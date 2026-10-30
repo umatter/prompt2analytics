@@ -82,6 +82,45 @@ p.adjust(p, method = "bonferroni")
 - `crates/p2a-core/src/stats/pairwise.rs::tests::test_validate_p_adjust_holm_against_r`
 - `crates/p2a-core/src/stats/pairwise.rs::tests::test_validate_p_adjust_bh_against_r`
 
+### Test 3: Missing values and an integer response (R-pinned)
+
+**R Code** (case `stat_pairwise_mahalanobis_na` in `validation/r/cases/stats_onesample.R`;
+dataset `validation/datasets/generated/pairwise_mahalanobis_na.csv`, 30 rows: `y` is an Int64
+column missing in rows 4 and 18, `g` has the levels g1, g2, g3 of 10 rows each):
+```r
+set.seed(9)
+pw <- pairwise.t.test(d$y, d$g, p.adjust.method = "holm")       # pool.sd = TRUE (R's default)
+pw_raw <- pairwise.t.test(d$y, d$g, p.adjust.method = "none")
+```
+
+| Comparison | Holm p | raw p | t (cross-check) |
+|---|---|---|---|
+| g2 vs g1 | 0.0035213461082837507 | 0.0035213461082837507 | 3.221930381127964 |
+| g3 vs g1 | 3.0116645128644064e-07 | 1.0038881709548021e-07 | 7.3740995281476955 |
+| g3 vs g2 | 0.000830954221002286 | 0.000415477110501143 | 4.0684687051849355 |
+
+Group sizes 9, 9, 10; means 9.555555555555555, 12.444444444444445, 16; pooled SD
+1.9020456823582805; df 25 for every comparison. The order (g2, g1), (g3, g1), (g3, g2) is both
+R's `lower.tri` order and p2a's storage order.
+
+**Missing values:** `run_pairwise_t_test` and `run_pairwise_wilcox_test` read the response and
+the factor in one request through the shared extractor: a row with a missing response or label
+is dropped from both (`pairwise.t.test` does the same), and the drop is reported in `missing` and
+a last Display line `Missing values: ...`. Integer responses are accepted (before T2-WP06 they
+failed as non-numeric) and labels come from the column as stored, so a text label "NA" is a
+level like any other (the CSV loader reads the token NA as missing).
+
+**Rust tests:**
+- `stats::pairwise::tests::test_validate_pairwise_t_test_na` (adjusted and raw p, t, df, sizes, means, pooled SD)
+- `stats::pairwise::tests::test_validate_na_pairwise_tests_missing_rows_and_errors` (both wrappers: `missing`, Display line, text and absent responses; the Wilcoxon p-values are not pinned, STAT-42)
+- `tier2::wp06_onesample::test_validate_mcp_hypothesis_pairwise_t_test` (p2a-mcp, the tool with `pool_sd: true`)
+
+**Tolerance:** `validation/README.md`, n < 100: means 1e-6, t and pooled SD 1e-5 relative,
+p `Tol::p_value`; df and counts exact.
+
+**Status:** R-pinned (registry `validation/methods/stats_onesample.json`, id
+`pairwise_t_test_pooled`).
+
 ## Numerical Precision Summary
 
 | Component | Tolerance | Notes |
@@ -96,6 +135,8 @@ p.adjust(p, method = "bonferroni")
 1. **Welch's t-test default**: R uses `pool.sd = !paired` (TRUE for unpaired by default), our default is FALSE (Welch's by default), matching modern best practices.
 
 2. **Sorting ties**: When p-values are identical, the order may differ slightly between R and Rust implementations, but final adjusted values are equivalent.
+
+3. **Group order**: the core function orders the groups by their label as text, so numeric labels 2 and 10 come out as 10, 2; R orders the levels of a numeric factor numerically. The p-values per pair are the same; only the order of the rows and columns differs.
 
 ## Performance Comparison
 

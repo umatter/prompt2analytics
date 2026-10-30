@@ -34,6 +34,8 @@ mean of x = 2.485714
 
 **Rust Test:** `crates/p2a-core/src/stats/ttest.rs::tests::test_validate_one_sample_against_r`
 
+**Status:** not R-pinned (inline quoted values).
+
 **Results Comparison:**
 | Metric | R | Rust | Tolerance | Match |
 |--------|---|------|-----------|-------|
@@ -61,6 +63,8 @@ mean of x = 2.46, mean of y = 3.40
 
 **Rust Test:** `crates/p2a-core/src/stats/ttest.rs::tests::test_validate_welch_against_r`
 
+**Status:** not R-pinned (inline quoted values).
+
 **Results Comparison:**
 | Metric | R | Rust | Tolerance | Match |
 |--------|---|------|-----------|-------|
@@ -86,6 +90,8 @@ mean difference = 6
 
 **Rust Test:** `crates/p2a-core/src/stats/ttest.rs::tests::test_validate_paired_against_r`
 
+**Status:** not R-pinned (inline quoted values).
+
 **Results Comparison:**
 | Metric | R | Rust | Tolerance | Match |
 |--------|---|------|-----------|-------|
@@ -93,6 +99,50 @@ mean difference = 6
 | df | 4 | 4 | exact | ✅ |
 | p-value | 0.0006889 | 0.0006889 | 1e-4 | ✅ |
 | mean diff | 6.0 | 6.0 | 1e-3 | ✅ |
+
+### Test 3b: t-tests with missing values and integer columns (R-pinned)
+
+**R Code** (case `stat_two_sample_na` in `validation/r/cases/stats_onesample.R`; dataset
+`validation/datasets/generated/two_sample_na.csv`, 22 rows: `x` and `y` with 7 values each and
+6 complete pairs, `xi`/`yi` Int64 columns with 20 and 18 values):
+```r
+one <- t.test(d$x); two <- t.test(d$x, d$y); two_eq <- t.test(d$x, d$y, var.equal = TRUE)
+pr <- t.test(d$x, d$y, paired = TRUE); ti <- t.test(d$xi, d$yi)     # NA removed as t.test does
+```
+
+**R values** (the full set, with the standard errors and estimates, is in
+`validation/expected/stat_two_sample_na.json`):
+
+| Test | t | df | p | 95% CI |
+|---|---|---|---|---|
+| one-sample `x` (n = 7) | 19.224879776549294 | 6 | 1.281621618642191e-06 | (5.622820623444335, 7.26289366226995) |
+| Welch `x`, `y` (7, 7) | 2.4211420066066545 | 11.986295516630276 | 0.03227121954167002 | (0.11282854757136428, 2.1443143095714943) |
+| pooled `x`, `y` | 2.4211420066066545 | 12 | 0.032250124224961374 | (0.11295735014996908, 2.144185506992889) |
+| paired `x`, `y` (6 pairs) | 14.696938456699081 | 5 | 2.635511420589e-05 | (0.9901128720208033, 1.4098871279791965) |
+| Welch `xi`, `yi` (Int64; 20, 18) | 0.9936932426636085 | 27.038848651726983 | 0.32918223786045675 | (-3.0521808116098357, 8.78551414494317) |
+
+**Missing values** (`t_test`, the dataset wrapper):
+
+| Test | Policy |
+|---|---|
+| one-sample | the column's missing values (null or NaN) are dropped (`x[!is.na(x)]`) |
+| two-sample | each column drops its own missing values (`t.test(x, y)`); `missing` sums both |
+| paired | a pair with a missing value in either column is dropped (`complete.cases(x, y)`) |
+
+The drop is reported in `TTestResult.missing` and a last Display line `Missing values: ...`.
+Integer, decimal and boolean columns are accepted; a text column is `NonNumericColumn`, an
+infinite value `NonFiniteValues`. Before T2-WP06, a null was read as 0 (one-sample t 3.09 on
+21 df) and an integer column was refused.
+
+**Rust tests:**
+- `stats::ttest::tests::test_validate_t_test_two_sample_na` (every number above, the SEs and estimates)
+- `stats::ttest::tests::test_validate_na_t_test_missing_rows` (`missing` per test, the Display line, a NaN cell)
+- `stats::ttest::tests::test_validate_na_t_test_errors` (text, absent and infinite columns)
+
+**Tolerance:** `validation/README.md`, n < 100: estimates `Tol::coef` (1e-6), SE, t, Welch df
+and CI `Tol::stat`/`Tol::se` (1e-5 relative), p `Tol::p_value`; counts and integer df exact.
+
+**Status:** R-pinned (registry `validation/methods/stats_onesample.json`, id `t_test`).
 
 ### Test 4: One-Way ANOVA
 

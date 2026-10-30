@@ -1,4 +1,4 @@
-# Validation: Bartlett's Test for Homogeneity of Variances
+# Validation: Bartlett, Fligner-Killeen and F tests of variances
 
 ## Method Overview
 
@@ -133,6 +133,88 @@ Groups with very different variances - tests numerical stability.
 | Conclusion | Reject H₀ | Reject H₀ | - |
 
 **Rust Test:** `crates/p2a-core/src/stats/bartlett.rs::tests::test_bartlett_unequal_variances`
+
+## R-pinned tests: missing values and integer columns
+
+All three tests below run on case `stat_two_sample_na` in `validation/r/cases/stats_onesample.R`
+(dataset `validation/datasets/generated/two_sample_na.csv`, 22 rows). `xi` and `yi` are Int64
+columns with missing values; the group column `g` (levels a, b, c) is missing in row 22, and
+`xi` in rows 21 and 22, so `xi ~ g` has 20 complete rows (groups of 7, 7 and 6).
+
+### Bartlett's test, `xi ~ g`
+
+```r
+bt <- bartlett.test(xi ~ g, data = d)   # model.frame: na.omit
+okg <- complete.cases(d$xi, d$g)
+gvar <- tapply(d$xi[okg], d$g[okg], var); gn <- tapply(d$xi[okg], d$g[okg], length)
+```
+
+| Quantity | R |
+|---|---|
+| K-squared | 1.0870055705502384 |
+| df | 2 |
+| p-value | 0.5807105812221599 |
+| group variances a, b, c (cross-check) | 63.95238095238095, 32.80952380952381, 27.5 |
+| pooled variance (cross-check) | 42.239495798319325 |
+| group sizes | 7, 7, 6 (N = 20) |
+
+### Fligner-Killeen test, `xi ~ g`
+
+```r
+fl <- fligner.test(xi ~ g, data = d)    # model.frame: na.omit
+```
+
+| Quantity | R |
+|---|---|
+| Fligner-Killeen:med chi-squared | 1.1621429648018324 |
+| df | 2 |
+| p-value | 0.5592987666070923 |
+| group sizes | 7, 7, 6 |
+
+### F test to compare two variances, `var.test(xi, yi)`
+
+```r
+vt <- var.test(d$xi, d$yi)              # each sample drops its own NA
+```
+
+| Quantity | R |
+|---|---|
+| F | 0.35160452177225177 |
+| num df, denom df | 19, 17 |
+| p-value | 0.030340988035820703 |
+| 95% CI of the ratio | (0.13353100158915807, 0.9025664881231058) |
+| ratio of variances | 0.35160452177225177 |
+| var(xi), var(yi) | 40.01052631578948, 113.79411764705883 |
+| n_x, n_y | 20, 18 |
+
+### Missing values and column types
+
+- `run_bartlett_test` and `run_fligner_test` read the value and group columns in one request
+  through the shared extractor: a row with a missing value or a missing label is dropped from
+  both (R's formula interface, `na.omit`), and the drop is reported in `missing` and a last
+  Display line `Missing values: ...`. Groups are listed in R's factor order (numeric labels
+  numerically, text in byte order).
+- `run_var_test` drops each sample's own missing values (`var.test(x, y)`), as `t.test` does.
+- Integer, decimal and boolean responses are accepted; the group column may have any label
+  type. A text response is `NonNumericColumn`.
+
+Before T2-WP06, the Fligner wrapper read null values as 0 and required a string group column,
+the F test read nulls as 0, and all three refused integer responses.
+
+**Rust tests:**
+- `stats::bartlett::tests::test_validate_bartlett_test_two_sample_na`
+- `stats::bartlett::tests::test_validate_na_bartlett_test_errors`
+- `tier2::wp06_onesample::test_validate_mcp_hypothesis_bartlett_test` (p2a-mcp, the tool `hypothesis_bartlett_test`)
+- `stats::fligner::tests::test_validate_fligner_test_two_sample_na`
+- `stats::fligner::tests::test_validate_na_fligner_test_errors`
+- `stats::vartest::tests::test_validate_var_test_two_sample_na`
+- `stats::vartest::tests::test_validate_na_var_test_missing_rows_and_errors`
+
+**Tolerance:** `validation/README.md`, n < 100: statistics, variances and CI 1e-5 relative
+(`Tol::stat`), the variance ratio 1e-6 (`Tol::coef`), p `Tol::p_value`; df and counts exact.
+
+**Status:** R-pinned (registry `validation/methods/stats_onesample.json`, ids `bartlett_test`,
+`fligner_test`, `var_test`).
 
 ## Numerical Precision Summary
 

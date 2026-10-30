@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "shapiro_wilk",
+      "name": "Shapiro-Wilk normality test (swilk.c, Royston 1995)",
+      "category": "stats",
+      "reference": "stats::shapiro.test (R 4.3.3, swilk.c AS R94)",
+      "doc": "validation/stats/shapiro_wilk.md",
+      "cases": ["stat_shapiro_wilk"],
+      "tests": [
+        "p2a-core::stats::shapiro::tests::test_validate_shapiro_wilk_swilk",
+        "p2a-core::stats::shapiro::tests::test_validate_shapiro_wilk_columns",
+        "p2a-core::stats::shapiro::tests::test_validate_shapiro_wilk_rescales_small_range",
+        "p2a-core::stats::shapiro::tests::test_validate_na_shapiro_wilk_columns",
+        "p2a-mcp::tier2::wp06_onesample::test_validate_mcp_hypothesis_shapiro_wilk"
+      ],
+      "quantities": ["W", "p-value", "n after dropping missing values", "reject_normality"],
+      "tolerance": "validation/README.md by n (3 to 5000): W Tol::stat(n), p Tol::p_value(n), n exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "t_test",
+      "name": "t-tests: one-sample, Welch, pooled, paired (missing values, Int64)",
+      "category": "stats",
+      "reference": "stats::t.test",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": [
+        "p2a-core::stats::ttest::tests::test_validate_t_test_two_sample_na",
+        "p2a-core::stats::ttest::tests::test_validate_na_t_test_missing_rows",
+        "p2a-core::stats::ttest::tests::test_validate_na_t_test_errors"
+      ],
+      "quantities": ["t", "df", "p", "95% CI", "estimates", "standard error", "n"],
+      "tolerance": "validation/README.md, n < 100: estimates 1e-6, SE, t, df (Welch) and CI 1e-5 relative, p 1e-5 (abs 1e-12); counts and integer df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ks_test_two_sample",
+      "name": "Two-sample Kolmogorov-Smirnov test (missing values, Int64)",
+      "category": "stats",
+      "reference": "stats::ks.test",
+      "doc": "validation/stats/ks_test.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": [
+        "p2a-core::stats::ks::tests::test_validate_ks_test_two_sample_na",
+        "p2a-core::stats::ks::tests::test_validate_na_ks_test_missing_rows_and_errors"
+      ],
+      "quantities": ["D", "n, m"],
+      "tolerance": "validation/README.md, n < 100: D 1e-5 relative; counts exact",
+      "deviations": [
+        {"finding": "STAT-27", "quantity": "p-value (ks_p)", "note": "p2a uses the asymptotic Kolmogorov distribution with Stephens' correction (0.19563779265722 on this case); R reports the exact p-value conditional on ties (0.15653867760174539). D is pinned."}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "var_test",
+      "name": "F test to compare two variances (missing values, Int64)",
+      "category": "stats",
+      "reference": "stats::var.test",
+      "doc": "validation/stats/bartlett.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": [
+        "p2a-core::stats::vartest::tests::test_validate_var_test_two_sample_na",
+        "p2a-core::stats::vartest::tests::test_validate_na_var_test_missing_rows_and_errors"
+      ],
+      "quantities": ["F", "df", "p", "95% CI", "variance ratio", "sample variances", "n"],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative (estimate 1e-6), p abs 1e-12; df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mood_test",
+      "name": "Mood two-sample test of scale (missing values, Int64, no ties)",
+      "category": "stats",
+      "reference": "stats::mood.test",
+      "doc": "validation/stats/mood.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": [
+        "p2a-core::stats::mood::tests::test_validate_mood_test_two_sample_na",
+        "p2a-core::stats::mood::tests::test_validate_na_mood_test_missing_rows_and_errors"
+      ],
+      "quantities": ["z", "p", "T (cross-check)", "n, m"],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; counts exact",
+      "deviations": [
+        {"finding": "STAT-29", "quantity": "z and p with ties (mood_z, mood_p on xi/yi)", "note": "R scores tied observations by Mielke's averaged positions; p2a squares the midrank deviation (z -2.6983447236552882 against R's -2.667468897704627). The tie-free pair mi/mj is pinned."}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "fligner_test",
+      "name": "Fligner-Killeen test of homogeneity of variances (value ~ group, missing values, Int64)",
+      "category": "stats",
+      "reference": "stats::fligner.test (formula interface, na.omit)",
+      "doc": "validation/stats/bartlett.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": [
+        "p2a-core::stats::fligner::tests::test_validate_fligner_test_two_sample_na",
+        "p2a-core::stats::fligner::tests::test_validate_na_fligner_test_errors"
+      ],
+      "quantities": ["chi-squared", "df", "p", "group sizes"],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "bartlett_test",
+      "name": "Bartlett test of homogeneity of variances (value ~ group, missing values, Int64)",
+      "category": "stats",
+      "reference": "stats::bartlett.test (formula interface, na.omit)",
+      "doc": "validation/stats/bartlett.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": [
+        "p2a-core::stats::bartlett::tests::test_validate_bartlett_test_two_sample_na",
+        "p2a-core::stats::bartlett::tests::test_validate_na_bartlett_test_errors",
+        "p2a-mcp::tier2::wp06_onesample::test_validate_mcp_hypothesis_bartlett_test"
+      ],
+      "quantities": ["K-squared", "df", "p", "group variances (cross-check)", "pooled variance (cross-check)", "group sizes", "n"],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cor_test_pearson",
+      "name": "Pearson correlation test on dataset columns (complete pairs, Int64)",
+      "category": "stats",
+      "reference": "stats::cor.test (method = 'pearson', two-sided)",
+      "doc": "validation/stats/new_methods.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": [
+        "p2a-core::stats::cortest::tests::test_validate_cor_test_two_sample_na",
+        "p2a-core::stats::cortest::tests::test_validate_na_cor_test_columns"
+      ],
+      "quantities": ["r", "t", "df", "p", "95% CI (Fisher z)", "n pairs"],
+      "tolerance": "validation/README.md, n < 100: r 1e-6, t and CI 1e-5 relative, p 1e-5 (abs 1e-12); df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "pairwise_t_test_pooled",
+      "name": "Pairwise t-tests with pooled SD, Holm and unadjusted (missing values, Int64)",
+      "category": "stats",
+      "reference": "stats::pairwise.t.test(pool.sd = TRUE, p.adjust.method = 'holm' | 'none')",
+      "doc": "validation/stats/pairwise_t_test.md",
+      "cases": ["stat_pairwise_mahalanobis_na"],
+      "tests": [
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_t_test_na",
+        "p2a-core::stats::pairwise::tests::test_validate_na_pairwise_tests_missing_rows_and_errors",
+        "p2a-mcp::tier2::wp06_onesample::test_validate_mcp_hypothesis_pairwise_t_test"
+      ],
+      "quantities": ["adjusted p (Holm)", "raw p", "t (cross-check)", "df", "group sizes", "group means", "pooled SD"],
+      "tolerance": "validation/README.md, n < 100: means 1e-6, t and pooled SD 1e-5 relative, p 1e-5 (abs 1e-12); df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mahalanobis",
+      "name": "Squared Mahalanobis distances on complete rows",
+      "category": "stats",
+      "reference": "stats::mahalanobis(X, colMeans(X), cov(X)) on complete.cases rows",
+      "doc": "validation/multivariate/mahalanobis.md",
+      "cases": ["stat_pairwise_mahalanobis_na"],
+      "tests": [
+        "p2a-core::stats::mahalanobis::tests::test_validate_mahalanobis_na",
+        "p2a-core::stats::mahalanobis::tests::test_validate_na_mahalanobis_columns",
+        "p2a-mcp::tier2::wp06_onesample::test_validate_mcp_multivariate_mahalanobis"
+      ],
+      "quantities": ["distances", "row indices", "centre", "n"],
+      "tolerance": "validation/README.md, n < 100: distances 1e-5, centre 1e-6 relative; rows and counts exact; MCP strings Tol::printed(4)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

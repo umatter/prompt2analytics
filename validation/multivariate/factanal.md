@@ -172,6 +172,8 @@ print(result$dof)        # df = 4
 
 4. **Promax Power**: R defaults to power=3, Rust uses power=4. Adjust for exact comparison.
 
+5. **Missing values**: `run_factanal` refuses a null or NaN cell with `NullValues` naming the column, as R's `factanal` refuses NA; integer columns are accepted (T2-WP06; `stats::factanal::tests::test_na_factanal_columns`). Not R-pinned (STAT-23).
+
 ## Performance Comparison
 
 Benchmarks measured on 2026-01-20 (v2 with optimizations). Rust times from Criterion, R times from system.time().
