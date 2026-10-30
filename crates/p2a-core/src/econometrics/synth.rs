@@ -1984,679 +1984,6 @@ fn rmspe_ratio(pre_rmspe: f64, effects: &[TimeEffect]) -> f64 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Create a simple panel dataset for testing.
-    fn create_test_panel() -> Dataset {
-        // Create a panel with:
-        // - 1 treated unit (A)
-        // - 2 donor units (B, C)
-        // - 6 time periods (1-6), treatment at time 4
-        // - Treatment effect of ~5 units
-
-        // Pre-treatment: A is 0.5*B + 0.5*C
-        // Post-treatment: A diverges by +5
-
-        let df = df! {
-            "unit" => ["A", "A", "A", "A", "A", "A",
-                       "B", "B", "B", "B", "B", "B",
-                       "C", "C", "C", "C", "C", "C"],
-            "time" => [1i64, 2, 3, 4, 5, 6,
-                       1, 2, 3, 4, 5, 6,
-                       1, 2, 3, 4, 5, 6],
-            "outcome" => [
-                // Unit A: pre = 0.5*B + 0.5*C, post = pre + 5
-                10.0, 11.0, 12.0, 18.0, 19.0, 20.0,  // A (treatment effect = 5 starting at t=4)
-                // Unit B
-                8.0, 10.0, 12.0, 14.0, 16.0, 18.0,   // B
-                // Unit C
-                12.0, 12.0, 12.0, 12.0, 12.0, 12.0,  // C
-            ],
-            "x1" => [
-                // Predictor that matches A = 0.5*B + 0.5*C
-                5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  // A: mean = 5
-                4.0, 4.0, 4.0, 4.0, 4.0, 4.0,  // B: mean = 4
-                6.0, 6.0, 6.0, 6.0, 6.0, 6.0,  // C: mean = 6
-            ],
-        }
-        .unwrap();
-
-        Dataset::new(df)
-    }
-
-    #[test]
-    fn test_basic_synth() {
-        let dataset = create_test_panel();
-
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Check basic structure
-        assert_eq!(result.treated_unit, "A");
-        assert_eq!(result.treatment_time, 4);
-        assert_eq!(result.n_donors, 2);
-        assert_eq!(result.n_pre_periods, 3); // times 1, 2, 3
-        assert_eq!(result.n_post_periods, 3); // times 4, 5, 6
-
-        // Weights should sum to 1
-        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
-        assert!(
-            (weight_sum - 1.0).abs() < 0.01,
-            "Weights should sum to 1, got {}",
-            weight_sum
-        );
-
-        // With equal V weights and predictor x1, optimal weights should be ~0.5 each
-        // since A's x1 = 5 = 0.5 * 4 + 0.5 * 6
-        for (unit, weight) in &result.all_unit_weights {
-            assert!(
-                (*weight - 0.5).abs() < 0.2,
-                "Unit {} weight should be ~0.5, got {}",
-                unit,
-                weight
-            );
-        }
-
-        // Treatment effect should be positive (around 5)
-        assert!(
-            result.average_effect > 0.0,
-            "Average effect should be positive, got {}",
-            result.average_effect
-        );
-
-        println!("{}", result);
-    }
-
-    #[test]
-    fn test_synth_with_data_driven_v() {
-        let dataset = create_test_panel();
-
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::DataDriven,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Should still produce valid results
-        assert_eq!(result.n_donors, 2);
-
-        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
-        assert!((weight_sum - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_synth_predictor_balance() {
-        let dataset = create_test_panel();
-
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Check predictor balance
-        assert!(!result.predictor_balance.is_empty());
-
-        let balance = &result.predictor_balance[0];
-        assert!((balance.treated_value - 5.0).abs() < 0.1);
-        // Synthetic should be close to 5.0 too (since weights ≈ 0.5, 0.5 and values are 4, 6)
-        assert!(
-            (balance.synthetic_value - 5.0).abs() < 0.5,
-            "Synthetic x1 should be ~5.0, got {}",
-            balance.synthetic_value
-        );
-    }
-
-    #[test]
-    fn test_synth_invalid_unit() {
-        let dataset = create_test_panel();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "NonexistentUnit".to_string(),
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_synth_no_pre_periods() {
-        let dataset = create_test_panel();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        // Treatment time before any data
-        let config = SynthConfig {
-            treatment_time: 0,
-            treated_unit: "A".to_string(),
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_predictor_spec() {
-        let spec = PredictorSpec::new("gdp");
-        assert_eq!(spec.column, "gdp");
-        assert!(spec.time_window.is_none());
-
-        let spec_window = PredictorSpec::with_window("population", 1980, 1990);
-        assert_eq!(spec_window.column, "population");
-        assert_eq!(spec_window.time_window, Some((1980, 1990)));
-    }
-
-    #[test]
-    fn test_qp_solver() {
-        // Simple test: minimize ||x||² subject to Σx = 1, x ≥ 0
-        // Solution should be uniform: x = [0.5, 0.5]
-        let h = Array2::from_shape_vec((2, 2), vec![2.0, 0.0, 0.0, 2.0]).unwrap();
-        let c = Array1::from(vec![0.0, 0.0]);
-
-        let w = solve_simplex_constrained_qp(&h, &c, 2).unwrap();
-
-        assert!((w[0] - 0.5).abs() < 0.01);
-        assert!((w[1] - 0.5).abs() < 0.01);
-        assert!((w.sum() - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_display() {
-        let dataset = create_test_panel();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Test Display trait
-        let output = format!("{}", result);
-        assert!(output.contains("Synthetic Control"));
-        assert!(output.contains("Treated Unit: A"));
-        assert!(output.contains("PREDICTOR BALANCE"));
-    }
-
-    // =========================================================================
-    // Tolerance, iteration bounds and cancellation (T0-WP11)
-    // =========================================================================
-
-    /// Runs `f` under a budget whose token is already cancelled. Shared with
-    /// `gsynth_tests`.
-    pub(super) fn cancelled<R>(f: impl FnOnce() -> R) -> R {
-        use crate::resource::{Budget, CancelToken, with_budget};
-        let token = CancelToken::new();
-        token.cancel();
-        with_budget(Budget::new(None, token), f)
-    }
-
-    #[test]
-    fn test_rmspe_ratio_rule() {
-        // The treated unit and the placebos share this rule: post-RMSPE over
-        // pre-RMSPE, 0 for no effects, infinite for a pre-RMSPE that is not
-        // above 1e-10 (NaN included)
-        let effect = |time, effect| TimeEffect {
-            time,
-            effect,
-            actual: 10.0 + effect,
-            synthetic: 10.0,
-        };
-        let effects = [effect(5, 3.1), effect(6, -3.9), effect(7, 0.4)];
-        let post = ((3.1f64 * 3.1 + 3.9 * 3.9 + 0.4 * 0.4) / 3.0).sqrt();
-        assert!((rmspe_ratio(0.7, &effects) - post / 0.7).abs() < 1e-12);
-        assert_eq!(rmspe_ratio(0.7, &[]), 0.0);
-        assert_eq!(rmspe_ratio(1e-10, &effects), f64::INFINITY);
-        assert_eq!(rmspe_ratio(0.0, &[]), f64::INFINITY);
-        assert_eq!(rmspe_ratio(f64::NAN, &effects), f64::INFINITY);
-    }
-
-    fn synth_cfg() -> SynthConfig {
-        SynthConfig {
-            treatment_time: 4,
-            treated_unit: "A".to_string(),
-            v_method: VOptimization::DataDriven,
-            max_iter: 50,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_synth_rejects_non_positive_tolerance_and_zero_max_iter() {
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        for tol in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
-            let r = run_synthetic_control(
-                &ds,
-                "outcome",
-                "unit",
-                "time",
-                &preds,
-                SynthConfig {
-                    tolerance: tol,
-                    ..synth_cfg()
-                },
-            );
-            assert!(
-                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("tolerance")),
-                "tol={tol}: ok={}",
-                r.is_ok()
-            );
-        }
-        let r = run_synthetic_control(
-            &ds,
-            "outcome",
-            "unit",
-            "time",
-            &preds,
-            SynthConfig {
-                max_iter: 0,
-                ..synth_cfg()
-            },
-        );
-        assert!(
-            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("max_iter"))
-        );
-    }
-
-    #[test]
-    fn test_synth_stops_when_cancelled() {
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        let r = cancelled(|| {
-            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
-        });
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-        let r = cancelled(|| {
-            run_synthetic_control(
-                &ds,
-                "outcome",
-                "unit",
-                "time",
-                &preds,
-                SynthConfig {
-                    run_placebos: true,
-                    ..synth_cfg()
-                },
-            )
-        });
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-    }
-
-    #[test]
-    fn test_synth_placebos_propagate_cancellation() {
-        // The placebo inference as a whole stops with Cancelled under a
-        // cancelled budget. The treated unit's own fit, which runs first, is the
-        // one that sees it here; how a placebo fit's Cancelled is handled is
-        // tested by test_placebo_fit_passes_on_cancellation_and_skips_failures.
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        let r = cancelled(|| {
-            run_placebo_inference(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), 1.0)
-        });
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-    }
-
-    #[test]
-    fn test_placebo_fit_passes_on_cancellation_and_skips_failures() {
-        // A placebo fit stopped by the budget must end the inference, not be
-        // skipped like a fit that fails
-        let ds = create_test_panel();
-        let preds = vec![PredictorSpec::new("x1")];
-        let fit = |donor: &str| {
-            placebo_rmspe_ratio(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), donor)
-        };
-        assert!(matches!(
-            cancelled(|| fit("B")),
-            Err(EconError::Cancelled(_))
-        ));
-        assert!(fit("B").unwrap().is_some_and(|ratio| ratio > 0.0));
-        // a unit that is not in the data cannot be fitted: that placebo is skipped
-        assert_eq!(fit("Z").unwrap(), None);
-    }
-
-    #[test]
-    fn test_nelder_mead_stops_when_cancelled() {
-        let objective = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>(), Array1::zeros(1));
-        let r = cancelled(|| nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000));
-        assert!(matches!(r, Err(EconError::Cancelled(_))));
-        let (best, val, iters) =
-            nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000).unwrap();
-        assert!(val < 1e-6 && iters >= 1 && best.len() == 2);
-    }
-
-    /// Unit "A" treated from t = 3 plus `n_donors` donors over t = 1..=3.
-    fn wide_panel(n_donors: usize) -> Dataset {
-        let (mut u, mut t, mut y, mut x) = (vec![], vec![], vec![], vec![]);
-        for d in 0..=n_donors {
-            let name = if d == 0 {
-                "A".to_string()
-            } else {
-                format!("D{d}")
-            };
-            for time in 1..=3i64 {
-                u.push(name.clone());
-                t.push(time);
-                let noise = 0.3 * ((d * 7 + time as usize * 3) as f64).sin();
-                y.push(10.0 + d as f64 * 0.1 + time as f64 + noise);
-                x.push(5.0 + d as f64 * 0.05 + noise);
-            }
-        }
-        Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "x1" => x }.unwrap())
-    }
-
-    #[test]
-    fn test_synth_matrices_respect_allocation_ceiling() {
-        let preds = vec![PredictorSpec::new("x1")];
-        // the 3 x 2 pre-period outcome matrix (48 bytes) is over a 16-byte ceiling
-        let ds = create_test_panel();
-        let r = crate::resource::with_alloc_ceiling(Some(16), || {
-            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
-        });
-        assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("outcome matrix")),
-            "ok={}",
-            r.is_ok()
-        );
-        // 20 donors: the outcome matrices (320 bytes) fit under 1000 bytes, the
-        // donor-by-donor QP matrices (20 x 20 each) do not
-        let ds = wide_panel(20);
-        let cfg = SynthConfig {
-            treatment_time: 3,
-            ..synth_cfg()
-        };
-        let r = crate::resource::with_alloc_ceiling(Some(1000), || {
-            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg.clone())
-        });
-        assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("donor-by-donor")),
-            "ok={}",
-            r.is_ok()
-        );
-        assert!(run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).is_ok());
-    }
-
-    // =========================================================================
-    // Validation tests (test_validate_* prefix)
-    // =========================================================================
-
-    /// Create a larger synthetic control dataset with a known treatment effect.
-    ///
-    /// DGP:
-    /// - 1 treated unit (T), 4 donors (D1-D4)
-    /// - 10 pre-treatment periods, 5 post-treatment periods
-    /// - T = 0.4*D1 + 0.6*D2 in pre-treatment (known weights)
-    /// - Treatment effect = 10 in post-treatment
-    fn create_validate_synth_dataset() -> Dataset {
-        let mut units = Vec::new();
-        let mut times = Vec::new();
-        let mut outcomes = Vec::new();
-        let mut x1_vals = Vec::new();
-
-        let n_pre = 10;
-        let n_post = 5;
-        let treatment_time = (n_pre + 1) as i64;
-        let true_effect = 10.0;
-
-        // Donor D1: linear trend
-        for t in 1..=(n_pre + n_post) {
-            units.push("D1");
-            times.push(t as i64);
-            outcomes.push(20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin());
-            x1_vals.push(3.0);
-        }
-
-        // Donor D2: different slope
-        for t in 1..=(n_pre + n_post) {
-            units.push("D2");
-            times.push(t as i64);
-            outcomes.push(25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin());
-            x1_vals.push(7.0);
-        }
-
-        // Donor D3: unrelated
-        for t in 1..=(n_pre + n_post) {
-            units.push("D3");
-            times.push(t as i64);
-            outcomes.push(30.0 + 0.5 * t as f64);
-            x1_vals.push(1.0);
-        }
-
-        // Donor D4: unrelated
-        for t in 1..=(n_pre + n_post) {
-            units.push("D4");
-            times.push(t as i64);
-            outcomes.push(15.0 + 2.0 * t as f64);
-            x1_vals.push(9.0);
-        }
-
-        // Treated unit T: in pre-treatment = 0.4*D1 + 0.6*D2
-        // In post-treatment, add true_effect
-        for t in 1..=(n_pre + n_post) {
-            units.push("T");
-            times.push(t as i64);
-            let d1_val = 20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin();
-            let d2_val = 25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin();
-            let synth_val = 0.4 * d1_val + 0.6 * d2_val;
-            let effect = if t > n_pre { true_effect } else { 0.0 };
-            outcomes.push(synth_val + effect);
-            x1_vals.push(0.4 * 3.0 + 0.6 * 7.0); // 5.4
-        }
-
-        let df = df! {
-            "unit" => units,
-            "time" => times,
-            "outcome" => outcomes,
-            "x1" => x1_vals,
-        }
-        .unwrap();
-
-        Dataset::new(df)
-    }
-
-    #[test]
-    fn test_synth_placebo_inference_ranks_every_unit() {
-        // every donor gets a placebo fit next to the treated unit's own; T fits
-        // its donors almost exactly before t = 11 and gains 10 after, so its
-        // post/pre RMSPE ratio ranks first
-        let ds = create_validate_synth_dataset();
-        let preds = vec![PredictorSpec::new("x1")];
-        let cfg = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: true,
-            ..Default::default()
-        };
-        let res = run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).unwrap();
-        let p = res.placebo_results.expect("placebo results");
-        let mut units: Vec<&str> = p.rmspe_ratios.iter().map(|(u, _)| u.as_str()).collect();
-        units.sort_unstable();
-        assert_eq!(units, ["D1", "D2", "D3", "D4", "T"]);
-        assert_eq!(p.n_units, 5);
-        assert_eq!(p.treated_rank, 1);
-        assert_eq!(p.p_value, 0.2);
-        assert!(p.rmspe_ratios.windows(2).all(|w| w[0].1 >= w[1].1));
-    }
-
-    /// Validate synthetic control recovers known weights and treatment effect.
-    #[test]
-    fn test_validate_synth_weight_recovery() {
-        let dataset = create_validate_synth_dataset();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Weights should be non-negative
-        for (unit, weight) in &result.all_unit_weights {
-            assert!(
-                *weight >= -1e-6,
-                "Weight for {} = {:.4} should be non-negative",
-                unit,
-                weight
-            );
-        }
-
-        // Weights should sum to ~1
-        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
-        assert!(
-            (weight_sum - 1.0).abs() < 0.02,
-            "Weights should sum to 1, got {:.6}",
-            weight_sum
-        );
-
-        // Pre-treatment RMSPE should be small (good fit)
-        assert!(
-            result.pre_treatment_rmspe < 2.0,
-            "Pre-treatment RMSPE = {:.4} should be small",
-            result.pre_treatment_rmspe
-        );
-    }
-
-    /// Validate synthetic control detects treatment effect direction and magnitude.
-    #[test]
-    fn test_validate_synth_treatment_effect() {
-        let dataset = create_validate_synth_dataset();
-        let predictors = vec![PredictorSpec::new("x1")];
-        let true_effect = 10.0;
-
-        let config = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Average effect should be close to true effect (within 3 for this DGP)
-        assert!(
-            (result.average_effect - true_effect).abs() < 3.0,
-            "Average effect = {:.4} should be close to true effect = {}",
-            result.average_effect,
-            true_effect
-        );
-
-        // All post-treatment effects should be positive
-        for te in &result.treatment_effects {
-            assert!(
-                te.effect > 0.0,
-                "Treatment effect at time {} = {:.4} should be positive",
-                te.time,
-                te.effect
-            );
-        }
-
-        // Cumulative effect should be positive and substantial
-        assert!(
-            result.cumulative_effect > 0.0,
-            "Cumulative effect should be positive"
-        );
-
-        // Structural checks
-        assert_eq!(result.n_pre_periods, 10);
-        assert_eq!(result.n_post_periods, 5);
-        assert_eq!(result.n_donors, 4);
-    }
-
-    /// Validate synthetic control time series outputs are correctly aligned.
-    #[test]
-    fn test_validate_synth_time_series_alignment() {
-        let dataset = create_validate_synth_dataset();
-        let predictors = vec![PredictorSpec::new("x1")];
-
-        let config = SynthConfig {
-            treatment_time: 11,
-            treated_unit: "T".to_string(),
-            v_method: VOptimization::Equal,
-            run_placebos: false,
-            ..Default::default()
-        };
-
-        let result =
-            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-                .unwrap();
-
-        // Actual and synthetic outcomes should have the same length
-        assert_eq!(result.actual_outcome.len(), result.synthetic_outcome.len());
-
-        // In pre-treatment period, actual and synthetic should be close
-        for i in 0..result.n_pre_periods {
-            if i < result.actual_outcome.len() && i < result.synthetic_outcome.len() {
-                let (_, actual) = result.actual_outcome[i];
-                let (_, synth) = result.synthetic_outcome[i];
-                let diff = (actual - synth).abs();
-                // Pre-treatment fit should be reasonable (within 5 units)
-                assert!(
-                    diff < 5.0,
-                    "Pre-treatment period {}: actual={:.2}, synth={:.2}, diff={:.2}",
-                    i,
-                    actual,
-                    synth,
-                    diff
-                );
-            }
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // Generalized Synthetic Control (gsynth)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3906,6 +3233,679 @@ fn bootstrap_gsynth(
          set bootstrap_se=false or use the analytical placeholder"
             .to_string(),
     ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a simple panel dataset for testing.
+    fn create_test_panel() -> Dataset {
+        // Create a panel with:
+        // - 1 treated unit (A)
+        // - 2 donor units (B, C)
+        // - 6 time periods (1-6), treatment at time 4
+        // - Treatment effect of ~5 units
+
+        // Pre-treatment: A is 0.5*B + 0.5*C
+        // Post-treatment: A diverges by +5
+
+        let df = df! {
+            "unit" => ["A", "A", "A", "A", "A", "A",
+                       "B", "B", "B", "B", "B", "B",
+                       "C", "C", "C", "C", "C", "C"],
+            "time" => [1i64, 2, 3, 4, 5, 6,
+                       1, 2, 3, 4, 5, 6,
+                       1, 2, 3, 4, 5, 6],
+            "outcome" => [
+                // Unit A: pre = 0.5*B + 0.5*C, post = pre + 5
+                10.0, 11.0, 12.0, 18.0, 19.0, 20.0,  // A (treatment effect = 5 starting at t=4)
+                // Unit B
+                8.0, 10.0, 12.0, 14.0, 16.0, 18.0,   // B
+                // Unit C
+                12.0, 12.0, 12.0, 12.0, 12.0, 12.0,  // C
+            ],
+            "x1" => [
+                // Predictor that matches A = 0.5*B + 0.5*C
+                5.0, 5.0, 5.0, 5.0, 5.0, 5.0,  // A: mean = 5
+                4.0, 4.0, 4.0, 4.0, 4.0, 4.0,  // B: mean = 4
+                6.0, 6.0, 6.0, 6.0, 6.0, 6.0,  // C: mean = 6
+            ],
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_basic_synth() {
+        let dataset = create_test_panel();
+
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Check basic structure
+        assert_eq!(result.treated_unit, "A");
+        assert_eq!(result.treatment_time, 4);
+        assert_eq!(result.n_donors, 2);
+        assert_eq!(result.n_pre_periods, 3); // times 1, 2, 3
+        assert_eq!(result.n_post_periods, 3); // times 4, 5, 6
+
+        // Weights should sum to 1
+        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
+        assert!(
+            (weight_sum - 1.0).abs() < 0.01,
+            "Weights should sum to 1, got {}",
+            weight_sum
+        );
+
+        // With equal V weights and predictor x1, optimal weights should be ~0.5 each
+        // since A's x1 = 5 = 0.5 * 4 + 0.5 * 6
+        for (unit, weight) in &result.all_unit_weights {
+            assert!(
+                (*weight - 0.5).abs() < 0.2,
+                "Unit {} weight should be ~0.5, got {}",
+                unit,
+                weight
+            );
+        }
+
+        // Treatment effect should be positive (around 5)
+        assert!(
+            result.average_effect > 0.0,
+            "Average effect should be positive, got {}",
+            result.average_effect
+        );
+
+        println!("{}", result);
+    }
+
+    #[test]
+    fn test_synth_with_data_driven_v() {
+        let dataset = create_test_panel();
+
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::DataDriven,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Should still produce valid results
+        assert_eq!(result.n_donors, 2);
+
+        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
+        assert!((weight_sum - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_synth_predictor_balance() {
+        let dataset = create_test_panel();
+
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Check predictor balance
+        assert!(!result.predictor_balance.is_empty());
+
+        let balance = &result.predictor_balance[0];
+        assert!((balance.treated_value - 5.0).abs() < 0.1);
+        // Synthetic should be close to 5.0 too (since weights ≈ 0.5, 0.5 and values are 4, 6)
+        assert!(
+            (balance.synthetic_value - 5.0).abs() < 0.5,
+            "Synthetic x1 should be ~5.0, got {}",
+            balance.synthetic_value
+        );
+    }
+
+    #[test]
+    fn test_synth_invalid_unit() {
+        let dataset = create_test_panel();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "NonexistentUnit".to_string(),
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_synth_no_pre_periods() {
+        let dataset = create_test_panel();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        // Treatment time before any data
+        let config = SynthConfig {
+            treatment_time: 0,
+            treated_unit: "A".to_string(),
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_predictor_spec() {
+        let spec = PredictorSpec::new("gdp");
+        assert_eq!(spec.column, "gdp");
+        assert!(spec.time_window.is_none());
+
+        let spec_window = PredictorSpec::with_window("population", 1980, 1990);
+        assert_eq!(spec_window.column, "population");
+        assert_eq!(spec_window.time_window, Some((1980, 1990)));
+    }
+
+    #[test]
+    fn test_qp_solver() {
+        // Simple test: minimize ||x||² subject to Σx = 1, x ≥ 0
+        // Solution should be uniform: x = [0.5, 0.5]
+        let h = Array2::from_shape_vec((2, 2), vec![2.0, 0.0, 0.0, 2.0]).unwrap();
+        let c = Array1::from(vec![0.0, 0.0]);
+
+        let w = solve_simplex_constrained_qp(&h, &c, 2).unwrap();
+
+        assert!((w[0] - 0.5).abs() < 0.01);
+        assert!((w[1] - 0.5).abs() < 0.01);
+        assert!((w.sum() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_display() {
+        let dataset = create_test_panel();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Test Display trait
+        let output = format!("{}", result);
+        assert!(output.contains("Synthetic Control"));
+        assert!(output.contains("Treated Unit: A"));
+        assert!(output.contains("PREDICTOR BALANCE"));
+    }
+
+    // =========================================================================
+    // Tolerance, iteration bounds and cancellation (T0-WP11)
+    // =========================================================================
+
+    /// Runs `f` under a budget whose token is already cancelled. Shared with
+    /// `gsynth_tests`.
+    pub(super) fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn test_rmspe_ratio_rule() {
+        // The treated unit and the placebos share this rule: post-RMSPE over
+        // pre-RMSPE, 0 for no effects, infinite for a pre-RMSPE that is not
+        // above 1e-10 (NaN included)
+        let effect = |time, effect| TimeEffect {
+            time,
+            effect,
+            actual: 10.0 + effect,
+            synthetic: 10.0,
+        };
+        let effects = [effect(5, 3.1), effect(6, -3.9), effect(7, 0.4)];
+        let post = ((3.1f64 * 3.1 + 3.9 * 3.9 + 0.4 * 0.4) / 3.0).sqrt();
+        assert!((rmspe_ratio(0.7, &effects) - post / 0.7).abs() < 1e-12);
+        assert_eq!(rmspe_ratio(0.7, &[]), 0.0);
+        assert_eq!(rmspe_ratio(1e-10, &effects), f64::INFINITY);
+        assert_eq!(rmspe_ratio(0.0, &[]), f64::INFINITY);
+        assert_eq!(rmspe_ratio(f64::NAN, &effects), f64::INFINITY);
+    }
+
+    fn synth_cfg() -> SynthConfig {
+        SynthConfig {
+            treatment_time: 4,
+            treated_unit: "A".to_string(),
+            v_method: VOptimization::DataDriven,
+            max_iter: 50,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_synth_rejects_non_positive_tolerance_and_zero_max_iter() {
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        for tol in [0.0, -1e-6, f64::NAN, f64::INFINITY] {
+            let r = run_synthetic_control(
+                &ds,
+                "outcome",
+                "unit",
+                "time",
+                &preds,
+                SynthConfig {
+                    tolerance: tol,
+                    ..synth_cfg()
+                },
+            );
+            assert!(
+                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("tolerance")),
+                "tol={tol}: ok={}",
+                r.is_ok()
+            );
+        }
+        let r = run_synthetic_control(
+            &ds,
+            "outcome",
+            "unit",
+            "time",
+            &preds,
+            SynthConfig {
+                max_iter: 0,
+                ..synth_cfg()
+            },
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("max_iter"))
+        );
+    }
+
+    #[test]
+    fn test_synth_stops_when_cancelled() {
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let r = cancelled(|| {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+        let r = cancelled(|| {
+            run_synthetic_control(
+                &ds,
+                "outcome",
+                "unit",
+                "time",
+                &preds,
+                SynthConfig {
+                    run_placebos: true,
+                    ..synth_cfg()
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_synth_placebos_propagate_cancellation() {
+        // The placebo inference as a whole stops with Cancelled under a
+        // cancelled budget. The treated unit's own fit, which runs first, is the
+        // one that sees it here; how a placebo fit's Cancelled is handled is
+        // tested by test_placebo_fit_passes_on_cancellation_and_skips_failures.
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let r = cancelled(|| {
+            run_placebo_inference(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), 1.0)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_placebo_fit_passes_on_cancellation_and_skips_failures() {
+        // A placebo fit stopped by the budget must end the inference, not be
+        // skipped like a fit that fails
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let fit = |donor: &str| {
+            placebo_rmspe_ratio(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), donor)
+        };
+        assert!(matches!(
+            cancelled(|| fit("B")),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(fit("B").unwrap().is_some_and(|ratio| ratio > 0.0));
+        // a unit that is not in the data cannot be fitted: that placebo is skipped
+        assert_eq!(fit("Z").unwrap(), None);
+    }
+
+    #[test]
+    fn test_nelder_mead_stops_when_cancelled() {
+        let objective = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>(), Array1::zeros(1));
+        let r = cancelled(|| nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000));
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+        let (best, val, iters) =
+            nelder_mead_optimize(&[1.0, 2.0], &objective, 1e-12, 1000).unwrap();
+        assert!(val < 1e-6 && iters >= 1 && best.len() == 2);
+    }
+
+    /// Unit "A" treated from t = 3 plus `n_donors` donors over t = 1..=3.
+    fn wide_panel(n_donors: usize) -> Dataset {
+        let (mut u, mut t, mut y, mut x) = (vec![], vec![], vec![], vec![]);
+        for d in 0..=n_donors {
+            let name = if d == 0 {
+                "A".to_string()
+            } else {
+                format!("D{d}")
+            };
+            for time in 1..=3i64 {
+                u.push(name.clone());
+                t.push(time);
+                let noise = 0.3 * ((d * 7 + time as usize * 3) as f64).sin();
+                y.push(10.0 + d as f64 * 0.1 + time as f64 + noise);
+                x.push(5.0 + d as f64 * 0.05 + noise);
+            }
+        }
+        Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "x1" => x }.unwrap())
+    }
+
+    #[test]
+    fn test_synth_matrices_respect_allocation_ceiling() {
+        let preds = vec![PredictorSpec::new("x1")];
+        // the 3 x 2 pre-period outcome matrix (48 bytes) is over a 16-byte ceiling
+        let ds = create_test_panel();
+        let r = crate::resource::with_alloc_ceiling(Some(16), || {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("outcome matrix")),
+            "ok={}",
+            r.is_ok()
+        );
+        // 20 donors: the outcome matrices (320 bytes) fit under 1000 bytes, the
+        // donor-by-donor QP matrices (20 x 20 each) do not
+        let ds = wide_panel(20);
+        let cfg = SynthConfig {
+            treatment_time: 3,
+            ..synth_cfg()
+        };
+        let r = crate::resource::with_alloc_ceiling(Some(1000), || {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg.clone())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("donor-by-donor")),
+            "ok={}",
+            r.is_ok()
+        );
+        assert!(run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).is_ok());
+    }
+
+    // =========================================================================
+    // Validation tests (test_validate_* prefix)
+    // =========================================================================
+
+    /// Create a larger synthetic control dataset with a known treatment effect.
+    ///
+    /// DGP:
+    /// - 1 treated unit (T), 4 donors (D1-D4)
+    /// - 10 pre-treatment periods, 5 post-treatment periods
+    /// - T = 0.4*D1 + 0.6*D2 in pre-treatment (known weights)
+    /// - Treatment effect = 10 in post-treatment
+    fn create_validate_synth_dataset() -> Dataset {
+        let mut units = Vec::new();
+        let mut times = Vec::new();
+        let mut outcomes = Vec::new();
+        let mut x1_vals = Vec::new();
+
+        let n_pre = 10;
+        let n_post = 5;
+        let treatment_time = (n_pre + 1) as i64;
+        let true_effect = 10.0;
+
+        // Donor D1: linear trend
+        for t in 1..=(n_pre + n_post) {
+            units.push("D1");
+            times.push(t as i64);
+            outcomes.push(20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin());
+            x1_vals.push(3.0);
+        }
+
+        // Donor D2: different slope
+        for t in 1..=(n_pre + n_post) {
+            units.push("D2");
+            times.push(t as i64);
+            outcomes.push(25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin());
+            x1_vals.push(7.0);
+        }
+
+        // Donor D3: unrelated
+        for t in 1..=(n_pre + n_post) {
+            units.push("D3");
+            times.push(t as i64);
+            outcomes.push(30.0 + 0.5 * t as f64);
+            x1_vals.push(1.0);
+        }
+
+        // Donor D4: unrelated
+        for t in 1..=(n_pre + n_post) {
+            units.push("D4");
+            times.push(t as i64);
+            outcomes.push(15.0 + 2.0 * t as f64);
+            x1_vals.push(9.0);
+        }
+
+        // Treated unit T: in pre-treatment = 0.4*D1 + 0.6*D2
+        // In post-treatment, add true_effect
+        for t in 1..=(n_pre + n_post) {
+            units.push("T");
+            times.push(t as i64);
+            let d1_val = 20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin();
+            let d2_val = 25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin();
+            let synth_val = 0.4 * d1_val + 0.6 * d2_val;
+            let effect = if t > n_pre { true_effect } else { 0.0 };
+            outcomes.push(synth_val + effect);
+            x1_vals.push(0.4 * 3.0 + 0.6 * 7.0); // 5.4
+        }
+
+        let df = df! {
+            "unit" => units,
+            "time" => times,
+            "outcome" => outcomes,
+            "x1" => x1_vals,
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_synth_placebo_inference_ranks_every_unit() {
+        // every donor gets a placebo fit next to the treated unit's own; T fits
+        // its donors almost exactly before t = 11 and gains 10 after, so its
+        // post/pre RMSPE ratio ranks first
+        let ds = create_validate_synth_dataset();
+        let preds = vec![PredictorSpec::new("x1")];
+        let cfg = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: true,
+            ..Default::default()
+        };
+        let res = run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).unwrap();
+        let p = res.placebo_results.expect("placebo results");
+        let mut units: Vec<&str> = p.rmspe_ratios.iter().map(|(u, _)| u.as_str()).collect();
+        units.sort_unstable();
+        assert_eq!(units, ["D1", "D2", "D3", "D4", "T"]);
+        assert_eq!(p.n_units, 5);
+        assert_eq!(p.treated_rank, 1);
+        assert_eq!(p.p_value, 0.2);
+        assert!(p.rmspe_ratios.windows(2).all(|w| w[0].1 >= w[1].1));
+    }
+
+    /// Validate synthetic control recovers known weights and treatment effect.
+    #[test]
+    fn test_validate_synth_weight_recovery() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Weights should be non-negative
+        for (unit, weight) in &result.all_unit_weights {
+            assert!(
+                *weight >= -1e-6,
+                "Weight for {} = {:.4} should be non-negative",
+                unit,
+                weight
+            );
+        }
+
+        // Weights should sum to ~1
+        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
+        assert!(
+            (weight_sum - 1.0).abs() < 0.02,
+            "Weights should sum to 1, got {:.6}",
+            weight_sum
+        );
+
+        // Pre-treatment RMSPE should be small (good fit)
+        assert!(
+            result.pre_treatment_rmspe < 2.0,
+            "Pre-treatment RMSPE = {:.4} should be small",
+            result.pre_treatment_rmspe
+        );
+    }
+
+    /// Validate synthetic control detects treatment effect direction and magnitude.
+    #[test]
+    fn test_validate_synth_treatment_effect() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+        let true_effect = 10.0;
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Average effect should be close to true effect (within 3 for this DGP)
+        assert!(
+            (result.average_effect - true_effect).abs() < 3.0,
+            "Average effect = {:.4} should be close to true effect = {}",
+            result.average_effect,
+            true_effect
+        );
+
+        // All post-treatment effects should be positive
+        for te in &result.treatment_effects {
+            assert!(
+                te.effect > 0.0,
+                "Treatment effect at time {} = {:.4} should be positive",
+                te.time,
+                te.effect
+            );
+        }
+
+        // Cumulative effect should be positive and substantial
+        assert!(
+            result.cumulative_effect > 0.0,
+            "Cumulative effect should be positive"
+        );
+
+        // Structural checks
+        assert_eq!(result.n_pre_periods, 10);
+        assert_eq!(result.n_post_periods, 5);
+        assert_eq!(result.n_donors, 4);
+    }
+
+    /// Validate synthetic control time series outputs are correctly aligned.
+    #[test]
+    fn test_validate_synth_time_series_alignment() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Actual and synthetic outcomes should have the same length
+        assert_eq!(result.actual_outcome.len(), result.synthetic_outcome.len());
+
+        // In pre-treatment period, actual and synthetic should be close
+        for i in 0..result.n_pre_periods {
+            if i < result.actual_outcome.len() && i < result.synthetic_outcome.len() {
+                let (_, actual) = result.actual_outcome[i];
+                let (_, synth) = result.synthetic_outcome[i];
+                let diff = (actual - synth).abs();
+                // Pre-treatment fit should be reasonable (within 5 units)
+                assert!(
+                    diff < 5.0,
+                    "Pre-treatment period {}: actual={:.2}, synth={:.2}, diff={:.2}",
+                    i,
+                    actual,
+                    synth,
+                    diff
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
