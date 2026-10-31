@@ -428,3 +428,127 @@ fn test_validate_cli_descriptive_na() {
         Some("Note: 2 of 22 rows dropped because of missing values (xi: 2)")
     );
 }
+
+/// The values of the `Lag k: v` lines, in order.
+fn lag_values(text: &str) -> Vec<f64> {
+    text.lines()
+        .filter(|l| l.trim_start().starts_with("Lag "))
+        .map(|l| {
+            l.split_once(':')
+                .unwrap()
+                .1
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+        .collect()
+}
+
+/// CLI-8: an Int64 series was "must be numeric" (case cli_stat_acf_int: pacf(y, lag.max = 5)).
+#[test]
+fn test_validate_cli_acf_pacf_int64() {
+    let case = Case::load("cli_stat_acf_int");
+    let s = temp_session();
+    let d = s.load(&case);
+    let d = d.as_str();
+    let p = s.json(&["stats", "pacf", d, "--col", "y", "--lag-max", "5"]);
+    let partial = s.json(&[
+        "stats",
+        "acf",
+        d,
+        "--col",
+        "y",
+        "--lag-max",
+        "5",
+        "--partial",
+    ]);
+    Check::new(&case)
+        .vector("pacf", &num_vec(&p, "values"), Tol::stat(24))
+        .scalar("n", num(&p, "n_obs"), Tol::exact())
+        .vector("pacf", &num_vec(&partial, "values"), Tol::stat(24))
+        .finish();
+    assert_eq!(
+        (p["lags"].clone(), partial["lags"].clone()),
+        (json!([1, 2, 3, 4, 5]), json!([1, 2, 3, 4, 5]))
+    );
+    // Not pinned: p["confidence_bound"] is 1.96 / sqrt(n); R's acf object has no bound
+    // (plot.acf draws qnorm(0.975) / sqrt(n)).
+    let text = s.ok(&["stats", "pacf", d, "--col", "y", "--lag-max", "5"]);
+    Check::new(&case)
+        .vector("pacf", &lag_values(&text), Tol::printed(4))
+        .finish();
+    // stats acf (not partial): the CLI passes adjusted = true (n - k denominators, CLI-22,
+    // Tier 4), so its values are R's acf times n / (n - k), derived from the case key `acf`;
+    // lag 0 is 1.
+    let a = s.json(&["stats", "acf", d, "--col", "y", "--lag-max", "5"]);
+    let values = num_vec(&a, "values");
+    assert_eq!(
+        (a["lags"].clone(), values[0]),
+        (json!([0, 1, 2, 3, 4, 5]), 1.0)
+    );
+    let r_acf = case.vector("acf");
+    for k in 1..=5 {
+        let want = r_acf[k - 1] * 24.0 / (24.0 - k as f64);
+        assert!(
+            Tol::stat(24).allows(values[k], want),
+            "lag {k}: rust={} derived R={want}",
+            values[k]
+        );
+    }
+}
+
+/// `data load validation/<rel> --name <file stem>` for tests that compare no R value (and so
+/// load no case); returns the name.
+fn load_dataset(s: &TempSession, rel: &str) -> String {
+    let path = repo_path(&format!("validation/{rel}"));
+    let name = path.file_stem().unwrap().to_str().unwrap().to_string();
+    s.load_as(&path, &name, &[]);
+    name
+}
+
+/// CLI-9: a missing value in the series was read as 0; R's acf/pacf refuse it
+/// (na.action = na.fail, as case cli_stat_acf_int checks in R). A refusal test: it compares no
+/// R number and is not registered.
+#[test]
+fn test_cli_acf_refuses_missing() {
+    let s = temp_session();
+    let d = load_dataset(&s, "datasets/generated/friedman_quade.csv");
+    for args in [
+        &[
+            "stats",
+            "acf",
+            d.as_str(),
+            "--col",
+            "y_na",
+            "--lag-max",
+            "5",
+        ][..],
+        &[
+            "stats",
+            "acf",
+            d.as_str(),
+            "--col",
+            "y_na",
+            "--lag-max",
+            "5",
+            "--partial",
+        ][..],
+        &[
+            "stats",
+            "pacf",
+            d.as_str(),
+            "--col",
+            "y_na",
+            "--lag-max",
+            "5",
+        ][..],
+    ] {
+        let e = s.err(args);
+        assert!(
+            e.contains("Column 'y_na' contains 1 missing value(s)") && e.contains("na.fail"),
+            "{args:?}: {e}"
+        );
+    }
+}

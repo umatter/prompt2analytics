@@ -2,7 +2,7 @@
 
 use clap::{Subcommand, ValueEnum};
 use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
-use p2a_core::errors::EconResult;
+use p2a_core::errors::{EconError, EconResult};
 use p2a_core::{
     AcfType,
     Alternative,
@@ -810,16 +810,23 @@ fn column_values(
     Ok((cols.numeric(col).to_vec(), cols.missing().clone()))
 }
 
-/// Helper to extract a column as `Vec<f64>`
-fn extract_column(dataset: &p2a_core::Dataset, col: &str) -> Result<Vec<f64>, String> {
-    let df = dataset.df();
-    let column = df
-        .column(col)
-        .map_err(|e| format!("Column '{}' not found: {}", col, e))?;
-    let f64_col = column
-        .f64()
-        .map_err(|e| format!("Column '{}' must be numeric: {}", col, e))?;
-    Ok(f64_col.into_no_null_iter().collect())
+/// A complete numeric series for ACF/PACF (Int64 and the other numeric dtypes accepted). A
+/// missing value is an error naming the column, as R's acf/pacf (na.action = na.fail) refuse
+/// it: dropping a value would splice the series.
+fn series_column(
+    dataset: &p2a_core::Dataset,
+    col: &str,
+    command: &str,
+) -> Result<Vec<f64>, String> {
+    match column_values(dataset, col, NaPolicy::Fail, command) {
+        Ok((values, _)) => Ok(values),
+        Err(e @ EconError::NullValues { .. }) => Err(format!(
+            "{e} ACF and PACF need a complete series, as R's acf/pacf (na.action = na.fail): \
+             fill the gaps first (for example: p2a munge fill-na <dataset> --method forward \
+             --columns <column>); dropping a value would splice the series."
+        )),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn execute_t_test_one(
@@ -1559,7 +1566,7 @@ fn execute_acf(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            let data = match series_column(ds, col, "acf") {
                 Ok(d) => d,
                 Err(e) => {
                     print_error(&e, format);
@@ -1589,7 +1596,7 @@ fn execute_acf(
                     Err(e) => print_error(&format!("PACF failed: {}", e), format),
                 }
             } else {
-                // acf(data, lag_max, acf_type, demean, na_rm)
+                // acf(data, lag_max, acf_type, demean, na_rm) // adjusted = true: CLI-22 (Tier 4)
                 match acf(&data, Some(lag_max), AcfType::Correlation, true, true) {
                     Ok(result) => match format {
                         OutputFormat::Json => {
@@ -1961,7 +1968,7 @@ fn execute_pacf(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            let data = match series_column(ds, col, "pacf") {
                 Ok(d) => d,
                 Err(e) => {
                     print_error(&e, format);
