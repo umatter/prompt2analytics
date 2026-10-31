@@ -197,6 +197,32 @@
       "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_viz_extraction",
+      "name": "CLI viz scatter, line, box, heatmap: joint deletion of incomplete rows and Int64 columns",
+      "category": "interfaces",
+      "reference": "stats::complete.cases; stats::cor(use = 'complete.obs'); table(code, out)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "cli_stat_descriptive_na",
+        "stat_contingency_na_codes",
+        "stat_two_sample_na"
+      ],
+      "tests": [
+        "p2a-cli::commands::viz::tests::test_validate_cli_viz_heatmap_complete_obs",
+        "p2a-cli::commands::viz::tests::test_validate_cli_viz_box_groups",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_na_cli_viz_xy_plots"
+      ],
+      "quantities": [
+        "complete-case correlation matrix and row count",
+        "box groups (labels, order, counts)",
+        "complete pairs",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

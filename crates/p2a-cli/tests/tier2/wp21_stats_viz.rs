@@ -1265,3 +1265,225 @@ fn test_validate_cli_anova_two_ss_type() {
         "{e3}"
     );
 }
+
+fn png(s: &TempSession, name: &str) -> String {
+    s.dir().join(name).to_str().unwrap().to_string()
+}
+
+fn is_png(path: &str) -> bool {
+    std::fs::read(path)
+        .map(|b| b.starts_with(b"\x89PNG"))
+        .unwrap_or(false)
+}
+
+/// CLI-9: scatter, line and heatmap paired the columns with zeros for missing cells; now complete
+/// rows only (cases stat_two_sample_na: n_pairs; cli_stat_descriptive_na: n_complete).
+#[test]
+fn test_validate_na_cli_viz_xy_plots() {
+    let case = Case::load("stat_two_sample_na");
+    let desc = Case::load("cli_stat_descriptive_na");
+    let s = temp_session();
+    let d = s.load(&case);
+    let d = d.as_str();
+    for kind in ["scatter", "line"] {
+        let f = png(&s, &format!("{kind}.png"));
+        let out = s.ok(&["viz", kind, d, "-x", "x", "-y", "y", "-f", f.as_str()]);
+        assert_eq!(
+            note(&out),
+            Some("Note: 16 of 22 rows dropped because of missing values (x: 15, y: 15)"),
+            "{kind}: {out}"
+        );
+        assert!(is_png(&f), "{kind}");
+        let j = s.json(&["viz", kind, d, "-x", "x", "-y", "y", "-f", f.as_str()]);
+        Check::new(&case)
+            .scalar("n_pairs", num(&j["missing"], "n_used"), Tol::exact())
+            .finish();
+        assert_eq!(j["missing"], missing(22, 6, json!({"x": 15, "y": 15})));
+    }
+    let f = png(&s, "heat.png");
+    let j = s.json(&[
+        "viz",
+        "heatmap",
+        d,
+        "--cols",
+        "x",
+        "y",
+        "xi",
+        "-f",
+        f.as_str(),
+    ]);
+    Check::new(&desc)
+        .scalar("n_complete", num(&j["missing"], "n_used"), Tol::exact())
+        .finish();
+    assert!(is_png(&f));
+}
+
+/// CLI-8: an Int64 group column was refused ("Group column must be string"); the row with a
+/// missing code is dropped. Compares no R number (the groups are pinned by the unit test
+/// commands::viz::tests::test_validate_cli_viz_box_groups), so it is not registered.
+#[test]
+fn test_cli_viz_box_int64_group() {
+    let s = temp_session();
+    let d = load_dataset(&s, "datasets/generated/contingency_na_codes.csv");
+    let f = png(&s, "box.png");
+    let out = s.ok(&[
+        "viz",
+        "box",
+        d.as_str(),
+        "-y",
+        "out",
+        "-g",
+        "code",
+        "-f",
+        f.as_str(),
+    ]);
+    assert!(out.contains("Box plot saved to") && is_png(&f), "{out}");
+    assert_eq!(
+        note(&out),
+        Some("Note: 1 of 12 rows dropped because of missing values (code: 1)"),
+        "{out}"
+    );
+    let j = s.json(&[
+        "viz",
+        "box",
+        d.as_str(),
+        "-y",
+        "out",
+        "-g",
+        "code",
+        "-f",
+        f.as_str(),
+    ]);
+    assert_eq!(j["missing"], missing(12, 11, json!({"code": 1})));
+}
+
+/// CLI-8/CLI-9: histogram of an Int64 column with missing cells; dendrogram of an Int64 column,
+/// and its refusal of missing values; residual plots of an Int64 response. Not registered (no R
+/// number).
+#[test]
+fn test_cli_viz_histogram_dendrogram_residuals() {
+    let s = temp_session();
+    let d2 = load_dataset(&s, "datasets/generated/two_sample_na.csv");
+    let dq = load_dataset(&s, "datasets/generated/friedman_quade.csv");
+    let dp = load_dataset(&s, "datasets/generated/pairwise_mahalanobis_na.csv");
+    let h = png(&s, "hist.png");
+    let out = s.ok(&[
+        "viz",
+        "histogram",
+        d2.as_str(),
+        "--col",
+        "xi",
+        "-f",
+        h.as_str(),
+    ]);
+    assert_eq!(
+        note(&out),
+        Some("Note: 2 of 22 rows dropped because of missing values (xi: 2)"),
+        "{out}"
+    );
+    assert!(is_png(&h));
+    let t = png(&s, "tree.png");
+    s.ok(&[
+        "viz",
+        "dendrogram",
+        dq.as_str(),
+        "--cols",
+        "y",
+        "-f",
+        t.as_str(),
+    ]);
+    assert!(is_png(&t));
+    let e = s.err(&[
+        "viz",
+        "dendrogram",
+        d2.as_str(),
+        "--cols",
+        "xi",
+        "yi",
+        "-f",
+        t.as_str(),
+    ]);
+    assert!(e.contains("Column 'xi' contains 2 missing value(s)"), "{e}");
+    let r = png(&s, "resid.png");
+    s.ok(&[
+        "viz",
+        "residuals",
+        dp.as_str(),
+        "-y",
+        "id",
+        "-x",
+        "b",
+        "-f",
+        r.as_str(),
+    ]);
+    for suffix in ["", "_qq", "_scale_location", "_leverage"] {
+        assert!(
+            is_png(&png(&s, &format!("resid{suffix}.png"))),
+            "resid{suffix}.png"
+        );
+    }
+}
+
+/// CLI-9: event-study and IRF rows with a missing cell were plotted at 0; an IRF band column that
+/// cannot be read was silently ignored. Not registered (no R number).
+#[test]
+fn test_cli_viz_event_study_irf() {
+    let s = temp_session();
+    let d = load_dataset(&s, "datasets/generated/two_sample_na.csv");
+    let d = d.as_str();
+    let f = png(&s, "event.png");
+    let out = s.ok(&[
+        "viz",
+        "event-study",
+        d,
+        "--time-col",
+        "id",
+        "--estimate-col",
+        "x",
+        "--ci-lower-col",
+        "y",
+        "--ci-upper-col",
+        "xi",
+        "-f",
+        f.as_str(),
+    ]);
+    assert_eq!(
+        note(&out),
+        Some("Note: 16 of 22 rows dropped because of missing values (x: 15, y: 15, xi: 2)"),
+        "{out}"
+    );
+    assert!(is_png(&f));
+    let i = png(&s, "irf.png");
+    let out = s.ok(&[
+        "viz",
+        "irf",
+        d,
+        "--horizon-col",
+        "id",
+        "--response-col",
+        "xi",
+        "-f",
+        i.as_str(),
+    ]);
+    assert_eq!(
+        note(&out),
+        Some("Note: 2 of 22 rows dropped because of missing values (xi: 2)"),
+        "{out}"
+    );
+    let e = s.err(&[
+        "viz",
+        "irf",
+        d,
+        "--horizon-col",
+        "id",
+        "--response-col",
+        "xi",
+        "--ci-lower-col",
+        "nope",
+        "--ci-upper-col",
+        "x",
+        "-f",
+        i.as_str(),
+    ]);
+    assert!(e.contains("Column 'nope' not found"), "{e}");
+}

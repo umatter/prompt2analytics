@@ -1,7 +1,7 @@
 //! Visualization commands
 
 use clap::Subcommand;
-use ndarray::Array2;
+use p2a_core::data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy, numeric_column};
 use p2a_core::regression::CovarianceType;
 use p2a_core::traits::LinearEstimator;
 use p2a_core::visualization::{
@@ -14,7 +14,7 @@ use p2a_core::{
 };
 use std::path::PathBuf;
 
-use crate::output::{OutputFormat, print_error, print_message};
+use crate::output::{OutputFormat, missing_json, print_error, print_message, print_missing_note};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -397,17 +397,108 @@ EXAMPLES:
     },
 }
 
-/// Extract a column from a Dataset as `Vec<f64>`
-fn extract_column(dataset: &p2a_core::Dataset, col: &str) -> Result<Vec<f64>, String> {
-    let df = dataset.df();
-    let column = df
-        .column(col)
-        .map_err(|e| format!("Column '{}' not found: {}", col, e))?;
-    let f64_col = column
-        .f64()
-        .map_err(|e| format!("Column '{}' must be numeric: {}", col, e))?;
+/// "viz <command>, columns 'a', 'b'": the context of a too-few-rows error.
+fn extraction_context(command: &str, names: &[&str]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    let noun = if names.len() == 1 {
+        "column"
+    } else {
+        "columns"
+    };
+    format!("viz {command}, {noun} {}", quoted.join(", "))
+}
 
-    Ok(f64_col.into_no_null_iter().collect())
+/// `names` on the rows where none of them is missing (R `complete.cases`: a plot of several
+/// columns drops a row missing in any of them). Int64 and the other numeric dtypes are
+/// accepted; fewer than `min_rows` complete rows is an error naming `viz <command>` and the
+/// columns.
+fn complete_rows(
+    dataset: &p2a_core::Dataset,
+    names: &[&str],
+    min_rows: usize,
+    command: &str,
+) -> Result<Columns, String> {
+    ColumnRequest::new(dataset.df())
+        .numerics(names)
+        .na(NaPolicy::Omit)
+        .min_rows(min_rows, &extraction_context(command, names))
+        .extract()
+        .map_err(|e| e.to_string())
+}
+
+/// The value column split by the group column's levels in R factor order (numbers in numeric
+/// order, text in C order; rows missing either column dropped, as `boxplot(y ~ g)` does), or
+/// one group named after `value_col` when `group_col` is None. The group column may be text,
+/// integer, float, boolean or date.
+fn box_groups(
+    dataset: &p2a_core::Dataset,
+    value_col: &str,
+    group_col: Option<&str>,
+) -> Result<(Vec<(String, Vec<f64>)>, MissingSummary), String> {
+    let Some(group_col) = group_col else {
+        let cols = complete_rows(dataset, &[value_col], 1, "box")?;
+        let values = cols.numeric(value_col).to_vec();
+        return Ok((
+            vec![(value_col.to_string(), values)],
+            cols.missing().clone(),
+        ));
+    };
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(value_col)
+        .factor(group_col)
+        .na(NaPolicy::Omit)
+        .min_rows(1, &extraction_context("box", &[value_col, group_col]))
+        .extract()
+        .map_err(|e| e.to_string())?;
+    let factor = cols.factor(group_col);
+    let mut groups: Vec<(String, Vec<f64>)> = factor
+        .levels
+        .iter()
+        .map(|level| (level.clone(), Vec::new()))
+        .collect();
+    for (&code, &value) in factor.codes.iter().zip(cols.numeric(value_col)) {
+        groups[code as usize].1.push(value);
+    }
+    Ok((groups, cols.missing().clone()))
+}
+
+/// Pearson correlations of `cols` over the rows complete in all of them (R
+/// `cor(use = "complete.obs")`), as a k x k matrix, and what was dropped.
+fn complete_case_correlations(
+    dataset: &p2a_core::Dataset,
+    cols: &[String],
+) -> Result<(Vec<Vec<f64>>, MissingSummary), String> {
+    let names: Vec<&str> = cols.iter().map(String::as_str).collect();
+    let columns = complete_rows(dataset, &names, 2, "heatmap")?;
+    let k = names.len();
+    let mut corr = vec![vec![0.0; k]; k];
+    for i in 0..k {
+        corr[i][i] = 1.0;
+        for j in (i + 1)..k {
+            let r = compute_correlation(columns.numeric(names[i]), columns.numeric(names[j]));
+            corr[i][j] = r;
+            corr[j][i] = r;
+        }
+    }
+    Ok((corr, columns.missing().clone()))
+}
+
+/// Text: `msg`, then the dropped-rows note; JSON: one line `{"message": msg}`, with a
+/// `"missing"` object when rows were dropped.
+fn print_saved(msg: &str, missing: &MissingSummary, format: &OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({ "message": msg });
+            if let (Some(summary), Some(object)) = (missing_json(missing), json.as_object_mut()) {
+                object.insert("missing".to_string(), summary);
+            }
+            println!("{json}");
+        }
+        _ => {
+            println!("{msg}");
+            print_missing_note(missing, format);
+        }
+    }
 }
 
 /// Decode base64 image to bytes
@@ -652,14 +743,15 @@ fn execute_histogram(
 
     match dataset {
         Some(ds) => {
-            // Extract column data
-            let data = match extract_column(ds, col) {
-                Ok(d) => d,
+            // Rows with a missing value are left out, as hist() does.
+            let cols = match complete_rows(ds, &[col], 1, "histogram") {
+                Ok(c) => c,
                 Err(e) => {
                     print_error(&e, format);
                     return Ok(());
                 }
             };
+            let data = cols.numeric(col);
 
             let chart_title = title
                 .map(|s| s.to_string())
@@ -672,14 +764,15 @@ fn execute_histogram(
             };
 
             // histogram(data, bins, config)
-            match histogram(&data, Some(bins), config) {
+            match histogram(data, Some(bins), config) {
                 Ok(result) => {
                     // Decode base64 and save PNG to file
                     match decode_base64_image(&result.image_base64) {
                         Ok(png_data) => {
                             std::fs::write(output, &png_data)?;
-                            print_message(
+                            print_saved(
                                 &format!("Histogram saved to: {}", output.display()),
+                                cols.missing(),
                                 format,
                             );
                         }
@@ -722,21 +815,15 @@ fn execute_scatter(
 
     match dataset {
         Some(ds) => {
-            // Extract column data
-            let x_data = match extract_column(ds, x_col) {
-                Ok(d) => d,
+            // Complete (x, y) pairs only.
+            let cols = match complete_rows(ds, &[x_col, y_col], 1, "scatter") {
+                Ok(c) => c,
                 Err(e) => {
                     print_error(&e, format);
                     return Ok(());
                 }
             };
-            let y_data = match extract_column(ds, y_col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
+            let (x_data, y_data) = (cols.numeric(x_col), cols.numeric(y_col));
 
             let chart_title = title
                 .map(|s| s.to_string())
@@ -751,12 +838,13 @@ fn execute_scatter(
             };
 
             // scatter_plot(x, y, config)
-            match scatter_plot(&x_data, &y_data, config) {
+            match scatter_plot(x_data, y_data, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
                         std::fs::write(output, &png_data)?;
-                        print_message(
+                        print_saved(
                             &format!("Scatter plot saved to: {}", output.display()),
+                            cols.missing(),
                             format,
                         );
                     }
@@ -798,21 +886,16 @@ fn execute_line(
 
     match dataset {
         Some(ds) => {
-            // Extract column data
-            let x_data = match extract_column(ds, x_col) {
-                Ok(d) => d,
+            // Complete (x, y) pairs only.
+            let cols = match complete_rows(ds, &[x_col, y_col], 1, "line") {
+                Ok(c) => c,
                 Err(e) => {
                     print_error(&e, format);
                     return Ok(());
                 }
             };
-            let y_data = match extract_column(ds, y_col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
+            let x_data = cols.numeric(x_col).to_vec();
+            let y_data = cols.numeric(y_col).to_vec();
 
             let chart_title = title
                 .map(|s| s.to_string())
@@ -833,7 +916,11 @@ fn execute_line(
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
                         std::fs::write(output, &png_data)?;
-                        print_message(&format!("Line plot saved to: {}", output.display()), format);
+                        print_saved(
+                            &format!("Line plot saved to: {}", output.display()),
+                            cols.missing(),
+                            format,
+                        );
                     }
                     Err(e) => {
                         print_error(&e, format);
@@ -870,73 +957,13 @@ fn execute_boxplot(
 
     match dataset {
         Some(ds) => {
-            let df = ds.df();
-
-            // Build groups for box plot
-            let groups: Vec<(String, Vec<f64>)> = if let Some(grp_col) = group_col {
-                // Group by the group column
-                let group_series = match df.column(grp_col) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        print_error(
-                            &format!("Group column '{}' not found: {}", grp_col, e),
-                            format,
-                        );
-                        return Ok(());
-                    }
-                };
-                let value_series = match df.column(value_col) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        print_error(
-                            &format!("Value column '{}' not found: {}", value_col, e),
-                            format,
-                        );
-                        return Ok(());
-                    }
-                };
-
-                // Get unique group values and filter data
-                let groups_str = group_series.str();
-                let values_f64 = value_series.f64();
-
-                match (groups_str, values_f64) {
-                    (Ok(gs), Ok(vs)) => {
-                        // Collect unique groups
-                        let unique: std::collections::HashSet<String> =
-                            gs.into_no_null_iter().map(|s| s.to_string()).collect();
-
-                        unique
-                            .into_iter()
-                            .map(|group_name| {
-                                let data: Vec<f64> = gs
-                                    .into_no_null_iter()
-                                    .zip(vs.into_no_null_iter())
-                                    .filter(|(g, _)| *g == group_name)
-                                    .map(|(_, v)| v)
-                                    .collect();
-                                (group_name, data)
-                            })
-                            .collect()
-                    }
-                    _ => {
-                        print_error(
-                            "Group column must be string and value column must be numeric",
-                            format,
-                        );
-                        return Ok(());
-                    }
+            // Groups in R factor order; rows missing the value or the group are left out.
+            let (groups, missing) = match box_groups(ds, value_col, group_col) {
+                Ok(g) => g,
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
                 }
-            } else {
-                // Single group - all data
-                let data = match extract_column(ds, value_col) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        print_error(&e, format);
-                        return Ok(());
-                    }
-                };
-                vec![(value_col.to_string(), data)]
             };
 
             let chart_title = title
@@ -954,7 +981,11 @@ fn execute_boxplot(
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
                         std::fs::write(output, &png_data)?;
-                        print_message(&format!("Box plot saved to: {}", output.display()), format);
+                        print_saved(
+                            &format!("Box plot saved to: {}", output.display()),
+                            &missing,
+                            format,
+                        );
                     }
                     Err(e) => print_error(&e, format),
                 },
@@ -984,35 +1015,14 @@ fn execute_heatmap(
 
     match dataset {
         Some(ds) => {
-            // Extract columns and compute correlation matrix
-            let n_cols = cols.len();
-            let mut data_vecs: Vec<Vec<f64>> = Vec::with_capacity(n_cols);
-
-            for col_name in cols {
-                match extract_column(ds, col_name) {
-                    Ok(d) => data_vecs.push(d),
-                    Err(e) => {
-                        print_error(&e, format);
-                        return Ok(());
-                    }
+            // Correlations over the complete rows (cor(use = "complete.obs")).
+            let (corr_matrix, missing) = match complete_case_correlations(ds, cols) {
+                Ok(c) => c,
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
                 }
-            }
-
-            // Compute correlation matrix
-            let n_rows = data_vecs[0].len();
-            let mut corr_matrix: Vec<Vec<f64>> = vec![vec![0.0; n_cols]; n_cols];
-
-            for i in 0..n_cols {
-                for j in 0..n_cols {
-                    if i == j {
-                        corr_matrix[i][j] = 1.0;
-                    } else if j > i {
-                        let corr = compute_correlation(&data_vecs[i], &data_vecs[j], n_rows);
-                        corr_matrix[i][j] = corr;
-                        corr_matrix[j][i] = corr;
-                    }
-                }
-            }
+            };
 
             let labels: Vec<String> = cols.to_vec();
 
@@ -1020,7 +1030,11 @@ fn execute_heatmap(
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
                         std::fs::write(output, &png_data)?;
-                        print_message(&format!("Heatmap saved to: {}", output.display()), format);
+                        print_saved(
+                            &format!("Heatmap saved to: {}", output.display()),
+                            &missing,
+                            format,
+                        );
                     }
                     Err(e) => print_error(&e, format),
                 },
@@ -1032,7 +1046,9 @@ fn execute_heatmap(
     Ok(())
 }
 
-fn compute_correlation(x: &[f64], y: &[f64], n: usize) -> f64 {
+/// Pearson correlation of two aligned columns (0 when either has no variance).
+fn compute_correlation(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len().min(y.len());
     let mean_x: f64 = x.iter().sum::<f64>() / n as f64;
     let mean_y: f64 = y.iter().sum::<f64>() / n as f64;
 
@@ -1114,8 +1130,9 @@ fn execute_coefplot(
                         Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
                             Ok(png_data) => {
                                 std::fs::write(output, &png_data)?;
-                                print_message(
+                                print_saved(
                                     &format!("Coefficient plot saved to: {}", output.display()),
+                                    &MissingSummary::none(result.n_obs()),
                                     format,
                                 );
                             }
@@ -1153,18 +1170,18 @@ fn execute_residuals(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            // Get Y values from dataset
-            let y_values = match extract_column(ds, dep_var) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             // Run OLS to get residuals
             match run_ols(ds, dep_var, &x_cols, true, CovarianceType::HC1) {
                 Ok(result) => {
+                    // run_ols refuses missing values, so y is complete and aligned with the
+                    // residuals.
+                    let (y_values, _) = match numeric_column(ds.df(), dep_var, NaPolicy::Fail) {
+                        Ok(y) => y,
+                        Err(e) => {
+                            print_error(&e.to_string(), format);
+                            return Ok(());
+                        }
+                    };
                     // Get residuals via LinearEstimator trait
                     let resid = result.residuals();
                     let residuals: Vec<f64> = resid.to_vec();
@@ -1224,11 +1241,12 @@ fn execute_residuals(
                                         let _ = std::fs::write(&lev_path, &lev_data);
                                     }
 
-                                    print_message(
+                                    print_saved(
                                         &format!(
                                             "Residual diagnostics saved to: {} (+ _qq, _scale_location, _leverage)",
                                             output.display()
                                         ),
+                                        &MissingSummary::none(y_values.len()),
                                         format,
                                     );
                                 }
@@ -1265,14 +1283,20 @@ fn execute_dendrogram(
 
     match dataset {
         Some(ds) => {
-            // Extract columns as Array2
-            let data = match extract_columns_as_array(ds, cols) {
-                Ok(arr) => arr,
+            // hclust of rows with a missing value is undefined: refuse them (Int64 accepted).
+            let names: Vec<&str> = cols.iter().map(String::as_str).collect();
+            let columns = match ColumnRequest::new(ds.df())
+                .numerics(&names)
+                .na(NaPolicy::Fail)
+                .extract()
+            {
+                Ok(c) => c,
                 Err(e) => {
                     print_error(&format!("Failed to extract data: {}", e), format);
                     return Ok(());
                 }
             };
+            let data = columns.matrix(&names, false).data;
 
             let link = match linkage_method.to_lowercase().as_str() {
                 "single" => Linkage::Single,
@@ -1301,8 +1325,9 @@ fn execute_dendrogram(
                         Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
                             Ok(png_data) => {
                                 std::fs::write(output, &png_data)?;
-                                print_message(
+                                print_saved(
                                     &format!("Dendrogram saved to: {}", output.display()),
+                                    columns.missing(),
                                     format,
                                 );
                             }
@@ -1319,40 +1344,6 @@ fn execute_dendrogram(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
-}
-
-/// Extract multiple columns from a Dataset as an `Array2<f64>`
-fn extract_columns_as_array(
-    dataset: &p2a_core::Dataset,
-    cols: &[String],
-) -> Result<Array2<f64>, String> {
-    let df = dataset.df();
-    let n_rows = df.height();
-    let n_cols = cols.len();
-
-    if n_cols == 0 {
-        return Err("No columns specified".to_string());
-    }
-
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-
-    for row_idx in 0..n_rows {
-        for col_name in cols {
-            let col = df
-                .column(col_name)
-                .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-            let f64_col = col
-                .f64()
-                .map_err(|e| format!("Column '{}' must be numeric: {}", col_name, e))?;
-            let value = f64_col.get(row_idx).ok_or_else(|| {
-                format!("Missing value at row {} in column '{}'", row_idx, col_name)
-            })?;
-            data.push(value);
-        }
-    }
-
-    Array2::from_shape_vec((n_rows, n_cols), data)
-        .map_err(|e| format!("Failed to create array: {}", e))
 }
 
 fn execute_event_study(
@@ -1376,34 +1367,17 @@ fn execute_event_study(
 
     match dataset {
         Some(ds) => {
-            let time = match extract_column(ds, time_col) {
-                Ok(d) => d,
+            // Rows complete in time, estimate and both limits.
+            let names = [time_col, estimate_col, ci_lower_col, ci_upper_col];
+            let cols = match complete_rows(ds, &names, 1, "event-study") {
+                Ok(c) => c,
                 Err(e) => {
                     print_error(&e, format);
                     return Ok(());
                 }
             };
-            let estimates = match extract_column(ds, estimate_col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let ci_lower = match extract_column(ds, ci_lower_col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let ci_upper = match extract_column(ds, ci_upper_col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
+            let (time, estimates) = (cols.numeric(time_col), cols.numeric(estimate_col));
+            let (ci_lower, ci_upper) = (cols.numeric(ci_lower_col), cols.numeric(ci_upper_col));
 
             let chart_title = title
                 .map(|s| s.to_string())
@@ -1417,12 +1391,13 @@ fn execute_event_study(
                 ..Default::default()
             };
 
-            match event_study_plot(&time, &estimates, &ci_lower, &ci_upper, config) {
+            match event_study_plot(time, estimates, ci_lower, ci_upper, config) {
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
                         std::fs::write(output, &png_data)?;
-                        print_message(
+                        print_saved(
                             &format!("Event study plot saved to: {}", output.display()),
+                            cols.missing(),
                             format,
                         );
                     }
@@ -1459,25 +1434,21 @@ fn execute_irf(
 
     match dataset {
         Some(ds) => {
-            let horizons = match extract_column(ds, horizon_col) {
-                Ok(d) => d,
+            // Rows complete in horizon, response and every band column given; a band column
+            // that cannot be read is an error, not a plot without the band.
+            let mut names = vec![horizon_col, response_col];
+            names.extend(ci_lower_col);
+            names.extend(ci_upper_col);
+            let cols = match complete_rows(ds, &names, 1, "irf") {
+                Ok(c) => c,
                 Err(e) => {
                     print_error(&e, format);
                     return Ok(());
                 }
             };
-            let responses = match extract_column(ds, response_col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
-            let ci_lower: Option<Vec<f64>> =
-                ci_lower_col.and_then(|col| extract_column(ds, col).ok());
-            let ci_upper: Option<Vec<f64>> =
-                ci_upper_col.and_then(|col| extract_column(ds, col).ok());
+            let (horizons, responses) = (cols.numeric(horizon_col), cols.numeric(response_col));
+            let ci_lower = ci_lower_col.map(|col| cols.numeric(col));
+            let ci_upper = ci_upper_col.map(|col| cols.numeric(col));
 
             let chart_title = title
                 .map(|s| s.to_string())
@@ -1490,10 +1461,10 @@ fn execute_irf(
             };
 
             match irf_plot(
-                &horizons,
-                &responses,
-                ci_lower.as_deref(),
-                ci_upper.as_deref(),
+                horizons,
+                responses,
+                ci_lower,
+                ci_upper,
                 shock_label,
                 response_label,
                 config,
@@ -1501,7 +1472,11 @@ fn execute_irf(
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
                         std::fs::write(output, &png_data)?;
-                        print_message(&format!("IRF plot saved to: {}", output.display()), format);
+                        print_saved(
+                            &format!("IRF plot saved to: {}", output.display()),
+                            cols.missing(),
+                            format,
+                        );
                     }
                     Err(e) => print_error(&e, format),
                 },
@@ -1647,4 +1622,70 @@ fn execute_line_interactive(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_validation::{Case, Check, Tol};
+
+    /// viz heatmap correlates complete rows (R cor(use = "complete.obs")); the missing cells were
+    /// read as zeros (r(x, y) 0.7955).
+    #[test]
+    fn test_validate_cli_viz_heatmap_complete_obs() {
+        let case = Case::load("cli_stat_descriptive_na");
+        let ds = p2a_core::DataLoader::load(case.dataset_path()).unwrap();
+        let cols = ["x", "y", "xi"].map(String::from);
+        let (m, missing) = complete_case_correlations(&ds, &cols).unwrap();
+        let flat: Vec<f64> = m.iter().flatten().copied().collect();
+        Check::new(&case)
+            .vector("cor_complete", &flat, Tol::stat(6))
+            .scalar("n_complete", missing.n_used as f64, Tol::exact())
+            .scalar("n_rows", missing.n_total as f64, Tol::exact())
+            .finish();
+        assert_eq!(
+            missing.by_column,
+            vec![
+                ("x".to_string(), 15),
+                ("y".to_string(), 15),
+                ("xi".to_string(), 2)
+            ]
+        );
+    }
+
+    /// viz box -g: an Int64 group in R factor order (2 < 10; it was refused, and the order was
+    /// random, CLI-40), the row with a missing code dropped (case stat_contingency_na_codes:
+    /// table(code, out)).
+    #[test]
+    fn test_validate_cli_viz_box_groups() {
+        let case = Case::load("stat_contingency_na_codes");
+        let ds = p2a_core::DataLoader::load(case.dataset_path()).unwrap();
+        let (groups, missing) = box_groups(&ds, "out", Some("code")).unwrap();
+        assert_eq!(
+            groups.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
+            ["2", "10"]
+        );
+        // out is 0/1: R's table(code, out), row-major
+        let tab: Vec<f64> = groups
+            .iter()
+            .flat_map(|(_, v)| [0.0, 1.0].map(|o| v.iter().filter(|&&x| x == o).count() as f64))
+            .collect();
+        Check::new(&case)
+            .vector("code_out_table", &tab, Tol::exact())
+            .finish();
+        assert_eq!(
+            (missing.n_total, missing.n_used, missing.by_column.clone()),
+            (12, 11, vec![("code".to_string(), 1)])
+        );
+        let (single, none) = box_groups(&ds, "out", None).unwrap();
+        assert_eq!(
+            (
+                single.len(),
+                single[0].0.as_str(),
+                single[0].1.len(),
+                none.n_dropped
+            ),
+            (1, "out", 12, 0)
+        );
+    }
 }
