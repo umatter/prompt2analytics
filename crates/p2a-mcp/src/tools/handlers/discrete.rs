@@ -90,7 +90,7 @@ impl AnalyticsServer {
 
     /// Run multinomial logit regression for unordered categorical outcomes.
     #[tool(
-        description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories (MLE, Newton-Raphson), as R's nnet::multinom(). Categories are ordered as R's factor() (numbers numerically, text alphabetically); the first is the reference unless 'reference' is given. Rows with a missing outcome or regressor are dropped and reported."
+        description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories (MLE, Newton-Raphson), as R's nnet::multinom(). Categories are ordered as R's factor() (numbers numerically, text by byte, as R under LC_COLLATE=C: uppercase before lowercase); the first is the reference unless 'reference' is given. Rows with a missing outcome or regressor are dropped and reported."
     )]
     pub async fn multinom(
         &self,

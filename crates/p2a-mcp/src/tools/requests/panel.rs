@@ -126,7 +126,7 @@ pub struct PvcmRequest {
     pub model: Option<String>,
 }
 
-/// Request for Arellano-Bond / System GMM dynamic panel estimation.
+/// Request for Arellano-Bond difference GMM dynamic panel estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GmmRequest {
     /// Name/ID of the dataset

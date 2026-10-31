@@ -63,7 +63,7 @@ pub struct MultinomRequest {
 
     /// Reference category (optional)
     #[schemars(
-        description = "Reference category for the model. If not specified, the first category (alphabetically) is used."
+        description = "Reference category for the model. If not specified, the first category is used, in R factor() order (numbers numerically, text by byte: uppercase before lowercase)."
     )]
     pub reference: Option<String>,
 }
@@ -110,7 +110,7 @@ pub struct MlogitRequest {
 
     /// Reference alternative (optional)
     #[schemars(
-        description = "Reference alternative for identification. Default: first alternative (alphabetically)."
+        description = "Reference alternative for identification. Default: the first alternative in R factor() order (numbers numerically, text by byte: uppercase before lowercase)."
     )]
     pub reference: Option<String>,
 }
