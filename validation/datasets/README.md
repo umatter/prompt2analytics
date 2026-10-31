@@ -8,7 +8,7 @@ datasets that R reference cases write (`validation/r/cases/*.R`).
 
 | File | Rows × columns | Used by | Source |
 |---|---|---|---|
-| `grunfeld.csv` | 200 × 5 (firm, year, inv, value, capital) | `ols_grunfeld`, `ols_diagnostics_grunfeld`, `panel_*_grunfeld`, `panel_hdfe_grunfeld`, `reg_cluster_na`, `harness_selftest`, the CLI exhibit tests and the paper's CLI captures | `plm::Grunfeld` |
+| `grunfeld.csv` | 200 × 5 (firm, year, inv, value, capital) | `ols_grunfeld`, `ols_diagnostics_grunfeld`, `panel_*_grunfeld`, `panel_hdfe_grunfeld`, `reg_cluster_na`, `dpd_ab_grunfeld`, `harness_selftest`, the CLI exhibit tests and the paper's CLI captures | `plm::Grunfeld` |
 | `employee_training.csv` | 1200 × 9 (employee_id, time, post_training, training_group, department, tenure, years_since_hire, performance, bonus) | the paper's chat transcripts (`paper/transcripts/section4_3_*.txt` in the paper repo); no validation case reads it | synthetic DiD panel, added in commit 4dd2c53; its generator is not in this repository |
 | `gdp_quarterly.csv` | 280 × 4 (date, year, quarter, gdp_growth) | the paper's time-series chat example (`paper/transcripts/section4_4_*.txt` in the paper repo); no validation case reads it | synthetic (see below) |
 
@@ -102,7 +102,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/chisq_small_expected.csv` | 13 × 2 (x, y) | `stat_chisq_small_expected` | `r/cases/stats_contingency.R` | literal values; expected counts below 5 |
 | `generated/mantelhaen_na.csv` | 240 × 3 (treat, outcome, stratum) | `stat_mantelhaen_na` | `r/cases/stats_contingency.R` | seed 11; 3 missing strata |
 | `generated/shapiro_cases.csv` | 5000 × 18 (id and 17 sample columns n3_124 ... n5000_rnorm, each padded with NA to 5000 rows; n3_124, n3_123, n25_int read as Int64) | `stat_shapiro_wilk` | `r/cases/stats_onesample.R` | seed 42; `qnorm(ppoints(100))` for `n100_qnorm` |
-| `generated/two_sample_na.csv` | 22 × 8 (id, x, y, xi, yi, g, mi, mj; xi, yi, mi, mj Int64 with NA, g text with one NA) | `stat_two_sample_na` | `r/cases/stats_onesample.R` | fixed x, y; seed 3 (xi, yi), seed 17 (mi, mj) |
+| `generated/two_sample_na.csv` | 22 × 8 (id, x, y, xi, yi, g, mi, mj; xi, yi, mi, mj Int64 with NA, g text with one NA) | `stat_two_sample_na`; read by `cli_stat_descriptive_na` | `r/cases/stats_onesample.R`; read by `r/cases/cli_stats.R` | fixed x, y; seed 3 (xi, yi), seed 17 (mi, mj) |
 | `generated/pairwise_mahalanobis_na.csv` | 30 × 5 (id, y, g, a, b; y Int64 with NA in rows 4 and 18, a NA in row 7) | `stat_pairwise_mahalanobis_na` | `r/cases/stats_onesample.R` | seed 9 |
 | `generated/rd_sim.csv` | 1000 × 6 (x, y, d, yf, xm, ym) | `rd_sharp_fixed_bw`, `rd_mass_points_nn`, `rd_fuzzy_fixed_bw` | `r/cases/causal_rd.R` | seed 42, cutoff 0, fuzzy take-up 0.2/0.8, x on a 0.01 grid in xm |
 | `generated/iv_weak_controls.csv` | 500 × 5 (y, x, w, z1, z2) | `iv_weak_controls` | `r/cases/econ_iv.R` | seed 20261021 |
@@ -121,12 +121,25 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/anova_two_way_unbalanced.csv` | 13 × 6 (y, fa, fb, y3, fa3, fb3) | `stat_anova_two_way_unbalanced` | `r/cases/stats_anova.R` | seed 101; 2 x 2 cells of 2/4/4/2 rows plus one row with y and fa missing; 3 x 2 layout y3 ~ fa3 * fb3 with the (C, L) cell empty |
 | `generated/oneway_na_labels.csv` | 9 × 5 (id, y, g, v9, g9) | `stat_oneway_na_labels` | `r/cases/stats_anova.R` | fixed values; y Int64 missing in 3 rows, g in 2, g9 in 3 |
 | `generated/wilcoxon_na.csv` | 10 × 3 (id, x, y) | `stat_wilcoxon_na` | `r/cases/stats_anova.R` | seed 17; x missing in row 3, y in row 8; no ties |
-| `generated/friedman_quade.csv` | 24 × 4 (y, y_na, treat, block) | `stat_friedman_quade` | `r/cases/stats_anova.R` | seed 23; 8 blocks × 3 treatments, Int64 y, y_na missing in row 5 (block S2) |
+| `generated/friedman_quade.csv` | 24 × 4 (y, y_na, treat, block) | `stat_friedman_quade`; read by `cli_stat_acf_int` | `r/cases/stats_anova.R`; read by `r/cases/cli_stats.R` | seed 23; 8 blocks × 3 treatments, Int64 y, y_na missing in row 5 (block S2) |
 | `generated/manova_na.csv` | 36 × 4 (id, y1, y2, g) | `stat_manova_na` | `r/cases/stats_anova.R` | seed 31; 3 groups of 12; y1 missing in rows 3 and 20, y2 in row 30 |
 | `generated/lung.csv` | 228 × 8 (inst, time, status, age, sex, ph.ecog, ph.karno, wt.loss) | `surv_km_lung`, `surv_km_lung_by_sex`, `surv_logrank_lung` | `r/cases/survival.R` | `survival::lung`: integer days, status 1 = censored, 2 = dead; empty cells inst 1, ph.ecog 1, ph.karno 1, wt.loss 14 |
 | `generated/logrank_small.csv` | 12 × 3 (time, event, group) | `surv_logrank_small` | `r/cases/survival.R` | fixed values: the 12-row data of the former log-rank test |
 | `generated/km_small.csv` | 10 × 2 (time, event) | `surv_km_small` | `r/cases/survival.R` | fixed values: the 10-row data of the former KM test |
 | `generated/km_median_rules.csv` | 16 × 6 (time, event, group, time_early, event_early, group_no_mid) | `surv_km_median_rules` | `r/cases/survival.R` | fixed values; group_no_mid has 7 empty cells |
+| `generated/arima_misspecified_seasonal.csv` | 1000 × 1 (y) | `arima_misspecified_seasonal` | `r/cases/forecasting_arima.R` | seed 42; y = 0.01 t + 2 sin(pi t / 6) + runif(1000, 0, 0.5), t = 0..999 (the unified benchmark's time-series DGP); the n = 100 fit reads the first 100 rows |
+| `generated/mixed_logit.csv` | 900 × 6 (person, id, alt, choice, x, w) | `disc_mixed_logit` | `r/cases/discrete_mixed.R` | seed 1234, 300 choice situations × 3 alternatives, normal coefficient on x |
+| `generated/mixed_logit_panel.csv` | 1200 × 6 (person, id, alt, choice, x, w) | `disc_mixed_logit_panel` | `r/cases/discrete_mixed.R` | seed 1234, 100 people × 4 situations × 3 alternatives |
+| `generated/choice_na.csv` | 300 × 12 (row, id, alt, choice, x, w, x_int, g, k, choice_na, x_na, id_na) | `disc_choice_na` | `r/cases/discrete_mixed.R` | seed 4321, 100 situations × 3 alternatives, 6 incomplete rows (5, 17, 23, 44, 101, 240) |
+| `generated/ab_balanced.csv` | 800 × 4 (id, year, y, x) | `dpd_ab_balanced` | `r/cases/econ_dynamic_panel.R` | seed 606; N = 100, T = 8 (2000-2007), y_t = 0.5 y_t-1 + 0.3 x_t + a_i + e_t, rounded to 10 decimals |
+| `generated/ab_gaps.csv` | 775 × 4 (id, year, y, x) | `dpd_ab_gaps` | `r/cases/econ_dynamic_panel.R` | `ab_balanced` without 2004 for ids divisible by 9 and without 2000-2001 for ids divisible by 13 |
+| `generated/ab_common_gap.csv` | 700 × 5 (id, unit, year, y, x); NA in y (10) and x (10); text `unit` (u001..u100) | `dpd_ab_common_gap`, `panel_pur_extraction` | `r/cases/econ_dynamic_panel.R` | seed 606, same DGP without 2003 for every unit |
+| `generated/loglin_na.csv` | 16 × 5 (id, f1, f2, f3, cnt; f2 and cnt Int64; f1 missing in row 14, f2 in row 15, cnt in row 16; rows 11 and 13 are the same cell (b, 10, y)) | `stat_loglin_na` | `r/cases/stats_mcp.R` | seed 211, a 3 × 2 × 2 table in long form |
+| `generated/weighted_na.csv` | 12 × 7 (id, v, w, a, b, wc, b_na; a, b and b_na Int64; v missing in row 3, w in row 8, b_na in row 5) | `stat_weighted_na` | `r/cases/stats_mcp.R` | seed 307 |
+| `generated/mauchly_na.csv` | 16 × 5 (id, t1-t4, all Int64; t2 missing in row 5, t4 in row 11) | `stat_mauchly_na` | `r/cases/stats_mcp.R` | seed 419, variances growing across conditions |
+| `generated/descriptive_na.csv` | 15 × 6 (id, v, vi, s, xs, ys; vi Int64, s text; v missing in rows 2, 9 and 13, vi in rows 4 and 11, xs in row 5, ys in row 10) | `stat_descriptive_na` | `r/cases/stats_mcp.R` | seed 613 |
+| `generated/isoreg_medpolish_int.csv` | 10 × 8 (id, x, y, y_na, c1-c4; y, y_na and c1-c4 Int64; y_na missing in row 6, c3 in row 4; x has no ties) | `stat_isoreg_medpolish_int` | `r/cases/stats_mcp.R` | seed 523 |
+| `generated/prop_trend_na.csv` | 7 × 6 (group, dose, successes, trials, trials_neg, successes_frac; all Int64 but successes_frac; successes missing in row 4; trials_neg is -1 in row 5; successes_frac is 5.5 in row 2) | `stat_prop_trend_na` | `r/cases/stats_mcp.R` | fixed values |
 
 ## Adding a dataset
 

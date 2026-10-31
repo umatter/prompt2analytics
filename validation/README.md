@@ -101,12 +101,13 @@ looks like a validation failure but is not one.
 - **Harness** (`validation/r/harness.R` and `validation/r/cases/*.R`; the case files record
   the versions they were written with): jsonlite, plm, fixest, sandwich, lmtest, car, tseries,
   quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl,
-  survival.
+  survival, mlogit, urca.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
                      "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER",
-                     "rdrobust", "forecast", "numDeriv", "pscl", "survival"))
+                     "rdrobust", "forecast", "numDeriv", "pscl", "survival", "mlogit",
+                     "urca"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -292,7 +293,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Random Effects | [panel_re.md](econometrics/panel_re.md) | R-pinned |
 | Hausman Test | [hausman.md](econometrics/hausman.md) | R-pinned |
 | HDFE | [hdfe.md](econometrics/hdfe.md) | R-pinned |
-| Arellano-Bond / System GMM | [gmm.md](econometrics/gmm.md) | not R-pinned |
+| Arellano-Bond difference GMM | [gmm.md](econometrics/gmm.md) | R-pinned |
+| Panel unit-root tests: data extraction (unit ids, time, gaps, missing values) | [panel_unit_root.md](econometrics/panel_unit_root.md) | R-pinned |
 | Panel GLS (pggls) | [pggls.md](econometrics/pggls.md) | not R-pinned |
 | FEGLM | [feglm.md](econometrics/feglm.md) | not R-pinned |
 | Multinomial and ordered logit/probit (Newton fit) | [discrete_newton.md](econometrics/discrete_newton.md) | R-pinned |
@@ -312,8 +314,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | not R-pinned |
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
 | Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-23) |
-| Logit | [logit.md](econometrics/logit.md) | not R-pinned |
+| Logit | [logit.md](econometrics/logit.md) | R-pinned |
 | Probit | [probit.md](econometrics/probit.md) | not R-pinned |
+| Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
+| Mixed logit | [mixed_logit.md](econometrics/mixed_logit.md) | R-pinned |
 | Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-77) |
 
 ### Survival Analysis
@@ -363,9 +367,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Statistical Methods
 | Method | File | Status |
 |--------|------|--------|
-| Median Polish | [medpolish.md](stats/medpolish.md) | not R-pinned |
-| Isotonic Regression | [isoreg.md](stats/isoreg.md) | not R-pinned |
-| Log-Linear Models | [loglin.md](stats/loglin.md) | not R-pinned |
+| Median Polish | [medpolish.md](stats/medpolish.md) | R-pinned |
+| Isotonic Regression | [isoreg.md](stats/isoreg.md) | R-pinned, known deviations (STAT-52) |
+| Log-Linear Models | [loglin.md](stats/loglin.md) | R-pinned |
 | Constrained Optimization | [constroptim.md](stats/constroptim.md) | not R-pinned |
 | SE for Contrasts | [secontrast.md](stats/secontrast.md) | not R-pinned |
 | Model Tables | [modeltables.md](stats/modeltables.md) | R-pinned, known deviations (STAT-75) |
@@ -379,7 +383,11 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Bartlett, Fligner-Killeen and F tests of variances | [bartlett.md](stats/bartlett.md) | R-pinned |
 | Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
 | Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned |
-| Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned |
+| Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned |
+| Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned, known deviations (TOOL-10) |
+| Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
+| Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
+| Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-36, STAT-37, STAT-65, STAT-69, STAT-87) |
 | One-way ANOVA | [anova.md](stats/anova.md) | R-pinned |
 | Two-way ANOVA (Type I, II and III sums of squares) | [anova.md](stats/anova.md) | R-pinned |
 | Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned |
@@ -424,6 +432,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 |--------|------|--------|
 | CLI exhibits (data describe/head, reg ols, reg diagnostics, panel fe/re/hdfe/hausman) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | MCP `regression_ols` (cov_type, intercept) | [ols.md](regression/ols.md) | R-pinned |
+| CLI stats and viz commands (missing values as R drops or refuses them, integer columns, chi-square and Fisher labels, R's warning and the conditional MLE, two-way ANOVA sums of squares) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 
 ## Reference datasets
 

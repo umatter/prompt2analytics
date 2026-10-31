@@ -121,7 +121,7 @@ fi
 STATUS_PY="validation/tools/validation_status.py"
 REPORT_DIR="validation/reports/$(date +%Y-%m-%d_%H%M%S)-$$"
 RESULTS="$REPORT_DIR/results.json"
-R_PACKAGES='install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries", "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER", "rdrobust", "forecast", "numDeriv", "pscl", "survival"))'
+R_PACKAGES='install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries", "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER", "rdrobust", "forecast", "numDeriv", "pscl", "survival", "mlogit", "urca"))'
 
 if [ -t 1 ]; then
     RED=$'\033[0;31m'
