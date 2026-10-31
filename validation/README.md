@@ -339,6 +339,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | IRF | [irf.md](econometrics/timeseries/irf.md) | not R-pinned |
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
 | Granger causality | [granger.md](econometrics/granger.md) | R-pinned |
+| ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
 
 ### Forecasting
 | Method | File | Status |
@@ -433,6 +434,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | CLI exhibits (data describe/head, reg ols, reg diagnostics, panel fe/re/hdfe/hausman) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
 | MCP `regression_ols` (cov_type, intercept) | [ols.md](regression/ols.md) | R-pinned |
 | CLI stats and viz commands (missing values as R drops or refuses them, integer columns, chi-square and Fisher labels, R's warning and the conditional MLE, two-way ANOVA sums of squares) | [CLI_REFERENCE.md](../docs/guides/CLI_REFERENCE.md) | R-pinned |
+| Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data: t-tests, cor.test, one-way ANOVA, Wilcoxon, Kaplan-Meier) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
 
 ## Reference datasets
 
