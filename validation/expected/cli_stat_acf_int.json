@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "cli_stat_acf_int",
+  "area": "cli/stats",
+  "method": "CLI ACF/PACF of an Int64 series; NA refused as acf(na.action = na.fail)",
+  "reference": "stats::acf(lag.max = 5); stats::pacf(lag.max = 5) (na.action = na.fail)",
+  "call": "acf(y, lag.max = 5, plot = FALSE); pacf(y, lag.max = 5, plot = FALSE)",
+  "dataset": "validation/datasets/generated/friedman_quade.csv",
+  "datasets": ["validation/datasets/generated/friedman_quade.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "acf": [-0.031137184115523464, -0.040613718411552341, 0.44268953068592054, -0.20216606498194944, -0.21164259927797832],
+    "pacf": [-0.031137184115523464, -0.041623597732931499, 0.44126784089534876, -0.22824891621885196, -0.22145924895452004],
+    "n": 24
+  }
+}
