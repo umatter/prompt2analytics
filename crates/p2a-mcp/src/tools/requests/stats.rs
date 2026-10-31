@@ -21,12 +21,14 @@ pub struct LoglinRequest {
     pub dataset: String,
 
     /// Count column
-    #[schemars(description = "Name of the column containing the cell counts.")]
+    #[schemars(
+        description = "Name of the column containing the cell counts. Rows with a missing count or a missing factor label are dropped (as R's xtabs) and reported."
+    )]
     pub count_column: String,
 
     /// Factor columns that define the contingency table dimensions
     #[schemars(
-        description = "Names of the factor columns that define the contingency table dimensions."
+        description = "Names of the factor columns that define the contingency table dimensions. Levels are ordered as R's factor() (numeric codes numerically)."
     )]
     pub factor_columns: Vec<String>,
 

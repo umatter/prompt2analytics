@@ -78,6 +78,19 @@
       "tolerance": "validation/README.md, n = 6 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and scores exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_stats_loglin",
+      "name": "MCP stats_loglin on a long-form count table with missing labels and counts",
+      "category": "stats",
+      "reference": "stats::loglin(xtabs(cnt ~ f1 + f2 + f3), margin, fit = TRUE) (xtabs drops rows with a missing label or count)",
+      "doc": "validation/stats/loglin.md",
+      "cases": ["stat_loglin_na"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_loglin_na"],
+      "quantities": ["G2 (lrt)", "Pearson X2", "df", "p-values of both (upper chi-square tail)", "table dimensions", "factor levels in R factor order", "total count", "missing"],
+      "tolerance": "validation/README.md, n = 448 counts: statistics 1e-6 relative, p 1e-6 relative + 1e-12 absolute, df, dimensions and total exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

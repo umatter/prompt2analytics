@@ -23,7 +23,8 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64, extract_numeric_matrix,
+    MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64,
+    extract_numeric_matrix, missing_json,
 };
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
@@ -32,6 +33,7 @@ use crate::tools::requests::stats::{
     OneWayAnovaRequest, PowerAnovaTestRequest, PowerPropTestRequest, PowerTTestRequest,
     SeContrastRequest, SplineRequest, TukeyHsdRequest, TwoWayAnovaRequest, WeightedMeanRequest,
 };
+use p2a_core::data::columns::{ColumnRequest, Factor};
 
 use p2a_core::stats::{
     ApproxMethod, ApproxRule, ContrastType, SplineMethod, TableType, approx, correlation_matrix,
@@ -44,125 +46,48 @@ use p2a_core::stats::{
 impl AnalyticsServer {
     /// Log-linear model fitting for contingency tables.
     #[tool(
-        description = "Fit log-linear models to multi-way contingency tables using iterative proportional fitting (IPF). Tests association and independence patterns. Equivalent to R's loglin()."
+        description = "Fit log-linear models to multi-way contingency tables using iterative proportional fitting (IPF). Tests association and independence patterns. Equivalent to R's loglin(). Takes long-form data (one row per cell or observation); rows with missing values are dropped as xtabs does."
     )]
     pub async fn stats_loglin(
         &self,
         Parameters(request): Parameters<LoglinRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-        use std::collections::HashMap;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        // Extract count column
-        let count_col = match df.column(&request.count_column) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Count column '{}' not found: {}",
-                    request.count_column, e
-                ))]));
-            }
-        };
-
-        let counts: Vec<f64> = match count_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_no_null_iter().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Count column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot cast count column: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Extract factor columns and determine dimensions
-        let mut factor_levels: Vec<Vec<String>> = Vec::new();
-        let mut factor_data: Vec<Vec<usize>> = Vec::new();
-
-        for col_name in &request.factor_columns {
-            let col = match df.column(col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Factor column '{}' not found: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-
-            // Get unique levels by casting to string series
-            let str_col = match col.cast(&DataType::String) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot cast factor column '{}' to string: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-
-            let unique_col = match str_col.unique() {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error getting unique values for '{}': {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-
-            let levels: Vec<String> = match unique_col.str() {
-                Ok(s) => s.into_no_null_iter().map(|v| v.to_string()).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error reading unique levels: {}",
-                        e
-                    ))]));
-                }
-            };
-
-            // Map values to indices
-            let level_map: HashMap<String, usize> = levels
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.clone(), i))
-                .collect();
-
-            // Get string values and map to indices
-            let str_series = match str_col.str() {
-                Ok(s) => s,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot read string series: {}",
-                        e
-                    ))]));
-                }
-            };
-
-            let indices: Vec<usize> = str_series
-                .into_no_null_iter()
-                .map(|v| *level_map.get(v).unwrap_or(&0))
-                .collect();
-
-            factor_levels.push(levels);
-            factor_data.push(indices);
+        if request.factor_columns.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "At least one factor column is required.",
+            )]));
         }
 
+        // The count and every factor in one request: a row with a missing count or a missing
+        // label is dropped, as R's xtabs drops it, and the levels follow R's factor() order
+        let names: Vec<&str> = request.factor_columns.iter().map(String::as_str).collect();
+        let cols = match ColumnRequest::new(dataset.df())
+            .numeric(&request.count_column)
+            .factors(&names)
+            .na(NaPolicy::Omit)
+            .extract()
+        {
+            Ok(c) => c,
+            // "Computation stopped: ...", said once
+            Err(e @ p2a_core::EconError::Cancelled(_)) => {
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
+            }
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model failed: {e}"
+                ))]));
+            }
+        };
+        let counts = cols.numeric(&request.count_column);
+        let factors: Vec<&Factor> = names.iter().map(|name| cols.factor(name)).collect();
+        let factor_levels: Vec<&[String]> = factors.iter().map(|f| f.levels.as_slice()).collect();
+
         // Build dimensions
-        let dimensions: Vec<usize> = factor_levels.iter().map(|l| l.len()).collect();
+        let dimensions: Vec<usize> = factors.iter().map(|f| f.n_levels()).collect();
 
         // Size the contingency table with checked arithmetic, then hold it to the budget
         let n_cells = match p2a_core::resource::checked_len(&dimensions, "contingency table") {
@@ -199,6 +124,14 @@ impl AnalyticsServer {
             }
         };
 
+        // Row-major cell strides, last factor fastest (the layout `loglin` expects); every
+        // partial product is at most `n_cells`, which was checked above
+        let mut strides = vec![0usize; dimensions.len()];
+        let mut stride = 1usize;
+        for (s, &d) in strides.iter_mut().zip(&dimensions).rev() {
+            *s = stride;
+            stride *= d;
+        }
         for (i, &count) in counts.iter().enumerate() {
             if i % 65_536 == 0
                 && let Err(e) = p2a_core::resource::checkpoint()
@@ -206,16 +139,12 @@ impl AnalyticsServer {
                 // "Computation stopped: ...", raised while the table is being counted
                 return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
             }
-            // Compute cell index from factor indices
-            let mut cell_idx = 0;
-            let mut multiplier = 1;
-            for dim_idx in (0..factor_data.len()).rev() {
-                cell_idx += factor_data[dim_idx][i] * multiplier;
-                multiplier *= dimensions[dim_idx];
-            }
-            if cell_idx < n_cells {
-                table[cell_idx] += count;
-            }
+            let cell: usize = factors
+                .iter()
+                .zip(&strides)
+                .map(|(f, s)| f.codes[i] as usize * s)
+                .sum();
+            table[cell] += count;
         }
 
         // Determine margins
@@ -237,7 +166,7 @@ impl AnalyticsServer {
         };
 
         // Build JSON output
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "model": {
                 "margins": result.margins,
                 "factor_columns": request.factor_columns,
@@ -248,14 +177,14 @@ impl AnalyticsServer {
             },
             "goodness_of_fit": {
                 "likelihood_ratio_test": {
-                    "statistic": format!("{:.4}", result.lrt),
+                    "statistic": result.lrt,
                     "df": result.df,
-                    "p_value": format!("{:.4}", result.p_value_lrt)
+                    "p_value": result.p_value_lrt
                 },
                 "pearson_chi_squared": {
-                    "statistic": format!("{:.4}", result.pearson),
+                    "statistic": result.pearson,
                     "df": result.df,
-                    "p_value": format!("{:.4}", result.p_value_pearson)
+                    "p_value": result.p_value_pearson
                 }
             },
             "convergence": {
@@ -275,6 +204,7 @@ impl AnalyticsServer {
             ),
             "references": "Haberman (1972). Algorithm AS 51; Agresti (2002). Categorical Data Analysis."
         });
+        insert_missing(&mut json_output, cols.missing());
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&json_output).unwrap(),
@@ -2157,6 +2087,13 @@ impl AnalyticsServer {
     }
 }
 
+/// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped.
+fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
+    if let Some(m) = missing_json(missing) {
+        output["missing"] = m;
+    }
+}
+
 /// Checks a `side x side` matrix against the `table_cells` budget of the installed limits (a
 /// product past `u64` counts as `u64::MAX`, so it passes only when the budget is unlimited).
 fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
@@ -2191,6 +2128,7 @@ mod tests {
     use crate::tools::common::test_support::{hosted_with, server_with, text};
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
+    use p2a_validation::{Case, Check, Tol};
 
     /// One unique string level per row and column, and a count column `n` = 1.0.
     fn ids(n: usize, cols: &[&str]) -> DataFrame {
@@ -2394,5 +2332,167 @@ mod tests {
             into_row_major(m.reversed_axes()),
             vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
         );
+    }
+
+    /// The R case `id`, a runtime and a server holding its dataset under the dataset's file
+    /// stem (returned as the last element).
+    fn case_server(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer, String) {
+        let case = Case::load(id);
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let name = std::path::Path::new(&case.dataset)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let (rt, server) = server_with(vec![(name.as_str(), df)]);
+        (case, rt, server, name)
+    }
+
+    /// The JSON of a successful tool result.
+    fn json_of(r: &CallToolResult) -> serde_json::Value {
+        assert_ne!(r.is_error, Some(true), "{}", text(r));
+        serde_json::from_str(&text(r)).unwrap()
+    }
+
+    /// The text of a successful tool result.
+    fn ok_text(r: &CallToolResult) -> String {
+        assert_ne!(r.is_error, Some(true), "{}", text(r));
+        text(r)
+    }
+
+    /// The text of a tool error.
+    fn err_text(r: &CallToolResult) -> String {
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "expected a tool error, got:\n{}",
+            text(r)
+        );
+        text(r)
+    }
+
+    /// A JSON number as f64 (NaN when it is not a number).
+    fn num(v: &serde_json::Value) -> f64 {
+        v.as_f64().unwrap_or(f64::NAN)
+    }
+
+    fn nums(v: &serde_json::Value) -> Vec<f64> {
+        v.as_array()
+            .unwrap_or_else(|| panic!("not an array: {v}"))
+            .iter()
+            .map(num)
+            .collect()
+    }
+
+    /// Handlers that format numbers as strings ("38.019531").
+    fn str_num(v: &serde_json::Value) -> f64 {
+        v.as_str()
+            .unwrap_or_else(|| panic!("not a string: {v}"))
+            .parse()
+            .unwrap()
+    }
+
+    /// A request deserialised from JSON, as the server does.
+    fn req<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Parameters<T> {
+        Parameters(serde_json::from_value(v).unwrap())
+    }
+
+    /// The numbers on the first line whose first whitespace token is `label` (significance
+    /// stars and other words skipped). Panics with the text when no such line exists.
+    fn row(text: &str, label: &str) -> Vec<f64> {
+        let line = text
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(label))
+            .unwrap_or_else(|| panic!("no line starting with {label:?} in:\n{text}"));
+        line.split_whitespace()
+            .skip(1)
+            .filter_map(|t| t.parse::<f64>().ok())
+            .collect()
+    }
+
+    /// `{"n_total", "n_used", "n_dropped", "by_column"}` as the tools report it.
+    fn summary(n_total: usize, n_used: usize, by_column: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"n_total": n_total, "n_used": n_used,
+                           "n_dropped": n_total - n_used, "by_column": by_column})
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_loglin_na() {
+        // TOOL-8: a null label became the level "" (a 4 x 3 x 2 table, df 17) and null counts
+        // were read as 0. R: loglin(xtabs(cnt ~ f1 + f2 + f3)), xtabs dropping those rows.
+        let (case, rt, server, name) = case_server("stat_loglin_na");
+        for (k, margins) in [
+            ("indep", None),
+            ("m12_3", Some(serde_json::json!([[0, 1], [2]]))),
+            ("m12_13", Some(serde_json::json!([[0, 1], [0, 2]]))),
+        ] {
+            let mut a = serde_json::json!({"dataset": name, "count_column": "cnt",
+                                           "factor_columns": ["f1", "f2", "f3"]});
+            if let Some(m) = margins {
+                a["margins"] = m;
+            }
+            let v = json_of(&rt.block_on(server.stats_loglin(req(a))).unwrap());
+            let (g, model, missing) = (&v["goodness_of_fit"], &v["model"], &v["missing"]);
+            Check::new(&case)
+                .scalar(
+                    &format!("{k}_lrt"),
+                    num(&g["likelihood_ratio_test"]["statistic"]),
+                    Tol::stat(448),
+                )
+                .scalar(
+                    &format!("{k}_pearson"),
+                    num(&g["pearson_chi_squared"]["statistic"]),
+                    Tol::stat(448),
+                )
+                .scalar(
+                    &format!("{k}_df"),
+                    num(&g["likelihood_ratio_test"]["df"]),
+                    Tol::exact(),
+                )
+                .scalar(
+                    &format!("{k}_p_lrt"),
+                    num(&g["likelihood_ratio_test"]["p_value"]),
+                    Tol::p_value(448),
+                )
+                .scalar(
+                    &format!("{k}_p_pearson"),
+                    num(&g["pearson_chi_squared"]["p_value"]),
+                    Tol::p_value(448),
+                )
+                .scalar("total", num(&model["total_count"]), Tol::exact())
+                .vector("dims", &nums(&model["dimensions"]), Tol::exact())
+                .scalar("n_total", num(&missing["n_total"]), Tol::exact())
+                .scalar("n_used", num(&missing["n_used"]), Tol::exact())
+                .scalar(
+                    "n_missing_cnt",
+                    num(&missing["by_column"]["cnt"]),
+                    Tol::exact(),
+                )
+                .scalar(
+                    "n_missing_f1",
+                    num(&missing["by_column"]["f1"]),
+                    Tol::exact(),
+                )
+                .scalar(
+                    "n_missing_f2",
+                    num(&missing["by_column"]["f2"]),
+                    Tol::exact(),
+                )
+                .finish();
+            assert_eq!(
+                model["factor_levels"],
+                serde_json::json!([["a", "b", "c"], ["2", "10"], ["x", "y"]])
+            );
+            assert_eq!(
+                v["missing"],
+                summary(16, 13, serde_json::json!({"cnt": 1, "f1": 1, "f2": 1}))
+            );
+        }
+        let e = err_text(
+            &rt.block_on(server.stats_loglin(req(serde_json::json!(
+                {"dataset": name, "count_column": "f1", "factor_columns": ["f2", "f3"]}))))
+                .unwrap(),
+        );
+        assert!(e.contains("Column 'f1' contains non-numeric values"), "{e}");
     }
 }
