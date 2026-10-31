@@ -12,7 +12,9 @@
 //! - And more
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{MissingSummary, check_named_budget, missing_json};
+use crate::tools::common::{
+    MissingSummary, NaPolicy, check_named_budget, missing_json, numeric_columns,
+};
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
@@ -1295,7 +1297,7 @@ impl AnalyticsServer {
 
     /// Cochran-Armitage test for trend in proportions.
     #[tool(
-        description = "Test for trend in proportions across ordered groups (Cochran-Armitage test). Tests whether proportions increase or decrease linearly with group scores. Commonly used in dose-response studies. Returns chi-squared statistic with 1 df and p-value."
+        description = "Test for trend in proportions across ordered groups (Cochran-Armitage test). Tests whether proportions increase or decrease linearly with group scores. Commonly used in dose-response studies. Returns chi-squared statistic with 1 df and p-value. Successes and trials are whole non-negative counts, one row per group; a group with a missing count is dropped and reported under missing, and the other groups keep their scores."
     )]
     pub async fn hypothesis_prop_trend_test(
         &self,
@@ -1307,56 +1309,43 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-        let successes: Vec<usize> = match df.column(&request.successes) {
-            Ok(col) => {
-                if let Ok(ca) = col.u64() {
-                    ca.into_no_null_iter().map(|v| v as usize).collect()
-                } else if let Ok(ca) = col.i64() {
-                    ca.into_no_null_iter().map(|v| v as usize).collect()
-                } else if let Ok(ca) = col.f64() {
-                    ca.into_no_null_iter().map(|v| v as usize).collect()
-                } else {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' must be numeric (integers)",
-                        request.successes
-                    ))]));
-                }
-            }
+        // A group (row) with a missing count is dropped from both columns
+        let names = [request.successes.as_str(), request.trials.as_str()];
+        let cols = match numeric_columns(dataset, &names, NaPolicy::Omit) {
+            Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found: {}",
-                    request.successes, e
+                    "Trend test failed: {e}"
                 ))]));
             }
         };
-
-        let trials: Vec<usize> = match df.column(&request.trials) {
-            Ok(col) => {
-                if let Ok(ca) = col.u64() {
-                    ca.into_no_null_iter().map(|v| v as usize).collect()
-                } else if let Ok(ca) = col.i64() {
-                    ca.into_no_null_iter().map(|v| v as usize).collect()
-                } else if let Ok(ca) = col.f64() {
-                    ca.into_no_null_iter().map(|v| v as usize).collect()
-                } else {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' must be numeric (integers)",
-                        request.trials
-                    ))]));
-                }
+        let mut counts = Vec::with_capacity(names.len());
+        for name in names {
+            match whole_counts(name, cols.numeric(name), cols.rows()) {
+                Ok(c) => counts.push(c),
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
             }
-            Err(e) => {
+        }
+
+        // Each kept group keeps its own score: the user's score of its dataset row, or by
+        // default its row position (1, 2, 3, ...) when a group was dropped
+        let n_total = cols.missing().n_total;
+        let scores = match &request.scores {
+            Some(s) if s.len() != n_total => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found: {}",
-                    request.trials, e
+                    "Trend test failed: scores must have one value per dataset row ({n_total}); \
+                     got {}",
+                    s.len()
                 ))]));
             }
+            Some(s) => Some(cols.rows().iter().map(|&r| s[r]).collect()),
+            None if cols.missing().is_empty() => None,
+            None => Some(cols.rows().iter().map(|&r| (r + 1) as f64).collect()),
         };
 
-        match run_prop_trend_test(&successes, &trials, request.scores.clone()) {
+        match run_prop_trend_test(&counts[0], &counts[1], scores) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "test": result.method,
                     "statistic": result.statistic,
                     "df": result.df,
@@ -1369,6 +1358,7 @@ impl AnalyticsServer {
                         "No significant trend in proportions (p >= 0.05)"
                     }
                 });
+                insert_missing(&mut json_output, cols.missing());
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -1640,6 +1630,37 @@ impl AnalyticsServer {
             ))])),
         }
     }
+}
+
+/// The values of the count column `name` (the kept `rows` of the dataset, 0-based) as `usize`.
+/// Each must be a finite, non-negative whole number of at most 2^53, the largest integer an
+/// `f64` holds exactly, and their total must fit in a `usize`. The error names the column and
+/// the first offending dataset row (1-based).
+fn whole_counts(name: &str, values: &[f64], rows: &[usize]) -> Result<Vec<usize>, String> {
+    const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
+    let mut counts = p2a_core::resource::try_with_capacity(values.len(), "count values")
+        .map_err(|e| format!("Trend test failed: {e}"))?;
+    let mut total = 0usize;
+    for (&v, &row) in values.iter().zip(rows) {
+        let whole = v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= MAX_EXACT;
+        let count = usize::try_from(v as u64)
+            .ok()
+            .filter(|_| whole)
+            .ok_or_else(|| {
+                format!(
+                    "Column '{name}' must hold non-negative whole numbers (counts); row {} is {v}",
+                    row + 1
+                )
+            })?;
+        total = total.checked_add(count).ok_or_else(|| {
+            format!(
+                "Trend test failed: the counts of column '{name}' sum past {}",
+                usize::MAX
+            )
+        })?;
+        counts.push(count);
+    }
+    Ok(counts)
 }
 
 /// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped.
@@ -2853,6 +2874,123 @@ mod tests {
         assert_eq!(
             v["missing"],
             summary(5000, 3, serde_json::json!({"n3_124": 4997}))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_prop_trend_test_na() {
+        // TOOL-17/X-2: the missing success count of group 4 was read as 0 (X-squared 37.388 on
+        // scores 1..7). R refuses the data; the tool drops the group and keeps the other
+        // groups' scores: prop.trend.test(x[cc], n[cc], score = which(cc)).
+        let (case, server, name) = case_server("stat_prop_trend_na").await;
+        let call = |extra: serde_json::Value| {
+            let mut args = serde_json::json!({"dataset": name, "successes": "successes",
+                                              "trials": "trials"});
+            if let serde_json::Value::Object(m) = extra {
+                args.as_object_mut().unwrap().extend(m);
+            }
+            let server = &server;
+            async move { hyp(server, "prop_trend_test", args).await }
+        };
+        let v = json_of(&call(serde_json::json!({})).await);
+        Check::new(&case)
+            .scalar("chisq", num(&v["statistic"]), Tol::stat(6))
+            .scalar("df", num(&v["df"]), Tol::exact())
+            .scalar("p", num(&v["p_value"]), Tol::p_value(6))
+            .vector("scores", &nums(&v["scores"]), Tol::exact())
+            .scalar("n_used", num(&v["missing"]["n_used"]), Tol::exact())
+            .scalar("n_total", num(&v["missing"]["n_total"]), Tol::exact())
+            .finish();
+        assert_eq!(
+            v["missing"],
+            serde_json::json!({"n_total": 7, "n_used": 6, "n_dropped": 1,
+                               "by_column": {"successes": 1}})
+        );
+        // user scores, one per dataset row; the dropped group's score goes with it
+        let d = json_of(&call(serde_json::json!({"scores": [0, 1, 2, 4, 8, 16, 32]})).await);
+        Check::new(&case)
+            .scalar("dose_chisq", num(&d["statistic"]), Tol::stat(6))
+            .scalar("dose_p", num(&d["p_value"]), Tol::p_value(6))
+            .vector("dose_scores", &nums(&d["scores"]), Tol::exact())
+            .finish();
+        let e = err_text(&call(serde_json::json!({"scores": [0, 1, 2, 8, 16, 32]})).await);
+        assert!(
+            e.contains("scores must have one value per dataset row (7)"),
+            "{e}"
+        );
+        // Int32 counts give the same result
+        let mut df = server
+            .datasets
+            .read()
+            .await
+            .get(&name)
+            .unwrap()
+            .df()
+            .clone();
+        for c in ["successes", "trials"] {
+            let cast = df.column(c).unwrap().cast(&DataType::Int32).unwrap();
+            df.with_column(cast).unwrap();
+        }
+        server
+            .datasets
+            .write()
+            .await
+            .insert("prop_trend_i32".into(), p2a_core::data::Dataset::new(df));
+        let i = json_of(
+            &hyp(
+                &server,
+                "prop_trend_test",
+                serde_json::json!({"dataset": "prop_trend_i32", "successes": "successes",
+                                   "trials": "trials"}),
+            )
+            .await,
+        );
+        assert_eq!(i["statistic"], v["statistic"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mcp_hypothesis_prop_trend_test_refuses_non_counts() {
+        // TOOL-17: a negative count wrapped to a huge usize (debug builds overflowed the sums)
+        // and a fractional count was truncated. Both are refused with the column and the row.
+        let df = p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/prop_trend_na.csv",
+        ))
+        .unwrap();
+        let server = AnalyticsServer::new();
+        server
+            .datasets
+            .write()
+            .await
+            .insert("d".into(), p2a_core::data::Dataset::new(df));
+        let e = err_text(
+            &hyp(
+                &server,
+                "prop_trend_test",
+                serde_json::json!({"dataset": "d", "successes": "successes",
+                                   "trials": "trials_neg"}),
+            )
+            .await,
+        );
+        assert!(
+            e.contains(
+                "Column 'trials_neg' must hold non-negative whole numbers (counts); row 5 is -1"
+            ),
+            "{e}"
+        );
+        let e = err_text(
+            &hyp(
+                &server,
+                "prop_trend_test",
+                serde_json::json!({"dataset": "d", "successes": "successes_frac",
+                                   "trials": "trials"}),
+            )
+            .await,
+        );
+        assert!(
+            e.contains(
+                "Column 'successes_frac' must hold non-negative whole numbers (counts); row 2 is 5.5"
+            ),
+            "{e}"
         );
     }
 }

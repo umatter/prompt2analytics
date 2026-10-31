@@ -65,6 +65,19 @@
       "tolerance": "counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_prop_trend_test",
+      "name": "MCP hypothesis_prop_trend_test on integer count columns with a missing group",
+      "category": "stats",
+      "reference": "stats::prop.trend.test on the complete groups, each group keeping its score",
+      "doc": "validation/stats/new_methods.md",
+      "cases": ["stat_prop_trend_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_prop_trend_test_na"],
+      "quantities": ["X-squared", "df", "p", "scores used (default and user scores)", "missing"],
+      "tolerance": "validation/README.md, n = 6 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and scores exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -246,6 +246,47 @@ prop.trend.test(smokers, patients)
 
 **Rust test**: `stats::proptrendtest::tests::test_prop_trend_basic` (`crates/p2a-core/src/stats/proptrendtest.rs`). It uses other data (5, 10, 15, 20 successes out of 50 each) and checks p < 0.05 and df = 1. Not R-pinned.
 
+#### MCP tool on count columns with a missing group (R-pinned)
+
+`hypothesis_prop_trend_test` reads its two count columns through the shared extractor. A group
+(row) with a missing count is dropped from both columns and reported under `missing`; every
+other group keeps its score: its row position (1, 2, 3, ...) by default, or the user's score of
+its dataset row (`scores` must have one value per dataset row). R's `prop.trend.test` refuses
+such data ("0 (non-NA) cases"), so the reference is `prop.trend.test` on the complete groups
+with those scores. A count that is not a non-negative whole number is refused with the column
+and the 1-based row ("Column 'trials_neg' must hold non-negative whole numbers (counts); row 5
+is -1"); every integer dtype is accepted.
+
+```r
+# case stat_prop_trend_na, validation/r/cases/stats_mcp.R
+# (validation/datasets/generated/prop_trend_na.csv: 7 groups; successes missing in group 4)
+cc <- complete.cases(d$successes, d$trials)          # prop.trend.test(d$successes, d$trials): "0 (non-NA) cases"
+pt <- prop.trend.test(d$successes[cc], d$trials[cc], score = which(cc))
+pd <- prop.trend.test(d$successes[cc], d$trials[cc], score = d$dose[cc])
+
+# R 4.3.3 gives:
+# default scores 1, 2, 3, 5, 6, 7: X-squared = 33.9806387718953, df = 1, p-value = 5.56632139655329e-09
+# dose scores 0, 1, 2, 8, 16, 32: X-squared = 30.58249222660634, p-value = 3.199680918972898e-08
+# groups used: 6 of 7
+```
+
+Before, the handler cast the columns to `usize` with `into_no_null_iter`: the missing count of
+group 4 became 0 (X-squared 37.388 on scores 1..7), a negative count wrapped and overflowed the
+sums (a debug-build panic), a fractional count was truncated and Int32 columns were refused.
+
+**MCP tests** (`crates/p2a-mcp/src/tools/handlers/hypothesis.rs`):
+- `tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_prop_trend_test_na`
+  (X-squared, df, p and the scores used, with the default and the dose scores; `missing`; a
+  `scores` vector of the wrong length is refused; Int32 counts give the same statistic)
+- `tools::handlers::hypothesis::tests::test_mcp_hypothesis_prop_trend_test_refuses_non_counts`
+  (not R-pinned: a negative and a fractional count are refused with the column and the row)
+
+**Tolerance:** `validation/README.md`, n = 6 (< 100): X-squared 1e-5 relative (`Tol::stat`), p
+1e-5 relative plus 1e-12 absolute (`Tol::p_value`); df, scores and counts exact.
+
+**Status:** R-pinned (registry `validation/methods/mcp_stats.json`, id
+`mcp_hypothesis_prop_trend_test`).
+
 ## Known Differences
 
 ### IQR/mad at Large n

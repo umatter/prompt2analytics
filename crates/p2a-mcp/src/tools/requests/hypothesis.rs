@@ -118,16 +118,20 @@ pub struct PropTrendTestRequest {
     pub dataset: String,
 
     /// Column with number of successes per group
-    #[schemars(description = "Name of column containing number of successes in each group.")]
+    #[schemars(
+        description = "Name of column containing number of successes in each group. Whole non-negative counts, one row per group; a group with a missing count is dropped and reported."
+    )]
     pub successes: String,
 
     /// Column with number of trials per group
-    #[schemars(description = "Name of column containing number of trials in each group.")]
+    #[schemars(
+        description = "Name of column containing number of trials in each group. Whole non-negative counts, one row per group; a group with a missing count is dropped and reported."
+    )]
     pub trials: String,
 
     /// Optional scores for the trend
     #[schemars(
-        description = "Optional scores for each group. If omitted, uses 1, 2, 3, ... (equally spaced)."
+        description = "Optional score per dataset row (one value for every row; the scores of dropped groups are dropped with them). If omitted, uses each group's row position 1, 2, 3, ..."
     )]
     pub scores: Option<Vec<f64>>,
 }

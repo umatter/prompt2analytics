@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "stat_prop_trend_na",
+  "area": "stats/proportions",
+  "method": "prop.trend.test on integer count columns with a missing group",
+  "reference": "stats::prop.trend.test on the complete groups, score = the groups' own scores",
+  "call": "prop.trend.test(successes[cc], trials[cc], score = which(cc) | dose[cc])",
+  "dataset": "validation/datasets/generated/prop_trend_na.csv",
+  "datasets": ["validation/datasets/generated/prop_trend_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "chisq": 33.9806387718953,
+    "df": 1,
+    "p": 5.5663213965532897e-09,
+    "scores": [1, 2, 3, 5, 6, 7],
+    "dose_chisq": 30.582492226606341,
+    "dose_p": 3.1996809189728982e-08,
+    "dose_scores": [0, 1, 2, 8, 16, 32],
+    "n_used": 6,
+    "n_total": 7
+  }
+}
