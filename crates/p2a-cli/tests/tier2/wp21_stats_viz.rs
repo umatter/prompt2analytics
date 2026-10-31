@@ -570,6 +570,10 @@ fn test_cli_acf_refuses_missing() {
             e.contains("Column 'y_na' contains 1 missing value(s)") && e.contains("na.fail"),
             "{args:?}: {e}"
         );
+        assert!(
+            e.contains("impute rather than drop") && e.contains("--columns y_na"),
+            "{args:?}: {e}"
+        );
     }
 }
 

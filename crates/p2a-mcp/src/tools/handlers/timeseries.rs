@@ -1979,15 +1979,16 @@ fn arima_spec(
     }
 }
 
-/// A tool error `prefix: err`; for a missing value, with how to fill the gap.
+/// A tool error `prefix: err`; for a missing value, with how to fill the gap. The hint
+/// narrows the generic "Drop or impute them first." of the missing-value error to imputing.
 fn ts_error(prefix: &str, err: &dyn std::fmt::Display) -> CallToolResult {
     let message = err.to_string();
     let mut text = format!("{prefix}: {message}");
     if message.contains("missing value") {
         text.push_str(
-            "\nHint: p2a's time-series methods need a complete series. Fill the gaps first \
-             (for example munge_fill_na with strategy \"forward\"); dropping a value would \
-             splice the series.",
+            "\nHint: for a time series, impute rather than drop: p2a's time-series methods \
+             need a complete series, and dropping a value would splice it. Fill the gaps first \
+             (for example munge_fill_na with strategy \"forward\").",
         );
     }
     CallToolResult::error(vec![Content::text(text)])
@@ -2523,7 +2524,9 @@ mod tests {
         let t = text_of(&r);
         assert_eq!(r.is_error, Some(true), "{t}");
         assert!(
-            t.contains("Column 'a_na' contains 2 missing value(s)") && t.contains("munge_fill_na"),
+            t.contains("Column 'a_na' contains 2 missing value(s)")
+                && t.contains("munge_fill_na")
+                && t.contains("impute rather than drop"),
             "{t}"
         );
         let r = fit(
@@ -2621,7 +2624,8 @@ mod tests {
             assert_eq!(gap.is_error, Some(true), "{tool}: {t}");
             assert!(
                 t.contains("Column 'a_na' contains 2 missing value(s)")
-                    && t.contains("munge_fill_na"),
+                    && t.contains("munge_fill_na")
+                    && t.contains("impute rather than drop"),
                 "{tool}: {t}"
             );
         }

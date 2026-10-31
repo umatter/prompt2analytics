@@ -688,14 +688,16 @@ fn execute_arima(
     Ok(())
 }
 
-/// `prefix: err`, plus how to fill the gap when the error is about missing values.
+/// `prefix: err`, plus how to fill the gap when the error is about missing values. The hint
+/// narrows the generic "Drop or impute them first." of the missing-value error to imputing.
 fn ts_error_message(prefix: &str, err: &dyn std::fmt::Display) -> String {
     let message = err.to_string();
     let mut text = format!("{prefix}: {message}");
     if message.contains("missing value") {
         text.push_str(
-            " Fill the gaps first (for example: p2a munge fill-na <dataset> --method forward \
-             --columns <column>); dropping a value would splice the series.",
+            " For a time series, impute rather than drop: fill the gaps first (for example: p2a \
+             munge fill-na <dataset> --method forward --columns <column>); dropping a value \
+             would splice the series.",
         );
     }
     text

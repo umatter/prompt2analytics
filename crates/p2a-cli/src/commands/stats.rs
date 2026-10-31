@@ -839,9 +839,10 @@ fn series_column(
     match column_values(dataset, col, NaPolicy::Fail, command) {
         Ok((values, _)) => Ok(values),
         Err(e @ EconError::NullValues { .. }) => Err(format!(
-            "{e} ACF and PACF need a complete series, as R's acf/pacf (na.action = na.fail): \
-             fill the gaps first (for example: p2a munge fill-na <dataset> --method forward \
-             --columns <column>); dropping a value would splice the series."
+            "{e} ACF and PACF need a complete series, as R's acf/pacf (na.action = na.fail). For \
+             a time series, impute rather than drop: fill the gaps first (for example: p2a \
+             munge fill-na <dataset> --method forward --columns {col}); dropping a value would \
+             splice the series."
         )),
         Err(e) => Err(e.to_string()),
     }
