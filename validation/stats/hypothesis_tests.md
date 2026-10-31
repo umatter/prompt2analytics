@@ -238,6 +238,47 @@ summary(aov(y ~ factor_a * factor_b, data = data))
 | F Factor B | 468.75 | 468.75 | 0.1 | ✅ |
 | F Interaction | 18.75 | 18.75 | 0.1 | ✅ |
 
+## Missing cells and integer columns through MCP and the CLI (X-2, X-8)
+
+The reviewer's repro of findings X-2 and X-8 is a committed R case: `validation/r/cases/na_acceptance.R`,
+case `na_x2_x8_reviewer`, dataset `validation/datasets/generated/na_reviewer.csv` (8 rows: the
+reviewer's `x` and `y` with one empty cell each, the integer group `g` and score `i`, plus the integer
+survival columns `time` and `event`). The rule: empty cells are missing and are dropped as R drops NA,
+with a note; integer columns are numeric. The MCP tests load the CSV with `create_dataset`, as the
+reviewer did; the CLI tests with `data load`.
+
+| Quantity | R | p2a before Tier 2 |
+|---|---|---|
+| one-sample t, df (`t.test(x)`) | 19.224879776549294, 6 | 6.585420425150713, 7 (the empty cell read as 0) |
+| mean, 95% CI | 6.4428571428571431; [5.6228206234443352, 7.26289366226995] | mean 5.6375 |
+| paired t, df, p, mean difference | 14.696938456699081, 5, 2.6355114205889999e-05, 1.2 | t 0.8849631314399664, df 7 |
+| Welch t, df, p | 2.4211420066066545, 11.986295516630276, 0.032271219541670018 | t 0.8822470125695193, df 13.60729227134347 |
+| `cor.test(x, y)` r, t, df, p | 0.9782906634777736, 9.4412517531339581, 4, 0.0007018271843026733 | r 0.006219360234733851 on 8 pairs |
+| `aov(y ~ factor(g))` F, df, p, rows | 0.085835141593650022, (1, 5), 0.7813098377313259, 7 | F 0.5994334277620387 on (1, 6), N = 8 |
+| `t.test(i)` t, df, p, mean (Int64) | 7.5055534994651349, 7, 0.00013666401542355999, 6.5 | refused: "Column 'i' must be numeric." (MCP), "expected `Float64`, got `i64`" (CLI) |
+| `aov(i ~ factor(g))` F, df, p | 0.30000000000000027, (1, 6), 0.60364505651013611 | refused as non-numeric |
+| `wilcox.test(i)` V, exact p | 36, 0.0078125000000000017 | refused as non-numeric |
+| `cor.test(i, y)` r, df, p | 0.45289724238230478, 5, 0.30750148504153196 | refused: "expected `Float64`, got `i64`" |
+| Kaplan-Meier S(t) at 3, 5, 7, 9, 15 (Int64 time and event) | 0.875, 0.72916666666666674, 0.58333333333333337, 0.3888888888888889, 0; median 9 | refused: "Column 'time' contains non-numeric values" |
+
+**Tests:**
+- `p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x2_reviewer_missing_cells` (one-sample,
+  paired and Welch t and df, `cor.test`, one-way ANOVA, rows used, the `Missing values:` lines)
+- `p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x8_reviewer_integer_columns` (t, ANOVA,
+  Wilcoxon, `cor.test` and the Kaplan-Meier median on the Int64 columns)
+- `p2a-cli::tier2::wp22_acceptance::test_validate_cli_x2_reviewer_missing_cells` (`stats t-test-one`,
+  `stats t-test-paired`: JSON values, `missing` and the `Note:` line)
+- `p2a-cli::tier2::wp22_acceptance::test_validate_cli_x8_reviewer_integer_columns` (`stats
+  t-test-one` on `i`, `survival km` with Int64 `time` and `event`: S(t), SE, numbers at risk and
+  events, median)
+
+**Tolerance:** the MCP text at its printed precision (t to 6 decimals, df to 2, the ANOVA table to
+4, the Kaplan-Meier median to 3); the CLI JSON at `validation/README.md`'s n < 100 tolerances
+(means `Tol::coef`, statistics and SEs `Tol::stat`/`Tol::se`, p-values `Tol::p_value`); df and
+counts exact.
+
+**Status:** R-pinned (registry `validation/methods/na_acceptance.json`, id `na_acceptance`).
+
 ---
 
 ## Numerical Precision Summary

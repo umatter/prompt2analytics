@@ -13,6 +13,26 @@
       "tolerance": "counts: exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "na_acceptance",
+      "name": "Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data)",
+      "category": "interfaces",
+      "reference": "stats::t.test, cor.test, aov (na.omit), wilcox.test; survival::survfit (conf.type = 'log')",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["na_x2_x8_reviewer"],
+      "tests": [
+        "p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x2_reviewer_missing_cells",
+        "p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x8_reviewer_integer_columns",
+        "p2a-cli::tier2::wp22_acceptance::test_validate_cli_x2_reviewer_missing_cells",
+        "p2a-cli::tier2::wp22_acceptance::test_validate_cli_x8_reviewer_integer_columns"
+      ],
+      "quantities": ["t and df (one-sample, paired, Welch) with empty cells, and the rows used", "cor.test r, t, df, p and pairs used",
+                     "one-way ANOVA F, p, df, SS and rows used", "t, ANOVA, Wilcoxon V and exact p, cor.test on Int64 columns",
+                     "Kaplan-Meier S(t), SE, numbers at risk and events, and median with Int64 time and status"],
+      "tolerance": "MCP text at print precision (t 6 decimals, df 2, ANOVA 4, KM median 3); JSON values at validation/README.md n < 100 (means 1e-6, statistics and SEs 1e-5 relative, p-values 1e-5 relative or 1e-12 absolute); df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
