@@ -77,6 +77,13 @@ Registered tests (registry entry `panel_unit_root_extraction` in
   ADF taus against `unit_tau` (`Tol::stat(690)`), `n_panels`, `avg_t` and
   `n_rows_dropped` exactly; the gap warning, the missing-value note as the last text line,
   and the numeric ids `id` giving the same taus bit for bit.
+- `tier2::wp19_dynamic_panel::test_validate_mcp_panel_unit_root_text_ids` (p2a-mcp): the
+  `panel_unit_root` text on the text ids, `n_panels`, `avg_t` (1 decimal) and
+  `n_rows_dropped` from the printed lines, and the gap warning;
+- `tier2::wp19_dynamic_panel::test_validate_cli_panel_unit_root_text_ids` (p2a-cli): `p2a
+  panel unit-root -F json` (`unit_statistics` against `unit_tau`, `n_panels`,
+  `avg_time_periods`, `missing.n_dropped`, the gap warning) and the text's `Warnings:`
+  block.
 
 Property tests, not registered as R-pinned (no value is compared with R; they load
 `validation/datasets/generated/ab_balanced.csv` or `ab_common_gap.csv` without a case):
