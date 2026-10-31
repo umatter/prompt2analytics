@@ -220,20 +220,24 @@ families! {
 /// Hosted [`Limits::arima_fit_work`]: the slowest fit it allows is meant to take about a
 /// quarter of the hosted 60 s deadline, so that a slower or shared CPU still finishes it in time.
 ///
-/// The value was measured on the optimiser the ARIMA tools used before the in-house fit (the
-/// `arima` crate's L-BFGS), on a laptop CPU (Intel Core 7 150U) under heavy load from parallel
-/// builds: at that optimiser's bound of 7,961 evaluations a work unit ([`arima_fit_work`]) cost
-/// at most about 40 us, for an MA-only fit on the slower cores (8 to 25 us for other orders), so
-/// 400,000 units took about 16 s on a release build. It allows ARIMA(1,1,1) on 15,384
-/// observations, ARIMA(0,1,0) on 40,000 and the `model_order` caps p = d = q = 20 on 214. The
-/// in-house Levenberg-Marquardt fit's work grows with the same count ([`arima_fit_work`]); the
-/// value stays until it is measured on that fit.
+/// Measured on a release build of the in-house Levenberg-Marquardt fit on a laptop CPU (Intel
+/// Core 7 150U), one fit at a time pinned to one of its slower cores, at the longest series the
+/// value allows for twelve order and option settings (ARIMA(1,1,1) with and without drift,
+/// ARIMA(0,1,0) with and without drift, MA-only, AR-only and mixed orders, and the
+/// `model_order` caps p = d = q = 20) on six kinds of series (noise, a random walk, a nearly
+/// non-invertible MA, a nearly non-stationary AR, sparse outliers and a sine): a work unit
+/// ([`arima_fit_work`]) cost at most about 1.0 us, in fits that ran all 200 iterations, so the
+/// slowest fit measured took about 7.5 s. A fit makes at most about twice the passes of such a
+/// fit (each rejected trial step at least doubles the damping, each accepted step lowers it at
+/// most threefold, and the damping stays between its bounds), so the slowest fit the value
+/// allows takes about 15 s. It allows ARIMA(1,1,1) on 288,461 observations, ARIMA(0,1,0) on
+/// 750,000 and the `model_order` caps p = d = q = 20 on 4,012.
 ///
 /// The margin assumes the default 60 s deadline: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a
 /// throttled shared CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. The fit
 /// checks the call's budget every iteration and every 4,096 rows of a pass, so a fit that a
 /// higher value allows and that runs past the deadline is cancelled at its next check.
-const ARIMA_FIT_WORK_HOSTED: u64 = 400_000;
+const ARIMA_FIT_WORK_HOSTED: u64 = 7_500_000;
 
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
 /// (`P2A_MAX_ALLOC_MB`), so that one tree-ensemble fit grows the process by about as much as one
@@ -2565,7 +2569,7 @@ mod tests {
         assert_eq!(h.session_db_bytes, Some(16 * 1024 * 1024));
         assert!(!h.sql_freeform);
         assert_eq!(h.spatial_links, Some(2_000_000));
-        assert_eq!(h.arima_fit_work, Some(400_000));
+        assert_eq!(h.arima_fit_work, Some(7_500_000));
         assert_eq!(h.ensemble_bytes, Some(256 * 1024 * 1024));
         assert_eq!(
             (h.db_result_rows, h.db_result_bytes),

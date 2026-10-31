@@ -609,7 +609,7 @@ Named budgets:
 | `response_bytes` | one tool's text and image output | 16 MiB | none |
 | `session_disk_bytes` | bytes in one session's data directory | 64 MiB | none |
 | `spatial_links` | total links of a `spatial_neighbors` structure | 2,000,000 | none |
-| `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 400,000 | none |
+| `arima_fit_work` | work of an ARIMA fit, observations × ((p + q + 3)² + d), checked before the fit starts; while set, a series holding a nonzero value below 1e-100 is refused as well | 7,500,000 | none |
 | `ensemble_bytes` | memory a `ml_causal_forest` or `ml_bart_causal` fit may hold at once (its trees, bootstrap draws and working copies of the data), as the core's bound predicts it from the rows and the settings, checked before the fit starts | 256 MiB | none |
 | `db_result_rows` | rows a SQL tool keeps | 100,000 | none |
 | `db_result_bytes` | estimated bytes a SQL tool keeps | 64 MiB | none |
@@ -629,11 +629,12 @@ Named budgets:
 | `llm_server_keys` | whether server-held provider keys may be used | `false` | `true` |
 | `llm_allow_loopback` | whether a loopback Ollama endpoint may be used; `true` also drops the default host allowlist when `P2A_LLM_ALLOWED_HOSTS` is unset | `false` | `true` |
 
-The hosted `arima_fit_work` of 400,000 allows ARIMA(1,1,1) on 15,384
-observations. It bounds a call's cost before the fit starts: the slowest fit it
-allowed with the optimiser used before the in-house fit took about 16 s on a
-release build, and the value has not yet been measured on the in-house fit,
-whose work grows with the same count. While the budget is set, a column holding
+The hosted `arima_fit_work` of 7,500,000 allows ARIMA(1,1,1) on 288,461
+observations. It bounds a call's cost before the fit starts: on a release build,
+one fit at a time on one of the slower cores of a laptop CPU, the slowest fit
+measured at that value took about 7.5 s, and since a fit makes at most about
+twice the passes of the fits measured, the slowest fit it allows takes about
+15 s, a quarter of the default deadline. While the budget is set, a column holding
 a nonzero value below 1e-100 is refused as well, because the squares and
 products the fit forms from values that small can be subnormal (below about
 2.2e-308), and arithmetic on those takes a much slower path. The margin to the
