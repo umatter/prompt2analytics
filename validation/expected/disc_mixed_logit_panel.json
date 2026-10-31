@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "disc_mixed_logit_panel",
+  "area": "econometrics/discrete",
+  "method": "Mixed logit, 100 people x 4 situations, draws per person (mlogit panel = TRUE)",
+  "reference": "mlogit::mlogit(rpar = c(x = 'n'), R = 50, halton = NA, panel = TRUE), re-solved tightly (optim + numDeriv Newton steps); SEs from numDeriv::hessian",
+  "call": "mlogit(choice ~ x + w | 0, data = dfidx(d, idx = list(c('id', 'person'), 'alt')), rpar = c(x = 'n'), R = 50, halton = NA, panel = TRUE)",
+  "dataset": "validation/datasets/generated/mixed_logit_panel.csv",
+  "datasets": ["validation/datasets/generated/mixed_logit_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "mlogit": "2.0.0",
+    "numDeriv": "2016.8.1.1"
+  },
+  "values": {
+    "coef": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [1.1021779837339249, -0.6571884176168149, 0.79278827001550245]
+    },
+    "se": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [0.15153404370712772, 0.088108219518474626, 0.18628003731162757]
+    },
+    "loglik": -340.03563169181729,
+    "max_abs_grad": 1.9214977625469267e-09,
+    "coef_pkg": {
+      "names": ["x", "w", "sd.x"],
+      "values": [1.1021775167920584, -0.65718990448464609, 0.79278704039056846]
+    },
+    "se_pkg": {
+      "names": ["x", "w", "sd.x"],
+      "values": [0.14244931688881876, 0.089181350144343433, 0.19545431347139972]
+    },
+    "loglik_pkg": -340.03563169182104,
+    "first_draws": [-1.043158263318454, 0.38110545476355645, -0.25739352610093824, 1.2726986411905357, -1.3662038163720984],
+    "unit1_first_draws": [-0.22714306250271524, 1.3417178410802537, -1.2950224067058145],
+    "n_units": 100,
+    "n_draws": 50,
+    "n_situations": 400
+  }
+}

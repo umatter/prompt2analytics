@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "id": "disc_choice_na",
+  "area": "econometrics/discrete",
+  "method": "Missing cells in discrete-choice data: glm logit/probit and nnet::multinom drop incomplete rows (na.omit); mlogit refuses a missing id, choice or attribute",
+  "reference": "stats::glm(binomial('logit' | 'probit'), na.action = na.omit, epsilon = 1e-14); table(g) on complete.cases(g, x, w) (nnet::multinom's na.omit sample); mlogit::mlogit errors on a missing choice, attribute or id",
+  "call": "glm(choice_na ~ x + w, family = binomial, data = d); glm(choice_na ~ x_na + w, family = binomial(link), data = d)",
+  "dataset": "validation/datasets/generated/choice_na.csv",
+  "datasets": ["validation/datasets/generated/choice_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "mlogit": "2.0.0"
+  },
+  "values": {
+    "logit_y_coef": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [-0.7632037025188213, 0.32631422480687039, -0.41797529908201525]
+    },
+    "logit_y_se": {
+      "names": ["(Intercept)", "x", "w"],
+      "values": [0.12932766842678328, 0.13538466078787076, 0.12980672412816011]
+    },
+    "logit_y_loglik": -181.78835192726527,
+    "logit_y_nobs": 298,
+    "logit_coef": {
+      "names": ["(Intercept)", "x_na", "w"],
+      "values": [-0.7800254609952163, 0.33128854168078986, -0.44345203659331467]
+    },
+    "logit_se": {
+      "names": ["(Intercept)", "x_na", "w"],
+      "values": [0.13033629774151329, 0.13609335254316823, 0.13141778024322312]
+    },
+    "logit_loglik": -180.10204540326504,
+    "logit_nobs": 297,
+    "probit_coef": {
+      "names": ["(Intercept)", "x_na", "w"],
+      "values": [-0.4761633999415939, 0.1960342515712869, -0.26645711096371721]
+    },
+    "probit_se": {
+      "names": ["(Intercept)", "x_na", "w"],
+      "values": [0.07782488226903958, 0.081393290624550099, 0.078690089400221735]
+    },
+    "probit_loglik": -180.21133533224827,
+    "probit_nobs": 297,
+    "n_rows": 300,
+    "missing_choice_na": 2,
+    "missing_x_na": 1,
+    "missing_id_na": 1,
+    "missing_g": 2,
+    "multinom_n": 298,
+    "multinom_counts": [77, 149, 72],
+    "k_levels": [2, 10, 33],
+    "mlogit_refuses": [1, 1, 1]
+  }
+}

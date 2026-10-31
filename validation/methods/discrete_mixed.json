@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mixed_logit",
+      "name": "Mixed logit (random parameters logit) with mlogit's Halton draw scheme, cross-section and panel",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(rpar = c(x = 'n'), R = 50, halton = NA[, panel = TRUE]): simulated log-likelihood re-solved with optim(BFGS, reltol = 1e-15) and numDeriv Newton steps; SEs from numDeriv::hessian; mlogit:::halton",
+      "doc": "validation/econometrics/mixed_logit.md",
+      "cases": ["disc_mixed_logit", "disc_mixed_logit_panel"],
+      "tests": [
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_halton_draws",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_two_random_loglik_gradient",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_loglik_at_r_optimum",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_cross_section",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_panel",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_no_random_is_conditional_logit",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_mixed_logit_badly_scaled_regressors",
+        "p2a-core::econometrics::discrete::mixed_logit::tests::test_validate_gmnl_and_mixl_wrappers",
+        "p2a-mcp::tools::handlers::discrete::tests::test_validate_mcp_mixed_logit",
+        "p2a-mcp::tools::handlers::discrete::tests::test_validate_mcp_mixed_logit_panel",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_mixed_logit",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_mixed_logit_panel"
+      ],
+      "quantities": ["Halton points (bit-exact)", "standard normal draws (unit 0 and unit 1)", "simulated log-likelihood and gradient at fixed points (normal; log-normal + normal)", "means", "SD", "SEs of means and SD", "z, p", "log-likelihood", "AIC", "convergence flag and max |gradient|", "conditional logit as the no-random special case", "scale equivariance (x*100, w/100)", "gmnl/mixl wrappers", "panel: n_individuals, product over situations", "MCP and CLI text at print precision, CLI JSON at full tolerance"],
+      "tolerance": "iterative MLE: means and SD 1e-6 relative, SEs 1e-5, log-likelihood validation/README.md stat(300) = 1e-6; mlogit's own estimate cross-checked at 1e-4 (its SEs are BHHH-style: recorded as se_pkg, not pinned); likelihood at fixed points 1e-11, analytic vs numDeriv gradient 1e-7 (abs 1e-8); Halton points exact, normal quantiles 1e-13 (statrs vs AS241); text Tol::printed(4)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "conditional_logit_choice_data",
+      "name": "McFadden conditional logit: R pin on mixed_logit.csv (Newton-polished mlogit)",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(choice ~ x + w | 0), Newton-polished (mlogit stops at |gradient| ~ 1e-3); numDeriv::hessian",
+      "doc": "validation/econometrics/mlogit.md",
+      "cases": ["disc_mixed_logit"],
+      "tests": [
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_conditional_logit_mixed_logit_data"
+      ],
+      "quantities": ["beta", "SE", "log-likelihood", "n situations", "mlogit's own estimate (cross-check)"],
+      "tolerance": "coefficients 1e-6, SEs 1e-5 relative (iterative), log-likelihood 1e-6; mlogit's own estimate at 1e-4",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "binary_multinomial_missing_values",
+      "name": "Logit, probit and multinomial logit with missing cells (rows dropped, as na.omit; factor() level order)",
+      "category": "econometrics",
+      "reference": "stats::glm(binomial('logit' | 'probit'), na.omit, epsilon = 1e-14); complete.cases + table (nnet::multinom sample); factor() level order",
+      "doc": "validation/econometrics/logit.md",
+      "cases": ["disc_choice_na"],
+      "tests": [
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_na_outcome_dropped",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_na_rows_dropped",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_probit_na_rows_dropped",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_na_outcome_dropped",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_integer_outcome_level_order",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_logit_missing_note"
+      ],
+      "quantities": ["logit coefficients, SEs, log-likelihood, nobs (outcome missing; outcome and regressor missing)", "probit coefficients, SEs, log-likelihood, nobs", "missing summary and note", "multinom categories, counts, n (no phantom category), numeric level order"],
+      "tolerance": "coefficients 1e-6, SEs 1e-5 relative (iterative MLE), log-likelihood 1e-6; counts exact; complete-row equality 1e-12; CLI text Tol::printed(6)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_mcp_cli_surface",
+      "name": "MCP ordered_model levels, CLI o-logit/o-probit --levels, convergence and theta SE printing (negbin, zip, zinb)",
+      "category": "econometrics",
+      "reference": "MASS::polr, MASS::glm.nb, pscl::zeroinfl (T2-WP10 cases, polished)",
+      "doc": "validation/econometrics/ordered.md",
+      "cases": ["disc_ordered", "disc_negbin", "disc_zeroinfl"],
+      "tests": [
+        "p2a-mcp::tools::handlers::discrete::tests::test_validate_mcp_ordered_model_levels",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_o_logit_levels",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_o_probit_levels",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_o_logit_missing_note",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_negbin_theta_se",
+        "p2a-cli::tier2::wp18_discrete::test_validate_cli_zip_zinb_convergence_and_theta_se"
+      ],
+      "quantities": ["ordered coefficients, cut points and SEs through MCP and CLI (text outcome with levels; numeric outcome)", "threshold labels", "convergence line", "NB and ZINB theta SE", "CLI missing-value note and JSON"],
+      "tolerance": "MCP core values and CLI JSON: coefficients 1e-6, SEs 1e-5 relative; CLI text Tol::printed(6) (coefficients, SEs, cut points) and printed(4) (z)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
