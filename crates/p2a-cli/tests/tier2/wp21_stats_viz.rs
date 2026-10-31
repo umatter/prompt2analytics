@@ -552,3 +552,340 @@ fn test_cli_acf_refuses_missing() {
         );
     }
 }
+
+/// Observed counts and expected counts of the rows `labels` of a "obs (exp)" table.
+fn obs_exp(text: &str, labels: &[&str]) -> (Vec<f64>, Vec<f64>) {
+    let cells: Vec<f64> = labels.iter().flat_map(|l| nums(&row(text, l))).collect();
+    let obs = cells.iter().step_by(2).copied().collect();
+    let exp = cells.iter().skip(1).step_by(2).copied().collect();
+    (obs, exp)
+}
+
+/// TOOL-33: level labels, R's small-expected warning, the Yates line and dropped rows
+/// (cases stat_chisq_small_expected, stat_contingency_na_codes).
+#[test]
+fn test_validate_cli_chisq_indep_labels_warning() {
+    let small = Case::load("stat_chisq_small_expected");
+    let codes = Case::load("stat_contingency_na_codes");
+    let s = temp_session();
+    let (d1, d2) = (s.load(&small), s.load(&codes));
+    let a1 = [
+        "stats",
+        "chisq-indep",
+        d1.as_str(),
+        "--row-var",
+        "x",
+        "--col-var",
+        "y",
+    ];
+    let out = s.ok(&a1);
+    let (obs, exp) = obs_exp(&out, &["p", "q", "r"]);
+    Check::new(&small)
+        .scalar("chisq", num_after(&out, "X-squared = "), Tol::printed(4))
+        .scalar("df", num_after(&out, "df = "), Tol::exact())
+        .scalar("p", num_after(&out, "p-value = "), Tol::printed(6))
+        .vector("observed", &obs, Tol::exact())
+        .vector("expected", &exp, Tol::printed(4))
+        .finish();
+    assert!(
+        out.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["s", "t"]),
+        "header row: {out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("Warning: Chi-squared approximation may be incorrect")),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Continuity correction") && note(&out).is_none(),
+        "{out}"
+    );
+    let j = s.json(&a1);
+    assert_eq!(
+        (j["row_levels"].clone(), j["col_levels"].clone()),
+        (json!(["p", "q", "r"]), json!(["s", "t"]))
+    );
+    Check::new(&small)
+        .scalar("chisq", num(&j, "chi_squared"), Tol::stat(13))
+        .scalar("df", num(&j, "df"), Tol::exact())
+        .scalar("p", num(&j, "p_value"), Tol::p_value(13))
+        .vector("observed", &num_vec(&j, "observed"), Tol::exact())
+        .vector("expected", &num_vec(&j, "expected"), Tol::stat(13))
+        .vector("residuals", &num_vec(&j, "residuals"), Tol::stat(13))
+        .finish();
+    assert!(
+        j["warnings"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("Chi-squared approximation may be incorrect"),
+        "{j}"
+    );
+    assert_eq!(
+        (j["yates_correction"].clone(), j.get("missing")),
+        (json!(false), None)
+    );
+    // 2 x 2 after dropping the 3 rows with a missing h: Yates, labels a/b x u/v, note
+    let a2 = [
+        "stats",
+        "chisq-indep",
+        d2.as_str(),
+        "--row-var",
+        "g",
+        "--col-var",
+        "h",
+    ];
+    let out2 = s.ok(&a2);
+    let (obs2, exp2) = obs_exp(&out2, &["a", "b"]);
+    Check::new(&codes)
+        .scalar(
+            "gh_chisq_yates",
+            num_after(&out2, "X-squared = "),
+            Tol::printed(4),
+        )
+        .scalar("gh_df", num_after(&out2, "df = "), Tol::exact())
+        .scalar(
+            "gh_p_yates",
+            num_after(&out2, "p-value = "),
+            Tol::printed(6),
+        )
+        .vector("gh_observed", &obs2, Tol::exact())
+        .vector("gh_expected", &exp2, Tol::printed(4))
+        .finish();
+    assert!(out2.contains("Continuity correction: Yates"), "{out2}");
+    assert_eq!(
+        note(&out2),
+        Some("Note: 3 of 12 rows dropped because of missing values (h: 3)"),
+        "{out2}"
+    );
+    let j2 = s.json(&a2);
+    Check::new(&codes)
+        .scalar("gh_chisq_yates", num(&j2, "chi_squared"), Tol::stat(9))
+        .scalar("gh_p_yates", num(&j2, "p_value"), Tol::p_value(9))
+        .vector("gh_observed", &num_vec(&j2, "observed"), Tol::exact())
+        .vector("gh_expected", &num_vec(&j2, "expected"), Tol::stat(9))
+        .vector("gh_residuals", &num_vec(&j2, "residuals"), Tol::stat(9))
+        .scalar("gh_n", num(&j2, "n"), Tol::exact())
+        .finish();
+    assert_eq!(
+        (j2["row_levels"].clone(), j2["col_levels"].clone()),
+        (json!(["a", "b"]), json!(["u", "v"]))
+    );
+    assert_eq!(j2["yates_correction"], json!(true));
+    assert_eq!(j2["missing"], missing(12, 9, json!({"h": 3})));
+}
+
+/// TOOL-33 (GOF): categories in R's order with observed and expected counts; the table is left
+/// out for many categories.
+#[test]
+fn test_validate_cli_chisq_gof_categories() {
+    let case = Case::load("stat_chisq_gof");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = ["stats", "chisq-gof", d.as_str(), "--observed", "cat"];
+    let out = s.ok(&args);
+    let n = case.scalar("n_used");
+    let rows: Vec<Vec<f64>> = ["a", "b", "c"]
+        .iter()
+        .map(|l| nums(&row(&out, l)))
+        .collect(); // [observed, expected]
+    Check::new(&case)
+        .scalar(
+            "uniform_chisq",
+            num_after(&out, "X-squared = "),
+            Tol::printed(4),
+        )
+        .scalar("uniform_df", num_after(&out, "df = "), Tol::exact())
+        .scalar("uniform_p", num_after(&out, "p-value = "), Tol::printed(6))
+        .vector(
+            "observed",
+            &rows.iter().map(|r| r[0]).collect::<Vec<_>>(),
+            Tol::exact(),
+        )
+        .finish();
+    // uniform expected counts, derived from R's n_used: n / 3
+    assert!(
+        rows.iter().all(|r| Tol::printed(4).allows(r[1], n / 3.0)),
+        "{out}"
+    );
+    assert!(!out.contains("Warning:"), "{out}");
+    assert_eq!(
+        note(&out),
+        Some("Note: 2 of 52 rows dropped because of missing values (cat: 2)"),
+        "{out}"
+    );
+    let j = s.json(&args);
+    assert_eq!(j["categories"], json!(["a", "b", "c"]));
+    Check::new(&case)
+        .scalar("uniform_chisq", num(&j, "chi_squared"), Tol::stat(50))
+        .scalar("uniform_df", num(&j, "df"), Tol::exact())
+        .scalar("uniform_p", num(&j, "p_value"), Tol::p_value(50))
+        .vector("observed", &num_vec(&j, "observed"), Tol::exact())
+        .scalar("n_used", num(&j, "n"), Tol::exact())
+        .finish();
+    assert!(
+        num_vec(&j, "expected")
+            .iter()
+            .all(|&e| Tol::stat(50).allows(e, n / 3.0)),
+        "{j}"
+    );
+    assert_eq!(j["missing"], missing(52, 50, json!({"cat": 2})));
+    // 52 categories (the id column): the table is left out of the text, kept in the JSON
+    let many = s.ok(&["stats", "chisq-gof", d.as_str(), "--observed", "id"]);
+    assert!(
+        many.contains("Table not shown: 52 categories (more than 50); use -F json for the counts."),
+        "{many}"
+    );
+    assert!(
+        many.lines()
+            .any(|l| l.starts_with("Warning: Chi-squared approximation may be incorrect")),
+        "{many}"
+    );
+    let jm = s.json(&["stats", "chisq-gof", d.as_str(), "--observed", "id"]);
+    assert_eq!(jm["categories"].as_array().unwrap().len(), 52);
+}
+
+/// TOOL-33 (Fisher): R's estimate is the conditional MLE; labelled counts; exact limits; dropped
+/// rows (cases stat_fisher_rows_2000, stat_contingency_na_codes; tight values = fisher.test's
+/// equations re-solved with uniroot(tol = 1e-15)).
+#[test]
+fn test_validate_cli_fisher_conditional_mle() {
+    const TIGHT: Tol = Tol::new(1e-9, 1e-12);
+    let big = Case::load("stat_fisher_rows_2000");
+    let codes = Case::load("stat_contingency_na_codes");
+    let s = temp_session();
+    let (d1, d2) = (s.load(&big), s.load(&codes));
+    let a1 = [
+        "stats",
+        "fisher",
+        d1.as_str(),
+        "--row-var",
+        "treat",
+        "--col-var",
+        "outcome",
+    ];
+    let out = s.ok(&a1);
+    let (lo, hi) = interval_after(&out, "95% CI: [");
+    Check::new(&big)
+        .scalar(
+            "p_two_sided",
+            num_after(&out, "p-value = "),
+            Tol::printed(6),
+        )
+        .scalar(
+            "estimate_cond_mle_tight",
+            num_after(&out, "Odds ratio (conditional MLE) = "),
+            Tol::printed(4),
+        )
+        .scalar("ci_lower_two_sided_tight", lo, Tol::printed(4))
+        .scalar("ci_upper_two_sided_tight", hi, Tol::printed(4))
+        .scalar(
+            "sample_odds_ratio",
+            num_after(&out, "Sample odds ratio = "),
+            Tol::printed(4),
+        )
+        .finish();
+    assert_eq!(
+        (nums(&row(&out, "control")), nums(&row(&out, "treated"))),
+        (vec![520.0, 480.0], vec![480.0, 520.0])
+    );
+    assert!(note(&out).is_none(), "{out}");
+    let j = s.json(&a1);
+    Check::new(&big)
+        .scalar("p_two_sided", num(&j, "p_value"), Tol::p_value(2000))
+        .scalar("estimate_cond_mle_tight", num(&j, "conditional_mle"), TIGHT)
+        .scalar("ci_lower_two_sided_tight", num(&j, "ci_lower"), TIGHT)
+        .scalar("ci_upper_two_sided_tight", num(&j, "ci_upper"), TIGHT)
+        .scalar(
+            "sample_odds_ratio",
+            num(&j, "sample_odds_ratio"),
+            Tol::coef(2000),
+        )
+        .scalar("sample_odds_ratio", num(&j, "odds_ratio"), Tol::coef(2000)) // unchanged meaning of the old key
+        .finish();
+    // the case asserts table(treat, outcome) == [520, 480, 480, 520] (stopifnot); levels in R
+    // factor order
+    assert_eq!(
+        (
+            j["table"].clone(),
+            j["row_levels"].clone(),
+            j["col_levels"].clone()
+        ),
+        (
+            json!([520.0, 480.0, 480.0, 520.0]),
+            json!(["control", "treated"]),
+            json!(["no", "yes"])
+        )
+    );
+    // numeric codes 2 < 10 (STAT-50 order) with one missing code
+    let a2 = [
+        "stats",
+        "fisher",
+        d2.as_str(),
+        "--row-var",
+        "code",
+        "--col-var",
+        "out",
+    ];
+    let out2 = s.ok(&a2);
+    let (lo2, hi2) = interval_after(&out2, "95% CI: [");
+    Check::new(&codes)
+        .scalar(
+            "code_out_fisher_p",
+            num_after(&out2, "p-value = "),
+            Tol::printed(6),
+        )
+        .scalar(
+            "code_out_fisher_estimate_tight",
+            num_after(&out2, "Odds ratio (conditional MLE) = "),
+            Tol::printed(4),
+        )
+        .scalar("code_out_fisher_ci_lower_tight", lo2, Tol::printed(4))
+        .scalar("code_out_fisher_ci_upper_tight", hi2, Tol::printed(4))
+        .scalar(
+            "code_out_sample_or",
+            num_after(&out2, "Sample odds ratio = "),
+            Tol::printed(4),
+        )
+        .vector(
+            "code_out_table",
+            &[nums(&row(&out2, "2")), nums(&row(&out2, "10"))].concat(),
+            Tol::exact(),
+        )
+        .finish();
+    assert_eq!(
+        note(&out2),
+        Some("Note: 1 of 12 rows dropped because of missing values (code: 1)"),
+        "{out2}"
+    );
+    let j2 = s.json(&a2);
+    Check::new(&codes)
+        .scalar("code_out_fisher_p", num(&j2, "p_value"), Tol::p_value(11))
+        .scalar(
+            "code_out_fisher_estimate_tight",
+            num(&j2, "conditional_mle"),
+            TIGHT,
+        )
+        .scalar(
+            "code_out_fisher_ci_lower_tight",
+            num(&j2, "ci_lower"),
+            TIGHT,
+        )
+        .scalar(
+            "code_out_fisher_ci_upper_tight",
+            num(&j2, "ci_upper"),
+            TIGHT,
+        )
+        .scalar(
+            "code_out_sample_or",
+            num(&j2, "sample_odds_ratio"),
+            Tol::coef(11),
+        )
+        .vector("code_out_table", &num_vec(&j2, "table"), Tol::exact())
+        .finish();
+    assert_eq!(
+        (j2["row_levels"].clone(), j2["col_levels"].clone()),
+        (json!(["2", "10"]), json!(["0", "1"]))
+    );
+    assert_eq!(j2["missing"], missing(12, 11, json!({"code": 1})));
+}

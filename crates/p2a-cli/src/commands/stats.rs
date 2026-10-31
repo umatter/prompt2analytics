@@ -829,6 +829,83 @@ fn series_column(
     }
 }
 
+/// Most rows a counts table prints; a larger table is left out of the text (-F json has it).
+const MAX_TABLE_ROWS: usize = 50;
+/// Most columns a counts table prints.
+const MAX_TABLE_COLS: usize = 12;
+
+/// Finite: `decimals` decimals; else "Inf", "-Inf" or "NaN" (R's spelling).
+fn fmt_num(v: f64, decimals: usize) -> String {
+    if v.is_finite() {
+        format!("{v:.decimals$}")
+    } else if v.is_nan() {
+        "NaN".to_string()
+    } else if v > 0.0 {
+        "Inf".to_string()
+    } else {
+        "-Inf".to_string()
+    }
+}
+
+/// Finite: a JSON number; else the string "Inf", "-Inf" or "NaN" (the MCP tools' convention).
+fn json_number(v: f64) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::json!(v)
+    } else {
+        serde_json::Value::String(fmt_num(v, 0))
+    }
+}
+
+/// A text table of `row_labels` x `col_labels`, header line first: the first column (the row
+/// labels, `corner` above them) left-aligned, every other column right-aligned to its widest
+/// entry, columns separated by two spaces; each line ends with '\n'. Widths count characters,
+/// so non-ASCII labels line up.
+fn format_table(
+    corner: &str,
+    row_labels: &[String],
+    col_labels: &[String],
+    cell: impl Fn(usize, usize) -> String,
+) -> String {
+    let width = |s: &str| s.chars().count();
+    let cells: Vec<Vec<String>> = (0..row_labels.len())
+        .map(|i| (0..col_labels.len()).map(|j| cell(i, j)).collect())
+        .collect();
+    let label_width = row_labels
+        .iter()
+        .map(|l| width(l))
+        .chain([width(corner)])
+        .max()
+        .unwrap_or(0);
+    let col_widths: Vec<usize> = col_labels
+        .iter()
+        .enumerate()
+        .map(|(j, label)| {
+            cells
+                .iter()
+                .map(|r| width(&r[j]))
+                .chain([width(label)])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let line = |label: &str, entries: &[String]| {
+        let mut text = format!("{label}{}", " ".repeat(label_width - width(label)));
+        for (entry, &w) in entries.iter().zip(&col_widths) {
+            text.push_str("  ");
+            text.push_str(&" ".repeat(w - width(entry)));
+            text.push_str(entry);
+        }
+        let mut text = text.trim_end().to_string();
+        text.push('\n');
+        text
+    };
+    let mut out = line(corner, col_labels);
+    for (label, entries) in row_labels.iter().zip(&cells) {
+        out.push_str(&line(label, entries));
+    }
+    out
+}
+
 fn execute_t_test_one(
     dataset_name: &str,
     col: &str,
@@ -1070,25 +1147,61 @@ fn execute_chisq_gof(
 
     match dataset {
         Some(ds) => match run_chisq_gof(ds, observed_col, None) {
-            Ok(result) => match format {
-                OutputFormat::Json => {
-                    let json = serde_json::json!({
-                        "test": "Chi-squared goodness-of-fit",
-                        "chi_squared": result.statistic,
-                        "df": result.df,
-                        "p_value": result.p_value,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+            Ok(result) => {
+                // Categories in R's factor order, the order of observed/expected.
+                let categories = result.row_labels.clone().unwrap_or_default();
+                let n: f64 = result.observed.iter().sum();
+                match format {
+                    OutputFormat::Json => {
+                        let json = serde_json::json!({
+                            "test": "Chi-squared goodness-of-fit",
+                            "chi_squared": json_number(result.statistic),
+                            "df": result.df,
+                            "p_value": json_number(result.p_value),
+                            "categories": categories,
+                            "observed": result.observed,
+                            "expected": result.expected.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                            "residuals": result.residuals.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                            "n": n,
+                            "warnings": result.warnings,
+                        });
+                        print_json(json, &result.missing)?;
+                    }
+                    _ => {
+                        println!("\nChi-squared Goodness-of-Fit Test");
+                        println!("{}", "=".repeat(40));
+                        println!(
+                            "X-squared = {:.4}, df = {}, p-value = {:.6}",
+                            result.statistic, result.df, result.p_value
+                        );
+                        println!();
+                        if categories.len() <= MAX_TABLE_ROWS {
+                            let columns = ["Observed".to_string(), "Expected".to_string()];
+                            print!(
+                                "{}",
+                                format_table("Category", &categories, &columns, |i, j| {
+                                    let (counts, decimals) = if j == 0 {
+                                        (&result.observed, 0)
+                                    } else {
+                                        (&result.expected, 4)
+                                    };
+                                    fmt_num(counts.get(i).copied().unwrap_or(f64::NAN), decimals)
+                                })
+                            );
+                        } else {
+                            println!(
+                                "Table not shown: {} categories (more than {MAX_TABLE_ROWS}); \
+                                 use -F json for the counts.",
+                                categories.len()
+                            );
+                        }
+                        for warning in &result.warnings {
+                            println!("Warning: {warning}");
+                        }
+                        print_missing_note(&result.missing, format);
+                    }
                 }
-                _ => {
-                    println!("\nChi-squared Goodness-of-Fit Test");
-                    println!("{}", "=".repeat(40));
-                    println!(
-                        "X-squared = {:.4}, df = {}, p-value = {:.6}",
-                        result.statistic, result.df, result.p_value
-                    );
-                }
-            },
+            }
             Err(e) => print_error(&format!("Chi-squared test failed: {}", e), format),
         },
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1115,25 +1228,72 @@ fn execute_chisq_indep(
         Some(ds) => {
             // run_chisq_independence(dataset, row_col, col_col, correct)
             match run_chisq_independence(ds, row_var, col_var, true) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "test": "Chi-squared test of independence",
-                            "chi_squared": result.statistic,
-                            "df": result.df,
-                            "p_value": result.p_value,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                Ok(result) => {
+                    // Levels in R's factor order; observed/expected/residuals are row-major.
+                    let row_levels = result.row_labels.clone().unwrap_or_default();
+                    let col_levels = result.col_labels.clone().unwrap_or_default();
+                    let n_cols = col_levels.len();
+                    let n: f64 = result.observed.iter().sum();
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "test": "Chi-squared test of independence",
+                                "chi_squared": json_number(result.statistic),
+                                "df": result.df,
+                                "p_value": json_number(result.p_value),
+                                "row_levels": row_levels,
+                                "col_levels": col_levels,
+                                "observed": result.observed,
+                                "expected": result.expected.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                                "residuals": result.residuals.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                                "n": n,
+                                "warnings": result.warnings,
+                                "yates_correction": result.yates_correction,
+                            });
+                            print_json(json, &result.missing)?;
+                        }
+                        _ => {
+                            println!("\nChi-squared Test of Independence");
+                            println!("{}", "=".repeat(40));
+                            println!(
+                                "X-squared = {:.4}, df = {}, p-value = {:.6}",
+                                result.statistic, result.df, result.p_value
+                            );
+                            if result.yates_correction {
+                                println!("Continuity correction: Yates");
+                            }
+                            println!();
+                            println!(
+                                "Observed (expected) counts, {row_var} (rows) x {col_var} (columns):"
+                            );
+                            if row_levels.len() <= MAX_TABLE_ROWS && n_cols <= MAX_TABLE_COLS {
+                                print!(
+                                    "{}",
+                                    format_table("", &row_levels, &col_levels, |i, j| {
+                                        let k = i * n_cols + j;
+                                        let at = |v: &[f64]| v.get(k).copied().unwrap_or(f64::NAN);
+                                        format!(
+                                            "{} ({})",
+                                            fmt_num(at(&result.observed), 0),
+                                            fmt_num(at(&result.expected), 4)
+                                        )
+                                    })
+                                );
+                            } else {
+                                println!(
+                                    "Table not shown: {} x {} table (more than {MAX_TABLE_ROWS} \
+                                     rows or {MAX_TABLE_COLS} columns); use -F json for the counts.",
+                                    row_levels.len(),
+                                    n_cols
+                                );
+                            }
+                            for warning in &result.warnings {
+                                println!("Warning: {warning}");
+                            }
+                            print_missing_note(&result.missing, format);
+                        }
                     }
-                    _ => {
-                        println!("\nChi-squared Test of Independence");
-                        println!("{}", "=".repeat(40));
-                        println!(
-                            "X-squared = {:.4}, df = {}, p-value = {:.6}",
-                            result.statistic, result.df, result.p_value
-                        );
-                    }
-                },
+                }
                 Err(e) => print_error(&format!("Chi-squared test failed: {}", e), format),
             }
         }
@@ -1170,26 +1330,54 @@ fn execute_fisher(
                 Some(0.95),
             ) {
                 Ok(result) => {
-                    let (ci_lower, ci_upper) = result.odds_ratio_ci.unwrap_or((f64::NAN, f64::NAN));
+                    // `odds_ratio` is the sample odds ratio (ad)/(bc); R's estimate is the
+                    // conditional MLE, with the exact conditional interval.
+                    let ci = result.odds_ratio_ci;
                     match format {
                         OutputFormat::Json => {
+                            let limit =
+                                |v: Option<f64>| v.map_or(serde_json::Value::Null, json_number);
                             let json = serde_json::json!({
                                 "test": "Fisher's exact test",
-                                "p_value": result.p_value,
-                                "odds_ratio": result.odds_ratio,
-                                "ci_lower": ci_lower,
-                                "ci_upper": ci_upper,
+                                "p_value": json_number(result.p_value),
+                                "odds_ratio": json_number(result.odds_ratio),
+                                "sample_odds_ratio": json_number(result.odds_ratio),
+                                "conditional_mle": json_number(result.conditional_mle),
+                                "ci_lower": limit(ci.map(|(lo, _)| lo)),
+                                "ci_upper": limit(ci.map(|(_, hi)| hi)),
+                                "ci_method": "exact conditional (as R fisher.test)",
+                                "row_levels": result.row_levels,
+                                "col_levels": result.col_levels,
+                                "table": result.table,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &result.missing)?;
                         }
                         _ => {
                             println!("\nFisher's Exact Test for 2x2 Table");
                             println!("{}", "=".repeat(40));
                             println!("p-value = {:.6}", result.p_value);
-                            println!("Odds ratio = {:.4}", result.odds_ratio);
-                            if result.odds_ratio_ci.is_some() {
-                                println!("95% CI: [{:.4}, {:.4}]", ci_lower, ci_upper);
+                            println!(
+                                "Odds ratio (conditional MLE) = {}",
+                                fmt_num(result.conditional_mle, 4)
+                            );
+                            if let Some((lo, hi)) = ci {
+                                println!("95% CI: [{}, {}]", fmt_num(lo, 4), fmt_num(hi, 4));
                             }
+                            println!("Sample odds ratio = {}", fmt_num(result.odds_ratio, 4));
+                            if result.row_levels.len() == 2 && result.col_levels.len() == 2 {
+                                println!();
+                                println!("Counts, {row_var} (rows) x {col_var} (columns):");
+                                print!(
+                                    "{}",
+                                    format_table(
+                                        "",
+                                        &result.row_levels,
+                                        &result.col_levels,
+                                        |i, j| fmt_num(result.table[2 * i + j], 0)
+                                    )
+                                );
+                            }
+                            print_missing_note(&result.missing, format);
                         }
                     }
                 }
