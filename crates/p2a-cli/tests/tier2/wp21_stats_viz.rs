@@ -316,3 +316,115 @@ fn test_validate_cli_t_test_two_na() {
         .finish();
     assert_eq!(ji["missing"], missing(44, 38, json!({"xi": 2, "yi": 4})));
 }
+
+/// CLI-9: Wilcoxon read the missing cells as 0 (V = 45, p = 0.0840); wilcox.test drops them (case stat_wilcoxon_na).
+#[test]
+fn test_validate_cli_wilcoxon_na() {
+    let case = Case::load("stat_wilcoxon_na");
+    let s = temp_session();
+    let d = s.load(&case);
+    let paired = [
+        "stats",
+        "wilcoxon",
+        d.as_str(),
+        "--col1",
+        "x",
+        "--col2",
+        "y",
+        "--paired",
+    ];
+    let out = s.ok(&paired);
+    Check::new(&case)
+        .scalar("paired_v", num_after(&out, "W = "), Tol::exact()) // the CLI labels V as W (STAT-72, Tier 4)
+        .scalar(
+            "paired_p_exact",
+            num_after(&out, "p-value = "),
+            Tol::printed(6),
+        )
+        .finish();
+    assert_eq!(
+        note(&out),
+        Some("Note: 2 of 10 rows dropped because of missing values (x: 1, y: 1)"),
+        "{out}"
+    );
+    let j = s.json(&paired);
+    Check::new(&case)
+        .scalar("paired_v", num(&j, "statistic"), Tol::exact())
+        .scalar("paired_p_exact", num(&j, "p_value"), Tol::p_value(8)) // default config: exact for 8 pairs without ties
+        .finish();
+    assert_eq!(j["missing"], missing(10, 8, json!({"x": 1, "y": 1})));
+    let r = s.json(&[
+        "stats",
+        "wilcoxon",
+        d.as_str(),
+        "--col1",
+        "x",
+        "--col2",
+        "y",
+    ]);
+    // p2a's rank-sum statistic is the rank sum R1 (R's W = R1 - n_x(n_x+1)/2, STAT-72); R1 itself
+    // is the case key. Not pinned: the exact rank-sum p (no R value in a Tier 2 case; the exact
+    // path is STAT-73, Tier 4).
+    Check::new(&case)
+        .scalar("ranksum_r1", num(&r, "statistic"), Tol::exact())
+        .finish();
+    assert_eq!(r["missing"], missing(20, 18, json!({"x": 1, "y": 1}))); // each sample on its own
+}
+
+/// CLI-9/CLI-8: fivenum/IQR/MAD drop missing cells (fivenum; IQR/mad na.rm = TRUE) and accept
+/// Int64 (case cli_stat_descriptive_na).
+#[test]
+fn test_validate_cli_descriptive_na() {
+    let case = Case::load("cli_stat_descriptive_na");
+    let s = temp_session();
+    let d = s.load(&case);
+    let d = d.as_str();
+    let out = s.ok(&["stats", "fivenum", d, "--col", "x"]);
+    let five: Vec<f64> = ["Min:", "Q1:", "Median:", "Q3:", "Max:"]
+        .iter()
+        .map(|l| nums(&row(&out, l))[0])
+        .collect();
+    Check::new(&case)
+        .vector("fivenum_x", &five, Tol::printed(4))
+        .finish();
+    assert_eq!(
+        note(&out),
+        Some("Note: 15 of 22 rows dropped because of missing values (x: 15)"),
+        "{out}"
+    );
+    for (col, n, k) in [("x", 7_u64, 15_u64), ("xi", 20, 2)] {
+        let mut by = serde_json::Map::new();
+        by.insert(col.to_string(), k.into());
+        let want = missing(22, n, Value::Object(by));
+        let j = s.json(&["stats", "fivenum", d, "--col", col]);
+        let got = ["min", "q1", "median", "q3", "max"].map(|key| num(&j, key));
+        Check::new(&case)
+            .vector(&format!("fivenum_{col}"), &got, Tol::coef(n as usize))
+            .scalar(&format!("n_{col}"), num(&j, "n"), Tol::exact())
+            .finish();
+        assert_eq!(j["missing"], want);
+        let iqr = s.json(&["stats", "iqr", d, "--col", col]);
+        let mad = s.json(&["stats", "mad", d, "--col", col]);
+        Check::new(&case)
+            .scalar(
+                &format!("iqr_{col}"),
+                num(&iqr, "iqr"),
+                Tol::coef(n as usize),
+            )
+            .scalar(
+                &format!("mad_{col}"),
+                num(&mad, "mad"),
+                Tol::coef(n as usize),
+            )
+            .finish();
+        assert_eq!((&iqr["missing"], &mad["missing"]), (&want, &want));
+    }
+    let text = s.ok(&["stats", "mad", d, "--col", "xi"]);
+    Check::new(&case)
+        .scalar("mad_xi", num_after(&text, "MAD(xi): "), Tol::printed(4))
+        .finish();
+    assert_eq!(
+        note(&text),
+        Some("Note: 2 of 22 rows dropped because of missing values (xi: 2)")
+    );
+}

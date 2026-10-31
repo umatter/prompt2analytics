@@ -1,7 +1,8 @@
 //! Statistical tests and descriptive statistics commands
 
 use clap::{Subcommand, ValueEnum};
-use p2a_core::data::columns::MissingSummary;
+use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use p2a_core::errors::EconResult;
 use p2a_core::{
     AcfType,
     Alternative,
@@ -40,8 +41,8 @@ use p2a_core::{
     run_two_way_anova,
     // T-tests (dataset wrapper: drops missing values as t.test does)
     t_test,
-    wilcoxon_rank_sum,
-    wilcoxon_signed_rank,
+    // Wilcoxon (dataset wrapper: drops missing values as wilcox.test does)
+    wilcoxon_test,
 };
 
 use crate::output::{
@@ -792,6 +793,23 @@ fn print_json(mut json: serde_json::Value, missing: &MissingSummary) -> anyhow::
     Ok(())
 }
 
+/// The values of one numeric column (Int64 and the other numeric dtypes accepted) under
+/// `policy`, and what was dropped. No value left is an error naming `stats <command>` and
+/// the column.
+fn column_values(
+    dataset: &p2a_core::Dataset,
+    col: &str,
+    policy: NaPolicy,
+    command: &str,
+) -> EconResult<(Vec<f64>, MissingSummary)> {
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(col)
+        .na(policy)
+        .min_rows(1, &format!("stats {command}, column '{col}'"))
+        .extract()?;
+    Ok((cols.numeric(col).to_vec(), cols.missing().clone()))
+}
+
 /// Helper to extract a column as `Vec<f64>`
 fn extract_column(dataset: &p2a_core::Dataset, col: &str) -> Result<Vec<f64>, String> {
     let df = dataset.df();
@@ -1246,31 +1264,11 @@ fn execute_wilcoxon(
 
     match dataset {
         Some(ds) => {
-            let data1 = match extract_column(ds, col1) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let data2 = match extract_column(ds, col2) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let config = WilcoxonConfig::default();
             let alt: Alternative = alternative.into();
 
-            let result = if paired {
-                wilcoxon_signed_rank(&data1, Some(&data2), 0.0, alt, &config)
-            } else {
-                wilcoxon_rank_sum(&data1, &data2, 0.0, alt, &config)
-            };
-
-            match result {
+            // Paired: complete pairs; rank-sum: each sample's missing values dropped.
+            match wilcoxon_test(ds, col1, Some(col2), 0.0, alt, paired, &config) {
                 Ok(res) => {
                     let test_name = if paired {
                         "Wilcoxon signed-rank test"
@@ -1284,12 +1282,13 @@ fn execute_wilcoxon(
                                 "statistic": res.statistic,
                                 "p_value": res.p_value,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &res.missing)?;
                         }
                         _ => {
                             println!("\n{}", test_name);
                             println!("{}", "=".repeat(40));
                             println!("W = {:.4}, p-value = {:.6}", res.statistic, res.p_value);
+                            print_missing_note(&res.missing, format);
                         }
                     }
                 }
@@ -1409,10 +1408,11 @@ fn execute_fivenum(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            // fivenum's default: the present values
+            let (data, missing) = match column_values(ds, col, NaPolicy::Omit, "fivenum") {
                 Ok(d) => d,
                 Err(e) => {
-                    print_error(&e, format);
+                    print_error(&e.to_string(), format);
                     return Ok(());
                 }
             };
@@ -1426,8 +1426,9 @@ fn execute_fivenum(
                             "median": result.median,
                             "q3": result.upper_hinge,
                             "max": result.maximum,
+                            "n": result.n,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &missing)?;
                     }
                     _ => {
                         println!("\nFive-Number Summary for '{}'", col);
@@ -1437,6 +1438,7 @@ fn execute_fivenum(
                         println!("Median: {:.4}", result.median);
                         println!("Q3:     {:.4}", result.upper_hinge);
                         println!("Max:    {:.4}", result.maximum);
+                        print_missing_note(&missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("fivenum failed: {}", e), format),
@@ -1463,10 +1465,11 @@ fn execute_iqr(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            // IQR(na.rm = TRUE), as the MCP tool documents
+            let (data, missing) = match column_values(ds, col, NaPolicy::Omit, "iqr") {
                 Ok(d) => d,
                 Err(e) => {
-                    print_error(&e, format);
+                    print_error(&e.to_string(), format);
                     return Ok(());
                 }
             };
@@ -1477,10 +1480,11 @@ fn execute_iqr(
                         let json = serde_json::json!({
                             "iqr": iqr_val,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &missing)?;
                     }
                     _ => {
                         println!("IQR({}): {:.4}", col, iqr_val);
+                        print_missing_note(&missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("IQR failed: {}", e), format),
@@ -1507,10 +1511,11 @@ fn execute_mad(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            // mad(na.rm = TRUE), as the MCP tool documents
+            let (data, missing) = match column_values(ds, col, NaPolicy::Omit, "mad") {
                 Ok(d) => d,
                 Err(e) => {
-                    print_error(&e, format);
+                    print_error(&e.to_string(), format);
                     return Ok(());
                 }
             };
@@ -1521,10 +1526,11 @@ fn execute_mad(
                         let json = serde_json::json!({
                             "mad": mad_val,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &missing)?;
                     }
                     _ => {
                         println!("MAD({}): {:.4}", col, mad_val);
+                        print_missing_note(&missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("MAD failed: {}", e), format),
