@@ -2416,8 +2416,7 @@ mod tests {
         }
     }
 
-    /// The CSV parser compares every field with every missing-value marker, so the hosted
-    /// profile holds the markers to a few short strings (na_markers, na_marker_bytes).
+    /// The hosted profile holds na_strings to a few short markers (na_markers, na_marker_bytes).
     #[test]
     fn na_strings_markers_are_few_and_short() {
         let markers = |n: usize| (0..n).map(|i| format!("m{i}")).collect::<Vec<_>>();

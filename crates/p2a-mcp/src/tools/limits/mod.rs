@@ -211,8 +211,7 @@ families! {
     /// `P2A_LIMIT_OVERRIDES`. It is 100, as is the hosted [`Limits::max_groups`] budget of
     /// groups compared pairwise: a cap of 10 refused legitimate designs with a few dozen groups.
     DesignGroups => "design_groups", 100;
-    /// Missing-value markers a dataset is read with (`na_strings`): the CSV parser compares
-    /// every field with every marker, so the list is held to a few short markers.
+    /// Missing-value markers a dataset is read with (`na_strings`), held to a few short markers.
     NaMarkers => "na_markers", 32;
     /// UTF-8 byte length of one missing-value marker (`na_strings[]`).
     NaMarkerBytes => "na_marker_bytes", 64;
