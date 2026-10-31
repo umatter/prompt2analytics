@@ -971,14 +971,15 @@ fn extract_column(dataset: &Dataset, col_name: &str) -> EconResult<Vec<f64>> {
         column: col_name.to_string(),
     })?;
 
-    ca.into_iter()
-        .map(|opt| {
-            opt.ok_or_else(|| EconError::NullValues {
-                column: col_name.to_string(),
-                count: 1,
-            })
-        })
-        .collect()
+    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
+    let missing = ca.null_count();
+    if missing > 0 {
+        return Err(EconError::NullValues {
+            column: col_name.to_string(),
+            count: missing,
+        });
+    }
+    Ok(ca.into_iter().flatten().collect())
 }
 
 /// Run spectral density estimation on a dataset column.

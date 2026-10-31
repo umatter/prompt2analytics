@@ -414,15 +414,15 @@ pub fn run_box_test(
         column: column.to_string(),
     })?;
 
-    let x: Vec<f64> = ca
-        .into_iter()
-        .map(|opt| {
-            opt.ok_or_else(|| EconError::NullValues {
-                column: column.to_string(),
-                count: 1,
-            })
-        })
-        .collect::<Result<Vec<f64>, EconError>>()?;
+    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
+    let missing = ca.null_count();
+    if missing > 0 {
+        return Err(EconError::NullValues {
+            column: column.to_string(),
+            count: missing,
+        });
+    }
+    let x: Vec<f64> = ca.into_iter().flatten().collect();
 
     let mut result = box_test(&x, lag, test_type, fitdf)?;
     result.series_name = Some(column.to_string());

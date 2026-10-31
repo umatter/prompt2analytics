@@ -122,6 +122,13 @@ sd(sp$spec) / mean(sp$spec)  # Coefficient of variation ~0.35
 | Spectral density values | ±10% | Small differences due to taper normalization |
 | Detrending | < 1e-8 | Very precise |
 
+## Missing values
+
+`run_spectrum` and `run_spectrum_ar` refuse a column with missing (empty) cells, as R's
+`spectrum` and `spec.ar` do under `na.action = na.fail`, naming the column and the number of
+missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
+([acf.md](../stats/acf.md)).
+
 ## Known Differences from R
 
 1. **Bandwidth calculation**: Our implementation uses a simplified bandwidth formula. R's formula is more sophisticated.

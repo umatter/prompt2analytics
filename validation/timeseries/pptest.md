@@ -121,6 +121,12 @@ trunc(12*(1000/100)^0.25) # = 21
 | Test statistic | ±1.0 | Non-standard distribution; focus on sign and magnitude |
 | P-value | ±0.05 | Interpolated from tables; exact match not expected |
 
+## Missing values
+
+`run_pp_test` refuses a column with missing (empty) cells, naming the column and the number of
+missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
+([acf.md](../stats/acf.md)). R's `PP.test` does not refuse them; its statistic is `NA`.
+
 ## Known Differences from R
 
 1. **Test statistic format**: R's PP.test returns Z(alpha) while our implementation returns Z(tau). Both test the same hypothesis but have different scales. The p-values are comparable.

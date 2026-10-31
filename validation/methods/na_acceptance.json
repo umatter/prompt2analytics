@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_missing_value_refusals",
+      "name": "ACF, PACF, CCF, Box, PP and spectrum: the missing-value refusal names the column and the count R reports (RF-34)",
+      "category": "stats",
+      "reference": "stats::acf / pacf / ccf / spectrum / spec.ar refuse NA (na.action = na.fail); the count is sum(is.na(x)). Box.test (na.pass) and PP.test (NA statistic) do not refuse; p2a refuses with the same count",
+      "doc": "validation/stats/acf.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-core::stats::acf::tests::test_validate_na_ts_refusals_report_null_count"],
+      "quantities": ["number of missing values in the refusal of each reader (x, xi, yi)"],
+      "tolerance": "counts: exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
