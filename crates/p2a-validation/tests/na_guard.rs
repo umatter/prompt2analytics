@@ -23,7 +23,7 @@
 //! - `// na-ok: <reason>` for data that cannot hold nulls (a column the code built itself, a
 //!   comparison mask);
 //! - `// na-legacy(T3): <reason>` or `// na-legacy(T4): <reason>` for a known site that a later
-//!   tier migrates (the reason names its finding, or "theme 3.3" of the October 2026 review).
+//!   tier migrates (the reason says what the site gets wrong, after its finding id if it has one).
 //!
 //! A comment that starts with `na-ok` or `na-legacy` in any other form is reported as a
 //! malformed marker, and an `na-legacy` marker with no extraction on its line or the next as a
@@ -784,7 +784,7 @@ fn test_na_guard_markers_exempt_their_line_and_the_next() {
                let _x = c.f64()?; // na-ok: the column was built two lines up\n    \
                // na-ok: mask from is_null(), never null\n    \
                let _y: Vec<bool> = m.into_no_null_iter().collect();\n    \
-               // na-legacy(T4): theme 3.3\n    \
+               // na-legacy(T4): per-column read\n    \
                let _z = c.f64()?;\n    \
                // na-ok: two lines above does not count\n\
                \n    \

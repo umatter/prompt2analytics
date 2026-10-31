@@ -517,12 +517,13 @@ let missing = cols.missing().clone();           // what was dropped
   and on `.f64()` with no `cast`, `strict_cast` or `cast_with_options` call in the six lines above, in
   non-test code of the five product crates; comments, string literals and `#[cfg(test)]` items are
   skipped. `// na-ok: <reason>` on the line or the line above marks a site that is null-free by
-  construction (a column the code built, a comparison mask). `// na-legacy(T4): <finding or theme 3.3>`
-  marks the 18 known carry-over sites, which later tiers migrate: migrating one means removing its marker
-  and lowering `MAX_LEGACY_MARKERS`. A malformed marker, an `na-legacy` marker with no extraction on its
-  line or the next, and a new `na-legacy` marker all fail the guard. Finding ids and "theme 3.3" refer to
-  the October 2026 code review. The real-tree test is `test_na_guard_tree_is_clean`, and
-  `test_na_guard_legacy_mcp_helpers_are_gone` keeps the removed null-to-NaN MCP helpers out.
+  construction (a column the code built, a comparison mask). `// na-legacy(T4): <reason>` marks the 18
+  known carry-over sites, which later tiers migrate; the reason says what the site gets wrong, after the
+  finding id of the October 2026 code review where there is one. Migrating a site means removing its
+  marker and lowering `MAX_LEGACY_MARKERS`. A malformed marker, an `na-legacy` marker with no extraction
+  on its line or the next, and a new `na-legacy` marker all fail the guard. The real-tree test is
+  `test_na_guard_tree_is_clean`, and `test_na_guard_legacy_mcp_helpers_are_gone` keeps the removed
+  null-to-NaN MCP helpers out.
 
 ### Matrix Operations
 

@@ -261,7 +261,7 @@ R-pinned: registry `validation/methods/data_layer.json`, ids `data_quality_profi
 - `cast` reports text that fails to parse even where R is silent (`as.logical("yes")` is NA
   without a warning); R's warning set is a subset of p2a's reports. R also parses hexadecimal
   text (`as.numeric("0x1A")` is 26), which p2a counts as failed.
-- Carry-over (theme 3.3, not owned by a Tier 2 package): `verification.rs` `preview_fill_na`
+- Carry-over (not owned by a Tier 2 package): `verification.rs` `preview_fill_na`
   still counts only nulls, so a preview can report no missing values for a column whose NaN
   cells `fill_na` fills.
 
