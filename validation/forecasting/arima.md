@@ -1,10 +1,12 @@
 # Validation: ARIMA
 
 Registry: [`validation/methods/forecasting_arima.json`](../methods/forecasting_arima.json)
-(methods `arima_css` and `arima_forecast`). R cases: `arima_css_forecast` and
-`arima_fixed_forecast` in
+(methods `arima_css` and `arima_forecast`). R cases: `arima_css_forecast`,
+`arima_fixed_forecast` and `arima_misspecified_seasonal` in
 [`validation/r/cases/forecasting_arima.R`](../r/cases/forecasting_arima.R), on
-`validation/datasets/generated/arima_series.csv` (n = 300, written by the case file).
+`validation/datasets/generated/arima_series.csv` (n = 300) and
+`validation/datasets/generated/arima_misspecified_seasonal.csv` (n = 1000), both written by
+the case file.
 
 Functions: `p2a_core::forecasting::{run_arima_with, forecast_arima_with, ArimaSpec}`;
 `run_arima` and `forecast_arima` are the same with R's defaults (`ArimaSpec::new(p, d, q)`).
@@ -40,11 +42,30 @@ implement (known difference 1).
   and J'e row by row). An iteration takes the Gauss-Newton step when the largest
   `|step_k| / (1 + |coef_k|)` is at most 1e-8 (converged, after a final Gauss-Newton step
   that is kept if it does not raise SSR), and otherwise damped steps
-  `(J'J + lambda diag(J'J)) step = -J'e` with lambda from 1e-3, divided by 10 on an accepted
-  step and multiplied by 10 on a rejected one. Above lambda = 1e16 the rounding floor is
-  reached and the fit counts as converged when the scaled Gauss-Newton step is at most 1e-6.
+  `(J'J + lambda diag(J'J)) step = -J'e` with lambda from 1e-3, under Nielsen's (1999)
+  gain-ratio rule: rho is the actual decrease of SSR over the decrease the linearised model
+  predicts, `step' (lambda diag(J'J) step - J'e)`. A step with rho > 0 is accepted and
+  lambda multiplied by max(1/3, 1 - (2 rho - 1)^3); otherwise lambda is multiplied by nu,
+  which then doubles (nu = 2 again after an accepted step). Above lambda = 1e16 the rounding
+  floor is reached and the fit counts as converged when the scaled Gauss-Newton step is at
+  most 1e-6; the Gauss-Newton step is then tried as at the 1e-8 test (a step that leaves SSR
+  unchanged has rho = 0 and is rejected, so the floor can come a little before that test).
   At most 200 iterations; a fit that stops short is reported with `converged = false` and a
   warning, not as an error.
+- Why the gain ratio: where the model leaves autocorrelated residuals, J'J underestimates
+  the curvature of SSR and the Gauss-Newton map can have an eigenvalue near -1, so the MA
+  coefficient alternates around the optimum while every step still lowers SSR. The earlier
+  rule (accept any step that does not raise SSR, then divide lambda by 10) never damped that
+  2-cycle: ARIMA(1,1,1) with drift on a seasonal series (`arima_misspecified_seasonal`,
+  eigenvalue -1.01 at n = 100 and -0.997 at n = 1000) stopped at the 200-iteration cap with
+  coefficients up to 8e-3 (relative) from the optimum. A step that achieves little of its
+  predicted decrease (rho near 0) now raises lambda, which damps the oscillation: the fit
+  converges in 33 (n = 100) and 32 (n = 1000) iterations, within 1.7e-7 (relative) of the
+  optimum. The 12 fits of `arima_css_forecast` that estimate coefficients take 4 to 26
+  iterations (3 to 28 under the earlier rule).
+- Precision: the stopping rule bounds the last scaled Gauss-Newton step, not the distance to
+  the optimum. Where the Gauss-Newton model is adequate the two are of the same order; the
+  R-pinned fits below agree with the exact optimum to `Tol::iterative(1e-6)` or better.
 - A coefficient whose derivative is identically zero (for example an AR term on a series
   that is constant after differencing) is an error naming it ("not identified").
 
@@ -99,6 +120,21 @@ planning check.
 - `arima_fixed_forecast`: `predict(arima(x, order, fixed = ..., method = "CSS"))` for five
   fixed coefficient vectors, the forecaster alone. `m40_101` (40 observations, MA -0.8) is
   the case the CSS recursion fails.
+- `arima_misspecified_seasonal`: ARIMA(1,1,1) with drift,
+  `forecast::Arima(order = c(1, 1, 1), include.drift = TRUE, method = "CSS")`, on a seasonal
+  series it misspecifies: `validation/datasets/generated/arima_misspecified_seasonal.csv`,
+  y = 0.01 t + 2 sin(pi t / 6) + U(0, 0.5), t = 0..999, seed 42 (the unified benchmark's
+  time-series series), fitted at n = 1000 and on its first 100 values. The residuals stay
+  autocorrelated (0.34 at lag 2, 0.41 / 0.51 at lag 12) and the Gauss-Newton map has an
+  eigenvalue of -1.0099 (n = 100) and -0.9973 (n = 1000) at the optimum; the case asserts
+  it is below -0.99. Gauss-Newton (as for `*_tight` above) does not contract there, and
+  numDeriv's gradient in the drift is off by 2.5e-8 at n = 100, so the exact optimum comes from
+  Newton's method on the analytic gradient of the CSS residuals (their derivatives follow the
+  residual recursion), each evaluation checked against `stats::arima(fixed = ...)`'s
+  residuals to 1e-12; the Hessian is `numDeriv::jacobian` of that gradient (max |gradient| at
+  the solution 1.9e-15 and 3.6e-14). The package values (optim's default `reltol`, the call
+  the benchmark makes) are cross-checks: their drift is 2.8e-5 (n = 100) and 2.4e-6
+  (n = 1000) relative from the optimum.
 
 ### Values (exact CSS optimum)
 
@@ -128,12 +164,26 @@ Forecasts at h = 1:
 The full vectors (h = 1..5, 80% limits, residual heads and tails, SSR, sigma2,
 log-likelihood, AIC) are in `validation/expected/arima_css_forecast.json`.
 
+### Values (misspecified seasonal series, exact CSS optimum)
+
+| Fit | ar1 | ma1 | drift |
+|---|---|---|---|
+| n = 100 | 0.69020288306856947 | 0.16463016415297885 | -0.0040354185164835224 |
+| n = 1000 | 0.70228272647770884 | 0.19138619050272601 | 0.0074334979545297242 |
+| n = 100, forecast::Arima | 0.69020281862898891 | 0.16463018844377031 | -0.0040353049113718798 |
+| n = 1000, forecast::Arima | 0.70228210289857906 | 0.19138623804441671 | 0.0074335159952327885 |
+
+SSR 22.847783951680395 (n = 100) and 222.16078373044002 (n = 1000); the sigma2,
+log-likelihood and AIC at the optimum are in
+`validation/expected/arima_misspecified_seasonal.json`.
+
 ## Tests and tolerances
 
 | Test | Pins | Tolerance |
 |---|---|---|
 | `test_validate_arima_css_fit` | 13 fits: coefficients (tight and package), SSR, sigma2, log-likelihood, AIC, n_cond, number of coefficients, residual head and tail | coefficients `Tol::iterative(1e-6)` against the exact optimum (both sides solved to 1e-8 scaled steps), `Tol::iterative(1e-3)` against forecast::Arima's optimum; SSR, sigma2, loglik, AIC `Tol::stat(300)` = 1e-6; residuals 1e-6 relative + 1e-7 absolute |
 | `test_validate_arima_mean_parameterisation` | `run_arima`: the intercept is the mean, d > 0 fits no drift, the AIC formula | as above |
+| `test_validate_arima_misspecified_seasonal` | ARIMA(1,1,1) with drift on the misspecified seasonal series, n = 100 and 1000: `converged`, no warning, coefficients (tight and package), SSR, sigma2, log-likelihood, AIC | coefficients `Tol::iterative(1e-6)` against the exact optimum, `Tol::iterative(1e-3)` against forecast::Arima's; SSR, sigma2, loglik, AIC `Tol::stat(n)` |
 | `test_validate_arima_css_forecast` | 13 fits: forecasts, SE, 80/95% limits (h = 1..5) | `Tol::stat(300)`; forecast::Arima's means at `Tol::iterative(1e-5)` |
 | `test_validate_arima_forecast_default_spec` | `forecast_arima` (R's defaults) on a_100, c_011, dr_121 | `Tol::stat(300)` |
 | `test_validate_arima_fixed_forecast` | `predict.Arima` for fixed coefficients (n = 300 and 40), CSS residual tails | `Tol::coef(n)`, `Tol::se(n)` |
@@ -179,3 +229,5 @@ Tests: `test_na_arima_int64_and_missing` (and, for the other time-series entry p
   Statistics*, 29(3), 311-322.
 - Hyndman, R.J. & Khandakar, Y. (2008). "Automatic Time Series Forecasting: The forecast
   Package for R". *Journal of Statistical Software*, 27(3).
+- Nielsen, H.B. (1999). *Damping Parameter in Marquardt's Method*. Report IMM-REP-1999-05,
+  Technical University of Denmark.

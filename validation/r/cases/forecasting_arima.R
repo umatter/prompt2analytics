@@ -148,6 +148,78 @@ case("arima_fixed_forecast", "forecasting/arima", "ARIMA forecasts for given coe
        call = "predict(arima(x, order, fixed = ..., method = 'CSS'), n.ahead = 8)", packages = character(0))
 })
 
+# A seasonal series that ARIMA(1,1,1) with drift misspecifies (TS-35): the unified benchmark's
+# time-series DGP (trend 0.01 t, period-12 sine of amplitude 2, uniform noise), n = 1000, and its
+# first 100 values (runif draws in order, so they are the n = 100 series). The fit leaves residual
+# autocorrelation (about 0.34 at lag 2, 0.4-0.5 at lag 12), so J'J underestimates the curvature of
+# the CSS objective in the MA coefficient and the Gauss-Newton iteration has an eigenvalue near -1
+# at the optimum: the case asserts that, so it keeps exercising the oscillation. .css_tight is
+# Gauss-Newton and does not contract there, and numDeriv's gradient in the drift is off by 2.5e-8
+# at n = 100 (8e-7 relative in the drift after a Newton solve), so the exact optimum comes from
+# Newton's method on the analytic gradient of the CSS residuals (their derivatives follow the
+# residual recursion), each pass checked against R's own residuals (stats::arima(fixed = ...)).
+.css_d1_drift <- function(par, x, p, q) {
+  phi <- par[seq_len(p)]; theta <- par[p + seq_len(q)]; drift <- par[p + q + 1]
+  w <- diff(x) - drift; rows <- (p + 1):length(w)
+  ma <- function(u) if (q) as.numeric(stats::filter(u, -theta, method = "recursive")) else u
+  ar <- if (p) drop(sapply(seq_len(p), function(i) w[rows - i]) %*% phi) else 0
+  e <- ma(w[rows] - ar)
+  e_r <- .css_resid(par, x, c(p, 1, q), FALSE, TRUE)[-(1:(p + 1))]
+  stopifnot(max(abs(e - e_r)) < 1e-12 * max(1, abs(e)))
+  # Derivatives of e over the rows after the p conditioning ones (before them all are 0).
+  J <- cbind(if (p) sapply(seq_len(p), function(i) ma(-w[rows - i])),
+             if (q) sapply(seq_len(q), function(j) ma(-c(rep(0, j), e)[seq_along(rows)])),
+             ma(rep(-(1 - sum(phi)), length(rows))))
+  list(e = e, J = J, grad = 2 * drop(crossprod(J, e)))
+}
+.css_newton_d1_drift <- function(x, p, q, start) {
+  g <- function(par) .css_d1_drift(par, x, p, q)$grad
+  par <- start
+  for (i in 1:30) {
+    H <- numDeriv::jacobian(g, par)
+    step <- -drop(solve((H + t(H)) / 2, g(par)))
+    par <- par + step
+    if (max(abs(step) / pmax(abs(par), 1)) < 1e-14) break
+  }
+  H <- numDeriv::jacobian(g, par); H <- (H + t(H)) / 2
+  r <- .css_d1_drift(par, x, p, q)
+  list(par = par, ssr = sum(r$e^2), max_abs_grad = max(abs(r$grad)),
+       gn_eigen = Re(eigen(diag(length(par)) - solve(2 * crossprod(r$J), H), only.values = TRUE)$values),
+       acf = acf(r$e, lag.max = 12, plot = FALSE)$acf[-1])
+}
+
+case("arima_misspecified_seasonal", "forecasting/arima", "ARIMA(1,1,1) with drift by CSS on a seasonal series it misspecifies (forecast::Arima, method = 'CSS')", function(ctx) {
+  set.seed(42)
+  n_all <- 1000; t0 <- 0:(n_all - 1)
+  d <- ctx$gen_dataset("arima_misspecified_seasonal",
+                       data.frame(y = 0.01 * t0 + 2 * sin(t0 * pi / 6) + runif(n_all, 0, 0.5)))
+  v <- list()
+  for (n in c(100, 1000)) {
+    x <- d$y[seq_len(n)]; key <- paste0("n", n)
+    # The call as users (and the benchmark) make it: optim's default reltol.
+    f <- forecast::Arima(x, order = c(1, 1, 1), include.drift = TRUE, method = "CSS")
+    tt <- .css_newton_d1_drift(x, 1, 1, unname(coef(f)))
+    stopifnot(min(tt$gn_eigen) < -0.99, tt$max_abs_grad < 1e-10)
+    k <- length(coef(f))
+    ft <- suppressWarnings(forecast::Arima(x, order = c(1, 1, 1), include.drift = TRUE, method = "CSS",
+                                           fixed = tt$par, transform.pars = FALSE))
+    v[[paste0(key, "_coef")]] <- named(coef(f))
+    v[[paste0(key, "_coef_tight")]] <- named(setNames(tt$par, names(coef(f))))
+    v[[paste0(key, "_ssr_tight")]] <- tt$ssr
+    v[[paste0(key, "_sigma2_tight")]] <- tt$ssr / (n - 1 - k)               # forecast::Arima's sigma2
+    v[[paste0(key, "_loglik_tight")]] <- ft$loglik
+    v[[paste0(key, "_aic_css_tight")]] <- -2 * ft$loglik + 2 * (k + 1)      # R reports NA for CSS fits
+    v[[paste0(key, "_max_abs_grad_tight")]] <- tt$max_abs_grad
+    v[[paste0(key, "_gn_eigen_min_tight")]] <- min(tt$gn_eigen)
+    v[[paste0(key, "_resid_acf_lag2_tight")]] <- tt$acf[2]
+    v[[paste0(key, "_resid_acf_lag12_tight")]] <- tt$acf[12]
+    v[[paste0(key, "_n")]] <- n
+  }
+  list(values = v,
+       reference = "forecast::Arima(order = c(1, 1, 1), include.drift = TRUE, method = 'CSS'); *_tight: Newton's method on the analytic gradient of the stats::arima(fixed = ...) CSS residuals, Hessian by numDeriv::jacobian",
+       call = "Arima(y[1:n], order = c(1, 1, 1), include.drift = TRUE, method = 'CSS')", packages = c("forecast", "numDeriv"))
+})
+
 # Granger causality on an integer series (lmtest::grangertest, default method; no missing cells in
 # these columns). p2a refuses missing values here: grangertest's two interfaces disagree on them
 # (the formula method's model.frame drops the NA rows and then lags the spliced series; the default

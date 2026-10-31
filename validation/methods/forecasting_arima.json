@@ -5,17 +5,18 @@
       "id": "arima_css",
       "name": "ARIMA(p,d,q) by conditional sum of squares: coefficients, mean, drift, sigma^2, CSS log-likelihood, AIC",
       "category": "forecasting",
-      "reference": "forecast::Arima(method = 'CSS'), re-solved to the exact CSS optimum (Gauss-Newton on stats::arima(fixed) residuals, numDeriv::jacobian); stats::arima CSS log-likelihood",
+      "reference": "forecast::Arima(method = 'CSS'), re-solved to the exact CSS optimum (Gauss-Newton on stats::arima(fixed) residuals, numDeriv::jacobian; for the misspecified seasonal series, where Gauss-Newton does not contract, Newton's method on the analytic gradient of those residuals); stats::arima CSS log-likelihood",
       "doc": "validation/forecasting/arima.md",
-      "cases": ["arima_css_forecast"],
+      "cases": ["arima_css_forecast", "arima_misspecified_seasonal"],
       "tests": [
         "p2a-core::forecasting::arima_model::tests::test_validate_arima_css_fit",
         "p2a-core::forecasting::arima_model::tests::test_validate_arima_mean_parameterisation",
+        "p2a-core::forecasting::arima_model::tests::test_validate_arima_misspecified_seasonal",
         "p2a-mcp::tools::handlers::timeseries::tests::test_validate_mcp_ts_arima_fit_drift",
         "p2a-cli::tier2::wp16_arima::test_validate_cli_ts_arima_json"
       ],
-      "quantities": ["coefficients (R names; mean, drift)", "SSR", "sigma2 (SSR / (n - d - k))", "CSS log-likelihood", "AIC -2 loglik + 2 (k + 1)", "n_cond", "residuals (head, tail)", "package optimum (cross-check)"],
-      "tolerance": "coefficients Tol::iterative(1e-6) against the exact CSS optimum (iterative; both sides solved to 1e-8 scaled steps), forecast::Arima's own optimum at 1e-3; SSR, sigma2, loglik, AIC Tol::stat(300) = 1e-6; residuals abs 1e-7; MCP/CLI text at print precision",
+      "quantities": ["coefficients (R names; mean, drift)", "SSR", "sigma2 (SSR / (n - d - k))", "CSS log-likelihood", "AIC -2 loglik + 2 (k + 1)", "n_cond", "residuals (head, tail)", "package optimum (cross-check)", "converged, no warning (ARIMA(1,1,1) with drift on a misspecified seasonal series)"],
+      "tolerance": "coefficients Tol::iterative(1e-6) against the exact CSS optimum (iterative; both sides solved to 1e-8 scaled steps), forecast::Arima's own optimum at 1e-3; SSR, sigma2, loglik, AIC Tol::stat(n) (1e-6 for n = 100..1000); residuals abs 1e-7; MCP/CLI text at print precision",
       "deviations": [],
       "supersedes_legacy": []
     },
