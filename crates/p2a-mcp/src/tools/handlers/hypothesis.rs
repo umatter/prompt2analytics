@@ -13,7 +13,7 @@
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, check_named_budget, missing_json, numeric_columns,
+    MissingSummary, NaPolicy, check_named_budget, insert_missing, missing_json, numeric_columns,
 };
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
@@ -431,9 +431,7 @@ impl AnalyticsServer {
                         "method": "exact conditional (as R fisher.test)",
                     });
                 }
-                if let Some(missing) = missing_json(&result.missing) {
-                    json_output["missing"] = missing;
-                }
+                insert_missing(&mut json_output, &result.missing);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -1661,13 +1659,6 @@ fn whole_counts(name: &str, values: &[f64], rows: &[usize]) -> Result<Vec<usize>
         counts.push(count);
     }
     Ok(counts)
-}
-
-/// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped.
-fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
-    if let Some(m) = missing_json(missing) {
-        output["missing"] = m;
-    }
 }
 
 /// Refuses a pairwise test whose factor has more groups than the `max_groups` budget, before any

@@ -187,6 +187,14 @@ pub fn missing_json(missing: &MissingSummary) -> Option<serde_json::Value> {
         .and_then(Result::ok)
 }
 
+/// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped; leaves
+/// it as it is otherwise.
+pub fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
+    if let Some(m) = missing_json(missing) {
+        output["missing"] = m;
+    }
+}
+
 /// The legacy helpers' refusal of a column that is not numeric (a text, date or other
 /// column; an entirely null column passes as all-NaN).
 fn legacy_numeric_check(col: &p2a_core::polars::prelude::Column, name: &str) -> Result<(), String> {
@@ -523,6 +531,23 @@ mod tests {
                 p2a_validation::Tol::exact(),
             )
             .finish();
+    }
+
+    #[test]
+    fn test_mcp_insert_missing_adds_the_key_only_when_rows_were_dropped() {
+        let dropped = MissingSummary {
+            n_total: 10,
+            n_used: 7,
+            n_dropped: 3,
+            by_column: vec![("y".to_string(), 2), ("n".to_string(), 1)],
+        };
+        let mut output = serde_json::json!({"statistic": 1.5});
+        insert_missing(&mut output, &dropped);
+        assert_eq!(output["missing"], missing_json(&dropped).unwrap());
+        assert_eq!(output["statistic"], 1.5);
+        let mut untouched = serde_json::json!({"statistic": 1.5});
+        insert_missing(&mut untouched, &MissingSummary::none(10));
+        assert_eq!(untouched, serde_json::json!({"statistic": 1.5}));
     }
 
     #[test]

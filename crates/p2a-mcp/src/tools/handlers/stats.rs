@@ -23,7 +23,7 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, missing_json,
+    MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, insert_missing,
     numeric_column, numeric_columns, numeric_matrix,
 };
 use crate::tools::requests::stats::{
@@ -1996,13 +1996,6 @@ impl AnalyticsServer {
                 e
             ))])),
         }
-    }
-}
-
-/// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped.
-fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
-    if let Some(m) = missing_json(missing) {
-        output["missing"] = m;
     }
 }
 
