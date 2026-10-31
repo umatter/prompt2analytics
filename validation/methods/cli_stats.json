@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cli_stats_t_tests",
+      "name": "CLI stats t-test-one, t-test-two, t-test-paired with missing values and Int64 columns",
+      "category": "interfaces",
+      "reference": "stats::t.test (one-sample with mu/conf.level, Welch, var.equal = TRUE, paired = TRUE; NA removed as t.test does)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_two_sample_na",
+        "cli_stat_descriptive_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_one_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_one_int64",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_paired_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_two_na"
+      ],
+      "quantities": [
+        "t",
+        "df",
+        "p",
+        "CI",
+        "mean / means and their difference",
+        "SE",
+        "n",
+        "missing-value note and JSON summary"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

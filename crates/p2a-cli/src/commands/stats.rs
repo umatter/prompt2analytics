@@ -1,6 +1,7 @@
 //! Statistical tests and descriptive statistics commands
 
 use clap::{Subcommand, ValueEnum};
+use p2a_core::data::columns::MissingSummary;
 use p2a_core::{
     AcfType,
     Alternative,
@@ -9,10 +10,7 @@ use p2a_core::{
     WilcoxonConfig,
     // ACF/PACF/CCF (raw data versions)
     acf,
-    // T-tests
-    one_sample_t_test,
     pacf,
-    paired_t_test,
     run_bartlett_test,
     // Box test (Ljung-Box)
     run_box_test,
@@ -40,12 +38,16 @@ use p2a_core::{
     // Tukey HSD
     run_tukey_hsd,
     run_two_way_anova,
-    two_sample_t_test,
+    // T-tests (dataset wrapper: drops missing values as t.test does)
+    t_test,
     wilcoxon_rank_sum,
     wilcoxon_signed_rank,
 };
 
-use crate::output::{OutputFormat, print_error, validate_column_exists, validate_confidence_level};
+use crate::output::{
+    OutputFormat, missing_json, print_error, print_missing_note, validate_column_exists,
+    validate_confidence_level,
+};
 use crate::session::SessionManager;
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -780,6 +782,16 @@ pub fn execute(
     }
 }
 
+/// Prints `json` pretty, with a `"missing"` object (`output::missing_json`) when rows were
+/// dropped because of missing values.
+fn print_json(mut json: serde_json::Value, missing: &MissingSummary) -> anyhow::Result<()> {
+    if let (Some(summary), Some(object)) = (missing_json(missing), json.as_object_mut()) {
+        object.insert("missing".to_string(), summary);
+    }
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
+}
+
 /// Helper to extract a column as `Vec<f64>`
 fn extract_column(dataset: &p2a_core::Dataset, col: &str) -> Result<Vec<f64>, String> {
     let df = dataset.df();
@@ -831,18 +843,10 @@ fn execute_t_test_one(
                 return Ok(());
             }
 
-            let data = match extract_column(ds, col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let alt: Alternative = alternative.into();
-            log::debug!("Sample size: {}", data.len());
-            match one_sample_t_test(&data, mu, alt, conf_level) {
+            match t_test(ds, col, None, mu, alt, false, false, conf_level) {
                 Ok(result) => {
+                    log::debug!("Sample size: {}", result.n);
                     log::info!(
                         "t-test completed: t={:.4}, df={:.1}, p={:.6}",
                         result.t_statistic,
@@ -860,8 +864,10 @@ fn execute_t_test_one(
                                 "ci_upper": result.conf_int_upper,
                                 "mean": result.estimate,
                                 "null_value": mu,
+                                "std_error": result.std_error,
+                                "n": result.n,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &result.missing)?;
                         }
                         _ => {
                             println!("\nOne-sample t-test");
@@ -878,6 +884,7 @@ fn execute_t_test_one(
                                 result.conf_int_upper
                             );
                             println!("Sample mean: {:.4}", result.estimate);
+                            print_missing_note(&result.missing, format);
                         }
                     }
                 }
@@ -908,25 +915,12 @@ fn execute_t_test_two(
 
     match dataset {
         Some(ds) => {
-            let data1 = match extract_column(ds, col1) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let data2 = match extract_column(ds, col2) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let alt: Alternative = alternative.into();
-            match two_sample_t_test(&data1, &data2, 0.0, alt, equal_var, 0.95) {
+            match t_test(ds, col1, Some(col2), 0.0, alt, false, equal_var, 0.95) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
+                        // `estimate` is the mean of col1 and `estimate_2` that of col2.
+                        let mean_y = result.estimate_2.unwrap_or(f64::NAN);
                         let json = serde_json::json!({
                             "test": if equal_var { "Two-sample t-test (equal variances)" } else { "Welch's t-test" },
                             "t_statistic": result.t_statistic,
@@ -934,9 +928,14 @@ fn execute_t_test_two(
                             "p_value": result.p_value,
                             "ci_lower": result.conf_int_lower,
                             "ci_upper": result.conf_int_upper,
-                            "mean_difference": result.estimate,
+                            "mean_difference": result.estimate - mean_y,
+                            "mean_x": result.estimate,
+                            "mean_y": mean_y,
+                            "n_x": result.n,
+                            "n_y": result.n_2,
+                            "std_error": result.std_error,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         let test_name = if equal_var {
@@ -954,7 +953,14 @@ fn execute_t_test_two(
                             "95% CI for difference: [{:.4}, {:.4}]",
                             result.conf_int_lower, result.conf_int_upper
                         );
-                        println!("Mean difference: {:.4}", result.estimate);
+                        if let Some(mean_y) = result.estimate_2 {
+                            println!(
+                                "Means: {} = {:.4}, {} = {:.4}",
+                                col1, result.estimate, col2, mean_y
+                            );
+                            println!("Mean difference: {:.4}", result.estimate - mean_y);
+                        }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("t-test failed: {}", e), format),
@@ -983,23 +989,8 @@ fn execute_t_test_paired(
 
     match dataset {
         Some(ds) => {
-            let data1 = match extract_column(ds, col1) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let data2 = match extract_column(ds, col2) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let alt: Alternative = alternative.into();
-            match paired_t_test(&data1, &data2, 0.0, alt, 0.95) {
+            match t_test(ds, col1, Some(col2), 0.0, alt, true, false, 0.95) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({
@@ -1010,8 +1001,10 @@ fn execute_t_test_paired(
                             "ci_lower": result.conf_int_lower,
                             "ci_upper": result.conf_int_upper,
                             "mean_difference": result.estimate,
+                            "std_error": result.std_error,
+                            "n": result.n,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nPaired t-test");
@@ -1025,6 +1018,7 @@ fn execute_t_test_paired(
                             result.conf_int_lower, result.conf_int_upper
                         );
                         println!("Mean difference: {:.4}", result.estimate);
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Paired t-test failed: {}", e), format),
