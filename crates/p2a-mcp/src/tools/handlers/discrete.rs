@@ -194,6 +194,7 @@ impl AnalyticsServer {
             max_iter: 200,
             tolerance: 1e-6,
             seed: Some(42),
+            ..Default::default()
         };
 
         let result = match run_gmnl(

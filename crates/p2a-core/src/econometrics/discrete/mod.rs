@@ -295,6 +295,7 @@ mod tests {
                 max_iter: 50,
                 tolerance: 1e-4,
                 seed: Some(42),
+                ..Default::default()
             }),
         )
         .unwrap();

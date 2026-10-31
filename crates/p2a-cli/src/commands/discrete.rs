@@ -1505,6 +1505,7 @@ fn execute_mixed_logit(
                 max_iter: 200,
                 tolerance: 1e-6,
                 seed: Some(42),
+                ..Default::default()
             };
 
             match run_mixed_logit(
