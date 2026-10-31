@@ -139,7 +139,7 @@ A directory listing inside the server's data root. Registered as `GET /api/sessi
 GET /api/sessions/{session_id}/datasets
 ```
 
-The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width. The rows count against the session's `session_db_bytes`; a dataset whose row would pass it has no row here.
+The path id is the caller; it must be a live session (404 otherwise), and a `X-P2A-Session-Id` header that names another session answers 404. `column_names` holds the dataset's first column names, at most 1,000 of them and 64 KiB; `column_count` is its full width. A dataset loaded with `na_strings` lists them as `na_strings`. The rows count against the session's `session_db_bytes`; a dataset whose row would pass it has no row here.
 
 **Response** (captured):
 ```json
@@ -151,7 +151,7 @@ The path id is the caller; it must be a live session (404 otherwise), and a `X-P
 POST /api/sessions/{session_id}/datasets/reload
 ```
 
-The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file is checked before parsing as `load_dataset` checks it: it must fit `load_file_bytes`, and a Parquet file whose decoded dataset would exceed the dataset quotas is refused before it is decoded, with `load_dataset`'s refusal. Each reloaded dataset must also fit the dataset quotas once loaded. A dataset refused by any of these checks is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded` (for a Parquet file the check would not read, followed by the reason); none of them holds a server path. Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
+The reload runs as one governed call (memory admission, the session's slot, the deadline) inside the session's data directory. Each source file is checked before parsing as `load_dataset` checks it: it must fit `load_file_bytes`, and a Parquet file whose decoded dataset would exceed the dataset quotas is refused before it is decoded, with `load_dataset`'s refusal. Each reloaded dataset must also fit the dataset quotas once loaded. A dataset refused by any of these checks is reported in `failed`. A `failed` entry's `error` is the `load_file_bytes` refusal (as in the example below), a dataset-quota refusal, `path is not inside this session's data directory` or `the file could not be loaded` (for a Parquet file the check would not read, followed by the reason); none of them holds a server path. A dataset loaded with `na_strings` is read with them again. Only a dataset loaded with `load_dataset` has a source path to reload; uploaded and inline (`create_dataset`) datasets are reported in `skipped`. A governor refusal answers like a refused tool call (see [Errors](#errors-status-codes-and-retries)).
 
 **Request:** (empty body)
 ```json

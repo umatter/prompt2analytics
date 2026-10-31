@@ -256,6 +256,9 @@ pub struct DatasetMetaResponse {
     pub loaded_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_size_bytes: Option<i64>,
+    /// The `na_strings` the dataset was loaded with, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub na_strings: Option<Vec<String>>,
 }
 
 impl From<DatasetMeta> for DatasetMetaResponse {
@@ -271,6 +274,7 @@ impl From<DatasetMeta> for DatasetMetaResponse {
             column_names: meta.column_names,
             loaded_at: chrono::DateTime::<chrono::Utc>::from(meta.loaded_at).to_rfc3339(),
             file_size_bytes: meta.file_size_bytes,
+            na_strings: meta.na_strings,
         }
     }
 }
@@ -838,6 +842,7 @@ mod tests {
             .map(|name| ReloadSource {
                 name: (*name).to_string(),
                 source_path: format!("{name}.parquet"),
+                na_strings: None,
             })
             .collect()
     }

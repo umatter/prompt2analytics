@@ -764,6 +764,7 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS column_names ON dataset_meta TYPE array<string>;
             DEFINE FIELD IF NOT EXISTS loaded_at ON dataset_meta TYPE datetime;
             DEFINE FIELD IF NOT EXISTS file_size_bytes ON dataset_meta TYPE option<int>;
+            DEFINE FIELD IF NOT EXISTS na_strings ON dataset_meta TYPE option<array<string>>;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_session ON dataset_meta COLUMNS session_id;
             DEFINE INDEX IF NOT EXISTS idx_dataset_meta_id ON dataset_meta COLUMNS id UNIQUE;
         "#;
