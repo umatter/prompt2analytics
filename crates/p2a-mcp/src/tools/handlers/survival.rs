@@ -245,13 +245,11 @@ fn check_log_rank_groups(dataset: &p2a_core::data::Dataset, group: &str) -> Resu
     let Some(max_groups) = crate::tools::limits::current().max_groups else {
         return Ok(());
     };
-    let Ok(col) = dataset.df().column(group) else {
+    let refused = |msg: String| format!("Log-rank test refused: {msg}");
+    let Some(k) = crate::tools::common::budget_group_count(dataset.df(), group).map_err(refused)?
+    else {
         return Ok(());
     };
-    let refused = |msg: String| format!("Log-rank test refused: {msg}");
-    let n_unique =
-        crate::tools::common::level_count_or_refusal(group, col.n_unique()).map_err(refused)?;
-    let k = n_unique.saturating_sub(usize::from(col.null_count() > 0)) as u64;
     crate::tools::common::check_named_budget("log_rank", "max_groups", k, Some(max_groups as u64))
         .map_err(|msg| {
             refused(format!(
@@ -381,7 +379,9 @@ mod tests {
         let time: Vec<f64> = (0..rows)
             .map(|i| 1.0 + ((i * 7919) % 997) as f64 / 37.0)
             .collect();
-        let status: Vec<i64> = (0..rows).map(|i| ((i / groups) % 3 != 0) as i64).collect();
+        let status: Vec<i64> = (0..rows)
+            .map(|i| (!(i / groups).is_multiple_of(3)) as i64)
+            .collect();
         let g: Vec<String> = (0..rows).map(|i| format!("g{}", i % groups)).collect();
         p2a_core::polars::prelude::df! { "time" => time, "status" => status, "g" => g }.unwrap()
     }

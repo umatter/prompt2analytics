@@ -13,8 +13,8 @@
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, budget_level_count, check_named_budget, insert_missing,
-    level_count_or_refusal, missing_json, numeric_columns,
+    MissingSummary, NaPolicy, budget_group_count, budget_level_count, check_named_budget,
+    insert_missing, missing_json, numeric_columns,
 };
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
@@ -1677,12 +1677,11 @@ fn check_pairwise_groups(
     let Some(max_groups) = crate::tools::limits::current().max_groups else {
         return Ok(());
     };
-    let Ok(col) = dataset.df().column(factor) else {
+    let Some(k) = budget_group_count(dataset.df(), factor)
+        .map_err(|msg| format!("Pairwise {label} refused: {msg}"))?
+    else {
         return Ok(());
     };
-    let n_unique = level_count_or_refusal(factor, col.n_unique())
-        .map_err(|msg| format!("Pairwise {label} refused: {msg}"))?;
-    let k = n_unique.saturating_sub(usize::from(col.null_count() > 0)) as u64;
     check_named_budget(tool, "max_groups", k, Some(max_groups as u64)).map_err(|msg| {
         let comparisons = k.saturating_mul(k.saturating_sub(1)) / 2;
         format!(
@@ -1746,6 +1745,7 @@ fn lower_triangular_p_matrix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::common::level_count_or_refusal;
     use crate::tools::common::test_support::{hosted_with, server_with, text};
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
