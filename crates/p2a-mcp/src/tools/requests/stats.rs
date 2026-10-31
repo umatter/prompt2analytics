@@ -407,7 +407,7 @@ pub struct MedpolishRequest {
 
     /// Column names to use as the matrix
     #[schemars(
-        description = "Names of the numeric columns to use as the matrix for median polish. The columns become the columns of the matrix, and each row of the dataset becomes a row of the matrix."
+        description = "Names of the numeric columns to use as the matrix for median polish. The columns become the columns of the matrix, and each row of the dataset becomes a row of the matrix. Integer and float columns are accepted."
     )]
     pub columns: Vec<String>,
 
@@ -423,7 +423,7 @@ pub struct MedpolishRequest {
 
     /// Handle missing values
     #[schemars(
-        description = "Whether to remove NaN values when computing medians (default: false). If false, the function fails if NaN values are present."
+        description = "Whether to ignore missing cells (null or NaN) when computing medians (default: false, as R's medpolish; then a missing cell is an error)."
     )]
     pub na_rm: Option<bool>,
 }
@@ -471,12 +471,14 @@ pub struct IsoregRequest {
 
     /// Column for x values (predictor)
     #[schemars(
-        description = "Name of the column to use as x (predictor). If not provided, uses row index."
+        description = "Name of the column to use as x (predictor). If not provided, uses row index. Missing values are refused, as R's isoreg does."
     )]
     pub x_column: Option<String>,
 
     /// Column for y values (response)
-    #[schemars(description = "Name of the column to use as y (response variable).")]
+    #[schemars(
+        description = "Name of the column to use as y (response variable). Missing values are refused, as R's isoreg does."
+    )]
     pub y_column: String,
 }
 

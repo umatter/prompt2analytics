@@ -1318,80 +1318,52 @@ impl AnalyticsServer {
 
     /// Run isotonic regression (monotonic constraint).
     #[tool(
-        description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed."
+        description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed. Missing values are refused, as R's isoreg does."
     )]
     pub async fn descriptive_isoreg(
         &self,
         Parameters(request): Parameters<IsoregRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        let y_col = match df.column(&request.y_column) {
+        // isoreg refuses missing values, as R's isoreg does ("missing values not allowed")
+        let mut names = vec![request.y_column.as_str()];
+        if let Some(x) = &request.x_column {
+            names.push(x.as_str());
+        }
+        let cols = match numeric_columns(dataset, &names, NaPolicy::Fail) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Y column '{}' not found: {}",
-                    request.y_column, e
+                    "Isotonic regression failed: {e}"
                 ))]));
             }
         };
-
-        let y: Vec<f64> = match y_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_no_null_iter().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Y column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot cast Y column: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let x: Vec<f64> = if let Some(ref x_col_name) = request.x_column {
-            let x_col = match df.column(x_col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "X column '{}' not found: {}",
-                        x_col_name, e
-                    ))]));
-                }
-            };
-            match x_col.cast(&DataType::Float64) {
-                Ok(c) => match c.f64() {
-                    Ok(f) => f.into_no_null_iter().collect(),
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "X column not numeric: {}",
-                            e
-                        ))]));
-                    }
-                },
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot cast X column: {}",
-                        e
-                    ))]));
-                }
-            }
+        let y = cols.numeric(&request.y_column);
+        // Without an x column, x is the row index 1..=n
+        let row_index: Vec<f64> = if request.x_column.is_some() {
+            Vec::new()
         } else {
-            (1..=y.len()).map(|i| i as f64).collect()
+            match p2a_core::resource::try_with_capacity(y.len(), "row index") {
+                Ok(mut v) => {
+                    v.extend((1..=y.len()).map(|i| i as f64));
+                    v
+                }
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Isotonic regression failed: {e}"
+                    ))]));
+                }
+            }
+        };
+        let x = match &request.x_column {
+            Some(name) => cols.numeric(name),
+            None => &row_index,
         };
 
-        let result = match isoreg(&x, &y) {
+        let result = match isoreg(x, y) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1456,31 +1428,26 @@ impl AnalyticsServer {
             ))]));
         }
 
-        let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
-        for row_idx in 0..n_rows {
-            let mut row_values: Vec<f64> = Vec::with_capacity(request.columns.len());
-            for col_name in &request.columns {
-                let col = match df.column(col_name) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' not found in dataset.",
-                            col_name
-                        ))]));
-                    }
-                };
-                let val = match col.f64() {
-                    Ok(ca) => ca.get(row_idx).unwrap_or(f64::NAN),
-                    Err(_) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' is not numeric.",
-                            col_name
-                        ))]));
-                    }
-                };
-                row_values.push(val);
+        // Each column read once; a missing cell is NaN, which run_medpolish skips with
+        // na_rm = true and refuses otherwise, as R's medpolish does
+        let mut columns: Vec<Vec<Option<f64>>> = Vec::with_capacity(n_cols);
+        for name in &request.columns {
+            match p2a_core::data::columns::numeric_options(df, name) {
+                Ok(values) => columns.push(values),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
             }
-            matrix.push(row_values);
+        }
+        let mut matrix: Vec<Vec<f64>> =
+            match p2a_core::resource::try_with_capacity(n_rows, "median polish matrix") {
+                Ok(m) => m,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Median polish refused: {e}"
+                    ))]));
+                }
+            };
+        for row in 0..n_rows {
+            matrix.push(columns.iter().map(|c| c[row].unwrap_or(f64::NAN)).collect());
         }
 
         let na_rm = request.na_rm.unwrap_or(false);
@@ -2880,5 +2847,81 @@ mod tests {
         let missing = summary(15, 13, serde_json::json!({"xs": 1, "ys": 1}));
         assert_eq!(a["missing"], missing);
         assert_eq!(s["missing"], missing);
+    }
+
+    #[test]
+    fn test_validate_mcp_descriptive_isoreg_int() {
+        // X-2: a missing response was read through into_no_null_iter after a cast and entered
+        // the fit. R: isoreg(x, y) on an Int64 response; isoreg refuses missing values.
+        let (case, rt, server, name) = case_server("stat_isoreg_medpolish_int");
+        let v = json_of(
+            &rt.block_on(server.descriptive_isoreg(req(serde_json::json!(
+                {"dataset": name, "x_column": "x", "y_column": "y"}))))
+                .unwrap(),
+        );
+        // deviation STAT-52: the knot positions (p2a: first index of each block, R: the last)
+        // are not pinned, only their number.
+        Check::new(&case)
+            .vector("isoreg_yf", &nums(&v["fitted_values"]), Tol::coef(10))
+            .scalar("isoreg_n_knots", num(&v["n_knots"]), Tol::exact())
+            .finish();
+        assert_eq!(v["n_observations"], serde_json::json!(10));
+        let e = err_text(
+            &rt.block_on(server.descriptive_isoreg(req(serde_json::json!(
+                {"dataset": name, "x_column": "x", "y_column": "y_na"}))))
+                .unwrap(),
+        );
+        assert!(
+            e.contains("Column 'y_na' contains 1 missing value(s)"),
+            "{e}"
+        );
+        let v = json_of(
+            &rt.block_on(server.descriptive_isoreg(req(serde_json::json!(
+                {"dataset": name, "y_column": "y"}))))
+                .unwrap(),
+        );
+        assert_eq!(v["n_observations"], serde_json::json!(10));
+    }
+
+    #[test]
+    fn test_validate_mcp_descriptive_medpolish_int() {
+        // X-8: every Int64 column was refused ("Column 'c1' is not numeric."). R: medpolish on
+        // the integer matrix, na.rm = TRUE with the missing cell of c3, and on c1, c2, c4.
+        let (case, rt, server, name) = case_server("stat_isoreg_medpolish_int");
+        let call = |columns: serde_json::Value, na_rm: Option<bool>| {
+            let mut a = serde_json::json!({"dataset": name, "columns": columns});
+            if let Some(b) = na_rm {
+                a["na_rm"] = serde_json::json!(b);
+            }
+            rt.block_on(server.descriptive_medpolish(req(a))).unwrap()
+        };
+        let p6 = Tol::printed(6);
+        let mut check = Check::new(&case);
+        for (prefix, columns, na_rm) in [
+            (
+                "mp",
+                serde_json::json!(["c1", "c2", "c3", "c4"]),
+                Some(true),
+            ),
+            ("mp3", serde_json::json!(["c1", "c2", "c4"]), None),
+        ] {
+            let v = json_of(&call(columns, na_rm));
+            let rows: Vec<f64> = v["row_effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| str_num(&r["effect"]))
+                .collect();
+            let cols = v["column_effects"].as_array().unwrap();
+            let names: Vec<&str> = cols.iter().map(|c| c["column"].as_str().unwrap()).collect();
+            let effects: Vec<f64> = cols.iter().map(|c| str_num(&c["effect"])).collect();
+            check
+                .scalar(&format!("{prefix}_overall"), str_num(&v["overall"]), p6)
+                .vector(&format!("{prefix}_row"), &rows, p6)
+                .named(&format!("{prefix}_col"), &names, &effects, p6);
+        }
+        check.finish();
+        let e = err_text(&call(serde_json::json!(["c1", "c2", "c3", "c4"]), None));
+        assert!(e.contains("na_rm"), "{e}");
     }
 }

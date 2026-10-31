@@ -181,6 +181,32 @@
         {"finding": "STAT-87", "quantity": "stats_fivenum iqr field", "note": "the hinge spread, not R's IQR; not pinned"}
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_descriptive_isoreg",
+      "name": "MCP descriptive_isoreg on an integer response; missing values refused",
+      "category": "stats",
+      "reference": "stats::isoreg(x, y) (x without ties)",
+      "doc": "validation/stats/isoreg.md",
+      "cases": ["stat_isoreg_medpolish_int"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_descriptive_isoreg_int"],
+      "quantities": ["fitted values (sorted x)", "number of knots", "n", "refusal of a missing y"],
+      "tolerance": "validation/README.md, n = 10 (< 100): fitted values 1e-6 relative; counts exact",
+      "deviations": [{"finding": "STAT-52", "quantity": "knot positions", "note": "p2a reports the first index of each block, R's iKnots the last; tied x are not pooled; only the number of knots is pinned"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_descriptive_medpolish",
+      "name": "MCP descriptive_medpolish on integer columns with a missing cell",
+      "category": "stats",
+      "reference": "stats::medpolish(na.rm = TRUE | FALSE), eps = 0.01, maxiter = 10",
+      "doc": "validation/stats/medpolish.md",
+      "cases": ["stat_isoreg_medpolish_int"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_descriptive_medpolish_int"],
+      "quantities": ["overall effect", "row effects", "column effects (na.rm = TRUE with a missing cell; complete columns)", "refusal with na.rm = FALSE"],
+      "tolerance": "MCP text at its 6 printed decimals (Tol::printed(6))",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

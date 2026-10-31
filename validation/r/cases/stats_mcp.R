@@ -131,6 +131,37 @@ case("stat_descriptive_na", "stats/robust", "fivenum, IQR, mad, ecdf, spline and
     packages = character(0))
 })
 
+# Isotonic regression on an integer response (x without ties: STAT-52, the pooling of tied x, is
+# Tier 4) and Tukey's median polish on integer columns, one of them with a missing cell. isoreg
+# refuses missing values ("missing values not allowed"); medpolish skips them only with na.rm = TRUE.
+case("stat_isoreg_medpolish_int", "stats/robust", "isoreg and medpolish on integer columns", function(ctx) {
+  set.seed(523)
+  n <- 10
+  x <- round(runif(n, 0, 20), 2)
+  y <- round(2 * x + rnorm(n, 0, 8))
+  y_na <- y; y_na[6] <- NA
+  re <- rnorm(n, 0, 6); ce <- c(-5, 0, 3, 9)
+  m <- sapply(ce, function(cj) round(40 + re + cj + rnorm(n, 0, 2)))
+  colnames(m) <- paste0("c", 1:4)
+  m[4, "c3"] <- NA
+  d <- ctx$gen_dataset("isoreg_medpolish_int", data.frame(id = 1:n, x = x, y = y, y_na = y_na, m))
+  stopifnot(!anyDuplicated(d$x), is.integer(d$y), is.integer(d$y_na), all(sapply(d[paste0("c", 1:4)], is.integer)))
+  ir <- isoreg(d$x, d$y)
+  e <- tryCatch({ isoreg(d$x, d$y_na); "no error" }, error = conditionMessage)
+  stopifnot(e == "missing values not allowed")
+  mp <- medpolish(as.matrix(d[paste0("c", 1:4)]), na.rm = TRUE, trace.iter = FALSE)
+  mp3 <- medpolish(as.matrix(d[c("c1", "c2", "c4")]), trace.iter = FALSE)
+  e2 <- tryCatch({ medpolish(as.matrix(d[paste0("c", 1:4)]), trace.iter = FALSE); "no error" }, error = conditionMessage)
+  stopifnot(e2 != "no error")
+  list(values = list(isoreg_yf = vec(ir$yf), isoreg_x_sorted = vec(sort(d$x)), isoreg_n_knots = length(ir$iKnots),
+                     isoreg_knots_r = vec(ir$iKnots),
+                     mp_overall = mp$overall, mp_row = vec(mp$row), mp_col = named(mp$col),
+                     mp3_overall = mp3$overall, mp3_row = vec(mp3$row), mp3_col = named(mp3$col)),
+       reference = "stats::isoreg(x, y); stats::medpolish(na.rm = TRUE | FALSE), eps = 0.01, maxiter = 10",
+       call = "isoreg(x, y); medpolish(cbind(c1, c2, c3, c4), na.rm = TRUE); medpolish(cbind(c1, c2, c4))",
+       packages = character(0))
+})
+
 # Chi-squared test for trend in proportions on integer count columns. Group 4 has a missing
 # success count; R's prop.trend.test refuses it ("0 (non-NA) cases"), the MCP tool drops the
 # group and keeps every other group's score (default: its row position, 1, 2, 3, 5, 6, 7).
