@@ -177,8 +177,9 @@ impl std::fmt::Display for ShapiroWilkResult {
 ///
 /// # Errors
 /// As `shapiro.test`: fewer than 3 or more than 5000 non-missing values, or a range below
-/// 1e-10 ("all values identical"). An infinite value is refused too. NaN values are
-/// dropped; a sample whose range is below 1 is divided by its range first.
+/// 1e-10 ("all values identical"). An infinite value is refused too, and so is a sample of
+/// finite values whose range (max - min) overflows. NaN values are dropped; a sample whose
+/// range is below 1 is divided by its range first.
 ///
 /// # Example
 /// ```ignore
@@ -223,6 +224,15 @@ pub fn shapiro_wilk_test(x: &[f64]) -> EconResult<ShapiroWilkResult> {
 
     // shapiro.test: refuse a constant sample, rescale a small range (R PR#1768).
     let range = sorted[n - 1] - sorted[0];
+    if !range.is_finite() {
+        // Finite values whose difference overflows: every x / range would be 0 and W would
+        // come out as 1 (R gives W = NaN). Refused, as an infinite value is.
+        return Err(EconError::InvalidSpecification {
+            message: "Shapiro-Wilk test: the range of x (max - min) overflows; rescale the \
+                      values"
+                .to_string(),
+        });
+    }
     if range < SMALL_RANGE {
         return Err(EconError::InvalidSpecification {
             message: "Shapiro-Wilk test: all 'x' values are identical".to_string(),
@@ -650,6 +660,28 @@ mod tests {
         assert!(
             matches!(&inf, EconError::InvalidSpecification { message } if message.contains("infinite")),
             "{inf}"
+        );
+    }
+
+    #[test]
+    fn test_shapiro_wilk_refuses_overflowing_range() {
+        // Finite values whose range (max - min) is not finite: every x / range is 0, W came out
+        // as 1 and p as 1. R's shapiro.test(c(-1e308, 0, 1e308, 5)) gives W = NaN, p = NA.
+        for x in [
+            vec![-1e308, 0.0, 1e308, 5.0],
+            vec![-f64::MAX, 1.0, 2.5, f64::MAX, -3.0],
+        ] {
+            let e = shapiro_wilk_test(&x).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("range") && message.contains("overflows")),
+                "{x:?}: {e}"
+            );
+        }
+        // A wide range that is finite is computed.
+        let wide = shapiro_wilk_test(&[-1e307, 0.0, 1e307, 5.0, 2e306]).unwrap();
+        assert!(
+            wide.w_statistic.is_finite() && wide.w_statistic < 1.0,
+            "{wide:?}"
         );
     }
 }
