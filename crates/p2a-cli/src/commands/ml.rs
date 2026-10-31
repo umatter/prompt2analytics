@@ -350,7 +350,7 @@ fn ml_columns(
         .extract()
         .map_err(|e| e.to_string())?;
     Ok((
-        c.matrix(&feats, false).data,
+        c.matrix(&feats, false).map_err(|e| e.to_string())?.data,
         target.map(|t| c.numeric_array(t)),
         c.missing().clone(),
     ))

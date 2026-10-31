@@ -31,11 +31,11 @@
 //!    logical `NA`.
 //!
 //! Every pass over the rows is O(n x k). The row mask, the kept rows, the column values,
-//! the time index values and the factor codes are allocated through [`crate::resource`].
-//! [`Columns::matrix`] allocates its n x `names.len()` copy infallibly, as
-//! `DesignMatrix::from_dataframe` does (a name repeated in `names` is copied once per
-//! occurrence), and [`Columns::numeric_array`] copies one column infallibly; per-level
-//! buffers (counts, level remaps) are sized by the number of levels.
+//! the time index values and the factor codes are allocated through [`crate::resource`], and
+//! so is the n x k copy of [`Columns::matrix`] (a name repeated in `names` is copied once per
+//! occurrence, so k can exceed the columns extracted). [`Columns::numeric_array`] copies one
+//! extracted column infallibly; per-level buffers (counts, level remaps) are sized by the
+//! number of levels.
 //!
 //! ```
 //! use p2a_core::data::columns::{ColumnRequest, NaPolicy};
@@ -55,7 +55,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 use polars::prelude::{
     ChunkFullNull, Column, DataFrame, DataType, Float64Chunked, PolarsError, StringChunked,
 };
@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignError, DesignMatrix, get_column_names};
-use crate::resource::{try_vec, try_with_capacity};
+use crate::resource::{try_vec, try_with_capacity, try_zeros2};
 
 /// What to do with rows that have a missing value (null, or NaN in a float column) in any
 /// requested column.
@@ -576,16 +576,17 @@ impl Columns {
     }
 
     /// Design matrix over numeric columns in `names` order; "(Intercept)" first when
-    /// `intercept`. The n x `names.len()` matrix is allocated infallibly (not through
-    /// [`crate::resource`]), as in `DesignMatrix::from_dataframe`.
+    /// `intercept`. The n x (`names.len()` + intercept) matrix is allocated through
+    /// [`crate::resource`]: a matrix above the allocation ceiling is
+    /// [`EconError::ResourceLimit`].
     ///
     /// # Panics
     /// If a name was not requested as numeric.
-    pub fn matrix(&self, names: &[&str], intercept: bool) -> DesignMatrix {
+    pub fn matrix(&self, names: &[&str], intercept: bool) -> EconResult<DesignMatrix> {
         let n = self.n();
-        let k = names.len() + usize::from(intercept);
-        let mut data = Array2::zeros((n, k));
-        let mut column_names = Vec::with_capacity(k);
+        let k = names.len().saturating_add(usize::from(intercept));
+        let mut data = try_zeros2(n, k, "design matrix")?;
+        let mut column_names = try_with_capacity(k, "design matrix column names")?;
         let mut j = 0;
         if intercept {
             data.column_mut(0).fill(1.0);
@@ -599,13 +600,13 @@ impl Columns {
             column_names.push(name.to_string());
             j += 1;
         }
-        DesignMatrix {
+        Ok(DesignMatrix {
             data,
             column_names,
             has_intercept: intercept,
             n_obs: n,
             n_features: k,
-        }
+        })
     }
 
     /// A categorical column on the kept rows.
@@ -1353,7 +1354,7 @@ mod tests {
             .extract()
             .unwrap();
         assert_eq!(cols.rows(), [0, 2, 4, 5, 7, 8, 9]);
-        let m = cols.matrix(&["y", "n"], true);
+        let m = cols.matrix(&["y", "n"], true).unwrap();
         assert_eq!(m.column_names, ["(Intercept)", "y", "n"]);
         assert_eq!(m.n_obs, 7);
         assert_eq!(m.n_features, 3);
@@ -1489,7 +1490,7 @@ mod tests {
         assert_eq!(cols.missing().by_column.len(), 1);
         assert_eq!(cols.missing().by_column[0].0, "y");
         assert_eq!(cols.n(), 8);
-        assert_eq!(cols.matrix(&["y", "y"], false).data.dim(), (8, 2));
+        assert_eq!(cols.matrix(&["y", "y"], false).unwrap().data.dim(), (8, 2));
         // The same name in two roles is extracted in both and counted once.
         let both = ColumnRequest::new(df)
             .numeric("n")
@@ -1791,6 +1792,27 @@ mod tests {
             ColumnRequest::new(&df).numeric("y").extract()
         });
         assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+    }
+
+    #[test]
+    fn test_na_columns_matrix_allocation_is_fallible() {
+        // The extraction holds one column; a design matrix that repeats it many times does not
+        // fit the same ceiling, and is refused instead of allocated.
+        let y: Vec<f64> = (0..64)
+            .map(|i| i as f64 * 0.5 + ((i * 7) % 11) as f64 * 0.1)
+            .collect();
+        let df = df! { "y" => y }.unwrap();
+        let cols = ColumnRequest::new(&df).numeric("y").extract().unwrap();
+        let repeated = vec!["y"; 64];
+        match resource::with_alloc_ceiling(Some(4096), || cols.matrix(&repeated, true)) {
+            Err(EconError::ResourceLimit(message)) => {
+                assert!(message.contains("design matrix"), "{message}")
+            }
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        let small = resource::with_alloc_ceiling(Some(4096), || cols.matrix(&["y"], true)).unwrap();
+        assert_eq!(small.data.dim(), (64, 2));
+        assert_eq!(small.data.column(1).sum(), cols.numeric_array("y").sum());
     }
 
     #[test]

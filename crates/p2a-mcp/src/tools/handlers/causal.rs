@@ -682,7 +682,14 @@ impl AnalyticsServer {
         let x = if cov_names.is_empty() {
             ndarray::Array2::zeros((cols.n(), 0))
         } else {
-            cols.matrix(&cov_names, false).data
+            match cols.matrix(&cov_names, false) {
+                Ok(m) => m.data,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Double ML: {e}"
+                    ))]));
+                }
+            }
         };
 
         // Parse model type
@@ -2281,10 +2288,18 @@ impl AnalyticsServer {
             .iter()
             .map(|c| cols.numeric_array(c))
             .collect();
-        let covariates: Vec<ndarray::Array2<f64>> = cov_lists
+        let covariates: Vec<ndarray::Array2<f64>> = match cov_lists
             .iter()
-            .map(|names_t| cols.matrix(names_t, false).data)
-            .collect();
+            .map(|names_t| cols.matrix(names_t, false).map(|m| m.data))
+            .collect()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "LTMLE: {e}"
+                ))]));
+            }
+        };
 
         // Create LTMLE data structure
         let data = match LtmleData::new(outcomes, treatments, covariates) {

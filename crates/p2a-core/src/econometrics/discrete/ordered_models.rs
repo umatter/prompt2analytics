@@ -351,7 +351,7 @@ pub fn run_ordered_model_with(
     }
 
     // Design matrix (no intercept: it is absorbed into the thresholds)
-    let dm = cols.matrix(x_cols, false);
+    let dm = cols.matrix(x_cols, false)?;
     let x = dm.view();
     let k = x.ncols();
 

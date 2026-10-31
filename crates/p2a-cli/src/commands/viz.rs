@@ -1296,7 +1296,13 @@ fn execute_dendrogram(
                     return Ok(());
                 }
             };
-            let data = columns.matrix(&names, false).data;
+            let data = match columns.matrix(&names, false) {
+                Ok(m) => m.data,
+                Err(e) => {
+                    print_error(&format!("Failed to extract data: {}", e), format);
+                    return Ok(());
+                }
+            };
 
             let link = match linkage_method.to_lowercase().as_str() {
                 "single" => Linkage::Single,

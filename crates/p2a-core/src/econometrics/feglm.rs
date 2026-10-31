@@ -862,7 +862,7 @@ pub fn run_feglm(
     }
 
     // Design matrix WITHOUT intercept (FE absorbs the constant)
-    let design = cols.matrix(x_cols, false);
+    let design = cols.matrix(x_cols, false)?;
     let x = design.data;
     let var_names = design.column_names;
     let n = y.len();

@@ -90,7 +90,7 @@ pub(crate) fn spatial_model_data(
         .numerics(x_cols)
         .na(NaPolicy::Fail)
         .extract()?;
-    Ok((cols.numeric_array(y_col), cols.matrix(x_cols, true).data))
+    Ok((cols.numeric_array(y_col), cols.matrix(x_cols, true)?.data))
 }
 
 /// Refuses an optimiser tolerance that is not finite and positive, and `max_iter == 0`.

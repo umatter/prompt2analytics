@@ -242,7 +242,7 @@ pub fn run_pvcm(
     let entity = cols.factor(entity_col);
     let n = y_full.len();
 
-    let design = cols.matrix(x_cols, true);
+    let design = cols.matrix(x_cols, true)?;
     let x_full = design.data;
     let var_names = design.column_names;
     let k = x_full.ncols();

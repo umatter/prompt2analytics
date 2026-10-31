@@ -656,7 +656,9 @@ pub fn run_staggered_did(
     let t_col: Array1<f64> = period.iter().map(|&t| t as f64).collect();
     let unit_ids: Array1<f64> = unit.codes.iter().map(|&u| f64::from(u)).collect();
     // The intercept column stays, as in the design matrix used before.
-    let x_cov: Option<Array2<f64>> = covariates.map(|c| cols.matrix(c, true).data);
+    let x_cov: Option<Array2<f64>> = covariates
+        .map(|c| cols.matrix(c, true).map(|m| m.data))
+        .transpose()?;
 
     // Each unit's first treatment period, in one pass: did::att_gt requires it
     // to be constant within a unit.
