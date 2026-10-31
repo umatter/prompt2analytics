@@ -346,7 +346,7 @@ pub struct StaggeredDiDRequest {
 
     /// Number of bootstrap replications
     #[schemars(
-        description = "Number of bootstrap replications for standard errors. Default is 999."
+        description = "0 = analytic influence-function standard errors (did's bstrap = FALSE; without covariates only), otherwise at least 50 unit-bootstrap replicates (1-49 are refused). Default 999."
     )]
     pub bootstrap: Option<usize>,
 }

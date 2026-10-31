@@ -246,3 +246,40 @@ async fn test_validate_mcp_x8_reviewer_integer_columns() {
         "{ci}"
     );
 }
+
+/// The staggered_did schema says what `bootstrap = 0` does (analytic influence-function SEs)
+/// and that 1-49 replicates are refused, and the IV tools name their first-stage statistic.
+#[test]
+fn test_mcp_staggered_did_bootstrap_description() {
+    let (_session, server) = session_with_datasets(vec![]);
+    let tools = server.list_tools();
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("no tool {name}"))
+    };
+    let did = tool("staggered_did");
+    let bootstrap = did.input_schema["properties"]["bootstrap"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        bootstrap.contains("0 = analytic influence-function standard errors")
+            && bootstrap.contains("at least 50"),
+        "{bootstrap}"
+    );
+    assert!(
+        tool("iv_2sls")
+            .description
+            .contains("partial F of the excluded instruments (the HC1 Wald F with robust = true"),
+        "{}",
+        tool("iv_2sls").description
+    );
+    assert!(
+        tool("iv_first_stage")
+            .description
+            .contains("partial F of the excluded instruments"),
+        "{}",
+        tool("iv_first_stage").description
+    );
+}
