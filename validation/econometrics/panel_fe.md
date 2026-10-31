@@ -244,10 +244,9 @@ RE with both id columns, the counts and the note),
 `econometrics::panel::linear_models::tests::test_validate_na_fe_re_errors_and_integer_regressor`,
 `econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld_na` (mean group),
 `econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree`,
-the id and time extractors in `econometrics::panel::utils::tests`
-(`test_validate_na_extract_time_ids_integer_widths_and_fractions`,
-`test_validate_na_extract_entity_ids_factor_order_and_nulls`,
-`test_validate_na_entity_and_time_codes`), and through the MCP tools
+the entity and time codes
+(`econometrics::panel::utils::tests::test_validate_na_entity_and_time_codes`), and through the
+MCP tools
 `tier2::wp08_iv_panel::test_validate_mcp_panel_fixed_effects_grunfeld_na` and
 `tier2::wp08_iv_panel::test_validate_mcp_panel_pmg_grunfeld_na`. A NaN cell is dropped
 like a null one (`econometrics::panel::linear_models::tests::test_fixed_effects_non_finite_data`).

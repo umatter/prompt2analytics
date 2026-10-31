@@ -13,20 +13,6 @@ use crate::data::columns::{ColumnRequest, Columns, Factor, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 
-/// Entity codes of every row of the dataset (one per row) and the number of entities.
-///
-/// Codes follow R `factor()` order of the ids (numeric ids numerically, text ids in C
-/// order). A missing id is an error here (`EconError::NullValues`), because this
-/// function returns one value per dataset row; estimators that drop incomplete rows
-/// use [`entity_codes`] on their own [`ColumnRequest`] instead.
-pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Vec<usize>, usize)> {
-    let cols = ColumnRequest::new(dataset.df())
-        .factor(entity_var)
-        .na(NaPolicy::Fail)
-        .extract()?;
-    Ok(entity_codes(cols.factor(entity_var)))
-}
-
 /// Compute entity-level means for demeaning.
 pub fn compute_entity_means(
     data: &Array1<f64>,
@@ -79,22 +65,6 @@ pub fn demean_matrix_by_entity(
     }
 
     x_demeaned
-}
-
-/// Period index of every row of the dataset (0 = earliest) and the sorted distinct
-/// times.
-///
-/// Times are integers of any width, whole-number floats or dates (days since
-/// 1970-01-01); a fractional time is `InvalidSpecification` ("must hold whole
-/// numbers"). A missing time is an error here (`EconError::NullValues`), because this
-/// function returns one value per dataset row; estimators that drop incomplete rows
-/// use [`time_codes`] on their own [`ColumnRequest`] instead.
-pub fn extract_time_ids(dataset: &Dataset, time_var: &str) -> EconResult<(Vec<usize>, Vec<i64>)> {
-    let cols = ColumnRequest::new(dataset.df())
-        .time_index(time_var)
-        .na(NaPolicy::Fail)
-        .extract()?;
-    Ok(time_codes(cols.time_index(time_var)))
 }
 
 /// Entity codes of the kept rows (0-based, in `factor.levels` order: R factor() order,
@@ -448,7 +418,7 @@ mod tests {
     use super::*;
     use crate::data::DataLoader;
     use crate::data::columns::{ColumnRequest, NaPolicy, numeric_column};
-    use polars::prelude::{Column, DataType};
+    use polars::prelude::Column;
 
     /// The case's dataset (`panel_grunfeld_na`) and the complete Grunfeld panel it was
     /// built from.
@@ -467,82 +437,6 @@ mod tests {
         let mut df = ds.df().clone();
         df.with_column(column).unwrap();
         Dataset::new(df)
-    }
-
-    /// Integer times of any width and whole floats give the same periods; a fractional
-    /// time is an error; a missing time is `NullValues` (the legacy shape has one value
-    /// per row) instead of period 0.
-    #[test]
-    fn test_validate_na_extract_time_ids_integer_widths_and_fractions() {
-        let (na, g) = fixtures("panel_grunfeld_na");
-        let expected = extract_time_ids(&g, "year").unwrap();
-        assert_eq!(expected.1, (1935..=1954).collect::<Vec<i64>>());
-        let year = g.df().column("year").unwrap().clone();
-        for dtype in [
-            DataType::Int32,
-            DataType::Int16,
-            DataType::UInt16,
-            DataType::Float64,
-        ] {
-            let cast = year.cast(&dtype).unwrap();
-            let got = extract_time_ids(&with(&g, cast), "year")
-                .unwrap_or_else(|e| panic!("{dtype:?}: {e}"));
-            assert_eq!(got, expected, "{dtype:?}");
-        }
-        let (mut years, _) = numeric_column(g.df(), "year", NaPolicy::Fail).unwrap();
-        years[0] = 1935.25;
-        match extract_time_ids(&with(&g, Column::new("year".into(), years)), "year") {
-            Err(EconError::InvalidSpecification { message }) => {
-                assert!(message.contains("must hold whole numbers"), "{message}")
-            }
-            other => panic!("expected InvalidSpecification, got {other:?}"),
-        }
-        match extract_time_ids(&na, "year") {
-            Err(EconError::NullValues { column, count }) => {
-                assert_eq!((column.as_str(), count), ("year", 2))
-            }
-            other => panic!("expected NullValues for year, got {other:?}"),
-        }
-    }
-
-    /// Entity codes follow R factor order (numeric ids numerically); a missing id is
-    /// `NullValues` instead of id 0 or the pseudo-entity "".
-    #[test]
-    fn test_validate_na_extract_entity_ids_factor_order_and_nulls() {
-        let (na, g) = fixtures("panel_grunfeld_na");
-        let firm: Vec<usize> = numeric_column(g.df(), "firm", NaPolicy::Fail)
-            .unwrap()
-            .0
-            .iter()
-            .map(|&f| f as usize - 1)
-            .collect();
-        let (ids, n_groups) = extract_entity_ids(&g, "firm").unwrap();
-        assert_eq!((ids.as_slice(), n_groups), (firm.as_slice(), 10));
-        let cast = g
-            .df()
-            .column("firm")
-            .unwrap()
-            .cast(&DataType::UInt32)
-            .unwrap();
-        assert_eq!(
-            extract_entity_ids(&with(&g, cast), "firm").unwrap(),
-            (firm.clone(), 10)
-        );
-        for column in ["firm_id", "firm_name"] {
-            match extract_entity_ids(&na, column) {
-                Err(EconError::NullValues { column: c, count }) => {
-                    assert_eq!((c.as_str(), count), (column, 2))
-                }
-                other => panic!("{column}: expected NullValues, got {other:?}"),
-            }
-        }
-        assert!(
-            matches!(
-                extract_entity_ids(&na, "nope"),
-                Err(EconError::ColumnNotFound { .. })
-            ),
-            "unknown column"
-        );
     }
 
     /// A committed CSV loaded as `p2a data load` loads it; for tests that compare no R
