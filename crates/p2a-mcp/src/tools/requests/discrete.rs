@@ -125,10 +125,8 @@ pub struct MixedLogitRequest {
     )]
     pub dataset: String,
 
-    /// Column identifying choice situations (individuals)
-    #[schemars(
-        description = "Column name identifying each choice situation (individual chooser)."
-    )]
+    /// Column identifying choice situations
+    #[schemars(description = "Column identifying each choice situation.")]
     pub choice_id: String,
 
     /// Column identifying alternatives
@@ -170,6 +168,13 @@ pub struct MixedLogitRequest {
         description = "Use Halton quasi-random sequences instead of pseudo-random draws. Default: true. Improves accuracy."
     )]
     pub halton: Option<bool>,
+
+    /// Decision-maker column for repeated choices (mlogit panel = TRUE)
+    #[schemars(
+        description = "Column identifying the decision maker when each person makes several choices (panel data). Draws are then taken per person and the probabilities of that person's choices are multiplied (mlogit panel = TRUE). Default: every choice situation is a separate decision maker."
+    )]
+    #[serde(default)]
+    pub individual_id: Option<String>,
 }
 
 /// Request for ordered logit/probit regression.
@@ -190,6 +195,13 @@ pub struct OrderedRequest {
     /// Model type: "logit" (default) or "probit"
     #[schemars(description = "Model type: 'logit' (default) or 'probit'.")]
     pub model_type: Option<String>,
+
+    /// Category order of a text outcome, lowest first
+    #[schemars(
+        description = "Ordinal order of a text outcome, lowest category first, e.g. [\"low\", \"mid\", \"high\"]. Required when the outcome column is text; every observed category must appear exactly once. Numeric outcomes are ordered numerically and need no levels."
+    )]
+    #[serde(default)]
+    pub levels: Option<Vec<String>>,
 }
 
 /// Request for negative binomial regression.
@@ -209,7 +221,7 @@ pub struct NegBinRequest {
 
     /// Initial theta (dispersion) parameter
     #[schemars(
-        description = "Optional initial theta (dispersion) parameter. If not specified, estimated from data."
+        description = "Optional starting value of theta (dispersion), as glm.nb's init.theta; between 1e-8 and 1e6. The estimate is the same maximum likelihood fit; omit it to start from the moment estimate."
     )]
     pub init_theta: Option<f64>,
 }
