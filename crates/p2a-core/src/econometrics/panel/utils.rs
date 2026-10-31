@@ -218,13 +218,14 @@ pub(crate) fn difference_equations(
         .ok_or_else(too_wide)?;
     let span = usize::try_from(span_i64).map_err(|_| too_wide())?;
     let lags = spec.lags;
-    if lags >= span.saturating_sub(2) {
+    // The first equation is at period lags + 2 (y at t, ..., t - lags - 1), as in pgmm.
+    if lags >= span.saturating_sub(1) {
         return Err(EconError::InsufficientData {
-            required: lags.saturating_add(3),
+            required: lags.saturating_add(2),
             provided: span,
             context: format!(
                 "GMM estimation requires at least {} time periods for {} lags",
-                lags.saturating_add(3),
+                lags.saturating_add(2),
                 lags
             ),
         });
@@ -246,7 +247,7 @@ pub(crate) fn difference_equations(
             ),
         });
     }
-    // lags < span - 2 and min_lag <= max_lag_eff < span, and span fits in i64.
+    // lags < span - 1 and min_lag <= max_lag_eff < span, and span fits in i64.
     let k = lags + k_x;
     let lags_i = lags as i64;
     let min_lag = spec.min_lag as i64;
@@ -545,6 +546,54 @@ mod tests {
             ),
             Err(e) => panic!("expected InvalidSpecification, got {e:?}"),
             Ok(_) => panic!("expected InvalidSpecification, got equations"),
+        }
+    }
+
+    /// The balanced panel's first `periods` years.
+    fn first_periods(periods: i64) -> Dataset {
+        let ds = repo_dataset(AB_BALANCED);
+        let keep: polars::prelude::BooleanChunked = ds
+            .df()
+            .column("year")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|y| y.map(|y| y < 2000 + periods))
+            .collect();
+        Dataset::new(ds.df().filter(&keep).unwrap())
+    }
+
+    /// pgmm fits a panel of lags + 2 periods: the last period's equation, with the
+    /// levels lags + 1 and more periods back as its instruments. One period fewer is
+    /// refused, and the error names lags + 2.
+    #[test]
+    fn test_difference_equations_span_of_lags_plus_two() {
+        for lags in [1usize, 2] {
+            let span = lags + 2;
+            let eq = ab_equations(&first_periods(span as i64), &lag_spec(lags, false)).unwrap();
+            assert_eq!(eq.span, span);
+            assert_eq!(eq.dy.len(), 100, "one equation per entity");
+            assert!(eq.time.iter().all(|&t| t == 2000 + span as i64 - 1));
+            assert_eq!(eq.n_gmm_instruments, lags);
+            match ab_equations(&first_periods(span as i64 - 1), &lag_spec(lags, false)) {
+                Err(EconError::InsufficientData {
+                    required,
+                    provided,
+                    context,
+                }) => {
+                    assert_eq!((required, provided), (lags + 2, lags + 1), "{context}");
+                    assert!(
+                        context.contains(&format!(
+                            "at least {} time periods for {lags} lags",
+                            lags + 2
+                        )),
+                        "{context}"
+                    );
+                }
+                Err(e) => panic!("expected InsufficientData, got {e:?}"),
+                Ok(_) => panic!("expected InsufficientData, got equations"),
+            }
         }
     }
 

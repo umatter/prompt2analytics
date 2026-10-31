@@ -1577,6 +1577,40 @@ mod tests {
         c.finish();
     }
 
+    /// A three-period panel with one lag is the smallest that pgmm fits: one
+    /// differenced equation per entity, instrumented by the first period's level.
+    #[test]
+    fn test_gmm_fits_a_three_period_panel() {
+        let ds = repo_dataset(AB_BALANCED);
+        let keep: polars::prelude::BooleanChunked = ds
+            .df()
+            .column("year")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|y| y.map(|y| y <= 2002))
+            .collect();
+        let three = Dataset::new(ds.df().filter(&keep).unwrap());
+        for step in [GmmStep::OneStep, GmmStep::TwoStep] {
+            let cfg = GmmConfig {
+                step,
+                ..Default::default()
+            };
+            let r = run_gmm(&three, "y", &["x"], "id", "year", 1, Some(cfg)).unwrap();
+            assert_eq!((r.n_obs, r.n_groups), (100, 100), "{step:?}");
+            assert!(
+                r.coefficients
+                    .iter()
+                    .chain(&r.std_errors)
+                    .all(|v| v.is_finite()),
+                "{step:?}: {:?} {:?}",
+                r.coefficients,
+                r.std_errors
+            );
+        }
+    }
+
     #[test]
     fn test_gmm_duplicate_entity_time_is_an_error() {
         let ds = repo_dataset(AB_BALANCED);
