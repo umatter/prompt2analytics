@@ -1365,7 +1365,7 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
     // sigma2 is 0, the log-likelihood is infinite and an MA or ARMA coefficient can take any
     // value. R's arima stops there on the singular Hessian.
     let scale = dx.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    if !(ssr > dx.len() as f64 * (ZERO_RESIDUAL * scale).powi(2)) {
+    if ssr <= dx.len() as f64 * (ZERO_RESIDUAL * scale).powi(2) {
         return Err(invalid(
             "the CSS residuals are zero up to rounding: the model reproduces the series \
              exactly, so its residual variance is 0 and the fit is not identified (is the \
@@ -1909,7 +1909,7 @@ mod tests {
         ] {
             let gain = gain_ratio(2.0, ssr_trial, predicted);
             assert!(
-                !(gain > 0.0),
+                gain.is_nan() || gain <= 0.0,
                 "trial {ssr_trial}, predicted {predicted}: gain {gain} accepts the step"
             );
         }
