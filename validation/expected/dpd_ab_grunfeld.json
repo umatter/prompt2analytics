@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "id": "dpd_ab_grunfeld",
+  "area": "econometrics/panel",
+  "method": "Arellano-Bond difference GMM (pgmm), Grunfeld: 173 instruments for 10 firms (rank-deficient weights)",
+  "reference": "plm::pgmm(inv ~ lag(inv, 1) + value + capital | lag(inv, 2:99)), model = 'onestep' | 'twostep'; both weighting matrices are singular and pgmm uses MASS::ginv",
+  "call": "pgmm(inv ~ lag(inv, 1) + value + capital | lag(inv, 2:99), data = pdata.frame(grunfeld, index = c('firm', 'year')), effect = 'individual', model = ...)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7",
+    "MASS": "7.3.60.0.1"
+  },
+  "values": {
+    "onestep_coef": {
+      "names": ["lag(inv, 1)", "value", "capital"],
+      "values": [0.67966800802854888, 0.10699466702845292, 0.11207891951856341]
+    },
+    "onestep_se": {
+      "names": ["lag(inv, 1)", "value", "capital"],
+      "values": [0.00049196657234559901, 7.7250327864405283e-05, 0.00018728670187081079]
+    },
+    "onestep_se_robust": {
+      "names": ["lag(inv, 1)", "value", "capital"],
+      "values": [0.10402577648126722, 0.013773015788091173, 0.038199219850353697]
+    },
+    "onestep_sargan": 8.9990772178522604,
+    "onestep_sargan_df": 170,
+    "onestep_sargan_df_nonzero": 170,
+    "onestep_sargan_p": 1,
+    "onestep_sargan_p_nonzero": 1,
+    "onestep_ar1": -1.3410290358385935,
+    "onestep_ar1_p": 0.17991102558357105,
+    "onestep_ar2": -1.362302243133932,
+    "onestep_ar2_p": 0.17310252002619453,
+    "onestep_n_instruments": 173,
+    "onestep_n_instruments_nonzero": 173,
+    "onestep_n_obs": 180,
+    "onestep_sigma2": 1009.9618092108349,
+    "onestep_se_textbook": {
+      "names": ["lag(inv, 1)", "value", "capital"],
+      "values": [0.049441093842016032, 0.0077634150854207617, 0.018821724733061065]
+    },
+    "onestep_sargan_homoskedastic": 256.5467086366109,
+    "onestep_sargan_homoskedastic_p": 1.9966517839977355e-05,
+    "twostep_coef": {
+      "names": ["lag(inv, 1)", "value", "capital"],
+      "values": [0.67195229747883012, 0.10853729180487748, 0.11679279002203646]
+    },
+    "twostep_se": {
+      "names": ["lag(inv, 1)", "value", "capital"],
+      "values": [0.033838123341988768, 0.0020700879953147004, 0.017610892245971028]
+    },
+    "twostep_se_robust": {
+      "names": ["lag(inv, 1)", "value", "capital"],
+      "values": [0.1220817501058947, 0.014836284415981081, 0.049712625632044941]
+    },
+    "twostep_sargan": 8.1989687762599619,
+    "twostep_sargan_df": 170,
+    "twostep_sargan_df_nonzero": 170,
+    "twostep_sargan_p": 1,
+    "twostep_sargan_p_nonzero": 1,
+    "twostep_ar1": -1.3642837339379748,
+    "twostep_ar1_p": 0.17247828329506745,
+    "twostep_ar2": -0.69314570525334374,
+    "twostep_ar2_p": 0.48821811732074377,
+    "twostep_n_instruments": 173,
+    "twostep_n_instruments_nonzero": 173,
+    "twostep_n_obs": 180,
+    "rank_one_step_weight": 133,
+    "rank_two_step_weight": 9
+  }
+}
