@@ -735,15 +735,14 @@ pub struct ReloadSource {
 /// the path jail, check the file before any parsing as `load_dataset` does
 /// (its size against the `load_file_bytes` budget, then a parquet file's
 /// footer and decoded size), and load the file, with the `na_strings` it was
-/// loaded with. It blocks, and runs the
-/// async part of the parquet check on `handle`; run it on the blocking pool
-/// inside the session's path-jail scope and under the server's request
-/// limits (`ToolGovernor::run_blocking` does both). The error is a fixed
-/// text, the budget refusal with the file's size and the limit, the quota
-/// refusal `load_dataset` gives, or `the file could not be loaded: <reason>`
-/// for a parquet file the check will not read; none holds a server path.
-/// The details are logged at debug level, the budget and quota refusals at
-/// info level.
+/// loaded with. It blocks, and runs the async part of the parquet check on
+/// `handle`; run it on the blocking pool inside the session's path-jail
+/// scope and under the server's request limits (`ToolGovernor::run_blocking`
+/// does both). The error is a fixed text, the budget refusal with the file's
+/// size and the limit, the quota refusal `load_dataset` gives, or
+/// `the file could not be loaded: <reason>` for a parquet file the check
+/// will not read; none holds a server path. The details are logged at debug
+/// level, the budget and quota refusals at info level.
 ///
 /// The decoded-size check is `load_dataset`'s (`session::admit_dataset`):
 /// this function installs `quotas` for `session` on this thread, as a tool

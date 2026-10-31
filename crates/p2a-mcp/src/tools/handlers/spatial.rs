@@ -1711,14 +1711,14 @@ mod tests {
         "u1", "u10", "u11", "u12", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9",
     ];
 
-    /// Dataset C of spml_entity_order.R (reproduced in validation/econometrics/splm.md;
-    /// the same formulas as
-    /// the p2a-core splm fixture, whose test helpers are not visible here): entity k on a
-    /// 3 x 4 grid at ((k-1) mod 4, (k-1) div 4) with label `C_LABELS[k-1]`, Int64 time
-    /// 2001..=2005, x = sin(0.7 k + 1.3 t) + 0.1 k and y_t = (I - 0.5 W)^-1
-    /// (1.5 x_t + 0.5 cos(1.1 k) + 0.3 sin(2.3 k t + 0.4)) for the row-standardised rook W;
-    /// row i is row (7 i + 3) mod 60 of the entity-major dataset A. Also the 12-row
-    /// coordinate dataset (label, Int64 gx, gy) in sorted label order.
+    /// Dataset C of spml_entity_order.R (reproduced in validation/econometrics/splm.md; the
+    /// same formulas as the p2a-core splm fixture, whose test helpers are not visible
+    /// here): entity k on a 3 x 4 grid at ((k-1) mod 4, (k-1) div 4) with label
+    /// `C_LABELS[k-1]`, Int64 time 2001..=2005, x = sin(0.7 k + 1.3 t) + 0.1 k and
+    /// y_t = (I - 0.5 W)^-1 (1.5 x_t + 0.5 cos(1.1 k) + 0.3 sin(2.3 k t + 0.4)) for the
+    /// row-standardised rook W; row i is row (7 i + 3) mod 60 of the entity-major
+    /// dataset A. Also the 12-row coordinate dataset (label, Int64 gx, gy) in sorted label
+    /// order.
     fn panel_dfs() -> (DataFrame, DataFrame) {
         let gx: Vec<i64> = (0..12).map(|i| i % 4).collect();
         let gy: Vec<i64> = (0..12).map(|i| i / 4).collect();
@@ -1968,8 +1968,7 @@ mod tests {
     }
 
     /// R: spml_entity_order.R (validation/econometrics/splm.md): within spatial-lag fit
-    /// with W
-    /// rows in sorted label order.
+    /// with W rows in sorted label order.
     #[test]
     fn test_mcp_spatial_panel_ml_sorted_ids_match_r() {
         let (panel, coords) = panel_dfs();

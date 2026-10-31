@@ -6,7 +6,7 @@
 //! - Hausman specification test
 //! - Variable Coefficients Model (PVCM)
 //! - Mean Group (PMG) estimator
-//! - Arellano-Bond / System GMM
+//! - Arellano-Bond difference GMM
 //! - Panel GLS
 //! - Panel unit root tests (LLC, IPS, Hadri)
 //! - High-dimensional fixed effects (HDFE)

@@ -297,8 +297,9 @@ p2a causal mediation <DATASET> -y <OUTCOME> -t <TREATMENT> -m <MEDIATOR> [-x <CO
 (alias `--bandwidth`; default: p2a's MSE-type selector, chosen with `--bwselect mserd` (default),
 `msetwo`, `cerrd` or `certwo` in `causal rd`; another name is an error), `--b` the bias
 bandwidth (alias `--bias-bandwidth`; default: h). `--vce` is the variance estimator: `nn`
-(default, as rdrobust), `hc0`, `hc1`, `hc2` or `hc3`. The output reports the robust bias-corrected estimate and the conventional one, as
-`rdrobust`, with the bandwidths and the effective observations on each side.
+(default, as rdrobust), `hc0`, `hc1`, `hc2` or `hc3`. The output reports the robust
+bias-corrected estimate and the conventional one, as `rdrobust`, with the bandwidths and the
+effective observations on each side.
 
 **`causal iv`** fits robust standard errors and prints the first-stage diagnostics as
 `First-stage diagnostics (HC1 Wald F of the excluded instruments):`, one

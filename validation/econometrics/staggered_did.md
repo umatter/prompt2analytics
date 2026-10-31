@@ -100,7 +100,7 @@ R-pinned (`validation/methods/causal_did.json`, method `staggered_did_cs`):
   `estimation_method`; without covariates the three methods coincide, as in did).
 - The analytic pre-trend test is did's asymptotic chi-squared test, and it over-rejects on small
   panels: in a null simulation with nine pre-treatment cells it rejected about 19% of panels at
-  the 5% level with 90 units (cohorts of about 15 units) and about 6% with 900, so a
+  the 5% level with 90 units (cohorts as small as 15 units) and about 6% with 900, so a
   PARALLEL_TRENDS_VIOLATED warning on a small panel is weak evidence. For small panels use the
   bootstrap test (`bootstrap >= 50`) and its Hotelling F, below.
 - `bootstrap >= 50`: a unit bootstrap (the T0 table-based resampler, same random stream). Every

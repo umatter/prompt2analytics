@@ -2947,10 +2947,10 @@ mod tests {
             let d = json_of(&call("density", c.clone()));
             // deviation STAT-36: IQR types other than 7 are computed as type 7; only the
             // default is pinned.
-            // deviation STAT-37: the density curve's grid is mislabelled when n is not a
-            // power of two, and
-            // deviation STAT-65: its default bandwidth is not bw.nrd0, so only its n is
-            // pinned.
+            // deviation STAT-37: the density grid is mislabelled when n is not a power of
+            // two.
+            // deviation STAT-65: the default bandwidth is not bw.nrd0; only the density's n
+            // is pinned.
             // deviation STAT-87: fivenum's `iqr` field is the hinge spread, not R's IQR,
             // and is not pinned.
             check
