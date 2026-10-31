@@ -52,6 +52,19 @@
       "tolerance": "validation/README.md, n = 27 (< 100): statistics 1e-5 relative, p 1e-5 relative + 1e-12 absolute, sizes exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_missing_report",
+      "name": "MCP hypothesis handlers report the rows they drop (Bartlett, Kruskal-Wallis, oneway, Friedman, Quade, Wilcoxon, pairwise t/Wilcoxon, Shapiro-Wilk)",
+      "category": "stats",
+      "reference": "complete.cases over the columns each R function uses (bartlett.test, kruskal.test, oneway.test, friedman.test, quade.test, wilcox.test, pairwise.t.test, pairwise.wilcox.test, shapiro.test)",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["stat_two_sample_na", "stat_oneway_na_labels", "stat_friedman_quade", "stat_wilcoxon_na", "stat_pairwise_mahalanobis_na", "stat_shapiro_wilk"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_handlers_report_missing_rows"],
+      "quantities": ["missing: n_total, n_used, n_dropped, by_column (counts of the R complete cases)", "no missing key when nothing is dropped"],
+      "tolerance": "counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

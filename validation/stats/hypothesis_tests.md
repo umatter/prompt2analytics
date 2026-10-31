@@ -170,6 +170,16 @@ Welch on the Int64 `xi`, `yi`; the values are in the table above).
 
 **Status:** R-pinned (registry `validation/methods/mcp_stats.json`, id `mcp_hypothesis_t_test`).
 
+Every JSON hypothesis tool reports dropped rows under `missing` (`n_total`, `n_used`,
+`n_dropped`, `by_column`), and has no such key when nothing was dropped.
+`tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_handlers_report_missing_rows`
+checks the report of Bartlett, Kruskal-Wallis, oneway, Friedman, Quade, Wilcoxon, the pairwise t
+and Wilcoxon tests and Shapiro-Wilk against R's complete cases on the T2-WP06 and T2-WP07 cases
+(`stat_two_sample_na`, `stat_oneway_na_labels`, `stat_friedman_quade`, `stat_wilcoxon_na`,
+`stat_pairwise_mahalanobis_na`, `stat_shapiro_wilk`): rows used, group sizes and blocks exactly
+(registry id `mcp_hypothesis_missing_report`). Friedman and Quade drop the whole block of a
+missing response.
+
 ### Test 4: One-Way ANOVA
 
 **R Code:**

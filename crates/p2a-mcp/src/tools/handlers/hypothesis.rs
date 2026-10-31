@@ -63,7 +63,7 @@ impl AnalyticsServer {
             })
             .collect();
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Bartlett's Test for Homogeneity of Variances",
             "statistic": result.statistic,
             "statistic_name": "K-squared",
@@ -85,6 +85,7 @@ impl AnalyticsServer {
             },
             "note": "Bartlett's test is sensitive to non-normality. If data are non-normal, consider using Levene's test instead."
         });
+        insert_missing(&mut output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -480,7 +481,7 @@ impl AnalyticsServer {
             })
             .collect();
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Friedman rank sum test",
             "statistic": result.statistic,
             "statistic_name": "Q (chi-squared approximation)",
@@ -505,6 +506,7 @@ impl AnalyticsServer {
                 "text": "Hollander & Wolfe (1973), Nonparametric Statistical Methods, pp. 139-146"
             }
         });
+        insert_missing(&mut output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -549,7 +551,7 @@ impl AnalyticsServer {
             })
             .collect();
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Kruskal-Wallis rank sum test",
             "statistic": result.statistic,
             "statistic_name": "H (chi-squared approximation)",
@@ -574,6 +576,7 @@ impl AnalyticsServer {
                 "text": "Hollander & Wolfe (1973), Nonparametric Statistical Methods, pp. 115-120"
             }
         });
+        insert_missing(&mut output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -952,7 +955,7 @@ impl AnalyticsServer {
             "One-way analysis of means (not assuming equal variances)"
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": method,
             "statistic": result.statistic,
             "statistic_name": "F",
@@ -976,6 +979,7 @@ impl AnalyticsServer {
                 "method": "Welch (1951), Biometrika 38(3/4):330-336"
             }
         });
+        insert_missing(&mut output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1051,7 +1055,7 @@ impl AnalyticsServer {
                     }
                 };
 
-                let output = serde_json::json!({
+                let mut output = serde_json::json!({
                     "test": result.test_name,
                     "p_adjust_method": result.p_adjust_method.name(),
                     "pool_sd": result.pool_sd,
@@ -1074,6 +1078,7 @@ impl AnalyticsServer {
                         "p_adjust": format!("{} adjustment for multiple comparisons", result.p_adjust_method.name())
                     }
                 });
+                insert_missing(&mut output, &result.missing);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
@@ -1153,7 +1158,7 @@ impl AnalyticsServer {
                     }
                 };
 
-                let output = serde_json::json!({
+                let mut output = serde_json::json!({
                     "test": result.test_name,
                     "p_adjust_method": result.p_adjust_method.name(),
                     "alternative": format!("{:?}", result.alternative).to_lowercase(),
@@ -1175,6 +1180,7 @@ impl AnalyticsServer {
                         "p_adjust": format!("{} adjustment for multiple comparisons", result.p_adjust_method.name())
                     }
                 });
+                insert_missing(&mut output, &result.missing);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
@@ -1412,7 +1418,7 @@ impl AnalyticsServer {
             })
             .collect();
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Quade test",
             "statistic": result.statistic,
             "statistic_name": "F",
@@ -1439,6 +1445,7 @@ impl AnalyticsServer {
                 "text": "Conover (1999), Practical Nonparametric Statistics, pp. 373-380"
             }
         });
+        insert_missing(&mut output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1461,7 +1468,7 @@ impl AnalyticsServer {
 
         match run_shapiro_wilk(dataset, &request.column) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "test": result.test_name,
                     "w_statistic": result.w_statistic,
                     "p_value": result.p_value,
@@ -1474,6 +1481,7 @@ impl AnalyticsServer {
                         "No evidence against normality (fail to reject H₀ at α = 0.05)"
                     }
                 });
+                insert_missing(&mut json_output, &result.missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -1588,6 +1596,7 @@ impl AnalyticsServer {
                     "continuity_correction": result.continuity_correction,
                     "n1": result.n,
                 });
+                insert_missing(&mut json_output, &result.missing);
 
                 if let Some(n2) = result.n_2 {
                     json_output["n2"] = serde_json::json!(n2);
@@ -2693,6 +2702,157 @@ mod tests {
         assert!(
             t.contains("Paired t-test requires both x and y columns."),
             "{t}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_handlers_report_missing_rows() {
+        // X-2: the core wrappers drop incomplete rows (T2-WP06, T2-WP07), but the JSON did not
+        // say so. The rows used are R's complete cases over the columns each R function uses.
+        let summary = |n_total: usize, n_used: usize, by_column: serde_json::Value| {
+            serde_json::json!({"n_total": n_total, "n_used": n_used,
+                               "n_dropped": n_total - n_used, "by_column": by_column})
+        };
+
+        // bartlett.test(xi ~ g)
+        let (case, server, name) = case_server("stat_two_sample_na").await;
+        let v = json_of(
+            &hyp(
+                &server,
+                "bartlett_test",
+                serde_json::json!({"dataset": name, "response": "xi", "factor": "g"}),
+            )
+            .await,
+        );
+        Check::new(&case)
+            .scalar("n_xi_g", num(&v["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(
+            v["missing"],
+            summary(22, 20, serde_json::json!({"xi": 2, "g": 1}))
+        );
+
+        // kruskal.test(v9 ~ g9), oneway.test(v9 ~ g9)
+        let (case, server, name) = case_server("stat_oneway_na_labels").await;
+        for tool in ["kruskal_wallis", "oneway"] {
+            let v = json_of(
+                &hyp(
+                    &server,
+                    tool,
+                    serde_json::json!({"dataset": name, "value": "v9", "group": "g9"}),
+                )
+                .await,
+            );
+            let sizes: Vec<f64> = v["group_statistics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| num(&g["n"]))
+                .collect();
+            Check::new(&case)
+                .vector("kw_group_n", &sizes, Tol::exact())
+                .finish();
+            assert_eq!(
+                num(&v["missing"]["n_used"]),
+                case.vector("kw_group_n").iter().sum::<f64>(),
+                "{tool}"
+            );
+            assert_eq!(
+                v["missing"],
+                summary(9, 6, serde_json::json!({"g9": 3})),
+                "{tool}"
+            );
+        }
+
+        // friedman.test / quade.test(y_na, treat, block): the block with the missing cell goes
+        let (case, server, name) = case_server("stat_friedman_quade").await;
+        for tool in ["friedman", "quade"] {
+            let v = json_of(
+                &hyp(
+                    &server,
+                    tool,
+                    serde_json::json!({"dataset": name, "value": "y_na", "treatment": "treat",
+                                       "block": "block"}),
+                )
+                .await,
+            );
+            Check::new(&case)
+                .scalar("na_n_blocks", num(&v["n_blocks"]), Tol::exact())
+                .finish();
+            assert_eq!(
+                v["missing"],
+                summary(24, 21, serde_json::json!({"y_na": 1})),
+                "{tool}"
+            );
+            let complete = json_of(
+                &hyp(
+                    &server,
+                    tool,
+                    serde_json::json!({"dataset": name, "value": "y", "treatment": "treat",
+                                       "block": "block"}),
+                )
+                .await,
+            );
+            assert!(complete.get("missing").is_none(), "{tool}: {complete}");
+        }
+
+        // wilcox.test(x, y, paired = TRUE): the JSON follows the Display text
+        let (case, server, name) = case_server("stat_wilcoxon_na").await;
+        let t = ok_text(
+            &hyp(
+                &server,
+                "wilcoxon",
+                serde_json::json!({"dataset": name, "x": "x", "y": "y", "paired": true}),
+            )
+            .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&t[t.find("\n{").unwrap() + 1..]).unwrap();
+        Check::new(&case)
+            .scalar("n_pairs", num(&v["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(
+            v["missing"],
+            summary(10, 8, serde_json::json!({"x": 1, "y": 1}))
+        );
+
+        // pairwise.t.test / pairwise.wilcox.test(y, g)
+        let (case, server, name) = case_server("stat_pairwise_mahalanobis_na").await;
+        for tool in ["pairwise_t_test", "pairwise_wilcox"] {
+            let v = json_of(
+                &hyp(
+                    &server,
+                    tool,
+                    serde_json::json!({"dataset": name, "response": "y", "factor": "g"}),
+                )
+                .await,
+            );
+            Check::new(&case)
+                .vector("pairwise_group_n", &nums(&v["group_sizes"]), Tol::exact())
+                .finish();
+            assert_eq!(
+                v["missing"],
+                summary(30, 28, serde_json::json!({"y": 2})),
+                "{tool}"
+            );
+        }
+
+        // shapiro.test(n3_124): 3 values of 5000 rows
+        let (case, server, name) = case_server("stat_shapiro_wilk").await;
+        let v = json_of(
+            &hyp(
+                &server,
+                "shapiro_wilk",
+                serde_json::json!({"dataset": name, "column": "n3_124"}),
+            )
+            .await,
+        );
+        Check::new(&case)
+            .scalar("n3_124_n", num(&v["n"]), Tol::exact())
+            .scalar("n3_124_n", num(&v["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(
+            v["missing"],
+            summary(5000, 3, serde_json::json!({"n3_124": 4997}))
         );
     }
 }
