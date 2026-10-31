@@ -494,7 +494,8 @@ pub struct Limits {
     pub image_pixels: Option<u64>,
     /// Cells of a computed table or square matrix.
     pub table_cells: Option<u64>,
-    /// Groups compared pairwise.
+    /// Groups compared pairwise, the groups of a log-rank test, and the levels of the two
+    /// factors of a two-way ANOVA together.
     pub max_groups: Option<usize>,
     /// Predicted output rows of a join.
     pub join_output_rows: Option<u64>,

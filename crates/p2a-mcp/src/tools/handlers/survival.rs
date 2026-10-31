@@ -89,6 +89,10 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
+        if let Err(msg) = check_log_rank_groups(dataset, &request.group) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
         let result = match log_rank_test(dataset, &request.time, &request.event, &request.group) {
             Ok(r) => r,
             Err(e) => {
@@ -232,6 +236,32 @@ impl AnalyticsServer {
     }
 }
 
+/// Refuses a log-rank test whose group column has more groups than the `max_groups` budget of
+/// the installed limits, before the test runs. The count is the column's distinct values minus
+/// one for null, an upper bound on the groups the test compares (it also drops rows whose time
+/// or status is missing). Nothing is counted when `max_groups` is off; a missing column is left
+/// to the core to report, and a count that fails is a refusal.
+fn check_log_rank_groups(dataset: &p2a_core::data::Dataset, group: &str) -> Result<(), String> {
+    let Some(max_groups) = crate::tools::limits::current().max_groups else {
+        return Ok(());
+    };
+    let Ok(col) = dataset.df().column(group) else {
+        return Ok(());
+    };
+    let refused = |msg: String| format!("Log-rank test refused: {msg}");
+    let n_unique =
+        crate::tools::common::level_count_or_refusal(group, col.n_unique()).map_err(refused)?;
+    let k = n_unique.saturating_sub(usize::from(col.null_count() > 0)) as u64;
+    crate::tools::common::check_named_budget("log_rank", "max_groups", k, Some(max_groups as u64))
+        .map_err(|msg| {
+            refused(format!(
+                "group column `{}` has {k} groups. {msg} Use a column with fewer groups or \
+                 filter the data first.",
+                crate::tools::limits::echo(group)
+            ))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +373,49 @@ mod tests {
         assert_eq!(r.is_error, Some(true));
         let t = text(&r);
         assert!(t.contains("arcsin") && t.contains("log-log"), "{t}");
+    }
+
+    /// A survival frame of `rows` rows whose group column `g` has `groups` levels,
+    /// with noisy times and both statuses in every group.
+    fn grouped(rows: usize, groups: usize) -> p2a_core::polars::prelude::DataFrame {
+        let time: Vec<f64> = (0..rows)
+            .map(|i| 1.0 + ((i * 7919) % 997) as f64 / 37.0)
+            .collect();
+        let status: Vec<i64> = (0..rows).map(|i| ((i / groups) % 3 != 0) as i64).collect();
+        let g: Vec<String> = (0..rows).map(|i| format!("g{}", i % groups)).collect();
+        p2a_core::polars::prelude::df! { "time" => time, "status" => status, "g" => g }.unwrap()
+    }
+
+    #[test]
+    fn log_rank_group_count_is_held_to_max_groups() {
+        use crate::tools::common::test_support::hosted_with;
+        use crate::tools::limits::{self, Limits};
+        let (rt, server) = server_with(vec![("many", grouped(606, 101)), ("few", grouped(606, 6))]);
+        let run = |limits: Limits, dataset: &str| {
+            let req: LogRankRequest = serde_json::from_value(json!({
+                "dataset": dataset, "time": "time", "event": "status", "group": "g"
+            }))
+            .unwrap();
+            limits::with_limits(limits, || {
+                rt.block_on(server.log_rank(Parameters(req))).unwrap()
+            })
+        };
+        // 101 groups > 100 (hosted max_groups): refused before the test
+        let r = run(Limits::hosted(), "many");
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        assert!(
+            t.contains("max_groups") && t.contains("101") && t.contains("`g`"),
+            "{t}"
+        );
+        // at the budget it runs; above a lowered one it is refused; off counts nothing
+        let ok = run(hosted_with(&["max_groups=6"]), "few");
+        assert_ne!(ok.is_error, Some(true), "{}", text(&ok));
+        let over = run(hosted_with(&["max_groups=5"]), "few");
+        assert_eq!(over.is_error, Some(true), "{}", text(&over));
+        assert!(text(&over).contains("max_groups"), "{}", text(&over));
+        let off = run(Limits::off(), "many");
+        assert_ne!(off.is_error, Some(true), "{}", text(&off));
     }
 
     #[test]
