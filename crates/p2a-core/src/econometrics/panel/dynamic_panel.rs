@@ -1238,15 +1238,6 @@ mod tests {
                 p: Tol::p_value(n),
             }
         }
-
-        fn all(t: Tol) -> Tols {
-            Tols {
-                coef: t,
-                se: t,
-                stat: t,
-                p: t,
-            }
-        }
     }
 
     /// The quantities of `{p}_*` that do not depend on the SE type.
@@ -1550,9 +1541,10 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("dpd_ab_grunfeld");
         let fits = four_fits(&ds, "inv", &["value", "capital"], "firm", "year");
         let mut c = Check::new(&case);
-        // Generalized inverses of rank-deficient weighting matrices: eigen- vs SVD-based
-        // truncation agree to 1.7e-10 (the specification in R vs pgmm).
-        let t = Tols::all(Tol::new(1e-7, 1e-12));
+        // Generalized inverses of rank-deficient weighting matrices (eigen- vs SVD-based
+        // truncation): the coefficients agree with pgmm to 3e-12, the SEs to 1.6e-10, within
+        // validation/README.md's tolerances for n = 180.
+        let t = Tols::n(180);
         check_four(&mut c, &["lag(inv, 1)", "value", "capital"], &fits, t);
         for r in &fits {
             c.scalar(

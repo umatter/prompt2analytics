@@ -248,8 +248,9 @@ Property tests, not registered as R-pinned (no value is compared with R; they lo
 
 `validation/README.md`, n = 180-600 equations: coefficients `Tol::coef(n)` (1e-8
 relative), SEs, sigma2 and statistics `Tol::se(n)`/`Tol::stat(n)` (1e-6), p-values
-`Tol::p_value(n)`; counts and df exact. Grunfeld uses `Tol::new(1e-7, 1e-12)`: with
-rank-deficient weighting matrices, eigen- and SVD-based truncation agree to 1.7e-10. The
+`Tol::p_value(n)`; counts and df exact, Grunfeld (n = 180) included: with its rank-deficient
+weighting matrices (eigen- vs SVD-based truncation), the coefficients agree to 3e-12 and the
+SEs to 1.6e-10. The
 implementation agrees with pgmm to about 1e-10 relative on every pinned quantity (2e-10 on
 Grunfeld). The MCP text is compared at `Tol::printed(4)`, the CLI text at
 `Tol::printed(6)`.
