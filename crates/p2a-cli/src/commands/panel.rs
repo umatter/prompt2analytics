@@ -3,19 +3,19 @@
 use clap::Subcommand;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use p2a_core::regression::CovarianceType;
-use p2a_core::run_arellano_bond;
 use p2a_core::{
     ClusterAdjustment, PanelConfig, PanelResult, PanelVcov, TestDistribution,
     run_fixed_effects_with, run_hausman_test, run_hdfe, run_random_effects_with,
 };
 use p2a_core::{GlmFamily, run_feglm};
+use p2a_core::{GmmConfig, GmmStep, GmmTransform, run_gmm};
 use p2a_core::{PanelGlsModel, run_panel_gls};
 use p2a_core::{PanelModel, PanelUnitRootConfig, PanelUnitRootTest, run_panel_unit_root};
 use p2a_core::{PvcmType, run_pvcm};
 
 use crate::output::{
-    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, print_error,
-    se_label, sorted_object,
+    CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, missing_json,
+    print_error, print_missing_note, se_label, sorted_object,
 };
 use crate::session::SessionManager;
 
@@ -160,11 +160,17 @@ EXAMPLES:
         family: String,
     },
 
-    /// Arellano-Bond GMM estimation for dynamic panels
+    /// Arellano-Bond difference GMM for dynamic panels (as plm::pgmm)
     #[command(after_help = "\
 EXAMPLES:
-    # Dynamic panel with lagged dependent variable
+    # Dynamic panel with lagged dependent variable (two-step, Windmeijer SEs)
     p2a panel gmm mydata -y investment -x sales cash_flow --entity firm_id --time year
+
+    # One-step with Arellano-Bond (1991) classical SEs
+    p2a panel gmm mydata -y investment -x sales --entity firm_id --time year --step onestep --vcov classical
+
+    # Two lags of y, instrument lags 2 to 4, collapsed instruments
+    p2a panel gmm mydata -y investment -x sales --entity firm_id --time year --lags 2 --max-lag 4 --collapse
 ")]
     Gmm {
         /// Dataset name
@@ -174,7 +180,7 @@ EXAMPLES:
         #[arg(short = 'y', long)]
         dep_var: String,
 
-        /// Independent variable columns
+        /// Strictly exogenous regressors (the lagged dependent variable is added by --lags)
         #[arg(short = 'x', long, num_args = 1..)]
         indep_vars: Vec<String>,
 
@@ -182,9 +188,33 @@ EXAMPLES:
         #[arg(long)]
         entity: String,
 
-        /// Time column for panel structure
+        /// Time column (whole numbers; lags are steps of 1)
         #[arg(long)]
         time: String,
+
+        /// Lags of the dependent variable
+        #[arg(long, default_value_t = 1)]
+        lags: usize,
+
+        /// One-step or two-step GMM
+        #[arg(long, default_value = "twostep", value_parser = ["onestep", "twostep"])]
+        step: String,
+
+        /// Shallowest lag of y used as instrument
+        #[arg(long = "min-lag", default_value_t = 2)]
+        min_lag: usize,
+
+        /// Deepest lag of y used as instrument (default: all available)
+        #[arg(long = "max-lag")]
+        max_lag: Option<usize>,
+
+        /// One instrument column per lag depth
+        #[arg(long)]
+        collapse: bool,
+
+        /// robust (one-step robust, two-step Windmeijer) or classical
+        #[arg(long, default_value = "robust", value_parser = ["robust", "classical"])]
+        vcov: String,
     },
 
     /// Panel Variable Coefficients Model (Swamy estimator)
@@ -355,7 +385,29 @@ pub fn execute(
             indep_vars,
             entity,
             time,
-        } => execute_gmm(dataset, dep_var, indep_vars, entity, time, format, session),
+            lags,
+            step,
+            min_lag,
+            max_lag,
+            collapse,
+            vcov,
+        } => {
+            let config = GmmConfig {
+                transform: GmmTransform::Difference,
+                step: if step == "onestep" {
+                    GmmStep::OneStep
+                } else {
+                    GmmStep::TwoStep
+                },
+                max_lag: *max_lag,
+                min_lag: *min_lag,
+                collapse: *collapse,
+                robust: vcov == "robust",
+            };
+            execute_gmm(
+                dataset, dep_var, indep_vars, entity, time, *lags, config, format, session,
+            )
+        }
         PanelCommands::Pvcm {
             dataset,
             dep_var,
@@ -686,6 +738,9 @@ fn execute_hdfe(
                     extra_json.insert("f_statistic".to_string(), result.f_stat.into());
                     extra_json.insert("f_p_value".to_string(), result.f_p_value.into());
                     extra_json.insert("fe_dimensions".to_string(), fe_dimensions.into());
+                    if let Some(missing) = missing_json(&result.missing) {
+                        extra_json.insert("missing".to_string(), missing);
+                    }
                     let report = RegressionReport {
                         method: &method,
                         coefficients: CoefRow::from_slices(
@@ -720,6 +775,7 @@ fn execute_hdfe(
                                 "\nF-statistic: {:.4} (p-value: {:.4})",
                                 result.f_stat, result.f_p_value
                             );
+                            print_missing_note(&result.missing, format);
                         }
                     }
                 }
@@ -856,6 +912,7 @@ fn execute_feglm(
                             "converged": result.converged,
                             "iterations": result.iterations,
                         });
+                        let json = with_missing(json, &result.missing);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -908,6 +965,7 @@ fn execute_feglm(
                         for (dim, count) in result.fe_dimensions.iter().zip(&result.fe_counts) {
                             println!("  {}: {} levels", dim, count);
                         }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("FEGLM failed: {}", e), format),
@@ -924,6 +982,8 @@ fn execute_gmm(
     indep_vars: &[String],
     entity: &str,
     time: &str,
+    lags: usize,
+    config: GmmConfig,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -939,10 +999,10 @@ fn execute_gmm(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            match run_arellano_bond(ds, dep_var, &x_cols, entity, time) {
+            match run_gmm(ds, dep_var, &x_cols, entity, time, lags, Some(config)) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Arellano-Bond GMM",
                             "transform": format!("{}", result.transform),
                             "step": format!("{}", result.step),
@@ -950,19 +1010,33 @@ fn execute_gmm(
                             "variables": result.variables,
                             "coefficients": result.coefficients,
                             "std_errors": result.std_errors,
+                            "se_type": result.se_type,
                             "z_stats": result.z_stats,
                             "p_values": result.p_values,
                             "n_obs": result.n_obs,
                             "n_groups": result.n_groups,
                             "n_instruments": result.n_instruments,
+                            "lags": result.lags,
+                            "min_lag": result.min_lag,
+                            "max_lag": result.max_lag,
+                            "collapse": result.collapse,
+                            "sigma2": result.sigma2,
                             "sargan_statistic": result.sargan_statistic,
                             "sargan_df": result.sargan_df,
                             "sargan_p_value": result.sargan_p_value,
+                            "sargan_homoskedastic": result.sargan_homoskedastic,
+                            "sargan_homoskedastic_p_value": result.sargan_homoskedastic_p_value,
+                            "one_step_weight_rank": result.one_step_weight_rank,
+                            "two_step_weight_rank": result.two_step_weight_rank,
                             "ar1_statistic": result.ar1_statistic,
                             "ar1_p_value": result.ar1_p_value,
                             "ar2_statistic": result.ar2_statistic,
                             "ar2_p_value": result.ar2_p_value,
+                            "warnings": result.warnings,
                         });
+                        if let Some(missing) = missing_json(&result.missing) {
+                            json["missing"] = missing;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -973,6 +1047,7 @@ fn execute_gmm(
                             "Observations: {}  Groups: {}  Instruments: {}",
                             result.n_obs, result.n_groups, result.n_instruments
                         );
+                        println!("Std. errors: {}", result.se_type);
 
                         println!("\nCoefficients:");
                         println!(
@@ -982,17 +1057,6 @@ fn execute_gmm(
                         println!("{}", "-".repeat(66));
 
                         for (i, var) in result.variables.iter().enumerate() {
-                            let sig = if result.p_values[i] < 0.001 {
-                                "***"
-                            } else if result.p_values[i] < 0.01 {
-                                "**"
-                            } else if result.p_values[i] < 0.05 {
-                                "*"
-                            } else if result.p_values[i] < 0.1 {
-                                "."
-                            } else {
-                                ""
-                            };
                             println!(
                                 "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
                                 var,
@@ -1000,7 +1064,7 @@ fn execute_gmm(
                                 result.std_errors[i],
                                 result.z_stats[i],
                                 result.p_values[i],
-                                sig
+                                significance_mark(result.p_values[i])
                             );
                         }
 
@@ -1009,9 +1073,19 @@ fn execute_gmm(
 
                         println!("\nDiagnostic Tests:");
                         println!(
-                            "  Sargan test: chi2({}) = {:.4}, p = {:.4}",
+                            "  Sargan/Hansen test: chi2({}) = {:.4}, p = {:.4}",
                             result.sargan_df, result.sargan_statistic, result.sargan_p_value
                         );
+                        if let (Some(stat), Some(p)) = (
+                            result.sargan_homoskedastic,
+                            result.sargan_homoskedastic_p_value,
+                        ) {
+                            println!(
+                                "  Sargan test (homoskedastic, one-step weights): chi2({}) = \
+                                 {stat:.4}, p = {p:.4}",
+                                result.sargan_df
+                            );
+                        }
                         println!(
                             "  AR(1): z = {:.4}, p = {:.4}",
                             result.ar1_statistic, result.ar1_p_value
@@ -1020,6 +1094,7 @@ fn execute_gmm(
                             "  AR(2): z = {:.4}, p = {:.4}",
                             result.ar2_statistic, result.ar2_p_value
                         );
+                        print_warnings(&result.warnings);
                     }
                 },
                 Err(e) => print_error(&format!("GMM estimation failed: {}", e), format),
@@ -1074,6 +1149,7 @@ fn execute_pvcm(
                             "homogeneity_pvalue": result.homogeneity_pvalue,
                             "individual_coefficients": result.individual_coefficients,
                         });
+                        let json = with_missing(json, &result.missing);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1122,6 +1198,7 @@ fn execute_pvcm(
                             "  Chi-squared = {:.4}, p = {:.4}",
                             result.homogeneity_stat, result.homogeneity_pvalue
                         );
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("PVCM estimation failed: {}", e), format),
@@ -1167,6 +1244,7 @@ fn execute_pmg(
                             "n_entities": result.n_entities,
                             "individual_coefficients": result.individual_coefficients,
                         });
+                        let json = with_missing(json, &result.missing);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1209,6 +1287,7 @@ fn execute_pmg(
 
                         println!("\n---");
                         println!("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("PMG estimation failed: {}", e), format),
@@ -1265,6 +1344,7 @@ fn execute_gls(
                             "n_periods": result.n_periods,
                             "sigma": result.sigma,
                         });
+                        let json = with_missing(json, &result.missing);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1312,6 +1392,7 @@ fn execute_gls(
                         println!("\nModel Fit:");
                         println!("  R-squared: {:.4}", result.r_squared);
                         println!("  Residual std. error: {:.4}", result.sigma);
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Panel GLS failed: {}", e), format),
@@ -1359,7 +1440,7 @@ fn execute_unit_root(
             match run_panel_unit_root(ds, var, unit, time, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "test_type": format!("{}", result.test_type),
                             "model": format!("{}", result.model),
                             "statistic": result.statistic,
@@ -1369,7 +1450,15 @@ fn execute_unit_root(
                             "n_panels": result.n_panels,
                             "avg_time_periods": result.avg_time_periods,
                             "lags_used": result.lags_used,
+                            "warnings": result.warnings,
                         });
+                        if let Some(stats) = &result.unit_statistics {
+                            json["unit_statistics"] = serde_json::json!(stats);
+                        }
+                        if let Some(p) = &result.unit_p_values {
+                            json["unit_p_values"] = serde_json::json!(p);
+                        }
+                        let json = with_missing(json, &result.missing);
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1386,6 +1475,8 @@ fn execute_unit_root(
 
                         println!("\nTest statistic: {:.4}", result.statistic);
                         println!("P-value: {:.4}", result.p_value);
+
+                        print_warnings(&result.warnings);
 
                         let sig = if result.p_value < 0.01 {
                             "*** Reject H0 at 1% level"
@@ -1405,4 +1496,42 @@ fn execute_unit_root(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+/// `json` with `"missing"` added when rows were dropped.
+fn with_missing(
+    mut json: serde_json::Value,
+    missing: &p2a_core::data::columns::MissingSummary,
+) -> serde_json::Value {
+    if let Some(m) = missing_json(missing) {
+        json["missing"] = m;
+    }
+    json
+}
+
+/// A `Warnings:` block (nothing when there are none); the missing-value note is one of
+/// them, as in `panel fe` and `panel re`.
+fn print_warnings(warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    println!("\nWarnings:");
+    for w in warnings {
+        println!("  - {w}");
+    }
+}
+
+/// `***`, `**`, `*`, `.` or nothing for a p-value.
+fn significance_mark(p: f64) -> &'static str {
+    if p < 0.001 {
+        "***"
+    } else if p < 0.01 {
+        "**"
+    } else if p < 0.05 {
+        "*"
+    } else if p < 0.1 {
+        "."
+    } else {
+        ""
+    }
 }

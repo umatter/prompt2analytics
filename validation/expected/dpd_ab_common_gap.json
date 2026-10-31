@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "id": "dpd_ab_common_gap",
+  "area": "econometrics/panel",
+  "method": "Arellano-Bond difference GMM (pgmm): a year no unit observes, missing cells, text unit ids",
+  "reference": "plm::pgmm on the complete rows; plm's time-aware lag() drops the equations that need 2003, and the 2003 instrument columns are zero",
+  "call": "pgmm(y ~ lag(y, 1) + x | lag(y, 2:99), data = pdata.frame(d[complete.cases(d), ], index = c('id', 'year')), effect = 'individual', model = ...)",
+  "dataset": "validation/datasets/generated/ab_common_gap.csv",
+  "datasets": ["validation/datasets/generated/ab_common_gap.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "onestep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.16915295624053117, 0.24284723725337082]
+    },
+    "onestep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.017037110851060709, 0.0072800347111472725]
+    },
+    "onestep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.13957570026897384, 0.05771761986118569]
+    },
+    "onestep_sargan": 14.528392616277394,
+    "onestep_sargan_df": 14,
+    "onestep_sargan_df_nonzero": 9,
+    "onestep_sargan_p": 0.41113213670587645,
+    "onestep_sargan_p_nonzero": 0.10473170856047082,
+    "onestep_ar1": -1.5383375045112073,
+    "onestep_ar1_p": 0.12396611414923135,
+    "onestep_ar2": null,
+    "onestep_ar2_p": null,
+    "onestep_n_instruments": 16,
+    "onestep_n_instruments_nonzero": 11,
+    "onestep_n_obs": 260,
+    "onestep_sigma2": 0.73519401703796272,
+    "onestep_se_textbook": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.1460820757030355, 0.062421533268848278]
+    },
+    "onestep_sargan_homoskedastic": 16.231227158935411,
+    "onestep_sargan_homoskedastic_p": 0.062207176871297939,
+    "twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.069803154965282083, 0.23299104199850471]
+    },
+    "twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.12182556435805915, 0.054184165575175421]
+    },
+    "twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.14912630257294213, 0.067069708724528193]
+    },
+    "twostep_sargan": 13.858201515361518,
+    "twostep_sargan_df": 14,
+    "twostep_sargan_df_nonzero": 9,
+    "twostep_sargan_p": 0.46032782312157938,
+    "twostep_sargan_p_nonzero": 0.12745943395435561,
+    "twostep_ar1": -0.97311868649575173,
+    "twostep_ar1_p": 0.33049431776190535,
+    "twostep_ar2": null,
+    "twostep_ar2_p": null,
+    "twostep_n_instruments": 16,
+    "twostep_n_instruments_nonzero": 11,
+    "twostep_n_obs": 260,
+    "n_rows_dropped": 20
+  }
+}

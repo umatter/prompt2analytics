@@ -137,9 +137,9 @@ pub struct GmmRequest {
     #[schemars(description = "Name of the dependent variable (Y) column.")]
     pub y: String,
 
-    /// Independent variables (X) column names
+    /// Strictly exogenous regressors (X) column names
     #[schemars(
-        description = "Names of the independent variable (X) columns. Include lagged dependent variable if desired."
+        description = "Names of the strictly exogenous regressors. They enter in differences and serve as their own instruments. Do not include the lagged dependent variable: `lags` adds it."
     )]
     pub x: Vec<String>,
 
@@ -151,7 +151,9 @@ pub struct GmmRequest {
     pub entity_var: String,
 
     /// Time period identifier column
-    #[schemars(description = "Column name for time period identifier (e.g., 'year', 'quarter').")]
+    #[schemars(
+        description = "Column name for the time period (e.g., 'year'): whole numbers; lags are steps of 1 (recode biennial years or dates as consecutive period numbers)."
+    )]
     #[serde(alias = "time_col", alias = "time", alias = "period")]
     pub time_var: String,
 
@@ -159,9 +161,9 @@ pub struct GmmRequest {
     #[schemars(description = "Number of lags of Y to use as regressors. Default: 1.")]
     pub lags: Option<usize>,
 
-    /// Transformation type: 'difference' (Arellano-Bond 1991) or 'system' (Blundell-Bond 1998)
+    /// Transformation type: 'difference' (Arellano-Bond 1991); 'system' is not implemented yet
     #[schemars(
-        description = "Transformation: 'difference' for Arellano-Bond, 'system' for Blundell-Bond. Default: 'difference'."
+        description = "'difference' (Arellano-Bond; default). 'system' (Blundell-Bond) is not implemented yet and runs difference GMM with a warning."
     )]
     pub transform: Option<String>,
 
@@ -178,7 +180,9 @@ pub struct GmmRequest {
     pub max_lag: Option<usize>,
 
     /// Minimum lag for instruments (default: 2)
-    #[schemars(description = "Minimum lag for instruments. Default: 2.")]
+    #[schemars(
+        description = "Minimum lag of y used as instrument. Default 2; lag 1 is not a valid instrument under serially uncorrelated errors."
+    )]
     pub min_lag: Option<usize>,
 
     /// Whether to collapse instruments
@@ -189,7 +193,7 @@ pub struct GmmRequest {
 
     /// Whether to use robust standard errors
     #[schemars(
-        description = "Whether to use robust (Windmeijer-corrected) standard errors. Default: true."
+        description = "Default true: one-step robust or two-step Windmeijer (2005)-corrected SEs; false: one-step Arellano-Bond (1991) classical or uncorrected two-step SEs."
     )]
     pub robust: Option<bool>,
 }

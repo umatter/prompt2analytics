@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_gmm_difference",
+      "name": "Arellano-Bond difference GMM (one-step, two-step)",
+      "category": "econometrics",
+      "reference": "plm::pgmm(transformation = 'd'); plm::vcovHC.pgmm; plm::sargan; plm::mtest",
+      "doc": "validation/econometrics/gmm.md",
+      "cases": [
+        "dpd_ab_balanced",
+        "dpd_ab_gaps",
+        "dpd_ab_common_gap",
+        "dpd_ab_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::utils::tests::test_validate_difference_equations_gaps_layout",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_balanced",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_balanced_variants",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_gaps",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_common_gap",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_grunfeld",
+        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_gmm_ab_balanced",
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_gmm_ab_balanced",
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_gmm_text"
+      ],
+      "quantities": [
+        "coefficients (one-step, two-step)",
+        "SE one-step Arellano-Bond (1991)",
+        "SE one-step robust",
+        "SE two-step uncorrected",
+        "SE two-step Windmeijer",
+        "sigma2",
+        "Sargan/Hansen (pgmm)",
+        "Sargan homoskedastic (one-step)",
+        "AR(1)",
+        "AR(2)",
+        "p-values",
+        "equations",
+        "instruments",
+        "weighting ranks"
+      ],
+      "tolerance": "validation/README.md, n = 180-600: coefficients 1e-8, SE and statistics 1e-6 relative; Grunfeld (rank-deficient weights) 1e-7",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/gmm_twostep_full.csv"
+      ]
+    },
+    {
+      "id": "panel_unit_root_extraction",
+      "name": "Panel unit-root tests: data extraction (unit ids, time, gaps, missing values)",
+      "category": "econometrics",
+      "reference": "urca::ur.df per unit (type 'drift', lags 1); plm::purtest's splicing of gaps",
+      "doc": "validation/econometrics/panel_unit_root.md",
+      "cases": [
+        "panel_pur_extraction"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_panel_pur_extraction_common_gap",
+        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_unit_root_text_ids",
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_unit_root_text_ids"
+      ],
+      "quantities": [
+        "per-unit ADF tau",
+        "units",
+        "average T",
+        "rows dropped"
+      ],
+      "tolerance": "validation/README.md, n = 690: statistics 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "panel_cli_missing_notes",
+      "name": "CLI panel commands report dropped rows",
+      "category": "cli",
+      "reference": "plm/fixest on the complete rows (T2-WP08): the rows a two-way HDFE uses, and those the entity-only estimators use",
+      "doc": "validation/econometrics/panel_fe.md",
+      "cases": [
+        "panel_grunfeld_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_missing_notes"
+      ],
+      "quantities": [
+        "rows dropped",
+        "rows used"
+      ],
+      "tolerance": "counts: exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

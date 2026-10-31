@@ -252,6 +252,13 @@ the id and time extractors in `econometrics::panel::utils::tests`
 `tier2::wp08_iv_panel::test_validate_mcp_panel_pmg_grunfeld_na`. A NaN cell is dropped
 like a null one (`econometrics::panel::linear_models::tests::test_fixed_effects_non_finite_data`).
 
+The CLI panel commands report the dropped rows too: `p2a panel hdfe`, `feglm`, `pvcm`,
+`pmg` and `gls` print `Note: <k> of <n> rows dropped ...` as their last text line and add a
+`missing` object to `-F json`, whose row counts are compared with the case's
+(`hdfe_n_removed`, `n_complete`, `n_complete_fe`) by
+`tier2::wp19_dynamic_panel::test_validate_cli_panel_missing_notes` (p2a-cli; registry entry
+`panel_cli_missing_notes` in `validation/methods/econ_dynamic_panel.json`).
+
 ## Known differences
 
 - A regressor that is constant within every entity, or one that is exactly collinear with

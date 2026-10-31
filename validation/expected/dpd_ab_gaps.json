@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "id": "dpd_ab_gaps",
+  "area": "econometrics/panel",
+  "method": "Arellano-Bond difference GMM (pgmm) with interior gaps and late entry",
+  "reference": "plm::pgmm on an unbalanced panel (equations need y_t, y_{t-1}, y_{t-2}; instruments only from observed lags)",
+  "call": "pgmm(y ~ lag(y, 1) + x | lag(y, 2:99), data = pdata.frame(d_with_gaps, ...), ...)",
+  "dataset": "validation/datasets/generated/ab_gaps.csv",
+  "datasets": ["validation/datasets/generated/ab_gaps.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "onestep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.4186843810911825, 0.31272652465574391]
+    },
+    "onestep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.0098542633259425562, 0.0052848749977703691]
+    },
+    "onestep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.099254430331240304, 0.045268949021560027]
+    },
+    "onestep_sargan": 30.330211331726847,
+    "onestep_sargan_df": 20,
+    "onestep_sargan_df_nonzero": 20,
+    "onestep_sargan_p": 0.064676831015432382,
+    "onestep_sargan_p_nonzero": 0.064676831015432382,
+    "onestep_ar1": -5.2242249623725572,
+    "onestep_ar1_p": 1.748860585673091e-07,
+    "onestep_ar2": 0.032978512675773855,
+    "onestep_ar2_p": 0.97369172272028515,
+    "onestep_n_instruments": 22,
+    "onestep_n_instruments_nonzero": 22,
+    "onestep_n_obs": 553,
+    "onestep_sigma2": 0.97465701581204933,
+    "onestep_se_textbook": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.097285937862874011, 0.052174779954641301]
+    },
+    "onestep_sargan_homoskedastic": 31.053534186450197,
+    "onestep_sargan_homoskedastic_p": 0.05448767223850292,
+    "twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.40262769564062889, 0.30711810508291038]
+    },
+    "twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.088088851855222361, 0.039162776013743059]
+    },
+    "twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.13098078602632593, 0.052445619371485355]
+    },
+    "twostep_sargan": 30.284528229247318,
+    "twostep_sargan_df": 20,
+    "twostep_sargan_df_nonzero": 20,
+    "twostep_sargan_p": 0.06537260196227529,
+    "twostep_sargan_p_nonzero": 0.06537260196227529,
+    "twostep_ar1": -4.0690973925183753,
+    "twostep_ar1_p": 4.7195617437434579e-05,
+    "twostep_ar2": 0.0026359051497193533,
+    "twostep_ar2_p": 0.99789685441273956,
+    "twostep_n_instruments": 22,
+    "twostep_n_instruments_nonzero": 22,
+    "twostep_n_obs": 553,
+    "lags2_twostep_coef": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.3485194232687942, -0.013836131302996928, 0.31913264284994552]
+    },
+    "lags2_twostep_se": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.11988697630405709, 0.054381271054572598, 0.043804862694906625]
+    },
+    "lags2_twostep_se_robust": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.17482919861499402, 0.074797267341558504, 0.056812731530544648]
+    },
+    "lags2_twostep_sargan": 23.225259708862669,
+    "lags2_twostep_sargan_df": 18,
+    "lags2_twostep_sargan_df_nonzero": 18,
+    "lags2_twostep_sargan_p": 0.1820816471829538,
+    "lags2_twostep_sargan_p_nonzero": 0.1820816471829538,
+    "lags2_twostep_ar1": -3.2743156453376834,
+    "lags2_twostep_ar1_p": 0.0010591822615122616,
+    "lags2_twostep_ar2": 0.75879386940787241,
+    "lags2_twostep_ar2_p": 0.4479758735413123,
+    "lags2_twostep_n_instruments": 21,
+    "lags2_twostep_n_instruments_nonzero": 21,
+    "lags2_twostep_n_obs": 442,
+    "collapse_twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.67680188421129273, 0.34017640164286544]
+    },
+    "collapse_twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.139632210596111, 0.049687659143879855]
+    },
+    "collapse_twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.14946245599314159, 0.052149957980785713]
+    },
+    "collapse_twostep_sargan": 4.5375538877534911,
+    "collapse_twostep_sargan_df": 5,
+    "collapse_twostep_sargan_df_nonzero": 5,
+    "collapse_twostep_sargan_p": 0.47487463487671616,
+    "collapse_twostep_sargan_p_nonzero": 0.47487463487671616,
+    "collapse_twostep_ar1": -5.3381407440384718,
+    "collapse_twostep_ar1_p": 9.3904553568583147e-08,
+    "collapse_twostep_ar2": 0.29678780226159884,
+    "collapse_twostep_ar2_p": 0.76662851851369496,
+    "collapse_twostep_n_instruments": 7,
+    "collapse_twostep_n_instruments_nonzero": 7,
+    "collapse_twostep_n_obs": 553
+  }
+}
