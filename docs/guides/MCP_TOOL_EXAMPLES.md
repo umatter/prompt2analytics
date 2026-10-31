@@ -215,6 +215,9 @@ Test effects of two factors and their interaction.
 
 # Additive model (no interaction)
 /anova_two_way dataset:experiment response:yield factor_a:fertilizer factor_b:irrigation interaction:false
+
+# Type II/III sums of squares (car::Anova) for unbalanced designs; the default is Type I (R aov)
+/anova_two_way dataset:experiment response:yield factor_a:fertilizer factor_b:irrigation interaction:true ss_type:II
 ```
 
 **Parameters:**
@@ -223,6 +226,7 @@ Test effects of two factors and their interaction.
 - `factor_a` (required): First categorical factor column
 - `factor_b` (required): Second categorical factor column
 - `interaction` (optional): Include interaction term (default: true)
+- `ss_type` (optional): Sums of squares, `I` (default; sequential, as R `aov`), `II` or `III` (as `car::Anova`); Types I and II agree on balanced designs
 
 **Output includes:**
 - ANOVA table with F-tests for each factor and interaction
@@ -384,13 +388,19 @@ Run Pearson's chi-squared goodness-of-fit test for categorical data.
 
 **Test against specific probabilities:**
 ```
-/hypothesis_chisq_gof dataset:data column:blood_type probs:[0.44,0.42,0.10,0.04]
+/hypothesis_chisq_gof dataset:data column:blood_type expected:{"O":0.44,"A":0.42,"B":0.10,"AB":0.04}
+```
+
+**Test whether a four-sided die is fair (listing every face, so a face that never came up counts with 0 observations):**
+```
+/hypothesis_chisq_gof dataset:rolls column:face expected:{"1":0.25,"2":0.25,"3":0.25,"4":0.25}
 ```
 
 **Parameters:**
 - `dataset` (required): Dataset name
 - `column` (required): Categorical column to count
-- `probs` (optional): Expected probabilities (must sum to 1.0; uniform if omitted)
+- `probs` (optional): Expected probabilities, one per category in the order of the sorted category labels (numbers numerically, text in C-locale order; the result's `categories` lists that order); they must sum to 1.0
+- `expected` (optional): A category -> probability map; categories that never occur in the data count as 0. Give `probs` or `expected`, not both; the uniform distribution if both are omitted
 
 **Output includes:**
 - Chi-squared statistic and degrees of freedom
