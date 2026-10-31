@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_hypothesis_t_test",
+      "name": "MCP hypothesis_t_test on dataset columns with missing values and integer columns",
+      "category": "stats",
+      "reference": "stats::t.test (one-sample; Welch; paired), NA removed as t.test does",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_t_test_two_sample_na"],
+      "quantities": ["t", "df", "p", "95% CI", "sample means / mean difference (one-sample, Welch, paired, Welch on Int64)", "missing-value note"],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals for t, p, CI and means, 2 for df)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_cor_test",
+      "name": "MCP hypothesis_cor_test (Pearson) on complete pairs",
+      "category": "stats",
+      "reference": "stats::cor.test(x, y) (complete.cases(x, y))",
+      "doc": "validation/stats/new_methods.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_cor_test_two_sample_na"],
+      "quantities": ["r", "t", "df", "p", "95% CI", "n", "missing"],
+      "tolerance": "validation/README.md, n = 6 (< 100): estimate 1e-6, statistic and CI 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and n exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_ks_test",
+      "name": "MCP hypothesis_ks_test, two-sample, on Int64 columns with missing values",
+      "category": "stats",
+      "reference": "stats::ks.test(xi, yi) (NA removed per sample)",
+      "doc": "validation/stats/ks_test.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_ks_test_two_sample_na"],
+      "quantities": ["D", "n", "n_2", "missing"],
+      "tolerance": "validation/README.md, n = 38 (< 100): D 1e-5 relative; sizes exact",
+      "deviations": [{"finding": "STAT-27", "quantity": "KS p-value", "note": "p2a is asymptotic with Stephens' correction (0.19563779265722031); R's exact p conditional on ties is 0.1565386776017454; not pinned"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_mood_test",
+      "name": "MCP hypothesis_mood_test on a tie-free Int64 pair with missing values",
+      "category": "stats",
+      "reference": "stats::mood.test(mi, mj) (NA removed per sample)",
+      "doc": "validation/stats/mood.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_mood_test_two_sample_na"],
+      "quantities": ["T", "z", "p", "n_x", "n_y", "missing"],
+      "tolerance": "validation/README.md, n = 27 (< 100): statistics 1e-5 relative, p 1e-5 relative + 1e-12 absolute, sizes exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

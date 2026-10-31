@@ -217,6 +217,20 @@ id `ks_test_two_sample`).
 
 *Benchmarks run on Linux with Rust Criterion (100 samples) and R microbenchmark/system.time (50 iterations). Speedup decreases at large n due to O(n log n) sorting dominating both implementations.*
 
+## MCP tool: missing values and integer columns
+
+`hypothesis_ks_test` calls the dataset wrapper `ks_test`, so the tool drops each sample's own
+missing values, accepts integer columns and reports the drop under `missing` (for a two-sample
+test the summaries of the two samples are summed: `n_total` counts the rows of both columns, and
+`by_column` is `{"xi": 2, "yi": 4}` on the case above). Before, the handler read its columns
+with `into_no_null_iter` (a missing cell entered the sample as 0) and refused Int64 columns
+("Column 'xi' is not numeric.").
+
+**MCP test:** `tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_ks_test_two_sample_na`
+(`statistic_D`, `n`, `n_2` against D, n and m above, `Tol::stat(38)` and exact; `missing`). The
+p-value is not pinned (STAT-27, as above). Registry `validation/methods/mcp_stats.json`, id
+`mcp_hypothesis_ks_test`.
+
 ## MCP Tool Usage
 
 ```json

@@ -155,8 +155,18 @@ ct <- cor.test(d$x, d$y)
 # 95% CI: (0.8091413571114043, 0.9977196153804951), 6 pairs
 ```
 
-Before T2-WP06 the MCP handler extracted the columns itself and read nulls as 0 (r 0.80 on this
-dataset); T2-WP20 moves it to `run_cor_test_dataset`.
+Before T2-WP06 and T2-WP20 the MCP handler extracted the columns itself and read nulls as 0
+(r 0.80 on 22 pairs of this dataset) and refused integer columns. `hypothesis_cor_test` now
+calls `run_cor_test_dataset`, keeps the complete pairs and reports the drop under `missing`
+(`{"n_total": 22, "n_used": 6, "n_dropped": 16, "by_column": {"x": 15, "y": 15}}` here).
+
+**MCP tool:** `tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_cor_test_two_sample_na`
+pins the tool's JSON (`estimate`, `statistic`, `df`, `p_value`, `confidence_interval`, `n`,
+`missing`) to the values above at the tolerances below (registry
+`validation/methods/mcp_stats.json`, id `mcp_hypothesis_cor_test`). The property test
+`tools::handlers::hypothesis::tests::test_mcp_hypothesis_two_sample_columns` checks that the
+Int64 pair `xi`, `yi` gives exactly the result of its Float64 copy (18 pairs) and that text and
+absent columns are refused with the core's error.
 
 **Rust tests:** `stats::cortest::tests::test_validate_cor_test_two_sample_na` (r, t, df, p,
 CI, n; `missing`) and `stats::cortest::tests::test_validate_na_cor_test_columns` (Int64 against

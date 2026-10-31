@@ -22,7 +22,9 @@ pub struct KsTestRequest {
     pub dataset: String,
 
     /// First variable column name
-    #[schemars(description = "Name of the first variable column (must be numeric).")]
+    #[schemars(
+        description = "Name of the first variable column (must be numeric). Missing values are dropped from each sample."
+    )]
     pub x: String,
 
     /// Second variable column name (optional)
@@ -196,7 +198,9 @@ pub struct TTestRequest {
     pub dataset: String,
 
     /// First variable column name
-    #[schemars(description = "Name of the first variable column (must be numeric).")]
+    #[schemars(
+        description = "Name of the first variable column (must be numeric). Missing values are dropped (each sample on its own; complete pairs when paired)."
+    )]
     pub x: String,
 
     /// Second variable column name (optional)
@@ -524,7 +528,9 @@ pub struct MoodTestRequest {
     pub dataset: String,
 
     /// First sample column name
-    #[schemars(description = "Name of the first sample column (numeric).")]
+    #[schemars(
+        description = "Name of the first sample column (numeric). Missing values are dropped from each sample."
+    )]
     pub x: String,
 
     /// Second sample column name
@@ -546,7 +552,9 @@ pub struct CorTestRequest {
     pub dataset: String,
 
     /// First variable column name
-    #[schemars(description = "Name of the first numeric variable column.")]
+    #[schemars(
+        description = "Name of the first numeric variable column. Rows with a missing x or y are dropped (complete pairs, as cor.test)."
+    )]
     pub x: String,
 
     /// Second variable column name

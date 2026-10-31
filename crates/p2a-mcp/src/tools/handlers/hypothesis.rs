@@ -12,15 +12,14 @@
 //! - And more
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{check_named_budget, missing_json};
+use crate::tools::common::{MissingSummary, check_named_budget, missing_json};
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
     Alternative, CmhAlternative, GofExpected, PValueAdjustMethod, PoissonAlternative, mcnemar_test,
-    mood_test, one_sample_t_test, paired_t_test, poisson_test, run_bartlett_test,
-    run_chisq_gof_with, run_chisq_independence, run_friedman_test, run_kruskal_test,
-    run_mantelhaen_test, run_oneway_test, run_pairwise_t_test, run_pairwise_wilcox_test,
-    run_quade_test, two_sample_t_test,
+    poisson_test, run_bartlett_test, run_chisq_gof_with, run_chisq_independence, run_friedman_test,
+    run_kruskal_test, run_mantelhaen_test, run_mood_test, run_oneway_test, run_pairwise_t_test,
+    run_pairwise_wilcox_test, run_quade_test, t_test,
 };
 use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
@@ -303,54 +302,24 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<CorTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::cortest::run_cor_test;
+        use p2a_core::stats::cortest::run_cor_test_dataset;
 
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-        let x: Vec<f64> = match df.column(&request.x) {
-            Ok(col) => match col.f64() {
-                Ok(ca) => ca.into_no_null_iter().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' is not numeric: {}",
-                        request.x, e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found: {}",
-                    request.x, e
-                ))]));
-            }
-        };
-
-        let y: Vec<f64> = match df.column(&request.y) {
-            Ok(col) => match col.f64() {
-                Ok(ca) => ca.into_no_null_iter().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' is not numeric: {}",
-                        request.y, e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found: {}",
-                    request.y, e
-                ))]));
-            }
-        };
-
         let method = request.method.as_deref().unwrap_or("pearson");
         let alternative = request.alternative.as_deref().unwrap_or("two.sided");
         let conf_level = request.conf_level.unwrap_or(0.95);
 
-        match run_cor_test(&x, &y, method, alternative, conf_level) {
+        match run_cor_test_dataset(
+            dataset,
+            &request.x,
+            &request.y,
+            method,
+            alternative,
+            conf_level,
+        ) {
             Ok(result) => {
                 let mut json_output = serde_json::json!({
                     "test": result.method_name,
@@ -382,6 +351,7 @@ impl AnalyticsServer {
                         "conf_level": result.conf_level,
                     });
                 }
+                insert_missing(&mut json_output, &result.missing);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -618,9 +588,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<KsTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::ks::{
-            TheoreticalDistribution, ks_test_one_sample, ks_test_two_sample,
-        };
+        use p2a_core::stats::ks::{TheoreticalDistribution, ks_test};
 
         let datasets = self.datasets.read().await;
 
@@ -639,50 +607,11 @@ impl AnalyticsServer {
             None => Alternative::TwoSided,
         };
 
-        let df = dataset.df();
-
-        let x_series = match df.column(&request.x) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found in dataset.",
-                    request.x
-                ))]));
-            }
-        };
-        let x: Vec<f64> = match x_series.f64() {
-            Ok(ca) => ca.into_no_null_iter().collect(),
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' is not numeric.",
-                    request.x
-                ))]));
-            }
-        };
-
-        let result = if let Some(y_col) = &request.y {
-            let y_series = match df.column(y_col) {
-                Ok(s) => s,
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' not found in dataset.",
-                        y_col
-                    ))]));
-                }
-            };
-            let y: Vec<f64> = match y_series.f64() {
-                Ok(ca) => ca.into_no_null_iter().collect(),
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' is not numeric.",
-                        y_col
-                    ))]));
-                }
-            };
-
-            ks_test_two_sample(&x, &y, alternative)
+        // The theoretical distribution of a one-sample test (none for two samples)
+        let distribution = if request.y.is_some() {
+            None
         } else {
-            let distribution = match request.distribution.as_deref() {
+            Some(match request.distribution.as_deref() {
                 Some("uniform") => {
                     let a = request.a.unwrap_or(0.0);
                     let b = request.b.unwrap_or(1.0);
@@ -701,12 +630,16 @@ impl AnalyticsServer {
                         TheoreticalDistribution::NormalParams { mean, sd }
                     }
                 }
-            };
-
-            ks_test_one_sample(&x, distribution, alternative)
+            })
         };
 
-        match result {
+        match ks_test(
+            dataset,
+            &request.x,
+            request.y.as_deref(),
+            distribution,
+            alternative,
+        ) {
             Ok(result) => {
                 let alt_description = match alternative {
                     Alternative::TwoSided => "two-sided",
@@ -733,6 +666,7 @@ impl AnalyticsServer {
                 if let Some(n2) = result.n_2 {
                     json_output["n_2"] = serde_json::json!(n2);
                 }
+                insert_missing(&mut json_output, &result.missing);
 
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
@@ -917,51 +851,13 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let x_series = match dataset.df().column(&request.x) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found in dataset.",
-                    request.x
-                ))]));
-            }
-        };
-        let x: Vec<f64> = match x_series.f64() {
-            Ok(ca) => ca.into_no_null_iter().collect(),
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' must be numeric.",
-                    request.x
-                ))]));
-            }
-        };
-
-        let y_series = match dataset.df().column(&request.y) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found in dataset.",
-                    request.y
-                ))]));
-            }
-        };
-        let y: Vec<f64> = match y_series.f64() {
-            Ok(ca) => ca.into_no_null_iter().collect(),
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' must be numeric.",
-                    request.y
-                ))]));
-            }
-        };
-
         let alternative = match request.alternative.as_deref() {
             Some("greater") | Some("gt") => Alternative::Greater,
             Some("less") | Some("lt") => Alternative::Less,
             _ => Alternative::TwoSided,
         };
 
-        let result = match mood_test(&x, &y, alternative) {
+        let result = match run_mood_test(dataset, &request.x, &request.y, Some(alternative)) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -977,7 +873,7 @@ impl AnalyticsServer {
             Alternative::Less => "true ratio of scales is less than 1 (x less spread than y)",
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Mood two-sample test of scale",
             "statistic": result.statistic,
             "statistic_name": "T (sum of squared rank deviations)",
@@ -1002,6 +898,7 @@ impl AnalyticsServer {
                 "ties": "Mielke (1967), Technometrics 9(2):312-314"
             }
         });
+        insert_missing(&mut output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1590,7 +1487,7 @@ impl AnalyticsServer {
 
     /// Run t-test for comparing means.
     #[tool(
-        description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: pass x and y as two numeric columns to compare (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate. Note: x and y must both be numeric columns. To compare a numeric variable across groups (e.g., salary by gender), first filter into two datasets or use two numeric columns."
+        description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: pass x and y as two numeric columns to compare (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate. Note: x and y must both be numeric columns. To compare a numeric variable across groups (e.g., salary by gender), first filter into two datasets or use two numeric columns. Missing values are dropped as R's t.test does (each sample on its own; complete pairs when paired) and reported in a 'Missing values' line. Integer columns are accepted."
     )]
     pub async fn hypothesis_t_test(
         &self,
@@ -1599,25 +1496,6 @@ impl AnalyticsServer {
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
-
-        let x_series = match dataset.df().column(&request.x) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found in dataset.",
-                    request.x
-                ))]));
-            }
-        };
-        let x: Vec<f64> = match x_series.f64() {
-            Ok(ca) => ca.into_no_null_iter().collect(),
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' must be numeric.",
-                    request.x
-                ))]));
-            }
-        };
 
         let mu = request.mu.unwrap_or(0.0);
         let alternative = match request.alternative.as_deref() {
@@ -1629,44 +1507,22 @@ impl AnalyticsServer {
         let var_equal = request.var_equal.unwrap_or(false);
         let conf_level = request.conf_level.unwrap_or(0.95);
 
-        let result = match &request.y {
-            Some(y_col) => {
-                let y_series = match dataset.df().column(y_col) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' not found in dataset.",
-                            y_col
-                        ))]));
-                    }
-                };
-                let y: Vec<f64> = match y_series.f64() {
-                    Ok(ca) => ca.into_no_null_iter().collect(),
-                    Err(_) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' must be numeric.",
-                            y_col
-                        ))]));
-                    }
-                };
+        if paired && request.y.is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Paired t-test requires both x and y columns.".to_string(),
+            )]));
+        }
 
-                if paired {
-                    paired_t_test(&x, &y, mu, alternative, conf_level)
-                } else {
-                    two_sample_t_test(&x, &y, mu, alternative, var_equal, conf_level)
-                }
-            }
-            None => {
-                if paired {
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        "Paired t-test requires both x and y columns.".to_string(),
-                    )]));
-                }
-                one_sample_t_test(&x, mu, alternative, conf_level)
-            }
-        };
-
-        match result {
+        match t_test(
+            dataset,
+            &request.x,
+            request.y.as_deref(),
+            mu,
+            alternative,
+            paired,
+            var_equal,
+            conf_level,
+        ) {
             Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "t-test failed: {}",
@@ -1774,6 +1630,13 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+}
+
+/// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped.
+fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
+    if let Some(m) = missing_json(missing) {
+        output["missing"] = m;
     }
 }
 
@@ -2505,5 +2368,331 @@ mod tests {
             3, 4
         )));
         assert!(!limits::with_limits(small, || fits_response_budget(3, 5)));
+    }
+
+    /// Calls the hypothesis tool named `tool` (without its `hypothesis_` prefix) with `args`,
+    /// deserialised into the tool's request type.
+    async fn hyp(server: &AnalyticsServer, tool: &str, args: serde_json::Value) -> CallToolResult {
+        fn req<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Parameters<T> {
+            Parameters(serde_json::from_value(v).unwrap())
+        }
+        match tool {
+            "t_test" => server.hypothesis_t_test(req(args)).await,
+            "cor_test" => server.hypothesis_cor_test(req(args)).await,
+            "ks_test" => server.hypothesis_ks_test(req(args)).await,
+            "mood_test" => server.hypothesis_mood_test(req(args)).await,
+            "bartlett_test" => server.hypothesis_bartlett_test(req(args)).await,
+            "kruskal_wallis" => server.hypothesis_kruskal_wallis(req(args)).await,
+            "oneway" => server.hypothesis_oneway(req(args)).await,
+            "friedman" => server.hypothesis_friedman(req(args)).await,
+            "quade" => server.hypothesis_quade(req(args)).await,
+            "wilcoxon" => server.hypothesis_wilcoxon(req(args)).await,
+            "pairwise_t_test" => server.hypothesis_pairwise_t_test(req(args)).await,
+            "pairwise_wilcox" => server.hypothesis_pairwise_wilcox(req(args)).await,
+            "shapiro_wilk" => server.hypothesis_shapiro_wilk(req(args)).await,
+            "prop_trend_test" => server.hypothesis_prop_trend_test(req(args)).await,
+            other => panic!("no hypothesis tool {other}"),
+        }
+        .unwrap()
+    }
+
+    /// The text of a successful tool result.
+    fn ok_text(r: &CallToolResult) -> String {
+        assert_ne!(r.is_error, Some(true), "{}", text(r));
+        text(r)
+    }
+
+    /// The text of a tool error.
+    fn err_text(r: &CallToolResult) -> String {
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "expected a tool error, got:\n{}",
+            text(r)
+        );
+        text(r)
+    }
+
+    /// The number after the first `label` in `text`.
+    fn number_after(text: &str, label: &str) -> f64 {
+        let i = text
+            .find(label)
+            .unwrap_or_else(|| panic!("`{label}` not found in:\n{text}"))
+            + label.len();
+        let s: String = text[i..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E'))
+            .collect();
+        s.parse()
+            .unwrap_or_else(|_| panic!("no number after `{label}` in:\n{text}"))
+    }
+
+    /// "(lo, hi)" on the line after "confidence interval:" (the t-test's text).
+    fn ci_line(text: &str) -> [f64; 2] {
+        let line = text
+            .lines()
+            .skip_while(|l| !l.contains("confidence interval:"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no confidence interval in:\n{text}"));
+        let (lo, hi) = line
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split_once(", ")
+            .unwrap();
+        [lo.parse().unwrap(), hi.parse().unwrap()]
+    }
+
+    /// A JSON number as f64 (NaN when it is not a number).
+    fn num(v: &serde_json::Value) -> f64 {
+        v.as_f64().unwrap_or(f64::NAN)
+    }
+
+    fn nums(v: &serde_json::Value) -> Vec<f64> {
+        v.as_array()
+            .unwrap_or_else(|| panic!("not an array: {v}"))
+            .iter()
+            .map(num)
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_t_test_two_sample_na() {
+        // X-2/TOOL-9: nulls were read as 0 (one-sample t 3.093880 on 21 df) and Int64 columns
+        // were refused. R: t.test drops NA from each sample, and incomplete pairs when paired.
+        let (case, server, name) = case_server("stat_two_sample_na").await;
+        let t = |args: serde_json::Value| {
+            let server = &server;
+            async move { ok_text(&hyp(server, "t_test", args).await) }
+        };
+        let one = t(serde_json::json!({"dataset": name, "x": "x"})).await;
+        let pr = t(serde_json::json!({"dataset": name, "x": "x", "y": "y", "paired": true})).await;
+        let we = t(serde_json::json!({"dataset": name, "x": "x", "y": "y"})).await;
+        let it = t(serde_json::json!({"dataset": name, "x": "xi", "y": "yi"})).await;
+        let (p6, p2) = (Tol::printed(6), Tol::printed(2));
+        let mut c = Check::new(&case);
+        for (k, out) in [
+            ("one", &one),
+            ("paired", &pr),
+            ("welch", &we),
+            ("int_welch", &it),
+        ] {
+            c.scalar(&format!("{k}_t"), number_after(out, "t = "), p6)
+                .scalar(&format!("{k}_df"), number_after(out, "df = "), p2)
+                .scalar(&format!("{k}_p"), number_after(out, "p-value = "), p6)
+                .vector(&format!("{k}_ci"), &ci_line(out), p6);
+        }
+        c.scalar("one_mean", number_after(&one, "mean: "), p6)
+            .scalar("paired_est", number_after(&pr, "mean: "), p6)
+            .vector(
+                "welch_est",
+                &[
+                    number_after(&we, "mean of x: "),
+                    number_after(&we, "mean of y: "),
+                ],
+                p6,
+            )
+            .vector(
+                "int_welch_est",
+                &[
+                    number_after(&it, "mean of x: "),
+                    number_after(&it, "mean of y: "),
+                ],
+                p6,
+            )
+            .finish();
+        assert!(
+            one.contains("Missing values: 15 of 22 rows dropped because of missing values (x: 15)"),
+            "{one}"
+        );
+        assert!(
+            pr.contains(
+                "Missing values: 16 of 22 rows dropped because of missing values (x: 15, y: 15)"
+            ),
+            "{pr}"
+        );
+        assert!(
+            we.lines().any(|l| l.starts_with("Missing values: ")),
+            "{we}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_cor_test_two_sample_na() {
+        // X-2: nulls were read as 0 (r 0.7955101 on 22 pairs). R: cor.test(x, y) keeps the
+        // complete pairs.
+        let (case, server, name) = case_server("stat_two_sample_na").await;
+        let v = json_of(
+            &hyp(
+                &server,
+                "cor_test",
+                serde_json::json!({"dataset": name, "x": "x", "y": "y"}),
+            )
+            .await,
+        );
+        let ci = &v["confidence_interval"];
+        Check::new(&case)
+            .scalar("cor_r", num(&v["estimate"]), Tol::coef(6))
+            .scalar("cor_t", num(&v["statistic"]), Tol::stat(6))
+            .scalar("cor_df", num(&v["df"]), Tol::exact())
+            .scalar("cor_p", num(&v["p_value"]), Tol::p_value(6))
+            .vector(
+                "cor_ci",
+                &[num(&ci["lower"]), num(&ci["upper"])],
+                Tol::stat(6),
+            )
+            .scalar("n_pairs", num(&v["n"]), Tol::exact())
+            .scalar("n_pairs", num(&v["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(
+            v["missing"],
+            serde_json::json!({"n_total": 22, "n_used": 6, "n_dropped": 16,
+                               "by_column": {"x": 15, "y": 15}})
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_ks_test_two_sample_na() {
+        // X-8: the Int64 columns xi, yi were refused ("Column 'xi' is not numeric."). R:
+        // ks.test(xi, yi) drops NA from each sample.
+        let (case, server, name) = case_server("stat_two_sample_na").await;
+        let v = json_of(
+            &hyp(
+                &server,
+                "ks_test",
+                serde_json::json!({"dataset": name, "x": "xi", "y": "yi"}),
+            )
+            .await,
+        );
+        Check::new(&case)
+            .scalar("ks_d", num(&v["statistic_D"]), Tol::stat(38))
+            .scalar("n_xi", num(&v["n"]), Tol::exact())
+            .scalar("n_yi", num(&v["n_2"]), Tol::exact())
+            .finish();
+        // deviation STAT-27: ks_p (R's exact p 0.1565386776017454; p2a's asymptotic p
+        // 0.19563779265722031) is not pinned.
+        assert_eq!(
+            v["missing"]["by_column"],
+            serde_json::json!({"xi": 2, "yi": 4})
+        );
+        assert_eq!(v["missing"]["n_dropped"], serde_json::json!(6));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validate_mcp_hypothesis_mood_test_two_sample_na() {
+        // X-8: the Int64 columns mi, mj were refused ("Column 'mi' must be numeric."). R:
+        // mood.test(mi, mj) drops NA from each sample; the pair has no ties.
+        let (case, server, name) = case_server("stat_two_sample_na").await;
+        let v = json_of(
+            &hyp(
+                &server,
+                "mood_test",
+                serde_json::json!({"dataset": name, "x": "mi", "y": "mj"}),
+            )
+            .await,
+        );
+        Check::new(&case)
+            .scalar("mood_nt_T", num(&v["statistic"]), Tol::stat(27))
+            .scalar("mood_nt_z", num(&v["z_score"]), Tol::stat(27))
+            .scalar("mood_nt_p", num(&v["p_value"]), Tol::p_value(27))
+            .scalar("n_mi", num(&v["n_x"]), Tol::exact())
+            .scalar("n_mj", num(&v["n_y"]), Tol::exact())
+            .finish();
+        assert_eq!(v["has_ties"], serde_json::json!(false));
+        assert_eq!(
+            v["missing"]["by_column"],
+            serde_json::json!({"mi": 7, "mj": 10})
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mcp_hypothesis_two_sample_columns() {
+        // Int64 columns give the results of their Float64 copies; a text column and an absent
+        // column are refused with the core's error text, in either role. Before: Int64 was
+        // refused and the errors named no reason.
+        let df = p2a_core::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/two_sample_na.csv",
+        ))
+        .unwrap();
+        let mut floats = df.clone();
+        for (from, to) in [("xi", "xi_f"), ("yi", "yi_f")] {
+            let copy = floats
+                .column(from)
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .with_name(to.into());
+            floats.with_column(copy).unwrap();
+        }
+        let server = AnalyticsServer::new();
+        {
+            let mut map = server.datasets.write().await;
+            map.insert("d".into(), p2a_core::data::Dataset::new(df));
+            map.insert("two_sample_f".into(), p2a_core::data::Dataset::new(floats));
+        }
+        let ints = json_of(
+            &hyp(
+                &server,
+                "cor_test",
+                serde_json::json!({"dataset": "d", "x": "xi", "y": "yi"}),
+            )
+            .await,
+        );
+        let fl = json_of(
+            &hyp(
+                &server,
+                "cor_test",
+                serde_json::json!({"dataset": "two_sample_f", "x": "xi_f", "y": "yi_f"}),
+            )
+            .await,
+        );
+        assert_eq!(ints["n"], serde_json::json!(18));
+        assert_eq!(fl["n"], serde_json::json!(18));
+        for key in ["estimate", "statistic", "p_value"] {
+            assert_eq!(ints[key], fl[key], "{key}");
+        }
+        for tool in ["t_test", "cor_test", "ks_test", "mood_test"] {
+            for (x, y) in [("g", "x"), ("x", "g")] {
+                let t = err_text(
+                    &hyp(
+                        &server,
+                        tool,
+                        serde_json::json!({"dataset": "d", "x": x, "y": y}),
+                    )
+                    .await,
+                );
+                assert!(
+                    t.contains("Column 'g' contains non-numeric values"),
+                    "{tool} ({x}, {y}): {t}"
+                );
+            }
+            for (x, y) in [("nope", "x"), ("x", "nope")] {
+                let t = err_text(
+                    &hyp(
+                        &server,
+                        tool,
+                        serde_json::json!({"dataset": "d", "x": x, "y": y}),
+                    )
+                    .await,
+                );
+                assert!(
+                    t.contains("Column 'nope' not found in dataset."),
+                    "{tool} ({x}, {y}): {t}"
+                );
+            }
+        }
+        let t = err_text(
+            &hyp(
+                &server,
+                "t_test",
+                serde_json::json!({"dataset": "d", "x": "x", "paired": true}),
+            )
+            .await,
+        );
+        assert!(
+            t.contains("Paired t-test requires both x and y columns."),
+            "{t}"
+        );
     }
 }
