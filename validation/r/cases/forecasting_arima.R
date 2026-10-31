@@ -154,7 +154,7 @@ case("arima_fixed_forecast", "forecasting/arima", "ARIMA forecasts for given coe
 # autocorrelation (about 0.34 at lag 2, 0.4-0.5 at lag 12), so J'J underestimates the curvature of
 # the CSS objective in the MA coefficient and the Gauss-Newton iteration has an eigenvalue near -1
 # at the optimum: the case asserts that, so it keeps exercising the oscillation. .css_tight is
-# Gauss-Newton and does not contract there, and numDeriv's gradient of the drift is off by 2e-8
+# Gauss-Newton and does not contract there, and numDeriv's gradient in the drift is off by 2.5e-8
 # at n = 100 (8e-7 relative in the drift after a Newton solve), so the exact optimum comes from
 # Newton's method on the analytic gradient of the CSS residuals (their derivatives follow the
 # residual recursion), each pass checked against R's own residuals (stats::arima(fixed = ...)).
