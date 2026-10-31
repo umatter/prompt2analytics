@@ -258,13 +258,28 @@ p2a discrete logit <DATASET> -y <DEP_VAR> -x <INDEP_VARS...>
 
 # Probit model
 p2a discrete probit <DATASET> -y <DEP_VAR> -x <INDEP_VARS...>
+
+# Ordered logit / probit (a text outcome needs its order, lowest first)
+p2a discrete o-logit <DATASET> -y <DEP_VAR> -x <INDEP_VARS...> [--levels <L1,L2,...>]
+p2a discrete o-probit <DATASET> -y <DEP_VAR> -x <INDEP_VARS...> [--levels <L1,L2,...>]
+
+# Mixed logit (long format; --individual for repeated choices by one person)
+p2a discrete mixed-logit <DATASET> --choice-id <COL> --alt-id <COL> -y <CHOICE> -x <VARS...> [--random-vars <VARS...>] [--n-draws <N>] [--individual <COL>]
 ```
 
 **Examples:**
 ```bash
 p2a discrete logit mydata -y purchased -x income age education
 p2a discrete probit mydata -y voted -x age income party_id
+p2a discrete o-logit survey -y satisfaction -x age income --levels low,mid,high
+p2a discrete mixed-logit trips --choice-id trip --alt-id mode -y chosen -x cost time --random-vars cost --individual person
 ```
+
+`logit`, `probit`, `mlogit` (multinomial), `o-logit`, `o-probit`, `negbin`, `zip`, `zinb`
+and `hurdle` drop rows with a missing outcome or regressor and say so (see
+[Missing values in results](#missing-values-in-results)); `clogit` and `mixed-logit`
+refuse a missing id, alternative, choice or attribute, as R's mlogit does. The ordered,
+count and mixed-logit commands print `Converged: Yes|No (k iterations)`.
 
 ### Time Series Commands
 

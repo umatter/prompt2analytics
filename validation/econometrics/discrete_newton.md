@@ -75,8 +75,9 @@ difference. Computed with R 4.3.3, nnet 7.3.19, MASS 7.3.60.0.1.
 The multinomial references (`coef_tight`, `se_tight`, `z_tight`, `p_tight`) are nnet's
 estimate re-solved by Newton's method on the analytic score and information until the
 relative step is below 1e-15; nnet's own `vcov` at `reltol = 1e-16` agrees with them to
-1e-6 (asserted in R). Labels sort as strings (`c001`, `c002`, ...), which is the order
-p2a uses.
+1e-6 (asserted in R). p2a orders the categories as R's `factor()` does (numbers by value,
+text by byte); for these labels (`mn8` 1-8, `j4` a-d, `sep5` `c001`, `c002`, ...) that is
+also their string order.
 
 ## Multinomial logit
 
