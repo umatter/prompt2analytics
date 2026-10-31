@@ -315,7 +315,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
 | Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-23) |
 | Logit | [logit.md](econometrics/logit.md) | R-pinned |
-| Probit | [probit.md](econometrics/probit.md) | not R-pinned |
+| Probit | [probit.md](econometrics/probit.md) | R-pinned |
 | Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
 | Mixed logit | [mixed_logit.md](econometrics/mixed_logit.md) | R-pinned |
 | Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-77) |
