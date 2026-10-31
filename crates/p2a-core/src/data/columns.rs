@@ -867,6 +867,7 @@ pub fn econ_error_from_design(err: DesignError, df: &DataFrame) -> EconError {
         DesignError::NoColumns => EconError::InvalidSpecification {
             message: "No independent variables specified".to_string(),
         },
+        DesignError::ResourceLimit(message) => EconError::ResourceLimit(message),
         DesignError::PolarsError(e) => EconError::Internal(e.to_string()),
     }
 }
@@ -1933,6 +1934,10 @@ mod tests {
                 &df
             ),
             EconError::Internal(_)
+        ));
+        assert!(matches!(
+            econ_error_from_design(DesignError::ResourceLimit("too large".into()), &df),
+            EconError::ResourceLimit(message) if message == "too large"
         ));
     }
 }
