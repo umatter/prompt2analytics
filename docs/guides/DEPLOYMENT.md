@@ -591,8 +591,8 @@ Named budgets:
 | Key | What it bounds | Hosted | Off |
 |---|---|---|---|
 | `image_pixels` | chart width × height | 16,000,000 | none |
-| `table_cells` | cells of computed tables and square matrices (contingency tables, `stats_loglin`, pairwise results, `linalg_toeplitz`) | 1,000,000 | none |
-| `max_groups` | groups compared pairwise | 100 | none |
+| `table_cells` | cells of computed tables and square matrices (contingency tables, `stats_loglin`, the two-way `stats_model_tables` cell means, pairwise results, `linalg_toeplitz`) | 1,000,000 | none |
+| `max_groups` | groups compared pairwise; the levels of the two factors of `anova_two_way` and of a two-way `stats_model_tables`, together (the fit's cost grows with the square of that count) | 100 | none |
 | `join_output_rows` | predicted output rows of a join | 2,000,000 | none |
 | `onehot_levels` | levels a one-hot encoding expands | 500 | none |
 | `pivot_columns` | output columns of `munge_pivot`: the index columns plus one per distinct value of `on`, counted before the pivot | 10,000 | none |

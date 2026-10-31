@@ -23,8 +23,8 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, insert_missing,
-    numeric_column, numeric_columns, numeric_matrix,
+    MissingSummary, NaPolicy, REFUSAL_NAMES, budget_level_count, check_named_budget, echo_list,
+    insert_missing, numeric_column, numeric_columns, numeric_matrix,
 };
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
@@ -278,6 +278,14 @@ impl AnalyticsServer {
                 serde_json::to_string_pretty(&json_output).unwrap(),
             )]))
         } else if request.factors.len() == 2 {
+            if let Err(msg) = check_two_way_levels(
+                dataset,
+                "stats_model_tables",
+                &request.factors[0],
+                &request.factors[1],
+            ) {
+                return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            }
             // Two-way ANOVA
             let anova = match run_two_way_anova(
                 dataset,
@@ -319,11 +327,31 @@ impl AnalyticsServer {
             // Compute grand mean
             let grand_mean = y.iter().sum::<f64>() / y.len() as f64;
 
-            // Cell sums and counts in one pass; cell (a, b) at a * lb + b
+            // Cell sums and counts in one pass; cell (a, b) at a * lb + b. The la x lb table is
+            // held to the table_cells budget before its buffers are allocated.
+            let cells = match p2a_core::resource::checked_len(&[la, lb], "cell-means table") {
+                Ok(cells) => cells,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Two-way model tables refused: {e}"
+                    ))]));
+                }
+            };
+            if let Err(msg) = check_named_budget(
+                "stats_model_tables",
+                "table_cells",
+                cells as u64,
+                crate::tools::limits::current().table_cells,
+            ) {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Two-way model tables refused: the cell-means table would have {cells} cells \
+                     ({la} x {lb} levels). {msg} Use factors with fewer levels."
+                ))]));
+            }
             let buffers =
-                p2a_core::resource::checked_len(&[la, lb], "cell-means table").and_then(|cells| {
+                p2a_core::resource::try_vec(cells, 0.0f64, "cell-means table").and_then(|sums| {
                     Ok((
-                        p2a_core::resource::try_vec(cells, 0.0f64, "cell-means table")?,
+                        sums,
                         p2a_core::resource::try_vec(cells, 0usize, "cell-means table")?,
                     ))
                 });
@@ -1257,6 +1285,15 @@ impl AnalyticsServer {
             }
         };
 
+        if let Err(msg) = check_two_way_levels(
+            dataset,
+            "anova_two_way",
+            &request.factor_a,
+            &request.factor_b,
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
         let result = match run_two_way_anova_with(
             dataset,
             &request.response,
@@ -2009,6 +2046,40 @@ fn sphericity_verdict(p_value: f64) -> serde_json::Value {
     }
 }
 
+/// Refuses a two-way ANOVA whose two factors together have more levels than the `max_groups`
+/// budget of the installed limits, before the fit: the least-squares fit's cost grows with the
+/// square of the level count. Each factor's distinct values are counted, an upper bound on the
+/// levels the fit keeps. Nothing is counted when `max_groups` is off; a missing column is left
+/// to the core to report.
+fn check_two_way_levels(
+    dataset: &p2a_core::data::Dataset,
+    tool: &str,
+    factor_a: &str,
+    factor_b: &str,
+) -> Result<(), String> {
+    let Some(max_groups) = crate::tools::limits::current().max_groups else {
+        return Ok(());
+    };
+    let refused = |msg: String| format!("Two-way ANOVA refused: {msg}");
+    let df = dataset.df();
+    let (Some(la), Some(lb)) = (
+        budget_level_count(df, factor_a).map_err(refused)?,
+        budget_level_count(df, factor_b).map_err(refused)?,
+    ) else {
+        return Ok(());
+    };
+    let levels = la.saturating_add(lb) as u64;
+    check_named_budget(tool, "max_groups", levels, Some(max_groups as u64)).map_err(|msg| {
+        refused(format!(
+            "factors `{}` and `{}` have {la} and {lb} levels, {levels} together, and the fit's \
+             cost grows with the square of that count. {msg} Use factors with fewer levels or \
+             filter the data first.",
+            crate::tools::limits::echo(factor_a),
+            crate::tools::limits::echo(factor_b)
+        ))
+    })
+}
+
 /// Checks a `side x side` matrix against the `table_cells` budget of the installed limits (a
 /// product past `u64` counts as `u64::MAX`, so it passes only when the budget is unlimited).
 fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
@@ -2058,6 +2129,105 @@ mod tests {
             .collect();
         columns.push(Column::new("n".into(), vec![1.0f64; n]));
         DataFrame::new(columns).unwrap()
+    }
+
+    /// `n` rows of a noisy response and two factors with `la` and `lb` levels (row i in level
+    /// i % la and i % lb).
+    fn two_factors(n: usize, la: usize, lb: usize) -> DataFrame {
+        let y: Vec<f64> = (0..n)
+            .map(|i| (i % 7) as f64 * 0.8 + ((i * 13) % 5) as f64 * 0.3)
+            .collect();
+        let a: Vec<String> = (0..n).map(|i| format!("a{}", i % la)).collect();
+        let b: Vec<String> = (0..n).map(|i| format!("b{}", i % lb)).collect();
+        df! { "y" => y, "a" => a, "b" => b }.unwrap()
+    }
+
+    fn two_way_req() -> TwoWayAnovaRequest {
+        TwoWayAnovaRequest {
+            dataset: "d".into(),
+            response: "y".into(),
+            factor_a: "a".into(),
+            factor_b: "b".into(),
+            interaction: None,
+            ss_type: None,
+        }
+    }
+
+    fn tables_req() -> ModelTablesRequest {
+        ModelTablesRequest {
+            dataset: "d".into(),
+            response: "y".into(),
+            factors: vec!["a".into(), "b".into()],
+            table_type: None,
+            se: None,
+        }
+    }
+
+    #[test]
+    fn anova_two_way_refuses_more_levels_than_max_groups() {
+        // 51 + 50 = 101 levels > 100 (hosted max_groups): refused before the fit.
+        let (rt, server) = server_with(vec![("d", two_factors(102, 51, 50))]);
+        for r in limits::with_limits(Limits::hosted(), || {
+            [
+                rt.block_on(server.anova_two_way(Parameters(two_way_req()))),
+                rt.block_on(server.stats_model_tables(Parameters(tables_req()))),
+            ]
+        }) {
+            let r = r.unwrap();
+            assert_eq!(r.is_error, Some(true), "{}", text(&r));
+            let t = text(&r);
+            assert!(
+                t.contains("max_groups") && t.contains("101") && t.contains("51 and 50"),
+                "{t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anova_two_way_level_budget_boundary() {
+        // 3 + 2 = 5 levels pass max_groups = 5, 3 + 3 = 6 do not; off counts nothing.
+        let l = hosted_with(&["max_groups=5"]);
+        let (rt, server) = server_with(vec![
+            ("ok", two_factors(36, 3, 2)),
+            ("over", two_factors(36, 3, 3)),
+        ]);
+        let run = |limits: Limits, dataset: &str| {
+            let req = TwoWayAnovaRequest {
+                dataset: dataset.into(),
+                ..two_way_req()
+            };
+            limits::with_limits(limits, || {
+                rt.block_on(server.anova_two_way(Parameters(req))).unwrap()
+            })
+        };
+        let ok = run(l.clone(), "ok");
+        assert_eq!(ok.is_error, Some(false), "{}", text(&ok));
+        let over = run(l, "over");
+        assert_eq!(over.is_error, Some(true), "{}", text(&over));
+        assert!(text(&over).contains("max_groups"), "{}", text(&over));
+        let off = run(Limits::off(), "over");
+        assert_eq!(off.is_error, Some(false), "{}", text(&off));
+    }
+
+    #[test]
+    fn model_tables_two_way_cells_are_held_to_table_cells() {
+        // a 3 x 3 cell-means table (9 cells) against table_cells = 8, before its buffers.
+        let (rt, server) = server_with(vec![("d", two_factors(36, 3, 3))]);
+        let r = limits::with_limits(hosted_with(&["table_cells=8"]), || {
+            rt.block_on(server.stats_model_tables(Parameters(tables_req())))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text(&r));
+        assert!(
+            text(&r).contains("table_cells") && text(&r).contains('9'),
+            "{}",
+            text(&r)
+        );
+        let fits = limits::with_limits(hosted_with(&["table_cells=9"]), || {
+            rt.block_on(server.stats_model_tables(Parameters(tables_req())))
+        })
+        .unwrap();
+        assert_eq!(fits.is_error, Some(false), "{}", text(&fits));
     }
 
     fn loglin_req(cols: &[&str]) -> LoglinRequest {

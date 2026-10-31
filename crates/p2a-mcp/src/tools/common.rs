@@ -282,6 +282,34 @@ pub fn extract_numeric_matrix(
     Ok(data)
 }
 
+/// The distinct values of column `name` for a size budget, null counted as one: an upper bound
+/// on the levels the core keeps after dropping missing values. `Ok(None)` when the column is
+/// missing, which the core reports itself.
+pub fn budget_level_count(
+    df: &p2a_core::polars::prelude::DataFrame,
+    name: &str,
+) -> Result<Option<usize>, String> {
+    let Ok(col) = df.column(name) else {
+        return Ok(None);
+    };
+    level_count_or_refusal(name, col.n_unique()).map(Some)
+}
+
+/// A distinct-value count a budget depends on, or the refusal when it could not be taken (the
+/// budget cannot be checked, so the request must not run unbounded).
+pub fn level_count_or_refusal(
+    name: &str,
+    count: p2a_core::polars::prelude::PolarsResult<usize>,
+) -> Result<usize, String> {
+    count.map_err(|e| {
+        format!(
+            "the distinct values of `{}` could not be counted to check this server's limits \
+             ({e}).",
+            crate::tools::limits::echo(name)
+        )
+    })
+}
+
 /// Check a size derived from the data (not a request field) against a named budget of the
 /// installed request limits.
 ///

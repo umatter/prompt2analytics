@@ -13,7 +13,8 @@
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, check_named_budget, insert_missing, missing_json, numeric_columns,
+    MissingSummary, NaPolicy, budget_level_count, check_named_budget, insert_missing,
+    level_count_or_refusal, missing_json, numeric_columns,
 };
 use crate::tools::limits::{Family, echo};
 use crate::tools::requests::hypothesis::*;
@@ -1689,34 +1690,6 @@ fn check_pairwise_groups(
              {comparisons} comparisons. {msg} Use a factor with fewer levels or filter the data \
              first.",
             echo(factor)
-        )
-    })
-}
-
-/// The distinct values of column `name` for a size budget, null counted as one: an upper bound
-/// on the levels the core keeps after dropping missing values. `Ok(None)` when the column is
-/// missing, which the core reports itself.
-fn budget_level_count(
-    df: &p2a_core::polars::prelude::DataFrame,
-    name: &str,
-) -> Result<Option<usize>, String> {
-    let Ok(col) = df.column(name) else {
-        return Ok(None);
-    };
-    level_count_or_refusal(name, col.n_unique()).map(Some)
-}
-
-/// A distinct-value count a budget depends on, or the refusal when it could not be taken (the
-/// budget cannot be checked, so the request must not run unbounded).
-fn level_count_or_refusal(
-    name: &str,
-    count: p2a_core::polars::prelude::PolarsResult<usize>,
-) -> Result<usize, String> {
-    count.map_err(|e| {
-        format!(
-            "the distinct values of `{}` could not be counted to check this server's limits \
-             ({e}).",
-            echo(name)
         )
     })
 }
