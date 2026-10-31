@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "stat_mauchly_na",
+  "area": "stats/mauchly",
+  "method": "Mauchly's sphericity test (X = ~1) with incomplete subjects",
+  "reference": "stats::mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1), X = ~1); stats:::sphericity (Greenhouse-Geisser, Huynh-Feldt)",
+  "call": "mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1, data = d), X = ~1)",
+  "dataset": "validation/datasets/generated/mauchly_na.csv",
+  "datasets": ["validation/datasets/generated/mauchly_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "w": 0.097591229284726688,
+    "p_r": 5.4509122489032029e-05,
+    "chisq": 27.277231938098648,
+    "df": 5,
+    "p_first_order": 5.0371160244126754e-05,
+    "gg": 0.56199827830573501,
+    "hf": 0.63649513364535615,
+    "lb": 0.33333333333333331,
+    "n_used": 14,
+    "n_total": 16
+  }
+}

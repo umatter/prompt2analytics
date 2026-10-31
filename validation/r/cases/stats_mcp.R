@@ -71,6 +71,37 @@ case("stat_weighted_na", "stats/weighted", "weighted.mean on complete (value, we
     call = "weighted.mean(v[cc], w[cc]); cov.wt(cbind(a, b), wt = wc, cor = TRUE)", packages = character(0))
 })
 
+# Mauchly's test on four repeated measures (integer-valued, Int64 in polars) with two missing
+# cells: lm(cbind(...) ~ 1) drops the two incomplete subjects (TOOL-24). The variances grow
+# across conditions, so sphericity is rejected.
+case("stat_mauchly_na", "stats/mauchly", "Mauchly's sphericity test (X = ~1) with incomplete subjects", function(ctx) {
+  set.seed(419)
+  n <- 16
+  subj <- rnorm(n, 0, 2)
+  m <- sapply(1:4, function(j) round(10 * (20 + 2 * j + subj * (1 + 0.6 * j) + rnorm(n, 0, c(0.5, 1, 2.5, 5)[j]))))
+  colnames(m) <- paste0("t", 1:4)
+  m[5, "t2"] <- NA; m[11, "t4"] <- NA
+  d <- ctx$gen_dataset("mauchly_na", data.frame(id = 1:n, m))
+  stopifnot(all(sapply(d[paste0("t", 1:4)], is.integer)))
+  fit <- lm(cbind(t1, t2, t3, t4) ~ 1, data = d)
+  mt <- mauchly.test(fit, X = ~1)
+  sp <- stats:::sphericity(SSD(fit), X = ~1)
+  # p2a reports the first-order chi-square approximation; R adds Box's second-order term (w2):
+  # z and the first-order p are R's own intermediate quantities (stats:::mauchly.test.SSD).
+  s <- SSD(fit); p <- 4; pp <- p - 1; nd <- s$df
+  Tm <- stats:::Thin.row(stats:::Proj(diag(p)) - stats:::Proj(matrix(1, p, 1)))
+  U <- solve(Tm %*% t(Tm), Tm %*% s$SSD %*% t(Tm))
+  logW <- log(det(U)) - pp * log(sum(diag(U)) / pp)
+  rho <- 1 - (2 * pp^2 + pp + 2) / (6 * pp * nd)
+  z <- -nd * rho * logW; f <- pp * (pp + 1) / 2 - 1
+  stopifnot(isTRUE(all.equal(exp(logW), unname(mt$statistic), tolerance = 1e-12)), mt$p.value < 0.05)
+  list(values = list(w = unname(mt$statistic), p_r = mt$p.value, chisq = z, df = f,
+                     p_first_order = pchisq(z, f, lower.tail = FALSE),
+                     gg = sp$GG.eps, hf = sp$HF.eps, lb = 1 / pp, n_used = nobs(fit), n_total = nrow(d)),
+       reference = "stats::mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1), X = ~1); stats:::sphericity (Greenhouse-Geisser, Huynh-Feldt)",
+       call = "mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1, data = d), X = ~1)", packages = character(0))
+})
+
 # Chi-squared test for trend in proportions on integer count columns. Group 4 has a missing
 # success count; R's prop.trend.test refuses it ("0 (non-NA) cases"), the MCP tool drops the
 # group and keeps every other group's score (default: its row position, 1, 2, 3, 5, 6, 7).

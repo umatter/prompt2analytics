@@ -167,7 +167,7 @@ pub struct MauchlyTestRequest {
 
     /// Columns for repeated measures
     #[schemars(
-        description = "Names of columns representing repeated measures (at least 3 required)."
+        description = "Names of columns representing repeated measures (at least 3). Subjects (rows) with a missing value in any of them are dropped, as R's lm-based mauchly.test does, and reported."
     )]
     pub columns: Vec<String>,
 }

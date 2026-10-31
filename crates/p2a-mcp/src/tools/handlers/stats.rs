@@ -24,7 +24,7 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
     MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64,
-    extract_numeric_matrix, missing_json, numeric_column, numeric_columns, numeric_matrix,
+    missing_json, numeric_column, numeric_columns, numeric_matrix,
 };
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
@@ -649,7 +649,7 @@ impl AnalyticsServer {
 
     /// Mauchly's sphericity test.
     #[tool(
-        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test()."
+        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test(). Uses the first-order chi-square approximation of the p-value (R's mauchly.test adds a second-order term). Subjects with a missing value are dropped and reported under missing; sphericity_violated is null when the p-value cannot be computed."
     )]
     pub async fn stats_mauchly_test(
         &self,
@@ -657,26 +657,31 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let p = request.columns.len();
+        if p < 3 {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Mauchly's test needs at least 3 repeated-measures columns (got {p}); with 2 \
+                 conditions there is one contrast and sphericity holds trivially (R reports W = \
+                 1, p = 1)."
+            ))]));
+        }
         if let Err(msg) = check_square_matrix("stats_mauchly_test", p) {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Mauchly's test refused: {p} columns give a {p} x {p} matrix. {msg}"
             ))]));
         }
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        // A subject with a missing value in any condition is dropped, as R's
+        // lm(cbind(...) ~ 1) drops it
+        let (data, missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Omit) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mauchly's test failed: {e}"
+                ))]));
+            }
         };
 
         // Flatten to row-major and call run_mauchly_test
@@ -694,12 +699,12 @@ impl AnalyticsServer {
             }
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "w_statistic": result.w,
             "chi_squared": result.chi_squared,
             "p_value": result.p_value,
             "df": result.df,
-            "sphericity_violated": result.p_value < 0.05,
+            "sphericity_violated": sphericity_verdict(result.p_value),
             "epsilon_corrections": {
                 "greenhouse_geisser": result.epsilon_gg,
                 "huynh_feldt": result.epsilon_hf,
@@ -708,6 +713,7 @@ impl AnalyticsServer {
             "n_subjects": result.n,
             "n_conditions": result.p_levels
         });
+        insert_missing(&mut output, &missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap(),
@@ -2055,6 +2061,16 @@ fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
     }
 }
 
+/// `true`/`false` from p < 0.05 when p is finite, JSON null otherwise: a p-value that could not
+/// be computed is no evidence for sphericity.
+fn sphericity_verdict(p_value: f64) -> serde_json::Value {
+    if p_value.is_finite() {
+        serde_json::json!(p_value < 0.05)
+    } else {
+        serde_json::Value::Null
+    }
+}
+
 /// Checks a `side x side` matrix against the `table_cells` budget of the installed limits (a
 /// product past `u64` counts as `u64::MAX`, so it passes only when the budget is unlimited).
 fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
@@ -2527,5 +2543,53 @@ mod tests {
         );
         let e = err_text(&call(serde_json::json!({"weights": "w"})));
         assert!(e.contains("Column 'w' contains 1 missing value(s)"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_mauchly_test_na() {
+        // TOOL-24: missing cells reached the core test as NaN: W, chi-squared and p were null,
+        // sphericity_violated was false and both epsilons 1, on 16 subjects. R:
+        // mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1), X = ~1) on the 14 complete subjects.
+        let (case, rt, server, name) = case_server("stat_mauchly_na");
+        let v = json_of(
+            &rt.block_on(server.stats_mauchly_test(req(serde_json::json!(
+                {"dataset": name, "columns": ["t1", "t2", "t3", "t4"]}))))
+                .unwrap(),
+        );
+        let eps = &v["epsilon_corrections"];
+        // deviation STAT-82 (Tier 3): R's own p-value p_r adds Box's second-order term; p2a's
+        // first-order p is pinned to R's intermediate Pr1 (p_first_order).
+        Check::new(&case)
+            .scalar("w", num(&v["w_statistic"]), Tol::stat(14))
+            .scalar("chisq", num(&v["chi_squared"]), Tol::stat(14))
+            .scalar("df", num(&v["df"]), Tol::exact())
+            .scalar("p_first_order", num(&v["p_value"]), Tol::p_value(14))
+            .scalar("gg", num(&eps["greenhouse_geisser"]), Tol::stat(14))
+            .scalar("hf", num(&eps["huynh_feldt"]), Tol::stat(14))
+            .scalar("lb", num(&eps["lower_bound"]), Tol::stat(14))
+            .scalar("n_used", num(&v["n_subjects"]), Tol::exact())
+            .scalar("n_used", num(&v["missing"]["n_used"]), Tol::exact())
+            .scalar("n_total", num(&v["missing"]["n_total"]), Tol::exact())
+            .finish();
+        assert_eq!(v["sphericity_violated"], serde_json::json!(true));
+        assert_eq!(
+            v["missing"],
+            summary(16, 14, serde_json::json!({"t2": 1, "t4": 1}))
+        );
+        let e = err_text(
+            &rt.block_on(server.stats_mauchly_test(req(serde_json::json!(
+                {"dataset": name, "columns": ["t1", "t3"]}))))
+                .unwrap(),
+        );
+        assert!(e.contains("at least 3 repeated-measures columns"), "{e}");
+    }
+
+    #[test]
+    fn test_mcp_stats_mauchly_verdict_is_null_for_non_finite_p() {
+        // TOOL-24: the verdict was `p < 0.05`, so a NaN p-value read as "sphericity holds"
+        assert_eq!(sphericity_verdict(f64::NAN), serde_json::Value::Null);
+        assert_eq!(sphericity_verdict(f64::INFINITY), serde_json::Value::Null);
+        assert_eq!(sphericity_verdict(0.01), serde_json::json!(true));
+        assert_eq!(sphericity_verdict(0.2), serde_json::json!(false));
     }
 }
