@@ -48,7 +48,7 @@ case("stat_anova_two_way_unbalanced", "stats/anova", "Two-way ANOVA, unbalanced 
              type3_fa_ss = a3["fa", "Sum Sq"], type3_fb_ss = a3["fb", "Sum Sq"], type3_int_ss = a3["fa:fb", "Sum Sq"],
              type3_fa_f = a3["fa", "F value"], type3_fb_f = a3["fb", "F value"], type3_int_f = a3["fa:fb", "F value"],
              n_used = nobs(m_int), n_dropped = nrow(d) - nobs(lm(y ~ fa * fb, data = d)))
-  # T2-WP07 additions to the design appendix (the keys above are unchanged): Type II/III p-values
+  # T2-WP07 additions (the keys above are unchanged): Type II/III p-values
   # and residual df; Type II on the additive model; Type II by model comparison on the 3x2 layout
   # with the empty (C, L) cell (car notes the aliased coefficient) and the Type III refusal there;
   # Type I on the 2x2 layout without its (B, H) cell, where aov has no interaction row.

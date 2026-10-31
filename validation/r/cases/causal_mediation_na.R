@@ -20,8 +20,8 @@ case("causal_mediation_na", "econometrics/mediation",
   dat <- ctx$gen_dataset("causal_na", data.frame(
     id = seq_len(n), y = y, d = as.integer(d), m = m, x1 = x1, x2 = x2,
     d_na = as.integer(d_na), d_txt = ifelse(d == 1, "treated", "control")))
-  # Integers are written without a decimal point, so polars reads d, d_na and id as Int64
-  # (design 2.2); d_txt is text; id is never missing.
+  # Integers are written without a decimal point, so polars reads d, d_na and id as Int64;
+  # d_txt is text; id is never missing.
   stopifnot(is.integer(dat$d), is.integer(dat$d_na), is.integer(dat$id), is.character(dat$d_txt),
             !anyNA(dat$d), !anyNA(dat$x2), !anyNA(dat$d_txt))
   vars <- c("y", "d", "m", "x1", "x2")

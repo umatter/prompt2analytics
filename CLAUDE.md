@@ -1001,7 +1001,7 @@ Auto-discovered guidance:
   and the runner self-test `bash validation/tools/tests/test_run_validation.sh`; plus a wasm32 `cargo check` +
   host tests for p2a-dioxus (`web`). CI does not install R: the R drift check (`Rscript validation/r/run.R
   --check`) runs in `validation/run_validation.sh` locally.
-- **Doctests are gated** and, as of Oct 2026, p2a-core runs 81 passed / 0 failed / 190 ignored. A doc example
+- **Doctests are gated** and, as of Oct 2026, p2a-core runs 87 passed / 0 failed / 190 ignored. A doc example
   that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
   what `mod.rs` actually re-exports. The 190 examples fenced as ignore are NOT compiled and can still rot silently.
 - **p2a-mcp integration tests** are one file per topic in `crates/p2a-mcp/tests/` (`governor.rs`,

@@ -6,7 +6,7 @@
 # from the exact CSS optimum (ARIMA(1,2,1): max |gradient| 0.43). Each fit is therefore re-solved
 # by Gauss-Newton on R's own CSS residuals (stats::arima(fixed = ...)) with numDeriv's Richardson
 # Jacobian. The package values stay in the case as cross-checks (untagged keys); the re-solved
-# ones carry the suffix _tight and are what the Rust tests pin (T2 design 2.3). Forecasts at the
+# ones carry the suffix _tight and are what the Rust tests pin. Forecasts at the
 # tight optimum come from forecast::forecast (stats::predict.Arima, Kalman state from
 # stats::arima's arimaSS) on the refitted object, with forecast::Arima's sigma2 = SSR / (n - d - k).
 suppressPackageStartupMessages({ library(forecast); library(numDeriv); library(lmtest) })
