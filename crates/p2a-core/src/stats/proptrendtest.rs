@@ -89,6 +89,11 @@ pub fn prop_trend_test(
             message: "scores must have same length as x".to_string(),
         });
     }
+    if let Some(i) = scores.iter().position(|s| !s.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("scores must be finite numbers; scores[{i}] = {}", scores[i]),
+        });
+    }
 
     // Total successes and trials
     let x_total: usize = x.iter().sum();
@@ -229,5 +234,23 @@ mod tests {
         // Single group should fail
         let result = prop_trend_test(&[5], &[50], None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prop_trend_refuses_non_finite_scores() {
+        let (x, n) = ([5, 11, 14], [50, 49, 52]);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let scores = [1.0, bad, 3.0];
+            match prop_trend_test(&x, &n, Some(&scores)) {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.contains("scores[1]") && message.contains("finite"),
+                    "{bad}: {message}"
+                ),
+                other => panic!("{bad}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
+        // finite scores still give a finite statistic and p-value
+        let r = prop_trend_test(&x, &n, Some(&[0.5, 1.0, 2.5])).unwrap();
+        assert!(r.statistic.is_finite() && r.p_value.is_finite(), "{r:?}");
     }
 }
