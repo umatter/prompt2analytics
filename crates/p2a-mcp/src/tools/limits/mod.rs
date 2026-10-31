@@ -37,10 +37,12 @@
 //!   exceeds [`Limits::ensemble_bytes`] before it starts: those fits keep every tree they grow,
 //!   so neither the deadline nor the per-allocation ceiling bounds what they hold.
 //! - [`Limits::check_arima_fit`] and [`Limits::check_arima_series`] let the ARIMA handlers
-//!   refuse a fit before it starts, because the `arima` crate's optimiser cannot be stopped
-//!   once it runs: one whose work exceeds [`Limits::arima_fit_work`], and one whose series holds
-//!   a nonzero value below [`ARIMA_MIN_MAGNITUDE`], small enough that the fit's arithmetic on it
-//!   can become subnormal and much slower.
+//!   bound a fit's cost before it starts: they refuse one whose work exceeds
+//!   [`Limits::arima_fit_work`], and one whose series holds a nonzero value below
+//!   [`ARIMA_MIN_MAGNITUDE`], small enough that the fit's arithmetic on it can become subnormal
+//!   and much slower. The fit itself checks the call's budget every iteration and every few
+//!   thousand rows of a pass, so the deadline stops it as well; the check up front refuses a fit
+//!   whose work could not fit the deadline instead of starting it.
 //!
 //! Every refusal is a [`LimitViolation`] whose message tells an LLM caller what to change. It never
 //! contains filesystem paths, environment variable names or internals; `override_key` names the
@@ -216,21 +218,22 @@ families! {
     NaMarkerBytes => "na_marker_bytes", 64;
 }
 
-/// Hosted [`Limits::arima_fit_work`]: the slowest fit it allows takes about 16 s on a release
-/// build, a quarter of the hosted 60 s deadline, so that a slower or shared CPU still finishes
-/// it in time.
+/// Hosted [`Limits::arima_fit_work`]: the slowest fit it allows is meant to take about a
+/// quarter of the hosted 60 s deadline, so that a slower or shared CPU still finishes it in time.
 ///
-/// Measured on a laptop CPU (Intel Core 7 150U) under heavy load from parallel builds: at the
-/// optimiser's bound of 7,961 evaluations a work unit ([`arima_fit_work`]) costs at most about
-/// 40 us, for an MA-only fit on the slower cores (8 to 25 us for other orders), so 400,000 units
-/// take about 16 s. Whole fits at this size whose optimiser ran to that bound took up to 9.1 s;
-/// fits that converge stop far sooner. It allows ARIMA(1,1,1) on 15,384 observations,
-/// ARIMA(0,1,0) on 40,000 and the `model_order` caps p = d = q = 20 on 214.
+/// The value was measured on the optimiser the ARIMA tools used before the in-house fit (the
+/// `arima` crate's L-BFGS), on a laptop CPU (Intel Core 7 150U) under heavy load from parallel
+/// builds: at that optimiser's bound of 7,961 evaluations a work unit ([`arima_fit_work`]) cost
+/// at most about 40 us, for an MA-only fit on the slower cores (8 to 25 us for other orders), so
+/// 400,000 units took about 16 s on a release build. It allows ARIMA(1,1,1) on 15,384
+/// observations, ARIMA(0,1,0) on 40,000 and the `model_order` caps p = d = q = 20 on 214. The
+/// in-house Levenberg-Marquardt fit's work grows with the same count ([`arima_fit_work`]); the
+/// value stays until it is measured on that fit.
 ///
 /// The margin assumes the default 60 s deadline: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a
-/// throttled shared CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raised
-/// above about 3.5 times this value, it lets an allowed fit run past the deadline and keep its
-/// slot, since the fit has no checkpoint.
+/// throttled shared CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. The fit
+/// checks the call's budget every iteration and every 4,096 rows of a pass, so a fit that a
+/// higher value allows and that runs past the deadline is cancelled at its next check.
 const ARIMA_FIT_WORK_HOSTED: u64 = 400_000;
 
 /// Hosted [`Limits::ensemble_bytes`]: 256 MiB, the hosted per-allocation ceiling
@@ -1345,9 +1348,10 @@ impl Limits {
 
     /// Checks an ARIMA fit of `n_obs` observations at orders `p`, `d` and `q`
     /// ([`arima_fit_work`]) against the [`Limits::arima_fit_work`] budget (`None` passes). The
-    /// ARIMA handlers call it before they fit, because the fit cannot be stopped once it starts.
-    /// The refusal says how many observations the orders allow (when that is at least the
-    /// `p + d + q + 10` the fit needs) and how small `p + q` must be for the observations.
+    /// ARIMA handlers call it before they fit, so that a fit whose work could not fit the
+    /// deadline is refused up front instead of cancelled part way through. The refusal says how
+    /// many observations the orders allow (when that is at least the `p + d + q + 10` the fit
+    /// needs) and how small `p + q` must be for the observations.
     pub fn check_arima_fit(
         &self,
         tool: &str,
@@ -1392,7 +1396,7 @@ impl Limits {
             message: format!(
                 "`{tool}` with p = {p}, d = {d} and q = {q} on {n_obs} observations needs {work} \
                  ({KNOB}: observations x ((p + q + 3)^2 + d)), which exceeds this server's limit \
-                 of {limit}: the ARIMA fit cannot be stopped once it starts. {advice}"
+                 of {limit} for one ARIMA fit, checked before the fit starts. {advice}"
             ),
             tool: tool.to_string(),
             parameter: KNOB.to_string(),
@@ -1409,11 +1413,10 @@ impl Limits {
     /// column, its differences, and their products and squares with ordinary-sized coefficients
     /// out of that range. It does not cover the MA residual recursion at an intercept of
     /// exactly 0.0 over a stretch of exact zeros, which can sit in the subnormal range (one pass
-    /// measured about 28 times slower); [`ARIMA_MIN_MAGNITUDE`] says why that is not believed to
-    /// last a whole fit, and records it as a residual risk for a change of the optimiser. The
-    /// ARIMA handlers call it after [`Limits::check_arima_fit`], with the column's valid values
-    /// (the fit refuses a column with nulls, so the values behind its null slots are never
-    /// read). `column` names the series in the refusal.
+    /// measured about 28 times slower); [`ARIMA_MIN_MAGNITUDE`] says why the deadline bounds
+    /// that case. The ARIMA handlers call it after [`Limits::check_arima_fit`], with the
+    /// column's valid values (the fit refuses a column with nulls, so the values behind its null
+    /// slots are never read). `column` names the series in the refusal.
     pub fn check_arima_series(
         &self,
         tool: &str,
@@ -1436,9 +1439,9 @@ impl Limits {
             message: format!(
                 "`{tool}` cannot fit column `{column}`: it holds a nonzero value of magnitude \
                  {found:e}, below this server's floor of {ARIMA_MIN_MAGNITUDE:e} for an ARIMA fit \
-                 ({KNOB}). Values that small can make the fit's arithmetic many times slower, \
-                 and the fit cannot be stopped once it starts. Set values that small to 0, or \
-                 rescale the column, for example multiply it by a power of ten."
+                 ({KNOB}). Values that small can make the fit's arithmetic many times slower \
+                 than the limit for one fit allows for. Set values that small to 0, or rescale \
+                 the column, for example multiply it by a power of ten."
             ),
             tool: tool.to_string(),
             parameter: "column".to_string(),

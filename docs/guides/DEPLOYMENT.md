@@ -627,15 +627,18 @@ Named budgets:
 | `llm_allow_loopback` | whether a loopback Ollama endpoint may be used; `true` also drops the default host allowlist when `P2A_LLM_ALLOWED_HOSTS` is unset | `false` | `true` |
 
 The hosted `arima_fit_work` of 400,000 allows ARIMA(1,1,1) on 15,384
-observations, and on a release build the slowest fit it allows is bounded at
-about 16 s; while the budget is set, a column holding a nonzero value below
-1e-100 is refused as well, because the squares and products the fit forms from
-values that small can be subnormal (below about 2.2e-308), and arithmetic on
-those takes a much slower path. The margin to the deadline assumes the
-default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a throttled shared
-CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raising it
-above about 3.5 times the hosted value lets a fit run past the deadline and keep
-its slot, since the fit has no checkpoint.
+observations. It bounds a call's cost before the fit starts: the slowest fit it
+allowed with the optimiser used before the in-house fit took about 16 s on a
+release build, and the value has not yet been measured on the in-house fit,
+whose work grows with the same count. While the budget is set, a column holding
+a nonzero value below 1e-100 is refused as well, because the squares and
+products the fit forms from values that small can be subnormal (below about
+2.2e-308), and arithmetic on those takes a much slower path. The margin to the
+deadline assumes the default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a
+throttled shared CPU, lower `arima_fit_work` in proportion with
+`P2A_LIMIT_OVERRIDES`. The fit checks the call's budget every iteration and
+every 4,096 rows of a pass, so a fit that runs past the deadline is cancelled
+at its next check.
 
 The hosted `ensemble_bytes` of 256 MiB matches the per-allocation ceiling: a
 causal-forest or BART-causal fit keeps every tree it grows, and BART keeps a
