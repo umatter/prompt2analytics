@@ -889,3 +889,253 @@ fn test_validate_cli_fisher_conditional_mle() {
     );
     assert_eq!(j2["missing"], missing(12, 11, json!({"code": 1})));
 }
+
+/// One-way ANOVA (aov drops rows missing y or g) and Kruskal-Wallis (labels missing) (case
+/// stat_oneway_na_labels).
+#[test]
+fn test_validate_cli_anova_kruskal_na() {
+    let case = Case::load("stat_oneway_na_labels");
+    let s = temp_session();
+    let d = s.load(&case);
+    let d = d.as_str();
+    let out = s.ok(&["stats", "anova", d, "--response", "y", "--factor", "g"]);
+    let (b, w) = (nums(&row(&out, "Between")), nums(&row(&out, "Within"))); // SS, DF, MS[, F, p]
+    Check::new(&case)
+        .scalar("aov_ss_between", b[0], Tol::printed(4))
+        .scalar("aov_df_between", b[1], Tol::exact())
+        .scalar("aov_f", b[3], Tol::printed(4))
+        .scalar("aov_p", b[4], Tol::printed(6))
+        .scalar("aov_ss_within", w[0], Tol::printed(4))
+        .scalar("aov_df_within", w[1], Tol::exact())
+        .scalar("aov_n_used", num_after(&out, "N = "), Tol::exact())
+        .finish();
+    assert_eq!(
+        note(&out),
+        Some("Note: 4 of 9 rows dropped because of missing values (y: 3, g: 2)"),
+        "{out}"
+    );
+    let j = s.json(&["stats", "anova", d, "--response", "y", "--factor", "g"]);
+    Check::new(&case)
+        .scalar("aov_f", num(&j, "f_statistic"), Tol::stat(5))
+        .scalar("aov_p", num(&j, "p_value"), Tol::p_value(5))
+        .scalar("aov_ss_between", num(&j, "ss_between"), Tol::stat(5))
+        .scalar("aov_ss_within", num(&j, "ss_within"), Tol::stat(5))
+        .scalar("aov_df_between", num(&j, "df_between"), Tol::exact())
+        .scalar("aov_df_within", num(&j, "df_within"), Tol::exact())
+        .scalar("aov_n_used", num(&j, "n_obs"), Tol::exact())
+        .finish();
+    assert_eq!(j["missing"], missing(9, 5, json!({"y": 3, "g": 2})));
+    let k = s.ok(&["stats", "kruskal", d, "--col", "v9", "--group", "g9"]);
+    Check::new(&case)
+        .scalar("kw_chisq", num_after(&k, "H = "), Tol::printed(4))
+        .scalar("kw_df", num_after(&k, "df = "), Tol::exact())
+        .scalar("kw_p", num_after(&k, "p-value = "), Tol::printed(6))
+        .finish();
+    assert_eq!(
+        note(&k),
+        Some("Note: 3 of 9 rows dropped because of missing values (g9: 3)"),
+        "{k}"
+    );
+    let kj = s.json(&["stats", "kruskal", d, "--col", "v9", "--group", "g9"]);
+    Check::new(&case)
+        .scalar("kw_chisq", num(&kj, "statistic"), Tol::stat(6))
+        .scalar("kw_p", num(&kj, "p_value"), Tol::p_value(6))
+        .finish();
+    assert_eq!(kj["missing"], missing(9, 6, json!({"g9": 3})));
+}
+
+/// Tukey HSD after aov with two missing responses (case stat_pairwise_mahalanobis_na: group means
+/// and pooled SD).
+#[test]
+fn test_validate_cli_tukey_na() {
+    let case = Case::load("stat_pairwise_mahalanobis_na");
+    let s = temp_session();
+    let d = s.load(&case);
+    let args = [
+        "stats",
+        "tukey",
+        d.as_str(),
+        "--response",
+        "y",
+        "--factor",
+        "g",
+    ];
+    let out = s.ok(&args);
+    let psd = case.scalar("pairwise_pooled_sd");
+    // derived: MSE = pooled SD^2
+    assert!(
+        Tol::printed(4).allows(num_after(&out, "MSE = "), psd * psd),
+        "{out}"
+    );
+    Check::new(&case)
+        .scalar("pairwise_df", num_after(&out, ", df = "), Tol::exact())
+        .finish();
+    assert_eq!(
+        note(&out),
+        Some("Note: 2 of 30 rows dropped because of missing values (y: 2)"),
+        "{out}"
+    );
+    let j = s.json(&args);
+    assert!(Tol::stat(28).allows(num(&j, "mse"), psd * psd), "{j}");
+    Check::new(&case)
+        .scalar("pairwise_df", num(&j, "df"), Tol::exact())
+        .finish();
+    for c in j["comparisons"].as_array().unwrap() {
+        let (g1, g2) = (c["group1"].as_str().unwrap(), c["group2"].as_str().unwrap());
+        // p2a: diff = mean(group1) - mean(group2)
+        let want = case.named("pairwise_group_mean", g1) - case.named("pairwise_group_mean", g2);
+        assert!(Tol::coef(28).allows(num(c, "diff"), want), "{g1}-{g2}: {c}");
+    }
+    assert_eq!(j["comparisons"].as_array().unwrap().len(), 3);
+    // Not pinned: p adj and the intervals (R's TukeyHSD values are in no Tier 2 case).
+    assert_eq!(j["missing"], missing(30, 28, json!({"y": 2})));
+}
+
+/// Friedman: a missing response drops its block (case stat_friedman_quade).
+#[test]
+fn test_validate_cli_friedman_na() {
+    let case = Case::load("stat_friedman_quade");
+    let s = temp_session();
+    let d = s.load(&case);
+    let na = [
+        "stats",
+        "friedman",
+        d.as_str(),
+        "--value",
+        "y_na",
+        "--group",
+        "treat",
+        "--block",
+        "block",
+    ];
+    let out = s.ok(&na);
+    Check::new(&case)
+        .scalar(
+            "na_friedman_q",
+            num_after(&out, "Chi-squared = "),
+            Tol::printed(4),
+        )
+        .scalar(
+            "na_friedman_p",
+            num_after(&out, "p-value = "),
+            Tol::printed(6),
+        )
+        .scalar("na_n_blocks", num_after(&out, "Blocks: "), Tol::exact())
+        .finish();
+    assert_eq!(
+        note(&out),
+        Some("Note: 3 of 24 rows dropped because of missing values (y_na: 1)"),
+        "{out}"
+    );
+    let j = s.json(&na);
+    Check::new(&case)
+        .scalar("na_friedman_q", num(&j, "statistic"), Tol::stat(21))
+        .scalar("na_friedman_p", num(&j, "p_value"), Tol::p_value(21))
+        .scalar("na_n_blocks", num(&j, "n_blocks"), Tol::exact())
+        .finish();
+    assert_eq!(j["missing"], missing(24, 21, json!({"y_na": 1})));
+    let full = s.ok(&[
+        "stats",
+        "friedman",
+        d.as_str(),
+        "--value",
+        "y",
+        "--group",
+        "treat",
+        "--block",
+        "block",
+    ]);
+    Check::new(&case)
+        .scalar(
+            "friedman_q",
+            num_after(&full, "Chi-squared = "),
+            Tol::printed(4),
+        )
+        .scalar("friedman_df", num_after(&full, "df = "), Tol::exact())
+        .scalar(
+            "friedman_p",
+            num_after(&full, "p-value = "),
+            Tol::printed(6),
+        )
+        .finish();
+    assert!(note(&full).is_none(), "nothing dropped, no note: {full}");
+}
+
+/// Shapiro-Wilk on a padded Int64 column, Bartlett value ~ group, KS on two Int64 columns (cases
+/// stat_shapiro_wilk, stat_two_sample_na).
+#[test]
+fn test_validate_cli_shapiro_bartlett_ks_na() {
+    let sw = Case::load("stat_shapiro_wilk");
+    let two = Case::load("stat_two_sample_na");
+    let s = temp_session();
+    let (d1, d2) = (s.load(&sw), s.load(&two));
+    let out = s.ok(&["stats", "shapiro", d1.as_str(), "--col", "n25_int"]);
+    Check::new(&sw)
+        .scalar("n25_int_w", num_after(&out, "W = "), Tol::printed(6))
+        .scalar("n25_int_p", num_after(&out, "p-value = "), Tol::printed(6))
+        .scalar("n25_int_n", num_after(&out, "n = "), Tol::exact())
+        .finish();
+    assert_eq!(
+        note(&out),
+        Some("Note: 4975 of 5000 rows dropped because of missing values (n25_int: 4975)"),
+        "{out}"
+    );
+    let j = s.json(&["stats", "shapiro", d1.as_str(), "--col", "n25_int"]);
+    Check::new(&sw)
+        .scalar("n25_int_w", num(&j, "W"), Tol::stat(25))
+        .scalar("n25_int_p", num(&j, "p_value"), Tol::p_value(25))
+        .finish();
+    assert_eq!(j["missing"], missing(5000, 25, json!({"n25_int": 4975})));
+    let b = s.ok(&[
+        "stats",
+        "bartlett",
+        d2.as_str(),
+        "--col",
+        "xi",
+        "--group",
+        "g",
+    ]);
+    Check::new(&two)
+        .scalar(
+            "bartlett_k2",
+            num_after(&b, "K-squared = "),
+            Tol::printed(4),
+        )
+        .scalar("bartlett_df", num_after(&b, "df = "), Tol::exact())
+        .scalar("bartlett_p", num_after(&b, "p-value = "), Tol::printed(6))
+        .finish();
+    assert_eq!(
+        note(&b),
+        Some("Note: 2 of 22 rows dropped because of missing values (xi: 2, g: 1)"),
+        "{b}"
+    );
+    let bj = s.json(&[
+        "stats",
+        "bartlett",
+        d2.as_str(),
+        "--col",
+        "xi",
+        "--group",
+        "g",
+    ]);
+    Check::new(&two)
+        .scalar("bartlett_k2", num(&bj, "statistic"), Tol::stat(20))
+        .scalar("bartlett_p", num(&bj, "p_value"), Tol::p_value(20))
+        .finish();
+    assert_eq!(bj["missing"], missing(22, 20, json!({"xi": 2, "g": 1})));
+    let ks = s.json(&["stats", "ks-test", d2.as_str(), "--x", "xi", "--y", "yi"]);
+    // Not pinned: the KS p-value (asymptotic in p2a, exact with ties in R: STAT-27, Tier 4,
+    // recorded in stats_onesample.json).
+    Check::new(&two)
+        .scalar("ks_d", num(&ks, "statistic"), Tol::stat(38))
+        .scalar("n_xi", num(&ks, "n"), Tol::exact())
+        .scalar("n_yi", num(&ks, "n_2"), Tol::exact())
+        .finish();
+    assert_eq!(ks["missing"], missing(44, 38, json!({"xi": 2, "yi": 4})));
+    let kst = s.ok(&["stats", "ks-test", d2.as_str(), "--x", "xi", "--y", "yi"]);
+    assert_eq!(
+        note(&kst),
+        Some("Note: 6 of 44 rows dropped because of missing values (xi: 2, yi: 4)"),
+        "{kst}"
+    );
+}

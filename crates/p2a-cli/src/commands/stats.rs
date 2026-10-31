@@ -1415,7 +1415,7 @@ fn execute_shapiro(
                             "p_value": result.p_value,
                             "n": result.n,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nShapiro-Wilk Normality Test");
@@ -1430,6 +1430,7 @@ fn execute_shapiro(
                         } else {
                             println!("\nConclusion: Cannot reject normality");
                         }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Shapiro-Wilk test failed: {}", e), format),
@@ -1522,7 +1523,7 @@ fn execute_bartlett(
                             "df": result.df,
                             "p_value": result.p_value,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nBartlett's Test for Homogeneity of Variances");
@@ -1531,6 +1532,7 @@ fn execute_bartlett(
                             "K-squared = {:.4}, df = {}, p-value = {:.6}",
                             result.statistic, result.df, result.p_value
                         );
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Bartlett's test failed: {}", e), format),
@@ -1568,7 +1570,7 @@ fn execute_kruskal(
                             "df": result.df,
                             "p_value": result.p_value,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nKruskal-Wallis Rank Sum Test");
@@ -1577,6 +1579,7 @@ fn execute_kruskal(
                             "H = {:.4}, df = {}, p-value = {:.6}",
                             result.statistic, result.df, result.p_value
                         );
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Kruskal-Wallis test failed: {}", e), format),
@@ -1848,7 +1851,7 @@ fn execute_anova(
                         "n_groups": result.n_groups,
                         "n_obs": result.n_obs,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &result.missing)?;
                 }
                 _ => {
                     println!("\nOne-Way ANOVA");
@@ -1883,6 +1886,7 @@ fn execute_anova(
                     );
                     println!();
                     println!("Effect size: eta-squared = {:.4}", result.eta_squared);
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("ANOVA failed: {}", e), format),
@@ -1932,7 +1936,7 @@ fn execute_anova_two(
                         "p_ab": result.p_ab,
                         "n_obs": result.n_obs,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &result.missing)?;
                 }
                 _ => {
                     println!("\nTwo-Way ANOVA");
@@ -1992,6 +1996,7 @@ fn execute_anova_two(
                         "{:>15} {:>12.4} {:>6}",
                         "Total", result.ss_total, result.df_total
                     );
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("Two-way ANOVA failed: {}", e), format),
@@ -2046,7 +2051,7 @@ fn execute_tukey(
                         "anova_p_value": anova_result.p_value,
                         "comparisons": comparisons,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &anova_result.missing)?;
                 }
                 _ => {
                     println!("\nTukey's HSD Test");
@@ -2070,6 +2075,7 @@ fn execute_tukey(
                             c.group1, c.group2, c.diff, c.ci_lower, c.ci_upper, c.p_adj, stars
                         );
                     }
+                    print_missing_note(&anova_result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("Tukey HSD failed: {}", e), format),
@@ -2110,7 +2116,7 @@ fn execute_friedman(
                         "rank_sums": result.rank_sums,
                         "mean_ranks": result.mean_ranks,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &result.missing)?;
                 }
                 _ => {
                     println!("\nFriedman Rank Sum Test");
@@ -2130,6 +2136,7 @@ fn execute_friedman(
                     {
                         println!("  {}: {:.4}", name, rank);
                     }
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("Friedman test failed: {}", e), format),
@@ -2340,7 +2347,7 @@ fn execute_ks_test(
                             "n": result.n,
                             "n_2": result.n_2,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\n{}", result.test_name);
@@ -2355,6 +2362,7 @@ fn execute_ks_test(
                         } else {
                             println!("Sample size: n = {}", result.n);
                         }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("K-S test failed: {}", e), format),

@@ -136,6 +136,66 @@
       "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_anova",
+      "name": "CLI stats anova, kruskal, tukey, friedman, anova-two (--ss-type) with missing values",
+      "category": "interfaces",
+      "reference": "stats::aov; kruskal.test; friedman.test; car::Anova(type = 2); pairwise.t.test's pooled SD and group means for Tukey's MSE and differences",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_oneway_na_labels",
+        "stat_pairwise_mahalanobis_na",
+        "stat_friedman_quade",
+        "stat_anova_two_way_unbalanced"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_anova_kruskal_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_tukey_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_friedman_na"
+      ],
+      "quantities": [
+        "SS",
+        "df",
+        "F",
+        "p (Type I and II)",
+        "N",
+        "H",
+        "Friedman chi-squared and blocks",
+        "Tukey MSE, df and differences",
+        "Tukey p adj and intervals not pinned (no R value in a Tier 2 case)",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_normality_variance",
+      "name": "CLI stats shapiro, bartlett, ks-test with missing values and Int64 columns",
+      "category": "interfaces",
+      "reference": "stats::shapiro.test; bartlett.test; ks.test",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_shapiro_wilk",
+        "stat_two_sample_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_shapiro_bartlett_ks_na"
+      ],
+      "quantities": [
+        "W",
+        "p",
+        "n",
+        "K-squared",
+        "df",
+        "p",
+        "KS D and sample sizes (KS p not pinned: STAT-27, Tier 4)",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
