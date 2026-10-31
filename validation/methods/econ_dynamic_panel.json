@@ -14,7 +14,12 @@
         "dpd_ab_grunfeld"
       ],
       "tests": [
-        "p2a-core::econometrics::panel::utils::tests::test_validate_difference_equations_gaps_layout"
+        "p2a-core::econometrics::panel::utils::tests::test_validate_difference_equations_gaps_layout",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_balanced",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_balanced_variants",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_gaps",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_common_gap",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_grunfeld"
       ],
       "quantities": [
         "coefficients (one-step, two-step)",

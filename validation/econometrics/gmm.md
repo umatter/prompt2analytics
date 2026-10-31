@@ -29,9 +29,8 @@ claimed.
 
 ### Grunfeld, `inv ~ lag(inv, 1) + value + capital`
 
-The data (`validation/datasets/grunfeld.csv`, N = 10 firms, T = 20 years) and model of
-`test_validate_arellano_bond_full_grunfeld` and `test_validate_gmm_twostep_full_grunfeld`,
-with all available lags of `inv` (2 and deeper) as GMM instruments.
+The data (`validation/datasets/grunfeld.csv`, N = 10 firms, T = 20 years), with all
+available lags of `inv` (2 and deeper) as GMM instruments.
 
 **R Code**:
 ```r
@@ -65,9 +64,6 @@ N = 10 firms, not a good fit.
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-36):
 - `econometrics::panel::tests::test_arellano_bond_convenience` (`crates/p2a-core/src/econometrics/panel/mod.rs`): the transform is Difference.
-- `econometrics::panel::tests::test_validate_arellano_bond_full_grunfeld` (`crates/p2a-core/src/econometrics/panel/mod.rs`): the lag coefficient lies in (0, 1). It prints R's 0.6720/0.1085/0.1168 but asserts none of them, and passes when the estimator returns `Err`.
-- `econometrics::panel::tests::test_validate_gmm_twostep_full_grunfeld` (`crates/p2a-core/src/econometrics/panel/mod.rs`): the step is TwoStep and the Sargan statistic and p-value are in range; passes when the estimator returns `Err`.
-- `econometrics::panel::dynamic_panel::tests::test_pinned_gmm_outputs` (`crates/p2a-core/src/econometrics/panel/dynamic_panel.rs`, added by T0-WP14): a characterisation pin of p2a's own outputs on Grunfeld, set against the pre-Tier-0 code, for the one-step non-robust full-instrument fit (155 instrument columns per its doc comment; pgmm reports 173 instruments for the same model) and a two-step robust fit with collapsed lags 2-4. It compares no R number.
 - No system-GMM test exists, and the `system` option is still ignored (ECON-30): in `dynamic_panel.rs` the configured transform is only copied into the result.
 
 ## Numerical Precision Summary
