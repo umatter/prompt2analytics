@@ -24,7 +24,7 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
     MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64,
-    extract_numeric_matrix, missing_json,
+    extract_numeric_matrix, missing_json, numeric_column, numeric_columns, numeric_matrix,
 };
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
@@ -513,66 +513,40 @@ impl AnalyticsServer {
 
     /// Weighted mean.
     #[tool(
-        description = "Compute the weighted arithmetic mean of a numeric column. Equivalent to R's weighted.mean()."
+        description = "Compute the weighted arithmetic mean of a numeric column. Equivalent to R's weighted.mean(). With na_rm (default) a row whose value or weight is missing is dropped as a pair and reported under missing; with na_rm = false a missing value or weight is an error."
     )]
     pub async fn stats_weighted_mean(
         &self,
         Parameters(request): Parameters<WeightedMeanRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let weights: Vec<f64> = match df.column(&request.weights) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Weights not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Weights column not found: {}",
-                    e
-                ))]));
-            }
-        };
-
+        // na_rm (default): a row whose value or weight is missing is dropped as a pair;
+        // otherwise a missing value or weight is an error naming the column
         let na_rm = request.na_rm.unwrap_or(true);
-        let result = match weighted_mean(&values, &weights, na_rm) {
+        let policy = if na_rm {
+            NaPolicy::Omit
+        } else {
+            NaPolicy::Fail
+        };
+        let cols = match numeric_columns(
+            dataset,
+            &[request.column.as_str(), request.weights.as_str()],
+            policy,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Weighted mean failed: {e}"
+                ))]));
+            }
+        };
+        let values = cols.numeric(&request.column);
+        let weights = cols.numeric(&request.weights);
+
+        let result = match weighted_mean(values, weights, na_rm) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -582,12 +556,13 @@ impl AnalyticsServer {
             }
         };
 
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "weighted_mean": result,
             "na_rm": na_rm,
-            "n": values.len(),
+            "n": cols.n(),
             "sum_weights": weights.iter().sum::<f64>()
         });
+        insert_missing(&mut json_output, cols.missing());
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&json_output).unwrap(),
@@ -596,7 +571,7 @@ impl AnalyticsServer {
 
     /// Weighted covariance matrix.
     #[tool(
-        description = "Compute the weighted covariance matrix for a set of numeric columns. Can use unbiased (reliability) or ML weighting. Equivalent to R's cov.wt()."
+        description = "Compute the weighted covariance matrix for a set of numeric columns. Can use unbiased (reliability) or ML weighting. Equivalent to R's cov.wt(). Missing values are refused, as R's cov.wt does."
     )]
     pub async fn stats_cov_wt(
         &self,
@@ -604,15 +579,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let p = request.columns.len();
         if let Err(msg) = check_square_matrix("stats_cov_wt", p) {
@@ -621,27 +588,21 @@ impl AnalyticsServer {
             ))]));
         }
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        // cov.wt refuses missing values and weights; with NaPolicy::Fail no row is dropped,
+        // so the matrix and the weights stay aligned
+        let (data, _) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
-
-        use p2a_core::polars::prelude::*;
-        let df = dataset.df();
-        let weights: Vec<f64> = match df.column(&request.weights) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Weights not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Weights column not found: {}",
-                    e
+                    "Weighted covariance failed: {e}"
+                ))]));
+            }
+        };
+        let (weights, _) = match numeric_column(dataset, &request.weights, NaPolicy::Fail) {
+            Ok(w) => w,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Weighted covariance failed: {e}"
                 ))]));
             }
         };
@@ -2107,7 +2068,7 @@ fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
 }
 
 /// The elements of `data` in row-major order, without a copy when it already has that layout
-/// (a matrix fresh from `extract_numeric_matrix` does).
+/// (a matrix fresh from `numeric_matrix` does).
 fn into_row_major(data: ndarray::Array2<f64>) -> Vec<f64> {
     if !data.is_standard_layout() {
         return data.iter().copied().collect();
@@ -2494,5 +2455,77 @@ mod tests {
                 .unwrap(),
         );
         assert!(e.contains("Column 'f1' contains non-numeric values"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_weighted_mean_na() {
+        // TOOL-9: value and weight dropped their nulls each on their own and were paired by
+        // position (10.4408 on 11 rows). R: weighted.mean on complete.cases(v, w).
+        let (case, rt, server, name) = case_server("stat_weighted_na");
+        let call = |extra: serde_json::Value| {
+            let mut a = serde_json::json!({"dataset": name, "column": "v", "weights": "w"});
+            if let serde_json::Value::Object(m) = extra {
+                a.as_object_mut().unwrap().extend(m);
+            }
+            rt.block_on(server.stats_weighted_mean(req(a))).unwrap()
+        };
+        let v = json_of(&call(serde_json::json!({})));
+        let i = json_of(&call(serde_json::json!({"column": "a", "weights": "wc"})));
+        Check::new(&case)
+            .scalar("wmean", num(&v["weighted_mean"]), Tol::coef(10))
+            .scalar("wmean_n", num(&v["n"]), Tol::exact())
+            .scalar("wmean_n", num(&v["missing"]["n_used"]), Tol::exact())
+            .scalar("wmean_sum_w", num(&v["sum_weights"]), Tol::coef(10))
+            .scalar("wmean_int", num(&i["weighted_mean"]), Tol::coef(12))
+            .scalar("wmean_int_sum_w", num(&i["sum_weights"]), Tol::coef(12))
+            .finish();
+        assert_eq!(
+            v["missing"],
+            summary(12, 10, serde_json::json!({"v": 1, "w": 1}))
+        );
+        assert!(i.get("missing").is_none(), "{i}");
+        let e = err_text(&call(serde_json::json!({"na_rm": false})));
+        assert!(e.contains("Column 'v' contains 1 missing value(s)"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_cov_wt_int() {
+        // TOOL-9/TOOL-24: a null cell became NaN (null covariance entries) and a null weight
+        // shortened the weights ("Weights length 11 doesn't match row count 12"). R: cov.wt
+        // on the Int64 columns a, b; it refuses missing values and weights.
+        let (case, rt, server, name) = case_server("stat_weighted_na");
+        let call = |extra: serde_json::Value| {
+            let mut a = serde_json::json!({"dataset": name, "columns": ["a", "b"],
+                                           "weights": "wc"});
+            if let serde_json::Value::Object(m) = extra {
+                a.as_object_mut().unwrap().extend(m);
+            }
+            rt.block_on(server.stats_cov_wt(req(a))).unwrap()
+        };
+        let flat = |m: &serde_json::Value| -> Vec<f64> {
+            m.as_array()
+                .unwrap_or_else(|| panic!("not a matrix: {m}"))
+                .iter()
+                .flat_map(nums)
+                .collect()
+        };
+        let v = json_of(&call(serde_json::json!({})));
+        let ml = json_of(&call(serde_json::json!({"method": "ML"})));
+        Check::new(&case)
+            .vector("cov", &flat(&v["covariance_matrix"]), Tol::stat(12))
+            .vector("cor", &flat(&v["correlation_matrix"]), Tol::stat(12))
+            .named("center", &["a", "b"], &nums(&v["center"]), Tol::coef(12))
+            .vector("wt", &nums(&v["weights"]), Tol::coef(12))
+            .scalar("n_obs", num(&v["n_obs"]), Tol::exact())
+            .vector("cov_ml", &flat(&ml["covariance_matrix"]), Tol::stat(12))
+            .vector("cor_ml", &flat(&ml["correlation_matrix"]), Tol::stat(12))
+            .finish();
+        let e = err_text(&call(serde_json::json!({"columns": ["a", "b_na"]})));
+        assert!(
+            e.contains("Column 'b_na' contains 1 missing value(s)"),
+            "{e}"
+        );
+        let e = err_text(&call(serde_json::json!({"weights": "w"})));
+        assert!(e.contains("Column 'w' contains 1 missing value(s)"), "{e}");
     }
 }

@@ -91,6 +91,22 @@
       "tolerance": "validation/README.md, n = 448 counts: statistics 1e-6 relative, p 1e-6 relative + 1e-12 absolute, df, dimensions and total exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_stats_weighted",
+      "name": "MCP stats_weighted_mean (complete value/weight pairs) and stats_cov_wt (integer columns)",
+      "category": "stats",
+      "reference": "stats::weighted.mean on complete.cases(v, w); stats::cov.wt(cor = TRUE, method = 'unbiased' | 'ML')",
+      "doc": "validation/stats/weighted.md",
+      "cases": ["stat_weighted_na"],
+      "tests": [
+        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_weighted_mean_na",
+        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_cov_wt_int"
+      ],
+      "quantities": ["weighted mean", "n used", "sum of weights", "missing", "covariance (unbiased and ML)", "center", "correlation", "normalised weights", "n_obs", "refusal of missing values and weights"],
+      "tolerance": "validation/README.md, n = 10-12 (< 100): weighted means, centres, sums of weights and normalised weights 1e-6, covariances and correlations 1e-5 relative; counts exact",
+      "deviations": [{"finding": "TOOL-23", "quantity": "stats_cov_wt with center = false", "note": "the tool uses center to switch the correlation matrix and always centres the data (R cov.wt(center = FALSE) does not); pinned only with center omitted"}],
+      "supersedes_legacy": []
     }
   ]
 }

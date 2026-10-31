@@ -122,7 +122,9 @@ pub struct WeightedMeanRequest {
     pub weights: String,
 
     /// Whether to remove NA values
-    #[schemars(description = "Whether to remove NA values before computation. Default is true.")]
+    #[schemars(
+        description = "true (default): rows where the value or the weight is missing are dropped together and reported; false: a missing value or weight is an error (R's weighted.mean(na.rm = FALSE) would return NA)."
+    )]
     pub na_rm: Option<bool>,
 }
 
@@ -134,11 +136,15 @@ pub struct CovWtRequest {
     pub dataset: String,
 
     /// Columns to compute covariance for
-    #[schemars(description = "Names of the numeric columns to include in the covariance matrix.")]
+    #[schemars(
+        description = "Names of the numeric columns to include in the covariance matrix. Missing values are refused, as R's cov.wt does."
+    )]
     pub columns: Vec<String>,
 
     /// Weight column
-    #[schemars(description = "Name of the weight column.")]
+    #[schemars(
+        description = "Name of the weight column. Missing values are refused, as R's cov.wt does."
+    )]
     pub weights: String,
 
     /// Whether to center the data

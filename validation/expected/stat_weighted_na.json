@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "stat_weighted_na",
+  "area": "stats/weighted",
+  "method": "weighted.mean on complete (value, weight) pairs; cov.wt on integer columns",
+  "reference": "stats::weighted.mean on complete.cases(v, w); stats::cov.wt(cor = TRUE, method = 'unbiased' | 'ML')",
+  "call": "weighted.mean(v[cc], w[cc]); cov.wt(cbind(a, b), wt = wc, cor = TRUE)",
+  "dataset": "validation/datasets/generated/weighted_na.csv",
+  "datasets": ["validation/datasets/generated/weighted_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "wmean": 10.452435597189695,
+    "wmean_n": 10,
+    "wmean_sum_w": 17.080000000000002,
+    "wmean_int": 52.993834497102959,
+    "wmean_int_sum_w": 13.462,
+    "wmean_na_rm_r": null,
+    "wmean_mispaired": 10.440777464788733,
+    "cov": [89.809891084366711, 31.108720176349422, 31.108720176349422, 32.921527650800392],
+    "center": {
+      "names": ["a", "b"],
+      "values": [52.993834497102959, 29.287401574803148]
+    },
+    "cor": [1, 0.57211069939989179, 0.57211069939989179, 1.0000000000000002],
+    "wt": [0.12323577477343635, 0.14693210518496508, 0.034690239191799144, 0.13110979052146782, 0.12167582825731689, 0.10964195513296687, 0.0446441836279899, 0.090774030604664976, 0.017159411677313923, 0.053558163720101026, 0.092408260288218691, 0.034170257019759322],
+    "n_obs": 12,
+    "cov_ml": [80.371006407908169, 27.8392404048959, 27.8392404048959, 29.461524536256618],
+    "cor_ml": [0.99999999999999978, 0.57211069939989179, 0.57211069939989179, 1]
+  }
+}

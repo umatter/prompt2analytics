@@ -37,6 +37,40 @@ case("stat_loglin_na", "stats/loglin", "Log-linear models (IPF) on a long-form c
        packages = character(0))
 })
 
+# weighted.mean with one missing value and one missing weight in different rows (TOOL-9),
+# and cov.wt on integer columns. R's weighted.mean(na.rm = TRUE) drops only missing values and
+# returns NA when a kept weight is missing; the MCP tool drops incomplete (value, weight) pairs,
+# which is weighted.mean on complete.cases(v, w). cov.wt refuses missing values and weights.
+case("stat_weighted_na", "stats/weighted", "weighted.mean on complete (value, weight) pairs; cov.wt on integer columns", function(ctx) {
+  set.seed(307)
+  n <- 12
+  v <- round(rnorm(n, 10, 3), 2); w <- round(runif(n, 0.5, 3), 2)
+  v[3] <- NA; w[8] <- NA
+  a <- round(rnorm(n, 50, 10)); b <- round(0.6 * a + rnorm(n, 0, 6))
+  wc <- round(runif(n, 0.2, 2), 3)
+  b_na <- b; b_na[5] <- NA
+  d <- ctx$gen_dataset("weighted_na", data.frame(id = 1:n, v = v, w = w, a = a, b = b, wc = wc, b_na = b_na))
+  stopifnot(is.integer(d$a), is.integer(d$b), is.integer(d$b_na), is.double(d$v), is.double(d$w))
+  cc <- complete.cases(d$v, d$w)
+  X <- cbind(a = d$a, b = d$b)
+  cw <- cov.wt(X, wt = d$wc, cor = TRUE)
+  cw_ml <- cov.wt(X, wt = d$wc, cor = TRUE, method = "ML")
+  e_x <- tryCatch({ cov.wt(cbind(d$a, d$b_na), wt = d$wc); "no error" }, error = conditionMessage)
+  e_w <- tryCatch({ cov.wt(X, wt = d$w); "no error" }, error = conditionMessage)
+  stopifnot(e_x == "'x' must contain finite values only", e_w != "no error")
+  # Cross-check values: what today's handler computes (each column's nulls dropped on its own,
+  # then paired by position), and R's own weighted.mean(na.rm = TRUE) (NA: a kept weight is missing).
+  pos <- weighted.mean(d$v[!is.na(d$v)], d$w[!is.na(d$w)])
+  list(values = list(
+    wmean = weighted.mean(d$v[cc], d$w[cc]), wmean_n = sum(cc), wmean_sum_w = sum(d$w[cc]),
+    wmean_int = weighted.mean(d$a, d$wc), wmean_int_sum_w = sum(d$wc),
+    wmean_na_rm_r = weighted.mean(d$v, d$w, na.rm = TRUE), wmean_mispaired = pos,
+    cov = vec(cw$cov), center = named(cw$center), cor = vec(cw$cor), wt = vec(cw$wt), n_obs = cw$n.obs,
+    cov_ml = vec(cw_ml$cov), cor_ml = vec(cw_ml$cor)),
+    reference = "stats::weighted.mean on complete.cases(v, w); stats::cov.wt(cor = TRUE, method = 'unbiased' | 'ML')",
+    call = "weighted.mean(v[cc], w[cc]); cov.wt(cbind(a, b), wt = wc, cor = TRUE)", packages = character(0))
+})
+
 # Chi-squared test for trend in proportions on integer count columns. Group 4 has a missing
 # success count; R's prop.trend.test refuses it ("0 (non-NA) cases"), the MCP tool drops the
 # group and keeps every other group's score (default: its row position, 1, 2, 3, 5, 6, 7).
