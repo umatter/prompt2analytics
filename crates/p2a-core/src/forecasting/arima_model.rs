@@ -91,6 +91,9 @@ const FILTER_STRIDE: usize = 1024;
 const DECAYED: f64 = 1e-12;
 /// Squarings before a matrix that has not decayed counts as not stable.
 const MAX_SQUARINGS: usize = 64;
+/// A fit whose root-mean-square CSS residual is at most this times the largest absolute
+/// value of the differenced series reproduces the series up to rounding.
+const ZERO_RESIDUAL: f64 = 1e-12;
 
 /// The warning R's `predict.Arima` gives for an MA polynomial with a root inside the unit
 /// circle.
@@ -390,6 +393,9 @@ impl fmt::Display for ArimaForecastResult {
 ///   p + d + q + 10 observations: [`EconError::InvalidSpecification`];
 /// - a coefficient that does not change the residuals (for instance an AR term on a series
 ///   that is constant after differencing): `InvalidSpecification` naming it;
+/// - a fit that reproduces the series up to rounding (zero residuals, for instance an MA
+///   term or the mean alone on such a series), whose variance is 0 and log-likelihood
+///   infinite: `InvalidSpecification`, as R's arima stops on its singular Hessian;
 /// - [`EconError::Cancelled`] when the budget installed with
 ///   [`crate::resource::with_budget`] is spent: the fit checks it before it starts, on
 ///   every iteration and every 4096 rows of a pass over the series.
@@ -1338,6 +1344,19 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
             "ARIMA CSS: the sum of squared residuals is not finite".to_string(),
         ));
     }
+    // Residuals at the rounding level of the data (all zero for a series that is constant
+    // after differencing, or after its mean and drift): the model reproduces the series, so
+    // sigma2 is 0, the log-likelihood is infinite and an MA or ARMA coefficient can take any
+    // value. R's arima stops there on the singular Hessian.
+    let scale = dx.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    if !(ssr > dx.len() as f64 * (ZERO_RESIDUAL * scale).powi(2)) {
+        return Err(invalid(
+            "the CSS residuals are zero up to rounding: the model reproduces the series \
+             exactly, so its residual variance is 0 and the fit is not identified (is the \
+             series constant after differencing?)"
+                .to_string(),
+        ));
+    }
     let residuals = full_residuals(n, &model, &ws.e)?;
 
     let Model { p, d, q, k, .. } = model;
@@ -1854,6 +1873,56 @@ mod tests {
             ..ArimaSpec::new(0, 1, 1)
         };
         assert_eq!(drift.label(), "ARIMA(0,1,1) with drift");
+    }
+
+    /// A series the model reproduces exactly (constant, or constant after differencing or
+    /// after its mean and drift) leaves zero CSS residuals. R's arima stops on the singular
+    /// Hessian of such a fit; it is refused as not identified, never reported converged with
+    /// an infinite log-likelihood.
+    #[test]
+    fn test_arima_refuses_a_fit_with_zero_residuals() {
+        let trend: Vec<f64> = (0..40).map(|i| 1.0 + 0.3 * i as f64).collect();
+        let ds = Dataset::new(
+            df! { "five" => vec![5.0; 40], "tenth" => vec![0.1; 40], "trend" => trend }.unwrap(),
+        );
+        let drift = |p, d, q| ArimaSpec {
+            include_drift: true,
+            ..ArimaSpec::new(p, d, q)
+        };
+        for (column, spec) in [
+            ("five", ArimaSpec::new(0, 0, 0)),
+            ("five", ArimaSpec::new(0, 0, 1)),
+            ("tenth", ArimaSpec::new(0, 0, 1)),
+            ("tenth", ArimaSpec::new(0, 0, 2)),
+            ("tenth", ArimaSpec::new(1, 0, 1)),
+            ("five", ArimaSpec::new(0, 1, 0)),
+            ("five", ArimaSpec::new(0, 1, 1)),
+            ("trend", drift(0, 1, 1)),
+            ("trend", drift(0, 0, 1)),
+        ] {
+            match run_arima_with(&ds, column, &spec) {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.contains("not identified"),
+                    "{column} {}: {message}",
+                    spec.label()
+                ),
+                Err(e) => panic!("{column} {}: {e:?}", spec.label()),
+                Ok(r) => panic!(
+                    "{column} {}: fitted, SSR {} loglik {} converged {}",
+                    spec.label(),
+                    r.ssr,
+                    r.loglik,
+                    r.converged
+                ),
+            }
+        }
+        // a noisy series still fits
+        let noisy: Vec<f64> = (0..40)
+            .map(|i| 5.0 + ((i * 37 % 17) as f64 - 8.0) / 8.0)
+            .collect();
+        let ds = Dataset::new(df! { "y" => noisy }.unwrap());
+        let r = run_arima_with(&ds, "y", &ArimaSpec::new(0, 0, 1)).unwrap();
+        assert!(r.loglik.is_finite() && r.ssr > 0.0, "{r:?}");
     }
 
     /// TS-1 on the old API. R: forecast::forecast(Arima(x, order, method = "CSS"), h = 5) at
