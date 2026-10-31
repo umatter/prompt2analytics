@@ -144,6 +144,42 @@ and CI `Tol::stat`/`Tol::se` (1e-5 relative), p `Tol::p_value`; counts and integ
 
 **Status:** R-pinned (registry `validation/methods/stats_onesample.json`, id `t_test`).
 
+### MCP tool: missing values and integer columns
+
+`hypothesis_t_test` calls the dataset wrapper `t_test`, so the MCP tool drops missing values
+as above (each sample on its own; complete pairs when paired), reports the drop in the last line
+of its text (`Missing values: 15 of 22 rows dropped because of missing values (x: 15)` for the
+one-sample test of `x`) and accepts integer columns. Before, the handler read its columns with
+`into_no_null_iter`, so every missing cell entered the test as 0 (one-sample t 3.09 on 21 df
+where R gives 19.22 on 6), and an Int64 column was refused.
+
+The tool's text is pinned to the same case, `stat_two_sample_na`, at its printed precision: t,
+p, the CI and the means to 6 decimals, df to 2 (one-sample `x`, Welch `x`, `y`, paired `x`, `y`,
+Welch on the Int64 `xi`, `yi`; the values are in the table above).
+
+**MCP tests** (`crates/p2a-mcp/src/tools/handlers/hypothesis.rs`):
+- `tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_t_test_two_sample_na` (t,
+  df, p, CI and means of the four tests; the missing-value lines)
+- `tools::handlers::hypothesis::tests::test_mcp_hypothesis_two_sample_columns` (not R-pinned, a
+  property test of the t-test, cor.test, KS and Mood tools: Int64 columns give the results of
+  their Float64 copies; a text column, in either role, is refused with "Column 'g' contains
+  non-numeric values", an absent one with "Column 'nope' not found in dataset."; a paired test
+  without `y` keeps its own error)
+
+**Tolerance:** `Tol::printed(6)` (`Tol::printed(2)` for df).
+
+**Status:** R-pinned (registry `validation/methods/mcp_stats.json`, id `mcp_hypothesis_t_test`).
+
+Every JSON hypothesis tool reports dropped rows under `missing` (`n_total`, `n_used`,
+`n_dropped`, `by_column`), and has no such key when nothing was dropped.
+`tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_handlers_report_missing_rows`
+checks the report of Bartlett, Kruskal-Wallis, oneway, Friedman, Quade, Wilcoxon, the pairwise t
+and Wilcoxon tests and Shapiro-Wilk against R's complete cases on the T2-WP06 and T2-WP07 cases
+(`stat_two_sample_na`, `stat_oneway_na_labels`, `stat_friedman_quade`, `stat_wilcoxon_na`,
+`stat_pairwise_mahalanobis_na`, `stat_shapiro_wilk`): rows used, group sizes and blocks exactly
+(registry id `mcp_hypothesis_missing_report`). Friedman and Quade drop the whole block of a
+missing response.
+
 ### Test 4: One-Way ANOVA
 
 **R Code:**

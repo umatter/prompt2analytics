@@ -113,8 +113,18 @@ md <- mahalanobis(X, colMeans(X), cov(X))
 - `stats::mahalanobis::tests::test_validate_na_mahalanobis_columns` (Int64 against Float64, text and absent columns)
 - `tier2::wp06_onesample::test_validate_mcp_multivariate_mahalanobis` (p2a-mcp: `n_obs`, `center`, the ten printed `first_10_distances` and `summary.mean_distance` at `Tol::printed(4)`)
 
-The MCP tool numbers its `first_10_distances` by kept row; labelling them with `rows` is
-T2-WP20's part.
+**MCP tool: row labels and missing values.** `multivariate_mahalanobis` numbers each of its
+`first_10_distances` by its 1-based dataset row (`MahalanobisResult.rows` + 1), so on this case
+the ten observations are 1-6 and 8-11 (row 7 has a missing `a`); before, they were numbered
+1-10 by kept row. The tool reports the drop under `missing` (`{"n_total": 30, "n_used": 29,
+"n_dropped": 1, "by_column": {"a": 1}}`).
+`tools::handlers::stats::tests::test_validate_mcp_multivariate_mahalanobis_rows` checks the row
+numbers against `which(complete.cases(a, b))`, the ten printed distances against R at
+`Tol::printed(4)` and the rows used exactly (registry `validation/methods/mcp_stats.json`, id
+`mcp_multivariate_mahalanobis_rows`).
+
+**Known difference (TOOL-10, Tier 4):** the tool's `chi_squared_threshold_95` and
+`n_potential_outliers` use the threshold 2.7 p, not `qchisq(0.95, p)`; they are not pinned.
 
 **Tolerance:** `validation/README.md`, n < 100: distances 1e-5 relative (`Tol::stat`), centre
 1e-6 (`Tol::coef`); rows and counts exact.

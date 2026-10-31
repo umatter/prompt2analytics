@@ -23,7 +23,8 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64, extract_numeric_matrix,
+    MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, missing_json,
+    numeric_column, numeric_columns, numeric_matrix,
 };
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
@@ -32,137 +33,62 @@ use crate::tools::requests::stats::{
     OneWayAnovaRequest, PowerAnovaTestRequest, PowerPropTestRequest, PowerTTestRequest,
     SeContrastRequest, SplineRequest, TukeyHsdRequest, TwoWayAnovaRequest, WeightedMeanRequest,
 };
+use p2a_core::data::columns::{ColumnRequest, Factor};
 
 use p2a_core::stats::{
-    ApproxMethod, ApproxRule, ContrastType, SplineMethod, TableType, approx, correlation_matrix,
-    fivenum, generate_contrasts, iqr, isoreg, loglin, model_tables, run_cov_wt, run_density,
-    run_ecdf, run_mad, run_mahalanobis, run_manova, run_mauchly_test, run_medpolish,
-    run_one_way_anova, run_tukey_hsd, run_two_way_anova, se_contrast, spline, weighted_mean,
+    ApproxMethod, ApproxRule, ContrastType, SplineMethod, SsType, TableType, TwoWayAnovaConfig,
+    approx, correlation_matrix, fivenum, generate_contrasts, iqr, isoreg, loglin, model_tables,
+    run_cov_wt, run_density, run_ecdf, run_mad, run_mahalanobis, run_manova, run_mauchly_test,
+    run_medpolish, run_one_way_anova, run_tukey_hsd, run_two_way_anova, run_two_way_anova_with,
+    se_contrast, spline, weighted_mean,
 };
 
 #[tool_router(router = stats_router, vis = "pub")]
 impl AnalyticsServer {
     /// Log-linear model fitting for contingency tables.
     #[tool(
-        description = "Fit log-linear models to multi-way contingency tables using iterative proportional fitting (IPF). Tests association and independence patterns. Equivalent to R's loglin()."
+        description = "Fit log-linear models to multi-way contingency tables using iterative proportional fitting (IPF). Tests association and independence patterns. Equivalent to R's loglin(). Takes long-form data (one row per cell or observation); rows with missing values are dropped as xtabs does."
     )]
     pub async fn stats_loglin(
         &self,
         Parameters(request): Parameters<LoglinRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-        use std::collections::HashMap;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        // Extract count column
-        let count_col = match df.column(&request.count_column) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Count column '{}' not found: {}",
-                    request.count_column, e
-                ))]));
-            }
-        };
-
-        let counts: Vec<f64> = match count_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_no_null_iter().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Count column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot cast count column: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Extract factor columns and determine dimensions
-        let mut factor_levels: Vec<Vec<String>> = Vec::new();
-        let mut factor_data: Vec<Vec<usize>> = Vec::new();
-
-        for col_name in &request.factor_columns {
-            let col = match df.column(col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Factor column '{}' not found: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-
-            // Get unique levels by casting to string series
-            let str_col = match col.cast(&DataType::String) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot cast factor column '{}' to string: {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-
-            let unique_col = match str_col.unique() {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error getting unique values for '{}': {}",
-                        col_name, e
-                    ))]));
-                }
-            };
-
-            let levels: Vec<String> = match unique_col.str() {
-                Ok(s) => s.into_no_null_iter().map(|v| v.to_string()).collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error reading unique levels: {}",
-                        e
-                    ))]));
-                }
-            };
-
-            // Map values to indices
-            let level_map: HashMap<String, usize> = levels
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.clone(), i))
-                .collect();
-
-            // Get string values and map to indices
-            let str_series = match str_col.str() {
-                Ok(s) => s,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot read string series: {}",
-                        e
-                    ))]));
-                }
-            };
-
-            let indices: Vec<usize> = str_series
-                .into_no_null_iter()
-                .map(|v| *level_map.get(v).unwrap_or(&0))
-                .collect();
-
-            factor_levels.push(levels);
-            factor_data.push(indices);
+        if request.factor_columns.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "At least one factor column is required.",
+            )]));
         }
 
+        // The count and every factor in one request: a row with a missing count or a missing
+        // label is dropped, as R's xtabs drops it, and the levels follow R's factor() order
+        let names: Vec<&str> = request.factor_columns.iter().map(String::as_str).collect();
+        let cols = match ColumnRequest::new(dataset.df())
+            .numeric(&request.count_column)
+            .factors(&names)
+            .na(NaPolicy::Omit)
+            .extract()
+        {
+            Ok(c) => c,
+            // "Computation stopped: ...", said once
+            Err(e @ p2a_core::EconError::Cancelled(_)) => {
+                return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
+            }
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model failed: {e}"
+                ))]));
+            }
+        };
+        let counts = cols.numeric(&request.count_column);
+        let factors: Vec<&Factor> = names.iter().map(|name| cols.factor(name)).collect();
+        let factor_levels: Vec<&[String]> = factors.iter().map(|f| f.levels.as_slice()).collect();
+
         // Build dimensions
-        let dimensions: Vec<usize> = factor_levels.iter().map(|l| l.len()).collect();
+        let dimensions: Vec<usize> = factors.iter().map(|f| f.n_levels()).collect();
 
         // Size the contingency table with checked arithmetic, then hold it to the budget
         let n_cells = match p2a_core::resource::checked_len(&dimensions, "contingency table") {
@@ -199,6 +125,14 @@ impl AnalyticsServer {
             }
         };
 
+        // Row-major cell strides, last factor fastest (the layout `loglin` expects); every
+        // partial product is at most `n_cells`, which was checked above
+        let mut strides = vec![0usize; dimensions.len()];
+        let mut stride = 1usize;
+        for (s, &d) in strides.iter_mut().zip(&dimensions).rev() {
+            *s = stride;
+            stride *= d;
+        }
         for (i, &count) in counts.iter().enumerate() {
             if i % 65_536 == 0
                 && let Err(e) = p2a_core::resource::checkpoint()
@@ -206,16 +140,12 @@ impl AnalyticsServer {
                 // "Computation stopped: ...", raised while the table is being counted
                 return Ok(CallToolResult::error(vec![Content::text(e.to_string())]));
             }
-            // Compute cell index from factor indices
-            let mut cell_idx = 0;
-            let mut multiplier = 1;
-            for dim_idx in (0..factor_data.len()).rev() {
-                cell_idx += factor_data[dim_idx][i] * multiplier;
-                multiplier *= dimensions[dim_idx];
-            }
-            if cell_idx < n_cells {
-                table[cell_idx] += count;
-            }
+            let cell: usize = factors
+                .iter()
+                .zip(&strides)
+                .map(|(f, s)| f.codes[i] as usize * s)
+                .sum();
+            table[cell] += count;
         }
 
         // Determine margins
@@ -237,7 +167,7 @@ impl AnalyticsServer {
         };
 
         // Build JSON output
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "model": {
                 "margins": result.margins,
                 "factor_columns": request.factor_columns,
@@ -248,14 +178,14 @@ impl AnalyticsServer {
             },
             "goodness_of_fit": {
                 "likelihood_ratio_test": {
-                    "statistic": format!("{:.4}", result.lrt),
+                    "statistic": result.lrt,
                     "df": result.df,
-                    "p_value": format!("{:.4}", result.p_value_lrt)
+                    "p_value": result.p_value_lrt
                 },
                 "pearson_chi_squared": {
-                    "statistic": format!("{:.4}", result.pearson),
+                    "statistic": result.pearson,
                     "df": result.df,
-                    "p_value": format!("{:.4}", result.p_value_pearson)
+                    "p_value": result.p_value_pearson
                 }
             },
             "convergence": {
@@ -275,6 +205,7 @@ impl AnalyticsServer {
             ),
             "references": "Haberman (1972). Algorithm AS 51; Agresti (2002). Categorical Data Analysis."
         });
+        insert_missing(&mut json_output, cols.missing());
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&json_output).unwrap(),
@@ -289,8 +220,6 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<ModelTablesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
@@ -330,7 +259,7 @@ impl AnalyticsServer {
                 }
             };
 
-            let json_output = serde_json::json!({
+            let mut json_output = serde_json::json!({
                 "table_type": result.table_type,
                 "grand_mean": result.grand_mean,
                 "one_way_table": {
@@ -343,6 +272,7 @@ impl AnalyticsServer {
                 "mse": result.mse,
                 "df_mse": result.df_mse
             });
+            insert_missing(&mut json_output, &anova.missing);
 
             Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&json_output).unwrap(),
@@ -365,108 +295,60 @@ impl AnalyticsServer {
                 }
             };
 
-            let df = dataset.df();
-
-            // Extract response and factors. All three columns must be filtered
-            // by ONE combined null mask: dropping nulls per column independently
-            // would desynchronize the row alignment and either mispair factor
-            // levels with responses or panic on an out-of-bounds index below.
-            let response_col = match df
-                .column(&request.response)
-                .and_then(|c| c.cast(&DataType::Float64))
+            // The response and both factors in one request, so the table uses the rows the
+            // ANOVA used; the levels follow R's factor() order
+            let cols = match ColumnRequest::new(dataset.df())
+                .numeric(&request.response)
+                .factor(&request.factors[0])
+                .factor(&request.factors[1])
+                .na(NaPolicy::Omit)
+                .extract()
             {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Response column '{}' not found or not numeric: {}",
-                        request.response, e
+                        "Two-way model tables failed: {e}"
                     ))]));
                 }
             };
-            let response_f64 = response_col.f64().unwrap();
-
-            let get_factor_col = |name: &str| {
-                df.column(name)
-                    .and_then(|c| c.cast(&DataType::String))
-                    .map_err(|e| {
-                        CallToolResult::error(vec![Content::text(format!(
-                            "Factor column '{}' not found or not readable: {}",
-                            name, e
-                        ))])
-                    })
-            };
-            let factor_a_col = match get_factor_col(&request.factors[0]) {
-                Ok(c) => c,
-                Err(e) => return Ok(e),
-            };
-            let factor_b_col = match get_factor_col(&request.factors[1]) {
-                Ok(c) => c,
-                Err(e) => return Ok(e),
-            };
-            let factor_a_str = factor_a_col.str().unwrap();
-            let factor_b_str = factor_b_col.str().unwrap();
-
-            // Keep only rows where response and both factors are all non-null.
-            let n_rows = df.height();
-            let mut y: Vec<f64> = Vec::with_capacity(n_rows);
-            let mut factor_a: Vec<String> = Vec::with_capacity(n_rows);
-            let mut factor_b: Vec<String> = Vec::with_capacity(n_rows);
-            for i in 0..n_rows {
-                if let (Some(yi), Some(a), Some(b)) = (
-                    response_f64.get(i),
-                    factor_a_str.get(i),
-                    factor_b_str.get(i),
-                ) {
-                    y.push(yi);
-                    factor_a.push(a.to_string());
-                    factor_b.push(b.to_string());
-                }
-            }
-
-            if y.is_empty() {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "No complete rows (response and both factors non-null) for the descriptive \
-                     cell-means table."
-                        .to_string(),
-                )]));
-            }
+            let y = cols.numeric(&request.response);
+            let fa = cols.factor(&request.factors[0]);
+            let fb = cols.factor(&request.factors[1]);
+            let (la, lb) = (fa.n_levels(), fb.n_levels());
 
             // Compute grand mean
             let grand_mean = y.iter().sum::<f64>() / y.len() as f64;
 
-            // Get unique levels
-            let levels_a: Vec<String> = {
-                let mut v: Vec<_> = factor_a.to_vec();
-                v.sort();
-                v.dedup();
-                v
+            // Cell sums and counts in one pass; cell (a, b) at a * lb + b
+            let buffers =
+                p2a_core::resource::checked_len(&[la, lb], "cell-means table").and_then(|cells| {
+                    Ok((
+                        p2a_core::resource::try_vec(cells, 0.0f64, "cell-means table")?,
+                        p2a_core::resource::try_vec(cells, 0usize, "cell-means table")?,
+                    ))
+                });
+            let (mut sums, mut counts) = match buffers {
+                Ok(b) => b,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Two-way model tables refused: {e}"
+                    ))]));
+                }
             };
-
-            let levels_b: Vec<String> = {
-                let mut v: Vec<_> = factor_b.to_vec();
-                v.sort();
-                v.dedup();
-                v
-            };
-
-            // Compute cell means
-            let mut cell_means: Vec<Vec<f64>> = vec![vec![0.0; levels_b.len()]; levels_a.len()];
-            let mut cell_counts: Vec<Vec<usize>> = vec![vec![0; levels_b.len()]; levels_a.len()];
-
-            for (i, yi) in y.iter().enumerate() {
-                let a_idx = levels_a.iter().position(|x| x == &factor_a[i]).unwrap();
-                let b_idx = levels_b.iter().position(|x| x == &factor_b[i]).unwrap();
-                cell_means[a_idx][b_idx] += yi;
-                cell_counts[a_idx][b_idx] += 1;
+            for ((&yi, &a), &b) in y.iter().zip(&fa.codes).zip(&fb.codes) {
+                let cell = a as usize * lb + b as usize;
+                sums[cell] += yi;
+                counts[cell] += 1;
             }
-
-            for i in 0..levels_a.len() {
-                for j in 0..levels_b.len() {
-                    if cell_counts[i][j] > 0 {
-                        cell_means[i][j] /= cell_counts[i][j] as f64;
-                    }
+            // An empty cell keeps the mean 0
+            for (sum, &count) in sums.iter_mut().zip(&counts) {
+                if count > 0 {
+                    *sum /= count as f64;
                 }
             }
+            let cell_means: Vec<Vec<f64>> = sums.chunks(lb).map(<[f64]>::to_vec).collect();
+            let cell_counts: Vec<Vec<usize>> = counts.chunks(lb).map(<[usize]>::to_vec).collect();
+            let (levels_a, levels_b) = (&fa.levels, &fb.levels);
 
             // Convert to effects if requested
             let values = if table_type == TableType::Effects {
@@ -478,7 +360,7 @@ impl AnalyticsServer {
                 cell_means
             };
 
-            let json_output = serde_json::json!({
+            let mut json_output = serde_json::json!({
                 "table_type": format!("{:?}", table_type),
                 "grand_mean": grand_mean,
                 "two_way_table": {
@@ -496,6 +378,7 @@ impl AnalyticsServer {
                     "ss_residual": anova.ss_error
                 }
             });
+            insert_missing(&mut json_output, cols.missing());
 
             Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&json_output).unwrap(),
@@ -566,7 +449,7 @@ impl AnalyticsServer {
         let group_means: Vec<f64> = anova.groups.iter().map(|g| g.mean).collect();
         let group_sizes: Vec<usize> = anova.groups.iter().map(|g| g.n).collect();
 
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "groups": group_names,
             "group_means": group_means,
             "group_sizes": group_sizes,
@@ -575,6 +458,7 @@ impl AnalyticsServer {
             "mse": result.mse,
             "df_mse": result.df_mse
         });
+        insert_missing(&mut json_output, &anova.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&json_output).unwrap(),
@@ -583,66 +467,40 @@ impl AnalyticsServer {
 
     /// Weighted mean.
     #[tool(
-        description = "Compute the weighted arithmetic mean of a numeric column. Equivalent to R's weighted.mean()."
+        description = "Compute the weighted arithmetic mean of a numeric column. Equivalent to R's weighted.mean(). With na_rm (default) a row whose value or weight is missing is dropped as a pair and reported under missing; with na_rm = false a missing value or weight is an error."
     )]
     pub async fn stats_weighted_mean(
         &self,
         Parameters(request): Parameters<WeightedMeanRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        let values: Vec<f64> = match df.column(&request.column) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column not found: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let weights: Vec<f64> = match df.column(&request.weights) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Weights not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Weights column not found: {}",
-                    e
-                ))]));
-            }
-        };
-
+        // na_rm (default): a row whose value or weight is missing is dropped as a pair;
+        // otherwise a missing value or weight is an error naming the column
         let na_rm = request.na_rm.unwrap_or(true);
-        let result = match weighted_mean(&values, &weights, na_rm) {
+        let policy = if na_rm {
+            NaPolicy::Omit
+        } else {
+            NaPolicy::Fail
+        };
+        let cols = match numeric_columns(
+            dataset,
+            &[request.column.as_str(), request.weights.as_str()],
+            policy,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Weighted mean failed: {e}"
+                ))]));
+            }
+        };
+        let values = cols.numeric(&request.column);
+        let weights = cols.numeric(&request.weights);
+
+        let result = match weighted_mean(values, weights, na_rm) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -652,12 +510,13 @@ impl AnalyticsServer {
             }
         };
 
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "weighted_mean": result,
             "na_rm": na_rm,
-            "n": values.len(),
+            "n": cols.n(),
             "sum_weights": weights.iter().sum::<f64>()
         });
+        insert_missing(&mut json_output, cols.missing());
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&json_output).unwrap(),
@@ -666,7 +525,7 @@ impl AnalyticsServer {
 
     /// Weighted covariance matrix.
     #[tool(
-        description = "Compute the weighted covariance matrix for a set of numeric columns. Can use unbiased (reliability) or ML weighting. Equivalent to R's cov.wt()."
+        description = "Compute the weighted covariance matrix for a set of numeric columns. Can use unbiased (reliability) or ML weighting. Equivalent to R's cov.wt(). Missing values are refused, as R's cov.wt does."
     )]
     pub async fn stats_cov_wt(
         &self,
@@ -674,15 +533,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let p = request.columns.len();
         if let Err(msg) = check_square_matrix("stats_cov_wt", p) {
@@ -691,27 +542,21 @@ impl AnalyticsServer {
             ))]));
         }
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        // cov.wt refuses missing values and weights; with NaPolicy::Fail no row is dropped,
+        // so the matrix and the weights stay aligned
+        let (data, _) = match numeric_matrix(dataset, &request.columns, NaPolicy::Fail) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
-
-        use p2a_core::polars::prelude::*;
-        let df = dataset.df();
-        let weights: Vec<f64> = match df.column(&request.weights) {
-            Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Weights not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Weights column not found: {}",
-                    e
+                    "Weighted covariance failed: {e}"
+                ))]));
+            }
+        };
+        let (weights, _) = match numeric_column(dataset, &request.weights, NaPolicy::Fail) {
+            Ok(w) => w,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Weighted covariance failed: {e}"
                 ))]));
             }
         };
@@ -758,7 +603,7 @@ impl AnalyticsServer {
 
     /// Mauchly's sphericity test.
     #[tool(
-        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test()."
+        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test(). Uses the first-order chi-square approximation of the p-value (R's mauchly.test adds a second-order term). Subjects with a missing value are dropped and reported under missing; sphericity_violated is null when the p-value cannot be computed."
     )]
     pub async fn stats_mauchly_test(
         &self,
@@ -766,26 +611,31 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let p = request.columns.len();
+        if p < 3 {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Mauchly's test needs at least 3 repeated-measures columns (got {p}); with 2 \
+                 conditions there is one contrast and sphericity holds trivially (R reports W = \
+                 1, p = 1)."
+            ))]));
+        }
         if let Err(msg) = check_square_matrix("stats_mauchly_test", p) {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Mauchly's test refused: {p} columns give a {p} x {p} matrix. {msg}"
             ))]));
         }
 
-        let data = match extract_numeric_matrix(dataset, &request.columns) {
+        // A subject with a missing value in any condition is dropped, as R's
+        // lm(cbind(...) ~ 1) drops it
+        let (data, missing) = match numeric_matrix(dataset, &request.columns, NaPolicy::Omit) {
             Ok(d) => d,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mauchly's test failed: {e}"
+                ))]));
+            }
         };
 
         // Flatten to row-major and call run_mauchly_test
@@ -803,12 +653,12 @@ impl AnalyticsServer {
             }
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "w_statistic": result.w,
             "chi_squared": result.chi_squared,
             "p_value": result.p_value,
             "df": result.df,
-            "sphericity_violated": result.p_value < 0.05,
+            "sphericity_violated": sphericity_verdict(result.p_value),
             "epsilon_corrections": {
                 "greenhouse_geisser": result.epsilon_gg,
                 "huynh_feldt": result.epsilon_hf,
@@ -817,6 +667,7 @@ impl AnalyticsServer {
             "n_subjects": result.n,
             "n_conditions": result.p_levels
         });
+        insert_missing(&mut output, &missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap(),
@@ -835,14 +686,15 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         match fivenum(&values) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "minimum": result.minimum,
                     "lower_hinge": result.lower_hinge,
                     "median": result.median,
@@ -851,6 +703,7 @@ impl AnalyticsServer {
                     "n": result.n,
                     "iqr": result.upper_hinge - result.lower_hinge
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -874,17 +727,19 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         match iqr(&values, request.qtype) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "iqr": result,
                     "quantile_type": request.qtype.unwrap_or(7)
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -908,34 +763,31 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
-        // If center is "mean", compute mean; otherwise use None (which defaults to median in mad())
-        let center = if request.center.as_deref() == Some("mean") {
-            let sum: f64 = values.iter().filter(|x| !x.is_nan()).sum();
-            let count = values.iter().filter(|x| !x.is_nan()).count();
-            if count > 0 {
-                Some(sum / count as f64)
-            } else {
-                None
-            }
+        // If center is "mean", the mean of the values used (no missing value is left);
+        // otherwise None, which is the median in mad()
+        let center = if request.center.as_deref() == Some("mean") && !values.is_empty() {
+            Some(values.iter().sum::<f64>() / values.len() as f64)
         } else {
-            None // Will use median by default
+            None
         };
 
         let constant = request.constant;
 
         match run_mad(&values, center, constant) {
             Ok(mad_value) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "mad": mad_value,
                     "center_used": center,
                     "constant": constant.unwrap_or(1.4826),
                     "n": values.len()
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -959,7 +811,8 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
@@ -974,12 +827,13 @@ impl AnalyticsServer {
                     (result.x.clone(), result.y.clone())
                 };
 
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": x_out,
                     "y": y_out,
                     "n": result.n,
                     "n_unique": result.x.len()
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -1003,7 +857,8 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
@@ -1034,7 +889,7 @@ impl AnalyticsServer {
 
         match run_density(&values, request.bw, kernel, Some(n)) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": result.x,
                     "y": result.y,
                     "bw": result.bw,
@@ -1043,6 +898,7 @@ impl AnalyticsServer {
                     "data_n": values.len(),
                     "range": [result.x.first(), result.x.last()]
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -1066,15 +922,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let x = match extract_column_f64(dataset, &request.x) {
-            Ok(v) => v,
+        // A row with a missing x or y is dropped from both, as R's regularize.values drops it
+        let cols = match numeric_columns(
+            dataset,
+            &[request.x.as_str(), request.y.as_str()],
+            NaPolicy::Omit,
+        ) {
+            Ok(c) => c,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
-
-        let y = match extract_column_f64(dataset, &request.y) {
-            Ok(v) => v,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let (x, y) = (cols.numeric(&request.x), cols.numeric(&request.y));
 
         let method = match request.method.as_deref().unwrap_or("fmm") {
             "fmm" => SplineMethod::Fmm,
@@ -1089,14 +946,15 @@ impl AnalyticsServer {
             }
         };
 
-        match spline(&x, &y, request.xout.as_deref(), None, method) {
+        match spline(x, y, request.xout.as_deref(), None, method) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": result.x,
                     "y": result.y,
                     "method": format!("{:?}", method),
                     "n_knots": x.len()
                 });
+                insert_missing(&mut json_output, cols.missing());
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -1120,15 +978,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let x = match extract_column_f64(dataset, &request.x) {
-            Ok(v) => v,
+        // A row with a missing x or y is dropped from both, as R's regularize.values drops it
+        let cols = match numeric_columns(
+            dataset,
+            &[request.x.as_str(), request.y.as_str()],
+            NaPolicy::Omit,
+        ) {
+            Ok(c) => c,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
-
-        let y = match extract_column_f64(dataset, &request.y) {
-            Ok(v) => v,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let (x, y) = (cols.numeric(&request.x), cols.numeric(&request.y));
 
         let method = match request.method.as_deref().unwrap_or("linear") {
             "linear" => ApproxMethod::Linear,
@@ -1155,15 +1014,16 @@ impl AnalyticsServer {
         // f parameter: for constant interpolation, 0 = left value, 1 = right value, 0.5 = average
         let f = 0.0; // Default: use left value for step interpolation
 
-        match approx(&x, &y, Some(&request.xout), None, method, rule, f) {
+        match approx(x, y, Some(&request.xout), None, method, rule, f) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": result.x,
                     "y": result.y,
                     "method": format!("{:?}", method),
                     "rule": format!("{:?}", rule),
                     "n_interpolated": result.x.len()
                 });
+                insert_missing(&mut json_output, cols.missing());
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -1205,7 +1065,7 @@ impl AnalyticsServer {
             }
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "n_obs": result.n_obs,
             "n_groups": result.n_groups,
             "n_responses": result.n_responses,
@@ -1264,6 +1124,7 @@ impl AnalyticsServer {
                 }
             )
         });
+        insert_missing(&mut output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
@@ -1344,7 +1205,7 @@ impl AnalyticsServer {
             })
             .collect();
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "method": "Tukey HSD (Honest Significant Differences)",
             "response_var": tukey.response_var,
             "factor_var": tukey.factor_var,
@@ -1366,6 +1227,7 @@ impl AnalyticsServer {
                 1.0 - conf_level
             )
         });
+        insert_missing(&mut output, &anova.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", tukey)),
@@ -1374,7 +1236,7 @@ impl AnalyticsServer {
 
     /// Run two-way ANOVA.
     #[tool(
-        description = "Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction on a response variable. Returns F-statistics and p-values for each factor and the interaction term. Use for factorial experimental designs."
+        description = "Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction on a response variable. Returns F-statistics and p-values for each factor and the interaction term. Use for factorial experimental designs. ss_type: 'I' (default, sequential as R aov), 'II' or 'III' (as car::Anova). Rows with missing values are dropped and reported."
     )]
     pub async fn anova_two_way(
         &self,
@@ -1385,13 +1247,25 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let interaction = request.interaction.unwrap_or(true);
+        let ss_type = match request.ss_type.as_deref().map(str::parse::<SsType>) {
+            None => SsType::I,
+            Some(Ok(t)) => t,
+            Some(Err(e)) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Two-way ANOVA failed: {e}"
+                ))]));
+            }
+        };
 
-        let result = match run_two_way_anova(
+        let result = match run_two_way_anova_with(
             dataset,
             &request.response,
             &request.factor_a,
             &request.factor_b,
-            interaction,
+            &TwoWayAnovaConfig {
+                interaction,
+                ss_type,
+            },
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -1444,80 +1318,52 @@ impl AnalyticsServer {
 
     /// Run isotonic regression (monotonic constraint).
     #[tool(
-        description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed."
+        description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed. Missing values are refused, as R's isoreg does."
     )]
     pub async fn descriptive_isoreg(
         &self,
         Parameters(request): Parameters<IsoregRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::polars::prelude::*;
-
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let df = dataset.df();
-
-        let y_col = match df.column(&request.y_column) {
+        // isoreg refuses missing values, as R's isoreg does ("missing values not allowed")
+        let mut names = vec![request.y_column.as_str()];
+        if let Some(x) = &request.x_column {
+            names.push(x.as_str());
+        }
+        let cols = match numeric_columns(dataset, &names, NaPolicy::Fail) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Y column '{}' not found: {}",
-                    request.y_column, e
+                    "Isotonic regression failed: {e}"
                 ))]));
             }
         };
-
-        let y: Vec<f64> = match y_col.cast(&DataType::Float64) {
-            Ok(c) => match c.f64() {
-                Ok(f) => f.into_no_null_iter().collect(),
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Y column not numeric: {}",
-                        e
-                    ))]));
-                }
-            },
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot cast Y column: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let x: Vec<f64> = if let Some(ref x_col_name) = request.x_column {
-            let x_col = match df.column(x_col_name) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "X column '{}' not found: {}",
-                        x_col_name, e
-                    ))]));
-                }
-            };
-            match x_col.cast(&DataType::Float64) {
-                Ok(c) => match c.f64() {
-                    Ok(f) => f.into_no_null_iter().collect(),
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "X column not numeric: {}",
-                            e
-                        ))]));
-                    }
-                },
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot cast X column: {}",
-                        e
-                    ))]));
-                }
-            }
+        let y = cols.numeric(&request.y_column);
+        // Without an x column, x is the row index 1..=n
+        let row_index: Vec<f64> = if request.x_column.is_some() {
+            Vec::new()
         } else {
-            (1..=y.len()).map(|i| i as f64).collect()
+            match p2a_core::resource::try_with_capacity(y.len(), "row index") {
+                Ok(mut v) => {
+                    v.extend((1..=y.len()).map(|i| i as f64));
+                    v
+                }
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Isotonic regression failed: {e}"
+                    ))]));
+                }
+            }
+        };
+        let x = match &request.x_column {
+            Some(name) => cols.numeric(name),
+            None => &row_index,
         };
 
-        let result = match isoreg(&x, &y) {
+        let result = match isoreg(x, y) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1582,31 +1428,26 @@ impl AnalyticsServer {
             ))]));
         }
 
-        let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
-        for row_idx in 0..n_rows {
-            let mut row_values: Vec<f64> = Vec::with_capacity(request.columns.len());
-            for col_name in &request.columns {
-                let col = match df.column(col_name) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' not found in dataset.",
-                            col_name
-                        ))]));
-                    }
-                };
-                let val = match col.f64() {
-                    Ok(ca) => ca.get(row_idx).unwrap_or(f64::NAN),
-                    Err(_) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' is not numeric.",
-                            col_name
-                        ))]));
-                    }
-                };
-                row_values.push(val);
+        // Each column read once; a missing cell is NaN, which run_medpolish skips with
+        // na_rm = true and refuses otherwise, as R's medpolish does
+        let mut columns: Vec<Vec<Option<f64>>> = Vec::with_capacity(n_cols);
+        for name in &request.columns {
+            match p2a_core::data::columns::numeric_options(df, name) {
+                Ok(values) => columns.push(values),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
             }
-            matrix.push(row_values);
+        }
+        let mut matrix: Vec<Vec<f64>> =
+            match p2a_core::resource::try_with_capacity(n_rows, "median polish matrix") {
+                Ok(m) => m,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Median polish refused: {e}"
+                    ))]));
+                }
+            };
+        for row in 0..n_rows {
+            matrix.push(columns.iter().map(|c| c[row].unwrap_or(f64::NAN)).collect());
         }
 
         let na_rm = request.na_rm.unwrap_or(false);
@@ -1926,7 +1767,7 @@ impl AnalyticsServer {
 
         let n_outliers = result.distances.iter().filter(|&&d| d > chi_sq_95).count();
 
-        let json_output = serde_json::json!({
+        let mut json_output = serde_json::json!({
             "n_obs": result.n_obs,
             "n_vars": result.n_vars,
             "center": result.center,
@@ -1941,10 +1782,10 @@ impl AnalyticsServer {
                 "note": format!("Under multivariate normality, D² ~ χ²({})", p)
             },
             "first_10_distances": result.distances.iter()
+                .zip(&result.rows)
                 .take(10)
-                .enumerate()
-                .map(|(i, &d)| serde_json::json!({
-                    "observation": i + 1,
+                .map(|(&d, &row)| serde_json::json!({
+                    "observation": row + 1,
                     "distance_squared": format!("{:.4}", d),
                     "potential_outlier": d > chi_sq_95
                 }))
@@ -1955,6 +1796,7 @@ impl AnalyticsServer {
             ),
             "references": "Mahalanobis, P. C. (1936). On the generalized distance in statistics."
         });
+        insert_missing(&mut json_output, &result.missing);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&json_output).unwrap_or_default(),
@@ -2157,6 +1999,23 @@ impl AnalyticsServer {
     }
 }
 
+/// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped.
+fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
+    if let Some(m) = missing_json(missing) {
+        output["missing"] = m;
+    }
+}
+
+/// `true`/`false` from p < 0.05 when p is finite, JSON null otherwise: a p-value that could not
+/// be computed is no evidence for sphericity.
+fn sphericity_verdict(p_value: f64) -> serde_json::Value {
+    if p_value.is_finite() {
+        serde_json::json!(p_value < 0.05)
+    } else {
+        serde_json::Value::Null
+    }
+}
+
 /// Checks a `side x side` matrix against the `table_cells` budget of the installed limits (a
 /// product past `u64` counts as `u64::MAX`, so it passes only when the budget is unlimited).
 fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
@@ -2170,7 +2029,7 @@ fn check_square_matrix(tool: &str, side: usize) -> Result<(), String> {
 }
 
 /// The elements of `data` in row-major order, without a copy when it already has that layout
-/// (a matrix fresh from `extract_numeric_matrix` does).
+/// (a matrix fresh from `numeric_matrix` does).
 fn into_row_major(data: ndarray::Array2<f64>) -> Vec<f64> {
     if !data.is_standard_layout() {
         return data.iter().copied().collect();
@@ -2191,6 +2050,7 @@ mod tests {
     use crate::tools::common::test_support::{hosted_with, server_with, text};
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
+    use p2a_validation::{Case, Check, Tol};
 
     /// One unique string level per row and column, and a count column `n` = 1.0.
     fn ids(n: usize, cols: &[&str]) -> DataFrame {
@@ -2394,5 +2254,674 @@ mod tests {
             into_row_major(m.reversed_axes()),
             vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
         );
+    }
+
+    /// The R case `id`, a runtime and a server holding its dataset under the dataset's file
+    /// stem (returned as the last element).
+    fn case_server(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer, String) {
+        let case = Case::load(id);
+        let df = p2a_core::data::DataLoader::load_csv(case.dataset_path()).unwrap();
+        let name = std::path::Path::new(&case.dataset)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let (rt, server) = server_with(vec![(name.as_str(), df)]);
+        (case, rt, server, name)
+    }
+
+    /// The JSON of a successful tool result.
+    fn json_of(r: &CallToolResult) -> serde_json::Value {
+        assert_ne!(r.is_error, Some(true), "{}", text(r));
+        serde_json::from_str(&text(r)).unwrap()
+    }
+
+    /// The text of a successful tool result.
+    fn ok_text(r: &CallToolResult) -> String {
+        assert_ne!(r.is_error, Some(true), "{}", text(r));
+        text(r)
+    }
+
+    /// The text of a tool error.
+    fn err_text(r: &CallToolResult) -> String {
+        assert_eq!(
+            r.is_error,
+            Some(true),
+            "expected a tool error, got:\n{}",
+            text(r)
+        );
+        text(r)
+    }
+
+    /// A JSON number as f64 (NaN when it is not a number).
+    fn num(v: &serde_json::Value) -> f64 {
+        v.as_f64().unwrap_or(f64::NAN)
+    }
+
+    fn nums(v: &serde_json::Value) -> Vec<f64> {
+        v.as_array()
+            .unwrap_or_else(|| panic!("not an array: {v}"))
+            .iter()
+            .map(num)
+            .collect()
+    }
+
+    /// Handlers that format numbers as strings ("38.019531").
+    fn str_num(v: &serde_json::Value) -> f64 {
+        v.as_str()
+            .unwrap_or_else(|| panic!("not a string: {v}"))
+            .parse()
+            .unwrap()
+    }
+
+    /// A request deserialised from JSON, as the server does.
+    fn req<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Parameters<T> {
+        Parameters(serde_json::from_value(v).unwrap())
+    }
+
+    /// The numbers on the first line whose first whitespace token is `label` (significance
+    /// stars and other words skipped). Panics with the text when no such line exists.
+    fn row(text: &str, label: &str) -> Vec<f64> {
+        let line = text
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(label))
+            .unwrap_or_else(|| panic!("no line starting with {label:?} in:\n{text}"));
+        line.split_whitespace()
+            .skip(1)
+            .filter_map(|t| t.parse::<f64>().ok())
+            .collect()
+    }
+
+    /// `{"n_total", "n_used", "n_dropped", "by_column"}` as the tools report it.
+    fn summary(n_total: usize, n_used: usize, by_column: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"n_total": n_total, "n_used": n_used,
+                           "n_dropped": n_total - n_used, "by_column": by_column})
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_loglin_na() {
+        // TOOL-8: a null label became the level "" (a 4 x 3 x 2 table, df 17) and null counts
+        // were read as 0. R: loglin(xtabs(cnt ~ f1 + f2 + f3)), xtabs dropping those rows.
+        let (case, rt, server, name) = case_server("stat_loglin_na");
+        for (k, margins) in [
+            ("indep", None),
+            ("m12_3", Some(serde_json::json!([[0, 1], [2]]))),
+            ("m12_13", Some(serde_json::json!([[0, 1], [0, 2]]))),
+        ] {
+            let mut a = serde_json::json!({"dataset": name, "count_column": "cnt",
+                                           "factor_columns": ["f1", "f2", "f3"]});
+            if let Some(m) = margins {
+                a["margins"] = m;
+            }
+            let v = json_of(&rt.block_on(server.stats_loglin(req(a))).unwrap());
+            let (g, model, missing) = (&v["goodness_of_fit"], &v["model"], &v["missing"]);
+            Check::new(&case)
+                .scalar(
+                    &format!("{k}_lrt"),
+                    num(&g["likelihood_ratio_test"]["statistic"]),
+                    Tol::stat(448),
+                )
+                .scalar(
+                    &format!("{k}_pearson"),
+                    num(&g["pearson_chi_squared"]["statistic"]),
+                    Tol::stat(448),
+                )
+                .scalar(
+                    &format!("{k}_df"),
+                    num(&g["likelihood_ratio_test"]["df"]),
+                    Tol::exact(),
+                )
+                .scalar(
+                    &format!("{k}_p_lrt"),
+                    num(&g["likelihood_ratio_test"]["p_value"]),
+                    Tol::p_value(448),
+                )
+                .scalar(
+                    &format!("{k}_p_pearson"),
+                    num(&g["pearson_chi_squared"]["p_value"]),
+                    Tol::p_value(448),
+                )
+                .scalar("total", num(&model["total_count"]), Tol::exact())
+                .vector("dims", &nums(&model["dimensions"]), Tol::exact())
+                .scalar("n_total", num(&missing["n_total"]), Tol::exact())
+                .scalar("n_used", num(&missing["n_used"]), Tol::exact())
+                .scalar(
+                    "n_missing_cnt",
+                    num(&missing["by_column"]["cnt"]),
+                    Tol::exact(),
+                )
+                .scalar(
+                    "n_missing_f1",
+                    num(&missing["by_column"]["f1"]),
+                    Tol::exact(),
+                )
+                .scalar(
+                    "n_missing_f2",
+                    num(&missing["by_column"]["f2"]),
+                    Tol::exact(),
+                )
+                .finish();
+            assert_eq!(
+                model["factor_levels"],
+                serde_json::json!([["a", "b", "c"], ["2", "10"], ["x", "y"]])
+            );
+            assert_eq!(
+                v["missing"],
+                summary(16, 13, serde_json::json!({"cnt": 1, "f1": 1, "f2": 1}))
+            );
+        }
+        let e = err_text(
+            &rt.block_on(server.stats_loglin(req(serde_json::json!(
+                {"dataset": name, "count_column": "f1", "factor_columns": ["f2", "f3"]}))))
+                .unwrap(),
+        );
+        assert!(e.contains("Column 'f1' contains non-numeric values"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_weighted_mean_na() {
+        // TOOL-9: value and weight dropped their nulls each on their own and were paired by
+        // position (10.4408 on 11 rows). R: weighted.mean on complete.cases(v, w).
+        let (case, rt, server, name) = case_server("stat_weighted_na");
+        let call = |extra: serde_json::Value| {
+            let mut a = serde_json::json!({"dataset": name, "column": "v", "weights": "w"});
+            if let serde_json::Value::Object(m) = extra {
+                a.as_object_mut().unwrap().extend(m);
+            }
+            rt.block_on(server.stats_weighted_mean(req(a))).unwrap()
+        };
+        let v = json_of(&call(serde_json::json!({})));
+        let i = json_of(&call(serde_json::json!({"column": "a", "weights": "wc"})));
+        Check::new(&case)
+            .scalar("wmean", num(&v["weighted_mean"]), Tol::coef(10))
+            .scalar("wmean_n", num(&v["n"]), Tol::exact())
+            .scalar("wmean_n", num(&v["missing"]["n_used"]), Tol::exact())
+            .scalar("wmean_sum_w", num(&v["sum_weights"]), Tol::coef(10))
+            .scalar("wmean_int", num(&i["weighted_mean"]), Tol::coef(12))
+            .scalar("wmean_int_sum_w", num(&i["sum_weights"]), Tol::coef(12))
+            .finish();
+        assert_eq!(
+            v["missing"],
+            summary(12, 10, serde_json::json!({"v": 1, "w": 1}))
+        );
+        assert!(i.get("missing").is_none(), "{i}");
+        let e = err_text(&call(serde_json::json!({"na_rm": false})));
+        assert!(e.contains("Column 'v' contains 1 missing value(s)"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_cov_wt_int() {
+        // TOOL-9/TOOL-24: a null cell became NaN (null covariance entries) and a null weight
+        // shortened the weights ("Weights length 11 doesn't match row count 12"). R: cov.wt
+        // on the Int64 columns a, b; it refuses missing values and weights.
+        let (case, rt, server, name) = case_server("stat_weighted_na");
+        let call = |extra: serde_json::Value| {
+            let mut a = serde_json::json!({"dataset": name, "columns": ["a", "b"],
+                                           "weights": "wc"});
+            if let serde_json::Value::Object(m) = extra {
+                a.as_object_mut().unwrap().extend(m);
+            }
+            rt.block_on(server.stats_cov_wt(req(a))).unwrap()
+        };
+        let flat = |m: &serde_json::Value| -> Vec<f64> {
+            m.as_array()
+                .unwrap_or_else(|| panic!("not a matrix: {m}"))
+                .iter()
+                .flat_map(nums)
+                .collect()
+        };
+        let v = json_of(&call(serde_json::json!({})));
+        let ml = json_of(&call(serde_json::json!({"method": "ML"})));
+        Check::new(&case)
+            .vector("cov", &flat(&v["covariance_matrix"]), Tol::stat(12))
+            .vector("cor", &flat(&v["correlation_matrix"]), Tol::stat(12))
+            .named("center", &["a", "b"], &nums(&v["center"]), Tol::coef(12))
+            .vector("wt", &nums(&v["weights"]), Tol::coef(12))
+            .scalar("n_obs", num(&v["n_obs"]), Tol::exact())
+            .vector("cov_ml", &flat(&ml["covariance_matrix"]), Tol::stat(12))
+            .vector("cor_ml", &flat(&ml["correlation_matrix"]), Tol::stat(12))
+            .finish();
+        let e = err_text(&call(serde_json::json!({"columns": ["a", "b_na"]})));
+        assert!(
+            e.contains("Column 'b_na' contains 1 missing value(s)"),
+            "{e}"
+        );
+        let e = err_text(&call(serde_json::json!({"weights": "w"})));
+        assert!(e.contains("Column 'w' contains 1 missing value(s)"), "{e}");
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_mauchly_test_na() {
+        // TOOL-24: missing cells reached the core test as NaN: W, chi-squared and p were null,
+        // sphericity_violated was false and both epsilons 1, on 16 subjects. R:
+        // mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1), X = ~1) on the 14 complete subjects.
+        let (case, rt, server, name) = case_server("stat_mauchly_na");
+        let v = json_of(
+            &rt.block_on(server.stats_mauchly_test(req(serde_json::json!(
+                {"dataset": name, "columns": ["t1", "t2", "t3", "t4"]}))))
+                .unwrap(),
+        );
+        let eps = &v["epsilon_corrections"];
+        // deviation STAT-82 (Tier 3): R's own p-value p_r adds Box's second-order term; p2a's
+        // first-order p is pinned to R's intermediate Pr1 (p_first_order).
+        Check::new(&case)
+            .scalar("w", num(&v["w_statistic"]), Tol::stat(14))
+            .scalar("chisq", num(&v["chi_squared"]), Tol::stat(14))
+            .scalar("df", num(&v["df"]), Tol::exact())
+            .scalar("p_first_order", num(&v["p_value"]), Tol::p_value(14))
+            .scalar("gg", num(&eps["greenhouse_geisser"]), Tol::stat(14))
+            .scalar("hf", num(&eps["huynh_feldt"]), Tol::stat(14))
+            .scalar("lb", num(&eps["lower_bound"]), Tol::stat(14))
+            .scalar("n_used", num(&v["n_subjects"]), Tol::exact())
+            .scalar("n_used", num(&v["missing"]["n_used"]), Tol::exact())
+            .scalar("n_total", num(&v["missing"]["n_total"]), Tol::exact())
+            .finish();
+        assert_eq!(v["sphericity_violated"], serde_json::json!(true));
+        assert_eq!(
+            v["missing"],
+            summary(16, 14, serde_json::json!({"t2": 1, "t4": 1}))
+        );
+        let e = err_text(
+            &rt.block_on(server.stats_mauchly_test(req(serde_json::json!(
+                {"dataset": name, "columns": ["t1", "t3"]}))))
+                .unwrap(),
+        );
+        assert!(e.contains("at least 3 repeated-measures columns"), "{e}");
+    }
+
+    #[test]
+    fn test_mcp_stats_mauchly_verdict_is_null_for_non_finite_p() {
+        // TOOL-24: the verdict was `p < 0.05`, so a NaN p-value read as "sphericity holds"
+        assert_eq!(sphericity_verdict(f64::NAN), serde_json::Value::Null);
+        assert_eq!(sphericity_verdict(f64::INFINITY), serde_json::Value::Null);
+        assert_eq!(sphericity_verdict(0.01), serde_json::json!(true));
+        assert_eq!(sphericity_verdict(0.2), serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_validate_mcp_anova_two_way_ss_type() {
+        // STAT-4: ss_type was not a field, so serde ignored it and Type I was computed (fa SS
+        // 7.7072 where car::Anova(type = 2) gives 40.1011).
+        let (case, rt, server, name) = case_server("stat_anova_two_way_unbalanced");
+        let call = |extra: serde_json::Value| {
+            let mut a = serde_json::json!({"dataset": name, "response": "y", "factor_a": "fa",
+                                           "factor_b": "fb"});
+            if let serde_json::Value::Object(m) = extra {
+                a.as_object_mut().unwrap().extend(m);
+            }
+            rt.block_on(server.anova_two_way(req(a))).unwrap()
+        };
+        let (p4, x) = (Tol::printed(4), Tol::exact());
+        let mut check = Check::new(&case);
+        for (ss_type, prefix, line) in [
+            ("II", "type2", "Sums of squares: Type II"),
+            ("III", "type3", "Sums of squares: Type III"),
+        ] {
+            let t = ok_text(&call(serde_json::json!({"ss_type": ss_type})));
+            assert!(t.contains(line), "{t}");
+            for (label, key) in [("fa", "fa"), ("fb", "fb"), ("fa:fb", "int")] {
+                let v = row(&t, label);
+                assert_eq!(v.len(), 5, "{label}: {v:?}\n{t}");
+                assert_eq!(v[1], 1.0, "{label} df\n{t}");
+                check
+                    .scalar(&format!("{prefix}_{key}_ss"), v[0], p4)
+                    .scalar(&format!("{prefix}_{key}_f"), v[3], p4)
+                    .scalar(&format!("{prefix}_{key}_p"), v[4], p4);
+            }
+            if ss_type == "II" {
+                let resid = row(&t, "Residuals");
+                check
+                    .scalar("type2_resid_ss", resid[0], p4)
+                    .scalar("type2_resid_df", resid[1], x);
+            }
+        }
+        let t = ok_text(&call(
+            serde_json::json!({"ss_type": "2", "interaction": false}),
+        ));
+        assert!(t.contains("Sums of squares: Type II"), "{t}");
+        for label in ["fa", "fb"] {
+            let v = row(&t, label);
+            assert_eq!(v.len(), 5, "{label}: {v:?}\n{t}");
+            check
+                .scalar(&format!("add_type2_{label}_ss"), v[0], p4)
+                .scalar(&format!("add_type2_{label}_f"), v[3], p4)
+                .scalar(&format!("add_type2_{label}_p"), v[4], p4);
+        }
+        check.finish();
+        let e = err_text(&call(serde_json::json!({"ss_type": "IV"})));
+        assert!(e.contains("II"), "{e}");
+        let t = ok_text(&call(serde_json::json!({})));
+        assert!(t.contains("Sums of squares: Type I (sequential"), "{t}");
+    }
+
+    #[test]
+    fn test_validate_mcp_anova_handlers_report_missing_rows() {
+        // X-2: the ANOVA-family core functions drop incomplete rows (T2-WP07), but the JSON
+        // did not say so; the two-way model table sorted Int64 levels as strings ("10" < "2").
+        // R: manova and aov on the complete cases, factor() level order.
+        let (case, rt, server, name) = case_server("stat_manova_na");
+        let v = json_of(
+            &rt.block_on(server.anova_manova(req(serde_json::json!(
+                {"dataset": name, "response_vars": ["y1", "y2"], "factor": "g"}))))
+                .unwrap(),
+        );
+        Check::new(&case)
+            .scalar("n_used", num(&v["n_obs"]), Tol::exact())
+            .scalar("n_used", num(&v["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(
+            v["missing"],
+            summary(36, 33, serde_json::json!({"y1": 2, "y2": 1}))
+        );
+
+        let (case, rt, server, name) = case_server("stat_oneway_na_labels");
+        let one_way = summary(9, 5, serde_json::json!({"y": 3, "g": 2}));
+        let tukey = json_of(
+            &rt.block_on(server.anova_tukey_hsd(req(serde_json::json!(
+                {"dataset": name, "response": "y", "factor": "g"}))))
+                .unwrap(),
+        );
+        let contrast = json_of(
+            &rt.block_on(server.stats_se_contrast(req(serde_json::json!(
+                {"dataset": name, "response": "y", "factor": "g"}))))
+                .unwrap(),
+        );
+        let table = json_of(
+            &rt.block_on(server.stats_model_tables(req(serde_json::json!(
+                {"dataset": name, "response": "y", "factors": ["g"]}))))
+                .unwrap(),
+        );
+        for (tool, v) in [
+            ("anova_tukey_hsd", &tukey),
+            ("stats_se_contrast", &contrast),
+            ("stats_model_tables", &table),
+        ] {
+            Check::new(&case)
+                .scalar("aov_n_used", num(&v["missing"]["n_used"]), Tol::exact())
+                .finish();
+            assert_eq!(v["missing"], one_way, "{tool}");
+        }
+
+        let (case, rt, server, name) = case_server("stat_loglin_na");
+        let v = json_of(
+            &rt.block_on(server.stats_model_tables(req(serde_json::json!(
+                {"dataset": name, "response": "cnt", "factors": ["f2", "f3"]}))))
+                .unwrap(),
+        );
+        let two = &v["two_way_table"];
+        assert_eq!(two["levels_a"], serde_json::json!(["2", "10"]));
+        assert_eq!(two["levels_b"], serde_json::json!(["x", "y"]));
+        let counts: f64 = two["counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(nums)
+            .sum();
+        assert_eq!(counts, 14.0, "{two}");
+        Check::new(&case)
+            .scalar(
+                "n_missing_cnt",
+                num(&v["missing"]["by_column"]["cnt"]),
+                Tol::exact(),
+            )
+            .scalar(
+                "n_missing_f2",
+                num(&v["missing"]["by_column"]["f2"]),
+                Tol::exact(),
+            )
+            .finish();
+        assert_eq!(
+            v["missing"],
+            summary(16, 14, serde_json::json!({"cnt": 1, "f2": 1}))
+        );
+        // the model table and the two-way ANOVA use the same rows
+        let t = ok_text(
+            &rt.block_on(server.anova_two_way(req(serde_json::json!(
+                {"dataset": name, "response": "cnt", "factor_a": "f2", "factor_b": "f3"}))))
+                .unwrap(),
+        );
+        let ss_f2 = row(&t, "f2")[0];
+        assert!(
+            Tol::printed(4).allows(ss_f2, num(&v["anova_summary"]["ss_a"])),
+            "{ss_f2} vs {}\n{t}",
+            v["anova_summary"]["ss_a"]
+        );
+    }
+
+    #[test]
+    fn test_validate_mcp_multivariate_mahalanobis_rows() {
+        // X-2: since the core drops incomplete rows (T2-WP06) the tool numbered the distances
+        // 1..10 by kept row; row 7 (1-based) has a missing `a`. R: mahalanobis on
+        // complete.cases(a, b), which(complete.cases(a, b)).
+        let (case, rt, server, name) = case_server("stat_pairwise_mahalanobis_na");
+        let v = json_of(
+            &rt.block_on(server.multivariate_mahalanobis(req(serde_json::json!(
+                {"dataset": name, "columns": ["a", "b"]}))))
+                .unwrap(),
+        );
+        let first = v["first_10_distances"].as_array().unwrap();
+        let rows: Vec<f64> = first.iter().map(|d| num(&d["observation"])).collect();
+        let want_rows: Vec<f64> = case.vector("mahalanobis_rows")[..10]
+            .iter()
+            .map(|r| r + 1.0)
+            .collect();
+        assert_eq!(rows, want_rows);
+        assert_eq!(
+            rows,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 9.0, 10.0, 11.0]
+        );
+        let r = case.vector("mahalanobis_complete");
+        for (i, d) in first.iter().enumerate() {
+            let got = str_num(&d["distance_squared"]);
+            assert!(
+                Tol::printed(4).allows(got, r[i]),
+                "distance {i}: {got} vs R {}",
+                r[i]
+            );
+        }
+        // deviation TOOL-10: chi_squared_threshold_95 and n_potential_outliers use 2.7 p, not
+        // qchisq(0.95, p); not pinned.
+        Check::new(&case)
+            .scalar("n_complete", num(&v["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(v["missing"], summary(30, 29, serde_json::json!({"a": 1})));
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_robust_summaries_na() {
+        // TOOL-3/X-2: the legacy extraction read nulls as NaN: stats_mad and stats_density
+        // counted the missing cells in n, nothing reported the drop, and text columns gave the
+        // legacy "is not numeric (type str)" message. R: the functions with na.rm = TRUE.
+        let (case, rt, server, name) = case_server("stat_descriptive_na");
+        let call = |tool: &str, extra: serde_json::Value| {
+            let mut a = serde_json::json!({"dataset": name});
+            if let serde_json::Value::Object(m) = extra {
+                a.as_object_mut().unwrap().extend(m);
+            }
+            rt.block_on(async {
+                match tool {
+                    "fivenum" => server.stats_fivenum(req(a)).await,
+                    "iqr" => server.stats_iqr(req(a)).await,
+                    "mad" => server.stats_mad(req(a)).await,
+                    "ecdf" => server.stats_ecdf(req(a)).await,
+                    "density" => server.stats_density(req(a)).await,
+                    other => panic!("no tool {other}"),
+                }
+            })
+            .unwrap()
+        };
+        let five = |v: &serde_json::Value| -> Vec<f64> {
+            ["minimum", "lower_hinge", "median", "upper_hinge", "maximum"]
+                .iter()
+                .map(|k| num(&v[*k]))
+                .collect()
+        };
+        let mut check = Check::new(&case);
+        for (col, sfx, n_key, missing) in [
+            (
+                "v",
+                "v",
+                "n_v",
+                summary(15, 12, serde_json::json!({"v": 3})),
+            ),
+            (
+                "vi",
+                "vi",
+                "n_vi",
+                summary(15, 13, serde_json::json!({"vi": 2})),
+            ),
+        ] {
+            let c = serde_json::json!({"column": col});
+            let f = json_of(&call("fivenum", c.clone()));
+            let q = json_of(&call("iqr", c.clone()));
+            let m = json_of(&call("mad", c.clone()));
+            let e = json_of(&call(
+                "ecdf",
+                serde_json::json!({"column": col, "at": [15, 20, 25]}),
+            ));
+            let d = json_of(&call("density", c.clone()));
+            check
+                .vector(&format!("fivenum_{sfx}"), &five(&f), Tol::coef(12))
+                .scalar(n_key, num(&f["n"]), Tol::exact())
+                .scalar(&format!("iqr_{sfx}"), num(&q["iqr"]), Tol::stat(12))
+                .scalar(&format!("mad_{sfx}"), num(&m["mad"]), Tol::stat(12))
+                .scalar(n_key, num(&m["n"]), Tol::exact())
+                .scalar(n_key, num(&e["n"]), Tol::exact())
+                .scalar(n_key, num(&d["data_n"]), Tol::exact());
+            if col == "v" {
+                let mm = json_of(&call(
+                    "mad",
+                    serde_json::json!({"column": col, "center": "mean"}),
+                ));
+                check
+                    .scalar("mad_mean_v", num(&mm["mad"]), Tol::stat(12))
+                    .scalar("mean_v", num(&mm["center_used"]), Tol::coef(12))
+                    .vector("ecdf_v_at", &nums(&e["y"]), Tol::coef(12));
+                assert_eq!(mm["missing"], missing, "mad center = mean");
+            }
+            for (tool, v) in [
+                ("fivenum", &f),
+                ("iqr", &q),
+                ("mad", &m),
+                ("ecdf", &e),
+                ("density", &d),
+            ] {
+                assert_eq!(v["missing"], missing, "{tool} on {col}");
+            }
+        }
+        check.finish();
+        for tool in ["fivenum", "iqr", "mad", "ecdf", "density"] {
+            let e = err_text(&call(tool, serde_json::json!({"column": "s"})));
+            assert!(
+                e.contains("Column 's' contains non-numeric values"),
+                "{tool}: {e}"
+            );
+            let e = err_text(&call(tool, serde_json::json!({"column": "nope"})));
+            assert!(
+                e.contains("Column 'nope' not found in dataset."),
+                "{tool}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_spline_approx_na() {
+        // TOOL-25 (missing values)/X-2: stats_spline failed with "non-finite values" on any
+        // incomplete pair, and nothing reported the drop. R: approx and spline drop the
+        // incomplete (x, y) pairs (regularize.values).
+        let (case, rt, server, name) = case_server("stat_descriptive_na");
+        let args = serde_json::json!({"dataset": name, "x": "xs", "y": "ys",
+                                      "xout": [1.5, 4, 6.5, 8]});
+        let a = json_of(&rt.block_on(server.stats_approx(req(args.clone()))).unwrap());
+        let mut sargs = args;
+        sargs["method"] = serde_json::json!("natural");
+        // deviation STAT-69: the default method fmm is not R's FMM spline; only natural is pinned
+        let s = json_of(&rt.block_on(server.stats_spline(req(sargs))).unwrap());
+        Check::new(&case)
+            .vector("approx_y", &nums(&a["y"]), Tol::stat(13))
+            .vector("spline_natural_y", &nums(&s["y"]), Tol::stat(13))
+            .scalar("n_pairs", num(&s["n_knots"]), Tol::exact())
+            .scalar("n_pairs", num(&a["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(a["n_interpolated"], serde_json::json!(4));
+        let missing = summary(15, 13, serde_json::json!({"xs": 1, "ys": 1}));
+        assert_eq!(a["missing"], missing);
+        assert_eq!(s["missing"], missing);
+    }
+
+    #[test]
+    fn test_validate_mcp_descriptive_isoreg_int() {
+        // X-2: a missing response was read through into_no_null_iter after a cast and entered
+        // the fit. R: isoreg(x, y) on an Int64 response; isoreg refuses missing values.
+        let (case, rt, server, name) = case_server("stat_isoreg_medpolish_int");
+        let v = json_of(
+            &rt.block_on(server.descriptive_isoreg(req(serde_json::json!(
+                {"dataset": name, "x_column": "x", "y_column": "y"}))))
+                .unwrap(),
+        );
+        // deviation STAT-52: the knot positions (p2a: first index of each block, R: the last)
+        // are not pinned, only their number.
+        Check::new(&case)
+            .vector("isoreg_yf", &nums(&v["fitted_values"]), Tol::coef(10))
+            .scalar("isoreg_n_knots", num(&v["n_knots"]), Tol::exact())
+            .finish();
+        assert_eq!(v["n_observations"], serde_json::json!(10));
+        let e = err_text(
+            &rt.block_on(server.descriptive_isoreg(req(serde_json::json!(
+                {"dataset": name, "x_column": "x", "y_column": "y_na"}))))
+                .unwrap(),
+        );
+        assert!(
+            e.contains("Column 'y_na' contains 1 missing value(s)"),
+            "{e}"
+        );
+        let v = json_of(
+            &rt.block_on(server.descriptive_isoreg(req(serde_json::json!(
+                {"dataset": name, "y_column": "y"}))))
+                .unwrap(),
+        );
+        assert_eq!(v["n_observations"], serde_json::json!(10));
+    }
+
+    #[test]
+    fn test_validate_mcp_descriptive_medpolish_int() {
+        // X-8: every Int64 column was refused ("Column 'c1' is not numeric."). R: medpolish on
+        // the integer matrix, na.rm = TRUE with the missing cell of c3, and on c1, c2, c4.
+        let (case, rt, server, name) = case_server("stat_isoreg_medpolish_int");
+        let call = |columns: serde_json::Value, na_rm: Option<bool>| {
+            let mut a = serde_json::json!({"dataset": name, "columns": columns});
+            if let Some(b) = na_rm {
+                a["na_rm"] = serde_json::json!(b);
+            }
+            rt.block_on(server.descriptive_medpolish(req(a))).unwrap()
+        };
+        let p6 = Tol::printed(6);
+        let mut check = Check::new(&case);
+        for (prefix, columns, na_rm) in [
+            (
+                "mp",
+                serde_json::json!(["c1", "c2", "c3", "c4"]),
+                Some(true),
+            ),
+            ("mp3", serde_json::json!(["c1", "c2", "c4"]), None),
+        ] {
+            let v = json_of(&call(columns, na_rm));
+            let rows: Vec<f64> = v["row_effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| str_num(&r["effect"]))
+                .collect();
+            let cols = v["column_effects"].as_array().unwrap();
+            let names: Vec<&str> = cols.iter().map(|c| c["column"].as_str().unwrap()).collect();
+            let effects: Vec<f64> = cols.iter().map(|c| str_num(&c["effect"])).collect();
+            check
+                .scalar(&format!("{prefix}_overall"), str_num(&v["overall"]), p6)
+                .vector(&format!("{prefix}_row"), &rows, p6)
+                .named(&format!("{prefix}_col"), &names, &effects, p6);
+        }
+        check.finish();
+        let e = err_text(&call(serde_json::json!(["c1", "c2", "c3", "c4"]), None));
+        assert!(e.contains("na_rm"), "{e}");
     }
 }

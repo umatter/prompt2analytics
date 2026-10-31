@@ -21,12 +21,14 @@ pub struct LoglinRequest {
     pub dataset: String,
 
     /// Count column
-    #[schemars(description = "Name of the column containing the cell counts.")]
+    #[schemars(
+        description = "Name of the column containing the cell counts. Rows with a missing count or a missing factor label are dropped (as R's xtabs) and reported."
+    )]
     pub count_column: String,
 
     /// Factor columns that define the contingency table dimensions
     #[schemars(
-        description = "Names of the factor columns that define the contingency table dimensions."
+        description = "Names of the factor columns that define the contingency table dimensions. Levels are ordered as R's factor() (numeric codes numerically)."
     )]
     pub factor_columns: Vec<String>,
 
@@ -120,7 +122,9 @@ pub struct WeightedMeanRequest {
     pub weights: String,
 
     /// Whether to remove NA values
-    #[schemars(description = "Whether to remove NA values before computation. Default is true.")]
+    #[schemars(
+        description = "true (default): rows where the value or the weight is missing are dropped together and reported; false: a missing value or weight is an error (R's weighted.mean(na.rm = FALSE) would return NA)."
+    )]
     pub na_rm: Option<bool>,
 }
 
@@ -132,11 +136,15 @@ pub struct CovWtRequest {
     pub dataset: String,
 
     /// Columns to compute covariance for
-    #[schemars(description = "Names of the numeric columns to include in the covariance matrix.")]
+    #[schemars(
+        description = "Names of the numeric columns to include in the covariance matrix. Missing values are refused, as R's cov.wt does."
+    )]
     pub columns: Vec<String>,
 
     /// Weight column
-    #[schemars(description = "Name of the weight column.")]
+    #[schemars(
+        description = "Name of the weight column. Missing values are refused, as R's cov.wt does."
+    )]
     pub weights: String,
 
     /// Whether to center the data
@@ -159,7 +167,7 @@ pub struct MauchlyTestRequest {
 
     /// Columns for repeated measures
     #[schemars(
-        description = "Names of columns representing repeated measures (at least 3 required)."
+        description = "Names of columns representing repeated measures (at least 3). Subjects (rows) with a missing value in any of them are dropped, as R's lm-based mauchly.test does, and reported."
     )]
     pub columns: Vec<String>,
 }
@@ -172,7 +180,9 @@ pub struct FivenumRequest {
     pub dataset: String,
 
     /// Column to summarize
-    #[schemars(description = "Name of the numeric column to compute five-number summary.")]
+    #[schemars(
+        description = "Name of the numeric column to compute five-number summary. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 }
 
@@ -184,7 +194,9 @@ pub struct IqrRequest {
     pub dataset: String,
 
     /// Column to compute IQR for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Quantile type (1-9, default 7)
@@ -200,7 +212,9 @@ pub struct MadRequest {
     pub dataset: String,
 
     /// Column to compute MAD for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Center (default: median)
@@ -222,7 +236,9 @@ pub struct EcdfRequest {
     pub dataset: String,
 
     /// Column to compute ECDF for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Optional values at which to evaluate the ECDF
@@ -240,7 +256,9 @@ pub struct DensityRequest {
     pub dataset: String,
 
     /// Column to estimate density for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Kernel type
@@ -268,7 +286,9 @@ pub struct SplineRequest {
     pub dataset: String,
 
     /// X column (knot locations)
-    #[schemars(description = "Name of the x (independent) column.")]
+    #[schemars(
+        description = "Name of the x (independent) column. Rows with a missing x or y are dropped (as R) and reported."
+    )]
     pub x: String,
 
     /// Y column (values at knots)
@@ -296,7 +316,9 @@ pub struct ApproxRequest {
     pub dataset: String,
 
     /// X column
-    #[schemars(description = "Name of the x (independent) column.")]
+    #[schemars(
+        description = "Name of the x (independent) column. Rows with a missing x or y are dropped (as R) and reported."
+    )]
     pub x: String,
 
     /// Y column
@@ -385,7 +407,7 @@ pub struct MedpolishRequest {
 
     /// Column names to use as the matrix
     #[schemars(
-        description = "Names of the numeric columns to use as the matrix for median polish. The columns become the columns of the matrix, and each row of the dataset becomes a row of the matrix."
+        description = "Names of the numeric columns to use as the matrix for median polish. The columns become the columns of the matrix, and each row of the dataset becomes a row of the matrix. Integer and float columns are accepted."
     )]
     pub columns: Vec<String>,
 
@@ -401,7 +423,7 @@ pub struct MedpolishRequest {
 
     /// Handle missing values
     #[schemars(
-        description = "Whether to remove NaN values when computing medians (default: false). If false, the function fails if NaN values are present."
+        description = "Whether to ignore missing cells (null or NaN) when computing medians (default: false, as R's medpolish; then a missing cell is an error)."
     )]
     pub na_rm: Option<bool>,
 }
@@ -449,12 +471,14 @@ pub struct IsoregRequest {
 
     /// Column for x values (predictor)
     #[schemars(
-        description = "Name of the column to use as x (predictor). If not provided, uses row index."
+        description = "Name of the column to use as x (predictor). If not provided, uses row index. Missing values are refused, as R's isoreg does."
     )]
     pub x_column: Option<String>,
 
     /// Column for y values (response)
-    #[schemars(description = "Name of the column to use as y (response variable).")]
+    #[schemars(
+        description = "Name of the column to use as y (response variable). Missing values are refused, as R's isoreg does."
+    )]
     pub y_column: String,
 }
 
@@ -621,6 +645,13 @@ pub struct TwoWayAnovaRequest {
         description = "Whether to include the interaction term (factor_a × factor_b). Default is true."
     )]
     pub interaction: Option<bool>,
+
+    /// Type of sums of squares.
+    #[serde(default)]
+    #[schemars(
+        description = "Sums of squares: 'I' (default; sequential, as R aov), 'II' or 'III' (as car::Anova; Type III uses sum-to-zero contrasts and is refused when empty cells alias coefficients). Types I and II agree on balanced designs; on unbalanced data they differ."
+    )]
+    pub ss_type: Option<String>,
 }
 
 /// Request for power analysis of t-test.

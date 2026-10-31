@@ -1,0 +1,212 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "mcp_hypothesis_t_test",
+      "name": "MCP hypothesis_t_test on dataset columns with missing values and integer columns",
+      "category": "stats",
+      "reference": "stats::t.test (one-sample; Welch; paired), NA removed as t.test does",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_t_test_two_sample_na"],
+      "quantities": ["t", "df", "p", "95% CI", "sample means / mean difference (one-sample, Welch, paired, Welch on Int64)", "missing-value note"],
+      "tolerance": "MCP text at print precision (Tol::printed: 6 decimals for t, p, CI and means, 2 for df)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_cor_test",
+      "name": "MCP hypothesis_cor_test (Pearson) on complete pairs",
+      "category": "stats",
+      "reference": "stats::cor.test(x, y) (complete.cases(x, y))",
+      "doc": "validation/stats/new_methods.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_cor_test_two_sample_na"],
+      "quantities": ["r", "t", "df", "p", "95% CI", "n", "missing"],
+      "tolerance": "validation/README.md, n = 6 (< 100): estimate 1e-6, statistic and CI 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and n exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_ks_test",
+      "name": "MCP hypothesis_ks_test, two-sample, on Int64 columns with missing values",
+      "category": "stats",
+      "reference": "stats::ks.test(xi, yi) (NA removed per sample)",
+      "doc": "validation/stats/ks_test.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_ks_test_two_sample_na"],
+      "quantities": ["D", "n", "n_2", "missing"],
+      "tolerance": "validation/README.md, n = 38 (< 100): D 1e-5 relative; sizes exact",
+      "deviations": [{"finding": "STAT-27", "quantity": "KS p-value", "note": "p2a is asymptotic with Stephens' correction (0.19563779265722031); R's exact p conditional on ties is 0.1565386776017454; not pinned"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_mood_test",
+      "name": "MCP hypothesis_mood_test on a tie-free Int64 pair with missing values",
+      "category": "stats",
+      "reference": "stats::mood.test(mi, mj) (NA removed per sample)",
+      "doc": "validation/stats/mood.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_mood_test_two_sample_na"],
+      "quantities": ["T", "z", "p", "n_x", "n_y", "missing"],
+      "tolerance": "validation/README.md, n = 27 (< 100): statistics 1e-5 relative, p 1e-5 relative + 1e-12 absolute, sizes exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_missing_report",
+      "name": "MCP hypothesis handlers report the rows they drop (Bartlett, Kruskal-Wallis, oneway, Friedman, Quade, Wilcoxon, pairwise t/Wilcoxon, Shapiro-Wilk)",
+      "category": "stats",
+      "reference": "complete.cases over the columns each R function uses (bartlett.test, kruskal.test, oneway.test, friedman.test, quade.test, wilcox.test, pairwise.t.test, pairwise.wilcox.test, shapiro.test)",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["stat_two_sample_na", "stat_oneway_na_labels", "stat_friedman_quade", "stat_wilcoxon_na", "stat_pairwise_mahalanobis_na", "stat_shapiro_wilk"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_handlers_report_missing_rows"],
+      "quantities": ["missing: n_total, n_used, n_dropped, by_column (counts of the R complete cases)", "no missing key when nothing is dropped"],
+      "tolerance": "counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_hypothesis_prop_trend_test",
+      "name": "MCP hypothesis_prop_trend_test on integer count columns with a missing group",
+      "category": "stats",
+      "reference": "stats::prop.trend.test on the complete groups, each group keeping its score",
+      "doc": "validation/stats/new_methods.md",
+      "cases": ["stat_prop_trend_na"],
+      "tests": ["p2a-mcp::tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_prop_trend_test_na"],
+      "quantities": ["X-squared", "df", "p", "scores used (default and user scores)", "missing"],
+      "tolerance": "validation/README.md, n = 6 (< 100): statistic 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and scores exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_stats_loglin",
+      "name": "MCP stats_loglin on a long-form count table with missing labels and counts",
+      "category": "stats",
+      "reference": "stats::loglin(xtabs(cnt ~ f1 + f2 + f3), margin, fit = TRUE) (xtabs drops rows with a missing label or count)",
+      "doc": "validation/stats/loglin.md",
+      "cases": ["stat_loglin_na"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_loglin_na"],
+      "quantities": ["G2 (lrt)", "Pearson X2", "df", "p-values of both (upper chi-square tail)", "table dimensions", "factor levels in R factor order", "total count", "missing"],
+      "tolerance": "validation/README.md, n = 448 counts: statistics 1e-6 relative, p 1e-6 relative + 1e-12 absolute, df, dimensions and total exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_stats_weighted",
+      "name": "MCP stats_weighted_mean (complete value/weight pairs) and stats_cov_wt (integer columns)",
+      "category": "stats",
+      "reference": "stats::weighted.mean on complete.cases(v, w); stats::cov.wt(cor = TRUE, method = 'unbiased' | 'ML')",
+      "doc": "validation/stats/weighted.md",
+      "cases": ["stat_weighted_na"],
+      "tests": [
+        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_weighted_mean_na",
+        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_cov_wt_int"
+      ],
+      "quantities": ["weighted mean", "n used", "sum of weights", "missing", "covariance (unbiased and ML)", "center", "correlation", "normalised weights", "n_obs", "refusal of missing values and weights"],
+      "tolerance": "validation/README.md, n = 10-12 (< 100): weighted means, centres, sums of weights and normalised weights 1e-6, covariances and correlations 1e-5 relative; counts exact",
+      "deviations": [{"finding": "TOOL-23", "quantity": "stats_cov_wt with center = false", "note": "the tool uses center to switch the correlation matrix and always centres the data (R cov.wt(center = FALSE) does not); pinned only with center omitted"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_stats_mauchly",
+      "name": "MCP stats_mauchly_test on repeated measures with incomplete subjects",
+      "category": "stats",
+      "reference": "stats::mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1), X = ~1); stats:::sphericity (Greenhouse-Geisser, Huynh-Feldt)",
+      "doc": "validation/stats/mauchly.md",
+      "cases": ["stat_mauchly_na"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_mauchly_test_na"],
+      "quantities": ["W", "chi-squared (R's z)", "df", "first-order p-value", "Greenhouse-Geisser and Huynh-Feldt epsilon", "lower bound", "n subjects used", "sphericity verdict", "missing"],
+      "tolerance": "validation/README.md, n = 14 (< 100): statistics and epsilons 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and n exact",
+      "deviations": [{"finding": "STAT-82", "quantity": "Mauchly p-value", "note": "p2a reports the first-order chi-square tail (pinned to R's own Pr1 = 5.0371160244126754e-05); R's mauchly.test adds Box's second-order term (5.450912248903203e-05); not pinned"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_anova_two_way_ss_type",
+      "name": "MCP anova_two_way with ss_type II and III on an unbalanced layout",
+      "category": "stats",
+      "reference": "car::Anova(lm(y ~ fa * fb), type = 2); car::Anova(type = 3) with contr.sum",
+      "doc": "validation/stats/anova.md",
+      "cases": ["stat_anova_two_way_unbalanced"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_anova_two_way_ss_type"],
+      "quantities": ["Type II SS, df, F, p (interaction and additive)", "Type III SS, df, F, p", "residual SS and df", "SS-type line", "refusal of an unknown ss_type"],
+      "tolerance": "MCP text at its 4 printed decimals (Tol::printed(4)); df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_anova_handlers_missing",
+      "name": "MCP anova_manova, anova_tukey_hsd, stats_se_contrast and stats_model_tables report dropped rows; model tables use R level order",
+      "category": "stats",
+      "reference": "manova / aov on complete cases (na.omit); factor() level order",
+      "doc": "validation/stats/anova.md",
+      "cases": ["stat_manova_na", "stat_oneway_na_labels", "stat_loglin_na"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_anova_handlers_report_missing_rows"],
+      "quantities": ["missing (counts of the R complete cases)", "n_obs", "two-way model-table level order and cell counts"],
+      "tolerance": "counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_multivariate_mahalanobis_rows",
+      "name": "MCP multivariate_mahalanobis labels each distance with its dataset row",
+      "category": "stats",
+      "reference": "stats::mahalanobis(X, colMeans(X), cov(X)) on complete rows; which(complete.cases(a, b))",
+      "doc": "validation/multivariate/mahalanobis.md",
+      "cases": ["stat_pairwise_mahalanobis_na"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_multivariate_mahalanobis_rows"],
+      "quantities": ["first ten squared distances", "their 1-based row numbers", "missing"],
+      "tolerance": "distances at their 4 printed decimals (Tol::printed(4)); row numbers exact",
+      "deviations": [{"finding": "TOOL-10", "quantity": "chi_squared_threshold_95 and n_potential_outliers", "note": "the tool thresholds at 2.7 p instead of qchisq(0.95, p) (Tier 4); not pinned"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_stats_robust_and_interpolation",
+      "name": "MCP stats_fivenum, stats_iqr, stats_mad, stats_ecdf, stats_density, stats_spline, stats_approx with missing values and integer columns",
+      "category": "stats",
+      "reference": "stats::fivenum, IQR(na.rm = TRUE), mad(na.rm = TRUE), ecdf; approx and spline(method = 'natural') on complete (x, y) pairs",
+      "doc": "validation/stats/robust.md",
+      "cases": ["stat_descriptive_na"],
+      "tests": [
+        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_robust_summaries_na",
+        "p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_stats_spline_approx_na"
+      ],
+      "quantities": ["five-number summary", "IQR (type 7)", "MAD (median and mean centre)", "ECDF at points", "n used", "approx (linear) at xout", "natural spline at xout", "missing", "density: n used only"],
+      "tolerance": "validation/README.md, n = 12-15 (< 100): order statistics and centres 1e-6, other values 1e-5 relative; counts exact",
+      "deviations": [
+        {"finding": "STAT-36", "quantity": "IQR quantile types 2-6, 8, 9", "note": "silently computed as type 7; only the default type 7 is pinned"},
+        {"finding": "STAT-37", "quantity": "density curve", "note": "FFT grid mislabelled when n is not a power of two; density values not pinned"},
+        {"finding": "STAT-65", "quantity": "density bandwidth", "note": "default bandwidth is not bw.nrd0 and non-Gaussian kernels scale bw differently; not pinned"},
+        {"finding": "STAT-69", "quantity": "spline method fmm (the default)", "note": "a clamped spline, not R's FMM; only method = natural is pinned"},
+        {"finding": "STAT-87", "quantity": "stats_fivenum iqr field", "note": "the hinge spread, not R's IQR; not pinned"}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_descriptive_isoreg",
+      "name": "MCP descriptive_isoreg on an integer response; missing values refused",
+      "category": "stats",
+      "reference": "stats::isoreg(x, y) (x without ties)",
+      "doc": "validation/stats/isoreg.md",
+      "cases": ["stat_isoreg_medpolish_int"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_descriptive_isoreg_int"],
+      "quantities": ["fitted values (sorted x)", "number of knots", "n", "refusal of a missing y"],
+      "tolerance": "validation/README.md, n = 10 (< 100): fitted values 1e-6 relative; counts exact",
+      "deviations": [{"finding": "STAT-52", "quantity": "knot positions", "note": "p2a reports the first index of each block, R's iKnots the last; tied x are not pooled; only the number of knots is pinned"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_descriptive_medpolish",
+      "name": "MCP descriptive_medpolish on integer columns with a missing cell",
+      "category": "stats",
+      "reference": "stats::medpolish(na.rm = TRUE | FALSE), eps = 0.01, maxiter = 10",
+      "doc": "validation/stats/medpolish.md",
+      "cases": ["stat_isoreg_medpolish_int"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_descriptive_medpolish_int"],
+      "quantities": ["overall effect", "row effects", "column effects (na.rm = TRUE with a missing cell; complete columns)", "refusal with na.rm = FALSE"],
+      "tolerance": "MCP text at its 6 printed decimals (Tol::printed(6))",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

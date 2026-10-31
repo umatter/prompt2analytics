@@ -133,6 +133,16 @@ Differences.
 **Status:** R-pinned with a known deviation (registry `validation/methods/stats_onesample.json`,
 id `mood_test`).
 
+**MCP tool: missing values and integer columns.** `hypothesis_mood_test` calls
+`run_mood_test`, so the tool drops each sample's own missing values, accepts integer columns and
+reports the drop under `missing` (the two samples' summaries summed; `by_column` is
+`{"mi": 7, "mj": 10}` on this case). Before, the handler read its columns with
+`into_no_null_iter` and refused Int64 columns ("Column 'mi' must be numeric.").
+`tools::handlers::hypothesis::tests::test_validate_mcp_hypothesis_mood_test_two_sample_na` pins
+the tool's `statistic` (T), `z_score`, `p_value`, `n_x` and `n_y` to the tie-free pair `mi`, `mj`
+above at the same tolerances and checks `has_ties` and `missing` (registry
+`validation/methods/mcp_stats.json`, id `mcp_hypothesis_mood_test`).
+
 ## Numerical Precision Summary
 
 - Z-scores match R within 0.5 for equal-scale data

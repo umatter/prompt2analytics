@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "stat_isoreg_medpolish_int",
+  "area": "stats/robust",
+  "method": "isoreg and medpolish on integer columns",
+  "reference": "stats::isoreg(x, y); stats::medpolish(na.rm = TRUE | FALSE), eps = 0.01, maxiter = 10",
+  "call": "isoreg(x, y); medpolish(cbind(c1, c2, c3, c4), na.rm = TRUE); medpolish(cbind(c1, c2, c4))",
+  "dataset": "validation/datasets/generated/isoreg_medpolish_int.csv",
+  "datasets": ["validation/datasets/generated/isoreg_medpolish_int.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "isoreg_yf": [-1, 11, 12.666666666666666, 12.666666666666666, 12.666666666666666, 20.5, 20.5, 20.5, 20.5, 37],
+    "isoreg_x_sorted": [1.29, 3.1299999999999999, 3.3300000000000001, 7.7699999999999996, 8.0299999999999994, 10.119999999999999, 11.529999999999999, 15.19, 17.280000000000001, 19.289999999999999],
+    "isoreg_n_knots": 5,
+    "isoreg_knots_r": [1, 2, 5, 9, 10],
+    "mp_overall": 38.01953125,
+    "mp_row": [4.23828125, -0.23828125, 5.76171875, -3.72265625, 1.01953125, -5.01953125, -9.26171875, 0.23828125, -0.76171875, 6.48046875],
+    "mp_col": {
+      "names": ["c1", "c2", "c3", "c4"],
+      "values": [-6.27734375, -1.78125, 1.7421875, 8.21875]
+    },
+    "mp3_overall": 37,
+    "mp3_row": [5, -1, 5, -4, 0, -5, -10.875, 0, 0.125, 6],
+    "mp3_col": {
+      "names": ["c1", "c2", "c4"],
+      "values": [-5.0625, 0, 10]
+    }
+  }
+}
