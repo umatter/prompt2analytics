@@ -20,7 +20,9 @@
         "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_gaps",
         "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_common_gap",
         "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_grunfeld",
-        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_gmm_ab_balanced"
+        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_gmm_ab_balanced",
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_gmm_ab_balanced",
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_gmm_text"
       ],
       "quantities": [
         "coefficients (one-step, two-step)",
@@ -55,7 +57,8 @@
       ],
       "tests": [
         "p2a-core::econometrics::panel_unit_root::tests::test_validate_panel_pur_extraction_common_gap",
-        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_unit_root_text_ids"
+        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_unit_root_text_ids",
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_unit_root_text_ids"
       ],
       "quantities": [
         "per-unit ADF tau",
@@ -64,6 +67,26 @@
         "rows dropped"
       ],
       "tolerance": "validation/README.md, n = 690: statistics 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "panel_cli_missing_notes",
+      "name": "CLI panel commands report dropped rows",
+      "category": "cli",
+      "reference": "plm/fixest on the complete rows (T2-WP08): the rows a two-way HDFE uses, and those the entity-only estimators use",
+      "doc": "validation/econometrics/panel_fe.md",
+      "cases": [
+        "panel_grunfeld_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp19_dynamic_panel::test_validate_cli_panel_missing_notes"
+      ],
+      "quantities": [
+        "rows dropped",
+        "rows used"
+      ],
+      "tolerance": "counts: exact",
       "deviations": [],
       "supersedes_legacy": []
     }
