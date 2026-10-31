@@ -1,6 +1,9 @@
 //! Statistical tests and descriptive statistics commands
 
 use clap::{Subcommand, ValueEnum};
+use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use p2a_core::errors::{EconError, EconResult};
+use p2a_core::stats::{SsType, TwoWayAnovaConfig, run_two_way_anova_with};
 use p2a_core::{
     AcfType,
     Alternative,
@@ -9,10 +12,7 @@ use p2a_core::{
     WilcoxonConfig,
     // ACF/PACF/CCF (raw data versions)
     acf,
-    // T-tests
-    one_sample_t_test,
     pacf,
-    paired_t_test,
     run_bartlett_test,
     // Box test (Ljung-Box)
     run_box_test,
@@ -39,13 +39,16 @@ use p2a_core::{
     run_shapiro_wilk,
     // Tukey HSD
     run_tukey_hsd,
-    run_two_way_anova,
-    two_sample_t_test,
-    wilcoxon_rank_sum,
-    wilcoxon_signed_rank,
+    // T-tests (dataset wrapper: drops missing values as t.test does)
+    t_test,
+    // Wilcoxon (dataset wrapper: drops missing values as wilcox.test does)
+    wilcoxon_test,
 };
 
-use crate::output::{OutputFormat, print_error, validate_column_exists, validate_confidence_level};
+use crate::output::{
+    OutputFormat, missing_json, print_error, print_missing_note, validate_column_exists,
+    validate_confidence_level,
+};
 use crate::session::SessionManager;
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -377,6 +380,9 @@ EXAMPLES:
 EXAMPLES:
     # Two-way ANOVA with interaction
     p2a --session s.json stats anova-two mydata --response yield --factor-a fertilizer --factor-b irrigation --interaction
+
+    # Type II sums of squares (as car::Anova)
+    p2a --session s.json stats anova-two mydata --response yield --factor-a fertilizer --factor-b irrigation --interaction --ss-type II
 ")]
     AnovaTwo {
         /// Dataset name
@@ -397,6 +403,11 @@ EXAMPLES:
         /// Include interaction term
         #[arg(long)]
         interaction: bool,
+
+        /// Sums of squares: I (sequential, as R aov; default), II or III (as car::Anova; III
+        /// with sum-to-zero contrasts)
+        #[arg(long, default_value = "I", value_name = "TYPE")]
+        ss_type: String,
     },
 
     /// Tukey's HSD post-hoc test
@@ -709,12 +720,14 @@ pub fn execute(
             factor_a,
             factor_b,
             interaction,
+            ss_type,
         } => execute_anova_two(
             dataset,
             response,
             factor_a,
             factor_b,
             *interaction,
+            ss_type,
             format,
             session,
         ),
@@ -780,16 +793,127 @@ pub fn execute(
     }
 }
 
-/// Helper to extract a column as `Vec<f64>`
-fn extract_column(dataset: &p2a_core::Dataset, col: &str) -> Result<Vec<f64>, String> {
-    let df = dataset.df();
-    let column = df
-        .column(col)
-        .map_err(|e| format!("Column '{}' not found: {}", col, e))?;
-    let f64_col = column
-        .f64()
-        .map_err(|e| format!("Column '{}' must be numeric: {}", col, e))?;
-    Ok(f64_col.into_no_null_iter().collect())
+/// Prints `json` pretty, with a `"missing"` object (`output::missing_json`) when rows were
+/// dropped because of missing values.
+fn print_json(mut json: serde_json::Value, missing: &MissingSummary) -> anyhow::Result<()> {
+    if let (Some(summary), Some(object)) = (missing_json(missing), json.as_object_mut()) {
+        object.insert("missing".to_string(), summary);
+    }
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
+}
+
+/// The values of one numeric column (Int64 and the other numeric dtypes accepted) under
+/// `policy`, and what was dropped. No value left is an error naming `stats <command>` and
+/// the column.
+fn column_values(
+    dataset: &p2a_core::Dataset,
+    col: &str,
+    policy: NaPolicy,
+    command: &str,
+) -> EconResult<(Vec<f64>, MissingSummary)> {
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(col)
+        .na(policy)
+        .min_rows(1, &format!("stats {command}, column '{col}'"))
+        .extract()?;
+    Ok((cols.numeric(col).to_vec(), cols.missing().clone()))
+}
+
+/// A complete numeric series for ACF/PACF (Int64 and the other numeric dtypes accepted). A
+/// missing value is an error naming the column, as R's acf/pacf (na.action = na.fail) refuse
+/// it: dropping a value would splice the series.
+fn series_column(
+    dataset: &p2a_core::Dataset,
+    col: &str,
+    command: &str,
+) -> Result<Vec<f64>, String> {
+    match column_values(dataset, col, NaPolicy::Fail, command) {
+        Ok((values, _)) => Ok(values),
+        Err(e @ EconError::NullValues { .. }) => Err(format!(
+            "{e} ACF and PACF need a complete series, as R's acf/pacf (na.action = na.fail): \
+             fill the gaps first (for example: p2a munge fill-na <dataset> --method forward \
+             --columns <column>); dropping a value would splice the series."
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Most rows a counts table prints; a larger table is left out of the text (-F json has it).
+const MAX_TABLE_ROWS: usize = 50;
+/// Most columns a counts table prints.
+const MAX_TABLE_COLS: usize = 12;
+
+/// Finite: `decimals` decimals; else "Inf", "-Inf" or "NaN" (R's spelling).
+fn fmt_num(v: f64, decimals: usize) -> String {
+    if v.is_finite() {
+        format!("{v:.decimals$}")
+    } else if v.is_nan() {
+        "NaN".to_string()
+    } else if v > 0.0 {
+        "Inf".to_string()
+    } else {
+        "-Inf".to_string()
+    }
+}
+
+/// Finite: a JSON number; else the string "Inf", "-Inf" or "NaN" (the MCP tools' convention).
+fn json_number(v: f64) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::json!(v)
+    } else {
+        serde_json::Value::String(fmt_num(v, 0))
+    }
+}
+
+/// A text table of `row_labels` x `col_labels`, header line first: the first column (the row
+/// labels, `corner` above them) left-aligned, every other column right-aligned to its widest
+/// entry, columns separated by two spaces; each line ends with '\n'. Widths count characters,
+/// so non-ASCII labels line up.
+fn format_table(
+    corner: &str,
+    row_labels: &[String],
+    col_labels: &[String],
+    cell: impl Fn(usize, usize) -> String,
+) -> String {
+    let width = |s: &str| s.chars().count();
+    let cells: Vec<Vec<String>> = (0..row_labels.len())
+        .map(|i| (0..col_labels.len()).map(|j| cell(i, j)).collect())
+        .collect();
+    let label_width = row_labels
+        .iter()
+        .map(|l| width(l))
+        .chain([width(corner)])
+        .max()
+        .unwrap_or(0);
+    let col_widths: Vec<usize> = col_labels
+        .iter()
+        .enumerate()
+        .map(|(j, label)| {
+            cells
+                .iter()
+                .map(|r| width(&r[j]))
+                .chain([width(label)])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let line = |label: &str, entries: &[String]| {
+        let mut text = format!("{label}{}", " ".repeat(label_width - width(label)));
+        for (entry, &w) in entries.iter().zip(&col_widths) {
+            text.push_str("  ");
+            text.push_str(&" ".repeat(w - width(entry)));
+            text.push_str(entry);
+        }
+        let mut text = text.trim_end().to_string();
+        text.push('\n');
+        text
+    };
+    let mut out = line(corner, col_labels);
+    for (label, entries) in row_labels.iter().zip(&cells) {
+        out.push_str(&line(label, entries));
+    }
+    out
 }
 
 fn execute_t_test_one(
@@ -831,18 +955,10 @@ fn execute_t_test_one(
                 return Ok(());
             }
 
-            let data = match extract_column(ds, col) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let alt: Alternative = alternative.into();
-            log::debug!("Sample size: {}", data.len());
-            match one_sample_t_test(&data, mu, alt, conf_level) {
+            match t_test(ds, col, None, mu, alt, false, false, conf_level) {
                 Ok(result) => {
+                    log::debug!("Sample size: {}", result.n);
                     log::info!(
                         "t-test completed: t={:.4}, df={:.1}, p={:.6}",
                         result.t_statistic,
@@ -860,8 +976,10 @@ fn execute_t_test_one(
                                 "ci_upper": result.conf_int_upper,
                                 "mean": result.estimate,
                                 "null_value": mu,
+                                "std_error": result.std_error,
+                                "n": result.n,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &result.missing)?;
                         }
                         _ => {
                             println!("\nOne-sample t-test");
@@ -878,6 +996,7 @@ fn execute_t_test_one(
                                 result.conf_int_upper
                             );
                             println!("Sample mean: {:.4}", result.estimate);
+                            print_missing_note(&result.missing, format);
                         }
                     }
                 }
@@ -908,25 +1027,12 @@ fn execute_t_test_two(
 
     match dataset {
         Some(ds) => {
-            let data1 = match extract_column(ds, col1) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let data2 = match extract_column(ds, col2) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let alt: Alternative = alternative.into();
-            match two_sample_t_test(&data1, &data2, 0.0, alt, equal_var, 0.95) {
+            match t_test(ds, col1, Some(col2), 0.0, alt, false, equal_var, 0.95) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
+                        // `estimate` is the mean of col1 and `estimate_2` that of col2.
+                        let mean_y = result.estimate_2.unwrap_or(f64::NAN);
                         let json = serde_json::json!({
                             "test": if equal_var { "Two-sample t-test (equal variances)" } else { "Welch's t-test" },
                             "t_statistic": result.t_statistic,
@@ -934,9 +1040,14 @@ fn execute_t_test_two(
                             "p_value": result.p_value,
                             "ci_lower": result.conf_int_lower,
                             "ci_upper": result.conf_int_upper,
-                            "mean_difference": result.estimate,
+                            "mean_difference": result.estimate - mean_y,
+                            "mean_x": result.estimate,
+                            "mean_y": mean_y,
+                            "n_x": result.n,
+                            "n_y": result.n_2,
+                            "std_error": result.std_error,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         let test_name = if equal_var {
@@ -954,7 +1065,14 @@ fn execute_t_test_two(
                             "95% CI for difference: [{:.4}, {:.4}]",
                             result.conf_int_lower, result.conf_int_upper
                         );
-                        println!("Mean difference: {:.4}", result.estimate);
+                        if let Some(mean_y) = result.estimate_2 {
+                            println!(
+                                "Means: {} = {:.4}, {} = {:.4}",
+                                col1, result.estimate, col2, mean_y
+                            );
+                            println!("Mean difference: {:.4}", result.estimate - mean_y);
+                        }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("t-test failed: {}", e), format),
@@ -983,23 +1101,8 @@ fn execute_t_test_paired(
 
     match dataset {
         Some(ds) => {
-            let data1 = match extract_column(ds, col1) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let data2 = match extract_column(ds, col2) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let alt: Alternative = alternative.into();
-            match paired_t_test(&data1, &data2, 0.0, alt, 0.95) {
+            match t_test(ds, col1, Some(col2), 0.0, alt, true, false, 0.95) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({
@@ -1010,8 +1113,10 @@ fn execute_t_test_paired(
                             "ci_lower": result.conf_int_lower,
                             "ci_upper": result.conf_int_upper,
                             "mean_difference": result.estimate,
+                            "std_error": result.std_error,
+                            "n": result.n,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nPaired t-test");
@@ -1025,6 +1130,7 @@ fn execute_t_test_paired(
                             result.conf_int_lower, result.conf_int_upper
                         );
                         println!("Mean difference: {:.4}", result.estimate);
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Paired t-test failed: {}", e), format),
@@ -1051,25 +1157,61 @@ fn execute_chisq_gof(
 
     match dataset {
         Some(ds) => match run_chisq_gof(ds, observed_col, None) {
-            Ok(result) => match format {
-                OutputFormat::Json => {
-                    let json = serde_json::json!({
-                        "test": "Chi-squared goodness-of-fit",
-                        "chi_squared": result.statistic,
-                        "df": result.df,
-                        "p_value": result.p_value,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+            Ok(result) => {
+                // Categories in R's factor order, the order of observed/expected.
+                let categories = result.row_labels.clone().unwrap_or_default();
+                let n: f64 = result.observed.iter().sum();
+                match format {
+                    OutputFormat::Json => {
+                        let json = serde_json::json!({
+                            "test": "Chi-squared goodness-of-fit",
+                            "chi_squared": json_number(result.statistic),
+                            "df": result.df,
+                            "p_value": json_number(result.p_value),
+                            "categories": categories,
+                            "observed": result.observed,
+                            "expected": result.expected.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                            "residuals": result.residuals.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                            "n": n,
+                            "warnings": result.warnings,
+                        });
+                        print_json(json, &result.missing)?;
+                    }
+                    _ => {
+                        println!("\nChi-squared Goodness-of-Fit Test");
+                        println!("{}", "=".repeat(40));
+                        println!(
+                            "X-squared = {:.4}, df = {}, p-value = {:.6}",
+                            result.statistic, result.df, result.p_value
+                        );
+                        println!();
+                        if categories.len() <= MAX_TABLE_ROWS {
+                            let columns = ["Observed".to_string(), "Expected".to_string()];
+                            print!(
+                                "{}",
+                                format_table("Category", &categories, &columns, |i, j| {
+                                    let (counts, decimals) = if j == 0 {
+                                        (&result.observed, 0)
+                                    } else {
+                                        (&result.expected, 4)
+                                    };
+                                    fmt_num(counts.get(i).copied().unwrap_or(f64::NAN), decimals)
+                                })
+                            );
+                        } else {
+                            println!(
+                                "Table not shown: {} categories (more than {MAX_TABLE_ROWS}); \
+                                 use -F json for the counts.",
+                                categories.len()
+                            );
+                        }
+                        for warning in &result.warnings {
+                            println!("Warning: {warning}");
+                        }
+                        print_missing_note(&result.missing, format);
+                    }
                 }
-                _ => {
-                    println!("\nChi-squared Goodness-of-Fit Test");
-                    println!("{}", "=".repeat(40));
-                    println!(
-                        "X-squared = {:.4}, df = {}, p-value = {:.6}",
-                        result.statistic, result.df, result.p_value
-                    );
-                }
-            },
+            }
             Err(e) => print_error(&format!("Chi-squared test failed: {}", e), format),
         },
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
@@ -1096,25 +1238,72 @@ fn execute_chisq_indep(
         Some(ds) => {
             // run_chisq_independence(dataset, row_col, col_col, correct)
             match run_chisq_independence(ds, row_var, col_var, true) {
-                Ok(result) => match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "test": "Chi-squared test of independence",
-                            "chi_squared": result.statistic,
-                            "df": result.df,
-                            "p_value": result.p_value,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                Ok(result) => {
+                    // Levels in R's factor order; observed/expected/residuals are row-major.
+                    let row_levels = result.row_labels.clone().unwrap_or_default();
+                    let col_levels = result.col_labels.clone().unwrap_or_default();
+                    let n_cols = col_levels.len();
+                    let n: f64 = result.observed.iter().sum();
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "test": "Chi-squared test of independence",
+                                "chi_squared": json_number(result.statistic),
+                                "df": result.df,
+                                "p_value": json_number(result.p_value),
+                                "row_levels": row_levels,
+                                "col_levels": col_levels,
+                                "observed": result.observed,
+                                "expected": result.expected.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                                "residuals": result.residuals.iter().map(|&v| json_number(v)).collect::<Vec<_>>(),
+                                "n": n,
+                                "warnings": result.warnings,
+                                "yates_correction": result.yates_correction,
+                            });
+                            print_json(json, &result.missing)?;
+                        }
+                        _ => {
+                            println!("\nChi-squared Test of Independence");
+                            println!("{}", "=".repeat(40));
+                            println!(
+                                "X-squared = {:.4}, df = {}, p-value = {:.6}",
+                                result.statistic, result.df, result.p_value
+                            );
+                            if result.yates_correction {
+                                println!("Continuity correction: Yates");
+                            }
+                            println!();
+                            println!(
+                                "Observed (expected) counts, {row_var} (rows) x {col_var} (columns):"
+                            );
+                            if row_levels.len() <= MAX_TABLE_ROWS && n_cols <= MAX_TABLE_COLS {
+                                print!(
+                                    "{}",
+                                    format_table("", &row_levels, &col_levels, |i, j| {
+                                        let k = i * n_cols + j;
+                                        let at = |v: &[f64]| v.get(k).copied().unwrap_or(f64::NAN);
+                                        format!(
+                                            "{} ({})",
+                                            fmt_num(at(&result.observed), 0),
+                                            fmt_num(at(&result.expected), 4)
+                                        )
+                                    })
+                                );
+                            } else {
+                                println!(
+                                    "Table not shown: {} x {} table (more than {MAX_TABLE_ROWS} \
+                                     rows or {MAX_TABLE_COLS} columns); use -F json for the counts.",
+                                    row_levels.len(),
+                                    n_cols
+                                );
+                            }
+                            for warning in &result.warnings {
+                                println!("Warning: {warning}");
+                            }
+                            print_missing_note(&result.missing, format);
+                        }
                     }
-                    _ => {
-                        println!("\nChi-squared Test of Independence");
-                        println!("{}", "=".repeat(40));
-                        println!(
-                            "X-squared = {:.4}, df = {}, p-value = {:.6}",
-                            result.statistic, result.df, result.p_value
-                        );
-                    }
-                },
+                }
                 Err(e) => print_error(&format!("Chi-squared test failed: {}", e), format),
             }
         }
@@ -1151,26 +1340,54 @@ fn execute_fisher(
                 Some(0.95),
             ) {
                 Ok(result) => {
-                    let (ci_lower, ci_upper) = result.odds_ratio_ci.unwrap_or((f64::NAN, f64::NAN));
+                    // `odds_ratio` is the sample odds ratio (ad)/(bc); R's estimate is the
+                    // conditional MLE, with the exact conditional interval.
+                    let ci = result.odds_ratio_ci;
                     match format {
                         OutputFormat::Json => {
+                            let limit =
+                                |v: Option<f64>| v.map_or(serde_json::Value::Null, json_number);
                             let json = serde_json::json!({
                                 "test": "Fisher's exact test",
-                                "p_value": result.p_value,
-                                "odds_ratio": result.odds_ratio,
-                                "ci_lower": ci_lower,
-                                "ci_upper": ci_upper,
+                                "p_value": json_number(result.p_value),
+                                "odds_ratio": json_number(result.odds_ratio),
+                                "sample_odds_ratio": json_number(result.odds_ratio),
+                                "conditional_mle": json_number(result.conditional_mle),
+                                "ci_lower": limit(ci.map(|(lo, _)| lo)),
+                                "ci_upper": limit(ci.map(|(_, hi)| hi)),
+                                "ci_method": "exact conditional (as R fisher.test)",
+                                "row_levels": result.row_levels,
+                                "col_levels": result.col_levels,
+                                "table": result.table,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &result.missing)?;
                         }
                         _ => {
                             println!("\nFisher's Exact Test for 2x2 Table");
                             println!("{}", "=".repeat(40));
                             println!("p-value = {:.6}", result.p_value);
-                            println!("Odds ratio = {:.4}", result.odds_ratio);
-                            if result.odds_ratio_ci.is_some() {
-                                println!("95% CI: [{:.4}, {:.4}]", ci_lower, ci_upper);
+                            println!(
+                                "Odds ratio (conditional MLE) = {}",
+                                fmt_num(result.conditional_mle, 4)
+                            );
+                            if let Some((lo, hi)) = ci {
+                                println!("95% CI: [{}, {}]", fmt_num(lo, 4), fmt_num(hi, 4));
                             }
+                            println!("Sample odds ratio = {}", fmt_num(result.odds_ratio, 4));
+                            if result.row_levels.len() == 2 && result.col_levels.len() == 2 {
+                                println!();
+                                println!("Counts, {row_var} (rows) x {col_var} (columns):");
+                                print!(
+                                    "{}",
+                                    format_table(
+                                        "",
+                                        &result.row_levels,
+                                        &result.col_levels,
+                                        |i, j| fmt_num(result.table[2 * i + j], 0)
+                                    )
+                                );
+                            }
+                            print_missing_note(&result.missing, format);
                         }
                     }
                 }
@@ -1208,7 +1425,7 @@ fn execute_shapiro(
                             "p_value": result.p_value,
                             "n": result.n,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nShapiro-Wilk Normality Test");
@@ -1223,6 +1440,7 @@ fn execute_shapiro(
                         } else {
                             println!("\nConclusion: Cannot reject normality");
                         }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Shapiro-Wilk test failed: {}", e), format),
@@ -1252,31 +1470,11 @@ fn execute_wilcoxon(
 
     match dataset {
         Some(ds) => {
-            let data1 = match extract_column(ds, col1) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-            let data2 = match extract_column(ds, col2) {
-                Ok(d) => d,
-                Err(e) => {
-                    print_error(&e, format);
-                    return Ok(());
-                }
-            };
-
             let config = WilcoxonConfig::default();
             let alt: Alternative = alternative.into();
 
-            let result = if paired {
-                wilcoxon_signed_rank(&data1, Some(&data2), 0.0, alt, &config)
-            } else {
-                wilcoxon_rank_sum(&data1, &data2, 0.0, alt, &config)
-            };
-
-            match result {
+            // Paired: complete pairs; rank-sum: each sample's missing values dropped.
+            match wilcoxon_test(ds, col1, Some(col2), 0.0, alt, paired, &config) {
                 Ok(res) => {
                     let test_name = if paired {
                         "Wilcoxon signed-rank test"
@@ -1290,12 +1488,13 @@ fn execute_wilcoxon(
                                 "statistic": res.statistic,
                                 "p_value": res.p_value,
                             });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
+                            print_json(json, &res.missing)?;
                         }
                         _ => {
                             println!("\n{}", test_name);
                             println!("{}", "=".repeat(40));
                             println!("W = {:.4}, p-value = {:.6}", res.statistic, res.p_value);
+                            print_missing_note(&res.missing, format);
                         }
                     }
                 }
@@ -1334,7 +1533,7 @@ fn execute_bartlett(
                             "df": result.df,
                             "p_value": result.p_value,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nBartlett's Test for Homogeneity of Variances");
@@ -1343,6 +1542,7 @@ fn execute_bartlett(
                             "K-squared = {:.4}, df = {}, p-value = {:.6}",
                             result.statistic, result.df, result.p_value
                         );
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Bartlett's test failed: {}", e), format),
@@ -1380,7 +1580,7 @@ fn execute_kruskal(
                             "df": result.df,
                             "p_value": result.p_value,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\nKruskal-Wallis Rank Sum Test");
@@ -1389,6 +1589,7 @@ fn execute_kruskal(
                             "H = {:.4}, df = {}, p-value = {:.6}",
                             result.statistic, result.df, result.p_value
                         );
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Kruskal-Wallis test failed: {}", e), format),
@@ -1415,10 +1616,11 @@ fn execute_fivenum(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            // fivenum's default: the present values
+            let (data, missing) = match column_values(ds, col, NaPolicy::Omit, "fivenum") {
                 Ok(d) => d,
                 Err(e) => {
-                    print_error(&e, format);
+                    print_error(&e.to_string(), format);
                     return Ok(());
                 }
             };
@@ -1432,8 +1634,9 @@ fn execute_fivenum(
                             "median": result.median,
                             "q3": result.upper_hinge,
                             "max": result.maximum,
+                            "n": result.n,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &missing)?;
                     }
                     _ => {
                         println!("\nFive-Number Summary for '{}'", col);
@@ -1443,6 +1646,7 @@ fn execute_fivenum(
                         println!("Median: {:.4}", result.median);
                         println!("Q3:     {:.4}", result.upper_hinge);
                         println!("Max:    {:.4}", result.maximum);
+                        print_missing_note(&missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("fivenum failed: {}", e), format),
@@ -1469,10 +1673,11 @@ fn execute_iqr(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            // IQR(na.rm = TRUE), as the MCP tool documents
+            let (data, missing) = match column_values(ds, col, NaPolicy::Omit, "iqr") {
                 Ok(d) => d,
                 Err(e) => {
-                    print_error(&e, format);
+                    print_error(&e.to_string(), format);
                     return Ok(());
                 }
             };
@@ -1483,10 +1688,11 @@ fn execute_iqr(
                         let json = serde_json::json!({
                             "iqr": iqr_val,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &missing)?;
                     }
                     _ => {
                         println!("IQR({}): {:.4}", col, iqr_val);
+                        print_missing_note(&missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("IQR failed: {}", e), format),
@@ -1513,10 +1719,11 @@ fn execute_mad(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            // mad(na.rm = TRUE), as the MCP tool documents
+            let (data, missing) = match column_values(ds, col, NaPolicy::Omit, "mad") {
                 Ok(d) => d,
                 Err(e) => {
-                    print_error(&e, format);
+                    print_error(&e.to_string(), format);
                     return Ok(());
                 }
             };
@@ -1527,10 +1734,11 @@ fn execute_mad(
                         let json = serde_json::json!({
                             "mad": mad_val,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &missing)?;
                     }
                     _ => {
                         println!("MAD({}): {:.4}", col, mad_val);
+                        print_missing_note(&missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("MAD failed: {}", e), format),
@@ -1559,7 +1767,7 @@ fn execute_acf(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            let data = match series_column(ds, col, "acf") {
                 Ok(d) => d,
                 Err(e) => {
                     print_error(&e, format);
@@ -1589,7 +1797,7 @@ fn execute_acf(
                     Err(e) => print_error(&format!("PACF failed: {}", e), format),
                 }
             } else {
-                // acf(data, lag_max, acf_type, demean, na_rm)
+                // acf(data, lag_max, acf_type, demean, na_rm) // adjusted = true: CLI-22 (Tier 4)
                 match acf(&data, Some(lag_max), AcfType::Correlation, true, true) {
                     Ok(result) => match format {
                         OutputFormat::Json => {
@@ -1653,7 +1861,7 @@ fn execute_anova(
                         "n_groups": result.n_groups,
                         "n_obs": result.n_obs,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &result.missing)?;
                 }
                 _ => {
                     println!("\nOne-Way ANOVA");
@@ -1688,6 +1896,7 @@ fn execute_anova(
                     );
                     println!();
                     println!("Effect size: eta-squared = {:.4}", result.eta_squared);
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("ANOVA failed: {}", e), format),
@@ -1703,6 +1912,7 @@ fn execute_anova_two(
     factor_a: &str,
     factor_b: &str,
     interaction: bool,
+    ss_type: &str,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1713,31 +1923,53 @@ fn execute_anova_two(
             return Ok(());
         }
     };
+    let ss_type: SsType = match ss_type.parse() {
+        Ok(t) => t,
+        Err(e) => {
+            print_error(&e.to_string(), format);
+            return Ok(());
+        }
+    };
+    let config = TwoWayAnovaConfig {
+        interaction,
+        ss_type,
+    };
 
     match dataset {
-        Some(ds) => match run_two_way_anova(ds, response, factor_a, factor_b, interaction) {
+        Some(ds) => match run_two_way_anova_with(ds, response, factor_a, factor_b, &config) {
             Ok(result) => match format {
                 OutputFormat::Json => {
+                    let opt = |v: Option<f64>| v.map_or(serde_json::Value::Null, json_number);
                     let json = serde_json::json!({
                         "test": "Two-way ANOVA",
                         "response": result.response_var,
                         "factor_a": result.factor_a,
                         "factor_b": result.factor_b,
                         "with_interaction": result.with_interaction,
-                        "ss_a": result.ss_a,
-                        "ss_b": result.ss_b,
-                        "ss_ab": result.ss_ab,
-                        "ss_error": result.ss_error,
-                        "ss_total": result.ss_total,
-                        "f_a": result.f_a,
-                        "f_b": result.f_b,
-                        "f_ab": result.f_ab,
-                        "p_a": result.p_a,
-                        "p_b": result.p_b,
-                        "p_ab": result.p_ab,
+                        "ss_type": result.ss_type.to_string(),
+                        "ss_a": json_number(result.ss_a),
+                        "ss_b": json_number(result.ss_b),
+                        "ss_ab": opt(result.ss_ab),
+                        "ss_error": json_number(result.ss_error),
+                        "ss_total": json_number(result.ss_total),
+                        "df_a": result.df_a,
+                        "df_b": result.df_b,
+                        "df_ab": result.df_ab,
+                        "df_error": result.df_error,
+                        "df_total": result.df_total,
+                        "ms_a": json_number(result.ms_a),
+                        "ms_b": json_number(result.ms_b),
+                        "ms_ab": opt(result.ms_ab),
+                        "ms_error": json_number(result.ms_error),
+                        "f_a": json_number(result.f_a),
+                        "f_b": json_number(result.f_b),
+                        "f_ab": opt(result.f_ab),
+                        "p_a": json_number(result.p_a),
+                        "p_b": json_number(result.p_b),
+                        "p_ab": opt(result.p_ab),
                         "n_obs": result.n_obs,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &result.missing)?;
                 }
                 _ => {
                     println!("\nTwo-Way ANOVA");
@@ -1751,42 +1983,70 @@ fn execute_anova_two(
                         result.n_obs,
                         if result.with_interaction { "Yes" } else { "No" }
                     );
+                    println!(
+                        "Sums of squares: {}",
+                        match result.ss_type {
+                            SsType::I => "Type I (sequential, as R aov)",
+                            SsType::II => "Type II (as car::Anova(type = 2))",
+                            SsType::III => {
+                                "Type III (sum-to-zero contrasts, as car::Anova(type = 3))"
+                            }
+                        }
+                    );
                     println!();
                     println!(
                         "{:>15} {:>12} {:>6} {:>12} {:>10} {:>10}",
                         "Source", "SS", "DF", "MS", "F", "Pr(>F)"
                     );
                     println!("{}", "-".repeat(70));
-                    println!(
-                        "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
-                        &result.factor_a,
-                        result.ss_a,
-                        result.df_a,
-                        result.ms_a,
-                        result.f_a,
-                        result.p_a
-                    );
-                    println!(
-                        "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
-                        &result.factor_b,
-                        result.ss_b,
-                        result.df_b,
-                        result.ms_b,
-                        result.f_b,
-                        result.p_b
-                    );
+                    // A main effect aliased with the other factor (df 0) has no row in aov:
+                    // its MS, F and p are NaN.
+                    let main_rows = [
+                        (
+                            &result.factor_a,
+                            result.ss_a,
+                            result.df_a,
+                            result.ms_a,
+                            result.f_a,
+                            result.p_a,
+                        ),
+                        (
+                            &result.factor_b,
+                            result.ss_b,
+                            result.df_b,
+                            result.ms_b,
+                            result.f_b,
+                            result.p_b,
+                        ),
+                    ];
+                    for (name, ss, df, ms, f_stat, p) in main_rows {
+                        if df == 0 {
+                            println!("{name:>15} not estimable (aliased with the other factor)");
+                        } else {
+                            println!(
+                                "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
+                                name, ss, df, ms, f_stat, p
+                            );
+                        }
+                    }
                     if result.with_interaction {
-                        if let (Some(ss_ab), Some(df_ab), Some(ms_ab), Some(f_ab), Some(p_ab)) = (
+                        match (
                             result.ss_ab,
                             result.df_ab,
                             result.ms_ab,
                             result.f_ab,
                             result.p_ab,
                         ) {
-                            println!(
-                                "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
-                                "Interaction", ss_ab, df_ab, ms_ab, f_ab, p_ab
-                            );
+                            (Some(ss_ab), Some(df_ab), Some(ms_ab), Some(f_ab), Some(p_ab)) => {
+                                println!(
+                                    "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
+                                    "Interaction", ss_ab, df_ab, ms_ab, f_ab, p_ab
+                                );
+                            }
+                            _ => println!(
+                                "{:>15} not estimable (empty cells leave no interaction df)",
+                                "Interaction"
+                            ),
                         }
                     }
                     println!(
@@ -1797,6 +2057,10 @@ fn execute_anova_two(
                         "{:>15} {:>12.4} {:>6}",
                         "Total", result.ss_total, result.df_total
                     );
+                    if result.ss_type != SsType::I {
+                        println!("Type II/III sums of squares need not add up to the total.");
+                    }
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("Two-way ANOVA failed: {}", e), format),
@@ -1851,7 +2115,7 @@ fn execute_tukey(
                         "anova_p_value": anova_result.p_value,
                         "comparisons": comparisons,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &anova_result.missing)?;
                 }
                 _ => {
                     println!("\nTukey's HSD Test");
@@ -1875,6 +2139,7 @@ fn execute_tukey(
                             c.group1, c.group2, c.diff, c.ci_lower, c.ci_upper, c.p_adj, stars
                         );
                     }
+                    print_missing_note(&anova_result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("Tukey HSD failed: {}", e), format),
@@ -1915,7 +2180,7 @@ fn execute_friedman(
                         "rank_sums": result.rank_sums,
                         "mean_ranks": result.mean_ranks,
                     });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
+                    print_json(json, &result.missing)?;
                 }
                 _ => {
                     println!("\nFriedman Rank Sum Test");
@@ -1935,6 +2200,7 @@ fn execute_friedman(
                     {
                         println!("  {}: {:.4}", name, rank);
                     }
+                    print_missing_note(&result.missing, format);
                 }
             },
             Err(e) => print_error(&format!("Friedman test failed: {}", e), format),
@@ -1961,7 +2227,7 @@ fn execute_pacf(
 
     match dataset {
         Some(ds) => {
-            let data = match extract_column(ds, col) {
+            let data = match series_column(ds, col, "pacf") {
                 Ok(d) => d,
                 Err(e) => {
                     print_error(&e, format);
@@ -2145,7 +2411,7 @@ fn execute_ks_test(
                             "n": result.n,
                             "n_2": result.n_2,
                         });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        print_json(json, &result.missing)?;
                     }
                     _ => {
                         println!("\n{}", result.test_name);
@@ -2160,6 +2426,7 @@ fn execute_ks_test(
                         } else {
                             println!("Sample size: n = {}", result.n);
                         }
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("K-S test failed: {}", e), format),

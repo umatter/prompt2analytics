@@ -1,0 +1,228 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "cli_stats_t_tests",
+      "name": "CLI stats t-test-one, t-test-two, t-test-paired with missing values and Int64 columns",
+      "category": "interfaces",
+      "reference": "stats::t.test (one-sample with mu/conf.level, Welch, var.equal = TRUE, paired = TRUE; NA removed as t.test does)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_two_sample_na",
+        "cli_stat_descriptive_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_one_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_one_int64",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_paired_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_t_test_two_na"
+      ],
+      "quantities": [
+        "t",
+        "df",
+        "p",
+        "CI",
+        "mean / means and their difference",
+        "SE",
+        "n",
+        "missing-value note and JSON summary"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_wilcoxon",
+      "name": "CLI stats wilcoxon (paired and rank-sum) with missing values",
+      "category": "interfaces",
+      "reference": "stats::wilcox.test (paired, exact); rank sum of x",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_wilcoxon_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_wilcoxon_na"
+      ],
+      "quantities": [
+        "paired V and exact p",
+        "rank-sum statistic as the rank sum R1 (R's W is R1 - n(n+1)/2, STAT-72)",
+        "rank-sum exact p not pinned (STAT-73, Tier 4)",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_descriptive",
+      "name": "CLI stats fivenum, iqr, mad with missing values and Int64 columns",
+      "category": "interfaces",
+      "reference": "stats::fivenum; IQR(na.rm = TRUE); mad(na.rm = TRUE)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "cli_stat_descriptive_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_descriptive_na"
+      ],
+      "quantities": [
+        "five numbers",
+        "n",
+        "IQR",
+        "MAD",
+        "missing-value note and JSON summary"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_acf_pacf",
+      "name": "CLI stats acf, pacf on an Int64 series; missing values refused",
+      "category": "interfaces",
+      "reference": "stats::pacf(lag.max = 5); stats::acf (na.action = na.fail)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "cli_stat_acf_int"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_acf_pacf_int64"
+      ],
+      "quantities": [
+        "PACF lags 1-5 (text and JSON)",
+        "n",
+        "stats acf values checked against R's acf times n / (n - k), the adjusted estimator the CLI uses until CLI-22 (Tier 4)",
+        "1.96/sqrt(n) bound not pinned (R reports none)"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_contingency",
+      "name": "CLI stats chisq-gof, chisq-indep, fisher: labels, warning, conditional MLE, missing values",
+      "category": "interfaces",
+      "reference": "stats::chisq.test(table(...)) (warning when an expected count < 5; Yates for 2 x 2); stats::fisher.test(table(...))",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_chisq_small_expected",
+        "stat_contingency_na_codes",
+        "stat_chisq_gof",
+        "stat_fisher_rows_2000"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_chisq_indep_labels_warning",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_chisq_gof_categories",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_fisher_conditional_mle"
+      ],
+      "quantities": [
+        "X-squared",
+        "df",
+        "p",
+        "observed",
+        "expected",
+        "residuals",
+        "n",
+        "level labels and order",
+        "R's warning",
+        "Yates flag",
+        "Fisher p",
+        "conditional MLE",
+        "exact limits",
+        "sample OR",
+        "labelled counts",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_anova",
+      "name": "CLI stats anova, kruskal, tukey, friedman, anova-two (--ss-type) with missing values",
+      "category": "interfaces",
+      "reference": "stats::aov; kruskal.test; friedman.test; car::Anova(type = 2); pairwise.t.test's pooled SD and group means for Tukey's MSE and differences",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_oneway_na_labels",
+        "stat_pairwise_mahalanobis_na",
+        "stat_friedman_quade",
+        "stat_anova_two_way_unbalanced"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_anova_kruskal_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_tukey_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_friedman_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_anova_two_ss_type"
+      ],
+      "quantities": [
+        "SS",
+        "df",
+        "F",
+        "p (Type I and II)",
+        "N",
+        "H",
+        "Friedman chi-squared and blocks",
+        "Tukey MSE, df and differences",
+        "Tukey p adj and intervals not pinned (no R value in a Tier 2 case)",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_stats_normality_variance",
+      "name": "CLI stats shapiro, bartlett, ks-test with missing values and Int64 columns",
+      "category": "interfaces",
+      "reference": "stats::shapiro.test; bartlett.test; ks.test",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "stat_shapiro_wilk",
+        "stat_two_sample_na"
+      ],
+      "tests": [
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_shapiro_bartlett_ks_na"
+      ],
+      "quantities": [
+        "W",
+        "p",
+        "n",
+        "K-squared",
+        "df",
+        "p",
+        "KS D and sample sizes (KS p not pinned: STAT-27, Tier 4)",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_viz_extraction",
+      "name": "CLI viz scatter, line, box, heatmap: joint deletion of incomplete rows and Int64 columns",
+      "category": "interfaces",
+      "reference": "stats::complete.cases; stats::cor(use = 'complete.obs'); table(code, out)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": [
+        "cli_stat_descriptive_na",
+        "stat_contingency_na_codes",
+        "stat_two_sample_na"
+      ],
+      "tests": [
+        "p2a-cli::commands::viz::tests::test_validate_cli_viz_heatmap_complete_obs",
+        "p2a-cli::commands::viz::tests::test_validate_cli_viz_box_groups",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_na_cli_viz_xy_plots"
+      ],
+      "quantities": [
+        "complete-case correlation matrix and row count",
+        "box groups (labels, order, counts)",
+        "complete pairs",
+        "missing-value summaries"
+      ],
+      "tolerance": "text at print precision (Tol::printed: 4 decimals for statistics, means, CI bounds and counts tables, 6 for p-values and Shapiro W, 1-2 for df); -F json at validation/README.md by n: Tol::coef/se/stat/p_value(n) (n < 100: 1e-6 coefficients and means, 1e-5 statistics, SE, CI, p relative or 1e-12 absolute); Fisher conditional MLE and limits Tol::new(1e-9, 1e-12) against the uniroot(tol = 1e-15) re-solve; counts, df and missing-value summaries exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

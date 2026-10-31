@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "cli_stat_descriptive_na",
+  "area": "cli/stats",
+  "method": "CLI t-test-one on Int64, fivenum/IQR/MAD and complete-case correlations with NA cells",
+  "reference": "stats::t.test(mu = 48, conf.level = 0.9); stats::fivenum; stats::IQR(na.rm = TRUE); stats::mad(na.rm = TRUE); stats::cor(use = 'complete.obs')",
+  "call": "t.test(xi, mu = 48, conf.level = 0.9); fivenum(x); IQR(x, na.rm = TRUE); mad(x, na.rm = TRUE); cor(d[, c('x', 'y', 'xi')], use = 'complete.obs')",
+  "dataset": "validation/datasets/generated/two_sample_na.csv",
+  "datasets": ["validation/datasets/generated/two_sample_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "int_one_t": 0.49490963142586614,
+    "int_one_df": 19,
+    "int_one_p": 0.62633840433585175,
+    "int_one_ci90": [46.254315189668581, 51.145684810331424],
+    "int_one_mean": 48.700000000000003,
+    "int_one_se": 1.4143996308644435,
+    "int_one_n": 20,
+    "fivenum_x": [5.0999999999999996, 6, 6.2000000000000002, 7.0499999999999998, 7.7000000000000002],
+    "iqr_x": 1.0499999999999998,
+    "mad_x": 0.88955999999999946,
+    "n_x": 7,
+    "fivenum_xi": [40, 43, 49, 52, 60],
+    "iqr_xi": 8.5,
+    "mad_xi": 6.6716999999999995,
+    "n_xi": 20,
+    "cor_complete": [1, 0.9782906634777736, 0.0097521479470577127, 0.9782906634777736, 1, 0.022767003929547669, 0.0097521479470577127, 0.022767003929547669, 1],
+    "n_complete": 6,
+    "n_rows": 22
+  }
+}
