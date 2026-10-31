@@ -120,6 +120,45 @@
       "tolerance": "validation/README.md, n = 14 (< 100): statistics and epsilons 1e-5 relative, p 1e-5 relative + 1e-12 absolute, df and n exact",
       "deviations": [{"finding": "STAT-82", "quantity": "Mauchly p-value", "note": "p2a reports the first-order chi-square tail (pinned to R's own Pr1 = 5.0371160244126754e-05); R's mauchly.test adds Box's second-order term (5.450912248903203e-05); not pinned"}],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_anova_two_way_ss_type",
+      "name": "MCP anova_two_way with ss_type II and III on an unbalanced layout",
+      "category": "stats",
+      "reference": "car::Anova(lm(y ~ fa * fb), type = 2); car::Anova(type = 3) with contr.sum",
+      "doc": "validation/stats/anova.md",
+      "cases": ["stat_anova_two_way_unbalanced"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_anova_two_way_ss_type"],
+      "quantities": ["Type II SS, df, F, p (interaction and additive)", "Type III SS, df, F, p", "residual SS and df", "SS-type line", "refusal of an unknown ss_type"],
+      "tolerance": "MCP text at its 4 printed decimals (Tol::printed(4)); df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_anova_handlers_missing",
+      "name": "MCP anova_manova, anova_tukey_hsd, stats_se_contrast and stats_model_tables report dropped rows; model tables use R level order",
+      "category": "stats",
+      "reference": "manova / aov on complete cases (na.omit); factor() level order",
+      "doc": "validation/stats/anova.md",
+      "cases": ["stat_manova_na", "stat_oneway_na_labels", "stat_loglin_na"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_anova_handlers_report_missing_rows"],
+      "quantities": ["missing (counts of the R complete cases)", "n_obs", "two-way model-table level order and cell counts"],
+      "tolerance": "counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mcp_multivariate_mahalanobis_rows",
+      "name": "MCP multivariate_mahalanobis labels each distance with its dataset row",
+      "category": "stats",
+      "reference": "stats::mahalanobis(X, colMeans(X), cov(X)) on complete rows; which(complete.cases(a, b))",
+      "doc": "validation/multivariate/mahalanobis.md",
+      "cases": ["stat_pairwise_mahalanobis_na"],
+      "tests": ["p2a-mcp::tools::handlers::stats::tests::test_validate_mcp_multivariate_mahalanobis_rows"],
+      "quantities": ["first ten squared distances", "their 1-based row numbers", "missing"],
+      "tolerance": "distances at their 4 printed decimals (Tol::printed(4)); row numbers exact",
+      "deviations": [{"finding": "TOOL-10", "quantity": "chi_squared_threshold_95 and n_potential_outliers", "note": "the tool thresholds at 2.7 p instead of qchisq(0.95, p) (Tier 4); not pinned"}],
+      "supersedes_legacy": []
     }
   ]
 }

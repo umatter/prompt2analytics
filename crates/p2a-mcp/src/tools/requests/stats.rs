@@ -629,6 +629,13 @@ pub struct TwoWayAnovaRequest {
         description = "Whether to include the interaction term (factor_a × factor_b). Default is true."
     )]
     pub interaction: Option<bool>,
+
+    /// Type of sums of squares.
+    #[serde(default)]
+    #[schemars(
+        description = "Sums of squares: 'I' (default; sequential, as R aov), 'II' or 'III' (as car::Anova; Type III uses sum-to-zero contrasts and is refused when empty cells alias coefficients). Types I and II agree on balanced designs; on unbalanced data they differ."
+    )]
+    pub ss_type: Option<String>,
 }
 
 /// Request for power analysis of t-test.

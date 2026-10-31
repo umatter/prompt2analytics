@@ -32,10 +32,15 @@ on the earlier columns is below 1e-7 of its length is aliased), so empty cells r
 interaction df: a 3 x 2 layout with one empty cell has interaction df 1 and residual df
 `n - rank`. When empty cells leave the interaction no df, `aov` prints no `a:b` row; p2a sets
 `ss_ab`, `df_ab`, `ms_ab`, `f_ab`, `p_ab` and `sig_ab` to `None` (while `with_interaction` stays
-`true`) and its Display prints the row as "not estimable". A main effect aliased with the other
-factor (B given A in a disconnected layout, A given B when A is nested in B) has df 0 and NaN
-for MS, F and p; `aov` drops that row too, and the Display prints it as "not estimable (aliased
-with the other factor)".
+`true`) and its Display prints the row as "not estimable". A main effect that enters after the
+other factor (B given A in Types I and II, A given B in Type II) loses one df for every
+disconnected component of the layout beyond the first: with K components the additive model
+has rank `La + Lb - K`, so B given A has `Lb - K` df and A given B `La - K`. It is aliased
+entirely, df 0, when it is a function of the other factor: B given A when A is nested in B
+(every level of A occurs with a single level of B, so the B indicators are sums of A
+indicators), A given B when B is nested in A. A term with df 0 has NaN for MS, F and p; `aov`
+drops that row too, and the Display prints it as "not estimable (aliased with the other
+factor)".
 
 The fit runs on the cell means weighted by the square roots of the cell sizes, which has the
 same normal equations as the regression on the rows: O(n) to build the cells, then Gram-Schmidt
@@ -154,6 +159,37 @@ Full precision is in `validation/expected/stat_anova_two_way_unbalanced.json`
 
 **MCP test** (`crates/p2a-mcp/tests/tier2/wp07_anova.rs`):
 `test_validate_mcp_anova_two_way_unbalanced` (`anova_two_way` text at its 4 printed decimals).
+
+## MCP tools
+
+- **`anova_two_way` takes `ss_type`:** `"I"` (the default; sequential, as R `aov`), `"II"` or
+  `"III"` (as `car::Anova`; also `"1"`, `"2"`, `"3"` and a leading "type"). An unknown value is a
+  tool error naming the accepted ones. Before, the field did not exist, so serde ignored it and
+  Type I was computed whatever was asked (fa SS 7.7072 on the case above where Type II is
+  40.1011). The tool prints the "Sums of squares: Type ..." line of the result.
+- **Dropped rows:** `anova_manova`, `anova_tukey_hsd`, `stats_se_contrast` and
+  `stats_model_tables` report the rows their core functions drop under `missing` (`n_total`,
+  `n_used`, `n_dropped`, `by_column`), with no such key when nothing was dropped; `anova_one_way`
+  and `anova_two_way` print the "Missing values" line of their text.
+- **Two-way model tables:** `stats_model_tables` with two factors reads the response and both
+  factors through the shared extractor in one request, so its cells use exactly the rows of its
+  ANOVA, and its levels follow R's `factor()` order (Int64 codes 2 before 10; before, the levels
+  were sorted as strings, "10" before "2"). Empty cells keep a mean of 0 (TOOL-22, Tier 4).
+
+The Type II and III values of `stat_anova_two_way_unbalanced` (table above: fa, fb and fa:fb SS,
+F and p; the Type II residual SS and df; the additive Type II model) are pinned through
+`anova_two_way` at its 4 printed decimals, each df exactly. The `missing` reports are pinned to
+R's complete cases: `stat_manova_na` (33 of 36 rows, `y1` missing in 2 and `y2` in 1),
+`stat_oneway_na_labels` (5 of 9, `y` 3 and `g` 2) and `stat_loglin_na` for `cnt ~ f2 + f3` (14 of
+16, `cnt` 1 and `f2` 1; levels `2, 10` and `x, y`; its model-table cells add up to 14 rows and
+its `ss_a` equals the `f2` SS that `anova_two_way` prints for the same columns).
+
+**MCP tests** (`crates/p2a-mcp/src/tools/handlers/stats.rs`):
+- `tools::handlers::stats::tests::test_validate_mcp_anova_two_way_ss_type`
+- `tools::handlers::stats::tests::test_validate_mcp_anova_handlers_report_missing_rows`
+
+Registry `validation/methods/mcp_stats.json`, ids `mcp_anova_two_way_ss_type` and
+`mcp_anova_handlers_missing`.
 
 ## Tolerances
 
