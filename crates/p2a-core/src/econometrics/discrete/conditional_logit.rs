@@ -25,8 +25,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::resource;
 use crate::traits::estimator::normal_cdf;
 
 /// Result from McFadden's conditional logit model.
@@ -184,24 +186,26 @@ struct MlogitData {
 }
 
 impl MlogitData {
+    /// `choice_situations[s]` lists the (row, alternative index) pairs of situation `s`, in
+    /// data order; the situations are visited in index order.
     fn new(
-        choice_situations: &std::collections::HashMap<String, Vec<(usize, usize)>>,
+        choice_situations: &[Vec<(usize, usize)>],
         choices: &[f64],
-        x_alt_specific: &[Vec<f64>],
-        z_ind_specific: &[Vec<f64>],
+        x_alt_specific: &[&[f64]],
+        z_ind_specific: &[&[f64]],
         n_alt_specific: usize,
         n_ind_specific: usize,
         n_alternatives: usize,
         ref_idx: usize,
     ) -> Self {
         let n_params = n_alt_specific + n_ind_specific * (n_alternatives - 1).max(0);
-        let total_rows: usize = choice_situations.values().map(|v| v.len()).sum();
+        let total_rows: usize = choice_situations.iter().map(|v| v.len()).sum();
 
         let mut choice_info = Vec::with_capacity(choice_situations.len());
         let mut features = Array2::<f64>::zeros((total_rows, n_params));
 
         let mut flat_idx = 0;
-        for alts in choice_situations.values() {
+        for alts in choice_situations {
             let start = flat_idx;
             let n_alts = alts.len();
             let mut chosen_local = 0;
@@ -358,38 +362,16 @@ fn compute_mlogit_derivatives_fast(
     (ll, gradient, hessian)
 }
 
-/// Helper to extract column as strings.
-fn extract_string_or_int_column(
-    df: &polars::prelude::DataFrame,
-    col: &str,
-) -> EconResult<Vec<String>> {
-    let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-        column: col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    if let Ok(ca) = series.str() {
-        Ok(ca.into_no_null_iter().map(|s| s.to_string()).collect())
-    } else if let Ok(ca) = series.i64() {
-        Ok(ca.into_no_null_iter().map(|v| v.to_string()).collect())
-    } else if let Ok(ca) = series.i32() {
-        Ok(ca.into_no_null_iter().map(|v| v.to_string()).collect())
-    } else if let Ok(ca) = series.f64() {
-        Ok(ca.into_no_null_iter().map(|v| v.to_string()).collect())
-    } else {
-        Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be string or integer", col),
-        })
-    }
-}
-
 /// Run McFadden's conditional logit model.
 ///
 /// R equivalent: `mlogit::mlogit()`
+///
+/// Every column comes from one request with `NaPolicy::Fail`: a missing id, alternative,
+/// choice or attribute is refused with `NullValues` naming the column, as R's mlogit
+/// refuses it. The choice indicator and the attributes may be Int64 or Boolean; a text
+/// attribute is `NonNumericColumn`. Choice situations and alternatives follow R `factor()`
+/// order (numeric ids numerically, text by byte), so the default reference alternative is
+/// the first in that order.
 pub fn run_mlogit(
     dataset: &Dataset,
     choice_id_col: &str,
@@ -400,46 +382,21 @@ pub fn run_mlogit(
     reference: Option<&str>,
 ) -> EconResult<MlogitResult> {
     let df = dataset.df();
-    let n_rows = df.height();
+    let cols = ColumnRequest::new(df)
+        .factor(choice_id_col)
+        .factor(alt_id_col)
+        .numeric(choice_col)
+        .numerics(alt_specific_cols)
+        .numerics(ind_specific_cols)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let n_rows = cols.n();
+    let situation = cols.factor(choice_id_col);
+    let alt = cols.factor(alt_id_col);
+    let choices = cols.numeric(choice_col);
+    let n_choice_situations = situation.n_levels();
 
-    let choice_ids: Vec<String> = extract_string_or_int_column(df, choice_id_col)?;
-    let alt_ids: Vec<String> = extract_string_or_int_column(df, alt_id_col)?;
-
-    let choice_series = df
-        .column(choice_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: choice_col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-    let choices: Vec<f64> = if let Ok(ca) = choice_series.f64() {
-        ca.into_no_null_iter().collect()
-    } else if let Ok(ca) = choice_series.i64() {
-        ca.into_no_null_iter().map(|v| v as f64).collect()
-    } else {
-        return Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be numeric (0/1)", choice_col),
-        });
-    };
-
-    let unique_choice_ids: Vec<String> = choice_ids
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    let n_choice_situations = unique_choice_ids.len();
-
-    let mut alternatives: Vec<String> = alt_ids
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    alternatives.sort();
+    let alternatives: Vec<String> = alt.levels.clone();
     let n_alternatives = alternatives.len();
 
     if n_alternatives < 2 {
@@ -458,72 +415,24 @@ pub fn run_mlogit(
         });
     }
 
-    let alt_to_idx: std::collections::HashMap<String, usize> = alternatives
+    let ref_idx = alternatives
         .iter()
-        .enumerate()
-        .map(|(i, a)| (a.clone(), i))
-        .collect();
-    let ref_idx = alt_to_idx[&ref_alt];
+        .position(|a| a == &ref_alt)
+        .unwrap_or(0);
 
-    let mut choice_situations: std::collections::HashMap<String, Vec<(usize, usize)>> =
-        std::collections::HashMap::new();
-
-    for row_idx in 0..n_rows {
-        let cid = &choice_ids[row_idx];
-        let aid = &alt_ids[row_idx];
-        let alt_idx = alt_to_idx[aid];
-        choice_situations
-            .entry(cid.clone())
-            .or_default()
-            .push((row_idx, alt_idx));
+    // Rows of each choice situation (in level order), in data order
+    let mut choice_situations: Vec<Vec<(usize, usize)>> =
+        resource::try_vec(n_choice_situations, Vec::new(), "conditional logit situations")?;
+    for (row_idx, (&s, &a)) in situation.codes.iter().zip(&alt.codes).enumerate() {
+        choice_situations[s as usize].push((row_idx, a as usize));
     }
 
     // Extract variables
     let n_alt_specific = alt_specific_cols.len();
-    let mut x_alt_specific: Vec<Vec<f64>> = Vec::new();
-    for col in alt_specific_cols {
-        let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-            column: col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let vals: Vec<f64> = if let Ok(ca) = series.f64() {
-            ca.into_no_null_iter().collect()
-        } else if let Ok(ca) = series.i64() {
-            ca.into_no_null_iter().map(|v| v as f64).collect()
-        } else {
-            return Err(EconError::InvalidSpecification {
-                message: format!("Column '{}' must be numeric", col),
-            });
-        };
-        x_alt_specific.push(vals);
-    }
+    let x_alt_specific: Vec<&[f64]> = alt_specific_cols.iter().map(|c| cols.numeric(c)).collect();
 
     let n_ind_specific = ind_specific_cols.len();
-    let mut z_ind_specific: Vec<Vec<f64>> = Vec::new();
-    for col in ind_specific_cols {
-        let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
-            column: col.to_string(),
-            available: df
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-        let vals: Vec<f64> = if let Ok(ca) = series.f64() {
-            ca.into_no_null_iter().collect()
-        } else if let Ok(ca) = series.i64() {
-            ca.into_no_null_iter().map(|v| v as f64).collect()
-        } else {
-            return Err(EconError::InvalidSpecification {
-                message: format!("Column '{}' must be numeric", col),
-            });
-        };
-        z_ind_specific.push(vals);
-    }
+    let z_ind_specific: Vec<&[f64]> = ind_specific_cols.iter().map(|c| cols.numeric(c)).collect();
 
     let n_gamma = n_ind_specific * (n_alternatives - 1);
     let n_params = n_alt_specific + n_gamma;
@@ -538,7 +447,7 @@ pub fn run_mlogit(
 
     let mlogit_data = MlogitData::new(
         &choice_situations,
-        &choices,
+        choices,
         &x_alt_specific,
         &z_ind_specific,
         n_alt_specific,
@@ -661,10 +570,9 @@ pub fn run_mlogit(
     }
 
     let mut choice_counts = vec![0usize; n_alternatives];
-    for row_idx in 0..n_rows {
-        if choices[row_idx] > 0.5 {
-            let alt_idx = alt_to_idx[&alt_ids[row_idx]];
-            choice_counts[alt_idx] += 1;
+    for (&c, &a) in choices.iter().zip(&alt.codes).take(n_rows) {
+        if c > 0.5 {
+            choice_counts[a as usize] += 1;
         }
     }
 
@@ -723,7 +631,114 @@ pub fn run_conditional_logit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    /// Case data for tests that compare no R value.
+    fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
+        crate::test_support::load_case(id)
+    }
+
+    fn null_values(r: EconResult<MlogitResult>) -> (String, usize) {
+        match r {
+            Err(EconError::NullValues { column, count }) => (column, count),
+            other => panic!("expected NullValues, got {other:?}"),
+        }
+    }
+
+    /// A missing choice, attribute or id is refused, as R's mlogit refuses it; it was read
+    /// as 0 (or grouped as one situation "").
+    #[test]
+    fn test_na_conditional_logit_missing_cells_refused() {
+        let (_, ds) = case_data("disc_choice_na");
+        let cl = |id: &str, choice: &str, x: &[&str]| {
+            run_conditional_logit(&ds, id, "alt", choice, x, None)
+        };
+        assert_eq!(
+            null_values(cl("id", "choice_na", &["x", "w"])),
+            ("choice_na".to_string(), 2)
+        );
+        assert_eq!(
+            null_values(cl("id", "choice", &["x_na", "w"])),
+            ("x_na".to_string(), 1)
+        );
+        assert_eq!(
+            null_values(cl("id_na", "choice", &["x", "w"])),
+            ("id_na".to_string(), 1)
+        );
+        let ml = |id: &str, choice: &str, x: &[&str]| {
+            run_mlogit(&ds, id, "alt", choice, x, &["w"], None)
+        };
+        assert_eq!(
+            null_values(ml("id", "choice_na", &["x"])),
+            ("choice_na".to_string(), 2)
+        );
+        assert_eq!(
+            null_values(ml("id", "choice", &["x_na"])),
+            ("x_na".to_string(), 1)
+        );
+        assert_eq!(
+            null_values(ml("id_na", "choice", &["x"])),
+            ("id_na".to_string(), 1)
+        );
+    }
+
+    /// An Int64 attribute gives the fit of its Float64 copy.
+    #[test]
+    fn test_na_conditional_logit_int64_attribute() {
+        let (_, ds) = case_data("disc_choice_na");
+        let mut df = ds.df().clone();
+        let f = df
+            .column("x_int")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .with_name("x_int_f".into());
+        df.with_column(f).unwrap();
+        let ds = Dataset::new(df);
+        let a = run_conditional_logit(&ds, "id", "alt", "choice", &["x_int", "w"], None).unwrap();
+        let b = run_conditional_logit(&ds, "id", "alt", "choice", &["x_int_f", "w"], None).unwrap();
+        let tol = Tol::new(1e-12, 1e-14);
+        for (x, y) in a
+            .beta
+            .iter()
+            .zip(&b.beta)
+            .chain(a.beta_std_errors.iter().zip(&b.beta_std_errors))
+        {
+            assert!(tol.allows(*x, *y), "{x} vs {y}");
+        }
+        assert!(tol.allows(a.log_likelihood, b.log_likelihood));
+    }
+
+    #[test]
+    fn test_na_conditional_logit_text_attribute_refused() {
+        let (_, ds) = case_data("disc_choice_na");
+        match run_conditional_logit(&ds, "id", "alt", "choice", &["alt"], None) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "alt"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+    }
+
+    /// The conditional logit on mixed_logit.csv against mlogit's fit, Newton-polished in R
+    /// (mlogit itself stops with |gradient| ~ 1e-3, 1.5e-5 relative from the MLE).
+    #[test]
+    fn test_validate_conditional_logit_mixed_logit_data() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_logit");
+        let r = run_conditional_logit(&ds, "id", "alt", "choice", &["x", "w"], None).unwrap();
+        Check::new(&case)
+            .named("clogit_coef_tight", &r.alt_specific_vars, &r.beta, Tol::iterative(1e-6))
+            .named(
+                "clogit_se_tight",
+                &r.alt_specific_vars,
+                &r.beta_std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("clogit_loglik_tight", r.log_likelihood, Tol::stat(300))
+            .named("clogit_coef", &r.alt_specific_vars, &r.beta, Tol::iterative(1e-4))
+            .finish();
+        assert!(r.converged, "{r}");
+        assert_eq!(r.n_choice_situations, 300);
+    }
 
     fn create_mlogit_dataset() -> Dataset {
         let df = df! {
