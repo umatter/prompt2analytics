@@ -50,7 +50,8 @@
 //!
 //! These request fields of every registered tool must be matched by a rule:
 //!
-//! - an integer field, by [`Rule::Max`] with a numeric family (not [`Family::StringBytes`]);
+//! - an integer field, by [`Rule::Max`] with a numeric family (not one that
+//!   [`Family::counts_bytes`]);
 //! - a float field, by a numeric [`Rule::Max`] (a count or size given as a float, such as the
 //!   `n` of `power_t_test`) or, for a convergence tolerance, by [`Rule::Tolerance`];
 //! - an array field, an array element that is itself an array (`a[]`) or a tuple, by
@@ -208,6 +209,11 @@ families! {
     /// `P2A_LIMIT_OVERRIDES`. It is 100, as is the hosted [`Limits::max_groups`] budget of
     /// groups compared pairwise: a cap of 10 refused legitimate designs with a few dozen groups.
     DesignGroups => "design_groups", 100;
+    /// Missing-value markers a dataset is read with (`na_strings`): the CSV parser compares
+    /// every field with every marker, so the list is held to a few short markers.
+    NaMarkers => "na_markers", 32;
+    /// UTF-8 byte length of one missing-value marker (`na_strings[]`).
+    NaMarkerBytes => "na_marker_bytes", 64;
 }
 
 /// Hosted [`Limits::arima_fit_work`]: the slowest fit it allows takes about 16 s on a release
@@ -316,13 +322,19 @@ impl Family {
     fn index(self) -> usize {
         self as usize
     }
+
+    /// Whether a [`Rule::Max`] of this family bounds a string's UTF-8 length, not a number:
+    /// [`Family::StringBytes`] and [`Family::NaMarkerBytes`].
+    pub fn counts_bytes(self) -> bool {
+        matches!(self, Family::StringBytes | Family::NaMarkerBytes)
+    }
 }
 
 /// How one request field is checked.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Rule {
-    /// A number must not exceed the family cap by absolute value. For
-    /// [`Family::StringBytes`], a string's UTF-8 length must not exceed it instead.
+    /// A number must not exceed the family cap by absolute value. For a family that
+    /// [`Family::counts_bytes`], a string's UTF-8 length must not exceed it instead.
     Max(Family),
     /// A number must be at least [`Limits::min_tolerance`] (catches 0, negatives, `1e-300`).
     Tolerance,
@@ -1705,21 +1717,22 @@ impl Limits {
             };
         match rule.rule {
             Rule::Exempt(_) => Ok(()),
-            Rule::Max(Family::StringBytes) => {
-                let (Some(cap), Some(s)) = (self.cap(Family::StringBytes), value.as_str()) else {
+            Rule::Max(family) if family.counts_bytes() => {
+                let (Some(cap), Some(s)) = (self.cap(family), value.as_str()) else {
                     return Ok(());
                 };
                 let len = s.len() as u64;
                 if len <= cap {
                     return Ok(());
                 }
+                let key = family.key();
                 violation(
                     len.to_string(),
                     cap.to_string(),
-                    Family::StringBytes.key(),
+                    key,
                     format!(
                         "Parameter `{path}` is {len} bytes long, which exceeds this server's limit \
-                         of {cap} bytes (string_bytes) for `{tool_echo}`. Use a shorter value."
+                         of {cap} bytes ({key}) for `{tool_echo}`. Use a shorter value."
                     ),
                 )
             }
@@ -2496,6 +2509,8 @@ mod tests {
             (Family::TreeDepth, "tree_depth", 100),
             (Family::PowerSampleSize, "power_sample_size", 1_000_000),
             (Family::DesignGroups, "design_groups", 100),
+            (Family::NaMarkers, "na_markers", 32),
+            (Family::NaMarkerBytes, "na_marker_bytes", 64),
         ];
         assert_eq!(Family::ALL.len(), expect.len());
         for &(f, key, cap) in expect {

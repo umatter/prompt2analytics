@@ -574,6 +574,8 @@ Families (Off: none):
 | `tree_depth` | `max_depth`, `maxdepth` | 100 |
 | `power_sample_size` | the sample size `n` of `power_t_test` and `power_anova_test`, per group in two-sample and ANOVA designs (the top of the range in which they solve for `n`); `power_prop_test` is not capped | 1,000,000 |
 | `design_groups` | `power_anova_test` `groups` | 100 |
+| `na_markers` | missing-value markers of `load_dataset` and `create_dataset` (`na_strings`; the CSV parser compares every field with every marker); duplicates are refused | 32 |
+| `na_marker_bytes` | UTF-8 bytes of one missing-value marker (`na_strings[]`) | 64 |
 
 Row classes and tolerance (Off: none):
 

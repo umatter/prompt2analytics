@@ -253,8 +253,8 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("collaborative_tmle", "max_covariates", Max(ListLength)),
         p("collaborative_tmle", "ps_lower", Exempt(TRIM)),
         p("collaborative_tmle", "ps_upper", Exempt(TRIM)),
-        p("create_dataset", "na_strings", UniqueList(ListLength)),
-        p("create_dataset", "na_strings[]", Max(StringBytes)),
+        p("create_dataset", "na_strings", UniqueList(NaMarkers)),
+        p("create_dataset", "na_strings[]", Max(NaMarkerBytes)),
         p("descriptive_medpolish", "eps", Tolerance),
         p("evalue", "baseline_risk", Exempt(CLOSED_FORM)),
         p("evalue", "ci_lower", Exempt(CLOSED_FORM)),
@@ -395,8 +395,8 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("linalg_toeplitz", "row", SquareLen),
         p("linalg_toeplitz", "column[]", Exempt(ARRAY_VALUE)),
         p("linalg_toeplitz", "row[]", Exempt(ARRAY_VALUE)),
-        p("load_dataset", "na_strings", UniqueList(ListLength)),
-        p("load_dataset", "na_strings[]", Max(StringBytes)),
+        p("load_dataset", "na_strings", UniqueList(NaMarkers)),
+        p("load_dataset", "na_strings[]", Max(NaMarkerBytes)),
         p("ltmle", "covariates", ArrayLen(ListLength)),
         p("ltmle", "ps_lower", Exempt(TRIM)),
         p("ltmle", "ps_upper", Exempt(TRIM)),
@@ -1109,13 +1109,17 @@ mod tests {
         (Family::TreeDepth, "ml_random_forest", "max_depth"),
         (Family::PowerSampleSize, "power_t_test", "n"),
         (Family::DesignGroups, "power_anova_test", "groups"),
+        (Family::NaMarkers, "load_dataset", "na_strings"),
+        (Family::NaMarkerBytes, "load_dataset", "na_strings[]"),
     ];
 
     fn value_of_size(f: Family, n: u64) -> Value {
         match f {
-            Family::ListLength => json!((0..n).map(|i| format!("c{i}")).collect::<Vec<_>>()),
+            Family::ListLength | Family::NaMarkers => {
+                json!((0..n).map(|i| format!("c{i}")).collect::<Vec<_>>())
+            }
             Family::ArrayLength => json!(vec![0.5; n as usize]),
-            Family::StringBytes => json!("a".repeat(n as usize)),
+            Family::StringBytes | Family::NaMarkerBytes => json!("a".repeat(n as usize)),
             _ => json!(n),
         }
     }
@@ -1130,13 +1134,18 @@ mod tests {
                 f.key()
             );
         }
+        // An element path `a[]` is given as a one-element array `a`.
+        let args = |field: &str, value: Value| match field.strip_suffix("[]") {
+            Some(array) => json!({ array: [value] }),
+            None => json!({ field: value }),
+        };
         for &(f, tool, field) in REPRESENTATIVE {
             let cap = h.cap(f).unwrap();
             assert!(
-                hosted(tool, json!({ field: value_of_size(f, cap) })).is_ok(),
+                hosted(tool, args(field, value_of_size(f, cap))).is_ok(),
                 "{tool}.{field} at cap"
             );
-            let v = hosted(tool, json!({ field: value_of_size(f, cap + 1) })).unwrap_err();
+            let v = hosted(tool, args(field, value_of_size(f, cap + 1))).unwrap_err();
             assert_eq!(
                 (v.parameter.as_str(), v.override_key),
                 (field, f.key()),
@@ -2328,7 +2337,7 @@ mod tests {
     fn every_capped_scalar_rule_refuses_1e15_and_off_accepts_it() {
         for r in PARAM_RULES {
             let Rule::Max(f) = r.rule else { continue };
-            if f == Family::StringBytes || r.path.contains(['.', '[']) {
+            if f.counts_bytes() || r.path.contains(['.', '[']) {
                 continue;
             }
             let tool = if r.tool == "*" { "__generic__" } else { r.tool };
@@ -2414,6 +2423,45 @@ mod tests {
         }
     }
 
+    /// The CSV parser compares every field with every missing-value marker, so the hosted
+    /// profile holds the markers to a few short strings (na_markers, na_marker_bytes).
+    #[test]
+    fn na_strings_markers_are_few_and_short() {
+        let markers = |n: usize| (0..n).map(|i| format!("m{i}")).collect::<Vec<_>>();
+        for tool in ["load_dataset", "create_dataset"] {
+            let args = |na: Vec<String>| json!({"path": "a.csv", "name": "d", "csv_content": "a\n1\n", "na_strings": na});
+            assert!(hosted(tool, args(markers(32))).is_ok(), "{tool}");
+            let v = hosted(tool, args(markers(33))).unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key),
+                ("na_strings", "na_markers"),
+                "{tool}"
+            );
+            assert!(
+                v.message.contains("has 33 elements") && v.message.contains("limit of 32"),
+                "{}",
+                v.message
+            );
+            assert!(hosted(tool, args(vec!["x".repeat(64)])).is_ok(), "{tool}");
+            let v = hosted(tool, args(vec!["x".repeat(65)])).unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key),
+                ("na_strings[]", "na_marker_bytes"),
+                "{tool}"
+            );
+            assert!(
+                v.message.contains("65 bytes long") && v.message.contains("limit of 64 bytes"),
+                "{}",
+                v.message
+            );
+            assert!(
+                Limits::off()
+                    .check_tool_arguments(tool, &args(markers(500)))
+                    .is_ok()
+            );
+        }
+    }
+
     #[test]
     fn ordered_model_levels_are_limited() {
         let args = |levels: Value| json!({"dataset": "d", "y": "y", "x": ["x1"], "levels": levels});
@@ -2479,7 +2527,7 @@ mod schema_tests {
             (Kind::TooDeep, _) => false,
             (_, Rule::Exempt(_)) => true,
             (Kind::Integer | Kind::IntegerElems | Kind::Float | Kind::FloatElems, Rule::Max(f)) => {
-                f != Family::StringBytes
+                !f.counts_bytes()
             }
             (Kind::Float, Rule::Tolerance) => true,
             (Kind::Array, Rule::ArrayLen(_) | Rule::UniqueList(_) | Rule::SquareLen) => true,
@@ -2509,9 +2557,10 @@ mod schema_tests {
 
     #[test]
     fn classification_matches_what_check_value_checks() {
-        use Family::{Lags, ListLength, StringBytes};
+        use Family::{Lags, ListLength, NaMarkerBytes, StringBytes};
         assert!(classifies(Kind::Integer, Rule::Max(Lags)));
         assert!(!classifies(Kind::Integer, Rule::Max(StringBytes)));
+        assert!(!classifies(Kind::Integer, Rule::Max(NaMarkerBytes)));
         assert!(!classifies(Kind::Integer, Rule::Tolerance));
         assert!(classifies(Kind::Float, Rule::Tolerance));
         assert!(classifies(Kind::Float, Rule::Max(Lags)));
