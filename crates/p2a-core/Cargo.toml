@@ -20,7 +20,7 @@ full = ["visualization", "forecasting", "file-formats", "database", "spectral-an
 ci = ["visualization", "forecasting", "file-formats", "spectral-analysis"]
 cuda = ["dep:cudarc"]
 visualization = ["dep:plotters", "dep:plotlars", "dep:image", "dep:base64"]
-forecasting = ["dep:arima", "dep:augurs-core", "dep:augurs-mstl", "dep:augurs-ets", "dep:stlrs"]
+forecasting = ["dep:augurs-core", "dep:augurs-mstl", "dep:augurs-ets", "dep:stlrs"]
 file-formats = ["dep:calamine"]
 database = ["dep:rusqlite", "dep:duckdb"]
 spectral-analysis = ["dep:rustfft"]
@@ -48,7 +48,6 @@ regex.workspace = true
 bytecount.workspace = true
 
 # Time series forecasting (optional - enable with "forecasting" feature)
-arima = { workspace = true, optional = true }
 augurs-core = { workspace = true, optional = true }
 augurs-mstl = { workspace = true, optional = true }
 augurs-ets = { workspace = true, optional = true }
