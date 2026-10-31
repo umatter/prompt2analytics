@@ -158,7 +158,7 @@ impl MissingSummary {
             return None;
         }
         let mut detail: Vec<String> = Vec::new();
-        if self.n_total % 2 == 0 {
+        if self.n_total.is_multiple_of(2) {
             detail.push(format!("two samples of {}", self.n_total / 2));
         }
         if !self.by_column.is_empty() {
