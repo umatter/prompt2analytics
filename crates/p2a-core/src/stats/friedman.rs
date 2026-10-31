@@ -788,7 +788,7 @@ mod tests {
         assert!(m.contains(na) && m.contains("'block'"), "{m}");
     }
 
-    /// Design 2.4 fixture: an Int64 response equals its Float64 cast; a text value column and
+    /// Column-type fixture: an Int64 response equals its Float64 cast; a text value column and
     /// an absent column are refused with the variant that names the problem.
     #[test]
     fn test_validate_na_friedman_dtypes_and_errors() {

@@ -1,5 +1,5 @@
-//! Input checks and target and feature extraction shared by the ML entry points (T2 design
-//! 1.6: ML methods refuse missing values).
+//! Input checks and target and feature extraction shared by the ML entry points (ML
+//! methods refuse missing values).
 //!
 //! The dataset wrappers (`run_gbm`, `run_xgboost`, `run_lightgbm`, `run_adaboost`,
 //! `run_mboost`, `run_cart`, `run_c50`, `run_ctree`, `run_cubist`, `run_quantile_rf`) read
@@ -124,7 +124,9 @@ mod tests {
 
     const X: [&str; 2] = ["x1", "x2"];
 
-    /// The 30-row fixture of plans/T2/T2-WP17.md (R cross-check: Appendix A.2, fixture.R).
+    /// The 30-row ML fixture, built with the same IEEE operations as the R cross-check (so
+    /// R sees the same values bit for bit): y_na and cls_na are missing at row 4, x1_na at
+    /// row 7.
     /// Rows listed in `skip` are left out (complete-row comparisons). An empty field is
     /// missing (T2-WP01 loader).
     fn fixture_csv(skip: &[usize]) -> String {
@@ -374,8 +376,7 @@ mod tests {
     fn test_na_ml_wrappers_refuse_missing_values() {
         // WT-2. Before the fix a null target is the buffer value 0.0 (Ok, n_obs = 30), and a
         // null feature is EconError::DesignError(NullValues ..). R: randomForest "NA not
-        // permitted in response", gbm "Missing values are not allowed in the response"
-        // (Appendix A.1).
+        // permitted in response", gbm "Missing values are not allowed in the response".
         let d = ml_dataset();
         for (name, fit) in numeric_fits() {
             let e = fit(&d, "y_na", &X).expect_err(name);

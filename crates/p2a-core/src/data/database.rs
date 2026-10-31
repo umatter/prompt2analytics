@@ -367,7 +367,7 @@ impl<'a> SqlLexer<'a> {
                     // then a digit or `.`, and the quote still starts an escape
                     // string whose `\'` the engine would honour. The lexer cannot
                     // tell that apart from a plain string cheaply, so it fails
-                    // closed (over-rejection is acceptable per the plan).
+                    // closed (refusing a few valid queries is the safe side).
                     if after_e && i >= 2 && (bytes[i - 2].is_ascii_digit() || bytes[i - 2] == b'.')
                     {
                         return Err(DatabaseError::Forbidden(

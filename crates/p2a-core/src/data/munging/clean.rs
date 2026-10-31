@@ -1980,7 +1980,7 @@ mod tests {
 
     #[test]
     fn test_na_fill_mean_fixtures() {
-        // Design 2.4: Int64 like Float64 (R: mean(c(1, 4)) = 2.5); a named text column is an
+        // Int64 like Float64 (R: mean(c(1, 4)) = 2.5); a named text column is an
         // error for mean; an absent column is named; with no column named, text columns are
         // skipped as before.
         let i = fill_na(
@@ -2169,7 +2169,7 @@ mod tests {
             None,
         ));
         assert!(e.contains("'v'") && e.contains("numeric"), "{e}");
-        // Design 2.4: Int64 accepted.
+        // Int64 accepted.
         let i = clip(
             &Dataset::new(df!("v" => [1i64, 9]).unwrap()),
             "v",

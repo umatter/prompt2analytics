@@ -553,7 +553,7 @@ pub fn run_twang(
 ) -> EconResult<TwangResult> {
     let config = config.unwrap_or_default();
 
-    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract treatment variable
     let t = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;

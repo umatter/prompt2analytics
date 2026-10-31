@@ -1677,7 +1677,7 @@ mod tests {
         assert_eq!(
             ds.df().column("k").unwrap().dtype(),
             &polars::prelude::DataType::Int64
-        ); // design 2.2
+        ); // k is written without a decimal point, so polars reads it as Int64
         let (exog, endog, instr) = (&["w", "k"], &["x"], &["z1", "z2"]);
         let r = run_iv2sls(&ds, "y", exog, endog, instr, false).unwrap();
         let h = run_iv2sls(&ds, "y", exog, endog, instr, true).unwrap();

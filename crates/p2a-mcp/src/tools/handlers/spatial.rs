@@ -1680,7 +1680,8 @@ mod tests {
         serde_json::from_value(v).unwrap()
     }
 
-    /// The 25 integer points of moran_int_points.R (plan T2-WP14, Appendix A.3), i = 0..24:
+    /// The 25 integer points of the Moran's I cross-check (the R script is in the doc
+    /// comment of `test_mcp_spatial_neighbors_and_moran_int64_match_r`), i = 0..24:
     /// gx = (40 i^2 + 3 i) mod 101, gy = (2 i^2 + 7 i + 5) mod 97,
     /// v = (gx + gy) div 10 + (3 i) mod 7, b = (v >= 13) as 0/1. No kNN ties for k = 4.
     /// `float`: Float64 copies (the same values), else Int64.
@@ -1710,7 +1711,8 @@ mod tests {
         "u1", "u10", "u11", "u12", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9",
     ];
 
-    /// Dataset C of spml_entity_order.R (plan T2-WP14, Appendix A.2; the same formulas as
+    /// Dataset C of spml_entity_order.R (reproduced in validation/econometrics/splm.md;
+    /// the same formulas as
     /// the p2a-core splm fixture, whose test helpers are not visible here): entity k on a
     /// 3 x 4 grid at ((k-1) mod 4, (k-1) div 4) with label `C_LABELS[k-1]`, Int64 time
     /// 2001..=2005, x = sin(0.7 k + 1.3 t) + 0.1 k and y_t = (I - 0.5 W)^-1
@@ -1758,7 +1760,33 @@ mod tests {
         (panel, coords)
     }
 
-    /// R: moran_int_points.R (plan T2-WP14, Appendix A.3; base R, spdep is not installed).
+    /// R (base R; spdep is not installed): Moran's I with the randomisation variance on
+    /// kNN-4 row-standardised weights of these points, as `spdep::moran.test`:
+    ///
+    /// ```r
+    /// options(digits = 17)
+    /// i <- 0:24
+    /// gx <- (40L * i * i + 3L * i) %% 101L
+    /// gy <- (2L * i * i + 7L * i + 5L) %% 97L
+    /// v <- (gx + gy) %/% 10L + (3L * i) %% 7L
+    /// stopifnot(!anyDuplicated(paste(gx, gy)))
+    /// D <- as.matrix(dist(cbind(gx, gy)))
+    /// k <- 4L; n <- length(i)
+    /// nb <- lapply(1:n, function(a) { d <- D[a, ]; d[a] <- Inf; o <- order(d); o[1:k] })
+    /// gap <- sapply(1:n, function(a) { d <- sort(D[a, -a]); d[k + 1] - d[k] })
+    /// W <- matrix(0, n, n); for (a in 1:n) W[a, nb[[a]]] <- 1 / k
+    /// z <- v - mean(v); S0 <- sum(W)
+    /// I <- n / S0 * sum(W * outer(z, z)) / sum(z^2)
+    /// EI <- -1 / (n - 1)
+    /// S1 <- 0.5 * sum((W + t(W))^2); S2 <- sum((rowSums(W) + colSums(W))^2)
+    /// b2 <- (sum(z^4) / n) / (sum(z^2) / n)^2
+    /// VI <- (n * ((n^2 - 3 * n + 3) * S1 - n * S2 + 3 * S0^2) -
+    ///        b2 * ((n^2 - n) * S1 - 2 * n * S2 + 6 * S0^2)) /
+    ///   ((n - 1) * (n - 2) * (n - 3) * S0^2) - EI^2
+    /// Z <- (I - EI) / sqrt(VI)
+    /// c(I = I, EI = EI, VI = VI, z = Z, p_greater = pnorm(Z, lower.tail = FALSE),
+    ///   p_two = 2 * pnorm(-abs(Z)), min_gap = min(gap))  # min_gap > 0: no kNN ties
+    /// ```
     #[test]
     fn test_mcp_spatial_neighbors_and_moran_int64_match_r() {
         let (rt, s) = server_with(vec![("pts", points_df(false)), ("ptsf", points_df(true))]);
@@ -1939,7 +1967,8 @@ mod tests {
         }
     }
 
-    /// R: spml_entity_order.R (plan T2-WP14, Appendix A.2): within spatial-lag fit with W
+    /// R: spml_entity_order.R (validation/econometrics/splm.md): within spatial-lag fit
+    /// with W
     /// rows in sorted label order.
     #[test]
     fn test_mcp_spatial_panel_ml_sorted_ids_match_r() {

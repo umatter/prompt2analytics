@@ -238,7 +238,7 @@ mod http_paths {
     }
 
     /// Every tool from X-1's evidence plus the merged duplicates: (tool,
-    /// field, value, hosted limit fixed by design 4.2).
+    /// field, value, hosted limit).
     const X1_CASES: &[(&str, &str, u64, Option<&str>)] = &[
         ("timeseries_arma_to_ma", "lag_max", ABSURD, Some("1000")),
         ("timeseries_arma_acf", "lag_max", ABSURD, Some("1000")),
@@ -437,7 +437,7 @@ mod http_paths {
         assert!(!ROW_RULES.is_empty());
         let cfg = open_public_config();
         let hosted = limits::resolve(&cfg).unwrap();
-        // Design 4.3 caps, one dataset just above each.
+        // The row-class caps, one dataset just above each.
         let class = |c: RowClass| match c {
             RowClass::Dense => ("dense", 5_000usize),
             RowClass::Cubic => ("cubic", 2_000),

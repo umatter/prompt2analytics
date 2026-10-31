@@ -768,7 +768,8 @@ fn main() {
         results.push(result);
     }
 
-    // --- Fisher Exact Test (pre-computed PMF, early termination) ---
+    // --- Fisher Exact Test (2 x 2, as R's fisher.test: exact p-value, conditional MLE
+    // odds ratio and its exact interval) ---
     for n in [100, 1000, 10000] {
         // Create a 2x2 contingency table with total ~n
         let a = (n as f64 * 0.3) as f64;

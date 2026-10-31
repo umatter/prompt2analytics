@@ -6,7 +6,9 @@
 use crate::common::*;
 use std::path::{Path, PathBuf};
 
-/// Writes the 25 integer points of moran_int_points.R (plan T2-WP14, Appendix A.3) to
+/// Writes the 25 integer points of the base-R Moran's I cross-check (the script is in the
+/// doc comment of `test_mcp_spatial_neighbors_and_moran_int64_match_r`,
+/// crates/p2a-mcp/src/tools/handlers/spatial.rs) to
 /// `dir/name` as CSV with columns gx, gy, v, for i = 0..24:
 /// gx = (40 i^2 + 3 i) mod 101, gy = (2 i^2 + 7 i + 5) mod 97,
 /// v = (gx + gy) div 10 + (3 i) mod 7 (no kNN ties for k = 4).
@@ -87,7 +89,8 @@ fn model<'a>(cmd: &'a str, dataset: &'a str, durbin: bool) -> Vec<&'a str> {
     args
 }
 
-/// R: moran_int_points.R (plan T2-WP14, Appendix A.3; base R, because spdep is not
+/// R: the base-R script in the doc comment of the MCP test
+/// `test_mcp_spatial_neighbors_and_moran_int64_match_r` (spdep is not
 /// installed): Moran's I with the randomisation variance on kNN-4 row-standardised
 /// weights.
 #[test]

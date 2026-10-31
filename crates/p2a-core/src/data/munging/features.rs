@@ -1689,7 +1689,7 @@ mod tests {
 
     #[test]
     fn test_na_bin_fixtures() {
-        // Design 2.4: Int64 accepted (R cut(1:4, 2): 0 0 1 1); text refused (R: cut("1.5", 2)
+        // Int64 accepted (R cut(1:4, 2): 0 0 1 1); text refused (R: cut("1.5", 2)
         // is an error, "'x' must be numeric"); an absent column is named; a column without an
         // observed value has no equal-width or quantile edges.
         let i = bin(

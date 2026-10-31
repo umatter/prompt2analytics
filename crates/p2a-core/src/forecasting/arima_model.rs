@@ -1719,7 +1719,7 @@ mod tests {
         );
         assert_non_numeric(econ(&run_arima(&ds, "lab", 1, 0, 0).unwrap_err()), "lab");
         assert_not_found(econ(&run_arima(&ds, "nope", 1, 0, 0).unwrap_err()), "nope");
-        // the one Rust-built fixture (design 2.2): NaN is missing
+        // the one Rust-built fixture (the R harness cannot write a NaN): NaN is missing
         let nan = with_nan_at(&arima_series(), "a", 17);
         assert_null_values(econ(&run_arima(&nan, "a", 1, 0, 0).unwrap_err()), "a", 1);
     }

@@ -748,7 +748,7 @@ impl fmt::Display for FuzzyRdResult {
 
 /// Largest local-polynomial order `p` accepted by the RD estimators.
 ///
-/// This is a method-level cap (Tier 0 design 3.1) and holds in every mode,
+/// This is a method-level cap and holds in every mode,
 /// not only on the hosted server. rdrobust allows orders 0..=20, but with the
 /// uncentred polynomial design used here orders above 4 are already
 /// numerically meaningless; 10 leaves ample room while keeping every design

@@ -184,10 +184,10 @@ unused_imports = "allow"
 unused_assignments = "allow"
 # Allow unused comparisons (usize >= 0 in tests)
 unused_comparisons = "allow"
-
-[workspace.lints.rustdoc]
 # Allow missing documentation during development
 missing_docs = "allow"
+
+[workspace.lints.rustdoc]
 # Allow bare URLs in documentation (common in references sections)
 bare_urls = "allow"
 # Allow broken intra-doc links (brackets in math notation)

@@ -3992,7 +3992,7 @@ mod tests {
             serde_json::json!({"n_total": 200, "n_used": 197, "n_dropped": 3,
                                "by_column": {"firm_label": 3}})
         );
-        // An absent id column (design 2.4 (d)).
+        // An absent id column.
         match run_ols_clustered(&ds, "inv", &x, "nope", None).unwrap_err() {
             EconError::ColumnNotFound { column, available } => {
                 assert_eq!(column, "nope");
@@ -4074,14 +4074,14 @@ mod tests {
             ),
             e => panic!("{e:?}"),
         }
-        // Text ids (design 2.4 (c)).
+        // Text ids.
         match run_vcov_driscoll_kraay(&ds, "inv", &x, "firm_label", None, None).unwrap_err() {
             EconError::InvalidSpecification { message } => {
                 assert!(message.contains("Time column 'firm_label'"), "{message}")
             }
             e => panic!("{e:?}"),
         }
-        // An absent time column (design 2.4 (d)).
+        // An absent time column.
         assert!(matches!(
             run_vcov_driscoll_kraay(&ds, "inv", &x, "nope", None, None),
             Err(EconError::ColumnNotFound { .. })

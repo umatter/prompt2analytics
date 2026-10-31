@@ -2242,7 +2242,7 @@ pub fn run_gsynth(
     x_cols: &[&str],
     config: GsynthConfig,
 ) -> EconResult<GsynthResult> {
-    // One balanced panel, units in R factor() order (T2 design 1.6: missing values,
+    // One balanced panel, units in R factor() order (missing values,
     // missing cells and duplicate cells are refused).
     let GsynthPanel {
         units: unique_units,

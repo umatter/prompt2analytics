@@ -436,7 +436,7 @@ pub fn run_ipw_treatment(
         });
     }
 
-    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract outcome variable
     let y = DesignMatrix::extract_column(dataset.df(), outcome)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
@@ -1061,7 +1061,7 @@ pub fn run_doubly_robust(
         });
     }
 
-    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract variables
     let y = DesignMatrix::extract_column(dataset.df(), outcome)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
@@ -2393,7 +2393,7 @@ mod tests {
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("causal_mediation_na");
         let df = ds.df();
-        // T2 design 2.2: the dtypes the WP13 tests rely on
+        // the dtypes the T2-WP13 tests rely on
         assert_eq!(df.column("d").unwrap().dtype(), &DataType::Int64);
         assert_eq!(df.column("d_na").unwrap().dtype(), &DataType::Int64);
         assert_eq!(df.column("d_txt").unwrap().dtype(), &DataType::String);
@@ -2454,7 +2454,7 @@ mod tests {
 
     #[test]
     fn test_validate_na_ipw_nan_outcome_is_missing() {
-        // T2 design 2.2: a NaN cell is missing, like a null.
+        // A NaN cell is missing, like a null.
         let (case, ds) = crate::test_support::load_case("causal_mediation_na");
         let data = na_fixtures::with_nan(&na_fixtures::complete_rows(&case, &ds), "y", 0);
         match run_ipw_treatment(&data, "y", "d", &["x1", "x2"], IpwConfig::default()) {
@@ -2504,8 +2504,8 @@ pub(super) mod na_fixtures {
         Dataset::new(df)
     }
 
-    /// `ds` with column `col` as Float64 and a NaN at `row` (the one Rust-built NaN fixture
-    /// of T2 design 2.2: the harness cannot write a NaN).
+    /// `ds` with column `col` as Float64 and a NaN at `row` (the one Rust-built NaN fixture:
+    /// the R harness cannot write a NaN).
     pub(crate) fn with_nan(ds: &Dataset, col: &str, row: usize) -> Dataset {
         let mut df = ds.df().clone();
         let values: Vec<Option<f64>> = df

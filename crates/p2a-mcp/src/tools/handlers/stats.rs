@@ -2633,6 +2633,8 @@ mod tests {
                 .flat_map(nums)
                 .collect()
         };
+        // deviation TOOL-23: center = false switches the correlation matrix off but still
+        // centres the data (R's cov.wt(center = FALSE) does not), so center is left out.
         let v = json_of(&call(serde_json::json!({})));
         let ml = json_of(&call(serde_json::json!({"method": "ML"})));
         Check::new(&case)
@@ -2943,6 +2945,14 @@ mod tests {
                 serde_json::json!({"column": col, "at": [15, 20, 25]}),
             ));
             let d = json_of(&call("density", c.clone()));
+            // deviation STAT-36: IQR types other than 7 are computed as type 7; only the
+            // default is pinned.
+            // deviation STAT-37: the density curve's grid is mislabelled when n is not a
+            // power of two, and
+            // deviation STAT-65: its default bandwidth is not bw.nrd0, so only its n is
+            // pinned.
+            // deviation STAT-87: fivenum's `iqr` field is the hinge spread, not R's IQR,
+            // and is not pinned.
             check
                 .vector(&format!("fivenum_{sfx}"), &five(&f), Tol::coef(12))
                 .scalar(n_key, num(&f["n"]), Tol::exact())

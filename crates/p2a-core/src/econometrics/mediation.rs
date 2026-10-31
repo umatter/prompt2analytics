@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_validate_na_mediation_reports_missing() {
-        // T2 design 1.5: the dropped rows are reported.
+        // The dropped rows are reported.
         let (case, ds) = crate::test_support::load_case("causal_mediation_na");
         let r = run_mediation_analysis(&ds, "y", "d", "m", &["x1", "x2"], na_cfg(0.05)).unwrap();
         Check::new(&case)
@@ -1311,7 +1311,7 @@ mod tests {
 
     #[test]
     fn test_validate_na_mediation_errors_name_the_column() {
-        // T2 design 2.4 (c) and (d).
+        // A text column and an absent column are named.
         let (_case, ds) = crate::test_support::load_case("causal_mediation_na");
         let run = |data: &Dataset, d: &str, m: &str, x: &[&str]| {
             run_mediation_analysis(data, "y", d, m, x, na_cfg(0.05))

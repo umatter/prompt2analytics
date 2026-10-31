@@ -680,7 +680,7 @@ mod tests {
     fn test_ppr_projection_sort_is_total() {
         // partial_cmp(..).unwrap_or(Equal) is not a total order once a projection is NaN,
         // and Rust's sort may then panic ("user-provided comparison function does not
-        // correctly implement a total order"; the review saw it through ml_ppr).
+        // correctly implement a total order").
         // total_cmp: -1 < -0 < 0 < 0.5 < 2 < NaN.
         let projections = [0.5, f64::NAN, -1.0, 0.0, -0.0, 2.0];
         let mut idx = vec![9usize; 6];

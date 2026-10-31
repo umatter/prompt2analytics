@@ -104,7 +104,7 @@ pub fn print_error(msg: &str, format: &OutputFormat) {
 }
 
 // =============================================================================
-// Rows dropped because of missing values (Tier 2 design 1.5)
+// Rows dropped because of missing values
 // =============================================================================
 
 /// `Note: <MissingSummary::note()>` for text and table output, e.g.
