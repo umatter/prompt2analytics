@@ -711,7 +711,7 @@ impl Factor {
             let i = u32::try_from(i).map_err(|_| too_many_levels())?;
             if position.insert(label.as_str(), i).is_some() {
                 return Err(EconError::InvalidSpecification {
-                    message: format!("level '{label}' appears twice in the level order"),
+                    message: format!("level '{}' appears twice in the level order", shown(label)),
                 });
             }
         }
@@ -722,7 +722,8 @@ impl Factor {
                 None => {
                     return Err(EconError::InvalidSpecification {
                         message: format!(
-                            "level '{label}' is not in the given level order ({})",
+                            "level '{}' is not in the given level order ({})",
+                            shown(label),
                             order_preview(order)
                         ),
                     });
@@ -748,8 +749,9 @@ impl Factor {
                         _ => {
                             return Err(EconError::InvalidSpecification {
                                 message: format!(
-                                    "level '{label}' in the level order is not a number, \
-                                     but the column levels are numeric"
+                                    "level '{}' in the level order is not a number, \
+                                     but the column levels are numeric",
+                                    shown(label)
                                 ),
                             });
                         }
@@ -767,14 +769,31 @@ impl Factor {
     }
 }
 
+/// A label as a refusal shows it: at most [`SHOWN_LABEL_BYTES`] bytes (cut at a character
+/// boundary), then "...".
+fn shown(label: &str) -> String {
+    if label.len() <= SHOWN_LABEL_BYTES {
+        return label.to_string();
+    }
+    let cut = (0..=SHOWN_LABEL_BYTES)
+        .rev()
+        .find(|&i| label.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}...", &label[..cut])
+}
+
+/// Bytes of a label a refusal shows.
+const SHOWN_LABEL_BYTES: usize = 24;
+
 /// "3 labels: 'a', 'b', 'c'" for a refusal: the length and at most the first five labels,
-/// so the message stays bounded however long the caller's order is.
+/// each cut by [`shown`], so the message stays bounded however long the caller's order and
+/// its labels are.
 fn order_preview(order: &[String]) -> String {
     const SHOWN: usize = 5;
     let mut labels: Vec<String> = order
         .iter()
         .take(SHOWN)
-        .map(|label| format!("'{label}'"))
+        .map(|label| format!("'{}'", shown(label)))
         .collect();
     if order.len() > SHOWN {
         labels.push("...".to_string());
@@ -1507,6 +1526,27 @@ mod tests {
         assert!(message.contains("'a'"), "{message}");
         assert!(message.contains("1000"), "{message}");
         assert!(!message.contains("L999"), "{message}");
+        assert!(message.len() < 300, "{} bytes: {message}", message.len());
+        // Each label is cut too: a long label in the order, a long observed label, and a long
+        // label the order repeats.
+        let long = "x".repeat(10_000);
+        let order = vec![long.clone(), "b".to_string()];
+        let message = invalid_message(cols.factor("s").with_level_order(&order));
+        assert!(message.contains("'a'"), "{message}");
+        assert!(message.len() < 300, "{} bytes", message.len());
+        let wide = frame(Series::new("s".into(), &[long.as_str(), "b"]));
+        let wide_cols = ColumnRequest::new(&wide).factor("s").extract().unwrap();
+        let message = invalid_message(wide_cols.factor("s").with_level_order(&strings(&["b"])));
+        assert!(message.len() < 300, "{} bytes", message.len());
+        let twice = vec![long.clone(), long];
+        let message = invalid_message(cols.factor("s").with_level_order(&twice));
+        assert!(message.contains("twice"), "{message}");
+        assert!(message.len() < 300, "{} bytes", message.len());
+        // Five long multi-byte labels in the order: still bounded in bytes.
+        let wide_order: Vec<String> = (0..1000)
+            .map(|i| format!("{i}{}", "é".repeat(500)))
+            .collect();
+        let message = invalid_message(cols.factor("s").with_level_order(&wide_order));
         assert!(message.len() < 300, "{} bytes: {message}", message.len());
     }
 
