@@ -609,11 +609,10 @@ fn assert_rows_match(text: &str, coefficients: &[OlsCoefficient]) {
     }
 }
 
-/// Printed and in-process value of the same computation. The CLI prints the
-/// shortest representation that reads back exactly, but serde_json's default
-/// float parser (no `float_roundtrip` feature) is not correctly rounded and can
-/// be an ulp or two off, so the comparison allows a few ulps.
-const SAME_COMPUTATION: Tol = Tol::new(1e-15, 0.0);
+/// Printed and in-process value of the same computation: equal. The CLI prints the
+/// shortest representation that reads back exactly, and serde_json parses it
+/// correctly rounded (the workspace enables its `float_roundtrip` feature).
+const SAME_COMPUTATION: Tol = Tol::new(0.0, 0.0);
 
 /// A JSON number equals `expected`, `null` standing for NaN.
 fn assert_json_num(v: &Value, expected: f64, what: &str) {

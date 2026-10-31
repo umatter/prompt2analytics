@@ -20,9 +20,8 @@ const SMOOTHERS_NOTE: &str = "Note: 4 of 60 rows dropped because of missing valu
 
 /// Every number of field `key` in the JSON text `json`: the value of each
 /// `"key": <number>` and the elements of each `"key": [<numbers>]`, read with
-/// `str::parse::<f64>`, which rounds correctly. This workspace builds serde_json without
-/// its `float_roundtrip` feature, and its default (best-effort) float parsing can read a
-/// shortest round-trip double 1 ulp off, so the exact comparisons read the text.
+/// `str::parse::<f64>`, which rounds correctly (as serde_json does too, since the workspace
+/// enables its `float_roundtrip` feature), so exact comparisons hold.
 fn json_numbers(json: &str, key: &str) -> Vec<f64> {
     let pattern = format!("\"{key}\":");
     let mut numbers = Vec::new();

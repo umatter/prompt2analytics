@@ -118,8 +118,8 @@ comparison is exact except the CLI text's grid, which is printed with 4 decimals
   error;
 - `test_validate_cli_reg_supsmu_na`: the printed grid equals R's to its 4 decimals; the
   `-F json` `fitted_sample` equals the smooth on the complete pairs exactly (the numbers
-  are read from the output text with `str::parse`, since serde_json's default float
-  parsing can be 1 ulp off).
+  are read from the output text with `str::parse`, which is correctly rounded, as
+  serde_json is too since the workspace enabled its `float_roundtrip` feature).
 
 Property tests, not registered (no R value):
 `test_mcp_regression_line_supsmu_too_few_complete_rows` and
