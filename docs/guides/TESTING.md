@@ -27,6 +27,11 @@ cargo test -- --nocapture
 
 # Run validation tests only
 cargo test -p p2a-core -- test_validate
+
+# NA extraction guard, and the Tier 2 MCP-path and CLI tests
+cargo test -p p2a-validation --test na_guard
+cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier2
+cargo test -p p2a-cli --no-default-features --features spectral-analysis --test tier2
 ```
 
 ### Test Categories
@@ -49,6 +54,13 @@ The p2a-core `tests/` directory includes `benchmark_ml_rust.rs` and `benchmark_f
 which are benchmarks and run for a long time in a debug build; use `--lib` or a named `--test` for a
 fast correctness loop. The p2a-mcp integration tests are listed in
 [p2a-mcp integration tests](#p2a-mcp-integration-tests).
+
+The MCP-path and CLI tests of the October 2026 review's Tier 2 packages live in two `tier2` test
+binaries, `crates/p2a-mcp/tests/tier2/` and `crates/p2a-cli/tests/tier2/`, with one module per
+package (`wp<nn>_<topic>.rs`); a package edits only its own module. The shared helpers are in each
+binary's `common.rs`: MCP `session_with(case_id)`, `session_with_datasets`, `call` (the dispatcher the
+HTTP API uses) and `text`; CLI `temp_session()`, whose `TempSession` runs the real `p2a` binary with
+`ok`, `err`, `json`, `json_docs`, `load` and `load_as`. The MCP binary needs the `http` feature.
 
 #### Validation Tests
 
@@ -82,6 +94,7 @@ socket.
 | `isolation.rs` | per-session directories, symbolic links, the disk quota, session export and import, the stale-directory purge | `#![cfg(feature = "http")]` | the CI set |
 | `uploads.rs` | `upload_dataset` decodes an uploaded Parquet file from the request's bytes and stores nothing (not in the session directory, not in the temporary folder) | `#![cfg(feature = "http")]` | the CI set |
 | `serve_limits.rs` | `serve` and `start_http_transport` install the request limits of an open public configuration, overrides included, on a bound socket; while it runs, a start of other limits (`serve`, `start_transport` over HTTP or stdio, `start_embedded_server`, which returns the refusal) or of the same limits with another allocation ceiling or session-directory setting is refused | `#![cfg(feature = "http")]` | the CI set |
+| `tier2/` (`main.rs`, one module per package) | Tier 2 MCP-path tests through `call_tool_with_session`: missing values, integer columns and the R pins of the migrated tools | `#![cfg(feature = "http")]` | the CI set |
 | `serve_limits_hold.rs` | a server holds its limits until its last connection or websocket session closes: after an aborted `start_http_transport` with a keep-alive connection open, and after a graceful shutdown with a websocket session open, a local start is refused and the old connection keeps the caps; once it closes, the local start is accepted. Its tests run one at a time, since each ends by installing the off profile | `#![cfg(feature = "http")]`; the websocket test needs `websocket` | the CI set |
 
 Commands for the feature sets CI does not build:
@@ -107,6 +120,9 @@ Test runtime varies by system resources. Approximate times on a modern laptop:
 | Discrete choice tests | `cargo test discrete` | 10-15 seconds |
 | ML clustering tests | `cargo test clustering` | 15-30 seconds |
 | Full test suite | `cargo test` | 2-5 minutes |
+| NA guard | `cargo test -p p2a-validation --test na_guard` | about 1 second (after the build) |
+| Tier 2 MCP-path tests | `cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier2` | under 1 second (after the build) |
+| Tier 2 CLI tests | `cargo test -p p2a-cli --no-default-features --features spectral-analysis --test tier2` | a few seconds (after the build) |
 
 **Note**: First run will be slower due to compilation.
 
@@ -154,6 +170,30 @@ let df = df! {
     "x" => [1.0, 2.0, 3.0, 4.0, 5.0],
 }?;
 ```
+
+### Missing values and integer columns
+
+Fixtures for code that reads user columns (`p2a_core::data::columns`, CLAUDE.md "Reading user
+columns") follow the R harness's conventions:
+
+- An empty CSV field is missing, and the harness writes R's `NA` as an empty field.
+- Whole-number doubles load as `Int64` (assert `is.integer` in the case).
+- Every dataset with missing cells keeps a never-missing `id` column.
+- NaN and ±Inf exist only in Rust-built fixtures (`f64::NAN`, `f64::INFINITY`).
+
+Every migrated entry point gets four fixture tests that fail before the migration:
+
+- an `Int64` column gives the same result as the same values as `Float64`;
+- a null: `NaPolicy::Omit` gives the complete-row result plus `missing.n_dropped`, and `Fail` gives
+  `NullValues` naming the column;
+- a text column gives `NonNumericColumn`;
+- an absent column gives `ColumnNotFound`.
+
+A test is registered in `validation/methods/*.json`, and named `test_validate_*`, exactly when it
+compares at least one value of its R case through `p2a_validation::Check` (a count R computes counts).
+A test that checks only an error variant, a text or a property is named `test_na_*`, `test_mcp_*` or
+`test_cli_*` and is not registered; it loads its CSV through `p2a_validation::repo_path` (CLI:
+`TempSession::load_as`), because the registry lint refuses `Case::load` in an unregistered test.
 
 ### Test Tolerances
 
@@ -341,7 +381,7 @@ runner, with feature sets chosen to keep it cheap:
    - `cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis`
 3. **Doctests**: p2a-core with `ci`, p2a-mcp with `http,llm,auth,websocket`
 4. **Validation harness, registry lint and runner tests** (after the doctests, in the same job):
-   - `cargo test -p p2a-validation`
+   - `cargo test -p p2a-validation` (includes the NA guard, `tests/na_guard.rs`)
    - the three test lists, `cargo test -p <pkg> --tests <the feature set of item 2> -- --list > target/<pkg>-tests.txt 2>&1`
    - `python3 validation/tools/validation_status.py lint --strict --tests target/p2a-core-tests.txt target/p2a-mcp-tests.txt target/p2a-cli-tests.txt`
    - `P2A_CHECK_STATUS_PAGE=1 python3 -m unittest discover -s validation/tools/tests -v` (includes the
@@ -375,6 +415,11 @@ Use `approx` crate with appropriate tolerances instead of exact equality.
 
 **Polars schema errors**:
 Ensure test data types match expected schema. Use explicit casts if needed.
+
+**`na_guard` reports `file:line: f64-without-cast` (or `into_no_null_iter`)**:
+Read the column through `p2a_core::data::columns` (in p2a-mcp: `tools::common::numeric_column(s)` /
+`numeric_matrix` with an explicit `NaPolicy`). If the data cannot hold nulls (a column the code built,
+a comparison mask), add `// na-ok: <reason>` on the line or the line above.
 
 **Link failures or doctests that "couldn't compile"**:
 A full disk and a distro `rustdoc` that does not match its `libLLVM` both look like broken code.

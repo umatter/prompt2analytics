@@ -244,13 +244,14 @@ pub struct CliArgs {
     #[arg(long, env = "P2A_MEMORY_SOFT_LIMIT_MB")]
     pub memory_soft_limit_mb: Option<u64>,
 
-    /// In-memory dataset MiB per session, 0 = unlimited (default: unlimited;
-    /// hosted: 200).
+    /// Session data MiB per session (datasets, cleaning-session checkpoints,
+    /// spatial weights), 0 = unlimited (default: unlimited; hosted: 200).
     #[arg(long, env = "P2A_SESSION_DATA_MB")]
     pub session_data_mb: Option<u64>,
 
-    /// In-memory dataset MiB over all sessions, 0 = unlimited (default:
-    /// unlimited; hosted: 500).
+    /// Session data MiB over all sessions (datasets, cleaning-session
+    /// checkpoints, spatial weights), 0 = unlimited (default: unlimited;
+    /// hosted: 500).
     #[arg(long, env = "P2A_TOTAL_DATA_MB")]
     pub total_data_mb: Option<u64>,
 

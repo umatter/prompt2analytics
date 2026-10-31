@@ -971,7 +971,7 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 413 | `payload_too_large` | a message, title or settings string above `message_bytes`. A request body above `P2A_MAX_HTTP_BODY_MB` answers 413 with the plain-text body `length limit exceeded` and no `code`; one sent without a `Content-Length` is cut off at the cap and answers 413 with the plain-text body `Failed to buffer the request body: length limit exceeded`. In the hosted profile a JSON body may be at most 2 MiB (or the cap, when that is lower); a longer one within the cap answers 413 with that second body |
 | 421 | `misdirected` | a local server received a request addressed to a host other than `localhost` or a loopback address |
 | 422 | `limit_exceeded` | a request limit refused a parameter, the dataset's row count, a pivot's output shape (`pivot_columns`, `pivot_cells`) or the response size; `details {parameter, requested, limit}` |
-| 422 | `quota_exceeded` | a dataset quota (the call's changes were undone) or a conversation-store bound |
+| 422 | `quota_exceeded` | a session-data quota (datasets, cleaning-session checkpoints, spatial weights; the call's changes were undone) or a conversation-store bound |
 | 429 | `session_busy` | the session's slot is taken: `Retry-After: 2` |
 | 503 | `server_busy` | every tool slot is taken: `Retry-After: 5` |
 | 503 | `memory_pressure` | the process is above its memory soft limit; before refusing a tool call, the server hands its freed heap memory back to the operating system, at most once every 10 s: `Retry-After: 15` |
@@ -1016,6 +1016,17 @@ Datasets are loaded using the `load_dataset` tool (not a direct HTTP endpoint):
 ```
 
 The path resolves inside the server's data directory (per session in open public mode). In the hosted profile a file larger than `load_file_bytes` (64 MiB) is refused before it is parsed.
+
+Missing values: `na_strings` (optional) lists the strings read as missing in a CSV file; the default is `["NA", ""]`, as R's `read.csv`. Unquoted empty fields are always missing, and `[]` keeps the text `NA` as a value. `na_strings` is refused for any file other than CSV (Parquet, Excel, Stata and SAS store missing values natively). `create_dataset` (`{"name", "csv_content"}`, inline CSV text) takes the same `na_strings`. In the hosted profile the list holds at most 32 markers of at most 64 bytes each (`na_markers`, `na_marker_bytes`).
+
+```json
+{
+  "session_id": "abc123",
+  "path": "survey.csv",
+  "name": "survey",
+  "na_strings": ["NA", "", "."]
+}
+```
 
 Supported formats:
 - CSV (`.csv`)

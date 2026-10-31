@@ -586,8 +586,7 @@ pub fn run_cor_test(
 /// does (`complete.cases(x, y)`), and reported in `missing`. Integer, decimal and boolean
 /// columns are accepted; a text column is refused (`EconError::NonNumericColumn`), as are
 /// infinite values (`EconError::NonFiniteValues`). `method`, `alternative` and `conf_level`
-/// are as in [`run_cor_test`]. The MCP and CLI correlation tools call this (T2-WP20,
-/// T2-WP21).
+/// are as in [`run_cor_test`]. The MCP `hypothesis_cor_test` tool calls this.
 pub fn run_cor_test_dataset(
     dataset: &Dataset,
     x_col: &str,

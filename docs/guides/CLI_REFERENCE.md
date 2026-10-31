@@ -52,8 +52,8 @@ as R's `read.csv(na.strings = c("NA", ""))` does. `--na-strings` replaces that l
 comma-separated (`--na-strings .` for a Stata or SAS export, `--na-strings NA,,.` for all three);
 an empty unquoted field is missing in every case. Write a marker that starts with `-` in the `=`
 form, `--na-strings=-99`. The list is stored in the session file, so later commands of the same
-session reload the file with the same markers. Other formats store missing values themselves:
-`--na-strings` on a Parquet, Excel, Stata or SAS file is an error.
+session reload the file with the same markers. `--na-strings` on any file other than CSV is an
+error (Parquet, Excel, Stata and SAS files store missing values natively).
 
 **Examples:**
 ```bash
@@ -67,6 +67,35 @@ p2a --session analysis.json data load stata_export.csv --name survey --na-string
 # Save under a name without a known extension
 p2a --session analysis.json data save firms --output firms.dat --file-format csv
 ```
+
+### Data Manipulation (munge) Commands
+
+`p2a munge <COMMAND> <DATASET> ... [-n|-o NAME]` writes its result to a new dataset (the name
+flag differs by command; see `p2a munge <COMMAND> --help`). Commands: `filter`, `select`,
+`drop`, `rename`, `sort`, `mutate`, `sample`, `join`, `concat`, `group-by`, `value-counts`,
+`pivot`, `melt`, `drop-na`, `fill-na`, `deduplicate`, `lag`, `lead`, `diff`, `standardize`,
+`bin`, `cast`, `one-hot`.
+
+```bash
+# Bin a numeric column into intervals, as R's cut()
+p2a munge bin <DATASET> -c <COLUMN> [-m equal-width|quantile|custom] [-n <N_BINS>] \
+    [--edges <E1,E2,...>] [--left-closed] [--include-lowest] [-o <NAME>]
+
+# Convert a column to another type
+p2a munge cast <DATASET> -c <COLUMN> --dtype int|float|string|bool [--strict] [-o <NAME>]
+
+# Fill missing values
+p2a munge fill-na <DATASET> -m mean|median|constant|forward|backward|zero [-c <COLUMNS...>] [--value <V>] [-n <NAME>]
+```
+
+- `munge bin`: intervals are closed on the right, `(a, b]`, as `cut()`; `--left-closed` closes
+  them on the left, `[a, b)` (`cut(right = FALSE)`), and `--include-lowest` puts a value equal
+  to the lowest edge in the first bin (the highest edge in the last bin with `--left-closed`),
+  as `cut(include.lowest = TRUE)`. `--edges` gives the strictly increasing break points of
+  `-m custom`. A missing value, or one outside the edges, is binned as missing.
+- `munge cast`: values that cannot be converted become missing, and the command reports how
+  many; `--strict` refuses the cast instead.
+- `munge fill-na`: every strategy fills NaN cells as well as nulls.
 
 ### Regression Commands
 
@@ -144,6 +173,14 @@ p2a panel hausman <DATASET> -y <DEP_VAR> -x <INDEP_VARS...> --entity <ENTITY_COL
 
 # High-dimensional fixed effects
 p2a panel hdfe <DATASET> -y <DEP_VAR> -x <INDEP_VARS...> --fe <FE_COLS...>
+
+# Arellano-Bond difference GMM
+p2a panel gmm <DATASET> -y <DEP_VAR> [-x <INDEP_VARS...>] --entity <ENTITY_COL> --time <TIME_COL> \
+    [--lags <N>] [--step onestep|twostep] [--min-lag <N>] [--max-lag <N>] [--collapse] \
+    [--vcov robust|classical]
+
+# Panel unit-root tests
+p2a panel unit-root <DATASET> -v <VAR> --unit <UNIT_COL> --time <TIME_COL> [--test llc|ips|hadri|fisher] [--lags <N>]
 ```
 
 **--vcov:** `classical` (default; plm's `vcov`), `cluster` (entity-clustered Arellano with the
@@ -172,6 +209,32 @@ What each command prints, besides the coefficient table and its `Standard errors
   `R-squared (within):` and `Adj. R-squared (within):` (adjusted with (n-1)/df_resid as plm;
   fixest's `war2` differs: 0.716833 vs 0.670467 on Grunfeld), the levels of each fixed effect
   and the within F test.
+- `panel gmm`: Arellano-Bond difference GMM, as R's `plm::pgmm` (`effect = "individual"`).
+  `--lags` (default 1) lags of the dependent variable are added to `-x`; the instruments are the
+  levels of y lagged `--min-lag` (default 2) to `--max-lag` (default: all available), one column
+  per lag depth with `--collapse`. `--step` is `twostep` by default; `--vcov robust` (default)
+  gives the one-step robust or the two-step Windmeijer-corrected standard errors, `--vcov
+  classical` the classical ones (these values differ from `panel fe`'s `--vcov`). The time column
+  holds whole numbers, and lags are steps of 1. It prints the coefficient table, the
+  Sargan/Hansen test of the overidentifying restrictions and the Arellano-Bond AR(1) and AR(2)
+  tests of serial correlation in the differenced residuals, with warnings when a weighting
+  matrix is rank-deficient; the JSON adds the homoskedastic Sargan statistic. The JSON keys:
+  `coefficients`, `variables`, `std_errors`, `z_stats`, `p_values`, `se_type`, `sigma2`,
+  `ar1_statistic`, `ar1_p_value`, `ar2_statistic`, `ar2_p_value`, `sargan_statistic`,
+  `sargan_df`, `sargan_p_value`, `sargan_homoskedastic`, `sargan_homoskedastic_p_value`,
+  `one_step_weight_rank`, `two_step_weight_rank`, `n_obs`, `n_groups`, `n_instruments`, `lags`,
+  `min_lag`, `max_lag`, `collapse`, `step`, `transform`, `method`, `dep_var`, `warnings` and
+  `missing`.
+- `panel unit-root`: the LLC, IPS, Hadri or Fisher test, as `plm::purtest`; rows with a
+  missing value are dropped, and a unit's remaining periods are joined in time order with a
+  warning. The JSON keys: `test_type`, `statistic`, `p_value`, `null_hypothesis`,
+  `alternative_hypothesis`, `model`, `lags_used`, `n_panels`, `avg_time_periods`, `warnings`,
+  `unit_statistics` and `unit_p_values` (per unit, where the test has them) and `missing`.
+
+Every panel command drops the rows with a missing value in the columns it uses. `panel hdfe`,
+`feglm`, `gmm`, `pvcm`, `pmg`, `gls` and `unit-root` print the `Note:` line last and carry
+`missing` in JSON (see [Missing values in results](#missing-values-in-results)); `panel fe` and
+`re` list the drop under `Warnings:` and in the JSON `warnings`.
 
 **Examples:**
 ```bash
@@ -189,6 +252,9 @@ p2a panel hausman firms -y revenue -x employees capital --entity firm_id
 
 # Two-way fixed effects (firm + year)
 p2a panel hdfe firms -y revenue -x employees --fe firm_id year
+
+# Two-step difference GMM with one lag of the dependent variable, collapsed instruments
+p2a panel gmm firms -y inv -x value capital --entity firm --time year --collapse
 ```
 
 ### Causal Inference Commands
@@ -207,22 +273,44 @@ p2a causal synth <DATASET> -y <OUTCOME> --unit <UNIT_COL> --time <TIME_COL> \
 
 # Regression Discontinuity (Sharp RD)
 p2a causal rd <DATASET> -y <DEP_VAR> --running <RUNNING_VAR> --cutoff <CUTOFF> \
-    [--bandwidth <H>] [--kernel <TYPE>] [--polynomial <P>]
+    [-p <POLY_ORDER>] [--kernel <TYPE>] [--bwselect <METHOD>] [--h <H>] [--b <B>] [--vce <VCE>]
 
 # Regression Discontinuity (Fuzzy RD)
-p2a causal rd-fuzzy <DATASET> -y <DEP_VAR> --treatment <TREAT_VAR> --running <RUNNING_VAR> \
-    --cutoff <CUTOFF> [--bandwidth <H>] [--kernel <TYPE>]
+p2a causal fuzzy-rd <DATASET> -y <DEP_VAR> --treatment <TREAT_VAR> --running <RUNNING_VAR> \
+    --cutoff <CUTOFF> [-p <POLY_ORDER>] [--kernel <TYPE>] [--h <H>] [--b <B>] [--vce <VCE>]
 
-# RD Bandwidth Selection
-p2a causal rd-bw <DATASET> -y <DEP_VAR> --running <RUNNING_VAR> --cutoff <CUTOFF> \
-    [--method <METHOD>]
+# Callaway-Sant'Anna staggered DiD
+p2a causal staggered-did <DATASET> -y <OUTCOME> --treatment-time <FIRST_TREAT_COL> --time <TIME_COL> \
+    --unit <UNIT_COL> [-x <COVARIATES...>] [--comparison nevertreated|notyettreated] \
+    [--method or|ipw|dr] [--bootstrap <N>]
+
+# Causal mediation analysis
+p2a causal mediation <DATASET> -y <OUTCOME> -t <TREATMENT> -m <MEDIATOR> [-x <COVARIATES...>] [--bootstrap <N>]
 ```
 
 **V-method options:** `datadriven` (default), `equal`
 
 **RD kernel types:** `triangular` (default), `epanechnikov`, `uniform`
 
-**RD bandwidth methods:** `mserd` (default), `msetwo`, `cerrd`, `certwo`
+**RD bandwidths (`causal rd`, `causal fuzzy-rd`):** `--h` is the main bandwidth on both sides
+(alias `--bandwidth`; default: p2a's MSE-type selector, chosen with `--bwselect mserd` (default),
+`msetwo` or `cerrd` in `causal rd`), `--b` the bias bandwidth (alias `--bias-bandwidth`;
+default: h). `--vce` is the variance estimator: `nn` (default, as rdrobust), `hc0`, `hc1`, `hc2`
+or `hc3`. The output reports the robust bias-corrected estimate and the conventional one, as
+`rdrobust`, with the bandwidths and the effective observations on each side.
+
+**`causal iv`** fits robust standard errors and prints the first-stage diagnostics as
+`First-stage diagnostics (HC1 Wald F of the excluded instruments):`, one
+`<endog> F-statistic: F on df1 and df2 DF` line per endogenous regressor; its JSON adds a
+`first_stage` object (`f_type`, `f_stats`, `df`, `p_values`, `strong_instruments`).
+
+**`causal staggered-did`:** `--bootstrap 0` gives analytic influence-function standard errors
+(did's `bstrap = FALSE`; without covariates only); otherwise at least 50 unit-bootstrap
+replicates (default 999). The JSON's `pretrend_test` holds `chi2`, `df`, `p_value`, `f_stat`
+and `df2` (the F form of a bootstrap covariance; `null` with the analytic one) and `method`.
+
+`causal iv`, `mediation`, `rd`, `fuzzy-rd` and `staggered-did` drop the rows with a missing value
+in the columns they use and report them (`Note:` line and `missing`).
 
 **Examples:**
 ```bash
@@ -241,13 +329,16 @@ p2a causal synth mydata -y gdp --unit country --time year --treated Germany \
     --treatment-time 1990 -p exports imports --placebos
 
 # Sharp RD: effect of crossing eligibility threshold
-p2a causal rd mydata -y test_score --running age --cutoff 65 --bandwidth 5
+p2a causal rd mydata -y test_score --running age --cutoff 65 --h 5
 
 # Fuzzy RD: treatment probability changes at cutoff
-p2a causal rd-fuzzy mydata -y earnings --treatment enrolled --running score --cutoff 50
+p2a causal fuzzy-rd mydata -y earnings --treatment enrolled --running score --cutoff 50
 
-# Bandwidth selection for RD
-p2a causal rd-bw mydata -y outcome --running running_var --cutoff 0 --method mserd
+# Sharp RD with a fixed main bandwidth and HC1 standard errors
+p2a causal rd mydata -y outcome --running running_var --cutoff 0 --h 2.5 --vce hc1
+
+# Staggered DiD with analytic standard errors
+p2a causal staggered-did panel -y y --treatment-time first_treat --time year --unit state --bootstrap 0
 ```
 
 ### Discrete Choice Commands
@@ -281,11 +372,47 @@ and `hurdle` drop rows with a missing outcome or regressor and say so (see
 refuse a missing id, alternative, choice or attribute, as R's mlogit does. The ordered,
 count and mixed-logit commands print `Converged: Yes|No (k iterations)`.
 
+### Survival Commands
+
+```bash
+# Kaplan-Meier survival curves
+p2a survival km <DATASET> -t <TIME> -e <EVENT> [-g <GROUP>] [--conf <LEVEL>] [--conf-type log|log-log|plain]
+
+# Log-rank test
+p2a survival log-rank <DATASET> -t <TIME> -e <EVENT> -g <GROUP>
+
+# Cox proportional hazards
+p2a survival cox <DATASET> -t <TIME> -e <EVENT> -x <COVARIATES...> [--ties breslow|efron] [--robust]
+```
+
+The status column `-e` is coded as R's `Surv()`: 0/1 (1 = event), 1/2 (2 = event, as R's `lung`)
+or TRUE/FALSE; any other code is an error. Integer times are accepted. `--conf-type` is R
+`survfit`'s `conf.type`: `log` (the default, as R), `log-log` or `plain`; the median follows R's
+`quantile.survfit`. Rows with a missing time, status, group or covariate are dropped and reported
+(`Note:` line, `missing`).
+
+JSON keys: `survival km` prints one object per group with `n_obs`, `total_events`,
+`total_censored`, `conf_level`, `conf_type`, `median_survival`, `median_ci`, `times`,
+`n_at_risk`, `n_events`, `n_censored`, `survival`, `std_errors`, `ci_lower`, `ci_upper` (a
+value that is not defined, such as the SE where S(t) = 0, is `null`) and `missing`;
+`survival log-rank` has `chi_squared`, `degrees_of_freedom`, `p_value`, `groups`,
+`n_per_group`, `events_per_group`, `expected_per_group`, `obs_minus_exp`, `variance` and
+`missing`; `survival cox` has `variables`, `coefficients`, `hazard_ratios`, `std_errors`,
+`z_stats`, `p_values`, `log_likelihood`, `concordance`, `n_obs`, `n_events`, `method` and
+`missing`.
+
+**Examples:**
+```bash
+p2a survival km lung -t time -e status --conf-type log-log
+p2a survival log-rank lung -t time -e status -g sex
+p2a survival cox lung -t time -e status -x age sex --ties efron
+```
+
 ### Time Series Commands
 
 ```bash
 # ARIMA model
-p2a ts arima <DATASET> --col <COL> -p <AR> -d <DIFF> -q <MA> [--horizon <N>]
+p2a ts arima <DATASET> --col <COL> -p <AR> -d <DIFF> -q <MA> [--horizon <N>] [--include-mean <BOOL>] [--drift]
 
 # MSTL decomposition
 p2a ts mstl <DATASET> --col <COL> --periods <PERIODS...>
@@ -293,6 +420,17 @@ p2a ts mstl <DATASET> --col <COL> --periods <PERIODS...>
 # Vector autoregression
 p2a ts var <DATASET> --cols <COLS...> --lags <N>
 ```
+
+**`ts arima`** fits by conditional sum of squares, as R's `arima(method = "CSS")`. The mean (R's
+`intercept`) is estimated by default when d = 0; `--include-mean false` drops it, and it must be
+false or omitted when d > 0. `--drift` fits a linear trend in the levels, as
+`forecast::Arima(include.drift = TRUE)`, for d = 0 or 1. With `--horizon` it prints point
+forecasts with 80% and 95% prediction intervals, as `forecast(Arima(...))`. The JSON keys include
+`model`, `label` (forecast::Arima's model label), `coefficients`, `std_errors`, `sigma2`, `loglik`,
+`aic`, `converged`, `iterations`, `include_mean`, `drift`, `warnings` and, with `--horizon`, the
+forecasts with `lower_80`, `upper_80`, `lower_95` and `upper_95`. A series with missing values
+is refused, with how to fill the gaps first (`p2a munge fill-na`): dropping a value would splice
+the series.
 
 **Examples:**
 ```bash
@@ -306,6 +444,70 @@ p2a ts mstl sales --col revenue --periods 7 365
 p2a ts var macro --cols gdp inflation unemployment --lags 2
 ```
 
+### Statistics Commands
+
+```bash
+# t-tests
+p2a stats t-test-one <DATASET> -c <COL> [-m <MU>] [-a two-sided|less|greater] [--conf-level <L>]
+p2a stats t-test-two <DATASET> --col1 <COL1> --col2 <COL2> [-a ...] [--equal-var]
+p2a stats t-test-paired <DATASET> --col1 <COL1> --col2 <COL2> [-a ...]
+
+# ANOVA and rank tests
+p2a stats anova <DATASET> -r <RESPONSE> -f <FACTOR>
+p2a stats anova-two <DATASET> -r <RESPONSE> --factor-a <A> --factor-b <B> [--interaction] [--ss-type I|II|III]
+p2a stats kruskal <DATASET> -c <COL> -g <GROUP>
+p2a stats wilcoxon <DATASET> --col1 <COL1> --col2 <COL2> [--paired] [-a ...]
+p2a stats friedman <DATASET> -v <VALUE> -g <GROUP> -b <BLOCK>
+
+# Contingency tables
+p2a stats chisq-indep <DATASET> --row-var <ROW_VAR> --col-var <COL_VAR>
+p2a stats chisq-gof <DATASET> -o <OBSERVED_COUNTS>
+p2a stats fisher <DATASET> --row-var <ROW_VAR> --col-var <COL_VAR>
+
+# Distributions and summaries
+p2a stats shapiro <DATASET> -c <COL>
+p2a stats ks-test <DATASET> --x <X> --y <Y> [-a ...]
+p2a stats fivenum <DATASET> -c <COL>      # also iqr, mad
+
+# Serial correlation and unit roots
+p2a stats acf <DATASET> -c <COL> [--lag-max <N>] [--partial]
+p2a stats pacf <DATASET> -c <COL> [--lag-max <N>]
+p2a stats box-test <DATASET> -c <COL> [--lag <N>] [--box-pierce] [--fitdf <N>]
+p2a stats pp-test <DATASET> -c <COL> [--lshort]
+```
+
+Missing values are dropped as R drops them, and every `stats` data command reports the drop:
+text output ends with the `Note:` line and JSON carries `missing` (see
+[Missing values in results](#missing-values-in-results)). Integer columns are numeric. A
+two-sample test (`t-test-two`, the rank-sum `wilcoxon`, `ks-test`) drops each sample's missing
+values on its own, so its note counts values: `Note: 30 of 44 values dropped because of missing
+values (two samples of 22; x: 15, y: 15)`. Paired tests drop incomplete pairs. `acf` and `pacf`
+refuse a column with missing values, as R's `acf`/`pacf` (`na.action = na.fail`), and say how to
+fill the gaps first; `ccf`, `box-test` and `pp-test` refuse them too.
+
+- `t-test-two` prints `Means: x = ..., y = ...` and `Mean difference: ...`; its JSON has
+  `mean_x`, `mean_y`, `mean_difference` (x minus y), `n_x`, `n_y`, `std_error`, `t_statistic`,
+  `df`, `p_value`, `ci_lower` and `ci_upper`. `t-test-one` and `t-test-paired` add `std_error`
+  and `n`.
+- `anova-two --ss-type`: `I` (default; sequential, as R's `aov`), `II` or `III` (as
+  `car::Anova`; Type III with sum-to-zero contrasts). A term the data cannot estimate is shown
+  as `not estimable (aliased with the other factor)` or, when empty cells leave the interaction
+  no degrees of freedom, `not estimable (empty cells leave no interaction df)`.
+- `chisq-indep` and `fisher` print the labelled table (observed and expected counts for
+  `chisq-indep`), up to 50 rows and 12 columns; a larger table is summarised as
+  `Table not shown: ...`. `chisq-indep` states `Continuity correction: Yates` on a 2 x 2 table
+  and R's `Warning:` lines (expected counts below 5). `fisher` reports the conditional maximum
+  likelihood odds ratio, as R's `fisher.test`, next to the sample odds ratio.
+- `fivenum`'s JSON has `n`, the values used.
+
+**Examples:**
+```bash
+p2a stats t-test-two trial --col1 treated --col2 control
+p2a stats anova-two crops -r yield --factor-a fertilizer --factor-b irrigation --interaction --ss-type II
+p2a stats fisher survey --row-var smoker --col-var outcome
+p2a stats acf sales -c revenue --lag-max 24
+```
+
 ### Machine Learning Commands
 
 ```bash
@@ -314,7 +516,13 @@ p2a ml kmeans <DATASET> --cols <COLS...> -k <N> [--seed <N>] [--max-iter <N>]
 
 # Principal Component Analysis
 p2a ml pca <DATASET> --cols <COLS...> [--n-components <N>] [--transform]
+
+# Linear support vector machine (binary target)
+p2a ml svm <DATASET> --cols <COLS...> -y <TARGET> [-c <C>] [--max-iter <N>] [--tolerance <TOL>]
 ```
+
+`ml svm` drops the rows with a missing feature or target and prints the `Note:` line (`missing`
+in JSON); `kmeans` and `pca` refuse missing values.
 
 **Examples:**
 ```bash
@@ -360,6 +568,14 @@ p2a viz irf <DATASET> --horizon-col <COL> --response-col <COL> [--ci-lower-col <
 ```
 
 **Linkage methods:** `single`, `complete`, `average`, `ward` (default)
+
+The data commands drop the rows that are incomplete in the plotted columns, together, and print
+the `Note:` line; integer columns are accepted. `viz box -g` orders the groups as R's `factor()`
+(numbers numerically, text in byte order). `viz heatmap` correlates the complete rows, as R's
+`cor(use = "complete.obs")`: a column that is constant on them has NA correlations (shown as
+`NA` in its cells; its diagonal stays 1), and the message names it. `viz dendrogram` refuses
+missing values, and `viz irf` refuses a CI column it cannot read as numbers. With `-F json` a
+plot command prints `{"message": ...}`, plus `missing` when rows were dropped.
 
 **Examples:**
 ```bash

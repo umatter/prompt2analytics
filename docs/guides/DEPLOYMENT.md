@@ -292,7 +292,10 @@ HTTP), and they never depend on the resource profile:
   `regression_bootstrap_cov` needs `n_boot` of at least 10; matching `ratio` is
   at most the number of controls;
 - the C5.0, quantile random forest and Cubist tree builders stop at depth 512,
-  so no input can recurse deep enough to overflow a worker's stack.
+  so no input can recurse deep enough to overflow a worker's stack;
+- staggered DiD `bootstrap` is 0 (analytic influence-function SEs) or at least
+  50 replicates, and its joint pre-trend Wald test is computed for at most 2000
+  pre-treatment cells (reported as not computed above that).
 
 ### Sessions and persistence
 

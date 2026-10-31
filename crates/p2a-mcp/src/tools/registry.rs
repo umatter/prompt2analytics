@@ -728,16 +728,16 @@ pub fn get_registry() -> Vec<ToolInfo> {
         ToolInfo {
             name: "ts_arima_fit",
             category: ToolCategory::TimeSeries,
-            description: "Fit ARIMA(p,d,q) model",
+            description: "Fit ARIMA(p,d,q) model by conditional sum of squares",
             related: &["ts_arima_forecast", "ts_garch_fit"],
-            r_equivalent: Some("arima()"),
+            r_equivalent: Some("arima(method = 'CSS')"),
         },
         ToolInfo {
             name: "ts_arima_forecast",
             category: ToolCategory::TimeSeries,
-            description: "Generate ARIMA forecasts with confidence intervals",
+            description: "Generate ARIMA forecasts with 80% and 95% prediction intervals",
             related: &["ts_arima_fit"],
-            r_equivalent: Some("predict.Arima()"),
+            r_equivalent: Some("forecast(Arima(method = 'CSS'))"),
         },
         ToolInfo {
             name: "ts_var",

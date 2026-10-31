@@ -404,6 +404,23 @@ pub async fn session_state_bytes(session: &Session) -> u64 {
     session.state_charge().await.bytes
 }
 
+/// [`session_state_bytes`] for the three maps of a session's state held elsewhere (an
+/// `AnalyticsServer` built for a session shares them): datasets, cleaning sessions and spatial
+/// weights, each read under its lock in turn.
+pub(crate) async fn state_maps_bytes(
+    datasets: &RwLock<HashMap<String, Dataset>>,
+    cleaning_sessions: &RwLock<HashMap<String, Arc<CleaningSession>>>,
+    spatial_weights: &RwLock<HashMap<String, SpatialWeights>>,
+) -> u64 {
+    let mut charge = {
+        let datasets = datasets.read().await;
+        datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
+    };
+    charge.add_cleaning_sessions(&*cleaning_sessions.read().await);
+    charge.add_spatial_weights(&*spatial_weights.read().await);
+    charge.bytes
+}
+
 /// Keeps a session's active-call count raised while it lives.
 #[derive(Debug)]
 pub struct ActiveCallGuard {
