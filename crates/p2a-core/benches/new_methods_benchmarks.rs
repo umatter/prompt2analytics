@@ -1555,6 +1555,7 @@ fn mixed_logit_benchmark(c: &mut Criterion) {
                         max_iter: 100,
                         tolerance: 1e-5,
                         seed: Some(42),
+                        ..Default::default()
                     }),
                 )
             })

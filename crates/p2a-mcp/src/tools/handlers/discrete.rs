@@ -21,17 +21,18 @@ use crate::tools::requests::discrete::{
     MultinomRequest, NegBinRequest, OrderedRequest, ProbitRequest, ZeroInflRequest,
 };
 
+use p2a_core::econometrics::{OrderedConfig, run_ordered_model_with};
 use p2a_core::{
-    FeglmConfig, GlmFamily, HurdleType, MixedLogitConfig, RandomDistribution, run_feglm, run_gmnl,
-    run_hurdle, run_logit, run_mlogit, run_multinom, run_negbin, run_ordered_logit,
-    run_ordered_probit, run_probit, run_zinb, run_zip,
+    FeglmConfig, GlmFamily, HurdleType, MixedLogitConfig, OrderedModelType, RandomDistribution,
+    run_feglm, run_gmnl, run_hurdle, run_logit, run_mlogit, run_multinom, run_negbin, run_probit,
+    run_zinb, run_zip,
 };
 
 #[tool_router(router = discrete_router, vis = "pub")]
 impl AnalyticsServer {
     /// Run Logit (logistic) regression for binary outcomes.
     #[tool(
-        description = "Run Logit (logistic) regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1."
+        description = "Run Logit (logistic) regression for binary outcomes by maximum likelihood (Newton-Raphson), as R's glm(family = binomial). The dependent variable must be numeric 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported."
     )]
     pub async fn logit(
         &self,
@@ -60,7 +61,7 @@ impl AnalyticsServer {
 
     /// Run Probit regression.
     #[tool(
-        description = "Run Probit regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1."
+        description = "Run Probit regression for binary outcomes by maximum likelihood (Newton-Raphson), as R's glm(family = binomial(link = \"probit\")). The dependent variable must be numeric 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported."
     )]
     pub async fn probit(
         &self,
@@ -89,7 +90,7 @@ impl AnalyticsServer {
 
     /// Run multinomial logit regression for unordered categorical outcomes.
     #[tool(
-        description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories. Uses MLE with Newton-Raphson. Equivalent to R's nnet::multinom()."
+        description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories (MLE, Newton-Raphson), as R's nnet::multinom(). Categories are ordered as R's factor() (numbers numerically, text alphabetically); the first is the reference unless 'reference' is given. Rows with a missing outcome or regressor are dropped and reported."
     )]
     pub async fn multinom(
         &self,
@@ -119,7 +120,7 @@ impl AnalyticsServer {
 
     /// Run McFadden's conditional logit (mlogit) for discrete choice analysis.
     #[tool(
-        description = "Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit()."
+        description = "Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit(). Missing values in the id, alternative, choice or attribute columns are refused, as in R's mlogit."
     )]
     pub async fn mlogit(
         &self,
@@ -160,7 +161,7 @@ impl AnalyticsServer {
 
     /// Run mixed logit (random parameters logit) for discrete choice with preference heterogeneity.
     #[tool(
-        description = "Run mixed logit (random parameters logit) for discrete choice models with heterogeneous preferences. Allows coefficients to vary across individuals according to specified distributions (normal, lognormal, triangular, uniform). Uses Maximum Simulated Likelihood (MSL) with Halton sequences. Equivalent to R's gmnl::gmnl() or mixl::mixl()."
+        description = "Run mixed logit (random parameters logit) for discrete choice with heterogeneous preferences: coefficients vary across decision makers as normal, lognormal, triangular or uniform random parameters. Maximum simulated likelihood with mlogit's draw scheme (Halton sequences, one segment per decision maker, the first 100 points dropped), BFGS with the analytic gradient from the conditional-logit estimates, standard errors from the Hessian. Set individual_id when the same person makes several choices (mlogit panel = TRUE). Missing values are refused. Equivalent to R's mlogit::mlogit(rpar = ..., halton = NA)."
     )]
     pub async fn mixed_logit(
         &self,
@@ -191,9 +192,8 @@ impl AnalyticsServer {
         let config = MixedLogitConfig {
             n_draws: request.n_draws.unwrap_or(500),
             halton: request.halton.unwrap_or(true),
-            max_iter: 200,
-            tolerance: 1e-6,
-            seed: Some(42),
+            individual_col: request.individual_id.clone(),
+            ..Default::default()
         };
 
         let result = match run_gmnl(
@@ -222,7 +222,7 @@ impl AnalyticsServer {
 
     /// Run ordered logit/probit regression for ordinal outcomes.
     #[tool(
-        description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes. Estimates threshold (cut-point) parameters. Equivalent to R's MASS::polr()."
+        description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes, as R's MASS::polr(). Numeric outcomes are ordered numerically; a text outcome needs 'levels' (its categories, lowest first). Rows with missing values are dropped and reported. Estimates threshold (cut-point) parameters."
     )]
     pub async fn ordered_model(
         &self,
@@ -235,15 +235,21 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
         let model_type = request.model_type.as_deref().unwrap_or("logit");
 
-        let result = match model_type.to_lowercase().as_str() {
-            "logit" => run_ordered_logit(dataset, &request.y, &x_refs),
-            "probit" => run_ordered_probit(dataset, &request.y, &x_refs),
+        let link = match model_type.to_lowercase().as_str() {
+            "logit" => OrderedModelType::Logit,
+            "probit" => OrderedModelType::Probit,
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
                     "Invalid model_type. Use 'logit' or 'probit'.".to_string(),
                 )]));
             }
         };
+        let config = OrderedConfig {
+            link,
+            levels: request.levels.clone(),
+            ..OrderedConfig::default()
+        };
+        let result = run_ordered_model_with(dataset, &request.y, &x_refs, &config);
 
         match result {
             Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
@@ -410,5 +416,295 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
         )]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use p2a_core::data::{DataLoader, Dataset};
+    use p2a_core::econometrics::{OrderedConfig, OrderedModelType, run_ordered_model_with};
+    use p2a_validation::{Case, Check, Tol};
+    use rmcp::handler::server::wrapper::Parameters;
+    use serde_json::{Value, json};
+
+    use crate::server::AnalyticsServer;
+    use crate::tools::common::test_support::{server_with, text};
+    use crate::tools::requests::discrete::{LogitRequest, MixedLogitRequest, OrderedRequest};
+
+    /// Case `id`, a runtime and a server holding the case's dataset under its file stem.
+    fn server_with_case(id: &str) -> (Case, tokio::runtime::Runtime, AnalyticsServer) {
+        let case = Case::load(id);
+        let path = case.dataset_path();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("dataset file stem")
+            .to_string();
+        let df = DataLoader::load_csv(&path).expect("case dataset");
+        let (rt, server) = server_with(vec![(stem.as_str(), df)]);
+        (case, rt, server)
+    }
+
+    fn case_dataset(case: &Case) -> Dataset {
+        Dataset::new(DataLoader::load_csv(case.dataset_path()).expect("case dataset"))
+    }
+
+    /// The whitespace tokens of the first line whose first token is `name`.
+    fn row<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+        text.lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .find(|tokens| tokens.first() == Some(&name))
+            .unwrap_or_else(|| panic!("no row {name:?} in:\n{text}"))
+    }
+
+    fn number(token: &str) -> f64 {
+        token
+            .parse()
+            .unwrap_or_else(|_| panic!("{token:?} is not a number"))
+    }
+
+    /// A text outcome with `levels` is fitted in that order, as polr on factor(y): the
+    /// tool's text is the core result's Display. Without `levels` the field was ignored and
+    /// a text outcome was an error.
+    #[test]
+    fn test_validate_mcp_ordered_model_levels() {
+        let (case, rt, server) = server_with_case("disc_ordered");
+        let ds = case_dataset(&case);
+        let levels: Vec<String> = ["low", "mid", "high"].map(String::from).to_vec();
+        for (model_type, link, p) in [
+            ("logit", OrderedModelType::Logit, "logit_"),
+            ("probit", OrderedModelType::Probit, "probit_"),
+        ] {
+            let request: OrderedRequest = serde_json::from_value(json!({
+                "dataset": "ordered", "y": "y_label", "x": ["x1", "x2"],
+                "levels": ["low", "mid", "high"], "model_type": model_type
+            }))
+            .unwrap();
+            let r = rt
+                .block_on(server.ordered_model(Parameters(request)))
+                .unwrap();
+            let t = text(&r);
+            assert_ne!(r.is_error, Some(true), "{t}");
+            let config = OrderedConfig {
+                link,
+                levels: Some(levels.clone()),
+                ..OrderedConfig::default()
+            };
+            let core = run_ordered_model_with(&ds, "y_label", &["x1", "x2"], &config).unwrap();
+            assert_eq!(t, core.to_string());
+            assert!(t.contains("low|mid:") && t.contains("mid|high:"), "{t}");
+            assert!(t.contains("Converged: true ("), "{t}");
+            let k = |s: &str| format!("{p}{s}");
+            Check::new(&case)
+                .named(
+                    &k("coef"),
+                    &core.variables,
+                    &core.coefficients,
+                    Tol::iterative(1e-6),
+                )
+                .vector(&k("zeta"), &core.thresholds, Tol::iterative(1e-6))
+                .named(
+                    &k("se_coef"),
+                    &core.variables,
+                    &core.std_errors,
+                    Tol::iterative(1e-5),
+                )
+                .vector(
+                    &k("se_zeta"),
+                    &core.threshold_std_errors,
+                    Tol::iterative(1e-5),
+                )
+                .scalar(&k("loglik"), core.log_likelihood, Tol::stat(400))
+                .finish();
+
+            // The numeric outcome needs no levels and gives the same fit.
+            let request: OrderedRequest = serde_json::from_value(json!({
+                "dataset": "ordered", "y": "y", "x": ["x1", "x2"], "model_type": model_type
+            }))
+            .unwrap();
+            let r = rt
+                .block_on(server.ordered_model(Parameters(request)))
+                .unwrap();
+            assert_ne!(r.is_error, Some(true), "{}", text(&r));
+            let numeric = OrderedConfig {
+                link,
+                ..OrderedConfig::default()
+            };
+            let num = run_ordered_model_with(&ds, "y", &["x1", "x2"], &numeric).unwrap();
+            assert_eq!(text(&r), num.to_string());
+            assert_eq!(num.categories, ["1", "2", "3"]);
+            let tight = Tol::new(1e-12, 1e-14);
+            for (a, b) in num
+                .coefficients
+                .iter()
+                .chain(&num.thresholds)
+                .zip(core.coefficients.iter().chain(&core.thresholds))
+            {
+                assert!(tight.allows(*a, *b), "{a} vs {b}");
+            }
+        }
+    }
+
+    /// Without `levels`, a text outcome is a tool error that names the column, its labels
+    /// and `levels`.
+    #[test]
+    fn test_mcp_ordered_model_text_outcome_needs_levels() {
+        let (_, rt, server) = server_with_case("disc_ordered");
+        let request: OrderedRequest = serde_json::from_value(json!({
+            "dataset": "ordered", "y": "y_label", "x": ["x1", "x2"]
+        }))
+        .unwrap();
+        let r = rt
+            .block_on(server.ordered_model(Parameters(request)))
+            .unwrap();
+        let t = text(&r);
+        assert_eq!(r.is_error, Some(true), "{t}");
+        for part in ["'y_label'", "high", "low", "mid", "levels"] {
+            assert!(t.contains(part), "{part:?} not in {t}");
+        }
+    }
+
+    /// The printed means, SEs, SD and SD SE of the x (normal) and w (fixed) rows.
+    fn check_printed_mixed_logit(case: &Case, t: &str) {
+        let (x, w) = (row(t, "x"), row(t, "w"));
+        // tokens: name, mean, SE, z, p, dist, SD, SD SE
+        let names = ["mean_x", "mean_w", "sd_x"];
+        let tol = Tol::printed(4);
+        Check::new(case)
+            .named(
+                "coef",
+                &names,
+                &[number(x[1]), number(w[1]), number(x[6])],
+                tol,
+            )
+            .named(
+                "se",
+                &names,
+                &[number(x[2]), number(w[2]), number(x[7])],
+                tol,
+            )
+            .finish();
+        assert_eq!((w[6], w[7]), ("-", "-"), "{t}");
+    }
+
+    /// mlogit's estimate with Hessian SEs through the tool (the SEs were 0.1000).
+    #[test]
+    fn test_validate_mcp_mixed_logit() {
+        let (case, rt, server) = server_with_case("disc_mixed_logit");
+        let request: MixedLogitRequest = serde_json::from_value(json!({
+            "dataset": "mixed_logit", "choice_id": "id", "alt_id": "alt", "choice": "choice",
+            "variables": ["x", "w"], "random_vars": ["x"], "n_draws": 50
+        }))
+        .unwrap();
+        let r = rt
+            .block_on(server.mixed_logit(Parameters(request)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        check_printed_mixed_logit(&case, &t);
+        assert!(t.contains("Converged:         Yes"), "{t}");
+    }
+
+    /// `individual_id` makes the person the decision maker (mlogit panel = TRUE).
+    #[test]
+    fn test_validate_mcp_mixed_logit_panel() {
+        let (case, rt, server) = server_with_case("disc_mixed_logit_panel");
+        let request: MixedLogitRequest = serde_json::from_value(json!({
+            "dataset": "mixed_logit_panel", "choice_id": "id", "alt_id": "alt",
+            "choice": "choice", "variables": ["x", "w"], "random_vars": ["x"],
+            "n_draws": 50, "individual_id": "person"
+        }))
+        .unwrap();
+        let r = rt
+            .block_on(server.mixed_logit(Parameters(request)))
+            .unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        check_printed_mixed_logit(&case, &t);
+        assert!(t.contains("Converged:         Yes"), "{t}");
+        assert!(t.contains("Individuals:       100"), "{t}");
+        assert!(t.contains("draws per individual"), "{t}");
+    }
+
+    /// The logit tool reports the rows it dropped.
+    #[test]
+    fn test_mcp_logit_reports_dropped_rows() {
+        let (_, rt, server) = server_with_case("disc_choice_na");
+        let request: LogitRequest = serde_json::from_value(json!({
+            "dataset": "choice_na", "y": "choice_na", "x": ["x", "w"]
+        }))
+        .unwrap();
+        let r = rt.block_on(server.logit(Parameters(request))).unwrap();
+        let t = text(&r);
+        assert_ne!(r.is_error, Some(true), "{t}");
+        assert_eq!(
+            t.lines().last(),
+            Some("Missing values: 2 of 300 rows dropped because of missing values (choice_na: 2)"),
+            "{t}"
+        );
+        assert!(t.contains("No. Observations: 298"), "{t}");
+    }
+
+    /// The schema documents `levels`, `individual_id` and the bounds of `init_theta`.
+    #[test]
+    fn test_mcp_discrete_schemas_document_new_fields() {
+        let tools = AnalyticsServer::discrete_router().list_all();
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is advertised"))
+        };
+        let required = |name: &str| -> Vec<String> {
+            tool(name)
+                .input_schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let ordered = tool("ordered_model");
+        let levels = &ordered.input_schema["properties"]["levels"];
+        let levels_text = levels.to_string();
+        assert!(
+            levels_text.contains("array") && levels_text.contains("string"),
+            "{levels_text}"
+        );
+        assert!(!required("ordered_model").contains(&"levels".to_string()));
+        assert!(
+            ordered
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("levels"),
+            "{:?}",
+            ordered.description
+        );
+        let mixed = tool("mixed_logit");
+        assert!(
+            mixed.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("individual_id")
+        );
+        assert!(!required("mixed_logit").contains(&"individual_id".to_string()));
+        let description = mixed.description.as_deref().unwrap_or("");
+        assert!(
+            description.contains("mlogit::mlogit") && description.contains("individual_id"),
+            "{description}"
+        );
+        let init_theta = tool("negbin").input_schema["properties"]["init_theta"]["description"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            init_theta.contains("1e-8") && init_theta.contains("1e6"),
+            "{init_theta}"
+        );
     }
 }

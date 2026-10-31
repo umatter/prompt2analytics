@@ -272,6 +272,8 @@ R-pinned (`crates/p2a-core/src/econometrics/discrete/count_models.rs` unless not
 | `econometrics::discrete::count_models::tests::test_validate_zip_intercept_only_zero_part` | `zip_z0_*` (`y ~ x1 + x2 \| 1`): count and zero coefficients, SEs, log-likelihood |
 | `econometrics::discrete::count_models::tests::test_validate_zeroinfl_regressor_scale_disc_zeroinfl` | ZIP and ZINB with x1 multiplied by 1e-6, 1e4, 1e6, 1e10 and 1e12: converged, scaled up at the unscaled fit's iteration and scaled down at most one later, no warning; x1 coefficients and SEs times the scale, all other coefficients, SEs, z, SE(log theta) and the log-likelihood equal the unscaled fit to 1e-7 relative, and pscl's `zip_*` / `zinb_*` values |
 | `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_zeroinfl_disc_zeroinfl` | the MCP `zeroinfl` text for both distributions: both coefficient tables, log-likelihood, and the ZINB theta line, at print precision |
+| `p2a-cli` `tier2::wp18_discrete::test_validate_cli_negbin_theta_se` (`crates/p2a-cli/tests/tier2/wp18_discrete.rs`) | `discrete negbin`: `Theta (dispersion): theta (SE: se)` at print precision, `Converged: Yes`; JSON `theta_std_error` 1e-5 (registry `validation/methods/discrete_mixed.json`, id `discrete_mcp_cli_surface`) |
+| `p2a-cli` `tier2::wp18_discrete::test_validate_cli_zip_zinb_convergence_and_theta_se` | `discrete zip` and `zinb`: `Converged: Yes`; the ZINB theta line with SE(theta) and SE(log theta) at print precision; JSON `theta_std_error` null for ZIP, 1e-5 for ZINB |
 
 Not R-pinned:
 

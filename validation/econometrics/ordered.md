@@ -79,8 +79,9 @@ categories are exactly `levels`. `levels` must name every observed label exactly
 label without observations is refused, because polr cannot estimate the cut points next to
 an empty category. R sorts text labels alphabetically (`factor()`), which for
 `low/mid/high` is the order `high < low < mid`, a different model; p2a asks instead of
-guessing (ECON-19). The MCP `ordered_model` tool and the CLI do not expose `levels` yet
-(T2-WP18): a text outcome there needs a numeric or Enum recode.
+guessing (ECON-19). The MCP `ordered_model` tool takes the order as its `levels` field and
+the CLI as `--levels low,mid,high` (`p2a discrete o-logit` / `o-probit`; comma- or
+space-separated); without it a text outcome is an error that asks for it.
 
 At most 100 categories are accepted (a method-level cap on the dense Hessian).
 
@@ -172,6 +173,10 @@ R-pinned (`crates/p2a-core/src/econometrics/discrete/ordered_models.rs` unless n
 | `econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_enum_outcome_uses_declared_order` | `y_label` as an Enum `low < mid < high`: `logit_counts`, `logit_coef`, `logit_zeta`, `logit_loglik` |
 | `econometrics::discrete::ordered_models::tests::test_validate_ordered_logit_missing_rows_dropped` | `y_na ~ x1_na + x2`: 393 rows used, 7 dropped (`y_na` 4, `x1_na` 3), the note; `na_coef`, `na_zeta`, `na_se_coef`, `na_loglik` |
 | `p2a-mcp` `tier2::wp10_ordered_count::test_validate_mcp_ordered_model_disc_ordered` (`crates/p2a-mcp/tests/tier2/wp10_ordered_count.rs`) | the MCP `ordered_model` text for both links: coefficients, SE, z, p, cut points with SE, log-likelihood at print precision; `Converged: true` |
+| `p2a-mcp` `tools::handlers::discrete::tests::test_validate_mcp_ordered_model_levels` (`crates/p2a-mcp/src/tools/handlers/discrete.rs`) | `y_label` with `levels` through the MCP tool, both links: the text is the core Display (`low\|mid`, `mid\|high`, `Converged: true`); `*_coef`, `*_zeta` 1e-6, `*_se_coef`, `*_se_zeta` 1e-5, `*_loglik`; the numeric `y` without `levels` gives the same fit |
+| `p2a-cli` `tier2::wp18_discrete::test_validate_cli_o_logit_levels` (`crates/p2a-cli/tests/tier2/wp18_discrete.rs`) | `o-logit --levels low,mid,high`: coefficients, SEs, cut points with SEs at print precision (6 decimals), z (4), `Converged: Yes`; JSON at 1e-6 / 1e-5, `categories` |
+| `p2a-cli` `tier2::wp18_discrete::test_validate_cli_o_probit_levels` | the same for `o-probit` with space-separated levels |
+| `p2a-cli` `tier2::wp18_discrete::test_validate_cli_o_logit_missing_note` | `y_na ~ x1_na + x2`: `na_coef`, `na_se_coef` at print precision, the `Note:` line, JSON `missing` |
 
 Not R-pinned (error paths, derivatives and fixtures):
 
@@ -197,6 +202,10 @@ Not R-pinned (error paths, derivatives and fixtures):
   `max_iter = 2` ends the fit with `converged = false` and a "did not converge" warning.
 - `p2a-mcp` `tier2::wp10_ordered_count::test_mcp_ordered_model_text_outcome_asks_for_levels`:
   the MCP tool error for a text outcome mentions `levels`.
+- `p2a-mcp` `tools::handlers::discrete::tests::test_mcp_ordered_model_text_outcome_needs_levels`:
+  the same through the handler, with the column and its labels.
+- `p2a-cli` `tier2::wp18_discrete::test_cli_o_logit_text_outcome_needs_levels`: the CLI
+  error names the column, its labels and `--levels`.
 
 ## Tolerance
 
@@ -211,7 +220,9 @@ relative (coefficients, cut points) and 1e-12 (SEs).
 ## Status
 
 R-pinned (registry `validation/methods/discrete_ordered_count.json`, ids
-`discrete_ordered_logit` and `discrete_ordered_probit`).
+`discrete_ordered_logit` and `discrete_ordered_probit`; the MCP `levels` field and the CLI
+`--levels`, convergence and theta lines in `validation/methods/discrete_mixed.json`, id
+`discrete_mcp_cli_surface`).
 
 ## Known Differences
 

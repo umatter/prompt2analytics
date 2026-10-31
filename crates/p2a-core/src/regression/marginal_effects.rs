@@ -72,6 +72,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::econometrics::{DiscreteModelType, DiscreteResult, run_logit, run_probit};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -330,8 +331,24 @@ pub fn marginal_effects_discrete(
         DiscreteModelType::Probit => ModelType::Probit,
     };
 
-    // Build design matrix
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
+    // The design matrix on the rows the model used: those with no missing value in the
+    // outcome or a regressor, as run_logit/run_probit drop them.
+    let dep_var = discrete_result.dep_var.as_str();
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(dep_var)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    if cols.n() != n_obs {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "marginal effects: the model was estimated on {n_obs} rows but '{dep_var}' and \
+                 the regressors have {} complete rows; pass the dataset the model was fitted on",
+                cols.n()
+            ),
+        });
+    }
+    let dm = cols.matrix(x_cols, true);
     let x = &dm.data;
     let k = x.ncols();
 
@@ -707,7 +724,40 @@ pub fn contrasts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::Tol;
     use polars::prelude::*;
+
+    /// Case data for tests that compare no R value.
+    fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
+        crate::test_support::load_case(id)
+    }
+
+    /// The marginal effects of a logit that dropped rows with a missing outcome are those
+    /// of the same logit on the complete rows: X is built from the rows the model used.
+    #[test]
+    fn test_na_marginal_effects_logit_uses_estimation_rows() {
+        let (_, ds) = case_data("disc_choice_na");
+        let full = marginal_effects(&ds, "choice_na", &["x", "w"], ModelType::Logit).unwrap();
+        let complete = Dataset::new(
+            ds.df()
+                .drop_nulls::<String>(Some(&["choice_na".into()]))
+                .unwrap(),
+        );
+        let cc = marginal_effects(&complete, "choice_na", &["x", "w"], ModelType::Logit).unwrap();
+        assert_eq!(full.n_obs, 298);
+        let values = |m: &MarginalEffectsResult| -> Vec<f64> {
+            let mut v: Vec<f64> = m.average_marginal.iter().map(|e| e.estimate).collect();
+            v.extend(m.average_marginal.iter().map(|e| e.std_error));
+            v.extend(m.at_means.iter().flatten().map(|e| e.estimate));
+            v
+        };
+        let (a, b) = (values(&full), values(&cc));
+        assert_eq!(a.len(), b.len());
+        let tol = Tol::new(1e-12, 1e-14);
+        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+            assert!(tol.allows(*x, *y), "[{i}] {x} vs complete rows {y}");
+        }
+    }
 
     fn create_test_dataset() -> Dataset {
         // Create test data with known properties

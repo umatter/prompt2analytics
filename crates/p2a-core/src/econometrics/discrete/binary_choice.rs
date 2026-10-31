@@ -30,8 +30,8 @@
 use ndarray::{Array1, Array2};
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
 
@@ -40,6 +40,10 @@ use super::types::{DiscreteModelType, DiscreteResult, MleSettings};
 /// Run logit regression.
 ///
 /// R equivalent: `stats::glm(y ~ x1 + x2, family = binomial(link = "logit"), data = df)`
+///
+/// Rows with a missing outcome or regressor are dropped (as `glm`'s `na.omit`) and
+/// reported in `missing`. The outcome must be numeric 0/1 (Int64 and Boolean columns are
+/// accepted); a text outcome is `NonNumericColumn`.
 pub fn run_logit(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconResult<DiscreteResult> {
     run_discrete_model(dataset, y_col, x_cols, DiscreteModelType::Logit, None)
 }
@@ -47,6 +51,8 @@ pub fn run_logit(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconResult<
 /// Run probit regression.
 ///
 /// R equivalent: `stats::glm(y ~ x1 + x2, family = binomial(link = "probit"), data = df)`
+///
+/// Missing values and outcome types as in [`run_logit`].
 pub fn run_probit(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconResult<DiscreteResult> {
     run_discrete_model(dataset, y_col, x_cols, DiscreteModelType::Probit, None)
 }
@@ -158,33 +164,17 @@ pub fn run_discrete_model(
 ) -> EconResult<DiscreteResult> {
     let settings = settings.unwrap_or_default();
     let df = dataset.df();
-    let n = df.height();
 
-    // Extract y
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    let y: Vec<f64> = y_series
-        .cast(&polars::prelude::DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: y_col.to_string(),
-        })?
-        .into_no_null_iter()
-        .collect();
-
-    // Build design matrix with intercept
-    let dm = DesignMatrix::from_dataframe(df, x_cols, true)?;
-    let x = dm.view().to_owned();
+    // y and X from the same rows: a row with a missing outcome or regressor is dropped
+    // (R glm: na.omit). A text outcome is NonNumericColumn; Int64 and Boolean are read.
+    let cols = ColumnRequest::new(df)
+        .numeric(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let n = cols.n();
+    let y: Vec<f64> = cols.numeric(y_col).to_vec();
+    let x = cols.matrix(x_cols, true).data;
     let k = x.ncols();
 
     // Build variable names
@@ -201,6 +191,9 @@ pub fn run_discrete_model(
     }
 
     let mut warnings = Vec::new();
+    if let Some(note) = cols.missing().note() {
+        warnings.push(note);
+    }
     if has_quasi {
         warnings.push(format!(
             "Quasi-complete separation detected for: {}. Coefficients may be unstable.",
@@ -504,6 +497,7 @@ pub fn run_discrete_model(
         iterations,
         converged,
         warnings,
+        missing: cols.missing().clone(),
     })
 }
 
@@ -541,7 +535,129 @@ fn compute_log_likelihood(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    /// Case data for tests that compare no R value.
+    fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
+        crate::test_support::load_case(id)
+    }
+
+    /// A missing outcome is dropped, as glm's na.omit does; it was read as 0.
+    #[test]
+    fn test_validate_logit_na_outcome_dropped() {
+        let (case, ds) = crate::test_support::load_case("disc_choice_na");
+        let r = run_logit(&ds, "choice_na", &["x", "w"]).unwrap();
+        Check::new(&case)
+            .named(
+                "logit_y_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "logit_y_se",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("logit_y_loglik", r.log_likelihood, Tol::stat(298))
+            .scalar("logit_y_nobs", r.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!(r.missing.n_total, 300);
+        assert_eq!(r.missing.n_dropped, 2);
+        assert_eq!(r.missing.by_column, vec![("choice_na".to_string(), 2)]);
+        let text = r.to_string();
+        assert_eq!(
+            text.lines().last().unwrap(),
+            "Missing values: 2 of 300 rows dropped because of missing values (choice_na: 2)"
+        );
+        assert_eq!(text.matches("2 of 300 rows dropped").count(), 1, "{text}");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("2 of 300 rows dropped")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// Missing values in the outcome and in a regressor: the incomplete rows are dropped
+    /// from y and X together (glm on 297 rows).
+    #[test]
+    fn test_validate_logit_na_rows_dropped() {
+        let (case, ds) = crate::test_support::load_case("disc_choice_na");
+        let r = run_logit(&ds, "choice_na", &["x_na", "w"]).unwrap();
+        Check::new(&case)
+            .named(
+                "logit_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "logit_se",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("logit_loglik", r.log_likelihood, Tol::stat(297))
+            .scalar("logit_nobs", r.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!(
+            r.missing.by_column,
+            vec![("choice_na".to_string(), 2), ("x_na".to_string(), 1)]
+        );
+        assert_eq!(r.missing.n_dropped, 3);
+    }
+
+    /// The probit counterpart of `test_validate_logit_na_rows_dropped`.
+    #[test]
+    fn test_validate_probit_na_rows_dropped() {
+        let (case, ds) = crate::test_support::load_case("disc_choice_na");
+        let r = run_probit(&ds, "choice_na", &["x_na", "w"]).unwrap();
+        Check::new(&case)
+            .named(
+                "probit_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "probit_se",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("probit_loglik", r.log_likelihood, Tol::stat(297))
+            .scalar("probit_nobs", r.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!(
+            r.missing.by_column,
+            vec![("choice_na".to_string(), 2), ("x_na".to_string(), 1)]
+        );
+    }
+
+    /// A text outcome is refused; a non-strict cast made every value null, then 0.
+    #[test]
+    fn test_na_logit_text_outcome_refused() {
+        let (_, ds) = case_data("disc_choice_na");
+        match run_logit(&ds, "alt", &["x"]) {
+            Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "alt"),
+            other => panic!("expected NonNumericColumn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_na_logit_absent_column() {
+        let (_, ds) = case_data("disc_choice_na");
+        for (y, x) in [("nope", "x"), ("choice", "nope")] {
+            match run_logit(&ds, y, &[x]) {
+                Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
+                other => panic!("expected ColumnNotFound, got {other:?}"),
+            }
+        }
+    }
 
     fn create_binary_dataset() -> Dataset {
         let df = df! {

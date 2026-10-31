@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::resource;
 use crate::traits::estimator::normal_cdf;
@@ -120,6 +120,9 @@ pub struct MultinomResult {
     pub n_obs: usize,
     /// Counts by category
     pub category_counts: Vec<usize>,
+    /// Rows dropped because of a missing outcome or regressor (`nnet::multinom`: `na.omit`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for MultinomResult {
@@ -171,6 +174,9 @@ impl fmt::Display for MultinomResult {
             "Converged: {} ({} iterations)",
             self.converged, self.iterations
         )?;
+        if let Some(note) = self.missing.note() {
+            writeln!(f, "Missing values: {note}")?;
+        }
         Ok(())
     }
 }
@@ -180,13 +186,20 @@ impl fmt::Display for MultinomResult {
 /// # Arguments
 ///
 /// * `dataset` - The dataset
-/// * `y_col` - Name of the categorical dependent variable
+/// * `y_col` - Name of the categorical dependent variable (text, integer, float or
+///   Boolean labels)
 /// * `x_cols` - Names of independent variables
-/// * `reference` - Optional reference category (default: first category in sorted order)
+/// * `reference` - Optional reference category (default: the first category in R
+///   `factor()` order: numbers numerically, text by byte)
 ///
 /// # Returns
 ///
 /// `MultinomResult` containing coefficient estimates and statistics.
+///
+/// # Missing values
+///
+/// Rows with a missing outcome or regressor are dropped (as `nnet::multinom`'s
+/// `na.omit`) and reported in `missing`.
 ///
 /// # Errors
 ///
@@ -216,39 +229,17 @@ pub fn run_multinom(
 ) -> EconResult<MultinomResult> {
     let df = dataset.df();
 
-    // Extract y values and determine categories
-    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
-
-    // Get unique categories
-    let y_str: Vec<String> = if let Ok(ca) = y_series.str() {
-        ca.into_no_null_iter().map(|s| s.to_string()).collect()
-    } else if let Ok(ca) = y_series.i64() {
-        ca.into_no_null_iter().map(|v| v.to_string()).collect()
-    } else if let Ok(ca) = y_series.f64() {
-        ca.into_no_null_iter().map(|v| v.to_string()).collect()
-    } else {
-        return Err(EconError::InvalidSpecification {
-            message: format!("Column '{}' must be categorical (string or integer)", y_col),
-        });
-    };
-
-    let n = y_str.len();
-
-    // Get sorted unique categories
-    let mut categories: Vec<String> = y_str
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    categories.sort();
+    // The outcome as a factor and X from the same rows: a row with a missing outcome or
+    // regressor is dropped (nnet::multinom: na.omit). Categories follow R factor() order
+    // (numbers numerically, text by byte).
+    let cols = ColumnRequest::new(df)
+        .factor(y_col)
+        .numerics(x_cols)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let y_factor = cols.factor(y_col);
+    let n = cols.n();
+    let mut categories: Vec<String> = y_factor.levels.clone();
 
     let j = categories.len(); // Number of categories
     if j < 2 {
@@ -282,27 +273,23 @@ pub fn run_multinom(
     let ref_idx = categories.iter().position(|c| c == &ref_cat).unwrap();
     categories.swap(0, ref_idx);
 
-    // Count observations per category
-    let category_counts: Vec<usize> = categories
+    // Category index of each factor level (the levels with the reference moved first)
+    let level_to_cat: Vec<usize> = y_factor
+        .levels
         .iter()
-        .map(|cat| y_str.iter().filter(|y| *y == cat).count())
+        .map(|level| categories.iter().position(|c| c == level).unwrap_or(0))
         .collect();
 
-    // Create category index mapping
-    let cat_to_idx: std::collections::HashMap<&str, usize> = categories
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.as_str(), i))
-        .collect();
+    // Category index of each observation, and the counts per category
+    let mut y_idx = resource::try_vec(n, 0usize, "multinomial logit outcome")?;
+    let mut category_counts = vec![0usize; j];
+    for (yi, &code) in y_idx.iter_mut().zip(&y_factor.codes) {
+        *yi = level_to_cat[code as usize];
+        category_counts[*yi] += 1;
+    }
 
-    // Convert y to category indices
-    let y_idx: Vec<usize> = y_str
-        .iter()
-        .map(|y| *cat_to_idx.get(y.as_str()).unwrap())
-        .collect();
-
-    // Build design matrix
-    let dm = DesignMatrix::from_dataframe(df, x_cols, true)?;
+    // Design matrix on the kept rows
+    let dm = cols.matrix(x_cols, true);
     let x = dm.view();
     let k = x.ncols();
 
@@ -540,12 +527,14 @@ pub fn run_multinom(
         converged,
         n_obs: n,
         category_counts,
+        missing: cols.missing().clone(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::design::DesignMatrix;
     use crate::resource::{self, Budget, CancelToken};
     use ndarray::array;
     use p2a_validation::{Check, Tol};
@@ -661,6 +650,56 @@ mod tests {
         pin_multinom(&case, &r);
     }
 
+    /// Every coefficient and SE of `a` equals that of `b` (same categories in the same
+    /// order) to rounding.
+    fn assert_same_fit(a: &MultinomResult, b: &MultinomResult) {
+        let tol = Tol::new(1e-12, 1e-14);
+        let (ca, cb) = (flat(&a.coefficients), flat(&b.coefficients));
+        let (sa, sb) = (flat(&a.std_errors), flat(&b.std_errors));
+        assert_eq!(ca.len(), cb.len());
+        for (i, (x, y)) in ca.iter().zip(&cb).chain(sa.iter().zip(&sb)).enumerate() {
+            assert!(tol.allows(*x, *y), "[{i}] {x} vs {y}");
+        }
+    }
+
+    /// A missing outcome is dropped (nnet::multinom's na.omit), not a phantom "" category.
+    #[test]
+    fn test_validate_multinom_na_outcome_dropped() {
+        let (case, ds) = crate::test_support::load_case("disc_choice_na");
+        let r = run_multinom(&ds, "g", &["x", "w"], None).unwrap();
+        assert_eq!(r.categories, ["A", "B", "C"]);
+        assert_eq!(r.reference_category, "A");
+        assert_eq!(r.n_obs as f64, case.scalar("multinom_n"));
+        let counts: Vec<f64> = r.category_counts.iter().map(|&c| c as f64).collect();
+        assert_eq!(counts, case.vector("multinom_counts"));
+        assert_eq!(r.missing.n_dropped, 2);
+        assert_eq!(r.missing.by_column, vec![("g".to_string(), 2)]);
+        let complete = Dataset::new(ds.df().drop_nulls::<String>(Some(&["g".into()])).unwrap());
+        let cc = run_multinom(&complete, "g", &["x", "w"], None).unwrap();
+        assert_same_fit(&r, &cc);
+        assert_eq!(
+            r.to_string().lines().last().unwrap(),
+            "Missing values: 2 of 300 rows dropped because of missing values (g: 2)"
+        );
+    }
+
+    /// Integer outcome labels are ordered numerically, as R's factor() (2 < 10 < 33).
+    #[test]
+    fn test_validate_multinom_integer_outcome_level_order() {
+        let (case, ds) = crate::test_support::load_case("disc_choice_na");
+        let r = run_multinom(&ds, "k", &["x", "w"], None).unwrap();
+        let levels: Vec<String> = case
+            .vector("k_levels")
+            .iter()
+            .map(|v| format!("{v}"))
+            .collect();
+        assert_eq!(r.categories, levels);
+        assert_eq!(r.categories, ["2", "10", "33"]);
+        assert_eq!(r.reference_category, "2");
+        let g = run_multinom(&ds, "g", &["x", "w"], None).unwrap();
+        assert_same_fit(&r, &g);
+    }
+
     #[test]
     fn test_softmax_into_log_sum_exp() {
         // (1) Ordinary predictors.
@@ -757,9 +796,8 @@ mod tests {
     /// (RF-31). The estimates must be finite and `converged` false: the iteration
     /// runs out of steps or stops at the first step that comes from the
     /// pseudoinverse (singular information), never applying it. Measured on 20
-    /// categories (38 parameters): the stop comes at step 42; with pseudoinverse
-    /// steps applied, the fit reports `converged = true` at step 45 with a
-    /// log-likelihood of -1.5e18.
+    /// categories (38 parameters): with pseudoinverse steps applied, the fit
+    /// reported `converged = true` with a log-likelihood of -1.5e18.
     #[test]
     fn test_multinom_one_row_per_category_does_not_converge() {
         let r = run_multinom(&continuous_y_dataset(20), "y", &["x"], None).unwrap();

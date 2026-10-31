@@ -504,8 +504,13 @@ pub static PARAM_RULES: &[ParamRule] = {
         p(
             "negbin",
             "init_theta",
-            Exempt("ignored by core: run_negbin does not use a starting dispersion"),
+            Exempt(
+                "starting value of glm.nb's theta alternation; core refuses values outside \
+                 [1e-8, 1e6]; not a cost parameter",
+            ),
         ),
+        p("ordered_model", "levels", UniqueList(ListLength)),
+        p("ordered_model", "levels[]", Max(StringBytes)),
         p("power_anova_test", "groups", Max(DesignGroups)),
         p("power_anova_test", "n", Max(PowerSampleSize)),
         p("power_anova_test", "between_var", Exempt(EFFECT)),
@@ -2407,6 +2412,23 @@ mod tests {
                 big.message
             );
         }
+    }
+
+    #[test]
+    fn ordered_model_levels_are_limited() {
+        let args = |levels: Value| json!({"dataset": "d", "y": "y", "x": ["x1"], "levels": levels});
+        assert!(hosted("ordered_model", args(json!(["low", "mid", "high"]))).is_ok());
+        let dup = hosted("ordered_model", args(json!(["low", "low"]))).unwrap_err();
+        assert!(dup.message.contains("more than once"), "{}", dup.message);
+        let many: Vec<String> = (0..501).map(|i| format!("level{i}")).collect();
+        let long = hosted("ordered_model", args(json!(many))).unwrap_err();
+        assert!(
+            long.message.contains("has 501 elements"),
+            "{}",
+            long.message
+        );
+        let big = hosted("ordered_model", args(json!(["x".repeat(5000)]))).unwrap_err();
+        assert!(big.message.contains("bytes long"), "{}", big.message);
     }
 }
 

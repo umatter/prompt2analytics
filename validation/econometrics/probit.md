@@ -55,7 +55,7 @@ summary(probit_fit)
 | β₁ (x) | 1.2 | ~1.2 | ~1.2 | 0.2 |
 | Log-likelihood | - | varies | varies | 0.1 |
 
-**Rust Test**: `crates/p2a-core/src/econometrics/discrete.rs::tests::test_validate_probit_simple`
+**Rust Test**: `econometrics::discrete::binary_choice::tests::test_validate_probit_simple` (`crates/p2a-core/src/econometrics/discrete/binary_choice.rs`; not R-pinned: it checks signs on a deterministic fixture)
 
 ---
 
@@ -161,6 +161,27 @@ where φ is the standard normal PDF.
 | Computation | Slightly faster | Requires Φ evaluation |
 
 In practice, predicted probabilities are nearly identical.
+
+## Missing values
+
+As for the logit ([logit.md](logit.md)): rows with a missing outcome or regressor are
+dropped (`glm`'s `na.omit`) and reported in `missing`; a text outcome is
+`NonNumericColumn`. Case `disc_choice_na` in
+[`validation/r/cases/discrete_mixed.R`](../r/cases/discrete_mixed.R):
+
+```r
+glm(choice_na ~ x_na + w, binomial("probit"), d, control = glm.control(epsilon = 1e-14))  # nobs 297
+```
+
+| Key | (Intercept) | x_na | w | log-likelihood | nobs |
+|---|---|---|---|---|---|
+| `probit_coef` | -0.4761633999415939 | 0.1960342515712869 | -0.2664571109637172 | -180.21133533224827 | 297 |
+| `probit_se` | 0.07782488226903958 | 0.0813932906245501 | 0.07869008940022174 | | |
+
+R-pinned: `econometrics::discrete::binary_choice::tests::test_validate_probit_na_rows_dropped`
+(coefficients 1e-6, SEs 1e-5 relative, log-likelihood 1e-6, nobs exact; registry
+`validation/methods/discrete_mixed.json`, id `binary_multinomial_missing_values`, whose
+`doc` is logit.md).
 
 ## Numerical Precision Summary
 

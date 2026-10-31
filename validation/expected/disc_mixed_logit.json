@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "id": "disc_mixed_logit",
+  "area": "econometrics/discrete",
+  "method": "Mixed logit, normal coefficient on x, R = 50 Halton draws per choice situation (mlogit)",
+  "reference": "mlogit::mlogit(rpar = c(x = 'n'), R = 50, halton = NA) simulated log-likelihood, re-solved with optim(BFGS, reltol = 1e-15) and Newton steps (numDeriv); SEs from numDeriv::hessian; conditional logit mlogit(choice ~ x + w | 0) likewise; mlogit:::halton",
+  "call": "mlogit(choice ~ x + w | 0, data = dfidx(d, idx = c('id', 'alt')), rpar = c(x = 'n'), R = 50, halton = NA)",
+  "dataset": "validation/datasets/generated/mixed_logit.csv",
+  "datasets": ["validation/datasets/generated/mixed_logit.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "mlogit": "2.0.0",
+    "numDeriv": "2016.8.1.1"
+  },
+  "values": {
+    "coef": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [0.94705121522529445, -0.7183429709052912, 1.3070751532911158]
+    },
+    "se": {
+      "names": ["mean_x", "mean_w", "sd_x"],
+      "values": [0.20046392776803168, 0.12021512327601581, 0.38794252490063635]
+    },
+    "loglik": -276.52510744446988,
+    "max_abs_grad": 3.4534465886898036e-09,
+    "coef_pkg": {
+      "names": ["x", "w", "sd.x"],
+      "values": [0.94706713332321801, -0.71834452411985161, 1.3071074769935906]
+    },
+    "se_pkg": {
+      "names": ["x", "w", "sd.x"],
+      "values": [0.20702816250820719, 0.12834905875786581, 0.41101790417292938]
+    },
+    "loglik_pkg": -276.52510744448449,
+    "first_draws": [-1.043158263318454, 0.38110545476355645, -0.25739352610093824, 1.2726986411905357, -1.3662038163720984],
+    "unit1_first_draws": [-0.22714306250271524, 1.3417178410802537, -1.2950224067058145],
+    "n_units": 300,
+    "n_draws": 50,
+    "n_situations": 300,
+    "clogit_coef": {
+      "names": ["x", "w"],
+      "values": [0.58942962109959907, -0.55231197730287263]
+    },
+    "clogit_se": {
+      "names": ["x", "w"],
+      "values": [0.083963897703697069, 0.083440261523235595]
+    },
+    "clogit_loglik": -281.77611853131634,
+    "clogit_coef_tight": {
+      "names": ["x", "w"],
+      "values": [0.58943834420121555, -0.55232020055869879]
+    },
+    "clogit_se_tight": {
+      "names": ["x", "w"],
+      "values": [0.083963897706943805, 0.083440261527003678]
+    },
+    "clogit_loglik_tight": -281.77611853131634,
+    "ln_n_point": {
+      "names": ["x", "w", "sd.x", "sd.w"],
+      "values": [-0.10000000000000001, -0.69999999999999996, 1, 0.40000000000000002]
+    },
+    "ln_n_loglik": -285.17048560928049,
+    "ln_n_grad": {
+      "names": ["x", "w", "sd.x", "sd.w"],
+      "values": [-20.479690697699866, -4.9750266857780394, 1.2432919784706993, -4.2147899465463627]
+    },
+    "halton_p3_drop100": [0.41152263374485593, 0.74485596707818924, 0.18930041152263374, 0.52263374485596703, 0.85596707818930029, 0.30041152263374482],
+    "halton_p2_drop100": [0.1484375, 0.6484375, 0.3984375, 0.8984375],
+    "halton_p7_3000_tail": [0.44987207711072763, 0.59272921996787054, 0.73558636282501344]
+  }
+}

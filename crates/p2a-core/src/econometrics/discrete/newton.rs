@@ -1,6 +1,8 @@
 //! The damped Newton step of the ordered (`ordered_models`) and zero-inflated
 //! (`count_models`) maximum-likelihood fits, their convergence test, and the checks
-//! around them.
+//! around them. The mixed logit (`mixed_logit`) takes its Newton steps after BFGS with
+//! [`newton_step`] too, and stops them at the first damped step; its convergence rule is
+//! its own.
 
 use ndarray::{Array1, Array2};
 

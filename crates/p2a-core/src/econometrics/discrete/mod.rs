@@ -9,7 +9,7 @@
 //! - **Ordered logit/probit**: For ordered categorical outcomes
 //! - **Count models**: Negative binomial, zero-inflated, and hurdle models
 //! - **Conditional logit**: McFadden's choice model (mlogit)
-//! - **Mixed logit**: Random parameters logit (gmnl, mixl)
+//! - **Mixed logit**: Random parameters logit (mlogit with `rpar`)
 //!
 //! # Mathematical Background
 //!
@@ -34,7 +34,8 @@
 //! - `MASS::glm.nb()` (negative binomial)
 //! - `pscl::zeroinfl()`, `pscl::hurdle()` (zero-inflated and hurdle models)
 //! - `mlogit::mlogit()` (conditional logit)
-//! - `gmnl::gmnl()`, `mixl::mixl()` (mixed logit)
+//! - `mlogit::mlogit(rpar = ...)` (mixed logit; `gmnl::gmnl()` and `mixl::mixl()` fit the
+//!   same model with other draws)
 
 // Module declarations
 mod binary_choice;
@@ -295,6 +296,7 @@ mod tests {
                 max_iter: 50,
                 tolerance: 1e-4,
                 seed: Some(42),
+                ..Default::default()
             }),
         )
         .unwrap();
