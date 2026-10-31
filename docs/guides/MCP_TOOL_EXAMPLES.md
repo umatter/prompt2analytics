@@ -31,10 +31,16 @@ Load a dataset from a file (CSV, Parquet, Excel, Stata, SAS).
 /load_dataset path:/path/to/data.csv
 /load_dataset path:/data/survey.xlsx
 /load_dataset path:/data/panel.dta
+/load_dataset path:/data/stata_export.csv na_strings:[".", "NA", ""]
 ```
 
 **Parameters:**
 - `path` (required): File path to load
+- `na_strings` (optional, CSV only): strings read as missing values; default `["NA", ""]`, as R's
+  `read.csv`. Unquoted empty fields are always missing; `[]` keeps the text `NA` as a value. It is
+  refused for other formats, which store missing values natively.
+
+`create_dataset` (`name`, `csv_content`) loads inline CSV text and takes the same `na_strings`.
 
 **Supported formats:**
 - CSV (.csv)
@@ -781,23 +787,25 @@ Estimate non-parametric survival curves.
 
 ```
 /kaplan_meier dataset:patients time:survival_time event:death
-/kaplan_meier dataset:patients time:survival_time event:death strata:treatment_group
-/kaplan_meier dataset:patients time:survival_time event:death confidence_level:0.95
+/kaplan_meier dataset:patients time:survival_time event:death group:treatment_group
+/kaplan_meier dataset:patients time:survival_time event:death confidence_level:0.95 conf_type:log-log
 ```
 
 **Parameters:**
 - `dataset` (required): Dataset name
 - `time` (required): Column with survival times
-- `event` (required): Binary event indicator (1=event, 0=censored)
-- `strata` (optional): Column for group stratification
+- `event` (required): Status column, coded as R's `Surv()`: 0/1 (1 = event), 1/2 (2 = event, as R's `lung`) or TRUE/FALSE
+- `group` (optional): Column for a stratified analysis
 - `confidence_level` (optional): CI level (default: 0.95)
+- `conf_type` (optional): confidence interval type, as R `survfit`'s `conf.type`: `log` (default), `log-log` or `plain`
 
 **Output includes:**
 - Survival probabilities at each event time
 - Greenwood standard errors
-- Confidence intervals (log-log transformed)
-- Median survival time
+- Confidence intervals (log transformed by default, as R's `survfit`)
+- Median survival time (as R's `quantile.survfit`)
 - Number at risk at each time point
+- Rows with a missing time, status or group are dropped and reported
 
 ### log_rank_test
 Compare survival curves between groups.
@@ -942,22 +950,31 @@ Fit an ARIMA(p,d,q) model.
 
 ```
 /ts_arima_fit dataset:sales column:revenue p:1 d:1 q:1
+/ts_arima_fit dataset:sales column:revenue p:1 d:0 q:1 include_mean:true
+/ts_arima_fit dataset:sales column:revenue p:0 d:1 q:1 include_drift:true
 ```
 
 **Parameters:**
 - `p`: Autoregressive order
 - `d`: Differencing order
 - `q`: Moving average order
+- `include_mean` (optional): estimate the mean (R's `intercept`); default true when d = 0, and must be false or omitted when d > 0
+- `include_drift` (optional): estimate a drift, as R `forecast::Arima(include.drift = TRUE)`; only for d = 0 or 1, default false
+
+The fit is by conditional sum of squares (R `arima(method = 'CSS')`). The series must have no missing values.
 
 ### ts_arima_forecast
 Generate forecasts from a fitted ARIMA model.
 
 ```
-/ts_arima_forecast dataset:sales column:revenue p:1 d:1 q:1 h:12
+/ts_arima_forecast dataset:sales column:revenue p:1 d:1 q:1 horizon:12
 ```
 
 **Parameters:**
-- `h`: Forecast horizon (number of periods ahead)
+- `horizon`: Forecast horizon (number of periods ahead)
+- `include_mean`, `include_drift` (optional): as for `ts_arima_fit`
+
+**Output includes:** the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals, as R `forecast(Arima(x, order, method = 'CSS'))`.
 
 ### ts_mstl
 MSTL seasonal-trend decomposition.

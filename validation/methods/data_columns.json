@@ -17,7 +17,6 @@
         "p2a-core::data::columns::tests::test_validate_columns_matrix_and_summary",
         "p2a-core::data::columns::tests::test_validate_columns_level_order",
         "p2a-core::data::columns::tests::test_validate_columns_duplicate_names",
-        "p2a-mcp::tools::common::tests::test_validate_mcp_legacy_helpers_refuse_text",
         "p2a-mcp::tools::common::tests::test_validate_mcp_numeric_column_omit_and_fail",
         "p2a-mcp::tools::common::tests::test_validate_mcp_numeric_columns_int64_and_text",
         "p2a-mcp::tools::common::tests::test_validate_mcp_numeric_matrix_dims_repeats_and_ceiling",

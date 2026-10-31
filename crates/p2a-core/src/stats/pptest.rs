@@ -468,19 +468,20 @@ pub fn run_pp_test(dataset: &Dataset, column: &str, lshort: bool) -> EconResult<
             column: column.to_string(),
         })?;
 
+    // na-legacy(T4): theme 3.3 (non-strict cast turns text into nulls; NaN passes through)
     let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
         column: column.to_string(),
     })?;
 
-    let x: Vec<f64> = ca
-        .into_iter()
-        .map(|opt| {
-            opt.ok_or_else(|| EconError::NullValues {
-                column: column.to_string(),
-                count: 1,
-            })
-        })
-        .collect::<Result<Vec<f64>, EconError>>()?;
+    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
+    let missing = ca.null_count();
+    if missing > 0 {
+        return Err(EconError::NullValues {
+            column: column.to_string(),
+            count: missing,
+        });
+    }
+    let x: Vec<f64> = ca.into_iter().flatten().collect();
 
     let mut result = pp_test(&x, lshort)?;
     result.series_name = Some(column.to_string());

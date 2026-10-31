@@ -647,18 +647,20 @@ fn extract_column(dataset: &Dataset, col_name: &str) -> EconResult<Vec<f64>> {
             column: col_name.to_string(),
         })?;
 
+    // na-legacy(T4): theme 3.3 (non-strict cast turns text into nulls; NaN passes through)
     let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
         column: col_name.to_string(),
     })?;
 
-    ca.into_iter()
-        .map(|opt| {
-            opt.ok_or_else(|| EconError::NullValues {
-                column: col_name.to_string(),
-                count: 1,
-            })
-        })
-        .collect()
+    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
+    let missing = ca.null_count();
+    if missing > 0 {
+        return Err(EconError::NullValues {
+            column: col_name.to_string(),
+            count: missing,
+        });
+    }
+    Ok(ca.into_iter().flatten().collect())
 }
 
 /// Run ACF on a dataset column.
@@ -975,5 +977,68 @@ mod tests {
                 v
             );
         }
+    }
+
+    #[cfg(feature = "spectral-analysis")]
+    fn spectrum_refusals(ds: &Dataset, col: &str) -> Vec<(&'static str, EconError)> {
+        use crate::stats::{SpectrumConfig, run_spectrum, run_spectrum_ar};
+        vec![
+            (
+                "spectrum",
+                run_spectrum(ds, col, SpectrumConfig::default()).unwrap_err(),
+            ),
+            (
+                "spectrum_ar",
+                run_spectrum_ar(ds, col, None, None).unwrap_err(),
+            ),
+        ]
+    }
+
+    #[cfg(not(feature = "spectral-analysis"))]
+    fn spectrum_refusals(_: &Dataset, _: &str) -> Vec<(&'static str, EconError)> {
+        Vec::new()
+    }
+
+    /// RF-34: the ACF, PACF, CCF, Box, PP and spectrum dataset readers refuse a column with
+    /// missing values (R's na.action = na.fail) and name the number of missing cells, R's
+    /// sum(is.na(col)): the rows minus the non-missing count the case records (case
+    /// stat_two_sample_na; x, xi and yi have missing cells, id has none). They reported 1.
+    #[test]
+    fn test_validate_na_ts_refusals_report_null_count() {
+        use crate::stats::{BoxTestType, run_box_test, run_pp_test};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_two_sample_na");
+        let rows = ds.nrows();
+        let mut check = Check::new(&case);
+        for (col, key) in [("x", "n_x"), ("xi", "n_xi"), ("yi", "n_yi")] {
+            let mut refusals: Vec<(&str, EconError)> = vec![
+                (
+                    "acf",
+                    run_acf(&ds, col, Some(3), AcfType::Correlation).unwrap_err(),
+                ),
+                ("pacf", run_pacf(&ds, col, Some(3)).unwrap_err()),
+                (
+                    "ccf",
+                    run_ccf(&ds, col, "id", Some(3), CcfType::Correlation).unwrap_err(),
+                ),
+                (
+                    "box",
+                    run_box_test(&ds, col, Some(3), BoxTestType::LjungBox, 0).unwrap_err(),
+                ),
+                ("pp", run_pp_test(&ds, col, false).unwrap_err()),
+            ];
+            refusals.extend(spectrum_refusals(&ds, col));
+            for (reader, e) in refusals {
+                match e {
+                    EconError::NullValues { column, count } => {
+                        assert_eq!(column, col, "{reader}");
+                        // R: sum(!is.na(col)) = rows - sum(is.na(col))
+                        check.scalar(key, (rows - count) as f64, Tol::exact());
+                    }
+                    other => panic!("{reader} {col}: expected NullValues, got {other}"),
+                }
+            }
+        }
+        check.finish();
     }
 }

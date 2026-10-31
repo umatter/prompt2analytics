@@ -336,6 +336,10 @@ where:
 
 # Additive model (no interaction)
 /anova_two_way dataset:mydata response:yield factor_a:fertilizer factor_b:irrigation interaction:false
+
+# Type II sums of squares (each main effect given the other, as car::Anova(type = 2));
+# the default is Type I (sequential, as aov), and Types I and II differ on unbalanced data
+/anova_two_way dataset:mydata response:yield factor_a:fertilizer factor_b:irrigation ss_type:II
 ```
 
 #### Interpreting Interaction
@@ -1657,10 +1661,14 @@ Where:
 Var(Ŝ(t)) = Ŝ(t)² × Σ_{tᵢ ≤ t} dᵢ / (nᵢ × (nᵢ - dᵢ))
 ```
 
-**Confidence Intervals**: Uses log-log transformation for better coverage:
+**Confidence Intervals**: by default on log Ŝ(t), as R `survfit`'s default `conf.type = "log"`
+(the upper limit is capped at 1):
 ```
-CI = Ŝ(t)^{exp(±z_{α/2} × SE(log(-log(Ŝ(t)))))}
+CI = Ŝ(t) × exp(±z_{α/2} × SE(log Ŝ(t)))
 ```
+`KmConfType::LogLog` (`conf_type: "log-log"` over MCP, `--conf-type log-log` in the CLI) gives the
+log-log interval `Ŝ(t)^{exp(±z_{α/2} × SE(log(-log(Ŝ(t)))))}`, and `KmConfType::Plain` the interval on
+Ŝ(t) itself (`run_kaplan_meier_with` and `KmConfig`).
 
 **Usage**:
 ```rust
@@ -1676,7 +1684,7 @@ run_kaplan_meier(dataset, "time", "event", Some("group"), 0.95)
 | CI Lower/Upper | 95% confidence interval |
 | N at Risk | Number still at risk at each time |
 | N Events | Number of events at each time |
-| Median Survival | Time when Ŝ(t) = 0.5 |
+| Median Survival | As R's `quantile.survfit`: the first time Ŝ(t) reaches 0.5, or the midpoint of the interval over which it equals 0.5 |
 
 **Assumptions**:
 1. **Independent censoring**: Censoring is unrelated to event risk

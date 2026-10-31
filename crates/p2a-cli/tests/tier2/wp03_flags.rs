@@ -1,25 +1,6 @@
 //! T2-WP03: global flags, subcommand short flags, session recording, data save/load through the p2a CLI.
 use crate::common::*;
 
-/// `p2a --session <path> -F json ts arima <args…>`: asserts success and parses the JSON object.
-///
-/// Skips stdout lines before the object: the arima crate's L-BFGS (liblbfgs 0.1.0,
-/// `line.rs:228`) prints a line-search error to stdout on this series. T2-WP16 replaces that
-/// optimiser and pins the ARIMA output with the strict `TempSession::json`; here only the
-/// flag binding matters.
-fn arima_json(s: &TempSession, args: &[&str]) -> serde_json::Value {
-    let mut all = vec!["-F", "json", "ts", "arima"];
-    all.extend_from_slice(args);
-    let stdout = s.ok(&all);
-    let start = if stdout.starts_with('{') {
-        0
-    } else {
-        stdout.find("\n{").map_or(0, |i| i + 1)
-    };
-    serde_json::from_str(&stdout[start..])
-        .unwrap_or_else(|e| panic!("{all:?}: no JSON object on stdout ({e})\n{stdout}"))
-}
-
 #[test]
 fn test_tier2_cli_helpers() {
     let out = p2a().arg("--version").output().unwrap();
@@ -69,20 +50,19 @@ fn test_cli_short_flags_bind_to_subcommands_in_debug_build() {
         "gdp",
         &[],
     );
-    let fit = arima_json(
-        &s,
-        &[
-            "gdp",
-            "--col",
-            "gdp_growth",
-            "-p",
-            "1",
-            "-d",
-            "0",
-            "-q",
-            "2",
-        ],
-    );
+    let fit = s.json(&[
+        "ts",
+        "arima",
+        "gdp",
+        "--col",
+        "gdp_growth",
+        "-p",
+        "1",
+        "-d",
+        "0",
+        "-q",
+        "2",
+    ]);
     assert_eq!(fit["model"], "ARIMA(1,0,2)"); // 2 is not the default (1), so -q bound to --ma
 }
 
@@ -198,21 +178,20 @@ fn test_cli_session_replays_subcommand_flags() {
     let copy_path = s.dir().join("gdp_copy.dat");
     let copy = copy_path.to_str().unwrap();
     s.ok(&["data", "load", gdp, "--name", "gdp"]);
-    let fit = arima_json(
-        &s,
-        &[
-            "gdp",
-            "--col",
-            "gdp_growth",
-            "-p",
-            "1",
-            "-d",
-            "0",
-            "-q",
-            "2",
-            "--quiet",
-        ],
-    );
+    let fit = s.json(&[
+        "ts",
+        "arima",
+        "gdp",
+        "--col",
+        "gdp_growth",
+        "-p",
+        "1",
+        "-d",
+        "0",
+        "-q",
+        "2",
+        "--quiet",
+    ]);
     assert_eq!(fit["model"], "ARIMA(1,0,2)");
     let filt = s.json(&[
         "munge", "filter", "gdp", "-c", "year", "-o", "ge", "-v", "2000", "-n", "recent",
@@ -308,9 +287,6 @@ fn r_class_code(dtype: &str) -> f64 {
     }
 }
 
-/// DATA-32 (CLI): "NA" is missing by default (R write.csv), --na-strings replaces the marker list,
-/// and the markers persist: every call below is a new process that reloads the session's datasets.
-/// The case `cli_na_strings` reads the same "NA"- and "."-coded copies of the case file in R.
 #[test]
 fn test_cli_na_strings_refused_for_any_non_csv_file() {
     // The --na-strings guard covers every extension but csv, also one the loader does not
@@ -334,6 +310,9 @@ fn test_cli_na_strings_refused_for_any_non_csv_file() {
     assert!(e.contains("Unsupported file format: txt"), "{e}");
 }
 
+/// DATA-32 (CLI): "NA" is missing by default (R write.csv), --na-strings replaces the marker list,
+/// and the markers persist: every call below is a new process that reloads the session's datasets.
+/// The case `cli_na_strings` reads the same "NA"- and "."-coded copies of the case file in R.
 #[test]
 fn test_validate_cli_data_load_na_strings() {
     let case = Case::load("columns_conventions");

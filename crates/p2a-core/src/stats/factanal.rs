@@ -1424,7 +1424,7 @@ pub fn run_factanal(
         .numerics(columns)
         .na(NaPolicy::Fail)
         .extract()?
-        .matrix(columns, false)
+        .matrix(columns, false)?
         .data;
 
     let mut result = factanal(&data.view(), n_factors, rotation, scores)?;

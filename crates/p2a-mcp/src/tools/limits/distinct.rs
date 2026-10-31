@@ -185,7 +185,7 @@ impl Keyed {
             DataType::UInt64 => Keyed::U64(s.u64()?.clone()),
             DataType::UInt128 => Keyed::U128(s.u128()?.clone()),
             DataType::Float32 => Keyed::F32(s.f32()?.clone()),
-            DataType::Float64 => Keyed::F64(s.f64()?.clone()),
+            DataType::Float64 => Keyed::F64(s.f64()?.clone()), // na-ok: dispatched on the physical dtype; keys() maps nulls to Key::Null
             DataType::String => Keyed::Str(s.str()?.clone()),
             DataType::Binary => Keyed::Bin(s.binary()?.clone()),
             _ => return Ok(None),

@@ -185,7 +185,9 @@ fn test_cli_ts_arima_errors() {
     assert!(e.contains("include_mean"), "{e}");
     let e = s.err(&arima("a_na", "0", &[]));
     assert!(
-        e.contains("Column 'a_na' contains 2 missing value(s)") && e.contains("munge fill-na"),
+        e.contains("Column 'a_na' contains 2 missing value(s)")
+            && e.contains("munge fill-na")
+            && e.contains("impute rather than drop"),
         "{e}"
     );
     let e = s.err(&arima("lab", "0", &[]));

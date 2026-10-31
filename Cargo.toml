@@ -44,7 +44,6 @@ rayon = "1.10"
 regex = "1.10"
 
 # Time series forecasting
-arima = "0.3"
 augurs-core = "0.10"
 augurs-mstl = "0.10"
 augurs-ets = { version = "0.10", features = ["mstl"] }

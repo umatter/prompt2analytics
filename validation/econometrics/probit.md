@@ -180,8 +180,7 @@ glm(choice_na ~ x_na + w, binomial("probit"), d, control = glm.control(epsilon =
 
 R-pinned: `econometrics::discrete::binary_choice::tests::test_validate_probit_na_rows_dropped`
 (coefficients 1e-6, SEs 1e-5 relative, log-likelihood 1e-6, nobs exact; registry
-`validation/methods/discrete_mixed.json`, id `binary_multinomial_missing_values`, whose
-`doc` is logit.md).
+`validation/methods/discrete_mixed.json`, id `probit_missing_values`).
 
 ## Numerical Precision Summary
 

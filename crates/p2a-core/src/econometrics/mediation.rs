@@ -262,7 +262,7 @@ pub fn run_mediation_analysis(
     let d = cols.numeric(treatment).to_vec();
     let m = cols.numeric(mediator).to_vec();
     // "(Intercept)" then the covariates, built row by row (CAUS-25)
-    let x = cols.matrix(covariates, true).data;
+    let x = cols.matrix(covariates, true)?.data;
     let k = x.ncols();
 
     // Compute point estimates

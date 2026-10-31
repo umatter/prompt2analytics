@@ -135,7 +135,7 @@ pub fn run_fixed_effects_with(
     let cols = panel_columns(dataset, y_col, x_cols, entity_col)?;
     let missing = cols.missing().clone();
     let y = cols.numeric_array(y_col);
-    let design = cols.matrix(x_cols, false);
+    let design = cols.matrix(x_cols, false)?;
     let x = design.data;
     let var_names = design.column_names;
     let n = y.len();
@@ -384,7 +384,7 @@ pub fn run_random_effects_with(
     let cols = panel_columns(dataset, y_col, x_cols, entity_col)?;
     let missing = cols.missing().clone();
     let y = cols.numeric_array(y_col);
-    let design = cols.matrix(x_cols, true);
+    let design = cols.matrix(x_cols, true)?;
     let x = design.data;
     let var_names = design.column_names;
     let n = y.len();

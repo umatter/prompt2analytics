@@ -537,7 +537,7 @@ pub fn run_negbin(
         .extract()?;
     let y = cols.numeric(y_col);
     let n = cols.n();
-    let dm = cols.matrix(x_cols, true);
+    let dm = cols.matrix(x_cols, true)?;
     let x = dm.view();
     let k = x.ncols();
 
@@ -1397,8 +1397,8 @@ fn run_zeroinfl(
         .extract()?;
     let y = cols.numeric(y_col);
     let n = cols.n();
-    let dm_count = cols.matrix(x_cols, true);
-    let dm_zero = cols.matrix(zero_cols, true);
+    let dm_count = cols.matrix(x_cols, true)?;
+    let dm_zero = cols.matrix(zero_cols, true)?;
     let x_count = dm_count.view();
     let x_zero = dm_zero.view();
     let k_count = x_count.ncols();
@@ -1843,10 +1843,10 @@ pub fn run_hurdle(
     }
 
     // Build design matrices
-    let x_full = cols.matrix(x_cols, true).data;
+    let x_full = cols.matrix(x_cols, true)?.data;
     let k_count = x_full.ncols();
 
-    let x_binary = cols.matrix(binary_cols, true).data;
+    let x_binary = cols.matrix(binary_cols, true)?.data;
     let k_binary = x_binary.ncols();
 
     // Part 1: Binary logit model
@@ -3380,8 +3380,8 @@ mod tests {
             .numerics(&["y_nb", "x1", "x2"])
             .extract()
             .unwrap();
-        let x = cols.matrix(&["x1", "x2"], true);
-        let z1 = cols.matrix(&["x1"], true);
+        let x = cols.matrix(&["x1", "x2"], true).unwrap();
+        let z1 = cols.matrix(&["x1"], true).unwrap();
         let y = cols.numeric("y_nb");
         let h = 1e-6;
         for (dist, z, par) in [

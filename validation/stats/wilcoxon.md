@@ -143,7 +143,10 @@ shared extractor (`p2a_core::data::columns`), with `wilcox.test`'s NA handling:
 
 - **Paired test:** a pair with a missing `x` or `y` is dropped (`complete.cases(x, y)`).
 - **Rank-sum test:** each sample drops its own missing values (two independent columns); the
-  two summaries are merged (`MissingSummary::merge_samples`).
+  two summaries are merged (`MissingSummary::merge_samples`), so `missing.n_total` counts the
+  values of both samples, twice the rows. The Display line counts values too
+  (`MissingSummary::two_sample_note`): `Missing values: 2 of 20 values dropped because of
+  missing values (two samples of 10; x: 1, y: 1)`.
 - **One-sample test:** the column's missing values are dropped.
 
 The drop is reported in `missing` and in a last Display line `Missing values: ...`. Integer

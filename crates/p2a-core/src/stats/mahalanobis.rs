@@ -373,7 +373,7 @@ pub fn run_mahalanobis(
         .numerics(columns)
         .na(NaPolicy::Omit)
         .extract()?;
-    let data = cols.matrix(columns, false).data;
+    let data = cols.matrix(columns, false)?.data;
 
     // Convert center if provided
     let center_arr = center.map(|c| Array1::from_vec(c.to_vec()));

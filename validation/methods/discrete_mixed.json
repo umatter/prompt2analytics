@@ -44,21 +44,35 @@
     },
     {
       "id": "binary_multinomial_missing_values",
-      "name": "Logit, probit and multinomial logit with missing cells (rows dropped, as na.omit; factor() level order)",
+      "name": "Logit and multinomial logit with missing cells (rows dropped, as na.omit; factor() level order)",
       "category": "econometrics",
-      "reference": "stats::glm(binomial('logit' | 'probit'), na.omit, epsilon = 1e-14); complete.cases + table (nnet::multinom sample); factor() level order",
+      "reference": "stats::glm(binomial('logit'), na.omit, epsilon = 1e-14); complete.cases + table (nnet::multinom sample); factor() level order",
       "doc": "validation/econometrics/logit.md",
       "cases": ["disc_choice_na"],
       "tests": [
         "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_na_outcome_dropped",
         "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_na_rows_dropped",
-        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_probit_na_rows_dropped",
         "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_na_outcome_dropped",
         "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_integer_outcome_level_order",
         "p2a-cli::tier2::wp18_discrete::test_validate_cli_logit_missing_note"
       ],
-      "quantities": ["logit coefficients, SEs, log-likelihood, nobs (outcome missing; outcome and regressor missing)", "probit coefficients, SEs, log-likelihood, nobs", "missing summary and note", "multinom categories, counts, n (no phantom category), numeric level order"],
+      "quantities": ["logit coefficients, SEs, log-likelihood, nobs (outcome missing; outcome and regressor missing)", "missing summary and note", "multinom categories, counts, n (no phantom category), numeric level order"],
       "tolerance": "coefficients 1e-6, SEs 1e-5 relative (iterative MLE), log-likelihood 1e-6; counts exact; complete-row equality 1e-12; CLI text Tol::printed(6)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "probit_missing_values",
+      "name": "Probit with missing cells (rows dropped, as na.omit)",
+      "category": "econometrics",
+      "reference": "stats::glm(binomial('probit'), na.omit, epsilon = 1e-14)",
+      "doc": "validation/econometrics/probit.md",
+      "cases": ["disc_choice_na"],
+      "tests": [
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_probit_na_rows_dropped"
+      ],
+      "quantities": ["probit coefficients, SEs, log-likelihood, nobs"],
+      "tolerance": "coefficients 1e-6, SEs 1e-5 relative (iterative MLE), log-likelihood 1e-6; nobs exact",
       "deviations": [],
       "supersedes_legacy": []
     },

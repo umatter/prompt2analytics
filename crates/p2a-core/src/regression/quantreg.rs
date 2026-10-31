@@ -267,7 +267,7 @@ pub fn quantreg(
     let y_arr = cols.numeric_array(y_col);
 
     let n = y_arr.len();
-    let x = cols.matrix(x_cols, config.intercept).data;
+    let x = cols.matrix(x_cols, config.intercept)?.data;
     let k = x.ncols();
 
     if n <= k {

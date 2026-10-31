@@ -1058,7 +1058,7 @@ pub fn run_medflex_dataset(
     let c = if confounders.is_empty() {
         Array2::zeros((cols.n(), 0))
     } else {
-        cols.matrix(confounders, false).data
+        cols.matrix(confounders, false)?.data
     };
     let mut result = run_medflex(&y.view(), &t.view(), &m.view(), &c.view(), config)?;
     result.missing = cols.missing().clone();

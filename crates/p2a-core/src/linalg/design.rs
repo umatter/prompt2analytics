@@ -54,6 +54,11 @@ pub enum DesignError {
     #[error("No columns specified for design matrix")]
     NoColumns,
 
+    /// An allocation refused under the [`crate::resource`] ceiling (the message of
+    /// `EconError::ResourceLimit`).
+    #[error("{0}")]
+    ResourceLimit(String),
+
     #[error("Polars error: {0}")]
     PolarsError(#[from] PolarsError),
 }
@@ -232,13 +237,9 @@ fn extract_f64_values(series: &Column, col_name: &str) -> Result<Vec<f64>, Desig
 /// The keys are the column's factor labels (`crate::data::columns::Factor`: text
 /// as stored, integers in decimal, booleans "FALSE"/"TRUE", dates "YYYY-MM-DD"). A
 /// missing label is [`DesignError::NullValues`]; a column that cannot be a factor
-/// is a [`DesignError::PolarsError`] naming it.
-///
-/// `DesignError` has no resource variant: an allocation refused under the
-/// [`crate::resource`] ceiling is also returned as [`DesignError::PolarsError`], whose
-/// text carries the "Resource limit" message, and `econ_error_from_design` turns any
-/// `PolarsError` into `EconError::Internal`. A caller that must report a refusal as
-/// `EconError::ResourceLimit` uses `crate::data::columns::factor_options` directly.
+/// is a [`DesignError::PolarsError`] naming it. An allocation refused under the
+/// [`crate::resource`] ceiling is [`DesignError::ResourceLimit`], which
+/// `econ_error_from_design` maps back to `EconError::ResourceLimit`.
 pub fn extract_groups(
     df: &DataFrame,
     group_col: &str,
@@ -248,6 +249,7 @@ pub fn extract_groups(
     let (codes, levels) =
         crate::data::columns::factor_options(df, group_col).map_err(|e| match e {
             EconError::ColumnNotFound { column, .. } => DesignError::ColumnNotFound(column),
+            EconError::ResourceLimit(message) => DesignError::ResourceLimit(message),
             other => DesignError::PolarsError(PolarsError::ComputeError(other.to_string().into())),
         })?;
 
@@ -518,5 +520,22 @@ mod tests {
             err.to_string(),
             "Column 'group' contains 1 missing value(s) (first at 0-based rows [1])"
         );
+    }
+
+    #[test]
+    fn test_na_extract_groups_resource_limit_is_typed() {
+        // A refusal under the allocation ceiling stays a resource refusal: DesignError's own
+        // variant, which econ_error_from_design maps to EconError::ResourceLimit (it was a
+        // PolarsError, reported as EconError::Internal).
+        let labels: Vec<String> = (0..1000).map(|i| format!("g{}", i % 7)).collect();
+        let df = df! { "g" => labels }.unwrap();
+        let err =
+            crate::resource::with_alloc_ceiling(Some(64), || extract_groups(&df, "g")).unwrap_err();
+        assert!(matches!(err, DesignError::ResourceLimit(_)), "{err:?}");
+        assert!(matches!(
+            crate::data::columns::econ_error_from_design(err, &df),
+            crate::errors::EconError::ResourceLimit(_)
+        ));
+        assert_eq!(extract_groups(&df, "g").unwrap().len(), 7);
     }
 }

@@ -712,7 +712,7 @@ pub fn run_manova(dataset: &Dataset, y_cols: &[&str], group_col: &str) -> EconRe
         .factor(group_col)
         .na(NaPolicy::Omit)
         .extract()?;
-    let y_data = cols.matrix(y_cols, false).data;
+    let y_data = cols.matrix(y_cols, false)?.data;
     let factor = cols.factor(group_col);
     let groups: Vec<&str> = (0..cols.n()).map(|i| factor.label(i)).collect();
 

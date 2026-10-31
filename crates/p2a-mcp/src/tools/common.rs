@@ -120,7 +120,7 @@ pub use serde::Deserialize;
 
 pub use p2a_core::data::columns::{Columns, MissingSummary, NaPolicy};
 
-use p2a_core::data::columns::{ColumnRequest, is_numeric_dtype};
+use p2a_core::data::columns::ColumnRequest;
 
 /// One numeric column under `policy`: the kept values and what was dropped. The error is
 /// the core rule's LLM-readable text ("Column 'x' contains 3 missing value(s) (null or
@@ -182,96 +182,47 @@ pub fn append_missing_note(text: &mut String, missing: &MissingSummary) {
 /// shape is `MissingSummary`'s own `Serialize`; as a `serde_json::Value`, the keys of
 /// `by_column` are sorted.
 pub fn missing_json(missing: &MissingSummary) -> Option<serde_json::Value> {
+    // `to_value` cannot fail for a MissingSummary (string keys, integer values), so `None`
+    // only means that no row was dropped.
     (!missing.is_empty())
         .then(|| serde_json::to_value(missing))
         .and_then(Result::ok)
 }
 
-/// The legacy helpers' refusal of a column that is not numeric (a text, date or other
-/// column; an entirely null column passes as all-NaN).
-fn legacy_numeric_check(col: &p2a_core::polars::prelude::Column, name: &str) -> Result<(), String> {
-    if col.null_count() == col.len() || is_numeric_dtype(col.dtype(), true) {
-        Ok(())
-    } else {
-        Err(format!(
-            "Column '{name}' is not numeric (type {}). Use a numeric column, or convert it with \
-             munge_cast.",
-            col.dtype()
-        ))
+/// Adds `"missing"` ([`missing_json`]) to a JSON tool output when rows were dropped; leaves
+/// it as it is otherwise.
+pub fn insert_missing(output: &mut serde_json::Value, missing: &MissingSummary) {
+    if let Some(m) = missing_json(missing) {
+        output["missing"] = m;
     }
 }
 
-/// Helper function to extract a single numeric column as a Vec<f64>.
-///
-/// Legacy: nulls become NaN. New code uses [`numeric_column`]/[`numeric_matrix`] with an
-/// explicit [`NaPolicy`]; removed by T2-WP22. A text, date or other non-numeric column is
-/// an error naming the column.
-pub fn extract_column_f64(
-    dataset: &p2a_core::data::Dataset,
-    column: &str,
-) -> Result<Vec<f64>, String> {
-    use p2a_core::polars::prelude::*;
-
-    let df = dataset.df();
-    let col = df
-        .column(column)
-        .map_err(|e| format!("Column '{}' not found: {}", column, e))?;
-    legacy_numeric_check(col, column)?;
-
-    let values: Vec<f64> = col
-        .cast(&DataType::Float64)
-        .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", column, e))?
-        .f64()
-        .map_err(|e| format!("Column '{}' is not numeric: {}", column, e))?
-        .into_iter()
-        .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
-        .collect();
-
-    Ok(values)
+/// The distinct values of column `name` for a size budget, null counted as one: an upper bound
+/// on the levels the core keeps after dropping missing values. `Ok(None)` when the column is
+/// missing, which the core reports itself.
+pub fn budget_level_count(
+    df: &p2a_core::polars::prelude::DataFrame,
+    name: &str,
+) -> Result<Option<usize>, String> {
+    let Ok(col) = df.column(name) else {
+        return Ok(None);
+    };
+    level_count_or_refusal(name, col.n_unique()).map(Some)
 }
 
-/// Helper function to extract numeric columns into an ndarray matrix.
-///
-/// Legacy: nulls become NaN. New code uses [`numeric_column`]/[`numeric_matrix`] with an
-/// explicit [`NaPolicy`]; removed by T2-WP22. A text, date or other non-numeric column is
-/// an error naming the column.
-pub fn extract_numeric_matrix(
-    dataset: &p2a_core::data::Dataset,
-    columns: &[String],
-) -> Result<ndarray::Array2<f64>, String> {
-    use p2a_core::polars::prelude::*;
-
-    let df = dataset.df();
-    let n_rows = df.height();
-    let n_cols = columns.len();
-
-    if columns.is_empty() {
-        return Err("At least one column must be specified".to_string());
-    }
-
-    // Fallible, so an n x p request above the allocation ceiling is an error, not an abort
-    let mut data = p2a_core::resource::try_zeros2(n_rows, n_cols, "numeric matrix")
-        .map_err(|e| e.to_string())?;
-
-    for (j, col_name) in columns.iter().enumerate() {
-        let col = df
-            .column(col_name)
-            .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-        legacy_numeric_check(col, col_name)?;
-
-        let cast = col
-            .cast(&DataType::Float64)
-            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?;
-        let values = cast
-            .f64()
-            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?;
-
-        for (cell, v) in data.column_mut(j).iter_mut().zip(values) {
-            *cell = v.unwrap_or(f64::NAN);
-        }
-    }
-
-    Ok(data)
+/// A distinct-value count a budget depends on, or the refusal when it could not be taken (the
+/// budget cannot be checked, so the request must not run unbounded).
+pub fn level_count_or_refusal(
+    name: &str,
+    count: p2a_core::polars::prelude::PolarsResult<usize>,
+) -> Result<usize, String> {
+    count.map_err(|e| {
+        format!(
+            "the distinct values of `{}` could not be counted to check this server's limits \
+             ({e}).",
+            crate::tools::limits::echo(name)
+        )
+    })
 }
 
 /// Check a size derived from the data (not a request field) against a named budget of the
@@ -402,50 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_numeric_matrix_allocation_is_fallible() {
-        use p2a_core::polars::prelude::*;
-        let ds = p2a_core::data::Dataset::new(
-            df!("x" => (0..200).map(|i| i as f64 * 0.5).collect::<Vec<_>>()).unwrap(),
-        );
-        let e = p2a_core::resource::with_alloc_ceiling(Some(1024), || {
-            extract_numeric_matrix(&ds, &["x".to_string()])
-        })
-        .unwrap_err();
-        assert!(e.contains("limit"), "{e}"); // 200 x 1 x 8 = 1600 bytes > 1024
-        // repeated names are still allowed
-        assert_eq!(
-            extract_numeric_matrix(&ds, &["x".to_string(), "x".to_string()])
-                .unwrap()
-                .dim(),
-            (200, 2)
-        );
-    }
-
-    #[test]
-    fn test_validate_mcp_legacy_helpers_refuse_text() {
-        use p2a_core::data::{DataLoader, Dataset};
-        let case = p2a_validation::Case::load("columns_conventions");
-        let ds = Dataset::new(DataLoader::load_csv(case.dataset_path()).unwrap());
-        let e = extract_column_f64(&ds, "s").unwrap_err();
-        assert!(e.contains("Column 's' is not numeric (type str)"), "{e}");
-        let e = extract_numeric_matrix(&ds, &["y".into(), "s".into()]).unwrap_err();
-        assert!(e.contains("Column 's'"), "{e}");
-        // null still becomes NaN in the legacy helpers
-        let n = extract_column_f64(&ds, "n").unwrap();
-        assert!(n[3].is_nan());
-        assert_eq!(
-            n.iter().filter(|v| v.is_nan()).count() as f64,
-            case.scalar("missing_n")
-        );
-        let flag = extract_column_f64(&ds, "flag").unwrap();
-        let r = case.vector("flag_numeric"); // [1, 0, 1, 1, 0, NA, 1, 0, 0, 1]
-        assert_eq!(flag.len(), r.len());
-        for (a, b) in flag.iter().zip(&r) {
-            assert!(a == b || (a.is_nan() && b.is_nan()), "{flag:?} vs {r:?}");
-        }
-    }
-
-    #[test]
     fn test_validate_mcp_numeric_column_omit_and_fail() {
         use p2a_core::data::{DataLoader, Dataset};
         let case = p2a_validation::Case::load("columns_conventions");
@@ -523,6 +430,23 @@ mod tests {
                 p2a_validation::Tol::exact(),
             )
             .finish();
+    }
+
+    #[test]
+    fn test_mcp_insert_missing_adds_the_key_only_when_rows_were_dropped() {
+        let dropped = MissingSummary {
+            n_total: 10,
+            n_used: 7,
+            n_dropped: 3,
+            by_column: vec![("y".to_string(), 2), ("n".to_string(), 1)],
+        };
+        let mut output = serde_json::json!({"statistic": 1.5});
+        insert_missing(&mut output, &dropped);
+        assert_eq!(output["missing"], missing_json(&dropped).unwrap());
+        assert_eq!(output["statistic"], 1.5);
+        let mut untouched = serde_json::json!({"statistic": 1.5});
+        insert_missing(&mut untouched, &MissingSummary::none(10));
+        assert_eq!(untouched, serde_json::json!({"statistic": 1.5}));
     }
 
     #[test]

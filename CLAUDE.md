@@ -371,6 +371,7 @@ src/
 │   └── html.rs            # HTML report builder
 │
 └── data/                  # Data management
+    ├── columns.rs         # NA-aware, dtype-tolerant column extraction (ColumnRequest, NaPolicy, MissingSummary, Factor)
     ├── quality.rs         # DataQualityProfile for LLM-assisted cleaning
     ├── verification.rs    # Cleaning verification and preview
     ├── cleaning_session.rs # Rollback-enabled cleaning sessions
@@ -429,6 +430,9 @@ fn my_function(lag: usize, n: usize) -> EconResult<MyResult> {
 Common error variants (field names as in `errors.rs`):
 - `EconError::InvalidSpecification { message }` - a parameter the data cannot support; name the bound
 - `EconError::ColumnNotFound { column, available }` - Missing column
+- `EconError::NullValues { column, count }` - missing (null or NaN) values where the method refuses them
+- `EconError::NonNumericColumn { column }` - a text, date or nested column in a numeric role
+- `EconError::NonFiniteValues { column, count }` - ±Inf values
 - `EconError::SingularMatrix { context, suggestion }` - Non-invertible matrix
 - `EconError::InsufficientData { required, provided, context }` - Not enough observations
 - `EconError::ConvergenceFailure { iterations, last_change, suggestion }` - Optimization didn't converge
@@ -459,6 +463,66 @@ allocation ceiling and the deadline.
   test against a naive reference on noisy data.
 - Method-level caps (outcome categories, `trials`, `committees`, RD order, tree depth 512, ...) hold
   in every mode; `docs/guides/DEPLOYMENT.md`, "Core invariants", lists them.
+
+### Reading user columns (missing values, integer columns)
+
+Two polars calls are wrong on data loaded from a CSV file: `ChunkedArray::into_no_null_iter()` ignores
+the validity bitmap and reads an empty cell as 0.0, and `Column::f64()` refuses `Int64`, the dtype polars
+infers for whole numbers (counts, scores, 0/1 events, integer times). Product code reads user columns
+through `p2a_core::data::columns` (`crates/p2a-core/src/data/columns.rs`) instead:
+
+```rust
+use p2a_core::data::columns::{ColumnRequest, NaPolicy};
+
+let cols = ColumnRequest::new(df)
+    .numeric(y_col)
+    .numerics(x_cols)
+    .factor(group_col)
+    .na(NaPolicy::Omit)
+    .min_rows(k + 1, "OLS")
+    .extract()?;
+let y = cols.numeric_array(y_col);              // Columns::{numeric, numeric_array, factor,
+let x = cols.matrix(x_cols, true)?;             //   time_index, rows, missing}; matrix is fallible
+let missing = cols.missing().clone();           // what was dropped
+```
+
+- Missing means null or NaN; ±Inf is refused (`NonFiniteValues`). `Int*`, `UInt*`, `Float32`, `Decimal`
+  and `Boolean` (0/1) are numeric; text, dates and nested columns are not (`NonNumericColumn`).
+- Factor levels follow R `factor()`: numbers numerically, text in C-locale byte order. Errors name the
+  column: `ColumnNotFound` only for a column that does not exist.
+- Results that drop rows gain
+  `#[serde(default, skip_serializing_if = "MissingSummary::is_empty")] pub missing: MissingSummary`; their
+  Display ends with `Missing values: <note>` (`MissingSummary::note()`, or `two_sample_note()` for two
+  samples that drop their values separately) and prints nothing when no row was dropped.
+- MCP handlers read columns with `tools::common::{numeric_column, numeric_columns, numeric_matrix}` and an
+  explicit `NaPolicy`, or call the core dataset wrapper, and report dropped rows with
+  `append_missing_note` (text) or `missing_json`/`insert_missing` (JSON). The CLI uses
+  `output::{print_missing_note, missing_json}`.
+- The NA policy is the default of the method's R reference:
+  - **Omit:** one-sample tests (`t.test`); two-sample columns, each column separately (`t.test(x, y)`);
+    paired tests and correlation, jointly (`complete.cases`); response ~ group (`aov`, `kruskal.test`);
+    contingency tables (`table`); survival (`survfit`, `coxph`); discrete choice on rows (`glm`, `polr`,
+    `nnet::multinom`); panel, IV, DiD and RD, jointly over every model column (`plm`, `fixest`,
+    `rdrobust`); difference GMM (`pgmm`; rows with a missing id or time too); panel unit-root tests (rows
+    dropped, gaps joined with a warning, as `plm::purtest`); the weighted mean (complete value-weight
+    pairs); Mauchly (complete subjects); `loglin` (`xtabs`) and `prop.trend.test` (a missing group is
+    dropped); SVM, PPR; the CLI viz commands (complete rows of the plotted columns; heatmap
+    `cor(use = "complete.obs")`).
+  - **Fail:** long-format choice models (conditional and mixed logit), because one dropped row breaks a
+    choice situation; weighting, matching, TMLE, gsynth; spatial; time series (`stl`, `HoltWinters`,
+    `acf`/`pacf`; dropping an interior value would splice the series); `cov.wt` and `isoreg`; k-means,
+    hierarchical clustering (`viz dendrogram`), PCA, forests and boosting (no surrogate splits).
+  - Friedman and Quade: a missing response drops its block; a missing label is an error.
+- **The NA guard.** `cargo test -p p2a-validation --test na_guard` (in CI) fails on `into_no_null_iter(`
+  and on `.f64()` with no `cast`, `strict_cast` or `cast_with_options` call in the six lines above, in
+  non-test code of the five product crates; comments, string literals and `#[cfg(test)]` items are
+  skipped. `// na-ok: <reason>` on the line or the line above marks a site that is null-free by
+  construction (a column the code built, a comparison mask). `// na-legacy(T4): <finding or theme 3.3>`
+  marks the 18 known carry-over sites, which later tiers migrate: migrating one means removing its marker
+  and lowering `MAX_LEGACY_MARKERS`. A malformed marker, an `na-legacy` marker with no extraction on its
+  line or the next, and a new `na-legacy` marker all fail the guard. Finding ids and "theme 3.3" refer to
+  the October 2026 code review. The real-tree test is `test_na_guard_tree_is_clean`, and
+  `test_na_guard_legacy_mcp_helpers_are_gone` keeps the removed null-to-NaN MCP helpers out.
 
 ### Matrix Operations
 
@@ -548,7 +612,9 @@ crates/p2a-mcp/src/
 │                          #   path MUST go through these; write_atomically() for writes; display_path()
 │                          #   for messages; per-session scope (enter_session_scope, remove_session_dir)
 ├── audit.rs               # Per-tool-call audit log (sanitized args, outcome, sizes; 0600, rotation)
-├── session.rs             # The one registry of live sessions (TTL, LRU eviction, per-session datasets)
+├── session.rs             # The one registry of live sessions (TTL, LRU eviction) and their state over
+│                          #   HTTP: datasets, seed, cleaning sessions, spatial weights, profiler; byte
+│                          #   accounting for the session-data quotas (charged by exec.rs)
 ├── persistent_session.rs  # SurrealDB-backed conversations over that registry (feature `db`)
 ├── llm/                   # Provider abstraction: anthropic.rs, openai.rs, ollama.rs; tools.rs holds the
 │                          #   *curated* LLM-facing tool subset, context.rs/tokens.rs manage the budget;
@@ -615,6 +681,10 @@ async fn my_tool(
     Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
 }
 ```
+
+   Read columns with `tools::common::numeric_column(s)`/`numeric_matrix` and an explicit `NaPolicy` (or
+   call the core dataset wrapper), and report dropped rows with `append_missing_note`/`missing_json`
+   (see "Reading user columns").
 
 3. Import the request type in the handler module and ensure it's re-exported from `tools/requests/mod.rs`
 
@@ -923,7 +993,8 @@ Auto-discovered guidance:
 
 - **Gating**: `cargo fmt --all -- --check`; `cargo test --tests` for p2a-core (`ci` feature), p2a-mcp
   (`http,llm,auth,websocket`), p2a-cli (`spectral-analysis`); doctests for p2a-core (`ci`) and p2a-mcp
-  (`http,llm,auth,websocket`) in their own step; then the validation step: `cargo test -p p2a-validation`,
+  (`http,llm,auth,websocket`) in their own step; then the validation step: `cargo test -p p2a-validation`
+  (includes the NA guard, `tests/na_guard.rs`),
   the strict validation lint (`validation_status.py lint --strict` on the three `--list` outputs), the Python
   unittests in `validation/tools/tests` (including the status-page check, run with `P2A_CHECK_STATUS_PAGE=1`)
   and the runner self-test `bash validation/tools/tests/test_run_validation.sh`; plus a wasm32 `cargo check` +
@@ -1011,10 +1082,18 @@ let df = df! {
 }
 ```
 
+- R-case fixtures with missing cells: an empty CSV field is NA; whole-number doubles load as `Int64`
+  (assert `is.integer` in the case); every such dataset keeps a never-missing `id` column; a NaN cell can
+  only be built in a Rust fixture (`f64::NAN`), the one allowed inline fixture.
+- Tier 2 MCP-path and CLI tests live in the `tier2` test binaries (`crates/p2a-mcp/tests/tier2/`,
+  `crates/p2a-cli/tests/tier2/`; see `docs/guides/TESTING.md`).
+
 ## Important Notes
 
 1. **ndarray version**: Pinned to 0.16 for compatibility with faer
-2. **polars version**: Using 0.52; `is_numeric()` was removed, use custom dtype checking
+2. **polars version**: Using 0.52; `is_numeric()` was removed, use custom dtype checking.
+   `ChunkedArray::into_no_null_iter()` ignores validity, and `Column::f64()` refuses Int64: read user
+   columns through `p2a_core::data::columns`
 3. **Serde serialization**: Use `#[serde(skip)]` for large internal matrices in result structs
 4. **Visualization**: Two types:
    - Static (plotters): `histogram()`, `scatter_plot()` - returns base64 PNG
@@ -1037,6 +1116,7 @@ let df = df! {
 - `crates/p2a-core/src/linalg/matrix_ops.rs` - Linear algebra primitives
 - `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait
 - `crates/p2a-core/src/resource.rs` - Resource guards: fallible allocation, alloc ceiling, budgets, `checkpoint()`
+- `crates/p2a-core/src/data/columns.rs` - NA-aware, dtype-tolerant column extraction (`ColumnRequest`, `NaPolicy`, `MissingSummary`)
 
 **Major Econometrics:**
 - `crates/p2a-core/src/econometrics/panel/` - Panel data (FE, RE, GLS, GMM)
@@ -1083,6 +1163,7 @@ let df = df! {
 - `validation/methods/` - Methods registry (which tests pin which R cases)
 - `validation/tools/validation_status.py` - Results collector, registry lint and status-page renderer
 - `crates/p2a-validation/src/check.rs` - `Tol` and `Check`, the comparison side of the harness
+- `crates/p2a-validation/tests/na_guard.rs` - the NA guard (missing-value-unaware column reads in product code)
 - `validation/[category]/method.md` - Per-method validation documents with R code and expected values
 
 **GPU Acceleration:**

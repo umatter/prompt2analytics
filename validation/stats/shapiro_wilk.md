@@ -32,7 +32,9 @@ checks `shapiro.test` makes before calling it:
    or more than 5000 values is refused ("sample size must be between 3 and 5000").
 2. The sample is sorted. A range below 1e-10 is refused ("all 'x' values are identical"); a
    range below 1 divides every value by the range (R PR#1768), so W and p do not depend on
-   the scale.
+   the scale. A range that overflows (finite values such as -1e308 and 1e308) is refused
+   with "the range of x (max - min) overflows; rescale the values", where R's `shapiro.test`
+   returns W = NaN and p = NA (`test_shapiro_wilk_refuses_overflowing_range`).
 3. Coefficients: n = 3 uses a = (-√½, 0, √½). Otherwise the Blom scores
    mᵢ = Φ⁻¹((i - 3/8) / (n + 1/4)) are normalised, the largest coefficient aₙ (and for n > 5
    also aₙ₋₁) is replaced by Royston's polynomial correction in 1/√n (swilk.c `c1`, `c2`), and

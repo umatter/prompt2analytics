@@ -355,8 +355,10 @@ impl AnalyticsServer {
         };
 
         // Design matrix [1, X] (the regressors OLS used; no missing value)
-        let x_mat = match common::numeric_columns(&dataset, &x_refs, NaPolicy::Fail) {
-            Ok(cols) => cols.matrix(&x_refs, true).data,
+        let x_mat = match common::numeric_columns(&dataset, &x_refs, NaPolicy::Fail)
+            .and_then(|cols| cols.matrix(&x_refs, true).map_err(|e| e.to_string()))
+        {
+            Ok(m) => m.data,
             Err(e) => return error_text(with_hint(e, MISSING_HINT_MODELS)),
         };
 

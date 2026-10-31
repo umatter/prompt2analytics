@@ -298,7 +298,7 @@ pub fn run_panel_gls(
 
     // Build design matrix (includes intercept for non-FE models)
     let has_intercept = model != PanelGlsModel::FixedEffects;
-    let dm = cols.matrix(x_cols, has_intercept);
+    let dm = cols.matrix(x_cols, has_intercept)?;
     let x = &dm.data;
     let k = x.ncols();
 

@@ -326,8 +326,8 @@ pub fn run_gmm_iv(
     let y = cols.numeric_array(y_col);
 
     // X and Z with intercept
-    let x_dm = cols.matrix(x_cols, true);
-    let z = cols.matrix(z_cols, true).data;
+    let x_dm = cols.matrix(x_cols, true)?;
+    let z = cols.matrix(z_cols, true)?.data;
 
     let moments = MomentCondition::LinearIV { y, x: x_dm.data, z };
     let mut result = run_general_gmm(moments, config)?;

@@ -292,7 +292,10 @@ HTTP), and they never depend on the resource profile:
   `regression_bootstrap_cov` needs `n_boot` of at least 10; matching `ratio` is
   at most the number of controls;
 - the C5.0, quantile random forest and Cubist tree builders stop at depth 512,
-  so no input can recurse deep enough to overflow a worker's stack.
+  so no input can recurse deep enough to overflow a worker's stack;
+- staggered DiD `bootstrap` is 0 (analytic influence-function SEs) or at least
+  50 replicates, and its joint pre-trend Wald test is computed for at most 2000
+  pre-treatment cells (reported as not computed above that).
 
 ### Sessions and persistence
 
@@ -574,6 +577,8 @@ Families (Off: none):
 | `tree_depth` | `max_depth`, `maxdepth` | 100 |
 | `power_sample_size` | the sample size `n` of `power_t_test` and `power_anova_test`, per group in two-sample and ANOVA designs (the top of the range in which they solve for `n`); `power_prop_test` is not capped | 1,000,000 |
 | `design_groups` | `power_anova_test` `groups` | 100 |
+| `na_markers` | missing-value markers of `load_dataset` and `create_dataset` (`na_strings`; the CSV parser compares every field with every marker); duplicates are refused | 32 |
+| `na_marker_bytes` | UTF-8 bytes of one missing-value marker (`na_strings[]`) | 64 |
 
 Row classes and tolerance (Off: none):
 
@@ -589,8 +594,8 @@ Named budgets:
 | Key | What it bounds | Hosted | Off |
 |---|---|---|---|
 | `image_pixels` | chart width × height | 16,000,000 | none |
-| `table_cells` | cells of computed tables and square matrices (contingency tables, `stats_loglin`, pairwise results, `linalg_toeplitz`) | 1,000,000 | none |
-| `max_groups` | groups compared pairwise | 100 | none |
+| `table_cells` | cells of computed tables and square matrices (contingency tables, `stats_loglin`, the two-way `stats_model_tables` cell means, pairwise results, `linalg_toeplitz`) | 1,000,000 | none |
+| `max_groups` | groups compared pairwise; the levels of the two factors of `anova_two_way` and of a two-way `stats_model_tables`, together (the fit's cost grows with the square of that count) | 100 | none |
 | `join_output_rows` | predicted output rows of a join | 2,000,000 | none |
 | `onehot_levels` | levels a one-hot encoding expands | 500 | none |
 | `pivot_columns` | output columns of `munge_pivot`: the index columns plus one per distinct value of `on`, counted before the pivot | 10,000 | none |
@@ -625,15 +630,18 @@ Named budgets:
 | `llm_allow_loopback` | whether a loopback Ollama endpoint may be used; `true` also drops the default host allowlist when `P2A_LLM_ALLOWED_HOSTS` is unset | `false` | `true` |
 
 The hosted `arima_fit_work` of 400,000 allows ARIMA(1,1,1) on 15,384
-observations, and on a release build the slowest fit it allows is bounded at
-about 16 s; while the budget is set, a column holding a nonzero value below
-1e-100 is refused as well, because the squares and products the fit forms from
-values that small can be subnormal (below about 2.2e-308), and arithmetic on
-those takes a much slower path. The margin to the deadline assumes the
-default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a throttled shared
-CPU, lower `arima_fit_work` in proportion with `P2A_LIMIT_OVERRIDES`. Raising it
-above about 3.5 times the hosted value lets a fit run past the deadline and keep
-its slot, since the fit has no checkpoint.
+observations. It bounds a call's cost before the fit starts: the slowest fit it
+allowed with the optimiser used before the in-house fit took about 16 s on a
+release build, and the value has not yet been measured on the in-house fit,
+whose work grows with the same count. While the budget is set, a column holding
+a nonzero value below 1e-100 is refused as well, because the squares and
+products the fit forms from values that small can be subnormal (below about
+2.2e-308), and arithmetic on those takes a much slower path. The margin to the
+deadline assumes the default 60 s: with a lower `P2A_TOOL_TIMEOUT_SECS`, or on a
+throttled shared CPU, lower `arima_fit_work` in proportion with
+`P2A_LIMIT_OVERRIDES`. The fit checks the call's budget every iteration and
+every 4,096 rows of a pass, so a fit that runs past the deadline is cancelled
+at its next check.
 
 The hosted `ensemble_bytes` of 256 MiB matches the per-allocation ceiling: a
 causal-forest or BART-causal fit keeps every tree it grows, and BART keeps a

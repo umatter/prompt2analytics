@@ -1037,18 +1037,26 @@ impl AnalyticsServer {
 
     /// Get server memory and performance statistics.
     #[tool(
-        description = "Get memory usage statistics for the analytics server. Shows dataset memory consumption, process memory (not reported in open public mode), and memory trends. Useful for monitoring resource usage with large datasets."
+        description = "Get memory usage statistics for the analytics server. Shows the memory of the session's datasets and of all its session data as the quotas count it (datasets, cleaning-session checkpoints, spatial weights), process memory (process-wide; not reported in open public mode), and the memory history (per session over HTTP). Useful for monitoring resource usage with large datasets."
     )]
     pub async fn server_stats(
         &self,
         Parameters(request): Parameters<ServerStatsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use crate::session::{datasets_bytes_of, fmt_bytes};
+        use crate::session::{datasets_bytes_of, fmt_bytes, state_maps_bytes};
         use p2a_core::get_process_memory;
 
         let include_datasets = request.include_datasets.unwrap_or(true);
         let include_history = request.include_history.unwrap_or(false);
 
+        // What the session-data quotas count, read before the datasets' lock is taken below
+        // (one of the session's maps at a time).
+        let session_data = state_maps_bytes(
+            &self.datasets,
+            &self.cleaning_sessions,
+            &self.spatial_weights,
+        )
+        .await;
         let datasets = self.datasets.read().await;
 
         // Each dataset as the dataset quotas charge it (its name, values and
@@ -1070,6 +1078,10 @@ impl AnalyticsServer {
         // Summary section
         output.push_str("## Summary\n\n");
         output.push_str(&format!("Total Dataset Memory: {}\n", fmt_bytes(total)));
+        output.push_str(&format!(
+            "Session data (quota figure): {}\n",
+            fmt_bytes(session_data)
+        ));
         output.push_str(&format!("Datasets Loaded: {}\n", sizes.len()));
         output.push_str(&format!("Uptime: {:.1}s\n", server_uptime().as_secs_f64()));
 
@@ -2629,8 +2641,9 @@ mod tests {
     /// mode under the hosted quotas, on a session server built for the
     /// call. `server_stats` counts the uptime from the server's start (it
     /// said "Uptime: 0.0s"), totals the session's datasets as the quota
-    /// check charges them (it showed more than the quota counted), and
-    /// withholds the peak RSS with the other process figures.
+    /// check charges them (it showed more than the quota counted), shows
+    /// the quota figure of all the session's data (its spatial weights
+    /// included), and withholds the peak RSS with the other process figures.
     #[cfg(feature = "http")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn governed_server_stats_agrees_with_the_server_and_its_quotas() {
@@ -2670,7 +2683,18 @@ mod tests {
             .write()
             .await
             .insert("d".into(), Dataset::new(frame));
+        let datasets_charged = crate::session::datasets_bytes(&*session.datasets.read().await);
+        let w4 = p2a_core::SpatialWeights::from_neighbors(
+            &p2a_core::Neighbors::from_knn(&crate::session::test_fixtures::spatial_coords(), 4),
+            p2a_core::WeightStyle::RowStd,
+        );
+        session
+            .spatial_weights
+            .write()
+            .await
+            .insert("w4".into(), w4);
         let charged = session.refresh_data_bytes().await;
+        assert!(charged > datasets_charged);
         let governor = ToolGovernor::new(exec, sessions);
 
         // The server the transport built at startup, then a while later a
@@ -2695,6 +2719,11 @@ mod tests {
         assert!(uptime_secs(&text) >= 0.5, "{text}");
         assert_eq!(
             line_after(&text, "Total Dataset Memory: "),
+            Some(fmt_bytes(datasets_charged).as_str()),
+            "{text}"
+        );
+        assert_eq!(
+            line_after(&text, "Session data (quota figure): "),
             Some(fmt_bytes(charged).as_str()),
             "{text}"
         );

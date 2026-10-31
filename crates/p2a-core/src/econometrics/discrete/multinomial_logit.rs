@@ -289,7 +289,7 @@ pub fn run_multinom(
     }
 
     // Design matrix on the kept rows
-    let dm = cols.matrix(x_cols, true);
+    let dm = cols.matrix(x_cols, true)?;
     let x = dm.view();
     let k = x.ncols();
 

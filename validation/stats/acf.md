@@ -131,6 +131,16 @@ ccf(x, y, lag.max = 3, plot = FALSE)
 | PACF(k), k > 1 | 5e-2 | Algorithm differences |
 | CCF(0) | 1e-6 | Equals correlation coefficient |
 
+## Missing values
+
+The dataset functions `run_acf`, `run_pacf` and `run_ccf` refuse a column with missing (empty)
+cells, as R's `acf`, `pacf` and `ccf` do under `na.action = na.fail`, with `NullValues` naming
+the column and the number of missing cells (R's `sum(is.na(x))`). The count is pinned on the
+case `stat_two_sample_na` by
+`p2a-core::stats::acf::tests::test_validate_na_ts_refusals_report_null_count`, which checks
+`run_box_test`, `run_pp_test`, `run_spectrum` and `run_spectrum_ar` the same way. A NaN value
+in a float column is not counted as missing.
+
 ## Known Differences
 
 1. **PACF Algorithm**: R uses Yule-Walker equations while we use Durbin-Levinson recursion. Both should give identical results mathematically, but numerical precision differences at higher lags are expected for small samples.

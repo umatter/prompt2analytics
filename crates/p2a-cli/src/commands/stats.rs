@@ -820,6 +820,14 @@ fn column_values(
     Ok((cols.numeric(col).to_vec(), cols.missing().clone()))
 }
 
+/// `Note: <MissingSummary::two_sample_note()>` after the text of a test whose two samples
+/// drop their missing values separately (t-test-two, the rank-sum test, two-sample KS).
+fn print_two_sample_note(missing: &MissingSummary) {
+    if let Some(note) = missing.two_sample_note() {
+        println!("Note: {note}");
+    }
+}
+
 /// A complete numeric series for ACF/PACF (Int64 and the other numeric dtypes accepted). A
 /// missing value is an error naming the column, as R's acf/pacf (na.action = na.fail) refuse
 /// it: dropping a value would splice the series.
@@ -831,9 +839,10 @@ fn series_column(
     match column_values(dataset, col, NaPolicy::Fail, command) {
         Ok((values, _)) => Ok(values),
         Err(e @ EconError::NullValues { .. }) => Err(format!(
-            "{e} ACF and PACF need a complete series, as R's acf/pacf (na.action = na.fail): \
-             fill the gaps first (for example: p2a munge fill-na <dataset> --method forward \
-             --columns <column>); dropping a value would splice the series."
+            "{e} ACF and PACF need a complete series, as R's acf/pacf (na.action = na.fail). For \
+             a time series, impute rather than drop: fill the gaps first (for example: p2a \
+             munge fill-na <dataset> --method forward --columns {col}); dropping a value would \
+             splice the series."
         )),
         Err(e) => Err(e.to_string()),
     }
@@ -1072,7 +1081,7 @@ fn execute_t_test_two(
                             );
                             println!("Mean difference: {:.4}", result.estimate - mean_y);
                         }
-                        print_missing_note(&result.missing, format);
+                        print_two_sample_note(&result.missing);
                     }
                 },
                 Err(e) => print_error(&format!("t-test failed: {}", e), format),
@@ -1494,7 +1503,11 @@ fn execute_wilcoxon(
                             println!("\n{}", test_name);
                             println!("{}", "=".repeat(40));
                             println!("W = {:.4}, p-value = {:.6}", res.statistic, res.p_value);
-                            print_missing_note(&res.missing, format);
+                            if paired {
+                                print_missing_note(&res.missing, format);
+                            } else {
+                                print_two_sample_note(&res.missing);
+                            }
                         }
                     }
                 }
@@ -2423,10 +2436,11 @@ fn execute_ks_test(
                         println!("Alternative: {:?}", result.alternative);
                         if let Some(n2) = result.n_2 {
                             println!("Sample sizes: n = {}, m = {}", result.n, n2);
+                            print_two_sample_note(&result.missing);
                         } else {
                             println!("Sample size: n = {}", result.n);
+                            print_missing_note(&result.missing, format);
                         }
-                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("K-S test failed: {}", e), format),

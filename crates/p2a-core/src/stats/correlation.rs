@@ -114,7 +114,7 @@ pub fn correlation_matrix(dataset: &Dataset) -> PolarsResult<CorrelationMatrix> 
 
 /// Compute Pearson correlation between two series.
 fn pearson_correlation(x: &Series, y: &Series) -> PolarsResult<f64> {
-    let x_f64 = x.f64()?;
+    let x_f64 = x.f64()?; // na-legacy(T4): STAT-19 (pairwise vs complete-case NA handling)
     let y_f64 = y.f64()?;
 
     let n = x_f64.len();

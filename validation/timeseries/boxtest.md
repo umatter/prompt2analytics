@@ -113,6 +113,13 @@ Box.test(x, lag = 10, type = "Ljung-Box")
 | Degrees of freedom | exact | Integer values must match exactly |
 | P-value | ±0.001 | For p > 1e-4; very small p-values compared via order of magnitude |
 
+## Missing values
+
+`run_box_test` refuses a column with missing (empty) cells, naming the column and the number
+of missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
+([acf.md](../stats/acf.md)). R's `Box.test` does not refuse them: it computes the
+autocorrelations with `na.action = na.pass`.
+
 ## Known Differences from R
 
 1. **P-value precision**: For very small p-values (< 1e-10), Rust and R may differ in the exact value but both correctly indicate extreme significance.

@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_missing_value_refusals",
+      "name": "ACF, PACF, CCF, Box, PP and spectrum: the missing-value refusal names the column and the count R reports (RF-34)",
+      "category": "stats",
+      "reference": "stats::acf / pacf / ccf / spectrum / spec.ar refuse NA (na.action = na.fail); the count is sum(is.na(x)). Box.test (na.pass) and PP.test (NA statistic) do not refuse; p2a refuses with the same count",
+      "doc": "validation/stats/acf.md",
+      "cases": ["stat_two_sample_na"],
+      "tests": ["p2a-core::stats::acf::tests::test_validate_na_ts_refusals_report_null_count"],
+      "quantities": ["number of missing values in the refusal of each reader (x, xi, yi)"],
+      "tolerance": "counts: exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "na_acceptance",
+      "name": "Missing cells and integer columns through MCP and the CLI (X-2, X-8 reviewer data)",
+      "category": "interfaces",
+      "reference": "stats::t.test, cor.test, aov (na.omit), wilcox.test; survival::survfit (conf.type = 'log')",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["na_x2_x8_reviewer"],
+      "tests": [
+        "p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x2_reviewer_missing_cells",
+        "p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x8_reviewer_integer_columns",
+        "p2a-cli::tier2::wp22_acceptance::test_validate_cli_x2_reviewer_missing_cells",
+        "p2a-cli::tier2::wp22_acceptance::test_validate_cli_x8_reviewer_integer_columns"
+      ],
+      "quantities": ["t and df (one-sample, paired, Welch) with empty cells, and the rows used", "cor.test r, t, df, p and pairs used",
+                     "one-way ANOVA F, p, df, SS and rows used", "t, ANOVA, Wilcoxon V and exact p, cor.test on Int64 columns",
+                     "Kaplan-Meier S(t), SE, numbers at risk and events, and median with Int64 time and status"],
+      "tolerance": "MCP text at print precision (t 6 decimals, df 2, ANOVA 4, KM median 3); JSON values at validation/README.md n < 100 (means 1e-6, statistics and SEs 1e-5 relative, p-values 1e-5 relative or 1e-12 absolute); df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_causal_missing_notes",
+      "name": "CLI causal iv, mediation and staggered-did report dropped rows",
+      "category": "cli",
+      "reference": "AER::ivreg with the HC1 (sandwich) Wald F of the excluded instruments; stats::complete.cases and the Hajek IPW units kept with p2a's trimming rule (0.05); did 2.1's att_gt formulas (est_method 'reg', bstrap = FALSE) as implemented in validation/r/cases/causal_did.R; on the complete rows (the T2-WP08, WP13 and WP12 cases)",
+      "doc": "docs/guides/CLI_REFERENCE.md",
+      "cases": ["iv_na_rows", "causal_mediation_na", "did_cs_analytic"],
+      "tests": [
+        "p2a-cli::tier2::wp22_acceptance::test_validate_cli_causal_iv_reports_missing_rows",
+        "p2a-cli::tier2::wp22_acceptance::test_validate_cli_causal_mediation_reports_missing_rows",
+        "p2a-cli::tier2::wp22_acceptance::test_validate_cli_staggered_did_json_reports_pretrend_method"
+      ],
+      "quantities": ["rows used and dropped, missing cells per column (note and JSON missing)", "first-stage HC1 Wald F of the excluded instruments and its df",
+                     "units kept after trimming", "pre-trend Wald statistic, df and p (pretrend_test, with its method)"],
+      "tolerance": "counts exact; F and the Wald statistic 1e-5 relative, p 1e-5 relative or 1e-12 absolute (validation/README.md, n = 294 and 720)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

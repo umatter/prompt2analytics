@@ -34,7 +34,7 @@ pub fn extract_xy(
         .na(policy)
         .extract()?;
     Ok((
-        cols.matrix(x, false).data,
+        cols.matrix(x, false)?.data,
         cols.numeric_array(y),
         cols.missing().clone(),
     ))
@@ -76,7 +76,7 @@ pub fn extract_x_classes(
     let factor = cols.factor(y);
     let codes: Array1<f64> = factor.codes.iter().map(|&c| f64::from(c)).collect();
     Ok((
-        cols.matrix(x, false).data,
+        cols.matrix(x, false)?.data,
         ClassTarget {
             y: codes,
             labels: Some(factor.levels.clone()),

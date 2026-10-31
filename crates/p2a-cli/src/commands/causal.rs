@@ -419,11 +419,12 @@ EXAMPLES:
         #[arg(long, default_value = "nevertreated")]
         comparison: String,
 
-        /// Estimation method: "or" (outcome regression), "ipw", or "dr" (doubly robust, default)
+        /// Estimation method: "or" (outcome regression, default), "ipw", or "dr" (doubly robust)
         #[arg(long, default_value = "or")]
         method: String,
 
-        /// Number of bootstrap replications for SEs (default: 999)
+        /// Unit-bootstrap replications for SEs, at least 50; 0 gives analytic
+        /// influence-function SEs, without covariates only (default: 999)
         #[arg(long, default_value = "999")]
         bootstrap: usize,
     },
@@ -912,21 +913,45 @@ fn execute_iv(
                         result.n_obs,
                         format,
                     );
-                    println!("{}", output);
 
                     // Print first-stage diagnostics
                     match format {
-                        OutputFormat::Json => {}
+                        OutputFormat::Json => {
+                            let mut json: serde_json::Value = serde_json::from_str(&output)?;
+                            json["first_stage"] = serde_json::json!({
+                                "f_type": result.first_stage_f_type,
+                                "f_stats": result.first_stage_f_stats,
+                                "df": result.first_stage_df,
+                                "p_values": result.first_stage_p_values,
+                                "strong_instruments": result.strong_instruments,
+                            });
+                            if let Some(m) = missing_json(&result.missing) {
+                                json["missing"] = m;
+                            }
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
                         _ => {
+                            println!("{}", output);
                             if !result.first_stage_f_stats.is_empty() {
-                                println!("\nFirst-stage diagnostics:");
+                                println!(
+                                    "\nFirst-stage diagnostics ({}):",
+                                    result.first_stage_f_type
+                                );
                                 for (i, f_stat) in result.first_stage_f_stats.iter().enumerate() {
                                     let endog_name = if i < endog.len() {
                                         &endog[i]
                                     } else {
                                         "Unknown"
                                     };
-                                    println!("  {} F-statistic: {:.4}", endog_name, f_stat);
+                                    match result.first_stage_df.get(i) {
+                                        Some((df1, df2)) => println!(
+                                            "  {} F-statistic: {:.4} on {} and {} DF",
+                                            endog_name, f_stat, df1, df2
+                                        ),
+                                        None => {
+                                            println!("  {} F-statistic: {:.4}", endog_name, f_stat)
+                                        }
+                                    }
                                 }
                                 if result.strong_instruments {
                                     println!("  Instruments are strong (all F > 10)");
@@ -959,6 +984,7 @@ fn execute_iv(
                                     }
                                 }
                             }
+                            print_missing_note(&result.missing, format);
                         }
                     }
                 }
@@ -1393,7 +1419,7 @@ fn execute_mediation(
             match run_mediation_analysis(ds, outcome, treatment, mediator, &cov_refs, config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Causal Mediation Analysis",
                             "total_effect": result.total_effect,
                             "direct_effect": result.direct_effect,
@@ -1407,6 +1433,9 @@ fn execute_mediation(
                             "p_indirect": result.p_indirect,
                             "n_obs": result.n_obs,
                         });
+                        if let Some(m) = missing_json(&result.missing) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {
@@ -1429,6 +1458,7 @@ fn execute_mediation(
                             result.proportion_mediated * 100.0
                         );
                         println!("N: {}", result.n_obs);
+                        print_missing_note(&result.missing, format);
                     }
                 },
                 Err(e) => print_error(&format!("Mediation analysis failed: {}", e), format),
@@ -1830,7 +1860,7 @@ fn execute_staggered_did(
             ) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
-                        let json = serde_json::json!({
+                        let mut json = serde_json::json!({
                             "method": "Callaway-Sant'Anna Staggered DiD",
                             "comparison_group": format!("{}", result.config.comparison_group),
                             "estimation_method": format!("{}", result.config.estimation_method),
@@ -1860,9 +1890,16 @@ fn execute_staggered_did(
                                     "chi2": pt.chi2,
                                     "df": pt.df,
                                     "p_value": pt.p_value,
+                                    "f_stat": pt.f_stat,
+                                    "df2": pt.df2,
+                                    "method": pt.method,
                                 })
                             }),
                         });
+                        // The text output's Display already ends with the missing-value note.
+                        if let Some(m) = missing_json(&result.missing) {
+                            json["missing"] = m;
+                        }
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
                     _ => {

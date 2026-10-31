@@ -64,6 +64,7 @@ impl AnalyticsServer {
         };
 
         let values: Vec<f64> = match col.cast(&DataType::Float64) {
+            // na-legacy(T4): theme 3.3 (per-column read: nulls dropped or NaN, no missing-value note)
             Ok(c) => match c.f64() {
                 Ok(f) => f.into_iter().flatten().filter(|v| v.is_finite()).collect(),
                 Err(e) => {
@@ -147,6 +148,7 @@ impl AnalyticsServer {
         };
 
         let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
+            // na-legacy(T4): theme 3.3 (per-column read: nulls dropped or NaN, no missing-value note)
             Ok(c) => match c.f64() {
                 Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
                 Err(e) => {
@@ -176,6 +178,7 @@ impl AnalyticsServer {
         };
 
         let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
+            // na-legacy(T4): theme 3.3 (per-column read: nulls dropped or NaN, no missing-value note)
             Ok(c) => match c.f64() {
                 Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
                 Err(e) => {
@@ -254,6 +257,7 @@ impl AnalyticsServer {
         };
 
         let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
+            // na-legacy(T4): theme 3.3 (per-column read: nulls dropped or NaN, no missing-value note)
             Ok(c) => match c.f64() {
                 Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
                 Err(e) => {
@@ -286,6 +290,7 @@ impl AnalyticsServer {
             };
 
             let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
+                // na-legacy(T4): theme 3.3 (per-column read: nulls dropped or NaN, no missing-value note)
                 Ok(c) => match c.f64() {
                     Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
                     Err(e) => {
@@ -367,6 +372,7 @@ impl AnalyticsServer {
             };
 
             let values: Vec<f64> = match col.cast(&DataType::Float64) {
+                // na-legacy(T4): theme 3.3 (per-column read: nulls dropped or NaN, no missing-value note)
                 Ok(c) => match c.f64() {
                     Ok(f) => f.into_iter().flatten().filter(|v| v.is_finite()).collect(),
                     Err(e) => {
@@ -705,6 +711,7 @@ impl AnalyticsServer {
                 .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
             let arr = casted
+                // na-legacy(T4): theme 3.3 (null -> NaN, no missing-value note)
                 .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
@@ -797,6 +804,7 @@ impl AnalyticsServer {
                 .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
             let arr = casted
+                // na-legacy(T4): theme 3.3 (null -> NaN, no missing-value note)
                 .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
@@ -871,6 +879,7 @@ impl AnalyticsServer {
                 .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
             let arr = casted
+                // na-legacy(T4): theme 3.3 (null -> NaN, no missing-value note)
                 .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
@@ -974,6 +983,7 @@ impl AnalyticsServer {
                 .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
             let arr = casted
+                // na-legacy(T4): theme 3.3 (null -> NaN, no missing-value note)
                 .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())

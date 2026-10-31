@@ -404,6 +404,23 @@ pub async fn session_state_bytes(session: &Session) -> u64 {
     session.state_charge().await.bytes
 }
 
+/// [`session_state_bytes`] for the three maps of a session's state held elsewhere (an
+/// `AnalyticsServer` built for a session shares them): datasets, cleaning sessions and spatial
+/// weights, each read under its lock in turn.
+pub(crate) async fn state_maps_bytes(
+    datasets: &RwLock<HashMap<String, Dataset>>,
+    cleaning_sessions: &RwLock<HashMap<String, Arc<CleaningSession>>>,
+    spatial_weights: &RwLock<HashMap<String, SpatialWeights>>,
+) -> u64 {
+    let mut charge = {
+        let datasets = datasets.read().await;
+        datasets_charge(datasets.iter().map(|(name, d)| (name.as_str(), d)))
+    };
+    charge.add_cleaning_sessions(&*cleaning_sessions.read().await);
+    charge.add_spatial_weights(&*spatial_weights.read().await);
+    charge.bytes
+}
+
 /// Keeps a session's active-call count raised while it lives.
 #[derive(Debug)]
 pub struct ActiveCallGuard {
@@ -1475,22 +1492,22 @@ pub(crate) struct QuotaShortfall {
 
 impl QuotaShortfall {
     /// What the dataset would do, as the quota refusals word it: "this
-    /// session's datasets would use X (limit Y per session)", or "the
-    /// server's dataset memory would reach X (limit Y)". X is
+    /// session's data (datasets, cleaning-session checkpoints and spatial
+    /// weights) would use X (limit Y per session)", or "the server's memory
+    /// for session data would reach X (limit Y)". X is
     /// [`reached`](Self::reached), which includes the session's cleaning
-    /// sessions and spatial weights (the admission check adds them), so it
-    /// can exceed what the datasets alone take; the texts are kept because
-    /// tests in other files assert them.
+    /// sessions and spatial weights (the admission check adds them).
     pub(crate) fn outcome(&self) -> String {
         if self.per_session {
             format!(
-                "this session's datasets would use {} (limit {} per session)",
+                "this session's data (datasets, cleaning-session checkpoints and spatial \
+                 weights) would use {} (limit {} per session)",
                 fmt_bytes(self.reached),
                 fmt_bytes(self.limit)
             )
         } else {
             format!(
-                "the server's dataset memory would reach {} (limit {})",
+                "the server's memory for session data would reach {} (limit {})",
                 fmt_bytes(self.reached),
                 fmt_bytes(self.limit)
             )
@@ -2475,7 +2492,10 @@ mod tests {
         {
             let _second = DatasetAdmission::install(None, total, b.clone(), m.clone());
             let refusal = admit_dataset("d", six).await.unwrap_err();
-            assert!(refusal.contains("server's dataset memory"), "{refusal}");
+            assert!(
+                refusal.contains("the server's memory for session data would reach"),
+                "{refusal}"
+            );
         }
         drop(first);
         assert_eq!(m.reserved_data_bytes(), 0);
@@ -2619,14 +2639,15 @@ mod tests {
         };
         assert_eq!(
             refused.outcome(),
-            "this session's datasets would use 240.00 MiB (limit 200.00 MiB per session)"
+            "this session's data (datasets, cleaning-session checkpoints and spatial weights) \
+             would use 240.00 MiB (limit 200.00 MiB per session)"
         );
         refused.per_session = false;
         refused.limit = 500 << 20;
         refused.reached = 520 << 20;
         assert_eq!(
             refused.outcome(),
-            "the server's dataset memory would reach 520.00 MiB (limit 500.00 MiB)"
+            "the server's memory for session data would reach 520.00 MiB (limit 500.00 MiB)"
         );
     }
 

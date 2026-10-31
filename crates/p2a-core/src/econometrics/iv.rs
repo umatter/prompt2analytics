@@ -344,9 +344,9 @@ fn iv_data(
         .extract()?;
     Ok(IvData {
         y: cols.numeric_array(y_col),
-        exog: cols.matrix(x_exog, true),
-        endog: cols.matrix(x_endog, false),
-        instr: cols.matrix(instruments, false),
+        exog: cols.matrix(x_exog, true)?,
+        endog: cols.matrix(x_endog, false)?,
+        instr: cols.matrix(instruments, false)?,
         missing: cols.missing().clone(),
     })
 }
@@ -857,7 +857,7 @@ pub fn run_first_stage_diagnostics(
     let mut all_vars: Vec<&str> = instruments.to_vec();
     all_vars.extend(&controls);
 
-    let design = cols.matrix(&all_vars, true);
+    let design = cols.matrix(&all_vars, true)?;
     let x = design.data;
     let var_names = design.column_names;
     let k = x.ncols();
@@ -894,7 +894,7 @@ pub fn run_first_stage_diagnostics(
 
     // Partial F of the instruments given the controls: the restricted fit
     // endog ~ [1, controls] against the full first stage (AER's weak-instrument F)
-    let restricted = cols.matrix(&controls, true);
+    let restricted = cols.matrix(&controls, true)?;
     let (restricted_inv, _) = safe_inverse(&xtx(&restricted.data.view()).view()).map_err(|e| {
         EconError::SingularMatrix {
             context: "[1, controls]'[1, controls] in the first-stage restricted fit".to_string(),

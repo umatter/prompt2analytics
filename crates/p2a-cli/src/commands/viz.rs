@@ -463,11 +463,13 @@ fn box_groups(
 }
 
 /// Pearson correlations of `cols` over the rows complete in all of them (R
-/// `cor(use = "complete.obs")`), as a k x k matrix, and what was dropped.
+/// `cor(use = "complete.obs")`), as a k x k matrix, what was dropped, and the indices of the
+/// columns that are constant on those rows. Such a column's correlations with the other
+/// columns are NaN (R's NA); its diagonal cell is 1, as in R.
 fn complete_case_correlations(
     dataset: &p2a_core::Dataset,
     cols: &[String],
-) -> Result<(Vec<Vec<f64>>, MissingSummary), String> {
+) -> Result<(Vec<Vec<f64>>, MissingSummary, Vec<usize>), String> {
     let names: Vec<&str> = cols.iter().map(String::as_str).collect();
     let columns = complete_rows(dataset, &names, 2, "heatmap")?;
     let k = names.len();
@@ -480,7 +482,29 @@ fn complete_case_correlations(
             corr[j][i] = r;
         }
     }
-    Ok((corr, columns.missing().clone()))
+    // With one column there is no correlation to be NA.
+    let constant = (0..k)
+        .filter(|&i| k > 1 && is_constant(columns.numeric(names[i])))
+        .collect();
+    Ok((corr, columns.missing().clone(), constant))
+}
+
+/// "correlations with c are NA: it is constant on the 5 complete rows" for the columns at
+/// `constant` (constant on the `n_complete` complete rows); `None` when there is none.
+fn na_note(cols: &[String], constant: &[usize], n_complete: usize) -> Option<String> {
+    let constant: Vec<&str> = constant
+        .iter()
+        .filter_map(|&i| cols.get(i).map(String::as_str))
+        .collect();
+    let pronoun = match constant.len() {
+        0 => return None,
+        1 => "it is",
+        _ => "they are",
+    };
+    Some(format!(
+        "correlations with {} are NA: {pronoun} constant on the {n_complete} complete rows",
+        constant.join(", ")
+    ))
 }
 
 /// Text: `msg`, then the dropped-rows note; JSON: one line `{"message": msg}`, with a
@@ -1016,7 +1040,7 @@ fn execute_heatmap(
     match dataset {
         Some(ds) => {
             // Correlations over the complete rows (cor(use = "complete.obs")).
-            let (corr_matrix, missing) = match complete_case_correlations(ds, cols) {
+            let (corr_matrix, missing, constant) = match complete_case_correlations(ds, cols) {
                 Ok(c) => c,
                 Err(e) => {
                     print_error(&e, format);
@@ -1030,11 +1054,11 @@ fn execute_heatmap(
                 Ok(result) => match decode_base64_image(&result.image_base64) {
                     Ok(png_data) => {
                         std::fs::write(output, &png_data)?;
-                        print_saved(
-                            &format!("Heatmap saved to: {}", output.display()),
-                            &missing,
-                            format,
-                        );
+                        let mut message = format!("Heatmap saved to: {}", output.display());
+                        if let Some(note) = na_note(&labels, &constant, missing.n_used) {
+                            message.push_str(&format!(" ({note})"));
+                        }
+                        print_saved(&message, &missing, format);
                     }
                     Err(e) => print_error(&e, format),
                 },
@@ -1046,8 +1070,16 @@ fn execute_heatmap(
     Ok(())
 }
 
-/// Pearson correlation of two aligned columns (0 when either has no variance).
+/// Whether every value of `x` equals the first (R's sd is then exactly 0).
+fn is_constant(x: &[f64]) -> bool {
+    x.windows(2).all(|w| w[0] == w[1])
+}
+
+/// Pearson correlation of two aligned columns; NaN (R's NA) when either has no variance.
 fn compute_correlation(x: &[f64], y: &[f64]) -> f64 {
+    if is_constant(x) || is_constant(y) {
+        return f64::NAN;
+    }
     let n = x.len().min(y.len());
     let mean_x: f64 = x.iter().sum::<f64>() / n as f64;
     let mean_y: f64 = y.iter().sum::<f64>() / n as f64;
@@ -1067,7 +1099,7 @@ fn compute_correlation(x: &[f64], y: &[f64]) -> f64 {
     if var_x > 0.0 && var_y > 0.0 {
         cov / (var_x.sqrt() * var_y.sqrt())
     } else {
-        0.0
+        f64::NAN
     }
 }
 
@@ -1296,7 +1328,13 @@ fn execute_dendrogram(
                     return Ok(());
                 }
             };
-            let data = columns.matrix(&names, false).data;
+            let data = match columns.matrix(&names, false) {
+                Ok(m) => m.data,
+                Err(e) => {
+                    print_error(&format!("Failed to extract data: {}", e), format);
+                    return Ok(());
+                }
+            };
 
             let link = match linkage_method.to_lowercase().as_str() {
                 "single" => Linkage::Single,
@@ -1636,7 +1674,7 @@ mod tests {
         let case = Case::load("cli_stat_descriptive_na");
         let ds = p2a_core::DataLoader::load(case.dataset_path()).unwrap();
         let cols = ["x", "y", "xi"].map(String::from);
-        let (m, missing) = complete_case_correlations(&ds, &cols).unwrap();
+        let (m, missing, _) = complete_case_correlations(&ds, &cols).unwrap();
         let flat: Vec<f64> = m.iter().flatten().copied().collect();
         Check::new(&case)
             .vector("cor_complete", &flat, Tol::stat(6))
@@ -1650,6 +1688,54 @@ mod tests {
                 ("y".to_string(), 15),
                 ("xi".to_string(), 2)
             ]
+        );
+    }
+
+    /// R's cor(use = "complete.obs") is NA for the correlations of a column that is constant on
+    /// the complete rows with the other columns (it warns "the standard deviation is zero"), and
+    /// keeps 1 on the diagonal, the constant column's included; the heatmap plotted 0. A
+    /// property of the rule, not R-pinned (no case).
+    #[test]
+    fn test_cli_viz_heatmap_constant_column_is_na() {
+        let df = polars::df! {
+            "x" => [1.2, 2.9, 3.1, 4.8, 5.3, 6.1],
+            "c" => [Some(2.0), Some(2.0), None, Some(2.0), Some(2.0), Some(2.0)],
+            "y" => [2.1, 3.9, 6.2, 7.8, 10.1, 12.4],
+        }
+        .unwrap();
+        let ds = p2a_core::Dataset::new(df);
+        let cols = ["x", "c", "y"].map(String::from);
+        let (m, missing, constant) = complete_case_correlations(&ds, &cols).unwrap();
+        for (i, j) in [(0, 1), (1, 0), (1, 2), (2, 1)] {
+            assert!(m[i][j].is_nan(), "[{i}][{j}] = {}", m[i][j]);
+        }
+        assert_eq!((m[0][0], m[1][1], m[2][2]), (1.0, 1.0, 1.0));
+        assert!(m[0][2].is_finite() && m[0][2] > 0.9, "{}", m[0][2]);
+        assert_eq!(missing.n_dropped, 1);
+        assert_eq!(constant, [1]);
+        assert_eq!(
+            na_note(&cols, &constant, missing.n_used).as_deref(),
+            Some("correlations with c are NA: it is constant on the 5 complete rows")
+        );
+        assert_eq!(na_note(&cols, &[], 6), None);
+        // A constant 0.1, whose mean is not exactly 0.1 in f64: still NA, as in R.
+        let tenth =
+            polars::df! { "x" => [1.2, 2.9, 3.1, 4.8], "t" => [0.1, 0.1, 0.1, 0.1] }.unwrap();
+        let cols = ["x", "t"].map(String::from);
+        let (m, _, constant) =
+            complete_case_correlations(&p2a_core::Dataset::new(tenth), &cols).unwrap();
+        assert!(m[0][1].is_nan() && m[1][0].is_nan(), "{m:?}");
+        assert_eq!((m[0][0], m[1][1]), (1.0, 1.0), "{m:?}");
+        assert_eq!(constant, [1]);
+        // Two constant columns: both named.
+        let both = polars::df! { "a" => [1.0, 1.0, 1.0], "b" => [3.0, 3.0, 3.0] }.unwrap();
+        let cols = ["a", "b"].map(String::from);
+        let (m, missing, constant) =
+            complete_case_correlations(&p2a_core::Dataset::new(both), &cols).unwrap();
+        assert!(m[0][1].is_nan() && m[0][0] == 1.0, "{m:?}");
+        assert_eq!(
+            na_note(&cols, &constant, missing.n_used).as_deref(),
+            Some("correlations with a, b are NA: they are constant on the 3 complete rows")
         );
     }
 

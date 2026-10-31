@@ -861,12 +861,10 @@ impl DatasetQuotas {
 /// datasets with this one in place of any dataset of the same name, plus
 /// its cleaning sessions and spatial weights, which both quotas count too
 /// (`Session::other_state_bytes`). A refusal names the size the session
-/// would reach and the limit, as a tool call's quota refusal does; it holds
-/// no server path. Its texts still say "this session's datasets would use
-/// X" and "the server's dataset memory would reach X", but X includes the
-/// session's cleaning sessions and spatial weights (and, for the total,
-/// every other session's charge), so it can exceed what the datasets
-/// alone take.
+/// would reach and the limit in the words of a tool call's quota refusal
+/// (`session::QuotaShortfall`); the figure includes the session's cleaning
+/// sessions and spatial weights and, for the total, every other session's
+/// charge. It holds no server path.
 ///
 /// Call it while holding the session's governor permit: the quota rollback
 /// of a tool call assumes one change of a session's datasets at a time.
@@ -904,7 +902,8 @@ pub async fn insert_reloaded_dataset(
         && after > limit
     {
         return Err(format!(
-            "this session's datasets would use {} (limit {} per session)",
+            "this session's data (datasets, cleaning-session checkpoints and spatial \
+             weights) would use {} (limit {} per session)",
             fmt_bytes(after),
             fmt_bytes(limit)
         ));
@@ -914,7 +913,7 @@ pub async fn insert_reloaded_dataset(
         && total > limit
     {
         return Err(format!(
-            "the server's dataset memory would reach {} (limit {})",
+            "the server's memory for session data would reach {} (limit {})",
             fmt_bytes(total),
             fmt_bytes(limit)
         ));
@@ -1737,7 +1736,10 @@ mod tests {
         let (three, two) = (fmt_bytes(3 * one), fmt_bytes(2 * one));
         assert!(three.ends_with(" KiB"), "{three}");
         assert!(
-            refused.contains(&format!("would use {three} (limit {two} per session)")),
+            refused.contains(&format!(
+                "this session's data (datasets, cleaning-session checkpoints and spatial \
+                 weights) would use {three} (limit {two} per session)"
+            )),
             "{refused}"
         );
         assert_eq!(put(&a, &sm, "x", 0.4, q).await, Ok(())); // replaces x
@@ -1746,7 +1748,9 @@ mod tests {
         let refused = put(&b, &sm, "y", 0.6, q).await.unwrap_err();
         let four = fmt_bytes(4 * one);
         assert!(
-            refused.contains(&format!("would reach {four} (limit {three})")),
+            refused.contains(&format!(
+                "the server's memory for session data would reach {four} (limit {three})"
+            )),
             "{refused}"
         );
         assert_eq!(sm.total_data_bytes().await, 3 * one);
@@ -1799,14 +1803,19 @@ mod tests {
             .unwrap_err();
         let reached = fmt_bytes(one + 6_722);
         assert!(
-            refused.contains(&format!("would use {reached} (limit ")),
+            refused.contains(&format!(
+                "this session's data (datasets, cleaning-session checkpoints and spatial \
+                 weights) would use {reached} (limit "
+            )),
             "{refused}"
         );
         let refused = insert_reloaded_dataset(&s, &sm, "x".into(), ds(), total)
             .await
             .unwrap_err();
         assert!(
-            refused.contains(&format!("would reach {reached} (limit ")),
+            refused.contains(&format!(
+                "the server's memory for session data would reach {reached} (limit "
+            )),
             "{refused}"
         );
         assert!(s.datasets.read().await.is_empty());

@@ -318,7 +318,7 @@ fn df_to_array2(df: &DataFrame, columns: &[&str]) -> EconResult<(Array2<f64>, Ve
         .numerics(columns)
         .na(NaPolicy::Fail)
         .extract()?;
-    let data = cols.matrix(columns, false).data;
+    let data = cols.matrix(columns, false)?.data;
     let var_names = columns.iter().map(|c| c.to_string()).collect();
     Ok((data, var_names))
 }

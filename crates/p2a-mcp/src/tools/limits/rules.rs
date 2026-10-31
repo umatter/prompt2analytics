@@ -253,8 +253,8 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("collaborative_tmle", "max_covariates", Max(ListLength)),
         p("collaborative_tmle", "ps_lower", Exempt(TRIM)),
         p("collaborative_tmle", "ps_upper", Exempt(TRIM)),
-        p("create_dataset", "na_strings", UniqueList(ListLength)),
-        p("create_dataset", "na_strings[]", Max(StringBytes)),
+        p("create_dataset", "na_strings", UniqueList(NaMarkers)),
+        p("create_dataset", "na_strings[]", Max(NaMarkerBytes)),
         p("descriptive_medpolish", "eps", Tolerance),
         p("evalue", "baseline_risk", Exempt(CLOSED_FORM)),
         p("evalue", "ci_lower", Exempt(CLOSED_FORM)),
@@ -395,8 +395,8 @@ pub static PARAM_RULES: &[ParamRule] = {
         p("linalg_toeplitz", "row", SquareLen),
         p("linalg_toeplitz", "column[]", Exempt(ARRAY_VALUE)),
         p("linalg_toeplitz", "row[]", Exempt(ARRAY_VALUE)),
-        p("load_dataset", "na_strings", UniqueList(ListLength)),
-        p("load_dataset", "na_strings[]", Max(StringBytes)),
+        p("load_dataset", "na_strings", UniqueList(NaMarkers)),
+        p("load_dataset", "na_strings[]", Max(NaMarkerBytes)),
         p("ltmle", "covariates", ArrayLen(ListLength)),
         p("ltmle", "ps_lower", Exempt(TRIM)),
         p("ltmle", "ps_upper", Exempt(TRIM)),
@@ -1003,23 +1003,22 @@ pub static PIVOT_RULES: &[super::PivotRule] = &[super::PivotRule {
 /// Work of an ARIMA fit as the `arima_fit_work` budget counts it:
 /// `n_obs * ((p + q + 3)^2 + d)`, saturating at `u64::MAX`.
 ///
-/// `ts_arima_fit` and `ts_arima_forecast` fit with `arima::estimate::fit` (arima 0.3.0), whose
-/// optimiser never looks at the call's budget: once it starts, the governor's deadline cannot
-/// stop it, so an expensive fit has to be refused before it starts. The fit minimises the
-/// conditional sum of squares with L-BFGS (liblbfgs 0.1.0, More-Thuente line search): at most
-/// 200 iterations, the first without a line search and each of the others a line search of at
-/// most 40 evaluations, so at most 1 + 199 x 40 = 7,961 evaluations. The bound is reachable: a
-/// failed line search is reverted and the next iteration starts instead of ending the fit, and
-/// some series reach it. One evaluation is the objective and its forward-difference gradient,
-/// `p + q + 3` passes over the differenced series. A pass costs at most about one unit per
-/// observation for each of `p + q + 3` terms (the residual, its square and its storage count as
-/// about three), measured on a release build over AR-only, MA-only and mixed orders; an MA term
-/// costs about twice an AR term, so the unit is an MA term's. So the slowest fit the data can
-/// force takes a time proportional to `n_obs * (p + q + 3)^2`. The `d` term counts the
-/// differencing (`d` passes, done by the fit and again by `run_arima` for the residuals), so
-/// that the count bounds every uninterruptible pass even where `model_order` is raised;
-/// differencing only shortens the series, and the starting values, the residuals and the
-/// forecast after the fit are a few passes more.
+/// `ts_arima_fit` and `ts_arima_forecast` estimate the conditional sum of squares in house
+/// (`p2a_core::forecasting::arima_model`) with Levenberg-Marquardt: at most 200 iterations, each
+/// one pass over the differenced series that also accumulates J'J and J'e of the residuals'
+/// derivatives, plus the damped trial steps of that iteration, one plain pass each (the damping
+/// grows geometrically after each rejected step, so an iteration tries at most about 15). The
+/// fit checks the call's budget at every iteration, every trial step and every 4,096 rows of a
+/// pass, so the deadline stops it; this count bounds a call's cost before the fit starts, so
+/// that a fit whose work could not fit the deadline is refused up front instead. Per
+/// observation, a pass with the Jacobian costs work that grows with the square of the number
+/// of coefficients, as `(p + q + 3)^2` does; the `d` term counts the differencing passes.
+///
+/// The count and the hosted value were set for the optimiser the tools used before (the
+/// `arima` crate's L-BFGS: at most 7,961 evaluations of `p + q + 3` passes each, a pass costing
+/// about one unit per observation and term, measured on a release build), whose slowest fit
+/// took a time proportional to `n_obs * (p + q + 3)^2` as well. The starting values, the
+/// residuals and the forecast after the fit are a few passes more.
 ///
 /// The time per unit holds only in ordinary floating-point arithmetic: see
 /// [`ARIMA_MIN_MAGNITUDE`] for the series the budget therefore refuses as well.
@@ -1052,24 +1051,19 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
 /// their products and squares with ordinary-sized coefficients, with a wide margin. NaN,
 /// infinities and zero cost no more than other numbers and pass.
 ///
-/// Where a value of the differenced series is zero, the floor bounds nothing. There
-/// `arima::estimate::residuals` gives the residual as
-/// `-(intercept + sum phi_j x_{t-j-1} + sum theta_j e_{t-j-1})`, which the coefficients the
-/// optimiser tries set, and the release-build measurements behind [`arima_fit_work`] cover it,
-/// not the floor. One case is known to leave the ordinary range: at an intercept of exactly 0.0
+/// Where a value of the differenced series is zero, the floor bounds nothing. There the CSS
+/// recursion gives the residual as `w_t - sum phi_i w_{t-i-1} - sum theta_j e_{t-j-1}` (`w` the
+/// differenced series less its mean and drift terms), which the coefficients the optimiser
+/// tries set, not the floor. One case is known to leave the ordinary range: at an intercept of exactly 0.0
 /// over a stretch of exact zeros, the MA recursion `e_t = -sum theta_j e_{t-j-1}` decays
 /// geometrically into the subnormal range and, for `|theta| > 1/2`, can stay on a subnormal
 /// rounding fixed point (for example 4 x 2^-1074 at `theta = 0.9`). Exact zeros pass the floor,
-/// and on a release build one pass of the objective in that state was measured at about 28
-/// times the time of a pass over ordinary data, a cost the budget's time per unit does not
-/// cover. A whole fit is not believed to stay in that state over its many evaluations: the
-/// intercept starts at the differenced series' mean, the forward-difference gradient moves it
-/// off zero, and where the data are large enough to absorb that step the first line search
-/// reached its minimum step, and in the runs measured the fit ended at the next one: the
-/// reverted step leaves the next L-BFGS update with zero correction pairs, whose 0/0 scaling
-/// made that line search fail its step check (a failed line search does not by itself end the
-/// fit; see [`arima_fit_work`]). This is a residual risk: a change of the optimiser (the TS-1
-/// replacement) must examine it again.
+/// and on a release build one pass of the objective in that state, with the optimiser the tools
+/// used before the in-house fit, was measured at about 28 times the time of a pass over
+/// ordinary data, a cost the budget's time per unit does not cover. The in-house fit checks the
+/// call's budget every 4,096 rows of a pass and at every iteration, so a fit that stays in that
+/// state ends at the deadline as a cancelled call. That is the residual risk: a call the budget
+/// admitted can still be cancelled.
 pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
 
 #[cfg(test)]
@@ -1109,13 +1103,17 @@ mod tests {
         (Family::TreeDepth, "ml_random_forest", "max_depth"),
         (Family::PowerSampleSize, "power_t_test", "n"),
         (Family::DesignGroups, "power_anova_test", "groups"),
+        (Family::NaMarkers, "load_dataset", "na_strings"),
+        (Family::NaMarkerBytes, "load_dataset", "na_strings[]"),
     ];
 
     fn value_of_size(f: Family, n: u64) -> Value {
         match f {
-            Family::ListLength => json!((0..n).map(|i| format!("c{i}")).collect::<Vec<_>>()),
+            Family::ListLength | Family::NaMarkers => {
+                json!((0..n).map(|i| format!("c{i}")).collect::<Vec<_>>())
+            }
             Family::ArrayLength => json!(vec![0.5; n as usize]),
-            Family::StringBytes => json!("a".repeat(n as usize)),
+            Family::StringBytes | Family::NaMarkerBytes => json!("a".repeat(n as usize)),
             _ => json!(n),
         }
     }
@@ -1130,13 +1128,18 @@ mod tests {
                 f.key()
             );
         }
+        // An element path `a[]` is given as a one-element array `a`.
+        let args = |field: &str, value: Value| match field.strip_suffix("[]") {
+            Some(array) => json!({ array: [value] }),
+            None => json!({ field: value }),
+        };
         for &(f, tool, field) in REPRESENTATIVE {
             let cap = h.cap(f).unwrap();
             assert!(
-                hosted(tool, json!({ field: value_of_size(f, cap) })).is_ok(),
+                hosted(tool, args(field, value_of_size(f, cap))).is_ok(),
                 "{tool}.{field} at cap"
             );
-            let v = hosted(tool, json!({ field: value_of_size(f, cap + 1) })).unwrap_err();
+            let v = hosted(tool, args(field, value_of_size(f, cap + 1))).unwrap_err();
             assert_eq!(
                 (v.parameter.as_str(), v.override_key),
                 (field, f.key()),
@@ -2028,9 +2031,9 @@ mod tests {
         );
     }
 
-    /// The `arima` crate's fit cannot be stopped once it starts, so the hosted profile bounds
-    /// its work before it starts, for both ARIMA tools, at every order the `model_order` cap
-    /// allows (each of p, d and q from 0 to the cap); nothing is bounded when limits are off.
+    /// The hosted profile bounds an ARIMA fit's work before it starts, for both ARIMA tools, at
+    /// every order the `model_order` cap allows (each of p, d and q from 0 to the cap); nothing
+    /// is bounded when limits are off.
     #[test]
     fn arima_fit_work_is_capped_in_hosted_profile() {
         use super::arima_fit_work;
@@ -2116,7 +2119,7 @@ mod tests {
             v.message,
             "`ts_arima_fit` with p = 1, d = 0 and q = 1 on 1000 observations needs 25000 \
              (arima_fit_work: observations x ((p + q + 3)^2 + d)), which exceeds this server's \
-             limit of 10000: the ARIMA fit cannot be stopped once it starts. Use at most 400 \
+             limit of 10000 for one ARIMA fit, checked before the fit starts. Use at most 400 \
              observations at these orders, for example the most recent ones, or set p and q to \
              0."
         );
@@ -2141,7 +2144,7 @@ mod tests {
             .unwrap_err();
         assert!(
             v.message.ends_with(
-                "the ARIMA fit cannot be stopped once it starts. Lower the orders so that \
+                "for one ARIMA fit, checked before the fit starts. Lower the orders so that \
                  p + q is at most 7."
             ),
             "{}",
@@ -2238,9 +2241,9 @@ mod tests {
                         "`{tool}` cannot fit column `y`: it holds a nonzero value of magnitude \
                          {found}, below this server's floor of 1e-100 for an ARIMA fit \
                          (arima_fit_work). Values that small can make the fit's arithmetic many \
-                         times slower, and the fit cannot be stopped once it starts. Set values \
-                         that small to 0, or rescale the column, for example multiply it by a \
-                         power of ten."
+                         times slower than the limit for one fit allows for. Set values that \
+                         small to 0, or rescale the column, for example multiply it by a power \
+                         of ten."
                     )
                 );
             }
@@ -2280,18 +2283,17 @@ mod tests {
     #[test]
     fn arima_differences_of_a_column_above_the_floor_stay_above_it_times_2_pow_minus_53() {
         use super::ARIMA_MIN_MAGNITUDE;
-        // `arima::util::diff` (arima 0.3.0) for f64, with the same subtractions in the same
-        // order: the differencing the fit applies.
-        fn crate_diff(x: &[f64], d: usize) -> Vec<f64> {
-            let mut y: Vec<f64> = x.to_vec();
-            let len = y.len();
-            for s in 0..d {
-                for i in 1..len - s {
-                    y[len - i] -= y[len - i - 1];
+        // `difference` in p2a_core::forecasting::arima_model (private there), with the same
+        // subtractions in the same order: the differencing the fit applies.
+        fn fit_difference(x: &[f64], d: usize) -> Vec<f64> {
+            let mut w: Vec<f64> = x.to_vec();
+            for _ in 0..d {
+                for l in (1..w.len()).rev() {
+                    w[l] -= w[l - 1];
                 }
             }
-            y.drain(0..d);
-            y
+            w.drain(..d.min(w.len()));
+            w
         }
         let bound = ARIMA_MIN_MAGNITUDE * 2f64.powi(-53);
         // Values one spacing apart near the floor and at other scales, the cancellations most
@@ -2317,7 +2319,7 @@ mod tests {
                     .is_ok()
             );
             for d in 0..=20 {
-                for v in crate_diff(x, d) {
+                for v in fit_difference(x, d) {
                     assert!(v == 0.0 || v.abs() >= bound, "d = {d}: {v:e}");
                 }
             }
@@ -2328,7 +2330,7 @@ mod tests {
     fn every_capped_scalar_rule_refuses_1e15_and_off_accepts_it() {
         for r in PARAM_RULES {
             let Rule::Max(f) = r.rule else { continue };
-            if f == Family::StringBytes || r.path.contains(['.', '[']) {
+            if f.counts_bytes() || r.path.contains(['.', '[']) {
                 continue;
             }
             let tool = if r.tool == "*" { "__generic__" } else { r.tool };
@@ -2414,6 +2416,45 @@ mod tests {
         }
     }
 
+    /// The CSV parser compares every field with every missing-value marker, so the hosted
+    /// profile holds the markers to a few short strings (na_markers, na_marker_bytes).
+    #[test]
+    fn na_strings_markers_are_few_and_short() {
+        let markers = |n: usize| (0..n).map(|i| format!("m{i}")).collect::<Vec<_>>();
+        for tool in ["load_dataset", "create_dataset"] {
+            let args = |na: Vec<String>| json!({"path": "a.csv", "name": "d", "csv_content": "a\n1\n", "na_strings": na});
+            assert!(hosted(tool, args(markers(32))).is_ok(), "{tool}");
+            let v = hosted(tool, args(markers(33))).unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key),
+                ("na_strings", "na_markers"),
+                "{tool}"
+            );
+            assert!(
+                v.message.contains("has 33 elements") && v.message.contains("limit of 32"),
+                "{}",
+                v.message
+            );
+            assert!(hosted(tool, args(vec!["x".repeat(64)])).is_ok(), "{tool}");
+            let v = hosted(tool, args(vec!["x".repeat(65)])).unwrap_err();
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key),
+                ("na_strings[]", "na_marker_bytes"),
+                "{tool}"
+            );
+            assert!(
+                v.message.contains("65 bytes long") && v.message.contains("limit of 64 bytes"),
+                "{}",
+                v.message
+            );
+            assert!(
+                Limits::off()
+                    .check_tool_arguments(tool, &args(markers(500)))
+                    .is_ok()
+            );
+        }
+    }
+
     #[test]
     fn ordered_model_levels_are_limited() {
         let args = |levels: Value| json!({"dataset": "d", "y": "y", "x": ["x1"], "levels": levels});
@@ -2479,7 +2520,7 @@ mod schema_tests {
             (Kind::TooDeep, _) => false,
             (_, Rule::Exempt(_)) => true,
             (Kind::Integer | Kind::IntegerElems | Kind::Float | Kind::FloatElems, Rule::Max(f)) => {
-                f != Family::StringBytes
+                !f.counts_bytes()
             }
             (Kind::Float, Rule::Tolerance) => true,
             (Kind::Array, Rule::ArrayLen(_) | Rule::UniqueList(_) | Rule::SquareLen) => true,
@@ -2509,9 +2550,10 @@ mod schema_tests {
 
     #[test]
     fn classification_matches_what_check_value_checks() {
-        use Family::{Lags, ListLength, StringBytes};
+        use Family::{Lags, ListLength, NaMarkerBytes, StringBytes};
         assert!(classifies(Kind::Integer, Rule::Max(Lags)));
         assert!(!classifies(Kind::Integer, Rule::Max(StringBytes)));
+        assert!(!classifies(Kind::Integer, Rule::Max(NaMarkerBytes)));
         assert!(!classifies(Kind::Integer, Rule::Tolerance));
         assert!(classifies(Kind::Float, Rule::Tolerance));
         assert!(classifies(Kind::Float, Rule::Max(Lags)));

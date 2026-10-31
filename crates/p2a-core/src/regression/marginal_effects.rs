@@ -348,7 +348,7 @@ pub fn marginal_effects_discrete(
             ),
         });
     }
-    let dm = cols.matrix(x_cols, true);
+    let dm = cols.matrix(x_cols, true)?;
     let x = &dm.data;
     let k = x.ncols();
 

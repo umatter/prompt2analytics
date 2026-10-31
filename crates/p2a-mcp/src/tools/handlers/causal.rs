@@ -102,7 +102,7 @@ fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationRepo
 impl AnalyticsServer {
     /// Run IV/2SLS regression.
     #[tool(
-        description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments. Includes first-stage diagnostics (F-statistic, instrument strength). Prefer this over iv_first_stage for a complete IV analysis."
+        description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments. Includes first-stage diagnostics: the partial F of the excluded instruments (the HC1 Wald F with robust = true, the default) and instrument strength. Prefer this over iv_first_stage for a complete IV analysis."
     )]
     pub async fn iv_2sls(
         &self,
@@ -145,7 +145,7 @@ impl AnalyticsServer {
 
     /// Run first-stage diagnostics for IV/2SLS.
     #[tool(
-        description = "Run ONLY first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Note: iv_2sls already includes first-stage results — use this only when you need first-stage diagnostics without the full 2SLS estimation."
+        description = "Run ONLY first-stage diagnostics to test instrument strength. Reports the partial F of the excluded instruments (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Note: iv_2sls already includes first-stage results — use this only when you need first-stage diagnostics without the full 2SLS estimation."
     )]
     pub async fn iv_first_stage(
         &self,
@@ -682,7 +682,14 @@ impl AnalyticsServer {
         let x = if cov_names.is_empty() {
             ndarray::Array2::zeros((cols.n(), 0))
         } else {
-            cols.matrix(&cov_names, false).data
+            match cols.matrix(&cov_names, false) {
+                Ok(m) => m.data,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Double ML: {e}"
+                    ))]));
+                }
+            }
         };
 
         // Parse model type
@@ -2281,10 +2288,18 @@ impl AnalyticsServer {
             .iter()
             .map(|c| cols.numeric_array(c))
             .collect();
-        let covariates: Vec<ndarray::Array2<f64>> = cov_lists
+        let covariates: Vec<ndarray::Array2<f64>> = match cov_lists
             .iter()
-            .map(|names_t| cols.matrix(names_t, false).data)
-            .collect();
+            .map(|names_t| cols.matrix(names_t, false).map(|m| m.data))
+            .collect()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "LTMLE: {e}"
+                ))]));
+            }
+        };
 
         // Create LTMLE data structure
         let data = match LtmleData::new(outcomes, treatments, covariates) {

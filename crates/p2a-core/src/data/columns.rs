@@ -31,11 +31,11 @@
 //!    logical `NA`.
 //!
 //! Every pass over the rows is O(n x k). The row mask, the kept rows, the column values,
-//! the time index values and the factor codes are allocated through [`crate::resource`].
-//! [`Columns::matrix`] allocates its n x `names.len()` copy infallibly, as
-//! `DesignMatrix::from_dataframe` does (a name repeated in `names` is copied once per
-//! occurrence), and [`Columns::numeric_array`] copies one column infallibly; per-level
-//! buffers (counts, level remaps) are sized by the number of levels.
+//! the time index values and the factor codes are allocated through [`crate::resource`], and
+//! so is the n x k copy of [`Columns::matrix`] (a name repeated in `names` is copied once per
+//! occurrence, so k can exceed the columns extracted). [`Columns::numeric_array`] copies one
+//! extracted column infallibly; per-level buffers (counts, level remaps) are sized by the
+//! number of levels.
 //!
 //! ```
 //! use p2a_core::data::columns::{ColumnRequest, NaPolicy};
@@ -55,7 +55,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 use polars::prelude::{
     ChunkFullNull, Column, DataFrame, DataType, Float64Chunked, PolarsError, StringChunked,
 };
@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignError, DesignMatrix, get_column_names};
-use crate::resource::{try_vec, try_with_capacity};
+use crate::resource::{try_vec, try_with_capacity, try_zeros2};
 
 /// What to do with rows that have a missing value (null, or NaN in a float column) in any
 /// requested column.
@@ -146,6 +146,37 @@ impl MissingSummary {
             n_dropped: a.n_dropped.saturating_add(b.n_dropped),
             by_column,
         }
+    }
+
+    /// The note of a summary that [`merge_samples`](Self::merge_samples) built from two
+    /// columns of one frame: "30 of 44 values dropped because of missing values (two samples
+    /// of 22; x: 15, y: 15)"; `None` when empty. Each sample drops its own missing values, so
+    /// the counts are of values, not rows; a column used as both samples is counted in each.
+    /// [`note`](Self::note) is unchanged, and the serialized summary keeps the merged totals.
+    pub fn two_sample_note(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut detail: Vec<String> = Vec::new();
+        if self.n_total.is_multiple_of(2) {
+            detail.push(format!("two samples of {}", self.n_total / 2));
+        }
+        if !self.by_column.is_empty() {
+            let list: Vec<String> = self
+                .by_column
+                .iter()
+                .map(|(column, count)| format!("{column}: {count}"))
+                .collect();
+            detail.push(list.join(", "));
+        }
+        let mut note = format!(
+            "{} of {} values dropped because of missing values",
+            self.n_dropped, self.n_total
+        );
+        if !detail.is_empty() {
+            note.push_str(&format!(" ({})", detail.join("; ")));
+        }
+        Some(note)
     }
 }
 
@@ -576,16 +607,17 @@ impl Columns {
     }
 
     /// Design matrix over numeric columns in `names` order; "(Intercept)" first when
-    /// `intercept`. The n x `names.len()` matrix is allocated infallibly (not through
-    /// [`crate::resource`]), as in `DesignMatrix::from_dataframe`.
+    /// `intercept`. The n x (`names.len()` + intercept) matrix is allocated through
+    /// [`crate::resource`]: a matrix above the allocation ceiling is
+    /// [`EconError::ResourceLimit`].
     ///
     /// # Panics
     /// If a name was not requested as numeric.
-    pub fn matrix(&self, names: &[&str], intercept: bool) -> DesignMatrix {
+    pub fn matrix(&self, names: &[&str], intercept: bool) -> EconResult<DesignMatrix> {
         let n = self.n();
-        let k = names.len() + usize::from(intercept);
-        let mut data = Array2::zeros((n, k));
-        let mut column_names = Vec::with_capacity(k);
+        let k = names.len().saturating_add(usize::from(intercept));
+        let mut data = try_zeros2(n, k, "design matrix")?;
+        let mut column_names = try_with_capacity(k, "design matrix column names")?;
         let mut j = 0;
         if intercept {
             data.column_mut(0).fill(1.0);
@@ -599,13 +631,13 @@ impl Columns {
             column_names.push(name.to_string());
             j += 1;
         }
-        DesignMatrix {
+        Ok(DesignMatrix {
             data,
             column_names,
             has_intercept: intercept,
             n_obs: n,
             n_features: k,
-        }
+        })
     }
 
     /// A categorical column on the kept rows.
@@ -679,7 +711,7 @@ impl Factor {
             let i = u32::try_from(i).map_err(|_| too_many_levels())?;
             if position.insert(label.as_str(), i).is_some() {
                 return Err(EconError::InvalidSpecification {
-                    message: format!("level '{label}' appears twice in the level order"),
+                    message: format!("level '{}' appears twice in the level order", shown(label)),
                 });
             }
         }
@@ -690,7 +722,8 @@ impl Factor {
                 None => {
                     return Err(EconError::InvalidSpecification {
                         message: format!(
-                            "level '{label}' is not in the given level order ({})",
+                            "level '{}' is not in the given level order ({})",
+                            shown(label),
                             order_preview(order)
                         ),
                     });
@@ -716,8 +749,9 @@ impl Factor {
                         _ => {
                             return Err(EconError::InvalidSpecification {
                                 message: format!(
-                                    "level '{label}' in the level order is not a number, \
-                                     but the column levels are numeric"
+                                    "level '{}' in the level order is not a number, \
+                                     but the column levels are numeric",
+                                    shown(label)
                                 ),
                             });
                         }
@@ -735,14 +769,31 @@ impl Factor {
     }
 }
 
+/// A label as a refusal shows it: at most [`SHOWN_LABEL_BYTES`] bytes (cut at a character
+/// boundary), then "...".
+fn shown(label: &str) -> String {
+    if label.len() <= SHOWN_LABEL_BYTES {
+        return label.to_string();
+    }
+    let cut = (0..=SHOWN_LABEL_BYTES)
+        .rev()
+        .find(|&i| label.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}...", &label[..cut])
+}
+
+/// Bytes of a label a refusal shows.
+const SHOWN_LABEL_BYTES: usize = 24;
+
 /// "3 labels: 'a', 'b', 'c'" for a refusal: the length and at most the first five labels,
-/// so the message stays bounded however long the caller's order is.
+/// each cut by [`shown`], so the message stays bounded however long the caller's order and
+/// its labels are.
 fn order_preview(order: &[String]) -> String {
     const SHOWN: usize = 5;
     let mut labels: Vec<String> = order
         .iter()
         .take(SHOWN)
-        .map(|label| format!("'{label}'"))
+        .map(|label| format!("'{}'", shown(label)))
         .collect();
     if order.len() > SHOWN {
         labels.push("...".to_string());
@@ -835,6 +886,7 @@ pub fn econ_error_from_design(err: DesignError, df: &DataFrame) -> EconError {
         DesignError::NoColumns => EconError::InvalidSpecification {
             message: "No independent variables specified".to_string(),
         },
+        DesignError::ResourceLimit(message) => EconError::ResourceLimit(message),
         DesignError::PolarsError(e) => EconError::Internal(e.to_string()),
     }
 }
@@ -1353,7 +1405,7 @@ mod tests {
             .extract()
             .unwrap();
         assert_eq!(cols.rows(), [0, 2, 4, 5, 7, 8, 9]);
-        let m = cols.matrix(&["y", "n"], true);
+        let m = cols.matrix(&["y", "n"], true).unwrap();
         assert_eq!(m.column_names, ["(Intercept)", "y", "n"]);
         assert_eq!(m.n_obs, 7);
         assert_eq!(m.n_features, 3);
@@ -1475,6 +1527,27 @@ mod tests {
         assert!(message.contains("1000"), "{message}");
         assert!(!message.contains("L999"), "{message}");
         assert!(message.len() < 300, "{} bytes: {message}", message.len());
+        // Each label is cut too: a long label in the order, a long observed label, and a long
+        // label the order repeats.
+        let long = "x".repeat(10_000);
+        let order = vec![long.clone(), "b".to_string()];
+        let message = invalid_message(cols.factor("s").with_level_order(&order));
+        assert!(message.contains("'a'"), "{message}");
+        assert!(message.len() < 300, "{} bytes", message.len());
+        let wide = frame(Series::new("s".into(), &[long.as_str(), "b"]));
+        let wide_cols = ColumnRequest::new(&wide).factor("s").extract().unwrap();
+        let message = invalid_message(wide_cols.factor("s").with_level_order(&strings(&["b"])));
+        assert!(message.len() < 300, "{} bytes", message.len());
+        let twice = vec![long.clone(), long];
+        let message = invalid_message(cols.factor("s").with_level_order(&twice));
+        assert!(message.contains("twice"), "{message}");
+        assert!(message.len() < 300, "{} bytes", message.len());
+        // Five long multi-byte labels in the order: still bounded in bytes.
+        let wide_order: Vec<String> = (0..1000)
+            .map(|i| format!("{i}{}", "é".repeat(500)))
+            .collect();
+        let message = invalid_message(cols.factor("s").with_level_order(&wide_order));
+        assert!(message.len() < 300, "{} bytes: {message}", message.len());
     }
 
     #[test]
@@ -1489,7 +1562,7 @@ mod tests {
         assert_eq!(cols.missing().by_column.len(), 1);
         assert_eq!(cols.missing().by_column[0].0, "y");
         assert_eq!(cols.n(), 8);
-        assert_eq!(cols.matrix(&["y", "y"], false).data.dim(), (8, 2));
+        assert_eq!(cols.matrix(&["y", "y"], false).unwrap().data.dim(), (8, 2));
         // The same name in two roles is extracted in both and counted once.
         let both = ColumnRequest::new(df)
             .numeric("n")
@@ -1794,6 +1867,67 @@ mod tests {
     }
 
     #[test]
+    fn test_na_columns_two_sample_note() {
+        // Two samples of 22 values, each dropping its own missing values, merged as the
+        // two-sample wrappers merge them: the note counts values, and names the sample size.
+        let sample = |name: &str, dropped: usize| MissingSummary {
+            n_total: 22,
+            n_used: 22 - dropped,
+            n_dropped: dropped,
+            by_column: vec![(name.to_string(), dropped)],
+        };
+        let merged = MissingSummary::merge_samples(&sample("x", 15), &sample("y", 15));
+        assert_eq!(
+            merged.two_sample_note().as_deref(),
+            Some(
+                "30 of 44 values dropped because of missing values (two samples of 22; x: 15, \
+                 y: 15)"
+            )
+        );
+        // note() is unchanged.
+        assert_eq!(
+            merged.note().as_deref(),
+            Some("30 of 44 rows dropped because of missing values (x: 15, y: 15)")
+        );
+        // Only one sample with missing values.
+        let one = MissingSummary::merge_samples(&sample("xi", 2), &MissingSummary::none(22));
+        assert_eq!(
+            one.two_sample_note().as_deref(),
+            Some("2 of 44 values dropped because of missing values (two samples of 22; xi: 2)")
+        );
+        // One column as both samples: its values are counted in each sample.
+        let same = MissingSummary::merge_samples(&sample("x", 15), &sample("x", 15));
+        assert_eq!(
+            same.two_sample_note().as_deref(),
+            Some("30 of 44 values dropped because of missing values (two samples of 22; x: 30)")
+        );
+        let none =
+            MissingSummary::merge_samples(&MissingSummary::none(5), &MissingSummary::none(5));
+        assert_eq!(none.two_sample_note(), None);
+    }
+
+    #[test]
+    fn test_na_columns_matrix_allocation_is_fallible() {
+        // The extraction holds one column; a design matrix that repeats it many times does not
+        // fit the same ceiling, and is refused instead of allocated.
+        let y: Vec<f64> = (0..64)
+            .map(|i| i as f64 * 0.5 + ((i * 7) % 11) as f64 * 0.1)
+            .collect();
+        let df = df! { "y" => y }.unwrap();
+        let cols = ColumnRequest::new(&df).numeric("y").extract().unwrap();
+        let repeated = vec!["y"; 64];
+        match resource::with_alloc_ceiling(Some(4096), || cols.matrix(&repeated, true)) {
+            Err(EconError::ResourceLimit(message)) => {
+                assert!(message.contains("design matrix"), "{message}")
+            }
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        let small = resource::with_alloc_ceiling(Some(4096), || cols.matrix(&["y"], true)).unwrap();
+        assert_eq!(small.data.dim(), (64, 2));
+        assert_eq!(small.data.column(1).sum(), cols.numeric_array("y").sum());
+    }
+
+    #[test]
     fn test_econ_error_from_design_maps_every_variant() {
         let df = df! { "a" => [1.0, 2.0], "b" => [0.5, 1.5] }.unwrap();
         match econ_error_from_design(DesignError::ColumnNotFound("q".into()), &df) {
@@ -1840,6 +1974,10 @@ mod tests {
                 &df
             ),
             EconError::Internal(_)
+        ));
+        assert!(matches!(
+            econ_error_from_design(DesignError::ResourceLimit("too large".into()), &df),
+            EconError::ResourceLimit(message) if message == "too large"
         ));
     }
 }

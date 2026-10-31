@@ -174,7 +174,7 @@ pub fn run_discrete_model(
         .extract()?;
     let n = cols.n();
     let y: Vec<f64> = cols.numeric(y_col).to_vec();
-    let x = cols.matrix(x_cols, true).data;
+    let x = cols.matrix(x_cols, true)?.data;
     let k = x.ncols();
 
     // Build variable names

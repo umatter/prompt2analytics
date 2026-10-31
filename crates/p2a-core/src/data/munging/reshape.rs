@@ -197,6 +197,7 @@ pub fn melt(
                 .column(var)
                 .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
             // Try to get as f64, handling different types
+            // na-legacy(T4): DATA-15 (pivot_longer reads nulls and non-f64/i64/i32 columns as NaN)
             let val = if let Ok(f64_col) = val_column.f64() {
                 f64_col.get(row_idx).unwrap_or(f64::NAN)
             } else if let Ok(i64_col) = val_column.i64() {

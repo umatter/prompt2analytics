@@ -213,7 +213,14 @@ impl std::fmt::Display for WilcoxonResult {
         }
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-        if let Some(note) = self.missing.note() {
+        // The rank-sum test's samples drop their missing values separately; paired rows are
+        // dropped jointly.
+        let note = if self.u_statistic.is_some() {
+            self.missing.two_sample_note()
+        } else {
+            self.missing.note()
+        };
+        if let Some(note) = note {
             writeln!(f, "Missing values: {note}")?;
         }
 
@@ -1737,6 +1744,14 @@ mod tests {
             (r.missing.n_total, r.missing.n_used, r.missing.n_dropped),
             (20, 18, 2)
         );
+        // each sample drops its own missing values: the note counts values
+        assert_eq!(
+            r.to_string().lines().last().map(str::to_string),
+            r.missing
+                .two_sample_note()
+                .map(|note| format!("Missing values: {note}"))
+        );
+        assert!(r.to_string().contains("two samples of 10"), "{r}");
     }
 
     /// Design 2.4 fixture of the dataset wrapper, on the Int64 case stat_friedman_quade: the

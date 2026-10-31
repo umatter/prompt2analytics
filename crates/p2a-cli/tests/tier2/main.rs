@@ -17,3 +17,4 @@ mod wp17_ml;
 mod wp18_discrete;
 mod wp19_dynamic_panel;
 mod wp21_stats_viz;
+mod wp22_acceptance;

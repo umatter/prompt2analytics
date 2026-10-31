@@ -156,7 +156,12 @@ pub fn correlation_heatmap(
                 // Draw value text if cells are large enough
                 if cell_width >= 35 && cell_height >= 20 {
                     let text_color = if val.abs() > 0.5 { WHITE } else { BLACK };
-                    let val_text = format!("{:.2}", val);
+                    // A value that could not be computed (R's NA) shows as NA on its gray cell.
+                    let val_text = if val.is_finite() {
+                        format!("{:.2}", val)
+                    } else {
+                        "NA".to_string()
+                    };
                     root.draw(&Text::new(
                         val_text,
                         (

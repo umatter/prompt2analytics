@@ -152,6 +152,7 @@ impl DescriptiveStats {
 
 /// Compute quantiles from a float series.
 fn compute_quantiles(series: &Series) -> (f64, f64, f64) {
+    // na-legacy(T4): theme 3.3 (quantiles over present values; NaN cells are not dropped; STAT-48, X-6)
     let f64_series = match series.f64() {
         Ok(s) => s,
         Err(_) => return (f64::NAN, f64::NAN, f64::NAN),

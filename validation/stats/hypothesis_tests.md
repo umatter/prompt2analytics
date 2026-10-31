@@ -1,17 +1,18 @@
-# Validation: Hypothesis Tests (t-test, ANOVA)
+# Validation: t-tests, and missing values and integer columns through MCP and the CLI
+
+ANOVA (one-way; two-way with Type I, II and III sums of squares) is documented in [anova.md](anova.md),
+Welch's one-way test in [oneway.md](oneway.md).
 
 ## Method Overview
 
 This document validates the implementation of:
 - **t-test**: One-sample, two-sample (Welch's), paired
-- **ANOVA**: One-way, two-way with interaction
 
 ## Reference Implementations
 
 | Package | Language | Function | Version Tested |
 |---------|----------|----------|----------------|
 | stats | R | `t.test()` | R 4.x |
-| stats | R | `aov()` | R 4.x |
 
 ---
 
@@ -180,63 +181,46 @@ and Wilcoxon tests and Shapiro-Wilk against R's complete cases on the T2-WP06 an
 (registry id `mcp_hypothesis_missing_report`). Friedman and Quade drop the whole block of a
 missing response.
 
-### Test 4: One-Way ANOVA
+## Missing cells and integer columns through MCP and the CLI (X-2, X-8)
 
-**R Code:**
-```r
-# Groups: A (mean~10), B (mean~15), C (mean~20)
-data <- data.frame(
-  y = c(9.5, 10.2, 10.8, 9.8, 10.5,
-        14.2, 15.5, 14.8, 15.2, 15.8,
-        19.5, 20.2, 19.8, 20.5, 20.8),
-  group = factor(rep(c("A","B","C"), each=5))
-)
-summary(aov(y ~ group, data = data))
-```
+The reviewer's repro of findings X-2 and X-8 is a committed R case: `validation/r/cases/na_acceptance.R`,
+case `na_x2_x8_reviewer`, dataset `validation/datasets/generated/na_reviewer.csv` (8 rows: the
+reviewer's `x` and `y` with one empty cell each, the integer group `g` and score `i`, plus the integer
+survival columns `time` and `event`). The rule: empty cells are missing and are dropped as R drops NA,
+with a note; integer columns are numeric. The MCP tests load the CSV with `create_dataset`, as the
+reviewer did; the CLI tests with `data load`.
 
-**R Output:**
-```
-            Df Sum Sq Mean Sq F value   Pr(>F)
-group        2 250.01  125.01   400.7 1.03e-11 ***
-Residuals   12   3.74    0.31
-```
+| Quantity | R | p2a before Tier 2 |
+|---|---|---|
+| one-sample t, df (`t.test(x)`) | 19.224879776549294, 6 | 6.585420425150713, 7 (the empty cell read as 0) |
+| mean, 95% CI | 6.4428571428571431; [5.6228206234443352, 7.26289366226995] | mean 5.6375 |
+| paired t, df, p, mean difference | 14.696938456699081, 5, 2.6355114205889999e-05, 1.2 | t 0.8849631314399664, df 7 |
+| Welch t, df, p | 2.4211420066066545, 11.986295516630276, 0.032271219541670018 | t 0.8822470125695193, df 13.60729227134347 |
+| `cor.test(x, y)` r, t, df, p | 0.9782906634777736, 9.4412517531339581, 4, 0.0007018271843026733 | r 0.006219360234733851 on 8 pairs |
+| `aov(y ~ factor(g))` F, df, p, rows | 0.085835141593650022, (1, 5), 0.7813098377313259, 7 | F 0.5994334277620387 on (1, 6), N = 8 |
+| `t.test(i)` t, df, p, mean (Int64) | 7.5055534994651349, 7, 0.00013666401542355999, 6.5 | refused: "Column 'i' must be numeric." (MCP), "expected `Float64`, got `i64`" (CLI) |
+| `aov(i ~ factor(g))` F, df, p | 0.30000000000000027, (1, 6), 0.60364505651013611 | refused as non-numeric |
+| `wilcox.test(i)` V, exact p | 36, 0.0078125000000000017 | refused as non-numeric |
+| `cor.test(i, y)` r, df, p | 0.45289724238230478, 5, 0.30750148504153196 | refused: "expected `Float64`, got `i64`" |
+| Kaplan-Meier S(t) at 3, 5, 7, 9, 15 (Int64 time and event) | 0.875, 0.72916666666666674, 0.58333333333333337, 0.3888888888888889, 0; median 9 | refused: "Column 'time' contains non-numeric values" |
 
-**Rust Test:** `crates/p2a-core/src/stats/anova.rs::tests::test_validate_one_way_anova_against_r`
+**Tests:**
+- `p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x2_reviewer_missing_cells` (one-sample,
+  paired and Welch t and df, `cor.test`, one-way ANOVA, rows used, the `Missing values:` lines)
+- `p2a-mcp::tier2::wp22_acceptance::test_validate_mcp_x8_reviewer_integer_columns` (t, ANOVA,
+  Wilcoxon, `cor.test` and the Kaplan-Meier median on the Int64 columns)
+- `p2a-cli::tier2::wp22_acceptance::test_validate_cli_x2_reviewer_missing_cells` (`stats t-test-one`,
+  `stats t-test-paired`: JSON values, `missing` and the `Note:` line)
+- `p2a-cli::tier2::wp22_acceptance::test_validate_cli_x8_reviewer_integer_columns` (`stats
+  t-test-one` on `i`, `survival km` with Int64 `time` and `event`: S(t), SE, numbers at risk and
+  events, median)
 
-**Results Comparison:**
-| Metric | R | Rust | Tolerance | Match |
-|--------|---|------|-----------|-------|
-| SS Between | 250.012 | 250.012 | 1e-3 | ✅ |
-| SS Within | 3.744 | 3.744 | 1e-3 | ✅ |
-| df Between | 2 | 2 | exact | ✅ |
-| df Within | 12 | 12 | exact | ✅ |
-| F-statistic | 400.66 | 400.66 | 1e-3 | ✅ |
-| p-value | <1e-10 | <1e-10 | - | ✅ |
-| η² | 0.9852 | 0.9852 | 1e-4 | ✅ |
+**Tolerance:** the MCP text at its printed precision (t to 6 decimals, df to 2, the ANOVA table to
+4, the Kaplan-Meier median to 3); the CLI JSON at `validation/README.md`'s n < 100 tolerances
+(means `Tol::coef`, statistics and SEs `Tol::stat`/`Tol::se`, p-values `Tol::p_value`); df and
+counts exact.
 
-### Test 5: Two-Way ANOVA
-
-**R Code:**
-```r
-data <- data.frame(
-  y = c(10,11,12, 15,16,17, 20,21,22, 30,31,32),
-  factor_a = factor(rep(c("A","B","A","B"), each=3)),
-  factor_b = factor(rep(rep(c("Low","High"), each=6)))
-)
-summary(aov(y ~ factor_a * factor_b, data = data))
-```
-
-**Rust Test:** `crates/p2a-core/src/stats/anova.rs::tests::test_validate_two_way_anova_against_r`
-
-**Results Comparison:**
-| Metric | R | Rust | Tolerance | Match |
-|--------|---|------|-----------|-------|
-| df Factor A | 1 | 1 | exact | ✅ |
-| df Factor B | 1 | 1 | exact | ✅ |
-| df Interaction | 1 | 1 | exact | ✅ |
-| df Error | 8 | 8 | exact | ✅ |
-| F Factor B | 468.75 | 468.75 | 0.1 | ✅ |
-| F Interaction | 18.75 | 18.75 | 0.1 | ✅ |
+**Status:** R-pinned (registry `validation/methods/na_acceptance.json`, id `na_acceptance`).
 
 ---
 
@@ -247,9 +231,6 @@ summary(aov(y ~ factor_a * factor_b, data = data))
 | t-test | t-statistic | 1e-3 | Exact numerical match |
 | t-test | p-value | 1e-4 | Using same t-distribution (statrs) |
 | t-test | df (Welch) | 0.01 | Welch-Satterthwaite approximation |
-| ANOVA | F-statistic | 1e-3 | Exact numerical match |
-| ANOVA | SS components | 1e-3 | Sum of squares decomposition |
-| ANOVA | Effect sizes | 1e-4 | η², ω² |
 
 ---
 
@@ -271,22 +252,6 @@ summary(aov(y ~ factor_a * factor_b, data = data))
 | n = 100,000 (two-sample) | 478 | 5000 | **10x** |
 
 *R's `system.time()` has millisecond resolution, so sub-ms times appear as 0.
-
-### One-Way ANOVA Performance
-
-| Dataset | Rust (µs) | R (µs) | Speedup |
-|---------|-----------|--------|---------|
-| n=60 (3 groups) | 14 | 1000 | **~70x** |
-| n=500 (5 groups) | 101 | 1500 | **~15x** |
-| n=5000 (10 groups) | 943 | 3000 | **~3x** |
-
-### Two-Way ANOVA Performance
-
-| Dataset | Rust (µs) | R (µs) | Speedup |
-|---------|-----------|--------|---------|
-| n=40 (2x2) | 27 | 2000 | **~74x** |
-| n=200 (2x2) | 112 | 2000 | **~18x** |
-| n=400 (2x2) | 207 | 2000 | **~10x** |
 
 ### Performance Analysis
 

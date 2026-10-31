@@ -180,7 +180,7 @@ Not R-pinned: `econometrics::discrete::binary_choice::tests::test_na_logit_text_
 `econometrics::discrete::binary_choice::tests::test_na_logit_absent_column` and
 `regression::marginal_effects::tests::test_na_marginal_effects_logit_uses_estimation_rows`
 (the marginal effects equal those on the complete rows). The probit pins are in
-[probit.md](probit.md).
+[probit.md](probit.md) (registry id `probit_missing_values`).
 
 ## Interpretation
 
