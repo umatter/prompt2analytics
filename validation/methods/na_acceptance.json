@@ -48,7 +48,7 @@
       ],
       "quantities": ["rows used and dropped, missing cells per column (note and JSON missing)", "first-stage HC1 Wald F of the excluded instruments and its df",
                      "units kept after trimming", "pre-trend Wald statistic, df and p (pretrend_test, with its method)"],
-      "tolerance": "counts exact; F and the Wald statistic 1e-5 relative, p 1e-5 relative or 1e-12 absolute (validation/README.md, n = 294 and 720)",
+      "tolerance": "counts exact; F and the Wald statistic 1e-6 relative, p 1e-6 relative or 1e-12 absolute (validation/README.md, n = 294 and 720)",
       "deviations": [],
       "supersedes_legacy": []
     }
