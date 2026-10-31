@@ -252,7 +252,7 @@ impl fmt::Display for MixedLogitResult {
             writeln!(
                 f,
                 "{:<20} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>10} {:>10} {:>10} {}",
-                &self.variable_names[i],
+                self.variable_names[i],
                 self.means[i],
                 self.mean_std_errors[i],
                 self.mean_z_stats[i],
@@ -805,11 +805,11 @@ fn maximize(f: &Objective<'_>, theta0: Vec<f64>, max_iter: usize, tol: f64) -> E
             .map(|i| (0..p).map(|j| b[[i, j]] * g[j]).sum())
             .collect();
         let mut gd: f64 = g.iter().zip(&d).map(|(gi, di)| gi * di).sum();
-        if !(gd > 0.0) {
+        if gd.is_nan() || gd <= 0.0 {
             b = diag.clone();
             d = (0..p).map(|i| b[[i, i]] * g[i]).collect();
             gd = g.iter().zip(&d).map(|(gi, di)| gi * di).sum();
-            if !(gd > 0.0) {
+            if gd.is_nan() || gd <= 0.0 {
                 break;
             }
         }

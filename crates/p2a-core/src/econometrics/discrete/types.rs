@@ -123,7 +123,7 @@ impl fmt::Display for DiscreteResult {
             writeln!(
                 f,
                 "{:<20} {:>12.6} {:>10.6} {:>10.4} {:>10.4} {:>6}",
-                &self.variables[i],
+                self.variables[i],
                 self.coefficients[i],
                 self.std_errors[i],
                 self.z_stats[i],
@@ -144,7 +144,7 @@ impl fmt::Display for DiscreteResult {
             writeln!(
                 f,
                 "{:<20} {:>12.6}",
-                &self.variables[i], self.marginal_effects[i]
+                self.variables[i], self.marginal_effects[i]
             )?;
         }
         writeln!(f, "{:-<45}", "")?;

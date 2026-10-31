@@ -198,7 +198,7 @@ impl MlogitData {
         n_alternatives: usize,
         ref_idx: usize,
     ) -> Self {
-        let n_params = n_alt_specific + n_ind_specific * (n_alternatives - 1).max(0);
+        let n_params = n_alt_specific + n_ind_specific * n_alternatives.saturating_sub(1);
         let total_rows: usize = choice_situations.iter().map(|v| v.len()).sum();
 
         let mut choice_info = Vec::with_capacity(choice_situations.len());
