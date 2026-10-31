@@ -472,7 +472,7 @@ async fn reload_refuses_a_parquet_source_past_the_quota_before_decoding_it() {
 
     // Replaced at the stored path by 4,000,000 rows: 32 MB once decoded.
     // Pre-fix the reload decoded it in full and only then refused it at the
-    // insert ("this session's datasets would use 30.53 MiB ...").
+    // insert, with the session-data quota refusal.
     levels_parquet(&stored, 4_000_000, None);
     let body = reload(&r, &sid).await;
     assert_eq!(body["data"]["succeeded"], json!(["small"]), "{body}");

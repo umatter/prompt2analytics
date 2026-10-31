@@ -4133,7 +4133,7 @@ mod tests {
         let message =
             refused_before_building(qs.call_total(total, qs.server.str_concat(Parameters(req))));
         assert!(
-            message.contains("the server's dataset memory would reach")
+            message.contains("the server's memory for session data would reach")
                 && message.contains("use a shorter separator")
                 && message.ends_with("or try again later.")
                 && !message.contains("new session"),
