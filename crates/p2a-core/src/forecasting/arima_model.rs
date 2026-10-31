@@ -18,9 +18,13 @@
 //! eₜ = wₜ - Σᵢ φᵢ wₜ₋ᵢ - Σⱼ θⱼ eₜ₋ⱼ, conditioning on the first d + p observations (their
 //! residuals are 0, and so are the residuals the MA terms would reach before them). The
 //! coefficients minimise the sum of squared residuals; p2a solves that least-squares problem
-//! to the exact optimum by Levenberg-Marquardt with the analytic Jacobian of the recursion,
-//! starting where R starts (AR and MA coefficients 0, μ and δ by least squares). R's default
-//! method, CSS-ML, is not implemented.
+//! by Levenberg-Marquardt with the analytic Jacobian of the recursion and Nielsen's
+//! gain-ratio damping, starting where R starts (AR and MA coefficients 0, μ and δ by least
+//! squares). The fit stops when the largest Gauss-Newton step, scaled by 1 + |coefficient|,
+//! is at most 1e-8, or at most 1e-6 once the sum of squares no longer resolves a smaller step
+//! (the rounding floor); `converged` says whether it did. That bounds the last step, not the
+//! distance to the optimum, which is of the same order where the Gauss-Newton model of the
+//! sum of squares is adequate. R's default method, CSS-ML, is not implemented.
 //!
 //! # Forecasts
 //!
@@ -43,6 +47,9 @@
 //!
 //! - Brockwell, P.J., & Davis, R.A. (1991). *Time Series: Theory and Methods*
 //!   (2nd ed.). Springer. ISBN: 978-0387974293.
+//!
+//! - Nielsen, H.B. (1999). *Damping Parameter in Marquardt's Method*. Report
+//!   IMM-REP-1999-05, Technical University of Denmark.
 //!
 //! R equivalent: `stats::arima(method = "CSS")`, `forecast::Arima(method = "CSS")`,
 //! `forecast::forecast()`, `stats::predict.Arima()`.
@@ -67,6 +74,9 @@ const STEP_TOLERANCE: f64 = 1e-8;
 /// When damping finds no better point, the fit counts as converged up to this scaled step.
 const FLOOR_TOLERANCE: f64 = 1e-6;
 const LAMBDA_START: f64 = 1e-3;
+/// The factor that raises the damping after a rejected step; it doubles on every further
+/// rejection and returns to this value after an accepted step (Nielsen 1999).
+const NU_START: f64 = 2.0;
 /// Above this damping no step improves the sum of squares: the rounding floor.
 const LAMBDA_MAX: f64 = 1e16;
 /// Keeps the damping positive after many accepted steps.
@@ -870,7 +880,37 @@ fn scaled_step(delta: &Array1<f64>, coef: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Levenberg-Marquardt on the CSS residuals from `coef` (updated in place).
+/// The final Gauss-Newton step `delta` from `coef` (whose sum of squares is `ssr`), kept when
+/// it does not raise the sum of squares beyond rounding: without it small coefficients stop
+/// short.
+fn final_step(
+    dx: &[f64],
+    model: &Model,
+    coef: &mut [f64],
+    trial: &mut [f64],
+    delta: &Array1<f64>,
+    ssr: f64,
+    ws: &mut Workspace,
+) -> EconResult<()> {
+    for ((t, c), d) in trial.iter_mut().zip(coef.iter()).zip(delta) {
+        *t = c + d;
+    }
+    let ssr_trial = css_pass(dx, model, trial, ws, false)?;
+    if ssr_trial.is_finite() && ssr_trial <= ssr * (1.0 + 1e-15) {
+        coef.copy_from_slice(trial);
+    }
+    Ok(())
+}
+
+/// Levenberg-Marquardt on the CSS residuals from `coef` (updated in place), damped by
+/// Nielsen's (1999) gain ratio: rho = the actual decrease of the sum of squares over the
+/// decrease the linearised residuals predict. A step with rho > 0 is accepted and lambda
+/// scaled by max(1/3, 1 - (2 rho - 1)^3); otherwise lambda is multiplied by nu, which then
+/// doubles. Accepting every step that lowers the sum of squares is not enough: where the
+/// model leaves autocorrelated residuals, J'J underestimates the curvature and the
+/// Gauss-Newton map can have an eigenvalue near -1, so the MA coefficients alternate around
+/// the optimum while each step still lowers the sum of squares. Such steps achieve little of
+/// their predicted decrease, and a small rho raises lambda until the oscillation is damped.
 fn optimise(
     dx: &[f64],
     model: &Model,
@@ -887,6 +927,7 @@ fn optimise(
     }
     let mut trial = try_vec(k, 0.0, "the ARIMA coefficients")?;
     let mut lambda = LAMBDA_START;
+    let mut nu = NU_START;
     let mut step = f64::INFINITY;
     for iteration in 1..=MAX_ITERATIONS {
         checkpoint()?;
@@ -912,14 +953,7 @@ fn optimise(
             .as_ref()
             .map_or(f64::INFINITY, |delta| scaled_step(delta, coef));
         if let Some(delta) = gauss_newton.as_ref().filter(|_| step <= STEP_TOLERANCE) {
-            // The final Gauss-Newton step: without it small coefficients stop short.
-            for c in 0..k {
-                trial[c] = coef[c] + delta[c];
-            }
-            let ssr_trial = css_pass(dx, model, &trial, ws, false)?;
-            if ssr_trial.is_finite() && ssr_trial <= ssr * (1.0 + 1e-15) {
-                coef.copy_from_slice(&trial);
-            }
+            final_step(dx, model, coef, &mut trial, delta, ssr, ws)?;
             return Ok(Convergence {
                 converged: true,
                 iterations: iteration,
@@ -931,28 +965,49 @@ fn optimise(
             for c in 0..k {
                 damped[[c, c]] += lambda * ws.jtj[[c, c]];
             }
-            let accepted = match solve(&damped.view(), &rhs) {
+            let gain = match solve(&damped.view(), &rhs) {
                 Ok(delta) => {
                     checkpoint()?;
                     for c in 0..k {
                         trial[c] = coef[c] + delta[c];
                     }
                     let ssr_trial = css_pass(dx, model, &trial, ws, false)?;
-                    ssr_trial.is_finite() && ssr_trial <= ssr
+                    // ||e||^2 - ||e + J delta||^2 = delta' (lambda diag(J'J) delta - J'e),
+                    // positive for a nonzero step.
+                    let predicted: f64 = (0..k)
+                        .map(|c| delta[c] * (lambda * ws.jtj[[c, c]] * delta[c] + rhs[c]))
+                        .sum();
+                    if ssr_trial.is_finite() {
+                        (ssr - ssr_trial) / predicted
+                    } else {
+                        f64::NAN
+                    }
                 }
                 // A singular or non-finite damped system: the step is rejected.
-                Err(_) => false,
+                Err(_) => f64::NAN,
             };
-            if accepted {
+            // Accepted only when rho > 0; NaN (a failed solve, a non-finite sum of squares,
+            // 0 / 0) is not.
+            if gain > 0.0 {
                 coef.copy_from_slice(&trial);
-                lambda = (lambda / 10.0).max(LAMBDA_MIN);
+                let scale = (1.0 - (2.0 * gain - 1.0).powi(3)).max(1.0 / 3.0);
+                lambda = (lambda * scale).max(LAMBDA_MIN);
+                nu = NU_START;
                 break;
             }
-            lambda *= 10.0;
+            lambda *= nu;
+            nu *= 2.0;
             if lambda > LAMBDA_MAX {
-                // No step lowers the sum of squares: the rounding floor is reached.
+                // No damped step lowers the sum of squares: the rounding floor is reached,
+                // possibly a little short of the step test (a step that leaves the sum of
+                // squares unchanged has rho = 0 and is rejected). The Gauss-Newton step is
+                // still tried there.
+                let converged = step <= FLOOR_TOLERANCE;
+                if let Some(delta) = gauss_newton.as_ref().filter(|_| converged) {
+                    final_step(dx, model, coef, &mut trial, delta, ssr, ws)?;
+                }
                 return Ok(Convergence {
-                    converged: step <= FLOOR_TOLERANCE,
+                    converged,
                     iterations: iteration,
                     step,
                 });
@@ -1686,6 +1741,53 @@ mod tests {
                     &fit.residuals[n - 3..],
                     Tol::new(1e-6, 1e-7),
                 );
+        }
+        check.finish();
+    }
+
+    /// TS-35. R: forecast::Arima(order = c(1, 1, 1), include.drift = TRUE, method = "CSS") on a
+    /// seasonal series the model misspecifies (n = 1000 and its first 100 values), and the exact
+    /// CSS optimum. There the Gauss-Newton map has an eigenvalue near -1, so the MA coefficient
+    /// oscillates while every step lowers the sum of squares; the fit must still converge.
+    #[test]
+    fn test_validate_arima_misspecified_seasonal() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("arima_misspecified_seasonal");
+        let spec = ArimaSpec {
+            include_drift: true,
+            ..ArimaSpec::new(1, 1, 1)
+        };
+        let mut check = Check::new(&case);
+        for n in [100, 1000] {
+            let key = format!("n{n}");
+            let series = Dataset::new(ds.head(Some(n)));
+            let fit = run_arima_with(&series, "y", &spec).unwrap();
+            assert!(
+                fit.converged,
+                "{key}: {} iterations, {:?}",
+                fit.iterations, fit.warnings
+            );
+            assert!(fit.warnings.is_empty(), "{key}: {:?}", fit.warnings);
+            check
+                .named(
+                    &format!("{key}_coef_tight"),
+                    &fit.coef_names,
+                    &fit.coefficients,
+                    Tol::iterative(1e-6),
+                )
+                // forecast::Arima's own optimum (optim's default reltol): up to 2.8e-5
+                // (relative) away, the drift at n = 100
+                .named(
+                    &format!("{key}_coef"),
+                    &fit.coef_names,
+                    &fit.coefficients,
+                    Tol::iterative(1e-3),
+                )
+                .scalar(&format!("{key}_ssr_tight"), fit.ssr, Tol::stat(n))
+                .scalar(&format!("{key}_sigma2_tight"), fit.sigma2, Tol::stat(n))
+                .scalar(&format!("{key}_loglik_tight"), fit.loglik, Tol::stat(n))
+                .scalar(&format!("{key}_aic_css_tight"), fit.aic, Tol::stat(n))
+                .scalar(&format!("{key}_n"), fit.n_obs as f64, Tol::exact());
         }
         check.finish();
     }

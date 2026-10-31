@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "id": "arima_misspecified_seasonal",
+  "area": "forecasting/arima",
+  "method": "ARIMA(1,1,1) with drift by CSS on a seasonal series it misspecifies (forecast::Arima, method = 'CSS')",
+  "reference": "forecast::Arima(order = c(1, 1, 1), include.drift = TRUE, method = 'CSS'); *_tight: Newton's method on the analytic gradient of the stats::arima(fixed = ...) CSS residuals, Hessian by numDeriv::jacobian",
+  "call": "Arima(y[1:n], order = c(1, 1, 1), include.drift = TRUE, method = 'CSS')",
+  "dataset": "validation/datasets/generated/arima_misspecified_seasonal.csv",
+  "datasets": ["validation/datasets/generated/arima_misspecified_seasonal.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "forecast": "9.0.2",
+    "numDeriv": "2016.8.1.1"
+  },
+  "values": {
+    "n100_coef": {
+      "names": ["ar1", "ma1", "drift"],
+      "values": [0.69020281862898891, 0.16463018844377031, -0.0040353049113718798]
+    },
+    "n100_coef_tight": {
+      "names": ["ar1", "ma1", "drift"],
+      "values": [0.69020288306856947, 0.16463016415297885, -0.0040354185164835224]
+    },
+    "n100_ssr_tight": 22.847783951680395,
+    "n100_sigma2_tight": 0.23799774949667077,
+    "n100_loglik_tight": -68.397304038767473,
+    "n100_aic_css_tight": 144.79460807753495,
+    "n100_max_abs_grad_tight": 1.8735013540549517e-15,
+    "n100_gn_eigen_min_tight": -1.0098896188418158,
+    "n100_resid_acf_lag2_tight": 0.34096807864218465,
+    "n100_resid_acf_lag12_tight": 0.40875928974166931,
+    "n100_n": 100,
+    "n1000_coef": {
+      "names": ["ar1", "ma1", "drift"],
+      "values": [0.70228210289857906, 0.19138623804441671, 0.0074335159952327885]
+    },
+    "n1000_coef_tight": {
+      "names": ["ar1", "ma1", "drift"],
+      "values": [0.70228272647770884, 0.19138619050272601, 0.0074334979545297242]
+    },
+    "n1000_ssr_tight": 222.16078373044002,
+    "n1000_sigma2_tight": 0.22305299571329318,
+    "n1000_loglik_tight": -667.0948178520473,
+    "n1000_aic_css_tight": 1342.1896357040946,
+    "n1000_max_abs_grad_tight": 3.6415315207705135e-14,
+    "n1000_gn_eigen_min_tight": -0.99725316433435363,
+    "n1000_resid_acf_lag2_tight": 0.34287204084585898,
+    "n1000_resid_acf_lag12_tight": 0.50507564958910312,
+    "n1000_n": 1000
+  }
+}
