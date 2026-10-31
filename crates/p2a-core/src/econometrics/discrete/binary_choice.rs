@@ -549,8 +549,18 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("disc_choice_na");
         let r = run_logit(&ds, "choice_na", &["x", "w"]).unwrap();
         Check::new(&case)
-            .named("logit_y_coef", &r.variables, &r.coefficients, Tol::iterative(1e-6))
-            .named("logit_y_se", &r.variables, &r.std_errors, Tol::iterative(1e-5))
+            .named(
+                "logit_y_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "logit_y_se",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
             .scalar("logit_y_loglik", r.log_likelihood, Tol::stat(298))
             .scalar("logit_y_nobs", r.n_obs as f64, Tol::exact())
             .finish();
@@ -564,7 +574,9 @@ mod tests {
         );
         assert_eq!(text.matches("2 of 300 rows dropped").count(), 1, "{text}");
         assert!(
-            r.warnings.iter().any(|w| w.contains("2 of 300 rows dropped")),
+            r.warnings
+                .iter()
+                .any(|w| w.contains("2 of 300 rows dropped")),
             "{:?}",
             r.warnings
         );
@@ -577,8 +589,18 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("disc_choice_na");
         let r = run_logit(&ds, "choice_na", &["x_na", "w"]).unwrap();
         Check::new(&case)
-            .named("logit_coef", &r.variables, &r.coefficients, Tol::iterative(1e-6))
-            .named("logit_se", &r.variables, &r.std_errors, Tol::iterative(1e-5))
+            .named(
+                "logit_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "logit_se",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
             .scalar("logit_loglik", r.log_likelihood, Tol::stat(297))
             .scalar("logit_nobs", r.n_obs as f64, Tol::exact())
             .finish();
@@ -595,8 +617,18 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("disc_choice_na");
         let r = run_probit(&ds, "choice_na", &["x_na", "w"]).unwrap();
         Check::new(&case)
-            .named("probit_coef", &r.variables, &r.coefficients, Tol::iterative(1e-6))
-            .named("probit_se", &r.variables, &r.std_errors, Tol::iterative(1e-5))
+            .named(
+                "probit_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named(
+                "probit_se",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
             .scalar("probit_loglik", r.log_likelihood, Tol::stat(297))
             .scalar("probit_nobs", r.n_obs as f64, Tol::exact())
             .finish();

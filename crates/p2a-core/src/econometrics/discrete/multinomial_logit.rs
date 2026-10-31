@@ -674,11 +674,7 @@ mod tests {
         assert_eq!(counts, case.vector("multinom_counts"));
         assert_eq!(r.missing.n_dropped, 2);
         assert_eq!(r.missing.by_column, vec![("g".to_string(), 2)]);
-        let complete = Dataset::new(
-            ds.df()
-                .drop_nulls::<String>(Some(&["g".into()]))
-                .unwrap(),
-        );
+        let complete = Dataset::new(ds.df().drop_nulls::<String>(Some(&["g".into()])).unwrap());
         let cc = run_multinom(&complete, "g", &["x", "w"], None).unwrap();
         assert_same_fit(&r, &cc);
         assert_eq!(

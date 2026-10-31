@@ -415,14 +415,14 @@ pub fn run_mlogit(
         });
     }
 
-    let ref_idx = alternatives
-        .iter()
-        .position(|a| a == &ref_alt)
-        .unwrap_or(0);
+    let ref_idx = alternatives.iter().position(|a| a == &ref_alt).unwrap_or(0);
 
     // Rows of each choice situation (in level order), in data order
-    let mut choice_situations: Vec<Vec<(usize, usize)>> =
-        resource::try_vec(n_choice_situations, Vec::new(), "conditional logit situations")?;
+    let mut choice_situations: Vec<Vec<(usize, usize)>> = resource::try_vec(
+        n_choice_situations,
+        Vec::new(),
+        "conditional logit situations",
+    )?;
     for (row_idx, (&s, &a)) in situation.codes.iter().zip(&alt.codes).enumerate() {
         choice_situations[s as usize].push((row_idx, a as usize));
     }
@@ -726,7 +726,12 @@ mod tests {
         let (case, ds) = crate::test_support::load_case("disc_mixed_logit");
         let r = run_conditional_logit(&ds, "id", "alt", "choice", &["x", "w"], None).unwrap();
         Check::new(&case)
-            .named("clogit_coef_tight", &r.alt_specific_vars, &r.beta, Tol::iterative(1e-6))
+            .named(
+                "clogit_coef_tight",
+                &r.alt_specific_vars,
+                &r.beta,
+                Tol::iterative(1e-6),
+            )
             .named(
                 "clogit_se_tight",
                 &r.alt_specific_vars,
@@ -734,7 +739,12 @@ mod tests {
                 Tol::iterative(1e-5),
             )
             .scalar("clogit_loglik_tight", r.log_likelihood, Tol::stat(300))
-            .named("clogit_coef", &r.alt_specific_vars, &r.beta, Tol::iterative(1e-4))
+            .named(
+                "clogit_coef",
+                &r.alt_specific_vars,
+                &r.beta,
+                Tol::iterative(1e-4),
+            )
             .finish();
         assert!(r.converged, "{r}");
         assert_eq!(r.n_choice_situations, 300);
