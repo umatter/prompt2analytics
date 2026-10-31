@@ -139,6 +139,14 @@ excludes it from the test and from the degrees of freedom. On `km_median_rules.c
 (p 0.6256854372911773), expected 1.5160, 5.4840 and 0 for `last`, `mid`, `never`, the same
 statistic as the test without the `never` rows. Test: `test_validate_logrank_zero_expected_group`.
 
+When every subject at risk at the first event time has the event then, nobody is at risk at a
+later event time and the variance of O - E is zero. `survdiff` stops ("Lapack routine dgesv:
+system is exactly singular", survival 3.5.8), and p2a refuses the test with an
+`InvalidSpecification` error (before this was fixed it reported chi-squared 0 on 1 df, p 1).
+Property test, not registered (no R value): `test_logrank_zero_variance_is_an_error` (two and
+three groups that all have the event at t = 1, one with a row censored before it; and a layout
+with one subject left after t = 1, chi-squared 1 on 1 df, as survdiff).
+
 ---
 
 ## Test Case 4: Lung Cancer Dataset (R's `lung`)
@@ -248,7 +256,8 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
   hypergeometric variance d (n - d) / (n^2 (n - 1)) times n_g (n - n_g) (diagonal) or -n_g n_h is
   added; the block then leaves the risk sets once. Groups with no expected events are excluded,
   the chi-square is (O - E)' V^- (O - E) over the remaining groups less one (a generalized inverse
-  when V is singular), df is their number minus one and p the upper tail.
+  when V is singular but not zero; a zero V is an error, as above), df is their number minus one
+  and p the upper tail.
 
 ## Known Differences from R
 

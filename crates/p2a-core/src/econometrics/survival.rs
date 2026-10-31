@@ -924,7 +924,8 @@ impl fmt::Display for LogRankResult {
 /// or `-n_g n_h` is added; the block's rows then leave the risk sets. Groups with no
 /// expected events are excluded from the test, as in R, and the chi-square is
 /// `(O - E)' V^- (O - E)` over the remaining groups less one, solved with a
-/// generalized inverse when the variance is singular; `df` is their number minus one.
+/// generalized inverse when the variance is singular but not zero; `df` is their number
+/// minus one.
 ///
 /// # Arguments
 ///
@@ -938,7 +939,9 @@ impl fmt::Display for LogRankResult {
 /// # Returns
 ///
 /// A `LogRankResult` containing the test statistic and p-value. Fewer than two groups
-/// with expected events is an `InvalidSpecification` error (R reports 0 on 0 df).
+/// with expected events is an `InvalidSpecification` error (R reports 0 on 0 df), and so
+/// is a zero variance, when every subject at risk at the first event time has the event
+/// then (R's survdiff stops on it).
 pub fn log_rank_test(
     dataset: &Dataset,
     time_col: &str,
@@ -1069,6 +1072,17 @@ pub fn log_rank_test(
         for (b, &h) in rest.iter().enumerate() {
             w[[a, b]] = variance[[g, h]];
         }
+    }
+    // Every kept group is at risk at the first event time, so the variance is zero exactly
+    // when everyone at risk then has the event: no later event time has anyone at risk.
+    // survdiff's solve() stops on that singular system; the test has no information.
+    if w.iter().all(|&v| v == 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: "the log-rank variance is zero: every subject at risk at the first event \
+                      time has the event then, so the groups cannot be compared (R survdiff \
+                      stops: the variance matrix is singular)"
+                .to_string(),
+        });
     }
     let w_inv = match safe_inverse(&w.view()) {
         Ok((inv, _)) => inv,
@@ -3276,6 +3290,48 @@ mod tests {
             "one group with expected events",
         );
         assert!(m.contains("two groups"), "{m}");
+    }
+
+    /// Every subject at risk at the first event time has the event then, so no one is
+    /// left and the variance of O - E is zero: R's survdiff stops ("system is exactly
+    /// singular"), and so does p2a, where it reported chi-square 0, df 1, p 1.
+    #[test]
+    fn test_logrank_zero_variance_is_an_error() {
+        let all_at_once = df! {
+            "time" => [1.0, 1.0, 1.0, 1.0],
+            "event" => [1.0, 1.0, 1.0, 1.0],
+            "group" => ["a", "a", "b", "b"],
+        }
+        .unwrap();
+        // A row censored before the first event time, and three groups.
+        let censored_first = df! {
+            "time" => [0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "event" => [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "group" => ["a", "a", "a", "b", "b", "c", "c"],
+        }
+        .unwrap();
+        for df in [all_at_once, censored_first] {
+            let m = invalid_spec(
+                log_rank_test(&Dataset::new(df), "time", "event", "group"),
+                "zero variance",
+            );
+            assert!(
+                m.contains("variance") && m.contains("first event time"),
+                "{m}"
+            );
+        }
+
+        // One subject outlives the first event time: V = 3 (4 - 3) / (16 * 3) * 2 * 2 = 1/4
+        // for group b, O - E = 2 - (3/2 + 1) = -1/2, so the chi-square is 1 on 1 df.
+        let one_survivor = df! {
+            "time" => [1.0, 1.0, 1.0, 2.0],
+            "event" => [1.0, 1.0, 1.0, 1.0],
+            "group" => ["a", "a", "b", "b"],
+        }
+        .unwrap();
+        let r = log_rank_test(&Dataset::new(one_survivor), "time", "event", "group").unwrap();
+        assert_eq!((r.df, r.variance[3]), (1, 0.25));
+        assert!((r.chi_squared - 1.0).abs() < 1e-12, "{}", r.chi_squared);
     }
 
     /// Create dataset for Cox PH with ties
