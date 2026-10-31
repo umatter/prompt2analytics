@@ -1132,7 +1132,7 @@ mod tests {
 
     #[test]
     fn test_gmm_instrument_matrix_respects_alloc_ceiling() {
-        // 180 equations x 173 instruments x 8 bytes = 249 KB > 64 KiB
+        // Grunfeld's full instrument matrix is larger than the 64 KiB ceiling set here.
         let e = resource::with_alloc_ceiling(Some(64 << 10), || {
             run_gmm(
                 &grunfeld(),
