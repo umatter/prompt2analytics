@@ -313,7 +313,7 @@ EXAMPLES:
         #[arg(long, default_value = "triangular")]
         kernel: String,
 
-        /// Bandwidth selection: "mserd" (default), "msetwo", "cerrd"
+        /// Bandwidth selection: "mserd" (default), "msetwo", "cerrd", "certwo"
         #[arg(long, default_value = "mserd")]
         bwselect: String,
 
@@ -1517,12 +1517,28 @@ fn print_rd_warnings(warnings: &[String], missing: &p2a_core::data::columns::Mis
     }
 }
 
-/// `--vce` as a `VceType`, or the core message (it names the option and the valid values).
-fn parse_vce_arg(vce: &str) -> Result<VceType, String> {
-    VceType::parse(vce).map_err(|e| match e {
+/// The message of a core refusal of an RD option name, without a second prefix (it names
+/// the option and the valid values).
+fn rd_name_message(e: p2a_core::EconError) -> String {
+    match e {
         p2a_core::EconError::InvalidSpecification { message } => message,
         other => other.to_string(),
-    })
+    }
+}
+
+/// `--vce` as a `VceType`, or the core message.
+fn parse_vce_arg(vce: &str) -> Result<VceType, String> {
+    VceType::parse(vce).map_err(rd_name_message)
+}
+
+/// `--kernel` as a `KernelType`, or the core message.
+fn parse_kernel_arg(kernel: &str) -> Result<KernelType, String> {
+    KernelType::parse(kernel).map_err(rd_name_message)
+}
+
+/// `--bwselect` as a `BandwidthMethod`, or the core message.
+fn parse_bwselect_arg(bwselect: &str) -> Result<BandwidthMethod, String> {
+    BandwidthMethod::parse(bwselect).map_err(rd_name_message)
 }
 
 fn execute_rd(
@@ -1538,8 +1554,15 @@ fn execute_rd(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    // --vce is checked before the session and the dataset
-    let vce = match parse_vce_arg(vce) {
+    // --vce, --kernel and --bwselect are checked before the session and the dataset
+    let parsed = parse_vce_arg(vce).and_then(|vce| {
+        Ok((
+            vce,
+            parse_kernel_arg(kernel)?,
+            parse_bwselect_arg(bwselect)?,
+        ))
+    });
+    let (vce, kern, bw) = match parsed {
         Ok(v) => v,
         Err(message) => {
             print_error(&message, format);
@@ -1556,16 +1579,6 @@ fn execute_rd(
 
     match dataset {
         Some(ds) => {
-            let kern = match kernel.to_lowercase().as_str() {
-                "uniform" => KernelType::Uniform,
-                "epanechnikov" => KernelType::Epanechnikov,
-                _ => KernelType::Triangular,
-            };
-            let bw = match bwselect.to_lowercase().as_str() {
-                "msetwo" => BandwidthMethod::MseTwo,
-                "cerrd" => BandwidthMethod::CerRd,
-                _ => BandwidthMethod::MseRd,
-            };
             let config = RdConfig {
                 p: poly_order,
                 h: bandwidths.h,
@@ -1684,8 +1697,9 @@ fn execute_fuzzy_rd(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    // --vce is checked before the session and the dataset
-    let vce = match parse_vce_arg(vce) {
+    // --vce and --kernel are checked before the session and the dataset
+    let parsed = parse_vce_arg(vce).and_then(|vce| Ok((vce, parse_kernel_arg(kernel)?)));
+    let (vce, kern) = match parsed {
         Ok(v) => v,
         Err(message) => {
             print_error(&message, format);
@@ -1702,11 +1716,6 @@ fn execute_fuzzy_rd(
 
     match dataset {
         Some(ds) => {
-            let kern = match kernel.to_lowercase().as_str() {
-                "uniform" => KernelType::Uniform,
-                "epanechnikov" => KernelType::Epanechnikov,
-                _ => KernelType::Triangular,
-            };
             let config = RdConfig {
                 p: poly_order,
                 h: bandwidths.h,
