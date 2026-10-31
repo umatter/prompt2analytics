@@ -59,35 +59,21 @@ use p2a_core::{
     run_twang, sargan_test, sbw, tmle, weightit,
 };
 
-/// The tool error for an RD option name the core refused: the core message alone, which
-/// names the parameter and the valid values.
-fn rd_name_error(e: p2a_core::EconError) -> CallToolResult {
-    let message = match e {
-        p2a_core::EconError::InvalidSpecification { message } => message,
-        other => other.to_string(),
-    };
-    CallToolResult::error(vec![Content::text(message)])
-}
-
-/// The RD tools' `vce` (default nearest-neighbour), or the tool error naming the valid ones.
-fn parse_vce(vce: Option<&str>) -> Result<VceType, CallToolResult> {
-    vce.map_or(Ok(VceType::Nn), |s| {
-        VceType::parse(s).map_err(rd_name_error)
-    })
-}
-
-/// The RD tools' `kernel` (default triangular), or the tool error naming the valid ones.
-fn parse_kernel(kernel: Option<&str>) -> Result<KernelType, CallToolResult> {
-    kernel.map_or(Ok(KernelType::Triangular), |s| {
-        KernelType::parse(s).map_err(rd_name_error)
-    })
-}
-
-/// The RD tools' `bwselect` (default mserd), or the tool error naming the valid ones.
-fn parse_bwselect(bwselect: Option<&str>) -> Result<BandwidthMethod, CallToolResult> {
-    bwselect.map_or(Ok(BandwidthMethod::MseRd), |s| {
-        BandwidthMethod::parse(s).map_err(rd_name_error)
-    })
+/// An RD option (`vce`, `kernel`, `bwselect`) by name, `default` when it is absent, or the
+/// message for a name the core refused: the core message alone, which names the parameter
+/// and the valid values.
+fn rd_option<T>(
+    name: Option<&str>,
+    default: T,
+    parse: fn(&str) -> p2a_core::EconResult<T>,
+) -> Result<T, String> {
+    match name {
+        None => Ok(default),
+        Some(s) => parse(s).map_err(|e| match e {
+            p2a_core::EconError::InvalidSpecification { message } => message,
+            other => other.to_string(),
+        }),
+    }
 }
 
 // Helper function for formatting diagnostic warnings
@@ -1808,17 +1794,25 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         // the option names are checked before the dataset lookup, so a bad name never
         // costs a data read
-        let vce = match parse_vce(request.vce.as_deref()) {
+        let vce = match rd_option(request.vce.as_deref(), VceType::Nn, VceType::parse) {
             Ok(v) => v,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
-        let kernel = match parse_kernel(request.kernel.as_deref()) {
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
             Ok(k) => k,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
-        let bwselect = match parse_bwselect(request.bwselect.as_deref()) {
+        let bwselect = match rd_option(
+            request.bwselect.as_deref(),
+            BandwidthMethod::MseRd,
+            BandwidthMethod::parse,
+        ) {
             Ok(b) => b,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
 
         let datasets = self.datasets.read().await;
@@ -1872,13 +1866,21 @@ impl AnalyticsServer {
         Parameters(request): Parameters<RdBandwidthRequest>,
     ) -> Result<CallToolResult, McpError> {
         // the option names are checked before the dataset lookup
-        let kernel = match parse_kernel(request.kernel.as_deref()) {
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
             Ok(k) => k,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
-        let bwselect = match parse_bwselect(request.bwselect.as_deref()) {
+        let bwselect = match rd_option(
+            request.bwselect.as_deref(),
+            BandwidthMethod::MseRd,
+            BandwidthMethod::parse,
+        ) {
             Ok(b) => b,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
 
         let datasets = self.datasets.read().await;
@@ -1921,17 +1923,25 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         // the option names are checked before the dataset lookup, so a bad name never
         // costs a data read
-        let vce = match parse_vce(request.vce.as_deref()) {
+        let vce = match rd_option(request.vce.as_deref(), VceType::Nn, VceType::parse) {
             Ok(v) => v,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
-        let kernel = match parse_kernel(request.kernel.as_deref()) {
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
             Ok(k) => k,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
-        let bwselect = match parse_bwselect(request.bwselect.as_deref()) {
+        let bwselect = match rd_option(
+            request.bwselect.as_deref(),
+            BandwidthMethod::MseRd,
+            BandwidthMethod::parse,
+        ) {
             Ok(b) => b,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
 
         let datasets = self.datasets.read().await;
@@ -1987,13 +1997,17 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         // the option names are checked before the dataset lookup, so a bad name never
         // costs a data read
-        let vce = match parse_vce(request.vce.as_deref()) {
+        let vce = match rd_option(request.vce.as_deref(), VceType::Nn, VceType::parse) {
             Ok(v) => v,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
-        let kernel = match parse_kernel(request.kernel.as_deref()) {
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
             Ok(k) => k,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
 
         let datasets = self.datasets.read().await;
