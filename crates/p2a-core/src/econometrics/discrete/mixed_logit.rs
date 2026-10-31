@@ -19,6 +19,17 @@
 //! it, the individual is, and the choice probabilities of its situations are multiplied
 //! before they are averaged over the draws (mlogit `panel = TRUE`).
 //!
+//! # Estimation
+//!
+//! The conditional logit (every coefficient fixed) is fitted first; the mixed logit
+//! starts from its means and `s = 0.1`. Each stage runs BFGS on the analytic gradient of
+//! the simulated log-likelihood, then Newton steps on its central-difference Hessian;
+//! standard errors come from the inverse of that Hessian at the estimate. A random
+//! coefficient's spread is `sigma = |s|` (sigma >= 0; mlogit keeps it signed). The fit is
+//! `converged` when the largest gradient component at the estimate is at most
+//! `tolerance (1 + |LL|)` and the Hessian is negative definite. That test depends on the
+//! units of a regressor: the score of `mu` for `c * x` is `c` times the score for `x`.
+//!
 //! # References
 //!
 //! - Train, K.E. (2009). *Discrete Choice Methods with Simulation* (2nd ed.).
@@ -35,9 +46,13 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
+use ndarray::Array2;
+
+use super::newton::{ensure_dense_inverse_fits, newton_step};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::linalg::matrix_ops::cholesky_inverse;
 use crate::resource;
 use crate::traits::estimator::normal_cdf;
 
@@ -184,8 +199,9 @@ impl fmt::Display for MixedLogitResult {
         writeln!(f, "  Iterations:        {}", self.iterations)?;
         writeln!(
             f,
-            "  Converged:         {}",
-            if self.converged { "Yes" } else { "No" }
+            "  Converged:         {} (max |gradient| = {:.1e})",
+            if self.converged { "Yes" } else { "No" },
+            self.max_abs_gradient
         )?;
         writeln!(f)?;
 
@@ -203,13 +219,13 @@ impl fmt::Display for MixedLogitResult {
         writeln!(f)?;
 
         writeln!(f, "Random Parameters:")?;
-        writeln!(f, "{:-<90}", "")?;
+        writeln!(f, "{:-<101}", "")?;
         writeln!(
             f,
-            "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-            "Variable", "Mean", "SE", "z", "p-value", "Dist", "Std.Dev"
+            "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "Variable", "Mean", "SE", "z", "p-value", "Dist", "Std.Dev", "SD SE"
         )?;
-        writeln!(f, "{:-<90}", "")?;
+        writeln!(f, "{:-<101}", "")?;
 
         for i in 0..self.variable_names.len() {
             let sig = if self.mean_p_values[i] < 0.001 {
@@ -224,28 +240,38 @@ impl fmt::Display for MixedLogitResult {
                 ""
             };
 
-            let sd_str = if self.distributions[i] == RandomDistribution::Fixed {
-                "-".to_string()
+            let (sd_str, sd_se_str) = if self.distributions[i] == RandomDistribution::Fixed {
+                ("-".to_string(), "-".to_string())
             } else {
-                format!("{:.4}", self.std_devs[i])
+                (
+                    format!("{:.4}", self.std_devs[i]),
+                    format!("{:.4}", self.std_dev_std_errors[i]),
+                )
             };
 
             writeln!(
                 f,
-                "{:<20} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>10} {:>10} {}",
+                "{:<20} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>10} {:>10} {:>10} {}",
                 &self.variable_names[i],
                 self.means[i],
                 self.mean_std_errors[i],
                 self.mean_z_stats[i],
                 self.mean_p_values[i],
-                self.distributions[i],
+                self.distributions[i].to_string(),
                 sd_str,
+                sd_se_str,
                 sig
             )?;
         }
 
-        writeln!(f, "{:-<90}", "")?;
+        writeln!(f, "{:-<101}", "")?;
         writeln!(f, "Signif. codes: '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
+        if !self.warnings.is_empty() {
+            writeln!(f, "Warnings:")?;
+            for w in &self.warnings {
+                writeln!(f, "  - {w}")?;
+            }
+        }
 
         Ok(())
     }
@@ -668,6 +694,210 @@ fn simulated_ll_grad(
     Ok((ll, grad))
 }
 
+/// Step halvings of the BFGS line search before it gives up.
+const LINE_SEARCH_HALVINGS: usize = 60;
+
+/// Newton steps after BFGS, per stage.
+const MAX_NEWTON_STEPS: usize = 10;
+
+/// An objective: the log-likelihood and its gradient at a parameter vector.
+type Objective<'a> = dyn Fn(&[f64]) -> EconResult<(f64, Vec<f64>)> + 'a;
+
+/// The end point of [`maximize`].
+struct Maximum {
+    theta: Vec<f64>,
+    ll: f64,
+    grad: Vec<f64>,
+    /// BFGS iterations plus Newton steps.
+    iterations: usize,
+}
+
+fn max_abs(v: &[f64]) -> f64 {
+    v.iter().fold(0.0f64, |m, x| {
+        if x.is_nan() {
+            f64::INFINITY
+        } else {
+            m.max(x.abs())
+        }
+    })
+}
+
+/// The Hessian of `f` at `theta` by central differences of its gradient: column k is
+/// `(g(theta + h_k e_k) - g(theta - h_k e_k)) / (2 h_k)` with
+/// `h_k = 1e-5 max(1, |theta_k|)`, then symmetrised.
+fn hessian(f: &Objective<'_>, theta: &[f64]) -> EconResult<Array2<f64>> {
+    let p = theta.len();
+    let mut h = resource::try_zeros2(p, p, "mixed logit Hessian")?;
+    let mut t = theta.to_vec();
+    for k in 0..p {
+        let step = 1e-5 * theta[k].abs().max(1.0);
+        let up = theta[k] + step;
+        let down = theta[k] - step;
+        t[k] = up;
+        let (_, g_up) = f(&t)?;
+        t[k] = down;
+        let (_, g_down) = f(&t)?;
+        t[k] = theta[k];
+        let width = up - down;
+        for j in 0..p {
+            h[[j, k]] = (g_up[j] - g_down[j]) / width;
+        }
+    }
+    for j in 0..p {
+        for k in (j + 1)..p {
+            let m = 0.5 * (h[[j, k]] + h[[k, j]]);
+            h[[j, k]] = m;
+            h[[k, j]] = m;
+        }
+    }
+    Ok(h)
+}
+
+/// `(-h)^-1` when `-h` is positive definite (Cholesky), else `None`.
+fn negative_inverse(h: &Array2<f64>) -> Option<Array2<f64>> {
+    let neg = h.mapv(|v| -v);
+    cholesky_inverse(&neg.view())
+        .ok()
+        .filter(|inv| inv.iter().all(|v| v.is_finite()))
+}
+
+/// Maximise `f` from `theta0`: BFGS on the gradient (the start inverse Hessian is
+/// `(-H)^-1` of the central-difference Hessian at `theta0`, or its diagonal when `-H` is
+/// not positive definite), then up to [`MAX_NEWTON_STEPS`] Newton steps on the
+/// central-difference Hessian. `max_iter` bounds BFGS iterations and Newton steps
+/// together. BFGS stops when the largest gradient component is at most
+/// `tol (1 + |LL|)` and the last step changed LL by at most `1e-12 (1 + |LL|)`, when its
+/// line search fails, or when the budget is used; the Newton phase stops at a step below
+/// `1e-12` (relative), at a step that lowers LL, or where `-H` is not positive definite.
+/// Neither stop decides convergence: the caller judges the gradient at the end point.
+fn maximize(f: &Objective<'_>, theta0: Vec<f64>, max_iter: usize, tol: f64) -> EconResult<Maximum> {
+    let p = theta0.len();
+    let mut theta = theta0;
+    let (mut ll, mut g) = f(&theta)?;
+    if !ll.is_finite() || g.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::Computation(
+            "mixed logit: the simulated log-likelihood or its gradient is not finite at the \
+             start values; check the scale of the variables"
+                .to_string(),
+        ));
+    }
+    let h0 = hessian(f, &theta)?;
+    let mut diag = resource::try_zeros2(p, p, "mixed logit inverse Hessian")?;
+    for k in 0..p {
+        diag[[k, k]] = 1.0 / h0[[k, k]].abs().max(1e-8);
+    }
+    let mut b = negative_inverse(&h0).unwrap_or_else(|| diag.clone());
+    let mut it = 0;
+    let mut dll_last = f64::INFINITY;
+
+    // BFGS
+    loop {
+        resource::checkpoint()?;
+        let scale = 1.0 + ll.abs();
+        if max_abs(&g) <= tol * scale && dll_last.abs() <= 1e-12 * scale {
+            break;
+        }
+        if it >= max_iter {
+            break;
+        }
+        it += 1;
+        let mut d: Vec<f64> = (0..p)
+            .map(|i| (0..p).map(|j| b[[i, j]] * g[j]).sum())
+            .collect();
+        let mut gd: f64 = g.iter().zip(&d).map(|(gi, di)| gi * di).sum();
+        if !(gd > 0.0) {
+            b = diag.clone();
+            d = (0..p).map(|i| b[[i, i]] * g[i]).collect();
+            gd = g.iter().zip(&d).map(|(gi, di)| gi * di).sum();
+            if !(gd > 0.0) {
+                break;
+            }
+        }
+        let mut alpha = 1.0;
+        let mut accepted = None;
+        for _ in 0..=LINE_SEARCH_HALVINGS {
+            let trial: Vec<f64> = theta.iter().zip(&d).map(|(t, di)| t + alpha * di).collect();
+            let (ll_t, g_t) = f(&trial)?;
+            if ll_t.is_finite()
+                && g_t.iter().all(|v| v.is_finite())
+                && ll_t >= ll + 1e-4 * alpha * gd
+            {
+                accepted = Some((trial, ll_t, g_t));
+                break;
+            }
+            alpha *= 0.5;
+        }
+        let Some((theta_new, ll_new, g_new)) = accepted else {
+            break;
+        };
+        // Inverse-Hessian update for f = -LL: s = step, y = g - g_new.
+        let s: Vec<f64> = theta_new.iter().zip(&theta).map(|(a, c)| a - c).collect();
+        let y: Vec<f64> = g.iter().zip(&g_new).map(|(a, c)| a - c).collect();
+        let sy: f64 = s.iter().zip(&y).map(|(a, c)| a * c).sum();
+        let s_norm = s.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let y_norm = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if sy > 1e-10 * s_norm * y_norm {
+            let rho = 1.0 / sy;
+            let by: Vec<f64> = (0..p)
+                .map(|i| (0..p).map(|j| b[[i, j]] * y[j]).sum())
+                .collect();
+            let yby: f64 = y.iter().zip(&by).map(|(a, c)| a * c).sum();
+            // B <- B - rho (s (By)' + (By) s') + (rho^2 y'By + rho) s s'
+            let coef = rho * rho * yby + rho;
+            for i in 0..p {
+                for j in 0..p {
+                    b[[i, j]] += -rho * (s[i] * by[j] + by[i] * s[j]) + coef * s[i] * s[j];
+                }
+            }
+        }
+        dll_last = ll_new - ll;
+        theta = theta_new;
+        ll = ll_new;
+        g = g_new;
+    }
+
+    // Newton steps
+    let mut work = resource::try_zeros2(p, p, "mixed logit Hessian")?;
+    let mut newton = 0;
+    while it < max_iter && newton < MAX_NEWTON_STEPS {
+        resource::checkpoint()?;
+        let h = hessian(f, &theta)?;
+        let Some(step) = newton_step(&h, &g, &mut work) else {
+            break;
+        };
+        if step.lambda > 0.0 {
+            break;
+        }
+        it += 1;
+        newton += 1;
+        let trial: Vec<f64> = theta.iter().zip(&step.delta).map(|(t, d)| t + d).collect();
+        let (ll_t, g_t) = f(&trial)?;
+        if !(ll_t.is_finite()
+            && g_t.iter().all(|v| v.is_finite())
+            && ll_t >= ll - 1e-12 * (1.0 + ll.abs()))
+        {
+            break;
+        }
+        let rel = step
+            .delta
+            .iter()
+            .zip(&theta)
+            .fold(0.0f64, |m, (d, t)| m.max(d.abs() / t.abs().max(1.0)));
+        theta = trial;
+        ll = ll_t;
+        g = g_t;
+        if rel < 1e-12 {
+            break;
+        }
+    }
+    Ok(Maximum {
+        theta,
+        ll,
+        grad: g,
+        iterations: it,
+    })
+}
+
 /// Checks of `run_mixed_logit`'s controls and specification, and the distribution of each
 /// variable (`Fixed` unless a spec names it).
 fn validate(
@@ -735,6 +965,26 @@ fn validate(
 /// R equivalent: `mlogit::mlogit(rpar = .., halton = NA[, panel = TRUE])` (draw scheme and
 /// likelihood); `gmnl::gmnl()` and `mixl::mixl()` fit the same model with other draws.
 ///
+/// # Estimation
+///
+/// Stage 1 fits the conditional logit (every coefficient fixed) from 0; stage 2 starts the
+/// mixed logit from its means and `s = 0.1` for every random parameter. Each stage runs
+/// BFGS on the analytic gradient, then Newton steps (see `maximize`); `max_iter` bounds
+/// each stage, and `iterations` reports both. Without random parameters stage 1 is the
+/// estimate. Standard errors come from the inverse of the Hessian of the simulated
+/// log-likelihood (central differences of its gradient) at the estimate; they are NaN, with
+/// a warning, when that Hessian is not negative definite.
+///
+/// `sigma` is reported as `|s|` of an unconstrained `s` (sigma >= 0), where mlogit keeps it
+/// signed: with finitely many draws, `s` and `-s` give different simulated likelihoods,
+/// and the estimate is the optimum with `sigma > 0`.
+///
+/// `converged` means that the largest gradient component at the reported estimate is at
+/// most `tolerance (1 + |LL|)` and the Hessian there is negative definite; it never depends
+/// on the state of a line search.
+///
+/// # Missing values
+///
 /// Every column comes from one request with `NaPolicy::Fail`: a missing id, alternative,
 /// choice, attribute or individual id is refused with `NullValues` naming the column, as
 /// mlogit refuses it. Int64 and Boolean columns are accepted.
@@ -758,10 +1008,10 @@ pub fn run_mixed_logit(
         config.individual_col.as_deref(),
     )?;
     let n_vars = x_cols.len();
-    let n_random = distributions
-        .iter()
-        .filter(|d| **d != RandomDistribution::Fixed)
-        .count();
+    let random: Vec<usize> = (0..n_vars)
+        .filter(|&j| distributions[j] != RandomDistribution::Fixed)
+        .collect();
+    let n_random = random.len();
     let n_params = n_vars + n_random;
     let n_units = data.unit_situations.len();
     let n_choice_situations = data.sit_x.len();
@@ -771,114 +1021,102 @@ pub fn run_mixed_logit(
     } else {
         "choice situation"
     };
-    let draws = draw_set(&config, n_units, n_random, unit_label)?;
-    let n_draws = config.n_draws;
+    let draws = if n_random > 0 {
+        Some(draw_set(&config, n_units, n_random, unit_label)?)
+    } else {
+        None
+    };
+    ensure_dense_inverse_fits(n_params, "mixed logit Hessian")?;
+    let tol = config.tolerance;
+    let gradient_ok = |fit: &Maximum| max_abs(&fit.grad) <= tol * (1.0 + fit.ll.abs());
 
-    // Initialize parameters
-    let mut theta: Vec<f64> = vec![0.0; n_params];
-    for t in theta.iter_mut().skip(n_vars) {
-        *t = 0.1;
-    }
+    // Stage 1: the conditional logit (no draws).
+    let fixed = vec![RandomDistribution::Fixed; n_vars];
+    let no_draws = DrawSet {
+        n_draws: 1,
+        z: Vec::new(),
+        scheme: "none (no random parameters: conditional logit)".to_string(),
+    };
+    let clogit = |t: &[f64]| simulated_ll_grad(&data, &no_draws, &fixed, t);
+    let stage1 = maximize(&clogit, vec![0.0; n_vars], config.max_iter, tol)?;
 
-    let ll_null = -(n_choice_situations as f64) * (n_alternatives as f64).ln();
-
-    let compute_simulated_ll = |theta: &[f64]| -> EconResult<f64> {
-        Ok(simulated_ll_grad(&data, &draws, &distributions, theta)?.0)
+    // Stage 2: the mixed logit from the conditional-logit means.
+    let (final_draws, final_dists) = match &draws {
+        Some(d) => (d, distributions.as_slice()),
+        None => (&no_draws, fixed.as_slice()),
+    };
+    let objective = |t: &[f64]| simulated_ll_grad(&data, final_draws, final_dists, t);
+    let mut warnings = Vec::new();
+    let (fit, iterations) = if n_random > 0 {
+        if !gradient_ok(&stage1) {
+            warnings.push("the conditional-logit start did not converge".to_string());
+        }
+        let mut theta0 = stage1.theta.clone();
+        theta0.extend(std::iter::repeat_n(0.1, n_random));
+        let fit = maximize(&objective, theta0, config.max_iter, tol)?;
+        let iterations = stage1.iterations + fit.iterations;
+        (fit, iterations)
+    } else {
+        let iterations = stage1.iterations;
+        (stage1, iterations)
     };
 
-    // Gradient ascent optimization
-    let mut ll = compute_simulated_ll(&theta)?;
-    let mut converged = false;
-    let mut iterations = 0;
-
-    let compute_gradient = |theta: &[f64], ll_current: f64| -> EconResult<Vec<f64>> {
-        let h = 1e-5;
-        let mut grad = vec![0.0; n_params];
-        for i in 0..n_params {
-            let mut theta_plus = theta.to_vec();
-            theta_plus[i] += h;
-            let ll_plus = compute_simulated_ll(&theta_plus)?;
-            grad[i] = (ll_plus - ll_current) / h;
-        }
-        Ok(grad)
-    };
-
-    for iter in 0..config.max_iter {
-        resource::checkpoint()?;
-        iterations = iter + 1;
-
-        let grad = compute_gradient(&theta, ll)?;
-        let grad_norm: f64 = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
-
-        if grad_norm < config.tolerance {
-            converged = true;
-            break;
-        }
-
-        let mut step = 1.0;
-        let mut best_ll = ll;
-        let mut best_theta = theta.clone();
-
-        for _ in 0..10 {
-            let new_theta: Vec<f64> = theta.iter().zip(&grad).map(|(t, g)| t + step * g).collect();
-
-            let new_ll = compute_simulated_ll(&new_theta)?;
-            if new_ll > best_ll {
-                best_ll = new_ll;
-                best_theta = new_theta;
-                break;
-            }
-            step *= 0.5;
-        }
-
-        if (best_ll - ll).abs() < config.tolerance {
-            converged = true;
-            theta = best_theta;
-            ll = best_ll;
-            break;
-        }
-
-        theta = best_theta;
-        ll = best_ll;
+    // Standard errors from the Hessian at the estimate.
+    let hess = hessian(&objective, &fit.theta)?;
+    let vcov = negative_inverse(&hess);
+    let max_abs_gradient = max_abs(&fit.grad);
+    let converged = gradient_ok(&fit) && vcov.is_some();
+    if vcov.is_none() {
+        warnings.push(
+            "the Hessian of the simulated log-likelihood is not negative definite at the \
+             estimate; standard errors are not reported"
+                .to_string(),
+        );
     }
+    if !converged {
+        warnings.insert(
+            0,
+            format!(
+                "mixed logit did not converge: max |gradient| = {max_abs_gradient:.3e} after \
+                 {iterations} iterations (tolerance {tol:e} x (1 + |LL|))"
+            ),
+        );
+    }
+    let se = |k: usize| match &vcov {
+        Some(v) if v[[k, k]] >= 0.0 => v[[k, k]].sqrt(),
+        _ => f64::NAN,
+    };
+    let normal = Normal::new(0.0, 1.0).map_err(|e| EconError::Computation(e.to_string()))?;
+    let p_value = |z: f64| 2.0 * normal.sf(z.abs());
 
-    // Extract results
+    let theta = &fit.theta;
+    let ll = fit.ll;
     let means: Vec<f64> = theta[..n_vars].to_vec();
-    let mut std_devs: Vec<f64> = vec![0.0; n_vars];
-    let mut sd_idx = n_vars;
-    for j in 0..n_vars {
-        if distributions[j] != RandomDistribution::Fixed {
-            std_devs[j] = theta[sd_idx].abs();
-            sd_idx += 1;
-        }
+    let mean_std_errors: Vec<f64> = (0..n_vars).map(se).collect();
+    let mut std_devs = vec![0.0; n_vars];
+    let mut std_dev_std_errors = vec![f64::NAN; n_vars];
+    for (m, &j) in random.iter().enumerate() {
+        std_devs[j] = theta[n_vars + m].abs();
+        std_dev_std_errors[j] = se(n_vars + m);
     }
-
-    // Standard errors (simplified using numerical Hessian)
-    let mean_std_errors: Vec<f64> = means.iter().map(|_| 0.1).collect();
-    let std_dev_std_errors: Vec<f64> = std_devs.iter().map(|_| 0.1).collect();
-
     let mean_z_stats: Vec<f64> = means
         .iter()
         .zip(&mean_std_errors)
-        .map(|(m, se)| if *se > 0.0 { m / se } else { 0.0 })
+        .map(|(m, s)| m / s)
         .collect();
-
-    let mean_p_values: Vec<f64> = mean_z_stats
-        .iter()
-        .map(|z| 2.0 * (1.0 - normal_cdf(z.abs())))
+    let mean_p_values: Vec<f64> = mean_z_stats.iter().map(|&z| p_value(z)).collect();
+    let std_dev_z_stats: Vec<f64> = (0..n_vars)
+        .map(|j| {
+            if distributions[j] == RandomDistribution::Fixed {
+                f64::NAN
+            } else {
+                std_devs[j] / std_dev_std_errors[j]
+            }
+        })
         .collect();
+    let std_dev_p_values: Vec<f64> = std_dev_z_stats.iter().map(|&z| p_value(z)).collect();
 
-    let std_dev_z_stats: Vec<f64> = std_devs
-        .iter()
-        .zip(&std_dev_std_errors)
-        .map(|(s, se)| if *se > 0.0 { s / se } else { 0.0 })
-        .collect();
-
-    let std_dev_p_values: Vec<f64> = std_dev_z_stats
-        .iter()
-        .map(|z| 2.0 * (1.0 - normal_cdf(z.abs())))
-        .collect();
-
+    let ll_null = -(n_choice_situations as f64) * (n_alternatives as f64).ln();
     let aic = -2.0 * ll + 2.0 * n_params as f64;
     let bic = -2.0 * ll + (n_params as f64) * (n_choice_situations as f64).ln();
 
@@ -897,22 +1135,24 @@ pub fn run_mixed_logit(
         log_likelihood_null: ll_null,
         n_choice_situations,
         n_alternatives,
-        n_draws,
+        n_draws: if n_random > 0 { config.n_draws } else { 0 },
         iterations,
         converged,
         aic,
         bic,
         n_units,
         n_individuals: data.n_individuals,
-        draw_scheme: draws.scheme.clone(),
-        max_abs_gradient: f64::NAN,
-        warnings: Vec::new(),
+        draw_scheme: final_draws.scheme.clone(),
+        max_abs_gradient,
+        warnings,
     })
 }
 
-/// Convenience function for running mixed logit with all variables random.
+/// Mixed logit with every variable in `random_vars` (all of `x_cols` when `None`) random,
+/// with one distribution (default normal): [`run_mixed_logit`] with those specs.
 ///
-/// R equivalent: `gmnl::gmnl()`
+/// The same model as `gmnl::gmnl()` without heterogeneity in scale; the draws and the
+/// likelihood are mlogit's (see [`run_mixed_logit`]).
 pub fn run_gmnl(
     dataset: &Dataset,
     choice_id_col: &str,
@@ -953,9 +1193,10 @@ pub fn run_gmnl(
     )
 }
 
-/// Convenience alias for mixl package compatibility.
+/// [`run_gmnl`] with Halton draws and `n_draws` (default 500) per decision maker.
 ///
-/// R equivalent: `mixl::mixl()`
+/// The same model as a `mixl::mixl()` random-coefficient specification; the draws and the
+/// likelihood are mlogit's (see [`run_mixed_logit`]).
 pub fn run_mixl(
     dataset: &Dataset,
     choice_id_col: &str,
@@ -1440,6 +1681,7 @@ mod tests {
         assert!(display.contains("Mixed Logit"));
         assert!(display.contains("cost"));
         assert!(display.contains("Draws:"), "{display}");
+        assert!(display.contains("SD SE"), "{display}");
     }
 
     // ==========================================================================
@@ -1579,68 +1821,355 @@ mod tests {
         assert!(result.log_likelihood.is_finite());
     }
 
-    #[test]
-    fn test_validate_gmnl_vs_r() {
-        // R reference: gmnl::gmnl()
-        // Test GMNL convenience function
+    // ==========================================================================
+    // Estimation against mlogit's simulated likelihood, solved tightly in R
+    // ==========================================================================
 
-        let dataset = create_mlogit_dataset();
+    const NAMES: [&str; 3] = ["mean_x", "mean_w", "sd_x"];
 
-        let result = run_gmnl(
-            &dataset,
-            "choice_id",
-            "alt_id",
-            "choice",
-            &["cost", "time"],
-            Some(&["cost"]), // Only cost is random
-            Some(RandomDistribution::Normal),
-            Some(MixedLogitConfig {
-                n_draws: 50,
-                halton: true,
-                max_iter: 50,
-                tolerance: 1e-3,
-                seed: Some(42),
-                ..Default::default()
-            }),
-        )
-        .unwrap();
-
-        // Structure checks
-        assert_eq!(result.variable_names.len(), 2);
-        assert_eq!(result.n_alternatives, 3);
-
-        // Cost is random, time is fixed
-        assert_eq!(result.distributions[0], RandomDistribution::Normal);
-        assert_eq!(result.distributions[1], RandomDistribution::Fixed);
-
-        // Log-likelihood should be finite
-        assert!(result.log_likelihood.is_finite());
+    /// (mean of x, mean of w, SD of x) of a fit with x normal and w fixed.
+    fn estimates(r: &MixedLogitResult) -> [f64; 3] {
+        [r.means[0], r.means[1], r.std_devs[0]]
     }
 
+    fn std_errors(r: &MixedLogitResult) -> [f64; 3] {
+        [
+            r.mean_std_errors[0],
+            r.mean_std_errors[1],
+            r.std_dev_std_errors[0],
+        ]
+    }
+
+    /// Convergence, the fixed coefficient's empty SD entries, z, p and AIC.
+    fn assert_fit_properties(r: &MixedLogitResult) {
+        assert!(r.converged, "{r}");
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(
+            r.max_abs_gradient <= 1e-6 * (1.0 + r.log_likelihood.abs()),
+            "max |gradient| {}",
+            r.max_abs_gradient
+        );
+        assert!(r.iterations >= 1);
+        assert_eq!(
+            r.distributions,
+            [RandomDistribution::Normal, RandomDistribution::Fixed]
+        );
+        assert_eq!(r.std_devs[1], 0.0);
+        assert!(r.std_dev_std_errors[1].is_nan());
+        let z = r.means[0] / r.mean_std_errors[0];
+        let p = 2.0 * Normal::new(0.0, 1.0).unwrap().sf(z.abs());
+        let tight = Tol::new(1e-12, 0.0);
+        assert!(
+            tight.allows(r.mean_z_stats[0], z),
+            "{} vs {z}",
+            r.mean_z_stats[0]
+        );
+        assert!(
+            tight.allows(r.mean_p_values[0], p),
+            "{} vs {p}",
+            r.mean_p_values[0]
+        );
+        assert!(
+            tight.allows(r.aic, -2.0 * r.log_likelihood + 6.0),
+            "{}",
+            r.aic
+        );
+    }
+
+    /// 300 choice situations, 50 Halton draws each, x normal: mlogit's estimate re-solved
+    /// tightly, with SEs from the Hessian (they were the constant 0.1).
     #[test]
-    fn test_validate_mixl_vs_r() {
-        // R reference: mixl package
-        // Test MIXL convenience function
-
-        let dataset = create_mlogit_dataset();
-
-        let result = run_mixl(
-            &dataset,
-            "choice_id",
-            "alt_id",
+    fn test_validate_mixed_logit_cross_section() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_logit");
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
             "choice",
-            &["cost"],
-            Some(&["cost"]),
-            Some(RandomDistribution::Normal),
-            Some(30), // n_draws
+            &["x", "w"],
+            &[normal("x")],
+            Some(draws_cfg(50)),
         )
         .unwrap();
+        Check::new(&case)
+            .named("coef", &NAMES, &estimates(&r), Tol::iterative(1e-6))
+            .named("se", &NAMES, &std_errors(&r), Tol::iterative(1e-5))
+            .scalar("loglik", r.log_likelihood, Tol::stat(300))
+            .scalar("n_units", r.n_units as f64, Tol::exact())
+            .scalar("n_situations", r.n_choice_situations as f64, Tol::exact())
+            .scalar("n_draws", r.n_draws as f64, Tol::exact())
+            // mlogit's own estimate stops 2.5e-5 (relative) from the optimum
+            .named(
+                "coef_pkg",
+                &["x", "w", "sd.x"],
+                &estimates(&r),
+                Tol::iterative(1e-4),
+            )
+            .finish();
+        assert_fit_properties(&r);
+        assert_eq!(r.n_individuals, None);
+    }
 
-        // Structure checks
-        assert_eq!(result.variable_names.len(), 1);
-        assert_eq!(result.distributions[0], RandomDistribution::Normal);
+    /// 100 people x 4 situations, draws per person (mlogit panel = TRUE).
+    #[test]
+    fn test_validate_mixed_logit_panel() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_logit_panel");
+        let config = MixedLogitConfig {
+            individual_col: Some("person".to_string()),
+            ..draws_cfg(50)
+        };
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &["x", "w"],
+            &[normal("x")],
+            Some(config),
+        )
+        .unwrap();
+        Check::new(&case)
+            .named("coef", &NAMES, &estimates(&r), Tol::iterative(1e-6))
+            .named("se", &NAMES, &std_errors(&r), Tol::iterative(1e-5))
+            .scalar("loglik", r.log_likelihood, Tol::stat(400))
+            .scalar("n_units", r.n_units as f64, Tol::exact())
+            .scalar("n_situations", r.n_choice_situations as f64, Tol::exact())
+            .scalar("n_draws", r.n_draws as f64, Tol::exact())
+            .named(
+                "coef_pkg",
+                &["x", "w", "sd.x"],
+                &estimates(&r),
+                Tol::iterative(1e-4),
+            )
+            .finish();
+        assert_fit_properties(&r);
+        assert_eq!(r.n_individuals, Some(100));
+        assert_eq!(r.n_units, 100);
+        assert_eq!(r.n_choice_situations, 400);
+        assert!(
+            r.draw_scheme.ends_with("draws per individual"),
+            "{}",
+            r.draw_scheme
+        );
+    }
 
-        // Log-likelihood should be finite
-        assert!(result.log_likelihood.is_finite());
+    /// With no random coefficient the model is the conditional logit (it returned zeros).
+    #[test]
+    fn test_validate_mixed_logit_no_random_is_conditional_logit() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_logit");
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &["x", "w"],
+            &[],
+            Some(draws_cfg(50)),
+        )
+        .unwrap();
+        let xw = ["x", "w"];
+        Check::new(&case)
+            .named("clogit_coef_tight", &xw, &r.means, Tol::iterative(1e-6))
+            .named(
+                "clogit_se_tight",
+                &xw,
+                &r.mean_std_errors,
+                Tol::iterative(1e-5),
+            )
+            .scalar("clogit_loglik_tight", r.log_likelihood, Tol::stat(300))
+            .finish();
+        let cl =
+            super::super::run_conditional_logit(&ds, "id", "alt", "choice", &xw, None).unwrap();
+        for k in 0..2 {
+            assert!(
+                Tol::new(1e-8, 1e-12).allows(r.means[k], cl.beta[k]),
+                "{} vs {}",
+                r.means[k],
+                cl.beta[k]
+            );
+            assert!(
+                Tol::new(1e-7, 1e-12).allows(r.mean_std_errors[k], cl.beta_std_errors[k]),
+                "{} vs {}",
+                r.mean_std_errors[k],
+                cl.beta_std_errors[k]
+            );
+        }
+        assert_eq!(r.n_draws, 0);
+        assert_eq!(
+            r.distributions,
+            [RandomDistribution::Fixed, RandomDistribution::Fixed]
+        );
+        assert!(r.converged, "{r}");
+        assert_eq!(
+            r.draw_scheme,
+            "none (no random parameters: conditional logit)"
+        );
+    }
+
+    /// x * 100 and w / 100: the model is equivariant (beta x = (beta / 100) (100 x) with the
+    /// same draws), so the estimate is the image of the unscaled one. The old ascent
+    /// returned its start values, labelled converged.
+    #[test]
+    fn test_validate_mixed_logit_badly_scaled_regressors() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_logit");
+        let mut df = ds.df().clone();
+        let scaled = |name: &str, factor: f64| -> Vec<f64> {
+            ds.df()
+                .column(name)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .map(|v| v * factor)
+                .collect()
+        };
+        df.with_column(Series::new("x100".into(), scaled("x", 100.0)))
+            .unwrap();
+        df.with_column(Series::new("w001".into(), scaled("w", 0.01)))
+            .unwrap();
+        let ds = Dataset::new(df);
+        let cols = ["x100", "w001"];
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &cols,
+            &[normal("x100")],
+            Some(draws_cfg(50)),
+        )
+        .unwrap();
+        let c =
+            run_mixed_logit(&ds, "id", "alt", "choice", &cols, &[], Some(draws_cfg(50))).unwrap();
+        let est = [
+            r.means[0] * 100.0,
+            r.means[1] / 100.0,
+            r.std_devs[0] * 100.0,
+        ];
+        let se = [
+            r.mean_std_errors[0] * 100.0,
+            r.mean_std_errors[1] / 100.0,
+            r.std_dev_std_errors[0] * 100.0,
+        ];
+        let cl = [c.means[0] * 100.0, c.means[1] / 100.0];
+        Check::new(&case)
+            .named("coef", &NAMES, &est, Tol::iterative(1e-6))
+            .named("se", &NAMES, &se, Tol::iterative(1e-5))
+            .scalar("loglik", r.log_likelihood, Tol::stat(300))
+            .named("clogit_coef_tight", &["x", "w"], &cl, Tol::iterative(1e-6))
+            .scalar("clogit_loglik_tight", c.log_likelihood, Tol::stat(300))
+            .finish();
+        assert!(r.converged && c.converged, "{r}\n{c}");
+    }
+
+    /// run_gmnl and run_mixl fit the same model.
+    #[test]
+    fn test_validate_gmnl_and_mixl_wrappers() {
+        let (case, ds) = crate::test_support::load_case("disc_mixed_logit");
+        let xw = ["x", "w"];
+        let random = ["x"];
+        let g = run_gmnl(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &xw,
+            Some(&random),
+            Some(RandomDistribution::Normal),
+            Some(draws_cfg(50)),
+        )
+        .unwrap();
+        let m = run_mixl(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &xw,
+            Some(&random),
+            Some(RandomDistribution::Normal),
+            Some(50),
+        )
+        .unwrap();
+        for r in [&g, &m] {
+            Check::new(&case)
+                .named("coef", &NAMES, &estimates(r), Tol::iterative(1e-6))
+                .named("se", &NAMES, &std_errors(r), Tol::iterative(1e-5))
+                .finish();
+        }
+    }
+
+    /// An exhausted iteration budget is reported as non-convergence with the gradient.
+    #[test]
+    fn test_mixed_logit_reports_non_convergence() {
+        let (_, ds) = case_data("disc_mixed_logit");
+        let config = MixedLogitConfig {
+            max_iter: 1,
+            ..draws_cfg(50)
+        };
+        let r = run_mixed_logit(
+            &ds,
+            "id",
+            "alt",
+            "choice",
+            &["x", "w"],
+            &[normal("x")],
+            Some(config),
+        )
+        .unwrap();
+        assert!(!r.converged, "{r}");
+        assert!(r.iterations <= 2, "{}", r.iterations);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("did not converge") && w.contains("max |gradient|")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Converged:         No"), "{r}");
+    }
+
+    /// Pseudo-random draws are reproducible with a seed and move with it.
+    #[test]
+    fn test_mixed_logit_pseudo_random_draws_are_seeded() {
+        let (case, ds) = case_data("disc_mixed_logit");
+        let fit = |seed: u64| {
+            let config = MixedLogitConfig {
+                halton: false,
+                seed: Some(seed),
+                ..draws_cfg(50)
+            };
+            run_mixed_logit(
+                &ds,
+                "id",
+                "alt",
+                "choice",
+                &["x", "w"],
+                &[normal("x")],
+                Some(config),
+            )
+            .unwrap()
+        };
+        let (a, b, c) = (fit(7), fit(7), fit(8));
+        let bits = |r: &MixedLogitResult| estimates(r).map(f64::to_bits);
+        assert_eq!(bits(&a), bits(&b));
+        assert_ne!(bits(&a), bits(&c));
+        // a sanity bound, not a pin: within 3 standard errors of the Halton estimate
+        let coef = case.by_names("coef", &NAMES);
+        let se = case.by_names("se", &NAMES);
+        for r in [&a, &c] {
+            for k in 0..3 {
+                assert!(
+                    (estimates(r)[k] - coef[k]).abs() < 3.0 * se[k],
+                    "{}: {:?}",
+                    r.draw_scheme,
+                    estimates(r)
+                );
+            }
+        }
+        assert!(
+            a.draw_scheme.starts_with("pseudo-random normal, seed 7"),
+            "{}",
+            a.draw_scheme
+        );
     }
 }
