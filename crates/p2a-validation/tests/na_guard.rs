@@ -983,3 +983,47 @@ fn test_na_guard_tree_is_clean() {
             .join("\n")
     );
 }
+
+#[test]
+fn test_na_guard_legacy_mcp_helpers_are_gone() {
+    let fx = Fixture::new("helpers");
+    fx.file(
+        "crates/p2a-mcp/src/tools/common.rs",
+        "pub fn extract_column_f64(ds: &Dataset, c: &str) -> Vec<f64> {\n    vec![]\n}\n",
+    )
+    .file(
+        "crates/p2a-mcp/src/tools/handlers/ml.rs",
+        "fn f() -> Result<(), String> {\n    \
+         let m = common::extract_numeric_matrix(&ds, &cols)?;\n    \
+         // extract_column_f64 is gone\n    \
+         Ok(())\n\
+         }\n\
+         fn my_extract_column_f64_like() {}\n",
+    );
+    let hits = legacy_helper_uses(&fx.0);
+    assert_eq!(
+        hits,
+        [
+            (
+                "crates/p2a-mcp/src/tools/common.rs".to_string(),
+                1,
+                "extract_column_f64"
+            ),
+            (
+                "crates/p2a-mcp/src/tools/handlers/ml.rs".to_string(),
+                2,
+                "extract_numeric_matrix"
+            ),
+        ]
+    );
+    let real = legacy_helper_uses(&p2a_validation::repo_root());
+    assert!(
+        real.is_empty(),
+        "callers must use tools::common::numeric_column(s)/numeric_matrix with an explicit \
+         NaPolicy:\n{}",
+        real.iter()
+            .map(|(f, l, n)| format!("  {f}:{l}: {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
