@@ -23,8 +23,8 @@ const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::{
-    MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, extract_column_f64,
-    missing_json, numeric_column, numeric_columns, numeric_matrix,
+    MissingSummary, NaPolicy, REFUSAL_NAMES, check_named_budget, echo_list, missing_json,
+    numeric_column, numeric_columns, numeric_matrix,
 };
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
@@ -686,14 +686,15 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         match fivenum(&values) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "minimum": result.minimum,
                     "lower_hinge": result.lower_hinge,
                     "median": result.median,
@@ -702,6 +703,7 @@ impl AnalyticsServer {
                     "n": result.n,
                     "iqr": result.upper_hinge - result.lower_hinge
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -725,17 +727,19 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
         match iqr(&values, request.qtype) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "iqr": result,
                     "quantile_type": request.qtype.unwrap_or(7)
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -759,34 +763,31 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
-        // If center is "mean", compute mean; otherwise use None (which defaults to median in mad())
-        let center = if request.center.as_deref() == Some("mean") {
-            let sum: f64 = values.iter().filter(|x| !x.is_nan()).sum();
-            let count = values.iter().filter(|x| !x.is_nan()).count();
-            if count > 0 {
-                Some(sum / count as f64)
-            } else {
-                None
-            }
+        // If center is "mean", the mean of the values used (no missing value is left);
+        // otherwise None, which is the median in mad()
+        let center = if request.center.as_deref() == Some("mean") && !values.is_empty() {
+            Some(values.iter().sum::<f64>() / values.len() as f64)
         } else {
-            None // Will use median by default
+            None
         };
 
         let constant = request.constant;
 
         match run_mad(&values, center, constant) {
             Ok(mad_value) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "mad": mad_value,
                     "center_used": center,
                     "constant": constant.unwrap_or(1.4826),
                     "n": values.len()
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -810,7 +811,8 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
@@ -825,12 +827,13 @@ impl AnalyticsServer {
                     (result.x.clone(), result.y.clone())
                 };
 
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": x_out,
                     "y": y_out,
                     "n": result.n,
                     "n_unique": result.x.len()
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -854,7 +857,8 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let values = match extract_column_f64(dataset, &request.column) {
+        // Missing values are dropped (as na.rm = TRUE) and reported
+        let (values, missing) = match numeric_column(dataset, &request.column, NaPolicy::Omit) {
             Ok(v) => v,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
@@ -885,7 +889,7 @@ impl AnalyticsServer {
 
         match run_density(&values, request.bw, kernel, Some(n)) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": result.x,
                     "y": result.y,
                     "bw": result.bw,
@@ -894,6 +898,7 @@ impl AnalyticsServer {
                     "data_n": values.len(),
                     "range": [result.x.first(), result.x.last()]
                 });
+                insert_missing(&mut json_output, &missing);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -917,15 +922,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let x = match extract_column_f64(dataset, &request.x) {
-            Ok(v) => v,
+        // A row with a missing x or y is dropped from both, as R's regularize.values drops it
+        let cols = match numeric_columns(
+            dataset,
+            &[request.x.as_str(), request.y.as_str()],
+            NaPolicy::Omit,
+        ) {
+            Ok(c) => c,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
-
-        let y = match extract_column_f64(dataset, &request.y) {
-            Ok(v) => v,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let (x, y) = (cols.numeric(&request.x), cols.numeric(&request.y));
 
         let method = match request.method.as_deref().unwrap_or("fmm") {
             "fmm" => SplineMethod::Fmm,
@@ -940,14 +946,15 @@ impl AnalyticsServer {
             }
         };
 
-        match spline(&x, &y, request.xout.as_deref(), None, method) {
+        match spline(x, y, request.xout.as_deref(), None, method) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": result.x,
                     "y": result.y,
                     "method": format!("{:?}", method),
                     "n_knots": x.len()
                 });
+                insert_missing(&mut json_output, cols.missing());
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -971,15 +978,16 @@ impl AnalyticsServer {
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
-        let x = match extract_column_f64(dataset, &request.x) {
-            Ok(v) => v,
+        // A row with a missing x or y is dropped from both, as R's regularize.values drops it
+        let cols = match numeric_columns(
+            dataset,
+            &[request.x.as_str(), request.y.as_str()],
+            NaPolicy::Omit,
+        ) {
+            Ok(c) => c,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
-
-        let y = match extract_column_f64(dataset, &request.y) {
-            Ok(v) => v,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-        };
+        let (x, y) = (cols.numeric(&request.x), cols.numeric(&request.y));
 
         let method = match request.method.as_deref().unwrap_or("linear") {
             "linear" => ApproxMethod::Linear,
@@ -1006,15 +1014,16 @@ impl AnalyticsServer {
         // f parameter: for constant interpolation, 0 = left value, 1 = right value, 0.5 = average
         let f = 0.0; // Default: use left value for step interpolation
 
-        match approx(&x, &y, Some(&request.xout), None, method, rule, f) {
+        match approx(x, y, Some(&request.xout), None, method, rule, f) {
             Ok(result) => {
-                let json_output = serde_json::json!({
+                let mut json_output = serde_json::json!({
                     "x": result.x,
                     "y": result.y,
                     "method": format!("{:?}", method),
                     "rule": format!("{:?}", rule),
                     "n_interpolated": result.x.len()
                 });
+                insert_missing(&mut json_output, cols.missing());
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -2749,5 +2758,127 @@ mod tests {
             .scalar("n_complete", num(&v["missing"]["n_used"]), Tol::exact())
             .finish();
         assert_eq!(v["missing"], summary(30, 29, serde_json::json!({"a": 1})));
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_robust_summaries_na() {
+        // TOOL-3/X-2: the legacy extraction read nulls as NaN: stats_mad and stats_density
+        // counted the missing cells in n, nothing reported the drop, and text columns gave the
+        // legacy "is not numeric (type str)" message. R: the functions with na.rm = TRUE.
+        let (case, rt, server, name) = case_server("stat_descriptive_na");
+        let call = |tool: &str, extra: serde_json::Value| {
+            let mut a = serde_json::json!({"dataset": name});
+            if let serde_json::Value::Object(m) = extra {
+                a.as_object_mut().unwrap().extend(m);
+            }
+            rt.block_on(async {
+                match tool {
+                    "fivenum" => server.stats_fivenum(req(a)).await,
+                    "iqr" => server.stats_iqr(req(a)).await,
+                    "mad" => server.stats_mad(req(a)).await,
+                    "ecdf" => server.stats_ecdf(req(a)).await,
+                    "density" => server.stats_density(req(a)).await,
+                    other => panic!("no tool {other}"),
+                }
+            })
+            .unwrap()
+        };
+        let five = |v: &serde_json::Value| -> Vec<f64> {
+            ["minimum", "lower_hinge", "median", "upper_hinge", "maximum"]
+                .iter()
+                .map(|k| num(&v[*k]))
+                .collect()
+        };
+        let mut check = Check::new(&case);
+        for (col, sfx, n_key, missing) in [
+            (
+                "v",
+                "v",
+                "n_v",
+                summary(15, 12, serde_json::json!({"v": 3})),
+            ),
+            (
+                "vi",
+                "vi",
+                "n_vi",
+                summary(15, 13, serde_json::json!({"vi": 2})),
+            ),
+        ] {
+            let c = serde_json::json!({"column": col});
+            let f = json_of(&call("fivenum", c.clone()));
+            let q = json_of(&call("iqr", c.clone()));
+            let m = json_of(&call("mad", c.clone()));
+            let e = json_of(&call(
+                "ecdf",
+                serde_json::json!({"column": col, "at": [15, 20, 25]}),
+            ));
+            let d = json_of(&call("density", c.clone()));
+            check
+                .vector(&format!("fivenum_{sfx}"), &five(&f), Tol::coef(12))
+                .scalar(n_key, num(&f["n"]), Tol::exact())
+                .scalar(&format!("iqr_{sfx}"), num(&q["iqr"]), Tol::stat(12))
+                .scalar(&format!("mad_{sfx}"), num(&m["mad"]), Tol::stat(12))
+                .scalar(n_key, num(&m["n"]), Tol::exact())
+                .scalar(n_key, num(&e["n"]), Tol::exact())
+                .scalar(n_key, num(&d["data_n"]), Tol::exact());
+            if col == "v" {
+                let mm = json_of(&call(
+                    "mad",
+                    serde_json::json!({"column": col, "center": "mean"}),
+                ));
+                check
+                    .scalar("mad_mean_v", num(&mm["mad"]), Tol::stat(12))
+                    .scalar("mean_v", num(&mm["center_used"]), Tol::coef(12))
+                    .vector("ecdf_v_at", &nums(&e["y"]), Tol::coef(12));
+                assert_eq!(mm["missing"], missing, "mad center = mean");
+            }
+            for (tool, v) in [
+                ("fivenum", &f),
+                ("iqr", &q),
+                ("mad", &m),
+                ("ecdf", &e),
+                ("density", &d),
+            ] {
+                assert_eq!(v["missing"], missing, "{tool} on {col}");
+            }
+        }
+        check.finish();
+        for tool in ["fivenum", "iqr", "mad", "ecdf", "density"] {
+            let e = err_text(&call(tool, serde_json::json!({"column": "s"})));
+            assert!(
+                e.contains("Column 's' contains non-numeric values"),
+                "{tool}: {e}"
+            );
+            let e = err_text(&call(tool, serde_json::json!({"column": "nope"})));
+            assert!(
+                e.contains("Column 'nope' not found in dataset."),
+                "{tool}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_mcp_stats_spline_approx_na() {
+        // TOOL-25 (missing values)/X-2: stats_spline failed with "non-finite values" on any
+        // incomplete pair, and nothing reported the drop. R: approx and spline drop the
+        // incomplete (x, y) pairs (regularize.values).
+        let (case, rt, server, name) = case_server("stat_descriptive_na");
+        let args = serde_json::json!({"dataset": name, "x": "xs", "y": "ys",
+                                      "xout": [1.5, 4, 6.5, 8]});
+        let a = json_of(&rt.block_on(server.stats_approx(req(args.clone()))).unwrap());
+        let mut sargs = args;
+        sargs["method"] = serde_json::json!("natural");
+        // deviation STAT-69: the default method fmm is not R's FMM spline; only natural is pinned
+        let s = json_of(&rt.block_on(server.stats_spline(req(sargs))).unwrap());
+        Check::new(&case)
+            .vector("approx_y", &nums(&a["y"]), Tol::stat(13))
+            .vector("spline_natural_y", &nums(&s["y"]), Tol::stat(13))
+            .scalar("n_pairs", num(&s["n_knots"]), Tol::exact())
+            .scalar("n_pairs", num(&a["missing"]["n_used"]), Tol::exact())
+            .finish();
+        assert_eq!(a["n_interpolated"], serde_json::json!(4));
+        let missing = summary(15, 13, serde_json::json!({"xs": 1, "ys": 1}));
+        assert_eq!(a["missing"], missing);
+        assert_eq!(s["missing"], missing);
     }
 }

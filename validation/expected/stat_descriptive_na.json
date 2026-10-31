@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "stat_descriptive_na",
+  "area": "stats/robust",
+  "method": "fivenum, IQR, mad, ecdf, spline and approx with missing values",
+  "reference": "stats::fivenum, IQR(na.rm = TRUE), mad(na.rm = TRUE), ecdf; approx and spline(method = 'natural') drop incomplete (x, y) pairs",
+  "call": "fivenum(v); IQR(v, na.rm = TRUE); mad(v, na.rm = TRUE); ecdf(v)(at); approx(xs, ys, xout); spline(xs, ys, method = 'natural', xout)",
+  "dataset": "validation/datasets/generated/descriptive_na.csv",
+  "datasets": ["validation/datasets/generated/descriptive_na.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "fivenum_v": [10.954000000000001, 18.241, 21.0075, 25.595999999999997, 30.132000000000001],
+    "iqr_v": 6.3904999999999959,
+    "mad_v": 4.776937199999999,
+    "mad_mean_v": 4.776937199999999,
+    "mean_v": 21.259916666666665,
+    "ecdf_v_at": [0.083333333333333329, 0.41666666666666669, 0.75],
+    "n_v": 12,
+    "fivenum_vi": [68, 85, 92, 101, 124],
+    "iqr_vi": 16,
+    "mad_vi": 13.343399999999999,
+    "n_vi": 13,
+    "approx_y": [0.80828200537153083, -0.75219324894514761, 0.35382918767507021, 0.9312373477672532],
+    "spline_natural_y": [0.74789853845853527, -0.76617606536789518, 0.32016823034888831, 1.1283817481647389],
+    "n_pairs": 13
+  }
+}

@@ -102,6 +102,35 @@ case("stat_mauchly_na", "stats/mauchly", "Mauchly's sphericity test (X = ~1) wit
        call = "mauchly.test(lm(cbind(t1, t2, t3, t4) ~ 1, data = d), X = ~1)", packages = character(0))
 })
 
+# The single-column descriptive tools (documented as na.rm = TRUE) and spline/approx on (x, y)
+# pairs with missing values in different rows (R drops incomplete pairs: regularize.values).
+# vi is an integer column (Int64 in polars) with missing cells; s is text.
+case("stat_descriptive_na", "stats/robust", "fivenum, IQR, mad, ecdf, spline and approx with missing values", function(ctx) {
+  set.seed(613)
+  n <- 15
+  v <- round(rnorm(n, 20, 5), 3); v[c(2, 9, 13)] <- NA
+  vi <- round(rnorm(n, 100, 15)); vi[c(4, 11)] <- NA
+  xs <- round(sort(runif(n, 0, 10)), 3); ys <- round(sin(xs) + rnorm(n, 0, 0.1), 4)
+  xs[5] <- NA; ys[10] <- NA
+  s <- rep(c("lo", "mid", "hi"), length.out = n)
+  d <- ctx$gen_dataset("descriptive_na", data.frame(id = 1:n, v = v, vi = vi, s = s, xs = xs, ys = ys))
+  stopifnot(is.integer(d$vi), is.double(d$v), !anyDuplicated(d$xs[!is.na(d$xs)]))
+  at <- c(15, 20, 25)
+  cc <- complete.cases(d$xs, d$ys)
+  xo <- c(1.5, 4, 6.5, 8)
+  list(values = list(
+    fivenum_v = vec(fivenum(d$v)), iqr_v = IQR(d$v, na.rm = TRUE), mad_v = mad(d$v, na.rm = TRUE),
+    mad_mean_v = mad(d$v, center = mean(d$v, na.rm = TRUE), na.rm = TRUE), mean_v = mean(d$v, na.rm = TRUE),
+    ecdf_v_at = vec(ecdf(d$v[!is.na(d$v)])(at)), n_v = sum(!is.na(d$v)),
+    fivenum_vi = vec(fivenum(d$vi)), iqr_vi = IQR(d$vi, na.rm = TRUE), mad_vi = mad(d$vi, na.rm = TRUE), n_vi = sum(!is.na(d$vi)),
+    approx_y = vec(approx(d$xs, d$ys, xout = xo)$y),
+    spline_natural_y = vec(spline(d$xs, d$ys, method = "natural", xout = xo)$y),
+    n_pairs = sum(cc)),
+    reference = "stats::fivenum, IQR(na.rm = TRUE), mad(na.rm = TRUE), ecdf; approx and spline(method = 'natural') drop incomplete (x, y) pairs",
+    call = "fivenum(v); IQR(v, na.rm = TRUE); mad(v, na.rm = TRUE); ecdf(v)(at); approx(xs, ys, xout); spline(xs, ys, method = 'natural', xout)",
+    packages = character(0))
+})
+
 # Chi-squared test for trend in proportions on integer count columns. Group 4 has a missing
 # success count; R's prop.trend.test refuses it ("0 (non-NA) cases"), the MCP tool drops the
 # group and keeps every other group's score (default: its row position, 1, 2, 3, 5, 6, 7).

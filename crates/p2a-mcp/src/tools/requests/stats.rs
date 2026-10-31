@@ -180,7 +180,9 @@ pub struct FivenumRequest {
     pub dataset: String,
 
     /// Column to summarize
-    #[schemars(description = "Name of the numeric column to compute five-number summary.")]
+    #[schemars(
+        description = "Name of the numeric column to compute five-number summary. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 }
 
@@ -192,7 +194,9 @@ pub struct IqrRequest {
     pub dataset: String,
 
     /// Column to compute IQR for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Quantile type (1-9, default 7)
@@ -208,7 +212,9 @@ pub struct MadRequest {
     pub dataset: String,
 
     /// Column to compute MAD for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Center (default: median)
@@ -230,7 +236,9 @@ pub struct EcdfRequest {
     pub dataset: String,
 
     /// Column to compute ECDF for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Optional values at which to evaluate the ECDF
@@ -248,7 +256,9 @@ pub struct DensityRequest {
     pub dataset: String,
 
     /// Column to estimate density for
-    #[schemars(description = "Name of the numeric column.")]
+    #[schemars(
+        description = "Name of the numeric column. Missing values are dropped and reported (as na.rm = TRUE)."
+    )]
     pub column: String,
 
     /// Kernel type
@@ -276,7 +286,9 @@ pub struct SplineRequest {
     pub dataset: String,
 
     /// X column (knot locations)
-    #[schemars(description = "Name of the x (independent) column.")]
+    #[schemars(
+        description = "Name of the x (independent) column. Rows with a missing x or y are dropped (as R) and reported."
+    )]
     pub x: String,
 
     /// Y column (values at knots)
@@ -304,7 +316,9 @@ pub struct ApproxRequest {
     pub dataset: String,
 
     /// X column
-    #[schemars(description = "Name of the x (independent) column.")]
+    #[schemars(
+        description = "Name of the x (independent) column. Rows with a missing x or y are dropped (as R) and reported."
+    )]
     pub x: String,
 
     /// Y column
