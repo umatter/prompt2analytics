@@ -29,6 +29,22 @@
 //!   *Econometrics Journal*, 3(2), 148-161.
 //!
 //! - R packages: `plm` (Croissant & Millo), `tseries`
+//!
+//! # Data requirements
+//!
+//! - **Units** are read as a factor: numeric or text ids, in R `factor()` order (numbers
+//!   numerically, text in C order), which is the order of `unit_statistics`.
+//! - **Time** must hold whole numbers or dates; a fractional value is an error. Each unit's
+//!   observations are taken in time order.
+//! - A repeated (unit, time) row is an error.
+//! - **Gaps** in a unit's time are joined: its observations are used in time order as if
+//!   consecutive, as `plm::purtest` does; the result warns how many units have gaps.
+//! - Units with fewer than 3 observations are dropped, with a warning naming them.
+//! - Rows with a missing value in the variable, the unit or the time are dropped and
+//!   reported in `missing` and `warnings`; an infinite value is an error.
+//!
+//! Only the per-unit ADF regression is validated against R (`urca::ur.df`); the LLC, IPS,
+//! Fisher and Hadri statistics are not.
 
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -36,8 +52,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::normal_cdf;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -142,6 +160,12 @@ pub struct PanelUnitRootResult {
     /// Individual unit p-values (for Fisher test)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit_p_values: Option<Vec<f64>>,
+    /// Warnings: units with gaps in time, dropped short units, dropped rows.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Rows dropped because of missing values.
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for PanelUnitRootResult {
@@ -178,6 +202,24 @@ impl fmt::Display for PanelUnitRootResult {
             "(fail to reject H0)"
         };
         writeln!(f, "Significance: {}", sig)?;
+
+        // The missing-value note is the last line, not a warning line.
+        let note = self.missing.note();
+        let warnings: Vec<&String> = self
+            .warnings
+            .iter()
+            .filter(|w| Some(w.as_str()) != note.as_deref())
+            .collect();
+        if !warnings.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Warnings:")?;
+            for w in warnings {
+                writeln!(f, "  - {w}")?;
+            }
+        }
+        if let Some(note) = note {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
@@ -220,11 +262,11 @@ pub fn run_panel_unit_root(
     config: PanelUnitRootConfig,
 ) -> EconResult<PanelUnitRootResult> {
     // Extract panel data
-    let panels = extract_panels(dataset, var_col, unit_col, time_col)?;
-
-    if panels.is_empty() {
-        return Err(EconError::EmptyDataset);
-    }
+    let Panels {
+        series: panels,
+        mut warnings,
+        missing,
+    } = extract_panels(dataset, var_col, unit_col, time_col)?;
 
     // Determine lags
     let max_t = panels.values().map(|v| v.len()).max().unwrap_or(0);
@@ -235,109 +277,148 @@ pub fn run_panel_unit_root(
         default_max_lags.min(max_lags)
     });
 
-    match config.test_type {
+    let mut result = match config.test_type {
         PanelUnitRootTest::LLC => run_llc_test(&panels, config.model, lags),
         PanelUnitRootTest::IPS => run_ips_test(&panels, config.model, lags),
         PanelUnitRootTest::Fisher => run_fisher_test(&panels, config.model, lags),
         PanelUnitRootTest::Hadri => run_hadri_test(&panels, config.model),
+    }?;
+    if let Some(note) = missing.note() {
+        warnings.push(note);
     }
+    result.warnings = warnings;
+    result.missing = missing;
+    Ok(result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Panel Data Extraction
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Extract panel data organized by unit.
+/// The panels of a unit-root test: each unit's observations in time order, keyed by the
+/// unit's factor code (level order), with what the extraction dropped or joined.
+struct Panels {
+    series: BTreeMap<usize, Vec<f64>>,
+    warnings: Vec<String>,
+    missing: MissingSummary,
+}
+
+/// "'a', 'b', 'c' (and 4 more)": at most five labels.
+fn label_list(labels: &[&str]) -> String {
+    let shown: Vec<String> = labels.iter().take(5).map(|l| format!("'{l}'")).collect();
+    let mut text = shown.join(", ");
+    if labels.len() > 5 {
+        text.push_str(&format!(" (and {} more)", labels.len() - 5));
+    }
+    text
+}
+
+/// Extract the panels: units as a factor (text or numeric ids), times as a whole-number
+/// index, rows with a missing value dropped. A repeated (unit, time) is an error; gaps
+/// are joined in time order, as `plm::purtest` does, with a warning; units with fewer
+/// than 3 observations are dropped with a warning naming them.
 fn extract_panels(
     dataset: &Dataset,
     var_col: &str,
     unit_col: &str,
     time_col: &str,
-) -> EconResult<BTreeMap<i64, Vec<f64>>> {
-    let df = dataset.df();
+) -> EconResult<Panels> {
+    let cols = ColumnRequest::new(dataset.df())
+        .factor(unit_col)
+        .time_index(time_col)
+        .numeric(var_col)
+        .na(NaPolicy::Omit)
+        .extract()?;
+    let factor = cols.factor(unit_col);
+    let times = cols.time_index(time_col);
+    let values = cols.numeric(var_col);
+    let n_units = factor.n_levels();
 
-    let available: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // Get columns
-    let var = df.column(var_col).map_err(|_| EconError::ColumnNotFound {
-        column: var_col.to_string(),
-        available: available.clone(),
-    })?;
-    let unit = df.column(unit_col).map_err(|_| EconError::ColumnNotFound {
-        column: unit_col.to_string(),
-        available: available.clone(),
-    })?;
-    let time = df.column(time_col).map_err(|_| EconError::ColumnNotFound {
-        column: time_col.to_string(),
-        available: available.clone(),
-    })?;
-
-    // Convert to f64
-    let var_vals: Vec<Option<f64>> = var
-        .cast(&polars::prelude::DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: var_col.to_string(),
-        })?
-        .f64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: var_col.to_string(),
-        })?
-        .into_iter()
-        .collect();
-
-    let unit_vals: Vec<Option<i64>> = unit
-        .cast(&polars::prelude::DataType::Int64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: unit_col.to_string(),
-        })?
-        .i64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: unit_col.to_string(),
-        })?
-        .into_iter()
-        .collect();
-
-    let time_vals: Vec<Option<i64>> = time
-        .cast(&polars::prelude::DataType::Int64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?
-        .i64()
-        .map_err(|_| EconError::NonNumericColumn {
-            column: time_col.to_string(),
-        })?
-        .into_iter()
-        .collect();
-
-    // Group by unit and sort by time
-    let mut panels: BTreeMap<i64, BTreeMap<i64, f64>> = BTreeMap::new();
-
-    for i in 0..var_vals.len() {
-        if let (Some(v), Some(u), Some(t)) = (var_vals[i], unit_vals[i], time_vals[i]) {
-            if v.is_finite() {
-                panels.entry(u).or_default().insert(t, v);
-            }
-        }
+    // Rows grouped by unit in level order (a stable counting sort), then by time.
+    let what = "panel unit-root rows";
+    let mut start = resource::try_vec(n_units.saturating_add(1), 0usize, what)?;
+    for &code in &factor.codes {
+        start[code as usize + 1] += 1;
+    }
+    for u in 0..n_units {
+        start[u + 1] += start[u];
+    }
+    let mut next = resource::try_vec(n_units, 0usize, what)?;
+    next.copy_from_slice(&start[..n_units]);
+    let mut order = resource::try_vec(factor.codes.len(), 0usize, what)?;
+    for (row, &code) in factor.codes.iter().enumerate() {
+        let slot = &mut next[code as usize];
+        order[*slot] = row;
+        *slot += 1;
     }
 
-    // Convert to sorted vectors
-    let result: BTreeMap<i64, Vec<f64>> = panels
-        .into_iter()
-        .filter_map(|(u, time_map)| {
-            let vals: Vec<f64> = time_map.into_values().collect();
-            if vals.len() >= 3 {
-                Some((u, vals))
-            } else {
-                None // Need at least 3 observations per panel
+    let mut series = BTreeMap::new();
+    let mut gapped = 0usize;
+    let mut first_gap: Option<(usize, i64, i64)> = None;
+    let mut short: Vec<&str> = Vec::new();
+    for u in 0..n_units {
+        resource::checkpoint()?;
+        let rows = &mut order[start[u]..start[u + 1]];
+        rows.sort_by_key(|&r| times[r]);
+        let mut gap_here = false;
+        for (p, pair) in rows.windows(2).enumerate() {
+            let (t1, t2) = (times[pair[0]], times[pair[1]]);
+            if t1 == t2 {
+                let k = rows[p..].partition_point(|&r| times[r] == t1);
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Unit '{}' has {k} rows for time {t1}; panel unit-root tests need \
+                         one row per (unit, time).",
+                        factor.levels[u]
+                    ),
+                });
             }
-        })
-        .collect();
+            if !gap_here && t2.saturating_sub(t1) > 1 {
+                gap_here = true;
+                first_gap.get_or_insert((u, t1, t2));
+            }
+        }
+        gapped += usize::from(gap_here);
+        if rows.len() < 3 {
+            short.push(&factor.levels[u]);
+            continue;
+        }
+        let mut unit_values = resource::try_with_capacity(rows.len(), what)?;
+        unit_values.extend(rows.iter().map(|&r| values[r]));
+        series.insert(u, unit_values);
+    }
 
-    Ok(result)
+    let mut warnings = Vec::new();
+    if let Some((u, t1, t2)) = first_gap {
+        warnings.push(format!(
+            "{gapped} of {n_units} unit(s) have gaps in time (first: unit '{}' between {t1} \
+             and {t2}); their observations are joined in time order as if consecutive, as \
+             plm::purtest does.",
+            factor.levels[u]
+        ));
+    }
+    if !short.is_empty() {
+        warnings.push(format!(
+            "Dropped {} unit(s) with fewer than 3 observations: {}",
+            short.len(),
+            label_list(&short)
+        ));
+    }
+    if series.is_empty() {
+        return Err(EconError::InsufficientData {
+            required: 3,
+            provided: 0,
+            context: format!(
+                "panel unit-root test: no unit of '{unit_col}' has 3 or more observations \
+                 of '{var_col}'"
+            ),
+        });
+    }
+    Ok(Panels {
+        series,
+        warnings,
+        missing: cols.missing().clone(),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -352,7 +433,7 @@ fn extract_panels(
 /// The LLC test assumes a common autoregressive parameter across panels
 /// and is based on a pooled ADF regression with panel-specific intercepts/trends.
 fn run_llc_test(
-    panels: &BTreeMap<i64, Vec<f64>>,
+    panels: &BTreeMap<usize, Vec<f64>>,
     model: PanelModel,
     lags: usize,
 ) -> EconResult<PanelUnitRootResult> {
@@ -469,6 +550,8 @@ fn run_llc_test(
         lags_used: lags,
         unit_statistics: None,
         unit_p_values: None,
+        warnings: Vec::new(),
+        missing: MissingSummary::default(),
     })
 }
 
@@ -606,7 +689,7 @@ fn get_llc_adjustment_factors(avg_t: f64, model: PanelModel) -> (f64, f64) {
 /// Based on averaging individual ADF t-statistics and using
 /// tabulated means and variances for standardization.
 fn run_ips_test(
-    panels: &BTreeMap<i64, Vec<f64>>,
+    panels: &BTreeMap<usize, Vec<f64>>,
     model: PanelModel,
     lags: usize,
 ) -> EconResult<PanelUnitRootResult> {
@@ -660,6 +743,8 @@ fn run_ips_test(
         lags_used: lags,
         unit_statistics: Some(t_stats),
         unit_p_values: None,
+        warnings: Vec::new(),
+        missing: MissingSummary::default(),
     })
 }
 
@@ -794,7 +879,7 @@ fn get_ips_moments(avg_t: f64, model: PanelModel) -> (f64, f64) {
 ///
 /// This test allows for unbalanced panels and heterogeneous lag structures.
 fn run_fisher_test(
-    panels: &BTreeMap<i64, Vec<f64>>,
+    panels: &BTreeMap<usize, Vec<f64>>,
     model: PanelModel,
     lags: usize,
 ) -> EconResult<PanelUnitRootResult> {
@@ -847,6 +932,8 @@ fn run_fisher_test(
         lags_used: lags,
         unit_statistics: Some(t_stats),
         unit_p_values: Some(p_values),
+        warnings: Vec::new(),
+        missing: MissingSummary::default(),
     })
 }
 
@@ -878,7 +965,7 @@ fn adf_p_value(t_stat: f64, _df: u32, model: PanelModel) -> f64 {
 ///
 /// Based on KPSS-type LM statistics averaged across panels.
 fn run_hadri_test(
-    panels: &BTreeMap<i64, Vec<f64>>,
+    panels: &BTreeMap<usize, Vec<f64>>,
     model: PanelModel,
 ) -> EconResult<PanelUnitRootResult> {
     let n = panels.len();
@@ -930,6 +1017,8 @@ fn run_hadri_test(
         lags_used: 0,
         unit_statistics: Some(lm_stats),
         unit_p_values: None,
+        warnings: Vec::new(),
+        missing: MissingSummary::default(),
     })
 }
 
@@ -1208,10 +1297,166 @@ mod tests {
             lags_used: 1,
             unit_statistics: None,
             unit_p_values: None,
+            warnings: vec!["w".into()],
+            missing: Default::default(),
         };
 
         let display = format!("{}", result);
         assert!(display.contains("Levin-Lin-Chu"));
         assert!(display.contains("10"));
+        assert!(display.contains("Warnings:"));
+    }
+    // ── Data extraction (validation/r/cases/econ_dynamic_panel.R, panel_pur_extraction) ──
+
+    use p2a_validation::{Check, Tol};
+
+    /// A committed CSV loaded as `p2a data load` loads it; for the property tests, which
+    /// compare no R value and so load no case.
+    fn repo_dataset(rel: &str) -> Dataset {
+        Dataset::new(crate::data::DataLoader::load_csv(p2a_validation::repo_path(rel)).unwrap())
+    }
+
+    const AB_BALANCED: &str = "validation/datasets/generated/ab_balanced.csv";
+    const AB_COMMON_GAP: &str = "validation/datasets/generated/ab_common_gap.csv";
+
+    fn ips_one_lag() -> PanelUnitRootConfig {
+        PanelUnitRootConfig {
+            test_type: PanelUnitRootTest::IPS,
+            model: PanelModel::Intercept,
+            lags: Some(1),
+            max_lags: None,
+        }
+    }
+
+    /// `ds` with column `column` added or replaced.
+    fn with_column(ds: &Dataset, column: Column) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(column).unwrap();
+        Dataset::new(df)
+    }
+
+    /// The `year` column as f64.
+    fn years_f64(ds: &Dataset) -> Vec<f64> {
+        ds.df()
+            .column("year")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|y| y.unwrap() as f64)
+            .collect()
+    }
+
+    /// Text unit ids, a year no unit observes (2003) and 10 missing y cells: the per-unit
+    /// ADF taus of urca::ur.df on each unit's observations in time order. Before: text ids
+    /// gave `EmptyDataset`.
+    #[test]
+    fn test_validate_panel_pur_extraction_common_gap() {
+        let (case, ds) = crate::test_support::load_case("panel_pur_extraction");
+        let r = run_panel_unit_root(&ds, "y", "unit", "year", ips_one_lag()).unwrap();
+        let taus = r.unit_statistics.clone().unwrap();
+        let mut c = Check::new(&case);
+        c.vector("unit_tau", &taus, Tol::stat(690))
+            .scalar("n_panels", r.n_panels as f64, Tol::exact())
+            .scalar("avg_t", r.avg_time_periods, Tol::exact())
+            .scalar("n_rows_dropped", r.missing.n_dropped as f64, Tol::exact());
+        c.finish();
+        assert_eq!(r.missing.by_column, [("y".to_string(), 10)]);
+        let note = r.missing.note().unwrap();
+        assert!(r.warnings.contains(&note), "{:?}", r.warnings);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("100 of 100 unit(s) have gaps in time")),
+            "{:?}",
+            r.warnings
+        );
+        // The note is the last line of the text, and only there.
+        let text = r.to_string();
+        assert!(text.contains("Warnings:"), "{text}");
+        assert!(
+            text.trim_end()
+                .ends_with(&format!("Missing values: {note}")),
+            "{text}"
+        );
+        assert_eq!(text.matches(note.as_str()).count(), 1, "{text}");
+        // Numeric ids give the same units in the same order.
+        let by_id = run_panel_unit_root(&ds, "y", "id", "year", ips_one_lag()).unwrap();
+        assert_eq!(by_id.unit_statistics.unwrap(), taus);
+    }
+
+    /// Before: `EmptyDataset` (the truncated times left 2 values per unit).
+    #[test]
+    fn test_pur_fractional_time_is_an_error() {
+        let ds = repo_dataset(AB_BALANCED);
+        let quarters: Vec<f64> = years_f64(&ds)
+            .iter()
+            .map(|y| 2000.0 + (y - 2000.0) / 4.0)
+            .collect();
+        let ds = with_column(&ds, Column::new("qtime".into(), quarters));
+        let e = run_panel_unit_root(&ds, "y", "id", "qtime", ips_one_lag()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("whole numbers")),
+            "{e:?}"
+        );
+    }
+
+    /// Before: `Ok`, the second row overwrote the first.
+    #[test]
+    fn test_pur_duplicate_unit_time_is_an_error() {
+        let ds = repo_dataset(AB_BALANCED);
+        let mut df = ds.df().clone();
+        df.vstack_mut(&ds.df().slice(2, 1)).unwrap();
+        let e =
+            run_panel_unit_root(&Dataset::new(df), "y", "id", "year", ips_one_lag()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("Unit '1' has 2 rows for time 2002")),
+            "{e:?}"
+        );
+    }
+
+    /// Before: the unit vanished silently.
+    #[test]
+    fn test_pur_short_units_dropped_with_warning() {
+        let ds = repo_dataset(AB_BALANCED);
+        let df = ds.df();
+        let ids = df.column("id").unwrap().i64().unwrap();
+        let years = df.column("year").unwrap().i64().unwrap();
+        let keep: polars::prelude::BooleanChunked = ids
+            .iter()
+            .zip(years.iter())
+            .map(|(i, y)| !(i == Some(7) && y.is_some_and(|y| y >= 2002)))
+            .collect();
+        let short = Dataset::new(df.filter(&keep).unwrap());
+        let r = run_panel_unit_root(&short, "y", "id", "year", ips_one_lag()).unwrap();
+        assert_eq!(r.n_panels, 99);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("Dropped 1 unit(s) with fewer than 3 observations: '7'")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_na_pur_int64_and_float64_time() {
+        let ds = repo_dataset(AB_BALANCED);
+        let float_years = with_column(&ds, Column::new("year".into(), years_f64(&ds)));
+        let a = run_panel_unit_root(&ds, "y", "id", "year", ips_one_lag()).unwrap();
+        let b = run_panel_unit_root(&float_years, "y", "id", "year", ips_one_lag()).unwrap();
+        assert_eq!(a.statistic.to_bits(), b.statistic.to_bits());
+        assert_eq!(a.unit_statistics, b.unit_statistics);
+    }
+
+    #[test]
+    fn test_na_pur_text_variable_is_non_numeric() {
+        let ds = repo_dataset(AB_COMMON_GAP);
+        let e = run_panel_unit_root(&ds, "unit", "id", "year", ips_one_lag()).unwrap_err();
+        assert!(
+            matches!(&e, EconError::NonNumericColumn { column } if column == "unit"),
+            "{e:?}"
+        );
     }
 }

@@ -42,6 +42,28 @@
       "supersedes_legacy": [
         "validation/expected/gmm_twostep_full.csv"
       ]
+    },
+    {
+      "id": "panel_unit_root_extraction",
+      "name": "Panel unit-root tests: data extraction (unit ids, time, gaps, missing values)",
+      "category": "econometrics",
+      "reference": "urca::ur.df per unit (type 'drift', lags 1); plm::purtest's splicing of gaps",
+      "doc": "validation/econometrics/panel_unit_root.md",
+      "cases": [
+        "panel_pur_extraction"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_panel_pur_extraction_common_gap"
+      ],
+      "quantities": [
+        "per-unit ADF tau",
+        "units",
+        "average T",
+        "rows dropped"
+      ],
+      "tolerance": "validation/README.md, n = 690: statistics 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
