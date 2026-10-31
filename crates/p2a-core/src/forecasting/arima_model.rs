@@ -71,13 +71,16 @@ use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_zeros1,
 const MAX_ITERATIONS: usize = 200;
 /// Converged when the largest |Gauss-Newton step| / (1 + |coefficient|) is at most this.
 const STEP_TOLERANCE: f64 = 1e-8;
-/// When damping finds no better point, the fit counts as converged up to this scaled step.
+/// When no damped step up to [`LAMBDA_MAX`] has a positive gain ratio (the rounding floor of
+/// the sum of squares), the fit counts as converged if the scaled Gauss-Newton step is at
+/// most this.
 const FLOOR_TOLERANCE: f64 = 1e-6;
 const LAMBDA_START: f64 = 1e-3;
 /// The factor that raises the damping after a rejected step; it doubles on every further
 /// rejection and returns to this value after an accepted step (Nielsen 1999).
 const NU_START: f64 = 2.0;
-/// Above this damping no step improves the sum of squares: the rounding floor.
+/// The damping at which the search for a step with a positive gain ratio stops: above it
+/// the damped steps are too short to lower the sum of squares beyond rounding.
 const LAMBDA_MAX: f64 = 1e16;
 /// Keeps the damping positive after many accepted steps.
 const LAMBDA_MIN: f64 = 1e-20;
@@ -216,7 +219,10 @@ pub struct ArimaResult {
     /// Estimation method: "CSS".
     #[serde(default)]
     pub method: String,
-    /// Whether the optimiser reached the CSS optimum.
+    /// Whether the Levenberg-Marquardt fit met its step test: the largest Gauss-Newton step,
+    /// scaled by 1 + |coefficient|, was at most 1e-8, or at most 1e-6 where no damped step
+    /// lowered the sum of squares further. It is a local criterion: the CSS objective can
+    /// have more than one minimum, and `converged` does not say this one is the lowest.
     #[serde(default)]
     pub converged: bool,
     /// Levenberg-Marquardt iterations.
@@ -908,6 +914,20 @@ fn final_step(
     Ok(())
 }
 
+/// Nielsen's gain ratio of a trial step: the decrease of the sum of squares from `ssr` to
+/// `ssr_trial` over the decrease `predicted` by the linearised residuals. NaN, which rejects
+/// the step, when the trial sum of squares is not finite or the predicted decrease is not
+/// positive: the predicted decrease of a nonzero damped step is positive in exact
+/// arithmetic, so a value at or below 0 is rounding in a nearly singular system, and its
+/// sign would turn a rise of the sum of squares into a positive ratio.
+fn gain_ratio(ssr: f64, ssr_trial: f64, predicted: f64) -> f64 {
+    if ssr_trial.is_finite() && predicted > 0.0 {
+        (ssr - ssr_trial) / predicted
+    } else {
+        f64::NAN
+    }
+}
+
 /// Levenberg-Marquardt on the CSS residuals from `coef` (updated in place), damped by
 /// Nielsen's (1999) gain ratio: rho = the actual decrease of the sum of squares over the
 /// decrease the linearised residuals predict. A step with rho > 0 is accepted and lambda
@@ -983,17 +1003,13 @@ fn optimise(
                     let predicted: f64 = (0..k)
                         .map(|c| delta[c] * (lambda * ws.jtj[[c, c]] * delta[c] + rhs[c]))
                         .sum();
-                    if ssr_trial.is_finite() {
-                        (ssr - ssr_trial) / predicted
-                    } else {
-                        f64::NAN
-                    }
+                    gain_ratio(ssr, ssr_trial, predicted)
                 }
                 // A singular or non-finite damped system: the step is rejected.
                 Err(_) => f64::NAN,
             };
             // Accepted only when rho > 0; NaN (a failed solve, a non-finite sum of squares,
-            // 0 / 0) is not.
+            // a predicted decrease that is not positive) is not.
             if gain > 0.0 {
                 coef.copy_from_slice(&trial);
                 let scale = (1.0 - (2.0 * gain - 1.0).powi(3)).max(1.0 / 3.0);
@@ -1873,6 +1889,30 @@ mod tests {
             ..ArimaSpec::new(0, 1, 1)
         };
         assert_eq!(drift.label(), "ARIMA(0,1,1) with drift");
+    }
+
+    /// A step is accepted only when its gain ratio is positive. A predicted decrease that is
+    /// not positive (rounding in a nearly singular damped system) accepts no step, also one
+    /// that raises the sum of squares, which the plain ratio would score as a gain.
+    #[test]
+    fn test_gain_ratio_needs_a_positive_predicted_decrease() {
+        assert_eq!(gain_ratio(2.0, 1.0, 2.0), 0.5);
+        assert!(gain_ratio(2.0, 3.0, 2.0) < 0.0);
+        for (ssr_trial, predicted) in [
+            (3.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (1.0, f64::NAN),
+            (f64::INFINITY, 1.0),
+            (f64::NAN, 1.0),
+        ] {
+            let gain = gain_ratio(2.0, ssr_trial, predicted);
+            assert!(
+                !(gain > 0.0),
+                "trial {ssr_trial}, predicted {predicted}: gain {gain} accepts the step"
+            );
+        }
     }
 
     /// A series the model reproduces exactly (constant, or constant after differencing or
