@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_gmm_difference",
+      "name": "Arellano-Bond difference GMM (one-step, two-step)",
+      "category": "econometrics",
+      "reference": "plm::pgmm(transformation = 'd'); plm::vcovHC.pgmm; plm::sargan; plm::mtest",
+      "doc": "validation/econometrics/gmm.md",
+      "cases": [
+        "dpd_ab_balanced",
+        "dpd_ab_gaps",
+        "dpd_ab_common_gap",
+        "dpd_ab_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::utils::tests::test_validate_difference_equations_gaps_layout"
+      ],
+      "quantities": [
+        "coefficients (one-step, two-step)",
+        "SE one-step Arellano-Bond (1991)",
+        "SE one-step robust",
+        "SE two-step uncorrected",
+        "SE two-step Windmeijer",
+        "sigma2",
+        "Sargan/Hansen (pgmm)",
+        "Sargan homoskedastic (one-step)",
+        "AR(1)",
+        "AR(2)",
+        "p-values",
+        "equations",
+        "instruments",
+        "weighting ranks"
+      ],
+      "tolerance": "validation/README.md, n = 180-600: coefficients 1e-8, SE and statistics 1e-6 relative; Grunfeld (rank-deficient weights) 1e-7",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/gmm_twostep_full.csv"
+      ]
+    }
+  ]
+}
