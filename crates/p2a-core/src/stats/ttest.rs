@@ -197,7 +197,13 @@ impl std::fmt::Display for TTestResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-        if let Some(note) = self.missing.note() {
+        // Two samples drop their missing values separately; paired rows are dropped jointly.
+        let note = if self.estimate_2.is_some() {
+            self.missing.two_sample_note()
+        } else {
+            self.missing.note()
+        };
+        if let Some(note) = note {
             writeln!(f, "Missing values: {note}")?;
         }
 
@@ -955,6 +961,12 @@ mod tests {
             vec![("x".to_string(), 15), ("y".to_string(), 15)]
         );
         assert_eq!((welch.n, welch.n_2), (7, Some(7)));
+        // each sample drops its own missing values: the note counts values
+        assert_eq!(
+            welch.to_string().lines().last().unwrap(),
+            "Missing values: 30 of 44 values dropped because of missing values (two samples of \
+             22; x: 15, y: 15)"
+        );
         // complete pairs (complete.cases(x, y))
         let paired = tt("x", Some("y"), true);
         assert_eq!(

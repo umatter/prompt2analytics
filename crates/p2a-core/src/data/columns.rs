@@ -147,6 +147,37 @@ impl MissingSummary {
             by_column,
         }
     }
+
+    /// The note of a summary that [`merge_samples`](Self::merge_samples) built from two
+    /// columns of one frame: "30 of 44 values dropped because of missing values (two samples
+    /// of 22; x: 15, y: 15)"; `None` when empty. Each sample drops its own missing values, so
+    /// the counts are of values, not rows; a column used as both samples is counted in each.
+    /// [`note`](Self::note) is unchanged, and the serialized summary keeps the merged totals.
+    pub fn two_sample_note(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut detail: Vec<String> = Vec::new();
+        if self.n_total % 2 == 0 {
+            detail.push(format!("two samples of {}", self.n_total / 2));
+        }
+        if !self.by_column.is_empty() {
+            let list: Vec<String> = self
+                .by_column
+                .iter()
+                .map(|(column, count)| format!("{column}: {count}"))
+                .collect();
+            detail.push(list.join(", "));
+        }
+        let mut note = format!(
+            "{} of {} values dropped because of missing values",
+            self.n_dropped, self.n_total
+        );
+        if !detail.is_empty() {
+            note.push_str(&format!(" ({})", detail.join("; ")));
+        }
+        Some(note)
+    }
 }
 
 impl fmt::Display for MissingSummary {
@@ -1792,6 +1823,46 @@ mod tests {
             ColumnRequest::new(&df).numeric("y").extract()
         });
         assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+    }
+
+    #[test]
+    fn test_na_columns_two_sample_note() {
+        // Two samples of 22 values, each dropping its own missing values, merged as the
+        // two-sample wrappers merge them: the note counts values, and names the sample size.
+        let sample = |name: &str, dropped: usize| MissingSummary {
+            n_total: 22,
+            n_used: 22 - dropped,
+            n_dropped: dropped,
+            by_column: vec![(name.to_string(), dropped)],
+        };
+        let merged = MissingSummary::merge_samples(&sample("x", 15), &sample("y", 15));
+        assert_eq!(
+            merged.two_sample_note().as_deref(),
+            Some(
+                "30 of 44 values dropped because of missing values (two samples of 22; x: 15, \
+                 y: 15)"
+            )
+        );
+        // note() is unchanged.
+        assert_eq!(
+            merged.note().as_deref(),
+            Some("30 of 44 rows dropped because of missing values (x: 15, y: 15)")
+        );
+        // Only one sample with missing values.
+        let one = MissingSummary::merge_samples(&sample("xi", 2), &MissingSummary::none(22));
+        assert_eq!(
+            one.two_sample_note().as_deref(),
+            Some("2 of 44 values dropped because of missing values (two samples of 22; xi: 2)")
+        );
+        // One column as both samples: its values are counted in each sample.
+        let same = MissingSummary::merge_samples(&sample("x", 15), &sample("x", 15));
+        assert_eq!(
+            same.two_sample_note().as_deref(),
+            Some("30 of 44 values dropped because of missing values (two samples of 22; x: 30)")
+        );
+        let none =
+            MissingSummary::merge_samples(&MissingSummary::none(5), &MissingSummary::none(5));
+        assert_eq!(none.two_sample_note(), None);
     }
 
     #[test]

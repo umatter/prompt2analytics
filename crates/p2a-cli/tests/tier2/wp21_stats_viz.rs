@@ -246,7 +246,10 @@ fn test_validate_cli_t_test_two_na() {
     );
     assert_eq!(
         note(&out),
-        Some("Note: 30 of 44 rows dropped because of missing values (x: 15, y: 15)"),
+        Some(
+            "Note: 30 of 44 values dropped because of missing values (two samples of 22; x: \
+             15, y: 15)"
+        ),
         "{out}"
     );
     let j = s.json(&["stats", "t-test-two", d, "--col1", "x", "--col2", "y"]);
@@ -369,6 +372,23 @@ fn test_validate_cli_wilcoxon_na() {
         .scalar("ranksum_r1", num(&r, "statistic"), Tol::exact())
         .finish();
     assert_eq!(r["missing"], missing(20, 18, json!({"x": 1, "y": 1}))); // each sample on its own
+    let rt = s.ok(&[
+        "stats",
+        "wilcoxon",
+        d.as_str(),
+        "--col1",
+        "x",
+        "--col2",
+        "y",
+    ]);
+    assert_eq!(
+        note(&rt),
+        Some(
+            "Note: 2 of 20 values dropped because of missing values (two samples of 10; x: 1, \
+             y: 1)"
+        ),
+        "{rt}"
+    );
 }
 
 /// CLI-9/CLI-8: fivenum/IQR/MAD drop missing cells (fivenum; IQR/mad na.rm = TRUE) and accept
@@ -1135,7 +1155,10 @@ fn test_validate_cli_shapiro_bartlett_ks_na() {
     let kst = s.ok(&["stats", "ks-test", d2.as_str(), "--x", "xi", "--y", "yi"]);
     assert_eq!(
         note(&kst),
-        Some("Note: 6 of 44 rows dropped because of missing values (xi: 2, yi: 4)"),
+        Some(
+            "Note: 6 of 44 values dropped because of missing values (two samples of 22; xi: \
+             2, yi: 4)"
+        ),
         "{kst}"
     );
 }

@@ -140,7 +140,13 @@ impl std::fmt::Display for KsTestResult {
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-        if let Some(note) = self.missing.note() {
+        // Two samples drop their missing values separately.
+        let note = if self.n_2.is_some() {
+            self.missing.two_sample_note()
+        } else {
+            self.missing.note()
+        };
+        if let Some(note) = note {
             writeln!(f, "Missing values: {note}")?;
         }
 
@@ -937,7 +943,8 @@ mod tests {
         );
         assert_eq!(
             two.to_string().lines().last().unwrap(),
-            format!("Missing values: {}", two.missing.note().unwrap())
+            "Missing values: 30 of 44 values dropped because of missing values (two samples of \
+             22; x: 15, y: 15)"
         );
         let one = ks_test(
             &ds,
