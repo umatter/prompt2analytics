@@ -1542,9 +1542,17 @@ mod tests {
         let fits = four_fits(&ds, "inv", &["value", "capital"], "firm", "year");
         let mut c = Check::new(&case);
         // Generalized inverses of rank-deficient weighting matrices (eigen- vs SVD-based
-        // truncation): the coefficients agree with pgmm to 3e-12, the SEs to 1.6e-10, within
-        // validation/README.md's tolerances for n = 180.
+        // truncation): the coefficients agree with pgmm to 3e-12, within validation/README.md's
+        // Tol::coef(180); the SEs agree to 1.6e-10 and the statistics and p-values to 6e-11, so
+        // their relative bounds are 1e-7, ten times tighter than README's for n = 180 (README's
+        // absolute parts).
         let t = Tols::n(180);
+        let t = Tols {
+            se: Tol::new(1e-7, t.se.abs),
+            stat: Tol::new(1e-7, t.stat.abs),
+            p: Tol::new(1e-7, t.p.abs),
+            ..t
+        };
         check_four(&mut c, &["lag(inv, 1)", "value", "capital"], &fits, t);
         for r in &fits {
             c.scalar(

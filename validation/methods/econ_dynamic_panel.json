@@ -40,7 +40,7 @@
         "instruments",
         "weighting ranks"
       ],
-      "tolerance": "validation/README.md, n = 180-600: coefficients 1e-8, SE and statistics 1e-6 relative",
+      "tolerance": "validation/README.md, n = 180-600: coefficients 1e-8, SE and statistics 1e-6 relative; Grunfeld SEs, statistics and p-values 1e-7",
       "deviations": [],
       "supersedes_legacy": [
         "validation/expected/gmm_twostep_full.csv"
