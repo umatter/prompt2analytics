@@ -228,9 +228,9 @@ impl AnalyticsServer {
         )]))
     }
 
-    /// Run Arellano-Bond / System GMM dynamic panel estimation.
+    /// Run Arellano-Bond difference GMM dynamic panel estimation.
     #[tool(
-        description = "Run Arellano-Bond (difference GMM) or Blundell-Bond (system GMM) estimation for dynamic panel data models. Handles endogeneity of lagged dependent variables using lagged levels/differences as instruments. Reports Sargan test for overidentifying restrictions and AR(1)/AR(2) tests for serial correlation."
+        description = "Arellano-Bond difference GMM for dynamic panels, as R plm::pgmm(transformation = 'd'). Equations exist where y is observed at t, ..., t-lags-1 (time in steps of 1; gaps and late entry are handled; repeated (entity, time) rows are an error). GMM instruments are the observed lags y_{t-min_lag} ... y_{t-max_lag} (block-diagonal by period, or collapsed), and the exogenous x enter in differences. One-step (H-weighted) or two-step (default) estimates. Standard errors: one-step robust or Arellano-Bond (1991) classical; two-step Windmeijer (2005)-corrected (default) or uncorrected. Reports the Sargan/Hansen test (plm::sargan) and the robust Arellano-Bond AR(1)/AR(2) tests. Rows with missing values are dropped and reported. System GMM (transform='system') is not implemented yet: it runs difference GMM with a warning."
     )]
     pub async fn panel_gmm(
         &self,
@@ -337,7 +337,7 @@ impl AnalyticsServer {
 
     /// Run panel unit root tests.
     #[tool(
-        description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity."
+        description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity. Unit ids may be text or numbers; time must hold whole numbers or dates; repeated (unit, time) rows are an error; gaps are joined in time order as plm::purtest does (reported); rows with missing values are dropped and reported."
     )]
     pub async fn panel_unit_root(
         &self,

@@ -19,7 +19,8 @@
         "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_balanced_variants",
         "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_gaps",
         "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_common_gap",
-        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_grunfeld"
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_gmm_ab_grunfeld",
+        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_gmm_ab_balanced"
       ],
       "quantities": [
         "coefficients (one-step, two-step)",
@@ -53,7 +54,8 @@
         "panel_pur_extraction"
       ],
       "tests": [
-        "p2a-core::econometrics::panel_unit_root::tests::test_validate_panel_pur_extraction_common_gap"
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_panel_pur_extraction_common_gap",
+        "p2a-mcp::tier2::wp19_dynamic_panel::test_validate_mcp_panel_unit_root_text_ids"
       ],
       "quantities": [
         "per-unit ADF tau",
