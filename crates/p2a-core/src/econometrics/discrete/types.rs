@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::data::columns::MissingSummary;
 use crate::traits::estimator::SignificanceLevel;
 
 /// Discrete choice model type.
@@ -62,6 +63,9 @@ pub struct DiscreteResult {
     pub converged: bool,
     /// Any warnings (e.g., separation issues)
     pub warnings: Vec<String>,
+    /// Rows dropped because of a missing outcome or regressor (R `glm`: `na.omit`).
+    #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
+    pub missing: MissingSummary,
 }
 
 impl fmt::Display for DiscreteResult {
@@ -91,10 +95,16 @@ impl fmt::Display for DiscreteResult {
         )?;
         writeln!(f)?;
 
-        // Warnings
-        if !self.warnings.is_empty() {
+        // Warnings (the missing-value note is printed once, as the last line)
+        let note = self.missing.note();
+        let shown: Vec<&String> = self
+            .warnings
+            .iter()
+            .filter(|w| note.as_deref() != Some(w.as_str()))
+            .collect();
+        if !shown.is_empty() {
             writeln!(f, "Warnings:")?;
-            for warning in &self.warnings {
+            for warning in shown {
                 writeln!(f, "  {}", warning)?;
             }
             writeln!(f)?;
@@ -138,6 +148,9 @@ impl fmt::Display for DiscreteResult {
             )?;
         }
         writeln!(f, "{:-<45}", "")?;
+        if let Some(note) = note {
+            writeln!(f, "Missing values: {note}")?;
+        }
 
         Ok(())
     }
