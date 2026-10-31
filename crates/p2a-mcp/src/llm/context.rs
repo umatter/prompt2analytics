@@ -349,6 +349,7 @@ fn get_sample_values(series: &Series, max_samples: usize) -> Vec<String> {
 fn get_numeric_stats(series: &Series) -> Option<String> {
     // Try to cast to f64 for statistics
     let float_series = series.cast(&DataType::Float64).ok()?;
+    // na-legacy(T4): theme 3.3 (context statistics over present values; NaN not counted as missing)
     let ca = float_series.f64().ok()?;
 
     let min = ca.min()?;

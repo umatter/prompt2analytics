@@ -967,6 +967,7 @@ fn extract_column(dataset: &Dataset, col_name: &str) -> EconResult<Vec<f64>> {
             column: col_name.to_string(),
         })?;
 
+    // na-legacy(T4): theme 3.3 (non-strict cast turns text into nulls; NaN passes through)
     let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
         column: col_name.to_string(),
     })?;
