@@ -3,6 +3,7 @@
 use clap::{Subcommand, ValueEnum};
 use p2a_core::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use p2a_core::errors::{EconError, EconResult};
+use p2a_core::stats::{SsType, TwoWayAnovaConfig, run_two_way_anova_with};
 use p2a_core::{
     AcfType,
     Alternative,
@@ -38,7 +39,6 @@ use p2a_core::{
     run_shapiro_wilk,
     // Tukey HSD
     run_tukey_hsd,
-    run_two_way_anova,
     // T-tests (dataset wrapper: drops missing values as t.test does)
     t_test,
     // Wilcoxon (dataset wrapper: drops missing values as wilcox.test does)
@@ -380,6 +380,9 @@ EXAMPLES:
 EXAMPLES:
     # Two-way ANOVA with interaction
     p2a --session s.json stats anova-two mydata --response yield --factor-a fertilizer --factor-b irrigation --interaction
+
+    # Type II sums of squares (as car::Anova)
+    p2a --session s.json stats anova-two mydata --response yield --factor-a fertilizer --factor-b irrigation --interaction --ss-type II
 ")]
     AnovaTwo {
         /// Dataset name
@@ -400,6 +403,11 @@ EXAMPLES:
         /// Include interaction term
         #[arg(long)]
         interaction: bool,
+
+        /// Sums of squares: I (sequential, as R aov; default), II or III (as car::Anova; III
+        /// with sum-to-zero contrasts)
+        #[arg(long, default_value = "I", value_name = "TYPE")]
+        ss_type: String,
     },
 
     /// Tukey's HSD post-hoc test
@@ -712,12 +720,14 @@ pub fn execute(
             factor_a,
             factor_b,
             interaction,
+            ss_type,
         } => execute_anova_two(
             dataset,
             response,
             factor_a,
             factor_b,
             *interaction,
+            ss_type,
             format,
             session,
         ),
@@ -1902,6 +1912,7 @@ fn execute_anova_two(
     factor_a: &str,
     factor_b: &str,
     interaction: bool,
+    ss_type: &str,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -1912,28 +1923,50 @@ fn execute_anova_two(
             return Ok(());
         }
     };
+    let ss_type: SsType = match ss_type.parse() {
+        Ok(t) => t,
+        Err(e) => {
+            print_error(&e.to_string(), format);
+            return Ok(());
+        }
+    };
+    let config = TwoWayAnovaConfig {
+        interaction,
+        ss_type,
+    };
 
     match dataset {
-        Some(ds) => match run_two_way_anova(ds, response, factor_a, factor_b, interaction) {
+        Some(ds) => match run_two_way_anova_with(ds, response, factor_a, factor_b, &config) {
             Ok(result) => match format {
                 OutputFormat::Json => {
+                    let opt = |v: Option<f64>| v.map_or(serde_json::Value::Null, json_number);
                     let json = serde_json::json!({
                         "test": "Two-way ANOVA",
                         "response": result.response_var,
                         "factor_a": result.factor_a,
                         "factor_b": result.factor_b,
                         "with_interaction": result.with_interaction,
-                        "ss_a": result.ss_a,
-                        "ss_b": result.ss_b,
-                        "ss_ab": result.ss_ab,
-                        "ss_error": result.ss_error,
-                        "ss_total": result.ss_total,
-                        "f_a": result.f_a,
-                        "f_b": result.f_b,
-                        "f_ab": result.f_ab,
-                        "p_a": result.p_a,
-                        "p_b": result.p_b,
-                        "p_ab": result.p_ab,
+                        "ss_type": result.ss_type.to_string(),
+                        "ss_a": json_number(result.ss_a),
+                        "ss_b": json_number(result.ss_b),
+                        "ss_ab": opt(result.ss_ab),
+                        "ss_error": json_number(result.ss_error),
+                        "ss_total": json_number(result.ss_total),
+                        "df_a": result.df_a,
+                        "df_b": result.df_b,
+                        "df_ab": result.df_ab,
+                        "df_error": result.df_error,
+                        "df_total": result.df_total,
+                        "ms_a": json_number(result.ms_a),
+                        "ms_b": json_number(result.ms_b),
+                        "ms_ab": opt(result.ms_ab),
+                        "ms_error": json_number(result.ms_error),
+                        "f_a": json_number(result.f_a),
+                        "f_b": json_number(result.f_b),
+                        "f_ab": opt(result.f_ab),
+                        "p_a": json_number(result.p_a),
+                        "p_b": json_number(result.p_b),
+                        "p_ab": opt(result.p_ab),
                         "n_obs": result.n_obs,
                     });
                     print_json(json, &result.missing)?;
@@ -1950,42 +1983,70 @@ fn execute_anova_two(
                         result.n_obs,
                         if result.with_interaction { "Yes" } else { "No" }
                     );
+                    println!(
+                        "Sums of squares: {}",
+                        match result.ss_type {
+                            SsType::I => "Type I (sequential, as R aov)",
+                            SsType::II => "Type II (as car::Anova(type = 2))",
+                            SsType::III => {
+                                "Type III (sum-to-zero contrasts, as car::Anova(type = 3))"
+                            }
+                        }
+                    );
                     println!();
                     println!(
                         "{:>15} {:>12} {:>6} {:>12} {:>10} {:>10}",
                         "Source", "SS", "DF", "MS", "F", "Pr(>F)"
                     );
                     println!("{}", "-".repeat(70));
-                    println!(
-                        "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
-                        &result.factor_a,
-                        result.ss_a,
-                        result.df_a,
-                        result.ms_a,
-                        result.f_a,
-                        result.p_a
-                    );
-                    println!(
-                        "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
-                        &result.factor_b,
-                        result.ss_b,
-                        result.df_b,
-                        result.ms_b,
-                        result.f_b,
-                        result.p_b
-                    );
+                    // A main effect aliased with the other factor (df 0) has no row in aov:
+                    // its MS, F and p are NaN.
+                    let main_rows = [
+                        (
+                            &result.factor_a,
+                            result.ss_a,
+                            result.df_a,
+                            result.ms_a,
+                            result.f_a,
+                            result.p_a,
+                        ),
+                        (
+                            &result.factor_b,
+                            result.ss_b,
+                            result.df_b,
+                            result.ms_b,
+                            result.f_b,
+                            result.p_b,
+                        ),
+                    ];
+                    for (name, ss, df, ms, f_stat, p) in main_rows {
+                        if df == 0 {
+                            println!("{name:>15} not estimable (aliased with the other factor)");
+                        } else {
+                            println!(
+                                "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
+                                name, ss, df, ms, f_stat, p
+                            );
+                        }
+                    }
                     if result.with_interaction {
-                        if let (Some(ss_ab), Some(df_ab), Some(ms_ab), Some(f_ab), Some(p_ab)) = (
+                        match (
                             result.ss_ab,
                             result.df_ab,
                             result.ms_ab,
                             result.f_ab,
                             result.p_ab,
                         ) {
-                            println!(
-                                "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
-                                "Interaction", ss_ab, df_ab, ms_ab, f_ab, p_ab
-                            );
+                            (Some(ss_ab), Some(df_ab), Some(ms_ab), Some(f_ab), Some(p_ab)) => {
+                                println!(
+                                    "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.6}",
+                                    "Interaction", ss_ab, df_ab, ms_ab, f_ab, p_ab
+                                );
+                            }
+                            _ => println!(
+                                "{:>15} not estimable (empty cells leave no interaction df)",
+                                "Interaction"
+                            ),
                         }
                     }
                     println!(
@@ -1996,6 +2057,9 @@ fn execute_anova_two(
                         "{:>15} {:>12.4} {:>6}",
                         "Total", result.ss_total, result.df_total
                     );
+                    if result.ss_type != SsType::I {
+                        println!("Type II/III sums of squares need not add up to the total.");
+                    }
                     print_missing_note(&result.missing, format);
                 }
             },

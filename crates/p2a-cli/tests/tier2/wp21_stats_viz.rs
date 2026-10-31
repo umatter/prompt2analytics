@@ -1139,3 +1139,129 @@ fn test_validate_cli_shapiro_bartlett_ks_na() {
         "{kst}"
     );
 }
+
+/// STAT-4's least-squares two-way ANOVA through the CLI: Type I (aov) and Type II (car::Anova),
+/// with the dropped row (case stat_anova_two_way_unbalanced).
+#[test]
+fn test_validate_cli_anova_two_ss_type() {
+    let case = Case::load("stat_anova_two_way_unbalanced");
+    let s = temp_session();
+    let d = s.load(&case);
+    let base = [
+        "stats",
+        "anova-two",
+        d.as_str(),
+        "--response",
+        "y",
+        "--factor-a",
+        "fa",
+        "--factor-b",
+        "fb",
+        "--interaction",
+    ];
+    let out = s.ok(&base);
+    // SS DF MS F p | Error: SS DF MS | Total: SS DF
+    let (a, b, ab, e, t) = (
+        nums(&row(&out, "fa")),
+        nums(&row(&out, "fb")),
+        nums(&row(&out, "Interaction")),
+        nums(&row(&out, "Error")),
+        nums(&row(&out, "Total")),
+    );
+    Check::new(&case)
+        .scalar("int_fa_ss", a[0], Tol::printed(4))
+        .scalar("int_fa_df", a[1], Tol::exact())
+        .scalar("int_fa_f", a[3], Tol::printed(4))
+        .scalar("int_fa_p", a[4], Tol::printed(6))
+        .scalar("int_fb_ss", b[0], Tol::printed(4))
+        .scalar("int_fb_f", b[3], Tol::printed(4))
+        .scalar("int_fb_p", b[4], Tol::printed(6))
+        .scalar("int_fa_x_fb_ss", ab[0], Tol::printed(4))
+        .scalar("int_fa_x_fb_df", ab[1], Tol::exact())
+        .scalar("int_fa_x_fb_f", ab[3], Tol::printed(4))
+        .scalar("int_fa_x_fb_p", ab[4], Tol::printed(6))
+        .scalar("int_resid_ss", e[0], Tol::printed(4))
+        .scalar("int_resid_df", e[1], Tol::exact())
+        .scalar("n_used", num_after(&out, "N = "), Tol::exact())
+        .finish();
+    // derived: Type I sums of squares add up to the total SS on the 12 kept rows (df 11)
+    let total = ["int_fa_ss", "int_fb_ss", "int_fa_x_fb_ss", "int_resid_ss"]
+        .iter()
+        .map(|k| case.scalar(k))
+        .sum::<f64>();
+    assert!(Tol::printed(4).allows(t[0], total) && t[1] == 11.0, "{out}");
+    assert!(
+        out.contains("Sums of squares: Type I (sequential, as R aov)"),
+        "{out}"
+    );
+    assert_eq!(
+        note(&out),
+        Some("Note: 1 of 13 rows dropped because of missing values (y: 1, fa: 1)"),
+        "{out}"
+    );
+    let j = s.json(&base);
+    Check::new(&case)
+        .scalar("int_fa_ss", num(&j, "ss_a"), Tol::stat(12))
+        .scalar("int_fa_df", num(&j, "df_a"), Tol::exact())
+        .scalar("int_fa_f", num(&j, "f_a"), Tol::stat(12))
+        .scalar("int_fa_p", num(&j, "p_a"), Tol::p_value(12))
+        .scalar("int_fb_ss", num(&j, "ss_b"), Tol::stat(12))
+        .scalar("int_fb_p", num(&j, "p_b"), Tol::p_value(12))
+        .scalar("int_fa_x_fb_ss", num(&j, "ss_ab"), Tol::stat(12))
+        .scalar("int_fa_x_fb_df", num(&j, "df_ab"), Tol::exact())
+        .scalar("int_fa_x_fb_p", num(&j, "p_ab"), Tol::p_value(12))
+        .scalar("int_resid_ss", num(&j, "ss_error"), Tol::stat(12))
+        .scalar("int_resid_df", num(&j, "df_error"), Tol::exact())
+        .scalar("n_used", num(&j, "n_obs"), Tol::exact())
+        .finish();
+    assert_eq!(
+        (j["ss_type"].clone(), j["missing"].clone()),
+        (json!("I"), missing(13, 12, json!({"y": 1, "fa": 1})))
+    );
+    let ii: Vec<&str> = base.iter().copied().chain(["--ss-type", "II"]).collect();
+    let out2 = s.ok(&ii);
+    let a2 = nums(&row(&out2, "fa"));
+    Check::new(&case)
+        .scalar("type2_fa_ss", a2[0], Tol::printed(4))
+        .scalar("type2_fa_f", a2[3], Tol::printed(4))
+        .scalar("type2_fa_p", a2[4], Tol::printed(6))
+        .finish();
+    assert!(
+        out2.contains("Sums of squares: Type II (as car::Anova(type = 2))"),
+        "{out2}"
+    );
+    let j2 = s.json(&ii);
+    Check::new(&case)
+        .scalar("type2_fa_ss", num(&j2, "ss_a"), Tol::stat(12))
+        .scalar("type2_fa_f", num(&j2, "f_a"), Tol::stat(12))
+        .scalar("type2_fa_p", num(&j2, "p_a"), Tol::p_value(12))
+        .scalar("type2_fb_ss", num(&j2, "ss_b"), Tol::stat(12))
+        .scalar("type2_int_ss", num(&j2, "ss_ab"), Tol::stat(12))
+        .scalar("type2_resid_ss", num(&j2, "ss_error"), Tol::stat(12))
+        .scalar("type2_resid_df", num(&j2, "df_error"), Tol::exact())
+        .finish();
+    assert_eq!(j2["ss_type"], json!("II"));
+    let bad: Vec<&str> = base.iter().copied().chain(["--ss-type", "IV"]).collect();
+    assert!(s.err(&bad).contains("Unknown sum-of-squares type 'IV'"));
+    // Not pinned: Type III is refused when the model has aliased coefficients (the empty
+    // (C, L) cell of y3 ~ fa3 * fb3), as car::Anova(type = 3) is.
+    let iii = [
+        "stats",
+        "anova-two",
+        d.as_str(),
+        "--response",
+        "y3",
+        "--factor-a",
+        "fa3",
+        "--factor-b",
+        "fb3",
+        "--interaction",
+        "--ss-type",
+        "III",
+    ];
+    let e3 = s.err(&iii);
+    assert!(
+        e3.contains("Two-way ANOVA failed") && e3.contains("aliased"),
+        "{e3}"
+    );
+}

@@ -152,7 +152,8 @@
       "tests": [
         "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_anova_kruskal_na",
         "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_tukey_na",
-        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_friedman_na"
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_friedman_na",
+        "p2a-cli::tier2::wp21_stats_viz::test_validate_cli_anova_two_ss_type"
       ],
       "quantities": [
         "SS",
