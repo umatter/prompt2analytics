@@ -712,7 +712,7 @@ pub fn sbw(
     covariate_cols: &[&str],
     config: SBWConfig,
 ) -> EconResult<SBWResult> {
-    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract treatment variable
     let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
@@ -1458,7 +1458,7 @@ mod tests {
 
     #[test]
     fn test_sbw_exact_matches_r_sbw() {
-        // R reference (R 4.3.3, quadprog 1.5.8; the sbw call is the plan's sbw 1.2 record):
+        // R reference (R 4.3.3, quadprog 1.5.8; the sbw call's output as recorded with sbw 1.2):
         //   Xc <- cbind(x1[d==0], x2[d==0]); tm <- c(mean(x1[d==1]), mean(x2[d==1])); n <- 20
         //   qp <- quadprog::solve.QP(diag(n), rep(0, n), cbind(t(rbind(t(Xc), 1)) / n, diag(n)),
         //                            c(tm, 1, rep(0, n)), meq = 3)      # exact QP, n scale

@@ -987,7 +987,7 @@ mod tests {
     fn test_validate_quality_profile_nan_cells() {
         use p2a_validation::{Check, Tol};
         // WT-9: the case data with z's three missing cells written as NaN. The harness
-        // cannot write NaN (design 2.2), so the NaN fixture is built here from the case
+        // cannot write NaN, so the NaN fixture is built here from the case
         // dataset.
         let (case, ds) = crate::test_support::load_case("data_quality_profile_na");
         let z_nan: Float64Chunked = ds
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_na_quality_profile_fixtures() {
-        // Design 2.4: an Int64 column with a null gives the statistics of the same values as
+        // An Int64 column with a null gives the statistics of the same values as
         // Float64 (R: quantile(c(1, 2, 4), c(.25, .5, .75)) = 1.5 2 3); unsigned integers get
         // statistics too; a text column has none.
         let i = generate_quality_profile(&Dataset::new(

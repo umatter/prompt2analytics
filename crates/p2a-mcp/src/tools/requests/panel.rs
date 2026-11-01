@@ -6,7 +6,7 @@
 //! - Hausman specification test
 //! - Variable Coefficients Model (PVCM)
 //! - Mean Group (PMG) estimator
-//! - Arellano-Bond / System GMM
+//! - Arellano-Bond difference GMM
 //! - Panel GLS
 //! - Panel unit root tests (LLC, IPS, Hadri)
 //! - High-dimensional fixed effects (HDFE)
@@ -126,7 +126,7 @@ pub struct PvcmRequest {
     pub model: Option<String>,
 }
 
-/// Request for Arellano-Bond / System GMM dynamic panel estimation.
+/// Request for Arellano-Bond difference GMM dynamic panel estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GmmRequest {
     /// Name/ID of the dataset

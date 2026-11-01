@@ -833,7 +833,8 @@ impl fmt::Display for FirstStageDiagnostics {
 /// # Arguments
 /// * `dataset` - The dataset
 /// * `endog_var` - Name of the endogenous variable
-/// * `instruments` - Names of the instrumental variables (excluded instruments)
+/// * `instruments` - Names of the instrumental variables (excluded instruments); an empty
+///   list is `InvalidSpecification`
 /// * `controls` - Optional control variables to include in first stage (exogenous variables)
 pub fn run_first_stage_diagnostics(
     dataset: &Dataset,
@@ -841,6 +842,15 @@ pub fn run_first_stage_diagnostics(
     instruments: &[&str],
     controls: Option<&[&str]>,
 ) -> EconResult<FirstStageDiagnostics> {
+    // Without an excluded instrument there is no partial F, and no strength to judge.
+    if instruments.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "First-stage diagnostics of '{endog_var}' need at least one excluded \
+                 instrument; the instrument list is empty"
+            ),
+        });
+    }
     let controls: Vec<&str> = controls.unwrap_or(&[]).to_vec();
 
     // The endogenous variable, instruments and controls on their complete rows
@@ -1341,6 +1351,19 @@ mod tests {
     }
 
     #[test]
+    fn test_first_stage_refuses_an_empty_instrument_list() {
+        // no excluded instrument: there is no partial F to report, and no verdict
+        let dataset = create_iv_dataset();
+        match run_first_stage_diagnostics(&dataset, "x_endog", &[], None) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("instrument") && message.contains("x_endog"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_iv_under_identified() {
         let dataset = create_iv_dataset();
         // Try to instrument 2 variables with only 1 instrument
@@ -1654,7 +1677,7 @@ mod tests {
         assert_eq!(
             ds.df().column("k").unwrap().dtype(),
             &polars::prelude::DataType::Int64
-        ); // design 2.2
+        ); // k is written without a decimal point, so polars reads it as Int64
         let (exog, endog, instr) = (&["w", "k"], &["x"], &["z1", "z2"]);
         let r = run_iv2sls(&ds, "y", exog, endog, instr, false).unwrap();
         let h = run_iv2sls(&ds, "y", exog, endog, instr, true).unwrap();

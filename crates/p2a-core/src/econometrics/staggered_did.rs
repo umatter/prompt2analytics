@@ -50,7 +50,11 @@
 //!   term for the estimated weights (did's `wif`), and the pre-trend test is the
 //!   Wald statistic `a' V^+ a` with the influence-function covariance of the
 //!   pre-treatment cells on chi-squared(rank V) (generalized inverse, df = rank, if
-//!   V is singular).
+//!   V is singular). The chi-squared reference is asymptotic and over-rejects on
+//!   small panels: in a null simulation with nine pre-treatment cells it rejected
+//!   about 19% of panels at the 5% level with 90 units (cohorts as small as 15
+//!   units) and about 6% with 900. For small panels use the bootstrap test below,
+//!   whose F reference accounts for the estimated covariance.
 //! - `bootstrap >= 50`: a unit bootstrap; values 1 to 49 are refused. Every
 //!   replicate resamples units, computes all cells, the aggregates (with the
 //!   replicate's own cohort shares) and the pre-trend vector; the reported SEs are

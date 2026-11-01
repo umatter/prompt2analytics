@@ -113,8 +113,8 @@ pub(super) mod capture_threads {
     }
 }
 
-/// The two arguments the dataset-metadata capture reads, `path` and
-/// `filename`, copied without the rest of the call's payload. A missing
+/// The arguments the dataset-metadata capture reads, `path`, `filename` and
+/// `na_strings`, copied without the rest of the call's payload. A missing
 /// field becomes null, which the capture reads as absent. The LLM tool loop
 /// (`llm_routes`) keeps the same copy for its own capture.
 #[cfg(any(test, all(feature = "db", feature = "llm")))]
@@ -122,6 +122,7 @@ pub(super) fn capture_fields(arguments: &serde_json::Value) -> serde_json::Value
     serde_json::json!({
         "path": arguments.get("path"),
         "filename": arguments.get("filename"),
+        "na_strings": arguments.get("na_strings"),
     })
 }
 
@@ -234,20 +235,23 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn the_capture_copy_holds_only_path_and_filename() {
+    fn the_capture_copy_holds_only_path_filename_and_na_strings() {
         let upload = json!({"name": "d", "filename": "d.csv", "content": "x".repeat(1 << 20)});
         assert_eq!(
             capture_fields(&upload),
-            json!({"path": null, "filename": "d.csv"})
+            json!({"path": null, "filename": "d.csv", "na_strings": null})
         );
-        let load = json!({"path": "data/a.csv", "name": "a"});
+        let load = json!({"path": "data/a.csv", "name": "a", "na_strings": ["-99"]});
         let copy = capture_fields(&load);
-        assert_eq!(copy, json!({"path": "data/a.csv", "filename": null}));
+        assert_eq!(
+            copy,
+            json!({"path": "data/a.csv", "filename": null, "na_strings": ["-99"]})
+        );
         // Read as the capture reads it: null is the same as absent.
         assert_eq!(copy.get("filename").and_then(Value::as_str), None);
         assert_eq!(
             capture_fields(&Value::Null),
-            json!({"path": null, "filename": null})
+            json!({"path": null, "filename": null, "na_strings": null})
         );
     }
 

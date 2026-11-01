@@ -423,8 +423,8 @@ fn pessimistic_error(n: usize, errors: usize, cf: f64) -> f64 {
 /// The largest number of distinct class codes C5.0 accepts for `n_samples`
 /// rows: `max(2, min(1000, n/2))`.
 ///
-/// This is a method-level cap in the sense of `nnet::multinom`'s `MaxNWts`
-/// (design 3.1): a target with more distinct values than this is an
+/// This is a method-level cap in the sense of `nnet::multinom`'s `MaxNWts`:
+/// a target with more distinct values than this is an
 /// identifier or a continuous variable, not a class label.
 fn max_classes(n_samples: usize) -> usize {
     2.max(1000.min(n_samples / 2))

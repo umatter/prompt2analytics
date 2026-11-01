@@ -1876,7 +1876,7 @@ mod tests {
         )
     }
 
-    /// A NaN in y is a missing cell (design 1.1, fixest drops it): the fit equals the
+    /// A NaN in y is a missing cell (fixest drops it): the fit equals the
     /// fit without that row and reports it; an infinite value is refused by name.
     #[test]
     fn test_hdfe_non_finite_data() {

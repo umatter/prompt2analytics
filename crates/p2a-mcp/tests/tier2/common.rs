@@ -1,4 +1,4 @@
-//! Shared helpers of the Tier 2 MCP-path tests (design 2.5, 4.1.5), and the scaffold's own
+//! Shared helpers of the Tier 2 MCP-path tests, and the scaffold's own
 //! tests.
 //!
 //! A test builds a [`Session`] holding its datasets, then runs tools through
@@ -30,7 +30,7 @@ pub fn session_with(case_id: &str) -> (Session, AnalyticsServer) {
     session_with_datasets(vec![(stem.as_str(), Dataset::new(df))])
 }
 
-/// A session holding the given datasets (for Rust-built fixtures, design 2.2), and a
+/// A session holding the given datasets (for Rust-built fixtures), and a
 /// dispatcher.
 ///
 /// The session's cached byte size is not refreshed: the default limits charge no session

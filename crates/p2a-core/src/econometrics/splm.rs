@@ -2350,7 +2350,7 @@ mod tests {
             .collect()
     }
 
-    /// R: spml_entity_order.R (plan T2-WP14, Appendix A.2; the script is reproduced in
+    /// R: spml_entity_order.R (the script is reproduced in
     /// validation/econometrics/splm.md). Base-R re-implementation of the spml within-lag
     /// concentrated likelihood, not splm itself (not installed), so this test is not
     /// R-pinned in the registry's sense.

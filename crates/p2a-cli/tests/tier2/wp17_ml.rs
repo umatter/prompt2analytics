@@ -2,7 +2,8 @@
 use crate::common::*;
 use serde_json::json;
 
-/// The 30-row fixture of plans/T2/T2-WP17.md (R cross-check: Appendix A.2, fixture.R).
+/// The 30-row ML fixture, built with the same IEEE operations as the R cross-check (so R
+/// sees the same values bit for bit): y_na and cls_na are missing at row 4, x1_na at row 7.
 /// Rows listed in `skip` are left out (complete-row comparisons). An empty field is
 /// missing (T2-WP01 loader).
 fn fixture_csv(skip: &[usize]) -> String {
@@ -129,7 +130,7 @@ fn test_na_cli_ml_missing_values_refused() {
 
 #[test]
 fn test_na_cli_ml_svm_omits_incomplete_rows() {
-    // CLI-9, ML-33. e1071::svm(factor(cls_na) ~ x1_na + x2) uses 28 rows (Appendix A.2).
+    // CLI-9, ML-33. e1071::svm(factor(cls_na) ~ x1_na + x2) uses 28 rows (na.omit).
     // Before: "Missing value at row 7 in column 'x1_na'" (and a null target read as class
     // 0).
     let s = session_with_fixture();

@@ -1014,11 +1014,10 @@ pub static PIVOT_RULES: &[super::PivotRule] = &[super::PivotRule {
 /// observation, a pass with the Jacobian costs work that grows with the square of the number
 /// of coefficients, as `(p + q + 3)^2` does; the `d` term counts the differencing passes.
 ///
-/// The count and the hosted value were set for the optimiser the tools used before (the
-/// `arima` crate's L-BFGS: at most 7,961 evaluations of `p + q + 3` passes each, a pass costing
-/// about one unit per observation and term, measured on a release build), whose slowest fit
-/// took a time proportional to `n_obs * (p + q + 3)^2` as well. The starting values, the
-/// residuals and the forecast after the fit are a few passes more.
+/// The hosted value was measured on this fit (`ARIMA_FIT_WORK_HOSTED`): the time of its
+/// slowest fits grew in proportion to this count, at most about 1.0 us per unit on a release
+/// build. The starting values, the residuals and the forecast after the fit are a few passes
+/// more.
 ///
 /// The time per unit holds only in ordinary floating-point arithmetic: see
 /// [`ARIMA_MIN_MAGNITUDE`] for the series the budget therefore refuses as well.

@@ -84,6 +84,18 @@ impl KernelType {
             _ => None,
         }
     }
+
+    /// rdrobust's `kernel` names, case-insensitive: "triangular" (also "tri"),
+    /// "epanechnikov" ("epa"), "uniform" ("uni"). An unknown name is an
+    /// `InvalidSpecification` listing the valid ones.
+    pub fn parse(s: &str) -> EconResult<KernelType> {
+        Self::from_str(s).ok_or_else(|| EconError::InvalidSpecification {
+            message: format!(
+                "Unknown kernel '{s}'; use \"triangular\" (the default, also \"tri\"), \
+                 \"epanechnikov\" (\"epa\") or \"uniform\" (\"uni\")"
+            ),
+        })
+    }
 }
 
 impl fmt::Display for KernelType {
@@ -124,6 +136,19 @@ impl BandwidthMethod {
             "certwo" | "cer_two" => Some(BandwidthMethod::CerTwo),
             _ => None,
         }
+    }
+
+    /// rdrobust's `bwselect` names, case-insensitive: "mserd" (also "mse"), "msetwo"
+    /// ("mse_two"), "cerrd" ("cer"), "certwo" ("cer_two"). An unknown name is an
+    /// `InvalidSpecification` listing the valid ones.
+    pub fn parse(s: &str) -> EconResult<BandwidthMethod> {
+        Self::from_str(s).ok_or_else(|| EconError::InvalidSpecification {
+            message: format!(
+                "Unknown bwselect '{s}'; use \"mserd\" (one MSE-optimal bandwidth, the \
+                 default), \"msetwo\" (one per side), \"cerrd\" (one CER-optimal bandwidth) \
+                 or \"certwo\" (one per side)"
+            ),
+        })
     }
 
     /// Check if this method uses separate bandwidths for left/right.
@@ -723,7 +748,7 @@ impl fmt::Display for FuzzyRdResult {
 
 /// Largest local-polynomial order `p` accepted by the RD estimators.
 ///
-/// This is a method-level cap (Tier 0 design 3.1) and holds in every mode,
+/// This is a method-level cap and holds in every mode,
 /// not only on the hosted server. rdrobust allows orders 0..=20, but with the
 /// uncentred polynomial design used here orders above 4 are already
 /// numerically meaningless; 10 leaves ample room while keeping every design
@@ -1900,6 +1925,46 @@ mod tests {
     use crate::test_support::load_case;
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    #[test]
+    fn test_kernel_and_bwselect_names_are_parsed_strictly() {
+        for (name, kernel) in [
+            ("triangular", KernelType::Triangular),
+            ("TRI", KernelType::Triangular),
+            ("Epanechnikov", KernelType::Epanechnikov),
+            ("epa", KernelType::Epanechnikov),
+            ("uniform", KernelType::Uniform),
+            ("uni", KernelType::Uniform),
+        ] {
+            assert_eq!(KernelType::parse(name).unwrap(), kernel, "{name}");
+        }
+        for (name, method) in [
+            ("mserd", BandwidthMethod::MseRd),
+            ("MSETWO", BandwidthMethod::MseTwo),
+            ("cerrd", BandwidthMethod::CerRd),
+            ("certwo", BandwidthMethod::CerTwo),
+            ("cer_two", BandwidthMethod::CerTwo),
+        ] {
+            assert_eq!(BandwidthMethod::parse(name).unwrap(), method, "{name}");
+        }
+        match KernelType::parse("gaussian") {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.starts_with("Unknown kernel 'gaussian'; use \"triangular\"")
+                    && message.contains("\"epa\"")
+                    && message.contains("\"uniform\""),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        match BandwidthMethod::parse("ik") {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.starts_with("Unknown bwselect 'ik'; use \"mserd\"")
+                    && message.contains("\"certwo\""),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
 
     fn create_sharp_rd_dataset() -> Dataset {
         // Create synthetic RD data with known treatment effect

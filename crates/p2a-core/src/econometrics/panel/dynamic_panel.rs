@@ -75,10 +75,16 @@ use crate::traits::estimator::SignificanceLevel;
 
 use super::utils::{DiffEquations, GmmLagSpec, difference_equations};
 
-/// The inverse of an L x L weighting matrix holds several L x L copies at once (the
-/// matrix, its scaled copy, eigenvectors, the factor and the solution). Check the
+/// The inversions of the L x L weighting matrices hold about this many L x L matrices at
+/// their peak: the moment matrix and its symmetrised and scaled copies, the
+/// eigendecomposition's vectors and workspace (most of the total), the Cholesky factor and
+/// the solution or the generalized inverse's factors, and the one-step inverse while the
+/// two-step weight is inverted. Measured with a counting allocator on one- and two-step
+/// fits, near the instrument count at which the hosted per-allocation ceiling binds. In
+/// these units the peak is higher for small L, where a fixed part of the
+/// eigendecomposition's workspace dominates, and falls towards 11 as L grows. Check the
 /// working set against the allocation ceiling before building it.
-const DENSE_INVERSE_COPIES: usize = 6;
+const DENSE_INVERSE_COPIES: usize = 16;
 
 fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
     let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
@@ -423,8 +429,9 @@ struct WeightInverse {
     /// Numerical rank.
     rank: usize,
     /// The matrix restricted to the kept eigen-directions (`MASS::ginv(MASS::ginv(S))`);
-    /// the matrix itself at full rank.
-    kept: Array2<f64>,
+    /// the matrix itself at full rank. Only when asked for: the one-step weight never
+    /// needs it, so its inversion does not hold it.
+    kept: Option<Array2<f64>>,
 }
 
 /// `(m + m') / 2`.
@@ -464,14 +471,15 @@ fn equilibrated_inverse(s: &Array2<f64>) -> Option<Array2<f64>> {
 /// The inverse of a symmetric L x L weighting matrix as `plm::pgmm`: the inverse when the
 /// matrix scaled to unit diagonal is numerically positive definite, otherwise
 /// `MASS::ginv`'s generalized inverse (eigenvalues with |λ| <= sqrt(eps) max|λ| dropped).
-fn weight_inverse(s: &Array2<f64>) -> EconResult<WeightInverse> {
+/// `with_kept` also returns the matrix restricted to the kept eigen-directions.
+fn weight_inverse(s: &Array2<f64>, with_kept: bool) -> EconResult<WeightInverse> {
     let s = symmetrized(s);
     let l = s.nrows();
     if let Some(inv) = equilibrated_inverse(&s) {
         return Ok(WeightInverse {
             inv,
             rank: l,
-            kept: s,
+            kept: with_kept.then_some(s),
         });
     }
     let singular = || EconError::SingularMatrix {
@@ -489,18 +497,25 @@ fn weight_inverse(s: &Array2<f64>) -> EconResult<WeightInverse> {
     let keep: Vec<usize> = (0..l).filter(|&j| values[j].abs() > cut).collect();
     let mut vk = resource::try_zeros2(l, keep.len(), "GMM generalized inverse")?;
     let mut vk_inv = resource::try_zeros2(l, keep.len(), "GMM generalized inverse")?;
-    let mut vk_kept = resource::try_zeros2(l, keep.len(), "GMM generalized inverse")?;
     for (c, &j) in keep.iter().enumerate() {
         vk.column_mut(c).assign(&vectors.column(j));
         vk_inv
             .column_mut(c)
             .assign(&(&vectors.column(j) / values[j]));
-        vk_kept
-            .column_mut(c)
-            .assign(&(&vectors.column(j) * values[j]));
     }
     let inv = symmetrized(&vk_inv.dot(&vk.t()));
-    let kept = symmetrized(&vk_kept.dot(&vk.t()));
+    drop(vk_inv);
+    let kept = if with_kept {
+        let mut vk_kept = resource::try_zeros2(l, keep.len(), "GMM generalized inverse")?;
+        for (c, &j) in keep.iter().enumerate() {
+            vk_kept
+                .column_mut(c)
+                .assign(&(&vectors.column(j) * values[j]));
+        }
+        Some(symmetrized(&vk_kept.dot(&vk.t())))
+    } else {
+        None
+    };
     Ok(WeightInverse {
         inv,
         rank: keep.len(),
@@ -858,7 +873,7 @@ pub fn run_gmm(
     let zy = eq.z.t().dot(&dy);
 
     // One step.
-    let w1 = weight_inverse(&one_step_moment_matrix(&eq, &sp)?)?;
+    let w1 = weight_inverse(&one_step_moment_matrix(&eq, &sp)?, false)?;
     let w1zx = w1.inv.dot(&zx);
     let b1 = small_inverse(&zx.t().dot(&w1zx), "X'Z A Z'X in one-step GMM")?;
     let beta1 = b1.dot(&w1zx.t().dot(&zy));
@@ -866,7 +881,7 @@ pub fn run_gmm(
 
     // Two-step weights from the one-step residuals: the weights of the Sargan/Hansen test
     // of either step, and of the two-step estimates.
-    let w2 = weight_inverse(&two_step_moment_matrix(&eq, &sp, &e1, &mut acc)?)?;
+    let w2 = weight_inverse(&two_step_moment_matrix(&eq, &sp, &e1, &mut acc)?, true)?;
     let two_step = match config.step {
         GmmStep::OneStep => None,
         GmmStep::TwoStep => {
@@ -899,7 +914,10 @@ pub fn run_gmm(
 
     // Covariances.
     let sigma2 = e1.dot(&e1) / (2.0 * (n_obs - k) as f64);
-    let v1r = b1.dot(&w1zx.t().dot(&w2.kept).dot(&w1zx)).dot(&b1);
+    let w2_kept = w2.kept.as_ref().ok_or_else(|| {
+        EconError::Computation("GMM: the two-step weighting matrix has no kept part".to_string())
+    })?;
+    let v1r = b1.dot(&w1zx.t().dot(w2_kept).dot(&w1zx)).dot(&b1);
     // The reported step, and the robust covariance its m-tests use (pgmm's summary
     // default): one-step vcovHC, two-step Windmeijer.
     let (beta, resid, bread, weight, v_robust) = match &two_step {
@@ -1575,6 +1593,61 @@ mod tests {
             }
         }
         c.finish();
+    }
+
+    /// The check before the weight inversions counts their whole working set: a panel
+    /// whose instrument count passes a count of six L x L matrices but not the measured
+    /// peak is refused under a per-allocation ceiling between the two, and runs without one.
+    #[test]
+    fn test_gmm_dense_inverse_check_counts_the_measured_peak() {
+        let ds = synthetic_panel(4, 20);
+        let fit = || run_gmm(&ds, "y", &["x"], "entity", "time", 1, None);
+        let r = fit().unwrap();
+        let l = r.n_instruments;
+        let ceiling = 2usize << 20;
+        assert!(
+            6 * 8 * l * l < ceiling && 16 * 8 * l * l > ceiling,
+            "L = {l}"
+        );
+        let e = resource::with_alloc_ceiling(Some(ceiling), fit).unwrap_err();
+        assert!(
+            matches!(&e, EconError::ResourceLimit(m) if m.contains("GMM weighting matrix")),
+            "{e:?}"
+        );
+    }
+
+    /// A three-period panel with one lag is the smallest that pgmm fits: one
+    /// differenced equation per entity, instrumented by the first period's level.
+    #[test]
+    fn test_gmm_fits_a_three_period_panel() {
+        let ds = repo_dataset(AB_BALANCED);
+        let keep: polars::prelude::BooleanChunked = ds
+            .df()
+            .column("year")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|y| y.map(|y| y <= 2002))
+            .collect();
+        let three = Dataset::new(ds.df().filter(&keep).unwrap());
+        for step in [GmmStep::OneStep, GmmStep::TwoStep] {
+            let cfg = GmmConfig {
+                step,
+                ..Default::default()
+            };
+            let r = run_gmm(&three, "y", &["x"], "id", "year", 1, Some(cfg)).unwrap();
+            assert_eq!((r.n_obs, r.n_groups), (100, 100), "{step:?}");
+            assert!(
+                r.coefficients
+                    .iter()
+                    .chain(&r.std_errors)
+                    .all(|v| v.is_finite()),
+                "{step:?}: {:?} {:?}",
+                r.coefficients,
+                r.std_errors
+            );
+        }
     }
 
     #[test]

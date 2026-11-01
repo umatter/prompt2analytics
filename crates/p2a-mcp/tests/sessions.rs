@@ -695,6 +695,93 @@ async fn only_load_dataset_records_a_source_path() {
     }
 }
 
+/// A dataset loaded with `na_strings` is reloaded with them: its stored row
+/// keeps the markers, and a reload reads the marked cells as missing again
+/// instead of as data. A dataset loaded without them keeps none.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn reload_reads_a_dataset_with_its_na_strings() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let root = allowed_data_root().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".p2a-na-reload-")
+        .tempdir_in(&root)
+        .unwrap();
+    std::fs::write(
+        dir.path().join("na.csv"),
+        "x,y\n1,1.1\n2,-99\n3,3.2\n4,3.8\n",
+    )
+    .unwrap();
+    let file = dir
+        .path()
+        .strip_prefix(&root)
+        .unwrap()
+        .join("na.csv")
+        .to_string_lossy()
+        .into_owned();
+    for arguments in [
+        json!({"path": file, "name": "marked", "na_strings": ["-99"]}),
+        json!({"path": file, "name": "plain"}),
+    ] {
+        let (st, body) = call(
+            &r,
+            "POST",
+            "/api/tools/load_dataset",
+            Some(&sid),
+            Some(json!({"session_id": sid, "arguments": arguments})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["success"], true, "{body}");
+    }
+
+    let (st, body) = call(
+        &r,
+        "GET",
+        &format!("/api/sessions/{sid}/datasets"),
+        Some(&sid),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let stored = |name: &str| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .map(|d| d["na_strings"].clone())
+    };
+    assert_eq!(stored("marked"), Some(json!(["-99"])), "{body}");
+    assert_eq!(stored("plain"), Some(Value::Null), "{body}");
+
+    // The live datasets go, as when the server restarts; the reload reads the
+    // file again.
+    let session = state.session_manager.get_session(&sid).await.unwrap();
+    session.datasets.write().await.clear();
+    session.refresh_data_bytes().await;
+    let body = reload(&r, &sid).await;
+    let mut succeeded: Vec<&str> = body["data"]["succeeded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.as_str())
+        .collect();
+    succeeded.sort_unstable();
+    assert_eq!(succeeded, ["marked", "plain"], "{body}");
+    let datasets = session.datasets.read().await;
+    let y = |name: &str| datasets[name].df().column("y").unwrap().clone();
+    assert_eq!(y("marked").null_count(), 1, "{:?}", y("marked"));
+    assert_eq!(y("plain").null_count(), 0, "{:?}", y("plain"));
+    assert_eq!(
+        y("plain").f64().unwrap().get(1),
+        Some(-99.0),
+        "{:?}",
+        y("plain")
+    );
+}
+
 /// A reload is admitted like a tool call: above the memory soft limit it is
 /// refused with the governor's 503.
 #[tokio::test]

@@ -93,10 +93,10 @@ print(ct)  # Matrix with columns for each k
 - **R.** `dist()` uses the coordinates both rows have (scaled up), so
   `hclust(dist(m), "ward.D2")` clusters a row with one `NA` (heights 1, 1, 1.5275252316519468,
   10.220893633467998 on the review's rows (0,0), (1,0), (5,5), (6,5), (NA,1); R 4.3.3).
-  p2a does not implement these pairwise-complete distances and refuses the row instead (T2
-  design 1.6, Fail): a documented deviation. With infinite distances (`dist()` of
-  (0,0), (1e200,0), (2e200,0) is Inf Inf Inf), `hclust` stops with "NA/NaN/Inf in foreign
-  function call (arg 10)", as p2a does.
+  p2a does not implement these pairwise-complete distances and refuses the row instead (its
+  missing-value rule for ML methods is Fail): a documented deviation. With infinite distances
+  (`dist()` of (0,0), (1e200,0), (2e200,0) is Inf Inf Inf), `hclust` stops with "NA/NaN/Inf in
+  foreign function call (arg 10)", as p2a does.
 - **MCP and CLI.** `ml_hierarchical`, `ml_cutree` and `p2a ml hierarchical` read their
   columns with the Fail policy: a missing value is an error naming the column, and integer
   columns are numeric.

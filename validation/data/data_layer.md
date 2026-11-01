@@ -105,7 +105,9 @@ The quantile strategy is p2a's own: the edges are `-Inf`, `quantile(x, (1:(n-1))
 na.rm = TRUE)` and `+Inf` (open outer bins, so it has no out-of-range rows). Tied interior
 edges are an error (R's `cut` refuses duplicated breaks); an edge that interpolates from a
 `-Inf` neighbour is `-Inf`, and a present `-Inf` (`+Inf`) that no interval holds goes to the
-first (last) bin, so a column with `log(0)` values bins whatever their count.
+first (last) bin, so a column with a few `log(0)` values bins. When the `-Inf` (`+Inf`) values
+are frequent enough that two interior edges are `-Inf` (`+Inf`), those edges are tied and the
+call is refused like any tied edges (use fewer bins or custom edges).
 
 ### Casting text to numbers
 

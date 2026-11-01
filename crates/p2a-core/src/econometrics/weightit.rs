@@ -420,7 +420,7 @@ pub fn weightit(
 ) -> EconResult<WeightItResult> {
     let mut warnings = Vec::new();
 
-    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract treatment variable
     let d = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
@@ -596,7 +596,7 @@ pub fn entropy_balance(
     covariate_cols: &[&str],
     targets: Option<&[f64]>,
 ) -> EconResult<EntropyBalanceResult> {
-    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract treatment variable
     let d = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;

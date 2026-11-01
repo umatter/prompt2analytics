@@ -1754,7 +1754,7 @@ mod tests {
         assert!(r.to_string().contains("two samples of 10"), "{r}");
     }
 
-    /// Design 2.4 fixture of the dataset wrapper, on the Int64 case stat_friedman_quade: the
+    /// Column-type fixture of the dataset wrapper, on the Int64 case stat_friedman_quade: the
     /// one-sample test on the Int64 column equals the test on its Float64 cast; a text column
     /// and an absent column are refused.
     #[test]

@@ -101,7 +101,7 @@ case("rd_fuzzy_fixed_bw", "causal/rd", "Fuzzy RD, rdrobust(fuzzy = d) with one b
   v <- c(v, .rd_values(r, "fuzzy_nn_h03_b05"), .rd_first_stage(r, "fuzzy_nn_h03_b05"))
   r <- rdrobust(d$yf, d$x, c = 0, fuzzy = d$d, p = 1, h = 0.4, b = 0.4, vce = "nn", level = 90)
   v$fuzzy_level90_ci_conv <- vec(r$ci[1, ]); v$fuzzy_level90_ci_robust <- vec(r$ci[3, ])
-  # Plan sync: a weak first stage (F = 9.898 < 10) for the warning test
+  # A weak first stage (F = 9.898 < 10) for the warning test
   r <- rdrobust(d$yf, d$x, c = 0, fuzzy = d$d, p = 1, h = 0.2, b = 0.2, vce = "nn")
   v <- c(v, .rd_first_stage(r, "fuzzy_nn_h02"))
   stopifnot((v$fuzzy_nn_h02_first_stage_conv / v$fuzzy_nn_h02_first_stage_se_conv)^2 < 10)

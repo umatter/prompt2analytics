@@ -907,7 +907,8 @@ impl StreamingToolExecutor {
     /// (`load_dataset`, `upload_dataset` or `create_dataset`) in session
     /// `session_id`: the dataset's name, dimensions and column names, read
     /// from the call's `result_text`, and its source, read from the
-    /// `path` and `filename` fields of `arguments`. The work is linear in
+    /// `path` and `filename` fields of `arguments`, and the `na_strings` of a
+    /// `load_dataset` call, which a reload reads the file with. The work is linear in
     /// `result_text`, so the tool route and the LLM tool loop both run it
     /// on the blocking pool
     /// (`routes_tools::capture_dataset_metadata_off_runtime`).
@@ -1127,6 +1128,18 @@ impl StreamingToolExecutor {
             .as_deref()
             .and_then(|p| jailed_file_size(session_id, p));
 
+        // The missing-value markers load_dataset read the file with, which a reload
+        // reads it with again (the call succeeded, so they passed the request limits).
+        let na_strings: Option<Vec<String>> = arguments
+            .get("na_strings")
+            .filter(|_| tool_name == "load_dataset")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
+
         // Determine source type
         let source_type = if tool_name == "upload_dataset" {
             arguments
@@ -1167,6 +1180,7 @@ impl StreamingToolExecutor {
                 );
                 meta.source_path = source_path;
                 meta.file_size_bytes = file_size_bytes;
+                meta.na_strings = na_strings;
 
                 tracing::info!(
                     meta_id = %meta.id_string(),

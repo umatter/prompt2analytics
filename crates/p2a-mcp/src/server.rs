@@ -345,7 +345,7 @@ use p2a_core::{
     run_fuzzy_rd,
     // Parametric G-Formula for time-varying treatments (gfoRmula)
     run_gformula,
-    // Arellano-Bond / System GMM
+    // Arellano-Bond difference GMM
     run_gmm,
     // General GMM (Hansen 1982)
     run_gmm_iv,

@@ -59,17 +59,19 @@ use p2a_core::{
     run_twang, sargan_test, sbw, tmle, weightit,
 };
 
-/// The RD tools' `vce` (default nearest-neighbour), or the tool error naming the valid ones
-/// (the core message, which names the parameter and the values).
-fn parse_vce(vce: Option<&str>) -> Result<VceType, CallToolResult> {
-    match vce {
-        None => Ok(VceType::Nn),
-        Some(s) => VceType::parse(s).map_err(|e| {
-            let message = match e {
-                p2a_core::EconError::InvalidSpecification { message } => message,
-                other => other.to_string(),
-            };
-            CallToolResult::error(vec![Content::text(message)])
+/// An RD option (`vce`, `kernel`, `bwselect`) by name, `default` when it is absent, or the
+/// message for a name the core refused: the core message alone, which names the parameter
+/// and the valid values.
+fn rd_option<T>(
+    name: Option<&str>,
+    default: T,
+    parse: fn(&str) -> p2a_core::EconResult<T>,
+) -> Result<T, String> {
+    match name {
+        None => Ok(default),
+        Some(s) => parse(s).map_err(|e| match e {
+            p2a_core::EconError::InvalidSpecification { message } => message,
+            other => other.to_string(),
         }),
     }
 }
@@ -1790,10 +1792,27 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RdEstimateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        // vce is checked before the dataset lookup, so a bad name never costs a data read
-        let vce = match parse_vce(request.vce.as_deref()) {
+        // the option names are checked before the dataset lookup, so a bad name never
+        // costs a data read
+        let vce = match rd_option(request.vce.as_deref(), VceType::Nn, VceType::parse) {
             Ok(v) => v,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
+        };
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
+            Ok(k) => k,
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
+        };
+        let bwselect = match rd_option(
+            request.bwselect.as_deref(),
+            BandwidthMethod::MseRd,
+            BandwidthMethod::parse,
+        ) {
+            Ok(b) => b,
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
 
         let datasets = self.datasets.read().await;
@@ -1801,21 +1820,6 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cutoff = request.cutoff.unwrap_or(0.0);
-
-        // Parse kernel type
-        let kernel = match request.kernel.as_deref() {
-            Some("epanechnikov") => KernelType::Epanechnikov,
-            Some("uniform") => KernelType::Uniform,
-            _ => KernelType::Triangular, // default
-        };
-
-        // Parse bandwidth selection method
-        let bwselect = match request.bwselect.as_deref() {
-            Some("msetwo") => BandwidthMethod::MseTwo,
-            Some("cerrd") => BandwidthMethod::CerRd,
-            Some("certwo") => BandwidthMethod::CerTwo,
-            _ => BandwidthMethod::MseRd, // default
-        };
 
         let config = RdConfig {
             p: request.p.unwrap_or(1),
@@ -1861,27 +1865,30 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RdBandwidthRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // the option names are checked before the dataset lookup
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
+            Ok(k) => k,
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
+        };
+        let bwselect = match rd_option(
+            request.bwselect.as_deref(),
+            BandwidthMethod::MseRd,
+            BandwidthMethod::parse,
+        ) {
+            Ok(b) => b,
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
+        };
+
         let datasets = self.datasets.read().await;
 
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cutoff = request.cutoff.unwrap_or(0.0);
         let p = request.p.unwrap_or(1);
-
-        // Parse kernel type
-        let kernel = match request.kernel.as_deref() {
-            Some("epanechnikov") => KernelType::Epanechnikov,
-            Some("uniform") => KernelType::Uniform,
-            _ => KernelType::Triangular,
-        };
-
-        // Parse bandwidth selection method
-        let bwselect = match request.bwselect.as_deref() {
-            Some("msetwo") => BandwidthMethod::MseTwo,
-            Some("cerrd") => BandwidthMethod::CerRd,
-            Some("certwo") => BandwidthMethod::CerTwo,
-            _ => BandwidthMethod::MseRd,
-        };
 
         let result = match rd_bandwidth(
             dataset,
@@ -1914,10 +1921,27 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<FuzzyRdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        // vce is checked before the dataset lookup, so a bad name never costs a data read
-        let vce = match parse_vce(request.vce.as_deref()) {
+        // the option names are checked before the dataset lookup, so a bad name never
+        // costs a data read
+        let vce = match rd_option(request.vce.as_deref(), VceType::Nn, VceType::parse) {
             Ok(v) => v,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
+        };
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
+            Ok(k) => k,
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
+        };
+        let bwselect = match rd_option(
+            request.bwselect.as_deref(),
+            BandwidthMethod::MseRd,
+            BandwidthMethod::parse,
+        ) {
+            Ok(b) => b,
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
 
         let datasets = self.datasets.read().await;
@@ -1925,21 +1949,6 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let cutoff = request.cutoff.unwrap_or(0.0);
-
-        // Parse kernel type
-        let kernel = match request.kernel.as_deref() {
-            Some("epanechnikov") => KernelType::Epanechnikov,
-            Some("uniform") => KernelType::Uniform,
-            _ => KernelType::Triangular,
-        };
-
-        // Parse bandwidth selection method
-        let bwselect = match request.bwselect.as_deref() {
-            Some("msetwo") => BandwidthMethod::MseTwo,
-            Some("cerrd") => BandwidthMethod::CerRd,
-            Some("certwo") => BandwidthMethod::CerTwo,
-            _ => BandwidthMethod::MseRd,
-        };
 
         let config = RdConfig {
             p: request.p.unwrap_or(1),
@@ -1986,10 +1995,19 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
-        // vce is checked before the dataset lookup, so a bad name never costs a data read
-        let vce = match parse_vce(request.vce.as_deref()) {
+        // the option names are checked before the dataset lookup, so a bad name never
+        // costs a data read
+        let vce = match rd_option(request.vce.as_deref(), VceType::Nn, VceType::parse) {
             Ok(v) => v,
-            Err(e) => return Ok(e),
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
+        };
+        let kernel = match rd_option(
+            request.kernel.as_deref(),
+            KernelType::Triangular,
+            KernelType::parse,
+        ) {
+            Ok(k) => k,
+            Err(m) => return Ok(CallToolResult::error(vec![Content::text(m)])),
         };
 
         let datasets = self.datasets.read().await;
@@ -2001,13 +2019,6 @@ impl AnalyticsServer {
                 "At least one cutoff value must be specified in 'cutoffs'.",
             )]));
         }
-
-        // Parse kernel type
-        let kernel = match request.kernel.as_deref() {
-            Some("epanechnikov") => KernelType::Epanechnikov,
-            Some("uniform") => KernelType::Uniform,
-            _ => KernelType::Triangular,
-        };
 
         // Parse pooling weights
         let pooling_weights = match request.pooling_weights.as_deref() {
@@ -2656,6 +2667,139 @@ mod tests {
         let req: RdMultiRequest =
             serde_json::from_value(merged(base, json!({"cutoffs": [0.0]}))).unwrap();
         check(rt.block_on(server.rd_multi(Parameters(req))).unwrap());
+    }
+
+    #[test]
+    fn test_mcp_rd_rejects_unknown_kernel_and_bwselect() {
+        // both names are checked before the dataset lookup, so no dataset is loaded
+        let (rt, server) = server_with(vec![]);
+        let base = json!({"dataset": "none", "outcome": "y", "running_var": "x"});
+        let check = |r: CallToolResult, starts: &str, lists: &[&str]| {
+            let out = text(&r);
+            assert_eq!(r.is_error, Some(true), "{out}");
+            // the core message alone, without a second prefix
+            assert!(out.starts_with(starts), "{out}");
+            for name in lists {
+                assert!(out.contains(name), "{name}: {out}");
+            }
+        };
+        let kernel_err = "Unknown kernel 'gaussian'; use \"triangular\"";
+        let kernels = ["epanechnikov", "uniform", "\"epa\"", "\"uni\""];
+        let k = merged(base.clone(), json!({"kernel": "gaussian"}));
+        let req: RdEstimateRequest = serde_json::from_value(k.clone()).unwrap();
+        check(
+            rt.block_on(server.rd_estimate(Parameters(req))).unwrap(),
+            kernel_err,
+            &kernels,
+        );
+        let req: RdBandwidthRequest = serde_json::from_value(k.clone()).unwrap();
+        check(
+            rt.block_on(server.rd_bw(Parameters(req))).unwrap(),
+            kernel_err,
+            &kernels,
+        );
+        let req: FuzzyRdRequest =
+            serde_json::from_value(merged(k.clone(), json!({"treatment": "d"}))).unwrap();
+        check(
+            rt.block_on(server.rd_fuzzy(Parameters(req))).unwrap(),
+            kernel_err,
+            &kernels,
+        );
+        let req: RdMultiRequest =
+            serde_json::from_value(merged(k, json!({"cutoffs": [0.0]}))).unwrap();
+        check(
+            rt.block_on(server.rd_multi(Parameters(req))).unwrap(),
+            kernel_err,
+            &kernels,
+        );
+
+        let bw_err = "Unknown bwselect 'ik'; use \"mserd\"";
+        let methods = ["msetwo", "cerrd", "certwo"];
+        let b = merged(base, json!({"bwselect": "ik"}));
+        let req: RdEstimateRequest = serde_json::from_value(b.clone()).unwrap();
+        check(
+            rt.block_on(server.rd_estimate(Parameters(req))).unwrap(),
+            bw_err,
+            &methods,
+        );
+        let req: RdBandwidthRequest = serde_json::from_value(b.clone()).unwrap();
+        check(
+            rt.block_on(server.rd_bw(Parameters(req))).unwrap(),
+            bw_err,
+            &methods,
+        );
+        let req: FuzzyRdRequest =
+            serde_json::from_value(merged(b, json!({"treatment": "d"}))).unwrap();
+        check(
+            rt.block_on(server.rd_fuzzy(Parameters(req))).unwrap(),
+            bw_err,
+            &methods,
+        );
+    }
+
+    #[test]
+    fn test_mcp_rd_accepts_short_and_cased_names() {
+        // the short names and any case select the named kernel and selector, never the
+        // triangular / mserd fallback
+        let (rt, server) = server_with(vec![("rd", rd_frame())]);
+        let base = json!({"dataset": "rd", "outcome": "y", "running_var": "x", "cutoff": 0.0});
+        for (kernel, bwselect, kernel_shown, method_shown) in [
+            (
+                "epa",
+                "CERTWO",
+                "Kernel: Epanechnikov",
+                "CER-optimal (separate)",
+            ),
+            (
+                "uni",
+                "mse_two",
+                "Kernel: Uniform",
+                "MSE-optimal (separate)",
+            ),
+            (
+                "Uniform",
+                "CerRd",
+                "Kernel: Uniform",
+                "CER-optimal (common)",
+            ),
+            ("tri", "mserd", "Kernel: Triangular", "MSE-optimal (common)"),
+        ] {
+            let args = merged(
+                base.clone(),
+                json!({"kernel": kernel, "bwselect": bwselect}),
+            );
+            let req: RdBandwidthRequest = serde_json::from_value(args.clone()).unwrap();
+            let r = rt.block_on(server.rd_bw(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            assert!(out.contains(kernel_shown), "{kernel}: {out}");
+            assert!(
+                out.contains(&format!("Method: {method_shown}")),
+                "{bwselect}: {out}"
+            );
+            let req: RdEstimateRequest = serde_json::from_value(args.clone()).unwrap();
+            let r = rt.block_on(server.rd_estimate(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            assert!(out.contains(kernel_shown), "{kernel}: {out}");
+            assert!(
+                out.contains(&format!("Bandwidth Method: {method_shown}")),
+                "{bwselect}: {out}"
+            );
+            let req: FuzzyRdRequest =
+                serde_json::from_value(merged(args.clone(), json!({"treatment": "d"}))).unwrap();
+            let r = rt.block_on(server.rd_fuzzy(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            assert!(out.contains(kernel_shown), "{kernel}: {out}");
+            let req: RdMultiRequest =
+                serde_json::from_value(merged(args, json!({"cutoffs": [0.0], "bandwidth": 0.3})))
+                    .unwrap();
+            let r = rt.block_on(server.rd_multi(Parameters(req))).unwrap();
+            let out = text(&r);
+            assert_ne!(r.is_error, Some(true), "{out}");
+            assert!(out.contains(kernel_shown), "{kernel}: {out}");
+        }
     }
 
     #[test]

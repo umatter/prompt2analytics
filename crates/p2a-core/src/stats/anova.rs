@@ -2261,7 +2261,7 @@ mod tests {
         );
     }
 
-    /// Design 2.4 fixture: an Int64 response equals its Float64 cast; a text response and an
+    /// Column-type fixture: an Int64 response equals its Float64 cast; a text response and an
     /// absent factor are refused with the variant that names the problem.
     #[test]
     fn test_validate_na_one_way_anova_dtypes_and_errors() {
@@ -2285,7 +2285,7 @@ mod tests {
         ));
     }
 
-    /// Design 2.4 fixture of the two-way wrapper, on the Int64 case stat_friedman_quade:
+    /// Column-type fixture of the two-way wrapper, on the Int64 case stat_friedman_quade:
     /// `y ~ treat + block` on the Int64 response equals the same model on its Float64 cast;
     /// a text response, an absent factor and a factor given twice are refused.
     #[test]

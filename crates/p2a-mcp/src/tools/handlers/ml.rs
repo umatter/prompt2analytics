@@ -70,8 +70,8 @@ use p2a_core::{
     tsne,
 };
 
-/// Appended to missing-value errors: these ML methods do not drop incomplete rows (T2 design
-/// 1.6; R's kmeans, prcomp and randomForest refuse NA too).
+/// Appended to missing-value errors: these ML methods do not drop incomplete rows (R's
+/// kmeans, prcomp and randomForest refuse NA too).
 const ML_MISSING_HINT: &str =
     "Use munge_drop_na to remove the incomplete rows or munge_fill_na to impute them.";
 
@@ -2342,7 +2342,9 @@ mod tests {
     // T2-WP17: missing values and column types through the ML tools
     // ========================================================================
 
-    /// The 30-row fixture of plans/T2/T2-WP17.md (R cross-check: Appendix A.2, fixture.R).
+    /// The 30-row ML fixture, built with the same IEEE operations as the R cross-check (so
+    /// R sees the same values bit for bit): y_na and cls_na are missing at row 4, x1_na at
+    /// row 7.
     /// Rows listed in `skip` are left out (complete-row comparisons). An empty field is
     /// missing (T2-WP01 loader).
     fn fixture_csv(skip: &[usize]) -> String {
@@ -2547,7 +2549,7 @@ mod tests {
     #[tokio::test]
     async fn test_na_mcp_svm_omits_incomplete_rows() {
         // ML-33. e1071::svm's formula interface drops incomplete rows (R: 29 rows for (cls,
-        // x1_na, x2), 28 for (cls_na, x1_na, x2); Appendix A.2). Before: a tool error (the
+        // x1_na, x2), 28 for (cls_na, x1_na, x2)). Before: a tool error (the
         // null became NaN and Tier 0's linear_svm refuses it).
         let s = server().await;
         let svm = |ds: &str, target: &str| json!({"dataset": ds, "features": ["x1_na", "x2"], "target": target});
@@ -2576,7 +2578,7 @@ mod tests {
     #[tokio::test]
     async fn test_na_mcp_ppr_omits_incomplete_rows() {
         // ML-33. R ppr(y_na ~ x1_na + x2) uses 28 rows (na.omit). Before: a tool error
-        // ("non-finite"; before Tier 0 the request panicked in the sort).
+        // ("non-finite").
         let s = server().await;
         let ppr = |ds: &str| json!({"dataset": ds, "features": ["x1_na", "x2"], "target": "y_na", "nterms": 1});
         let a = s.ml_ppr(req(ppr("ml"))).await.unwrap();

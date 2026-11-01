@@ -335,7 +335,7 @@ pub fn tmle(
     // Extract Data
     // ═══════════════════════════════════════════════════════════════════════
 
-    // Missing values are refused (MatchIt, WeightIt and tmle refuse them; T2 design 1.6).
+    // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract outcome variable Y
     let y = DesignMatrix::extract_column(dataset.df(), outcome_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;

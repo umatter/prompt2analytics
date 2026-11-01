@@ -357,8 +357,11 @@ pub enum BinStrategy {
 /// `quantile(type = 7, na.rm = TRUE)`) and `+inf`; an edge that interpolates
 /// from a `-inf` lower neighbour is `-inf` (R's value next to a finite
 /// neighbour), and a present `-inf` (`+inf`) that no interval holds goes into
-/// the first (last) bin, so a column with `-inf` values, from `log(0)` say, is
-/// binned whatever their count. `Custom(edges)` are used as given.
+/// the first (last) bin, so a column with a few `-inf` values, from `log(0)` say,
+/// is binned. Interior edges must differ, as `cut()` refuses duplicated breaks:
+/// when the `-inf` (`+inf`) values are frequent enough that two interior edges
+/// are `-inf` (`+inf`), the call is refused (use fewer bins or custom edges).
+/// `Custom(edges)` are used as given.
 ///
 /// # Arguments
 ///
@@ -1686,7 +1689,7 @@ mod tests {
 
     #[test]
     fn test_na_bin_fixtures() {
-        // Design 2.4: Int64 accepted (R cut(1:4, 2): 0 0 1 1); text refused (R: cut("1.5", 2)
+        // Int64 accepted (R cut(1:4, 2): 0 0 1 1); text refused (R: cut("1.5", 2)
         // is an error, "'x' must be numeric"); an absent column is named; a column without an
         // observed value has no equal-width or quantile edges.
         let i = bin(

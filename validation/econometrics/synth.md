@@ -257,6 +257,9 @@ Data requirements of `run_synthetic_control` (MCP `synthetic_control`, CLI `caus
   for unit '{u}' at time {t}.", an absent cell "No data for unit '{u}' at time {t}";
 - predictors are aggregated (mean, first, last or sum) over the values present in their
   window;
+- an infinite value (`Inf` or `-Inf`) anywhere in the outcome or a predictor column is refused
+  before the fit, whichever unit or time it belongs to: "Column '{column}' contains {k}
+  infinite value(s); remove or recode them before estimating.";
 - integer outcomes and predictors are read as numbers; unit ids may be text, integers or
   floats (`treated_unit` is matched against the label, e.g. "3"); times are integers,
   whole-number floats or dates.

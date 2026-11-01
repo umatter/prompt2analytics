@@ -111,6 +111,102 @@ fn test_cli_causal_rd_rejects_unknown_vce() {
 }
 
 #[test]
+fn test_cli_causal_rd_rejects_unknown_kernel_and_bwselect() {
+    // --kernel and --bwselect are parsed before the dataset lookup: no dataset is loaded
+    let s = temp_session();
+    let kernel = |err: &str| {
+        assert!(
+            err.contains("Unknown kernel 'gaussian'; use \"triangular\"")
+                && err.contains("epanechnikov")
+                && err.contains("uniform"),
+            "{err}"
+        );
+    };
+    kernel(&s.err(&[
+        "causal", "rd", "none", "-y", "y", "-r", "x", "-c", "0", "--kernel", "gaussian",
+    ]));
+    kernel(&s.err(&[
+        "causal", "fuzzy-rd", "none", "-y", "y", "-r", "x", "-t", "d", "-c", "0", "--kernel",
+        "gaussian",
+    ]));
+    let err = s.err(&[
+        "causal",
+        "rd",
+        "none",
+        "-y",
+        "y",
+        "-r",
+        "x",
+        "-c",
+        "0",
+        "--bwselect",
+        "ik",
+    ]);
+    assert!(
+        err.contains("Unknown bwselect 'ik'; use \"mserd\"") && err.contains("certwo"),
+        "{err}"
+    );
+}
+
+#[test]
+fn test_cli_causal_rd_short_kernel_names_and_certwo() {
+    // the short names select the named kernel, and certwo the separate CER bandwidths,
+    // never the triangular / mserd fallback
+    let s = temp_session();
+    s.load_as(
+        &repo_path("validation/datasets/generated/rd_sim.csv"),
+        "rd",
+        &[],
+    );
+    let sharp = |extra: &[&str]| {
+        let mut args = vec![
+            "causal", "rd", "rd", "-y", "y", "-r", "x", "-c", "0", "--h", "0.3",
+        ];
+        args.extend_from_slice(extra);
+        s.json(&args)
+    };
+    let epa = sharp(&["--kernel", "epa"]);
+    assert_eq!(epa["kernel"], "Epanechnikov", "{epa}");
+    let full = sharp(&["--kernel", "epanechnikov"]);
+    assert_eq!(num(&epa, "tau_robust"), num(&full, "tau_robust"));
+    assert_eq!(sharp(&["--kernel", "uni"])["kernel"], "Uniform");
+    assert_eq!(sharp(&["--kernel", "TRI"])["kernel"], "Triangular");
+
+    let fuzzy = |kernel: &str| {
+        num(
+            &s.json(&[
+                "causal", "fuzzy-rd", "rd", "-y", "yf", "-r", "x", "-t", "d", "-c", "0", "--h",
+                "0.3", "--kernel", kernel,
+            ]),
+            "tau_fuzzy",
+        )
+    };
+    let uni = fuzzy("uni");
+    assert_eq!(uni, fuzzy("uniform"));
+    assert_ne!(uni, fuzzy("triangular"));
+
+    let selected = |bwselect: &str| {
+        s.json(&[
+            "causal",
+            "rd",
+            "rd",
+            "-y",
+            "y",
+            "-r",
+            "x",
+            "-c",
+            "0",
+            "--bwselect",
+            bwselect,
+        ])
+    };
+    let common = selected("cerrd");
+    assert_eq!(num(&common, "h_left"), num(&common, "h_right"), "{common}");
+    let two = selected("certwo");
+    assert_ne!(num(&two, "h_left"), num(&two, "h_right"), "{two}");
+}
+
+#[test]
 fn test_validate_cli_causal_fuzzy_rd() {
     let case = Case::load("rd_fuzzy_fixed_bw");
     let s = temp_session();

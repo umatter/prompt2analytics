@@ -327,7 +327,7 @@ pub fn execute(
 }
 
 /// Features (and the target, requested first, so that [`NaPolicy::Fail`] names it first)
-/// through the shared extractor under `policy` (T2 design 1.6: Fail for every ML command
+/// through the shared extractor under `policy` (Fail for every ML command
 /// except `ml svm`, which drops incomplete rows as e1071's formula interface does).
 /// Integer and boolean columns are numeric; text is refused by name.
 fn ml_columns(

@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(r.missing.by_column, vec![("g9".to_string(), 3)]);
     }
 
-    /// Design 2.4 fixture: integer labels in numeric order (2 < 10), a text value column and
+    /// Column-type fixture: integer labels in numeric order (2 < 10), a text value column and
     /// an absent column refused with the variant that names the problem.
     #[test]
     fn test_validate_na_kruskal_dtypes_and_errors() {

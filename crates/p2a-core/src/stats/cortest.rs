@@ -742,7 +742,7 @@ mod tests {
         let y: Vec<f64> = (0..500)
             .map(|i| (next() % 13) as f64 + 0.5 * x[i])
             .collect();
-        assert_eq!(kendall_s(&x, &y).unwrap(), 55869); // also computed by the planning port of the old loop
+        assert_eq!(kendall_s(&x, &y).unwrap(), 55869); // also computed by a port of the old pairwise loop
         for alt in [
             Alternative::TwoSided,
             Alternative::Less,

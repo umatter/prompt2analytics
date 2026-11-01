@@ -76,7 +76,7 @@ fn with_hint(message: String, hint: &str) -> String {
 impl AnalyticsServer {
     /// Create spatial neighbors and weights from coordinates.
     #[tool(
-        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(). Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort)."
+        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(). Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort). Known limitation: style 'U' gives binary weights, not spdep's 'U' (the globally standardized weights divided by n), and a style it does not know is read as 'W'; see the release notes."
     )]
     pub async fn spatial_neighbors(
         &self,
@@ -414,7 +414,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Autoregressive Lag (SAR) model.
     #[tool(
-        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
+        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its standard errors do not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes."
     )]
     pub async fn sar_model(
         &self,
@@ -527,7 +527,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Error Model (SEM).
     #[tool(
-        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
+        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: the standard error of lambda does not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes."
     )]
     pub async fn sem_model(
         &self,
@@ -615,7 +615,7 @@ impl AnalyticsServer {
 
     /// Run Spatial GMM with heteroscedasticity robustness (sphet).
     #[tool(
-        description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights)."
+        description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its estimates and standard errors do not yet match the R reference (sphet), for every model; see the release notes."
     )]
     pub async fn sphet_model(
         &self,
@@ -999,7 +999,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel ML model (spml).
     #[tool(
-        description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
+        description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. Known limitation: its standard errors do not yet match the R reference (splm); in the within model the spatial error coefficient is reported as rho, with lag = true the spatial error is not estimated (the combined model runs the lag model), the random-effects and pooled models ignore spatial_error, and the time and two-way effects are not applied, so those estimates do not match either; see the release notes."
     )]
     pub async fn spatial_panel_ml(
         &self,
@@ -1147,7 +1147,7 @@ impl AnalyticsServer {
 
     /// Run Spatial Panel GMM model (spgm).
     #[tool(
-        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused."
+        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. Known limitation: it does not yet match the R reference (splm::spgm): the spatial error parameter is not estimated, b2sls and ec2sls run w2sls, and g2sls ignores the weights; see the release notes."
     )]
     pub async fn spatial_panel_gmm(
         &self,
@@ -1680,7 +1680,8 @@ mod tests {
         serde_json::from_value(v).unwrap()
     }
 
-    /// The 25 integer points of moran_int_points.R (plan T2-WP14, Appendix A.3), i = 0..24:
+    /// The 25 integer points of the Moran's I cross-check (the R script is in the doc
+    /// comment of `test_mcp_spatial_neighbors_and_moran_int64_match_r`), i = 0..24:
     /// gx = (40 i^2 + 3 i) mod 101, gy = (2 i^2 + 7 i + 5) mod 97,
     /// v = (gx + gy) div 10 + (3 i) mod 7, b = (v >= 13) as 0/1. No kNN ties for k = 4.
     /// `float`: Float64 copies (the same values), else Int64.
@@ -1710,13 +1711,14 @@ mod tests {
         "u1", "u10", "u11", "u12", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9",
     ];
 
-    /// Dataset C of spml_entity_order.R (plan T2-WP14, Appendix A.2; the same formulas as
-    /// the p2a-core splm fixture, whose test helpers are not visible here): entity k on a
-    /// 3 x 4 grid at ((k-1) mod 4, (k-1) div 4) with label `C_LABELS[k-1]`, Int64 time
-    /// 2001..=2005, x = sin(0.7 k + 1.3 t) + 0.1 k and y_t = (I - 0.5 W)^-1
-    /// (1.5 x_t + 0.5 cos(1.1 k) + 0.3 sin(2.3 k t + 0.4)) for the row-standardised rook W;
-    /// row i is row (7 i + 3) mod 60 of the entity-major dataset A. Also the 12-row
-    /// coordinate dataset (label, Int64 gx, gy) in sorted label order.
+    /// Dataset C of spml_entity_order.R (reproduced in validation/econometrics/splm.md; the
+    /// same formulas as the p2a-core splm fixture, whose test helpers are not visible
+    /// here): entity k on a 3 x 4 grid at ((k-1) mod 4, (k-1) div 4) with label
+    /// `C_LABELS[k-1]`, Int64 time 2001..=2005, x = sin(0.7 k + 1.3 t) + 0.1 k and
+    /// y_t = (I - 0.5 W)^-1 (1.5 x_t + 0.5 cos(1.1 k) + 0.3 sin(2.3 k t + 0.4)) for the
+    /// row-standardised rook W; row i is row (7 i + 3) mod 60 of the entity-major
+    /// dataset A. Also the 12-row coordinate dataset (label, Int64 gx, gy) in sorted label
+    /// order.
     fn panel_dfs() -> (DataFrame, DataFrame) {
         let gx: Vec<i64> = (0..12).map(|i| i % 4).collect();
         let gy: Vec<i64> = (0..12).map(|i| i / 4).collect();
@@ -1758,7 +1760,33 @@ mod tests {
         (panel, coords)
     }
 
-    /// R: moran_int_points.R (plan T2-WP14, Appendix A.3; base R, spdep is not installed).
+    /// R (base R; spdep is not installed): Moran's I with the randomisation variance on
+    /// kNN-4 row-standardised weights of these points, as `spdep::moran.test`:
+    ///
+    /// ```r
+    /// options(digits = 17)
+    /// i <- 0:24
+    /// gx <- (40L * i * i + 3L * i) %% 101L
+    /// gy <- (2L * i * i + 7L * i + 5L) %% 97L
+    /// v <- (gx + gy) %/% 10L + (3L * i) %% 7L
+    /// stopifnot(!anyDuplicated(paste(gx, gy)))
+    /// D <- as.matrix(dist(cbind(gx, gy)))
+    /// k <- 4L; n <- length(i)
+    /// nb <- lapply(1:n, function(a) { d <- D[a, ]; d[a] <- Inf; o <- order(d); o[1:k] })
+    /// gap <- sapply(1:n, function(a) { d <- sort(D[a, -a]); d[k + 1] - d[k] })
+    /// W <- matrix(0, n, n); for (a in 1:n) W[a, nb[[a]]] <- 1 / k
+    /// z <- v - mean(v); S0 <- sum(W)
+    /// I <- n / S0 * sum(W * outer(z, z)) / sum(z^2)
+    /// EI <- -1 / (n - 1)
+    /// S1 <- 0.5 * sum((W + t(W))^2); S2 <- sum((rowSums(W) + colSums(W))^2)
+    /// b2 <- (sum(z^4) / n) / (sum(z^2) / n)^2
+    /// VI <- (n * ((n^2 - 3 * n + 3) * S1 - n * S2 + 3 * S0^2) -
+    ///        b2 * ((n^2 - n) * S1 - 2 * n * S2 + 6 * S0^2)) /
+    ///   ((n - 1) * (n - 2) * (n - 3) * S0^2) - EI^2
+    /// Z <- (I - EI) / sqrt(VI)
+    /// c(I = I, EI = EI, VI = VI, z = Z, p_greater = pnorm(Z, lower.tail = FALSE),
+    ///   p_two = 2 * pnorm(-abs(Z)), min_gap = min(gap))  # min_gap > 0: no kNN ties
+    /// ```
     #[test]
     fn test_mcp_spatial_neighbors_and_moran_int64_match_r() {
         let (rt, s) = server_with(vec![("pts", points_df(false)), ("ptsf", points_df(true))]);
@@ -1939,8 +1967,8 @@ mod tests {
         }
     }
 
-    /// R: spml_entity_order.R (plan T2-WP14, Appendix A.2): within spatial-lag fit with W
-    /// rows in sorted label order.
+    /// R: spml_entity_order.R (validation/econometrics/splm.md): within spatial-lag fit
+    /// with W rows in sorted label order.
     #[test]
     fn test_mcp_spatial_panel_ml_sorted_ids_match_r() {
         let (panel, coords) = panel_dfs();

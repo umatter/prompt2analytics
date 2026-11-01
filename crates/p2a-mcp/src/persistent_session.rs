@@ -694,6 +694,7 @@ impl PersistentSessionManager {
                 Some(source_path) => plan.sources.push(ReloadSource {
                     name: meta.name,
                     source_path,
+                    na_strings: meta.na_strings,
                 }),
                 // e.g. uploaded datasets without a file path
                 None => plan.skipped.push(ReloadSkip {
@@ -725,20 +726,23 @@ pub struct ReloadSource {
     pub name: String,
     /// The stored source path (the caller's own input)
     pub source_path: String,
+    /// The `na_strings` the dataset was loaded with; `None` reads the file with the
+    /// loader's default markers.
+    pub na_strings: Option<Vec<String>>,
 }
 
 /// The load step of a dataset reload: validate `source.source_path` through
 /// the path jail, check the file before any parsing as `load_dataset` does
 /// (its size against the `load_file_bytes` budget, then a parquet file's
-/// footer and decoded size), and load the file. It blocks, and runs the
-/// async part of the parquet check on `handle`; run it on the blocking pool
-/// inside the session's path-jail scope and under the server's request
-/// limits (`ToolGovernor::run_blocking` does both). The error is a fixed
-/// text, the budget refusal with the file's size and the limit, the quota
-/// refusal `load_dataset` gives, or `the file could not be loaded: <reason>`
-/// for a parquet file the check will not read; none holds a server path.
-/// The details are logged at debug level, the budget and quota refusals at
-/// info level.
+/// footer and decoded size), and load the file, with the `na_strings` it was
+/// loaded with. It blocks, and runs the async part of the parquet check on
+/// `handle`; run it on the blocking pool inside the session's path-jail
+/// scope and under the server's request limits (`ToolGovernor::run_blocking`
+/// does both). The error is a fixed text, the budget refusal with the file's
+/// size and the limit, the quota refusal `load_dataset` gives, or
+/// `the file could not be loaded: <reason>` for a parquet file the check
+/// will not read; none holds a server path. The details are logged at debug
+/// level, the budget and quota refusals at info level.
 ///
 /// The decoded-size check is `load_dataset`'s (`session::admit_dataset`):
 /// this function installs `quotas` for `session` on this thread, as a tool
@@ -813,7 +817,15 @@ pub fn load_reload_source(
             return Err(format!("{RELOAD_LOAD_FAILED}: {reason}"));
         }
     }
-    let dataset = p2a_core::DataLoader::load(&path).map_err(|e| {
+    // The dataset's own missing-value markers, as load_dataset read it.
+    let loaded = match source.na_strings.as_deref() {
+        None => p2a_core::DataLoader::load(&path),
+        Some(na) => {
+            let na: Vec<&str> = na.iter().map(String::as_str).collect();
+            p2a_core::DataLoader::load_with_na(&path, &na)
+        }
+    };
+    let dataset = loaded.map_err(|e| {
         tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
         RELOAD_LOAD_FAILED.to_string()
     })?;

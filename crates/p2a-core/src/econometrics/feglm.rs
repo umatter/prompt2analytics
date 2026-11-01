@@ -1790,7 +1790,7 @@ mod tests {
         Dataset::new(df! { "id" => id, "x" => x, "y" => y }.unwrap())
     }
 
-    /// A NaN in y or a regressor is a missing cell (design 1.1, fixest drops it): the
+    /// A NaN in y or a regressor is a missing cell (fixest drops it): the
     /// fit equals the fit without that row and reports it. An infinite value is
     /// refused by name, before the family's checks.
     #[test]

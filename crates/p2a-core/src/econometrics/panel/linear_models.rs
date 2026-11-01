@@ -1069,7 +1069,7 @@ mod tests {
         }
     }
 
-    /// A NaN in y is a missing cell (design 1.1, plm na.omit): the row is dropped and
+    /// A NaN in y is a missing cell (plm's na.omit): the row is dropped and
     /// reported, and the fit equals the fit without that row; an infinite regressor
     /// value is refused by name.
     #[test]

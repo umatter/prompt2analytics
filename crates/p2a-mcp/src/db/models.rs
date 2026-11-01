@@ -374,6 +374,11 @@ pub struct DatasetMeta {
     pub loaded_at: Datetime,
     /// File size in bytes (if known)
     pub file_size_bytes: Option<i64>,
+    /// The `na_strings` the dataset was loaded with (`None`: the loader's default
+    /// markers), so that a reload reads the same cells as missing. Rows stored before
+    /// the field existed read as `None`.
+    #[serde(default)]
+    pub na_strings: Option<Vec<String>>,
 }
 
 impl DatasetMeta {
@@ -398,6 +403,7 @@ impl DatasetMeta {
             column_names,
             loaded_at: Datetime::from(Utc::now()),
             file_size_bytes: None,
+            na_strings: None,
         }
     }
 

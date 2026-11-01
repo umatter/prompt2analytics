@@ -1201,7 +1201,7 @@ mod tests {
     fn test_validate_columns_conventions() {
         let (case, ds) = crate::test_support::load_case("columns_conventions");
         let df = ds.df();
-        // design 2.2: the fixture's dtypes are what the case relies on
+        // the fixture's dtypes are what the case relies on
         assert_eq!(df.column("y").unwrap().dtype(), &DataType::Float64);
         assert_eq!(df.column("n").unwrap().dtype(), &DataType::Int64);
         assert_eq!(df.column("s").unwrap().dtype(), &DataType::String);

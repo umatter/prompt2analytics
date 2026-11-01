@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_validate_na_contingency_int64_equals_float64() {
-        // design 2.4 (a): an Int64 code column and the same values as Float64 give one table
+        // an Int64 code column and the same values as Float64 give one table
         // and the same labels.
         let (_case, ds) = crate::test_support::load_case("stat_contingency_na_codes");
         assert_eq!(ds.df().column("code").unwrap().dtype(), &DataType::Int64);
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_na_contingency_nan_float_is_missing() {
-        // design 2.2: the one inline fixture, a NaN cell (the harness cannot write one). NaN is
+        // the one inline fixture, a NaN cell (the R harness cannot write one). NaN is
         // missing, as R's is.na.
         let df =
             df!("x" => [1.0, 2.0, f64::NAN, 2.0, 10.0], "y" => ["p", "q", "p", "p", "q"]).unwrap();
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_validate_na_contingency_rejects_datetime_and_absent_columns() {
-        // design 2.4 (c)/(d): a dtype that cannot be a factor is named; an absent column is
+        // a dtype that cannot be a factor is named; an absent column is
         // ColumnNotFound.
         let (_case, ds) = crate::test_support::load_case("stat_contingency_na_codes");
         let mut df = ds.df().clone();

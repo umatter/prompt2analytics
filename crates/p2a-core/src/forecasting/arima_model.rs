@@ -71,13 +71,16 @@ use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_zeros1,
 const MAX_ITERATIONS: usize = 200;
 /// Converged when the largest |Gauss-Newton step| / (1 + |coefficient|) is at most this.
 const STEP_TOLERANCE: f64 = 1e-8;
-/// When damping finds no better point, the fit counts as converged up to this scaled step.
+/// When no damped step up to [`LAMBDA_MAX`] has a positive gain ratio (the rounding floor of
+/// the sum of squares), the fit counts as converged if the scaled Gauss-Newton step is at
+/// most this.
 const FLOOR_TOLERANCE: f64 = 1e-6;
 const LAMBDA_START: f64 = 1e-3;
 /// The factor that raises the damping after a rejected step; it doubles on every further
 /// rejection and returns to this value after an accepted step (Nielsen 1999).
 const NU_START: f64 = 2.0;
-/// Above this damping no step improves the sum of squares: the rounding floor.
+/// The damping at which the search for a step with a positive gain ratio stops: above it
+/// the damped steps are too short to lower the sum of squares beyond rounding.
 const LAMBDA_MAX: f64 = 1e16;
 /// Keeps the damping positive after many accepted steps.
 const LAMBDA_MIN: f64 = 1e-20;
@@ -91,6 +94,9 @@ const FILTER_STRIDE: usize = 1024;
 const DECAYED: f64 = 1e-12;
 /// Squarings before a matrix that has not decayed counts as not stable.
 const MAX_SQUARINGS: usize = 64;
+/// A fit whose root-mean-square CSS residual is at most this times the largest absolute
+/// value of the differenced series reproduces the series up to rounding.
+const ZERO_RESIDUAL: f64 = 1e-12;
 
 /// The warning R's `predict.Arima` gives for an MA polynomial with a root inside the unit
 /// circle.
@@ -213,7 +219,10 @@ pub struct ArimaResult {
     /// Estimation method: "CSS".
     #[serde(default)]
     pub method: String,
-    /// Whether the optimiser reached the CSS optimum.
+    /// Whether the Levenberg-Marquardt fit met its step test: the largest Gauss-Newton step,
+    /// scaled by 1 + |coefficient|, was at most 1e-8, or at most 1e-6 where no damped step
+    /// lowered the sum of squares further. It is a local criterion: the CSS objective can
+    /// have more than one minimum, and `converged` does not say this one is the lowest.
     #[serde(default)]
     pub converged: bool,
     /// Levenberg-Marquardt iterations.
@@ -390,6 +399,9 @@ impl fmt::Display for ArimaForecastResult {
 ///   p + d + q + 10 observations: [`EconError::InvalidSpecification`];
 /// - a coefficient that does not change the residuals (for instance an AR term on a series
 ///   that is constant after differencing): `InvalidSpecification` naming it;
+/// - a fit that reproduces the series up to rounding (zero residuals, for instance an MA
+///   term or the mean alone on such a series), whose variance is 0 and log-likelihood
+///   infinite: `InvalidSpecification`, as R's arima stops on its singular Hessian;
 /// - [`EconError::Cancelled`] when the budget installed with
 ///   [`crate::resource::with_budget`] is spent: the fit checks it before it starts, on
 ///   every iteration and every 4096 rows of a pass over the series.
@@ -902,6 +914,20 @@ fn final_step(
     Ok(())
 }
 
+/// Nielsen's gain ratio of a trial step: the decrease of the sum of squares from `ssr` to
+/// `ssr_trial` over the decrease `predicted` by the linearised residuals. NaN, which rejects
+/// the step, when the trial sum of squares is not finite or the predicted decrease is not
+/// positive: the predicted decrease of a nonzero damped step is positive in exact
+/// arithmetic, so a value at or below 0 is rounding in a nearly singular system, and its
+/// sign would turn a rise of the sum of squares into a positive ratio.
+fn gain_ratio(ssr: f64, ssr_trial: f64, predicted: f64) -> f64 {
+    if ssr_trial.is_finite() && predicted > 0.0 {
+        (ssr - ssr_trial) / predicted
+    } else {
+        f64::NAN
+    }
+}
+
 /// Levenberg-Marquardt on the CSS residuals from `coef` (updated in place), damped by
 /// Nielsen's (1999) gain ratio: rho = the actual decrease of the sum of squares over the
 /// decrease the linearised residuals predict. A step with rho > 0 is accepted and lambda
@@ -977,17 +1003,13 @@ fn optimise(
                     let predicted: f64 = (0..k)
                         .map(|c| delta[c] * (lambda * ws.jtj[[c, c]] * delta[c] + rhs[c]))
                         .sum();
-                    if ssr_trial.is_finite() {
-                        (ssr - ssr_trial) / predicted
-                    } else {
-                        f64::NAN
-                    }
+                    gain_ratio(ssr, ssr_trial, predicted)
                 }
                 // A singular or non-finite damped system: the step is rejected.
                 Err(_) => f64::NAN,
             };
             // Accepted only when rho > 0; NaN (a failed solve, a non-finite sum of squares,
-            // 0 / 0) is not.
+            // a predicted decrease that is not positive) is not.
             if gain > 0.0 {
                 coef.copy_from_slice(&trial);
                 let scale = (1.0 - (2.0 * gain - 1.0).powi(3)).max(1.0 / 3.0);
@@ -1338,6 +1360,19 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
             "ARIMA CSS: the sum of squared residuals is not finite".to_string(),
         ));
     }
+    // Residuals at the rounding level of the data (all zero for a series that is constant
+    // after differencing, or after its mean and drift): the model reproduces the series, so
+    // sigma2 is 0, the log-likelihood is infinite and an MA or ARMA coefficient can take any
+    // value. R's arima stops there on the singular Hessian.
+    let scale = dx.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    if ssr <= dx.len() as f64 * (ZERO_RESIDUAL * scale).powi(2) {
+        return Err(invalid(
+            "the CSS residuals are zero up to rounding: the model reproduces the series \
+             exactly, so its residual variance is 0 and the fit is not identified (is the \
+             series constant after differencing?)"
+                .to_string(),
+        ));
+    }
     let residuals = full_residuals(n, &model, &ws.e)?;
 
     let Model { p, d, q, k, .. } = model;
@@ -1684,7 +1719,7 @@ mod tests {
         );
         assert_non_numeric(econ(&run_arima(&ds, "lab", 1, 0, 0).unwrap_err()), "lab");
         assert_not_found(econ(&run_arima(&ds, "nope", 1, 0, 0).unwrap_err()), "nope");
-        // the one Rust-built fixture (design 2.2): NaN is missing
+        // the one Rust-built fixture (the R harness cannot write a NaN): NaN is missing
         let nan = with_nan_at(&arima_series(), "a", 17);
         assert_null_values(econ(&run_arima(&nan, "a", 1, 0, 0).unwrap_err()), "a", 1);
     }
@@ -1854,6 +1889,80 @@ mod tests {
             ..ArimaSpec::new(0, 1, 1)
         };
         assert_eq!(drift.label(), "ARIMA(0,1,1) with drift");
+    }
+
+    /// A step is accepted only when its gain ratio is positive. A predicted decrease that is
+    /// not positive (rounding in a nearly singular damped system) accepts no step, also one
+    /// that raises the sum of squares, which the plain ratio would score as a gain.
+    #[test]
+    fn test_gain_ratio_needs_a_positive_predicted_decrease() {
+        assert_eq!(gain_ratio(2.0, 1.0, 2.0), 0.5);
+        assert!(gain_ratio(2.0, 3.0, 2.0) < 0.0);
+        for (ssr_trial, predicted) in [
+            (3.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (1.0, f64::NAN),
+            (f64::INFINITY, 1.0),
+            (f64::NAN, 1.0),
+        ] {
+            let gain = gain_ratio(2.0, ssr_trial, predicted);
+            assert!(
+                gain.is_nan() || gain <= 0.0,
+                "trial {ssr_trial}, predicted {predicted}: gain {gain} accepts the step"
+            );
+        }
+    }
+
+    /// A series the model reproduces exactly (constant, or constant after differencing or
+    /// after its mean and drift) leaves zero CSS residuals. R's arima stops on the singular
+    /// Hessian of such a fit; it is refused as not identified, never reported converged with
+    /// an infinite log-likelihood.
+    #[test]
+    fn test_arima_refuses_a_fit_with_zero_residuals() {
+        let trend: Vec<f64> = (0..40).map(|i| 1.0 + 0.3 * i as f64).collect();
+        let ds = Dataset::new(
+            df! { "five" => vec![5.0; 40], "tenth" => vec![0.1; 40], "trend" => trend }.unwrap(),
+        );
+        let drift = |p, d, q| ArimaSpec {
+            include_drift: true,
+            ..ArimaSpec::new(p, d, q)
+        };
+        for (column, spec) in [
+            ("five", ArimaSpec::new(0, 0, 0)),
+            ("five", ArimaSpec::new(0, 0, 1)),
+            ("tenth", ArimaSpec::new(0, 0, 1)),
+            ("tenth", ArimaSpec::new(0, 0, 2)),
+            ("tenth", ArimaSpec::new(1, 0, 1)),
+            ("five", ArimaSpec::new(0, 1, 0)),
+            ("five", ArimaSpec::new(0, 1, 1)),
+            ("trend", drift(0, 1, 1)),
+            ("trend", drift(0, 0, 1)),
+        ] {
+            match run_arima_with(&ds, column, &spec) {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.contains("not identified"),
+                    "{column} {}: {message}",
+                    spec.label()
+                ),
+                Err(e) => panic!("{column} {}: {e:?}", spec.label()),
+                Ok(r) => panic!(
+                    "{column} {}: fitted, SSR {} loglik {} converged {}",
+                    spec.label(),
+                    r.ssr,
+                    r.loglik,
+                    r.converged
+                ),
+            }
+        }
+        // a noisy series still fits
+        let noisy: Vec<f64> = (0..40)
+            .map(|i| 5.0 + ((i * 37 % 17) as f64 - 8.0) / 8.0)
+            .collect();
+        let ds = Dataset::new(df! { "y" => noisy }.unwrap());
+        let r = run_arima_with(&ds, "y", &ArimaSpec::new(0, 0, 1)).unwrap();
+        assert!(r.loglik.is_finite() && r.ssr > 0.0, "{r:?}");
     }
 
     /// TS-1 on the old API. R: forecast::forecast(Arima(x, order, method = "CSS"), h = 5) at

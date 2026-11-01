@@ -1235,8 +1235,9 @@ fn main() {
     // Cap: no R benchmark at n=10000
     // Difference GMM, two-step, one lag of y, with collapsed instruments lags 2..4
     // (3 columns plus the 2 differenced x's: fewer instruments than entities at
-    // both sizes, so the two-step weight is invertible). R's pgmm runs the same
-    // specification with collapse = TRUE, lag(y, 2:4) and fsm = "I".
+    // both sizes, so the two-step weight is invertible). R's pgmm runs it with
+    // collapse = TRUE, lag(y, 2:4) and fsm = "I"; p2a's first step uses pgmm's default
+    // H weight (fsm = "G"), which R must use for both to fit the same specification.
     for (n_ent, n_per) in sizes_for(&["Arellano_Bond"], [(10, 10), (50, 20)]) {
         use p2a_core::econometrics::{GmmConfig, run_gmm};
         let n = n_ent * n_per;

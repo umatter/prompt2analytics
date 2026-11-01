@@ -210,6 +210,22 @@ pub fn budget_level_count(
     level_count_or_refusal(name, col.n_unique()).map(Some)
 }
 
+/// The distinct non-null values of column `name`, the group count a `max_groups` budget holds:
+/// an upper bound on the groups the core compares (it may drop more rows). `Ok(None)` when the
+/// column is missing, which the core reports itself; a count that fails is the refusal message.
+pub fn budget_group_count(
+    df: &p2a_core::polars::prelude::DataFrame,
+    name: &str,
+) -> Result<Option<u64>, String> {
+    let Ok(col) = df.column(name) else {
+        return Ok(None);
+    };
+    let n_unique = level_count_or_refusal(name, col.n_unique())?;
+    Ok(Some(
+        n_unique.saturating_sub(usize::from(col.null_count() > 0)) as u64,
+    ))
+}
+
 /// A distinct-value count a budget depends on, or the refusal when it could not be taken (the
 /// budget cannot be checked, so the request must not run unbounded).
 pub fn level_count_or_refusal(
@@ -329,6 +345,20 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_group_count_leaves_out_null_and_an_absent_column() {
+        let df = p2a_core::polars::prelude::df! {
+            "g" => [Some("a"), Some("b"), None, Some("a"), Some("c")],
+            "h" => [Some("x"), Some("y"), Some("x"), Some("y"), Some("y")],
+        }
+        .unwrap();
+        assert_eq!(budget_group_count(&df, "g"), Ok(Some(3)));
+        assert_eq!(budget_group_count(&df, "h"), Ok(Some(2)));
+        assert_eq!(budget_group_count(&df, "absent"), Ok(None));
+        // the level count for a budget keeps null as a value
+        assert_eq!(budget_level_count(&df, "g"), Ok(Some(4)));
+    }
 
     #[test]
     fn check_named_budget_refuses_over_and_passes_unlimited() {

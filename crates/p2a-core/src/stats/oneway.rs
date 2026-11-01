@@ -526,7 +526,7 @@ mod tests {
         }
     }
 
-    /// Design 2.4 fixture: integer labels in numeric order (2 < 10), a text value column and
+    /// Column-type fixture: integer labels in numeric order (2 < 10), a text value column and
     /// an absent column refused with the variant that names the problem.
     #[test]
     fn test_validate_na_oneway_dtypes_and_errors() {

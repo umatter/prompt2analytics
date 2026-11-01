@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(r.missing.n_dropped, 3);
     }
 
-    /// Design 2.4 fixture: an Int64 response (the case's `id`) equals its Float64 cast, with
+    /// Column-type fixture: an Int64 response (the case's `id`) equals its Float64 cast, with
     /// the rows of y1's missing cells dropped; a text response and an absent response are
     /// refused. (`y` and `y_na` of stat_friedman_quade cannot serve: they agree on every
     /// complete row, so their error SSCP matrix is singular.)
