@@ -401,7 +401,10 @@ impl fmt::Display for ArimaForecastResult {
 ///   that is constant after differencing): `InvalidSpecification` naming it;
 /// - a fit that reproduces the series up to rounding (zero residuals, for instance an MA
 ///   term or the mean alone on such a series), whose variance is 0 and log-likelihood
-///   infinite: `InvalidSpecification`, as R's arima stops on its singular Hessian;
+///   infinite: `InvalidSpecification`. R's arima stops on such a fit when the model has a
+///   coefficient (mean, drift, AR or MA), on its singular Hessian or on an objective that
+///   is not finite at the start; for ARIMA(0,d,0) without mean or drift it reports
+///   sigma^2 = 0 and an infinite log-likelihood, which p2a refuses as well;
 /// - [`EconError::Cancelled`] when the budget installed with
 ///   [`crate::resource::with_budget`] is spent: the fit checks it before it starts, on
 ///   every iteration and every 4096 rows of a pass over the series.
@@ -1363,7 +1366,10 @@ fn fit_css(x: &[f64], spec: &ArimaSpec, column: &str) -> EconResult<ArimaResult>
     // Residuals at the rounding level of the data (all zero for a series that is constant
     // after differencing, or after its mean and drift): the model reproduces the series, so
     // sigma2 is 0, the log-likelihood is infinite and an MA or ARMA coefficient can take any
-    // value. R's arima stops there on the singular Hessian.
+    // value. R's arima stops there when the model has a coefficient (mean, drift, AR or MA),
+    // on the singular Hessian or on an objective that is not finite at the start; for
+    // ARIMA(0,d,0) without mean or drift it reports sigma^2 = 0 and an infinite
+    // log-likelihood, which is refused here as well.
     let scale = dx.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     if ssr <= dx.len() as f64 * (ZERO_RESIDUAL * scale).powi(2) {
         return Err(invalid(
@@ -1916,9 +1922,12 @@ mod tests {
     }
 
     /// A series the model reproduces exactly (constant, or constant after differencing or
-    /// after its mean and drift) leaves zero CSS residuals. R's arima stops on the singular
-    /// Hessian of such a fit; it is refused as not identified, never reported converged with
-    /// an infinite log-likelihood.
+    /// after its mean and drift) leaves zero CSS residuals. R's arima stops on such a fit
+    /// when the model has a coefficient (mean, drift, AR or MA), on the singular Hessian or
+    /// on an objective that is not finite at the start; for ARIMA(0,d,0) without mean or
+    /// drift (`five` with (0, 1, 0) below) it reports sigma^2 = 0 and an infinite
+    /// log-likelihood. Every such fit is refused as not identified, never reported converged
+    /// with an infinite log-likelihood.
     #[test]
     fn test_arima_refuses_a_fit_with_zero_residuals() {
         let trend: Vec<f64> = (0..40).map(|i| 1.0 + 0.3 * i as f64).collect();
