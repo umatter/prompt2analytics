@@ -6851,7 +6851,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-chat"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6869,7 +6869,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -6897,7 +6897,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -6943,7 +6943,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-dioxus"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6971,7 +6971,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -7010,7 +7010,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-validation"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
