@@ -494,69 +494,6 @@ fn first_lambda_failure(max_iter: usize, last_change: f64) -> EconError {
     }
 }
 
-/// Coordinate descent for Binomial family (logistic regression)
-fn coordinate_descent_binomial(
-    x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
-    lambda: f64,
-    alpha: f64,
-    beta: &mut Array1<f64>,
-    intercept: &mut f64,
-    max_iter: usize,
-    thresh: f64,
-) -> EconResult<usize> {
-    let n = x.nrows() as f64;
-    let p = x.ncols();
-
-    for iter in 0..max_iter {
-        resource::checkpoint()?;
-        let mut max_change = 0.0f64;
-
-        // Compute probabilities: p = 1 / (1 + exp(-eta))
-        let eta: Array1<f64> = x.dot(beta) + *intercept;
-        let prob: Array1<f64> = eta.mapv(|e| 1.0 / (1.0 + (-e).exp()));
-
-        // Working weights: w = p * (1 - p)
-        let w: Array1<f64> = prob.mapv(|p| (p * (1.0 - p)).max(1e-5));
-
-        // Working response: z = eta + (y - p) / w
-        let z: Array1<f64> = &eta + &((&y.to_owned() - &prob) / &w);
-
-        // Update intercept (unpenalized)
-        let old_intercept = *intercept;
-        let w_sum: f64 = w.sum();
-        let w_z_sum: f64 = (&w * &z).sum();
-        *intercept = w_z_sum / w_sum;
-        max_change = max_change.max((*intercept - old_intercept).abs());
-
-        // Update each coefficient
-        for j in 0..p {
-            let old_beta = beta[j];
-
-            // Weighted partial residual
-            let r: Array1<f64> = &z - &x.dot(beta) - *intercept + &(&x.column(j) * old_beta);
-
-            // Weighted gradient
-            let xj = x.column(j);
-            let w_xj_r: f64 = (&w * &xj.to_owned() * &r).sum();
-            let w_xj_sq: f64 = (&w * &xj.to_owned() * &xj.to_owned()).sum();
-
-            // Coordinate update
-            let z_val = soft_threshold(w_xj_r / n, lambda * alpha);
-            let new_beta = z_val / (w_xj_sq / n + lambda * (1.0 - alpha));
-
-            beta[j] = new_beta;
-            max_change = max_change.max((new_beta - old_beta).abs());
-        }
-
-        if max_change < thresh {
-            return Ok(iter + 1);
-        }
-    }
-
-    Ok(max_iter)
-}
-
 /// Compute deviance for Binomial family
 fn deviance_binomial(y: &ArrayView1<f64>, prob: &Array1<f64>) -> f64 {
     let mut dev = 0.0;
@@ -716,11 +653,6 @@ struct PathFit {
     warnings: Vec<String>,
 }
 
-/// Whether a path stops after the fit just pushed (pre-WP07 rule, replaced in Task 3).
-fn path_stops(fit: &GlmnetCoefficients, config: &GlmnetConfig) -> bool {
-    fit.dev_ratio > config.deviance_thresh || config.dfmax.is_some_and(|d| fit.df >= d)
-}
-
 /// Gaussian path: glmnet's `elnet` on `yt = (y - ym) / ys`, with the penalty in those units
 /// (`l1 = lambda alpha / ys`, `l2 = lambda (1 - alpha) / ys`), warm starts along the path.
 fn gaussian_path(
@@ -789,35 +721,159 @@ fn gaussian_path(
     })
 }
 
-/// Binomial path with the pre-WP07 loop (replaced in Task 4).
+/// glmnet's stopping rules for a generated binomial path (lognet: the dev.ratio gain is compared
+/// with `fdev` itself, not `fdev * dev.ratio`), after the fit just pushed.
+fn binomial_path_stops(fits: &[GlmnetCoefficients], config: &GlmnetConfig) -> bool {
+    let m = fits.len();
+    if m < MNLAM {
+        return false;
+    }
+    let (cur, prev) = (&fits[m - 1], &fits[m - 2]);
+    config.dfmax.is_some_and(|d| cur.df > d)
+        || cur.dev_ratio - prev.dev_ratio < config.fdev
+        || cur.dev_ratio > config.deviance_thresh
+}
+
+/// glmnet's bound on fitted probabilities inside IRLS (`glmnet.control(pmin)`).
+const PMIN: f64 = 1e-9;
+
+/// glmnet's `mxitnr`: IRLS (outer) iterations per lambda.
+const MXIT_IRLS: usize = 100;
+
+/// Codes a binomial response by its two levels as R's `factor()` (the larger value is 1) and
+/// applies R's class-size checks. Returns the 0/1 response and a warning for a small class.
+fn binomial_response(y: ArrayView1<f64>) -> EconResult<(Vec<f64>, Option<String>)> {
+    let mut levels: Vec<f64> = y.to_vec();
+    levels.sort_by(f64::total_cmp);
+    levels.dedup();
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    match levels.len() {
+        1 => return spec("binomial glmnet needs two classes; y has one value".to_string()),
+        2 => {}
+        k => {
+            return spec(format!(
+                "More than two classes (found {k}); use a two-class response"
+            ));
+        }
+    }
+    let hi = levels[1];
+    let y01: Vec<f64> = y.iter().map(|&v| if v == hi { 1.0 } else { 0.0 }).collect();
+    let ones = y01.iter().filter(|&&v| v == 1.0).count();
+    let smallest = ones.min(y01.len() - ones);
+    if smallest <= 1 {
+        return spec("one binomial class has 1 or 0 observations; not allowed".to_string());
+    }
+    let note = (smallest < 8)
+        .then(|| "one binomial class has fewer than 8 observations; dangerous ground".to_string());
+    Ok((y01, note))
+}
+
+/// Binomial deviance `-2 sum(y ln p + (1 - y) ln(1 - p))` of `eta`, probabilities bounded at
+/// 1e-10.
+fn binomial_deviance_eta(y: &[f64], eta: &[f64]) -> f64 {
+    y.iter()
+        .zip(eta)
+        .map(|(&yi, &e)| {
+            let p = (1.0 / (1.0 + (-e).exp())).clamp(1e-10, 1.0 - 1e-10);
+            -2.0 * (yi * p.ln() + (1.0 - yi) * (1.0 - p).ln())
+        })
+        .sum()
+}
+
+/// Binomial path: glmnet's `lognet`, IRLS with an inner weighted coordinate descent in which
+/// the intercept is an unpenalised coordinate (so `sum(y - p) = 0` at convergence). y is not
+/// standardised; the penalty is `lambda alpha |b|_1 + lambda (1 - alpha) / 2 |b|^2` in the
+/// standardised x units.
 fn binomial_path(
     design: &Design,
-    y: ArrayView1<f64>,
-    lambdas: &[f64],
-    config: &GlmnetConfig,
+    y01: &[f64],
+    p0: f64,
     null_deviance: f64,
+    lambdas: &[f64],
+    generated: bool,
+    config: &GlmnetConfig,
 ) -> EconResult<PathFit> {
     let (n, p) = (design.n, design.p);
-    let z = ArrayView2::from_shape((n, p).f(), &design.z)
-        .map_err(|e| EconError::Computation(format!("glmnet design: {e}")))?;
-    let mut beta = Array1::zeros(p);
-    let mut b0 = 0.0;
+    let nf = n as f64;
+    let what = "glmnet IRLS working vectors";
+    let mut eta = resource::try_vec(n, 0.0, what)?;
+    let mut w = resource::try_vec(n, 0.0, what)?;
+    let mut r = resource::try_vec(n, 0.0, what)?;
+    let mut b = vec![0.0; p];
+    let mut b0 = if config.intercept {
+        (p0 / (1.0 - p0)).ln()
+    } else {
+        0.0
+    };
+    let mut budget = PassBudget {
+        used: 0,
+        max: config.max_iter,
+    };
     let mut fits = resource::try_with_capacity(lambdas.len(), "glmnet coefficient path")?;
-    for &lambda in lambdas {
-        resource::checkpoint()?;
-        coordinate_descent_binomial(
-            &z,
-            &y,
-            lambda,
-            config.alpha,
-            &mut beta,
-            &mut b0,
-            config.max_iter,
-            config.thresh,
-        )?;
-        let prob = (z.dot(&beta) + b0).mapv(|e| 1.0 / (1.0 + (-e).exp()));
-        let dev_ratio = 1.0 - deviance_binomial(&y, &prob) / null_deviance;
-        let coefficients: Vec<f64> = (0..p).map(|j| beta[j] / design.scale[j]).collect();
+    let mut warnings = Vec::new();
+    for (k, &lambda) in lambdas.iter().enumerate() {
+        let l1 = lambda * config.alpha;
+        let l2 = lambda * (1.0 - config.alpha);
+        let mut failed = None;
+        for outer in 0..MXIT_IRLS {
+            // eta = b0 + z b
+            eta.fill(b0);
+            for j in (0..p).filter(|&j| b[j] != 0.0) {
+                for (e, z) in eta.iter_mut().zip(design.col(j)) {
+                    *e += b[j] * z;
+                }
+            }
+            for i in 0..n {
+                let pr = (1.0 / (1.0 + (-eta[i]).exp())).clamp(PMIN, 1.0 - PMIN);
+                w[i] = pr * (1.0 - pr);
+                r[i] = (y01[i] - pr) / w[i];
+            }
+            let wls = Wls::new(design, Some(&w));
+            let (b_old, b0_old) = (b.clone(), b0);
+            let intercept = config.intercept.then_some(&mut b0);
+            if let Solve::Budget(dlx) = wls.solve(
+                &mut b,
+                intercept,
+                &mut r,
+                l1,
+                l2,
+                config.thresh,
+                &mut budget,
+            )? {
+                failed = Some(dlx);
+                break;
+            }
+            let change = (0..p)
+                .map(|j| wls.v[j] * (b[j] - b_old[j]).powi(2))
+                .fold(wls.sum_w / nf * (b0 - b0_old).powi(2), f64::max);
+            if change < config.thresh {
+                break;
+            }
+            if outer + 1 == MXIT_IRLS {
+                failed = Some(change);
+            }
+        }
+        if let Some(dlx) = failed {
+            if fits.is_empty() {
+                return Err(first_lambda_failure(config.max_iter, dlx));
+            }
+            warnings.push(truncation_warning(
+                k + 1,
+                lambdas.len(),
+                lambda,
+                config.max_iter,
+            ));
+            break;
+        }
+        // deviance at the converged coefficients
+        eta.fill(b0);
+        for j in (0..p).filter(|&j| b[j] != 0.0) {
+            for (e, z) in eta.iter_mut().zip(design.col(j)) {
+                *e += b[j] * z;
+            }
+        }
+        let dev_ratio = 1.0 - binomial_deviance_eta(y01, &eta) / null_deviance;
+        let coefficients: Vec<f64> = (0..p).map(|j| b[j] / design.scale[j]).collect();
         let intercept = if config.intercept {
             b0 - (0..p)
                 .map(|j| design.center[j] * coefficients[j])
@@ -833,14 +889,14 @@ fn binomial_path(
             df,
             dev_ratio,
         });
-        if fits.last().is_some_and(|f| path_stops(f, config)) {
+        if generated && binomial_path_stops(&fits, config) {
             break;
         }
     }
     Ok(PathFit {
         fits,
-        npasses: 0,
-        warnings: Vec::new(),
+        npasses: budget.used,
+        warnings,
     })
 }
 
@@ -856,15 +912,27 @@ pub fn glmnet(
 
     let design = standardize_design(x, config.standardize, config.intercept)?;
     let nf = n as f64;
-    let y_mean = y.sum() / nf;
-    let ym = if config.intercept { y_mean } else { 0.0 };
-    let yc: Vec<f64> = y.iter().map(|v| v - ym).collect();
-
+    // The response as fitted (binomial: coded 0/1), the residual at the null fit that
+    // lambda_max is computed from, and the null deviance.
+    let (yfit, class_note) = match config.family {
+        GlmnetFamily::Gaussian => (y.to_vec(), None),
+        GlmnetFamily::Binomial => binomial_response(y)?,
+    };
+    let y_mean = yfit.iter().sum::<f64>() / nf;
+    // gaussian: ym; binomial: p0 (glmnet: 0.5 without an intercept)
+    let ym = match (config.family, config.intercept) {
+        (_, true) => y_mean,
+        (GlmnetFamily::Gaussian, false) => 0.0,
+        (GlmnetFamily::Binomial, false) => 0.5,
+    };
+    let yc: Vec<f64> = yfit.iter().map(|v| v - ym).collect();
     let null_deviance = match config.family {
         GlmnetFamily::Gaussian => yc.iter().map(|v| v * v).sum(),
         GlmnetFamily::Binomial => {
-            let prob_null = Array1::from_elem(n, y_mean);
-            deviance_binomial(&y, &prob_null)
+            -2.0 * yfit
+                .iter()
+                .map(|&v| v * ym.ln() + (1.0 - v) * (1.0 - ym).ln())
+                .sum::<f64>()
         }
     };
 
@@ -885,11 +953,7 @@ pub fn glmnet(
                 / nf
         })
         .fold(0.0f64, f64::max);
-    let lambda_max = match config.family {
-        GlmnetFamily::Gaussian => grad_max / config.alpha.max(ALPHA_FLOOR),
-        GlmnetFamily::Binomial if config.alpha > 0.0 => grad_max / config.alpha.max(1e-3),
-        GlmnetFamily::Binomial => grad_max * 100.0,
-    };
+    let lambda_max = grad_max / config.alpha.max(ALPHA_FLOOR);
     let (lambda_seq, generated, note) = lambda_path(config, lambda_max, n, p)?;
 
     // Each fit holds p coefficients plus seven words (lambda, intercept, the coefficient Vec
@@ -911,10 +975,18 @@ pub fn glmnet(
             }
             gaussian_path(&design, &yc, ym, ys, &lambda_seq, generated, config)?
         }
-        GlmnetFamily::Binomial => binomial_path(&design, y, &lambda_seq, config, null_deviance)?,
+        GlmnetFamily::Binomial => binomial_path(
+            &design,
+            &yfit,
+            ym,
+            null_deviance,
+            &lambda_seq,
+            generated,
+            config,
+        )?,
     };
 
-    let mut warnings: Vec<String> = note.into_iter().collect();
+    let mut warnings: Vec<String> = class_note.into_iter().chain(note).collect();
     warnings.extend(path.warnings);
     Ok(GlmnetResult {
         variable_names: (0..p).map(|i| format!("V{}", i + 1)).collect(),
@@ -1580,6 +1652,7 @@ mod tests {
 
     const X8: [&str; 8] = ["X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"];
     const LAMS: [f64; 4] = [1.0, 0.3, 0.1, 0.03];
+    const BLAMS: [f64; 3] = [0.1, 0.03, 0.01];
     /// Coordinate descent converges linearly. At thresh 1e-24 an R port of this algorithm
     /// lands within 1e-12 of the KKT point (`*_tight`); abs 1e-11 leaves a 10x margin for
     /// summation order.
@@ -2002,5 +2075,100 @@ mod tests {
         );
         assert_spec(glmnet(x.view(), y.slice(s![..4]), &c), "rows");
         assert_spec(cv_glmnet(x.view(), y.view(), &c, 1, Some(1)), "nfolds");
+        let mut cb = GlmnetConfig::default();
+        cb.family = GlmnetFamily::Binomial;
+        assert_spec(
+            glmnet(x.view(), array![0.0, 1.0, 2.0, 0.0, 1.0].view(), &cb),
+            "More than two classes",
+        );
+        assert_spec(
+            glmnet(x.view(), array![1.0, 0.0, 0.0, 0.0, 0.0].view(), &cb),
+            "1 or 0 observations",
+        );
+    }
+
+    #[test]
+    fn test_validate_glmnet_binomial() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let (x, y) = xy(&ds, "yb", &X8);
+        let mut chk = Check::new(&case);
+        for (tag, alpha, standardize, intercept) in [
+            ("binom", 1.0, true, true),
+            ("binom_raw", 1.0, false, true),
+            ("binom_noint", 1.0, true, false),
+            ("binom_a5", 0.5, true, true),
+        ] {
+            let mut c = tight(alpha, standardize, intercept, Some(&BLAMS[..]));
+            c.family = GlmnetFamily::Binomial;
+            let r = run_glmnet(&ds, "yb", &X8, &c).unwrap();
+            let (b, d) = (coef_path(&r), dev_ratios(&r));
+            chk.vector(&format!("{tag}_coef_tight"), &b, EXACT)
+                .vector(&format!("{tag}_coef"), &b, R_GLMNET)
+                .vector(&format!("{tag}_dev_ratio_tight"), &d, Tol::iterative(1e-9))
+                .vector(&format!("{tag}_dev_ratio"), &d, R_DEV);
+            if intercept {
+                // REG-6: the intercept score sum(y - p) is zero at convergence
+                for f in &r.fits {
+                    let eta = x.dot(&Array1::from_vec(f.coefficients.clone())) + f.intercept;
+                    let score: f64 = y
+                        .iter()
+                        .zip(eta.iter())
+                        .map(|(yi, e)| yi - 1.0 / (1.0 + (-e).exp()))
+                        .sum();
+                    assert!(
+                        score.abs() < 1e-9,
+                        "{tag} lambda {}: sum(y - p) = {score}",
+                        f.lambda
+                    );
+                }
+            }
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_validate_glmnet_binomial_path() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let mut c = tight(1.0, true, true, None);
+        c.family = GlmnetFamily::Binomial;
+        let r = run_glmnet(&ds, "yb", &X8, &c).unwrap();
+        let (x, y) = xy(&ds, "yb", &X8);
+        let mut cn = c.clone();
+        cn.intercept = false;
+        let sub = glmnet(x.slice(s![..120, ..]), y.slice(s![..120]), &cn).unwrap(); // ybar = 0.45
+        Check::new(&case)
+            .vector("binom_path_lambda", &r.lambda, Tol::coef(150))
+            .vector("binom_path_df", &dfs(&r), Tol::exact())
+            .vector("binom_path_coef_tight", &coef_path(&r), EXACT)
+            .vector(
+                "binom_path_dev_ratio_tight",
+                &dev_ratios(&r),
+                Tol::iterative(1e-9),
+            )
+            .vector("binom_path_dev_ratio", &dev_ratios(&r), R_DEV)
+            .scalar("binom_noint_sub_lambda_max", sub.lambda[0], Tol::coef(120))
+            .finish();
+    }
+
+    #[test]
+    fn test_glmnet_binomial_two_level_coding() {
+        // R codes the response by its two factor levels.
+        let (_case, ds) = crate::test_support::load_case("glmnet_paths");
+        let (x, y) = xy(&ds, "yb", &X8);
+        let mut c = tight(1.0, true, true, Some(&BLAMS[..]));
+        c.family = GlmnetFamily::Binomial;
+        let a = glmnet(x.view(), y.view(), &c).unwrap();
+        let pm = y.mapv(|v| 2.0 * v - 1.0); // {-1, 1}: identical fit in R
+        let b = glmnet(x.view(), pm.view(), &c).unwrap();
+        assert_eq!(coef_path(&a), coef_path(&b));
+        let few = Array1::from_iter((0..150).map(|i| if i < 5 { 1.0 } else { 0.0 }));
+        let w = glmnet(x.view(), few.view(), &c).unwrap();
+        assert!(
+            w.warnings
+                .iter()
+                .any(|m| m.contains("fewer than 8 observations")),
+            "{:?}",
+            w.warnings
+        );
     }
 }

@@ -23,7 +23,10 @@
         "p2a-core::regression::glmnet::tests::test_glmnet_constant_column_is_excluded",
         "p2a-core::regression::glmnet::tests::test_validate_glmnet_default_path",
         "p2a-core::regression::glmnet::tests::test_validate_glmnet_path_rules",
-        "p2a-core::regression::glmnet::tests::test_glmnet_nlambda_one_is_lambda_max"
+        "p2a-core::regression::glmnet::tests::test_glmnet_nlambda_one_is_lambda_max",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_binomial",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_binomial_path",
+        "p2a-core::regression::glmnet::tests::test_glmnet_binomial_two_level_coding"
       ],
       "quantities": [
         "coefficients and intercept at lambda 1, 0.3, 0.1, 0.03 for alpha 1, 0.5, 0 x standardize x intercept (gaussian)",
