@@ -104,6 +104,7 @@ pub mod etwfe;
 pub mod feglm;
 pub mod general_gmm;
 pub mod gformula;
+pub mod glm;
 pub mod hdfe;
 pub mod hettx;
 pub mod iv;

@@ -84,6 +84,80 @@ They are not ports for exactness: R is the test oracle and the default conventio
   cross-product test is stricter than QR on X by up to a factor of `dim`, which is why linear-model
   coefficients use `least_squares` (R9).
 
+## Generalized linear models (glm.fit)
+
+`fit_glm(x, y, &GlmSpec)` fits by Fisher scoring (IRLS) as `stats::glm.fit`; `x` carries its own
+intercept column.
+
+| Family | Links | Variance | Dispersion |
+|---|---|---|---|
+| `Gaussian` | `Identity`, `Log` | 1 | estimated |
+| `Binomial` | `Logit`, `Probit`, `Cloglog` | `mu (1 - mu)` | 1 |
+| `QuasiBinomial` | `Logit`, `Probit`, `Cloglog` | `mu (1 - mu)` | estimated |
+| `Poisson` | `Log`, `Identity` | `mu` | 1 |
+| `QuasiPoisson` | `Log`, `Identity` | `mu` | estimated |
+
+- **Family and link functions** are R's: the logit inverse link clamps `|eta| > 30`, the probit
+  clamps `eta` to `-qnorm(.Machine$double.eps) = 8.125890664701906`, the cloglog and log inverse
+  links keep `mu` within `[eps, 1 - eps]` and `>= eps`, and every `mu.eta` is at least `eps`. Binomial
+  deviance residuals use `y log(y / mu)` with `0 log 0 = 0`.
+- **Initialisation** (`family$initialize`): binomial `y` must be in [0, 1] (rows with weight 0 get
+  `y = 0`), `mustart = (w y + 0.5) / (w + 1)`, and "non-integer #successes in a binomial glm!" when
+  some `w y` is not an integer; Poisson `y >= 0`, `mustart = y + 0.1`; Gaussian `mustart = y`, and
+  the log link without `start` needs `y > 0` ("cannot find valid starting values: please specify
+  some").
+- **IRLS.** Each step solves the weighted working regression on the rows with `w > 0` and
+  `mu.eta != 0` by `Qr` with tolerance 1e-11 (R's `min(1e-7, epsilon / 1000)` at the default
+  `glm.control`); aliased columns get coefficient 0 in the iteration and `NaN` in the result. A
+  non-finite deviance or invalid fitted values halve the step towards the previous coefficients
+  ("step size truncated due to divergence" / "step size truncated: out of bounds", `boundary`).
+  After the loop: "glm.fit: algorithm did not converge", "glm.fit: algorithm stopped at boundary
+  value", "glm.fit: fitted probabilities numerically 0 or 1 occurred" (sets `separation`), "glm.fit:
+  fitted rates numerically 0 occurred".
+- **Convergence.** `|dev - devold| / (|dev| + 0.1 * D0 / n_ok) < epsilon`; see "Deviations from R".
+- **Results.** SEs and dispersion as `summary.glm` (Pearson dispersion over the rows with positive
+  working weight; "observations with zero weight not used for calculating dispersion"), `vcov` from
+  the QR of the last step; the null deviance as `glm()`: `linkinv(offset)` without an intercept, the
+  weighted mean with one, and a refit of the intercept-only model when there is an offset too
+  (skipped when `x` is the single column of ones: the null model is then the fitted model). The
+  model has an intercept when some column of `x` is identically 1. AIC is `family$aic + 2 rank`
+  (binomial: `round(w y)` successes of `round(w)` trials, R's round-half-even; Poisson: `+Inf` and
+  R's "non-integer x" warning for a non-integer count), and `logLik = p - AIC / 2` with
+  `p = rank + 1` for the Gaussian family and `rank` otherwise (`logLik.glm`). Quasi families have
+  `NaN` AIC and log-likelihood.
+- **Defaults** differ from `glm.control`: `epsilon` 1e-10 (R 1e-8) and `max_iter` 100 (R 25), about
+  one more IRLS iteration and closer to the MLE.
+- **Helpers.** `fit_propensity(x, treat, link)` is the binomial MLE of a 0/1 treatment with the
+  logit, probit or cloglog link; `fit_logistic_fluctuation(y, offset, covariates, weights)` is TMLE's
+  quasi-binomial logit fluctuation (`glm(y ~ -1 + H, offset)` or `glm(y ~ 1, offset, weights)`);
+  `qlogis`, `plogis`, `bound`.
+
+### Deviations from R
+
+- **Convergence criterion.** `glm.fit` stops when `|dev - devold| / (|dev| + 0.1) < epsilon`; the
+  absolute 0.1 makes the rule depend on the scale of `y` (Gaussian, quasi-Poisson) and of the prior
+  weights. For the Gaussian family `mustart = y` gives `devold = 0`, so a small-scale response
+  "converges" after the first step; with the log link that step is not the MLE. Checked in R 4.3.3:
+  `glm(I(1e-6 * (yp + 0.5)) ~ x1, family = gaussian(link = "log"))` on this case's data stops after 1
+  iteration with slope 0.15911284076242163, against 0.2132268406899209 for the unscaled response (5
+  iterations). p2a uses the floor `0.1 * D0 / n_ok`, where `D0` is the deviance of the weighted mean
+  of `y` over the `n_ok` rows with positive weight (R's 0.1 when that is 0 or not finite); it is
+  invariant to rescaling `y` or `w`, and about 0.14 for unweighted 0/1 data, so no result at the
+  solution changes.
+- **Gaussian AIC with zero weights** is computed over the rows with positive weight,
+  `n_ok (log(2 pi dev / n_ok) + 1) + 2 - sum log w + 2 rank` (`logLik.lm`'s convention); `glm` gives
+  `+Inf`.
+- **Aliasing tolerance** fixed at 1e-11 (R's value at the default `glm.control`) instead of
+  `min(1e-7, epsilon / 1000)`: R's coupling gives 1e-17 at `epsilon = 1e-14`, which detects no
+  aliasing at all.
+- **Errors instead of undefined fits:** non-finite IRLS coefficients are `DivergenceError` (R warns
+  "non-finite coefficients at iteration k" and returns an undefined `coef`); no positive weight is
+  `InsufficientData`.
+- **Flags:** `separation` and its warning also cover `QuasiBinomial`, and "fitted rates numerically
+  0" also `QuasiPoisson` (R warns for `binomial` and `poisson` only).
+- **`weighted_least_squares`** refuses an all-zero weight vector (`InsufficientData`); `lm.wfit`
+  returns an all-`NA` fit.
+
 ## Case linalg_qr_glm
 
 `validation/r/cases/linalg_glm.R`, dataset `validation/datasets/generated/linalg_glm.csv`
@@ -110,16 +184,21 @@ trap_rank = 3   trap_x1_coef = 2.065140641939357   trap_rss = 204.11400660276115
 
 The GLM fits use `glm.control(epsilon = 1e-14, maxit = 100)` in R and `epsilon = 1e-14` in p2a:
 both sides are converged, so the solutions are compared at the README's tolerances. The propensity
-and fluctuation fits run at p2a's default `epsilon` (1e-10) against R at 1e-14:
-`Tol::iterative(1e-8)` (the fluctuation fit at 1e-10 differs from the 1e-14 fit by 5.8e-12
-relative).
+and fluctuation fits run at p2a's default `epsilon` (1e-10) against R at 1e-14. Where the
+deviance-change rule converges quadratically (logit coefficients and fitted values, fluctuation
+coefficients and deviances: the fluctuation coefficient at 1e-10 differs from the 1e-14 fit by
+5.8e-12 relative) they are compared at `Tol::iterative(1e-8)`. Where it converges only linearly
+(the probit, a non-canonical link; the fluctuation SE and dispersion, which `summary.glm` takes from
+the working weights of the last IRLS step) the gap at 1e-10 is up to 2.1e-6 relative, and R's own
+`glm` at `epsilon = 1e-10` shows the same gap (probit intercept -0.0722050664731, fluctuation SE
+0.039090634610887): these are compared at `Tol::new(1e-5, 1e-12)` (`DEFAULT_EPS_TOL`).
 
 | Quantity | Tolerance (n = 120) |
 |---|---|
 | coefficients, `|diag(R)|`, fitted values, residuals | `Tol::coef`: 1e-8 relative |
 | SEs, deviances, dispersion, AIC, logLik, RSS | `Tol::se` / `Tol::stat`: 1e-6 relative |
 | rank, pivot, df | exact |
-| default-epsilon fits against R at 1e-14 | `Tol::iterative(1e-8)` |
+| default-epsilon fits against R at 1e-14 | `Tol::iterative(1e-8)`; linearly converging quantities `Tol::new(1e-5, 1e-12)` |
 
 **Emitted, not pinned.** The case also emits LINPACK's compact storage (`qr_qraux`,
 `qr_qraux_rank`, `qr3_qraux`) and the signed `qr_r_diag` (only `|diag(R)|` is pinned: its sign is a
@@ -138,11 +217,45 @@ Registered in `validation/methods/linalg_glm.json` (they load `linalg_qr_glm`):
   `linalg::solve::tests::test_qr_factorization_properties` (QR identities: `Q [R_j; 0]` reproduces
   each identified column, aliased columns lie in the span of the identified ones to `tol`, `Q` is
   orthogonal; properties, not R-pinned).
+- `linalg_sym_inverse`: `linalg::solve::tests::test_sym_inverse_reports_rank` (the dummy trap
+  `[1, x1, ysep, 1 - ysep]`: rank 3 of 4, the identified slope and the RSS through the generalized
+  inverse, the generalized-inverse identities, `SingularPolicy::Error`, and `safe_inverse`'s flag).
+- `econ_glm`: `econometrics::glm::tests::test_validate_glm_families` (nine family/link fits, the
+  aliased logit, `fit_propensity`; plus, as properties, the score equations at the solution,
+  convergence at the default spec and `start = 0`),
+  `econometrics::glm::tests::test_validate_glm_fluctuation`,
+  `econometrics::glm::tests::test_validate_glm_binomial_noninteger`,
+  `econometrics::glm::tests::test_glm_separation_flag` (property: flag, warning, deviance below
+  `2 log 2`, every observation classified correctly),
+  `econometrics::glm::tests::test_glm_scale_equivariance` (property),
+  `econometrics::glm::tests::test_glm_zero_weights_match_subset` (property),
+  `econometrics::glm::tests::test_glm_fit_serde_round_trip` (JSON round trip with `NaN` as `null`).
 
 Other tests (quoted R values or properties; not R-pinned):
 
 - `linalg::solve::tests::test_least_squares_rejects_invalid_input`: length, finiteness, tolerance and
   weight checks.
+- `linalg::solve::tests::test_sym_inverse_rejects_nonsymmetric_and_nonfinite`: asymmetry, non-finite
+  and non-square input, rounding-level asymmetry accepted, the zero and empty matrices.
+- `linalg::solve::tests::test_sym_inverse_negative_definite_and_indefinite`:
+  `solve(matrix(c(-4, 1, 1, -3), 2))` and its equilibrated reciprocal condition 0.5519815245204085;
+  the KKT matrix `[[2, 0, 1], [0, 2, 1], [1, 1, 0]]` (rank 3, reciprocal condition
+  0.38196601125010504).
+- `linalg::matrix_ops::tests::test_safe_inverse_rejects_lower_triangle_trick`:
+  `solve(matrix(c(2, 0, 1, 3), 2))` (REG-59).
+- `linalg::matrix_ops::tests::test_safe_inverse_warns_on_near_singular_pd`: `[[1, a], [a, 1]]` with
+  `a = 1 - 2^-40`, equilibrated condition `2^41 - 1` (REG-4).
+- `linalg::matrix_ops::tests::test_safe_inverse_unchanged_on_well_conditioned_spd`: the Cholesky
+  inverse bit for bit at condition 2.1e6, and `solve()` of the KKT matrix.
+- `linalg::matrix_ops::tests::test_safe_inverse_ill_conditioned_symmetric_flags_condition` and
+  `linalg::matrix_ops::tests::test_safe_inverse_ill_conditioned_nonsymmetric_keeps_pseudoinverse`.
+- T1's RF-31 tests of `matrix_ops.rs` (`test_safe_inverse_lu_fallback_negative_diagonal`,
+  `test_safe_inverse_lu_fallback_tridiagonal`, `test_safe_inverse_lu_fallback_sparse_sweep`,
+  `test_safe_inverse_spd_keeps_cholesky_path`, `test_linalg_rejects_non_finite`,
+  `test_verified_inverse_rejects_bad_candidates`).
+- `econometrics::glm::tests::test_glm_rejects_invalid_input` and
+  `econometrics::glm::tests::test_logistic_helpers` (`qlogis(0.25)`, `plogis(0.3)`,
+  `-qnorm(.Machine$double.eps)`).
 
 ## How to regenerate
 
