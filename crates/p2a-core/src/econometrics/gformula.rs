@@ -1671,9 +1671,16 @@ mod tests {
 
     #[test]
     fn test_gformula_bootstrap_unchanged_by_chunking() {
-        // Pinned at 1fdb22f; per-replicate seeds are seed + 1000 b, unchanged.
-        // 130 replicates cross the 64-replicate chunk boundary twice.
-        const SE_RD: [(usize, f64); 2] = [(20, 36.45400422031243), (130, 46.5715124639952)];
+        // Pinned at 1fdb22f, re-pinned at T3-WP01. In create_test_data a1 equals a0 row for
+        // row, so the outcome model's X'X in fit_linear ([1, x, l1, a0, a1]) has rank 4 of 5
+        // in the main fit and in every replicate (equilibrated reciprocal condition 1e-34 to
+        // 1e-18). The old safe_inverse took faer's Cholesky of that singular matrix whenever
+        // it did not fail (about half the replicates), so those replicates' coefficients
+        // were noise and the SE was 36.45 and 46.57 on a risk difference of 0.386; the
+        // symmetric generalized inverse gives 0.050 and 0.051. Per-replicate seeds are
+        // seed + 1000 b, unchanged. 130 replicates cross the 64-replicate chunk boundary
+        // twice.
+        const SE_RD: [(usize, f64); 2] = [(20, 0.05016316903989167), (130, 0.051370887581548556)];
         for (b, se_rd) in SE_RD {
             let cfg = GFormulaConfig {
                 n_simulations: 200,

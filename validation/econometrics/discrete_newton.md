@@ -225,7 +225,8 @@ and `I - 0.5 W` on a 5 x 5 rook grid):
 - `test_solve_structured_and_singular`
 - `test_linalg_rejects_non_finite`
 - `test_safe_inverse_spd_keeps_cholesky_path`
-- `test_safe_inverse_ill_conditioned_keeps_pseudoinverse`
+- `test_safe_inverse_ill_conditioned_symmetric_flags_condition` and
+  `test_safe_inverse_ill_conditioned_nonsymmetric_keeps_pseudoinverse` (split by T3-WP01)
 - `test_verified_inverse_rejects_bad_candidates`
 
 ```bash

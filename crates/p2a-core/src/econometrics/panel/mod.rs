@@ -63,13 +63,13 @@
 //! `plm::phtest()` for Hausman test
 
 // Submodules
-mod dynamic_panel;
-mod gls_models;
-mod heterogeneous;
-mod linear_models;
-mod specification_test;
-mod types;
-mod utils;
+pub mod dynamic_panel;
+pub mod gls_models;
+pub mod heterogeneous;
+pub mod linear_models;
+pub mod specification_test;
+pub mod types;
+pub mod utils;
 
 // Re-export core types
 pub use types::{
