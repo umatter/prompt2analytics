@@ -1457,7 +1457,7 @@ mod tests {
         ];
         let r = silhouette(p.view(), &[0, 0, 0, 1, 1, 2]).unwrap();
         assert_eq!(r.silhouette_widths[5], 0.0);
-        assert!((r.average_silhouette - 0.81312650186401625).abs() < 1e-12);
+        assert!((r.average_silhouette - 0.8131265018640162).abs() < 1e-12);
     }
 
     #[test]
