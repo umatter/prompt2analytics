@@ -267,7 +267,7 @@ pub fn network_simplex(network: &Network) -> EconResult<FlowSolution> {
     let mut pivots = 0usize;
     let mut stack: Vec<usize> = Vec::new();
     loop {
-        if pivots % 256 == 0 {
+        if pivots.is_multiple_of(256) {
             resource::checkpoint()?;
         }
         // Entering arc: block search over the real arcs.

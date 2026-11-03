@@ -1722,13 +1722,7 @@ fn cem_method(
         }
     }
     let subclass: Vec<Option<usize>> = stratum_of.iter().map(|&id| label[id]).collect();
-    Ok(stratified_output(
-        is_treated,
-        subclass,
-        None,
-        None,
-        Vec::new(),
-    )?)
+    stratified_output(is_treated, subclass, None, None, Vec::new())
 }
 
 /// The output of a partition (CEM, subclassification, full matching): MatchIt's ATT weights,
@@ -2123,8 +2117,8 @@ fn solve_full(
     omf: Option<f64>,
 ) -> EconResult<Option<(Vec<(usize, usize)>, bool, usize)>> {
     let flipped = match omf {
-        None => !(max_c > 0.5),
-        Some(o) => !(o >= 0.0),
+        None => max_c.is_nan() || max_c <= 0.5,
+        Some(o) => o.is_nan() || o < 0.0,
     };
     let (nt, nc) = dist.dim();
     // rows x cols of the problem actually solved
@@ -3180,7 +3174,7 @@ mod tests {
         let s2: Vec<f64> = (0..45u64)
             .map(|i| ((i * 11) % 19) as f64 * 0.3 + 0.1)
             .collect();
-        assert!((ks(&s1, &s2) - 0.066666666666666638).abs() < 1e-12);
+        assert!((ks(&s1, &s2) - 0.06666666666666664).abs() < 1e-12);
         assert!(
             ks(&[1.0, 2.0, 3.0], &[10.0, 11.0, 12.0]) > 0.99 && ks(&[1.0, 2.0], &[1.0, 2.0]) == 0.0
         );

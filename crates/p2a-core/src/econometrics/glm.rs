@@ -636,7 +636,8 @@ impl Problem<'_> {
                 });
                 // Stop when the coefficients settle, at a link clamp (separation), or once
                 // the change stops shrinking (rounding level).
-                if !(change >= tol) || self.saturated(&eta) || change >= prev_change {
+                if change.is_nan() || change < tol || self.saturated(&eta) || change >= prev_change
+                {
                     devold = dev;
                     break;
                 }
