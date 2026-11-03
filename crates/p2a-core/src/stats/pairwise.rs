@@ -931,12 +931,11 @@ pub fn pairwise_wilcox_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToStr
     let mut all_exact = true;
 
     // Configure Wilcoxon test
-    let config = WilcoxonConfig {
-        exact,
-        correct: true,
-        conf_int: false,
-        conf_level: 0.95,
-    };
+    let mut config = WilcoxonConfig::default();
+    config.exact = exact;
+    config.correct = true;
+    config.conf_int = false;
+    config.conf_level = 0.95;
 
     // Perform pairwise Wilcoxon rank sum tests (lower triangular)
     for i in 1..k {
