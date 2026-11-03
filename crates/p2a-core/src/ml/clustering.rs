@@ -296,19 +296,7 @@ fn kmeans_single(
 
         // Update centroids
         let old_centroids = centroids.clone();
-        for j in 0..k {
-            let mut sum = Array1::zeros(centroids.ncols());
-            let mut count = 0;
-            for i in 0..n_samples {
-                if labels[i] == j {
-                    sum += &data.row(i);
-                    count += 1;
-                }
-            }
-            if count > 0 {
-                centroids.row_mut(j).assign(&(sum / count as f64));
-            }
-        }
+        update_centroids(data, &labels, &mut centroids);
 
         // Check convergence
         let mut max_shift: f64 = 0.0;
@@ -338,6 +326,33 @@ fn kmeans_single(
         inertia,
         cluster_sizes,
     })
+}
+
+/// Moves each centroid with at least one point to the mean of its points; a centroid
+/// with none keeps its position.
+///
+/// One pass over the rows: row `i` is added to the sum of cluster `labels[i]`, so each
+/// cluster's sum takes its rows in row order, the same additions in the same order as a
+/// separate pass per cluster (O(n k d)), and the centroids are bit-identical to that.
+fn update_centroids(data: &ArrayView2<f64>, labels: &[usize], centroids: &mut Array2<f64>) {
+    let (k, d) = centroids.dim();
+    let mut sums = vec![0.0f64; k * d];
+    let mut counts = vec![0usize; k];
+    for (row, &label) in data.rows().into_iter().zip(labels) {
+        let sum = &mut sums[label * d..(label + 1) * d];
+        for (s, &x) in sum.iter_mut().zip(row.iter()) {
+            *s += x;
+        }
+        counts[label] += 1;
+    }
+    for (j, (sum, &count)) in sums.chunks_exact(d.max(1)).zip(&counts).enumerate() {
+        if count > 0 {
+            let c = count as f64;
+            for (dst, &s) in centroids.row_mut(j).iter_mut().zip(sum) {
+                *dst = s / c;
+            }
+        }
+    }
 }
 
 /// CPU path for K-means label assignment.
@@ -1271,8 +1286,15 @@ fn uf_union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
 }
 
 /// Squared Euclidean distance between two vectors.
+///
+/// Contiguous rows (any standard-layout matrix) take a plain slice loop, which does not
+/// depend on how ndarray's iterator gets inlined; strided rows take the ndarray iterator.
+/// Both add the terms in index order, so the result is the same either way.
 #[inline]
 fn euclidean_distance_squared(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
+    if let (Some(a), Some(b)) = (a.as_slice(), b.as_slice()) {
+        return a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum();
+    }
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
 }
 
@@ -1958,6 +1980,54 @@ mod tests {
                 (got.n_clusters, got.n_noise),
                 (want.n_clusters, want.n_noise)
             );
+        }
+    }
+
+    /// The one-pass centroid update equals a pass per cluster bit for bit, including a
+    /// cluster with no points (which keeps its centroid).
+    #[test]
+    fn update_centroids_matches_per_cluster_passes() {
+        let data = three_clusters(301, 4, 7);
+        let k = 5;
+        let labels: Vec<usize> = (0..data.nrows()).map(|i| (i * 7 + i / 3) % 4).collect();
+        let start = Array2::from_shape_fn((k, 4), |(j, c)| j as f64 - 0.25 * c as f64);
+        let mut reference = start.clone();
+        for j in 0..k {
+            let mut sum = Array1::<f64>::zeros(4);
+            let mut count = 0;
+            for i in 0..data.nrows() {
+                if labels[i] == j {
+                    sum += &data.row(i);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                reference.row_mut(j).assign(&(sum / count as f64));
+            }
+        }
+        let mut got = start.clone();
+        update_centroids(&data.view(), &labels, &mut got);
+        let bits = |a: &Array2<f64>| a.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&got), bits(&reference));
+        assert_eq!(got.row(4), start.row(4));
+    }
+
+    /// The slice path of the distance equals the strided (iterator) path bit for bit.
+    #[test]
+    fn euclidean_distance_squared_slice_and_strided_paths_agree() {
+        let data = three_clusters(40, 6, 3);
+        // Standard-layout transpose: its columns are the rows of data, strided
+        let t = Array2::from_shape_fn((data.ncols(), data.nrows()), |(c, r)| data[[r, c]]);
+        for i in 0..data.nrows() {
+            for j in 0..data.nrows() {
+                let (a, b) = (data.row(i), data.row(j));
+                let (sa, sb) = (t.column(i), t.column(j));
+                assert!(a.as_slice().is_some() && sa.as_slice().is_none());
+                assert_eq!(
+                    euclidean_distance_squared(&a, &b).to_bits(),
+                    euclidean_distance_squared(&sa, &sb).to_bits()
+                );
+            }
         }
     }
 
