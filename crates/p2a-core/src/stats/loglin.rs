@@ -823,8 +823,9 @@ mod tests {
     #[test]
     fn test_loglin_reports_nonconvergence() {
         // R: loglin(.., eps = 1e-12, iter = 3) warns "algorithm did not converge" and returns the
-        // 3-cycle fit.
-        let (_, ds) = crate::test_support::load_case("stat_loglin_nodecomp");
+        // 3-cycle fit. Not R-pinned: the case's table, no R value compared.
+        let path = p2a_validation::repo_path("validation/datasets/generated/loglin_2x3x4.csv");
+        let ds = crate::data::Dataset::new(crate::data::DataLoader::load_csv(path).unwrap());
         let table = case_table(&ds);
         let r = loglin(&table, &[2, 3, 4], &m3(), Some(1e-12), Some(3)).unwrap();
         assert!(

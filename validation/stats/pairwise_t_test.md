@@ -108,15 +108,15 @@ an adjusted p below the raw 0.5.
 old code counted the NA and gave 0.16, 1, 1, 1.
 
 **Rust Tests:** `stats::pairwise::tests::test_validate_p_adjust_stat_p_adjust`,
-`test_validate_p_adjust_hommel_against_r`, `test_p_adjust_nan_kept_and_excluded_from_n`,
-`test_p_adjust_holm`, `test_p_adjust_method_parses_aliases_and_rejects_unknown` (not R-pinned).
+`test_validate_p_adjust_hommel_against_r`, `test_validate_p_adjust_nan_kept_and_excluded_from_n`,
+`test_validate_p_adjust_holm`, `test_p_adjust_method_parses_aliases_and_rejects_unknown` (not R-pinned).
 
 ### Test 2c: Pairwise Wilcoxon (R-pinned)
 
 Case `stat_pairwise_legacy`: set `a` with `exact = FALSE` (0.012185780355344811 for each pair),
 set `b` exact (0.1), set `c` exact with Holm (0.023809523809523808; raw 0.007936507936507936),
 tolerance `Tol::p_value(n)`. Tests: `test_validate_pairwise_wilcox_against_r`,
-`test_validate_pairwise_wilcox_exact_small_sample`, `test_pairwise_wilcox_with_holm_adjustment`.
+`test_validate_pairwise_wilcox_exact_small_sample`, `test_validate_pairwise_wilcox_with_holm_adjustment`.
 
 ### Test 3: Missing values and an integer response (R-pinned)
 

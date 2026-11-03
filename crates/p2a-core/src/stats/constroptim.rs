@@ -763,10 +763,6 @@ mod tests {
         Tol::iterative(1e-4)
     }
 
-    fn legacy_case() -> Case {
-        Case::load("stat_constroptim_legacy")
-    }
-
     #[test]
     fn test_validate_constr_optim_quadratic() {
         // R: constrOptim(c(1, 1), function(x) x[1]^2 + x[2]^2,
@@ -786,7 +782,7 @@ mod tests {
         )
         .unwrap();
         // deviation STAT-80: convergence and outer iterations not compared
-        let case = legacy_case();
+        let case = Case::load("stat_constroptim_legacy");
         Check::new(&case)
             .vector("quadratic_par", &r.par, iter())
             .scalar("quadratic_value", r.value, iter())
@@ -816,7 +812,7 @@ mod tests {
         )
         .unwrap();
         // deviation STAT-80: convergence and outer iterations not compared
-        let case = legacy_case();
+        let case = Case::load("stat_constroptim_legacy");
         Check::new(&case)
             .vector("lp3_par", &r.par, iter())
             .scalar("lp3_value", r.value, iter())
@@ -868,7 +864,7 @@ mod tests {
         )
         .unwrap();
         // deviation STAT-80: convergence and outer iterations not compared
-        let case = legacy_case();
+        let case = Case::load("stat_constroptim_legacy");
         Check::new(&case)
             .vector("binding_par", &r.par, iter())
             .scalar("binding_value", r.value, iter())

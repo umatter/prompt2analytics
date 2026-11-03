@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_p_adjust_nan_kept_and_excluded_from_n() {
+    fn test_validate_p_adjust_nan_kept_and_excluded_from_n() {
         // R: NA p-values stay NA and are not counted in n (STAT-30)
         let case = Case::load("stat_p_adjust");
         let mut c = Check::new(&case);
@@ -1244,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn test_p_adjust_holm() {
+    fn test_validate_p_adjust_holm() {
         // R: p.adjust(c(0.01, 0.04, 0.03, 0.02), "holm") is 0.04, 0.06, 0.06, 0.06
         let case = Case::load("stat_p_adjust");
         let mut c = Check::new(&case);
@@ -1548,7 +1548,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pairwise_wilcox_with_holm_adjustment() {
+    fn test_validate_pairwise_wilcox_with_holm_adjustment() {
         // R: pairwise.wilcox.test(x, g, p.adjust.method = "holm") on set c (exact: no ties)
         let (case, ds) = crate::test_support::load_case("stat_pairwise_legacy");
         let (x, g) = sets(&ds).remove("c").unwrap();

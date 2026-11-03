@@ -144,7 +144,7 @@ values at 1e-9 relative and R's printed values as a cross-check at 1e-2 relative
 Case `stat_fisher_legacy` (`validation/r/cases/stats_power_loglin.R`, dataset
 `validation/datasets/generated/fisher_legacy.csv`, one row per table `a, b, c, d`): `fisher.test`
 for the three alternatives with the limits and estimate re-solved tight as above. Each test runs
-`check_legacy(<table>)`: p for `two.sided`, `less` and `greater` at 1e-9 relative; the two-sided
+`check_legacy("stat_fisher_legacy", <table>)`: p for `two.sided`, `less` and `greater` at 1e-9 relative; the two-sided
 limits, the upper `less` and lower `greater` limit and the conditional MLE against the tight
 re-solve at 1e-9 relative (1e-12 absolute); the sample odds ratio at 1e-15 relative and n exactly;
 the `less` lower limit 0 and the `greater` upper limit `Inf`.

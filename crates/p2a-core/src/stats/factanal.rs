@@ -1608,8 +1608,8 @@ mod tests {
         a.as_standard_layout().iter().copied().collect()
     }
 
-    fn factanal_case() -> (Case, Array2<f64>) {
-        let (case, ds) = crate::test_support::load_case("stat_factanal_promax");
+    fn factanal_case(id: &str) -> (Case, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case(id);
         let cols: Vec<Vec<f64>> = (1..=12)
             .map(|j| {
                 crate::data::columns::numeric_column(
@@ -1689,7 +1689,7 @@ mod tests {
         // p2a's fixed point with tolerance 1e-12. Iterative on both sides: 1e-4 relative
         // (STAT-62's rule; R's default factr moves its own uniquenesses by 7.2e-6, and R's
         // varimax inside factanal stops at eps 1e-5).
-        let (case, x) = factanal_case();
+        let (case, x) = factanal_case("stat_factanal_promax");
         let fa = Tol::iterative(1e-4);
         let mut c = Check::new(&case);
         for (rot, key) in [

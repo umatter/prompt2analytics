@@ -165,10 +165,10 @@
       "tests": [
         "p2a-core::stats::pairwise::tests::test_validate_p_adjust_stat_p_adjust",
         "p2a-core::stats::pairwise::tests::test_validate_p_adjust_hommel_against_r",
-        "p2a-core::stats::pairwise::tests::test_p_adjust_nan_kept_and_excluded_from_n",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_nan_kept_and_excluded_from_n",
         "p2a-core::stats::pairwise::tests::test_validate_p_adjust_holm_against_r",
         "p2a-core::stats::pairwise::tests::test_validate_p_adjust_bh_against_r",
-        "p2a-core::stats::pairwise::tests::test_p_adjust_holm"
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_holm"
       ],
       "quantities": [
         "12 vectors (legacy, STAT-31's Hommel examples, ties, NA, single, ones) x 7 methods"
@@ -190,7 +190,7 @@
         "p2a-core::stats::pairwise::tests::test_validate_pairwise_t_test_pooled_against_r",
         "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_against_r",
         "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_exact_small_sample",
-        "p2a-core::stats::pairwise::tests::test_pairwise_wilcox_with_holm_adjustment"
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_with_holm_adjustment"
       ],
       "quantities": [
         "pooled t p (none, Holm, Hommel), Welch t p, down to 7.1e-14",

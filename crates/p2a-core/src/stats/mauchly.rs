@@ -603,8 +603,11 @@ mod tests {
         }
     }
 
-    fn mauchly_case() -> (Case, Array2<f64>) {
-        let (case, ds) = crate::test_support::load_case("stat_mauchly_sigma");
+    /// The data of the R case (registered tests name the case at the call).
+    const SIGMA_DATA: &str = "stat_mauchly_sigma";
+
+    fn mauchly_case(id: &str) -> (Case, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case(id);
         let cols: Vec<Vec<f64>> = ["V1", "V2", "V3", "V4"]
             .iter()
             .map(|c| {
@@ -632,7 +635,7 @@ mod tests {
         // R: mauchly.test(lm(Y ~ 1), ...) on mauchly_sigma (15 subjects, 4 measures) with T = I,
         // X = ~1, idata f = (a, a, b, b) with X = ~f (passed as R's T), and Sigma = diag(1:4) with
         // T = I and with X = ~1.
-        let (case, y) = mauchly_case();
+        let (case, y) = mauchly_case("stat_mauchly_sigma");
         let n = y.nrows(); // 15
         let psi = Array2::from_diag(&Array1::from(case.vector("psi_diag")));
         let designs = [
@@ -724,7 +727,7 @@ mod tests {
     #[test]
     fn test_validate_mauchly_two_columns() {
         // R: mauchly.test(lm(Y[, 1:2] ~ 1), X = ~1): one contrast, W = 1, p = 1 (was p = NaN)
-        let (case, y) = mauchly_case();
+        let (case, y) = mauchly_case("stat_mauchly_sigma");
         let r = mauchly_test(&y.slice(s![.., 0..2]).to_owned(), None).unwrap();
         Check::new(&case)
             .scalar("two_col_W", r.w, Tol::exact())
@@ -735,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_mauchly_rejects_invalid_sigma_and_transform() {
-        let (_case, y) = mauchly_case();
+        let (_case, y) = mauchly_case(SIGMA_DATA);
         let msg = |c: MauchlyConfig| mauchly_test_with(&y, &c).unwrap_err().to_string();
         let sig = |m: Array2<f64>| MauchlyConfig {
             sigma: Some(m),
@@ -783,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_mauchly_display_names_transform_and_both_p_values() {
-        let (_case, y) = mauchly_case();
+        let (_case, y) = mauchly_case(SIGMA_DATA);
         let text = format!("{}", mauchly_test(&y, None).unwrap());
         assert!(text.contains("Transformation: contrasts orthogonal to the constant"));
         assert!(text.contains("(first-order chi-square 0.353699)"), "{text}");

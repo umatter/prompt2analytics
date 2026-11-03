@@ -1170,8 +1170,8 @@ mod tests {
     /// The legacy tables of `stat_fisher_legacy` (fisher.test, limits re-solved tight as
     /// T2-WP05): p for the three alternatives, the tight limits and estimate, the sample odds
     /// ratio and n.
-    fn check_legacy(id: &str) {
-        let (case, tables) = case_tables("stat_fisher_legacy");
+    fn check_legacy(case_id: &str, id: &str) {
+        let (case, tables) = case_tables(case_id);
         let table = tables
             .iter()
             .find(|(name, _)| name == id)
@@ -1214,26 +1214,26 @@ mod tests {
     #[test]
     fn test_validate_against_r_basic() {
         // R: fisher.test(matrix(c(1, 9, 11, 3), 2)); p 0.002759456185220086
-        check_legacy("basic");
+        check_legacy("stat_fisher_legacy", "basic");
     }
 
     #[test]
     fn test_validate_against_r_lady_tea() {
         // R: fisher.test(matrix(c(3, 1, 1, 3), 2)); p 0.4857142857142858
-        check_legacy("tea");
+        check_legacy("stat_fisher_legacy", "tea");
     }
 
     #[test]
     fn test_validate_against_r_one_sided() {
         // R: fisher.test(matrix(c(6, 1, 2, 7), 2), alternative = "greater"); p 0.020279720279720286
-        check_legacy("one_sided");
+        check_legacy("stat_fisher_legacy", "one_sided");
     }
 
     #[test]
     fn test_validate_fisher_legacy_ci() {
         // R: fisher.test(matrix(c(10, 5, 5, 10), 2))$conf.int, re-solved tight:
         // 0.7054372156512816, 23.921858982581192 (before T2-WP05 p2a gave (0, 40))
-        check_legacy("ci");
+        check_legacy("stat_fisher_legacy", "ci");
     }
 
     #[test]
