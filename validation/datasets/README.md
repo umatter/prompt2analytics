@@ -8,7 +8,7 @@ datasets that R reference cases write (`validation/r/cases/*.R`).
 
 | File | Rows × columns | Used by | Source |
 |---|---|---|---|
-| `grunfeld.csv` | 200 × 5 (firm, year, inv, value, capital) | `ols_grunfeld`, `ols_diagnostics_grunfeld`, `panel_*_grunfeld`, `panel_hdfe_grunfeld`, `panel_grunfeld_na`, `reg_cluster_na`, `dpd_ab_grunfeld`, `harness_selftest`, the CLI exhibit tests and the paper's CLI captures | `plm::Grunfeld` |
+| `grunfeld.csv` | 200 × 5 (firm, year, inv, value, capital) | `ols_grunfeld`, `ols_diagnostics_grunfeld`, `panel_*_grunfeld`, `panel_hdfe_grunfeld`, `panel_grunfeld_na`, `reg_cluster_na`, `dpd_ab_grunfeld`, `ols_no_intercept_grunfeld`, `ols_twoway_cluster_grunfeld`, `harness_selftest`, the CLI exhibit tests and the paper's CLI captures | `plm::Grunfeld` |
 | `employee_training.csv` | 1200 × 9 (employee_id, time, post_training, training_group, department, tenure, years_since_hire, performance, bonus) | the paper's chat transcripts (`paper/transcripts/section4_3_*.txt` in the paper repo); no validation case reads it | synthetic DiD panel, added in commit 4dd2c53; its generator is not in this repository |
 | `gdp_quarterly.csv` | 280 × 4 (date, year, quarter, gdp_growth) | the paper's time-series chat example (`paper/transcripts/section4_4_*.txt` in the paper repo); no validation case reads it | synthetic (see below) |
 
@@ -141,6 +141,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/isoreg_medpolish_int.csv` | 10 × 8 (id, x, y, y_na, c1-c4; y, y_na and c1-c4 Int64; y_na missing in row 6, c3 in row 4; x has no ties) | `stat_isoreg_medpolish_int` | `r/cases/stats_mcp.R` | seed 523 |
 | `generated/prop_trend_na.csv` | 7 × 6 (group, dose, successes, trials, trials_neg, successes_frac; all Int64 but successes_frac; successes missing in row 4; trials_neg is -1 in row 5; successes_frac is 5.5 in row 2) | `stat_prop_trend_na` | `r/cases/stats_mcp.R` | fixed values |
 | `generated/na_reviewer.csv` | 8 × 7 (id, x, y, g, i, time, event; g, i, time and event Int64; x missing in row 3, y in row 2) | `na_x2_x8_reviewer` | `r/cases/na_acceptance.R` | fixed values (the X-2 reviewer data and integer survival columns) |
+| `generated/ts_flags_sim.csv` | 120 × 3 (t, y_ar, y_seas) | `ts_ar_yw_aic` | `r/cases/cli_flags.R` | seed 20261022: AR(2) (0.6, −0.3) plus 5; trend + monthly season with outliers at t = 6 and 75 |
 
 ## Adding a dataset
 

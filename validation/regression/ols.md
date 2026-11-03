@@ -22,7 +22,7 @@ With n observations and k coefficients (the intercept included):
 | Quantity | Formula | R |
 |---|---|---|
 | t inference | t = β̂/SE on n − k df; CI β̂ ± t₀.₉₇₅,ₙ₋ₖ SE | `summary.lm`, `confint` |
-| R² | 1 − SSR/SST (centred) | `summary.lm` |
+| R² | 1 − SSR/SST (centred; uncentered without an intercept, see [no_intercept.md](no_intercept.md)) | `summary.lm` |
 | adjusted R² | 1 − (1 − R²)(n − 1)/(n − k) | `summary.lm` |
 | sigma | √(SSR/(n − k)) | `sigma` |
 | F | ((SST − SSR)/(k − 1)) / (SSR/(n − k)) on (k − 1, n − k) | `summary.lm` |
