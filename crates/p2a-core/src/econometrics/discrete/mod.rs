@@ -38,14 +38,14 @@
 //!   same model with other draws)
 
 // Module declarations
-mod binary_choice;
-mod conditional_logit;
-mod count_models;
-mod mixed_logit;
-mod multinomial_logit;
-mod newton;
-mod ordered_models;
-mod types;
+pub mod binary_choice;
+pub mod conditional_logit;
+pub mod count_models;
+pub mod mixed_logit;
+pub mod multinomial_logit;
+pub mod newton;
+pub mod ordered_models;
+pub mod types;
 
 // Re-exports for types
 pub use types::{DiscreteModelType, DiscreteResult};
