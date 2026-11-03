@@ -14,7 +14,7 @@
 //! with both df near 1e6).
 //!
 //! statrs's inverse and survival functions for these distributions are not used, because:
-//! `StudentsT::inverse_cdf` does not terminate for df >= 1.5e7 (and at q = 1e-100, df = 1000);
+//! `StudentsT::inverse_cdf` does not terminate for very large df (and at q = 1e-100, df = 1000);
 //! it panics for q < 1e-154; it is 6.1e-5 off at df = 1e6; `ChiSquared::sf` returns 1 for
 //! x < 1.1e-15 at any df; `ChiSquared::inverse_cdf` returns a coarse bisection point when the
 //! density overflows (e.g. qchisq(0.025, 318)); and `FisherSnedecor::sf` loses accuracy far in
@@ -1179,7 +1179,7 @@ mod tests {
         assert!(TAIL.allows(at1e6, q[4]), "df 1e6: rust {at1e6}, R {}", q[4]);
     }
 
-    /// statrs `StudentsT::inverse_cdf` never returned here (df >= 1.5e7).
+    /// statrs `StudentsT::inverse_cdf` never returned at these very large df.
     #[test]
     fn test_validate_t_critical_terminates_for_huge_df() {
         let case = case_of("stat_quantile_types");

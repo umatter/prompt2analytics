@@ -132,8 +132,8 @@ the upper-tail p-values `t_test_p_value` (two-sided), `chi_squared_p_value`, `f_
   two-sided normal tail is the chi-square(1) upper tail of `z^2`, because statrs's `erfc` is only
   accurate to about 5e-11 relative.
   These replace statrs calls with these defects (measured against R 4.3.3):
-  1. `StudentsT::inverse_cdf` does not terminate for df >= 1.5e7 (and at q = 1e-100, df = 1000):
-     an OLS confidence interval on 15 million rows hung.
+  1. `StudentsT::inverse_cdf` does not terminate for very large df (and at q = 1e-100,
+     df = 1000).
   2. It panics for q < 1e-154.
   3. It is wrong at large df: 1.959847719928278 at (0.975, 1e6) against R's
      1.9599663568141066 (6.1e-5 relative), 6.8% off at 1e7.
