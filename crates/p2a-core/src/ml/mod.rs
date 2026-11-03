@@ -77,9 +77,9 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **ICE Curves** | [`ice_curves`] | Individual Conditional Expectation |
-//! | **LIME** | [`lime`] | Local Interpretable Model-agnostic Explanations |
-//! | **SHAP** | [`shap_values`] | SHapley Additive exPlanations |
+//! | **ICE Curves** | [`compute_ice_curves`] | Individual Conditional Expectation |
+//! | **Partial Dependence** | [`partial_dependence`] | Partial dependence of predictions on one feature |
+//! | **SHAP** | [`kernel_shap`], [`shap_tree_ensemble`] | SHapley Additive exPlanations (model-agnostic Kernel SHAP; tree ensembles) |
 //!
 //! ## Advanced Tree Methods
 //!
@@ -87,7 +87,6 @@
 //! |--------|----------|-------------|
 //! | **Quantile RF** | [`quantile_rf`] | Quantile regression forests |
 //! | **CTree** | [`ctree`] | Conditional inference trees |
-//! | **Boruta** | [`boruta`] | Feature selection with shadow features |
 //! | **C5.0** | [`c50`] | C5.0 decision trees |
 //! | **Cubist** | [`cubist`] | Rule-based regression |
 //! | **MARS** | [`mars`] | Multivariate adaptive regression splines |
@@ -182,10 +181,9 @@
 //! | `pvclust` | [`pvclust`] |
 //! | `grf` | [`causal_forest`] |
 //! | `BART` | [`bart`], [`bart_causal`] |
-//! | `iml`, `DALEX` | [`ice_curves`], [`lime`], [`shap_values`] |
+//! | `iml`, `DALEX` | [`compute_ice_curves`], [`partial_dependence`], [`kernel_shap`] |
 //! | `quantregForest` | [`quantile_rf`] |
 //! | `party` | [`ctree`] |
-//! | `Boruta` | [`boruta`] |
 //! | `C50` | [`c50`] |
 //! | `Cubist` | [`cubist`] |
 //! | `earth` | [`mars`] |
@@ -518,6 +516,8 @@ pub use pdp::{
 #[cfg(test)]
 mod tests {
     use super::partition_exact;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
 
     /// `partition_exact` splits as `Iterator::partition` does, with every vector at exactly its
     /// length, also where one side keeps almost every index.
@@ -536,5 +536,87 @@ mod tests {
         let (even, odd) = partition_exact(0..777, |i| i % 2 == 0);
         assert_eq!((even.len(), odd.len()), (389, 388));
         assert_eq!((even.capacity(), odd.capacity()), (389, 388));
+    }
+
+    /// File-backed `mod name;` declarations in `source`, with comments ignored; inline modules such as
+    /// `mod tests {` are not file-backed and are skipped.
+    fn file_module_names(source: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in source.lines() {
+            let mut rest = line.split("//").next().unwrap_or("").trim();
+            if let Some(after) = rest.strip_prefix("pub") {
+                rest = after.trim_start();
+                if rest.starts_with('(') {
+                    match rest.split_once(')') {
+                        Some((_, after)) => rest = after.trim_start(),
+                        None => continue,
+                    }
+                }
+            }
+            let Some(after) = rest.strip_prefix("mod ") else {
+                continue;
+            };
+            let Some(name) = after.trim().strip_suffix(';') else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
+    /// Every `.rs` file under `src/` is reachable from `lib.rs` through `mod` declarations. An orphan file is
+    /// never compiled: its tests never run and its items cannot be called, yet readers and the module docs
+    /// take it for shipped code (ML-116 `ml/advanced_trees.rs`, WT-17 `ml/interpretability.rs`).
+    #[test]
+    fn test_every_source_file_is_compiled() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut reached: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut pending = vec![(src.join("lib.rs"), src.clone())];
+        // Built from two pieces so that this file does not contain the attribute it looks for.
+        let path_attr = ["#[", "path"].concat();
+        while let Some((file, dir)) = pending.pop() {
+            let source = std::fs::read_to_string(&file).unwrap();
+            assert!(
+                !source.contains(&path_attr),
+                "{}: modules with a path attribute are not handled here",
+                file.display()
+            );
+            for name in file_module_names(&source) {
+                let flat = dir.join(format!("{name}.rs"));
+                let nested = dir.join(&name).join("mod.rs");
+                let target = match (flat.is_file(), nested.is_file()) {
+                    (true, false) => flat,
+                    (false, true) => nested,
+                    _ => panic!(
+                        "{}: `mod {name};` must resolve to exactly one of {} and {}",
+                        file.display(),
+                        flat.display(),
+                        nested.display()
+                    ),
+                };
+                pending.push((target, dir.join(&name)));
+            }
+            reached.insert(file);
+        }
+        let mut orphans = Vec::new();
+        let mut dirs = vec![src.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") && !reached.contains(&path) {
+                    orphans.push(path.strip_prefix(&src).unwrap().display().to_string());
+                }
+            }
+        }
+        orphans.sort();
+        assert!(
+            orphans.is_empty(),
+            "source files that no `mod` declaration reaches (never compiled): {orphans:?}"
+        );
     }
 }
