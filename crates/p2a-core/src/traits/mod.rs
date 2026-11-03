@@ -9,6 +9,7 @@ pub use convergence::{
 };
 
 pub use estimator::{
-    LinearEstimator, SignificanceLevel, chi_squared_p_value, f_test_p_value, logistic_cdf,
-    logistic_pdf, normal_cdf, normal_pdf, t_critical, t_test_p_value,
+    LinearEstimator, SignificanceLevel, chi_squared_p_value, chi_squared_quantile, f_test_p_value,
+    logistic_cdf, logistic_pdf, normal_cdf, normal_p_value_two_sided, normal_pdf, normal_quantile,
+    t_critical, t_quantile, t_test_p_value, validate_level, z_critical,
 };
