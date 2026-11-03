@@ -47,7 +47,7 @@
       "doc": "validation/econometrics/granger.md",
       "cases": ["ts_granger_int"],
       "tests": [
-        "p2a-core::econometrics::timeseries::tests::test_validate_granger_int_series"
+        "p2a-core::econometrics::timeseries::granger::tests::test_validate_granger_int_series"
       ],
       "quantities": ["F", "p", "df1, df2", "rows used"],
       "tolerance": "F Tol::stat(300), p Tol::p_value(300), counts exact",
