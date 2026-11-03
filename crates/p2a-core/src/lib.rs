@@ -47,7 +47,7 @@
 //! | **Variance** | [`bartlett_test`], [`fligner_test`], [`var_test`] | [`stats`] |
 //! | **Correlation** | [`cor_test`], [`correlation_matrix`] | [`stats`] |
 //! | **Post-hoc** | [`tukey_hsd`], [`pairwise_t_test`], [`pairwise_wilcox_test`] | [`stats`] |
-//! | **Time series** | [`acf`], [`pacf`], [`ccf`], [`box_test`], [`pp_test`] | [`stats`] |
+//! | **Time series** | [`acf()`], [`pacf`], [`ccf`], [`box_test`], [`pp_test`] | [`stats`] |
 //! | **Power analysis** | [`power_t_test`], [`power_prop_test`], [`power_anova_test`] | [`stats`] |
 //! | **Proportions** | [`prop_test_one`], [`prop_test_two`], [`binom_test`] | [`stats`] |
 //! | **Contingency** | [`fisher_exact_test`], [`mcnemar_test`], [`mantelhaen_test`] | [`stats`] |
@@ -169,8 +169,8 @@
 //! | **MDS** | Multidimensional scaling | [`cmdscale`] |
 //! | **Random Forest** | Ensemble trees | [`random_forest`] |
 //! | **SVM** | Support vector machines | [`linear_svm`] |
-//! | **Causal Forest** | Heterogeneous treatment effects | [`causal_forest`] |
-//! | **BART Causal** | Bayesian trees for causal | [`bart_causal`] |
+//! | **Causal Forest** | Heterogeneous treatment effects | [`causal_forest()`] |
+//! | **BART Causal** | Bayesian trees for causal | [`bart_causal()`] |
 //!
 //! ### Export & Visualization
 //!
@@ -195,6 +195,7 @@
 //! - [`export`] - LaTeX, HTML, Markdown, CSV export
 //! - [`linalg`] - Matrix operations (X'X, Cholesky, etc.)
 //! - [`traits`] - Common traits ([`LinearEstimator`])
+//! - [`options`] - option strings parsed into enums (`option_enum!`)
 //! - [`errors`] - Error types ([`EconError`])
 //!
 //! ## R Package Equivalents
@@ -214,7 +215,7 @@
 //! | `did` | [`run_staggered_did`] |
 //! | `rdrobust` | [`run_rd`] |
 //! | `MatchIt` | [`match_it`] |
-//! | `WeightIt` | [`weightit`] |
+//! | `WeightIt` | [`weightit()`] |
 //! | `tmle` | [`run_tmle`] |
 //! | `Synth` | [`run_synthetic_control`] |
 //! | `spdep` | [`spatial`] module |
@@ -226,6 +227,7 @@
 // Foundation modules (pure Rust implementations)
 pub mod errors;
 pub mod linalg;
+pub mod options;
 pub mod resource;
 pub mod traits;
 

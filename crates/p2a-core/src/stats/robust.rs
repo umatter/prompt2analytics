@@ -1,6 +1,13 @@
 //! Robust and extended descriptive statistics.
 //!
-//! Implements fivenum, IQR, mad, ecdf, and density from R stats.
+//! Implements fivenum, IQR, quantile (R's types 1-9), quantiles, percentile_interval,
+//! boxplot_stats, mad, ecdf, and density from R stats.
+//!
+//! ```
+//! use p2a_core::stats::robust::{quantiles, QuantileType};
+//! let q = quantiles(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], &[0.25], QuantileType::T6).unwrap();
+//! assert_eq!(q, vec![2.75]);
+//! ```
 
 use crate::errors::{EconError, EconResult};
 use crate::resource;
@@ -51,19 +58,14 @@ pub fn fivenum(data: &[f64]) -> EconResult<FivenumResult> {
 
     sorted.sort_by(|a, b| a.total_cmp(b));
 
-    let median = median_sorted(&sorted);
-
-    // Lower and upper hinges (Tukey's method)
-    let n2 = n.div_ceil(2);
-    let lower_hinge = median_sorted(&sorted[..n2]);
-    let upper_hinge = median_sorted(&sorted[(n - n2)..]);
+    let [minimum, lower_hinge, median, upper_hinge, maximum] = fivenum_sorted(&sorted);
 
     Ok(FivenumResult {
-        minimum: sorted[0],
+        minimum,
         lower_hinge,
         median,
         upper_hinge,
-        maximum: sorted[n - 1],
+        maximum,
         n,
     })
 }
@@ -85,75 +87,276 @@ fn median_sorted(sorted: &[f64]) -> f64 {
 // IQR - Interquartile Range
 // ============================================================================
 
-/// Compute the interquartile range.
+/// Compute the interquartile range, R's `IQR(data, type = qtype, na.rm = TRUE)`.
 ///
-/// IQR = Q3 - Q1, where Q1 and Q3 are the first and third quartiles.
-///
-/// # Arguments
-///
-/// * `data` - Input data
-/// * `qtype` - Quantile type (1-9, default 7 matches R's default)
-///
-/// # Returns
-///
-/// The interquartile range as f64.
+/// NaN values are dropped; `qtype` is R's quantile type 1-9 (default 7); any other type is an
+/// error. The data are sorted once and both quartiles are read from the sorted copy.
 pub fn iqr(data: &[f64], qtype: Option<usize>) -> EconResult<f64> {
-    let qtype = qtype.unwrap_or(7);
-
-    let q1 = quantile(data, 0.25, qtype)?;
-    let q3 = quantile(data, 0.75, qtype)?;
-
-    Ok(q3 - q1)
+    let t = QuantileType::from_r(qtype.unwrap_or(7))?;
+    let s = sorted_non_nan_copy(data, "IQR sort buffer")?;
+    Ok(quantile_sorted(&s, 0.75, t) - quantile_sorted(&s, 0.25, t))
 }
 
-/// Compute a single quantile.
+/// Compute a single quantile, R's `quantile(data, p, type = qtype, na.rm = TRUE)`.
 ///
-/// Implements R's quantile types 1-9.
+/// R's quantile types 1-9 (an error for other values); NaN values are dropped.
 pub fn quantile(data: &[f64], p: f64, qtype: usize) -> EconResult<f64> {
+    let t = QuantileType::from_r(qtype)?;
     if !(0.0..=1.0).contains(&p) {
         return Err(EconError::InvalidSpecification {
-            message: "p must be between 0 and 1".to_string(),
+            message: format!("p must be in [0, 1], got {p}"),
         });
     }
+    Ok(quantile_sorted(
+        &sorted_non_nan_copy(data, "quantile sort buffer")?,
+        p,
+        t,
+    ))
+}
 
-    let mut sorted: Vec<f64> = data.iter().filter(|x| !x.is_nan()).copied().collect();
+/// R's sample quantile types (Hyndman & Fan 1996), as `stats::quantile(type = 1..9)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum QuantileType {
+    T1,
+    T2,
+    T3,
+    T4,
+    T5,
+    T6,
+    #[default]
+    T7,
+    T8,
+    T9,
+}
 
-    let n = sorted.len();
-    if n == 0 {
-        return Err(EconError::EmptyDataset);
-    }
-
-    sorted.sort_by(|a, b| a.total_cmp(b));
-
-    // R's type 7 (default): p(k) = (k-1)/(n-1)
-    // Linear interpolation between sorted[j-1] and sorted[j]
-    let index = match qtype {
-        1 => {
-            // Inverse of empirical CDF
-            if p == 0.0 {
-                0.0
-            } else {
-                (n as f64 * p).ceil() - 1.0
-            }
+impl QuantileType {
+    /// All nine types in R's order.
+    pub const ALL: [QuantileType; 9] = [
+        Self::T1,
+        Self::T2,
+        Self::T3,
+        Self::T4,
+        Self::T5,
+        Self::T6,
+        Self::T7,
+        Self::T8,
+        Self::T9,
+    ];
+    /// The type for R's `type` argument (1..=9).
+    pub fn from_r(t: usize) -> EconResult<Self> {
+        match t {
+            1..=9 => Ok(Self::ALL[t - 1]),
+            _ => Err(EconError::InvalidSpecification {
+                message: format!(
+                    "quantile type must be an integer from 1 to 9 (R's quantile types), got {t}"
+                ),
+            }),
         }
-        7 => {
-            // R's default: (n-1)*p + 1
-            (n - 1) as f64 * p
+    }
+    /// R's `type` number.
+    pub fn r_type(self) -> usize {
+        self as usize + 1
+    }
+    fn ab(self) -> (f64, f64) {
+        match self {
+            Self::T4 => (0.0, 1.0),
+            Self::T5 => (0.5, 0.5),
+            Self::T6 => (0.0, 0.0),
+            Self::T7 => (1.0, 1.0),
+            Self::T8 => (1.0 / 3.0, 1.0 / 3.0),
+            Self::T9 => (3.0 / 8.0, 3.0 / 8.0),
+            Self::T1 | Self::T2 | Self::T3 => (0.0, 0.0),
+        }
+    }
+}
+
+/// One sample quantile of sorted, NaN-free data, exactly as R 4.3's `quantile.default`
+/// (type 7's interpolation; types 1-3 without fuzz; types 4-9 with R's `fuzz <- 4 * .Machine$double.eps`).
+/// `p` is clamped to [0, 1]; empty data or NaN `p` give NaN.
+pub fn quantile_sorted(sorted: &[f64], p: f64, qtype: QuantileType) -> f64 {
+    let n = sorted.len();
+    if n == 0 || p.is_nan() {
+        return f64::NAN;
+    }
+    let p = p.clamp(0.0, 1.0);
+    let nf = n as f64;
+    if qtype == QuantileType::T7 {
+        // index <- 1 + max(n - 1, 0) * probs; lo <- floor(index); hi <- ceiling(index)
+        let index = 1.0 + (nf - 1.0) * p;
+        let lo = index.floor();
+        let hi = index.ceil();
+        let qs = sorted[lo as usize - 1];
+        let xhi = sorted[hi as usize - 1];
+        if index > lo && xhi != qs {
+            let h = index - lo;
+            return (1.0 - h) * qs + h * xhi;
+        }
+        return qs;
+    }
+    let (j, h) = match qtype {
+        QuantileType::T1 | QuantileType::T2 | QuantileType::T3 => {
+            let nppm = if qtype == QuantileType::T3 {
+                nf * p - 0.5
+            } else {
+                nf * p
+            };
+            let j = nppm.floor();
+            let gt = if nppm > j { 1.0 } else { 0.0 };
+            let h = match qtype {
+                QuantileType::T1 => gt,
+                QuantileType::T2 => (gt + 1.0) / 2.0,
+                _ => {
+                    if nppm != j || (j as i64).rem_euclid(2) == 1 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            (j, h)
         }
         _ => {
-            // Fall back to type 7
-            (n - 1) as f64 * p
+            let (a, b) = qtype.ab();
+            let fuzz = 4.0 * f64::EPSILON;
+            let nppm = a + p * (nf + 1.0 - a - b);
+            let j = (nppm + fuzz).floor();
+            let mut h = nppm - j;
+            if h.abs() < fuzz {
+                h = 0.0;
+            }
+            (j, h)
         }
     };
-
-    let j = index.floor() as usize;
-    let g = index - index.floor();
-
-    if j + 1 >= n {
-        Ok(sorted[n - 1])
+    // R: x <- c(x[1], x[1], x, x[n], x[n]); qs <- x[j + 2] (1-based), right neighbour x[j + 3]
+    let ext = |i1: i64| -> f64 {
+        if i1 <= 2 {
+            sorted[0]
+        } else if i1 >= n as i64 + 3 {
+            sorted[n - 1]
+        } else {
+            sorted[(i1 - 3) as usize]
+        }
+    };
+    let j = j as i64;
+    let (left, right) = (ext(j + 2), ext(j + 3));
+    if h == 1.0 {
+        right
+    } else if h > 0.0 && h < 1.0 && left != right {
+        (1.0 - h) * left + h * right
     } else {
-        Ok((1.0 - g) * sorted[j] + g * sorted[j + 1])
+        left
     }
+}
+
+/// The non-NaN values of `data`, sorted with `f64::total_cmp`, in one guarded buffer (R's
+/// `na.rm = TRUE`); +/-Inf are kept, as R's quantile does. `EmptyDataset` when nothing is left.
+fn sorted_non_nan_copy(data: &[f64], what: &str) -> EconResult<Vec<f64>> {
+    let mut s = crate::resource::try_with_capacity::<f64>(data.len(), what)?;
+    s.extend(data.iter().copied().filter(|x| !x.is_nan()));
+    if s.is_empty() {
+        return Err(EconError::EmptyDataset);
+    }
+    s.sort_by(f64::total_cmp);
+    Ok(s)
+}
+
+fn sorted_copy(data: &[f64], what: &str) -> EconResult<Vec<f64>> {
+    if data.is_empty() {
+        return Err(EconError::EmptyDataset);
+    }
+    if data.iter().any(|x| x.is_nan()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("{what}: missing values and NaN are not allowed (R: na.rm = FALSE)"),
+        });
+    }
+    let mut s = crate::resource::try_with_capacity::<f64>(data.len(), "quantile sort buffer")?;
+    s.extend_from_slice(data);
+    s.sort_by(f64::total_cmp);
+    Ok(s)
+}
+
+/// `stats::quantile(data, probs, type)`; NaN in `data` is an error (R without `na.rm`), `probs` in [0, 1].
+pub fn quantiles(data: &[f64], probs: &[f64], qtype: QuantileType) -> EconResult<Vec<f64>> {
+    if let Some(p) = probs.iter().find(|p| !(**p >= 0.0 && **p <= 1.0)) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("probabilities must be in [0, 1], got {p}"),
+        });
+    }
+    let s = sorted_copy(data, "quantile")?;
+    let mut out = crate::resource::try_with_capacity::<f64>(probs.len(), "quantile output")?;
+    out.extend(probs.iter().map(|&p| quantile_sorted(&s, p, qtype)));
+    Ok(out)
+}
+
+/// Bootstrap percentile interval: type 7 quantiles at (1 - level)/2 and (1 + level)/2. Drop failed
+/// (NaN) replicates first and report their number; NaN draws are an error here.
+pub fn percentile_interval(draws: &[f64], level: f64) -> EconResult<(f64, f64)> {
+    crate::traits::estimator::validate_level(level, "level")?;
+    let s = sorted_copy(draws, "percentile interval draws")?;
+    Ok((
+        quantile_sorted(&s, (1.0 - level) / 2.0, QuantileType::T7),
+        quantile_sorted(&s, (1.0 + level) / 2.0, QuantileType::T7),
+    ))
+}
+
+/// `grDevices::boxplot.stats(x, coef)` without notches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoxplotStats {
+    /// Lower whisker, lower hinge, median, upper hinge, upper whisker.
+    pub stats: [f64; 5],
+    /// Non-missing observations.
+    pub n: usize,
+    /// Values beyond coef * hinge spread, in data order.
+    pub out: Vec<f64>,
+}
+
+/// R `fivenum` on sorted, non-empty, NaN-free data: 0.5 * (x[floor(d)] + x[ceiling(d)]) at
+/// d = 1, n4, (n + 1)/2, n + 1 - n4, n with n4 = floor((n + 3)/2)/2.
+fn fivenum_sorted(s: &[f64]) -> [f64; 5] {
+    let n = s.len() as f64;
+    let n4 = ((n + 3.0) / 2.0).floor() / 2.0;
+    [1.0, n4, (n + 1.0) / 2.0, n + 1.0 - n4, n]
+        .map(|d| 0.5 * (s[d.floor() as usize - 1] + s[d.ceil() as usize - 1]))
+}
+
+/// `grDevices::boxplot.stats`: Tukey hinges (fivenum), whiskers at the most extreme values within
+/// coef * (upper hinge - lower hinge), outliers in data order. NaN dropped; coef finite and >= 0.
+pub fn boxplot_stats(data: &[f64], coef: f64) -> EconResult<BoxplotStats> {
+    if !(coef.is_finite() && coef >= 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("coef must be finite and non-negative, got {coef}"),
+        });
+    }
+    let s = sorted_non_nan_copy(data, "boxplot sort buffer")?;
+    let mut kept = crate::resource::try_with_capacity::<f64>(s.len(), "boxplot data")?;
+    kept.extend(data.iter().copied().filter(|x| !x.is_nan()));
+    let mut stats = fivenum_sorted(&s);
+    let mut out = Vec::new();
+    if coef > 0.0 {
+        let iqr = stats[3] - stats[1];
+        let is_out = |x: f64| {
+            if iqr.is_nan() {
+                !x.is_finite()
+            } else {
+                x < stats[1] - coef * iqr || x > stats[3] + coef * iqr
+            }
+        };
+        out = kept.iter().copied().filter(|&x| is_out(x)).collect();
+        if !out.is_empty() {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for x in kept.iter().copied().filter(|&x| !is_out(x)) {
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+            stats[0] = lo;
+            stats[4] = hi;
+        }
+    }
+    Ok(BoxplotStats {
+        stats,
+        n: kept.len(),
+        out,
+    })
 }
 
 // ============================================================================
@@ -311,6 +514,21 @@ pub enum DensityKernel {
     /// Cosine kernel
     Cosine,
 }
+
+crate::option_enum!(
+    DensityKernel,
+    crate::options::Choices {
+        option: "kernel",
+        values: &[
+            (&["gaussian", "normal"], DensityKernel::Gaussian),
+            (&["epanechnikov"], DensityKernel::Epanechnikov),
+            (&["rectangular", "uniform"], DensityKernel::Rectangular),
+            (&["triangular"], DensityKernel::Triangular),
+            (&["biweight", "quartic"], DensityKernel::Biweight),
+            (&["cosine"], DensityKernel::Cosine),
+        ],
+    }
+);
 
 /// Result of kernel density estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -596,6 +814,7 @@ fn silverman_bandwidth(data: &[f64]) -> f64 {
     let sd = var.sqrt();
 
     // IQR estimate
+    // STAT-65 (Tier 4): bw.nrd0 uses IQR(x) (type 7); this rule stays until STAT-65 is fixed
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
     let q1 = sorted[(0.25 * n) as usize];
@@ -680,15 +899,7 @@ pub fn run_density(
     kernel: &str,
     n_points: Option<usize>,
 ) -> EconResult<DensityResult> {
-    let kernel = match kernel.to_lowercase().as_str() {
-        "gaussian" | "normal" => DensityKernel::Gaussian,
-        "epanechnikov" => DensityKernel::Epanechnikov,
-        "rectangular" | "uniform" => DensityKernel::Rectangular,
-        "triangular" => DensityKernel::Triangular,
-        "biweight" | "quartic" => DensityKernel::Biweight,
-        "cosine" => DensityKernel::Cosine,
-        _ => DensityKernel::Gaussian,
-    };
+    let kernel: DensityKernel = kernel.parse()?;
 
     density(data, bw, kernel, n_points, None, None)
 }
@@ -1104,45 +1315,278 @@ mod tests {
         assert!((quantile(&data, 1.0, 7).unwrap() - 5.0).abs() < 1e-10);
     }
 
+    #[test]
+    fn test_quantile_names_bad_p_and_drops_nan() {
+        let m = spec_message(quantile(&[1.0, 2.0, 3.0], 1.5, 7));
+        assert!(m.contains("got 1.5"), "{m}");
+        let d = [4.2, f64::NAN, 1.1, 3.3, f64::NAN, 2.7];
+        assert!((quantile(&d, 0.5, 7).unwrap() - 3.0).abs() < 1e-12);
+        assert!((iqr(&d, None).unwrap() - (3.525 - 2.3)).abs() < 1e-12);
+        assert!(matches!(
+            quantile(&[f64::NAN, f64::NAN], 0.5, 7),
+            Err(EconError::EmptyDataset)
+        ));
+        let b = boxplot_stats(&[9.0, f64::NAN, 1.0, 1.2, 0.9, 1.1], 1.5).unwrap();
+        assert_eq!((b.n, b.out.as_slice()), (5, &[9.0][..]));
+    }
+
     // =========================================================================
     // Validation tests against R
     // =========================================================================
 
-    #[test]
-    fn test_validate_fivenum() {
-        // R: data <- c(2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0)
-        // R: fivenum(data) -> [2, 6, 10, 14, 18]
-        let data = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0];
-        let result = fivenum(&data).unwrap();
+    // -------------------------------------------------------------------------
+    // Quantile types 1-9, fivenum, boxplot.stats and percentile intervals
+    // (case stat_quantile_types: x has n = 28 with ties, y has n = 7)
+    // -------------------------------------------------------------------------
 
-        assert!((result.minimum - 2.0).abs() < 1e-10, "min mismatch");
-        assert!((result.maximum - 18.0).abs() < 1e-10, "max mismatch");
-        assert!((result.median - 10.0).abs() < 1e-10, "median mismatch");
-        // Tukey hinges might differ slightly from quartiles
-        assert!(
-            result.lower_hinge >= 2.0 && result.lower_hinge <= 10.0,
-            "lower_hinge out of range"
-        );
-        assert!(
-            result.upper_hinge >= 10.0 && result.upper_hinge <= 18.0,
-            "upper_hinge out of range"
-        );
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Case, Check, Tol};
+
+    /// Called as `sample("stat_quantile_types")`, so each registered test names its case
+    /// id in its own body (validation_status.py rule registered-test-loads-no-case).
+    fn sample(id: &str) -> (Case, Vec<f64>, Vec<f64>) {
+        let (case, ds) = crate::test_support::load_case(id);
+        let (x, _) = numeric_column(ds.df(), "x", NaPolicy::Fail).unwrap();
+        let (y, miss) = numeric_column(ds.df(), "y", NaPolicy::Omit).unwrap();
+        assert_eq!((x.len(), y.len(), miss.n_dropped), (28, 7, 21));
+        (case, x, y)
+    }
+
+    fn one_to(n: usize) -> Vec<f64> {
+        (1..=n).map(|i| i as f64).collect()
+    }
+
+    fn spec_message<T: std::fmt::Debug>(r: EconResult<T>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// The legacy `quantile(data, p, type)` API for every R type (STAT-36: types 2-6, 8 and 9
+    /// used to fall back to type 7).
+    #[test]
+    fn test_validate_quantile_legacy_api_types() {
+        let (case, x, y) = sample("stat_quantile_types");
+        let probs = case.vector("probs");
+        let s10 = one_to(10);
+        let mut check = Check::new(&case);
+        let mut seq10 = Vec::new();
+        for t in 1..=9 {
+            let gx: Vec<f64> = probs.iter().map(|&p| quantile(&x, p, t).unwrap()).collect();
+            let gy: Vec<f64> = probs.iter().map(|&p| quantile(&y, p, t).unwrap()).collect();
+            check.vector(&format!("x_type{t}"), &gx, Tol::coef(28));
+            check.vector(&format!("y_type{t}"), &gy, Tol::coef(7));
+            seq10.push(quantile(&s10, 0.25, t).unwrap());
+        }
+        check.vector("seq10_q25", &seq10, Tol::coef(10));
+        check.finish();
     }
 
     #[test]
     fn test_validate_iqr() {
-        // R: IQR(c(2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0)) -> 8.0
-        let data = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0];
-        let result = iqr(&data, None).unwrap();
+        let (case, x, _) = sample("stat_quantile_types");
+        let mut check = Check::new(&case);
+        for t in 1..=9 {
+            check.scalar(
+                &format!("x_iqr_type{t}"),
+                iqr(&x, Some(t)).unwrap(),
+                Tol::coef(28),
+            );
+        }
+        check.finish();
+        assert_eq!(iqr(&x, None).unwrap(), iqr(&x, Some(7)).unwrap());
+    }
 
-        // R uses type 7 quantiles by default
-        let expected = 8.0;
-        assert!(
-            (result - expected).abs() < 1.0,
-            "IQR mismatch: Rust={:.6}, R={:.6}",
-            result,
-            expected
+    #[test]
+    fn test_quantile_rejects_type_0_and_12() {
+        let (_case, x, _) = sample("stat_quantile_types");
+        for t in [0, 10, 12, usize::MAX] {
+            for m in [
+                spec_message(quantile(&x, 0.25, t)),
+                spec_message(iqr(&x, Some(t))),
+                spec_message(QuantileType::from_r(t)),
+            ] {
+                assert!(m.contains("from 1 to 9"), "type {t}: {m}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_quantile_types_1_9() {
+        let (case, x, y) = sample("stat_quantile_types");
+        let probs = case.vector("probs");
+        let s10 = one_to(10);
+        let mut check = Check::new(&case);
+        let mut seq10 = Vec::new();
+        for t in 1..=9 {
+            let qt = QuantileType::from_r(t).unwrap();
+            check.vector(
+                &format!("x_type{t}"),
+                &quantiles(&x, &probs, qt).unwrap(),
+                Tol::coef(28),
+            );
+            check.vector(
+                &format!("y_type{t}"),
+                &quantiles(&y, &probs, qt).unwrap(),
+                Tol::coef(7),
+            );
+            seq10.push(quantile_sorted(&s10, 0.25, QuantileType::ALL[t - 1]));
+        }
+        check.vector("seq10_q25", &seq10, Tol::coef(10));
+        check.finish();
+    }
+
+    /// Types 4-9 at p = (k - a)/(n + 1 - a - b), where a + p (n + 1 - a - b) lands on k only up
+    /// to rounding; R's 4 * eps fuzz picks the order statistic k. Exact: the answer is a data
+    /// value.
+    #[test]
+    fn test_validate_quantile_fuzz_rule() {
+        let (case, x, _) = sample("stat_quantile_types");
+        let mut check = Check::new(&case);
+        for (t, qt) in [
+            (4, QuantileType::T4),
+            (5, QuantileType::T5),
+            (6, QuantileType::T6),
+            (8, QuantileType::T8),
+            (9, QuantileType::T9),
+        ] {
+            let probs = case.vector(&format!("fuzz_type{t}_probs"));
+            check.vector(
+                &format!("x_fuzz_type{t}"),
+                &quantiles(&x, &probs, qt).unwrap(),
+                Tol::exact(),
+            );
+        }
+        // Seven values of -1e20 below 1..21: with the fuzz, type 9 at this p is x_(8) = 1;
+        // without it (j = 7, h = 1 - 9e-16) the result would be -88816.841970012523.
+        let mut gap = vec![-1e20; 7];
+        gap.extend(one_to(21));
+        let p = case.vector("gap_type9_p")[0];
+        check.scalar(
+            "gap_type9_q",
+            quantile_sorted(&gap, p, QuantileType::T9),
+            Tol::exact(),
         );
+        check.finish();
+    }
+
+    #[test]
+    fn test_quantile_type_from_r_round_trip() {
+        for t in 1..=9 {
+            assert_eq!(QuantileType::from_r(t).unwrap().r_type(), t);
+        }
+        assert_eq!(QuantileType::default(), QuantileType::T7);
+        assert_eq!(QuantileType::ALL.len(), 9);
+    }
+
+    #[test]
+    fn test_quantiles_refuses_nan_and_bad_probabilities() {
+        let (_case, x, _) = sample("stat_quantile_types");
+        let t7 = QuantileType::T7;
+        assert!(spec_message(quantiles(&[1.0, f64::NAN], &[0.5], t7)).contains("NaN"));
+        for p in [-0.1, 1.1, f64::NAN] {
+            let m = spec_message(quantiles(&x, &[p], t7));
+            assert!(m.contains("probabilities"), "{p}: {m}");
+        }
+        assert!(matches!(
+            quantiles(&[], &[0.5], t7),
+            Err(EconError::EmptyDataset)
+        ));
+        assert!(quantile_sorted(&[], 0.5, t7).is_nan());
+        assert_eq!(quantile_sorted(&[3.0], 0.7, QuantileType::T4), 3.0);
+        // R: quantile(c(1, Inf), c(0, 0.5, 1)) is 1, Inf, Inf
+        assert_eq!(
+            quantiles(&[1.0, f64::INFINITY], &[0.0, 0.5, 1.0], t7).unwrap(),
+            vec![1.0, f64::INFINITY, f64::INFINITY]
+        );
+    }
+
+    fn fivenum_vec(f: &FivenumResult) -> Vec<f64> {
+        vec![f.minimum, f.lower_hinge, f.median, f.upper_hinge, f.maximum]
+    }
+
+    #[test]
+    fn test_validate_fivenum() {
+        let (case, x, y) = sample("stat_quantile_types");
+        Check::new(&case)
+            .vector(
+                "x_fivenum",
+                &fivenum_vec(&fivenum(&x).unwrap()),
+                Tol::coef(28),
+            )
+            .vector(
+                "y_fivenum",
+                &fivenum_vec(&fivenum(&y).unwrap()),
+                Tol::coef(7),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_boxplot_stats() {
+        let (case, x, y) = sample("stat_quantile_types");
+        let b = boxplot_stats(&x, 1.5).unwrap();
+        let b05 = boxplot_stats(&x, 0.5).unwrap();
+        let by = boxplot_stats(&y, 1.5).unwrap();
+        let b62 = boxplot_stats(&[1.0, 7.0, 12.0, 15.0, 15.0, 16.0, 18.0, 18.0], 1.5).unwrap();
+        let b0 = boxplot_stats(&x, 0.0).unwrap();
+        Check::new(&case)
+            .vector("x_boxplot_stats", &b.stats, Tol::coef(28))
+            .scalar("x_boxplot_n", b.n as f64, Tol::exact())
+            .scalar("x_boxplot_n_out", b.out.len() as f64, Tol::exact())
+            .vector("x_boxplot05_stats", &b05.stats, Tol::coef(28))
+            .vector("x_boxplot05_out", &b05.out, Tol::exact())
+            .vector("y_boxplot_stats", &by.stats, Tol::coef(7))
+            .scalar("y_boxplot_n_out", by.out.len() as f64, Tol::exact())
+            .vector("data62_boxplot_stats", &b62.stats, Tol::coef(8))
+            .scalar("data62_boxplot_n_out", b62.out.len() as f64, Tol::exact())
+            .vector("x_boxplot_stats", &b0.stats, Tol::coef(28))
+            .finish();
+        assert!(b0.out.is_empty());
+        assert_eq!(boxplot_stats(&[x[0], f64::NAN, x[1]], 1.5).unwrap().n, 2);
+    }
+
+    #[test]
+    fn test_boxplot_stats_rejects_bad_coef_and_empty() {
+        for coef in [-1.0, f64::NAN, f64::INFINITY] {
+            let m = spec_message(boxplot_stats(&[1.0, 2.0, 3.0], coef));
+            assert!(m.contains("coef"), "{coef}: {m}");
+        }
+        assert!(matches!(
+            boxplot_stats(&[], 1.5),
+            Err(EconError::EmptyDataset)
+        ));
+        assert!(matches!(
+            boxplot_stats(&[f64::NAN], 1.5),
+            Err(EconError::EmptyDataset)
+        ));
+    }
+
+    #[test]
+    fn test_validate_percentile_interval() {
+        let (case, x, y) = sample("stat_quantile_types");
+        let mut check = Check::new(&case);
+        for (lv, tag) in [(0.95, "95"), (0.9, "90"), (0.5, "50")] {
+            let (a, b) = percentile_interval(&x, lv).unwrap();
+            check.vector(&format!("x_pct_{tag}"), &[a, b], Tol::coef(28));
+            let (a, b) = percentile_interval(&y, lv).unwrap();
+            check.vector(&format!("y_pct_{tag}"), &[a, b], Tol::coef(7));
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_percentile_interval_rejects_bad_level_and_nan() {
+        for lv in [0.0, 1.0, 95.0, f64::NAN] {
+            let m = spec_message(percentile_interval(&[1.0, 2.0, 3.0], lv));
+            assert!(m.contains("level"), "{lv}: {m}");
+        }
+        assert!(spec_message(percentile_interval(&[1.0, f64::NAN], 0.95)).contains("NaN"));
+        assert!(matches!(
+            percentile_interval(&[], 0.95),
+            Err(EconError::EmptyDataset)
+        ));
     }
 
     #[test]
@@ -1252,5 +1696,33 @@ mod tests {
             "Density should integrate to ~1, got {:.4}",
             integral
         );
+    }
+
+    #[test]
+    fn test_density_kernel_parses_aliases_and_rejects_unknown() {
+        for (s, k) in [
+            ("Gaussian", DensityKernel::Gaussian),
+            ("normal", DensityKernel::Gaussian),
+            (" NORMAL ", DensityKernel::Gaussian),
+            ("uniform", DensityKernel::Rectangular),
+            ("Rectangular", DensityKernel::Rectangular),
+            ("quartic", DensityKernel::Biweight),
+            ("Epanechnikov", DensityKernel::Epanechnikov),
+            ("triangular", DensityKernel::Triangular),
+            ("cosine", DensityKernel::Cosine),
+        ] {
+            assert_eq!(s.parse::<DensityKernel>().unwrap(), k, "{s:?}");
+        }
+        assert_eq!(
+            spec_message("optcosine".parse::<DensityKernel>()),
+            "unknown kernel 'optcosine'; expected one of: gaussian, epanechnikov, rectangular, \
+             triangular, biweight, cosine"
+        );
+        assert_eq!(DensityKernel::choices().validate(), Ok(()));
+        assert_eq!(DensityKernel::Biweight.to_string(), "biweight");
+        assert!(matches!(
+            run_density(&[1.0, 2.0, 3.5, 4.0], Some(0.5), "bogus", Some(16)),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 }
