@@ -249,13 +249,12 @@ impl AnalyticsServer {
             }
             _ => {
                 // Periodogram method
-                let config = SpectrumConfig {
-                    spans: request.spans.clone(),
-                    taper: request.taper.unwrap_or(0.1),
-                    detrend: request.detrend.unwrap_or(true),
-                    demean: false,
-                    pad_ratio: 0.0,
-                };
+                let mut config = SpectrumConfig::default();
+                config.spans = request.spans.clone();
+                config.taper = request.taper.unwrap_or(0.1);
+                config.detrend = request.detrend.unwrap_or(true);
+                config.demean = false;
+                config.pad_ratio = 0.0;
 
                 match run_spectrum(dataset, &request.column, config) {
                     Ok(r) => r,
@@ -1004,13 +1003,12 @@ impl AnalyticsServer {
         };
 
         // Build config
-        let config = ArConfig {
-            aic: request.aic.unwrap_or(true),
-            order_max: request.order_max,
-            order: request.order,
-            method,
-            demean: request.demean.unwrap_or(true),
-        };
+        let mut config = ArConfig::default();
+        config.aic = request.aic.unwrap_or(true);
+        config.order_max = request.order_max;
+        config.order = request.order;
+        config.method = method;
+        config.demean = request.demean.unwrap_or(true);
 
         // Fit AR model
         let result = match ar(&x, config) {

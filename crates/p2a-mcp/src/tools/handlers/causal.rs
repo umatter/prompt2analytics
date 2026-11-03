@@ -265,13 +265,12 @@ impl AnalyticsServer {
         let alpha = 1.0 - request.confidence_level.unwrap_or(0.95);
 
         // Build config
-        let config = BPBoundsConfig {
-            monotonicity: request.monotonicity.unwrap_or(false),
-            bootstrap_ci: request.bootstrap_ci.unwrap_or(true),
-            n_bootstrap: request.n_bootstrap.unwrap_or(1000),
-            alpha,
-            seed: request.seed,
-        };
+        let mut config = BPBoundsConfig::default();
+        config.monotonicity = request.monotonicity.unwrap_or(false);
+        config.bootstrap_ci = request.bootstrap_ci.unwrap_or(true);
+        config.n_bootstrap = request.n_bootstrap.unwrap_or(1000);
+        config.alpha = alpha;
+        config.seed = request.seed;
 
         // Run Balke-Pearl bounds
         let result = match run_bp_bounds(&z.view(), &d.view(), &y.view(), config) {
@@ -493,12 +492,11 @@ impl AnalyticsServer {
         };
 
         // Build config
-        let config = EtwfeConfig {
-            tref: None,
-            gref: None,
-            cgroup,
-            anticipation: 0,
-        };
+        let mut config = EtwfeConfig::default();
+        config.tref = None;
+        config.gref = None;
+        config.cgroup = cgroup;
+        config.anticipation = 0;
 
         // Parse controls
         let control_refs: Option<Vec<&str>> = request
@@ -550,13 +548,12 @@ impl AnalyticsServer {
             _ => Estimand::ATE,
         };
 
-        let config = IpwConfig {
-            trim: request.trim.unwrap_or(0.05),
-            estimand,
-            bootstrap: request.bootstrap.unwrap_or(999),
-            normalized: true,
-            seed: None,
-        };
+        let mut config = IpwConfig::default();
+        config.trim = request.trim.unwrap_or(0.05);
+        config.estimand = estimand;
+        config.bootstrap = request.bootstrap.unwrap_or(999);
+        config.normalized = true;
+        config.seed = None;
 
         let result = match run_ipw_treatment(
             dataset,
@@ -609,13 +606,12 @@ impl AnalyticsServer {
             _ => Estimand::ATE,
         };
 
-        let config = DoublyRobustConfig {
-            method,
-            trim: request.trim.unwrap_or(0.05),
-            estimand,
-            bootstrap: request.bootstrap.unwrap_or(999),
-            seed: None,
-        };
+        let mut config = DoublyRobustConfig::default();
+        config.method = method;
+        config.trim = request.trim.unwrap_or(0.05);
+        config.estimand = estimand;
+        config.bootstrap = request.bootstrap.unwrap_or(999);
+        config.seed = None;
 
         let result = match run_doubly_robust(
             dataset,
@@ -755,12 +751,11 @@ impl AnalyticsServer {
             _ => CbpsMethod::ExactBalance,
         };
 
-        let config = CbpsConfig {
-            method,
-            balance_threshold: request.balance_threshold.unwrap_or(0.1),
-            tolerance: 1e-8,
-            max_iter: 100,
-        };
+        let mut config = CbpsConfig::default();
+        config.method = method;
+        config.balance_threshold = request.balance_threshold.unwrap_or(0.1);
+        config.tolerance = 1e-8;
+        config.max_iter = 100;
 
         let result = match run_cbps(dataset, &request.treatment, &cov_refs, Some(config)) {
             Ok(r) => r,
@@ -806,15 +801,14 @@ impl AnalyticsServer {
             _ => WeightEstimand::ATE,
         };
 
-        let config = WeightItConfig {
-            method,
-            estimand,
-            intercept: true,
-            stabilize: request.stabilize.unwrap_or(false),
-            trim_quantile: request.trim_quantile.unwrap_or(1.0),
-            max_iter: 200,
-            tolerance: 1e-8,
-        };
+        let mut config = WeightItConfig::default();
+        config.method = method;
+        config.estimand = estimand;
+        config.intercept = true;
+        config.stabilize = request.stabilize.unwrap_or(false);
+        config.trim_quantile = request.trim_quantile.unwrap_or(1.0);
+        config.max_iter = 200;
+        config.tolerance = 1e-8;
 
         let result = match weightit(dataset, &request.treatment, &cov_refs, config) {
             Ok(r) => r,
@@ -886,15 +880,14 @@ impl AnalyticsServer {
             _ => SBWEstimand::ATT,
         };
 
-        let config = SBWConfig {
-            estimand,
-            balance_tol: request.balance_tol.unwrap_or(0.0),
-            min_weight: request.min_weight.unwrap_or(0.0),
-            normalize_to_n: true,
-            max_iter: 1000,
-            tolerance: 1e-8,
-            balance_penalty: request.balance_penalty.unwrap_or(1000.0),
-        };
+        let mut config = SBWConfig::default();
+        config.estimand = estimand;
+        config.balance_tol = request.balance_tol.unwrap_or(0.0);
+        config.min_weight = request.min_weight.unwrap_or(0.0);
+        config.normalize_to_n = true;
+        config.max_iter = 1000;
+        config.tolerance = 1e-8;
+        config.balance_penalty = request.balance_penalty.unwrap_or(1000.0);
 
         let result = match sbw(dataset, &request.treatment, &cov_refs, config) {
             Ok(r) => r,
@@ -940,16 +933,15 @@ impl AnalyticsServer {
             _ => TwangEstimand::ATT,
         };
 
-        let config = TwangConfig {
-            n_trees: request.n_trees.unwrap_or(3000),
-            shrinkage: request.shrinkage.unwrap_or(0.01),
-            stop_method,
-            estimand,
-            balance_threshold: request.balance_threshold.unwrap_or(0.1),
-            min_iterations: 100,
-            interaction_depth: 1,
-            min_node_size: 10,
-        };
+        let mut config = TwangConfig::default();
+        config.n_trees = request.n_trees.unwrap_or(3000);
+        config.shrinkage = request.shrinkage.unwrap_or(0.01);
+        config.stop_method = stop_method;
+        config.estimand = estimand;
+        config.balance_threshold = request.balance_threshold.unwrap_or(0.1);
+        config.min_iterations = 100;
+        config.interaction_depth = 1;
+        config.min_node_size = 10;
 
         let result = match run_twang(dataset, &request.treatment, &cov_refs, Some(config)) {
             Ok(r) => r,
@@ -1051,13 +1043,12 @@ impl AnalyticsServer {
         let ps_lower = request.ps_lower.unwrap_or(0.01);
         let ps_upper = request.ps_upper.unwrap_or(0.99);
 
-        let config = TmleConfig {
-            q_model,
-            g_model: GModel::Logistic,
-            truncate_ps: (ps_lower, ps_upper),
-            max_iter: 100,
-            tolerance: 1e-8,
-        };
+        let mut config = TmleConfig::default();
+        config.q_model = q_model;
+        config.g_model = GModel::Logistic;
+        config.truncate_ps = (ps_lower, ps_upper);
+        config.max_iter = 100;
+        config.tolerance = 1e-8;
 
         let result = match tmle(
             dataset,
@@ -1294,17 +1285,16 @@ impl AnalyticsServer {
         let seed = request.seed.or(*global_seed);
 
         // Build config
-        let config = GFormulaConfig {
-            n_simulations: request.n_simulations.unwrap_or(1000),
-            time_points: t_max,
-            intervention,
-            outcome_type,
-            n_bootstrap: request.n_bootstrap.unwrap_or(200),
-            seed,
-            confidence_level: request.confidence_level.unwrap_or(0.95),
-            max_iter: 100,
-            tolerance: 1e-8,
-        };
+        let mut config = GFormulaConfig::default();
+        config.n_simulations = request.n_simulations.unwrap_or(1000);
+        config.time_points = t_max;
+        config.intervention = intervention;
+        config.outcome_type = outcome_type;
+        config.n_bootstrap = request.n_bootstrap.unwrap_or(200);
+        config.seed = seed;
+        config.confidence_level = request.confidence_level.unwrap_or(0.95);
+        config.max_iter = 100;
+        config.tolerance = 1e-8;
 
         // Run g-formula
         let result = match run_gformula(&gformula_data, config) {
@@ -1336,11 +1326,10 @@ impl AnalyticsServer {
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
-        let config = MediationConfig {
-            bootstrap: request.bootstrap.unwrap_or(999),
-            trim: request.trim.unwrap_or(0.05),
-            seed: None,
-        };
+        let mut config = MediationConfig::default();
+        config.bootstrap = request.bootstrap.unwrap_or(999);
+        config.trim = request.trim.unwrap_or(0.05);
+        config.seed = None;
 
         let result = match run_mediation_analysis(
             dataset,
@@ -1394,14 +1383,13 @@ impl AnalyticsServer {
         };
 
         let n_bootstrap = request.n_bootstrap.unwrap_or(1000);
-        let config = MedflexConfig {
-            allow_interaction: request.allow_interaction.unwrap_or(true),
-            bootstrap_ci: n_bootstrap > 0,
-            n_bootstrap,
-            confidence_level: request.confidence_level.unwrap_or(0.95),
-            scale,
-            seed: None,
-        };
+        let mut config = MedflexConfig::default();
+        config.allow_interaction = request.allow_interaction.unwrap_or(true);
+        config.bootstrap_ci = n_bootstrap > 0;
+        config.n_bootstrap = n_bootstrap;
+        config.confidence_level = request.confidence_level.unwrap_or(0.95);
+        config.scale = scale;
+        config.seed = None;
 
         let result: MedflexResult = match run_medflex_dataset(
             dataset,
@@ -1475,16 +1463,15 @@ impl AnalyticsServer {
             _ => VOptimization::DataDriven, // default
         };
 
-        let config = SynthConfig {
-            treatment_time: request.treatment_time,
-            treated_unit: request.treated_unit.clone(),
-            optimization_window: request.optimization_window,
-            v_method,
-            tolerance: request.tolerance.unwrap_or(1e-6),
-            max_iter: request.max_iter.unwrap_or(1000),
-            run_placebos: request.run_placebos.unwrap_or(false),
-            weight_threshold: request.weight_threshold.unwrap_or(0.001),
-        };
+        let mut config = SynthConfig::default();
+        config.treatment_time = request.treatment_time;
+        config.treated_unit = request.treated_unit.clone();
+        config.optimization_window = request.optimization_window;
+        config.v_method = v_method;
+        config.tolerance = request.tolerance.unwrap_or(1e-6);
+        config.max_iter = request.max_iter.unwrap_or(1000);
+        config.run_placebos = request.run_placebos.unwrap_or(false);
+        config.weight_threshold = request.weight_threshold.unwrap_or(0.001);
 
         let result = match run_synthetic_control(
             dataset,
@@ -2043,19 +2030,18 @@ impl AnalyticsServer {
             RdMultiBandwidth::PerCutoffOptimal
         };
 
-        let config = RdMultiConfig {
-            cutoffs: request.cutoffs.clone(),
-            bandwidth,
-            kernel,
-            p: request.p.unwrap_or(1),
-            q: None,
-            pooled: request.pooled.unwrap_or(true),
-            pooling_weights,
-            bwselect: BandwidthMethod::MseRd,
-            vce,
-            level: request.level.unwrap_or(0.95),
-            test_heterogeneity: request.test_heterogeneity.unwrap_or(true),
-        };
+        let mut config = RdMultiConfig::default();
+        config.cutoffs = request.cutoffs.clone();
+        config.bandwidth = bandwidth;
+        config.kernel = kernel;
+        config.p = request.p.unwrap_or(1);
+        config.q = None;
+        config.pooled = request.pooled.unwrap_or(true);
+        config.pooling_weights = pooling_weights;
+        config.bwselect = BandwidthMethod::MseRd;
+        config.vce = vce;
+        config.level = request.level.unwrap_or(0.95);
+        config.test_heterogeneity = request.test_heterogeneity.unwrap_or(true);
 
         let result: RdMultiResult = match run_rd_multi_dataset(
             dataset,
@@ -2432,17 +2418,16 @@ impl AnalyticsServer {
             _ => SEMethod::Bootstrap,
         };
 
-        let config = StdRegConfig {
-            model_type,
-            estimand,
-            se_method,
-            n_bootstrap: request.n_bootstrap.unwrap_or(999),
-            confidence_level: request.confidence_level.unwrap_or(0.95),
-            include_interactions: request.interactions.unwrap_or(false),
-            seed: None,
-            max_iter: 100,
-            tolerance: 1e-8,
-        };
+        let mut config = StdRegConfig::default();
+        config.model_type = model_type;
+        config.estimand = estimand;
+        config.se_method = se_method;
+        config.n_bootstrap = request.n_bootstrap.unwrap_or(999);
+        config.confidence_level = request.confidence_level.unwrap_or(0.95);
+        config.include_interactions = request.interactions.unwrap_or(false);
+        config.seed = None;
+        config.max_iter = 100;
+        config.tolerance = 1e-8;
 
         let result = match run_stdreg(
             dataset,

@@ -1557,12 +1557,11 @@ impl AnalyticsServer {
 
         let mu = request.mu.unwrap_or(0.0);
         let paired = request.paired.unwrap_or(false);
-        let config = WilcoxonConfig {
-            exact: request.exact,
-            correct: request.correct.unwrap_or(true),
-            conf_int: request.conf_int.unwrap_or(false),
-            conf_level: request.conf_level.unwrap_or(0.95),
-        };
+        let mut config = WilcoxonConfig::default();
+        config.exact = request.exact;
+        config.correct = request.correct.unwrap_or(true);
+        config.conf_int = request.conf_int.unwrap_or(false);
+        config.conf_level = request.conf_level.unwrap_or(0.95);
 
         match wilcoxon_test(
             dataset,

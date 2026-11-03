@@ -1107,15 +1107,14 @@ impl AnalyticsServer {
             _ => EffectEstimationMethod::Matching,
         };
 
-        let config = HetTxConfig {
-            n_permutations: request.n_permutations.unwrap_or(1000),
-            test_statistic,
-            decompose: request.decompose.unwrap_or(true),
-            effect_method,
-            n_neighbors: request.n_neighbors.unwrap_or(3),
-            seed,
-            compute_importance: true,
-        };
+        let mut config = HetTxConfig::default();
+        config.n_permutations = request.n_permutations.unwrap_or(1000);
+        config.test_statistic = test_statistic;
+        config.decompose = request.decompose.unwrap_or(true);
+        config.effect_method = effect_method;
+        config.n_neighbors = request.n_neighbors.unwrap_or(3);
+        config.seed = seed;
+        config.compute_importance = true;
 
         let cov_refs: Vec<&str> = request
             .covariates
@@ -1525,21 +1524,20 @@ impl AnalyticsServer {
         let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Build configuration
-        let config = CtreeConfig {
-            mincriterion: request.mincriterion.unwrap_or(0.95),
-            minsplit: request.minsplit.unwrap_or(20),
-            minbucket: request.minbucket.unwrap_or(7),
-            maxdepth: request.maxdepth.unwrap_or(0),
-            teststat: request
-                .teststat
-                .clone()
-                .unwrap_or_else(|| "quadratic".to_string()),
-            testtype: request
-                .testtype
-                .clone()
-                .unwrap_or_else(|| "bonferroni".to_string()),
-            seed: request.seed,
-        };
+        let mut config = CtreeConfig::default();
+        config.mincriterion = request.mincriterion.unwrap_or(0.95);
+        config.minsplit = request.minsplit.unwrap_or(20);
+        config.minbucket = request.minbucket.unwrap_or(7);
+        config.maxdepth = request.maxdepth.unwrap_or(0);
+        config.teststat = request
+            .teststat
+            .clone()
+            .unwrap_or_else(|| "quadratic".to_string());
+        config.testtype = request
+            .testtype
+            .clone()
+            .unwrap_or_else(|| "bonferroni".to_string());
+        config.seed = request.seed;
 
         let feature_refs: Vec<&str> = request.features.iter().map(|s| s.as_str()).collect();
 
@@ -1658,17 +1656,16 @@ impl AnalyticsServer {
         };
 
         // Build config
-        let config = MboostConfig {
-            mstop: request.mstop.unwrap_or(100),
-            nu: request.nu.unwrap_or(0.1),
-            family,
-            base_learner,
-            tree_depth: request.tree_depth.unwrap_or(1),
-            min_samples_split: request.min_samples_split.unwrap_or(5),
-            cv_folds: request.cv_folds,
-            center: request.center.unwrap_or(true),
-            seed: request.seed,
-        };
+        let mut config = MboostConfig::default();
+        config.mstop = request.mstop.unwrap_or(100);
+        config.nu = request.nu.unwrap_or(0.1);
+        config.family = family;
+        config.base_learner = base_learner;
+        config.tree_depth = request.tree_depth.unwrap_or(1);
+        config.min_samples_split = request.min_samples_split.unwrap_or(5);
+        config.cv_folds = request.cv_folds;
+        config.center = request.center.unwrap_or(true);
+        config.seed = request.seed;
 
         // Convert column names to &str
         let x_cols: Vec<&str> = request.x_cols.iter().map(|s| s.as_str()).collect();

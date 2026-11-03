@@ -49,10 +49,9 @@ impl AnalyticsServer {
                 ))]));
             }
         };
-        let config = KmConfig {
-            conf_level: request.confidence_level.unwrap_or(0.95),
-            conf_type,
-        };
+        let mut config = KmConfig::default();
+        config.conf_level = request.confidence_level.unwrap_or(0.95);
+        config.conf_type = conf_type;
 
         let results = match run_kaplan_meier_with(
             dataset,
@@ -128,12 +127,11 @@ impl AnalyticsServer {
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
-        let config = CoxConfig {
-            ties,
-            tolerance: request.tolerance.unwrap_or(1e-9),
-            max_iter: request.max_iter.unwrap_or(100),
-            robust_se: false,
-        };
+        let mut config = CoxConfig::default();
+        config.ties = ties;
+        config.tolerance = request.tolerance.unwrap_or(1e-9);
+        config.max_iter = request.max_iter.unwrap_or(100);
+        config.robust_se = false;
 
         let result = match run_cox_ph(
             dataset,
@@ -178,11 +176,10 @@ impl AnalyticsServer {
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
-        let config = AftConfig {
-            distribution,
-            tolerance: request.tolerance.unwrap_or(1e-9),
-            max_iter: request.max_iter.unwrap_or(100),
-        };
+        let mut config = AftConfig::default();
+        config.distribution = distribution;
+        config.tolerance = request.tolerance.unwrap_or(1e-9);
+        config.max_iter = request.max_iter.unwrap_or(100);
 
         let result = match run_aft(
             dataset,

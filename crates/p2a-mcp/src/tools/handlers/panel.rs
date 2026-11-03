@@ -38,7 +38,11 @@ fn panel_config(vcov: Option<&str>) -> Result<PanelConfig, String> {
         return Ok(PanelConfig::default());
     };
     s.parse::<PanelVcov>()
-        .map(|vcov| PanelConfig { vcov })
+        .map(|vcov| {
+            let mut config = PanelConfig::default();
+            config.vcov = vcov;
+            config
+        })
         .map_err(|_| {
             format!(
                 "Invalid vcov '{}': expected one of: classical, cluster, cluster-hc0, \
@@ -255,14 +259,13 @@ impl AnalyticsServer {
             _ => GmmStep::TwoStep, // Default
         };
 
-        let config = GmmConfig {
-            transform,
-            step,
-            max_lag: request.max_lag,
-            min_lag: request.min_lag.unwrap_or(2),
-            collapse: request.collapse.unwrap_or(false),
-            robust: request.robust.unwrap_or(true),
-        };
+        let mut config = GmmConfig::default();
+        config.transform = transform;
+        config.step = step;
+        config.max_lag = request.max_lag;
+        config.min_lag = request.min_lag.unwrap_or(2);
+        config.collapse = request.collapse.unwrap_or(false);
+        config.robust = request.robust.unwrap_or(true);
 
         let result: GmmResult = match run_gmm(
             dataset,
@@ -362,12 +365,11 @@ impl AnalyticsServer {
             _ => PanelModel::Intercept, // Default
         };
 
-        let config = PanelUnitRootConfig {
-            test_type,
-            model,
-            lags: request.lags,
-            max_lags: None,
-        };
+        let mut config = PanelUnitRootConfig::default();
+        config.test_type = test_type;
+        config.model = model;
+        config.lags = request.lags;
+        config.max_lags = None;
 
         let result = match run_panel_unit_root(
             dataset,
@@ -406,11 +408,10 @@ impl AnalyticsServer {
         let fe_refs: Vec<&str> = request.fe.iter().map(|s| s.as_str()).collect();
 
         // Build config from optional parameters
-        let config = HdfeConfig {
-            tolerance: request.tolerance.unwrap_or(1e-8),
-            max_iterations: request.max_iterations.unwrap_or(10000),
-            accelerate: true,
-        };
+        let mut config = HdfeConfig::default();
+        config.tolerance = request.tolerance.unwrap_or(1e-8);
+        config.max_iterations = request.max_iterations.unwrap_or(10000);
+        config.accelerate = true;
 
         // Parse SE type
         let cov_type = match request.se_type.as_deref() {
