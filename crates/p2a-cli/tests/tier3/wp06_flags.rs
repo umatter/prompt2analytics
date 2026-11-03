@@ -472,3 +472,86 @@ fn test_cli_script_export_comments_flag() {
     assert_eq!(commands(&off).len(), 2);
     assert!(off.starts_with("#!/bin/bash\n# p2a analytics script\n"));
 }
+
+fn memory_warnings(out: &std::process::Output) -> Vec<String> {
+    assert_no_panic(out, "max-memory");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stderr_lines(out)
+        .into_iter()
+        .filter(|l| l.starts_with("Warning: estimated dataset memory"))
+        .collect()
+}
+
+/// DATA-30: one stderr line per invocation while the session's datasets exceed --max-memory.
+#[test]
+fn test_cli_max_memory_warns_once() {
+    let s = temp_session();
+    let csv = s.dir().join("big.csv");
+    let mut body = String::from("x,y\n");
+    for i in 0..70_000 {
+        // two Float64 columns: 1,232,000 estimated bytes
+        body.push_str(&format!("{i}.5,{}.25\n", 2 * i));
+    }
+    std::fs::write(&csv, body).unwrap();
+    let csv = csv.to_str().unwrap();
+    let line = |mb: &str| {
+        format!(
+            "Warning: estimated dataset memory {mb} exceeds the limit of 1.00 MB (--max-memory 1)"
+        )
+    };
+    assert_eq!(
+        memory_warnings(&s.run(&["--max-memory", "1", "data", "load", csv, "--name", "big"])),
+        [line("1.17 MB")]
+    );
+    // the reloaded dataset already exceeds the limit; storing a second one does not warn again
+    assert_eq!(
+        memory_warnings(&s.run(&["--max-memory", "1", "data", "load", csv, "--name", "big2"])),
+        [line("1.17 MB")]
+    );
+    assert_eq!(
+        memory_warnings(&s.run(&["--max-memory", "1", "data", "list"])),
+        [line("2.35 MB")]
+    );
+    assert!(
+        memory_warnings(&s.run(&["data", "list"])).is_empty(),
+        "0 = no limit (the default)"
+    );
+    assert!(memory_warnings(&s.run(&["--max-memory", "3", "data", "list"])).is_empty());
+}
+
+#[test]
+fn test_cli_max_memory_without_session() {
+    let out = p2a()
+        .args([
+            "--max-memory",
+            "1",
+            "data",
+            "generate",
+            "-n",
+            "10",
+            "-s",
+            "1",
+            "-c",
+            r#"[{"name": "x", "distribution": {"type": "normal", "mean": 0, "std": 1}}]"#,
+        ])
+        .output()
+        .unwrap();
+    assert_no_panic(&out, "max-memory without session");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stderr_lines(&out)
+            .iter()
+            .any(|l| l
+                == "Warning: --max-memory has no effect without --session (no datasets are kept)"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
