@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "stat_constroptim_legacy",
+  "area": "stats/constroptim",
+  "method": "constrOptim on constroptim.rs's four legacy problems (STAT-62)",
+  "reference": "stats::constrOptim (mu = 1e-4, outer.eps = 1e-5; BFGS with grad, Nelder-Mead without)",
+  "call": "constrOptim(theta, f, grad, ui, ci)",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "quadratic_par": [0.500000000151549, 0.500000000151549],
+    "quadratic_value": 0.50000000030309799,
+    "quadratic_convergence": 0,
+    "quadratic_outer_iterations": 3,
+    "lp3_par": [0.49999999831081493, 0.49999999831081493],
+    "lp3_value": -0.99999999662162986,
+    "lp3_convergence": 0,
+    "lp3_outer_iterations": 3,
+    "nelder_mead_par": [1.0000008855605316, 2.0000000235991697],
+    "nelder_mead_value": 7.8477437588934487e-13,
+    "nelder_mead_convergence": 0,
+    "nelder_mead_outer_iterations": 3,
+    "binding_par": [1.0000000025631852],
+    "binding_value": 1.0000000051263704,
+    "binding_convergence": 0,
+    "binding_outer_iterations": 3
+  }
+}

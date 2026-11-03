@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "stat_pairwise_legacy",
+  "area": "stats/multiple_comparisons",
+  "method": "pairwise.t.test and pairwise.wilcox.test on pairwise.rs's legacy data (STAT-62)",
+  "reference": "stats::pairwise.t.test; stats::pairwise.wilcox.test",
+  "call": "pairwise.t.test(x, g, pool.sd, p.adjust.method)",
+  "dataset": "validation/datasets/generated/pairwise_legacy.csv",
+  "datasets": ["validation/datasets/generated/pairwise_legacy.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "a_t_pooled_none": [4.754648736160668e-10, 7.0953017916741439e-14, 1.3947885992511475e-10],
+    "a_t_pooled_holm": [4.754648736160668e-10, 2.1285905375022432e-13, 2.789577198502295e-10],
+    "a_t_welch_none": [9.3088309663717483e-08, 2.5252880786093754e-10, 4.0739183286749267e-08],
+    "a_t_pooled_hommel": [4.754648736160668e-10, 2.1285905375022432e-13, 2.789577198502295e-10],
+    "a_w_normal_none": [0.012185780355344811, 0.012185780355344811, 0.012185780355344811],
+    "b_w_exact_none": [0.10000000000000001],
+    "c_w_holm": [0.023809523809523808, 0.023809523809523808, 0.023809523809523808],
+    "c_w_none": [0.0079365079365079361, 0.0079365079365079361, 0.0079365079365079361]
+  }
+}

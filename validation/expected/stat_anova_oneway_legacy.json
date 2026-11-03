@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "stat_anova_oneway_legacy",
+  "area": "stats/anova",
+  "method": "aov on anova.rs's one-way fertilizer data (legacy test, STAT-62)",
+  "reference": "stats::aov; summary.aov; tapply(mean, sd, min, max)",
+  "call": "aov(yield ~ fertilizer, data = d)",
+  "dataset": "validation/datasets/generated/anova_oneway_legacy.csv",
+  "datasets": ["validation/datasets/generated/anova_oneway_legacy.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "fertilizer_ss": 250.01200000000017,
+    "fertilizer_df": 2,
+    "fertilizer_ms": 125.00600000000009,
+    "fertilizer_f": 400.66025641025595,
+    "fertilizer_p": 1.0316137484534604e-11,
+    "Residuals_ss": 3.7440000000000069,
+    "Residuals_df": 12,
+    "Residuals_ms": 0.31200000000000055,
+    "eta_squared": 0.98524566906792355,
+    "ss_total": 253.75600000000017,
+    "grand_mean": 15.140000000000001,
+    "n": 15,
+    "omega_squared": 0.98157973455925185,
+    "group_length": [5, 5, 5],
+    "group_mean": [10.16, 15.1, 20.16],
+    "group_sd": [0.52249401910452531, 0.62449979983984016, 0.52249401910452531],
+    "group_min": [9.5, 14.199999999999999, 19.5],
+    "group_max": [10.800000000000001, 15.800000000000001, 20.800000000000001]
+  }
+}
