@@ -618,9 +618,12 @@ cannot be created.
 ### Running Tests
 
 ```bash
-cargo test                              # All tests
+cargo test                              # All tests (benchmark-only tests report as ignored)
 cargo test -p p2a-core                  # Core library only
 cargo test -p p2a-core -- test_validate # Validation tests
+
+# Benchmark-only tests, in a release build (docs/guides/TESTING.md lists them)
+cargo test -p p2a-core --release --no-default-features --features ci --test benchmark_ml_rust -- --ignored --nocapture
 ```
 
 ### Linting

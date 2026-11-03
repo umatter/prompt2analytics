@@ -50,10 +50,10 @@ Located in `tests/` directories. Run with:
 cargo test -p p2a-core --test '*'
 ```
 
-The p2a-core `tests/` directory includes `benchmark_ml_rust.rs` and `benchmark_fast_implementations.rs`,
-which are benchmarks and run for a long time in a debug build; use `--lib` or a named `--test` for a
-fast correctness loop. The p2a-mcp integration tests are listed in
-[p2a-mcp integration tests](#p2a-mcp-integration-tests).
+The p2a-core `tests/` directory includes `benchmark_ml_rust.rs` and `benchmark_fast_implementations.rs`. Their
+timing-only tests are `#[ignore]`d, so `cargo test` reports them as ignored (see
+[Benchmark tests](#benchmark-tests-ignored-by-default)); use `--lib` or a named `--test` for a fast correctness
+loop. The p2a-mcp integration tests are listed in [p2a-mcp integration tests](#p2a-mcp-integration-tests).
 
 The MCP-path and CLI tests of the October 2026 review's Tier 2 packages live in two `tier2` test
 binaries, `crates/p2a-mcp/tests/tier2/` and `crates/p2a-cli/tests/tier2/`, with one module per
@@ -359,6 +359,37 @@ cargo bench -p p2a-core --bench regression_benchmarks
 cargo bench -p p2a-core -- ols
 ```
 
+### Benchmark tests (ignored by default)
+
+A few timing programs are written as tests rather than `benches/` targets. They time code and
+assert nothing, so they carry `#[ignore = "benchmark; run with --release -- --ignored"]`:
+`cargo test` and CI report them as ignored instead of running them in a debug build.
+
+| Test | File | What it times |
+|------|------|---------------|
+| `benchmark_rust_ml` | `crates/p2a-core/tests/benchmark_ml_rust.rs` | kernel SVM (RBF and linear), CART and ROC/AUC at n = 1,000 to 20,000 |
+| `benchmark_roc_auc_implementations`, `benchmark_svm_implementations`, `benchmark_svm_linear`, `benchmark_xgboost_implementations`, `benchmark_mboost_implementations`, `summary_comparison` | `crates/p2a-core/tests/benchmark_fast_implementations.rs` | fast against original ROC/AUC, SVM, XGBoost and mboost; `summary_comparison` prints notes only |
+| HDBSCAN full benchmark | `crates/p2a-core/src/ml/advanced_clustering_mod/` | HDBSCAN on large synthetic data |
+
+`verify_fast_roc_accuracy` in `benchmark_fast_implementations.rs` checks the fast AUC against the
+original one and runs with the normal tests.
+
+Run the benchmarks in a release build:
+
+```bash
+cargo test -p p2a-core --release --no-default-features --features ci --test benchmark_ml_rust -- --ignored --nocapture
+cargo test -p p2a-core --release --no-default-features --features ci --test benchmark_fast_implementations -- --ignored --nocapture
+cargo test -p p2a-core --release --no-default-features --features ci --lib -- hdbscan_full_benchmark --ignored --nocapture
+```
+
+Cost: before they were ignored, CI's debug build spent 1,792.67 s on `benchmark_rust_ml` and 24.59 s on
+the seven tests of `benchmark_fast_implementations.rs` (August 2026). The kernel SVM at n = 20,000
+needs about 3.1 GB of memory; at opt-level 1 its RBF and linear fits took about 150 s each.
+
+Timing assertions follow the same rule: a test asserts wall-clock time only inside
+`if !cfg!(debug_assertions) { .. }` or after `if cfg!(debug_assertions) { return; }`, so a debug-build
+`cargo test` never depends on the machine's speed or load.
+
 ### Performance Profiling
 
 ```bash
@@ -399,6 +430,9 @@ CI does not build the `database` feature of p2a-core (duckdb-sys), the `db` feat
 p2a-mcp, `cuda`, release builds or the Dioxus desktop target; run those locally (commands above). A
 separate Security audit workflow (`.github/workflows/audit.yml`) runs `cargo audit` weekly and on
 every change to `Cargo.lock`, any `Cargo.toml` or the workflow itself.
+
+Benchmark-only tests are `#[ignore]`d, so the Test job reports them as ignored (see
+[Benchmark tests](#benchmark-tests-ignored-by-default)). No workflow measures code coverage.
 
 ## Troubleshooting
 
