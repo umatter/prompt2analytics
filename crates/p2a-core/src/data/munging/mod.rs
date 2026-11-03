@@ -8,7 +8,7 @@
 //!
 //! - [`transform`] - Core transforms: filter, select, rename, mutate, sort
 //! - [`clean`] - Data cleaning: drop_na, fill_na, deduplicate, cast (reports values that fail to convert)
-//! - [`join`] - Join operations: left/right/inner/full joins, concat
+//! - [`join`](mod@join) - Join operations: left/right/inner/full joins, concat
 //! - [`aggregate`] - Aggregation: group_by, value_counts, summarize, describe
 //! - [`reshape`] - Reshape: pivot, melt, transpose, explode, stack
 //! - [`features`] - Feature engineering: lag, lead, diff, standardize, bin, one_hot
@@ -31,13 +31,13 @@
 //! let computed = mutate(&renamed, "age_squared", MutateExpr::Function("square".into(), "age".into()))?;
 //! ```
 
-mod aggregate;
-mod clean;
-mod error;
-mod features;
-mod join;
-mod reshape;
-mod transform;
+pub mod aggregate;
+pub mod clean;
+pub mod error;
+pub mod features;
+pub mod join;
+pub mod reshape;
+pub mod transform;
 
 /// Loop iterations between two cooperative-cancellation checkpoints
 /// ([`crate::resource::checkpoint`]) in the munging loops.

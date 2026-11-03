@@ -11,16 +11,16 @@
 //! | **K-Means** | [`kmeans`] | Lloyd's algorithm with k-means++ init |
 //! | **Mini-Batch K-Means** | [`mini_batch_kmeans`] | Scalable k-means for large data |
 //! | **Trimmed K-Means** | [`trimmed_kmeans`] | Robust k-means with outlier trimming |
-//! | **K-Medoids (PAM)** | [`kmedoids`] | Partitioning Around Medoids |
+//! | **K-Medoids (PAM)** | [`kmedoids()`] | Partitioning Around Medoids |
 //! | **CLARA** | [`clara`] | K-medoids for large datasets |
 //! | **DBSCAN** | [`dbscan`] | Density-based clustering |
-//! | **HDBSCAN** | [`hdbscan`] | Hierarchical DBSCAN |
-//! | **OPTICS** | [`optics`] | Ordering points for cluster structure |
+//! | **HDBSCAN** | [`hdbscan()`] | Hierarchical DBSCAN |
+//! | **OPTICS** | [`optics()`] | Ordering points for cluster structure |
 //! | **Hierarchical** | [`hierarchical`] | Agglomerative clustering |
 //! | **AGNES** | [`agnes`] | Agglomerative nesting |
 //! | **DIANA** | [`diana`] | Divisive analysis |
 //! | **FastCluster** | [`fastcluster`] | Fast hierarchical (O(n²) memory) |
-//! | **Dynamic Tree Cut** | [`dynamic_tree_cut`] | Adaptive dendrogram cutting |
+//! | **Dynamic Tree Cut** | [`dynamic_tree_cut()`] | Adaptive dendrogram cutting |
 //! | **Spectral** | [`spectral_clustering`] | Graph Laplacian clustering |
 //! | **Affinity Propagation** | [`affinity_propagation`] | Message-passing clustering |
 //! | **Gaussian Mixture** | [`gaussian_mixture`] | EM-based GMM |
@@ -58,55 +58,54 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **BART** | [`bart`] | Bayesian Additive Regression Trees (prediction) |
-//! | **CART** | [`cart`] | Decision trees (classification/regression) |
+//! | **BART** | [`bart()`] | Bayesian Additive Regression Trees (prediction) |
+//! | **CART** | [`cart()`] | Decision trees (classification/regression) |
 //! | **Random Forest** | [`random_forest`] | CART-based ensemble |
-//! | **Gradient Boosting** | [`gbm`] | Gradient boosting machine (GBM) |
-//! | **AdaBoost** | [`adaboost`] | Adaptive boosting (M1, R2, SAMME) |
+//! | **Gradient Boosting** | [`gbm()`] | Gradient boosting machine (GBM) |
+//! | **AdaBoost** | [`adaboost()`] | Adaptive boosting (M1, R2, SAMME) |
 //! | **Linear SVM** | [`linear_svm`] | Support vector machine (SMO) |
-//! | **PPR** | [`ppr`] | Projection pursuit regression |
+//! | **PPR** | [`ppr()`] | Projection pursuit regression |
 //!
 //! ## Causal Machine Learning
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **Causal Forest** | [`causal_forest`] | Heterogeneous treatment effects (grf) |
-//! | **BART Causal** | [`bart_causal`] | Bayesian trees for causal inference |
+//! | **Causal Forest** | [`causal_forest()`] | Heterogeneous treatment effects (grf) |
+//! | **BART Causal** | [`bart_causal()`] | Bayesian trees for causal inference |
 //!
 //! ## Model Interpretability
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **ICE Curves** | [`ice_curves`] | Individual Conditional Expectation |
-//! | **LIME** | [`lime`] | Local Interpretable Model-agnostic Explanations |
-//! | **SHAP** | [`shap_values`] | SHapley Additive exPlanations |
+//! | **ICE Curves** | [`compute_ice_curves`] | Individual Conditional Expectation |
+//! | **Partial Dependence** | [`partial_dependence`] | Partial dependence of predictions on one feature |
+//! | **SHAP** | [`kernel_shap`], [`shap_tree_ensemble`] | SHapley Additive exPlanations (model-agnostic Kernel SHAP; tree ensembles) |
 //!
 //! ## Advanced Tree Methods
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **Quantile RF** | [`quantile_rf`] | Quantile regression forests |
-//! | **CTree** | [`ctree`] | Conditional inference trees |
-//! | **Boruta** | [`boruta`] | Feature selection with shadow features |
-//! | **C5.0** | [`c50`] | C5.0 decision trees |
-//! | **Cubist** | [`cubist`] | Rule-based regression |
-//! | **MARS** | [`mars`] | Multivariate adaptive regression splines |
+//! | **Quantile RF** | [`quantile_rf()`] | Quantile regression forests |
+//! | **CTree** | [`ctree()`] | Conditional inference trees |
+//! | **C5.0** | [`c50()`] | C5.0 decision trees |
+//! | **Cubist** | [`cubist()`] | Rule-based regression |
+//! | **MARS** | [`mars()`] | Multivariate adaptive regression splines |
 //!
 //! ## Association Rules
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **Apriori** | [`apriori`] | Association rule mining |
+//! | **Apriori** | [`apriori()`] | Association rule mining |
 //! | **Eclat** | [`eclat`] | Vertical data format mining |
 //!
 //! ## Gradient Boosting Methods
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **XGBoost** | [`xgboost`] | Extreme gradient boosting with L1/L2 regularization |
-//! | **LightGBM** | [`lightgbm`] | Histogram-based gradient boosting |
-//! | **MBoost** | [`mboost`] | Model-based gradient boosting framework |
-//! | **BART** | [`bart`] | Bayesian additive regression trees |
+//! | **XGBoost** | [`xgboost()`] | Extreme gradient boosting with L1/L2 regularization |
+//! | **LightGBM** | [`lightgbm()`] | Histogram-based gradient boosting |
+//! | **MBoost** | [`mboost()`] | Model-based gradient boosting framework |
+//! | **BART** | [`bart()`] | Bayesian additive regression trees |
 //!
 //! ## Missing values and column types
 //!
@@ -117,7 +116,7 @@
 //! NaN) in the target or a feature is an error naming the column. R's randomForest, gbm,
 //! kmeans and prcomp refuse NA too, and p2a's trees have no surrogate splits. The array
 //! functions ([`kmeans`], [`hierarchical`], [`pca`], [`tsne`], [`cmdscale`], [`dbscan`],
-//! [`linear_svm`], [`ppr`], [`random_forest`]) refuse non-finite input.
+//! [`linear_svm`], [`ppr()`], [`random_forest`]) refuse non-finite input.
 //!
 //! ## Large-N Performance
 //!
@@ -173,58 +172,58 @@
 //! | R Package | p2a-core Functions |
 //! |-----------|-------------------|
 //! | `stats` (kmeans) | [`kmeans`], [`hierarchical`], [`cmdscale`] |
-//! | `cluster` | [`kmedoids`], [`agnes`], [`diana`], [`clara`], [`fanny`], [`silhouette`] |
-//! | `dbscan` | [`dbscan`], [`hdbscan`], [`optics`] |
+//! | `cluster` | [`kmedoids()`], [`agnes`], [`diana`], [`clara`], [`fanny`], [`silhouette`] |
+//! | `dbscan` | [`dbscan`], [`hdbscan()`], [`optics()`] |
 //! | `mclust` | [`gaussian_mixture`], [`normal_mix_em`] |
 //! | `fastcluster` | [`fastcluster`] |
-//! | `dynamicTreeCut` | [`dynamic_tree_cut`] |
+//! | `dynamicTreeCut` | [`dynamic_tree_cut()`] |
 //! | `flexmix` | [`flexmix`] |
 //! | `pvclust` | [`pvclust`] |
-//! | `grf` | [`causal_forest`] |
-//! | `BART` | [`bart`], [`bart_causal`] |
-//! | `iml`, `DALEX` | [`ice_curves`], [`lime`], [`shap_values`] |
-//! | `quantregForest` | [`quantile_rf`] |
-//! | `party` | [`ctree`] |
-//! | `Boruta` | [`boruta`] |
-//! | `C50` | [`c50`] |
-//! | `Cubist` | [`cubist`] |
-//! | `earth` | [`mars`] |
-//! | `arules` | [`apriori`], [`eclat`] |
+//! | `grf` | [`causal_forest()`] |
+//! | `BART` | [`bart()`], [`bart_causal()`] |
+//! | `iml`, `DALEX` | [`compute_ice_curves`], [`partial_dependence`], [`kernel_shap`] |
+//! | `quantregForest` | [`quantile_rf()`] |
+//! | `party` | [`ctree()`] |
+//! | `C50` | [`c50()`] |
+//! | `Cubist` | [`cubist()`] |
+//! | `earth` | [`mars()`] |
+//! | `arules` | [`apriori()`], [`eclat`] |
 
-mod adaboost;
-mod advanced_clustering_mod;
+pub mod adaboost;
+pub mod advanced_clustering_mod;
 pub mod apriori;
-mod bart;
-mod bart_causal;
-mod c50;
-mod cart;
-mod causal_forest;
-mod cluster_optimized;
-mod cluster_validation;
-mod clustering;
-mod ctree;
-mod cubist;
+pub mod bart;
+pub mod bart_causal;
+pub mod c50;
+pub mod cart;
+pub mod causal_forest;
+pub mod cluster_optimized;
+pub mod cluster_validation;
+pub mod clustering;
+pub mod ctree;
+pub mod cubist;
 pub mod dual_tree;
-mod evaluation;
-mod evaluation_fast;
-mod extract;
-mod gbm;
-mod ice;
+pub mod evaluation;
+pub mod evaluation_fast;
+pub mod extract;
+pub mod gbm;
+pub mod hclust;
+pub mod ice;
 pub mod kdtree;
-mod lightgbm;
-mod mars;
-mod mboost;
-mod mboost_fast;
-mod pdp;
+pub mod lightgbm;
+pub mod mars;
+pub mod mboost;
+pub mod mboost_fast;
+pub mod pdp;
 pub mod ppr;
-mod quantile_rf;
-mod reduction;
-mod shap;
-mod svm;
-mod svm_fast;
+pub mod quantile_rf;
+pub mod reduction;
+pub mod shap;
+pub mod svm;
+pub mod svm_fast;
 pub mod trees;
-mod xgboost;
-mod xgboost_fast;
+pub mod xgboost;
+pub mod xgboost_fast;
 
 /// Bytes a heap allocation of `size` bytes occupies under glibc malloc (the
 /// allocator of the Linux builds): the size plus an 8-byte header, rounded up
@@ -518,6 +517,8 @@ pub use pdp::{
 #[cfg(test)]
 mod tests {
     use super::partition_exact;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
 
     /// `partition_exact` splits as `Iterator::partition` does, with every vector at exactly its
     /// length, also where one side keeps almost every index.
@@ -536,5 +537,87 @@ mod tests {
         let (even, odd) = partition_exact(0..777, |i| i % 2 == 0);
         assert_eq!((even.len(), odd.len()), (389, 388));
         assert_eq!((even.capacity(), odd.capacity()), (389, 388));
+    }
+
+    /// File-backed `mod name;` declarations in `source`, with comments ignored; inline modules such as
+    /// `mod tests {` are not file-backed and are skipped.
+    fn file_module_names(source: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in source.lines() {
+            let mut rest = line.split("//").next().unwrap_or("").trim();
+            if let Some(after) = rest.strip_prefix("pub") {
+                rest = after.trim_start();
+                if rest.starts_with('(') {
+                    match rest.split_once(')') {
+                        Some((_, after)) => rest = after.trim_start(),
+                        None => continue,
+                    }
+                }
+            }
+            let Some(after) = rest.strip_prefix("mod ") else {
+                continue;
+            };
+            let Some(name) = after.trim().strip_suffix(';') else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
+    /// Every `.rs` file under `src/` is reachable from `lib.rs` through `mod` declarations. An orphan file is
+    /// never compiled: its tests never run and its items cannot be called, yet readers and the module docs
+    /// take it for shipped code (ML-116 `ml/advanced_trees.rs`, WT-17 `ml/interpretability.rs`).
+    #[test]
+    fn test_every_source_file_is_compiled() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut reached: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut pending = vec![(src.join("lib.rs"), src.clone())];
+        // Built from two pieces so that this file does not contain the attribute it looks for.
+        let path_attr = ["#[", "path"].concat();
+        while let Some((file, dir)) = pending.pop() {
+            let source = std::fs::read_to_string(&file).unwrap();
+            assert!(
+                !source.contains(&path_attr),
+                "{}: modules with a path attribute are not handled here",
+                file.display()
+            );
+            for name in file_module_names(&source) {
+                let flat = dir.join(format!("{name}.rs"));
+                let nested = dir.join(&name).join("mod.rs");
+                let target = match (flat.is_file(), nested.is_file()) {
+                    (true, false) => flat,
+                    (false, true) => nested,
+                    _ => panic!(
+                        "{}: `mod {name};` must resolve to exactly one of {} and {}",
+                        file.display(),
+                        flat.display(),
+                        nested.display()
+                    ),
+                };
+                pending.push((target, dir.join(&name)));
+            }
+            reached.insert(file);
+        }
+        let mut orphans = Vec::new();
+        let mut dirs = vec![src.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") && !reached.contains(&path) {
+                    orphans.push(path.strip_prefix(&src).unwrap().display().to_string());
+                }
+            }
+        }
+        orphans.sort();
+        assert!(
+            orphans.is_empty(),
+            "source files that no `mod` declaration reaches (never compiled): {orphans:?}"
+        );
     }
 }

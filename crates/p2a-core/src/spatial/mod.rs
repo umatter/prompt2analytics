@@ -53,9 +53,9 @@
 //! # }
 //! ```
 
-mod diagnostics;
-mod neighbors;
-mod weights;
+pub mod diagnostics;
+pub mod neighbors;
+pub mod weights;
 
 pub use diagnostics::{
     GearyResult,
