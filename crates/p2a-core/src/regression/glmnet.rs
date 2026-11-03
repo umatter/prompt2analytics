@@ -1956,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmnet_kkt_excluded_variable() {
+    fn test_validate_glmnet_kkt_excluded_variable() {
         // Pre-WP07: K1, K16, K23 stay at 0 at path indices 54, 61, 80 with
         // |x~_j'r|/n = 1.00995, 1.00386, 1.05708 x lambda, df 26/28/29 where the solution
         // has 27/29/30 (REG-41).
@@ -2007,7 +2007,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmnet_convergence_is_scale_free() {
+    fn test_validate_glmnet_convergence_is_scale_free() {
         // glmnet's criterion is in standardised-y units: y * 1e-6 and y * 1e6 take the same
         // passes. Pre-WP07: absolute |delta beta| < thresh, 3.07 relative error at 1e-6.
         let (_case, ds) = crate::test_support::load_case("glmnet_paths");
@@ -2036,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmnet_maxit_truncates_path_with_warning() {
+    fn test_validate_glmnet_maxit_truncates_path_with_warning() {
         let (_case, ds) = crate::test_support::load_case("glmnet_paths");
         let full = run_glmnet(&ds, "y", &X8, &GlmnetConfig::default()).unwrap();
         let mut c = GlmnetConfig::default();
@@ -2073,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmnet_constant_column_is_excluded() {
+    fn test_validate_glmnet_constant_column_is_excluded() {
         // glmnet's ju: a constant column gets coefficient 0 and leaves the others unchanged.
         let (case, ds) = crate::test_support::load_case("glmnet_paths");
         let (x, y) = xy(&ds, "y", &X8);
@@ -2155,7 +2155,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmnet_nlambda_one_is_lambda_max() {
+    fn test_validate_glmnet_nlambda_one_is_lambda_max() {
         // REG-42 (b): nlambda = 1 divided by nlambda - 1 = 0 (a NaN lambda).
         let (case, ds) = crate::test_support::load_case("glmnet_paths");
         let mut c = GlmnetConfig::default();
@@ -2343,7 +2343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmnet_binomial_two_level_coding() {
+    fn test_validate_glmnet_binomial_two_level_coding() {
         // R codes the response by its two factor levels.
         let (_case, ds) = crate::test_support::load_case("glmnet_paths");
         let (x, y) = xy(&ds, "yb", &X8);
@@ -2498,7 +2498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmnet_display_prints_coefficients() {
+    fn test_validate_glmnet_display_prints_coefficients() {
         let (_case, ds) = crate::test_support::load_case("glmnet_paths");
         let r = run_glmnet(&ds, "y", &X8, &tight(1.0, true, true, Some(&LAMS[..]))).unwrap();
         let text = r.to_string();

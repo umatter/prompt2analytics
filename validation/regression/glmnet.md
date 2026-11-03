@@ -109,19 +109,19 @@ All in `crates/p2a-core/src/regression/glmnet.rs`.
 | `test_validate_glmnet_gaussian_enet_raw` | `a5_raw[_noint]_*` | as above | REG-7, REG-40 |
 | `test_validate_glmnet_gaussian_ridge_std` | `a0_std[_noint]_*` | as above | REG-40 |
 | `test_validate_glmnet_gaussian_ridge_raw` | `a0_raw[_noint]_*` | as above | REG-7, REG-40 |
-| `test_glmnet_kkt_excluded_variable` | `kkt_lambda`, `kkt_df`, `kkt_coef_tight`; KKT of every excluded variable | exact; 1e-9 rel + 1e-10 abs | REG-41 |
-| `test_glmnet_convergence_is_scale_free` | y x 1e-6 and x 1e6: same passes and rescaled coefficients | 1e-6 rel | REG-41 |
-| `test_glmnet_maxit_truncates_path_with_warning` | cumulative `max_iter`, truncation warning, `ConvergenceFailure` | exact | REG-41 |
-| `test_glmnet_constant_column_is_excluded` | `a10_std_coef_tight`, `a10_raw_coef_tight` with a constant column added | EXACT | REG-7 |
+| `test_validate_glmnet_kkt_excluded_variable` | `kkt_lambda`, `kkt_df`, `kkt_coef_tight`; KKT of every excluded variable | exact; 1e-9 rel + 1e-10 abs | REG-41 |
+| `test_validate_glmnet_convergence_is_scale_free` | y x 1e-6 and x 1e6: same passes and rescaled coefficients | 1e-6 rel | REG-41 |
+| `test_validate_glmnet_maxit_truncates_path_with_warning` | cumulative `max_iter`, truncation warning, `ConvergenceFailure` | exact | REG-41 |
+| `test_validate_glmnet_constant_column_is_excluded` | `a10_std_coef_tight`, `a10_raw_coef_tight` with a constant column added | EXACT | REG-7 |
 | `test_validate_glmnet_default_path` | `path_lambda`, `path_df`, `path_coef_tight`, `path_dev_ratio[_tight]`, `ridge_path_lambda_max`, `ridge_path_length`, `enet_path_lambda_max` | `Tol::coef(150)`, exact, EXACT, R_DEV | REG-40 |
 | `test_validate_glmnet_path_rules` | `wide_path_lambda`, `wide_path_df`, `dfmax2_path_df`, `fdev0_path_length`; user lambdas | `Tol::coef(20)`, exact | REG-40 |
-| `test_glmnet_nlambda_one_is_lambda_max` | `nlambda1_coef`, `nlambda1_dev_ratio`; CV with one lambda | EXACT, exact | REG-42 |
+| `test_validate_glmnet_nlambda_one_is_lambda_max` | `nlambda1_coef`, `nlambda1_dev_ratio`; CV with one lambda | EXACT, exact | REG-42 |
 | `test_validate_glmnet_binomial` | `binom`, `binom_raw`, `binom_noint`, `binom_a5`: `_coef[_tight]`, `_dev_ratio[_tight]`; `sum(y - p) = 0` | EXACT, R_GLMNET, R_DEV | REG-6 |
 | `test_validate_glmnet_binomial_path` | `binom_path_*`, `binom_noint_sub_lambda_max` | `Tol::coef(150)`, exact, EXACT, R_DEV | REG-6 |
-| `test_glmnet_binomial_two_level_coding` | {0, 1} and {-1, 1} give the same fit; small-class warning | exact | REG-6 |
+| `test_validate_glmnet_binomial_two_level_coding` | {0, 1} and {-1, 1} give the same fit; small-class warning | exact | REG-6 |
 | `test_validate_cv_glmnet_foldid` | `cv_*`, `cvb_*` (cvm, cvsd, indices, fold path lengths, lambda.min / 1se, coefficients) | 1e-9 rel (tight), 1e-7 / 1e-6 rel (glmnet), exact | REG-42 |
 | `test_validate_glmnet_predict_interpolates` | `interp_coef[_tight]`, `interp_pred`, `binom_interp_prob[_tight]`; invalid lambda | EXACT, R_GLMNET, 1e-6 | REG-42, X-6 |
-| `test_glmnet_display_prints_coefficients` | the `Display` text of a path and a CV fit | - | REG-8 |
+| `test_validate_glmnet_display_prints_coefficients` | the `Display` text of a path and a CV fit | - | REG-8 |
 
 Property tests that load no case: `test_cv_glmnet_exact_fit_has_finite_cvsd` (REG-42: no NaN
 `cvsd` when folds stop early), `test_glmnet_rejects_empty_lambda` (REG-42),
