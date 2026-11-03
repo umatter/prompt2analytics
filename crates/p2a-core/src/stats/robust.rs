@@ -93,8 +93,7 @@ fn median_sorted(sorted: &[f64]) -> f64 {
 /// error. The data are sorted once and both quartiles are read from the sorted copy.
 pub fn iqr(data: &[f64], qtype: Option<usize>) -> EconResult<f64> {
     let t = QuantileType::from_r(qtype.unwrap_or(7))?;
-    let clean: Vec<f64> = data.iter().copied().filter(|x| !x.is_nan()).collect();
-    let s = sorted_copy(&clean, "IQR")?;
+    let s = sorted_finite_copy(data, "IQR sort buffer")?;
     Ok(quantile_sorted(&s, 0.75, t) - quantile_sorted(&s, 0.25, t))
 }
 
@@ -105,11 +104,14 @@ pub fn quantile(data: &[f64], p: f64, qtype: usize) -> EconResult<f64> {
     let t = QuantileType::from_r(qtype)?;
     if !(0.0..=1.0).contains(&p) {
         return Err(EconError::InvalidSpecification {
-            message: "p must be between 0 and 1".to_string(),
+            message: format!("p must be in [0, 1], got {p}"),
         });
     }
-    let clean: Vec<f64> = data.iter().copied().filter(|x| !x.is_nan()).collect();
-    Ok(quantile_sorted(&sorted_copy(&clean, "quantile")?, p, t))
+    Ok(quantile_sorted(
+        &sorted_finite_copy(data, "quantile sort buffer")?,
+        p,
+        t,
+    ))
 }
 
 /// R's sample quantile types (Hyndman & Fan 1996), as `stats::quantile(type = 1..9)`.
@@ -246,6 +248,18 @@ pub fn quantile_sorted(sorted: &[f64], p: f64, qtype: QuantileType) -> f64 {
     }
 }
 
+/// The non-NaN values of `data`, sorted with `f64::total_cmp`, in one guarded buffer (R's
+/// `na.rm = TRUE`); `EmptyDataset` when nothing is left.
+fn sorted_finite_copy(data: &[f64], what: &str) -> EconResult<Vec<f64>> {
+    let mut s = crate::resource::try_with_capacity::<f64>(data.len(), what)?;
+    s.extend(data.iter().copied().filter(|x| !x.is_nan()));
+    if s.is_empty() {
+        return Err(EconError::EmptyDataset);
+    }
+    s.sort_by(f64::total_cmp);
+    Ok(s)
+}
+
 fn sorted_copy(data: &[f64], what: &str) -> EconResult<Vec<f64>> {
     if data.is_empty() {
         return Err(EconError::EmptyDataset);
@@ -313,8 +327,9 @@ pub fn boxplot_stats(data: &[f64], coef: f64) -> EconResult<BoxplotStats> {
             message: format!("coef must be finite and non-negative, got {coef}"),
         });
     }
-    let kept: Vec<f64> = data.iter().copied().filter(|x| !x.is_nan()).collect();
-    let s = sorted_copy(&kept, "boxplot")?;
+    let s = sorted_finite_copy(data, "boxplot sort buffer")?;
+    let mut kept = crate::resource::try_with_capacity::<f64>(s.len(), "boxplot data")?;
+    kept.extend(data.iter().copied().filter(|x| !x.is_nan()));
     let mut stats = fivenum_sorted(&s);
     let mut out = Vec::new();
     if coef > 0.0 {
@@ -1298,6 +1313,21 @@ mod tests {
         assert!((quantile(&data, 0.5, 7).unwrap() - 3.0).abs() < 1e-10);
         assert!((quantile(&data, 0.0, 7).unwrap() - 1.0).abs() < 1e-10);
         assert!((quantile(&data, 1.0, 7).unwrap() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_quantile_names_bad_p_and_drops_nan() {
+        let m = spec_message(quantile(&[1.0, 2.0, 3.0], 1.5, 7));
+        assert!(m.contains("got 1.5"), "{m}");
+        let d = [4.2, f64::NAN, 1.1, 3.3, f64::NAN, 2.7];
+        assert!((quantile(&d, 0.5, 7).unwrap() - 3.0).abs() < 1e-12);
+        assert!((iqr(&d, None).unwrap() - (3.525 - 2.3)).abs() < 1e-12);
+        assert!(matches!(
+            quantile(&[f64::NAN, f64::NAN], 0.5, 7),
+            Err(EconError::EmptyDataset)
+        ));
+        let b = boxplot_stats(&[9.0, f64::NAN, 1.0, 1.2, 0.9, 1.1], 1.5).unwrap();
+        assert_eq!((b.n, b.out.as_slice()), (5, &[9.0][..]));
     }
 
     // =========================================================================
