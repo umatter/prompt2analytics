@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "linalg_qr_least_squares",
+      "name": "Rank-revealing least squares: pivoted QR (dqrdc2's limited column pivoting), lm.fit, lm.wfit",
+      "category": "regression",
+      "reference": "base::qr (LAPACK = FALSE, tol 1e-7); stats::lm.fit; stats::lm.wfit; stats::vcov.lm",
+      "doc": "validation/linalg/solve.md",
+      "cases": ["linalg_qr_glm"],
+      "tests": [
+        "p2a-core::linalg::solve::tests::test_validate_qr_dqrdc2_aliasing",
+        "p2a-core::linalg::solve::tests::test_validate_qr_edge_shapes",
+        "p2a-core::linalg::solve::tests::test_validate_lm_wfit_zero_weights",
+        "p2a-core::linalg::solve::tests::test_qr_factorization_properties"
+      ],
+      "quantities": ["rank", "pivot", "|diag(R)| (identified block)", "coefficients (NA for aliased columns)", "residual df", "RSS", "SE (vcov.lm, NA for aliased)", "lm.wfit coefficients, df, residuals and fitted values with zero weights", "weighted SE", "QR identities (property tests, not R-pinned)"],
+      "tolerance": "validation/README.md, n = 120: coefficients and |diag(R)| 1e-8, SE and statistics 1e-6 relative; rank, pivot and df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

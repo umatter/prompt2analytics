@@ -1,0 +1,841 @@
+//! Rank-revealing least squares and symmetric inverses: the one numerical path of Tier 3.
+//!
+//! * [`Qr`], [`least_squares`] and [`weighted_least_squares`] follow R's `lm.fit` and
+//!   `lm.wfit`: a Householder QR with LINPACK `dqrdc2`'s limited column pivoting (a
+//!   column whose remaining norm falls below `tol` times its original norm is moved to
+//!   the end, so the later of two collinear columns is the aliased one; `tol` is 1e-7
+//!   as in `lm.fit`). Aliased columns get `NaN` coefficients and `NaN` rows and columns
+//!   in the unscaled covariance; [`aliasing_message`] words R's warning.
+//! * `sym_inverse` inverts a symmetric matrix and reports its numerical rank and
+//!   reciprocal condition (of the diagonally equilibrated matrix) instead of silently
+//!   returning a pseudoinverse; `SingularPolicy` decides whether a rank-deficient
+//!   matrix is an error or gets a symmetric generalized inverse.
+//!
+//! Checked against `base::qr`, `stats::lm.fit`, `stats::lm.wfit` and `stats::lm` on the R
+//! case `linalg_qr_glm` (`validation/linalg/solve.md`).
+//!
+//! ```
+//! use ndarray::array;
+//! use p2a_core::linalg::solve::least_squares;
+//! let x = array![[1.0, 1.0, 2.0], [1.0, 2.0, 4.0], [1.0, 3.0, 6.0], [1.0, 4.0, 8.0]];
+//! let y = array![1.1, 1.9, 3.2, 3.8];
+//! let fit = least_squares(x.view(), y.view()).unwrap();
+//! assert_eq!(fit.rank, 2);
+//! assert_eq!(fit.aliased, vec![2]);          // the third column is twice the second
+//! assert!(fit.coefficients[2].is_nan());
+//! ```
+
+use crate::errors::{EconError, EconResult};
+use crate::resource;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+
+/// stats::lm.fit tolerance.
+pub const LM_QR_TOL: f64 = 1e-7;
+/// Relative eigenvalue tolerance of `sym_inverse` on the diagonally equilibrated matrix:
+/// eigenvalues <= SYM_RANK_TOL * dim * lambda_max count as zero.
+pub const SYM_RANK_TOL: f64 = 1e-14;
+/// A matrix is symmetric when max |m_ij - m_ji| <= SYMMETRY_TOL * max |m_ij|.
+pub const SYMMETRY_TOL: f64 = 1e-10;
+
+fn spec(message: String) -> EconError {
+    EconError::InvalidSpecification { message }
+}
+
+/// Reference-BLAS `dnrm2`: the Euclidean norm with scale/ssq accumulation (no overflow).
+fn nrm2(v: &[f64]) -> f64 {
+    let mut scale = 0.0f64;
+    let mut ssq = 1.0f64;
+    for &x in v {
+        if x != 0.0 {
+            let a = x.abs();
+            if scale < a {
+                let r = scale / a;
+                ssq = 1.0 + ssq * r * r;
+                scale = a;
+            } else {
+                let r = a / scale;
+                ssq += r * r;
+            }
+        }
+    }
+    scale * ssq.sqrt()
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// `y += t * x`.
+fn axpy(t: f64, x: &[f64], y: &mut [f64]) {
+    for (yi, xi) in y.iter_mut().zip(x) {
+        *yi += t * xi;
+    }
+}
+
+fn check_qr_tol(tol: f64) -> EconResult<()> {
+    if tol.is_finite() && tol > 0.0 && tol < 1.0 {
+        Ok(())
+    } else {
+        Err(spec(format!("QR tolerance must be in (0, 1), got {tol}")))
+    }
+}
+
+/// A Householder QR decomposition with `dqrdc2`'s limited column pivoting (R's `qr(x,
+/// LAPACK = FALSE)`, the `lm.fit` path).
+///
+/// The factor is held column by column (the working copy is `X'`), so every norm, dot
+/// product and update runs on contiguous memory. The arithmetic follows `dqrdc2`
+/// (overflow-safe norms, the norm downdate with Bates' recomputation, the stable
+/// Householder sign), but bit-level agreement with `base::qr` is neither required nor
+/// tested.
+#[derive(Debug, Clone)]
+pub struct Qr {
+    /// Column `j` of the compact factor at `a[j * n..(j + 1) * n]`: R in the upper
+    /// triangle, the Householder vectors (without their first entry) below it.
+    a: Vec<f64>,
+    n: usize,
+    p: usize,
+    qraux: Array1<f64>,
+    pivot: Vec<usize>,
+    rank: usize,
+}
+
+impl Qr {
+    /// Decompose `x` (n x p) with column tolerance `tol` (0 < tol < 1; R's `lm.fit` uses
+    /// [`LM_QR_TOL`]). Refuses a non-finite entry or tolerance.
+    pub fn decompose(x: ArrayView2<f64>, tol: f64) -> EconResult<Qr> {
+        check_qr_tol(tol)?;
+        let (n, p) = x.dim();
+        let len = resource::checked_len(&[p, n], "QR workspace")?;
+        let mut a = resource::try_vec(len, 0.0, "QR workspace")?;
+        for (j, col) in x.columns().into_iter().enumerate() {
+            for (i, &v) in col.iter().enumerate() {
+                if !v.is_finite() {
+                    return Err(spec(format!(
+                        "x contains a non-finite value (row {i}, column {j})"
+                    )));
+                }
+                a[j * n + i] = v;
+            }
+        }
+        Self::factor(a, n, p, tol)
+    }
+
+    /// Decompose a matrix given column by column (`cols[j * n + i]` = `x[i, j]`), as the
+    /// IRLS loop of `econometrics::glm` builds it.
+    pub(crate) fn from_columns(cols: Vec<f64>, n: usize, p: usize, tol: f64) -> EconResult<Qr> {
+        check_qr_tol(tol)?;
+        if Some(cols.len()) != n.checked_mul(p) {
+            return Err(EconError::Computation(format!(
+                "QR workspace has {} values for {n} x {p}",
+                cols.len()
+            )));
+        }
+        if let Some(k) = cols.iter().position(|v| !v.is_finite()) {
+            let (j, i) = if n == 0 { (0, 0) } else { (k / n, k % n) };
+            return Err(spec(format!(
+                "x contains a non-finite value (row {i}, column {j})"
+            )));
+        }
+        Self::factor(cols, n, p, tol)
+    }
+
+    fn factor(mut a: Vec<f64>, n: usize, p: usize, tol: f64) -> EconResult<Qr> {
+        let mut qraux = resource::try_vec(p, 0.0, "QR workspace")?;
+        // work2: the original column norms (1 for a zero column), the reference of the
+        // negligibility test.
+        let mut work2 = resource::try_vec(p, 0.0, "QR workspace")?;
+        for j in 0..p {
+            qraux[j] = nrm2(&a[j * n..(j + 1) * n]);
+            work2[j] = if qraux[j] == 0.0 { 1.0 } else { qraux[j] };
+        }
+        let mut pivot: Vec<usize> = (0..p).collect();
+        let mut k0 = p;
+        let lup = n.min(p);
+        for l in 0..lup {
+            resource::checkpoint()?;
+            // A column whose remaining norm is negligible against its original norm is
+            // cycled to the end (limited pivoting).
+            while l < k0 && qraux[l] < work2[l] * tol {
+                a[l * n..p * n].rotate_left(n);
+                pivot[l..p].rotate_left(1);
+                qraux[l..p].rotate_left(1);
+                work2[l..p].rotate_left(1);
+                k0 -= 1;
+            }
+            if l + 1 == n {
+                break;
+            }
+            let (head, tail) = a.split_at_mut((l + 1) * n);
+            let cl = &mut head[l * n..];
+            let mut nrmxl = nrm2(&cl[l..]);
+            if nrmxl == 0.0 {
+                // No reflector for this column. dqrdc2 leaves qraux[l] at the downdated
+                // norm here; zero marks "no reflector" for qty and q_times (dqrsl skips
+                // a reflector with qraux 0).
+                qraux[l] = 0.0;
+                continue;
+            }
+            if cl[l] != 0.0 {
+                nrmxl = nrmxl.abs().copysign(cl[l]);
+            }
+            let r = 1.0 / nrmxl;
+            for v in &mut cl[l..] {
+                *v *= r;
+            }
+            cl[l] += 1.0;
+            for (jj, cj) in tail.chunks_exact_mut(n).enumerate() {
+                let j = l + 1 + jj;
+                let t = -dot(&cl[l..], &cj[l..]) / cl[l];
+                axpy(t, &cl[l..], &mut cj[l..]);
+                if qraux[j] != 0.0 {
+                    let ratio = cj[l].abs() / qraux[j];
+                    let tt = (1.0 - ratio * ratio).max(0.0);
+                    if tt.abs() < 1e-6 {
+                        // Bates (1999): recompute instead of downdating a norm that has
+                        // lost its precision.
+                        qraux[j] = nrm2(&cj[l + 1..]);
+                    } else {
+                        qraux[j] *= tt.sqrt();
+                    }
+                }
+            }
+            qraux[l] = cl[l];
+            cl[l] = -nrmxl;
+        }
+        Ok(Qr {
+            a,
+            n,
+            p,
+            qraux: Array1::from_vec(qraux),
+            pivot,
+            rank: k0.min(n),
+        })
+    }
+
+    /// Column `j` of the compact factor.
+    fn col(&self, j: usize) -> &[f64] {
+        &self.a[j * self.n..(j + 1) * self.n]
+    }
+
+    /// `R[i, j]` (`i <= j`).
+    fn r(&self, i: usize, j: usize) -> f64 {
+        self.a[j * self.n + i]
+    }
+
+    /// Numerical rank (R's `qr$rank`).
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// Column order of the factor, 0-based (R's `qr$pivot - 1`): `pivot()[k]` is the
+    /// original index of the k-th column of R.
+    pub fn pivot(&self) -> &[usize] {
+        &self.pivot
+    }
+
+    /// LINPACK's compact storage of the reflectors' first entries (R's `qr$qraux`).
+    pub(crate) fn qraux(&self) -> ArrayView1<'_, f64> {
+        self.qraux.view()
+    }
+
+    /// Original indices of the aliased columns (`pivot()[rank..]`), ascending.
+    pub fn aliased(&self) -> Vec<usize> {
+        let mut v = self.pivot[self.rank..].to_vec();
+        v.sort_unstable();
+        v
+    }
+
+    /// Number of reflectors that act (dqrsl's `ju`).
+    fn n_reflectors(&self) -> usize {
+        self.rank.min(self.n.saturating_sub(1))
+    }
+
+    /// Apply reflector `j` to `q` in place.
+    fn reflect(&self, j: usize, q: &mut [f64]) {
+        let v0 = self.qraux[j];
+        if v0 == 0.0 {
+            return;
+        }
+        let c = self.col(j);
+        let t = -(v0 * q[j] + dot(&c[j + 1..], &q[j + 1..])) / v0;
+        q[j] += t * v0;
+        axpy(t, &c[j + 1..], &mut q[j + 1..]);
+    }
+
+    /// `Q' y` (dqrsl job 1000), with the first `rank` reflectors. Panics if
+    /// `y.len()` is not the number of rows of the decomposed matrix (a caller bug).
+    pub fn qty(&self, y: ArrayView1<f64>) -> Array1<f64> {
+        assert_eq!(y.len(), self.n, "Qr::qty: y has the wrong length");
+        let mut q = y.to_vec();
+        for j in 0..self.n_reflectors() {
+            self.reflect(j, &mut q);
+        }
+        Array1::from_vec(q)
+    }
+
+    /// `Q v` with the first `rank` reflectors (the inverse of [`Qr::qty`]).
+    pub(crate) fn q_times(&self, v: ArrayView1<f64>) -> Array1<f64> {
+        assert_eq!(v.len(), self.n, "Qr::q_times: v has the wrong length");
+        let mut q = v.to_vec();
+        for j in (0..self.n_reflectors()).rev() {
+            self.reflect(j, &mut q);
+        }
+        Array1::from_vec(q)
+    }
+
+    /// Solve `R11 b = (Q'y)[..rank]` and return `b` in pivoted order.
+    fn solve_r11(&self, y: ArrayView1<f64>) -> Vec<f64> {
+        let q = self.qty(y);
+        let k = self.rank;
+        let mut b = q.to_vec();
+        b.truncate(k);
+        for j in (0..k).rev() {
+            b[j] /= self.r(j, j);
+            let bj = b[j];
+            axpy(-bj, &self.col(j)[..j], &mut b[..j]);
+        }
+        b
+    }
+
+    /// Least-squares coefficients in the original column order, `NaN` for aliased
+    /// columns (`lm.fit`).
+    pub fn coefficients(&self, y: ArrayView1<f64>) -> Array1<f64> {
+        let b = self.solve_r11(y);
+        let mut out = Array1::from_elem(self.p, f64::NAN);
+        for (i, v) in b.into_iter().enumerate() {
+            out[self.pivot[i]] = v;
+        }
+        out
+    }
+
+    /// As [`Qr::coefficients`] with 0 for aliased columns (`dqrls`, used by IRLS).
+    pub(crate) fn coefficients_zeroed(&self, y: ArrayView1<f64>) -> Array1<f64> {
+        let b = self.solve_r11(y);
+        let mut out = Array1::zeros(self.p);
+        for (i, v) in b.into_iter().enumerate() {
+            out[self.pivot[i]] = v;
+        }
+        out
+    }
+
+    /// `(R11' R11)^{-1}` (R's `chol2inv(qr$qr[1:rank, 1:rank])`) in the original column
+    /// order, with `NaN` rows and columns for aliased columns.
+    pub fn unscaled_covariance(&self) -> Array2<f64> {
+        let k = self.rank;
+        // R11^{-1}, upper triangular, column by column: rinv[j * k + i].
+        let mut rinv = vec![0.0; k * k];
+        for c in 0..k {
+            let col = &mut rinv[c * k..(c + 1) * k];
+            col[c] = 1.0;
+            for j in (0..=c).rev() {
+                col[j] /= self.r(j, j);
+                let bj = col[j];
+                axpy(-bj, &self.col(j)[..j], &mut col[..j]);
+            }
+        }
+        let mut out = Array2::from_elem((self.p, self.p), f64::NAN);
+        for i in 0..k {
+            for j in 0..=i {
+                // (Rinv Rinv')_{ij} = sum_l Rinv[i, l] Rinv[j, l], l >= max(i, j) = i
+                let mut s = 0.0;
+                for l in i..k {
+                    s += rinv[l * k + i] * rinv[l * k + j];
+                }
+                out[[self.pivot[i], self.pivot[j]]] = s;
+                out[[self.pivot[j], self.pivot[i]]] = s;
+            }
+        }
+        out
+    }
+
+    /// `max |R_ii| / min |R_ii|` over `i < rank`; `NaN` when the rank is 0.
+    pub fn r_diag_ratio(&self) -> f64 {
+        if self.rank == 0 {
+            return f64::NAN;
+        }
+        let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+        for i in 0..self.rank {
+            let v = self.r(i, i).abs();
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        hi / lo
+    }
+
+    /// The diagonal of the compact factor (R's `diag(qr$qr)`), in pivoted order, length
+    /// `min(n, p)`. Entries past the rank belong to aliased columns.
+    pub fn r_diag(&self) -> Array1<f64> {
+        Array1::from_iter((0..self.n.min(self.p)).map(|i| self.r(i, i)))
+    }
+}
+
+/// A least-squares fit (`lm.fit` / `lm.wfit`).
+#[derive(Debug, Clone)]
+pub struct LeastSquares {
+    /// Coefficients in the original column order; `NaN` for aliased columns.
+    pub coefficients: Array1<f64>,
+    /// `y - residuals`.
+    pub fitted: Array1<f64>,
+    /// Residuals (on the original scale for a weighted fit).
+    pub residuals: Array1<f64>,
+    /// Numerical rank.
+    pub rank: usize,
+    /// Original indices of the aliased columns, ascending.
+    pub aliased: Vec<usize>,
+    /// Residual degrees of freedom: rows (with positive weight) minus rank.
+    pub df_residual: usize,
+    /// `(X'X)^{-1}` (weighted: `(X'WX)^{-1}`) in the original order, `NaN` rows and
+    /// columns for aliased columns. Multiply by the residual variance for `vcov`.
+    pub unscaled_cov: Array2<f64>,
+    /// The decomposition (of `sqrt(w) X` on the positive-weight rows for a weighted fit).
+    pub qr: Qr,
+}
+
+impl LeastSquares {
+    /// R's "Coefficients not defined because of singularities" message; see
+    /// [`aliasing_message`].
+    pub fn aliasing_warning(&self, names: &[String]) -> Option<String> {
+        aliasing_message(&self.aliased, names)
+    }
+}
+
+/// `least_squares_tol(x, y, LM_QR_TOL)`: `lm.fit`.
+pub fn least_squares(x: ArrayView2<f64>, y: ArrayView1<f64>) -> EconResult<LeastSquares> {
+    least_squares_tol(x, y, LM_QR_TOL)
+}
+
+/// Least squares by pivoted QR with column tolerance `tol` (`lm.fit(x, y, tol)`).
+/// Refuses a length mismatch, non-finite input, an invalid tolerance and zero rows.
+pub fn least_squares_tol(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    tol: f64,
+) -> EconResult<LeastSquares> {
+    let n = x.nrows();
+    if y.len() != n {
+        return Err(spec(format!("y has {} rows but x has {n}", y.len())));
+    }
+    if n == 0 {
+        return Err(EconError::InsufficientData {
+            required: 1,
+            provided: 0,
+            context: "least squares".into(),
+        });
+    }
+    if let Some(i) = y.iter().position(|v| !v.is_finite()) {
+        return Err(spec(format!("y contains a non-finite value (row {i})")));
+    }
+    let qr = Qr::decompose(x, tol)?;
+    Ok(fit_from_qr(qr, y))
+}
+
+fn fit_from_qr(qr: Qr, y: ArrayView1<f64>) -> LeastSquares {
+    let n = y.len();
+    let rank = qr.rank();
+    let mut effects = qr.qty(y);
+    effects.iter_mut().take(rank).for_each(|v| *v = 0.0);
+    let residuals = qr.q_times(effects.view());
+    let fitted = &y - &residuals;
+    let coefficients = qr.coefficients(y);
+    LeastSquares {
+        coefficients,
+        fitted,
+        residuals,
+        rank,
+        aliased: qr.aliased(),
+        df_residual: n - rank,
+        unscaled_cov: qr.unscaled_covariance(),
+        qr,
+    }
+}
+
+/// Weighted least squares (`lm.wfit`): rows with weight 0 are dropped from the fit (and
+/// from the residual degrees of freedom); their fitted value is `x0 b` (aliased
+/// coefficients count as 0) and their residual `y0 - x0 b`. Residuals of the other rows
+/// are on the original scale. Refuses negative or non-finite weights and an all-zero
+/// weight vector (where `lm.wfit` returns an all-`NA` fit).
+pub fn weighted_least_squares(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    w: ArrayView1<f64>,
+) -> EconResult<LeastSquares> {
+    let (n, p) = x.dim();
+    if y.len() != n {
+        return Err(spec(format!("y has {} rows but x has {n}", y.len())));
+    }
+    if w.len() != n {
+        return Err(spec(format!("weights has {} rows but x has {n}", w.len())));
+    }
+    if let Some(i) = y.iter().position(|v| !v.is_finite()) {
+        return Err(spec(format!("y contains a non-finite value (row {i})")));
+    }
+    if let Some((i, v)) = w
+        .iter()
+        .enumerate()
+        .find(|(_, v)| !v.is_finite() || **v < 0.0)
+    {
+        return Err(spec(format!(
+            "weights must be finite and >= 0 (row {i} is {v})"
+        )));
+    }
+    let ok: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
+    if ok.is_empty() {
+        return Err(EconError::InsufficientData {
+            required: 1,
+            provided: 0,
+            context: "weighted least squares: no positive weights".into(),
+        });
+    }
+    let m = ok.len();
+    let mut xs = resource::try_zeros2(m, p, "weighted least squares")?;
+    let mut ys = resource::try_zeros1(m, "weighted least squares")?;
+    let mut sw = resource::try_zeros1(m, "weighted least squares")?;
+    for (k, &i) in ok.iter().enumerate() {
+        let s = w[i].sqrt();
+        sw[k] = s;
+        ys[k] = y[i] * s;
+        for j in 0..p {
+            xs[[k, j]] = x[[i, j]] * s;
+        }
+    }
+    let fit = least_squares_tol(xs.view(), ys.view(), LM_QR_TOL)?;
+    let b0 = fit.coefficients.mapv(|v| if v.is_nan() { 0.0 } else { v });
+    let mut residuals = Array1::zeros(n);
+    let mut fitted = Array1::zeros(n);
+    let mut next = ok.iter().copied().enumerate().peekable();
+    for i in 0..n {
+        if let Some(&(k, _)) = next.peek().filter(|(_, ii)| *ii == i) {
+            next.next();
+            residuals[i] = fit.residuals[k] / sw[k];
+            fitted[i] = y[i] - residuals[i];
+        } else {
+            let f0 = x.row(i).dot(&b0);
+            fitted[i] = f0;
+            residuals[i] = y[i] - f0;
+        }
+    }
+    Ok(LeastSquares {
+        fitted,
+        residuals,
+        ..fit
+    })
+}
+
+/// R's "Coefficients not defined because of singularities: x2, x5", or `None` when
+/// nothing is aliased. `names[j]` names column `j` when present; otherwise R's default
+/// name `x{j+1}` is used. Shared by [`LeastSquares`] and GLM callers.
+pub fn aliasing_message(aliased: &[usize], names: &[String]) -> Option<String> {
+    if aliased.is_empty() {
+        return None;
+    }
+    let list: Vec<String> = aliased
+        .iter()
+        .map(|&j| {
+            names
+                .get(j)
+                .cloned()
+                .unwrap_or_else(|| format!("x{}", j + 1))
+        })
+        .collect();
+    Some(format!(
+        "Coefficients not defined because of singularities: {}",
+        list.join(", ")
+    ))
+}
+
+#[cfg(test)]
+pub(crate) mod case_data {
+    use crate::data::Dataset;
+    use crate::data::columns::{ColumnRequest, Columns, NaPolicy};
+    use ndarray::Array2;
+
+    pub(crate) const COLUMNS: &[&str] = &[
+        "x1", "x2", "x3", "x4", "off", "yb", "yp", "wq", "yq", "ysep", "yc", "w0",
+    ];
+
+    /// All columns of linalg_glm.csv (no missing values; 120 rows).
+    pub(crate) fn columns(ds: &Dataset) -> Columns {
+        let c = ColumnRequest::new(ds.df())
+            .numerics(COLUMNS)
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        assert_eq!(c.n(), 120);
+        c
+    }
+
+    /// Design matrix with the named columns in order; "1" is a column of ones, "1-<name>"
+    /// is 1 - column.
+    pub(crate) fn design(c: &Columns, names: &[&str]) -> Array2<f64> {
+        let n = c.n();
+        let mut x = Array2::<f64>::zeros((n, names.len()));
+        for (j, name) in names.iter().enumerate() {
+            for i in 0..n {
+                x[[i, j]] = match *name {
+                    "1" => 1.0,
+                    s if s.starts_with("1-") => 1.0 - c.numeric(&s[2..])[i],
+                    s => c.numeric(s)[i],
+                };
+            }
+        }
+        x
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::case_data::{columns, design};
+    use super::*;
+    use ndarray::{Array1, Array2, s};
+    use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_validate_qr_dqrdc2_aliasing() {
+        let (case, ds) = crate::test_support::load_case("linalg_qr_glm");
+        let c = columns(&ds);
+        let n = c.n();
+        let x = design(&c, &["1", "x1", "x3", "x2", "x4"]); // x3 = x1 - 2 x2 in the CSV
+        let y = c.numeric_array("yc");
+        let qr = Qr::decompose(x.view(), LM_QR_TOL).unwrap();
+        let k = qr.rank();
+        let pivot: Vec<f64> = qr.pivot().iter().map(|&j| (j + 1) as f64).collect();
+        let fit = least_squares(x.view(), y.view()).unwrap();
+        let rss = fit.residuals.mapv(|r| r * r).sum();
+        let s2 = rss / fit.df_residual as f64;
+        let se: Vec<f64> = fit
+            .unscaled_cov
+            .diag()
+            .iter()
+            .map(|v| (v * s2).sqrt())
+            .collect();
+        // |R_ii| is unique for a given pivot; its sign is a convention (not pinned).
+        let r_abs: Vec<f64> = qr.r_diag().iter().take(k).map(|v| v.abs()).collect();
+        Check::new(&case)
+            .scalar("qr_rank", k as f64, Tol::exact())
+            .vector("qr_pivot", &pivot, Tol::exact())
+            .vector("lmfit_coef", &fit.coefficients.to_vec(), Tol::coef(n)) // NaN == R NA
+            .scalar("lmfit_rank", fit.rank as f64, Tol::exact())
+            .scalar("lmfit_df", fit.df_residual as f64, Tol::exact())
+            .scalar("lmfit_resid_ss", rss, Tol::stat(n))
+            .vector("lm_se", &se, Tol::se(n)) // NaN for x2, as vcov(lm)
+            .finish();
+        let r_case = case.vector("qr_r_diag_rank");
+        assert_eq!(r_abs.len(), r_case.len());
+        for (got, want) in r_abs.iter().zip(&r_case) {
+            assert!(
+                Tol::coef(n).allows(*got, want.abs()),
+                "|R_ii| {got} vs R {want}"
+            );
+        }
+        assert_eq!(qr.aliased(), vec![3]);
+        assert_eq!(fit.aliased, vec![3]);
+        let names: Vec<String> = ["(Intercept)", "x1", "x3", "x2", "x4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            fit.aliasing_warning(&names).as_deref(),
+            Some("Coefficients not defined because of singularities: x2")
+        );
+        // R[5,5] of the aliased column is rounding noise (R: -4.53e-15)
+        let x2_norm = x.column(3).dot(&x.column(3)).sqrt();
+        assert!(qr.r_diag()[4].abs() < LM_QR_TOL * x2_norm);
+        // conditioning indicator from R's own diag(R)
+        let rd = case.vector("qr_r_diag_rank");
+        let ratio = rd.iter().fold(0.0_f64, |a, v| a.max(v.abs()))
+            / rd.iter().fold(f64::INFINITY, |a, v| a.min(v.abs()));
+        assert!(Tol::coef(n).allows(qr.r_diag_ratio(), ratio));
+        // fitted + residuals = y (lm.fit: fitted = y - residuals)
+        for i in 0..n {
+            assert!((fit.fitted[i] + fit.residuals[i] - y[i]).abs() <= 1e-12 * y[i].abs().max(1.0));
+        }
+    }
+
+    #[test]
+    fn test_validate_qr_edge_shapes() {
+        let (case, ds) = crate::test_support::load_case("linalg_qr_glm");
+        let c = columns(&ds);
+        let n = c.n();
+        // cbind(1, x1, 2 * x1, x2, 0, x4): the rescaled duplicate and the zero column move
+        // to the end (R pivot 1 2 4 6 3 5, rank 4)
+        let mut x2 = design(&c, &["1", "x1", "x1", "x2", "x4", "x4"]);
+        x2.column_mut(2).mapv_inplace(|v| 2.0 * v);
+        x2.column_mut(4).fill(0.0);
+        let q2 = Qr::decompose(x2.view(), LM_QR_TOL).unwrap();
+        let p2: Vec<f64> = q2.pivot().iter().map(|&j| (j + 1) as f64).collect();
+        // n < p: the first three rows of [1, x1, x3, x2, x4]
+        let x = design(&c, &["1", "x1", "x3", "x2", "x4"]);
+        let q3 = Qr::decompose(x.slice(s![0..3, ..]), LM_QR_TOL).unwrap();
+        let p3: Vec<f64> = q3.pivot().iter().map(|&j| (j + 1) as f64).collect();
+        Check::new(&case)
+            .scalar("qr2_rank", q2.rank() as f64, Tol::exact())
+            .vector("qr2_pivot", &p2, Tol::exact())
+            .scalar("qr3_rank", q3.rank() as f64, Tol::exact())
+            .vector("qr3_pivot", &p3, Tol::exact())
+            .finish();
+        assert_eq!(q2.aliased(), vec![2, 4]);
+        assert_eq!(q3.qraux().len(), 5);
+        // p = 0: rank 0, residuals = y, df = n
+        let y = c.numeric_array("yc");
+        let empty = Array2::<f64>::zeros((n, 0));
+        let f0 = least_squares(empty.view(), y.view()).unwrap();
+        assert_eq!((f0.rank, f0.df_residual, f0.coefficients.len()), (0, n, 0));
+        assert_eq!(f0.residuals, y);
+    }
+
+    #[test]
+    fn test_validate_lm_wfit_zero_weights() {
+        let (case, ds) = crate::test_support::load_case("linalg_qr_glm");
+        let c = columns(&ds);
+        let n = c.n();
+        let x = design(&c, &["1", "x1", "x2"]);
+        let (y, w) = (c.numeric_array("yc"), c.numeric_array("w0")); // w0[0..5] == 0
+        let fit = weighted_least_squares(x.view(), y.view(), w.view()).unwrap();
+        let s2 = (0..n)
+            .filter(|&i| w[i] > 0.0)
+            .map(|i| w[i] * fit.residuals[i].powi(2))
+            .sum::<f64>()
+            / fit.df_residual as f64;
+        let se: Vec<f64> = fit
+            .unscaled_cov
+            .diag()
+            .iter()
+            .map(|v| (v * s2).sqrt())
+            .collect();
+        Check::new(&case)
+            .vector("lmwfit_coef", &fit.coefficients.to_vec(), Tol::coef(n))
+            .scalar("lmwfit_df", fit.df_residual as f64, Tol::exact()) // 112 = 115 positive weights - 3
+            .vector(
+                "lmwfit_resid_head",
+                &fit.residuals.to_vec()[..8],
+                Tol::coef(n),
+            ) // rows 1-5: y0 - x0 b
+            .vector(
+                "lmwfit_fitted_head",
+                &fit.fitted.to_vec()[..8],
+                Tol::coef(n),
+            )
+            .vector("lmw_se", &se, Tol::se(n))
+            .finish();
+        assert_eq!((fit.residuals.len(), fit.fitted.len()), (n, n));
+    }
+
+    /// QR identities on the three designs of the case (properties, not R-pinned).
+    #[test]
+    fn test_qr_factorization_properties() {
+        let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
+        let c = columns(&ds);
+        let n = c.n();
+        let x = design(&c, &["1", "x1", "x3", "x2", "x4"]);
+        let mut x2 = design(&c, &["1", "x1", "x1", "x2", "x4", "x4"]);
+        x2.column_mut(2).mapv_inplace(|v| 2.0 * v);
+        x2.column_mut(4).fill(0.0);
+        let x3 = x.slice(s![0..3, ..]).to_owned();
+        let yc = c.numeric_array("yc");
+        let x1 = c.numeric_array("x1");
+        for xm in [&x, &x2, &x3] {
+            let rows = xm.nrows();
+            let qr = Qr::decompose(xm.view(), LM_QR_TOL).unwrap();
+            let k = qr.rank();
+            let big = xm.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+            // (a) Q [R[0..=j, j]; 0] = X[:, pivot[j]]
+            for j in 0..k {
+                let mut v = Array1::<f64>::zeros(rows);
+                for i in 0..=j {
+                    v[i] = qr.r(i, j);
+                }
+                let col = qr.q_times(v.view());
+                let want = xm.column(qr.pivot()[j]);
+                for i in 0..rows {
+                    assert!(
+                        (col[i] - want[i]).abs() <= 1e-12 * big,
+                        "column {j}, row {i}: {} vs {}",
+                        col[i],
+                        want[i]
+                    );
+                }
+            }
+            // (b) an aliased column is (numerically) in the span of the identified ones
+            let ident: Vec<usize> = qr.pivot()[..k].to_vec();
+            let xi = xm.select(ndarray::Axis(1), &ident);
+            for &j in &qr.aliased() {
+                let xj = xm.column(j);
+                let norm = xj.dot(&xj).sqrt();
+                if rows <= k {
+                    continue; // exact interpolation: nothing to test
+                }
+                let f = least_squares(xi.view(), xj).unwrap();
+                let r = f.residuals.dot(&f.residuals).sqrt();
+                assert!(
+                    r <= LM_QR_TOL * norm,
+                    "aliased column {j}: residual {r} vs {norm}"
+                );
+            }
+            // (c) Q is orthogonal: qty(q_times(v)) == v and the norm is kept
+            for v in [&yc, &x1] {
+                let v = v.slice(s![..rows]).to_owned();
+                let qv = qr.q_times(v.view());
+                let back = qr.qty(qv.view());
+                let nv = v.dot(&v).sqrt();
+                assert!((qv.dot(&qv).sqrt() - nv).abs() <= 1e-12 * nv);
+                for i in 0..rows {
+                    assert!((back[i] - v[i]).abs() <= 1e-12 * nv);
+                }
+            }
+        }
+        assert_eq!(n, 120);
+    }
+
+    /// Shared by the degenerate-input tests of this module.
+    fn spec_err<T: std::fmt::Debug>(r: EconResult<T>, needle: &str) {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains(needle), "{message}")
+            }
+            other => panic!("expected InvalidSpecification containing {needle:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_least_squares_rejects_invalid_input() {
+        let x = ndarray::array![[1.0, 0.3], [1.0, 1.2], [1.0, 2.1], [1.0, 2.9]];
+        let y = ndarray::array![1.1, 1.9, 3.2, 3.8];
+        let mut xn = x.clone();
+        xn[[2, 1]] = f64::NAN;
+        spec_err(least_squares(xn.view(), y.view()), "x");
+        let mut yi = y.clone();
+        yi[1] = f64::INFINITY;
+        spec_err(least_squares(x.view(), yi.view()), "y");
+        spec_err(least_squares(x.view(), y.slice(s![..3])), "rows");
+        spec_err(least_squares_tol(x.view(), y.view(), 0.0), "tolerance");
+        spec_err(least_squares_tol(x.view(), y.view(), f64::NAN), "tolerance");
+        spec_err(
+            weighted_least_squares(
+                x.view(),
+                y.view(),
+                ndarray::array![1.0, -0.5, 1.0, 1.0].view(),
+            ),
+            "weights",
+        );
+        spec_err(
+            weighted_least_squares(
+                x.view(),
+                y.view(),
+                ndarray::array![1.0, f64::NAN, 1.0, 1.0].view(),
+            ),
+            "weights",
+        );
+        assert!(matches!(
+            weighted_least_squares(x.view(), y.view(), Array1::<f64>::zeros(4).view()),
+            Err(EconError::InsufficientData { .. })
+        ));
+        assert!(matches!(
+            least_squares(
+                Array2::<f64>::zeros((0, 2)).view(),
+                Array1::<f64>::zeros(0).view()
+            ),
+            Err(EconError::InsufficientData { .. })
+        ));
+    }
+}
