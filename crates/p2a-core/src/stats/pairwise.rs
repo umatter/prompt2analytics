@@ -112,6 +112,22 @@ impl PValueAdjustMethod {
     }
 }
 
+crate::option_enum!(
+    PValueAdjustMethod,
+    crate::options::Choices {
+        option: "p_adjust_method",
+        values: &[
+            (&["holm"], PValueAdjustMethod::Holm),
+            (&["hochberg"], PValueAdjustMethod::Hochberg),
+            (&["hommel"], PValueAdjustMethod::Hommel),
+            (&["bonferroni", "bonf"], PValueAdjustMethod::Bonferroni),
+            (&["BH", "fdr", "benjamini-hochberg"], PValueAdjustMethod::BH),
+            (&["BY", "benjamini-yekutieli"], PValueAdjustMethod::BY),
+            (&["none"], PValueAdjustMethod::None),
+        ],
+    }
+);
+
 /// Result of a pairwise t-test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairwiseTTestResult {
@@ -272,7 +288,17 @@ impl std::fmt::Display for PairwiseTTestResult {
     }
 }
 
-/// Adjust p-values for multiple comparisons.
+/// Adjust p-values for multiple comparisons, as R's `p.adjust(p, method)`.
+///
+/// NaN p-values (R's `NA`) are kept in place and left out of the number of tests `n`. With
+/// `n <= 1` the input is returned unchanged, and Hommel's method with `n = 2` is Hochberg's (R).
+/// With `o` the order of the p-values (stable, by `f64::total_cmp`):
+/// - Bonferroni: `min(1, n p)`;
+/// - Holm: `min(1, cummax((n + 1 - i) p[o]))`, ascending;
+/// - Hochberg: `min(1, cummin((n + 1 - i) p[o]))`, descending, i = n..1;
+/// - Hommel: R's algorithm (Wright 1992) on the ascending p-values;
+/// - BH: `min(1, cummin(n / i p[o]))`, descending;
+/// - BY: as BH with the factor `sum_{k <= n} 1 / k`.
 ///
 /// # Arguments
 /// * `p_values` - Vector of raw p-values
@@ -283,136 +309,114 @@ impl std::fmt::Display for PairwiseTTestResult {
 ///
 /// # References
 /// - R `stats::p.adjust()` function
+/// - Wright, S. P. (1992). Adjusted p-values for simultaneous inference. Biometrics 48, 1005-1013.
 pub fn p_adjust(p_values: &[f64], method: PValueAdjustMethod) -> Vec<f64> {
-    let n = p_values.len();
-    if n == 0 {
-        return vec![];
+    let mut out = p_values.to_vec();
+    let keep: Vec<usize> = (0..p_values.len())
+        .filter(|&i| !p_values[i].is_nan())
+        .collect();
+    let n = keep.len();
+    if n <= 1 {
+        return out;
     }
-
-    match method {
-        PValueAdjustMethod::None => p_values.to_vec(),
-
-        PValueAdjustMethod::Bonferroni => {
-            p_values.iter().map(|&p| (p * n as f64).min(1.0)).collect()
-        }
-
+    let p: Vec<f64> = keep.iter().map(|&i| p_values[i]).collect();
+    let method = if n == 2 && method == PValueAdjustMethod::Hommel {
+        PValueAdjustMethod::Hochberg
+    } else {
+        method
+    };
+    let nf = n as f64;
+    let ascending = || {
+        let mut o: Vec<usize> = (0..n).collect();
+        o.sort_by(|&a, &b| p[a].total_cmp(&p[b]));
+        o
+    };
+    let descending = || {
+        let mut o: Vec<usize> = (0..n).collect();
+        o.sort_by(|&a, &b| p[b].total_cmp(&p[a]));
+        o
+    };
+    // adjusted[k] belongs to p[o[k]]
+    let (o, adjusted): (Vec<usize>, Vec<f64>) = match method {
+        PValueAdjustMethod::None => return out,
+        PValueAdjustMethod::Bonferroni => (
+            (0..n).collect(),
+            p.iter().map(|&v| (nf * v).min(1.0)).collect(),
+        ),
         PValueAdjustMethod::Holm => {
-            // Sort p-values with indices
-            let mut indexed: Vec<(usize, f64)> = p_values.iter().cloned().enumerate().collect();
-            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mut adjusted = vec![0.0; n];
-            let mut cummax = 0.0f64;
-
-            for (rank, (orig_idx, p)) in indexed.iter().enumerate() {
-                let factor = (n - rank) as f64;
-                let adj = (p * factor).min(1.0);
-                cummax = cummax.max(adj);
-                adjusted[*orig_idx] = cummax;
-            }
-
-            adjusted
+            let o = ascending();
+            let mut run = f64::NEG_INFINITY;
+            let adj = o
+                .iter()
+                .enumerate()
+                .map(|(k, &j)| {
+                    run = run.max((nf - k as f64) * p[j]);
+                    run.min(1.0)
+                })
+                .collect();
+            (o, adj)
         }
-
-        PValueAdjustMethod::Hochberg => {
-            // Sort p-values with indices (descending)
-            let mut indexed: Vec<(usize, f64)> = p_values.iter().cloned().enumerate().collect();
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mut adjusted = vec![0.0; n];
-            let mut cummin = 1.0f64;
-
-            for (rank, (orig_idx, p)) in indexed.iter().enumerate() {
-                let factor = (rank + 1) as f64;
-                let adj = (p * factor).min(1.0);
-                cummin = cummin.min(adj);
-                adjusted[*orig_idx] = cummin;
-            }
-
-            adjusted
+        PValueAdjustMethod::Hochberg | PValueAdjustMethod::BH | PValueAdjustMethod::BY => {
+            let o = descending();
+            let q = if method == PValueAdjustMethod::BY {
+                (1..=n).map(|k| 1.0 / k as f64).sum::<f64>()
+            } else {
+                1.0
+            };
+            let mut run = f64::INFINITY;
+            let adj = o
+                .iter()
+                .enumerate()
+                .map(|(k, &j)| {
+                    // i runs n..1 along the descending order
+                    let i = (n - k) as f64;
+                    let v = match method {
+                        PValueAdjustMethod::Hochberg => (nf + 1.0 - i) * p[j],
+                        _ => q * nf / i * p[j],
+                    };
+                    run = run.min(v);
+                    run.min(1.0)
+                })
+                .collect();
+            (o, adj)
         }
-
-        PValueAdjustMethod::BH => {
-            // Benjamini-Hochberg: sort descending, cummin of n/rank * p
-            let mut indexed: Vec<(usize, f64)> = p_values.iter().cloned().enumerate().collect();
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mut adjusted = vec![0.0; n];
-            let mut cummin = 1.0f64;
-
-            for (i, (orig_idx, p)) in indexed.iter().enumerate() {
-                let rank = n - i; // Ranks from n down to 1
-                let adj = (p * n as f64 / rank as f64).min(1.0);
-                cummin = cummin.min(adj);
-                adjusted[*orig_idx] = cummin;
-            }
-
-            adjusted
-        }
-
-        PValueAdjustMethod::BY => {
-            // Benjamini-Yekutieli: like BH but with sum(1/i) factor
-            let c_n: f64 = (1..=n).map(|i| 1.0 / i as f64).sum();
-
-            let mut indexed: Vec<(usize, f64)> = p_values.iter().cloned().enumerate().collect();
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mut adjusted = vec![0.0; n];
-            let mut cummin = 1.0f64;
-
-            for (i, (orig_idx, p)) in indexed.iter().enumerate() {
-                let rank = n - i;
-                let adj = (p * n as f64 * c_n / rank as f64).min(1.0);
-                cummin = cummin.min(adj);
-                adjusted[*orig_idx] = cummin;
-            }
-
-            adjusted
-        }
-
         PValueAdjustMethod::Hommel => {
-            // Hommel's procedure - more complex
-            // Uses the Simes inequality
-            let mut indexed: Vec<(usize, f64)> = p_values.iter().cloned().enumerate().collect();
-            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let sorted_p: Vec<f64> = indexed.iter().map(|(_, p)| *p).collect();
-            let indices: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
-
-            // Initialize with Bonferroni
-            let mut q: Vec<f64> = sorted_p.iter().map(|&p| (p * n as f64).min(1.0)).collect();
-
-            for j in (1..n).rev() {
-                let ij: Vec<usize> = (0..=(n - j - 1)).collect();
-                let i2: Vec<usize> = ((n - j)..n).collect();
-
-                let q1 = (j as f64 + 1.0) * sorted_p[i2[0]];
-
-                for i in &ij {
-                    q[*i] = q[*i].min((j as f64 + 1.0) * sorted_p[*i]).min(q1).min(1.0);
+            let o = ascending();
+            let ps: Vec<f64> = o.iter().map(|&j| p[j]).collect();
+            let start = ps
+                .iter()
+                .enumerate()
+                .map(|(k, &v)| nf * v / (k + 1) as f64)
+                .fold(f64::INFINITY, f64::min);
+            let mut q = vec![start; n];
+            let mut pa = vec![start; n];
+            for m in (2..n).rev() {
+                let mf = m as f64;
+                // i1 = 0..n-m+1, i2 = n-m+1..n
+                let split = n - m + 1;
+                let q1 = (split..n)
+                    .enumerate()
+                    .map(|(k, i)| mf * ps[i] / (k + 2) as f64)
+                    .fold(f64::INFINITY, f64::min);
+                for i in 0..split {
+                    q[i] = (mf * ps[i]).min(q1);
                 }
-
-                for i in &i2 {
-                    q[*i] = q[ij[n - j - 1]].min(1.0);
+                let fill = q[n - m];
+                for qi in q.iter_mut().skip(split) {
+                    *qi = fill;
+                }
+                for (a, &b) in pa.iter_mut().zip(&q) {
+                    *a = a.max(b);
                 }
             }
-
-            // Cumulative max to ensure monotonicity
-            let mut cummax = 0.0f64;
-            for qi in &mut q {
-                cummax = cummax.max(*qi);
-                *qi = cummax;
-            }
-
-            // Restore original order
-            let mut adjusted = vec![0.0; n];
-            for (i, &orig_idx) in indices.iter().enumerate() {
-                adjusted[orig_idx] = q[i];
-            }
-
-            adjusted
+            let adj = pa.iter().zip(&ps).map(|(&a, &b)| a.max(b)).collect();
+            (o, adj)
         }
+    };
+    for (k, &j) in o.iter().enumerate() {
+        out[keep[j]] = adjusted[k];
     }
+    out
 }
 
 /// Perform pairwise t-tests between all groups.
@@ -540,8 +544,11 @@ pub fn pairwise_t_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToString>(
                 (t, df, p)
             } else {
                 // Use Welch's t-test
+                // t and the Welch df from the two-sample test; the p-value from the
+                // upper-tail helper, so small tails keep their relative precision (X-17)
                 let result = two_sample_t_test(x, y, 0.0, alternative, false, 0.95)?;
-                (result.t_statistic, result.df, result.p_value)
+                let p = compute_p_value_t(result.t_statistic, result.df, alternative);
+                (result.t_statistic, result.df, p)
             };
 
             t_statistics.push(t_stat);
@@ -657,23 +664,26 @@ fn comparison_count(k: usize) -> EconResult<usize> {
         })
 }
 
-/// Compute p-value for t-statistic.
+/// Compute p-value for t-statistic (the upper-tail helper of `traits::estimator`, so small
+/// tails keep their relative precision).
 fn compute_p_value_t(t_stat: f64, df: f64, alternative: Alternative) -> f64 {
-    use statrs::distribution::{ContinuousCDF, StudentsT};
+    use crate::traits::estimator::t_test_p_value;
 
     if df <= 0.0 || t_stat.is_nan() {
         return f64::NAN;
     }
-    if t_stat.is_infinite() || t_stat.abs() > 1e10 {
-        return 0.0;
-    }
-
-    let t_dist = StudentsT::new(0.0, 1.0, df).unwrap();
-
+    let two_sided = t_test_p_value(t_stat, df);
+    let upper = |t: f64| {
+        if t >= 0.0 {
+            two_sided / 2.0
+        } else {
+            1.0 - two_sided / 2.0
+        }
+    };
     match alternative {
-        Alternative::TwoSided => 2.0 * (1.0 - t_dist.cdf(t_stat.abs())),
-        Alternative::Greater => 1.0 - t_dist.cdf(t_stat),
-        Alternative::Less => t_dist.cdf(t_stat),
+        Alternative::TwoSided => two_sided,
+        Alternative::Greater => upper(t_stat),
+        Alternative::Less => upper(-t_stat),
     }
 }
 
@@ -911,7 +921,7 @@ pub fn pairwise_wilcox_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToStr
 
         // Compute median
         let mut sorted = data.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(f64::total_cmp);
         let median = if n.is_multiple_of(2) {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
         } else {
@@ -1080,35 +1090,172 @@ mod tests {
         assert!((adj[4] - 0.25).abs() < 1e-10);
     }
 
+    use p2a_validation::{Case, Check, Tol};
+    use std::collections::BTreeMap;
+
+    const METHODS: [(PValueAdjustMethod, &str); 7] = [
+        (PValueAdjustMethod::Holm, "holm"),
+        (PValueAdjustMethod::Hochberg, "hochberg"),
+        (PValueAdjustMethod::Hommel, "hommel"),
+        (PValueAdjustMethod::Bonferroni, "bonferroni"),
+        (PValueAdjustMethod::BH, "bh"),
+        (PValueAdjustMethod::BY, "by"),
+        (PValueAdjustMethod::None, "none"),
+    ];
+    const VECTORS: [&str; 12] = [
+        "legacy_holm",
+        "legacy_validate",
+        "legacy_five",
+        "hommel_two",
+        "hommel_six",
+        "hommel_three",
+        "hommel_five",
+        "ties",
+        "na_three",
+        "na_four",
+        "single",
+        "ones",
+    ];
+    /// p.adjust is arithmetic on the p-values; NaN equals NaN.
+    const ADJ: Tol = Tol::new(1e-12, 1e-15);
+
+    fn adj_check(case: &Case, c: &mut Check, v: &str, m: PValueAdjustMethod, mn: &str) {
+        c.vector(
+            &format!("{v}_{mn}"),
+            &p_adjust(&case.vector(&format!("{v}_p")), m),
+            ADJ,
+        );
+    }
+
+    /// set -> (x, g) from the case's long-form dataset (set, x, g).
+    fn sets(ds: &crate::data::Dataset) -> BTreeMap<String, (Vec<f64>, Vec<String>)> {
+        let df = ds.df();
+        let text = |name: &str| -> Vec<String> {
+            df.column(name)
+                .unwrap()
+                .str()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap().to_string())
+                .collect()
+        };
+        let (s, g) = (text("set"), text("g"));
+        let (x, _) =
+            crate::data::columns::numeric_column(df, "x", crate::data::columns::NaPolicy::Fail)
+                .unwrap();
+        let mut out: BTreeMap<String, (Vec<f64>, Vec<String>)> = BTreeMap::new();
+        for i in 0..x.len() {
+            let e = out.entry(s[i].clone()).or_default();
+            e.0.push(x[i]);
+            e.1.push(g[i].clone());
+        }
+        out
+    }
+
+    /// R's lower triangle: (B, A), (C, A), (C, B)
+    const PAIRS: [(usize, usize); 3] = [(1, 0), (2, 0), (2, 1)];
+
+    #[test]
+    fn test_validate_p_adjust_stat_p_adjust() {
+        let case = Case::load("stat_p_adjust");
+        let mut c = Check::new(&case);
+        for v in VECTORS {
+            for (m, mn) in METHODS {
+                adj_check(&case, &mut c, v, m, mn);
+            }
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_p_adjust_hommel_against_r() {
+        // STAT-31: a raw 0.5 came back as 0.006 (hommel_six)
+        let case = Case::load("stat_p_adjust");
+        let mut c = Check::new(&case);
+        for v in [
+            "hommel_two",
+            "hommel_six",
+            "hommel_three",
+            "hommel_five",
+            "legacy_five",
+            "ties",
+        ] {
+            let raw = case.vector(&format!("{v}_p"));
+            let adj = p_adjust(&raw, PValueAdjustMethod::Hommel);
+            for (a, r) in adj.iter().zip(&raw) {
+                assert!(a >= r, "{v}: adjusted {a} below raw {r}");
+            }
+            adj_check(&case, &mut c, v, PValueAdjustMethod::Hommel, "hommel");
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_p_adjust_nan_kept_and_excluded_from_n() {
+        // R: NA p-values stay NA and are not counted in n (STAT-30)
+        let case = Case::load("stat_p_adjust");
+        let mut c = Check::new(&case);
+        for (m, mn) in METHODS {
+            let adj = p_adjust(&case.vector("na_four_p"), m);
+            assert!(adj[1].is_nan(), "{mn}: {adj:?}");
+            adj_check(&case, &mut c, "na_four", m, mn);
+        }
+        c.finish();
+        let mut p: Vec<f64> = (1..=25).map(|i| i as f64 / 30.0).collect();
+        for i in [3, 11, 20] {
+            p[i] = f64::NAN;
+        }
+        for (m, mn) in METHODS {
+            let adj = p_adjust(&p, m);
+            let nan: Vec<usize> = (0..25).filter(|&i| adj[i].is_nan()).collect();
+            assert_eq!(nan, vec![3, 11, 20], "{mn}");
+        }
+    }
+
+    #[test]
+    fn test_p_adjust_method_parses_aliases_and_rejects_unknown() {
+        PValueAdjustMethod::choices().validate().unwrap();
+        for s in ["fdr", "BH", "benjamini-hochberg"] {
+            assert_eq!(
+                s.parse::<PValueAdjustMethod>().unwrap(),
+                PValueAdjustMethod::BH,
+                "{s}"
+            );
+        }
+        assert_eq!(
+            "bonf".parse::<PValueAdjustMethod>().unwrap(),
+            PValueAdjustMethod::Bonferroni
+        );
+        assert_eq!(
+            "Hommel".parse::<PValueAdjustMethod>().unwrap(),
+            PValueAdjustMethod::Hommel
+        );
+        let e = "sidak"
+            .parse::<PValueAdjustMethod>()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("holm"), "{e}");
+        assert_eq!(PValueAdjustMethod::Hommel.to_string(), "hommel");
+        // the inherent parser stays
+        assert_eq!(
+            PValueAdjustMethod::from_str("fdr"),
+            Some(PValueAdjustMethod::BH)
+        );
+    }
+
     #[test]
     fn test_p_adjust_holm() {
-        // R: p.adjust(c(0.01, 0.04, 0.03, 0.02), method = "holm")
-        // Expected: 0.04, 0.08, 0.08, 0.06
-        let p = vec![0.01, 0.04, 0.03, 0.02];
-        let adj = p_adjust(&p, PValueAdjustMethod::Holm);
-
-        // Sorted: 0.01, 0.02, 0.03, 0.04
-        // Adjusted: 0.01*4=0.04, 0.02*3=0.06, 0.03*2=0.06, 0.04*1=0.04
-        // With cummax: 0.04, 0.06, 0.06, 0.06
-        // Back to original order: [0.04, 0.06, 0.06, 0.06]
-        // But R gives: [0.04, 0.08, 0.08, 0.06]
-        // Let me recalculate...
-
-        // Holm: multiply sorted p_i by (n - i + 1), then cumulative max
-        // Sorted (with orig idx): (0, 0.01), (3, 0.02), (2, 0.03), (1, 0.04)
-        // Rank 1: 0.01 * 4 = 0.04, cummax = 0.04 → orig[0] = 0.04
-        // Rank 2: 0.02 * 3 = 0.06, cummax = 0.06 → orig[3] = 0.06
-        // Rank 3: 0.03 * 2 = 0.06, cummax = 0.06 → orig[2] = 0.06
-        // Rank 4: 0.04 * 1 = 0.04, cummax = 0.06 → orig[1] = 0.06
-        // Wait, the result should be [0.04, 0.06, 0.06, 0.06]
-
-        // Let me check R:
-        // > p.adjust(c(0.01, 0.04, 0.03, 0.02), method = "holm")
-        // [1] 0.04 0.04 0.06 0.06
-        // Hmm, different from what I calculated. Let me trace through more carefully.
-
-        assert!((adj[0] - 0.04).abs() < 1e-10); // 0.01 * 4
-        // The exact values depend on tie-handling
+        // R: p.adjust(c(0.01, 0.04, 0.03, 0.02), "holm") is 0.04, 0.06, 0.06, 0.06
+        let case = Case::load("stat_p_adjust");
+        let mut c = Check::new(&case);
+        adj_check(
+            &case,
+            &mut c,
+            "legacy_holm",
+            PValueAdjustMethod::Holm,
+            "holm",
+        );
+        c.finish();
     }
 
     #[test]
@@ -1205,110 +1352,65 @@ mod tests {
 
     #[test]
     fn test_validate_pairwise_t_test_pooled_against_r() {
-        // R code:
-        // x <- c(1.0, 2.0, 3.0, 2.5, 1.5, 10.0, 11.0, 12.0, 10.5, 11.5, 20.0, 21.0, 22.0, 20.5, 21.5)
-        // g <- factor(c(rep("A", 5), rep("B", 5), rep("C", 5)))
-        // pairwise.t.test(x, g, pool.sd = TRUE, p.adjust.method = "none")
-        //
-        // Expected p-values (lower triangular):
-        //     A           B
-        // B   1.4e-10     -
-        // C   1.3e-15     1.4e-10
-
-        let values = vec![
-            1.0, 2.0, 3.0, 2.5, 1.5, 10.0, 11.0, 12.0, 10.5, 11.5, 20.0, 21.0, 22.0, 20.5, 21.5,
+        // R: pairwise.t.test(x, g, pool.sd = TRUE / FALSE, p.adjust.method = ...) on set a.
+        // Tail p-values down to 7.1e-14: relative with no absolute floor (X-17).
+        let (case, ds) = crate::test_support::load_case("stat_pairwise_legacy");
+        let (x, g) = sets(&ds).remove("a").unwrap();
+        let tol = Tol::new(1e-9, 0.0);
+        let mut c = Check::new(&case);
+        let runs = [
+            (true, PValueAdjustMethod::None, "a_t_pooled_none"),
+            (true, PValueAdjustMethod::Holm, "a_t_pooled_holm"),
+            (true, PValueAdjustMethod::Hommel, "a_t_pooled_hommel"),
+            (false, PValueAdjustMethod::None, "a_t_welch_none"),
         ];
-        let groups = vec![
-            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
-        ];
-
-        let result = pairwise_t_test(
-            &values,
-            &groups,
-            true,
-            Alternative::TwoSided,
-            PValueAdjustMethod::None,
-        )
-        .unwrap();
-
-        // B vs A (index 0)
-        let p_ba = result.p_values_raw[result.index(1, 0)];
-        assert!(p_ba < 1e-9, "B vs A p-value should be very small: {}", p_ba);
-
-        // C vs A (index 1)
-        let p_ca = result.p_values_raw[result.index(2, 0)];
-        assert!(
-            p_ca < 1e-12,
-            "C vs A p-value should be very small: {}",
-            p_ca
-        );
-
-        // C vs B (index 2)
-        let p_cb = result.p_values_raw[result.index(2, 1)];
-        assert!(p_cb < 1e-9, "C vs B p-value should be very small: {}", p_cb);
+        for (pool, m, key) in runs {
+            let r = pairwise_t_test(&x, &g, pool, Alternative::TwoSided, m).unwrap();
+            assert_eq!(r.group_names, vec!["A", "B", "C"]);
+            let p: Vec<f64> = PAIRS
+                .iter()
+                .map(|&(i, j)| {
+                    if m == PValueAdjustMethod::None {
+                        r.p_value_raw(i, j)
+                    } else {
+                        r.p_value_adj(i, j)
+                    }
+                })
+                .collect();
+            c.vector(key, &p, tol);
+        }
+        c.finish();
     }
 
     #[test]
     fn test_validate_p_adjust_holm_against_r() {
-        // R: p.adjust(c(0.001, 0.01, 0.05, 0.1), method = "holm")
-        // [1] 0.004 0.030 0.100 0.100
-        let p = vec![0.001, 0.01, 0.05, 0.1];
-        let adj = p_adjust(&p, PValueAdjustMethod::Holm);
-
-        assert!(
-            (adj[0] - 0.004).abs() < 0.001,
-            "Expected 0.004, got {}",
-            adj[0]
+        // R: p.adjust(c(0.001, 0.01, 0.05, 0.1), "holm") is 0.004, 0.03, 0.1, 0.1
+        let case = Case::load("stat_p_adjust");
+        let mut c = Check::new(&case);
+        adj_check(
+            &case,
+            &mut c,
+            "legacy_validate",
+            PValueAdjustMethod::Holm,
+            "holm",
         );
-        assert!(
-            (adj[1] - 0.030).abs() < 0.001,
-            "Expected 0.030, got {}",
-            adj[1]
-        );
-        assert!(
-            (adj[2] - 0.100).abs() < 0.001,
-            "Expected 0.100, got {}",
-            adj[2]
-        );
-        assert!(
-            (adj[3] - 0.100).abs() < 0.001,
-            "Expected 0.100, got {}",
-            adj[3]
-        );
+        c.finish();
     }
 
     #[test]
     fn test_validate_p_adjust_bh_against_r() {
-        // R: p.adjust(c(0.001, 0.01, 0.05, 0.1), method = "BH")
-        // [1] 0.004 0.020 0.0667 0.100
-        let p = vec![0.001, 0.01, 0.05, 0.1];
-        let adj = p_adjust(&p, PValueAdjustMethod::BH);
-
-        assert!(
-            (adj[0] - 0.004).abs() < 0.001,
-            "Expected 0.004, got {}",
-            adj[0]
+        // R: p.adjust(c(0.001, 0.01, 0.05, 0.1), "BH") is 0.004, 0.02, 0.0667, 0.1
+        let case = Case::load("stat_p_adjust");
+        let mut c = Check::new(&case);
+        adj_check(
+            &case,
+            &mut c,
+            "legacy_validate",
+            PValueAdjustMethod::BH,
+            "bh",
         );
-        assert!(
-            (adj[1] - 0.020).abs() < 0.001,
-            "Expected 0.020, got {}",
-            adj[1]
-        );
-        assert!(
-            (adj[2] - 0.0667).abs() < 0.001,
-            "Expected 0.0667, got {}",
-            adj[2]
-        );
-        assert!(
-            (adj[3] - 0.100).abs() < 0.001,
-            "Expected 0.100, got {}",
-            adj[3]
-        );
+        c.finish();
     }
-
-    // ========================================================================
-    // Pairwise Wilcoxon Tests
-    // ========================================================================
 
     #[test]
     fn test_pairwise_wilcox_basic() {
@@ -1409,116 +1511,61 @@ mod tests {
 
     #[test]
     fn test_validate_pairwise_wilcox_against_r() {
-        // R code:
-        // x <- c(1.0, 2.0, 3.0, 2.5, 1.5, 10.0, 11.0, 12.0, 10.5, 11.5, 20.0, 21.0, 22.0, 20.5, 21.5)
-        // g <- factor(c(rep("A", 5), rep("B", 5), rep("C", 5)))
-        // pairwise.wilcox.test(x, g, p.adjust.method = "none", exact = FALSE)
-        //
-        // Expected (lower triangular p-values):
-        //     A           B
-        // B   0.0079      -
-        // C   0.0079      0.0079
-        //
-        // (Note: exact values may vary slightly due to normal approximation)
-
-        let values = vec![
-            1.0, 2.0, 3.0, 2.5, 1.5, 10.0, 11.0, 12.0, 10.5, 11.5, 20.0, 21.0, 22.0, 20.5, 21.5,
-        ];
-        let groups = vec![
-            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
-        ];
-
-        let result = pairwise_wilcox_test(
-            &values,
-            &groups,
+        // R: pairwise.wilcox.test(x, g, p.adjust.method = "none", exact = FALSE) on set a
+        let (case, ds) = crate::test_support::load_case("stat_pairwise_legacy");
+        let (x, g) = sets(&ds).remove("a").unwrap();
+        let r = pairwise_wilcox_test(
+            &x,
+            &g,
             Alternative::TwoSided,
             PValueAdjustMethod::None,
             Some(false),
         )
         .unwrap();
-
-        // All three comparisons should have very small p-values
-        // B vs A
-        let p_ba = result.p_values_raw[result.index(1, 0)];
-        assert!(p_ba < 0.05, "B vs A p-value should be < 0.05: {}", p_ba);
-
-        // C vs A
-        let p_ca = result.p_values_raw[result.index(2, 0)];
-        assert!(p_ca < 0.05, "C vs A p-value should be < 0.05: {}", p_ca);
-
-        // C vs B
-        let p_cb = result.p_values_raw[result.index(2, 1)];
-        assert!(p_cb < 0.05, "C vs B p-value should be < 0.05: {}", p_cb);
+        let p: Vec<f64> = PAIRS.iter().map(|&(i, j)| r.p_value_raw(i, j)).collect();
+        Check::new(&case)
+            .vector("a_w_normal_none", &p, Tol::p_value(15))
+            .finish();
     }
 
     #[test]
     fn test_validate_pairwise_wilcox_exact_small_sample() {
-        // R code:
-        // x <- c(1, 2, 3, 4, 5, 6)
-        // g <- factor(c("A", "A", "A", "B", "B", "B"))
-        // pairwise.wilcox.test(x, g, exact = TRUE, p.adjust.method = "none")
-        //
-        // Expected p-value ≈ 0.1 (exact, no ties)
-
-        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let groups = vec!["A", "A", "A", "B", "B", "B"];
-
-        let result = pairwise_wilcox_test(
-            &values,
-            &groups,
+        // R: pairwise.wilcox.test(x, g, exact = TRUE, p.adjust.method = "none") on set b
+        let (case, ds) = crate::test_support::load_case("stat_pairwise_legacy");
+        let (x, g) = sets(&ds).remove("b").unwrap();
+        let r = pairwise_wilcox_test(
+            &x,
+            &g,
             Alternative::TwoSided,
             PValueAdjustMethod::None,
             Some(true),
         )
         .unwrap();
-
-        assert_eq!(result.n_comparisons, 1);
-        // The exact p-value for W=6 (sum of ranks 1,2,3) with n1=n2=3 should be 0.1
-        assert!(
-            result.p_values_raw[0] > 0.05 && result.p_values_raw[0] < 0.2,
-            "Expected p-value around 0.1, got {}",
-            result.p_values_raw[0]
-        );
-        assert!(result.exact);
+        assert!(r.exact);
+        Check::new(&case)
+            .vector("b_w_exact_none", &r.p_values_raw, Tol::p_value(6))
+            .finish();
     }
 
     #[test]
     fn test_pairwise_wilcox_with_holm_adjustment() {
-        // R code:
-        // x <- c(1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 20, 21, 22, 23, 24)
-        // g <- factor(c(rep("A", 5), rep("B", 5), rep("C", 5)))
-        // pairwise.wilcox.test(x, g, p.adjust.method = "holm")
-
-        let values = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0, 20.0, 21.0, 22.0, 23.0, 24.0,
-        ];
-        let groups = vec![
-            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
-        ];
-
-        let result = pairwise_wilcox_test(
-            &values,
-            &groups,
+        // R: pairwise.wilcox.test(x, g, p.adjust.method = "holm") on set c (exact: no ties)
+        let (case, ds) = crate::test_support::load_case("stat_pairwise_legacy");
+        let (x, g) = sets(&ds).remove("c").unwrap();
+        let r = pairwise_wilcox_test(
+            &x,
+            &g,
             Alternative::TwoSided,
             PValueAdjustMethod::Holm,
             None,
         )
         .unwrap();
-
-        assert_eq!(result.n_comparisons, 3);
-
-        // All adjusted p-values should be >= raw p-values
-        for i in 0..result.n_comparisons {
-            assert!(
-                result.p_values_adj[i] >= result.p_values_raw[i],
-                "Adjusted p-value should be >= raw p-value"
-            );
-        }
-
-        // Check that W statistics are stored
-        for i in 0..result.n_comparisons {
-            assert!(result.w_statistics[i] > 0.0);
-        }
+        let raw: Vec<f64> = PAIRS.iter().map(|&(i, j)| r.p_value_raw(i, j)).collect();
+        let adj: Vec<f64> = PAIRS.iter().map(|&(i, j)| r.p_value_adj(i, j)).collect();
+        Check::new(&case)
+            .vector("c_w_holm", &adj, Tol::p_value(15))
+            .vector("c_w_none", &raw, Tol::p_value(15))
+            .finish();
     }
 
     #[test]

@@ -152,6 +152,53 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "p_adjust",
+      "name": "p-value adjustment (Holm, Hochberg, Hommel, Bonferroni, BH, BY, none) with NA p-values",
+      "category": "stats",
+      "reference": "stats::p.adjust (n = number of non-NA p-values)",
+      "doc": "validation/stats/pairwise_t_test.md",
+      "cases": [
+        "stat_p_adjust"
+      ],
+      "tests": [
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_stat_p_adjust",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_hommel_against_r",
+        "p2a-core::stats::pairwise::tests::test_p_adjust_nan_kept_and_excluded_from_n",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_holm_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_bh_against_r",
+        "p2a-core::stats::pairwise::tests::test_p_adjust_holm"
+      ],
+      "quantities": [
+        "12 vectors (legacy, STAT-31's Hommel examples, ties, NA, single, ones) x 7 methods"
+      ],
+      "tolerance": "1e-12 relative + 1e-15 (arithmetic in R's order); NaN equals NaN",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "pairwise_legacy",
+      "name": "Pairwise t and Wilcoxon tests on the legacy data of pairwise.rs",
+      "category": "stats",
+      "reference": "stats::pairwise.t.test(pool.sd, p.adjust.method); stats::pairwise.wilcox.test(exact, p.adjust.method)",
+      "doc": "validation/stats/pairwise_t_test.md",
+      "cases": [
+        "stat_pairwise_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_t_test_pooled_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_exact_small_sample",
+        "p2a-core::stats::pairwise::tests::test_pairwise_wilcox_with_holm_adjustment"
+      ],
+      "quantities": [
+        "pooled t p (none, Holm, Hommel), Welch t p, down to 7.1e-14",
+        "Wilcoxon normal-approximation, exact and Holm-adjusted p"
+      ],
+      "tolerance": "t p-values 1e-9 relative without an absolute floor; Wilcoxon p validation/README.md (n = 6-15)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
