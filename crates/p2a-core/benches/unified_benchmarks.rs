@@ -36,6 +36,7 @@ static ALLOC: TrackingAllocator = TrackingAllocator;
 
 use ndarray::{Array1, Array2};
 use p2a_core::DesignMatrix;
+use p2a_core::econometrics::matching::{MOrder, MatchOptions, match_it_with};
 use p2a_core::econometrics::{
     AftConfig, AftDistribution, DoubleMLConfig, FeglmConfig, LtmleConfig, LtmleData,
     PanelUnitRootConfig, run_aft, run_competing_risks, run_double_ml, run_ltmle,
@@ -151,7 +152,6 @@ use p2a_core::{
     hierarchical,
     kmeans,
     log_rank_test,
-    match_it,
     pca,
     random_forest,
     run_cbps,
@@ -2555,8 +2555,13 @@ fn main() {
     for n in sizes_for(&["Matching"], [100, 1000]) {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
+        // The R side runs matchit(.., m.order = "data"); MatchIt's default for a
+        // propensity-score distance, and p2a's since T3-WP25, is "largest", so both
+        // sides name the order.
+        let mut opts = MatchOptions::default();
+        opts.m_order = Some(MOrder::Data);
         let mut result = run_benchmark_tracked("Matching", "nearest", n, &slow_config, || {
-            match_it(
+            match_it_with(
                 &dataset,
                 "treatment",
                 &["x1", "x2"],
@@ -2566,9 +2571,10 @@ fn main() {
                     replace: false,
                 },
                 None,
+                &opts,
             )
         });
-        if let Ok(ref m) = match_it(
+        if let Ok(ref m) = match_it_with(
             &dataset,
             "treatment",
             &["x1", "x2"],
@@ -2578,6 +2584,7 @@ fn main() {
                 replace: false,
             },
             None,
+            &opts,
         ) {
             let mut outputs = BTreeMap::new();
             let n_matched = m.weights.iter().filter(|&&w| w > 0.0).count();
