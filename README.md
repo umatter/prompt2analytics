@@ -1,7 +1,6 @@
 # prompt2analytics
 
 [![CI](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/umatter/prompt2analytics/branch/main/graph/badge.svg)](https://codecov.io/gh/umatter/prompt2analytics)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-yellow.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-blue.svg)](https://www.rust-lang.org/)
 
@@ -618,9 +617,12 @@ cannot be created.
 ### Running Tests
 
 ```bash
-cargo test                              # All tests
+cargo test                              # All tests (benchmark-only tests report as ignored)
 cargo test -p p2a-core                  # Core library only
 cargo test -p p2a-core -- test_validate # Validation tests
+
+# Benchmark-only tests, in a release build (docs/guides/TESTING.md lists them)
+cargo test -p p2a-core --release --no-default-features --features ci --test benchmark_ml_rust -- --ignored --nocapture
 ```
 
 ### Linting

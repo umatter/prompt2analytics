@@ -1026,16 +1026,13 @@ fn spectrum_smoothed_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                spectrum(
-                    &x,
-                    SpectrumConfig {
-                        spans: Some(vec![3, 3]),
-                        taper: 0.1,
-                        detrend: true,
-                        demean: true,
-                        pad_ratio: 1.0,
-                    },
-                )
+                let mut config = SpectrumConfig::default();
+                config.spans = Some(vec![3, 3]);
+                config.taper = 0.1;
+                config.detrend = true;
+                config.demean = true;
+                config.pad_ratio = 1.0;
+                spectrum(&x, config)
             });
         });
     }

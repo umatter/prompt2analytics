@@ -1030,11 +1030,14 @@ Auto-discovered guidance:
   (SurrealDB), `cuda`, the Dioxus desktop target (WebKit/GTK), and `p2a-chat` tests (it has no test surface).
   These are exercised locally or on the self-hosted runner. A weekly `audit.yml` runs `cargo audit`; its RUSTSEC
   exemptions live as flags in that file (not `.cargo/audit.toml`, which is gitignored and would never reach CI).
-- Only one test is `#[ignore]`d (an HDBSCAN benchmark in `ml/advanced_clustering_mod/advanced.rs`);
-  run it with `--release -- --ignored`. `docs/guides/TESTING.md` lists expected runtimes and memory needs.
-- **`tests/benchmark_ml_rust.rs` and `tests/benchmark_fast_implementations.rs` are benchmarks, not
-  correctness tests**, and `cargo test -p p2a-core` runs them. In a debug build the ML one has been
-  observed to burn 16+ minutes of CPU. Use `--lib` for a fast correctness loop.
+- **Ignored tests are benchmarks.** `tests/benchmark_ml_rust.rs`, every test in
+  `tests/benchmark_fast_implementations.rs` except `verify_fast_roc_accuracy`, and the HDBSCAN benchmark
+  in `ml/advanced_clustering_mod/` time code and assert nothing, so they carry
+  `#[ignore = "benchmark; ..."]` and `cargo test` (CI included) reports them as ignored. In CI's debug
+  build `benchmark_ml_rust` alone took 1792.67 s before it was ignored (Aug 2026). Run one with
+  `cargo test -p p2a-core --release --no-default-features --features ci --test benchmark_ml_rust -- --ignored --nocapture`.
+  A new timing-only test gets the same attribute or goes in `benches/`. `--lib` is still the fast
+  correctness loop; `docs/guides/TESTING.md` lists runtimes and memory needs.
 - **Wall-clock assertions**: seven exist, all release-only (`cfg!(debug_assertions)` guards), so a
   debug `cargo test` skips them and `cargo test --release` on a slow or loaded machine can fail them.
   In p2a-core: `test_fast_mboost_componentwise_speed` (1 s), `test_fast_xgboost_speed` (10 s), the
