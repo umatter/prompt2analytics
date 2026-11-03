@@ -114,15 +114,15 @@
 //! | `CausalImpact` | [`causal_impact()`], [`run_causal_impact`] |
 
 pub mod ar;
-mod arima_model;
+pub mod arima_model;
 pub mod causal_impact;
-mod changepoint;
+pub mod changepoint;
 pub mod cpgram;
 pub mod decompose;
 pub mod garch;
-mod holtwinters;
+pub mod holtwinters;
 pub mod kalman;
-mod mstl;
+pub mod mstl;
 pub mod stl;
 pub mod structts;
 pub mod tsutils;

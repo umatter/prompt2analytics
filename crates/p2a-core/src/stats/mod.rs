@@ -67,19 +67,19 @@
 //! - [`loglin`] - Log-linear models
 //! - [`spline`], [`approx`] - Interpolation
 
-mod acf;
-mod anova;
+pub mod acf;
+pub mod anova;
 pub mod ansari;
 pub mod bartlett;
 pub mod binomtest;
 pub mod boxtest;
 pub mod cancor;
-mod chisq;
+pub mod chisq;
 pub mod constroptim;
-mod contingency;
-mod correlation;
+pub mod contingency;
+pub mod correlation;
 pub mod cortest;
-mod descriptive;
+pub mod descriptive;
 pub mod factanal;
 pub mod fisher;
 pub mod fligner;
@@ -104,13 +104,14 @@ pub mod pptest;
 pub mod proptest;
 pub mod proptrendtest;
 pub mod quade;
+pub mod ranks;
 pub mod robust;
 pub mod secontrast;
 pub mod shapiro;
 #[cfg(feature = "spectral-analysis")]
 pub mod spectrum;
 pub mod spline;
-mod ttest;
+pub mod ttest;
 pub mod tukey;
 pub mod vartest;
 pub mod weighted;

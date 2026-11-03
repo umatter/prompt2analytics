@@ -189,40 +189,41 @@
 //! | `earth` | [`mars`] |
 //! | `arules` | [`apriori`], [`eclat`] |
 
-mod adaboost;
-mod advanced_clustering_mod;
+pub mod adaboost;
+pub mod advanced_clustering_mod;
 pub mod apriori;
-mod bart;
-mod bart_causal;
-mod c50;
-mod cart;
-mod causal_forest;
-mod cluster_optimized;
-mod cluster_validation;
-mod clustering;
-mod ctree;
-mod cubist;
+pub mod bart;
+pub mod bart_causal;
+pub mod c50;
+pub mod cart;
+pub mod causal_forest;
+pub mod cluster_optimized;
+pub mod cluster_validation;
+pub mod clustering;
+pub mod ctree;
+pub mod cubist;
 pub mod dual_tree;
-mod evaluation;
-mod evaluation_fast;
-mod extract;
-mod gbm;
-mod ice;
+pub mod evaluation;
+pub mod evaluation_fast;
+pub mod extract;
+pub mod gbm;
+pub mod hclust;
+pub mod ice;
 pub mod kdtree;
-mod lightgbm;
-mod mars;
-mod mboost;
-mod mboost_fast;
-mod pdp;
+pub mod lightgbm;
+pub mod mars;
+pub mod mboost;
+pub mod mboost_fast;
+pub mod pdp;
 pub mod ppr;
-mod quantile_rf;
-mod reduction;
-mod shap;
-mod svm;
-mod svm_fast;
+pub mod quantile_rf;
+pub mod reduction;
+pub mod shap;
+pub mod svm;
+pub mod svm_fast;
 pub mod trees;
-mod xgboost;
-mod xgboost_fast;
+pub mod xgboost;
+pub mod xgboost_fast;
 
 /// Bytes a heap allocation of `size` bytes occupies under glibc malloc (the
 /// allocator of the Linux builds): the size plus an 8-byte header, rounded up

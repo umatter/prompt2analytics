@@ -31,13 +31,13 @@
 //! let computed = mutate(&renamed, "age_squared", MutateExpr::Function("square".into(), "age".into()))?;
 //! ```
 
-mod aggregate;
-mod clean;
-mod error;
-mod features;
-mod join;
-mod reshape;
-mod transform;
+pub mod aggregate;
+pub mod clean;
+pub mod error;
+pub mod features;
+pub mod join;
+pub mod reshape;
+pub mod transform;
 
 /// Loop iterations between two cooperative-cancellation checkpoints
 /// ([`crate::resource::checkpoint`]) in the munging loops.

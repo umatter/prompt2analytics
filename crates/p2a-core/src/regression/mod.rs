@@ -65,19 +65,19 @@
 //! # }
 //! ```
 
-mod diagnostics;
-mod evalue;
-mod glmnet;
-mod gls;
+pub mod diagnostics;
+pub mod evalue;
+pub mod glmnet;
+pub mod gls;
 pub mod line;
-mod loess;
-mod marginal_effects;
-mod nls;
-mod ols;
-mod quantreg;
-mod sensemakr;
-mod smooth_spline;
-mod step;
+pub mod loess;
+pub mod marginal_effects;
+pub mod nls;
+pub mod ols;
+pub mod quantreg;
+pub mod sensemakr;
+pub mod smooth_spline;
+pub mod step;
 pub mod supsmu;
 
 pub use diagnostics::{

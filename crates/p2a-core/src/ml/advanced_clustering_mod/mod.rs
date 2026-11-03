@@ -26,6 +26,19 @@
 //! - n < 10,000 && d <= 15: KD-Tree + Prim's MST (good balance)
 //! - n >= 10,000 && d <= 15: Dual-Tree Boruvka (best scaling)
 //! - d > 15: Parallel brute-force (KD-tree degrades in high dimensions)
+//!
+//! # Module paths
+//!
+//! Each family is a public module, and the flat names are the same items:
+//!
+//! ```
+//! use p2a_core::ml::advanced_clustering_mod::{common::ClusteringAlgorithm, hdbscan::HdbscanResult};
+//! use p2a_core::ml::{ClusteringAlgorithm as Flat, HdbscanResult as FlatResult};
+//!
+//! fn same(a: ClusteringAlgorithm) -> Flat { a }
+//! fn same_result(r: HdbscanResult) -> FlatResult { r }
+//! assert_eq!(same(ClusteringAlgorithm::BruteForce), Flat::BruteForce);
+//! ```
 
 pub mod affinity;
 pub mod common;

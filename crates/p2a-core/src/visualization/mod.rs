@@ -14,9 +14,9 @@
 //! - Interactive exploration of data
 //! - HTML output for web display
 
-mod charts;
+pub mod charts;
 pub mod colors;
-mod heatmap;
+pub mod heatmap;
 pub mod interactive;
 
 pub use charts::{

@@ -165,13 +165,13 @@
 pub mod cleaning_session;
 pub mod columns;
 #[cfg(feature = "database")]
-mod database;
-mod dataset;
-mod loader;
+pub mod database;
+pub mod dataset;
+pub mod loader;
 pub mod munging;
 pub mod quality;
-mod sas;
-mod stata;
+pub mod sas;
+pub mod stata;
 pub mod suggestion;
 pub mod verification;
 
