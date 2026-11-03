@@ -382,7 +382,11 @@ fn convergence_error(e: tails::NoConvergence) -> EconError {
     EconError::ConvergenceFailure {
         iterations: e.iterations,
         last_change: e.last_change,
-        suggestion: format!("{} did not converge; please report the arguments", e.what),
+        suggestion: format!(
+            "{} did not converge; the degrees of freedom are likely beyond the supported range \
+             (about 1e12, see the p2a_core::traits::estimator docs); if not, please report the arguments",
+            e.what
+        ),
     }
 }
 
@@ -395,7 +399,7 @@ fn convergence_error(e: tails::NoConvergence) -> EconError {
 /// - Student's t with df >= 1000 uses the four-term Cornish-Fisher expansion (Fisher 1925; A&S 26.7.5)
 ///   where z^2 <= 0.005 df. There its truncation error is below double precision, verified against R
 ///   up to df = 1e12.
-/// - Iteration caps bound the supported df. The chi-square series needs about 1.4 sqrt(df) terms near
+/// - Iteration caps bound the supported df. The chi-square series needs about 5 sqrt(df) terms near
 ///   the centre and reaches its 1e7 cap at df of about 4e12 (the continued fraction stays below its
 ///   cap there); the F continued fraction was checked to df1, df2 = 1e12. Up to df = 1e12 every helper
 ///   converges. Beyond the caps the p-value helpers return NaN and the quantile helpers
@@ -418,7 +422,8 @@ mod tails {
     const STEP_ACCEPT: f64 = 1e-8;
     const EXP_MAX: f64 = 709.78;
 
-    /// An iteration that hit its cap (never observed; reported as ConvergenceFailure / NaN).
+    /// An iteration that hit its cap (beyond the supported df range, see the module docs; reported as
+    /// ConvergenceFailure / NaN).
     #[derive(Debug, Clone, Copy)]
     pub(super) struct NoConvergence {
         pub(super) what: &'static str,
@@ -774,7 +779,7 @@ mod tails {
     }
     /// 2 P(Z > z) for z >= 0 as the chi-square(1) upper tail of z^2 (accurate to the
     /// chi-square tail's ~1e-13 relative; statrs `erfc` is not). NaN if the series or continued
-    /// fraction hit its cap (never observed).
+    /// fraction hit its cap (beyond the supported df range, see the module docs).
     pub(super) fn normal_two_sided(z: f64) -> f64 {
         if z == 0.0 {
             return 1.0;
@@ -1357,9 +1362,8 @@ mod tests {
         }
     }
 
-    /// Seeded draws over p in [1e-300, 1 - 1e-300] and df from 0.1 to 1e12 (t) and 0.03 to
-    /// 1e5 (chi-square): the quantile solvers return, and the tails of their answers give p
-    /// back.
+    /// The chi-square helpers' documented df range: converged up to 1e12, NaN or
+    /// ConvergenceFailure near the centre beyond the series cap.
     #[test]
     fn test_chi_squared_helpers_df_range() {
         // Inside the documented range: finite, and just below 1/2 at the mean.
@@ -1373,9 +1377,12 @@ mod tests {
         ));
         // Far from the centre the continued fraction still converges at df = 1e14.
         let far = chi_squared_p_value(1.1e14, 1e14);
-        assert!(far == 0.0 || far.is_finite(), "{far}");
+        assert_eq!(far, 0.0, "{far}");
     }
 
+    /// Seeded draws: lower-tail p in [1e-300, 0.5), upper-tail p in (0.5, 1 - 1e-15], and df
+    /// from 0.1 to 1e12 (t) and 0.03 to 1e5 (chi-square): the quantile solvers return, and the
+    /// tails of their answers give p back.
     #[test]
     fn test_distribution_helpers_seeded_round_trip() {
         let rel = |a: f64, b: f64| ((a - b) / b).abs();

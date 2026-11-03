@@ -93,7 +93,7 @@ fn median_sorted(sorted: &[f64]) -> f64 {
 /// error. The data are sorted once and both quartiles are read from the sorted copy.
 pub fn iqr(data: &[f64], qtype: Option<usize>) -> EconResult<f64> {
     let t = QuantileType::from_r(qtype.unwrap_or(7))?;
-    let s = sorted_finite_copy(data, "IQR sort buffer")?;
+    let s = sorted_non_nan_copy(data, "IQR sort buffer")?;
     Ok(quantile_sorted(&s, 0.75, t) - quantile_sorted(&s, 0.25, t))
 }
 
@@ -108,7 +108,7 @@ pub fn quantile(data: &[f64], p: f64, qtype: usize) -> EconResult<f64> {
         });
     }
     Ok(quantile_sorted(
-        &sorted_finite_copy(data, "quantile sort buffer")?,
+        &sorted_non_nan_copy(data, "quantile sort buffer")?,
         p,
         t,
     ))
@@ -249,8 +249,8 @@ pub fn quantile_sorted(sorted: &[f64], p: f64, qtype: QuantileType) -> f64 {
 }
 
 /// The non-NaN values of `data`, sorted with `f64::total_cmp`, in one guarded buffer (R's
-/// `na.rm = TRUE`); `EmptyDataset` when nothing is left.
-fn sorted_finite_copy(data: &[f64], what: &str) -> EconResult<Vec<f64>> {
+/// `na.rm = TRUE`); +/-Inf are kept, as R's quantile does. `EmptyDataset` when nothing is left.
+fn sorted_non_nan_copy(data: &[f64], what: &str) -> EconResult<Vec<f64>> {
     let mut s = crate::resource::try_with_capacity::<f64>(data.len(), what)?;
     s.extend(data.iter().copied().filter(|x| !x.is_nan()));
     if s.is_empty() {
@@ -327,7 +327,7 @@ pub fn boxplot_stats(data: &[f64], coef: f64) -> EconResult<BoxplotStats> {
             message: format!("coef must be finite and non-negative, got {coef}"),
         });
     }
-    let s = sorted_finite_copy(data, "boxplot sort buffer")?;
+    let s = sorted_non_nan_copy(data, "boxplot sort buffer")?;
     let mut kept = crate::resource::try_with_capacity::<f64>(s.len(), "boxplot data")?;
     kept.extend(data.iter().copied().filter(|x| !x.is_nan()));
     let mut stats = fivenum_sorted(&s);
