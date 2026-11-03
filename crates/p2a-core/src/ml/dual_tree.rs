@@ -2,7 +2,9 @@
 //!
 //! This module implements the Dual-Tree Boruvka algorithm for efficiently
 //! building minimum spanning trees from mutual reachability distances.
-//! Used by HDBSCAN for large datasets where O(n²) becomes prohibitive.
+//!
+//! HDBSCAN does not use these builders: its spanning tree is Prim's algorithm with dbscan's tie
+//! order ([`crate::ml::hdbscan()`]).
 //!
 //! # References
 //!
@@ -46,10 +48,7 @@ impl Eq for DualTreeEntry {}
 impl Ord for DualTreeEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Min-heap: smaller distances first
-        other
-            .min_mr
-            .partial_cmp(&self.min_mr)
-            .unwrap_or(Ordering::Equal)
+        other.min_mr.total_cmp(&self.min_mr)
     }
 }
 
@@ -452,11 +451,8 @@ fn find_component_bridges(
     bridges
 }
 
-/// Simplified dual-tree MST using KD-tree + Prim's algorithm.
-///
-/// This is a simpler O(n log n) to O(n²) hybrid approach:
-/// - Use KD-tree for neighbor queries during Prim's
-/// - Works well for moderate n and low dimensions
+/// Prim's algorithm on the dense mutual-reachability graph: O(n^2) distance evaluations; the tree
+/// supplies only the points.
 pub fn kdtree_prim_mst(tree: &KdTree, core_distances: &[f64]) -> Vec<(usize, usize, f64)> {
     let n = tree.len();
     if n <= 1 {
@@ -577,7 +573,7 @@ mod tests {
 
         // Sort edges by weight
         let mut sorted = mst.clone();
-        sorted.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
+        sorted.sort_by(|a, b| a.2.total_cmp(&b.2));
 
         // First edge should connect the close points (0 and 1)
         assert!((sorted[0].0 == 0 && sorted[0].1 == 1) || (sorted[0].0 == 1 && sorted[0].1 == 0));
