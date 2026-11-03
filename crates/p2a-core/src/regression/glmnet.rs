@@ -37,7 +37,7 @@
 //!
 //! R equivalent: `glmnet::glmnet()`, `glmnet::cv.glmnet()`
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, ShapeBuilder, s};
 use polars::prelude::*;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -50,7 +50,6 @@ use crate::data::columns::{NaPolicy, econ_error_from_design, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::DesignMatrix;
 use crate::resource;
-use polars::prelude::*;
 
 /// Family type for GLM
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -78,9 +77,17 @@ pub struct GlmnetConfig {
     pub standardize: bool,
     /// Include intercept (default: true)
     pub intercept: bool,
-    /// Maximum iterations for coordinate descent. At least 1 (otherwise `InvalidSpecification`).
+    /// glmnet's `maxit`: the total number of coordinate passes over the whole path (default
+    /// 100 000). When it runs out the path is cut at the last converged lambda with a warning;
+    /// if not even the first lambda converged the fit is a `ConvergenceFailure`. At least 1
+    /// (otherwise `InvalidSpecification`).
     pub max_iter: usize,
-    /// Convergence threshold. Must be finite and > 0 (otherwise `InvalidSpecification`).
+    /// glmnet's `thresh` (default 1e-7): coordinate descent has converged when a full pass over
+    /// every variable moves no coefficient by more than `max_j v_j delta_j^2 < thresh`, in
+    /// standardised units (`v_j` the weighted variance of column j, y divided by its sd for
+    /// gaussian), so the criterion does not depend on the scale of x or y. The default leaves
+    /// coefficients within about 1e-4 sd(y)/sd(x_j) of the minimiser, as R's do; `thresh = 1e-14`
+    /// gives about 1e-7. Must be finite and > 0 (otherwise `InvalidSpecification`).
     pub thresh: f64,
     /// Model family
     pub family: GlmnetFamily,
@@ -144,12 +151,28 @@ pub struct GlmnetResult {
     pub null_deviance: f64,
     /// Family used
     pub family: GlmnetFamily,
-    /// Standardization means (if standardized)
+    /// The centring of x: column means when an intercept is fitted, else `None`.
     pub x_mean: Option<Vec<f64>>,
-    /// Standardization scales (if standardized)
+    /// The scales of x: population sd (1 for a constant column) when standardised, else `None`.
     pub x_scale: Option<Vec<f64>>,
-    /// Response mean (for standardization)
+    /// Mean of y.
     pub y_mean: f64,
+    /// Whether x was standardised (`x_scale` holds the scales).
+    #[serde(default = "default_true")]
+    pub standardize: bool,
+    /// Whether an intercept was fitted (`x_mean` holds the centring).
+    #[serde(default = "default_true")]
+    pub intercept: bool,
+    /// Coordinate passes over the whole path (glmnet's `npasses`).
+    #[serde(default)]
+    pub npasses: usize,
+    /// Notes on the fit (a path truncated by `max_iter`, ...).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Cross-validation result
@@ -179,114 +202,279 @@ pub struct GlmnetCvResult {
     pub nfolds: usize,
 }
 
+/// Relative slack of the soft-threshold: a gradient within summation rounding of the threshold
+/// counts as at the threshold. A fit at `lambda_max` computed in other arithmetic (R's path, a
+/// path passed back in as user lambdas) is then exactly zero instead of carrying a 1e-17
+/// coefficient; the effect on any coefficient is below `1e-13 * gamma / v_j`.
+const SOFT_RTOL: f64 = 1e-13;
+
 /// Soft-thresholding operator: S(z, γ) = sign(z)(|z| - γ)₊
 #[inline]
 fn soft_threshold(z: f64, gamma: f64) -> f64 {
-    if z > gamma {
-        z - gamma
-    } else if z < -gamma {
-        z + gamma
-    } else {
+    if z.abs() <= gamma * (1.0 + SOFT_RTOL) {
         0.0
-    }
-}
-
-/// Compute the maximum lambda (where all coefficients are zero)
-fn compute_lambda_max(x: &ArrayView2<f64>, y: &ArrayView1<f64>, alpha: f64) -> f64 {
-    let n = x.nrows() as f64;
-    let mut max_grad = 0.0f64;
-
-    for j in 0..x.ncols() {
-        let grad = x.column(j).dot(y).abs() / n;
-        max_grad = max_grad.max(grad);
-    }
-
-    // For elastic net, lambda_max is scaled by alpha
-    if alpha > 0.0 {
-        max_grad / alpha.max(1e-3)
+    } else if z > 0.0 {
+        z - gamma
     } else {
-        max_grad * 100.0 // Large value for ridge
+        z + gamma
     }
 }
 
-/// Coordinate descent for Gaussian family
-/// OPTIMIZED: Uses incremental residual updates instead of recomputing X*beta each iteration
-fn coordinate_descent_gaussian(
-    x: &ArrayView2<f64>,
-    y: &ArrayView1<f64>,
-    lambda: f64,
-    alpha: f64,
-    beta: &mut Array1<f64>,
-    max_iter: usize,
-    thresh: f64,
-) -> EconResult<usize> {
-    let n = x.nrows() as f64;
-    let p = x.ncols();
+/// The standardised design glmnet works on.
+///
+/// `z = (x - center) / scale`, column-major (`z[j * n + i]`), with `center_j = mean(x_j)` when
+/// an intercept is fitted (else 0) and `scale_j` the population sd of `x_j` when `standardize`
+/// (else 1). A constant column is not `usable`: its coefficient stays 0 (glmnet's `ju`).
+/// `xv_j = mean(z_j^2)`, the unit-weight curvature of coordinate j.
+struct Design {
+    n: usize,
+    p: usize,
+    z: Vec<f64>,
+    center: Vec<f64>,
+    scale: Vec<f64>,
+    xv: Vec<f64>,
+    usable: Vec<bool>,
+}
 
-    // Precompute X'X diagonal (column norms squared) and X'y
-    let col_norms_sq: Vec<f64> = (0..p).map(|j| x.column(j).dot(&x.column(j))).collect();
-    let xty: Vec<f64> = (0..p).map(|j| x.column(j).dot(y)).collect();
+impl Design {
+    fn col(&self, j: usize) -> &[f64] {
+        &self.z[j * self.n..(j + 1) * self.n]
+    }
 
-    // Precompute X'X for active set (we'll compute these lazily)
-    // For now, maintain residual = y - X*beta
-    let mut residual: Array1<f64> = y - &x.dot(beta);
+    /// Indices of the usable (non-constant) columns.
+    fn usable_columns(&self) -> Vec<usize> {
+        (0..self.p).filter(|&j| self.usable[j]).collect()
+    }
+}
 
-    // Active set - start with all variables
-    let mut active: Vec<usize> = (0..p).collect();
-    let mut ever_active = vec![false; p];
+/// glmnet's standardisation of x (glmnetpp `standard1` with unit weights).
+fn standardize_design(
+    x: ArrayView2<f64>,
+    standardize: bool,
+    intercept: bool,
+) -> EconResult<Design> {
+    let (n, p) = x.dim();
+    let what = "glmnet standardised design";
+    let mut z = resource::try_vec(resource::checked_len(&[n, p], what)?, 0.0, what)?;
+    let mut center = Vec::with_capacity(p);
+    let mut scale = Vec::with_capacity(p);
+    let mut xv = Vec::with_capacity(p);
+    let mut usable = Vec::with_capacity(p);
+    let nf = n as f64;
+    for j in 0..p {
+        let col = x.column(j);
+        let mean = col.sum() / nf;
+        let (lo, hi) = col
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                (lo.min(v), hi.max(v))
+            });
+        let ok = hi > lo;
+        let sd = (col.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / nf).sqrt();
+        let c = if intercept { mean } else { 0.0 };
+        let s = if standardize && ok { sd } else { 1.0 };
+        let zj = &mut z[j * n..(j + 1) * n];
+        for (zi, &v) in zj.iter_mut().zip(col.iter()) {
+            *zi = (v - c) / s;
+        }
+        xv.push(zj.iter().map(|v| v * v).sum::<f64>() / nf);
+        center.push(c);
+        scale.push(s);
+        usable.push(ok);
+    }
+    if !usable.iter().any(|&u| u) {
+        return Err(EconError::InvalidSpecification {
+            message: "every column of x is constant".to_string(),
+        });
+    }
+    Ok(Design {
+        n,
+        p,
+        z,
+        center,
+        scale,
+        xv,
+        usable,
+    })
+}
 
-    for iter in 0..max_iter {
+/// The coordinate-pass budget of one path: glmnet's `maxit` counts passes over the whole path.
+struct PassBudget {
+    used: usize,
+    max: usize,
+}
+
+impl PassBudget {
+    /// Claims one pass; `false` when the budget is spent. Checks the call's budget first.
+    fn take(&mut self) -> EconResult<bool> {
         resource::checkpoint()?;
-        let mut max_change = 0.0f64;
-
-        // First pass: cycle through active set
-        for &j in &active {
-            let old_beta = beta[j];
-
-            // Gradient using residual: (1/n) * X_j' * (residual + X_j * beta_j)
-            // = (1/n) * (X_j' * residual + col_norm_sq[j] * beta_j)
-            let xj_residual = x.column(j).dot(&residual);
-            let rho = (xj_residual + col_norms_sq[j] * old_beta) / n;
-
-            // Coordinate update with elastic net penalty
-            let z = soft_threshold(rho, lambda * alpha);
-            let new_beta = z / (col_norms_sq[j] / n + lambda * (1.0 - alpha));
-
-            // Update residual incrementally: r += X_j * (old_beta - new_beta)
-            if (new_beta - old_beta).abs() > 1e-15 {
-                let delta = old_beta - new_beta;
-                for i in 0..x.nrows() {
-                    residual[i] += x[[i, j]] * delta;
-                }
-                beta[j] = new_beta;
-                max_change = max_change.max((new_beta - old_beta).abs());
-
-                if new_beta.abs() > 1e-10 {
-                    ever_active[j] = true;
-                }
-            }
+        if self.used >= self.max {
+            return Ok(false);
         }
+        self.used += 1;
+        Ok(true)
+    }
+}
 
-        // Convergence check
-        if max_change < thresh {
-            return Ok(iter + 1);
-        }
+/// How a coordinate-descent solve ended.
+enum Solve {
+    /// A full pass over every usable column moved no coordinate by more than `thresh`.
+    Converged,
+    /// The path's pass budget ran out; the largest last weighted change.
+    Budget(f64),
+}
 
-        // Update active set every 10 iterations or when converging
-        if iter % 10 == 9 || max_change < thresh * 10.0 {
-            // Include variables that are currently non-zero or have been active
-            active = (0..p)
-                .filter(|&j| beta[j].abs() > 1e-10 || ever_active[j])
-                .collect();
+/// A weighted least-squares problem `(1/2n) sum_i w_i (r_i - z_i b)^2 + l1 |b|_1 + l2/2 |b|^2`
+/// solved by coordinate descent on the working residual `r` (glmnet's `elnet` / `lognet` inner
+/// loop). `w = None` means unit weights.
+struct Wls<'a> {
+    design: &'a Design,
+    w: Option<&'a [f64]>,
+    /// Weighted curvature `v_j = sum_i w_i z_ij^2 / n`.
+    v: Vec<f64>,
+    /// `sum_i w_i`.
+    sum_w: f64,
+    all: Vec<usize>,
+}
 
-            // If active set is empty or very small, scan all variables
-            if active.len() < 3 {
-                active = (0..p).collect();
-            }
+impl<'a> Wls<'a> {
+    fn new(design: &'a Design, w: Option<&'a [f64]>) -> Self {
+        let nf = design.n as f64;
+        let (v, sum_w) = match w {
+            None => (design.xv.clone(), nf),
+            Some(w) => (
+                (0..design.p)
+                    .map(|j| {
+                        design
+                            .col(j)
+                            .iter()
+                            .zip(w)
+                            .map(|(z, w)| w * z * z)
+                            .sum::<f64>()
+                            / nf
+                    })
+                    .collect(),
+                w.iter().sum(),
+            ),
+        };
+        Wls {
+            design,
+            w,
+            v,
+            sum_w,
+            all: design.usable_columns(),
         }
     }
 
-    Ok(max_iter)
+    /// One pass over `set` (and the intercept when `b0` is given); returns
+    /// `max(v_j delta_j^2)` over the moves made.
+    fn pass(
+        &self,
+        set: &[usize],
+        b: &mut [f64],
+        b0: Option<&mut f64>,
+        r: &mut [f64],
+        l1: f64,
+        l2: f64,
+    ) -> f64 {
+        let nf = self.design.n as f64;
+        let mut dlx = 0.0f64;
+        for &j in set {
+            let zj = self.design.col(j);
+            let old = b[j];
+            let dot: f64 = match self.w {
+                None => zj.iter().zip(r.iter()).map(|(z, r)| z * r).sum(),
+                Some(w) => zj
+                    .iter()
+                    .zip(r.iter())
+                    .zip(w)
+                    .map(|((z, r), w)| w * z * r)
+                    .sum(),
+            };
+            let g = dot / nf + self.v[j] * old;
+            let new = soft_threshold(g, l1) / (self.v[j] + l2);
+            if new != old {
+                let d = new - old;
+                for (ri, zi) in r.iter_mut().zip(zj) {
+                    *ri -= d * zi;
+                }
+                b[j] = new;
+                dlx = dlx.max(self.v[j] * d * d);
+            }
+        }
+        if let Some(b0) = b0 {
+            let d = match self.w {
+                None => r.iter().sum::<f64>() / nf,
+                Some(w) => r.iter().zip(w).map(|(r, w)| w * r).sum::<f64>() / self.sum_w,
+            };
+            if d != 0.0 {
+                *b0 += d;
+                for ri in r.iter_mut() {
+                    *ri -= d;
+                }
+                dlx = dlx.max(self.sum_w / nf * d * d);
+            }
+        }
+        dlx
+    }
+
+    /// Coordinate descent to convergence: converged only on a full pass over every usable column
+    /// (so no excluded variable violates its KKT condition), with passes over the active set in
+    /// between (glmnet's scheme).
+    fn solve(
+        &self,
+        b: &mut [f64],
+        mut b0: Option<&mut f64>,
+        r: &mut [f64],
+        l1: f64,
+        l2: f64,
+        thresh: f64,
+        budget: &mut PassBudget,
+    ) -> EconResult<Solve> {
+        let mut active = Vec::with_capacity(self.all.len());
+        let mut last = f64::INFINITY;
+        loop {
+            if !budget.take()? {
+                return Ok(Solve::Budget(last));
+            }
+            last = self.pass(&self.all, b, b0.as_deref_mut(), r, l1, l2);
+            if last < thresh {
+                return Ok(Solve::Converged);
+            }
+            active.clear();
+            active.extend(self.all.iter().copied().filter(|&j| b[j] != 0.0));
+            if active.is_empty() && b0.is_none() {
+                continue;
+            }
+            loop {
+                if !budget.take()? {
+                    return Ok(Solve::Budget(last));
+                }
+                last = self.pass(&active, b, b0.as_deref_mut(), r, l1, l2);
+                if last < thresh {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// The truncation note when the pass budget runs out at the `k`-th (1-based) of `len` lambdas.
+fn truncation_warning(k: usize, len: usize, lambda: f64, max_iter: usize) -> String {
+    format!(
+        "Convergence not reached at lambda {k} of {len} (lambda = {lambda:.6e}) after max_iter = \
+         {max_iter} coordinate passes over the path; the fits for the {} larger lambdas are returned",
+        k - 1
+    )
+}
+
+/// `ConvergenceFailure` when not even the first lambda converged.
+fn first_lambda_failure(max_iter: usize, last_change: f64) -> EconError {
+    EconError::ConvergenceFailure {
+        iterations: max_iter,
+        last_change,
+        suggestion: "increase max_iter or thresh".to_string(),
+    }
 }
 
 /// Coordinate descent for Binomial family (logistic regression)
@@ -352,12 +540,6 @@ fn coordinate_descent_binomial(
     Ok(max_iter)
 }
 
-/// Compute deviance for Gaussian family
-fn deviance_gaussian(y: &ArrayView1<f64>, fitted: &Array1<f64>) -> f64 {
-    let residuals: Array1<f64> = y - fitted;
-    residuals.mapv(|r| r * r).sum()
-}
-
 /// Compute deviance for Binomial family
 fn deviance_binomial(y: &ArrayView1<f64>, prob: &Array1<f64>) -> f64 {
     let mut dev = 0.0;
@@ -394,6 +576,140 @@ fn validate_glmnet_config(config: &GlmnetConfig) -> EconResult<()> {
     Ok(())
 }
 
+/// The fits of one path, the coordinate passes spent and the notes.
+struct PathFit {
+    fits: Vec<GlmnetCoefficients>,
+    npasses: usize,
+    warnings: Vec<String>,
+}
+
+/// Whether a path stops after the fit just pushed (pre-WP07 rule, replaced in Task 3).
+fn path_stops(fit: &GlmnetCoefficients, config: &GlmnetConfig) -> bool {
+    fit.dev_ratio > config.deviance_thresh || config.dfmax.is_some_and(|d| fit.df >= d)
+}
+
+/// Gaussian path: glmnet's `elnet` on `yt = (y - ym) / ys`, with the penalty in those units
+/// (`l1 = lambda alpha / ys`, `l2 = lambda (1 - alpha) / ys`), warm starts along the path.
+fn gaussian_path(
+    design: &Design,
+    yc: &[f64],
+    ym: f64,
+    ys: f64,
+    lambdas: &[f64],
+    config: &GlmnetConfig,
+) -> EconResult<PathFit> {
+    let p = design.p;
+    let wls = Wls::new(design, None);
+    let mut r: Vec<f64> = yc.iter().map(|v| v / ys).collect();
+    let tss: f64 = r.iter().map(|v| v * v).sum();
+    let mut b = vec![0.0; p];
+    let mut budget = PassBudget {
+        used: 0,
+        max: config.max_iter,
+    };
+    let what = "glmnet coefficient path";
+    let mut fits = resource::try_with_capacity(lambdas.len(), what)?;
+    let mut warnings = Vec::new();
+    for (k, &lambda) in lambdas.iter().enumerate() {
+        let l1 = lambda * config.alpha / ys;
+        let l2 = lambda * (1.0 - config.alpha) / ys;
+        if let Solve::Budget(dlx) =
+            wls.solve(&mut b, None, &mut r, l1, l2, config.thresh, &mut budget)?
+        {
+            if fits.is_empty() {
+                return Err(first_lambda_failure(config.max_iter, dlx));
+            }
+            warnings.push(truncation_warning(
+                k + 1,
+                lambdas.len(),
+                lambda,
+                config.max_iter,
+            ));
+            break;
+        }
+        let coefficients: Vec<f64> = (0..p).map(|j| ys * b[j] / design.scale[j]).collect();
+        let intercept = if config.intercept {
+            ym - (0..p)
+                .map(|j| design.center[j] * coefficients[j])
+                .sum::<f64>()
+        } else {
+            0.0
+        };
+        let rss: f64 = r.iter().map(|v| v * v).sum();
+        let df = coefficients.iter().filter(|&&c| c != 0.0).count();
+        fits.push(GlmnetCoefficients {
+            lambda,
+            intercept,
+            coefficients,
+            df,
+            dev_ratio: 1.0 - rss / tss,
+        });
+        if fits.last().is_some_and(|f| path_stops(f, config)) {
+            break;
+        }
+    }
+    Ok(PathFit {
+        fits,
+        npasses: budget.used,
+        warnings,
+    })
+}
+
+/// Binomial path with the pre-WP07 loop (replaced in Task 4).
+fn binomial_path(
+    design: &Design,
+    y: ArrayView1<f64>,
+    lambdas: &[f64],
+    config: &GlmnetConfig,
+    null_deviance: f64,
+) -> EconResult<PathFit> {
+    let (n, p) = (design.n, design.p);
+    let z = ArrayView2::from_shape((n, p).f(), &design.z)
+        .map_err(|e| EconError::Computation(format!("glmnet design: {e}")))?;
+    let mut beta = Array1::zeros(p);
+    let mut b0 = 0.0;
+    let mut fits = resource::try_with_capacity(lambdas.len(), "glmnet coefficient path")?;
+    for &lambda in lambdas {
+        resource::checkpoint()?;
+        coordinate_descent_binomial(
+            &z,
+            &y,
+            lambda,
+            config.alpha,
+            &mut beta,
+            &mut b0,
+            config.max_iter,
+            config.thresh,
+        )?;
+        let prob = (z.dot(&beta) + b0).mapv(|e| 1.0 / (1.0 + (-e).exp()));
+        let dev_ratio = 1.0 - deviance_binomial(&y, &prob) / null_deviance;
+        let coefficients: Vec<f64> = (0..p).map(|j| beta[j] / design.scale[j]).collect();
+        let intercept = if config.intercept {
+            b0 - (0..p)
+                .map(|j| design.center[j] * coefficients[j])
+                .sum::<f64>()
+        } else {
+            0.0
+        };
+        let df = coefficients.iter().filter(|&&c| c != 0.0).count();
+        fits.push(GlmnetCoefficients {
+            lambda,
+            intercept,
+            coefficients,
+            df,
+            dev_ratio,
+        });
+        if fits.last().is_some_and(|f| path_stops(f, config)) {
+            break;
+        }
+    }
+    Ok(PathFit {
+        fits,
+        npasses: 0,
+        warnings: Vec::new(),
+    })
+}
+
 /// Fit glmnet model
 pub fn glmnet(
     x: ArrayView2<f64>,
@@ -418,48 +734,40 @@ pub fn glmnet(
         ));
     }
 
-    // Standardize X and center y
-    let y_mean = y.mean().unwrap_or(0.0);
-    let y_centered: Array1<f64> = if config.intercept {
-        y.to_owned() - y_mean
-    } else {
-        y.to_owned()
-    };
+    let design = standardize_design(x, config.standardize, config.intercept)?;
+    let nf = n as f64;
+    let y_mean = y.sum() / nf;
+    let ym = if config.intercept { y_mean } else { 0.0 };
+    let yc: Vec<f64> = y.iter().map(|v| v - ym).collect();
 
-    let (x_scaled, x_mean, x_scale) = if config.standardize {
-        let x_mean: Vec<f64> = (0..p).map(|j| x.column(j).mean().unwrap_or(0.0)).collect();
-        let x_scale: Vec<f64> = (0..p)
-            .map(|j| {
-                let col = x.column(j);
-                let mean = x_mean[j];
-                let var: f64 = col.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (n as f64);
-                var.sqrt().max(1e-10)
-            })
-            .collect();
-
-        let mut x_scaled = Array2::zeros((n, p));
-        for j in 0..p {
-            for i in 0..n {
-                x_scaled[[i, j]] = (x[[i, j]] - x_mean[j]) / x_scale[j];
-            }
-        }
-        (x_scaled, Some(x_mean), Some(x_scale))
-    } else {
-        (x.to_owned(), None, None)
-    };
-
-    // Compute null deviance
     let null_deviance = match config.family {
-        GlmnetFamily::Gaussian => y_centered.mapv(|v| v * v).sum(),
+        GlmnetFamily::Gaussian => yc.iter().map(|v| v * v).sum(),
         GlmnetFamily::Binomial => {
-            let p_null = y.mean().unwrap_or(0.5);
-            let prob_null = Array1::from_elem(n, p_null);
-            deviance_binomial(&y.view(), &prob_null)
+            let prob_null = Array1::from_elem(n, y_mean);
+            deviance_binomial(&y, &prob_null)
         }
     };
 
     // Generate lambda sequence
-    let lambda_max = compute_lambda_max(&x_scaled.view(), &y_centered.view(), config.alpha);
+    let grad_max = design
+        .usable_columns()
+        .into_iter()
+        .map(|j| {
+            design
+                .col(j)
+                .iter()
+                .zip(&yc)
+                .map(|(z, y)| z * y)
+                .sum::<f64>()
+                .abs()
+                / nf
+        })
+        .fold(0.0f64, f64::max);
+    let lambda_max = if config.alpha > 0.0 {
+        grad_max / config.alpha.max(1e-3)
+    } else {
+        grad_max * 100.0
+    };
     let lambda_min = lambda_max * config.lambda_min_ratio;
 
     let lambda_seq: Vec<f64> = if let Some(ref user_lambda) = config.lambda {
@@ -475,131 +783,45 @@ pub fn glmnet(
         seq
     };
 
-    // Fit along the path with warm starts. Each fit holds p coefficients plus
-    // seven words (lambda, intercept, the coefficient Vec header, df, dev_ratio).
+    // Each fit holds p coefficients plus seven words (lambda, intercept, the coefficient Vec
+    // header, df, dev_ratio).
     let what = "glmnet coefficient path";
     resource::check_alloc::<f64>(
         resource::checked_len(&[lambda_seq.len(), p.saturating_add(7)], what)?,
         what,
     )?;
-    let mut fits = resource::try_with_capacity(lambda_seq.len(), what)?;
-    let mut beta = Array1::zeros(p);
-    let mut intercept_val = 0.0;
 
-    for &lambda in &lambda_seq {
-        resource::checkpoint()?;
-        // Coordinate descent
-        match config.family {
-            GlmnetFamily::Gaussian => {
-                coordinate_descent_gaussian(
-                    &x_scaled.view(),
-                    &y_centered.view(),
-                    lambda,
-                    config.alpha,
-                    &mut beta,
-                    config.max_iter,
-                    config.thresh,
-                )?;
+    let path = match config.family {
+        GlmnetFamily::Gaussian => {
+            let ys = (null_deviance / nf).sqrt();
+            if ys == 0.0 {
+                return Err(EconError::InvalidSpecification {
+                    message: "y is constant; gaussian glmnet fails at standardization step"
+                        .to_string(),
+                });
             }
-            GlmnetFamily::Binomial => {
-                coordinate_descent_binomial(
-                    &x_scaled.view(),
-                    &y.view(),
-                    lambda,
-                    config.alpha,
-                    &mut beta,
-                    &mut intercept_val,
-                    config.max_iter,
-                    config.thresh,
-                )?;
-            }
+            gaussian_path(&design, &yc, ym, ys, &lambda_seq, config)?
         }
-
-        // Compute deviance
-        let fitted = match config.family {
-            GlmnetFamily::Gaussian => x_scaled.dot(&beta),
-            GlmnetFamily::Binomial => {
-                let eta = x_scaled.dot(&beta) + intercept_val;
-                eta.mapv(|e| 1.0 / (1.0 + (-e).exp()))
-            }
-        };
-
-        let deviance = match config.family {
-            GlmnetFamily::Gaussian => deviance_gaussian(&y_centered.view(), &fitted),
-            GlmnetFamily::Binomial => deviance_binomial(&y.view(), &fitted),
-        };
-
-        let dev_ratio = 1.0 - deviance / null_deviance;
-
-        // Transform coefficients back to original scale
-        let (final_coefs, final_intercept) = if config.standardize {
-            let x_scale = x_scale.as_ref().unwrap();
-            let x_mean = x_mean.as_ref().unwrap();
-
-            let coefs: Vec<f64> = (0..p).map(|j| beta[j] / x_scale[j]).collect();
-            let intercept = if config.intercept {
-                match config.family {
-                    GlmnetFamily::Gaussian => {
-                        y_mean - (0..p).map(|j| coefs[j] * x_mean[j]).sum::<f64>()
-                    }
-                    GlmnetFamily::Binomial => {
-                        intercept_val
-                            - (0..p)
-                                .map(|j| beta[j] * x_mean[j] / x_scale[j])
-                                .sum::<f64>()
-                    }
-                }
-            } else {
-                0.0
-            };
-            (coefs, intercept)
-        } else {
-            let coefs: Vec<f64> = beta.iter().copied().collect();
-            let intercept = if config.intercept {
-                match config.family {
-                    GlmnetFamily::Gaussian => y_mean,
-                    GlmnetFamily::Binomial => intercept_val,
-                }
-            } else {
-                0.0
-            };
-            (coefs, intercept)
-        };
-
-        let df = final_coefs.iter().filter(|&&c| c.abs() > 1e-10).count();
-
-        fits.push(GlmnetCoefficients {
-            lambda,
-            intercept: final_intercept,
-            coefficients: final_coefs,
-            df,
-            dev_ratio,
-        });
-
-        // Early stopping
-        if dev_ratio > config.deviance_thresh {
-            break;
-        }
-        if let Some(dfmax) = config.dfmax {
-            if df >= dfmax {
-                break;
-            }
-        }
-    }
+        GlmnetFamily::Binomial => binomial_path(&design, y, &lambda_seq, config, null_deviance)?,
+    };
 
     Ok(GlmnetResult {
         variable_names: (0..p).map(|i| format!("V{}", i + 1)).collect(),
         dependent_var: "y".to_string(),
         alpha: config.alpha,
-        lambda: fits.iter().map(|f| f.lambda).collect(),
-        fits,
+        lambda: path.fits.iter().map(|f| f.lambda).collect(),
+        fits: path.fits,
         n_obs: n,
         n_features: p,
         null_deviance,
         family: config.family,
-        x_mean,
-        x_scale,
+        x_mean: config.intercept.then(|| design.center.clone()),
+        x_scale: config.standardize.then(|| design.scale.clone()),
         y_mean,
+        standardize: config.standardize,
+        intercept: config.intercept,
+        npasses: path.npasses,
+        warnings: path.warnings,
     })
 }
 
@@ -1204,74 +1426,6 @@ mod tests {
         assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
     }
 
-    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
-    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "{what}: pin these values: {actual:?}"
-        );
-        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-            assert!(
-                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
-                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
-            );
-        }
-    }
-
-    /// Characterisation test recorded from the code before the T0-WP14 resource
-    /// bounds (the `test_lambda_path` and `test_cv_glmnet` fits); the refactor
-    /// must not move these numbers.
-    #[test]
-    fn test_pinned_glmnet_outputs() {
-        let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0]];
-        let y = array![2.0, 4.0, 5.0, 7.0, 9.0];
-        let config = GlmnetConfig {
-            alpha: 0.5,
-            nlambda: 20,
-            ..Default::default()
-        };
-        let r = glmnet(x.view(), y.view(), &config).unwrap();
-        let last = r.fits.last().unwrap();
-        let mut v = vec![r.lambda[0], r.lambda[r.lambda.len() - 1], last.intercept];
-        v.extend(&last.coefficients);
-
-        let x = array![
-            [1.0, 2.0],
-            [2.0, 3.0],
-            [3.0, 4.0],
-            [4.0, 5.0],
-            [5.0, 6.0],
-            [6.0, 7.0],
-            [7.0, 8.0],
-            [8.0, 9.0],
-            [9.0, 10.0],
-            [10.0, 11.0]
-        ];
-        let y = array![2.0, 4.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0];
-        let config = GlmnetConfig {
-            alpha: 1.0,
-            nlambda: 20,
-            ..Default::default()
-        };
-        let cv = cv_glmnet(x.view(), y.view(), &config, 5, Some(42)).unwrap();
-        v.extend([cv.lambda_min, cv.lambda_1se, cv.cvm[0]]);
-        assert_pinned(
-            "glmnet",
-            &v,
-            &[
-                4.808326112068522,
-                0.00048083261120685276,
-                -0.548543031199773,
-                0.8499598746999023,
-                0.8496658517750166,
-                0.0005466038397008906,
-                0.11309988200086778,
-                39.7064688694004,
-            ],
-        );
-    }
-
     /// REG-25: the glmnet wrappers refuse a missing y as R's glmnet does (it stops), and
     /// a text y is not numeric (it used to become zeros); an Int64 y is a number. A
     /// property test: no value is compared with R, so it loads the datasets without a
@@ -1311,5 +1465,273 @@ mod tests {
             (&a.lambda, fa.intercept, &fa.coefficients),
             (&b.lambda, fb.intercept, &fb.coefficients)
         );
+    }
+
+    // ---- R reference case glmnet_paths (T3-WP07) ----
+
+    use p2a_validation::{Check, Tol};
+
+    const X8: [&str; 8] = ["X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"];
+    const LAMS: [f64; 4] = [1.0, 0.3, 0.1, 0.03];
+    /// Coordinate descent converges linearly. At thresh 1e-24 an R port of this algorithm
+    /// lands within 1e-12 of the KKT point (`*_tight`); abs 1e-11 leaves a 10x margin for
+    /// summation order.
+    const EXACT: Tol = Tol::new(1e-9, 1e-11);
+    /// glmnet's own output stops at thresh 1e-14 (max_j xv_j delta_j^2): up to 1.0e-7 from
+    /// the minimiser here.
+    const R_GLMNET: Tol = Tol::new(1e-6, 2e-7);
+    /// glmnet's own dev.ratio: up to 2.0e-9 from the minimiser's.
+    const R_DEV: Tol = Tol::new(1e-8, 5e-9);
+
+    fn k30() -> Vec<String> {
+        (1..=30).map(|j| format!("K{j}")).collect()
+    }
+    fn refs(v: &[String]) -> Vec<&str> {
+        v.iter().map(String::as_str).collect()
+    }
+    fn tight(
+        alpha: f64,
+        standardize: bool,
+        intercept: bool,
+        lambda: Option<&[f64]>,
+    ) -> GlmnetConfig {
+        let mut c = GlmnetConfig::default();
+        c.alpha = alpha;
+        c.standardize = standardize;
+        c.intercept = intercept;
+        c.lambda = lambda.map(<[f64]>::to_vec);
+        c.thresh = 1e-24;
+        c
+    }
+    /// R's as.numeric(as.matrix(coef(fit))): (p + 1) x L, column-major, intercept first.
+    fn coef_path(r: &GlmnetResult) -> Vec<f64> {
+        r.fits
+            .iter()
+            .flat_map(|f| std::iter::once(f.intercept).chain(f.coefficients.iter().copied()))
+            .collect()
+    }
+    fn dev_ratios(r: &GlmnetResult) -> Vec<f64> {
+        r.fits.iter().map(|f| f.dev_ratio).collect()
+    }
+    fn dfs(r: &GlmnetResult) -> Vec<f64> {
+        r.fits.iter().map(|f| f.df as f64).collect()
+    }
+    fn xy(ds: &Dataset, y: &str, cols: &[&str]) -> (Array2<f64>, Array1<f64>) {
+        let x = DesignMatrix::from_dataframe(ds.df(), cols, false)
+            .unwrap()
+            .data;
+        (
+            x,
+            Array1::from_vec(numeric_column(ds.df(), y, NaPolicy::Fail).unwrap().0),
+        )
+    }
+
+    fn check_gaussian(
+        case: &p2a_validation::Case,
+        ds: &Dataset,
+        alpha: f64,
+        standardize: bool,
+        tag: &str,
+    ) {
+        let mut chk = Check::new(case);
+        for (intercept, t) in [(true, tag.to_string()), (false, format!("{tag}_noint"))] {
+            let r = run_glmnet(
+                ds,
+                "y",
+                &X8,
+                &tight(alpha, standardize, intercept, Some(&LAMS[..])),
+            )
+            .unwrap();
+            let (b, d) = (coef_path(&r), dev_ratios(&r));
+            chk.vector(&format!("{t}_coef_tight"), &b, EXACT)
+                .vector(&format!("{t}_coef"), &b, R_GLMNET)
+                .vector(&format!("{t}_dev_ratio_tight"), &d, Tol::iterative(1e-9))
+                .vector(&format!("{t}_dev_ratio"), &d, R_DEV);
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_validate_glmnet_gaussian_lasso_std() {
+        // REG-7 (reverse): intercept = false scales x without centring it. The intercept fit
+        // is a guard.
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        check_gaussian(&case, &ds, 1.0, true, "a10_std");
+    }
+
+    #[test]
+    fn test_validate_glmnet_gaussian_lasso_raw() {
+        // REG-7: standardize = false still centres x for the intercept.
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        check_gaussian(&case, &ds, 1.0, false, "a10_raw");
+    }
+
+    #[test]
+    fn test_validate_glmnet_gaussian_enet_std() {
+        // REG-40: the L2 penalty is lambda (1 - alpha) / sd(y) in glmnet's units.
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        check_gaussian(&case, &ds, 0.5, true, "a5_std");
+    }
+
+    #[test]
+    fn test_validate_glmnet_gaussian_enet_raw() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        check_gaussian(&case, &ds, 0.5, false, "a5_raw");
+    }
+
+    #[test]
+    fn test_validate_glmnet_gaussian_ridge_std() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        check_gaussian(&case, &ds, 0.0, true, "a0_std");
+    }
+
+    #[test]
+    fn test_validate_glmnet_gaussian_ridge_raw() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        check_gaussian(&case, &ds, 0.0, false, "a0_raw");
+    }
+
+    #[test]
+    fn test_glmnet_kkt_excluded_variable() {
+        // Pre-WP07: K1, K16, K23 stay at 0 at path indices 54, 61, 80 with
+        // |x~_j'r|/n = 1.00995, 1.00386, 1.05708 x lambda, df 26/28/29 where the solution
+        // has 27/29/30 (REG-41).
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let cols = k30();
+        let lam = case.vector("kkt_lambda");
+        let r = run_glmnet(
+            &ds,
+            "yk",
+            &refs(&cols),
+            &tight(1.0, true, true, Some(lam.as_slice())),
+        )
+        .unwrap();
+        let (x, y) = xy(&ds, "yk", &refs(&cols));
+        let n = x.nrows() as f64;
+        for (k, f) in r.fits.iter().enumerate() {
+            let fitted = x.dot(&Array1::from_vec(f.coefficients.clone())) + f.intercept;
+            let resid = &y - &fitted;
+            for j in 0..30 {
+                if f.coefficients[j] != 0.0 {
+                    continue;
+                }
+                let col = x.column(j);
+                let m = col.sum() / n;
+                let sd = (col.iter().map(|v| (v - m).powi(2)).sum::<f64>() / n).sqrt();
+                let g = col
+                    .iter()
+                    .zip(resid.iter())
+                    .map(|(v, e)| (v - m) * e)
+                    .sum::<f64>()
+                    .abs()
+                    / (n * sd);
+                assert!(
+                    g <= f.lambda * (1.0 + 1e-9),
+                    "index {k}: K{} excluded with |x~'r|/n = {g:.9} > lambda {:.9}",
+                    j + 1,
+                    f.lambda
+                );
+            }
+        }
+        Check::new(&case)
+            .vector("kkt_lambda", &r.lambda, Tol::exact())
+            .vector("kkt_df", &dfs(&r), Tol::exact())
+            // AR(0.85) design: linear convergence; the largest gap at thresh 1e-24 is 2.35e-11
+            // in the R port of this algorithm
+            .vector("kkt_coef_tight", &coef_path(&r), Tol::new(1e-9, 1e-10))
+            .finish();
+    }
+
+    #[test]
+    fn test_glmnet_convergence_is_scale_free() {
+        // glmnet's criterion is in standardised-y units: y * 1e-6 and y * 1e6 take the same
+        // passes. Pre-WP07: absolute |delta beta| < thresh, 3.07 relative error at 1e-6.
+        let (_case, ds) = crate::test_support::load_case("glmnet_paths");
+        let (x, y) = xy(&ds, "y", &X8);
+        let mut c = GlmnetConfig::default();
+        c.thresh = 1e-14;
+        let base = glmnet(x.view(), y.view(), &c).unwrap();
+        for s in [1e-6, 1e6] {
+            let ys = &y * s;
+            let r = glmnet(x.view(), ys.view(), &c).unwrap();
+            assert_eq!(r.fits.len(), base.fits.len(), "scale {s}");
+            assert!(
+                r.npasses.abs_diff(base.npasses) <= 2,
+                "scale {s}: {} vs {} passes",
+                r.npasses,
+                base.npasses
+            );
+            for (a, b) in coef_path(&r).iter().zip(coef_path(&base)) {
+                assert!(
+                    (a / s - b).abs() <= 1e-12 + 1e-6 * b.abs(),
+                    "scale {s}: {} vs {b}",
+                    a / s
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_glmnet_maxit_truncates_path_with_warning() {
+        let (_case, ds) = crate::test_support::load_case("glmnet_paths");
+        let full = run_glmnet(&ds, "y", &X8, &GlmnetConfig::default()).unwrap();
+        let mut c = GlmnetConfig::default();
+        c.max_iter = 60;
+        let short = run_glmnet(&ds, "y", &X8, &c).unwrap();
+        let k = short.fits.len();
+        assert!(k >= 1 && k < full.fits.len(), "{k} fits");
+        assert!(short.npasses <= 60, "{} passes", short.npasses);
+        assert_eq!(
+            short.warnings,
+            vec![format!(
+                "Convergence not reached at lambda {} of {} (lambda = {:.6e}) after max_iter = 60 \
+                 coordinate passes over the path; the fits for the {k} larger lambdas are returned",
+                k + 1,
+                c.nlambda,
+                full.lambda[k]
+            )]
+        );
+        // same deterministic iterations until the budget ends
+        for (a, b) in short.fits.iter().zip(&full.fits) {
+            assert_eq!(
+                (a.intercept, &a.coefficients),
+                (b.intercept, &b.coefficients)
+            );
+        }
+        // no lambda converged at all: an error (R returns an empty model)
+        let mut c1 = GlmnetConfig::default();
+        c1.max_iter = 1;
+        c1.lambda = Some(vec![0.01]);
+        assert!(matches!(
+            run_glmnet(&ds, "y", &X8, &c1).unwrap_err(),
+            EconError::ConvergenceFailure { .. }
+        ));
+    }
+
+    #[test]
+    fn test_glmnet_constant_column_is_excluded() {
+        // glmnet's ju: a constant column gets coefficient 0 and leaves the others unchanged.
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let (x, y) = xy(&ds, "y", &X8);
+        let x9 = ndarray::concatenate![Axis(1), x, Array2::from_elem((x.nrows(), 1), 3.0)];
+        let mut chk = Check::new(&case);
+        for (standardize, key) in [(true, "a10_std_coef_tight"), (false, "a10_raw_coef_tight")] {
+            let r = glmnet(
+                x9.view(),
+                y.view(),
+                &tight(1.0, standardize, true, Some(&LAMS[..])),
+            )
+            .unwrap();
+            assert!(r.fits.iter().all(|f| f.coefficients[8] == 0.0));
+            let b: Vec<f64> = r
+                .fits
+                .iter()
+                .flat_map(|f| {
+                    std::iter::once(f.intercept).chain(f.coefficients[..8].iter().copied())
+                })
+                .collect();
+            chk.vector(key, &b, EXACT);
+        }
+        chk.finish();
     }
 }
