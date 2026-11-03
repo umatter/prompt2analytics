@@ -10,34 +10,51 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::cholesky;
 use crate::linalg::solve::{LM_QR_TOL, Qr};
 use crate::resource;
+use crate::traits::estimator::t_test_p_value;
 
-/// Result from a VAR model estimation.
+/// Result from a VAR model estimation (`vars::VAR(type = "const")`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VarResult {
-    /// Number of lags
+    /// Number of lags p
     pub lags: usize,
-    /// Number of variables
+    /// Number of variables K
     pub n_vars: usize,
-    /// Number of observations used
+    /// Observations used in each equation: T = n - p.
     pub n_obs: usize,
     /// Variable names
     pub var_names: Vec<String>,
-    /// AIC information criterion
+    /// stats::AIC of a vars::VAR fit: -2 logLik + 2 K (1 + K p).
     pub aic: f64,
-    /// BIC information criterion
+    /// stats::BIC: -2 logLik + ln(T) K (1 + K p).
     pub bic: f64,
-    /// Coefficient matrices: one per lag plus intercept
-    /// Shape: (n_vars, 1 + n_vars * lags) - each row is an equation
+    /// (K, 1 + K p); row = equation, columns [const, y1.l1, .., yK.l1, .., yK.lp] (names in
+    /// `coef_names`; vars puts const last).
     pub coefficients: Vec<Vec<f64>>,
-    /// Residual covariance matrix (n_vars x n_vars)
+    /// Residual covariance U'U / (T - K p - 1), as vars' summary()$covres; used for the SEs
+    /// and the orthogonalised IRF. (Before Tier 3 this held U'U / T, now `sigma_u_ml`.)
     pub sigma_u: Vec<Vec<f64>>,
-    /// Log-likelihood
+    /// vars::logLik: -T/2 (K ln 2 pi + ln det sigma_u_ml + K).
     pub log_likelihood: f64,
-    /// Standard errors for coefficients
+    /// sqrt(sigma_u[eq][eq] * (Z'Z)^-1_jj), as lm inside vars::VAR.
     pub std_errors: Vec<Vec<f64>>,
+    /// Coefficient names in the column order of `coefficients`: "const", "<var>.l<lag>".
+    #[serde(default)]
+    pub coef_names: Vec<String>,
+    /// t values, coefficient / SE.
+    #[serde(default)]
+    pub t_values: Vec<Vec<f64>>,
+    /// Two-sided p-values on t(T - K p - 1).
+    #[serde(default)]
+    pub p_values: Vec<Vec<f64>>,
     /// T - K p - 1, the residual df of each equation (>= K).
     #[serde(default)]
     pub df_residual: usize,
+    /// Maximum-likelihood residual covariance U'U / T.
+    #[serde(default)]
+    pub sigma_u_ml: Vec<Vec<f64>>,
+    /// ln det `sigma_u_ml`.
+    #[serde(default)]
+    pub log_det_sigma_ml: f64,
 }
 
 impl fmt::Display for VarResult {
@@ -259,39 +276,43 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
             .assign(&qr.q_times(effects.view())?);
     }
 
-    // Compute residual covariance matrix: Σ_u = (1/T) * e'e
-    let mut sigma_u = Array2::zeros((k, k));
-    for i in 0..k {
-        for j in 0..k {
-            let mut sum = 0.0;
-            for t_idx in 0..t {
-                sum += residuals[[t_idx, i]] * residuals[[t_idx, j]];
-            }
-            sigma_u[[i, j]] = sum / t as f64;
-        }
-    }
+    // Residual covariances: U'U / (T - K p - 1) for the SEs and the orthogonalised IRF
+    // (vars' summary()$covres, ECON-90), U'U / T for the likelihood.
+    let cross = residuals.t().dot(&residuals);
+    let sigma_u = &cross / df_residual as f64;
+    let sigma_u_ml = &cross / t as f64;
 
-    // Standard errors
+    // Standard errors, t and p of each equation (lm with T - K p - 1 residual df)
     let mut std_errors = Array2::zeros((k, n_regressors));
+    let mut t_values = Array2::zeros((k, n_regressors));
+    let mut p_values = Array2::zeros((k, n_regressors));
     for eq in 0..k {
         let sigma_eq = sigma_u[[eq, eq]];
         for j in 0..n_regressors {
-            std_errors[[eq, j]] = (sigma_eq * unscaled[[j, j]]).max(0.0).sqrt();
+            let se = (sigma_eq * unscaled[[j, j]]).max(0.0).sqrt();
+            let tv = coefficients[[eq, j]] / se;
+            std_errors[[eq, j]] = se;
+            t_values[[eq, j]] = tv;
+            p_values[[eq, j]] = t_test_p_value(tv, df_residual as f64);
         }
     }
 
-    // Log-likelihood
-    let det_sigma = sigma_u
-        .iter()
-        .fold(1.0_f64, |acc, &x| acc * x.abs().max(1e-10));
-    let log_likelihood = -0.5
-        * (t as f64)
-        * (k as f64 * (2.0 * std::f64::consts::PI).ln() + det_sigma.ln() + k as f64);
+    // ECON-50: log det of the ML Sigma through its Cholesky factor (vars' logLik.varest)
+    let l = cholesky(&sigma_u_ml.view()).map_err(|_| EconError::SingularMatrix {
+        context: "VAR residual covariance (divisor T) is singular: one equation's residuals \
+                  are a linear combination of the others'"
+            .to_string(),
+        suggestion: "Drop the redundant series".to_string(),
+    })?;
+    let log_det_sigma_ml = 2.0 * (0..k).map(|i| l[[i, i]].ln()).sum::<f64>();
+    let (tf, kf) = (t as f64, k as f64);
+    let log_likelihood =
+        -0.5 * tf * (kf * (2.0 * std::f64::consts::PI).ln() + log_det_sigma_ml + kf);
 
-    // Information criteria
+    // stats::AIC / BIC of a varest: df = sum of the coefficient counts, K (1 + K p)
     let n_params = (k * n_regressors) as f64;
     let aic = -2.0 * log_likelihood + 2.0 * n_params;
-    let bic = -2.0 * log_likelihood + n_params * (t as f64).ln();
+    let bic = -2.0 * log_likelihood + n_params * tf.ln();
 
     Ok(VarResult {
         lags,
@@ -304,7 +325,12 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
         sigma_u: array2_to_vec(&sigma_u),
         log_likelihood,
         std_errors: array2_to_vec(&std_errors),
+        coef_names,
+        t_values: array2_to_vec(&t_values),
+        p_values: array2_to_vec(&p_values),
         df_residual,
+        sigma_u_ml: array2_to_vec(&sigma_u_ml),
+        log_det_sigma_ml,
     })
 }
 
@@ -574,6 +600,115 @@ mod tests {
         }
     }
 
+    /// Column-major copy of a K x K matrix stored as rows (R's vec()).
+    fn col_major(m: &[Vec<f64>]) -> Vec<f64> {
+        (0..m.len())
+            .flat_map(|j| m.iter().map(move |row| row[j]))
+            .collect()
+    }
+
+    /// R's vec(irf(..)$irf[[impulse]]): responses in variable order, horizons 0..H-1 within
+    /// each.
+    fn impulse_column_major(r: &VarIrfResult, shock: usize) -> Vec<f64> {
+        (0..r.var_names.len())
+            .flat_map(|resp| r.irf.iter().map(move |h| h[resp][shock]))
+            .collect()
+    }
+
+    /// Case `id` (var_canada; each caller names it) and VAR(2) on its dataset.
+    fn canada_var(id: &str) -> (p2a_validation::Case, Dataset, VarResult) {
+        let (case, ds) = crate::test_support::load_case(id);
+        let var = run_var(&ds, &CANADA, 2).unwrap();
+        (case, ds, var)
+    }
+
+    /// R: vars::VAR(Canada, p = 2, type = "const"); coef(summary(m$varresult[[eq]])) (lm per
+    /// equation, residual df T - Kp - 1 = 73); crossprod(resid(m)) / 73
+    /// (= summary(m)$covres). Case var_canada.
+    #[test]
+    fn test_validate_var_canada_coefficients_se() {
+        use p2a_validation::{Check, Tol};
+        let (case, _ds, var) = canada_var("var_canada");
+        let n = var.n_obs; // 82
+        let mut check = Check::new(&case);
+        for (eq, name) in var.var_names.iter().enumerate() {
+            check
+                .named(
+                    &format!("coef_{name}"),
+                    &var.coef_names,
+                    &var.coefficients[eq],
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("se_{name}"),
+                    &var.coef_names,
+                    &var.std_errors[eq],
+                    Tol::se(n),
+                )
+                .named(
+                    &format!("t_{name}"),
+                    &var.coef_names,
+                    &var.t_values[eq],
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("p_{name}"),
+                    &var.coef_names,
+                    &var.p_values[eq],
+                    Tol::p_value(n),
+                );
+        }
+        check
+            .vector("sigma_df", &col_major(&var.sigma_u), Tol::stat(n))
+            .scalar("n_obs", var.n_obs as f64, Tol::exact())
+            .scalar("n_rows", (var.n_obs + var.lags) as f64, Tol::exact())
+            .scalar("df_resid", var.df_residual as f64, Tol::exact())
+            .finish();
+    }
+
+    /// R: logLik(m), AIC(m), BIC(m) (df = K (Kp + 1) = 36); log(det(crossprod(resid(m)) / T)).
+    #[test]
+    fn test_validate_var_canada_loglik_ic() {
+        use p2a_validation::{Check, Tol};
+        let (case, _ds, var) = canada_var("var_canada");
+        let n = var.n_obs;
+        Check::new(&case)
+            .scalar("loglik", var.log_likelihood, Tol::stat(n))
+            .scalar("aic_stats", var.aic, Tol::stat(n))
+            .scalar("bic_stats", var.bic, Tol::stat(n))
+            .scalar("sigma_ml_logdet", var.log_det_sigma_ml, Tol::stat(n))
+            .vector("sigma_ml", &col_major(&var.sigma_u_ml), Tol::stat(n))
+            .finish();
+    }
+
+    /// R: irf(m, n.ahead = 12, ortho = TRUE | FALSE, boot = FALSE)$irf[[impulse]]. p2a's
+    /// `steps` counts the horizons including h = 0, so steps = n.ahead + 1 = 13.
+    /// Psi_h = Phi_h P, P = t(chol(crossprod(resid) / 73)).
+    #[test]
+    fn test_validate_var_irf_canada() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds, var) = canada_var("var_canada");
+        let n = var.n_obs;
+        let ortho = compute_irf(&var, 13, true).unwrap();
+        let plain = compute_irf(&var, 13, false).unwrap();
+        assert_eq!(run_var_irf(&ds, &CANADA, 2, 13).unwrap().irf, ortho.irf);
+        let mut check = Check::new(&case);
+        for (j, imp) in CANADA.iter().enumerate() {
+            check
+                .vector(
+                    &format!("irf_ortho_{imp}"),
+                    &impulse_column_major(&ortho, j),
+                    Tol::stat(n),
+                )
+                .vector(
+                    &format!("irf_plain_{imp}"),
+                    &impulse_column_major(&plain, j),
+                    Tol::stat(n),
+                );
+        }
+        check.finish();
+    }
+
     fn cancelled() -> Budget {
         let token = CancelToken::new();
         token.cancel();
@@ -597,39 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_var_vs_r() {
-        // R reference:
-        // library(vars)
-        // set.seed(42)
-        // VAR(p=1) on bivariate series
-        // Check coefficient structure matches
-        let dataset = create_var_validation_dataset();
-        let result = run_var(&dataset, &["y1", "y2"], 1).unwrap();
-
-        // Verify structure
-        assert_eq!(result.n_vars, 2);
-        assert_eq!(result.lags, 1);
-        assert!(result.n_obs > 90); // Should have most observations
-
-        // Coefficients shape: (n_vars, 1 + n_vars * lags) = (2, 3)
-        assert_eq!(result.coefficients.len(), 2);
-        assert_eq!(result.coefficients[0].len(), 3); // intercept + 2 lagged vars
-
-        // AIC and BIC should be finite
-        assert!(result.aic.is_finite());
-        assert!(result.bic.is_finite());
-
-        // Log-likelihood should be finite
-        assert!(result.log_likelihood.is_finite());
-
-        // Sigma_u should be 2x2 positive semi-definite
-        assert_eq!(result.sigma_u.len(), 2);
-        assert!(result.sigma_u[0][0] > 0.0); // Diagonal should be positive
-        assert!(result.sigma_u[1][1] > 0.0);
-    }
-
-    #[test]
-    fn test_validate_var_coefficient_estimation() {
+    fn test_var_recovers_dgp() {
         // Test that VAR coefficients are reasonably close to true DGP values
         let dataset = create_var_validation_dataset();
         let result = run_var(&dataset, &["y1", "y2"], 1).unwrap();
@@ -657,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_var_irf_structure() {
+    fn test_var_irf_shapes_and_decay() {
         // R reference:
         // irf(var_model, impulse = "y1", response = "y2", n.ahead = 5, ortho = TRUE)
         let dataset = create_var_validation_dataset();
@@ -687,48 +790,6 @@ mod tests {
             final_step_sum < first_step_sum * 2.0,
             "IRF should not explode for stationary VAR"
         );
-    }
-
-    #[test]
-    fn test_validate_var_non_orthogonalized_irf() {
-        let dataset = create_var_validation_dataset();
-        let result = run_var(&dataset, &["y1", "y2"], 1).unwrap();
-
-        // Non-orthogonalized IRF
-        let irf_non_orth = compute_irf(&result, 5, false).unwrap();
-        assert!(!irf_non_orth.orthogonalized);
-
-        // Orthogonalized IRF
-        let irf_orth = compute_irf(&result, 5, true).unwrap();
-        assert!(irf_orth.orthogonalized);
-
-        // The two should generally differ (unless Sigma is diagonal)
-        let mut diff: f64 = 0.0;
-        for s in 0..5 {
-            for i in 0..2 {
-                for j in 0..2 {
-                    diff += (irf_non_orth.irf[s][i][j] - irf_orth.irf[s][i][j]).abs();
-                }
-            }
-        }
-        // Some difference is expected unless covariance is exactly diagonal
-        assert!(diff >= 0.0, "IRFs computed successfully");
-    }
-
-    #[test]
-    fn test_validate_var_with_higher_lags() {
-        let dataset = create_var_validation_dataset();
-
-        // VAR(2) should also work
-        let result = run_var(&dataset, &["y1", "y2"], 2).unwrap();
-        assert_eq!(result.lags, 2);
-
-        // Coefficients should have shape (2, 1 + 2*2) = (2, 5)
-        assert_eq!(result.coefficients[0].len(), 5);
-
-        // AIC for VAR(2) might be higher (overfitting) or lower
-        // Just check it's finite
-        assert!(result.aic.is_finite());
     }
 
     #[test]
