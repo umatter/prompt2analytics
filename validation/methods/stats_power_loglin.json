@@ -227,6 +227,54 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "fisher_legacy",
+      "name": "Fisher's exact test on the legacy 2x2 tables of fisher.rs",
+      "category": "stats",
+      "reference": "stats::fisher.test(alternative = 'two.sided' | 'less' | 'greater'); limits and conditional MLE re-solved with uniroot(tol = 1e-15) (T2-WP05)",
+      "doc": "validation/stats/fisher.md",
+      "cases": [
+        "stat_fisher_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::fisher::tests::test_validate_against_r_basic",
+        "p2a-core::stats::fisher::tests::test_validate_against_r_lady_tea",
+        "p2a-core::stats::fisher::tests::test_validate_against_r_one_sided",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_legacy_ci"
+      ],
+      "quantities": [
+        "p for three alternatives",
+        "two-sided and one-sided limits",
+        "conditional MLE",
+        "sample odds ratio",
+        "N"
+      ],
+      "tolerance": "p 1e-9 relative; limits and MLE 1e-9 relative + 1e-12 (T2-WP05's rule)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "anova_legacy",
+      "name": "One-way and balanced two-way ANOVA on the legacy data of anova.rs",
+      "category": "stats",
+      "reference": "stats::aov; summary.aov",
+      "doc": "validation/stats/anova.md",
+      "cases": [
+        "stat_anova_oneway_legacy",
+        "stat_anova_twoway_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::anova::tests::test_validate_one_way_anova_against_r",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_against_r"
+      ],
+      "quantities": [
+        "SS, df, MS, F, p for every term and the residuals (one-way; two-way with and without the interaction)",
+        "eta squared, omega squared, grand mean, group n/mean/sd/min/max"
+      ],
+      "tolerance": "validation/README.md, n = 12-15: SS, MS, F 1e-5 relative; p 1e-5 + 1e-12; means 1e-6; df exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

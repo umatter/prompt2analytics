@@ -1509,129 +1509,77 @@ mod tests {
 
     #[test]
     fn test_validate_one_way_anova_against_r() {
-        // Test data matches R validation script exactly
-        let dataset = create_one_way_test_data();
-        let result = run_one_way_anova(&dataset, "yield", "fertilizer").unwrap();
-
-        // R expected values from aov(yield ~ fertilizer, data = data1)
-        let expected_ss_between = 250.012;
-        let expected_ss_within = 3.744;
-        let expected_df_between = 2;
-        let expected_df_within = 12;
-        let expected_ms_between = 125.006;
-        let expected_ms_within = 0.312;
-        let expected_f = 400.660256;
-        // R gives p-value as 1.03161374845346e-11
-        let expected_eta_sq = 0.985245669;
-
-        // Validate sum of squares (tolerance 1e-3)
-        assert!(
-            (result.ss_between - expected_ss_between).abs() < 1e-3,
-            "SS Between mismatch: Rust={}, R={}",
-            result.ss_between,
-            expected_ss_between
-        );
-        assert!(
-            (result.ss_within - expected_ss_within).abs() < 1e-3,
-            "SS Within mismatch: Rust={}, R={}",
-            result.ss_within,
-            expected_ss_within
-        );
-
-        // Validate degrees of freedom (exact match)
+        // R: aov(yield ~ fertilizer) on stat_anova_oneway_legacy (validation/r/cases/stats_power_loglin.R)
+        let (case, ds) = load_case("stat_anova_oneway_legacy");
+        let r = run_one_way_anova(&ds, "yield", "fertilizer").unwrap();
+        let n = 15;
+        let g = &r.groups;
         assert_eq!(
-            result.df_between, expected_df_between,
-            "DF Between mismatch"
+            g.iter().map(|x| x.group.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B", "C"]
         );
-        assert_eq!(result.df_within, expected_df_within, "DF Within mismatch");
-
-        // Validate mean squares (tolerance 1e-3)
-        assert!(
-            (result.ms_between - expected_ms_between).abs() < 1e-3,
-            "MS Between mismatch: Rust={}, R={}",
-            result.ms_between,
-            expected_ms_between
-        );
-        assert!(
-            (result.ms_within - expected_ms_within).abs() < 1e-3,
-            "MS Within mismatch: Rust={}, R={}",
-            result.ms_within,
-            expected_ms_within
-        );
-
-        // Validate F-statistic (tolerance 1e-3)
-        assert!(
-            (result.f_statistic - expected_f).abs() < 1e-3,
-            "F-statistic mismatch: Rust={}, R={}",
-            result.f_statistic,
-            expected_f
-        );
-
-        // Validate p-value is very small (both should be < 1e-10)
-        assert!(
-            result.p_value < 1e-10,
-            "P-value should be < 1e-10, got {}",
-            result.p_value
-        );
-
-        // Validate eta-squared (tolerance 1e-4)
-        assert!(
-            (result.eta_squared - expected_eta_sq).abs() < 1e-4,
-            "Eta-squared mismatch: Rust={}, R={}",
-            result.eta_squared,
-            expected_eta_sq
-        );
-
-        // Validate grand mean (R reports 15.14)
-        assert!(
-            (result.grand_mean - 15.14).abs() < 1e-6,
-            "Grand mean mismatch: Rust={}, R=15.14",
-            result.grand_mean
-        );
+        let col = |f: fn(&GroupStats) -> f64| g.iter().map(f).collect::<Vec<f64>>();
+        Check::new(&case)
+            .scalar("fertilizer_ss", r.ss_between, Tol::stat(n))
+            .scalar("Residuals_ss", r.ss_within, Tol::stat(n))
+            .scalar("ss_total", r.ss_total, Tol::stat(n))
+            .scalar("fertilizer_ms", r.ms_between, Tol::stat(n))
+            .scalar("Residuals_ms", r.ms_within, Tol::stat(n))
+            .scalar("fertilizer_f", r.f_statistic, Tol::stat(n))
+            .scalar("eta_squared", r.eta_squared, Tol::stat(n))
+            .scalar("omega_squared", r.omega_squared, Tol::stat(n))
+            .scalar("fertilizer_p", r.p_value, Tol::p_value(n))
+            .scalar("fertilizer_df", r.df_between as f64, Tol::exact())
+            .scalar("Residuals_df", r.df_within as f64, Tol::exact())
+            .scalar("n", r.n_obs as f64, Tol::exact())
+            .scalar("grand_mean", r.grand_mean, Tol::coef(n))
+            .vector("group_mean", &col(|x| x.mean), Tol::coef(n))
+            .vector("group_sd", &col(|x| x.std_dev), Tol::se(n))
+            .vector("group_length", &col(|x| x.n as f64), Tol::exact())
+            .vector("group_min", &col(|x| x.min), Tol::exact())
+            .vector("group_max", &col(|x| x.max), Tol::exact())
+            .finish();
     }
 
     #[test]
     fn test_validate_two_way_anova_against_r() {
-        // Test data matches R validation script exactly
-        let dataset = create_two_way_test_data();
-        let result = run_two_way_anova(&dataset, "yield", "fertilizer", "water", true).unwrap();
-
-        // R expected values from aov(yield ~ fertilizer * water, data = data2)
-        // Note: R reports SS_A = 168.75, SS_B = 468.75, SS_AB = 18.75, SS_error = 8.0
-
-        // Validate degrees of freedom (exact)
-        assert_eq!(result.df_a, 1, "DF Factor A mismatch");
-        assert_eq!(result.df_b, 1, "DF Factor B mismatch");
-        assert_eq!(result.df_ab.unwrap(), 1, "DF Interaction mismatch");
-        assert_eq!(result.df_error, 8, "DF Error mismatch");
-
-        // Validate F-statistics
-        // R: F_water = 468.75, F_interaction = 18.75
-        assert!(
-            (result.f_b - 468.75).abs() < 0.1,
-            "F Factor B mismatch: Rust={}, R=468.75",
-            result.f_b
-        );
-        assert!(
-            (result.f_ab.unwrap() - 18.75).abs() < 0.1,
-            "F Interaction mismatch: Rust={}, R=18.75",
-            result.f_ab.unwrap()
-        );
-
-        // Validate p-values are significant
-        assert!(result.p_a < 0.001, "Factor A should be significant");
-        assert!(result.p_b < 0.001, "Factor B should be significant");
-        assert!(
-            result.p_ab.unwrap() < 0.01,
-            "Interaction should be significant"
-        );
-
-        // Validate SS decomposition holds
-        let ss_total_computed = result.ss_a + result.ss_b + result.ss_ab.unwrap() + result.ss_error;
-        assert!(
-            (result.ss_total - ss_total_computed).abs() < 1e-6,
-            "SS decomposition failed"
-        );
+        // R: aov(yield ~ fertilizer * water) and aov(yield ~ fertilizer + water) on
+        // stat_anova_twoway_legacy (yield is Int64 in the CSV)
+        let (case, ds) = load_case("stat_anova_twoway_legacy");
+        let n = 12;
+        let mut c = Check::new(&case);
+        for (interaction, pre) in [(true, "int"), (false, "add")] {
+            let r = run_two_way_anova(&ds, "yield", "fertilizer", "water", interaction).unwrap();
+            let mut terms = vec![
+                ("fertilizer", r.ss_a, r.df_a, r.ms_a, Some((r.f_a, r.p_a))),
+                ("water", r.ss_b, r.df_b, r.ms_b, Some((r.f_b, r.p_b))),
+                ("Residuals", r.ss_error, r.df_error, r.ms_error, None),
+            ];
+            if interaction {
+                terms.push((
+                    "fertilizer_x_water",
+                    r.ss_ab.unwrap(),
+                    r.df_ab.unwrap(),
+                    r.ms_ab.unwrap(),
+                    Some((r.f_ab.unwrap(), r.p_ab.unwrap())),
+                ));
+            } else {
+                assert!(r.ss_ab.is_none());
+            }
+            for (name, ss, df, ms, fp) in terms {
+                c.scalar(&format!("{pre}_{name}_ss"), ss, Tol::stat(n))
+                    .scalar(&format!("{pre}_{name}_ms"), ms, Tol::stat(n))
+                    .scalar(&format!("{pre}_{name}_df"), df as f64, Tol::exact());
+                if let Some((f, p)) = fp {
+                    c.scalar(&format!("{pre}_{name}_f"), f, Tol::stat(n))
+                        .scalar(&format!("{pre}_{name}_p"), p, Tol::p_value(n));
+                }
+            }
+            c.scalar("ss_total", r.ss_total, Tol::stat(n))
+                .scalar("grand_mean", r.grand_mean, Tol::coef(n))
+                .scalar("n", r.n_obs as f64, Tol::exact());
+        }
+        c.finish();
     }
 
     // ========================================================================

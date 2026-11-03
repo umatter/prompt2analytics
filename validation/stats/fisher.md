@@ -139,16 +139,32 @@ values at 1e-9 relative and R's printed values as a cross-check at 1e-2 relative
   and the other tests of method `contingency_table`.
 - Registry: `validation/methods/stats_contingency.json`, method `fisher_exact`.
 
+### Legacy tables (R-pinned)
+
+Case `stat_fisher_legacy` (`validation/r/cases/stats_power_loglin.R`, dataset
+`validation/datasets/generated/fisher_legacy.csv`, one row per table `a, b, c, d`): `fisher.test`
+for the three alternatives with the limits and estimate re-solved tight as above. Each test runs
+`check_legacy(<table>)`: p for `two.sided`, `less` and `greater` at 1e-9 relative; the two-sided
+limits, the upper `less` and lower `greater` limit and the conditional MLE against the tight
+re-solve at 1e-9 relative (1e-12 absolute); the sample odds ratio at 1e-15 relative and n exactly;
+the `less` lower limit 0 and the `greater` upper limit `Inf`.
+
+| Test | Table | Two-sided p | Tight CI (two-sided) |
+|---|---|---|---|
+| `stats::fisher::tests::test_validate_against_r_basic` | `basic` `[[1, 11], [9, 3]]` | 0.002759456185220086 | 0.0006360029488751081, 0.42586647569637387 |
+| `stats::fisher::tests::test_validate_against_r_lady_tea` | `tea` `[[3, 1], [1, 3]]` | 0.4857142857142858 | 0.21173559544657847, 626.2435305888135 |
+| `stats::fisher::tests::test_validate_against_r_one_sided` | `one_sided` `[[6, 2], [1, 7]]` | 0.04055944055944058 (greater 0.020279720279720286) | 1.0876028823630632, 1098.971432187753 |
+| `stats::fisher::tests::test_validate_fisher_legacy_ci` | `ci` `[[10, 5], [5, 10]]` | 0.14311097805070672 | 0.7054372156512816, 23.921858982581192 |
+
+Before T2-WP05 the CI of `ci` was (0, 40); the old test only checked that it contained the sample
+odds ratio. Registry: `validation/methods/stats_power_loglin.json`, method `fisher_legacy`.
+
 ### Quoted values
 
-The older tests compare with values quoted from R, which `fisher.test` reproduces:
-`stats::fisher::tests::test_validate_against_r_lady_tea` (p 0.4857142857),
-`stats::fisher::tests::test_validate_against_r_basic` (`[[1, 11], [9, 3]]`, p 0.002759456185),
-`stats::fisher::tests::test_validate_against_r_one_sided` (`[[6, 2], [1, 7]]`, two-sided p
-0.04055944056), `stats::fisher::tests::test_zero_cells` (`[[0, 5], [5, 10]]`, p 0.2663183695)
-and `stats::fisher::tests::test_extreme_table` (`[[50, 1], [1, 50]]`, p 1.302273445e-26;
-R's printed "odds ratio 1530.9" is the imprecise `uniroot` solution of the conditional MLE,
-1512.5074333693019).
+`stats::fisher::tests::test_zero_cells` (`[[0, 5], [5, 10]]`, p 0.2663183695) and
+`stats::fisher::tests::test_extreme_table` (`[[50, 1], [1, 50]]`, p 1.302273445e-26; R's printed
+"odds ratio 1530.9" is the imprecise `uniroot` solution of the conditional MLE,
+1512.5074333693019) compare with values quoted from R.
 
 ## Tolerance
 
