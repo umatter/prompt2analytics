@@ -439,6 +439,8 @@ mod tests {
             caliper_used: None,
             propensity_scores: Some(vec![0.5; 100]),
             effective_sample_size: n_matched as f64,
+            propensity_convergence: None,
+            warnings: vec![],
         }
     }
 

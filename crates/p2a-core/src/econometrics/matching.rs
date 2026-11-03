@@ -55,10 +55,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::glm::{GlmLink, GlmSpec, fit_propensity};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
-use crate::traits::estimator::logistic_cdf;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 /// Threshold for using parallel algorithms (to avoid overhead on small datasets)
 const PARALLEL_THRESHOLD: usize = 500;
@@ -309,6 +310,23 @@ pub struct MatchResult {
     pub caliper_used: Option<f64>,
     /// Effective sample size (accounting for weights).
     pub effective_sample_size: f64,
+    /// Convergence of the propensity-score glm (None when no propensity score is used).
+    #[serde(default)]
+    pub propensity_convergence: Option<Convergence>,
+    /// Warnings: the propensity-score glm's, MatchIt's sample warnings and notes on
+    /// generalised inverses, unmatched units and discarded subclasses.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for MatchResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.propensity_convergence.clone()
+    }
 }
 
 impl fmt::Display for MatchResult {
@@ -370,8 +388,7 @@ impl fmt::Display for MatchResult {
             - (self.balance_after.mean_abs_std_diff
                 / self.balance_before.mean_abs_std_diff.max(1e-10));
         writeln!(f, "Balance Improvement: {:.1}%", improvement * 100.0)?;
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -425,10 +442,22 @@ pub fn match_it(
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
 
     let n = treatment.len();
+    if let Some((i, v)) = treatment
+        .iter()
+        .enumerate()
+        .find(|(_, v)| **v != 0.0 && **v != 1.0)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "treatment column '{treatment_col}' must be coded 0/1 (row {} is {v})",
+                i + 1
+            ),
+        });
+    }
 
     // Identify treated and control indices
     let (treated_idx, control_idx): (Vec<usize>, Vec<usize>) =
-        (0..n).partition(|&i| treatment[i] >= 0.5);
+        (0..n).partition(|&i| treatment[i] == 1.0);
 
     let n_treated = treated_idx.len();
     let n_control = control_idx.len();
@@ -443,6 +472,19 @@ pub fn match_it(
     }
 
     validate_match_counts(&method, n, n_treated, n_control, covariate_cols.len())?;
+    let ps_link = match distance_method {
+        DistanceMethod::Logit => Some(GlmLink::Logit),
+        DistanceMethod::Probit => Some(GlmLink::Probit),
+        DistanceMethod::Mahalanobis | DistanceMethod::Euclidean => None,
+    };
+    if matches!(method, MatchMethod::Subclass { .. }) && ps_link.is_none() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "subclassification needs a propensity-score distance (logit or probit), got {}",
+                distance_method
+            ),
+        });
+    }
 
     // Build covariate matrix
     let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
@@ -461,6 +503,7 @@ pub fn match_it(
     );
 
     // Perform matching based on method - using optimized algorithms
+    let mut ps_model: Option<PropensityModel> = None;
     let (matches, weights, subclasses, caliper_used, propensity_scores) = match &method {
         MatchMethod::NearestNeighbor {
             ratio,
@@ -471,11 +514,10 @@ pub fn match_it(
                 DistanceMethod::Logit | DistanceMethod::Probit => {
                     // FAST PATH: Use sorting + binary search for propensity score matching
                     // O(n_t * log(n_c)) instead of O(n_t * n_c)
-                    let ps = estimate_propensity_scores(
-                        &x,
-                        &treatment,
-                        distance_method == DistanceMethod::Probit,
-                    )?;
+                    let model =
+                        estimate_propensity(&x, &treatment, ps_link.unwrap_or(GlmLink::Logit))?;
+                    let ps = model.scores.clone();
+                    ps_model = Some(model);
 
                     // Compute caliper in absolute PS units
                     let caliper_abs = caliper.map(|c| {
@@ -537,14 +579,18 @@ pub fn match_it(
             max_ratio,
         } => {
             // Full matching uses propensity scores for stratification
-            let ps = estimate_propensity_scores(&x, &treatment, false)?;
+            let model = estimate_propensity(&x, &treatment, ps_link.unwrap_or(GlmLink::Logit))?;
+            let ps = model.scores.clone();
+            ps_model = Some(model);
             let (m, w, sc, cal) =
                 full_matching_optimized(&ps, &treated_idx, &control_idx, *min_ratio, *max_ratio)?;
             (m, w, sc, cal, ps)
         }
         MatchMethod::Subclass { n_subclasses } => {
             // Subclassification uses propensity scores
-            let ps = estimate_propensity_scores(&x, &treatment, false)?;
+            let model = estimate_propensity(&x, &treatment, ps_link.unwrap_or(GlmLink::Logit))?;
+            let ps = model.scores.clone();
+            ps_model = Some(model);
             let (m, w, sc, cal) =
                 subclassification_matching(&ps, &treated_idx, &control_idx, *n_subclasses)?;
             (m, w, sc, cal, ps)
@@ -593,6 +639,8 @@ pub fn match_it(
         n_discarded_control: n_control - n_matched_control,
         caliper_used,
         effective_sample_size,
+        propensity_convergence: ps_model.as_ref().map(|m| m.convergence.clone()),
+        warnings: ps_model.map(|m| m.warnings).unwrap_or_default(),
     })
 }
 
@@ -835,113 +883,52 @@ pub fn subclass_match(
 // Propensity Score Estimation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Estimate propensity scores using logistic/probit regression.
-fn estimate_propensity_scores(
+/// A propensity-score model: the binomial glm of the treatment on `[1, x]`.
+struct PropensityModel {
+    scores: Array1<f64>,
+    coefficients: Array1<f64>,
+    convergence: Convergence,
+    warnings: Vec<String>,
+}
+
+/// Propensity scores from `econometrics::glm::fit_propensity` (the logit or probit MLE of
+/// `glm.fit`, as MatchIt's `distance = "glm"`); no clipping (MatchIt does not clip).
+fn estimate_propensity(
     x: &Array2<f64>,
-    treatment: &Array1<f64>,
-    use_probit: bool,
-) -> EconResult<Array1<f64>> {
-    let n = treatment.len();
-    let k = x.ncols();
-
-    // Add intercept
-    let mut x_with_intercept = Array2::zeros((n, k + 1));
-    for i in 0..n {
-        x_with_intercept[[i, 0]] = 1.0;
-        for j in 0..k {
-            x_with_intercept[[i, j + 1]] = x[[i, j]];
-        }
-    }
-
-    // Newton-Raphson for MLE
-    let mut beta = Array1::zeros(k + 1);
-    let max_iter = 50;
-    let tolerance = 1e-8;
-
-    for _ in 0..max_iter {
-        crate::resource::checkpoint()?;
-
-        // Linear predictor
-        let z: Array1<f64> = x_with_intercept.dot(&beta);
-
-        // Probabilities
-        let p: Array1<f64> = if use_probit {
-            z.mapv(normal_cdf)
-        } else {
-            z.mapv(logistic_cdf)
-        };
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        // Gradient
-        let residuals = treatment - &p_clipped;
-        let gradient = x_with_intercept.t().dot(&residuals);
-
-        // Check convergence
-        let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-        if grad_norm < tolerance {
-            break;
-        }
-
-        // Weights for Hessian
-        let weights: Array1<f64> = if use_probit {
-            // For probit: phi(z)^2 / (Phi(z) * (1-Phi(z)))
-            z.iter()
-                .zip(p_clipped.iter())
-                .map(|(&zi, &pi)| {
-                    let phi = normal_pdf(zi);
-                    phi * phi / (pi * (1.0 - pi) + 1e-10)
-                })
-                .collect()
-        } else {
-            // For logit: p(1-p)
-            p_clipped.mapv(|pi| pi * (1.0 - pi))
-        };
-
-        // Hessian approximation: -X'WX
-        let mut hessian = Array2::zeros((k + 1, k + 1));
-        for i in 0..n {
-            let wi = weights[i];
-            for j in 0..(k + 1) {
-                for l in 0..(k + 1) {
-                    hessian[[j, l]] -= wi * x_with_intercept[[i, j]] * x_with_intercept[[i, l]];
-                }
-            }
-        }
-
-        // Invert -H and update
-        let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) =
-            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
-                context: "Propensity score estimation".to_string(),
-                suggestion: format!("Check for multicollinearity: {:?}", e),
-            })?;
-
-        let delta = hess_inv.dot(&gradient);
-        beta = &beta + &delta;
-    }
-
-    // Final propensity scores
-    let z_final: Array1<f64> = x_with_intercept.dot(&beta);
-    let ps: Array1<f64> = if use_probit {
-        z_final.mapv(normal_cdf)
-    } else {
-        z_final.mapv(logistic_cdf)
-    };
-
-    // Clip to avoid extreme values
-    Ok(ps.mapv(|p| p.max(1e-10).min(1.0 - 1e-10)))
-}
-
-/// Standard normal CDF using statrs.
-fn normal_cdf(x: f64) -> f64 {
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    normal.cdf(x)
-}
-
-/// Standard normal PDF.
-fn normal_pdf(x: f64) -> f64 {
-    (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
+    treat: &Array1<f64>,
+    link: GlmLink,
+) -> EconResult<PropensityModel> {
+    let (n, k) = x.dim();
+    let mut design = crate::resource::try_zeros2(n, k + 1, "propensity-score design matrix")?;
+    design.column_mut(0).fill(1.0);
+    design.slice_mut(ndarray::s![.., 1..]).assign(x);
+    let fit = fit_propensity(design.view(), treat.view(), link)?;
+    let spec = GlmSpec::logit();
+    let convergence = Convergence::new(
+        fit.fit.converged,
+        fit.fit.iterations,
+        spec.max_iter,
+        "relative change in deviance",
+        f64::NAN,
+        spec.epsilon,
+    );
+    let mut warnings: Vec<String> = convergence
+        .note("propensity-score glm")
+        .into_iter()
+        .collect();
+    warnings.extend(
+        fit.fit
+            .warnings
+            .iter()
+            .filter(|w| w.as_str() != "glm.fit: algorithm did not converge")
+            .map(|w| format!("propensity-score glm: {w}")),
+    );
+    Ok(PropensityModel {
+        scores: fit.scores,
+        coefficients: fit.fit.coefficients,
+        convergence,
+        warnings,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1988,7 +1975,103 @@ fn compute_effective_sample_size(weights: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    const COVS: [&str; 3] = ["x1", "x2", "x3"];
+
+    fn nn(ratio: usize, caliper: Option<f64>, replace: bool) -> MatchMethod {
+        MatchMethod::NearestNeighbor {
+            ratio,
+            caliper,
+            replace,
+        }
+    }
+
+    fn full(min_ratio: f64, max_ratio: f64) -> MatchMethod {
+        MatchMethod::Full {
+            min_ratio,
+            max_ratio,
+        }
+    }
+
+    /// glm(treat ~ x1 + x2 + x3, binomial(logit | probit)) at epsilon 1e-14 (the *_tight keys)
+    /// and MatchIt's own glm (epsilon 1e-8, the package values);
+    /// validation/r/cases/causal_matching.R, case matchit_nearest.
+    #[test]
+    fn test_validate_matchit_propensity_models() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let x = DesignMatrix::from_dataframe(ds.df(), &COVS, false)
+            .unwrap()
+            .data;
+        let d = DesignMatrix::extract_column(ds.df(), "treat").unwrap();
+        let names = ["(Intercept)", "x1", "x2", "x3"];
+        let lg = estimate_propensity(&x, &d, GlmLink::Logit).unwrap();
+        let pr = estimate_propensity(&x, &d, GlmLink::Probit).unwrap();
+        Check::new(&case)
+            .vector("logit_ps_tight", &lg.scores.to_vec(), Tol::iterative(1e-8))
+            .named(
+                "logit_coef",
+                &names,
+                &lg.coefficients.to_vec(),
+                Tol::iterative(1e-8),
+            )
+            .vector("probit_ps_tight", &pr.scores.to_vec(), Tol::iterative(1e-8))
+            .named(
+                "probit_coef_tight",
+                &names,
+                &pr.coefficients.to_vec(),
+                Tol::iterative(1e-8),
+            )
+            // MatchIt's glm (epsilon 1e-8) stops about 1e-6 away from the MLE
+            .named(
+                "probit_coef",
+                &names,
+                &pr.coefficients.to_vec(),
+                Tol::iterative(1e-5),
+            )
+            .finish();
+        assert!(lg.convergence.converged && pr.convergence.converged && lg.warnings.is_empty());
+    }
+
+    /// CAUS-20: nearest-neighbour, full and subclass matching all use the probit MLE when
+    /// asked for probit (Full and Subclass used to fit a logit; nearest-neighbour solved the
+    /// logit score equation).
+    #[test]
+    fn test_validate_matchit_probit_in_every_ps_method() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        for m in [
+            nn(1, None, false),
+            full(0.0, f64::INFINITY),
+            MatchMethod::Subclass { n_subclasses: 5 },
+        ] {
+            let r = match_it(&ds, "treat", &COVS, m, Some(DistanceMethod::Probit)).unwrap();
+            Check::new(&case)
+                .vector(
+                    "probit_ps_tight",
+                    &r.propensity_scores.clone().unwrap(),
+                    Tol::iterative(1e-8),
+                )
+                .finish();
+            assert!(r.propensity_convergence.as_ref().unwrap().converged);
+        }
+    }
+
+    /// Perfect separation (R glm: "glm.fit: fitted probabilities numerically 0 or 1
+    /// occurred", converged in 28 iterations, x2 aliased; MatchIt matches every treated
+    /// unit). Replaces the old `assert!(result.is_ok() || result.is_err())` (CAUS-92).
+    #[test]
+    fn test_matching_reports_propensity_glm_warnings() {
+        let df = df! { "treatment" => [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        "x1" => [10.0, 11.0, 12.0, 1.0, 2.0, 3.0], "x2" => [10.0, 11.0, 12.0, 1.0, 2.0, 3.0] }
+        .unwrap();
+        let r = nearest_neighbor_match(&Dataset::new(df), "treatment", &["x1", "x2"], None, false)
+            .unwrap();
+        assert_eq!(r.n_matched_treated, 3);
+        let sep = "propensity-score glm: glm.fit: fitted probabilities numerically 0 or 1 occurred";
+        assert!(r.warnings.iter().any(|w| w == sep), "{:?}", r.warnings);
+        assert!(r.to_string().contains(&format!("Warning: {sep}")));
+    }
 
     /// Create test dataset with known treatment assignment mechanism.
     ///
@@ -2218,24 +2301,6 @@ mod tests {
         let dataset = create_test_dataset();
         let result = nearest_neighbor_match(&dataset, "nonexistent", &["x1", "x2"], None, false);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_no_overlap_handling() {
-        // Create dataset with perfect separation
-        let df = df! {
-            "treatment" => [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-            "x1" => [10.0, 11.0, 12.0, 1.0, 2.0, 3.0],
-            "x2" => [10.0, 11.0, 12.0, 1.0, 2.0, 3.0]
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Should still work but may have few matches
-        let result = nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], None, false);
-        // Result might succeed with poor balance or fail depending on implementation
-        // The key is it shouldn't panic
-        assert!(result.is_ok() || result.is_err());
     }
 
     #[test]
@@ -2868,7 +2933,10 @@ mod tests {
     #[test]
     fn test_stratified_matching_respects_allocation_ceiling() {
         let ds = create_matchit_validation_dataset();
-        // about 191*309/5 ≈ 11.8k (treated, control) pairs * 8 B ≈ 94 KB > 1 KiB
+        // about 191*309/5 ≈ 11.8k (treated, control) pairs * 8 B ≈ 94 KB > 48 KiB. The
+        // ceiling is 48 KiB, not 1 KiB: the propensity-score design matrix (500 x 3
+        // doubles, 12 KB) and the glm's work arrays are allocated fallibly too and would
+        // trip a 1 KiB ceiling before the matched-control lists this test targets.
         for method in [
             MatchMethod::Subclass { n_subclasses: 5 },
             MatchMethod::Full {
@@ -2881,7 +2949,7 @@ mod tests {
             },
         ] {
             let label = format!("{method}");
-            let r = crate::resource::with_alloc_ceiling(Some(1024), || {
+            let r = crate::resource::with_alloc_ceiling(Some(48 * 1024), || {
                 match_it(&ds, "treatment", &["x1", "x2"], method, None)
             });
             assert!(
