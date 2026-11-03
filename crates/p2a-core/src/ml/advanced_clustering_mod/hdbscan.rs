@@ -267,10 +267,12 @@ pub fn hdbscan_with(data: ArrayView2<f64>, config: &HdbscanConfig) -> EconResult
             "no split leaves two clusters of at least min_cluster_size = {mcs} points, so every point is noise (as dbscan::hdbscan)"
         ));
     }
-    let n_inf = cluster_stability.iter().filter(|s| s.is_infinite()).count();
+    // a cluster born at eps 0 has stability 1/0 - 1/0 = NaN (as dbscan's cluster_scores), one
+    // that dies at eps 0 has +Inf: both come from coincident points
+    let n_inf = cluster_stability.iter().filter(|s| !s.is_finite()).count();
     if n_inf > 0 {
         warnings.push(format!(
-            "{n_inf} selected cluster(s) have infinite stability: at least min_samples points coincide, so some mutual-reachability distances are 0 (lambda = 1/0); excess of mass then keeps the parent, as dbscan does"
+            "{n_inf} selected cluster(s) have non-finite (infinite or NaN) stability: at least min_samples points coincide, so some mutual-reachability distances are 0 (lambda = 1/0); excess of mass then keeps the parent, as dbscan does"
         ));
     }
 
@@ -970,6 +972,41 @@ mod tests {
             .fold(f64::INFINITY, f64::min);
         assert_eq!(min, 0.0);
         assert!(nosplit.condensed_tree[0].stability.is_finite());
+    }
+
+    /// Twelve coincident rows (>= 2 * min_cluster_size) plus ten noisy ones: the coincident cluster
+    /// is born at eps 0, so its stability is 1/0 - 1/0 = NaN (dbscan::hdbscan on such data reports
+    /// cluster_scores `7.54, NaN`), and the degenerate-stability warning must name it.
+    #[test]
+    fn test_hdbscan_coincident_points_warn_on_nan_stability() {
+        let mut rows: Vec<[f64; 2]> = vec![[0.0, 0.0]; 12];
+        let noisy = [
+            [5.02, 4.97],
+            [4.91, 5.08],
+            [5.13, 5.01],
+            [4.96, 4.88],
+            [5.07, 5.12],
+            [4.85, 4.99],
+            [5.18, 4.93],
+            [4.99, 5.21],
+            [5.04, 4.81],
+            [4.89, 5.15],
+        ];
+        rows.extend_from_slice(&noisy);
+        let x = Array2::from_shape_vec((rows.len(), 2), rows.concat()).unwrap();
+        let r = hdbscan(x.view(), Some(5), Some(5)).unwrap();
+        assert!(
+            r.cluster_stability.iter().any(|s| s.is_nan()),
+            "{:?}",
+            r.cluster_stability
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("non-finite (infinite or NaN) stability")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     /// min_samples = 1: core distances 0, so the merge heights are single linkage on dist(X)

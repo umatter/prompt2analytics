@@ -571,11 +571,13 @@ mod tests {
 
     #[test]
     fn test_validate_hdbscan_optimized_matches_hdbscan() {
-        let (_case, ds) = crate::test_support::load_case("hdbscan_blobs");
+        use crate::ml::advanced_clustering_mod::common::test_data::r_codes;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("hdbscan_blobs");
         let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
         let r = crate::ml::hdbscan(x.view(), Some(5), Some(5)).unwrap();
         let (labels, outlier, k) = hdbscan_optimized(x.view(), Some(5), Some(5)).unwrap();
-        assert_eq!((labels, k), (r.labels, 3));
+        assert_eq!((labels.clone(), k), (r.labels, 3));
         assert_eq!(
             outlier.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             r.outlier_scores
@@ -583,6 +585,10 @@ mod tests {
                 .map(|v| v.to_bits())
                 .collect::<Vec<_>>()
         );
+        Check::new(&case)
+            .vector("mp5_cluster", &r_codes(&labels), Tol::exact())
+            .vector("mp5_outlier_scores", &outlier, Tol::stat(x.nrows()))
+            .finish();
     }
 
     /// R: extractDBSCAN(optics(blobs_noise, eps = 0.35, minPts = 5), eps_cl = 0.35) through the

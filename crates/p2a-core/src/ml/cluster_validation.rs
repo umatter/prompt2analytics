@@ -263,6 +263,11 @@ pub(crate) fn check_silhouette_clusters(labels: &[usize], n: usize) -> Result<()
     let mut seen: Vec<bool> = Vec::new();
     let mut k = 0usize;
     for &l in labels {
+        if l >= n {
+            return Err(format!(
+                "silhouette: labels must be below n = {n} (got {l})"
+            ));
+        }
         if l >= seen.len() {
             seen.resize(l + 1, false);
         }
@@ -1438,6 +1443,17 @@ mod tests {
         assert!(spec(silhouette(x.view(), &[1, 1, 1, 1])).contains("between 2 and n - 1 = 3"));
         // all singletons: was Ok(average 1)
         assert!(spec(silhouette(x.view(), &[0, 1, 2, 3])).contains("got 4"));
+        // a label at or above n is refused before any buffer is sized by it
+        assert!(
+            spec(silhouette(x.view(), &[0, 0, 1, usize::MAX]))
+                .contains(&format!("labels must be below n = 4 (got {})", usize::MAX))
+        );
+        let d4 = compute_pairwise_distances(&x.view()).unwrap();
+        assert!(
+            silhouette_from_dist(d4.view(), &[0, 0, 1, 4])
+                .unwrap_err()
+                .contains("labels must be below n = 4 (got 4)")
+        );
         let bad = array![[0.0, 0.1], [f64::NAN, 0.0], [5.0, 5.2], [5.1, 4.9]];
         assert!(spec(silhouette(bad.view(), &[0, 0, 1, 1])).contains("non-finite"));
         let d = compute_pairwise_distances(&x.view()).unwrap();
