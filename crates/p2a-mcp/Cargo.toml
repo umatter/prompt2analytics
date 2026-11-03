@@ -16,6 +16,9 @@ name = "p2a-mcp"
 path = "src/main.rs"
 
 [dependencies]
+# Char-boundary-safe truncation (rule R8)
+p2a-text.workspace = true
+
 # Core analytics engine
 p2a-core = { path = "../p2a-core", features = ["full"] }
 

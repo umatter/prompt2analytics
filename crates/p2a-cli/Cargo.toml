@@ -19,6 +19,9 @@ spectral-analysis = ["p2a-core/spectral-analysis"]
 database = ["p2a-core/database"]
 
 [dependencies]
+# Char-boundary-safe truncation (rule R8)
+p2a-text.workspace = true
+
 # Core analytics library. Database support is gated through the `database`
 # feature above so it can be turned off in CI; everything else from `full`
 # stays on unconditionally.

@@ -51,6 +51,9 @@ mobile = [
 ]
 
 [dependencies]
+# Char-boundary-safe truncation (rule R8)
+p2a-text.workspace = true
+
 # Dioxus framework - base features, platform selected via features
 # Note: "macro" enables rsx!, "html" enables HTML elements, "hooks/signals" for state
 # "document" enables Stylesheet and other document components
