@@ -7,7 +7,8 @@ use std::fmt;
 use super::common::{array2_to_vec, df_to_array2};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{cholesky, safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::cholesky;
+use crate::linalg::solve::{LM_QR_TOL, Qr};
 use crate::resource;
 
 /// Result from a VAR model estimation.
@@ -34,6 +35,9 @@ pub struct VarResult {
     pub log_likelihood: f64,
     /// Standard errors for coefficients
     pub std_errors: Vec<Vec<f64>>,
+    /// T - K p - 1, the residual df of each equation (>= K).
+    #[serde(default)]
+    pub df_residual: usize,
 }
 
 impl fmt::Display for VarResult {
@@ -130,7 +134,17 @@ impl fmt::Display for VarIrfResult {
 /// * `lags` - Number of lags to include
 ///
 /// # Model
-/// VAR(p) model: y_t = c + A_1 y_{t-1} + ... + A_p y_{t-p} + e_t
+/// VAR(p) model: y_t = c + A_1 y_{t-1} + ... + A_p y_{t-p} + e_t, estimated equation by
+/// equation on the common design Z = [1, y_{t-1}', .., y_{t-p}'] (T = n - p rows,
+/// m = 1 + K p columns) by pivoted QR.
+///
+/// # Requirements
+/// `lags >= 1`; `n > p + 1` (`InsufficientTimePeriods`); `n >= (K + 1)(p + 1)`, so that each
+/// equation keeps at least K residual degrees of freedom (`InsufficientData`); lags of full
+/// rank (an aliased lag, e.g. a series proportional to another, is `SingularMatrix` naming
+/// it).
+///
+/// R equivalent: `vars::VAR(y, p = lags, type = "const")`.
 ///
 /// Integer and Boolean columns are accepted; a missing value (null or NaN) is
 /// `EconError::NullValues` naming the column, and text is `NonNumericColumn` (as for
@@ -159,6 +173,31 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
     // Shape: (t, 1 + k*p). lags < t_full, so k * lags is below the size of the
     // data matrix and the + 1 cannot overflow.
     let n_regressors = 1 + resource::checked_len(&[k, lags], "VAR design")?;
+
+    // ECON-79: each equation has m = 1 + K p coefficients on T = n - p rows, and the
+    // K x K residual covariance (likelihood, orthogonalised IRF) needs T - m >= K.
+    // vars::VAR returns NA coefficients, NaN SEs or a degenerate logLik below this.
+    let df_residual = match t.checked_sub(n_regressors) {
+        Some(d) if d >= k => d,
+        _ => {
+            let required = k
+                .checked_add(1)
+                .zip(lags.checked_add(1))
+                .and_then(|(a, b)| a.checked_mul(b))
+                .unwrap_or(usize::MAX);
+            return Err(EconError::InsufficientData {
+                required,
+                provided: t_full,
+                context: format!(
+                    "VAR({lags}) of {k} series: each equation has 1 + K p = {n_regressors} \
+                     coefficients on n - p = {t} rows, and the K x K residual covariance needs \
+                     at least K = {k} residual degrees of freedom (n >= (K + 1)(p + 1) = \
+                     {required}); vars::VAR returns NaN standard errors or a degenerate logLik here"
+                ),
+            });
+        }
+    };
+
     let mut z = resource::try_zeros2(t, n_regressors, "VAR design")?;
     let mut y = Array2::zeros((t, k));
 
@@ -182,32 +221,42 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
         }
     }
 
-    // Estimate each equation by OLS: β = (Z'Z)^{-1} Z'Y
-    resource::check_alloc::<f64>(
-        resource::checked_len(&[n_regressors, n_regressors], "VAR Z'Z")?,
-        "VAR Z'Z",
-    )?;
-    let ztz = xtx(&z.view());
-    let (ztz_inv, _) = safe_inverse(&ztz.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Z'Z in VAR estimation".to_string(),
-        suggestion: format!("Check for perfect collinearity: {:?}", e),
-    })?;
+    // Every equation has the same design, so one pivoted QR (dqrdc2, as lm.fit inside
+    // vars::VAR) serves all K of them.
+    let coef_names = var_coef_names(&var_names, lags);
+    let qr = Qr::decompose(z.view(), LM_QR_TOL)?;
+    if qr.rank() < n_regressors {
+        let names: Vec<&str> = qr
+            .aliased()
+            .iter()
+            .map(|&j| coef_names[j].as_str())
+            .collect();
+        return Err(EconError::SingularMatrix {
+            context: format!(
+                "VAR design has rank {} of {n_regressors}: {} aliased (coefficients not defined \
+                 because of singularities)",
+                qr.rank(),
+                names.join(", ")
+            ),
+            suggestion:
+                "Drop the series that is a linear combination of the others (or constant), \
+                         or lower the lag order"
+                    .to_string(),
+        });
+    }
+    let unscaled = qr.unscaled_covariance()?;
 
-    // Compute coefficients for each equation
     let mut coefficients = Array2::zeros((k, n_regressors));
     let mut residuals = Array2::zeros((t, k));
-
     for eq in 0..k {
-        let y_eq = y.column(eq).to_owned();
-        let zty = xty(&z.view(), &y_eq);
-        let beta = ztz_inv.dot(&zty);
-        coefficients.row_mut(eq).assign(&beta);
-
-        // Compute residuals
-        let y_hat = z.dot(&beta);
-        for i in 0..t {
-            residuals[[i, eq]] = y_eq[i] - y_hat[i];
-        }
+        let y_eq = y.column(eq);
+        coefficients.row_mut(eq).assign(&qr.coefficients(y_eq)?);
+        // Residuals Q (0, .., 0, (Q'y)[m..]) as lm.fit computes them.
+        let mut effects = qr.qty(y_eq)?;
+        effects.iter_mut().take(n_regressors).for_each(|v| *v = 0.0);
+        residuals
+            .column_mut(eq)
+            .assign(&qr.q_times(effects.view())?);
     }
 
     // Compute residual covariance matrix: Σ_u = (1/T) * e'e
@@ -227,7 +276,7 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
     for eq in 0..k {
         let sigma_eq = sigma_u[[eq, eq]];
         for j in 0..n_regressors {
-            std_errors[[eq, j]] = (sigma_eq * ztz_inv[[j, j]]).max(0.0).sqrt();
+            std_errors[[eq, j]] = (sigma_eq * unscaled[[j, j]]).max(0.0).sqrt();
         }
     }
 
@@ -255,6 +304,48 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
         sigma_u: array2_to_vec(&sigma_u),
         log_likelihood,
         std_errors: array2_to_vec(&std_errors),
+        df_residual,
+    })
+}
+
+/// vars' coefficient names in the column order of the design: `const`, then `<var>.l<lag>`
+/// for lag 1..=p and each variable.
+fn var_coef_names(var_names: &[String], lags: usize) -> Vec<String> {
+    let mut names = Vec::with_capacity(1 + var_names.len() * lags);
+    names.push("const".to_string());
+    for lag in 1..=lags {
+        for v in var_names {
+            names.push(format!("{v}.l{lag}"));
+        }
+    }
+    names
+}
+
+/// Refuse a [`VarResult`] whose vectors do not have the shapes `n_vars` and `lags` imply
+/// (one built by hand or deserialised), instead of indexing past them.
+fn check_var_shapes(v: &VarResult) -> EconResult<()> {
+    let k = v.n_vars;
+    let m = v.lags.checked_mul(k).and_then(|x| x.checked_add(1));
+    let ok = k >= 1
+        && v.var_names.len() == k
+        && v.coefficients.len() == k
+        && m.is_some_and(|m| v.coefficients.iter().all(|row| row.len() == m))
+        && v.sigma_u.len() == k
+        && v.sigma_u.iter().all(|row| row.len() == k);
+    if ok {
+        return Ok(());
+    }
+    let p = v.lags;
+    Err(EconError::InvalidSpecification {
+        message: format!(
+            "VarResult is inconsistent: n_vars = {k} and lags = {p} need {k} variable names, {k} \
+             coefficient rows of length 1 + K p and a {k} x {k} sigma_u; found {} names, {} \
+             coefficient rows (lengths {:?}) and {} sigma_u rows",
+            v.var_names.len(),
+            v.coefficients.len(),
+            v.coefficients.iter().map(Vec::len).collect::<Vec<_>>(),
+            v.sigma_u.len()
+        ),
     })
 }
 
@@ -274,6 +365,7 @@ pub fn compute_irf(
             message: "IRF requires at least 1 step".to_string(),
         });
     }
+    check_var_shapes(var_result)?;
 
     let k = var_result.n_vars;
     let p = var_result.lags;
@@ -303,8 +395,12 @@ pub fn compute_irf(
 
     // For orthogonalized IRF, compute Cholesky decomposition of sigma_u
     let impact_matrix = if orthogonalize {
-        cholesky(&sigma_u.view())
-            .map_err(|e| EconError::Internal(format!("Cholesky decomposition failed: {:?}", e)))?
+        cholesky(&sigma_u.view()).map_err(|_| EconError::SingularMatrix {
+            context: "sigma_u is not positive definite, so the orthogonalised impulse responses \
+                      have no Cholesky impact matrix"
+                .to_string(),
+            suggestion: "Use orthogonalize = false, or drop a redundant series".to_string(),
+        })?
     } else {
         // Identity matrix for non-orthogonalized IRF
         let mut identity = Array2::zeros((k, k));
@@ -376,7 +472,107 @@ mod tests {
     use super::*;
     use crate::econometrics::timeseries::common::test_fixtures::*;
     use crate::econometrics::timeseries::{granger_test, run_varma, run_vecm};
+    use crate::regression::ols::na_fixtures::repo_dataset;
     use crate::resource::{Budget, CancelToken, with_budget};
+    use polars::prelude::*;
+
+    const CANADA: [&str; 4] = ["e", "prod", "rw", "U"];
+
+    /// The dataset of case var_canada, for tests that compare no case value.
+    fn canada_dataset() -> Dataset {
+        repo_dataset("validation/datasets/generated/var_canada.csv")
+    }
+
+    /// ECON-79. VAR(3) of K = 3 series has m = 1 + K p = 10 coefficients per equation on
+    /// T = n - p rows, and the K x K residual covariance needs T - m >= K, i.e.
+    /// n >= (K + 1)(p + 1) = 16. R (vars 1.6.1): VAR() on the first 10 rows returns NA
+    /// coefficients and NaN SEs and logLik() stops ("system is exactly singular"); at 13 rows
+    /// (df 0) the residual SE is NaN. Data: round(matrix(rnorm(48), 16, 3), 4) after
+    /// set.seed(79) (no value is pinned here).
+    #[test]
+    fn test_var_rejects_saturated() {
+        let a = [
+            1.1074, 0.5392, 0.2494, -0.8363, 1.0850, -2.6291, -1.1520, -1.0125, -0.9942, 0.0919,
+            -2.1554, -0.3745, -0.5436, 0.4045, 1.5437, -0.7084,
+        ];
+        let b = [
+            -1.4173, 0.7247, -0.3104, -0.4871, 1.2515, -0.7154, 1.5779, -0.1990, -1.3337, -1.0903,
+            0.8764, -2.2822, -0.8152, -0.0305, 1.1114, -0.2963,
+        ];
+        let c = [
+            1.7390, 0.2882, 1.3085, -0.5775, 0.0095, 1.1367, 0.6923, 0.5172, 1.0432, -0.7070,
+            0.1435, -0.2663, -2.3517, -0.1631, 0.2768, -0.0246,
+        ];
+        let rows = |n: usize| {
+            Dataset::new(df! { "a" => &a[..n], "b" => &b[..n], "c" => &c[..n] }.unwrap())
+        };
+        for n in [10usize, 13, 15] {
+            match run_var(&rows(n), &["a", "b", "c"], 3) {
+                Err(EconError::InsufficientData {
+                    required,
+                    provided,
+                    context,
+                }) => {
+                    assert_eq!((required, provided), (16, n));
+                    assert!(context.contains("1 + K p"), "{context}");
+                }
+                other => panic!("n = {n}: expected InsufficientData, got {other:?}"),
+            }
+        }
+        let ok = run_var(&rows(16), &["a", "b", "c"], 3).unwrap();
+        assert_eq!((ok.n_obs, ok.df_residual), (13, 3));
+        assert!(
+            ok.std_errors
+                .iter()
+                .flatten()
+                .all(|s| s.is_finite() && *s > 0.0)
+        );
+        assert!(ok.log_likelihood.is_finite());
+    }
+
+    /// ECON-79. b = 2 a exactly: the lag b.l1 is aliased (R: coef(VAR(..)$varresult$a)["b.l1"]
+    /// is NA, the later of two collinear columns, dqrdc2's rule). Before: the
+    /// pseudo-inverse fit was returned as Ok.
+    #[test]
+    fn test_var_rejects_collinear_series() {
+        let a: Vec<f64> = (0..40)
+            .map(|i| ((i * 7919) % 97) as f64 / 97.0 - 0.5 + 0.02 * i as f64)
+            .collect();
+        let b: Vec<f64> = a.iter().map(|v| 2.0 * v).collect();
+        let c: Vec<f64> = (0..40)
+            .map(|i| ((i * 104_729) % 89) as f64 / 89.0 - 0.5)
+            .collect();
+        let ds = Dataset::new(df! { "a" => a, "b" => b, "c" => c }.unwrap());
+        match run_var(&ds, &["a", "b", "c"], 1) {
+            Err(EconError::SingularMatrix { context, .. }) => {
+                assert!(context.contains("b.l1"), "{context}")
+            }
+            other => panic!("expected SingularMatrix naming b.l1, got {other:?}"),
+        }
+    }
+
+    /// A VarResult built or deserialized with inconsistent shapes was indexed out of bounds.
+    #[test]
+    fn test_irf_rejects_inconsistent_var_result() {
+        let var = run_var(&canada_dataset(), &CANADA, 2).unwrap();
+        let mut short_row = var.clone();
+        short_row.coefficients[1].pop();
+        let mut short_sigma = var.clone();
+        short_sigma.sigma_u.pop();
+        let mut short_names = var.clone();
+        short_names.var_names.pop();
+        for bad in [short_row, short_sigma, short_names] {
+            match compute_irf(&bad, 5, true) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(
+                        message.starts_with("VarResult is inconsistent"),
+                        "{message}"
+                    )
+                }
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
+        }
+    }
 
     fn cancelled() -> Budget {
         let token = CancelToken::new();
