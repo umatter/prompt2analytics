@@ -380,21 +380,9 @@ fn format_args_brief(args: &serde_json::Value) -> String {
             .take(4)
             .map(|(k, v)| {
                 let val = match v {
-                    serde_json::Value::String(s) => {
-                        if s.len() > 30 {
-                            format!("\"{}...\"", &s[..27])
-                        } else {
-                            format!("\"{}\"", s)
-                        }
-                    }
-                    other => {
-                        let s = other.to_string();
-                        if s.len() > 30 {
-                            format!("{}...", &s[..27])
-                        } else {
-                            s
-                        }
-                    }
+                    // Shortened by characters: a byte cut panics inside a multi-byte character.
+                    serde_json::Value::String(s) => format!("\"{}\"", p2a_text::ellipsize(s, 30)),
+                    other => p2a_text::ellipsize(&other.to_string(), 30).into_owned(),
                 };
                 format!("{}={}", k, val)
             })
@@ -404,6 +392,11 @@ fn format_args_brief(args: &serde_json::Value) -> String {
     } else {
         String::new()
     }
+}
+
+/// The short session id printed in the welcome banner.
+fn session_label(id: &str) -> &str {
+    p2a_text::truncate_chars(id, 8)
 }
 
 fn save_image(base64_data: &str, path: &std::path::Path) -> anyhow::Result<()> {
@@ -620,7 +613,7 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
         base_url.bright_cyan(),
         args.provider.bright_cyan(),
         args.model.bright_cyan(),
-        &session_id[..8.min(session_id.len())],
+        session_label(&session_id),
     );
     if script_prompts.is_none() {
         println!(
@@ -1102,5 +1095,50 @@ mod tests {
         }
         // Surrounding whitespace is trimmed, not refused.
         assert!(build_http_client(Some("  ok-token\t")).is_ok());
+    }
+
+    /// CLI-1: the old `&s[..27]` cut inside 'é' (bytes 26..28) and crashed the client mid-stream.
+    /// Expected strings: the p2a_text::ellipsize contract (T3-WP03 plan, Appendix A).
+    #[test]
+    fn format_args_brief_truncates_on_char_boundaries() {
+        assert_eq!(
+            format_args_brief(
+                &serde_json::json!({"path": "/home/analyst/data/revenu_été_région_2024.csv"})
+            ),
+            "(path=\"/home/analyst/data/revenu_é...\")"
+        );
+        // non-string branch: the compact JSON has 'ä' at bytes 26..28
+        assert_eq!(
+            format_args_brief(
+                &serde_json::json!({"x_cols": ["Größe_kg", "Gewicht_kg_äquivalent"]})
+            ),
+            "(x_cols=[\"Größe_kg\",\"Gewicht_kg_äqu...)"
+        );
+        // ASCII output is unchanged (the reviewer's control run printed exactly this)
+        assert_eq!(
+            format_args_brief(
+                &serde_json::json!({"path": "/home/analyst/data/revenue_summer_2024.csv"})
+            ),
+            "(path=\"/home/analyst/data/revenue_...\")"
+        );
+        assert_eq!(
+            format_args_brief(&serde_json::json!({"x": (1..=15).collect::<Vec<i32>>()})),
+            "(x=[1,2,3,4,5,6,7,8,9,10,11,12...)"
+        );
+        assert_eq!(
+            format_args_brief(&serde_json::json!({"dataset": "Größe"})),
+            "(dataset=\"Größe\")"
+        );
+        assert_eq!(format_args_brief(&serde_json::json!("not an object")), "");
+    }
+
+    #[test]
+    fn session_label_keeps_whole_characters() {
+        assert_eq!(session_label("aéééé"), "aéééé"); // old [..8] cut inside 'é' (bytes 7..9)
+        assert_eq!(
+            session_label("0f8c2d4e-1b2a-4c3d-9e8f-001122334455"),
+            "0f8c2d4e"
+        );
+        assert_eq!(session_label("abc"), "abc");
     }
 }
