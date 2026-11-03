@@ -27,7 +27,7 @@ jobs:
             artifact_name: linux
 
           # macOS Apple Silicon
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             # `dmg` only — the .dmg contains the .app; building the bare `macos`
             # (.app) type too just spills the bundle's internal files into out-dir.
