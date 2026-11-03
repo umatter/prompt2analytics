@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "power_t_test",
+      "name": "Power of the one-sample, two-sample and paired t test, solved for any one parameter",
+      "category": "stats",
+      "reference": "stats::power.t.test(n, delta, sd, sig.level, power, type, alternative, strict, tol)",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_power_legacy_api",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_power",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_n",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_delta",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_sd",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_sig"
+      ],
+      "quantities": [
+        "power, n, delta, sd, sig.level for type two.sample / one.sample / paired x alternative two.sided / one.sided (tol 1e-12)",
+        "R's defaults sd = 1, sig.level = 0.05",
+        "strict = TRUE power and n",
+        "R's default tol (2^-13) n and sd",
+        "an extended-bracket root below n = 2",
+        "two-sided |delta|"
+      ],
+      "tolerance": "power 1e-10 relative (+1e-14), roots 1e-9 relative (+1e-12); R's default-tolerance roots within 2 tol absolute",
+      "deviations": [
+        {
+          "finding": "STAT-61",
+          "quantity": "power_t_test (the Tier 0 function), one-sided power at a negative delta",
+          "note": "the Tier 0 function tests the one-sided alternative in the direction of delta (the power of |delta|); R and power_t_test_with test the upper tail whatever the sign of delta (power 1.0e-6 at n = 20, delta = -1). Not compared with R; power_t_test_with is."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "power_prop_test",
+      "name": "Power of the two-sample proportion test, solved for any one parameter",
+      "category": "stats",
+      "reference": "stats::power.prop.test(n, p1, p2, sig.level, power, alternative, strict, tol)",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_power_legacy_api",
+        "p2a-core::stats::power::tests::test_validate_power_prop_solve"
+      ],
+      "quantities": [
+        "power, n, p1, p2, sig.level for both alternatives (tol 1e-12)",
+        "strict = TRUE power",
+        "n = 100, 0.3 vs 0.5 power; n for power 0.8 at tol 1e-12 and R's default tol"
+      ],
+      "tolerance": "power 1e-10 relative (+1e-14), roots 1e-9 relative (+1e-12); R's default-tolerance roots within 2 tol absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "power_anova_test",
+      "name": "Power of the balanced one-way ANOVA, solved for any one parameter",
+      "category": "stats",
+      "reference": "stats::power.anova.test(groups, n, between.var, within.var, sig.level, power); solved values re-solved with uniroot(tol = 1e-12) over R's intervals",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_power_legacy_api",
+        "p2a-core::stats::power::tests::test_validate_power_anova_solve"
+      ],
+      "quantities": [
+        "power",
+        "n, groups, between.var, within.var, sig.level (tol 1e-12 and R's default)",
+        "groups 3, n 20, between 0.25: power and n (STAT-34)",
+        "Cohen's f"
+      ],
+      "tolerance": "power 1e-10 relative (+1e-14), roots 1e-9 relative (+1e-12); R's default-tolerance roots within 2 tol absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "noncentral_distributions",
+      "name": "Noncentral t and F distribution functions (Lenth's AS 243 and AS 226 series with Frick's start)",
+      "category": "stats",
+      "reference": "stats::pt(q, df, ncp, lower.tail); stats::pf(q, df1, df2, ncp, lower.tail)",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_noncentral_t_f_ports"
+      ],
+      "quantities": [
+        "pt at 16 points (one per pnt.c branch: series, normal approximation, df > 4e5, t < 0 with ncp > 40, ncp = 0, fractional df)",
+        "pf at 10 points (pnbeta series, df2 > 1e8 noncentral chi-square, x = 0, ncp = 0, large ncp)"
+      ],
+      "tolerance": "1e-12 relative + 1e-14 absolute (the published series (AS 243; AS 226 + R84) with R's constants; f64)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
