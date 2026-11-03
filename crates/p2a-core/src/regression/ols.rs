@@ -2612,6 +2612,21 @@ pub fn vcov_driscoll_kraay(
         }
     }
 
+    // The period-aggregated scores have rank at most T: the t tests use T - rank df and
+    // need T > rank (REG-51; the subtraction underflowed before).
+    let rank = ols_result.rank();
+    let df_periods = n_periods
+        .checked_sub(rank)
+        .filter(|d| *d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: rank + 1,
+            provided: n_periods,
+            context: format!(
+                "Driscoll-Kraay standard errors need more time periods than identified \
+                 coefficients (k = {rank}): the period-aggregated scores have rank at most T"
+            ),
+        })?;
+
     // The identified columns and the fit's (X'X)^{-1} block (aliased columns: NaN).
     let id = IdentifiedDesign::of(x.view(), ols_result)?;
     let full_k = k;
@@ -2704,7 +2719,6 @@ pub fn vcov_driscoll_kraay(
     let identified_se: Vec<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
     let std_errors = id.embed_vec(&identified_se);
     let vcov = id.embed(&vcov);
-    let df_k = k;
     let k = full_k;
 
     let coefficients: Vec<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
@@ -2714,7 +2728,7 @@ pub fn vcov_driscoll_kraay(
         .map(|c| c.name.clone())
         .collect();
 
-    let df = (n_periods - df_k) as f64;
+    let df = df_periods as f64;
     // Aliased columns: NaN (the se > 0 rule would turn them into t = 0, p = 1)
     let t_stats: Vec<f64> = coefficients
         .iter()
@@ -5080,5 +5094,47 @@ mod tests {
                 .all(|v| v.is_finite())
         );
         assert!(dk.warnings.iter().any(|w| w.contains(ALIAS_MSG)));
+    }
+
+    /// k = 4 (intercept + x1, x2, x3): T = 3 underflowed n_periods - k (debug panic, release
+    /// p = 1 for every coefficient); T = 4 gave df 0 and NaN p-values. T must exceed the rank.
+    #[test]
+    fn test_driscoll_kraay_rejects_t_le_k() {
+        for t in [3usize, 4] {
+            match run_vcov_driscoll_kraay(
+                &short_panel(t, false),
+                "y",
+                &["x1", "x2", "x3"],
+                "time",
+                None,
+                None,
+            )
+            .unwrap_err()
+            {
+                EconError::InsufficientData {
+                    required,
+                    provided,
+                    context,
+                } => {
+                    assert_eq!((required, provided), (5, t));
+                    assert!(context.contains("time periods"), "{context}");
+                }
+                e => panic!("T = {t}: {e:?}"),
+            }
+        }
+        let ok = run_vcov_driscoll_kraay(
+            &short_panel(5, false),
+            "y",
+            &["x1", "x2", "x3"],
+            "time",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            ok.p_values
+                .iter()
+                .all(|p| p.is_finite() && (0.0..=1.0).contains(p))
+        );
     }
 }
