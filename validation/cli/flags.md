@@ -67,10 +67,10 @@ spectral-analysis --test tier3`):
 | `test_validate_cli_hac_no_intercept` | `ols_no_intercept_grunfeld` | `--lags 4 --intercept false`: names, coefficients, Newey-West SE, t, p, R² | README |
 | `test_validate_cli_gls_identity_no_intercept` | `ols_no_intercept_grunfeld` | identity GLS: names, coefficients, SE, t, p, R², adjusted R², sigma | README |
 | `test_validate_cli_step_no_intercept` | `ols_no_intercept_grunfeld` | backward step keeps both terms; `extractAIC` (k = 2 and log n), final R² and AIC; bare `--use-bic` | README |
-| `test_cli_quantreg_no_intercept_reaches_core` | `ols_no_intercept_grunfeld` | `--intercept false` reaches `quantreg()`: CLI coefficients equal the in-process call | `Tol::new(1e-12, 1e-15)` |
+| `test_validate_cli_quantreg_no_intercept_reaches_core` | `ols_no_intercept_grunfeld` | `--intercept false` reaches `quantreg()`: CLI coefficients equal the in-process call | `Tol::new(1e-12, 1e-15)` |
 | `test_validate_cli_ts_ar_aic_flag` | `ts_ar_yw_aic` | AIC order, coefficients, relative AIC and mean; `--aic false` order 20 and its coefficients; `--order 2 --aic false` | README, n = 120; orders exact |
-| `test_cli_ts_stl_robust_flag` | `ts_ar_yw_aic` | `--robust true/false`, bare and default; remainder equals `run_stl` in process | exact |
-| `test_cli_ts_spectrum_detrend_flag` | `ts_ar_yw_aic` | `--detrend false` equals `run_spectrum` in process and differs from the default | exact |
+| `test_validate_cli_ts_stl_robust_flag` | `ts_ar_yw_aic` | `--robust true/false`, bare and default; remainder equals `run_stl` in process | exact |
+| `test_validate_cli_ts_spectrum_detrend_flag` | `ts_ar_yw_aic` | `--detrend false` equals `run_spectrum` in process and differs from the default | exact |
 | `test_cli_script_export_comments_flag` | none | `--comments false` drops only the per-command comment lines | exact |
 | `test_cli_max_memory_warns_once` | none | one warning per invocation, values 1.17 and 2.35 MB, none without a limit or under it | exact |
 | `test_cli_max_memory_without_session` | none | the no-session note | exact |

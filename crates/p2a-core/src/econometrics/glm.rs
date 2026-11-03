@@ -1371,7 +1371,7 @@ mod tests {
     /// Separation (no finite MLE): flagged, warned, and every observation classified
     /// correctly; neither convergence nor an iteration count is asserted.
     #[test]
-    fn test_glm_separation_flag() {
+    fn test_validate_glm_separation_flag() {
         let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
         let c = columns(&ds);
         let x = design(&c, &["1", "x4"]);
@@ -1420,7 +1420,7 @@ mod tests {
     /// iteration count alone (properties; not R-pinned). The Gaussian log-link fit of a
     /// small-scale response is where glm.fit's absolute 0.1 stops after one step.
     #[test]
-    fn test_glm_scale_equivariance() {
+    fn test_validate_glm_scale_equivariance() {
         let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
         let c = columns(&ds);
         let yb = c.numeric_array("yb");
@@ -1471,7 +1471,7 @@ mod tests {
     /// fit on the other rows (Gaussian AIC over the positive weights: a deviation from
     /// glm's +Inf).
     #[test]
-    fn test_glm_zero_weights_match_subset() {
+    fn test_validate_glm_zero_weights_match_subset() {
         let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
         let c = columns(&ds);
         let x = design(&c, &["1", "x1", "x2"]);
@@ -1647,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glm_fit_serde_round_trip() {
+    fn test_validate_glm_fit_serde_round_trip() {
         let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
         let c = columns(&ds);
         let x = design(&c, &["1", "x1", "x3", "x2"]);

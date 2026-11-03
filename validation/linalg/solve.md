@@ -299,10 +299,10 @@ Registered in `validation/methods/linalg_glm.json` (they load `linalg_qr_glm`):
 - `linalg_qr_least_squares`: `linalg::solve::tests::test_validate_qr_dqrdc2_aliasing`,
   `linalg::solve::tests::test_validate_qr_edge_shapes`,
   `linalg::solve::tests::test_validate_lm_wfit_zero_weights`,
-  `linalg::solve::tests::test_qr_factorization_properties` (QR identities: `Q [R_j; 0]` reproduces
+  `linalg::solve::tests::test_validate_qr_factorization_properties` (QR identities: `Q [R_j; 0]` reproduces
   each identified column, aliased columns lie in the span of the identified ones to `tol`, `Q` is
   orthogonal; properties, not R-pinned).
-- `linalg_sym_inverse`: `linalg::solve::tests::test_sym_inverse_reports_rank` (the dummy trap
+- `linalg_sym_inverse`: `linalg::solve::tests::test_validate_sym_inverse_reports_rank` (the dummy trap
   `[1, x1, ysep, 1 - ysep]`: rank 3 of 4, the identified slope and the RSS through the generalized
   inverse, the generalized-inverse identities, `SingularPolicy::Error`, and `safe_inverse`'s flag).
 - `econ_glm`: `econometrics::glm::tests::test_validate_glm_families` (nine family/link fits, the
@@ -310,11 +310,11 @@ Registered in `validation/methods/linalg_glm.json` (they load `linalg_qr_glm`):
   convergence at the default spec and `start = 0`),
   `econometrics::glm::tests::test_validate_glm_fluctuation`,
   `econometrics::glm::tests::test_validate_glm_binomial_noninteger`,
-  `econometrics::glm::tests::test_glm_separation_flag` (property: flag, warning, deviance below
+  `econometrics::glm::tests::test_validate_glm_separation_flag` (property: flag, warning, deviance below
   `2 log 2`, every observation classified correctly),
-  `econometrics::glm::tests::test_glm_scale_equivariance` (property),
-  `econometrics::glm::tests::test_glm_zero_weights_match_subset` (property),
-  `econometrics::glm::tests::test_glm_fit_serde_round_trip` (JSON round trip with `NaN` as `null`).
+  `econometrics::glm::tests::test_validate_glm_scale_equivariance` (property),
+  `econometrics::glm::tests::test_validate_glm_zero_weights_match_subset` (property),
+  `econometrics::glm::tests::test_validate_glm_fit_serde_round_trip` (JSON round trip with `NaN` as `null`).
 
 Other tests (quoted R values or properties; not R-pinned):
 

@@ -3413,7 +3413,7 @@ mod tests {
 
     /// run_ols_clustered and run_vcov_hac are fit(.., intercept = true) (case ols_grunfeld).
     #[test]
-    fn test_clustered_and_hac_wrappers_keep_the_intercept() {
+    fn test_validate_clustered_and_hac_wrappers_keep_the_intercept() {
         let (case, ds) = crate::test_support::load_case("ols_grunfeld");
         let x = ["value", "capital"];
         let a = run_ols_clustered(&ds, "inv", &x, "firm", Some("year")).unwrap();

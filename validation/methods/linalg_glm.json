@@ -12,7 +12,7 @@
         "p2a-core::linalg::solve::tests::test_validate_qr_dqrdc2_aliasing",
         "p2a-core::linalg::solve::tests::test_validate_qr_edge_shapes",
         "p2a-core::linalg::solve::tests::test_validate_lm_wfit_zero_weights",
-        "p2a-core::linalg::solve::tests::test_qr_factorization_properties"
+        "p2a-core::linalg::solve::tests::test_validate_qr_factorization_properties"
       ],
       "quantities": ["rank", "pivot", "|diag(R)| (identified block)", "coefficients (NA for aliased columns)", "residual df", "RSS", "SE (vcov.lm, NA for aliased)", "lm.wfit coefficients, df, residuals and fitted values with zero weights", "weighted SE", "QR identities (property tests, not R-pinned)"],
       "tolerance": "validation/README.md, n = 120: coefficients and |diag(R)| 1e-8, SE and statistics 1e-6 relative; rank, pivot and df exact",
@@ -27,7 +27,7 @@
       "doc": "validation/linalg/solve.md",
       "cases": ["linalg_qr_glm"],
       "tests": [
-        "p2a-core::linalg::solve::tests::test_sym_inverse_reports_rank"
+        "p2a-core::linalg::solve::tests::test_validate_sym_inverse_reports_rank"
       ],
       "quantities": ["rank (dummy trap: 3 of 4)", "identified x1 coefficient and RSS via the generalized inverse", "generalized-inverse identities (property)", "condition flag of safe_inverse on the dummy trap"],
       "tolerance": "validation/README.md, n = 120: coefficient 1e-8, RSS 1e-6 relative; rank exact",
@@ -44,11 +44,11 @@
       "tests": [
         "p2a-core::econometrics::glm::tests::test_validate_glm_families",
         "p2a-core::econometrics::glm::tests::test_validate_glm_fluctuation",
-        "p2a-core::econometrics::glm::tests::test_glm_separation_flag",
+        "p2a-core::econometrics::glm::tests::test_validate_glm_separation_flag",
         "p2a-core::econometrics::glm::tests::test_validate_glm_binomial_noninteger",
-        "p2a-core::econometrics::glm::tests::test_glm_scale_equivariance",
-        "p2a-core::econometrics::glm::tests::test_glm_fit_serde_round_trip",
-        "p2a-core::econometrics::glm::tests::test_glm_zero_weights_match_subset"
+        "p2a-core::econometrics::glm::tests::test_validate_glm_scale_equivariance",
+        "p2a-core::econometrics::glm::tests::test_validate_glm_fit_serde_round_trip",
+        "p2a-core::econometrics::glm::tests::test_validate_glm_zero_weights_match_subset"
       ],
       "quantities": ["coefficients (NA for aliased)", "SE (summary.glm)", "deviance", "null deviance (incl. the offset + intercept refit)", "dispersion", "residual df", "AIC", "logLik", "propensity scores (logit, probit)", "TMLE fluctuation fits", "binomial AIC with non-integer weights", "convergence, separation and scale equivariance (property tests, not R-pinned)"],
       "tolerance": "validation/README.md, n = 120: coefficients 1e-8, SE and statistics 1e-6 relative, counts exact; fits at the default epsilon 1e-10 against R at 1e-14: Tol::iterative(1e-8), and Tol::new(1e-5, 1e-12) for the linearly converging probit and fluctuation SE and dispersion (R at epsilon 1e-10 shows the same gap)",

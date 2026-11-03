@@ -1162,7 +1162,7 @@ mod tests {
 
     /// QR identities on the three designs of the case (properties, not R-pinned).
     #[test]
-    fn test_qr_factorization_properties() {
+    fn test_validate_qr_factorization_properties() {
         let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
         let c = columns(&ds);
         let n = c.n();
@@ -1325,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sym_inverse_reports_rank() {
+    fn test_validate_sym_inverse_reports_rank() {
         let (case, ds) = crate::test_support::load_case("linalg_qr_glm");
         let c = columns(&ds);
         let n = c.n();

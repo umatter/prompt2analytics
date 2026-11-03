@@ -310,7 +310,7 @@ fn test_validate_cli_step_no_intercept() {
 /// --intercept false reaches quantreg(). Coefficients are compared with p2a-core in process: R's exact
 /// rq(tau = 0.5) is recorded (rq_coef) but not pinned, REG-52 (T3-WP10 implements Barrodale-Roberts).
 #[test]
-fn test_cli_quantreg_no_intercept_reaches_core() {
+fn test_validate_cli_quantreg_no_intercept_reaches_core() {
     let case = Case::load("ols_no_intercept_grunfeld");
     let s = temp_session();
     let g = s.load(&case);
@@ -378,7 +378,7 @@ fn test_validate_cli_ts_ar_aic_flag() {
 
 /// ts stl --robust true (the help example) reaches run_stl; not R-pinned (TS-26: f32 STL, default windows).
 #[test]
-fn test_cli_ts_stl_robust_flag() {
+fn test_validate_cli_ts_stl_robust_flag() {
     let case = Case::load("ts_ar_yw_aic");
     let s = temp_session();
     let d = s.load(&case);
@@ -406,7 +406,7 @@ fn test_cli_ts_stl_robust_flag() {
 /// ts spectrum --detrend false reaches run_spectrum; not R-pinned (STAT-68: periodogram scale and taper).
 #[cfg(feature = "spectral-analysis")]
 #[test]
-fn test_cli_ts_spectrum_detrend_flag() {
+fn test_validate_cli_ts_spectrum_detrend_flag() {
     let case = Case::load("ts_ar_yw_aic");
     let s = temp_session();
     let d = s.load(&case);

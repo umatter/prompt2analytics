@@ -188,16 +188,16 @@ The case holds 15 t, 8 chi-square and 7 F p-values, 5 normal p-values, 7 normal 
 ### Rust tests
 
 - `stats::robust::tests::test_validate_quantile_legacy_api_types`, `test_validate_iqr`,
-  `test_quantile_rejects_type_0_and_12`, `test_validate_quantile_types_1_9`,
-  `test_validate_quantile_fuzz_rule`, `test_quantiles_refuses_nan_and_bad_probabilities`,
+  `test_validate_quantile_rejects_type_0_and_12`, `test_validate_quantile_types_1_9`,
+  `test_validate_quantile_fuzz_rule`, `test_validate_quantiles_refuses_nan_and_bad_probabilities`,
   `test_validate_percentile_interval` (method `quantile_types`)
 - `stats::robust::tests::test_validate_fivenum`, `test_validate_boxplot_stats` (method
   `boxplot_stats`)
-- `traits::estimator::tests::test_t_p_value_tail_is_not_zero`,
+- `traits::estimator::tests::test_validate_t_p_value_tail_is_not_zero`,
   `test_validate_p_value_helpers_stat_quantile_types`,
   `test_validate_normal_helpers_stat_quantile_types`,
-  `test_validate_quantile_helpers_stat_quantile_types`, `test_t_critical_large_df_matches_r`,
-  `test_t_critical_terminates_for_huge_df`, `test_default_confidence_intervals_large_df`
+  `test_validate_quantile_helpers_stat_quantile_types`, `test_validate_t_critical_large_df_matches_r`,
+  `test_validate_t_critical_terminates_for_huge_df`, `test_validate_default_confidence_intervals_large_df`
   (method `distribution_helpers`)
 
 **Tolerance:**

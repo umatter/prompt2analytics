@@ -1123,7 +1123,7 @@ mod tests {
     /// near 1e-40 and 1e-30 that `1 - cdf` rounded to 0. (The Tier 3 design's text paired
     /// t = 13.5 with 2.165754515305109e-40, which is the p-value of the first t.)
     #[test]
-    fn test_t_p_value_tail_is_not_zero() {
+    fn test_validate_t_p_value_tail_is_not_zero() {
         let case = case_of("stat_quantile_types");
         let (t, df, p) = (
             case.vector("pt2_t"),
@@ -1170,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn test_t_critical_large_df_matches_r() {
+    fn test_validate_t_critical_large_df_matches_r() {
         let case = case_of("stat_quantile_types");
         let q = case.vector("qt_q");
         let at197 = t_critical(0.05, 197.0);
@@ -1181,7 +1181,7 @@ mod tests {
 
     /// statrs `StudentsT::inverse_cdf` never returned here (df >= 1.5e7).
     #[test]
-    fn test_t_critical_terminates_for_huge_df() {
+    fn test_validate_t_critical_terminates_for_huge_df() {
         let case = case_of("stat_quantile_types");
         let q = case.vector("qt_q");
         let a = t_critical(0.05, 2e7);
@@ -1224,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_confidence_intervals_large_df() {
+    fn test_validate_default_confidence_intervals_large_df() {
         let case = case_of("stat_quantile_types");
         let q = case.vector("qt_q");
         let fit = LargeDf {

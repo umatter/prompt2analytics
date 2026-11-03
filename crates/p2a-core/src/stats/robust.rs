@@ -1399,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quantile_rejects_type_0_and_12() {
+    fn test_validate_quantile_rejects_type_0_and_12() {
         let (_case, x, _) = sample("stat_quantile_types");
         for t in [0, 10, 12, usize::MAX] {
             for m in [
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quantiles_refuses_nan_and_bad_probabilities() {
+    fn test_validate_quantiles_refuses_nan_and_bad_probabilities() {
         let (_case, x, _) = sample("stat_quantile_types");
         let t7 = QuantileType::T7;
         assert!(spec_message(quantiles(&[1.0, f64::NAN], &[0.5], t7)).contains("NaN"));

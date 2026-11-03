@@ -13,7 +13,7 @@
         "p2a-core::regression::ols::tests::test_validate_ols_raw_intercept_in_last_column",
         "p2a-core::regression::ols::tests::test_validate_ols_clustered_no_intercept_grunfeld",
         "p2a-core::regression::ols::tests::test_validate_hac_no_intercept_grunfeld",
-        "p2a-core::regression::ols::tests::test_clustered_and_hac_wrappers_keep_the_intercept",
+        "p2a-core::regression::ols::tests::test_validate_clustered_and_hac_wrappers_keep_the_intercept",
         "p2a-core::regression::gls::tests::test_validate_gls_identity_no_intercept_grunfeld"
       ],
       "quantities": ["coefficients", "SE classical, HC1, CR1 firm, CR1 firm + year, Newey-West lag 4", "t", "p", "R2 and adjusted R2 (uncentered without intercept)", "sigma", "F, its df and p", "logLik", "AIC", "F and R2 with the intercept column last (run_ols_raw)", "cluster counts"],
@@ -35,7 +35,7 @@
         "p2a-cli::tier3::wp06_flags::test_validate_cli_hac_no_intercept",
         "p2a-cli::tier3::wp06_flags::test_validate_cli_gls_identity_no_intercept",
         "p2a-cli::tier3::wp06_flags::test_validate_cli_step_no_intercept",
-        "p2a-cli::tier3::wp06_flags::test_cli_quantreg_no_intercept_reaches_core"
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_quantreg_no_intercept_reaches_core"
       ],
       "quantities": ["coefficient tables (text and JSON)", "R2 and adjusted R2", "two-way CR1 SE, t, p and cluster counts", "step criterion, final variables, R2 and AIC", "quantreg coefficients equal p2a-core in process"],
       "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE and R2, 3 for t, 4 for p); -F json at validation/README.md, n = 200 (coefficients 1e-8, SE and statistics 1e-6 relative, p also 1e-12 absolute); counts exact; quantreg in-process Tol::new(1e-12, 1e-15)",
@@ -53,8 +53,8 @@
       "cases": ["ts_ar_yw_aic"],
       "tests": [
         "p2a-cli::tier3::wp06_flags::test_validate_cli_ts_ar_aic_flag",
-        "p2a-cli::tier3::wp06_flags::test_cli_ts_stl_robust_flag",
-        "p2a-cli::tier3::wp06_flags::test_cli_ts_spectrum_detrend_flag"
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_ts_stl_robust_flag",
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_ts_spectrum_detrend_flag"
       ],
       "quantities": ["selected order", "AR coefficients (AIC, aic = FALSE order 20, fixed order 2)", "relative AIC vector", "series mean", "STL remainder and spectrum ordinates equal p2a-core in process for both flag values, and differ between them"],
       "tolerance": "validation/README.md, n = 120: coefficients and mean 1e-8, AIC 1e-6 relative; orders exact; STL and spectrum exact equality with the in-process call",

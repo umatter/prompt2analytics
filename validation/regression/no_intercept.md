@@ -75,7 +75,7 @@ last on `ols_grunfeld`: F 284.38382086987531 on 3 df against R's 426.57573130481
 | `regression::ols::tests::test_validate_ols_raw_intercept_in_last_column` | `run_ols_raw` with the ones column last: F, its numerator df, R², adjusted R² (case `ols_grunfeld`) |
 | `regression::ols::tests::test_validate_ols_clustered_no_intercept_grunfeld` | `OlsClusteredResult::fit(.., false)`, one- and two-way: coefficients, CR1 SE and p, cluster counts, R² |
 | `regression::ols::tests::test_validate_hac_no_intercept_grunfeld` | `HacResult::fit(.., false)` with Bartlett bandwidth 4: coefficients and SEs |
-| `regression::ols::tests::test_clustered_and_hac_wrappers_keep_the_intercept` | `run_ols_clustered` and `run_vcov_hac` equal `fit(.., true)`; two-way SEs of `ols_grunfeld` |
+| `regression::ols::tests::test_validate_clustered_and_hac_wrappers_keep_the_intercept` | `run_ols_clustered` and `run_vcov_hac` equal `fit(.., true)`; two-way SEs of `ols_grunfeld` |
 | `regression::gls::tests::test_validate_gls_identity_no_intercept_grunfeld` | identity GLS without intercept: coefficients, SE, t, p, R², adjusted R², sigma; with intercept R² and adjusted R² of `ols_grunfeld` (centered) |
 
 The CLI tests that reach these fits are listed in [../cli/flags.md](../cli/flags.md).
