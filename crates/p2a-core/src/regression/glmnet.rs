@@ -1,29 +1,37 @@
-//! Regularized linear regression with elastic net penalty (glmnet).
+//! Regularized linear and logistic regression with the elastic net penalty (glmnet).
 //!
-//! Implements the elastic net estimator combining L1 (lasso) and L2 (ridge) penalties:
+//! The gaussian objective, in the standardised x units `z` (see below), is glmnet's:
 //!
-//! min_β (1/2n) ||y - Xβ||² + λ[(1-α)||β||₂²/2 + α||β||₁]
+//! min (1/2n) ||y - b0 - Z b||² + λ [α ||b||₁ + (1 - α) / (2 ys) ||b||²]
 //!
-//! where:
-//! - α = 1 gives the lasso
-//! - α = 0 gives ridge regression
-//! - 0 < α < 1 gives elastic net
+//! - α = 1 gives the lasso, α = 0 ridge, 0 < α < 1 the elastic net;
+//! - `ys` is the population sd of y with an intercept and `sqrt(mean(y²))` without one: glmnet
+//!   solves on `y / ys`, so a textbook ridge with penalty (λ'/2)||β||² is glmnet's λ = λ' ys.
+//!
+//! The binomial objective is `-(1/n) sum(y η - log(1 + e^η)) + λ [α ||b||₁ + (1 - α)/2 ||b||²]`
+//! with y not standardised.
+//!
+//! # Standardisation
+//!
+//! x is centred by its column means if and only if an intercept is fitted, and divided by its
+//! population sd when `standardize` (otherwise by 1). Coefficients are reported on the original
+//! scale. A constant column gets coefficient 0 (glmnet's `ju`).
 //!
 //! # Algorithm
 //!
-//! Uses cyclical coordinate descent with warm starts and active set convergence.
-//! The coordinate update for coefficient j is:
+//! Cyclical coordinate descent with warm starts (Friedman, Hastie and Tibshirani 2010): the
+//! update of coordinate j is `b_j = S(g_j, l1) / (v_j + l2)` with S the soft-threshold. A lambda
+//! has converged when a full pass over every variable moves no coefficient by more than
+//! `max_j v_j Δ_j² < thresh` (passes over the active set in between), so no excluded variable
+//! violates its KKT condition. `max_iter` counts passes over the whole path. Binomial fits use
+//! IRLS with the intercept as an unpenalised coordinate of the inner weighted loop.
 //!
-//! β̃_j = S(∂L/∂β_j, λα) / (1 + λ(1-α))
-//!
-//! where S is the soft-thresholding operator: S(z, γ) = sign(z)(|z| - γ)₊
-//!
-//! # Features
-//!
-//! - Pathwise solution along sequence of λ values
-//! - Cross-validation for λ selection
-//! - Supports Gaussian and binomial families
-//! - Standardization of predictors (optional)
+//! The lambda path, its stopping rules, `cv.glmnet` and `predict.glmnet(exact = FALSE)` follow
+//! glmnet 5.1; `validation/regression/glmnet.md` lists the conventions and the known
+//! differences from R: `alpha` outside [0, 1], an empty user lambda and non-convergence at the
+//! first lambda are errors; `nlambda = 1` reports `lambda_max`; `nfolds = 2` is accepted; no
+//! covariance updates or strong rules (pass counts differ); no weights, offsets, penalty
+//! factors, limits or other families.
 //!
 //! # References
 //!

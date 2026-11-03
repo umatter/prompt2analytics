@@ -7,9 +7,7 @@
       "category": "regression",
       "reference": "glmnet::glmnet(alpha, lambda, standardize, intercept, family = 'gaussian' | 'binomial', control = list(thresh, fdev, dfmax)); glmnet::cv.glmnet(foldid); glmnet::predict.glmnet(s, exact = FALSE); exact KKT minimisers written out in the case",
       "doc": "validation/regression/glmnet.md",
-      "cases": [
-        "glmnet_paths"
-      ],
+      "cases": ["glmnet_paths"],
       "tests": [
         "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_lasso_std",
         "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_lasso_raw",
