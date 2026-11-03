@@ -178,11 +178,8 @@ pub fn correlation_heatmap(
         // Draw row labels (left side)
         for (i, label) in row_labels.iter().enumerate() {
             let y = y_offset + i as u32 * cell_height + cell_height / 2;
-            let truncated = if label.len() > 15 {
-                format!("{}...", &label[..12])
-            } else {
-                label.clone()
-            };
+            // Shortened by characters: a byte cut panics inside a multi-byte character.
+            let truncated = p2a_text::ellipsize(label, 15).into_owned();
             root.draw(&Text::new(
                 truncated,
                 ((x_offset - 5) as i32, (y + 4) as i32),
@@ -197,11 +194,7 @@ pub fn correlation_heatmap(
         // Draw column labels (top, rotated would be ideal but we'll use abbreviated)
         for (j, label) in col_labels.iter().enumerate() {
             let x = x_offset + j as u32 * cell_width + cell_width / 2;
-            let truncated = if label.len() > 8 {
-                format!("{}...", &label[..5])
-            } else {
-                label.clone()
-            };
+            let truncated = p2a_text::ellipsize(label, 8).into_owned();
             root.draw(&Text::new(
                 truncated,
                 (x as i32, (y_offset - 5) as i32),
@@ -336,5 +329,41 @@ mod tests {
         let l = vec!["A".to_string(), "B".to_string()];
         assert!(correlation_heatmap(&m, &l, &l, None, Some(50), Some(50)).is_ok());
         assert!(correlation_heatmap(&m, &l, &l, None, Some(0), Some(50)).is_err());
+    }
+
+    /// DATA-26 (column site): labels over 8 bytes were cut with &label[..5]; 'ß' spans bytes 4..6 of
+    /// "Größe_kg" and '入' bytes 3..6 of "収入合計額". All three labels are <= 15 bytes, so the row site is not hit.
+    #[test]
+    fn test_correlation_heatmap_non_ascii_column_labels() {
+        let m = vec![
+            vec![1.0, 0.42, -0.17],
+            vec![0.42, 1.0, 0.31],
+            vec![-0.17, 0.31, 1.0],
+        ];
+        let labels: Vec<String> = ["Größe_kg", "収入合計額", "R²_adj"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let r = correlation_heatmap(&m, &labels, &labels, None, None, None).unwrap();
+        assert_eq!((r.n_rows, r.n_cols), (3, 3));
+        assert_eq!(r.col_labels, labels); // the result keeps the full names
+        assert!(!r.image_base64.is_empty());
+    }
+
+    /// DATA-26 (row site): labels over 15 bytes were cut with &label[..12]; 'ö' spans bytes 11..13.
+    #[test]
+    fn test_correlation_heatmap_non_ascii_row_labels() {
+        let m = vec![
+            vec![1.0, 0.27, 0.05],
+            vec![0.27, 1.0, -0.38],
+            vec![0.05, -0.38, 1.0],
+        ];
+        let labels: Vec<String> = ["Haushaltsgrößenklasse", "Einkommen", "Alter"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let r = correlation_heatmap(&m, &labels, &labels, Some("Korrelation"), None, None).unwrap();
+        assert_eq!(r.row_labels, labels);
+        assert!(!r.image_base64.is_empty());
     }
 }
