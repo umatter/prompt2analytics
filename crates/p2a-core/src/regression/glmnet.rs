@@ -64,15 +64,20 @@ pub enum GlmnetFamily {
 /// Configuration for glmnet fitting
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlmnetConfig {
-    /// Elastic net mixing parameter (0 = ridge, 1 = lasso)
+    /// Elastic net mixing parameter (0 = ridge, 1 = lasso). Finite in [0, 1], otherwise
+    /// `InvalidSpecification` (R clamps a value above 1 to 1 with a warning).
     pub alpha: f64,
-    /// Sequence of lambda values (if None, automatically generated)
+    /// A user lambda path (None: the generated path). Non-empty, every value finite and >= 0;
+    /// sorted decreasingly as R does, fitted in full (never cut short by the stopping rules,
+    /// `dfmax` does not apply).
     pub lambda: Option<Vec<f64>>,
-    /// Number of lambda values in path (default: 100). At least 1 when `lambda` is `None`
-    /// (otherwise `InvalidSpecification`); a path above the allocation ceiling is `ResourceLimit`.
+    /// Number of lambda values in the generated path (default: 100). At least 1 when `lambda`
+    /// is `None` (otherwise `InvalidSpecification`); `nlambda = 1` is the single value
+    /// `lambda_max`; a path above the allocation ceiling is `ResourceLimit`.
     pub nlambda: usize,
-    /// Minimum lambda ratio (lambda_min / lambda_max)
-    pub lambda_min_ratio: f64,
+    /// `lambda_min / lambda_max` of the generated path, finite and strictly between 0 and 1.
+    /// `None` is glmnet's default: 0.01 when n < p, else 1e-4.
+    pub lambda_min_ratio: Option<f64>,
     /// Standardize predictors before fitting (default: true)
     pub standardize: bool,
     /// Include intercept (default: true)
@@ -91,10 +96,21 @@ pub struct GlmnetConfig {
     pub thresh: f64,
     /// Model family
     pub family: GlmnetFamily,
-    /// Maximum number of non-zero coefficients
+    /// glmnet's `dfmax`: a generated path stops after the first fit (from the 5th) with more
+    /// than `dfmax` nonzero coefficients; that fit is kept.
     pub dfmax: Option<usize>,
-    /// Minimum deviance ratio for early stopping
+    /// glmnet's `devmax` (default 0.999), in (0, 1]: a generated path stops after the first fit
+    /// (from the 5th) whose dev.ratio exceeds it.
     pub deviance_thresh: f64,
+    /// glmnet's `fdev` (default 1e-5), finite and >= 0: a generated path stops after the first
+    /// fit (from the 5th) whose dev.ratio gain over the previous fit is below `fdev * dev.ratio`
+    /// (gaussian) or `fdev` (binomial). 0 disables the rule.
+    #[serde(default = "default_fdev")]
+    pub fdev: f64,
+}
+
+fn default_fdev() -> f64 {
+    1e-5
 }
 
 impl Default for GlmnetConfig {
@@ -103,7 +119,7 @@ impl Default for GlmnetConfig {
             alpha: 1.0, // lasso by default
             lambda: None,
             nlambda: 100,
-            lambda_min_ratio: 0.0001,
+            lambda_min_ratio: None,
             standardize: true,
             intercept: true,
             max_iter: 100_000,
@@ -111,6 +127,7 @@ impl Default for GlmnetConfig {
             family: GlmnetFamily::Gaussian,
             dfmax: None,
             deviance_thresh: 0.999,
+            fdev: 1e-5,
         }
     }
 }
@@ -550,30 +567,146 @@ fn deviance_binomial(y: &ArrayView1<f64>, prob: &Array1<f64>) -> f64 {
     dev
 }
 
-/// Check the path and iteration controls of a glmnet configuration.
+/// Check the controls of a glmnet configuration (rule R3: every error is an
+/// `InvalidSpecification` naming the parameter):
 ///
-/// `nlambda = 1` (which generates a NaN lambda) and an empty user lambda
-/// sequence are not handled here (REG-42).
+/// - `thresh` finite and > 0; `max_iter` >= 1; `nlambda` >= 1 when no user lambda is given;
+/// - `alpha` finite in [0, 1];
+/// - a user `lambda`: non-empty, every value finite and >= 0;
+/// - `lambda_min_ratio`, when given: finite, strictly between 0 and 1;
+/// - `fdev` finite and >= 0; `deviance_thresh` finite in (0, 1].
+///
+/// The data checks (columns, rows, finite values) are in [`glmnet`].
 fn validate_glmnet_config(config: &GlmnetConfig) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
     if !(config.thresh.is_finite() && config.thresh > 0.0) {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "thresh must be a positive finite number (got {})",
-                config.thresh
-            ),
-        });
+        return spec(format!(
+            "thresh must be a positive finite number (got {})",
+            config.thresh
+        ));
     }
     if config.max_iter == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "max_iter must be at least 1".to_string(),
-        });
+        return spec("max_iter must be at least 1".to_string());
     }
     if config.lambda.is_none() && config.nlambda == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "nlambda must be at least 1 when no lambda sequence is given".to_string(),
-        });
+        return spec("nlambda must be at least 1 when no lambda sequence is given".to_string());
+    }
+    if !(config.alpha.is_finite() && (0.0..=1.0).contains(&config.alpha)) {
+        return spec(format!(
+            "alpha must be a finite number in [0, 1] (got {})",
+            config.alpha
+        ));
+    }
+    if let Some(lambda) = &config.lambda {
+        if lambda.is_empty() {
+            return spec("lambda must contain at least one value".to_string());
+        }
+        if let Some(bad) = lambda.iter().find(|l| !(l.is_finite() && **l >= 0.0)) {
+            return spec(format!(
+                "lambda: lambdas should be non-negative and finite (got {bad})"
+            ));
+        }
+    }
+    if let Some(r) = config.lambda_min_ratio {
+        if !(r.is_finite() && r > 0.0 && r < 1.0) {
+            return spec(format!(
+                "lambda_min_ratio must be finite and strictly between 0 and 1 (got {r})"
+            ));
+        }
+    }
+    if !(config.fdev.is_finite() && config.fdev >= 0.0) {
+        return spec(format!(
+            "fdev must be finite and non-negative (got {})",
+            config.fdev
+        ));
+    }
+    let d = config.deviance_thresh;
+    if !(d.is_finite() && d > 0.0 && d <= 1.0) {
+        return spec(format!(
+            "deviance_thresh must be finite, above 0 and at most 1 (got {d})"
+        ));
     }
     Ok(())
+}
+
+/// Check the data glmnet is given: at least one column, as many rows as y, at least two rows,
+/// every value finite.
+fn validate_glmnet_data(x: ArrayView2<f64>, y: ArrayView1<f64>) -> EconResult<()> {
+    let (n, p) = x.dim();
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    if p == 0 {
+        return spec("x must have at least one column".to_string());
+    }
+    if n != y.len() {
+        return spec(format!("x has {n} rows but y has {} elements", y.len()));
+    }
+    if n < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n,
+            context: "glmnet".to_string(),
+        });
+    }
+    if x.iter().any(|v| !v.is_finite()) {
+        return spec("x contains a missing or non-finite value".to_string());
+    }
+    if y.iter().any(|v| !v.is_finite()) {
+        return spec("y contains a missing or non-finite value".to_string());
+    }
+    Ok(())
+}
+
+/// The smallest `alpha` the generated path's `lambda_max` divides by (glmnet: `max(alpha, 1e-3)`),
+/// so a ridge path starts at `max|x'y| / n / 1e-3`.
+const ALPHA_FLOOR: f64 = 1e-3;
+
+/// glmnet's `mnlam`: the stopping rules of a generated path apply from this fit on.
+const MNLAM: usize = 5;
+
+/// The lambda path: the user's, sorted decreasingly, or the generated one from `lambda_max`
+/// down to `ratio * lambda_max` on a log scale. Returns the path, whether it was generated, and
+/// a note for `nlambda = 1`.
+fn lambda_path(
+    config: &GlmnetConfig,
+    lambda_max: f64,
+    n: usize,
+    p: usize,
+) -> EconResult<(Vec<f64>, bool, Option<String>)> {
+    if let Some(user) = &config.lambda {
+        let mut seq = user.clone();
+        seq.sort_by(|a, b| b.total_cmp(a));
+        return Ok((seq, false, None));
+    }
+    if config.nlambda == 1 {
+        let tail = if config.alpha >= ALPHA_FLOOR {
+            ", at which every coefficient is zero"
+        } else {
+            ""
+        };
+        let note = format!(
+            "nlambda = 1: the path is the single value lambda_max = {lambda_max:.6e}{tail}"
+        );
+        return Ok((vec![lambda_max], true, Some(note)));
+    }
+    let ratio = config
+        .lambda_min_ratio
+        .unwrap_or(if n < p { 0.01 } else { 1e-4 });
+    let mut seq = resource::try_with_capacity::<f64>(config.nlambda, "glmnet lambda path")?;
+    let last = (config.nlambda - 1) as f64;
+    seq.extend((0..config.nlambda).map(|k| lambda_max * ratio.powf(k as f64 / last)));
+    Ok((seq, true, None))
+}
+
+/// glmnet's stopping rules for a generated gaussian path, after the fit just pushed.
+fn gaussian_path_stops(fits: &[GlmnetCoefficients], config: &GlmnetConfig) -> bool {
+    let m = fits.len();
+    if m < MNLAM {
+        return false;
+    }
+    let (cur, prev) = (&fits[m - 1], &fits[m - 2]);
+    config.dfmax.is_some_and(|d| cur.df > d)
+        || cur.dev_ratio - prev.dev_ratio < config.fdev * cur.dev_ratio
+        || cur.dev_ratio > config.deviance_thresh
 }
 
 /// The fits of one path, the coordinate passes spent and the notes.
@@ -596,6 +729,7 @@ fn gaussian_path(
     ym: f64,
     ys: f64,
     lambdas: &[f64],
+    generated: bool,
     config: &GlmnetConfig,
 ) -> EconResult<PathFit> {
     let p = design.p;
@@ -644,7 +778,7 @@ fn gaussian_path(
             df,
             dev_ratio: 1.0 - rss / tss,
         });
-        if fits.last().is_some_and(|f| path_stops(f, config)) {
+        if generated && gaussian_path_stops(&fits, config) {
             break;
         }
     }
@@ -717,22 +851,8 @@ pub fn glmnet(
     config: &GlmnetConfig,
 ) -> EconResult<GlmnetResult> {
     validate_glmnet_config(config)?;
-    let n = x.nrows();
-    let p = x.ncols();
-
-    if n != y.len() {
-        return Err(EconError::Computation(format!(
-            "X has {} rows but y has {} elements",
-            n,
-            y.len()
-        )));
-    }
-
-    if config.alpha < 0.0 || config.alpha > 1.0 {
-        return Err(EconError::Computation(
-            "alpha must be between 0 and 1".to_string(),
-        ));
-    }
+    validate_glmnet_data(x, y)?;
+    let (n, p) = x.dim();
 
     let design = standardize_design(x, config.standardize, config.intercept)?;
     let nf = n as f64;
@@ -748,7 +868,9 @@ pub fn glmnet(
         }
     };
 
-    // Generate lambda sequence
+    // lambda_max: the smallest lambda at which every coefficient is zero (glmnet), from the
+    // gradient at the null fit; divided by max(alpha, 1e-3) so a ridge path starts where
+    // glmnet's does.
     let grad_max = design
         .usable_columns()
         .into_iter()
@@ -763,25 +885,12 @@ pub fn glmnet(
                 / nf
         })
         .fold(0.0f64, f64::max);
-    let lambda_max = if config.alpha > 0.0 {
-        grad_max / config.alpha.max(1e-3)
-    } else {
-        grad_max * 100.0
+    let lambda_max = match config.family {
+        GlmnetFamily::Gaussian => grad_max / config.alpha.max(ALPHA_FLOOR),
+        GlmnetFamily::Binomial if config.alpha > 0.0 => grad_max / config.alpha.max(1e-3),
+        GlmnetFamily::Binomial => grad_max * 100.0,
     };
-    let lambda_min = lambda_max * config.lambda_min_ratio;
-
-    let lambda_seq: Vec<f64> = if let Some(ref user_lambda) = config.lambda {
-        user_lambda.clone()
-    } else {
-        let log_max = lambda_max.ln();
-        let log_min = lambda_min.ln();
-        let mut seq = resource::try_with_capacity::<f64>(config.nlambda, "glmnet lambda path")?;
-        seq.extend((0..config.nlambda).map(|i| {
-            let t = i as f64 / (config.nlambda - 1) as f64;
-            (log_max + t * (log_min - log_max)).exp()
-        }));
-        seq
-    };
+    let (lambda_seq, generated, note) = lambda_path(config, lambda_max, n, p)?;
 
     // Each fit holds p coefficients plus seven words (lambda, intercept, the coefficient Vec
     // header, df, dev_ratio).
@@ -800,11 +909,13 @@ pub fn glmnet(
                         .to_string(),
                 });
             }
-            gaussian_path(&design, &yc, ym, ys, &lambda_seq, config)?
+            gaussian_path(&design, &yc, ym, ys, &lambda_seq, generated, config)?
         }
         GlmnetFamily::Binomial => binomial_path(&design, y, &lambda_seq, config, null_deviance)?,
     };
 
+    let mut warnings: Vec<String> = note.into_iter().collect();
+    warnings.extend(path.warnings);
     Ok(GlmnetResult {
         variable_names: (0..p).map(|i| format!("V{}", i + 1)).collect(),
         dependent_var: "y".to_string(),
@@ -821,7 +932,7 @@ pub fn glmnet(
         standardize: config.standardize,
         intercept: config.intercept,
         npasses: path.npasses,
-        warnings: path.warnings,
+        warnings,
     })
 }
 
@@ -865,16 +976,12 @@ pub fn cv_glmnet(
 ) -> EconResult<GlmnetCvResult> {
     let n = x.nrows();
 
-    if nfolds < 2 {
-        return Err(EconError::Computation(
-            "nfolds must be at least 2".to_string(),
-        ));
-    }
-    if nfolds > n {
-        return Err(EconError::Computation(format!(
-            "nfolds ({}) cannot exceed number of observations ({})",
-            nfolds, n
-        )));
+    if nfolds < 2 || nfolds > n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "nfolds must be at least 2 and at most the number of observations ({n}), got {nfolds}"
+            ),
+        });
     }
 
     // First fit on full data to get lambda sequence
@@ -1733,5 +1840,167 @@ mod tests {
             chk.vector(key, &b, EXACT);
         }
         chk.finish();
+    }
+
+    #[test]
+    fn test_validate_glmnet_default_path() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let lasso = run_glmnet(&ds, "y", &X8, &tight(1.0, true, true, None)).unwrap();
+        let ridge = run_glmnet(&ds, "y", &X8, &tight(0.0, true, true, None)).unwrap();
+        let enet = run_glmnet(&ds, "y", &X8, &tight(0.5, true, true, None)).unwrap();
+        Check::new(&case)
+            .vector("path_lambda", &lasso.lambda, Tol::coef(150))
+            .vector("path_df", &dfs(&lasso), Tol::exact())
+            .vector("path_coef_tight", &coef_path(&lasso), EXACT)
+            .vector(
+                "path_dev_ratio_tight",
+                &dev_ratios(&lasso),
+                Tol::iterative(1e-9),
+            )
+            .vector("path_dev_ratio", &dev_ratios(&lasso), R_DEV)
+            .scalar("ridge_path_lambda_max", ridge.lambda[0], Tol::coef(150))
+            .scalar("ridge_path_length", ridge.lambda.len() as f64, Tol::exact())
+            .scalar("enet_path_lambda_max", enet.lambda[0], Tol::coef(150))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_glmnet_path_rules() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let cols = k30();
+        let (k, yk) = xy(&ds, "yk", &refs(&cols));
+        // n = 20 < p = 30
+        let (kw, yw) = (
+            k.slice(s![..20, ..]).to_owned(),
+            yk.slice(s![..20]).to_owned(),
+        );
+        let mut cw = GlmnetConfig::default();
+        cw.thresh = 1e-20;
+        let wide = glmnet(kw.view(), yw.view(), &cw).unwrap();
+        let mut cd = tight(1.0, true, true, None);
+        cd.dfmax = Some(2);
+        let dfm = run_glmnet(&ds, "y", &X8, &cd).unwrap();
+        let mut cf = tight(1.0, true, true, None);
+        cf.fdev = 0.0;
+        let full = run_glmnet(&ds, "y", &X8, &cf).unwrap();
+        Check::new(&case)
+            .vector("wide_path_lambda", &wide.lambda, Tol::coef(20))
+            .vector("wide_path_df", &dfs(&wide), Tol::exact())
+            .vector("dfmax2_path_df", &dfs(&dfm), Tol::exact())
+            .scalar("fdev0_path_length", full.lambda.len() as f64, Tol::exact())
+            .finish();
+        // user lambdas: sorted decreasing (R), never early-stopped, dfmax not applied
+        let mut cu = tight(1.0, true, true, Some(&[0.03, 1.0, 0.1, 0.3][..]));
+        cu.dfmax = Some(0);
+        let u = run_glmnet(&ds, "y", &X8, &cu).unwrap();
+        assert_eq!(u.lambda, vec![1.0, 0.3, 0.1, 0.03]);
+        assert_eq!(coef_path(&u).len(), 36);
+    }
+
+    #[test]
+    fn test_glmnet_nlambda_one_is_lambda_max() {
+        // REG-42 (b): nlambda = 1 divided by nlambda - 1 = 0 (a NaN lambda).
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let mut c = GlmnetConfig::default();
+        c.nlambda = 1;
+        let r = run_glmnet(&ds, "y", &X8, &c).unwrap();
+        let lmax = case.vector("path_lambda")[0];
+        assert_eq!(r.lambda.len(), 1);
+        assert!(
+            Tol::coef(150).allows(r.lambda[0], lmax),
+            "{} vs {lmax}",
+            r.lambda[0]
+        );
+        assert!(
+            r.warnings.iter().any(|w| w.contains("nlambda = 1")),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .vector("nlambda1_coef", &coef_path(&r), EXACT) // mean(y), zeros
+            .scalar("nlambda1_dev_ratio", r.fits[0].dev_ratio, Tol::exact())
+            .finish();
+        let (x, y) = xy(&ds, "y", &X8);
+        let cv = cv_glmnet(x.view(), y.view(), &c, 5, Some(1)).unwrap();
+        assert_eq!(
+            (cv.cvm.len(), cv.lambda_min_index, cv.lambda_1se_index),
+            (1, 0, 0)
+        );
+        assert!(cv.cvm[0].is_finite() && cv.cvsd[0].is_finite());
+    }
+
+    #[test]
+    fn test_glmnet_rejects_empty_lambda() {
+        // REG-42 (c): an empty user lambda returned Ok with no fit at all.
+        let (x, y) = lambda_path_data();
+        let mut c = GlmnetConfig::default();
+        c.lambda = Some(vec![]);
+        match glmnet(x.view(), y.view(), &c).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("lambda"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+        assert!(matches!(
+            cv_glmnet(x.view(), y.view(), &c, 2, Some(1)).unwrap_err(),
+            EconError::InvalidSpecification { .. }
+        ));
+    }
+
+    /// `r` is an `InvalidSpecification` whose message contains `needle`.
+    fn assert_spec<T: std::fmt::Debug>(r: EconResult<T>, needle: &str) {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains(needle), "{needle}: {message}")
+            }
+            other => panic!("{needle}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_glmnet_rejects_invalid_inputs() {
+        // R3: every invalid input is an InvalidSpecification naming the parameter.
+        let (x, y) = lambda_path_data();
+        let fit = |c: &GlmnetConfig| glmnet(x.view(), y.view(), c);
+        let with = |f: &dyn Fn(&mut GlmnetConfig)| {
+            let mut c = GlmnetConfig::default();
+            f(&mut c);
+            c
+        };
+        for a in [1.5, -0.1, f64::NAN] {
+            assert_spec(fit(&with(&|c| c.alpha = a)), "alpha");
+        }
+        for l in [vec![1.0, -0.1], vec![f64::NAN]] {
+            assert_spec(fit(&with(&|c| c.lambda = Some(l.clone()))), "lambda");
+        }
+        for r in [1.0, 0.0, f64::NAN] {
+            assert_spec(
+                fit(&with(&|c| c.lambda_min_ratio = Some(r))),
+                "lambda_min_ratio",
+            );
+        }
+        for v in [-1.0, f64::NAN] {
+            assert_spec(fit(&with(&|c| c.fdev = v)), "fdev");
+        }
+        for v in [0.0, 1.5] {
+            assert_spec(fit(&with(&|c| c.deviance_thresh = v)), "deviance_thresh");
+        }
+        let c = GlmnetConfig::default();
+        assert_spec(
+            glmnet(x.view(), Array1::from_elem(5, 2.0).view(), &c),
+            "y is constant",
+        );
+        let mut xn = x.clone();
+        xn[[2, 1]] = f64::NAN;
+        assert_spec(glmnet(xn.view(), y.view(), &c), "x contains");
+        let mut yi = y.clone();
+        yi[3] = f64::INFINITY;
+        assert_spec(glmnet(x.view(), yi.view(), &c), "y contains");
+        assert_spec(
+            glmnet(Array2::<f64>::zeros((5, 0)).view(), y.view(), &c),
+            "at least one column",
+        );
+        assert_spec(glmnet(x.view(), y.slice(s![..4]), &c), "rows");
+        assert_spec(cv_glmnet(x.view(), y.view(), &c, 1, Some(1)), "nfolds");
     }
 }
