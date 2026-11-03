@@ -20,9 +20,9 @@
         "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_mahalanobis",
         "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_euclidean",
         "p2a-core::econometrics::matching::tests::test_validate_matchit_balance_table",
-        "p2a-core::econometrics::matching::tests::test_matchit_m_order_random_is_seeded",
-        "p2a-core::econometrics::matching::tests::test_matchit_display_shows_the_balance_tables_and_notes",
-        "p2a-core::econometrics::matching::tests::test_matching_rejects_invalid_options"
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_m_order_random_is_seeded",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_display_shows_the_balance_tables_and_notes",
+        "p2a-core::econometrics::matching::tests::test_validate_matching_rejects_invalid_options"
       ],
       "quantities": ["propensity scores and glm coefficients (logit, probit)", "matched pairs (m.order largest, smallest, data; probit; Mahalanobis; Euclidean)", "1:2 match matrix (rounds)", "caliper on the PS scale and the caliper pairs", "weights (1:2, caliper, replacement)", "pooled within-group covariance", "balance before/after: means, SMD, variance ratio, eCDF mean and max", "matched ESS"],
       "tolerance": "n = 240: pairs, match matrices and counts exact; weights 1e-8 (Tol::coef); balance statistics and ESS 1e-6 (Tol::stat); propensity scores, coefficients and the absolute caliper Tol::iterative(1e-8) against the epsilon 1e-14 refit, MatchIt's own glm values at Tol::iterative(1e-8) (logit) and 1e-5 (probit: MatchIt's glm stops 4.6e-7 away)",
@@ -49,7 +49,7 @@
         "p2a-core::econometrics::matching::tests::test_validate_full_matching_recovery",
         "p2a-core::econometrics::matching::tests::test_validate_full_matching_flipped",
         "p2a-core::econometrics::matching::tests::test_validate_full_matching_probit",
-        "p2a-core::econometrics::matching::tests::test_full_matching_rejects_infeasible_and_invalid_bounds"
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_rejects_infeasible_and_invalid_bounds"
       ],
       "quantities": ["optimal total distance (PS unconstrained and [0.5, 2], probit, Mahalanobis unconstrained, [0.5, 2], max 1, max 0.5 flipped)", "partitions and weights (Mahalanobis)", "the weight formula on R's partitions", "matched ESS", "every unit kept; star structure; bounds"],
       "tolerance": "n = 240: partitions exact; weights and Mahalanobis totals 1e-8 (Tol::coef); PS totals Tol::iterative(1e-8) (glm epsilon 1e-10 against 1e-14); p2a's integer costs at resolution max_d / 2^40",

@@ -321,6 +321,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
 | Mixed logit | [mixed_logit.md](econometrics/mixed_logit.md) | R-pinned |
 | Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-77) |
+| Matching (MatchIt: nearest neighbour, CEM, subclassification; optimal full matching as optmatch) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
+| Minimum-cost flow (network simplex) | [matching.md](econometrics/matching.md) | R-pinned |
 
 ### Survival Analysis
 | Method | File | Status |

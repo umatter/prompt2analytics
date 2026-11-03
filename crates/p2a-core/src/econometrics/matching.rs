@@ -2861,7 +2861,7 @@ mod tests {
     }
 
     #[test]
-    fn test_matchit_m_order_random_is_seeded() {
+    fn test_validate_matchit_m_order_random_is_seeded() {
         let (_, ds) = crate::test_support::load_case("matchit_nearest");
         let run = |seed| {
             let mut o = opts(MOrder::Random);
@@ -2957,7 +2957,7 @@ mod tests {
     }
 
     #[test]
-    fn test_matching_rejects_invalid_options() {
+    fn test_validate_matching_rejects_invalid_options() {
         let (_, ds) = crate::test_support::load_case("matchit_nearest");
         let msg = |r: EconResult<MatchResult>| match r {
             Err(EconError::InvalidSpecification { message }) => message,
@@ -3187,7 +3187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_matchit_display_shows_the_balance_tables_and_notes() {
+    fn test_validate_matchit_display_shows_the_balance_tables_and_notes() {
         let (_, ds) = crate::test_support::load_case("matchit_nearest");
         let r = match_it(&ds, "treat", &COVS, nn(1, Some(0.1), false), None).unwrap();
         let s = r.to_string();
@@ -3271,7 +3271,7 @@ mod tests {
 
     /// Perfect separation (R glm: "glm.fit: fitted probabilities numerically 0 or 1
     /// occurred", converged in 28 iterations, x2 aliased; MatchIt matches every treated
-    /// unit). Replaces the old `assert!(result.is_ok() || result.is_err())` (CAUS-92).
+    /// unit). Replaces the old test that accepted any outcome (CAUS-92).
     #[test]
     fn test_matching_reports_propensity_glm_warnings() {
         let df = df! { "treatment" => [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
@@ -3637,113 +3637,6 @@ mod tests {
         Dataset::new(df)
     }
 
-    #[test]
-    fn test_validate_matching_vs_r() {
-        // Validates against R MatchIt package
-        // R reference:
-        // library(MatchIt)
-        // m_nn <- matchit(treatment ~ x1 + x2, data = match_data, method = "nearest",
-        //                 distance = "logit", replace = FALSE)
-
-        let dataset = create_matchit_validation_dataset();
-
-        let result = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::NearestNeighbor {
-                ratio: 1,
-                caliper: None,
-                replace: false,
-            },
-            Some(DistanceMethod::Logit),
-        )
-        .unwrap();
-
-        // Structure validation
-        assert!(result.n_treated > 0);
-        assert!(result.n_control > 0);
-        assert!(result.n_matched_treated > 0);
-        assert!(result.n_matched_control > 0);
-
-        // Balance should improve after matching
-        // Before matching SMD may be large due to confounding
-        assert!(
-            result.balance_after.mean_abs_std_diff
-                <= result.balance_before.mean_abs_std_diff + 0.05,
-            "Balance should improve or stay similar after matching"
-        );
-
-        // After matching, SMD should be relatively small (< 0.25 is common threshold)
-        for cov in &result.balance_after.covariates {
-            assert!(
-                cov.std_diff.abs() < 0.5,
-                "Covariate {} has SMD {:.4} > 0.5 after matching",
-                cov.name,
-                cov.std_diff
-            );
-        }
-
-        // Propensity scores should be computed
-        assert!(result.propensity_scores.is_some());
-        let ps = result.propensity_scores.as_ref().unwrap();
-        assert_eq!(ps.len(), result.n_obs);
-        // PS should be in (0, 1)
-        for &p in ps.iter() {
-            assert!(p > 0.0 && p < 1.0, "PS {} out of range", p);
-        }
-    }
-
-    #[test]
-    fn test_validate_matching_balance_smd() {
-        // Validate SMD calculation matches R's formula
-        // SMD = (mean_t - mean_c) / sqrt((var_t + var_c) / 2)
-
-        let dataset = create_matchit_validation_dataset();
-
-        let result = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::NearestNeighbor {
-                ratio: 1,
-                caliper: None,
-                replace: false,
-            },
-            Some(DistanceMethod::Logit),
-        )
-        .unwrap();
-
-        // Verify balance table structure
-        assert_eq!(result.balance_before.covariates.len(), 2);
-        assert_eq!(result.balance_after.covariates.len(), 2);
-
-        // Variance ratios should be positive
-        for cov in &result.balance_after.covariates {
-            assert!(cov.var_ratio > 0.0, "Variance ratio should be positive");
-            // Good balance means var_ratio is close to 1 (0.5 to 2 is acceptable)
-            assert!(
-                cov.var_ratio > 0.1 && cov.var_ratio < 10.0,
-                "Variance ratio {:.4} for {} seems extreme",
-                cov.var_ratio,
-                cov.name
-            );
-        }
-
-        // Mean absolute SMD should be computed correctly
-        let computed_mean_smd: f64 = result
-            .balance_after
-            .covariates
-            .iter()
-            .map(|c| c.std_diff.abs())
-            .sum::<f64>()
-            / result.balance_after.covariates.len() as f64;
-        assert!(
-            (computed_mean_smd - result.balance_after.mean_abs_std_diff).abs() < 1e-10,
-            "Mean SMD mismatch"
-        );
-    }
-
     /// Shared checks of a full matching on the PS: the optimal total is pinned to optmatch at tol = 1e-8 and lies
     /// below MatchIt's default solution (tol = 0.001); every unit is kept; every set is a star within the bounds;
     /// the weights are MatchIt's formula on p2a's own partition. The PS optimum is not unique on a line, so the
@@ -4008,7 +3901,7 @@ mod tests {
     /// optmatch fails for min.controls = 2 here (178 controls needed, 151 available; MatchIt: "No matches were
     /// found"); bad bounds and distances are refused with the parameter named.
     #[test]
-    fn test_full_matching_rejects_infeasible_and_invalid_bounds() {
+    fn test_validate_full_matching_rejects_infeasible_and_invalid_bounds() {
         let (_, ds) = crate::test_support::load_case("matchit_full_cem");
         let msg = |m: MatchMethod| match match_it(&ds, "treat", &COVS, m, None) {
             Err(EconError::InvalidSpecification { message }) => message,
@@ -4114,83 +4007,6 @@ mod tests {
                 .any(|w| w.contains("fewer subclasses were generated than requested (1 of 2)")),
             "{w2:?}"
         );
-    }
-
-    #[test]
-    fn test_validate_matching_with_caliper() {
-        // Validate caliper matching
-        let dataset = create_matchit_validation_dataset();
-
-        // Without caliper
-        let result_no_caliper = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::NearestNeighbor {
-                ratio: 1,
-                caliper: None,
-                replace: false,
-            },
-            Some(DistanceMethod::Logit),
-        )
-        .unwrap();
-
-        // With caliper (0.1 SD of PS)
-        let result_with_caliper = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::NearestNeighbor {
-                ratio: 1,
-                caliper: Some(0.1),
-                replace: false,
-            },
-            Some(DistanceMethod::Logit),
-        )
-        .unwrap();
-
-        // Caliper should reduce or maintain number of matches
-        assert!(
-            result_with_caliper.n_matched_treated <= result_no_caliper.n_matched_treated,
-            "Caliper should not increase matches"
-        );
-
-        // Balance with caliper should be at least as good (often better)
-        // though with fewer matched units
-    }
-
-    #[test]
-    fn test_validate_matching_effective_sample_size() {
-        // Validate ESS calculation
-        let dataset = create_matchit_validation_dataset();
-
-        let result = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::NearestNeighbor {
-                ratio: 1,
-                caliper: None,
-                replace: true, // With replacement creates weights
-            },
-            Some(DistanceMethod::Logit),
-        )
-        .unwrap();
-
-        // ESS should be positive
-        assert!(result.effective_sample_size > 0.0);
-
-        // ESS should be <= actual matched sample size
-        let matched_size = result.n_matched_treated + result.n_matched_control;
-        assert!(
-            result.effective_sample_size <= matched_size as f64 + 0.01,
-            "ESS {:.2} should be <= matched size {}",
-            result.effective_sample_size,
-            matched_size
-        );
-
-        // With replacement, ESS might be less than nominal due to repeated use
-        // of the same control unit
     }
 
     // =========================================================================
