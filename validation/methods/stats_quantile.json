@@ -8,7 +8,15 @@
       "reference": "stats::quantile(type = 1..9); stats::IQR(type); quantile(x, c((1 - level)/2, (1 + level)/2), type = 7)",
       "doc": "validation/stats/robust.md",
       "cases": ["stat_quantile_types"],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::robust::tests::test_validate_quantile_legacy_api_types",
+        "p2a-core::stats::robust::tests::test_validate_iqr",
+        "p2a-core::stats::robust::tests::test_quantile_rejects_type_0_and_12",
+        "p2a-core::stats::robust::tests::test_validate_quantile_types_1_9",
+        "p2a-core::stats::robust::tests::test_validate_quantile_fuzz_rule",
+        "p2a-core::stats::robust::tests::test_quantiles_refuses_nan_and_bad_probabilities",
+        "p2a-core::stats::robust::tests::test_validate_percentile_interval"
+      ],
       "quantities": ["quantiles at 10 probabilities, types 1-9, n = 28 (ties) and n = 7", "IQR types 1-9", "quantile(1:10, 0.25, type = 1..9)", "types 4-9 at p = (k - a)/(n + 1 - a - b) and the 4*eps fuzz gap case", "percentile intervals at levels 0.95, 0.9, 0.5"],
       "tolerance": "validation/README.md closed-form tolerance (Tol::coef(n): n = 28, 7, 10); the fuzz and gap cases exact (they test which order statistic is chosen)",
       "deviations": [],
@@ -21,7 +29,10 @@
       "reference": "stats::fivenum; grDevices::boxplot.stats(coef = 1.5, 0.5)",
       "doc": "validation/stats/robust.md",
       "cases": ["stat_quantile_types"],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::robust::tests::test_validate_fivenum",
+        "p2a-core::stats::robust::tests::test_validate_boxplot_stats"
+      ],
       "quantities": ["fivenum (n = 28, n = 7)", "boxplot.stats stats, n, out (coef 1.5 and 0.5)", "DATA-62's example c(1, 7, 12, 15, 15, 16, 18, 18)"],
       "tolerance": "Tol::coef(n) for stats; n, n_out and out exact",
       "deviations": [],
@@ -34,7 +45,15 @@
       "reference": "stats::pt, pchisq, pf, pnorm (lower.tail = FALSE); stats::qnorm, qt, qchisq",
       "doc": "validation/stats/robust.md",
       "cases": ["stat_quantile_types"],
-      "tests": [],
+      "tests": [
+        "p2a-core::traits::estimator::tests::test_t_p_value_tail_is_not_zero",
+        "p2a-core::traits::estimator::tests::test_validate_p_value_helpers_stat_quantile_types",
+        "p2a-core::traits::estimator::tests::test_validate_normal_helpers_stat_quantile_types",
+        "p2a-core::traits::estimator::tests::test_validate_quantile_helpers_stat_quantile_types",
+        "p2a-core::traits::estimator::tests::test_t_critical_large_df_matches_r",
+        "p2a-core::traits::estimator::tests::test_t_critical_terminates_for_huge_df",
+        "p2a-core::traits::estimator::tests::test_default_confidence_intervals_large_df"
+      ],
       "quantities": ["2*pt(-|t|, df) for 15 (t, df) incl. p ~ 1e-40 and df up to 1e9", "pchisq upper for 8 (x, df) incl. df = 0.01", "pf upper for 7 (F, df1, df2) incl. F = 1e8 and df2 = 1e6", "2*pnorm(-|z|)", "qnorm, qnorm((1 + level)/2)", "qt for 17 (p, df) incl. df = 2e7, 1e9 and p = 1e-12", "qchisq for 12 (p, df) incl. the STAT-60 band (318, 320) and df = 0.01, 1e6"],
       "tolerance": "relative 1e-11 with no absolute floor (Tol::new(1e-11, 0.0)); measured maxima 1.5e-13 (pt), 1.2e-13 (pchisq), 6.1e-13 (pf), 3.6e-13 (qt), 8.0e-13 (qchisq)",
       "deviations": [],

@@ -174,7 +174,6 @@
       "quantities": ["five-number summary", "IQR (type 7)", "MAD (median and mean centre)", "ECDF at points", "n used", "approx (linear) at xout", "natural spline at xout", "missing", "density: n used only"],
       "tolerance": "validation/README.md, n = 12-15 (< 100): order statistics and centres 1e-6, other values 1e-5 relative; counts exact",
       "deviations": [
-        {"finding": "STAT-36", "quantity": "IQR quantile types 2-6, 8, 9", "note": "silently computed as type 7; only the default type 7 is pinned"},
         {"finding": "STAT-37", "quantity": "density curve", "note": "FFT grid mislabelled when n is not a power of two; density values not pinned"},
         {"finding": "STAT-65", "quantity": "density bandwidth", "note": "default bandwidth is not bw.nrd0 and non-Gaussian kernels scale bw differently; not pinned"},
         {"finding": "STAT-69", "quantity": "spline method fmm (the default)", "note": "a clamped spline, not R's FMM; only method = natural is pinned"},
