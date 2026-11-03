@@ -597,8 +597,9 @@ async fn reload_releases_what_its_check_before_decoding_reserves() {
 
 /// Only `load_dataset` records the file it loaded as a dataset's source. A
 /// `path` argument to `upload_dataset` or `create_dataset`, which neither
-/// tool reads, is not stored, so a reload skips those datasets instead of
-/// replacing them with that file.
+/// tool has, is refused as an unknown field, so no file can be attached to
+/// those datasets, and a reload skips them instead of replacing them with
+/// that file.
 #[cfg(feature = "llm")]
 #[tokio::test]
 async fn only_load_dataset_records_a_source_path() {
@@ -620,21 +621,34 @@ async fn only_load_dataset_records_a_source_path() {
         .to_string_lossy()
         .into_owned();
     let small = noisy_csv(3, 5);
+    let upload = json!({
+        "content": base64::engine::general_purpose::STANDARD.encode(&small),
+        "filename": "small.csv",
+        "name": "uploaded",
+    });
+    let create = json!({"csv_content": small, "name": "created"});
+    for (tool, arguments) in [("upload_dataset", &upload), ("create_dataset", &create)] {
+        let mut with_path = arguments.clone();
+        with_path["path"] = json!(file);
+        let (st, body) = call(
+            &r,
+            "POST",
+            &format!("/api/tools/{tool}"),
+            Some(&sid),
+            Some(json!({"session_id": sid, "arguments": with_path})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{tool}: {body}");
+        assert_eq!(body["code"], "invalid_arguments", "{tool}: {body}");
+        assert!(
+            body["error"].as_str().is_some_and(|e| e.contains("`path`")),
+            "{tool}: {body}"
+        );
+    }
     let calls = [
         ("load_dataset", json!({"path": file, "name": "loaded"})),
-        (
-            "upload_dataset",
-            json!({
-                "content": base64::engine::general_purpose::STANDARD.encode(&small),
-                "filename": "small.csv",
-                "name": "uploaded",
-                "path": file,
-            }),
-        ),
-        (
-            "create_dataset",
-            json!({"csv_content": small, "name": "created", "path": file}),
-        ),
+        ("upload_dataset", upload),
+        ("create_dataset", create),
     ];
     for (tool, arguments) in calls {
         let (st, body) = call(
