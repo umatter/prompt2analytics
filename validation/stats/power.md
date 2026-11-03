@@ -138,3 +138,5 @@ module.
   where R's series is slow or does not converge (R warns there).
 - `power.anova.test(groups = 2^62, power = 0.8)` fails in R and here ("cannot solve for n"): the
   power is 1 on the whole interval.
+- Not R-pinned: R's `uniroot` iteration counts and `init.it` (the bracket-extension count); `RootInfo`
+  reports p2a's own counts.

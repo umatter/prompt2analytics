@@ -373,7 +373,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Median Polish | [medpolish.md](stats/medpolish.md) | R-pinned |
 | Isotonic Regression | [isoreg.md](stats/isoreg.md) | R-pinned, known deviations (STAT-52) |
 | Log-Linear Models | [loglin.md](stats/loglin.md) | R-pinned |
-| Constrained Optimization | [constroptim.md](stats/constroptim.md) | not R-pinned |
+| Constrained Optimization | [constroptim.md](stats/constroptim.md) | R-pinned, known deviations (STAT-80) |
 | SE for Contrasts | [secontrast.md](stats/secontrast.md) | not R-pinned |
 | Model Tables | [modeltables.md](stats/modeltables.md) | R-pinned, known deviations (STAT-75) |
 | Fisher's Exact Test (2 × 2) | [fisher.md](stats/fisher.md) | R-pinned |
@@ -399,6 +399,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Friedman rank-sum test | [friedman.md](stats/friedman.md) | R-pinned |
 | Quade test | [quade_test.md](stats/quade_test.md) | R-pinned |
 | One-way MANOVA (Pillai, Wilks, Hotelling-Lawley, Roy) | [manova.md](stats/manova.md) | R-pinned |
+| Power analysis (power.t.test, power.prop.test, power.anova.test) | [power.md](stats/power.md) | R-pinned, known deviations (STAT-61) |
+| p-value adjustment (p.adjust) | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
+| Factor analysis (ML; varimax, promax) | [factanal.md](multivariate/factanal.md) | R-pinned, known deviations (STAT-23) |
 
 ### Spatial Econometrics
 | Method | File | Status |
