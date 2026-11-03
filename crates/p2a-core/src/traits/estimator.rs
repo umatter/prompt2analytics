@@ -395,6 +395,11 @@ fn convergence_error(e: tails::NoConvergence) -> EconError {
 /// - Student's t with df >= 1000 uses the four-term Cornish-Fisher expansion (Fisher 1925; A&S 26.7.5)
 ///   where z^2 <= 0.005 df. There its truncation error is below double precision, verified against R
 ///   up to df = 1e12.
+/// - Iteration caps bound the supported df. The chi-square series needs about 1.4 sqrt(df) terms near
+///   the centre and reaches its 1e7 cap at df of about 4e12 (the continued fraction stays below its
+///   cap there); the F continued fraction was checked to df1, df2 = 1e12. Up to df = 1e12 every helper
+///   converges. Beyond the caps the p-value helpers return NaN and the quantile helpers
+///   ConvergenceFailure (chi-square p-values and quantiles near the centre for df >= 5e12).
 mod tails {
     use statrs::distribution::{ContinuousCDF, Normal};
     use statrs::function::gamma::ln_gamma;
@@ -1356,14 +1361,32 @@ mod tests {
     /// 1e5 (chi-square): the quantile solvers return, and the tails of their answers give p
     /// back.
     #[test]
+    fn test_chi_squared_helpers_df_range() {
+        // Inside the documented range: finite, and just below 1/2 at the mean.
+        let p = chi_squared_p_value(1e12, 1e12);
+        assert!(p > 0.49 && p < 0.5, "{p}");
+        // Beyond the series cap (df >= 5e12, near the centre): NaN and ConvergenceFailure.
+        assert!(chi_squared_p_value(1e14, 1e14).is_nan());
+        assert!(matches!(
+            chi_squared_quantile(0.5, 1e14),
+            Err(EconError::ConvergenceFailure { .. })
+        ));
+        // Far from the centre the continued fraction still converges at df = 1e14.
+        let far = chi_squared_p_value(1.1e14, 1e14);
+        assert!(far == 0.0 || far.is_finite(), "{far}");
+    }
+
+    #[test]
     fn test_distribution_helpers_seeded_round_trip() {
         let rel = |a: f64, b: f64| ((a - b) / b).abs();
         let mut rng = SplitMix64(20261021);
-        let (lo, hi) = (1e-300_f64.ln(), 0.5_f64.ln());
+        // Lower-tail q down to 1e-300; upper-tail q from 1e-15, so that 1 - q stays below 1.
+        let (lo, lo_upper, hi) = (1e-300_f64.ln(), 1e-15_f64.ln(), 0.5_f64.ln());
         let mut done = 0;
         while done < 1000 {
-            let q = rng.range(lo, hi).exp();
-            let p = if rng.unif() < 0.5 { q } else { 1.0 - q };
+            let upper = rng.unif() >= 0.5;
+            let q = rng.range(if upper { lo_upper } else { lo }, hi).exp();
+            let p = if upper { 1.0 - q } else { q };
             if p == 0.5 || p >= 1.0 {
                 continue;
             }

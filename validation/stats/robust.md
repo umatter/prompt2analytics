@@ -212,6 +212,11 @@ The case holds 15 t, 8 chi-square and 7 F p-values, 5 normal p-values, 7 normal 
   Measured maxima: 1.5e-13 (pt), 1.1e-13 (pchisq), 6.1e-13 (pf), 3.2e-15 (two-sided normal),
   3.6e-13 (qt), 8.0e-13 (qchisq), 5.4e-16 (qnorm). The quantile, box-plot and percentile keys
   agree exactly.
+- Supported df: the incomplete-gamma series and the continued fractions converge within their
+  iteration caps up to df = 1e12 (chi-square up to about 4e12; F checked to df1, df2 = 1e12).
+  Beyond that, near the centre of the distribution, `chi_squared_p_value` returns NaN and
+  `chi_squared_quantile` returns `ConvergenceFailure`; R returns finite values there
+  (`test_chi_squared_helpers_df_range` pins this at df = 1e14).
 
 **Status:** R-pinned (registry `validation/methods/stats_quantile.json`, ids `quantile_types`,
 `boxplot_stats`, `distribution_helpers`).
