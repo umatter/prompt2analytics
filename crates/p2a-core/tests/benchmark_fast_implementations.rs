@@ -1,5 +1,14 @@
 //! Benchmark fast implementations vs original vs R
-//! Run with: cargo test -p p2a-core --test benchmark_fast_implementations --release -- --nocapture
+//!
+//! Every test here except `verify_fast_roc_accuracy` prints timings or notes and asserts nothing,
+//! so those tests are `#[ignore]`d and `cargo test` (CI included) reports them as ignored.
+//! `verify_fast_roc_accuracy` checks the fast ROC/AUC against the original and runs normally.
+//! Run the benchmarks in a release build:
+//!
+//! ```text
+//! cargo test -p p2a-core --release --no-default-features --features ci \
+//!     --test benchmark_fast_implementations -- --ignored --nocapture
+//! ```
 
 use ndarray::{Array1, Array2};
 use p2a_core::{
@@ -57,6 +66,7 @@ fn generate_data(n: usize) -> (Array2<f64>, Array1<f64>, Vec<f64>, Vec<f64>) {
 }
 
 #[test]
+#[ignore = "benchmark; run with --release -- --ignored"]
 fn benchmark_roc_auc_implementations() {
     println!("\n============================================================");
     println!("ROC/AUC BENCHMARK: Fast vs Original");
@@ -101,6 +111,7 @@ fn benchmark_roc_auc_implementations() {
 }
 
 #[test]
+#[ignore = "benchmark; run with --release -- --ignored"]
 fn benchmark_svm_implementations() {
     println!("\n============================================================");
     println!("SVM BENCHMARK: Fast vs Original");
@@ -162,6 +173,7 @@ fn benchmark_svm_implementations() {
 }
 
 #[test]
+#[ignore = "benchmark; run with --release -- --ignored"]
 fn benchmark_svm_linear() {
     println!("\n============================================================");
     println!("LINEAR SVM BENCHMARK: Fast vs Original");
@@ -256,6 +268,7 @@ fn verify_fast_roc_accuracy() {
 }
 
 #[test]
+#[ignore = "benchmark; run with --release -- --ignored"]
 fn benchmark_xgboost_implementations() {
     println!("\n============================================================");
     println!("XGBOOST BENCHMARK: Fast (Histogram) vs Original");
@@ -347,6 +360,7 @@ fn benchmark_xgboost_implementations() {
 }
 
 #[test]
+#[ignore = "benchmark; run with --release -- --ignored"]
 fn benchmark_mboost_implementations() {
     println!("\n============================================================");
     println!("MBOOST BENCHMARK: Fast (Parallel) vs Original");
@@ -437,6 +451,7 @@ fn benchmark_mboost_implementations() {
 }
 
 #[test]
+#[ignore = "benchmark; run with --release -- --ignored"]
 fn summary_comparison() {
     println!("\n============================================================");
     println!("IMPLEMENTATION COMPARISON SUMMARY");

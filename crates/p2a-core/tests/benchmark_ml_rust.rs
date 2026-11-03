@@ -1,5 +1,13 @@
 //! Benchmark Rust ML methods for comparison with R
-//! Run with: cargo test -p p2a-core --test benchmark_ml_rust --release -- --nocapture
+//!
+//! The test prints timings and asserts nothing, and an unoptimised build spends tens of minutes
+//! in it, so it is `#[ignore]`d and `cargo test` (CI included) reports it as ignored. Run it in a
+//! release build:
+//!
+//! ```text
+//! cargo test -p p2a-core --release --no-default-features --features ci \
+//!     --test benchmark_ml_rust -- --ignored --nocapture
+//! ```
 
 use ndarray::{Array1, Array2};
 use p2a_core::{CartConfig, CartMethod, KernelSvmConfig, SvmKernel, cart, kernel_svm, roc_auc};
@@ -29,6 +37,7 @@ fn generate_data(n: usize) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
 }
 
 #[test]
+#[ignore = "benchmark; run with --release -- --ignored"]
 fn benchmark_rust_ml() {
     println!("\n============================================================");
     println!("RUST ML BENCHMARKS");

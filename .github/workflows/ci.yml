@@ -97,6 +97,14 @@ jobs:
         # --tests runs unit + integration tests only; doctests are gated
         # separately in the step below so a failing example is distinguishable
         # from a failing unit test in the log.
+        #
+        # Benchmark-only tests are #[ignore]d and show up here as "ignored":
+        # tests/benchmark_ml_rust.rs and every test in
+        # tests/benchmark_fast_implementations.rs except verify_fast_roc_accuracy
+        # time code and assert nothing. In this debug build benchmark_ml_rust
+        # alone took 1792.67 s of this step (Aug 2026). Run them locally with
+        # `cargo test -p p2a-core --release --no-default-features --features ci
+        # --test <file> -- --ignored --nocapture`.
         run: |
           cargo test -p p2a-core --tests --no-default-features --features ci
           cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket"
