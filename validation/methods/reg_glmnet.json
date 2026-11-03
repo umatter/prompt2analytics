@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "glmnet",
+      "name": "Elastic net, lasso and ridge (glmnet): gaussian and binomial coordinate descent, lambda path, cv.glmnet, predict at s",
+      "category": "regression",
+      "reference": "glmnet::glmnet(alpha, lambda, standardize, intercept, family = 'gaussian' | 'binomial', control = list(thresh, fdev, dfmax)); glmnet::cv.glmnet(foldid); glmnet::predict.glmnet(s, exact = FALSE); exact KKT minimisers written out in the case",
+      "doc": "validation/regression/glmnet.md",
+      "cases": ["glmnet_paths"],
+      "tests": [
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_lasso_std",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_lasso_raw",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_enet_std",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_enet_raw",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_ridge_std",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_gaussian_ridge_raw",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_kkt_excluded_variable",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_convergence_is_scale_free",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_maxit_truncates_path_with_warning",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_constant_column_is_excluded",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_default_path",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_path_rules",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_nlambda_one_is_lambda_max",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_binomial",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_binomial_path",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_binomial_two_level_coding",
+        "p2a-core::regression::glmnet::tests::test_validate_cv_glmnet_foldid",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_predict_interpolates",
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_display_prints_coefficients"
+      ],
+      "quantities": [
+        "coefficients and intercept at lambda 1, 0.3, 0.1, 0.03 for alpha 1, 0.5, 0 x standardize x intercept (gaussian)",
+        "dev.ratio",
+        "default lasso path: lambda, df, coefficients, dev.ratio, length (fdev / devmax stop)",
+        "ridge and elastic-net lambda_max, ridge path length",
+        "n < p lambda.min.ratio path, dfmax path, fdev = 0 path length, nlambda = 1",
+        "binomial coefficients and dev.ratio (standardize, intercept, alpha 0.5), intercept score sum(y - p)",
+        "binomial default path: lambda, df, coefficients, dev.ratio; no-intercept lambda_max",
+        "cv.glmnet cvm, cvsd, lambda.min, lambda.1se and indices, fold path lengths, coefficients at lambda.min / lambda.1se (gaussian 5 equal folds, binomial 7 unequal folds)",
+        "coef / predict at s off the path (interpolation, clamping), binomial probabilities",
+        "KKT conditions, df and coefficients along an AR(0.85) lasso path"
+      ],
+      "tolerance": "n = 150: exact KKT minimisers (*_tight) 1e-9 relative + 1e-11 absolute (coordinate descent at thresh 1e-24), KKT path 1e-10 absolute; glmnet's own output (thresh 1e-14) 1e-6 relative + 2e-7 absolute, dev.ratio 1e-8 + 5e-9, cvm 1e-7 and cvsd 1e-6 relative; lambdas validation/README.md coefficient row (1e-8, n = 20: 1e-6); df, indices and path lengths exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
