@@ -27,8 +27,7 @@
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{
-    CONDITION_THRESHOLD, LinalgError, chol_solve_identity, faer_to_ndarray, partial_piv_lu_inverse,
-    verified_inverse,
+    CONDITION_THRESHOLD, LinalgError, chol_solve_identity, lu_inverse_bounded, norm1,
 };
 use crate::resource;
 use faer::Mat;
@@ -293,14 +292,15 @@ impl Qr {
         Ok(Array1::from_vec(q))
     }
 
-    /// `Q v` with the first `rank` reflectors (the inverse of [`Qr::qty`]).
-    pub(crate) fn q_times(&self, v: ArrayView1<f64>) -> Array1<f64> {
-        assert_eq!(v.len(), self.n, "Qr::q_times: v has the wrong length");
+    /// `Q v` with the first `rank` reflectors (the inverse of [`Qr::qty`]). Refuses a `v`
+    /// whose length is not the number of rows of the decomposed matrix, as [`Qr::qty`].
+    pub(crate) fn q_times(&self, v: ArrayView1<f64>) -> EconResult<Array1<f64>> {
+        self.check_len(&v)?;
         let mut q = v.to_vec();
         for j in (0..self.n_reflectors()).rev() {
             self.reflect(j, &mut q);
         }
-        Array1::from_vec(q)
+        Ok(Array1::from_vec(q))
     }
 
     /// Solve `R11 b = (Q'y)[..rank]` and return `b` in pivoted order.
@@ -458,7 +458,7 @@ fn fit_from_qr(qr: Qr, y: ArrayView1<f64>) -> EconResult<LeastSquares> {
     let rank = qr.rank();
     let mut effects = qr.qty(y)?;
     effects.iter_mut().take(rank).for_each(|v| *v = 0.0);
-    let residuals = qr.q_times(effects.view());
+    let residuals = qr.q_times(effects.view())?;
     let fitted = &y - &residuals;
     let coefficients = qr.coefficients(y)?;
     let unscaled_cov = qr.unscaled_covariance()?;
@@ -525,8 +525,18 @@ pub fn weighted_least_squares(
         let s = w[i].sqrt();
         sw[k] = s;
         ys[k] = y[i] * s;
+        let mut finite = ys[k].is_finite();
         for j in 0..p {
             xs[[k, j]] = x[[i, j]] * s;
+            finite &= xs[[k, j]].is_finite();
+        }
+        // A finite but very large weight can still overflow the scaled row; name the
+        // caller's row and the weight, not a row of the compacted matrix.
+        if !finite {
+            return Err(spec(format!(
+                "weights: row {i} (w = {:e}) overflows the weighted design",
+                w[i]
+            )));
         }
     }
     let fit = least_squares_tol(xs.view(), ys.view(), LM_QR_TOL)?;
@@ -622,29 +632,79 @@ impl SymInverse {
     }
 }
 
-/// `(max |m_ij - m_ji|, max |m_ij|)` of a square matrix.
-fn asymmetry(m: &ArrayView2<f64>) -> (f64, f64) {
+/// `(max |m_ij - m_ji|, max |m_ij|)` of a square matrix in one pass over its pairs, or
+/// `None` when an entry is not finite.
+pub(crate) fn finite_asymmetry(m: &ArrayView2<f64>) -> Option<(f64, f64)> {
     let d = m.nrows();
-    let (mut asym, mut big) = (0.0f64, 0.0f64);
-    for i in 0..d {
-        for j in 0..d {
-            big = big.max(m[[i, j]].abs());
-            if j > i {
-                asym = asym.max((m[[i, j]] - m[[j, i]]).abs());
+    let Some(sl) = m.as_slice() else {
+        // Not row-major contiguous: indexed reads.
+        let (mut asym, mut big, mut finite) = (0.0f64, 0.0f64, true);
+        for i in 0..d {
+            for j in i..d {
+                let (a, b) = (m[[i, j]], m[[j, i]]);
+                finite &= a.is_finite() & b.is_finite();
+                big = big.max(a.abs()).max(b.abs());
+                asym = asym.max((a - b).abs());
+            }
+        }
+        return finite.then_some((asym, big));
+    };
+    // Row-major and contiguous (the usual case). Pass 1, contiguous: `v * 0` is 0 for a
+    // finite entry and NaN otherwise, so the sum is NaN exactly when one is not finite.
+    // Four lanes keep the reductions out of a single dependency chain.
+    let (mut nan, mut big) = ([0.0f64; 4], [0.0f64; 4]);
+    let (chunks, rest) = sl.as_chunks::<4>();
+    for c in chunks {
+        for l in 0..4 {
+            nan[l] += c[l] * 0.0;
+            let v = c[l].abs();
+            if v > big[l] {
+                big[l] = v;
             }
         }
     }
-    (asym, big)
+    for &v in rest {
+        nan[0] += v * 0.0;
+        if v.abs() > big[0] {
+            big[0] = v.abs();
+        }
+    }
+    if (nan[0] + nan[1] + nan[2] + nan[3]).is_nan() {
+        return None;
+    }
+    let big = big[0].max(big[1]).max(big[2].max(big[3]));
+    // Pass 2: the strict lower triangle of row i against column i above the diagonal.
+    let mut asym = 0.0f64;
+    for i in 1..d {
+        for (j, a) in sl[i * d..i * d + i].iter().enumerate() {
+            let v = (a - sl[j * d + i]).abs();
+            if v > asym {
+                asym = v;
+            }
+        }
+    }
+    Some((asym, big))
 }
 
-/// Whether `m` is square, finite and symmetric to `SYMMETRY_TOL` relative to its largest
-/// entry (the zero matrix is symmetric).
-pub(crate) fn is_symmetric(m: &ArrayView2<f64>) -> bool {
-    if m.nrows() != m.ncols() || !m.iter().all(|v| v.is_finite()) {
-        return false;
+/// `m` as a faer matrix (bit for bit), with plain slice reads when `m` is row-major.
+fn to_faer(m: &ArrayView2<f64>) -> Mat<f64> {
+    let (rows, cols) = m.dim();
+    match m.as_slice() {
+        Some(sl) => Mat::from_fn(rows, cols, |i, j| sl[i * cols + j]),
+        None => Mat::from_fn(rows, cols, |i, j| m[[i, j]]),
     }
-    let (asym, big) = asymmetry(m);
-    asym <= SYMMETRY_TOL * big
+}
+
+/// A faer matrix as a row-major ndarray (bit for bit), read through column slices.
+fn from_faer(x: &Mat<f64>) -> Array2<f64> {
+    let (rows, cols) = (x.nrows(), x.ncols());
+    let mut v = vec![0.0f64; rows * cols];
+    for j in 0..cols {
+        for (dst, &val) in v[j..].iter_mut().step_by(cols).zip(x.col_as_slice(j)) {
+            *dst = val;
+        }
+    }
+    Array2::from_shape_vec((rows, cols), v).expect("rows * cols entries")
 }
 
 /// `(rank, reciprocal condition)` from eigenvalues of the equilibrated matrix.
@@ -702,8 +762,10 @@ fn eigen_inverse(e: &Mat<f64>, s: &[f64], keep: usize, guarded: bool) -> EconRes
 ///   invertible): eigenvalues at or below `SYM_RANK_TOL * dim * lambda_max` count as zero.
 /// * Full rank: positive-definite matrices are inverted by Cholesky (the code
 ///   `safe_inverse` always ran, bit for bit), negative-definite ones by the Cholesky
-///   factor of `-m`, and indefinite ones by the verified partial-pivot LU of
-///   `matrix_ops`. A Cholesky inverse whose `kappa_1(E)` is at most `1e10` (and at most
+///   factor of `-m`, and indefinite ones by the partial-pivot LU of `matrix_ops`,
+///   accepted when `max |m X - I|` is within the residual allowance for `kappa_1(m)`
+///   (capped by a bound on `kappa_2(m)` from the eigenvalues of `E`; otherwise the
+///   eigenvalue inverse). A Cholesky inverse whose `kappa_1(E)` is at most `1e10` (and at most
 ///   `0.1 / (SYM_RANK_TOL * dim)`) is accepted in O(dim^2) without eigenvalues.
 /// * Rank-deficient: [`SingularPolicy::Error`] gives [`EconError::SingularMatrix`];
 ///   [`SingularPolicy::Generalized`] gives `S E_r^+ S`, the Moore-Penrose inverse of `E`
@@ -716,43 +778,103 @@ pub fn sym_inverse(
     policy: SingularPolicy,
     what: &str,
 ) -> EconResult<SymInverse> {
-    sym_inverse_impl(m, policy, what, true)
-}
-
-/// [`sym_inverse`] without the budget checkpoint and the allocation-ceiling checks, for
-/// `matrix_ops::safe_inverse`, which has never consulted either: its callers already
-/// hold the `dim x dim` matrix and run their own `checkpoint()` per iteration, so a
-/// cancellation surfaces there as `Cancelled` instead of as a failed inverse. Errors
-/// are then only the validation refusals and `LinalgError::EigenFailed`.
-pub(crate) fn sym_inverse_unguarded(
-    m: ArrayView2<f64>,
-    policy: SingularPolicy,
-    what: &str,
-) -> EconResult<SymInverse> {
-    sym_inverse_impl(m, policy, what, false)
-}
-
-fn sym_inverse_impl(
-    m: ArrayView2<f64>,
-    policy: SingularPolicy,
-    what: &str,
-    guarded: bool,
-) -> EconResult<SymInverse> {
     let (rows, cols) = m.dim();
     if rows != cols {
         return Err(LinalgError::NotSquare { rows, cols }.into());
     }
-    if !m.iter().all(|v| v.is_finite()) {
+    let Some((asym, big)) = finite_asymmetry(&m) else {
         return Err(spec(format!("{what} contains non-finite entries")));
-    }
-    let (asym, big) = asymmetry(&m);
+    };
     if asym > SYMMETRY_TOL * big {
         return Err(spec(format!(
             "{what} is not symmetric (max |m - m'| = {asym:.3e} > {SYMMETRY_TOL:.0e} * max |m|); \
              sym_inverse requires a symmetric matrix"
         )));
     }
-    let d = rows;
+    sym_inverse_core(m, policy, what, true)
+}
+
+/// [`sym_inverse`] for `matrix_ops::safe_inverse`, which has already checked that `m` is
+/// square, finite and symmetric to [`SYMMETRY_TOL`] (the checks are not repeated), and
+/// which has never consulted budgets or the allocation ceiling: its callers already hold
+/// the `dim x dim` matrix and run their own `checkpoint()` per iteration, so a
+/// cancellation surfaces there as `Cancelled` instead of as a failed inverse. The only
+/// error is then `LinalgError::EigenFailed` (and `SingularMatrix` under
+/// [`SingularPolicy::Error`]).
+pub(crate) fn sym_inverse_unguarded(
+    m: ArrayView2<f64>,
+    policy: SingularPolicy,
+) -> EconResult<SymInverse> {
+    debug_assert!(
+        m.nrows() == m.ncols()
+            && finite_asymmetry(&m).is_some_and(|(asym, big)| asym <= SYMMETRY_TOL * big)
+    );
+    sym_inverse_core(m, policy, "matrix", false)
+}
+
+/// `(||E||_1, ||E^-1||_1)` for `E = S m S`, `S = diag(1 / r)`, from the faer copy `a` of `m`
+/// (its lower triangle) and the candidate inverse `x` of `m` (`E^-1 = R x R`); `None` when
+/// `x` has a non-finite entry. One pass over each matrix, column by column; `col_e` (length
+/// `dim`) is scratch.
+fn equilibrated_norms(
+    a: &Mat<f64>,
+    x: &Mat<f64>,
+    r: &[f64],
+    s: &[f64],
+    col_e: &mut [f64],
+) -> Option<(f64, f64)> {
+    let d = r.len();
+    col_e.fill(0.0);
+    let mut einv_norm = 0.0f64;
+    for j in 0..d {
+        let (sj, rj) = (s[j], r[j]);
+        // Column j of E from the lower triangle; each entry below the diagonal also
+        // belongs to column i (E is symmetric).
+        let lower = &a.col_as_slice(j)[j..];
+        col_e[j] += weighted_abs_sum(lower, &s[j..]) * sj;
+        for ((v, si), ce) in lower[1..].iter().zip(&s[j + 1..]).zip(&mut col_e[j + 1..]) {
+            *ce += v.abs() * si * sj;
+        }
+        // A non-finite entry of x makes the sum non-finite (the slow check tells it from
+        // overflow).
+        let col = x.col_as_slice(j);
+        let ci = weighted_abs_sum(col, r) * rj;
+        if !ci.is_finite() && !col.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        einv_norm = einv_norm.max(ci);
+    }
+    let e_norm = col_e.iter().fold(0.0f64, |acc, v| acc.max(*v));
+    Some((e_norm, einv_norm))
+}
+
+/// `sum |v_i| w_i` over the common length, in four lanes (no single dependency chain).
+fn weighted_abs_sum(v: &[f64], w: &[f64]) -> f64 {
+    let n = v.len().min(w.len());
+    let (v, w) = (&v[..n], &w[..n]);
+    let mut acc = [0.0f64; 4];
+    let (vc, vr) = v.as_chunks::<4>();
+    let (wc, wr) = w.as_chunks::<4>();
+    for (v4, w4) in vc.iter().zip(wc) {
+        for l in 0..4 {
+            acc[l] += v4[l].abs() * w4[l];
+        }
+    }
+    for (vi, wi) in vr.iter().zip(wr) {
+        acc[0] += vi.abs() * wi;
+    }
+    (acc[0] + acc[1]) + (acc[2] + acc[3])
+}
+
+/// The work of [`sym_inverse`] on a validated (square, finite, symmetric) matrix.
+/// `guarded`: run the budget checkpoint and allocate through the allocation ceiling.
+fn sym_inverse_core(
+    m: ArrayView2<f64>,
+    policy: SingularPolicy,
+    what: &str,
+    guarded: bool,
+) -> EconResult<SymInverse> {
+    let d = m.nrows();
     if d == 0 {
         return Ok(SymInverse {
             inverse: Array2::zeros((0, 0)),
@@ -768,43 +890,49 @@ fn sym_inverse_impl(
         resource::check_alloc::<f64>(len, "sym_inverse")?;
     }
     let lower = |i: usize, j: usize| if i >= j { m[[i, j]] } else { m[[j, i]] };
-    let s: Vec<f64> = (0..d)
-        .map(|i| {
-            let a = m[[i, i]].abs();
-            if a > 0.0 { 1.0 / a.sqrt() } else { 1.0 }
-        })
-        .collect();
+    // r_i = sqrt|m_ii| (1 for a zero diagonal entry) and s_i = 1 / r_i: E = S m S.
+    // One allocation for r, s and the certificate's column sums.
+    let mut scratch = vec![0.0f64; 3 * d];
+    let (r, rest) = scratch.split_at_mut(d);
+    let (s, col_e) = rest.split_at_mut(d);
+    for i in 0..d {
+        let a = m[[i, i]].abs();
+        r[i] = if a > 0.0 { a.sqrt() } else { 1.0 };
+        s[i] = 1.0 / r[i];
+    }
+    let (r, s) = (&*r, &*s);
 
     // 1. Cholesky of m, or of -m when every diagonal entry is negative.
-    let mut x = chol_solve_identity(&Mat::from_fn(d, d, |i, j| m[[i, j]]));
+    let a = to_faer(&m);
+    let mut x = chol_solve_identity(&a);
     if x.is_none() && (0..d).all(|i| m[[i, i]] < 0.0) {
-        x = chol_solve_identity(&Mat::from_fn(d, d, |i, j| -m[[i, j]]))
-            .map(|inv| Mat::from_fn(d, d, |i, j| -inv[(i, j)]));
-    }
-    let x = x.filter(|inv| (0..d).all(|j| (0..d).all(|i| inv[(i, j)].is_finite())));
-
-    // 2. Certificate: kappa_2(E) <= kappa_1(E) = ||E||_1 ||E^-1||_1 for a symmetric E.
-    if let Some(inv) = &x {
-        let mut e_norm = 0.0f64;
-        let mut einv_norm = 0.0f64;
-        for j in 0..d {
-            let (mut ce, mut ci) = (0.0, 0.0);
-            for i in 0..d {
-                ce += (lower(i, j) * s[i] * s[j]).abs();
-                ci += (inv[(i, j)] / (s[i] * s[j])).abs();
+        x = chol_solve_identity(&Mat::from_fn(d, d, |i, j| -a[(i, j)])).map(|mut inv| {
+            for j in 0..d {
+                for v in inv.col_as_slice_mut(j) {
+                    *v = -*v;
+                }
             }
-            e_norm = e_norm.max(ce);
-            einv_norm = einv_norm.max(ci);
-        }
-        let kappa1 = e_norm * einv_norm;
-        if kappa1 <= CONDITION_THRESHOLD.min(0.1 / (SYM_RANK_TOL * d as f64)) {
-            return Ok(SymInverse {
-                inverse: faer_to_ndarray(inv),
-                rank: d,
-                dim: d,
-                reciprocal_condition: 1.0 / kappa1,
-                generalized: false,
-            });
+            inv
+        });
+    }
+
+    // 2. Certificate: kappa_2(E) <= kappa_1(E) = ||E||_1 ||E^-1||_1 for a symmetric E. A
+    //    non-finite inverse is dropped here.
+    if let Some(inv) = &x {
+        match equilibrated_norms(&a, inv, r, s, col_e) {
+            None => x = None,
+            Some((e_norm, einv_norm)) => {
+                let kappa1 = e_norm * einv_norm;
+                if kappa1 <= CONDITION_THRESHOLD.min(0.1 / (SYM_RANK_TOL * d as f64)) {
+                    return Ok(SymInverse {
+                        inverse: from_faer(inv),
+                        rank: d,
+                        dim: d,
+                        reciprocal_condition: 1.0 / kappa1,
+                        generalized: false,
+                    });
+                }
+            }
         }
     }
 
@@ -823,20 +951,20 @@ fn sym_inverse_impl(
     };
     if rank == d {
         if let Some(inv) = x {
-            return Ok(full(faer_to_ndarray(&inv)));
+            return Ok(full(from_faer(&inv)));
         }
-        // Indefinite: verified LU, with the exact 2-norm condition of m itself (not of
-        // E: on a badly scaled matrix the residual bound would be too tight).
-        let lam_m = Mat::from_fn(d, d, lower)
-            .self_adjoint_eigenvalues(faer::Side::Lower)
-            .map_err(|_| LinalgError::EigenFailed)?;
-        let hi = lam_m.iter().fold(0.0f64, |a, v| a.max(v.abs()));
-        let lo = lam_m.iter().fold(f64::INFINITY, |a, v| a.min(v.abs()));
-        let cond_m = if lo > 0.0 { hi / lo } else { f64::INFINITY };
-        if let Ok(inv) = verified_inverse(&m, cond_m, partial_piv_lu_inverse) {
-            return Ok(full(inv));
+        // Indefinite: the verified partial-pivot LU. Its residual allowance uses
+        // kappa_1(m) from the candidate, capped by an upper bound on kappa_2(m) that does
+        // not depend on it: m^-1 = S E^-1 S gives ||m^-1||_2 <= max s_i^2 / min |lambda(E)|,
+        // and ||m||_2 <= ||m||_1 for a symmetric m. (The condition of E alone would make
+        // the allowance too tight on a badly scaled matrix.)
+        let lmin = lam.iter().fold(f64::INFINITY, |acc, v| acc.min(v.abs()));
+        let smax2 = s.iter().fold(0.0f64, |acc, v| acc.max(v * v));
+        let cap = norm1(&a) * smax2 / lmin;
+        if let Some(inv) = lu_inverse_bounded(&a, cap) {
+            return Ok(full(from_faer(&inv)));
         }
-        return Ok(full(eigen_inverse(&e, &s, d, guarded)?));
+        return Ok(full(eigen_inverse(&e, s, d, guarded)?));
     }
     match policy {
         SingularPolicy::Error => Err(EconError::SingularMatrix {
@@ -846,7 +974,7 @@ fn sym_inverse_impl(
                 .into(),
         }),
         SingularPolicy::Generalized => Ok(SymInverse {
-            inverse: eigen_inverse(&e, &s, rank, guarded)?,
+            inverse: eigen_inverse(&e, s, rank, guarded)?,
             rank,
             dim: d,
             reciprocal_condition: rcond,
@@ -1056,7 +1184,7 @@ mod tests {
                 for i in 0..=j {
                     v[i] = qr.r(i, j);
                 }
-                let col = qr.q_times(v.view());
+                let col = qr.q_times(v.view()).unwrap();
                 let want = xm.column(qr.pivot()[j]);
                 for i in 0..rows {
                     assert!(
@@ -1086,7 +1214,7 @@ mod tests {
             // (c) Q is orthogonal: qty(q_times(v)) == v and the norm is kept
             for v in [&yc, &x1] {
                 let v = v.slice(s![..rows]).to_owned();
-                let qv = qr.q_times(v.view());
+                let qv = qr.q_times(v.view()).unwrap();
                 let back = qr.qty(qv.view()).unwrap();
                 let nv = v.dot(&v).sqrt();
                 assert!((qv.dot(&qv).sqrt() - nv).abs() <= 1e-12 * nv);
@@ -1156,6 +1284,29 @@ mod tests {
         let qr = Qr::decompose(x.view(), LM_QR_TOL).unwrap();
         spec_err(qr.qty(y.slice(s![..3])), "rows");
         spec_err(qr.coefficients(y.slice(s![..3])), "rows");
+        spec_err(qr.q_times(y.slice(s![..3])), "rows");
+        // a finite weight whose square root overflows the scaled row: the caller's row and
+        // the weight are named (not a row of the compacted positive-weight matrix)
+        let mut xb = x.clone();
+        xb[[2, 1]] = 1e200;
+        spec_err(
+            weighted_least_squares(
+                xb.view(),
+                y.view(),
+                ndarray::array![0.0, 1.0, 1e300, 1.0].view(),
+            ),
+            "weights: row 2 (w = 1e300) overflows the weighted design",
+        );
+        let mut yb = y.clone();
+        yb[3] = 1e200;
+        spec_err(
+            weighted_least_squares(
+                x.view(),
+                yb.view(),
+                ndarray::array![0.0, 1.0, 1.0, 1e300].view(),
+            ),
+            "weights: row 3",
+        );
         // the p x p covariance of a wide x goes through the allocation ceiling
         let wide = Array2::from_shape_fn((2, 64), |(i, j)| ((i + 1) * (j + 3) % 7) as f64 + 0.1);
         let qw = Qr::decompose(wide.view(), LM_QR_TOL).unwrap();
@@ -1297,5 +1448,65 @@ mod tests {
         let s = sym_inverse(k.view(), SingularPolicy::Error, "KKT").unwrap();
         assert_eq!((s.rank, s.generalized), (3, false));
         assert!((s.reciprocal_condition - 0.38196601125010504).abs() <= 1e-12);
+        // indefinite with every diagonal entry negative: the Cholesky of -m fails too, and
+        // the LU inverse is returned bit for bit
+        let m = ndarray::array![[-1.0, 2.1, 0.3], [2.1, -1.2, 0.4], [0.3, 0.4, -0.9]];
+        let s = sym_inverse(m.view(), SingularPolicy::Error, "M").unwrap();
+        let lu = crate::linalg::matrix_ops::partial_piv_lu_inverse(&to_faer(&m.view()));
+        assert_eq!(s.inverse, from_faer(&lu));
+        // a badly scaled (graded) indefinite matrix: the kappa_1 allowance still accepts
+        // the LU inverse (it is within a factor dim of the exact 2-norm condition)
+        let d = 6;
+        let g: Vec<f64> = (0..d).map(|i| 10f64.powi(3 * i as i32 - 6)).collect();
+        let base = Array2::from_shape_fn((d, d), |(i, j)| {
+            let o = 0.3 * ((i * 5 + j * 5) % 7) as f64 / 7.0;
+            o + if i == j {
+                if i % 2 == 0 { 2.0 } else { -2.0 }
+            } else {
+                0.0
+            }
+        });
+        let m = Array2::from_shape_fn((d, d), |(i, j)| g[i] * base[[i, j]] * g[j]);
+        let s = sym_inverse(m.view(), SingularPolicy::Error, "M").unwrap();
+        assert!(s.is_full_rank());
+        let lu = crate::linalg::matrix_ops::partial_piv_lu_inverse(&to_faer(&m.view()));
+        assert_eq!(s.inverse, from_faer(&lu));
+        // the candidate-independent cap binds: an allowance for cond 1 refuses this LU
+        let a = to_faer(&m.view());
+        assert!(crate::linalg::matrix_ops::lu_inverse_bounded(&a, f64::INFINITY).is_some());
+        assert!(crate::linalg::matrix_ops::lu_inverse_bounded(&a, 1.0).is_none());
+    }
+
+    #[test]
+    fn test_finite_asymmetry_layouts() {
+        let m = ndarray::array![[4.0, 1.0, -2.5], [1.5, 3.0, 0.2], [-2.5, 0.2, 7.0]];
+        let want = Some((0.5, 7.0));
+        assert_eq!(finite_asymmetry(&m.view()), want);
+        assert_eq!(finite_asymmetry(&m.t()), want);
+        assert_eq!(finite_asymmetry(&m.slice(s![..;1, ..;1])), want);
+        for v in [f64::NAN, f64::INFINITY] {
+            for (i, j) in [(0, 0), (0, 2), (2, 1)] {
+                let mut b = m.clone();
+                b[[i, j]] = v;
+                assert_eq!(finite_asymmetry(&b.view()), None, "({i}, {j}) = {v}");
+                assert_eq!(
+                    finite_asymmetry(&b.t()),
+                    None,
+                    "({i}, {j}) = {v}, transposed"
+                );
+            }
+        }
+        // remainder of the four-lane pass (5 x 5 = 25 entries) and d = 0, 1
+        let mut f = Array2::<f64>::eye(5);
+        f[[4, 4]] = f64::NAN;
+        assert_eq!(finite_asymmetry(&f.view()), None);
+        assert_eq!(
+            finite_asymmetry(&Array2::<f64>::zeros((0, 0)).view()),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            finite_asymmetry(&ndarray::array![[-3.0]].view()),
+            Some((0.0, 3.0))
+        );
     }
 }

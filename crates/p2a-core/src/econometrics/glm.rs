@@ -208,6 +208,7 @@ pub struct GlmFit {
 pub struct PropensityFit {
     /// Fitted probabilities (`fit.fitted`).
     pub scores: Array1<f64>,
+    /// The underlying binomial GLM fit (coefficients, standard errors, convergence).
     pub fit: GlmFit,
 }
 

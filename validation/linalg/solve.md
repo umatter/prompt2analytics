@@ -56,8 +56,11 @@ They are not ports for exactness: R is the test oracle and the default conventio
 - **Full rank.** Positive-definite matrices are inverted by Cholesky of `m` (the code `safe_inverse`
   always ran, so every full-rank SPD caller gets bit-identical output); negative-definite ones by
   the Cholesky factor of `-m` (a negated Hessian passed un-negated); indefinite ones by the verified
-  partial-pivot LU of `matrix_ops` (RF-31), with the exact 2-norm condition of `m` from its
-  eigenvalues as the residual allowance, and the eigen route if that fails.
+  partial-pivot LU of `matrix_ops` (RF-31), accepted when `max |m X - I|` is within
+  `100 * dim * eps * min(kappa_1, cap)`: `kappa_1 = ||m||_1 ||X||_1` from the candidate (within a
+  factor `dim` of `kappa_2(m)` for a correct one), capped by `||m||_1 max s_i^2 / min |lambda(E)|`,
+  an upper bound on `kappa_2(m)` that a wrong candidate cannot raise; the eigen route if that
+  fails. (No second eigendecomposition for the exact condition of `m`.)
 - **Certificate.** When Cholesky succeeds, `kappa_1(E) = ||E||_1 ||E^-1||_1` is computed in
   O(dim^2) from the inverse. For a symmetric matrix `kappa_2 <= kappa_1`, so
   `kappa_1 <= min(1e10, 0.1 / (SYM_RANK_TOL * dim))` proves full rank and "no warning" without any
@@ -243,35 +246,51 @@ Kalman rows (head p75 143 / 724 / 1425 / 6864). The OLS ratios below 1 are load 
 spread is as large); Logit and Probit invert a negative-definite Hessian, which now takes the
 negated Cholesky instead of the SVD condition and LU, so part of their gain is real. Outputs agree to 2.3e-16
 relative (Logit and Probit at n = 100 differ in the last bit, from the negated-Cholesky route).
-Nothing end to end exceeds 1.5x.
+Nothing end to end exceeds 1.5x. (Measured before the review fixes below, which only remove
+work from `safe_inverse`.)
 
-`safe_inverse` alone (scratch micro-benchmark, not committed; one core, six interleaved runs; ns):
+`safe_inverse` alone (scratch micro-benchmark, not committed: the head function against the
+5da3cbe9 body copied into an example, release, one core, `RAYON_NUM_THREADS=1`, six rounds of
+five interleaved batches; ns, median / p75; at d = 1 the "indefinite" input is a negative
+scalar). First measurement of the package, then after the review fixes (one pass for
+finiteness and asymmetry, no repeated validation on the `safe_inverse` path, the certificate on
+the column-major faer copy in four-lane sums, and no second eigendecomposition for indefinite
+input):
 
 | Input | d = 1 | d = 3 | d = 10 | d = 50 |
 |---|---|---|---|---|
-| SPD, base / head | 262 / 249 (0.95) | 350 / 419 (1.20) | 1562 / 2701 (**1.73**) | 30899 / 52233 (**1.69**) |
-| negative definite | 1020 / 376 (0.37) | 2950 / 574 (0.19) | 14055 / 3267 (0.23) | 287353 / 57105 (0.20) |
-| indefinite | 1006 / 437 (0.43) | 3203 / 3569 (1.11) | 13914 / 23341 (**1.68**) | 285742 / 495595 (**1.73**) |
+| SPD, first head / base | 0.95 | 1.20 | **1.73** | **1.69** |
+| SPD, base / head | 251 / 338 (1.35) | 374 / 495 (1.32) | 1699 / 2035 (1.20) | 36749 / 42060 (1.14) |
+| negative definite, base / head | 985 / 514 (0.52) | 3265 / 638 (0.20) | 19562 / 2537 (0.13) | 336080 / 45753 (0.14) |
+| indefinite, first head / base | 0.43 | 1.11 | **1.68** | **1.73** |
+| indefinite, base / head | 1039 / 546 (0.53) | 3106 / 2696 (0.87) | 21045 / 16549 (0.79) | 378750 / 321503 (0.85) |
 
-(p75 within 4 % of the median throughout.) Two classes exceed 1.5x in isolation and were reported
-to the user:
+(p75 within 5 % of the median except base indefinite at d = 1 (1152) and head (607); the inverses agree with base to 1e-15 relative, SPD
+bit for bit.) No row exceeds 1.5x. What remains on SPD input is O(d^2) work base did not do, at
+a small constant: the finiteness and symmetry scan (about 2 us at d = 50, two contiguous-friendly
+passes), the scale vector, and the `kappa_1` certificate that proves full rank without
+eigenvalues (about 2.4 us at d = 50); the faer copy and the copy back are faster than base's.
+At d = 1 and 3 the difference is about 100 ns of fixed cost (one scratch allocation and the
+certificate). Indefinite input now takes one symmetric eigendecomposition (rank and conditioning
+of the equilibrated matrix) and the LU, whose residual allowance uses `kappa_1(m)` from the LU
+candidate, capped by `||m||_1 max s_i^2 / min |lambda(E)|`, an upper bound on `kappa_2(m)` that
+does not depend on the candidate; for a correct candidate the allowance is at most `dim` times
+the one the exact 2-norm condition gave.
 
-- **SPD, d >= 10.** The Cholesky inverse is the same; around it the new route adds O(d^2) passes
-  that base did not run: the symmetry and finiteness checks of `safe_inverse`, repeated inside
-  `sym_inverse`, the scale vector, the finiteness check of the inverse, and the `kappa_1`
-  certificate that proves full rank without eigenvalues (strided `ndarray`/`faer` indexing). At
-  d = 50 that is about 21 us against a 31 us Cholesky inverse. Removing the repeated validation
-  on the `safe_inverse` path and computing the certificate on contiguous memory would recover most
-  of it.
-- **Indefinite, d >= 10.** Base took one SVD (condition) and an LU; the new route takes two
-  symmetric eigendecompositions (rank and conditioning of the equilibrated matrix, then the exact
-  condition of `m` for the LU's residual allowance) and the LU. This is what lets it report rank
-  instead of returning a pseudoinverse.
+Informational, for the D1 gate of WP09 (same machine, one core, six rounds of five batches; us,
+median / p75). `least_squares` (pivoted QR; it also returns residuals, fitted values, the
+unscaled covariance and the rank) against `xtx` + `xty` + a Cholesky solve, on a design with an
+intercept and uniform noise columns:
 
-End to end these costs stay inside load noise (the largest ratio above is 1.20), and
-negative-definite input, the Newton Hessians of the discrete models, is 3-5x faster. Informational
-(head only, same runs): `least_squares` n = 1000, p = 5 / 20: 68 / 436 us; `fit_glm` logit
-n = 1000, p = 5 / 20: 711 / 4339 us.
+| k | n = 100 | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| 6: head / xtx + Cholesky | 12.4/12.9 vs 3.0/3.2 (4.1) | 126/127 vs 28.2/28.5 (4.5) | 1719/1748 vs 309/318 (5.6) |
+| 10 | 26.2/26.4 vs 7.6/7.8 (3.4) | 252/254 vs 63.5/64.9 (4.0) | 3365/3756 vs 808/869 (4.2) |
+| 50 | 300/320 vs 77.6/84.1 (3.9) | 2616/2707 vs 535/554 (4.9) | 48901/54754 vs 11347/14424 (4.3) |
+
+`fit_glm(logit)` on a matrix against `run_logit` on a dataset (k = 3: intercept and two
+covariates, simulated logit outcome): n = 100: 47.1/53.5 vs 72.0/77.4 (0.65); n = 1,000:
+428/453 vs 617/699 (0.69); n = 10,000: 5198/7216 vs 7689/9947 (0.68).
 
 ## Tests
 

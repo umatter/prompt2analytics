@@ -123,6 +123,35 @@ pub(crate) fn verified_inverse(
     Err(LinalgError::SingularMatrix)
 }
 
+/// Largest absolute column sum (the 1-norm) of a faer matrix, read column by column.
+pub(crate) fn norm1(a: &Mat<f64>) -> f64 {
+    (0..a.ncols())
+        .map(|j| a.col_as_slice(j).iter().map(|v| v.abs()).sum::<f64>())
+        .fold(0.0f64, f64::max)
+}
+
+/// [`partial_piv_lu_inverse`] of a finite, symmetric, full-rank `mat`, accepted when it is
+/// finite and `max |A X - I| <= INVERSE_RESIDUAL_FACTOR * n * eps * min(kappa_1, cond_cap)`,
+/// with `kappa_1 = ||A||_1 ||X||_1`; `None` otherwise.
+///
+/// For a symmetric matrix `kappa_2 <= kappa_1 <= n kappa_2`, so a correct candidate gets an
+/// allowance at most `n` times the one [`verified_inverse`] gives with the exact 2-norm
+/// condition, without a second decomposition. `cond_cap` is an upper bound on `kappa_2(A)`
+/// that does not depend on the candidate, so a wrong candidate cannot widen the allowance
+/// beyond it.
+pub(crate) fn lu_inverse_bounded(mat: &Mat<f64>, cond_cap: f64) -> Option<Mat<f64>> {
+    let n = mat.nrows();
+    let candidate = partial_piv_lu_inverse(mat);
+    let kappa1 = norm1(mat) * norm1(&candidate);
+    let cond = if kappa1.is_nan() {
+        cond_cap
+    } else {
+        kappa1.min(cond_cap)
+    };
+    let bound = INVERSE_RESIDUAL_FACTOR * n as f64 * f64::EPSILON * cond;
+    (inverse_residual(mat, &candidate) <= bound).then_some(candidate)
+}
+
 /// Whether `x` solves `A x = b` to working precision: `x` is finite and
 /// `||A x - b||_inf <= INVERSE_RESIDUAL_FACTOR * n * eps * (||A||_inf ||x||_inf + ||b||_inf)`.
 fn solve_residual_ok(a: &ArrayView2<f64>, x: &Array1<f64>, b: &Array1<f64>) -> bool {
@@ -277,8 +306,9 @@ pub fn condition_number(m: &ArrayView2<f64>) -> Result<f64, LinalgError> {
 ///   [`SingularPolicy::Generalized`](super::solve::SingularPolicy::Generalized): full-rank
 ///   positive-definite matrices are inverted by Cholesky (bit for bit the inverse this
 ///   function always returned for them), negative-definite ones by the Cholesky factor of
-///   `-m`, other full-rank matrices by the verified LU below, and rank-deficient matrices
-///   get a symmetric generalized inverse. The second element is
+///   `-m`, other full-rank matrices by the partial-pivot LU, checked against a residual
+///   allowance for `kappa_1(m)` (capped by a candidate-free bound on `kappa_2(m)`), and
+///   rank-deficient matrices get a symmetric generalized inverse. The second element is
 ///   `Some(1 / reciprocal_condition)` of the diagonally equilibrated matrix (possibly
 ///   infinite) when the matrix is rank-deficient or that condition number exceeds
 ///   [`CONDITION_THRESHOLD`].
@@ -308,17 +338,18 @@ pub fn safe_inverse(m: &ArrayView2<f64>) -> Result<(Array2<f64>, Option<f64>), L
     if rows != cols {
         return Err(LinalgError::NotSquare { rows, cols });
     }
-    if !is_all_finite(m) {
+    // One pass: finiteness and asymmetry together.
+    let Some((asym, big)) = super::solve::finite_asymmetry(m) else {
         return Err(LinalgError::NonFinite);
-    }
-    if super::solve::is_symmetric(m) {
+    };
+    if asym <= super::solve::SYMMETRY_TOL * big {
         // The unguarded variant: safe_inverse ignores budgets and the allocation ceiling,
         // as it always has, so no resource refusal can send symmetric input on to the
-        // general route. Only a failed eigendecomposition (a LinalgError) falls through.
+        // general route, and it skips the validation done just above. Only a failed
+        // eigendecomposition (a LinalgError) falls through.
         match super::solve::sym_inverse_unguarded(
             m.view(),
             super::solve::SingularPolicy::Generalized,
-            "matrix",
         ) {
             Ok(s) => {
                 let cond = 1.0 / s.reciprocal_condition;
@@ -326,8 +357,14 @@ pub fn safe_inverse(m: &ArrayView2<f64>) -> Result<(Array2<f64>, Option<f64>), L
                 return Ok((s.inverse, warn));
             }
             Err(crate::errors::EconError::LinalgError(_)) => {}
-            // Unreachable: is_symmetric already rules out the validation refusals.
-            Err(_) => return Err(LinalgError::SingularMatrix),
+            // Unreachable: the unguarded path has no validation or resource refusals.
+            Err(e) => {
+                debug_assert!(
+                    false,
+                    "sym_inverse_unguarded refused validated input: {e:?}"
+                );
+                return Err(LinalgError::SingularMatrix);
+            }
         }
     }
     general_inverse(m)
@@ -952,9 +989,11 @@ mod tests {
         assert!(matches!(r, Err(LinalgError::NonFinite)), "{r:?}");
     }
 
-    /// Guard: symmetric positive definite input keeps the Cholesky bits.
+    /// safe_inverse ignores budgets and the allocation ceiling; sym_inverse honours them.
     #[test]
     fn test_safe_inverse_symmetric_ignores_budget_and_ceiling() {
+        use crate::errors::EconError;
+        use crate::linalg::solve::{SingularPolicy, sym_inverse};
         use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
         // 20 x 20 (3200 bytes of f64), with noise: SPD, indefinite, and rank-deficient
         // (the last column repeats the first).
@@ -965,14 +1004,13 @@ mod tests {
         });
         let mut indef = spd.clone();
         indef[[3, 3]] = -5.0;
-        let b = Array2::from_shape_fn((d + 5, d), |(i, j)| {
+        let mut b = Array2::from_shape_fn((d + 5, d), |(i, j)| {
             if j == d - 1 {
                 (i as f64 * 0.37).sin()
             } else {
                 ((i * (j + 2)) as f64 * 0.11).cos()
             }
         });
-        let mut b = b;
         let c0 = b.column(0).to_owned();
         b.column_mut(d - 1).assign(&c0);
         let rankdef = b.t().dot(&b);
@@ -989,29 +1027,66 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         let r = with_budget(Budget::new(None, token), || {
-            super::super::solve::sym_inverse(
-                spd.view(),
-                super::super::solve::SingularPolicy::Error,
-                "m",
-            )
+            sym_inverse(spd.view(), SingularPolicy::Error, "m")
         });
-        assert!(
-            matches!(r, Err(crate::errors::EconError::Cancelled(_))),
-            "{r:?}"
-        );
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
         let r = with_alloc_ceiling(Some(1024), || {
-            super::super::solve::sym_inverse(
-                spd.view(),
-                super::super::solve::SingularPolicy::Error,
-                "m",
-            )
+            sym_inverse(spd.view(), SingularPolicy::Error, "m")
         });
-        assert!(
-            matches!(r, Err(crate::errors::EconError::ResourceLimit(_))),
-            "{r:?}"
-        );
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
     }
 
+    /// The symmetry scan reads non-contiguous views (transposed, strided) as it reads
+    /// row-major ones, and refuses a non-finite entry in either.
+    #[test]
+    fn test_safe_inverse_non_contiguous_views() {
+        let mut rng = Lcg(7);
+        let x = Array2::from_shape_fn((30, 8), |_| 2.0 * rng.next_u() - 1.0);
+        let gram = x.t().dot(&x) + Array2::<f64>::eye(8);
+        // column-major view of the same matrix
+        let ft = gram.t();
+        assert!(ft.as_slice().is_none());
+        let (inv_t, w_t) = safe_inverse(&ft).unwrap();
+        let (inv_c, w_c) = safe_inverse(&ft.to_owned().view()).unwrap();
+        assert_eq!((inv_t, w_t), (inv_c, w_c));
+        // strided view: every other row and column of a 16 x 16 SPD matrix
+        let y = Array2::from_shape_fn((40, 16), |_| 2.0 * rng.next_u() - 1.0);
+        let big = y.t().dot(&y) + Array2::<f64>::eye(16);
+        let sv = big.slice(ndarray::s![..;2, ..;2]);
+        assert!(sv.as_slice().is_none());
+        assert_eq!(
+            safe_inverse(&sv).unwrap(),
+            safe_inverse(&sv.to_owned().view()).unwrap()
+        );
+        // a non-symmetric matrix through a transposed view takes the general route
+        let a = array![[2.0, 1.0], [0.0, 3.0]];
+        let (inv, w) = safe_inverse(&a.t()).unwrap();
+        assert_eq!(w, None);
+        let p = a.t().dot(&inv);
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((p[[i, j]] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-14);
+            }
+        }
+        // non-finite entries, in either layout and either triangle
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut m = gram.clone();
+            m[[5, 1]] = v;
+            assert!(matches!(
+                safe_inverse(&m.view()),
+                Err(LinalgError::NonFinite)
+            ));
+            assert!(matches!(safe_inverse(&m.t()), Err(LinalgError::NonFinite)));
+            let mut m = gram.clone();
+            m[[3, 3]] = v;
+            assert!(matches!(
+                safe_inverse(&m.view()),
+                Err(LinalgError::NonFinite)
+            ));
+        }
+    }
+
+    /// Guard: symmetric positive definite input keeps the Cholesky bits.
     #[test]
     fn test_safe_inverse_spd_keeps_cholesky_path() {
         let m = array![[4.0, 1.0, 0.5], [1.0, 3.0, 0.2], [0.5, 0.2, 2.0]];
