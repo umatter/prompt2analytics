@@ -296,6 +296,10 @@ pub fn condition_number(m: &ArrayView2<f64>) -> Result<f64, LinalgError> {
 /// well-conditioned structured matrices of size 16 or more (diagonal, tridiagonal,
 /// multinomial and ordered logit Hessians), and nothing checked the result.
 ///
+/// * Budgets and the allocation ceiling are not consulted (callers already hold the
+///   matrix and checkpoint their own loops), so a cancellation surfaces at the caller's
+///   next `checkpoint()` and never reroutes symmetric input to the general route.
+///
 /// Callers must not discard the second element: `Some` means a generalized or numerically
 /// unreliable inverse. New code uses [`sym_inverse`](super::solve::sym_inverse) or
 /// [`least_squares`](super::solve::least_squares).
@@ -307,16 +311,24 @@ pub fn safe_inverse(m: &ArrayView2<f64>) -> Result<(Array2<f64>, Option<f64>), L
     if !is_all_finite(m) {
         return Err(LinalgError::NonFinite);
     }
-    if super::solve::is_symmetric(m)
-        && let Ok(s) = super::solve::sym_inverse(
+    if super::solve::is_symmetric(m) {
+        // The unguarded variant: safe_inverse ignores budgets and the allocation ceiling,
+        // as it always has, so no resource refusal can send symmetric input on to the
+        // general route. Only a failed eigendecomposition (a LinalgError) falls through.
+        match super::solve::sym_inverse_unguarded(
             m.view(),
             super::solve::SingularPolicy::Generalized,
             "matrix",
-        )
-    {
-        let cond = 1.0 / s.reciprocal_condition;
-        let warn = (!s.is_full_rank() || cond > CONDITION_THRESHOLD).then_some(cond);
-        return Ok((s.inverse, warn));
+        ) {
+            Ok(s) => {
+                let cond = 1.0 / s.reciprocal_condition;
+                let warn = (!s.is_full_rank() || cond > CONDITION_THRESHOLD).then_some(cond);
+                return Ok((s.inverse, warn));
+            }
+            Err(crate::errors::EconError::LinalgError(_)) => {}
+            // Unreachable: is_symmetric already rules out the validation refusals.
+            Err(_) => return Err(LinalgError::SingularMatrix),
+        }
     }
     general_inverse(m)
 }
@@ -941,6 +953,65 @@ mod tests {
     }
 
     /// Guard: symmetric positive definite input keeps the Cholesky bits.
+    #[test]
+    fn test_safe_inverse_symmetric_ignores_budget_and_ceiling() {
+        use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
+        // 20 x 20 (3200 bytes of f64), with noise: SPD, indefinite, and rank-deficient
+        // (the last column repeats the first).
+        let d = 20;
+        let off = |i: usize, j: usize| 0.05 * (((i * 7 + j * 7) % 11) as f64 - 5.0);
+        let spd = Array2::from_shape_fn((d, d), |(i, j)| {
+            off(i, j) + if i == j { 4.0 + 0.1 * i as f64 } else { 0.0 }
+        });
+        let mut indef = spd.clone();
+        indef[[3, 3]] = -5.0;
+        let b = Array2::from_shape_fn((d + 5, d), |(i, j)| {
+            if j == d - 1 {
+                (i as f64 * 0.37).sin()
+            } else {
+                ((i * (j + 2)) as f64 * 0.11).cos()
+            }
+        });
+        let mut b = b;
+        let c0 = b.column(0).to_owned();
+        b.column_mut(d - 1).assign(&c0);
+        let rankdef = b.t().dot(&b);
+        for m in [&spd, &indef, &rankdef] {
+            let free = safe_inverse(&m.view()).unwrap();
+            let token = CancelToken::new();
+            token.cancel();
+            let cancelled = with_budget(Budget::new(None, token), || safe_inverse(&m.view()));
+            assert_eq!(cancelled.unwrap(), free, "cancelled budget");
+            let ceiling = with_alloc_ceiling(Some(1024), || safe_inverse(&m.view()));
+            assert_eq!(ceiling.unwrap(), free, "allocation ceiling");
+        }
+        // sym_inverse itself honours both
+        let token = CancelToken::new();
+        token.cancel();
+        let r = with_budget(Budget::new(None, token), || {
+            super::super::solve::sym_inverse(
+                spd.view(),
+                super::super::solve::SingularPolicy::Error,
+                "m",
+            )
+        });
+        assert!(
+            matches!(r, Err(crate::errors::EconError::Cancelled(_))),
+            "{r:?}"
+        );
+        let r = with_alloc_ceiling(Some(1024), || {
+            super::super::solve::sym_inverse(
+                spd.view(),
+                super::super::solve::SingularPolicy::Error,
+                "m",
+            )
+        });
+        assert!(
+            matches!(r, Err(crate::errors::EconError::ResourceLimit(_))),
+            "{r:?}"
+        );
+    }
+
     #[test]
     fn test_safe_inverse_spd_keeps_cholesky_path() {
         let m = array![[4.0, 1.0, 0.5], [1.0, 3.0, 0.2], [0.5, 0.2, 2.0]];

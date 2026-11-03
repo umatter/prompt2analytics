@@ -74,17 +74,24 @@ pub enum GlmFamily {
 /// GLM link function (`stats::make.link`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GlmLink {
+    /// Identity, `mu`.
     Identity,
+    /// Logit, `log(mu / (1 - mu))`.
     Logit,
+    /// Probit, `qnorm(mu)`.
     Probit,
+    /// Complementary log-log, `log(-log(1 - mu))`.
     Cloglog,
+    /// Log, `log(mu)`.
     Log,
 }
 
 /// What to fit: family, link, prior weights, offset, start values and IRLS control.
 #[derive(Debug, Clone)]
 pub struct GlmSpec<'a> {
+    /// Error distribution (variance function and dispersion).
     pub family: GlmFamily,
+    /// Link from the mean to the linear predictor.
     pub link: GlmLink,
     /// Prior weights (`>= 0`); rows with weight 0 are dropped from the fit.
     pub weights: Option<ArrayView1<'a, f64>>,
@@ -146,6 +153,7 @@ impl<'a> GlmSpec<'a> {
 /// JSON `null` and read back as `NaN`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlmFit {
+    /// Coefficients in the column order of `x`; `NaN` for aliased columns.
     #[serde(with = "nan_vec")]
     pub coefficients: Array1<f64>,
     /// `sqrt(diag(vcov))` (`summary.glm`).
@@ -163,7 +171,10 @@ pub struct GlmFit {
     /// IRLS working weights of the last iteration (0 for rows not used).
     #[serde(with = "nan_vec")]
     pub working_weights: Array1<f64>,
+    /// Residual deviance at the last iterate.
     pub deviance: f64,
+    /// Deviance of the intercept-only model (plus the offset), or of the offset alone
+    /// when `x` has no column of ones (`glm.fit`).
     pub null_deviance: f64,
     /// `logLik.glm`; `NaN` for the quasi families.
     #[serde(with = "nan_f64")]
@@ -176,10 +187,13 @@ pub struct GlmFit {
     pub dispersion: f64,
     /// Rows with positive weight minus rank.
     pub df_residual: usize,
+    /// Numerical rank of the weighted design (pivoted QR, `tol` 1e-11 as `glm.fit`).
     pub rank: usize,
     /// Original indices of the aliased columns, ascending.
     pub aliased: Vec<usize>,
+    /// The relative deviance change fell below `epsilon` within `max_iter` iterations.
     pub converged: bool,
+    /// IRLS iterations of the main fit.
     pub iterations: usize,
     /// The last iteration had to halve its step.
     pub boundary: bool,
@@ -500,7 +514,7 @@ impl Problem<'_> {
                 },
                 other => other,
             })?;
-            let b = qr.coefficients_zeroed(zw.view());
+            let b = qr.coefficients_zeroed(zw.view())?;
             if !b.iter().all(|v| v.is_finite()) {
                 return Err(EconError::DivergenceError {
                     iteration: iter,
@@ -784,19 +798,12 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
     }
 
     let (rank, aliased, unscaled) = match &fit.qr {
-        Some(qr) => (qr.rank(), qr.aliased(), qr.unscaled_covariance()),
+        Some(qr) => (qr.rank(), qr.aliased(), qr.unscaled_covariance()?),
         None => (0, Vec::new(), Array2::zeros((0, 0))),
     };
     let mut coefficients = fit.coef.clone();
     for &j in &aliased {
         coefficients[j] = f64::NAN;
-    }
-    if rank > n {
-        return Err(EconError::InsufficientData {
-            required: rank,
-            provided: n,
-            context: "glm: more coefficients than observations".into(),
-        });
     }
     let df_residual = n_ok.saturating_sub(rank);
 

@@ -269,15 +269,28 @@ impl Qr {
         axpy(t, &c[j + 1..], &mut q[j + 1..]);
     }
 
-    /// `Q' y` (dqrsl job 1000), with the first `rank` reflectors. Panics if
-    /// `y.len()` is not the number of rows of the decomposed matrix (a caller bug).
-    pub fn qty(&self, y: ArrayView1<f64>) -> Array1<f64> {
-        assert_eq!(y.len(), self.n, "Qr::qty: y has the wrong length");
+    /// [`EconError::InvalidSpecification`] unless `y` has one value per row of the
+    /// decomposed matrix.
+    fn check_len(&self, y: &ArrayView1<f64>) -> EconResult<()> {
+        if y.len() != self.n {
+            return Err(spec(format!(
+                "y has {} rows but the decomposed matrix has {}",
+                y.len(),
+                self.n
+            )));
+        }
+        Ok(())
+    }
+
+    /// `Q' y` (dqrsl job 1000), with the first `rank` reflectors. Refuses a `y` whose
+    /// length is not the number of rows of the decomposed matrix.
+    pub fn qty(&self, y: ArrayView1<f64>) -> EconResult<Array1<f64>> {
+        self.check_len(&y)?;
         let mut q = y.to_vec();
         for j in 0..self.n_reflectors() {
             self.reflect(j, &mut q);
         }
-        Array1::from_vec(q)
+        Ok(Array1::from_vec(q))
     }
 
     /// `Q v` with the first `rank` reflectors (the inverse of [`Qr::qty`]).
@@ -291,8 +304,8 @@ impl Qr {
     }
 
     /// Solve `R11 b = (Q'y)[..rank]` and return `b` in pivoted order.
-    fn solve_r11(&self, y: ArrayView1<f64>) -> Vec<f64> {
-        let q = self.qty(y);
+    fn solve_r11(&self, y: ArrayView1<f64>) -> EconResult<Vec<f64>> {
+        let q = self.qty(y)?;
         let k = self.rank;
         let mut b = q.to_vec();
         b.truncate(k);
@@ -301,36 +314,39 @@ impl Qr {
             let bj = b[j];
             axpy(-bj, &self.col(j)[..j], &mut b[..j]);
         }
-        b
+        Ok(b)
     }
 
     /// Least-squares coefficients in the original column order, `NaN` for aliased
-    /// columns (`lm.fit`).
-    pub fn coefficients(&self, y: ArrayView1<f64>) -> Array1<f64> {
-        let b = self.solve_r11(y);
+    /// columns (`lm.fit`). Refuses a `y` of the wrong length, as [`Qr::qty`].
+    pub fn coefficients(&self, y: ArrayView1<f64>) -> EconResult<Array1<f64>> {
+        let b = self.solve_r11(y)?;
         let mut out = Array1::from_elem(self.p, f64::NAN);
         for (i, v) in b.into_iter().enumerate() {
             out[self.pivot[i]] = v;
         }
-        out
+        Ok(out)
     }
 
     /// As [`Qr::coefficients`] with 0 for aliased columns (`dqrls`, used by IRLS).
-    pub(crate) fn coefficients_zeroed(&self, y: ArrayView1<f64>) -> Array1<f64> {
-        let b = self.solve_r11(y);
+    pub(crate) fn coefficients_zeroed(&self, y: ArrayView1<f64>) -> EconResult<Array1<f64>> {
+        let b = self.solve_r11(y)?;
         let mut out = Array1::zeros(self.p);
         for (i, v) in b.into_iter().enumerate() {
             out[self.pivot[i]] = v;
         }
-        out
+        Ok(out)
     }
 
     /// `(R11' R11)^{-1}` (R's `chol2inv(qr$qr[1:rank, 1:rank])`) in the original column
-    /// order, with `NaN` rows and columns for aliased columns.
-    pub fn unscaled_covariance(&self) -> Array2<f64> {
+    /// order, with `NaN` rows and columns for aliased columns. Both buffers (`rank^2` and
+    /// `p^2`) go through the allocation ceiling: `p` can exceed the rows `decompose`
+    /// checked.
+    pub fn unscaled_covariance(&self) -> EconResult<Array2<f64>> {
         let k = self.rank;
         // R11^{-1}, upper triangular, column by column: rinv[j * k + i].
-        let mut rinv = vec![0.0; k * k];
+        let len = resource::checked_len(&[k, k], "unscaled covariance")?;
+        let mut rinv = resource::try_vec(len, 0.0, "unscaled covariance")?;
         for c in 0..k {
             let col = &mut rinv[c * k..(c + 1) * k];
             col[c] = 1.0;
@@ -340,7 +356,8 @@ impl Qr {
                 axpy(-bj, &self.col(j)[..j], &mut col[..j]);
             }
         }
-        let mut out = Array2::from_elem((self.p, self.p), f64::NAN);
+        let mut out = resource::try_zeros2(self.p, self.p, "unscaled covariance")?;
+        out.fill(f64::NAN);
         for i in 0..k {
             for j in 0..=i {
                 // (Rinv Rinv')_{ij} = sum_l Rinv[i, l] Rinv[j, l], l >= max(i, j) = i
@@ -352,7 +369,7 @@ impl Qr {
                 out[[self.pivot[j], self.pivot[i]]] = s;
             }
         }
-        out
+        Ok(out)
     }
 
     /// `max |R_ii| / min |R_ii|` over `i < rank`; `NaN` when the rank is 0.
@@ -433,27 +450,28 @@ pub fn least_squares_tol(
         return Err(spec(format!("y contains a non-finite value (row {i})")));
     }
     let qr = Qr::decompose(x, tol)?;
-    Ok(fit_from_qr(qr, y))
+    fit_from_qr(qr, y)
 }
 
-fn fit_from_qr(qr: Qr, y: ArrayView1<f64>) -> LeastSquares {
+fn fit_from_qr(qr: Qr, y: ArrayView1<f64>) -> EconResult<LeastSquares> {
     let n = y.len();
     let rank = qr.rank();
-    let mut effects = qr.qty(y);
+    let mut effects = qr.qty(y)?;
     effects.iter_mut().take(rank).for_each(|v| *v = 0.0);
     let residuals = qr.q_times(effects.view());
     let fitted = &y - &residuals;
-    let coefficients = qr.coefficients(y);
-    LeastSquares {
+    let coefficients = qr.coefficients(y)?;
+    let unscaled_cov = qr.unscaled_covariance()?;
+    Ok(LeastSquares {
         coefficients,
         fitted,
         residuals,
         rank,
         aliased: qr.aliased(),
         df_residual: n - rank,
-        unscaled_cov: qr.unscaled_covariance(),
+        unscaled_cov,
         qr,
-    }
+    })
 }
 
 /// Weighted least squares (`lm.wfit`): rows with weight 0 are dropped from the fit (and
@@ -475,6 +493,12 @@ pub fn weighted_least_squares(
     }
     if let Some(i) = y.iter().position(|v| !v.is_finite()) {
         return Err(spec(format!("y contains a non-finite value (row {i})")));
+    }
+    // Every row, as lm.wfit: a zero-weight row's fitted value is x0 b.
+    if let Some(((i, j), _)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(spec(format!(
+            "x contains a non-finite value (row {i}, column {j})"
+        )));
     }
     if let Some((i, v)) = w
         .iter()
@@ -636,7 +660,8 @@ fn classify(lam: &[f64], d: usize) -> (usize, f64, f64) {
 }
 
 /// `S (sum over the `keep` eigenpairs of E with the largest |lambda| of v v' / lambda) S`.
-fn eigen_inverse(e: &Mat<f64>, s: &[f64], keep: usize) -> EconResult<Array2<f64>> {
+/// `guarded`: allocate through the allocation ceiling (see [`sym_inverse_unguarded`]).
+fn eigen_inverse(e: &Mat<f64>, s: &[f64], keep: usize, guarded: bool) -> EconResult<Array2<f64>> {
     let d = s.len();
     let eig = e
         .self_adjoint_eigen(faer::Side::Lower)
@@ -645,7 +670,11 @@ fn eigen_inverse(e: &Mat<f64>, s: &[f64], keep: usize) -> EconResult<Array2<f64>
     let u = eig.U();
     let mut order: Vec<usize> = (0..d).collect();
     order.sort_by(|&a, &b| lam[b].abs().total_cmp(&lam[a].abs()));
-    let mut g = resource::try_zeros2(d, d, "sym_inverse")?;
+    let mut g = if guarded {
+        resource::try_zeros2(d, d, "sym_inverse")?
+    } else {
+        Array2::zeros((d, d))
+    };
     for &k in order.iter().take(keep) {
         let inv = 1.0 / lam[k];
         for i in 0..d {
@@ -687,6 +716,28 @@ pub fn sym_inverse(
     policy: SingularPolicy,
     what: &str,
 ) -> EconResult<SymInverse> {
+    sym_inverse_impl(m, policy, what, true)
+}
+
+/// [`sym_inverse`] without the budget checkpoint and the allocation-ceiling checks, for
+/// `matrix_ops::safe_inverse`, which has never consulted either: its callers already
+/// hold the `dim x dim` matrix and run their own `checkpoint()` per iteration, so a
+/// cancellation surfaces there as `Cancelled` instead of as a failed inverse. Errors
+/// are then only the validation refusals and `LinalgError::EigenFailed`.
+pub(crate) fn sym_inverse_unguarded(
+    m: ArrayView2<f64>,
+    policy: SingularPolicy,
+    what: &str,
+) -> EconResult<SymInverse> {
+    sym_inverse_impl(m, policy, what, false)
+}
+
+fn sym_inverse_impl(
+    m: ArrayView2<f64>,
+    policy: SingularPolicy,
+    what: &str,
+    guarded: bool,
+) -> EconResult<SymInverse> {
     let (rows, cols) = m.dim();
     if rows != cols {
         return Err(LinalgError::NotSquare { rows, cols }.into());
@@ -711,9 +762,11 @@ pub fn sym_inverse(
             generalized: false,
         });
     }
-    resource::checkpoint()?;
-    let len = resource::checked_len(&[d, d], "sym_inverse")?;
-    resource::check_alloc::<f64>(len, "sym_inverse")?;
+    if guarded {
+        resource::checkpoint()?;
+        let len = resource::checked_len(&[d, d], "sym_inverse")?;
+        resource::check_alloc::<f64>(len, "sym_inverse")?;
+    }
     let lower = |i: usize, j: usize| if i >= j { m[[i, j]] } else { m[[j, i]] };
     let s: Vec<f64> = (0..d)
         .map(|i| {
@@ -783,7 +836,7 @@ pub fn sym_inverse(
         if let Ok(inv) = verified_inverse(&m, cond_m, partial_piv_lu_inverse) {
             return Ok(full(inv));
         }
-        return Ok(full(eigen_inverse(&e, &s, d)?));
+        return Ok(full(eigen_inverse(&e, &s, d, guarded)?));
     }
     match policy {
         SingularPolicy::Error => Err(EconError::SingularMatrix {
@@ -793,7 +846,7 @@ pub fn sym_inverse(
                 .into(),
         }),
         SingularPolicy::Generalized => Ok(SymInverse {
-            inverse: eigen_inverse(&e, &s, rank)?,
+            inverse: eigen_inverse(&e, &s, rank, guarded)?,
             rank,
             dim: d,
             reciprocal_condition: rcond,
@@ -1034,7 +1087,7 @@ mod tests {
             for v in [&yc, &x1] {
                 let v = v.slice(s![..rows]).to_owned();
                 let qv = qr.q_times(v.view());
-                let back = qr.qty(qv.view());
+                let back = qr.qty(qv.view()).unwrap();
                 let nv = v.dot(&v).sqrt();
                 assert!((qv.dot(&qv).sqrt() - nv).abs() <= 1e-12 * nv);
                 for i in 0..rows {
@@ -1084,9 +1137,32 @@ mod tests {
             ),
             "weights",
         );
+        // a non-finite x in a zero-weight row is refused too (lm.wfit)
+        let mut xz = x.clone();
+        xz[[1, 1]] = f64::INFINITY;
+        spec_err(
+            weighted_least_squares(
+                xz.view(),
+                y.view(),
+                ndarray::array![1.0, 0.0, 1.0, 1.0].view(),
+            ),
+            "x contains a non-finite value (row 1, column 1)",
+        );
         assert!(matches!(
             weighted_least_squares(x.view(), y.view(), Array1::<f64>::zeros(4).view()),
             Err(EconError::InsufficientData { .. })
+        ));
+        // Qr's solves refuse a y of the wrong length instead of panicking
+        let qr = Qr::decompose(x.view(), LM_QR_TOL).unwrap();
+        spec_err(qr.qty(y.slice(s![..3])), "rows");
+        spec_err(qr.coefficients(y.slice(s![..3])), "rows");
+        // the p x p covariance of a wide x goes through the allocation ceiling
+        let wide = Array2::from_shape_fn((2, 64), |(i, j)| ((i + 1) * (j + 3) % 7) as f64 + 0.1);
+        let qw = Qr::decompose(wide.view(), LM_QR_TOL).unwrap();
+        assert!(qw.unscaled_covariance().is_ok());
+        assert!(matches!(
+            crate::resource::with_alloc_ceiling(Some(4096), || qw.unscaled_covariance()),
+            Err(EconError::ResourceLimit(_))
         ));
         assert!(matches!(
             least_squares(

@@ -35,7 +35,11 @@ They are not ports for exactness: R is the test oracle and the default conventio
 - **`lm.wfit` conventions.** `weighted_least_squares(x, y, w)` fits `sqrt(w) x` on `sqrt(w) y` over
   the rows with `w > 0`; residuals are returned on the original scale; rows with weight 0 get
   `fitted = x0 b` (aliased coefficients count as 0) and `residual = y0 - x0 b`; `df_residual` counts
-  the positive weights. `unscaled_cov` is `(X'WX)^{-1}`.
+  the positive weights. `unscaled_cov` is `(X'WX)^{-1}`. A non-finite `x` is refused in every row,
+  zero-weight rows included, as `lm.wfit` does.
+- **Errors, not panics.** `Qr::qty` and `Qr::coefficients` refuse a `y` of the wrong length with
+  `InvalidSpecification`; `Qr::unscaled_covariance` allocates its `rank^2` and `p^2` buffers
+  through the allocation ceiling (`p` can exceed the `n x p` workspace `decompose` checked).
 - **Warning text.** `aliasing_message(aliased, names)` gives R's "Coefficients not defined because of
   singularities: x2, x5" (default names `x{j+1}`).
 
@@ -77,7 +81,13 @@ They are not ports for exactness: R is the test oracle and the default conventio
   | not symmetric | verified partial-pivot LU, `None`; SVD condition > 1e10: the pseudoinverse, `Some(condition)` |
 
   Non-symmetric input never reaches Cholesky (REG-59: faer's `llt` reads only the lower triangle, so
-  `[[2, 1], [0, 3]]` was inverted as `diag(2, 3)`).
+  `[[2, 1], [0, 3]]` was inverted as `diag(2, 3)`). Only a failed eigendecomposition sends
+  symmetric input on to the general route.
+- **Budgets.** `sym_inverse` calls `resource::checkpoint()` and checks the `dim^2` allocation
+  against the ceiling. `safe_inverse` does neither, as before: it runs `sym_inverse`'s unguarded
+  variant, so its callers (which already hold the matrix and checkpoint their own loops) see a
+  cancellation as `Cancelled` at their next checkpoint, not as a failed inverse, and no refusal can
+  reroute symmetric input to the SVD/LU route.
 - **Worked numbers** (equilibrated condition): Longley's X'X 1.87e9 (no flag); a raw quadratic trend
   in calendar years 1960-2020, 3.67e9 (no flag); the raw cubic 2.71e14, flagged and classified as
   rank 3 of 4 (equilibrated `rcond` 3.68e-15 < `SYM_RANK_TOL * 4`), while `lm` keeps rank 4. The
@@ -207,6 +217,62 @@ convention), the IRLS iteration counts at R's default control (`*_iter_default`,
 and the separated fit's `sep_fitted_extreme`, `sep_converged_r` and `sep_iter`. They describe R's
 path, not the solution; p2a tests convergence, separation and scale equivariance as properties.
 
+## Performance
+
+Rule-5 timing check of T3-WP01 (2026-11-03): release builds, `--no-default-features --features ci`,
+`RAYON_NUM_THREADS` fixed, head and base runs interleaved on a shared 12-core machine that other
+builds were loading. "Base" is the head tree with `safe_inverse`'s body replaced by the one at
+5da3cbe9 (the only hot-path change; `least_squares` and `fit_glm` are new and have no base).
+Each figure is the lowest over the interleaved runs; times in microseconds, median / p75.
+
+End to end (`unified_benchmarks --only OLS,OLS_Bootstrap,Logit,Probit` on the paper's CSVs,
+two runs each, cores 10-11, 2 threads; `forecasting_benchmarks KalmanSmoother`, Criterion, two
+runs each):
+
+| Benchmark | n | base | head | head / base |
+|---|---|---|---|---|
+| OLS standard | 100 / 1000 / 10000 | 25.4 / 145.5 / 1310 | 25.6 / 132.2 / 962 | 1.01 / 0.91 / 0.73 |
+| OLS HC1 | 100 / 1000 / 10000 | 57.7 / 311 / 2757 | 52.5 / 249 / 2146 | 0.91 / 0.80 / 0.78 |
+| OLS_Bootstrap pairs | 100 / 1000 | 1570 / 10425 | 1821 / 10973 | 1.16 / 1.05 |
+| Logit MLE | 100 / 1000 / 10000 | 114 / 1143 / 10763 | 86 / 1003 / 8470 | 0.75 / 0.88 / 0.79 |
+| Probit MLE | 100 / 1000 / 10000 | 166 / 1450 / 14597 | 125 / 1228 / 14816 | 0.75 / 0.85 / 1.02 |
+| KalmanSmoother | 100 / 500 / 1000 / 5000 | 126 / 587 / 1189 / 6631 | 133 / 704 / 1388 / 6475 | 1.06 / 1.20 / 1.17 / 0.98 |
+
+p75 is within 5 % of the median in every row except base OLS HC1 at n = 10000 (3995) and the
+Kalman rows (head p75 143 / 724 / 1425 / 6864). The OLS ratios below 1 are load noise (the run
+spread is as large); Logit and Probit invert a negative-definite Hessian, which now takes the
+negated Cholesky instead of the SVD condition and LU, so part of their gain is real. Outputs agree to 2.3e-16
+relative (Logit and Probit at n = 100 differ in the last bit, from the negated-Cholesky route).
+Nothing end to end exceeds 1.5x.
+
+`safe_inverse` alone (scratch micro-benchmark, not committed; one core, six interleaved runs; ns):
+
+| Input | d = 1 | d = 3 | d = 10 | d = 50 |
+|---|---|---|---|---|
+| SPD, base / head | 262 / 249 (0.95) | 350 / 419 (1.20) | 1562 / 2701 (**1.73**) | 30899 / 52233 (**1.69**) |
+| negative definite | 1020 / 376 (0.37) | 2950 / 574 (0.19) | 14055 / 3267 (0.23) | 287353 / 57105 (0.20) |
+| indefinite | 1006 / 437 (0.43) | 3203 / 3569 (1.11) | 13914 / 23341 (**1.68**) | 285742 / 495595 (**1.73**) |
+
+(p75 within 4 % of the median throughout.) Two classes exceed 1.5x in isolation and were reported
+to the user:
+
+- **SPD, d >= 10.** The Cholesky inverse is the same; around it the new route adds O(d^2) passes
+  that base did not run: the symmetry and finiteness checks of `safe_inverse`, repeated inside
+  `sym_inverse`, the scale vector, the finiteness check of the inverse, and the `kappa_1`
+  certificate that proves full rank without eigenvalues (strided `ndarray`/`faer` indexing). At
+  d = 50 that is about 21 us against a 31 us Cholesky inverse. Removing the repeated validation
+  on the `safe_inverse` path and computing the certificate on contiguous memory would recover most
+  of it.
+- **Indefinite, d >= 10.** Base took one SVD (condition) and an LU; the new route takes two
+  symmetric eigendecompositions (rank and conditioning of the equilibrated matrix, then the exact
+  condition of `m` for the LU's residual allowance) and the LU. This is what lets it report rank
+  instead of returning a pseudoinverse.
+
+End to end these costs stay inside load noise (the largest ratio above is 1.20), and
+negative-definite input, the Newton Hessians of the discrete models, is 3-5x faster. Informational
+(head only, same runs): `least_squares` n = 1000, p = 5 / 20: 68 / 436 us; `fit_glm` logit
+n = 1000, p = 5 / 20: 711 / 4339 us.
+
 ## Tests
 
 Registered in `validation/methods/linalg_glm.json` (they load `linalg_qr_glm`):
@@ -234,7 +300,8 @@ Registered in `validation/methods/linalg_glm.json` (they load `linalg_qr_glm`):
 Other tests (quoted R values or properties; not R-pinned):
 
 - `linalg::solve::tests::test_least_squares_rejects_invalid_input`: length, finiteness, tolerance and
-  weight checks.
+  weight checks; a non-finite `x` in a zero-weight row; `Qr::qty` and `Qr::coefficients` on a short
+  `y`; the `p x p` covariance of a 2 x 64 `x` under a 4 KiB allocation ceiling.
 - `linalg::solve::tests::test_sym_inverse_rejects_nonsymmetric_and_nonfinite`: asymmetry, non-finite
   and non-square input, rounding-level asymmetry accepted, the zero and empty matrices.
 - `linalg::solve::tests::test_sym_inverse_negative_definite_and_indefinite`:
@@ -247,6 +314,9 @@ Other tests (quoted R values or properties; not R-pinned):
   `a = 1 - 2^-40`, equilibrated condition `2^41 - 1` (REG-4).
 - `linalg::matrix_ops::tests::test_safe_inverse_unchanged_on_well_conditioned_spd`: the Cholesky
   inverse bit for bit at condition 2.1e6, and `solve()` of the KKT matrix.
+- `linalg::matrix_ops::tests::test_safe_inverse_symmetric_ignores_budget_and_ceiling`: SPD,
+  indefinite and rank-deficient 20 x 20 input gives the same result under a cancelled budget and a
+  1 KiB allocation ceiling; `sym_inverse` itself returns `Cancelled` and `ResourceLimit`.
 - `linalg::matrix_ops::tests::test_safe_inverse_ill_conditioned_symmetric_flags_condition` and
   `linalg::matrix_ops::tests::test_safe_inverse_ill_conditioned_nonsymmetric_keeps_pseudoinverse`.
 - T1's RF-31 tests of `matrix_ops.rs` (`test_safe_inverse_lu_fallback_negative_diagonal`,

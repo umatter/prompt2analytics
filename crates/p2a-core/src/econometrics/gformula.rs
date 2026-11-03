@@ -1671,9 +1671,13 @@ mod tests {
 
     #[test]
     fn test_gformula_bootstrap_unchanged_by_chunking() {
-        // Pinned at 1fdb22f, re-pinned at T3-WP01 (safe_inverse's symmetric route; the
-        // earlier pins, 36.45 and 46.57 on a risk difference of 0.386, came from the old
-        // inverse of the outcome models' cross-products). Per-replicate seeds are
+        // Pinned at 1fdb22f, re-pinned at T3-WP01. In create_test_data a1 equals a0 row for
+        // row, so the outcome model's X'X in fit_linear ([1, x, l1, a0, a1]) has rank 4 of 5
+        // in the main fit and in every replicate (equilibrated reciprocal condition 1e-34 to
+        // 1e-18). The old safe_inverse took faer's Cholesky of that singular matrix whenever
+        // it did not fail (about half the replicates), so those replicates' coefficients
+        // were noise and the SE was 36.45 and 46.57 on a risk difference of 0.386; the
+        // symmetric generalized inverse gives 0.050 and 0.051. Per-replicate seeds are
         // seed + 1000 b, unchanged. 130 replicates cross the 64-replicate chunk boundary
         // twice.
         const SE_RD: [(usize, f64); 2] = [(20, 0.05016316903989167), (130, 0.051370887581548556)];
@@ -1688,10 +1692,6 @@ mod tests {
                 ..Default::default()
             };
             let r = run_gformula(&create_test_data(), cfg).unwrap();
-            eprintln!(
-                "SEPIN {b} {:?} rd {:?}",
-                r.se_risk_difference, r.risk_difference
-            );
             assert_eq!(r.se_risk_difference, se_rd, "n_bootstrap {b}");
         }
     }
