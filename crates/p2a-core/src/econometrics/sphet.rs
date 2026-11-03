@@ -1423,8 +1423,13 @@ mod tests {
                 ..Default::default()
             };
             let r = run_sphet(&d, "y", &["x"], &w, c).unwrap();
+            // With every kernel weight near 1 the HAC meat is (Z_hat'u)(Z_hat'u)', and
+            // Z_hat'u = Z'P_H u = 0 for 2SLS residuals, so the variance is 0 up to rounding:
+            // the SEs are finite and non-negative. They were positive only while
+            // safe_inverse returned a Cholesky "inverse" of the singular H'H (row-standardised
+            // weights make W1 repeat the constant column).
             assert!(
-                r.std_errors.iter().all(|s| s.is_finite() && *s > 0.0),
+                r.std_errors.iter().all(|s| s.is_finite() && *s >= 0.0),
                 "{:?}",
                 r.std_errors
             );

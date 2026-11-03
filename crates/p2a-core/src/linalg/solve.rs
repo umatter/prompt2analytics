@@ -6,9 +6,9 @@
 //!   the end, so the later of two collinear columns is the aliased one; `tol` is 1e-7
 //!   as in `lm.fit`). Aliased columns get `NaN` coefficients and `NaN` rows and columns
 //!   in the unscaled covariance; [`aliasing_message`] words R's warning.
-//! * `sym_inverse` inverts a symmetric matrix and reports its numerical rank and
+//! * [`sym_inverse`] inverts a symmetric matrix and reports its numerical rank and
 //!   reciprocal condition (of the diagonally equilibrated matrix) instead of silently
-//!   returning a pseudoinverse; `SingularPolicy` decides whether a rank-deficient
+//!   returning a pseudoinverse; [`SingularPolicy`] decides whether a rank-deficient
 //!   matrix is an error or gets a symmetric generalized inverse.
 //!
 //! Checked against `base::qr`, `stats::lm.fit`, `stats::lm.wfit` and `stats::lm` on the R
@@ -26,7 +26,12 @@
 //! ```
 
 use crate::errors::{EconError, EconResult};
+use crate::linalg::matrix_ops::{
+    CONDITION_THRESHOLD, LinalgError, chol_solve_identity, faer_to_ndarray, partial_piv_lu_inverse,
+    verified_inverse,
+};
 use crate::resource;
+use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// stats::lm.fit tolerance.
@@ -544,6 +549,258 @@ pub fn aliasing_message(aliased: &[usize], names: &[String]) -> Option<String> {
     ))
 }
 
+/// What [`sym_inverse`] does with a rank-deficient matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SingularPolicy {
+    /// Refuse it ([`EconError::SingularMatrix`]).
+    Error,
+    /// Return a symmetric generalized inverse and set [`SymInverse::generalized`].
+    Generalized,
+}
+
+/// The result of [`sym_inverse`].
+#[derive(Debug, Clone)]
+pub struct SymInverse {
+    /// The inverse, or a symmetric generalized inverse when `generalized`.
+    pub inverse: Array2<f64>,
+    /// Numerical rank: eigenvalues of the equilibrated matrix above
+    /// `SYM_RANK_TOL * dim * lambda_max` in absolute value.
+    pub rank: usize,
+    /// Dimension of the matrix.
+    pub dim: usize,
+    /// Reciprocal condition of the diagonally equilibrated matrix `E = S m S`
+    /// (`S = diag(1 / sqrt|m_ii|)`, 1 for a zero diagonal entry); 0 for the zero matrix.
+    /// It is `min|lambda| / max|lambda|` when that is below 1e-10 or the matrix is not
+    /// definite. For a definite matrix that the O(d^2) certificate accepts it is
+    /// `1 / kappa_1(E)`, a lower bound within a factor `dim` of the exact value and
+    /// always above 1e-10, so a threshold at or below 1e-10 decides exactly.
+    pub reciprocal_condition: f64,
+    /// `true` when `rank < dim` (a generalized inverse was returned).
+    pub generalized: bool,
+}
+
+impl SymInverse {
+    /// `rank == dim`.
+    pub fn is_full_rank(&self) -> bool {
+        self.rank == self.dim
+    }
+
+    /// "`<what>` is singular (rank r of d); a generalized inverse was used", when
+    /// `generalized`.
+    pub fn warning(&self, what: &str) -> Option<String> {
+        self.generalized.then(|| {
+            format!(
+                "{what} is singular (rank {} of {}); a generalized inverse was used",
+                self.rank, self.dim
+            )
+        })
+    }
+}
+
+/// `(max |m_ij - m_ji|, max |m_ij|)` of a square matrix.
+fn asymmetry(m: &ArrayView2<f64>) -> (f64, f64) {
+    let d = m.nrows();
+    let (mut asym, mut big) = (0.0f64, 0.0f64);
+    for i in 0..d {
+        for j in 0..d {
+            big = big.max(m[[i, j]].abs());
+            if j > i {
+                asym = asym.max((m[[i, j]] - m[[j, i]]).abs());
+            }
+        }
+    }
+    (asym, big)
+}
+
+/// Whether `m` is square, finite and symmetric to `SYMMETRY_TOL` relative to its largest
+/// entry (the zero matrix is symmetric).
+pub(crate) fn is_symmetric(m: &ArrayView2<f64>) -> bool {
+    if m.nrows() != m.ncols() || !m.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let (asym, big) = asymmetry(m);
+    asym <= SYMMETRY_TOL * big
+}
+
+/// `(rank, reciprocal condition)` from eigenvalues of the equilibrated matrix.
+fn classify(lam: &[f64], d: usize) -> (usize, f64, f64) {
+    let lmax = lam.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if lmax == 0.0 {
+        return (0, 0.0, 0.0);
+    }
+    let tol = SYM_RANK_TOL * d as f64 * lmax;
+    let rank = lam.iter().filter(|v| v.abs() > tol).count();
+    let lmin = lam.iter().fold(f64::INFINITY, |a, v| a.min(v.abs()));
+    (rank, lmin / lmax, tol)
+}
+
+/// `S (sum over the `keep` eigenpairs of E with the largest |lambda| of v v' / lambda) S`.
+fn eigen_inverse(e: &Mat<f64>, s: &[f64], keep: usize) -> EconResult<Array2<f64>> {
+    let d = s.len();
+    let eig = e
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| LinalgError::EigenFailed)?;
+    let lam = eig.S().column_vector();
+    let u = eig.U();
+    let mut order: Vec<usize> = (0..d).collect();
+    order.sort_by(|&a, &b| lam[b].abs().total_cmp(&lam[a].abs()));
+    let mut g = resource::try_zeros2(d, d, "sym_inverse")?;
+    for &k in order.iter().take(keep) {
+        let inv = 1.0 / lam[k];
+        for i in 0..d {
+            let ui = u[(i, k)] * inv;
+            for j in 0..d {
+                g[[i, j]] += ui * u[(j, k)];
+            }
+        }
+    }
+    for i in 0..d {
+        for j in 0..d {
+            g[[i, j]] *= s[i] * s[j];
+        }
+    }
+    Ok(g)
+}
+
+/// Inverse of a symmetric matrix with its numerical rank.
+///
+/// * Refused: a non-square matrix (`LinalgError::NotSquare`), a non-finite entry, and an
+///   asymmetry above `SYMMETRY_TOL * max |m|` ([`EconError::InvalidSpecification`]). The
+///   lower triangle defines the matrix.
+/// * Rank and conditioning are those of the equilibrated `E = S m S`,
+///   `S = diag(1 / sqrt|m_ii|)` (1 for a zero diagonal entry, so a KKT system stays
+///   invertible): eigenvalues at or below `SYM_RANK_TOL * dim * lambda_max` count as zero.
+/// * Full rank: positive-definite matrices are inverted by Cholesky (the code
+///   `safe_inverse` always ran, bit for bit), negative-definite ones by the Cholesky
+///   factor of `-m`, and indefinite ones by the verified partial-pivot LU of
+///   `matrix_ops`. A Cholesky inverse whose `kappa_1(E)` is at most `1e10` (and at most
+///   `0.1 / (SYM_RANK_TOL * dim)`) is accepted in O(dim^2) without eigenvalues.
+/// * Rank-deficient: [`SingularPolicy::Error`] gives [`EconError::SingularMatrix`];
+///   [`SingularPolicy::Generalized`] gives `S E_r^+ S`, the Moore-Penrose inverse of `E`
+///   on its identified eigenvalues mapped back, a symmetric reflexive generalized
+///   inverse (`m G m = m`, `G m G = G`) that reproduces every estimable quantity.
+///
+/// `what` names the matrix in messages.
+pub fn sym_inverse(
+    m: ArrayView2<f64>,
+    policy: SingularPolicy,
+    what: &str,
+) -> EconResult<SymInverse> {
+    let (rows, cols) = m.dim();
+    if rows != cols {
+        return Err(LinalgError::NotSquare { rows, cols }.into());
+    }
+    if !m.iter().all(|v| v.is_finite()) {
+        return Err(spec(format!("{what} contains non-finite entries")));
+    }
+    let (asym, big) = asymmetry(&m);
+    if asym > SYMMETRY_TOL * big {
+        return Err(spec(format!(
+            "{what} is not symmetric (max |m - m'| = {asym:.3e} > {SYMMETRY_TOL:.0e} * max |m|); \
+             sym_inverse requires a symmetric matrix"
+        )));
+    }
+    let d = rows;
+    if d == 0 {
+        return Ok(SymInverse {
+            inverse: Array2::zeros((0, 0)),
+            rank: 0,
+            dim: 0,
+            reciprocal_condition: 1.0,
+            generalized: false,
+        });
+    }
+    resource::checkpoint()?;
+    let len = resource::checked_len(&[d, d], "sym_inverse")?;
+    resource::check_alloc::<f64>(len, "sym_inverse")?;
+    let lower = |i: usize, j: usize| if i >= j { m[[i, j]] } else { m[[j, i]] };
+    let s: Vec<f64> = (0..d)
+        .map(|i| {
+            let a = m[[i, i]].abs();
+            if a > 0.0 { 1.0 / a.sqrt() } else { 1.0 }
+        })
+        .collect();
+
+    // 1. Cholesky of m, or of -m when every diagonal entry is negative.
+    let mut x = chol_solve_identity(&Mat::from_fn(d, d, |i, j| m[[i, j]]));
+    if x.is_none() && (0..d).all(|i| m[[i, i]] < 0.0) {
+        x = chol_solve_identity(&Mat::from_fn(d, d, |i, j| -m[[i, j]]))
+            .map(|inv| Mat::from_fn(d, d, |i, j| -inv[(i, j)]));
+    }
+    let x = x.filter(|inv| (0..d).all(|j| (0..d).all(|i| inv[(i, j)].is_finite())));
+
+    // 2. Certificate: kappa_2(E) <= kappa_1(E) = ||E||_1 ||E^-1||_1 for a symmetric E.
+    if let Some(inv) = &x {
+        let mut e_norm = 0.0f64;
+        let mut einv_norm = 0.0f64;
+        for j in 0..d {
+            let (mut ce, mut ci) = (0.0, 0.0);
+            for i in 0..d {
+                ce += (lower(i, j) * s[i] * s[j]).abs();
+                ci += (inv[(i, j)] / (s[i] * s[j])).abs();
+            }
+            e_norm = e_norm.max(ce);
+            einv_norm = einv_norm.max(ci);
+        }
+        let kappa1 = e_norm * einv_norm;
+        if kappa1 <= CONDITION_THRESHOLD.min(0.1 / (SYM_RANK_TOL * d as f64)) {
+            return Ok(SymInverse {
+                inverse: faer_to_ndarray(inv),
+                rank: d,
+                dim: d,
+                reciprocal_condition: 1.0 / kappa1,
+                generalized: false,
+            });
+        }
+    }
+
+    // 3. Eigenvalues of the equilibrated matrix.
+    let e = Mat::from_fn(d, d, |i, j| lower(i, j) * s[i] * s[j]);
+    let lam = e
+        .self_adjoint_eigenvalues(faer::Side::Lower)
+        .map_err(|_| LinalgError::EigenFailed)?;
+    let (rank, rcond, _) = classify(&lam, d);
+    let full = |inverse: Array2<f64>| SymInverse {
+        inverse,
+        rank: d,
+        dim: d,
+        reciprocal_condition: rcond,
+        generalized: false,
+    };
+    if rank == d {
+        if let Some(inv) = x {
+            return Ok(full(faer_to_ndarray(&inv)));
+        }
+        // Indefinite: verified LU, with the exact 2-norm condition of m itself (not of
+        // E: on a badly scaled matrix the residual bound would be too tight).
+        let lam_m = Mat::from_fn(d, d, lower)
+            .self_adjoint_eigenvalues(faer::Side::Lower)
+            .map_err(|_| LinalgError::EigenFailed)?;
+        let hi = lam_m.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        let lo = lam_m.iter().fold(f64::INFINITY, |a, v| a.min(v.abs()));
+        let cond_m = if lo > 0.0 { hi / lo } else { f64::INFINITY };
+        if let Ok(inv) = verified_inverse(&m, cond_m, partial_piv_lu_inverse) {
+            return Ok(full(inv));
+        }
+        return Ok(full(eigen_inverse(&e, &s, d)?));
+    }
+    match policy {
+        SingularPolicy::Error => Err(EconError::SingularMatrix {
+            context: format!("{what}: rank {rank} of {d}"),
+            suggestion: "check for perfectly collinear variables (a full set of dummies with \
+                         an intercept, or a duplicated, rescaled or constant column)"
+                .into(),
+        }),
+        SingularPolicy::Generalized => Ok(SymInverse {
+            inverse: eigen_inverse(&e, &s, rank)?,
+            rank,
+            dim: d,
+            reciprocal_condition: rcond,
+            generalized: true,
+        }),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod case_data {
     use crate::data::Dataset;
@@ -837,5 +1094,131 @@ mod tests {
             ),
             Err(EconError::InsufficientData { .. })
         ));
+    }
+
+    #[test]
+    fn test_sym_inverse_reports_rank() {
+        let (case, ds) = crate::test_support::load_case("linalg_qr_glm");
+        let c = columns(&ds);
+        let n = c.n();
+        let xt = design(&c, &["1", "x1", "ysep", "1-ysep"]); // intercept + both dummies
+        let y = c.numeric_array("yc");
+        let m = crate::linalg::matrix_ops::xtx(&xt.view());
+        let inv = sym_inverse(m.view(), SingularPolicy::Generalized, "X'X").unwrap();
+        assert_eq!(
+            (inv.rank, inv.dim, inv.generalized, inv.is_full_rank()),
+            (3, 4, true, false)
+        );
+        assert_eq!(
+            inv.warning("X'X").as_deref(),
+            Some("X'X is singular (rank 3 of 4); a generalized inverse was used")
+        );
+        let b = inv.inverse.dot(&xt.t().dot(&y));
+        let rss = (&y - &xt.dot(&b)).mapv(|r| r * r).sum();
+        Check::new(&case)
+            .scalar("trap_rank", inv.rank as f64, Tol::exact())
+            .scalar("trap_x1_coef", b[1], Tol::coef(n)) // estimable: identical for every generalized inverse
+            .scalar("trap_rss", rss, Tol::stat(n))
+            .finish();
+        // reflexive symmetric generalized inverse (R emulation: 3.7e-15 and 3.4e-15)
+        let g = &inv.inverse;
+        let mx = |a: &Array2<f64>| a.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+        assert!(mx(&(m.dot(g).dot(&m) - &m)) <= 1e-10 * mx(&m));
+        assert!(mx(&(g.dot(&m).dot(g) - g)) <= 1e-10 * mx(g));
+        assert!(mx(&(g - &g.t())) <= 1e-12 * mx(g));
+        match sym_inverse(m.view(), SingularPolicy::Error, "X'X") {
+            Err(EconError::SingularMatrix { context, .. }) => {
+                assert_eq!(context, "X'X: rank 3 of 4")
+            }
+            other => panic!("expected SingularMatrix, got {other:?}"),
+        }
+        // safe_inverse now flags the dummy trap. Before: None whenever faer's Cholesky
+        // passed the zero pivot (data-dependent; REG-4 observed both outcomes). The
+        // deterministic fails-before test is
+        // matrix_ops::tests::test_safe_inverse_warns_on_near_singular_pd.
+        let (_, warn) = crate::linalg::matrix_ops::safe_inverse(&m.view()).unwrap();
+        assert!(warn.is_some_and(|c| c > crate::linalg::matrix_ops::CONDITION_THRESHOLD));
+    }
+
+    #[test]
+    fn test_sym_inverse_rejects_nonsymmetric_and_nonfinite() {
+        spec_err(
+            sym_inverse(
+                ndarray::array![[2.0, 1.0], [0.0, 3.0]].view(),
+                SingularPolicy::Error,
+                "A",
+            ),
+            "not symmetric",
+        );
+        spec_err(
+            sym_inverse(
+                ndarray::array![[1.0, f64::NAN], [f64::NAN, 1.0]].view(),
+                SingularPolicy::Error,
+                "A",
+            ),
+            "non-finite",
+        );
+        assert!(matches!(
+            sym_inverse(
+                Array2::<f64>::zeros((2, 3)).view(),
+                SingularPolicy::Error,
+                "A"
+            ),
+            Err(EconError::LinalgError(
+                crate::linalg::LinalgError::NotSquare { .. }
+            ))
+        ));
+        // asymmetry at 1e-13 relative is rounding, not asymmetry
+        let m = ndarray::array![[4.0, 1.0 + 1e-13], [1.0, 3.0]];
+        assert!(
+            sym_inverse(m.view(), SingularPolicy::Error, "A")
+                .unwrap()
+                .is_full_rank()
+        );
+        // the zero matrix: rank 0; Error refuses, Generalized returns the zero matrix
+        assert!(matches!(
+            sym_inverse(
+                Array2::<f64>::zeros((2, 2)).view(),
+                SingularPolicy::Error,
+                "Z"
+            ),
+            Err(EconError::SingularMatrix { .. })
+        ));
+        let z = sym_inverse(
+            Array2::<f64>::zeros((2, 2)).view(),
+            SingularPolicy::Generalized,
+            "Z",
+        )
+        .unwrap();
+        assert_eq!((z.rank, z.reciprocal_condition), (0, 0.0));
+        assert!(z.inverse.iter().all(|v| *v == 0.0));
+        let e = sym_inverse(
+            Array2::<f64>::zeros((0, 0)).view(),
+            SingularPolicy::Error,
+            "E",
+        )
+        .unwrap();
+        assert_eq!((e.rank, e.dim, e.generalized), (0, 0, false));
+    }
+
+    #[test]
+    fn test_sym_inverse_negative_definite_and_indefinite() {
+        // a negated Hessian passed un-negated (binary_choice.rs, count_models.rs do this):
+        // the Cholesky factor of -H inverts it
+        let h = ndarray::array![[-4.0, 1.0], [1.0, -3.0]];
+        let s = sym_inverse(h.view(), SingularPolicy::Error, "H").unwrap();
+        let r = ndarray::array![
+            [-0.27272727272727271, -0.090909090909090912],
+            [-0.090909090909090912, -0.36363636363636365]
+        ];
+        for (g, w) in s.inverse.iter().zip(r.iter()) {
+            assert!((g - w).abs() <= 1e-15);
+        }
+        assert!((s.reciprocal_condition - 0.5519815245204085).abs() <= 1e-12); // R, equilibrated by |diag|
+        // KKT matrix with a zero diagonal entry: full rank (scale 1 for the zero diagonal)
+        let k = ndarray::array![[2.0, 0.0, 1.0], [0.0, 2.0, 1.0], [1.0, 1.0, 0.0]];
+        let s = sym_inverse(k.view(), SingularPolicy::Error, "KKT").unwrap();
+        assert_eq!((s.rank, s.generalized), (3, false));
+        assert!((s.reciprocal_condition - 0.38196601125010504).abs() <= 1e-12);
     }
 }

@@ -39,6 +39,51 @@ They are not ports for exactness: R is the test oracle and the default conventio
 - **Warning text.** `aliasing_message(aliased, names)` gives R's "Coefficients not defined because of
   singularities: x2, x5" (default names `x{j+1}`).
 
+## Symmetric inverses (sym_inverse, safe_inverse)
+
+- **Symmetry rule.** A matrix is symmetric when `max |m_ij - m_ji| <= 1e-10 * max |m_ij|`
+  (`SYMMETRY_TOL`; scale-free, so a matrix with tiny entries cannot be 1 % asymmetric and still
+  count as symmetric). `sym_inverse` refuses anything else, and a non-finite or non-square matrix.
+  The lower triangle defines the matrix.
+- **Equilibration and rank.** `E = S m S` with `S = diag(1 / sqrt|m_ii|)`, and scale 1 for a zero
+  diagonal entry (a positive semi-definite matrix with a zero diagonal has a zero row anyway, and a
+  symmetric indefinite KKT system `[[H, A'], [A, 0]]` stays invertible). Eigenvalues of `E` with
+  `|lambda| <= SYM_RANK_TOL * dim * lambda_max` (`SYM_RANK_TOL = 1e-14`) count as zero.
+- **Full rank.** Positive-definite matrices are inverted by Cholesky of `m` (the code `safe_inverse`
+  always ran, so every full-rank SPD caller gets bit-identical output); negative-definite ones by
+  the Cholesky factor of `-m` (a negated Hessian passed un-negated); indefinite ones by the verified
+  partial-pivot LU of `matrix_ops` (RF-31), with the exact 2-norm condition of `m` from its
+  eigenvalues as the residual allowance, and the eigen route if that fails.
+- **Certificate.** When Cholesky succeeds, `kappa_1(E) = ||E||_1 ||E^-1||_1` is computed in
+  O(dim^2) from the inverse. For a symmetric matrix `kappa_2 <= kappa_1`, so
+  `kappa_1 <= min(1e10, 0.1 / (SYM_RANK_TOL * dim))` proves full rank and "no warning" without any
+  eigenvalue. `reciprocal_condition` is then `1 / kappa_1(E)`, a lower bound within a factor `dim`
+  of the exact value and always above 1e-10. Otherwise it is the exact `min|lambda| / max|lambda|`
+  of `E` (0 for the zero matrix), so thresholds at or below 1e-10 decide exactly.
+- **Rank-deficient.** `SingularPolicy::Error` gives `SingularMatrix { context: "<what>: rank r of
+  d" }`; `SingularPolicy::Generalized` gives `S E_r^+ S`, the Moore-Penrose inverse of `E` on its
+  identified eigenvalues mapped back. It is symmetric and reflexive (`m G m = m`, `G m G = G`),
+  equals `MASS::ginv(m)` when `diag(m)` is constant, reproduces every estimable quantity, and is
+  robust to badly scaled columns. `SymInverse::warning` words it: "X'X is singular (rank 3 of 4); a
+  generalized inverse was used".
+- **`safe_inverse`** (signature unchanged) returns, by input class:
+
+  | Input | Result |
+  |---|---|
+  | non-square / non-finite | `LinalgError::NotSquare` / `LinalgError::NonFinite` |
+  | symmetric, full rank, equilibrated condition <= 1e10 | the inverse (SPD: Cholesky, bit for bit as before), `None` |
+  | symmetric, full rank, equilibrated condition > 1e10 | the inverse, `Some(1 / reciprocal_condition)` |
+  | symmetric, rank-deficient | `S E_r^+ S`, `Some(1 / reciprocal_condition)` (possibly infinite) |
+  | not symmetric | verified partial-pivot LU, `None`; SVD condition > 1e10: the pseudoinverse, `Some(condition)` |
+
+  Non-symmetric input never reaches Cholesky (REG-59: faer's `llt` reads only the lower triangle, so
+  `[[2, 1], [0, 3]]` was inverted as `diag(2, 3)`).
+- **Worked numbers** (equilibrated condition): Longley's X'X 1.87e9 (no flag); a raw quadratic trend
+  in calendar years 1960-2020, 3.67e9 (no flag); the raw cubic 2.71e14, flagged and classified as
+  rank 3 of 4 (equilibrated `rcond` 3.68e-15 < `SYM_RANK_TOL * 4`), while `lm` keeps rank 4. The
+  cross-product test is stricter than QR on X by up to a factor of `dim`, which is why linear-model
+  coefficients use `least_squares` (R9).
+
 ## Case linalg_qr_glm
 
 `validation/r/cases/linalg_glm.R`, dataset `validation/datasets/generated/linalg_glm.csv`

@@ -1671,9 +1671,12 @@ mod tests {
 
     #[test]
     fn test_gformula_bootstrap_unchanged_by_chunking() {
-        // Pinned at 1fdb22f; per-replicate seeds are seed + 1000 b, unchanged.
-        // 130 replicates cross the 64-replicate chunk boundary twice.
-        const SE_RD: [(usize, f64); 2] = [(20, 36.45400422031243), (130, 46.5715124639952)];
+        // Pinned at 1fdb22f, re-pinned at T3-WP01 (safe_inverse's symmetric route; the
+        // earlier pins, 36.45 and 46.57 on a risk difference of 0.386, came from the old
+        // inverse of the outcome models' cross-products). Per-replicate seeds are
+        // seed + 1000 b, unchanged. 130 replicates cross the 64-replicate chunk boundary
+        // twice.
+        const SE_RD: [(usize, f64); 2] = [(20, 0.05016316903989167), (130, 0.051370887581548556)];
         for (b, se_rd) in SE_RD {
             let cfg = GFormulaConfig {
                 n_simulations: 200,
@@ -1685,6 +1688,10 @@ mod tests {
                 ..Default::default()
             };
             let r = run_gformula(&create_test_data(), cfg).unwrap();
+            eprintln!(
+                "SEPIN {b} {:?} rd {:?}",
+                r.se_risk_difference, r.risk_difference
+            );
             assert_eq!(r.se_risk_difference, se_rd, "n_bootstrap {b}");
         }
     }

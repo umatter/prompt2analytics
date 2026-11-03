@@ -1111,10 +1111,15 @@ mod tests {
             x_vec.push(x);
 
             // Strong relationship: higher x -> category C
-            // B has moderate x, A has low x
-            let cat = if x < -0.5 {
+            // B has moderate x, A has low x. A latent index with deterministic noise makes
+            // the categories overlap; thresholds on x alone separate them completely, and
+            // then no finite MLE exists. nnet::multinom on these data: x slopes 3.83 (B vs
+            // A) and 7.74 (C vs A).
+            let u = ((i * 37) % 100) as f64 / 100.0 - 0.5;
+            let z = x + 1.6 * u;
+            let cat = if z < -0.5 {
                 "A"
-            } else if x < 1.0 {
+            } else if z < 1.0 {
                 "B"
             } else {
                 "C"

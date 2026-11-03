@@ -84,7 +84,7 @@ fn inverse_residual(a: &Mat<f64>, x: &Mat<f64>) -> f64 {
 }
 
 /// `mat^{-1}` by LU with partial (row) pivoting, solved against the identity.
-fn partial_piv_lu_inverse(mat: &Mat<f64>) -> Mat<f64> {
+pub(crate) fn partial_piv_lu_inverse(mat: &Mat<f64>) -> Mat<f64> {
     let n = mat.nrows();
     mat.partial_piv_lu().solve(&Mat::<f64>::identity(n, n))
 }
@@ -102,7 +102,7 @@ fn partial_piv_lu_inverse(mat: &Mat<f64>) -> Mat<f64> {
 /// faer copy and the LU candidate are dropped before the SVD route, so that route
 /// peaks at [`pseudoinverse`]'s own working set: besides the caller's matrix, its
 /// own copy of it, U, V, S^+ and the product, plus faer's SVD workspace.
-fn verified_inverse(
+pub(crate) fn verified_inverse(
     m: &ArrayView2<f64>,
     cond: f64,
     lu_inverse: impl FnOnce(&Mat<f64>) -> Mat<f64>,
@@ -264,64 +264,86 @@ pub fn condition_number(m: &ArrayView2<f64>) -> Result<f64, LinalgError> {
     Ok(max_s / min_s)
 }
 
-/// Inverse of a square matrix, with a pseudoinverse fallback for ill-conditioned
-/// input that is not positive definite.
+/// Inverse of a square matrix, with a condition value when the result is unreliable.
 ///
-/// Returns `(inverse, None)`, or `(pseudoinverse, Some(cond))` with the condition
-/// number as a warning.
+/// Returns `(inverse, None)`, or `(inverse, Some(cond))` when the inverse is generalized or
+/// numerically unreliable.
 ///
-/// 1. Non-square input: [`LinalgError::NotSquare`].
-/// 2. If the Cholesky factorisation succeeds (symmetric positive definite input,
-///    such as X'X or an information matrix), the Cholesky inverse is returned with
-///    `None`. Cholesky reads only the lower triangle, so the upper triangle of the
-///    input is not checked on this path (REG-59, T3-WP01).
-/// 3. Otherwise:
-///    - a non-finite entry gives [`LinalgError::NonFinite`];
-///    - `cond = condition_number(m)`; if `cond > CONDITION_THRESHOLD`, the result
-///      is `(pseudoinverse(m), Some(cond))`;
-///    - else the inverse by LU with partial pivoting is returned with `None` if it
-///      is finite and `max |A X - I| <= INVERSE_RESIDUAL_FACTOR * n * eps * cond`;
-///      if it is not, the SVD pseudoinverse under the same check; if neither
-///      passes, [`LinalgError::SingularMatrix`].
+/// * Non-square input: [`LinalgError::NotSquare`]. Non-finite entries:
+///   [`LinalgError::NonFinite`], before any factorisation.
+/// * Symmetric input (asymmetry at most [`SYMMETRY_TOL`](super::solve::SYMMETRY_TOL)
+///   times the largest entry; the lower triangle is used) goes through
+///   [`sym_inverse`](super::solve::sym_inverse) with
+///   [`SingularPolicy::Generalized`](super::solve::SingularPolicy::Generalized): full-rank
+///   positive-definite matrices are inverted by Cholesky (bit for bit the inverse this
+///   function always returned for them), negative-definite ones by the Cholesky factor of
+///   `-m`, other full-rank matrices by the verified LU below, and rank-deficient matrices
+///   get a symmetric generalized inverse. The second element is
+///   `Some(1 / reciprocal_condition)` of the diagonally equilibrated matrix (possibly
+///   infinite) when the matrix is rank-deficient or that condition number exceeds
+///   [`CONDITION_THRESHOLD`].
+/// * Non-symmetric input is never sent to Cholesky (REG-59: Cholesky reads only the lower
+///   triangle, so `[[2, 1], [0, 3]]` was inverted as `diag(2, 3)`):
+///   - `cond = condition_number(m)` (SVD); if `cond > CONDITION_THRESHOLD`, the result is
+///     `(pseudoinverse(m), Some(cond))`;
+///   - else the inverse by LU with partial pivoting is returned with `None` if it is finite
+///     and `max |A X - I| <= INVERSE_RESIDUAL_FACTOR * n * eps * cond`; if it is not, the
+///     SVD pseudoinverse under the same check; if neither passes,
+///     [`LinalgError::SingularMatrix`].
 ///
-/// Why partial pivoting, and why every LU result is checked: faer 0.22.6's
-/// `FullPivLu`, which this fallback used until RF-31, returned wrong or all-NaN
-/// inverses for well-conditioned structured matrices of size 16 or more
-/// (diagonal, tridiagonal, multinomial and ordered logit Hessians), and nothing
-/// checked the result.
+/// Why partial pivoting, and why every LU result is checked: faer 0.22.6's `FullPivLu`,
+/// which the fallback used until RF-31, returned wrong or all-NaN inverses for
+/// well-conditioned structured matrices of size 16 or more (diagonal, tridiagonal,
+/// multinomial and ordered logit Hessians), and nothing checked the result.
+///
+/// Callers must not discard the second element: `Some` means a generalized or numerically
+/// unreliable inverse. New code uses [`sym_inverse`](super::solve::sym_inverse) or
+/// [`least_squares`](super::solve::least_squares).
 pub fn safe_inverse(m: &ArrayView2<f64>) -> Result<(Array2<f64>, Option<f64>), LinalgError> {
     let (rows, cols) = m.dim();
     if rows != cols {
         return Err(LinalgError::NotSquare { rows, cols });
     }
-
-    let mat = ndarray_to_faer(m);
-
-    // Try Cholesky first (faster for symmetric positive definite matrices like X'X)
-    if let Ok(chol) = mat.llt(faer::Side::Lower) {
-        // Solve for inverse: A * A^{-1} = I
-        let n = rows;
-        let mut identity = Mat::<f64>::zeros(n, n);
-        for i in 0..n {
-            identity[(i, i)] = 1.0;
-        }
-        let inv = chol.solve(&identity);
-        return Ok((faer_to_ndarray(&inv), None));
-    }
-    drop(mat);
-
-    // Cholesky failed: not positive definite (or not finite).
     if !is_all_finite(m) {
         return Err(LinalgError::NonFinite);
     }
+    if super::solve::is_symmetric(m)
+        && let Ok(s) = super::solve::sym_inverse(
+            m.view(),
+            super::solve::SingularPolicy::Generalized,
+            "matrix",
+        )
+    {
+        let cond = 1.0 / s.reciprocal_condition;
+        let warn = (!s.is_full_rank() || cond > CONDITION_THRESHOLD).then_some(cond);
+        return Ok((s.inverse, warn));
+    }
+    general_inverse(m)
+}
+
+/// The non-symmetric branch of [`safe_inverse`] (RF-31): SVD condition, the pseudoinverse
+/// above [`CONDITION_THRESHOLD`], otherwise the verified partial-pivot LU.
+fn general_inverse(m: &ArrayView2<f64>) -> Result<(Array2<f64>, Option<f64>), LinalgError> {
     let cond = condition_number(m)?;
     if cond > CONDITION_THRESHOLD {
         // Ill-conditioned: use pseudoinverse and return warning
         let pinv = pseudoinverse(m)?;
         return Ok((pinv, Some(cond)));
     }
-
     Ok((verified_inverse(m, cond, partial_piv_lu_inverse)?, None))
+}
+
+/// `mat^{-1}` by Cholesky (faer's `llt`, lower triangle) solved against the identity, or
+/// `None` when the factorisation fails. The code path `safe_inverse` has always used for
+/// positive-definite input.
+pub(crate) fn chol_solve_identity(mat: &Mat<f64>) -> Option<Mat<f64>> {
+    let chol = mat.llt(faer::Side::Lower).ok()?;
+    let n = mat.nrows();
+    let mut identity = Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        identity[(i, i)] = 1.0;
+    }
+    Some(chol.solve(&identity))
 }
 
 /// Cholesky decomposition: M = L * L^T
@@ -764,10 +786,18 @@ mod tests {
         }
     }
 
+    /// RF-31's purpose (faer's full-pivot LU bug at n >= 16) on the LU route itself; the
+    /// symmetric route of safe_inverse (negated Cholesky since T3-WP01) is checked by its
+    /// residual, since (1 / sqrt k) / sqrt k is not 1 / k in the last bit for every k.
     #[test]
     fn test_safe_inverse_lu_fallback_negative_diagonal() {
         for n in [15, 16, 32] {
-            let (inv, w) = safe_inverse(&diag_from(n, -1.0).view()).unwrap();
+            let a = diag_from(n, -1.0);
+            let (inv, w) = safe_inverse(&a.view()).unwrap();
+            assert_eq!(w, None, "n = {n}");
+            let r = max_abs_residual(&a, &inv);
+            assert!(r <= 1e-15, "n = {n}: max |A X - I| = {r}");
+            let (inv, w) = general_inverse(&a.view()).unwrap();
             assert_eq!(w, None, "n = {n}");
             for i in 0..n {
                 for j in 0..n {
@@ -924,15 +954,91 @@ mod tests {
         }
     }
 
-    /// Guard: a non-positive-definite matrix with cond > 1e10 keeps the pseudoinverse.
+    /// A symmetric ill-conditioned (negative-definite) matrix: the exact inverse by the
+    /// Cholesky factor of -m, flagged with its condition (before: the pseudoinverse).
     #[test]
-    fn test_safe_inverse_ill_conditioned_keeps_pseudoinverse() {
+    fn test_safe_inverse_ill_conditioned_symmetric_flags_condition() {
         let m = array![[-1.0, -1.0], [-1.0, -1.0 - 1e-12]];
+        let (inv, w) = safe_inverse(&m.view()).unwrap();
+        let c = w.expect("ill-conditioned matrix must be flagged");
+        assert!(c > CONDITION_THRESHOLD, "{c}");
+        assert!(inv.iter().all(|v| v.is_finite()));
+        let r = max_abs_residual(&m, &inv);
+        assert!(
+            r <= 100.0 * 2.0 * f64::EPSILON * c,
+            "max |A X - I| = {r}, cond {c}"
+        );
+        let neg = cholesky_inverse(&(-&m).view()).unwrap();
+        assert_eq!(inv, -neg);
+    }
+
+    /// Guard: a non-symmetric matrix with cond > 1e10 keeps the pseudoinverse (before:
+    /// Cholesky of its lower triangle succeeded and returned that inverse with None, a
+    /// second REG-59 instance).
+    #[test]
+    fn test_safe_inverse_ill_conditioned_nonsymmetric_keeps_pseudoinverse() {
+        let m = array![[1.0, 2.0], [1.0, 2.0 + 1e-11]];
         let cond = condition_number(&m.view()).unwrap();
         assert!(cond > CONDITION_THRESHOLD, "{cond}");
         let (inv, w) = safe_inverse(&m.view()).unwrap();
         assert_eq!(w, Some(cond));
         assert_eq!(inv, pseudoinverse(&m.view()).unwrap());
+    }
+
+    /// REG-59: faer's llt reads only the lower triangle; [[2,1],[0,3]] was inverted as diag(2,3).
+    #[test]
+    fn test_safe_inverse_rejects_lower_triangle_trick() {
+        let a = array![[2.0, 1.0], [0.0, 3.0]];
+        let (inv, warn) = safe_inverse(&a.view()).unwrap();
+        // R: solve(matrix(c(2, 0, 1, 3), 2))
+        let r = array![[0.5, -0.16666666666666666], [0.0, 0.3333333333333333]];
+        for (got, want) in inv.iter().zip(r.iter()) {
+            assert!((got - want).abs() <= 1e-15, "{inv:?}");
+        }
+        let id = a.dot(&inv);
+        assert!(
+            id[[0, 1]].abs() < 1e-15
+                && (id[[0, 0]] - 1.0).abs() < 1e-15
+                && (id[[1, 1]] - 1.0).abs() < 1e-15
+        );
+        assert_eq!(warn, None); // SVD condition 1.7675918792439975 (R kappa exact)
+    }
+
+    /// REG-4 (core half): an ill-conditioned SPD matrix on which Cholesky deterministically
+    /// succeeds (l22^2 = 1 - a^2 ~ 1.8e-12 in any rounding order) was returned with no warning.
+    #[test]
+    fn test_safe_inverse_warns_on_near_singular_pd() {
+        let a = 1.0 - (-40.0_f64).exp2(); // exactly 1 - 2^-40
+        let m = array![[1.0, a], [a, 1.0]];
+        let (inv, warn) = safe_inverse(&m.view()).unwrap();
+        let c = warn.expect("ill-conditioned SPD matrix must be flagged");
+        // equilibrated (diag = 1) condition (1 + a) / (1 - a) = 2^41 - 1 = 2199023255551 (R,
+        // exact); a symmetric eigensolver resolves the eigenvalue 2^-40 to ~5e-4 relative
+        assert!(
+            (c / 2_199_023_255_551.0 - 1.0).abs() < 1e-2,
+            "condition {c}"
+        );
+        let id = m.dot(&inv);
+        assert!((id[[0, 0]] - 1.0).abs() < 1e-3 && id[[0, 1]].abs() < 1e-3);
+    }
+
+    /// Full-rank SPD matrices keep the previous Cholesky path bit for bit (regression guard;
+    /// passes before). The 3x3 SPD and Gram cases are in
+    /// test_safe_inverse_spd_keeps_cholesky_path.
+    #[test]
+    fn test_safe_inverse_unchanged_on_well_conditioned_spd() {
+        let b = 1.0 - (-20.0_f64).exp2(); // condition about 2.1e6
+        let m = array![[1.0, b], [b, 1.0]];
+        let (inv, warn) = safe_inverse(&m.view()).unwrap();
+        assert_eq!(inv, cholesky_inverse(&m.view()).unwrap());
+        assert_eq!(warn, None);
+        let kkt = array![[2.0, 0.0, 1.0], [0.0, 2.0, 1.0], [1.0, 1.0, 0.0]]; // indefinite, zero diagonal
+        let (ik, wk) = safe_inverse(&kkt.view()).unwrap();
+        let r = array![[0.25, -0.25, 0.5], [-0.25, 0.25, 0.5], [0.5, 0.5, -1.0]]; // R solve()
+        for (g, w) in ik.iter().zip(r.iter()) {
+            assert!((g - w).abs() <= 1e-15);
+        }
+        assert_eq!(wk, None);
     }
 
     #[test]
