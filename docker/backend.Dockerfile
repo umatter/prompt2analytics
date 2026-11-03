@@ -25,7 +25,8 @@ RUN apt-get update && apt-get install -y \
 # Copy workspace manifest files first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
-# Copy all workspace member Cargo.toml files (needed for workspace resolution).
+# Copy all workspace member Cargo.toml files (needed for workspace resolution):
+# p2a-core, p2a-mcp, p2a-cli, p2a-chat, p2a-dioxus, p2a-validation and p2a-text.
 # Every member in the root Cargo.toml must be present or cargo fails to resolve
 # the workspace ("failed to read crates/<x>/Cargo.toml").
 COPY crates/p2a-core/Cargo.toml ./crates/p2a-core/
@@ -36,15 +37,18 @@ COPY crates/p2a-dioxus/Cargo.toml ./crates/p2a-dioxus/
 # p2a-validation is a test-only path dev-dependency of p2a-core, p2a-cli and p2a-mcp: the release
 # build never compiles it, but the workspace does not load without its manifest.
 COPY crates/p2a-validation/Cargo.toml ./crates/p2a-validation/
+# p2a-text (char-boundary-safe truncation) is a normal dependency of p2a-core and p2a-mcp.
+COPY crates/p2a-text/Cargo.toml ./crates/p2a-text/
 
 # Create dummy source files for all workspace members
-RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-chat/src crates/p2a-dioxus/src crates/p2a-validation/src && \
+RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-chat/src crates/p2a-dioxus/src crates/p2a-validation/src crates/p2a-text/src && \
     echo "pub fn dummy() {}" > crates/p2a-core/src/lib.rs && \
     echo "fn main() {}" > crates/p2a-mcp/src/main.rs && \
     echo "fn main() {}" > crates/p2a-cli/src/main.rs && \
     echo "fn main() {}" > crates/p2a-chat/src/main.rs && \
     echo "fn main() {}" > crates/p2a-dioxus/src/main.rs && \
-    echo "pub fn dummy() {}" > crates/p2a-validation/src/lib.rs
+    echo "pub fn dummy() {}" > crates/p2a-validation/src/lib.rs && \
+    echo "" > crates/p2a-text/src/lib.rs
 
 # Build dependencies only (cached layer) - this may fail but will cache deps
 RUN cargo build --release -p p2a-mcp --features full 2>/dev/null || true
@@ -52,9 +56,10 @@ RUN cargo build --release -p p2a-mcp --features full 2>/dev/null || true
 # Copy actual source code for the crates we need
 COPY crates/p2a-core ./crates/p2a-core
 COPY crates/p2a-mcp ./crates/p2a-mcp
+COPY crates/p2a-text ./crates/p2a-text
 
 # Touch the source files to invalidate the cache for the actual build
-RUN touch crates/p2a-core/src/lib.rs crates/p2a-mcp/src/main.rs
+RUN touch crates/p2a-core/src/lib.rs crates/p2a-mcp/src/main.rs crates/p2a-text/src/lib.rs
 
 # Build the actual binary
 RUN cargo build --release -p p2a-mcp --features full
