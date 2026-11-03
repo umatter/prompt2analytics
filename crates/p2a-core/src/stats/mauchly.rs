@@ -13,25 +13,33 @@
 //!
 //! ## Mauchly's W Statistic
 //!
-//! Given the sample covariance matrix S of the transformed data:
+//! With T the pp x p transformation (Helmert contrasts by default, R's `X = ~1`), S the sample
+//! covariance, B = T S T' and Psi = T Sigma T' (Sigma = I unless given), l are the eigenvalues of
+//! Psi^-1 B (R's `U = solve(Psi, B)`), computed as those of the symmetric Psi^-1/2 B Psi^-1/2:
 //!
-//! W = |S| / (tr(S)/(p-1))^(p-1)
+//! W = prod(l) / mean(l)^pp
 //!
-//! Under H₀ (sphericity holds), a transformation of W follows χ²:
+//! With nd = n - 1 and rho = 1 - (2 pp^2 + pp + 2) / (6 pp nd), z = -nd rho ln(W) is
+//! approximately chi-square with f = pp (pp + 1) / 2 - 1 degrees of freedom; the p-value adds
+//! Anderson's (2003, Sec. 10.7.4) second-order term
 //!
-//! -ν ln(W) ~ χ²(df)  where df = p(p-1)/2 - 1
+//! p = Pr(chi2_f > z) + w2 (Pr(chi2_{f+4} > z) - Pr(chi2_f > z)),
+//! w2 = (pp + 2)(pp - 1)(pp - 2)(2 pp^3 + 6 pp^2 + 3 pp + 2) / (288 (nd pp rho)^2),
+//!
+//! as R's `mauchly.test`, except that R writes `3 * p` (the number of measures) for Anderson's
+//! `3 pp` (see `validation/stats/mauchly.md`).
 //!
 //! ## Epsilon Corrections
 //!
 //! When sphericity is violated, degrees of freedom are corrected:
 //!
 //! - **Greenhouse-Geisser (ε̂_GG)**: Conservative lower bound
-//!   ε̂_GG = [tr(S)]² / ((p-1) × tr(S²))
+//!   ε̂_GG = (Σ l)² / (pp Σ l²)
 //!
 //! - **Huynh-Feldt (ε̂_HF)**: Less conservative adjustment
-//!   ε̂_HF = (n(p-1)ε̂_GG - 2) / ((p-1)(n-1-(p-1)ε̂_GG))
+//!   ε̂_HF = (n pp ε̂_GG - 2) / (pp (n - 1 - pp ε̂_GG)), capped at 1
 //!
-//! - **Lower bound**: ε_LB = 1/(p-1)
+//! - **Lower bound**: ε_LB = 1/pp
 //!
 //! # References
 //!
@@ -47,6 +55,9 @@
 //!   *Journal of Educational Statistics*, 1(1), 69-82.
 //!   https://doi.org/10.3102/10769986001001069
 //!
+//! - Anderson, T.W. (2003). *An Introduction to Multivariate Statistical Analysis* (3rd ed.),
+//!   Section 10.7.4. Wiley.
+//!
 //! - Box, G.E.P. (1954). Some theorems on quadratic forms applied in the study
 //!   of analysis of variance problems, I. Effect of inequality of variance in
 //!   the one-way classification. *The Annals of Mathematical Statistics*, 25(2),
@@ -55,9 +66,11 @@
 //! R equivalent: `stats::mauchly.test()`
 
 use crate::errors::{EconError, EconResult};
-use ndarray::{Array2, Axis};
+use crate::linalg::matrix_ops::eig_symmetric;
+use crate::linalg::solve::SYM_RANK_TOL;
+use crate::traits::estimator::chi_squared_p_value;
+use ndarray::{Array1, Array2, Axis};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 // ============================================================================
 // Mauchly Test Result
@@ -68,11 +81,11 @@ use statrs::distribution::{ChiSquared, ContinuousCDF};
 pub struct MauchlyResult {
     /// Mauchly's W statistic
     pub w: f64,
-    /// Chi-squared test statistic
+    /// Chi-squared test statistic (R's z = -nd rho ln W)
     pub chi_squared: f64,
     /// Degrees of freedom for chi-squared test
     pub df: f64,
-    /// P-value
+    /// P-value, with Anderson's second-order term
     pub p_value: f64,
     /// Number of levels (p)
     pub p_levels: usize,
@@ -80,20 +93,36 @@ pub struct MauchlyResult {
     pub n: usize,
     /// Greenhouse-Geisser epsilon correction
     pub epsilon_gg: f64,
-    /// Huynh-Feldt epsilon correction
+    /// Huynh-Feldt epsilon correction (capped at 1)
     pub epsilon_hf: f64,
-    /// Lower bound epsilon (1/(p-1))
+    /// Lower bound epsilon (1 / n_contrasts)
     pub epsilon_lb: f64,
+    /// The first-order chi-square tail Pr(chi2_df > chi_squared)
+    #[serde(default)]
+    pub p_value_first_order: f64,
+    /// Number of rows of the transformation T (R's pp)
+    #[serde(default)]
+    pub n_contrasts: usize,
+    /// The transformation, in words
+    #[serde(default)]
+    pub transform: String,
 }
 
 impl std::fmt::Display for MauchlyResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Mauchly's Test of Sphericity")?;
         writeln!(f, "=============================")?;
+        if !self.transform.is_empty() {
+            writeln!(f, "Transformation: {}", self.transform)?;
+        }
         writeln!(f, "W statistic: {:.6}", self.w)?;
         writeln!(f, "Chi-squared: {:.4}", self.chi_squared)?;
         writeln!(f, "df: {:.0}", self.df)?;
-        writeln!(f, "p-value: {:.6}", self.p_value)?;
+        writeln!(
+            f,
+            "p-value: {:.6} (first-order chi-square {:.6})",
+            self.p_value, self.p_value_first_order
+        )?;
         writeln!(f)?;
 
         if self.p_value < 0.05 {
@@ -113,153 +142,197 @@ impl std::fmt::Display for MauchlyResult {
     }
 }
 
+/// The transformation T applied to the p measures before testing sphericity.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum MauchlyTransform {
+    /// Orthonormal contrasts orthogonal to the constant (R's `X = ~1`; the p - 1 Helmert rows)
+    #[default]
+    Contrasts,
+    /// The measures themselves (R's default `T = I`)
+    Identity,
+    /// A user-supplied pp x p matrix (R's `T`). W, the epsilons and the p-value depend only on its
+    /// row space, so any `idata` / `M` / `X` design of R is tested by passing its T.
+    Matrix(Array2<f64>),
+}
+
+/// The options of [`mauchly_test_with`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MauchlyConfig {
+    /// The transformation T (default: contrasts, R's `X = ~1`)
+    pub transform: MauchlyTransform,
+    /// The covariance proportionality is tested against (R's `Sigma`; identity when absent)
+    pub sigma: Option<Array2<f64>>,
+}
+
+fn invalid(message: String) -> EconError {
+    EconError::InvalidSpecification { message }
+}
+
 // ============================================================================
 // Core Implementation
 // ============================================================================
 
-/// Perform Mauchly's test for sphericity.
+/// Mauchly's test that the covariance of the transformed measures `T y` is proportional to
+/// `T Sigma T'` (R's `mauchly.test(object, M, X, idata, T, Sigma)` on an intercept-only mlm).
 ///
-/// Tests whether a covariance matrix satisfies the sphericity assumption
-/// (equal variances of differences between all pairs of measurements).
+/// # Errors
 ///
-/// # Arguments
-///
-/// * `data` - Data matrix (n × p) where n = subjects, p = repeated measures
-/// * `sigma` - Expected covariance structure (None = identity/sphericity)
-///
-/// # Returns
-///
-/// A `MauchlyResult` containing the test statistics and epsilon corrections.
-///
-/// # Mathematical Details
-///
-/// Mauchly's W statistic:
-/// ```text
-/// W = |S| / (trace(S) / d)^d
-/// ```
-/// where S is the (p-1) × (p-1) transformed covariance matrix (using orthogonal
-/// contrasts), and d = p - 1.
-///
-/// The test statistic C = -f * ln(W) approximately follows a chi-squared
-/// distribution with df = p(p-1)/2 - 1 degrees of freedom.
-///
-/// # Example
-///
-/// ```ignore
-/// use p2a_core::stats::mauchly::mauchly_test;
-/// use ndarray::array;
-///
-/// // Data: 10 subjects, 4 repeated measures
-/// let data = array![
-///     [1.0, 2.0, 3.0, 4.0],
-///     [2.0, 3.0, 4.0, 5.0],
-///     // ... more subjects
-/// ];
-///
-/// let result = mauchly_test(&data, None)?;
-/// println!("W = {}, p = {}", result.w, result.p_value);
-/// ```
-pub fn mauchly_test(data: &Array2<f64>, sigma: Option<&Array2<f64>>) -> EconResult<MauchlyResult> {
+/// `InvalidSpecification` for fewer than 2 subjects or measures, a non-finite cell, a `sigma`
+/// that is not p x p, finite, symmetric and positive definite, a `T` without p columns, rows or
+/// finite entries, or a `T Sigma T'` that is not positive definite (T without full row rank);
+/// `InsufficientData` when there are no more subjects than contrasts or the transformed sample
+/// covariance is singular (R returns W = 0 there).
+pub fn mauchly_test_with(data: &Array2<f64>, config: &MauchlyConfig) -> EconResult<MauchlyResult> {
     let (n, p) = data.dim();
-
     if n < 2 {
-        return Err(EconError::InvalidSpecification {
-            message: "Need at least 2 observations".to_string(),
-        });
+        return Err(invalid(format!(
+            "Mauchly's test needs at least 2 observations, got {n}"
+        )));
     }
-
     if p < 2 {
-        return Err(EconError::InvalidSpecification {
-            message: "Need at least 2 repeated measures".to_string(),
-        });
+        return Err(invalid(format!(
+            "Mauchly's test needs at least 2 repeated measures, got {p}"
+        )));
     }
-
-    // d = number of orthogonal contrasts = p - 1
-    let d = p - 1;
-
-    // Check sigma if provided
-    if let Some(s) = sigma {
-        if s.dim() != (p, p) {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Sigma must be {} × {}, got {} × {}",
-                    p,
-                    p,
-                    s.dim().0,
-                    s.dim().1
-                ),
-            });
+    let non_finite = data.iter().filter(|v| !v.is_finite()).count();
+    if non_finite > 0 {
+        return Err(invalid(format!(
+            "data must be finite; {non_finite} cell(s) are NaN or infinite"
+        )));
+    }
+    if let Some(sig) = &config.sigma {
+        if sig.dim() != (p, p) {
+            return Err(invalid(format!(
+                "sigma must be {p} x {p}, got {} x {}",
+                sig.nrows(),
+                sig.ncols()
+            )));
+        }
+        if sig.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("sigma must be finite".to_string()));
+        }
+        let scale = sig.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for i in 0..p {
+            for j in 0..i {
+                if (sig[[i, j]] - sig[[j, i]]).abs() > 1e-12 * scale.max(f64::MIN_POSITIVE) {
+                    return Err(invalid(format!(
+                        "sigma must be symmetric (sigma[{i}, {j}] = {} but sigma[{j}, {i}] = {})",
+                        sig[[i, j]],
+                        sig[[j, i]]
+                    )));
+                }
+            }
+        }
+        let (lam, _) = eig_symmetric(&sig.view())?;
+        let (lo, hi) = min_max(&lam);
+        if !(hi > 0.0 && lo > SYM_RANK_TOL * p as f64 * hi) {
+            return Err(invalid(format!(
+                "sigma must be positive definite (smallest eigenvalue {lo:e}, largest {hi:e})"
+            )));
         }
     }
 
-    // Compute sample covariance matrix
-    let cov = compute_covariance(data)?;
-
-    // Create orthogonal contrast matrix M (p × d)
-    // This transforms the original covariance to test sphericity
-    let m = create_orthogonal_contrasts(p);
-
-    // Compute transformed covariance: S = M' * Cov * M
-    let s = transform_covariance(&cov, &m)?;
-
-    // If sigma is provided, transform it and adjust
-    let s = if let Some(sig) = sigma {
-        let _sig_t = transform_covariance(sig, &m)?;
-        // For now, we test against identity (sphericity)
-        // A more general test would solve S * Sigma^{-1}
-        s
-    } else {
-        s
+    let (t, mut transform) = match &config.transform {
+        MauchlyTransform::Contrasts => (
+            create_orthogonal_contrasts(p).t().to_owned(),
+            "contrasts orthogonal to the constant (R: X = ~1)".to_string(),
+        ),
+        MauchlyTransform::Identity => (Array2::eye(p), "identity (R: T = I)".to_string()),
+        MauchlyTransform::Matrix(t) => {
+            if t.ncols() != p {
+                return Err(invalid(format!(
+                    "T must have {p} columns (one per measure), got {} x {}",
+                    t.nrows(),
+                    t.ncols()
+                )));
+            }
+            if t.nrows() == 0 {
+                return Err(invalid("T must have at least one row".to_string()));
+            }
+            if t.iter().any(|v| !v.is_finite()) {
+                return Err(invalid("T must be finite".to_string()));
+            }
+            (t.clone(), "user-supplied contrast matrix T".to_string())
+        }
     };
+    if config.sigma.is_some() {
+        transform.push_str(", tested against Sigma");
+    }
+    let pp = t.nrows();
 
-    // Compute Mauchly's W statistic
-    // W = |S| / (trace(S) / d)^d
-    let det_s = matrix_determinant(&s)?;
-    let trace_s = matrix_trace(&s);
+    // B = T S T', Psi = T Sigma T'
+    let cov = compute_covariance(data)?;
+    let b = t.dot(&cov).dot(&t.t());
+    let psi = match &config.sigma {
+        Some(sig) => t.dot(sig).dot(&t.t()),
+        None => t.dot(&t.t()),
+    };
+    let psi = symmetrise(&psi);
+    let (lam, v) = eig_symmetric(&psi.view())?;
+    let (lo, hi) = min_max(&lam);
+    if !(hi > 0.0 && lo > SYM_RANK_TOL * pp as f64 * hi) {
+        return Err(invalid(
+            "T Sigma T' must be positive definite (T needs full row rank)".to_string(),
+        ));
+    }
+    let inv_sqrt = Array1::from_iter(lam.iter().map(|l| 1.0 / l.sqrt()));
+    let psi_inv_half = (&v * &inv_sqrt).dot(&v.t());
+    let c = symmetrise(&psi_inv_half.dot(&b).dot(&psi_inv_half));
+    let (l, _) = eig_symmetric(&c.view())?;
 
-    if trace_s <= 0.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Covariance matrix trace is non-positive".to_string(),
+    let nd = (n - 1) as f64;
+    let (l_lo, l_hi) = min_max(&l);
+    if n - 1 < pp || !(l_hi > 0.0 && l_lo > SYM_RANK_TOL * pp as f64 * l_hi) {
+        return Err(EconError::InsufficientData {
+            required: pp + 1,
+            provided: n,
+            context: "Mauchly's test needs more subjects than contrasts and a non-singular \
+                      transformed covariance"
+                .to_string(),
         });
     }
 
-    let w = det_s / (trace_s / d as f64).powi(d as i32);
-
-    // Degrees of freedom for chi-squared test
-    // df = p(p-1)/2 - 1 = d(d+1)/2 - 1
-    let df = (d * (d + 1)) as f64 / 2.0 - 1.0;
-
-    // Correction factor for better chi-squared approximation
-    // f = (n - 1) - (2d^2 + d + 2) / (6d)
-    let f1 = n as f64 - 1.0;
-    let correction = (2.0 * (d as f64).powi(2) + d as f64 + 2.0) / (6.0 * d as f64);
-    let f = f1 - correction;
-
-    // Chi-squared statistic: C = -f * ln(W)
-    let chi_squared = if w > 0.0 && w < 1.0 {
-        -f * w.ln()
-    } else if w >= 1.0 {
-        // Perfect sphericity
-        0.0
+    let ppf = pp as f64;
+    let sum_l: f64 = l.sum();
+    let log_w = l.iter().map(|x| x.ln()).sum::<f64>() - ppf * (sum_l / ppf).ln();
+    let w = log_w.exp();
+    let rho = 1.0 - (2.0 * ppf * ppf + ppf + 2.0) / (6.0 * ppf * nd);
+    let z = -nd * rho * log_w;
+    let df = ppf * (ppf + 1.0) / 2.0 - 1.0;
+    // Anderson (2003, Sec. 10.7.4), with pp throughout (R's code has 3 * p for 3 * pp)
+    let w2 = (ppf + 2.0)
+        * (ppf - 1.0)
+        * (ppf - 2.0)
+        * (2.0 * ppf.powi(3) + 6.0 * ppf * ppf + 3.0 * ppf + 2.0)
+        / (288.0 * (nd * ppf * rho).powi(2));
+    let tail = |k: f64| {
+        if z <= 0.0 {
+            1.0
+        } else {
+            chi_squared_p_value(z, k)
+        }
+    };
+    let (p_value, p_value_first_order) = if df == 0.0 {
+        (1.0, 1.0)
     } else {
-        // Invalid (negative determinant suggests numerical issues)
-        f64::NAN
+        let pr1 = tail(df);
+        (pr1 + w2 * (tail(df + 4.0) - pr1), pr1)
     };
 
-    // P-value from chi-squared distribution
-    let p_value = if df > 0.0 && chi_squared.is_finite() && chi_squared >= 0.0 {
-        let chi_dist = ChiSquared::new(df).map_err(|e| EconError::Internal(e.to_string()))?;
-        1.0 - chi_dist.cdf(chi_squared)
+    // Epsilons
+    let epsilon_lb = 1.0 / ppf;
+    let sum_l2: f64 = l.iter().map(|x| x * x).sum();
+    let epsilon_gg = (sum_l * sum_l / (ppf * sum_l2)).clamp(epsilon_lb, 1.0);
+    let denominator = ppf * (nd - ppf * epsilon_gg);
+    let epsilon_hf = if denominator > 0.0 {
+        (((nd + 1.0) * ppf * epsilon_gg - 2.0) / denominator).clamp(epsilon_gg, 1.0)
     } else {
-        f64::NAN
+        1.0
     };
-
-    // Compute epsilon corrections
-    let (epsilon_gg, epsilon_hf, epsilon_lb) = compute_epsilon_corrections(&s, n, p)?;
 
     Ok(MauchlyResult {
         w,
-        chi_squared,
+        chi_squared: z,
         df,
         p_value,
         p_levels: p,
@@ -267,23 +340,49 @@ pub fn mauchly_test(data: &Array2<f64>, sigma: Option<&Array2<f64>>) -> EconResu
         epsilon_gg,
         epsilon_hf,
         epsilon_lb,
+        p_value_first_order,
+        n_contrasts: pp,
+        transform,
     })
+}
+
+/// Mauchly's test with R's `X = ~1` contrasts, against `sigma` when given (identity otherwise).
+///
+/// # Arguments
+///
+/// * `data` - Data matrix (n × p) where n = subjects, p = repeated measures
+/// * `sigma` - The covariance sphericity is tested against (None = identity)
+///
+/// # Errors
+///
+/// As [`mauchly_test_with`].
+pub fn mauchly_test(data: &Array2<f64>, sigma: Option<&Array2<f64>>) -> EconResult<MauchlyResult> {
+    mauchly_test_with(
+        data,
+        &MauchlyConfig {
+            transform: MauchlyTransform::Contrasts,
+            sigma: sigma.cloned(),
+        },
+    )
+}
+
+fn min_max(v: &Array1<f64>) -> (f64, f64) {
+    v.iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &x| {
+            (lo.min(x), hi.max(x))
+        })
+}
+
+fn symmetrise(m: &Array2<f64>) -> Array2<f64> {
+    (m + &m.t()) / 2.0
 }
 
 /// Compute sample covariance matrix.
 fn compute_covariance(data: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let (n, p) = data.dim();
-
-    // Column means
+    let (n, _) = data.dim();
     let means = data.mean_axis(Axis(0)).ok_or(EconError::EmptyDataset)?;
-
-    // Center the data
-    let centered = data - &means.broadcast((n, p)).unwrap();
-
-    // Covariance: (1/(n-1)) * X'X
-    let cov = centered.t().dot(&centered) / (n - 1) as f64;
-
-    Ok(cov)
+    let centered = data - &means;
+    Ok(centered.t().dot(&centered) / (n - 1) as f64)
 }
 
 /// Create orthogonal contrast matrix for sphericity test.
@@ -310,132 +409,23 @@ fn create_orthogonal_contrasts(p: usize) -> Array2<f64> {
     m
 }
 
-/// Transform covariance matrix using contrast matrix: S = M' * Cov * M
-fn transform_covariance(cov: &Array2<f64>, m: &Array2<f64>) -> EconResult<Array2<f64>> {
-    // S = M' * Cov * M
-    let temp = m.t().dot(cov);
-    let s = temp.dot(m);
-    Ok(s)
-}
-
-/// Compute matrix determinant (for small matrices).
-fn matrix_determinant(a: &Array2<f64>) -> EconResult<f64> {
-    let (n, _m) = a.dim();
-
-    match n {
-        1 => Ok(a[[0, 0]]),
-        2 => Ok(a[[0, 0]] * a[[1, 1]] - a[[0, 1]] * a[[1, 0]]),
-        3 => {
-            // 3x3 determinant using rule of Sarrus
-            Ok(a[[0, 0]] * (a[[1, 1]] * a[[2, 2]] - a[[1, 2]] * a[[2, 1]])
-                - a[[0, 1]] * (a[[1, 0]] * a[[2, 2]] - a[[1, 2]] * a[[2, 0]])
-                + a[[0, 2]] * (a[[1, 0]] * a[[2, 1]] - a[[1, 1]] * a[[2, 0]]))
-        }
-        _ => {
-            // Use LU decomposition for larger matrices
-            lu_determinant(a)
-        }
-    }
-}
-
-/// Compute determinant using LU decomposition.
-fn lu_determinant(a: &Array2<f64>) -> EconResult<f64> {
-    let n = a.nrows();
-    let mut lu = a.clone();
-    let mut det = 1.0;
-    let mut sign = 1.0;
-
-    for k in 0..n {
-        // Partial pivoting
-        let mut max_val = lu[[k, k]].abs();
-        let mut max_row = k;
-        for i in (k + 1)..n {
-            if lu[[i, k]].abs() > max_val {
-                max_val = lu[[i, k]].abs();
-                max_row = i;
-            }
-        }
-
-        if max_val < 1e-15 {
-            return Ok(0.0); // Singular matrix
-        }
-
-        if max_row != k {
-            // Swap rows
-            for j in 0..n {
-                let tmp = lu[[k, j]];
-                lu[[k, j]] = lu[[max_row, j]];
-                lu[[max_row, j]] = tmp;
-            }
-            sign = -sign;
-        }
-
-        det *= lu[[k, k]];
-
-        // Elimination
-        for i in (k + 1)..n {
-            let factor = lu[[i, k]] / lu[[k, k]];
-            for j in (k + 1)..n {
-                lu[[i, j]] -= factor * lu[[k, j]];
-            }
-        }
-    }
-
-    Ok(det * sign)
-}
-
-/// Compute matrix trace.
-fn matrix_trace(a: &Array2<f64>) -> f64 {
-    a.diag().sum()
-}
-
-/// Compute epsilon corrections for sphericity violations.
-///
-/// Returns (Greenhouse-Geisser, Huynh-Feldt, Lower Bound) epsilon values.
-fn compute_epsilon_corrections(s: &Array2<f64>, n: usize, p: usize) -> EconResult<(f64, f64, f64)> {
-    let d = p - 1;
-
-    // Lower bound: 1 / (p - 1)
-    let epsilon_lb = 1.0 / d as f64;
-
-    // Greenhouse-Geisser epsilon
-    // ε_GG = trace(S)² / (d * trace(S²))
-    let trace_s = matrix_trace(s);
-    let s_squared = s.dot(s);
-    let trace_s2 = matrix_trace(&s_squared);
-
-    let epsilon_gg = if trace_s2 > 0.0 {
-        (trace_s * trace_s) / (d as f64 * trace_s2)
-    } else {
-        1.0
-    };
-
-    // Clamp to valid range [1/(p-1), 1]
-    let epsilon_gg = epsilon_gg.clamp(epsilon_lb, 1.0);
-
-    // Huynh-Feldt epsilon
-    // ε_HF = (n * (p-1) * ε_GG - 2) / ((p-1) * (n - 1 - (p-1) * ε_GG))
-    let n_f = n as f64;
-    let d_f = d as f64;
-
-    let numerator = n_f * d_f * epsilon_gg - 2.0;
-    let denominator = d_f * (n_f - 1.0 - d_f * epsilon_gg);
-
-    let epsilon_hf = if denominator > 0.0 {
-        numerator / denominator
-    } else {
-        1.0
-    };
-
-    // Clamp to valid range [ε_GG, 1] (HF is always >= GG)
-    let epsilon_hf = epsilon_hf.clamp(epsilon_gg, 1.0);
-
-    Ok((epsilon_gg, epsilon_hf, epsilon_lb))
-}
-
 // ============================================================================
 // Simplified interface
 // ============================================================================
+
+/// Reshape row-major `data` (n × p).
+fn reshape(data: &[f64], n: usize, p: usize) -> EconResult<Array2<f64>> {
+    if n.checked_mul(p) != Some(data.len()) {
+        return Err(invalid(format!(
+            "Data length {} doesn't match {} × {}",
+            data.len(),
+            n,
+            p
+        )));
+    }
+    Array2::from_shape_vec((n, p), data.to_vec())
+        .map_err(|e| invalid(format!("Failed to reshape data: {e}")))
+}
 
 /// Perform Mauchly's test from flat data.
 ///
@@ -445,24 +435,31 @@ fn compute_epsilon_corrections(s: &Array2<f64>, n: usize, p: usize) -> EconResul
 /// * `n` - Number of subjects
 /// * `p` - Number of repeated measures
 pub fn mauchly_test_from_slice(data: &[f64], n: usize, p: usize) -> EconResult<MauchlyResult> {
-    if data.len() != n * p {
-        return Err(EconError::InvalidSpecification {
-            message: format!("Data length {} doesn't match {} × {}", data.len(), n, p),
-        });
-    }
-
-    let matrix = Array2::from_shape_vec((n, p), data.to_vec()).map_err(|e| {
-        EconError::InvalidSpecification {
-            message: format!("Failed to reshape data: {}", e),
-        }
-    })?;
-
-    mauchly_test(&matrix, None)
+    mauchly_test(&reshape(data, n, p)?, None)
 }
 
 /// Run Mauchly's test (MCP wrapper).
 pub fn run_mauchly_test(data: &[f64], n: usize, p: usize) -> EconResult<MauchlyResult> {
     mauchly_test_from_slice(data, n, p)
+}
+
+/// Run Mauchly's test against `sigma` (row-major p × p), with R's `X = ~1` contrasts.
+pub fn run_mauchly_test_with_sigma(
+    data: &[f64],
+    n: usize,
+    p: usize,
+    sigma: &[f64],
+) -> EconResult<MauchlyResult> {
+    if p.checked_mul(p) != Some(sigma.len()) {
+        return Err(invalid(format!(
+            "sigma must be {p} x {p} ({} values), got {} values",
+            p.saturating_mul(p),
+            sigma.len()
+        )));
+    }
+    let sigma = Array2::from_shape_vec((p, p), sigma.to_vec())
+        .map_err(|e| invalid(format!("Failed to reshape sigma: {e}")))?;
+    mauchly_test(&reshape(data, n, p)?, Some(&sigma))
 }
 
 // ============================================================================
@@ -472,7 +469,8 @@ pub fn run_mauchly_test(data: &[f64], n: usize, p: usize) -> EconResult<MauchlyR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use ndarray::{array, s};
+    use p2a_validation::{Case, Check, Tol};
 
     #[test]
     fn test_mauchly_spherical() {
@@ -605,16 +603,189 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_determinant() {
-        // 2x2 matrix
-        let a = array![[1.0, 2.0], [3.0, 4.0]];
-        let det = matrix_determinant(&a).unwrap();
-        assert!((det - (-2.0)).abs() < 1e-10);
+    fn mauchly_case() -> (Case, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case("stat_mauchly_sigma");
+        let cols: Vec<Vec<f64>> = ["V1", "V2", "V3", "V4"]
+            .iter()
+            .map(|c| {
+                crate::data::columns::numeric_column(
+                    ds.df(),
+                    c,
+                    crate::data::columns::NaPolicy::Fail,
+                )
+                .unwrap()
+                .0
+            })
+            .collect();
+        let n = cols[0].len();
+        (case, Array2::from_shape_fn((n, 4), |(i, j)| cols[j][i]))
+    }
 
-        // 3x3 matrix
-        let b = array![[6.0, 1.0, 1.0], [4.0, -2.0, 5.0], [2.0, 8.0, 7.0]];
-        let det = matrix_determinant(&b).unwrap();
-        assert!((det - (-306.0)).abs() < 1e-8);
+    fn matrix(case: &Case, key: &str, rows: usize) -> Array2<f64> {
+        let v = case.vector(key);
+        let cols = v.len() / rows;
+        Array2::from_shape_vec((rows, cols), v).unwrap()
+    }
+
+    #[test]
+    fn test_validate_mauchly_sigma() {
+        // R: mauchly.test(lm(Y ~ 1), ...) on mauchly_sigma (15 subjects, 4 measures) with T = I,
+        // X = ~1, idata f = (a, a, b, b) with X = ~f (passed as R's T), and Sigma = diag(1:4) with
+        // T = I and with X = ~1.
+        let (case, y) = mauchly_case();
+        let n = y.nrows(); // 15
+        let psi = Array2::from_diag(&Array1::from(case.vector("psi_diag")));
+        let designs = [
+            (
+                "identity",
+                MauchlyConfig {
+                    transform: MauchlyTransform::Identity,
+                    sigma: None,
+                },
+            ),
+            ("contrasts", MauchlyConfig::default()),
+            (
+                "within_f",
+                MauchlyConfig {
+                    transform: MauchlyTransform::Matrix(matrix(&case, "within_f_T", 2)),
+                    sigma: None,
+                },
+            ),
+            (
+                "psi_identity",
+                MauchlyConfig {
+                    transform: MauchlyTransform::Identity,
+                    sigma: Some(psi.clone()),
+                },
+            ),
+            (
+                "psi_contrasts",
+                MauchlyConfig {
+                    transform: MauchlyTransform::Contrasts,
+                    sigma: Some(psi.clone()),
+                },
+            ),
+        ];
+        let mut c = Check::new(&case);
+        for (k, cfg) in &designs {
+            let r = mauchly_test_with(&y, cfg).unwrap();
+            // deviation STAT-82: p uses Anderson's w2 with 3 pp (R's code has 3 * p), pinned to
+            // the case's p_anderson; R's own p is within 1e-3 relative
+            c.scalar(&format!("{k}_W"), r.w, Tol::stat(n))
+                .scalar(&format!("{k}_p_anderson"), r.p_value, Tol::p_value(n))
+                .scalar(&format!("{k}_p"), r.p_value, Tol::new(1e-3, 1e-12))
+                .scalar(
+                    &format!("{k}_p_first_order"),
+                    r.p_value_first_order,
+                    Tol::p_value(n),
+                )
+                .scalar(&format!("{k}_chisq"), r.chi_squared, Tol::stat(n))
+                .scalar(&format!("{k}_df"), r.df, Tol::exact())
+                .scalar(&format!("{k}_pp"), r.n_contrasts as f64, Tol::exact())
+                .scalar(&format!("{k}_gg"), r.epsilon_gg, Tol::stat(n));
+            // stats:::sphericity prints HF uncapped (within_f: 1.059110549795335); anova.mlm and
+            // p2a use min(1, HF)
+            let hf = case.scalar(&format!("{k}_hf")).min(1.0);
+            assert!(
+                Tol::stat(n).allows(r.epsilon_hf, hf),
+                "{k}_hf rust={} R={hf}",
+                r.epsilon_hf
+            );
+            assert!((r.epsilon_lb - 1.0 / r.n_contrasts as f64).abs() < 1e-15);
+        }
+        // R's own non-orthonormal basis Thin.row(Proj(I) - Proj(1)): the test is basis-invariant
+        let r = mauchly_test_with(
+            &y,
+            &MauchlyConfig {
+                transform: MauchlyTransform::Matrix(matrix(&case, "contrasts_T", 3)),
+                sigma: None,
+            },
+        )
+        .unwrap();
+        c.scalar("contrasts_W", r.w, Tol::stat(n)).scalar(
+            "contrasts_p_anderson",
+            r.p_value,
+            Tol::p_value(n),
+        );
+        // the legacy entry point honours sigma (STAT-56: it was transformed and discarded)
+        let r = mauchly_test(&y, Some(&psi)).unwrap();
+        c.scalar("psi_contrasts_W", r.w, Tol::stat(n)).scalar(
+            "psi_contrasts_p_anderson",
+            r.p_value,
+            Tol::p_value(n),
+        );
+        let flat: Vec<f64> = y.iter().copied().collect();
+        let psi_flat: Vec<f64> = psi.iter().copied().collect();
+        let r = run_mauchly_test_with_sigma(&flat, n, 4, &psi_flat).unwrap();
+        c.scalar("psi_contrasts_W", r.w, Tol::stat(n));
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_mauchly_two_columns() {
+        // R: mauchly.test(lm(Y[, 1:2] ~ 1), X = ~1): one contrast, W = 1, p = 1 (was p = NaN)
+        let (case, y) = mauchly_case();
+        let r = mauchly_test(&y.slice(s![.., 0..2]).to_owned(), None).unwrap();
+        Check::new(&case)
+            .scalar("two_col_W", r.w, Tol::exact())
+            .scalar("two_col_p", r.p_value, Tol::exact())
+            .finish();
+        assert_eq!((r.df, r.n_contrasts), (0.0, 1));
+    }
+
+    #[test]
+    fn test_mauchly_rejects_invalid_sigma_and_transform() {
+        let (_case, y) = mauchly_case();
+        let msg = |c: MauchlyConfig| mauchly_test_with(&y, &c).unwrap_err().to_string();
+        let sig = |m: Array2<f64>| MauchlyConfig {
+            sigma: Some(m),
+            ..Default::default()
+        };
+        assert!(msg(sig(Array2::eye(3))).contains("sigma must be 4 x 4"));
+        let mut asym = Array2::eye(4);
+        asym[[0, 1]] = 0.5;
+        assert!(msg(sig(asym)).contains("symmetric"));
+        assert!(msg(sig(-Array2::<f64>::eye(4))).contains("positive definite"));
+        let mut nan = Array2::eye(4);
+        nan[[2, 2]] = f64::NAN;
+        assert!(msg(sig(nan)).contains("finite"));
+        let t = |m: Array2<f64>| MauchlyConfig {
+            transform: MauchlyTransform::Matrix(m),
+            sigma: None,
+        };
+        assert!(msg(t(Array2::zeros((2, 3)))).contains("T must have 4 columns"));
+        // rank-deficient T: two equal rows
+        let dup = array![[1.0, -1.0, 0.0, 0.0], [1.0, -1.0, 0.0, 0.0]];
+        assert!(msg(t(dup)).contains("full row rank"));
+        // 3 subjects, 4 measures with T = I: B is singular (R returns W = 0)
+        let few = y.slice(s![0..3, ..]).to_owned();
+        assert!(matches!(
+            mauchly_test_with(
+                &few,
+                &MauchlyConfig {
+                    transform: MauchlyTransform::Identity,
+                    sigma: None
+                }
+            ),
+            Err(EconError::InsufficientData { .. })
+        ));
+        let mut bad = y.clone();
+        bad[[0, 0]] = f64::NAN;
+        assert!(
+            mauchly_test(&bad, None)
+                .unwrap_err()
+                .to_string()
+                .contains("finite")
+        );
+        let e = run_mauchly_test_with_sigma(&[0.0; 8], 2, 4, &[1.0; 4]).unwrap_err();
+        assert!(e.to_string().contains("sigma must be 4 x 4"), "{e}");
+    }
+
+    #[test]
+    fn test_mauchly_display_names_transform_and_both_p_values() {
+        let (_case, y) = mauchly_case();
+        let text = format!("{}", mauchly_test(&y, None).unwrap());
+        assert!(text.contains("Transformation: contrasts orthogonal to the constant"));
+        assert!(text.contains("(first-order chi-square 0.353699)"), "{text}");
     }
 }

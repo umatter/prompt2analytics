@@ -123,6 +123,35 @@
       "tolerance": "validation/README.md, n = 180-652: statistics and fit 1e-6 relative, p 1e-6 + 1e-12, df exact; iterations not pinned",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mauchly_sigma",
+      "name": "Mauchly's test of sphericity: T = I, X = ~1, X = ~f and a given Sigma",
+      "category": "stats",
+      "reference": "stats::mauchly.test.mlm (T, X, idata, Sigma); stats:::sphericity",
+      "doc": "validation/stats/mauchly.md",
+      "cases": [
+        "stat_mauchly_sigma"
+      ],
+      "tests": [
+        "p2a-core::stats::mauchly::tests::test_validate_mauchly_sigma",
+        "p2a-core::stats::mauchly::tests::test_validate_mauchly_two_columns"
+      ],
+      "quantities": [
+        "W, p (with Anderson's second-order term), first-order p, chi-square, df, number of contrasts, Greenhouse-Geisser and Huynh-Feldt epsilons for five designs",
+        "R's own contrast basis",
+        "two measures",
+        "designs T = I, X = ~1, X = ~f (through R's T), Sigma"
+      ],
+      "tolerance": "validation/README.md, n = 15: statistics 1e-5 relative, p 1e-5 + 1e-12, df exact; Huynh-Feldt against min(1, R) (anova.mlm's rule)",
+      "deviations": [
+        {
+          "finding": "STAT-82",
+          "quantity": "p-value when the number of contrasts pp is below the number of measures p",
+          "note": "Anderson's w2 with 3 pp; R's mauchly.test.SSD writes 3 * p (a typo against Anderson 2003, Sec. 10.7.4); differs from R by about 1e-4 relative (contrasts design 0.354922 vs 0.354953)"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
