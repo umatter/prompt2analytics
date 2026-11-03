@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Run with: cargo test -p p2a-core --release -- test_hdbscan_full_benchmark --ignored --nocapture
+    #[ignore = "benchmark; run with --release -- --ignored"]
     fn test_hdbscan_full_benchmark() {
         use rand::prelude::*;
         use rand_distr::Normal;

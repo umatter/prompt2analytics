@@ -369,7 +369,7 @@ assert nothing, so they carry `#[ignore = "benchmark; run with --release -- --ig
 |------|------|---------------|
 | `benchmark_rust_ml` | `crates/p2a-core/tests/benchmark_ml_rust.rs` | kernel SVM (RBF and linear), CART and ROC/AUC at n = 1,000 to 20,000 |
 | `benchmark_roc_auc_implementations`, `benchmark_svm_implementations`, `benchmark_svm_linear`, `benchmark_xgboost_implementations`, `benchmark_mboost_implementations`, `summary_comparison` | `crates/p2a-core/tests/benchmark_fast_implementations.rs` | fast against original ROC/AUC, SVM, XGBoost and mboost; `summary_comparison` prints notes only |
-| HDBSCAN full benchmark | `crates/p2a-core/src/ml/advanced_clustering_mod/` | HDBSCAN on large synthetic data |
+| `test_hdbscan_full_benchmark` | `crates/p2a-core/src/ml/advanced_clustering_mod/hdbscan.rs` | HDBSCAN on large synthetic data |
 
 `verify_fast_roc_accuracy` in `benchmark_fast_implementations.rs` checks the fast AUC against the
 original one and runs with the normal tests.
