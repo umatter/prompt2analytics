@@ -103,6 +103,11 @@ EXAMPLES:
         #[arg(long)]
         cluster: String,
 
+        /// Second cluster variable: two-way clustered SEs (Cameron, Gelbach and Miller 2011),
+        /// as sandwich::vcovCL(cluster = ~c1 + c2, type = "HC1")
+        #[arg(long, value_name = "COLUMN")]
+        cluster2: Option<String>,
+
         /// Include intercept
         #[arg(long, default_value = "true")]
         intercept: bool,
@@ -429,9 +434,17 @@ pub fn execute(
             dep_var,
             indep_vars,
             cluster,
+            cluster2,
             intercept,
         } => execute_clustered(
-            dataset, dep_var, indep_vars, cluster, *intercept, format, session,
+            dataset,
+            dep_var,
+            indep_vars,
+            cluster,
+            cluster2.as_deref(),
+            *intercept,
+            format,
+            session,
         ),
         RegressionCommands::Diagnostics {
             dataset,
@@ -639,6 +652,7 @@ fn execute_clustered(
     dep_var: &str,
     indep_vars: &[String],
     cluster: &str,
+    cluster2: Option<&str>,
     _intercept: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
@@ -658,8 +672,7 @@ fn execute_clustered(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            // run_ols_clustered takes cluster1 and optional cluster2 for two-way clustering
-            match run_ols_clustered(ds, dep_var, &x_cols, cluster, None) {
+            match run_ols_clustered(ds, dep_var, &x_cols, cluster, cluster2) {
                 Ok(result) => {
                     let second = result.cluster_var_2.as_deref().zip(result.n_clusters_2);
                     let (se_type, se_type_json) =
@@ -673,7 +686,10 @@ fn execute_clustered(
                     if let Some(m) = missing_json(&result.ols.missing) {
                         extra_json.insert("missing".to_string(), m);
                     }
-                    let method = format!("Clustered OLS (cluster: {})", cluster);
+                    let method = match cluster2 {
+                        None => format!("Clustered OLS (cluster: {cluster})"),
+                        Some(c2) => format!("Clustered OLS (clusters: {cluster}, {c2})"),
+                    };
                     let report = RegressionReport {
                         method: &method,
                         coefficients: result.ols.coefficients.iter().map(CoefRow::from).collect(),

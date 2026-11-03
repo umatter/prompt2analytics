@@ -20,6 +20,23 @@
       "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE and statistics 1e-6 relative; p-values also 1e-12 absolute; df and counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cli_regression_flags",
+      "name": "p2a reg ols/clustered/hac/gls/step/quantreg --intercept false and reg clustered --cluster2",
+      "category": "interfaces",
+      "reference": "stats::lm without intercept; sandwich::vcovCL(~firm, ~firm + year, type = 'HC1'), NeweyWest(lag = 4, prewhite = FALSE); stats::step(direction = 'backward'), extractAIC(k = 2 | log(n))",
+      "doc": "validation/cli/flags.md",
+      "cases": ["ols_no_intercept_grunfeld", "ols_grunfeld", "ols_twoway_cluster_grunfeld"],
+      "tests": [
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_clustered_two_way"
+      ],
+      "quantities": ["coefficient tables (text and JSON)", "R2 and adjusted R2", "two-way CR1 SE, t, p and cluster counts", "step criterion, final variables, R2 and AIC", "quantreg coefficients equal p2a-core in process"],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE and R2, 3 for t, 4 for p); -F json at validation/README.md, n = 200 (coefficients 1e-8, SE and statistics 1e-6 relative, p also 1e-12 absolute); counts exact; quantreg in-process Tol::new(1e-12, 1e-15)",
+      "deviations": [
+        {"finding": "REG-52", "quantity": "rq coefficients without intercept", "note": "p2a's IRLS quantile regression (tol 1e-6) is not the exact LP of rq(method = 'br'); R gives 0.1116253861993205 / 0.078613841312111174 (rq_coef). The CLI test checks that --intercept false reaches quantreg() (in-process equality); T3-WP10 implements Barrodale-Roberts and can pin rq_coef."}
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
