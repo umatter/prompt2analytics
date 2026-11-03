@@ -6,7 +6,7 @@
 //! - Group-based data transformations (demeaning for panel data)
 //! - Toeplitz matrix construction
 //! - Rank-revealing least squares (pivoted QR as R's `lm.fit`) and symmetric inverses that
-//!   report their rank ([`solve`](self::solve))
+//!   report their rank ([`solve`])
 
 pub mod design;
 #[cfg(feature = "cuda")]

@@ -1618,7 +1618,7 @@ mod tests {
     fn test_logistic_helpers() {
         assert_eq!(plogis(0.0), 0.5);
         assert!((qlogis(0.25) - (-1.0986122886681098)).abs() <= 1e-15); // R qlogis(0.25)
-        assert!((plogis(0.3) - 0.57444251681165903).abs() <= 1e-15); // R plogis(0.3)
+        assert!((plogis(0.3) - 0.574442516811659).abs() <= 1e-15); // R plogis(0.3)
         assert_eq!((plogis(-800.0), plogis(800.0)), (0.0, 1.0));
         assert!((plogis(qlogis(0.2)) - 0.2).abs() <= 1e-15);
         assert_eq!(

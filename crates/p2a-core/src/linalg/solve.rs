@@ -137,7 +137,8 @@ impl Qr {
             )));
         }
         if let Some(k) = cols.iter().position(|v| !v.is_finite()) {
-            let (j, i) = if n == 0 { (0, 0) } else { (k / n, k % n) };
+            // a value exists, so n * p > 0 and n > 0
+            let (j, i) = (k / n, k % n);
             return Err(spec(format!(
                 "x contains a non-finite value (row {i}, column {j})"
             )));
@@ -1208,8 +1209,8 @@ mod tests {
         let h = ndarray::array![[-4.0, 1.0], [1.0, -3.0]];
         let s = sym_inverse(h.view(), SingularPolicy::Error, "H").unwrap();
         let r = ndarray::array![
-            [-0.27272727272727271, -0.090909090909090912],
-            [-0.090909090909090912, -0.36363636363636365]
+            [-0.2727272727272727, -0.09090909090909091],
+            [-0.09090909090909091, -0.36363636363636365]
         ];
         for (g, w) in s.inverse.iter().zip(r.iter()) {
             assert!((g - w).abs() <= 1e-15);
