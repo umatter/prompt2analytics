@@ -39,10 +39,9 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, ShapeBuilder, s};
 use polars::prelude::*;
+use rand::SeedableRng;
 use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
@@ -217,7 +216,34 @@ pub struct GlmnetCvResult {
     pub lambda_1se_index: usize,
     /// Number of folds used
     pub nfolds: usize,
+    /// Fold label (1..=nfolds, R's `foldid`) of each observation.
+    #[serde(default)]
+    pub foldid: Vec<usize>,
+    /// Length of each fold's own lambda path.
+    #[serde(default)]
+    pub fold_path_lengths: Vec<usize>,
+    /// Notes of the fold fits, prefixed `fold k: `.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
+
+impl GlmnetCvResult {
+    /// The full-data fit at `lambda.min`.
+    pub fn fit_min(&self) -> &GlmnetCoefficients {
+        &self.fit.fits[self.lambda_min_index]
+    }
+
+    /// The full-data fit at `lambda.1se`.
+    pub fn fit_1se(&self) -> &GlmnetCoefficients {
+        &self.fit.fits[self.lambda_1se_index]
+    }
+}
+
+/// Seed of [`cv_glmnet`]'s fold assignment when `seed` is `None` (so a call is reproducible).
+pub const CV_GLMNET_DEFAULT_SEED: u64 = 42;
+
+/// cv.glmnet's bound on predicted probabilities in the binomial deviance (`cv.lognet`).
+const CV_PROB_MIN: f64 = 1e-5;
 
 /// Relative slack of the soft-threshold: a gradient within summation rounding of the threshold
 /// counts as at the threshold. A fit at `lambda_max` computed in other arithmetic (R's path, a
@@ -492,16 +518,6 @@ fn first_lambda_failure(max_iter: usize, last_change: f64) -> EconError {
         last_change,
         suggestion: "increase max_iter or thresh".to_string(),
     }
-}
-
-/// Compute deviance for Binomial family
-fn deviance_binomial(y: &ArrayView1<f64>, prob: &Array1<f64>) -> f64 {
-    let mut dev = 0.0;
-    for i in 0..y.len() {
-        let p = prob[i].max(1e-10).min(1.0 - 1e-10);
-        dev -= 2.0 * (y[i] * p.ln() + (1.0 - y[i]) * (1.0 - p).ln());
-    }
-    dev
 }
 
 /// Check the controls of a glmnet configuration (rule R3: every error is an
@@ -1038,7 +1054,9 @@ pub fn run_glmnet(
     Ok(result)
 }
 
-/// Cross-validation for glmnet
+/// Cross-validated glmnet with random folds: `nfolds` in 2..=n (R requires at least 3), labels
+/// `(i mod nfolds) + 1` shuffled with ChaCha8 seeded by `seed` (default
+/// [`CV_GLMNET_DEFAULT_SEED`]), then [`cv_glmnet_foldid`].
 pub fn cv_glmnet(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
@@ -1047,7 +1065,6 @@ pub fn cv_glmnet(
     seed: Option<u64>,
 ) -> EconResult<GlmnetCvResult> {
     let n = x.nrows();
-
     if nfolds < 2 || nfolds > n {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -1055,119 +1072,142 @@ pub fn cv_glmnet(
             ),
         });
     }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed.unwrap_or(CV_GLMNET_DEFAULT_SEED));
+    let mut foldid = resource::try_with_capacity::<usize>(n, "glmnet fold labels")?;
+    foldid.extend((0..n).map(|i| i % nfolds + 1));
+    foldid.shuffle(&mut rng);
+    cv_glmnet_foldid(x, y, config, &foldid)
+}
 
-    // First fit on full data to get lambda sequence
-    let full_fit = glmnet(x, y, config)?;
-    let lambda_seq = full_fit.lambda.clone();
-    let nlambda = lambda_seq.len();
+/// `cv.glmnet(foldid = ...)`: labels 1..=K (K >= 2), one per row, every label used.
+///
+/// The full data are fitted first; its lambdas are the CV grid. Each fold is fitted on its own
+/// path (the user's `lambda` when given, as cv.glmnet passes it through) and its held-out rows
+/// are predicted at every grid lambda by [`glmnet_predict`]'s interpolation, clamped at the
+/// fold path's ends, so every lambda has an error from every fold. The error is the squared
+/// residual (gaussian) or the binomial deviance with probabilities bounded at 1e-5;
+/// `cvm` and `cvsd` are cv.glmnet's fold-size-weighted mean and standard error of the fold means.
+pub fn cv_glmnet_foldid(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    config: &GlmnetConfig,
+    foldid: &[usize],
+) -> EconResult<GlmnetCvResult> {
+    let n = x.nrows();
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    if foldid.len() != n {
+        return spec(format!(
+            "foldid must have one label per row: {} labels for {n} rows",
+            foldid.len()
+        ));
+    }
+    if foldid.contains(&0) {
+        return spec("foldid labels must be 1, 2, ..., K (got 0)".to_string());
+    }
+    let k = foldid.iter().copied().max().unwrap_or(0);
+    if k < 2 {
+        return spec("foldid must use at least 2 folds".to_string());
+    }
+    let mut sizes = resource::try_vec(k, 0usize, "glmnet fold sizes")?;
+    for &f in foldid {
+        sizes[f - 1] += 1;
+    }
+    if let Some(unused) = sizes.iter().position(|&c| c == 0) {
+        return spec(format!(
+            "foldid: label {} of 1..={k} has no observation",
+            unused + 1
+        ));
+    }
 
-    // Create fold assignments
-    let mut rng = match seed {
-        Some(s) => ChaCha8Rng::seed_from_u64(s),
-        None => ChaCha8Rng::from_entropy(),
+    let full = glmnet(x, y, config)?;
+    let lambda = full.lambda.clone();
+    let nl = lambda.len();
+    // the response the errors are computed on (binomial: coded 0/1 as the fit codes it)
+    let yerr: Vec<f64> = match config.family {
+        GlmnetFamily::Gaussian => y.to_vec(),
+        GlmnetFamily::Binomial => binomial_response(y)?.0,
     };
-
-    let mut fold_ids: Vec<usize> = (0..n).map(|i| i % nfolds).collect();
-    fold_ids.shuffle(&mut rng);
-
-    // Cross-validation errors
-    let mut cv_errors: Vec<Vec<f64>> = vec![Vec::with_capacity(nlambda); nfolds];
-
-    for fold in 0..nfolds {
+    let what = "glmnet cross-validation errors";
+    let mut fold_means = resource::try_vec(resource::checked_len(&[k, nl], what)?, 0.0, what)?;
+    let mut fold_path_lengths = Vec::with_capacity(k);
+    let mut warnings = Vec::new();
+    for fold in 1..=k {
         resource::checkpoint()?;
-        // Create train/test split
-        let train_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] != fold).collect();
-        let test_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] == fold).collect();
-
-        let n_train = train_idx.len();
-        let n_test = test_idx.len();
-
-        let mut x_train = Array2::zeros((n_train, x.ncols()));
-        let mut y_train = Array1::zeros(n_train);
-        let mut x_test = Array2::zeros((n_test, x.ncols()));
-        let mut y_test = Array1::zeros(n_test);
-
-        for (new_i, &orig_i) in train_idx.iter().enumerate() {
-            x_train.row_mut(new_i).assign(&x.row(orig_i));
-            y_train[new_i] = y[orig_i];
-        }
-        for (new_i, &orig_i) in test_idx.iter().enumerate() {
-            x_test.row_mut(new_i).assign(&x.row(orig_i));
-            y_test[new_i] = y[orig_i];
-        }
-
-        // Fit on training data with fixed lambda sequence
-        let mut fold_config = config.clone();
-        fold_config.lambda = Some(lambda_seq.clone());
-        let fold_fit = glmnet(x_train.view(), y_train.view(), &fold_config)?;
-
-        // Compute test error for each lambda
-        for fit in &fold_fit.fits {
-            let coefs = Array1::from_vec(fit.coefficients.clone());
-            let fitted = x_test.dot(&coefs) + fit.intercept;
-
-            let error = match config.family {
-                GlmnetFamily::Gaussian => {
-                    let mse: f64 = (&y_test - &fitted).mapv(|r| r * r).sum() / n_test as f64;
-                    mse
-                }
-                GlmnetFamily::Binomial => {
-                    let prob = fitted.mapv(|e| 1.0 / (1.0 + (-e).exp()));
-                    deviance_binomial(&y_test.view(), &prob) / n_test as f64
-                }
-            };
-            cv_errors[fold].push(error);
+        let train: Vec<usize> = (0..n).filter(|&i| foldid[i] != fold).collect();
+        let test: Vec<usize> = (0..n).filter(|&i| foldid[i] == fold).collect();
+        let x_train = x.select(Axis(0), &train);
+        let y_train = y.select(Axis(0), &train);
+        let x_test = x.select(Axis(0), &test);
+        let f = glmnet(x_train.view(), y_train.view(), config)?;
+        fold_path_lengths.push(f.lambda.len());
+        warnings.extend(f.warnings.iter().map(|w| format!("fold {fold}: {w}")));
+        for (l, &lam) in lambda.iter().enumerate() {
+            let (b0, beta) = interpolate(&f, lam)?;
+            let eta = x_test.dot(&Array1::from_vec(beta)) + b0;
+            let err: f64 = test
+                .iter()
+                .zip(eta.iter())
+                .map(|(&i, &e)| match config.family {
+                    GlmnetFamily::Gaussian => (yerr[i] - e).powi(2),
+                    GlmnetFamily::Binomial => {
+                        let p = (1.0 / (1.0 + (-e).exp())).clamp(CV_PROB_MIN, 1.0 - CV_PROB_MIN);
+                        -2.0 * (yerr[i] * p.ln() + (1.0 - yerr[i]) * (1.0 - p).ln())
+                    }
+                })
+                .sum();
+            fold_means[(fold - 1) * nl + l] = err / test.len() as f64;
         }
     }
 
-    // Compute mean and standard error across folds
-    let cvm: Vec<f64> = (0..nlambda)
-        .map(|l| {
-            let errors: Vec<f64> = cv_errors.iter().filter_map(|f| f.get(l).copied()).collect();
-            errors.iter().sum::<f64>() / errors.len() as f64
-        })
-        .collect();
-
-    let cvsd: Vec<f64> = (0..nlambda)
-        .map(|l| {
-            let errors: Vec<f64> = cv_errors.iter().filter_map(|f| f.get(l).copied()).collect();
-            let mean = cvm[l];
-            let var: f64 =
-                errors.iter().map(|&e| (e - mean).powi(2)).sum::<f64>() / (errors.len() - 1) as f64;
-            (var / errors.len() as f64).sqrt()
-        })
-        .collect();
-
+    let total = n as f64;
+    let mut cvm = Vec::with_capacity(nl);
+    let mut cvsd = Vec::with_capacity(nl);
+    for l in 0..nl {
+        let m = (0..k)
+            .map(|f| sizes[f] as f64 * fold_means[f * nl + l])
+            .sum::<f64>()
+            / total;
+        let var = (0..k)
+            .map(|f| sizes[f] as f64 * (fold_means[f * nl + l] - m).powi(2))
+            .sum::<f64>()
+            / total
+            / (k - 1) as f64;
+        cvm.push(m);
+        cvsd.push(var.sqrt());
+    }
     let cvup: Vec<f64> = cvm.iter().zip(&cvsd).map(|(&m, &s)| m + s).collect();
     let cvlo: Vec<f64> = cvm.iter().zip(&cvsd).map(|(&m, &s)| m - s).collect();
 
-    // Find lambda.min and lambda.1se
-    let (lambda_min_index, &lambda_min_cvm) = cvm
+    // lambda.min: the largest lambda with the smallest finite cvm (the first index)
+    let lambda_min_index = cvm
         .iter()
         .enumerate()
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .unwrap();
-    let lambda_min = lambda_seq[lambda_min_index];
-
-    // lambda.1se: largest lambda within 1 SE of minimum
-    let threshold = lambda_min_cvm + cvsd[lambda_min_index];
+        .filter(|(_, v)| v.is_finite())
+        .min_by(|(i, a), (j, b)| a.total_cmp(b).then(i.cmp(j)))
+        .map(|(i, _)| i)
+        .ok_or_else(|| {
+            EconError::Computation("cross-validation produced no finite error".to_string())
+        })?;
+    let threshold = cvm[lambda_min_index] + cvsd[lambda_min_index];
     let lambda_1se_index = (0..=lambda_min_index)
         .find(|&i| cvm[i] <= threshold)
         .unwrap_or(lambda_min_index);
-    let lambda_1se = lambda_seq[lambda_1se_index];
 
     Ok(GlmnetCvResult {
-        fit: full_fit,
-        lambda: lambda_seq,
+        lambda_min: lambda[lambda_min_index],
+        lambda_1se: lambda[lambda_1se_index],
+        fit: full,
+        lambda,
         cvm,
         cvsd,
         cvup,
         cvlo,
-        lambda_min,
         lambda_min_index,
-        lambda_1se,
         lambda_1se_index,
-        nfolds,
+        nfolds: k,
+        foldid: foldid.to_vec(),
+        fold_path_lengths,
+        warnings,
     })
 }
 
@@ -1253,60 +1293,82 @@ pub fn run_lasso(
     run_glmnet(dataset, y_col, x_cols, &config)
 }
 
-/// Predict from glmnet result at a specific lambda
+/// The fit at `s` as `predict.glmnet(s, exact = FALSE)` (glmnet's `lambda.interp`): linear
+/// interpolation in lambda between the two bracketing fits, clamped to the first / last fit
+/// outside the path. Returns the intercept and the coefficients.
+fn interpolate(result: &GlmnetResult, s: f64) -> EconResult<(f64, Vec<f64>)> {
+    if !(s.is_finite() && s >= 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("lambda must be finite and non-negative (got {s})"),
+        });
+    }
+    let fits = &result.fits;
+    let (Some(first), Some(last)) = (fits.first(), fits.last()) else {
+        return Err(EconError::Computation("empty lambda path".to_string()));
+    };
+    let pick = |f: &GlmnetCoefficients| Ok((f.intercept, f.coefficients.clone()));
+    if fits.len() == 1 || s >= first.lambda {
+        return pick(first);
+    }
+    if s <= last.lambda {
+        return pick(last);
+    }
+    // l: the last fit with lambda >= s (lambdas decrease along the path)
+    let l = fits.iter().rposition(|f| f.lambda >= s).unwrap_or(0);
+    if fits[l].lambda == s {
+        return pick(&fits[l]);
+    }
+    let (left, right) = (&fits[l], &fits[l + 1]);
+    let frac = (s - right.lambda) / (left.lambda - right.lambda);
+    let mix = |a: f64, b: f64| frac * a + (1.0 - frac) * b;
+    Ok((
+        mix(left.intercept, right.intercept),
+        left.coefficients
+            .iter()
+            .zip(&right.coefficients)
+            .map(|(&a, &b)| mix(a, b))
+            .collect(),
+    ))
+}
+
+/// Predict at `lambda` as `predict.glmnet(s = lambda, exact = FALSE)`: the coefficients are
+/// linearly interpolated between the bracketing fits (clamped to the first / last fit outside
+/// the path); probabilities for binomial. `lambda` must be finite and >= 0 and `x` must have the
+/// fit's number of columns (otherwise `InvalidSpecification`).
 pub fn glmnet_predict(
     result: &GlmnetResult,
     x: ArrayView2<f64>,
     lambda: f64,
 ) -> EconResult<Array1<f64>> {
-    // Find the closest lambda
-    let idx = result
-        .lambda
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            ((*a - lambda).abs())
-                .partial_cmp(&((*b - lambda).abs()))
-                .unwrap()
-        })
-        .map(|(i, _)| i)
-        .ok_or_else(|| EconError::Computation("Empty lambda sequence".to_string()))?;
-
-    let fit = &result.fits[idx];
-    let coefs = Array1::from_vec(fit.coefficients.clone());
-
-    let eta = x.dot(&coefs) + fit.intercept;
-
+    if x.ncols() != result.n_features {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "x has {} columns but the fit has {}",
+                x.ncols(),
+                result.n_features
+            ),
+        });
+    }
+    let (b0, beta) = interpolate(result, lambda)?;
+    let eta = x.dot(&Array1::from_vec(beta)) + b0;
     match result.family {
         GlmnetFamily::Gaussian => Ok(eta),
         GlmnetFamily::Binomial => Ok(eta.mapv(|e| 1.0 / (1.0 + (-e).exp()))),
     }
 }
 
-/// Get coefficients at a specific lambda
+/// `coef.glmnet(s = lambda)`: the intercept and the nonzero coefficients, by name, of the fit
+/// interpolated at `lambda` (as [`glmnet_predict`]).
 pub fn glmnet_coef(result: &GlmnetResult, lambda: f64) -> EconResult<(f64, Vec<(String, f64)>)> {
-    let idx = result
-        .lambda
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            ((*a - lambda).abs())
-                .partial_cmp(&((*b - lambda).abs()))
-                .unwrap()
-        })
-        .map(|(i, _)| i)
-        .ok_or_else(|| EconError::Computation("Empty lambda sequence".to_string()))?;
-
-    let fit = &result.fits[idx];
-    let coefs: Vec<(String, f64)> = result
+    let (b0, beta) = interpolate(result, lambda)?;
+    let coefs = result
         .variable_names
         .iter()
-        .zip(&fit.coefficients)
-        .filter(|(_, c)| c.abs() > 1e-10)
-        .map(|(name, &c)| (name.clone(), c))
+        .zip(beta)
+        .filter(|(_, c)| *c != 0.0)
+        .map(|(name, c)| (name.clone(), c))
         .collect();
-
-    Ok((fit.intercept, coefs))
+    Ok((b0, coefs))
 }
 
 impl std::fmt::Display for GlmnetResult {
@@ -1688,6 +1750,19 @@ mod tests {
         r.fits
             .iter()
             .flat_map(|f| std::iter::once(f.intercept).chain(f.coefficients.iter().copied()))
+            .collect()
+    }
+    fn coef_vec(f: &GlmnetCoefficients) -> Vec<f64> {
+        std::iter::once(f.intercept)
+            .chain(f.coefficients.iter().copied())
+            .collect()
+    }
+    fn fold_ids(ds: &Dataset, col: &str) -> Vec<usize> {
+        numeric_column(ds.df(), col, NaPolicy::Fail)
+            .unwrap()
+            .0
+            .iter()
+            .map(|&v| v as usize)
             .collect()
     }
     fn dev_ratios(r: &GlmnetResult) -> Vec<f64> {
@@ -2085,6 +2160,14 @@ mod tests {
             glmnet(x.view(), array![1.0, 0.0, 0.0, 0.0, 0.0].view(), &cb),
             "1 or 0 observations",
         );
+        for f in [
+            &[1, 1, 2, 2][..],
+            &[0, 1, 1, 2, 2],
+            &[1, 1, 1, 1, 1],
+            &[1, 1, 3, 3, 3],
+        ] {
+            assert_spec(cv_glmnet_foldid(x.view(), y.view(), &c, f), "foldid");
+        }
     }
 
     #[test]
@@ -2170,5 +2253,138 @@ mod tests {
             "{:?}",
             w.warnings
         );
+    }
+
+    #[test]
+    fn test_validate_cv_glmnet_foldid() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let (x, y) = xy(&ds, "y", &X8);
+        let cv = cv_glmnet_foldid(
+            x.view(),
+            y.view(),
+            &tight(1.0, true, true, None),
+            &fold_ids(&ds, "foldid"),
+        )
+        .unwrap();
+        let (xb, yb) = xy(&ds, "yb", &X8);
+        let mut cb = tight(1.0, true, true, None);
+        cb.family = GlmnetFamily::Binomial;
+        let cvb = cv_glmnet_foldid(xb.view(), yb.view(), &cb, &fold_ids(&ds, "foldid7")).unwrap();
+        let idx = |c: &GlmnetCvResult| {
+            vec![
+                (c.lambda_min_index + 1) as f64,
+                (c.lambda_1se_index + 1) as f64,
+            ]
+        };
+        let lens = |c: &GlmnetCvResult| {
+            c.fold_path_lengths
+                .iter()
+                .map(|&l| l as f64)
+                .collect::<Vec<_>>()
+        };
+        Check::new(&case)
+            .vector("path_lambda", &cv.lambda, Tol::coef(150))
+            .vector("cv_cvm_tight", &cv.cvm, Tol::iterative(1e-9))
+            .vector("cv_cvsd_tight", &cv.cvsd, Tol::iterative(1e-9))
+            .vector("cv_cvm", &cv.cvm, Tol::new(1e-7, 0.0)) // cv.glmnet's folds stop at thresh 1e-14: 6.7e-9 rel
+            .vector("cv_cvsd", &cv.cvsd, Tol::new(1e-6, 0.0)) // 3.04e-8 rel
+            .vector("cv_index", &idx(&cv), Tol::exact())
+            .vector("cv_fold_path_length", &lens(&cv), Tol::exact())
+            .scalar("cv_lambda_min", cv.lambda_min, Tol::coef(150))
+            .scalar("cv_lambda_1se", cv.lambda_1se, Tol::coef(150))
+            .vector("cv_coef_min", &coef_vec(cv.fit_min()), R_GLMNET)
+            .vector("cv_coef_1se", &coef_vec(cv.fit_1se()), R_GLMNET)
+            .vector("cvb_lambda", &cvb.lambda, Tol::coef(150))
+            .vector("cvb_cvm_tight", &cvb.cvm, Tol::iterative(1e-9))
+            .vector("cvb_cvsd_tight", &cvb.cvsd, Tol::iterative(1e-9))
+            .vector("cvb_cvm", &cvb.cvm, Tol::new(1e-7, 0.0))
+            .vector("cvb_cvsd", &cvb.cvsd, Tol::new(1e-6, 0.0))
+            .vector("cvb_index", &idx(&cvb), Tol::exact())
+            .vector("cvb_fold_path_length", &lens(&cvb), Tol::exact())
+            .finish();
+        // the full-data fit's coefficients at lambda.min / lambda.1se are path columns 38 / 22
+        let pt = case.vector("path_coef_tight");
+        for (f, col) in [(cv.fit_min(), 37), (cv.fit_1se(), 21)] {
+            for (a, e) in coef_vec(f).iter().zip(&pt[col * 9..col * 9 + 9]) {
+                assert!(EXACT.allows(*a, *e), "{a} vs {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cv_glmnet_exact_fit_has_finite_cvsd() {
+        // REG-42 (d); degenerate input on purpose (no noise). Pre-WP07 every fold ran the
+        // full-data lambdas and stopped at dev.ratio > 0.999 at its own index, so lambdas past a
+        // fold's stop had one fold error (cvsd 0/0 = NaN) or none (`errors.len() - 1` underflow).
+        let x = Array2::from_shape_fn((20, 2), |(i, j)| {
+            if j == 0 {
+                (i + 1) as f64
+            } else {
+                ((7 * (i + 1)) % 11) as f64
+            }
+        });
+        let y = x.column(0).mapv(|v| 3.0 + 2.0 * v);
+        for seed in 0..20u64 {
+            let cv =
+                cv_glmnet(x.view(), y.view(), &GlmnetConfig::default(), 2, Some(seed)).unwrap();
+            assert_eq!(cv.cvm.len(), cv.lambda.len());
+            assert!(
+                cv.cvm.iter().chain(&cv.cvsd).all(|v| v.is_finite()),
+                "seed {seed}: {:?}",
+                cv.cvsd
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_glmnet_predict_interpolates() {
+        let (case, ds) = crate::test_support::load_case("glmnet_paths");
+        let fit = run_glmnet(&ds, "y", &X8, &tight(1.0, true, true, None)).unwrap();
+        let mut got = Vec::new();
+        for s in case.vector("interp_s") {
+            // 2.5 (above lambda_max), 0.5, 0.05, 1e-4 (below the path)
+            let (b0, nz) = glmnet_coef(&fit, s).unwrap();
+            got.push(b0);
+            got.extend(
+                X8.iter()
+                    .map(|n| nz.iter().find(|(m, _)| m == n).map_or(0.0, |(_, c)| *c)),
+            );
+        }
+        let (x, _) = xy(&ds, "y", &X8);
+        let pred = glmnet_predict(&fit, x.slice(s![..3, ..]), 0.5).unwrap();
+        let mut cb = tight(1.0, true, true, None);
+        cb.family = GlmnetFamily::Binomial;
+        let fb = run_glmnet(&ds, "yb", &X8, &cb).unwrap();
+        let prob = glmnet_predict(&fb, x.slice(s![..3, ..]), 0.05).unwrap();
+        Check::new(&case)
+            .vector("interp_coef_tight", &got, EXACT)
+            .vector("interp_coef", &got, R_GLMNET)
+            .vector(
+                "interp_pred",
+                pred.as_slice().unwrap(),
+                Tol::new(1e-6, 1e-6),
+            )
+            .vector("binom_interp_prob_tight", prob.as_slice().unwrap(), EXACT)
+            .vector(
+                "binom_interp_prob",
+                prob.as_slice().unwrap(),
+                Tol::new(1e-6, 1e-7),
+            )
+            .finish();
+        for bad in [f64::NAN, -1.0, f64::INFINITY] {
+            // R5: a NaN lambda was a partial_cmp(..).unwrap() panic
+            assert!(matches!(
+                glmnet_predict(&fit, x.view(), bad).unwrap_err(),
+                EconError::InvalidSpecification { .. }
+            ));
+            assert!(matches!(
+                glmnet_coef(&fit, bad).unwrap_err(),
+                EconError::InvalidSpecification { .. }
+            ));
+        }
+        assert!(matches!(
+            glmnet_predict(&fit, x.slice(s![.., ..3]), 0.5).unwrap_err(),
+            EconError::InvalidSpecification { .. }
+        ));
     }
 }
