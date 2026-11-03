@@ -8,6 +8,7 @@ members = [
     "crates/p2a-chat",
     "crates/p2a-dioxus",
     "crates/p2a-validation",
+    "crates/p2a-text",
 ]
 [workspace.package]
 version = "0.4.0"
@@ -18,6 +19,10 @@ repository = "https://github.com/umatter/prompt2analytics"
 rust-version = "1.88"
 
 [workspace.dependencies]
+# Char-boundary-safe text truncation (crates/p2a-text). Keep `version` equal to [workspace.package].version:
+# crates.io needs it on path dependencies, and p2a-text must be published before p2a-core.
+p2a-text = { path = "crates/p2a-text", version = "0.4.0" }
+
 # DataFrame and data manipulation
 polars = { version = "0.52", features = ["lazy", "csv", "parquet", "dtype-full", "diagonal_concat", "semi_anti_join", "cross_join", "pivot", "rows", "cum_agg", "rank", "strings", "timezones", "dtype-datetime", "dtype-date", "dtype-time", "dtype-duration"] }
 polars-ops = { version = "0.52", features = ["pivot", "rank", "strings"] }

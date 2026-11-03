@@ -216,7 +216,7 @@ impl std::fmt::Display for SensemakrResult {
                 writeln!(
                     f,
                     "{:>20} {:>10.1} {:>10.1} {:>12.4} {:>12.4} {:>12.4}",
-                    truncate_str(&bound.benchmark, 20),
+                    p2a_text::ellipsize(&bound.benchmark, 20),
                     bound.kd,
                     bound.ky,
                     bound.r2_yd_bound,
@@ -245,15 +245,6 @@ impl std::fmt::Display for SensemakrResult {
         }
 
         Ok(())
-    }
-}
-
-/// Truncate string for display.
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    } else {
-        s.to_string()
     }
 }
 
@@ -1088,5 +1079,39 @@ mod tests {
         // First point should be original estimate (no confounding)
         let original = ols.coefficients.iter().find(|c| c.name == "x").unwrap();
         assert!((contour.adjusted_estimates[0][0] - original.estimate).abs() < 1e-6);
+    }
+
+    /// REG-17 (sensemakr.rs): benchmark names over 20 bytes were cut at byte 17; '²' spans bytes 16..18.
+    #[test]
+    fn test_display_non_ascii_benchmark_name() {
+        let n = 40;
+        let t: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+        let x1: Vec<f64> = (0..n)
+            .map(|i| ((i * 37) % 11) as f64 / 10.0 - 0.5)
+            .collect();
+        let w: Vec<f64> = (0..n).map(|i| ((i * 53) % 13) as f64 / 12.0).collect();
+        let e: Vec<f64> = (0..n)
+            .map(|i| ((i * 71) % 17) as f64 / 17.0 - 0.5)
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.5 + 2.0 * t[i] + x1[i] + 0.5 * w[i] + 0.3 * e[i])
+            .collect();
+        let bench = "Wohnfläche_in_m²_netto"; // 24 bytes, 22 chars
+        let df = df! { "y" => y, "treatment" => t, "x1" => x1, bench => w }.unwrap();
+        let r = run_sensemakr(
+            &Dataset::new(df),
+            "y",
+            "treatment",
+            &["x1", bench],
+            Some(&[bench]),
+            Some(1.0),
+            Some(1.0),
+            1.0,
+            0.05,
+        )
+        .unwrap();
+        assert_eq!(r.benchmark_bounds.len(), 1);
+        let out = r.to_string();
+        assert!(out.contains("Wohnfläche_in_m²_... "), "{out}"); // 20 chars, {:>20}
     }
 }

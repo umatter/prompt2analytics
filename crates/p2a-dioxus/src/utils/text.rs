@@ -1,23 +1,12 @@
 //! Text utilities.
 
-/// Return the largest prefix of `s` that is at most `max_bytes` long and ends
-/// on a UTF-8 character boundary.
+/// The longest prefix of `s` that is at most `max_bytes` long and ends on a UTF-8 character
+/// boundary.
 ///
-/// Slicing a `&str` with a raw byte range (`&s[..max_bytes]`) panics when the
-/// cut falls inside a multi-byte character — very common for analytics output
-/// (σ, β, χ², ±, accented names, non-ASCII data values). This truncates safely
-/// instead, never splitting a character.
-pub fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    // Walk back to the nearest char boundary at or below max_bytes.
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
+/// Slicing a `&str` with a raw byte range (`&s[..max_bytes]`) panics when the cut falls inside a
+/// multi-byte character (σ, β, χ², ±, accented names, non-ASCII data values). Re-exported from
+/// `p2a_text::truncate_bytes`, the workspace's single char-boundary helper (rule R8).
+pub use p2a_text::truncate_bytes as truncate_on_char_boundary;
 
 /// Escape a string for safe interpolation inside a **single-quoted** JavaScript
 /// string literal (as used with `dioxus::document::eval` on the desktop path).

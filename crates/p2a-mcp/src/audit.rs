@@ -954,14 +954,7 @@ fn json_string_len(s: &str) -> usize {
 /// The largest char boundary of `s` at or below `max` (`str::floor_char_boundary`
 /// is newer than the MSRV).
 fn floor_char_boundary(s: &str, max: usize) -> usize {
-    if max >= s.len() {
-        return s.len();
-    }
-    let mut i = max;
-    while !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+    p2a_text::floor_char_boundary(s, max)
 }
 
 #[cfg(test)]

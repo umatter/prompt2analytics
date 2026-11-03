@@ -1,0 +1,18 @@
+[package]
+name = "p2a-text"
+description = "Char-boundary-safe text truncation for prompt2analytics (no dependencies, wasm-safe)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+keywords = ["utf-8", "truncate", "text", "unicode"]
+categories = ["text-processing"]
+
+# Deliberately empty: p2a-core, p2a-mcp, p2a-cli, p2a-chat and p2a-dioxus (wasm32) all depend on this
+# crate. Publish it to crates.io before p2a-core.
+[dependencies]
+
+[lints]
+workspace = true

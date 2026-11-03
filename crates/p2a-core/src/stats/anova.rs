@@ -207,7 +207,7 @@ impl std::fmt::Display for AnovaResult {
             writeln!(
                 f,
                 "{:>15} {:>8} {:>12.4} {:>12.4}",
-                truncate(&group.group, 15),
+                p2a_text::ellipsize(&group.group, 15),
                 group.n,
                 group.mean,
                 group.std_dev
@@ -227,15 +227,6 @@ impl std::fmt::Display for AnovaResult {
         }
 
         Ok(())
-    }
-}
-
-/// Truncate a string to a maximum length.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    } else {
-        s.to_string()
     }
 }
 
@@ -607,7 +598,7 @@ impl std::fmt::Display for TwoWayAnovaResult {
             writeln!(
                 f,
                 "{:>15} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.4} {}",
-                truncate(&label, 15),
+                p2a_text::ellipsize(&label, 15),
                 self.ss_ab.unwrap_or(f64::NAN),
                 df_ab,
                 self.ms_ab.unwrap_or(f64::NAN),
@@ -619,7 +610,7 @@ impl std::fmt::Display for TwoWayAnovaResult {
             writeln!(
                 f,
                 "{:>15} not estimable (empty cells leave no interaction df)",
-                truncate(&label, 15)
+                p2a_text::ellipsize(&label, 15)
             )?;
         }
 
@@ -2314,5 +2305,37 @@ mod tests {
             run_two_way_anova(&ds, "y", "block", "block", true),
             Err(EconError::InvalidSpecification { .. })
         ));
+    }
+
+    /// REG-17 (anova.rs, one-way rows): labels over 15 bytes were cut at byte 12; 'ö' spans bytes 11..13.
+    #[test]
+    fn test_one_way_display_non_ascii_group_labels() {
+        let (a, b, c) = ("Haushaltsgrößenklasse", "Größe_kg", "収入合計額の階層");
+        let df = df! {
+            "y" => [4.1, 3.8, 4.6, 4.3, 5.2, 5.9, 5.5, 6.1, 3.2, 2.9, 3.7, 3.4],
+            "g" => [a, a, a, a, b, b, b, b, c, c, c, c],
+        }
+        .unwrap();
+        let out = run_one_way_anova(&Dataset::new(df), "y", "g")
+            .unwrap()
+            .to_string();
+        assert!(out.contains("Haushaltsgrö... "), "{out}"); // 15 chars
+        assert!(out.contains("       Größe_kg "), "{out}");
+        assert!(out.contains("       収入合計額の階層 "), "{out}"); // 8 chars fit (old rule printed "収入合計...")
+    }
+
+    /// REG-17 (anova.rs, interaction row): "Haushalt:Größe" is 16 bytes and 'ö' spans bytes 11..13.
+    #[test]
+    fn test_two_way_display_non_ascii_interaction_label() {
+        let df = df! {
+            "y" => [5.1, 4.8, 5.4, 6.2, 6.6, 6.0, 4.4, 4.9, 4.1, 7.3, 7.9, 7.5],
+            "Haushalt" => ["a1", "a1", "a1", "a1", "a1", "a1", "a2", "a2", "a2", "a2", "a2", "a2"],
+            "Größe" => ["b1", "b1", "b1", "b2", "b2", "b2", "b1", "b1", "b1", "b2", "b2", "b2"],
+        }
+        .unwrap();
+        let out = run_two_way_anova(&Dataset::new(df), "y", "Haushalt", "Größe", true)
+            .unwrap()
+            .to_string();
+        assert!(out.contains(" Haushalt:Größe "), "{out}"); // 14 chars, {:>15}
     }
 }

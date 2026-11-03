@@ -6860,6 +6860,7 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
+ "p2a-text",
  "reqwest",
  "rustyline",
  "serde",
@@ -6883,6 +6884,7 @@ dependencies = [
  "ndarray 0.16.1",
  "p2a-chat",
  "p2a-core",
+ "p2a-text",
  "p2a-validation",
  "polars",
  "predicates",
@@ -6915,6 +6917,7 @@ dependencies = [
  "image 0.24.9",
  "memory-stats",
  "ndarray 0.16.1",
+ "p2a-text",
  "p2a-validation",
  "plotlars",
  "plotters",
@@ -6955,6 +6958,7 @@ dependencies = [
  "image 0.25.9",
  "js-sys",
  "p2a-mcp",
+ "p2a-text",
  "pulldown-cmark",
  "reqwest",
  "serde",
@@ -6985,6 +6989,7 @@ dependencies = [
  "jsonwebtoken",
  "ndarray 0.16.1",
  "p2a-core",
+ "p2a-text",
  "p2a-validation",
  "polars",
  "polars-parquet",
@@ -7007,6 +7012,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
 ]
+
+[[package]]
+name = "p2a-text"
+version = "0.4.0"
 
 [[package]]
 name = "p2a-validation"

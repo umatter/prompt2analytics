@@ -396,12 +396,9 @@ impl DbConnection {
         let message_count =
             i32::try_from(self.count_messages(conversation_id).await?).unwrap_or(i32::MAX);
 
-        // Truncate preview if needed
-        let preview = if message_preview.len() > 100 {
-            format!("{}...", &message_preview[..97])
-        } else {
-            message_preview.to_string()
-        };
+        // Shorten the preview to 100 characters (a byte cut panics inside a
+        // multi-byte character).
+        let preview = p2a_text::ellipsize(message_preview, 100).into_owned();
 
         // Update conversation
         let conv_id = conversation_id.to_string();
@@ -657,4 +654,39 @@ struct Removed {
     messages: usize,
     bytes: u64,
     conversation: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::DbConnection;
+
+    /// MCP-6: the old `&preview[..97]` cut inside the 45th 'ä' (bytes 96..98); the request task panicked
+    /// after the message was stored, so message_count stayed 0.
+    #[tokio::test]
+    async fn preview_is_cut_on_char_boundaries() {
+        let db = DbConnection::connect_memory().await.unwrap();
+        let id = db
+            .create_conversation("session-utf8", "Umlaute")
+            .await
+            .unwrap()
+            .id_string();
+        let short = format!("Grüezi {}", "ä".repeat(60)); // 128 bytes, 67 chars
+        db.add_message(&id, "user", &short).await.unwrap();
+        let c = db.get_conversation(&id).await.unwrap();
+        assert_eq!(c.message_count, 1);
+        assert_eq!(c.last_message_preview.as_deref(), Some(short.as_str()));
+        let long = format!("Grüezi {}", "ä".repeat(120)); // 248 bytes, 127 chars
+        db.add_message(&id, "assistant", &long).await.unwrap();
+        let c = db.get_conversation(&id).await.unwrap();
+        assert_eq!(c.message_count, 2);
+        assert_eq!(
+            c.last_message_preview,
+            Some(format!("Grüezi {}...", "ä".repeat(90)))
+        );
+        db.add_message(&id, "user", &"x".repeat(150)).await.unwrap(); // ASCII: as before
+        assert_eq!(
+            db.get_conversation(&id).await.unwrap().last_message_preview,
+            Some(format!("{}...", "x".repeat(97)))
+        );
+    }
 }

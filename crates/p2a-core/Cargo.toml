@@ -26,6 +26,9 @@ database = ["dep:rusqlite", "dep:duckdb"]
 spectral-analysis = ["dep:rustfft"]
 
 [dependencies]
+# Char-boundary-safe truncation (rule R8)
+p2a-text.workspace = true
+
 # DataFrame and data manipulation
 polars.workspace = true
 polars-ops.workspace = true

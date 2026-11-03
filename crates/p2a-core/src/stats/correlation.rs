@@ -36,13 +36,16 @@ impl CorrelationMatrix {
         // Header row
         result.push_str(&format!("{:>12}", ""));
         for col in &self.columns {
-            result.push_str(&format!("{:>12}", truncate(col, 10)));
+            result.push_str(&format!("{:>12}", p2a_text::ellipsize(col, 10)));
         }
         result.push('\n');
 
         // Data rows
         for (i, row) in self.matrix.iter().enumerate() {
-            result.push_str(&format!("{:>12}", truncate(&self.columns[i], 10)));
+            result.push_str(&format!(
+                "{:>12}",
+                p2a_text::ellipsize(&self.columns[i], 10)
+            ));
             for val in row {
                 result.push_str(&format!("{:>12.4}", val));
             }
@@ -50,15 +53,6 @@ impl CorrelationMatrix {
         }
 
         result
-    }
-}
-
-/// Truncate a string to a maximum length.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s.to_string()
     }
 }
 
@@ -146,4 +140,44 @@ fn pearson_correlation(x: &Series, y: &Series) -> PolarsResult<f64> {
     }
 
     Ok(sum_xy / (sum_x2.sqrt() * sum_y2.sqrt()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REG-17 (correlation.rs): names over 10 bytes were cut at byte 7; '合' spans bytes 6..9 of "収入合計額"
+    /// and 'е' bytes 6..8 of "Население", so the compute_correlation tool panicked.
+    #[test]
+    fn test_to_string_table_non_ascii_names() {
+        let cm = CorrelationMatrix {
+            columns: vec![
+                "収入合計額".into(),
+                "Население".into(),
+                "Größe_kg_netto".into(),
+            ],
+            matrix: vec![
+                vec![1.0, 0.42137, -0.16752],
+                vec![0.42137, 1.0, 0.30561],
+                vec![-0.16752, 0.30561, 1.0],
+            ],
+        };
+        assert_eq!(
+            cm.to_string_table(),
+            concat!(
+                "                   収入合計額   Население  Größe_k...\n",
+                "       収入合計額      1.0000      0.4214     -0.1675\n",
+                "   Население      0.4214      1.0000      0.3056\n",
+                "  Größe_k...     -0.1675      0.3056      1.0000\n"
+            )
+        );
+        let ascii = CorrelationMatrix {
+            columns: vec!["income_total_usd".into()],
+            matrix: vec![vec![1.0]],
+        };
+        assert_eq!(
+            ascii.to_string_table(),
+            "              income_...\n  income_...      1.0000\n"
+        );
+    }
 }

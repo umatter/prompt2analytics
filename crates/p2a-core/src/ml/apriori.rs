@@ -115,11 +115,7 @@ impl std::fmt::Display for AprioriResult {
             writeln!(f, "{:-<56}", "")?;
 
             let mut sorted_rules = self.rules.clone();
-            sorted_rules.sort_by(|a, b| {
-                b.lift
-                    .partial_cmp(&a.lift)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            sorted_rules.sort_by(|a, b| b.lift.total_cmp(&a.lift));
 
             for rule in sorted_rules.iter().take(10) {
                 let lhs_str = if rule.lhs.is_empty() {
@@ -133,11 +129,7 @@ impl std::fmt::Display for AprioriResult {
                 writeln!(
                     f,
                     "{:<30} {:>8.4} {:>8.4} {:>8.2}",
-                    if rule_str.len() > 30 {
-                        format!("{}...", &rule_str[..27])
-                    } else {
-                        rule_str
-                    },
+                    p2a_text::ellipsize(&rule_str, 30),
                     rule.support,
                     rule.confidence,
                     rule.lift
@@ -397,11 +389,7 @@ pub fn apriori(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResu
     }
 
     // Sort rules by lift (descending)
-    rules.sort_by(|a, b| {
-        b.lift
-            .partial_cmp(&a.lift)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    rules.sort_by(|a, b| b.lift.total_cmp(&a.lift));
 
     Ok(AprioriResult {
         itemsets: frequent_itemsets,
@@ -716,11 +704,7 @@ pub fn eclat(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResult
         }
     }
 
-    rules.sort_by(|a, b| {
-        b.lift
-            .partial_cmp(&a.lift)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    rules.sort_by(|a, b| b.lift.total_cmp(&a.lift));
 
     Ok(AprioriResult {
         itemsets: frequent_itemsets,
@@ -943,6 +927,53 @@ mod tests {
             // Support(B) = 3/4 = 0.75
             // Lift = 0.667 / 0.75 = 0.889
             assert!((rule.lift - 0.889).abs() < 0.01);
+        }
+    }
+
+    /// ML-62: the rule string is 49 bytes and 'ü' spans bytes 26..28, so &rule_str[..27] panicked in Display.
+    #[test]
+    fn test_display_non_ascii_rule_is_cut_on_char_boundaries() {
+        let (v, m) = (
+            "Vollkornbrot geschnitten überbacken".to_string(),
+            "Milch".to_string(),
+        );
+        let tx = vec![
+            vec![v.clone(), m.clone()],
+            vec![v.clone(), m.clone()],
+            vec![v.clone(), m.clone()],
+            vec![m.clone()],
+            vec!["Käse".to_string()],
+        ];
+        let r = apriori(&tx, &AprioriConfig::default()).unwrap();
+        assert_eq!(r.rules.len(), 2); // {V}=>{M} conf 1.0 and {M}=>{V} conf 0.75, both lift 1.25
+        let out = r.to_string();
+        assert!(out.contains("{Vollkornbrot geschnitten ü... "), "{out}");
+        assert!(out.contains("{Milch} => {Vollkornbrot ge... "), "{out}"); // ASCII cut, as before
+    }
+
+    /// R5: rules are listed by non-increasing lift; lift is finite by construction (confidence / support_rhs,
+    /// support_rhs >= 1/n, else 0.0), so total_cmp orders exactly as the old NaN-tolerant comparison did.
+    #[test]
+    fn test_rules_sorted_by_lift_descending() {
+        let tx: Vec<Vec<String>> = vec![
+            vec!["bread", "milk"],
+            vec!["bread", "diaper", "beer"],
+            vec!["milk", "diaper", "beer"],
+            vec!["bread", "milk", "diaper", "beer"],
+            vec!["bread", "milk"],
+        ]
+        .into_iter()
+        .map(|t| t.into_iter().map(String::from).collect())
+        .collect();
+        let c = AprioriConfig {
+            min_support: 0.4,
+            min_confidence: 0.6,
+            min_lift: 0.0,
+            ..Default::default()
+        };
+        for r in [apriori(&tx, &c).unwrap(), eclat(&tx, &c).unwrap()] {
+            assert!(r.rules.len() >= 2);
+            assert!(r.rules.windows(2).all(|w| w[0].lift >= w[1].lift));
         }
     }
 }

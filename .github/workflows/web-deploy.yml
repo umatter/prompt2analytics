@@ -27,7 +27,10 @@ on:
       # p2a-dioxus, so it must redeploy too or the live site silently drifts from
       # main. p2a-core/p2a-mcp are deliberately absent: the `web` feature does not
       # depend on them (only `desktop`/`mobile` do), and assets live under
-      # crates/p2a-dioxus/assets, already covered above.
+      # crates/p2a-dioxus/assets, already covered above. p2a-text is the exception:
+      # it is compiled into the wasm bundle (`utils::text`), so a change to it must
+      # redeploy.
+      - 'crates/p2a-text/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
   workflow_dispatch:
