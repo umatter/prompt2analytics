@@ -16,6 +16,7 @@
 
 use crate::errors::{EconError, EconResult};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
@@ -100,19 +101,25 @@ impl std::fmt::Display for SilhouetteResult {
     }
 }
 
-/// Compute silhouette coefficient for cluster validation.
+/// Compute silhouette coefficient for cluster validation (R `cluster::silhouette`).
 ///
 /// The silhouette value measures how similar an object is to its own cluster
 /// compared to other clusters. Ranges from -1 (poor clustering) to +1 (good clustering).
 ///
 /// For each observation i:
 /// - a(i) = average distance to other points in same cluster
-/// - b(i) = smallest average distance to points in any other cluster
-/// - s(i) = (b(i) - a(i)) / max(a(i), b(i))
+/// - b(i) = smallest average distance to points in any other cluster (the neighbour cluster is the
+///   first minimiser)
+/// - s(i) = (b(i) - a(i)) / max(a(i), b(i)), and s(i) = 0 when i is alone in its cluster
+///   (Rousseeuw 1987) or a(i) = b(i)
 ///
 /// # Arguments
-/// * `data` - Input data matrix (n_samples x n_features)
+/// * `data` - Input data matrix (n_samples x n_features), finite values
 /// * `labels` - Cluster assignments (0-indexed)
+///
+/// # Errors
+/// `InvalidSpecification` when the labels do not have between 2 and n - 1 distinct values (where
+/// `cluster::silhouette` returns `NA`), for non-finite data, or for a length mismatch.
 ///
 /// # Returns
 /// * `SilhouetteResult` containing individual and average silhouette widths
@@ -139,115 +146,18 @@ pub fn silhouette(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<Silhoue
         return Err(EconError::EmptyDataset);
     }
 
-    // Find unique clusters and count
-    let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
-
-    if n_clusters < 2 {
-        return Err(EconError::InvalidSpecification {
-            message: "Need at least 2 clusters for silhouette analysis".to_string(),
-        });
-    }
-
-    // Group points by cluster
-    let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_clusters];
-    for (i, &label) in labels.iter().enumerate() {
-        cluster_indices[label].push(i);
-    }
-
-    // Compute pairwise distances (O(n^2))
-    let distances = compute_pairwise_distances(&data);
-
-    // Compute silhouette for each point
-    let mut silhouette_widths = Vec::with_capacity(n);
-    let mut silhouette_info = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let cluster_i = labels[i];
-        let cluster_i_indices = &cluster_indices[cluster_i];
-
-        // Compute a(i): average distance to other points in same cluster
-        let a_i = if cluster_i_indices.len() > 1 {
-            let sum: f64 = cluster_i_indices
-                .iter()
-                .filter(|&&j| j != i)
-                .map(|&j| distances[[i, j]])
-                .sum();
-            sum / (cluster_i_indices.len() - 1) as f64
-        } else {
-            0.0 // Singleton cluster
-        };
-
-        // Compute b(i): min average distance to any other cluster
-        let mut b_i = f64::INFINITY;
-        let mut neighbor_cluster = 0;
-
-        for c in 0..n_clusters {
-            if c == cluster_i || cluster_indices[c].is_empty() {
-                continue;
-            }
-
-            let avg_dist: f64 = cluster_indices[c]
-                .iter()
-                .map(|&j| distances[[i, j]])
-                .sum::<f64>()
-                / cluster_indices[c].len() as f64;
-
-            if avg_dist < b_i {
-                b_i = avg_dist;
-                neighbor_cluster = c;
-            }
-        }
-
-        // Compute silhouette width
-        let s_i = if a_i == 0.0 && b_i == 0.0 {
-            0.0
-        } else if a_i.is_infinite() || b_i.is_infinite() {
-            0.0
-        } else {
-            (b_i - a_i) / a_i.max(b_i)
-        };
-
-        silhouette_widths.push(s_i);
-        silhouette_info.push(SilhouetteInfo {
-            index: i,
-            cluster: cluster_i,
-            neighbor_cluster,
-            a_i,
-            b_i,
-            s_i,
-        });
-    }
-
-    // Compute average silhouette width
-    let average_silhouette = silhouette_widths.iter().sum::<f64>() / n as f64;
-
-    // Compute per-cluster average silhouette
-    let mut cluster_silhouettes = vec![0.0; n_clusters];
-    for c in 0..n_clusters {
-        if !cluster_indices[c].is_empty() {
-            let sum: f64 = cluster_indices[c]
-                .iter()
-                .map(|&i| silhouette_widths[i])
-                .sum();
-            cluster_silhouettes[c] = sum / cluster_indices[c].len() as f64;
-        }
-    }
-
-    Ok(SilhouetteResult {
-        silhouette_widths,
-        average_silhouette,
-        labels: labels.to_vec(),
-        cluster_silhouettes,
-        silhouette_info,
-        n_clusters,
-        n,
-    })
+    crate::ml::advanced_clustering_mod::common::check_points(&data, "silhouette")?;
+    check_silhouette_clusters(labels, n)
+        .map_err(|message| EconError::InvalidSpecification { message })?;
+    let d = compute_pairwise_distances(&data)?;
+    Ok(silhouette_result(d.view(), labels))
 }
 
-/// Compute silhouette coefficient from a precomputed distance matrix.
+/// Compute silhouette coefficient from a precomputed distance matrix (R `cluster::silhouette(x,
+/// dist)`); the same rules as [`silhouette()`].
 ///
 /// # Arguments
-/// * `dist_matrix` - Precomputed distance matrix (n x n)
+/// * `dist_matrix` - Precomputed symmetric distance matrix (n x n), finite; row i gives i's sums
 /// * `labels` - Cluster assignments (0-indexed)
 pub fn silhouette_from_dist(
     dist_matrix: ArrayView2<f64>,
@@ -271,97 +181,140 @@ pub fn silhouette_from_dist(
         return Err("Empty data".to_string());
     }
 
-    let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
-
-    if n_clusters < 2 {
-        return Err("Need at least 2 clusters for silhouette analysis".to_string());
+    if dist_matrix.iter().any(|v| !v.is_finite()) {
+        return Err("the dissimilarities contain non-finite values".to_string());
     }
+    check_silhouette_clusters(labels, n)?;
+    Ok(silhouette_result(dist_matrix, labels))
+}
 
-    // Group points by cluster
-    let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_clusters];
-    for (i, &label) in labels.iter().enumerate() {
-        cluster_indices[label].push(i);
+/// The silhouette of every observation, as `cluster::silhouette`'s C routine `sildist`.
+pub(crate) struct SilhouetteCore {
+    /// s(i); 0 for singletons and when a(i) = b(i).
+    pub(crate) widths: Vec<f64>,
+    /// a(i); 0 for singletons.
+    pub(crate) a: Vec<f64>,
+    /// b(i); `INFINITY` when no other non-empty cluster exists.
+    pub(crate) b: Vec<f64>,
+    /// The first minimising cluster of b(i); the own label when none exists.
+    pub(crate) neighbor: Vec<usize>,
+    /// Members per label `0..=max label`.
+    pub(crate) sizes: Vec<usize>,
+}
+
+/// The one silhouette (R `cluster::silhouette`, C routine `sildist`): sums over the other members of
+/// every cluster in index order; `s(i) = 0` for a singleton (Rousseeuw 1987) and when `a(i) = b(i)`;
+/// the neighbour is the first minimising cluster. Row i of `dist` gives i's sums.
+pub(crate) fn silhouette_core(dist: ArrayView2<f64>, labels: &[usize]) -> SilhouetteCore {
+    let n = labels.len();
+    let k = labels.iter().copied().max().map_or(0, |m| m + 1);
+    let mut sizes = vec![0usize; k];
+    for &l in labels {
+        sizes[l] += 1;
     }
+    let per: Vec<(f64, f64, f64, usize)> = (0..n)
+        .into_par_iter()
+        .map_init(
+            || vec![0.0f64; k],
+            |sums, i| {
+                sums.iter_mut().for_each(|s| *s = 0.0);
+                for j in 0..n {
+                    if j != i {
+                        sums[labels[j]] += dist[[i, j]];
+                    }
+                }
+                let ci = labels[i];
+                let a = if sizes[ci] > 1 {
+                    sums[ci] / (sizes[ci] - 1) as f64
+                } else {
+                    0.0
+                };
+                let (mut b, mut nb) = (f64::INFINITY, ci);
+                for c in 0..k {
+                    if c != ci && sizes[c] > 0 {
+                        let m = sums[c] / sizes[c] as f64;
+                        if m < b {
+                            b = m;
+                            nb = c;
+                        }
+                    }
+                }
+                // Rousseeuw (1987): s(i) = 0 for a singleton; sildist also gives 0 when a(i) = b(i)
+                let s = if sizes[ci] == 1 || b.is_infinite() || a == b {
+                    0.0
+                } else {
+                    (b - a) / a.max(b)
+                };
+                (s, a, b, nb)
+            },
+        )
+        .collect();
+    SilhouetteCore {
+        widths: per.iter().map(|p| p.0).collect(),
+        a: per.iter().map(|p| p.1).collect(),
+        b: per.iter().map(|p| p.2).collect(),
+        neighbor: per.iter().map(|p| p.3).collect(),
+        sizes,
+    }
+}
 
-    let mut silhouette_widths = Vec::with_capacity(n);
-    let mut silhouette_info = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let cluster_i = labels[i];
-        let cluster_i_indices = &cluster_indices[cluster_i];
-
-        let a_i = if cluster_i_indices.len() > 1 {
-            let sum: f64 = cluster_i_indices
-                .iter()
-                .filter(|&&j| j != i)
-                .map(|&j| dist_matrix[[i, j]])
-                .sum();
-            sum / (cluster_i_indices.len() - 1) as f64
-        } else {
-            0.0
-        };
-
-        let mut b_i = f64::INFINITY;
-        let mut neighbor_cluster = 0;
-
-        for c in 0..n_clusters {
-            if c == cluster_i || cluster_indices[c].is_empty() {
-                continue;
-            }
-
-            let avg_dist: f64 = cluster_indices[c]
-                .iter()
-                .map(|&j| dist_matrix[[i, j]])
-                .sum::<f64>()
-                / cluster_indices[c].len() as f64;
-
-            if avg_dist < b_i {
-                b_i = avg_dist;
-                neighbor_cluster = c;
-            }
+/// `2 <= distinct labels <= n - 1` (cluster::silhouette returns NA otherwise).
+pub(crate) fn check_silhouette_clusters(labels: &[usize], n: usize) -> Result<(), String> {
+    let mut seen: Vec<bool> = Vec::new();
+    let mut k = 0usize;
+    for &l in labels {
+        if l >= seen.len() {
+            seen.resize(l + 1, false);
         }
+        if !seen[l] {
+            seen[l] = true;
+            k += 1;
+        }
+    }
+    if k < 2 || k + 1 > n {
+        return Err(format!(
+            "silhouette needs between 2 and n - 1 = {} non-empty clusters (got {k}); cluster::silhouette returns NA otherwise",
+            n.saturating_sub(1)
+        ));
+    }
+    Ok(())
+}
 
-        let s_i = if a_i == 0.0 && b_i == 0.0 {
-            0.0
-        } else if a_i.is_infinite() || b_i.is_infinite() {
-            0.0
-        } else {
-            (b_i - a_i) / a_i.max(b_i)
-        };
-
-        silhouette_widths.push(s_i);
-        silhouette_info.push(SilhouetteInfo {
+/// The [`SilhouetteResult`] of a dissimilarity matrix: per-cluster means over all members (0 for an
+/// absent label).
+fn silhouette_result(dist: ArrayView2<f64>, labels: &[usize]) -> SilhouetteResult {
+    let n = labels.len();
+    let core = silhouette_core(dist, labels);
+    let n_clusters = core.sizes.len();
+    let mut sums = vec![0.0f64; n_clusters];
+    for (i, &l) in labels.iter().enumerate() {
+        sums[l] += core.widths[i];
+    }
+    let cluster_silhouettes = sums
+        .iter()
+        .zip(&core.sizes)
+        .map(|(&s, &m)| if m > 0 { s / m as f64 } else { 0.0 })
+        .collect();
+    let silhouette_info = (0..n)
+        .map(|i| SilhouetteInfo {
             index: i,
-            cluster: cluster_i,
-            neighbor_cluster,
-            a_i,
-            b_i,
-            s_i,
-        });
-    }
-
-    let average_silhouette = silhouette_widths.iter().sum::<f64>() / n as f64;
-
-    let mut cluster_silhouettes = vec![0.0; n_clusters];
-    for c in 0..n_clusters {
-        if !cluster_indices[c].is_empty() {
-            let sum: f64 = cluster_indices[c]
-                .iter()
-                .map(|&i| silhouette_widths[i])
-                .sum();
-            cluster_silhouettes[c] = sum / cluster_indices[c].len() as f64;
-        }
-    }
-
-    Ok(SilhouetteResult {
-        silhouette_widths,
+            cluster: labels[i],
+            neighbor_cluster: core.neighbor[i],
+            a_i: core.a[i],
+            b_i: core.b[i],
+            s_i: core.widths[i],
+        })
+        .collect();
+    let average_silhouette = core.widths.iter().sum::<f64>() / n as f64;
+    SilhouetteResult {
+        silhouette_widths: core.widths,
         average_silhouette,
         labels: labels.to_vec(),
         cluster_silhouettes,
         silhouette_info,
         n_clusters,
         n,
-    })
+    }
 }
 
 /// Convenience wrapper for silhouette.
@@ -791,7 +744,7 @@ pub fn dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<DunnInd
     }
 
     // Compute pairwise distances
-    let distances = compute_pairwise_distances(&data);
+    let distances = compute_pairwise_distances(&data)?;
 
     // Compute minimum inter-cluster distance
     let mut min_inter_dist = f64::INFINITY;
@@ -1395,25 +1348,23 @@ pub fn run_gap_statistic(
 // Helper functions
 // =============================================================================
 
-/// Compute pairwise Euclidean distances.
-fn compute_pairwise_distances(data: &ArrayView2<f64>) -> Array2<f64> {
+/// Pairwise Euclidean distances (the one kernel [`crate::ml::kdtree::sq_euclidean`]), with the
+/// n x n matrix allocated through the resource guards.
+fn compute_pairwise_distances(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
     let n = data.nrows();
-    let mut distances = Array2::zeros((n, n));
+    let mut distances = crate::resource::try_zeros2(n, n, "silhouette dissimilarity matrix")?;
+    let rows: Vec<Vec<f64>> = data.rows().into_iter().map(|r| r.to_vec()).collect();
 
     for i in 0..n {
+        crate::resource::checkpoint()?;
         for j in (i + 1)..n {
-            let mut sum = 0.0;
-            for k in 0..data.ncols() {
-                let diff = data[[i, k]] - data[[j, k]];
-                sum += diff * diff;
-            }
-            let dist = sum.sqrt();
+            let dist = crate::ml::kdtree::sq_euclidean(&rows[i], &rows[j]).sqrt();
             distances[[i, j]] = dist;
             distances[[j, i]] = dist;
         }
     }
 
-    distances
+    Ok(distances)
 }
 
 // =============================================================================
@@ -1423,7 +1374,91 @@ fn compute_pairwise_distances(data: &ArrayView2<f64>) -> Array2<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ml::advanced_clustering_mod::common::test_data::blobs;
     use ndarray::array;
+    use p2a_validation::{Check, Tol};
+
+    fn case_labels(case: &p2a_validation::Case) -> Vec<usize> {
+        case.vector("labels")
+            .iter()
+            .map(|&v| v as usize - 1)
+            .collect()
+    }
+
+    /// R: cluster::silhouette(cutree(hclust(dist(X), "average"), 6), dist(X)) on blobs_noise (n = 115, one
+    /// singleton, row 107). validation/r/cases/ml_density_clustering.R, case silhouette_singletons.
+    #[test]
+    fn test_validate_silhouette_singletons() {
+        let (case, ds) = crate::test_support::load_case("silhouette_singletons");
+        let x = blobs(&ds);
+        let n = x.nrows();
+        let labels = case_labels(&case);
+        let r = silhouette(x.view(), &labels).unwrap();
+        let neighbor: Vec<f64> = r
+            .silhouette_info
+            .iter()
+            .map(|s| (s.neighbor_cluster + 1) as f64)
+            .collect();
+        let singletons = (0..r.n_clusters)
+            .filter(|&c| labels.iter().filter(|&&l| l == c).count() == 1)
+            .count();
+        Check::new(&case)
+            .vector("sil_width", &r.silhouette_widths, Tol::coef(n))
+            .scalar("avg_width", r.average_silhouette, Tol::stat(n))
+            .vector("cluster_avg", &r.cluster_silhouettes, Tol::stat(n))
+            .vector("neighbor", &neighbor, Tol::exact())
+            .scalar("n_singletons", singletons as f64, Tol::exact())
+            .finish();
+    }
+
+    /// The same case through a precomputed dissimilarity matrix.
+    #[test]
+    fn test_validate_silhouette_from_dist_singletons() {
+        let (case, ds) = crate::test_support::load_case("silhouette_singletons");
+        let x = blobs(&ds);
+        let n = x.nrows();
+        let d = compute_pairwise_distances(&x.view()).unwrap();
+        let r = silhouette_from_dist(d.view(), &case_labels(&case)).unwrap();
+        Check::new(&case)
+            .vector("sil_width", &r.silhouette_widths, Tol::coef(n))
+            .scalar("avg_width", r.average_silhouette, Tol::stat(n))
+            .vector("cluster_avg", &r.cluster_silhouettes, Tol::stat(n))
+            .finish();
+    }
+
+    /// cluster::silhouette returns NA unless 2 <= k <= n - 1 non-empty clusters; p2a refuses.
+    #[test]
+    fn test_silhouette_needs_two_to_n_minus_1_clusters() {
+        let x = array![[0.0, 0.1], [1.0, 0.0], [5.0, 5.2], [5.1, 4.9]];
+        let spec = |r: EconResult<SilhouetteResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        };
+        // one non-empty cluster: was Ok(0)
+        assert!(spec(silhouette(x.view(), &[1, 1, 1, 1])).contains("between 2 and n - 1 = 3"));
+        // all singletons: was Ok(average 1)
+        assert!(spec(silhouette(x.view(), &[0, 1, 2, 3])).contains("got 4"));
+        let bad = array![[0.0, 0.1], [f64::NAN, 0.0], [5.0, 5.2], [5.1, 4.9]];
+        assert!(spec(silhouette(bad.view(), &[0, 0, 1, 1])).contains("non-finite"));
+        let d = compute_pairwise_distances(&x.view()).unwrap();
+        assert!(
+            silhouette_from_dist(d.view(), &[0, 1, 2, 3])
+                .unwrap_err()
+                .contains("between 2 and n - 1")
+        );
+        // the finding's six points (R: s_6 = 0, average 0.81312650186401625)
+        let p = array![
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [5.0, 0.0],
+            [5.1, 0.0],
+            [20.0, 0.0]
+        ];
+        let r = silhouette(p.view(), &[0, 0, 0, 1, 1, 2]).unwrap();
+        assert_eq!(r.silhouette_widths[5], 0.0);
+        assert!((r.average_silhouette - 0.81312650186401625).abs() < 1e-12);
+    }
 
     #[test]
     fn test_silhouette_basic() {

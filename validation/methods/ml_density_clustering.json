@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "silhouette",
+      "name": "Silhouette widths (cluster::silhouette)",
+      "category": "ml",
+      "reference": "cluster::silhouette(x, dist) (cluster 2.1.6, C routine sildist): singletons and a(i) = b(i) score 0",
+      "doc": "validation/ml/silhouette.md",
+      "cases": [
+        "silhouette_singletons"
+      ],
+      "tests": [
+        "p2a-core::ml::cluster_validation::tests::test_validate_silhouette_singletons",
+        "p2a-core::ml::cluster_validation::tests::test_validate_silhouette_from_dist_singletons",
+        "p2a-core::ml::cluster_optimized::tests::test_validate_silhouette_optimized_singletons",
+        "p2a-core::ml::advanced_clustering_mod::common::tests::test_validate_silhouette_helpers_singletons"
+      ],
+      "quantities": [
+        "silhouette widths",
+        "average silhouette width",
+        "per-cluster average widths",
+        "neighbour cluster",
+        "number of singleton clusters"
+      ],
+      "tolerance": "validation/README.md, n = 115: widths 1e-8 relative (Tol::coef); averages 1e-6 relative (Tol::stat); neighbours and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

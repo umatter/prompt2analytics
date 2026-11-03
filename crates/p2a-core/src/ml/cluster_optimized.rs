@@ -89,12 +89,11 @@ pub fn compute_pairwise_sq_distances_parallel(data: &ArrayView2<f64>) -> Array2<
 // Optimized Silhouette Coefficient
 // =============================================================================
 
-/// Optimized silhouette computation with parallelization.
+/// Optimized silhouette computation with parallelization: R `cluster::silhouette` through the one core
+/// of [`crate::ml::cluster_validation::silhouette()`] (singletons and `a(i) = b(i)` score 0) on a
+/// parallel distance matrix.
 ///
-/// This version:
-/// - Parallelizes pairwise distance computation
-/// - Parallelizes silhouette computation for each point
-/// - Uses pre-computed cluster membership for O(1) lookups
+/// Refuses non-finite data and labellings without 2 to n - 1 distinct clusters (where R returns `NA`).
 pub fn silhouette_optimized(
     data: ArrayView2<f64>,
     labels: &[usize],
@@ -109,69 +108,15 @@ pub fn silhouette_optimized(
         return Err("Empty data".to_string());
     }
 
-    let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
-    if n_clusters < 2 {
-        return Err("Need at least 2 clusters".to_string());
-    }
+    crate::ml::advanced_clustering_mod::common::check_points(&data, "silhouette_optimized")
+        .map_err(|e| e.to_string())?;
+    crate::ml::cluster_validation::check_silhouette_clusters(labels, n)?;
 
-    // Pre-compute cluster indices
-    let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_clusters];
-    for (i, &label) in labels.iter().enumerate() {
-        cluster_indices[label].push(i);
-    }
-
-    // Compute pairwise distances in parallel
     let distances = compute_pairwise_distances_parallel(&data);
+    let widths = crate::ml::cluster_validation::silhouette_core(distances.view(), labels).widths;
+    let average = widths.iter().sum::<f64>() / n as f64;
 
-    // Compute silhouette for each point in parallel
-    let silhouette_widths: Vec<f64> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let cluster_i = labels[i];
-            let cluster_i_indices = &cluster_indices[cluster_i];
-
-            // a(i): average distance to other points in same cluster
-            let a_i = if cluster_i_indices.len() > 1 {
-                let sum: f64 = cluster_i_indices
-                    .iter()
-                    .filter(|&&j| j != i)
-                    .map(|&j| distances[[i, j]])
-                    .sum();
-                sum / (cluster_i_indices.len() - 1) as f64
-            } else {
-                0.0
-            };
-
-            // b(i): min average distance to any other cluster
-            let mut b_i = f64::INFINITY;
-            for c in 0..n_clusters {
-                if c == cluster_i || cluster_indices[c].is_empty() {
-                    continue;
-                }
-                let avg_dist: f64 = cluster_indices[c]
-                    .iter()
-                    .map(|&j| distances[[i, j]])
-                    .sum::<f64>()
-                    / cluster_indices[c].len() as f64;
-                if avg_dist < b_i {
-                    b_i = avg_dist;
-                }
-            }
-
-            // Silhouette width
-            if a_i == 0.0 && b_i == 0.0 {
-                0.0
-            } else if a_i.is_infinite() || b_i.is_infinite() {
-                0.0
-            } else {
-                (b_i - a_i) / a_i.max(b_i)
-            }
-        })
-        .collect();
-
-    let average = silhouette_widths.iter().sum::<f64>() / n as f64;
-
-    Ok((silhouette_widths, average))
+    Ok((widths, average))
 }
 
 // =============================================================================
@@ -971,6 +916,25 @@ pub fn affinity_propagation_optimized(
 mod tests {
     use super::*;
     use ndarray::array;
+
+    /// R: cluster::silhouette on blobs_noise with a singleton cluster (case silhouette_singletons).
+    #[test]
+    fn test_validate_silhouette_optimized_singletons() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("silhouette_singletons");
+        let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
+        let n = x.nrows();
+        let labels: Vec<usize> = case
+            .vector("labels")
+            .iter()
+            .map(|&v| v as usize - 1)
+            .collect();
+        let (widths, avg) = silhouette_optimized(x.view(), &labels).unwrap();
+        Check::new(&case)
+            .vector("sil_width", &widths, Tol::coef(n))
+            .scalar("avg_width", avg, Tol::stat(n))
+            .finish();
+    }
 
     #[test]
     fn test_parallel_distances() {
