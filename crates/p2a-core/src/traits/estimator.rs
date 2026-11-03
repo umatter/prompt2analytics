@@ -605,8 +605,10 @@ mod tails {
     /// Safeguarded Newton for ln_tail(u) = lq; ln_tail is monotone (increasing for a lower tail),
     /// d ln_tail / du = +-exp(u + ln_dens(u) - ln_tail(u)). Steps are clamped to 5 and kept inside the
     /// bracket the iterates establish (bisection otherwise). The result may exceed 709 (overflow).
+    /// `first` is ln_tail(u) at the start when the caller has it already (saves one evaluation).
     fn solve_log_tail(
         mut u: f64,
+        mut first: Option<f64>,
         lq: f64,
         ln_tail: impl Fn(f64) -> R,
         ln_dens: impl Fn(f64) -> f64,
@@ -615,7 +617,10 @@ mod tails {
         let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
         let mut last = f64::INFINITY;
         for _ in 0..NEWTON_MAX {
-            let lt = ln_tail(u)?;
+            let lt = match first.take() {
+                Some(lt) => lt,
+                None => ln_tail(u)?,
+            };
             let g = lt - lq;
             if g == 0.0 {
                 return Ok(u);
@@ -674,24 +679,32 @@ mod tails {
         let z = -normal_quantile(q).abs();
         let tail = |u: f64| t_ln_lower_tail(exp_or_inf(u), u, df);
         let dens = |u: f64| t_ln_pdf(exp_or_inf(u), u, df);
-        let mut starts = vec![
+        let mut starts = [
             (LN_HALF + ln_gamma(a + 0.5) - ln_gamma(a + 1.0) - LN_SQRT_PI + a * df.ln() - lq) / df,
             (-z).ln(),
+            f64::NAN,
         ];
         let cf = cornish_fisher_t(z, df);
-        if cf.is_finite() && cf < 0.0 {
-            starts.push((-cf).ln());
-        }
+        let n_starts = if cf.is_finite() && cf < 0.0 {
+            starts[2] = (-cf).ln();
+            3
+        } else {
+            2
+        };
+        // The tail at the chosen start is the Newton iteration's first evaluation.
         let mut best = starts[0];
-        let mut best_g = (tail(best)? - lq).abs();
-        for &u0 in &starts[1..] {
-            let g0 = (tail(u0)? - lq).abs();
+        let mut best_lt = tail(best)?;
+        let mut best_g = (best_lt - lq).abs();
+        for &u0 in &starts[1..n_starts] {
+            let lt0 = tail(u0)?;
+            let g0 = (lt0 - lq).abs();
             if g0 < best_g {
                 best = u0;
+                best_lt = lt0;
                 best_g = g0;
             }
         }
-        let u = solve_log_tail(best, lq, tail, dens, false)?;
+        let u = solve_log_tail(best, Some(best_lt), lq, tail, dens, false)?;
         Ok(-exp_or_inf(u))
     }
     /// ln P(a, y) by the series y^a e^-y / Gamma(a + 1) * sum_k y^k / prod_{j<=k} (a + j); y < a + 1.
@@ -814,6 +827,7 @@ mod tails {
         }
         let u = solve_log_tail(
             u0,
+            None,
             q.ln(),
             |uu| chi2_ln_tail(exp_or_inf(uu), df, lower),
             |uu| chi2_ln_pdf(uu, df),
@@ -837,6 +851,32 @@ mod tails {
         };
         let (x, ln_x, y, ln_y, _) = odds_split(r, ln_r);
         ln_beta_reg(0.5 * df2, 0.5 * df1, x, ln_x, y, ln_y)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Handing solve_log_tail the tail value at its start only skips that evaluation: the
+        /// quantile is the same, bit for bit, as when the iteration evaluates it itself.
+        #[test]
+        fn solve_log_tail_given_first_value_matches_evaluating_it() {
+            for &q in &[1e-300_f64, 1e-20, 1e-4, 0.005, 0.025, 0.1, 0.3, 0.4999] {
+                for &df in &[0.5, 1.0, 3.0, 10.0, 94.0, 999.0, 1e5] {
+                    let lq = q.ln();
+                    let tail = |u: f64| t_ln_lower_tail(exp_or_inf(u), u, df);
+                    let dens = |u: f64| t_ln_pdf(exp_or_inf(u), u, df);
+                    let u0 = normal_quantile(q).abs().ln();
+                    let evaluated = solve_log_tail(u0, None, lq, tail, dens, false);
+                    let given = solve_log_tail(u0, Some(tail(u0).unwrap()), lq, tail, dens, false);
+                    assert_eq!(
+                        evaluated.map(f64::to_bits).ok(),
+                        given.map(f64::to_bits).ok(),
+                        "q = {q}, df = {df}"
+                    );
+                }
+            }
+        }
     }
 }
 
