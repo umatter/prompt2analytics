@@ -48,8 +48,8 @@ print(result$value)
 ```
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
-- `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): the value improves on the start (2.0) and stays below 1.5 while x + y ≥ 0.99; R's optimum (0.5 at (0.5, 0.5)) is quoted in a comment but not compared.
-- `stats::constroptim::tests::test_validate_constr_optim_nelder_mead` (`crates/p2a-core/src/stats/constroptim.rs`): Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0; the solution is within 0.2 of (1, 2).
+- `stats::constroptim::tests::test_validate_constr_optim_quadratic` (`crates/p2a-core/src/stats/constroptim.rs`): x² + y² with x + y ≥ 1 from (1, 1); `quadratic_par` (0.500000000151549 twice) and `quadratic_value` (0.500000000303098), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; deviation STAT-80: R converges in 3 outer iterations, p2a's plain log barrier runs 100, so the convergence code and outer iterations are not compared).
+- `stats::constroptim::tests::test_validate_constr_optim_nelder_mead` (`crates/p2a-core/src/stats/constroptim.rs`): Nelder-Mead on (x - 1)² + (y - 2)² with x, y ≥ 0 from (0.5, 0.5). Not R-pinned: p2a stops at (1.00211, 2.00106), value 5.6e-6, 2.1e-3 from R's (1.0000008855605316, 2.0000000235991697), value 7.8e-13 (`stat_constroptim_legacy`), outside 1e-4; registry deviation STAT-80. The test checks feasibility and a solution within 1e-2 of (1, 2).
 
 ### Test Case 2: Active Constraint
 
@@ -69,7 +69,7 @@ print(result$value)
 ```
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
-- `stats::constroptim::tests::test_validate_constr_optim_binding_constraint` (`crates/p2a-core/src/stats/constroptim.rs`): minimise x² subject to x ≥ 1; x within 0.1 and the value within 0.2 of 1.0.
+- `stats::constroptim::tests::test_validate_constr_optim_binding_constraint` (`crates/p2a-core/src/stats/constroptim.rs`): minimise x² subject to x ≥ 1 from 2; `binding_par` (1.0000000025631852) and `binding_value` (1.0000000051263704), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; deviation STAT-80: R converges in 3 outer iterations, p2a's plain log barrier runs 100, so the convergence code and outer iterations are not compared).
 
 ### Test Case 3: Multiple Constraints (Box Constraints)
 
@@ -86,7 +86,7 @@ print(result$par)
 ```
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with STAT-62 for the tests and STAT-80 for the estimator):
-- `stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints` (`crates/p2a-core/src/stats/constroptim.rs`): the value within 0.2 of R's printed -1.0 and the three constraints satisfied within 0.01.
+- `stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints` (`crates/p2a-core/src/stats/constroptim.rs`): -x - y with x, y ≥ 0 and x + y ≤ 1 from (0.3, 0.3); `lp3_par` (0.49999999831081493 twice) and `lp3_value` (-0.9999999966216299), R-pinned (case `stat_constroptim_legacy`, `Tol::iterative(1e-4)`; deviation STAT-80: R converges in 3 outer iterations, p2a's plain log barrier runs 100, so the convergence code and outer iterations are not compared).
 
 ### Test Case 4: Higher Dimensional
 
@@ -114,7 +114,7 @@ print(result$par)
 
 ## Known Differences
 
-1. **Barrier parameter schedule**: Different mu reduction rates
+1. **Barrier parameter schedule (STAT-80, Tier 4)**: R's `constrOptim` (mu = 1e-4, outer.eps = 1e-5) converges in 3 outer iterations on the four legacy problems; p2a's plain log barrier runs 100 (convergence 1), which leaves par about 1.5e-5 relative from R's. Par and value are R-pinned at `Tol::iterative(1e-4)` (`stat_constroptim_legacy`); the convergence code and outer-iteration count are a registry deviation (`stats_power_loglin.json`, `constroptim_legacy`).
 2. **Convergence criteria**: May differ in tolerance handling
 3. **Initial feasibility**: Different handling of infeasible starting points
 

@@ -275,6 +275,38 @@
       "tolerance": "validation/README.md, n = 12-15: SS, MS, F 1e-5 relative; p 1e-5 + 1e-12; means 1e-6; df exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "constroptim_legacy",
+      "name": "Linearly constrained optimisation on the legacy problems of constroptim.rs",
+      "category": "stats",
+      "reference": "stats::constrOptim (mu = 1e-4, outer.eps = 1e-5)",
+      "doc": "validation/stats/constroptim.md",
+      "cases": [
+        "stat_constroptim_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_quadratic",
+        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints",
+        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_binding_constraint"
+      ],
+      "quantities": [
+        "par and value of three problems (quadratic, lp3, binding)"
+      ],
+      "tolerance": "Tol::iterative(1e-4)",
+      "deviations": [
+        {
+          "finding": "STAT-80",
+          "quantity": "convergence code and outer iterations",
+          "note": "R's adaptive barrier converges in 3 outer iterations (convergence 0); p2a's plain log barrier runs 100 (convergence 1) and stops about 1.5e-5 from the optimum; not compared until STAT-80 (Tier 4)"
+        },
+        {
+          "finding": "STAT-80",
+          "quantity": "Nelder-Mead problem: par and value (nelder_mead_par, nelder_mead_value)",
+          "note": "p2a's barrier with Nelder-Mead stops at (1.0021099915327514, 2.0010575190290307), value 5.570410765044598e-6; R at (1.0000008855605316, 2.0000000235991697), value 7.847743758893449e-13: 2.1e-3 relative, outside 1e-4; test_validate_constr_optim_nelder_mead checks feasibility only until STAT-80 (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
