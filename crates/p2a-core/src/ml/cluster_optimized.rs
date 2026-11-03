@@ -5,7 +5,6 @@
 
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
-use std::cmp::Ordering;
 
 // =============================================================================
 // Optimized Pairwise Distance Computation
@@ -139,6 +138,8 @@ pub fn kmedoids_optimized(
     if k == 0 || k > n {
         return Err(format!("k must be between 1 and {}", n));
     }
+    crate::ml::advanced_clustering_mod::common::check_points(&data, "kmedoids_optimized")
+        .map_err(|e| e.to_string())?;
 
     let max_iter = max_iterations.unwrap_or(100);
 
@@ -255,7 +256,7 @@ fn build_medoids_fast(distances: &Array2<f64>, k: usize, _seed: Option<u64>) -> 
     let first_medoid = sums
         .iter()
         .enumerate()
-        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+        .min_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| i)
         .unwrap_or(0);
 
@@ -289,7 +290,7 @@ fn build_medoids_fast(distances: &Array2<f64>, k: usize, _seed: Option<u64>) -> 
         let best = gains
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(i, _)| i)
             .unwrap_or(0);
 
@@ -405,6 +406,11 @@ pub fn affinity_propagation_optimized(
     if n < 2 {
         return Err("Need at least 2 observations".to_string());
     }
+    crate::ml::advanced_clustering_mod::common::check_points(
+        &data,
+        "affinity_propagation_optimized",
+    )
+    .map_err(|e| e.to_string())?;
 
     let damp = damping.unwrap_or(0.5);
     if !(0.5..1.0).contains(&damp) {
@@ -428,7 +434,7 @@ pub fn affinity_propagation_optimized(
                 }
             }
         }
-        sims.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        sims.sort_by(f64::total_cmp);
         if sims.is_empty() {
             0.0
         } else {
@@ -602,6 +608,21 @@ mod tests {
                 Tol::exact(),
             )
             .finish();
+    }
+
+    #[test]
+    fn test_kmedoids_and_affinity_optimized_refuse_non_finite() {
+        let data = array![[0.0, 0.0], [0.1, f64::NAN], [10.0, 10.0], [10.1, 10.1]];
+        assert!(
+            kmedoids_optimized(data.view(), 2, Some(10), Some(1))
+                .unwrap_err()
+                .contains("non-finite")
+        );
+        assert!(
+            affinity_propagation_optimized(data.view(), None, None, None, None)
+                .unwrap_err()
+                .contains("non-finite")
+        );
     }
 
     /// R: cluster::silhouette on blobs_noise with a singleton cluster (case silhouette_singletons).
