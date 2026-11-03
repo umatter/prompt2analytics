@@ -525,6 +525,53 @@ use p2a_core::{
     window as ts_window,
 };
 
+/// Tools whose handler takes no parameters (rmcp's default schema
+/// `{"type":"object","properties":{}}`). HTTP and stdio refuse any argument for them, as
+/// `#[serde(deny_unknown_fields)]` does for the other tools (TOOL-13); `null` and `{}` are
+/// accepted.
+pub const NO_PARAMS_TOOLS: &[&str] = &["list_datasets"];
+
+/// The first key of a non-empty JSON object of arguments to a [`NO_PARAMS_TOOLS`] tool, cut
+/// for the refusal; `None` for an empty object.
+fn first_argument_key(arguments: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    arguments
+        .keys()
+        .next()
+        .map(|k| crate::tools::limits::echo(k))
+}
+
+/// Refuses arguments to a [`NO_PARAMS_TOOLS`] tool on the dispatch path, with serde's wording
+/// for a struct without fields. `null` and `{}` pass. Through the governed path only a
+/// non-empty object reaches here (`call_tool_with_session` turns `null` into `{}` and refuses
+/// a non-object first); the other branch serves direct `dispatch_tool` calls.
+#[cfg(feature = "http")]
+fn refuse_arguments(
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Result<(), crate::exec::ToolCallError> {
+    use crate::exec::ToolCallError;
+    use serde_json::Value;
+    let kind = match arguments {
+        Value::Null => return Ok(()),
+        Value::Object(map) => match first_argument_key(map) {
+            None => return Ok(()),
+            Some(key) => {
+                return Err(ToolCallError::InvalidArguments(format!(
+                    "Failed to parse arguments for '{tool}': unknown field `{key}`, there are \
+                     no fields"
+                )));
+            }
+        },
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Array(_) => "array",
+    };
+    Err(ToolCallError::InvalidArguments(format!(
+        "Failed to parse arguments for '{tool}': invalid type: {kind}, expected no arguments"
+    )))
+}
+
 /// The main analytics server that handles MCP requests.
 #[derive(Clone)]
 pub struct AnalyticsServer {
@@ -584,6 +631,15 @@ impl AnalyticsServer {
             tool_router,
             audit: None,
         }
+    }
+
+    /// Every routed tool (name, description, input schema), sorted by name. Not
+    /// feature-gated: the registry, the HTTP tool list and the LLM tool list all read it, so
+    /// their order is stable (the router's own `list_all` is in `HashMap` order).
+    pub fn router_tools(&self) -> Vec<Tool> {
+        let mut v = self.tool_router.list_all();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
     }
 
     /// Audit this server's MCP tool calls (the stdio transport) to `logger`:
@@ -658,8 +714,7 @@ impl AnalyticsServer {
     pub fn list_tools(&self) -> Vec<crate::transport::http::ToolDefinition> {
         use crate::transport::http::ToolDefinition;
 
-        self.tool_router
-            .list_all()
+        self.router_tools()
             .into_iter()
             .map(|tool| ToolDefinition {
                 name: tool.name.to_string(),
@@ -701,8 +756,7 @@ impl AnalyticsServer {
 
         use crate::llm::{INTERNAL_TOOLS, TIER1_TOOLS, ToolDefinition};
 
-        self.tool_router
-            .list_all()
+        self.router_tools()
             .into_iter()
             .filter(|t| {
                 let name = t.name.as_ref();
@@ -860,6 +914,7 @@ impl AnalyticsServer {
         macro_rules! dispatch {
             ($name:literal => no_params => $method:ident) => {
                 if tool_name == $name {
+                    refuse_arguments(tool_name, &arguments)?;
                     let result = session_server
                         .$method()
                         .await
@@ -1598,7 +1653,7 @@ impl ServerHandler for AnalyticsServer {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+        Ok(ListToolsResult::with_all_items(self.router_tools()))
     }
 
     async fn call_tool(
@@ -1614,6 +1669,22 @@ impl ServerHandler for AnalyticsServer {
         // Look at the arguments as a JSON object without copying them (for
         // the limit check and the audit entry), then hand them back to the
         // request unchanged.
+        // A parameterless tool has no request struct to refuse unknown fields, so its
+        // arguments are refused here, in rmcp's wording for every other tool (TOOL-13), and
+        // answered and audited as `invalid_arguments` below.
+        let no_params_refusal = NO_PARAMS_TOOLS
+            .contains(&tool.as_str())
+            .then(|| request.arguments.as_ref().and_then(first_argument_key))
+            .flatten()
+            .map(|key| {
+                McpError::invalid_params(
+                    format!(
+                        "failed to deserialize parameters: unknown field `{key}`, there are no \
+                         fields"
+                    ),
+                    None,
+                )
+            });
         let had_arguments = request.arguments.is_some();
         let args = serde_json::Value::Object(request.arguments.take().unwrap_or_default());
         let audit = self.audit.as_deref().filter(|a| a.is_enabled()).map(|a| {
@@ -1625,6 +1696,9 @@ impl ServerHandler for AnalyticsServer {
         // error, so the call is answered and audited like any other (rmcp
         // would drop the request's task without a reply).
         let outcome: Result<CallToolResult, (McpError, &'static str)> = catch_panic(async {
+            if let Some(e) = no_params_refusal {
+                return Err((e, "invalid_arguments"));
+            }
             let checked = if known {
                 enforce_request_limits(&limits, &tool, &args, &self.datasets).await
             } else {
@@ -1733,6 +1807,47 @@ mod tests {
             .await
             .insert(name.to_string(), dataset);
         server
+    }
+
+    /// The quoted names in get_info().instructions are tools of this build (or optional ones).
+    #[test]
+    fn test_server_instructions_name_routed_tools() {
+        let s = AnalyticsServer::new();
+        let routed: Vec<String> = s
+            .router_tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let text = s.get_info().instructions.unwrap();
+        let names: Vec<&str> = text.split('\'').skip(1).step_by(2).collect();
+        assert!(names.len() >= 25, "{names:?}");
+        for n in names {
+            assert!(
+                routed.iter().any(|r| r == n)
+                    || crate::tools::registry::OPTIONAL_TOOLS.contains(&n),
+                "{n}"
+            );
+        }
+    }
+
+    /// NO_PARAMS_TOOLS is exactly the set of routed tools with rmcp's parameterless schema.
+    #[test]
+    fn test_no_params_tools_match_the_router() {
+        let empty = serde_json::json!({"type": "object", "properties": {}});
+        let mut found: Vec<String> = AnalyticsServer::new()
+            .router_tools()
+            .into_iter()
+            .filter(|t| serde_json::Value::Object((*t.input_schema).clone()) == empty)
+            .map(|t| t.name.to_string())
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            NO_PARAMS_TOOLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

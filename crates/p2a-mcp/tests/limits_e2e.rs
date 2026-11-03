@@ -95,7 +95,8 @@ fn assert_positional_structs_redacted(text: &str, lines: &[serde_json::Value], o
 /// left one padding key out in its place.
 fn assert_query_kept_ahead_of_padding(line: &serde_json::Value) {
     assert_eq!(line["tool_name"], "search_tools", "{line}");
-    assert_eq!(line["outcome"], "ok", "{line}");
+    // the padding keys are unknown fields, so the call is refused (TOOL-13) and audited
+    assert_eq!(line["outcome"], "invalid_arguments", "{line}");
     let arguments = line["arguments"].as_object().unwrap();
     assert_eq!(arguments.get("query"), Some(&"regression".into()), "{line}");
     assert_eq!(
@@ -1037,7 +1038,8 @@ mod http_paths {
             let sid = new_session(&app).await;
             let (status, body) =
                 post_tool(&app, &sid, "search_tools", super::padded_search_arguments()).await;
-            assert_eq!(status, 200, "{body}");
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(body["code"], "invalid_arguments", "{body}");
             super::audit_lines(&cfg.audit).await
         });
         assert_eq!(lines.len(), 1, "{lines:#?}");
@@ -1689,8 +1691,7 @@ mod stdio_path {
             Limits::off(),
             stdio_call(server, "search_tools", padded_search_arguments()),
         );
-        assert!(msg.get("error").is_none(), "{msg}");
-        assert_ne!(msg["result"]["isError"], true, "{msg}");
+        assert_eq!(msg["error"]["code"], -32602, "{msg}");
         let lines = run(Limits::off(), audit_lines(&cfg));
         assert_eq!(lines.len(), 1, "{lines:#?}");
         assert_eq!(lines[0]["origin"], "stdio");

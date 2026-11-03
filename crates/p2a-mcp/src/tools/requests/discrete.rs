@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 /// Request for Logit regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LogitRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -32,6 +33,7 @@ pub struct LogitRequest {
 
 /// Request for Probit regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProbitRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -48,6 +50,7 @@ pub struct ProbitRequest {
 
 /// Request for multinomial logit regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MultinomRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -70,6 +73,7 @@ pub struct MultinomRequest {
 
 /// Request for McFadden's conditional logit (mlogit) model.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MlogitRequest {
     /// Name/ID of the dataset (in long format)
     #[schemars(
@@ -118,6 +122,7 @@ pub struct MlogitRequest {
 /// Request for mixed logit (random parameters logit) estimation.
 /// Covers both gmnl and mixl R packages.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MixedLogitRequest {
     /// Name/ID of the dataset (in long format)
     #[schemars(
@@ -179,6 +184,7 @@ pub struct MixedLogitRequest {
 
 /// Request for ordered logit/probit regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OrderedRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -206,6 +212,7 @@ pub struct OrderedRequest {
 
 /// Request for negative binomial regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NegBinRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -228,6 +235,7 @@ pub struct NegBinRequest {
 
 /// Request for zero-inflated models.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ZeroInflRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -254,6 +262,7 @@ pub struct ZeroInflRequest {
 
 /// Request for hurdle model (two-part model for count data with zero inflation).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HurdleModelRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -280,6 +289,7 @@ pub struct HurdleModelRequest {
 
 /// Request for Generalized Linear Model with High-Dimensional Fixed Effects (FEGLM).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FeglmRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// Request for data quality profile.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DataQualityProfileRequest {
     /// Name/ID of the dataset to profile
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -13,6 +14,7 @@ pub struct DataQualityProfileRequest {
 
 /// Request for previewing a cleaning operation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PreviewCleaningRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -75,6 +77,7 @@ pub struct PreviewCleaningRequest {
 
 /// Request for verifying a cleaning operation after applying.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VerifyCleaningRequest {
     /// Name/ID of the original dataset (before cleaning)
     #[schemars(description = "Name or ID of the original dataset before cleaning.")]
@@ -91,6 +94,7 @@ pub struct VerifyCleaningRequest {
 
 /// Request to start a new cleaning session.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CleaningSessionStartRequest {
     /// Name/ID of the dataset to start cleaning
     #[schemars(description = "Name or ID of the dataset to create a cleaning session for.")]
@@ -103,6 +107,7 @@ pub struct CleaningSessionStartRequest {
 
 /// Request for cleaning session status.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CleaningSessionStatusRequest {
     /// Session ID
     #[schemars(description = "The session ID returned by cleaning_session_start.")]
@@ -111,6 +116,7 @@ pub struct CleaningSessionStatusRequest {
 
 /// Request to rollback a cleaning session.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CleaningRollbackRequest {
     /// Session ID
     #[schemars(description = "The session ID to rollback.")]
@@ -125,6 +131,7 @@ pub struct CleaningRollbackRequest {
 
 /// Request to apply a cleaning operation within a session.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CleaningSessionApplyRequest {
     /// Session ID
     #[schemars(description = "The session ID to apply the operation to.")]
@@ -171,6 +178,7 @@ pub struct CleaningSessionApplyRequest {
 
 /// Request to list all checkpoints in a session.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CleaningSessionCheckpointsRequest {
     /// Session ID
     #[schemars(description = "The session ID to list checkpoints for.")]
@@ -179,6 +187,7 @@ pub struct CleaningSessionCheckpointsRequest {
 
 /// Request to generate smart cleaning suggestions.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SuggestCleaningRequest {
     /// The name/ID of the loaded dataset to analyze.
     #[schemars(description = "The name/ID of the loaded dataset.")]
@@ -195,4 +204,5 @@ pub struct SuggestCleaningRequest {
 
 /// Request to list all active cleaning sessions.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListCleaningSessionsRequest {}

@@ -894,6 +894,31 @@ pub static PARAM_RULES: &[ParamRule] = {
                  height, and a size it ignores",
             ),
         ),
+        // ---- Tier 3 request fields (T3 design 5.1; T3-WP05). Inert until the wave-3 owner
+        // adds the field (TIER3_PENDING_FIELDS lists the ones not there yet). ----
+        p("staggered_did", "anticipation", Max(Lags)),
+        p(
+            "etwfe",
+            "tref",
+            Exempt("reference period: a value of the time variable, not a cost"),
+        ),
+        p(
+            "etwfe",
+            "gref",
+            Exempt("reference cohort: a value of the cohort variable, not a cost"),
+        ),
+        p("ltmle", "dynamic_columns", UniqueList(ListLength)),
+        p("gsynth", "r_max", Max(Components)),
+        p("gsynth", "bootstrap_reps", Max(Replications)),
+        p("iv_mte", "bootstrap_reps", Max(Replications)),
+        p("iv_mte", "prte_weights", ArrayLen(ArrayLength)),
+        p("gmm_iv", "weight_matrix", ArrayLen(ArrayLength)),
+        p("stats_mauchly_test", "sigma", ArrayLen(ArrayLength)),
+        p("stats_spline", "n", Max(GridPoints)),
+        p("ts_vecm", "rank", Max(ModelOrder)),
+        p("ts_varma", "long_var_order", Max(Lags)),
+        p("panel_unit_root", "pmax", Max(Lags)),
+        p("munge_fill_na", "value", Max(StringBytes)),
     ]
 };
 
@@ -1052,18 +1077,37 @@ pub fn arima_fit_work(n_obs: usize, p: usize, d: usize, q: usize) -> u64 {
 ///
 /// Where a value of the differenced series is zero, the floor bounds nothing. There the CSS
 /// recursion gives the residual as `w_t - sum phi_i w_{t-i-1} - sum theta_j e_{t-j-1}` (`w` the
-/// differenced series less its mean and drift terms), which the coefficients the optimiser
-/// tries set, not the floor. One case is known to leave the ordinary range: at an intercept of exactly 0.0
-/// over a stretch of exact zeros, the MA recursion `e_t = -sum theta_j e_{t-j-1}` decays
+/// differenced series less its mean and drift terms), which the coefficients the optimiser tries
+/// set, not the floor. One case is known to leave the ordinary range: at an intercept of exactly
+/// 0.0 over a stretch of exact zeros, the MA recursion `e_t = -sum theta_j e_{t-j-1}` decays
 /// geometrically into the subnormal range and, for `|theta| > 1/2`, can stay on a subnormal
-/// rounding fixed point (for example 4 x 2^-1074 at `theta = 0.9`). Exact zeros pass the floor,
-/// and on a release build one pass of the objective in that state, with the optimiser the tools
-/// used before the in-house fit, was measured at about 28 times the time of a pass over
-/// ordinary data, a cost the budget's time per unit does not cover. The in-house fit checks the
-/// call's budget every 4,096 rows of a pass and at every iteration, so a fit that stays in that
-/// state ends at the deadline as a cancelled call. That is the residual risk: a call the budget
-/// admitted can still be cancelled.
+/// rounding fixed point (for example 4 x 2^-1074 at `theta = 0.9`). Exact zeros pass the floor, and
+/// on a release build one pass of the objective in that state, with the optimiser the tools used
+/// before the in-house fit, was measured at about 28 times the time of a pass over ordinary data, a
+/// cost the budget's time per unit does not cover. The in-house fit checks the call's budget every
+/// 4,096 rows of a pass and at every iteration, so a fit that stays in that state ends at the
+/// deadline as a cancelled call. That is the residual risk: a call the budget admitted can still be
+/// cancelled.
 pub const ARIMA_MIN_MAGNITUDE: f64 = 1e-100;
+
+/// (tool, field) of T3 design 5.1 that wave-3 packages add; their rules above exist from wave 1.
+#[cfg(test)]
+pub(crate) const TIER3_PENDING_FIELDS: &[(&str, &str)] = &[
+    ("staggered_did", "anticipation"),
+    ("etwfe", "tref"),
+    ("etwfe", "gref"),
+    ("ltmle", "dynamic_columns"),
+    ("gsynth", "r_max"),
+    ("gsynth", "bootstrap_reps"),
+    ("iv_mte", "bootstrap_reps"),
+    ("iv_mte", "prte_weights"),
+    ("gmm_iv", "weight_matrix"),
+    ("stats_mauchly_test", "sigma"),
+    ("stats_spline", "n"),
+    ("ts_varma", "long_var_order"),
+    ("panel_unit_root", "pmax"),
+    ("munge_fill_na", "value"),
+];
 
 #[cfg(test)]
 mod tests {
@@ -1115,6 +1159,66 @@ mod tests {
             Family::StringBytes | Family::NaMarkerBytes => json!("a".repeat(n as usize)),
             _ => json!(n),
         }
+    }
+
+    /// T3 design 5.1 fields: cap passes, cap + 1 is refused with the field and family named.
+    const TIER3_FIELDS: &[(Family, &str, &str)] = &[
+        (Family::Lags, "staggered_did", "anticipation"),
+        (Family::Components, "gsynth", "r_max"),
+        (Family::Replications, "gsynth", "bootstrap_reps"),
+        (Family::Replications, "iv_mte", "bootstrap_reps"),
+        (Family::ArrayLength, "iv_mte", "prte_weights"),
+        (Family::ArrayLength, "gmm_iv", "weight_matrix"),
+        (Family::ArrayLength, "stats_mauchly_test", "sigma"),
+        (Family::GridPoints, "stats_spline", "n"),
+        (Family::ModelOrder, "ts_vecm", "rank"),
+        (Family::Lags, "ts_varma", "long_var_order"),
+        (Family::Lags, "panel_unit_root", "pmax"),
+        (Family::ListLength, "ltmle", "dynamic_columns"),
+        (Family::Replications, "mediation_analysis", "n_bootstrap"),
+        (
+            Family::Replications,
+            "natural_effects_mediation",
+            "n_bootstrap",
+        ),
+        (Family::StringBytes, "munge_fill_na", "value"),
+    ];
+
+    #[test]
+    fn tier3_request_fields_are_limited() {
+        let h = Limits::hosted();
+        for &(f, tool, field) in TIER3_FIELDS {
+            let cap = h.cap(f).expect("hosted cap");
+            assert!(
+                hosted(tool, json!({ field: value_of_size(f, cap) })).is_ok(),
+                "{tool}.{field} at the cap"
+            );
+            let v = hosted(tool, json!({ field: value_of_size(f, cap + 1) }))
+                .expect_err(&format!("{tool}.{field} above the cap"));
+            assert_eq!(
+                (v.parameter.as_str(), v.override_key),
+                (field, f.key()),
+                "{tool}.{field}"
+            );
+        }
+        assert!(
+            hosted("ltmle", json!({"dynamic_columns": ["a", "a"]}))
+                .unwrap_err()
+                .message
+                .contains("more than once")
+        );
+        assert!(
+            hosted(
+                "etwfe",
+                json!({"tref": 3_000_000_000i64, "gref": -3_000_000_000i64})
+            )
+            .is_ok()
+        );
+        assert!(
+            Limits::off()
+                .check_tool_arguments("gsynth", &json!({"r_max": 1_000_000}))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3205,12 +3309,15 @@ mod schema_tests {
                 let s = tools
                     .get(r.tool)
                     .unwrap_or_else(|| panic!("rule for unknown tool `{}`", r.tool));
-                assert!(
-                    s["properties"].get(first).is_some(),
-                    "{}.{} is not a field",
-                    r.tool,
-                    r.path
-                );
+                // a T3 design 5.1 field gets its rule before its wave-3 owner adds it
+                if !super::TIER3_PENDING_FIELDS.contains(&(r.tool, first)) {
+                    assert!(
+                        s["properties"].get(first).is_some(),
+                        "{}.{} is not a field",
+                        r.tool,
+                        r.path
+                    );
+                }
             }
         }
         for rr in ROW_RULES {

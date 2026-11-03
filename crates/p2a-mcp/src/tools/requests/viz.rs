@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 /// Request to generate a histogram.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HistogramRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -31,6 +32,7 @@ pub struct HistogramRequest {
 
 /// Request to generate a scatter plot.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScatterPlotRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -51,6 +53,7 @@ pub struct ScatterPlotRequest {
 
 /// Request to generate a line chart.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LineChartRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -73,6 +76,7 @@ pub struct LineChartRequest {
 
 /// Request to generate a box plot.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BoxPlotRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -89,6 +93,7 @@ pub struct BoxPlotRequest {
 
 /// Request to generate a correlation heatmap.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HeatmapRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -111,6 +116,7 @@ pub struct HeatmapRequest {
 
 /// Request to generate an interactive scatter plot (HTML/Plotly output).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScatterInteractiveRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -137,6 +143,7 @@ pub struct ScatterInteractiveRequest {
 
 /// Request to generate an interactive histogram (HTML/Plotly output).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HistogramInteractiveRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -159,6 +166,7 @@ pub struct HistogramInteractiveRequest {
 
 /// Request to generate an interactive line chart (HTML/Plotly output).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LineInteractiveRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -183,6 +191,7 @@ pub struct LineInteractiveRequest {
 
 /// Request to generate an event study plot.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EventStudyRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -213,6 +222,7 @@ pub struct EventStudyRequest {
 
 /// Request to generate a coefficient plot.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CoefficientPlotRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -247,6 +257,7 @@ pub struct CoefficientPlotRequest {
 
 /// Request to generate an IRF (Impulse Response Function) plot.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IrfPlotRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -283,6 +294,7 @@ pub struct IrfPlotRequest {
 
 /// Request to generate residual diagnostic plots.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResidualDiagnosticsRequest {
     /// Name/ID of the dataset
     #[schemars(
@@ -307,6 +319,7 @@ pub struct ResidualDiagnosticsRequest {
 
 /// Request to visualize hierarchical clustering results as a dendrogram.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DendrogramRequest {
     /// Linkage matrix from hierarchical clustering (JSON array of arrays)
     #[schemars(

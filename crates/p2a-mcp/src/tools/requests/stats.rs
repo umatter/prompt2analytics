@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 /// Request for log-linear model fitting.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LoglinRequest {
     /// Name/ID of the dataset
     #[schemars(
@@ -49,6 +50,7 @@ pub struct LoglinRequest {
 
 /// Request for model tables from ANOVA.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ModelTablesRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -78,6 +80,7 @@ pub struct ModelTablesRequest {
 
 /// Request for standard errors of contrasts (se.contrast).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SeContrastRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -108,6 +111,7 @@ pub struct SeContrastRequest {
 
 /// Request for weighted mean.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WeightedMeanRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -130,6 +134,7 @@ pub struct WeightedMeanRequest {
 
 /// Request for weighted covariance matrix.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CovWtRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -160,6 +165,7 @@ pub struct CovWtRequest {
 
 /// Request for Mauchly's sphericity test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MauchlyTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -174,6 +180,7 @@ pub struct MauchlyTestRequest {
 
 /// Request for Tukey's five-number summary.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FivenumRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -188,6 +195,7 @@ pub struct FivenumRequest {
 
 /// Request for interquartile range.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IqrRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -206,6 +214,7 @@ pub struct IqrRequest {
 
 /// Request for median absolute deviation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MadRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -230,6 +239,7 @@ pub struct MadRequest {
 
 /// Request for empirical CDF.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EcdfRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -250,6 +260,7 @@ pub struct EcdfRequest {
 
 /// Request for kernel density estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DensityRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -280,6 +291,7 @@ pub struct DensityRequest {
 
 /// Request for spline interpolation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SplineRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -310,6 +322,7 @@ pub struct SplineRequest {
 
 /// Request for linear approximation/interpolation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ApproxRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -342,6 +355,7 @@ pub struct ApproxRequest {
 
 /// Request for MANOVA (Multivariate Analysis of Variance).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ManovaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -368,6 +382,7 @@ pub struct ManovaRequest {
 
 /// Request for factor analysis.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FactorAnalysisRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -400,6 +415,7 @@ pub struct FactorAnalysisRequest {
 
 /// Request for median polish (robust two-way decomposition).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MedpolishRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -430,6 +446,7 @@ pub struct MedpolishRequest {
 
 /// Request for power analysis of proportion test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PowerPropTestRequest {
     /// Sample size per group
     #[schemars(
@@ -464,6 +481,7 @@ pub struct PowerPropTestRequest {
 
 /// Request for isotonic regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IsoregRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -484,6 +502,7 @@ pub struct IsoregRequest {
 
 /// Request for power analysis of ANOVA test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PowerAnovaTestRequest {
     /// Number of groups
     #[schemars(
@@ -518,6 +537,7 @@ pub struct PowerAnovaTestRequest {
 
 /// Request for Tukey's HSD (Honest Significant Differences) test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TukeyHsdRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -544,6 +564,7 @@ pub struct TukeyHsdRequest {
 
 /// Request for Mahalanobis distance computation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MahalanobisRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -562,6 +583,7 @@ pub struct MahalanobisRequest {
 
 /// Request for canonical correlation analysis.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CancorRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -594,6 +616,7 @@ pub struct CancorRequest {
 
 /// Request for correlation matrix.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CorrelationRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -602,6 +625,7 @@ pub struct CorrelationRequest {
 
 /// Request for one-way ANOVA.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OneWayAnovaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -622,6 +646,7 @@ pub struct OneWayAnovaRequest {
 
 /// Request for two-way ANOVA.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TwoWayAnovaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -647,7 +672,6 @@ pub struct TwoWayAnovaRequest {
     pub interaction: Option<bool>,
 
     /// Type of sums of squares.
-    #[serde(default)]
     #[schemars(
         description = "Sums of squares: 'I' (default; sequential, as R aov), 'II' or 'III' (as car::Anova; Type III uses sum-to-zero contrasts and is refused when empty cells alias coefficients). Types I and II agree on balanced designs; on unbalanced data they differ."
     )]
@@ -656,6 +680,7 @@ pub struct TwoWayAnovaRequest {
 
 /// Request for power analysis of t-test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PowerTTestRequest {
     /// Sample size (per group for two-sample)
     #[schemars(

@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 /// Request for Kolmogorov-Smirnov test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KsTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -78,6 +79,7 @@ pub struct KsTestRequest {
 
 /// Request for Fisher's exact test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FisherExactRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -112,6 +114,7 @@ pub struct FisherExactRequest {
 
 /// Request for trend test in proportions.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PropTrendTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -138,6 +141,7 @@ pub struct PropTrendTestRequest {
 
 /// Request for Wilcoxon rank sum / signed rank test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WilcoxonTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -196,6 +200,7 @@ pub struct WilcoxonTestRequest {
 
 /// Request for t-test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -244,6 +249,7 @@ pub struct TTestRequest {
 
 /// Request for chi-squared goodness-of-fit test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChiSquaredGofRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -272,6 +278,7 @@ pub struct ChiSquaredGofRequest {
 
 /// Request for chi-squared test of independence.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChiSquaredIndependenceRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -300,6 +307,7 @@ pub struct ChiSquaredIndependenceRequest {
 
 /// Request for exact Poisson test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PoissonTestRequest {
     /// Number of events (one or two values)
     #[schemars(
@@ -332,6 +340,7 @@ pub struct PoissonTestRequest {
 
 /// Request for McNemar's chi-squared test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct McnemarTestRequest {
     /// Upper-right cell (b) of the 2x2 table
     #[schemars(
@@ -354,6 +363,7 @@ pub struct McnemarTestRequest {
 
 /// Request for Bartlett's test of homogeneity of variances.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BartlettTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -372,6 +382,7 @@ pub struct BartlettTestRequest {
 
 /// Request for Cochran-Mantel-Haenszel test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MantelhaenTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -408,6 +419,7 @@ pub struct MantelhaenTestRequest {
 
 /// Request for Kruskal-Wallis rank sum test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KruskalWallisRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -428,6 +440,7 @@ pub struct KruskalWallisRequest {
 
 /// Request for pairwise t-tests with multiple comparison correction.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PairwiseTTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -464,6 +477,7 @@ pub struct PairwiseTTestRequest {
 
 /// Request for Welch's one-way ANOVA test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OnewayTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -490,6 +504,7 @@ pub struct OnewayTestRequest {
 
 /// Request for pairwise Wilcoxon rank sum tests with multiple comparison correction.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PairwiseWilcoxRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -526,6 +541,7 @@ pub struct PairwiseWilcoxRequest {
 
 /// Request for Mood's two-sample test of scale.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MoodTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -550,6 +566,7 @@ pub struct MoodTestRequest {
 
 /// Request for correlation test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CorTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -584,6 +601,7 @@ pub struct CorTestRequest {
 
 /// Request for Quade test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuadeTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -605,6 +623,7 @@ pub struct QuadeTestRequest {
 
 /// Request for Friedman rank sum test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FriedmanTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -626,6 +645,7 @@ pub struct FriedmanTestRequest {
 
 /// Request for Shapiro-Wilk normality test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ShapiroWilkRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

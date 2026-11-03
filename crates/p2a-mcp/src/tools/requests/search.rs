@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 /// Request for searching tools by natural language query.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchToolsRequest {
     /// Natural language description of the analysis you want to perform.
     /// Examples: "regression with robust standard errors", "test for unit root",
@@ -22,25 +23,16 @@ pub struct SearchToolsRequest {
     #[schemars(description = "Optional category to filter results")]
     pub category: Option<String>,
 
-    /// Maximum number of tools to return (default: 10, max: 25)
-    #[schemars(description = "Maximum tools to return (default: 10)")]
+    /// Maximum number of tools to return (1 to 25, default: 10)
+    #[schemars(
+        description = "Maximum tools to return, 1 to 25 (default: 10); larger values return 25"
+    )]
     pub limit: Option<usize>,
-}
-
-/// Request for executing a tool by name with dynamic dispatch.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExecuteToolRequest {
-    /// Name of the tool to execute (from search_tools results)
-    #[schemars(description = "Name of the tool to execute")]
-    pub tool_name: String,
-
-    /// Tool arguments as a JSON object. Structure depends on the specific tool.
-    #[schemars(description = "Tool arguments as JSON object")]
-    pub arguments: serde_json::Value,
 }
 
 /// Request for listing tool categories.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListToolCategoriesRequest {
     /// If true, include tool counts per category (default: true)
     #[schemars(description = "Include tool counts (default: true)")]

@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// Request for creating spatial neighbors.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpatialNeighborsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -53,6 +54,7 @@ pub struct SpatialNeighborsRequest {
 
 /// Request for Moran's I test for spatial autocorrelation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MoranTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -77,6 +79,7 @@ pub struct MoranTestRequest {
 
 /// Request for spatial LM tests.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpatialLmTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -99,6 +102,7 @@ pub struct SpatialLmTestRequest {
 
 /// Request for Spatial Autoregressive (SAR) model.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SarModelRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -133,6 +137,7 @@ pub struct SarModelRequest {
 
 /// Request for Spatial Error Model (SEM).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SemModelRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -155,6 +160,7 @@ pub struct SemModelRequest {
 
 /// Request for Spatial GMM with Heteroscedasticity Robustness (sphet).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SphetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -205,6 +211,7 @@ pub struct SphetRequest {
 
 /// Request for SAR Probit model (spatial lag probit).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SarProbitRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -245,6 +252,7 @@ pub struct SarProbitRequest {
 
 /// Request for SEM Probit model (spatial error probit).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SemProbitRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -279,6 +287,7 @@ pub struct SemProbitRequest {
 
 /// Request for Spatial Panel ML estimation (spml).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpmlRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset containing panel data.")]
@@ -331,6 +340,7 @@ pub struct SpmlRequest {
 
 /// Request for Spatial Panel GMM estimation (spgm).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpgmRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset containing panel data.")]

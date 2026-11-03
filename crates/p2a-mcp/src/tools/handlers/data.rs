@@ -1515,12 +1515,18 @@ impl AnalyticsServer {
 
     /// Load a dataset from a file.
     #[tool(
-        description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. CSV text \"NA\" and empty fields are read as missing (set na_strings to change this). Returns dataset information including dimensions and column types."
+        description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. CSV text \"NA\" and empty fields are read as missing (set na_strings to change this). Returns dataset information including dimensions and column types. A declared file_type must match the extension."
     )]
     pub async fn load_dataset(
         &self,
         Parameters(request): Parameters<LoadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Err(e) = crate::tools::common::check_declared_file_type(
+            request.file_type.as_deref(),
+            &request.path,
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(e)]));
+        }
         let path = match path_jail::validate_data_path(&request.path) {
             Ok(p) => p,
             Err(e) => {
@@ -1709,12 +1715,18 @@ impl AnalyticsServer {
 
     /// Upload and load a dataset from base64-encoded content.
     #[tool(
-        description = "Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV and Parquet formats."
+        description = "Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV and Parquet formats. A declared file_type must match the extension."
     )]
     pub async fn upload_dataset(
         &self,
         Parameters(request): Parameters<UploadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Err(e) = crate::tools::common::check_declared_file_type(
+            request.file_type.as_deref(),
+            &request.filename,
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(e)]));
+        }
         use base64::Engine;
 
         // Decode base64
