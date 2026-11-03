@@ -344,17 +344,13 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
     let unscaled = qr.unscaled_covariance()?;
 
     let mut coefficients = Array2::zeros((k, n_regressors));
-    let mut residuals = Array2::zeros((t, k));
     for eq in 0..k {
-        let y_eq = y.column(eq);
-        coefficients.row_mut(eq).assign(&qr.coefficients(y_eq)?);
-        // Residuals Q (0, .., 0, (Q'y)[m..]) as lm.fit computes them.
-        let mut effects = qr.qty(y_eq)?;
-        effects.iter_mut().take(n_regressors).for_each(|v| *v = 0.0);
-        residuals
-            .column_mut(eq)
-            .assign(&qr.q_times(effects.view())?);
+        coefficients
+            .row_mut(eq)
+            .assign(&qr.coefficients(y.column(eq))?);
     }
+    // U = Y - Z B' in one matrix product (cheaper than K more passes over the reflectors)
+    let residuals = &y - &z.dot(&coefficients.t());
 
     // Residual covariances: U'U / (T - K p - 1) for the SEs and the orthogonalised IRF
     // (vars' summary()$covres, ECON-90), U'U / T for the likelihood.

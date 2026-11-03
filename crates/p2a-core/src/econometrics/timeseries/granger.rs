@@ -1,13 +1,13 @@
 //! The Granger causality F test ([`granger_test`], [`run_granger_test`], [`granger_test_bidirectional`]).
 
-use ndarray::Array1;
+use ndarray::{Array1, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::solve::least_squares;
+use crate::linalg::solve::{LM_QR_TOL, Qr};
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::f_test_p_value;
@@ -96,7 +96,7 @@ impl fmt::Display for GrangerResult {
 /// F = [(RSS_R - RSS_U) / p] / [RSS_U / (n - 3p - 1)]
 ///
 /// Under H0, F ~ F(p, n - 3p - 1), n = number of rows (each regression uses the n - p rows
-/// t = p + 1..n). Both regressions are solved by pivoted QR.
+/// t = p + 1..n). Both regressions come from one pivoted QR of the unrestricted design.
 ///
 /// # Requirements
 ///
@@ -188,16 +188,6 @@ pub fn granger_test(
     // Build dependent variable vector (y values from lags onwards)
     let y = Array1::from_vec(y_vec[lags..].to_vec());
 
-    // Build restricted design matrix: intercept + lagged y only
-    // X_R = [1, y_{t-1}, y_{t-2}, ..., y_{t-p}]
-    let mut x_restricted = resource::try_zeros2(n, lags + 1, "restricted Granger design")?;
-    for i in 0..n {
-        x_restricted[[i, 0]] = 1.0; // intercept
-        for lag in 1..=lags {
-            x_restricted[[i, lag]] = y_vec[lags + i - lag];
-        }
-    }
-
     // Build unrestricted design matrix: intercept + lagged y + lagged x
     // X_U = [1, y_{t-1}, ..., y_{t-p}, x_{t-1}, ..., x_{t-p}]
     let mut x_unrestricted = resource::try_zeros2(n, 2 * lags + 1, "unrestricted Granger design")?;
@@ -209,38 +199,57 @@ pub fn granger_test(
         }
     }
 
-    let rss = |model: &str, x: &ndarray::Array2<f64>| -> EconResult<f64> {
-        let fit = least_squares(x.view(), y.view())?;
-        if !fit.aliased.is_empty() {
-            let labels: Vec<String> = fit
-                .aliased
-                .iter()
-                .map(|&j| match j {
-                    0 => "(Intercept)".to_string(),
-                    j if j <= lags => format!("{dependent}_{j}"),
-                    j => format!("{cause}_{}", j - lags),
-                })
-                .collect();
-            return Err(EconError::SingularMatrix {
-                context: format!(
-                    "{model} Granger regression has aliased coefficients ({}): the lags of \
-                     {dependent} and {cause} are collinear",
-                    labels.join(", ")
-                ),
-                suggestion: "lmtest::grangertest stops here too; are the two series identical \
-                             or proportional?"
-                    .to_string(),
-            });
-        }
-        Ok(fit.residuals.dot(&fit.residuals))
+    // The restricted design [1, y lags] is the first p + 1 columns of the unrestricted one.
+    // At full rank dqrdc2 moves no column, so the first p + 1 reflectors of the unrestricted
+    // QR are the QR of the restricted design, and one decomposition gives both residual sums
+    // of squares from the effects Q'y: RSS_U = sum over i >= 2p + 1, RSS_R = sum over
+    // i >= p + 1 (lm.fit on each design gives the same).
+    let m = 2 * lags + 1;
+    let qr = Qr::decompose(x_unrestricted.view(), LM_QR_TOL)?;
+    if qr.rank() < m {
+        let aliased = qr.aliased();
+        let model = if aliased.iter().any(|&j| j <= lags) {
+            "restricted"
+        } else {
+            "unrestricted"
+        };
+        let labels: Vec<String> = aliased
+            .iter()
+            .map(|&j| match j {
+                0 => "(Intercept)".to_string(),
+                j if j <= lags => format!("{dependent}_{j}"),
+                j => format!("{cause}_{}", j - lags),
+            })
+            .collect();
+        return Err(EconError::SingularMatrix {
+            context: format!(
+                "{model} Granger regression has aliased coefficients ({}): the lags of \
+                 {dependent} and {cause} are collinear",
+                labels.join(", ")
+            ),
+            suggestion: "lmtest::grangertest stops here too; are the two series identical or \
+                         proportional?"
+                .to_string(),
+        });
+    }
+    debug_assert!(qr.pivot().iter().enumerate().all(|(i, &j)| i == j));
+    let effects = qr.qty(y.view())?;
+    let sum_sq = |from: usize, to: usize| {
+        effects
+            .slice(s![from..to])
+            .iter()
+            .map(|e| e * e)
+            .sum::<f64>()
     };
-    let rss_r = rss("restricted", &x_restricted)?;
-    let rss_u = rss("unrestricted", &x_unrestricted)?;
+    let rss_u = sum_sq(m, n);
+    // RSS_R - RSS_U as a sum of squares: never negative
+    let rss_gain = sum_sq(lags + 1, m);
+    let rss_r = rss_u + rss_gain;
 
     // F without an absolute exact-fit threshold: it is scale-free, and RSS_U = 0 gives inf
-    // (p = 0) as in R; max(0) absorbs a rounding-negative difference.
+    // (p = 0) as in R.
     let df1 = lags;
-    let f_statistic = ((rss_r - rss_u).max(0.0) / df1 as f64) / (rss_u / df2 as f64);
+    let f_statistic = (rss_gain / df1 as f64) / (rss_u / df2 as f64);
 
     let p_value = f_test_p_value(f_statistic, df1 as f64, df2 as f64);
     let significant = p_value < 0.05;
@@ -484,6 +493,26 @@ mod tests {
                 b.f_statistic,
                 a.f_statistic
             );
+        }
+    }
+
+    /// x = 3 y exactly: the lags of x are aliased with those of y (R: grangertest stops with
+    /// "there are aliased coefficients in the model").
+    #[test]
+    fn test_granger_rejects_proportional_series() {
+        let y: Vec<f64> = (0..30)
+            .map(|i| ((i * 7919) % 97) as f64 / 97.0 - 0.5)
+            .collect();
+        let x: Vec<f64> = y.iter().map(|v| 3.0 * v).collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        match granger_test(&ds, "y", "x", 2) {
+            Err(EconError::SingularMatrix { context, .. }) => {
+                assert!(
+                    context.contains("unrestricted") && context.contains("x_1"),
+                    "{context}"
+                )
+            }
+            other => panic!("expected SingularMatrix, got {other:?}"),
         }
     }
 
