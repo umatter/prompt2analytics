@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "ols_illcond",
+  "area": "regression",
+  "method": "lm on a full-rank but ill-conditioned design (kappa(X) ~ 1.7e8; normal equations lose ~5 digits)",
+  "reference": "stats::lm (Householder QR); the Cholesky normal-equation error and the spread to LAPACK dgeqp3 are recorded for the record",
+  "call": "lm(y ~ x1 + x2 + x3, data = ols_illcond)",
+  "dataset": "validation/datasets/generated/ols_illcond.csv",
+  "datasets": ["validation/datasets/generated/ols_illcond.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "x1", "x2", "x3"],
+      "values": [-521.62338184281998, 1.6205851564219942, -1.0683241910594095, 0.51144536361936777]
+    },
+    "se": {
+      "names": ["(Intercept)", "x1", "x2", "x3"],
+      "values": [375.81450793348512, 0.6353925431334142, 0.63431944943760887, 0.040152763559180835]
+    },
+    "r2": 0.81682960867516063,
+    "sigma": 0.28291816079299725,
+    "adj_r2": 0.80959919849128537,
+    "fstat": 112.97140658724977,
+    "loglik": -10.455542269845015,
+    "kappa_x": 168023422.69544402,
+    "rank": 4,
+    "normal_equations_max_rel_err": 2.7960668434880614e-05,
+    "lapack_qr_max_rel_diff": 8.1073439807266807e-11
+  }
+}

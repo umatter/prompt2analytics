@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ols_rank_qr",
+      "name": "OLS on rank-deficient and ill-conditioned designs: aliased regressors, rank, df, and the normal-equations / pivoted-QR choice",
+      "category": "regression",
+      "reference": "stats::lm (lm.fit, dqrdc2, tol = 1e-7); stats::summary.lm; stats::logLik; stats::AIC; stats::BIC; sandwich::vcovHC",
+      "doc": "validation/regression/ols.md",
+      "cases": [
+        "ols_aliased",
+        "ols_illcond",
+        "ols_longley",
+        "ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_dummy_trap",
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_duplicate",
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_constant",
+        "p2a-core::regression::ols::tests::test_validate_ols_illcond_qr",
+        "p2a-core::regression::ols::tests::test_validate_ols_longley_qr",
+        "p2a-core::regression::ols::tests::test_validate_ols_solve_paths"
+      ],
+      "quantities": [
+        "identified coefficients",
+        "aliased flags",
+        "SE classical (NA for aliased)",
+        "rank",
+        "df_resid",
+        "R2",
+        "adj. R2",
+        "sigma",
+        "F and its df",
+        "logLik",
+        "AIC",
+        "BIC",
+        "HC0/HC1/HC3 SE on the identified columns",
+        "run_ols_raw = run_ols",
+        "solve path per design (normal equations for Grunfeld, pivoted QR for Longley, ols_illcond and aliased designs)"
+      ],
+      "tolerance": "validation/README.md, n = 120 and 80: coefficients 1e-8 / 1e-6, SE and statistics 1e-6 / 1e-5 relative; ill-conditioned coefficients Tol::coef(80); Longley also 1e-10 (an accuracy check, not a path pin); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

@@ -66,7 +66,8 @@ use crate::data::columns::{
     ColumnRequest, Columns, Factor, MissingSummary, NaPolicy, econ_error_from_design,
 };
 use crate::errors::{EconError, EconResult, EstimationWarning};
-use crate::linalg::{CONDITION_THRESHOLD, DesignMatrix, matmul, safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, aliasing_message, least_squares, sym_inverse};
+use crate::linalg::{DesignMatrix, matmul, safe_inverse, xtx, xty};
 use crate::resource;
 use crate::traits::{LinearEstimator, SignificanceLevel, f_test_p_value, t_test_p_value};
 
@@ -227,6 +228,11 @@ pub struct OlsResult {
     /// nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Names of the aliased (linearly dependent) design columns, in column order; their
+    /// coefficient, SE, t, p and CI are NaN, as R's `lm` reports NA. Absent from JSON when
+    /// nothing is aliased.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliased: Vec<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal caches (not serialized)
@@ -360,6 +366,11 @@ impl std::fmt::Display for OlsResult {
 }
 
 impl OlsResult {
+    /// Number of identified coefficients (R's `fit$rank`): `n_params - aliased.len()`.
+    pub fn rank(&self) -> usize {
+        self.n_params - self.aliased.len()
+    }
+
     /// Export coefficient table to a CSV string.
     ///
     /// Produces a table with columns: variable, coefficient, std_error, t_stat, p_value,
@@ -550,125 +561,11 @@ pub fn run_ols_raw(
         });
     }
 
-    // Check we have enough observations
-    if n <= k {
-        return Err(EconError::InsufficientData {
-            required: k + 1,
-            provided: n,
-            context: format!("OLS regression with {} parameters", k),
-        });
-    }
-
-    let mut warnings = Vec::new();
-
     // The model has an intercept when some column is constant and non-zero, in any
     // position (REG-19; R reads it from the terms, which a raw matrix does not have).
     let has_intercept = has_constant_column(x.view());
 
-    // Compute (X'X)^{-1}
-    let (xtx_inv, cond_warning) =
-        safe_inverse(&xtx(&x.view()).view()).map_err(|_e| EconError::SingularMatrix {
-            context: "X'X matrix in OLS".to_string(),
-            suggestion: "Check for perfect multicollinearity between independent variables"
-                .to_string(),
-        })?;
-
-    if let Some(cond) = cond_warning {
-        warnings.push(
-            EstimationWarning::HighConditionNumber {
-                value: cond,
-                threshold: CONDITION_THRESHOLD,
-            }
-            .message(),
-        );
-    }
-
-    // Compute β = (X'X)^{-1} X'y
-    let xty_vec = xty(&x.view(), y);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // Compute fitted values and residuals
-    let y_hat = x.dot(&beta);
-    let residuals: Array1<f64> = y - &y_hat;
-
-    // Compute statistics
-    let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
-    let df_resid = n - k;
-    let sigma_squared = ssr / (df_resid as f64);
-    let residual_std_error = sigma_squared.sqrt();
-    let FitSummary {
-        sst,
-        r_squared,
-        adj_r_squared,
-        df_model,
-        f_statistic,
-        f_p_value,
-    } = fit_summary(y, ssr, k, df_resid, sigma_squared, has_intercept);
-
-    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, k);
-
-    // Compute variance-covariance matrix based on cov_type
-    let vcov = compute_vcov(&x.view(), &residuals, &xtx_inv, cov_type, n, k)?;
-
-    // Extract standard errors from diagonal
-    let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
-
-    // Compute t-statistics and p-values
-    let t_stats: Array1<f64> = &beta / &se;
-    let p_values: Vec<f64> = t_stats
-        .iter()
-        .map(|&t| t_test_p_value(t, df_resid as f64))
-        .collect();
-
-    // Compute 95% confidence intervals
-    let t_crit = crate::traits::t_critical(0.05, df_resid as f64);
-
-    // Build coefficient results
-    let coefficients: Vec<OlsCoefficient> = variable_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let p = p_values[i];
-            OlsCoefficient {
-                name: name.clone(),
-                estimate: beta[i],
-                std_error: se[i],
-                t_value: t_stats[i],
-                p_value: p,
-                significance: SignificanceLevel::from_p_value(p),
-                ci_lower_95: beta[i] - t_crit * se[i],
-                ci_upper_95: beta[i] + t_crit * se[i],
-            }
-        })
-        .collect();
-
-    Ok(OlsResult {
-        dependent_var: y_name.to_string(),
-        variable_names: variable_names.to_vec(),
-        n_obs: n,
-        n_params: k,
-        df_resid,
-        df_model,
-        coefficients,
-        r_squared,
-        adj_r_squared,
-        residual_std_error,
-        f_statistic,
-        f_p_value,
-        log_likelihood,
-        aic,
-        bic,
-        cov_type,
-        warnings,
-        missing: MissingSummary::none(n),
-        beta,
-        se,
-        resid: residuals,
-        vcov,
-        xtx_inv,
-        ssr,
-        sst,
-    })
+    fit_ols(x.view(), y, variable_names, y_name, has_intercept, cov_type)
 }
 
 /// Run OLS regression on a dataset.
@@ -704,50 +601,199 @@ pub fn run_ols(
     // Extract y vector
     let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
 
-    let x = &design.data;
-    let n = design.n_obs;
-    let k = design.n_features;
+    fit_ols(
+        design.data.view(),
+        &y,
+        &design.column_names,
+        y_col,
+        intercept,
+        cov_type,
+    )
+}
 
-    // Check we have enough observations
-    if n <= k {
+/// Which solve an OLS fit took (decision D1, variant B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OlsPath {
+    /// Cholesky inverse of X'X: full rank and well conditioned.
+    NormalEquations,
+    /// `lm.fit`'s pivoted QR (`linalg::solve::least_squares`): rank-deficient or
+    /// ill-conditioned designs.
+    PivotedQr,
+}
+
+/// The normal equations are used only when the diagonally equilibrated X'X has a
+/// reciprocal condition of at least this value (`sym_inverse`'s estimate, which is a lower
+/// bound, so the check errs toward the QR). Their relative error grows like
+/// `eps / rcond`; below the threshold the pivoted QR (error `eps * sqrt(1 / rcond)`)
+/// decides rank and coefficients.
+const OLS_NORMAL_EQUATIONS_MIN_RCOND: f64 = 1e-8;
+
+/// `(X'X)^{-1}` when the design is of full rank and well conditioned (see
+/// [`OLS_NORMAL_EQUATIONS_MIN_RCOND`]); `None` when the pivoted QR must decide.
+/// Cancellation and the allocation ceiling propagate; any other failure of the inverse
+/// (a singular or indefinite X'X) means "use the QR".
+fn normal_equations_inverse(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Option<Array2<f64>>> {
+    let (n, k) = x.dim();
+    if k == 0 || n <= k {
+        return Ok(None);
+    }
+    let gram = xtx(&x);
+    match sym_inverse(gram.view(), SingularPolicy::Error, "X'X") {
+        Ok(inv)
+            if inv.reciprocal_condition >= OLS_NORMAL_EQUATIONS_MIN_RCOND
+                && inv.inverse.diag().iter().all(|v| v.is_finite() && *v > 0.0) =>
+        {
+            Ok(Some(inv.inverse))
+        }
+        Ok(_) => Ok(None),
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The least-squares solution of one OLS fit.
+struct OlsSolve {
+    /// Coefficients in column order, `NaN` for aliased columns.
+    beta: Array1<f64>,
+    residuals: Array1<f64>,
+    /// `(X'X)^{-1}` (k x k), `NaN` rows and columns for aliased columns.
+    unscaled: Array2<f64>,
+    rank: usize,
+    /// Indices of the aliased columns, ascending.
+    aliased: Vec<usize>,
+    path: OlsPath,
+}
+
+/// Solve `min ||y - X b||`: the normal equations on a full-rank, well-conditioned design
+/// (bit for bit the solve OLS always used there), `lm.fit`'s pivoted QR otherwise.
+fn solve_ols(
+    x: ndarray::ArrayView2<'_, f64>,
+    y: ndarray::ArrayView1<'_, f64>,
+) -> EconResult<OlsSolve> {
+    if let Some(unscaled) = normal_equations_inverse(x)? {
+        let y = y.to_owned();
+        let beta = unscaled.dot(&xty(&x, &y));
+        let residuals = &y - &x.dot(&beta);
+        return Ok(OlsSolve {
+            beta,
+            residuals,
+            unscaled,
+            rank: x.ncols(),
+            aliased: Vec::new(),
+            path: OlsPath::NormalEquations,
+        });
+    }
+    let ls = least_squares(x, y)?;
+    Ok(OlsSolve {
+        beta: ls.coefficients,
+        residuals: ls.residuals,
+        unscaled: ls.unscaled_cov,
+        rank: ls.rank,
+        aliased: ls.aliased,
+        path: OlsPath::PivotedQr,
+    })
+}
+
+/// The columns of `x` listed in `cols`, through the allocation ceiling.
+fn select_columns(x: ndarray::ArrayView2<'_, f64>, cols: &[usize]) -> EconResult<Array2<f64>> {
+    let mut out = resource::try_zeros2(x.nrows(), cols.len(), "OLS identified design")?;
+    for (j, &c) in cols.iter().enumerate() {
+        out.column_mut(j).assign(&x.column(c));
+    }
+    Ok(out)
+}
+
+/// The `(cols, cols)` block of a square matrix.
+fn select_block(m: &Array2<f64>, cols: &[usize]) -> Array2<f64> {
+    Array2::from_shape_fn((cols.len(), cols.len()), |(i, j)| m[[cols[i], cols[j]]])
+}
+
+/// A k x k matrix holding `m` at `(cols, cols)` and `NaN` elsewhere.
+fn embed_block(m: &Array2<f64>, cols: &[usize], k: usize) -> Array2<f64> {
+    let mut out = Array2::from_elem((k, k), f64::NAN);
+    for (i, &ci) in cols.iter().enumerate() {
+        for (j, &cj) in cols.iter().enumerate() {
+            out[[ci, cj]] = m[[i, j]];
+        }
+    }
+    out
+}
+
+/// One OLS fit on arrays, shared by [`run_ols`] and [`run_ols_raw`]: the least-squares
+/// solution ([`solve_ols`]), fit statistics on the identified columns as `summary.lm`, and
+/// the requested covariance on the identified columns (as `sandwich`). Aliased columns get
+/// `NaN` coefficients, SEs, t, p and CIs and R's warning.
+fn fit_ols(
+    x: ndarray::ArrayView2<'_, f64>,
+    y: &Array1<f64>,
+    names: &[String],
+    y_name: &str,
+    intercept: bool,
+    cov_type: CovarianceType,
+) -> EconResult<OlsResult> {
+    let (n, k) = x.dim();
+    // lm.fit refuses NA/NaN/Inf; run_ols input is already NA-checked by the extractor.
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "OLS input contains non-finite values (NA/NaN/Inf) in x".to_string(),
+        });
+    }
+    if y.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "OLS input contains non-finite values (NA/NaN/Inf) in y".to_string(),
+        });
+    }
+    if n == 0 {
         return Err(EconError::InsufficientData {
-            required: k + 1,
-            provided: n,
-            context: format!("OLS regression with {} parameters", k),
+            required: 1,
+            provided: 0,
+            context: "OLS regression".to_string(),
         });
     }
 
-    let mut warnings = Vec::new();
-
-    // Compute (X'X)^{-1}
-    let (xtx_inv, cond_warning) =
-        safe_inverse(&xtx(&x.view()).view()).map_err(|_e| EconError::SingularMatrix {
-            context: "X'X matrix in OLS".to_string(),
-            suggestion: "Check for perfect multicollinearity between independent variables"
+    let solve = solve_ols(x, y.view())?;
+    let rank = solve.rank;
+    if rank == 0 {
+        return Err(EconError::SingularMatrix {
+            context: "OLS design matrix has rank 0".to_string(),
+            suggestion: "every column is zero; include an intercept or a non-zero regressor"
                 .to_string(),
-        })?;
-
-    if let Some(cond) = cond_warning {
-        warnings.push(
-            EstimationWarning::HighConditionNumber {
-                value: cond,
-                threshold: CONDITION_THRESHOLD,
-            }
-            .message(),
-        );
+        });
     }
+    let df_resid =
+        n.checked_sub(rank)
+            .filter(|d| *d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: rank + 1,
+                provided: n,
+                context: format!("OLS regression with {rank} identified parameters"),
+            })?;
 
-    // Compute β = (X'X)^{-1} X'y
-    let xty_vec = xty(&x.view(), &y);
-    let beta = xtx_inv.dot(&xty_vec);
+    let mut warnings = Vec::new();
+    if let Some(w) = aliasing_message(&solve.aliased, names) {
+        warnings.push(w);
+    }
+    let aliased: Vec<String> = solve
+        .aliased
+        .iter()
+        .map(|&j| {
+            names
+                .get(j)
+                .cloned()
+                .unwrap_or_else(|| format!("x{}", j + 1))
+        })
+        .collect();
 
-    // Compute fitted values and residuals
-    let y_hat = x.dot(&beta);
-    let residuals: Array1<f64> = &y - &y_hat;
+    let OlsSolve {
+        beta,
+        residuals,
+        unscaled: xtx_inv,
+        aliased: aliased_idx,
+        ..
+    } = solve;
 
     // Compute statistics
     let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
-    let df_resid = n - k;
     let sigma_squared = ssr / (df_resid as f64);
     let residual_std_error = sigma_squared.sqrt();
     let FitSummary {
@@ -757,17 +803,25 @@ pub fn run_ols(
         df_model,
         f_statistic,
         f_p_value,
-    } = fit_summary(&y, ssr, k, df_resid, sigma_squared, intercept);
+    } = fit_summary(y, ssr, rank, df_resid, sigma_squared, intercept);
 
-    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, k);
+    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, rank);
 
-    // Compute variance-covariance matrix based on cov_type
-    let vcov = compute_vcov(&x.view(), &residuals, &xtx_inv, cov_type, n, k)?;
+    // Covariance on the identified columns; aliased rows and columns are NaN.
+    let vcov = if aliased.is_empty() {
+        compute_vcov(&x, &residuals, &xtx_inv, cov_type, n, df_resid)?
+    } else {
+        let cols: Vec<usize> = (0..k).filter(|j| !aliased_idx.contains(j)).collect();
+        let x1 = select_columns(x, &cols)?;
+        let u1 = select_block(&xtx_inv, &cols);
+        let v1 = compute_vcov(&x1.view(), &residuals, &u1, cov_type, n, df_resid)?;
+        embed_block(&v1, &cols, k)
+    };
 
     // Extract standard errors from diagonal
     let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
 
-    // Compute t-statistics and p-values
+    // Compute t-statistics and p-values (NaN for aliased columns)
     let t_stats: Array1<f64> = &beta / &se;
     let p_values: Vec<f64> = t_stats
         .iter()
@@ -778,8 +832,7 @@ pub fn run_ols(
     let t_crit = crate::traits::t_critical(0.05, df_resid as f64);
 
     // Build coefficient results
-    let coefficients: Vec<OlsCoefficient> = design
-        .column_names
+    let coefficients: Vec<OlsCoefficient> = names
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -798,8 +851,8 @@ pub fn run_ols(
         .collect();
 
     Ok(OlsResult {
-        dependent_var: y_col.to_string(),
-        variable_names: design.column_names.clone(),
+        dependent_var: y_name.to_string(),
+        variable_names: names.to_vec(),
         n_obs: n,
         n_params: k,
         df_resid,
@@ -816,6 +869,7 @@ pub fn run_ols(
         cov_type,
         warnings,
         missing: MissingSummary::none(n),
+        aliased,
         beta,
         se,
         resid: residuals,
@@ -833,17 +887,17 @@ fn compute_vcov(
     xtx_inv: &Array2<f64>,
     cov_type: CovarianceType,
     n: usize,
-    k: usize,
+    df_resid: usize,
 ) -> EconResult<Array2<f64>> {
     match cov_type {
         CovarianceType::Standard => {
             // Standard OLS: σ² (X'X)^{-1}
-            let sigma2 = residuals.iter().map(|&e| e.powi(2)).sum::<f64>() / ((n - k) as f64);
+            let sigma2 = residuals.iter().map(|&e| e.powi(2)).sum::<f64>() / (df_resid as f64);
             Ok(xtx_inv * sigma2)
         }
         CovarianceType::HC0 | CovarianceType::HC1 | CovarianceType::HC2 | CovarianceType::HC3 => {
             // Robust standard errors using sandwich estimator
-            compute_hc_vcov(x, residuals, xtx_inv, cov_type, n, k)
+            compute_hc_vcov(x, residuals, xtx_inv, cov_type, n, df_resid)
         }
     }
 }
@@ -858,7 +912,7 @@ fn compute_hc_vcov(
     xtx_inv: &Array2<f64>,
     cov_type: CovarianceType,
     n: usize,
-    k: usize,
+    df_resid: usize,
 ) -> EconResult<Array2<f64>> {
     // Compute leverage values for HC2/HC3
     let leverage = if matches!(cov_type, CovarianceType::HC2 | CovarianceType::HC3) {
@@ -875,7 +929,7 @@ fn compute_hc_vcov(
             match cov_type {
                 CovarianceType::HC0 => e2,
                 CovarianceType::HC1 => {
-                    let correction = (n as f64) / ((n - k) as f64);
+                    let correction = (n as f64) / (df_resid as f64);
                     e2 * correction
                 }
                 CovarianceType::HC2 => {
@@ -4374,5 +4428,332 @@ mod tests {
             run_vcov_bootstrap(&ds, "nope", &["wt"], Some(200), None, Some(1)),
             Err(EconError::ColumnNotFound { .. })
         ));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // T3-WP09: rank-deficient and ill-conditioned designs (validation/r/cases/reg_rank_qr.R;
+    // registry validation/methods/reg_rank_qr.json)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /// (names, values) of the identified coefficients: R prints only these in
+    /// coef(fit)[!is.na(coef(fit))].
+    fn identified(r: &OlsResult, f: impl Fn(&OlsCoefficient) -> f64) -> (Vec<String>, Vec<f64>) {
+        r.coefficients
+            .iter()
+            .filter(|c| c.estimate.is_finite())
+            .map(|c| (c.name.clone(), f(c)))
+            .unzip()
+    }
+
+    fn all_named(r: &OlsResult, f: impl Fn(&OlsCoefficient) -> f64) -> (Vec<String>, Vec<f64>) {
+        r.coefficients
+            .iter()
+            .map(|c| (c.name.clone(), f(c)))
+            .unzip()
+    }
+
+    fn alias_flags(r: &OlsResult) -> Vec<f64> {
+        r.coefficients
+            .iter()
+            .map(|c| if c.estimate.is_nan() { 1.0 } else { 0.0 })
+            .collect()
+    }
+
+    const ALIAS_MSG: &str = "Coefficients not defined because of singularities";
+
+    /// R: lm(y ~ x1 + da + db + dc) on ols_aliased (reg_rank_qr.R). dc is aliased; the
+    /// identified columns, df = n - rank, summary.lm, logLik (rank + 1 parameters) and
+    /// vcovHC(HC1) as R.
+    #[test]
+    fn test_validate_ols_aliased_dummy_trap() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let x = ["x1", "da", "db", "dc"];
+        let r = run_ols(&ds, "y", &x, true, CovarianceType::Standard).unwrap();
+        let hc1 = run_ols(&ds, "y", &x, true, CovarianceType::HC1).unwrap();
+        let n = r.n_obs;
+        let (cn, cv) = identified(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error); // dc: NaN, R: NA (null) -> equal
+        let (hn, hv) = identified(&hc1, |c| c.std_error);
+        Check::new(&case)
+            .named("trap_coef", &cn, &cv, Tol::coef(n))
+            .vector("trap_aliased", &alias_flags(&r), Tol::exact())
+            .named("trap_se", &sn, &sv, Tol::se(n))
+            .scalar("trap_rank", r.rank() as f64, Tol::exact())
+            .scalar("trap_df", r.df_resid as f64, Tol::exact())
+            .scalar("trap_r2", r.r_squared, Tol::stat(n))
+            .scalar("trap_adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("trap_sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("trap_fstat", r.f_statistic, Tol::stat(n))
+            .vector(
+                "trap_fstat_df",
+                &[r.df_model as f64, r.df_resid as f64],
+                Tol::exact(),
+            )
+            .scalar("trap_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("trap_aic", r.aic, Tol::stat(n))
+            .scalar("trap_bic", r.bic, Tol::stat(n))
+            .named("trap_hc1_se", &hn, &hv, Tol::se(n))
+            .finish();
+        assert_eq!(r.aliased, vec!["dc".to_string()]);
+        assert_eq!((r.n_params, r.rank()), (5, 4));
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains(ALIAS_MSG) && w.contains("dc")),
+            "{:?}",
+            r.warnings
+        );
+        let dc = &r.coefficients[4];
+        assert!(
+            dc.estimate.is_nan()
+                && dc.std_error.is_nan()
+                && dc.t_value.is_nan()
+                && dc.p_value.is_nan()
+        );
+        assert!(dc.ci_lower_95.is_nan() && r.vcov_matrix().row(4).iter().all(|v| v.is_nan()));
+        assert!(r.vcov_matrix()[[1, 1]].is_finite() && r.coefficients()[4].is_nan());
+        assert!(r.to_string().contains(ALIAS_MSG));
+    }
+
+    /// R: lm(y ~ x1 + x2 + x3), x2 = 2 x1 up to 1e-10: x2 (the later column) is aliased,
+    /// x3 is kept. Also the HC0/HC1/HC3 sandwiches on the identified columns, and
+    /// run_ols_raw on the same arrays.
+    #[test]
+    fn test_validate_ols_aliased_duplicate() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let x = ["x1", "x2", "x3"];
+        let fit = |cov| run_ols(&ds, "y", &x, true, cov).unwrap();
+        let (r, h0, h1, h3) = (
+            fit(CovarianceType::Standard),
+            fit(CovarianceType::HC0),
+            fit(CovarianceType::HC1),
+            fit(CovarianceType::HC3),
+        );
+        let n = r.n_obs;
+        let (cn, cv) = identified(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        let se = |m: &OlsResult| identified(m, |c| c.std_error);
+        let ((n0, v0), (n1, v1), (n3, v3)) = (se(&h0), se(&h1), se(&h3));
+        Check::new(&case)
+            .named("dup_coef", &cn, &cv, Tol::coef(n))
+            .vector("dup_aliased", &alias_flags(&r), Tol::exact())
+            .named("dup_se", &sn, &sv, Tol::se(n))
+            .scalar("dup_rank", r.rank() as f64, Tol::exact())
+            .scalar("dup_df", r.df_resid as f64, Tol::exact())
+            .scalar("dup_r2", r.r_squared, Tol::stat(n))
+            .scalar("dup_sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("dup_fstat", r.f_statistic, Tol::stat(n))
+            .named("dup_hc0_se", &n0, &v0, Tol::se(n))
+            .named("dup_hc1_se", &n1, &v1, Tol::se(n))
+            .named("dup_hc3_se", &n3, &v3, Tol::se(n))
+            .finish();
+        assert_eq!(r.aliased, vec!["x2".to_string()]);
+        // run_ols_raw: same design, same numbers (one solve path)
+        let dm = DesignMatrix::from_dataframe(ds.df(), &x, true).unwrap();
+        let y = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        let raw = run_ols_raw(&dm.data, &y, &dm.column_names, "y", CovarianceType::HC1).unwrap();
+        assert_eq!(raw.aliased, h1.aliased);
+        for (a, b) in raw.coefficients.iter().zip(&h1.coefficients) {
+            assert!(
+                (a.estimate.is_nan() && b.estimate.is_nan())
+                    || (a.estimate == b.estimate && a.std_error == b.std_error)
+            );
+        }
+    }
+
+    /// R: lm(y ~ x1 + k5) with k5 = 5: the constant is aliased with the intercept.
+    #[test]
+    fn test_validate_ols_aliased_constant() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let r = run_ols(&ds, "y", &["x1", "k5"], true, CovarianceType::Standard).unwrap();
+        let (cn, cv) = identified(&r, |c| c.estimate);
+        Check::new(&case)
+            .named("const_coef", &cn, &cv, Tol::coef(r.n_obs))
+            .vector("const_aliased", &alias_flags(&r), Tol::exact())
+            .finish();
+        assert_eq!(r.aliased, vec!["k5".to_string()]);
+    }
+
+    /// R: lm on kappa(X) = 1.68e8, at the README tolerance (Tol::coef(80) = 1e-6). The
+    /// normal equations miss by 2.8e-5 here, so the design must take the QR.
+    #[test]
+    fn test_validate_ols_illcond_qr() {
+        let (case, ds) = crate::test_support::load_case("ols_illcond");
+        let r = run_ols(
+            &ds,
+            "y",
+            &["x1", "x2", "x3"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let n = r.n_obs;
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        Check::new(&case)
+            .named("coef", &cn, &cv, Tol::coef(n))
+            .named("se", &sn, &sv, Tol::se(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("fstat", r.f_statistic, Tol::stat(n))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("rank", r.rank() as f64, Tol::exact())
+            .finish();
+        // lm warns about nothing
+        assert!(
+            r.aliased.is_empty() && r.warnings.is_empty(),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// REG-18 on T1's Longley case: an accuracy check at 1e-10 (lm is 3.5e-14 from NIST's
+    /// certified values, and any Householder QR meets 1e-10 with a wide margin), not a path
+    /// pin. Before: 3.56e-8 (the normal equations).
+    #[test]
+    fn test_validate_ols_longley_qr() {
+        let (case, ds) = crate::test_support::load_case("ols_longley");
+        let x = [
+            "GNP.deflator",
+            "GNP",
+            "Unemployed",
+            "Armed.Forces",
+            "Population",
+            "Year",
+        ];
+        let r = run_ols(&ds, "Employed", &x, true, CovarianceType::Standard).unwrap();
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        Check::new(&case)
+            .named("coef", &cn, &cv, Tol::new(1e-10, 1e-12))
+            .named("se_classical", &sn, &sv, Tol::new(1e-10, 1e-14))
+            .finish();
+    }
+
+    /// Variant B of D1: a well-conditioned design takes the normal equations (today's
+    /// numbers, bit for bit), every design whose equilibrated X'X has a reciprocal condition
+    /// below 1e-8 or that is rank-deficient takes the pivoted QR. Each pinned design is
+    /// checked against its R case on the path it takes.
+    #[test]
+    fn test_validate_ols_solve_paths() {
+        let path_of = |ds: &Dataset, y: &str, x: &[&str]| {
+            let d = DesignMatrix::from_dataframe(ds.df(), x, true).unwrap();
+            let yv = DesignMatrix::extract_column(ds.df(), y).unwrap();
+            solve_ols(d.data.view(), yv.view()).unwrap().path
+        };
+        let (grunfeld, g) = crate::test_support::load_case("ols_grunfeld");
+        assert_eq!(
+            path_of(&g, "inv", &["value", "capital"]),
+            OlsPath::NormalEquations
+        );
+        let r = run_ols(
+            &g,
+            "inv",
+            &["value", "capital"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        Check::new(&grunfeld)
+            .named("coef", &cn, &cv, Tol::coef(r.n_obs))
+            .finish();
+        let (_, ill) = crate::test_support::load_case("ols_illcond");
+        assert_eq!(path_of(&ill, "y", &["x1", "x2", "x3"]), OlsPath::PivotedQr);
+        let (_, lo) = crate::test_support::load_case("ols_longley");
+        let lx = [
+            "GNP.deflator",
+            "GNP",
+            "Unemployed",
+            "Armed.Forces",
+            "Population",
+            "Year",
+        ];
+        assert_eq!(path_of(&lo, "Employed", &lx), OlsPath::PivotedQr);
+        let (_, al) = crate::test_support::load_case("ols_aliased");
+        assert_eq!(
+            path_of(&al, "y", &["x1", "da", "db", "dc"]),
+            OlsPath::PivotedQr
+        );
+        assert_eq!(path_of(&al, "y", &["x1", "x3"]), OlsPath::NormalEquations);
+    }
+
+    /// Two columns, no intercept, cosine c between them: the equilibrated X'X is
+    /// [[1, c], [c, 1]] with reciprocal condition (1 - c) / (1 + c). Just inside the
+    /// threshold (about 1e-7) the fit takes the normal equations; just past it (about
+    /// 3e-9) the QR. Both agree with each other's solve to the accuracy the conditioning
+    /// allows.
+    #[test]
+    fn test_ols_solve_path_threshold() {
+        let n = 50;
+        let base: Vec<f64> = (0..n).map(|i| 1.0 + (i as f64 * 0.7).sin()).collect();
+        let wiggle: Vec<f64> = (0..n).map(|i| (i as f64 * 1.9).cos()).collect();
+        let design = |eps: f64| {
+            let mut x = Array2::<f64>::zeros((n, 2));
+            for i in 0..n {
+                x[[i, 0]] = base[i];
+                x[[i, 1]] = base[i] + eps * wiggle[i];
+            }
+            x
+        };
+        let rcond = |x: &Array2<f64>| {
+            let a = x.t().dot(x);
+            let c = a[[0, 1]] / (a[[0, 0]] * a[[1, 1]]).sqrt();
+            (1.0 - c) / (1.0 + c)
+        };
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.5 * base[i] + 0.1 * ((i * 7) % 5) as f64)
+            .collect();
+        let y = Array1::from(y);
+        let (inside, past) = (design(1.1e-3), design(1.9e-4));
+        let (ri, rp) = (rcond(&inside), rcond(&past));
+        assert!(ri > 3e-8 && ri < 3e-7, "{ri}");
+        assert!(rp > 1e-9 && rp < 5e-9, "{rp}");
+        let fi = solve_ols(inside.view(), y.view()).unwrap();
+        let fp = solve_ols(past.view(), y.view()).unwrap();
+        assert_eq!(fi.path, OlsPath::NormalEquations);
+        assert_eq!(fp.path, OlsPath::PivotedQr);
+        assert_eq!((fi.rank, fp.rank), (2, 2));
+        let qi = crate::linalg::solve::least_squares(inside.view(), y.view()).unwrap();
+        for (a, b) in fi.beta.iter().zip(&qi.coefficients) {
+            assert!((a - b).abs() <= 1e-6 * b.abs(), "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_ols_rank_zero_is_an_error() {
+        let df = df! {
+            "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 5.9],
+            "z" => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        }
+        .unwrap();
+        match run_ols(
+            &Dataset::new(df),
+            "y",
+            &["z"],
+            false,
+            CovarianceType::Standard,
+        )
+        .unwrap_err()
+        {
+            EconError::SingularMatrix { context, .. } => {
+                assert!(context.contains("rank 0"), "{context}")
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ols_raw_rejects_non_finite() {
+        let x = ndarray::array![[1.0, 0.3], [1.0, 1.1], [1.0, 2.2], [1.0, 2.9], [1.0, 4.2]];
+        let y = ndarray::array![1.0, f64::NAN, 3.1, 3.9, 5.2];
+        let names = vec!["(Intercept)".to_string(), "x".to_string()];
+        match run_ols_raw(&x, &y, &names, "y", CovarianceType::Standard).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("non-finite"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
     }
 }

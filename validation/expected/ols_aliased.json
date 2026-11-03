@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "id": "ols_aliased",
+  "area": "regression",
+  "method": "lm with aliased regressors: dummy trap, x2 = 2 x1 and a constant column (NA coefficients, rank, df, sandwich, nested F)",
+  "reference": "stats::lm (dqrdc2 pivoting, tol = 1e-7): aliased coefficients NA, rank, df.residual, summary.lm, logLik; sandwich::vcovHC/vcovCL/NeweyWest on the identified columns; stats::anova for the nested F with an aliased unrestricted model and for the RESET augmentation by rank; lmtest::bgtest/bptest/resettest on the aliased model",
+  "call": "lm(y ~ x1 + da + db + dc); lm(y ~ x1 + x2 + x3); lm(y ~ x1 + k5); anova(lm(y ~ x1), lm(y ~ x1 + x2 + x3))",
+  "dataset": "validation/datasets/generated/ols_aliased.csv",
+  "datasets": ["validation/datasets/generated/ols_aliased.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "trap_coef": {
+      "names": ["(Intercept)", "x1", "da", "db"],
+      "values": [0.68660825889922494, 0.45848569646633064, 0.25244367887317148, 0.57656204927040122]
+    },
+    "trap_aliased": [0, 0, 0, 0, 1],
+    "trap_se": {
+      "names": ["(Intercept)", "x1", "da", "db", "dc"],
+      "values": [0.09343870651454142, 0.054051413569350316, 0.12941428863892374, 0.13558922009466723, null]
+    },
+    "trap_rank": 4,
+    "trap_df": 116,
+    "trap_r2": 0.46571432264481438,
+    "trap_sigma": 0.58232062913493343,
+    "trap_adj_r2": 0.45189658960976642,
+    "trap_fstat": 33.704104824109436,
+    "trap_fstat_df": [3, 116],
+    "trap_loglik": -103.35044203055294,
+    "trap_aic": 216.70088406110588,
+    "trap_bic": 230.6383427750161,
+    "trap_hc1_se": {
+      "names": ["(Intercept)", "x1", "da", "db"],
+      "values": [0.083457993028405245, 0.057596550260112747, 0.11862514345858768, 0.13683185312263149]
+    },
+    "trap_bgtest1_chisq": 0.40333656734767115,
+    "trap_bgtest1_p": 0.52537112588468737,
+    "trap_bptest": 1.3783997498637213,
+    "trap_bptest_df": 3,
+    "trap_bptest_p": 0.71060566887229271,
+    "trap_reset_fitted": 0.44078741849147773,
+    "trap_reset_fitted_df": [2, 113],
+    "trap_reset_fitted_p": 0.644631207340992,
+    "trap_reset_fitted_anova_f": 0.44468819210645039,
+    "trap_reset_fitted_anova_df": [2, 114],
+    "trap_reset_fitted_anova_p": 0.64213126502664997,
+    "dup_coef": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.94887771102635188, 0.51467209555024762, 0.18595553418496888]
+    },
+    "dup_aliased": [0, 0, 1, 0],
+    "dup_se": {
+      "names": ["(Intercept)", "x1", "x2", "x3"],
+      "values": [0.05486058402436695, 0.055099196176166092, null, 0.055110899374371629]
+    },
+    "dup_rank": 3,
+    "dup_r2": 0.43684794066477278,
+    "dup_df": 117,
+    "dup_sigma": 0.59528413947451264,
+    "dup_fstat": 45.379581065647386,
+    "dup_hc1_se": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.054914708171403537, 0.06147419096258562, 0.054739959966156118]
+    },
+    "dup_hc0_se": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.0542239296271642, 0.060700899916243653, 0.054051379600052442]
+    },
+    "dup_hc3_se": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.056018174276046183, 0.064072712225681949, 0.056560316567381794]
+    },
+    "dup_cl_hc1_se": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.061371890632820197, 0.085830595484536643, 0.062042120727814086]
+    },
+    "dup_nw_lag4_se": {
+      "names": ["(Intercept)", "x1", "x3"],
+      "values": [0.057714923616133271, 0.047964597088424724, 0.047496254939913586]
+    },
+    "const_coef": {
+      "names": ["(Intercept)", "x1"],
+      "values": [0.95067890408848998, 0.48429144531369378]
+    },
+    "const_aliased": [0, 0, 1],
+    "wald_alias_f": 11.385266969298289,
+    "wald_alias_df1": 1,
+    "wald_alias_df2": 117,
+    "wald_alias_p": 0.0010047200102334269
+  }
+}
