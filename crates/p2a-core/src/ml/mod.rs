@@ -11,16 +11,16 @@
 //! | **K-Means** | [`kmeans`] | Lloyd's algorithm with k-means++ init |
 //! | **Mini-Batch K-Means** | [`mini_batch_kmeans`] | Scalable k-means for large data |
 //! | **Trimmed K-Means** | [`trimmed_kmeans`] | Robust k-means with outlier trimming |
-//! | **K-Medoids (PAM)** | [`kmedoids`] | Partitioning Around Medoids |
+//! | **K-Medoids (PAM)** | [`kmedoids()`] | Partitioning Around Medoids |
 //! | **CLARA** | [`clara`] | K-medoids for large datasets |
 //! | **DBSCAN** | [`dbscan`] | Density-based clustering |
-//! | **HDBSCAN** | [`hdbscan`] | Hierarchical DBSCAN |
-//! | **OPTICS** | [`optics`] | Ordering points for cluster structure |
+//! | **HDBSCAN** | [`hdbscan()`] | Hierarchical DBSCAN |
+//! | **OPTICS** | [`optics()`] | Ordering points for cluster structure |
 //! | **Hierarchical** | [`hierarchical`] | Agglomerative clustering |
 //! | **AGNES** | [`agnes`] | Agglomerative nesting |
 //! | **DIANA** | [`diana`] | Divisive analysis |
 //! | **FastCluster** | [`fastcluster`] | Fast hierarchical (O(n²) memory) |
-//! | **Dynamic Tree Cut** | [`dynamic_tree_cut`] | Adaptive dendrogram cutting |
+//! | **Dynamic Tree Cut** | [`dynamic_tree_cut()`] | Adaptive dendrogram cutting |
 //! | **Spectral** | [`spectral_clustering`] | Graph Laplacian clustering |
 //! | **Affinity Propagation** | [`affinity_propagation`] | Message-passing clustering |
 //! | **Gaussian Mixture** | [`gaussian_mixture`] | EM-based GMM |
@@ -172,11 +172,11 @@
 //! | R Package | p2a-core Functions |
 //! |-----------|-------------------|
 //! | `stats` (kmeans) | [`kmeans`], [`hierarchical`], [`cmdscale`] |
-//! | `cluster` | [`kmedoids`], [`agnes`], [`diana`], [`clara`], [`fanny`], [`silhouette`] |
-//! | `dbscan` | [`dbscan`], [`hdbscan`], [`optics`] |
+//! | `cluster` | [`kmedoids()`], [`agnes`], [`diana`], [`clara`], [`fanny`], [`silhouette`] |
+//! | `dbscan` | [`dbscan`], [`hdbscan()`], [`optics()`] |
 //! | `mclust` | [`gaussian_mixture`], [`normal_mix_em`] |
 //! | `fastcluster` | [`fastcluster`] |
-//! | `dynamicTreeCut` | [`dynamic_tree_cut`] |
+//! | `dynamicTreeCut` | [`dynamic_tree_cut()`] |
 //! | `flexmix` | [`flexmix`] |
 //! | `pvclust` | [`pvclust`] |
 //! | `grf` | [`causal_forest`] |
