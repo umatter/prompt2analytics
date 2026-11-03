@@ -952,7 +952,7 @@ mod tests {
     }
 
     /// R5: rules are listed by non-increasing lift; lift is finite by construction (confidence / support_rhs,
-    /// support_rhs >= 1/n, else 0.0), so total_cmp orders exactly as partial_cmp did.
+    /// support_rhs >= 1/n, else 0.0), so total_cmp orders exactly as the old NaN-tolerant comparison did.
     #[test]
     fn test_rules_sorted_by_lift_descending() {
         let tx: Vec<Vec<String>> = vec![
