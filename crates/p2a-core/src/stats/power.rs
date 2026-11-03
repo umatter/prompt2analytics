@@ -492,7 +492,7 @@ fn chi_squared_lower_quantile(p: f64, df: f64) -> EconResult<f64> {
 /// (in log space, by zeroin at tol 0), with R's chi-square limits when the larger degrees of freedom
 /// exceed 4e5. NaN for alpha outside (0, 1), as R.
 fn f_upper_quantile(alpha: f64, df1: f64, df2: f64) -> EconResult<f64> {
-    if !(alpha > 0.0 && alpha < 1.0) || !(df1 > 0.0) || !(df2 > 0.0) {
+    if !(alpha > 0.0 && alpha < 1.0) || df1.is_nan() || df1 <= 0.0 || df2.is_nan() || df2 <= 0.0 {
         return Ok(f64::NAN);
     }
     if df1 <= df2 && df2 > 4e5 {
@@ -648,7 +648,7 @@ fn uniroot(
     tol: f64,
     param: &str,
 ) -> EconResult<(f64, RootInfo)> {
-    if !(lower < upper) {
+    if lower.is_nan() || upper.is_nan() || lower >= upper {
         return Err(invalid(format!(
             "cannot solve for {param}: the search interval [{lower:e}, {upper:e}] is empty"
         )));
@@ -754,7 +754,8 @@ fn uniroot(
             }
         }
     }
-    if !(sign(f_lower) * sign(f_upper) <= 0.0) || !lower.is_finite() || !upper.is_finite() {
+    let sign_product = sign(f_lower) * sign(f_upper);
+    if sign_product.is_nan() || sign_product > 0.0 || !lower.is_finite() || !upper.is_finite() {
         return Err(invalid(format!(
             "cannot solve for {param}: the power does not reach the requested value on \
              [{lower:e}, {upper:e}]"
@@ -1303,7 +1304,7 @@ pub fn power_t_test_with(spec: &PowerTTestSpec) -> EconResult<PowerTTestResult> 
             v
         }
         PowerTParam::Sd => {
-            if !(delta > 0.0) {
+            if delta.is_nan() || delta <= 0.0 {
                 return Err(invalid(format!(
                     "solving for sd needs delta > 0 (R searches delta * [1e-7, 1e7]), got delta = {delta:?}"
                 )));
@@ -1848,7 +1849,7 @@ fn anova_power(
     let df1 = groups - 1.0;
     let df2 = (n - 1.0) * groups;
     let lambda = (groups - 1.0) * n * (between / within);
-    if df1.is_nan() || df2.is_nan() || lambda.is_nan() || !(df1 > 0.0) || !(df2 > 0.0) {
+    if df1.is_nan() || df2.is_nan() || lambda.is_nan() || df1 <= 0.0 || df2 <= 0.0 {
         return Ok(NcValue::nan());
     }
     if lambda == f64::INFINITY {
@@ -1977,7 +1978,7 @@ pub fn power_anova_test_with(spec: &PowerAnovaTestSpec) -> EconResult<PowerAnova
             v
         }
         PowerAnovaParam::WithinVar => {
-            if !(between > 0.0) {
+            if between.is_nan() || between <= 0.0 {
                 return Err(invalid(format!(
                     "solving for within_var needs between_var > 0 (R searches between_var * [1e-7, 1e7]), got between_var = {between:?}"
                 )));
