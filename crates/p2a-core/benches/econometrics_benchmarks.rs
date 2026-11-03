@@ -332,16 +332,15 @@ fn synth_benchmark(c: &mut Criterion) {
     {
         let dataset = generate_synth_data(5, 10, 6, 42);
         let predictors = vec![PredictorSpec::with_window("outcome", 1, 5)];
-        let config = SynthConfig {
-            treated_unit: "Treated".to_string(),
-            treatment_time: 6,
-            v_method: VOptimization::DataDriven,
-            optimization_window: None,
-            run_placebos: false,
-            tolerance: 1e-6,
-            max_iter: 1000,
-            weight_threshold: 1e-4,
-        };
+        let mut config = SynthConfig::default();
+        config.treated_unit = "Treated".to_string();
+        config.treatment_time = 6;
+        config.v_method = VOptimization::DataDriven;
+        config.optimization_window = None;
+        config.run_placebos = false;
+        config.tolerance = 1e-6;
+        config.max_iter = 1000;
+        config.weight_threshold = 1e-4;
 
         group.bench_with_input(
             BenchmarkId::new("no_placebos", "5x10"),
@@ -358,16 +357,15 @@ fn synth_benchmark(c: &mut Criterion) {
     {
         let dataset = generate_synth_data(15, 20, 12, 42);
         let predictors = vec![PredictorSpec::with_window("outcome", 1, 11)];
-        let config = SynthConfig {
-            treated_unit: "Treated".to_string(),
-            treatment_time: 12,
-            v_method: VOptimization::DataDriven,
-            optimization_window: None,
-            run_placebos: false,
-            tolerance: 1e-6,
-            max_iter: 1000,
-            weight_threshold: 1e-4,
-        };
+        let mut config = SynthConfig::default();
+        config.treated_unit = "Treated".to_string();
+        config.treatment_time = 12;
+        config.v_method = VOptimization::DataDriven;
+        config.optimization_window = None;
+        config.run_placebos = false;
+        config.tolerance = 1e-6;
+        config.max_iter = 1000;
+        config.weight_threshold = 1e-4;
 
         group.bench_with_input(
             BenchmarkId::new("no_placebos", "15x20"),
@@ -384,16 +382,15 @@ fn synth_benchmark(c: &mut Criterion) {
     {
         let dataset = generate_synth_data(10, 15, 8, 42);
         let predictors = vec![PredictorSpec::with_window("outcome", 1, 7)];
-        let config = SynthConfig {
-            treated_unit: "Treated".to_string(),
-            treatment_time: 8,
-            v_method: VOptimization::DataDriven,
-            optimization_window: None,
-            run_placebos: true,
-            tolerance: 1e-6,
-            max_iter: 1000,
-            weight_threshold: 1e-4,
-        };
+        let mut config = SynthConfig::default();
+        config.treated_unit = "Treated".to_string();
+        config.treatment_time = 8;
+        config.v_method = VOptimization::DataDriven;
+        config.optimization_window = None;
+        config.run_placebos = true;
+        config.tolerance = 1e-6;
+        config.max_iter = 1000;
+        config.weight_threshold = 1e-4;
 
         group.bench_with_input(
             BenchmarkId::new("with_placebos", "10x15"),
@@ -484,14 +481,13 @@ fn feglm_logit_benchmark(c: &mut Criterion) {
         let dataset = generate_binary_panel_data(n_entities, n_periods, 42);
         let n = n_entities * n_periods;
 
-        let config = FeglmConfig {
-            max_iter: 25,
-            tolerance: 1e-8,
-            map_max_iter: 100,
-            map_tolerance: 1e-10,
-            weight_min: 1e-10,
-            accelerate: true,
-        };
+        let mut config = FeglmConfig::default();
+        config.max_iter = 25;
+        config.tolerance = 1e-8;
+        config.map_max_iter = 100;
+        config.map_tolerance = 1e-10;
+        config.weight_min = 1e-10;
+        config.accelerate = true;
 
         group.bench_with_input(BenchmarkId::new("single_fe", n), &dataset, |b, data| {
             b.iter(|| {
@@ -512,14 +508,13 @@ fn feglm_logit_benchmark(c: &mut Criterion) {
         let dataset = generate_binary_panel_data(n_entities, n_periods, 42);
         let n = n_entities * n_periods;
 
-        let config = FeglmConfig {
-            max_iter: 25,
-            tolerance: 1e-8,
-            map_max_iter: 100,
-            map_tolerance: 1e-10,
-            weight_min: 1e-10,
-            accelerate: true,
-        };
+        let mut config = FeglmConfig::default();
+        config.max_iter = 25;
+        config.tolerance = 1e-8;
+        config.map_max_iter = 100;
+        config.map_tolerance = 1e-10;
+        config.weight_min = 1e-10;
+        config.accelerate = true;
 
         group.bench_with_input(BenchmarkId::new("two_way_fe", n), &dataset, |b, data| {
             b.iter(|| {
@@ -546,14 +541,13 @@ fn feglm_poisson_benchmark(c: &mut Criterion) {
         let dataset = generate_count_panel_data(n_entities, n_periods, 42);
         let n = n_entities * n_periods;
 
-        let config = FeglmConfig {
-            max_iter: 25,
-            tolerance: 1e-8,
-            map_max_iter: 100,
-            map_tolerance: 1e-10,
-            weight_min: 1e-10,
-            accelerate: true,
-        };
+        let mut config = FeglmConfig::default();
+        config.max_iter = 25;
+        config.tolerance = 1e-8;
+        config.map_max_iter = 100;
+        config.map_tolerance = 1e-10;
+        config.weight_min = 1e-10;
+        config.accelerate = true;
 
         group.bench_with_input(BenchmarkId::new("two_way_fe", n), &dataset, |b, data| {
             b.iter(|| {
@@ -579,13 +573,12 @@ fn ipw_benchmark(c: &mut Criterion) {
         let dataset = generate_treatment_data(n, 42);
 
         // Use minimal bootstrap for benchmarking (bootstrap is slow)
-        let config = IpwConfig {
-            trim: 0.05,
-            estimand: Estimand::ATE,
-            bootstrap: 99, // Reduced for speed
-            normalized: true,
-            seed: Some(42),
-        };
+        let mut config = IpwConfig::default();
+        config.trim = 0.05;
+        config.estimand = Estimand::ATE;
+        config.bootstrap = 99; // Reduced for speed
+        config.normalized = true;
+        config.seed = Some(42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
             b.iter(|| {
@@ -603,13 +596,12 @@ fn doubly_robust_benchmark(c: &mut Criterion) {
     for n in [200, 500, 1000, 2000] {
         let dataset = generate_treatment_data(n, 42);
 
-        let config = DoublyRobustConfig {
-            method: DRMethod::AIPW,
-            trim: 0.05,
-            estimand: Estimand::ATE,
-            bootstrap: 99, // Reduced for speed
-            seed: Some(42),
-        };
+        let mut config = DoublyRobustConfig::default();
+        config.method = DRMethod::AIPW;
+        config.trim = 0.05;
+        config.estimand = Estimand::ATE;
+        config.bootstrap = 99; // Reduced for speed
+        config.seed = Some(42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
             b.iter(|| {
@@ -627,11 +619,10 @@ fn mediation_benchmark(c: &mut Criterion) {
     for n in [200, 500, 1000] {
         let dataset = generate_mediation_data(n, 42);
 
-        let config = MediationConfig {
-            bootstrap: 99, // Reduced for speed
-            trim: 0.05,
-            seed: Some(42),
-        };
+        let mut config = MediationConfig::default();
+        config.bootstrap = 99; // Reduced for speed
+        config.trim = 0.05;
+        config.seed = Some(42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
             b.iter(|| {
@@ -794,12 +785,11 @@ fn cox_ph_benchmark(c: &mut Criterion) {
         let dataset = generate_survival_data(n, 0.3, 42);
 
         // Efron method (default)
-        let config_efron = CoxConfig {
-            ties: TiesMethod::Efron,
-            max_iter: 25,
-            tolerance: 1e-9,
-            robust_se: false,
-        };
+        let mut config_efron = CoxConfig::default();
+        config_efron.ties = TiesMethod::Efron;
+        config_efron.max_iter = 25;
+        config_efron.tolerance = 1e-9;
+        config_efron.robust_se = false;
 
         group.bench_with_input(BenchmarkId::new("efron", n), &dataset, |b, data| {
             b.iter(|| {
@@ -815,12 +805,11 @@ fn cox_ph_benchmark(c: &mut Criterion) {
         });
 
         // Breslow method
-        let config_breslow = CoxConfig {
-            ties: TiesMethod::Breslow,
-            max_iter: 25,
-            tolerance: 1e-9,
-            robust_se: false,
-        };
+        let mut config_breslow = CoxConfig::default();
+        config_breslow.ties = TiesMethod::Breslow;
+        config_breslow.max_iter = 25;
+        config_breslow.tolerance = 1e-9;
+        config_breslow.robust_se = false;
 
         group.bench_with_input(BenchmarkId::new("breslow", n), &dataset, |b, data| {
             b.iter(|| {
@@ -846,11 +835,10 @@ fn aft_benchmark(c: &mut Criterion) {
         let dataset = generate_survival_data(n, 0.3, 42);
 
         // Weibull
-        let config_weibull = AftConfig {
-            distribution: AftDistribution::Weibull,
-            tolerance: 1e-9,
-            max_iter: 100,
-        };
+        let mut config_weibull = AftConfig::default();
+        config_weibull.distribution = AftDistribution::Weibull;
+        config_weibull.tolerance = 1e-9;
+        config_weibull.max_iter = 100;
 
         group.bench_with_input(BenchmarkId::new("weibull", n), &dataset, |b, data| {
             b.iter(|| {
@@ -866,11 +854,10 @@ fn aft_benchmark(c: &mut Criterion) {
         });
 
         // Log-Normal
-        let config_lognormal = AftConfig {
-            distribution: AftDistribution::LogNormal,
-            tolerance: 1e-9,
-            max_iter: 100,
-        };
+        let mut config_lognormal = AftConfig::default();
+        config_lognormal.distribution = AftDistribution::LogNormal;
+        config_lognormal.tolerance = 1e-9;
+        config_lognormal.max_iter = 100;
 
         group.bench_with_input(BenchmarkId::new("lognormal", n), &dataset, |b, data| {
             b.iter(|| {

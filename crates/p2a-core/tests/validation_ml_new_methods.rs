@@ -123,17 +123,16 @@ fn test_cart_vs_r() {
     let (x, y_reg, y_class) = generate_test_data(200);
 
     // CART Regression
-    let config = CartConfig {
-        method: CartMethod::Anova,
-        max_depth: 5,
-        min_split: 10,
-        min_bucket: 5,
-        cp: 0.01,
-        xval: 0,
-        max_surrogate: 0,
-        use_surrogate: false,
-        seed: Some(42),
-    };
+    let mut config = CartConfig::default();
+    config.method = CartMethod::Anova;
+    config.max_depth = 5;
+    config.min_split = 10;
+    config.min_bucket = 5;
+    config.cp = 0.01;
+    config.xval = 0;
+    config.max_surrogate = 0;
+    config.use_surrogate = false;
+    config.seed = Some(42);
 
     let result = cart(x.view(), y_reg.view(), &config).expect("CART regression should succeed");
 
@@ -156,17 +155,16 @@ fn test_cart_vs_r() {
     assert!(r2 > 0.50, "CART R² should be reasonable: {}", r2);
 
     // CART Classification
-    let config_class = CartConfig {
-        method: CartMethod::Gini,
-        max_depth: 5,
-        min_split: 10,
-        min_bucket: 5,
-        cp: 0.01,
-        xval: 0,
-        max_surrogate: 0,
-        use_surrogate: false,
-        seed: Some(42),
-    };
+    let mut config_class = CartConfig::default();
+    config_class.method = CartMethod::Gini;
+    config_class.max_depth = 5;
+    config_class.min_split = 10;
+    config_class.min_bucket = 5;
+    config_class.cp = 0.01;
+    config_class.xval = 0;
+    config_class.max_surrogate = 0;
+    config_class.use_surrogate = false;
+    config_class.seed = Some(42);
 
     // Convert y_class from {-1, 1} to {0, 1}
     let y_class_01: Array1<f64> = y_class.mapv(|v| if v > 0.0 { 1.0 } else { 0.0 });
@@ -195,17 +193,16 @@ fn test_cart_vs_r() {
 fn test_variable_importance_ranking() {
     let (x, y_reg, _) = generate_test_data(200);
 
-    let config = CartConfig {
-        method: CartMethod::Anova,
-        max_depth: 5,
-        min_split: 10,
-        min_bucket: 5,
-        cp: 0.01,
-        xval: 0,
-        max_surrogate: 0,
-        use_surrogate: false,
-        seed: Some(42),
-    };
+    let mut config = CartConfig::default();
+    config.method = CartMethod::Anova;
+    config.max_depth = 5;
+    config.min_split = 10;
+    config.min_bucket = 5;
+    config.cp = 0.01;
+    config.xval = 0;
+    config.max_surrogate = 0;
+    config.use_surrogate = false;
+    config.seed = Some(42);
 
     let result = cart(x.view(), y_reg.view(), &config).expect("CART should succeed");
 

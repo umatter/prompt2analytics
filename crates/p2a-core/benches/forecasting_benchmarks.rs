@@ -334,14 +334,10 @@ fn decompose_multiplicative_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &x, |b, data| {
             b.iter(|| {
-                decompose(
-                    data,
-                    12,
-                    DecomposeConfig {
-                        decompose_type: DecomposeType::Multiplicative,
-                        filter: None,
-                    },
-                )
+                let mut config = DecomposeConfig::default();
+                config.decompose_type = DecomposeType::Multiplicative;
+                config.filter = None;
+                decompose(data, 12, config)
             });
         });
     }

@@ -1179,6 +1179,13 @@ fn gmm_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(label), &label, |b, _| {
             b.iter(|| {
+                let mut config = GmmConfig::default();
+                config.transform = GmmTransform::Difference;
+                config.step = GmmStep::OneStep; // Use one-step for benchmarking
+                config.max_lag = Some(3);
+                config.min_lag = 2;
+                config.collapse = true;
+                config.robust = false;
                 run_gmm(
                     &dataset,
                     "y",
@@ -1186,14 +1193,7 @@ fn gmm_benchmark(c: &mut Criterion) {
                     "entity",
                     "time",
                     1, // lags
-                    Some(GmmConfig {
-                        transform: GmmTransform::Difference,
-                        step: GmmStep::OneStep, // Use one-step for benchmarking
-                        max_lag: Some(3),
-                        min_lag: 2,
-                        collapse: true,
-                        robust: false,
-                    }),
+                    Some(config),
                 )
             })
         });

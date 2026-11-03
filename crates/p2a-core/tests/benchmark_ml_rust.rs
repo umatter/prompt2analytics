@@ -72,17 +72,16 @@ fn benchmark_rust_ml() {
         println!("SVM Linear: {:.4} sec", t_svm_lin);
 
         // CART Regression
-        let config_cart = CartConfig {
-            method: CartMethod::Anova,
-            max_depth: 5,
-            min_split: 10,
-            min_bucket: 5,
-            cp: 0.01,
-            xval: 0,
-            max_surrogate: 0,
-            use_surrogate: false,
-            seed: Some(42),
-        };
+        let mut config_cart = CartConfig::default();
+        config_cart.method = CartMethod::Anova;
+        config_cart.max_depth = 5;
+        config_cart.min_split = 10;
+        config_cart.min_bucket = 5;
+        config_cart.cp = 0.01;
+        config_cart.xval = 0;
+        config_cart.max_surrogate = 0;
+        config_cart.use_surrogate = false;
+        config_cart.seed = Some(42);
 
         let start = Instant::now();
         let cart_result = cart(x.view(), y_reg.view(), &config_cart).unwrap();
@@ -90,17 +89,16 @@ fn benchmark_rust_ml() {
         println!("CART Reg:   {:.4} sec", t_cart_reg);
 
         // CART Classification
-        let config_cart_class = CartConfig {
-            method: CartMethod::Gini,
-            max_depth: 5,
-            min_split: 10,
-            min_bucket: 5,
-            cp: 0.01,
-            xval: 0,
-            max_surrogate: 0,
-            use_surrogate: false,
-            seed: Some(42),
-        };
+        let mut config_cart_class = CartConfig::default();
+        config_cart_class.method = CartMethod::Gini;
+        config_cart_class.max_depth = 5;
+        config_cart_class.min_split = 10;
+        config_cart_class.min_bucket = 5;
+        config_cart_class.cp = 0.01;
+        config_cart_class.xval = 0;
+        config_cart_class.max_surrogate = 0;
+        config_cart_class.use_surrogate = false;
+        config_cart_class.seed = Some(42);
 
         let start = Instant::now();
         let cart_class_result = cart(x.view(), y_class_01.view(), &config_cart_class).unwrap();
