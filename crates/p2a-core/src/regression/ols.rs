@@ -346,7 +346,7 @@ impl std::fmt::Display for OlsResult {
             writeln!(
                 f,
                 "{:>15} {:>12.4} {:>12.4} {:>10.4} {:>10.4} {}",
-                truncate(&coef.name, 15),
+                p2a_text::ellipsize(&coef.name, 15),
                 coef.estimate,
                 coef.std_error,
                 coef.t_value,
@@ -440,15 +440,6 @@ impl ResultNotes for DriscollKraayResult {
 impl ResultNotes for BootstrapResult {
     fn notes_warnings(&self) -> Vec<String> {
         self.warnings.clone()
-    }
-}
-
-/// Truncate a string to a maximum length.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    } else {
-        s.to_string()
     }
 }
 
@@ -1231,7 +1222,7 @@ impl std::fmt::Display for OlsClusteredResult {
             writeln!(
                 f,
                 "{:>15} {:>12.4} {:>12.4} {:>10.4} {:>10.4} {}",
-                truncate(&coef.name, 15),
+                p2a_text::ellipsize(&coef.name, 15),
                 coef.estimate,
                 coef.std_error,
                 coef.t_value,
@@ -5373,5 +5364,43 @@ mod tests {
         }
         assert_ne!(rad.std_errors[1], mam.std_errors[1]);
         assert_ne!(mam.std_errors[1], web.std_errors[1]);
+    }
+
+    /// 'ö' spans bytes 11..13 of "Haushaltsgröße_netto": the byte slice &s[..12] panicked in
+    /// Display, which MCP regression_ols/regression_clustered return.
+    #[test]
+    fn test_ols_display_non_ascii_names() {
+        let name = "Haushaltsgröße_netto";
+        assert!(!name.is_char_boundary(12));
+        let n = 30;
+        let x: Vec<f64> = (0..n)
+            .map(|i| i as f64 + 0.3 * ((i * 7) % 5) as f64)
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 1.0 + 0.5 * v + 0.2 * ((i * 13) % 7) as f64)
+            .collect();
+        let cl: Vec<i64> = (0..n as i64).map(|i| i % 5).collect();
+        let long: Vec<f64> = x.iter().map(|v| v.sqrt() + 0.01 * v).collect();
+        let ds = Dataset::new(
+            df! { "y" => y, name => x, "a_very_long_variable_name" => long, "cl" => cl }.unwrap(),
+        );
+        let r = run_ols(
+            &ds,
+            "y",
+            &[name, "a_very_long_variable_name"],
+            true,
+            CovarianceType::HC1,
+        )
+        .unwrap();
+        let text = r.to_string();
+        // ASCII names are cut as before
+        assert!(
+            text.contains("Haushaltsgrö...") && text.contains("a_very_long_..."),
+            "{text}"
+        );
+        let c = run_ols_clustered(&ds, "y", &[name], "cl", None).unwrap();
+        assert!(c.to_string().contains("Haushaltsgrö..."));
     }
 }
