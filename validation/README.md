@@ -101,13 +101,13 @@ looks like a validation failure but is not one.
 - **Harness** (`validation/r/harness.R` and `validation/r/cases/*.R`; the case files record
   the versions they were written with): jsonlite, plm, fixest, sandwich, lmtest, car, tseries,
   quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl,
-  survival, mlogit, urca.
+  survival, mlogit, urca, glmnet.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
                      "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER",
                      "rdrobust", "forecast", "numDeriv", "pscl", "survival", "mlogit",
-                     "urca"))
+                     "urca", "glmnet"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -286,6 +286,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned, known deviations (REG-31) |
 | Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | not R-pinned |
 | E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | not R-pinned |
+| Lasso, ridge and elastic net (glmnet gaussian and binomial paths, cv.glmnet, predict) | [glmnet.md](regression/glmnet.md) | R-pinned |
 
 ### Econometrics
 | Method | File | Status |
@@ -389,7 +390,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned, known deviations (TOOL-10) |
 | Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
 | Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
-| Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-36, STAT-37, STAT-65, STAT-69, STAT-87) |
+| Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx); quantile types 1-9, boxplot.stats; p-value and quantile helpers (pt, pchisq, pf, pnorm tails; qnorm, qt, qchisq) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-37, STAT-65, STAT-69, STAT-87) |
 | One-way ANOVA | [anova.md](stats/anova.md) | R-pinned |
 | Two-way ANOVA (Type I, II and III sums of squares) | [anova.md](stats/anova.md) | R-pinned |
 | Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned |
@@ -413,6 +414,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Method | File | Status |
 |--------|------|--------|
 | Toeplitz Matrix | [toeplitz.md](linalg/toeplitz.md) | not R-pinned |
+| Rank-revealing QR least squares (qr, lm.fit, lm.wfit), symmetric inverse with rank and conditioning, shared GLM (glm.fit) | [solve.md](linalg/solve.md) | R-pinned |
 
 ### Diagnostics
 | Method | File | Status |

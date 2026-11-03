@@ -142,6 +142,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/prop_trend_na.csv` | 7 × 6 (group, dose, successes, trials, trials_neg, successes_frac; all Int64 but successes_frac; successes missing in row 4; trials_neg is -1 in row 5; successes_frac is 5.5 in row 2) | `stat_prop_trend_na` | `r/cases/stats_mcp.R` | fixed values |
 | `generated/na_reviewer.csv` | 8 × 7 (id, x, y, g, i, time, event; g, i, time and event Int64; x missing in row 3, y in row 2) | `na_x2_x8_reviewer` | `r/cases/na_acceptance.R` | fixed values (the X-2 reviewer data and integer survival columns) |
 | `generated/ts_flags_sim.csv` | 120 × 3 (t, y_ar, y_seas) | `ts_ar_yw_aic` | `r/cases/cli_flags.R` | seed 20261022: AR(2) (0.6, −0.3) plus 5; trend + monthly season with outliers at t = 6 and 75 |
+| `generated/linalg_glm.csv` | 120 × 12 (x1, x2, x3, x4, off, yb, yp, wq, yq, ysep, yc, w0) | `linalg_qr_glm` | `r/cases/linalg_glm.R` | seed 20261210; x3 = x1 - 2 x2 exactly (collinear); yb binomial (logit), yp Poisson with offset off, yq fractional with weights wq, ysep separated by x4, yc gaussian, w0 weights with 5 zeros |
+| `generated/quantile_sample.csv` | 28 × 3 (i, x, y; y missing in rows 8-28) | `stat_quantile_types` | `r/cases/stats_quantile.R` | seed 20261106; x: 23 normal draws (mean 10, sd 3, 3 decimals) plus ties 7.5 × 2 and 12 × 3; y: 7 fixed values |
+| `generated/glmnet_sim.csv` | 150 × 43 (y, yb, X1-X8, foldid, foldid7, K1-K30, yk) | `glmnet_paths` | `r/cases/reg_glmnet.R` | seed 20261122: X normal with X2 correlated with X1 and X5 scaled, y gaussian, yb binomial, foldid 5 random folds, foldid7 7 deterministic folds; seed 20261130: K1-K30 AR(0.85) design, yk with 8 nonzero coefficients (the KKT check) |
 
 ## Adding a dataset
 
