@@ -242,16 +242,7 @@ const TRUNCATION_SUFFIX: &str = "\n[truncated]";
 /// it is at most `limit` bytes; `s` itself when it already fits. A `limit`
 /// smaller than the suffix gives the empty string.
 pub(crate) fn truncate_to(s: &str, limit: usize) -> String {
-    if s.len() <= limit {
-        return s.to_string();
-    }
-    let Some(cut) = truncation_cut(s, limit) else {
-        return String::new();
-    };
-    let mut out = String::with_capacity(cut + TRUNCATION_SUFFIX.len());
-    out.push_str(&s[..cut]);
-    out.push_str(TRUNCATION_SUFFIX);
-    out
+    p2a_text::ellipsize_bytes(s, limit, TRUNCATION_SUFFIX).into_owned()
 }
 
 /// `text` cut as [`truncate_to`] cuts it, in its own buffer: a text that
@@ -275,11 +266,8 @@ pub(crate) fn truncate_in_place(text: &mut String, limit: usize) {
 /// boundary. `None` when `limit` has no room for the suffix (nothing is
 /// kept).
 fn truncation_cut(s: &str, limit: usize) -> Option<usize> {
-    let mut cut = limit.checked_sub(TRUNCATION_SUFFIX.len())?;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    Some(cut)
+    let room = limit.checked_sub(TRUNCATION_SUFFIX.len())?;
+    Some(p2a_text::floor_char_boundary(s, room))
 }
 
 /// The error a transaction's failed statement reported, from the

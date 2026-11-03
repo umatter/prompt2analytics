@@ -61,11 +61,7 @@ const SUMMARY_ACK: &str = "Understood, I'll keep this context in mind.";
 /// The longest prefix of `s` that is at most `max_bytes` long and ends on a
 /// char boundary.
 pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
-    let mut end = max_bytes.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    p2a_text::truncate_bytes(s, max_bytes)
 }
 
 /// `s` as a JSON string literal: quoted, with quotes, backslashes, every

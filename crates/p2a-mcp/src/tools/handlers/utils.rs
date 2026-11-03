@@ -883,10 +883,7 @@ fn shown_name(name: &str) -> String {
 /// characters is cut to 25 and "...". Counted and cut in chars, since a byte
 /// cut can fall inside a multi-byte character of a caller-chosen name.
 fn table_name(name: &str) -> String {
-    match (name.char_indices().nth(28), name.char_indices().nth(25)) {
-        (Some(_), Some((cut, _))) => format!("{}...", &name[..cut]),
-        _ => name.to_string(),
-    }
+    p2a_text::ellipsize(name, 28).into_owned()
 }
 
 thread_local! {
