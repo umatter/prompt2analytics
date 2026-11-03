@@ -124,3 +124,267 @@ async fn test_upload_dataset_checks_declared_file_type() {
         text(&bad)
     );
 }
+
+const CSV: &str = "x,y\n1,2.1\n,3.9\n3,6.2\n4,7.8\n"; // x Int64 with one missing value; y noisy
+
+/// TOOL-13 over POST /api/tools (the finding's live repro). Before: 200 "saved as 'before'" and
+/// x became f64.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unknown_field_is_refused_http() {
+    use p2a_core::polars::prelude::*;
+    let (app, state) = http_app().await;
+    let sid = new_session(&app).await;
+    let created = post_tool(
+        &app,
+        &sid,
+        "create_dataset",
+        json!({"name": "before", "csv_content": CSV}),
+    )
+    .await;
+    assert_eq!(created.0, 200, "{}", created.1);
+    let (status, body) = post_tool(
+        &app,
+        &sid,
+        "munge_fill_na",
+        json!({"dataset": "before", "columns": ["x"], "strategy": "mean", "output_name": "after"}),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "invalid_arguments");
+    let msg = body["error"].as_str().unwrap();
+    assert!(
+        msg.contains("unknown field `output_name`") && msg.contains("`result_name`"),
+        "{msg}"
+    );
+    let (status, body) = post_tool(
+        &app,
+        &sid,
+        "regression_ols",
+        json!({"dataset": "before", "y": "y", "x": ["x"], "robust_type": "HC3"}),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field `robust_type`"),
+        "{body}"
+    );
+    // the input is untouched and nothing else was written
+    let before = session_dataset(&state, &sid, "before").await.unwrap();
+    let x = before.df().column("x").unwrap();
+    assert_eq!((x.dtype(), x.null_count()), (&DataType::Int64, 1));
+    assert!(session_dataset(&state, &sid, "after").await.is_none());
+    // the correct spelling still works. R: mean(c(1L, NA, 3L, 4L), na.rm = TRUE) = 2.6666666666666665
+    let (status, body) = post_tool(
+        &app,
+        &sid,
+        "munge_fill_na",
+        json!({"dataset": "before", "columns": ["x"], "strategy": "mean", "result_name": "after"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let after = session_dataset(&state, &sid, "after").await.unwrap();
+    let v: Vec<f64> = after
+        .df()
+        .column("x")
+        .unwrap()
+        .as_materialized_series()
+        .f64()
+        .unwrap()
+        .into_iter()
+        .map(|o| o.unwrap())
+        .collect();
+    assert_eq!(v[0], 1.0);
+    assert_eq!(v[2], 3.0);
+    assert_eq!(v[3], 4.0);
+    assert!((v[1] - 2.6666666666666665).abs() <= 1e-15, "{}", v[1]);
+    let before = session_dataset(&state, &sid, "before").await.unwrap();
+    assert_eq!(before.df().column("x").unwrap().null_count(), 1);
+}
+
+/// TOOL-13 in the LLM tool loop: an Ollama stub emits the misspelled call; interpret=false
+/// returns the tool results. Before: is_error false and the input overwritten.
+#[cfg(feature = "llm")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unknown_field_is_refused_llm_loop() {
+    use p2a_core::polars::prelude::*;
+    let (app, state) = http_app().await;
+    let sid = new_session(&app).await;
+    let created = post_tool(
+        &app,
+        &sid,
+        "create_dataset",
+        json!({"name": "before", "csv_content": CSV}),
+    )
+    .await;
+    assert_eq!(created.0, 200, "{}", created.1);
+    let reply = json!({"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {
+        "name": "munge_fill_na",
+        "arguments": {"dataset": "before", "columns": ["x"], "strategy": "mean", "output_name": "after"}}}]},
+        "done": true});
+    let stub = axum::Router::new().route(
+        "/api/chat",
+        axum::routing::post(move || {
+            let r = reply.clone();
+            async move { axum::Json(r) }
+        }),
+    );
+    let addr = spawn_stub(stub).await;
+    let (status, body) = post_json(
+        &app,
+        "/api/llm/chat",
+        json!({"session_id": sid, "message": "fill x", "interpret": false,
+               "provider": {"provider_type": "ollama", "base_url": format!("http://{addr}"),
+                            "model": "stub"}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let r = &body["data"]["message"]["tool_results"][0];
+    assert_eq!(r["is_error"], true, "{body}");
+    assert!(
+        r["content"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field `output_name`"),
+        "{body}"
+    );
+    let x = session_dataset(&state, &sid, "before")
+        .await
+        .unwrap()
+        .df()
+        .column("x")
+        .unwrap()
+        .clone();
+    assert_eq!((x.dtype(), x.null_count()), (&DataType::Int64, 1));
+}
+
+/// TOOL-13 on stdio (rmcp Parameters). Before: a success result "saved as 'before'".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unknown_field_is_refused_stdio() {
+    let out = stdio_calls(
+        p2a_mcp::server::AnalyticsServer::new(),
+        &[
+            (
+                "create_dataset",
+                json!({"name": "before", "csv_content": CSV}),
+            ),
+            (
+                "munge_fill_na",
+                json!({"dataset": "before", "columns": ["x"], "strategy": "mean", "output_name": "after"}),
+            ),
+            ("list_datasets", json!({"verbose": true})),
+        ],
+    )
+    .await;
+    assert!(out[0].get("result").is_some(), "{}", out[0]);
+    for (i, field) in [(1, "output_name"), (2, "verbose")] {
+        assert_eq!(out[i]["error"]["code"], -32602, "{}", out[i]);
+        assert!(
+            out[i]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("unknown field `{field}`")),
+            "{}",
+            out[i]
+        );
+    }
+}
+
+/// D2 for every routed tool: a made-up key is refused before any handler runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_every_routed_tool_refuses_unknown_fields() {
+    let (session, server) = session_with_datasets(vec![]);
+    let mut wrong = Vec::new();
+    for tool in server.router_tools() {
+        let name = tool.name.to_string();
+        match try_call(
+            &server,
+            &session,
+            &name,
+            json!({"p2a_unknown_field_probe": true}),
+        )
+        .await
+        {
+            Err(p2a_mcp::exec::ToolCallError::InvalidArguments(m))
+                if m.contains("unknown field `p2a_unknown_field_probe`") => {}
+            other => wrong.push(format!("{name}: {other:?}")),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} tools accept an unknown field:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// The parameterless tool: null and {} run, anything else is refused (HTTP).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_no_params_tool_refuses_arguments() {
+    let (app, _state) = http_app().await;
+    let sid = new_session(&app).await;
+    assert_eq!(
+        post_json(&app, "/api/tools/list_datasets", json!({"session_id": sid}))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        post_tool(&app, &sid, "list_datasets", json!({})).await.0,
+        200
+    );
+    let (status, body) = post_tool(&app, &sid, "list_datasets", json!({"name": "x"})).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Some("invalid_arguments")
+        ),
+        "{body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field `name`, there are no fields"),
+        "{body}"
+    );
+}
+
+/// Aliases stay accepted under deny_unknown_fields (kruskal: response/factor = value/group).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_aliases_are_still_accepted() {
+    use p2a_core::polars::prelude::*;
+    // Hollander & Wolfe (?kruskal.test): R kruskal.test(list(x, y, z))
+    let ds = p2a_core::data::Dataset::new(
+        df!(
+            "v" => [2.9, 3.0, 2.5, 2.6, 3.2, 3.8, 2.7, 4.0, 2.4, 2.8, 3.4, 3.7, 2.2, 2.0],
+            "g" => ["a", "a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c", "c", "c"]
+        )
+        .unwrap(),
+    );
+    let (session, server) = session_with_datasets(vec![("k", ds)]);
+    let canonical = call(
+        &server,
+        &session,
+        "hypothesis_kruskal_wallis",
+        json!({"dataset": "k", "value": "v", "group": "g"}),
+    )
+    .await;
+    let aliased = call(
+        &server,
+        &session,
+        "hypothesis_kruskal_wallis",
+        json!({"dataset": "k", "response": "v", "factor": "g"}),
+    )
+    .await;
+    assert!(
+        canonical.success && aliased.success,
+        "{} / {}",
+        text(&canonical),
+        text(&aliased)
+    );
+    assert_eq!(text(&canonical), text(&aliased));
+}

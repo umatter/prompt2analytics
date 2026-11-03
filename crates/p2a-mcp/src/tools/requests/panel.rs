@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 /// Request for Panel Fixed Effects regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PanelFERequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -46,6 +47,7 @@ pub struct PanelFERequest {
 
 /// Request for Panel Random Effects regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PanelRERequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -76,6 +78,7 @@ pub struct PanelRERequest {
 
 /// Request for Hausman specification test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HausmanRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -99,6 +102,7 @@ pub struct HausmanRequest {
 
 /// Request for Variable Coefficients Model (PVCM).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PvcmRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -128,6 +132,7 @@ pub struct PvcmRequest {
 
 /// Request for Arellano-Bond difference GMM dynamic panel estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GmmRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -200,6 +205,7 @@ pub struct GmmRequest {
 
 /// Request for Panel GLS.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PanelGlsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -234,6 +240,7 @@ pub struct PanelGlsRequest {
 
 /// Request for Panel Unit Root tests.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PanelUnitRootRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -276,6 +283,7 @@ pub struct PanelUnitRootRequest {
 
 /// Request for High-Dimensional Fixed Effects (HDFE).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PanelHdfeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

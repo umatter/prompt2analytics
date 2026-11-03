@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 /// Request to load a dataset from a file.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LoadDatasetRequest {
     /// Path to the data file
     #[schemars(
@@ -38,6 +39,7 @@ pub struct LoadDatasetRequest {
 
 /// Request to upload and load a dataset from base64-encoded content.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UploadDatasetRequest {
     /// Base64-encoded file content
     #[schemars(description = "The file content encoded as base64")]
@@ -62,6 +64,7 @@ pub struct UploadDatasetRequest {
 
 /// Request to create a dataset from inline CSV content.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateDatasetRequest {
     /// Name/identifier for the dataset
     #[schemars(description = "Name to identify this dataset (e.g., 'my_data')")]
@@ -81,6 +84,7 @@ pub struct CreateDatasetRequest {
 
 /// Request to export a dataset to a file.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExportDatasetRequest {
     /// Name/ID of the dataset to export
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -105,6 +109,7 @@ pub struct ExportDatasetRequest {
 
 /// Request to describe a loaded dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DescribeDatasetRequest {
     /// Name/ID of the dataset to describe
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -113,6 +118,7 @@ pub struct DescribeDatasetRequest {
 
 /// Request to preview rows from a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HeadDatasetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

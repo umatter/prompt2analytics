@@ -2792,9 +2792,13 @@ mod tests {
             let out = text(&r);
             assert_ne!(r.is_error, Some(true), "{out}");
             assert!(out.contains(kernel_shown), "{kernel}: {out}");
-            let req: RdMultiRequest =
-                serde_json::from_value(merged(args, json!({"cutoffs": [0.0], "bandwidth": 0.3})))
-                    .unwrap();
+            // rd_multi takes cutoffs (not cutoff) and a given bandwidth (no bwselect), so
+            // neither is sent
+            let mut multi_args = merged(args, json!({"cutoffs": [0.0], "bandwidth": 0.3}));
+            let multi = multi_args.as_object_mut().unwrap();
+            multi.remove("bwselect");
+            multi.remove("cutoff");
+            let req: RdMultiRequest = serde_json::from_value(multi_args).unwrap();
             let r = rt.block_on(server.rd_multi(Parameters(req))).unwrap();
             let out = text(&r);
             assert_ne!(r.is_error, Some(true), "{out}");

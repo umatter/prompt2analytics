@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 /// Predictor specification for synthetic control.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SynthPredictorSpec {
     /// Column name of the predictor variable
     #[schemars(description = "Column name of the predictor variable.")]
@@ -35,6 +36,7 @@ pub struct SynthPredictorSpec {
 
 /// Request for general GMM IV estimation (Hansen 1982).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GeneralGmmIvRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -79,6 +81,7 @@ pub struct GeneralGmmIvRequest {
 
 /// Request for IV/2SLS regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IV2SLSRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -111,6 +114,7 @@ pub struct IV2SLSRequest {
 
 /// Request for first-stage diagnostics.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FirstStageRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -133,6 +137,7 @@ pub struct FirstStageRequest {
 
 /// Request for Sargan test of overidentifying restrictions.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SarganTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -164,6 +169,7 @@ pub struct SarganTestRequest {
 /// Balke-Pearl bounds provide sharp nonparametric bounds on the causal effect
 /// using instrumental variables without assuming parametric models.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BPBoundsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -220,6 +226,7 @@ pub struct BPBoundsRequest {
 /// choice-theoretic model of treatment selection, revealing heterogeneity
 /// in treatment effects.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IVMTERequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -262,6 +269,7 @@ pub struct IVMTERequest {
 
 /// Request for Difference-in-Differences estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiDRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -292,6 +300,7 @@ pub struct DiDRequest {
 
 /// Request for Callaway-Sant'Anna staggered DiD estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StaggeredDiDRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -353,6 +362,7 @@ pub struct StaggeredDiDRequest {
 
 /// Request for Goodman-Bacon decomposition of staggered DiD.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BaconDecompRequest {
     /// Name/ID of the dataset
     #[schemars(
@@ -388,6 +398,7 @@ pub struct BaconDecompRequest {
 
 /// Request for Extended Two-Way Fixed Effects (ETWFE) estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EtwfeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -438,6 +449,7 @@ pub struct EtwfeRequest {
 
 /// Request for Inverse Probability Weighting (IPW) treatment effect estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IpwRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -480,6 +492,7 @@ pub struct IpwRequest {
 
 /// Request for Doubly Robust (AIPW) treatment effect estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DoublyRobustRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -530,6 +543,7 @@ pub struct DoublyRobustRequest {
 
 /// Request for Double/Debiased Machine Learning (DoubleML) estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DoubleMLRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -578,6 +592,7 @@ pub struct DoubleMLRequest {
 
 /// Request for Covariate Balancing Propensity Score (CBPS) estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CbpsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -609,6 +624,7 @@ pub struct CbpsRequest {
 
 /// Request for flexible inverse probability weighting (WeightIt).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WeightItRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -652,6 +668,7 @@ pub struct WeightItRequest {
 
 /// Request for entropy balancing.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EntropyBalanceRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -677,6 +694,7 @@ pub struct EntropyBalanceRequest {
 
 /// Request for stable balancing weights (SBW).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SBWRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -718,6 +736,7 @@ pub struct SBWRequest {
 
 /// Request for twang GBM propensity score estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TwangRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -765,6 +784,7 @@ pub struct TwangRequest {
 
 /// Request for propensity score matching (MatchIt).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MatchItRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -820,6 +840,7 @@ pub struct MatchItRequest {
 
 /// Request for Targeted Maximum Likelihood Estimation (TMLE).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TmleRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -860,6 +881,7 @@ pub struct TmleRequest {
 
 /// Request for Collaborative Targeted Maximum Likelihood Estimation (C-TMLE).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CTmleRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -918,6 +940,7 @@ pub struct CTmleRequest {
 
 /// Request for Longitudinal Targeted Maximum Likelihood Estimation (LTMLE).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LtmleRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -958,6 +981,7 @@ pub struct LtmleRequest {
 
 /// Request for Regression Standardization (G-computation).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StdRegRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1016,6 +1040,7 @@ pub struct StdRegRequest {
 
 /// Request for Parametric G-Formula with time-varying treatments.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GFormulaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -1099,6 +1124,7 @@ pub struct GFormulaRequest {
 
 /// Request for Causal Mediation Analysis.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MediationRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1143,6 +1169,7 @@ pub struct MediationRequest {
 
 /// Request for Natural Effect Models (medflex) mediation analysis.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NaturalEffectsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1199,6 +1226,7 @@ pub struct NaturalEffectsRequest {
 
 /// Request for Synthetic Control Method.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SyntheticControlRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -1278,6 +1306,7 @@ pub struct SyntheticControlRequest {
 
 /// Request for Generalized Synthetic Control (gsynth) estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GsynthRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -1350,6 +1379,7 @@ pub struct GsynthRequest {
 
 /// Request for Synthetic Control with Prediction Intervals (SCPI).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScpiRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -1417,6 +1447,7 @@ pub struct ScpiRequest {
 
 /// Request for Sharp Regression Discontinuity estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RdEstimateRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1478,6 +1509,7 @@ pub struct RdEstimateRequest {
 
 /// Request for RD bandwidth selection only.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RdBandwidthRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1516,6 +1548,7 @@ pub struct RdBandwidthRequest {
 
 /// Request for Fuzzy Regression Discontinuity estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FuzzyRdRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1585,6 +1618,7 @@ pub struct FuzzyRdRequest {
 
 /// Request for Multi-Cutoff Regression Discontinuity estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RdMultiRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1666,6 +1700,7 @@ pub struct RdMultiRequest {
 
 /// Request for Causal Forest estimation (Wager & Athey 2018).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CausalForestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1710,6 +1745,7 @@ pub struct CausalForestRequest {
 
 /// Request for BART-based Causal Inference (bartCause style).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BartCausalRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1758,6 +1794,7 @@ pub struct BartCausalRequest {
 
 /// Request for Treatment Effect Heterogeneity Test (hettx).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HetTxRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1810,6 +1847,7 @@ pub struct HetTxRequest {
 
 /// Request for sensitivity analysis for unmeasured confounding (sensemakr).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SensemakrRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1871,6 +1909,7 @@ pub struct SensemakrRequest {
 
 /// Request for average marginal effects computation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MarginalEffectsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -1893,6 +1932,7 @@ pub struct MarginalEffectsRequest {
 
 /// Request for E-value sensitivity analysis for unmeasured confounding.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EValueRequest {
     /// Type of effect measure
     #[schemars(

@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// Request for K-means clustering.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KMeansRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -33,6 +34,7 @@ pub struct KMeansRequest {
 
 /// Request for DBSCAN clustering.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DBSCANRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -57,6 +59,7 @@ pub struct DBSCANRequest {
 
 /// Request for PCA (Principal Component Analysis).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PCARequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -75,6 +78,7 @@ pub struct PCARequest {
 
 /// Request for Hierarchical clustering.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HierarchicalRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -105,6 +109,7 @@ pub struct HierarchicalRequest {
 
 /// Request for t-SNE dimensionality reduction.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TsneRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -139,6 +144,7 @@ pub struct TsneRequest {
 
 /// Request for Classical Multidimensional Scaling (cmdscale).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CmdscaleRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -163,6 +169,7 @@ pub struct CmdscaleRequest {
 
 /// Request for cutting a hierarchical clustering tree (cutree).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CutreeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -193,6 +200,7 @@ pub struct CutreeRequest {
 
 /// Request for Random Forest regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RandomForestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -231,6 +239,7 @@ pub struct RandomForestRequest {
 
 /// Request for Linear SVM classification.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SvmRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -263,6 +272,7 @@ pub struct SvmRequest {
 
 /// Request for Projection Pursuit Regression (PPR).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PprRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -301,6 +311,7 @@ pub struct PprRequest {
 
 /// Request for Conditional Inference Trees (ctree).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CtreeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -355,6 +366,7 @@ pub struct CtreeRequest {
 
 /// Request for C5.0 Decision Tree classification.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct C50Request {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -403,6 +415,7 @@ pub struct C50Request {
 
 /// Request for computing SHAP values.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ShapValuesRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -449,6 +462,7 @@ pub struct ShapValuesRequest {
 
 /// Request for Cubist rule-based regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CubistRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -493,6 +507,7 @@ pub struct CubistRequest {
 
 /// Request for Model-based Boosting (mboost).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MboostRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 /// Request to get server memory and performance statistics.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ServerStatsRequest {
     /// Include per-dataset memory breakdown (default: true)
     #[schemars(
@@ -27,6 +28,7 @@ pub struct ServerStatsRequest {
 
 /// Request to set the global random seed for ML reproducibility.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetSeedRequest {
     /// The random seed value
     #[schemars(description = "The random seed value. Set to null/omit to clear the global seed.")]
@@ -35,6 +37,7 @@ pub struct SetSeedRequest {
 
 /// Request to get the current global seed.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetSeedRequest {}
 
 // ============================================================================
@@ -43,6 +46,7 @@ pub struct GetSeedRequest {}
 
 /// Column specification for random data generation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnSpecInput {
     /// Name of the column
     #[schemars(description = "Name of the column to generate.")]
@@ -57,6 +61,7 @@ pub struct ColumnSpecInput {
 
 /// Request to generate random data.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GenerateRandomDataRequest {
     /// Number of rows to generate
     #[schemars(description = "Number of rows to generate.")]
@@ -83,6 +88,7 @@ pub struct GenerateRandomDataRequest {
 
 /// A section in the HTML report.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReportSectionInput {
     /// Section title
     #[schemars(description = "Title for this section of the report.")]
@@ -95,6 +101,7 @@ pub struct ReportSectionInput {
 
 /// Content item for a report section.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReportContentInput {
     /// Type of content: 'text', 'code', 'table', 'chart', or 'stats'
     #[schemars(
@@ -143,6 +150,7 @@ pub struct ReportContentInput {
 
 /// Request to generate an HTML report.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GenerateReportRequest {
     /// Report title
     #[schemars(description = "Title for the report.")]
@@ -167,6 +175,7 @@ pub struct GenerateReportRequest {
 
 /// Request to export the current analysis session.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExportSessionRequest {
     /// Path to save the session file
     #[schemars(
@@ -183,6 +192,7 @@ pub struct ExportSessionRequest {
 
 /// Request to import a previously exported session.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ImportSessionRequest {
     /// Path to the session file to import
     #[schemars(

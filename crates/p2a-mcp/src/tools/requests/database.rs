@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 /// Request to query a SQLite database.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SqliteQueryRequest {
     /// Path to the SQLite database file
     #[schemars(description = "Path to the SQLite database file (.db, .sqlite, .sqlite3).")]
@@ -29,6 +30,7 @@ pub struct SqliteQueryRequest {
 
 /// Request to list tables in a SQLite database.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SqliteListTablesRequest {
     /// Path to the SQLite database file
     #[schemars(description = "Path to the SQLite database file.")]
@@ -37,6 +39,7 @@ pub struct SqliteListTablesRequest {
 
 /// Request to get schema for a SQLite table.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SqliteSchemaRequest {
     /// Path to the SQLite database file
     #[schemars(description = "Path to the SQLite database file.")]
@@ -53,6 +56,7 @@ pub struct SqliteSchemaRequest {
 
 /// Request to query a DuckDB database.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DuckDBQueryRequest {
     /// Path to the DuckDB database file
     #[schemars(
@@ -73,6 +77,7 @@ pub struct DuckDBQueryRequest {
 
 /// Request to list tables in a DuckDB database.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DuckDBListTablesRequest {
     /// Path to the DuckDB database file
     #[schemars(description = "Path to the DuckDB database file.")]
@@ -81,6 +86,7 @@ pub struct DuckDBListTablesRequest {
 
 /// Request to get schema for a DuckDB table.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DuckDBSchemaRequest {
     /// Path to the DuckDB database file
     #[schemars(description = "Path to the DuckDB database file.")]
@@ -93,6 +99,7 @@ pub struct DuckDBSchemaRequest {
 
 /// Request to query a file (Parquet, CSV) using DuckDB SQL.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DuckDBFileQueryRequest {
     /// Path to the data file (Parquet or CSV)
     #[schemars(

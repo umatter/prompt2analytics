@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// Request for autocorrelation function (ACF).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AcfRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -27,6 +28,7 @@ pub struct AcfRequest {
 
 /// Request for cross-correlation function (CCF).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CcfRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -49,6 +51,7 @@ pub struct CcfRequest {
 
 /// Request for spectral density estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpectrumRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -91,6 +94,7 @@ pub struct SpectrumRequest {
 
 /// Request for Box-Pierce or Ljung-Box test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BoxTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -123,6 +127,7 @@ pub struct BoxTestRequest {
 
 /// Request for Phillips-Perron unit root test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PPTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -141,6 +146,7 @@ pub struct PPTestRequest {
 
 /// Request for VAR (Vector Autoregression) model.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VarRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -159,6 +165,7 @@ pub struct VarRequest {
 
 /// Request for Granger causality test.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GrangerRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -185,6 +192,7 @@ pub struct GrangerRequest {
 
 /// Request for VARMA (Vector ARMA) model.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VarmaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -205,6 +213,7 @@ pub struct VarmaRequest {
 
 /// Request for VECM (Vector Error Correction Model).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VecmRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -229,6 +238,7 @@ pub struct VecmRequest {
 
 /// Request for VAR Impulse Response Functions.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VarIrfRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -249,6 +259,7 @@ pub struct VarIrfRequest {
 
 /// Request for ARIMA model fitting.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArimaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -287,6 +298,7 @@ pub struct ArimaRequest {
 
 /// Request for ARIMA forecasting.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArimaForecastRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -329,6 +341,7 @@ pub struct ArimaForecastRequest {
 
 /// Request for GARCH model fitting (volatility modeling).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GarchRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -355,6 +368,7 @@ pub struct GarchRequest {
 
 /// Request for MSTL decomposition.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MstlRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -373,6 +387,7 @@ pub struct MstlRequest {
 
 /// Request for changepoint detection.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChangepointRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -405,6 +420,7 @@ pub struct ChangepointRequest {
 
 /// Request for Holt-Winters exponential smoothing.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HoltWintersRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -453,6 +469,7 @@ pub struct HoltWintersRequest {
 
 /// Request for AR (autoregressive) model fitting.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArModelRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -487,6 +504,7 @@ pub struct ArModelRequest {
 
 /// Request for classical seasonal decomposition.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DecomposeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -511,6 +529,7 @@ pub struct DecomposeRequest {
 
 /// Request for structural time series model fitting.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StructTsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -535,6 +554,7 @@ pub struct StructTsRequest {
 
 /// Request for CausalImpact analysis (Bayesian Structural Time Series for causal inference).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CausalImpactRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -595,6 +615,7 @@ pub struct CausalImpactRequest {
 
 /// Request for cumulative periodogram (cpgram).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CpgramRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -611,6 +632,7 @@ pub struct CpgramRequest {
 
 /// Request for Toeplitz matrix construction.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ToeplitzRequest {
     /// First column (and row for symmetric matrix)
     #[schemars(
@@ -627,6 +649,7 @@ pub struct ToeplitzRequest {
 
 /// Request for time series lag operation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LagRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -645,6 +668,7 @@ pub struct LagRequest {
 
 /// Request for time series embedding.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EmbedRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -661,6 +685,7 @@ pub struct EmbedRequest {
 
 /// Request for inverse differencing.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiffinvRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -685,6 +710,7 @@ pub struct DiffinvRequest {
 
 /// Request for linear filtering.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FilterRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -709,6 +735,7 @@ pub struct FilterRequest {
 
 /// Request for time series window extraction.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WindowRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -731,6 +758,7 @@ pub struct WindowRequest {
 
 /// Request for theoretical ARMA ACF.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArmaAcfRequest {
     /// AR coefficients
     #[schemars(description = "Autoregressive coefficients (phi). Empty for MA-only model.")]
@@ -751,6 +779,7 @@ pub struct ArmaAcfRequest {
 
 /// Request for ARMA to MA conversion.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArmaToMaRequest {
     /// AR coefficients
     #[schemars(description = "Autoregressive coefficients (phi).")]
@@ -767,6 +796,7 @@ pub struct ArmaToMaRequest {
 
 /// Request for ACF to AR conversion.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Acf2ArRequest {
     /// ACF values
     #[schemars(description = "Autocorrelation function values starting at lag 1.")]
@@ -775,6 +805,7 @@ pub struct Acf2ArRequest {
 
 /// Request for ARIMA simulation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArimaSimRequest {
     /// Number of observations to simulate
     #[schemars(description = "Number of observations to simulate.")]
@@ -803,6 +834,7 @@ pub struct ArimaSimRequest {
 
 /// Request for running median smoothing.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RunmedRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

@@ -25,6 +25,7 @@ use serde::Deserialize;
 
 /// Request for OLS regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OlsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -53,6 +54,7 @@ pub struct OlsRequest {
 
 /// Request for regression diagnostics.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiagnosticsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -69,6 +71,7 @@ pub struct DiagnosticsRequest {
 
 /// Request for Breusch-Godfrey test for serial correlation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BgTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -103,6 +106,7 @@ pub struct BgTestRequest {
 
 /// Request for Ramsey's RESET test for functional form.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResetTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -131,6 +135,7 @@ pub struct ResetTestRequest {
 
 /// Request for Wald test comparing nested models.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WaldTestRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -161,6 +166,7 @@ pub struct WaldTestRequest {
 
 /// Request for Harvey-Collier test for linearity.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HarveyCollierRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -177,6 +183,7 @@ pub struct HarveyCollierRequest {
 
 /// Request for HAC (Newey-West) standard errors.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HacRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -209,6 +216,7 @@ pub struct HacRequest {
 
 /// Request for bootstrap covariance estimation (vcovBS).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BootstrapCovRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -241,6 +249,7 @@ pub struct BootstrapCovRequest {
 
 /// Request for OLS with clustered standard errors.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OlsClusteredRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -267,6 +276,7 @@ pub struct OlsClusteredRequest {
 
 /// Request for Driscoll-Kraay panel-robust standard errors.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DriscollKraayRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
@@ -302,6 +312,7 @@ pub struct DriscollKraayRequest {
 
 /// Request for quantile regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuantRegRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -330,6 +341,7 @@ pub struct QuantRegRequest {
 
 /// Request for nonlinear least squares (NLS).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NlsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -364,6 +376,7 @@ pub struct NlsRequest {
 
 /// Request for LOESS local regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LoessRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -398,6 +411,7 @@ pub struct LoessRequest {
 
 /// Request for super smoother (supsmu).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SupsmuRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -434,6 +448,7 @@ pub struct SupsmuRequest {
 
 /// Request for Tukey's resistant line.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LineRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -454,6 +469,7 @@ pub struct LineRequest {
 
 /// Request for stepwise regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StepRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -478,6 +494,7 @@ pub struct StepRequest {
 
 /// Request for GLS (Generalized Least Squares).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GlsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -510,6 +527,7 @@ pub struct GlsRequest {
 
 /// Request for smooth spline fitting.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SmoothSplineRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -544,6 +562,7 @@ pub struct SmoothSplineRequest {
 
 /// Request for glmnet (elastic net, lasso, ridge) regression.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GlmnetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -586,6 +605,7 @@ pub struct GlmnetRequest {
 
 /// Request for cross-validated glmnet.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CvGlmnetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -630,6 +650,7 @@ pub struct CvGlmnetRequest {
 
 /// Request for ridge regression (shortcut for glmnet with alpha=0).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RidgeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -652,6 +673,7 @@ pub struct RidgeRequest {
 
 /// Request for lasso regression (shortcut for glmnet with alpha=1).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LassoRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

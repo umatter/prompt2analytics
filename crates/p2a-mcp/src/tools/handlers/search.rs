@@ -25,9 +25,7 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::registry::{ToolCategory, category_counts, parse_category, search_tools_scored};
-use crate::tools::requests::search::{
-    ExecuteToolRequest, ListToolCategoriesRequest, SearchToolsRequest,
-};
+use crate::tools::requests::search::{ListToolCategoriesRequest, SearchToolsRequest};
 
 #[tool_router(router = search_router, vis = "pub")]
 impl AnalyticsServer {
@@ -187,6 +185,7 @@ impl AnalyticsServer {
 
 /// Request for getting detailed tool information.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ToolInfoRequest {
     /// Name of the tool to get information about
     #[schemars(description = "Name of the tool")]

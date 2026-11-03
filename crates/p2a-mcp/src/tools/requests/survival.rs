@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// Request for Kaplan-Meier survival curve estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KaplanMeierRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -44,6 +45,7 @@ pub struct KaplanMeierRequest {
 
 /// Request for Log-Rank test comparing survival curves.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LogRankRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -70,6 +72,7 @@ pub struct LogRankRequest {
 
 /// Request for Cox Proportional Hazards model.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CoxPhRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -112,6 +115,7 @@ pub struct CoxPhRequest {
 
 /// Request for Accelerated Failure Time (AFT) model.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AftRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
@@ -150,6 +154,7 @@ pub struct AftRequest {
 
 /// Request for Competing Risks analysis (Aalen-Johansen estimator).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CompetingRisksRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of a previously loaded dataset.")]

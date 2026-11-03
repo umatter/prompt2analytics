@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// Request to batch process multiple datasets with the same operation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BatchProcessRequest {
     /// Names/IDs of datasets to process
     #[schemars(description = "List of dataset names to process. Each must be previously loaded.")]
@@ -29,6 +30,7 @@ pub struct BatchProcessRequest {
 
 /// Request to compare the same columns across multiple datasets.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CompareDatasetRequest {
     /// Names/IDs of datasets to compare
     #[schemars(description = "List of dataset names to compare. Each must be previously loaded.")]
@@ -47,6 +49,7 @@ pub struct CompareDatasetRequest {
 
 /// Request to filter rows in a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FilterDatasetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset to filter.")]
@@ -77,6 +80,7 @@ pub struct FilterDatasetRequest {
 
 /// Request to select columns from a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SelectColumnsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -95,6 +99,7 @@ pub struct SelectColumnsRequest {
 
 /// Request to drop columns from a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DropColumnsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -113,6 +118,7 @@ pub struct DropColumnsRequest {
 
 /// Request to rename columns in a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RenameColumnsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -133,6 +139,7 @@ pub struct RenameColumnsRequest {
 
 /// Request to sort a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SortDatasetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -155,6 +162,7 @@ pub struct SortDatasetRequest {
 
 /// Request to join two datasets.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JoinDatasetsRequest {
     /// Name/ID of the left dataset
     #[schemars(description = "Name or ID of the left dataset.")]
@@ -191,6 +199,7 @@ pub struct JoinDatasetsRequest {
 
 /// Request to concatenate datasets.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConcatDatasetsRequest {
     /// Names/IDs of datasets to concatenate
     #[schemars(description = "List of dataset names to concatenate vertically (row-bind).")]
@@ -203,6 +212,7 @@ pub struct ConcatDatasetsRequest {
 
 /// Request to group and aggregate a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GroupByRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -225,6 +235,7 @@ pub struct GroupByRequest {
 
 /// Request to compute value counts for a column.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ValueCountsRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -245,6 +256,7 @@ pub struct ValueCountsRequest {
 
 /// Request to pivot a dataset from long to wide format.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PivotDatasetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -269,6 +281,7 @@ pub struct PivotDatasetRequest {
 
 /// Request to melt a dataset from wide to long format.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MeltDatasetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -297,6 +310,7 @@ pub struct MeltDatasetRequest {
 
 /// Request to drop rows with null values.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DropNaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -321,6 +335,7 @@ pub struct DropNaRequest {
 
 /// Request to fill null values.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FillNaRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -343,6 +358,7 @@ pub struct FillNaRequest {
 
 /// Request to remove duplicate rows.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeduplicateRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -367,6 +383,7 @@ pub struct DeduplicateRequest {
 
 /// Request to trim whitespace from string columns.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TrimRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -383,6 +400,7 @@ pub struct TrimRequest {
 
 /// Request to convert a string column to lowercase.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ToLowercaseRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -399,6 +417,7 @@ pub struct ToLowercaseRequest {
 
 /// Request to convert a string column to uppercase.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ToUppercaseRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -415,6 +434,7 @@ pub struct ToUppercaseRequest {
 
 /// Request to replace exact values in a column.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReplaceValueRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -439,6 +459,7 @@ pub struct ReplaceValueRequest {
 
 /// Request to replace substrings matching a regex pattern.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RegexReplaceRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -463,6 +484,7 @@ pub struct RegexReplaceRequest {
 
 /// Request to extract substrings matching a regex pattern.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RegexExtractRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -495,6 +517,7 @@ pub struct RegexExtractRequest {
 
 /// Request to count regex matches in each row.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RegexCountRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -519,6 +542,7 @@ pub struct RegexCountRequest {
 
 /// Request to split a string column into multiple columns.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StrSplitRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -551,6 +575,7 @@ pub struct StrSplitRequest {
 
 /// Request to concatenate multiple string columns.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StrConcatRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -575,6 +600,7 @@ pub struct StrConcatRequest {
 
 /// Request to get string lengths.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StrLengthRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -595,6 +621,7 @@ pub struct StrLengthRequest {
 
 /// Request to extract a substring.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StrSubstringRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -619,6 +646,7 @@ pub struct StrSubstringRequest {
 
 /// Request to create lag or lead columns.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LagLeadRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -651,6 +679,7 @@ pub struct LagLeadRequest {
 
 /// Request to standardize or normalize columns.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StandardizeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -673,6 +702,7 @@ pub struct StandardizeRequest {
 
 /// Request to bin a continuous variable.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BinColumnRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -717,6 +747,7 @@ pub struct BinColumnRequest {
 
 /// Request to one-hot encode a categorical column.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OneHotEncodeRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -739,6 +770,7 @@ pub struct OneHotEncodeRequest {
 
 /// Request to compute differences or percent changes.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiffRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -769,6 +801,7 @@ pub struct DiffRequest {
 
 /// Request to sample rows from a dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SampleDatasetRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -793,6 +826,7 @@ pub struct SampleDatasetRequest {
 
 /// Request to cast column(s) to a different data type.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CastColumnRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
@@ -829,6 +863,7 @@ pub struct CastColumnRequest {
 
 /// Request to create a new column by computation.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MutateColumnRequest {
     /// Name/ID of the dataset
     #[schemars(description = "Name or ID of the dataset.")]
