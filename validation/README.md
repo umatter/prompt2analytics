@@ -366,6 +366,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | SVM | no validation document yet | not R-pinned |
 | Causal Forest | [causal_forest.md](ml/causal_forest.md) | not R-pinned |
 | BART Causal (bartCause) | [bart_causal.md](ml/bart_causal.md) | not R-pinned |
+| HDBSCAN (dbscan::hdbscan) | [hdbscan.md](ml/hdbscan.md) | R-pinned, known deviations (ML-49) |
+| OPTICS (dbscan::optics, extractDBSCAN, extractXi) | [optics.md](ml/optics.md) | R-pinned |
+| Silhouette (cluster::silhouette) | [silhouette.md](ml/silhouette.md) | R-pinned |
 
 ### Statistical Methods
 | Method | File | Status |
