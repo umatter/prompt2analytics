@@ -11,6 +11,9 @@
       "tests": [
         "p2a-core::regression::ols::tests::test_validate_ols_no_intercept_grunfeld",
         "p2a-core::regression::ols::tests::test_validate_ols_raw_intercept_in_last_column",
+        "p2a-core::regression::ols::tests::test_validate_ols_clustered_no_intercept_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_hac_no_intercept_grunfeld",
+        "p2a-core::regression::ols::tests::test_clustered_and_hac_wrappers_keep_the_intercept",
         "p2a-core::regression::gls::tests::test_validate_gls_identity_no_intercept_grunfeld"
       ],
       "quantities": ["coefficients", "SE classical, HC1, CR1 firm, CR1 firm + year, Newey-West lag 4", "t", "p", "R2 and adjusted R2 (uncentered without intercept)", "sigma", "F, its df and p", "logLik", "AIC", "F and R2 with the intercept column last (run_ols_raw)", "cluster counts"],

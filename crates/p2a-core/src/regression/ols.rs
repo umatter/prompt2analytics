@@ -1070,6 +1070,8 @@ impl std::fmt::Display for OlsClusteredResult {
 ///
 /// # Returns
 /// An `OlsClusteredResult` containing the regression results with clustered SEs.
+///
+/// This is [`OlsClusteredResult::fit`] with an intercept.
 pub fn run_ols_clustered(
     dataset: &Dataset,
     y_col: &str,
@@ -1077,150 +1079,168 @@ pub fn run_ols_clustered(
     cluster1: &str,
     cluster2: Option<&str>,
 ) -> EconResult<OlsClusteredResult> {
-    // Cluster ids, with the rows whose id is missing left out.
-    let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
-    let context = match cluster2 {
-        Some(c2) => {
-            request = request.factor(c2);
-            format!("clustered OLS (rows with ids in '{cluster1}' and '{c2}')")
-        }
-        None => format!("clustered OLS (rows with an id in '{cluster1}')"),
-    };
-    let ids = request.na(NaPolicy::Omit).min_rows(1, &context).extract()?;
+    OlsClusteredResult::fit(dataset, y_col, x_cols, cluster1, cluster2, true)
+}
 
-    let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 3);
-    names.push(y_col);
-    names.extend_from_slice(x_cols);
-    names.push(cluster1);
-    names.extend(cluster2);
-    let sample = estimation_sample(dataset, &names, &ids)?;
-    let df = sample.df();
-
-    // First run standard OLS to get coefficients and residuals
-    let mut base_result = run_ols(&sample, y_col, x_cols, true, CovarianceType::Standard)?;
-
-    // Build design matrix again (we need it for clustered SEs)
-    let design = DesignMatrix::from_dataframe(df, x_cols, true)
-        .map_err(|e| econ_error_from_design(e, df))?;
-    let x = &design.data;
-
-    // Row indices (into the sample) of each cluster
-    let factor1 = ids.factor(cluster1);
-    let clusters1 = cluster_groups(factor1)?;
-    let n_clusters_1 = clusters1.len();
-
-    if n_clusters_1 < 2 {
-        return Err(EconError::InsufficientData {
-            required: 2,
-            provided: n_clusters_1,
-            context: "Need at least 2 clusters for clustered standard errors".to_string(),
-        });
-    }
-
-    // Add graduated warning for few clusters (Cameron-Miller 2015 guidance)
-    // - G < 20: Severe finite-sample bias concerns
-    // - 20 <= G < 50: Moderate concerns, consider wild bootstrap
-    // - G >= 50: Generally adequate for asymptotic inference
-    if n_clusters_1 < 50 {
-        let severity = if n_clusters_1 < 20 {
-            "severe"
-        } else {
-            "moderate"
-        };
-        base_result.warnings.push(
-            EstimationWarning::FewClusters {
-                n_clusters: n_clusters_1,
-                severity: severity.to_string(),
+impl OlsClusteredResult {
+    /// OLS with one-way (`cluster2 = None`) or two-way cluster-robust CR1 standard errors, as
+    /// `sandwich::vcovCL(cluster = ~c1 [+ c2], type = "HC1")`. `intercept = false` fits the
+    /// model through the origin (k counts the slope columns only; R², adjusted R² and F
+    /// uncentered, as `summary.lm`). Missing cluster ids are handled as in
+    /// [`run_ols_clustered`], which is `fit(.., true)`.
+    pub fn fit(
+        dataset: &Dataset,
+        y_col: &str,
+        x_cols: &[&str],
+        cluster1: &str,
+        cluster2: Option<&str>,
+        intercept: bool,
+    ) -> EconResult<OlsClusteredResult> {
+        // Cluster ids, with the rows whose id is missing left out.
+        let mut request = ColumnRequest::new(dataset.df()).factor(cluster1);
+        let context = match cluster2 {
+            Some(c2) => {
+                request = request.factor(c2);
+                format!("clustered OLS (rows with ids in '{cluster1}' and '{c2}')")
             }
-            .message(),
-        );
-    }
+            None => format!("clustered OLS (rows with an id in '{cluster1}')"),
+        };
+        let ids = request.na(NaPolicy::Omit).min_rows(1, &context).extract()?;
 
-    let (vcov, n_clusters_2, cluster_type) = if let Some(c2) = cluster2 {
-        // Two-way clustering
-        let factor2 = ids.factor(c2);
-        let clusters2 = cluster_groups(factor2)?;
-        let n_c2 = clusters2.len();
+        let mut names: Vec<&str> = Vec::with_capacity(x_cols.len() + 3);
+        names.push(y_col);
+        names.extend_from_slice(x_cols);
+        names.push(cluster1);
+        names.extend(cluster2);
+        let sample = estimation_sample(dataset, &names, &ids)?;
+        let df = sample.df();
 
-        if n_c2 < 2 {
+        // First run standard OLS to get coefficients and residuals
+        let mut base_result = run_ols(&sample, y_col, x_cols, intercept, CovarianceType::Standard)?;
+
+        // Build design matrix again (we need it for clustered SEs)
+        let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
+            .map_err(|e| econ_error_from_design(e, df))?;
+        let x = &design.data;
+
+        // Row indices (into the sample) of each cluster
+        let factor1 = ids.factor(cluster1);
+        let clusters1 = cluster_groups(factor1)?;
+        let n_clusters_1 = clusters1.len();
+
+        if n_clusters_1 < 2 {
             return Err(EconError::InsufficientData {
                 required: 2,
-                provided: n_c2,
-                context: format!("Need at least 2 clusters for '{}'", c2),
+                provided: n_clusters_1,
+                context: "Need at least 2 clusters for clustered standard errors".to_string(),
             });
         }
 
-        let intersection = intersection_groups(factor1, factor2)?;
-        let vcov = compute_twoway_clustered_vcov(
-            &x.view(),
-            &base_result.resid,
-            &base_result.xtx_inv,
-            &clusters1,
-            &clusters2,
-            &intersection,
-        )?;
+        // Add graduated warning for few clusters (Cameron-Miller 2015 guidance)
+        // - G < 20: Severe finite-sample bias concerns
+        // - 20 <= G < 50: Moderate concerns, consider wild bootstrap
+        // - G >= 50: Generally adequate for asymptotic inference
+        if n_clusters_1 < 50 {
+            let severity = if n_clusters_1 < 20 {
+                "severe"
+            } else {
+                "moderate"
+            };
+            base_result.warnings.push(
+                EstimationWarning::FewClusters {
+                    n_clusters: n_clusters_1,
+                    severity: severity.to_string(),
+                }
+                .message(),
+            );
+        }
 
-        (
-            vcov,
-            Some(n_c2),
-            format!("Two-way clustered ({}, {})", cluster1, c2),
-        )
-    } else {
-        // One-way clustering
-        let vcov = compute_clustered_vcov(
-            &x.view(),
-            &base_result.resid,
-            &base_result.xtx_inv,
-            &clusters1,
-        )?;
+        let (vcov, n_clusters_2, cluster_type) = if let Some(c2) = cluster2 {
+            // Two-way clustering
+            let factor2 = ids.factor(c2);
+            let clusters2 = cluster_groups(factor2)?;
+            let n_c2 = clusters2.len();
 
-        (vcov, None, format!("Clustered ({})", cluster1))
-    };
-
-    // Update standard errors and statistics
-    let k = design.n_features;
-    let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
-    let t_stats: Array1<f64> = &base_result.beta / &se;
-    let df = base_result.df_resid;
-
-    let t_crit = crate::traits::t_critical(0.05, df as f64);
-
-    let coefficients: Vec<OlsCoefficient> = design
-        .column_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let p = t_test_p_value(t_stats[i], df as f64);
-            OlsCoefficient {
-                name: name.clone(),
-                estimate: base_result.beta[i],
-                std_error: se[i],
-                t_value: t_stats[i],
-                p_value: p,
-                significance: SignificanceLevel::from_p_value(p),
-                ci_lower_95: base_result.beta[i] - t_crit * se[i],
-                ci_upper_95: base_result.beta[i] + t_crit * se[i],
+            if n_c2 < 2 {
+                return Err(EconError::InsufficientData {
+                    required: 2,
+                    provided: n_c2,
+                    context: format!("Need at least 2 clusters for '{}'", c2),
+                });
             }
+
+            let intersection = intersection_groups(factor1, factor2)?;
+            let vcov = compute_twoway_clustered_vcov(
+                &x.view(),
+                &base_result.resid,
+                &base_result.xtx_inv,
+                &clusters1,
+                &clusters2,
+                &intersection,
+            )?;
+
+            (
+                vcov,
+                Some(n_c2),
+                format!("Two-way clustered ({}, {})", cluster1, c2),
+            )
+        } else {
+            // One-way clustering
+            let vcov = compute_clustered_vcov(
+                &x.view(),
+                &base_result.resid,
+                &base_result.xtx_inv,
+                &clusters1,
+            )?;
+
+            (vcov, None, format!("Clustered ({})", cluster1))
+        };
+
+        // Update standard errors and statistics
+        let k = design.n_features;
+        let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
+        let t_stats: Array1<f64> = &base_result.beta / &se;
+        let df = base_result.df_resid;
+
+        let t_crit = crate::traits::t_critical(0.05, df as f64);
+
+        let coefficients: Vec<OlsCoefficient> = design
+            .column_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let p = t_test_p_value(t_stats[i], df as f64);
+                OlsCoefficient {
+                    name: name.clone(),
+                    estimate: base_result.beta[i],
+                    std_error: se[i],
+                    t_value: t_stats[i],
+                    p_value: p,
+                    significance: SignificanceLevel::from_p_value(p),
+                    ci_lower_95: base_result.beta[i] - t_crit * se[i],
+                    ci_upper_95: base_result.beta[i] + t_crit * se[i],
+                }
+            })
+            .collect();
+
+        // Update the result
+        base_result.coefficients = coefficients;
+        base_result.se = se;
+        base_result.vcov = vcov;
+        if let Some(note) = ids.missing().note() {
+            base_result.missing = ids.missing().clone();
+            base_result.warnings.insert(0, note);
+        }
+
+        Ok(OlsClusteredResult {
+            ols: base_result,
+            cluster_type,
+            n_clusters_1,
+            n_clusters_2,
+            cluster_var_1: cluster1.to_string(),
+            cluster_var_2: cluster2.map(|s| s.to_string()),
         })
-        .collect();
-
-    // Update the result
-    base_result.coefficients = coefficients;
-    base_result.se = se;
-    base_result.vcov = vcov;
-    if let Some(note) = ids.missing().note() {
-        base_result.missing = ids.missing().clone();
-        base_result.warnings.insert(0, note);
     }
-
-    Ok(OlsClusteredResult {
-        ols: base_result,
-        cluster_type,
-        n_clusters_1,
-        n_clusters_2,
-        cluster_var_1: cluster1.to_string(),
-        cluster_var_2: cluster2.map(|s| s.to_string()),
-    })
 }
 
 /// The rows of `dataset` that `ids` kept, restricted to the columns `names` (each must
@@ -1798,6 +1818,8 @@ fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
 /// `HacResult` with HAC-adjusted standard errors.
 ///
 /// R equivalent: `sandwich::NeweyWest(lm(y ~ x), lag = bandwidth, prewhite = prewhiten)`
+///
+/// This is [`HacResult::fit`] with an intercept.
 pub fn run_vcov_hac(
     dataset: &Dataset,
     y_col: &str,
@@ -1806,19 +1828,36 @@ pub fn run_vcov_hac(
     kernel: Option<&str>,
     prewhiten: bool,
 ) -> EconResult<HacResult> {
-    // First run OLS
-    let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
+    HacResult::fit(dataset, y_col, x_cols, bandwidth, kernel, prewhiten, true)
+}
 
-    // Build design matrix
-    let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
-    let x = dm.view().to_owned();
+impl HacResult {
+    /// OLS with HAC (Newey-West family) standard errors, as [`run_vcov_hac`], with or without an
+    /// intercept (`intercept = false`: `NeweyWest(lm(y ~ 0 + x), ..)`). [`run_vcov_hac`] is
+    /// `fit(.., true)`.
+    pub fn fit(
+        dataset: &Dataset,
+        y_col: &str,
+        x_cols: &[&str],
+        bandwidth: Option<usize>,
+        kernel: Option<&str>,
+        prewhiten: bool,
+        intercept: bool,
+    ) -> EconResult<HacResult> {
+        // First run OLS
+        let ols_result = run_ols(dataset, y_col, x_cols, intercept, CovarianceType::Standard)?;
 
-    // Parse kernel
-    let kernel_type = kernel
-        .and_then(HacKernel::from_str)
-        .unwrap_or(HacKernel::Bartlett);
+        // Build design matrix
+        let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, intercept)?;
+        let x = dm.view().to_owned();
 
-    vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)
+        // Parse kernel
+        let kernel_type = kernel
+            .and_then(HacKernel::from_str)
+            .unwrap_or(HacKernel::Bartlett);
+
+        vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)
+    }
 }
 
 // ============================================================================
@@ -3321,6 +3360,79 @@ mod tests {
             .scalar("r2", r.r_squared, Tol::stat(n))
             .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
             .finish();
+    }
+
+    /// CR1 one- and two-way without intercept: sandwich::vcovCL(lm(inv ~ 0 + value + capital), ~firm [+ year], HC1).
+    #[test]
+    fn test_validate_ols_clustered_no_intercept_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("ols_no_intercept_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        for (c2, key) in [
+            (None, "cluster_firm_hc1"),
+            (Some("year"), "cluster_firm_year_hc1"),
+        ] {
+            let r = OlsClusteredResult::fit(&ds, "inv", &["value", "capital"], "firm", c2, false)
+                .unwrap();
+            let names: Vec<&str> = r.ols.coefficients.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, ["value", "capital"]);
+            assert_eq!((r.n_clusters_1, r.n_clusters_2), (10, c2.map(|_| 20)));
+            let se: Vec<f64> = r.ols.coefficients.iter().map(|c| c.std_error).collect();
+            let p: Vec<f64> = r.ols.coefficients.iter().map(|c| c.p_value).collect();
+            let b: Vec<f64> = r.ols.coefficients.iter().map(|c| c.estimate).collect();
+            Check::new(&case)
+                .named("coef", &names, &b, Tol::coef(n))
+                .named(&format!("se_{key}"), &names, &se, Tol::se(n))
+                .named(&format!("p_{key}"), &names, &p, Tol::p_value(n))
+                .scalar("r2", r.ols.r_squared, Tol::stat(n))
+                .finish();
+        }
+    }
+
+    /// NeweyWest(lm(inv ~ 0 + value + capital), lag = 4, prewhite = FALSE) = p2a Bartlett bandwidth 4 (T1 hac_ar1).
+    #[test]
+    fn test_validate_hac_no_intercept_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("ols_no_intercept_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let h = HacResult::fit(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            Some(4),
+            Some("bartlett"),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(h.names, ["value", "capital"]);
+        assert_eq!((h.bandwidth, h.n_params), (4, 2));
+        Check::new(&case)
+            .named("coef", &h.names, &h.coefficients, Tol::coef(n))
+            .named("se_nw_lag4", &h.names, &h.std_errors, Tol::se(n))
+            .finish();
+    }
+
+    /// run_ols_clustered and run_vcov_hac are fit(.., intercept = true) (case ols_grunfeld).
+    #[test]
+    fn test_clustered_and_hac_wrappers_keep_the_intercept() {
+        let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+        let x = ["value", "capital"];
+        let a = run_ols_clustered(&ds, "inv", &x, "firm", Some("year")).unwrap();
+        let b = OlsClusteredResult::fit(&ds, "inv", &x, "firm", Some("year"), true).unwrap();
+        let se = |r: &OlsClusteredResult| {
+            r.ols
+                .coefficients
+                .iter()
+                .map(|c| c.std_error)
+                .collect::<Vec<f64>>()
+        };
+        assert_eq!(se(&a), se(&b));
+        let names: Vec<&str> = a.ols.coefficients.iter().map(|c| c.name.as_str()).collect();
+        Check::new(&case)
+            .named("se_cluster_firm_year_hc1", &names, &se(&a), Tol::se(200))
+            .finish();
+        let h = run_vcov_hac(&ds, "inv", &x, Some(4), Some("bartlett"), false).unwrap();
+        let g = HacResult::fit(&ds, "inv", &x, Some(4), Some("bartlett"), false, true).unwrap();
+        assert_eq!((h.std_errors, h.names), (g.std_errors, g.names));
     }
 
     /// `lm(mpg ~ wt + hp + disp)` on all 32 rows of mtcars (case `ols_mtcars`).
