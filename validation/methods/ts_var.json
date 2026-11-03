@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_var",
+      "name": "Vector autoregression VAR(p) with a constant (equation-wise OLS by pivoted QR)",
+      "category": "econometrics",
+      "reference": "vars::VAR(type = 'const') and summary.varest; stats::logLik/AIC/BIC",
+      "doc": "validation/econometrics/timeseries/var.md",
+      "cases": ["var_canada"],
+      "tests": [
+        "p2a-core::econometrics::timeseries::var::tests::test_validate_var_canada_coefficients_se",
+        "p2a-core::econometrics::timeseries::var::tests::test_validate_var_canada_loglik_ic",
+        "p2a-core::econometrics::timeseries::var::tests::test_validate_var_display_prints_coefficients"
+      ],
+      "quantities": ["coefficients", "SE (Sigma divisor T - Kp - 1)", "t", "p", "Sigma_u (T - Kp - 1)", "Sigma_u ML (T)", "log det Sigma_ML", "logLik", "AIC", "BIC", "residual df", "observations", "printed coefficient table"],
+      "tolerance": "validation/README.md, n = 82 (< 100): coefficients 1e-6, SE, t, Sigma, logLik and criteria 1e-5 relative, p 1e-5 relative / 1e-12 absolute; counts exact; printed table at its 6 (estimate, SE) and 3 (t) decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ts_var_irf",
+      "name": "VAR impulse responses, orthogonalised (Cholesky of the df-corrected Sigma_u) and plain",
+      "category": "econometrics",
+      "reference": "vars::irf(ortho = TRUE | FALSE, boot = FALSE, cumulative = FALSE); vars:::Psi.varest, Phi.varest",
+      "doc": "validation/econometrics/timeseries/irf.md",
+      "cases": ["var_canada"],
+      "tests": [
+        "p2a-core::econometrics::timeseries::var::tests::test_validate_var_irf_canada",
+        "p2a-core::econometrics::timeseries::var::tests::test_validate_var_irf_display_prints_every_horizon"
+      ],
+      "quantities": ["orthogonalised responses, 13 horizons x 4 x 4", "plain responses, 13 horizons x 4 x 4", "printed table at 6 decimals"],
+      "tolerance": "validation/README.md, n = 82: 1e-5 relative, 1e-14 absolute (structural zeros exact); printed at 6 decimals",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "granger_test_lags",
+      "name": "Granger causality F test: lag orders, small samples (df2 = n - 3p - 1) and the capped default order",
+      "category": "econometrics",
+      "reference": "lmtest::grangertest(order = p); p2a's default order min(floor(12 (n/100)^(1/4)), (n - 2) %/% 3), written out",
+      "doc": "validation/econometrics/timeseries/granger.md",
+      "cases": ["granger_short", "var_canada"],
+      "tests": [
+        "p2a-core::econometrics::timeseries::granger::tests::test_validate_granger_short_lags",
+        "p2a-core::econometrics::timeseries::granger::tests::test_validate_granger_canada_prod_on_e"
+      ],
+      "quantities": ["F", "p", "df1", "df2", "rows used", "default order and its warning"],
+      "tolerance": "validation/README.md: n = 20 (granger_short) and n = 82 (var_canada): F 1e-5, p 1e-5 relative / 1e-12 absolute; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
