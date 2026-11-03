@@ -70,6 +70,7 @@ use crate::linalg::solve::{
     LM_QR_TOL, Qr, SingularPolicy, aliasing_message, least_squares, sym_inverse,
 };
 use crate::linalg::{DesignMatrix, matmul, xtx, xty};
+use crate::options::Choices;
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::{LinearEstimator, SignificanceLevel, f_test_p_value, t_test_p_value};
@@ -1678,17 +1679,38 @@ impl std::fmt::Display for HacKernel {
     }
 }
 
+/// Accepted spellings of the HAC kernel (matched after `options::normalize`, so "Quadratic
+/// Spectral", "quadratic-spectral" and "QS" all parse): sandwich's names and common
+/// abbreviations. The first spelling of each entry is canonical.
+const HAC_KERNEL_CHOICES: Choices<HacKernel> = Choices {
+    option: "kernel",
+    values: &[
+        (
+            &["bartlett", "newey_west", "neweywest", "nw"],
+            HacKernel::Bartlett,
+        ),
+        (&["parzen"], HacKernel::Parzen),
+        (
+            &["quadratic_spectral", "qs", "quadraticspectral"],
+            HacKernel::QuadraticSpectral,
+        ),
+        (&["truncated", "rectangular"], HacKernel::Truncated),
+        (
+            &["tukey_hanning", "tukeyhanning", "tukey", "th"],
+            HacKernel::TukeyHanning,
+        ),
+    ],
+};
+
+// FromStr (unknown names are an error listing the accepted ones) and choices(); the
+// Display above ("Bartlett (Newey-West)") is printed by MCP and the CLI and stays.
+crate::option_enum!(HacKernel, HAC_KERNEL_CHOICES, no_display);
+
 impl HacKernel {
-    /// Parse kernel type from string.
+    /// Parse kernel type from string; `None` for an unknown name.
+    #[deprecated(note = "use str::parse, which reports unknown names")]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "bartlett" | "newey-west" | "nw" => Some(Self::Bartlett),
-            "parzen" => Some(Self::Parzen),
-            "quadratic-spectral" | "qs" | "quadraticspectral" => Some(Self::QuadraticSpectral),
-            "truncated" | "rectangular" => Some(Self::Truncated),
-            "tukey-hanning" | "tukeyhanning" | "th" => Some(Self::TukeyHanning),
-            _ => None,
-        }
+        s.parse().ok()
     }
 
     /// Compute the kernel weight for a given lag j and bandwidth m.
@@ -2019,7 +2041,10 @@ fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
 /// * `x_cols` - Names of independent variable columns
 /// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than n; one above n/4
 ///   adds a warning (see [`vcov_hac`]).
-/// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", "truncated", "tukey-hanning")
+/// * `kernel` - Kernel name: `bartlett` (also `Newey-West`, `nw`), `parzen`,
+///   `quadratic_spectral` (`Quadratic Spectral`, `qs`), `truncated` (`rectangular`),
+///   `tukey_hanning` (`Tukey-Hanning`, `tukey`); case, spaces and dashes are ignored. `None`
+///   is Bartlett; an unknown name is `InvalidSpecification` listing the accepted ones.
 /// * `prewhiten` - Whether to use prewhitening
 ///
 /// # Returns
@@ -2060,10 +2085,8 @@ impl HacResult {
         let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, intercept)?;
         let x = dm.view().to_owned();
 
-        // Parse kernel
-        let kernel_type = kernel
-            .and_then(HacKernel::from_str)
-            .unwrap_or(HacKernel::Bartlett);
+        // Parse kernel (unknown names are an error)
+        let kernel_type = crate::options::parse_or(kernel, HacKernel::Bartlett)?;
 
         vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)
     }
@@ -2085,19 +2108,74 @@ pub enum BootstrapType {
     /// Residual bootstrap: Resample residuals, keeping X fixed.
     /// More efficient under correct specification but assumes homoskedasticity.
     Residual,
-    /// Wild bootstrap: Multiply residuals by random weights (Rademacher).
+    /// Wild bootstrap: Multiply residuals by random weights (Rademacher, ±1 with
+    /// probability 1/2; sandwich's `type = "wild"` default).
     /// Robust to heteroskedasticity, preserves X structure.
     Wild,
+    /// Wild bootstrap with Mammen's two-point weights (sandwich `type = "mammen"`):
+    /// -(sqrt5 - 1)/2 with probability (sqrt5 + 1)/(2 sqrt5), else (sqrt5 + 1)/2.
+    WildMammen,
+    /// Wild bootstrap with Webb's six-point weights (sandwich `type = "webb"`):
+    /// ±sqrt(1/2), ±1, ±sqrt(3/2), each with probability 1/6.
+    WildWebb,
 }
 
+/// Accepted spellings of the bootstrap type (sandwich's `vcovBS` names; `norm`,
+/// `jackknife` and `fractional` are not implemented and are refused).
+const BOOTSTRAP_TYPE_CHOICES: Choices<BootstrapType> = Choices {
+    option: "bootstrap_type",
+    values: &[
+        (&["pairs", "xy", "case", "cases"], BootstrapType::Pairs),
+        (&["residual", "resid", "residuals"], BootstrapType::Residual),
+        (
+            &["wild", "rademacher", "wild_rademacher"],
+            BootstrapType::Wild,
+        ),
+        (&["mammen", "wild_mammen"], BootstrapType::WildMammen),
+        (&["webb", "wild_webb"], BootstrapType::WildWebb),
+    ],
+};
+
+crate::option_enum!(BootstrapType, BOOTSTRAP_TYPE_CHOICES, no_display);
+
 impl BootstrapType {
-    /// Parse from string.
+    /// Parse from string; `None` for an unknown name.
+    #[deprecated(note = "use str::parse, which reports unknown names")]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "pairs" | "xy" | "case" => Some(BootstrapType::Pairs),
-            "residual" | "resid" => Some(BootstrapType::Residual),
-            "wild" => Some(BootstrapType::Wild),
-            _ => None,
+        s.parse().ok()
+    }
+}
+
+/// One wild-bootstrap weight (sandwich::vcovBS laws). Rademacher keeps the original
+/// `rng.r#gen::<bool>()` draw, so seeded `Wild` results are unchanged; Mammen draws one
+/// uniform against (sqrt5 + 1)/(2 sqrt5); Webb one of six points uniformly.
+fn wild_weight(kind: BootstrapType, rng: &mut ChaCha8Rng) -> f64 {
+    match kind {
+        BootstrapType::WildMammen => {
+            let s5 = 5f64.sqrt();
+            if rng.r#gen::<f64>() < (s5 + 1.0) / (2.0 * s5) {
+                -(s5 - 1.0) / 2.0
+            } else {
+                (s5 + 1.0) / 2.0
+            }
+        }
+        BootstrapType::WildWebb => {
+            const WEBB: [f64; 6] = [
+                -1.224_744_871_391_589,
+                -1.0,
+                -std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+                1.0,
+                1.224_744_871_391_589,
+            ];
+            WEBB[rng.gen_range(0..6)]
+        }
+        _ => {
+            if rng.r#gen::<bool>() {
+                1.0
+            } else {
+                -1.0
+            }
         }
     }
 }
@@ -2108,6 +2186,8 @@ impl std::fmt::Display for BootstrapType {
             BootstrapType::Pairs => write!(f, "Pairs (xy)"),
             BootstrapType::Residual => write!(f, "Residual"),
             BootstrapType::Wild => write!(f, "Wild"),
+            BootstrapType::WildMammen => write!(f, "Wild (Mammen)"),
+            BootstrapType::WildWebb => write!(f, "Wild (Webb)"),
         }
     }
 }
@@ -2284,10 +2364,13 @@ pub fn vcov_bootstrap(
                     .collect();
                 solver.coefficients(x1, &y_boot)?
             }
-            (BootstrapType::Wild, Some(solver)) => {
-                // Wild bootstrap with Rademacher weights
+            (
+                BootstrapType::Wild | BootstrapType::WildMammen | BootstrapType::WildWebb,
+                Some(solver),
+            ) => {
+                // Wild bootstrap: residuals times Rademacher, Mammen or Webb weights
                 let weights: Vec<f64> = (0..n)
-                    .map(|_| if rng.r#gen::<bool>() { 1.0 } else { -1.0 })
+                    .map(|_| wild_weight(bootstrap_type, &mut rng))
                     .collect();
 
                 let y_boot: Array1<f64> = (0..n)
@@ -2377,7 +2460,9 @@ pub fn vcov_bootstrap(
 /// * `x_cols` - Names of independent variable columns
 /// * `n_boot` - Number of bootstrap replications (default: 999). At least 10 (see
 ///   [`vcov_bootstrap`]).
-/// * `bootstrap_type` - Type string ("pairs", "residual", "wild")
+/// * `bootstrap_type` - `pairs` (also `xy`, `case`), `residual`, `wild` (Rademacher), `mammen`,
+///   `webb` (sandwich's names). `None` is pairs; an unknown name (also sandwich's `norm`,
+///   `jackknife`, `fractional`, which are not implemented) is `InvalidSpecification`.
 /// * `seed` - Optional RNG seed
 ///
 /// # Returns
@@ -2409,10 +2494,8 @@ pub fn run_vcov_bootstrap(
     let x = dm.data;
     let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
 
-    // Parse bootstrap type
-    let boot_type = bootstrap_type
-        .and_then(BootstrapType::from_str)
-        .unwrap_or(BootstrapType::Pairs);
+    // Parse bootstrap type (unknown names are an error)
+    let boot_type = crate::options::parse_or(bootstrap_type, BootstrapType::Pairs)?;
 
     vcov_bootstrap(&ols_result, &x, &y, n_boot, boot_type, seed)
 }
@@ -2790,7 +2873,8 @@ pub fn vcov_driscoll_kraay(
 ///   with an id is `InsufficientData` naming the column).
 /// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
 ///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
-/// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", etc.)
+/// * `kernel` - Kernel name, as for [`run_vcov_hac`] (`None` is Bartlett; an unknown name is
+///   `InvalidSpecification`)
 ///
 /// # Returns
 ///
@@ -2836,10 +2920,8 @@ pub fn run_vcov_driscoll_kraay(
     let dm = DesignMatrix::from_dataframe(df, x_cols, true)
         .map_err(|e| econ_error_from_design(e, df))?;
 
-    // Parse kernel
-    let kernel_type = kernel
-        .and_then(HacKernel::from_str)
-        .unwrap_or(HacKernel::Bartlett);
+    // Parse kernel (unknown names are an error)
+    let kernel_type = crate::options::parse_or(kernel, HacKernel::Bartlett)?;
 
     let mut result = vcov_driscoll_kraay(
         &ols_result,
@@ -3132,6 +3214,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_hac_kernel_parsing() {
         assert!(matches!(
             HacKernel::from_str("bartlett"),
@@ -3276,6 +3359,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_bootstrap_type_parsing() {
         assert!(matches!(
             BootstrapType::from_str("pairs"),
@@ -5136,5 +5220,158 @@ mod tests {
                 .iter()
                 .all(|p| p.is_finite() && (0.0..=1.0).contains(p))
         );
+    }
+
+    #[test]
+    fn test_hac_kernel_parses_sandwich_names() {
+        use HacKernel::*;
+        HacKernel::choices().validate().unwrap();
+        for (s, k) in [
+            ("Quadratic Spectral", QuadraticSpectral),
+            ("quadratic-spectral", QuadraticSpectral),
+            ("QS", QuadraticSpectral),
+            ("Tukey-Hanning", TukeyHanning),
+            ("tukey_hanning", TukeyHanning),
+            ("tukey", TukeyHanning),
+            ("Bartlett", Bartlett),
+            ("Newey-West", Bartlett),
+            ("nw", Bartlett),
+            ("Parzen", Parzen),
+            ("Truncated", Truncated),
+            ("rectangular", Truncated),
+        ] {
+            assert_eq!(s.parse::<HacKernel>().unwrap(), k, "{s}");
+        }
+        match "qs2".parse::<HacKernel>().unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("kernel")
+                    && message.contains("'qs2'")
+                    && message.contains("quadratic_spectral"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+        let ts = create_timeseries_dataset();
+        let qs =
+            run_vcov_hac(&ts, "y", &["x"], Some(4), Some("Quadratic Spectral"), false).unwrap();
+        assert_eq!(qs.kernel, QuadraticSpectral); // before: Bartlett
+        assert!(run_vcov_hac(&ts, "y", &["x"], Some(4), Some("qs2"), false).is_err()); // before: Ok (Bartlett)
+        let p = create_panel_dataset();
+        assert_eq!(
+            run_vcov_driscoll_kraay(&p, "y", &["x"], "time", None, Some("Tukey-Hanning"))
+                .unwrap()
+                .kernel,
+            TukeyHanning
+        );
+        assert!(run_vcov_driscoll_kraay(&p, "y", &["x"], "time", None, Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_type_parses_aliases_and_rejects_unknown() {
+        use BootstrapType::*;
+        BootstrapType::choices().validate().unwrap();
+        for (s, t) in [
+            ("pairs", Pairs),
+            ("xy", Pairs),
+            ("case", Pairs),
+            ("Residual", Residual),
+            ("wild", Wild),
+            ("rademacher", Wild),
+            ("wild-rademacher", Wild),
+            ("Mammen", WildMammen),
+            ("wild-mammen", WildMammen),
+            ("webb", WildWebb),
+            ("wild_webb", WildWebb),
+        ] {
+            assert_eq!(s.parse::<BootstrapType>().unwrap(), t, "{s}");
+        }
+        for bad in ["norm", "jackknife", "mamen"] {
+            match bad.parse::<BootstrapType>().unwrap_err() {
+                EconError::InvalidSpecification { message } => assert!(
+                    message.contains("bootstrap_type") && message.contains("mammen"),
+                    "{message}"
+                ),
+                e => panic!("{e:?}"),
+            }
+        }
+        let ds = create_test_dataset();
+        let m = run_vcov_bootstrap(&ds, "y", &["x1"], Some(200), Some("mammen"), Some(42)).unwrap();
+        assert_eq!(m.bootstrap_type, WildMammen); // before: Pairs
+        assert!(run_vcov_bootstrap(&ds, "y", &["x1"], Some(200), Some("norm"), Some(42)).is_err());
+    }
+
+    /// The weight laws of sandwich::vcovBS (sandwich 3.1.3 source): Mammen -(sqrt5 - 1)/2
+    /// w.p. (sqrt5 + 1)/(2 sqrt5), else (sqrt5 + 1)/2; Webb ±sqrt(1/2), ±1, ±sqrt(3/2) w.p.
+    /// 1/6; Rademacher ±1. Seeded; the bounds are >= 4.5 Monte Carlo sd.
+    #[test]
+    fn test_wild_weights_match_sandwich() {
+        let n = 200_000;
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let draw = |kind, rng: &mut ChaCha8Rng| -> Vec<f64> {
+            (0..n).map(|_| wild_weight(kind, rng)).collect()
+        };
+        let moment = |w: &[f64], p: i32| w.iter().map(|v| v.powi(p)).sum::<f64>() / n as f64;
+        let m = draw(BootstrapType::WildMammen, &mut rng);
+        let (lo, hi) = (-(5f64.sqrt() - 1.0) / 2.0, (5f64.sqrt() + 1.0) / 2.0);
+        assert!(m.iter().all(|&w| w == lo || w == hi));
+        let p_lo = m.iter().filter(|&&w| w == lo).count() as f64 / n as f64;
+        assert!((p_lo - 0.723_606_797_749_978_9).abs() < 0.005, "{p_lo}");
+        assert!(
+            moment(&m, 1).abs() < 0.01
+                && (moment(&m, 2) - 1.0).abs() < 0.01
+                && (moment(&m, 3) - 1.0).abs() < 0.03
+        );
+        let w = draw(BootstrapType::WildWebb, &mut rng);
+        let support = [
+            -(1.5f64).sqrt(),
+            -1.0,
+            -(0.5f64).sqrt(),
+            (0.5f64).sqrt(),
+            1.0,
+            (1.5f64).sqrt(),
+        ];
+        for s in support {
+            let f = w.iter().filter(|&&v| v == s).count() as f64 / n as f64;
+            assert!((f - 1.0 / 6.0).abs() < 0.005, "{s}: {f}");
+        }
+        assert!((moment(&w, 2) - 1.0).abs() < 0.01);
+        let r = draw(BootstrapType::Wild, &mut rng);
+        assert!(r.iter().all(|&v| v == 1.0 || v == -1.0) && moment(&r, 3).abs() < 0.01);
+    }
+
+    /// Property test as test_validate_bootstrap_aliased_design_uses_identified_columns, for
+    /// the three wild laws; Mammen and Rademacher are different methods in R and must give
+    /// different p2a output.
+    #[test]
+    fn test_validate_bootstrap_wild_variants_near_hc0() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let hc0 = case.vector("dup_hc0_se");
+        let run = |t| {
+            run_vcov_bootstrap(
+                &ds,
+                "y",
+                &["x1", "x2", "x3"],
+                Some(2000),
+                Some(t),
+                Some(20261118),
+            )
+            .unwrap()
+        };
+        let (rad, mam, web) = (run("wild"), run("mammen"), run("webb"));
+        for b in [&rad, &mam, &web] {
+            assert!(b.std_errors[2].is_nan());
+            for (s, h) in [b.std_errors[0], b.std_errors[1], b.std_errors[3]]
+                .iter()
+                .zip(&hc0)
+            {
+                assert!(
+                    (s / h - 1.0).abs() < 0.10,
+                    "{}: se {s} vs HC0 {h}",
+                    b.bootstrap_type
+                );
+            }
+        }
+        assert_ne!(rad.std_errors[1], mam.std_errors[1]);
+        assert_ne!(mam.std_errors[1], web.std_errors[1]);
     }
 }

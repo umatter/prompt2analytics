@@ -91,6 +91,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult, EstimationWarning};
 use crate::linalg::{DesignMatrix, condition_number, safe_inverse, xtx};
+use crate::options::Choices;
 use crate::regression::{CovarianceType, run_ols};
 use crate::resource;
 use crate::traits::chi_squared_p_value;
@@ -152,7 +153,7 @@ pub struct VifResult {
 }
 
 /// Test statistic type for Breusch-Godfrey test.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BgTestType {
     /// Chi-squared statistic (asymptotic)
     #[default]
@@ -161,14 +162,23 @@ pub enum BgTestType {
     F,
 }
 
+/// Accepted spellings of the Breusch-Godfrey statistic (lmtest's `type = "Chisq" | "F"`).
+const BG_TEST_TYPE_CHOICES: Choices<BgTestType> = Choices {
+    option: "test_type",
+    values: &[
+        (&["chisq", "chi_squared", "chi2", "lm"], BgTestType::Chisq),
+        (&["f", "f_test"], BgTestType::F),
+    ],
+};
+
+// FromStr (unknown names are an error listing the accepted ones), choices(), Display.
+crate::option_enum!(BgTestType, BG_TEST_TYPE_CHOICES);
+
 impl BgTestType {
-    /// Parse from string representation.
+    /// Parse from string representation; `None` for an unknown name. Prefer `str::parse`,
+    /// which reports unknown names.
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "chisq" | "chi-squared" | "chi2" | "lm" => Some(BgTestType::Chisq),
-            "f" | "f-test" => Some(BgTestType::F),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
@@ -201,7 +211,7 @@ pub struct BgTestResult {
 }
 
 /// Type of variables to use for RESET test augmentation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ResetType {
     /// Use powers of fitted values (ŷ², ŷ³, ...) - most common
     #[default]
@@ -217,15 +227,28 @@ pub enum ResetType {
     PrinComp,
 }
 
+/// Accepted spellings of the RESET augmentation (lmtest's `type = "fitted" | "regressor" |
+/// "princomp"`).
+const RESET_TYPE_CHOICES: Choices<ResetType> = Choices {
+    option: "reset_type",
+    values: &[
+        (&["fitted", "fit", "fitted_values"], ResetType::Fitted),
+        (&["regressor", "reg", "regressors"], ResetType::Regressor),
+        (
+            &["princomp", "pca", "pc", "principal_component"],
+            ResetType::PrinComp,
+        ),
+    ],
+};
+
+// FromStr (unknown names are an error listing the accepted ones), choices(), Display.
+crate::option_enum!(ResetType, RESET_TYPE_CHOICES);
+
 impl ResetType {
-    /// Parse from string representation.
+    /// Parse from string representation; `None` for an unknown name. Prefer `str::parse`,
+    /// which reports unknown names.
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "fitted" | "fit" => Some(ResetType::Fitted),
-            "regressor" | "reg" | "regressors" => Some(ResetType::Regressor),
-            "princomp" | "pca" | "pc" => Some(ResetType::PrinComp),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
@@ -3014,5 +3037,46 @@ mod tests {
             .finish();
         // deviation REG-37: n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (wald_drop_capital_chisq)
         assert_eq!((f.df1, f.df2), (1, Some(197)));
+    }
+
+    #[test]
+    fn test_reset_type_parses_aliases_and_rejects_unknown() {
+        ResetType::choices().validate().unwrap();
+        for (s, t) in [
+            ("fitted", ResetType::Fitted),
+            ("FIT", ResetType::Fitted),
+            ("regressor", ResetType::Regressor),
+            ("regressors", ResetType::Regressor),
+            ("princomp", ResetType::PrinComp),
+            ("PCA", ResetType::PrinComp),
+            ("principal-component", ResetType::PrinComp),
+        ] {
+            assert_eq!(s.parse::<ResetType>().unwrap(), t, "{s}");
+        }
+        match "pca2".parse::<ResetType>().unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("reset_type") && message.contains("princomp"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bg_test_type_parses_aliases_and_rejects_unknown() {
+        BgTestType::choices().validate().unwrap();
+        for (s, t) in [
+            ("Chisq", BgTestType::Chisq),
+            ("chi-squared", BgTestType::Chisq),
+            ("LM", BgTestType::Chisq),
+            ("F", BgTestType::F),
+            ("f-test", BgTestType::F),
+        ] {
+            assert_eq!(s.parse::<BgTestType>().unwrap(), t, "{s}");
+        }
+        assert!(matches!(
+            "wald".parse::<BgTestType>(),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 }

@@ -44,7 +44,7 @@
     },
     {
       "id": "ols_sandwich_aliased",
-      "name": "Clustered (CR1), Newey-West and bootstrap SEs on an aliased design",
+      "name": "Clustered (CR1), Newey-West and wild-bootstrap SEs on an aliased design",
       "category": "regression",
       "reference": "sandwich::vcovCL(cluster = ~cl, type = 'HC1'); sandwich::NeweyWest(lag = 4, prewhite = FALSE); sandwich::vcovHC(type = 'HC0') as the bootstrap expectation",
       "doc": "validation/regression/ols_robust_se.md",
@@ -54,16 +54,18 @@
       "tests": [
         "p2a-core::regression::ols::tests::test_validate_ols_aliased_sandwich",
         "p2a-core::regression::ols::tests::test_validate_bootstrap_aliased_design_uses_identified_columns",
-        "p2a-core::regression::ols::tests::test_validate_bootstrap_fixed_design_solve_matches_refit"
+        "p2a-core::regression::ols::tests::test_validate_bootstrap_fixed_design_solve_matches_refit",
+        "p2a-core::regression::ols::tests::test_validate_bootstrap_wild_variants_near_hc0"
       ],
       "quantities": [
         "CR1 SE",
         "Newey-West lag 4 SE",
         "NaN SE for the aliased column",
         "bootstrap SE on the identified columns (Monte Carlo property, not R-pinned)",
-        "fixed-design bootstrap solve = refit by least squares"
+        "fixed-design bootstrap solve = refit by least squares",
+        "wild bootstrap SE (Rademacher, Mammen, Webb) within 10% of HC0 (Monte Carlo property, B = 2000, seeded; not R-pinned)"
       ],
-      "tolerance": "validation/README.md, n = 120: SE 1e-6 relative; bootstrap: Monte Carlo property; fixed-design solve 1e-12 relative",
+      "tolerance": "validation/README.md, n = 120: SE 1e-6 relative; bootstrap: Monte Carlo property, 10% = 6 sd at B = 2000; fixed-design solve 1e-12 relative",
       "deviations": [],
       "supersedes_legacy": []
     }
