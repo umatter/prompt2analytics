@@ -1052,22 +1052,6 @@ fn check_stratum_control_lists<T>(
     )
 }
 
-/// Cutpoints without NaN, sorted, for counting by binary search.
-fn sorted_cutpoints(cuts: &[f64]) -> Vec<f64> {
-    let mut sorted: Vec<f64> = cuts.iter().copied().filter(|c| !c.is_nan()).collect();
-    sorted.sort_unstable_by(f64::total_cmp);
-    sorted
-}
-
-/// Number of cutpoints strictly below `v` (`sorted` from [`sorted_cutpoints`]).
-///
-/// Equal to `cuts.iter().filter(|&&c| v > c).count()`: a NaN cutpoint or a NaN
-/// `v` never compares greater, and `c < v` is monotone along the sorted list.
-#[inline]
-fn count_below(sorted: &[f64], v: f64) -> usize {
-    sorted.partition_point(|&c| c < v)
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Convenience Functions
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1824,36 +1808,19 @@ fn full_method(
     })
 }
 
+/// S8: propensity-score subclassification (`matchit2subclass`, `min.n = 0`); `ps_range` of a
+/// subclass is its pair of cut points.
 fn subclass_method(is_treated: &[bool], scores: &[f64], k: usize) -> EconResult<MethodOutput> {
-    let (t, c) = group_indices(is_treated);
-    let ps = Array1::from_vec(scores.to_vec());
-    let (matches, weights, subclasses, _) = subclassification_matching(&ps, &t, &c, k)?;
-    Ok(MethodOutput {
-        weights,
-        matches,
-        subclass: sets_from_subclasses(is_treated.len(), &subclasses),
-        subclasses,
-        m_order: None,
-        caliper_abs: None,
-        total_distance: None,
-        warnings: Vec::new(),
-    })
-}
-
-/// Compute quantile-based cutpoints for binning.
-fn compute_quantile_cutpoints(values: &[f64], n_bins: usize) -> Vec<f64> {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let n = sorted.len();
-    let mut cutpoints = Vec::with_capacity(n_bins - 1);
-
-    for i in 1..n_bins {
-        let idx = (n as f64 * i as f64 / n_bins as f64).floor() as usize;
-        cutpoints.push(sorted[idx.min(n - 1)]);
+    let (labels, q, warnings) = subclass_labels(scores, is_treated, k);
+    // the original subclass (before discarded ones were skipped) of every kept label
+    let mut orig = vec![0usize; k + 1];
+    for (l, &sc) in labels.iter().zip(scores) {
+        if let Some(l) = l {
+            orig[*l] = find_interval(&q, sc).clamp(1, k);
+        }
     }
-
-    cutpoints
+    let ranges = |s: usize, _: &[usize], _: &[usize]| (q[orig[s] - 1], q[orig[s]]);
+    stratified_output(is_treated, labels, Some(&ranges), None, warnings)
 }
 
 /// Optimized full matching algorithm (greedy approximation).
@@ -1979,111 +1946,6 @@ fn full_matching_optimized(
             control_indices: s.control,
             ps_range: (s.start_ps, s.end_ps),
         });
-    }
-
-    // Add unmatched treated units
-    for &ti in treated_idx {
-        if weights[ti] == 0.0 {
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices: vec![],
-                distances: vec![],
-                weight: 0.0,
-            });
-        }
-    }
-
-    Ok((matches, weights, Some(subclasses), None))
-}
-
-/// Propensity score subclassification.
-fn subclassification_matching(
-    propensity_scores: &Array1<f64>,
-    treated_idx: &[usize],
-    control_idx: &[usize],
-    n_subclasses: usize,
-) -> EconResult<(
-    Vec<MatchInfo>,
-    Vec<f64>,
-    Option<Vec<SubclassInfo>>,
-    Option<f64>,
-)> {
-    let n = propensity_scores.len();
-    let mut weights = vec![0.0; n];
-
-    // Compute quantile cutpoints based on treated propensity scores
-    let treated_ps: Vec<f64> = treated_idx.iter().map(|&i| propensity_scores[i]).collect();
-    let cutpoints = compute_quantile_cutpoints(&treated_ps, n_subclasses);
-
-    // Assign units to subclasses
-    let mut subclasses: Vec<SubclassInfo> = (0..n_subclasses)
-        .map(|i| SubclassInfo {
-            subclass_id: i + 1,
-            treated_indices: Vec::new(),
-            control_indices: Vec::new(),
-            ps_range: if i == 0 {
-                (0.0, *cutpoints.first().unwrap_or(&1.0))
-            } else if i == n_subclasses - 1 {
-                (*cutpoints.last().unwrap_or(&0.0), 1.0)
-            } else {
-                (cutpoints[i - 1], cutpoints[i])
-            },
-        })
-        .collect();
-
-    // Membership mask instead of a Vec::contains scan per unit, and sorted
-    // cutpoints so each subclass is found by binary search
-    let mut is_treated = vec![false; n];
-    for &i in treated_idx {
-        is_treated[i] = true;
-    }
-    let sorted_cuts = sorted_cutpoints(&cutpoints);
-
-    // Assign units to subclasses
-    for &i in treated_idx.iter().chain(control_idx.iter()) {
-        let ps = propensity_scores[i];
-        let subclass = count_below(&sorted_cuts, ps);
-        let subclass = subclass.min(n_subclasses - 1);
-
-        if is_treated[i] {
-            subclasses[subclass].treated_indices.push(i);
-        } else {
-            subclasses[subclass].control_indices.push(i);
-        }
-    }
-
-    check_stratum_control_lists::<usize>(
-        subclasses
-            .iter()
-            .filter(|sc| !sc.treated_indices.is_empty() && !sc.control_indices.is_empty())
-            .map(|sc| (sc.treated_indices.len(), sc.control_indices.len())),
-    )?;
-
-    // Compute weights within each subclass
-    let mut matches = Vec::new();
-
-    for sc in &subclasses {
-        if sc.treated_indices.is_empty() || sc.control_indices.is_empty() {
-            continue;
-        }
-
-        let n_t = sc.treated_indices.len() as f64;
-        let n_c = sc.control_indices.len() as f64;
-
-        for &ti in &sc.treated_indices {
-            weights[ti] = 1.0;
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices: sc.control_indices.clone(),
-                distances: vec![],
-                weight: 1.0,
-            });
-        }
-
-        let control_weight = n_t / n_c;
-        for &ci in &sc.control_indices {
-            weights[ci] = control_weight;
-        }
     }
 
     // Add unmatched treated units
@@ -3683,35 +3545,71 @@ mod tests {
         );
     }
 
+    /// matchit(method = "subclass", subclass = 5): cut points are type-7 quantiles of the treated PS,
+    /// assignment is findInterval(all.inside = TRUE); logit and probit (CAUS-20 Subclass part).
     #[test]
-    fn test_validate_subclassification_vs_r() {
-        // Validate subclassification against R MatchIt with method = "subclass"
-        let dataset = create_matchit_validation_dataset();
-
-        let result = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::Subclass { n_subclasses: 5 },
-            Some(DistanceMethod::Logit),
-        )
-        .unwrap();
-
-        // Should create exactly n_subclasses subclasses
-        assert!(result.subclasses.is_some());
-        let subclasses = result.subclasses.as_ref().unwrap();
-        assert_eq!(subclasses.len(), 5, "Should have 5 subclasses");
-
-        // Subclasses should be based on PS quantiles
-        // Check that PS ranges don't overlap (approximately)
-        let mut prev_max = 0.0;
-        for sc in subclasses {
-            assert!(
-                sc.ps_range.0 >= prev_max - 0.01, // Allow small overlap
-                "Subclass PS ranges should be ordered"
-            );
-            prev_max = sc.ps_range.1;
+    fn test_validate_subclass_logit_probit() {
+        let (case, ds) = crate::test_support::load_case("matchit_subclass");
+        let mut check = Check::new(&case);
+        for (lk, dist) in [
+            ("logit", DistanceMethod::Logit),
+            ("probit", DistanceMethod::Probit),
+        ] {
+            let r = match_it(
+                &ds,
+                "treat",
+                &COVS,
+                MatchMethod::Subclass { n_subclasses: 5 },
+                Some(dist),
+            )
+            .unwrap();
+            let sc = r.subclasses.as_ref().unwrap();
+            let mut q: Vec<f64> = sc.iter().map(|s| s.ps_range.0).collect();
+            q.push(sc.last().unwrap().ps_range.1);
+            let labels: Vec<f64> = r
+                .subclass
+                .iter()
+                .map(|s| s.map_or(f64::NAN, |v| v as f64))
+                .collect();
+            check
+                .vector(
+                    &format!("subclass5_{lk}_q_cut_tight"),
+                    &q,
+                    Tol::iterative(1e-8),
+                )
+                .vector(&format!("subclass5_{lk}_subclass"), &labels, Tol::exact())
+                .vector(
+                    &format!("subclass5_{lk}_weights"),
+                    &r.weights,
+                    Tol::coef(r.n_obs),
+                );
+            assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         }
+        check.finish();
+    }
+
+    /// Hand case: treated scores 0.1, 0.2, 0.3, 0.4 give q = (0.1, 0.25, 0.4) for k = 2 (type 7:
+    /// 1 + 3 * 0.5 = 2.5, 0.2 + 0.5 * 0.1). Controls 0.15 and 0.12 fall in subclass 1, so subclass 2 has no
+    /// control and is discarded with a warning (MatchIt's min.n = 0).
+    #[test]
+    fn test_subclass_without_controls_is_discarded_with_a_warning() {
+        let scores = [0.1, 0.2, 0.3, 0.4, 0.15, 0.12];
+        let t = [true, true, true, true, false, false];
+        let (labels, q, warnings) = subclass_labels(&scores, &t, 2);
+        assert_eq!(q, vec![0.1, 0.25, 0.4]);
+        assert_eq!(labels, vec![Some(1), Some(1), None, None, Some(1), Some(1)]);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("subclass 2 holds no control units")),
+            "{warnings:?}"
+        );
+        let (_, _, w2) = subclass_labels(&[0.3; 4], &[true, true, false, false], 2);
+        assert!(
+            w2.iter()
+                .any(|w| w.contains("fewer subclasses were generated than requested (1 of 2)")),
+            "{w2:?}"
+        );
     }
 
     #[test]
