@@ -357,211 +357,15 @@ fn compute_nearest_medoids(
 // Optimized HDBSCAN
 // =============================================================================
 
-/// Optimized HDBSCAN with parallel core distance and MST computation.
+/// HDBSCAN labels, GLOSH outlier scores and the number of clusters. Delegates to
+/// [`crate::ml::hdbscan()`] (R `dbscan::hdbscan`); kept for compatibility.
 pub fn hdbscan_optimized(
     data: ArrayView2<f64>,
     min_cluster_size: Option<usize>,
     min_samples: Option<usize>,
 ) -> Result<(Vec<i32>, Vec<f64>, usize), String> {
-    let n = data.nrows();
-
-    if n < 2 {
-        return Err("Need at least 2 observations".to_string());
-    }
-
-    let mcs = min_cluster_size.unwrap_or(5).max(2);
-    let ms = min_samples.unwrap_or(mcs);
-
-    // Compute distances in parallel
-    let distances = compute_pairwise_distances_parallel(&data);
-
-    // Compute core distances in parallel
-    let core_distances: Vec<f64> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut dists: Vec<f64> = (0..n)
-                .filter(|&j| i != j)
-                .map(|j| distances[[i, j]])
-                .collect();
-            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-
-            if dists.len() >= ms {
-                dists[ms - 1]
-            } else {
-                dists.last().cloned().unwrap_or(0.0)
-            }
-        })
-        .collect();
-
-    // Compute mutual reachability distances in parallel
-    // Use references to avoid move issues with closures
-    let distances_ref = &distances;
-    let core_distances_ref = &core_distances;
-
-    let mr_results: Vec<(usize, usize, f64)> = (0..n)
-        .into_par_iter()
-        .flat_map(|i| {
-            ((i + 1)..n)
-                .map(move |j| {
-                    let mr = distances_ref[[i, j]]
-                        .max(core_distances_ref[i])
-                        .max(core_distances_ref[j]);
-                    (i, j, mr)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let mut mutual_reach = Array2::zeros((n, n));
-    for (i, j, mr) in mr_results {
-        mutual_reach[[i, j]] = mr;
-        mutual_reach[[j, i]] = mr;
-    }
-
-    // Build MST using Prim's (optimized)
-    let mst = build_mst_optimized(&mutual_reach);
-
-    // Extract clusters
-    let (labels, n_clusters) = extract_hdbscan_clusters_optimized(&mst, n, mcs);
-
-    // Compute outlier scores
-    let outlier_scores: Vec<f64> = core_distances.iter().map(|&cd| cd / (cd + 1.0)).collect();
-
-    Ok((labels, outlier_scores, n_clusters))
-}
-
-/// Optimized Prim's MST with better cache locality.
-fn build_mst_optimized(distances: &Array2<f64>) -> Vec<(usize, usize, f64)> {
-    let n = distances.nrows();
-    let mut in_tree = vec![false; n];
-    let mut min_dist = vec![f64::INFINITY; n];
-    let mut min_from = vec![0usize; n];
-    let mut mst = Vec::with_capacity(n - 1);
-
-    // Start from node 0
-    in_tree[0] = true;
-    for j in 1..n {
-        min_dist[j] = distances[[0, j]];
-        min_from[j] = 0;
-    }
-
-    for _ in 1..n {
-        // Find minimum using parallel reduction for large n
-        let (min_idx, min_val) = if n > 1000 {
-            (0..n)
-                .into_par_iter()
-                .filter(|&j| !in_tree[j])
-                .map(|j| (j, min_dist[j]))
-                .reduce(
-                    || (0, f64::INFINITY),
-                    |a, b| {
-                        if a.1 < b.1 { a } else { b }
-                    },
-                )
-        } else {
-            let mut min_idx = 0;
-            let mut min_val = f64::INFINITY;
-            for j in 0..n {
-                if !in_tree[j] && min_dist[j] < min_val {
-                    min_val = min_dist[j];
-                    min_idx = j;
-                }
-            }
-            (min_idx, min_val)
-        };
-
-        in_tree[min_idx] = true;
-        mst.push((min_from[min_idx], min_idx, min_val));
-
-        // Update distances (can be parallelized for large n)
-        if n > 1000 {
-            let updates: Vec<(usize, f64, usize)> = (0..n)
-                .into_par_iter()
-                .filter(|&j| !in_tree[j] && distances[[min_idx, j]] < min_dist[j])
-                .map(|j| (j, distances[[min_idx, j]], min_idx))
-                .collect();
-
-            for (j, d, from) in updates {
-                min_dist[j] = d;
-                min_from[j] = from;
-            }
-        } else {
-            for j in 0..n {
-                if !in_tree[j] && distances[[min_idx, j]] < min_dist[j] {
-                    min_dist[j] = distances[[min_idx, j]];
-                    min_from[j] = min_idx;
-                }
-            }
-        }
-    }
-
-    mst
-}
-
-/// Extract clusters from MST using single-linkage.
-fn extract_hdbscan_clusters_optimized(
-    mst: &[(usize, usize, f64)],
-    n: usize,
-    min_cluster_size: usize,
-) -> (Vec<i32>, usize) {
-    // Union-Find
-    let mut parent: Vec<usize> = (0..n).collect();
-    let mut rank: Vec<usize> = vec![0; n];
-    let mut size: Vec<usize> = vec![1; n];
-
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        if parent[x] != x {
-            parent[x] = find(parent, parent[x]);
-        }
-        parent[x]
-    }
-
-    fn union(parent: &mut [usize], rank: &mut [usize], size: &mut [usize], x: usize, y: usize) {
-        let px = find(parent, x);
-        let py = find(parent, y);
-        if px == py {
-            return;
-        }
-
-        let (smaller, larger) = if rank[px] < rank[py] {
-            (px, py)
-        } else {
-            (py, px)
-        };
-        parent[smaller] = larger;
-        size[larger] += size[smaller];
-        if rank[px] == rank[py] {
-            rank[larger] += 1;
-        }
-    }
-
-    // Sort MST edges by weight
-    let mut sorted_edges = mst.to_vec();
-    sorted_edges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
-
-    // Process edges
-    for &(i, j, _) in &sorted_edges {
-        union(&mut parent, &mut rank, &mut size, i, j);
-    }
-
-    // Assign cluster labels
-    let mut labels = vec![-1i32; n];
-    let mut root_to_cluster = std::collections::HashMap::new();
-    let mut cluster_id = 0i32;
-
-    for i in 0..n {
-        let root = find(&mut parent, i);
-        if size[root] >= min_cluster_size {
-            let cluster = *root_to_cluster.entry(root).or_insert_with(|| {
-                let id = cluster_id;
-                cluster_id += 1;
-                id
-            });
-            labels[i] = cluster;
-        }
-    }
-
-    (labels, cluster_id as usize)
+    let r = crate::ml::hdbscan(data, min_cluster_size, min_samples)?;
+    Ok((r.labels, r.outlier_scores, r.n_clusters))
 }
 
 // =============================================================================
@@ -916,6 +720,22 @@ pub fn affinity_propagation_optimized(
 mod tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn test_validate_hdbscan_optimized_matches_hdbscan() {
+        let (_case, ds) = crate::test_support::load_case("hdbscan_blobs");
+        let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
+        let r = crate::ml::hdbscan(x.view(), Some(5), Some(5)).unwrap();
+        let (labels, outlier, k) = hdbscan_optimized(x.view(), Some(5), Some(5)).unwrap();
+        assert_eq!((labels, k), (r.labels, 3));
+        assert_eq!(
+            outlier.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            r.outlier_scores
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
 
     /// R: cluster::silhouette on blobs_noise with a singleton cluster (case silhouette_singletons).
     #[test]

@@ -10,26 +10,75 @@ use serde::{Deserialize, Serialize};
 // Algorithm Selection
 // =============================================================================
 
-/// Algorithm selection for HDBSCAN/OPTICS.
+/// Neighbour-search choice of HDBSCAN and OPTICS. The variants choose only how neighbours are found;
+/// HDBSCAN's spanning tree is always Prim's algorithm on the dense mutual-reachability graph, so every
+/// variant gives the same result.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClusteringAlgorithm {
-    /// Brute-force O(n²) - best for small datasets
+    /// Brute-force neighbour search (n < 500)
     BruteForce,
-    /// KD-Tree with Prim's MST - good for medium datasets with low dimensions
+    /// k-d tree neighbour search (500 <= n < 10,000, d <= 15)
     KdTreePrim,
-    /// Dual-Tree Boruvka - best scaling for large datasets with low dimensions
+    /// k-d tree neighbour search (n >= 10,000, d <= 15). A historical name: no Boruvka tree is built.
     DualTreeBoruvka,
-    /// Parallel brute-force - for high-dimensional data where KD-tree degrades
+    /// Brute-force neighbour search for high-dimensional data, where a k-d tree degrades (d > 15)
     BruteForceParallel,
 }
 
-/// Automatically select the best algorithm based on data characteristics.
+/// Select the neighbour search from the data size.
 pub(crate) fn select_algorithm(n: usize, d: usize) -> ClusteringAlgorithm {
     match (n, d) {
         (n, _) if n < 500 => ClusteringAlgorithm::BruteForce,
         (n, d) if n < 10_000 && d <= 15 => ClusteringAlgorithm::KdTreePrim,
         (_, d) if d <= 15 => ClusteringAlgorithm::DualTreeBoruvka,
         _ => ClusteringAlgorithm::BruteForceParallel,
+    }
+}
+
+/// The k-d tree serves the neighbour searches of this algorithm choice (HDBSCAN's core distances,
+/// OPTICS's eps-neighbourhoods).
+pub(crate) fn uses_tree(alg: ClusteringAlgorithm) -> bool {
+    matches!(
+        alg,
+        ClusteringAlgorithm::KdTreePrim | ClusteringAlgorithm::DualTreeBoruvka
+    )
+}
+
+/// Data points copied row-major into one buffer, with the one distance kernel
+/// ([`crate::ml::kdtree::sq_euclidean`]).
+pub(crate) struct Points {
+    pub(crate) n: usize,
+    pub(crate) d: usize,
+    buf: Vec<f64>,
+}
+
+impl Points {
+    /// Copy `data` (allocated through the resource guards).
+    pub(crate) fn new(data: &ArrayView2<f64>, what: &str) -> EconResult<Points> {
+        let (n, d) = data.dim();
+        let mut buf =
+            crate::resource::try_with_capacity(crate::resource::checked_len(&[n, d], what)?, what)?;
+        for row in data.rows() {
+            buf.extend(row.iter().copied());
+        }
+        Ok(Points { n, d, buf })
+    }
+
+    /// Row `i`.
+    #[inline]
+    pub(crate) fn row(&self, i: usize) -> &[f64] {
+        &self.buf[i * self.d..(i + 1) * self.d]
+    }
+
+    /// Squared Euclidean distance of rows `i` and `j`.
+    #[inline]
+    pub(crate) fn sq(&self, i: usize, j: usize) -> f64 {
+        crate::ml::kdtree::sq_euclidean(self.row(i), self.row(j))
+    }
+
+    /// The rows as vectors (for [`crate::ml::kdtree::KdTree::new`]).
+    pub(crate) fn rows_vec(&self) -> Vec<Vec<f64>> {
+        (0..self.n).map(|i| self.row(i).to_vec()).collect()
     }
 }
 
