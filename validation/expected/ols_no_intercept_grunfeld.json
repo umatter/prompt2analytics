@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "id": "ols_no_intercept_grunfeld",
+  "area": "regression",
+  "method": "lm(inv ~ 0 + value + capital): uncentered R^2, HC1, CR1 (firm, firm + year), NeweyWest(lag = 4), step",
+  "reference": "stats::lm/summary.lm without intercept (uncentered R^2, n/(n - k), F on k df); sandwich 3.1.3 vcovHC(type = 'HC1'), vcovCL(cluster = ~firm and ~firm + year, type = 'HC1'), NeweyWest(lag = 4, prewhite = FALSE); stats::step(direction = 'backward'), drop1, extractAIC; quantreg::rq(tau = 0.5) recorded",
+  "call": "m0 <- lm(inv ~ 0 + value + capital, data = grunfeld); summary(m0); vcovCL(m0, cluster = ~firm + year, type = 'HC1'); NeweyWest(m0, lag = 4, prewhite = FALSE); step(m0, direction = 'backward')",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "quantreg": "6.1"
+  },
+  "values": {
+    "coef": {
+      "names": ["value", "capital"],
+      "values": [0.10763842564502346, 0.18320624121791276]
+    },
+    "se_classical": {
+      "names": ["value", "capital"],
+      "values": [0.0058255828827650088, 0.024274988583620462]
+    },
+    "t_classical": {
+      "names": ["value", "capital"],
+      "values": [18.476850782343483, 7.5471195624590779]
+    },
+    "p_classical": {
+      "names": ["value", "capital"],
+      "values": [5.7847070115501921e-45, 1.586907312591542e-12]
+    },
+    "se_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.007157222743767907, 0.045848483655002208]
+    },
+    "t_hc1": {
+      "names": ["value", "capital"],
+      "values": [15.039133124471881, 3.9959062244346311]
+    },
+    "p_hc1": {
+      "names": ["value", "capital"],
+      "values": [1.3507255347816579e-34, 9.0865394780483143e-05]
+    },
+    "se_cluster_firm_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.018368739167695273, 0.091581574190960788]
+    },
+    "t_cluster_firm_hc1": {
+      "names": ["value", "capital"],
+      "values": [5.8598701120610919, 2.000470540459387]
+    },
+    "p_cluster_firm_hc1": {
+      "names": ["value", "capital"],
+      "values": [1.9073606787881814e-08, 0.046815654995564775]
+    },
+    "se_cluster_firm_year_hc1": {
+      "names": ["value", "capital"],
+      "values": [0.018915957603117081, 0.087476980292006776]
+    },
+    "t_cluster_firm_year_hc1": {
+      "names": ["value", "capital"],
+      "values": [5.6903503329530709, 2.0943365969693089]
+    },
+    "p_cluster_firm_year_hc1": {
+      "names": ["value", "capital"],
+      "values": [4.513870455905945e-08, 0.037502471829740008]
+    },
+    "se_nw_lag4": {
+      "names": ["value", "capital"],
+      "values": [0.012024172521665591, 0.06422501151487825]
+    },
+    "t_nw_lag4": {
+      "names": ["value", "capital"],
+      "values": [8.9518364320768544, 2.8525684448569004]
+    },
+    "p_nw_lag4": {
+      "names": ["value", "capital"],
+      "values": [2.5500672258474932e-16, 0.0047972150312808187]
+    },
+    "r2": 0.8578932101329837,
+    "adj_r2": 0.85645778801311478,
+    "sigma": 98.872298425483166,
+    "f_stat": 597.65918210272923,
+    "f_df1": 2,
+    "f_df2": 198,
+    "f_p": 1.2848962858403676e-84,
+    "log_lik": -1201.5484935724141,
+    "aic": 2409.0969871448283,
+    "extract_aic": 1839.5215738629595,
+    "extract_bic": 1846.1182085960556,
+    "drop1_aic": {
+      "names": ["none", "value", "capital"],
+      "values": [1839.5215738629595, 2037.957430658571, 1888.0887280465781]
+    },
+    "step_backward_coef": {
+      "names": ["value", "capital"],
+      "values": [0.10763842564502346, 0.18320624121791276]
+    },
+    "rq_coef": {
+      "names": ["value", "capital"],
+      "values": [0.1116253861993205, 0.078613841312111174]
+    },
+    "n_obs": 200,
+    "df_resid": 198
+  }
+}

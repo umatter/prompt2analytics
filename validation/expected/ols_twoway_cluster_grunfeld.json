@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "ols_twoway_cluster_grunfeld",
+  "area": "regression",
+  "method": "lm(inv ~ value + capital) with vcovCL(~firm + year, HC1): t, p and cluster counts",
+  "reference": "sandwich 3.1.3 vcovCL(cluster = ~firm + year, type = 'HC1'): t = coef / se, p = 2 pt(-|t|, 197)",
+  "call": "vcovCL(lm(inv ~ value + capital, data = grunfeld), cluster = ~firm + year, type = 'HC1')",
+  "dataset": "validation/datasets/grunfeld.csv",
+  "datasets": ["validation/datasets/grunfeld.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "t_cluster_firm_year_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [-2.1664077296564725, 7.0485576671437791, 2.900040730052512]
+    },
+    "p_cluster_firm_year_hc1": {
+      "names": ["(Intercept)", "value", "capital"],
+      "values": [0.031480735322878178, 2.9731400355190913e-11, 0.0041548694769250822]
+    },
+    "n_clusters_firm": 10,
+    "n_clusters_year": 20,
+    "n_obs": 200
+  }
+}
