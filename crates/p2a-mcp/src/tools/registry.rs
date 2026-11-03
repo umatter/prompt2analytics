@@ -910,6 +910,32 @@ mod tests {
         }
     }
 
+    /// R (randomForest 4.7.1.2) regression defaults, from
+    /// formals(randomForest:::randomForest.default): ntree 500, mtry max(floor(p/3), 1),
+    /// nodesize 5, maxnodes NULL. p2a: n_trees 100, ceil(sqrt(p)), max_depth 10,
+    /// min_samples_split 2 (trees.rs). No classification mode exists.
+    #[test]
+    fn test_ml_random_forest_registry_entry_is_truthful() {
+        let t = registry()
+            .iter()
+            .find(|t| t.name == "ml_random_forest")
+            .unwrap();
+        assert_eq!(t.r_equivalent, None);
+        let d = &t.description;
+        assert!(!d.contains("classification/regression"));
+        for s in [
+            "regression",
+            "no classification mode",
+            "ntree 500",
+            "max(floor(p/3), 1)",
+            "nodesize 5",
+            "ceil(sqrt(p))",
+            "max_depth 10",
+        ] {
+            assert!(d.contains(s), "missing {s:?} in {d}");
+        }
+    }
+
     #[test]
     fn test_category_name_round_trips_through_parse_category() {
         for c in ToolCategory::all() {

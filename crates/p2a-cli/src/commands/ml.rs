@@ -105,7 +105,7 @@ EXAMPLES:
         seed: Option<u64>,
     },
 
-    /// Random Forest regression/classification
+    /// Random Forest regression (MSE splits; a class label is averaged, not voted)
     #[command(after_help = "\
 EXAMPLES:
     # Random forest with 100 trees
@@ -1018,4 +1018,22 @@ fn execute_svm(
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The forest is a regression forest (ML-108): the help must not offer classification.
+    #[test]
+    fn test_random_forest_help_says_regression_only() {
+        use clap::Subcommand;
+        let cmd = <MlCommands as Subcommand>::augment_subcommands(clap::Command::new("ml"));
+        let rf = cmd.find_subcommand("random-forest").unwrap();
+        let about = rf.get_about().unwrap().to_string();
+        assert!(
+            about.contains("regression") && !about.contains("classification/"),
+            "{about}"
+        );
+    }
 }

@@ -619,9 +619,9 @@ impl AnalyticsServer {
     // Supervised Learning Tools
     // ========================================================================
 
-    /// Run Random Forest regression.
+    /// Run Random Forest regression (a regression forest only; ML-108).
     #[tool(
-        description = "Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances, out-of-bag score, and predictions."
+        description = "Run Random Forest regression: variance-reduction (MSE) splits with leaf means. A class label coded as numbers is averaged, not voted: there is no classification mode. Defaults differ from R's randomForest::randomForest() for regression: n_trees 100 (R ntree 500), features per split ceil(sqrt(p)) (R mtry max(floor(p/3), 1)), max_depth 10 (R unlimited), min_samples_split 2 (R nodesize 5). Returns feature importances, out-of-bag score, and predictions."
     )]
     pub async fn ml_random_forest(
         &self,

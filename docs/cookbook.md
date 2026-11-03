@@ -337,16 +337,13 @@ p2a --session analysis.json ml tsne mydata --cols x1 x2 x3 x4 x5 --n-components 
 
 ### Random Forest
 
-```bash
-# Classification
-p2a --session analysis.json ml random-forest mydata \
-    -y label -x feature1 feature2 feature3 \
-    --n-trees 100
+Regression forest (variance-reduction splits). A 0/1 target gives probability-like predictions; there is no
+classification mode.
 
-# Regression
+```bash
 p2a --session analysis.json ml random-forest mydata \
-    -y price -x sqft bedrooms bathrooms \
-    --n-trees 100 --task regression
+    -y price --cols sqft bedrooms bathrooms \
+    --n-trees 100
 ```
 
 ---
