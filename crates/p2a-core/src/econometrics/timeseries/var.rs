@@ -57,18 +57,83 @@ pub struct VarResult {
     pub log_det_sigma_ml: f64,
 }
 
+/// A p-value as a coefficient table prints it.
+fn format_p(p: f64) -> String {
+    if p.is_nan() {
+        "NA".to_string()
+    } else if p < 1e-4 {
+        format!("{p:.2e}")
+    } else {
+        format!("{p:.4}")
+    }
+}
+
+/// Entry `[i][j]` of a nested vector, NaN when absent (a deserialised old result).
+fn cell(m: &[Vec<f64>], i: usize, j: usize) -> f64 {
+    m.get(i).and_then(|r| r.get(j)).copied().unwrap_or(f64::NAN)
+}
+
 impl fmt::Display for VarResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Vector Autoregression VAR({}) Results", self.lags)?;
         writeln!(f, "===========================================")?;
         writeln!(f, "No. Variables: {}", self.n_vars)?;
-        writeln!(f, "Observations: {}", self.n_obs)?;
+        writeln!(
+            f,
+            "Observations: {} (the first {} rows are used as lags)",
+            self.n_obs, self.lags
+        )?;
         writeln!(f, "Variables: {}", self.var_names.join(", "))?;
+        writeln!(f, "Deterministic terms: constant")?;
+        writeln!(
+            f,
+            "Residual df per equation: {} (T - Kp - 1)",
+            self.df_residual
+        )?;
         writeln!(f, "Log-Likelihood: {:.4}", self.log_likelihood)?;
         writeln!(f, "AIC: {:.4}", self.aic)?;
         writeln!(f, "BIC: {:.4}", self.bic)?;
+        writeln!(
+            f,
+            "  (AIC and BIC use the T = {} observations of this fit; fits with other lag orders use other samples)",
+            self.n_obs
+        )?;
         writeln!(f)?;
-        writeln!(f, "Residual Covariance Matrix (Sigma_u):")?;
+
+        let width = self
+            .coef_names
+            .iter()
+            .map(|n| n.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(4)
+            + 2;
+        for (eq, name) in self.var_names.iter().enumerate() {
+            writeln!(f, "Equation {name}:")?;
+            writeln!(
+                f,
+                "  {:<width$}{:>14}{:>14}{:>11}{:>11}",
+                "Term", "Estimate", "Std. Error", "t value", "Pr(>|t|)"
+            )?;
+            for (j, term) in self.coef_names.iter().enumerate() {
+                writeln!(
+                    f,
+                    "  {:<width$}{:>14.6}{:>14.6}{:>11.3}{:>11}",
+                    term,
+                    cell(&self.coefficients, eq, j),
+                    cell(&self.std_errors, eq, j),
+                    cell(&self.t_values, eq, j),
+                    format_p(cell(&self.p_values, eq, j))
+                )?;
+            }
+            writeln!(f)?;
+        }
+
+        writeln!(
+            f,
+            "Residual Covariance Matrix (Sigma_u, divisor T - Kp - 1 = {}):",
+            self.df_residual
+        )?;
         for (i, row) in self.sigma_u.iter().enumerate() {
             write!(
                 f,
@@ -115,30 +180,45 @@ impl fmt::Display for VarIrfResult {
             self.lags, orth_str
         )?;
         writeln!(f, "=======================================")?;
-        writeln!(f, "Steps: {}", self.steps)?;
+        writeln!(
+            f,
+            "Steps: {} (horizons 0 to {})",
+            self.steps,
+            self.steps.saturating_sub(1)
+        )?;
         writeln!(f, "Variables: {}", self.var_names.join(", "))?;
-        writeln!(f)?;
+        if self.orthogonalized {
+            writeln!(
+                f,
+                "Impact: lower Cholesky factor of Sigma_u, as vars::irf(ortho = TRUE)"
+            )?;
+        } else {
+            writeln!(
+                f,
+                "Impact: identity (unit shocks), as vars::irf(ortho = FALSE)"
+            )?;
+        }
+        writeln!(
+            f,
+            "Layout: one table per impulse; rows are horizons, columns responses"
+        )?;
 
-        // Show IRF for first few steps
-        let show_steps = self.steps.min(5);
-        for h in 0..show_steps {
-            writeln!(f, "Step {}:", h)?;
-            for (i, response_var) in self.var_names.iter().enumerate() {
-                write!(f, "  Response of {}: [", response_var)?;
-                for (j, _shock_var) in self.var_names.iter().enumerate() {
-                    if j > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:.4}", self.irf[h][i][j])?;
+        for (shock, impulse) in self.var_names.iter().enumerate() {
+            writeln!(f)?;
+            writeln!(f, "Impulse: {impulse}")?;
+            write!(f, "{:>6}", "h")?;
+            for response in &self.var_names {
+                write!(f, "{response:>14}")?;
+            }
+            writeln!(f)?;
+            for (h, phi) in self.irf.iter().enumerate() {
+                write!(f, "{h:>6}")?;
+                for resp in 0..self.var_names.len() {
+                    write!(f, "{:>14.6}", cell(phi, resp, shock))?;
                 }
-                writeln!(f, "]")?;
+                writeln!(f)?;
             }
         }
-
-        if self.steps > show_steps {
-            writeln!(f, "  ... ({} more steps)", self.steps - show_steps)?;
-        }
-
         Ok(())
     }
 }
@@ -709,6 +789,98 @@ mod tests {
         check.finish();
     }
 
+    /// The coefficient table rows of "Equation <eq>:" (term, [estimate, SE, t]); p is
+    /// printed but not parsed.
+    fn equation_rows(text: &str, eq: &str) -> Vec<(String, Vec<f64>)> {
+        let header = format!("Equation {eq}:");
+        let lines = text.lines().skip_while(|l| l.trim() != header).skip(2); // header + titles
+        let mut rows = Vec::new();
+        for line in lines {
+            let tok: Vec<&str> = line.split_whitespace().collect();
+            if tok.is_empty() {
+                break;
+            }
+            rows.push((
+                tok[0].to_string(),
+                tok[1..4]
+                    .iter()
+                    .map(|s| s.parse::<f64>().unwrap())
+                    .collect(),
+            ));
+        }
+        rows
+    }
+
+    /// Rows of "Impulse: <imp>": [h, response_1, .., response_K].
+    fn impulse_rows(text: &str, imp: &str) -> Vec<Vec<f64>> {
+        let header = format!("Impulse: {imp}");
+        text.lines()
+            .skip_while(|l| l.trim() != header)
+            .skip(2)
+            .take_while(|l| !l.trim().is_empty())
+            .map(|l| {
+                l.split_whitespace()
+                    .map(|s| s.parse::<f64>().unwrap())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// ECON-49: ts_var returns this text; it must contain the coefficients and SEs (R: vars
+    /// summary per equation).
+    #[test]
+    fn test_validate_var_display_prints_coefficients() {
+        use p2a_validation::{Check, Tol};
+        let (case, _ds, var) = canada_var("var_canada");
+        let text = var.to_string();
+        for needle in [
+            "Vector Autoregression VAR(2)",
+            "No. Variables: 4",
+            "Residual df per equation: 73",
+            "Log-Likelihood: -175.8186",
+            "AIC: 423.6371",
+            "BIC: 510.2790",
+            "Sigma_u",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in\n{text}");
+        }
+        let mut check = Check::new(&case);
+        for eq in CANADA {
+            let rows = equation_rows(&text, eq);
+            assert_eq!(rows.len(), 9, "equation {eq}:\n{text}");
+            let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+            let col = |c: usize| rows.iter().map(|(_, v)| v[c]).collect::<Vec<f64>>();
+            check
+                .named(&format!("coef_{eq}"), &names, &col(0), Tol::printed(6))
+                .named(&format!("se_{eq}"), &names, &col(1), Tol::printed(6))
+                .named(&format!("t_{eq}"), &names, &col(2), Tol::printed(3));
+        }
+        check.finish();
+    }
+
+    /// ECON-49: ts_var_irf(steps = 13) printed horizons 0-4 and "... (8 more steps)".
+    #[test]
+    fn test_validate_var_irf_display_prints_every_horizon() {
+        use p2a_validation::{Check, Tol};
+        let (case, _ds, var) = canada_var("var_canada");
+        let text = compute_irf(&var, 13, true).unwrap().to_string();
+        assert!(!text.contains("more steps"), "{text}");
+        let mut check = Check::new(&case);
+        for imp in CANADA {
+            let rows = impulse_rows(&text, imp);
+            assert_eq!(
+                rows.iter().map(|r| r[0] as usize).collect::<Vec<_>>(),
+                (0..13).collect::<Vec<_>>(),
+                "{text}"
+            );
+            let printed: Vec<f64> = (0..4)
+                .flat_map(|r| rows.iter().map(move |row| row[1 + r]))
+                .collect();
+            check.vector(&format!("irf_ortho_{imp}"), &printed, Tol::printed(6));
+        }
+        check.finish();
+    }
+
     fn cancelled() -> Budget {
         let token = CancelToken::new();
         token.cancel();
@@ -790,19 +962,6 @@ mod tests {
             final_step_sum < first_step_sum * 2.0,
             "IRF should not explode for stationary VAR"
         );
-    }
-
-    #[test]
-    fn test_validate_var_display_format() {
-        let dataset = create_var_validation_dataset();
-        let result = run_var(&dataset, &["y1", "y2"], 1).unwrap();
-
-        let display = format!("{}", result);
-        assert!(display.contains("Vector Autoregression VAR(1)"));
-        assert!(display.contains("No. Variables: 2"));
-        assert!(display.contains("AIC:"));
-        assert!(display.contains("BIC:"));
-        assert!(display.contains("Sigma_u"));
     }
 
     #[test]
