@@ -435,6 +435,62 @@ pub fn check_declared_file_type(declared: Option<&str>, file_name: &str) -> Resu
     ))
 }
 
+// ============================================================================
+// Convergence and warning notes (T3 design 2.5)
+// ============================================================================
+
+/// A warning's text without a leading "Warning:" and surrounding whitespace; `None` when
+/// nothing is left.
+fn warning_text(w: &str) -> Option<&str> {
+    let t = w.trim();
+    let t = t.strip_prefix("Warning:").map(str::trim_start).unwrap_or(t);
+    (!t.is_empty()).then_some(t)
+}
+
+/// Appends a tool's convergence and warnings to its text: "Converged: yes (N iterations)" or
+/// "Converged: no (N iterations)" ("1 iteration" for N = 1, as p2a-core's convergence line),
+/// then one "Warning: <text>" line per non-empty warning (a leading "Warning:" in the text is
+/// not repeated), each on its own line. Nothing is appended when there is nothing to report.
+pub fn append_notes(text: &mut String, converged: Option<(bool, usize)>, warnings: &[String]) {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some((ok, n)) = converged {
+        let unit = if n == 1 { "iteration" } else { "iterations" };
+        let yes = if ok { "yes" } else { "no" };
+        lines.push(format!("Converged: {yes} ({n} {unit})"));
+    }
+    lines.extend(
+        warnings
+            .iter()
+            .filter_map(|w| warning_text(w))
+            .map(|w| format!("Warning: {w}")),
+    );
+    if lines.is_empty() {
+        return;
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&lines.join("\n"));
+}
+
+/// The JSON form of [`append_notes`]: `{"converged": bool, "iterations": n, "warnings": [..]}`,
+/// with `converged` and `iterations` only when `converged` is `Some`; `warnings` is always
+/// present (trimmed, a leading "Warning:" removed, empty entries dropped).
+pub fn notes_json(converged: Option<(bool, usize)>, warnings: &[String]) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some((ok, n)) = converged {
+        out.insert("converged".into(), ok.into());
+        out.insert("iterations".into(), n.into());
+    }
+    let w: Vec<serde_json::Value> = warnings
+        .iter()
+        .filter_map(|w| warning_text(w))
+        .map(|w| w.into())
+        .collect();
+    out.insert("warnings".into(), w.into());
+    serde_json::Value::Object(out)
+}
+
 /// Shared helpers for handler unit tests.
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -481,6 +537,42 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_append_notes_lines() {
+        let mut s = String::from("Coefficients: 1.0");
+        append_notes(
+            &mut s,
+            Some((false, 100)),
+            &[
+                "Warning: x did not converge".into(),
+                "  ".into(),
+                "rank 2 < 3".into(),
+            ],
+        );
+        assert_eq!(
+            s,
+            "Coefficients: 1.0\nConverged: no (100 iterations)\nWarning: x did not converge\nWarning: rank 2 < 3"
+        );
+        let mut t = String::from("ok\n");
+        append_notes(&mut t, Some((true, 12)), &[]);
+        assert_eq!(t, "ok\nConverged: yes (12 iterations)");
+        let mut u = String::from("unchanged");
+        append_notes(&mut u, None, &[]);
+        assert_eq!(u, "unchanged");
+        let mut one = String::from("fit");
+        append_notes(&mut one, Some((true, 1)), &[]);
+        assert_eq!(one, "fit\nConverged: yes (1 iteration)"); // singular, as Convergence::line()
+    }
+
+    #[test]
+    fn test_notes_json_keys() {
+        assert_eq!(
+            notes_json(Some((true, 7)), &["Warning: a".into(), "".into()]),
+            serde_json::json!({"converged": true, "iterations": 7, "warnings": ["a"]})
+        );
+        assert_eq!(notes_json(None, &[]), serde_json::json!({"warnings": []}));
+    }
 
     #[test]
     fn test_declared_file_type_parses_aliases_and_rejects_unknown() {
