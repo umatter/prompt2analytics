@@ -3425,7 +3425,11 @@ mod tests {
                 .map(|c| c.std_error)
                 .collect::<Vec<f64>>()
         };
-        assert_eq!(se(&a), se(&b));
+        // Equal up to rounding: the cluster meat is a parallel (rayon) sum, whose order of
+        // additions, and so its last bit, can differ between two calls.
+        for (sa, sb) in se(&a).iter().zip(se(&b)) {
+            assert!(Tol::new(1e-12, 0.0).allows(*sa, sb), "{sa} vs {sb}");
+        }
         let names: Vec<&str> = a.ols.coefficients.iter().map(|c| c.name.as_str()).collect();
         Check::new(&case)
             .named("se_cluster_firm_year_hc1", &names, &se(&a), Tol::se(200))
