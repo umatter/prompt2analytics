@@ -280,10 +280,9 @@ fn execute_km(
         print_error(&format!("Dataset '{}' not found", dataset_name), format);
         return Ok(());
     };
-    let config = KmConfig {
-        conf_level,
-        conf_type,
-    };
+    let mut config = KmConfig::default();
+    config.conf_level = conf_level;
+    config.conf_type = conf_type;
     let results = match run_kaplan_meier_with(ds, time_col, event_col, group_col, &config) {
         Ok(results) => results,
         Err(e) => {
@@ -495,12 +494,11 @@ fn execute_cox(
                 _ => TiesMethod::Breslow,
             };
 
-            let config = CoxConfig {
-                ties: ties_method,
-                max_iter: 25,
-                tolerance: 1e-9,
-                robust_se: robust,
-            };
+            let mut config = CoxConfig::default();
+            config.ties = ties_method;
+            config.max_iter = 25;
+            config.tolerance = 1e-9;
+            config.robust_se = robust;
 
             match run_cox_ph(ds, time_col, event_col, &cov_refs, Some(config)) {
                 Ok(result) => match format {
@@ -594,11 +592,10 @@ fn execute_aft(
                 _ => AftDistribution::Weibull,
             };
 
-            let config = AftConfig {
-                distribution,
-                max_iter: 100,
-                tolerance: 1e-9,
-            };
+            let mut config = AftConfig::default();
+            config.distribution = distribution;
+            config.max_iter = 100;
+            config.tolerance = 1e-9;
 
             match run_aft(ds, time_col, event_col, &cov_refs, Some(config)) {
                 Ok(result) => match format {

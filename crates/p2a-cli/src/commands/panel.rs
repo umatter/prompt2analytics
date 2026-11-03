@@ -392,18 +392,17 @@ pub fn execute(
             collapse,
             vcov,
         } => {
-            let config = GmmConfig {
-                transform: GmmTransform::Difference,
-                step: if step == "onestep" {
-                    GmmStep::OneStep
-                } else {
-                    GmmStep::TwoStep
-                },
-                max_lag: *max_lag,
-                min_lag: *min_lag,
-                collapse: *collapse,
-                robust: vcov == "robust",
+            let mut config = GmmConfig::default();
+            config.transform = GmmTransform::Difference;
+            config.step = if step == "onestep" {
+                GmmStep::OneStep
+            } else {
+                GmmStep::TwoStep
             };
+            config.max_lag = *max_lag;
+            config.min_lag = *min_lag;
+            config.collapse = *collapse;
+            config.robust = vcov == "robust";
             execute_gmm(
                 dataset, dep_var, indep_vars, entity, time, *lags, config, format, session,
             )
@@ -465,7 +464,8 @@ fn execute_fe(
     match dataset {
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
-            let config = PanelConfig { vcov };
+            let mut config = PanelConfig::default();
+            config.vcov = vcov;
 
             match run_fixed_effects_with(ds, dep_var, &x_cols, entity, &config) {
                 Ok(result) => {
@@ -533,7 +533,8 @@ fn execute_re(
     match dataset {
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
-            let config = PanelConfig { vcov };
+            let mut config = PanelConfig::default();
+            config.vcov = vcov;
 
             match run_random_effects_with(ds, dep_var, &x_cols, entity, &config) {
                 Ok(result) => {
@@ -1430,12 +1431,11 @@ fn execute_unit_root(
                 _ => PanelUnitRootTest::LLC,
             };
 
-            let config = PanelUnitRootConfig {
-                test_type,
-                model: PanelModel::Intercept,
-                lags: *lags,
-                max_lags: None,
-            };
+            let mut config = PanelUnitRootConfig::default();
+            config.test_type = test_type;
+            config.model = PanelModel::Intercept;
+            config.lags = *lags;
+            config.max_lags = None;
 
             match run_panel_unit_root(ds, var, unit, time, config) {
                 Ok(result) => match format {

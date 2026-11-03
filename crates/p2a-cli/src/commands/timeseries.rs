@@ -1812,13 +1812,12 @@ fn execute_spectrum(
                     .collect()
             });
 
-            let config = SpectrumConfig {
-                spans: span_vec,
-                taper,
-                detrend,
-                demean: false,
-                pad_ratio: 0.0,
-            };
+            let mut config = SpectrumConfig::default();
+            config.spans = span_vec;
+            config.taper = taper;
+            config.detrend = detrend;
+            config.demean = false;
+            config.pad_ratio = 0.0;
 
             match run_spectrum(ds, col, config) {
                 Ok(result) => match format {
