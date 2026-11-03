@@ -64,7 +64,7 @@ jobs:
           restore-keys: ${{ runner.os }}-wasm-cargo-
 
       - name: Setup Node (Tailwind CSS)
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '20'
 
@@ -84,7 +84,7 @@ jobs:
         # Pinned to a released tag (not the mutable @main branch) so a change to
         # that branch cannot run unreviewed in this pages:write / id-token:write
         # deploy pipeline.
-        uses: cargo-bins/cargo-binstall@75b4bfae1b2c753a6806bbce6e6cb89b602de33c # v1.22.0
+        uses: cargo-bins/cargo-binstall@81df5c23b0dc775b009efdfc9895c5965b7a4e40 # v1.26.1
 
       - name: Install Dioxus CLI (prebuilt)
         run: cargo binstall dioxus-cli@0.7.3 --no-confirm
@@ -152,4 +152,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
