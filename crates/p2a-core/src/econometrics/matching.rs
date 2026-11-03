@@ -43,7 +43,8 @@
 //!   the SAT. *Journal of the American Statistical Association*, 99(467), 609-618.
 //!   https://doi.org/10.1198/016214504000000647
 //!
-//! - Implementation validated against R package `MatchIt` (Ho et al., 2011).
+//! - Pinned to MatchIt 4.8.0 and optmatch 0.10.8 (validation/r/cases/causal_matching.R; see
+//!   validation/econometrics/matching.md for the deviations).
 //!   https://cran.r-project.org/package=MatchIt
 
 use ndarray::{Array1, Array2};
@@ -59,6 +60,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::eig_symmetric;
 use crate::linalg::solve::{SingularPolicy, sym_inverse};
+use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 /// Threshold for using parallel algorithms (to avoid overhead on small datasets)
@@ -80,12 +82,14 @@ pub enum MatchMethod {
         /// Whether to sample controls with replacement.
         replace: bool,
     },
-    /// Coarsened exact matching within covariate strata.
+    /// Coarsened exact matching within covariate strata (MatchIt `method = "cem"`).
     CoarsenedExact {
-        /// Optional custom cutpoints for each covariate.
-        /// If None, automatic binning is used (quartiles).
+        /// Cut points per covariate (MatchIt `cutpoints = list(..)`), left-closed intervals as
+        /// `findInterval`. Takes precedence over `n_bins`.
         cutpoints: Option<Vec<Vec<f64>>>,
-        /// Number of bins for automatic coarsening (default: 4).
+        /// `Some(k)`: `k` quantile bins per covariate (MatchIt `cutpoints = "q<k>"`, type-7
+        /// quantiles); `None`: MatchIt's default, `nclass.Sturges` equal-width bins
+        /// (`cutpoints = "sturges"`).
         n_bins: Option<usize>,
     },
     /// Full/optimal matching creating optimal strata.
@@ -129,13 +133,11 @@ impl fmt::Display for MatchMethod {
                 }
                 Ok(())
             }
-            MatchMethod::CoarsenedExact { n_bins, .. } => {
-                write!(f, "Coarsened Exact Matching")?;
-                if let Some(bins) = n_bins {
-                    write!(f, " ({} bins)", bins)?;
-                }
-                Ok(())
-            }
+            MatchMethod::CoarsenedExact { cutpoints, n_bins } => match (cutpoints, n_bins) {
+                (Some(_), _) => write!(f, "Coarsened Exact Matching (user cut points)"),
+                (None, Some(k)) => write!(f, "Coarsened Exact Matching ({k} quantile bins)"),
+                (None, None) => write!(f, "Coarsened Exact Matching (Sturges bins)"),
+            },
             MatchMethod::Full {
                 min_ratio,
                 max_ratio,
@@ -685,13 +687,9 @@ pub fn match_it_with(
             *replace,
             options,
         )?,
-        MatchMethod::CoarsenedExact { cutpoints, n_bins } => cem_method(
-            &x,
-            &is_treated,
-            cutpoints.as_deref(),
-            *n_bins,
-            &covariate_names,
-        )?,
+        MatchMethod::CoarsenedExact { cutpoints, n_bins } => {
+            cem_method(&x, &is_treated, cutpoints.as_deref(), *n_bins)?
+        }
         MatchMethod::Full {
             min_ratio,
             max_ratio,
@@ -1132,7 +1130,7 @@ pub fn cem_match(
 ) -> EconResult<MatchResult> {
     let method = MatchMethod::CoarsenedExact {
         cutpoints: None,
-        n_bins: Some(4),
+        n_bins: None,
     };
     match_it(dataset, treatment_col, covariate_cols, method, None)
 }
@@ -1682,26 +1680,119 @@ fn sets_from_subclasses(n: usize, sc: &Option<Vec<SubclassInfo>>) -> Vec<Option<
     sets
 }
 
+/// S7: coarsened exact matching (MatchIt's `cem_matchit`): strata of the coded covariates,
+/// numbered by first appearance among those holding both groups.
 fn cem_method(
     x: &Array2<f64>,
     is_treated: &[bool],
     cutpoints: Option<&[Vec<f64>]>,
     n_bins: Option<usize>,
-    names: &[String],
 ) -> EconResult<MethodOutput> {
-    let (t, c) = group_indices(is_treated);
-    let cp = cutpoints.map(|c| c.to_vec());
-    let (matches, weights, subclasses, _) =
-        coarsened_exact_matching(x, &t, &c, cp.as_ref(), n_bins.unwrap_or(4), names)?;
+    let (n, k) = x.dim();
+    let breaks: Vec<Vec<f64>> = (0..k)
+        .map(|j| {
+            let col = x.column(j).to_vec();
+            cem_breaks(&col, cutpoints.map(|c| c[j].as_slice()), n_bins)
+        })
+        .collect();
+    let mut ids: HashMap<Vec<usize>, usize> = HashMap::new();
+    let mut stratum_of = vec![0usize; n];
+    let mut counts: Vec<(usize, usize)> = Vec::new();
+    for i in 0..n {
+        let key: Vec<usize> = (0..k)
+            .map(|j| find_interval(&breaks[j], x[[i, j]]))
+            .collect();
+        let next = ids.len();
+        let id = *ids.entry(key).or_insert(next);
+        if id == counts.len() {
+            counts.push((0, 0));
+        }
+        if is_treated[i] {
+            counts[id].0 += 1;
+        } else {
+            counts[id].1 += 1;
+        }
+        stratum_of[i] = id;
+    }
+    let mut label = vec![None; counts.len()];
+    let mut kept = 0;
+    for (id, &(t, c)) in counts.iter().enumerate() {
+        if t > 0 && c > 0 {
+            kept += 1;
+            label[id] = Some(kept);
+        }
+    }
+    let subclass: Vec<Option<usize>> = stratum_of.iter().map(|&id| label[id]).collect();
+    Ok(stratified_output(
+        is_treated,
+        subclass,
+        None,
+        None,
+        Vec::new(),
+    )?)
+}
+
+/// The output of a partition (CEM, subclassification, full matching): MatchIt's ATT weights,
+/// the subclass list (`ps_range` from `ranges`, or NaN), and one `MatchInfo` per treated unit
+/// in data order listing the controls of its set (with `distance(t, c)` when given).
+fn stratified_output(
+    is_treated: &[bool],
+    subclass: Vec<Option<usize>>,
+    ranges: Option<&dyn Fn(usize, &[usize], &[usize]) -> (f64, f64)>,
+    distance: Option<&dyn Fn(usize, usize) -> f64>,
+    warnings: Vec<String>,
+) -> EconResult<MethodOutput> {
+    let n_sets = subclass.iter().flatten().copied().max().unwrap_or(0);
+    let mut treated: Vec<Vec<usize>> = vec![Vec::new(); n_sets];
+    let mut controls: Vec<Vec<usize>> = vec![Vec::new(); n_sets];
+    for (i, s) in subclass.iter().enumerate() {
+        if let Some(s) = s {
+            if is_treated[i] {
+                treated[s - 1].push(i);
+            } else {
+                controls[s - 1].push(i);
+            }
+        }
+    }
+    check_stratum_control_lists::<usize>(
+        (0..n_sets).map(|s| (treated[s].len(), controls[s].len())),
+    )?;
+    let weights = weights_from_sets(&subclass, is_treated);
+    let mut matches = Vec::new();
+    for t in (0..is_treated.len()).filter(|&i| is_treated[i]) {
+        let control_indices = subclass[t].map_or_else(Vec::new, |s| controls[s - 1].clone());
+        let distances = match distance {
+            Some(d) => control_indices.iter().map(|&c| d(t, c)).collect(),
+            None => Vec::new(),
+        };
+        matches.push(MatchInfo {
+            treated_idx: t,
+            control_indices,
+            distances,
+            weight: 0.0,
+        });
+    }
+    let subclasses: Vec<SubclassInfo> = treated
+        .into_iter()
+        .zip(controls)
+        .enumerate()
+        .filter(|(_, (t, c))| !t.is_empty() || !c.is_empty())
+        .map(|(s, (t, c))| SubclassInfo {
+            subclass_id: s + 1,
+            ps_range: ranges.map_or((f64::NAN, f64::NAN), |r| r(s + 1, &t, &c)),
+            treated_indices: t,
+            control_indices: c,
+        })
+        .collect();
     Ok(MethodOutput {
         weights,
         matches,
-        subclass: sets_from_subclasses(is_treated.len(), &subclasses),
-        subclasses,
+        subclass,
+        subclasses: Some(subclasses),
         m_order: None,
         caliper_abs: None,
         total_distance: None,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -1749,128 +1840,6 @@ fn subclass_method(is_treated: &[bool], scores: &[f64], k: usize) -> EconResult<
     })
 }
 
-/// Coarsened exact matching algorithm.
-fn coarsened_exact_matching(
-    x: &Array2<f64>,
-    treated_idx: &[usize],
-    control_idx: &[usize],
-    cutpoints: Option<&Vec<Vec<f64>>>,
-    n_bins: usize,
-    _covariate_names: &[String],
-) -> EconResult<(
-    Vec<MatchInfo>,
-    Vec<f64>,
-    Option<Vec<SubclassInfo>>,
-    Option<f64>,
-)> {
-    let n = x.nrows();
-    let k = x.ncols();
-    let mut weights = vec![0.0; n];
-
-    // Compute cutpoints for each covariate
-    let cuts: Vec<Vec<f64>> = match cutpoints {
-        Some(c) => c.clone(),
-        None => {
-            // Automatic quartile-based binning
-            (0..k)
-                .map(|j| {
-                    let col: Vec<f64> = (0..n).map(|i| x[[i, j]]).collect();
-                    compute_quantile_cutpoints(&col, n_bins)
-                })
-                .collect()
-        }
-    };
-
-    // Sorted copies so each bin is found by binary search
-    let cuts: Vec<Vec<f64>> = cuts.iter().map(|c| sorted_cutpoints(c)).collect();
-
-    // Membership mask instead of a Vec::contains scan per unit
-    let mut is_treated = vec![false; n];
-    for &i in treated_idx {
-        is_treated[i] = true;
-    }
-
-    // Assign each observation to a stratum
-    let mut strata: HashMap<String, (Vec<usize>, Vec<usize>)> = HashMap::new();
-
-    for &i in treated_idx.iter().chain(control_idx.iter()) {
-        let stratum_key = compute_stratum_key(x, i, &cuts);
-        let entry = strata
-            .entry(stratum_key)
-            .or_insert((Vec::new(), Vec::new()));
-        if is_treated[i] {
-            entry.0.push(i);
-        } else {
-            entry.1.push(i);
-        }
-    }
-
-    // Every matched treated unit stores the stratum's controls and a distance each.
-    check_stratum_control_lists::<(usize, f64)>(
-        strata
-            .values()
-            .filter(|(t, c)| !t.is_empty() && !c.is_empty())
-            .map(|(t, c)| (t.len(), c.len())),
-    )?;
-
-    // Build matches and subclasses
-    let mut matches = Vec::new();
-    let mut subclasses = Vec::new();
-    let mut subclass_id = 0;
-
-    for (treated, control) in strata.values() {
-        // Only include strata with both treated and control
-        if treated.is_empty() || control.is_empty() {
-            // Discard these units (weight = 0)
-            continue;
-        }
-
-        subclass_id += 1;
-
-        // CEM weights: n_control / n_treated in stratum (for ATT)
-        let n_t = treated.len() as f64;
-        let n_c = control.len() as f64;
-
-        // Treated get weight 1
-        for &ti in treated {
-            weights[ti] = 1.0;
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices: control.clone(),
-                distances: vec![0.0; control.len()], // Exact match = 0 distance
-                weight: 1.0,
-            });
-        }
-
-        // Controls get weight proportional to treated/control ratio
-        let control_weight = n_t / n_c;
-        for &ci in control {
-            weights[ci] = control_weight;
-        }
-
-        subclasses.push(SubclassInfo {
-            subclass_id,
-            treated_indices: treated.clone(),
-            control_indices: control.clone(),
-            ps_range: (0.0, 1.0), // Not applicable for CEM
-        });
-    }
-
-    // Add unmatched treated units to matches with empty controls
-    for &ti in treated_idx {
-        if weights[ti] == 0.0 {
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices: vec![],
-                distances: vec![],
-                weight: 0.0,
-            });
-        }
-    }
-
-    Ok((matches, weights, Some(subclasses), None))
-}
-
 /// Compute quantile-based cutpoints for binning.
 fn compute_quantile_cutpoints(values: &[f64], n_bins: usize) -> Vec<f64> {
     let mut sorted = values.to_vec();
@@ -1885,23 +1854,6 @@ fn compute_quantile_cutpoints(values: &[f64], n_bins: usize) -> Vec<f64> {
     }
 
     cutpoints
-}
-
-/// Compute stratum key for an observation based on coarsened covariates.
-///
-/// `cuts` holds one sorted cutpoint list per covariate (see
-/// [`sorted_cutpoints`]); the bin is the number of cutpoints below the value.
-fn compute_stratum_key(x: &Array2<f64>, row: usize, cuts: &[Vec<f64>]) -> String {
-    let k = x.ncols();
-    let mut key_parts = Vec::with_capacity(k);
-
-    for (j, col_cuts) in cuts.iter().enumerate().take(k) {
-        let val = x[[row, j]];
-        let bin = count_below(col_cuts, val);
-        key_parts.push(bin.to_string());
-    }
-
-    key_parts.join("_")
 }
 
 /// Optimized full matching algorithm (greedy approximation).
@@ -2147,6 +2099,160 @@ fn subclassification_matching(
     }
 
     Ok((matches, weights, Some(subclasses), None))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Coarsened exact matching and subclassification (MatchIt cem_matchit, matchit2subclass)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// R's `findInterval(x, breaks)`: the number of breaks `<= x` (left-closed intervals).
+fn find_interval(breaks: &[f64], x: f64) -> usize {
+    breaks.partition_point(|&b| b <= x)
+}
+
+/// `[-inf] + sorted unique(cuts) + [+inf]`.
+fn padded_breaks(mut cuts: Vec<f64>) -> Vec<f64> {
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut b = Vec::with_capacity(cuts.len() + 2);
+    b.push(f64::NEG_INFINITY);
+    b.extend(cuts);
+    b.push(f64::INFINITY);
+    b
+}
+
+/// The CEM breaks of one covariate (S7): explicit cut points, MatchIt's `"q<k>"` (type-7
+/// quantiles at `1/k, ..., (k-1)/k`) or, by default, `nclass.Sturges` equal-width bins.
+fn cem_breaks(col: &[f64], cutpoints: Option<&[f64]>, n_bins: Option<usize>) -> Vec<f64> {
+    if let Some(c) = cutpoints {
+        return padded_breaks(c.to_vec());
+    }
+    let mut sorted = col.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    match n_bins {
+        Some(k) => {
+            let step = 1.0 / k as f64;
+            let cuts = (0..k.saturating_sub(1))
+                .map(|i| quantile_sorted(&sorted, step + i as f64 * step, QuantileType::T7))
+                .collect();
+            padded_breaks(cuts)
+        }
+        None => {
+            let n = col.len();
+            let k = ((n as f64).log2() + 1.0).ceil().max(1.0) as usize;
+            let (lo, hi) = (sorted[0], sorted[n - 1]);
+            let by = (hi - lo) / k as f64;
+            let mut b = Vec::with_capacity(k + 1);
+            b.push(f64::NEG_INFINITY);
+            b.extend((1..k).map(|i| lo + i as f64 * by));
+            b.push(f64::INFINITY);
+            b
+        }
+    }
+}
+
+/// MatchIt's ATT weights from a partition (S6, `get_weights_from_subclass`): a treated unit in
+/// a set gets 1, a control `n_t(s) / n_c(s)`, an unmatched unit 0; normalised per group.
+fn weights_from_sets(sets: &[Option<usize>], is_treated: &[bool]) -> Vec<f64> {
+    let mut counts: HashMap<usize, (usize, usize)> = HashMap::new();
+    for (s, &t) in sets.iter().zip(is_treated) {
+        if let Some(s) = s {
+            let e = counts.entry(*s).or_insert((0, 0));
+            if t {
+                e.0 += 1;
+            } else {
+                e.1 += 1;
+            }
+        }
+    }
+    let mut w: Vec<f64> = sets
+        .iter()
+        .zip(is_treated)
+        .map(|(s, &t)| match s {
+            None => 0.0,
+            Some(s) => {
+                let (nt, nc) = counts[s];
+                if nt == 0 || nc == 0 {
+                    0.0
+                } else if t {
+                    1.0
+                } else {
+                    nt as f64 / nc as f64
+                }
+            }
+        })
+        .collect();
+    normalize_weights(&mut w, is_treated);
+    w
+}
+
+/// Subclass labels (1-based) of `matchit2subclass` with `min.n = 0` (S8): cut points at the
+/// type-7 quantiles of the treated scores at `seq(0, 1, length.out = k + 1)`, assignment by
+/// `findInterval(.., all.inside = TRUE)`; subclasses without treated or control units are
+/// left unmatched and the rest renumbered. Returns the labels, the cut points and warnings.
+fn subclass_labels(
+    scores: &[f64],
+    is_treated: &[bool],
+    k: usize,
+) -> (Vec<Option<usize>>, Vec<f64>, Vec<String>) {
+    let mut st: Vec<f64> = scores
+        .iter()
+        .zip(is_treated)
+        .filter(|(_, t)| **t)
+        .map(|(s, _)| *s)
+        .collect();
+    st.sort_by(f64::total_cmp);
+    let step = 1.0 / k as f64;
+    let q: Vec<f64> = (0..=k)
+        .map(|i| {
+            let p = if i == k { 1.0 } else { i as f64 * step };
+            quantile_sorted(&st, p, QuantileType::T7)
+        })
+        .collect();
+    let raw: Vec<usize> = scores
+        .iter()
+        .map(|&s| find_interval(&q, s).clamp(1, k))
+        .collect();
+    let mut warnings = Vec::new();
+    let mut nt = vec![0usize; k + 1];
+    let mut nc = vec![0usize; k + 1];
+    for (&l, &t) in raw.iter().zip(is_treated) {
+        if t {
+            nt[l] += 1;
+        } else {
+            nc[l] += 1;
+        }
+    }
+    let distinct = (1..=k).filter(|&l| nt[l] + nc[l] > 0).count();
+    if distinct < k {
+        warnings.push(format!(
+            "due to discreteness in the propensity score, fewer subclasses were generated than \
+             requested ({distinct} of {k})"
+        ));
+    }
+    let mut relabel = vec![None; k + 1];
+    let mut next = 0;
+    for l in 1..=k {
+        if nt[l] + nc[l] == 0 {
+            continue;
+        }
+        if nt[l] == 0 || nc[l] == 0 {
+            let (group, m) = if nt[l] == 0 {
+                ("treated", nc[l])
+            } else {
+                ("control", nt[l])
+            };
+            warnings.push(format!(
+                "subclass {l} holds no {group} units; its {m} units are left unmatched \
+                 (MatchIt's default min.n = 1 would move units from an adjacent subclass instead)"
+            ));
+            continue;
+        }
+        next += 1;
+        relabel[l] = Some(next);
+    }
+    let labels = raw.iter().map(|&l| relabel[l]).collect();
+    (labels, q, warnings)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2806,6 +2912,100 @@ mod tests {
 
     /// summary(matchit(..), standardize = TRUE)$sum.all / $sum.matched for x1, x2, x3 (ATT: SMD standardised
     /// by the treated SD of the full sample; Var. Ratio NA for the binary x3).
+    /// matchit(method = "cem"): numeric covariates are cut into nclass.Sturges(x) = 9 equal-width bins.
+    #[test]
+    fn test_validate_cem_sturges() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let r = cem_match(&ds, "treat", &COVS).unwrap();
+        Check::new(&case)
+            .vector("cem_weights", &r.weights, Tol::coef(r.n_obs))
+            .scalar("cem_n_matched_t", r.n_matched_treated as f64, Tol::exact())
+            .scalar("cem_n_matched_c", r.n_matched_control as f64, Tol::exact())
+            .scalar(
+                "cem_n_strata",
+                r.subclasses.as_ref().unwrap().len() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert!(r.propensity_scores.is_none());
+        assert!(
+            r.to_string()
+                .contains("Coarsened Exact Matching (Sturges bins)")
+        );
+    }
+
+    /// n_bins: Some(4) is MatchIt's cutpoints = "q4"; explicit cut points are left-closed (findInterval).
+    /// The two binnings R distinguishes give different strata here too.
+    #[test]
+    fn test_validate_cem_quantile_and_explicit_cut_points() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let q4 = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            MatchMethod::CoarsenedExact {
+                cutpoints: None,
+                n_bins: Some(4),
+            },
+            None,
+        )
+        .unwrap();
+        let cuts = vec![vec![-1.0, 0.0, 1.0], vec![-0.5, 0.5], vec![0.2, 0.8]];
+        let cx = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            MatchMethod::CoarsenedExact {
+                cutpoints: Some(cuts),
+                n_bins: None,
+            },
+            None,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("cem_q4_weights", &q4.weights, Tol::coef(q4.n_obs))
+            .scalar(
+                "cem_q4_n_strata",
+                q4.subclasses.as_ref().unwrap().len() as f64,
+                Tol::exact(),
+            )
+            .vector("cem_cut_weights", &cx.weights, Tol::coef(cx.n_obs))
+            .scalar(
+                "cem_cut_n_strata",
+                cx.subclasses.as_ref().unwrap().len() as f64,
+                Tol::exact(),
+            )
+            .finish();
+        assert_ne!(q4.weights, cem_match(&ds, "treat", &COVS).unwrap().weights);
+    }
+
+    #[test]
+    fn test_find_interval_is_left_closed() {
+        let b = [f64::NEG_INFINITY, 0.0, 1.0, f64::INFINITY];
+        assert_eq!(
+            [-0.5, 0.0, 0.5, 1.0, 2.0].map(|x| find_interval(&b, x)),
+            [1, 2, 2, 3, 3]
+        );
+    }
+
+    #[test]
+    fn test_cem_without_common_strata_is_an_error() {
+        let df = df! { "d" => [1.0, 1.0, 0.0, 0.0], "x" => [0.0, 0.1, 10.0, 10.1] }.unwrap();
+        let r = match_it(
+            &Dataset::new(df),
+            "d",
+            &["x"],
+            MatchMethod::CoarsenedExact {
+                cutpoints: Some(vec![vec![5.0]]),
+                n_bins: None,
+            },
+            None,
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("no units were matched"))
+        );
+    }
+
     #[test]
     fn test_validate_matchit_balance_table() {
         let (case, ds) = crate::test_support::load_case("matchit_nearest");
@@ -3049,21 +3249,6 @@ mod tests {
 
         // With replacement, all treated units should be matched
         assert_eq!(result.n_matched_treated, result.n_treated);
-    }
-
-    #[test]
-    fn test_cem_matching_basic() {
-        let dataset = create_test_dataset();
-        let result = cem_match(&dataset, "treatment", &["x1", "x2"]).unwrap();
-
-        // CEM should create subclasses
-        assert!(result.subclasses.is_some());
-
-        // Check matching method is recorded
-        match result.method {
-            MatchMethod::CoarsenedExact { .. } => (),
-            _ => panic!("Expected CoarsenedExact method"),
-        }
     }
 
     #[test]
@@ -3453,36 +3638,6 @@ mod tests {
             (computed_mean_smd - result.balance_after.mean_abs_std_diff).abs() < 1e-10,
             "Mean SMD mismatch"
         );
-    }
-
-    #[test]
-    fn test_validate_cem_matching_vs_r() {
-        // Validate CEM against R MatchIt with method = "cem"
-        let dataset = create_matchit_validation_dataset();
-
-        let result = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::CoarsenedExact {
-                cutpoints: None,
-                n_bins: Some(4), // Quartiles
-            },
-            None,
-        )
-        .unwrap();
-
-        // CEM should produce exact balance within strata
-        // Number of matched should be less than or equal to total
-        assert!(result.n_matched_treated <= result.n_treated);
-        assert!(result.n_matched_control <= result.n_control);
-
-        // CEM typically discards unmatched units
-        assert!(result.n_discarded_treated >= 0);
-        assert!(result.n_discarded_control >= 0);
-
-        // Balance should generally improve (or at least not get much worse)
-        // CEM can have perfect balance within strata but may lose observations
     }
 
     #[test]
