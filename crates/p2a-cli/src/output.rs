@@ -139,6 +139,57 @@ pub fn missing_json(missing: &MissingSummary) -> Option<serde_json::Value> {
     serde_json::to_value(missing).ok()
 }
 
+/// The convergence and warning notes of a result, for text and table output:
+/// "Converged: yes (12 iterations)" / "Converged: no (100 iterations)" ("1 iteration")
+/// when `converged` is `Some((converged, iterations))`, then "Warning: <text>" per warning.
+/// JSON: empty, as the notes go into the payload ([`notes_json`]).
+pub(crate) fn note_lines(
+    converged: Option<(bool, usize)>,
+    warnings: &[String],
+    format: &OutputFormat,
+) -> Vec<String> {
+    if matches!(format, OutputFormat::Json) {
+        return Vec::new();
+    }
+    let mut lines = Vec::with_capacity(warnings.len() + 1);
+    if let Some((ok, iterations)) = converged {
+        let unit = if iterations == 1 {
+            "iteration"
+        } else {
+            "iterations"
+        };
+        let yes = if ok { "yes" } else { "no" };
+        lines.push(format!("Converged: {yes} ({iterations} {unit})"));
+    }
+    lines.extend(warnings.iter().map(|w| format!("Warning: {w}")));
+    lines
+}
+
+/// Prints [`note_lines`] to stdout after the command's own output, as
+/// [`print_missing_note`] does. The shared CLI form of convergence status and warnings
+/// (T3 design 2.6) for the commands that the Tier 3 CLI packages (WP60, WP61) convert.
+pub fn print_notes(converged: Option<(bool, usize)>, warnings: &[String], format: &OutputFormat) {
+    for line in note_lines(converged, warnings, format) {
+        println!("{line}");
+    }
+}
+
+/// The JSON form of the notes: `{"converged": bool, "iterations": n}` when `converged` is
+/// `Some`, and always `"warnings": [..]` (possibly empty), so every JSON payload that
+/// includes it carries its warnings. Callers merge the map into their own object.
+pub fn notes_json(
+    converged: Option<(bool, usize)>,
+    warnings: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    if let Some((ok, iterations)) = converged {
+        map.insert("converged".to_string(), ok.into());
+        map.insert("iterations".to_string(), iterations.into());
+    }
+    map.insert("warnings".to_string(), warnings.to_vec().into());
+    map
+}
+
 /// Format dataset summary for display
 pub fn format_dataset_summary(
     name: &str,
@@ -912,6 +963,43 @@ mod missing_note_tests {
             Some(serde_json::json!({
                 "n_total": 120, "n_used": 117, "n_dropped": 3, "by_column": {"y": 2, "x1": 1}
             }))
+        );
+    }
+}
+
+#[cfg(test)]
+mod notes_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn note_lines_for_text_table_and_json() {
+        let w = vec!["first".to_string(), "second".to_string()];
+        assert_eq!(
+            note_lines(Some((true, 12)), &w, &OutputFormat::Text),
+            [
+                "Converged: yes (12 iterations)",
+                "Warning: first",
+                "Warning: second"
+            ]
+        );
+        assert_eq!(
+            note_lines(Some((false, 1)), &[], &OutputFormat::Table),
+            ["Converged: no (1 iteration)"]
+        );
+        assert!(note_lines(Some((true, 3)), &w, &OutputFormat::Json).is_empty());
+        assert!(note_lines(None, &[], &OutputFormat::Text).is_empty());
+    }
+
+    #[test]
+    fn notes_json_keys() {
+        assert_eq!(
+            Value::Object(notes_json(Some((false, 100)), &["w".into()])),
+            json!({"converged": false, "iterations": 100, "warnings": ["w"]})
+        );
+        assert_eq!(
+            Value::Object(notes_json(None, &[])),
+            json!({"warnings": []})
         );
     }
 }
