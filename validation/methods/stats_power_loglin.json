@@ -199,6 +199,34 @@
       "tolerance": "t p-values 1e-9 relative without an absolute floor; Wilcoxon p validation/README.md (n = 6-15)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "factanal_rotation",
+      "name": "Maximum-likelihood factor analysis with varimax and promax rotation",
+      "category": "stats",
+      "reference": "stats::factanal(rotation = 'none' | 'varimax' | 'promax', control = list(opt = list(factr = 1, pgtol = 0))); stats::varimax; stats::promax",
+      "doc": "validation/multivariate/factanal.md",
+      "cases": [
+        "stat_factanal_promax"
+      ],
+      "tests": [
+        "p2a-core::stats::factanal::tests::test_validate_factanal_rotation_promax",
+        "p2a-core::stats::factanal::tests::test_validate_factanal_against_r"
+      ],
+      "quantities": [
+        "varimax and promax loadings and rotation matrices of R's unrotated loadings (at the varimax optimum), normalised varimax criterion",
+        "promax factor correlations",
+        "uniquenesses, sorted loadings (none, varimax, promax), communalities, proportion of variance, chi-square, df, p, objective"
+      ],
+      "tolerance": "rotations Tol::iterative(1e-8) against R's varimax(eps = 1e-14) and a promax built on it, after sortLoadings; full fit Tol::iterative(1e-4) against R's tight refit (both optimisers iterative), rotated fits against those tight rotations",
+      "deviations": [
+        {
+          "finding": "STAT-23",
+          "quantity": "factanal's own varimax and promax loadings, variance proportions and promax factor correlations (loadings_varimax, loadings_promax, prop_var_varimax, prop_var_promax, promax_phi)",
+          "note": "R's factanal stops varimax at eps = 1e-5, up to 7.1e-4 in a loading from the varimax optimum (promax 6.9e-5); p2a iterates to the optimum, so the rotated fits are compared with R's rotations at the optimum (rot_varimax_tight, rot_promax_tight, rot_promax_phi_tight) instead"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

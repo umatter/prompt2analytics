@@ -48,6 +48,30 @@ pub enum ScoresMethod {
     Bartlett,
 }
 
+crate::option_enum!(
+    RotationMethod,
+    crate::options::Choices {
+        option: "rotation",
+        values: &[
+            (&["varimax"], RotationMethod::Varimax),
+            (&["promax"], RotationMethod::Promax),
+            (&["none"], RotationMethod::None),
+        ],
+    }
+);
+
+crate::option_enum!(
+    ScoresMethod,
+    crate::options::Choices {
+        option: "scores",
+        values: &[
+            (&["none"], ScoresMethod::None),
+            (&["regression", "thomson"], ScoresMethod::Regression),
+            (&["bartlett"], ScoresMethod::Bartlett),
+        ],
+    }
+);
+
 /// Configuration for factor analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorAnalysisConfig {
@@ -90,7 +114,8 @@ pub struct FactorAnalysisResult {
     /// Uniquenesses (specific variances)
     #[serde(skip)]
     pub uniquenesses: Array1<f64>,
-    /// Communalities (proportion of variance explained by factors)
+    /// Communalities `1 - uniquenesses` up to the fit: `rowSums(L0^2)` of the unrotated loadings,
+    /// which is `diag(Lambda Phi Lambda')` for every rotation
     #[serde(skip)]
     pub communalities: Array1<f64>,
     /// Proportion of variance explained by each factor
@@ -102,7 +127,7 @@ pub struct FactorAnalysisResult {
     /// Factor scores (n x k) if requested
     #[serde(skip)]
     pub scores: Option<Array2<f64>>,
-    /// Factor correlation matrix (for oblique rotation)
+    /// Factor correlation matrix (promax), in the order and signs of `loadings`
     #[serde(skip)]
     pub factor_correlation: Option<Array2<f64>>,
     /// Chi-squared test statistic for goodness of fit
@@ -233,22 +258,20 @@ pub fn factanal_from_corr(
     let (loadings, final_psi, converged, iterations, objective) =
         optimize_uniquenesses(corr, k, &mut psi, config)?;
 
-    // Apply rotation if requested
-    let (rotated_loadings, factor_corr) = match config.rotation {
+    // Communalities from the unrotated loadings: diag(Lambda Phi Lambda') for every rotation
+    let communalities = compute_communalities(&loadings.view());
+
+    // Rotate, then sort as factanal's sortLoadings
+    let (rotated, phi) = match config.rotation {
         RotationMethod::None => (loadings, None),
-        RotationMethod::Varimax => {
-            let rotated = varimax_rotation(&loadings.view(), config.max_iter, config.tolerance)?;
-            (rotated, None)
-        }
+        RotationMethod::Varimax => (varimax(&loadings)?.0, None),
         RotationMethod::Promax => {
-            let (rotated, phi) =
-                promax_rotation(&loadings.view(), 4.0, config.max_iter, config.tolerance)?;
-            (rotated, Some(phi))
+            let (l, t) = promax(&loadings, 4.0)?;
+            let phi = factor_correlation(&t)?;
+            (l, Some(phi))
         }
     };
-
-    // Compute communalities
-    let communalities = compute_communalities(&rotated_loadings.view());
+    let (rotated_loadings, factor_corr) = sort_loadings(rotated, phi);
 
     // Compute variance proportions
     let (var_props, cum_var) = compute_variance_proportions(&rotated_loadings.view());
@@ -260,12 +283,8 @@ pub fn factanal_from_corr(
     let chi_squared = (n_obs as f64 - 1.0 - correction) * objective;
     let chi_squared = chi_squared.max(0.0); // Ensure non-negative
 
-    // Compute p-value
     let p_value = if df > 0 {
-        use statrs::distribution::{ChiSquared, ContinuousCDF};
-        let chi_dist = ChiSquared::new(df as f64)
-            .map_err(|e| EconError::Internal(format!("Chi-squared distribution error: {}", e)))?;
-        1.0 - chi_dist.cdf(chi_squared)
+        crate::traits::estimator::chi_squared_p_value(chi_squared, df as f64)
     } else {
         1.0
     };
@@ -325,7 +344,7 @@ fn initialize_uniquenesses(corr: &ArrayView2<f64>, _n_factors: usize) -> EconRes
 
     // Sort eigenvalues in descending order
     let mut sorted_eig: Vec<f64> = eigenvalues.iter().cloned().collect();
-    sorted_eig.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_eig.sort_by(|a, b| b.total_cmp(a));
 
     // Initial uniquenesses: use communality estimate from first k eigenvalues
     let total_var: f64 = sorted_eig.iter().sum();
@@ -378,7 +397,7 @@ fn top_k_eigenpairs(
             .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
 
         let mut idx_val: Vec<(usize, f64)> = eigenvalues.iter().cloned().enumerate().collect();
-        idx_val.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        idx_val.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         let sorted_vals: Vec<f64> = idx_val.iter().take(k).map(|&(_, v)| v).collect();
         let sorted_indices: Vec<usize> = idx_val.iter().take(k).map(|&(i, _)| i).collect();
@@ -698,7 +717,7 @@ fn compute_loadings_from_psi_cached(
 
     // Sort eigenvalues in descending order and get indices
     let mut idx_val: Vec<(usize, f64)> = eigenvalues.iter().cloned().enumerate().collect();
-    idx_val.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    idx_val.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // Compute loadings: Lambda = Psi^(1/2) V_k (D_k - I)^(1/2)
     // where D_k are the top k eigenvalues
@@ -937,214 +956,175 @@ fn compute_objective(
     compute_objective_cached(corr, loadings, psi, &cache)
 }
 
-/// Apply varimax (orthogonal) rotation.
-///
-/// Maximizes the sum of variances of squared loadings per factor.
-/// Reference: Kaiser (1958).
-fn varimax_rotation(
-    loadings: &ArrayView2<f64>,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<Array2<f64>> {
-    let (p, k) = loadings.dim();
+/// Maximum number of varimax iterations.
+const VARIMAX_MAX_ITER: usize = 1000;
+/// Relative stop of the varimax iteration: the sum of singular values (the criterion's
+/// linearisation) grows by less than this fraction. R's `varimax` default is `eps = 1e-5`;
+/// p2a iterates to the optimum (R's `varimax(eps = 1e-14)`).
+const VARIMAX_REL_TOL: f64 = 1e-14;
 
-    if k == 1 {
-        return Ok(loadings.to_owned());
+/// `x * diag(d)`: scale the columns of `x`.
+fn scale_columns(x: &Array2<f64>, d: &[f64]) -> Array2<f64> {
+    let mut out = x.clone();
+    for (mut col, &s) in out.columns_mut().into_iter().zip(d) {
+        col *= s;
     }
+    out
+}
 
-    let mut rotated = loadings.to_owned();
-
-    // Normalize rows (Kaiser normalization)
-    let h: Vec<f64> = (0..p)
-        .map(|i| {
-            let sum_sq: f64 = (0..k).map(|j| rotated[[i, j]].powi(2)).sum();
-            sum_sq.sqrt().max(1e-10)
+/// Varimax rotation with Kaiser normalisation (R's `stats::varimax(x, normalize = TRUE)`):
+/// the SVD iteration `B = x' (z^3 - z diag(colSums(z^2)) / p)`, `T = U V'`, run to the
+/// optimum. Returns the rotated loadings `x T` and the rotation matrix `T`.
+///
+/// A zero row of `x` keeps scale 1 (R would give NaN).
+///
+/// Reference: Kaiser (1958); R's `stats::varimax`.
+pub fn varimax(x: &Array2<f64>) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let (p, k) = x.dim();
+    if k < 2 {
+        return Ok((x.clone(), Array2::eye(k)));
+    }
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "varimax: the loadings contain non-finite values".to_string(),
+        });
+    }
+    let sc: Vec<f64> = x
+        .rows()
+        .into_iter()
+        .map(|r| {
+            let s = r.dot(&r).sqrt();
+            if s > 0.0 { s } else { 1.0 }
         })
         .collect();
-
-    for i in 0..p {
-        for j in 0..k {
-            rotated[[i, j]] /= h[i];
-        }
+    let mut xn = x.clone();
+    for (mut row, &s) in xn.rows_mut().into_iter().zip(&sc) {
+        row /= s;
     }
-
-    // Iteratively rotate pairs of factors
-    for _ in 0..max_iter {
-        let mut max_change: f64 = 0.0;
-
-        // Rotate each pair of factors
-        for j in 0..k {
-            for m in (j + 1)..k {
-                // Compute rotation angle
-                let mut u = 0.0;
-                let mut v = 0.0;
-
-                for i in 0..p {
-                    let x = rotated[[i, j]];
-                    let y = rotated[[i, m]];
-                    let x2 = x * x;
-                    let y2 = y * y;
-                    u += x2 - y2;
-                    v += 2.0 * x * y;
-                }
-
-                // Varimax criterion
-                let _a = 0.0;
-                let _b = 0.0;
-                let mut num = 0.0;
-                let mut denom = 0.0;
-
-                for i in 0..p {
-                    let x = rotated[[i, j]];
-                    let y = rotated[[i, m]];
-                    let x2 = x * x;
-                    let y2 = y * y;
-                    let xy = x * y;
-
-                    num += 4.0 * xy * (x2 - y2);
-                    denom += (x2 - y2).powi(2) - 4.0 * xy.powi(2);
-                }
-
-                // Additional terms for varimax
-                num -= 2.0 * u * v / p as f64;
-                denom += (u * u - v * v) / p as f64;
-
-                // Compute rotation angle
-                let phi = 0.25 * num.atan2(denom);
-
-                if phi.abs() > tolerance {
-                    max_change = max_change.max(phi.abs());
-
-                    let cos_phi = phi.cos();
-                    let sin_phi = phi.sin();
-
-                    // Apply rotation
-                    for i in 0..p {
-                        let x = rotated[[i, j]];
-                        let y = rotated[[i, m]];
-                        rotated[[i, j]] = x * cos_phi + y * sin_phi;
-                        rotated[[i, m]] = -x * sin_phi + y * cos_phi;
-                    }
-                }
-            }
+    let mut tt: Array2<f64> = Array2::eye(k);
+    let mut d = 0.0;
+    for _ in 0..VARIMAX_MAX_ITER {
+        crate::resource::checkpoint()?;
+        let z = xn.dot(&tt);
+        let col_ss: Vec<f64> = z
+            .columns()
+            .into_iter()
+            .map(|c| c.dot(&c) / p as f64)
+            .collect();
+        let z3 = z.mapv(|v| v * v * v) - scale_columns(&z, &col_ss);
+        let b = xn.t().dot(&z3);
+        let svd = ndarray_to_faer(&b.view())
+            .thin_svd()
+            .map_err(|_| EconError::Computation("varimax: SVD failed".to_string()))?;
+        let u = faer_to_ndarray(&svd.U().to_owned());
+        let v = faer_to_ndarray(&svd.V().to_owned());
+        tt = u.dot(&v.t());
+        let dpast = d;
+        d = (0..k).map(|i| svd.S()[i]).sum::<f64>();
+        if !d.is_finite() {
+            return Err(EconError::Computation(
+                "varimax: the criterion is not finite".to_string(),
+            ));
         }
-
-        if max_change < tolerance {
+        if d < dpast * (1.0 + VARIMAX_REL_TOL) {
             break;
         }
     }
-
-    // Denormalize
-    for i in 0..p {
-        for j in 0..k {
-            rotated[[i, j]] *= h[i];
-        }
+    let mut z = xn.dot(&tt);
+    for (mut row, &s) in z.rows_mut().into_iter().zip(&sc) {
+        row *= s;
     }
-
-    // Reorder factors by variance explained
-    reorder_loadings(&rotated)
+    Ok((z, tt))
 }
 
-/// Apply promax (oblique) rotation.
-///
-/// Starts with varimax solution, then applies power transformation to allow
-/// correlated factors.
-fn promax_rotation(
-    loadings: &ArrayView2<f64>,
-    power: f64,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<(Array2<f64>, Array2<f64>)> {
-    let (p, k) = loadings.dim();
-
-    // First apply varimax
-    let varimax_loadings = varimax_rotation(loadings, max_iter, tolerance)?;
-
-    // Apply power transformation to get target matrix
-    let mut target = Array2::zeros((p, k));
-    for i in 0..p {
-        for j in 0..k {
-            let l = varimax_loadings[[i, j]];
-            target[[i, j]] = l.signum() * l.abs().powf(power);
-        }
+/// Promax rotation (Hendrickson & White 1964; R's `stats::promax(x, m)`): varimax, the target
+/// `Q = xv |xv|^(m - 1)`, `U = lm.fit(xv, Q)`, columns scaled by `sqrt(diag(solve(U'U)))`.
+/// Returns the loadings `xv U` and the rotation matrix `T_v U`.
+pub fn promax(x: &Array2<f64>, m: f64) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let k = x.ncols();
+    if k < 2 {
+        return Ok((x.clone(), Array2::eye(k)));
     }
-
-    // Find transformation matrix T such that varimax * T ≈ target
-    // Using least squares: T = (L'L)^(-1) L' target
-    let lt_l = matmul(
-        &varimax_loadings.t().to_owned().view(),
-        &varimax_loadings.view(),
-    )
-    .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
-
-    let lt_target = matmul(&varimax_loadings.t().to_owned().view(), &target.view())
-        .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
-
-    // Solve for T
-    let (lt_l_eigenvalues, lt_l_eigenvectors) = eig_symmetric(&lt_l.view())
-        .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
-
-    let mut lt_l_inv = Array2::zeros((k, k));
-    for i in 0..k {
-        for j in 0..k {
-            let mut sum = 0.0;
-            for m in 0..k {
-                if lt_l_eigenvalues[m] > 1e-10 {
-                    sum +=
-                        lt_l_eigenvectors[[i, m]] * lt_l_eigenvectors[[j, m]] / lt_l_eigenvalues[m];
-                }
-            }
-            lt_l_inv[[i, j]] = sum;
-        }
+    if !m.is_finite() || m < 1.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("promax: the power m must be finite and at least 1, got {m}"),
+        });
     }
-
-    let t = matmul(&lt_l_inv.view(), &lt_target.view())
-        .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
-
-    // Normalize columns of T
-    let mut t_normalized = t.clone();
+    let (xv, tv) = varimax(x)?;
+    let q = xv.mapv(|v| v * v.abs().powf(m - 1.0));
+    let mut u = Array2::<f64>::zeros((k, k));
     for j in 0..k {
-        let norm: f64 = (0..k).map(|i| t[[i, j]].powi(2)).sum::<f64>().sqrt();
-        if norm > 1e-10 {
-            for i in 0..k {
-                t_normalized[[i, j]] /= norm;
-            }
+        let fit = crate::linalg::solve::least_squares(xv.view(), q.column(j))?;
+        if fit.coefficients.iter().any(|c| c.is_nan()) {
+            return Err(EconError::SingularMatrix {
+                context: "promax: the varimax loadings are rank deficient".to_string(),
+                suggestion: "extract fewer factors".to_string(),
+            });
         }
+        u.column_mut(j).assign(&fit.coefficients);
     }
-
-    // Apply transformation: promax_loadings = varimax_loadings * T
-    let promax_loadings = matmul(&varimax_loadings.view(), &t_normalized.view())
-        .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
-
-    // Compute factor correlation matrix: Φ = T' T
-    let phi = matmul(&t_normalized.t().to_owned().view(), &t_normalized.view())
-        .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
-
-    Ok((promax_loadings, phi))
+    let utu = u.t().dot(&u);
+    let inv = crate::linalg::solve::sym_inverse(
+        utu.view(),
+        crate::linalg::solve::SingularPolicy::Error,
+        "promax U'U",
+    )?
+    .inverse;
+    let d: Vec<f64> = (0..k).map(|i| inv[[i, i]].sqrt()).collect();
+    let u = scale_columns(&u, &d);
+    Ok((xv.dot(&u), tv.dot(&u)))
 }
 
-/// Reorder loadings by variance explained (descending).
-fn reorder_loadings(loadings: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let (p, k) = loadings.dim();
+/// Factor correlations of an oblique rotation with rotation matrix `T`:
+/// `solve(T) solve(T)' = (T'T)^-1` (R's `factanal`).
+pub fn factor_correlation(rotmat: &Array2<f64>) -> EconResult<Array2<f64>> {
+    let ttt = rotmat.t().dot(rotmat);
+    let inv = crate::linalg::solve::sym_inverse(
+        ttt.view(),
+        crate::linalg::solve::SingularPolicy::Error,
+        "promax rotation matrix",
+    )?
+    .inverse;
+    // symmetric by construction; average away rounding
+    Ok((&inv + &inv.t()) / 2.0)
+}
 
-    // Compute variance (sum of squared loadings) for each factor
-    let mut variances: Vec<(usize, f64)> = (0..k)
-        .map(|j| {
-            let var: f64 = (0..p).map(|i| loadings[[i, j]].powi(2)).sum();
-            (j, var)
-        })
+/// The column order and signs of R's `sortLoadings` (`factanal`): columns by descending sum of
+/// squared loadings (stable), then each column with a negative sum negated. Returns the
+/// permutation `o` and the signs `s`: new column `j` is `s[j] * l[, o[j]]`.
+pub fn sort_order(l: &Array2<f64>) -> (Vec<usize>, Vec<f64>) {
+    let ss: Vec<f64> = l.columns().into_iter().map(|c| c.dot(&c)).collect();
+    let mut o: Vec<usize> = (0..l.ncols()).collect();
+    o.sort_by(|&a, &b| ss[b].total_cmp(&ss[a]));
+    let signs = o
+        .iter()
+        .map(|&j| if l.column(j).sum() < 0.0 { -1.0 } else { 1.0 })
         .collect();
+    (o, signs)
+}
 
-    variances.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut reordered = Array2::zeros((p, k));
-    for (new_j, (old_j, _)) in variances.iter().enumerate() {
-        for i in 0..p {
-            reordered[[i, new_j]] = loadings[[i, *old_j]];
-        }
+/// Apply a column order and signs (from [`sort_order`]) to the columns of `m`.
+pub fn permute_columns(m: &Array2<f64>, o: &[usize], signs: &[f64]) -> Array2<f64> {
+    let mut out = Array2::zeros((m.nrows(), o.len()));
+    for (j, (&src, &s)) in o.iter().zip(signs).enumerate() {
+        out.column_mut(j).assign(&(&m.column(src) * s));
     }
+    out
+}
 
-    Ok(reordered)
+/// R's `sortLoadings`: loadings sorted by SS loadings with positive column sums; the factor
+/// correlations get the same permutation P and signs D (`D P' phi P D`).
+pub fn sort_loadings(
+    l: Array2<f64>,
+    phi: Option<Array2<f64>>,
+) -> (Array2<f64>, Option<Array2<f64>>) {
+    let (o, signs) = sort_order(&l);
+    let sorted = permute_columns(&l, &o, &signs);
+    let phi = phi.map(|phi| {
+        let k = o.len();
+        Array2::from_shape_fn((k, k), |(a, b)| signs[a] * signs[b] * phi[[o[a], o[b]]])
+    });
+    (sorted, phi)
 }
 
 /// Compute communalities (h² = sum of squared loadings for each variable).
@@ -1436,6 +1416,7 @@ pub fn run_factanal(
 mod tests {
     use super::*;
     use ndarray::array;
+    use p2a_validation::{Case, Check, Tol};
 
     fn create_test_data() -> Array2<f64> {
         // Create data with known factor structure
@@ -1540,16 +1521,23 @@ mod tests {
             [0.35, 0.65]
         ];
 
-        let rotated = varimax_rotation(&loadings.view(), 100, 1e-6).unwrap();
+        let (rotated, t) = varimax(&loadings).unwrap();
 
-        // Rotated loadings should have same communalities
+        // Rotated loadings have the same communalities; T is orthogonal
         for i in 0..6 {
             let orig_h2: f64 = (0..2).map(|j| loadings[[i, j]].powi(2)).sum();
             let rot_h2: f64 = (0..2).map(|j| rotated[[i, j]].powi(2)).sum();
             assert!(
-                (orig_h2 - rot_h2).abs() < 0.01,
+                (orig_h2 - rot_h2).abs() < 1e-12,
                 "Communality changed after rotation"
             );
+        }
+        let tt = t.t().dot(&t);
+        for a in 0..2 {
+            for b in 0..2 {
+                let e = if a == b { 1.0 } else { 0.0 };
+                assert!((tt[[a, b]] - e).abs() < 1e-12);
+            }
         }
     }
 
@@ -1558,13 +1546,15 @@ mod tests {
         let data = create_test_data();
         let result = factanal(&data.view(), 2, RotationMethod::Promax, ScoresMethod::None).unwrap();
 
-        assert!(result.factor_correlation.is_some());
         let phi = result.factor_correlation.unwrap();
         assert_eq!(phi.dim(), (2, 2));
-
-        // Diagonal should be 1 (or close to 1)
-        assert!((phi[[0, 0]] - 1.0).abs() < 0.1);
-        assert!((phi[[1, 1]] - 1.0).abs() < 0.1);
+        // a correlation matrix: unit diagonal, symmetric
+        for a in 0..2 {
+            assert!((phi[[a, a]] - 1.0).abs() < 1e-12, "{phi:?}");
+            for b in 0..2 {
+                assert!((phi[[a, b]] - phi[[b, a]]).abs() < 1e-12);
+            }
+        }
     }
 
     #[test]
@@ -1609,38 +1599,154 @@ mod tests {
     /// print(result$uniquenesses)
     /// print(result$loadings)
     /// ```
+    fn rows(case: &Case, key: &str, k: usize) -> Array2<f64> {
+        let v = case.vector(key);
+        Array2::from_shape_vec((v.len() / k, k), v).unwrap()
+    }
+
+    fn flat(a: &Array2<f64>) -> Vec<f64> {
+        a.as_standard_layout().iter().copied().collect()
+    }
+
+    fn factanal_case() -> (Case, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case("stat_factanal_promax");
+        let cols: Vec<Vec<f64>> = (1..=12)
+            .map(|j| {
+                crate::data::columns::numeric_column(
+                    ds.df(),
+                    &format!("v{j}"),
+                    crate::data::columns::NaPolicy::Fail,
+                )
+                .unwrap()
+                .0
+            })
+            .collect();
+        let n = cols[0].len();
+        (case, Array2::from_shape_fn((n, 12), |(i, j)| cols[j][i]))
+    }
+
+    /// The normalised varimax criterion (the case's `vcrit`).
+    fn vcrit(l: &Array2<f64>) -> f64 {
+        let p = l.nrows() as f64;
+        let mut z = l.clone();
+        for mut row in z.rows_mut() {
+            let s = row.dot(&row).sqrt();
+            row.mapv_inplace(|v| (v / s).powi(2));
+        }
+        z.columns()
+            .into_iter()
+            .map(|c| c.dot(&c) - c.sum().powi(2) / p)
+            .sum()
+    }
+
+    #[test]
+    fn test_validate_factanal_rotation_promax() {
+        // Rotation alone, on R's own unrotated loadings: R's varimax at its optimum
+        // (eps = 1e-14) and promax's four lines (m = 4) on it, after sortLoadings' order and
+        // signs. R's default varimax iterate (eps 1e-5, keys rot_varimax etc.) is not read.
+        let case = Case::load("stat_factanal_promax");
+        let l0 = rows(&case, "rot_input", 3);
+        let (vm, vt) = varimax(&l0).unwrap();
+        let (pm, pt) = promax(&l0, 4.0).unwrap();
+        let (vo, vs) = sort_order(&vm);
+        let (po, ps) = sort_order(&pm);
+        let pt_sorted = permute_columns(&pt, &po, &ps);
+        let phi = factor_correlation(&pt_sorted).unwrap();
+        // the sorted phi equals sort_loadings' D P' phi P D of the unsorted one
+        let (_, phi_sorted) = sort_loadings(pm.clone(), Some(factor_correlation(&pt).unwrap()));
+        let phi_sorted = phi_sorted.unwrap();
+        for (a, b) in phi.iter().zip(phi_sorted.iter()) {
+            assert!((a - b).abs() < 1e-12, "{phi:?} vs {phi_sorted:?}");
+        }
+        let rot = Tol::iterative(1e-8);
+        Check::new(&case)
+            .vector(
+                "rot_varimax_tight",
+                &flat(&permute_columns(&vm, &vo, &vs)),
+                rot,
+            )
+            .vector(
+                "rot_varimax_rotmat_tight",
+                &flat(&permute_columns(&vt, &vo, &vs)),
+                rot,
+            )
+            .vector(
+                "rot_promax_tight",
+                &flat(&permute_columns(&pm, &po, &ps)),
+                rot,
+            )
+            .vector("rot_promax_rotmat_tight", &flat(&pt_sorted), rot)
+            .vector("rot_promax_phi_tight", &flat(&phi), rot)
+            .finish();
+        // not a different local optimum
+        let tight = case.scalar("rot_varimax_criterion_tight");
+        assert!(vcrit(&vm) >= tight - 1e-12, "{} < {tight}", vcrit(&vm));
+    }
+
     #[test]
     fn test_validate_factanal_against_r() {
-        let data = create_test_data();
-        let result = factanal(&data.view(), 2, RotationMethod::None, ScoresMethod::None).unwrap();
-
-        // The exact values depend on the random data, but we can check:
-        // 1. Uniquenesses should be in reasonable range (0.1 to 0.5 for well-structured data)
-        for &u in result.uniquenesses.iter() {
-            assert!(
-                u > 0.0 && u < 1.0,
-                "Uniqueness out of expected range: {}",
-                u
-            );
+        // factanal(X, 3, rotation = ..., control = list(opt = list(factr = 1, pgtol = 0)));
+        // p2a's fixed point with tolerance 1e-12. Iterative on both sides: 1e-4 relative
+        // (STAT-62's rule; R's default factr moves its own uniquenesses by 7.2e-6, and R's
+        // varimax inside factanal stops at eps 1e-5).
+        let (case, x) = factanal_case();
+        let fa = Tol::iterative(1e-4);
+        let mut c = Check::new(&case);
+        for (rot, key) in [
+            (RotationMethod::None, "none"),
+            (RotationMethod::Varimax, "varimax"),
+            (RotationMethod::Promax, "promax"),
+        ] {
+            let mut cfg = FactorAnalysisConfig::default();
+            cfg.n_factors = 3;
+            cfg.rotation = rot;
+            cfg.tolerance = 1e-12;
+            cfg.max_iter = 100_000;
+            let r = factanal_with_config(&x.view(), &cfg).unwrap();
+            assert!(r.converged, "{key}");
+            // deviation STAT-23: R's factanal stops varimax at eps 1e-5, up to 7.1e-4 from the
+            // varimax optimum (rot_varimax vs rot_varimax_tight), so loadings_varimax,
+            // loadings_promax, prop_var_varimax, prop_var_promax and promax_phi (R's default
+            // iterate) are not compared; the rotated fits are compared with R's rotations at the
+            // optimum (rot_*_tight, rotations of R's tight unrotated loadings).
+            let reference = match rot {
+                RotationMethod::None => "loadings_none".to_string(),
+                _ => format!("rot_{key}_tight"),
+            };
+            c.vector(&reference, &flat(&r.loadings), fa)
+                .vector("uniquenesses", &r.uniquenesses.to_vec(), fa)
+                // diag(Lambda Phi Lambda') = rowSums(L0^2), not rowSums(pattern^2)
+                .vector("communalities", &r.communalities.to_vec(), fa)
+                .scalar("statistic", r.chi_squared, fa)
+                .scalar("pval", r.p_value, fa)
+                .scalar("objective", r.objective, fa)
+                .scalar("dof", r.df as f64, Tol::exact());
+            if rot == RotationMethod::None {
+                c.vector("prop_var_none", &r.variance_proportions.to_vec(), fa);
+            } else {
+                // SS loadings / p of R's rotation at the optimum
+                let lr = rows(&case, &reference, 3);
+                for (j, &v) in r.variance_proportions.iter().enumerate() {
+                    let col = lr.column(j);
+                    let expected = col.dot(&col) / 12.0;
+                    assert!(
+                        fa.allows(v, expected),
+                        "{key} prop_var[{j}] {v} vs {expected}"
+                    );
+                }
+            }
+            match rot {
+                RotationMethod::Promax => {
+                    c.vector(
+                        "rot_promax_phi_tight",
+                        &flat(r.factor_correlation.as_ref().unwrap()),
+                        fa,
+                    );
+                }
+                _ => assert!(r.factor_correlation.is_none()),
+            }
         }
-
-        // 2. Each variable should load primarily on one factor
-        for i in 0..6 {
-            let l1 = result.loadings[[i, 0]].abs();
-            let l2 = result.loadings[[i, 1]].abs();
-            // One loading should be substantially larger than the other
-            let max_l = l1.max(l2);
-            assert!(
-                max_l > 0.3,
-                "Variable {} has low loadings: {}, {}",
-                i,
-                l1,
-                l2
-            );
-        }
-
-        // 3. Convergence check
-        assert!(result.converged, "Factor analysis did not converge");
+        c.finish();
     }
 
     fn generated(name: &str) -> crate::data::Dataset {
@@ -1648,8 +1754,28 @@ mod tests {
         crate::data::Dataset::new(crate::data::DataLoader::load_csv(p).unwrap())
     }
 
-    /// X-8: an Int64 column gives the result of its Float64 copy; a null or NaN cell is
-    /// refused as R's factanal() refuses NA (no R values: STAT-23 is open).
+    #[test]
+    fn test_rotation_and_scores_methods_parse_aliases_and_reject_unknown() {
+        RotationMethod::choices().validate().unwrap();
+        ScoresMethod::choices().validate().unwrap();
+        assert_eq!(
+            "Promax".parse::<RotationMethod>().unwrap(),
+            RotationMethod::Promax
+        );
+        assert_eq!(
+            "thomson".parse::<ScoresMethod>().unwrap(),
+            ScoresMethod::Regression
+        );
+        assert!(
+            "oblimin"
+                .parse::<RotationMethod>()
+                .unwrap_err()
+                .to_string()
+                .contains("varimax")
+        );
+        assert_eq!(RotationMethod::Promax.to_string(), "promax");
+    }
+
     #[test]
     fn test_na_factanal_columns() {
         use crate::data::Dataset;
