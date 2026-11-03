@@ -1,57 +1,46 @@
-//! Generate MCP tool documentation.
+//! Generate the MCP tool reference (`docs/mcp/tools-reference.md`) from the tool router.
 //!
 //! Run with: cargo run -p p2a-mcp --example generate_tool_docs
 
 use p2a_mcp::tools::{
-    ToolCategory, category_counts, generate_markdown_docs, get_registry, search_tools, tool_count,
+    ToolCategory, category_counts, generate_markdown_docs, get_registry, search_tools_scored,
+    tool_count,
 };
-use std::fs;
+use std::path::Path;
 
 fn main() {
     println!("MCP Tools Registry Summary");
     println!("==========================\n");
 
-    // Total count
     println!("Total tools: {}\n", tool_count());
 
-    // Category breakdown
     println!("Tools by Category:");
     let counts = category_counts();
-    let mut sorted: Vec<_> = counts.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
-    for (category, count) in sorted {
+    for category in ToolCategory::all() {
         println!(
             "  {:?}: {} tools - {}",
             category,
-            count,
+            counts.get(category).copied().unwrap_or(0),
             category.description()
         );
     }
+    println!();
 
-    println!("\n");
-
-    // Generate markdown docs
     let docs = generate_markdown_docs();
+    let output_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/mcp/tools-reference.md");
+    if let Err(e) = std::fs::write(&output_path, &docs) {
+        eprintln!("Failed to write {}: {e}", output_path.display());
+        std::process::exit(1);
+    }
+    println!("Documentation written to: {}", output_path.display());
 
-    // Write to file
-    let output_path = "docs/mcp/tools-reference.md";
-    if let Err(e) = fs::write(output_path, &docs) {
-        eprintln!("Failed to write docs to {}: {}", output_path, e);
-        // Print to stdout instead
-        println!("{}", docs);
-    } else {
-        println!("Documentation written to: {}", output_path);
+    println!("\nSearch Demo: top 5 for 'panel'");
+    for r in search_tools_scored("panel", None, 5) {
+        println!("  - {} (score {:.1})", r.tool.name, r.score);
     }
 
-    // Demo search
-    println!("\nSearch Demo:");
-    println!("Searching for 'panel'...");
-    for tool in search_tools("panel").iter().take(5) {
-        println!("  - {}: {}", tool.name, tool.description);
-    }
-
-    // Demo category filter
-    println!("\nRegression tools:");
+    println!("\nRegression tools (R counterpart):");
     for tool in get_registry()
         .iter()
         .filter(|t| t.category == ToolCategory::Regression)

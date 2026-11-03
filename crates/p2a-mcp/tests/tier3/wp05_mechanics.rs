@@ -388,3 +388,32 @@ async fn test_aliases_are_still_accepted() {
     );
     assert_eq!(text(&canonical), text(&aliased));
 }
+
+/// GET /api/tools lists the tools sorted by name, the same in every call (before: HashMap
+/// order, different in every process).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tool_list_is_sorted_and_stable() {
+    let (app, _state) = http_app().await;
+    let get = |app: axum::Router| async move {
+        use tower::ServiceExt;
+        let req = axum::http::Request::get("/api/tools")
+            .header("host", "localhost")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let b = axum::body::to_bytes(app.oneshot(req).await.unwrap().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let a = get(app.clone()).await;
+    let mut sorted = a.clone();
+    sorted.sort();
+    assert_eq!(a, sorted);
+    assert_eq!(a, get(app).await);
+}

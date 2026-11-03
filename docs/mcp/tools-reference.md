@@ -1,257 +1,423 @@
 # MCP Tools Reference
 
-Total tools: 106
+Generated from the MCP tool router by `cargo run -p p2a-mcp --example generate_tool_docs`; do not edit by hand.
 
-## Data
+Total tools: 270
+
+## Data (8 tools)
 
 *Data loading, listing, describing, and export*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `list_datasets` | List all loaded datasets with dimensions and column types | ls() |
-| `load_dataset` | Load data from CSV, Parquet, Excel, Stata, or SAS files | read.csv, read_parquet, read_dta |
-| `export_dataset` | Export dataset to CSV, Parquet, or JSON format | write.csv, write_parquet |
-| `create_dataset` | Create dataset from inline CSV content | - |
-| `describe_dataset` | Get descriptive statistics for all columns | summary() |
-| `head_dataset` | Preview first N rows of a dataset | head() |
-| `compare_datasets` | Compare two datasets for differences | all.equal() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `compare_datasets` | Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after). | all.equal() |
+| `create_dataset` | Create a dataset directly from CSV content provided as a string. Useful for creating small datasets without file I/O. CSV text "NA" and empty fields are read as missing (set na_strings to change this). | - |
+| `describe_dataset` | Get summary statistics for a loaded dataset including column types, null counts, and basic statistics for numeric columns. | summary() |
+| `export_dataset` | Export a loaded dataset to a file. Supports CSV, Parquet, and JSON formats. The format is determined by the file extension or can be explicitly specified. | write.csv, write_parquet |
+| `head_dataset` | Preview the first N rows of a loaded dataset (default: 5 rows). Returns data in a formatted table. | head() |
+| `list_datasets` | List all currently loaded datasets with their basic information (name, dimensions, column types). | ls() |
+| `load_dataset` | Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. CSV text "NA" and empty fields are read as missing (set na_strings to change this). Returns dataset information including dimensions and column types. A declared file_type must match the extension. | read.csv, read_parquet, read_dta |
+| `upload_dataset` | Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV and Parquet formats. A declared file_type must match the extension. | - |
 
-## Cleaning
+## Cleaning (10 tools)
 
 *Data quality profiling, cleaning sessions, rollback*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `data_quality_profile` | Generate quality profile: missing values, outliers, duplicates | - |
-| `suggest_cleaning` | Get AI-powered cleaning suggestions with priorities | - |
-| `preview_cleaning` | Preview cleaning operation without applying | - |
-| `verify_cleaning` | Verify cleaning results match expectations | - |
-| `cleaning_session_start` | Start a cleaning session with checkpoints | - |
-| `cleaning_session_apply` | Apply a cleaning operation within session | - |
-| `cleaning_rollback` | Rollback to previous checkpoint | - |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `cleaning_rollback` | Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation). | - |
+| `cleaning_session_apply` | Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed. | - |
+| `cleaning_session_checkpoints` | List all checkpoints in a cleaning session, showing the state at each point. | - |
+| `cleaning_session_start` | Start a new cleaning session for a dataset. Returns a session ID that can be used to track progress, apply operations, and rollback changes. Each session maintains checkpoints for undo capability. | - |
+| `cleaning_session_status` | Get the current status of a cleaning session, including checkpoint count, operations performed, current row count, and completeness score. | - |
+| `data_quality_profile` | Generate a comprehensive data quality profile for LLM-assisted data cleaning. Returns column-level statistics (nulls, uniques, types), numeric outlier detection, string pattern analysis, and automated issue detection with severity ratings. | - |
+| `list_cleaning_sessions` | List all active cleaning sessions with their current status. | - |
+| `preview_cleaning` | Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter. | - |
+| `suggest_cleaning` | Analyze a dataset and generate prioritized cleaning suggestions. Returns specific operations with parameters, estimated impact, and reasoning. Use this to get intelligent recommendations before starting a cleaning workflow. | - |
+| `verify_cleaning` | Verify a cleaning operation by comparing the original and cleaned datasets. Returns a detailed report with row counts, quality delta (completeness change, issues resolved/introduced), and sample changes. | - |
 
-## Munging
+## Munging (34 tools)
 
 *Data transformation: filter, join, pivot, mutate*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `munge_filter` | Filter rows based on conditions | dplyr::filter() |
-| `munge_select` | Select specific columns | dplyr::select() |
-| `munge_mutate` | Create or modify columns with expressions | dplyr::mutate() |
-| `munge_join` | Join two datasets (left, inner, full) | dplyr::left_join() |
-| `munge_pivot` | Reshape from long to wide format | tidyr::pivot_wider() |
-| `munge_melt` | Reshape from wide to long format | tidyr::pivot_longer() |
-| `munge_group_by` | Group data and compute aggregations | dplyr::group_by() %>% summarize() |
-| `munge_drop_na` | Remove rows with missing values | tidyr::drop_na() |
-| `munge_fill_na` | Fill missing values with specified strategy | tidyr::fill() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `batch_process` | Run the same analysis (describe, correlation, or OLS regression) on multiple datasets at once. Useful for comparing results across datasets or processing survey waves. | - |
+| `munge_bin` | Bin a numeric column into intervals as R's cut(): missing values and values outside the edges get NA (null), intervals are (a, b] unless right = false, include_lowest closes the outer edge. Strategies: 'uniform' (equal width; the range is widened by 0.1% as cut(x, n)), 'quantile' (type-7 quantile edges, open outer bins), 'custom' (strictly increasing break points). The reply lists the edges, the rows per bin and the NA rows. | cut() |
+| `munge_cast` | Cast column(s) to int, float, string or bool. Text is parsed as R's as.numeric/as.integer/as.logical do (trimmed; '3.7' to int is 3); text that cannot be parsed becomes missing and the reply says how many values (strict = true refuses instead). Use after cleaning sentinel values. | as.numeric(), as.integer(), as.character(), as.logical() |
+| `munge_concat` | Concatenate (row-bind) multiple datasets vertically. All datasets must have the same columns. | rbind() |
+| `munge_deduplicate` | Remove duplicate rows from a dataset. Specify which duplicate to keep: 'first', 'last', or 'none'. | dplyr::distinct() |
+| `munge_diff` | Compute differences or percent changes for a column. Useful for time series and panel data analysis. | diff() |
+| `munge_drop_columns` | Drop (remove) specific columns from a dataset. | dplyr::select() |
+| `munge_drop_na` | Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null. | tidyr::drop_na() |
+| `munge_fill_na` | Fill missing values (null, and NaN in float columns) using a strategy: 'mean', 'median', 'forward', 'backward', 'zero', or a constant value. Mean and median use the observed values; a column with no observed value is an error. | tidyr::fill() |
+| `munge_filter` | Filter rows in a dataset based on a column condition. Supports operators: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'. The value is parsed based on the column type. | dplyr::filter() |
+| `munge_group_by` | Group a dataset by columns and compute aggregations. Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'. | dplyr::group_by() %>% summarize() |
+| `munge_join` | Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types. | dplyr::left_join() |
+| `munge_lag_lead` | Create lag or lead columns for time series or panel data. Lag shifts values forward (past values), lead shifts values backward (future values). | dplyr::lag(), dplyr::lead() |
+| `munge_melt` | Melt a dataset from wide to long format. ID variables remain as-is, value variables are unpivoted into rows. | tidyr::pivot_longer() |
+| `munge_mutate` | Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values. Operands must be numeric or boolean columns; convert text columns with munge_cast first. | dplyr::mutate() |
+| `munge_one_hot_encode` | One-hot encode a categorical column, creating binary indicator columns for each category. Use drop_first=true to avoid multicollinearity in regression. | model.matrix() |
+| `munge_pivot` | Pivot a dataset from long to wide format. Index columns remain as rows, 'on' column values become new column names, and 'values' column fills those columns. | tidyr::pivot_wider() |
+| `munge_rename` | Rename columns in a dataset. Provide pairs of [old_name, new_name]. | dplyr::rename() |
+| `munge_sample` | Randomly sample rows from a dataset. Useful for creating training/test splits or working with large datasets. | dplyr::slice_sample() |
+| `munge_select` | Select (keep) specific columns from a dataset, dropping all others. | dplyr::select() |
+| `munge_sort` | Sort a dataset by one or more columns in ascending or descending order. | dplyr::arrange() |
+| `munge_standardize` | Standardize (z-score) or normalize (0-1 range) numeric columns. Standardize subtracts mean and divides by std. Normalize scales to [0, 1]. | scale() |
+| `munge_value_counts` | Compute frequency counts for unique values in a column. Optionally normalize to percentages. | table() |
+| `str_concat` | Concatenate multiple string columns into a new column, optionally with a separator between values. | paste() |
+| `str_length` | Create a new column containing the length (number of characters) of each string in the source column. | nchar() |
+| `str_regex_count` | Count the number of times a regex pattern matches in each row, creating a new integer column with the counts. | stringr::str_count() |
+| `str_regex_extract` | Extract substrings matching a regex pattern into a new column. Use capture groups () to specify what to extract, or extract the whole match. | stringr::str_extract() |
+| `str_regex_replace` | Replace substrings matching a regex pattern with a replacement string. Supports capture groups ($1, $2, etc.) in the replacement. | gsub() |
+| `str_replace_value` | Replace exact values in a column with a new value. Use to clean sentinel values like -99, 'N/A', or 'missing' by replacing them (use null as new_value to convert to missing). For pattern-based replacement, use str_regex_replace. Call this directly — do NOT call head_dataset or describe_dataset first. | - |
+| `str_split` | Split a string column by a pattern (supports regex) into multiple columns named prefix_0, prefix_1, etc. | tidyr::separate() |
+| `str_substring` | Extract a substring from each string in a column. Supports negative indices to count from end. | substr() |
+| `str_to_lowercase` | Convert all characters in a string column to lowercase. | tolower() |
+| `str_to_uppercase` | Convert all characters in a string column to uppercase. | toupper() |
+| `str_trim` | Trim leading and trailing whitespace from string columns. If no columns specified, trims all string columns. | trimws() |
 
-## Descriptive
+## Descriptive (12 tools)
 
 *Descriptive statistics, correlation, ANOVA*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `compute_correlation` | Compute the Pearson correlation matrix for all numeric columns in a dataset. | cor() |
+| `descriptive_isoreg` | Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed. Missing values are refused, as R's isoreg does. | isoreg() |
+| `descriptive_medpolish` | Run Tukey's Median Polish for robust two-way decomposition of a matrix. Fits an additive model (constant + row effects + column effects + residuals) iteratively using medians instead of means, making it resistant to outliers. Returns the overall effect, row effects, column effects, and residuals. Useful for exploratory data analysis of two-way tables. | medpolish() |
+| `stats_approx` | Linear or constant (step function) interpolation between data points. Handles points outside the data range with NA or nearest value. Equivalent to R's approx(). | approx() |
+| `stats_cov_wt` | Compute the weighted covariance matrix for a set of numeric columns. Can use unbiased (reliability) or ML weighting. Equivalent to R's cov.wt(). Missing values are refused, as R's cov.wt does. | cov.wt() |
+| `stats_density` | Estimate the probability density function using kernel density estimation. Supports multiple kernel functions and automatic bandwidth selection. Equivalent to R's density(). | density() |
+| `stats_ecdf` | Compute the empirical cumulative distribution function (ECDF) for a numeric column. Returns step function values at data points or specified evaluation points. Equivalent to R's ecdf(). | ecdf() |
+| `stats_fivenum` | Compute Tukey's five-number summary: minimum, lower-hinge (Q1), median, upper-hinge (Q3), and maximum. Equivalent to R's fivenum(). | fivenum() |
+| `stats_iqr` | Compute the interquartile range (Q3 - Q1) of a numeric column. Supports different quantile types (1-9). Equivalent to R's IQR(). | IQR() |
+| `stats_mad` | Compute the median absolute deviation (MAD), a robust measure of dispersion. By default, scaled by 1.4826 for consistency with the standard deviation of normal distributions. Equivalent to R's mad(). | mad() |
+| `stats_spline` | Fit a cubic spline through data points for smooth interpolation. Supports natural, FMM (Forsythe-Malcolm-Moler), periodic, and monotone (Hyman) splines. Equivalent to R's spline(). | spline() |
+| `stats_weighted_mean` | Compute the weighted arithmetic mean of a numeric column. Equivalent to R's weighted.mean(). With na_rm (default) a row whose value or weight is missing is dropped as a pair and reported under missing; with na_rm = false a missing value or weight is an error. | weighted.mean() |
 
-## Statistics
+## Statistics (34 tools)
 
 *Hypothesis tests, power analysis, multivariate*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `hypothesis_t_test` | One-sample, two-sample, or paired t-test | t.test() |
-| `hypothesis_wilcoxon` | Wilcoxon rank-sum or signed-rank test | wilcox.test() |
-| `hypothesis_chisq_gof` | Chi-squared goodness of fit test | chisq.test() |
-| `anova_one_way` | One-way ANOVA | aov() |
-| `power_t_test` | Power analysis for t-tests | power.t.test() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `anova_manova` | Run Multivariate Analysis of Variance (MANOVA) to test whether group means differ across multiple response variables simultaneously. Returns four test statistics: Wilks' Lambda (most popular), Pillai's Trace (most robust, default), Hotelling-Lawley Trace, and Roy's Largest Root. Each with approximate F-statistic and p-value. Use when you have 2+ continuous response variables and want to test group differences while accounting for correlations between responses. | manova() |
+| `anova_one_way` | Run one-way Analysis of Variance (ANOVA) to test whether means differ across groups. Returns F-statistic, p-value, effect sizes (eta-squared, omega-squared), and group statistics. Use when comparing a continuous response variable across 2+ categorical groups. | aov() |
+| `anova_tukey_hsd` | Run Tukey's HSD post-hoc test after one-way ANOVA to perform pairwise comparisons between all group means. Controls for family-wise error rate using the Studentized range distribution. Returns: difference in means, confidence interval, and adjusted p-value for each pair. Use this after finding a significant ANOVA result to identify which specific groups differ. | TukeyHSD() |
+| `anova_two_way` | Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction on a response variable. Returns F-statistics and p-values for each factor and the interaction term. Use for factorial experimental designs. ss_type: 'I' (default, sequential as R aov), 'II' or 'III' (as car::Anova). Rows with missing values are dropped and reported. | aov() |
+| `hypothesis_bartlett_test` | Run Bartlett's test for homogeneity of variances across groups. Tests H₀: all group variances are equal. Suitable for checking the equal variance assumption before ANOVA. Note: Sensitive to non-normality; use Levene's test if data may be non-normal. Returns: K-squared statistic, df, p-value, and group-wise variance estimates. | bartlett.test() |
+| `hypothesis_chisq_gof` | Run Pearson's chi-squared goodness-of-fit test (R chisq.test(table(x), p = ...)) to check if observed category frequencies match expected probabilities. Tests H₀: observed frequencies follow the expected distribution. Each distinct non-missing value of the column is a category; rows with a missing value are dropped and reported under missing. Give the expected probabilities either as probs, one per category in the order of the sorted category labels (numbers numerically, text in C-locale order; the result's categories lists that order), or as expected, a category -> probability map in which categories that never occur in the data count as 0 (e.g. all six faces of a die); omit both for the uniform distribution. Returns chi-squared statistic, p-value, degrees of freedom, the categories with observed and expected counts and Pearson residuals, and R's warning when an expected count is below 5. | chisq.test() |
+| `hypothesis_chisq_independence` | Run Pearson's chi-squared test of independence (R chisq.test(table(x, y))) to check if two categorical variables are independent. Creates a contingency table from two columns and tests H₀: row and column variables are independent. Rows with a missing value in either column are dropped (R table()) and reported under missing; the levels are sorted (numbers numerically, text in C-locale order) and returned as row_levels and col_levels. For 2×2 tables, Yates' continuity correction is applied by default. Returns chi-squared statistic, p-value, degrees of freedom, observed and expected counts and residuals in row_levels x col_levels order, and R's warning 'Chi-squared approximation may be incorrect' when an expected count is below 5. | chisq.test() |
+| `hypothesis_cor_test` | Test for association between paired samples using Pearson, Spearman, or Kendall correlation. Returns correlation coefficient, test statistic, p-value, and confidence interval (for Pearson). Pearson measures linear association; Spearman and Kendall measure monotonic association and are robust to outliers. | cor.test() |
+| `hypothesis_fisher_exact` | Run Fisher's exact test for a 2×2 contingency table built from two columns, as R fisher.test. Tests independence between two binary categorical variables using exact probability calculations (hypergeometric distribution). More accurate than chi-squared test for small samples. Rows with a missing value in either column are dropped (R table()); the levels are sorted (numbers numerically, text in C-locale order) and returned as row_levels and col_levels. Returns the p-value, the conditional MLE odds ratio and (with conf_level) the exact conditional CI as R fisher.test (one-sided for 'less'/'greater'), the sample odds ratio and the level labels; infinite values are the string "Inf". Use when expected cell counts are small (<5) or when exact p-values are needed. | fisher.test() |
+| `hypothesis_friedman` | Run Friedman rank sum test for unreplicated blocked data. Non-parametric alternative to one-way repeated measures ANOVA. Tests whether treatments have equal effects across blocks. Returns Q statistic, degrees of freedom, p-value, and rank statistics per treatment. | friedman.test() |
+| `hypothesis_kruskal_wallis` | Run Kruskal-Wallis rank sum test - the non-parametric alternative to one-way ANOVA. Tests whether samples from two or more groups have the same median. Uses chi-squared approximation with tie correction. Returns H statistic, degrees of freedom, p-value, and rank statistics per group. | kruskal.test() |
+| `hypothesis_ks_test` | Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs) and p-value. A small p-value suggests the distributions differ. | ks.test() |
+| `hypothesis_mantelhaen` | Run Cochran-Mantel-Haenszel test for conditional independence in stratified 2×2 tables (R mantelhaen.test(table(x, y, stratum))). Tests whether two binary variables are associated while controlling for a third (stratum) variable. Rows with a missing value in any of the three columns are dropped (R table()) and reported under missing; levels are sorted (numbers numerically, text in C-locale order) and returned as row_levels and col_levels. Returns CMH chi-squared statistic, p-value, common odds ratio estimate with confidence interval, and per-stratum statistics. | mantelhaen.test() |
+| `hypothesis_mcnemar` | Run McNemar's chi-squared test for paired nominal data. Tests symmetry in a 2x2 contingency table. Commonly used for comparing two classifiers or before/after studies. Only requires the discordant cells (b and c). | mcnemar.test() |
+| `hypothesis_mood_test` | Run Mood's two-sample test for comparing scale parameters between two independent samples. Tests H₀: scale ratio = 1 (equal scales) using squared rank deviations from the mean rank. Non-parametric alternative to F-test for variance comparison. Handles ties using Mielke (1967) variance correction. Returns Z-statistic, p-value, and sample sizes. | mood.test() |
+| `hypothesis_oneway` | Run Welch's one-way ANOVA test - compares means of multiple groups without assuming equal variances. This is more robust than standard ANOVA when variances differ. Returns F statistic, numerator and denominator degrees of freedom, p-value, and group statistics. | oneway.test() |
+| `hypothesis_pairwise_t_test` | Run pairwise t-tests between all group levels with p-value adjustment for multiple comparisons. Post-hoc analysis after ANOVA. Options: pool_sd=true uses pooled variance (Student's), false uses Welch's (default). Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs. | pairwise.t.test() |
+| `hypothesis_pairwise_wilcox` | Run pairwise Wilcoxon rank sum tests between all group levels with p-value adjustment. Non-parametric post-hoc analysis after Kruskal-Wallis test. Does not assume normality. Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs. | pairwise.wilcox.test() |
+| `hypothesis_poisson` | Run exact Poisson test for rate parameters. One-sample test: tests whether the rate equals a hypothesized value. Two-sample test: compares the ratio of two rates. Returns test statistic, p-value, rate estimate (or ratio), and confidence interval. | poisson.test() |
+| `hypothesis_prop_trend_test` | Test for trend in proportions across ordered groups (Cochran-Armitage test). Tests whether proportions increase or decrease linearly with group scores. Commonly used in dose-response studies. Returns chi-squared statistic with 1 df and p-value. Successes and trials are whole non-negative counts, one row per group; a group with a missing count is dropped and reported under missing, and the other groups keep their scores. | prop.trend.test() |
+| `hypothesis_quade` | Run Quade test for unreplicated blocked data. Similar to Friedman test but uses weighted rankings based on block ranges, making it more powerful when block effects vary. Returns F statistic, degrees of freedom, p-value, and treatment statistics. Requires complete blocks (one observation per treatment per block). | quade.test() |
+| `hypothesis_shapiro_wilk` | Run the Shapiro-Wilk test for normality. Tests the null hypothesis that a sample came from a normally distributed population. Returns W statistic (values close to 1 indicate normality) and p-value. Sample size must be between 3 and 5000. A small p-value (e.g., < 0.05) suggests data is not normally distributed. | shapiro.test() |
+| `hypothesis_t_test` | Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: pass x and y as two numeric columns to compare (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate. Note: x and y must both be numeric columns. To compare a numeric variable across groups (e.g., salary by gender), first filter into two datasets or use two numeric columns. Missing values are dropped as R's t.test does (each sample on its own; complete pairs when paired) and reported in a 'Missing values' line. Integer columns are accepted. | t.test() |
+| `hypothesis_wilcoxon` | Run Wilcoxon non-parametric test for location. Supports: (1) One-sample signed rank test: test if median differs from hypothesized value, (2) Two-sample rank sum test (Mann-Whitney U): compare distributions between two groups, (3) Paired signed rank test: compare matched pairs. Does not assume normality. Returns W/V statistic, p-value, and optionally confidence interval and location estimate. | wilcox.test() |
+| `multivariate_cancor` | Run Canonical Correlation Analysis (CCA) to find linear combinations of two sets of variables that have maximum correlation with each other. Returns canonical correlations (in decreasing order), coefficients for X variables (xcoef), and coefficients for Y variables (ycoef). The canonical variates are X*xcoef and Y*ycoef. Useful for multivariate dimensionality reduction, identifying relationships between variable sets, and understanding shared variance. | cancor() |
+| `multivariate_factanal` | Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables. Models correlation structure as x = Λf + e where Λ is the loadings matrix, f are factor scores, and e is error. Returns loadings matrix, uniquenesses (specific variances), communalities (variance explained per variable), variance proportions, chi-squared goodness-of-fit test, and optionally factor scores. Supports varimax (orthogonal) and promax (oblique) rotation. | factanal() |
+| `multivariate_mahalanobis` | Compute squared Mahalanobis distance for each observation. The Mahalanobis distance measures how far each observation is from the center of the distribution, accounting for correlations between variables. Useful for outlier detection, multivariate normality assessment, and cluster analysis. Returns squared distances (D²) which follow a chi-squared distribution with p degrees of freedom under multivariate normality. | mahalanobis() |
+| `power_anova_test` | Compute power or sample size for balanced one-way ANOVA. Given 4 of {groups, n, between_var, within_var, sig_level, power}, computes the 5th. Use for study design comparing means across multiple groups. | power.anova.test() |
+| `power_prop_test` | Compute power or sample size for two-sample proportion tests. Given 4 of {n, p1, p2, sig_level, power}, computes the 5th. Use for study design comparing proportions between two groups. | power.prop.test() |
+| `power_t_test` | Compute power or sample size for t-tests. Given 4 of {n, delta, sd, sig_level, power}, computes the 5th. Use for study design to determine required sample size for desired power, or to compute power for a given sample size. Supports one-sample, two-sample, and paired t-tests. | power.t.test() |
+| `stats_loglin` | Fit log-linear models to multi-way contingency tables using iterative proportional fitting (IPF). Tests association and independence patterns. Equivalent to R's loglin(). Takes long-form data (one row per cell or observation); rows with missing values are dropped as xtabs does. | loglin() |
+| `stats_mauchly_test` | Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test(). Uses the first-order chi-square approximation of the p-value (R's mauchly.test adds a second-order term). Subjects with a missing value are dropped and reported under missing; sphericity_violated is null when the p-value cannot be computed. | mauchly.test() |
+| `stats_model_tables` | Compute cell means or effects tables from one-way or two-way ANOVA. Returns group means or deviations from grand mean with optional standard errors. Equivalent to R's model.tables(). | model.tables() |
+| `stats_se_contrast` | Compute standard errors for linear contrasts of group means from one-way ANOVA. Can use custom contrasts or generate standard ones (treatment, Helmert, sum, polynomial). Equivalent to R's se.contrast(). | se.contrast() |
 
-## Regression
+## Regression (25 tools)
 
 *OLS, GLS, NLS, quantile, robust standard errors*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `regression_ols` | OLS regression with optional robust standard errors (HC0-HC3) | lm(), sandwich::vcovHC() |
-| `regression_clustered` | OLS with clustered standard errors | sandwich::vcovCL() |
-| `regression_hac` | HAC (Newey-West) standard errors for time series | sandwich::vcovHAC() |
-| `regression_gls` | Generalized least squares with AR1 or custom correlation | nlme::gls() |
-| `regression_nls` | Nonlinear least squares (Levenberg-Marquardt) | nls() |
-| `regression_quantreg` | Quantile regression (interior point/simplex) | quantreg::rq() |
-| `regression_loess` | Local polynomial regression (LOESS/LOWESS) | loess() |
-| `regression_diagnostics` | Regression diagnostics: VIF, Breusch-Pagan, Durbin-Watson | car::vif(), lmtest::bptest() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `evalue` | Compute E-values for sensitivity analysis to unmeasured confounding (VanderWeele & Ding 2017). The E-value is the minimum strength of association that an unmeasured confounder would need with both treatment and outcome to fully explain away an observed effect. Supports risk ratios (RR), odds ratios (OR), hazard ratios (HR), standardized mean differences (SMD), and risk differences (RD). A large E-value means considerable confounding would be needed to explain away the effect. Returns E-value for point estimate and confidence interval limit closest to null. | EValue package |
+| `marginal_effects` | Compute average marginal effects (AME) from regression models. For OLS, marginal effects equal coefficients. For Logit/Probit, effects are averaged across observations accounting for nonlinearity. Returns effects, standard errors, z-values, p-values, and confidence intervals. | marginaleffects::avg_slopes() |
+| `regression_bgtest` | Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value. | lmtest::bgtest() |
+| `regression_bootstrap_cov` | Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable. | sandwich::vcovBS() |
+| `regression_clustered` | Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors. Rows with a missing cluster id are dropped and the model is re-estimated on the remaining rows (as fixest); the output reports how many. | sandwich::vcovCL() |
+| `regression_cv_glmnet` | Run cross-validated elastic net/lasso/ridge regression to select optimal lambda. Returns lambda.min (minimum CV error) and lambda.1se (most regularized within 1 SE of minimum). | glmnet::cv.glmnet() |
+| `regression_diagnostics` | Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number. | car::vif(), lmtest::bptest() |
+| `regression_driscoll_kraay` | Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values. time_col must hold whole numbers or dates; rows with a missing time id are dropped and the model is re-estimated (reported in the output). | plm::vcovSCC() |
+| `regression_glmnet` | Run regularized regression with elastic net penalty (glmnet). Combines L1 (lasso) and L2 (ridge) penalties. Set alpha=1 for lasso, alpha=0 for ridge, or 0<alpha<1 for elastic net. Returns coefficient path along lambda sequence. | glmnet::glmnet() |
+| `regression_gls` | Fit a Generalized Least Squares (GLS) regression model. GLS extends OLS to handle correlated or heteroscedastic errors. Correlation structures: 'ar1' (autoregressive), 'compound_symmetry' (equal correlation), 'identity' (OLS). For AR(1), rho can be specified or auto-estimated from OLS residuals. Returns coefficients, standard errors, t-values, p-values, and model fit statistics. | nlme::gls() |
+| `regression_hac` | Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection. | sandwich::vcovHAC() |
+| `regression_harvtest` | Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest(). | lmtest::harvtest() |
+| `regression_lasso` | Run lasso regression (L1-penalized linear regression). Shortcut for glmnet with alpha=1. Performs automatic feature selection by shrinking some coefficients to zero. | glmnet::glmnet(alpha = 1) |
+| `regression_line` | Tukey's resistant line - robust regression using medians instead of means, making it resistant to outliers. Divides data into three groups and uses group medians to determine slope and intercept. Returns coefficients, fitted values, and residuals. | line() |
+| `regression_loess` | Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters. | loess() |
+| `regression_nls` | Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info. | nls() |
+| `regression_ols` | Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. Standard errors default to HC1 (heteroskedasticity-robust); set cov_type = 'standard' for classical, or 'hc0', 'hc2', 'hc3'. Set intercept = false to omit the intercept. For comparing group means with a single categorical predictor, consider anova_one_way instead. | lm(), sandwich::vcovHC() |
+| `regression_quantreg` | Run quantile regression to estimate conditional quantiles instead of conditional means. Useful when the relationship varies across the distribution, or when the error distribution is non-Gaussian. Can estimate single quantile (tau) or multiple quantiles simultaneously. | quantreg::rq() |
+| `regression_resettest` | Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed. | lmtest::resettest() |
+| `regression_ridge` | Run ridge regression (L2-penalized linear regression). Shortcut for glmnet with alpha=0. Useful when predictors are highly correlated. | glmnet::glmnet(alpha = 0) |
+| `regression_smooth_spline` | Fit a smoothing spline to data. Smoothing splines balance goodness-of-fit against smoothness using a penalty on curvature. The smoothing parameter (spar) or degrees of freedom (df) controls the tradeoff. If neither is specified, uses generalized cross-validation (GCV) to automatically select optimal smoothing. Returns fitted values, effective degrees of freedom, and GCV score. | smooth.spline() |
+| `regression_step` | Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history. | step() |
+| `regression_supsmu` | Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns smoothed y values and can handle periodic data. | supsmu() |
+| `regression_waldtest` | Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications. | lmtest::waldtest() |
+| `sensemakr` | Run sensitivity analysis for unmeasured confounding (Cinelli & Hazlett 2020). Computes robustness value (RV) - the minimum confounding strength needed to nullify the treatment effect. Key outputs: (1) Partial R²: how much variance treatment explains in outcome, (2) RV_q: confounding needed to reduce effect by q%, (3) RV_alpha: confounding needed to make effect insignificant, (4) Benchmark bounds: adjusted estimates under various confounding scenarios. Essential for causal inference to assess how robust findings are to unmeasured confounding. | sensemakr::sensemakr() |
 
-## Panel
+## Panel (9 tools)
 
 *Fixed effects, random effects, Hausman, GMM, HDFE*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `panel_fixed_effects` | Fixed effects (within) estimator | plm::plm(model='within') |
-| `panel_random_effects` | Random effects (GLS) estimator | plm::plm(model='random') |
-| `hausman_test` | Hausman specification test (FE vs RE) | plm::phtest() |
-| `panel_hdfe` | High-dimensional fixed effects (multiple FE) | fixest::feols() |
-| `panel_gmm` | Arellano-Bond dynamic panel GMM | plm::pgmm() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `hausman_test` | Run Hausman specification test to choose between Fixed Effects and Random Effects, using the classical FE and RE covariances as plm::phtest. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects. | plm::phtest() |
+| `panel_fixed_effects` | Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers. Controls ONE fixed effect dimension. For multiple simultaneous FEs (e.g., firm + year), use panel_hdfe instead. Standard errors are classical by default (as plm); set vcov = 'cluster' for entity-clustered (Arellano) standard errors. | plm::plm(model='within') |
+| `panel_gls` | Run Panel GLS (Feasible Generalized Least Squares) for panel data with heteroskedasticity and/or cross-sectional correlation. Supports fixed effects GLS, pooled GLS, and first-difference GLS. More efficient than standard FE/RE when error structure is known. | plm::pggls() |
+| `panel_gmm` | Arellano-Bond difference GMM for dynamic panels, as R plm::pgmm(transformation = 'd'). Equations exist where y is observed at t, ..., t-lags-1 (time in steps of 1; gaps and late entry are handled; repeated (entity, time) rows are an error). GMM instruments are the observed lags y_{t-min_lag} ... y_{t-max_lag} (block-diagonal by period, or collapsed), and the exogenous x enter in differences. One-step (H-weighted) or two-step (default) estimates. Standard errors: one-step robust or Arellano-Bond (1991) classical; two-step Windmeijer (2005)-corrected (default) or uncorrected. Reports the Sargan/Hansen test (plm::sargan) and the robust Arellano-Bond AR(1)/AR(2) tests. Rows with missing values are dropped and reported. System GMM (transform='system') is not implemented yet: it runs difference GMM with a warning. | plm::pgmm() |
+| `panel_hdfe` | Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe. | fixest::feols() |
+| `panel_pmg` | Run Mean Group (MG) estimator (Pesaran & Smith 1995) for heterogeneous panel data. Computes simple average of individual-specific OLS estimates across entities. Equivalent to PVCM with 'within' model type. | plm::pmg() |
+| `panel_pvcm` | Run Variable Coefficients Model (PVCM) for heterogeneous panel data. Allows slope coefficients to vary across entities. Two modes: 'within' runs separate OLS per entity, 'random' (Swamy 1970) computes a GLS weighted average. Also computes homogeneity test for coefficient equality. | plm::pvcm() |
+| `panel_random_effects` | Run Random Effects (Swamy-Arora GLS) panel regression, as plm::plm(model = 'random'). Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds. Standard errors are classical by default (as plm), with z statistics and a Wald chi-squared test of the slopes; set vcov = 'cluster' for entity-clustered (Arellano) standard errors. | plm::plm(model='random') |
+| `panel_unit_root` | Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity. Unit ids may be text or numbers; time must hold whole numbers or dates; repeated (unit, time) rows are an error; gaps are joined in time order as plm::purtest does (reported); rows with missing values are dropped and reported. | plm::purtest() |
 
-## IV
+## IV (6 tools)
 
 *Instrumental variables, 2SLS, Sargan, bounds*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `iv_2sls` | Two-stage least squares IV regression | AER::ivreg() |
-| `iv_first_stage` | First-stage diagnostics: F-stat, partial R² | lmtest::waldtest() |
-| `iv_sargan_test` | Sargan overidentification test | AER::summary.ivreg() |
-| `bp_bounds` | Balke-Pearl bounds for IV with binary outcomes | bpbounds package |
-| `iv_mte` | Marginal treatment effects for IV | ivmte package |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `bp_bounds` | Compute Balke-Pearl bounds for nonparametric IV analysis. Provides sharp bounds on the Average Causal Effect (ACE) without parametric assumptions. All three variables (instrument Z, treatment D, outcome Y) must be binary (0/1). Returns bounds with optional bootstrap confidence intervals. Also reports the Wald (standard IV) estimate for comparison. Use monotonicity=true if you can assume no defiers (instrument only affects treatment in one direction). | bpbounds package |
+| `gmm_iv` | Run general GMM (Generalized Method of Moments) IV estimation following Hansen (1982). Estimates parameters using moment conditions E[z(y - xβ)] = 0. Supports two-step, iterative, and CUE estimation with HAC weighting. Reports J-test for overidentifying restrictions. Use for IV estimation when you have more instruments than endogenous variables. | gmm::gmm() |
+| `iv_2sls` | Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments. Includes first-stage diagnostics: the partial F of the excluded instruments (the HC1 Wald F with robust = true, the default) and instrument strength. Prefer this over iv_first_stage for a complete IV analysis. | AER::ivreg() |
+| `iv_first_stage` | Run ONLY first-stage diagnostics to test instrument strength. Reports the partial F of the excluded instruments (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Note: iv_2sls already includes first-stage results — use this only when you need first-stage diagnostics without the full 2SLS estimation. | lmtest::waldtest() |
+| `iv_mte` | Estimate Marginal Treatment Effects (MTE) using the Heckman-Vytlacil framework. MTE reveals heterogeneity in treatment effects across the distribution of unobserved resistance to treatment. Returns MTE curve, ATE, ATT, ATU, and LATE estimates. The MTE framework shows how different IV estimands are weighted averages of the MTE curve, providing deeper insight into treatment effect heterogeneity than standard IV/2SLS. | ivmte package |
+| `iv_sargan_test` | Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with error term). H0: instruments are valid. Rejection suggests at least one invalid instrument. Requires more instruments than endogenous variables. | AER::summary.ivreg() |
 
-## DiD
+## DiD (7 tools)
 
 *Difference-in-differences, staggered DiD, synthetic control*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `diff_in_diff` | Canonical 2x2 difference-in-differences | Basic DiD in lm() |
-| `staggered_did` | Callaway-Sant'Anna staggered treatment DiD | did::att_gt() |
-| `etwfe` | Extended TWFE (Wooldridge approach) | etwfe package |
-| `bacon_decomp` | Goodman-Bacon TWFE decomposition | bacondecomp::bacon() |
-| `synthetic_control` | Synthetic control method | Synth package |
-| `gsynth` | Generalized synthetic control (matrix completion) | gsynth package |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `bacon_decomp` | Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time. | bacondecomp::bacon() |
+| `diff_in_diff` | Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment. For staggered treatment adoption across multiple periods, use staggered_did instead. | Basic DiD in lm() |
+| `etwfe` | Estimate treatment effects using Extended TWFE (Wooldridge 2021, 2023). Addresses heterogeneous treatment effects in staggered DiD by estimating saturated cohort-by-time interactions. Returns cohort-time ATT estimates, event study by relative time, cohort averages, and overall ATT. Robust to treatment effect heterogeneity across cohorts and over time. | etwfe package |
+| `gsynth` | Run Generalized Synthetic Control Method for causal inference with interactive fixed effects. Unlike traditional synthetic control (single treated unit), gsynth handles multiple treated units with staggered adoption. Uses Interactive Fixed Effects (IFE) to model: Y_it = α_i + λ_i'f_t + X_it'β + τ_it·D_it + ε_it. Factors f_t and loadings λ_i capture unobserved confounders. Developed by Xu (2017). Returns ATT (average treatment effect on treated), unit-level effects, factor structure, and optional bootstrap inference. | gsynth package |
+| `scpi` | Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. Extends the classic synthetic control method (Abadie et al. 2010) with proper uncertainty quantification through prediction intervals that account for both in-sample and out-of-sample variance. Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (sparse with sum=1). Developed by Cattaneo, Feng & Titiunik (2021) in JASA. Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics. Units may be identified by text or integer ids; the panel must be balanced. | scpi::scpi() |
+| `staggered_did` | Estimate causal effects with staggered treatment adoption using Callaway-Sant'Anna (2021) method. Handles multiple time periods, heterogeneous treatment timing, and dynamic treatment effects. Returns group-time ATTs, event study plots, and overall ATT with pre-trend tests. | did::att_gt() |
+| `synthetic_control` | Run Synthetic Control Method for comparative case studies with a single treated unit. Creates a weighted combination of control (donor) units to construct a synthetic counterfactual. Developed by Abadie, Diamond, and Hainmueller (2010). Returns unit weights, predictor balance, treatment effects at each post-treatment period, and optional placebo-based inference (p-values). | Synth package |
 
-## RD
+## RD (4 tools)
 
 *Regression discontinuity (sharp, fuzzy, multi-cutoff)*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `rd_estimate` | Sharp RD with CCT robust inference | rdrobust::rdrobust() |
-| `rd_fuzzy` | Fuzzy RD design (two-stage) | rdrobust::rdrobust(fuzzy=) |
-| `rd_bw` | Optimal bandwidth selection (MSE, CCT) | rdrobust::rdbwselect() |
-| `rd_multi` | Multi-cutoff or multi-score RD | rdmulti package |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `rd_bw` | Compute MSE-optimal bandwidth for Regression Discontinuity estimation. Returns bandwidth values without running the full estimation. Useful for inspecting bandwidth selection before estimation. | rdrobust::rdbwselect() |
+| `rd_estimate` | Run Sharp Regression Discontinuity (RD) estimation by local polynomial regression, with the bias-corrected robust inference of Calonico, Cattaneo & Titiunik (2014) as in R's rdrobust: conventional, bias-corrected and robust estimates, standard errors, p-values and confidence intervals. Bandwidths come from p2a's own MSE-type selector unless h (and b) are given; vce selects the variance estimator (nearest-neighbour by default, as rdrobust). Rows with missing values are dropped and reported. | rdrobust::rdrobust() |
+| `rd_fuzzy` | Run Fuzzy Regression Discontinuity estimation, for designs where the treatment probability (not assignment) jumps at the cutoff. Fits the outcome and the treatment on one bandwidth and reports the Wald ratio (LATE) with its joint conventional standard error and the bias-corrected robust estimate and interval, as rdrobust(fuzzy = ), plus the first-stage jump and F statistic (warning below 10). Bandwidths come from p2a's own MSE-type selector (run on the outcome), not rdrobust's rdbwselect, unless h (and b) are given. | rdrobust::rdrobust(fuzzy=) |
+| `rd_multi` | Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020). Each cutoff-specific estimate is rdrobust's bias-corrected estimate with its robust standard error; vce selects the variance estimator. Per-cutoff bandwidths come from p2a's own MSE-type selector, not rdrobust's rdbwselect, unless a bandwidth is given. | rdmulti package |
 
-## Matching
+## Matching (1 tools)
 
 *Propensity score matching, CEM, nearest neighbor*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `propensity_matching` | Propensity score matching (1:1, 1:k, caliper) | MatchIt::matchit() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `propensity_matching` | Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance. Returns a matched dataset. For direct effect estimation via reweighting, use treatment_ipw instead. | MatchIt::matchit() |
 
-## Treatment
+## Treatment (14 tools)
 
 *IPW, doubly robust, TMLE, CBPS, entropy balancing*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `treatment_cbps` | Covariate balancing propensity scores | CBPS::CBPS() |
-| `treatment_weightit` | Flexible propensity score weighting | WeightIt::weightit() |
-| `treatment_entropy_balance` | Entropy balancing weights | ebal::ebalance() |
-| `treatment_twang` | GBM-based propensity score estimation | twang::ps() |
-| `treatment_ipw` | Inverse probability weighting | ipw package |
-| `treatment_doubly_robust` | Doubly robust (AIPW) estimation | drtmle package |
-| `treatment_tmle` | Targeted maximum likelihood estimation | tmle::tmle() |
-| `collaborative_tmle` | Collaborative TMLE for high-dimensional data | ctmle package |
-| `ltmle` | Longitudinal TMLE for time-varying treatments | ltmle::ltmle() |
-| `treatment_double_ml` | Double/debiased machine learning | DoubleML package |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `collaborative_tmle` | Estimate Average Treatment Effect (ATE) using C-TMLE - extends TMLE with data-adaptive covariate selection for the propensity score model. Uses cross-validation to select which covariates to include, reducing finite-sample bias from including too many covariates while maintaining double robustness. Returns ATE estimate, selected covariates, selection path with CV criterion at each step, and influence curve-based standard errors. | ctmle package |
+| `gformula` | Estimate causal effects of time-varying treatments using the parametric g-formula (generalized formula). Uses Monte Carlo simulation to estimate counterfactual outcomes under different treatment regimes. Suitable for longitudinal/panel data with time-varying confounders. Returns risk difference, risk ratio, potential outcomes, and bootstrap confidence intervals. Based on Robins (1986) and Hernan & Robins (2020). R equivalent: gfoRmula package. | gfoRmula::gformula() |
+| `heterogeneity_test` | Test for treatment effect heterogeneity using Fisherian randomization inference. Tests H0: all individual treatment effects are equal (tau_i = tau). Returns permutation p-value, estimated individual effects, ATE, and optionally decomposes heterogeneity into systematic (explained by covariates) and idiosyncratic components. Based on R package 'hettx' by Ding, Feller & Miratrix. | hettx::detect_idiosyncratic() |
+| `ltmle` | Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics. Columns must not contain missing values (p2a has no censoring node); integer and boolean columns are accepted. | ltmle::ltmle() |
+| `regression_standardization` | Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution. Supports ATE (Average Treatment Effect), ATT (on Treated), ATC (on Controls). Returns effect estimate, potential outcomes E[Y(1)] and E[Y(0)], confidence intervals, and for binary outcomes: risk ratio, odds ratio, and NNT. | stdReg::stdGlm() |
+| `treatment_cbps` | Estimate propensity scores using Covariate Balancing Propensity Score (CBPS). Unlike standard logistic regression, CBPS uses GMM to simultaneously estimate propensity scores AND achieve covariate balance. Returns propensity scores, IPW weights, balance diagnostics before and after weighting, and J-test for overidentification. | CBPS::CBPS() |
+| `treatment_double_ml` | Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information. Columns must not contain missing values; integer and boolean columns are accepted. | DoubleML package |
+| `treatment_doubly_robust` | Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression. Consistent if either the propensity model OR the outcome model is correctly specified. Returns effect estimate with bootstrap standard errors and model fit diagnostics. | drtmle package |
+| `treatment_entropy_balance` | Compute entropy balancing weights (Hainmueller 2012). Reweights the control group to achieve exact mean balance on specified covariates with the treated group. Minimizes entropy (KL divergence) from uniform weights subject to balance constraints. Useful when exact balance is needed for bias reduction. Returns weights, balance table, and effective sample size. | ebal::ebalance() |
+| `treatment_ipw` | Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals. Returns a point estimate (ATE/ATT). For matched samples with balance diagnostics, use propensity_matching instead. | ipw package |
+| `treatment_sbw` | Compute Stable Balancing Weights (SBW) using quadratic programming (Zubizarreta 2015). Directly optimizes for covariate balance rather than modeling the propensity score. Finds weights that minimize variance while achieving exact or approximate balance on covariate means. Advantages: directly targets balance (not propensity score fit), provides stable weights with lower variance than IPW, handles approximate balance when exact is infeasible. Returns weights, balance diagnostics before/after, effective sample size, and optimization details. | sbw::sbw() |
+| `treatment_tmle` | Estimate Average Treatment Effect (ATE) using TMLE - a doubly robust, semiparametric efficient estimator. TMLE uses a targeting step to optimize the bias-variance tradeoff for the ATE. More efficient than standard AIPW due to the fluctuation model. Returns ATE estimate with influence curve-based standard errors and confidence intervals. | tmle::tmle() |
+| `treatment_twang` | Estimate propensity scores using Gradient Boosted Machine (GBM) with automatic tuning for covariate balance (twang). Unlike logistic regression, twang uses machine learning and automatically selects the optimal number of iterations based on balance metrics (standardized effect sizes or KS statistics). Particularly useful when you need good balance across many covariates. Returns propensity scores, IPW weights, optimal iteration number, and balance diagnostics before/after weighting. | twang::ps() |
+| `treatment_weightit` | Compute balancing weights for causal inference using WeightIt. Supports multiple methods: 'logistic' (standard propensity score), 'entropy' (entropy balancing for exact mean balance), 'energy' (energy distance minimization), 'stable' (stable balancing weights). Returns weights, balance diagnostics before/after, and effective sample size (ESS). Low ESS indicates high weight variability. | WeightIt::weightit() |
 
-## Mediation
+## Mediation (2 tools)
 
 *Causal mediation, natural effects*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `mediation_analysis` | Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference. | mediation::mediate() |
+| `natural_effects_mediation` | Perform Natural Effect Models (medflex) mediation analysis that allows for treatment-mediator interactions. Decomposes total effect into Natural Direct Effect (NDE) and Natural Indirect Effect (NIE) using the regression-based approach of Lange, Vansteelandt, & Bekaert (2012). Unlike IPW-based mediation, this method uses regression models for both mediator and outcome, with optional A*M interaction terms. Returns effect estimates, bootstrap CIs, and model diagnostics. | medflex::neModel() |
 
-## Discrete
+## Discrete (10 tools)
 
 *Logit, probit, multinomial, ordered, count models*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `logit` | Logistic regression (binary outcome) | glm(family=binomial) |
-| `probit` | Probit regression (binary outcome) | glm(family=binomial(probit)) |
-| `multinom` | Multinomial logit for unordered categories | nnet::multinom() |
-| `ordered_model` | Ordered logit/probit for ordinal outcomes | MASS::polr() |
-| `negbin` | Negative binomial for overdispersed counts | MASS::glm.nb() |
-| `zeroinfl` | Zero-inflated Poisson/negative binomial | pscl::zeroinfl() |
-| `feglm` | GLM with high-dimensional fixed effects | fixest::feglm() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `feglm` | Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects. Uses IRLS + Method of Alternating Projections. Equivalent to R's alpaca::feglm(). | fixest::feglm() |
+| `hurdle_model` | Run a hurdle model (two-part model) for count data with excess zeros. The hurdle model separates the zero vs. positive decision (binary logit) from the count magnitude (truncated Poisson or negative binomial). Unlike zero-inflated models, hurdle assumes all zeros come from the binary part. Equivalent to R's pscl::hurdle(). | pscl::hurdle() |
+| `logit` | Run Logit (logistic) regression for binary outcomes by maximum likelihood (Newton-Raphson), as R's glm(family = binomial). The dependent variable must be numeric 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported. | glm(family=binomial) |
+| `mixed_logit` | Run mixed logit (random parameters logit) for discrete choice with heterogeneous preferences: coefficients vary across decision makers as normal, lognormal, triangular or uniform random parameters. Maximum simulated likelihood with mlogit's draw scheme (Halton sequences, one segment per decision maker, the first 100 points dropped), BFGS with the analytic gradient from the conditional-logit estimates, standard errors from the Hessian. Set individual_id when the same person makes several choices (mlogit panel = TRUE). Missing values are refused. Equivalent to R's mlogit::mlogit(rpar = ..., halton = NA). | gmnl::gmnl() |
+| `mlogit` | Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit(). Missing values in the id, alternative, choice or attribute columns are refused, as in R's mlogit. | mlogit::mlogit() |
+| `multinom` | Run multinomial logit regression for unordered categorical outcomes with 3+ categories (MLE, Newton-Raphson), as R's nnet::multinom(). Categories are ordered as R's factor() (numbers numerically, text by byte, as R under LC_COLLATE=C: uppercase before lowercase); the first is the reference unless 'reference' is given. Rows with a missing outcome or regressor are dropped and reported. | nnet::multinom() |
+| `negbin` | Run negative binomial regression for count data with overdispersion (variance > mean). Estimates dispersion parameter (theta). Equivalent to R's MASS::glm.nb(). | MASS::glm.nb() |
+| `ordered_model` | Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes, as R's MASS::polr(). Numeric outcomes are ordered numerically; a text outcome needs 'levels' (its categories, lowest first). Rows with missing values are dropped and reported. Estimates threshold (cut-point) parameters. | MASS::polr() |
+| `probit` | Run Probit regression for binary outcomes by maximum likelihood (Newton-Raphson), as R's glm(family = binomial(link = "probit")). The dependent variable must be numeric 0/1 (integer and Boolean columns are accepted). Rows with a missing value in y or any x are dropped (R's na.omit) and the drop is reported. | glm(family=binomial(probit)) |
+| `zeroinfl` | Run zero-inflated Poisson or negative binomial regression for count data with excess zeros. Models both the zero-inflation probability and the count process. Equivalent to R's pscl::zeroinfl(). | pscl::zeroinfl() |
 
-## TimeSeries
+## TimeSeries (32 tools)
 
 *ARIMA, VAR, GARCH, Kalman, changepoint detection*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `ts_arima_fit` | Fit ARIMA(p,d,q) model | arima() |
-| `ts_arima_forecast` | Generate ARIMA forecasts with confidence intervals | predict.Arima() |
-| `ts_var` | Vector autoregression | vars::VAR() |
-| `ts_var_irf` | Impulse response functions | vars::irf() |
-| `ts_garch_fit` | GARCH(p,q) volatility model | rugarch::ugarchfit() |
-| `ts_mstl` | Multiple seasonal decomposition (MSTL) | forecast::mstl() |
-| `ts_changepoint` | Changepoint detection (PELT, binary segmentation) | changepoint::cpt.*() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `causal_impact_analysis` | Estimate the causal effect of an intervention using Bayesian Structural Time Series (BSTS). Uses pre-intervention data to build a counterfactual prediction, then compares with observed post-intervention data to estimate the causal effect. Optionally uses control time series that are correlated with the response but unaffected by the intervention. Returns cumulative/average effects with credible intervals and Bayesian p-value. | CausalImpact::CausalImpact() |
+| `linalg_toeplitz` | Construct a Toeplitz matrix - a matrix with constant values along each diagonal. Useful for autocorrelation matrices, circulant matrices, and time series analysis. Can create symmetric or asymmetric Toeplitz matrices. | toeplitz() |
+| `timeseries_acf` | Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags. Returns values for lags 0 to lag_max with 95% confidence bounds. For model fitting, use ts_arima_fit directly instead of computing ACF first. | acf(), pacf() |
+| `timeseries_acf_to_ar` | Compute AR coefficients from autocorrelation function using the Yule-Walker equations. Also returns partial autocorrelations. | acf2AR() |
+| `timeseries_ar` | Fit an autoregressive model to time series data with automatic order selection via AIC. Supports Yule-Walker (default), Burg, and OLS methods. Returns AR coefficients, prediction variance, AIC values, partial autocorrelations, and residuals. | ar() |
+| `timeseries_arima_sim` | Simulate a time series from an ARIMA(p,d,q) model. Generates random innovations and applies the ARMA recursion with optional differencing. | arima.sim() |
+| `timeseries_arma_acf` | Compute the theoretical autocorrelation function (ACF) or partial ACF for an ARMA(p,q) model given AR and MA coefficients. | ARMAacf() |
+| `timeseries_arma_to_ma` | Convert ARMA model to its infinite MA representation (psi weights). The psi weights show the impulse response function of the model. | ARMAtoMA() |
+| `timeseries_box_test` | Test for autocorrelation in a time series using Box-Pierce or Ljung-Box test. Tests H₀: no autocorrelation up to specified lag. Commonly used to check whether ARIMA residuals are white noise. Ljung-Box (default) has better finite-sample properties. For ARMA(p,q) residuals, set fitdf=p+q to adjust degrees of freedom. Returns: X-squared statistic, df, p-value, and sample autocorrelations. | Box.test() |
+| `timeseries_ccf` | Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables. | ccf() |
+| `timeseries_cpgram` | Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise. | cpgram() |
+| `timeseries_decompose` | Decompose a time series into trend, seasonal, and random components using moving averages. Implements R's decompose() function. Supports additive (Y = T + S + R) and multiplicative (Y = T × S × R) decomposition. | decompose() |
+| `timeseries_diffinv` | Compute the inverse of differencing (cumulative sum). Reconstructs the original series from differences given initial values. | diffinv() |
+| `timeseries_embed` | Create a lag embedding matrix from a time series. Each row contains consecutive values, useful for building AR models or phase space reconstruction. | embed() |
+| `timeseries_filter` | Apply a linear filter to a time series using convolution or recursive filtering. Useful for smoothing, differencing, or implementing ARMA models. | filter() |
+| `timeseries_lag` | Shift a time series by k positions. Positive k shifts values backward (lag), negative k shifts forward (lead). Returns the lagged series with NA padding. | - |
+| `timeseries_pp_test` | Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics. | PP.test() |
+| `timeseries_runmed` | Apply running median smoother to a time series. More robust to outliers than running mean. Uses Tukey's median polish for the smoothing. | runmed() |
+| `timeseries_spectrum` | Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns. | spectrum() |
+| `timeseries_structts` | Fit a structural time series model by maximum likelihood using the Kalman filter. Supports: 'level' (local level/random walk + noise, equivalent to ARIMA(0,1,1)), 'trend' (local linear trend, equivalent to ARIMA(0,2,2)), and 'bsm' (basic structural model with level, trend, and seasonality). Returns variance parameters, smoothed components, fitted values, residuals, log-likelihood, AIC, and BIC. | StructTS() |
+| `timeseries_window` | Extract a contiguous window (subset) from a time series by specifying start and end indices. | window() |
+| `ts_arima_fit` | Fit an ARIMA(p,d,q) model to a univariate time series by conditional sum of squares (as R arima(method = 'CSS') and forecast::Arima(method = 'CSS')). Returns the AR and MA coefficients, the mean (R's 'intercept', estimated by default when d = 0) or a drift (include_drift, d = 0 or 1), sigma^2, the CSS log-likelihood and AIC, and whether the optimiser converged. The series must have no missing values. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly. | arima() |
+| `ts_arima_forecast` | Forecast h steps ahead with an ARIMA(p,d,q) model fitted by conditional sum of squares. Returns the fitted model, point forecasts, standard errors and 80% / 95% prediction intervals computed as R's forecast(Arima(x, order, method = 'CSS')). Accepts include_mean and include_drift like ts_arima_fit. The series must have no missing values. | predict.Arima() |
+| `ts_changepoint` | Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods. | changepoint::cpt.*() |
+| `ts_garch_fit` | Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks. | rugarch::ugarchfit() |
+| `ts_granger` | Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models. | lmtest::grangertest() |
+| `ts_holt_winters` | Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients. | HoltWinters() |
+| `ts_mstl` | Perform MSTL (Multiple Seasonal-Trend decomposition using LOESS) on a time series. Extracts trend, seasonal components, and residuals. | forecast::mstl() |
+| `ts_var` | Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC. | vars::VAR() |
+| `ts_var_irf` | Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization. | vars::irf() |
+| `ts_varma` | Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series. | - |
+| `ts_vecm` | Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues. | urca::ca.jo() |
 
-## Spatial
+## Spatial (10 tools)
 
 *SAR, SEM, Moran's I, spatial weights, panel spatial*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `spatial_neighbors` | Create spatial neighbors (k-NN, distance) | spdep::knearneigh() |
-| `moran_test` | Moran's I test for spatial autocorrelation | spdep::moran.test() |
-| `sar_model` | Spatial autoregressive lag model (SAR) | spatialreg::lagsarlm() |
-| `sem_model` | Spatial error model (SEM) | spatialreg::errorsarlm() |
-| `spatial_panel_ml` | Spatial panel ML estimation | splm::spml() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `moran_test` | Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). | spdep::moran.test() |
+| `sar_model` | Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its standard errors do not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes. | spatialreg::lagsarlm() |
+| `sar_probit_model` | Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused. | spatialprobit::sarprobit() |
+| `sem_model` | Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: the standard error of lambda does not yet match the R reference (spatialreg), and with k-nearest-neighbour weights its log-likelihood and AIC are slightly off; see the release notes. | spatialreg::errorsarlm() |
+| `sem_probit_model` | Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit(). The outcome may be a 0/1 integer, float or boolean column; missing values are refused. | spatialprobit::semprobit() |
+| `spatial_lm_tests_tool` | Run Lagrange Multiplier tests for spatial dependence. Tests for spatial lag (SAR) vs spatial error (SEM) dependence in OLS residuals. Includes robust versions that account for the presence of the other form of spatial dependence. Use to decide between SAR and SEM models. Equivalent to R's spdep::lm.LMtests(). | spdep::lm.LMtests() |
+| `spatial_neighbors` | Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw(). Coordinates may be integer or float columns and must have no missing values. Row i of the weights is row i of this dataset; for spatial_panel_ml/spatial_panel_gmm build the weights from a dataset with one row per entity, sorted by the entity id (numbers ascending, text in byte order, e.g. with munge_sort). Known limitation: style 'U' gives binary weights, not spdep's 'U' (the globally standardized weights divided by n), and a style it does not know is read as 'W'; see the release notes. | spdep::knearneigh() |
+| `spatial_panel_gmm` | Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007). The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. Known limitation: it does not yet match the R reference (splm::spgm): the spatial error parameter is not estimated, b2sls and ec2sls run w2sls, and g2sls ignores the weights; see the release notes. | splm::spgm() |
+| `spatial_panel_ml` | Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS. The panel must be balanced (each entity once in every period; rows in any order). Row i of the weights belongs to the i-th entity in sorted id order (numbers ascending, text in byte order), so build the weights from a coordinate dataset sorted by entity id. Missing values in y, x, entity or time are refused. Known limitation: its standard errors do not yet match the R reference (splm); in the within model the spatial error coefficient is reported as rho, with lag = true the spatial error is not estimated (the combined model runs the lag model), the random-effects and pooled models ignore spatial_error, and the time and two-way effects are not applied, so those estimates do not match either; see the release notes. | splm::spml() |
+| `sphet_model` | Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet(). Integer and boolean columns are accepted; missing values are refused (each row is one unit of the weights). Known limitation: its estimates and standard errors do not yet match the R reference (sphet), for every model; see the release notes. | sphet::spreg() |
 
-## Survival
+## Survival (5 tools)
 
 *Kaplan-Meier, Cox PH, AFT, competing risks*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `aft` | Run Accelerated Failure Time (AFT) parametric survival model. Models log(T) as a linear function of covariates. Supports Weibull, Exponential, Log-Normal, and Log-Logistic distributions. Returns regression coefficients (as acceleration factors), standard errors, shape parameters, and AIC/BIC. Status coded as R's Surv(): 0/1, 1/2 or TRUE/FALSE. Times must be positive, as R survreg requires. Rows with a missing value in any used column are dropped and reported. | survival::survreg() |
+| `competing_risks` | Run Competing Risks analysis using the Aalen-Johansen estimator. Computes cumulative incidence functions (CIF) for multiple event types in the presence of competing risks. Properly accounts for subjects who experience a different event than the one of interest. Returns CIF curves with confidence intervals for each event type. Event codes: 0 = censored, 1, 2, ... = event types. Rows with a missing time or code are dropped and reported. | cmprsk::cuminc() |
+| `cox_ph` | Run Cox Proportional Hazards (Cox PH) regression model. Semi-parametric regression estimating covariate effects on hazard rate without assuming a baseline hazard form. Uses Newton-Raphson optimization. Returns hazard ratios, coefficients, standard errors, confidence intervals, and concordance (C-index). Status coded as R's Surv(): 0/1, 1/2 or TRUE/FALSE. Rows with a missing value in any used column are dropped and reported. | survival::coxph() |
+| `kaplan_meier` | Kaplan-Meier survival curves, as R survival::survfit. Status coded as R's Surv(): 0/1 (1 = event), 1/2 (2 = event) or TRUE/FALSE. Greenwood standard errors; confidence intervals with conf_type 'log' (default, as R), 'log-log' or 'plain'. Median survival and its confidence limits as R's quantile.survfit (NA when a limit is not reached). Optional stratification by group (R factor order). Rows with a missing time, status or group are dropped and reported. The table lists every event time with both limits (up to 200 rows; the first 100 and last 50 beyond). | survival::survfit() |
+| `log_rank` | Log-rank test comparing survival curves between groups, as R survival::survdiff (rho = 0). Status coded as R's Surv(): 0/1, 1/2 or TRUE/FALSE. Groups with no expected events are excluded from the test, as in R; df = groups with expected events - 1. Rows with a missing time, status or group are dropped and reported. Returns the chi-squared statistic, p-value, and observed and expected events per group. | survival::survdiff() |
 
-## MachineLearning
+## MachineLearning (17 tools)
 
 *K-means, DBSCAN, PCA, t-SNE, Random Forest, SVM*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `ml_kmeans` | K-means clustering (k-means++ initialization) | kmeans() |
-| `ml_dbscan` | Density-based clustering (DBSCAN) | dbscan::dbscan() |
-| `ml_hierarchical` | Hierarchical clustering (Ward, complete, single) | hclust() |
-| `ml_pca` | Principal component analysis | prcomp() |
-| `ml_tsne` | t-SNE dimensionality reduction | Rtsne::Rtsne() |
-| `ml_random_forest` | Random forest classification/regression | randomForest::randomForest() |
-| `ml_causal_forest` | Causal forest for heterogeneous treatment effects | grf::causal_forest() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `ml_bart_causal` | BART Causal estimates heterogeneous treatment effects using Bayesian Additive Regression Trees methodology. Fits separate response surfaces for treated and control groups, then computes CATE = E[Y\|T=1,X] - E[Y\|T=0,X]. Uses bootstrap for uncertainty quantification. Returns: ATE with confidence interval, CATE estimates for each unit, variable importance for treatment effect heterogeneity. Simplified frequentist approximation to R's bartCause package. | bartCause::bartc() |
+| `ml_c50` | C5.0 Decision Tree for classification (Quinlan's successor to C4.5). Uses information gain ratio for splitting, pessimistic error pruning, and optionally boosting via AdaBoost.M1. Features: automatic feature selection (winnowing), rule extraction, multiclass support. Returns tree structure, rules (if requested), variable importance, and class predictions. Based on R's C50 package. The target can be integer class codes or a text, categorical or boolean column; labels are reported as class_names. | C50::C5.0() |
+| `ml_causal_forest` | Causal Forest estimates heterogeneous treatment effects (CATE) using random forests adapted for causal inference. Key features: honest splitting (separate data for tree structure vs estimation), local centering, bootstrap variance estimation. Returns: CATE estimates for each unit, ATE with confidence interval, variable importance showing which covariates drive treatment effect heterogeneity. Based on R package 'grf'. | grf::causal_forest() |
+| `ml_cmdscale` | Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and goodness-of-fit measures. Useful for visualizing similarity/dissimilarity data. | cmdscale() |
+| `ml_ctree` | Conditional Inference Trees (ctree) - decision trees with unbiased variable selection via permutation tests. Based on Hothorn, Hornik & Zeileis (2006). Unlike CART, ctree uses statistical significance tests for variable selection, avoiding bias towards variables with many possible split points. The tree grows until no significant relationship exists between predictors and response (no pruning needed). Equivalent to R's partykit::ctree. A text, categorical or boolean target fits a classification tree (at most 10 classes). | partykit::ctree() |
+| `ml_cubist` | Cubist is a rule-based regression model with linear models in terminal nodes. Based on Quinlan's M5 model tree algorithm. Key features: (1) Rule extraction with linear regression in leaves, (2) Committee models (boosted ensembles) for improved accuracy, (3) Instance-based (k-NN) prediction adjustment. Returns rules, variable importance, and predictions. Based on Quinlan (1992) 'Learning with Continuous Classes' and R's Cubist package. | Cubist::cubist() |
+| `ml_cutree` | Cut a hierarchical clustering dendrogram into groups (cutree). First performs hierarchical clustering, then cuts the resulting tree at a specified number of clusters (k) or height. Returns cluster assignments for each observation. Useful for extracting cluster memberships from a dendrogram. | cutree() |
+| `ml_dbscan` | Run DBSCAN (Density-Based Spatial Clustering of Applications with Noise) clustering. Finds clusters of arbitrary shape and identifies outliers as noise points. Does not require specifying number of clusters. | dbscan::dbscan() |
+| `ml_hierarchical` | Run Hierarchical clustering using agglomerative approach. Supports Ward, single, complete, and average linkage methods. Returns cluster assignments and dendrogram information. | hclust() |
+| `ml_kmeans` | Run K-means clustering to partition data into k clusters. Uses k-means++ initialization for better convergence. Returns cluster assignments, centroids, and inertia (within-cluster sum of squares). | kmeans() |
+| `ml_mboost` | Run Model-based Boosting (mboost), a component-wise gradient boosting method that selects one variable per iteration. Supports Gaussian (regression), Binomial (classification), and Poisson (count data) families with linear or tree base learners. Equivalent to R's mboost package. Returns variable importance via selection frequency and automatic variable selection. | mboost::mboost() |
+| `ml_pca` | Run Principal Component Analysis (PCA) for dimensionality reduction. Returns principal components, explained variance ratios, and loadings. Useful for understanding data structure and reducing feature dimensionality. | prcomp() |
+| `ml_ppr` | Projection Pursuit Regression (PPR) - a dimension reduction regression that fits models of the form y = sum(f_k(alpha_k' * x)). Finds optimal projection directions and ridge functions. Returns projection directions, coefficients, fitted values, and goodness-of-fit metrics. Useful for non-linear regression when relationships are complex. Rows with a missing value in the target or a feature are dropped (as R's ppr formula interface) and reported under "missing". | ppr() |
+| `ml_random_forest` | Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances, out-of-bag score, and predictions. | - |
+| `ml_shap_values` | SHAP (SHapley Additive exPlanations) computes feature importance for individual predictions using game-theoretic Shapley values. For tree-based models, uses TreeSHAP (Lundberg et al. 2018) for exact O(TLD^2) computation. Returns: SHAP values matrix (n_obs x n_features), global feature importance (mean \|SHAP\|), and summary statistics. Each SHAP value represents the contribution of a feature to the difference between the actual prediction and the average prediction. Implements R's 'fastshap' and Python's 'shap' packages. | - |
+| `ml_svm` | Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions. Rows with a missing value in the target or a feature are dropped (as e1071::svm's formula interface) and the count is reported. | e1071::svm(kernel = "linear") |
+| `ml_tsne` | Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization. | Rtsne::Rtsne() |
 
-## Visualization
+## Visualization (13 tools)
 
 *Histograms, scatter plots, heatmaps, interactive charts*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `viz_histogram` | Create histogram plot (PNG) | hist() |
-| `viz_scatter` | Create scatter plot (PNG) | plot() |
-| `viz_line` | Create line chart (PNG) | plot(type='l') |
-| `viz_heatmap` | Create correlation heatmap | heatmap() |
-| `viz_scatter_interactive` | Interactive scatter plot (Plotly HTML) | plotly::plot_ly() |
-| `viz_coefficient` | Coefficient plot with confidence intervals | coefplot::coefplot() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `viz_boxplot` | Generate a box plot visualization comparing the distributions of one or more numeric columns. Shows median, quartiles, and outliers. Returns a base64-encoded PNG image. | boxplot() |
+| `viz_coefficient` | Generate a coefficient plot showing regression coefficients with confidence intervals (error bars). Useful for visualizing regression results. Shows vertical zero line for reference. | coefplot::coefplot() |
+| `viz_dendrogram` | Generate a dendrogram (tree diagram) from hierarchical clustering results. Shows how clusters are merged at each level with merge distances. Takes a linkage matrix from hierarchical clustering output. | plot(hclust()) |
+| `viz_event_study` | Generate an event study plot showing treatment effects over time with confidence intervals. Used for visualizing DiD or panel event study results. Shows point estimates with CI bands and reference lines at t=0 and y=0. | fixest::iplot() |
+| `viz_heatmap` | Generate a correlation heatmap visualization for numeric columns. Uses a diverging blue-white-red colormap. Returns a base64-encoded PNG image. | heatmap() |
+| `viz_histogram` | Generate a histogram visualization for a numeric column. Returns a base64-encoded PNG image along with bin statistics. | hist() |
+| `viz_histogram_interactive` | Generate an interactive histogram visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for overlaid histograms. Interactive features include zoom, pan, and hover. | plotly::plot_ly(type = "histogram") |
+| `viz_irf` | Generate an Impulse Response Function (IRF) plot from VAR models. Shows how a variable responds to a shock over time. Optionally includes confidence bands. | plot(vars::irf()) |
+| `viz_line` | Generate a line chart visualization for time series or sequential data. Supports multiple Y series. Returns a base64-encoded PNG image. | plot(type='l') |
+| `viz_line_interactive` | Generate an interactive line chart visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Interactive features include zoom, pan, and hover. | plotly::plot_ly(mode = "lines") |
+| `viz_residual_diagnostics` | Generate four diagnostic plots for regression analysis: (1) Residuals vs Fitted, (2) Normal Q-Q plot, (3) Scale-Location, (4) Residuals vs Leverage. Also calculates Cook's distance for identifying influential observations. Returns four base64-encoded PNG images. | plot(lm()) |
+| `viz_scatter` | Generate a scatter plot visualization showing the relationship between two numeric columns. Returns a base64-encoded PNG image. | plot() |
+| `viz_scatter_interactive` | Generate an interactive scatter plot visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for colored traces. Interactive features include zoom, pan, and hover. | plotly::plot_ly() |
 
-## Database
+## Database (7 tools)
 
 *SQLite and DuckDB queries, schema inspection*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `db_sqlite_query` | Execute SQL query on SQLite database | DBI::dbGetQuery() |
-| `db_duckdb_query` | Execute a read-only SQL query on a DuckDB database (files: db_query_file) | duckdb::dbGetQuery() |
-| `db_query_file` | Query one Parquet/CSV file with read-only DuckDB SQL | - |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `db_duckdb_query` | Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN without ANALYZE, PRAGMA, DESCRIBE or SHOW) against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more. EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the query cannot read files: ':memory:' starts empty, so to query a CSV or Parquet file use db_query_file with {file}. The server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there. | duckdb::dbGetQuery() |
+| `db_duckdb_schema` | Get the schema (column names and types) for a table in a DuckDB database. | DBI::dbListFields() |
+| `db_duckdb_tables` | List all tables in a DuckDB database. | DBI::dbListTables() |
+| `db_query_file` | Execute exactly one read-only SQL statement with DuckDB on one Parquet or CSV file, file_path, and load the result as a dataset, for example to filter or aggregate the file before loading it. Refer to the file as {file}, also inside reader functions, for example SELECT * FROM {file} or read_csv_auto({file}, header = true). The query can read no other file, so it cannot join files. The rules and caps of db_duckdb_query apply: EXPLAIN ANALYZE, ATTACH, COPY, INSTALL/LOAD, SET and any second statement are refused, and the server may cap the number of rows, the result size and the run time; a truncated result is reported. Not available when the server disables free-form SQL (the public demo); use load_dataset there. | - |
+| `db_sqlite_query` | Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN or a schema PRAGMA: table_info, table_list, index_list, ...) against a SQLite database and load the results as a dataset. The resulting dataset can then be analyzed using other tools. Statements that would modify the database, ATTACH, other PRAGMAs and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported. | DBI::dbGetQuery() |
+| `db_sqlite_schema` | Get the schema (column names and types) for a table in a SQLite database. | DBI::dbListFields() |
+| `db_sqlite_tables` | List all tables in a SQLite database. | DBI::dbListTables() |
 
-## Utility
+## Utility (10 tools)
 
 *Random seed, reports, session export/import*
 
-| Tool | Description | R Equivalent |
-|------|-------------|-------------|
-| `set_seed` | Set random seed for reproducibility | set.seed() |
-| `generate_random_data` | Generate synthetic dataset with various distributions | Various rnorm, runif, etc. |
-| `generate_report` | Generate HTML report from analysis results | rmarkdown::render() |
-| `export_session` | Export session state for later import | save(), saveRDS() |
+| Tool | Description | R counterpart |
+|------|-------------|---------------|
+| `export_session` | Export the current session including all loaded datasets and their metadata. Can save to file or return as string. Useful for saving your analysis state to resume later. | save(), saveRDS() |
+| `generate_random_data` | Generate a random dataset with specified columns and distributions. Supports: uniform (min, max), normal (mean, std), binomial (n, p), poisson (lambda), exponential (rate), bernoulli (p), categorical (categories, optional weights), uniform_int (min, max), sequence (start), constant (value), constant_string (value). Example column: {"name": "x", "distribution": {"type": "normal", "mean": 0, "std": 1}} | Various rnorm, runif, etc. |
+| `generate_report` | Generate a self-contained HTML report from analysis results. The report includes proper styling, tables, charts (as embedded images), and is suitable for sharing or printing. Returns the complete HTML document as a string. | rmarkdown::render() |
+| `get_seed` | Get the current global random seed setting and list which ML tools support seeded reproducibility. | - |
+| `import_session` | Import a previously exported session from a JSON file. Can merge with existing session or replace it. Restores all datasets with their original names. | load() |
+| `list_tool_categories` | List all available tool categories with descriptions and tool counts. Use this to understand what types of analyses are available before searching for specific tools. | - |
+| `search_tools` | Search for analytics tools by natural language description. Use this when you need to find the right tool for an analysis task. Returns matching tools with descriptions and relevance scores. Example queries: 'regression with robust standard errors', 'test for serial correlation', 'panel data fixed effects'. | - |
+| `server_stats` | Get memory usage statistics for the analytics server. Shows the memory of the session's datasets and of all its session data as the quotas count it (datasets, cleaning-session checkpoints, spatial weights), process memory (process-wide; not reported in open public mode), and the memory history (per session over HTTP). Useful for monitoring resource usage with large datasets. | - |
+| `set_seed` | Set a global random seed for ML operations (kmeans, random_forest, tsne). When set, ML tools will use this seed as a fallback if no per-tool seed is specified. Clear by calling with no seed value. | set.seed() |
+| `tool_info` | Get detailed information about a specific tool including its full description, parameters, JSON input schema, related tools, and R counterpart. Use this after search_tools to learn more about a specific tool before using it. | - |
 

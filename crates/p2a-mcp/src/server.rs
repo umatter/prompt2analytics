@@ -714,8 +714,7 @@ impl AnalyticsServer {
     pub fn list_tools(&self) -> Vec<crate::transport::http::ToolDefinition> {
         use crate::transport::http::ToolDefinition;
 
-        self.tool_router
-            .list_all()
+        self.router_tools()
             .into_iter()
             .map(|tool| ToolDefinition {
                 name: tool.name.to_string(),
@@ -757,8 +756,7 @@ impl AnalyticsServer {
 
         use crate::llm::{INTERNAL_TOOLS, TIER1_TOOLS, ToolDefinition};
 
-        self.tool_router
-            .list_all()
+        self.router_tools()
             .into_iter()
             .filter(|t| {
                 let name = t.name.as_ref();
@@ -1655,7 +1653,7 @@ impl ServerHandler for AnalyticsServer {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+        Ok(ListToolsResult::with_all_items(self.router_tools()))
     }
 
     async fn call_tool(
@@ -1809,6 +1807,27 @@ mod tests {
             .await
             .insert(name.to_string(), dataset);
         server
+    }
+
+    /// The quoted names in get_info().instructions are tools of this build (or optional ones).
+    #[test]
+    fn test_server_instructions_name_routed_tools() {
+        let s = AnalyticsServer::new();
+        let routed: Vec<String> = s
+            .router_tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let text = s.get_info().instructions.unwrap();
+        let names: Vec<&str> = text.split('\'').skip(1).step_by(2).collect();
+        assert!(names.len() >= 25, "{names:?}");
+        for n in names {
+            assert!(
+                routed.iter().any(|r| r == n)
+                    || crate::tools::registry::OPTIONAL_TOOLS.contains(&n),
+                "{n}"
+            );
+        }
     }
 
     /// NO_PARAMS_TOOLS is exactly the set of routed tools with rmcp's parameterless schema.
