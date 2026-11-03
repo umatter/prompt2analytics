@@ -100,6 +100,29 @@
       "tolerance": "1e-12 relative + 1e-14 absolute (the published series (AS 243; AS 226 + R84) with R's constants; f64)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "loglin_ipf",
+      "name": "Log-linear models by iterative proportional fitting, non-decomposable models",
+      "category": "stats",
+      "reference": "stats::loglin(table, margin, eps, iter, fit = TRUE) (AS 51)",
+      "doc": "validation/stats/loglin.md",
+      "cases": [
+        "stat_loglin_nodecomp"
+      ],
+      "tests": [
+        "p2a-core::stats::loglin::tests::test_validate_loglin_nodecomp",
+        "p2a-core::stats::loglin::tests::test_validate_loglin_nodecomp_2x2x2"
+      ],
+      "quantities": [
+        "G2, X2, df, p-values, fitted table (eps 1e-12)",
+        "fitted tables and p-values at eps 1e-12 and 1e-10; non-convergence reported",
+        "a decomposable model",
+        "STAT-28's 2x2x2 table"
+      ],
+      "tolerance": "validation/README.md, n = 180-652: statistics and fit 1e-6 relative, p 1e-6 + 1e-12, df exact; iterations not pinned",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

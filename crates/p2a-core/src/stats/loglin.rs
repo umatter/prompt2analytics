@@ -12,10 +12,11 @@
 //!   Source: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/loglin.html
 
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
+use crate::traits::estimator::chi_squared_p_value;
 
 /// Result of log-linear model fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,10 +35,20 @@ pub struct LoglinResult {
     pub fit: Vec<f64>,
     /// Original table dimensions
     pub dimensions: Vec<usize>,
-    /// Number of iterations until convergence
+    /// Number of IPF cycles run (R's `nlast`)
     pub n_iter: usize,
-    /// Whether the model converged
+    /// Whether the largest margin deviation of the last cycle fell below `eps`
     pub converged: bool,
+    /// Largest absolute deviation between a fitted and an observed margin in the last cycle,
+    /// each measured before that margin's adjustment (AS 51, R)
+    #[serde(default)]
+    pub max_deviation: f64,
+    /// The convergence record of the IPF iteration
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// Warnings (R's "algorithm did not converge")
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Margins used in the model
     pub margins: Vec<Vec<usize>>,
     /// Total count in the table
@@ -68,10 +79,6 @@ impl std::fmt::Display for LoglinResult {
             self.p_value_pearson
         )?;
         writeln!(f)?;
-        writeln!(f, "Convergence:")?;
-        writeln!(f, "  Converged: {}", self.converged)?;
-        writeln!(f, "  Iterations: {}", self.n_iter)?;
-        writeln!(f)?;
 
         // Show interpretation
         let sig = if self.p_value_lrt < 0.05 {
@@ -94,7 +101,16 @@ impl std::fmt::Display for LoglinResult {
             )?;
         }
 
-        Ok(())
+        write!(f, "{}", notes_text(self))
+    }
+}
+
+impl ResultNotes for LoglinResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
     }
 }
 
@@ -125,13 +141,14 @@ impl std::fmt::Display for LoglinResult {
 ///
 /// # Algorithm
 ///
-/// Iterative Proportional Fitting (IPF):
-/// 1. Initialize fitted values to uniform (total / n_cells)
-/// 2. For each margin in the model:
-///    a. Compute observed margin
-///    b. Compute fitted margin
-///    c. Adjust fitted values so fitted margin equals observed margin
-/// 3. Repeat until convergence (max deviation < eps)
+/// Iterative Proportional Fitting (IPF), as AS 51 and R's `loglin`:
+/// 1. The fitted table starts at 1 in every cell; the observed margins are computed once.
+/// 2. One cycle visits each margin in order: the fitted margin is computed, its largest absolute
+///    deviation from the observed margin is recorded, and the fit is rescaled to the observed
+///    margin (a cell whose fitted margin is 0 becomes 0).
+/// 3. After a cycle whose largest deviation is below `eps` the fit has converged; otherwise the
+///    next cycle starts, up to `max_iter` cycles. A fit that stops at `max_iter` is returned with
+///    `converged = false` and a warning (R: "algorithm did not converge").
 ///
 /// # References
 ///
@@ -222,22 +239,32 @@ pub fn loglin(
         return Err("Table must have positive total".to_string());
     }
 
-    // Initialize fitted values uniformly
-    let mut fit: Vec<f64> = resource::try_vec(n_cells, total / n_cells as f64, "fitted table")
-        .map_err(|e| e.to_string())?;
+    // R's start: 1 in every cell
+    let mut fit: Vec<f64> =
+        resource::try_vec(n_cells, 1.0, "fitted table").map_err(|e| e.to_string())?;
+
+    // The observed margins, once
+    let mut observed = Vec::new();
+    observed
+        .try_reserve_exact(margins.len())
+        .map_err(|_| "observed margins: allocation failed".to_string())?;
+    for margin in margins {
+        observed.push(compute_margin(table, dimensions, margin)?);
+    }
 
     // Iterative Proportional Fitting
     let mut n_iter = 0;
     let mut converged = false;
+    let mut max_dev: f64 = f64::NAN;
 
     for iter in 0..max_iter {
         resource::checkpoint().map_err(|e| e.to_string())?;
         n_iter = iter + 1;
-        let mut max_dev: f64 = 0.0;
+        max_dev = 0.0;
 
-        // Apply each margin
-        for margin in margins {
-            max_dev = max_dev.max(fit_one_margin(table, &mut fit, dimensions, margin)?);
+        // Measure each margin, then adjust it
+        for (margin, obs) in margins.iter().zip(&observed) {
+            max_dev = max_dev.max(fit_one_margin(obs, &mut fit, dimensions, margin)?);
         }
 
         if max_dev < eps {
@@ -245,6 +272,16 @@ pub fn loglin(
             break;
         }
     }
+
+    let convergence = Convergence::new(
+        converged,
+        n_iter,
+        max_iter,
+        "maximum absolute margin deviation",
+        max_dev,
+        eps,
+    );
+    let warnings: Vec<String> = convergence.note("loglin").into_iter().collect();
 
     // Compute test statistics
     let (lrt, pearson) = compute_test_statistics(table, &fit);
@@ -255,13 +292,16 @@ pub fn loglin(
     let df = n_cells
         .saturating_sub(count_free_parameters(dimensions, margins).map_err(|e| e.to_string())?);
 
-    // Compute p-values
-    let (p_value_lrt, p_value_pearson) = if df > 0 {
-        let chi_sq = ChiSquared::new(df as f64).unwrap();
-        (1.0 - chi_sq.cdf(lrt), 1.0 - chi_sq.cdf(pearson))
-    } else {
-        (1.0, 1.0)
+    // Upper-tail p-values; a statistic at or below 0 (a perfect fit, or rounding below it) has
+    // p = 1, as has a saturated model
+    let p_value = |stat: f64| {
+        if df > 0 && stat > 0.0 {
+            chi_squared_p_value(stat, df as f64)
+        } else {
+            1.0
+        }
     };
+    let (p_value_lrt, p_value_pearson) = (p_value(lrt), p_value(pearson));
 
     Ok(LoglinResult {
         lrt,
@@ -273,55 +313,43 @@ pub fn loglin(
         dimensions: dimensions.to_vec(),
         n_iter,
         converged,
+        max_deviation: max_dev,
+        convergence,
+        warnings,
         margins: margins.to_vec(),
         total,
         n_cells,
     })
 }
 
-/// One IPF step: scale `fit` so that its `margin` matches the observed table's, and return the
-/// largest deviation left in that margin afterwards.
+/// One IPF step: return the largest absolute deviation of `fit`'s `margin` from the observed
+/// margin `obs_margin`, measured before the adjustment (AS 51, R), then scale `fit` to it: each cell
+/// by `obs / fitted` of its margin cell, or to 0 where the fitted margin is 0 (R's `adjust`).
 ///
-/// A step walks the whole table four times (the observed margin, the fitted margin, the scaling
-/// and the refitted margin) and a model may list hundreds of margins, so the budget is checked
-/// before each step, not only once per IPF iteration.
+/// A step walks the whole table twice (the fitted margin and the scaling) and a model may list
+/// hundreds of margins, so the budget is checked before each step, not only once per IPF cycle.
 fn fit_one_margin(
-    table: &[f64],
+    obs_margin: &[f64],
     fit: &mut [f64],
     dimensions: &[usize],
     margin: &[usize],
 ) -> Result<f64, String> {
     resource::checkpoint().map_err(|e| e.to_string())?;
 
-    // Compute observed margin
-    let obs_margin = compute_margin(table, dimensions, margin)?;
-
-    // Compute fitted margin
     let fit_margin = compute_margin(fit, dimensions, margin)?;
-
-    // Compute adjustment factors
+    let mut max_dev: f64 = 0.0;
     let mut adjustments = resource::try_vec(obs_margin.len(), 0.0, "margin adjustments")
         .map_err(|e| e.to_string())?;
     for i in 0..obs_margin.len() {
-        if fit_margin[i] > 1e-10 {
+        max_dev = max_dev.max((fit_margin[i] - obs_margin[i]).abs());
+        if fit_margin[i] > 0.0 {
             adjustments[i] = obs_margin[i] / fit_margin[i];
-        } else {
-            adjustments[i] = 1.0;
         }
     }
 
-    // Apply adjustments to fitted values
     for_each_margin_index(dimensions, margin, |cell_idx, margin_idx| {
         fit[cell_idx] *= adjustments[margin_idx];
     });
-
-    // Check convergence for this margin
-    let new_fit_margin = compute_margin(fit, dimensions, margin)?;
-    let mut max_dev: f64 = 0.0;
-    for i in 0..obs_margin.len() {
-        let dev = (new_fit_margin[i] - obs_margin[i]).abs();
-        max_dev = max_dev.max(dev);
-    }
     Ok(max_dev)
 }
 
@@ -516,6 +544,7 @@ pub fn run_loglin(
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use p2a_validation::{Case, Check, Tol};
 
     /// Reference: convert a linear index to multidimensional coordinates.
     fn index_to_coords(index: usize, dimensions: &[usize]) -> Vec<usize> {
@@ -701,26 +730,119 @@ mod tests {
         }
     }
 
+    const M3: [&[usize]; 3] = [&[0, 1], &[0, 2], &[1, 2]];
+
+    fn m3() -> Vec<Vec<usize>> {
+        M3.iter().map(|m| m.to_vec()).collect()
+    }
+
+    /// The case's long-form table (Var1 A..B, Var2 A..C, Var3 A..D, Freq), row-major in dims
+    /// [2, 3, 4] (last index fastest).
+    fn case_table(ds: &crate::data::Dataset) -> Vec<f64> {
+        let df = ds.df();
+        let level = |name: &str| -> Vec<usize> {
+            df.column(name)
+                .unwrap()
+                .str()
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.unwrap().as_bytes()[0] - b'A') as usize)
+                .collect()
+        };
+        let (a, b, c) = (level("Var1"), level("Var2"), level("Var3"));
+        let (freq, _) =
+            crate::data::columns::numeric_column(df, "Freq", crate::data::columns::NaPolicy::Fail)
+                .unwrap();
+        let mut t = vec![0.0; 24];
+        for i in 0..freq.len() {
+            t[a[i] * 12 + b[i] * 4 + c[i]] = freq[i];
+        }
+        t
+    }
+
     #[test]
-    fn test_loglin_one_cycle_values_unchanged() {
-        // Pins today's single-IPF-cycle answer for a non-decomposable model. It equals R's
-        // loglin(A, list(c(1,2), c(1,3), c(2,3)), iter = 1), where obs <- c(10,20,30,40,15,25,35,5) is
-        // laid out row-major in dims (2,2,2). STAT-28 (tier 3) will change these numbers deliberately.
-        let r = loglin(
-            &[10., 20., 30., 40., 15., 25., 35., 5.],
-            &[2, 2, 2],
-            &[vec![0, 1], vec![0, 2], vec![1, 2]],
-            None,
-            None,
+    fn test_validate_loglin_nodecomp() {
+        // R: loglin(A, list(c(1,2), c(1,3), c(2,3)), eps = 1e-12, iter = 1000, fit = TRUE) on
+        // loglin_2x3x4 (no three-way interaction: not decomposable, so IPF iterates), and the
+        // decomposable list(c(1,2), c(1,3)). Pinned at the solution; convergence at R's defaults
+        // (eps 0.1, iter 20) and non-convergence after one cycle hold for any correct IPF.
+        let (case, ds) = crate::test_support::load_case("stat_loglin_nodecomp");
+        let table = case_table(&ds);
+        let n = table.iter().sum::<f64>() as usize; // 652
+        let r = loglin(&table, &[2, 3, 4], &m3(), Some(1e-12), Some(1000)).unwrap();
+        let d = loglin(&table, &[2, 3, 4], &m3(), None, None).unwrap();
+        let one = loglin(&table, &[2, 3, 4], &m3(), None, Some(1)).unwrap();
+        let dec = loglin(
+            &table,
+            &[2, 3, 4],
+            &[vec![0, 1], vec![0, 2]],
+            Some(1e-12),
+            Some(1000),
         )
         .unwrap();
-        assert!((r.lrt - 10.018549340799476).abs() < 1e-10, "{}", r.lrt);
+        assert!(r.converged && d.converged && !one.converged && dec.converged);
+        Check::new(&case)
+            .vector("counts_rowmajor", &table, Tol::exact())
+            .scalar("lrt", r.lrt, Tol::stat(n))
+            .scalar("pearson", r.pearson, Tol::stat(n))
+            .scalar("df", r.df as f64, Tol::exact())
+            .scalar("p_lrt", r.p_value_lrt, Tol::p_value(n))
+            .scalar("p_pearson", r.p_value_pearson, Tol::p_value(n))
+            .vector("fit_rowmajor", &r.fit, Tol::stat(n))
+            .scalar("decomposable_lrt", dec.lrt, Tol::stat(n))
+            .scalar("decomposable_df", dec.df as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_loglin_nodecomp_2x2x2() {
+        // STAT-28's repro, laid out row-major in dims (2, 2, 2). R: G2 8.1479 at eps 1e-10
+        // (24 cycles; 8.148 after 5 at R's default eps 0.1). One cycle gives 10.0185, the value
+        // the pre-fix code reported as converged.
+        let case = Case::load("stat_loglin_nodecomp");
+        let t = case.vector("t222_counts");
+        let d = loglin(&t, &[2, 2, 2], &m3(), None, None).unwrap();
+        let e = loglin(&t, &[2, 2, 2], &m3(), Some(1e-10), Some(1000)).unwrap();
+        let one = loglin(&t, &[2, 2, 2], &m3(), None, Some(1)).unwrap();
+        assert!(d.converged && e.converged);
         assert!(
-            (r.pearson - 9.032901912901915).abs() < 1e-10,
-            "{}",
-            r.pearson
+            !one.converged && one.warnings.iter().any(|w| w.contains("did not converge")),
+            "{:?}",
+            one.warnings
         );
-        assert_eq!(r.df, 1);
+        Check::new(&case)
+            .scalar("t222_eps10_lrt", e.lrt, Tol::stat(180))
+            .scalar("t222_eps10_pearson", e.pearson, Tol::stat(180))
+            .scalar("t222_eps10_p_lrt", e.p_value_lrt, Tol::p_value(180))
+            .scalar("t222_eps10_p_pearson", e.p_value_pearson, Tol::p_value(180))
+            .vector("t222_eps10_fit_rowmajor", &e.fit, Tol::stat(180))
+            .scalar("t222_df", e.df as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_loglin_reports_nonconvergence() {
+        // R: loglin(.., eps = 1e-12, iter = 3) warns "algorithm did not converge" and returns the
+        // 3-cycle fit.
+        let (_, ds) = crate::test_support::load_case("stat_loglin_nodecomp");
+        let table = case_table(&ds);
+        let r = loglin(&table, &[2, 3, 4], &m3(), Some(1e-12), Some(3)).unwrap();
+        assert!(
+            !r.converged
+                && r.n_iter == 3
+                && !r.convergence.converged
+                && r.convergence.iterations == 3
+        );
+        assert!(r.max_deviation > 1e-12 && r.max_deviation.is_finite());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("loglin did not converge after 3 iterations")),
+            "{:?}",
+            r.warnings
+        );
+        let text = format!("{r}");
+        assert!(text.contains("Converged: no (3 iterations"), "{text}");
     }
 
     #[test]
@@ -742,13 +864,13 @@ mod tests {
 
     #[test]
     fn test_ipf_margin_step_checks_the_budget() {
-        // One IPF iteration can walk a 1M-cell table three times for each of 500 margins, so each
+        // One IPF iteration can walk a 1M-cell table twice for each of 500 margins, so each
         // margin step checks the budget itself, not only the iteration around it
         let t = CancelToken::new();
         t.cancel();
         let mut fit = vec![25.0; 4];
         let e = resource::with_budget(Budget::new(None, t), || {
-            fit_one_margin(&[15.0, 15.0, 25.0, 45.0], &mut fit, &[2, 2], &[0])
+            fit_one_margin(&[30.0, 70.0], &mut fit, &[2, 2], &[0])
         })
         .unwrap_err();
         assert!(e.contains("stopped"), "{e}");
@@ -758,10 +880,12 @@ mod tests {
             "a refused step leaves the fit untouched"
         );
 
-        // Without a budget the step scales the fit to the observed margin (30, 70)
-        let dev = fit_one_margin(&[15.0, 15.0, 25.0, 45.0], &mut fit, &[2, 2], &[0]).unwrap();
+        // Without a budget the step reports the deviation of the fitted margin (50, 50) from the
+        // observed one (30, 70), measured before the adjustment, and scales the fit to it
+        let observed = compute_margin(&[15.0, 15.0, 25.0, 45.0], &[2, 2], &[0]).unwrap();
+        let dev = fit_one_margin(&observed, &mut fit, &[2, 2], &[0]).unwrap();
         assert_eq!(fit, vec![15.0, 15.0, 35.0, 35.0]);
-        assert!(dev < 1e-12, "{dev}");
+        assert_eq!(dev, 20.0);
     }
 
     #[test]
