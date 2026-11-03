@@ -51,14 +51,14 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmLink, GlmSpec, fit_propensity};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::matrix_ops::eig_symmetric;
+use crate::linalg::solve::{SingularPolicy, sym_inverse};
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 /// Threshold for using parallel algorithms (to avoid overhead on small datasets)
@@ -178,6 +178,104 @@ impl fmt::Display for DistanceMethod {
     }
 }
 
+crate::option_enum!(
+    DistanceMethod,
+    crate::options::Choices {
+        option: "distance",
+        values: &[
+            (&["logit", "glm", "logistic", "ps"], DistanceMethod::Logit),
+            (&["probit"], DistanceMethod::Probit),
+            (&["mahalanobis"], DistanceMethod::Mahalanobis),
+            (&["euclidean"], DistanceMethod::Euclidean),
+        ],
+    },
+    no_display
+);
+
+/// MatchIt `m.order`: the order in which treated units choose their nearest controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MOrder {
+    /// Largest propensity score first (MatchIt's default for a propensity score).
+    Largest,
+    /// Smallest propensity score first.
+    Smallest,
+    /// Data order (MatchIt's default for Mahalanobis and Euclidean distances, and always
+    /// used with replacement).
+    Data,
+    /// Seeded random order ([`MatchOptions::seed`]).
+    Random,
+}
+
+crate::option_enum!(
+    MOrder,
+    crate::options::Choices {
+        option: "m_order",
+        values: &[
+            (&["largest", "descending"], MOrder::Largest),
+            (&["smallest", "ascending"], MOrder::Smallest),
+            (&["data", "data_order"], MOrder::Data),
+            (&["random"], MOrder::Random),
+        ],
+    }
+);
+
+/// The method names the MCP and CLI accept (the variant data stay in [`MatchMethod`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchMethodKind {
+    /// Nearest-neighbour matching.
+    Nearest,
+    /// Coarsened exact matching.
+    Cem,
+    /// Optimal full matching.
+    Full,
+    /// Propensity-score subclassification.
+    Subclass,
+}
+
+crate::option_enum!(
+    MatchMethodKind,
+    crate::options::Choices {
+        option: "method",
+        values: &[
+            (
+                &["nearest", "nn", "nearest_neighbor", "nearest_neighbour"],
+                MatchMethodKind::Nearest
+            ),
+            (
+                &["cem", "coarsened", "coarsened_exact", "coarsenedexact"],
+                MatchMethodKind::Cem
+            ),
+            (
+                &["full", "optimal", "full_matching", "optimal_full"],
+                MatchMethodKind::Full
+            ),
+            (
+                &[
+                    "subclass",
+                    "subclassification",
+                    "stratify",
+                    "stratification"
+                ],
+                MatchMethodKind::Subclass
+            ),
+        ],
+    }
+);
+
+/// Seed of [`MOrder::Random`] when [`MatchOptions::seed`] is None.
+pub const DEFAULT_MATCH_SEED: u64 = 42;
+
+/// MatchIt arguments beyond the method and the distance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MatchOptions {
+    /// None = MatchIt's default: Largest for logit/probit distances, Data for
+    /// Mahalanobis/Euclidean. Ignored by CEM, full and subclass matching, and by
+    /// nearest-neighbour matching with replacement (always data order, as MatchIt).
+    pub m_order: Option<MOrder>,
+    /// Seed of [`MOrder::Random`]; None = [`DEFAULT_MATCH_SEED`].
+    pub seed: Option<u64>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Result Types
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -191,14 +289,31 @@ pub struct MatchCovariateBalance {
     pub mean_treated: f64,
     /// Mean in control group.
     pub mean_control: f64,
-    /// Standardized mean difference: (mean_t - mean_c) / sqrt((var_t + var_c)/2).
+    /// summary.matchit's "Std. Mean Diff." for the ATT: the weighted mean difference over the
+    /// standard deviation of the treated group in the full (unmatched, unweighted) sample.
     /// Rule of thumb: |SMD| < 0.1 indicates good balance.
     pub std_diff: f64,
-    /// Variance ratio: var_t / var_c.
-    /// Rule of thumb: 0.5 < ratio < 2 indicates good balance.
+    /// summary.matchit's "Var. Ratio": weighted variance of the treated over that of the
+    /// controls; NaN for binary covariates and groups with fewer than two weighted units.
     pub var_ratio: f64,
-    /// Kolmogorov-Smirnov statistic comparing distributions.
+    /// Equal to `ecdf_max` (the weighted Kolmogorov-Smirnov statistic; with unit weights the
+    /// two-sample KS statistic).
     pub ks_statistic: f64,
+    /// summary.matchit's "eCDF Mean": mean absolute difference of the weighted eCDFs.
+    #[serde(default)]
+    pub ecdf_mean: f64,
+    /// summary.matchit's "eCDF Max": largest absolute difference of the weighted eCDFs.
+    #[serde(default)]
+    pub ecdf_max: f64,
+}
+
+/// A table cell: NaN prints as "-".
+fn cell(v: f64) -> String {
+    if v.is_nan() {
+        "-".to_string()
+    } else {
+        format!("{v:.4}")
+    }
 }
 
 /// Balance table comparing covariate distributions for matching.
@@ -218,27 +333,28 @@ impl fmt::Display for MatchBalanceTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10}",
-            "Covariate", "Mean(T)", "Mean(C)", "Std.Diff", "Var.Ratio", "KS Stat"
+            "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "Covariate", "Mean(T)", "Mean(C)", "Std.Diff", "Var.Ratio", "eCDF Mean", "eCDF Max"
         )?;
-        writeln!(f, "{}", "-".repeat(80))?;
+        writeln!(f, "{}", "-".repeat(92))?;
 
         for cov in &self.covariates {
             let balance_flag = if cov.std_diff.abs() > 0.1 { "!" } else { "" };
             writeln!(
                 f,
-                "{:<20} {:>10.4} {:>10.4} {:>10.4}{} {:>10.4} {:>10.4}",
+                "{:<20} {:>10} {:>10} {:>10}{} {:>10} {:>10} {:>10}",
                 cov.name,
-                cov.mean_treated,
-                cov.mean_control,
-                cov.std_diff,
+                cell(cov.mean_treated),
+                cell(cov.mean_control),
+                cell(cov.std_diff),
                 balance_flag,
-                cov.var_ratio,
-                cov.ks_statistic
+                cell(cov.var_ratio),
+                cell(cov.ecdf_mean),
+                cell(cov.ecdf_max)
             )?;
         }
 
-        writeln!(f, "{}", "-".repeat(80))?;
+        writeln!(f, "{}", "-".repeat(92))?;
         writeln!(f, "Mean Abs. Std. Diff: {:.4}", self.mean_abs_std_diff)?;
         writeln!(f, "Max Abs. Std. Diff:  {:.4}", self.max_abs_std_diff)?;
         writeln!(f, "Imbalanced (|SMD|>0.1): {}", self.n_imbalanced)?;
@@ -288,9 +404,10 @@ pub struct MatchResult {
     pub matches: Vec<MatchInfo>,
     /// Subclass information (for Full/Subclass methods).
     pub subclasses: Option<Vec<SubclassInfo>>,
-    /// Matching weights for all observations (0 for unmatched).
+    /// MatchIt's matching weights for all observations (0 for unmatched), normalised so the
+    /// positive weights of each group sum to their count.
     pub weights: Vec<f64>,
-    /// Propensity scores (if computed).
+    /// Propensity scores (None when no propensity score is used).
     pub propensity_scores: Option<Vec<f64>>,
     /// Total number of observations.
     pub n_obs: usize,
@@ -308,7 +425,7 @@ pub struct MatchResult {
     pub n_discarded_control: usize,
     /// Caliper used (if applicable).
     pub caliper_used: Option<f64>,
-    /// Effective sample size (accounting for weights).
+    /// `ess_treated + ess_control` (MatchIt's "Matched (ESS)" of both groups).
     pub effective_sample_size: f64,
     /// Convergence of the propensity-score glm (None when no propensity score is used).
     #[serde(default)]
@@ -317,6 +434,28 @@ pub struct MatchResult {
     /// generalised inverses, unmatched units and discarded subclasses.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Order used by nearest-neighbour matching (Data with replacement, as MatchIt); None for
+    /// the other methods.
+    #[serde(default)]
+    pub m_order: Option<MOrder>,
+    /// MatchIt's `subclass` per row, 1-based: the pair (nearest neighbour without
+    /// replacement, numbered in treated data order), stratum (CEM), matched set (full) or
+    /// subclass; None = unmatched, or nearest neighbour with replacement (MatchIt: NULL).
+    #[serde(default)]
+    pub subclass: Vec<Option<usize>>,
+    /// Caliper on the distance scale (propensity score: `caliper * sd(ps)`; covariate
+    /// distances: as given).
+    #[serde(default)]
+    pub caliper_abs: Option<f64>,
+    /// Full matching: the total distance within the matched sets.
+    #[serde(default)]
+    pub total_distance: Option<f64>,
+    /// Kish effective sample size `(sum w)^2 / sum w^2` of the matched treated units.
+    #[serde(default)]
+    pub ess_treated: f64,
+    /// Kish effective sample size of the matched controls.
+    #[serde(default)]
+    pub ess_control: f64,
 }
 
 impl ResultNotes for MatchResult {
@@ -335,7 +474,14 @@ impl fmt::Display for MatchResult {
         writeln!(f, "==================================")?;
         writeln!(f)?;
         writeln!(f, "Method:   {}", self.method)?;
-        writeln!(f, "Distance: {}", self.distance)?;
+        if let Some(o) = self.m_order {
+            writeln!(f, "Matching order: {o} (MatchIt m.order)")?;
+        }
+        if matches!(self.method, MatchMethod::CoarsenedExact { .. }) {
+            writeln!(f, "Distance: not used (coarsened exact matching)")?;
+        } else {
+            writeln!(f, "Distance: {}", self.distance)?;
+        }
         writeln!(f)?;
 
         writeln!(f, "Sample Sizes:")?;
@@ -350,38 +496,44 @@ impl fmt::Display for MatchResult {
             "  Control:         {} (matched: {}, discarded: {})",
             self.n_control, self.n_matched_control, self.n_discarded_control
         )?;
+        writeln!(
+            f,
+            "  Matched ESS:     {:.1} treated, {:.1} control",
+            self.ess_treated, self.ess_control
+        )?;
         writeln!(f, "  Effective N:     {:.1}", self.effective_sample_size)?;
         writeln!(f)?;
 
         if let Some(caliper) = self.caliper_used {
-            writeln!(f, "Caliper: {:.4} SD of propensity score", caliper)?;
+            match self.distance {
+                DistanceMethod::Logit | DistanceMethod::Probit => writeln!(
+                    f,
+                    "Caliper: {:.4} SD of the propensity score ({:.6} on the score scale)",
+                    caliper,
+                    self.caliper_abs.unwrap_or(f64::NAN)
+                )?,
+                d => writeln!(
+                    f,
+                    "Caliper: {} (in {} distance units)",
+                    caliper,
+                    DistanceMethod::choices().canonical(d)
+                )?,
+            }
+            writeln!(f)?;
+        }
+        if let Some(d) = self.total_distance {
+            writeln!(f, "Total distance within matched sets: {d:.6} (optimal)")?;
             writeln!(f)?;
         }
 
-        writeln!(f, "Balance Before Matching:")?;
         writeln!(
             f,
-            "  Mean Abs. Std. Diff: {:.4}",
-            self.balance_before.mean_abs_std_diff
+            "Balance Before Matching (summary.matchit; SMD standardised by the treated SD):"
         )?;
-        writeln!(
-            f,
-            "  Imbalanced covariates: {}",
-            self.balance_before.n_imbalanced
-        )?;
+        write!(f, "{}", self.balance_before)?;
         writeln!(f)?;
-
         writeln!(f, "Balance After Matching:")?;
-        writeln!(
-            f,
-            "  Mean Abs. Std. Diff: {:.4}",
-            self.balance_after.mean_abs_std_diff
-        )?;
-        writeln!(
-            f,
-            "  Imbalanced covariates: {}",
-            self.balance_after.n_imbalanced
-        )?;
+        write!(f, "{}", self.balance_after)?;
         writeln!(f)?;
 
         let improvement = 1.0
@@ -396,19 +548,11 @@ impl fmt::Display for MatchResult {
 // Main Matching Function
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Run propensity score matching.
+/// Run propensity score matching (MatchIt's `matchit` for the ATT).
 ///
-/// Creates matched comparison groups for causal inference from observational data.
-///
-/// # Arguments
-/// * `dataset` - Dataset containing treatment indicator and covariates
-/// * `treatment_col` - Name of binary treatment column (0/1)
-/// * `covariate_cols` - Names of covariate columns for matching
-/// * `method` - Matching method to use
-/// * `distance` - Distance metric (default: Logit propensity score)
-///
-/// # Returns
-/// `MatchResult` containing matched sample, weights, and balance diagnostics.
+/// `match_it(..)` is [`match_it_with`] with [`MatchOptions::default()`]: MatchIt's default
+/// `m.order` (largest first for a propensity score, data order for Mahalanobis and
+/// Euclidean distances).
 ///
 /// # Example
 /// ```ignore
@@ -434,13 +578,50 @@ pub fn match_it(
     method: MatchMethod,
     distance: Option<DistanceMethod>,
 ) -> EconResult<MatchResult> {
+    match_it_with(
+        dataset,
+        treatment_col,
+        covariate_cols,
+        method,
+        distance,
+        &MatchOptions::default(),
+    )
+}
+
+/// What one matching method hands back to [`match_it_with`].
+struct MethodOutput {
+    /// Raw (unnormalised) weights per row.
+    weights: Vec<f64>,
+    matches: Vec<MatchInfo>,
+    subclass: Vec<Option<usize>>,
+    subclasses: Option<Vec<SubclassInfo>>,
+    m_order: Option<MOrder>,
+    caliper_abs: Option<f64>,
+    total_distance: Option<f64>,
+    warnings: Vec<String>,
+}
+
+/// [`match_it`] with MatchIt's further arguments ([`MatchOptions`]: `m.order` and the seed of
+/// the random order).
+///
+/// Steps (S1): the treatment must be coded 0/1; the covariates are extracted; the method's
+/// parameters are checked (`ratio`, `n_subclasses`, `n_bins` and `cutpoints` against the data,
+/// a positive finite caliper, `m_order` largest/smallest only with a propensity score,
+/// subclassification only on a propensity score); balance before matching; the method; the
+/// weights normalised as MatchIt's (`.make_sum_to_n`); balance after matching and the ESS.
+pub fn match_it_with(
+    dataset: &Dataset,
+    treatment_col: &str,
+    covariate_cols: &[&str],
+    method: MatchMethod,
+    distance: Option<DistanceMethod>,
+    options: &MatchOptions,
+) -> EconResult<MatchResult> {
     let distance_method = distance.unwrap_or_default();
 
     // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
-    // Extract treatment indicator
     let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
     let n = treatment.len();
     if let Some((i, v)) = treatment
         .iter()
@@ -454,14 +635,9 @@ pub fn match_it(
             ),
         });
     }
-
-    // Identify treated and control indices
-    let (treated_idx, control_idx): (Vec<usize>, Vec<usize>) =
-        (0..n).partition(|&i| treatment[i] == 1.0);
-
-    let n_treated = treated_idx.len();
-    let n_control = control_idx.len();
-
+    let is_treated: Vec<bool> = treatment.iter().map(|&v| v == 1.0).collect();
+    let n_treated = is_treated.iter().filter(|&&t| t).count();
+    let n_control = n - n_treated;
     if n_treated == 0 || n_control == 0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -472,154 +648,120 @@ pub fn match_it(
     }
 
     validate_match_counts(&method, n, n_treated, n_control, covariate_cols.len())?;
+
+    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
+        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
+    let x = design.data;
+    let covariate_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
+
     let ps_link = match distance_method {
         DistanceMethod::Logit => Some(GlmLink::Logit),
         DistanceMethod::Probit => Some(GlmLink::Probit),
         DistanceMethod::Mahalanobis | DistanceMethod::Euclidean => None,
     };
-    if matches!(method, MatchMethod::Subclass { .. }) && ps_link.is_none() {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "subclassification needs a propensity-score distance (logit or probit), got {}",
-                distance_method
-            ),
-        });
-    }
+    validate_match_options(&method, distance_method, ps_link.is_some(), options)?;
 
-    // Build covariate matrix
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-    let x = design.data.clone();
-    let covariate_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
+    let balance_before = balance_table(&x, &covariate_names, &is_treated, &vec![1.0; n]);
 
-    // Compute balance before matching
-    let balance_before = compute_balance_table(
-        &x,
-        &treatment,
-        &treated_idx,
-        &control_idx,
-        &covariate_names,
-        None,
-    );
+    let uses_ps = ps_link.is_some() && !matches!(method, MatchMethod::CoarsenedExact { .. });
+    let ps_model = match ps_link {
+        Some(link) if uses_ps => Some(estimate_propensity(&x, &treatment, link)?),
+        _ => None,
+    };
+    let scores: Option<Vec<f64>> = ps_model.as_ref().map(|m| m.scores.to_vec());
 
-    // Perform matching based on method - using optimized algorithms
-    let mut ps_model: Option<PropensityModel> = None;
-    let (matches, weights, subclasses, caliper_used, propensity_scores) = match &method {
+    let out = match &method {
         MatchMethod::NearestNeighbor {
             ratio,
             caliper,
             replace,
-        } => {
-            match distance_method {
-                DistanceMethod::Logit | DistanceMethod::Probit => {
-                    // FAST PATH: Use sorting + binary search for propensity score matching
-                    // O(n_t * log(n_c)) instead of O(n_t * n_c)
-                    let model =
-                        estimate_propensity(&x, &treatment, ps_link.unwrap_or(GlmLink::Logit))?;
-                    let ps = model.scores.clone();
-                    ps_model = Some(model);
-
-                    // Compute caliper in absolute PS units
-                    let caliper_abs = caliper.map(|c| {
-                        let ps_std = ps.std(1.0);
-                        c * ps_std
-                    });
-
-                    let (m, w) = ps_nearest_neighbor_fast(
-                        &ps,
-                        &treated_idx,
-                        &control_idx,
-                        *ratio,
-                        caliper_abs,
-                        *replace,
-                    )?;
-
-                    (m, w, None, *caliper, ps)
-                }
-                DistanceMethod::Mahalanobis | DistanceMethod::Euclidean => {
-                    // OPTIMIZED PATH: Parallel distance computation on treated×control only
-                    // Avoids full n×n distance matrix
-                    let use_mahalanobis = distance_method == DistanceMethod::Mahalanobis;
-
-                    // Compute caliper (for non-PS, interpret as raw distance)
-                    let caliper_abs = *caliper;
-
-                    let (m, w) = parallel_distance_matching(
-                        &x,
-                        &treated_idx,
-                        &control_idx,
-                        *ratio,
-                        caliper_abs,
-                        *replace,
-                        use_mahalanobis,
-                    )?;
-
-                    // Return uniform propensity scores for compatibility
-                    let ps = Array1::from_elem(n, 0.5);
-
-                    (m, w, None, *caliper, ps)
-                }
-            }
-        }
-        MatchMethod::CoarsenedExact { cutpoints, n_bins } => {
-            // CEM doesn't use distances or propensity scores
-            let (m, w, sc, cal) = coarsened_exact_matching(
-                &x,
-                &treated_idx,
-                &control_idx,
-                cutpoints.as_ref(),
-                n_bins.unwrap_or(4),
-                &covariate_names,
-            )?;
-            let ps = Array1::from_elem(n, 0.5);
-            (m, w, sc, cal, ps)
-        }
+        } => nearest_neighbour(
+            &x,
+            &is_treated,
+            scores.as_deref(),
+            distance_method,
+            *ratio,
+            *caliper,
+            *replace,
+            options,
+        )?,
+        MatchMethod::CoarsenedExact { cutpoints, n_bins } => cem_method(
+            &x,
+            &is_treated,
+            cutpoints.as_deref(),
+            *n_bins,
+            &covariate_names,
+        )?,
         MatchMethod::Full {
             min_ratio,
             max_ratio,
-        } => {
-            // Full matching uses propensity scores for stratification
-            let model = estimate_propensity(&x, &treatment, ps_link.unwrap_or(GlmLink::Logit))?;
-            let ps = model.scores.clone();
-            ps_model = Some(model);
-            let (m, w, sc, cal) =
-                full_matching_optimized(&ps, &treated_idx, &control_idx, *min_ratio, *max_ratio)?;
-            (m, w, sc, cal, ps)
-        }
+        } => full_method(
+            &x,
+            &is_treated,
+            scores.as_deref(),
+            distance_method,
+            *min_ratio,
+            *max_ratio,
+        )?,
         MatchMethod::Subclass { n_subclasses } => {
-            // Subclassification uses propensity scores
-            let model = estimate_propensity(&x, &treatment, ps_link.unwrap_or(GlmLink::Logit))?;
-            let ps = model.scores.clone();
-            ps_model = Some(model);
-            let (m, w, sc, cal) =
-                subclassification_matching(&ps, &treated_idx, &control_idx, *n_subclasses)?;
-            (m, w, sc, cal, ps)
+            subclass_method(&is_treated, scores.as_deref().unwrap_or(&[]), *n_subclasses)?
         }
     };
 
-    // Count matched units
-    let n_matched_treated = matches
-        .iter()
-        .filter(|m| !m.control_indices.is_empty())
+    let mut weights = out.weights;
+    normalize_weights(&mut weights, &is_treated);
+    let n_matched_treated = (0..n)
+        .filter(|&i| is_treated[i] && weights[i] > 0.0)
         .count();
-    let matched_controls: std::collections::HashSet<usize> = matches
-        .iter()
-        .flat_map(|m| m.control_indices.iter().copied())
+    let n_matched_control = (0..n)
+        .filter(|&i| !is_treated[i] && weights[i] > 0.0)
+        .count();
+    if n_matched_treated == 0 || n_matched_control == 0 {
+        let message = match &method {
+            MatchMethod::NearestNeighbor { caliper, .. } => format!(
+                "no treated unit has a control within the caliper ({} = {} on the distance \
+                 scale); widen the caliper",
+                caliper.unwrap_or(f64::NAN),
+                out.caliper_abs.unwrap_or(f64::NAN)
+            ),
+            MatchMethod::CoarsenedExact { .. } => "no units were matched: no stratum holds both \
+                 treated and control units; coarsen the variables further or match on fewer \
+                 covariates"
+                .to_string(),
+            MatchMethod::Subclass { .. } => {
+                "no subclass holds both treated and control units".to_string()
+            }
+            MatchMethod::Full { .. } => "no units were matched".to_string(),
+        };
+        return Err(EconError::InvalidSpecification { message });
+    }
+    let mut matches = out.matches;
+    for m in &mut matches {
+        m.weight = weights[m.treated_idx];
+    }
+
+    let balance_after = balance_table(&x, &covariate_names, &is_treated, &weights);
+    let wt: Vec<f64> = (0..n)
+        .filter(|&i| is_treated[i])
+        .map(|i| weights[i])
         .collect();
-    let n_matched_control = matched_controls.len();
+    let wc: Vec<f64> = (0..n)
+        .filter(|&i| !is_treated[i])
+        .map(|i| weights[i])
+        .collect();
+    let (ess_treated, ess_control) = (kish_ess(&wt), kish_ess(&wc));
 
-    // Compute balance after matching
-    let balance_after = compute_balance_table(
-        &x,
-        &treatment,
-        &treated_idx,
-        &control_idx,
-        &covariate_names,
-        Some(&weights),
-    );
-
-    // Compute effective sample size
-    let effective_sample_size = compute_effective_sample_size(&weights);
+    let caliper_used = match &method {
+        MatchMethod::NearestNeighbor { caliper, .. } => *caliper,
+        _ => None,
+    };
+    let mut warnings = Vec::new();
+    let mut propensity_convergence = None;
+    if let Some(m) = ps_model {
+        warnings.extend(m.warnings);
+        propensity_convergence = Some(m.convergence);
+    }
+    warnings.extend(out.warnings);
 
     Ok(MatchResult {
         method,
@@ -627,9 +769,9 @@ pub fn match_it(
         balance_before,
         balance_after,
         matches,
-        subclasses,
+        subclasses: out.subclasses,
         weights,
-        propensity_scores: Some(propensity_scores.to_vec()),
+        propensity_scores: scores,
         n_obs: n,
         n_treated,
         n_control,
@@ -638,10 +780,187 @@ pub fn match_it(
         n_discarded_treated: n_treated - n_matched_treated,
         n_discarded_control: n_control - n_matched_control,
         caliper_used,
-        effective_sample_size,
-        propensity_convergence: ps_model.as_ref().map(|m| m.convergence.clone()),
-        warnings: ps_model.map(|m| m.warnings).unwrap_or_default(),
+        effective_sample_size: ess_treated + ess_control,
+        propensity_convergence,
+        warnings,
+        m_order: out.m_order,
+        subclass: out.subclass,
+        caliper_abs: out.caliper_abs,
+        total_distance: out.total_distance,
+        ess_treated,
+        ess_control,
     })
+}
+
+/// S1 step 3: the caliper, the full-matching bounds, the cut points, `m_order` and the
+/// subclassification distance.
+fn validate_match_options(
+    method: &MatchMethod,
+    distance: DistanceMethod,
+    has_ps: bool,
+    options: &MatchOptions,
+) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    let dname = DistanceMethod::choices().canonical(distance);
+    match method {
+        MatchMethod::NearestNeighbor { caliper, .. } => {
+            if let Some(c) = *caliper {
+                if !(c.is_finite() && c > 0.0) {
+                    return spec(format!(
+                        "caliper must be a positive, finite number (in standard deviations of \
+                         the propensity score for logit/probit, in distance units for \
+                         mahalanobis/euclidean), got {c}"
+                    ));
+                }
+            }
+            if let Some(o @ (MOrder::Largest | MOrder::Smallest)) = options.m_order {
+                if !has_ps {
+                    return spec(format!(
+                        "m_order = '{o}' orders treated units by their propensity score; with \
+                         distance = '{dname}' use 'data' or 'random' (as MatchIt)"
+                    ));
+                }
+            }
+        }
+        MatchMethod::Subclass { .. } if !has_ps => {
+            return spec(format!(
+                "subclassification needs a propensity-score distance (logit or probit), got \
+                 {dname}"
+            ));
+        }
+        MatchMethod::CoarsenedExact {
+            cutpoints: Some(cuts),
+            ..
+        } => {
+            for (j, c) in cuts.iter().enumerate() {
+                if c.iter().any(|v| !v.is_finite()) {
+                    return spec(format!(
+                        "cutpoints for covariate {} must be finite numbers",
+                        j + 1
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// S3-S5: nearest-neighbour matching on the propensity score or a covariate distance.
+#[allow(clippy::too_many_arguments)]
+fn nearest_neighbour(
+    x: &Array2<f64>,
+    is_treated: &[bool],
+    scores: Option<&[f64]>,
+    distance: DistanceMethod,
+    ratio: usize,
+    caliper: Option<f64>,
+    replace: bool,
+    options: &MatchOptions,
+) -> EconResult<MethodOutput> {
+    let n = is_treated.len();
+    let (n_t, n_c) = (
+        is_treated.iter().filter(|&&t| t).count(),
+        is_treated.iter().filter(|&&t| !t).count(),
+    );
+    let order_kind = if replace {
+        MOrder::Data
+    } else {
+        options.m_order.unwrap_or(if scores.is_some() {
+            MOrder::Largest
+        } else {
+            MOrder::Data
+        })
+    };
+    let order = treated_order(
+        is_treated,
+        scores,
+        order_kind,
+        options.seed.unwrap_or(DEFAULT_MATCH_SEED),
+    );
+    let mut warnings = Vec::new();
+    if !replace {
+        if n_c < n_t {
+            warnings.push(
+                "Fewer control units than treated units; not all treated units will get a match."
+                    .to_string(),
+            );
+        } else if n_c < ratio.saturating_mul(n_t) {
+            warnings.push(format!("Not all treated units will get {ratio} matches."));
+        }
+    }
+    let (matched, caliper_abs, dist): (
+        Vec<Vec<usize>>,
+        Option<f64>,
+        Box<dyn Fn(usize, usize) -> f64>,
+    ) = match scores {
+        Some(s) => {
+            let caliper_abs = caliper.map(|c| c * sample_sd(s));
+            let m = nn_on_scores(s, is_treated, &order, ratio, caliper_abs, replace)?;
+            let s = s.to_vec();
+            (m, caliper_abs, Box::new(move |t, c| (s[t] - s[c]).abs()))
+        }
+        None => {
+            let metric = CovariateMetric::new(
+                x,
+                is_treated,
+                distance == DistanceMethod::Mahalanobis,
+                &mut warnings,
+            )?;
+            let m = if metric.z.ncols() == 1 {
+                // matchit2nearest: one covariate is matched as a scalar distance
+                let z = metric.z.column(0).to_vec();
+                nn_on_scores(&z, is_treated, &order, ratio, caliper, replace)?
+            } else {
+                nn_on_covariates(&metric, is_treated, &order, ratio, caliper, replace)?
+            };
+            (m, caliper, Box::new(move |t, c| metric.distance(t, c)))
+        }
+    };
+    let pairs = crate::resource::checked_len(
+        &[n_t, ratio],
+        "matched control lists (ratio controls per treated unit)",
+    )?;
+    crate::resource::check_alloc::<(usize, f64)>(
+        pairs,
+        "matched control lists (ratio controls per treated unit)",
+    )?;
+    let mut subclass = vec![None; n];
+    let mut label = 0;
+    let mut matches = Vec::with_capacity(n_t);
+    for t in (0..n).filter(|&i| is_treated[i]) {
+        let m = &matched[t];
+        if !replace && !m.is_empty() {
+            label += 1;
+            subclass[t] = Some(label);
+            for &c in m {
+                subclass[c] = Some(label);
+            }
+        }
+        matches.push(MatchInfo {
+            treated_idx: t,
+            control_indices: m.clone(),
+            distances: m.iter().map(|&c| dist(t, c)).collect(),
+            weight: 0.0,
+        });
+    }
+    Ok(MethodOutput {
+        weights: weights_from_matches(&matched, is_treated),
+        matches,
+        subclass,
+        subclasses: None,
+        m_order: Some(order_kind),
+        caliper_abs,
+        total_distance: None,
+        warnings,
+    })
+}
+
+/// R's `sd`: the sample standard deviation (divisor `n - 1`).
+fn sample_sd(x: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    let m = x.iter().sum::<f64>() / n;
+    (x.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / (n - 1.0)).sqrt()
 }
 
 /// Check the method's count parameters against the data before any work.
@@ -932,448 +1251,502 @@ fn estimate_propensity(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Matching Algorithms
+// Nearest-neighbour matching (MatchIt matchit2nearest / nn_matchC)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Fast propensity score nearest neighbor matching using sorting + binary search.
-///
-/// This is O(n_t * log(n_c)) instead of O(n_t * n_c) for the naive approach.
-/// For n=1000 with 50% treatment, this is ~500*9 = 4500 ops vs 500*500 = 250000 ops.
-fn ps_nearest_neighbor_fast(
-    propensity_scores: &Array1<f64>,
-    treated_idx: &[usize],
-    control_idx: &[usize],
+/// Treated rows in the order they choose their controls (S3). `Largest`/`Smallest` sort
+/// stably by score (ties keep data order, as R's `order`); `Random` shuffles the data order
+/// with a seeded ChaCha8 generator.
+fn treated_order(
+    is_treated: &[bool],
+    scores: Option<&[f64]>,
+    order: MOrder,
+    seed: u64,
+) -> Vec<usize> {
+    let mut rows: Vec<usize> = (0..is_treated.len()).filter(|&i| is_treated[i]).collect();
+    match (order, scores) {
+        (MOrder::Largest, Some(s)) => rows.sort_by(|&a, &b| s[b].total_cmp(&s[a])),
+        (MOrder::Smallest, Some(s)) => rows.sort_by(|&a, &b| s[a].total_cmp(&s[b])),
+        (MOrder::Random, _) => {
+            use rand::SeedableRng;
+            use rand::seq::SliceRandom;
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            rows.shuffle(&mut rng);
+        }
+        _ => {}
+    }
+    rows
+}
+
+/// Disjoint-set "skip" pointers over sorted control positions: the nearest available
+/// position at or below / at or above a position, with path compression.
+struct Skip {
+    /// `left[p + 1]` leads to the nearest available position `<= p`, encoded `+ 1` (0 = none).
+    left: Vec<usize>,
+    /// `right[p]` leads to the nearest available position `>= p` (`len` = none).
+    right: Vec<usize>,
+}
+
+impl Skip {
+    fn new(len: usize) -> EconResult<Skip> {
+        let mut left = crate::resource::try_vec(len + 1, 0usize, "nearest-neighbour skip lists")?;
+        let mut right = crate::resource::try_vec(len + 1, 0usize, "nearest-neighbour skip lists")?;
+        for i in 0..=len {
+            left[i] = i;
+            right[i] = i;
+        }
+        Ok(Skip { left, right })
+    }
+
+    fn find(par: &mut [usize], mut x: usize) -> usize {
+        let mut root = x;
+        while par[root] != root {
+            root = par[root];
+        }
+        while par[x] != root {
+            let next = par[x];
+            par[x] = root;
+            x = next;
+        }
+        root
+    }
+
+    /// Nearest available position `< pos`.
+    fn below(&mut self, pos: usize) -> Option<usize> {
+        let r = Self::find(&mut self.left, pos);
+        (r > 0).then(|| r - 1)
+    }
+
+    /// Nearest available position `>= pos`.
+    fn above(&mut self, pos: usize) -> Option<usize> {
+        let r = Self::find(&mut self.right, pos);
+        (r < self.right.len() - 1).then_some(r)
+    }
+
+    fn mark_used(&mut self, p: usize) {
+        self.left[p + 1] = p;
+        self.right[p] = p + 1;
+    }
+}
+
+/// Nearest-neighbour matching on a scalar distance (S4, MatchIt's `nn_matchC_vec` rules):
+/// per row, the matched controls in match order (empty for controls and unmatched treated
+/// units). Without replacement treated units match in `order` and in rounds (every unit
+/// gets its r-th match before any gets its (r+1)-th); with replacement each treated unit
+/// takes its `ratio` nearest controls. An exact tie between the nearest score below and the
+/// nearest at or above goes below.
+fn nn_on_scores(
+    scores: &[f64],
+    is_treated: &[bool],
+    order: &[usize],
     ratio: usize,
     caliper_abs: Option<f64>,
     replace: bool,
-) -> EconResult<(Vec<MatchInfo>, Vec<f64>)> {
-    let n = propensity_scores.len();
-    let mut weights = vec![0.0; n];
-    let mut matches = Vec::with_capacity(treated_idx.len());
-
-    // Step 1: Create sorted index of controls by propensity score - O(n_c log n_c)
-    let mut control_sorted: Vec<(usize, f64)> = control_idx
-        .iter()
-        .map(|&i| (i, propensity_scores[i]))
-        .collect();
-    control_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Pre-extract just the scores for binary search
-    let control_ps: Vec<f64> = control_sorted.iter().map(|(_, ps)| *ps).collect();
-
-    // Track used controls for without-replacement matching (AtomicBool is interior-mutable)
-    let used_controls: Vec<AtomicBool> = if !replace {
-        control_sorted
-            .iter()
-            .map(|_| AtomicBool::new(false))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Step 2: For each treated unit, find nearest controls using binary search - O(n_t * log(n_c) * ratio)
-    for &ti in treated_idx {
-        crate::resource::checkpoint()?;
-
-        let ps_t = propensity_scores[ti];
-
-        // Binary search to find insertion point - O(log n_c)
-        let pos = control_ps.partition_point(|&ps| ps < ps_t);
-
-        // Find k nearest neighbors by expanding outward from insertion point
-        let selected = find_k_nearest_neighbors(
-            &control_sorted,
-            &control_ps,
-            pos,
-            ps_t,
-            ratio,
-            caliper_abs,
-            replace,
-            if !replace { Some(&used_controls) } else { None },
-        );
-
-        if !selected.is_empty() {
-            let control_indices: Vec<usize> = selected.iter().map(|(ci, _)| *ci).collect();
-            let dists: Vec<f64> = selected.iter().map(|(_, d)| *d).collect();
-
-            // Assign weights
-            weights[ti] = 1.0;
-            for &ci in &control_indices {
-                weights[ci] += 1.0 / ratio as f64;
-            }
-
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices,
-                distances: dists,
-                weight: 1.0,
-            });
-        } else {
-            // No valid match found
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices: vec![],
-                distances: vec![],
-                weight: 0.0,
-            });
-        }
-    }
-
-    Ok((matches, weights))
-}
-
-/// Find k nearest neighbors by expanding outward from binary search position.
-/// Returns up to `k` matches that satisfy the caliper constraint.
-#[inline]
-fn find_k_nearest_neighbors(
-    control_sorted: &[(usize, f64)],
-    control_ps: &[f64],
-    pos: usize,
-    target_ps: f64,
-    k: usize,
-    caliper_abs: Option<f64>,
-    replace: bool,
-    used: Option<&[AtomicBool]>,
-) -> Vec<(usize, f64)> {
-    let n = control_sorted.len();
-    if n == 0 {
-        return Vec::new();
-    }
-
-    // k <= n_control is validated by match_it, so this capacity is bounded by
-    // the data already in memory.
-    let mut result = Vec::with_capacity(k.min(n));
-
-    // Two-pointer expansion from insertion point
-    let mut left = pos.saturating_sub(1) as isize;
-    let mut right = if pos >= n { n - 1 } else { pos };
-
-    while result.len() < k && (left >= 0 || right < n) {
-        let left_dist = if left >= 0 {
-            (control_ps[left as usize] - target_ps).abs()
-        } else {
-            f64::INFINITY
-        };
-
-        let right_dist = if right < n {
-            (control_ps[right] - target_ps).abs()
-        } else {
-            f64::INFINITY
-        };
-
-        let (chosen_idx, chosen_dist) = if left_dist <= right_dist {
-            let idx = left as usize;
-            left -= 1;
-            (idx, left_dist)
-        } else {
-            let idx = right;
-            right += 1;
-            (idx, right_dist)
-        };
-
-        // Check caliper constraint
-        if let Some(max_dist) = caliper_abs {
-            if chosen_dist > max_dist {
-                // If closest available is beyond caliper, stop searching
-                break;
-            }
-        }
-
-        // Check if control is available
-        if !replace {
-            if let Some(used_flags) = used {
-                if used_flags[chosen_idx].swap(true, Ordering::Relaxed) {
-                    // Already used, skip
-                    continue;
-                }
-            }
-        }
-
-        let (control_idx, _) = control_sorted[chosen_idx];
-        result.push((control_idx, chosen_dist));
-    }
-
-    result
-}
-
-/// Parallel nearest neighbor matching for Mahalanobis/Euclidean distances.
-///
-/// Computes only treated×control distances (not full n×n matrix) and
-/// uses parallel iteration for large datasets.
-fn parallel_distance_matching(
-    x: &Array2<f64>,
-    treated_idx: &[usize],
-    control_idx: &[usize],
-    ratio: usize,
-    caliper_abs: Option<f64>,
-    replace: bool,
-    use_mahalanobis: bool,
-) -> EconResult<(Vec<MatchInfo>, Vec<f64>)> {
-    let n = x.nrows();
-
-    // Compute inverse covariance for Mahalanobis (shared across all distance computations)
-    let cov_inv = if use_mahalanobis {
-        Some(compute_covariance_inverse(x)?)
-    } else {
-        None
-    };
-
-    // Use parallel or sequential based on dataset size
-    let use_parallel = treated_idx.len() >= PARALLEL_THRESHOLD;
-
+) -> EconResult<Vec<Vec<usize>>> {
+    let n = scores.len();
+    let mut cr: Vec<usize> = (0..n).filter(|&i| !is_treated[i]).collect();
+    cr.sort_by(|&a, &b| scores[a].total_cmp(&scores[b]));
+    let cs: Vec<f64> = cr.iter().map(|&i| scores[i]).collect();
+    let nc = cs.len();
+    let within = |d: f64| caliper_abs.is_none_or(|c| d <= c);
+    let mut matched: Vec<Vec<usize>> = vec![Vec::new(); n];
     if replace {
-        // With replacement: can fully parallelize since controls are independent.
-        // The budget is captured here because rayon workers do not see the
-        // caller's thread-local budget.
-        let budget = crate::resource::current_budget();
-        let match_one = |ti: usize| -> EconResult<MatchInfo> {
-            if let Some(b) = &budget {
-                b.check()?;
-            }
-            Ok(find_best_controls_for_treated(
-                x,
-                ti,
-                control_idx,
-                ratio,
-                caliper_abs,
-                cov_inv.as_ref(),
-            ))
-        };
-        let matches: Vec<MatchInfo> = if use_parallel {
-            treated_idx
-                .par_iter()
-                .map(|&ti| match_one(ti))
-                .collect::<EconResult<Vec<_>>>()?
-        } else {
-            treated_idx
-                .iter()
-                .map(|&ti| match_one(ti))
-                .collect::<EconResult<Vec<_>>>()?
-        };
-
-        // Compute weights from matches
-        let mut weights = vec![0.0; n];
-        for m in &matches {
-            if !m.control_indices.is_empty() {
-                weights[m.treated_idx] = 1.0;
-                for &ci in &m.control_indices {
-                    weights[ci] += 1.0 / ratio as f64;
+        for &t in order {
+            crate::resource::checkpoint()?;
+            let st = scores[t];
+            let pos = cs.partition_point(|&s| s < st);
+            let (mut lo, mut hi) = (pos, pos);
+            let mut got = Vec::with_capacity(ratio.min(nc));
+            while got.len() < ratio && (lo > 0 || hi < nc) {
+                let db = (lo > 0).then(|| st - cs[lo - 1]);
+                let da = (hi < nc).then(|| cs[hi] - st);
+                let take_below = match (db, da) {
+                    (Some(b), Some(a)) => b <= a,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                let d = if take_below { db } else { da }.unwrap_or(f64::INFINITY);
+                if !within(d) {
+                    break;
+                }
+                if take_below {
+                    lo -= 1;
+                    got.push(cr[lo]);
+                } else {
+                    got.push(cr[hi]);
+                    hi += 1;
                 }
             }
+            matched[t] = got;
         }
-
-        Ok((matches, weights))
-    } else {
-        // Without replacement: need sequential for correct exclusion tracking
-        // But we can parallelize distance computation within each iteration
-        let mut weights = vec![0.0; n];
-        let mut matches = Vec::with_capacity(treated_idx.len());
-        let mut used_controls: std::collections::HashSet<usize> =
-            std::collections::HashSet::with_capacity(control_idx.len());
-
-        for &ti in treated_idx {
-            crate::resource::checkpoint()?;
-
-            // Find available controls
-            let available_controls: Vec<usize> = control_idx
-                .iter()
-                .filter(|&&ci| !used_controls.contains(&ci))
-                .copied()
-                .collect();
-
-            if available_controls.is_empty() {
-                matches.push(MatchInfo {
-                    treated_idx: ti,
-                    control_indices: vec![],
-                    distances: vec![],
-                    weight: 0.0,
-                });
+        return Ok(matched);
+    }
+    let mut skip = Skip::new(nc)?;
+    for r in 1..=ratio {
+        for &t in order {
+            if matched[t].len() != r - 1 {
                 continue;
             }
+            crate::resource::checkpoint()?;
+            let st = scores[t];
+            let pos = cs.partition_point(|&s| s < st);
+            let below = skip.below(pos);
+            let above = skip.above(pos);
+            let pick = match (below, above) {
+                (Some(b), Some(a)) => {
+                    if st - cs[b] <= cs[a] - st {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                (Some(b), None) => b,
+                (None, Some(a)) => a,
+                (None, None) => continue,
+            };
+            if !within((st - cs[pick]).abs()) {
+                continue;
+            }
+            matched[t].push(cr[pick]);
+            skip.mark_used(pick);
+        }
+    }
+    Ok(matched)
+}
 
-            // Compute distances to available controls (parallel for large datasets)
-            let mut control_distances: Vec<(usize, f64)> = if available_controls.len() >= 100 {
-                available_controls
-                    .par_iter()
-                    .map(|&ci| {
-                        let dist = compute_pairwise_distance(x, ti, ci, cov_inv.as_ref());
-                        (ci, dist)
-                    })
-                    .collect()
-            } else {
-                available_controls
+/// Covariates prepared for a Mahalanobis or Euclidean distance: `z` such that the distance of
+/// rows i and j is `||z_i - z_j||` (S5; whitened covariates for Mahalanobis, MatchIt's
+/// `mahalanobize`).
+struct CovariateMetric {
+    z: Array2<f64>,
+}
+
+impl CovariateMetric {
+    fn distance(&self, i: usize, j: usize) -> f64 {
+        let (a, b) = (self.z.row(i), self.z.row(j));
+        a.iter()
+            .zip(b.iter())
+            .map(|(u, v)| (u - v) * (u - v))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    /// The metric of `distance` on `x` (n x k), with MatchIt's `transform_covariates`:
+    /// columns whose range is below `sqrt(eps)` are dropped, and the Mahalanobis metric uses
+    /// the pooled within-group covariance. Warnings are pushed to `warnings`.
+    fn new(
+        x: &Array2<f64>,
+        is_treated: &[bool],
+        mahalanobis: bool,
+        warnings: &mut Vec<String>,
+    ) -> EconResult<CovariateMetric> {
+        let (n, k) = x.dim();
+        let tol = f64::EPSILON.sqrt();
+        let keep: Vec<usize> = (0..k)
+            .filter(|&j| {
+                let c = x.column(j);
+                let (lo, hi) = c
                     .iter()
-                    .map(|&ci| {
-                        let dist = compute_pairwise_distance(x, ti, ci, cov_inv.as_ref());
-                        (ci, dist)
-                    })
-                    .collect()
-            };
-
-            // Sort by distance
-            control_distances
-                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Apply caliper
-            let valid_controls: Vec<(usize, f64)> = match caliper_abs {
-                Some(max_dist) => control_distances
-                    .into_iter()
-                    .filter(|(_, d)| *d <= max_dist)
-                    .collect(),
-                None => control_distances,
-            };
-
-            // Select top k matches
-            let selected: Vec<(usize, f64)> = valid_controls.into_iter().take(ratio).collect();
-
-            if !selected.is_empty() {
-                let control_indices: Vec<usize> = selected.iter().map(|(ci, _)| *ci).collect();
-                let dists: Vec<f64> = selected.iter().map(|(_, d)| *d).collect();
-
-                // Mark as used
-                for &ci in &control_indices {
-                    used_controls.insert(ci);
-                }
-
-                weights[ti] = 1.0;
-                for &ci in &control_indices {
-                    weights[ci] += 1.0 / ratio as f64;
-                }
-
-                matches.push(MatchInfo {
-                    treated_idx: ti,
-                    control_indices,
-                    distances: dists,
-                    weight: 1.0,
-                });
-            } else {
-                matches.push(MatchInfo {
-                    treated_idx: ti,
-                    control_indices: vec![],
-                    distances: vec![],
-                    weight: 0.0,
-                });
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                        (lo.min(v), hi.max(v))
+                    });
+                hi - lo >= tol
+            })
+            .collect();
+        if keep.is_empty() {
+            warnings.push("every matching covariate is constant; all distances are 0".into());
+            return Ok(CovariateMetric {
+                z: crate::resource::try_zeros2(n, 0, "matching covariates")?,
+            });
+        }
+        let mut xk = crate::resource::try_zeros2(n, keep.len(), "matching covariates")?;
+        for (c, &j) in keep.iter().enumerate() {
+            xk.column_mut(c).assign(&x.column(j));
+        }
+        if !mahalanobis {
+            return Ok(CovariateMetric { z: xk });
+        }
+        let s = pooled_within_covariance(&xk, is_treated)?;
+        let what = "pooled within-group covariance of the matching covariates";
+        let inv = sym_inverse(s.view(), SingularPolicy::Generalized, what)?;
+        if let Some(w) = inv.warning(what) {
+            warnings.push(w);
+        }
+        let (values, vectors) = eig_symmetric(&inv.inverse.view()).map_err(|e| {
+            EconError::Computation(format!("eigen-decomposition of the {what}: {e:?}"))
+        })?;
+        let kk = keep.len();
+        let mut root = Array2::<f64>::zeros((kk, kk));
+        for c in 0..kk {
+            let s = values[c].max(0.0).sqrt();
+            for r in 0..kk {
+                root[[r, c]] = vectors[[r, c]] * s;
             }
         }
-
-        Ok((matches, weights))
+        let mut z = crate::resource::try_zeros2(n, kk, "whitened matching covariates")?;
+        ndarray::linalg::general_mat_mul(1.0, &xk, &root, 0.0, &mut z);
+        Ok(CovariateMetric { z })
     }
 }
 
-/// Find best control matches for a single treated unit.
-#[inline]
-fn find_best_controls_for_treated(
-    x: &Array2<f64>,
-    ti: usize,
-    control_idx: &[usize],
+/// MatchIt's `pooled_cov`: `sum_g sum_{i in g} (x_i - mean_g)(x_i - mean_g)' / (n - 2)`.
+fn pooled_within_covariance(x: &Array2<f64>, is_treated: &[bool]) -> EconResult<Array2<f64>> {
+    let (n, k) = x.dim();
+    let denom = n
+        .checked_sub(2)
+        .filter(|&d| d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: 3,
+            provided: n,
+            context: "pooled within-group covariance for the Mahalanobis distance".into(),
+        })?;
+    let mut means = [Array1::<f64>::zeros(k), Array1::<f64>::zeros(k)];
+    let mut counts = [0usize; 2];
+    for i in 0..n {
+        let g = usize::from(is_treated[i]);
+        counts[g] += 1;
+        means[g] += &x.row(i);
+    }
+    for g in 0..2 {
+        if counts[g] > 0 {
+            means[g] /= counts[g] as f64;
+        }
+    }
+    let mut s = Array2::<f64>::zeros((k, k));
+    for i in 0..n {
+        let g = usize::from(is_treated[i]);
+        let d = &x.row(i) - &means[g];
+        for a in 0..k {
+            for b in 0..=a {
+                s[[a, b]] += d[a] * d[b];
+            }
+        }
+    }
+    for a in 0..k {
+        for b in 0..=a {
+            let v = s[[a, b]] / denom as f64;
+            s[[a, b]] = v;
+            s[[b, a]] = v;
+        }
+    }
+    Ok(s)
+}
+
+/// Nearest-neighbour matching on a covariate distance (S5): without replacement in rounds,
+/// each treated unit takes the available control of smallest `(distance, row)`; with
+/// replacement its `ratio` smallest. Same output as [`nn_on_scores`].
+fn nn_on_covariates(
+    metric: &CovariateMetric,
+    is_treated: &[bool],
+    order: &[usize],
     ratio: usize,
     caliper_abs: Option<f64>,
-    cov_inv: Option<&Array2<f64>>,
-) -> MatchInfo {
-    // Compute distances to all controls
-    let mut control_distances: Vec<(usize, f64)> = control_idx
-        .iter()
-        .map(|&ci| {
-            let dist = compute_pairwise_distance(x, ti, ci, cov_inv);
-            (ci, dist)
-        })
-        .collect();
-
-    // Sort by distance
-    control_distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Apply caliper
-    let valid_controls: Vec<(usize, f64)> = match caliper_abs {
-        Some(max_dist) => control_distances
-            .into_iter()
-            .filter(|(_, d)| *d <= max_dist)
-            .collect(),
-        None => control_distances,
-    };
-
-    // Select top k
-    let selected: Vec<(usize, f64)> = valid_controls.into_iter().take(ratio).collect();
-
-    if !selected.is_empty() {
-        MatchInfo {
-            treated_idx: ti,
-            control_indices: selected.iter().map(|(ci, _)| *ci).collect(),
-            distances: selected.iter().map(|(_, d)| *d).collect(),
-            weight: 1.0,
+    replace: bool,
+) -> EconResult<Vec<Vec<usize>>> {
+    let n = is_treated.len();
+    let controls: Vec<usize> = (0..n).filter(|&i| !is_treated[i]).collect();
+    let within = |d: f64| caliper_abs.is_none_or(|c| d <= c);
+    let key = |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+    let mut matched: Vec<Vec<usize>> = vec![Vec::new(); n];
+    if replace {
+        let one = |t: usize| -> Vec<usize> {
+            let mut d: Vec<(f64, usize)> = controls
+                .iter()
+                .map(|&c| (metric.distance(t, c), c))
+                .collect();
+            let k = ratio.min(d.len());
+            if k < d.len() {
+                d.select_nth_unstable_by(k, key);
+                d.truncate(k);
+            }
+            d.sort_by(key);
+            d.into_iter()
+                .take_while(|p| within(p.0))
+                .map(|p| p.1)
+                .collect()
+        };
+        if order.len() >= PARALLEL_THRESHOLD {
+            let budget = crate::resource::current_budget();
+            let out: EconResult<Vec<Vec<usize>>> = order
+                .par_iter()
+                .map(|&t| {
+                    if let Some(b) = &budget {
+                        b.check()?;
+                    }
+                    Ok(one(t))
+                })
+                .collect();
+            for (&t, m) in order.iter().zip(out?) {
+                matched[t] = m;
+            }
+        } else {
+            for &t in order {
+                crate::resource::checkpoint()?;
+                matched[t] = one(t);
+            }
         }
-    } else {
-        MatchInfo {
-            treated_idx: ti,
-            control_indices: vec![],
-            distances: vec![],
-            weight: 0.0,
+        return Ok(matched);
+    }
+    let mut available = controls;
+    for r in 1..=ratio {
+        for &t in order {
+            if matched[t].len() != r - 1 || available.is_empty() {
+                continue;
+            }
+            crate::resource::checkpoint()?;
+            let best = if available.len() >= PARALLEL_THRESHOLD {
+                let budget = crate::resource::current_budget();
+                if let Some(b) = &budget {
+                    b.check()?;
+                }
+                available
+                    .par_iter()
+                    .enumerate()
+                    .map(|(pos, &c)| (metric.distance(t, c), c, pos))
+                    .min_by(|a, b| key(&(a.0, a.1), &(b.0, b.1)))
+            } else {
+                available
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, &c)| (metric.distance(t, c), c, pos))
+                    .min_by(|a, b| key(&(a.0, a.1), &(b.0, b.1)))
+            };
+            let Some((d, c, pos)) = best else { continue };
+            if !within(d) {
+                continue;
+            }
+            matched[t].push(c);
+            available.swap_remove(pos);
+        }
+    }
+    Ok(matched)
+}
+
+/// MatchIt's match-matrix weights (S6, `weights_matrixC`): 1 for a treated unit with at least
+/// one match, and for a control the sum of `1 / m_t` over the treated units `t` it is matched
+/// to (`m_t` their number of matches); normalised per group.
+fn weights_from_matches(matched: &[Vec<usize>], is_treated: &[bool]) -> Vec<f64> {
+    let mut w = vec![0.0; is_treated.len()];
+    for (t, m) in matched.iter().enumerate() {
+        if !is_treated[t] || m.is_empty() {
+            continue;
+        }
+        w[t] = 1.0;
+        let share = 1.0 / m.len() as f64;
+        for &c in m {
+            w[c] += share;
+        }
+    }
+    normalize_weights(&mut w, is_treated);
+    w
+}
+
+/// MatchIt's `.make_sum_to_n`: within each group, the positive weights are scaled to sum to
+/// their count.
+fn normalize_weights(w: &mut [f64], is_treated: &[bool]) {
+    for g in [true, false] {
+        let (mut sum, mut count) = (0.0, 0usize);
+        for (wi, &t) in w.iter().zip(is_treated) {
+            if t == g && *wi > 0.0 {
+                sum += *wi;
+                count += 1;
+            }
+        }
+        if count > 0 && sum > 0.0 {
+            let f = count as f64 / sum;
+            for (wi, &t) in w.iter_mut().zip(is_treated) {
+                if t == g && *wi > 0.0 {
+                    *wi *= f;
+                }
+            }
         }
     }
 }
 
-/// Compute distance between two observations.
-#[inline]
-fn compute_pairwise_distance(
+// ═══════════════════════════════════════════════════════════════════════════════
+// Stratified methods
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn group_indices(is_treated: &[bool]) -> (Vec<usize>, Vec<usize>) {
+    (0..is_treated.len()).partition(|&i| is_treated[i])
+}
+
+/// Row labels from a list of subclasses.
+fn sets_from_subclasses(n: usize, sc: &Option<Vec<SubclassInfo>>) -> Vec<Option<usize>> {
+    let mut sets = vec![None; n];
+    for s in sc.iter().flatten() {
+        for &i in s.treated_indices.iter().chain(&s.control_indices) {
+            sets[i] = Some(s.subclass_id);
+        }
+    }
+    sets
+}
+
+fn cem_method(
     x: &Array2<f64>,
-    i: usize,
-    j: usize,
-    cov_inv: Option<&Array2<f64>>,
-) -> f64 {
-    let k = x.ncols();
-
-    if let Some(inv) = cov_inv {
-        // Mahalanobis distance
-        let mut diff = Vec::with_capacity(k);
-        for col in 0..k {
-            diff.push(x[[i, col]] - x[[j, col]]);
-        }
-
-        let mut d_sq = 0.0;
-        for row in 0..k {
-            let mut sum = 0.0;
-            for col in 0..k {
-                sum += inv[[row, col]] * diff[col];
-            }
-            d_sq += diff[row] * sum;
-        }
-        d_sq.max(0.0).sqrt()
-    } else {
-        // Euclidean distance
-        let mut dist_sq = 0.0;
-        for col in 0..k {
-            let d = x[[i, col]] - x[[j, col]];
-            dist_sq += d * d;
-        }
-        dist_sq.sqrt()
-    }
+    is_treated: &[bool],
+    cutpoints: Option<&[Vec<f64>]>,
+    n_bins: Option<usize>,
+    names: &[String],
+) -> EconResult<MethodOutput> {
+    let (t, c) = group_indices(is_treated);
+    let cp = cutpoints.map(|c| c.to_vec());
+    let (matches, weights, subclasses, _) =
+        coarsened_exact_matching(x, &t, &c, cp.as_ref(), n_bins.unwrap_or(4), names)?;
+    Ok(MethodOutput {
+        weights,
+        matches,
+        subclass: sets_from_subclasses(is_treated.len(), &subclasses),
+        subclasses,
+        m_order: None,
+        caliper_abs: None,
+        total_distance: None,
+        warnings: Vec::new(),
+    })
 }
 
-/// Compute inverse covariance matrix for Mahalanobis distance.
-fn compute_covariance_inverse(x: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let n = x.nrows();
-    let k = x.ncols();
+fn full_method(
+    _x: &Array2<f64>,
+    is_treated: &[bool],
+    scores: Option<&[f64]>,
+    _distance: DistanceMethod,
+    min_ratio: f64,
+    max_ratio: f64,
+) -> EconResult<MethodOutput> {
+    let (t, c) = group_indices(is_treated);
+    let ps = Array1::from_vec(
+        scores
+            .map(<[f64]>::to_vec)
+            .unwrap_or_else(|| vec![0.5; is_treated.len()]),
+    );
+    let (matches, weights, subclasses, _) =
+        full_matching_optimized(&ps, &t, &c, min_ratio, max_ratio)?;
+    Ok(MethodOutput {
+        weights,
+        matches,
+        subclass: sets_from_subclasses(is_treated.len(), &subclasses),
+        subclasses,
+        m_order: None,
+        caliper_abs: None,
+        total_distance: None,
+        warnings: Vec::new(),
+    })
+}
 
-    // Compute mean
-    let x_mean: Array1<f64> = x.mean_axis(ndarray::Axis(0)).unwrap();
-
-    // Compute covariance matrix (can parallelize for large k)
-    let mut cov = Array2::zeros((k, k));
-    for i in 0..n {
-        for j in 0..k {
-            for l in 0..k {
-                cov[[j, l]] += (x[[i, j]] - x_mean[j]) * (x[[i, l]] - x_mean[l]);
-            }
-        }
-    }
-    cov /= (n - 1) as f64;
-
-    // Invert
-    let (cov_inv, _) = safe_inverse(&cov.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Mahalanobis distance computation".to_string(),
-        suggestion: format!("Check for multicollinearity: {:?}", e),
-    })?;
-
-    Ok(cov_inv)
+fn subclass_method(is_treated: &[bool], scores: &[f64], k: usize) -> EconResult<MethodOutput> {
+    let (t, c) = group_indices(is_treated);
+    let ps = Array1::from_vec(scores.to_vec());
+    let (matches, weights, subclasses, _) = subclassification_matching(&ps, &t, &c, k)?;
+    Ok(MethodOutput {
+        weights,
+        matches,
+        subclass: sets_from_subclasses(is_treated.len(), &subclasses),
+        subclasses,
+        m_order: None,
+        caliper_abs: None,
+        total_distance: None,
+        warnings: Vec::new(),
+    })
 }
 
 /// Coarsened exact matching algorithm.
@@ -1777,195 +2150,181 @@ fn subclassification_matching(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Balance Diagnostics
+// Balance (summary.matchit, standardize = TRUE, ATT)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute balance table for covariates.
-fn compute_balance_table(
+/// MatchIt's weighted variance (`col_w_var`): weights normalised to sum 1, `m (1 - m)` for a
+/// binary variable, else `sum w (x - m)^2 / (1 - sum w^2)`.
+fn wvar(x: &[f64], w: &[f64], bin: bool) -> f64 {
+    let sw: f64 = w.iter().sum();
+    let mut m = 0.0;
+    let mut sw2 = 0.0;
+    for (&xi, &wi) in x.iter().zip(w) {
+        let v = wi / sw;
+        m += v * xi;
+        sw2 += v * v;
+    }
+    if bin {
+        return m * (1.0 - m);
+    }
+    let ss: f64 = x
+        .iter()
+        .zip(w)
+        .map(|(&xi, &wi)| (wi / sw) * (xi - m) * (xi - m))
+        .sum();
+    ss / (1.0 - sw2)
+}
+
+/// MatchIt's `pooled_sd` (standardisation fallback): binary `sqrt(sum_g s_g (1 - s_g / n_g) / n)`
+/// with `s_g` the group sum, else `sqrt(sum_g sum_{i in g} (x_i - mean_g)^2 / (n - 2))`.
+fn pooled_sd(x: &[f64], is_treated: &[bool], bin: bool) -> f64 {
+    let n = x.len() as f64;
+    let mut sum = [0.0; 2];
+    let mut cnt = [0.0; 2];
+    for (&xi, &t) in x.iter().zip(is_treated) {
+        sum[usize::from(t)] += xi;
+        cnt[usize::from(t)] += 1.0;
+    }
+    if bin {
+        let v: f64 = (0..2)
+            .filter(|&g| cnt[g] > 0.0)
+            .map(|g| sum[g] * (1.0 - sum[g] / cnt[g]))
+            .sum();
+        return (v / n).sqrt();
+    }
+    let mean = [sum[0] / cnt[0], sum[1] / cnt[1]];
+    let ss: f64 = x
+        .iter()
+        .zip(is_treated)
+        .map(|(&xi, &t)| (xi - mean[usize::from(t)]).powi(2))
+        .sum();
+    (ss / (n - 2.0)).sqrt()
+}
+
+/// Weighted eCDF mean and max differences between the groups (summary.matchit's "eCDF Mean"
+/// and "eCDF Max"): weights normalised to sum 1 per group, units ordered by `x` (stably),
+/// the running difference taken at the last unit of each run of equal values. With unit
+/// weights the max is the two-sample Kolmogorov-Smirnov statistic.
+fn ecdf_stats(x: &[f64], is_treated: &[bool], w: &[f64]) -> (f64, f64) {
+    let (mut st, mut sc) = (0.0, 0.0);
+    for (&wi, &t) in w.iter().zip(is_treated) {
+        if t {
+            st += wi;
+        } else {
+            sc += wi;
+        }
+    }
+    let mut idx: Vec<usize> = (0..x.len()).collect();
+    idx.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
+    let (mut run, mut total, mut max, mut points) = (0.0_f64, 0.0_f64, 0.0_f64, 0usize);
+    for (k, &i) in idx.iter().enumerate() {
+        run += if is_treated[i] { w[i] / st } else { -w[i] / sc };
+        let last = k + 1 == idx.len() || x[idx[k + 1]] != x[i];
+        if last {
+            total += run.abs();
+            max = max.max(run.abs());
+            points += 1;
+        }
+    }
+    if points == 0 {
+        return (f64::NAN, f64::NAN);
+    }
+    (total / points as f64, max)
+}
+
+/// summary.matchit's balance table for the ATT (S12): weighted means, the standardised mean
+/// difference over the treated SD of the full sample, the weighted variance ratio (NaN for
+/// binary covariates) and the weighted eCDF mean and max.
+fn balance_table(
     x: &Array2<f64>,
-    _treatment: &Array1<f64>,
-    treated_idx: &[usize],
-    control_idx: &[usize],
-    covariate_names: &[String],
-    weights: Option<&[f64]>,
+    names: &[String],
+    is_treated: &[bool],
+    w: &[f64],
 ) -> MatchBalanceTable {
-    let k = x.ncols();
-    let mut covariates = Vec::with_capacity(k);
-
-    for j in 0..k {
-        let balance =
-            compute_covariate_balance(x, j, treated_idx, control_idx, &covariate_names[j], weights);
-        covariates.push(balance);
-    }
-
-    // Summary statistics
-    let abs_diffs: Vec<f64> = covariates.iter().map(|c| c.std_diff.abs()).collect();
-    let mean_abs_std_diff = abs_diffs.iter().sum::<f64>() / abs_diffs.len() as f64;
-    let max_abs_std_diff = abs_diffs.iter().cloned().fold(0.0_f64, f64::max);
-    let n_imbalanced = abs_diffs.iter().filter(|&&d| d > 0.1).count();
-
-    MatchBalanceTable {
-        covariates,
-        mean_abs_std_diff,
-        max_abs_std_diff,
-        n_imbalanced,
-    }
-}
-
-/// Compute balance statistics for a single covariate.
-fn compute_covariate_balance(
-    x: &Array2<f64>,
-    col_idx: usize,
-    treated_idx: &[usize],
-    control_idx: &[usize],
-    name: &str,
-    weights: Option<&[f64]>,
-) -> MatchCovariateBalance {
-    // Extract values and weights
-    let (t_vals, t_weights): (Vec<f64>, Vec<f64>) = treated_idx
-        .iter()
-        .map(|&i| (x[[i, col_idx]], weights.map(|w| w[i]).unwrap_or(1.0)))
-        .filter(|(_, w)| *w > 0.0)
-        .unzip();
-
-    let (c_vals, c_weights): (Vec<f64>, Vec<f64>) = control_idx
-        .iter()
-        .map(|&i| (x[[i, col_idx]], weights.map(|w| w[i]).unwrap_or(1.0)))
-        .filter(|(_, w)| *w > 0.0)
-        .unzip();
-
-    // Weighted means
-    let mean_treated = weighted_mean(&t_vals, &t_weights);
-    let mean_control = weighted_mean(&c_vals, &c_weights);
-
-    // Weighted variances
-    let var_treated = weighted_variance(&t_vals, &t_weights, mean_treated);
-    let var_control = weighted_variance(&c_vals, &c_weights, mean_control);
-
-    // Standardized mean difference (SMD)
-    // Formula: (mean_t - mean_c) / sqrt((var_t + var_c) / 2)
-    let pooled_sd = ((var_treated + var_control) / 2.0).sqrt();
-    let std_diff = if pooled_sd > 1e-10 {
-        (mean_treated - mean_control) / pooled_sd
-    } else {
-        0.0
-    };
-
-    // Variance ratio
-    let var_ratio = if var_control > 1e-10 {
-        var_treated / var_control
-    } else if var_treated > 1e-10 {
-        f64::INFINITY
-    } else {
-        1.0
-    };
-
-    // Kolmogorov-Smirnov statistic
-    let ks_statistic = compute_ks_statistic(&t_vals, &c_vals);
-
-    MatchCovariateBalance {
-        name: name.to_string(),
-        mean_treated,
-        mean_control,
-        std_diff,
-        var_ratio,
-        ks_statistic,
-    }
-}
-
-/// Compute weighted mean.
-fn weighted_mean(values: &[f64], weights: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let sum_w: f64 = weights.iter().sum();
-    if sum_w <= 0.0 {
-        return 0.0;
-    }
-    values
-        .iter()
-        .zip(weights.iter())
-        .map(|(&v, &w)| v * w)
-        .sum::<f64>()
-        / sum_w
-}
-
-/// Compute weighted variance.
-fn weighted_variance(values: &[f64], weights: &[f64], mean: f64) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-    let sum_w: f64 = weights.iter().sum();
-    if sum_w <= 0.0 {
-        return 0.0;
-    }
-    let var: f64 = values
-        .iter()
-        .zip(weights.iter())
-        .map(|(&v, &w)| w * (v - mean).powi(2))
-        .sum::<f64>()
-        / sum_w;
-    var
-}
-
-/// Compute Kolmogorov-Smirnov statistic comparing two distributions.
-///
-/// One merge over the two sorted samples, O(n log n). The ECDFs are
-/// evaluated at every distinct value as before: a NaN still counts in the
-/// sample size but is never `<=` anything, and `<=` treats -0.0 and 0.0 as
-/// one value.
-fn compute_ks_statistic(x1: &[f64], x2: &[f64]) -> f64 {
-    if x1.is_empty() || x2.is_empty() {
-        return 0.0;
-    }
-    let (n1, n2) = (x1.len() as f64, x2.len() as f64);
-    let sorted = |x: &[f64]| {
-        let mut v: Vec<f64> = x.iter().copied().filter(|v| !v.is_nan()).collect();
-        v.sort_unstable_by(f64::total_cmp);
-        v
-    };
-    let (s1, s2) = (sorted(x1), sorted(x2));
-
-    let (mut i, mut j, mut d) = (0usize, 0usize, 0.0_f64);
-    while i < s1.len() || j < s2.len() {
-        let x = match (s1.get(i), s2.get(j)) {
-            (Some(&a), Some(&b)) => {
-                if a <= b {
-                    a
+    let tol = f64::EPSILON.sqrt();
+    let covariates: Vec<MatchCovariateBalance> = (0..x.ncols())
+        .map(|j| {
+            let col = x.column(j).to_vec();
+            let bin = col.iter().all(|&v| v == 0.0 || v == 1.0);
+            let (mut xt, mut wt, mut xc, mut wc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for i in 0..col.len() {
+                if is_treated[i] {
+                    xt.push(col[i]);
+                    wt.push(w[i]);
                 } else {
-                    b
+                    xc.push(col[i]);
+                    wc.push(w[i]);
                 }
             }
-            (Some(&a), None) => a,
-            (None, Some(&b)) => b,
-            (None, None) => break,
-        };
-        while i < s1.len() && s1[i] <= x {
-            i += 1;
-        }
-        while j < s2.len() && s2[j] <= x {
-            j += 1;
-        }
-        d = d.max((i as f64 / n1 - j as f64 / n2).abs());
+            let too_small = wt.iter().filter(|&&v| v != 0.0).count() < 2
+                && wc.iter().filter(|&&v| v != 0.0).count() < 2;
+            let wmean = |x: &[f64], w: &[f64]| {
+                x.iter().zip(w).map(|(a, b)| a * b).sum::<f64>() / w.iter().sum::<f64>()
+            };
+            let (mean_t, mean_c) = (wmean(&xt, &wt), wmean(&xc, &wc));
+            let md = mean_t - mean_c;
+            let std_diff = if md.abs() > tol {
+                if too_small {
+                    f64::NAN
+                } else {
+                    let mut sd = wvar(&xt, &vec![1.0; xt.len()], bin).sqrt();
+                    if !sd.is_finite() || sd < tol {
+                        sd = pooled_sd(&col, is_treated, bin);
+                    }
+                    md / sd
+                }
+            } else {
+                md
+            };
+            let var_ratio = if bin || too_small {
+                f64::NAN
+            } else {
+                wvar(&xt, &wt, false) / wvar(&xc, &wc, false)
+            };
+            let (ecdf_mean, ecdf_max) = if bin {
+                (md.abs(), md.abs())
+            } else if too_small {
+                (f64::NAN, f64::NAN)
+            } else {
+                ecdf_stats(&col, is_treated, w)
+            };
+            MatchCovariateBalance {
+                name: names[j].clone(),
+                mean_treated: mean_t,
+                mean_control: mean_c,
+                std_diff,
+                var_ratio,
+                ks_statistic: ecdf_max,
+                ecdf_mean,
+                ecdf_max,
+            }
+        })
+        .collect();
+    let finite: Vec<f64> = covariates
+        .iter()
+        .map(|c| c.std_diff.abs())
+        .filter(|v| v.is_finite())
+        .collect();
+    let mean_abs_std_diff = if finite.is_empty() {
+        0.0
+    } else {
+        finite.iter().sum::<f64>() / finite.len() as f64
+    };
+    MatchBalanceTable {
+        mean_abs_std_diff,
+        max_abs_std_diff: finite.iter().copied().fold(0.0, f64::max),
+        n_imbalanced: finite.iter().filter(|&&v| v > 0.1).count(),
+        covariates,
     }
-    d
 }
 
-/// Compute effective sample size accounting for weights.
-fn compute_effective_sample_size(weights: &[f64]) -> f64 {
-    let positive_weights: Vec<f64> = weights.iter().filter(|&&w| w > 0.0).copied().collect();
-    if positive_weights.is_empty() {
-        return 0.0;
-    }
-
-    let sum_w: f64 = positive_weights.iter().sum();
-    let sum_w2: f64 = positive_weights.iter().map(|w| w * w).sum();
-
-    if sum_w2 > 0.0 {
-        sum_w * sum_w / sum_w2
-    } else {
-        0.0
-    }
+/// Kish's effective sample size `(sum w)^2 / sum w^2` over the positive weights; 0 for none.
+fn kish_ess(w: &[f64]) -> f64 {
+    let (s, s2) = w
+        .iter()
+        .filter(|&&v| v > 0.0)
+        .fold((0.0, 0.0), |(s, s2), &v| (s + v, s2 + v * v));
+    if s2 > 0.0 { s * s / s2 } else { 0.0 }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1993,6 +2352,559 @@ mod tests {
             min_ratio,
             max_ratio,
         }
+    }
+
+    const BAL: [&str; 6] = [
+        "mean_t",
+        "mean_c",
+        "smd",
+        "var_ratio",
+        "ecdf_mean",
+        "ecdf_max",
+    ];
+
+    fn opts(o: MOrder) -> MatchOptions {
+        let mut m = MatchOptions::default();
+        m.m_order = Some(o);
+        m
+    }
+
+    /// R's .mt_pairs(): treated row ids (1-based, data order), then each one's first matched
+    /// control (NaN if none).
+    fn pairs_vec(r: &MatchResult) -> Vec<f64> {
+        let t: Vec<f64> = r
+            .matches
+            .iter()
+            .map(|m| (m.treated_idx + 1) as f64)
+            .collect();
+        let c = r.matches.iter().map(|m| {
+            m.control_indices
+                .first()
+                .map_or(f64::NAN, |&c| (c + 1) as f64)
+        });
+        t.into_iter().chain(c).collect()
+    }
+
+    /// R's cbind(treated ids, match.matrix columns) for ratio k.
+    fn match_matrix_vec(r: &MatchResult, k: usize) -> Vec<f64> {
+        let mut v: Vec<f64> = r
+            .matches
+            .iter()
+            .map(|m| (m.treated_idx + 1) as f64)
+            .collect();
+        for col in 0..k {
+            v.extend(r.matches.iter().map(|m| {
+                m.control_indices
+                    .get(col)
+                    .map_or(f64::NAN, |&c| (c + 1) as f64)
+            }));
+        }
+        v
+    }
+
+    fn mask(ds: &Dataset) -> Vec<bool> {
+        DesignMatrix::extract_column(ds.df(), "treat")
+            .unwrap()
+            .iter()
+            .map(|&v| v == 1.0)
+            .collect()
+    }
+
+    fn balance_rows(t: &MatchBalanceTable) -> [Vec<f64>; 6] {
+        let f =
+            |g: fn(&MatchCovariateBalance) -> f64| t.covariates.iter().map(g).collect::<Vec<f64>>();
+        [
+            f(|c| c.mean_treated),
+            f(|c| c.mean_control),
+            f(|c| c.std_diff),
+            f(|c| c.var_ratio),
+            f(|c| c.ecdf_mean),
+            f(|c| c.ecdf_max),
+        ]
+    }
+
+    /// matchit(.., method = "nearest", distance = "glm"): MatchIt's default m.order for a PS is "largest".
+    #[test]
+    fn test_validate_matchit_nearest_logit_largest() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, false),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        let ps = r.propensity_scores.clone().unwrap();
+        Check::new(&case)
+            .vector("logit_largest_pairs", &pairs_vec(&r), Tol::exact())
+            .vector("logit_ps", &ps[..12], Tol::iterative(1e-8))
+            .scalar("n_treated", r.n_treated as f64, Tol::exact())
+            .scalar("n_control", r.n_control as f64, Tol::exact())
+            .finish();
+        assert_eq!(
+            (r.m_order, r.n_matched_treated, r.n_matched_control),
+            (Some(MOrder::Largest), 89, 89)
+        );
+        assert!(r.weights.iter().all(|&w| w == 0.0 || w == 1.0));
+        assert_eq!(r.subclass.iter().flatten().count(), 178);
+    }
+
+    /// m.order = "data" and "smallest" reproduce MatchIt; R distinguishes the orders and so must p2a.
+    #[test]
+    fn test_validate_matchit_nearest_logit_data() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let run = |o| {
+            match_it_with(
+                &ds,
+                "treat",
+                &COVS,
+                nn(1, None, false),
+                Some(DistanceMethod::Logit),
+                &opts(o),
+            )
+            .unwrap()
+        };
+        let (data, small, large) = (
+            run(MOrder::Data),
+            run(MOrder::Smallest),
+            run(MOrder::Largest),
+        );
+        Check::new(&case)
+            .vector("logit_data_pairs", &pairs_vec(&data), Tol::exact())
+            .vector("logit_smallest_pairs", &pairs_vec(&small), Tol::exact())
+            .finish();
+        assert_ne!(pairs_vec(&data), pairs_vec(&large));
+        assert_ne!(pairs_vec(&small), pairs_vec(&large));
+    }
+
+    #[test]
+    fn test_validate_matchit_nearest_probit() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, false),
+            Some(DistanceMethod::Probit),
+        )
+        .unwrap();
+        let ps = r.propensity_scores.clone().unwrap();
+        Check::new(&case)
+            .vector("probit_largest_pairs", &pairs_vec(&r), Tol::exact())
+            .vector("probit_ps", &ps[..12], Tol::iterative(1e-5)) // MatchIt's glm (epsilon 1e-8): up to 4.6e-7 apart
+            .finish();
+    }
+
+    /// 1:2 without replacement: every treated unit gets its first match before any gets a second.
+    #[test]
+    fn test_validate_matchit_nearest_ratio2_rounds() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(2, None, false),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("ratio2_mm", &match_matrix_vec(&r, 2), Tol::exact())
+            .vector("ratio2_weights", &r.weights, Tol::coef(r.n_obs))
+            .finish();
+        assert_eq!(
+            r.matches
+                .iter()
+                .filter(|m| m.control_indices.len() == 2)
+                .count(),
+            62
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Not all treated units will get 2 matches."),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_matchit_nearest_caliper() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, Some(0.1), false),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        Check::new(&case)
+            .scalar("caliper_abs", r.caliper_abs.unwrap(), Tol::iterative(1e-8))
+            .vector("caliper_pairs", &pairs_vec(&r), Tol::exact())
+            .vector("caliper_weights", &r.weights, Tol::coef(r.n_obs))
+            .finish();
+        assert_eq!((r.n_matched_treated, r.caliper_used), (74, Some(0.1)));
+    }
+
+    #[test]
+    fn test_validate_matchit_nearest_replace() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it_with(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, true),
+            Some(DistanceMethod::Logit),
+            &opts(MOrder::Largest),
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("replace_pairs", &pairs_vec(&r), Tol::exact())
+            .vector("replace_weights", &r.weights, Tol::coef(r.n_obs))
+            .finish();
+        assert_eq!(r.m_order, Some(MOrder::Data)); // with replacement MatchIt matches in data order
+        assert!(r.subclass.iter().all(Option::is_none)); // MatchIt: subclass NULL
+    }
+
+    #[test]
+    fn test_validate_matchit_nearest_mahalanobis() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, false),
+            Some(DistanceMethod::Mahalanobis),
+        )
+        .unwrap();
+        let x = DesignMatrix::from_dataframe(ds.df(), &COVS, false)
+            .unwrap()
+            .data;
+        let s = pooled_within_covariance(&x, &mask(&ds)).unwrap();
+        Check::new(&case)
+            .vector("maha_pairs", &pairs_vec(&r), Tol::exact())
+            .vector(
+                "maha_pooled_cov",
+                &s.iter().copied().collect::<Vec<f64>>(),
+                Tol::coef(r.n_obs),
+            )
+            .finish();
+        assert_eq!(
+            (r.m_order, r.propensity_scores.is_none()),
+            (Some(MOrder::Data), true)
+        );
+    }
+
+    /// Regression guard: Euclidean nearest-neighbour matching already matched MatchIt (data order, raw covariates).
+    #[test]
+    fn test_validate_matchit_nearest_euclidean() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, false),
+            Some(DistanceMethod::Euclidean),
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("euclid_pairs", &pairs_vec(&r), Tol::exact())
+            .finish();
+    }
+
+    /// MatchIt 4.8.0's tie rules, probed with matchit(t ~ x, distance = <score vector>) and distance =
+    /// "mahalanobis" / "euclidean" (Appendix B, ties.R, ties2.R, ties3.R):
+    /// - an exact tie between the nearest score below and the nearest at or above goes below;
+    /// - among equal scores below, the later row (the binary-search neighbour) wins, at or above the earlier row;
+    /// - with one covariate, Mahalanobis and Euclidean switch to these scalar rules (x = -1 wins over x = 1
+    ///   whatever its row).
+    /// With two or more covariates p2a takes the lowest row; that is p2a's rule, not MatchIt's (deviation 14).
+    #[test]
+    fn test_nearest_neighbour_ties_as_matchit() {
+        let one = |s: &[f64], ratio: usize| {
+            let t: Vec<bool> = (0..s.len()).map(|i| i == 0).collect();
+            nn_on_scores(s, &t, &[0], ratio, None, false).unwrap()[0].clone()
+        };
+        assert_eq!(one(&[0.5, 0.25, 0.75, 0.125], 1), vec![1]);
+        assert_eq!(one(&[0.5, 0.75, 0.25, 0.125], 1), vec![2]);
+        assert_eq!(one(&[0.5, 0.4, 0.4, 0.9], 1), vec![2]);
+        assert_eq!(one(&[0.5, 0.6, 0.6, 0.1], 1), vec![1]);
+        assert_eq!(one(&[0.5, 0.5, 0.5, 0.125], 1), vec![1]);
+        assert_eq!(one(&[0.5, 0.25, 0.75, 0.75, 0.125], 2), vec![1, 2]);
+        for dist in [DistanceMethod::Mahalanobis, DistanceMethod::Euclidean] {
+            for (xs, want) in [([0.0, -1.0, 1.0], 1usize), ([0.0, 1.0, -1.0], 2)] {
+                let df = df! { "d" => [1.0, 0.0, 0.0], "x" => xs.to_vec() }.unwrap();
+                let r = match_it(
+                    &Dataset::new(df),
+                    "d",
+                    &["x"],
+                    nn(1, None, false),
+                    Some(dist),
+                )
+                .unwrap();
+                assert_eq!(r.matches[0].control_indices, vec![want], "{dist:?} {xs:?}");
+            }
+        }
+        let x = Array2::from_shape_vec((3, 2), vec![0.0, 0.0, -1.0, -0.5, 1.0, 0.5]).unwrap();
+        let m = CovariateMetric { z: x };
+        assert_eq!(
+            nn_on_covariates(&m, &[true, false, false], &[0], 1, None, false).unwrap()[0],
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn test_matchit_m_order_random_is_seeded() {
+        let (_, ds) = crate::test_support::load_case("matchit_nearest");
+        let run = |seed| {
+            let mut o = opts(MOrder::Random);
+            o.seed = seed;
+            // bit patterns, so the unmatched units' NaN compare equal
+            pairs_vec(
+                &match_it_with(&ds, "treat", &COVS, nn(1, Some(0.1), false), None, &o).unwrap(),
+            )
+            .into_iter()
+            .map(f64::to_bits)
+            .collect::<Vec<u64>>()
+        };
+        assert_eq!(run(Some(7)), run(Some(7)));
+        assert_eq!(run(None), run(Some(DEFAULT_MATCH_SEED)));
+        assert_ne!(run(Some(7)), run(Some(8)));
+    }
+
+    #[test]
+    fn test_m_order_parses_aliases_and_rejects_unknown() {
+        MOrder::choices().validate().unwrap();
+        for (s, v) in [
+            ("largest", MOrder::Largest),
+            ("Descending", MOrder::Largest),
+            ("smallest", MOrder::Smallest),
+            ("ASCENDING", MOrder::Smallest),
+            ("data", MOrder::Data),
+            ("data-order", MOrder::Data),
+            ("random", MOrder::Random),
+        ] {
+            assert_eq!(s.parse::<MOrder>().unwrap(), v, "{s}");
+        }
+        let e = "closest".parse::<MOrder>().unwrap_err().to_string();
+        assert!(
+            e.contains("m_order") && e.contains("largest, smallest, data, random"),
+            "{e}"
+        );
+        assert_eq!(MOrder::Largest.to_string(), "largest");
+    }
+
+    #[test]
+    fn test_distance_method_parses_aliases_and_rejects_unknown() {
+        DistanceMethod::choices().validate().unwrap();
+        for (s, v) in [
+            ("logit", DistanceMethod::Logit),
+            ("GLM", DistanceMethod::Logit),
+            ("logistic", DistanceMethod::Logit),
+            ("probit", DistanceMethod::Probit),
+            ("Mahalanobis", DistanceMethod::Mahalanobis),
+            ("euclidean", DistanceMethod::Euclidean),
+        ] {
+            assert_eq!(s.parse::<DistanceMethod>().unwrap(), v, "{s}");
+        }
+        let e = "manhattan"
+            .parse::<DistanceMethod>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("distance") && e.contains("logit, probit, mahalanobis, euclidean"),
+            "{e}"
+        );
+        assert_eq!(
+            DistanceMethod::Logit.to_string(),
+            "Logit (Propensity Score)"
+        ); // Display unchanged
+    }
+
+    #[test]
+    fn test_match_method_kind_parses_aliases_and_rejects_unknown() {
+        MatchMethodKind::choices().validate().unwrap();
+        for (s, v) in [
+            ("nearest", MatchMethodKind::Nearest),
+            ("nn", MatchMethodKind::Nearest),
+            ("Nearest Neighbor", MatchMethodKind::Nearest),
+            ("cem", MatchMethodKind::Cem),
+            ("coarsened", MatchMethodKind::Cem),
+            ("coarsenedexact", MatchMethodKind::Cem),
+            ("full", MatchMethodKind::Full),
+            ("optimal", MatchMethodKind::Full),
+            ("subclass", MatchMethodKind::Subclass),
+            ("stratify", MatchMethodKind::Subclass),
+            ("stratification", MatchMethodKind::Subclass),
+        ] {
+            assert_eq!(s.parse::<MatchMethodKind>().unwrap(), v, "{s}");
+        }
+        let e = "genetic"
+            .parse::<MatchMethodKind>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("method") && e.contains("nearest, cem, full, subclass"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_matching_rejects_invalid_options() {
+        let (_, ds) = crate::test_support::load_case("matchit_nearest");
+        let msg = |r: EconResult<MatchResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got ok = {}", other.is_ok()),
+        };
+        for c in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+            assert!(
+                msg(match_it(&ds, "treat", &COVS, nn(1, Some(c), false), None)).contains("caliper")
+            );
+        }
+        let m = msg(match_it_with(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, false),
+            Some(DistanceMethod::Mahalanobis),
+            &opts(MOrder::Largest),
+        ));
+        assert!(m.contains("m_order") && m.contains("largest"), "{m}");
+        assert!(
+            msg(match_it(
+                &ds,
+                "treat",
+                &COVS,
+                MatchMethod::Subclass { n_subclasses: 5 },
+                Some(DistanceMethod::Euclidean)
+            ))
+            .contains("propensity")
+        );
+        assert!(
+            msg(match_it(
+                &ds,
+                "treat",
+                &COVS,
+                nn(1, Some(1e-9), false),
+                None
+            ))
+            .contains("no treated unit")
+        ); // MatchIt: "No matches were found"
+        let df =
+            df! { "d" => [1.0, 0.0, 2.0, 0.0, 1.0, 0.0], "x" => [0.1, 0.4, 0.2, 0.9, 0.5, 0.7] }
+                .unwrap();
+        let m = msg(match_it(
+            &Dataset::new(df),
+            "d",
+            &["x"],
+            nn(1, None, false),
+            None,
+        ));
+        assert!(m.contains("0/1") && m.contains("row 3"), "{m}");
+    }
+
+    /// summary(matchit(..), standardize = TRUE)$sum.all / $sum.matched for x1, x2, x3 (ATT: SMD standardised
+    /// by the treated SD of the full sample; Var. Ratio NA for the binary x3).
+    #[test]
+    fn test_validate_matchit_balance_table() {
+        let (case, ds) = crate::test_support::load_case("matchit_nearest");
+        let r1 = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, false),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        let r2 = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            nn(2, None, false),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        let n = r1.n_obs;
+        let mut c = Check::new(&case);
+        for (prefix, r) in [("logit_largest", &r1), ("ratio2", &r2)] {
+            let (b, a) = (
+                balance_rows(&r.balance_before),
+                balance_rows(&r.balance_after),
+            );
+            for (i, stat) in BAL.iter().enumerate() {
+                c.vector(&format!("{prefix}_before_{stat}"), &b[i], Tol::stat(n));
+                c.vector(&format!("{prefix}_after_{stat}"), &a[i], Tol::stat(n));
+            }
+        }
+        let (b1, a1) = (
+            balance_rows(&r1.balance_before),
+            balance_rows(&r1.balance_after),
+        );
+        c.vector("logit_largest_smd_before", &b1[2], Tol::stat(n))
+            .vector("logit_largest_smd_after", &a1[2], Tol::stat(n))
+            .vector(
+                "ratio2_ess",
+                &[r2.ess_control, r2.ess_treated],
+                Tol::stat(n),
+            )
+            .finish();
+        assert!(
+            r1.balance_after
+                .covariates
+                .iter()
+                .all(|cv| cv.ks_statistic == cv.ecdf_max || cv.ks_statistic.is_nan())
+        );
+        assert_eq!(r1.effective_sample_size, r1.ess_treated + r1.ess_control);
+    }
+
+    /// T0-WP11's R pins of the two-sample KS statistic, through the weighted eCDF with unit weights:
+    /// ks.test(c(1.2,3.4,3.4,0.5,2.2,5.0,2.2,4.1), c(0.7,3.4,2.9,2.2,6.3,1.1,4.4))$statistic and
+    /// ks.test(((0:59 * 37) %% 23) * 0.25, ((0:44 * 11) %% 19) * 0.3 + 0.1)$statistic.
+    #[test]
+    fn test_ecdf_max_is_the_ks_statistic_with_unit_weights() {
+        let ks = |a: &[f64], b: &[f64]| {
+            let x: Vec<f64> = a.iter().chain(b).copied().collect();
+            let t: Vec<bool> = (0..x.len()).map(|i| i < a.len()).collect();
+            ecdf_stats(&x, &t, &vec![1.0; x.len()]).1
+        };
+        assert!(
+            (ks(
+                &[1.2, 3.4, 3.4, 0.5, 2.2, 5.0, 2.2, 4.1],
+                &[0.7, 3.4, 2.9, 2.2, 6.3, 1.1, 4.4]
+            ) - 0.16071428571428575)
+                .abs()
+                < 1e-12
+        );
+        let s1: Vec<f64> = (0..60u64).map(|i| ((i * 37) % 23) as f64 * 0.25).collect();
+        let s2: Vec<f64> = (0..45u64)
+            .map(|i| ((i * 11) % 19) as f64 * 0.3 + 0.1)
+            .collect();
+        assert!((ks(&s1, &s2) - 0.066666666666666638).abs() < 1e-12);
+        assert!(
+            ks(&[1.0, 2.0, 3.0], &[10.0, 11.0, 12.0]) > 0.99 && ks(&[1.0, 2.0], &[1.0, 2.0]) == 0.0
+        );
+    }
+
+    #[test]
+    fn test_matchit_display_shows_the_balance_tables_and_notes() {
+        let (_, ds) = crate::test_support::load_case("matchit_nearest");
+        let r = match_it(&ds, "treat", &COVS, nn(1, Some(0.1), false), None).unwrap();
+        let s = r.to_string();
+        for want in [
+            "Propensity Score Matching",
+            "Matching order: largest",
+            "Matched ESS:",
+            "on the score scale",
+            "Balance Before Matching",
+            "Balance After Matching",
+            "eCDF Max",
+            "Converged: yes",
+        ] {
+            assert!(s.contains(want), "missing {want:?} in\n{s}");
+        }
+        let cem = cem_match(&ds, "treat", &COVS).unwrap().to_string();
+        assert!(cem.contains("Distance: not used"), "{cem}"); // the binning label is Task 6's
     }
 
     /// glm(treat ~ x1 + x2 + x3, binomial(logit | probit)) at epsilon 1e-14 (the *_tight keys)
@@ -2130,17 +3042,6 @@ mod tests {
     }
 
     #[test]
-    fn test_nearest_neighbor_with_caliper() {
-        let dataset = create_test_dataset();
-        let result =
-            nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], Some(0.2), false).unwrap();
-
-        assert_eq!(result.caliper_used, Some(0.2));
-        // With caliper, some treated units may be discarded
-        assert!(result.n_discarded_treated >= 0);
-    }
-
-    #[test]
     fn test_nearest_neighbor_with_replacement() {
         let dataset = create_test_dataset();
         let result =
@@ -2257,27 +3158,9 @@ mod tests {
 
     #[test]
     fn test_effective_sample_size() {
-        let weights = vec![1.0, 1.0, 1.0, 0.5, 0.5];
-        let ess = compute_effective_sample_size(&weights);
-        // ESS should be greater than 0 and bounded by the count of non-zero weights
-        assert!(ess > 0.0);
-        let n_nonzero = weights.iter().filter(|&&w| w > 0.0).count() as f64;
-        assert!(ess <= n_nonzero);
-    }
-
-    #[test]
-    fn test_ks_statistic() {
-        // Identical distributions should have KS = 0
-        let x1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let x2 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let ks = compute_ks_statistic(&x1, &x2);
-        assert!(ks < 0.01);
-
-        // Very different distributions should have high KS
-        let x3 = vec![1.0, 2.0, 3.0];
-        let x4 = vec![10.0, 11.0, 12.0];
-        let ks2 = compute_ks_statistic(&x3, &x4);
-        assert!(ks2 > 0.9);
+        // Kish: (sum w)^2 / sum w^2 = 4^2 / 3.5
+        assert!((kish_ess(&[1.0, 1.0, 1.0, 0.5, 0.5]) - 4.571428571428571).abs() < 1e-15);
+        assert_eq!(kish_ess(&[0.0, 0.0]), 0.0);
     }
 
     #[test]
@@ -2289,7 +3172,10 @@ mod tests {
         // Test Display for MatchResult
         let output = format!("{}", result);
         assert!(output.contains("Propensity Score Matching"));
-        assert!(output.contains("Balance"));
+        assert!(output.contains("Matching order: largest (MatchIt m.order)"));
+        assert!(output.contains("Matched ESS:"));
+        assert!(output.contains("Balance Before Matching (summary.matchit"));
+        assert!(output.contains("Balance After Matching:"));
 
         // Test Display for MatchBalanceTable
         let balance_output = format!("{}", result.balance_before);
@@ -2759,96 +3645,6 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         with_budget(Budget::new(None, token), f)
-    }
-
-    #[test]
-    fn test_ks_statistic_matches_r() {
-        // R: ks.test(c(1.2,3.4,3.4,0.5,2.2,5.0,2.2,4.1), c(0.7,3.4,2.9,2.2,6.3,1.1,4.4))$statistic
-        let a = [1.2, 3.4, 3.4, 0.5, 2.2, 5.0, 2.2, 4.1];
-        let b = [0.7, 3.4, 2.9, 2.2, 6.3, 1.1, 4.4];
-        assert!((compute_ks_statistic(&a, &b) - 0.16071428571428575).abs() < 1e-12);
-        // R: i1 <- 0:59; i2 <- 0:44
-        //    ks.test(((i1*37) %% 23)*0.25, ((i2*11) %% 19)*0.3 + 0.1)$statistic
-        let s1: Vec<f64> = (0..60u64).map(|i| ((i * 37) % 23) as f64 * 0.25).collect();
-        let s2: Vec<f64> = (0..45u64)
-            .map(|i| ((i * 11) % 19) as f64 * 0.3 + 0.1)
-            .collect();
-        assert!((compute_ks_statistic(&s1, &s2) - 0.06666666666666664).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_ks_statistic_matches_previous_implementation() {
-        /// Verbatim copy of the previous compute_ks_statistic (quadratic).
-        fn naive(x1: &[f64], x2: &[f64]) -> f64 {
-            if x1.is_empty() || x2.is_empty() {
-                return 0.0;
-            }
-
-            // Sort both samples
-            let mut s1 = x1.to_vec();
-            let mut s2 = x2.to_vec();
-            s1.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            s2.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-            let n1 = s1.len() as f64;
-            let n2 = s2.len() as f64;
-
-            // Merge and compute CDF differences
-            let mut combined: Vec<f64> = s1.iter().chain(s2.iter()).copied().collect();
-            combined.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            combined.dedup();
-
-            let mut max_diff = 0.0_f64;
-
-            for &x in &combined {
-                let cdf1 = s1.iter().filter(|&&v| v <= x).count() as f64 / n1;
-                let cdf2 = s2.iter().filter(|&&v| v <= x).count() as f64 / n2;
-                max_diff = max_diff.max((cdf1 - cdf2).abs());
-            }
-
-            max_diff
-        }
-        let mut s = 99u64;
-        let mut u = || {
-            s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (s >> 11) as f64 / (1u64 << 53) as f64
-        };
-        for (n1, n2, round) in [
-            (300, 200, false),
-            (300, 200, true),
-            (1, 50, false),
-            (17, 1, true),
-            (40, 40, true),
-        ] {
-            let mut g = |n: usize, sh: f64| -> Vec<f64> {
-                (0..n)
-                    .map(|_| {
-                        let v = u() * 4.0 + sh;
-                        if round { (v * 4.0).round() / 4.0 } else { v }
-                    })
-                    .collect()
-            };
-            let (a, b) = (g(n1, 0.0), g(n2, 0.3));
-            // exact: same count/n arithmetic
-            assert_eq!(compute_ks_statistic(&a, &b), naive(&a, &b));
-        }
-        // signed zeros and infinities
-        let a = [-0.0, 0.0, 1.0, f64::INFINITY, -2.0];
-        let b = [0.0, f64::NEG_INFINITY, 1.0, 1.0];
-        assert_eq!(compute_ks_statistic(&a, &b), naive(&a, &b));
-    }
-
-    #[test]
-    fn test_ks_statistic_nan_semantics_unchanged() {
-        // NaN still counts in the denominator but is never <= anything (the previous semantics):
-        // at x = 4, F1 = 2/3 (the NaN never counts) and F2 = 1, so D = |2/3 - 1| in f64
-        // (0.33333333333333337). Dropping the NaN instead would give D = 0.5.
-        assert_eq!(
-            compute_ks_statistic(&[1.0, f64::NAN, 3.0], &[2.0, 4.0]),
-            (2.0_f64 / 3.0 - 1.0).abs()
-        );
     }
 
     /// R 4.3.3, MatchIt 4.8.0, on the CSV of create_matchit_validation_dataset() (regenerated

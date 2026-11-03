@@ -370,6 +370,8 @@ mod tests {
                 std_diff: 0.05,
                 var_ratio: 1.02,
                 ks_statistic: 0.03,
+                ecdf_mean: 0.03 / 2.0,
+                ecdf_max: 0.03,
             },
             MatchCovariateBalance {
                 name: "income".to_string(),
@@ -378,6 +380,8 @@ mod tests {
                 std_diff: 0.08,
                 var_ratio: 0.95,
                 ks_statistic: 0.04,
+                ecdf_mean: 0.04 / 2.0,
+                ecdf_max: 0.04,
             },
         ];
 
@@ -390,6 +394,8 @@ mod tests {
                 std_diff: 0.25, // Above threshold
                 var_ratio: 1.5,
                 ks_statistic: 0.15,
+                ecdf_mean: 0.15 / 2.0,
+                ecdf_max: 0.15,
             });
         }
 
@@ -441,6 +447,12 @@ mod tests {
             effective_sample_size: n_matched as f64,
             propensity_convergence: None,
             warnings: vec![],
+            m_order: Some(crate::econometrics::matching::MOrder::Largest),
+            subclass: vec![],
+            caliper_abs: None,
+            total_distance: None,
+            ess_treated: n_matched as f64,
+            ess_control: n_matched as f64,
         }
     }
 

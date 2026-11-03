@@ -152,7 +152,7 @@ Maximum absolute difference between treated and control CDFs.
 - `econometrics::matching::tests::test_validate_cem_matching_vs_r` (`crates/p2a-core/src/econometrics/matching.rs`): inequalities between the CEM matched and original counts.
 - `econometrics::matching::tests::test_balance_improvement` (`crates/p2a-core/src/econometrics/matching.rs`): balance statistics are computed before and after matching, and the mean absolute SMD before matching is positive. It does not check that matching improves balance.
 - `econometrics::matching::tests::test_validate_ks_before_matching_vs_matchit` (`crates/p2a-core/src/econometrics/matching.rs`, added in Tier 0, T0-WP11): the before-matching KS statistic (eCDF max) of x1 and x2 equals 0.34643081041698437 and 0.16215117165658516 within 1e-12. These are MatchIt 4.8.0 values typed into the test (`summary(matchit(treatment ~ x1 + x2, data = d, method = NULL, distance = "glm"))$sum.all[, "eCDF Max"]`): a quoted-value check, not R-pinned.
-- `econometrics::matching::tests::test_ks_statistic_matches_r` (`crates/p2a-core/src/econometrics/matching.rs`, added in Tier 0, T0-WP11): two `ks.test(x, y)$statistic` values from R typed into the test, compared with `compute_ks_statistic` within 1e-12; a quoted-value check, not R-pinned.
+- `econometrics::matching::tests::test_ecdf_max_is_the_ks_statistic_with_unit_weights` (`crates/p2a-core/src/econometrics/matching.rs`, ported from Tier 0, T0-WP11, in T3-WP25): the same two `ks.test(x, y)$statistic` values from R typed into the test, compared with `ecdf_stats` (unit weights) within 1e-12; a quoted-value check, not R-pinned.
 
 ## Tolerances
 
