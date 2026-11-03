@@ -500,6 +500,21 @@ pub enum DensityKernel {
     Cosine,
 }
 
+crate::option_enum!(
+    DensityKernel,
+    crate::options::Choices {
+        option: "kernel",
+        values: &[
+            (&["gaussian", "normal"], DensityKernel::Gaussian),
+            (&["epanechnikov"], DensityKernel::Epanechnikov),
+            (&["rectangular", "uniform"], DensityKernel::Rectangular),
+            (&["triangular"], DensityKernel::Triangular),
+            (&["biweight", "quartic"], DensityKernel::Biweight),
+            (&["cosine"], DensityKernel::Cosine),
+        ],
+    }
+);
+
 /// Result of kernel density estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DensityResult {
@@ -869,15 +884,7 @@ pub fn run_density(
     kernel: &str,
     n_points: Option<usize>,
 ) -> EconResult<DensityResult> {
-    let kernel = match kernel.to_lowercase().as_str() {
-        "gaussian" | "normal" => DensityKernel::Gaussian,
-        "epanechnikov" => DensityKernel::Epanechnikov,
-        "rectangular" | "uniform" => DensityKernel::Rectangular,
-        "triangular" => DensityKernel::Triangular,
-        "biweight" | "quartic" => DensityKernel::Biweight,
-        "cosine" => DensityKernel::Cosine,
-        _ => DensityKernel::Gaussian,
-    };
+    let kernel: DensityKernel = kernel.parse()?;
 
     density(data, bw, kernel, n_points, None, None)
 }
@@ -1659,5 +1666,33 @@ mod tests {
             "Density should integrate to ~1, got {:.4}",
             integral
         );
+    }
+
+    #[test]
+    fn test_density_kernel_parses_aliases_and_rejects_unknown() {
+        for (s, k) in [
+            ("Gaussian", DensityKernel::Gaussian),
+            ("normal", DensityKernel::Gaussian),
+            (" NORMAL ", DensityKernel::Gaussian),
+            ("uniform", DensityKernel::Rectangular),
+            ("Rectangular", DensityKernel::Rectangular),
+            ("quartic", DensityKernel::Biweight),
+            ("Epanechnikov", DensityKernel::Epanechnikov),
+            ("triangular", DensityKernel::Triangular),
+            ("cosine", DensityKernel::Cosine),
+        ] {
+            assert_eq!(s.parse::<DensityKernel>().unwrap(), k, "{s:?}");
+        }
+        assert_eq!(
+            spec_message("optcosine".parse::<DensityKernel>()),
+            "unknown kernel 'optcosine'; expected one of: gaussian, epanechnikov, rectangular, \
+             triangular, biweight, cosine"
+        );
+        assert_eq!(DensityKernel::choices().validate(), Ok(()));
+        assert_eq!(DensityKernel::Biweight.to_string(), "biweight");
+        assert!(matches!(
+            run_density(&[1.0, 2.0, 3.5, 4.0], Some(0.5), "bogus", Some(16)),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 }
