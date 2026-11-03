@@ -30,12 +30,12 @@ whole numbers, so polars reads it as `Int64`; the cause `m` is an ARMA(1,1) seri
 
 ## Tests and tolerances
 
-`test_validate_granger_int_series` (`crates/p2a-core/src/econometrics/timeseries.rs`)
+`test_validate_granger_int_series` (`crates/p2a-core/src/econometrics/timeseries/granger.rs`)
 pins F at `Tol::stat(300)` (1e-6 relative), the p-value at `Tol::p_value(300)`, and the
 degrees of freedom and the rows used exactly, for both lag orders.
 
 ```bash
-cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::timeseries::tests::test_validate_granger
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::timeseries::granger::tests::test_validate_granger
 ```
 
 ## Input data and missing values
