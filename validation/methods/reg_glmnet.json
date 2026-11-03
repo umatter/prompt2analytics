@@ -28,7 +28,8 @@
         "p2a-core::regression::glmnet::tests::test_validate_glmnet_binomial_path",
         "p2a-core::regression::glmnet::tests::test_glmnet_binomial_two_level_coding",
         "p2a-core::regression::glmnet::tests::test_validate_cv_glmnet_foldid",
-        "p2a-core::regression::glmnet::tests::test_validate_glmnet_predict_interpolates"
+        "p2a-core::regression::glmnet::tests::test_validate_glmnet_predict_interpolates",
+        "p2a-core::regression::glmnet::tests::test_glmnet_display_prints_coefficients"
       ],
       "quantities": [
         "coefficients and intercept at lambda 1, 0.3, 0.1, 0.03 for alpha 1, 0.5, 0 x standardize x intercept (gaussian)",

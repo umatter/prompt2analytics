@@ -60,6 +60,40 @@ pub enum GlmnetFamily {
     Binomial,
 }
 
+impl std::str::FromStr for GlmnetFamily {
+    type Err = EconError;
+
+    /// `gaussian` (also `linear`, `normal`) or `binomial` (also `logistic`, `logit`); case,
+    /// surrounding space and the separators ' ', '-', '.', '_' are ignored.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let key: String = s
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if matches!(c, ' ' | '-' | '.') { '_' } else { c })
+            .collect();
+        match key.as_str() {
+            "gaussian" | "linear" | "normal" => Ok(GlmnetFamily::Gaussian),
+            "binomial" | "logistic" | "logit" => Ok(GlmnetFamily::Binomial),
+            _ => Err(EconError::InvalidSpecification {
+                message: format!(
+                    "unknown family '{}'; expected one of: gaussian, binomial",
+                    s.trim()
+                ),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for GlmnetFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GlmnetFamily::Gaussian => "gaussian",
+            GlmnetFamily::Binomial => "binomial",
+        })
+    }
+}
+
 /// Configuration for glmnet fitting
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlmnetConfig {
@@ -1371,6 +1405,39 @@ pub fn glmnet_coef(result: &GlmnetResult, lambda: f64) -> EconResult<(f64, Vec<(
     Ok((b0, coefs))
 }
 
+/// At most this many nonzero coefficients are printed per fit (the largest by |coef|).
+const DISPLAY_MAX_COEFS: usize = 20;
+
+/// `(Intercept) b0, name coef, ...` for the nonzero coefficients; more than
+/// [`DISPLAY_MAX_COEFS`]: the largest by |coef| (in column order) and a count of the rest.
+fn coefficient_terms(names: &[String], fit: &GlmnetCoefficients) -> String {
+    let mut nonzero: Vec<usize> = (0..fit.coefficients.len())
+        .filter(|&j| fit.coefficients[j] != 0.0)
+        .collect();
+    let hidden = nonzero.len().saturating_sub(DISPLAY_MAX_COEFS);
+    if hidden > 0 {
+        nonzero.sort_by(|&a, &b| {
+            fit.coefficients[b]
+                .abs()
+                .total_cmp(&fit.coefficients[a].abs())
+                .then(a.cmp(&b))
+        });
+        nonzero.truncate(DISPLAY_MAX_COEFS);
+        nonzero.sort_unstable();
+    }
+    let mut out = format!("(Intercept) {:.6}", fit.intercept);
+    for j in nonzero {
+        let name = names
+            .get(j)
+            .map_or_else(|| format!("V{}", j + 1), Clone::clone);
+        out.push_str(&format!(", {name} {:.6}", fit.coefficients[j]));
+    }
+    if hidden > 0 {
+        out.push_str(&format!(", (+{hidden} more nonzero)"));
+    }
+    out
+}
+
 impl std::fmt::Display for GlmnetResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
@@ -1378,10 +1445,10 @@ impl std::fmt::Display for GlmnetResult {
             "Glmnet Result: {} ~ {} variables",
             self.dependent_var, self.n_features
         )?;
-        writeln!(f, "  Family:     {:?}", self.family)?;
+        writeln!(f, "  Family:      {}", self.family)?;
         writeln!(
             f,
-            "  Alpha:      {:.2} ({})",
+            "  Alpha:       {:.2} ({})",
             self.alpha,
             if self.alpha == 1.0 {
                 "lasso"
@@ -1391,19 +1458,37 @@ impl std::fmt::Display for GlmnetResult {
                 "elastic net"
             }
         )?;
-        writeln!(f, "  N:          {}", self.n_obs)?;
-        writeln!(f, "  Lambda path: {} values", self.lambda.len())?;
+        writeln!(f, "  Standardize: {}", self.standardize)?;
+        writeln!(f, "  Intercept:   {}", self.intercept)?;
+        writeln!(f, "  N:           {}", self.n_obs)?;
+        writeln!(
+            f,
+            "  Lambda path: {} values ({} passes)",
+            self.lambda.len(),
+            self.npasses
+        )?;
         writeln!(f)?;
         writeln!(f, "  Lambda      Df    %Dev")?;
-        for fit in self.fits.iter().take(10) {
+        for fit in &self.fits {
             writeln!(
                 f,
                 "  {:.4e}    {:3}   {:.3}",
                 fit.lambda, fit.df, fit.dev_ratio
             )?;
         }
-        if self.fits.len() > 10 {
-            writeln!(f, "  ... ({} more)", self.fits.len() - 10)?;
+        writeln!(f)?;
+        writeln!(f, "  Coefficients (nonzero; intercept first):")?;
+        for (i, fit) in self.fits.iter().enumerate() {
+            writeln!(
+                f,
+                "  [{:>3}] lambda {:.4e}: {}",
+                i + 1,
+                fit.lambda,
+                coefficient_terms(&self.variable_names, fit)
+            )?;
+        }
+        for w in &self.warnings {
+            writeln!(f, "Warning: {w}")?;
         }
         Ok(())
     }
@@ -1424,18 +1509,34 @@ impl std::fmt::Display for GlmnetCvResult {
             self.lambda_1se, self.lambda_1se_index
         )?;
         writeln!(f)?;
+        let (min, se1) = (self.fit_min(), self.fit_1se());
         writeln!(
             f,
             "  At lambda.min: {} non-zero coefs, {:.1}% dev explained",
-            self.fit.fits[self.lambda_min_index].df,
-            self.fit.fits[self.lambda_min_index].dev_ratio * 100.0
+            min.df,
+            min.dev_ratio * 100.0
         )?;
         writeln!(
             f,
             "  At lambda.1se: {} non-zero coefs, {:.1}% dev explained",
-            self.fit.fits[self.lambda_1se_index].df,
-            self.fit.fits[self.lambda_1se_index].dev_ratio * 100.0
+            se1.df,
+            se1.dev_ratio * 100.0
         )?;
+        writeln!(f)?;
+        let names = &self.fit.variable_names;
+        writeln!(
+            f,
+            "  Coefficients at lambda.min (nonzero; intercept first):"
+        )?;
+        writeln!(f, "    {}", coefficient_terms(names, min))?;
+        writeln!(
+            f,
+            "  Coefficients at lambda.1se (nonzero; intercept first):"
+        )?;
+        writeln!(f, "    {}", coefficient_terms(names, se1))?;
+        for w in self.fit.warnings.iter().chain(&self.warnings) {
+            writeln!(f, "Warning: {w}")?;
+        }
         Ok(())
     }
 }
@@ -2386,5 +2487,103 @@ mod tests {
             glmnet_predict(&fit, x.slice(s![.., ..3]), 0.5).unwrap_err(),
             EconError::InvalidSpecification { .. }
         ));
+    }
+
+    #[test]
+    fn test_glmnet_display_prints_coefficients() {
+        let (_case, ds) = crate::test_support::load_case("glmnet_paths");
+        let r = run_glmnet(&ds, "y", &X8, &tight(1.0, true, true, Some(&LAMS[..]))).unwrap();
+        let text = r.to_string();
+        for f in &r.fits {
+            assert!(
+                text.contains(&format!("(Intercept) {:.6}", f.intercept)),
+                "{text}"
+            );
+            for (name, c) in X8.iter().zip(&f.coefficients) {
+                if *c != 0.0 {
+                    assert!(
+                        text.contains(&format!("{name} {c:.6}")),
+                        "{name} at lambda {}: {text}",
+                        f.lambda
+                    );
+                }
+            }
+        }
+        // one line per fit
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.trim_start().starts_with('['))
+                .count(),
+            4
+        );
+        // p > 20: the 20 largest |coef| and a count of the rest (30 nonzero at this lambda)
+        let cols = k30();
+        let k = run_glmnet(
+            &ds,
+            "yk",
+            &refs(&cols),
+            &tight(1.0, true, true, Some(&[0.0009602538655657498][..])),
+        )
+        .unwrap();
+        assert!(k.to_string().contains("(+10 more nonzero)"), "{k}");
+        let (x, y) = xy(&ds, "y", &X8);
+        let mut cv = cv_glmnet_foldid(
+            x.view(),
+            y.view(),
+            &tight(1.0, true, true, None),
+            &fold_ids(&ds, "foldid"),
+        )
+        .unwrap();
+        // cv_glmnet_foldid on arrays names the columns V1..V8, as glmnet does
+        cv.fit.variable_names = X8.iter().map(|n| n.to_string()).collect();
+        let ct = cv.to_string();
+        assert!(
+            ct.contains("Coefficients at lambda.min (nonzero; intercept first):"),
+            "{ct}"
+        );
+        assert!(
+            ct.contains("Coefficients at lambda.1se (nonzero; intercept first):"),
+            "{ct}"
+        );
+        assert!(
+            ct.contains(&format!("X1 {:.6}", cv.fit_min().coefficients[0])),
+            "{ct}"
+        );
+        assert!(
+            ct.contains(&format!("X1 {:.6}", cv.fit_1se().coefficients[0])),
+            "{ct}"
+        );
+        let mut c = GlmnetConfig::default();
+        c.max_iter = 60;
+        assert!(
+            run_glmnet(&ds, "y", &X8, &c)
+                .unwrap()
+                .to_string()
+                .contains("\nWarning: Convergence not reached at lambda ")
+        );
+    }
+
+    #[test]
+    fn test_glmnetfamily_parses_aliases_and_rejects_unknown() {
+        for g in ["gaussian", "Gaussian", " GAUSSIAN ", "linear", "normal"] {
+            assert_eq!(
+                g.parse::<GlmnetFamily>().unwrap(),
+                GlmnetFamily::Gaussian,
+                "{g}"
+            );
+        }
+        for b in ["binomial", "logistic", "Logit"] {
+            assert_eq!(
+                b.parse::<GlmnetFamily>().unwrap(),
+                GlmnetFamily::Binomial,
+                "{b}"
+            );
+        }
+        assert_spec(
+            "poisson".parse::<GlmnetFamily>(),
+            "unknown family 'poisson'; expected one of: gaussian, binomial",
+        );
+        assert_eq!(GlmnetFamily::Binomial.to_string(), "binomial");
+        assert_eq!(GlmnetFamily::Gaussian.to_string(), "gaussian");
     }
 }
