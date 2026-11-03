@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ols_no_intercept",
+      "name": "OLS, GLS, clustered and HAC fits without intercept: uncentered R2, adjusted R2 with n, F on k df",
+      "category": "regression",
+      "reference": "stats::lm / summary.lm with attr(terms, 'intercept') == 0; sandwich::vcovHC(type = 'HC1'), vcovCL(cluster = ~firm | ~firm + year, type = 'HC1'), NeweyWest(lag = 4, prewhite = FALSE)",
+      "doc": "validation/regression/no_intercept.md",
+      "cases": ["ols_no_intercept_grunfeld", "ols_grunfeld"],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_no_intercept_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_ols_raw_intercept_in_last_column",
+        "p2a-core::regression::gls::tests::test_validate_gls_identity_no_intercept_grunfeld"
+      ],
+      "quantities": ["coefficients", "SE classical, HC1, CR1 firm, CR1 firm + year, Newey-West lag 4", "t", "p", "R2 and adjusted R2 (uncentered without intercept)", "sigma", "F, its df and p", "logLik", "AIC", "F and R2 with the intercept column last (run_ols_raw)", "cluster counts"],
+      "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE and statistics 1e-6 relative; p-values also 1e-12 absolute; df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

@@ -185,7 +185,7 @@ pub struct OlsResult {
     pub n_params: usize,
     /// Degrees of freedom for residuals (n - k)
     pub df_resid: usize,
-    /// Degrees of freedom for model (k - 1)
+    /// Degrees of freedom for model (k - 1 with an intercept, k without)
     pub df_model: usize,
 
     /// Coefficients with full statistics
@@ -249,7 +249,8 @@ pub struct OlsResult {
     /// Sum of squared residuals (cached; used by R², F-test, diagnostics).
     #[serde(skip)]
     pub ssr: f64,
-    /// Total sum of squares (cached; used by R², F-test, diagnostics).
+    /// Total sum of squares (cached; used by R², F-test, diagnostics): about the mean
+    /// with an intercept, about zero without (summary.lm).
     #[serde(skip)]
     pub sst: f64,
 }
@@ -422,6 +423,92 @@ fn gaussian_fit_criteria(ssr: f64, n: usize, k: usize) -> (f64, f64, f64) {
     (ll, 2.0 * p - 2.0 * ll, p * n.ln() - 2.0 * ll)
 }
 
+/// True when some column of `x` is constant and non-zero, i.e. the model contains an
+/// intercept in any position.
+///
+/// R takes the intercept from the model's terms (`attr(terms, "intercept")`); a raw design
+/// matrix has no terms, so a constant non-zero column marks it. A column counts as constant
+/// when its first entry `v0` is finite and non-zero and every entry lies within
+/// `1e-10 * max(|v0|, 1)` of it. The scan stops at the first entry that differs.
+pub(crate) fn has_constant_column(x: ndarray::ArrayView2<'_, f64>) -> bool {
+    if x.nrows() == 0 {
+        return false;
+    }
+    x.columns().into_iter().any(|col| {
+        let v0 = col[0];
+        if !v0.is_finite() || v0 == 0.0 {
+            return false;
+        }
+        let tol = 1e-10 * v0.abs().max(1.0);
+        col.iter().all(|&v| (v - v0).abs() <= tol)
+    })
+}
+
+/// The fit statistics that depend on whether the model has an intercept.
+struct FitSummary {
+    /// Total sum of squares: about the mean with an intercept, about zero without.
+    sst: f64,
+    r_squared: f64,
+    adj_r_squared: f64,
+    /// Numerator df of the overall F test: `k - 1` with an intercept, `k` without.
+    df_model: usize,
+    f_statistic: f64,
+    f_p_value: f64,
+}
+
+/// R², adjusted R² and the overall F test as R's `summary.lm` computes them (REG-19).
+///
+/// With an intercept the total sum of squares is centered, adjusted R² uses `n - 1` and F
+/// tests the `k - 1` slopes. Without one (regression through the origin) the total sum of
+/// squares is `Σ y²`, adjusted R² uses `n` and F tests all `k` coefficients, so
+/// `R² = Σ ŷ² / (Σ ŷ² + SSR)`. `ssr` is the residual sum of squares, `sigma_squared` is
+/// `ssr / df_resid`.
+fn fit_summary(
+    y: &Array1<f64>,
+    ssr: f64,
+    k: usize,
+    df_resid: usize,
+    sigma_squared: f64,
+    intercept: bool,
+) -> FitSummary {
+    let n = y.len();
+    let (sst, df_int) = if intercept {
+        let y_mean = y.mean().unwrap_or(0.0);
+        (y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>(), 1)
+    } else {
+        // summary.lm without an intercept: about zero
+        (y.iter().map(|&yi| yi.powi(2)).sum::<f64>(), 0)
+    };
+    // Explained sum of squares; Σ ŷ² without an intercept (the residuals are orthogonal to ŷ)
+    let sse = sst - ssr;
+    let df_model = k.saturating_sub(df_int);
+
+    let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+    let adj_r_squared = if sst > 0.0 && df_resid > 0 {
+        1.0 - (1.0 - r_squared) * ((n - df_int) as f64) / (df_resid as f64)
+    } else {
+        0.0
+    };
+    let f_statistic = if df_model > 0 && ssr > 0.0 {
+        (sse / df_model as f64) / sigma_squared
+    } else {
+        0.0
+    };
+    let f_p_value = if df_model > 0 && df_resid > 0 {
+        f_test_p_value(f_statistic, df_model as f64, df_resid as f64)
+    } else {
+        f64::NAN
+    };
+    FitSummary {
+        sst,
+        r_squared,
+        adj_r_squared,
+        df_model,
+        f_statistic,
+        f_p_value,
+    }
+}
+
 /// Run OLS regression on pre-extracted ndarray data.
 ///
 /// This is the core computation function that operates directly on arrays,
@@ -474,8 +561,9 @@ pub fn run_ols_raw(
 
     let mut warnings = Vec::new();
 
-    // Check if first column is intercept (all 1s)
-    let has_intercept = x.column(0).iter().all(|&v| (v - 1.0).abs() < 1e-10);
+    // The model has an intercept when some column is constant and non-zero, in any
+    // position (REG-19; R reads it from the terms, which a raw matrix does not have).
+    let has_intercept = has_constant_column(x.view());
 
     // Compute (X'X)^{-1}
     let (xtx_inv, cond_warning) =
@@ -504,35 +592,18 @@ pub fn run_ols_raw(
     let residuals: Array1<f64> = y - &y_hat;
 
     // Compute statistics
-    let y_mean = y.mean().unwrap_or(0.0);
-    let sst: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
     let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
-    let sse = sst - ssr; // Explained sum of squares
-
     let df_resid = n - k;
-    let df_model = k - if has_intercept { 1 } else { 0 };
-
-    let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-    let adj_r_squared = if sst > 0.0 && df_resid > 0 {
-        1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df_resid as f64)
-    } else {
-        0.0
-    };
-
     let sigma_squared = ssr / (df_resid as f64);
     let residual_std_error = sigma_squared.sqrt();
-
-    // F-statistic
-    let f_statistic = if df_model > 0 && ssr > 0.0 {
-        (sse / df_model as f64) / sigma_squared
-    } else {
-        0.0
-    };
-    let f_p_value = if df_model > 0 && df_resid > 0 {
-        f_test_p_value(f_statistic, df_model as f64, df_resid as f64)
-    } else {
-        f64::NAN
-    };
+    let FitSummary {
+        sst,
+        r_squared,
+        adj_r_squared,
+        df_model,
+        f_statistic,
+        f_p_value,
+    } = fit_summary(y, ssr, k, df_resid, sigma_squared, has_intercept);
 
     let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, k);
 
@@ -675,35 +746,18 @@ pub fn run_ols(
     let residuals: Array1<f64> = &y - &y_hat;
 
     // Compute statistics
-    let y_mean = y.mean().unwrap_or(0.0);
-    let sst: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
     let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
-    let sse = sst - ssr; // Explained sum of squares
-
     let df_resid = n - k;
-    let df_model = k - if intercept { 1 } else { 0 };
-
-    let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-    let adj_r_squared = if sst > 0.0 && df_resid > 0 {
-        1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df_resid as f64)
-    } else {
-        0.0
-    };
-
     let sigma_squared = ssr / (df_resid as f64);
     let residual_std_error = sigma_squared.sqrt();
-
-    // F-statistic
-    let f_statistic = if df_model > 0 && ssr > 0.0 {
-        (sse / df_model as f64) / sigma_squared
-    } else {
-        0.0
-    };
-    let f_p_value = if df_model > 0 && df_resid > 0 {
-        f_test_p_value(f_statistic, df_model as f64, df_resid as f64)
-    } else {
-        f64::NAN
-    };
+    let FitSummary {
+        sst,
+        r_squared,
+        adj_r_squared,
+        df_model,
+        f_statistic,
+        f_p_value,
+    } = fit_summary(&y, ssr, k, df_resid, sigma_squared, intercept);
 
     let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, k);
 
@@ -3204,6 +3258,69 @@ mod tests {
         pin_fit(&mut check, &r);
         pin_trait(&mut check, &r, "hc1");
         check.finish();
+    }
+
+    /// Case ols_no_intercept_grunfeld: lm(inv ~ 0 + value + capital) (validation/r/cases/cli_flags.R). REG-19.
+    #[test]
+    fn test_validate_ols_no_intercept_grunfeld() {
+        let (case, ds) = crate::test_support::load_case("ols_no_intercept_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let x = ["value", "capital"];
+        let r = run_ols(&ds, "inv", &x, false, CovarianceType::Standard).unwrap();
+        let names: Vec<&str> = r.coefficients.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, x);
+        let col = |r: &OlsResult, f: fn(&OlsCoefficient) -> f64| {
+            r.coefficients.iter().map(f).collect::<Vec<f64>>()
+        };
+        let hc1 = run_ols(&ds, "inv", &x, false, CovarianceType::HC1).unwrap();
+        Check::new(&case)
+            .named("coef", &names, &col(&r, |c| c.estimate), Tol::coef(n))
+            .named(
+                "se_classical",
+                &names,
+                &col(&r, |c| c.std_error),
+                Tol::se(n),
+            )
+            .named("t_classical", &names, &col(&r, |c| c.t_value), Tol::stat(n))
+            .named(
+                "p_classical",
+                &names,
+                &col(&r, |c| c.p_value),
+                Tol::p_value(n),
+            )
+            .named("se_hc1", &names, &col(&hc1, |c| c.std_error), Tol::se(n))
+            .named("p_hc1", &names, &col(&hc1, |c| c.p_value), Tol::p_value(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("f_stat", r.f_statistic, Tol::stat(n))
+            .scalar("f_df1", r.df_model as f64, Tol::exact())
+            .scalar("f_df2", r.df_resid as f64, Tol::exact())
+            .scalar("f_p", r.f_p_value, Tol::p_value(n))
+            .scalar("log_lik", r.log_likelihood, Tol::stat(n))
+            .scalar("aic", r.aic, Tol::stat(n))
+            .finish();
+    }
+
+    /// REG-19 (b): the intercept is found in any column of a raw design (case ols_grunfeld).
+    #[test]
+    fn test_validate_ols_raw_intercept_in_last_column() {
+        let (case, ds) = crate::test_support::load_case("ols_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let d = DesignMatrix::from_dataframe(ds.df(), &["value", "capital"], false).unwrap();
+        let y = DesignMatrix::extract_column(ds.df(), "inv").unwrap();
+        let mut x = Array2::<f64>::ones((n, 3));
+        x.slice_mut(ndarray::s![.., 0..2]).assign(&d.data);
+        let names = ["value", "capital", "(Intercept)"]
+            .map(String::from)
+            .to_vec();
+        let r = run_ols_raw(&x, &y, &names, "inv", CovarianceType::Standard).unwrap();
+        Check::new(&case)
+            .scalar("f_stat", r.f_statistic, Tol::stat(n))
+            .scalar("f_df1", r.df_model as f64, Tol::exact())
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .finish();
     }
 
     /// `lm(mpg ~ wt + hp + disp)` on all 32 rows of mtcars (case `ols_mtcars`).
