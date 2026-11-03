@@ -6,7 +6,6 @@
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 // =============================================================================
 // Optimized Pairwise Distance Computation
@@ -372,173 +371,16 @@ pub fn hdbscan_optimized(
 // Optimized OPTICS
 // =============================================================================
 
-/// Optimized OPTICS with parallel core distance computation.
+/// OPTICS ordering, reachabilities (in ordering order) and labels. Delegates to
+/// [`crate::ml::optics()`] (R `dbscan::optics`; labels by `extractDBSCAN(eps_cl = max_eps)` for a
+/// finite `max_eps`, none otherwise); kept for compatibility.
 pub fn optics_optimized(
     data: ArrayView2<f64>,
     min_samples: usize,
     max_eps: Option<f64>,
 ) -> Result<(Vec<usize>, Vec<f64>, Vec<i32>), String> {
-    let n = data.nrows();
-
-    if n == 0 {
-        return Err("Empty data".to_string());
-    }
-
-    if min_samples < 1 || min_samples > n {
-        return Err(format!("min_samples must be between 1 and {}", n));
-    }
-
-    let eps = max_eps.unwrap_or(f64::INFINITY);
-
-    // Compute distances in parallel
-    let distances = compute_pairwise_distances_parallel(&data);
-
-    // Compute core distances in parallel
-    let core_distances: Vec<f64> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut dists: Vec<f64> = (0..n)
-                .filter(|&j| i != j)
-                .map(|j| distances[[i, j]])
-                .collect();
-            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-
-            if dists.len() >= min_samples {
-                dists[min_samples - 1].min(eps)
-            } else {
-                f64::INFINITY
-            }
-        })
-        .collect();
-
-    // OPTICS ordering (inherently sequential but with optimized neighbor queries)
-    let mut processed = vec![false; n];
-    let mut ordering = Vec::with_capacity(n);
-    let mut reachability = vec![f64::INFINITY; n];
-
-    #[derive(PartialEq)]
-    struct OrderedPoint {
-        reachability: f64,
-        index: usize,
-    }
-
-    impl Eq for OrderedPoint {}
-
-    impl Ord for OrderedPoint {
-        fn cmp(&self, other: &Self) -> Ordering {
-            other
-                .reachability
-                .partial_cmp(&self.reachability)
-                .unwrap_or(Ordering::Equal)
-        }
-    }
-
-    impl PartialOrd for OrderedPoint {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    for start in 0..n {
-        if processed[start] {
-            continue;
-        }
-
-        let mut seeds = BinaryHeap::new();
-        processed[start] = true;
-        ordering.push(start);
-
-        if core_distances[start] <= eps {
-            // Get neighbors and update reachability in parallel
-            let updates: Vec<(usize, f64)> = (0..n)
-                .into_par_iter()
-                .filter(|&j| !processed[j] && distances[[start, j]] <= eps)
-                .map(|j| {
-                    let new_reach = core_distances[start].max(distances[[start, j]]);
-                    (j, new_reach)
-                })
-                .collect();
-
-            for (j, new_reach) in updates {
-                if new_reach < reachability[j] {
-                    reachability[j] = new_reach;
-                    seeds.push(OrderedPoint {
-                        reachability: new_reach,
-                        index: j,
-                    });
-                }
-            }
-        }
-
-        while let Some(OrderedPoint { index: p, .. }) = seeds.pop() {
-            if processed[p] {
-                continue;
-            }
-
-            processed[p] = true;
-            ordering.push(p);
-
-            if core_distances[p] <= eps {
-                for j in 0..n {
-                    if !processed[j] && distances[[p, j]] <= eps {
-                        let new_reach = core_distances[p].max(distances[[p, j]]);
-                        if new_reach < reachability[j] {
-                            reachability[j] = new_reach;
-                            seeds.push(OrderedPoint {
-                                reachability: new_reach,
-                                index: j,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Extract clusters
-    let labels = extract_optics_clusters(&ordering, &reachability);
-
-    // Reorder reachability
-    let reachability_ordered: Vec<f64> = ordering.iter().map(|&i| reachability[i]).collect();
-
-    Ok((ordering, reachability_ordered, labels))
-}
-
-fn extract_optics_clusters(ordering: &[usize], reachability: &[f64]) -> Vec<i32> {
-    let n = ordering.len();
-    let mut labels = vec![-1i32; n];
-
-    // Use median reachability as threshold
-    let mut sorted_reach: Vec<f64> = reachability
-        .iter()
-        .filter(|&&r| r.is_finite())
-        .cloned()
-        .collect();
-    sorted_reach.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-
-    let threshold = if sorted_reach.is_empty() {
-        f64::INFINITY
-    } else {
-        sorted_reach[sorted_reach.len() / 2] * 1.5
-    };
-
-    let mut current_cluster = -1i32;
-    for &idx in ordering {
-        let r = reachability[idx];
-        if r > threshold {
-            if current_cluster >= 0 {
-                current_cluster += 1;
-            }
-            labels[idx] = -1;
-        } else {
-            if current_cluster < 0 {
-                current_cluster = 0;
-            }
-            labels[idx] = current_cluster;
-        }
-    }
-
-    labels
+    let r = crate::ml::optics(data, min_samples, max_eps, None)?;
+    Ok((r.ordering, r.reachability, r.labels))
 }
 
 // =============================================================================
@@ -735,6 +577,31 @@ mod tests {
                 .map(|v| v.to_bits())
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// R: extractDBSCAN(optics(blobs_noise, eps = 0.35, minPts = 5), eps_cl = 0.35) through the
+    /// delegation (case optics_blobs).
+    #[test]
+    fn test_validate_optics_optimized_matches_optics() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("optics_blobs");
+        let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
+        let (ordering, reach, labels) = optics_optimized(x.view(), 5, Some(0.35)).unwrap();
+        let r = crate::ml::optics(x.view(), 5, Some(0.35), None).unwrap();
+        assert_eq!((ordering.clone(), labels.clone()), (r.ordering, r.labels));
+        assert_eq!(reach.len(), 115);
+        Check::new(&case)
+            .vector(
+                "eps035_order",
+                &ordering.iter().map(|&p| (p + 1) as f64).collect::<Vec<_>>(),
+                Tol::exact(),
+            )
+            .vector(
+                "eps035_dbscan_cluster",
+                &crate::ml::advanced_clustering_mod::common::test_data::r_codes(&labels),
+                Tol::exact(),
+            )
+            .finish();
     }
 
     /// R: cluster::silhouette on blobs_noise with a singleton cluster (case silhouette_singletons).

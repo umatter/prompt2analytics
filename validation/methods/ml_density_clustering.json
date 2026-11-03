@@ -53,6 +53,35 @@
       "supersedes_legacy": []
     },
     {
+      "id": "optics",
+      "name": "OPTICS ordering and flat clusterings (dbscan::optics, extractDBSCAN, extractXi)",
+      "category": "ml",
+      "reference": "dbscan::optics(x, eps, minPts) (dbscan 1.2.6 optics_int); dbscan::extractDBSCAN(object, eps_cl); dbscan::extractXi(object, xi, minimum = FALSE, correctPredecessors)",
+      "doc": "validation/ml/optics.md",
+      "cases": [
+        "optics_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_inf",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_eps05",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_predecessor",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_extract_dbscan",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_extract_xi",
+        "p2a-core::ml::cluster_optimized::tests::test_validate_optics_optimized_matches_optics"
+      ],
+      "quantities": [
+        "ordering (eps Inf, 0.5, 0.35)",
+        "reachability distances",
+        "core distances (undefined beyond eps)",
+        "predecessors",
+        "extractDBSCAN labels (eps_cl 0.35 on three orderings)",
+        "extractXi labels and xi-cluster start/end, with and without the predecessor correction, eps Inf and 0.5"
+      ],
+      "tolerance": "validation/README.md, n = 115: orderings, predecessors, labels and positions exact; distances 1e-8 relative (Tol::coef)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "silhouette",
       "name": "Silhouette widths (cluster::silhouette)",
       "category": "ml",

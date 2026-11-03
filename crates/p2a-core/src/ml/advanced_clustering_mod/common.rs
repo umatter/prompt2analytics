@@ -86,39 +86,6 @@ impl Points {
 // Shared helpers
 // =============================================================================
 
-/// Compute distance matrix in parallel.
-pub(crate) fn compute_distance_matrix_parallel(data: &ArrayView2<f64>) -> Array2<f64> {
-    let n = data.nrows();
-    let d = data.ncols();
-
-    let data_slice: Vec<f64> = data.iter().cloned().collect();
-    let data_ref = &data_slice;
-
-    let results: Vec<(usize, usize, f64)> = (0..n)
-        .into_par_iter()
-        .flat_map(|i| {
-            ((i + 1)..n)
-                .map(move |j| {
-                    let mut sum = 0.0;
-                    for k in 0..d {
-                        let diff = data_ref[i * d + k] - data_ref[j * d + k];
-                        sum += diff * diff;
-                    }
-                    (i, j, sum.sqrt())
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let mut distances = Array2::zeros((n, n));
-    for (i, j, dist) in results {
-        distances[[i, j]] = dist;
-        distances[[j, i]] = dist;
-    }
-
-    distances
-}
-
 // =============================================================================
 // Helper functions
 // =============================================================================
