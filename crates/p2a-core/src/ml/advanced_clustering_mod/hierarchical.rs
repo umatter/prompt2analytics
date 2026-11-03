@@ -188,7 +188,7 @@ fn agglomerate(
 /// - Kaufman, L. and Rousseeuw, P.J. (1990). "Finding Groups in Data:
 ///   An Introduction to Cluster Analysis". Wiley, New York.
 /// - R cluster::diana documentation
-///   Source: https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/diana.html
+///   Source: <https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/diana.html>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DianaResult {
     /// Cluster assignments for each point (0 to n_clusters-1)
@@ -486,7 +486,7 @@ pub fn run_diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> EconResult
 ///
 /// - Kaufman, L. and Rousseeuw, P.J. (1990). "Finding Groups in Data".
 /// - R cluster::agnes documentation
-///   Source: https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/agnes.html
+///   Source: <https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/agnes.html>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgnesResult {
     /// Cluster assignments for each point (0 to n_clusters-1)
@@ -715,7 +715,7 @@ pub fn run_agnes(
 /// - Suzuki, R. and Shimodaira, H. (2006). "Pvclust: an R package for assessing
 ///   the uncertainty in hierarchical clustering". Bioinformatics, 22(12).
 /// - R pvclust package documentation
-///   Source: https://www.rdocumentation.org/packages/pvclust/versions/2.2-0/topics/pvclust
+///   Source: <https://www.rdocumentation.org/packages/pvclust/versions/2.2-0/topics/pvclust>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PvClustResult {
     /// AU (Approximately Unbiased) p-values for each cluster (edge)
@@ -1249,7 +1249,7 @@ pub enum FastLinkage {
 /// - Müllner, D. (2013). "fastcluster: Fast Hierarchical, Agglomerative
 ///   Clustering Routines for R and Python." Journal of Statistical Software.
 /// - R fastcluster package documentation
-///   Source: https://www.rdocumentation.org/packages/fastcluster/versions/1.2.6/topics/hclust
+///   Source: <https://www.rdocumentation.org/packages/fastcluster/versions/1.2.6/topics/hclust>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FastClusterResult {
     /// Merge matrix (n-1 x 2): indices of clusters merged at each step

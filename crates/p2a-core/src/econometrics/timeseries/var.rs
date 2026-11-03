@@ -75,7 +75,7 @@ pub struct VarIrfResult {
     pub steps: usize,
     /// Number of lags in the VAR
     pub lags: usize,
-    /// IRF tensor: [step][response_var][shock_var]
+    /// IRF tensor: `[step][response_var][shock_var]`
     pub irf: Vec<Vec<Vec<f64>>>,
     /// Orthogonalized IRF (Cholesky decomposition)
     pub orthogonalized: bool,

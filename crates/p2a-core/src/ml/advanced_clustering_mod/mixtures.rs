@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 /// - Leisch, F. (2004). "FlexMix: A General Framework for Finite Mixture Models
 ///   and Latent Class Regression in R". Journal of Statistical Software, 11(8).
 /// - R flexmix package documentation
-///   Source: https://www.rdocumentation.org/packages/flexmix/versions/2.3-20/topics/flexmix
+///   Source: <https://www.rdocumentation.org/packages/flexmix/versions/2.3-20/topics/flexmix>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlexMixResult {
     /// Component membership (posterior) probabilities for each observation
@@ -360,7 +360,7 @@ pub fn run_flexmix(
 ///
 /// - McLachlan, G. J., & Peel, D. (2000). "Finite Mixture Models." Wiley.
 /// - R mixtools package documentation
-///   Source: https://www.rdocumentation.org/packages/mixtools/versions/2.0.0/topics/normalmixEM
+///   Source: <https://www.rdocumentation.org/packages/mixtools/versions/2.0.0/topics/normalmixEM>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalMixEMResult {
     /// Component means

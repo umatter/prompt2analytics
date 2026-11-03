@@ -49,7 +49,7 @@
 //!
 //! ## Time Series
 //!
-//! - [`acf`], [`pacf`], [`ccf`] - Autocorrelation functions
+//! - [`acf()`], [`pacf`], [`ccf`] - Autocorrelation functions
 //! - [`box_test`] - Ljung-Box / Box-Pierce portmanteau test
 //! - [`pp_test`] - Phillips-Perron unit root test
 //!
@@ -61,11 +61,11 @@
 //!
 //! ## Other
 //!
-//! - [`mahalanobis`] - Mahalanobis distance
-//! - [`isoreg`] - Isotonic regression
-//! - [`medpolish`] - Median polish for two-way tables
-//! - [`loglin`] - Log-linear models
-//! - [`spline`], [`approx`] - Interpolation
+//! - [`mahalanobis()`] - Mahalanobis distance
+//! - [`isoreg()`] - Isotonic regression
+//! - [`medpolish()`] - Median polish for two-way tables
+//! - [`loglin()`] - Log-linear models
+//! - [`spline()`], [`approx`] - Interpolation
 
 pub mod acf;
 pub mod anova;

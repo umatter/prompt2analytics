@@ -28,7 +28,7 @@ pub enum DynamicCutMethod {
 ///   from a hierarchical cluster tree: the Dynamic Tree Cut package for R."
 ///   Bioinformatics, 24(5), 719-720.
 /// - R dynamicTreeCut package documentation
-///   Source: https://www.rdocumentation.org/packages/dynamicTreeCut/versions/1.63-1/topics/cutreeDynamic
+///   Source: <https://www.rdocumentation.org/packages/dynamicTreeCut/versions/1.63-1/topics/cutreeDynamic>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicTreeCutResult {
     /// Cluster assignments (0 = unassigned/outlier)

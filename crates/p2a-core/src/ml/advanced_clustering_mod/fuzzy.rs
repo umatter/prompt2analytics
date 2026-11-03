@@ -18,7 +18,7 @@ use super::common::compute_distance_matrix;
 /// - Bezdek, J.C. (1981). "Pattern Recognition with Fuzzy Objective Function
 ///   Algorithms". Plenum Press, New York.
 /// - R e1071::cmeans documentation
-///   Source: https://www.rdocumentation.org/packages/e1071/versions/1.7-16/topics/cmeans
+///   Source: <https://www.rdocumentation.org/packages/e1071/versions/1.7-16/topics/cmeans>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzyCMeansResult {
     /// Hard cluster assignments (index of maximum membership)
@@ -359,7 +359,7 @@ pub fn run_fuzzy_cmeans(
 ///
 /// - Kaufman, L. and Rousseeuw, P.J. (1990). "Finding Groups in Data".
 /// - R cluster::fanny documentation
-///   Source: https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/fanny.html
+///   Source: <https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/fanny.html>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FannyResult {
     /// Membership coefficients (n x k matrix)

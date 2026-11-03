@@ -58,20 +58,20 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **BART** | [`bart`] | Bayesian Additive Regression Trees (prediction) |
-//! | **CART** | [`cart`] | Decision trees (classification/regression) |
+//! | **BART** | [`bart()`] | Bayesian Additive Regression Trees (prediction) |
+//! | **CART** | [`cart()`] | Decision trees (classification/regression) |
 //! | **Random Forest** | [`random_forest`] | CART-based ensemble |
-//! | **Gradient Boosting** | [`gbm`] | Gradient boosting machine (GBM) |
-//! | **AdaBoost** | [`adaboost`] | Adaptive boosting (M1, R2, SAMME) |
+//! | **Gradient Boosting** | [`gbm()`] | Gradient boosting machine (GBM) |
+//! | **AdaBoost** | [`adaboost()`] | Adaptive boosting (M1, R2, SAMME) |
 //! | **Linear SVM** | [`linear_svm`] | Support vector machine (SMO) |
-//! | **PPR** | [`ppr`] | Projection pursuit regression |
+//! | **PPR** | [`ppr()`] | Projection pursuit regression |
 //!
 //! ## Causal Machine Learning
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **Causal Forest** | [`causal_forest`] | Heterogeneous treatment effects (grf) |
-//! | **BART Causal** | [`bart_causal`] | Bayesian trees for causal inference |
+//! | **Causal Forest** | [`causal_forest()`] | Heterogeneous treatment effects (grf) |
+//! | **BART Causal** | [`bart_causal()`] | Bayesian trees for causal inference |
 //!
 //! ## Model Interpretability
 //!
@@ -85,27 +85,27 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **Quantile RF** | [`quantile_rf`] | Quantile regression forests |
-//! | **CTree** | [`ctree`] | Conditional inference trees |
-//! | **C5.0** | [`c50`] | C5.0 decision trees |
-//! | **Cubist** | [`cubist`] | Rule-based regression |
-//! | **MARS** | [`mars`] | Multivariate adaptive regression splines |
+//! | **Quantile RF** | [`quantile_rf()`] | Quantile regression forests |
+//! | **CTree** | [`ctree()`] | Conditional inference trees |
+//! | **C5.0** | [`c50()`] | C5.0 decision trees |
+//! | **Cubist** | [`cubist()`] | Rule-based regression |
+//! | **MARS** | [`mars()`] | Multivariate adaptive regression splines |
 //!
 //! ## Association Rules
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **Apriori** | [`apriori`] | Association rule mining |
+//! | **Apriori** | [`apriori()`] | Association rule mining |
 //! | **Eclat** | [`eclat`] | Vertical data format mining |
 //!
 //! ## Gradient Boosting Methods
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **XGBoost** | [`xgboost`] | Extreme gradient boosting with L1/L2 regularization |
-//! | **LightGBM** | [`lightgbm`] | Histogram-based gradient boosting |
-//! | **MBoost** | [`mboost`] | Model-based gradient boosting framework |
-//! | **BART** | [`bart`] | Bayesian additive regression trees |
+//! | **XGBoost** | [`xgboost()`] | Extreme gradient boosting with L1/L2 regularization |
+//! | **LightGBM** | [`lightgbm()`] | Histogram-based gradient boosting |
+//! | **MBoost** | [`mboost()`] | Model-based gradient boosting framework |
+//! | **BART** | [`bart()`] | Bayesian additive regression trees |
 //!
 //! ## Missing values and column types
 //!
@@ -116,7 +116,7 @@
 //! NaN) in the target or a feature is an error naming the column. R's randomForest, gbm,
 //! kmeans and prcomp refuse NA too, and p2a's trees have no surrogate splits. The array
 //! functions ([`kmeans`], [`hierarchical`], [`pca`], [`tsne`], [`cmdscale`], [`dbscan`],
-//! [`linear_svm`], [`ppr`], [`random_forest`]) refuse non-finite input.
+//! [`linear_svm`], [`ppr()`], [`random_forest`]) refuse non-finite input.
 //!
 //! ## Large-N Performance
 //!
@@ -179,15 +179,15 @@
 //! | `dynamicTreeCut` | [`dynamic_tree_cut()`] |
 //! | `flexmix` | [`flexmix`] |
 //! | `pvclust` | [`pvclust`] |
-//! | `grf` | [`causal_forest`] |
-//! | `BART` | [`bart`], [`bart_causal`] |
+//! | `grf` | [`causal_forest()`] |
+//! | `BART` | [`bart()`], [`bart_causal()`] |
 //! | `iml`, `DALEX` | [`compute_ice_curves`], [`partial_dependence`], [`kernel_shap`] |
-//! | `quantregForest` | [`quantile_rf`] |
-//! | `party` | [`ctree`] |
-//! | `C50` | [`c50`] |
-//! | `Cubist` | [`cubist`] |
-//! | `earth` | [`mars`] |
-//! | `arules` | [`apriori`], [`eclat`] |
+//! | `quantregForest` | [`quantile_rf()`] |
+//! | `party` | [`ctree()`] |
+//! | `C50` | [`c50()`] |
+//! | `Cubist` | [`cubist()`] |
+//! | `earth` | [`mars()`] |
+//! | `arules` | [`apriori()`], [`eclat`] |
 
 pub mod adaboost;
 pub mod advanced_clustering_mod;

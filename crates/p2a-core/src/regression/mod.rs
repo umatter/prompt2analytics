@@ -19,7 +19,7 @@
 //! - [`run_gls`] - Generalized least squares (AR(1), compound symmetry or identity; `gls()` also takes a known Omega)
 //! - [`run_quantreg`] - Quantile/median regression
 //! - [`run_loess`] - Local polynomial regression (LOESS/LOWESS)
-//! - [`smooth_spline`] - Smoothing splines
+//! - [`smooth_spline()`] - Smoothing splines
 //! - [`run_nls`] - Nonlinear least squares (Gauss-Newton/L-M)
 //!
 //! ## Model Selection
@@ -37,15 +37,15 @@
 //!
 //! ## Marginal Effects & Sensitivity
 //!
-//! - [`marginal_effects`] - Average marginal effects (AME)
+//! - [`marginal_effects()`] - Average marginal effects (AME)
 //! - [`contrasts`] - Effect contrasts
 //! - [`run_sensemakr`] - Sensitivity analysis for unmeasured confounding
 //! - [`evalue_rr`], [`evalue_or`] - E-values for causal inference
 //!
 //! ## Other
 //!
-//! - [`line`] - Tukey's resistant line
-//! - [`supsmu`] - Friedman's SuperSmoother
+//! - [`line()`] - Tukey's resistant line
+//! - [`supsmu()`] - Friedman's SuperSmoother
 //!
 //! ## Example
 //!

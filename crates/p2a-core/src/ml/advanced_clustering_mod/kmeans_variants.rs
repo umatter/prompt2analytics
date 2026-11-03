@@ -511,7 +511,7 @@ pub fn run_trimmed_kmeans(
 /// - Dhillon, I. S., & Modha, D. S. (2001). "Concept decompositions for large
 ///   sparse text data using clustering." Machine Learning, 42(1), 143-175.
 /// - R skmeans package documentation
-///   Source: https://www.rdocumentation.org/packages/skmeans/versions/0.2-17/topics/skmeans
+///   Source: <https://www.rdocumentation.org/packages/skmeans/versions/0.2-17/topics/skmeans>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SKMeansResult {
     /// Cluster assignments for each point (0-indexed)

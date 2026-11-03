@@ -8,7 +8,7 @@
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
 //! | **ARIMA** | [`run_arima`], [`run_arima_with`], [`forecast_arima`], [`forecast_arima_with`], [`ArimaSpec`] | ARIMA(p,d,q) by conditional sum of squares (mean and drift as R), forecasts with 80/95% intervals |
-//! | **AR** | [`ar`], [`run_ar`] | Autoregressive models (Yule-Walker, OLS, Burg) |
+//! | **AR** | [`ar()`], [`run_ar`] | Autoregressive models (Yule-Walker, OLS, Burg) |
 //! | **ARIMA Simulation** | [`arima_sim`] | Simulate ARIMA processes |
 //! | **ARMA ACF** | [`arma_acf`] | Theoretical ACF of ARMA models |
 //! | **ARMA to MA** | [`arma_to_ma`] | Convert ARMA to MA representation |
@@ -25,15 +25,15 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **STL** | [`stl`], [`run_stl`] | Seasonal-trend decomposition (LOESS) |
+//! | **STL** | [`stl()`], [`run_stl`] | Seasonal-trend decomposition (LOESS) |
 //! | **MSTL** | [`run_mstl`] | Multiple seasonal decomposition |
-//! | **Classical** | [`decompose`], [`run_decompose`] | Additive/multiplicative decomposition |
+//! | **Classical** | [`decompose()`], [`run_decompose`] | Additive/multiplicative decomposition |
 //!
 //! ## Volatility Models
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
-//! | **GARCH** | [`garch`], [`run_garch`] | Generalized autoregressive conditional heteroskedasticity |
+//! | **GARCH** | [`garch()`], [`run_garch`] | Generalized autoregressive conditional heteroskedasticity |
 //!
 //! ## State-Space Models
 //!
@@ -105,10 +105,10 @@
 //! |------------|-------------------|
 //! | `arima(method = "CSS")`, `forecast::Arima()` | [`run_arima`], [`run_arima_with`] |
 //! | `forecast::forecast()` of an `Arima` fit | [`forecast_arima`], [`forecast_arima_with`] |
-//! | `ar()` | [`ar`], [`run_ar`] |
+//! | `ar()` | [`ar()`], [`run_ar`] |
 //! | `HoltWinters()` | [`holt_winters`], [`run_holt_winters`] |
-//! | `stl()` | [`stl`], [`run_stl`] |
-//! | `decompose()` | [`decompose`], [`run_decompose`] |
+//! | `stl()` | [`stl()`], [`run_stl`] |
+//! | `decompose()` | [`decompose()`], [`run_decompose`] |
 //! | `StructTS()` | [`struct_ts`], [`run_struct_ts`] |
 //! | `KalmanFilter()` | [`kalman_filter`] |
 //! | `CausalImpact` | [`causal_impact()`], [`run_causal_impact`] |

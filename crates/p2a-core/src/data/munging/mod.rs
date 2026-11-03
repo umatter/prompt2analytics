@@ -8,7 +8,7 @@
 //!
 //! - [`transform`] - Core transforms: filter, select, rename, mutate, sort
 //! - [`clean`] - Data cleaning: drop_na, fill_na, deduplicate, cast (reports values that fail to convert)
-//! - [`join`] - Join operations: left/right/inner/full joins, concat
+//! - [`join`](mod@join) - Join operations: left/right/inner/full joins, concat
 //! - [`aggregate`] - Aggregation: group_by, value_counts, summarize, describe
 //! - [`reshape`] - Reshape: pivot, melt, transpose, explode, stack
 //! - [`features`] - Feature engineering: lag, lead, diff, standardize, bin, one_hot

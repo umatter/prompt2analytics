@@ -20,7 +20,7 @@ use super::common::{
 /// - Kaufman, L. and Rousseeuw, P.J. (1990). "Finding Groups in Data: An
 ///   Introduction to Cluster Analysis". Wiley, New York.
 /// - R cluster::pam documentation
-///   Source: https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/pam.html
+///   Source: <https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/pam.html>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KMedoidsResult {
     /// Cluster assignments for each point (0-indexed)
@@ -308,7 +308,7 @@ pub fn run_kmedoids(
 /// - Kaufman, L. and Rousseeuw, P.J. (1990). "Finding Groups in Data:
 ///   An Introduction to Cluster Analysis". Wiley.
 /// - R cluster::clara documentation
-///   Source: https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/clara.html
+///   Source: <https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/clara.html>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaraResult {
     /// Cluster assignments for all observations

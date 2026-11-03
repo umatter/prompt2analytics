@@ -17,7 +17,7 @@ use std::collections::HashMap;
 ///   large data sets with categorical values." Data Mining and Knowledge
 ///   Discovery, 2(3), 283-304.
 /// - R clustMixType::kproto documentation
-///   Source: https://www.rdocumentation.org/packages/clustMixType/versions/0.4-2/topics/kproto
+///   Source: <https://www.rdocumentation.org/packages/clustMixType/versions/0.4-2/topics/kproto>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KPrototypesResult {
     /// Cluster assignments for each point (0-indexed)

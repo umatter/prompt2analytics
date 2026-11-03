@@ -253,7 +253,7 @@ pub(crate) fn compute_silhouette_avg(labels: &[usize], distances: &Array2<f64>, 
 ///
 /// - Hennig, C. (2020). fpc: Flexible Procedures for Clustering. R package.
 /// - R fpc::cluster.stats documentation
-///   Source: https://www.rdocumentation.org/packages/fpc/versions/2.2-10/topics/cluster.stats
+///   Source: <https://www.rdocumentation.org/packages/fpc/versions/2.2-10/topics/cluster.stats>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterStatsResult {
     /// Number of clusters

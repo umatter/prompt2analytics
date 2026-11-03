@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 ///
 /// - McLachlan, G.J. and Peel, D. (2000). "Finite Mixture Models". Wiley.
 /// - R mclust package documentation
-///   Source: https://www.rdocumentation.org/packages/mclust/
+///   Source: <https://www.rdocumentation.org/packages/mclust/>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GaussianMixtureResult {
     /// Hard cluster assignments (most likely cluster for each point)

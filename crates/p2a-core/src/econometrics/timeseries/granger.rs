@@ -99,7 +99,7 @@ impl fmt::Display for GrangerResult {
 ///
 /// - Granger, C.W.J. (1969). Investigating Causal Relations by Econometric Models and
 ///   Cross-spectral Methods. *Econometrica*, 37(3), 424-438.
-///   https://doi.org/10.2307/1912791
+///   <https://doi.org/10.2307/1912791>
 ///
 /// R equivalent: `lmtest::grangertest()`
 ///
