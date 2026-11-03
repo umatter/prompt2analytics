@@ -28,6 +28,12 @@ pub struct LoadDatasetRequest {
         description = "Strings read as missing values when the data is CSV; default [\"NA\", \"\"] (R's read.csv). Unquoted empty fields are always missing. Pass [] to keep the text NA as a value. Not allowed for non-CSV files."
     )]
     pub na_strings: Option<Vec<String>>,
+
+    /// Declared file type (the web UI's File Type selector).
+    #[schemars(
+        description = "Optional declared file type: 'auto' (default), 'csv', 'parquet', 'excel', 'stata' or 'sas'. The file is read by its extension; a declared type that the extension contradicts is refused, so a mislabelled file is never parsed."
+    )]
+    pub file_type: Option<String>,
 }
 
 /// Request to upload and load a dataset from base64-encoded content.
@@ -46,6 +52,12 @@ pub struct UploadDatasetRequest {
         description = "Optional name to identify this dataset. If not provided, the filename will be used."
     )]
     pub name: Option<String>,
+
+    /// Declared file type (the web UI's File Type selector).
+    #[schemars(
+        description = "Optional declared file type: 'auto' (default), 'csv', 'parquet', 'excel', 'stata' or 'sas'. The file is read by its extension; a declared type that the extension contradicts is refused, so a mislabelled file is never parsed."
+    )]
+    pub file_type: Option<String>,
 }
 
 /// Request to create a dataset from inline CSV content.

@@ -50,3 +50,77 @@ async fn test_tier3_helpers_drive_the_real_entry_points() {
         out[0]
     );
 }
+
+/// A declared file_type is checked against the extension (the web UI's File Type selector).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_load_dataset_checks_declared_file_type() {
+    // inside the path-jail root (the test cwd); removed on drop
+    let dir = tempfile::Builder::new()
+        .prefix("wp05_ft_")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
+    let p = dir.path().join("ft.csv");
+    std::fs::write(&p, "a,b\n1,2.5\n2,3.5\n3,4.1\n").unwrap();
+    let path = p.to_str().unwrap();
+    let (session, server) = session_with_datasets(vec![]);
+    let ok = call(
+        &server,
+        &session,
+        "load_dataset",
+        json!({"path": path, "name": "ft", "file_type": "csv"}),
+    )
+    .await;
+    assert!(ok.success, "{}", text(&ok));
+    let bad = call(
+        &server,
+        &session,
+        "load_dataset",
+        json!({"path": path, "name": "ft2", "file_type": "parquet"}),
+    )
+    .await;
+    assert!(
+        !bad.success && text(&bad).contains("does not match the file 'ft.csv'"),
+        "{}",
+        text(&bad)
+    );
+    assert!(!session.datasets.read().await.contains_key("ft2"));
+    let unk = call(
+        &server,
+        &session,
+        "load_dataset",
+        json!({"path": path, "file_type": "tsv"}),
+    )
+    .await;
+    assert!(
+        !unk.success && text(&unk).contains("unknown file_type 'tsv'"),
+        "{}",
+        text(&unk)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_upload_dataset_checks_declared_file_type() {
+    use base64::Engine as _;
+    let content = base64::engine::general_purpose::STANDARD.encode("a,b\n1,2.5\n2,3.5\n");
+    let (session, server) = session_with_datasets(vec![]);
+    let ok = call(
+        &server,
+        &session,
+        "upload_dataset",
+        json!({"content": content, "filename": "u.csv", "name": "u", "file_type": "csv"}),
+    )
+    .await;
+    assert!(ok.success, "{}", text(&ok));
+    let bad = call(
+        &server,
+        &session,
+        "upload_dataset",
+        json!({"content": content, "filename": "u.csv", "name": "u2", "file_type": "stata"}),
+    )
+    .await;
+    assert!(
+        !bad.success && text(&bad).contains("stata files end in .dta"),
+        "{}",
+        text(&bad)
+    );
+}

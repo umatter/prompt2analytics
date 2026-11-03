@@ -299,6 +299,142 @@ pub(crate) fn echo_list<S: AsRef<str>>(items: &[S], sep: &str, max: usize) -> St
     out
 }
 
+// ============================================================================
+// Options, declared file types (T3 design 2.5)
+// ============================================================================
+
+/// Parses an optional option string: `None` gives `default`, `Some(s)` gives `s.parse()`.
+///
+/// An [`p2a_core::EconError::InvalidSpecification`] error returns its bare `message` (the
+/// option and the accepted values); any other error its Display.
+pub fn parse_option<T: std::str::FromStr<Err = p2a_core::EconError>>(
+    value: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        None => Ok(default),
+        Some(s) => s.parse::<T>().map_err(|e| match e {
+            p2a_core::EconError::InvalidSpecification { message } => message,
+            other => other.to_string(),
+        }),
+    }
+}
+
+/// The `file_type` of `load_dataset` / `upload_dataset` (the web UI's File Type selector).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredFileType {
+    /// No declaration: the extension decides.
+    Auto,
+    /// CSV text.
+    Csv,
+    /// Apache Parquet.
+    Parquet,
+    /// Excel or OpenDocument spreadsheet.
+    Excel,
+    /// Stata `.dta`.
+    Stata,
+    /// SAS `.sas7bdat`.
+    Sas,
+}
+
+impl DeclaredFileType {
+    /// The canonical name: "auto", "csv", "parquet", "excel", "stata" or "sas".
+    pub fn canonical(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Csv => "csv",
+            Self::Parquet => "parquet",
+            Self::Excel => "excel",
+            Self::Stata => "stata",
+            Self::Sas => "sas",
+        }
+    }
+
+    /// The file extensions of the type, as `DataLoader::load` dispatches on them; none for
+    /// `Auto`.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Auto => &[],
+            Self::Csv => &["csv"],
+            Self::Parquet => &["parquet", "pq"],
+            Self::Excel => &["xlsx", "xls", "xlsb", "ods"],
+            Self::Stata => &["dta"],
+            Self::Sas => &["sas7bdat"],
+        }
+    }
+}
+
+impl std::str::FromStr for DeclaredFileType {
+    type Err = p2a_core::EconError;
+
+    /// A canonical name or one of the type's extensions, ignoring case and surrounding
+    /// whitespace.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let t = s.trim().to_ascii_lowercase();
+        if t == "auto" {
+            return Ok(Self::Auto);
+        }
+        for ty in [
+            Self::Csv,
+            Self::Parquet,
+            Self::Excel,
+            Self::Stata,
+            Self::Sas,
+        ] {
+            if t == ty.canonical() || ty.extensions().contains(&t.as_str()) {
+                return Ok(ty);
+            }
+        }
+        Err(p2a_core::EconError::InvalidSpecification {
+            message: format!(
+                "unknown file_type '{}'; expected one of: auto, csv, parquet, excel, stata, sas",
+                s.chars().take(64).collect::<String>()
+            ),
+        })
+    }
+}
+
+/// Checks a declared `file_type` against the extension of `file_name`: `Ok` when `declared`
+/// is `None` or auto, or names the type of the extension; else a message naming the declared
+/// type, the file name (its last path component, at most 64 characters, never its directory)
+/// and the extensions the type expects.
+pub fn check_declared_file_type(declared: Option<&str>, file_name: &str) -> Result<(), String> {
+    let declared = parse_option(declared, DeclaredFileType::Auto)?;
+    if declared == DeclaredFileType::Auto {
+        return Ok(());
+    }
+    let path = std::path::Path::new(file_name);
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if declared.extensions().contains(&ext.as_str()) {
+        return Ok(());
+    }
+    let shown: String = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .take(64)
+        .collect();
+    let exts: Vec<String> = declared
+        .extensions()
+        .iter()
+        .map(|e| format!(".{e}"))
+        .collect();
+    let expected = match exts.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        Some((last, _)) => last.clone(),
+        None => String::new(),
+    };
+    let name = declared.canonical();
+    Err(format!(
+        "file_type '{name}' does not match the file '{shown}': the file is read by its \
+         extension, and {name} files end in {expected}. Rename the file or use file_type 'auto'."
+    ))
+}
+
 /// Shared helpers for handler unit tests.
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -345,6 +481,70 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_declared_file_type_parses_aliases_and_rejects_unknown() {
+        for (s, t) in [
+            ("auto", DeclaredFileType::Auto),
+            ("CSV", DeclaredFileType::Csv),
+            (" parquet ", DeclaredFileType::Parquet),
+            ("pq", DeclaredFileType::Parquet),
+            ("excel", DeclaredFileType::Excel),
+            ("xlsx", DeclaredFileType::Excel),
+            ("ods", DeclaredFileType::Excel),
+            ("stata", DeclaredFileType::Stata),
+            ("dta", DeclaredFileType::Stata),
+            ("sas", DeclaredFileType::Sas),
+            ("sas7bdat", DeclaredFileType::Sas),
+        ] {
+            assert_eq!(s.parse::<DeclaredFileType>().unwrap(), t, "{s}");
+        }
+        let e = parse_option::<DeclaredFileType>(Some("tsv"), DeclaredFileType::Auto).unwrap_err();
+        assert_eq!(
+            e,
+            "unknown file_type 'tsv'; expected one of: auto, csv, parquet, excel, stata, sas"
+        );
+    }
+
+    #[test]
+    fn test_check_declared_file_type() {
+        assert!(check_declared_file_type(None, "/data/x.csv").is_ok());
+        assert!(check_declared_file_type(Some("auto"), "x.txt").is_ok());
+        assert!(check_declared_file_type(Some("csv"), "/data/X.CSV").is_ok());
+        assert!(check_declared_file_type(Some("excel"), "book.ods").is_ok());
+        let e = check_declared_file_type(Some("parquet"), "/home/u/private/sales.csv").unwrap_err();
+        assert_eq!(
+            e,
+            "file_type 'parquet' does not match the file 'sales.csv': the file is read by its \
+             extension, and parquet files end in .parquet or .pq. Rename the file or use \
+             file_type 'auto'."
+        );
+        assert!(!e.contains("/home"));
+        let e = check_declared_file_type(Some("excel"), "a.csv").unwrap_err();
+        assert!(
+            e.contains("excel files end in .xlsx, .xls, .xlsb or .ods"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_parse_option_parses_and_reports_the_core_message() {
+        use p2a_core::regression::CovarianceType;
+        assert_eq!(
+            parse_option::<CovarianceType>(None, CovarianceType::HC1).unwrap(),
+            CovarianceType::HC1
+        );
+        assert_eq!(
+            parse_option::<CovarianceType>(Some("HC3"), CovarianceType::HC1).unwrap(),
+            CovarianceType::HC3
+        );
+        let e = parse_option::<CovarianceType>(Some("hc9"), CovarianceType::HC1).unwrap_err();
+        assert!(
+            e.starts_with("unknown covariance type 'hc9'")
+                && !e.contains("Invalid model specification"),
+            "{e}"
+        );
+    }
 
     #[test]
     fn budget_group_count_leaves_out_null_and_an_absent_column() {
