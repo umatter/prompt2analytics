@@ -47,7 +47,7 @@
 //!   validation/econometrics/matching.md for the deviations).
 //!   https://cran.r-project.org/package=MatchIt
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,6 +56,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmLink, GlmSpec, fit_propensity};
+use crate::econometrics::min_cost_flow::{FlowStatus, Network, network_simplex};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::eig_symmetric;
@@ -142,10 +143,18 @@ impl fmt::Display for MatchMethod {
                 min_ratio,
                 max_ratio,
             } => {
+                let b = |v: f64| {
+                    if v == f64::INFINITY {
+                        "Inf".to_string()
+                    } else {
+                        v.to_string()
+                    }
+                };
                 write!(
                     f,
-                    "Full Matching (ratio range: [{:.1}, {:.1}])",
-                    min_ratio, max_ratio
+                    "Optimal Full Matching (controls per treated unit in [{}, {}])",
+                    b(*min_ratio),
+                    b(*max_ratio)
                 )
             }
             MatchMethod::Subclass { n_subclasses } => {
@@ -592,7 +601,7 @@ pub fn match_it(
 
 /// What one matching method hands back to [`match_it_with`].
 struct MethodOutput {
-    /// Raw (unnormalised) weights per row.
+    /// MatchIt's weights per row, already normalised (`.make_sum_to_n`) by the method.
     weights: Vec<f64>,
     matches: Vec<MatchInfo>,
     subclass: Vec<Option<usize>>,
@@ -706,8 +715,7 @@ pub fn match_it_with(
         }
     };
 
-    let mut weights = out.weights;
-    normalize_weights(&mut weights, &is_treated);
+    let weights = out.weights;
     let n_matched_treated = (0..n)
         .filter(|&i| is_treated[i] && weights[i] > 0.0)
         .count();
@@ -820,6 +828,10 @@ fn validate_match_options(
                 }
             }
         }
+        MatchMethod::Full {
+            min_ratio,
+            max_ratio,
+        } => check_full_bounds(*min_ratio, *max_ratio)?,
         MatchMethod::Subclass { .. } if !has_ps => {
             return spec(format!(
                 "subclassification needs a propensity-score distance (logit or probit), got \
@@ -1119,9 +1131,12 @@ pub fn cem_match(
     match_it(dataset, treatment_col, covariate_cols, method, None)
 }
 
-/// Perform full matching for optimal stratification.
+/// Optimal full matching on a logit propensity score with 0.5 to 2 controls per treated unit
+/// (`matchit(method = "full", min.controls = 0.5, max.controls = 2)`).
 ///
-/// Creates optimal strata containing treated and control units.
+/// Every matched set is one treated unit with controls or one control with treated units,
+/// and the total within-set distance `|ps_t - ps_c|` is minimal ([`optimal_full_match`]).
+/// Problems above [`FULL_MATCH_MAX_PAIRS`] treated-control pairs are refused.
 ///
 /// # Arguments
 /// * `dataset` - Dataset containing treatment and covariates
@@ -1780,32 +1795,87 @@ fn stratified_output(
     })
 }
 
+/// S9: optimal full matching ([`optimal_full_match`]) on `|ps_t - ps_c|` (the score scale, as
+/// MatchIt) or the S5 covariate metric; sets numbered by their smallest data row.
 fn full_method(
-    _x: &Array2<f64>,
+    x: &Array2<f64>,
     is_treated: &[bool],
     scores: Option<&[f64]>,
-    _distance: DistanceMethod,
+    distance: DistanceMethod,
     min_ratio: f64,
     max_ratio: f64,
 ) -> EconResult<MethodOutput> {
+    let n = is_treated.len();
     let (t, c) = group_indices(is_treated);
-    let ps = Array1::from_vec(
-        scores
-            .map(<[f64]>::to_vec)
-            .unwrap_or_else(|| vec![0.5; is_treated.len()]),
-    );
-    let (matches, weights, subclasses, _) =
-        full_matching_optimized(&ps, &t, &c, min_ratio, max_ratio)?;
-    Ok(MethodOutput {
-        weights,
-        matches,
-        subclass: sets_from_subclasses(is_treated.len(), &subclasses),
-        subclasses,
-        m_order: None,
-        caliper_abs: None,
-        total_distance: None,
-        warnings: Vec::new(),
-    })
+    check_full_pairs(t.len(), c.len())?;
+    let mut warnings = Vec::new();
+    let dist: Box<dyn Fn(usize, usize) -> f64> = match scores {
+        Some(s) => Box::new(move |i, j| (s[i] - s[j]).abs()),
+        None => {
+            let m = CovariateMetric::new(
+                x,
+                is_treated,
+                distance == DistanceMethod::Mahalanobis,
+                &mut warnings,
+            )?;
+            Box::new(move |i, j| m.distance(i, j))
+        }
+    };
+    let mut dm = crate::resource::try_zeros2(t.len(), c.len(), "full-matching distance matrix")?;
+    for (r, &ti) in t.iter().enumerate() {
+        crate::resource::checkpoint()?;
+        for (k, &ci) in c.iter().enumerate() {
+            dm[[r, k]] = dist(ti, ci);
+        }
+    }
+    let sol = optimal_full_match(dm.view(), min_ratio, max_ratio)?;
+    drop(dm);
+    let mut set_of = vec![None; n];
+    for (r, s) in sol.row_sets.iter().enumerate() {
+        set_of[t[r]] = *s;
+    }
+    for (k, s) in sol.col_sets.iter().enumerate() {
+        set_of[c[k]] = *s;
+    }
+    let mut label = vec![None; sol.n_sets];
+    let mut next = 0;
+    let subclass: Vec<Option<usize>> = set_of
+        .iter()
+        .map(|s| {
+            s.map(|s| {
+                *label[s].get_or_insert_with(|| {
+                    next += 1;
+                    next
+                })
+            })
+        })
+        .collect();
+    if let Some(f) = sol.omit_fraction {
+        let u = sol.col_sets.iter().filter(|s| s.is_none()).count();
+        warnings.push(format!(
+            "max_ratio = {max_ratio} cannot absorb all {} control units; as optmatch::fullmatch, \
+             {u} control units are left unmatched (omit fraction {f:.6})",
+            c.len()
+        ));
+    }
+    let ps_range = |_: usize, ts: &[usize], cs: &[usize]| match scores {
+        Some(sc) => ts
+            .iter()
+            .chain(cs)
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| {
+                (lo.min(sc[i]), hi.max(sc[i]))
+            }),
+        None => (f64::NAN, f64::NAN),
+    };
+    let mut out = stratified_output(
+        is_treated,
+        subclass,
+        Some(&ps_range),
+        Some(&*dist),
+        warnings,
+    )?;
+    out.total_distance = Some(sol.total_distance);
+    Ok(out)
 }
 
 /// S8: propensity-score subclassification (`matchit2subclass`, `min.n = 0`); `ps_range` of a
@@ -1821,146 +1891,6 @@ fn subclass_method(is_treated: &[bool], scores: &[f64], k: usize) -> EconResult<
     }
     let ranges = |s: usize, _: &[usize], _: &[usize]| (q[orig[s] - 1], q[orig[s]]);
     stratified_output(is_treated, labels, Some(&ranges), None, warnings)
-}
-
-/// Optimized full matching algorithm (greedy approximation).
-///
-/// Creates optimal strata by iteratively grouping treated and control units.
-/// This version takes only propensity scores (no distance matrix needed).
-fn full_matching_optimized(
-    propensity_scores: &Array1<f64>,
-    treated_idx: &[usize],
-    control_idx: &[usize],
-    min_ratio: f64,
-    max_ratio: f64,
-) -> EconResult<(
-    Vec<MatchInfo>,
-    Vec<f64>,
-    Option<Vec<SubclassInfo>>,
-    Option<f64>,
-)> {
-    let n = propensity_scores.len();
-    let mut weights = vec![0.0; n];
-
-    // Sort all units by propensity score
-    let mut all_units: Vec<(usize, f64, bool)> = treated_idx
-        .iter()
-        .map(|&i| (i, propensity_scores[i], true))
-        .chain(
-            control_idx
-                .iter()
-                .map(|&i| (i, propensity_scores[i], false)),
-        )
-        .collect();
-    all_units.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Greedy stratification. The strata are formed first and emitted after
-    // their total size has been checked; ids and order are as before.
-    struct Stratum {
-        subclass_id: usize,
-        treated: Vec<usize>,
-        control: Vec<usize>,
-        start_ps: f64,
-        end_ps: f64,
-    }
-    let mut strata: Vec<Stratum> = Vec::new();
-    let mut i = 0;
-    let mut subclass_id = 0;
-
-    while i < all_units.len() {
-        crate::resource::checkpoint()?;
-
-        subclass_id += 1;
-        let mut treated = Vec::new();
-        let mut control = Vec::new();
-        let start_ps = all_units[i].1;
-
-        // Collect consecutive units into a stratum
-        while i < all_units.len() {
-            let (idx, _ps, is_treated) = all_units[i];
-
-            // Check if we should close this stratum
-            if !treated.is_empty() && !control.is_empty() {
-                let ratio = control.len() as f64 / treated.len() as f64;
-                if ratio < min_ratio || ratio > max_ratio {
-                    // Close stratum if ratio constraint would be violated
-                    if (is_treated && ratio >= max_ratio) || (!is_treated && ratio <= min_ratio) {
-                        break;
-                    }
-                }
-            }
-
-            if is_treated {
-                treated.push(idx);
-            } else {
-                control.push(idx);
-            }
-            i += 1;
-        }
-
-        // Skip empty or one-sided strata
-        if treated.is_empty() || control.is_empty() {
-            continue;
-        }
-
-        let end_ps = all_units[i.saturating_sub(1)].1;
-
-        strata.push(Stratum {
-            subclass_id,
-            treated,
-            control,
-            start_ps,
-            end_ps,
-        });
-    }
-
-    check_stratum_control_lists::<usize>(
-        strata.iter().map(|s| (s.treated.len(), s.control.len())),
-    )?;
-
-    let mut subclasses = Vec::with_capacity(strata.len());
-    let mut matches = Vec::new();
-    for s in strata {
-        // Compute stratum weights
-        let n_t = s.treated.len() as f64;
-        let n_c = s.control.len() as f64;
-
-        for &ti in &s.treated {
-            weights[ti] = 1.0;
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices: s.control.clone(),
-                distances: vec![],
-                weight: 1.0,
-            });
-        }
-
-        let control_weight = n_t / n_c;
-        for &ci in &s.control {
-            weights[ci] = control_weight;
-        }
-
-        subclasses.push(SubclassInfo {
-            subclass_id: s.subclass_id,
-            treated_indices: s.treated,
-            control_indices: s.control,
-            ps_range: (s.start_ps, s.end_ps),
-        });
-    }
-
-    // Add unmatched treated units
-    for &ti in treated_idx {
-        if weights[ti] == 0.0 {
-            matches.push(MatchInfo {
-                treated_idx: ti,
-                control_indices: vec![],
-                distances: vec![],
-                weight: 0.0,
-            });
-        }
-    }
-
-    Ok((matches, weights, Some(subclasses), None))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2115,6 +2045,300 @@ fn subclass_labels(
     }
     let labels = raw.iter().map(|&l| relabel[l]).collect();
     (labels, q, warnings)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Optimal full matching (optmatch::fullmatch)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Largest treated x control problem optimal full matching accepts (optmatch's default
+/// maximum problem size), in every mode: the dense problem needs about 48 bytes per pair.
+pub const FULL_MATCH_MAX_PAIRS: usize = 10_000_000;
+
+/// An optimal full matching of the rows (treated) and columns (controls) of a distance matrix.
+#[derive(Debug, Clone)]
+pub struct FullMatchSolution {
+    /// (row, column) pairs joined by a unit of flow, rows ascending, then columns ascending.
+    pub pairs: Vec<(usize, usize)>,
+    /// 0-based matched set of every row (sets numbered by first appearance, scanning rows then
+    /// columns); None = unmatched (only after the max_controls recovery).
+    pub row_sets: Vec<Option<usize>>,
+    /// 0-based matched set of every column; None = unmatched.
+    pub col_sets: Vec<Option<usize>>,
+    /// Number of matched sets.
+    pub n_sets: usize,
+    /// Sum of the distances over `pairs` (the optmatch objective; every set is a star).
+    pub total_distance: f64,
+    /// optmatch's omit fraction when the recovery left controls unmatched.
+    pub omit_fraction: Option<f64>,
+    /// The problem was solved transposed (max_controls <= 0.5).
+    pub flipped: bool,
+    /// Network simplex pivots of the final solve.
+    pub pivots: usize,
+}
+
+fn full_bounds_error(min_c: f64, max_c: f64) -> EconError {
+    EconError::InvalidSpecification {
+        message: format!(
+            "min_ratio = {min_c} and max_ratio = {max_c} must satisfy 0 <= min_ratio <= max_ratio \
+             and max_ratio > 0 (controls per treated unit, optmatch's min.controls / max.controls)"
+        ),
+    }
+}
+
+/// S1: finite `min_ratio >= 0`, `max_ratio > 0` (`+inf` allowed), `min_ratio <= max_ratio`.
+fn check_full_bounds(min_c: f64, max_c: f64) -> EconResult<()> {
+    if min_c.is_finite() && min_c >= 0.0 && !max_c.is_nan() && max_c > 0.0 && min_c <= max_c {
+        Ok(())
+    } else {
+        Err(full_bounds_error(min_c, max_c))
+    }
+}
+
+fn check_full_pairs(n_t: usize, n_c: usize) -> EconResult<()> {
+    match n_t.checked_mul(n_c) {
+        Some(p) if p <= FULL_MATCH_MAX_PAIRS => Ok(()),
+        p => {
+            let pairs = p.map_or_else(|| "more than usize::MAX".to_string(), |p| p.to_string());
+            let mb = p.map_or(f64::INFINITY, |p| (48.0 * p as f64 / 1e6).round());
+            Err(EconError::InvalidSpecification {
+                message: format!(
+                    "optimal full matching needs a dense {n_t} x {n_c} problem ({pairs} \
+                     treated-control pairs, about {mb} MB); at most {FULL_MATCH_MAX_PAIRS} pairs \
+                     are supported (optmatch's default maximum problem size); use nearest-\
+                     neighbour or subclass matching, or match within subgroups"
+                ),
+            })
+        }
+    }
+}
+
+/// One `fmatch` problem (S10 steps 1-8): the pairs (in the original orientation) of the
+/// optimal full matching with `min_c`/`max_c` controls per treated unit and omit fraction
+/// `omf`, or None when it is infeasible.
+fn solve_full(
+    dist: ArrayView2<'_, f64>,
+    min_c: f64,
+    max_c: f64,
+    omf: Option<f64>,
+) -> EconResult<Option<(Vec<(usize, usize)>, bool, usize)>> {
+    let flipped = match omf {
+        None => !(max_c > 0.5),
+        Some(o) => !(o >= 0.0),
+    };
+    let (nt, nc) = dist.dim();
+    // rows x cols of the problem actually solved
+    let (nr, ncl) = if flipped { (nc, nt) } else { (nt, nc) };
+    let (maxc, minc, omf_c) = if flipped {
+        (
+            (1.0 / min_c).min(ncl as f64),
+            (1.0 / max_c).max(1.0 / nr as f64),
+            omf.map(|o| -o),
+        )
+    } else {
+        (max_c.min(ncl as f64), min_c.max(1.0 / nr as f64), omf)
+    };
+    let f = 1.0 - omf_c.unwrap_or(0.0);
+    if minc.floor() > maxc.ceil() || (1.0 / minc).ceil() < (1.0 / maxc).floor() {
+        return Ok(None);
+    }
+    let mut mxr = (1.0 / minc).ceil();
+    let mxc = maxc.ceil();
+    let mnc = minc.floor().max(1.0);
+    if mnc > 1.0 {
+        mxr = 1.0;
+    }
+    let n_mc = (ncl as f64 * f).round_ties_even();
+    let nr_f = nr as f64;
+    if (mxr > 1.0 && nr_f / mxr > n_mc) || (mxr == 1.0 && nr_f * mnc > n_mc) || (nr_f * mxc < n_mc)
+    {
+        return Ok(None);
+    }
+    let at = |r: usize, c: usize| if flipped { dist[[c, r]] } else { dist[[r, c]] };
+    let max_d = dist.iter().copied().fold(0.0, f64::max);
+    let unit = max_d < f64::EPSILON.sqrt();
+    let eps = max_d / (1u64 << 40) as f64;
+    let cost = |d: f64| -> i64 {
+        if unit {
+            1
+        } else {
+            (0.5 + d / eps).ceil() as i64
+        }
+    };
+
+    let (mxr, mxc, mnc, n_mc) = (mxr as i64, mxc as i64, mnc as i64, n_mc as i64);
+    let pairs_n = nr * ncl;
+    let n_arcs = pairs_n + nr + 2 * ncl;
+    crate::resource::check_alloc::<(usize, usize, i64, i64)>(n_arcs, "full-matching network")?;
+    let end = nr + ncl;
+    let sink = end + 1;
+    let mut g = Network::with_arc_capacity(nr + ncl + 2, n_arcs)?;
+    for r in 0..nr {
+        crate::resource::checkpoint()?;
+        for c in 0..ncl {
+            g.add_arc(r, nr + c, 1, cost(at(r, c)))?;
+        }
+    }
+    for r in 0..nr {
+        if mxc - mnc > 0 {
+            g.add_arc(r, end, mxc - mnc, 0)?;
+        }
+        g.set_supply(r, mxc)?;
+    }
+    for c in 0..ncl {
+        if mxr - 1 > 0 {
+            g.add_arc(nr + c, end, mxr - 1, 0)?;
+        }
+        g.add_arc(nr + c, sink, 1, 0)?;
+    }
+    g.set_supply(end, -(mxc * nr as i64 - n_mc))?;
+    g.set_supply(sink, -n_mc)?;
+    let sol = network_simplex(&g)?;
+    if sol.status == FlowStatus::Infeasible {
+        return Ok(None);
+    }
+    let mut pairs = Vec::new();
+    for r in 0..nr {
+        for c in 0..ncl {
+            if sol.flows[r * ncl + c] > 0 {
+                pairs.push(if flipped { (c, r) } else { (r, c) });
+            }
+        }
+    }
+    pairs.sort_unstable();
+    Ok(Some((pairs, flipped, sol.pivots)))
+}
+
+/// Optimal full matching of the rows (treated) and columns (controls) of a non-negative
+/// distance matrix: `optmatch::fullmatch(dist, min.controls, max.controls)` solved exactly.
+///
+/// Every matched set is one treated unit with one or more controls or one control with one
+/// or more treated units, with `min_controls <= controls / treated <= max_controls`, and the
+/// sum of the distances within the sets is minimal (Hansen and Klopfer 2006): the network of
+/// optmatch's `fmatch`, solved by [`network_simplex`] on integer costs at resolution
+/// `max(dist) / 2^40`. As optmatch, `max_controls <= 0.5` is solved transposed, and when
+/// `max_controls` cannot absorb every control the omit-fraction recovery leaves the controls
+/// unmatched that the unconstrained solution cannot use. Refused: an empty or non-finite or
+/// negative matrix, invalid bounds, more than [`FULL_MATCH_MAX_PAIRS`] entries, and
+/// infeasible bounds.
+pub fn optimal_full_match(
+    dist: ArrayView2<'_, f64>,
+    min_controls: f64,
+    max_controls: f64,
+) -> EconResult<FullMatchSolution> {
+    let (nt, nc) = dist.dim();
+    if nt == 0 || nc == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("the distance matrix must have rows and columns, got {nt} x {nc}"),
+        });
+    }
+    check_full_pairs(nt, nc)?;
+    if dist.iter().any(|d| !d.is_finite() || *d < 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: "the distance matrix must hold finite, non-negative distances".into(),
+        });
+    }
+    check_full_bounds(min_controls, max_controls)?;
+    let (min_c, max_c) = (min_controls, max_controls);
+    let mut omit_fraction = None;
+    let mut solved = None;
+    let mut tried = false;
+    if max_c * nt as f64 >= nc as f64 {
+        tried = true;
+        solved = solve_full(dist, min_c, max_c, None)?;
+    }
+    if solved.is_none() {
+        if max_c.is_finite() && max_c >= 1.0 {
+            if let Some((p0, _, _)) = solve_full(dist, min_c, f64::INFINITY, None)? {
+                let (row_sets, col_sets, n_sets) = star_sets(&p0, nt, nc);
+                let mut controls = vec![0usize; n_sets];
+                let mut has_treated = vec![false; n_sets];
+                for s in col_sets.iter().flatten() {
+                    controls[*s] += 1;
+                }
+                for s in row_sets.iter().flatten() {
+                    has_treated[*s] = true;
+                }
+                let num: f64 = (0..n_sets)
+                    .filter(|&s| has_treated[s])
+                    .map(|s| (controls[s] as f64).min(max_c))
+                    .sum();
+                if num == 0.0 {
+                    solved = solve_full(dist, min_c, max_c, None)?;
+                } else {
+                    let omf = 1.0 - num / nc as f64;
+                    solved = solve_full(dist, min_c, max_c, Some(omf))?;
+                    if solved.is_some() {
+                        omit_fraction = Some(omf);
+                    }
+                }
+            }
+        } else if !tried {
+            solved = solve_full(dist, min_c, max_c, None)?;
+        }
+    }
+    let Some((pairs, flipped, pivots)) = solved else {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "full matching is infeasible with min_ratio = {min_c}, max_ratio = {max_c} \
+                 ({nt} treated, {nc} control units)"
+            ),
+        });
+    };
+    let (row_sets, col_sets, n_sets) = star_sets(&pairs, nt, nc);
+    let total_distance = pairs.iter().map(|&(r, c)| dist[[r, c]]).sum();
+    Ok(FullMatchSolution {
+        pairs,
+        row_sets,
+        col_sets,
+        n_sets,
+        total_distance,
+        omit_fraction,
+        flipped,
+        pivots,
+    })
+}
+
+/// Connected components of the pair graph, numbered by first appearance scanning rows, then
+/// columns.
+fn star_sets(
+    pairs: &[(usize, usize)],
+    nt: usize,
+    nc: usize,
+) -> (Vec<Option<usize>>, Vec<Option<usize>>, usize) {
+    let mut par: Vec<usize> = (0..nt + nc).collect();
+    fn find(par: &mut [usize], mut x: usize) -> usize {
+        while par[x] != x {
+            par[x] = par[par[x]];
+            x = par[x];
+        }
+        x
+    }
+    let mut paired = vec![false; nt + nc];
+    for &(r, c) in pairs {
+        let (a, b) = (find(&mut par, r), find(&mut par, nt + c));
+        if a != b {
+            par[a] = b;
+        }
+        paired[r] = true;
+        paired[nt + c] = true;
+    }
+    let mut label = vec![usize::MAX; nt + nc];
+    let mut n_sets = 0;
+    let mut sets = vec![None; nt + nc];
+    for v in 0..nt + nc {
+        if !paired[v] {
+            continue;
+        }
+        let root = find(&mut par, v);
+        if label[root] == usize::MAX {
+            label[root] = n_sets;
+            n_sets += 1;
+        }
+        sets[v] = Some(label[root]);
+    }
+    let col_sets = sets.split_off(nt);
+    (sets, col_sets, n_sets)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2368,6 +2592,20 @@ mod tests {
             }));
         }
         v
+    }
+
+    /// R's .mt_canon(): each row's label is 1 + the smallest row index of its set; NaN if
+    /// unmatched.
+    fn canonical_sets(sub: &[Option<usize>]) -> Vec<f64> {
+        let mut first = std::collections::HashMap::new();
+        for (i, s) in sub.iter().enumerate() {
+            if let Some(s) = s {
+                first.entry(*s).or_insert(i);
+            }
+        }
+        sub.iter()
+            .map(|s| s.map_or(f64::NAN, |s| (first[&s] + 1) as f64))
+            .collect()
     }
 
     fn mask(ds: &Dataset) -> Vec<bool> {
@@ -3120,6 +3358,10 @@ mod tests {
 
         // Full matching should create subclasses
         assert!(result.subclasses.is_some());
+        assert_eq!(
+            result.n_matched_treated + result.n_matched_control,
+            result.n_obs
+        );
 
         // All units should be matched in full matching
         assert!(result.n_matched_treated > 0);
@@ -3502,51 +3744,313 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_validate_full_matching_vs_r() {
-        // Validate full matching against R MatchIt with method = "full"
-        let dataset = create_matchit_validation_dataset();
-
-        let result = match_it(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            MatchMethod::Full {
-                min_ratio: 0.5,
-                max_ratio: 2.0,
-            },
-            Some(DistanceMethod::Logit),
-        )
-        .unwrap();
-
-        // Full matching should create subclasses
-        assert!(result.subclasses.is_some());
-        let subclasses = result.subclasses.as_ref().unwrap();
-        assert!(!subclasses.is_empty(), "Should have at least one subclass");
-
-        // Each subclass should have both treated and control
-        for sc in subclasses {
+    /// Shared checks of a full matching on the PS: the optimal total is pinned to optmatch at tol = 1e-8 and lies
+    /// below MatchIt's default solution (tol = 0.001); every unit is kept; every set is a star within the bounds;
+    /// the weights are MatchIt's formula on p2a's own partition. The PS optimum is not unique on a line, so the
+    /// partition itself is not pinned (deviation 3).
+    fn check_full_ps(
+        case: &p2a_validation::Case,
+        r: &MatchResult,
+        t: &[bool],
+        key: &str,
+        default_key: &str,
+        bounds: (f64, f64),
+    ) {
+        let total = r.total_distance.unwrap();
+        Check::new(case)
+            .scalar(key, total, Tol::iterative(1e-8))
+            .finish();
+        assert!(
+            total < case.scalar(default_key),
+            "{total} vs MatchIt's default {}",
+            case.scalar(default_key)
+        );
+        assert_eq!((r.n_matched_treated, r.n_matched_control), (89, 151));
+        for sc in r.subclasses.as_ref().unwrap() {
+            let (nt, nc) = (
+                sc.treated_indices.len() as f64,
+                sc.control_indices.len() as f64,
+            );
             assert!(
-                !sc.treated_indices.is_empty() || !sc.control_indices.is_empty(),
-                "Subclass {} should have some units",
+                nt == 1.0 || nc == 1.0,
+                "set {}: {nt} treated, {nc} controls",
+                sc.subclass_id
+            );
+            assert!(
+                nc / nt >= bounds.0 && nc / nt <= bounds.1,
+                "set {}: {nc}/{nt} outside {bounds:?}",
                 sc.subclass_id
             );
         }
+        assert_eq!(r.weights, weights_from_sets(&r.subclass, t));
+    }
 
-        // Full matching typically doesn't discard units
-        // All or most units should be included
-        let total_in_subclasses: usize = subclasses
-            .iter()
-            .map(|sc| sc.treated_indices.len() + sc.control_indices.len())
-            .sum();
-        assert!(
-            total_in_subclasses >= result.n_obs / 2,
-            "Full matching should include most observations"
+    /// matchit(method = "full", distance = "glm"): MatchIt's default bounds (0, Inf).
+    #[test]
+    fn test_validate_full_matching_total_distance() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            full(0.0, f64::INFINITY),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        check_full_ps(
+            &case,
+            &r,
+            &mask(&ds),
+            "full_tight_total_distance",
+            "full_total_distance",
+            (0.0, f64::INFINITY),
         );
     }
 
-    /// matchit(method = "subclass", subclass = 5): cut points are type-7 quantiles of the treated PS,
-    /// assignment is findInterval(all.inside = TRUE); logit and probit (CAUS-20 Subclass part).
+    /// min.controls = 0.5, max.controls = 2, on the PS and on the Mahalanobis distance (where the optimum is
+    /// unique, so the partition and the weights are pinned). The old sweep let strata reach 52 controls per
+    /// treated unit.
+    #[test]
+    fn test_validate_full_matching_bounded() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            full(0.5, 2.0),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        check_full_ps(
+            &case,
+            &r,
+            &mask(&ds),
+            "full_bounded_tight_total_distance",
+            "full_bounded_total_distance",
+            (0.5, 2.0),
+        );
+        let bd = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            full(0.5, 2.0),
+            Some(DistanceMethod::Mahalanobis),
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector(
+                "full_maha_bounded_sets",
+                &canonical_sets(&bd.subclass),
+                Tol::exact(),
+            )
+            .vector(
+                "full_maha_bounded_weights",
+                &bd.weights,
+                Tol::coef(bd.n_obs),
+            )
+            .scalar(
+                "full_maha_bounded_total_distance",
+                bd.total_distance.unwrap(),
+                Tol::coef(bd.n_obs),
+            )
+            .finish();
+    }
+
+    /// MatchIt's full-matching weights from a partition: R's own (default) partitions in, R's weights out.
+    #[test]
+    fn test_validate_full_matching_weights() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let t = mask(&ds);
+        for (sets, weights) in [
+            ("full_subclass", "full_weights"),
+            ("full_bounded_subclass", "full_bounded_weights"),
+        ] {
+            let s: Vec<Option<usize>> = case
+                .vector(sets)
+                .iter()
+                .map(|&v| Some(v as usize))
+                .collect();
+            Check::new(&case)
+                .vector(weights, &weights_from_sets(&s, &t), Tol::coef(t.len()))
+                .finish();
+        }
+    }
+
+    /// Mahalanobis distance, unconstrained: the optimum is unique, so partition, weights and ESS are pinned.
+    #[test]
+    fn test_validate_full_matching_mahalanobis() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let un = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            full(0.0, f64::INFINITY),
+            Some(DistanceMethod::Mahalanobis),
+        )
+        .unwrap();
+        let n = un.n_obs;
+        Check::new(&case)
+            .vector(
+                "full_maha_tight_sets",
+                &canonical_sets(&un.subclass),
+                Tol::exact(),
+            )
+            .vector("full_maha_tight_weights", &un.weights, Tol::coef(n))
+            .scalar(
+                "full_maha_tight_total_distance",
+                un.total_distance.unwrap(),
+                Tol::coef(n),
+            )
+            .vector(
+                "full_maha_tight_ess",
+                &[un.ess_control, un.ess_treated],
+                Tol::stat(n),
+            )
+            .finish();
+        assert!(un.total_distance.unwrap() < case.scalar("full_maha_default_total_distance"));
+    }
+
+    /// max_ratio = 1 cannot absorb 151 controls with 89 treated units: optmatch's recovery matches the 79
+    /// controls the unconstrained solution can use (omit fraction 1 - 79/151).
+    #[test]
+    fn test_validate_full_matching_recovery() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            full(0.0, 1.0),
+            Some(DistanceMethod::Mahalanobis),
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector(
+                "full_maha_max1_sets",
+                &canonical_sets(&r.subclass),
+                Tol::exact(),
+            )
+            .vector("full_maha_max1_weights", &r.weights, Tol::coef(r.n_obs))
+            .scalar(
+                "full_maha_max1_total_distance",
+                r.total_distance.unwrap(),
+                Tol::coef(r.n_obs),
+            )
+            .finish();
+        assert_eq!(r.n_matched_control, 79);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("72 control units are left unmatched")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// max_ratio = 0.5 (at least two treated units per control) is solved transposed, as optmatch; it needs
+    /// nt >= 2 nc, so the case uses all treated units and the controls with id <= flip_max_id (129 rows).
+    #[test]
+    fn test_validate_full_matching_flipped() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let col = |c: &str| DesignMatrix::extract_column(ds.df(), c).unwrap();
+        let (id, t) = (col("id"), col("treat"));
+        let keep: Vec<bool> = (0..id.len())
+            .map(|i| t[i] == 1.0 || id[i] <= case.scalar("flip_max_id"))
+            .collect();
+        let sub = Dataset::new(
+            ds.df()
+                .filter(&BooleanChunked::from_slice("keep".into(), &keep))
+                .unwrap(),
+        );
+        let r = match_it(
+            &sub,
+            "treat",
+            &COVS,
+            full(0.0, 0.5),
+            Some(DistanceMethod::Mahalanobis),
+        )
+        .unwrap();
+        assert_eq!(r.n_obs, 129);
+        Check::new(&case)
+            .vector(
+                "full_maha_flip_sets",
+                &canonical_sets(&r.subclass),
+                Tol::exact(),
+            )
+            .vector("full_maha_flip_weights", &r.weights, Tol::coef(r.n_obs))
+            .scalar(
+                "full_maha_flip_total_distance",
+                r.total_distance.unwrap(),
+                Tol::coef(r.n_obs),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_full_matching_probit() {
+        let (case, ds) = crate::test_support::load_case("matchit_full_cem");
+        let r = match_it(
+            &ds,
+            "treat",
+            &COVS,
+            full(0.0, f64::INFINITY),
+            Some(DistanceMethod::Probit),
+        )
+        .unwrap();
+        Check::new(&case)
+            .scalar(
+                "full_probit_tight_total_distance",
+                r.total_distance.unwrap(),
+                Tol::iterative(1e-8),
+            )
+            .finish();
+    }
+
+    /// optmatch fails for min.controls = 2 here (178 controls needed, 151 available; MatchIt: "No matches were
+    /// found"); bad bounds and distances are refused with the parameter named.
+    #[test]
+    fn test_full_matching_rejects_infeasible_and_invalid_bounds() {
+        let (_, ds) = crate::test_support::load_case("matchit_full_cem");
+        let msg = |m: MatchMethod| match match_it(&ds, "treat", &COVS, m, None) {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got ok = {}", other.is_ok()),
+        };
+        assert!(msg(full(2.0, f64::INFINITY)).contains("infeasible"));
+        for (a, b) in [
+            (-1.0, 2.0),
+            (f64::NAN, 2.0),
+            (3.0, 2.0),
+            (0.0, 0.0),
+            (0.0, f64::NAN),
+        ] {
+            let m = msg(full(a, b));
+            assert!(m.contains("min_ratio") && m.contains("max_ratio"), "{m}");
+        }
+        let d = Array2::from_shape_vec((1, 2), vec![0.5, f64::NAN]).unwrap();
+        assert!(optimal_full_match(d.view(), 0.0, f64::INFINITY).is_err());
+        let d = Array2::from_shape_vec((1, 2), vec![0.5, -0.1]).unwrap();
+        assert!(optimal_full_match(d.view(), 0.0, f64::INFINITY).is_err());
+    }
+
+    /// WP25-8 (a): above FULL_MATCH_MAX_PAIRS the dense problem is refused before the n_t x n_c
+    /// distance matrix is allocated.
+    #[test]
+    fn test_full_matching_refuses_problems_above_the_pair_cap() {
+        let n = 6400;
+        let d: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+        let x1: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
+        let x2: Vec<f64> = (0..n).map(|i| (1.7 * i as f64).cos()).collect();
+        let ds = Dataset::new(df! { "d" => d, "x1" => x1, "x2" => x2 }.unwrap());
+        let r = crate::resource::with_alloc_ceiling(Some(64 << 20), || {
+            match_it(&ds, "d", &["x1", "x2"], full(0.0, f64::INFINITY), None)
+        });
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message })
+                if message.contains("10000000 pairs") && message.contains("3200 x 3200")),
+            "{:?}",
+            r.err()
+        );
+    }
+
     #[test]
     fn test_validate_subclass_logit_probit() {
         let (case, ds) = crate::test_support::load_case("matchit_subclass");
@@ -3801,8 +4305,14 @@ mod tests {
             let r = crate::resource::with_alloc_ceiling(Some(48 * 1024), || {
                 match_it(&ds, "treatment", &["x1", "x2"], method, None)
             });
+            // Full matching fails earlier, on the 191 x 309 distance matrix (472 KB)
+            let what = if label.starts_with("Optimal Full") {
+                "full-matching distance matrix"
+            } else {
+                "matched control"
+            };
             assert!(
-                matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("matched control")),
+                matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains(what)),
                 "{label}: ok={}",
                 r.is_ok()
             );
@@ -3811,9 +4321,8 @@ mod tests {
 
     #[test]
     fn test_full_matching_unchanged_by_two_pass_strata() {
-        // Full matching now forms strata before emitting matches; the output must
-        // be the same. Strata are consecutive in PS order, so each treated unit's
-        // control list is its stratum's control list.
+        // S9: matches in treated data order; each treated unit lists its matched
+        // set's controls.
         let r = match_it(
             &create_matchit_validation_dataset(),
             "treatment",
@@ -3832,6 +4341,7 @@ mod tests {
                 expected.push((ti, s.control_indices.clone()));
             }
         }
+        expected.sort_by_key(|e| e.0);
         let got: Vec<(usize, Vec<usize>)> = r
             .matches
             .iter()
