@@ -41,6 +41,31 @@
       "tolerance": "validation/README.md, n = 120 and 80: coefficients 1e-8 / 1e-6, SE and statistics 1e-6 / 1e-5 relative; ill-conditioned coefficients Tol::coef(80); Longley also 1e-10 (an accuracy check, not a path pin); counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ols_sandwich_aliased",
+      "name": "Clustered (CR1), Newey-West and bootstrap SEs on an aliased design",
+      "category": "regression",
+      "reference": "sandwich::vcovCL(cluster = ~cl, type = 'HC1'); sandwich::NeweyWest(lag = 4, prewhite = FALSE); sandwich::vcovHC(type = 'HC0') as the bootstrap expectation",
+      "doc": "validation/regression/ols_robust_se.md",
+      "cases": [
+        "ols_aliased"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_sandwich",
+        "p2a-core::regression::ols::tests::test_validate_bootstrap_aliased_design_uses_identified_columns",
+        "p2a-core::regression::ols::tests::test_validate_bootstrap_fixed_design_solve_matches_refit"
+      ],
+      "quantities": [
+        "CR1 SE",
+        "Newey-West lag 4 SE",
+        "NaN SE for the aliased column",
+        "bootstrap SE on the identified columns (Monte Carlo property, not R-pinned)",
+        "fixed-design bootstrap solve = refit by least squares"
+      ],
+      "tolerance": "validation/README.md, n = 120: SE 1e-6 relative; bootstrap: Monte Carlo property; fixed-design solve 1e-12 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
