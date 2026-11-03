@@ -2,8 +2,9 @@
 
 use clap::{Subcommand, ValueEnum};
 use p2a_core::regression::CovarianceType;
-use p2a_core::{run_diagnostics, run_ols, run_ols_clustered};
-use p2a_core::{run_loess, run_quantreg};
+use p2a_core::regression::{OlsClusteredResult, QuantRegConfig, quantreg};
+use p2a_core::run_loess;
+use p2a_core::{HacResult, run_diagnostics, run_ols};
 // Additional regression methods
 use ndarray::Array1;
 use p2a_core::traits::t_test_p_value;
@@ -11,7 +12,7 @@ use p2a_core::{
     model_asymptotic, model_exponential_decay, model_exponential_growth, model_logistic_growth,
     model_michaelis_menten, model_power, run_nls,
 };
-use p2a_core::{run_gls, run_line, run_smooth_spline, run_step, run_supsmu, run_vcov_hac};
+use p2a_core::{run_gls, run_line, run_smooth_spline, run_step, run_supsmu};
 
 use crate::output::{
     CoefRow, OutputFormat, RegressionReport, StatKind, format_regression_report, missing_json,
@@ -69,8 +70,17 @@ EXAMPLES:
         #[arg(short = 'x', long, num_args = 1..)]
         indep_vars: Vec<String>,
 
-        /// Include intercept
-        #[arg(long, default_value = "true")]
+        /// Include an intercept (true/false; default true). With false the model goes through
+        /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         intercept: bool,
 
         /// Standard errors: hc1 (default, heteroskedasticity-robust), hc0, hc2, hc3, or standard (classical, as R's summary(lm))
@@ -103,8 +113,22 @@ EXAMPLES:
         #[arg(long)]
         cluster: String,
 
-        /// Include intercept
-        #[arg(long, default_value = "true")]
+        /// Second cluster variable: two-way clustered SEs (Cameron, Gelbach and Miller 2011),
+        /// as sandwich::vcovCL(cluster = ~c1 + c2, type = "HC1")
+        #[arg(long, value_name = "COLUMN")]
+        cluster2: Option<String>,
+
+        /// Include an intercept (true/false; default true). With false the model goes through
+        /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         intercept: bool,
     },
 
@@ -152,8 +176,17 @@ EXAMPLES:
         #[arg(short = 't', long, default_value = "0.5")]
         tau: f64,
 
-        /// Include intercept
-        #[arg(long, default_value = "true")]
+        /// Include an intercept (true/false; default true). With false the model goes through
+        /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         intercept: bool,
     },
 
@@ -249,8 +282,17 @@ EXAMPLES:
         #[arg(long)]
         rho: Option<f64>,
 
-        /// Include intercept
-        #[arg(long, default_value = "true")]
+        /// Include an intercept (true/false; default true). With false the model goes through
+        /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         intercept: bool,
     },
 
@@ -286,12 +328,29 @@ EXAMPLES:
         #[arg(long, default_value = "both")]
         direction: String,
 
-        /// Use BIC instead of AIC
-        #[arg(long, default_value = "false")]
+        /// Use BIC (k = log n) instead of AIC (true/false; default false)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = false,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         use_bic: bool,
 
-        /// Include intercept
-        #[arg(long, default_value = "true")]
+        /// Include an intercept (true/false; default true). With false the model goes through
+        /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         intercept: bool,
     },
 
@@ -402,8 +461,17 @@ EXAMPLES:
         #[arg(long)]
         lags: Option<usize>,
 
-        /// Include intercept
-        #[arg(long, default_value = "true")]
+        /// Include an intercept (true/false; default true). With false the model goes through
+        /// the origin and R² is uncentered, as R's lm(y ~ 0 + x)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         intercept: bool,
     },
 }
@@ -429,9 +497,17 @@ pub fn execute(
             dep_var,
             indep_vars,
             cluster,
+            cluster2,
             intercept,
         } => execute_clustered(
-            dataset, dep_var, indep_vars, cluster, *intercept, format, session,
+            dataset,
+            dep_var,
+            indep_vars,
+            cluster,
+            cluster2.as_deref(),
+            *intercept,
+            format,
+            session,
         ),
         RegressionCommands::Diagnostics {
             dataset,
@@ -443,8 +519,10 @@ pub fn execute(
             dep_var,
             indep_vars,
             tau,
-            intercept: _,
-        } => execute_quantreg(dataset, dep_var, indep_vars, *tau, format, session),
+            intercept,
+        } => execute_quantreg(
+            dataset, dep_var, indep_vars, *tau, *intercept, format, session,
+        ),
         RegressionCommands::Loess {
             dataset,
             dep_var,
@@ -606,16 +684,17 @@ fn execute_ols(
                     // The table comes from the result's coefficient records, so
                     // an aliased column prints the core's NaN, never a made-up 0.
                     let se_type = se_label(result.cov_type);
+                    let r2 = R2Labels::new(intercept);
                     let report = RegressionReport {
                         method: "OLS Regression",
                         coefficients: result.coefficients.iter().map(CoefRow::from).collect(),
                         statistic: StatKind::T,
-                        r_squared: ("R-squared", result.r_squared),
-                        adj_r_squared: ("Adj. R-squared", result.adj_r_squared),
+                        r_squared: (r2.r_squared, result.r_squared),
+                        adj_r_squared: (r2.adj_r_squared, result.adj_r_squared),
                         n_obs: result.n_obs,
                         se_type: &se_type,
                         se_type_json: result.cov_type.short_label(),
-                        r_squared_type: "ordinary",
+                        r_squared_type: r2.json_type,
                         extra_json: serde_json::Map::new(),
                         warnings: &result.warnings,
                     };
@@ -639,7 +718,8 @@ fn execute_clustered(
     dep_var: &str,
     indep_vars: &[String],
     cluster: &str,
-    _intercept: bool,
+    cluster2: Option<&str>,
+    intercept: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -658,8 +738,7 @@ fn execute_clustered(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            // run_ols_clustered takes cluster1 and optional cluster2 for two-way clustering
-            match run_ols_clustered(ds, dep_var, &x_cols, cluster, None) {
+            match OlsClusteredResult::fit(ds, dep_var, &x_cols, cluster, cluster2, intercept) {
                 Ok(result) => {
                     let second = result.cluster_var_2.as_deref().zip(result.n_clusters_2);
                     let (se_type, se_type_json) =
@@ -673,17 +752,21 @@ fn execute_clustered(
                     if let Some(m) = missing_json(&result.ols.missing) {
                         extra_json.insert("missing".to_string(), m);
                     }
-                    let method = format!("Clustered OLS (cluster: {})", cluster);
+                    let method = match cluster2 {
+                        None => format!("Clustered OLS (cluster: {cluster})"),
+                        Some(c2) => format!("Clustered OLS (clusters: {cluster}, {c2})"),
+                    };
+                    let r2 = R2Labels::new(intercept);
                     let report = RegressionReport {
                         method: &method,
                         coefficients: result.ols.coefficients.iter().map(CoefRow::from).collect(),
                         statistic: StatKind::T,
-                        r_squared: ("R-squared", result.ols.r_squared),
-                        adj_r_squared: ("Adj. R-squared", result.ols.adj_r_squared),
+                        r_squared: (r2.r_squared, result.ols.r_squared),
+                        adj_r_squared: (r2.adj_r_squared, result.ols.adj_r_squared),
                         n_obs: result.ols.n_obs,
                         se_type: &se_type,
                         se_type_json: &se_type_json,
-                        r_squared_type: "ordinary",
+                        r_squared_type: r2.json_type,
                         extra_json,
                         warnings: &result.ols.warnings,
                     };
@@ -699,6 +782,32 @@ fn execute_clustered(
         }
     }
     Ok(())
+}
+
+/// R² labels of a least-squares fit: with an intercept R² is centered (`"ordinary"`),
+/// without one it is uncentered as in `summary.lm` (`"uncentered"`).
+struct R2Labels {
+    r_squared: &'static str,
+    adj_r_squared: &'static str,
+    json_type: &'static str,
+}
+
+impl R2Labels {
+    fn new(intercept: bool) -> R2Labels {
+        if intercept {
+            R2Labels {
+                r_squared: "R-squared",
+                adj_r_squared: "Adj. R-squared",
+                json_type: "ordinary",
+            }
+        } else {
+            R2Labels {
+                r_squared: "R-squared (uncentered)",
+                adj_r_squared: "Adj. R-squared (uncentered)",
+                json_type: "uncentered",
+            }
+        }
+    }
 }
 
 /// The `Standard errors:` text and the JSON `se_type` of a cluster-robust fit,
@@ -834,6 +943,7 @@ fn execute_quantreg(
     dep_var: &str,
     indep_vars: &[String],
     tau: f64,
+    intercept: bool,
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
@@ -849,7 +959,10 @@ fn execute_quantreg(
         Some(ds) => {
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
-            match run_quantreg(ds, dep_var, &x_cols, tau) {
+            let mut config = QuantRegConfig::default();
+            config.tau = tau;
+            config.intercept = intercept;
+            match quantreg(ds, dep_var, &x_cols, &config) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let mut json = serde_json::json!({
@@ -1154,6 +1267,11 @@ fn execute_gls(
     match dataset {
         Some(ds) => {
             let x_refs: Vec<&str> = indep_vars.iter().map(String::as_str).collect();
+            let mut var_names = Vec::new();
+            if intercept {
+                var_names.push("(Intercept)".to_string());
+            }
+            var_names.extend(indep_vars.iter().cloned());
             match run_gls(ds, dep_var, &x_refs, intercept, correlation, rho) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
@@ -1161,6 +1279,7 @@ fn execute_gls(
                             "method": "GLS Regression",
                             "correlation": result.correlation,
                             "correlation_param": result.correlation_param,
+                            "names": var_names,
                             "coefficients": result.coefficients,
                             "std_errors": result.std_errors,
                             "t_values": result.t_values,
@@ -1188,12 +1307,6 @@ fn execute_gls(
                         );
                         println!("{}", "-".repeat(60));
 
-                        let mut var_names = Vec::new();
-                        if intercept {
-                            var_names.push("(Intercept)".to_string());
-                        }
-                        var_names.extend(indep_vars.iter().cloned());
-
                         for (i, name) in var_names.iter().enumerate() {
                             if i < result.coefficients.len() {
                                 let sig = if result.p_values[i] < 0.001 {
@@ -1218,8 +1331,9 @@ fn execute_gls(
                         }
 
                         println!("\n---");
-                        println!("R-squared: {:.4}", result.r_squared);
-                        println!("Adj R-squared: {:.4}", result.adj_r_squared);
+                        let uncentered = if intercept { "" } else { " (uncentered)" };
+                        println!("R-squared{uncentered}: {:.4}", result.r_squared);
+                        println!("Adj R-squared{uncentered}: {:.4}", result.adj_r_squared);
                         println!("Sigma: {:.4}", result.sigma);
                         println!("AIC: {:.4}, BIC: {:.4}", result.aic, result.bic);
                         println!("Observations: {}", result.n_obs);
@@ -1313,8 +1427,9 @@ fn execute_step(
                         println!("\nInitial model: {}", result.initial_variables.join(" + "));
                         println!("Final model: {}", result.final_variables.join(" + "));
                         println!("Total steps: {}", result.n_steps);
+                        let uncentered = if intercept { "" } else { " (uncentered)" };
                         println!(
-                            "\nFinal model R-squared: {:.4}",
+                            "\nFinal model R-squared{uncentered}: {:.4}",
                             result.final_model.r_squared
                         );
                     }
@@ -1562,10 +1677,19 @@ fn execute_hac(
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
 
             // Run HAC estimation directly using the Dataset-based API
-            match run_vcov_hac(ds, dep_var, &x_cols, lags, Some("bartlett"), false) {
+            match HacResult::fit(
+                ds,
+                dep_var,
+                &x_cols,
+                lags,
+                Some("bartlett"),
+                false,
+                intercept,
+            ) {
                 Ok(hac_result) => {
                     // Also run OLS for R-squared
-                    let ols_result = run_ols(ds, dep_var, &x_cols, true, CovarianceType::Standard);
+                    let ols_result =
+                        run_ols(ds, dep_var, &x_cols, intercept, CovarianceType::Standard);
                     let (r_squared, n_obs_display) = match &ols_result {
                         Ok(ols) => (ols.r_squared, ols.n_obs),
                         Err(_) => (f64::NAN, hac_result.n_obs),
@@ -1592,6 +1716,7 @@ fn execute_hac(
                                 "method": "OLS with HAC Standard Errors",
                                 "kernel": "Bartlett (Newey-West)",
                                 "bandwidth": hac_result.bandwidth,
+                                "names": hac_result.names,
                                 "coefficients": coefficients,
                                 "std_errors": std_errors,
                                 "t_values": t_values,
@@ -1617,13 +1742,7 @@ fn execute_hac(
                             );
                             println!("{}", "-".repeat(60));
 
-                            let mut var_names = Vec::new();
-                            if intercept {
-                                var_names.push("(Intercept)".to_string());
-                            }
-                            var_names.extend(indep_vars.iter().cloned());
-
-                            for (i, name) in var_names.iter().enumerate() {
+                            for (i, name) in hac_result.names.iter().enumerate() {
                                 if i < coefficients.len() {
                                     let sig = if p_values[i] < 0.001 {
                                         "***"
@@ -1647,7 +1766,8 @@ fn execute_hac(
                             }
 
                             println!("\n---");
-                            println!("R-squared: {:.4}", r_squared);
+                            let uncentered = if intercept { "" } else { " (uncentered)" };
+                            println!("R-squared{uncentered}: {:.4}", r_squared);
                             println!("Observations: {}", n_obs_display);
                             if !hac_result.warnings.is_empty() {
                                 println!("\nWarnings:");

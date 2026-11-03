@@ -59,8 +59,14 @@ pub struct Cli {
     #[arg(long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Memory limit in MB (0 = unlimited); parsed, not yet enforced
-    #[arg(long = "max-memory", global = true, default_value = "0")]
+    /// Warn on stderr, at most once per command, when the estimated memory of the
+    /// --session datasets exceeds this many MB (MiB); 0 = no limit
+    #[arg(
+        long = "max-memory",
+        global = true,
+        value_name = "MB",
+        default_value = "0"
+    )]
     pub max_memory_mb: usize,
 
     #[command(subcommand)]
@@ -240,8 +246,11 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    if let Some(ref mut manager) = session_manager {
+    if let Some(manager) = session_manager.as_mut() {
+        manager.set_memory_limit(cli.max_memory_mb);
         manager.start_command();
+    } else if cli.max_memory_mb > 0 {
+        eprintln!("Warning: --max-memory has no effect without --session (no datasets are kept)");
     }
 
     // Execute the command
@@ -409,6 +418,170 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bool_flag_tests {
+    use super::{Cli, Commands};
+    use crate::commands::regression::RegressionCommands as R;
+    use crate::commands::script::ScriptCommands as S;
+    use crate::commands::timeseries::TimeseriesCommands as T;
+    use clap::{ArgAction, CommandFactory, Parser};
+
+    fn stuck_at_true(cmd: &clap::Command, path: &str, out: &mut Vec<String>) {
+        for a in cmd.get_arguments() {
+            if matches!(a.get_action(), ArgAction::SetTrue)
+                && a.get_default_values()
+                    .iter()
+                    .any(|v| v.to_str() == Some("true"))
+            {
+                out.push(format!("{path} --{}", a.get_long().unwrap_or("?")));
+            }
+        }
+        for s in cmd.get_subcommands() {
+            stuck_at_true(s, &format!("{path} {}", s.get_name()), out);
+        }
+    }
+
+    /// CLI-5: a SetTrue flag whose default is true can never be false.
+    #[test]
+    fn no_boolean_flag_is_stuck_at_true() {
+        let mut cmd = Cli::command();
+        cmd.build();
+        let mut stuck = Vec::new();
+        stuck_at_true(&cmd, "p2a", &mut stuck);
+        assert!(
+            stuck.is_empty(),
+            "flags that can never be turned off: {stuck:?}"
+        );
+    }
+
+    fn parsed(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// The value of `flag` after parsing `args` (one arm per converted flag).
+    fn flag_value(args: &[&str], flag: &str) -> bool {
+        match (parsed(args).command, flag) {
+            (Commands::Regression(R::Ols { intercept, .. }), "intercept")
+            | (Commands::Regression(R::Clustered { intercept, .. }), "intercept")
+            | (Commands::Regression(R::Quantreg { intercept, .. }), "intercept")
+            | (Commands::Regression(R::Gls { intercept, .. }), "intercept")
+            | (Commands::Regression(R::Step { intercept, .. }), "intercept")
+            | (Commands::Regression(R::Hac { intercept, .. }), "intercept") => intercept,
+            (Commands::Regression(R::Step { use_bic, .. }), "use-bic") => use_bic,
+            (Commands::Script(S::Export { comments, .. }), "comments") => comments,
+            (Commands::Timeseries(T::Ar { aic, .. }), "aic") => aic,
+            (Commands::Timeseries(T::Stl { robust, .. }), "robust") => robust,
+            #[cfg(feature = "spectral-analysis")]
+            (Commands::Timeseries(T::Spectrum { detrend, .. }), "detrend") => detrend,
+            _ => panic!("no arm for --{flag} in {args:?}"),
+        }
+    }
+
+    #[test]
+    fn bool_flags_take_true_false_and_r_spellings() {
+        let mut cases: Vec<(Vec<&str>, &str, bool)> = vec![
+            (
+                vec!["p2a", "reg", "ols", "d", "-y", "y", "-x", "x"],
+                "intercept",
+                true,
+            ),
+            (
+                vec![
+                    "p2a",
+                    "reg",
+                    "clustered",
+                    "d",
+                    "-y",
+                    "y",
+                    "-x",
+                    "x",
+                    "--cluster",
+                    "g",
+                ],
+                "intercept",
+                true,
+            ),
+            (
+                vec!["p2a", "reg", "quantreg", "d", "-y", "y", "-x", "x"],
+                "intercept",
+                true,
+            ),
+            (
+                vec!["p2a", "reg", "gls", "d", "-y", "y", "-x", "x"],
+                "intercept",
+                true,
+            ),
+            (
+                vec!["p2a", "reg", "step", "d", "-y", "y", "-x", "x"],
+                "intercept",
+                true,
+            ),
+            (
+                vec!["p2a", "reg", "step", "d", "-y", "y", "-x", "x"],
+                "use-bic",
+                false,
+            ),
+            (
+                vec!["p2a", "reg", "hac", "d", "-y", "y", "-x", "x"],
+                "intercept",
+                true,
+            ),
+            (
+                vec!["p2a", "script", "export", "s.json", "-o", "x.sh"],
+                "comments",
+                true,
+            ),
+            (vec!["p2a", "ts", "ar", "d", "--col", "y"], "aic", true),
+            (
+                vec!["p2a", "ts", "stl", "d", "--col", "y", "--period", "12"],
+                "robust",
+                false,
+            ),
+        ];
+        if cfg!(feature = "spectral-analysis") {
+            // `if cfg!` rather than `#[cfg]` keeps `mut` used in every feature set
+            cases.push((
+                vec!["p2a", "ts", "spectrum", "d", "--col", "y"],
+                "detrend",
+                true,
+            ));
+        }
+        for (base, flag, default) in cases {
+            let long_s = format!("--{flag}");
+            let long = long_s.as_str();
+            let eq_false_s = format!("{long}=false");
+            fn joined<'a>(base: &[&'a str], extra: &[&'a str]) -> Vec<&'a str> {
+                let mut v = base.to_vec();
+                v.extend_from_slice(extra);
+                v
+            }
+            assert_eq!(flag_value(&base, flag), default, "{long} default");
+            assert!(
+                flag_value(&joined(&base, &[long]), flag),
+                "bare {long} means true (recorded sessions)"
+            );
+            for t in ["true", "TRUE", "T", "yes", "1"] {
+                assert!(flag_value(&joined(&base, &[long, t]), flag), "{long} {t}");
+            }
+            for f in ["false", "FALSE", "F", "no", "0"] {
+                assert!(!flag_value(&joined(&base, &[long, f]), flag), "{long} {f}");
+            }
+            assert!(
+                !flag_value(&joined(&base, &[eq_false_s.as_str()]), flag),
+                "{eq_false_s}"
+            );
+            let e = Cli::try_parse_from(joined(&base, &[long, "maybe"]))
+                .err()
+                .unwrap_or_else(|| panic!("{long} maybe parsed"));
+            assert_eq!(
+                e.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{long} maybe: {e}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -600,18 +773,28 @@ mod cli_definition_tests {
         );
     }
 
-    /// `--max-memory` is parsed but nothing reads it yet; --help and CLI_REFERENCE.md say so.
+    /// `--max-memory` warns about the session's datasets (DATA-30); --help and CLI_REFERENCE.md
+    /// say what it does and that it needs --session.
     #[test]
-    fn max_memory_help_says_it_is_not_enforced() {
-        let help = Cli::command()
+    fn max_memory_help_says_what_it_does() {
+        let arg = Cli::command()
             .get_arguments()
             .find(|a| a.get_id() == "max_memory_mb")
-            .and_then(|a| a.get_help())
+            .cloned()
+            .expect("--max-memory exists");
+        let help = arg
+            .get_help()
             .map(|h| h.to_string())
             .expect("--max-memory has help text");
         assert_eq!(
             help,
-            "Memory limit in MB (0 = unlimited); parsed, not yet enforced"
+            "Warn on stderr, at most once per command, when the estimated memory of the \
+             --session datasets exceeds this many MB (MiB); 0 = no limit"
+        );
+        assert_eq!(
+            arg.get_value_names()
+                .map(|v| v.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+            Some(vec!["MB".to_string()])
         );
         // Read at run time: a compile-time include_str! would tie the build to a file
         // outside the crate.
@@ -619,10 +802,10 @@ mod cli_definition_tests {
         let reference =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(
-            reference
-                .lines()
-                .any(|l| l.contains("--max-memory") && l.contains("parsed, not yet enforced")),
-            "CLI_REFERENCE.md: the --max-memory line no longer says it is not enforced"
+            reference.lines().any(|l| l.contains("--max-memory <MB>")
+                && l.contains("at most once per command")
+                && l.contains("no effect without --session")),
+            "CLI_REFERENCE.md: the --max-memory line does not describe the warning"
         );
     }
 

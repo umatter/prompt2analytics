@@ -90,15 +90,16 @@ pub fn format_bytes(bytes: usize) -> String {
 
 /// Memory tracker for monitoring cumulative memory usage.
 ///
-/// Tracks memory across multiple datasets and provides warnings
-/// when approaching configured limits.
+/// Tracks the estimated memory of several datasets against a limit. It prints nothing
+/// itself: [`MemoryTracker::take_warning`] formats one warning per crossing of the limit,
+/// which the caller reports.
 #[derive(Debug)]
 pub struct MemoryTracker {
     /// Maximum allowed memory in bytes (0 = unlimited)
     max_bytes: usize,
     /// Current estimated memory usage in bytes
     current_bytes: usize,
-    /// Whether a warning has been issued
+    /// Whether the warning for the current crossing has been taken
     warning_issued: bool,
 }
 
@@ -137,15 +138,22 @@ impl MemoryTracker {
     /// Returns true if within limits, false if limit exceeded.
     pub fn add_bytes(&mut self, bytes: usize) -> bool {
         self.current_bytes = self.current_bytes.saturating_add(bytes);
+        !self.limit_exceeded()
+    }
 
-        if self.max_bytes > 0 && self.current_bytes > self.max_bytes {
-            if !self.warning_issued {
-                self.warning_issued = true;
-            }
-            false
-        } else {
-            true
+    /// "estimated dataset memory 1.43 MB exceeds the limit of 1.00 MB" the first time usage
+    /// exceeds the limit since creation, [`reset`](Self::reset), or usage last fell back to the
+    /// limit; `None` otherwise and with no limit.
+    pub fn take_warning(&mut self) -> Option<String> {
+        if !self.limit_exceeded() || self.warning_issued {
+            return None;
         }
+        self.warning_issued = true;
+        Some(format!(
+            "estimated dataset memory {} exceeds the limit of {}",
+            format_bytes(self.current_bytes),
+            format_bytes(self.max_bytes)
+        ))
     }
 
     /// Remove bytes from the tracker (e.g., when a dataset is dropped).
@@ -177,7 +185,8 @@ impl MemoryTracker {
         if self.max_bytes == 0 {
             return false;
         }
-        self.current_bytes > (self.max_bytes * 8 / 10)
+        // max_bytes / 10 * 8 cannot overflow, unlike max_bytes * 8 / 10
+        self.current_bytes > self.max_bytes / 10 * 8
     }
 
     /// Get usage percentage (0-100).
@@ -595,6 +604,39 @@ mod tests {
         // Add more to exceed
         tracker.add_bytes(200_000); // Now over 1 MB
         assert!(tracker.limit_exceeded());
+    }
+
+    #[test]
+    fn test_near_limit_does_not_overflow_at_usize_max() {
+        let mut t = MemoryTracker::new(usize::MAX); // saturates to usize::MAX bytes
+        assert_eq!(t.max_allowed(), usize::MAX);
+        assert!(!t.near_limit()); // panicked before: max_bytes * 8 overflows
+        t.add_bytes(usize::MAX / 10 * 8 + 1);
+        assert!(t.near_limit() && !t.limit_exceeded());
+    }
+
+    #[test]
+    fn test_take_warning_once_per_crossing() {
+        let mut t = MemoryTracker::new(1);
+        assert_eq!(t.take_warning(), None);
+        assert!(!t.add_bytes(1_500_000));
+        assert_eq!(
+            t.take_warning().as_deref(),
+            Some("estimated dataset memory 1.43 MB exceeds the limit of 1.00 MB")
+        );
+        assert_eq!(t.take_warning(), None);
+        t.add_bytes(1);
+        assert_eq!(t.take_warning(), None);
+        t.remove_bytes(1_000_000); // 500,001 bytes: under the limit again
+        assert_eq!(t.take_warning(), None);
+        t.add_bytes(600_000); // 1,100,001 bytes: a new crossing
+        assert_eq!(
+            t.take_warning().as_deref(),
+            Some("estimated dataset memory 1.05 MB exceeds the limit of 1.00 MB")
+        );
+        let mut u = MemoryTracker::unlimited();
+        u.add_bytes(usize::MAX);
+        assert_eq!(u.take_warning(), None);
     }
 
     #[test]

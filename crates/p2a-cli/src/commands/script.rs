@@ -21,8 +21,17 @@ pub enum ScriptCommands {
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Include comments in generated script
-        #[arg(long, default_value = "true")]
+        /// Write each recorded command line as a comment above it (true/false; default true).
+        /// The header and the cleanup comment are always written.
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         comments: bool,
     },
 
@@ -526,6 +535,34 @@ mod tests {
         assert_eq!(
             render_script(&s, true, ".p2a_session_test.json"),
             "#!/bin/bash\n# p2a analytics script\n# Demo\n# Generated: 2026-01-01 00:00:00 UTC\n# p2a version: 0.1.3\n\nset -euo pipefail\n\nSESSION_FILE=\".p2a_session_test.json\"\n\n# data load d.csv --name d\np2a --session \"$SESSION_FILE\" data load d.csv --name d\n\n# reg ols d -y y -x x1 x2\np2a --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\n# Cleanup temporary session file\nrm -f \"$SESSION_FILE\"\n\necho \"Script completed successfully\"\n"
+        );
+    }
+
+    /// `--comments false`: the same script without the per-command comment lines; the
+    /// header and the cleanup comment stay.
+    #[test]
+    fn render_script_without_comments_omits_command_lines() {
+        let mut s = Session::new();
+        s.title = Some("Demo".into());
+        s.version = "0.1.3".into();
+        s.updated_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        s.commands.push(record(
+            &["data", "load", "d.csv", "--name", "d"],
+            "data load d.csv --name d",
+            "data",
+            "load",
+            serde_json::Value::Null,
+        ));
+        s.commands.push(record(
+            &[],
+            "reg ols d -y y -x x1 x2",
+            "reg",
+            "ols",
+            serde_json::json!({"dataset": "d", "dep_var": "y", "indep_vars": ["x1", "x2"], "robust": "hc1"}),
+        ));
+        assert_eq!(
+            render_script(&s, false, ".p2a_session_test.json"),
+            "#!/bin/bash\n# p2a analytics script\n# Demo\n# Generated: 2026-01-01 00:00:00 UTC\n# p2a version: 0.1.3\n\nset -euo pipefail\n\nSESSION_FILE=\".p2a_session_test.json\"\n\np2a --session \"$SESSION_FILE\" data load d.csv --name d\n\np2a --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\n# Cleanup temporary session file\nrm -f \"$SESSION_FILE\"\n\necho \"Script completed successfully\"\n"
         );
     }
 

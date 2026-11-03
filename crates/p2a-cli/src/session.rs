@@ -1,5 +1,6 @@
 //! Session recording and management for reproducibility
 
+use crate::memory::{MemoryTracker, estimate_dataset_memory};
 use chrono::{DateTime, Utc};
 use p2a_core::{DataLoader, Dataset};
 use serde::{Deserialize, Serialize};
@@ -158,6 +159,14 @@ pub struct SessionManager {
     datasets: HashMap<String, Dataset>,
     /// Timer for command duration tracking
     command_start: Option<Instant>,
+    /// Estimated memory of the datasets in `datasets`, against `--max-memory`
+    memory: MemoryTracker,
+    /// The estimate counted for each dataset name (a replaced dataset is counted once)
+    memory_by_name: HashMap<String, usize>,
+    /// The `--max-memory` value in MiB (0 = no limit)
+    max_memory_mb: usize,
+    /// Whether this invocation has printed its memory warning
+    memory_warned: bool,
 }
 
 impl SessionManager {
@@ -188,7 +197,59 @@ impl SessionManager {
             session,
             datasets,
             command_start: None,
+            memory: MemoryTracker::unlimited(),
+            memory_by_name: HashMap::new(),
+            max_memory_mb: 0,
+            memory_warned: false,
         })
+    }
+
+    /// Applies `--max-memory` (MiB; 0 = no limit): counts the datasets already in memory
+    /// (reloaded from the session file) and prints the warning line if they exceed it.
+    /// Called once by `main`.
+    pub fn set_memory_limit(&mut self, max_memory_mb: usize) {
+        self.max_memory_mb = max_memory_mb;
+        self.memory = MemoryTracker::new(max_memory_mb);
+        self.memory_by_name.clear();
+        let estimates: Vec<(String, usize)> = self
+            .datasets
+            .iter()
+            .map(|(name, ds)| (name.clone(), estimate_dataset_memory(ds)))
+            .collect();
+        for (name, bytes) in estimates {
+            self.count_bytes(name, bytes);
+        }
+        self.emit_memory_warning();
+    }
+
+    /// Counts `bytes` for the dataset `name`, replacing the estimate of an earlier dataset
+    /// of that name. The new estimate is added before the old one is removed, so a
+    /// replacement neither counts twice nor re-arms a warning already taken.
+    fn count_bytes(&mut self, name: String, bytes: usize) {
+        self.memory.add_bytes(bytes);
+        if let Some(old) = self.memory_by_name.insert(name, bytes) {
+            self.memory.remove_bytes(old);
+        }
+    }
+
+    /// The memory warning, at most once per invocation, with the flag that set the limit.
+    fn memory_warning(&mut self) -> Option<String> {
+        if self.memory_warned {
+            return None;
+        }
+        let w = self
+            .memory
+            .take_warning()
+            .map(|w| format!("{w} (--max-memory {})", self.max_memory_mb))?;
+        self.memory_warned = true;
+        Some(w)
+    }
+
+    /// Prints the memory warning on stderr, if there is one.
+    fn emit_memory_warning(&mut self) {
+        if let Some(w) = self.memory_warning() {
+            eprintln!("Warning: {w}");
+        }
     }
 
     /// Start timing a command
@@ -306,7 +367,9 @@ impl SessionManager {
 
     /// Store a dataset in memory
     pub fn store_dataset(&mut self, name: String, dataset: Dataset) {
+        self.count_bytes(name.clone(), estimate_dataset_memory(&dataset));
         self.datasets.insert(name, dataset);
+        self.emit_memory_warning();
     }
 
     /// Get a dataset by name
@@ -415,5 +478,51 @@ mod dataset_meta_tests {
             back.na_strings,
             Some(vec![".".to_string(), "NA".to_string()])
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_limit_tests {
+    use super::*;
+    use crate::memory::estimate_dataset_memory;
+    use polars::prelude::*;
+
+    fn two_float_columns(rows: usize) -> Dataset {
+        let x: Vec<f64> = (0..rows).map(|i| i as f64 + 0.5).collect();
+        let y: Vec<f64> = (0..rows).map(|i| 2.0 * i as f64 + 0.25).collect();
+        Dataset::new(df! { "x" => x, "y" => y }.unwrap())
+    }
+
+    #[test]
+    fn memory_limit_warns_once_and_counts_replacements_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = SessionManager::new(dir.path().join("s.json")).unwrap();
+        m.set_memory_limit(1);
+        assert_eq!(m.memory_warning(), None);
+        let bytes = estimate_dataset_memory(&two_float_columns(70_000));
+        assert_eq!(bytes, 1_232_000); // 70,000 x 2 x 8 bytes + 10 %
+        m.count_bytes("a".into(), bytes);
+        assert_eq!(
+            m.memory_warning().as_deref(),
+            Some("estimated dataset memory 1.17 MB exceeds the limit of 1.00 MB (--max-memory 1)")
+        );
+        m.count_bytes("a".into(), bytes); // replaced, not added
+        assert_eq!(m.memory.current_usage(), 1_232_000);
+        m.count_bytes("b".into(), bytes);
+        assert_eq!(m.memory.current_usage(), 2_464_000);
+        assert_eq!(
+            m.memory_warning(),
+            None,
+            "at most one warning per invocation"
+        );
+    }
+
+    #[test]
+    fn memory_limit_zero_never_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = SessionManager::new(dir.path().join("s.json")).unwrap();
+        m.set_memory_limit(0);
+        m.count_bytes("a".into(), usize::MAX / 2);
+        assert_eq!(m.memory_warning(), None);
     }
 }

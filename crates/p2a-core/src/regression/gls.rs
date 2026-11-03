@@ -149,12 +149,20 @@ pub fn gls(
     // p-values
     let p_values: Array1<f64> = t_values.mapv(|t| t_test_p_value(t, df_residual as f64));
 
-    // R-squared (using original residuals)
-    let y_mean = y.sum() / n as f64;
-    let sst: f64 = y.iter().map(|yi| (yi - y_mean).powi(2)).sum();
+    // R-squared (using original residuals). As summary.lm (REG-19): the total sum of
+    // squares is about the mean when X has an intercept (a constant column in any
+    // position) and about zero otherwise, and adjusted R² uses n - 1 or n accordingly.
+    let has_intercept = super::ols::has_constant_column(*x);
+    let sst: f64 = if has_intercept {
+        let y_mean = y.sum() / n as f64;
+        y.iter().map(|yi| (yi - y_mean).powi(2)).sum()
+    } else {
+        y.dot(y)
+    };
     let ss_res: f64 = residuals.dot(&residuals);
     let r_squared = if sst > 0.0 { 1.0 - ss_res / sst } else { 0.0 };
-    let adj_r_squared = 1.0 - (1.0 - r_squared) * (n - 1) as f64 / df_residual as f64;
+    let adj_r_squared =
+        1.0 - (1.0 - r_squared) * (n - usize::from(has_intercept)) as f64 / df_residual as f64;
 
     // Log-likelihood
     let log_likelihood =
@@ -491,6 +499,32 @@ fn dispatch_gls(
 mod tests {
     use super::*;
     use ndarray::array;
+
+    /// GLS with identity correlation is OLS: pinned to lm without intercept (ols_no_intercept_grunfeld)
+    /// and, for the centered R² with intercept, to ols_grunfeld. REG-19.
+    #[test]
+    fn test_validate_gls_identity_no_intercept_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_no_intercept_grunfeld");
+        let n = case.scalar("n_obs") as usize;
+        let r = run_gls(&ds, "inv", &["value", "capital"], false, "identity", None).unwrap();
+        let names = ["value", "capital"];
+        Check::new(&case)
+            .named("coef", &names, &r.coefficients, Tol::coef(n))
+            .named("se_classical", &names, &r.std_errors, Tol::se(n))
+            .named("t_classical", &names, &r.t_values, Tol::stat(n))
+            .named("p_classical", &names, &r.p_values, Tol::p_value(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("sigma", r.sigma, Tol::stat(n))
+            .finish();
+        let (with, ds) = crate::test_support::load_case("ols_grunfeld");
+        let r = run_gls(&ds, "inv", &["value", "capital"], true, "identity", None).unwrap();
+        Check::new(&with)
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .finish();
+    }
 
     #[test]
     fn test_gls_identity() {

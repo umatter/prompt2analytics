@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ols_no_intercept",
+      "name": "OLS, GLS, clustered and HAC fits without intercept: uncentered R2, adjusted R2 with n, F on k df",
+      "category": "regression",
+      "reference": "stats::lm / summary.lm with attr(terms, 'intercept') == 0; sandwich::vcovHC(type = 'HC1'), vcovCL(cluster = ~firm | ~firm + year, type = 'HC1'), NeweyWest(lag = 4, prewhite = FALSE)",
+      "doc": "validation/regression/no_intercept.md",
+      "cases": ["ols_no_intercept_grunfeld", "ols_grunfeld"],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_no_intercept_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_ols_raw_intercept_in_last_column",
+        "p2a-core::regression::ols::tests::test_validate_ols_clustered_no_intercept_grunfeld",
+        "p2a-core::regression::ols::tests::test_validate_hac_no_intercept_grunfeld",
+        "p2a-core::regression::ols::tests::test_clustered_and_hac_wrappers_keep_the_intercept",
+        "p2a-core::regression::gls::tests::test_validate_gls_identity_no_intercept_grunfeld"
+      ],
+      "quantities": ["coefficients", "SE classical, HC1, CR1 firm, CR1 firm + year, Newey-West lag 4", "t", "p", "R2 and adjusted R2 (uncentered without intercept)", "sigma", "F, its df and p", "logLik", "AIC", "F and R2 with the intercept column last (run_ols_raw)", "cluster counts"],
+      "tolerance": "validation/README.md, n = 200: coefficients 1e-8, SE and statistics 1e-6 relative; p-values also 1e-12 absolute; df and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_regression_flags",
+      "name": "p2a reg ols/clustered/hac/gls/step/quantreg --intercept false and reg clustered --cluster2",
+      "category": "interfaces",
+      "reference": "stats::lm without intercept; sandwich::vcovCL(~firm, ~firm + year, type = 'HC1'), NeweyWest(lag = 4, prewhite = FALSE); stats::step(direction = 'backward'), extractAIC(k = 2 | log(n))",
+      "doc": "validation/cli/flags.md",
+      "cases": ["ols_no_intercept_grunfeld", "ols_grunfeld", "ols_twoway_cluster_grunfeld"],
+      "tests": [
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_ols_no_intercept",
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_clustered_two_way",
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_clustered_no_intercept",
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_hac_no_intercept",
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_gls_identity_no_intercept",
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_step_no_intercept",
+        "p2a-cli::tier3::wp06_flags::test_cli_quantreg_no_intercept_reaches_core"
+      ],
+      "quantities": ["coefficient tables (text and JSON)", "R2 and adjusted R2", "two-way CR1 SE, t, p and cluster counts", "step criterion, final variables, R2 and AIC", "quantreg coefficients equal p2a-core in process"],
+      "tolerance": "text at print precision (Tol::printed: 6 decimals for coefficients, SE and R2, 3 for t, 4 for p); -F json at validation/README.md, n = 200 (coefficients 1e-8, SE and statistics 1e-6 relative, p also 1e-12 absolute); counts exact; quantreg in-process Tol::new(1e-12, 1e-15)",
+      "deviations": [
+        {"finding": "REG-52", "quantity": "rq coefficients without intercept", "note": "p2a's IRLS quantile regression (tol 1e-6) is not the exact LP of rq(method = 'br'); R gives 0.1116253861993205 / 0.078613841312111174 (rq_coef). The CLI test checks that --intercept false reaches quantreg() (in-process equality); T3-WP10 implements Barrodale-Roberts and can pin rq_coef."}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cli_timeseries_flags",
+      "name": "p2a ts ar --aic, ts stl --robust and ts spectrum --detrend",
+      "category": "interfaces",
+      "reference": "stats::ar(method = 'yule-walker') with aic = TRUE, aic = FALSE and order.max = 2",
+      "doc": "validation/cli/flags.md",
+      "cases": ["ts_ar_yw_aic"],
+      "tests": [
+        "p2a-cli::tier3::wp06_flags::test_validate_cli_ts_ar_aic_flag",
+        "p2a-cli::tier3::wp06_flags::test_cli_ts_stl_robust_flag",
+        "p2a-cli::tier3::wp06_flags::test_cli_ts_spectrum_detrend_flag"
+      ],
+      "quantities": ["selected order", "AR coefficients (AIC, aic = FALSE order 20, fixed order 2)", "relative AIC vector", "series mean", "STL remainder and spectrum ordinates equal p2a-core in process for both flag values, and differ between them"],
+      "tolerance": "validation/README.md, n = 120: coefficients and mean 1e-8, AIC 1e-6 relative; orders exact; STL and spectrum exact equality with the in-process call",
+      "deviations": [
+        {"finding": "TS-15", "quantity": "var_pred", "note": "p2a's Yule-Walker prediction variance omits ar.yw's n / (n - (order + 1)): p2a 1.012860245443493 (order 2) and 0.9090641227233529 (order 20), R 1.0388310209676848 and 1.1018959063313365 (aic_var_pred, noaic_var_pred); not pinned."},
+        {"finding": "TS-26", "quantity": "STL components", "note": "STL runs in f32 with p2a's default windows; R's stl needs s.window and differs; the test pins the CLI against run_stl in process."},
+        {"finding": "STAT-68", "quantity": "periodogram ordinates", "note": "the raw periodogram is 2x spec.pgram's with a different taper; the test pins the CLI against run_spectrum in process."}
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

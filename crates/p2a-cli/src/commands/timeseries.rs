@@ -284,7 +284,7 @@ EXAMPLES:
         #[arg(long)]
         col: String,
 
-        /// AR order (if not using AIC selection)
+        /// Fit exactly this order (AIC selection is then not used)
         #[arg(long)]
         order: Option<usize>,
 
@@ -292,8 +292,18 @@ EXAMPLES:
         #[arg(long, default_value = "yule-walker")]
         method: String,
 
-        /// Use AIC for order selection (default: true)
-        #[arg(long, default_value = "true")]
+        /// Select the order by AIC up to min(n - 1, floor(10 log10 n)) (true/false; default true);
+        /// false fits that maximum order, as R's ar(aic = FALSE). --order fixes the order and
+        /// overrides both
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         aic: bool,
     },
 
@@ -318,8 +328,16 @@ EXAMPLES:
         #[arg(long)]
         period: usize,
 
-        /// Use robust fitting (default: false)
-        #[arg(long, default_value = "false")]
+        /// Robust (outlier-resistant) fitting (true/false; default false)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = false,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         robust: bool,
     },
 
@@ -422,8 +440,16 @@ EXAMPLES:
         #[arg(long, default_value = "0.1")]
         taper: f64,
 
-        /// Whether to detrend (default: true)
-        #[arg(long, default_value = "true")]
+        /// Remove a least-squares linear trend first (true/false; default true, as spec.pgram)
+        #[arg(
+            long,
+            value_name = "BOOL",
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         detrend: bool,
     },
 }
@@ -1786,13 +1812,12 @@ fn execute_spectrum(
                     .collect()
             });
 
-            let config = SpectrumConfig {
-                spans: span_vec,
-                taper,
-                detrend,
-                demean: false,
-                pad_ratio: 0.0,
-            };
+            let mut config = SpectrumConfig::default();
+            config.spans = span_vec;
+            config.taper = taper;
+            config.detrend = detrend;
+            config.demean = false;
+            config.pad_ratio = 0.0;
 
             match run_spectrum(ds, col, config) {
                 Ok(result) => match format {

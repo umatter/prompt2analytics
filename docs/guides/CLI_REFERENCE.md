@@ -16,7 +16,7 @@ cargo build --release -p p2a-cli
 --session <FILE>         Record commands to session file for reproducibility
 --quiet                  Suppress non-essential output (progress spinners)
 --verbose                Log to stderr: info; repeat for debug (twice) and trace (three times)
---max-memory <MB>        Memory limit in MB (0 = unlimited, the default); parsed, not yet enforced
+--max-memory <MB>        Warn on stderr, at most once per command, when the estimated memory of the --session datasets exceeds MB MiB (0 = no limit, the default); no effect without --session
 -h, --help               Print help
 -V, --version            Print version
 ```

@@ -1144,16 +1144,15 @@ fn execute_synth(
                 _ => VOptimization::DataDriven,
             };
 
-            let config = SynthConfig {
-                treated_unit: treated_unit.to_string(),
-                treatment_time,
-                optimization_window: None,
-                v_method: v_opt,
-                tolerance: 1e-6,
-                max_iter: 1000,
-                run_placebos,
-                weight_threshold: 0.001,
-            };
+            let mut config = SynthConfig::default();
+            config.treated_unit = treated_unit.to_string();
+            config.treatment_time = treatment_time;
+            config.optimization_window = None;
+            config.v_method = v_opt;
+            config.tolerance = 1e-6;
+            config.max_iter = 1000;
+            config.run_placebos = run_placebos;
+            config.weight_threshold = 0.001;
 
             match run_synthetic_control(ds, outcome, unit_col, time_col, &predictor_specs, config) {
                 Ok(result) => match format {
@@ -1235,13 +1234,12 @@ fn execute_ipw(
                 "att" => Estimand::ATT,
                 _ => Estimand::ATE,
             };
-            let config = IpwConfig {
-                estimand: est,
-                trim,
-                bootstrap,
-                normalized: true,
-                seed: None,
-            };
+            let mut config = IpwConfig::default();
+            config.estimand = est;
+            config.trim = trim;
+            config.bootstrap = bootstrap;
+            config.normalized = true;
+            config.seed = None;
 
             match run_ipw_treatment(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1341,13 +1339,12 @@ fn execute_dr(
                 "regression" => DRMethod::Regression,
                 _ => DRMethod::AIPW,
             };
-            let config = DoublyRobustConfig {
-                method: dr_method,
-                estimand: est,
-                trim,
-                bootstrap,
-                seed: None,
-            };
+            let mut config = DoublyRobustConfig::default();
+            config.method = dr_method;
+            config.estimand = est;
+            config.trim = trim;
+            config.bootstrap = bootstrap;
+            config.seed = None;
 
             match run_doubly_robust(ds, outcome, treatment, &cov_refs, config) {
                 Ok(result) => match format {
@@ -1410,11 +1407,10 @@ fn execute_mediation(
     match dataset {
         Some(ds) => {
             let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
-            let config = MediationConfig {
-                bootstrap,
-                trim: 0.05,
-                seed: None,
-            };
+            let mut config = MediationConfig::default();
+            config.bootstrap = bootstrap;
+            config.trim = 0.05;
+            config.seed = None;
 
             match run_mediation_analysis(ds, outcome, treatment, mediator, &cov_refs, config) {
                 Ok(result) => match format {
