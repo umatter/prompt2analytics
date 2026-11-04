@@ -73,7 +73,7 @@ use crate::linalg::matrix_ops::{cholesky_inverse, eig_symmetric};
 use crate::resource;
 use crate::traits::estimator::SignificanceLevel;
 
-use super::utils::{DiffEquations, GmmLagSpec, difference_equations};
+use super::utils::{GmmEquations, GmmLagSpec, gmm_equations};
 
 /// The inversions of the L x L weighting matrices hold about this many L x L matrices at
 /// their peak: the moment matrix and its symmetrised and scaled copies, the
@@ -653,7 +653,7 @@ impl BlockSum {
 }
 
 /// Σ_i Z_i' H_i Z_i, H_i[a, b] = 2 if a = b, -1 if the equations are one period apart.
-fn one_step_moment_matrix(eq: &DiffEquations, sp: &SparseRows) -> EconResult<Array2<f64>> {
+fn one_step_moment_matrix(eq: &GmmEquations, sp: &SparseRows) -> EconResult<Array2<f64>> {
     let l = eq.z.ncols();
     let mut s1 = resource::try_zeros2(l, l, "GMM one-step weighting matrix")?;
     for block in &eq.blocks {
@@ -682,7 +682,7 @@ fn one_step_moment_matrix(eq: &DiffEquations, sp: &SparseRows) -> EconResult<Arr
 
 /// Σ_i g_i g_i', g_i = Z_i' e_i.
 fn two_step_moment_matrix(
-    eq: &DiffEquations,
+    eq: &GmmEquations,
     sp: &SparseRows,
     e: &Array1<f64>,
     acc: &mut BlockSum,
@@ -713,7 +713,7 @@ fn two_step_moment_matrix(
 /// -B2 ZX' W2 q_j, q_j = -Σ_i [a_ij (g_i·u) + g_i (a_ij·u)], a_ij = Z_i' X_i[:, j],
 /// g_i = Z_i' e1_i, u = W2 Z' e2, and `r` = B2 ZX' W2.
 fn windmeijer_d(
-    eq: &DiffEquations,
+    eq: &GmmEquations,
     sp: &SparseRows,
     e1: &Array1<f64>,
     u: &Array1<f64>,
@@ -752,7 +752,7 @@ fn windmeijer_d(
 }
 
 /// Whether some entity has two equations `order` periods apart.
-fn has_lag_pair(eq: &DiffEquations, order: i64) -> bool {
+fn has_lag_pair(eq: &GmmEquations, order: i64) -> bool {
     eq.blocks.iter().any(|block| {
         let times = &eq.time[block.clone()];
         times
@@ -769,7 +769,7 @@ fn has_lag_pair(eq: &DiffEquations, order: i64) -> bool {
 /// residuals are `e`.
 fn ab_mtest(
     e: &[f64],
-    eq: &DiffEquations,
+    eq: &GmmEquations,
     order: i64,
     b: &Array2<f64>,
     w: &Array2<f64>,
@@ -827,8 +827,8 @@ fn label_list(labels: &[String]) -> String {
 /// * `x_cols` - Names of the strictly exogenous regressors (not the lagged y: `lags`
 ///   adds it); they enter in differences and serve as their own instruments
 /// * `entity_col` - Column name for entity/individual identifier (numbers or text)
-/// * `time_col` - Column name for the time period: whole numbers or dates, lags are
-///   steps of 1
+/// * `time_col` - Column name for the time period: whole numbers (a Date column counts
+///   days, so recode dates as period numbers); lags are steps of 1
 /// * `lags` - Number of lags of the dependent variable among the regressors
 /// * `config` - GMM configuration options (default: two-step, Windmeijer SEs)
 ///
@@ -865,8 +865,9 @@ pub fn run_gmm(
         min_lag: config.min_lag,
         max_lag: config.max_lag,
         collapse: config.collapse,
+        system: false,
     };
-    let eq = difference_equations(&cols, y_col, x_cols, entity_col, time_col, &spec)?;
+    let eq = gmm_equations(&cols, y_col, x_cols, entity_col, time_col, &spec)?;
     let (n_obs, k) = eq.x.dim();
     let l = eq.z.ncols();
 
@@ -901,7 +902,7 @@ pub fn run_gmm(
     ensure_dense_inverse_fits(l, "GMM weighting matrix")?;
     let sp = SparseRows::of(&eq.z)?;
     let mut acc = BlockSum::new(l)?;
-    let dy = Array1::from_vec(eq.dy.clone());
+    let dy = Array1::from_vec(eq.lhs.clone());
     let zx = eq.z.t().dot(&eq.x);
     let zy = eq.z.t().dot(&dy);
 

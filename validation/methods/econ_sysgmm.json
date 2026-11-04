@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_gmm_system",
+      "name": "Blundell-Bond system GMM (one-step, two-step)",
+      "category": "econometrics",
+      "reference": "plm::pgmm(transformation = 'ld', fsm = 'full', effect = 'individual'); plm::vcovHC.pgmm; plm::sargan; plm::mtest",
+      "doc": "validation/econometrics/gmm.md",
+      "cases": [
+        "dpd_sys_balanced",
+        "dpd_sys_gaps",
+        "dpd_sys_empluk"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::utils::tests::test_validate_system_equations_balanced_layout",
+        "p2a-core::econometrics::panel::utils::tests::test_validate_system_equations_gaps_layout"
+      ],
+      "quantities": [
+        "coefficients (one-step, two-step)",
+        "SE one-step robust",
+        "SE two-step uncorrected",
+        "SE two-step Windmeijer",
+        "sigma2 (one-step difference residuals)",
+        "Sargan/Hansen (pgmm)",
+        "AR(1)",
+        "AR(2)",
+        "p-values",
+        "equations (total, differenced, level)",
+        "instruments",
+        "entities"
+      ],
+      "tolerance": "validation/README.md with n = equations used: n > 1000 (1100-1642) coefficients 1e-10, SE and statistics 1e-8; n = 900, 995: 1e-8 and 1e-6 relative; counts exact",
+      "deviations": [
+        {
+          "finding": "ECON-30",
+          "quantity": "system GMM with lags >= 3 or min_lag >= 4",
+          "note": "plm 2.6.7 pgmm(transformation = 'ld') fills its level-instrument matrix from a vector of the wrong length (R warns 'data length [36] is not a sub-multiple or multiple of the number of rows [5]'); p2a uses y_{t-1} - y_{t-2} for every level equation, as pgmm does for lags <= 2 and min_lag <= 3, pinned to the estimator written out in R (.sys_spec in econ_sysgmm.R, checked there against pgmm on the other fits)"
+        },
+        {
+          "finding": "ECON-30",
+          "quantity": "one-step classical SEs",
+          "note": "refused for system GMM: pgmm's summary(robust = FALSE) one-step SEs are sqrt(diag(m$B1)), without sigma^2 and with a 1/N factor, and the H weight is the error covariance only when var(eta_i) = 0"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
