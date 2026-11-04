@@ -1056,7 +1056,7 @@ mod tests {
     /// The within residuals sum to zero in every entity, so the T x T error covariance has
     /// rank T - 1: its generalized inverse is reported.
     #[test]
-    fn test_panel_gls_within_reports_singular_error_covariance() {
+    fn test_validate_panel_gls_within_reports_singular_error_covariance() {
         let (_case, ds) = crate::test_support::load_case("pggls_sim");
         let r = run_fegls(&ds, "y", &["x1", "x2"], "id", "t").unwrap();
         assert!(
@@ -1073,7 +1073,7 @@ mod tests {
 
     /// The differenced intercept is a column of zeros: the first step names it.
     #[test]
-    fn test_panel_gls_fd_reports_aliased_first_step() {
+    fn test_validate_panel_gls_fd_reports_aliased_first_step() {
         let (_case, ds) = crate::test_support::load_case("pggls_sim");
         let r = run_panel_gls(
             &ds,

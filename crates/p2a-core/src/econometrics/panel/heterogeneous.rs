@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pvcm_skips_collinear_entity_with_warning() {
+    fn test_validate_pvcm_skips_collinear_entity_with_warning() {
         let (_case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
         let r = run_pvcm(
             &pvcm_panel_degenerate(&ds, false),

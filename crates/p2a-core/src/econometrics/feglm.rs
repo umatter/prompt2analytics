@@ -2138,7 +2138,7 @@ mod tests {
     /// Logit, probit and Poisson on feglm_families either converge or say that they did
     /// not; the coefficients are finite.
     #[test]
-    fn test_feglm_families_report_convergence() {
+    fn test_validate_feglm_families_report_convergence() {
         let (_case, ds) = crate::test_support::load_case("feglm_families");
         // deviation ECON-20 (coefficients; fixest drops 16 rows, the entities whose outcome is
         // all 0 or all 1, for logit/probit: logit_nobs 464 of 480), ECON-67 (poisson SE)
