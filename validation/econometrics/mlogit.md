@@ -94,7 +94,7 @@ summary(result)
 ```
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R pin of the conditional logit is `econometrics::discrete::conditional_logit::tests::test_validate_conditional_logit_mixed_logit_data`, below):
-- `econometrics::discrete::conditional_logit::tests::test_validate_mlogit_with_individual_vars` (`crates/p2a-core/src/econometrics/discrete/conditional_logit.rs`): the dimensions of beta and gamma and a finite log-likelihood.
+- superseded by `econometrics::discrete::conditional_logit::tests::test_validate_mlogit_fishing_asc` (R-pinned on `disc_mlogit_fishing`; section rewritten with the validation docs).
 
 ---
 

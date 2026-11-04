@@ -7,7 +7,9 @@
       "category": "econometrics",
       "reference": "stats::glm(family = binomial('logit' | 'probit')) at glm.control(epsilon = 1e-10, maxit = 100); summary.glm; tight refit at epsilon = 1e-14; R's default control for the separated case",
       "doc": "validation/econometrics/logit.md",
-      "cases": ["disc_binary_glm"],
+      "cases": [
+        "disc_binary_glm"
+      ],
       "tests": [
         "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_binary_glm",
         "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_probit_binary_glm",
@@ -17,12 +19,67 @@
         "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_rejects_y_outside_0_1",
         "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_quasi_separated_dummy_warns"
       ],
-      "quantities": ["coefficients", "SE (expected information)", "z", "p", "logLik", "AIC", "null logLik", "aliased coefficients NA and the rank", "separation flag and warnings (p2a's and R's default control)", "limit of the identified coefficients of a quasi-separated fit", "near-collinear fit (logLik, coefficients)", "outcome outside {0, 1} refused"],
+      "quantities": [
+        "coefficients",
+        "SE (expected information)",
+        "z",
+        "p",
+        "logLik",
+        "AIC",
+        "null logLik",
+        "aliased coefficients NA and the rank",
+        "separation flag and warnings (p2a's and R's default control)",
+        "limit of the identified coefficients of a quasi-separated fit",
+        "near-collinear fit (logLik, coefficients)",
+        "outcome outside {0, 1} refused"
+      ],
       "tolerance": "logit at epsilon 1e-10 (the MLE to 1e-13) and probit at epsilon 1e-14: coefficients 1e-8, SEs, z, logLik, AIC 1e-6, p 1e-6 + 1e-12 (validation/README.md, n = 400); the default-control probit 1e-6 against the tight MLE; quasi-separated limit coefficients 1e-6 and SEs 1e-5; near-collinear fit 1e-6",
       "deviations": [
-        {"finding": "ECON-60", "quantity": "default control", "note": "MleSettings defaults to max_iter 100, tolerance 1e-10 (R glm.control: 25, 1e-8); at R's default probit stops 1.6e-6 from the MLE on disc_choice_na; R's values remain settable"}
+        {
+          "finding": "ECON-60",
+          "quantity": "default control",
+          "note": "MleSettings defaults to max_iter 100, tolerance 1e-10 (R glm.control: 25, 1e-8); at R's default probit stops 1.6e-6 from the MLE on disc_choice_na; R's values remain settable"
+        }
       ],
-      "supersedes_legacy": ["validation/expected/logit_simple.csv", "validation/expected/logit_multiple.csv", "validation/expected/probit_simple.csv", "validation/expected/probit_multiple.csv"]
+      "supersedes_legacy": [
+        "validation/expected/logit_simple.csv",
+        "validation/expected/logit_multiple.csv",
+        "validation/expected/probit_simple.csv",
+        "validation/expected/probit_multiple.csv"
+      ]
+    },
+    {
+      "id": "discrete_mlogit_asc",
+      "name": "Conditional (McFadden) logit with alternative-specific constants as mlogit::mlogit",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(chosen ~ price + catch | income), '| 0 + income', '~ price + catch', '| 0', reflevel = 'beach' | 'pier' on Fishing, re-solved by Newton's method on the analytic score and information",
+      "doc": "validation/econometrics/mlogit.md",
+      "cases": [
+        "disc_mlogit_fishing"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_fishing_asc",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_fishing_noasc",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_conditional_logit_fishing_generic",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_fishing_reflevel",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_convergence_is_scale_free",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_aliased_attribute_is_an_error"
+      ],
+      "quantities": [
+        "constants, generic and individual-specific coefficients (mlogit names)",
+        "SEs",
+        "logLik",
+        "AIC",
+        "choice counts",
+        "asc = false",
+        "generic-only with and without constants",
+        "reflevel",
+        "scale-free convergence (income x 1e-6, x 1e6; iteration counts agree within one)",
+        "aliased / within-situation-constant attributes refused"
+      ],
+      "tolerance": "coefficients 1e-9, SEs 1e-8 relative against the Newton-polished optimum (iterative MLE converged to ~1e-14), logLik 1e-8 (validation/README.md, n = 1182); mlogit's own estimates cross-checked at 1e-6",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

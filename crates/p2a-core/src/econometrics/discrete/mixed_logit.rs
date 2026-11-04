@@ -1978,8 +1978,13 @@ mod tests {
             )
             .scalar("clogit_loglik_tight", r.log_likelihood, Tol::stat(300))
             .finish();
-        let cl =
-            super::super::run_conditional_logit(&ds, "id", "alt", "choice", &xw, None).unwrap();
+        // the mixed logit has no alternative-specific constants: mlogit(choice ~ x + w | 0)
+        let mut cfg = super::super::conditional_logit::MlogitConfig::default();
+        cfg.asc = false;
+        let cl = super::super::conditional_logit::run_conditional_logit_with(
+            &ds, "id", "alt", "choice", &xw, &cfg,
+        )
+        .unwrap();
         for k in 0..2 {
             assert!(
                 Tol::new(1e-8, 1e-12).allows(r.means[k], cl.beta[k]),
