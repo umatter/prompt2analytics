@@ -31,16 +31,17 @@
 //! println!("Converged in {} iterations", result.iterations);
 //! ```
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, Qr};
 use crate::regression::CovarianceType;
 use crate::resource;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, f_test_p_value, t_test_p_value};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -52,8 +53,8 @@ use crate::traits::estimator::{SignificanceLevel, f_test_p_value, t_test_p_value
 /// Controls the convergence behavior of the Method of Alternating Projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HdfeConfig {
-    /// Convergence tolerance for the demeaning algorithm.
-    /// Iteration stops when the L2-norm of change falls below this value.
+    /// Relative tolerance of the alternating projections: a sweep stops when
+    /// ||change|| <= tolerance * max(||demeaned column||, 1e-6 ||column||).
     /// Must be finite and greater than 0.
     /// Default: 1e-8
     pub tolerance: f64,
@@ -162,12 +163,14 @@ fn map_step_inplace(data: &mut [f64], factors: &[FactorInfo], sums_bufs: &mut [V
 /// # Arguments
 /// * `data` - The input vector to demean
 /// * `factors` - Slice of factor information for each fixed effect dimension
-/// * `tolerance` - Convergence threshold (L2 norm of change)
+/// * `tolerance` - Relative convergence threshold: a sweep stops when
+///   `||change|| <= tolerance * max(||current||, MAP_SCALE_FLOOR * ||data||)`
 /// * `max_iter` - Maximum number of iterations
 /// * `accelerate` - Whether to use Gearhart-Koshy acceleration
 ///
 /// # Returns
-/// A tuple of (demeaned_data, iterations, final_change, converged), or
+/// A tuple of (demeaned_data, iterations, final_change, converged), where
+/// `final_change` is the last relative change `||change|| / scale`, or
 /// `EconError::Cancelled` when the current budget runs out between sweeps.
 fn demean_map(
     data: &Array1<f64>,
@@ -198,6 +201,9 @@ fn demean_map(
     let mut prev_prev = vec![0.0; n];
     let mut converged = false;
     let mut final_change = f64::MAX;
+    // The scale of the stopping rule never falls below 1e-6 of the column's own norm,
+    // so a column the effects absorb converges once its residue is rounding noise.
+    let floor = MAP_SCALE_FLOOR * data.iter().map(|v| v * v).sum::<f64>().sqrt();
 
     for iter in 1..=max_iter {
         resource::checkpoint()?;
@@ -211,16 +217,21 @@ fn demean_map(
         // One round of alternating projections (in-place)
         map_step_inplace(&mut current, factors, &mut sums_bufs);
 
-        // Compute change (L2 norm) inline
+        // Change and current norm (L2) in one pass
         let mut delta_sq: f64 = 0.0;
+        let mut norm_sq: f64 = 0.0;
         for i in 0..n {
             let d = current[i] - prev[i];
             delta_sq += d * d;
+            norm_sq += current[i] * current[i];
         }
-        final_change = delta_sq.sqrt();
+        let delta = delta_sq.sqrt();
+        let current_norm = norm_sq.sqrt();
+        let scale = current_norm.max(floor).max(f64::MIN_POSITIVE);
+        final_change = delta / scale;
 
-        // Check convergence
-        if final_change < tolerance {
+        // Relative stopping rule: invariant to rescaling the column
+        if delta <= tolerance * scale {
             converged = true;
             return Ok((Array1::from_vec(current), iter, final_change, converged));
         }
@@ -237,7 +248,8 @@ fn demean_map(
                 denominator += dp * dp;
             }
 
-            if denominator > 1e-16 {
+            // Scale-free guard: skip only a step that is rounding noise
+            if denominator > (f64::EPSILON * current_norm).powi(2) {
                 let alpha = (numerator / denominator).clamp(0.0, 1.0);
                 if alpha > 0.0 && alpha < 1.0 {
                     // Apply acceleration in-place
@@ -259,7 +271,7 @@ fn demean_map(
 /// we process them in parallel via `rayon` and reduce their per-column
 /// convergence statistics at the end. The caller's budget is installed on each
 /// worker, so every sweep honours it.
-fn demean_matrix_map(
+pub(crate) fn demean_matrix_map(
     x: &Array2<f64>,
     factors: &[FactorInfo],
     tolerance: f64,
@@ -321,6 +333,167 @@ fn validate_config(config: &HdfeConfig) -> EconResult<()> {
         });
     }
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Regressors absorbed by the fixed effects or collinear
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A regressor whose demeaned sum of squares is at most this fraction of its centred raw
+/// sum of squares has no variation left after the fixed effects and is dropped. Absorbed
+/// columns leave rounding residue (ratios near 1e-30 on the reference designs); genuine
+/// regressors keep ratios of order 0.1-1.
+pub(crate) const WITHIN_VARIATION_TOL: f64 = 1e-12;
+
+/// The MAP stopping rule's scale never falls below this fraction of the column's norm
+/// (`sqrt(WITHIN_VARIATION_TOL)`), so an absorbed column converges once its residue is
+/// below `tolerance * 1e-6 * ||column||`.
+pub(crate) const MAP_SCALE_FLOOR: f64 = 1e-6;
+
+/// The outcome of [`screen_regressors`]: which columns are estimated, which were dropped
+/// and why, and the factorization the caller solves from.
+#[derive(Debug, Clone)]
+pub(crate) struct RegressorScreen {
+    /// Original indices of the estimated columns, ascending.
+    pub kept: Vec<usize>,
+    /// Names of the dropped columns: the absorbed ones, then the collinear ones.
+    pub dropped: Vec<String>,
+    /// One warning per kind of drop (absorbed, collinear).
+    pub warnings: Vec<String>,
+    /// Pivoted QR (`LM_QR_TOL`) of the non-absorbed demeaned columns, in their original
+    /// order; its `aliased()` columns are the collinear ones. Callers solve from it
+    /// instead of factorising the kept columns again.
+    pub qr: Qr,
+    /// Original column indices of `qr`'s columns.
+    pub screened: Vec<usize>,
+    /// Positions of the kept columns among `screened`.
+    kept_pos: Vec<usize>,
+}
+
+impl RegressorScreen {
+    /// Least-squares coefficients of `y` (demeaned like the columns) on the kept
+    /// columns, in `kept` order.
+    pub fn coefficients(&self, y: ArrayView1<f64>) -> EconResult<Array1<f64>> {
+        let all = self.qr.coefficients(y)?;
+        Ok(self.kept_pos.iter().map(|&p| all[p]).collect())
+    }
+
+    /// `(X_k' X_k)^{-1}` of the kept demeaned columns, in `kept` order.
+    pub fn unscaled_covariance(&self) -> EconResult<Array2<f64>> {
+        let all = self.qr.unscaled_covariance()?;
+        let k = self.kept_pos.len();
+        let mut out = resource::try_zeros2(k, k, "unscaled covariance")?;
+        for (a, &pa) in self.kept_pos.iter().enumerate() {
+            for (b, &pb) in self.kept_pos.iter().enumerate() {
+                out[[a, b]] = all[[pa, pb]];
+            }
+        }
+        Ok(out)
+    }
+
+    /// Residual sum of squares of `y` (demeaned like the columns) on the kept columns.
+    pub fn rss(&self, y: ArrayView1<f64>) -> EconResult<f64> {
+        let effects = self.qr.qty(y)?;
+        Ok(effects
+            .iter()
+            .skip(self.qr.rank())
+            .map(|v| v * v)
+            .sum::<f64>())
+    }
+}
+
+/// `'id'` or `'firm' + 'year'`: the fixed effects as the screen's warnings name them.
+pub(crate) fn fe_label(fe_cols: &[&str]) -> String {
+    fe_cols
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
+fn quoted(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Drop the regressors the fixed effects absorb, then the later of collinear ones, as
+/// plm (time-invariant regressors, `aliased`) and fixest (`collin.var`) do.
+///
+/// 1. Column `j` is absorbed when its centred raw sum of squares is 0 or its demeaned sum
+///    of squares is at most [`WITHIN_VARIATION_TOL`] times the centred one.
+/// 2. The remaining demeaned columns are decomposed by pivoted QR at `LM_QR_TOL`
+///    (`lm.fit`); its aliased columns, the later of each collinear set, are dropped.
+///
+/// `raw` and `demeaned` are n x k in the same column order as `names`. With no column
+/// left the call is `InvalidSpecification` ("no regressor left to estimate: ...").
+pub(crate) fn screen_regressors(
+    raw: ArrayView2<f64>,
+    demeaned: ArrayView2<f64>,
+    names: &[String],
+    fe_label: &str,
+) -> EconResult<RegressorScreen> {
+    let k = raw.ncols();
+    let mut absorbed = Vec::new();
+    let mut screened = Vec::new();
+    for j in 0..k {
+        let col = raw.column(j);
+        let n = col.len().max(1) as f64;
+        let mean = col.sum() / n;
+        let ss_c: f64 = col.iter().map(|v| (v - mean) * (v - mean)).sum();
+        let ss_w: f64 = demeaned.column(j).iter().map(|v| v * v).sum();
+        if ss_c == 0.0 || ss_w <= WITHIN_VARIATION_TOL * ss_c {
+            absorbed.push(j);
+        } else {
+            screened.push(j);
+        }
+    }
+    let name = |j: usize| {
+        names
+            .get(j)
+            .cloned()
+            .unwrap_or_else(|| format!("x{}", j + 1))
+    };
+    let mut warnings = Vec::new();
+    let mut dropped: Vec<String> = absorbed.iter().map(|&j| name(j)).collect();
+    if !dropped.is_empty() {
+        warnings.push(format!(
+            "{} dropped: no variation left after removing the {fe_label} fixed effects \
+             (not estimated, as in plm and fixest)",
+            quoted(&dropped)
+        ));
+    }
+    if screened.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("no regressor left to estimate: {}", warnings.join("; ")),
+        });
+    }
+    let sub = demeaned.select(Axis(1), &screened);
+    let qr = Qr::decompose(sub.view(), LM_QR_TOL)?;
+    let aliased = qr.aliased();
+    if !aliased.is_empty() {
+        let collinear: Vec<String> = aliased.iter().map(|&p| name(screened[p])).collect();
+        warnings.push(format!(
+            "{} dropped: collinear with the other regressors after removing the {fe_label} \
+             fixed effects (the later of the collinear regressors is not estimated, as in fixest)",
+            quoted(&collinear)
+        ));
+        dropped.extend(collinear);
+    }
+    let kept_pos: Vec<usize> = (0..screened.len())
+        .filter(|p| !aliased.contains(p))
+        .collect();
+    let kept: Vec<usize> = kept_pos.iter().map(|&p| screened[p]).collect();
+    Ok(RegressorScreen {
+        kept,
+        dropped,
+        warnings,
+        qr,
+        screened,
+        kept_pos,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -390,9 +563,9 @@ fn count_connected_components(f0: &FactorInfo, f1: &FactorInfo) -> usize {
 /// ("mobility groups") of the bipartite graph linking the two factors' levels
 /// (Abowd–Creecy–Kramarz; Correia 2017): `df = n_0 + n_1 - C`. When the graph
 /// is a single connected component this reduces to the familiar `N + T - 1`,
-/// but for disconnected groups the naive `N + T - 1` under-counts absorbed DF —
-/// which would overstate residual DF and deflate the standard errors — so the
-/// component count must be computed explicitly.
+/// but for C > 1 components the naive `N + T - 1` over-counts the absorbed DF —
+/// which would understate the residual DF and inflate the standard errors by
+/// `sqrt(df / df_naive)` — so the component count must be computed explicitly.
 ///
 /// For three or more FE dimensions there is no simple closed form; we use the
 /// connected-components count for the first two dimensions and add
@@ -479,10 +652,17 @@ pub struct HdfeResult {
     // ═══════════════════════════════════════════════════════════════════════════
     /// Number of iterations to convergence
     pub iterations: usize,
-    /// Final convergence metric (L2 norm of change)
+    /// Final convergence metric: the largest relative change of a demeaned column,
+    /// `||change|| / max(||demeaned column||, 1e-6 ||column||)`
     pub convergence: f64,
     /// Whether convergence was achieved
     pub converged: bool,
+    /// The iteration limit of the alternating projections
+    #[serde(default)]
+    pub max_iterations: usize,
+    /// The relative tolerance of the alternating projections
+    #[serde(default)]
+    pub tolerance: f64,
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Covariance Type
@@ -513,6 +693,30 @@ pub struct HdfeResult {
     /// (fixest drops them too).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+
+    /// Regressors not estimated: absorbed by the fixed effects or collinear with the
+    /// others after removing them (plm and fixest drop them too)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
+    /// Warnings: dropped regressors, non-convergence of the alternating projections
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for HdfeResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(Convergence::new(
+            self.converged,
+            self.iterations,
+            self.max_iterations,
+            "relative change of the demeaned columns",
+            self.convergence,
+            self.tolerance,
+        ))
+    }
 }
 
 impl fmt::Display for HdfeResult {
@@ -529,15 +733,6 @@ impl fmt::Display for HdfeResult {
         for (name, count) in self.fe_dimensions.iter().zip(self.fe_counts.iter()) {
             writeln!(f, "  {}: {} levels", name, count)?;
         }
-        writeln!(f)?;
-
-        writeln!(
-            f,
-            "Convergence: {} in {} iterations (final change: {:.2e})",
-            if self.converged { "Yes" } else { "No" },
-            self.iterations,
-            self.convergence
-        )?;
         writeln!(f)?;
 
         writeln!(f, "R-squared (within): {:.4}", self.r_squared_within)?;
@@ -572,6 +767,8 @@ impl fmt::Display for HdfeResult {
 
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        // Notes before the missing-value note, which stays the last line
+        write!(f, "{}", notes_text(self))?;
         if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
@@ -663,9 +860,8 @@ pub fn run_hdfe(
     // Design matrix WITHOUT intercept (FE absorbs the constant)
     let design = cols.matrix(x_cols, false)?;
     let x = design.data;
-    let var_names = design.column_names;
+    let all_names = design.column_names;
     let n = y.len();
-    let k = x.ncols();
 
     // Factor information for each FE dimension (levels in R factor order)
     let factors: Vec<FactorInfo> = fe_cols
@@ -675,16 +871,6 @@ pub fn run_hdfe(
 
     // Compute absorbed degrees of freedom
     let df_absorbed = compute_absorbed_df(&factors);
-
-    // Check we have enough observations
-    let df_resid = n.saturating_sub(k).saturating_sub(df_absorbed);
-    if df_resid == 0 {
-        return Err(EconError::InsufficientData {
-            required: k + df_absorbed + 1,
-            provided: n,
-            context: "Not enough observations for HDFE estimation".to_string(),
-        });
-    }
 
     // Demean y using MAP
     let (y_demeaned, y_iters, y_change, y_converged) = demean_map(
@@ -696,7 +882,7 @@ pub fn run_hdfe(
     )?;
 
     // Demean X using MAP
-    let (x_demeaned, x_iters, x_change, x_converged) = demean_matrix_map(
+    let (x_demeaned_all, x_iters, x_change, x_converged) = demean_matrix_map(
         &x,
         &factors,
         config.tolerance,
@@ -708,32 +894,43 @@ pub fn run_hdfe(
     let convergence = y_change.max(x_change);
     let converged = y_converged && x_converged;
 
-    // Check convergence
+    // Regressors absorbed by the effects or collinear after them are not estimated
+    let screen = screen_regressors(
+        x.view(),
+        x_demeaned_all.view(),
+        &all_names,
+        &fe_label(fe_cols),
+    )?;
+    let mut warnings = screen.warnings.clone();
     if !converged {
-        return Err(EconError::ConvergenceFailure {
-            iterations: config.max_iterations,
-            last_change: convergence,
-            suggestion: format!(
-                "HDFE demeaning did not converge. Try: (1) increasing max_iterations above {}, \
-                 (2) relaxing tolerance above {:.2e}, or (3) checking for singleton observations",
-                config.max_iterations, config.tolerance
-            ),
-        });
+        // fixest warns and returns the last iterate ("Absence of convergence")
+        let record = Convergence::new(
+            false,
+            iterations,
+            config.max_iterations,
+            "relative change of the demeaned columns",
+            convergence,
+            config.tolerance,
+        );
+        warnings.extend(record.note("HDFE alternating projections"));
     }
+    let x_demeaned = x_demeaned_all.select(Axis(1), &screen.kept);
+    let var_names: Vec<String> = screen.kept.iter().map(|&j| all_names[j].clone()).collect();
+    let k = screen.kept.len();
 
-    // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ
-    let xtx_mat = xtx(&x_demeaned.view());
-    let (xtx_inv, _cond_warning) =
-        safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X in HDFE".to_string(),
-            suggestion: format!(
-                "Check for perfect multicollinearity among regressors: {:?}",
-                e
-            ),
+    // Residual degrees of freedom
+    let df_resid = n
+        .checked_sub(k + df_absorbed)
+        .filter(|&d| d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: k + df_absorbed + 1,
+            provided: n,
+            context: "Not enough observations for HDFE estimation".to_string(),
         })?;
 
-    let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
-    let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
+    // OLS on demeaned data from the screen's pivoted QR (one factorization)
+    let beta = screen.coefficients(y_demeaned.view())?;
+    let xtx_inv = screen.unscaled_covariance()?;
 
     // Residuals from demeaned model
     let y_hat: Array1<f64> = x_demeaned.dot(&beta);
@@ -825,6 +1022,8 @@ pub fn run_hdfe(
         iterations,
         convergence,
         converged,
+        max_iterations: config.max_iterations,
+        tolerance: config.tolerance,
         cov_type,
         beta,
         se,
@@ -832,6 +1031,8 @@ pub fn run_hdfe(
         vcov,
         xtx_inv,
         missing: cols.missing().clone(),
+        dropped: screen.dropped,
+        warnings,
     })
 }
 
@@ -977,11 +1178,13 @@ mod tests {
     }
 
     fn create_unbalanced_panel() -> Dataset {
-        // Unbalanced: A has 3 obs, B has 2 obs, C has 4 obs
+        // Unbalanced: A has 3 obs, B has 2 obs, C has 4 obs. `x` is year - 2019 in
+        // every row (absorbed by the year effects); `x_mixed` varies within years.
         let df = df! {
             "firm" => ["A", "A", "A", "B", "B", "C", "C", "C", "C"],
             "year" => [2020i64, 2021, 2022, 2021, 2022, 2020, 2021, 2022, 2023],
             "x" => [1.0, 2.0, 3.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0],
+            "x_mixed" => [1.0, 2.5, 3.0, 2.0, 1.5, 1.0, 2.2, 2.9, 4.6],
             "y" => [2.1, 4.3, 6.0, 9.2, 11.0, 12.1, 14.0, 15.9, 18.2],
         }
         .unwrap();
@@ -1108,7 +1311,7 @@ mod tests {
             counts: vec![2, 2, 2, 2],
         };
         // Correct: n0 + n1 - C = 4 + 4 - 2 = 6 (the naive N + T - 1 would give 7,
-        // under-counting absorbed DF and deflating standard errors).
+        // over-counting the absorbed DF and inflating the standard errors).
         assert_eq!(compute_absorbed_df(&[firm, period]), 6);
     }
 
@@ -1181,7 +1384,7 @@ mod tests {
         let result = run_hdfe(
             &dataset,
             "y",
-            &["x"],
+            &["x_mixed"],
             &["firm", "year"],
             None,
             CovarianceType::Standard,
@@ -1270,7 +1473,8 @@ mod tests {
         assert!(display.contains("High-Dimensional Fixed Effects"));
         assert!(display.contains("firm"));
         assert!(display.contains("year"));
-        assert!(display.contains("Convergence: Yes"));
+        assert!(display.contains("Converged: yes"));
+        assert!(!display.contains("Convergence:"));
     }
 
     #[test]
@@ -2009,5 +2213,322 @@ mod tests {
         expect_cancelled(with_budget(cancelled(), || {
             demean_matrix_map(&x, &[factor1, factor2], 1e-8, 1000, true)
         }));
+    }
+
+    // =========================================================================
+    // T3-WP17: relative MAP rule (ECON-69), absorbed regressors (ECON-72),
+    // disconnected two-way effects (X-16)
+    // =========================================================================
+
+    #[test]
+    fn test_validate_hdfe_converges_at_scale_1e9() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("hdfe_map_scale");
+        let r = run_hdfe(
+            &ds,
+            "y_big",
+            &["x"],
+            &["firm", "year"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        assert!(r.converged, "{:?}", r.warnings);
+        // MAP to relative 1e-8; R replica 6.7e-16 from fixest
+        Check::new(&case)
+            .named(
+                "coef_big",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-8),
+            )
+            .named(
+                "se_iid_big",
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-6),
+            )
+            .scalar("df_resid", r.df_resid as f64, Tol::exact())
+            .finish();
+        let r1 = run_hdfe(
+            &ds,
+            "y",
+            &["x"],
+            &["firm", "year"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        Check::new(&case)
+            .named(
+                "coef",
+                &r1.variables,
+                &r1.coefficients,
+                Tol::iterative(1e-8),
+            )
+            .named(
+                "se_iid",
+                &r1.variables,
+                &r1.std_errors,
+                Tol::iterative(1e-6),
+            )
+            .scalar("r2_within", r1.r_squared_within, Tol::iterative(1e-6))
+            .scalar("n_obs", r1.n_obs as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_hdfe_map_scale_invariant_iterations() {
+        // y * 1e-6, y, y * 1e6: the stopping rule must not depend on units. R replica of
+        // the relative rule: 10/10/10 sweeps (the absolute rule: 11/11/18).
+        let (_case, ds) = crate::test_support::load_case("hdfe_map_scale");
+        use crate::regression::ols::na_fixtures::with_derived;
+        let ds = with_derived(
+            &with_derived(&ds, "y_small", "y", |v| v * 1e-6),
+            "y_large",
+            "y",
+            |v| v * 1e6,
+        );
+        let fit = |col: &str| {
+            run_hdfe(
+                &ds,
+                col,
+                &["x"],
+                &["firm", "year"],
+                None,
+                CovarianceType::Standard,
+            )
+            .unwrap()
+        };
+        let (s, m, l) = (fit("y_small"), fit("y"), fit("y_large"));
+        for r in [&s, &l] {
+            assert!(
+                r.iterations.abs_diff(m.iterations) <= 1,
+                "{} vs {}",
+                r.iterations,
+                m.iterations
+            );
+        }
+        assert!((s.coefficients[0] / 1e-6 / m.coefficients[0] - 1.0).abs() < 1e-10);
+        assert!((l.coefficients[0] / 1e6 / m.coefficients[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_validate_hdfe_map_iteration_limit_is_reported() {
+        let (_case, ds) = crate::test_support::load_case("hdfe_map_scale");
+        let config = HdfeConfig {
+            max_iterations: 2,
+            ..HdfeConfig::default()
+        };
+        let r = run_hdfe(
+            &ds,
+            "y",
+            &["x"],
+            &["firm", "year"],
+            Some(config),
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        assert!(!r.converged);
+        assert!(
+            r.warnings.iter().any(|w| w
+                .starts_with("HDFE alternating projections did not converge after 2 iterations")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(format!("{r}").contains("Converged: no (2 iterations"));
+    }
+
+    #[test]
+    fn test_validate_hdfe_absorbed_regressors() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_absorbed_regressors");
+        let n = 180;
+        // MAP exact after 2 sweeps on this balanced design: README tolerances
+        let two = run_hdfe(
+            &ds,
+            "y",
+            &["x1", "x2", "z", "w"],
+            &["id", "t"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        assert_eq!(two.dropped, vec!["z".to_string(), "w".to_string()]);
+        assert!(
+            two.warnings.iter().any(|w| w
+                == "'z', 'w' dropped: no variation left after removing the 'id' + 't' fixed \
+                    effects (not estimated, as in plm and fixest)"),
+            "{:?}",
+            two.warnings
+        );
+        Check::new(&case)
+            .named(
+                "hdfe2_coef",
+                &two.variables,
+                &two.coefficients,
+                Tol::coef(n),
+            )
+            .named("hdfe2_se_iid", &two.variables, &two.std_errors, Tol::se(n))
+            .scalar("hdfe2_df_resid", two.df_resid as f64, Tol::exact())
+            .finish();
+        let one = run_hdfe(
+            &ds,
+            "y",
+            &["x1", "x2", "z", "w"],
+            &["id"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        assert_eq!(one.dropped, vec!["z".to_string()]);
+        Check::new(&case)
+            .named(
+                "hdfe1_coef",
+                &one.variables,
+                &one.coefficients,
+                Tol::coef(n),
+            )
+            .named("hdfe1_se_iid", &one.variables, &one.std_errors, Tol::se(n))
+            .finish();
+        let x3 = run_hdfe(
+            &ds,
+            "y",
+            &["x1", "x2", "x3"],
+            &["id", "t"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        assert_eq!(x3.dropped, vec!["x3".to_string()]);
+        assert!(x3.warnings.iter().any(|w| w.starts_with(
+            "'x3' dropped: collinear with the other regressors after removing the 'id' + 't' \
+             fixed effects"
+        )));
+        Check::new(&case)
+            .named(
+                "hdfe2_x3_coef",
+                &x3.variables,
+                &x3.coefficients,
+                Tol::coef(n),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_hdfe_all_regressors_absorbed_is_an_error() {
+        // create_unbalanced_panel's x is year - 2019 in every row: absorbed by the year effects.
+        let e = run_hdfe(
+            &create_unbalanced_panel(),
+            "y",
+            &["x"],
+            &["firm", "year"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.starts_with("no regressor left to estimate: 'x' dropped")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_screen_regressors_thresholds() {
+        // 3 firms x 4 years, two-way effects
+        let firm = FactorInfo {
+            name: "firm".to_string(),
+            n_levels: 3,
+            ids: (0..12).map(|i| i / 4).collect(),
+            counts: vec![4, 4, 4],
+        };
+        let year = FactorInfo {
+            name: "year".to_string(),
+            n_levels: 4,
+            ids: (0..12).map(|i| i % 4).collect(),
+            counts: vec![3, 3, 3, 3],
+        };
+        let x1 = [
+            0.3, -1.2, 0.8, 2.1, -0.4, 1.7, -0.9, 0.2, 1.1, -0.6, 0.5, -1.8,
+        ];
+        let x2 = [
+            1.4, 0.2, -0.7, 0.9, -1.5, 0.6, 1.9, -0.3, 0.1, -1.1, 0.75, 0.4,
+        ];
+        let x3 = [
+            -0.5, 0.9, 1.3, -1.6, 0.2, -0.8, 0.45, 1.2, -1.9, 0.3, 0.65, -0.1,
+        ];
+        let (a, b) = ([1.0, -2.0, 0.5], [0.3, 1.1, -0.7, 2.0]);
+        let ab: Vec<f64> = (0..12).map(|i| a[i / 4] + b[i % 4]).collect();
+        let x12: Vec<f64> = (0..12).map(|i| x1[i] + x2[i]).collect();
+        let r: Vec<f64> = (0..12).map(|i| ab[i] + 0.01 * x3[i]).collect();
+        let raw = Array2::from_shape_fn((12, 6), |(i, j)| match j {
+            0 => x1[i],
+            1 => x2[i],
+            2 => ab[i],
+            3 => x12[i],
+            4 => r[i],
+            _ => 7.0,
+        });
+        let factors = [firm, year];
+        let (mut dm, _, _, converged) =
+            demean_matrix_map(&raw, &factors, 1e-10, 1000, true).unwrap();
+        assert!(converged);
+        // Column 4: its demeaned sum of squares set to 1e-10 of its centred one (above
+        // the 1e-12 threshold), along the demeaned x3 (not collinear with x1, x2)
+        let (x3_dm, _, _, _) =
+            demean_map(&Array1::from(x3.to_vec()), &factors, 1e-10, 1000, true).unwrap();
+        let mean = r.iter().sum::<f64>() / 12.0;
+        let ss_c: f64 = r.iter().map(|v| (v - mean).powi(2)).sum();
+        let ss_x3: f64 = x3_dm.iter().map(|v| v * v).sum();
+        dm.column_mut(4)
+            .assign(&(&x3_dm * (1e-10 * ss_c / ss_x3).sqrt()));
+        let names: Vec<String> = ["x1", "x2", "ab", "x12", "r", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let screen = screen_regressors(raw.view(), dm.view(), &names, "'firm' + 'year'").unwrap();
+        assert_eq!(screen.kept, vec![0, 1, 4]);
+        assert_eq!(screen.dropped, vec!["ab", "c", "x12"]);
+        assert_eq!(
+            screen.warnings,
+            vec![
+                "'ab', 'c' dropped: no variation left after removing the 'firm' + 'year' fixed \
+                 effects (not estimated, as in plm and fixest)"
+                    .to_string(),
+                "'x12' dropped: collinear with the other regressors after removing the 'firm' + \
+                 'year' fixed effects (the later of the collinear regressors is not estimated, \
+                 as in fixest)"
+                    .to_string(),
+            ]
+        );
+        assert_eq!(fe_label(&["id"]), "'id'");
+        assert_eq!(fe_label(&["id", "t"]), "'id' + 't'");
+    }
+
+    #[test]
+    fn test_validate_hdfe_disconnected_components() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("hdfe_disconnected");
+        let n = 80;
+        // MAP exact after 2 sweeps on this design (balanced blocks): README tolerances
+        let r = run_hdfe(
+            &ds,
+            "y",
+            &["x", "z"],
+            &["firm", "year"],
+            None,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        Check::new(&case)
+            .named("coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("se", &r.variables, &r.std_errors, Tol::se(n))
+            .scalar("df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("df_absorbed", r.df_absorbed as f64, Tol::exact())
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+        // the pre-5f86b49 rule (n0 + n1 - 1 = 25 absorbed, df 53) would give se_naive_df
+        assert!((r.std_errors[0] / case.named("se_naive_df", "x") - 1.0).abs() > 5e-3);
     }
 }
