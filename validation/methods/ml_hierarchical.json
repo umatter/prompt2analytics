@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_hclust",
+      "name": "Hierarchical clustering core (8 linkages), cutree",
+      "category": "ml",
+      "reference": "stats::hclust; stats::cutree",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::hclust::tests::test_validate_hclust_single",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_complete",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_average",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_mcquitty",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_wardD",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_wardD2",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_centroid",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_median",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_cuts",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_hand_cases",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_tree_conversions_round_trip"
+      ],
+      "quantities": [
+        "merge",
+        "height",
+        "order",
+        "cutree k",
+        "cutree h",
+        "tie-breaking (hclust_ties)"
+      ],
+      "tolerance": "merge, order, labels exact; heights Tol::coef(n) (n = 40-60: 1e-6 relative)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
