@@ -1274,7 +1274,8 @@ fn mlogit_benchmark(c: &mut Criterion) {
         let dataset = create_mlogit_dataset(n_choosers, n_alts, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(label), &label, |b, _| {
-            b.iter(|| run_mlogit(&dataset, "chosen", "chooser", "alt", &["price"], &[], None))
+            // run_mlogit(dataset, choice situation, alternative, choice indicator, ...)
+            b.iter(|| run_mlogit(&dataset, "chooser", "alt", "chosen", &["price"], &[], None))
         });
     }
     group.finish();
