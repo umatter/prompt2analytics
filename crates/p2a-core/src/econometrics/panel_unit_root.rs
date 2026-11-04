@@ -39,24 +39,51 @@
 //! - A repeated (unit, time) row is an error.
 //! - **Gaps** in a unit's time are joined: its observations are used in time order as if
 //!   consecutive, as `plm::purtest` does; the result warns how many units have gaps.
+//! - A Date time column counts days, so dates more than a day apart are reported as gaps;
+//!   recode monthly, quarterly or yearly dates as period numbers first.
 //! - Units with fewer than 3 observations are dropped, with a warning naming them.
 //! - Rows with a missing value in the variable, the unit or the time are dropped and
 //!   reported in `missing` and `warnings`; an infinite value is an error.
 //!
-//! Only the per-unit ADF regression is validated against R (`urca::ur.df`); the LLC, IPS,
-//! Fisher and Hadri statistics are not.
+//! # Lag order
+//!
+//! The ADF-type tests (LLC, IPS, Fisher) regress each unit's first difference on its
+//! lagged level, the deterministic terms and `p` lagged differences.
+//!
+//! - **Default** (neither `lags` nor `lag_selection`): `floor(T_max^(1/3))` lags for every
+//!   unit, with `T_max` the longest unit, capped by `max_lags`. The result labels it so.
+//! - **Fixed** (`lags = Some(p)` or `lag_selection = Fixed(p)`): `p` lags for every unit.
+//! - **Per unit** (`lag_selection = Aic | Sic | Hall`), as `plm::purtest(lags = "AIC" |
+//!   "SIC" | "Hall", pmax, fixedT = TRUE)`: every candidate order `0..=pmax` is fitted on
+//!   the common sample `t = pmax + 2..T` (`fixedT`); AIC and SIC pick the smallest
+//!   `ln(rss/n) + c K / n` (`c = 2` or `ln n`; ties go to the larger order), and Hall's rule
+//!   the largest order whose last lagged difference has `|t| >= 1.96` (0 if none). `pmax`
+//!   defaults to `max_lags`, else [`DEFAULT_PMAX`] (plm's default).
+//! - **`dfcor`** selects the residual variance of the ADF regression: `rss/(n - K)` (true,
+//!   the default here and `urca::ur.df`'s convention) or `rss/n` (false, plm's default).
+//!   Hall's rule and the per-unit t-statistics depend on it; AIC and SIC do not.
+//!
+//! A unit needs `T >= 3 + n_det + 2p` observations for `p` lags (`n_det` = 0, 1 or 2
+//! deterministic terms), so that the ADF regression keeps a residual degree of freedom; a
+//! shorter unit, or one whose regressors are collinear (an exactly linear series), is
+//! skipped and named in the warnings. With no unit left the test is an error.
+//!
+//! The per-unit ADF regressions and the per-unit lag orders are validated against R
+//! (`urca::ur.df`, `plm::purtest`); the LLC, IPS, Fisher and Hadri statistics are not.
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::least_squares;
+use crate::options::Choices;
 use crate::resource;
-use crate::traits::estimator::normal_cdf;
+use crate::traits::convergence::ResultNotes;
+use crate::traits::estimator::{chi_squared_p_value, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Types and Configuration
@@ -75,6 +102,26 @@ pub enum PanelUnitRootTest {
     /// Hadri test (null: stationarity)
     Hadri,
 }
+
+crate::option_enum!(
+    PanelUnitRootTest,
+    crate::options::Choices {
+        option: "test",
+        values: &[
+            (
+                &["llc", "levinlin", "levin_lin_chu"],
+                PanelUnitRootTest::LLC
+            ),
+            (&["ips", "im_pesaran_shin"], PanelUnitRootTest::IPS),
+            (
+                &["madwu", "maddala_wu", "fisher"],
+                PanelUnitRootTest::Fisher
+            ),
+            (&["hadri"], PanelUnitRootTest::Hadri),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for PanelUnitRootTest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -99,6 +146,19 @@ pub enum PanelModel {
     Trend,
 }
 
+crate::option_enum!(
+    PanelModel,
+    crate::options::Choices {
+        option: "model",
+        values: &[
+            (&["none", "nc"], PanelModel::None),
+            (&["intercept", "drift", "c", "const"], PanelModel::Intercept),
+            (&["trend", "ct"], PanelModel::Trend),
+        ],
+    },
+    no_display
+);
+
 impl fmt::Display for PanelModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -109,6 +169,96 @@ impl fmt::Display for PanelModel {
     }
 }
 
+/// plm::purtest's default maximum lag order for lag selection.
+pub const DEFAULT_PMAX: usize = 10;
+
+/// How the ADF-type tests choose each unit's lag order (module docs, "Lag order").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LagSelection {
+    /// The same order for every unit.
+    Fixed(usize),
+    /// Akaike's criterion per unit (plm `lags = "AIC"`).
+    Aic,
+    /// Schwarz's criterion per unit (plm `lags = "SIC"`).
+    Sic,
+    /// Hall's general-to-specific t rule per unit (plm `lags = "Hall"`).
+    Hall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LagRule {
+    Fixed,
+    Aic,
+    Sic,
+    Hall,
+}
+
+static LAG_RULES: Choices<LagRule> = Choices {
+    option: "lag_selection",
+    values: &[
+        (&["fixed"], LagRule::Fixed),
+        (&["aic"], LagRule::Aic),
+        (&["sic", "bic", "schwarz"], LagRule::Sic),
+        (&["hall", "t_sig", "tsig"], LagRule::Hall),
+    ],
+};
+
+impl LagSelection {
+    /// `name`: fixed | aic | sic (bic, schwarz) | hall (t_sig, tsig); case and separator
+    /// insensitive. `fixed` needs `lags`; the criteria refuse `lags` (their bound is
+    /// `pmax`). An unknown name is `InvalidSpecification` listing the names.
+    pub fn from_option(name: &str, lags: Option<usize>) -> EconResult<LagSelection> {
+        let rule = LAG_RULES.parse(name)?;
+        match (rule, lags) {
+            (LagRule::Fixed, Some(p)) => Ok(LagSelection::Fixed(p)),
+            (LagRule::Fixed, None) => Err(EconError::InvalidSpecification {
+                message: "lag_selection = fixed needs lags (the lag order of every unit)"
+                    .to_string(),
+            }),
+            (_, Some(_)) => Err(EconError::InvalidSpecification {
+                message: format!(
+                    "lags fixes the lag order and cannot be combined with lag_selection = {} \
+                     (use pmax)",
+                    LAG_RULES.canonical(rule)
+                ),
+            }),
+            (LagRule::Aic, None) => Ok(LagSelection::Aic),
+            (LagRule::Sic, None) => Ok(LagSelection::Sic),
+            (LagRule::Hall, None) => Ok(LagSelection::Hall),
+        }
+    }
+
+    /// "fixed | aic | sic | hall", for CLI help and tool descriptions.
+    pub fn names_help() -> String {
+        LAG_RULES.help()
+    }
+
+    /// The canonical option spelling of the rule ("aic").
+    fn option_name(&self) -> &'static str {
+        match self {
+            LagSelection::Fixed(_) => "fixed",
+            LagSelection::Aic => "aic",
+            LagSelection::Sic => "sic",
+            LagSelection::Hall => "hall",
+        }
+    }
+}
+
+impl fmt::Display for LagSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LagSelection::Fixed(p) => write!(f, "fixed ({p})"),
+            LagSelection::Aic => write!(f, "AIC"),
+            LagSelection::Sic => write!(f, "SIC"),
+            LagSelection::Hall => write!(f, "Hall"),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Configuration for panel unit root tests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PanelUnitRootConfig {
@@ -116,10 +266,22 @@ pub struct PanelUnitRootConfig {
     pub test_type: PanelUnitRootTest,
     /// Model specification
     pub model: PanelModel,
-    /// Number of lags for ADF-type regressions (None = automatic selection)
+    /// The lag order of every unit's ADF-type regression. `None` with no
+    /// `lag_selection`: `floor(T_max^(1/3))` for every unit (module docs, "Lag order").
     pub lags: Option<usize>,
-    /// Maximum lags for automatic selection
+    /// Cap of the default lag order; the default `pmax` of lag selection.
     pub max_lags: Option<usize>,
+    /// Per-unit lag selection (AIC, SIC, Hall) or a fixed order; `None` = the default rule.
+    #[serde(default)]
+    pub lag_selection: Option<LagSelection>,
+    /// Largest order lag selection considers (default `max_lags`, else
+    /// [`DEFAULT_PMAX`]). Only with `lag_selection = Aic | Sic | Hall`.
+    #[serde(default)]
+    pub pmax: Option<usize>,
+    /// ADF residual variance `rss/(n - K)` (true, `urca::ur.df`) or `rss/n` (false, plm's
+    /// default). Default: true.
+    #[serde(default = "default_true")]
+    pub dfcor: bool,
 }
 
 impl Default for PanelUnitRootConfig {
@@ -129,6 +291,9 @@ impl Default for PanelUnitRootConfig {
             model: PanelModel::Intercept,
             lags: None,
             max_lags: None,
+            lag_selection: None,
+            pmax: None,
+            dfcor: true,
         }
     }
 }
@@ -152,7 +317,7 @@ pub struct PanelUnitRootResult {
     pub n_panels: usize,
     /// Average time periods (T)
     pub avg_time_periods: f64,
-    /// Lags used
+    /// Lags used: the largest unit lag order (the common order when it is fixed)
     pub lags_used: usize,
     /// Individual unit test statistics (if available)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,12 +325,30 @@ pub struct PanelUnitRootResult {
     /// Individual unit p-values (for Fisher test)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit_p_values: Option<Vec<f64>>,
-    /// Warnings: units with gaps in time, dropped short units, dropped rows.
+    /// Warnings: units with gaps in time, dropped short units, skipped units, dropped rows.
     #[serde(default)]
     pub warnings: Vec<String>,
     /// Rows dropped because of missing values.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Ids of the units used, in the order of `unit_statistics`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unit_ids: Vec<String>,
+    /// Lag order of each unit used (empty for Hadri)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unit_lags: Vec<usize>,
+    /// How the lag orders were chosen, as printed after "Lags:"
+    #[serde(default)]
+    pub lag_selection: String,
+    /// ADF residual variance `rss/(n - K)` (true) or `rss/n` (false)
+    #[serde(default = "default_true")]
+    pub dfcor: bool,
+}
+
+impl ResultNotes for PanelUnitRootResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for PanelUnitRootResult {
@@ -183,7 +366,30 @@ impl fmt::Display for PanelUnitRootResult {
         writeln!(f, "Model:      {}", self.model)?;
         writeln!(f, "N panels:   {}", self.n_panels)?;
         writeln!(f, "Avg T:      {:.1}", self.avg_time_periods)?;
-        writeln!(f, "Lags:       {}", self.lags_used)?;
+        if self.lag_selection.is_empty() {
+            writeln!(f, "Lags:       {}", self.lags_used)?;
+        } else {
+            writeln!(f, "Lags:       {}", self.lag_selection)?;
+        }
+        if let (Some(&lo), Some(&hi)) = (self.unit_lags.iter().min(), self.unit_lags.iter().max())
+            && lo != hi
+        {
+            let mean = self.unit_lags.iter().sum::<usize>() as f64 / self.unit_lags.len() as f64;
+            writeln!(
+                f,
+                "            per unit: min {lo}, max {hi}, mean {mean:.2}"
+            )?;
+        }
+        if self.test_type != PanelUnitRootTest::Hadri {
+            if self.dfcor {
+                writeln!(f, "ADF residual variance: rss/(n - k) (dfcor = true)")?;
+            } else {
+                writeln!(
+                    f,
+                    "ADF residual variance: rss/n (dfcor = false, plm's default)"
+                )?;
+            }
+        }
         writeln!(f)?;
         writeln!(f, "H0: {}", self.null_hypothesis)?;
         writeln!(f, "H1: {}", self.alternative_hypothesis)?;
@@ -237,7 +443,7 @@ impl fmt::Display for PanelUnitRootResult {
 /// * `var_col` - Variable to test for unit root
 /// * `unit_col` - Panel unit identifier column
 /// * `time_col` - Time period column
-/// * `config` - Test configuration
+/// * `config` - Test configuration (lag order: module docs, "Lag order")
 ///
 /// # Returns
 ///
@@ -247,9 +453,12 @@ impl fmt::Display for PanelUnitRootResult {
 ///
 /// ```ignore
 /// use p2a_core::econometrics::{run_panel_unit_root, PanelUnitRootConfig, PanelUnitRootTest};
+/// use p2a_core::econometrics::panel_unit_root::LagSelection;
 ///
 /// let config = PanelUnitRootConfig {
-///     test_type: PanelUnitRootTest::LLC,
+///     test_type: PanelUnitRootTest::IPS,
+///     lag_selection: Some(LagSelection::Aic),
+///     pmax: Some(4),
 ///     ..Default::default()
 /// };
 /// let result = run_panel_unit_root(&dataset, "gdp", "country", "year", config)?;
@@ -261,28 +470,27 @@ pub fn run_panel_unit_root(
     time_col: &str,
     config: PanelUnitRootConfig,
 ) -> EconResult<PanelUnitRootResult> {
-    // Extract panel data
+    check_lag_options(&config)?;
     let Panels {
         series: panels,
         mut warnings,
         missing,
     } = extract_panels(dataset, var_col, unit_col, time_col)?;
 
-    // Determine lags
-    let max_t = panels.values().map(|v| v.len()).max().unwrap_or(0);
-    let default_max_lags = ((max_t as f64).powf(1.0 / 3.0)).floor() as usize;
-    let max_lags = config.max_lags.unwrap_or(default_max_lags).max(1);
-    let lags = config.lags.unwrap_or_else(|| {
-        // Use AIC-based selection or default to floor(T^(1/3))
-        default_max_lags.min(max_lags)
-    });
-
-    let mut result = match config.test_type {
-        PanelUnitRootTest::LLC => run_llc_test(&panels, config.model, lags),
-        PanelUnitRootTest::IPS => run_ips_test(&panels, config.model, lags),
-        PanelUnitRootTest::Fisher => run_fisher_test(&panels, config.model, lags),
-        PanelUnitRootTest::Hadri => run_hadri_test(&panels, config.model),
-    }?;
+    let mut result = if config.test_type == PanelUnitRootTest::Hadri {
+        run_hadri_test(&panels, config.model)?
+    } else {
+        let (plan, label) = lag_plan(&config, &panels);
+        let mut r = match config.test_type {
+            PanelUnitRootTest::LLC => run_llc_test(&panels, config.model, &plan, config.dfcor),
+            PanelUnitRootTest::IPS => run_ips_test(&panels, config.model, &plan, config.dfcor),
+            _ => run_fisher_test(&panels, config.model, &plan, config.dfcor),
+        }?;
+        r.lag_selection = label;
+        r
+    };
+    result.dfcor = config.dfcor;
+    warnings.append(&mut result.warnings);
     if let Some(note) = missing.note() {
         warnings.push(note);
     }
@@ -292,13 +500,448 @@ pub fn run_panel_unit_root(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Lag order
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn invalid(message: String) -> EconError {
+    EconError::InvalidSpecification { message }
+}
+
+/// The option combinations that contradict each other (module docs, "Lag order").
+fn check_lag_options(config: &PanelUnitRootConfig) -> EconResult<()> {
+    if config.test_type == PanelUnitRootTest::Hadri {
+        if config.lag_selection.is_some() || config.pmax.is_some() {
+            return Err(invalid(
+                "the Hadri test uses no lagged differences; lag_selection and pmax do not apply"
+                    .to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    match (config.lag_selection, config.lags) {
+        (Some(LagSelection::Fixed(p)), Some(q)) if p != q => {
+            return Err(invalid(format!(
+                "lags = {q} conflicts with lag_selection = fixed ({p})"
+            )));
+        }
+        (Some(LagSelection::Fixed(_)), _) | (None, _) => {
+            if config.pmax.is_some() {
+                return Err(invalid(
+                    "pmax applies only to lag_selection = aic, sic or hall".to_string(),
+                ));
+            }
+        }
+        (Some(rule), Some(_)) => {
+            return Err(invalid(format!(
+                "lags fixes the lag order and cannot be combined with lag_selection = {} \
+                 (use pmax)",
+                rule.option_name()
+            )));
+        }
+        (Some(_), None) => {
+            if config.pmax == Some(0) {
+                return Err(invalid(
+                    "pmax must be at least 1 for lag selection (got 0)".to_string(),
+                ));
+            }
+            if let (Some(a), Some(b)) = (config.pmax, config.max_lags)
+                && a != b
+            {
+                return Err(invalid(format!(
+                    "pmax and max_lags give different maximum lags ({a}, {b})"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How each unit's lag order is found.
+enum LagPlan {
+    Fixed(usize),
+    Select { rule: LagSelection, pmax: usize },
+}
+
+/// The plan and its label (the text after "Lags:"); the options are checked.
+fn lag_plan(config: &PanelUnitRootConfig, panels: &[(String, Vec<f64>)]) -> (LagPlan, String) {
+    match (config.lag_selection, config.lags) {
+        (Some(LagSelection::Fixed(p)), _) | (None, Some(p)) => {
+            (LagPlan::Fixed(p), format!("{p} (fixed by the user)"))
+        }
+        (None, None) => {
+            let max_t = panels.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+            let default = (max_t as f64).cbrt().floor() as usize;
+            let cap = config.max_lags.unwrap_or(default).max(1);
+            let p = default.min(cap);
+            let label = if cap < default {
+                format!("{p} (fixed: min(floor(T_max^(1/3)), max_lags))")
+            } else {
+                format!("{p} (fixed: floor(T_max^(1/3)))")
+            };
+            (LagPlan::Fixed(p), label)
+        }
+        (Some(rule), _) => {
+            let pmax = config.pmax.or(config.max_lags).unwrap_or(DEFAULT_PMAX);
+            (
+                LagPlan::Select { rule, pmax },
+                format!("{rule} per unit, pmax = {pmax}"),
+            )
+        }
+    }
+}
+
+/// A unit's lag order under `plan`.
+fn unit_lag(
+    series: &[f64],
+    plan: &LagPlan,
+    model: PanelModel,
+    dfcor: bool,
+) -> Result<usize, UnitError> {
+    match *plan {
+        LagPlan::Fixed(p) => Ok(p),
+        LagPlan::Select { rule, pmax } => select_lag(series, rule, pmax, model, dfcor),
+    }
+}
+
+/// The number of deterministic terms of `model`.
+fn n_det(model: PanelModel) -> usize {
+    match model {
+        PanelModel::None => 0,
+        PanelModel::Intercept => 1,
+        PanelModel::Trend => 2,
+    }
+}
+
+fn det_text(model: PanelModel) -> &'static str {
+    match model {
+        PanelModel::None => "no deterministic terms",
+        PanelModel::Intercept => "an intercept",
+        PanelModel::Trend => "an intercept and a trend",
+    }
+}
+
+/// `3 + n_det + 2 * lags`, the observations a unit needs for `lags` lags (saturating).
+fn adf_required(model: PanelModel, lags: usize) -> usize {
+    lags.saturating_mul(2).saturating_add(3 + n_det(model))
+}
+
+/// Why one unit's regression failed: a reason to skip the unit (too short, rank
+/// deficient, an exact fit) or an error that stops the test (cancellation, memory).
+enum UnitError {
+    Skip { reason: String, error: EconError },
+    Fatal(EconError),
+}
+
+impl From<EconError> for UnitError {
+    fn from(e: EconError) -> Self {
+        UnitError::Fatal(e)
+    }
+}
+
+/// A unit has `T >= 3 + n_det + 2 * lags` observations, so that its ADF regression on
+/// rows `lags + 1..T` keeps a residual degree of freedom.
+fn adf_length_check(t: usize, model: PanelModel, lags: usize) -> Result<(), UnitError> {
+    let required = adf_required(model, lags);
+    if t >= required {
+        return Ok(());
+    }
+    let det = det_text(model);
+    Err(UnitError::Skip {
+        reason: format!("{t} observations; {lags} lag(s) with {det} need at least {required}"),
+        error: EconError::InsufficientData {
+            required,
+            provided: t,
+            context: format!(
+                "ADF regression with {lags} lag(s) and {det} needs at least {required} \
+                 observations"
+            ),
+        },
+    })
+}
+
+fn rank_deficient(what: String, rank: usize, cols: usize) -> UnitError {
+    UnitError::Skip {
+        reason: format!("rank deficient: rank {rank} of {cols}"),
+        error: EconError::SingularMatrix {
+            context: format!("{what} is rank deficient (rank {rank} of {cols})"),
+            suggestion: "the series is exactly linear or constant over the sample".to_string(),
+        },
+    }
+}
+
+/// The ADF design of order `lags` on rows `first..T` (0-based `i`, `first > lags`):
+/// response `s[i] - s[i-1]`; columns `s[i-1]`, 1 (n_det >= 1), `i + 1` (n_det = 2), then
+/// `s[i-j] - s[i-j-1]` for j = 1..=lags.
+fn adf_design(
+    s: &[f64],
+    model: PanelModel,
+    lags: usize,
+    first: usize,
+) -> EconResult<(Array2<f64>, Array1<f64>)> {
+    let what = "ADF regression design";
+    let nd = n_det(model);
+    let n = s.len() - first;
+    let k = 1 + nd + lags;
+    let mut x = resource::try_zeros2(n, k, what)?;
+    let mut y = resource::try_zeros1(n, what)?;
+    for (r, i) in (first..s.len()).enumerate() {
+        y[r] = s[i] - s[i - 1];
+        x[[r, 0]] = s[i - 1];
+        if nd >= 1 {
+            x[[r, 1]] = 1.0;
+        }
+        if nd == 2 {
+            x[[r, 2]] = (i + 1) as f64;
+        }
+        for j in 1..=lags {
+            x[[r, nd + j]] = s[i - j] - s[i - j - 1];
+        }
+    }
+    Ok((x, y))
+}
+
+fn rss(residuals: &Array1<f64>) -> f64 {
+    residuals.iter().map(|e| e * e).sum()
+}
+
+/// One unit's lag order by AIC, SIC or Hall's rule on the common sample `t = pmax + 2..T`
+/// (plm's `lagsel`, `fixedT = TRUE`; module docs, "Lag order").
+fn select_lag(
+    s: &[f64],
+    rule: LagSelection,
+    pmax: usize,
+    model: PanelModel,
+    dfcor: bool,
+) -> Result<usize, UnitError> {
+    let t = s.len();
+    let required = adf_required(model, pmax);
+    let det = det_text(model);
+    if t < required {
+        return Err(UnitError::Skip {
+            reason: format!(
+                "{t} observations; lag selection with pmax = {pmax} and {det} needs at least \
+                 {required}"
+            ),
+            error: EconError::InsufficientData {
+                required,
+                provided: t,
+                context: format!(
+                    "lag selection with pmax = {pmax} and {det} needs at least {required} \
+                     observations per unit"
+                ),
+            },
+        });
+    }
+    let nd = n_det(model);
+    let (x, y) = adf_design(s, model, pmax, pmax + 1)?;
+    let n = y.len();
+    let nf = n as f64;
+    let fit = |p: usize| -> Result<crate::linalg::solve::LeastSquares, UnitError> {
+        resource::checkpoint()?;
+        let k = 1 + nd + p;
+        let ls = least_squares(x.slice(ndarray::s![.., ..k]), y.view())?;
+        if ls.rank < k {
+            return Err(rank_deficient(
+                format!("the lag-selection regression with {p} lag(s)"),
+                ls.rank,
+                k,
+            ));
+        }
+        Ok(ls)
+    };
+    match rule {
+        LagSelection::Aic | LagSelection::Sic => {
+            let penalty = if rule == LagSelection::Aic {
+                2.0
+            } else {
+                nf.ln()
+            };
+            let mut best: Option<(usize, f64)> = None;
+            // Descending, strictly smaller wins: ties go to the larger order (which.min).
+            for p in (0..=pmax).rev() {
+                let ls = fit(p)?;
+                let k = (1 + nd + p) as f64;
+                let crit = (rss(&ls.residuals) / nf).ln() + penalty * k / nf;
+                if best.is_none_or(|(_, c)| crit < c) {
+                    best = Some((p, crit));
+                }
+            }
+            Ok(best.map_or(0, |(p, _)| p))
+        }
+        LagSelection::Hall => {
+            for p in (1..=pmax).rev() {
+                let ls = fit(p)?;
+                let k = 1 + nd + p;
+                let s2 = rss(&ls.residuals) / if dfcor { (n - k) as f64 } else { nf };
+                let j = nd + p;
+                let t_last = ls.coefficients[j] / (s2 * ls.unscaled_cov[[j, j]]).sqrt();
+                if t_last.abs() >= 1.96 {
+                    return Ok(p);
+                }
+            }
+            Ok(0)
+        }
+        LagSelection::Fixed(p) => Ok(p),
+    }
+}
+
+/// One unit's ADF regression.
+struct AdfFit {
+    /// t-statistic of the lagged level.
+    t_stat: f64,
+    /// Residual degrees of freedom.
+    df_resid: usize,
+}
+
+/// The ADF regression of one unit with `lags` lagged differences on rows `lags + 1..T`;
+/// residual variance `rss/(n - K)` (`dfcor`) or `rss/n`.
+fn adf_regression(
+    s: &[f64],
+    model: PanelModel,
+    lags: usize,
+    dfcor: bool,
+) -> Result<AdfFit, UnitError> {
+    adf_length_check(s.len(), model, lags)?;
+    let (x, y) = adf_design(s, model, lags, lags + 1)?;
+    let k = x.ncols();
+    let ls = least_squares(x.view(), y.view())?;
+    if ls.rank < k {
+        return Err(rank_deficient(
+            format!("the ADF regression with {lags} lag(s)"),
+            ls.rank,
+            k,
+        ));
+    }
+    let n = y.len();
+    let df_resid = n.checked_sub(k).filter(|&d| d > 0).ok_or_else(|| {
+        EconError::Computation(format!("ADF regression: {n} rows for {k} columns"))
+    })?;
+    let s2 = rss(&ls.residuals) / if dfcor { df_resid as f64 } else { n as f64 };
+    let t_stat = ls.coefficients[0] / (s2 * ls.unscaled_cov[[0, 0]]).sqrt();
+    if !t_stat.is_finite() {
+        return Err(UnitError::Skip {
+            reason: "exact fit: no residual variation".to_string(),
+            error: EconError::SingularMatrix {
+                context: "ADF regression fits exactly (no residual variation)".to_string(),
+                suggestion: "the series is exactly linear or constant over the sample".to_string(),
+            },
+        });
+    }
+    Ok(AdfFit { t_stat, df_resid })
+}
+
+/// Runs `f` on every unit; a unit `f` cannot estimate is skipped and named in one warning,
+/// any other error stops the test. With no unit left, the first unit's error, its context
+/// prefixed with `test`.
+fn skip_or_propagate<T>(
+    test: PanelUnitRootTest,
+    panels: &[(String, Vec<f64>)],
+    mut f: impl FnMut(&[f64]) -> Result<T, UnitError>,
+) -> EconResult<(Vec<(usize, T)>, Vec<String>)> {
+    let mut kept = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut first_error: Option<EconError> = None;
+    for (i, (label, series)) in panels.iter().enumerate() {
+        resource::checkpoint()?;
+        match f(series) {
+            Ok(v) => kept.push((i, v)),
+            Err(UnitError::Fatal(e)) => return Err(e),
+            Err(UnitError::Skip { reason, error }) => {
+                skipped.push(format!("'{label}' ({reason})"));
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if kept.is_empty() {
+        let prefix = format!("{test}: no unit can be used: ");
+        return Err(match first_error {
+            Some(EconError::InsufficientData {
+                required,
+                provided,
+                context,
+            }) => EconError::InsufficientData {
+                required,
+                provided,
+                context: format!("{prefix}{context}"),
+            },
+            Some(EconError::SingularMatrix {
+                context,
+                suggestion,
+            }) => EconError::SingularMatrix {
+                context: format!("{prefix}{context}"),
+                suggestion,
+            },
+            Some(e) => e,
+            None => EconError::InsufficientData {
+                required: 1,
+                provided: 0,
+                context: format!("{test}: no unit"),
+            },
+        });
+    }
+    let mut warnings = Vec::new();
+    if !skipped.is_empty() {
+        let mut list = skipped
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if skipped.len() > 5 {
+            list.push_str(&format!(" (and {} more)", skipped.len() - 5));
+        }
+        warnings.push(format!(
+            "Skipped {} unit(s) whose ADF regression cannot be estimated: {list}",
+            skipped.len()
+        ));
+    }
+    Ok((kept, warnings))
+}
+
+/// A result with the fields every test fills; the caller sets the rest.
+#[allow(clippy::too_many_arguments)]
+fn unit_root_result(
+    test_type: PanelUnitRootTest,
+    model: PanelModel,
+    statistic: f64,
+    p_value: f64,
+    hypotheses: (&str, &str),
+    panels: &[(String, Vec<f64>)],
+    used: &[usize],
+    unit_lags: Vec<usize>,
+    warnings: Vec<String>,
+) -> PanelUnitRootResult {
+    let n = used.len();
+    let avg_t = used.iter().map(|&i| panels[i].1.len() as f64).sum::<f64>() / n as f64;
+    PanelUnitRootResult {
+        test_type,
+        model,
+        statistic,
+        p_value,
+        null_hypothesis: hypotheses.0.to_string(),
+        alternative_hypothesis: hypotheses.1.to_string(),
+        n_panels: n,
+        avg_time_periods: avg_t,
+        lags_used: unit_lags.iter().copied().max().unwrap_or(0),
+        unit_statistics: None,
+        unit_p_values: None,
+        warnings,
+        missing: MissingSummary::default(),
+        unit_ids: used.iter().map(|&i| panels[i].0.clone()).collect(),
+        unit_lags,
+        lag_selection: String::new(),
+        dfcor: true,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Panel Data Extraction
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The panels of a unit-root test: each unit's observations in time order, keyed by the
-/// unit's factor code (level order), with what the extraction dropped or joined.
+/// The panels of a unit-root test: each unit's label and observations in time order, in
+/// level order, with what the extraction dropped or joined.
 struct Panels {
-    series: BTreeMap<usize, Vec<f64>>,
+    series: Vec<(String, Vec<f64>)>,
     warnings: Vec<String>,
     missing: MissingSummary,
 }
@@ -352,7 +995,7 @@ fn extract_panels(
         *slot += 1;
     }
 
-    let mut series = BTreeMap::new();
+    let mut series = Vec::new();
     let mut gapped = 0usize;
     let mut first_gap: Option<(usize, i64, i64)> = None;
     let mut short: Vec<&str> = Vec::new();
@@ -385,7 +1028,7 @@ fn extract_panels(
         }
         let mut unit_values = resource::try_with_capacity(rows.len(), what)?;
         unit_values.extend(rows.iter().map(|&r| values[r]));
-        series.insert(u, unit_values);
+        series.push((factor.levels[u].clone(), unit_values));
     }
 
     let mut warnings = Vec::new();
@@ -433,65 +1076,36 @@ fn extract_panels(
 /// The LLC test assumes a common autoregressive parameter across panels
 /// and is based on a pooled ADF regression with panel-specific intercepts/trends.
 fn run_llc_test(
-    panels: &BTreeMap<usize, Vec<f64>>,
+    panels: &[(String, Vec<f64>)],
     model: PanelModel,
-    lags: usize,
+    plan: &LagPlan,
+    dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
-    let n = panels.len();
-    let avg_t: f64 = panels.values().map(|v| v.len() as f64).sum::<f64>() / n as f64;
+    // Step 1: each unit's auxiliary regressions; units that cannot be estimated are skipped.
+    // dfcor enters only Hall's lag choice (plm's lagsel), not the auxiliary residuals.
+    let (units, warnings) = skip_or_propagate(PanelUnitRootTest::LLC, panels, |series| {
+        let p = unit_lag(series, plan, model, dfcor)?;
+        let (e, v) = compute_llc_residuals(series, model, p)?;
+        Ok((p, e, v))
+    })?;
 
-    // Step 1: Run individual ADF regressions and collect residuals
     let mut delta_y_tilde_all: Vec<f64> = Vec::new();
     let mut y_lag_tilde_all: Vec<f64> = Vec::new();
-    let mut s2_all: Vec<f64> = Vec::new();
-    let mut t_eff_all: Vec<f64> = Vec::new();
-
-    for series in panels.values() {
-        let t = series.len();
-        if t <= lags + 2 {
-            continue;
-        }
-
-        // Compute first differences
-        let delta_y: Vec<f64> = series.windows(2).map(|w| w[1] - w[0]).collect();
-        let y_lag: Vec<f64> = series[0..t - 1].to_vec();
-
-        // Build design matrix for auxiliary regression
-        let t_eff = delta_y.len() - lags;
-        if t_eff < 3 {
-            continue;
-        }
-
-        // Regress Δy on deterministics and lagged Δy, get residuals e_t
-        // Regress y_{t-1} on same, get residuals v_{t-1}
-        let (e, v) = compute_llc_residuals(&delta_y, &y_lag, model, lags)?;
-
-        if e.len() != v.len() || e.is_empty() {
-            continue;
-        }
-
-        // Compute panel-specific variance
+    let mut s2_all: Vec<f64> = Vec::with_capacity(units.len());
+    for (_, (_, e, v)) in &units {
+        // Panel-specific variance
         let s2: f64 = e.iter().map(|ei| ei * ei).sum::<f64>() / e.len() as f64;
         s2_all.push(s2.max(1e-10));
-        t_eff_all.push(e.len() as f64);
 
         // Standardize residuals by sqrt(s2)
         let s = s2.sqrt().max(1e-10);
-        for ei in &e {
-            delta_y_tilde_all.push(ei / s);
-        }
-        for vi in &v {
-            y_lag_tilde_all.push(vi / s);
-        }
+        delta_y_tilde_all.extend(e.iter().map(|ei| ei / s));
+        y_lag_tilde_all.extend(v.iter().map(|vi| vi / s));
     }
-
-    if delta_y_tilde_all.is_empty() || y_lag_tilde_all.is_empty() {
-        return Err(EconError::InsufficientData {
-            required: 10,
-            provided: 0,
-            context: "LLC test: no valid residuals".to_string(),
-        });
-    }
+    let used: Vec<usize> = units.iter().map(|(i, _)| *i).collect();
+    let unit_lags: Vec<usize> = units.iter().map(|(_, (p, _, _))| *p).collect();
+    let n = used.len();
+    let avg_t: f64 = used.iter().map(|&i| panels[i].1.len() as f64).sum::<f64>() / n as f64;
 
     // Step 2: Pooled regression of standardized residuals
     // Δ̃y = ρ * ṽ_{t-1} + error
@@ -518,7 +1132,7 @@ fn run_llc_test(
 
     // Compute standard error
     let resid: Array1<f64> = &delta_y_tilde - &y_lag_tilde.mapv(|v| v * rho_hat);
-    let s2_resid: f64 = resid.iter().map(|r| r * r).sum::<f64>() / (n_obs - 1) as f64;
+    let s2_resid: f64 = resid.iter().map(|r| r * r).sum::<f64>() / n_obs.saturating_sub(1) as f64;
     let se_rho = (s2_resid / sum_vv).sqrt();
 
     // Compute t-statistic
@@ -538,49 +1152,38 @@ fn run_llc_test(
     // P-value from standard normal
     let p_value = normal_cdf(t_star);
 
-    Ok(PanelUnitRootResult {
-        test_type: PanelUnitRootTest::LLC,
+    Ok(unit_root_result(
+        PanelUnitRootTest::LLC,
         model,
-        statistic: t_star,
+        t_star,
         p_value,
-        null_hypothesis: "Panels contain unit roots (common ρ = 0)".to_string(),
-        alternative_hypothesis: "Panels are stationary (common ρ < 0)".to_string(),
-        n_panels: n,
-        avg_time_periods: avg_t,
-        lags_used: lags,
-        unit_statistics: None,
-        unit_p_values: None,
-        warnings: Vec::new(),
-        missing: MissingSummary::default(),
-    })
+        (
+            "Panels contain unit roots (common ρ = 0)",
+            "Panels are stationary (common ρ < 0)",
+        ),
+        panels,
+        &used,
+        unit_lags,
+        warnings,
+    ))
 }
 
-/// Compute LLC auxiliary regression residuals.
+/// LLC auxiliary regression residuals of one unit: Δy and y_{t-1} on the deterministic
+/// terms and `lags` lagged differences, on rows `lags + 1..T`.
 fn compute_llc_residuals(
-    delta_y: &[f64],
-    y_lag: &[f64],
+    series: &[f64],
     model: PanelModel,
     lags: usize,
-) -> EconResult<(Vec<f64>, Vec<f64>)> {
+) -> Result<(Vec<f64>, Vec<f64>), UnitError> {
+    adf_length_check(series.len(), model, lags)?;
+    let delta_y: Vec<f64> = series.windows(2).map(|w| w[1] - w[0]).collect();
+    let y_lag = &series[..series.len() - 1];
     let t = delta_y.len();
     let t_eff = t - lags;
 
-    if t_eff < 3 {
-        return Err(EconError::InsufficientData {
-            required: 3,
-            provided: t_eff,
-            context: "LLC residuals".to_string(),
-        });
-    }
-
-    // Build design matrix: [intercept, trend?, lagged Δy_1, ..., lagged Δy_p]
-    let n_cols = match model {
-        PanelModel::None => lags,
-        PanelModel::Intercept => 1 + lags,
-        PanelModel::Trend => 2 + lags,
-    };
-
-    let mut x = Array2::zeros((t_eff, n_cols.max(1)));
+    // Design matrix: [intercept, trend?, lagged Δy_1, ..., lagged Δy_p]
+    let n_cols = n_det(model) + lags;
+    let mut x = resource::try_zeros2(t_eff, n_cols, "LLC auxiliary regression")?;
     let mut dy_vec = Vec::with_capacity(t_eff);
     let mut ylag_vec = Vec::with_capacity(t_eff);
 
@@ -599,51 +1202,25 @@ fn compute_llc_residuals(
             col += 1;
         }
         for j in 0..lags {
-            if i > j {
-                x[[row, col + j]] = delta_y[i - j - 1];
-            }
+            x[[row, col + j]] = delta_y[i - j - 1];
         }
     }
 
-    let dy = Array1::from(dy_vec.clone());
-    let ylag = Array1::from(ylag_vec.clone());
-
     if n_cols == 0 {
-        // No regressors, residuals are just the data
+        // No regressors (no deterministic terms, no lags): the data are the residuals.
         return Ok((dy_vec, ylag_vec));
     }
 
-    // Regress dy on X to get residuals e
-    let xtx_mat = xtx(&x.view());
-    let xty_dy = xty(&x.view(), &dy);
-    let xty_ylag = xty(&x.view(), &ylag);
-
-    let beta_dy = match safe_inverse(&xtx_mat.view()) {
-        Ok((inv, _)) => inv.dot(&xty_dy),
-        Err(_) => return Ok((dy_vec, ylag_vec)), // Fall back to original
-    };
-
-    let beta_ylag = match safe_inverse(&xtx_mat.view()) {
-        Ok((inv, _)) => inv.dot(&xty_ylag),
-        Err(_) => return Ok((dy_vec, ylag_vec)),
-    };
-
-    // Compute residuals
-    let e: Vec<f64> = (0..t_eff)
-        .map(|i| {
-            let pred: f64 = (0..n_cols).map(|j| x[[i, j]] * beta_dy[j]).sum();
-            dy[i] - pred
-        })
-        .collect();
-
-    let v: Vec<f64> = (0..t_eff)
-        .map(|i| {
-            let pred: f64 = (0..n_cols).map(|j| x[[i, j]] * beta_ylag[j]).sum();
-            ylag[i] - pred
-        })
-        .collect();
-
-    Ok((e, v))
+    let dy = least_squares(x.view(), ArrayView1::from(&dy_vec))?;
+    if dy.rank < n_cols {
+        return Err(rank_deficient(
+            format!("the LLC auxiliary regression with {lags} lag(s)"),
+            dy.rank,
+            n_cols,
+        ));
+    }
+    let v = least_squares(x.view(), ArrayView1::from(&ylag_vec))?;
+    Ok((dy.residuals.to_vec(), v.residuals.to_vec()))
 }
 
 /// Get LLC adjustment factors (μ*, σ*) based on T and model.
@@ -681,6 +1258,29 @@ fn get_llc_adjustment_factors(avg_t: f64, model: PanelModel) -> (f64, f64) {
 // Im-Pesaran-Shin Test
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Every unit's lag order and ADF regression; units that cannot be estimated are skipped.
+fn unit_adf_fits(
+    test: PanelUnitRootTest,
+    panels: &[(String, Vec<f64>)],
+    model: PanelModel,
+    plan: &LagPlan,
+    dfcor: bool,
+) -> EconResult<(Vec<usize>, Vec<usize>, Vec<AdfFit>, Vec<String>)> {
+    let (units, warnings) = skip_or_propagate(test, panels, |series| {
+        let p = unit_lag(series, plan, model, dfcor)?;
+        Ok((p, adf_regression(series, model, p, dfcor)?))
+    })?;
+    let mut used = Vec::with_capacity(units.len());
+    let mut lags = Vec::with_capacity(units.len());
+    let mut fits = Vec::with_capacity(units.len());
+    for (i, (p, fit)) in units {
+        used.push(i);
+        lags.push(p);
+        fits.push(fit);
+    }
+    Ok((used, lags, fits, warnings))
+}
+
 /// Im-Pesaran-Shin (2003) panel unit root test.
 ///
 /// Tests H0: All panels have a unit root (heterogeneous ρ_i = 0)
@@ -689,35 +1289,16 @@ fn get_llc_adjustment_factors(avg_t: f64, model: PanelModel) -> (f64, f64) {
 /// Based on averaging individual ADF t-statistics and using
 /// tabulated means and variances for standardization.
 fn run_ips_test(
-    panels: &BTreeMap<usize, Vec<f64>>,
+    panels: &[(String, Vec<f64>)],
     model: PanelModel,
-    lags: usize,
+    plan: &LagPlan,
+    dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
-    let n = panels.len();
-    let mut t_stats: Vec<f64> = Vec::with_capacity(n);
-    let mut t_lengths: Vec<usize> = Vec::with_capacity(n);
-
-    // Compute individual ADF t-statistics
-    for series in panels.values() {
-        match compute_adf_t_statistic(series, model, lags) {
-            Ok(t) => {
-                t_stats.push(t);
-                t_lengths.push(series.len());
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if t_stats.is_empty() {
-        return Err(EconError::InsufficientData {
-            required: 1,
-            provided: 0,
-            context: "IPS test: no valid t-statistics".to_string(),
-        });
-    }
-
+    let (used, unit_lags, fits, warnings) =
+        unit_adf_fits(PanelUnitRootTest::IPS, panels, model, plan, dfcor)?;
+    let t_stats: Vec<f64> = fits.iter().map(|f| f.t_stat).collect();
     let n_valid = t_stats.len();
-    let avg_t: f64 = t_lengths.iter().map(|&x| x as f64).sum::<f64>() / n_valid as f64;
+    let avg_t: f64 = used.iter().map(|&i| panels[i].1.len() as f64).sum::<f64>() / n_valid as f64;
 
     // Compute average t-statistic
     let t_bar: f64 = t_stats.iter().sum::<f64>() / n_valid as f64;
@@ -731,116 +1312,22 @@ fn run_ips_test(
     // P-value from standard normal
     let p_value = normal_cdf(w_stat);
 
-    Ok(PanelUnitRootResult {
-        test_type: PanelUnitRootTest::IPS,
+    let mut r = unit_root_result(
+        PanelUnitRootTest::IPS,
         model,
-        statistic: w_stat,
+        w_stat,
         p_value,
-        null_hypothesis: "All panels have unit roots (ρ_i = 0 for all i)".to_string(),
-        alternative_hypothesis: "Some panels are stationary (ρ_i < 0 for some i)".to_string(),
-        n_panels: n,
-        avg_time_periods: avg_t,
-        lags_used: lags,
-        unit_statistics: Some(t_stats),
-        unit_p_values: None,
-        warnings: Vec::new(),
-        missing: MissingSummary::default(),
-    })
-}
-
-/// Compute ADF t-statistic for a single series.
-fn compute_adf_t_statistic(series: &[f64], model: PanelModel, lags: usize) -> EconResult<f64> {
-    let t = series.len();
-    if t <= lags + 3 {
-        return Err(EconError::InsufficientData {
-            required: lags + 4,
-            provided: t,
-            context: "ADF t-statistic".to_string(),
-        });
-    }
-
-    // Compute first differences: ΔY_t = Y_t - Y_{t-1}
-    // delta_y[i] = series[i+1] - series[i], so delta_y has length t-1
-    let delta_y: Vec<f64> = series.windows(2).map(|w| w[1] - w[0]).collect();
-    let n_diff = delta_y.len(); // t - 1
-
-    // Effective sample size: we lose 1 for differencing, lags for lagged differences
-    // So t_eff = (t - 1) - lags = t - lags - 1
-    let t_eff = n_diff.saturating_sub(lags);
-    if t_eff < 3 {
-        return Err(EconError::InsufficientData {
-            required: 3,
-            provided: t_eff,
-            context: "ADF regression".to_string(),
-        });
-    }
-
-    // Build design matrix: [y_{t-1}, intercept?, trend?, Δy_{t-1}, ..., Δy_{t-p}]
-    let n_det = match model {
-        PanelModel::None => 0,
-        PanelModel::Intercept => 1,
-        PanelModel::Trend => 2,
-    };
-    let k = 1 + n_det + lags; // y_lag + deterministics + lagged differences
-
-    let mut x = Array2::zeros((t_eff, k));
-    let mut y = Array1::zeros(t_eff);
-
-    for i in 0..t_eff {
-        // obs is the index in delta_y that we're regressing
-        // We need lags previous delta_y values, so start at index `lags`
-        let obs = i + lags; // Index in delta_y
-
-        y[i] = delta_y[obs];
-
-        // y_{t-1} in original series: delta_y[obs] = series[obs+1] - series[obs]
-        // So y_{t-1} = series[obs]
-        x[[i, 0]] = series[obs];
-
-        let mut col = 1;
-
-        // Deterministics
-        if model == PanelModel::Intercept || model == PanelModel::Trend {
-            x[[i, col]] = 1.0;
-            col += 1;
-        }
-        if model == PanelModel::Trend {
-            x[[i, col]] = (obs + 2) as f64; // Time trend (1-indexed)
-            col += 1;
-        }
-
-        // Lagged differences: Δy_{t-1}, Δy_{t-2}, ..., Δy_{t-p}
-        for j in 0..lags {
-            let lag_idx = obs - j - 1;
-            if lag_idx < n_diff {
-                x[[i, col + j]] = delta_y[lag_idx];
-            }
-        }
-    }
-
-    // OLS: β = (X'X)^{-1} X'y
-    let xtx_mat = xtx(&x.view());
-    let xty_vec = xty(&x.view(), &y);
-
-    let (inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
-        context: "ADF regression X'X".to_string(),
-        suggestion: "Check for multicollinearity or constant regressors".to_string(),
-    })?;
-
-    let beta = inv.dot(&xty_vec);
-
-    // Residuals and variance
-    let fitted: Array1<f64> = x.dot(&beta);
-    let residuals = &y - &fitted;
-    let s2 = residuals.iter().map(|r| r * r).sum::<f64>() / (t_eff - k) as f64;
-
-    // Standard error of ρ̂ (coefficient on y_{t-1})
-    let se_rho = (s2 * inv[[0, 0]]).sqrt();
-
-    // t-statistic
-    let t_stat = beta[0] / se_rho.max(1e-10);
-
-    Ok(t_stat)
+        (
+            "All panels have unit roots (ρ_i = 0 for all i)",
+            "Some panels are stationary (ρ_i < 0 for some i)",
+        ),
+        panels,
+        &used,
+        unit_lags,
+        warnings,
+    );
+    r.unit_statistics = Some(t_stats);
+    Ok(r)
 }
 
 /// Get IPS (2003) expected mean and variance of t-statistic.
@@ -879,62 +1366,46 @@ fn get_ips_moments(avg_t: f64, model: PanelModel) -> (f64, f64) {
 ///
 /// This test allows for unbalanced panels and heterogeneous lag structures.
 fn run_fisher_test(
-    panels: &BTreeMap<usize, Vec<f64>>,
+    panels: &[(String, Vec<f64>)],
     model: PanelModel,
-    lags: usize,
+    plan: &LagPlan,
+    dfcor: bool,
 ) -> EconResult<PanelUnitRootResult> {
-    let n = panels.len();
-    let mut p_values: Vec<f64> = Vec::with_capacity(n);
-    let mut t_stats: Vec<f64> = Vec::with_capacity(n);
-    let mut t_lengths: Vec<usize> = Vec::with_capacity(n);
-
-    for series in panels.values() {
-        match compute_adf_t_statistic(series, model, lags) {
-            Ok(t) => {
-                // Convert t-statistic to p-value using Fuller distribution approximation
-                let df = (series.len() - lags - 2) as u32;
-                let p = adf_p_value(t, df, model);
-                p_values.push(p.max(1e-10).min(1.0 - 1e-10));
-                t_stats.push(t);
-                t_lengths.push(series.len());
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if p_values.is_empty() {
-        return Err(EconError::InsufficientData {
-            required: 1,
-            provided: 0,
-            context: "Fisher test: no valid p-values".to_string(),
-        });
-    }
-
+    let (used, unit_lags, fits, warnings) =
+        unit_adf_fits(PanelUnitRootTest::Fisher, panels, model, plan, dfcor)?;
+    let t_stats: Vec<f64> = fits.iter().map(|f| f.t_stat).collect();
+    let p_values: Vec<f64> = fits
+        .iter()
+        .map(|f| {
+            let df = u32::try_from(f.df_resid).unwrap_or(u32::MAX);
+            adf_p_value(f.t_stat, df, model).clamp(1e-10, 1.0 - 1e-10)
+        })
+        .collect();
     let n_valid = p_values.len();
-    let avg_t: f64 = t_lengths.iter().map(|&x| x as f64).sum::<f64>() / n_valid as f64;
 
     // Fisher statistic: P = -2 Σ ln(p_i)
     let fisher_stat: f64 = -2.0 * p_values.iter().map(|p| p.ln()).sum::<f64>();
 
     // P-value from χ²(2N)
-    let df = 2.0 * n_valid as f64;
-    let p_value = 1.0 - chi_squared_cdf(fisher_stat, df);
+    let p_value = chi_squared_p_value(fisher_stat, 2.0 * n_valid as f64);
 
-    Ok(PanelUnitRootResult {
-        test_type: PanelUnitRootTest::Fisher,
+    let mut r = unit_root_result(
+        PanelUnitRootTest::Fisher,
         model,
-        statistic: fisher_stat,
+        fisher_stat,
         p_value,
-        null_hypothesis: "All panels have unit roots".to_string(),
-        alternative_hypothesis: "At least one panel is stationary".to_string(),
-        n_panels: n,
-        avg_time_periods: avg_t,
-        lags_used: lags,
-        unit_statistics: Some(t_stats),
-        unit_p_values: Some(p_values),
-        warnings: Vec::new(),
-        missing: MissingSummary::default(),
-    })
+        (
+            "All panels have unit roots",
+            "At least one panel is stationary",
+        ),
+        panels,
+        &used,
+        unit_lags,
+        warnings,
+    );
+    r.unit_statistics = Some(t_stats);
+    r.unit_p_values = Some(p_values);
+    Ok(r)
 }
 
 /// Approximate p-value for ADF t-statistic using MacKinnon (1996) critical values.
@@ -965,33 +1436,17 @@ fn adf_p_value(t_stat: f64, _df: u32, model: PanelModel) -> f64 {
 ///
 /// Based on KPSS-type LM statistics averaged across panels.
 fn run_hadri_test(
-    panels: &BTreeMap<usize, Vec<f64>>,
+    panels: &[(String, Vec<f64>)],
     model: PanelModel,
 ) -> EconResult<PanelUnitRootResult> {
-    let n = panels.len();
-    let mut lm_stats: Vec<f64> = Vec::with_capacity(n);
-    let mut t_lengths: Vec<usize> = Vec::with_capacity(n);
-
-    for series in panels.values() {
-        match compute_kpss_statistic(series, model) {
-            Ok(lm) => {
-                lm_stats.push(lm);
-                t_lengths.push(series.len());
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if lm_stats.is_empty() {
-        return Err(EconError::InsufficientData {
-            required: 1,
-            provided: 0,
-            context: "Hadri test: no valid LM statistics".to_string(),
-        });
+    let mut lm_stats: Vec<f64> = Vec::with_capacity(panels.len());
+    for (_, series) in panels {
+        resource::checkpoint()?;
+        lm_stats.push(compute_kpss_statistic(series, model)?);
     }
 
     let n_valid = lm_stats.len();
-    let avg_t: f64 = t_lengths.iter().map(|&x| x as f64).sum::<f64>() / n_valid as f64;
+    let used: Vec<usize> = (0..n_valid).collect();
 
     // Average LM statistic
     let lm_bar: f64 = lm_stats.iter().sum::<f64>() / n_valid as f64;
@@ -1003,23 +1458,21 @@ fn run_hadri_test(
     let z_stat = (n_valid as f64).sqrt() * (lm_bar - mu) / sigma2.sqrt();
 
     // P-value (one-sided, upper tail)
-    let p_value = 1.0 - normal_cdf(z_stat);
+    let p_value = Normal::standard().sf(z_stat);
 
-    Ok(PanelUnitRootResult {
-        test_type: PanelUnitRootTest::Hadri,
+    let mut r = unit_root_result(
+        PanelUnitRootTest::Hadri,
         model,
-        statistic: z_stat,
+        z_stat,
         p_value,
-        null_hypothesis: "All panels are stationary".to_string(),
-        alternative_hypothesis: "Some panels have unit roots".to_string(),
-        n_panels: n,
-        avg_time_periods: avg_t,
-        lags_used: 0,
-        unit_statistics: Some(lm_stats),
-        unit_p_values: None,
-        warnings: Vec::new(),
-        missing: MissingSummary::default(),
-    })
+        ("All panels are stationary", "Some panels have unit roots"),
+        panels,
+        &used,
+        Vec::new(),
+        Vec::new(),
+    );
+    r.unit_statistics = Some(lm_stats);
+    Ok(r)
 }
 
 /// Compute KPSS-type LM statistic for a single series.
@@ -1034,36 +1487,22 @@ fn compute_kpss_statistic(series: &[f64], model: PanelModel) -> EconResult<f64> 
     }
 
     // Detrend the series
-    let residuals = match model {
+    let residuals: Vec<f64> = match model {
         PanelModel::None => series.to_vec(),
         PanelModel::Intercept => {
             let mean: f64 = series.iter().sum::<f64>() / t as f64;
             series.iter().map(|&x| x - mean).collect()
         }
         PanelModel::Trend => {
-            // Regress on constant and trend
-            let mut x = Array2::zeros((t, 2));
+            // Regress on constant and trend (full rank for t >= 2)
+            let mut x = resource::try_zeros2(t, 2, "KPSS trend regression")?;
             for i in 0..t {
                 x[[i, 0]] = 1.0;
                 x[[i, 1]] = (i + 1) as f64;
             }
-            let y = Array1::from(series.to_vec());
-
-            let xtx_mat = xtx(&x.view());
-            let xty_vec = xty(&x.view(), &y);
-
-            match safe_inverse(&xtx_mat.view()) {
-                Ok((inv, _)) => {
-                    let beta = inv.dot(&xty_vec);
-                    (0..t)
-                        .map(|i| series[i] - beta[0] - beta[1] * (i + 1) as f64)
-                        .collect()
-                }
-                Err(_) => {
-                    let mean: f64 = series.iter().sum::<f64>() / t as f64;
-                    series.iter().map(|&x| x - mean).collect()
-                }
-            }
+            least_squares(x.view(), ArrayView1::from(series))?
+                .residuals
+                .to_vec()
         }
     };
 
@@ -1110,24 +1549,6 @@ fn get_hadri_moments(model: PanelModel) -> (f64, f64) {
             (1.0 / 15.0, 11.0 / 6300.0)
         }
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Helper Functions
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Chi-squared CDF approximation using Wilson-Hilferty transformation.
-fn chi_squared_cdf(x: f64, df: f64) -> f64 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    if df <= 0.0 {
-        return 1.0;
-    }
-
-    // Wilson-Hilferty approximation
-    let z = ((x / df).powf(1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df))) / (2.0 / (9.0 * df)).sqrt();
-    normal_cdf(z)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1200,12 +1621,8 @@ mod tests {
 
         assert_eq!(result.test_type, PanelUnitRootTest::LLC);
         assert_eq!(result.n_panels, 10);
-        // For stationary data, should reject H0 (unit root) at some level
-        // Note: small sample, might not always reject
-        println!(
-            "LLC stationary: stat={:.4}, p={:.4}",
-            result.statistic, result.p_value
-        );
+        assert!(result.statistic.is_finite());
+        assert!((0.0..=1.0).contains(&result.p_value));
     }
 
     #[test]
@@ -1220,11 +1637,11 @@ mod tests {
 
         let result = run_panel_unit_root(&dataset, "y_ur", "unit", "time", config).unwrap();
 
-        // For unit root data, should NOT reject H0
-        println!(
-            "LLC unit root: stat={:.4}, p={:.4}",
-            result.statistic, result.p_value
-        );
+        // The value is not checked: the LLC statistic is ECON-41 (Tier 4).
+        assert_eq!(result.n_panels, 10);
+        assert_eq!(result.lags_used, 1);
+        assert!(result.statistic.is_finite());
+        assert!((0.0..=1.0).contains(&result.p_value));
     }
 
     #[test]
@@ -1240,8 +1657,8 @@ mod tests {
         let result = run_panel_unit_root(&dataset, "y_stat", "unit", "time", config).unwrap();
 
         assert_eq!(result.test_type, PanelUnitRootTest::IPS);
-        assert!(result.unit_statistics.is_some());
-        println!("IPS: stat={:.4}, p={:.4}", result.statistic, result.p_value);
+        assert_eq!(result.unit_statistics.as_ref().map(Vec::len), Some(10));
+        assert!(result.statistic.is_finite());
     }
 
     #[test]
@@ -1257,11 +1674,8 @@ mod tests {
         let result = run_panel_unit_root(&dataset, "y_stat", "unit", "time", config).unwrap();
 
         assert_eq!(result.test_type, PanelUnitRootTest::Fisher);
-        assert!(result.unit_p_values.is_some());
-        println!(
-            "Fisher: stat={:.4}, p={:.4}",
-            result.statistic, result.p_value
-        );
+        assert_eq!(result.unit_p_values.as_ref().map(Vec::len), Some(10));
+        assert!((0.0..=1.0).contains(&result.p_value));
     }
 
     #[test]
@@ -1276,11 +1690,10 @@ mod tests {
         let result = run_panel_unit_root(&dataset, "y_stat", "unit", "time", config).unwrap();
 
         assert_eq!(result.test_type, PanelUnitRootTest::Hadri);
-        // Hadri: H0 is stationarity, so for stationary data, should NOT reject
-        println!(
-            "Hadri: stat={:.4}, p={:.4}",
-            result.statistic, result.p_value
-        );
+        assert_eq!(result.n_panels, 10);
+        assert!(result.unit_lags.is_empty());
+        assert!(result.statistic.is_finite());
+        assert!((0.0..=1.0).contains(&result.p_value));
     }
 
     #[test]
@@ -1299,12 +1712,28 @@ mod tests {
             unit_p_values: None,
             warnings: vec!["w".into()],
             missing: Default::default(),
+            unit_ids: Vec::new(),
+            unit_lags: vec![1, 2, 1],
+            lag_selection: "AIC per unit, pmax = 2".into(),
+            dfcor: false,
         };
 
         let display = format!("{}", result);
         assert!(display.contains("Levin-Lin-Chu"));
         assert!(display.contains("10"));
         assert!(display.contains("Warnings:"));
+        assert!(
+            display.contains("Lags:       AIC per unit, pmax = 2\n"),
+            "{display}"
+        );
+        assert!(
+            display.contains("per unit: min 1, max 2, mean 1.33"),
+            "{display}"
+        );
+        assert!(
+            display.contains("rss/n (dfcor = false, plm's default)"),
+            "{display}"
+        );
     }
     // ── Data extraction (validation/r/cases/econ_dynamic_panel.R, panel_pur_extraction) ──
 
@@ -1320,12 +1749,11 @@ mod tests {
     const AB_COMMON_GAP: &str = "validation/datasets/generated/ab_common_gap.csv";
 
     fn ips_one_lag() -> PanelUnitRootConfig {
-        PanelUnitRootConfig {
-            test_type: PanelUnitRootTest::IPS,
-            model: PanelModel::Intercept,
-            lags: Some(1),
-            max_lags: None,
-        }
+        let mut c = PanelUnitRootConfig::default();
+        c.test_type = PanelUnitRootTest::IPS;
+        c.model = PanelModel::Intercept;
+        c.lags = Some(1);
+        c
     }
 
     /// `ds` with column `column` added or replaced.
@@ -1458,5 +1886,550 @@ mod tests {
             matches!(&e, EconError::NonNumericColumn { column } if column == "unit"),
             "{e:?}"
         );
+    }
+
+    // ── Lag selection (validation/r/cases/econ_purtest.R, purtest_lag_selection) ──
+
+    fn purtest(
+        ds: &Dataset,
+        test: PanelUnitRootTest,
+        model: PanelModel,
+        sel: LagSelection,
+        dfcor: bool,
+    ) -> PanelUnitRootResult {
+        let mut c = PanelUnitRootConfig::default();
+        c.test_type = test;
+        c.model = model;
+        c.lag_selection = Some(sel);
+        c.pmax = Some(4);
+        c.dfcor = dfcor;
+        run_panel_unit_root(ds, "y", "id", "t", c).unwrap()
+    }
+
+    const RULES: [(LagSelection, &str); 3] = [
+        (LagSelection::Aic, "aic"),
+        (LagSelection::Sic, "sic"),
+        (LagSelection::Hall, "hall"),
+    ];
+
+    fn as_f64(v: &[usize]) -> Vec<f64> {
+        v.iter().map(|&p| p as f64).collect()
+    }
+
+    fn rule_label(sel: LagSelection) -> String {
+        format!("{sel} per unit, pmax = 4")
+    }
+
+    fn twelve_ids() -> Vec<String> {
+        (1..=12).map(|i| i.to_string()).collect()
+    }
+
+    #[test]
+    fn test_validate_purtest_lag_selection_ips() {
+        let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
+        // deviation ECON-43: the W-tbar statistic uses ad-hoc moments; ips_*_stat/_p are not compared
+        let mut c = Check::new(&case);
+        for (sel, rule) in RULES {
+            for dfcor in [false, true] {
+                let sfx = if dfcor { "_dfcor" } else { "" };
+                let r = purtest(
+                    &ds,
+                    PanelUnitRootTest::IPS,
+                    PanelModel::Intercept,
+                    sel,
+                    dfcor,
+                );
+                c.vector(
+                    &format!("ips_{rule}{sfx}_lags"),
+                    &as_f64(&r.unit_lags),
+                    Tol::exact(),
+                )
+                .vector(
+                    &format!("trho_{rule}{sfx}"),
+                    r.unit_statistics.as_deref().unwrap(),
+                    Tol::stat(480),
+                );
+                assert_eq!(r.n_panels, 12);
+                assert_eq!(r.lags_used, *r.unit_lags.iter().max().unwrap());
+                assert_eq!(r.unit_ids, twelve_ids());
+                assert_eq!(r.lag_selection, rule_label(sel));
+                assert_eq!(r.dfcor, dfcor);
+            }
+        }
+        let r = purtest(
+            &ds,
+            PanelUnitRootTest::IPS,
+            PanelModel::Trend,
+            LagSelection::Aic,
+            true,
+        );
+        c.vector("trend_lags_aic_dfcor", &as_f64(&r.unit_lags), Tol::exact())
+            .vector(
+                "trend_trho_aic_dfcor",
+                r.unit_statistics.as_deref().unwrap(),
+                Tol::stat(480),
+            );
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_purtest_lag_selection_llc() {
+        let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
+        // deviation ECON-41: levinlin_*_stat/_p not compared
+        let mut c = Check::new(&case);
+        for (sel, rule) in RULES {
+            for dfcor in [false, true] {
+                let sfx = if dfcor { "_dfcor" } else { "" };
+                let r = purtest(
+                    &ds,
+                    PanelUnitRootTest::LLC,
+                    PanelModel::Intercept,
+                    sel,
+                    dfcor,
+                );
+                c.vector(
+                    &format!("levinlin_{rule}{sfx}_lags"),
+                    &as_f64(&r.unit_lags),
+                    Tol::exact(),
+                );
+                assert_eq!(r.lags_used, *r.unit_lags.iter().max().unwrap());
+                assert_eq!(r.lag_selection, rule_label(sel));
+                assert_eq!(r.unit_ids, twelve_ids());
+            }
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_purtest_lag_selection_madwu() {
+        let (case, ds) = crate::test_support::load_case("purtest_lag_selection");
+        // deviation ECON-44: madwu_*_stat/_p and ptrho_* not compared
+        let mut c = Check::new(&case);
+        for (sel, rule) in RULES {
+            for dfcor in [false, true] {
+                let sfx = if dfcor { "_dfcor" } else { "" };
+                let r = purtest(
+                    &ds,
+                    PanelUnitRootTest::Fisher,
+                    PanelModel::Intercept,
+                    sel,
+                    dfcor,
+                );
+                c.vector(
+                    &format!("madwu_{rule}{sfx}_lags"),
+                    &as_f64(&r.unit_lags),
+                    Tol::exact(),
+                )
+                .vector(
+                    &format!("trho_{rule}{sfx}"),
+                    r.unit_statistics.as_deref().unwrap(),
+                    Tol::stat(480),
+                );
+                assert_eq!(r.n_panels, 12);
+            }
+        }
+        let r = purtest(
+            &ds,
+            PanelUnitRootTest::Fisher,
+            PanelModel::None,
+            LagSelection::Sic,
+            true,
+        );
+        c.vector("none_lags_sic_dfcor", &as_f64(&r.unit_lags), Tol::exact())
+            .vector(
+                "none_trho_sic_dfcor",
+                r.unit_statistics.as_deref().unwrap(),
+                Tol::stat(480),
+            );
+        c.finish();
+    }
+
+    /// Property test (no R value): AIC and SIC, and Hall under the two variances, choose
+    /// different orders on `purtest_panel`.
+    #[test]
+    fn test_lag_selection_rules_give_different_lags() {
+        let ds = repo_dataset("validation/datasets/generated/purtest_panel.csv");
+        let ips = |sel, dfcor| {
+            purtest(
+                &ds,
+                PanelUnitRootTest::IPS,
+                PanelModel::Intercept,
+                sel,
+                dfcor,
+            )
+        };
+        let aic = ips(LagSelection::Aic, false);
+        let sic = ips(LagSelection::Sic, false);
+        assert_eq!(aic.unit_lags, [4, 1, 2, 3, 1, 2, 3, 4, 1, 0, 2, 1]);
+        assert_eq!(sic.unit_lags, [2, 1, 1, 1, 1, 2, 2, 0, 1, 0, 1, 1]);
+        assert_ne!(aic.unit_statistics, sic.unit_statistics);
+        let hall = ips(LagSelection::Hall, false);
+        let hall_dfcor = ips(LagSelection::Hall, true);
+        assert_eq!((hall.unit_lags[0], hall_dfcor.unit_lags[0]), (4, 2));
+        assert_eq!(hall.unit_lags[1..], hall_dfcor.unit_lags[1..]);
+    }
+
+    #[test]
+    fn test_panel_unit_root_test_parses_aliases_and_rejects_unknown() {
+        PanelUnitRootTest::choices().validate().unwrap();
+        for (s, t) in [
+            ("llc", PanelUnitRootTest::LLC),
+            ("LLC", PanelUnitRootTest::LLC),
+            ("levinlin", PanelUnitRootTest::LLC),
+            ("Levin-Lin-Chu", PanelUnitRootTest::LLC),
+            ("ips", PanelUnitRootTest::IPS),
+            ("im_pesaran_shin", PanelUnitRootTest::IPS),
+            ("madwu", PanelUnitRootTest::Fisher),
+            ("Maddala-Wu", PanelUnitRootTest::Fisher),
+            ("fisher", PanelUnitRootTest::Fisher),
+            ("hadri", PanelUnitRootTest::Hadri),
+        ] {
+            assert_eq!(s.parse::<PanelUnitRootTest>().unwrap(), t, "{s}");
+        }
+        let e = "llc2".parse::<PanelUnitRootTest>().unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("'llc2'") && message.contains("llc, ips, madwu, hadri")),
+            "{e:?}"
+        );
+        // The long Display labels stay.
+        assert_eq!(PanelUnitRootTest::Fisher.to_string(), "Fisher (Maddala-Wu)");
+    }
+
+    #[test]
+    fn test_panel_model_parses_aliases_and_rejects_unknown() {
+        PanelModel::choices().validate().unwrap();
+        for (s, m) in [
+            ("none", PanelModel::None),
+            ("nc", PanelModel::None),
+            ("intercept", PanelModel::Intercept),
+            ("drift", PanelModel::Intercept),
+            ("c", PanelModel::Intercept),
+            ("const", PanelModel::Intercept),
+            ("trend", PanelModel::Trend),
+            ("ct", PanelModel::Trend),
+        ] {
+            assert_eq!(s.parse::<PanelModel>().unwrap(), m, "{s}");
+        }
+        let e = "quadratic".parse::<PanelModel>().unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("none, intercept, trend")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_lag_selection_parses_aliases_and_rejects_unknown() {
+        LAG_RULES.validate().unwrap();
+        assert_eq!(
+            LagSelection::from_option("AIC", None).unwrap(),
+            LagSelection::Aic
+        );
+        assert_eq!(
+            LagSelection::from_option("bic", None).unwrap(),
+            LagSelection::Sic
+        );
+        assert_eq!(
+            LagSelection::from_option("Schwarz", None).unwrap(),
+            LagSelection::Sic
+        );
+        assert_eq!(
+            LagSelection::from_option("t-sig", None).unwrap(),
+            LagSelection::Hall
+        );
+        assert_eq!(
+            LagSelection::from_option("fixed", Some(2)).unwrap(),
+            LagSelection::Fixed(2)
+        );
+        for (name, lags) in [("fixed", None), ("aic", Some(2))] {
+            let e = LagSelection::from_option(name, lags).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("lags")),
+                "{e:?}"
+            );
+        }
+        let e = LagSelection::from_option("gts", None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains("fixed, aic, sic, hall")),
+            "{e:?}"
+        );
+        assert_eq!(LagSelection::names_help(), "fixed | aic | sic | hall");
+        assert_eq!(LagSelection::Fixed(2).to_string(), "fixed (2)");
+    }
+
+    #[test]
+    fn test_lag_selection_config_conflicts_are_errors() {
+        let ds = repo_dataset("validation/datasets/generated/purtest_panel.csv");
+        let run = |f: &dyn Fn(&mut PanelUnitRootConfig)| {
+            let mut c = PanelUnitRootConfig::default();
+            c.test_type = PanelUnitRootTest::IPS;
+            f(&mut c);
+            run_panel_unit_root(&ds, "y", "id", "t", c)
+        };
+        let message = |r: EconResult<PanelUnitRootResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            message(run(&|c| {
+                c.lag_selection = Some(LagSelection::Sic);
+                c.lags = Some(2);
+            })),
+            "lags fixes the lag order and cannot be combined with lag_selection = sic (use pmax)"
+        );
+        assert_eq!(
+            message(run(&|c| {
+                c.lag_selection = Some(LagSelection::Fixed(2));
+                c.lags = Some(3);
+            })),
+            "lags = 3 conflicts with lag_selection = fixed (2)"
+        );
+        assert_eq!(
+            message(run(&|c| {
+                c.lag_selection = Some(LagSelection::Aic);
+                c.pmax = Some(0);
+            })),
+            "pmax must be at least 1 for lag selection (got 0)"
+        );
+        assert_eq!(
+            message(run(&|c| {
+                c.lag_selection = Some(LagSelection::Hall);
+                c.pmax = Some(3);
+                c.max_lags = Some(4);
+            })),
+            "pmax and max_lags give different maximum lags (3, 4)"
+        );
+        assert_eq!(
+            message(run(&|c| {
+                c.test_type = PanelUnitRootTest::Hadri;
+                c.lag_selection = Some(LagSelection::Aic);
+            })),
+            "the Hadri test uses no lagged differences; lag_selection and pmax do not apply"
+        );
+        assert_eq!(
+            message(run(&|c| c.pmax = Some(2))),
+            "pmax applies only to lag_selection = aic, sic or hall"
+        );
+        // pmax = 19 needs 3 + 1 + 38 = 42 observations; every unit has 40.
+        match run(&|c| {
+            c.lag_selection = Some(LagSelection::Aic);
+            c.pmax = Some(19);
+        }) {
+            Err(EconError::InsufficientData {
+                required: 42,
+                provided: 40,
+                context,
+            }) => assert!(context.contains("pmax = 19"), "{context}"),
+            other => panic!("{other:?}"),
+        }
+        // Equal pmax and max_lags agree.
+        let r = run(&|c| {
+            c.lag_selection = Some(LagSelection::Aic);
+            c.pmax = Some(4);
+            c.max_lags = Some(4);
+        })
+        .unwrap();
+        assert_eq!(r.lag_selection, "AIC per unit, pmax = 4");
+    }
+
+    #[test]
+    fn test_default_lag_rule_is_unchanged() {
+        let ds = repo_dataset("validation/datasets/generated/purtest_panel.csv");
+        let mut c = PanelUnitRootConfig::default();
+        c.test_type = PanelUnitRootTest::IPS;
+        let r = run_panel_unit_root(&ds, "y", "id", "t", c.clone()).unwrap();
+        assert_eq!(r.lags_used, 3);
+        assert!(r.unit_lags.iter().all(|&p| p == 3), "{:?}", r.unit_lags);
+        assert_eq!(r.lag_selection, "3 (fixed: floor(T_max^(1/3)))");
+        c.lag_selection = Some(LagSelection::Fixed(3));
+        let fixed = run_panel_unit_root(&ds, "y", "id", "t", c.clone()).unwrap();
+        assert_eq!(fixed.lag_selection, "3 (fixed by the user)");
+        let bits = |r: &PanelUnitRootResult| {
+            r.unit_statistics
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|t| t.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&r), bits(&fixed));
+        // A binding max_lags is labelled so.
+        c.lag_selection = None;
+        c.max_lags = Some(2);
+        let capped = run_panel_unit_root(&ds, "y", "id", "t", c).unwrap();
+        assert_eq!(
+            capped.lag_selection,
+            "2 (fixed: min(floor(T_max^(1/3)), max_lags))"
+        );
+    }
+
+    // ── Short and degenerate units (ECON-42) ──
+
+    /// Units 1..=k with `lengths[k-1]` periods of an AR(1) (rho 0.5) with uniform noise.
+    fn noisy_panel(lengths: &[usize], seed: u64) -> Dataset {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(12345);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64 / 2147483648.0) - 1.0
+        };
+        let (mut unit, mut time, mut y) = (Vec::new(), Vec::new(), Vec::new());
+        for (k, &len) in lengths.iter().enumerate() {
+            let mut v = 0.0;
+            for t in 0..len {
+                v = 0.5 * v + next();
+                unit.push(k as i64 + 1);
+                time.push(t as i64 + 1);
+                y.push(v);
+            }
+        }
+        Dataset::new(
+            DataFrame::new(vec![
+                Column::new("unit".into(), unit),
+                Column::new("time".into(), time),
+                Column::new("y".into(), y),
+            ])
+            .unwrap(),
+        )
+    }
+
+    /// `noisy_panel(&[t_len; k], seed)` plus unit `k + 1` with y = 2, 4, ..., 2 t_len.
+    fn noisy_panel_with_linear_unit(k: usize, t_len: usize, seed: u64) -> Dataset {
+        let mut df = noisy_panel(&vec![t_len; k], seed).df().clone();
+        let line = DataFrame::new(vec![
+            Column::new("unit".into(), vec![k as i64 + 1; t_len]),
+            Column::new("time".into(), (1..=t_len as i64).collect::<Vec<_>>()),
+            Column::new(
+                "y".into(),
+                (1..=t_len).map(|t| 2.0 * t as f64).collect::<Vec<_>>(),
+            ),
+        ])
+        .unwrap();
+        df.vstack_mut(&line).unwrap();
+        Dataset::new(df)
+    }
+
+    fn cfg(test: PanelUnitRootTest, model: PanelModel, lags: Option<usize>) -> PanelUnitRootConfig {
+        let mut c = PanelUnitRootConfig::default();
+        c.test_type = test;
+        c.model = model;
+        c.lags = lags;
+        c
+    }
+
+    #[test]
+    fn test_adf_rejects_short_panels() {
+        let short = noisy_panel(&[6; 5], 1);
+        for t in [
+            PanelUnitRootTest::IPS,
+            PanelUnitRootTest::Fisher,
+            PanelUnitRootTest::LLC,
+        ] {
+            // intercept, 2 lags: needs 3 + 1 + 4 = 8 observations
+            match run_panel_unit_root(
+                &short,
+                "y",
+                "unit",
+                "time",
+                cfg(t, PanelModel::Intercept, Some(2)),
+            ) {
+                Err(EconError::InsufficientData {
+                    required: 8,
+                    provided: 6,
+                    context,
+                }) => assert!(context.contains("2 lag"), "{context}"),
+                other => panic!("{t:?}: {other:?}"),
+            }
+        }
+        // default rule floor(5^(1/3)) = 1 with a trend: needs 7 > 5
+        assert!(matches!(
+            run_panel_unit_root(
+                &noisy_panel(&[5; 5], 2),
+                "y",
+                "unit",
+                "time",
+                cfg(PanelUnitRootTest::IPS, PanelModel::Trend, None)
+            ),
+            Err(EconError::InsufficientData {
+                required: 7,
+                provided: 5,
+                ..
+            })
+        ));
+        // df exactly 0 (trend, T = 8, 2 lags)
+        assert!(matches!(
+            run_panel_unit_root(
+                &noisy_panel(&[8; 5], 3),
+                "y",
+                "unit",
+                "time",
+                cfg(PanelUnitRootTest::IPS, PanelModel::Trend, Some(2))
+            ),
+            Err(EconError::InsufficientData {
+                required: 9,
+                provided: 8,
+                ..
+            })
+        ));
+        // unbalanced: nine units of 40 and one of 6 -> the short unit is skipped and named
+        let mut lengths = vec![40; 9];
+        lengths.push(6);
+        let r = run_panel_unit_root(
+            &noisy_panel(&lengths, 4),
+            "y",
+            "unit",
+            "time",
+            cfg(PanelUnitRootTest::IPS, PanelModel::Intercept, Some(2)),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                r.n_panels,
+                r.unit_statistics.as_ref().unwrap().len(),
+                r.unit_lags.len()
+            ),
+            (9, 9, 9)
+        );
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "Skipped 1 unit(s) whose ADF regression cannot be estimated: '10' (6 \
+                    observations; 2 lag(s) with an intercept need at least 8)"),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Skipped 1 unit(s)"));
+    }
+
+    #[test]
+    fn test_adf_and_llc_skip_rank_deficient_units() {
+        // unit 7 is the exact line y = 2 t: its lagged difference duplicates the intercept
+        let ds = noisy_panel_with_linear_unit(6, 20, 5);
+        for t in [
+            PanelUnitRootTest::IPS,
+            PanelUnitRootTest::Fisher,
+            PanelUnitRootTest::LLC,
+        ] {
+            let r = run_panel_unit_root(
+                &ds,
+                "y",
+                "unit",
+                "time",
+                cfg(t, PanelModel::Intercept, Some(1)),
+            )
+            .unwrap();
+            assert_eq!(r.n_panels, 6, "{t:?}");
+            assert_eq!(r.unit_ids, ["1", "2", "3", "4", "5", "6"], "{t:?}");
+            assert!(
+                r.warnings.iter().any(|w| w.starts_with(
+                    "Skipped 1 unit(s) whose ADF regression cannot be estimated: '7' (rank \
+                     deficient"
+                )),
+                "{t:?} {:?}",
+                r.warnings
+            );
+        }
     }
 }
