@@ -145,6 +145,64 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/linalg_glm.csv` | 120 × 12 (x1, x2, x3, x4, off, yb, yp, wq, yq, ysep, yc, w0) | `linalg_qr_glm` | `r/cases/linalg_glm.R` | seed 20261210; x3 = x1 - 2 x2 exactly (collinear); yb binomial (logit), yp Poisson with offset off, yq fractional with weights wq, ysep separated by x4, yc gaussian, w0 weights with 5 zeros |
 | `generated/quantile_sample.csv` | 28 × 3 (i, x, y; y missing in rows 8-28) | `stat_quantile_types` | `r/cases/stats_quantile.R` | seed 20261106; x: 23 normal draws (mean 10, sd 3, 3 decimals) plus ties 7.5 × 2 and 12 × 3; y: 7 fixed values |
 | `generated/glmnet_sim.csv` | 150 × 43 (y, yb, X1-X8, foldid, foldid7, K1-K30, yk) | `glmnet_paths` | `r/cases/reg_glmnet.R` | seed 20261122: X normal with X2 correlated with X1 and X5 scaled, y gaussian, yb binomial, foldid 5 random folds, foldid7 7 deterministic folds; seed 20261130: K1-K30 AR(0.85) design, yk with 8 nonzero coefficients (the KKT check) |
+| `generated/anova_oneway_legacy.csv` | 15 × 2 (yield, fertilizer) | `stat_anova_oneway_legacy` | `r/cases/stats_power_loglin.R` | literal values: the one-way fertilizer data of `anova.rs`'s legacy test |
+| `generated/anova_twoway_legacy.csv` | 12 × 3 (yield, fertilizer, water) | `stat_anova_twoway_legacy` | `r/cases/stats_power_loglin.R` | literal values: the two-way fertilizer × water data of `anova.rs`'s legacy test |
+| `generated/binary_glm.csv` | 400 × 10 (y, x1, x2, d, x1b, nd, xnc, ysep, yq, y012) | `disc_binary_glm` | `r/cases/discrete_mlogit_asc.R` | seed 20261021 |
+| `generated/blobs_noise.csv` | 115 × 2 (x, y) | `hdbscan_blobs`; read by `optics_blobs`, `silhouette_singletons` | `r/cases/ml_density_clustering.R` | seed 20261109 |
+| `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
+| `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |
+| `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax` | `r/cases/stats_power_loglin.R` | seed 20261118 |
+| `generated/feglm_panel.csv` | 480 × 7 (id, time, x, x2, y_gauss, y_bin, y_cnt) | `feglm_families` | `r/cases/econ_panel_t3.R` | seed 20261106 |
+| `generated/fisher_legacy.csv` | 4 × 5 (table, a, b, c, d) | `stat_fisher_legacy` | `r/cases/stats_power_loglin.R` | literal values: the four 2 × 2 tables of `fisher.rs`'s legacy tests |
+| `generated/garch_returns.csv` | 1500 × 5 (t, r_norm, r_t, r_g21, r_norm_dm) | `garch_normal_t` | `r/cases/ts_garch.R` | seed 20261105 |
+| `generated/gls_cs.csv` | 150 × 4 (g, y, x, z) | `gls_compsymm` | `r/cases/regression_smoothers_t3.R` | seed 20261120 |
+| `generated/granger_short.csv` | 20 × 2 (x, y) | `granger_short` | `r/cases/ts_var.R` | seed 20261113 |
+| `generated/hclust_60.csv` | 60 × 3 (a, b, c) | `hclust_methods`; read by `kmeans_lloyd_pca_mds`, `dynamic_tree_cut` | `r/cases/ml_hierarchical.R` | seed 20261110 |
+| `generated/hclust_ties.csv` | 40 × 2 (u, v) | `hclust_methods` | `r/cases/ml_hierarchical.R` | seed 7 |
+| `generated/hdfe_disconnected.csv` | 80 × 5 (firm, year, x, z, y) | `hdfe_disconnected` | `r/cases/econ_panel_t3.R` | seed 20261105 |
+| `generated/hdfe_scale.csv` | 1000 × 5 (firm, year, x, y, y_big) | `hdfe_map_scale` | `r/cases/econ_panel_t3.R` | seed 20261103 |
+| `generated/line_outliers.csv` | 30 × 2 (x, y) | `line_tukey_outliers` | `r/cases/regression_smoothers_t3.R` | literal values: x = 1:30, the old line test's y with outliers at x = 5, 15 and 25 |
+| `generated/loess_skewed.csv` | 100 × 2 (x, y) | `loess_skewed_direct` | `r/cases/regression_smoothers_t3.R` | seed 20261128 |
+| `generated/loess_x10.csv` | 10 × 2 (x, y) | `loess_x10_direct` | `r/cases/regression_smoothers_t3.R` | literal values: x = 1:10, near-linear y |
+| `generated/loglin_2x3x4.csv` | 24 × 4 (Var1, Var2, Var3, Freq) | `stat_loglin_nodecomp` | `r/cases/stats_power_loglin.R` | seed 20261116 |
+| `generated/matching_sim.csv` | 240 × 6 (id, treat, x1, x2, x3, y) | `matchit_nearest`; read by `matchit_full_cem`, `matchit_subclass` | `r/cases/causal_matching.R` | seed 20261128 |
+| `generated/mauchly_sigma.csv` | 15 × 4 (V1, V2, V3, V4) | `stat_mauchly_sigma` | `r/cases/stats_power_loglin.R` | seed 20261117 |
+| `generated/mcf_networks.csv` | 580 × 6 (network, kind, a, b, cap, cost) | `mcf_networks` | `r/cases/causal_matching.R` | seed 20261023 |
+| `generated/mlogit_fishing.csv` | 4728 × 6 (id, alt, chosen, price, catch, income) | `disc_mlogit_fishing` | `r/cases/discrete_mlogit_asc.R` | `mlogit::Fishing` in long form (`dfidx`), 1182 choice situations × 4 modes |
+| `generated/multinom_overlap.csv` | 300 × 3 (y, x1, x2) | `disc_multinom_overlap` | `r/cases/discrete_mlogit_asc.R` | seed 20261022 |
+| `generated/nls_expdecay.csv` | 11 × 2 (x, y) | `nls_expdecay` | `r/cases/regression_smoothers_t3.R` | literal values: the old nls test's exponential-decay data, x = 0, 0.5, ..., 5 |
+| `generated/nls_mm.csv` | 8 × 2 (S, V) | `nls_mm` | `r/cases/regression_smoothers_t3.R` | literal values: the old Michaelis-Menten test data |
+| `generated/ols_aliased.csv` | 120 × 9 (y, x1, x2, x3, da, db, dc, k5, cl) | `ols_aliased` | `r/cases/reg_rank_qr.R` | seed 20261118 |
+| `generated/ols_illcond.csv` | 80 × 4 (y, x1, x2, x3) | `ols_illcond` | `r/cases/reg_rank_qr.R` | seed 20261119 |
+| `generated/ols_year_trend.csv` | 5000 × 3 (y, year, z) | `ols_year_trend` | `r/cases/reg_rank_qr.R` | seed 20261104 |
+| `generated/p_adjust_vectors.csv` | 47 × 2 (vector, p) | `stat_p_adjust` | `r/cases/stats_power_loglin.R` | literal values: named p-value vectors (legacy, Hommel, ties, NA, single) |
+| `generated/pairwise_legacy.csv` | 36 × 3 (set, x, g) | `stat_pairwise_legacy` | `r/cases/stats_power_loglin.R` | literal values: the three sets of `pairwise.rs`'s legacy tests |
+| `generated/panel_absorbed.csv` | 180 × 8 (id, t, x1, x2, z, w, x3, y) | `panel_absorbed_regressors` | `r/cases/econ_panel_t3.R` | seed 20261104 |
+| `generated/pggls_panel.csv` | 200 × 5 (id, t, x1, x2, y) | `pggls_sim` | `r/cases/econ_panel_t3.R` | seed 20261101 |
+| `generated/purtest_panel.csv` | 480 × 3 (id, t, y) | `purtest_lag_selection` | `r/cases/econ_purtest.R` | seed 20261204 |
+| `generated/pvcm_panel.csv` | 240 × 5 (id, t, x1, x2, y) | `pvcm_pmg_sim` | `r/cases/econ_panel_t3.R` | seed 20261102 |
+| `generated/rank_binom_grid.csv` | 23 × 5 (label, x, n, p, stat15) | `stat_rank_binom` | `r/cases/stats_rank_t3.R` | literal values: 23 (x, n, p) cells; `stat15` marks the cells of STAT-15 |
+| `generated/rank_fligner.csv` | 102 × 3 (set, group, value) | `stat_rank_fligner` | `r/cases/stats_rank_t3.R` | literal values: the two examples the old tests quoted, and `datasets::InsectSprays` |
+| `generated/rank_friedman_rounding.csv` | 66 × 4 (block, method, time, first12) | `stat_rank_friedman_rounding` | `r/cases/stats_rank_t3.R` | literal values: the `?friedman.test` RoundingTimes data (22 players × 3 methods) in long form; `first12` marks the first 12 players |
+| `generated/rank_isoreg.csv` | 58 × 3 (set, x, y) | `stat_rank_isoreg` | `r/cases/stats_rank_t3.R` | seed 20261026 |
+| `generated/rank_kruskal_hw.csv` | 14 × 2 (value, group) | `stat_rank_kruskal_hw` | `r/cases/stats_rank_t3.R` | literal values: Hollander & Wolfe (1973) p. 116, the `?kruskal.test` example |
+| `generated/rank_quade_store.csv` | 35 × 3 (store, brand, sales) | `stat_rank_quade_store` | `r/cases/stats_rank_t3.R` | literal values: Conover (1999) p. 375, the `?quade.test` hand-lotion example |
+| `generated/rank_small_blocks.csv` | 32 × 4 (block, treat, y, y_unit) | `stat_rank_small_blocks` | `r/cases/stats_rank_t3.R` | seed 20261023 |
+| `generated/rank_small_groups.csv` | 21 × 4 (g, y, y_unit, ynt) | `stat_rank_small_groups` | `r/cases/stats_rank_t3.R` | seed 20261022 |
+| `generated/rank_two_sample.csv` | 126 × 3 (set, group, value) | `stat_rank_two_sample` | `r/cases/stats_rank_t3.R` | seed 20261024 |
+| `generated/rank_wilcoxon.csv` | 101 × 3 (set, group, value) | `stat_rank_wilcoxon` | `r/cases/stats_rank_t3.R` | seed 20261025 |
+| `generated/reset_two.csv` | 150 × 3 (y, x1, x2) | `reset_princomp` | `r/cases/reg_rank_qr.R` | seed 20261121 |
+| `generated/rq_boot_indices.csv` | 100 × 50 (b01-b50) | `rq_boot_xy` | `r/cases/reg_quantreg_br.R` | seed 20261021 |
+| `generated/sensemakr_darfur.csv` | 1276 × 8 (peacefactor, directlyharmed, age, farmer_dar, herder_dar, pastvoted, hhsize_darfur, female) | `sensemakr_darfur` | `r/cases/regression_smoothers_t3.R` | `sensemakr::darfur`, the eight model columns |
+| `generated/shap_kernel_sim.csv` | 20 × 12 (x0-x11) | `shap_kernel_sim` | `r/cases/ml_shap.R` | seed 4802 |
+| `generated/shap_tree_sim.csv` | 80 × 5 (x0, x1, x2, x3, y) | `shap_tree_rpart` | `r/cases/ml_shap.R` | seed 4801 |
+| `generated/smoothers_t3.csv` | 100 × 4 (x, y, xm, ym) | `smoothers_gcv_periodic_loess` | `r/cases/regression_smoothers_t3.R` | seed 20261127 |
+| `generated/supsmu_sine.csv` | 100 × 4 (x, y, w, xr) | `supsmu_sine` | `r/cases/regression_smoothers_t3.R` | seed 42 |
+| `generated/sysgmm_empluk.csv` | 1031 × 5 (firm, year, lemp, lwage, lcap) | `dpd_sys_empluk` | `r/cases/econ_sysgmm.R` | `plm::EmplUK`, logs of emp, wage and capital |
+| `generated/var_canada.csv` | 84 × 4 (e, prod, rw, U) | `var_canada` | `r/cases/ts_var.R` | `vars::Canada` |
+| `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
+| `generated/vecm_denmark.csv` | 55 × 4 (LRM, LRY, IBO, IDE) | `vecm_denmark` | `r/cases/ts_vecm.R` | `urca::denmark`, the four model columns |
+| `generated/vecm_sim3.csv` | 250 × 3 (x1, x2, x3) | `vecm_sim3` | `r/cases/ts_vecm.R` | seed 20261101 |
 
 ## Adding a dataset
 

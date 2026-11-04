@@ -101,13 +101,16 @@ looks like a validation failure but is not one.
 - **Harness** (`validation/r/harness.R` and `validation/r/cases/*.R`; the case files record
   the versions they were written with): jsonlite, plm, fixest, sandwich, lmtest, car, tseries,
   quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl,
-  survival, mlogit, urca, glmnet.
+  survival, mlogit, urca, glmnet, cluster, dbscan, dfidx, dynamicTreeCut, EValue, lpSolve,
+  MatchIt, optmatch, rlemon, rpart, sensemakr, vars.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
                      "quantreg", "nlme", "aod", "strucchange", "nnet", "MASS", "AER",
                      "rdrobust", "forecast", "numDeriv", "pscl", "survival", "mlogit",
-                     "urca", "glmnet"))
+                     "urca", "glmnet", "cluster", "dbscan", "dfidx", "dynamicTreeCut",
+                     "EValue", "lpSolve", "MatchIt", "optmatch", "rlemon", "rpart",
+                     "sensemakr", "vars"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -280,12 +283,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Regression through the origin: uncentered R², adjusted R² with n, F on k df (OLS, raw design, GLS, clustered, HAC) | [no_intercept.md](regression/no_intercept.md) | R-pinned |
 | HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned, known deviations (REG-22, REG-24, REG-26, REG-35, REG-37, REG-43, REG-50, REG-52, REG-61, REG-64, REG-9) |
 | Bootstrap covariance (vcovBS) | [vcovBS.md](regression/vcovBS.md) | not R-pinned |
-| LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-26) |
+| LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-14, REG-26, REG-60) |
 | Nonlinear least squares | [nls.md](regression/nls.md) | R-pinned |
 | Tukey's Resistant Line | [line.md](regression/line.md) | R-pinned, known deviations (REG-12) |
-| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned |
+| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned, known deviations (REG-31) |
 | Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | R-pinned, known deviations (REG-27, REG-28) |
-| E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | R-pinned, known deviations (REG-5, REG-39) |
+| E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | R-pinned, known deviations (REG-39, REG-5) |
 | GLS with grouped AR(1) / compound-symmetry errors, rho by REML or ML | [gls.md](regression/gls.md) | R-pinned |
 | Smoothing spline (GCV / CV selection) | [smooth_spline.md](regression/smooth_spline.md) | not R-pinned |
 | Lasso, ridge and elastic net (glmnet gaussian and binomial paths, cv.glmnet, predict) | [glmnet.md](regression/glmnet.md) | R-pinned |
@@ -297,12 +300,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Fixed Effects | [panel_fe.md](econometrics/panel_fe.md) | R-pinned, known deviations (ECON-34) |
 | Random Effects | [panel_re.md](econometrics/panel_re.md) | R-pinned |
 | Hausman Test | [hausman.md](econometrics/hausman.md) | R-pinned |
-| HDFE | [hdfe.md](econometrics/hdfe.md) | R-pinned |
-| Arellano-Bond difference GMM | [gmm.md](econometrics/gmm.md) | R-pinned, known deviations (ECON-30) |
-| Blundell-Bond system GMM | [gmm.md](econometrics/gmm.md) | R-pinned, known deviations (ECON-30) |
-| Panel unit-root tests: data extraction (unit ids, time, gaps, missing values) | [panel_unit_root.md](econometrics/panel_unit_root.md) | R-pinned |
-| Panel GLS (pggls) | [pggls.md](econometrics/pggls.md) | not R-pinned |
-| FEGLM | [feglm.md](econometrics/feglm.md) | not R-pinned |
+| Arellano-Bond difference GMM and Blundell-Bond system GMM (plm::pgmm, transformation "d" and "ld") | [gmm.md](econometrics/gmm.md) | R-pinned, known deviations (ECON-30) |
 | Multinomial and ordered logit/probit (Newton fit) | [discrete_newton.md](econometrics/discrete_newton.md) | R-pinned |
 | Ordered logit and probit (MASS::polr) | [ordered.md](econometrics/ordered.md) | R-pinned |
 | Negative binomial, zero-inflated Poisson and NB (MASS::glm.nb, pscl::zeroinfl) | [count_models.md](econometrics/count_models.md) | R-pinned, known deviations (ECON-64) |
@@ -320,18 +318,18 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | not R-pinned |
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
 | Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-23) |
-| Logit | [logit.md](econometrics/logit.md) | R-pinned |
+| Logit | [logit.md](econometrics/logit.md) | R-pinned, known deviations (ECON-60) |
 | Probit | [probit.md](econometrics/probit.md) | R-pinned |
 | Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
 | Mixed logit | [mixed_logit.md](econometrics/mixed_logit.md) | R-pinned |
 | Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-77) |
 | Matching (MatchIt: nearest neighbour, CEM, subclassification; optimal full matching as optmatch) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
-| Minimum-cost flow (network simplex) | [matching.md](econometrics/matching.md) | R-pinned |
-| Panel GLS (pggls): pooled pin on a simulated N > T panel, within and FD warnings (Tier 3) | [pggls.md](econometrics/pggls.md) | R-pinned, known deviations (ECON-33) |
-| FEGLM: Gaussian pin, IRLS convergence reporting (Tier 3) | [feglm.md](econometrics/feglm.md) | R-pinned, known deviations (ECON-20, ECON-66, ECON-67, ECON-85) |
+| Minimum-cost flow (network simplex) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
+| Panel GLS (pggls): pooled pin on a simulated N > T panel, within and FD warnings | [pggls.md](econometrics/pggls.md) | R-pinned, known deviations (ECON-33) |
+| FEGLM: Gaussian pin, IRLS convergence reporting | [feglm.md](econometrics/feglm.md) | R-pinned, known deviations (ECON-20, ECON-66, ECON-67, ECON-85) |
 | Variable coefficients (pvcm within, random) and mean group (pmg) | [pvcm.md](econometrics/pvcm.md) | R-pinned, known deviations (ECON-34, ECON-35) |
 | HDFE: relative MAP rule, absorbed regressors (FE, RE, Hausman, HDFE, FEGLM), disconnected effects | [hdfe.md](econometrics/hdfe.md) | R-pinned |
-| Panel unit-root tests: per-unit lag selection (AIC, SIC, Hall) | [panel_unit_root.md](econometrics/panel_unit_root.md) | R-pinned, known deviations (ECON-41, ECON-43, ECON-44, ECON-88) |
+| Panel unit-root tests: data extraction (unit ids, time, gaps, missing values), per-unit lag selection (AIC, SIC, Hall) | [panel_unit_root.md](econometrics/panel_unit_root.md) | R-pinned, known deviations (ECON-41, ECON-43, ECON-44, ECON-88) |
 
 ### Survival Analysis
 | Method | File | Status |
@@ -346,13 +344,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Time Series
 | Method | File | Status |
 |--------|------|--------|
-| VAR | [var.md](econometrics/timeseries/var.md) | R-pinned |
-| VARMA | no validation document yet | not R-pinned |
-| VECM | [vecm.md](econometrics/timeseries/vecm.md) | not R-pinned |
-| IRF | [irf.md](econometrics/timeseries/irf.md) | R-pinned |
+| VAR (vars::VAR: coefficients, SEs, Sigma_u, logLik, AIC/BIC) | [var.md](econometrics/timeseries/var.md) | R-pinned |
+| VARMA (Hannan-Rissanen two-step) | [varma.md](econometrics/timeseries/varma.md) | R-pinned |
+| VECM (Johansen, urca::ca.jo and cajorls) | [vecm.md](econometrics/timeseries/vecm.md) | R-pinned |
+| IRF (orthogonalised and plain) | [irf.md](econometrics/timeseries/irf.md) | R-pinned |
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
-| Granger causality | [granger.md](econometrics/granger.md) | R-pinned |
-| Granger causality (lag orders, small samples, default order) | [granger.md](econometrics/timeseries/granger.md) | R-pinned |
+| Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
 
 ### Forecasting
@@ -361,13 +358,14 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | ARIMA | [arima.md](forecasting/arima.md) | R-pinned |
 | MSTL | [mstl.md](forecasting/mstl.md) | not R-pinned |
 | Structural time series (StructTS) | [structts.md](forecasting/structts.md) | not R-pinned |
+| GARCH(p, q) (maximum likelihood, normal and Student-t errors, variance forecasts) | [garch.md](forecasting/garch.md) | R-pinned |
 | Changepoint | no validation document yet | not R-pinned |
 
 ### Machine Learning
 | Method | File | Status |
 |--------|------|--------|
 | K-means | [kmeans.md](ml/kmeans.md) | R-pinned |
-| DBSCAN | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
+| DBSCAN (dbscan::dbscan; recorded with the hclust data) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
 | Hierarchical (stats::hclust core; hierarchical, fastcluster, AGNES, DIANA, pvclust) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
 | Cutree | [cutree.md](ml/cutree.md) | R-pinned |
 | Dynamic tree cut (dynamicTreeCut::cutreeDynamic) | [dynamic_tree_cut.md](ml/dynamic_tree_cut.md) | R-pinned |
