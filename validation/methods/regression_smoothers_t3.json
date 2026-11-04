@@ -1,0 +1,188 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "loess_direct",
+      "name": "LOESS with exact local fits (R loess surface = 'direct')",
+      "category": "regression",
+      "reference": "stats::loess(control = loess.control(surface = 'direct')); stats::lowess's rule at zero-width neighbourhoods",
+      "doc": "validation/regression/loess.md",
+      "cases": [
+        "loess_x10_direct",
+        "loess_skewed_direct",
+        "smoothers_gcv_periodic_loess"
+      ],
+      "tests": [],
+      "quantities": [
+        "fitted values, degrees 0-2, span < 1, = 1, > 1",
+        "predictions",
+        "trace of the hat matrix (p2a enp)",
+        "fit at zero-width neighbourhoods",
+        "scale invariance in x"
+      ],
+      "tolerance": "validation/README.md coefficient row (n = 10: 1e-6, n = 100: 1e-8); trace as statistics",
+      "deviations": [
+        {
+          "finding": "REG-60",
+          "quantity": "R's enp (one.delta + 2 trace.hat - n), residual SE (one.delta), robust iterations",
+          "note": "p2a's enp is tr(L) = R trace.hat; enp_r_s075_d2 4.950126136174497 is not compared"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "supsmu",
+      "name": "Friedman's super smoother (port of R's ppr.f supsmu)",
+      "category": "regression",
+      "reference": "stats::supsmu(span = 'cv' | fraction, bass, periodic, wt)",
+      "doc": "validation/regression/supsmu.md",
+      "cases": [
+        "smoothers_gcv_periodic_loess",
+        "supsmu_sine"
+      ],
+      "tests": [],
+      "quantities": [
+        "smoothed values: cv, fixed span, bass, periodic, weights, ties",
+        "unique x grid"
+      ],
+      "tolerance": "validation/README.md coefficient row, n = 100: 1e-8 (the port is exact to about 1e-15)",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/supsmu_test.csv"
+      ]
+    },
+    {
+      "id": "gls_estimated_correlation",
+      "name": "GLS with grouped AR(1) / compound-symmetry errors, rho by REML or ML",
+      "category": "regression",
+      "reference": "nlme::gls(correlation = corCompSymm(form = ~ 1 | g) | corAR1(form = ~ 1 | g), method = 'REML' | 'ML'); nlme's profile likelihood maximised by optimize(tol = 1e-12)",
+      "doc": "validation/regression/gls.md",
+      "cases": [
+        "gls_compsymm"
+      ],
+      "tests": [],
+      "quantities": [
+        "rho (REML, ML)",
+        "coefficients",
+        "SE",
+        "sigma",
+        "log-likelihood",
+        "AIC",
+        "BIC",
+        "groups"
+      ],
+      "tolerance": "rho 1e-6 relative (flat maximum); coefficients 1e-8, SE and statistics 1e-6 (n = 150); nlme's own fit as a cross-check at 1e-6 (AR(1): rho and SE 1e-5)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "line",
+      "name": "Tukey resistant line",
+      "category": "regression",
+      "reference": "stats::line(iter) (R >= 3.5 tukeyline)",
+      "doc": "validation/regression/line.md",
+      "cases": [
+        "line_tukey_outliers"
+      ],
+      "tests": [],
+      "quantities": [],
+      "tolerance": "to be pinned with REG-12",
+      "deviations": [
+        {
+          "finding": "REG-12",
+          "quantity": "iter1_coef, iter2_coef, iter3_coef",
+          "note": "R 1.739 / 0.513 at iter = 1; p2a's variant differs (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "nls",
+      "name": "Nonlinear least squares (Levenberg-Marquardt), unweighted",
+      "category": "regression",
+      "reference": "stats::nls (Gauss-Newton, tight control)",
+      "doc": "validation/regression/nls.md",
+      "cases": [
+        "nls_expdecay",
+        "nls_mm"
+      ],
+      "tests": [],
+      "quantities": [
+        "coefficients",
+        "SE",
+        "t",
+        "p",
+        "RSS",
+        "sigma",
+        "df"
+      ],
+      "tolerance": "iterative: coefficients 1e-6, SE and t 1e-5, RSS and sigma 1e-8 relative",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/nls_exponential_decay.csv",
+        "validation/expected/nls_michaelis_menten.csv"
+      ]
+    },
+    {
+      "id": "sensemakr",
+      "name": "Sensitivity analysis to omitted variables (Cinelli and Hazlett)",
+      "category": "regression",
+      "reference": "sensemakr::sensemakr, partial_r2, robustness_value",
+      "doc": "validation/regression/sensemakr.md",
+      "cases": [
+        "sensemakr_darfur"
+      ],
+      "tests": [],
+      "quantities": [
+        "estimate, SE, t, dof (classical OLS)",
+        "partial R2 of the treatment",
+        "RV_q (q = 1, 0.5)",
+        "benchmark partial R2 of the treatment on female"
+      ],
+      "tolerance": "validation/README.md, n = 1276: coefficients 1e-10, statistics 1e-8",
+      "deviations": [
+        {
+          "finding": "REG-28",
+          "quantity": "rv_qa; run_sensemakr's se, t, partial R2, RV and female_r2yxj",
+          "note": "RV_alpha formula; HC1 t in run_sensemakr (Tier 4)"
+        },
+        {
+          "finding": "REG-27",
+          "quantity": "bound_r2dz_x, bound_r2yz_dx, bound_adjusted_estimate, bound_adjusted_se, bound CI",
+          "note": "bound formulas and adjusted SE (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "evalue",
+      "name": "E-values (VanderWeele and Ding)",
+      "category": "regression",
+      "reference": "EValue::evalues.RR, evalues.OR, evalues.HR, evalues.MD (4.1.4)",
+      "doc": "validation/regression/evalue.md",
+      "cases": [
+        "evalue_formulas"
+      ],
+      "tests": [],
+      "quantities": [
+        "RR-scale estimate",
+        "E-value of the estimate",
+        "E-value of the confidence limit closest to the null"
+      ],
+      "tolerance": "closed forms: 1e-12 relative",
+      "deviations": [
+        {
+          "finding": "REG-5",
+          "quantity": "row7 (HR, common outcome)",
+          "note": "p2a uses sqrt(HR); EValue (1 - 0.5^sqrt(HR)) / (1 - 0.5^sqrt(1/HR)) (Tier 4)"
+        },
+        {
+          "finding": "REG-39",
+          "quantity": "could_explain_away",
+          "note": "not pinned (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sensemakr_darfur",
+  "area": "regression/sensemakr",
+  "method": "sensemakr on darfur (no village effects): partial R2, RV, benchmark female (kd = 1)",
+  "reference": "sensemakr::sensemakr(lm, treatment = 'directlyharmed', benchmark_covariates = 'female', kd = 1); partial_r2; robustness_value",
+  "call": "sensemakr(lm(peacefactor ~ directlyharmed + age + farmer_dar + herder_dar + pastvoted + hhsize_darfur + female), 'directlyharmed', 'female')",
+  "dataset": "validation/datasets/generated/sensemakr_darfur.csv",
+  "datasets": ["validation/datasets/generated/sensemakr_darfur.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sensemakr": "0.1.6"
+  },
+  "values": {
+    "estimate": 0.048885495979343788,
+    "se": 0.018391858008442351,
+    "t": 2.6579965959341383,
+    "dof": 1268,
+    "r2yd_x": 0.0055408518026417476,
+    "rv_q": 0.071910087912922846,
+    "rv_q05": 0.036632022814959704,
+    "rv_qa": 0.019338593626010935,
+    "female_r2dxj": 0.0025749309884314669,
+    "female_r2yxj": 0.11546024184356445,
+    "bound_r2dz_x": 0.0025815783745872559,
+    "bound_r2yz_dx": 0.13120713123858388,
+    "bound_adjusted_estimate": 0.036816589644091006,
+    "bound_adjusted_se": 0.017171821125752423,
+    "bound_adjusted_lower": 0.0031282821680899686,
+    "bound_adjusted_upper": 0.070504897120092044,
+    "n": 1276
+  }
+}
