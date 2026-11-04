@@ -1,0 +1,117 @@
+{
+  "schema": 1,
+  "id": "dpd_sys_gaps",
+  "area": "econometrics/panel",
+  "method": "System GMM (pgmm transformation = 'ld'), panel with interior gaps and late entry",
+  "reference": "plm::pgmm(transformation = 'ld')",
+  "call": "pgmm(y ~ lag(y, 1) + x | lag(y, 2:99), data = pdata.frame(ab_gaps), transformation = 'ld')",
+  "dataset": "validation/datasets/generated/ab_gaps.csv",
+  "datasets": ["validation/datasets/generated/ab_gaps.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "onestep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.80836497688629116, 0.32228600514230282]
+    },
+    "onestep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.0029044530511675251, 0.0039656484874251415]
+    },
+    "onestep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.030483014938680154, 0.043068173842383074]
+    },
+    "onestep_sargan": 42.291523814838641,
+    "onestep_sargan_df": 27,
+    "onestep_sargan_p": 0.030800475883339395,
+    "onestep_ar1": -5.5783843581323032,
+    "onestep_ar2": 0.29863129655925219,
+    "onestep_ar1_p": 2.427627803353704e-08,
+    "onestep_ar2_p": 0.76522138329768497,
+    "onestep_n_instruments": 29,
+    "onestep_wald_coef": 84784.259549471768,
+    "onestep_n_obs": 1217,
+    "onestep_n_obs_diff": 553,
+    "onestep_n_obs_level": 664,
+    "onestep_n_groups": 100,
+    "onestep_sigma2": 1.4400761395143025,
+    "twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.82523389344701426, 0.31208693944222621]
+    },
+    "twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.025227107725092856, 0.036981196191668397]
+    },
+    "twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.040670934505040501, 0.053698228810411766]
+    },
+    "twostep_sargan": 41.799360194273127,
+    "twostep_sargan_df": 27,
+    "twostep_sargan_p": 0.034445116317843721,
+    "twostep_ar1": -6.053263312942498,
+    "twostep_ar2": 0.302685146002729,
+    "twostep_ar1_p": 1.4194056719730602e-09,
+    "twostep_ar2_p": 0.76212981886688869,
+    "twostep_n_instruments": 29,
+    "twostep_wald_coef": 1205.8815583986921,
+    "twostep_n_obs": 1217,
+    "twostep_n_obs_diff": 553,
+    "twostep_n_obs_level": 664,
+    "twostep_n_groups": 100,
+    "lags2_twostep_coef": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.74347693844116236, 0.17103586740009269, 0.31206298577761082]
+    },
+    "lags2_twostep_se": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.031591082105456941, 0.039983655554469477, 0.040958543242977395]
+    },
+    "lags2_twostep_se_robust": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.046212695931643635, 0.059392222242889897, 0.052890031121091523]
+    },
+    "lags2_twostep_sargan": 29.67505219601324,
+    "lags2_twostep_sargan_df": 25,
+    "lags2_twostep_sargan_p": 0.23668699201393834,
+    "lags2_twostep_ar1": -5.0117145715110007,
+    "lags2_twostep_ar2": -0.53900380716425622,
+    "lags2_twostep_ar1_p": 5.3947183462726949e-07,
+    "lags2_twostep_ar2_p": 0.58988422758281556,
+    "lags2_twostep_n_instruments": 28,
+    "lags2_twostep_wald_coef": 1598.9813170919911,
+    "lags2_twostep_n_obs": 995,
+    "lags2_twostep_n_obs_diff": 442,
+    "lags2_twostep_n_obs_level": 553,
+    "lags2_twostep_n_groups": 100,
+    "collapse_twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.69698525384071564, 0.32573264461291329]
+    },
+    "collapse_twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.053727024707257771, 0.041305426327512336]
+    },
+    "collapse_twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.055997929924971115, 0.044317436938468006]
+    },
+    "collapse_twostep_sargan": 4.8374591938286793,
+    "collapse_twostep_sargan_df": 7,
+    "collapse_twostep_sargan_p": 0.67979108113486708,
+    "collapse_twostep_ar1": -5.3652146876042748,
+    "collapse_twostep_ar2": 0.28574942390729258,
+    "collapse_twostep_ar1_p": 8.0852991812718541e-08,
+    "collapse_twostep_ar2_p": 0.77507004740571572,
+    "collapse_twostep_n_instruments": 9,
+    "collapse_twostep_wald_coef": 256.5842869031892,
+    "collapse_twostep_n_obs": 1217,
+    "collapse_twostep_n_obs_diff": 553,
+    "collapse_twostep_n_obs_level": 664,
+    "collapse_twostep_n_groups": 100
+  }
+}

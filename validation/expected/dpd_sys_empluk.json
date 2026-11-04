@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "id": "dpd_sys_empluk",
+  "area": "econometrics/panel",
+  "method": "System GMM on plm::EmplUK (log emp, wage, capital), two-step",
+  "reference": "plm::pgmm(transformation = 'ld') on EmplUK",
+  "call": "pgmm(lemp ~ lag(lemp, 1) + lwage + lcap | lag(lemp, 2:99), EmplUK, transformation = 'ld')",
+  "dataset": "validation/datasets/generated/sysgmm_empluk.csv",
+  "datasets": ["validation/datasets/generated/sysgmm_empluk.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "onestep_coef": {
+      "names": ["lag(lemp, 1)", "lwage", "lcap"],
+      "values": [0.74564102793932818, 0.10192324280488663, 0.20831291642498684]
+    },
+    "onestep_se": {
+      "names": ["lag(lemp, 1)", "lwage", "lcap"],
+      "values": [0.024974978221452036, 0.011351381971032056, 0.01976183401445223]
+    },
+    "onestep_se_robust": {
+      "names": ["lag(lemp, 1)", "lwage", "lcap"],
+      "values": [0.062784463455463804, 0.0288880089561445, 0.047846632517106219]
+    },
+    "onestep_sargan": 70.904493486134911,
+    "onestep_sargan_df": 36,
+    "onestep_sargan_p": 0.00045894388762247792,
+    "onestep_ar1": -1.9581956560524971,
+    "onestep_ar2": -0.36710304503850061,
+    "onestep_ar1_p": 0.050207058666891055,
+    "onestep_ar2_p": 0.71354215602042936,
+    "onestep_n_instruments": 39,
+    "onestep_wald_coef": 317259.39853455243,
+    "onestep_n_obs": 1642,
+    "onestep_n_obs_diff": 751,
+    "onestep_n_obs_level": 891,
+    "onestep_n_groups": 140,
+    "onestep_sigma2": 0.010846797402085849,
+    "twostep_coef": {
+      "names": ["lag(lemp, 1)", "lwage", "lcap"],
+      "values": [0.73796323751942161, 0.10317196014058094, 0.21597642070575596]
+    },
+    "twostep_se": {
+      "names": ["lag(lemp, 1)", "lwage", "lcap"],
+      "values": [0.024963497103525963, 0.012125288841971418, 0.019601289190941531]
+    },
+    "twostep_se_robust": {
+      "names": ["lag(lemp, 1)", "lwage", "lcap"],
+      "values": [0.064628856690428393, 0.028639170446890516, 0.048257985107939334]
+    },
+    "twostep_sargan": 69.8754641054323,
+    "twostep_sargan_df": 36,
+    "twostep_sargan_p": 0.00060574436137990307,
+    "twostep_ar1": -2.0030574991247927,
+    "twostep_ar2": -0.34882541556559599,
+    "twostep_ar1_p": 0.045171117135833348,
+    "twostep_ar2_p": 0.72722038160707181,
+    "twostep_n_instruments": 39,
+    "twostep_wald_coef": 37496.58299327745,
+    "twostep_n_obs": 1642,
+    "twostep_n_obs_diff": 751,
+    "twostep_n_obs_level": 891,
+    "twostep_n_groups": 140
+  }
+}

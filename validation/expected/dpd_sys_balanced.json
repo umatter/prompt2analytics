@@ -1,0 +1,210 @@
+{
+  "schema": 1,
+  "id": "dpd_sys_balanced",
+  "area": "econometrics/panel",
+  "method": "System GMM (pgmm transformation = 'ld'), balanced N = 100, T = 8",
+  "reference": "plm::pgmm(transformation = 'ld', effect = 'individual'); summary.pgmm (robust = FALSE/TRUE); sargan; mtest; variants lag(y, 1:2), lag(y, 2:3), lag(y, 3:99), collapse = TRUE, no x; lags3_spec/minlag4_spec: the system estimator written out in R (pgmm 2.6.7 mis-builds its level instruments when lags >= 3 or min_lag >= 4)",
+  "call": "pgmm(y ~ lag(y, 1) + x | lag(y, 2:99), data = pdata.frame(ab_balanced, index = c('id','year')), transformation = 'ld', model = 'onestep' | 'twosteps')",
+  "dataset": "validation/datasets/generated/ab_balanced.csv",
+  "datasets": ["validation/datasets/generated/ab_balanced.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "onestep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.82277152861236102, 0.30670618306258884]
+    },
+    "onestep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.002186366221634423, 0.0038513666477165312]
+    },
+    "onestep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.027320976059039045, 0.041764270438180796]
+    },
+    "onestep_sargan": 40.146725761163744,
+    "onestep_sargan_df": 27,
+    "onestep_sargan_p": 0.049639710406295563,
+    "onestep_ar1": -5.8810801940636059,
+    "onestep_ar2": 0.0046954457691116462,
+    "onestep_ar1_p": 4.0759761039524843e-09,
+    "onestep_ar2_p": 0.99625359008105874,
+    "onestep_n_instruments": 29,
+    "onestep_wald_coef": 149443.99158844576,
+    "onestep_n_obs": 1300,
+    "onestep_n_obs_diff": 600,
+    "onestep_n_obs_level": 700,
+    "onestep_n_groups": 100,
+    "onestep_sigma2": 1.4401318877737306,
+    "twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.81945371863891747, 0.29975339225945341]
+    },
+    "twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.021471081529256232, 0.036360354628745317]
+    },
+    "twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.035723644003136414, 0.053956892625510601]
+    },
+    "twostep_sargan": 40.080300354034641,
+    "twostep_sargan_df": 27,
+    "twostep_sargan_p": 0.050357327508182559,
+    "twostep_ar1": -6.4090086588087232,
+    "twostep_ar2": -0.001233961287909219,
+    "twostep_ar1_p": 1.4646887678573905e-10,
+    "twostep_ar2_p": 0.99901544158960687,
+    "twostep_n_instruments": 29,
+    "twostep_wald_coef": 1595.7547994882684,
+    "twostep_n_obs": 1300,
+    "twostep_n_obs_diff": 600,
+    "twostep_n_obs_level": 700,
+    "twostep_n_groups": 100,
+    "lags2_twostep_coef": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.73689652519425564, 0.13090302697822137, 0.31139795982584151]
+    },
+    "lags2_twostep_se": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.029460889606111696, 0.030812775401528391, 0.038130987298475784]
+    },
+    "lags2_twostep_se_robust": {
+      "names": ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"],
+      "values": [0.042921800510134812, 0.044844528203951385, 0.052062499282716924]
+    },
+    "lags2_twostep_sargan": 30.517412831590931,
+    "lags2_twostep_sargan_df": 25,
+    "lags2_twostep_sargan_p": 0.20549878609324515,
+    "lags2_twostep_ar1": -5.5035972230462171,
+    "lags2_twostep_ar2": -0.57998332515624396,
+    "lags2_twostep_ar1_p": 3.7211916544045704e-08,
+    "lags2_twostep_ar2_p": 0.56192586269726696,
+    "lags2_twostep_n_instruments": 28,
+    "lags2_twostep_wald_coef": 1735.1769498411877,
+    "lags2_twostep_n_obs": 1100,
+    "lags2_twostep_n_obs_diff": 500,
+    "lags2_twostep_n_obs_level": 600,
+    "lags2_twostep_n_groups": 100,
+    "maxlag3_twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.77546976082008956, 0.30996866724758892]
+    },
+    "maxlag3_twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.026162239008770207, 0.038276477553109069]
+    },
+    "maxlag3_twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.038531628699571857, 0.052028763751830041]
+    },
+    "maxlag3_twostep_sargan": 27.262566188077034,
+    "maxlag3_twostep_sargan_df": 17,
+    "maxlag3_twostep_sargan_p": 0.054327706610181589,
+    "maxlag3_twostep_ar1": -6.514851520581999,
+    "maxlag3_twostep_ar2": 0.0023377632605159392,
+    "maxlag3_twostep_ar1_p": 7.2761595387129276e-11,
+    "maxlag3_twostep_ar2_p": 0.99813473648660911,
+    "maxlag3_twostep_n_instruments": 19,
+    "maxlag3_twostep_wald_coef": 1049.2814016955797,
+    "maxlag3_twostep_n_obs": 1300,
+    "maxlag3_twostep_n_obs_diff": 600,
+    "maxlag3_twostep_n_obs_level": 700,
+    "maxlag3_twostep_n_groups": 100,
+    "minlag3_onestep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.74717141470404624, 0.31192147331446818]
+    },
+    "minlag3_onestep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.0041168357688661427, 0.0040944023772659247]
+    },
+    "minlag3_onestep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.046145271338149253, 0.042560932880039558]
+    },
+    "minlag3_onestep_sargan": 30.597286885044866,
+    "minlag3_onestep_sargan_df": 21,
+    "minlag3_onestep_sargan_p": 0.080626331153722794,
+    "minlag3_onestep_ar1": -5.9699627922501239,
+    "minlag3_onestep_ar2": 0.50333334150919207,
+    "minlag3_onestep_ar1_p": 2.3730769987042031e-09,
+    "minlag3_onestep_ar2_p": 0.61472992869965326,
+    "minlag3_onestep_n_instruments": 23,
+    "minlag3_onestep_wald_coef": 39693.866055667597,
+    "minlag3_onestep_n_obs": 1100,
+    "minlag3_onestep_n_obs_diff": 500,
+    "minlag3_onestep_n_obs_level": 600,
+    "minlag3_onestep_n_groups": 100,
+    "minlag3_onestep_sigma2": 1.3559307970574319,
+    "collapse_twostep_coef": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.7209148422479621, 0.3038418175872592]
+    },
+    "collapse_twostep_se": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.046698721306681797, 0.039671145598826306]
+    },
+    "collapse_twostep_se_robust": {
+      "names": ["lag(y, 1)", "x"],
+      "values": [0.05064007304659357, 0.042879263596668146]
+    },
+    "collapse_twostep_sargan": 6.5645399436507867,
+    "collapse_twostep_sargan_df": 7,
+    "collapse_twostep_sargan_p": 0.47558086326224253,
+    "collapse_twostep_ar1": -5.6293184724823533,
+    "collapse_twostep_ar2": -0.017238512492564004,
+    "collapse_twostep_ar1_p": 1.8092306990543555e-08,
+    "collapse_twostep_ar2_p": 0.98624633822184271,
+    "collapse_twostep_n_instruments": 9,
+    "collapse_twostep_wald_coef": 335.83133572679338,
+    "collapse_twostep_n_obs": 1300,
+    "collapse_twostep_n_obs_diff": 600,
+    "collapse_twostep_n_obs_level": 700,
+    "collapse_twostep_n_groups": 100,
+    "nox_onestep_coef": {
+      "names": ["lag(y, 1)"],
+      "values": [0.82225492604401929]
+    },
+    "nox_onestep_se": {
+      "names": ["lag(y, 1)"],
+      "values": [0.0021886889264418233]
+    },
+    "nox_onestep_se_robust": {
+      "names": ["lag(y, 1)"],
+      "values": [0.027743932321347996]
+    },
+    "nox_onestep_sargan": 40.243114977970237,
+    "nox_onestep_sargan_df": 26,
+    "nox_onestep_sargan_p": 0.036920926100254034,
+    "nox_onestep_ar1": -5.8948558231886592,
+    "nox_onestep_ar2": -0.23056778908086298,
+    "nox_onestep_ar1_p": 3.7500867000713609e-09,
+    "nox_onestep_ar2_p": 0.81765059397052842,
+    "nox_onestep_n_instruments": 27,
+    "nox_onestep_wald_coef": 141138.30149575093,
+    "nox_onestep_n_obs": 1300,
+    "nox_onestep_n_obs_diff": 600,
+    "nox_onestep_n_obs_level": 700,
+    "nox_onestep_n_groups": 100,
+    "nox_onestep_sigma2": 1.5490978881916444,
+    "lags3_spec_onestep_coef": [0.68239461391752254, 0.078495834379038093, 0.097246962592787076, 0.3183205081696201],
+    "lags3_spec_twostep_coef": [0.68695887437039349, 0.085935496579958331, 0.099772450862177953, 0.33353960652564107],
+    "lags3_spec_twostep_se_robust": [0.063893560583196479, 0.058990800077549178, 0.05516705118816765, 0.056504199174985038],
+    "lags3_spec_twostep_sargan": 24.896962804697843,
+    "lags3_spec_n_obs": 900,
+    "lags3_spec_n_obs_diff": 400,
+    "lags3_spec_n_obs_level": 500,
+    "lags3_spec_n_instruments": 25,
+    "minlag4_spec_onestep_coef": [0.69917526537530883, 0.3236478951628366],
+    "minlag4_spec_twostep_coef": [0.68665778471262462, 0.3218254229448384],
+    "minlag4_spec_twostep_se_robust": [0.099539874401858838, 0.061758846234713123],
+    "minlag4_spec_twostep_sargan": 25.400291262580367,
+    "minlag4_spec_n_obs": 900,
+    "minlag4_spec_n_obs_diff": 400,
+    "minlag4_spec_n_obs_level": 500,
+    "minlag4_spec_n_instruments": 17
+  }
+}
