@@ -68,8 +68,8 @@ points on a line, ward.D2, hybrid, minClusterSize 2: deepSplit 0 and 4 both `1 1
 |---|---|---|
 | `test_validate_cutree_dynamic_tree` | `hclust_average_height`, `tree_*` | heights `Tol::coef(60)`; labels exact |
 | `test_validate_cutree_dynamic_hybrid` | `hybrid_*`, `ward_hybrid_ds1` (square and condensed dissimilarities agree) | exact |
-| `test_validate_dynamic_tree_cut_options_change_the_result` | every exposed option changes the labels, as in R | property |
-| `test_validate_dynamic_tree_cut_defaults_and_fallback` | defaults, the warned fallback to tree, the option checks | property |
+| `test_validate_dynamic_tree_cut_options_change_the_result` | every exposed option changes the labels, as in R | property (data from case `dynamic_tree_cut`), not an R comparison |
+| `test_validate_dynamic_tree_cut_defaults_and_fallback` | defaults, the warned fallback to tree, the option checks | property (data from case `dynamic_tree_cut`), not an R comparison |
 | `test_dynamic_tree_cut_n_below_2_is_error`, `test_dynamic_tree_cut_n2_unassigned_as_r`, `test_dynamic_tree_cut_basic`, `test_dynamic_tree_cut_deep_split` | hand cases above | exact |
 
 ```bash

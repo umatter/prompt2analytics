@@ -11,7 +11,8 @@ iterations, R's `kmeans(x, centers, algorithm = "Lloyd")` (not R's default Harti
 
 An explicit `tolerance` > 0 stops earlier, when the sum of the squared centroid shifts is at most
 `tolerance` times the mean column variance (scikit-learn's relative `tol`), and is followed by a final
-assignment pass, so the labels are always those of the returned centroids. Both rules are scale-free.
+assignment pass, so the labels are always those of the returned centroids (that pass is not counted in
+`n_iterations`, which never exceeds `max_iterations`). Both rules are scale-free.
 `tolerance = None` (the MCP and CLI default) is 0: until no point is reassigned. A run that reaches the
 limit has `convergence.converged == false` and a warning ("k-means (Lloyd) did not converge after ...").
 
@@ -45,10 +46,10 @@ the same on `X * 1e-5`, and with `iter.max = 2`.
 |---|---|---|
 | `test_validate_kmeans_unit_scale` | `km_unit_cluster`, `km_unit_centers`, `km_unit_tot_withinss` | labels exact; centres `Tol::coef(60)`; tot.withinss `Tol::stat(60)` |
 | `test_validate_kmeans_small_scale` | `km_small_cluster`, `km_small_tot_withinss` | labels exact; `Tol::stat(60)` |
-| `test_validate_kmeans_not_converged` | (iteration limit 2: not converged, warning, inertia at least the converged run's) | property |
-| `test_validate_kmeans_scale_invariant` | (x 2^-20 and x 2^20: same labels and passes, with and without a tolerance) | exact |
-| `test_validate_kmeans_labels_match_final_centroids` | (every label is a nearest returned centroid) | exact |
-| `test_kmeans_from_centers_validates`, `test_kmeans_plusplus_start_feeds_lloyd`, `test_kmeans_separates_three_blobs`, `test_kmeans_inertia_decreases_with_k`, `test_kmeans_same_seed_same_result` | p2a properties | |
+| `test_validate_kmeans_not_converged` | (iteration limit 2: not converged, warning, inertia at least the converged run's) | property (data from case `kmeans_lloyd_pca_mds`), not an R comparison |
+| `test_validate_kmeans_scale_invariant` | (x 2^-20 and x 2^20: same labels and passes, with and without a tolerance) | property (data from case `kmeans_lloyd_pca_mds`), not an R comparison; exact |
+| `test_validate_kmeans_labels_match_final_centroids` | (every label is a nearest returned centroid) | property (data from case `kmeans_lloyd_pca_mds`), not an R comparison; exact |
+| `test_kmeans_from_centers_validates`, `test_kmeans_tolerance_stop_counts_at_most_max_iterations`, `test_kmeans_plusplus_start_feeds_lloyd`, `test_kmeans_separates_three_blobs`, `test_kmeans_inertia_decreases_with_k`, `test_kmeans_same_seed_same_result` | p2a properties | |
 
 ## Missing and non-finite values
 

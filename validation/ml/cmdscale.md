@@ -40,7 +40,7 @@ sorted algebraically), an all-zero configuration for the line, and collapsed at 
 |---|---|---|
 | `test_validate_cmdscale_eurodist` | `mds_points_abs`, `mds_eig` | points `Tol::coef(21)`; eigenvalues 1e-9 relative, 1e-6 absolute (the null eigenvalue is roundoff) |
 | `test_validate_cmdscale_line_configuration` | `mds_line_points_abs`, `mds_line_eig` | 1e-12 |
-| `test_validate_cmdscale_is_scale_equivariant` | (data x 2^-17: eigenvalues and points rescale) | 1e-9 relative |
+| `test_validate_cmdscale_is_scale_equivariant` | (data x 2^-17: eigenvalues and points rescale) | property (data from case `kmeans_lloyd_pca_mds`), not an R comparison; 1e-9 relative |
 | `test_validate_cmdscale_matches_r` (T0-WP16) | R 4.3.3 values typed into the test: 8 x 2 points and eight eigenvalues, Euclidean and Manhattan | 1e-9 absolute; a quoted-value check |
 | `test_cmdscale_basic`, `test_cmdscale_from_data`, `test_cmdscale_preserves_euclidean_distances`, `test_cmdscale_gof`, `test_cmdscale_validation_non_square` and the other `test_cmdscale_validation_` tests | p2a properties | |
 

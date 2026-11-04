@@ -25,7 +25,9 @@ pub struct KMeansResult {
     pub labels: Vec<usize>,
     /// Centroid positions (k x features)
     pub centroids: Array2<f64>,
-    /// Number of assignment passes (the last one, on convergence, reassigns no point)
+    /// Number of Lloyd iterations, at most `max_iterations`: assignment passes, the last of
+    /// which reassigns no point on convergence without a tolerance. With a tolerance, the
+    /// relabelling pass after the stop (labels against the final centroids) is not counted.
     pub n_iterations: usize,
     /// Within-cluster sum of squares (inertia)
     pub inertia: f64,
@@ -331,7 +333,8 @@ fn kmeans_plusplus_init(
 
 /// One Lloyd run from `centroids`: assignment passes and centroid updates until a pass
 /// reassigns no point (or, with `tol_abs > 0`, the squared centroid shift is at most `tol_abs`,
-/// followed by a final assignment pass), or `max_iter` passes.
+/// followed by a final assignment pass that `n_iterations` does not count), or `max_iter`
+/// passes.
 ///
 /// When the `cuda` feature is enabled and a GPU is available, uses DGEMM-based
 /// pairwise distance computation for the assignment step (n >= threshold).
@@ -418,7 +421,7 @@ fn kmeans_single(
                     .filter(|(a, b)| a != b)
                     .count();
                 labels.copy_from_slice(&new_labels);
-                n_iterations += 1;
+                // not counted: n_iterations stays within max_iter
                 converged = true;
                 break;
             }
@@ -2381,6 +2384,27 @@ mod tests {
                 assert_eq!(d(r.labels[i]), d(best), "row {i}, tol {tol:?}");
             }
             assert!(r.convergence.converged && r.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_kmeans_tolerance_stop_counts_at_most_max_iterations() {
+        // A tolerance stop on the last allowed pass used to count the relabelling pass too and
+        // report max_iterations + 1. Any shift is within this tolerance, so pass 1 stops.
+        let data = three_clusters(90, 2, 7);
+        let init = kmeans_plusplus_init(&data.view(), 3, &mut StdRng::seed_from_u64(3)).unwrap();
+        for max_iter in [1, 4] {
+            let r =
+                kmeans_from_centers(data.view(), init.view(), Some(max_iter), Some(1e12)).unwrap();
+            assert_eq!(r.n_iterations, 1, "max_iter {max_iter}");
+            assert!(r.convergence.converged);
+            assert!(r.n_iterations <= max_iter);
+        }
+        let r = kmeans_from_centers(data.view(), init.view(), Some(1), Some(1e12)).unwrap();
+        for i in 0..data.nrows() {
+            let d = |j: usize| euclidean_distance_squared(&data.row(i), &r.centroids.row(j));
+            let best = (0..3).min_by(|&a, &b| d(a).total_cmp(&d(b))).unwrap();
+            assert_eq!(d(r.labels[i]), d(best), "row {i}");
         }
     }
 

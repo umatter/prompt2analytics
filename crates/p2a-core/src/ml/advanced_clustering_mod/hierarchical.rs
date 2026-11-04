@@ -526,7 +526,7 @@ pub fn agnes(
         merge: tree.scipy_linkage(),
         heights: tree.height().to_vec(),
         order: agnes_banner_order(&tree),
-        method: format!("{:?}", linkage).to_lowercase(),
+        method: linkage.to_string(),
         n,
     })
 }
@@ -1464,16 +1464,19 @@ mod tests {
     fn test_agnes_linkage_methods() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0],];
 
-        // Test all linkage methods work
-        for linkage in [
-            AgnesLinkage::Single,
-            AgnesLinkage::Complete,
-            AgnesLinkage::Average,
-            AgnesLinkage::Ward,
-            AgnesLinkage::Weighted,
+        // Every linkage runs and reports the option table's canonical name (cluster::agnes's
+        // method string), which also parses back to the same linkage.
+        for (linkage, name) in [
+            (AgnesLinkage::Single, "single"),
+            (AgnesLinkage::Complete, "complete"),
+            (AgnesLinkage::Average, "average"),
+            (AgnesLinkage::Ward, "ward"),
+            (AgnesLinkage::Weighted, "weighted"),
         ] {
             let result = agnes(data.view(), Some(2), Some(linkage)).unwrap();
             assert_eq!(result.n_clusters, 2);
+            assert_eq!(result.method, name);
+            assert_eq!(result.method.parse::<AgnesLinkage>().unwrap(), linkage);
         }
     }
 

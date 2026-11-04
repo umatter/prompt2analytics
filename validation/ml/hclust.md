@@ -86,9 +86,9 @@ points; p2a's label + 1 equals R's cluster (noise -1 -> 0). Test `test_validate_
 | `test_validate_hclust_single`, `_complete`, `_average`, `_mcquitty`, `_wardD`, `_wardD2`, `_centroid`, `_median` | `<method>_merge`, `_height`, `_order`, `_cutree3`; `ties_<method>_merge`, `_height`, `_order` | merge, order, labels exact; heights `Tol::coef(n)` |
 | `test_validate_hclust_cuts` | `average_cutree_k246`, `average_cutree_h15`, `average_k_h15` | exact |
 | `test_validate_hclust_hand_cases` | `ml13_*`, `ml14_*`, `ml25_wardD2_height` | heights `Tol::coef(n)`; labels exact |
-| `test_validate_hclust_tree_conversions_round_trip` | (properties on `hclust_methods` data: merge-matrix, SciPy-linkage and order round trips) | exact |
+| `test_validate_hclust_tree_conversions_round_trip` | (merge-matrix, SciPy-linkage and order round trips) | property (data from case `hclust_methods`), not an R comparison; exact |
 | `test_validate_hierarchical_linkages` (`ml/clustering.rs`) | `<method>_merge`, `_height`; `ties_<method>_merge`, `_height` | merge exact; heights `Tol::coef(n)` |
-| `test_validate_cutree3`, `test_validate_cutree_labels_deterministic_first_appearance` (`ml/clustering.rs`) | `<method>_cutree3`, `average_cutree_k246`, `average_cutree_h15`, `average_k_h15` | exact |
+| `test_validate_cutree3` (`ml/clustering.rs`; `test_validate_cutree_labels_deterministic_first_appearance` there is a property on this data, not an R comparison) | `<method>_cutree3`, `average_cutree_k246`, `average_cutree_h15`, `average_k_h15` | exact |
 | `test_validate_fastcluster_linkages`, `test_validate_fastcluster_finding_cases` (`advanced_clustering_mod/hierarchical.rs`) | `<method>_*`, `ties_<method>_*`, `ml13_*`, `ml14_*` | merge, order, labels exact; heights `Tol::coef(n)` |
 | `test_validate_agnes_diana_coefficients`, `test_validate_agnes_tree` | `agnes_<method>_ac`, `_height`, `_order`, `_cutree3`; `diana_dc` | ac, dc `Tol::stat(60)`; heights `Tol::coef(60)`; order, labels exact |
 | `test_validate_diana_banner` | `diana_banner`, `_order`, `_merge`, `_cutree3` | banner `Tol::coef(60)`; the rest exact |

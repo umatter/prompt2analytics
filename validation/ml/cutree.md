@@ -29,7 +29,7 @@ centroid 22, 18, 20; mcquitty, median 21, 19, 20. The review's four hand cases (
 | Test (`crates/p2a-core/src/ml/clustering.rs`) | Keys | Tolerance |
 |---|---|---|
 | `test_validate_cutree3` | `<method>_cutree3`, `average_cutree_k246`, `average_cutree_h15`, `average_k_h15` | exact |
-| `test_validate_cutree_labels_deterministic_first_appearance` | (ward.D2 tree of hclust_60 cut repeatedly: identical labels, the first observation in group 1) | exact |
+| `test_validate_cutree_labels_deterministic_first_appearance` | (ward.D2 tree of hclust_60 cut repeatedly: identical labels, the first observation in group 1) | property (data from case `hclust_methods`), not an R comparison; exact |
 | `test_cutree_refuses_a_truncated_tree`, `test_hierarchical_height_cut_refuses_inversions` | error texts | |
 | `test_cutree_basic`, `test_cutree_by_height`, `test_cutree_multiple_k`, `test_cutree_validation` | p2a properties | |
 
