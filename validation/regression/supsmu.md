@@ -132,3 +132,6 @@ None: the port agrees with R on every case.
 Release build, same protocol as `loess.md`. Head/base at n = 50 / 200 / 1,000: automatic span 2.68 /
 3.13 / 3.28 (three running-line passes and the CV smoothing of R's algorithm; pre-approved, WP11-5);
 fixed span 0.1: 1.35 / 1.36 / 1.55.
+Re-measured on the merged tree against `fe13b889` (one P core, three interleaved runs each,
+criterion `supsmu`): automatic span 2.73 / 3.53 / 3.75 at n = 50 / 200 / 1,000, fixed span 0.1
+1.13 / 1.33 / 1.39.

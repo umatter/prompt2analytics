@@ -204,8 +204,31 @@ the intercept 1.4e-12). LAPACK's dgeqp3 and dqrdc2 differ by 8.1e-11 on `ols_ill
 is why no tolerance tighter than the README's is applied there.
 
 **Timing.** The common path (full rank, reciprocal condition at least 1e-8) runs the
-normal equations it ran before plus one O(k²) condition certificate; no release-mode
-before/after table was measured in the package lane (see the package report).
+normal equations it ran before plus one O(k²) condition certificate. Release build, one P
+core (`taskset -c 2`), `RAYON_NUM_THREADS=1`; base is the code before this change
+(`fe13b889`) and head the merged tree, run interleaved three times each; medians of the
+per-run medians. `unified_benchmarks` fits from a dataset (the `regression_n<n>` data, three
+regressors); criterion `OLS_Standard` calls `run_ols_raw` on a prepared matrix (five
+regressors and a constant).
+
+| Fit | n = 100: base µs, ratio | n = 1,000 | n = 10,000 |
+|---|---|---|---|
+| standard (unified) | 7.50, 1.04 | 39.9, 1.01 | 307, 1.03 |
+| HC1 (unified) | 17.5, 1.01 | 80.7, 1.05 | 676, 1.01 |
+| HC0 / HC2 / HC3 (unified) | 19.8 / 28.3 / 27.8: 0.99 / 1.00 / 1.01 | 1.02 / 1.00 / 1.01 | 0.96 / 0.97 / 0.97 |
+| clustered by entity (unified) | 21.2, 1.05 | 84.3, 0.98 | 646, 1.01 |
+| HAC, Newey-West (unified) | 26.5, 0.96 | 246, 0.92 | 3,554, 0.90 |
+| Driscoll-Kraay (unified; n = 100 / 500 / 1,000) | 13.4, 0.89 | 27.8, 0.92 (500) | 48.2, 0.88 (1,000) |
+| pairs bootstrap (unified) | 601, **1.12** | 2,906, **1.13** | not run |
+| standard, `run_ols_raw` (criterion) | 5.12, 1.07 | 14.4, **1.16** | 107, **1.20** |
+| HC0-HC3, `run_ols_raw`, n = 1,000 (criterion) | | 54.8-86.0, 1.01-1.03 | |
+
+The raw-matrix fit costs about 2 µs more per 1,000 rows at n >= 1,000, which grows with n and
+so is an O(nk) pass. The likely cause is the non-finite scan of X and y at the start of the
+fit, which `lm.fit` also makes (its columns are centred, so no refinement step is taken). On
+the dataset path the extractor has already checked them, and the scan is a few per cent of
+the fit. The pairs bootstrap
+costs 12-13% more. Neither has been signed off.
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 

@@ -215,3 +215,6 @@ Release build, CPU 0-3, `RAYON_NUM_THREADS=1`, base (pre-package engine, 96adf9b
 medians; synthetic noisy data. Head/base: degree 1 span 0.75 (unified): 1.13 / 1.06 / 1.07 at n = 100 /
 1,000 / 10,000; degree 2 span 0.5 (LOESS_Gaussian): 1.10 / 0.98 / 0.99; robust (LOESS_Robust): 0.99 /
 0.90 / 0.89.
+Re-measured on the merged tree against `fe13b889` (one P core, three interleaved runs each): degree 1
+span 0.75 (unified) 0.99 / 1.05 / 1.06 at n = 100 / 1,000 / 10,000; LOESS_Gaussian 1.06 / 0.99 / 0.97;
+LOESS_Robust 0.93 / 0.86 / 0.87 (n = 100 / 1,000 / 5,000).
