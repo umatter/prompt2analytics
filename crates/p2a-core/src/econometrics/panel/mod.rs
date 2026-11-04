@@ -1209,20 +1209,12 @@ mod tests {
         )
     }
 
-    /// The message of a `SingularMatrix` error, or a panic naming the result.
-    fn singular_suggestion<T: std::fmt::Debug>(res: crate::errors::EconResult<T>) -> String {
-        match res {
-            Err(crate::errors::EconError::SingularMatrix { suggestion, .. }) => suggestion,
-            other => panic!("expected SingularMatrix, got {other:?}"),
-        }
-    }
-
-    /// Exactly collinear regressors are not identified. FE used to return the
-    /// minimum-norm split, RE a wrong identified combination (x1 + 2 x2), and
-    /// Hausman chi2 0 with p 1. All three refuse, naming the regressors, with
-    /// the classical and the clustered covariance.
+    /// Exactly collinear regressors are not identified. FE drops the later one after
+    /// demeaning (as plm's aliased coefficients and fixest), RE the later one of the raw
+    /// design, and Hausman compares the remaining slope (df 1), with the classical and
+    /// the clustered covariance.
     #[test]
-    fn test_collinear_regressors_are_refused() {
+    fn test_collinear_regressors_are_dropped() {
         let ds = create_collinear_panel_dataset();
         let x = ["x1", "x2"];
         for vcov in [
@@ -1230,41 +1222,76 @@ mod tests {
             PanelVcov::Arellano(ClusterAdjustment::Stata),
         ] {
             let config = PanelConfig { vcov };
-            for s in [
-                singular_suggestion(run_fixed_effects_with(&ds, "y", &x, "entity", &config)),
-                singular_suggestion(run_random_effects_with(&ds, "y", &x, "entity", &config)),
-            ] {
-                assert!(
-                    s.contains("exactly collinear") && s.contains("involved: x1, x2"),
-                    "{s}"
-                );
-            }
+            let fe = run_fixed_effects_with(&ds, "y", &x, "entity", &config).unwrap();
+            assert_eq!(fe.dropped, vec!["x2".to_string()]);
+            assert_eq!(fe.variables, vec!["x1".to_string()]);
+            assert!(
+                fe.warnings.iter().any(|w| w.starts_with(
+                    "'x2' dropped: collinear with the other regressors after removing the \
+                     'entity' fixed effects"
+                )),
+                "{:?}",
+                fe.warnings
+            );
+            let re = run_random_effects_with(&ds, "y", &x, "entity", &config).unwrap();
+            assert_eq!(re.dropped, vec!["x2".to_string()]);
+            assert_eq!(
+                re.variables,
+                vec!["(Intercept)".to_string(), "x1".to_string()]
+            );
+            assert!(
+                re.warnings.iter().any(|w| w
+                    .starts_with("'x2' dropped: collinear with the other regressors (the later")),
+                "{:?}",
+                re.warnings
+            );
         }
-        let s = singular_suggestion(run_hausman_test(&ds, "y", &x, "entity"));
-        assert!(s.contains("involved: x1, x2"), "{s}");
+        let h = run_hausman_test(&ds, "y", &x, "entity").unwrap();
+        assert_eq!(h.df, 1);
     }
 
-    /// A regressor that is exactly zero after demeaning is not identified by
-    /// FE, which refuses. RE identifies it from the between variation; its
-    /// within step (sigma_e^2) then falls back to a pseudoinverse, which is
-    /// now reported instead of being dropped.
+    /// A regressor that is constant within every entity has no variation left after
+    /// demeaning: FE drops it with a warning, as plm. RE keeps it, identified by the
+    /// between variation, and its within step (sigma_e^2) leaves it out without a
+    /// warning (plm's ercomp).
     #[test]
-    fn test_time_invariant_regressor_fe_refuses_re_warns() {
+    fn test_time_invariant_regressor_fe_drops_re_keeps() {
         let ds = create_collinear_panel_dataset();
-        let s = singular_suggestion(run_fixed_effects(&ds, "y", &["x1", "z"], "entity"));
+        let fe = run_fixed_effects(&ds, "y", &["x1", "z"], "entity").unwrap();
+        assert_eq!(fe.dropped, vec!["z".to_string()]);
         assert!(
-            s.contains("involved: z") && s.contains("constant within every entity"),
-            "{s}"
+            fe.warnings.iter().any(|w| w
+                == "'z' dropped: no variation left after removing the 'entity' fixed effects \
+                    (not estimated, as in plm and fixest)"),
+            "{:?}",
+            fe.warnings
         );
         let re = run_random_effects(&ds, "y", &["x1", "z"], "entity").unwrap();
+        assert!(re.dropped.is_empty());
+        assert_eq!(
+            re.variables,
+            vec!["(Intercept)".to_string(), "x1".to_string(), "z".to_string()]
+        );
         assert!(re.coefficients.iter().all(|b| b.is_finite()));
         assert!(
-            re.warnings
+            !re.warnings
                 .iter()
                 .any(|w| w.contains("within regression that estimates sigma_e^2")),
             "{:?}",
             re.warnings
         );
+    }
+
+    #[test]
+    fn test_validate_hausman_absorbed_regressor() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_absorbed_regressors");
+        let h = run_hausman_test(&ds, "y", &["x1", "x2", "z"], "id").unwrap();
+        Check::new(&case)
+            .scalar("hausman_chisq", h.chi2_statistic, Tol::stat(180))
+            .scalar("hausman_df", h.df as f64, Tol::exact())
+            .scalar("hausman_p", h.p_value, Tol::p_value(180))
+            .finish();
     }
 
     #[test]

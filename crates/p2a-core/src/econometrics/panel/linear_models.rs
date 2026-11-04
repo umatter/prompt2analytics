@@ -44,12 +44,14 @@
 //!
 //! R equivalent: `plm::plm()` with `model = "within"` or `model = "random"`
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy};
+use crate::econometrics::hdfe::screen_regressors;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::eig_symmetric;
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, least_squares, sym_inverse};
 use crate::resource;
 use crate::traits::estimator::{
     SignificanceLevel, chi_squared_p_value, f_test_p_value, normal_cdf, t_test_p_value,
@@ -121,9 +123,12 @@ pub fn run_fixed_effects(
 ///
 /// Rows with a missing value (null or NaN) in `y`, a regressor or the entity are
 /// dropped and reported in `missing` (plm `na.omit`); an infinite value is refused
-/// (`NonFiniteValues`). Entities are numbered in R factor order of the ids. Refused:
-/// regressors that are exactly collinear after removing the entity means (the
-/// coefficients are not identified).
+/// (`NonFiniteValues`). Entities are numbered in R factor order of the ids.
+///
+/// Regressors without variation left after removing the entity means (a
+/// time-invariant regressor), and the later of regressors that are collinear after
+/// demeaning, are not estimated: they are named in `dropped` and a warning, as plm
+/// drops them. With no regressor left the call is `InvalidSpecification`.
 pub fn run_fixed_effects_with(
     dataset: &Dataset,
     y_col: &str,
@@ -137,9 +142,8 @@ pub fn run_fixed_effects_with(
     let y = cols.numeric_array(y_col);
     let design = cols.matrix(x_cols, false)?;
     let x = design.data;
-    let var_names = design.column_names;
+    let all_names = design.column_names;
     let n = y.len();
-    let k = x.ncols();
     let (entity_ids, n_groups) = entity_codes(cols.factor(entity_col));
 
     if n_groups < 2 {
@@ -152,44 +156,35 @@ pub fn run_fixed_effects_with(
 
     // Demean y and X by entity
     let y_demeaned = demean_by_entity(&y, &entity_ids, n_groups);
-    let x_demeaned = demean_matrix_by_entity(&x, &entity_ids, n_groups);
+    let x_demeaned_all = demean_matrix_by_entity(&x, &entity_ids, n_groups);
+
+    // Regressors absorbed by the entity effects or collinear after them are not
+    // estimated (plm drops them); the fit solves from the screen's pivoted QR
+    let mut warnings = warnings_with_note(&missing);
+    let screen = screen_regressors(
+        x.view(),
+        x_demeaned_all.view(),
+        &all_names,
+        &format!("'{entity_col}'"),
+    )?;
+    warnings.extend(screen.warnings.iter().cloned());
+    let x_demeaned = x_demeaned_all.select(Axis(1), &screen.kept);
+    let var_names: Vec<String> = screen.kept.iter().map(|&j| all_names[j].clone()).collect();
+    let k = screen.kept.len();
 
     // Degrees of freedom: n - N - k (lost N entity dummies)
-    let df = n.saturating_sub(n_groups).saturating_sub(k);
-    if df == 0 {
-        return Err(EconError::InsufficientData {
+    let df = n
+        .checked_sub(n_groups + k)
+        .filter(|&d| d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
             required: n_groups + k + 1,
             provided: n,
             context: "Not enough observations for degrees of freedom".to_string(),
-        });
-    }
+        })?;
 
-    // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ
-    let mut warnings = warnings_with_note(&missing);
-    let xtx_mat = xtx(&x_demeaned.view());
-    require_full_rank(
-        &xtx_mat,
-        &var_names,
-        "X'X in Fixed Effects",
-        "after removing the entity means the regressors",
-        " (a regressor that is constant within every entity is zero after demeaning)",
-    )?;
-    let (xtx_inv, cond) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'X in Fixed Effects".to_string(),
-        suggestion: format!(
-            "Check for perfect multicollinearity among variables: {:?}",
-            e
-        ),
-    })?;
-    warn_pseudoinverse(
-        &mut warnings,
-        "the within regression",
-        "the coefficients may not be identified",
-        cond,
-    );
-
-    let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
-    let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
+    // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ, from the screen's QR
+    let beta = screen.coefficients(y_demeaned.view())?;
+    let xtx_inv = screen.unscaled_covariance()?;
 
     // Residuals from demeaned model
     let y_hat: Array1<f64> = x_demeaned.dot(&beta);
@@ -308,6 +303,7 @@ pub fn run_fixed_effects_with(
         theta_by_group: Vec::new(),
         warnings,
         missing,
+        dropped: screen.dropped,
         coef_arr,
         se_arr,
         residuals,
@@ -337,7 +333,13 @@ pub fn run_random_effects(
 /// unbalanced panels).
 ///
 /// One code path serves balanced and unbalanced panels:
-/// 1. σ²_ν from the within regression, `SSR_w / (n - N - K)`.
+/// 0. Regressors exactly collinear with the intercept and the earlier regressors are
+///    dropped (the later of each collinear set), named in `dropped` and a warning, as
+///    plm drops aliased coefficients.
+/// 1. σ²_ν from the within regression, `SSR_w / (n - N - K_w)`, where `K_w` counts
+///    the regressors that vary within entities (a time-invariant regressor is not in
+///    the within regression; plm's `ercomp`). It stays in the model, identified by
+///    the between variation.
 /// 2. The between regression on the observation-level group means (each entity
 ///    weighted by its T_i), its residual quadratic form `quad2` and the trace
 ///    term `M_η = n - tr[(Σ T_i z̄_i z̄_i')⁻¹ Σ T_i² z̄_i z̄_i']`;
@@ -361,9 +363,9 @@ pub fn run_random_effects(
 /// Rows with a missing value (null or NaN) in `y`, a regressor or the entity are
 /// dropped and reported in `missing` (plm `na.omit`); an infinite value is refused
 /// (`NonFiniteValues`). Entities are numbered in R factor order of the ids. Refused:
-/// regressors that are exactly collinear with each other or with the intercept (the
-/// coefficients are not identified), `n <= N + K` (no within degrees of freedom for
-/// σ²_ν) and `N <= K + 1` (the between regression is not estimable, as plm).
+/// no regressor that varies within entities (plm's "empty model"), `n <= N + K_w` (no
+/// within degrees of freedom for σ²_ν) and `N <= K + 1` (the between regression is
+/// not estimable, as plm).
 ///
 /// # References
 /// - Swamy, P.A.V.B. & Arora, S.S. (1972). The exact finite sample properties of
@@ -385,11 +387,9 @@ pub fn run_random_effects_with(
     let missing = cols.missing().clone();
     let y = cols.numeric_array(y_col);
     let design = cols.matrix(x_cols, true)?;
-    let x = design.data;
-    let var_names = design.column_names;
+    let x_all = design.data;
+    let all_names = design.column_names;
     let n = y.len();
-    let p = x.ncols(); // K + 1
-    let k_s = p - 1; // K
 
     let (entity_ids, n_groups) = entity_codes(cols.factor(entity_col));
 
@@ -400,9 +400,55 @@ pub fn run_random_effects_with(
             context: "At least 2 entities required for panel estimation".to_string(),
         });
     }
-    if n <= n_groups + k_s {
+
+    let mut warnings = warnings_with_note(&missing);
+
+    // Step 0: raw collinearity. The later of exactly collinear columns of [1, X] is
+    // dropped from every step (plm's aliased coefficients); the intercept is column 0,
+    // so it is never the aliased one.
+    let raw_qr = Qr::decompose(x_all.view(), LM_QR_TOL)?;
+    let aliased = raw_qr.aliased();
+    let dropped: Vec<String> = aliased.iter().map(|&j| all_names[j].clone()).collect();
+    if !dropped.is_empty() {
+        let quoted: Vec<String> = dropped.iter().map(|d| format!("'{d}'")).collect();
+        warnings.push(format!(
+            "{} dropped: collinear with the other regressors (the later of the collinear \
+             regressors is not estimated, as in plm)",
+            quoted.join(", ")
+        ));
+    }
+    let keep: Vec<usize> = (0..x_all.ncols())
+        .filter(|j| !aliased.contains(j))
+        .collect();
+    let x = x_all.select(Axis(1), &keep);
+    let var_names: Vec<String> = keep.iter().map(|&j| all_names[j].clone()).collect();
+    let p = x.ncols(); // K + 1
+    let k_s = p - 1; // K
+
+    // Step 1: within regression on the entity-demeaned slopes -> sigma^2_nu. Only
+    // the slopes that vary within entities enter it (plm's ercomp); the demeaned
+    // intercept column is zero and is left out.
+    let y_w = demean_by_entity(&y, &entity_ids, n_groups);
+    let x_demeaned = demean_matrix_by_entity(&x, &entity_ids, n_groups);
+    let within = screen_regressors(
+        x.slice(s![.., 1..]),
+        x_demeaned.slice(s![.., 1..]),
+        &var_names[1..],
+        &format!("'{entity_col}'"),
+    )
+    .map_err(|e| match e {
+        EconError::InvalidSpecification { .. } => EconError::InvalidSpecification {
+            message: "random effects: no regressor varies within entities, so the within \
+                      regression that estimates sigma_e^2 is empty (plm stops with 'empty \
+                      model')"
+                .to_string(),
+        },
+        other => other,
+    })?;
+    let k_w = within.kept.len();
+    if n <= n_groups + k_w {
         return Err(EconError::InsufficientData {
-            required: n_groups + k_s + 1,
+            required: n_groups + k_w + 1,
             provided: n,
             context: "random effects: the within regression that estimates sigma_e^2 needs \
                       more observations than entities plus slopes"
@@ -418,29 +464,7 @@ pub fn run_random_effects_with(
                 .to_string(),
         });
     }
-
-    let mut warnings = warnings_with_note(&missing);
-
-    // Step 1: within regression on the entity-demeaned slopes -> sigma^2_nu
-    // (the demeaned intercept column is zero and is left out of the view)
-    let y_w = demean_by_entity(&y, &entity_ids, n_groups);
-    let x_demeaned = demean_matrix_by_entity(&x, &entity_ids, n_groups);
-    let x_w = x_demeaned.slice(s![.., 1..]);
-    let (xtx_w_inv, cond) =
-        safe_inverse(&xtx(&x_w).view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X (demeaned) in Random Effects".to_string(),
-            suggestion: format!("Check for perfect multicollinearity: {:?}", e),
-        })?;
-    warn_pseudoinverse(
-        &mut warnings,
-        "the within regression that estimates sigma_e^2",
-        "a regressor may not vary within entities, and sigma_e^2 still counts it in its \
-         degrees of freedom",
-        cond,
-    );
-    let b_w: Array1<f64> = xtx_w_inv.dot(&xty(&x_w, &y_w));
-    let e_w = &y_w - &x_w.dot(&b_w);
-    let sigma2_nu = e_w.dot(&e_w) / (n - n_groups - k_s) as f64;
+    let sigma2_nu = within.rss(y_w.view())? / (n - n_groups - k_w) as f64;
 
     // Step 2: per-entity sums in one pass over the observations
     let what = "random effects group means";
@@ -479,7 +503,7 @@ pub fn run_random_effects_with(
     // Step 3: between regression, rank-aware (collinear entity means, such as
     // a regressor without between variation, make A singular; plm then drops
     // the aliased column)
-    let (a_inv, rank_b) = between_inverse(&a, &mut warnings)?;
+    let (a_inv, rank_b) = between_inverse(&a)?;
     if rank_b < p {
         warnings.push(format!(
             "the Swamy-Arora between regression is rank deficient (rank {rank_b} of {p}): the \
@@ -533,29 +557,27 @@ pub fn run_random_effects_with(
 
     // Step 5: OLS on the transformed model. X* c = 0 exactly when X c = 0
     // (average over t: (1 - theta_i) xbar_i'c = 0 with theta_i < 1), so its rank
-    // is that of the data with the intercept.
-    let xtx_q = xtx(&x_q.view());
-    require_full_rank(
-        &xtx_q,
-        &var_names,
-        "X'X (quasi-demeaned) in Random Effects",
-        "the regressors and the intercept",
-        "",
-    )?;
-    let (bread, cond) = safe_inverse(&xtx_q.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'X (quasi-demeaned) in Random Effects".to_string(),
-        suggestion: format!("Check for multicollinearity: {:?}", e),
-    })?;
-    warn_pseudoinverse(
-        &mut warnings,
-        "the quasi-demeaned regression",
-        "the coefficients may not be identified",
-        cond,
-    );
-    let beta: Array1<f64> = bread.dot(&xty(&x_q.view(), &y_q));
-    let fitted = x_q.dot(&beta);
-    let residuals = &y_q - &fitted;
-    let df = n - p;
+    // is that of the data with the intercept, which step 0 made full.
+    let ls = least_squares(x_q.view(), y_q.view())?;
+    if ls.rank < p {
+        return Err(EconError::Internal(format!(
+            "random effects: the quasi-demeaned design has rank {} of {p} after the \
+             collinear regressors were dropped",
+            ls.rank
+        )));
+    }
+    let bread = ls.unscaled_cov;
+    let beta: Array1<f64> = ls.coefficients;
+    let fitted = ls.fitted;
+    let residuals = ls.residuals;
+    let df = n
+        .checked_sub(p)
+        .filter(|&d| d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: p + 1,
+            provided: n,
+            context: "random effects: residual degrees of freedom".to_string(),
+        })?;
     let s2 = residuals.dot(&residuals) / df as f64;
 
     let vcov = match config.vcov {
@@ -652,27 +674,12 @@ pub fn run_random_effects_with(
         theta_by_group,
         warnings,
         missing,
+        dropped,
         coef_arr,
         se_arr,
         residuals,
         vcov,
     })
-}
-
-/// Records that `safe_inverse` fell back to a pseudoinverse (`Some(cond)`) for
-/// the cross-product matrix of `what`, with its `consequence`.
-fn warn_pseudoinverse(
-    warnings: &mut Vec<String>,
-    what: &str,
-    consequence: &str,
-    cond: Option<f64>,
-) {
-    if let Some(c) = cond {
-        warnings.push(format!(
-            "the cross-product matrix of {what} is ill-conditioned (condition number {c:.2e}), \
-             so a pseudoinverse was used: {consequence}"
-        ));
-    }
 }
 
 /// `b' V⁻¹ b`, or `None` when `V` is singular.
@@ -742,52 +749,6 @@ fn scaled_eigen(a: &Array2<f64>) -> EconResult<ScaledEigen> {
     })
 }
 
-/// Refuses a cross-product `X'X` of less than full rank (judged as in
-/// [`scaled_eigen`]): exactly collinear columns, or a column that is
-/// identically zero, are not identified. The error names the columns in the
-/// null space, `"{subject} are exactly collinear (rank r of p; involved: ...)"`,
-/// followed by `hint`. A within-demeaned column of rounding residue (a regressor
-/// that does not vary within entities, with entity means that are not exact in
-/// floating point) is not caught here.
-fn require_full_rank(
-    xtx: &Array2<f64>,
-    names: &[String],
-    context: &str,
-    subject: &str,
-    hint: &str,
-) -> EconResult<()> {
-    let p = xtx.nrows();
-    let e = scaled_eigen(xtx)?;
-    if e.rank == p {
-        return Ok(());
-    }
-    let mut involved = vec![false; p];
-    for (j, &l) in e.lambda.iter().enumerate() {
-        if l <= e.tol {
-            for (i, flag) in involved.iter_mut().enumerate() {
-                if e.s[i] == 0.0 || e.u[[i, j]].abs() > 1e-6 {
-                    *flag = true;
-                }
-            }
-        }
-    }
-    let shown: Vec<&str> = names
-        .iter()
-        .zip(&involved)
-        .filter(|&(_, &f)| f)
-        .map(|(n, _)| n.as_str())
-        .collect();
-    Err(EconError::SingularMatrix {
-        context: context.to_string(),
-        suggestion: format!(
-            "{subject} are exactly collinear (rank {} of {p}; involved: {}), so their \
-             coefficients are not identified: drop one of them{hint}",
-            e.rank,
-            shown.join(", ")
-        ),
-    })
-}
-
 /// `cor(a, b)²` from centered sums; 0 when either has no variance.
 fn squared_correlation(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
     let (ma, mb) = (a.mean().unwrap_or(0.0), b.mean().unwrap_or(0.0));
@@ -822,15 +783,12 @@ pub(super) fn symmetric_eigen_pairs(m: &Array2<f64>) -> EconResult<(Vec<f64>, Ar
 /// Inverse of the between moment matrix `A = Σ T_i z̄_i z̄_i'` and its rank.
 ///
 /// The rank is judged as in [`scaled_eigen`], on `S A S` against
-/// `100 (K + 1) ε max(1, λ_max)`. At full rank this is `safe_inverse(A)` (a
-/// pseudoinverse fallback is recorded in `warnings`); otherwise the generalized
+/// `100 (K + 1) ε max(1, λ_max)`. At full rank this is `sym_inverse(A)` with
+/// `SingularPolicy::Error` (its rank tolerance is the lower one); otherwise the generalized
 /// inverse `S (Σ_{λ_j > tol} u_j u_j' / λ_j) S`. Any generalized inverse gives
 /// the same Swamy-Arora `quad2` and trace term, because the range of
 /// `Σ T_i² z̄ z̄'` lies in the range of `A`.
-fn between_inverse(
-    a: &Array2<f64>,
-    warnings: &mut Vec<String>,
-) -> EconResult<(Array2<f64>, usize)> {
+fn between_inverse(a: &Array2<f64>) -> EconResult<(Array2<f64>, usize)> {
     let p = a.nrows();
     let ScaledEigen {
         s,
@@ -840,16 +798,13 @@ fn between_inverse(
         rank,
     } = scaled_eigen(a)?;
     if rank == p {
-        let (inv, cond) = safe_inverse(&a.view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X (between) in Random Effects".to_string(),
-            suggestion: format!("Check for multicollinearity: {:?}", e),
-        })?;
-        warn_pseudoinverse(
-            warnings,
-            "the between regression",
-            "the variance components may be inaccurate",
-            cond,
-        );
+        // full rank was verified above
+        let inv = sym_inverse(
+            a.view(),
+            SingularPolicy::Error,
+            "Swamy-Arora between cross-product",
+        )?
+        .inverse;
         return Ok((inv, p));
     }
     let mut g = Array2::<f64>::zeros((p, p));
@@ -1428,5 +1383,73 @@ mod tests {
                 "{got} vs {want}"
             );
         }
+    }
+
+    // ── T3-WP17: regressors absorbed by the entity effects or collinear (ECON-72)
+
+    #[test]
+    fn test_validate_fe_drops_time_invariant_regressor() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_absorbed_regressors");
+        let n = 180;
+        let r = run_fixed_effects(&ds, "y", &["x1", "x2", "z"], "id").unwrap();
+        assert_eq!(r.dropped, vec!["z".to_string()]);
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "'z' dropped: no variation left after removing the 'id' fixed effects (not \
+                    estimated, as in plm and fixest)"),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .named("fe_coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("fe_se", &r.variables, &r.std_errors, Tol::se(n))
+            .scalar("fe_df_resid", r.df as f64, Tol::exact())
+            .finish();
+        let r3 = run_fixed_effects(&ds, "y", &["x1", "x2", "x3"], "id").unwrap();
+        assert_eq!(r3.dropped, vec!["x3".to_string()]);
+        assert!(r3.warnings.iter().any(|w| w.starts_with(
+            "'x3' dropped: collinear with the other regressors after removing the 'id' fixed \
+             effects"
+        )));
+        Check::new(&case)
+            .named("fe_x3_coef", &r3.variables, &r3.coefficients, Tol::coef(n))
+            .finish();
+        // only z: nothing left (plm "empty model"; fixest "All variables ... collinear")
+        let e = run_fixed_effects(&ds, "y", &["z"], "id").unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.starts_with("no regressor left to estimate: 'z' dropped")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_re_absorbed_regressor() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_absorbed_regressors");
+        let n = 180;
+        let r = run_random_effects(&ds, "y", &["x1", "x2", "z"], "id").unwrap();
+        assert!(r.dropped.is_empty()); // z is identified by the between variation
+        Check::new(&case)
+            .named("re_coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("re_se", &r.variables, &r.std_errors, Tol::se(n))
+            .scalar("re_sigma2_idios", r.sigma_e.unwrap().powi(2), Tol::stat(n))
+            .scalar("re_sigma2_id", r.sigma_u.unwrap().powi(2), Tol::stat(n))
+            .scalar("re_theta", r.theta.unwrap(), Tol::stat(n))
+            .finish();
+        let r3 = run_random_effects(&ds, "y", &["x1", "x2", "x3"], "id").unwrap();
+        assert_eq!(r3.dropped, vec!["x3".to_string()]);
+        assert!(r3.warnings.iter().any(|w| {
+            w.starts_with("'x3' dropped: collinear with the other regressors (the later")
+        }));
+        Check::new(&case)
+            .named("re_x3_coef", &r3.variables, &r3.coefficients, Tol::coef(n))
+            .finish();
+        let e = run_random_effects(&ds, "y", &["z"], "id").unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("empty")),
+            "{e:?}"
+        );
     }
 }

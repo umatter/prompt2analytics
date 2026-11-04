@@ -12,6 +12,7 @@ use std::str::FromStr;
 
 use crate::data::columns::MissingSummary;
 use crate::errors::EconError;
+use crate::traits::convergence::ResultNotes;
 use crate::traits::estimator::{LinearEstimator, SignificanceLevel, t_critical};
 
 /// Small-sample factor of the entity-clustered (Arellano) covariance
@@ -190,6 +191,12 @@ pub struct PanelResult {
     /// (plm `na.omit`).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Regressors not estimated, each named in a warning: fixed effects drops those the
+    /// entity effects absorb (no variation within entities) and the later of collinear
+    /// ones after demeaning; random effects drops the later of collinear ones (plm drops
+    /// both, fixest too).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
 
     // ── Trait-backing storage (LinearEstimator). Kept out of the public
     //    JSON surface to avoid duplicating the Vec-typed fields above; round-
@@ -212,6 +219,15 @@ pub struct PanelResult {
     /// Used by `LinearEstimator::vcov_matrix`.
     #[serde(skip, default)]
     pub vcov: Array2<f64>,
+}
+
+/// The warnings, the missing-value note among them (JSON and the CLI/MCP note
+/// helpers); the Display keeps its `Warnings:` block. No convergence record: both
+/// estimators are closed form.
+impl ResultNotes for PanelResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl PanelResult {
