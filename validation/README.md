@@ -419,7 +419,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Diagnostics
 | Method | File | Status |
 |--------|------|--------|
-| Regression Diagnostics (JB, BP, DW, VIF, condition number) | [regression_diagnostics.md](diagnostics/regression_diagnostics.md) | R-pinned |
+| Regression Diagnostics (JB, BP, DW, VIF, condition number) | [regression_diagnostics.md](diagnostics/regression_diagnostics.md) | R-pinned, known deviations (REG-37, REG-4) |
 | Breusch-Godfrey | [bgtest.md](diagnostics/bgtest.md) | R-pinned |
 | Harvey-Collier | [harvtest.md](diagnostics/harvtest.md) | R-pinned |
 
