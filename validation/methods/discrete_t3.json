@@ -137,6 +137,28 @@
       "tolerance": "hurdle zero part at the tight glm fit: coefficients 1e-8, SEs and logLik 1e-6 (glm at R's control also within 1e-8); NB 1e-6 (T2-WP10's tolerance) and 1e-12 against p2a's own fit without the aliased column",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_ordered_aliasing",
+      "name": "Ordered logit/probit with an aliased regressor: dropped (NaN) as MASS::polr drops it",
+      "category": "econometrics",
+      "reference": "MASS::polr(y ~ x + xb, method = 'logistic' | 'probit') with xb = 2 x on ordered_j5 (warns 'design appears to be rank-deficient' and keeps x), against polr(y ~ x) at reltol 1e-14",
+      "doc": "validation/econometrics/discrete_newton.md",
+      "cases": [
+        "disc_polr_aliased"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_aliased_regressor_is_nan"
+      ],
+      "quantities": [
+        "x coefficient and cut points of both links",
+        "xb coefficient, SE, z, p NaN",
+        "R's aliasing message",
+        "polr's warning and the kept-coefficient count (case flags)"
+      ],
+      "tolerance": "coefficient and cut points Tol::iterative(1e-6), T1's pin_ordered tolerance (polr's BFGS optimum)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

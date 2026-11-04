@@ -16,7 +16,7 @@
 //!
 //! R equivalent: `MASS::polr()`
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
@@ -27,6 +27,7 @@ use crate::data::Dataset;
 use crate::data::columns::{self, ColumnRequest, Columns, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::cholesky_inverse;
+use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
 use crate::resource;
 use crate::traits::estimator::logistic_cdf;
 
@@ -286,7 +287,9 @@ pub fn run_ordered_probit(
 /// The categories follow the outcome's data type: numbers by value (2 < 10,
 /// -2 < -1), an Enum in its declared order, booleans FALSE < TRUE, dates by time.
 /// A text or categorical outcome has no such order and needs
-/// [`OrderedConfig::levels`], lowest category first.
+/// [`OrderedConfig::levels`], lowest category first. A regressor that is a linear
+/// combination of the others and a constant (the cut points) is dropped, as polr drops
+/// it: its coefficient, SE, z and p are `NaN`, with R's aliasing message in `warnings`.
 ///
 /// # Errors
 ///
@@ -352,10 +355,33 @@ pub fn run_ordered_model_with(
 
     // Design matrix (no intercept: it is absorbed into the thresholds)
     let dm = cols.matrix(x_cols, false)?;
-    let x = dm.view();
-    let k = x.ncols();
-
     let var_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
+    let k_full = var_names.len();
+
+    // Aliased regressors (linear combinations of the others and the intercept the cut
+    // points stand for) are dropped and reported as NaN, as polr drops them ("design
+    // appears to be rank-deficient").
+    let aliased_idx: Vec<usize> = {
+        let with_intercept = cols.matrix(x_cols, true)?;
+        let qr = Qr::decompose(with_intercept.view(), LM_QR_TOL)?;
+        qr.aliased()
+            .into_iter()
+            .filter_map(|a| a.checked_sub(1))
+            .collect()
+    };
+    let identified: Vec<usize> = (0..k_full).filter(|c| !aliased_idx.contains(c)).collect();
+    let mut warnings: Vec<String> = Vec::new();
+    let x_identified;
+    let x = if aliased_idx.is_empty() {
+        dm.view()
+    } else {
+        if let Some(msg) = aliasing_message(&aliased_idx, &var_names) {
+            warnings.push(msg);
+        }
+        x_identified = dm.view().select(Axis(1), &identified);
+        x_identified.view()
+    };
+    let k = x.ncols();
     let codes = factor.codes.as_slice();
 
     // Parameters: theta = (beta_1..beta_k, zeta_1..zeta_{J-1})
@@ -390,7 +416,6 @@ pub fn run_ordered_model_with(
         Some(&mut hess),
     )?;
     let mut ll_prev = f64::NAN;
-    let mut warnings: Vec<String> = Vec::new();
     let mut converged = false;
     let mut stopped = false;
     let mut iterations = 0;
@@ -502,9 +527,17 @@ pub fn run_ordered_model_with(
     };
     drop(covariance);
 
-    let beta: Vec<f64> = theta[..k].to_vec();
+    // Coefficients and SEs of every regressor, NaN at the aliased ones.
+    let scatter = |v: &[f64]| -> Vec<f64> {
+        let mut out = vec![f64::NAN; k_full];
+        for (&c, &val) in identified.iter().zip(v) {
+            out[c] = val;
+        }
+        out
+    };
+    let beta: Vec<f64> = scatter(&theta[..k]);
     let alpha: Vec<f64> = theta[k..].to_vec();
-    let std_errors: Vec<f64> = se_all[..k].to_vec();
+    let std_errors: Vec<f64> = scatter(&se_all[..k]);
     let threshold_std_errors: Vec<f64> = se_all[k..].to_vec();
     let z_stats: Vec<f64> = beta.iter().zip(&std_errors).map(|(b, se)| b / se).collect();
     let p_values: Vec<f64> = z_stats
@@ -1564,6 +1597,65 @@ mod tests {
         match e {
             EconError::ResourceLimit(m) => assert!(m.contains("Hessian"), "{m}"),
             other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+    }
+
+    /// xb = 2 x: polr warns "design appears to be rank-deficient, so dropping some
+    /// coefs" and fits x alone (disc_polr_aliased: `*_warned`, `*_kept`); p2a reports xb
+    /// as NaN with the logit's aliasing message.
+    #[test]
+    fn test_validate_ordered_aliased_regressor_is_nan() {
+        let (case, ds) = load_case("disc_polr_aliased");
+        let ds = crate::regression::ols::na_fixtures::with_derived(&ds, "xb", "x", |v| 2.0 * v);
+        for (tag, link) in [
+            ("logit", OrderedModelType::Logit),
+            ("probit", OrderedModelType::Probit),
+        ] {
+            assert_eq!(case.scalar(&format!("{tag}_warned")), 1.0);
+            assert_eq!(case.scalar(&format!("{tag}_kept")), 1.0);
+            let zeta = case.names(&format!("{tag}_zeta")).to_vec();
+            let mut levels: Vec<String> = zeta
+                .iter()
+                .map(|z| z.split('|').next().unwrap().to_string())
+                .collect();
+            levels.push(zeta.last().unwrap().split('|').nth(1).unwrap().to_string());
+            let config = OrderedConfig {
+                link,
+                levels: Some(levels),
+                ..OrderedConfig::default()
+            };
+            let r = run_ordered_model_with(&ds, "y", &["x", "xb"], &config).unwrap();
+            assert_eq!(r.variables, ["x", "xb"]);
+            assert!(
+                r.coefficients[1].is_nan() && r.std_errors[1].is_nan(),
+                "{tag}: {r}"
+            );
+            assert!(
+                r.z_stats[1].is_nan() && r.p_values[1].is_nan(),
+                "{tag}: {r}"
+            );
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w == "Coefficients not defined because of singularities: xb"),
+                "{tag}: {:?}",
+                r.warnings
+            );
+            assert!(r.converged, "{tag}: {r}");
+            Check::new(&case)
+                .named(
+                    &format!("{tag}_coef"),
+                    &r.variables[..1],
+                    &r.coefficients[..1],
+                    Tol::iterative(1e-6),
+                )
+                .named(
+                    &format!("{tag}_zeta"),
+                    &zeta_names(&r),
+                    &r.thresholds,
+                    Tol::iterative(1e-6),
+                )
+                .finish();
         }
     }
 }
