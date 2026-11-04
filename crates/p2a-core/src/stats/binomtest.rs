@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::validate_level;
 
 /// Result of an exact binomial test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,16 +194,8 @@ pub fn binom_test(
             message: "Number of successes cannot exceed number of trials".to_string(),
         });
     }
-    if p <= 0.0 || p >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Null probability must be between 0 and 1 (exclusive)".to_string(),
-        });
-    }
-    if conf_level <= 0.0 || conf_level >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
-        });
-    }
+    validate_level(p, "p")?;
+    validate_level(conf_level, "conf_level")?;
 
     let estimate = x as f64 / n as f64;
 
@@ -246,8 +239,8 @@ fn exact_binom_p_value(x: u64, n: u64, p0: f64, alternative: Alternative) -> f64
             binom.cdf(x)
         }
         Alternative::Greater => {
-            // P(X >= x) = 1 - P(X <= x-1)
-            if x == 0 { 1.0 } else { 1.0 - binom.cdf(x - 1) }
+            // P(X >= x) = P(X > x - 1), the survival function (no 1 - cdf cancellation)
+            if x == 0 { 1.0 } else { binom.sf(x - 1) }
         }
         Alternative::TwoSided => {
             // Optimized two-sided p-value using binary search
@@ -272,12 +265,12 @@ fn two_sided_binom_p_value(binom: &statrs::distribution::Binomial, x: u64, n: u6
     if x == 0 {
         // Lower tail is just P(X=0), find upper boundary
         let upper = find_upper_boundary(binom, n, observed_prob);
-        return binom.cdf(0) + (1.0 - binom.cdf(upper.saturating_sub(1)));
+        return binom.cdf(0) + binom.sf(upper.saturating_sub(1));
     }
     if x == n {
         // Upper tail is just P(X=n), find lower boundary
         let lower = find_lower_boundary(binom, n, observed_prob);
-        return binom.cdf(lower) + (1.0 - binom.cdf(n - 1));
+        return binom.cdf(lower) + binom.sf(n - 1);
     }
 
     if x_f < mean {
@@ -290,7 +283,7 @@ fn two_sided_binom_p_value(binom: &statrs::distribution::Binomial, x: u64, n: u6
         let p_upper = if upper > n {
             0.0
         } else {
-            1.0 - binom.cdf(upper.saturating_sub(1))
+            binom.sf(upper.saturating_sub(1))
         };
         (p_lower + p_upper).min(1.0)
     } else if x_f > mean {
@@ -300,7 +293,7 @@ fn two_sided_binom_p_value(binom: &statrs::distribution::Binomial, x: u64, n: u6
 
         // P-value = P(X <= lower) + P(X >= x)
         let p_lower = binom.cdf(lower);
-        let p_upper = 1.0 - binom.cdf(x.saturating_sub(1));
+        let p_upper = binom.sf(x.saturating_sub(1));
         (p_lower + p_upper).min(1.0)
     } else {
         // x == mean (rare for discrete), p-value = 1
@@ -451,74 +444,118 @@ mod tests {
         assert!(result.conf_int_lower == 0.0);
     }
 
-    // ========================================================================
-    // Validation Tests Against R
-    // ========================================================================
-
     #[test]
-    fn test_validate_binom_test_two_sided() {
-        // R: binom.test(15, 100, p = 0.1)
-        // p-value = 0.09628
-        // 95% CI: (0.08645439, 0.23530750)
-
-        let result = binom_test(15, 100, 0.1, Alternative::TwoSided, 0.95).unwrap();
-
-        assert!(
-            (result.p_value - 0.09628).abs() < 0.001,
-            "p-value mismatch: Rust={}, R=0.09628",
-            result.p_value
-        );
-        assert!(
-            (result.conf_int_lower - 0.08645439).abs() < 0.001,
-            "CI lower mismatch: Rust={}, R=0.08645439",
-            result.conf_int_lower
-        );
-        assert!(
-            (result.conf_int_upper - 0.23530750).abs() < 0.001,
-            "CI upper mismatch: Rust={}, R=0.23530750",
-            result.conf_int_upper
-        );
+    fn test_validate_binom_grid() {
+        use crate::data::columns::{ColumnRequest, NaPolicy};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_binom");
+        let cols = ColumnRequest::new(ds.df())
+            .factor("label")
+            .numerics(&["x", "n", "p", "stat15"])
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        let (mut all, mut ok) = (Vec::new(), Vec::new());
+        let mut v: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
+        for i in 0..cols.n() {
+            let label = cols.factor("label").label(i).to_string();
+            let (x, n, p) = (
+                cols.numeric("x")[i] as u64,
+                cols.numeric("n")[i] as u64,
+                cols.numeric("p")[i],
+            );
+            let two = binom_test(x, n, p, Alternative::TwoSided, 0.95).unwrap();
+            let less = binom_test(x, n, p, Alternative::Less, 0.95).unwrap();
+            let greater = binom_test(x, n, p, Alternative::Greater, 0.95).unwrap();
+            if cols.numeric("stat15")[i] == 0.0 {
+                ok.push(label.clone());
+                v.entry("p_two").or_default().push(two.p_value);
+            } // deviation STAT-15: the stat15 cells keep R's two-sided p under p_two_stat15
+            all.push(label);
+            for (k, val) in [
+                ("p_less", less.p_value),
+                ("p_greater", greater.p_value),
+                ("ci_two_lower", two.conf_int_lower),
+                ("ci_two_upper", two.conf_int_upper),
+                ("ci_greater_lower", greater.conf_int_lower),
+                ("ci_less_upper", less.conf_int_upper),
+                ("estimate", two.estimate),
+            ] {
+                v.entry(k).or_default().push(val);
+            }
+        }
+        // the smallest n in the grid is 10: README tolerances at n = 10
+        Check::new(&case)
+            .named("p_two", &ok, &v["p_two"], Tol::p_value(10))
+            .named("p_less", &all, &v["p_less"], Tol::p_value(10))
+            .named("p_greater", &all, &v["p_greater"], Tol::p_value(10))
+            .named("ci_two_lower", &all, &v["ci_two_lower"], Tol::stat(10))
+            .named("ci_two_upper", &all, &v["ci_two_upper"], Tol::stat(10))
+            .named(
+                "ci_greater_lower",
+                &all,
+                &v["ci_greater_lower"],
+                Tol::stat(10),
+            )
+            .named("ci_less_upper", &all, &v["ci_less_upper"], Tol::stat(10))
+            .named("estimate", &all, &v["estimate"], Tol::coef(10))
+            .finish();
     }
 
     #[test]
-    fn test_validate_binom_test_greater() {
-        // R: binom.test(15, 100, p = 0.1, alternative = "greater")
-        // p-value = 0.07257
-        // 95% CI: (0.09479401, 1.00000000)
-
-        let result = binom_test(15, 100, 0.1, Alternative::Greater, 0.95).unwrap();
-
-        assert!(
-            (result.p_value - 0.07257).abs() < 0.001,
-            "p-value mismatch: Rust={}, R=0.07257",
-            result.p_value
-        );
-        assert!(
-            (result.conf_int_lower - 0.09479401).abs() < 0.001,
-            "CI lower mismatch: Rust={}, R=0.09479401",
-            result.conf_int_lower
-        );
-        assert!(result.conf_int_upper == 1.0);
+    fn test_validate_binom_upper_tails() {
+        // R6: P(X >= x) as a survival function. r13 = (95, 100, 0.5): before, 1 - cdf(94) = 0
+        // (greater) and the two-sided p was half of R's; r12 = (10, 10, 0.05): 1 - cdf(9) =
+        // 9.7699626167013776e-14 (R 9.765625e-14). Tol::p_value's abs 1e-12 hides these, so
+        // this test compares relative accuracy only.
+        use p2a_validation::{Check, Tol};
+        let (case, _ds) = crate::test_support::load_case("stat_rank_binom");
+        let g13 = binom_test(95, 100, 0.5, Alternative::Greater, 0.95)
+            .unwrap()
+            .p_value;
+        let t13 = binom_test(95, 100, 0.5, Alternative::TwoSided, 0.95)
+            .unwrap()
+            .p_value;
+        let g12 = binom_test(10, 10, 0.05, Alternative::Greater, 0.95)
+            .unwrap()
+            .p_value;
+        // tighter than the README row on purpose: relative accuracy of tiny tails
+        let tail = Tol::new(1e-10, 0.0);
+        Check::new(&case)
+            .named_subset(
+                "p_greater",
+                &["r12", "r13"],
+                &["r12", "r13"],
+                &[g12, g13],
+                tail,
+            )
+            .named_subset("p_two", &["r13"], &["r13"], &[t13], tail)
+            .finish();
     }
 
     #[test]
-    fn test_validate_binom_test_less() {
-        // R: binom.test(15, 100, p = 0.1, alternative = "less")
-        // p-value = 0.9601
-        // 95% CI: (0.0000000, 0.2215369)
-
-        let result = binom_test(15, 100, 0.1, Alternative::Less, 0.95).unwrap();
-
-        assert!(
-            (result.p_value - 0.9601).abs() < 0.001,
-            "p-value mismatch: Rust={}, R=0.9601",
-            result.p_value
-        );
-        assert!(result.conf_int_lower == 0.0);
-        assert!(
-            (result.conf_int_upper - 0.2215369).abs() < 0.001,
-            "CI upper mismatch: Rust={}, R=0.2215369",
-            result.conf_int_upper
-        );
+    fn test_binom_test_rejects_invalid_level_and_p() {
+        // R: "'conf.level' must be a single number between 0 and 1", "'p' must be a single
+        // number between 0 and 1". Before: conf_level NaN panicked in statrs' Beta quantile;
+        // p NaN returned Ok with a NaN p-value.
+        for level in [f64::NAN, 1.0, -0.1] {
+            match binom_test(3, 10, 0.5, Alternative::TwoSided, level) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("conf_level"), "{message}")
+                }
+                other => panic!("{level}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
+        for p in [f64::NAN, 0.0, 1.0] {
+            match binom_test(3, 10, p, Alternative::TwoSided, 0.95) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(
+                        message.contains("p must be strictly between 0 and 1"),
+                        "{message}"
+                    )
+                }
+                other => panic!("{p}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
     }
 }

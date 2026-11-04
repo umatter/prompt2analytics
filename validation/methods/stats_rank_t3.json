@@ -243,7 +243,10 @@
       "cases": [
         "stat_rank_binom"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::binomtest::tests::test_validate_binom_grid",
+        "p2a-core::stats::binomtest::tests::test_validate_binom_upper_tails"
+      ],
       "quantities": [
         "two-sided p (14 cells)",
         "p less",
