@@ -202,7 +202,7 @@ result <- smooth.spline(x, y, df = 6)
 # lambda = 0.0005617122726951194
 ```
 
-**Rust test**: `regression::smooth_spline::tests::test_validate_smooth_spline_against_r` (`crates/p2a-core/src/regression/smooth_spline.rs`): on the same x and y, df within 1 of 6 and every residual below 0.5. No R value is compared. Not R-pinned (REG-29, REG-30).
+**Rust test** (property test): `regression::smooth_spline::tests::test_smooth_spline_df_target_is_met` (`crates/p2a-core/src/regression/smooth_spline.rs`): on this x and y with small added noise, df within the bisection's stop rule (0.05) of 6, no warning, and every residual below 0.5. No R value is compared. Not R-pinned (REG-29, REG-30); see [smooth_spline.md](../regression/smooth_spline.md).
 
 ### spline Validation
 
