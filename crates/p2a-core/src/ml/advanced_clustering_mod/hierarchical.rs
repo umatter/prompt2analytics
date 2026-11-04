@@ -5,180 +5,13 @@ use crate::resource::{checked_len, checkpoint, try_vec, try_with_capacity};
 use ndarray::{Array2, ArrayView2};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::common::try_distance_matrix;
 use crate::ml::extract::require_finite;
 use crate::ml::hclust::{Dissimilarity, HclustTree, Linkage, agnes_banner_order, hclust_euclidean};
 use crate::options::Choices;
-
-// =============================================================================
-// Helper functions
-// =============================================================================
-
-/// Inputs of one Lance-Williams update: the distances from the merged
-/// clusters `c1`, `c2` to another cluster, their distance to each other, and
-/// the three cluster sizes.
-#[derive(Clone, Copy)]
-struct LanceWilliams {
-    d_c1: f64,
-    d_c2: f64,
-    d_12: f64,
-    n1: f64,
-    n2: f64,
-    n_other: f64,
-}
-
-/// Outcome of [`agglomerate`]. Cluster ids: observations are `0..n` and the
-/// merge at step `s` creates id `n + s`.
-struct Agglomeration {
-    /// Per merge: `(c1, c2, height, size of the merged cluster)`.
-    merges: Vec<(usize, usize, f64, usize)>,
-    /// Remaining cluster ids, in the order the clusters were kept.
-    active: Vec<usize>,
-    /// Members of every id (ids that were merged away are empty).
-    members: Vec<Vec<usize>>,
-}
-
-/// Agglomerative clustering on the `n x n` distance matrix `dist`, merging
-/// the closest pair until `target_k` clusters remain.
-///
-/// The matrix is updated in place: a merged cluster takes over the row and
-/// column of `c1`, so no matrix grows with the cluster ids. For every active
-/// id `r` the minimum distance to the ids after it in the active order (and
-/// the first id attaining it) is cached; the closest pair is the first row
-/// whose cached minimum is smallest. That is exactly the lexicographically
-/// first minimal pair a full scan over the active order finds, so merges,
-/// heights and tie order equal those of the quadratic search. Ids keep the
-/// old order: after a merge `c1` and `c2` leave the active list and the new
-/// id is appended. `update` is the linkage's Lance-Williams formula and
-/// `on_merge` sees the members of `c1` and `c2` and the merge height.
-fn agglomerate(
-    mut dist: Array2<f64>,
-    target_k: usize,
-    update: impl Fn(&LanceWilliams) -> f64,
-    mut on_merge: impl FnMut(&[usize], &[usize], f64),
-) -> Result<Agglomeration, String> {
-    let n = dist.nrows();
-    let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    let mut active: Vec<usize> = (0..n).collect();
-    // Row and column of `dist` that holds each id
-    let mut slot: Vec<usize> = (0..n).collect();
-    // Cached minimum over the later active ids, and the first id attaining it
-    let mut row_min = vec![f64::INFINITY; n];
-    let mut row_arg = vec![usize::MAX; n];
-
-    fn rescan(
-        pos: usize,
-        active: &[usize],
-        slot: &[usize],
-        dist: &Array2<f64>,
-        row_min: &mut [f64],
-        row_arg: &mut [usize],
-    ) {
-        let r = active[pos];
-        let (mut best, mut arg) = (f64::INFINITY, usize::MAX);
-        for &s in &active[pos + 1..] {
-            let d = dist[[slot[r], slot[s]]];
-            if d < best {
-                best = d;
-                arg = s;
-            }
-        }
-        row_min[r] = best;
-        row_arg[r] = arg;
-    }
-
-    for pos in 0..n {
-        rescan(pos, &active, &slot, &dist, &mut row_min, &mut row_arg);
-    }
-
-    let mut merges = Vec::with_capacity(n.saturating_sub(target_k));
-
-    while active.len() > target_k {
-        checkpoint().map_err(|e| e.to_string())?;
-
-        // Closest pair: the first row with the smallest cached minimum
-        let mut min_dist = f64::INFINITY;
-        let mut p1 = 0;
-        for (pos, &r) in active.iter().enumerate() {
-            if row_min[r] < min_dist {
-                min_dist = row_min[r];
-                p1 = pos;
-            }
-        }
-        if min_dist.is_infinite() {
-            return Err("No valid cluster pair found".to_string());
-        }
-        let c1 = active[p1];
-        let c2 = row_arg[c1];
-        let p2 = active[p1 + 1..]
-            .iter()
-            .position(|&id| id == c2)
-            .map(|q| p1 + 1 + q)
-            .ok_or_else(|| "No valid cluster pair found".to_string())?;
-
-        on_merge(&members[c1], &members[c2], min_dist);
-        merges.push((c1, c2, min_dist, members[c1].len() + members[c2].len()));
-
-        // Lance-Williams update, written into c1's row and column
-        let (s1, s2) = (slot[c1], slot[c2]);
-        let n1 = members[c1].len() as f64;
-        let n2 = members[c2].len() as f64;
-        let d_12 = dist[[s1, s2]];
-        for &other in &active {
-            if other == c1 || other == c2 {
-                continue;
-            }
-            let so = slot[other];
-            let new_dist = update(&LanceWilliams {
-                d_c1: dist[[s1, so]],
-                d_c2: dist[[s2, so]],
-                d_12,
-                n1,
-                n2,
-                n_other: members[other].len() as f64,
-            });
-            dist[[s1, so]] = new_dist;
-            dist[[so, s1]] = new_dist;
-        }
-
-        // Members and ids
-        let mut merged = std::mem::take(&mut members[c1]);
-        merged.extend_from_slice(&members[c2]);
-        members[c2] = Vec::new();
-        members.push(merged);
-        let new_id = members.len() - 1;
-        active.remove(p2);
-        active.remove(p1);
-        active.push(new_id);
-        slot.push(s1);
-        row_min.push(f64::INFINITY);
-        row_arg.push(usize::MAX);
-
-        // Cached minima: rows that pointed at c1 or c2 are rescanned; the
-        // others only compare against the new cluster, which comes last
-        for pos in 0..active.len() - 1 {
-            let r = active[pos];
-            if row_arg[r] == c1 || row_arg[r] == c2 {
-                rescan(pos, &active, &slot, &dist, &mut row_min, &mut row_arg);
-            } else {
-                let d = dist[[slot[r], s1]];
-                if d < row_min[r] {
-                    row_min[r] = d;
-                    row_arg[r] = new_id;
-                }
-            }
-        }
-    }
-
-    Ok(Agglomeration {
-        merges,
-        active,
-        members,
-    })
-}
+use crate::traits::estimator::normal_quantile;
+use statrs::function::erf::erfc;
 
 // =============================================================================
 // DIANA (DIvisive ANAlysis)
@@ -771,7 +604,7 @@ impl std::fmt::Display for PvClustResult {
             .filter(|&(_, (au, _))| *au >= self.au_threshold)
             .map(|(i, (au, bp))| (i + 1, *au, *bp))
             .collect();
-        significant.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        significant.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         writeln!(f, "Significant clusters (top 10):")?;
         writeln!(f, "  Edge   AU     BP")?;
@@ -791,7 +624,8 @@ impl std::fmt::Display for PvClustResult {
 ///
 /// # Arguments
 /// * `data` - Data matrix (n_samples x n_features)
-/// * `method` - Linkage method: "average", "single", "complete", "ward"
+/// * `method` - Linkage method, any `stats::hclust` method name or alias of
+///   [`Linkage`] (default "average"; "ward" is ward.D2); an unknown name is an error
 /// * `n_boot` - Number of bootstrap replicates (default: 1000)
 /// * `r` - Bootstrap sample sizes as ratios (default: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]);
 ///   at least one, each finite and positive
@@ -830,7 +664,7 @@ pub fn pvclust(
         return Err("Need at least 2 observations".to_string());
     }
 
-    let linkage_method = method.unwrap_or("average");
+    let linkage = crate::options::parse_or(method, Linkage::Average).map_err(|e| e.to_string())?;
     let nboot = n_boot.unwrap_or(1000);
     let ratios = r.unwrap_or_else(|| vec![0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]);
     let threshold = au_threshold.unwrap_or(0.95);
@@ -855,7 +689,7 @@ pub fn pvclust(
     };
 
     // Perform initial clustering
-    let (merge, heights) = hierarchical_clustering_merge(&data, linkage_method)?;
+    let (merge, heights) = hierarchical_clustering_merge(&data, linkage)?;
 
     let n_edges = merge.len();
 
@@ -898,7 +732,7 @@ pub fn pvclust(
             }
 
             // Perform clustering on bootstrap sample
-            let (boot_merge, _) = hierarchical_clustering_merge(&boot_data.view(), linkage_method)?;
+            let (boot_merge, _) = hierarchical_clustering_merge(&boot_data.view(), linkage)?;
             let boot_clusters = extract_clusters_from_merge(&boot_merge, sample_size);
 
             // Map each original observation to its first position in the sample
@@ -952,7 +786,7 @@ pub fn pvclust(
 
         // AU p-value from multiscale extrapolation
         // Use weighted least squares on log(-log(p)) vs log(r)
-        au_pvalues[edge_idx] = compute_au_pvalue(&counts[edge_idx], &ratios, nboot);
+        au_pvalues[edge_idx] = compute_au_pvalue(&counts[edge_idx], &ratios, nboot)?;
     }
 
     // Assign cluster labels based on significant edges
@@ -969,69 +803,25 @@ pub fn pvclust(
         n_boot: nboot,
         au_threshold: threshold,
         n,
-        method: linkage_method.to_string(),
+        method: linkage.r_name().to_string(),
     })
 }
 
-/// Perform hierarchical clustering and return merge matrix and heights.
+/// The `hclust(dist(data), linkage)` tree as R's merge matrix and heights.
 fn hierarchical_clustering_merge(
     data: &ArrayView2<f64>,
-    method: &str,
+    linkage: Linkage,
 ) -> Result<(Vec<(i32, i32)>, Vec<f64>), String> {
-    let n = data.nrows();
-
-    // Compute distance matrix
-    let distances = try_distance_matrix(data, "pvclust distance matrix")?;
-
-    // Perform agglomerative clustering
-    let agglomeration = agglomerate(
-        distances,
-        1,
-        |lw| hclust_lance_williams(method, lw),
-        |_, _, _| {},
-    )?;
-
-    // R-style indexing: negative for leaves, positive for internal nodes
-    let to_r = |c: usize| {
-        if c < n {
-            -((c as i32) + 1)
-        } else {
-            (c - n + 1) as i32
-        }
-    };
-    let merge = agglomeration
-        .merges
+    let tree =
+        hclust_euclidean(*data, linkage, "pvclust dissimilarities").map_err(|e| e.to_string())?;
+    let to_i32 =
+        |v: i64| i32::try_from(v).map_err(|_| "too many observations for pvclust".to_string());
+    let merge = tree
+        .merge()
         .iter()
-        .map(|&(c1, c2, _, _)| (to_r(c1), to_r(c2)))
-        .collect();
-    let heights = agglomeration.merges.iter().map(|m| m.2).collect();
-
-    Ok((merge, heights))
-}
-
-/// pvclust's Lance-Williams update for `method` (unknown methods use average).
-fn hclust_lance_williams(method: &str, lw: &LanceWilliams) -> f64 {
-    let LanceWilliams {
-        d_c1,
-        d_c2,
-        d_12,
-        n1,
-        n2,
-        n_other,
-    } = *lw;
-    match method {
-        "single" => d_c1.min(d_c2),
-        "complete" => d_c1.max(d_c2),
-        "average" => (n1 * d_c1 + n2 * d_c2) / (n1 + n2),
-        "ward" => {
-            let n_total = n1 + n2 + n_other;
-            let alpha1 = (n1 + n_other) / n_total;
-            let alpha2 = (n2 + n_other) / n_total;
-            let beta = -n_other / n_total;
-            (alpha1 * d_c1.powi(2) + alpha2 * d_c2.powi(2) + beta * d_12.powi(2)).sqrt()
-        }
-        _ => (n1 * d_c1 + n2 * d_c2) / (n1 + n2), // default to average
-    }
+        .map(|&(a, b)| Ok((to_i32(a)?, to_i32(b)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((merge, tree.height().to_vec()))
 }
 
 /// Extract clusters from merge matrix.
@@ -1064,17 +854,14 @@ fn extract_clusters_from_merge(merge: &[(i32, i32)], n: usize) -> Vec<Vec<usize>
     clusters
 }
 
-/// Compute AU p-value from multiscale bootstrap.
-fn compute_au_pvalue(counts: &[usize], ratios: &[f64], nboot: usize) -> f64 {
+/// Compute the AU p-value from the multiscale bootstrap: `z = qnorm(p)` regressed on
+/// `sqrt(r)` by least squares, `AU = pnorm(-a)` of the intercept `a`.
+fn compute_au_pvalue(counts: &[usize], ratios: &[f64], nboot: usize) -> Result<f64, String> {
     // Compute frequencies
     let freqs: Vec<f64> = counts
         .iter()
-        .map(|&c| (c as f64 / nboot as f64).max(0.001).min(0.999))
+        .map(|&c| (c as f64 / nboot as f64).clamp(0.001, 0.999))
         .collect();
-
-    // Transform: z = qnorm(p), x = sqrt(r)
-    // Fit: z = a + b*x
-    // AU p-value: pnorm(-a)
 
     let mut sum_x = 0.0;
     let mut sum_z = 0.0;
@@ -1084,7 +871,7 @@ fn compute_au_pvalue(counts: &[usize], ratios: &[f64], nboot: usize) -> f64 {
 
     for (&r, &p) in ratios.iter().zip(&freqs) {
         let x = r.sqrt();
-        let z = inverse_normal_cdf(p);
+        let z = normal_quantile(p).map_err(|e| e.to_string())?;
         sum_x += x;
         sum_z += z;
         sum_xz += x * z;
@@ -1094,61 +881,14 @@ fn compute_au_pvalue(counts: &[usize], ratios: &[f64], nboot: usize) -> f64 {
     // Simple linear regression
     let denom = n * sum_xx - sum_x * sum_x;
     if denom.abs() < 1e-10 {
-        return freqs.iter().sum::<f64>() / freqs.len() as f64;
+        return Ok(freqs.iter().sum::<f64>() / freqs.len() as f64);
     }
 
     let b = (n * sum_xz - sum_x * sum_z) / denom;
     let a = (sum_z - b * sum_x) / n;
 
     // AU = Phi(-a)
-    normal_cdf(-a)
-}
-
-/// Inverse normal CDF (probit function) - simple approximation.
-fn inverse_normal_cdf(p: f64) -> f64 {
-    // Abramowitz & Stegun approximation
-    let p = p.max(1e-10).min(1.0 - 1e-10);
-
-    let t = if p < 0.5 {
-        (-2.0 * p.ln()).sqrt()
-    } else {
-        (-2.0 * (1.0 - p).ln()).sqrt()
-    };
-
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
-    if p < 0.5 { -z } else { z }
-}
-
-/// Normal CDF - standard normal distribution function.
-fn normal_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
-}
-
-/// Error function approximation.
-fn erf(x: f64) -> f64 {
-    // Horner form of approximation
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-
-    sign * y
+    Ok(0.5 * erfc(a / std::f64::consts::SQRT_2))
 }
 
 /// Assign cluster labels based on significant AU p-values.
@@ -1167,7 +907,7 @@ fn assign_pvclust_labels(
         .filter(|&(_, au)| *au >= threshold)
         .map(|(i, au)| (i, *au))
         .collect();
-    significant_edges.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    significant_edges.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // Build cluster contents
     let mut cluster_contents: HashMap<i32, Vec<usize>> = HashMap::new();
@@ -1664,71 +1404,6 @@ mod tests {
         assert!(e.contains("cancelled"), "{e}");
     }
 
-    /// Golden (characterization) test: captured on the code before the
-    /// in-place engine and the per-replicate matching maps; it passes before
-    /// and after.
-    #[test]
-    fn pvclust_outputs_unchanged_by_the_engine() {
-        const GOLDEN_SUMS: [u64; 2] = [4625097201419323349, 4615739258092021352];
-        const GOLDEN_LABELS: [usize; 30] = [
-            2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 0, 2, 2, 0, 2, 2, 2, 2, 2,
-            2,
-        ];
-        const GOLDEN_AU: [u64; 5] = [
-            4605713939569136160,
-            4607136844457579383,
-            4607182408038478870,
-            4586554553958278736,
-            4606467524958177223,
-        ];
-        let mut rng = StdRng::seed_from_u64(21);
-        let centers = [[0.0, 0.0], [4.0, 4.0], [0.0, 5.0]];
-        let data = Array2::from_shape_fn((30, 2), |(i, j)| centers[i % 3][j] + rng.r#gen::<f64>());
-        let r = pvclust(
-            data.view(),
-            Some("average"),
-            Some(15),
-            None,
-            Some(0.9),
-            Some(7),
-        )
-        .unwrap();
-        let sums = [
-            r.au_pvalues.iter().sum::<f64>().to_bits(),
-            r.bp_pvalues.iter().sum::<f64>().to_bits(),
-        ];
-        let au: Vec<u64> = r.au_pvalues[..5].iter().map(|v| v.to_bits()).collect();
-        let msg = format!("got sums {sums:?}, labels {:?}, au {au:?}", r.labels);
-        // Exact bits only where the constants were captured (x86_64 glibc
-        // Linux with AVX2+FMA, crate::ml::golden_bits_platform): the AU
-        // p-values go through libm's ln and exp, which can differ in the last
-        // ulp elsewhere. One- and two-ulp changes of the scale ratios moved
-        // them by at most 1.2e-13 relative here (and by 2.5e-11 over 2,000
-        // random count vectors), while a changed bootstrap count moves them
-        // by far more than the 1e-9 tolerance used off the reference
-        // platform. The labels and the BP sum (counts / n_boot) are exact
-        // everywhere.
-        assert_eq!(&r.labels[..], &GOLDEN_LABELS[..], "{msg}");
-        assert_eq!(sums[1], GOLDEN_SUMS[1], "{msg}");
-        if crate::ml::golden_bits_platform() {
-            assert_eq!(
-                (sums[0], &au[..]),
-                (GOLDEN_SUMS[0], &GOLDEN_AU[..]),
-                "{msg}"
-            );
-        } else {
-            let want = std::iter::once(GOLDEN_SUMS[0])
-                .chain(GOLDEN_AU)
-                .map(f64::from_bits);
-            let got = std::iter::once(sums[0])
-                .chain(au.iter().copied())
-                .map(f64::from_bits);
-            for (g, w) in got.zip(want) {
-                assert!((g - w).abs() <= 1e-9 * w.abs(), "{msg}");
-            }
-        }
-    }
-
     #[test]
     fn test_diana_basic() {
         let data = array![
@@ -2145,5 +1820,85 @@ mod tests {
                 .unwrap_err()
                 .contains("unknown linkage")
         );
+    }
+
+    #[test]
+    fn test_pvclust_rejects_unknown_method() {
+        // ML-55: before, Ok((method: "compelte", average heights))
+        let x = array![
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [0.2, 0.0],
+            [10.0, 10.0],
+            [10.1, 10.1],
+            [10.2, 10.0]
+        ];
+        let e = pvclust(x.view(), Some("compelte"), Some(5), None, None, Some(1)).unwrap_err();
+        assert!(e.contains("unknown linkage 'compelte'"), "{e}");
+        assert_eq!(
+            pvclust(x.view(), Some("WARD"), Some(5), None, None, Some(1))
+                .unwrap()
+                .method,
+            "ward.D2"
+        );
+    }
+
+    #[test]
+    fn test_validate_pvclust_tree() {
+        // pvclust's tree is hclust(dist(x), "average"); the bootstrap p-values are ML-10 (Tier 4).
+        // hclust_methods.
+        let (case, ds) = crate::test_support::load_case("hclust_methods");
+        let r = pvclust(
+            matrix(ds.df(), &["a", "b", "c"]).view(),
+            None,
+            Some(2),
+            Some(vec![1.0]),
+            None,
+            Some(3),
+        )
+        .unwrap();
+        let merge: Vec<(i64, i64)> = r.merge.iter().map(|&(a, b)| (a as i64, b as i64)).collect();
+        Check::new(&case)
+            .vector("average_merge", &merge_colmajor(&merge), Tol::exact())
+            .vector("average_height", &r.heights, Tol::coef(60))
+            .finish();
+    }
+
+    #[test]
+    fn test_pvclust_is_deterministic_for_a_seed() {
+        let mut rng = StdRng::seed_from_u64(21);
+        let x = Array2::from_shape_fn((30, 2), |(i, _)| (i % 3) as f64 * 3.0 + rng.r#gen::<f64>());
+        let a = pvclust(
+            x.view(),
+            Some("average"),
+            Some(15),
+            None,
+            Some(0.9),
+            Some(7),
+        )
+        .unwrap();
+        let b = pvclust(
+            x.view(),
+            Some("average"),
+            Some(15),
+            None,
+            Some(0.9),
+            Some(7),
+        )
+        .unwrap();
+        assert_eq!(a.au_pvalues, b.au_pvalues);
+        assert_eq!(a.bp_pvalues, b.bp_pvalues);
+        assert_eq!(a.labels, b.labels);
+    }
+
+    #[test]
+    fn test_au_pvalue_uses_exact_normal_functions() {
+        // X-14. R: p <- pmin(pmax(counts / 1000, 0.001), 0.999); a <- coef(lm(qnorm(p) ~ sqrt(r)))[1];
+        // pnorm(-a) = 0.77754497438747294 (a = -0.76392816645692252). The A-S copies gave
+        // 0.77751341704481625.
+        let ratios = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4];
+        let counts = [512, 547, 571, 603, 622, 650, 668, 684, 701, 715];
+        let au = compute_au_pvalue(&counts, &ratios, 1000).unwrap();
+        assert!((au - 0.77754497438747294).abs() <= 1e-10 * 0.7775, "{au}");
     }
 }

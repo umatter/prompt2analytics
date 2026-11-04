@@ -153,6 +153,32 @@
       "tolerance": "dc Tol::stat(60); banner Tol::coef(60); rest exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_pvclust_tree",
+      "name": "pvclust (tree)",
+      "category": "ml",
+      "reference": "stats::hclust(dist(x), 'average')",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_pvclust_tree"
+      ],
+      "quantities": [
+        "merge",
+        "heights"
+      ],
+      "tolerance": "as ml_hclust",
+      "deviations": [
+        {
+          "finding": "ML-10",
+          "quantity": "AU and BP p-values",
+          "note": "pvclust resamples observations instead of variables (Tier 4); only the tree is pinned"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
