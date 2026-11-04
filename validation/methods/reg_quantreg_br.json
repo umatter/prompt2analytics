@@ -66,6 +66,11 @@
           "finding": "REG-26",
           "quantity": "nid p-value, tau 0.25, (Intercept), rq_br_se",
           "note": "summary.rq's absolute fuzz sqrt(eps) is replaced by sqrt(eps) * mean|y - median(y)| so that the iid and nid SEs are scale-equivariant (rule 4); this p-value moves 3.4e-6 relative"
+        },
+        {
+          "finding": "REG-26",
+          "quantity": "nid SE, tau 0.02, (Intercept), rq_br_se",
+          "note": "the same scale-free fuzz moves this SE 1.2e-6 relative (0.6977189521715584 against R's 0.697719800310165; summary.rq's own formula with the scaled eps gives p2a's value), where tau - h = 0.0079 makes the density estimate sensitive to eps"
         }
       ],
       "supersedes_legacy": []

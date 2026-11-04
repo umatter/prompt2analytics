@@ -16,6 +16,18 @@
 //!   (1e-6 times the residual MAD). An approximation that no R method computes; its objective is
 //!   close to, but not at, the LP minimum.
 //!
+//! # Standard errors ([`QuantRegSe`], `summary.rq(se = )`)
+//!
+//! - `nid` (default, at every n): the Hendricks-Koenker sandwich, with the density from fits at
+//!   τ ± h (Hall-Sheather bandwidth). R's default for n < 1001 is `se = "rank"` (rank-inversion
+//!   intervals), which is not computed here.
+//! - `iid`: the Koenker-Bassett sparsity estimate.
+//! - `ker`: Powell's kernel sandwich.
+//!
+//! summary.rq's absolute fuzz `sqrt(.Machine$double.eps)` is multiplied by `mean |y - median(y)|`
+//! here, so every standard error is scale-equivariant. t, p and the 95% interval use t(n - k).
+//! `validation/regression/quantreg.md` lists every difference from R.
+//!
 //! # References
 //!
 //! - Koenker, R., & Bassett, G. (1978). Regression Quantiles. *Econometrica*, 46(1), 33-50.
@@ -45,12 +57,11 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares, weighted_least_squares};
-use crate::linalg::{safe_inverse, xtx};
 use crate::options::Choices;
 use crate::resource;
 use crate::stats::robust::{QuantileType, quantile_sorted};
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text, relative_change_vec};
-use crate::traits::estimator::{t_test_p_value, validate_level};
+use crate::traits::estimator::{normal_quantile, t_quantile, t_test_p_value, validate_level};
 
 /// `.Machine$double.eps^(2/3)`: the pivot tolerance of quantreg's `rq.fit.br`.
 const BR_TOLER: f64 = 3.666852862501036e-11;
@@ -381,7 +392,7 @@ pub fn quantreg(
     if config.bootstrap_samples > 0 {
         tracing::warn!(
             "quantile regression: bootstrap_samples={} was requested, but bootstrap standard \
-             errors are not implemented; using the Powell (1991) sandwich estimator instead",
+             errors are not implemented; the setting is ignored",
             config.bootstrap_samples
         );
     }
@@ -437,25 +448,35 @@ pub fn quantreg(
 
     let method = resolve_method(config.algorithm, n, config.tau, config.tol);
     let fit = fit_full_rank(x.view(), y.view(), config.tau, method, config)?;
-    let warnings = fit.warnings.clone();
+    let mut warnings = fit.warnings.clone();
 
-    // Standard errors: the old sandwich (replaced by summary.rq's estimators next)
-    let std_errors = compute_quantreg_se(&x, &fit.residuals, config.tau, n, k)?;
+    let se = match rq_se(x.view(), y.view(), config.tau, &fit, config) {
+        Ok(se) => se,
+        Err(e @ (EconError::InsufficientData { .. } | EconError::SingularMatrix { .. })) => {
+            warnings.push(format!(
+                "standard errors (se = {}) could not be computed: {e}",
+                config.se
+            ));
+            RqSe::unavailable(config.se, k)
+        }
+        Err(e) => return Err(e),
+    };
+    warnings.extend(se.warnings.iter().cloned());
+
+    let q = t_quantile(0.975, df as f64)?;
     let coefficients: Vec<QuantRegCoefficient> = (0..k)
         .map(|i| {
             let b = fit.coefficients[i];
-            let se = std_errors[i];
-            let t_val = if se > 1e-15 { b / se } else { 0.0 };
-            let p_val = t_test_p_value(t_val, df as f64);
-            let t_crit = 1.96; // Approximate for large samples
+            let s = se.std_errors[i];
+            let t = b / s;
             QuantRegCoefficient {
                 name: var_names[i].clone(),
                 estimate: b,
-                std_error: se,
-                t_value: t_val,
-                p_value: p_val,
-                ci_lower_95: b - t_crit * se,
-                ci_upper_95: b + t_crit * se,
+                std_error: s,
+                t_value: t,
+                p_value: t_test_p_value(t, df as f64),
+                ci_lower_95: b - q * s,
+                ci_upper_95: b + q * s,
             }
         })
         .collect();
@@ -472,11 +493,11 @@ pub fn quantreg(
         algorithm: fit.algorithm,
         variable_names: var_names,
         missing: cols.missing().clone(),
-        se_type: QuantRegSe::Nid,
-        se_method: String::new(),
-        se_bandwidth: None,
-        sparsity: None,
-        kernel_bandwidth: None,
+        se_type: se.se_type,
+        se_method: se.method,
+        se_bandwidth: se.bandwidth,
+        sparsity: se.sparsity,
+        kernel_bandwidth: se.kernel_bandwidth,
         nonunique: fit.nonunique,
         convergence: fit.convergence,
         warnings,
@@ -1008,83 +1029,234 @@ fn irls_quantreg(
     ))
 }
 
-/// Compute standard errors using sandwich formula.
-fn compute_quantreg_se(
-    x: &Array2<f64>,
-    residuals: &Array1<f64>,
-    tau: f64,
-    n: usize,
-    k: usize,
-) -> EconResult<Vec<f64>> {
-    // Powell (1991) sandwich estimator
-    // V = τ(1-τ) / (n f(0)²) × (X'X)^{-1}
-    // where f(0) is the density of residuals at zero
-
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Quantile regression SE computation".to_string(),
-        suggestion: format!("Original error: {}", e),
-    })?;
-
-    // Estimate f(0) using kernel density
-    let h = bandwidth_nrd(residuals);
-    let f0 = kernel_density_at_zero(residuals, h);
-
-    // Variance factor
-    let var_factor = if f0.abs() > 1e-15 {
-        tau * (1.0 - tau) / (n as f64 * f0 * f0)
-    } else {
-        // Fallback: use residual scale
-        let mad = residuals.iter().map(|r| r.abs()).sum::<f64>() / n as f64;
-        tau * (1.0 - tau) * mad * mad
-    };
-
-    // Standard errors
-    let se: Vec<f64> = (0..k)
-        .map(|i| (var_factor * xtx_inv[[i, i]]).abs().sqrt())
-        .collect();
-
-    Ok(se)
+/// The standard normal density (R `dnorm`).
+fn dnorm(x: f64) -> f64 {
+    const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+    INV_SQRT_2PI * (-0.5 * x * x).exp()
 }
 
-/// Normal reference bandwidth (Silverman's rule of thumb).
-fn bandwidth_nrd(x: &Array1<f64>) -> f64 {
-    let n = x.len() as f64;
-    let sd = {
-        let mean = x.iter().sum::<f64>() / n;
-        let var = x.iter().map(|xi| (xi - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        var.sqrt()
-    };
-
-    // IQR estimate
-    let mut sorted: Vec<f64> = x.iter().copied().collect();
-    sorted.sort_by(f64::total_cmp);
-    let q1 = sorted[(n as usize * 25) / 100];
-    let q3 = sorted[(n as usize * 75) / 100];
-    let iqr = q3 - q1;
-
-    let scale = (sd).min(iqr / 1.34);
-    0.9 * scale * n.powf(-0.2)
-}
-
-/// Kernel density estimate at zero using Epanechnikov kernel.
-fn kernel_density_at_zero(residuals: &Array1<f64>, h: f64) -> f64 {
-    if h <= 0.0 {
-        return 0.1; // Fallback
+/// quantreg::bandwidth.rq(tau, n, hs = TRUE, alpha = 0.05): the Hall-Sheather bandwidth
+/// `n^(-1/3) qnorm(0.975)^(2/3) (1.5 phi(x0)^2 / (2 x0^2 + 1))^(1/3)`, `x0 = qnorm(tau)`.
+pub fn hall_sheather_bandwidth(tau: f64, n: usize) -> EconResult<f64> {
+    validate_level(tau, "tau")?;
+    if n == 0 {
+        return Err(spec(
+            "the Hall-Sheather bandwidth needs at least one observation".into(),
+        ));
     }
+    let x0 = normal_quantile(tau)?;
+    let f0 = dnorm(x0);
+    let z = normal_quantile(0.975)?;
+    Ok((n as f64).powf(-1.0 / 3.0)
+        * z.powf(2.0 / 3.0)
+        * ((1.5 * f0 * f0) / (2.0 * x0 * x0 + 1.0)).powf(1.0 / 3.0))
+}
 
-    let n = residuals.len() as f64;
-    let mut density = 0.0;
+/// summary.rq's bandwidth for nid and ker: [`hall_sheather_bandwidth`] halved until
+/// tau -/+ h lies in [0, 1].
+fn halved_bandwidth(tau: f64, n: usize) -> EconResult<f64> {
+    let mut h = hall_sheather_bandwidth(tau, n)?;
+    while tau - h < 0.0 || tau + h > 1.0 {
+        h /= 2.0;
+    }
+    Ok(h)
+}
 
-    for &r in residuals.iter() {
-        let u = r / h;
-        if u.abs() <= 1.0 {
-            // Epanechnikov kernel: K(u) = 0.75 * (1 - u²)
-            density += 0.75 * (1.0 - u * u);
+/// Standard errors of a quantile-regression fit; see [`rq_se`].
+#[derive(Debug, Clone)]
+pub struct RqSe {
+    /// The type computed
+    pub se_type: QuantRegSe,
+    /// `sqrt(diag(vcov))`
+    pub std_errors: Array1<f64>,
+    /// Covariance of the coefficients
+    pub vcov: Array2<f64>,
+    /// Hall-Sheather bandwidth (iid: unhalved; nid, ker: halved; boot: `None`)
+    pub bandwidth: Option<f64>,
+    /// iid: the sparsity estimate (R's `1 / scale`)
+    pub sparsity: Option<f64>,
+    /// ker: Powell's kernel bandwidth
+    pub kernel_bandwidth: Option<f64>,
+    /// boot: replications kept
+    pub replications: Option<usize>,
+    /// How the standard errors were computed
+    pub method: String,
+    /// Warnings (R's "non-positive fis", nonunique auxiliary fits, dropped replications)
+    pub warnings: Vec<String>,
+}
+
+impl RqSe {
+    /// NaN standard errors of `se_type` (they could not be computed).
+    fn unavailable(se_type: QuantRegSe, p: usize) -> Self {
+        Self {
+            se_type,
+            std_errors: Array1::from_elem(p, f64::NAN),
+            vcov: Array2::from_elem((p, p), f64::NAN),
+            bandwidth: None,
+            sparsity: None,
+            kernel_bandwidth: None,
+            replications: None,
+            method: format!("{se_type} (not available)"),
+            warnings: Vec::new(),
         }
     }
+}
 
-    density / (n * h)
+/// `tau (1 - tau) H^-1 X'X H^-1` with `H = (sqrt(f) X)'(sqrt(f) X)`: the sandwich of nid and ker.
+fn density_sandwich(
+    x: ArrayView2<'_, f64>,
+    f: &Array1<f64>,
+    tau: f64,
+    what: &str,
+) -> EconResult<Array2<f64>> {
+    let p = x.ncols();
+    let mut fx = x.to_owned();
+    for (mut row, &fi) in fx.rows_mut().into_iter().zip(f.iter()) {
+        row *= fi.sqrt();
+    }
+    let qr = Qr::decompose(fx.view(), LM_QR_TOL)?;
+    if qr.rank() < p {
+        return Err(EconError::SingularMatrix {
+            context: format!(
+                "{what} sandwich: sqrt(f) X has rank {} of {p} (too few observations with a \
+                 positive density estimate)",
+                qr.rank()
+            ),
+            suggestion: "use se = iid or se = boot".into(),
+        });
+    }
+    let hinv = qr.unscaled_covariance()?;
+    let xx = x.t().dot(&x);
+    Ok(hinv.dot(&xx).dot(&hinv) * (tau * (1.0 - tau)))
+}
+
+/// The standard errors of `fit` as `quantreg::summary.rq(se = config.se)`:
+///
+/// - `Iid`: `sparsity^2 tau (1 - tau) (X'X)^-1`, the sparsity being the slope of the simplex
+///   fit of the ordered residuals (h + 1 of them around the zero residuals, h from the
+///   Hall-Sheather bandwidth) on their ranks / (n - p);
+/// - `Nid`: the Hendricks-Koenker sandwich, the density `2h / (x (b(tau + h) - b(tau - h)) -
+///   eps)` from fits with the fit's algorithm (the simplex for an IRLS fit); "k non-positive
+///   fis" as R;
+/// - `Ker`: Powell's sandwich with the kernel bandwidth `(qnorm(tau + h) - qnorm(tau - h))
+///   min(sd(u), IQR(u) / 1.34)`;
+/// - `Boot`: the xy-pair bootstrap with `config.bootstrap_samples` replications (0: 200),
+///   resampled with ChaCha8 from `config.seed` (stream = replication index).
+///
+/// summary.rq's fuzz `eps = sqrt(.Machine$double.eps)` is multiplied by `mean |y -
+/// median(y)|` so that the iid and nid standard errors are scale-equivariant. Errors:
+/// `InsufficientData` (iid: fewer than h + pz + 2 observations, where R stops), `SingularMatrix`
+/// (a singular density-weighted design).
+pub fn rq_se(
+    x: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    tau: f64,
+    fit: &RqFit,
+    config: &QuantRegConfig,
+) -> EconResult<RqSe> {
+    let (n, p) = x.dim();
+    if y.len() != n || fit.coefficients.len() != p || fit.residuals.len() != n {
+        return Err(spec(format!(
+            "rq_se: x is {n} x {p}, y has {} rows and the fit {} coefficients and {} residuals",
+            y.len(),
+            fit.coefficients.len(),
+            fit.residuals.len()
+        )));
+    }
+    validate_level(tau, "tau")?;
+    validate_config(config)?;
+    let eps = RQ_FUZZ * dispersion(y);
+    let mut warnings = Vec::new();
+    let se_type = config.se;
+    let mut out = RqSe::unavailable(se_type, p);
+    let vcov = match se_type {
+        QuantRegSe::Iid => {
+            let xxinv = Qr::decompose(x, LM_QR_TOL)?.unscaled_covariance()?;
+            let resid = &fit.residuals;
+            let pz = resid.iter().filter(|r| r.abs() < eps).count();
+            let hs = hall_sheather_bandwidth(tau, n)?;
+            let h = ((n as f64 * hs).ceil() as usize).max(p + 1);
+            if h + pz + 1 > n {
+                return Err(EconError::InsufficientData {
+                    required: h + pz + 1,
+                    provided: n,
+                    context: "iid sparsity estimate (summary.rq)".into(),
+                });
+            }
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| resid[a].abs().total_cmp(&resid[b].abs()));
+            let mut ord_resid: Vec<f64> = order[pz..=h + pz].iter().map(|&i| resid[i]).collect();
+            ord_resid.sort_by(f64::total_cmp);
+            let m = ord_resid.len();
+            let design = Array2::from_shape_fn((m, 2), |(j, c)| {
+                if c == 0 {
+                    1.0
+                } else {
+                    (pz + 1 + j) as f64 / (n - p) as f64
+                }
+            });
+            let sp = br_simplex(design.view(), ArrayView1::from(&ord_resid[..]), 0.5)?;
+            if sp.nonunique {
+                warnings.push(format!("{NONUNIQUE} (iid sparsity fit)"));
+            }
+            let sparsity = sp.coef[1];
+            out.bandwidth = Some(hs);
+            out.sparsity = Some(sparsity);
+            out.method = format!("iid (Koenker-Bassett sparsity, Hall-Sheather bandwidth {hs:.4})");
+            xxinv * (sparsity * sparsity) * tau * (1.0 - tau)
+        }
+        QuantRegSe::Nid => {
+            let h = halved_bandwidth(tau, n)?;
+            let aux = match fit.algorithm {
+                QuantRegMethod::FrischNewton => QuantRegMethod::FrischNewton,
+                _ => QuantRegMethod::BarrodaleRoberts,
+            };
+            let hi = fit_full_rank(x, y, tau + h, aux, config)?;
+            let lo = fit_full_rank(x, y, tau - h, aux, config)?;
+            for (f, t) in [(&hi, tau + h), (&lo, tau - h)] {
+                if f.nonunique {
+                    warnings.push(format!("{NONUNIQUE} (nid fit at tau = {t:.4})"));
+                }
+                warnings.extend(f.warnings.iter().filter(|w| *w != NONUNIQUE).cloned());
+            }
+            let dyhat = x.dot(&(&hi.coefficients - &lo.coefficients));
+            let k = dyhat.iter().filter(|&&v| v <= 0.0).count();
+            if k > 0 {
+                warnings.push(format!("{k} non-positive fis"));
+            }
+            let f = dyhat.mapv(|v| {
+                let den = v - eps;
+                if den > 0.0 { 2.0 * h / den } else { 0.0 }
+            });
+            out.bandwidth = Some(h);
+            out.method =
+                format!("nid (Hendricks-Koenker sandwich, Hall-Sheather bandwidth {h:.4})");
+            density_sandwich(x, &f, tau, "nid")?
+        }
+        QuantRegSe::Ker => {
+            let h = halved_bandwidth(tau, n)?;
+            let u = &fit.residuals;
+            let mean = u.sum() / n as f64;
+            let sd = (u.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0)).sqrt();
+            let mut sorted = u.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let iqr = quantile_sorted(&sorted, 0.75, QuantileType::T7)
+                - quantile_sorted(&sorted, 0.25, QuantileType::T7);
+            let hk = (normal_quantile(tau + h)? - normal_quantile(tau - h)?) * sd.min(iqr / 1.34);
+            let f = u.mapv(|v| dnorm(v / hk) / hk);
+            out.bandwidth = Some(h);
+            out.kernel_bandwidth = Some(hk);
+            out.method = format!("ker (Powell kernel sandwich, bandwidth {hk:.4})");
+            density_sandwich(x, &f, tau, "ker")?
+        }
+        QuantRegSe::Boot => {
+            return Err(spec("se = boot arrives in Task 6".into()));
+        }
+    };
+    out.std_errors = vcov.diag().mapv(f64::sqrt);
+    out.vcov = vcov;
+    out.warnings = warnings;
+    Ok(out)
 }
 
 /// Convenience function for quantile regression with default settings.
@@ -1101,17 +1273,33 @@ pub fn run_quantreg(
     quantreg(dataset, y_col, x_cols, &config)
 }
 
-/// Run multiple quantile regressions for different quantiles.
+/// Quantile regressions at several quantiles with default settings; see
+/// [`quantreg_multi_with`].
 pub fn quantreg_multi(
     dataset: &Dataset,
     y_col: &str,
     x_cols: &[&str],
     taus: &[f64],
 ) -> EconResult<Vec<QuantRegResult>> {
+    quantreg_multi_with(dataset, y_col, x_cols, taus, &QuantRegConfig::default())
+}
+
+/// One fit per tau with `config` (its `tau` replaced); an empty `taus` is an error.
+pub fn quantreg_multi_with(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    taus: &[f64],
+    config: &QuantRegConfig,
+) -> EconResult<Vec<QuantRegResult>> {
+    if taus.is_empty() {
+        return Err(spec("taus must contain at least one quantile".into()));
+    }
     let mut results = Vec::with_capacity(taus.len());
     for &tau in taus {
-        let result = run_quantreg(dataset, y_col, x_cols, tau)?;
-        results.push(result);
+        let mut cfg = config.clone();
+        cfg.tau = tau;
+        results.push(quantreg(dataset, y_col, x_cols, &cfg)?);
     }
     Ok(results)
 }
@@ -1337,8 +1525,28 @@ mod tests {
                 Tol::coef(n),
             );
             assert!(r.convergence.converged, "tau = {tau}");
-            // deviation REG-26: std_error, t, p (se_iid_<tag>, se_nid_<tag>); deviation REG-64:
-            //   95% CI uses 1.96.
+            let se = |r: &QuantRegResult| {
+                r.coefficients
+                    .iter()
+                    .map(|c| c.std_error)
+                    .collect::<Vec<_>>()
+            };
+            check.named(
+                &format!("se_nid_{tag}"),
+                &r.variable_names,
+                &se(&r),
+                Tol::se(n),
+            );
+            let mut cfg = QuantRegConfig::default();
+            cfg.tau = tau;
+            cfg.se = QuantRegSe::Iid;
+            let ri = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+            check.named(
+                &format!("se_iid_{tag}"),
+                &ri.variable_names,
+                &se(&ri),
+                Tol::se(n),
+            );
             slopes.push(r.coefficients[1].estimate);
         }
         let r = run_quantreg(&ds, "y", &["x"], 0.5).unwrap();
@@ -1351,52 +1559,6 @@ mod tests {
             slopes[0] < slopes[1] && slopes[1] < slopes[2],
             "slopes increase with tau: {slopes:?}"
         );
-    }
-
-    /// Validation test: Quantile regression with multiple quantiles
-    #[test]
-    fn test_validate_quantreg_multi() {
-        // Create data with clear heteroskedasticity
-        let n = 80;
-        let x: Vec<f64> = (0..n).map(|i| (i as f64) / 8.0).collect();
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let noise = ((i as f64 * 0.987).cos()) * (0.5 + 0.3 * xi);
-                1.0 + 2.0 * xi + noise
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        // Run multiple quantiles
-        let taus = vec![0.1, 0.25, 0.5, 0.75, 0.9];
-        let results = quantreg_multi(&dataset, "y", &["x"], &taus).unwrap();
-
-        assert_eq!(results.len(), 5);
-
-        // All should have positive slopes (true slope = 2)
-        for (i, result) in results.iter().enumerate() {
-            assert_eq!(result.tau, taus[i]);
-            assert!(
-                result.coefficients[1].estimate > 0.0,
-                "Quantile {} slope should be positive",
-                taus[i]
-            );
-        }
-
-        // Intercepts should generally increase with tau for location-scale model
-        let _intercept_10 = results[0].coefficients[0].estimate;
-        let _intercept_90 = results[4].coefficients[0].estimate;
-        // With positive errors having larger spread at higher x,
-        // we expect higher quantiles to have higher intercepts
-        // (though this depends on the specific error distribution)
     }
 
     /// REG-25: quantreg reads y and X with R's na.omit (quantreg::rq drops incomplete
@@ -1805,5 +1967,385 @@ mod tests {
         assert!(s.contains("Converged: yes ("), "{s}");
         let json = crate::traits::convergence::notes_json(&r);
         assert_eq!(json["converged"], true);
+    }
+
+    // ── summary.rq standard errors (REG-26) and t(n - k) intervals (REG-64) ──
+
+    fn table(r: &QuantRegResult) -> [Vec<f64>; 5] {
+        let col =
+            |f: fn(&QuantRegCoefficient) -> f64| r.coefficients.iter().map(f).collect::<Vec<_>>();
+        [
+            col(|c| c.std_error),
+            col(|c| c.t_value),
+            col(|c| c.p_value),
+            col(|c| c.ci_lower_95),
+            col(|c| c.ci_upper_95),
+        ]
+    }
+
+    /// summary.rq(se = <se>) on rq_br_se (n = 100) and rq_br_mtcars (n = 32) at tau
+    /// 0.25/0.5/0.75: SE, t, p and the t(n - p) 95% interval. Returns the fits per case id and tag.
+    fn check_summary_se(se: QuantRegSe) -> Vec<(&'static str, &'static str, QuantRegResult)> {
+        let key = se.to_string();
+        let mut out = Vec::new();
+        for (id, y, xs) in [
+            ("rq_br_se", "y", &["x"][..]),
+            ("rq_br_mtcars", "mpg", &["wt", "hp", "qsec"][..]),
+        ] {
+            let (case, ds) = crate::test_support::load_case(id);
+            let n = case.scalar("n") as usize;
+            let mut check = Check::new(&case);
+            for (tau, tag) in [(0.25, "tau25"), (0.5, "tau50"), (0.75, "tau75")] {
+                let mut cfg = QuantRegConfig::default();
+                cfg.tau = tau;
+                cfg.se = se;
+                let r = quantreg(&ds, y, xs, &cfg).unwrap();
+                let [s, t, p, lo, hi] = table(&r);
+                let names = &r.variable_names;
+                check
+                    .named(&format!("{tag}_se_{key}"), names, &s, Tol::se(n))
+                    .named(&format!("{tag}_t_{key}"), names, &t, Tol::stat(n))
+                    .named(&format!("{tag}_ci_lower_{key}"), names, &lo, Tol::stat(n))
+                    .named(&format!("{tag}_ci_upper_{key}"), names, &hi, Tol::stat(n));
+                if (id, tag, se) == ("rq_br_se", "tau25", QuantRegSe::Nid) {
+                    // deviation REG-26: the scale-free fuzz moves this intercept p-value 3.4e-6
+                    // relative (outside Tol::p_value(100)); the slope's p-value is pinned
+                    check.named_subset(
+                        &format!("{tag}_p_{key}"),
+                        &["x"],
+                        names,
+                        &p,
+                        Tol::p_value(n),
+                    );
+                    let rp = case.named(&format!("{tag}_p_{key}"), "(Intercept)");
+                    assert!((p[0] / rp - 1.0).abs() < 1e-5, "{} vs {rp}", p[0]);
+                } else {
+                    check.named(&format!("{tag}_p_{key}"), names, &p, Tol::p_value(n));
+                }
+                assert_eq!(r.se_type, se);
+                out.push((id, tag, r));
+            }
+            check.finish();
+        }
+        out
+    }
+
+    /// summary.rq(se = "iid"): Koenker-Bassett sparsity with the Hall-Sheather bandwidth; the tau
+    /// 0.75 sparsity fit is nonunique in R too (its vertex defines the estimator). Fails before
+    /// WP10: SEs sqrt(n) too small (tau 0.5: 0.0503 / 0.00832 vs 0.4807 / 0.0795).
+    #[test]
+    fn test_validate_rq_summary_se_iid() {
+        for (id, tag, r) in check_summary_se(QuantRegSe::Iid) {
+            let (case, _) = crate::test_support::load_case(id);
+            let n = case.scalar("n") as usize;
+            let mut check = Check::new(&case);
+            check.scalar(
+                &format!("{tag}_scale_iid"),
+                1.0 / r.sparsity.unwrap(),
+                Tol::stat(n),
+            );
+            if id == "rq_br_se" {
+                check.scalar(
+                    &format!("{tag}_hs_bandwidth"),
+                    r.se_bandwidth.unwrap(),
+                    Tol::stat(n),
+                );
+            }
+            check.finish();
+            let k = r
+                .warnings
+                .iter()
+                .filter(|w| *w == "Solution may be nonunique (iid sparsity fit)")
+                .count();
+            assert_eq!(
+                k as f64,
+                case.scalar(&format!("{tag}_nonunique_iid")),
+                "{id} {tag}"
+            );
+            assert!(
+                r.se_method.starts_with("iid (Koenker-Bassett sparsity"),
+                "{}",
+                r.se_method
+            );
+        }
+    }
+
+    /// summary.rq(se = "nid") (p2a's default at every n): the Hendricks-Koenker sandwich with
+    /// tau -/+ h fits; mtcars tau 0.25 has R's "1 non-positive fis"; the no-intercept fit.
+    #[test]
+    fn test_validate_rq_summary_se_nid() {
+        for (id, tag, r) in check_summary_se(QuantRegSe::Nid) {
+            let (case, _) = crate::test_support::load_case(id);
+            let fis: Vec<String> = r
+                .warnings
+                .iter()
+                .filter(|w| w.ends_with(" non-positive fis"))
+                .cloned()
+                .collect();
+            let expected = case.scalar(&format!("{tag}_nonpositive_fis"));
+            let want = if expected > 0.0 {
+                vec![format!("{expected} non-positive fis")]
+            } else {
+                vec![]
+            };
+            assert_eq!(fis, want, "{id} {tag}");
+            if id == "rq_br_se" {
+                Check::new(&case)
+                    .scalar(
+                        &format!("{tag}_hs_bandwidth"),
+                        r.se_bandwidth.unwrap(),
+                        Tol::stat(100),
+                    )
+                    .finish();
+            }
+            assert!(
+                r.se_method.starts_with("nid (Hendricks-Koenker sandwich"),
+                "{}",
+                r.se_method
+            );
+        }
+        let (case, ds) = crate::test_support::load_case("rq_br_mtcars");
+        let mut check = Check::new(&case);
+        for (tau, tag) in [(0.25, "tau25"), (0.5, "tau50"), (0.75, "tau75")] {
+            let mut cfg = QuantRegConfig::default();
+            cfg.tau = tau;
+            cfg.intercept = false;
+            let g = quantreg(&ds, "mpg", &["wt", "hp"], &cfg).unwrap();
+            check.named(
+                &format!("noint_{tag}_se_nid"),
+                &g.variable_names,
+                &table(&g)[0],
+                Tol::se(32),
+            );
+        }
+        check.finish();
+    }
+
+    /// summary.rq(se = "ker"): Powell's kernel sandwich with the residual-scale bandwidth.
+    #[test]
+    fn test_validate_rq_summary_se_ker() {
+        for (id, tag, r) in check_summary_se(QuantRegSe::Ker) {
+            assert!(
+                r.se_method.starts_with("ker (Powell kernel sandwich"),
+                "{}",
+                r.se_method
+            );
+            if id != "rq_br_se" {
+                continue;
+            }
+            let (case, _) = crate::test_support::load_case(id);
+            Check::new(&case)
+                .scalar(
+                    &format!("{tag}_ker_bandwidth"),
+                    r.kernel_bandwidth.unwrap(),
+                    Tol::stat(100),
+                )
+                .scalar(
+                    &format!("{tag}_hs_bandwidth"),
+                    r.se_bandwidth.unwrap(),
+                    Tol::stat(100),
+                )
+                .finish();
+        }
+    }
+
+    /// tau = 0.02, n = 100: bandwidth.rq = 0.0243 exceeds tau, so summary.rq halves it to 0.01214
+    /// (nid and ker).
+    #[test]
+    fn test_validate_rq_bandwidth_halving() {
+        let (case, ds) = crate::test_support::load_case("rq_br_se");
+        let mut check = Check::new(&case);
+        check.scalar(
+            "tau02_hs_bandwidth_unhalved",
+            hall_sheather_bandwidth(0.02, 100).unwrap(),
+            Tol::stat(100),
+        );
+        for se in [QuantRegSe::Nid, QuantRegSe::Ker] {
+            let mut cfg = QuantRegConfig::default();
+            cfg.tau = 0.02;
+            cfg.se = se;
+            let r = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+            let key = format!("tau02_se_{se}");
+            let s = table(&r)[0].clone();
+            if se == QuantRegSe::Nid {
+                // deviation REG-26: the scale-free fuzz (sqrt(eps) * mean |y - median(y)|) moves the
+                // intercept's nid SE 1.2e-6 relative here, where tau - h is small; the slope is pinned
+                check.named_subset(&key, &["x"], &r.variable_names, &s, Tol::se(100));
+                let rs = case.named(&key, "(Intercept)");
+                assert!((s[0] / rs - 1.0).abs() < 2e-6, "{} vs {rs}", s[0]);
+            } else {
+                check.named(&key, &r.variable_names, &s, Tol::se(100));
+            }
+            check.scalar(
+                "tau02_hs_bandwidth",
+                r.se_bandwidth.unwrap(),
+                Tol::stat(100),
+            );
+        }
+        check.finish();
+        assert!(
+            hall_sheather_bandwidth(0.0, 100).is_err() && hall_sheather_bandwidth(0.5, 0).is_err()
+        );
+    }
+
+    /// REG-64: both interval ends are estimate -/+ qt(0.975, n - p) * se, so p < 0.05 exactly when
+    /// 0 is outside the interval. qt(0.975, 98) = 1.9844674545084815, qt(0.975, 28) =
+    /// 2.0484071417952445 (R). Fails before WP10: 1.96.
+    #[test]
+    fn test_rq_ci_uses_t_quantile() {
+        let mt = crate::regression::ols::na_fixtures::mtcars();
+        for (ds, y, xs, q) in [
+            (hetero(), "y", &["x"][..], 1.9844674545084815),
+            (mt, "mpg", &["wt", "hp", "qsec"][..], 2.0484071417952445),
+        ] {
+            for se in [QuantRegSe::Iid, QuantRegSe::Nid, QuantRegSe::Ker] {
+                for tau in [0.25, 0.5, 0.75] {
+                    let mut cfg = QuantRegConfig::default();
+                    cfg.tau = tau;
+                    cfg.se = se;
+                    for c in &quantreg(&ds, y, xs, &cfg).unwrap().coefficients {
+                        assert!(
+                            ((c.ci_upper_95 - c.estimate) / (q * c.std_error) - 1.0).abs() < 1e-9,
+                            "{y} {se} {tau} {}",
+                            c.name
+                        );
+                        assert!(
+                            ((c.estimate - c.ci_lower_95) / (q * c.std_error) - 1.0).abs() < 1e-9,
+                            "{y} {se} {tau} {}",
+                            c.name
+                        );
+                        assert_eq!(
+                            c.p_value < 0.05,
+                            c.ci_lower_95 > 0.0 || c.ci_upper_95 < 0.0,
+                            "{y} {se} {tau} {}",
+                            c.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rule 4: the iid, nid and ker SEs are scale-equivariant (summary.rq's fuzz is multiplied by
+    /// mean |y - median(y)|). R's own iid and nid SEs move by 7.7% and 4.0% at y x 1e-6
+    /// (scale_m6_tau50_se_* in rq_br_se, recorded, not pinned).
+    #[test]
+    fn test_rq_se_scale_equivariance() {
+        let ds = hetero();
+        for se in [QuantRegSe::Iid, QuantRegSe::Nid, QuantRegSe::Ker] {
+            let mut cfg = QuantRegConfig::default();
+            cfg.se = se;
+            let base = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+            for factor in [1e-6, 1e6] {
+                let r = quantreg(
+                    &with_derived(&ds, "ys", "y", |v| v * factor),
+                    "ys",
+                    &["x"],
+                    &cfg,
+                )
+                .unwrap();
+                for (c, b) in r.coefficients.iter().zip(&base.coefficients) {
+                    assert!(
+                        (c.std_error / factor / b.std_error - 1.0).abs() < 1e-12,
+                        "{se} x {factor}: {} vs {}",
+                        c.std_error,
+                        b.std_error
+                    );
+                    assert!(
+                        (c.p_value / b.p_value - 1.0).abs() < 1e-9 || c.p_value == b.p_value,
+                        "{se} x {factor}"
+                    );
+                }
+                assert_eq!(r.warnings, base.warnings, "{se} x {factor}");
+            }
+        }
+    }
+
+    /// n = 5 (rows 1-5): R's summary.rq(se = "iid") stops ("variable lengths differ"; h + pz + 1 = 6
+    /// > 5), while rq() itself works. p2a keeps the fit, reports NaN SEs and says why. nid works and
+    /// matches R, with "1 non-positive fis".
+    #[test]
+    fn test_validate_rq_small_sample_se() {
+        let (case, ds) = crate::test_support::load_case("rq_br_se");
+        let d5 = Dataset::new(ds.df().head(Some(5)));
+        let mut cfg = QuantRegConfig::default();
+        cfg.se = QuantRegSe::Iid;
+        let r = quantreg(&d5, "y", &["x"], &cfg).unwrap();
+        let mut check = Check::new(&case);
+        check.named(
+            "small5_coef",
+            &r.variable_names,
+            &estimates(&r),
+            Tol::coef(5),
+        );
+        assert!(
+            r.coefficients
+                .iter()
+                .all(|c| c.std_error.is_nan() && c.p_value.is_nan() && c.ci_lower_95.is_nan())
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("standard errors (se = iid) could not be computed")),
+            "{:?}",
+            r.warnings
+        );
+        cfg.se = QuantRegSe::Nid;
+        let r = quantreg(&d5, "y", &["x"], &cfg).unwrap();
+        check
+            .named(
+                "small5_se_nid",
+                &r.variable_names,
+                &table(&r)[0],
+                Tol::se(5),
+            )
+            .finish();
+        assert!(
+            r.warnings.iter().any(|w| w == "1 non-positive fis"),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(case.scalar("small5_iid_fails"), 1.0);
+        assert_eq!(case.scalar("small5_nonpositive_fis"), 1.0);
+    }
+
+    /// quantreg_multi / quantreg_multi_with give the single fits (nid default; iid on request); an
+    /// empty taus is an error (TOOL-14's core part). Replaces the range-only
+    /// test_validate_quantreg_multi (REG-44).
+    #[test]
+    fn test_validate_rq_multi_hetero() {
+        let (case, ds) = crate::test_support::load_case("rq_br_se");
+        let mut check = Check::new(&case);
+        let rs = quantreg_multi(&ds, "y", &["x"], &[0.25, 0.5, 0.75]).unwrap();
+        for (r, tag) in rs.iter().zip(["tau25", "tau50", "tau75"]) {
+            check
+                .named(
+                    &format!("{tag}_coef"),
+                    &r.variable_names,
+                    &estimates(r),
+                    Tol::coef(100),
+                )
+                .named(
+                    &format!("{tag}_se_nid"),
+                    &r.variable_names,
+                    &table(r)[0],
+                    Tol::se(100),
+                );
+        }
+        let mut cfg = QuantRegConfig::default();
+        cfg.se = QuantRegSe::Iid;
+        let ri = quantreg_multi_with(&ds, "y", &["x"], &[0.75], &cfg).unwrap();
+        check
+            .named(
+                "tau75_se_iid",
+                &ri[0].variable_names,
+                &table(&ri[0])[0],
+                Tol::se(100),
+            )
+            .finish();
+        assert!(matches!(
+            quantreg_multi(&ds, "y", &["x"], &[]),
+            Err(EconError::InvalidSpecification { message }) if message.contains("taus")
+        ));
     }
 }
