@@ -38,6 +38,7 @@
 //! Under H₀ (equal variances), χ² ~ χ²(k-1) where k is the number of groups.
 
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
@@ -46,7 +47,7 @@ use crate::resource::try_with_capacity;
 use crate::stats::bartlett::values_by_level;
 use crate::stats::ranks::midranks;
 use crate::traits::SignificanceLevel;
-use crate::traits::estimator::{chi_squared_p_value, normal_quantile};
+use crate::traits::estimator::chi_squared_p_value;
 
 /// Result of Fligner-Killeen test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,28 +158,27 @@ pub fn fligner_test(groups: &[(String, Vec<f64>)]) -> EconResult<FlignerResult> 
         total_n += data.len();
     }
 
-    for (name, data) in groups {
-        if let Some(v) = data.iter().find(|v| !v.is_finite()) {
-            let what = if v.is_nan() {
-                "NaN"
-            } else {
-                "an infinite value"
-            };
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Fligner-Killeen test: group '{name}' contains {what}; the test needs finite values (run_fligner_test drops missing values, as fligner.test does; infinite values are refused)"
-                ),
-            });
-        }
-    }
-
-    // Step 1: Compute absolute deviations from group medians
+    // Step 1: Compute absolute deviations from group medians. A non-finite value is refused
+    // in the same pass, at the first one of the first group that holds one (the median of
+    // such a group is computed but never used).
     let mut all_deviations: Vec<f64> = try_with_capacity(total_n, "Fligner-Killeen deviations")?;
     let mut group_indices: Vec<usize> = try_with_capacity(total_n, "Fligner-Killeen groups")?;
 
-    for (group_idx, (_, data)) in groups.iter().enumerate() {
+    for (group_idx, (name, data)) in groups.iter().enumerate() {
         let median = compute_median(data);
         for &x in data {
+            if !x.is_finite() {
+                let what = if x.is_nan() {
+                    "NaN"
+                } else {
+                    "an infinite value"
+                };
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Fligner-Killeen test: group '{name}' contains {what}; the test needs finite values (run_fligner_test drops missing values, as fligner.test does; infinite values are refused)"
+                    ),
+                });
+            }
             all_deviations.push((x - median).abs());
             group_indices.push(group_idx);
         }
@@ -190,11 +190,13 @@ pub fn fligner_test(groups: &[(String, Vec<f64>)]) -> EconResult<FlignerResult> 
     // Step 3: Transform ranks to normal scores
     // R uses: a(i) = qnorm((1 + i/(n+1))/2)
     // where i is the rank (1 to n)
+    // 1 <= r <= n, so the argument is in (0.5, 1) and needs no validation.
     let n_f = total_n as f64;
-    let z_scores: Vec<f64> = ranks
-        .iter()
-        .map(|&r| normal_quantile((1.0 + r / (n_f + 1.0)) / 2.0))
-        .collect::<EconResult<Vec<f64>>>()?;
+    let normal = Normal::standard();
+    let mut z_scores: Vec<f64> = try_with_capacity(total_n, "Fligner-Killeen scores")?;
+    for &r in &ranks {
+        z_scores.push(normal.inverse_cdf((1.0 + r / (n_f + 1.0)) / 2.0));
+    }
 
     // Step 4: Compute test statistic
     // Overall mean of z scores

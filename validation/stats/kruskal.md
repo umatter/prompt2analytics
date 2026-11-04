@@ -117,6 +117,19 @@ equality, so `-0.0` and `0.0` tie and two distinct doubles never do). The Fligne
 `stats::fligner::tests::test_fligner_rejects_nan` (a NaN inside a group is an error; the dataset
 wrapper drops missing values first, as `fligner.test` does).
 
+**Timing.** `fligner_test` refuses a non-finite value in the pass that computes each group's
+absolute deviations, and turns ranks into scores with one standard-normal quantile per value
+(the argument `(1 + r / (n + 1)) / 2` lies in (0.5, 1), so it needs no check). The statistic is
+bit-identical to the version with a separate guard pass and a checked quantile. Release, one P
+core, `RAYON_NUM_THREADS=1`, medians of 6 interleaved runs (each a median of 21 samples), four
+normal groups with different spreads; base = fe13b889, before the Tier 3 rank changes:
+
+| n | base µs | separate guard, checked quantile µs (ratio) | now µs (ratio) |
+|---|---|---|---|
+| 100 | 3.06 | 3.42 (1.12) | 3.10 (1.01) |
+| 1,000 | 33.8 | 35.6 (1.05) | 32.6 (0.97) |
+| 10,000 | 556 | 533 (0.96) | 490 (0.88) |
+
 ## Missing values, labels and the R case
 
 `run_kruskal_test(dataset, value, group)` reads the value and the group in one request through
