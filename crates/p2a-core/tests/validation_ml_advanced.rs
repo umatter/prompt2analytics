@@ -5,7 +5,10 @@
 //! 2. Cubist: Regression R^2 on synthetic linear data
 //! 3. CTree: Conditional inference tree splits on significant features
 //! 4. MBoost: Gradient boosting with linear and tree base learners
-//! 5. SHAP: Feature attribution sums to prediction - base_value
+//!
+//! SHAP: TreeSHAP equals exact enumeration of the trees' path-dependent game; the R-pinned SHAP
+//! tests live in `ml::shap::tests`. The C5.0, Cubist, CTree and MBoost tests are property checks
+//! on simulated data, not comparisons with R.
 
 use ndarray::{Array1, Array2, ArrayView2};
 use p2a_core::ml::{
