@@ -67,7 +67,7 @@ Note: PCA loadings are unique up to sign. Compare absolute values or check corre
 ## Missing and non-finite values
 
 - **Core.** `pca` refuses NaN and ±Inf and names the first bad cell in row-major order:
-  "PCA: x must contain only finite values (row 4, column 0 is NaN); remove or impute
+  "PCA: data must contain only finite values (row 4, column 0 is NaN); remove or impute
   missing values first". It used to return NaN variances (or an SVD failure). R stops as
   well: `prcomp(m)` on a matrix with an `NA` gives "infinite or missing values in 'x'"
   (R 4.3.3).

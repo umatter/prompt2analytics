@@ -64,7 +64,7 @@ Centroids should match within 1e-4 (given same initialization).
 ## Missing and non-finite values
 
 - **Core.** `kmeans` refuses NaN and ±Inf before it initialises and names the first bad
-  cell in row-major order: "k-means: x must contain only finite values (row 4, column 0 is
+  cell in row-major order: "k-means: data must contain only finite values (row 4, column 0 is
   NaN); remove or impute missing values first". It used to report "K-means failed to
   converge" (every inertia was NaN). R stops as well: `kmeans(m, 2)` on a matrix with an
   `NA` gives "NA/NaN/Inf in foreign function call (arg 1)" (R 4.3.3).

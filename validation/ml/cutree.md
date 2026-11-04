@@ -83,7 +83,7 @@ print(ct)  # Matrix with columns for each k
 ## Missing and non-finite values
 
 - **Core.** `hierarchical` (which `cutree` cuts) refuses NaN and ±Inf and names the first
-  bad cell in row-major order: "hierarchical clustering: x must contain only finite values
+  bad cell in row-major order: "hierarchical clustering: data must contain only finite values
   (row 4, column 0 is NaN); remove or impute missing values first". It used to return a
   corrupt tree: a NaN row left every nearest-neighbour distance at infinity and the merge
   loop merged anyway (self-merges, more clusters than requested). The merge loop also

@@ -1653,7 +1653,9 @@ mod tests {
                 let err =
                     hierarchical(ml24_rows(nan_row).view(), Some(1), linkage, None).unwrap_err();
                 assert!(
-                    err.starts_with("hierarchical clustering: x must contain only finite values"),
+                    err.starts_with(
+                        "hierarchical clustering: data must contain only finite values"
+                    ),
                     "{linkage:?}: {err}"
                 );
                 assert!(err.contains(cell), "{linkage:?}: {err}");
@@ -1697,7 +1699,7 @@ mod tests {
         let err = kmeans(ml24_rows(4).view(), 2, Some(100), None, Some(2), Some(1)).unwrap_err();
         assert_eq!(
             err,
-            "k-means: x must contain only finite values (row 4, column 0 is NaN); remove or impute missing values first"
+            "k-means: data must contain only finite values (row 4, column 0 is NaN); remove or impute missing values first"
         );
     }
 

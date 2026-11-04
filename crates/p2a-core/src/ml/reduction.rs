@@ -1125,7 +1125,7 @@ mod tests {
         x[[4, 0]] = f64::NAN;
         let err = pca(x.view(), None, false).unwrap_err();
         assert!(
-            err.starts_with("PCA: x must contain only finite values (row 4, column 0 is NaN)"),
+            err.starts_with("PCA: data must contain only finite values (row 4, column 0 is NaN)"),
             "{err}"
         );
         x[[4, 0]] = 9.0;
