@@ -232,7 +232,13 @@ pub fn granger_test(
                 .to_string(),
         });
     }
-    debug_assert!(qr.pivot().iter().enumerate().all(|(i, &j)| i == j));
+    // RSS_R is read off the first p + 1 effects, which needs the identity pivot; checked in
+    // release builds too (m comparisons) so a change to Qr's pivoting cannot go unnoticed.
+    if !qr.pivot().iter().enumerate().all(|(i, &j)| i == j) {
+        return Err(EconError::Computation(
+            "Granger QR pivoted a full-rank design; restricted RSS undefined".to_string(),
+        ));
+    }
     let effects = qr.qty(y.view())?;
     let sum_sq = |from: usize, to: usize| {
         effects
@@ -246,8 +252,8 @@ pub fn granger_test(
     let rss_gain = sum_sq(lags + 1, m);
     let rss_r = rss_u + rss_gain;
 
-    // F without an absolute exact-fit threshold: it is scale-free, and RSS_U = 0 gives inf
-    // (p = 0) as in R.
+    // F without an absolute exact-fit threshold: it is scale-free. RSS_U = 0 gives F = inf
+    // (p = 0) when RSS_R > RSS_U, and NaN when both are 0, as in R.
     let df1 = lags;
     let f_statistic = (rss_gain / df1 as f64) / (rss_u / df2 as f64);
 
@@ -296,7 +302,13 @@ pub fn run_granger_test(
     dependent: &str,
     cause: &str,
 ) -> EconResult<GrangerResult> {
-    let n = dataset.df().height();
+    // Columns first, so a missing or text column is named as such on a short dataset too
+    let n = ColumnRequest::new(dataset.df())
+        .numerics(&[dependent, cause])
+        .na(NaPolicy::Fail)
+        .extract()?
+        .rows()
+        .len();
     let schwert = ((12.0 * (n as f64 / 100.0).powf(0.25)).floor() as usize).max(1);
     let cap = n.saturating_sub(2) / 3; // largest p with n - 3p - 1 >= 1
     if cap == 0 {
@@ -466,6 +478,11 @@ mod tests {
                 provided: 4,
                 ..
             })
+        ));
+        // a misspelled column is named, not reported as too few rows
+        assert!(matches!(
+            run_granger_test(&tiny, "y", "z"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "z"
         ));
     }
 
