@@ -1677,9 +1677,9 @@ mod tests {
     /// rho estimated. Pins: nlme's profile likelihood maximised by optimize(tol = 1e-12)
     /// (`<m>_profile_*`, the tight refit); cross-check: nlme's own fit (`<m>_*`), whose optimiser
     /// stops up to 3e-8 relative short in rho.
-    fn check_compsymm(method: GlsMethod, m: &str) {
+    fn check_compsymm(case_id: &str, method: GlsMethod, m: &str) {
         use p2a_validation::{Check, Tol};
-        let (case, ds) = crate::test_support::load_case("gls_compsymm");
+        let (case, ds) = crate::test_support::load_case(case_id);
         let n = case.scalar("n") as usize;
         let g = run_gls_with(&ds, "y", &["x", "z"], true, &cs_options(method, None)).unwrap();
         let rho = g.correlation_param.unwrap();
@@ -1714,12 +1714,12 @@ mod tests {
 
     #[test]
     fn test_validate_gls_compsymm_reml() {
-        check_compsymm(GlsMethod::Reml, "reml")
+        check_compsymm("gls_compsymm", GlsMethod::Reml, "reml")
     }
 
     #[test]
     fn test_validate_gls_compsymm_ml() {
-        check_compsymm(GlsMethod::Ml, "ml")
+        check_compsymm("gls_compsymm", GlsMethod::Ml, "ml")
     }
 
     /// Case `gls_compsymm`: corCompSymm(0.3, form = ~ 1 | g, fixed = TRUE), REML and ML (no
