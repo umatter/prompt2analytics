@@ -167,15 +167,25 @@ pub(crate) fn check_points(data: &ArrayView2<f64>, method: &str) -> EconResult<(
     if data.ncols() == 0 {
         return Err(spec(format!("{method}: the data have no columns")));
     }
-    let mut bad = 0usize;
-    let mut first = None;
-    for ((i, j), &v) in data.indexed_iter() {
-        if !v.is_finite() {
-            bad += 1;
-            first.get_or_insert((i, j));
+    // one pass in memory order for the ranges and finiteness; the count and the first position are
+    // only gathered on failure
+    let d = data.ncols();
+    let mut lo = vec![f64::INFINITY; d];
+    let mut hi = vec![f64::NEG_INFINITY; d];
+    let mut finite = true;
+    for row in data.rows() {
+        for ((&v, l), h) in row.iter().zip(lo.iter_mut()).zip(hi.iter_mut()) {
+            finite &= v.is_finite();
+            *l = l.min(v);
+            *h = h.max(v);
         }
     }
-    if let Some((i, j)) = first {
+    if !finite {
+        let bad = data.iter().filter(|v| !v.is_finite()).count();
+        let (i, j) = data
+            .indexed_iter()
+            .find(|(_, v)| !v.is_finite())
+            .map_or((0, 0), |(ij, _)| ij);
         return Err(spec(format!(
             "{method}: the data contain {bad} non-finite value(s) (first at row {i}, column {j}); remove or impute them"
         )));
@@ -183,13 +193,8 @@ pub(crate) fn check_points(data: &ArrayView2<f64>, method: &str) -> EconResult<(
     // every squared distance is <= the sum of squared column ranges (monotone rounding), so this
     // bounds them all
     let mut s = 0.0f64;
-    for col in data.columns() {
-        let (lo, hi) = col
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
-                (lo.min(v), hi.max(v))
-            });
-        s += (hi - lo) * (hi - lo);
+    for (&l, &h) in lo.iter().zip(&hi) {
+        s += (h - l) * (h - l);
     }
     if !s.is_finite() {
         return Err(spec(format!(

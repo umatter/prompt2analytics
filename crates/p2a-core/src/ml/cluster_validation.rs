@@ -115,11 +115,12 @@ impl std::fmt::Display for SilhouetteResult {
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features), finite values
-/// * `labels` - Cluster assignments (0-indexed)
+/// * `labels` - Cluster assignments (0-indexed, each below n)
 ///
 /// # Errors
 /// `InvalidSpecification` when the labels do not have between 2 and n - 1 distinct values (where
-/// `cluster::silhouette` returns `NA`), for non-finite data, or for a length mismatch.
+/// `cluster::silhouette` returns `NA`), for non-finite data, for a length mismatch, or when a label is
+/// n or above (labels are 0-indexed cluster indices below n).
 ///
 /// # Returns
 /// * `SilhouetteResult` containing individual and average silhouette widths
@@ -158,7 +159,7 @@ pub fn silhouette(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<Silhoue
 ///
 /// # Arguments
 /// * `dist_matrix` - Precomputed symmetric distance matrix (n x n), finite; row i gives i's sums
-/// * `labels` - Cluster assignments (0-indexed)
+/// * `labels` - Cluster assignments (0-indexed, each below n)
 pub fn silhouette_from_dist(
     dist_matrix: ArrayView2<f64>,
     labels: &[usize],
@@ -212,50 +213,96 @@ pub(crate) fn silhouette_core(dist: ArrayView2<f64>, labels: &[usize]) -> Silhou
     for &l in labels {
         sizes[l] += 1;
     }
-    let per: Vec<(f64, f64, f64, usize)> = (0..n)
-        .into_par_iter()
-        .map_init(
-            || vec![0.0f64; k],
-            |sums, i| {
-                sums.iter_mut().for_each(|s| *s = 0.0);
-                for j in 0..n {
-                    if j != i {
-                        sums[labels[j]] += dist[[i, j]];
-                    }
-                }
-                let ci = labels[i];
-                let a = if sizes[ci] > 1 {
-                    sums[ci] / (sizes[ci] - 1) as f64
-                } else {
-                    0.0
-                };
-                let (mut b, mut nb) = (f64::INFINITY, ci);
-                for c in 0..k {
-                    if c != ci && sizes[c] > 0 {
-                        let m = sums[c] / sizes[c] as f64;
-                        if m < b {
-                            b = m;
-                            nb = c;
-                        }
-                    }
-                }
-                // Rousseeuw (1987): s(i) = 0 for a singleton; sildist also gives 0 when a(i) = b(i)
-                let s = if sizes[ci] == 1 || b.is_infinite() || a == b {
-                    0.0
-                } else {
-                    (b - a) / a.max(b)
-                };
-                (s, a, b, nb)
-            },
-        )
-        .collect();
+    let mut widths = vec![0.0f64; n];
+    let mut a = vec![0.0f64; n];
+    let mut b = vec![0.0f64; n];
+    let mut neighbor = vec![0usize; n];
+    let put =
+        |sums: &mut Vec<f64>,
+         (i, (((w, a), b), nb)): (usize, (((&mut f64, &mut f64), &mut f64), &mut usize))| {
+            (*w, *a, *b, *nb) = silhouette_row(dist, labels, &sizes, i, sums);
+        };
+    if n < SILHOUETTE_PAR_MIN_N {
+        // one thread pays off only once a row's O(n) sums dwarf the fork-join cost
+        let mut sums = vec![0.0f64; k];
+        widths
+            .iter_mut()
+            .zip(a.iter_mut())
+            .zip(b.iter_mut())
+            .zip(neighbor.iter_mut())
+            .enumerate()
+            .for_each(|row| put(&mut sums, row));
+    } else {
+        // written in place: no per-row tuple buffer beside the four outputs
+        widths
+            .par_iter_mut()
+            .zip(a.par_iter_mut())
+            .zip(b.par_iter_mut())
+            .zip(neighbor.par_iter_mut())
+            .enumerate()
+            .for_each_init(|| vec![0.0f64; k], put);
+    }
     SilhouetteCore {
-        widths: per.iter().map(|p| p.0).collect(),
-        a: per.iter().map(|p| p.1).collect(),
-        b: per.iter().map(|p| p.2).collect(),
-        neighbor: per.iter().map(|p| p.3).collect(),
+        widths,
+        a,
+        b,
+        neighbor,
         sizes,
     }
+}
+
+/// Below this many observations [`silhouette_core`] runs on the calling thread.
+const SILHOUETTE_PAR_MIN_N: usize = 2048;
+
+/// `(s(i), a(i), b(i), neighbour)` of row i; `sums` is a scratch buffer of one slot per label. The
+/// sums run over j in index order, skipping j = i.
+#[inline]
+fn silhouette_row(
+    dist: ArrayView2<f64>,
+    labels: &[usize],
+    sizes: &[usize],
+    i: usize,
+    sums: &mut [f64],
+) -> (f64, f64, f64, usize) {
+    sums.iter_mut().for_each(|s| *s = 0.0);
+    let row = dist.row(i);
+    if let Some(r) = row.as_slice() {
+        for (&dij, &lj) in r[..i].iter().zip(&labels[..i]) {
+            sums[lj] += dij;
+        }
+        for (&dij, &lj) in r[i + 1..].iter().zip(&labels[i + 1..]) {
+            sums[lj] += dij;
+        }
+    } else {
+        for (j, (&dij, &lj)) in row.iter().zip(labels).enumerate() {
+            if j != i {
+                sums[lj] += dij;
+            }
+        }
+    }
+    let ci = labels[i];
+    let a = if sizes[ci] > 1 {
+        sums[ci] / (sizes[ci] - 1) as f64
+    } else {
+        0.0
+    };
+    let (mut b, mut nb) = (f64::INFINITY, ci);
+    for (c, (&sc, &mc)) in sums.iter().zip(sizes).enumerate() {
+        if c != ci && mc > 0 {
+            let m = sc / mc as f64;
+            if m < b {
+                b = m;
+                nb = c;
+            }
+        }
+    }
+    // Rousseeuw (1987): s(i) = 0 for a singleton; sildist also gives 0 when a(i) = b(i)
+    let s = if sizes[ci] == 1 || b.is_infinite() || a == b {
+        0.0
+    } else {
+        (b - a) / a.max(b)
+    };
+    (s, a, b, nb)
 }
 
 /// `2 <= distinct labels <= n - 1` (cluster::silhouette returns NA otherwise).
@@ -1357,19 +1404,58 @@ pub fn run_gap_statistic(
 /// n x n matrix allocated through the resource guards.
 fn compute_pairwise_distances(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
     let n = data.nrows();
-    let mut distances = crate::resource::try_zeros2(n, n, "silhouette dissimilarity matrix")?;
-    let rows: Vec<Vec<f64>> = data.rows().into_iter().map(|r| r.to_vec()).collect();
-
-    for i in 0..n {
-        crate::resource::checkpoint()?;
-        for j in (i + 1)..n {
-            let dist = crate::ml::kdtree::sq_euclidean(&rows[i], &rows[j]).sqrt();
-            distances[[i, j]] = dist;
-            distances[[j, i]] = dist;
+    let d = data.ncols();
+    let mut out = crate::resource::try_vec(
+        crate::resource::checked_len(&[n, n], "silhouette dissimilarity matrix")?,
+        0.0f64,
+        "silhouette dissimilarity matrix",
+    )?;
+    // one contiguous row-major copy only when the view is not already one
+    let owned: Vec<f64>;
+    let flat: &[f64] = match data.as_slice() {
+        Some(s) => s,
+        None => {
+            owned = data.iter().copied().collect();
+            &owned
+        }
+    };
+    // a matrix this small stays in cache, so the mirrored write goes in the same loop; above it the
+    // upper triangle is written row by row and mirrored in cache-sized tiles (the column writes of
+    // the plain loop stride by n)
+    const MIRROR_TILED_MIN_N: usize = 256;
+    const TILE: usize = 64;
+    if d > 0 && n < MIRROR_TILED_MIN_N {
+        for (i, ri) in flat.chunks_exact(d).enumerate() {
+            crate::resource::checkpoint()?;
+            for (j, rj) in flat.chunks_exact(d).enumerate().skip(i + 1) {
+                let dist = crate::ml::kdtree::sq_euclidean(ri, rj).sqrt();
+                out[i * n + j] = dist;
+                out[j * n + i] = dist;
+            }
+        }
+    } else if d > 0 {
+        for (i, ri) in flat.chunks_exact(d).enumerate() {
+            crate::resource::checkpoint()?;
+            let row = &mut out[i * n..(i + 1) * n];
+            for (o, rj) in row[i + 1..]
+                .iter_mut()
+                .zip(flat.chunks_exact(d).skip(i + 1))
+            {
+                *o = crate::ml::kdtree::sq_euclidean(ri, rj).sqrt();
+            }
+        }
+        for bi in (0..n).step_by(TILE) {
+            crate::resource::checkpoint()?;
+            for bj in (bi..n).step_by(TILE) {
+                for i in bi..(bi + TILE).min(n) {
+                    for j in bj.max(i + 1)..(bj + TILE).min(n) {
+                        out[j * n + i] = out[i * n + j];
+                    }
+                }
+            }
         }
     }
-
-    Ok(distances)
+    Array2::from_shape_vec((n, n), out).map_err(|e| EconError::Computation(e.to_string()))
 }
 
 // =============================================================================
@@ -1474,6 +1560,75 @@ mod tests {
         let r = silhouette(p.view(), &[0, 0, 0, 1, 1, 2]).unwrap();
         assert_eq!(r.silhouette_widths[5], 0.0);
         assert!((r.average_silhouette - 0.8131265018640162).abs() < 1e-12);
+    }
+
+    /// The sequential (n below the threshold) and parallel branches, and the strided-row fallback,
+    /// give the bits of a naive sildist loop (sums over j != i in index order).
+    #[test]
+    fn test_silhouette_core_branches_match_naive_sums() {
+        use rand::prelude::*;
+        let naive = |d: ArrayView2<f64>, labels: &[usize]| -> Vec<u64> {
+            let n = labels.len();
+            let k = labels.iter().max().unwrap() + 1;
+            let mut sizes = vec![0usize; k];
+            labels.iter().for_each(|&l| sizes[l] += 1);
+            (0..n)
+                .map(|i| {
+                    let mut sums = vec![0.0f64; k];
+                    for j in 0..n {
+                        if j != i {
+                            sums[labels[j]] += d[[i, j]];
+                        }
+                    }
+                    let ci = labels[i];
+                    let a = if sizes[ci] > 1 {
+                        sums[ci] / (sizes[ci] - 1) as f64
+                    } else {
+                        0.0
+                    };
+                    let b = (0..k)
+                        .filter(|&c| c != ci && sizes[c] > 0)
+                        .map(|c| sums[c] / sizes[c] as f64)
+                        .fold(f64::INFINITY, f64::min);
+                    let s = if sizes[ci] == 1 || b.is_infinite() || a == b {
+                        0.0
+                    } else {
+                        (b - a) / a.max(b)
+                    };
+                    s.to_bits()
+                })
+                .collect()
+        };
+        let bits = |v: &[f64]| v.iter().map(|w| w.to_bits()).collect::<Vec<_>>();
+        let mut rng = StdRng::seed_from_u64(7);
+        for n in [37, 301, SILHOUETTE_PAR_MIN_N + 13] {
+            let x =
+                Array2::from_shape_fn((n, 3), |(i, _)| (i % 4) as f64 * 1.5 + rng.r#gen::<f64>());
+            let mut labels: Vec<usize> = (0..n).map(|i| i % 4).collect();
+            labels[5] = 4; // a singleton
+            let d = compute_pairwise_distances(&x.view()).unwrap();
+            // every entry, both triangles across the mirror's tiles, is the row pair's distance
+            for i in 0..n {
+                for j in 0..n {
+                    let want = if i == j {
+                        0.0
+                    } else {
+                        crate::ml::kdtree::sq_euclidean(
+                            x.row(i).as_slice().unwrap(),
+                            x.row(j).as_slice().unwrap(),
+                        )
+                        .sqrt()
+                    };
+                    assert_eq!(d[[i, j]].to_bits(), want.to_bits(), "({i}, {j})");
+                }
+            }
+            let want = naive(d.view(), &labels);
+            assert_eq!(bits(&silhouette_core(d.view(), &labels).widths), want);
+            if n < 100 {
+                // a transposed (strided) view of the symmetric matrix takes the fallback loop
+                assert_eq!(bits(&silhouette_core(d.t(), &labels).widths), want);
+            }
+        }
     }
 
     #[test]
