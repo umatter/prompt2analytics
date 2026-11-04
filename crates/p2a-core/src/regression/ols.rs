@@ -621,7 +621,7 @@ pub fn run_ols(
 
 /// Which solve an OLS fit took (decision D1, variant B).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OlsPath {
+pub(crate) enum OlsPath {
     /// Cholesky inverse of X'X: full rank and well conditioned.
     NormalEquations,
     /// `lm.fit`'s pivoted QR (`linalg::solve::least_squares`): rank-deficient or
@@ -660,21 +660,21 @@ fn normal_equations_inverse(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Optio
 }
 
 /// The least-squares solution of one OLS fit.
-struct OlsSolve {
+pub(crate) struct OlsSolve {
     /// Coefficients in column order, `NaN` for aliased columns.
-    beta: Array1<f64>,
-    residuals: Array1<f64>,
+    pub(crate) beta: Array1<f64>,
+    pub(crate) residuals: Array1<f64>,
     /// `(X'X)^{-1}` (k x k), `NaN` rows and columns for aliased columns.
-    unscaled: Array2<f64>,
-    rank: usize,
+    pub(crate) unscaled: Array2<f64>,
+    pub(crate) rank: usize,
     /// Indices of the aliased columns, ascending.
-    aliased: Vec<usize>,
-    path: OlsPath,
+    pub(crate) aliased: Vec<usize>,
+    pub(crate) path: OlsPath,
 }
 
 /// Solve `min ||y - X b||`: the normal equations on a full-rank, well-conditioned design
 /// (bit for bit the solve OLS always used there), `lm.fit`'s pivoted QR otherwise.
-fn solve_ols(
+pub(crate) fn solve_ols(
     x: ndarray::ArrayView2<'_, f64>,
     y: ndarray::ArrayView1<'_, f64>,
 ) -> EconResult<OlsSolve> {

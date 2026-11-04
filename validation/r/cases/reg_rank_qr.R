@@ -80,3 +80,35 @@ case("ols_illcond", "regression", "lm on a full-rank but ill-conditioned design 
   list(values = v, reference = "stats::lm (Householder QR); the Cholesky normal-equation error and the spread to LAPACK dgeqp3 are recorded for the record",
        call = "lm(y ~ x1 + x2 + x3, data = ols_illcond)", packages = character(0))
 })
+
+# Sign convention shared with p2a (diagnostics.rs first_principal_component): the loading with the
+# largest absolute value is positive (first such index on ties).
+.pc1_lmtest <- function(Z) {
+  v <- as.matrix(eigen(cov(Z))$vectors)[, 1]
+  j <- which.max(abs(v)); if (v[j] < 0) v <- -v
+  list(loadings = v, scores = as.vector(Z %*% v))
+}
+
+case("reset_princomp", "regression", "lmtest::resettest(type = 'princomp' | 'fitted' | 'regressor'), power 2:3 and 3", function(ctx) {
+  set.seed(20261121)
+  n <- 150; x1 <- rnorm(n); x2 <- 0.5 * x1 + rnorm(n)
+  y <- 1 + x1 + 0.5 * x2 + 0.3 * (x1 + x2)^2 + rnorm(n)
+  d <- ctx$gen_dataset("reset_two", data.frame(y = round(y, 10), x1 = round(x1, 10), x2 = round(x2, 10)))
+  m <- lm(y ~ x1 + x2, data = d)
+  rp <- resettest(m, power = 2:3, type = "princomp"); rf <- resettest(m, power = 2:3, type = "fitted")
+  rr <- resettest(m, power = 2:3, type = "regressor"); r3 <- resettest(m, power = 3, type = "princomp")
+  Z <- as.matrix(d[, c("x1", "x2")]); pc <- .pc1_lmtest(Z)
+  # power = 3 alone distinguishes resettest's uncentred pc1 = Z v1 from centred scores (prcomp()$x[, 1]):
+  pcc <- as.vector(scale(Z, scale = FALSE) %*% pc$loadings); X <- model.matrix(m)
+  rss <- function(M) sum(lm.fit(M, d$y)$residuals^2)
+  f3_centred <- (n - 4) * (rss(X) - rss(cbind(X, pcc^3))) / rss(cbind(X, pcc^3))
+  stopifnot(abs(rp$statistic - rf$statistic) > 1, abs(r3$statistic - f3_centred) > 0.1)
+  v <- list(princomp_stat = unname(rp$statistic), princomp_df = vec(unname(rp$parameter)), princomp_p = rp$p.value,
+            fitted_stat = unname(rf$statistic), fitted_p = rf$p.value,
+            regressor_stat = unname(rr$statistic), regressor_df = vec(unname(rr$parameter)),
+            princomp_p3_stat = unname(r3$statistic), princomp_p3_df = vec(unname(r3$parameter)), princomp_p3_p = r3$p.value,
+            princomp_p3_centred_stat = f3_centred,
+            pc1_loadings = vec(pc$loadings), pc1_lmtest_head = vec(head(pc$scores, 5)))
+  list(values = v, reference = "lmtest::resettest(power = 2:3 | 3, type = 'princomp' | 'fitted' | 'regressor'); pc1 = Z %*% eigen(cov(Z))$vectors[, 1] as in resettest; the centred-score statistic is recorded to show the case distinguishes them",
+       call = "resettest(lm(y ~ x1 + x2), power = 2:3, type = 'princomp')", packages = "lmtest")
+})

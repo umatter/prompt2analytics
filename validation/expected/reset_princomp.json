@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "reset_princomp",
+  "area": "regression",
+  "method": "lmtest::resettest(type = 'princomp' | 'fitted' | 'regressor'), power 2:3 and 3",
+  "reference": "lmtest::resettest(power = 2:3 | 3, type = 'princomp' | 'fitted' | 'regressor'); pc1 = Z %*% eigen(cov(Z))$vectors[, 1] as in resettest; the centred-score statistic is recorded to show the case distinguishes them",
+  "call": "resettest(lm(y ~ x1 + x2), power = 2:3, type = 'princomp')",
+  "dataset": "validation/datasets/generated/reset_two.csv",
+  "datasets": ["validation/datasets/generated/reset_two.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "princomp_stat": 106.83012746759189,
+    "princomp_df": [2, 145],
+    "princomp_p": 3.0524202840387294e-29,
+    "fitted_stat": 91.538155844567939,
+    "fitted_p": 1.9543475860927981e-26,
+    "regressor_stat": 41.514761922155813,
+    "regressor_df": [4, 143],
+    "princomp_p3_stat": 22.918632127631003,
+    "princomp_p3_df": [1, 146],
+    "princomp_p3_p": 4.1023056959905776e-06,
+    "princomp_p3_centred_stat": 6.540979982413889,
+    "pc1_loadings": [0.60820629447196406, 0.79377900158966297],
+    "pc1_lmtest_head": [0.86745123082426123, 3.2726862292657612, 0.32932856517205744, -0.85691292940001007, 0.012615516828151374]
+  }
+}

@@ -95,6 +95,7 @@ use crate::options::Choices;
 use crate::regression::{CovarianceType, run_ols};
 use crate::resource;
 use crate::traits::chi_squared_p_value;
+use crate::traits::convergence::{ResultNotes, notes_text};
 
 /// Result from regression diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,12 +219,9 @@ pub enum ResetType {
     Fitted,
     /// Use powers of regressors (x², x³, ...)
     Regressor,
-    /// Use powers of the first principal component of the regressors.
-    ///
-    /// NOTE: not yet implemented as described — this currently reuses the
-    /// powers-of-fitted-values augmentation (identical to `Fitted`) and emits a
-    /// runtime warning. It does not compute a principal component, so it does
-    /// not match R's `lmtest::resettest(type = "princomp")`.
+    /// Use powers of the first principal component of the regressors, as
+    /// `lmtest::resettest(type = "princomp")`: `Z` = the non-constant design columns,
+    /// `v1` = the first eigenvector of `cov(Z)`, `pc1 = Z v1` (not centred).
     PrinComp,
 }
 
@@ -278,6 +276,10 @@ pub struct ResetTestResult {
     pub significant_at_05: bool,
     /// Interpretation of the result
     pub interpretation: String,
+    /// Warnings: the model's aliasing note, and augmentation terms dropped as collinear.
+    /// Absent from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Result from the Wald test for comparing nested models.
@@ -347,6 +349,16 @@ impl std::fmt::Display for ResetTestResult {
         writeln!(f)?;
         writeln!(f, "F Statistic: {:.4}", self.statistic)?;
         writeln!(f, "df: ({}, {})", self.df.0, self.df.1)?;
+        let what = match self.reset_type {
+            ResetType::Fitted => "the fitted values",
+            ResetType::Regressor => "each regressor",
+            ResetType::PrinComp => "the first principal component of the regressors",
+        };
+        writeln!(
+            f,
+            "Augmentation: powers of {what} (type = \"{}\")",
+            self.reset_type
+        )?;
         writeln!(f, "p-value: {:.4}", self.p_value)?;
         writeln!(f)?;
         writeln!(f, "Powers tested: {:?}", self.powers)?;
@@ -354,7 +366,13 @@ impl std::fmt::Display for ResetTestResult {
         writeln!(f, "Augmented R²: {:.4}", self.r2_augmented)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
-        Ok(())
+        f.write_str(&notes_text(self))
+    }
+}
+
+impl ResultNotes for ResetTestResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 }
 
@@ -1005,160 +1023,76 @@ pub fn reset_test(
     powers: &[usize],
     reset_type: ResetType,
 ) -> EconResult<ResetTestResult> {
-    // Validate powers
-    let powers = normalize_reset_powers(powers)?;
+    // Validate powers before fitting anything
+    normalize_reset_powers(powers)?;
 
     // Step 1: Run original OLS regression
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
-    let n = ols_result.n_obs;
-    let k_original = ols_result.n_params;
-
-    // Step 2: Build design matrix and extract y
+    // Step 2: The design and y as run_ols read them
     let df = dataset.df();
     let design = DesignMatrix::from_dataframe(df, x_cols, true)
         .map_err(|e| EconError::Internal(e.to_string()))?;
-    let x_orig = &design.data;
-
-    // Get y values
     let y =
         DesignMatrix::extract_column(df, y_col).map_err(|e| EconError::Internal(e.to_string()))?;
 
-    // Compute fitted values: fitted = X * beta
-    let beta: Array1<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
-    let fitted: Array1<f64> = (0..n)
-        .map(|i| (0..k_original).map(|j| x_orig[[i, j]] * beta[j]).sum())
-        .collect();
+    // Steps 3-4: augmentation, augmented fit and F test (one implementation)
+    reset_test_from_ols(&ols_result, &design.data.view(), &y, powers, reset_type)
+}
 
-    if matches!(reset_type, ResetType::PrinComp) {
-        // First principal component of regressors, then powers
-        // Simple PC: weighted average of standardized regressors
-        let k_noint = x_cols.len(); // excluding intercept
-        if k_noint == 0 {
-            return Err(EconError::InvalidSpecification {
-                message: "PrinComp RESET requires at least one regressor".to_string(),
-            });
-        }
-
-        // Not yet implemented: this reuses the powers-of-fitted-values
-        // augmentation (identical to ResetType::Fitted) rather than
-        // computing the first principal component of the regressors, so it
-        // does not match R's resettest(type = "princomp").
-        tracing::warn!(
-            "RESET test: the 'princomp' augmentation is not implemented; using the \
-             powers-of-fitted-values augmentation (identical to 'fitted'). Results will \
-             not match R's resettest(type = \"princomp\")."
-        );
+/// lmtest's first principal component of the regressors `z` (n x p): `v1` is the
+/// eigenvector of `cov(z)` (n - 1 denominator) with the largest eigenvalue (chosen by its
+/// Rayleigh quotient, so the eigen solver's order is not relied on), signed so that its
+/// largest |entry| is positive (first index on ties); the scores are `z v1`, NOT centred
+/// (`resettest(type = "princomp")` uses `Z %*% v1`). Returns `(scores, loadings)`.
+fn first_principal_component(
+    z: ndarray::ArrayView2<'_, f64>,
+) -> EconResult<(Array1<f64>, Array1<f64>)> {
+    let (n, p) = z.dim();
+    if n < 2 || p == 0 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n,
+            context: "first principal component of the regressors".to_string(),
+        });
     }
-
-    // Size the augmented model before building it
-    let regressor_cols = reset_regressor_columns(&x_orig.view());
-    let k_augmented = reset_augmented_width(
-        n,
-        k_original,
-        powers.len(),
-        reset_type,
-        regressor_cols.len(),
-    )?;
-    let n_aug = k_augmented - k_original;
-
-    // Build augmented X matrix: [X_original, augmentation columns]
-    let mut x_aug = resource::try_zeros2(n, k_augmented, "RESET augmented design")?;
-
-    // Copy original X
+    let means: Vec<f64> = (0..p).map(|j| z.column(j).sum() / n as f64).collect();
+    let mut cov = Array2::<f64>::zeros((p, p));
     for i in 0..n {
-        for j in 0..k_original {
-            x_aug[[i, j]] = x_orig[[i, j]];
+        for a in 0..p {
+            let da = z[[i, a]] - means[a];
+            for b in a..p {
+                cov[[a, b]] += da * (z[[i, b]] - means[b]);
+            }
         }
     }
-
-    // Add augmentation variables
-    fill_reset_augmentation(
-        &mut x_aug,
-        k_original,
-        &powers,
-        reset_type,
-        &fitted,
-        &x_orig.view(),
-        &regressor_cols,
-    )?;
-
-    // Step 3: Run augmented regression
-    let xtx_aug = xtx(&x_aug.view());
-    let (xtx_aug_inv, _) =
-        safe_inverse(&xtx_aug.view()).map_err(|e| EconError::SingularMatrix {
-            context: "Augmented model X'X".to_string(),
-            suggestion: format!("Augmentation variables may be collinear: {}", e),
-        })?;
-
-    let mut xty_aug: Array1<f64> = Array1::zeros(k_augmented);
-    for i in 0..n {
-        for j in 0..k_augmented {
-            xty_aug[j] += x_aug[[i, j]] * y[i];
+    for a in 0..p {
+        for b in a..p {
+            cov[[a, b]] /= (n - 1) as f64;
+            cov[[b, a]] = cov[[a, b]];
         }
     }
-
-    let beta_aug: Array1<f64> = xtx_aug_inv.dot(&xty_aug);
-
-    // Compute SSR for augmented model
-    let y_mean = y.mean().unwrap_or(0.0);
-    let mut ssr_aug = 0.0;
-    let mut sst = 0.0;
-
-    for i in 0..n {
-        let fitted_aug: f64 = (0..k_augmented).map(|j| x_aug[[i, j]] * beta_aug[j]).sum();
-        let resid = y[i] - fitted_aug;
-        ssr_aug += resid * resid;
-        sst += (y[i] - y_mean).powi(2);
-    }
-
-    // SSR for original model
-    let ssr_orig: f64 = ols_result.resid.iter().map(|e| e * e).sum();
-
-    // R² values
-    let r2_original = if sst > 0.0 { 1.0 - ssr_orig / sst } else { 0.0 };
-    let r2_augmented = if sst > 0.0 { 1.0 - ssr_aug / sst } else { 0.0 };
-
-    // Step 4: F-test
-    // F = ((SSR_restricted - SSR_unrestricted) / q) / (SSR_unrestricted / (n - k_unrestricted))
-    // where q = number of restrictions (number of added variables)
-    let q = n_aug;
-    let df1 = q;
-    let df2 = n - k_augmented;
-
-    let f_stat = if ssr_aug > 0.0 && df2 > 0 {
-        ((ssr_orig - ssr_aug) / q as f64) / (ssr_aug / df2 as f64)
-    } else {
-        0.0
+    let (_, vecs) = crate::linalg::eig_symmetric(&cov.view())
+        .map_err(|e| EconError::Computation(format!("eigen decomposition of cov(Z): {e}")))?;
+    let rayleigh = |j: usize| {
+        let v = vecs.column(j);
+        v.dot(&cov.dot(&v))
     };
-
-    let p_value = crate::traits::f_test_p_value(f_stat, df1 as f64, df2 as f64);
-
-    let significant = p_value < 0.05;
-    let interpretation = if significant {
-        format!(
-            "Reject H0: Model misspecification detected (p={:.4} < 0.05). Consider adding nonlinear terms.",
-            p_value
-        )
-    } else {
-        format!(
-            "Fail to reject H0: No significant misspecification detected (p={:.4} >= 0.05)",
-            p_value
-        )
-    };
-
-    Ok(ResetTestResult {
-        statistic: f_stat,
-        p_value,
-        df: (df1, df2),
-        powers,
-        reset_type,
-        n_obs: n,
-        r2_original,
-        r2_augmented,
-        significant_at_05: significant,
-        interpretation,
-    })
+    let best = (0..vecs.ncols())
+        .max_by(|&a, &b| rayleigh(a).total_cmp(&rayleigh(b)))
+        .ok_or_else(|| EconError::Computation("cov(Z) has no eigenvectors".to_string()))?;
+    let mut v = vecs.column(best).to_owned();
+    let mut lead = 0;
+    for j in 1..p {
+        if v[j].abs() > v[lead].abs() {
+            lead = j;
+        }
+    }
+    if v[lead] < 0.0 {
+        v.mapv_inplace(|x| -x);
+    }
+    let scores = z.dot(&v);
+    Ok((scores, v))
 }
 
 /// RESET powers as both RESET variants use them: an empty list means `[2, 3]`,
@@ -1229,14 +1163,15 @@ fn reset_augmented_width(
 }
 
 /// Fill the augmentation columns of `x_aug`, from column `k_original` on: for
-/// each power in order, the power of the fitted values (`Fitted`, `PrinComp`) or
-/// of each regressor column in `regressor_cols` (`Regressor`).
+/// each power in order, the power of `base` (the fitted values for `Fitted`, the first
+/// principal component of the regressors for `PrinComp`) or of each regressor column in
+/// `regressor_cols` (`Regressor`).
 fn fill_reset_augmentation(
     x_aug: &mut Array2<f64>,
     k_original: usize,
     powers: &[usize],
     reset_type: ResetType,
-    fitted: &Array1<f64>,
+    base: &Array1<f64>,
     x: &ndarray::ArrayView2<f64>,
     regressor_cols: &[usize],
 ) -> EconResult<()> {
@@ -1249,7 +1184,7 @@ fn fill_reset_augmentation(
         match reset_type {
             ResetType::Fitted | ResetType::PrinComp => {
                 for i in 0..n {
-                    x_aug[[i, col]] = fitted[i].powi(p);
+                    x_aug[[i, col]] = base[i].powi(p);
                 }
                 col += 1;
             }
@@ -1301,14 +1236,37 @@ pub fn reset_test_from_ols(
 
     let n = ols_result.n_obs;
     let k_original = ols_result.n_params;
+    if x.nrows() != n || x.ncols() != k_original || y.len() != n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "RESET: the design is {} x {} and y has {} values, but the OLS fit has {n} \
+                 observations and {k_original} parameters",
+                x.nrows(),
+                x.ncols(),
+                y.len()
+            ),
+        });
+    }
 
-    // Compute fitted values using vectorized matrix-vector multiplication
-    let beta: Array1<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
-    let x_view: ndarray::ArrayView2<f64> = x.view();
-    let fitted: Array1<f64> = x_view.dot(&beta);
+    // Fitted values of the fit: y - residuals (X b would be NaN for an aliased column)
+    let regressor_cols = reset_regressor_columns(x);
+    let base: Array1<f64> = match reset_type {
+        ResetType::PrinComp => {
+            if regressor_cols.is_empty() {
+                return Err(EconError::InvalidSpecification {
+                    message: "PrinComp RESET requires at least one regressor".to_string(),
+                });
+            }
+            let mut z = resource::try_zeros2(n, regressor_cols.len(), "RESET regressors")?;
+            for (c, &j) in regressor_cols.iter().enumerate() {
+                z.column_mut(c).assign(&x.column(j));
+            }
+            first_principal_component(z.view())?.0
+        }
+        _ => y - &ols_result.resid,
+    };
 
     // Size the augmented model before building it
-    let regressor_cols = reset_regressor_columns(x);
     let k_augmented = reset_augmented_width(
         n,
         k_original,
@@ -1316,58 +1274,63 @@ pub fn reset_test_from_ols(
         reset_type,
         regressor_cols.len(),
     )?;
-    let n_aug = k_augmented - k_original;
+    let q = k_augmented - k_original;
 
-    // Build augmented X matrix using slice assignment (vectorized)
+    // Build augmented X matrix: [X, augmentation columns]
     let mut x_aug = resource::try_zeros2(n, k_augmented, "RESET augmented design")?;
     x_aug.slice_mut(ndarray::s![.., ..k_original]).assign(x);
-
-    // Add augmentation columns
     fill_reset_augmentation(
         &mut x_aug,
         k_original,
         &powers,
         reset_type,
-        &fitted,
+        &base,
         x,
         &regressor_cols,
     )?;
 
-    // Run augmented regression using vectorized operations
-    // X'X - use pure ndarray for speed
-    let xtx_aug = x_aug.t().dot(&x_aug);
-    // Use fast Cholesky inverse (no condition number check - OLS already succeeded)
-    let xtx_aug_inv = crate::linalg::cholesky_inverse(&xtx_aug.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "Augmented model X'X".to_string(),
-            suggestion: format!("Augmentation variables may be collinear: {}", e),
-        }
-    })?;
-
-    // X'y using vectorized dot product
-    let xty_aug = x_aug.t().dot(y);
-
-    // β_aug = (X'X)^{-1} X'y
-    let beta_aug = xtx_aug_inv.dot(&xty_aug);
-
-    // Compute SSR using vectorized operations
-    let fitted_aug = x_aug.dot(&beta_aug);
-    let resid_aug = y - &fitted_aug;
+    // Augmented fit (normal equations when well conditioned, pivoted QR otherwise)
+    let aug = crate::regression::ols::solve_ols(x_aug.view(), y.view())?;
 
     let y_mean = y.mean().unwrap_or(0.0);
-    let ssr_aug: f64 = resid_aug.iter().map(|&r| r * r).sum();
+    let ssr_aug: f64 = aug.residuals.iter().map(|&r| r * r).sum();
     let sst: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-
     let ssr_orig: f64 = ols_result.resid.iter().map(|e| e * e).sum();
     let r2_original = if sst > 0.0 { 1.0 - ssr_orig / sst } else { 0.0 };
     let r2_augmented = if sst > 0.0 { 1.0 - ssr_aug / sst } else { 0.0 };
 
-    let q = n_aug;
-    let df1 = q;
-    let df2 = n - k_augmented;
+    // Degrees of freedom by rank (anova.lm's rule): df1 = rank([X, Z]) - rank(X),
+    // df2 = n - rank([X, Z]). lmtest counts ncol(X) and every augmentation column instead,
+    // which differs only when a column aliases.
+    let rank_x = ols_result.rank();
+    let df1 = aug
+        .rank
+        .checked_sub(rank_x)
+        .filter(|d| *d > 0)
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: "every RESET augmentation term is collinear with the model; nothing to test"
+                .to_string(),
+        })?;
+    let df2 =
+        n.checked_sub(aug.rank)
+            .filter(|d| *d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: aug.rank + 1,
+                provided: n,
+                context: "RESET test augmented model".to_string(),
+            })?;
 
-    let f_stat = if ssr_aug > 0.0 && df2 > 0 {
-        ((ssr_orig - ssr_aug) / q as f64) / (ssr_aug / df2 as f64)
+    let mut warnings = alias_warnings(ols_result);
+    if df1 < q {
+        warnings.push(format!(
+            "RESET: {} of {q} augmentation terms are collinear with the model and were \
+             dropped; df1 = {df1}",
+            q - df1
+        ));
+    }
+
+    let f_stat = if ssr_aug > 0.0 {
+        ((ssr_orig - ssr_aug) / df1 as f64) / (ssr_aug / df2 as f64)
     } else {
         0.0
     };
@@ -1397,7 +1360,18 @@ pub fn reset_test_from_ols(
         r2_augmented,
         significant_at_05: significant,
         interpretation,
+        warnings,
     })
+}
+
+/// The aliasing warnings of a fit (R's "Coefficients not defined because of
+/// singularities: ..."), copied for the tests built on it.
+fn alias_warnings(ols: &crate::regression::OlsResult) -> Vec<String> {
+    ols.warnings
+        .iter()
+        .filter(|w| w.starts_with("Coefficients not defined because of singularities"))
+        .cloned()
+        .collect()
 }
 
 /// Wald test for comparing nested linear models.
@@ -3078,5 +3052,154 @@ mod tests {
             "wald".parse::<BgTestType>(),
             Err(EconError::InvalidSpecification { .. })
         ));
+    }
+
+    /// lmtest::resettest(type = "princomp"): pc1 = Z v1, v1 the first eigenvector of
+    /// cov(Z), NOT centred; power = 3 alone separates it from centred scores
+    /// (22.918632127631003 vs 6.540979982413889). Before: princomp returned the fitted
+    /// statistic 91.53815584456794.
+    #[test]
+    fn test_validate_reset_princomp() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("reset_princomp");
+        let x = ["x1", "x2"];
+        let pc = reset_test(&ds, "y", &x, &[2, 3], ResetType::PrinComp).unwrap();
+        let fit = reset_test(&ds, "y", &x, &[2, 3], ResetType::Fitted).unwrap();
+        let reg = reset_test(&ds, "y", &x, &[2, 3], ResetType::Regressor).unwrap();
+        let p3 = reset_test(&ds, "y", &x, &[3], ResetType::PrinComp).unwrap();
+        let n = pc.n_obs;
+        let df = |r: &ResetTestResult| [r.df.0 as f64, r.df.1 as f64];
+        Check::new(&case)
+            .scalar("princomp_stat", pc.statistic, Tol::stat(n))
+            .vector("princomp_df", &df(&pc), Tol::exact())
+            .scalar("princomp_p", pc.p_value, Tol::p_value(n))
+            .scalar("fitted_stat", fit.statistic, Tol::stat(n))
+            .scalar("fitted_p", fit.p_value, Tol::p_value(n))
+            .scalar("regressor_stat", reg.statistic, Tol::stat(n))
+            .vector("regressor_df", &df(&reg), Tol::exact())
+            .scalar("princomp_p3_stat", p3.statistic, Tol::stat(n))
+            .vector("princomp_p3_df", &df(&p3), Tol::exact())
+            .scalar("princomp_p3_p", p3.p_value, Tol::p_value(n))
+            .finish();
+        assert!((pc.statistic - fit.statistic).abs() > 1.0); // R distinguishes them
+        assert!((p3.statistic - case.scalar("princomp_p3_centred_stat")).abs() > 0.1);
+        assert!(pc.to_string().contains("princomp") && pc.warnings.is_empty());
+
+        // The component itself: a unit eigenvector of cov(Z) for the largest eigenvalue,
+        // scores = Z v (uncentred); the statistic does not depend on its sign.
+        let z = DesignMatrix::from_dataframe(ds.df(), &x, false)
+            .unwrap()
+            .data;
+        let (scores, v) = first_principal_component(z.view()).unwrap();
+        assert!((v.dot(&v) - 1.0).abs() < 1e-12);
+        let zc = &z - &z.mean_axis(ndarray::Axis(0)).unwrap();
+        let cov = zc.t().dot(&zc) / (n as f64 - 1.0);
+        let cv = cov.dot(&v);
+        let lambda = v.dot(&cv);
+        let tr = cov[[0, 0]] + cov[[1, 1]];
+        assert!(lambda >= tr / 2.0); // the larger of the two eigenvalues
+        for (a, b) in cv.iter().zip(v.iter()) {
+            assert!(
+                (a - lambda * b).abs() <= 1e-10 * lambda.abs(),
+                "{a} vs {}",
+                lambda * b
+            );
+        }
+        let zv = z.dot(&v);
+        assert!(
+            scores
+                .iter()
+                .zip(&zv)
+                .all(|(a, b)| (a - b).abs() <= 1e-12 * b.abs().max(1.0))
+        );
+        let xi = DesignMatrix::from_dataframe(ds.df(), &x, true)
+            .unwrap()
+            .data;
+        let y = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        let ssr = |m: &Array2<f64>| {
+            let f = crate::linalg::solve::least_squares(m.view(), y.view()).unwrap();
+            f.residuals.iter().map(|e| e * e).sum::<f64>()
+        };
+        let mut aug = Array2::<f64>::zeros((n, 5));
+        aug.slice_mut(ndarray::s![.., ..3]).assign(&xi);
+        for i in 0..n {
+            let s = -scores[i];
+            aug[[i, 3]] = s * s;
+            aug[[i, 4]] = s * s * s;
+        }
+        let (s0, s1) = (ssr(&xi), ssr(&aug));
+        let f_neg = ((s0 - s1) / 2.0) / (s1 / (n as f64 - 5.0));
+        assert!(
+            (f_neg - pc.statistic).abs() <= 1e-10 * pc.statistic,
+            "{f_neg}"
+        );
+
+        // the pre-computed-OLS variant agrees
+        let ols = run_ols(&ds, "y", &x, true, CovarianceType::Standard).unwrap();
+        let pc2 = reset_test_from_ols(&ols, &xi.view(), &y, &[2, 3], ResetType::PrinComp).unwrap();
+        Check::new(&case)
+            .scalar("princomp_stat", pc2.statistic, Tol::stat(n))
+            .finish();
+    }
+
+    /// RESET on the dummy-trap model: the fitted values of the QR fit, and the degrees of
+    /// freedom by rank, pinned to anova.lm of the augmented fit: df2 = n - rank = 114.
+    #[test]
+    fn test_validate_reset_aliased_model() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let r = reset_test(
+            &ds,
+            "y",
+            &["x1", "da", "db", "dc"],
+            &[2, 3],
+            ResetType::Fitted,
+        )
+        .unwrap();
+        // deviation REG-4: lmtest::resettest reports df2 = n - (ncol(X) + q) = 113 here
+        // (trap_reset_fitted*), counting the aliased column; p2a uses n - rank, as anova.lm.
+        Check::new(&case)
+            .scalar("trap_reset_fitted_anova_f", r.statistic, Tol::stat(r.n_obs))
+            .vector(
+                "trap_reset_fitted_anova_df",
+                &[r.df.0 as f64, r.df.1 as f64],
+                Tol::exact(),
+            )
+            .scalar(
+                "trap_reset_fitted_anova_p",
+                r.p_value,
+                Tol::p_value(r.n_obs),
+            )
+            .finish();
+        assert!(
+            r.warnings.iter().any(|w| w.contains("dc")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// type = regressor with a 0/1 dummy: d^2 = d^3 = d alias the model, so they add
+    /// nothing; df1 counts the identified terms (2 of 4).
+    #[test]
+    fn test_reset_collinear_augmentation_df_by_rank() {
+        let n = 40;
+        let x: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.37).sin() * 3.0 + i as f64 * 0.1)
+            .collect();
+        let d: Vec<f64> = (0..n).map(|i| ((i * 7) % 3 == 0) as i32 as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x[i] + 0.8 * d[i] + 0.1 * x[i] * x[i] + 0.2 * ((i * 13) % 5) as f64
+            })
+            .collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x, "d" => d }.unwrap());
+        let r = reset_test(&ds, "y", &["x", "d"], &[2, 3], ResetType::Regressor).unwrap();
+        assert_eq!(r.df, (2, n - 5));
+        assert!(
+            r.warnings.iter().any(|w| w.contains("2 of 4")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.statistic.is_finite() && r.statistic > 0.0);
     }
 }

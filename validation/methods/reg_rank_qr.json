@@ -68,6 +68,35 @@
       "tolerance": "validation/README.md, n = 120: SE 1e-6 relative; bootstrap: Monte Carlo property, 10% = 6 sd at B = 2000; fixed-design solve 1e-12 relative",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "resettest_princomp",
+      "name": "RESET test, type = princomp (and fitted, regressor), also on an aliased model",
+      "category": "regression",
+      "reference": "lmtest::resettest(power = 2:3 | 3, type = 'princomp' | 'fitted' | 'regressor'); stats::anova.lm of the augmented fit (aliased model)",
+      "doc": "validation/diagnostics/regression_diagnostics.md",
+      "cases": [
+        "reset_princomp",
+        "ols_aliased"
+      ],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_princomp",
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_aliased_model"
+      ],
+      "quantities": [
+        "RESET statistic, df, p (princomp, fitted, regressor; power 2:3 and 3)",
+        "RESET F, df and p on the dummy-trap model (anova.lm of the augmented fit)",
+        "reset_test_from_ols = reset_test"
+      ],
+      "tolerance": "validation/README.md, n = 150 and 120: statistics 1e-6 relative; p-values also 1e-12 absolute; df exact; the first principal component is checked by its properties (unit norm, cov(Z) v = lambda_max v within 1e-10, scores = Z v, sign invariance)",
+      "deviations": [
+        {
+          "finding": "REG-4",
+          "quantity": "RESET statistic and df2 on an aliased model",
+          "note": "lmtest::resettest uses df2 = n - (ncol(X) + q) = 113, counting the aliased column; p2a uses n - rank = 114, as anova.lm (rule 4)"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
