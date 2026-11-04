@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "matching_nearest",
+      "name": "Nearest-neighbour matching (MatchIt): logit/probit PS, m.order, k:1 in rounds, caliper, replacement, Mahalanobis (pooled covariance), Euclidean; summary.matchit balance tables",
+      "category": "econometrics",
+      "reference": "MatchIt::matchit(method = 'nearest', distance = 'glm' | 'mahalanobis' | 'euclidean', link, m.order, ratio, caliper, replace), summary.matchit(standardize = TRUE); MatchIt 4.8.0; stats::glm (epsilon 1e-14 refit)",
+      "doc": "validation/econometrics/matching.md",
+      "cases": ["matchit_nearest"],
+      "tests": [
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_propensity_models",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_probit_in_every_ps_method",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_logit_largest",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_logit_data",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_probit",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_ratio2_rounds",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_caliper",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_replace",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_mahalanobis",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_nearest_euclidean",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_balance_table",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_m_order_random_is_seeded",
+        "p2a-core::econometrics::matching::tests::test_validate_matchit_display_shows_the_balance_tables_and_notes",
+        "p2a-core::econometrics::matching::tests::test_validate_matching_rejects_invalid_options"
+      ],
+      "quantities": ["propensity scores and glm coefficients (logit, probit)", "matched pairs (m.order largest, smallest, data; probit; Mahalanobis; Euclidean)", "1:2 match matrix (rounds)", "caliper on the PS scale and the caliper pairs", "weights (1:2, caliper, replacement)", "pooled within-group covariance", "balance before/after: means, SMD, variance ratio, eCDF mean and max", "matched ESS"],
+      "tolerance": "n = 240: pairs, match matrices and counts exact; weights 1e-8 (Tol::coef); balance statistics and ESS 1e-6 (Tol::stat); propensity scores, coefficients and the absolute caliper Tol::iterative(1e-8) against the epsilon 1e-14 refit, MatchIt's own glm values at Tol::iterative(1e-8) (logit) and 1e-5 (probit: MatchIt's glm stops 4.6e-7 away)",
+      "deviations": [
+        {"finding": "CAUS-67", "quantity": "m.order closest / farthest", "note": "not implemented; refused with the accepted values (largest, smallest, data, random)"},
+        {"finding": "CAUS-67", "quantity": "m.order random", "note": "seeded ChaCha8 shuffle; R's RNG order is not reproduced"},
+        {"finding": "CAUS-67", "quantity": "exact ties among covariate distances with two or more covariates", "note": "lowest row; MatchIt's nn_matchC_mahcovs order is undocumented and not row order (probe ties3.R); the scalar and one-covariate rules match MatchIt"},
+        {"finding": "CAUS-67", "quantity": "caliper on Mahalanobis/Euclidean distances", "note": "p2a extension in raw distance units (MatchIt requires covariate-named calipers); negative calipers (MatchIt's anti-calipers) are refused"}
+      ],
+      "supersedes_legacy": ["validation/expected/match_nn.csv"]
+    },
+    {
+      "id": "matching_full",
+      "name": "Optimal full matching (optmatch::fullmatch via MatchIt): min/max controls, omit-fraction recovery, transposed problem; PS, probit, Mahalanobis distances",
+      "category": "econometrics",
+      "reference": "MatchIt::matchit(method = 'full') -> optmatch::fullmatch (optmatch 0.10.8) at tol = 0.001 (MatchIt's default, recorded) and tol = 1e-8 (pinned); an lpSolve LP of the same network during planning",
+      "doc": "validation/econometrics/matching.md",
+      "cases": ["matchit_full_cem"],
+      "tests": [
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_total_distance",
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_bounded",
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_weights",
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_mahalanobis",
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_recovery",
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_flipped",
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_probit",
+        "p2a-core::econometrics::matching::tests::test_validate_full_matching_rejects_infeasible_and_invalid_bounds"
+      ],
+      "quantities": ["optimal total distance (PS unconstrained and [0.5, 2], probit, Mahalanobis unconstrained, [0.5, 2], max 1, max 0.5 flipped)", "partitions and weights (Mahalanobis)", "the weight formula on R's partitions", "matched ESS", "every unit kept; star structure; bounds"],
+      "tolerance": "n = 240: partitions exact; weights and Mahalanobis totals 1e-8 (Tol::coef); PS totals Tol::iterative(1e-8) (glm epsilon 1e-10 against 1e-14); p2a's integer costs at resolution max_d / 2^40",
+      "deviations": [
+        {"finding": "CAUS-70", "quantity": "full matching at MatchIt's default tol = 0.001", "note": "p2a solves exactly; MatchIt's default is 0.48% above the optimum on matching_sim (0.8700895944690001 vs 0.8659137461118286); pinned to optmatch at tol = 1e-8 and asserted below MatchIt's default"},
+        {"finding": "CAUS-70", "quantity": "partitions and weights on propensity-score distances", "note": "the optimum is not unique on a line (optmatch and an LP reach the same total to 1e-15 with 17 units placed differently); totals, structure and the weight formula are pinned instead"}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "matching_cem",
+      "name": "Coarsened exact matching (MatchIt): Sturges, q<k> quantile and explicit cut points",
+      "category": "econometrics",
+      "reference": "MatchIt::matchit(method = 'cem', cutpoints = 'sturges' | 'q4' | list(..)); MatchIt 4.8.0",
+      "doc": "validation/econometrics/matching.md",
+      "cases": ["matchit_full_cem"],
+      "tests": [
+        "p2a-core::econometrics::matching::tests::test_validate_cem_sturges",
+        "p2a-core::econometrics::matching::tests::test_validate_cem_quantile_and_explicit_cut_points"
+      ],
+      "quantities": ["weights", "matched treated and control counts", "number of strata"],
+      "tolerance": "weights 1e-8 (Tol::coef); counts exact",
+      "deviations": [
+        {"finding": "CAUS-67", "quantity": "n_bins = 1 and 2", "note": "p2a: one bin, and the median; MatchIt errors on 'q1' and reads the single 'q2' quantile as a bin count"}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "matching_subclass",
+      "name": "Propensity-score subclassification (MatchIt): type-7 cut points of the treated PS, findInterval(all.inside)",
+      "category": "econometrics",
+      "reference": "MatchIt::matchit(method = 'subclass', subclass = 5, link = 'logit' | 'probit'); MatchIt 4.8.0",
+      "doc": "validation/econometrics/matching.md",
+      "cases": ["matchit_subclass"],
+      "tests": ["p2a-core::econometrics::matching::tests::test_validate_subclass_logit_probit"],
+      "quantities": ["cut points (tight refit)", "subclass labels", "weights"],
+      "tolerance": "labels exact; weights 1e-8; cut points Tol::iterative(1e-8)",
+      "deviations": [
+        {"finding": "CAUS-67", "quantity": "subclasses lacking treated or control units", "note": "discarded with a warning (MatchIt with min.n = 0); MatchIt's default min.n = 1 moves units between subclasses (C++ subclass_scootC, not ported). Identical whenever every subclass holds both groups (asserted in the case)"}
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "min_cost_flow",
+      "name": "Minimum-cost flow by the network simplex method (solver of optimal full matching)",
+      "category": "econometrics",
+      "reference": "rlemon::MinCostFlow(algorithm = 'NetworkSimplex') (LEMON 1.3; rlemon 0.2.1), cross-checked with lpSolve::lp 5.6.23",
+      "doc": "validation/econometrics/matching.md",
+      "cases": ["mcf_networks"],
+      "tests": ["p2a-core::econometrics::min_cost_flow::tests::test_validate_mcf_networks"],
+      "quantities": ["feasibility", "optimal cost (5 networks)", "optimality conditions (bounds, conservation, complementary slackness)"],
+      "tolerance": "exact (integer costs)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

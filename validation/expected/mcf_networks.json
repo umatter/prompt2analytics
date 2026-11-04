@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "mcf_networks",
+  "area": "econometrics/matching",
+  "method": "Minimum-cost flow (LEMON network simplex via rlemon; lpSolve cross-check) on seeded random networks",
+  "reference": "rlemon::MinCostFlow(algorithm = 'NetworkSimplex') (LEMON 1.3, the solver optmatch uses through rlemon); lpSolve::lp cross-check",
+  "call": "MinCostFlow(arcSources, arcTargets, arcCapacities, arcCosts, nodeSupplies, numNodes, 'NetworkSimplex')",
+  "dataset": "validation/datasets/generated/mcf_networks.csv",
+  "datasets": ["validation/datasets/generated/mcf_networks.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "rlemon": "0.2.1",
+    "lpSolve": "5.6.23"
+  },
+  "values": {
+    "net1_feasible": 1,
+    "net1_cost": 340,
+    "net2_feasible": 1,
+    "net2_cost": 244,
+    "net3_feasible": 1,
+    "net3_cost": 213,
+    "net4_feasible": 1,
+    "net4_cost": 151,
+    "net5_feasible": 0
+  }
+}

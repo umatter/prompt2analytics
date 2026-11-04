@@ -37,6 +37,11 @@
 //!   ([`EconError::InsufficientData`]).
 //! * The separation flag and its warning also cover the quasi-binomial family, and the
 //!   "fitted rates numerically 0" warning the quasi-Poisson family.
+//! * [`GlmSpec::coef_tol`] optionally keeps iterating after the deviance rule until the
+//!   coefficients settle; [`fit_propensity`] uses it for the non-canonical links only, so
+//!   probit (and cloglog) propensity scores reach the MLE to about 1e-10 instead of the
+//!   deviance rule's 2e-6. The canonical logit keeps the deviance rule alone: its IRLS is
+//!   Newton's method, which converges quadratically and already lands at about 1e-8.
 //!
 //! ```
 //! use ndarray::array;
@@ -51,6 +56,7 @@
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::Qr;
 use crate::resource;
+use crate::traits::convergence::{Convergence, ResultNotes, relative_change_vec};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
@@ -104,6 +110,16 @@ pub struct GlmSpec<'a> {
     pub epsilon: f64,
     /// Maximum IRLS iterations; default 100 (R's default `maxit` is 25).
     pub max_iter: usize,
+    /// Optional refinement after the deviance rule is met: keep iterating (within
+    /// `max_iter`) until the relative coefficient change
+    /// ([`crate::traits::convergence::relative_change_vec`]) falls below this tolerance, or
+    /// until a binomial linear predictor reaches its link's clamp (separation: the
+    /// coefficients diverge and further steps no longer change the fitted values). The fit
+    /// counts as converged once the deviance rule is met. The deviance rule alone leaves an
+    /// `O(sqrt(epsilon))` coefficient error when the link is not canonical (Fisher scoring
+    /// converges linearly), about 2e-6 relative for the probit at `epsilon` 1e-10. Default
+    /// `None`; [`fit_propensity`] uses 1e-10 for the probit and cloglog links.
+    pub coef_tol: Option<f64>,
 }
 
 impl<'a> GlmSpec<'a> {
@@ -117,6 +133,7 @@ impl<'a> GlmSpec<'a> {
             start: None,
             epsilon: 1e-10,
             max_iter: 100,
+            coef_tol: None,
         }
     }
 
@@ -195,6 +212,12 @@ pub struct GlmFit {
     pub converged: bool,
     /// IRLS iterations of the main fit.
     pub iterations: usize,
+    /// `max_iter` of the spec (0 when read from JSON written before this field existed).
+    #[serde(default)]
+    pub max_iter: usize,
+    /// `epsilon` of the spec (0 when read from JSON written before this field existed).
+    #[serde(default)]
+    pub epsilon: f64,
     /// The last iteration had to halve its step.
     pub boundary: bool,
     /// Binomial families: some fitted probability is within `10 eps` of 0 or 1.
@@ -377,6 +400,8 @@ struct Problem<'a> {
     offset: &'a [f64],
     epsilon: f64,
     max_iter: usize,
+    /// [`GlmSpec::coef_tol`].
+    coef_tol: Option<f64>,
     /// Floor of the convergence denominator: 0.1 * D0 / n_ok (0.1 when that is 0 or not
     /// finite).
     floor: f64,
@@ -393,6 +418,26 @@ impl Problem<'_> {
 
     fn valid(&self, mu: &Array1<f64>) -> bool {
         self.family.valid_mu(mu)
+    }
+
+    /// A binomial linear predictor at or beyond its link's clamp: the fitted probability no
+    /// longer moves (separation), so coefficient refinement stops.
+    fn saturated(&self, eta: &Array1<f64>) -> bool {
+        if !self.family.is_binomial() {
+            return false;
+        }
+        let clamp = match self.link {
+            GlmLink::Logit => LOGIT_THRESH,
+            GlmLink::Probit => PROBIT_THRESH,
+            _ => {
+                let eps10 = 10.0 * EPS;
+                return eta.iter().any(|&e| {
+                    let m = self.link.linkinv(e);
+                    m > 1.0 - eps10 || m < eps10
+                });
+            }
+        };
+        eta.iter().any(|e| e.abs() >= clamp)
     }
 
     /// `x b + offset`.
@@ -462,6 +507,7 @@ impl Problem<'_> {
         let mut start = coefold.clone().unwrap_or_else(|| Array1::zeros(p));
         let mut converged = false;
         let mut boundary = false;
+        let mut prev_change = f64::INFINITY;
         let mut last_qr = None;
         let mut working_weights = Array1::zeros(n);
         let mut iterations = 0;
@@ -578,8 +624,26 @@ impl Problem<'_> {
             }
             if (dev - devold).abs() / (dev.abs() + self.floor) < self.epsilon {
                 converged = true;
-                devold = dev;
-                break;
+            }
+            if converged {
+                let Some(tol) = self.coef_tol else {
+                    devold = dev;
+                    break;
+                };
+                let change = coefold.as_ref().map_or(f64::INFINITY, |old| {
+                    relative_change_vec(
+                        start.as_slice().unwrap_or(&[]),
+                        old.as_slice().unwrap_or(&[]),
+                    )
+                });
+                // Stop when the coefficients settle, at a link clamp (separation), or once
+                // the change stops shrinking (rounding level).
+                if change.is_nan() || change < tol || self.saturated(&eta) || change >= prev_change
+                {
+                    devold = dev;
+                    break;
+                }
+                prev_change = change;
             }
             devold = dev;
             coefold = Some(start.clone());
@@ -774,6 +838,7 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
         offset: &offset,
         epsilon: spec.epsilon,
         max_iter: spec.max_iter,
+        coef_tol: spec.coef_tol,
         floor,
     };
     let init = match &spec.start {
@@ -932,14 +997,45 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
         aliased,
         converged: fit.converged,
         iterations: fit.iterations,
+        max_iter: spec.max_iter,
+        epsilon: spec.epsilon,
         boundary: fit.boundary,
         separation,
         warnings,
     })
 }
 
+impl ResultNotes for GlmFit {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(Convergence::new(
+            self.converged,
+            self.iterations,
+            self.max_iter,
+            "relative change in deviance",
+            f64::NAN,
+            self.epsilon,
+        ))
+    }
+}
+
+/// Relative coefficient change at which [`fit_propensity`] stops refining after the
+/// deviance rule ([`GlmSpec::coef_tol`]); applied to the non-canonical links (probit,
+/// cloglog) only.
+pub const PROPENSITY_COEF_TOL: f64 = 1e-10;
+
 /// Propensity scores: the binomial MLE of `treat` (coded 0/1) on `x` with the logit,
 /// probit or complementary log-log link. The caller includes the intercept column.
+///
+/// For the probit and cloglog links the fit keeps iterating after the deviance rule until
+/// the relative coefficient change is below [`PROPENSITY_COEF_TOL`] (or a fitted
+/// probability reaches the link's clamp), so the non-canonical links, whose Fisher scoring
+/// converges only linearly, reach the MLE as closely as the canonical logit. The logit
+/// stops at the deviance rule (`glm.fit`'s): Newton's method converges quadratically, and
+/// extra passes would cost `O(n p^2)` each for nothing.
 pub fn fit_propensity(
     x: ArrayView2<f64>,
     treat: ArrayView1<f64>,
@@ -959,7 +1055,11 @@ pub fn fit_propensity(
             "propensity treatment must be coded 0/1 (row {i} is {v})"
         )));
     }
-    let fit = fit_glm(x, treat, &GlmSpec::new(GlmFamily::Binomial, link))?;
+    let mut spec = GlmSpec::new(GlmFamily::Binomial, link);
+    if link != GlmLink::Logit {
+        spec.coef_tol = Some(PROPENSITY_COEF_TOL);
+    }
+    let fit = fit_glm(x, treat, &spec)?;
     Ok(PropensityFit {
         scores: fit.fitted.clone(),
         fit,
@@ -1291,9 +1391,10 @@ mod tests {
             .scalar("aliased_df_residual", fa.df_residual as f64, Tol::exact())
             .scalar("aliased_aic", fa.aic, Tol::stat(n))
             .scalar("aliased_loglik", fa.log_likelihood, Tol::stat(n));
-        // fit_propensity: the logit and probit MLE (CAUS-20) at the default spec (epsilon
-        // 1e-10), against R at 1e-14: the logit (canonical link) at 1e-8, the probit at
-        // DEFAULT_EPS_TOL
+        // fit_propensity: the logit and probit MLE (CAUS-20), against R at 1e-14, both at
+        // 1e-8: the logit stops at the deviance rule (Newton, quadratic convergence), and the
+        // probit's coefficient refinement (PROPENSITY_COEF_TOL) removes the deviance rule's
+        // linear-convergence gap
         let x = design(&c, &["1", "x1", "x2"]);
         let pl = fit_propensity(x.view(), yb.view(), GlmLink::Logit).unwrap();
         let pp = fit_propensity(x.view(), yb.view(), GlmLink::Probit).unwrap();
@@ -1306,14 +1407,22 @@ mod tests {
             .vector(
                 "probit_fitted_head",
                 &pp.scores.to_vec()[..5],
-                DEFAULT_EPS_TOL,
+                Tol::iterative(1e-8),
             );
         for (got, want) in pp.fit.coefficients.iter().zip(case.vector("probit_coef")) {
             assert!(
-                DEFAULT_EPS_TOL.allows(*got, want),
+                Tol::iterative(1e-8).allows(*got, want),
                 "propensity probit {got} vs R {want}"
             );
         }
+        // the probit's default-spec fit is the deviance rule alone (about 2e-6 away)
+        let pd = fit_glm(x.view(), yb.view(), &GlmSpec::probit()).unwrap();
+        assert!(pd.converged && pp.fit.converged && pp.fit.iterations > pd.iterations);
+        // the logit is not refined: Newton converges quadratically, so fit_propensity runs
+        // exactly the deviance rule's iterations (no extra O(n p^2) passes)
+        let ld = fit_glm(x.view(), yb.view(), &GlmSpec::logit()).unwrap();
+        assert_eq!(pl.fit.iterations, ld.iterations);
+        assert_eq!(pl.fit.coefficients, ld.coefficients);
         assert_eq!(pl.scores, pl.fit.fitted);
         // (a) start values work: start = 0 converges to the default-start solution
         let zero = Array1::<f64>::zeros(3);
@@ -1392,6 +1501,40 @@ mod tests {
                 assert_eq!(fit.fitted[i] > 0.5, y[i] == 1.0, "row {i}");
             }
         }
+    }
+
+    /// The coefficient refinement of fit_propensity stops at the link clamp under perfect
+    /// separation instead of running to max_iter; the fit's notes report the deviance rule
+    /// and R's separation warning.
+    #[test]
+    fn test_propensity_refinement_stops_under_separation() {
+        let x = ndarray::array![
+            [1.0, 10.0],
+            [1.0, 11.0],
+            [1.0, 12.0],
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [1.0, 3.5]
+        ];
+        let d = ndarray::array![1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+        for link in [GlmLink::Logit, GlmLink::Probit, GlmLink::Cloglog] {
+            let p = fit_propensity(x.view(), d.view(), link).unwrap();
+            assert!(p.fit.converged && p.fit.separation, "{link:?}");
+            assert!(
+                p.fit.iterations < p.fit.max_iter,
+                "{link:?}: {}",
+                p.fit.iterations
+            );
+            let text = crate::traits::convergence::notes_text(&p.fit);
+            assert!(text.starts_with("Converged: yes ("), "{text}");
+            assert!(
+                text.contains("Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred"),
+                "{text}"
+            );
+        }
+        let f = fit_glm(x.view(), d.view(), &GlmSpec::logit()).unwrap();
+        let c = f.notes_convergence().unwrap();
+        assert_eq!((c.max_iterations, c.tolerance), (100, 1e-10));
     }
 
     #[test]
