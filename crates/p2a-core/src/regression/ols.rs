@@ -716,8 +716,16 @@ pub(crate) fn normal_equations_inverse(
     if k == 0 || n <= k {
         return Ok(None);
     }
-    let gram = xtx(&x);
-    match sym_inverse(gram.view(), SingularPolicy::Error, "X'X") {
+    normal_inverse_from_gram(xtx(&x).view())
+}
+
+/// [`normal_equations_inverse`] from a cross-product `X'X` the caller has accumulated
+/// (the GLM's IRLS builds `X'WX` in the pass that weights the rows). The caller ensures
+/// that the design has more rows than columns and at least one column.
+pub(crate) fn normal_inverse_from_gram(
+    gram: ndarray::ArrayView2<'_, f64>,
+) -> EconResult<Option<NormalInverse>> {
+    match sym_inverse(gram, SingularPolicy::Error, "X'X") {
         Ok(inv)
             if inv.reciprocal_condition >= OLS_NORMAL_EQUATIONS_MIN_RCOND
                 && inv.inverse.diag().iter().all(|v| v.is_finite() && *v > 0.0) =>
