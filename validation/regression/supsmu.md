@@ -136,41 +136,43 @@ Re-measured on the merged tree against `fe13b889` (one P core, three interleaved
 criterion `supsmu`): automatic span 2.73 / 3.53 / 3.75 at n = 50 / 200 / 1,000, fixed span 0.1
 1.13 / 1.33 / 1.39.
 
-**T3-PERF4.** The three residual smooths of the cross-validation have the same span, x and
-weights, so the x part of Friedman's updating formulas (the window's weighted mean and variance of
-x and the update factors) is now computed once for the three of them (`smooth_many`); every value
-is unchanged bit for bit (`test_supsmu_shared_residual_smooths_are_bit_identical` compares with
-three separate `smooth` calls on noisy data with ties and zero and unequal weights, periodic and
-not, three bass values and two fixed spans). The other five passes and the fixed-span smooth are
-the code of WP11. Release, one P core, `RAYON_NUM_THREADS=1`, criterion `supsmu`, three
-interleaved rounds of base (`fe13b889`), wave-2A head and this lane, medians; the machine was
-loaded by other lanes' builds (absolute times about 3 times the quiet ones, and the head/base
-ratios lower than on the quiet integration run), so the projection multiplies the quiet
-integration ratio by the lane/head ratio of the same loaded run. The authoritative re-time is at
+**T3-PERF4.** Two changes, in `smooth` and in the shared-window smoother:
+
+- The three residual smooths of the cross-validation have the same span, x and weights, so the
+  x part of Friedman's updating formulas (the window's weighted mean and variance of x and the
+  update factors) is computed once for the three of them (`smooth_many`);
+  `test_supsmu_shared_residual_smooths_are_bit_identical` holds it bit for bit to three
+  separate `smooth` calls (noisy data with ties, zero and unequal weights, periodic and not,
+  three bass values, two fixed spans).
+- The Fortran updates a window mean as `m = (W_old m + w v) / W`, a division on the chain of
+  the running mean at every point it enters or leaves. `smooth` uses the same update in
+  increment form, `m += w (v - m) / W`, and the update factors multiply by 1 / W, which
+  depends only on the weight sum and is computed off the chains. The rounding then differs from
+  the Fortran's, but not its accuracy: the error of a step is relative to `v - m` instead of to
+  `m`. `test_supsmu_reciprocal_updates_match_divisions` holds the smooths and leave-one-out
+  residuals to the division form within 1e-10 of the response's scale for x in [0, 1]; for x
+  shifted by 1000, where both forms lose digits to cancellation, it compares both with the
+  unshifted smooth, and the new form's total error is 0.92 times the division form's (1.03e-9
+  against 1.11e-9; at most 1.5 times is asserted). Against the R pins the largest relative
+  difference is 6.6e-12 (weighted and periodic CV smooths), far inside `Tol::coef`.
+  Multiplying by 1 / W in the Fortran's form `(W_old m + w v) * (1 / W)` was tried first and
+  rejected: with constant W the error of 1 / W has one sign at every step, and with x shifted
+  by 1000 the error grew to up to 15 times that of the division form.
+
+Release, one P core (`taskset -c 3`), `RAYON_NUM_THREADS=1`, criterion `supsmu`, five
+interleaved rounds of base (`fe13b889`), the wave-2A head and this lane, medians of the
+per-round ratios. The machine was loaded by other lanes' builds (load 7-17, absolute times up to
+twice the quiet ones, single rounds up to 1.5 times off); the authoritative re-time is at
 integration.
 
-| Variant | n | loaded: head/base | loaded: lane/base | lane/head | quiet head/base (integration) | projected lane/base |
-|---|---|---|---|---|---|---|
-| automatic span | 50 | 2.44 | 2.13 | 0.874 | 2.73 | 2.39 |
-| automatic span | 200 | 2.74 | 2.43 | 0.886 | 3.53 | 3.13 |
-| automatic span | 1,000 | 2.95 | 2.45 | 0.829 | 3.75 | 3.11 |
-| fixed span 0.1 | 50 | 0.93 | 0.99 | 1.067 | 1.13 | 1.13 |
-| fixed span 0.1 | 200 | 1.12 | 1.14 | 1.022 | 1.33 | 1.33 |
-| fixed span 0.1 | 1,000 | 1.13 | 1.13 | 1.002 | 1.39 | 1.39 |
+| Variant | n | head/base | lane/base |
+|---|---|---|---|
+| automatic span | 50 | 4.29 | 1.91 |
+| automatic span | 200 | 3.50 | 1.98 |
+| automatic span | 1,000 | 3.95 | 2.13 |
+| fixed span 0.1 | 50 | 1.06 | 0.81 |
+| fixed span 0.1 | 200 | 1.48 | 1.02 |
+| fixed span 0.1 | 1,000 | 1.45 | 1.02 |
 
-An in-process comparison of the two smoothers (same binary, interleaved, minimum of 21 runs)
-put the automatic span at 0.81-0.83 of the WP11 code at n = 50 / 200 / 1,000.
-
-**Not signed off: the plan's targets (automatic span 2.5, fixed span 1.1) are not reached with
-unchanged results.** Cause: R's Fortran updates the window's means and variances with Friedman's
-recurrences, `xm = (fbo xm + w x) / fbw` and its analogues, so each smooth is a chain of about seven
-dependent divisions per point (ten with the leave-one-out residuals), about 12-14 us per pass at
-n = 1,000 on this machine, and the algorithm needs eight passes in five dependent stages. The `fe13b889` code was
-another algorithm (three running-sum passes with no division chain, and the wrong result).
-Moving the three CV windows in one pass and replaying the recorded x part of the tweeter and
-midrange windows for the later smooths were tried and measured no faster or slower (the divider's
-throughput, not the latency of one chain, bounds a fused pass; the recorded x part costs cache).
-Reaching the targets would need running sums of centred values instead of the recurrences:
-the same smooth up to rounding (which would have to be shown inside the R pins' 1e-8), but
-numerically weaker for x with a large offset or long series, and a different rounding of R's algorithm. That
-is a decision for the maintainer, not part of this package.
+The plan's targets (automatic span at most 2.5, fixed span at most 1.1 times `fe13b889`) are
+met.
