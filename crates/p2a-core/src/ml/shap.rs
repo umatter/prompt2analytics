@@ -74,6 +74,7 @@ use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::traits::convergence::{ResultNotes, notes_text};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -153,7 +154,8 @@ pub struct ShapConfig {
     /// Kernel SHAP coalition budget (shap's `nsamples`; default `2 M + 2048`): every coalition is
     /// evaluated (exact) when `2^M - 2 <= n_samples`, which the default does for M <= 11;
     /// otherwise shap.KernelExplainer's sampled design with `n_samples` coalitions. TreeSHAP does
-    /// not sample: a value given to the tree path is reported in `warnings`. Must be >= 1.
+    /// not sample: a value given to the tree path is reported in `warnings`. Must be >= 1 on
+    /// both paths (0 is an error).
     pub n_samples: Option<usize>,
 
     /// `None`: the method's own perturbation ([`FeaturePerturbation::default_for`]). Anything
@@ -266,7 +268,7 @@ impl ShapResult {
                         "2^M - 2".to_string()
                     };
                     format!(
-                        "Method: Kernel SHAP (interventional; {n} of {total} coalitions sampled, seed {}; Monte Carlo estimate)",
+                        "Method: Kernel SHAP (interventional; {n} of {total} coalitions evaluated (complete sizes enumerated, the rest sampled), seed {}; Monte Carlo estimate)",
                         self.seed.unwrap_or(SHAP_DEFAULT_SEED)
                     )
                 }
@@ -690,7 +692,7 @@ fn flatten(node: &super::trees::TreeNode, out: &mut Vec<TreeShapNode>) -> usize 
 }
 
 /// The leaf a point reaches (`x[feature] <= threshold` goes left, as `DecisionTree::predict_one`).
-fn predict_nodes(nodes: &[TreeShapNode], x: ArrayView1<f64>) -> f64 {
+fn predict_nodes(nodes: &[TreeShapNode], x: &[f64]) -> f64 {
     let mut j = 0usize;
     while nodes[j].feature >= 0 {
         let n = &nodes[j];
@@ -733,36 +735,85 @@ fn path_buffer_len(depth: usize) -> EconResult<usize> {
     )? / 2)
 }
 
+/// Working memory of the TreeSHAP recursion for trees of depth at most `D`: the path buffer
+/// ([`path_buffer_len`]) and `inv[k] = 1 / k` for `k = 1..=D + 1` (`inv[0] = 0`, unused). A path
+/// has at most `D + 1` elements, so every count EXTEND and UNWIND divide by is in the table: the
+/// recursions then multiply instead of dividing, and the divisions leave the serial chain of
+/// UNWIND's weight recurrence.
+#[derive(Clone)]
+struct TreeShapScratch {
+    path: Vec<PathElement>,
+    inv: Vec<f64>,
+}
+
+impl TreeShapScratch {
+    fn new(depth: usize) -> EconResult<Self> {
+        use crate::resource;
+        let path = resource::try_vec(
+            path_buffer_len(depth)?,
+            PathElement::default(),
+            "TreeSHAP path buffer",
+        )?;
+        let len = depth.saturating_add(2);
+        let mut inv = resource::try_vec(len, 0.0, "TreeSHAP path buffer")?;
+        for (k, v) in inv.iter_mut().enumerate().skip(1) {
+            *v = 1.0 / k as f64;
+        }
+        Ok(Self { path, inv })
+    }
+}
+
 /// EXTEND: append (feature, zero fraction, one fraction) to the path of length `len` and update
-/// the permutation weights.
-fn extend_path(path: &mut [PathElement], len: usize, zero: f64, one: f64, feature: i32) {
+/// the permutation weights. `inv` is [`TreeShapScratch::inv`] (`len + 1` in range).
+fn extend_path(
+    path: &mut [PathElement],
+    inv: &[f64],
+    len: usize,
+    zero: f64,
+    one: f64,
+    feature: i32,
+) {
     path[len] = PathElement {
         feature,
         zero,
         one,
         weight: if len == 0 { 1.0 } else { 0.0 },
     };
-    let l1 = (len + 1) as f64;
+    let inv_l1 = inv[len + 1];
+    let (one_l1, zero_l1) = (one * inv_l1, zero * inv_l1);
+    // weight'[i + 1] = weight[i + 1] zero (len - i - 1) / l1 + weight[i] one (i + 1) / l1: the
+    // first term is carried in a register rather than stored and reloaded, so iterations do not
+    // wait on each other through memory.
+    let mut carry = path[len].weight;
     for i in (0..len).rev() {
-        path[i + 1].weight += one * path[i].weight * (i + 1) as f64 / l1;
-        path[i].weight = zero * path[i].weight * (len - i) as f64 / l1;
+        let w = path[i].weight;
+        path[i + 1].weight = carry + w * (one_l1 * (i + 1) as f64);
+        carry = w * (zero_l1 * (len - i) as f64);
     }
+    path[0].weight = carry;
 }
 
 /// UNWIND: undo the extension of element `k` of the path of length `len` (a feature split on
 /// again further down); the path then has length `len - 1`.
-fn unwind_path(path: &mut [PathElement], len: usize, k: usize) {
+fn unwind_path(path: &mut [PathElement], inv: &[f64], len: usize, k: usize) {
     let depth = len - 1;
     let (one, zero) = (path[k].one, path[k].zero);
     let d1 = (depth + 1) as f64;
-    let mut next_one = path[depth].weight;
-    for i in (0..depth).rev() {
-        if one != 0.0 {
+    let inv_d1 = inv[depth + 1];
+    if one != 0.0 {
+        let d1_one = d1 / one;
+        let zero_d1 = zero * inv_d1;
+        let mut next_one = path[depth].weight;
+        for i in (0..depth).rev() {
             let tmp = path[i].weight;
-            path[i].weight = next_one * d1 / ((i + 1) as f64 * one);
-            next_one = tmp - path[i].weight * zero * (depth - i) as f64 / d1;
-        } else {
-            path[i].weight = path[i].weight * d1 / (zero * (depth - i) as f64);
+            let w = next_one * (d1_one * inv[i + 1]);
+            path[i].weight = w;
+            next_one = tmp - w * (zero_d1 * (depth - i) as f64);
+        }
+    } else {
+        let d1_zero = d1 / zero;
+        for i in (0..depth).rev() {
+            path[i].weight *= d1_zero * inv[depth - i];
         }
     }
     for i in k..depth {
@@ -773,25 +824,82 @@ fn unwind_path(path: &mut [PathElement], len: usize, k: usize) {
 }
 
 /// The total permutation weight of the path of length `len` if element `k` were unwound (the
-/// leaf contribution's weight).
-fn unwound_path_sum(path: &[PathElement], len: usize, k: usize) -> f64 {
+/// leaf contribution's weight), one element at a time: the reference [`leaf_weights`] is tested
+/// against.
+#[cfg(test)]
+fn unwound_path_sum(path: &[PathElement], inv: &[f64], len: usize, k: usize) -> f64 {
     let depth = len - 1;
     let (one, zero) = (path[k].one, path[k].zero);
     let d1 = (depth + 1) as f64;
     let mut total = 0.0;
     if one != 0.0 {
+        let d1_one = d1 / one;
+        let zero_d1 = zero * inv[depth + 1];
         let mut next_one = path[depth].weight;
         for i in (0..depth).rev() {
-            let tmp = next_one * d1 / ((i + 1) as f64 * one);
+            let tmp = next_one * (d1_one * inv[i + 1]);
             total += tmp;
-            next_one = path[i].weight - tmp * zero * (depth - i) as f64 / d1;
+            next_one = path[i].weight - tmp * (zero_d1 * (depth - i) as f64);
         }
     } else {
+        let d1_zero = d1 / zero;
         for i in (0..depth).rev() {
-            total += path[i].weight * d1 / (zero * (depth - i) as f64);
+            total += path[i].weight * (d1_zero * inv[depth - i]);
         }
     }
     total
+}
+
+/// Adds each element's leaf contribution `unwound_path_sum(path, k) * (one_k - zero_k) * scale`
+/// to `phi[feature_k]`, for k = 1..len (Algorithm 2's leaf step), with all elements at once and
+/// no data-dependent branch. Every one fraction is 0 or 1 (the root's is 1, a hot child inherits
+/// the one fraction of the element it unwinds or 1, a cold child gets 0), so:
+///
+/// * an element with one fraction 0 unwinds by `w_j * d1 / (zero (depth - j))`; its contribution
+///   (times `one - zero = -zero`) is `-d1 * sum_j w_j / (depth - j) * scale`, one O(D) sum shared
+///   by every such element;
+/// * an element with one fraction 1 runs UNWIND's recurrence `tmp = next * d1 / (j + 1)`,
+///   `next = w_j - tmp * zero (depth - j) / d1`, written as `next = w_j - next * g_j zero` so
+///   that one multiply-add is the only step on the serial chain; four elements run side by side
+///   in fixed-width lanes (the recurrence runs for every lane and the one fraction selects the
+///   result).
+///
+/// The same weights as [`unwound_path_sum`] up to rounding (tested).
+fn leaf_weights(path: &[PathElement], inv: &[f64], phi: &mut [f64], scale: f64) {
+    const LANES: usize = 4;
+    let len = path.len();
+    let depth = len - 1;
+    let d1 = (depth + 1) as f64;
+    let inv_d1 = inv[depth + 1];
+    let mut cold_sum = 0.0;
+    for j in 0..depth {
+        cold_sum += path[j].weight * inv[depth - j];
+    }
+    let cold = -(cold_sum * d1);
+    let w_top = path[depth].weight;
+    for chunk in path[1..].chunks(LANES) {
+        let mut z = [0.0; LANES];
+        for (zl, el) in z.iter_mut().zip(chunk) {
+            debug_assert!(el.one == 0.0 || el.one == 1.0);
+            *zl = el.zero;
+        }
+        let mut next = [w_top; LANES];
+        let mut total = [0.0; LANES];
+        for j in (0..depth).rev() {
+            let w = path[j].weight;
+            let c = d1 * inv[j + 1];
+            let g = c * ((depth - j) as f64 * inv_d1);
+            for l in 0..LANES {
+                total[l] += next[l] * c;
+                next[l] = w - next[l] * (g * z[l]);
+            }
+        }
+        for (l, el) in chunk.iter().enumerate() {
+            let hot = el.one;
+            let contribution = hot * (total[l] * (1.0 - el.zero)) + (1.0 - hot) * cold;
+            phi[el.feature as usize] += contribution * scale;
+        }
+    }
 }
 
 /// TreeSHAP recursion state over one validated node table. `condition` 0: plain SHAP; +1 / -1:
@@ -800,9 +908,12 @@ fn unwound_path_sum(path: &[PathElement], len: usize, k: usize) -> f64 {
 /// buffer of [`path_buffer_len`] elements, reused across calls.
 struct TreeShapRun<'n, 'x, 'p> {
     nodes: &'n [TreeShapNode],
-    x: ArrayView1<'x, f64>,
+    /// [`cover_fractions`] of `nodes`.
+    frac: &'n [f64],
+    x: &'x [f64],
     phi: &'p mut [f64],
     path: &'p mut [PathElement],
+    inv: &'p [f64],
     condition: i8,
     condition_feature: i32,
 }
@@ -825,11 +936,16 @@ impl TreeShapRun<'_, '_, '_> {
             return;
         }
         let start = off + parent_len;
-        self.path.copy_within(off..start, start);
+        // a few elements: an inline loop, not a memmove call
+        let (parent, child) = self.path.split_at_mut(start);
+        for (c, p) in child[..parent_len].iter_mut().zip(&parent[off..]) {
+            *c = *p;
+        }
         let mut len = parent_len;
         if self.condition == 0 || self.condition_feature != parent_feature {
             extend_path(
                 &mut self.path[start..],
+                self.inv,
                 len,
                 parent_zero,
                 parent_one,
@@ -840,13 +956,12 @@ impl TreeShapRun<'_, '_, '_> {
         let nodes = self.nodes;
         let n = &nodes[node];
         if n.feature < 0 {
-            let path = &self.path[start..start + len];
-            for i in 1..len {
-                let w = unwound_path_sum(path, len, i);
-                let el = path[i];
-                self.phi[el.feature as usize] +=
-                    w * (el.one - el.zero) * n.value * condition_fraction;
-            }
+            leaf_weights(
+                &self.path[start..start + len],
+                self.inv,
+                self.phi,
+                n.value * condition_fraction,
+            );
             return;
         }
         let f = n.feature as usize;
@@ -855,18 +970,22 @@ impl TreeShapRun<'_, '_, '_> {
         } else {
             (n.right as usize, n.left as usize)
         };
-        let cover = n.n_samples as f64;
-        let hot_zero = nodes[hot].n_samples as f64 / cover;
-        let cold_zero = nodes[cold].n_samples as f64 / cover;
+        let hot_zero = self.frac[hot];
+        let cold_zero = self.frac[cold];
         let (mut inc_zero, mut inc_one) = (1.0, 1.0);
-        // never the root element's feature -1
-        if let Some(k) = self.path[start..start + len]
-            .iter()
-            .position(|e| e.feature == n.feature)
-        {
+        // never the root element's feature -1; a unique path holds the feature at most once, so
+        // the scan needs no early exit (and no data-dependent branch)
+        let mut found = usize::MAX;
+        for (k, e) in self.path[start..start + len].iter().enumerate() {
+            if e.feature == n.feature {
+                found = k;
+            }
+        }
+        if found != usize::MAX {
+            let k = found;
             inc_zero = self.path[start + k].zero;
             inc_one = self.path[start + k].one;
-            unwind_path(&mut self.path[start..], len, k);
+            unwind_path(&mut self.path[start..], self.inv, len, k);
             len -= 1;
         }
         let (mut hot_cf, mut cold_cf) = (condition_fraction, condition_fraction);
@@ -897,21 +1016,39 @@ impl TreeShapRun<'_, '_, '_> {
     }
 }
 
+/// `frac[c] = cover(c) / cover(parent(c))` (1 for the root): the zero fraction of each edge,
+/// computed once per tree instead of once per explained row. `nodes` must have passed
+/// [`validate_nodes`] (internal covers are positive).
+fn cover_fractions(nodes: &[TreeShapNode]) -> EconResult<Vec<f64>> {
+    let mut frac = crate::resource::try_vec(nodes.len(), 1.0, "TreeSHAP cover fractions")?;
+    for n in nodes.iter().filter(|n| n.feature >= 0) {
+        let cover = n.n_samples as f64;
+        for c in [n.left as usize, n.right as usize] {
+            frac[c] = nodes[c].n_samples as f64 / cover;
+        }
+    }
+    Ok(frac)
+}
+
 /// Adds one tree's (conditioned) TreeSHAP values at `x` to `phi`. `nodes` must have passed
-/// [`validate_nodes`] and `path` must hold `path_buffer_len(depth)` elements.
+/// [`validate_nodes`], `frac` must be its [`cover_fractions`], and `scratch` must have been
+/// built for at least its depth.
 fn tree_shap_into(
     nodes: &[TreeShapNode],
-    x: ArrayView1<f64>,
+    frac: &[f64],
+    x: &[f64],
     phi: &mut [f64],
-    path: &mut [PathElement],
+    scratch: &mut TreeShapScratch,
     condition: i8,
     condition_feature: i32,
 ) {
     let mut run = TreeShapRun {
         nodes,
+        frac,
         x,
         phi,
-        path,
+        path: &mut scratch.path,
+        inv: &scratch.inv,
         condition,
         condition_feature,
     };
@@ -924,9 +1061,11 @@ fn tree_shap_into(
 #[cfg(test)]
 fn tree_shap_single(nodes: &[TreeShapNode], x: ArrayView1<f64>, n_features: usize) -> Array1<f64> {
     let depth = validate_nodes(nodes, n_features, 0).expect("valid node table");
-    let mut path = vec![PathElement::default(); path_buffer_len(depth).unwrap()];
+    let frac = cover_fractions(nodes).unwrap();
+    let mut path = TreeShapScratch::new(depth).unwrap();
     let mut phi = vec![0.0; n_features];
-    tree_shap_into(nodes, x, &mut phi, &mut path, 0, -1);
+    let x = x.to_vec();
+    tree_shap_into(nodes, &frac, &x, &mut phi, &mut path, 0, -1);
     Array1::from_vec(phi)
 }
 
@@ -945,14 +1084,16 @@ fn split_features(nodes: &[TreeShapNode], n_features: usize) -> Vec<usize> {
 /// `Phi[l][l] = phi_l - sum_{j != l} Phi[j][l]`. `phi` holds the tree's TreeSHAP values at `x`,
 /// `features` its [`split_features`], `scratch` 2 M values. The result is symmetric and its rows
 /// sum to `phi`.
+#[allow(clippy::too_many_arguments)]
 fn tree_interactions_into(
     nodes: &[TreeShapNode],
+    frac: &[f64],
     features: &[usize],
-    x: ArrayView1<f64>,
+    x: &[f64],
     phi: &[f64],
     out: &mut Array2<f64>,
     scratch: &mut [f64],
-    path: &mut [PathElement],
+    path: &mut TreeShapScratch,
 ) {
     let m = phi.len();
     let (on, off) = scratch.split_at_mut(m);
@@ -962,8 +1103,8 @@ fn tree_interactions_into(
     for &j in features {
         on.fill(0.0);
         off.fill(0.0);
-        tree_shap_into(nodes, x, on, path, 1, j as i32);
-        tree_shap_into(nodes, x, off, path, -1, j as i32);
+        tree_shap_into(nodes, frac, x, on, path, 1, j as i32);
+        tree_shap_into(nodes, frac, x, off, path, -1, j as i32);
         for l in 0..m {
             let val = (on[l] - off[l]) / 2.0;
             out[[j, l]] += val;
@@ -980,14 +1121,33 @@ fn tree_shap_interactions_single(
     n_features: usize,
 ) -> Array2<f64> {
     let depth = validate_nodes(nodes, n_features, 0).expect("valid node table");
-    let mut path = vec![PathElement::default(); path_buffer_len(depth).unwrap()];
+    let frac = cover_fractions(nodes).unwrap();
+    let mut path = TreeShapScratch::new(depth).unwrap();
     let mut phi = vec![0.0; n_features];
-    tree_shap_into(nodes, x, &mut phi, &mut path, 0, -1);
+    let x = x.to_vec();
+    tree_shap_into(nodes, &frac, &x, &mut phi, &mut path, 0, -1);
     let mut out = Array2::zeros((n_features, n_features));
     let mut scratch = vec![0.0; 2 * n_features];
     let features = split_features(nodes, n_features);
-    tree_interactions_into(nodes, &features, x, &phi, &mut out, &mut scratch, &mut path);
+    tree_interactions_into(
+        nodes,
+        &frac,
+        &features,
+        &x,
+        &phi,
+        &mut out,
+        &mut scratch,
+        &mut path,
+    );
     out
+}
+
+/// One validated tree of an ensemble with what every explained row reuses: its
+/// [`cover_fractions`] and (for interaction values) its [`split_features`].
+struct ShapTree {
+    nodes: Vec<TreeShapNode>,
+    frac: Vec<f64>,
+    features: Vec<usize>,
 }
 
 /// The perturbation TreeSHAP computes; any other request is an error that names the route.
@@ -1023,7 +1183,8 @@ fn observational_error() -> EconError {
 ///
 /// `InvalidSpecification` for no rows or columns, a non-finite value, a feature-name count
 /// that differs from the columns, no trees, an unfitted or malformed tree, a tree splitting on a
-/// column `x` does not have, and a perturbation other than tree_path_dependent.
+/// column `x` does not have, a perturbation other than tree_path_dependent, and
+/// `n_samples = 0`.
 ///
 /// # References
 ///
@@ -1037,31 +1198,106 @@ pub fn shap_tree_ensemble(
 ) -> EconResult<ShapResult> {
     use crate::resource;
     let feature_perturbation = tree_perturbation(config)?;
+    if config.n_samples == Some(0) {
+        return Err(spec("n_samples must be at least 1".into()));
+    }
     validate_explain_inputs(x, feature_names.as_deref())?;
     if trees.is_empty() {
         return Err(spec("TreeSHAP needs at least one tree".into()));
     }
     let (n, m) = x.dim();
-    let mut flat = resource::try_with_capacity::<Vec<TreeShapNode>>(trees.len(), "TreeSHAP trees")?;
+    let mut flat = resource::try_with_capacity::<ShapTree>(trees.len(), "TreeSHAP trees")?;
     let mut max_depth = 0usize;
     for (t, tree) in trees.iter().enumerate() {
         let nodes = extract_tree_structure(tree);
         max_depth = max_depth.max(validate_nodes(&nodes, m, t)?);
-        flat.push(nodes);
+        let frac = cover_fractions(&nodes)?;
+        let features = if config.compute_interactions {
+            split_features(&nodes, m)
+        } else {
+            Vec::new()
+        };
+        flat.push(ShapTree {
+            nodes,
+            frac,
+            features,
+        });
     }
     let n_trees = flat.len() as f64;
-    let mut path = resource::try_vec(
-        path_buffer_len(max_depth)?,
-        PathElement::default(),
-        "TreeSHAP path buffer",
-    )?;
-    let base_value = flat.iter().map(|t| tree_expected_value(t)).sum::<f64>() / n_trees;
+    // Each worker clones this (a few hundred bytes for the deepest tree the forest allows).
+    let proto = (
+        TreeShapScratch::new(max_depth)?,
+        resource::try_vec(4 * m, 0.0, "SHAP row scratch")?,
+    );
+    let base_value = flat
+        .iter()
+        .map(|t| tree_expected_value(&t.nodes))
+        .sum::<f64>()
+        / n_trees;
 
     let mut shap_values = resource::try_zeros2(n, m, "SHAP values")?;
-    let mut predictions = resource::try_vec(n, 0.0, "SHAP predictions")?;
-    let mut interactions = if config.compute_interactions {
+    if config.compute_interactions {
         let len = resource::checked_len(&[n, m, m], "SHAP interaction values")?;
         resource::check_alloc::<f64>(len, "SHAP interaction values")?;
+    }
+    // Rows are independent: each worker owns its path buffer and scratch, and writes only its
+    // row, so the values do not depend on the number of threads.
+    let budget = resource::current_budget();
+    let rows: Vec<(f64, Option<Array2<f64>>)> = shap_values
+        .as_slice_mut()
+        .expect("a freshly allocated matrix is in standard layout")
+        .par_chunks_mut(m)
+        .enumerate()
+        .map_init(
+            || proto.clone(),
+            |(path, scratch), (i, phi)| -> EconResult<(f64, Option<Array2<f64>>)> {
+                if let Some(b) = budget.as_ref() {
+                    b.check()?;
+                }
+                let (xi, rest) = scratch.split_at_mut(m);
+                for (v, &xv) in xi.iter_mut().zip(x.row(i)) {
+                    *v = xv;
+                }
+                let mut pred = 0.0;
+                let acc = if config.compute_interactions {
+                    let mut acc = resource::try_zeros2(m, m, "SHAP interaction values")?;
+                    let (tree_phi, rest) = rest.split_at_mut(m);
+                    for t in &flat {
+                        tree_phi.fill(0.0);
+                        tree_shap_into(&t.nodes, &t.frac, xi, tree_phi, path, 0, -1);
+                        for (p, v) in phi.iter_mut().zip(tree_phi.iter()) {
+                            *p += v;
+                        }
+                        tree_interactions_into(
+                            &t.nodes,
+                            &t.frac,
+                            &t.features,
+                            xi,
+                            tree_phi,
+                            &mut acc,
+                            rest,
+                            path,
+                        );
+                        pred += predict_nodes(&t.nodes, xi);
+                    }
+                    acc /= n_trees;
+                    Some(acc)
+                } else {
+                    for t in &flat {
+                        tree_shap_into(&t.nodes, &t.frac, xi, phi, path, 0, -1);
+                        pred += predict_nodes(&t.nodes, xi);
+                    }
+                    None
+                };
+                for v in phi.iter_mut() {
+                    *v /= n_trees;
+                }
+                Ok((pred / n_trees, acc))
+            },
+        )
+        .collect::<EconResult<_>>()?;
+    let mut predictions = resource::try_vec(n, 0.0, "SHAP predictions")?;
+    let mut interactions = if config.compute_interactions {
         Some(resource::try_with_capacity::<Array2<f64>>(
             n,
             "SHAP interaction values",
@@ -1069,45 +1305,11 @@ pub fn shap_tree_ensemble(
     } else {
         None
     };
-    let features: Vec<Vec<usize>> = match interactions {
-        Some(_) => flat.iter().map(|t| split_features(t, m)).collect(),
-        None => Vec::new(),
-    };
-    let mut scratch = match interactions {
-        Some(_) => resource::try_vec(3 * m, 0.0, "SHAP interaction scratch")?,
-        None => Vec::new(),
-    };
-    for (i, mut row) in shap_values.outer_iter_mut().enumerate() {
-        resource::checkpoint()?;
-        let xi = x.row(i);
-        let phi = row
-            .as_slice_mut()
-            .expect("rows of a standard-layout matrix are contiguous");
-        let mut pred = 0.0;
-        if let Some(all) = interactions.as_mut() {
-            let mut acc = resource::try_zeros2(m, m, "SHAP interaction values")?;
-            let (tree_phi, rest) = scratch.split_at_mut(m);
-            for (nodes, used) in flat.iter().zip(&features) {
-                tree_phi.fill(0.0);
-                tree_shap_into(nodes, xi, tree_phi, &mut path, 0, -1);
-                for (p, t) in phi.iter_mut().zip(tree_phi.iter()) {
-                    *p += t;
-                }
-                tree_interactions_into(nodes, used, xi, tree_phi, &mut acc, rest, &mut path);
-                pred += predict_nodes(nodes, xi);
-            }
-            acc /= n_trees;
+    for (i, (pred, acc)) in rows.into_iter().enumerate() {
+        predictions[i] = pred;
+        if let (Some(all), Some(acc)) = (interactions.as_mut(), acc) {
             all.push(acc);
-        } else {
-            for nodes in &flat {
-                tree_shap_into(nodes, xi, phi, &mut path, 0, -1);
-                pred += predict_nodes(nodes, xi);
-            }
         }
-        for v in phi.iter_mut() {
-            *v /= n_trees;
-        }
-        predictions[i] = pred / n_trees;
     }
 
     let feature_importance = mean_abs_columns(&shap_values);
@@ -1205,6 +1407,15 @@ fn enumerate_coalitions(m: usize) -> EconResult<CoalitionDesign> {
     })
 }
 
+/// Whether subset size s, with `n_subsets` coalitions (complements included) and remaining
+/// size weight `remaining`, is enumerated completely from a budget of `samples_left`: shap's test
+/// `samples_left * remaining / n_subsets >= 1 - 1e-8`, and the coalitions must fit the budget.
+/// The tolerance alone admits up to `n_subsets * 1e-8` coalitions too many, which a size with
+/// more than 1e8 subsets (M >= 30) can reach.
+fn size_fits(samples_left: usize, remaining: f64, n_subsets: f64) -> bool {
+    samples_left as f64 * remaining / n_subsets >= 1.0 - 1e-8 && n_subsets <= samples_left as f64
+}
+
 /// shap.KernelExplainer's coalition design (`explain()`, shap 0.4x):
 ///  * subset sizes s = 1..=ceil((M-1)/2), paired with M - s when s <= floor((M-1)/2); size
 ///    weights `w_s ∝ (M-1)/(s(M-s))`, doubled for paired sizes, normalised;
@@ -1268,7 +1479,7 @@ fn sampled_coalitions(
     for s in 1..=num_subset_sizes {
         let paired = s <= num_paired;
         let n_subsets = binomial_coefficient(m, s) * if paired { 2.0 } else { 1.0 };
-        if samples_left as f64 * remaining[s - 1] / n_subsets < 1.0 - 1e-8 {
+        if !size_fits(samples_left, remaining[s - 1], n_subsets) {
             break;
         }
         num_full += 1;
@@ -1402,7 +1613,7 @@ pub fn kernel_shap<F>(
 where
     F: Fn(ArrayView2<f64>) -> Vec<f64>,
 {
-    use crate::linalg::solve::weighted_least_squares;
+    use crate::linalg::solve::{LM_QR_TOL, Qr, weighted_least_squares};
     use crate::resource;
     use rand::SeedableRng;
 
@@ -1456,6 +1667,33 @@ where
         } else {
             None
         };
+        // Every row shares the enumerated design, so its weighted regression matrix
+        // `sqrt(w) * E` (E[r, j] = z_rj - z_r,M) is factored once; a row then only builds its
+        // response. The rows' arithmetic is weighted_least_squares' (its weights are positive).
+        let shared_fit = match &shared {
+            Some(d) => {
+                let k = d.z.nrows();
+                let mut xs = resource::try_zeros2(k, m - 1, "Kernel SHAP regression")?;
+                for (r, z) in d.z.outer_iter().enumerate() {
+                    let sw = d.weights[r].sqrt();
+                    let last = z[m - 1];
+                    for j in 0..m - 1 {
+                        xs[[r, j]] = (z[j] - last) * sw;
+                    }
+                }
+                let qr = Qr::decompose(xs.view(), LM_QR_TOL)?;
+                if qr.rank() < m - 1 {
+                    return Err(EconError::Computation(format!(
+                        "Kernel SHAP: the enumerated design has rank {} of {}",
+                        qr.rank(),
+                        m - 1
+                    )));
+                }
+                let sw: Vec<f64> = d.weights.iter().map(|w| w.sqrt()).collect();
+                Some((qr, sw))
+            }
+            None => None,
+        };
         let seed = config.seed.unwrap_or(SHAP_DEFAULT_SEED);
         let mut masked = resource::try_zeros2(n_bg, m, "Kernel SHAP masked rows")?;
         let (mut min_rows, mut max_rows) = (usize::MAX, 0usize);
@@ -1475,7 +1713,11 @@ where
             min_rows = min_rows.min(k);
             max_rows = max_rows.max(k);
             let delta = predictions[i] - base_value;
-            let mut e = resource::try_zeros2(k, m - 1, "Kernel SHAP regression")?;
+            // the sampled design differs by row and is built per row
+            let mut e = match shared_fit {
+                Some(_) => Array2::zeros((0, m - 1)),
+                None => resource::try_zeros2(k, m - 1, "Kernel SHAP regression")?,
+            };
             let mut y2 = resource::try_zeros1(k, "Kernel SHAP regression")?;
             for (r, z) in design.z.outer_iter().enumerate() {
                 resource::checkpoint()?;
@@ -1489,24 +1731,37 @@ where
                 check_predictions(&p, n_bg)?;
                 let y = p.iter().sum::<f64>() / n_bg as f64 - base_value;
                 let last = z[m - 1];
-                for j in 0..m - 1 {
-                    e[[r, j]] = z[j] - last;
+                if shared_fit.is_none() {
+                    for j in 0..m - 1 {
+                        e[[r, j]] = z[j] - last;
+                    }
                 }
                 y2[r] = y - last * delta;
             }
-            let w = ndarray::ArrayView1::from(&design.weights[..]);
-            let ls = weighted_least_squares(e.view(), y2.view(), w)?;
-            if ls.rank < m - 1 {
-                return Err(spec(format!(
-                    "Kernel SHAP: the {k} sampled coalitions do not identify all {m} features (rank {} of {}); increase n_samples",
-                    ls.rank,
-                    m - 1
-                )));
-            }
+            let coefficients = match &shared_fit {
+                Some((qr, sw)) => {
+                    for (v, s) in y2.iter_mut().zip(sw) {
+                        *v *= s;
+                    }
+                    qr.coefficients(y2.view())?
+                }
+                None => {
+                    let w = ndarray::ArrayView1::from(&design.weights[..]);
+                    let ls = weighted_least_squares(e.view(), y2.view(), w)?;
+                    if ls.rank < m - 1 {
+                        return Err(spec(format!(
+                            "Kernel SHAP: the {k} sampled coalitions do not identify all {m} features (rank {} of {}); increase n_samples",
+                            ls.rank,
+                            m - 1
+                        )));
+                    }
+                    ls.coefficients
+                }
+            };
             let mut rest = delta;
             for j in 0..m - 1 {
-                shap_values[[i, j]] = ls.coefficients[j];
-                rest -= ls.coefficients[j];
+                shap_values[[i, j]] = coefficients[j];
+                rest -= coefficients[j];
             }
             shap_values[[i, m - 1]] = rest;
         }
@@ -1694,6 +1949,9 @@ where
 
 /// Compute SHAP values for a RandomForestModel (includes stored trees).
 ///
+/// TreeSHAP ([`shap_values_model_with`] with [`ShapMethod::Tree`]): the exact Shapley values of
+/// the trees' path-dependent game `E[f(x) | x_S]`.
+///
 /// This is the recommended way to compute SHAP values when using
 /// `random_forest_with_trees()` which retains the tree structures.
 ///
@@ -1711,9 +1969,6 @@ where
 /// let shap = shap_values_model(&model, x.view(), &ShapConfig::default())?;
 /// println!("Feature importance: {:?}", shap.feature_importance);
 /// ```
-///
-/// TreeSHAP ([`shap_values_model_with`] with [`ShapMethod::Tree`]): the exact Shapley values of
-/// the trees' path-dependent game `E[f(x) | x_S]`.
 ///
 /// # References
 ///
@@ -2173,6 +2428,49 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf_weights_match_unwound_path_sum() {
+        // The batched leaf step against the per-element UNWOUND sum on random unique paths
+        // (one fractions 0 or 1, as TreeSHAP builds them; noisy zero fractions), including
+        // paths longer than one lane group and all-hot / all-cold paths.
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let inv: Vec<f64> = (0..16)
+            .map(|k| if k == 0 { 0.0 } else { 1.0 / k as f64 })
+            .collect();
+        for case in 0..400 {
+            let len = 2 + case % 12;
+            let mut path = vec![PathElement::default(); len];
+            for k in 0..len {
+                let (zero, one) = if k == 0 {
+                    (1.0, 1.0)
+                } else {
+                    let one = match case % 5 {
+                        0 => 1.0,
+                        1 => 0.0,
+                        _ => f64::from(rng.gen_range(0..2u8)),
+                    };
+                    (rng.gen_range(0.05..1.0), one)
+                };
+                let feature = if k == 0 { -1 } else { k as i32 - 1 };
+                extend_path(&mut path, &inv, k, zero, one, feature);
+            }
+            let scale = rng.gen_range(-2.0..2.0);
+            let mut want = vec![0.0; len];
+            for k in 1..len {
+                let el = path[k];
+                want[k - 1] = unwound_path_sum(&path, &inv, len, k) * (el.one - el.zero) * scale;
+            }
+            let mut got = vec![0.0; len];
+            leaf_weights(&path, &inv, &mut got, scale);
+            for (g, w) in got.iter().zip(&want) {
+                assert!(
+                    (g - w).abs() <= 1e-13 * w.abs().max(1e-3),
+                    "case {case}, len {len}: {got:?} vs {want:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_treeshap_matches_bruteforce_shapley() {
         // Random CART trees (depth 6, 60 rows, 5 features: features repeat on paths), 10 training
         // rows and 10 points outside [0, 1]; TreeSHAP against enumeration of E[f(x) | x_S] over all
@@ -2240,7 +2538,7 @@ mod tests {
         validate_nodes(&nodes, 5, 0).unwrap();
         assert_eq!(nodes[0].n_samples, 60);
         for r in x.rows() {
-            assert_eq!(predict_nodes(&nodes, r), tree.predict_one(&r));
+            assert_eq!(predict_nodes(&nodes, &r.to_vec()), tree.predict_one(&r));
             assert_eq!(walk(&nodes, r), tree.predict_one(&r));
         }
     }
@@ -2330,6 +2628,12 @@ mod tests {
             r.warnings
         );
         assert!(r.to_string().contains("Warning: n_samples = 50"));
+        // n_samples = 0 is refused here as on the Kernel path (before: only a warning)
+        c.n_samples = Some(0);
+        let e = shap_values_model(&model, x.view(), &c)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("n_samples must be at least 1"), "{e}");
         let mut interv = ShapConfig::default();
         interv.feature_perturbation = Some(FeaturePerturbation::Interventional);
         let e = shap_values_model(&model, x.view(), &interv)
@@ -2668,7 +2972,9 @@ mod tests {
         assert_ne!(other.shap_values, r.shap_values);
         assert!(
             r.to_string()
-                .contains("10 of 14 coalitions sampled, seed 42; Monte Carlo estimate")
+                .contains(
+                    "10 of 14 coalitions evaluated (complete sizes enumerated, the rest sampled), seed 42; Monte Carlo estimate"
+                )
         );
     }
 
@@ -2737,6 +3043,25 @@ mod tests {
             sum = t;
         }
         sum + c
+    }
+
+    #[test]
+    fn test_kernel_design_complete_size_must_fit_the_budget() {
+        // shap's tolerance 1 - 1e-8 alone admits a size with more than 1e8 subsets when the
+        // budget is a few coalitions short of it (before: `samples_left -= n_subsets` then
+        // underflowed: a panic in debug builds, a wrapped budget in release builds).
+        let n_subsets = 2.0e8;
+        assert!(199_999_999.0 / n_subsets >= 1.0 - 1e-8); // the tolerance test alone passes
+        assert!(!size_fits(199_999_999, 1.0, n_subsets));
+        assert!(size_fits(200_000_000, 1.0, n_subsets));
+        // a budget one below a complete design at M = 4 (2^4 - 2 = 14): size 1 (8 coalitions
+        // with complements) is enumerated, size 2 (6) is not, and the design stays in budget
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        let d = sampled_coalitions(4, 13, &mut rng).unwrap();
+        assert_eq!((d.num_full, d.n_fixed, d.exact), (1, 8, false));
+        assert!(d.z.nrows() <= 13, "{}", d.z.nrows());
+        let d = sampled_coalitions(4, 14, &mut rng).unwrap();
+        assert_eq!((d.num_full, d.n_fixed, d.exact), (2, 14, true));
     }
 
     #[test]
