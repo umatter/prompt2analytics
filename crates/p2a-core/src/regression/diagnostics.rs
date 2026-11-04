@@ -300,9 +300,9 @@ pub struct WaldTestResult {
     pub test_type: String,
     /// Number of observations
     pub n_obs: usize,
-    /// Number of parameters in unrestricted model
+    /// Identified parameters (rank) of the unrestricted model
     pub k_unrestricted: usize,
-    /// Number of parameters in restricted model
+    /// Identified parameters (rank) of the restricted model
     pub k_restricted: usize,
     /// Residual sum of squares for unrestricted model
     pub rss_unrestricted: f64,
@@ -312,6 +312,16 @@ pub struct WaldTestResult {
     pub significant_at_05: bool,
     /// Interpretation of the result
     pub interpretation: String,
+    /// Warnings: duplicate names ignored, the models' aliasing notes. Absent from JSON when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for WaldTestResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl std::fmt::Display for WaldTestResult {
@@ -337,7 +347,7 @@ impl std::fmt::Display for WaldTestResult {
         writeln!(f, "Number of restrictions: {}", self.df1)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
-        Ok(())
+        f.write_str(&notes_text(self))
     }
 }
 
@@ -1383,7 +1393,8 @@ fn alias_warnings(ols: &crate::regression::OlsResult) -> Vec<String> {
 /// - F-test: F = ((RSS_r - RSS_u) / q) / (RSS_u / (n - k_u)) ~ F(q, n - k_u)
 /// - Chi-squared: χ² = n * (RSS_r - RSS_u) / RSS_u ~ χ²(q)
 ///
-/// where q = k_u - k_r is the number of restrictions.
+/// where q = rank_u - rank_r is the number of restrictions (anova.lm: an aliased or
+/// collinear extra regressor adds none) and n - k_u is n - rank_u.
 ///
 /// # Arguments
 ///
@@ -1399,8 +1410,10 @@ fn alias_warnings(ols: &crate::regression::OlsResult) -> Vec<String> {
 ///
 /// # Note
 ///
-/// The restricted model's regressors must be a subset of the unrestricted model's
-/// regressors. If not, an error is returned.
+/// Repeated names are ignored (first occurrence kept, with a warning), as R's formula
+/// interface does. The restricted model's regressors must be a strict subset of the
+/// unrestricted model's, and the unrestricted model must identify more coefficients;
+/// otherwise the result is `InvalidSpecification`.
 ///
 /// # References
 ///
@@ -1434,105 +1447,51 @@ pub fn wald_test(
     x_cols_restricted: &[&str],
     use_f_test: bool,
 ) -> EconResult<WaldTestResult> {
-    // Check that restricted vars are a subset of unrestricted
-    for &r_col in x_cols_restricted {
-        if !x_cols_unrestricted.contains(&r_col) {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Restricted model variable '{}' must be in unrestricted model",
-                    r_col
-                ),
-            });
+    // Unique names (first occurrence kept), as R's formula interface treats a repeated
+    // term; each duplicate is reported.
+    let mut warnings = Vec::new();
+    let mut dedupe = |cols: &[&str], what: &str| -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(cols.len());
+        for &c in cols {
+            if out.iter().any(|o| o == c) {
+                let note =
+                    format!("'{c}' is listed more than once in {what}; duplicates are ignored");
+                if !warnings.contains(&note) {
+                    warnings.push(note);
+                }
+            } else {
+                out.push(c.to_string());
+            }
         }
-    }
+        out
+    };
+    let unrestricted = dedupe(x_cols_unrestricted, "x_unrestricted");
+    let restricted = dedupe(x_cols_restricted, "x_restricted");
 
-    let q = x_cols_unrestricted.len() - x_cols_restricted.len();
-    if q == 0 {
+    // The restricted model must be nested in the unrestricted one, strictly
+    if restricted.iter().any(|r| !unrestricted.contains(r))
+        || restricted.len() >= unrestricted.len()
+    {
         return Err(EconError::InvalidSpecification {
-            message: "Models must differ - restricted model must have fewer variables".to_string(),
+            message: format!(
+                "the restricted model's variables must be a strict subset of the unrestricted \
+                 model's (restricted: [{}], unrestricted: [{}])",
+                restricted.join(", "),
+                unrestricted.join(", ")
+            ),
         });
     }
 
     // Run both regressions
-    let ols_unrestricted = run_ols(
-        dataset,
-        y_col,
-        x_cols_unrestricted,
-        true,
-        CovarianceType::Standard,
-    )?;
-    let ols_restricted = run_ols(
-        dataset,
-        y_col,
-        x_cols_restricted,
-        true,
-        CovarianceType::Standard,
-    )?;
+    let u_cols: Vec<&str> = unrestricted.iter().map(String::as_str).collect();
+    let r_cols: Vec<&str> = restricted.iter().map(String::as_str).collect();
+    let ols_unrestricted = run_ols(dataset, y_col, &u_cols, true, CovarianceType::Standard)?;
+    let ols_restricted = run_ols(dataset, y_col, &r_cols, true, CovarianceType::Standard)?;
 
-    let n = ols_unrestricted.n_obs;
-    let k_u = ols_unrestricted.n_params; // includes intercept
-    let k_r = ols_restricted.n_params;
-
-    // Get RSS from both models
-    let rss_u: f64 = ols_unrestricted.resid.iter().map(|e| e * e).sum();
-    let rss_r: f64 = ols_restricted.resid.iter().map(|e| e * e).sum();
-
-    let df1 = q; // number of restrictions
-    let df2 = n - k_u; // residual df in unrestricted model
-
-    // Compute test statistic and p-value
-    // Note: In theory, RSS_r >= RSS_u (restricted has at least as much error).
-    // In practice, numerical issues can cause RSS_r < RSS_u, especially with
-    // multicollinear data. We clamp to ensure non-negative statistics.
-    let rss_diff = (rss_r - rss_u).max(0.0);
-
-    let (statistic, p_value, test_type, df2_opt) = if use_f_test {
-        // F = ((RSS_r - RSS_u) / q) / (RSS_u / (n - k_u))
-        let f_stat = if rss_u > 0.0 && df2 > 0 {
-            (rss_diff / df1 as f64) / (rss_u / df2 as f64)
-        } else {
-            0.0
-        };
-        let p = crate::traits::f_test_p_value(f_stat, df1 as f64, df2 as f64);
-        (f_stat, p, "F".to_string(), Some(df2))
-    } else {
-        // Chi-sq = n * (RSS_r - RSS_u) / RSS_u
-        let chi_stat = if rss_u > 0.0 {
-            (n as f64) * rss_diff / rss_u
-        } else {
-            0.0
-        };
-        let p = chi_squared_p_value(chi_stat, df1 as f64);
-        (chi_stat, p, "Chisq".to_string(), None)
-    };
-
-    let significant = p_value < 0.05;
-    let interpretation = if significant {
-        format!(
-            "Reject H0: The {} additional variable(s) are jointly significant (p={:.4} < 0.05). Use the unrestricted model.",
-            q, p_value
-        )
-    } else {
-        format!(
-            "Fail to reject H0: The {} additional variable(s) are not jointly significant (p={:.4} >= 0.05). The restricted model is adequate.",
-            q, p_value
-        )
-    };
-
-    Ok(WaldTestResult {
-        statistic,
-        p_value,
-        df1,
-        df2: df2_opt,
-        test_type,
-        n_obs: n,
-        k_unrestricted: k_u,
-        k_restricted: k_r,
-        rss_unrestricted: rss_u,
-        rss_restricted: rss_r,
-        significant_at_05: significant,
-        interpretation,
-    })
+    let mut result = wald_test_from_ols(&ols_unrestricted, &ols_restricted, use_f_test)?;
+    warnings.append(&mut result.warnings);
+    result.warnings = warnings;
+    Ok(result)
 }
 
 /// Convenience function for Wald test with F-statistic.
@@ -1561,9 +1520,6 @@ pub fn wald_test_from_ols(
     use_f_test: bool,
 ) -> EconResult<WaldTestResult> {
     let n = ols_unrestricted.n_obs;
-    let k_u = ols_unrestricted.n_params;
-    let k_r = ols_restricted.n_params;
-
     if n != ols_restricted.n_obs {
         return Err(EconError::InvalidSpecification {
             message: "Unrestricted and restricted models must have same number of observations"
@@ -1571,23 +1527,31 @@ pub fn wald_test_from_ols(
         });
     }
 
-    let q = k_u - k_r;
-    if q <= 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Unrestricted model must have more parameters than restricted model"
-                .to_string(),
-        });
-    }
+    // Restrictions counted by rank (anova.lm): an aliased or collinear extra regressor
+    // adds no restriction.
+    let (rank_u, rank_r) = (ols_unrestricted.rank(), ols_restricted.rank());
+    let q = rank_u
+        .checked_sub(rank_r)
+        .filter(|q| *q > 0)
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: format!(
+                "the unrestricted model must have more identified coefficients than the \
+                 restricted model (ranks {rank_u} and {rank_r}); collinear extra regressors \
+                 cannot be tested"
+            ),
+        })?;
 
     let rss_u: f64 = ols_unrestricted.resid.iter().map(|e| e * e).sum();
     let rss_r: f64 = ols_restricted.resid.iter().map(|e| e * e).sum();
+    // RSS_r >= RSS_u in exact arithmetic; rounding can invert a tiny difference
+    let rss_diff = (rss_r - rss_u).max(0.0);
 
     let df1 = q;
-    let df2 = n - k_u;
+    let df2 = ols_unrestricted.df_resid; // n - rank_u
 
     let (statistic, p_value, test_type, df2_opt) = if use_f_test {
         let f_stat = if rss_u > 0.0 && df2 > 0 {
-            ((rss_r - rss_u) / df1 as f64) / (rss_u / df2 as f64)
+            (rss_diff / df1 as f64) / (rss_u / df2 as f64)
         } else {
             0.0
         };
@@ -1595,7 +1559,7 @@ pub fn wald_test_from_ols(
         (f_stat, p, "F".to_string(), Some(df2))
     } else {
         let chi_stat = if rss_u > 0.0 {
-            (n as f64) * (rss_r - rss_u) / rss_u
+            (n as f64) * rss_diff / rss_u
         } else {
             0.0
         };
@@ -1616,6 +1580,13 @@ pub fn wald_test_from_ols(
         )
     };
 
+    let mut warnings = alias_warnings(ols_unrestricted);
+    for w in alias_warnings(ols_restricted) {
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
+
     Ok(WaldTestResult {
         statistic,
         p_value,
@@ -1623,12 +1594,13 @@ pub fn wald_test_from_ols(
         df2: df2_opt,
         test_type,
         n_obs: n,
-        k_unrestricted: k_u,
-        k_restricted: k_r,
+        k_unrestricted: rank_u,
+        k_restricted: rank_r,
         rss_unrestricted: rss_u,
         rss_restricted: rss_r,
         significant_at_05: significant,
         interpretation,
+        warnings,
     })
 }
 
@@ -2606,9 +2578,24 @@ mod tests {
     // Wald Test Tests
     // ========================================
 
+    /// Noisy, x2 not collinear with x1 (create_test_dataset has x2 = 0.5 x1 exactly).
+    fn create_wald_dataset() -> Dataset {
+        let x1: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let x2: Vec<f64> = (1..=20)
+            .map(|i| ((i * 7) % 11) as f64 * 0.5 + 0.01 * i as f64)
+            .collect();
+        let y: Vec<f64> = x1
+            .iter()
+            .zip(&x2)
+            .enumerate()
+            .map(|(i, (a, b))| 0.9 * a + 0.2 * b + 0.3 * ((i * 13) % 5) as f64)
+            .collect();
+        Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap())
+    }
+
     #[test]
     fn test_wald_test_basic() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
 
         // Test unrestricted model (y ~ x1 + x2) vs restricted model (y ~ x1)
         let result = wald_test(&dataset, "y", &["x1", "x2"], &["x1"], true).unwrap();
@@ -2622,7 +2609,7 @@ mod tests {
 
     #[test]
     fn test_wald_test_chi_squared() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
 
         // Test with chi-squared statistic (use_f_test = false)
         let result = wald_test(&dataset, "y", &["x1", "x2"], &["x1"], false).unwrap();
@@ -2672,7 +2659,9 @@ mod tests {
     fn test_wald_test_multiple_restrictions() {
         // Create data with multiple variables
         let x1: Vec<f64> = (1..=40).map(|i| i as f64).collect();
-        let x2: Vec<f64> = (1..=40).map(|i| (i as f64) * 0.5).collect();
+        let x2: Vec<f64> = (1..=40)
+            .map(|i| ((i * 7) % 11) as f64 * 0.5 + 0.01 * i as f64)
+            .collect();
         let x3: Vec<f64> = (1..=40).map(|i| (i as f64).sqrt()).collect();
         let y: Vec<f64> = x1
             .iter()
@@ -2698,7 +2687,7 @@ mod tests {
 
     #[test]
     fn test_wald_test_displays_correctly() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
         let result = wald_test(&dataset, "y", &["x1", "x2"], &["x1"], true).unwrap();
 
         let display = format!("{}", result);
@@ -2709,7 +2698,7 @@ mod tests {
 
     #[test]
     fn test_run_wald_test_convenience() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
 
         // Convenience function should use F-test by default
         let result = run_wald_test(&dataset, "y", &["x1", "x2"], &["x1"]).unwrap();
@@ -3201,5 +3190,93 @@ mod tests {
             r.warnings
         );
         assert!(r.statistic.is_finite() && r.statistic > 0.0);
+    }
+
+    /// Grunfeld (T1 case ols_diagnostics_grunfeld). (a) a restricted list longer than the
+    /// unrestricted one underflowed len_u - len_r; (b) equal sets; (c) wald_test_from_ols
+    /// with swapped models underflowed k_u - k_r; (d) a duplicate in the unrestricted list
+    /// gave F = 0, p = 1, df (2, 196): duplicates are ignored as R's formula interface does,
+    /// F = 81.98954629331581 = waldtest(m, m_value).
+    #[test]
+    fn test_validate_wald_rejects_duplicates() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
+        match wald_test(&ds, "inv", &["value"], &["value", "value"], true).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("strict subset"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+        assert!(matches!(
+            wald_test(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                &["capital", "value"],
+                true
+            ),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        let u = run_ols(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let r = run_ols(&ds, "inv", &["value"], true, CovarianceType::Standard).unwrap();
+        assert!(matches!(
+            wald_test_from_ols(&r, &u, true),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        let w = wald_test(
+            &ds,
+            "inv",
+            &["value", "capital", "capital"],
+            &["value"],
+            true,
+        )
+        .unwrap();
+        Check::new(&case)
+            .scalar("wald_drop_capital_f", w.statistic, Tol::stat(w.n_obs))
+            .scalar("wald_drop_capital_f_p", w.p_value, Tol::p_value(w.n_obs))
+            .finish();
+        assert_eq!((w.df1, w.df2), (1, Some(197)));
+        assert!(
+            w.warnings
+                .iter()
+                .any(|m| m.contains("capital") && m.contains("more than once")),
+            "{:?}",
+            w.warnings
+        );
+        assert!(w.to_string().contains("more than once"));
+    }
+
+    /// anova(lm(y ~ x1), lm(y ~ x1 + x2 + x3)) with x2 aliased: q = rank 3 - rank 2 = 1,
+    /// not 3 - 1 = 2 names.
+    #[test]
+    fn test_validate_wald_aliased_rank_q() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let w = wald_test(&ds, "y", &["x1", "x2", "x3"], &["x1"], true).unwrap();
+        Check::new(&case)
+            .scalar("wald_alias_f", w.statistic, Tol::stat(w.n_obs))
+            .scalar("wald_alias_df1", w.df1 as f64, Tol::exact())
+            .scalar("wald_alias_df2", w.df2.unwrap() as f64, Tol::exact())
+            .scalar("wald_alias_p", w.p_value, Tol::p_value(w.n_obs))
+            .finish();
+    }
+
+    /// x2 = 0.5 x1 exactly: the unrestricted model has the restricted model's rank, so
+    /// there is nothing to test (before: a statistic with df1 = 1).
+    #[test]
+    fn test_wald_collinear_restriction_is_an_error() {
+        match wald_test(&create_test_dataset(), "y", &["x1", "x2"], &["x1"], true).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("rank"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
     }
 }

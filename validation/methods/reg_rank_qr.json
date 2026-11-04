@@ -97,6 +97,37 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "waldtest_nested_rank",
+      "name": "Wald F test of nested OLS models: duplicates, strict subsets, rank-based restrictions",
+      "category": "regression",
+      "reference": "lmtest::waldtest (full rank); stats::anova.lm (aliased unrestricted model)",
+      "doc": "validation/diagnostics/regression_diagnostics.md",
+      "cases": [
+        "ols_aliased",
+        "ols_diagnostics_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_rejects_duplicates",
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_aliased_rank_q"
+      ],
+      "quantities": [
+        "F",
+        "df1 = rank difference",
+        "df2 = n - rank",
+        "p",
+        "errors for non-strict subsets and rank-equal models"
+      ],
+      "tolerance": "validation/README.md, n = 120 and 200: statistics 1e-6 relative; p-values also 1e-12 absolute; df exact",
+      "deviations": [
+        {
+          "finding": "REG-37",
+          "quantity": "Chisq form",
+          "note": "n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (Tier 4); not exercised here"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
