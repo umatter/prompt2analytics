@@ -10,10 +10,27 @@
 //! of the variation in the data, point by point.
 //!
 //! For each point x0, the algorithm:
-//! 1. Selects k = floor(span * n) nearest neighbors
-//! 2. Computes tricubic weights: w(u) = (1 - |u|^3)^3 for |u| < 1
-//! 3. Fits a weighted polynomial regression
+//! 1. Selects the q = floor(span * n) nearest neighbours by distance (R's rule,
+//!    `min(n, floor(n span + 1e-5))`; all n for span >= 1); every point at the q-th
+//!    distance is included, so a tie group is never split
+//! 2. Computes tricubic weights w(u) = (1 - |u|^3)^3 on u = (x - x0) / radius, where the
+//!    radius is the q-th distance; for span > 1 it is multiplied by sqrt(span) (R's code
+//!    scales the squared radius by span; its documentation says span^(1/p))
+//! 3. Fits a weighted polynomial of the given degree in u, with lm.fit's relative rank
+//!    rule, so the fit does not depend on the scale of x; a degree that drops is reported
 //! 4. Returns the fitted value at x0
+//!
+//! The local fits are exact at every point, as R's `loess(surface = "direct")`; R's default
+//! kd-tree interpolation differs from them by up to about 1e-3 relative.
+//!
+//! **Zero-width neighbourhoods.** When at least q observations share the value x0, the
+//! neighbourhood has zero width. The fit there is the weighted mean of the tied responses
+//! (R `lowess`'s rule) and a warning names the smallest span that avoids it; R's `loess`
+//! returns 0 there and warns "zero-width neighborhood. make span bigger". A constant x is
+//! an error.
+//!
+//! `enp` is the trace of the hat matrix (R's `trace.hat`), not R's "Equivalent Number of
+//! Parameters"; the residual SE and the robust iterations are not yet R's (REG-60).
 //!
 //! # Robust Fitting
 //!
@@ -23,11 +40,9 @@
 //!
 //! # Performance
 //!
-//! This implementation uses several optimizations inspired by R's C implementation:
-//! - Pre-sorting by x with binary search for O(k + log n) neighborhood lookup
-//! - Inline closed-form WLS solvers for degree 0 (weighted mean), degree 1 (2x2),
-//!   and degree 2 (3x3 Cramer's rule)
-//! - Buffer reuse across all fitting points to avoid per-point allocations
+//! - Pre-sorting by x with binary search; each neighbourhood is O(q)
+//! - Local fits solve the (degree + 1)-square moment system by an LDL' factorisation with
+//!   lm.fit's relative pivot rule, with no allocation per point
 //!
 //! # References
 //!
@@ -40,14 +55,14 @@
 //!   Chapter 8 of Statistical Models in S, eds J.M. Chambers and T.J. Hastie.
 //! - R implementation: `stats::loess()` - https://stat.ethz.ch/R-manual/R-devel/library/stats/html/loess.html
 
-use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::matrix_inverse;
+use crate::linalg::solve::LM_QR_TOL;
+use crate::traits::convergence::{ResultNotes, notes_text};
 
 /// Configuration for LOESS fitting.
 #[derive(Debug, Clone)]
@@ -130,6 +145,16 @@ pub struct LoessResult {
     /// nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Notes on the fit (zero-width neighbourhoods, reduced local degrees, robustness
+    /// fallbacks); absent from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for LoessResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for LoessResult {
@@ -155,7 +180,7 @@ impl fmt::Display for LoessResult {
         if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -189,15 +214,10 @@ fn bisquare_weight(u: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// Optimized internal engine using pre-sorted data and inline WLS solvers
+// Engine: sorted data, R's neighbourhoods, moment-based local fits
 // ---------------------------------------------------------------------------
 
-/// Pre-sorted data structure for O(k + log n) neighborhood lookups.
-///
-/// Instead of computing O(n) distances and sorting them for each evaluation point,
-/// we sort the data by x once upfront. Then, for each evaluation point x0, we use
-/// binary search to find the insertion point and expand outward to collect the k
-/// nearest neighbors. This mirrors the approach used in R's C implementation of loess.
+/// Data sorted by x, with R's neighbourhood size and radius rule.
 struct SortedData {
     /// x values in sorted order
     x_sorted: Vec<f64>,
@@ -205,353 +225,350 @@ struct SortedData {
     y_sorted: Vec<f64>,
     /// Mapping from sorted index back to original index
     orig_idx: Vec<usize>,
-    /// Number of neighbors to use
-    k: usize,
-    /// Whether span > 1 (use all points with scaled bandwidth)
-    span_gt1: bool,
-    /// The span value (for bandwidth scaling when span > 1)
-    span: f64,
+    /// Neighbourhood size: R `lowesd`'s `min(n, floor(n span + 1e-5))`, n for span >= 1.
+    q: usize,
+    /// Radius multiplier: `sqrt(span)` for span > 1, else 1.
+    radius_mult: f64,
+}
+
+/// A neighbourhood `[left, right)` in sorted order and its radius (0: zero width).
+#[derive(Debug, Clone, Copy)]
+struct Nbhd {
+    left: usize,
+    right: usize,
+    radius: f64,
+}
+
+/// One local fit: the fitted value at x0, `(X'WX)^{-1}[0, 0]` on the identified columns,
+/// the effective degree, and what happened.
+#[derive(Debug, Clone, Copy)]
+struct LocalFit {
+    fit: f64,
+    c00: f64,
+    degree: usize,
+    zero_width: bool,
+    robust_fallback: bool,
+}
+
+/// `q` for span `span` and `n` observations (R's `lowesd`).
+fn neighbourhood_size(n: usize, span: f64) -> usize {
+    if span < 1.0 {
+        ((n as f64 * span + 1e-5).floor() as usize).clamp(1, n)
+    } else {
+        n
+    }
 }
 
 impl SortedData {
-    fn new(x: &[f64], y: &[f64], span: f64) -> Self {
+    /// Sort the data and fix q and the radius rule. Refuses non-finite and constant x.
+    fn new(x: &[f64], y: &[f64], span: f64) -> EconResult<Self> {
         let n = x.len();
-        // Create index array sorted by x values
-        let mut order: Vec<usize> = (0..n).collect();
+        for (name, v) in [("x", x), ("y", y)] {
+            if let Some(i) = v.iter().position(|t| !t.is_finite()) {
+                return Err(EconError::InvalidSpecification {
+                    message: format!("x and y must be finite; row {i} of {name} is {}", v[i]),
+                });
+            }
+        }
+        let mut order: Vec<usize> = crate::resource::try_with_capacity(n, "LOESS order")?;
+        order.extend(0..n);
         order.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
-
         let x_sorted: Vec<f64> = order.iter().map(|&i| x[i]).collect();
         let y_sorted: Vec<f64> = order.iter().map(|&i| y[i]).collect();
-
-        let k = if span <= 1.0 {
-            ((span * n as f64).ceil() as usize).max(1).min(n)
-        } else {
-            n
-        };
-
-        SortedData {
+        if n > 0 && x_sorted[0] == x_sorted[n - 1] {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "x is constant ({n} values equal {}); a local regression on x needs at least two distinct x values",
+                    x_sorted[0]
+                ),
+            });
+        }
+        // R multiplies the squared radius by span (ehg127 works on squared distances), so the
+        // radius grows by sqrt(span), not span^(1/p) as documented: verified against
+        // loess(surface = "direct") for spans 1.2-3.
+        let radius_mult = if span > 1.0 { span.sqrt() } else { 1.0 };
+        Ok(SortedData {
             x_sorted,
             y_sorted,
             orig_idx: order,
-            k,
-            span_gt1: span > 1.0,
-            span,
-        }
+            q: neighbourhood_size(n, span),
+            radius_mult,
+        })
     }
 
-    /// Find the k nearest neighbors of x0 using binary search + sliding window.
-    /// Returns (left_idx, right_idx) as a contiguous range in the sorted arrays,
-    /// where right_idx is exclusive.
-    ///
-    /// This is O(log n) instead of O(k) for the expand approach.
-    #[inline]
-    fn find_neighborhood(&self, x0: f64) -> (usize, usize) {
-        let n = self.x_sorted.len();
-        let k = self.k;
-
-        if k >= n {
-            return (0, n);
-        }
-
-        // Binary search for insertion point of x0
-        let pos = self.x_sorted.partition_point(|&v| v < x0);
-
-        // The optimal window of size k that contains x0's nearest neighbors
-        // must start somewhere in [max(0, pos-k) .. min(pos, n-k)].
-        // We find the best start by sliding:
-        // For a window [left, left+k), we want to minimize the max distance.
-        // The optimal window has the property that the distances from x0 to
-        // both endpoints are as balanced as possible.
-
-        // Initial candidate: center the window around pos
-        let mut left = if pos >= k / 2 { pos - k / 2 } else { 0 };
-        if left + k > n {
-            left = n - k;
-        }
-
-        // Slide the window to find optimal position:
-        // Compare distance to left boundary vs right boundary.
-        // If right boundary is closer, shift window right; if left is closer, shift left.
-        // This converges in at most k/2 steps but typically very few.
-        loop {
-            if left + k >= n {
-                break;
-            }
-            // Compare: would shifting right improve things?
-            // Currently window is [left, left+k). Shifting right gives [left+1, left+k+1).
-            // We lose x_sorted[left] and gain x_sorted[left+k].
-            let d_left = (x0 - self.x_sorted[left]).abs();
-            let d_right = (self.x_sorted[left + k] - x0).abs();
-            if d_right < d_left {
-                left += 1;
+    /// The q nearest points of x0 by distance (ties to the left), extended by every point
+    /// at the q-th distance, so that a tie group is never split. O(q).
+    fn neighbourhood(&self, x0: f64) -> Nbhd {
+        let xs = &self.x_sorted;
+        let n = xs.len();
+        let pos = xs.partition_point(|&v| v < x0);
+        let (mut l, mut r) = (pos, pos);
+        let mut d_q = 0.0f64;
+        for _ in 0..self.q {
+            let dl = if l > 0 {
+                (x0 - xs[l - 1]).abs()
             } else {
-                break;
+                f64::INFINITY
+            };
+            let dr = if r < n {
+                (x0 - xs[r]).abs()
+            } else {
+                f64::INFINITY
+            };
+            if dl <= dr {
+                l -= 1;
+                d_q = dl;
+            } else {
+                r += 1;
+                d_q = dr;
             }
         }
-
-        (left, left + k)
-    }
-
-    /// Compute the maximum distance in the neighborhood for weight scaling.
-    #[inline]
-    fn max_distance(&self, x0: f64, left: usize, right: usize) -> f64 {
-        let dl = (x0 - self.x_sorted[left]).abs();
-        let dr = (x0 - self.x_sorted[right - 1]).abs();
-        let max_dist = dl.max(dr);
-        let max_dist = if self.span_gt1 {
-            max_dist * self.span
-        } else {
-            max_dist
-        };
-        if max_dist < 1e-10 { 1.0 } else { max_dist }
+        while l > 0 && (x0 - xs[l - 1]).abs() <= d_q {
+            l -= 1;
+        }
+        while r < n && (x0 - xs[r]).abs() <= d_q {
+            r += 1;
+        }
+        Nbhd {
+            left: l,
+            right: r,
+            radius: d_q * self.radius_mult,
+        }
     }
 }
 
-/// Inline WLS solver for degree 0 (local constant / weighted mean).
-///
-/// fitted = sum(w_i * y_i) / sum(w_i)
-///
-/// Also returns the self-weight (h_ii) for hat matrix trace computation.
-/// For degree 0: h_ii = w_i / sum(w_j)
-#[inline]
-fn wls_degree0(y: &[f64], weights: &[f64], self_pos: usize) -> (f64, f64) {
-    let mut sw = 0.0;
-    let mut swy = 0.0;
-    for i in 0..y.len() {
-        let w = weights[i];
-        sw += w;
-        swy += w * y[i];
-    }
-    if sw < 1e-15 {
-        return (0.0, 0.0);
-    }
-    let fitted = swy / sw;
-    let h_ii = weights[self_pos] / sw;
-    (fitted, h_ii)
-}
+/// Squared relative pivot tolerance: dqrdc2's column rule (`LM_QR_TOL`) on the sqrt(w)
+/// weighted columns, squared because the moment matrix holds squared norms.
+const MOMENT_PIVOT_TOL: f64 = LM_QR_TOL * LM_QR_TOL;
 
-/// Inline WLS solver for degree 1 (local linear) using 2x2 normal equations.
+/// Local polynomial fit at x0 on the rows of `[left, right)` with positive weight.
 ///
-/// Solves the weighted normal equations directly:
-///   [S0  S1] [b0]   [T0]
-///   [S1  S2] [b1] = [T1]
+/// The estimator is weighted least squares on `[1, u, u^2][..=degree]`, `u = (x - x0) /
+/// radius` (|u| <= 1), solved through its moment matrix `M = [sum w u^(i+j)]` by an LDL'
+/// factorisation in the column order 1, u, u^2. Column j is aliased, and dropped with every
+/// higher power, when its pivot is at most `LM_QR_TOL^2 M_jj`: lm.fit's relative rank rule on
+/// the weighted columns. No absolute cutoff and no allocation. A zero-width neighbourhood
+/// (radius 0, every row at x0) gets weight 1 on each row and degree 0 (R `lowess`'s rule).
+/// When every robustness weight in the neighbourhood is 0 they are ignored there.
 ///
-/// where Sk = sum(w_i * dx_i^k), Tk = sum(w_i * dx_i^k * y_i), dx_i = x_i - x0.
-///
-/// Uses Cramer's rule for the 2x2 system.
-/// Also returns h_ii for hat matrix trace: h_ii = e_0' (X'WX)^-1 e_0 * w_self
-/// where e_0 = [1, 0] since we evaluate at x0 (dx=0).
-/// So h_ii = (X'WX)^{-1}[0,0] * w_self
-#[inline]
-fn wls_degree1(
-    x_sorted: &[f64],
-    y: &[f64],
-    weights: &[f64],
+/// Within the data (u on both sides of 0, or one side of a boundary point) M is well
+/// conditioned and the solve agrees with the pivoted QR to about 1e-12. Far outside the data
+/// (prediction by extrapolation) all u lie near one value and the moment matrix squares the
+/// columns' condition, so the extrapolated value carries a relative error of order
+/// cond^2 * 1e-16.
+fn local_fit(
+    sd: &SortedData,
     x0: f64,
-    left: usize,
-    self_pos: usize,
-) -> (f64, f64) {
-    let mut s0 = 0.0;
-    let mut s1 = 0.0;
-    let mut s2 = 0.0;
-    let mut t0 = 0.0;
-    let mut t1 = 0.0;
-
-    for i in 0..weights.len() {
-        let w = weights[i];
-        if w > 0.0 {
-            let dx = x_sorted[left + i] - x0;
-            let wdx = w * dx;
-            s0 += w;
-            s1 += wdx;
-            s2 += wdx * dx;
-            t0 += w * y[i];
-            t1 += wdx * y[i];
+    nb: &Nbhd,
+    degree: usize,
+    robust: Option<&[f64]>,
+) -> EconResult<LocalFit> {
+    let zero_width = nb.radius == 0.0;
+    let degree = if zero_width { 0 } else { degree };
+    let inv_r = if zero_width { 0.0 } else { 1.0 / nb.radius };
+    let accumulate = |rw: Option<&[f64]>| {
+        let mut s = [0.0f64; 5];
+        let mut t = [0.0f64; 3];
+        let mut m = 0usize;
+        for i in nb.left..nb.right {
+            let d = sd.x_sorted[i] - x0;
+            let mut w = if zero_width {
+                1.0
+            } else {
+                tricubic_weight(d.abs() * inv_r)
+            };
+            if let Some(rw) = rw {
+                w *= rw[sd.orig_idx[i]];
+            }
+            if w > 0.0 {
+                m += 1;
+                let u = d * inv_r;
+                let yi = sd.y_sorted[i];
+                let mut p = w;
+                for j in 0..=2 * degree {
+                    s[j] += p;
+                    if j <= degree {
+                        t[j] += p * yi;
+                    }
+                    p *= u;
+                }
+            }
         }
+        (s, t, m)
+    };
+    let (mut s, mut t, mut m) = accumulate(robust);
+    let mut robust_fallback = false;
+    if m == 0 && robust.is_some() {
+        (s, t, m) = accumulate(None);
+        robust_fallback = true;
     }
-
-    // Cramer's rule for 2x2: det = s0*s2 - s1*s1
-    let det = s0 * s2 - s1 * s1;
-    if det.abs() < 1e-30 {
-        // Fallback to degree 0 (weighted mean)
-        return wls_degree0(y, weights, self_pos);
+    if m == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "no observation has positive weight in the neighbourhood of x = {x0} (q = {}); increase span",
+                sd.q
+            ),
+        });
     }
-    let inv_det = 1.0 / det;
-    // b0 = (s2*t0 - s1*t1) / det
-    let b0 = (s2 * t0 - s1 * t1) * inv_det;
-    // h_ii: (X'WX)^{-1}[0,0] = s2 / det
-    let h_ii = (s2 * inv_det) * weights[self_pos];
-    (b0, h_ii)
+    let p = degree.min(m - 1) + 1;
+    // LDL' of M (p <= 3) with the relative pivot rule.
+    let mut l = [[0.0f64; 3]; 3];
+    let mut dd = [0.0f64; 3];
+    let mut kept = 0;
+    for j in 0..p {
+        let mjj = s[2 * j];
+        let mut dj = mjj;
+        for k in 0..j {
+            dj -= l[j][k] * l[j][k] * dd[k];
+        }
+        if !(dj > MOMENT_PIVOT_TOL * mjj) {
+            break;
+        }
+        dd[j] = dj;
+        for i in (j + 1)..p {
+            let mut v = s[i + j];
+            for k in 0..j {
+                v -= l[i][k] * l[j][k] * dd[k];
+            }
+            l[i][j] = v / dj;
+        }
+        kept = j + 1;
+    }
+    // kept >= 1: M_00 = sum w > 0.
+    let solve0 = |b: &[f64; 3]| {
+        let mut z = [0.0f64; 3];
+        for i in 0..kept {
+            let mut v = b[i];
+            for k in 0..i {
+                v -= l[i][k] * z[k];
+            }
+            z[i] = v;
+        }
+        for i in 0..kept {
+            z[i] /= dd[i];
+        }
+        for i in (0..kept).rev() {
+            let mut v = z[i];
+            for k in (i + 1)..kept {
+                v -= l[k][i] * z[k];
+            }
+            z[i] = v;
+        }
+        z[0]
+    };
+    let fit = solve0(&t);
+    let c00 = solve0(&[1.0, 0.0, 0.0]);
+    Ok(LocalFit {
+        fit,
+        c00,
+        degree: kept - 1,
+        zero_width,
+        robust_fallback,
+    })
 }
 
-/// Inline WLS solver for degree 2 (local quadratic) using 3x3 system.
-///
-/// Solves:
-///   [S0  S1  S2] [b0]   [T0]
-///   [S1  S2  S3] [b1] = [T1]
-///   [S2  S3  S4] [b2]   [T2]
-///
-/// We only need b0 (fitted value at x0) and (X'WX)^{-1}[0,0] (for h_ii).
-/// Uses Cramer's rule for the 3x3 system to get b0, and the cofactor
-/// expansion for (X'WX)^{-1}[0,0].
-#[inline]
-fn wls_degree2(
-    x_sorted: &[f64],
-    y: &[f64],
-    weights: &[f64],
-    x0: f64,
-    left: usize,
-    self_pos: usize,
-) -> (f64, f64) {
-    let mut s0 = 0.0;
-    let mut s1 = 0.0;
-    let mut s2 = 0.0;
-    let mut s3 = 0.0;
-    let mut s4 = 0.0;
-    let mut t0 = 0.0;
-    let mut t1 = 0.0;
-    let mut t2 = 0.0;
-
-    for i in 0..weights.len() {
-        let w = weights[i];
-        if w > 0.0 {
-            let dx = x_sorted[left + i] - x0;
-            let dx2 = dx * dx;
-            s0 += w;
-            s1 += w * dx;
-            s2 += w * dx2;
-            s3 += w * dx2 * dx;
-            s4 += w * dx2 * dx2;
-            t0 += w * y[i];
-            t1 += w * dx * y[i];
-            t2 += w * dx2 * y[i];
-        }
-    }
-
-    // 3x3 determinant by cofactor expansion along row 0:
-    // det = s0*(s2*s4 - s3*s3) - s1*(s1*s4 - s3*s2) + s2*(s1*s3 - s2*s2)
-    let m00 = s2 * s4 - s3 * s3;
-    let m01 = s1 * s4 - s3 * s2;
-    let m02 = s1 * s3 - s2 * s2;
-    let det = s0 * m00 - s1 * m01 + s2 * m02;
-
-    if det.abs() < 1e-30 {
-        // Fallback to degree 1
-        return wls_degree1(x_sorted, y, weights, x0, left, self_pos);
-    }
-
-    let inv_det = 1.0 / det;
-
-    // b0 via Cramer's rule: replace column 0 with RHS
-    // det_0 = t0*(s2*s4-s3^2) - s1*(t1*s4-s3*t2) + s2*(t1*s3-s2*t2)
-    let det_0 = t0 * m00 - s1 * (t1 * s4 - s3 * t2) + s2 * (t1 * s3 - s2 * t2);
-    let b0 = det_0 * inv_det;
-
-    // (X'WX)^{-1}[0,0] = cofactor(0,0) / det = m00 / det
-    let h_ii = (m00 * inv_det) * weights[self_pos];
-
-    (b0, h_ii)
+/// What one pass over the data met, for the warnings.
+#[derive(Debug, Default, Clone)]
+struct FitStats {
+    zero_width_points: usize,
+    /// Distinct x values with a zero-width neighbourhood and their tie counts.
+    zero_width_x: Vec<(f64, usize)>,
+    degree_dropped: usize,
+    robust_fallback: usize,
 }
 
-/// Compute weights for a neighborhood range, writing into the provided buffer.
-/// Returns the number of non-zero weights.
-#[inline]
-fn compute_weights_into(
-    x_sorted: &[f64],
-    x0: f64,
-    left: usize,
-    right: usize,
-    max_dist: f64,
-    robust_weights: Option<&[f64]>,
-    orig_idx: &[usize],
-    weight_buf: &mut [f64],
-) -> usize {
-    let inv_max = 1.0 / max_dist;
-    let len = right - left;
-    let mut nonzero = 0;
-    for i in 0..len {
-        let u = (x_sorted[left + i] - x0).abs() * inv_max;
-        let mut w = tricubic_weight(u);
-        if let Some(rw) = robust_weights {
-            w *= rw[orig_idx[left + i]];
+impl FitStats {
+    fn merge(&mut self, other: FitStats) {
+        if other.zero_width_points > self.zero_width_points {
+            self.zero_width_points = other.zero_width_points;
+            self.zero_width_x = other.zero_width_x;
         }
-        weight_buf[i] = w;
-        if w > 0.0 {
-            nonzero += 1;
-        }
+        self.degree_dropped = self.degree_dropped.max(other.degree_dropped);
+        self.robust_fallback = self.robust_fallback.max(other.robust_fallback);
     }
-    nonzero
+
+    fn warnings(&self, n: usize, q: usize, span: f64) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.zero_width_points > 0 {
+            let t_max = self.zero_width_x.iter().map(|&(_, t)| t).max().unwrap_or(0);
+            let mut xs: Vec<String> = self
+                .zero_width_x
+                .iter()
+                .take(3)
+                .map(|(v, _)| v.to_string())
+                .collect();
+            if self.zero_width_x.len() > 3 {
+                xs.push("...".into());
+            }
+            let share = if self.zero_width_x.len() > 1 {
+                format!("up to {t_max} observations share one x value")
+            } else {
+                format!("{t_max} observations share one x value")
+            };
+            out.push(format!(
+                "zero-width neighbourhood at {} of {n} points (x = {}): {share}, at least the q = {q} \
+                 neighbours of span {span}; the fit there is the weighted mean of the tied responses \
+                 (R's lowess rule; R's loess returns 0 there and warns \"zero-width neighborhood. make \
+                 span bigger\"); span >= {} avoids this",
+                self.zero_width_points,
+                xs.join(", "),
+                (t_max + 1) as f64 / n as f64
+            ));
+        }
+        if self.degree_dropped > 0 {
+            out.push(format!(
+                "local polynomial degree reduced at {} of {n} points: fewer distinct x values with \
+                 positive weight than degree + 1",
+                self.degree_dropped
+            ));
+        }
+        if self.robust_fallback > 0 {
+            out.push(format!(
+                "robustness weights were all zero in {} neighbourhoods; the unweighted local fit was \
+                 used there",
+                self.robust_fallback
+            ));
+        }
+        out
+    }
 }
 
-/// Fit all data points using the optimized engine.
-///
-/// Returns (fitted_values_in_original_order, hat_matrix_trace).
+/// Fit all data points: (fitted values in the original order, trace of the hat matrix, stats).
 fn fit_all_points(
     sd: &SortedData,
     degree: usize,
     robust_weights: Option<&[f64]>,
     compute_hat: bool,
-) -> EconResult<(Vec<f64>, f64)> {
+) -> EconResult<(Vec<f64>, f64, FitStats)> {
     let n = sd.x_sorted.len();
-    let k = sd.k;
-
-    // Pre-allocate output in sorted order, then reorder
-    let mut fitted_sorted = vec![0.0; n];
+    let mut fitted = crate::resource::try_vec(n, 0.0, "LOESS fitted values")?;
     let mut hat_trace = 0.0;
-
-    // Reusable weight buffer (max size = k)
-    let mut weight_buf = vec![0.0; k];
-
+    let mut stats = FitStats::default();
     for si in 0..n {
+        if si % 256 == 0 {
+            crate::resource::checkpoint()?;
+        }
         let x0 = sd.x_sorted[si];
-        let (left, right) = sd.find_neighborhood(x0);
-        let len = right - left;
-        let max_dist = sd.max_distance(x0, left, right);
-
-        // Compute weights into reusable buffer
-        compute_weights_into(
-            &sd.x_sorted,
-            x0,
-            left,
-            right,
-            max_dist,
-            robust_weights,
-            &sd.orig_idx,
-            &mut weight_buf[..len],
-        );
-
-        // Find position of current point within neighborhood for h_ii
-        // Since data is sorted, si must be in [left, right)
-        let self_pos = si - left;
-
-        let y_slice = &sd.y_sorted[left..right];
-        let w_slice = &weight_buf[..len];
-
-        let (fitted_val, h_ii) = match degree {
-            0 => wls_degree0(y_slice, w_slice, self_pos),
-            1 => wls_degree1(&sd.x_sorted, y_slice, w_slice, x0, left, self_pos),
-            2 => wls_degree2(&sd.x_sorted, y_slice, w_slice, x0, left, self_pos),
-            _ => {
-                // Generic fallback using matrix operations (should not happen for degree <= 2)
-                let fitted =
-                    generic_wls_fit(&sd.x_sorted[left..right], y_slice, w_slice, x0, degree)?;
-                (fitted, 0.0) // No hat trace for generic
-            }
-        };
-
-        fitted_sorted[si] = fitted_val;
+        let nb = sd.neighbourhood(x0);
+        let lf = local_fit(sd, x0, &nb, degree, robust_weights)?;
+        fitted[sd.orig_idx[si]] = lf.fit;
         if compute_hat {
-            hat_trace += h_ii;
+            // the point's own tricube weight is 1; its robustness weight is 1 here
+            hat_trace += lf.c00;
+        }
+        if lf.zero_width {
+            stats.zero_width_points += 1;
+            if stats.zero_width_x.last().is_none_or(|&(v, _)| v != x0) {
+                stats.zero_width_x.push((x0, nb.right - nb.left));
+            }
+        } else if lf.degree < degree {
+            stats.degree_dropped += 1;
+        }
+        if lf.robust_fallback {
+            stats.robust_fallback += 1;
         }
     }
-
-    // Reorder from sorted order back to original order
-    let mut fitted_orig = vec![0.0; n];
-    for si in 0..n {
-        fitted_orig[sd.orig_idx[si]] = fitted_sorted[si];
-    }
-
-    Ok((fitted_orig, hat_trace))
+    Ok((fitted, hat_trace, stats))
 }
 
 /// Fit at a single evaluation point (used for prediction at new x values).
@@ -561,74 +578,8 @@ fn fit_single_point(
     degree: usize,
     robust_weights: Option<&[f64]>,
 ) -> EconResult<f64> {
-    let (left, right) = sd.find_neighborhood(x0);
-    let len = right - left;
-    let max_dist = sd.max_distance(x0, left, right);
-
-    let mut weight_buf = vec![0.0; len];
-    compute_weights_into(
-        &sd.x_sorted,
-        x0,
-        left,
-        right,
-        max_dist,
-        robust_weights,
-        &sd.orig_idx,
-        &mut weight_buf,
-    );
-
-    let y_slice = &sd.y_sorted[left..right];
-
-    let (fitted_val, _) = match degree {
-        0 => wls_degree0(y_slice, &weight_buf, 0), // self_pos doesn't matter for prediction
-        1 => wls_degree1(&sd.x_sorted, y_slice, &weight_buf, x0, left, 0),
-        2 => wls_degree2(&sd.x_sorted, y_slice, &weight_buf, x0, left, 0),
-        _ => {
-            let fitted =
-                generic_wls_fit(&sd.x_sorted[left..right], y_slice, &weight_buf, x0, degree)?;
-            (fitted, 0.0)
-        }
-    };
-
-    Ok(fitted_val)
-}
-
-/// Generic WLS solver using matrix operations for arbitrary degree.
-/// Fallback for degree > 2 (should not be needed normally).
-fn generic_wls_fit(
-    x_nbr: &[f64],
-    y_nbr: &[f64],
-    weights: &[f64],
-    x0: f64,
-    degree: usize,
-) -> EconResult<f64> {
-    let n = x_nbr.len();
-    let p = degree + 1;
-
-    let mut xtwx = Array2::<f64>::zeros((p, p));
-    let mut xtwy = Array1::<f64>::zeros(p);
-
-    for i in 0..n {
-        let w = weights[i];
-        if w > 0.0 {
-            let dx = x_nbr[i] - x0;
-            // Build powers of dx
-            let mut powers = vec![1.0; p];
-            for j in 1..p {
-                powers[j] = powers[j - 1] * dx;
-            }
-            for j in 0..p {
-                xtwy[j] += w * powers[j] * y_nbr[i];
-                for kk in 0..p {
-                    xtwx[[j, kk]] += w * powers[j] * powers[kk];
-                }
-            }
-        }
-    }
-
-    let xtwx_inv = matrix_inverse(&xtwx.view())?;
-    let beta = xtwx_inv.dot(&xtwy);
-    Ok(beta[0])
+    let nb = sd.neighbourhood(x0);
+    Ok(local_fit(sd, x0, &nb, degree, robust_weights)?.fit)
 }
 
 /// Compute robust weights using bisquare function.
@@ -700,38 +651,46 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
             message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
         });
     }
-    if config.span <= 0.0 {
+    if !(config.span.is_finite() && config.span > 0.0) {
         return Err(EconError::InvalidSpecification {
-            message: "span must be positive".to_string(),
+            message: format!("span must be a finite positive number, got {}", config.span),
         });
     }
     if config.degree > 2 {
         return Err(EconError::InvalidSpecification {
-            message: "degree must be 0, 1, or 2".to_string(),
+            message: format!("degree must be 0, 1, or 2, got {}", config.degree),
         });
     }
-
-    // Minimum observations needed for local regression
-    let min_obs = config.degree + 1;
-    let k = if config.span <= 1.0 {
-        ((config.span * n as f64).ceil() as usize).max(1).min(n)
-    } else {
-        n
-    };
-    if k < min_obs {
+    if config.robust && config.robust_iterations == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "robust_iterations must be at least 1 when robust = true".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "span too small: need at least {} observations per neighborhood for degree {}, but span gives {}",
-                min_obs, config.degree, k
+                "tolerance must be a finite positive number, got {}",
+                config.tolerance
             ),
         });
     }
 
-    // Build pre-sorted data structure for fast neighborhood lookups
-    let sd = SortedData::new(x, y, config.span);
+    // Sorted data with R's q and radius rule (refuses non-finite and constant x)
+    let sd = SortedData::new(x, y, config.span)?;
+
+    // Minimum observations needed for local regression
+    let min_obs = config.degree + 1;
+    if sd.q < min_obs {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "span too small: need at least {} observations per neighborhood for degree {}, but span gives {}",
+                min_obs, config.degree, sd.q
+            ),
+        });
+    }
 
     // Initial fit (also computes hat matrix trace for ENP)
-    let (mut fitted, enp) = fit_all_points(&sd, config.degree, None, true)?;
+    let (mut fitted, enp, mut stats) = fit_all_points(&sd, config.degree, None, true)?;
 
     // Compute residuals
     let mut residuals: Vec<f64> = y
@@ -750,8 +709,9 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
             let new_robust_weights = compute_robust_weights(&residuals);
 
             // Refit with robust weights (no need for hat trace in robust iterations)
-            let (new_fitted, _) =
+            let (new_fitted, _, pass) =
                 fit_all_points(&sd, config.degree, Some(&new_robust_weights), false)?;
+            stats.merge(pass);
 
             // Check convergence
             let max_change: f64 = fitted
@@ -774,6 +734,7 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
             }
         }
     }
+    let warnings = stats.warnings(n, sd.q, config.span);
 
     // Compute diagnostics
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
@@ -808,6 +769,7 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
         r_squared,
         robust_iterations: iterations,
         missing: MissingSummary::none(n),
+        warnings,
     })
 }
 
@@ -821,11 +783,19 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
 /// Vector of predicted y values.
 pub fn loess_predict(model: &LoessModel, new_x: &[f64]) -> EconResult<Vec<f64>> {
     // Build sorted data structure for the model's training data
-    let sd = SortedData::new(&model.x, &model.y, model.span);
+    let sd = SortedData::new(&model.x, &model.y, model.span)?;
+    if let Some(i) = new_x.iter().position(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("new x values must be finite; value {i} is {}", new_x[i]),
+        });
+    }
 
-    let mut predictions = Vec::with_capacity(new_x.len());
+    let mut predictions = crate::resource::try_with_capacity(new_x.len(), "LOESS predictions")?;
 
-    for &x0 in new_x {
+    for (i, &x0) in new_x.iter().enumerate() {
+        if i % 256 == 0 {
+            crate::resource::checkpoint()?;
+        }
         let pred = fit_single_point(&sd, x0, model.degree, model.robust_weights.as_deref())?;
         predictions.push(pred);
     }
@@ -879,6 +849,7 @@ pub fn run_loess(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::{Array1, Array2};
 
     #[test]
     fn test_tricubic_weight() {
@@ -1106,58 +1077,287 @@ mod tests {
         );
     }
 
-    /// Validation test against R's loess function.
-    /// This test uses known values from R to verify correctness.
+    fn col(ds: &Dataset, n: &str) -> Vec<f64> {
+        crate::data::columns::numeric_column(ds.df(), n, NaPolicy::Fail)
+            .unwrap()
+            .0
+    }
+
+    fn fit(x: &[f64], y: &[f64], span: f64, degree: usize) -> LoessResult {
+        let mut c = LoessConfig::default();
+        c.span = span;
+        c.degree = degree;
+        loess(x, y, c).unwrap()
+    }
+
+    /// REG-15: 60 of the 100 x values are 0; span 0.5 uses q = 50 neighbours, so the tie
+    /// group exceeds q. Data only: the R pin is `test_validate_loess_mass_point`.
     #[test]
-    fn test_validate_loess_against_r() {
-        // Test data (from R: loess(y ~ x, span=0.75, degree=2))
-        // R code:
-        // x <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-        // y <- c(2.5, 3.8, 6.1, 7.9, 10.2, 12.0, 14.3, 16.1, 18.0, 20.2)
-        // fit <- loess(y ~ x, span=0.75, degree=2)
-        // fit$fitted
-
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let y = vec![2.5, 3.8, 6.1, 7.9, 10.2, 12.0, 14.3, 16.1, 18.0, 20.2];
-
-        let result = loess(
-            &x,
-            &y,
-            LoessConfig {
-                span: 0.75,
-                degree: 2,
-                robust: false,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // The data is nearly linear (y ~ 2x), so fitted values should be close
-        // R produces very similar results to raw y for this smooth data
-
-        // Check that RSS is small (good fit)
-        assert!(result.rss < 1.0, "RSS too large: {}", result.rss);
-
-        // Check R-squared is high
-        assert!(
-            result.r_squared > 0.99,
-            "R-squared too low: {}",
-            result.r_squared
+    fn test_loess_mass_point_no_panic() {
+        let ds = crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/smoothers_t3.csv",
         );
-
-        // Check fitted values are reasonable (within 0.5 of y for this smooth data)
-        for i in 0..10 {
-            let diff = (result.fitted[i] - y[i]).abs();
-            assert!(
-                diff < 0.5,
-                "Fitted[{}] = {}, y[{}] = {}, diff = {}",
-                i,
-                result.fitted[i],
-                i,
-                y[i],
-                diff
-            );
+        let (x, y) = (col(&ds, "xm"), col(&ds, "ym"));
+        for degree in 0..=2 {
+            let r = fit(&x, &y, 0.5, degree);
+            assert!(r.fitted.iter().all(|f| f.is_finite()), "degree {degree}");
+            let pred = loess_predict(r.model.as_ref().unwrap(), &[0.0, 0.25, 0.9]).unwrap();
+            assert!(pred.iter().all(|f| f.is_finite()));
         }
+        // a Likert-style mass point: 16 of 40 at 3.0, span 0.3 (q = 12)
+        let xl: Vec<f64> = (0..40)
+            .map(|i| if i < 16 { 3.0 } else { 10.0 + i as f64 })
+            .collect();
+        let yl: Vec<f64> = xl
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 0.5 * v + 0.1 * ((i * 7) % 5) as f64)
+            .collect();
+        assert!(fit(&xl, &yl, 0.3, 1).fitted.iter().all(|f| f.is_finite()));
+        // a constant predictor is an error naming x, not a panic
+        let yc: Vec<f64> = (0..23).map(|i| 1.0 + 0.3 * ((i * 5) % 7) as f64).collect();
+        for span in [0.75, 1.0] {
+            let mut c = LoessConfig::default();
+            c.span = span;
+            match loess(&[2.0; 23], &yc, c).unwrap_err() {
+                EconError::InvalidSpecification { message } => {
+                    assert!(message.contains("x is constant"), "{message}")
+                }
+                e => panic!("{e:?}"),
+            }
+        }
+    }
+
+    /// Case `smoothers_gcv_periodic_loess`: R loess(surface = "direct") where the
+    /// neighbourhood has positive width; at the 60 tied zeros R returns 0 ("zero-width
+    /// neighborhood"), and the pin is lowess's rule (weight 1 on the ties: their mean,
+    /// `lowess_masspoint_y0` = 0.9731694359533333), decision P2.
+    #[test]
+    fn test_validate_loess_mass_point() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("smoothers_gcv_periodic_loess");
+        let (x, y) = (col(&ds, "xm"), col(&ds, "ym"));
+        let r = fit(&x, &y, 0.5, 1);
+        Check::new(&case)
+            .vector("loess_masspoint_expected", &r.fitted, Tol::coef(100))
+            .scalar("lowess_masspoint_y0", r.fitted[0], Tol::coef(100))
+            .finish();
+        let w: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("zero-width"))
+            .collect();
+        assert_eq!(w.len(), 1, "{:?}", r.warnings);
+        assert!(
+            w[0].contains("60 of 100") && w[0].contains("q = 50") && w[0].contains("0.61"),
+            "{}",
+            w[0]
+        );
+        assert!(
+            r.to_string().contains("zero-width"),
+            "Display ends with the notes"
+        );
+    }
+
+    /// Case `loess_x10_direct` (REG-44 site; REG-45: span * n = 7.5 -> q = 7; P3: span > 1).
+    #[test]
+    fn test_validate_loess_x10_direct() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("loess_x10_direct");
+        let (x, y) = (col(&ds, "x"), col(&ds, "y"));
+        let n = case.scalar("n") as usize;
+        let (r2, r1, r0, r12) = (
+            fit(&x, &y, 0.75, 2),
+            fit(&x, &y, 0.75, 1),
+            fit(&x, &y, 0.5, 0),
+            fit(&x, &y, 1.2, 2),
+        );
+        let pred = loess_predict(r2.model.as_ref().unwrap(), &case.vector("predict_x")).unwrap();
+        Check::new(&case)
+            .vector("fit_s075_d2", &r2.fitted, Tol::coef(n))
+            .scalar("trace_s075_d2", r2.enp, Tol::stat(n))
+            .vector("fit_s075_d1", &r1.fitted, Tol::coef(n))
+            .scalar("trace_s075_d1", r1.enp, Tol::stat(n))
+            .vector("fit_s05_d0", &r0.fitted, Tol::coef(n))
+            .vector("fit_s12_d2", &r12.fitted, Tol::coef(n))
+            .vector("predict_s075_d2", &pred, Tol::coef(n))
+            .scalar("n", r2.n_obs as f64, Tol::exact())
+            .finish();
+        // deviation REG-60: enp_r_s075_d2 is R's "Equivalent Number of Parameters"
+        // (one.delta + 2 tr(L) - n); p2a's `enp` is tr(L), R's trace.hat. Residual SE and
+        // robust iterations are not compared either.
+        assert!(
+            r2.warnings.is_empty() && r12.warnings.is_empty(),
+            "{:?}",
+            r2.warnings
+        );
+    }
+
+    /// Case `loess_skewed_direct` (REG-14: neighbourhoods mostly on one side).
+    #[test]
+    fn test_validate_loess_skewed_direct() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("loess_skewed_direct");
+        let (x, y) = (col(&ds, "x"), col(&ds, "y"));
+        let (a, b) = (fit(&x, &y, 0.75, 2), fit(&x, &y, 0.3, 1));
+        Check::new(&case)
+            .vector("fit_s075_d2", &a.fitted, Tol::coef(100))
+            .scalar("trace_s075_d2", a.enp, Tol::stat(100))
+            .vector("fit_s03_d1", &b.fitted, Tol::coef(100))
+            .scalar("trace_s03_d1", b.enp, Tol::stat(100))
+            .finish();
+    }
+
+    /// REG-46: local polynomial fitting is affine-invariant in x; x * 1e-6 and x * 1e6
+    /// give the same fit, as in R.
+    #[test]
+    fn test_validate_loess_scale_invariance() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("loess_x10_direct");
+        let (x, y) = (col(&ds, "x"), col(&ds, "y"));
+        let base = fit(&x, &y, 0.75, 2);
+        for s in [1e-6, 1e6] {
+            let xs: Vec<f64> = x.iter().map(|v| v * s).collect();
+            let r = fit(&xs, &y, 0.75, 2);
+            for (a, b) in r.fitted.iter().zip(&base.fitted) {
+                assert!((a - b).abs() <= 1e-9 * b.abs(), "x*{s}: {a} vs {b}");
+            }
+            assert!(
+                (r.enp - base.enp).abs() <= 1e-9 * base.enp,
+                "x*{s}: enp {} vs {}",
+                r.enp,
+                base.enp
+            );
+            assert!(r.warnings.is_empty(), "x*{s}: {:?}", r.warnings);
+        }
+        Check::new(&case)
+            .vector("fit_s075_d2", &base.fitted, Tol::coef(10))
+            .finish();
+    }
+
+    #[test]
+    fn test_loess_rejects_invalid_controls() {
+        let x: Vec<f64> = (0..20).map(|i| i as f64 * 0.7).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.sin() + 0.1 * ((i * 3) % 4) as f64)
+            .collect();
+        let bad = |c: LoessConfig, x: &[f64], what: &str| match loess(x, &y, c).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains(what), "{what}: {message}")
+            }
+            e => panic!("{what}: {e:?}"),
+        };
+        for span in [f64::NAN, 0.0, -0.5] {
+            let mut c = LoessConfig::default();
+            c.span = span;
+            bad(c, &x, "span");
+        }
+        let mut c = LoessConfig::default();
+        c.degree = 3;
+        bad(c, &x, "degree");
+        let mut c = LoessConfig::default();
+        c.robust = true;
+        c.robust_iterations = 0;
+        bad(c, &x, "robust_iterations");
+        for tol in [0.0, f64::NAN] {
+            let mut c = LoessConfig::default();
+            c.tolerance = tol;
+            bad(c, &x, "tolerance");
+        }
+        let mut xn = x.clone();
+        xn[4] = f64::NAN;
+        bad(LoessConfig::default(), &xn, "finite");
+    }
+
+    /// WP11-4: the moment solver of `local_fit` agrees with least squares (pivoted QR,
+    /// lm.fit's rank rule) on sqrt(w) [1, u, u^2] at every point: fit, h_ii and degree.
+    #[test]
+    fn test_loess_local_solver_matches_qr() {
+        use crate::linalg::solve::least_squares;
+        // uneven x with a run of ties (two distinct values in some windows) and noise
+        let mut x: Vec<f64> = (0..200)
+            .map(|i| {
+                let t = i as f64 / 199.0;
+                (t * t * 7.0 + ((i * 37) % 13) as f64 * 0.01).max(0.0)
+            })
+            .collect();
+        for v in x.iter_mut().take(30) {
+            *v = (*v * 4.0).round() / 4.0;
+        }
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.sin() + 0.2 * (((i * 53) % 17) as f64 / 17.0 - 0.5))
+            .collect();
+        let mut checked_drop = false;
+        for degree in 0..=2 {
+            for span in [0.1, 0.5, 1.2] {
+                let sd = SortedData::new(&x, &y, span).unwrap();
+                let mut evals: Vec<f64> = sd.x_sorted.clone();
+                // points between the data (not extrapolation: there all neighbours lie on one side
+                // and the moment matrix squares the condition of the columns)
+                evals.extend([0.13, 3.3, 6.9]);
+                for &x0 in &evals {
+                    let nb = sd.neighbourhood(x0);
+                    let lf = local_fit(&sd, x0, &nb, degree, None).unwrap();
+                    // the reference: QR on the positive-weight rows
+                    let rows: Vec<usize> = (nb.left..nb.right)
+                        .filter(|&i| {
+                            nb.radius == 0.0
+                                || tricubic_weight((sd.x_sorted[i] - x0).abs() / nb.radius) > 0.0
+                        })
+                        .collect();
+                    let d = if nb.radius == 0.0 {
+                        0
+                    } else {
+                        degree.min(rows.len() - 1)
+                    };
+                    let mut xm = Array2::<f64>::zeros((rows.len(), d + 1));
+                    let mut yv = Array1::<f64>::zeros(rows.len());
+                    for (r, &i) in rows.iter().enumerate() {
+                        let w: f64 = if nb.radius == 0.0 {
+                            1.0
+                        } else {
+                            tricubic_weight((sd.x_sorted[i] - x0).abs() / nb.radius)
+                        };
+                        let u = if nb.radius == 0.0 {
+                            0.0
+                        } else {
+                            (sd.x_sorted[i] - x0) / nb.radius
+                        };
+                        for j in 0..=d {
+                            xm[[r, j]] = w.sqrt() * u.powi(j as i32);
+                        }
+                        yv[r] = w.sqrt() * sd.y_sorted[i];
+                    }
+                    let ls = least_squares(xm.view(), yv.view()).unwrap();
+                    assert_eq!(
+                        lf.degree,
+                        ls.rank - 1,
+                        "degree {degree} span {span} x0 {x0}"
+                    );
+                    checked_drop |= lf.degree < d;
+                    let b0 = ls.coefficients[0];
+                    let c00 = ls.unscaled_cov[[0, 0]];
+                    assert!(
+                        (lf.fit - b0).abs() <= 1e-10 * b0.abs().max(1e-3),
+                        "fit {} vs {b0} (degree {degree} span {span} x0 {x0})",
+                        lf.fit
+                    );
+                    assert!(
+                        (lf.c00 - c00).abs() <= 1e-10 * c00.abs(),
+                        "c00 {} vs {c00}",
+                        lf.c00
+                    );
+                }
+            }
+        }
+        assert!(
+            checked_drop,
+            "the data must exercise a reduced local degree"
+        );
     }
 
     #[test]

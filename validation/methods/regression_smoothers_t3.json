@@ -12,7 +12,12 @@
         "loess_skewed_direct",
         "smoothers_gcv_periodic_loess"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::regression::loess::tests::test_validate_loess_x10_direct",
+        "p2a-core::regression::loess::tests::test_validate_loess_skewed_direct",
+        "p2a-core::regression::loess::tests::test_validate_loess_mass_point",
+        "p2a-core::regression::loess::tests::test_validate_loess_scale_invariance"
+      ],
       "quantities": [
         "fitted values, degrees 0-2, span < 1, = 1, > 1",
         "predictions",
