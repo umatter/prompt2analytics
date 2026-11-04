@@ -1,0 +1,113 @@
+# Validation: Variable coefficients (pvcm) and mean group (pmg)
+
+## Method Overview
+
+`run_pvcm` and `run_pmg` (`crates/p2a-core/src/econometrics/panel/heterogeneous.rs`) fit one
+OLS regression per entity, `y_it = X_it b_i + e_it`, and combine the entity estimates.
+
+- **Within** (`PvcmType::Within`, R `pvcm(model = "within")`): the individual coefficients
+  `b_i` and their SEs, `Var(b_i) = s_i^2 (X_i'X_i)^-1` with `s_i^2 = rss_i / (T_i - k)`. The
+  reported overall coefficients are the unweighted mean of the `b_i`.
+- **Random** (`PvcmType::Random`, Swamy 1970, R `pvcm(model = "random")`): with
+  `Delta = (1/(N-1)) sum (b_i - b_bar)(b_i - b_bar)' - (1/N) sum Var(b_i)`, the GLS
+  estimate `b = (sum W_i)^-1 sum W_i b_i`, `W_i = (Var(b_i) + Delta)^-1`, and its variance
+  `(sum W_i)^-1`.
+- **Mean group** (`run_pmg`, Pesaran and Smith 1995, R `pmg(model = "mg")`): the unweighted
+  mean of the `b_i`.
+
+Entities are fitted in R `factor()` order of the ids (numbers numerically, text in byte
+order), so the Swamy sums are deterministic.
+
+**Status**: R-pinned with known deviations (method `panel_pvcm_pmg` in
+`validation/methods/econ_panel_t3.json`): the individual coefficients and SEs, the Swamy
+coefficients, SEs and the diagonal of Delta, and the mean-group coefficients. Not pinned: the
+mean-group SE (ECON-34) and the homogeneity test (ECON-35), Tier 4.
+
+## Entities that cannot be estimated
+
+An entity with no more rows than coefficients, or whose regressors are collinear, has no
+`b_i`. It is skipped and named in `warnings`: "entity '12' skipped: 3 observations for 3
+coefficients", "entity '3' skipped: its regressors are collinear (rank 2 of 3)". The text
+output prints the warnings before the missing-value line, which stays last. A singular
+`Var(b_i) + Delta`, a singular weight sum or a singular `Var(b_i)` in the homogeneity test is
+an error naming the entity. Before Tier 3, short entities were dropped silently, collinear
+entities were pseudo-inverted into the averages, and an entity with a singular
+`Var(b_i) + Delta` was left out of the Swamy sums silently.
+
+## R reference
+
+Case `pvcm_pmg_sim` (`validation/r/cases/econ_panel_t3.R`, R 4.3.3, plm 2.6.7;
+`validation/datasets/generated/pvcm_panel.csv`, N = 12 entities `id` 1..12, T = 20, n = 240,
+heterogeneous slopes, positive-definite Swamy Delta):
+
+```r
+pd <- pdata.frame(d, index = c("id", "t"))
+pvcm(y ~ x1 + x2, data = pd, model = "within")
+pvcm(y ~ x1 + x2, data = pd, model = "random")
+pmg(y ~ x1 + x2, data = pd, model = "mg")
+```
+
+| Quantity ((Intercept), x1, x2) | R |
+|---|---|
+| within, entity 1: coefficients | 1.191360514, -0.1501127754, -0.02595929598 |
+| within, entity 1: SE | 0.3134300473, 0.1685327548, 0.1501410776 |
+| random: coefficients | 0.6795444326, 0.5815089351, -0.4981040760 |
+| random: SE | 0.4418901474, 0.1564522983, 0.08254980597 |
+| random: Delta diagonal | 2.282425182, 0.2799281991, 0.06846336377 |
+| random: homogeneity chi2 (df 33), not pinned | 3385.234629 |
+| mg: coefficients | 0.6755447018, 0.5829283539, -0.4969613022 |
+| mg: SE, not pinned | 0.4420557664, 0.1565954001, 0.08313141715 |
+
+The case file holds the coefficients and SEs of all twelve entities, and the full Delta
+(off-diagonals -0.1129477848, -0.06503953957, 0.06155671950).
+
+p2a's Swamy estimator reproduces `pvcm(model = "random")` when Delta is positive definite,
+as here. When the estimated Delta is not positive definite, p2a clamps only its diagonal at
+0, so the two can differ (ECON-35).
+
+## Tests
+
+Registered (method `panel_pvcm_pmg`):
+
+- `econometrics::panel::heterogeneous::tests::test_validate_pvcm_within_sim`: every
+  entity's coefficients (`within_coef_<i>`) and SEs (`within_se_<i>`), and n;
+- `econometrics::panel::heterogeneous::tests::test_validate_pvcm_random_sim`: the Swamy
+  coefficients, SEs and Delta diagonal;
+- `econometrics::panel::heterogeneous::tests::test_validate_pmg_sim`: the mean-group
+  coefficients and n;
+- `econometrics::panel::heterogeneous::tests::test_validate_pvcm_skips_collinear_entity_with_warning`:
+  on the case data with entity 3's `x2` set to `2 * x1`, the within fit has 11 entities and
+  the collinear warning; with entity 12 cut to 3 rows, the short-entity warning (no R value
+  compared).
+
+The tests of Tier 2's missing-value case `panel_grunfeld_na`
+(`econometrics::panel::heterogeneous::tests::test_validate_pmg_grunfeld_na`,
+`econometrics::panel::heterogeneous::tests::test_validate_na_pvcm_numeric_and_string_ids_agree`)
+pin the mean-group coefficients on Grunfeld with missing cells and check that text and
+numeric ids agree. With the numeric id the output's last line is then "Missing values: 5
+of 200 rows dropped because of missing values (inv: 2, value: 1, firm_id: 2)".
+
+The three full-Grunfeld PVCM and PMG tests, which compared the averages with rounded values
+at tolerances up to 30, were deleted in Tier 3.
+
+## Tolerances
+
+`validation/README.md`, n = 240: coefficients 1e-8 relative, SE and statistics 1e-6
+relative; n exact.
+
+## Known differences (registry deviations)
+
+- **Mean-group SE (ECON-34).** p2a reports the cross-entity standard deviation of the `b_i`
+  with the 1/N variance (1.466133, 0.5193682, 0.2757157 here, from an R replica of p2a's
+  algorithm); pmg reports the standard error `sd / sqrt(N)` with the 1/(N - 1) variance.
+- **Homogeneity test (ECON-35).** p2a centres the test on the unweighted mean of the `b_i`
+  (3492.654 here) where plm uses its weighted estimate (3385.234629).
+
+## References
+
+- Swamy, P. A. V. B. (1970). Efficient inference in a random coefficient regression model.
+  *Econometrica*, 38(2), 311-323.
+- Pesaran, M. H., & Smith, R. (1995). Estimating long-run relationships from dynamic
+  heterogeneous panels. *Journal of Econometrics*, 68(1), 79-113.
+- Croissant, Y., & Millo, G. (2008). Panel data econometrics in R: the plm package. *Journal
+  of Statistical Software*, 27(2).

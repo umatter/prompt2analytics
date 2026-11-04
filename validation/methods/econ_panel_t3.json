@@ -1,0 +1,257 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "panel_absorbed_regressors",
+      "name": "Regressors absorbed by the fixed effects or collinear: FE, RE, Hausman, HDFE and FEGLM drop them as plm and fixest",
+      "category": "econometrics",
+      "reference": "plm::plm(model = 'within' | 'random') (time-invariant regressors removed, aliased dropped); fixest::feols / feglm $collin.var",
+      "doc": "validation/econometrics/hdfe.md",
+      "cases": [
+        "panel_absorbed_regressors"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::linear_models::tests::test_validate_fe_drops_time_invariant_regressor",
+        "p2a-core::econometrics::panel::linear_models::tests::test_validate_re_absorbed_regressor",
+        "p2a-core::econometrics::panel::tests::test_validate_hausman_absorbed_regressor",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_absorbed_regressors",
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_absorbed_regressors"
+      ],
+      "quantities": [
+        "dropped regressor names",
+        "FE coefficients, SE, df",
+        "FE coefficients with a collinear regressor",
+        "RE coefficients, SE, sigma2 idiosyncratic and individual, theta",
+        "RE coefficients with a collinear regressor",
+        "Hausman chi2, df, p",
+        "HDFE one- and two-way coefficients, iid SE, df",
+        "HDFE coefficients with a collinear regressor",
+        "FEGLM Gaussian two-way coefficients"
+      ],
+      "tolerance": "validation/README.md, n = 180: coefficients 1e-8, SE and statistics 1e-6 relative, p-values Tol::p_value; names and df exact. MAP exact after 2 sweeps on this design",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "hdfe_map_convergence",
+      "name": "HDFE alternating projections: relative stopping rule, scale invariance, iteration limit as a warning",
+      "category": "econometrics",
+      "reference": "fixest::feols(y ~ x | firm + year, vcov = 'iid'); fixest::feglm(family = gaussian); lm with factor dummies for the classical SE",
+      "doc": "validation/econometrics/hdfe.md",
+      "cases": [
+        "hdfe_map_scale"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_converges_at_scale_1e9",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_map_scale_invariant_iterations",
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_map_iteration_limit_is_reported",
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_gaussian_converges_at_scale_1e9"
+      ],
+      "quantities": [
+        "coefficients and iid SE at y and y x 1e9",
+        "within R2",
+        "df",
+        "n",
+        "FEGLM Gaussian coefficient at y x 1e9",
+        "iteration counts within 1 across y x 1e-6, y, y x 1e6 (property)",
+        "non-convergence reported as a warning (property)"
+      ],
+      "tolerance": "Tol::iterative at the README values for n = 1000 (coefficients 1e-8, SE/R2 1e-6); MAP relative tolerance 1e-8; R replica 6.7e-16",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "hdfe_disconnected_df",
+      "name": "HDFE degrees of freedom on disconnected fixed effects",
+      "category": "econometrics",
+      "reference": "stats::lm(y ~ x + z + factor(firm) + factor(year)) (rank-based df: n0 + n1 - 2 components)",
+      "doc": "validation/econometrics/hdfe.md",
+      "cases": [
+        "hdfe_disconnected"
+      ],
+      "tests": [
+        "p2a-core::econometrics::hdfe::tests::test_validate_hdfe_disconnected_components"
+      ],
+      "quantities": [
+        "coefficients",
+        "iid SE",
+        "df_resid 54",
+        "df_absorbed 24",
+        "n"
+      ],
+      "tolerance": "validation/README.md, n = 80: coefficients 1e-6, SE 1e-5 relative; df exact. MAP exact after 2 sweeps on this design",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "panel_unit_root_lag_selection",
+      "name": "Panel unit-root tests: per-unit lag selection (AIC, SIC, Hall) and ADF t, as plm::purtest",
+      "category": "econometrics",
+      "reference": "plm::purtest(test, exo, lags = 'AIC' | 'SIC' | 'Hall', pmax = 4, dfcor, fixedT = TRUE)",
+      "doc": "validation/econometrics/panel_unit_root.md",
+      "cases": [
+        "purtest_lag_selection"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_lag_selection_ips",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_lag_selection_llc",
+        "p2a-core::econometrics::panel_unit_root::tests::test_validate_purtest_lag_selection_madwu"
+      ],
+      "quantities": [
+        "per-unit lags: AIC, SIC, Hall with dfcor FALSE and TRUE (IPS, LLC, Maddala-Wu)",
+        "per-unit lags: trend AIC dfcor TRUE, none SIC dfcor TRUE",
+        "per-unit ADF t (IPS, Maddala-Wu; the six rules, trend, none)"
+      ],
+      "tolerance": "lags exact; per-unit t validation/README.md statistics row, n = 480: 1e-6 relative",
+      "deviations": [
+        {
+          "finding": "ECON-43",
+          "quantity": "ips_*_stat, ips_*_p",
+          "note": "the IPS W-tbar statistic standardises with ad-hoc moments, not plm's tabulated E/Var of t"
+        },
+        {
+          "finding": "ECON-41",
+          "quantity": "levinlin_*_stat, levinlin_*_p",
+          "note": "the LLC adjustment uses approximate mu*/sigma* and a different long-run variance"
+        },
+        {
+          "finding": "ECON-44",
+          "quantity": "madwu_*_stat, madwu_*_p, ptrho_*",
+          "note": "per-unit p-values come from a shifted normal, not MacKinnon's response surface"
+        },
+        {
+          "finding": "ECON-88",
+          "quantity": "default lag rule and ADF residual variance (no lag_selection; dfcor default)",
+          "note": "p2a's defaults are a fixed floor(T_max^(1/3)) lags for every unit and dfcor = true (urca::ur.df's rss/(n - k)); plm::purtest defaults to lags = 'SIC', pmax = 10 and dfcor = FALSE. Default-config outputs are not pinned to plm's defaults; the pins use explicit lags = 'AIC' | 'SIC' | 'Hall', pmax = 4 and both dfcor values"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "panel_gls",
+      "name": "Panel GLS (pggls): pooled coefficients; within and FD warnings",
+      "category": "econometrics",
+      "reference": "plm::pggls(model = 'pooling' | 'within' | 'fd') (unrestricted T x T FGLS)",
+      "doc": "validation/econometrics/pggls.md",
+      "cases": [
+        "pggls_sim",
+        "panel_grunfeld_na"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_pggls_pooling_sim",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_panel_gls_within_reports_singular_error_covariance",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_panel_gls_fd_reports_aliased_first_step",
+        "p2a-core::econometrics::panel::gls_models::tests::test_validate_na_panel_gls_missing_firm_id"
+      ],
+      "quantities": [
+        "pooled coefficients",
+        "pooled RSS",
+        "pooled R2",
+        "pooled df",
+        "within df",
+        "n, N, T",
+        "singular Omega warning (within)",
+        "aliased first-step warning (FD)",
+        "rows with a missing text entity id dropped, not fitted as an extra entity (panel_grunfeld_na; property)"
+      ],
+      "tolerance": "validation/README.md, n = 200: coefficients 1e-8, statistics 1e-6 relative; counts exact",
+      "deviations": [
+        {
+          "finding": "ECON-33",
+          "quantity": "pooling_se",
+          "note": "p2a scales (X'Omega^-1 X)^-1 by rss/df; pggls reports its diagonal unscaled"
+        },
+        {
+          "finding": "ECON-33",
+          "quantity": "within_coef, within_se, within_rss, within_r2, fd_coef, fd_se, fd_rss, fd_r2, fd_df_resid",
+          "note": "p2a's GLS step runs on the untransformed data and an intercept, not on the within or first-differenced model"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "panel_pvcm_pmg",
+      "name": "Variable coefficients (pvcm within and random) and mean group (pmg)",
+      "category": "econometrics",
+      "reference": "plm::pvcm(model = 'within' | 'random') (Swamy 1970); plm::pmg(model = 'mg')",
+      "doc": "validation/econometrics/pvcm.md",
+      "cases": [
+        "pvcm_pmg_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_within_sim",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_random_sim",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pmg_sim",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_skips_collinear_entity_with_warning",
+        "p2a-core::econometrics::panel::heterogeneous::tests::test_validate_pvcm_display_lists_entities_in_level_order"
+      ],
+      "quantities": [
+        "individual coefficients and SEs (12 entities)",
+        "Swamy coefficients and SEs",
+        "Delta diagonal",
+        "mean-group coefficients",
+        "n",
+        "skipped-entity warnings (property)",
+        "entity order of the text output (property)"
+      ],
+      "tolerance": "validation/README.md, n = 240: coefficients 1e-8, SE and statistics 1e-6 relative",
+      "deviations": [
+        {
+          "finding": "ECON-34",
+          "quantity": "mg_se",
+          "note": "p2a reports the cross-entity standard deviation with the 1/N variance, not pmg's standard error sd/sqrt(N) with 1/(N - 1)"
+        },
+        {
+          "finding": "ECON-35",
+          "quantity": "random_chisq",
+          "note": "the homogeneity test is centred on the unweighted mean of the b_i, not on plm's weighted estimate; a non-positive-definite Delta is clamped on its diagonal only"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "feglm",
+      "name": "FEGLM: Gaussian coefficients pinned to fixest; convergence reporting for logit, probit, Poisson",
+      "category": "econometrics",
+      "reference": "fixest::feglm(| id + time, vcov = 'iid'); stats::glm with factor dummies",
+      "doc": "validation/econometrics/feglm.md",
+      "cases": [
+        "feglm_families"
+      ],
+      "tests": [
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_gaussian_families",
+        "p2a-core::econometrics::feglm::tests::test_validate_feglm_families_report_convergence"
+      ],
+      "quantities": [
+        "Gaussian coefficients",
+        "Gaussian df",
+        "n",
+        "logit/probit/Poisson convergence reported (property)"
+      ],
+      "tolerance": "validation/README.md, n = 480: coefficients 1e-8 relative; df and n exact. MAP exact after 2 sweeps on this design",
+      "deviations": [
+        {
+          "finding": "ECON-20",
+          "quantity": "logit_coef, probit_coef, poisson_coef, gauss_se_lm, gauss_deviance, gauss_dispersion",
+          "note": "the fixed effects are recovered in eta in one pass, not iterated to the fixed point of the weighted problem; fixest also drops the 16 rows of entities whose binary outcome is constant (logit_nobs 464 of 480)"
+        },
+        {
+          "finding": "ECON-66",
+          "quantity": "gauss_loglik_glm",
+          "note": "the Gaussian log-likelihood (and AIC/BIC) is -0.5 SSR, not glm's normal log-likelihood"
+        },
+        {
+          "finding": "ECON-67",
+          "quantity": "poisson_se, poisson_glm_se",
+          "note": "the Poisson SEs are scaled by a quasi-Poisson dispersion"
+        },
+        {
+          "finding": "ECON-85",
+          "quantity": "df_resid, df_absorbed on disconnected two-way designs",
+          "note": "feglm keeps its own absorbed-df rule (levels summed minus n_factors - 1), which over-counts on disconnected fixed effects; feglm_families is connected, so its df are unaffected"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

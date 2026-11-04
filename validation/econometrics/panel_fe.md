@@ -168,8 +168,8 @@ before computing, so R and Rust see the same doubles.
   `econometrics::panel::linear_models::tests::test_wald_statistic_refuses_a_singular_covariance`,
   `econometrics::panel::linear_models::tests::test_wald_statistic_full_rank`,
   `econometrics::panel::linear_models::tests::test_f_df_are_those_of_the_f_p_value`,
-  `econometrics::panel::tests::test_collinear_regressors_are_refused`,
-  `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
+  `econometrics::panel::tests::test_collinear_regressors_are_dropped`,
+  `econometrics::panel::tests::test_time_invariant_regressor_fe_drops_re_keeps`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_fixed_effects` checks
   the `panel_fixed_effects` text against the case at display precision, with the default
   and with `vcov = "cluster-hc0"`.

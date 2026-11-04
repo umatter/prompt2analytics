@@ -9,8 +9,8 @@ alternating projections (MAP) and runs OLS on the demeaned data, without dummy v
   `panel_hdfe`.
 - `se_type` (`CovarianceType`): `Standard` (iid) or HC0-HC3; HC1 uses `n / df_resid`. There
   is no cluster option.
-- `config` (`HdfeConfig`): tolerance, iteration limit and acceleration of the MAP; invalid
-  controls and non-finite data are refused.
+- `config` (`HdfeConfig`): tolerance (relative, default 1e-8), iteration limit (default
+  10000) and acceleration of the MAP; invalid controls and non-finite data are refused.
 - Degrees of freedom: `df_resid = n - K - (sum of levels - redundant levels)`.
 - Fit statistics: within R-squared, adjusted within R-squared in plm's convention
   `1 - (1 - R2)(n - 1)/df_resid`, and the within F test of the slopes.
@@ -94,11 +94,13 @@ with 13 residual df. Both are removed.
 
 ## Missing values and identifier types
 
-- One NA-aware request reads y, the regressors and the entity id and every fixed-effect column (the year included); the rows with a
-  missing value (null or NaN) in any of them are dropped jointly, as plm and fixest do
-  (`na.omit`). The count is in `missing`, the first warning (FE/RE) and the last line of
-  the output: "Missing values: 5 of 200 rows dropped because of missing values (inv: 2,
-  value: 1, firm_id: 2)".
+- One NA-aware request reads y, the regressors and every fixed-effect column (the year
+  included); the rows with a missing value (null or NaN) in any of them are dropped
+  jointly, as plm and fixest do (`na.omit`). HDFE reports the count in `missing` and on the
+  last line of its output (it has no FE/RE warning block): "Missing values: 7 of 200 rows
+  dropped because of missing values (inv: 2, value: 1, firm_id: 2, year: 2)". The one-way
+  FE and RE estimators read no time column; their note, "5 of 200 rows dropped because of
+  missing values (inv: 2, value: 1, firm_id: 2)", is also their first warning.
 - A missing id drops its row. Before Tier 2 a missing numeric id became 0 and merged
   into the real level 0, and a missing text id became a pseudo-level "" (ECON-37); a
   missing outcome was reported as "Column 'inv' not found".
@@ -134,6 +136,134 @@ the note, and the ECON-37 variant with y and x complete),
 the MCP tool `tier2::wp08_iv_panel::test_validate_mcp_panel_hdfe_grunfeld_na`. A NaN cell
 in y is dropped like a null one, an infinite value refused
 (`econometrics::hdfe::tests::test_hdfe_non_finite_data`).
+
+## Convergence of the alternating projections
+
+Each column is demeaned by the method of alternating projections (one sweep subtracts the
+group means of every fixed-effect dimension in turn; Gearhart-Koshy acceleration from the
+third sweep). A column stops when
+
+    ||change|| <= tolerance * max(||current||, 1e-6 * ||column||)
+
+with `tolerance` the configured 1e-8. The rule is relative: before Tier 3 it was the absolute
+`||change|| < 1e-8`, so a column of order 1e9 could never satisfy it and raised
+`ConvergenceFailure` after 10000 sweeps, while a column of order 1e-6 stopped after one. The
+floor of 1e-6 of the column's own norm keeps a column that the fixed effects absorb (its
+demeaned norm tends to 0) from chasing rounding noise. An R transcription of the MAP stops
+after 10, 10 and 10 sweeps on `y` scaled by 1e-6, 1 and 1e6 under the relative rule, against
+11, 11 and 18 under the absolute one, and agrees with fixest to 1e-15 on both scales.
+
+Reaching the iteration limit is no longer an error: the fit is returned with
+`converged = false` and the warning "HDFE alternating projections did not converge after
+... iterations ...". `HdfeResult` records `iterations`, `max_iterations`, `tolerance` and the
+last relative change (`convergence`); the output prints a `Converged:` line from them.
+
+Case `hdfe_map_scale` (`validation/r/cases/econ_panel_t3.R`, fixest 0.14.2;
+`validation/datasets/generated/hdfe_scale.csv`, n = 1000, unbalanced firm x year with 120
+absorbed levels): `feols(y ~ x | firm + year, vcov = "iid")` and the same for
+`y_big = 1e9 * y`.
+
+| Quantity | R |
+|---|---|
+| coef x (y) | 0.5412754728 |
+| iid SE x (y) | 0.03249037864 |
+| coef x (y_big) | 541275472.8 |
+| iid SE x (y_big) | 32490378.64 |
+| FEGLM Gaussian coef x (y_big) | 541275472.8 |
+| within R² | 0.2397677500 |
+| df_resid | 880 |
+| n | 1000 |
+
+Tests (method `hdfe_map_convergence` in `validation/methods/econ_panel_t3.json`):
+`econometrics::hdfe::tests::test_validate_hdfe_converges_at_scale_1e9` (coefficients, iid SEs,
+within R², df and n at both scales), `econometrics::hdfe::tests::test_validate_hdfe_map_scale_invariant_iterations`
+(the sweep counts at scales 1e-6, 1 and 1e6 differ by at most one),
+`econometrics::hdfe::tests::test_validate_hdfe_map_iteration_limit_is_reported` (an
+iteration limit of 2 returns the fit with the warning) and
+`econometrics::feglm::tests::test_validate_feglm_gaussian_converges_at_scale_1e9`. On this
+unbalanced design the MAP stops at its tolerance, so the pins use `Tol::iterative` at the
+README values for n = 1000: coefficients 1e-8, SE and R² 1e-6 (the R replica agrees with
+fixest to 6.7e-16).
+
+## Regressors absorbed by the fixed effects
+
+FE (`run_fixed_effects`), RE, HDFE and FEGLM screen the demeaned regressors before solving:
+
+1. A regressor whose demeaned sum of squares is at most 1e-12 of its centred sum of squares
+   has no variation left after the fixed effects (a time-invariant characteristic under
+   entity effects, a column that the entity and time effects together absorb). It is dropped
+   with the warning "'z' dropped: no variation left after removing the 'id' fixed effects
+   (not estimated, as in plm and fixest)".
+2. The remaining demeaned columns go through a pivoted QR at `lm.fit`'s tolerance 1e-7; the
+   later of exactly collinear regressors is dropped with "'x3' dropped: collinear with the
+   other regressors after removing the 'id' + 't' fixed effects (the later of the collinear
+   regressors is not estimated, as in fixest)".
+
+The names are in `dropped`, the warnings in `warnings`; the fit solves from the same QR.
+With no regressor left the call is an error ("no regressor left to estimate"), as plm's
+"empty model". Before Tier 3, FE and HDFE refused such a design with `SingularMatrix` (FE)
+or pseudo-inverted it (HDFE).
+
+RE keeps a time-invariant regressor (the between variation identifies it). It drops the
+later of collinear columns of the raw design `[1, X]`, as plm's aliased coefficients, and
+its within regression, which estimates sigma_e², counts only the slopes that vary within
+entities, as plm's `ercomp`. Before Tier 3 that count included the time-invariant regressor,
+so sigma_e², theta and every coefficient differed from plm (x1 by 3.6e-3 relative on the case
+below). The Hausman test compares the slopes FE keeps.
+
+Case `panel_absorbed_regressors` (`validation/r/cases/econ_panel_t3.R`, plm 2.6.7, fixest
+0.14.2; `validation/datasets/generated/panel_absorbed.csv`, N = 30, T = 6): `z` is
+time-invariant, `w` is absorbed by the id and t effects together, `x3 = x1 + x2`.
+
+| Model (R call) | Quantity | R |
+|---|---|---|
+| FE, `plm(y ~ x1 + x2 + z, model = "within")` | coef x1, x2 | 0.1453727769, -0.7468197527 |
+| | SE x1, x2 | 0.1742488847, 0.1682010529 |
+| | df_resid | 148 |
+| RE, `plm(y ~ x1 + x2 + z, model = "random")` | coef (Intercept), x1, x2, z | 0.7365784049, 0.9356803072, -0.5573081128, 0.4100546470 |
+| | SE | 0.2074400228, 0.1588304685, 0.1830449165, 0.2043334804 |
+| | sigma2 idiosyncratic, individual; theta | 3.617004295, 0.2733851297; 0.1705456109 |
+| RE with x3, `plm(y ~ x1 + x2 + x3, model = "random")` | coef (Intercept), x1, x2 | 0.6309324623, 0.6654591694, -0.6321598855 |
+| Hausman, `phtest` | chi2, df, p | 120.9620054, 2, 5.412953036e-27 |
+| HDFE id + t, `feols(y ~ x1 + x2 + z + w \| id + t)` | coef x1, x2 | 0.4069267592, -0.3027531552 |
+| | iid SE x1, x2 | 0.08789712530, 0.08825285307 |
+| | df_resid | 143 |
+| HDFE id, `feols(y ~ x1 + x2 + z + w \| id)` | coef x1, x2, w | 0.3926827202, -0.3244502460, 1.437028381 |
+| | iid SE | 0.08667474941, 0.08522275683, 0.06686447827 |
+| FEGLM Gaussian id + t, `feglm(..., gaussian)` | coef x1, x2 | 0.4069267592, -0.3027531552 |
+
+With `x3` added, FE and HDFE drop it and reproduce the coefficients above (`fe_x3_coef`,
+`hdfe2_x3_coef`).
+
+Tests (method `panel_absorbed_regressors`):
+`econometrics::panel::linear_models::tests::test_validate_fe_drops_time_invariant_regressor`,
+`econometrics::panel::linear_models::tests::test_validate_re_absorbed_regressor`,
+`econometrics::panel::tests::test_validate_hausman_absorbed_regressor`,
+`econometrics::hdfe::tests::test_validate_hdfe_absorbed_regressors`,
+`econometrics::feglm::tests::test_validate_feglm_absorbed_regressors`. The design is balanced,
+so the MAP is exact after two sweeps and the README tolerances for n = 180 apply
+(coefficients 1e-8, SE and statistics 1e-6; names and df exact).
+
+## Disconnected fixed effects
+
+When the firm and year effects split the sample into C connected components, the absorbed
+rank is `n_firm + n_year - C`, not `n_firm + n_year - 1`; HDFE counts the components. Case
+`hdfe_disconnected` (`validation/datasets/generated/hdfe_disconnected.csv`: 16 firms, 10
+years, two components, n = 80) against `lm(y ~ x + z + factor(firm) + factor(year))`:
+
+| Quantity | R |
+|---|---|
+| coef x, z | 0.6130566690, -0.1963215774 |
+| SE x, z | 0.1192968015, 0.1047934716 |
+| df_resid | 54 |
+| df_absorbed | 24 |
+| n | 80 |
+
+With the connected-design count (df_resid 53) the SEs would be 0.1204169838 and
+0.1057774695 (`se_naive_df`, not pinned). Test (method `hdfe_disconnected_df`):
+`econometrics::hdfe::tests::test_validate_hdfe_disconnected_components`, README tolerances
+for n = 80 (coefficients 1e-6, SE 1e-5). FEGLM keeps its own count, which over-counts on
+such designs (ECON-85, Tier 4).
 
 ## Known differences
 
