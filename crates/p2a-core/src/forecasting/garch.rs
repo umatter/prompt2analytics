@@ -1,37 +1,44 @@
-//! GARCH (Generalized Autoregressive Conditional Heteroskedasticity) models.
+//! GARCH(p, q) models of conditional heteroskedasticity, estimated by conditional maximum
+//! likelihood with normal or standardised Student-t errors.
 //!
-//! This module implements GARCH models for time-varying volatility modeling.
+//! # Model
 //!
-//! # Mathematical Formulation
+//! r_t = mu + e_t (mu = 0 without a mean term), e_t = sqrt(h_t) z_t and
 //!
-//! ## GARCH(p,q) Model
+//! h_t = omega + sum_{i=1..p} alpha_i e_{t-i}^2 + sum_{j=1..q} beta_j h_{t-j},
 //!
-//! Given returns r_t with mean μ:
+//! with omega > 0, alpha_i, beta_j >= 0 and sum alpha + sum beta < 1. z_t is N(0, 1)
+//! ([`GarchDistribution::Normal`], fGarch "norm") or fGarch's standardised Student-t with shape
+//! nu > 2 ([`GarchDistribution::StudentT`], fGarch "std"). The likelihood is conditional with
+//! fGarch's "mci" start: h_t = mean(e^2) for the first max(p, q) periods, and the sum runs over
+//! all n observations.
 //!
-//! Mean equation: r_t = μ + ε_t
+//! # Estimation
 //!
-//! Variance equation: σ²_t = ω + Σᵢ αᵢ ε²_{t-i} + Σⱼ βⱼ σ²_{t-j}
-//!
-//! where ε_t = σ_t z_t and z_t ~ iid N(0,1)
-//!
-//! ## GARCH(1,1) Simplified
-//!
-//! σ²_t = ω + α ε²_{t-1} + β σ²_{t-1}
-//!
-//! ## Parameter Constraints
-//!
-//! - ω > 0 (intercept positive)
-//! - α ≥ 0 (ARCH coefficients non-negative)
-//! - β ≥ 0 (GARCH coefficients non-negative)
-//! - Σα + Σβ < 1 (stationarity condition)
-//!
-//! ## Unconditional Variance
-//!
-//! σ² = ω / (1 - α - β)
-//!
-//! ## Persistence
-//!
-//! persistence = α + β (closer to 1 means more persistent volatility)
+//! * **Parameters.** The optimiser works on unconstrained theta: mu = xbar + s theta_mu,
+//!   omega = s^2 exp(theta_omega) (s^2 the sample variance), (alpha, beta) by a positive softmax,
+//!   so that every coefficient is positive and their sum below 1, and
+//!   nu = 2 + (GARCH_SHAPE_MAX - 2) logistic(theta_nu). The problem is scale free: data times c
+//!   converge in the same iterations to (mu c, omega c^2, alpha, beta).
+//! * **Optimiser.** BFGS (Nocedal & Wright 2006, Alg. 6.1) with a strong-Wolfe line search
+//!   (Alg. 3.5/3.6) on the analytic gradient, which comes from the recursions for
+//!   dh_t / dparameter in one O(n (p + q)) pass. The start inverse Hessian is the inverse
+//!   finite-difference Hessian. Three starting values, (sum alpha, sum beta) = (0.1, 0.8),
+//!   (0.05, 0.05) and (0.3, 0.6) with omega = s^2 (1 - sum), are tried and the highest
+//!   log-likelihood wins.
+//! * **Convergence.** max_i |d(loglik / n) / d theta_i| <= `tolerance`. Up to three Newton steps
+//!   in the natural parameters then polish the winner; each is kept only when it is feasible,
+//!   does not lower the log-likelihood and lowers the criterion. Stopping at the iteration
+//!   limit is reported with a warning.
+//! * **Inference.** Standard errors are sqrt(diag(I^-1)), I the observed information (the
+//!   negative Hessian of the log-likelihood in the natural parameters, from central differences
+//!   of the analytic gradient); `t_stats` are Wald z values with normal p-values 2 Phi(-|z|), as
+//!   in fGarch and tseries. Where I is not positive definite the standard errors are NaN with a
+//!   warning. A coefficient at or below 1e-4 of alpha + beta, or a shape within 1e-3 of the
+//!   range of its upper bound [`GARCH_SHAPE_MAX`], is on its bound: it is held fixed for the
+//!   standard errors (its own are NaN) and reported in `at_bound` and the warnings.
+//! * **Forecasts.** [`garch_forecast`] runs the GARCH(p, q) recursion with E[e^2_s] = sigma^2_s
+//!   beyond the sample.
 //!
 //! # References
 //!
@@ -39,31 +46,97 @@
 //!   *Journal of Econometrics*, 31(3), 307-327.
 //! - Engle, R.F. (1982). Autoregressive conditional heteroscedasticity with estimates
 //!   of the variance of United Kingdom inflation. *Econometrica*, 50(4), 987-1007.
+//! - Nocedal, J. and Wright, S. J. (2006). *Numerical Optimization*, 2nd ed., ch. 3 and 6.
+//! - Würtz, D., Chalabi, Y. and Luksan, L. (2006). Parameter estimation of ARMA models with
+//!   GARCH/APARCH errors: an R and SPlus software implementation (fGarch).
 //!
-//! R equivalent: `fGarch::garchFit()`
+//! R equivalent: `fGarch::garchFit(~ garch(p, q), cond.dist = "norm" | "std")`.
 
+use ndarray::Array2;
 use serde::{Deserialize, Serialize};
+use statrs::function::gamma::{digamma, ln_gamma};
 use std::fmt;
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity};
+use crate::linalg::matrix_ops::cholesky;
+use crate::linalg::solve::{SingularPolicy, sym_inverse};
+use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity, try_zeros2};
 use crate::traits::SignificanceLevel;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
+use crate::traits::estimator::normal_p_value_two_sided;
+
+/// Upper bound of the Student-t shape nu (degrees of freedom): above it the standardised t cannot be told
+/// from the normal and lgamma((nu+1)/2) - lgamma(nu/2) loses digits to cancellation.
+pub const GARCH_SHAPE_MAX: f64 = 200.0;
+/// Shape at every starting value.
+const GARCH_SHAPE_START: f64 = 8.0;
+/// A variance coefficient at or below this fraction of alpha + beta is on its lower bound 0.
+const BOUND_REL: f64 = 1e-4;
+/// Newton steps after BFGS (each kept only if feasible, logLik does not fall, the criterion falls).
+const NEWTON_STEPS: usize = 3;
+const MAX_GARCH_ORDER: usize = 20;
+const MIN_OBS: usize = 20;
+const WOLFE_C1: f64 = 1e-4;
+const WOLFE_C2: f64 = 0.9;
+const LINE_SEARCH_TRIALS: usize = 40;
+const START_HESSIAN_STEP: f64 = 1e-4;
+/// A later start replaces the best one only above this relative margin.
+const TIE_REL: f64 = 1e-9;
+const CRITERION: &str = "scaled gradient";
+const NOT_PD: &str = "the observed information (negative Hessian of the log-likelihood) is not positive definite at the estimate: standard errors, z values and p-values are not reported (NaN)";
+const NO_HESSIAN: &str = "the Hessian of the log-likelihood could not be evaluated at the estimate: standard errors are not reported (NaN)";
+
+/// Conditional distribution of the standardised errors z_t = e_t / sqrt(h_t) (fGarch's `cond.dist`).
+///
+/// ```
+/// use p2a_core::forecasting::garch::GarchDistribution;
+///
+/// assert_eq!("t".parse::<GarchDistribution>()?, GarchDistribution::StudentT);
+/// assert_eq!(GarchDistribution::Normal.to_string(), "norm");
+/// # Ok::<(), p2a_core::errors::EconError>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GarchDistribution {
+    /// z_t ~ N(0, 1) (fGarch "norm").
+    #[default]
+    #[serde(rename = "norm", alias = "normal", alias = "gaussian")]
+    Normal,
+    /// z_t standardised Student-t with shape nu > 2 (fGarch "std").
+    #[serde(rename = "std", alias = "t", alias = "student_t", alias = "student")]
+    StudentT,
+}
+
+crate::option_enum!(
+    GarchDistribution,
+    crate::options::Choices {
+        option: "distribution",
+        values: &[
+            (&["norm", "normal", "gaussian"], GarchDistribution::Normal),
+            (
+                &["std", "t", "student_t", "student", "studentt"],
+                GarchDistribution::StudentT
+            ),
+        ],
+    }
+);
 
 /// Configuration for GARCH estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GarchConfig {
-    /// Order of ARCH terms (default: 1)
+    /// ARCH order p, 1..=20 (default 1).
     pub p: usize,
-    /// Order of GARCH terms (default: 1)
+    /// GARCH order q, 0..=20 (default 1).
     pub q: usize,
-    /// Include mean in the model (default: true)
+    /// Estimate a mean mu (default true); without it mu = 0.
     pub include_mean: bool,
-    /// Maximum iterations for optimization (default: 500)
+    /// BFGS iterations per starting value (default 500), at least 1; up to 3 Newton steps follow.
     pub max_iter: usize,
-    /// Convergence tolerance (default: 1e-8)
+    /// Convergence tolerance on max_i |d(loglik / n) / d theta_i| over the transformed parameters
+    /// (default 1e-8); finite and positive.
     pub tolerance: f64,
-    /// Distribution assumption: "normal" or "t" (default: "normal")
-    pub distribution: String,
+    /// Conditional distribution of the standardised errors (default normal).
+    #[serde(default)]
+    pub distribution: GarchDistribution,
 }
 
 impl Default for GarchConfig {
@@ -74,17 +147,21 @@ impl Default for GarchConfig {
             include_mean: true,
             max_iter: 500,
             tolerance: 1e-8,
-            distribution: "normal".to_string(),
+            distribution: GarchDistribution::Normal,
         }
     }
 }
 
 /// Result from GARCH estimation.
+///
+/// `std_errors`, `t_stats`, `p_values` and `significance` follow `param_names`. They are NaN for a
+/// parameter on its bound (`at_bound`) and for every parameter when the observed information is not
+/// positive definite (see `warnings`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GarchResult {
     /// Model specification string (e.g., "GARCH(1,1)")
     pub model: String,
-    /// Estimated mean (mu)
+    /// Estimated mean (mu); 0 without a mean term
     pub mu: f64,
     /// Estimated intercept in variance equation (omega)
     pub omega: f64,
@@ -92,86 +169,146 @@ pub struct GarchResult {
     pub alpha: Vec<f64>,
     /// GARCH coefficients (beta)
     pub beta: Vec<f64>,
-    /// Standard errors for all parameters
+    /// Standard errors, sqrt of the diagonal of the inverse observed information (NaN where
+    /// unavailable)
     pub std_errors: Vec<f64>,
-    /// t-statistics for all parameters
+    /// Wald z values, estimate / standard error
     pub t_stats: Vec<f64>,
-    /// p-values for all parameters
+    /// Two-sided normal p-values 2 Phi(-|z|)
     pub p_values: Vec<f64>,
     /// Significance levels for all parameters
     pub significance: Vec<SignificanceLevel>,
-    /// Conditional variances (sigma^2_t)
+    /// Conditional variances (h_t)
     #[serde(skip)]
     pub conditional_variance: Vec<f64>,
-    /// Standardized residuals (z_t = epsilon_t / sigma_t)
+    /// Standardized residuals (z_t = e_t / sqrt(h_t))
     #[serde(skip)]
     pub std_residuals: Vec<f64>,
     /// Log-likelihood value
     pub log_likelihood: f64,
-    /// AIC (Akaike Information Criterion)
+    /// AIC, -2 logLik + 2 k
     pub aic: f64,
-    /// BIC (Bayesian Information Criterion)
+    /// BIC, -2 logLik + k ln n
     pub bic: f64,
     /// Persistence (sum of alpha and beta)
     pub persistence: f64,
-    /// Unconditional variance
+    /// Unconditional variance omega / (1 - persistence)
     pub unconditional_variance: f64,
     /// Half-life of volatility shock (in periods)
     pub half_life: f64,
     /// Number of observations
     pub n_obs: usize,
-    /// Number of parameters
+    /// Number of parameters, including the shape of the t
     pub n_params: usize,
-    /// Convergence achieved
+    /// Convergence achieved (mirrors `convergence.converged`)
     pub converged: bool,
-    /// Number of iterations
+    /// BFGS iterations of the winning start plus its kept Newton steps
     pub iterations: usize,
+    /// Parameter names: [mu], omega, alpha1..p, beta1..q, [shape]
+    #[serde(default)]
+    pub param_names: Vec<String>,
+    /// Conditional distribution of the standardised errors
+    #[serde(default)]
+    pub distribution: GarchDistribution,
+    /// Student-t shape nu (t errors only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<f64>,
+    /// Covariance of the estimates in `param_names` order (NaN rows and columns where unavailable)
+    #[serde(default)]
+    pub vcov: Vec<Vec<f64>>,
+    /// Parameters held fixed on a bound for the standard errors
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at_bound: Vec<String>,
+    /// Convergence record of the optimiser
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// Warnings (bounds, inference, convergence)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl GarchResult {
+    /// Estimates in `param_names` order.
+    pub fn estimates(&self) -> Vec<f64> {
+        let mut v = Vec::with_capacity(self.param_names.len());
+        if self.param_names.first().is_some_and(|n| n == "mu") {
+            v.push(self.mu);
+        }
+        v.push(self.omega);
+        v.extend(&self.alpha);
+        v.extend(&self.beta);
+        if let Some(nu) = self.shape {
+            v.push(nu);
+        }
+        v
+    }
+}
+
+impl ResultNotes for GarchResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
+}
+
+/// `{x:.4e}` for small or large magnitudes, `{x:.6}` otherwise; non-finite as Rust prints it.
+fn fmt_num(x: f64) -> String {
+    if !x.is_finite() {
+        format!("{x}")
+    } else if x != 0.0 && (x.abs() < 1e-3 || x.abs() >= 1e5) {
+        format!("{x:.4e}")
+    } else {
+        format!("{x:.6}")
+    }
 }
 
 impl fmt::Display for GarchResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "\n{}", "=".repeat(60))?;
-        writeln!(f, "{:^60}", self.model)?;
-        writeln!(f, "{}", "=".repeat(60))?;
-
-        writeln!(f, "\nCoefficients:")?;
-        writeln!(f, "{:-<60}", "")?;
-        writeln!(
-            f,
-            "{:<15} {:>12} {:>12} {:>10} {:>8}",
-            "Parameter", "Estimate", "Std.Error", "t-value", "Pr(>|t|)"
-        )?;
-        writeln!(f, "{:-<60}", "")?;
-
-        // Parameter names
-        let mut param_names = vec!["mu", "omega"];
-        for i in 0..self.alpha.len() {
-            param_names.push(if i == 0 { "alpha1" } else { "alpha2" });
-        }
-        for i in 0..self.beta.len() {
-            param_names.push(if i == 0 { "beta1" } else { "beta2" });
-        }
-
-        // All parameter values
-        let mut params = vec![self.mu, self.omega];
-        params.extend(&self.alpha);
-        params.extend(&self.beta);
-
-        for (i, name) in param_names.iter().enumerate() {
-            if i < params.len() && i < self.std_errors.len() {
-                writeln!(
-                    f,
-                    "{:<15} {:>12.6} {:>12.6} {:>10.4} {:>8.4} {}",
-                    name,
-                    params[i],
-                    self.std_errors[i],
-                    self.t_stats[i],
-                    self.p_values[i],
-                    self.significance[i]
-                )?;
+        let rule = "=".repeat(64);
+        let dash = "-".repeat(64);
+        writeln!(f, "\n{rule}")?;
+        writeln!(f, "{:^64}", self.model)?;
+        writeln!(f, "{rule}")?;
+        match (self.distribution, self.shape) {
+            (GarchDistribution::StudentT, Some(nu)) => writeln!(
+                f,
+                "Conditional distribution: std (standardised Student-t errors, shape {nu:.4})"
+            )?,
+            (GarchDistribution::StudentT, None) => writeln!(
+                f,
+                "Conditional distribution: std (standardised Student-t errors)"
+            )?,
+            (GarchDistribution::Normal, _) => {
+                writeln!(f, "Conditional distribution: norm (normal errors)")?
             }
         }
-        writeln!(f, "{:-<60}", "")?;
+
+        writeln!(f, "\nCoefficients:")?;
+        writeln!(f, "{dash}")?;
+        writeln!(
+            f,
+            "{:<10} {:>12} {:>12} {:>10} {:>10}",
+            "Parameter", "Estimate", "Std.Error", "z value", "Pr(>|z|)"
+        )?;
+        writeln!(f, "{dash}")?;
+        let est = self.estimates();
+        for (i, name) in self.param_names.iter().enumerate() {
+            let get = |v: &[f64]| v.get(i).copied().unwrap_or(f64::NAN);
+            let stars = self.significance.get(i).map_or("", |s| s.stars());
+            writeln!(
+                f,
+                "{:<10} {:>12} {:>12} {:>10.4} {:>10.4} {}",
+                name,
+                fmt_num(get(&est)),
+                fmt_num(get(&self.std_errors)),
+                get(&self.t_stats),
+                get(&self.p_values),
+                stars
+            )?;
+        }
+        writeln!(f, "{dash}")?;
 
         writeln!(f, "\nModel Diagnostics:")?;
         writeln!(f, "  Log-Likelihood: {:.4}", self.log_likelihood)?;
@@ -179,11 +316,11 @@ impl fmt::Display for GarchResult {
         writeln!(f, "  BIC:            {:.4}", self.bic)?;
 
         writeln!(f, "\nVolatility Characteristics:")?;
-        writeln!(f, "  Persistence (α + β):   {:.4}", self.persistence)?;
+        writeln!(f, "  Persistence (α + β):   {:.6}", self.persistence)?;
         writeln!(
             f,
-            "  Unconditional Var:     {:.6}",
-            self.unconditional_variance
+            "  Unconditional Var:     {}",
+            fmt_num(self.unconditional_variance)
         )?;
         writeln!(
             f,
@@ -195,493 +332,1026 @@ impl fmt::Display for GarchResult {
         writeln!(f, "\nEstimation:")?;
         writeln!(f, "  Observations:   {}", self.n_obs)?;
         writeln!(f, "  Parameters:     {}", self.n_params)?;
-        writeln!(f, "  Converged:      {}", self.converged)?;
-        writeln!(f, "  Iterations:     {}", self.iterations)?;
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
-/// Fit a GARCH(p,q) model to a time series.
+/// Layout of the natural parameter vector [mu], omega, alpha_1..p, beta_1..q, [shape] and the data scale.
+#[derive(Debug, Clone)]
+struct Spec {
+    p: usize,
+    q: usize,
+    mean: bool,
+    student: bool,
+    n: usize,
+    xbar: f64,
+    s2: f64,
+    s: f64,
+}
+
+impl Spec {
+    fn new(x: &[f64], p: usize, q: usize, mean: bool, dist: GarchDistribution) -> Spec {
+        let n = x.len();
+        let xbar = x.iter().sum::<f64>() / n as f64;
+        let s2 = x.iter().map(|v| (v - xbar) * (v - xbar)).sum::<f64>() / n as f64;
+        Spec {
+            p,
+            q,
+            mean,
+            student: dist == GarchDistribution::StudentT,
+            n,
+            xbar,
+            s2,
+            s: s2.sqrt(),
+        }
+    }
+    fn m(&self) -> usize {
+        self.p.max(self.q)
+    }
+    /// Index of omega.
+    fn io(&self) -> usize {
+        usize::from(self.mean)
+    }
+    /// Indices of the alphas and betas.
+    fn coef(&self) -> std::ops::Range<usize> {
+        self.io() + 1..self.io() + 1 + self.p + self.q
+    }
+    /// Number of parameters.
+    fn k(&self) -> usize {
+        self.coef().end + usize::from(self.student)
+    }
+    fn names(&self) -> Vec<String> {
+        let mut v = Vec::with_capacity(self.k());
+        if self.mean {
+            v.push("mu".to_string());
+        }
+        v.push("omega".to_string());
+        v.extend((1..=self.p).map(|i| format!("alpha{i}")));
+        v.extend((1..=self.q).map(|j| format!("beta{j}")));
+        if self.student {
+            v.push("shape".to_string());
+        }
+        v
+    }
+}
+
+fn is_budget_error(e: &EconError) -> bool {
+    matches!(e, EconError::Cancelled(_) | EconError::ResourceLimit(_))
+}
+
+/// Log-likelihood and its analytic gradient in the natural parameters, in one pass.
 ///
-/// # Arguments
+/// `Ok(None)` when the point is infeasible (some h_t not positive and finite, a shape at or below
+/// 2, or a non-finite result); `Err` only for a cancelled budget. The derivatives d_t = dh_t /
+/// d(mu, omega, alpha, beta) follow the beta recursion; the last q of them sit in a ring buffer.
+fn loglik_grad(spec: &Spec, x: &[f64], nat: &[f64]) -> EconResult<Option<(f64, Vec<f64>)>> {
+    let (p, q, n, io) = (spec.p, spec.q, spec.n, spec.io());
+    let k = spec.k();
+    let kv = spec.coef().end;
+    let m = spec.m();
+    let mu = if spec.mean { nat[0] } else { 0.0 };
+    let omega = nat[io];
+    let alpha = &nat[io + 1..io + 1 + p];
+    let beta = &nat[io + 1 + p..io + 1 + p + q];
+    let nu = if spec.student { nat[k - 1] } else { f64::NAN };
+    if spec.student && !(nu > 2.0 && nu.is_finite()) {
+        return Ok(None);
+    }
+    let (mut se, mut se2) = (0.0, 0.0);
+    for &v in x {
+        let e = v - mu;
+        se += e;
+        se2 += e * e;
+    }
+    let ebar = se / n as f64;
+    let hbar = se2 / n as f64;
+
+    let mut g = vec![0.0; k];
+    let mut hring = vec![0.0; q.max(1)];
+    let mut ring = vec![0.0; q.max(1) * kv];
+    let mut d = vec![0.0; kv];
+    let (mut sum_norm, mut ll_t, mut g_nu) = (0.0, 0.0, 0.0);
+    let stride = checkpoint_stride(kv * (q + 1) + p + 1);
+    for t in 0..n {
+        if t % stride == 0 {
+            checkpoint()?;
+        }
+        let e = x[t] - mu;
+        let h;
+        if t < m {
+            h = hbar;
+            d.iter_mut().for_each(|v| *v = 0.0);
+            if spec.mean {
+                d[0] = -2.0 * ebar;
+            }
+        } else {
+            let mut ht = omega;
+            let mut dmu = 0.0;
+            for i in 1..=p {
+                let el = x[t - i] - mu;
+                ht += alpha[i - 1] * el * el;
+                dmu += alpha[i - 1] * el;
+            }
+            d.iter_mut().for_each(|v| *v = 0.0);
+            if spec.mean {
+                d[0] = -2.0 * dmu;
+            }
+            d[io] = 1.0;
+            for i in 1..=p {
+                let el = x[t - i] - mu;
+                d[io + i] = el * el;
+            }
+            for j in 1..=q {
+                let slot = (t - j) % q;
+                let hl = hring[slot];
+                ht += beta[j - 1] * hl;
+                d[io + p + j] += hl;
+                let b = beta[j - 1];
+                let prev = &ring[slot * kv..(slot + 1) * kv];
+                for (dc, pc) in d.iter_mut().zip(prev) {
+                    *dc += b * pc;
+                }
+            }
+            h = ht;
+        }
+        if !(h > 0.0 && h.is_finite()) {
+            return Ok(None);
+        }
+        if q > 0 {
+            let slot = t % q;
+            hring[slot] = h;
+            ring[slot * kv..(slot + 1) * kv].copy_from_slice(&d);
+        }
+        let (dl_dh, dl_de);
+        if spec.student {
+            let km = nu - 2.0;
+            let r = e * e / (h * km);
+            let l1p = r.ln_1p();
+            ll_t += -0.5 * h.ln() - (nu + 1.0) / 2.0 * l1p;
+            dl_dh = -0.5 / h + (nu + 1.0) / 2.0 * r / (h * (1.0 + r));
+            dl_de = -(nu + 1.0) * e / (h * km * (1.0 + r));
+            g_nu += -0.5 * l1p + (nu + 1.0) / 2.0 * r / (km * (1.0 + r));
+        } else {
+            sum_norm += h.ln() + e * e / h;
+            dl_dh = -0.5 * (1.0 / h - e * e / (h * h));
+            dl_de = -e / h;
+        }
+        for (gc, dc) in g.iter_mut().zip(&d) {
+            *gc += dl_dh * dc;
+        }
+        if spec.mean {
+            g[0] -= dl_de;
+        }
+    }
+    let nf = n as f64;
+    let ll = if spec.student {
+        g[k - 1] = nf
+            * (0.5 * digamma((nu + 1.0) / 2.0) - 0.5 * digamma(nu / 2.0) - 0.5 / (nu - 2.0))
+            + g_nu;
+        ll_t + nf
+            * (ln_gamma((nu + 1.0) / 2.0)
+                - ln_gamma(nu / 2.0)
+                - 0.5 * (std::f64::consts::PI * (nu - 2.0)).ln())
+    } else {
+        -0.5 * (nf * (2.0 * std::f64::consts::PI).ln() + sum_norm)
+    };
+    if !ll.is_finite() || g.iter().any(|v| !v.is_finite()) {
+        return Ok(None);
+    }
+    Ok(Some((ll, g)))
+}
+
+/// Conditional variances h_t and residuals e_t at `nat` by the same recursion, without the gradient.
+fn conditional_variances(spec: &Spec, x: &[f64], nat: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)> {
+    let (p, q, n, io) = (spec.p, spec.q, spec.n, spec.io());
+    let mu = if spec.mean { nat[0] } else { 0.0 };
+    let omega = nat[io];
+    let alpha = &nat[io + 1..io + 1 + p];
+    let beta = &nat[io + 1 + p..io + 1 + p + q];
+    let mut e = try_with_capacity(n, "the GARCH residuals")?;
+    e.extend(x.iter().map(|v| v - mu));
+    let hbar = e.iter().map(|v| v * v).sum::<f64>() / n as f64;
+    let mut h: Vec<f64> = try_with_capacity(n, "the GARCH conditional variances")?;
+    let stride = checkpoint_stride(p + q + 1);
+    for t in 0..n {
+        if t % stride == 0 {
+            checkpoint()?;
+        }
+        if t < spec.m() {
+            h.push(hbar);
+            continue;
+        }
+        let mut ht = omega;
+        for i in 1..=p {
+            ht += alpha[i - 1] * e[t - i] * e[t - i];
+        }
+        for j in 1..=q {
+            ht += beta[j - 1] * h[t - j];
+        }
+        h.push(ht);
+    }
+    Ok((h, e))
+}
+
+fn logistic(t: f64) -> f64 {
+    if t >= 0.0 {
+        1.0 / (1.0 + (-t).exp())
+    } else {
+        let z = t.exp();
+        z / (1.0 + z)
+    }
+}
+
+/// Natural parameters of the transformed vector theta.
+fn to_natural(spec: &Spec, th: &[f64]) -> Vec<f64> {
+    let k = spec.k();
+    let io = spec.io();
+    let mut nat = vec![0.0; k];
+    if spec.mean {
+        nat[0] = spec.xbar + spec.s * th[0];
+    }
+    nat[io] = spec.s2 * th[io].exp();
+    let c = spec.coef();
+    let top = th[c.clone()].iter().fold(0.0_f64, |a, &b| a.max(b));
+    let mut denom = (-top).exp();
+    for i in c.clone() {
+        nat[i] = (th[i] - top).exp();
+        denom += nat[i];
+    }
+    for v in &mut nat[c] {
+        *v /= denom;
+    }
+    if spec.student {
+        nat[k - 1] = 2.0 + (GARCH_SHAPE_MAX - 2.0) * logistic(th[k - 1]);
+    }
+    nat
+}
+
+/// Inverse of [`to_natural`].
+fn to_theta(spec: &Spec, nat: &[f64]) -> Vec<f64> {
+    let k = spec.k();
+    let io = spec.io();
+    let mut th = vec![0.0; k];
+    if spec.mean {
+        th[0] = (nat[0] - spec.xbar) / spec.s;
+    }
+    th[io] = (nat[io] / spec.s2).ln();
+    let c = spec.coef();
+    let rest = 1.0 - nat[c.clone()].iter().sum::<f64>();
+    for i in c {
+        th[i] = (nat[i] / rest).ln();
+    }
+    if spec.student {
+        let nu = nat[k - 1];
+        th[k - 1] = ((nu - 2.0) / (GARCH_SHAPE_MAX - nu)).ln();
+    }
+    th
+}
+
+/// Gradient with respect to theta from the gradient `g` in the natural parameters at `nat`.
+fn theta_gradient(spec: &Spec, nat: &[f64], g: &[f64]) -> Vec<f64> {
+    let k = spec.k();
+    let io = spec.io();
+    let mut gt = vec![0.0; k];
+    if spec.mean {
+        gt[0] = spec.s * g[0];
+    }
+    gt[io] = nat[io] * g[io];
+    let c = spec.coef();
+    let sum: f64 = c.clone().map(|i| nat[i] * g[i]).sum();
+    for i in c {
+        gt[i] = nat[i] * (g[i] - sum);
+    }
+    if spec.student {
+        let nu = nat[k - 1];
+        gt[k - 1] = (nu - 2.0) * (GARCH_SHAPE_MAX - nu) / (GARCH_SHAPE_MAX - 2.0) * g[k - 1];
+    }
+    gt
+}
+
+/// The convergence criterion max_i |d(loglik / n) / d theta_i|.
+fn criterion(spec: &Spec, nat: &[f64], g: &[f64]) -> f64 {
+    theta_gradient(spec, nat, g)
+        .iter()
+        .fold(0.0_f64, |a, v| a.max(v.abs()))
+        / spec.n as f64
+}
+
+/// f = -loglik / n and its gradient in theta; `Ok(None)` where infeasible.
+fn objective(spec: &Spec, x: &[f64], th: &[f64]) -> EconResult<Option<(f64, Vec<f64>)>> {
+    let nat = to_natural(spec, th);
+    let n = spec.n as f64;
+    Ok(loglik_grad(spec, x, &nat)?.map(|(ll, g)| {
+        let gt = theta_gradient(spec, &nat, &g);
+        (-ll / n, gt.iter().map(|v| -v / n).collect())
+    }))
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn max_abs(v: &[f64]) -> f64 {
+    v.iter().fold(0.0_f64, |a, x| a.max(x.abs()))
+}
+
+/// One accepted line-search point: step length, theta, f and gradient.
+type Trial = (f64, Vec<f64>, f64, Vec<f64>);
+
+/// Strong-Wolfe line search (Nocedal & Wright 2006, Alg. 3.5 with bisection zoom, Alg. 3.6).
+/// Returns the best Armijo point when the curvature condition is never met; `None` when there
+/// is no Armijo point.
+fn line_search<F>(
+    obj: &mut F,
+    th: &[f64],
+    f0: f64,
+    g0: &[f64],
+    d: &[f64],
+) -> EconResult<Option<Trial>>
+where
+    F: FnMut(&[f64]) -> EconResult<Option<(f64, Vec<f64>)>>,
+{
+    let dphi0 = dot(g0, d);
+    let mut best: Option<Trial> = None;
+    let mut eval =
+        |a: f64, best: &mut Option<Trial>| -> EconResult<Option<(f64, Vec<f64>, Vec<f64>)>> {
+            let ta: Vec<f64> = th.iter().zip(d).map(|(t, di)| t + a * di).collect();
+            match obj(&ta)? {
+                Some((fa, ga)) if fa.is_finite() => {
+                    if fa <= f0 + WOLFE_C1 * a * dphi0 && best.as_ref().is_none_or(|b| fa < b.2) {
+                        *best = Some((a, ta.clone(), fa, ga.clone()));
+                    }
+                    Ok(Some((fa, ga, ta)))
+                }
+                _ => Ok(None),
+            }
+        };
+    let (mut a_prev, mut f_prev) = (0.0, f0);
+    let mut a = 1.0;
+    let mut bracket: Option<(f64, f64, f64)> = None; // (lo, f_lo, hi)
+    for i in 0..LINE_SEARCH_TRIALS {
+        let r = eval(a, &mut best)?;
+        match r {
+            Some((fa, ga, ta)) if fa <= f0 + WOLFE_C1 * a * dphi0 && (i == 0 || fa < f_prev) => {
+                let dphi = dot(&ga, d);
+                if dphi.abs() <= -WOLFE_C2 * dphi0 {
+                    return Ok(Some((a, ta, fa, ga)));
+                }
+                if dphi >= 0.0 {
+                    bracket = Some((a, fa, a_prev));
+                    break;
+                }
+                a_prev = a;
+                f_prev = fa;
+                a *= 2.0;
+            }
+            _ => {
+                bracket = Some((a_prev, f_prev, a));
+                break;
+            }
+        }
+    }
+    if let Some((mut lo, mut f_lo, mut hi)) = bracket {
+        for _ in 0..LINE_SEARCH_TRIALS {
+            let a = 0.5 * (lo + hi);
+            match eval(a, &mut best)? {
+                Some((fa, ga, ta)) if fa <= f0 + WOLFE_C1 * a * dphi0 && fa < f_lo => {
+                    let dphi = dot(&ga, d);
+                    if dphi.abs() <= -WOLFE_C2 * dphi0 {
+                        return Ok(Some((a, ta, fa, ga)));
+                    }
+                    if dphi * (hi - lo) >= 0.0 {
+                        hi = lo;
+                    }
+                    lo = a;
+                    f_lo = fa;
+                }
+                _ => hi = a,
+            }
+        }
+    }
+    Ok(best)
+}
+
+/// Inverse of the central-difference Hessian of f in theta at `th` (step 1e-4, symmetrised) when
+/// that Hessian is positive definite; the identity otherwise. The flag says which.
+fn start_inverse_hessian<F>(obj: &mut F, th: &[f64]) -> EconResult<(Array2<f64>, bool)>
+where
+    F: FnMut(&[f64]) -> EconResult<Option<(f64, Vec<f64>)>>,
+{
+    let k = th.len();
+    let identity = Array2::eye(k);
+    let mut hess = try_zeros2(k, k, "the GARCH start Hessian")?;
+    for j in 0..k {
+        let mut tp = th.to_vec();
+        tp[j] += START_HESSIAN_STEP;
+        let mut tm = th.to_vec();
+        tm[j] -= START_HESSIAN_STEP;
+        let (Some((_, gp)), Some((_, gm))) = (obj(&tp)?, obj(&tm)?) else {
+            return Ok((identity, false));
+        };
+        for i in 0..k {
+            hess[[i, j]] = (gp[i] - gm[i]) / (2.0 * START_HESSIAN_STEP);
+        }
+    }
+    let sym = (&hess + &hess.t()) * 0.5;
+    if cholesky(&sym.view()).is_err() {
+        return Ok((identity, false));
+    }
+    match sym_inverse(sym.view(), SingularPolicy::Error, "the GARCH start Hessian") {
+        Ok(inv) => Ok((inv.inverse, true)),
+        Err(e) if is_budget_error(&e) => Err(e),
+        Err(_) => Ok((identity, false)),
+    }
+}
+
+/// End point of a BFGS run.
+struct BfgsOut {
+    th: Vec<f64>,
+    f: f64,
+    iterations: usize,
+}
+
+/// BFGS in theta (Nocedal & Wright 2006, Alg. 6.1) until max |grad f| <= `tol`, `max_iter`
+/// iterations or a failed line search. `None` when f is not finite at `th0`.
+fn bfgs<F>(obj: &mut F, th0: Vec<f64>, max_iter: usize, tol: f64) -> EconResult<Option<BfgsOut>>
+where
+    F: FnMut(&[f64]) -> EconResult<Option<(f64, Vec<f64>)>>,
+{
+    let Some((mut f, mut g)) = obj(&th0)? else {
+        return Ok(None);
+    };
+    let k = th0.len();
+    let mut th = th0;
+    let (mut b, mut scaled) = start_inverse_hessian(obj, &th)?;
+    let mut iterations = 0;
+    while max_abs(&g) > tol && iterations < max_iter {
+        checkpoint()?;
+        let mut d: Vec<f64> = (0..k)
+            .map(|i| -(0..k).map(|j| b[[i, j]] * g[j]).sum::<f64>())
+            .collect();
+        if dot(&d, &g) >= 0.0 {
+            b = Array2::eye(k);
+            scaled = false;
+            d = g.iter().map(|v| -v).collect();
+        }
+        let Some((a, th_new, f_new, g_new)) = line_search(obj, &th, f, &g, &d)? else {
+            break;
+        };
+        let s: Vec<f64> = d.iter().map(|v| a * v).collect();
+        let y: Vec<f64> = g_new.iter().zip(&g).map(|(n, o)| n - o).collect();
+        let sy = dot(&s, &y);
+        if sy > 0.0 {
+            if !scaled {
+                b = Array2::eye(k) * (sy / dot(&y, &y));
+                scaled = true;
+            }
+            let by: Vec<f64> = (0..k)
+                .map(|i| (0..k).map(|j| b[[i, j]] * y[j]).sum())
+                .collect();
+            let rho = 1.0 / sy;
+            let c = rho + rho * rho * dot(&y, &by);
+            for i in 0..k {
+                for j in 0..k {
+                    b[[i, j]] += c * s[i] * s[j] - rho * (by[i] * s[j] + s[i] * by[j]);
+                }
+            }
+        }
+        th = th_new;
+        f = f_new;
+        g = g_new;
+        iterations += 1;
+    }
+    Ok(Some(BfgsOut { th, f, iterations }))
+}
+
+/// The three starting values: (sum alpha, sum beta) = (0.1, 0.8), (0.05, 0.05), (0.3, 0.6)
+/// (sum beta = 0 without GARCH terms), split evenly over the lags, with omega = s^2 (1 - sum),
+/// mu = xbar and shape 8.
+fn starts(spec: &Spec) -> [Vec<f64>; 3] {
+    [(0.1, 0.8), (0.05, 0.05), (0.3, 0.6)].map(|(sa, sb)| {
+        let sb = if spec.q == 0 { 0.0 } else { sb };
+        let mut v = Vec::with_capacity(spec.k());
+        if spec.mean {
+            v.push(spec.xbar);
+        }
+        v.push(spec.s2 * (1.0 - sa - sb));
+        v.extend(std::iter::repeat_n(sa / spec.p as f64, spec.p));
+        v.extend(std::iter::repeat_n(sb / spec.q.max(1) as f64, spec.q));
+        if spec.student {
+            v.push(GARCH_SHAPE_START);
+        }
+        v
+    })
+}
+
+/// Parameters on a bound: a coefficient at or below BOUND_REL of alpha + beta, or a shape above
+/// GARCH_SHAPE_MAX - 1e-3 (GARCH_SHAPE_MAX - 2).
+fn at_bounds(spec: &Spec, nat: &[f64]) -> Vec<bool> {
+    let k = spec.k();
+    let mut fixed = vec![false; k];
+    let c = spec.coef();
+    let total: f64 = nat[c.clone()].iter().sum();
+    for i in c {
+        fixed[i] = nat[i] <= BOUND_REL * total;
+    }
+    if spec.student {
+        fixed[k - 1] = nat[k - 1] > GARCH_SHAPE_MAX - 1e-3 * (GARCH_SHAPE_MAX - 2.0);
+    }
+    fixed
+}
+
+/// Hessian of the log-likelihood on the free parameters by central differences of the analytic
+/// gradient (steps: mu 1e-5 s; omega, alpha, beta 1e-6 |value|; shape 1e-6 of its distance to the
+/// nearer bound), symmetrised. `None` when a step is not positive or a gradient is infeasible.
+fn hessian_free(
+    spec: &Spec,
+    x: &[f64],
+    nat: &[f64],
+    fixed: &[bool],
+) -> EconResult<Option<Array2<f64>>> {
+    let k = spec.k();
+    let free: Vec<usize> = (0..k).filter(|&i| !fixed[i]).collect();
+    let kf = free.len();
+    let mut hess = try_zeros2(kf, kf, "the GARCH Hessian")?;
+    for (cj, &j) in free.iter().enumerate() {
+        checkpoint()?;
+        let step = if spec.mean && j == 0 {
+            1e-5 * spec.s
+        } else if spec.student && j == k - 1 {
+            1e-6 * (nat[j] - 2.0).min(GARCH_SHAPE_MAX - nat[j])
+        } else {
+            1e-6 * nat[j].abs()
+        };
+        if !(step > 0.0 && step.is_finite()) {
+            return Ok(None);
+        }
+        let mut up = nat.to_vec();
+        up[j] += step;
+        let mut down = nat.to_vec();
+        down[j] -= step;
+        let (Some((_, gp)), Some((_, gm))) =
+            (loglik_grad(spec, x, &up)?, loglik_grad(spec, x, &down)?)
+        else {
+            return Ok(None);
+        };
+        for (ci, &i) in free.iter().enumerate() {
+            hess[[ci, cj]] = (gp[i] - gm[i]) / (2.0 * step);
+        }
+    }
+    Ok(Some((&hess + &hess.t()) * 0.5))
+}
+
+/// Whether `nat` lies in the parameter space: omega > 0, coefficients >= 0 with sum < 1, 2 < nu < max.
+fn feasible(spec: &Spec, nat: &[f64]) -> bool {
+    let c = spec.coef();
+    let ok = nat[spec.io()] > 0.0
+        && nat[c.clone()].iter().all(|v| *v >= 0.0)
+        && nat[c].iter().sum::<f64>() < 1.0
+        && nat.iter().all(|v| v.is_finite());
+    let k = spec.k();
+    ok && (!spec.student || (nat[k - 1] > 2.0 && nat[k - 1] < GARCH_SHAPE_MAX))
+}
+
+/// Up to NEWTON_STEPS Newton steps on the free parameters; each kept only when the candidate is
+/// feasible, its log-likelihood does not fall (1e-12 relative) and its criterion falls. Returns
+/// the polished point and the number of kept steps.
+fn newton_polish(
+    spec: &Spec,
+    x: &[f64],
+    nat: &[f64],
+    fixed: &[bool],
+) -> EconResult<(Vec<f64>, usize)> {
+    let mut cur = nat.to_vec();
+    let Some((mut ll, mut g)) = loglik_grad(spec, x, &cur)? else {
+        return Ok((cur, 0));
+    };
+    let mut crit = criterion(spec, &cur, &g);
+    let free: Vec<usize> = (0..spec.k()).filter(|&i| !fixed[i]).collect();
+    let mut kept = 0;
+    for _ in 0..NEWTON_STEPS {
+        checkpoint()?;
+        let Some(h) = hessian_free(spec, x, &cur, fixed)? else {
+            break;
+        };
+        let info = -h;
+        let inv = match sym_inverse(info.view(), SingularPolicy::Error, "the GARCH Hessian") {
+            Ok(inv) => inv.inverse,
+            Err(e) if is_budget_error(&e) => return Err(e),
+            Err(_) => break,
+        };
+        let mut cand = cur.clone();
+        for (ci, &i) in free.iter().enumerate() {
+            cand[i] += free
+                .iter()
+                .enumerate()
+                .map(|(cj, &j)| inv[[ci, cj]] * g[j])
+                .sum::<f64>();
+        }
+        if !feasible(spec, &cand) {
+            break;
+        }
+        let Some((ll_c, g_c)) = loglik_grad(spec, x, &cand)? else {
+            break;
+        };
+        let crit_c = criterion(spec, &cand, &g_c);
+        if ll_c < ll - 1e-12 * ll.abs() || crit_c >= crit {
+            break;
+        }
+        cur = cand;
+        ll = ll_c;
+        g = g_c;
+        crit = crit_c;
+        kept += 1;
+    }
+    Ok((cur, kept))
+}
+
+/// Standard errors and covariance from the inverse observed information on the free parameters.
+struct Inference {
+    std_errors: Vec<f64>,
+    vcov: Vec<Vec<f64>>,
+    warning: Option<String>,
+}
+
+fn inference(spec: &Spec, x: &[f64], nat: &[f64], fixed: &[bool]) -> EconResult<Inference> {
+    let k = spec.k();
+    let mut out = Inference {
+        std_errors: vec![f64::NAN; k],
+        vcov: vec![vec![f64::NAN; k]; k],
+        warning: None,
+    };
+    let Some(h) = hessian_free(spec, x, nat, fixed)? else {
+        out.warning = Some(NO_HESSIAN.to_string());
+        return Ok(out);
+    };
+    let info = -h;
+    let kf = info.nrows();
+    let diag: Vec<f64> = (0..kf).map(|i| info[[i, i]]).collect();
+    if diag.iter().any(|v| !(*v > 0.0 && v.is_finite())) {
+        out.warning = Some(NOT_PD.to_string());
+        return Ok(out);
+    }
+    // Equilibrated so that the check is scale free (omega ~1e-6 next to beta ~0.9).
+    let mut eq = info.clone();
+    for i in 0..kf {
+        for j in 0..kf {
+            eq[[i, j]] /= (diag[i] * diag[j]).sqrt();
+        }
+    }
+    if cholesky(&eq.view()).is_err() {
+        out.warning = Some(NOT_PD.to_string());
+        return Ok(out);
+    }
+    let inv = match sym_inverse(
+        info.view(),
+        SingularPolicy::Error,
+        "the GARCH observed information",
+    ) {
+        Ok(inv) => inv.inverse,
+        Err(e) if is_budget_error(&e) => return Err(e),
+        Err(e) => {
+            out.warning = Some(format!("standard errors are not reported (NaN): {e}"));
+            return Ok(out);
+        }
+    };
+    let free: Vec<usize> = (0..k).filter(|&i| !fixed[i]).collect();
+    for (ci, &i) in free.iter().enumerate() {
+        for (cj, &j) in free.iter().enumerate() {
+            out.vcov[i][j] = inv[[ci, cj]];
+        }
+        if inv[[ci, ci]] > 0.0 {
+            out.std_errors[i] = inv[[ci, ci]].sqrt();
+        }
+    }
+    Ok(out)
+}
+
+/// Fit a GARCH(p, q) model by conditional maximum likelihood (see the module docs).
 ///
-/// * `data` - Time series data (e.g., returns)
-/// * `config` - GARCH configuration (optional, uses defaults if None)
+/// # Errors
 ///
-/// # Returns
-///
-/// `GarchResult` containing parameter estimates and diagnostics, or
-/// [`EconError::Cancelled`] when the budget installed with
-/// [`crate::resource::with_budget`] is cancelled or past its deadline. The
-/// budget is checked once per optimiser iteration, once per parameter of the
-/// standard-error pass, and about every 65,536 operations of each
-/// likelihood evaluation.
+/// * [`EconError::InsufficientData`]: fewer than 20 observations, or no more observations than
+///   parameters.
+/// * [`EconError::InvalidSpecification`]: p = 0, an order above 20 or at least n, `max_iter` = 0,
+///   a tolerance that is not finite and positive, or a constant series.
+/// * [`EconError::NullValues`] / [`EconError::NonFiniteValues`]: NaN or infinite data.
+/// * [`EconError::DivergenceError`]: the log-likelihood is not finite at any starting value.
+/// * [`EconError::Cancelled`] when the budget installed with [`crate::resource::with_budget`] is
+///   cancelled or past its deadline: it is checked once per optimiser iteration, once per
+///   Hessian column and about every 65,536 operations of each likelihood pass.
 ///
 /// # Example
 ///
-/// ```ignore
-/// use p2a_core::forecasting::garch::{garch, GarchConfig};
+/// ```
+/// use p2a_core::forecasting::garch::{GarchConfig, garch, garch_forecast};
 ///
-/// let returns = vec![0.01, -0.02, 0.015, -0.005, 0.03, -0.01];
-/// let config = GarchConfig::default();
-/// let result = garch(&returns, Some(config)).unwrap();
-/// println!("Persistence: {}", result.persistence);
+/// // volatility clustering: h_t = 2e-6 + 0.1 e_{t-1}^2 + 0.85 h_{t-1}, z_t a fixed sequence in (-1.7, 1.7)
+/// let (mut h, mut e) = (2e-5_f64, 0.0_f64);
+/// let mut x = Vec::new();
+/// for t in 0..400_u64 {
+///     h = 2e-6 + 0.1 * e * e + 0.85 * h;
+///     let z = ((t * 7919 + 13) % 1000) as f64 / 1000.0 * 3.4 - 1.7;
+///     e = h.sqrt() * z;
+///     x.push(5e-4 + e);
+/// }
+/// let fit = garch(&x, Some(GarchConfig::default()))?;
+/// assert_eq!(fit.param_names, ["mu", "omega", "alpha1", "beta1"]);
+/// let (variance, volatility, _mean) = garch_forecast(&fit, 5)?;
+/// assert_eq!(variance.len(), 5);
+/// assert!((volatility[0] - variance[0].sqrt()).abs() < 1e-15);
+/// # Ok::<(), p2a_core::errors::EconError>(())
 /// ```
 pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResult> {
     let config = config.unwrap_or_default();
-
+    validate_inputs(data, &config)?;
     let n = data.len();
-    if n < 20 {
-        return Err(EconError::InsufficientData {
-            required: 20,
-            provided: n,
-            context: "GARCH estimation requires at least 20 observations".to_string(),
-        });
-    }
-
-    // Validate the ARCH/GARCH orders. `p`/`q` come from the caller (and, via the
-    // MCP/CLI tools, ultimately from untrusted input). The warm-up loop in
-    // `compute_garch_quantities` indexes the series up to `p.max(q)`, so an order
-    // at or beyond `n` would index out of bounds and panic. Also cap the orders
-    // to a sane maximum to avoid pathological parameter counts.
-    const MAX_GARCH_ORDER: usize = 20;
-    if config.p > MAX_GARCH_ORDER || config.q > MAX_GARCH_ORDER {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "GARCH orders p={} and q={} must not exceed {}",
-                config.p, config.q, MAX_GARCH_ORDER
-            ),
-        });
-    }
-    if config.p.max(config.q) >= n {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "GARCH orders p={} and q={} must be smaller than the number of observations ({})",
-                config.p, config.q, n
-            ),
-        });
-    }
-
-    // Calculate initial estimates
-    let mean: f64 = data.iter().sum::<f64>() / n as f64;
-    let residuals: Vec<f64> = data.iter().map(|&x| x - mean).collect();
-    let sample_var: f64 = residuals.iter().map(|&r| r * r).sum::<f64>() / (n - 1) as f64;
-
-    // Initial parameter guesses
-    // For GARCH(1,1): omega ≈ var * (1 - alpha - beta), alpha ≈ 0.1, beta ≈ 0.8
-    let init_alpha: f64 = 0.1;
-    let init_beta: f64 = 0.8;
-    let multiplier: f64 = (1.0_f64 - init_alpha - init_beta).max(0.01);
-    let init_omega = sample_var * multiplier;
-
-    // Estimate using BFGS-like optimization
-    let (mu, omega, alpha, beta, converged, iterations) = estimate_garch_params(
+    let spec = Spec::new(
         data,
         config.p,
         config.q,
-        mean,
-        init_omega,
-        init_alpha,
-        init_beta,
-        config.max_iter,
-        config.tolerance,
         config.include_mean,
-    )?;
+        config.distribution,
+    );
+    let k = spec.k();
 
-    // Compute conditional variances
-    let (cond_var, std_resid, log_lik) = compute_garch_quantities(data, mu, omega, &alpha, &beta)?;
+    // BFGS from each start; the highest log-likelihood wins (ties go to the earlier start).
+    let mut best: Option<(f64, Vec<f64>, usize)> = None;
+    let mut obj = |th: &[f64]| objective(&spec, data, th);
+    for start in starts(&spec) {
+        let Some(out) = bfgs(
+            &mut obj,
+            to_theta(&spec, &start),
+            config.max_iter,
+            config.tolerance,
+        )?
+        else {
+            continue;
+        };
+        let ll = -out.f * n as f64;
+        if best
+            .as_ref()
+            .is_none_or(|(b, _, _)| ll > b + TIE_REL * b.abs().max(1.0))
+        {
+            best = Some((ll, to_natural(&spec, &out.th), out.iterations));
+        }
+    }
+    let Some((_, nat0, bfgs_iterations)) = best else {
+        return Err(EconError::DivergenceError {
+            iteration: 0,
+            suggestion: "the log-likelihood is not finite at any starting value; check the data for extreme values".to_string(),
+        });
+    };
 
-    // Compute information criteria
-    let n_params = if config.include_mean { 2 } else { 1 } + config.p + config.q;
-    let aic = -2.0 * log_lik + 2.0 * n_params as f64;
-    let bic = -2.0 * log_lik + (n_params as f64) * (n as f64).ln();
+    // Newton polish of the winner, then the bounds and inference at the final estimate.
+    let (nat, kept) = newton_polish(&spec, data, &nat0, &at_bounds(&spec, &nat0))?;
+    let Some((log_lik, grad)) = loglik_grad(&spec, data, &nat)? else {
+        return Err(EconError::Computation(
+            "the GARCH log-likelihood is not finite at the estimate".to_string(),
+        ));
+    };
+    let crit = criterion(&spec, &nat, &grad);
+    let fixed = at_bounds(&spec, &nat);
+    let inf = inference(&spec, data, &nat, &fixed)?;
+    let (h, e) = conditional_variances(&spec, data, &nat)?;
+    let std_residuals: Vec<f64> = e.iter().zip(&h).map(|(e, h)| e / h.sqrt()).collect();
 
-    // Compute persistence and unconditional variance
-    let alpha_sum: f64 = alpha.iter().sum();
-    let beta_sum: f64 = beta.iter().sum();
-    let persistence = alpha_sum + beta_sum;
+    let names = spec.names();
+    let t_stats: Vec<f64> = nat
+        .iter()
+        .zip(&inf.std_errors)
+        .map(|(v, se)| v / se)
+        .collect();
+    let p_values: Vec<f64> = t_stats
+        .iter()
+        .map(|z| normal_p_value_two_sided(*z))
+        .collect();
+    let significance = p_values
+        .iter()
+        .map(|p| SignificanceLevel::from_p_value(*p))
+        .collect();
 
+    let io = spec.io();
+    let mu = if spec.mean { nat[0] } else { 0.0 };
+    let omega = nat[io];
+    let alpha = nat[io + 1..io + 1 + spec.p].to_vec();
+    let beta = nat[io + 1 + spec.p..spec.coef().end].to_vec();
+    let shape = spec.student.then(|| nat[k - 1]);
+    let persistence: f64 = alpha.iter().sum::<f64>() + beta.iter().sum::<f64>();
     let unconditional_variance = if persistence < 1.0 {
         omega / (1.0 - persistence)
     } else {
-        sample_var
+        f64::INFINITY
     };
-
-    // Half-life of volatility shock
     let half_life = if persistence > 0.0 && persistence < 1.0 {
-        (0.5_f64).ln() / persistence.ln()
+        0.5_f64.ln() / persistence.ln()
     } else {
         f64::INFINITY
     };
 
-    // Compute standard errors using numerical Hessian approximation
-    let (std_errors, t_stats, p_values, significance) =
-        compute_garch_inference(data, mu, omega, &alpha, &beta, config.include_mean)?;
-
-    let model = format!("GARCH({},{})", config.p, config.q);
+    let iterations = bfgs_iterations + kept;
+    let convergence = Convergence::new(
+        crit <= config.tolerance,
+        iterations,
+        config.max_iter.saturating_add(NEWTON_STEPS),
+        CRITERION,
+        crit,
+        config.tolerance,
+    );
+    let mut warnings = Vec::new();
+    let mut at_bound = Vec::new();
+    for (i, name) in names.iter().enumerate().filter(|(i, _)| fixed[*i]) {
+        let v = nat[i];
+        warnings.push(if spec.student && i == k - 1 {
+            format!(
+                "shape = {v:.4} is at its upper bound {GARCH_SHAPE_MAX}: the standardised residuals show no excess kurtosis over the normal; it is held fixed for the standard errors (distribution = norm is the limit)"
+            )
+        } else {
+            format!(
+                "{name} = {v:.3e} is at its lower bound 0 (at most 1e-4 of alpha + beta): it is held fixed for the standard errors, which are conditional on it; consider a model without this term"
+            )
+        });
+        at_bound.push(name.clone());
+    }
+    warnings.extend(inf.warning);
+    warnings.extend(convergence.note("GARCH"));
 
     Ok(GarchResult {
-        model,
+        model: format!("GARCH({},{})", config.p, config.q),
         mu,
         omega,
         alpha,
         beta,
-        std_errors,
+        std_errors: inf.std_errors,
         t_stats,
         p_values,
         significance,
-        conditional_variance: cond_var,
-        std_residuals: std_resid,
+        conditional_variance: h,
+        std_residuals,
         log_likelihood: log_lik,
-        aic,
-        bic,
+        aic: -2.0 * log_lik + 2.0 * k as f64,
+        bic: -2.0 * log_lik + k as f64 * (n as f64).ln(),
         persistence,
         unconditional_variance,
         half_life,
         n_obs: n,
-        n_params,
-        converged,
+        n_params: k,
+        converged: convergence.converged,
         iterations,
+        param_names: names,
+        distribution: config.distribution,
+        shape,
+        vcov: inf.vcov,
+        at_bound,
+        convergence,
+        warnings,
     })
 }
 
-/// Estimate GARCH parameters using quasi-Newton optimization.
-fn estimate_garch_params(
-    data: &[f64],
-    p: usize,
-    q: usize,
-    init_mu: f64,
-    init_omega: f64,
-    init_alpha: f64,
-    init_beta: f64,
-    max_iter: usize,
-    tol: f64,
-    include_mean: bool,
-) -> EconResult<(f64, f64, Vec<f64>, Vec<f64>, bool, usize)> {
-    // Use BFGS-like optimization with transformed parameters for constraints
-    // Transform: theta = log(param) to ensure positivity
-    // For stationarity, we parameterize alpha + beta < 1
-
-    let _n = data.len();
-
-    // Start with initial values
-    let mut mu = if include_mean { init_mu } else { 0.0 };
-    let mut omega = init_omega.max(1e-10);
-    let mut alpha_vec = vec![init_alpha / p as f64; p];
-    let mut beta_vec = vec![init_beta / q as f64; q];
-
-    // Simple gradient descent with projection
-    let step_size = 0.01;
-    let mut prev_ll = f64::NEG_INFINITY;
-    let mut converged = false;
-    let mut iter = 0;
-
-    for i in 0..max_iter {
-        // Each iteration makes up to 5 + 2(p + q) likelihood passes over the series;
-        // each pass also checks the budget as it goes.
-        checkpoint()?;
-        iter = i + 1;
-
-        // Compute current log-likelihood
-        let (_, _, ll) = compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_vec)?;
-
-        // Check convergence
-        if (ll - prev_ll).abs() < tol {
-            converged = true;
-            break;
-        }
-        prev_ll = ll;
-
-        // Compute numerical gradients
-        let eps = 1e-6;
-
-        // Gradient for mu
-        if include_mean {
-            let (_, _, ll_plus) =
-                compute_garch_quantities(data, mu + eps, omega, &alpha_vec, &beta_vec)?;
-            let (_, _, ll_minus) =
-                compute_garch_quantities(data, mu - eps, omega, &alpha_vec, &beta_vec)?;
-            let grad_mu = (ll_plus - ll_minus) / (2.0 * eps);
-            mu += step_size * grad_mu;
-        }
-
-        // Gradient for omega
-        let (_, _, ll_plus) =
-            compute_garch_quantities(data, mu, omega + eps, &alpha_vec, &beta_vec)?;
-        let (_, _, ll_minus) =
-            compute_garch_quantities(data, mu, (omega - eps).max(1e-10), &alpha_vec, &beta_vec)?;
-        let grad_omega = (ll_plus - ll_minus) / (2.0 * eps);
-        omega = (omega + step_size * grad_omega).max(1e-10);
-
-        // Gradients for alpha
-        for j in 0..p {
-            let mut alpha_plus = alpha_vec.clone();
-            let mut alpha_minus = alpha_vec.clone();
-            alpha_plus[j] += eps;
-            alpha_minus[j] = (alpha_minus[j] - eps).max(0.0);
-
-            let (_, _, ll_plus) =
-                compute_garch_quantities(data, mu, omega, &alpha_plus, &beta_vec)?;
-            let (_, _, ll_minus) =
-                compute_garch_quantities(data, mu, omega, &alpha_minus, &beta_vec)?;
-            let grad = (ll_plus - ll_minus) / (2.0 * eps);
-            alpha_vec[j] = (alpha_vec[j] + step_size * grad).max(0.0);
-        }
-
-        // Gradients for beta
-        for j in 0..q {
-            let mut beta_plus = beta_vec.clone();
-            let mut beta_minus = beta_vec.clone();
-            beta_plus[j] += eps;
-            beta_minus[j] = (beta_minus[j] - eps).max(0.0);
-
-            let (_, _, ll_plus) =
-                compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_plus)?;
-            let (_, _, ll_minus) =
-                compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_minus)?;
-            let grad = (ll_plus - ll_minus) / (2.0 * eps);
-            beta_vec[j] = (beta_vec[j] + step_size * grad).max(0.0);
-        }
-
-        // Project to stationarity constraint
-        let persistence: f64 = alpha_vec.iter().sum::<f64>() + beta_vec.iter().sum::<f64>();
-        if persistence >= 0.999 {
-            let scale = 0.99 / persistence;
-            for a in &mut alpha_vec {
-                *a *= scale;
-            }
-            for b in &mut beta_vec {
-                *b *= scale;
-            }
-        }
-    }
-
-    Ok((mu, omega, alpha_vec, beta_vec, converged, iter))
-}
-
-/// Compute conditional variances, standardized residuals, and log-likelihood.
-///
-/// One pass costs O(n(p + q)) and the optimiser makes up to 5 + 2(p + q) of them
-/// per iteration, so the recursion checks the budget about every 65,536
-/// operations: a single pass over a long series also stops at the deadline.
-fn compute_garch_quantities(
-    data: &[f64],
-    mu: f64,
-    omega: f64,
-    alpha: &[f64],
-    beta: &[f64],
-) -> EconResult<(Vec<f64>, Vec<f64>, f64)> {
+/// Refuse settings and data the likelihood cannot use, before any work.
+fn validate_inputs(data: &[f64], config: &GarchConfig) -> EconResult<()> {
     let n = data.len();
-    let p = alpha.len();
-    let q = beta.len();
-
-    // Initialize with unconditional variance
-    let persistence: f64 = alpha.iter().sum::<f64>() + beta.iter().sum::<f64>();
-    let uncond_var = if persistence < 1.0 && omega > 0.0 {
-        omega / (1.0 - persistence)
-    } else {
-        // Fallback to sample variance
-        let mean: f64 = data.iter().sum::<f64>() / n as f64;
-        data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n as f64
-    };
-
-    let mut cond_var = vec![uncond_var; n];
-    let residuals: Vec<f64> = data.iter().map(|&x| x - mu).collect();
-    let mut std_resid = vec![0.0; n];
-
-    // Start from max(p, q) to have enough history
-    let start = p.max(q);
-
-    // Warm up with unconditional variance
-    for t in 0..start {
-        cond_var[t] = uncond_var;
-        std_resid[t] = residuals[t] / cond_var[t].sqrt().max(1e-10);
+    if n < MIN_OBS {
+        return Err(EconError::InsufficientData {
+            required: MIN_OBS,
+            provided: n,
+            context: "GARCH estimation requires at least 20 observations".to_string(),
+        });
     }
-
-    // GARCH recursion: each step costs O(p + q)
-    let stride = checkpoint_stride(p + q + 1);
-    for (step, t) in (start..n).enumerate() {
-        if step % stride == 0 {
-            checkpoint()?;
-        }
-        let mut sigma2 = omega;
-
-        // ARCH terms
-        for i in 0..p {
-            if t > i {
-                sigma2 += alpha[i] * residuals[t - 1 - i].powi(2);
-            }
-        }
-
-        // GARCH terms
-        for j in 0..q {
-            if t > j {
-                sigma2 += beta[j] * cond_var[t - 1 - j];
-            }
-        }
-
-        cond_var[t] = sigma2.max(1e-10);
-        std_resid[t] = residuals[t] / cond_var[t].sqrt();
+    let nan = data.iter().filter(|v| v.is_nan()).count();
+    if nan > 0 {
+        return Err(EconError::NullValues {
+            column: "data".into(),
+            count: nan,
+        });
     }
-
-    // Log-likelihood (Gaussian)
-    let log_lik = -0.5 * (n as f64) * (2.0 * std::f64::consts::PI).ln()
-        - 0.5 * cond_var.iter().map(|&v| v.ln()).sum::<f64>()
-        - 0.5 * std_resid.iter().map(|&z| z.powi(2)).sum::<f64>();
-
-    Ok((cond_var, std_resid, log_lik))
+    let inf = data.iter().filter(|v| v.is_infinite()).count();
+    if inf > 0 {
+        return Err(EconError::NonFiniteValues {
+            column: "data".into(),
+            count: inf,
+        });
+    }
+    let (p, q) = (config.p, config.q);
+    // `p`/`q` come from the caller (and, via the MCP/CLI tools, from untrusted input).
+    if p > MAX_GARCH_ORDER || q > MAX_GARCH_ORDER {
+        return Err(EconError::InvalidSpecification {
+            message: format!("GARCH orders p={p} and q={q} must not exceed {MAX_GARCH_ORDER}"),
+        });
+    }
+    if p == 0 {
+        return Err(EconError::InvalidSpecification {
+            message:
+                "GARCH needs at least one ARCH term: the ARCH order p must be at least 1, got 0"
+                    .to_string(),
+        });
+    }
+    if p.max(q) >= n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "GARCH orders p={p} and q={q} must be smaller than the number of observations ({n})"
+            ),
+        });
+    }
+    let student = config.distribution == GarchDistribution::StudentT;
+    let n_params = usize::from(config.include_mean) + 1 + p + q + usize::from(student);
+    if n <= n_params {
+        return Err(EconError::InsufficientData {
+            required: n_params + 1,
+            provided: n,
+            context: format!(
+                "GARCH({p},{q}) {} a mean term{} has {n_params} parameters; the conditional likelihood needs more observations than parameters",
+                if config.include_mean {
+                    "with"
+                } else {
+                    "without"
+                },
+                if student { " and Student-t errors" } else { "" }
+            ),
+        });
+    }
+    if config.max_iter < 1 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("max_iter must be at least 1, got {}", config.max_iter),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be finite and positive, got {}",
+                config.tolerance
+            ),
+        });
+    }
+    let xbar = data.iter().sum::<f64>() / n as f64;
+    let s2 = data.iter().map(|x| (x - xbar) * (x - xbar)).sum::<f64>() / n as f64;
+    // all-equal first: the two-pass s2 of a constant series can be a rounding residue above 0
+    if data.iter().all(|&v| v == data[0]) || s2 <= 0.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "GARCH needs a series with positive variance; the data are constant ({})",
+                data[0]
+            ),
+        });
+    }
+    Ok(())
 }
 
-/// The four vectors [`compute_garch_inference`] returns.
-type GarchInference = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<SignificanceLevel>);
-
-/// Compute standard errors using numerical Hessian approximation.
+/// Forecast conditional variances, volatilities and returns from a fitted GARCH model.
 ///
-/// Makes three likelihood passes per parameter and checks the budget before
-/// each parameter (and, through [`compute_garch_quantities`], within each pass).
-fn compute_garch_inference(
-    data: &[f64],
-    mu: f64,
-    omega: f64,
-    alpha: &[f64],
-    beta: &[f64],
-    include_mean: bool,
-) -> EconResult<GarchInference> {
-    use crate::traits::t_test_p_value;
-
-    let n = data.len();
-    let eps = 1e-5;
-
-    // Collect parameters
-    let mut params = vec![];
-    if include_mean {
-        params.push(mu);
-    }
-    params.push(omega);
-    params.extend(alpha);
-    params.extend(beta);
-
-    let n_params = params.len();
-    let df = (n - n_params) as f64;
-
-    // Compute numerical Hessian diagonal (for standard errors)
-    let mut std_errors = Vec::with_capacity(n_params);
-
-    // Helper to compute log-likelihood with modified parameter
-    let compute_ll = |idx: usize, delta: f64| -> EconResult<f64> {
-        let mut new_alpha = alpha.to_vec();
-        let mut new_beta = beta.to_vec();
-        let mut new_mu = mu;
-        let mut new_omega = omega;
-
-        let param_offset = if include_mean { 2 } else { 1 };
-
-        if include_mean && idx == 0 {
-            new_mu += delta;
-        } else if (include_mean && idx == 1) || (!include_mean && idx == 0) {
-            new_omega = (new_omega + delta).max(1e-10);
-        } else if idx < param_offset + alpha.len() {
-            let alpha_idx = idx - param_offset;
-            new_alpha[alpha_idx] = (new_alpha[alpha_idx] + delta).max(0.0);
-        } else {
-            let beta_idx = idx - param_offset - alpha.len();
-            new_beta[beta_idx] = (new_beta[beta_idx] + delta).max(0.0);
-        }
-
-        let (_, _, ll) = compute_garch_quantities(data, new_mu, new_omega, &new_alpha, &new_beta)?;
-        Ok(ll)
-    };
-
-    for i in 0..n_params {
-        checkpoint()?;
-        let ll_plus = compute_ll(i, eps)?;
-        let ll_center = compute_ll(i, 0.0)?;
-        let ll_minus = compute_ll(i, -eps)?;
-
-        // Second derivative approximation
-        let d2ll = (ll_plus - 2.0 * ll_center + ll_minus) / (eps * eps);
-
-        // Standard error from observed information
-        let se = if d2ll < 0.0 {
-            (-1.0 / d2ll).sqrt()
-        } else {
-            // Fallback for non-negative curvature
-            params[i].abs() * 0.1
-        };
-
-        std_errors.push(se.max(1e-10));
-    }
-
-    // Compute t-statistics and p-values
-    let t_stats: Vec<f64> = params
-        .iter()
-        .zip(std_errors.iter())
-        .map(|(&p, &se)| if se > 1e-10 { p / se } else { 0.0 })
-        .collect();
-
-    let p_values: Vec<f64> = t_stats.iter().map(|&t| t_test_p_value(t, df)).collect();
-
-    let significance: Vec<SignificanceLevel> = p_values
-        .iter()
-        .map(|&p| SignificanceLevel::from_p_value(p))
-        .collect();
-
-    Ok((std_errors, t_stats, p_values, significance))
-}
-
-/// Forecast conditional variance and returns using a fitted GARCH model.
-///
-/// # Arguments
-///
-/// * `result` - Fitted GARCH result
-/// * `h` - Forecast horizon
+/// sigma^2_{T+k} = omega + sum_{i=1..p} alpha_i E[e^2_{T+k-i}] + sum_{j=1..q} beta_j sigma^2_{T+k-j},
+/// with E[e^2_s] = e_s^2 = z_s^2 h_s and sigma^2_s = h_s for s <= T, and E[e^2_s] = sigma^2_s for
+/// s > T. For GARCH(1,1) this is uncond + (alpha + beta)^(k-1) (sigma^2_{T+1} - uncond). The
+/// return forecast is mu.
 ///
 /// # Returns
 ///
 /// Tuple of (forecast variances, forecast volatilities, forecast returns), or
-/// [`EconError::ResourceLimit`] when the horizon is too large to allocate.
+/// [`EconError::ResourceLimit`] when the horizon is too large to allocate, or
+/// [`EconError::InvalidSpecification`] for a result without the conditional variances and
+/// standardised residuals of its fit (they are not serialised).
 pub fn garch_forecast(
     result: &GarchResult,
     h: usize,
 ) -> EconResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     const WHAT: &str = "the GARCH forecast horizon";
-
-    let alpha_sum: f64 = result.alpha.iter().sum();
-    let beta_sum: f64 = result.beta.iter().sum();
-    let persistence = alpha_sum + beta_sum;
-
-    // Get last conditional variance and residual
-    let last_var = *result
-        .conditional_variance
-        .last()
-        .unwrap_or(&result.unconditional_variance);
-    let last_resid_sq = result
-        .std_residuals
-        .last()
-        .map(|z| z.powi(2) * last_var)
-        .unwrap_or(result.unconditional_variance);
+    let n = result.conditional_variance.len();
+    let (p, q) = (result.alpha.len(), result.beta.len());
+    if n == 0 || result.std_residuals.len() != n || n < p.max(q) {
+        return Err(EconError::InvalidSpecification {
+            message: "garch_forecast needs the conditional variances and standardised residuals of the fit; a GarchResult read back from JSON does not carry them (they are not serialised), so refit the model".to_string(),
+        });
+    }
 
     let mut forecast_var = try_with_capacity(h, WHAT)?;
     let mut forecast_vol = try_with_capacity(h, WHAT)?;
     let mut forecast_ret = try_with_capacity(h, WHAT)?;
 
-    let uncond_var = result.unconditional_variance;
-
-    for i in 0..h {
-        // Multi-step ahead variance forecast
-        // For GARCH(1,1): E[σ²_{t+h}] = σ² + (α+β)^(h-1) * (σ²_{t+1} - σ²)
-        let var_h = if i == 0 {
-            result.omega
-                + result.alpha.iter().sum::<f64>() * last_resid_sq
-                + result.beta.iter().sum::<f64>() * last_var
-        } else {
-            uncond_var + persistence.powi(i as i32) * (forecast_var[i - 1] - uncond_var)
-        };
-
-        forecast_var.push(var_h);
-        forecast_vol.push(var_h.sqrt());
+    // Last p squared residuals and last q variances, oldest first.
+    let mut e2_hist: Vec<f64> = (n - p..n)
+        .map(|t| result.std_residuals[t] * result.std_residuals[t] * result.conditional_variance[t])
+        .collect();
+    let mut h_hist: Vec<f64> = result.conditional_variance[n - q..].to_vec();
+    for _ in 0..h {
+        // O(p + q) per step: no budget check, as for Holt-Winters
+        let mut var = result.omega;
+        for (i, a) in result.alpha.iter().enumerate() {
+            var += a * e2_hist[p - 1 - i];
+        }
+        for (j, b) in result.beta.iter().enumerate() {
+            var += b * h_hist[q - 1 - j];
+        }
+        forecast_var.push(var);
+        forecast_vol.push(var.sqrt());
         forecast_ret.push(result.mu);
+        if p > 0 {
+            e2_hist.remove(0);
+            e2_hist.push(var);
+        }
+        if q > 0 {
+            h_hist.remove(0);
+            h_hist.push(var);
+        }
     }
 
     Ok((forecast_var, forecast_vol, forecast_ret))
@@ -710,6 +1380,245 @@ pub fn run_garch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    /// Parameters, h_t and forecasts at an interior optimum. The R emulation of this algorithm reaches
+    /// the analytic-gradient root to <= 5e-14 (/dev/shm/p2a-plan/T3/WP35/compare.R). The tolerance is
+    /// relative only, because omega ~1e-6 and the covariances ~1e-13 sit at Tol::iterative's 1e-12
+    /// absolute floor.
+    const PAR: Tol = Tol::new(1e-8, 0.0);
+    /// SEs, z and covariances from the central-difference Hessian of the analytic gradient (emulation <= 2e-8).
+    const SE: Tol = Tol::new(1e-6, 0.0);
+    const N: usize = 1500;
+
+    /// Column `name` of the committed garch_returns dataset (case garch_normal_t).
+    /// Called as `returns("garch_normal_t", "r_norm")`: the case id is a literal in each test body (sync S6).
+    fn returns(case_id: &str, name: &str) -> (p2a_validation::Case, Vec<f64>) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let x = numeric_column(ds.df(), name, NaPolicy::Fail).unwrap().0;
+        (case, x)
+    }
+
+    fn fit(x: &[f64], p: usize, q: usize, include_mean: bool, dist: &str) -> GarchResult {
+        let mut c = GarchConfig::default();
+        c.p = p;
+        c.q = q;
+        c.include_mean = include_mean;
+        c.distribution = dist.parse().unwrap(); // String before the fix, GarchDistribution after
+        garch(x, Some(c)).unwrap()
+    }
+
+    /// R's names [mu], omega, alpha1..p, beta1..q.
+    fn names(p: usize, q: usize, include_mean: bool) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        if include_mean {
+            v.push("mu".into());
+        }
+        v.push("omega".into());
+        v.extend((1..=p).map(|i| format!("alpha{i}")));
+        v.extend((1..=q).map(|j| format!("beta{j}")));
+        v
+    }
+
+    /// Estimates in R's order from the fields that exist before and after the fix.
+    fn estimates(r: &GarchResult, include_mean: bool) -> Vec<f64> {
+        let mut v = Vec::new();
+        if include_mean {
+            v.push(r.mu);
+        }
+        v.push(r.omega);
+        v.extend(&r.alpha);
+        v.extend(&r.beta);
+        v
+    }
+
+    /// R (garch_normal_t): GARCH(1,1) with mean and normal errors on r_norm (n = 1500, variance ~1e-4).
+    /// Fails before: the R port of the old estimator (old_emul.R) gives mu 0.4340, omega 8.886e5,
+    /// alpha = beta = 0 and logLik -11651.47 after 500 fixed-step iterations, with the warm-up
+    /// h = omega / (1 - persistence) instead of mean(e^2) (TS-11).
+    #[test]
+    fn test_validate_garch_normal() {
+        let (case, x) = returns("garch_normal_t", "r_norm");
+        let r = fit(&x, 1, 1, true, "norm");
+        let est = estimates(&r, true);
+        Check::new(&case)
+            .named("norm_par_tight", &names(1, 1, true), &est, PAR)
+            .scalar("norm_loglik_tight", r.log_likelihood, Tol::stat(N))
+            .scalar("norm_aic", r.aic, Tol::stat(N))
+            .scalar("norm_bic", r.bic, Tol::stat(N))
+            .vector("norm_h_first", &r.conditional_variance[..3], PAR)
+            .scalar(
+                "norm_h_last_tight",
+                *r.conditional_variance.last().unwrap(),
+                PAR,
+            )
+            .scalar("norm_uncond_var_tight", r.unconditional_variance, PAR)
+            // Appendix A.31 (optim, finite-difference gradients): 1.7e-6 short of the optimum
+            .vector("norm_par", &est, Tol::new(1e-5, 0.0))
+            .scalar("norm_loglik", r.log_likelihood, Tol::stat(N))
+            .finish();
+        assert!(r.converged, "GARCH(1,1) on r_norm must converge");
+        assert_eq!(r.n_params, 4);
+        assert!((r.persistence - (r.alpha[0] + r.beta[0])).abs() <= 1e-15);
+        // R: half-life 47.693054313217765 periods
+        assert!(
+            (r.half_life - 47.693054313217765).abs() <= 1e-6 * 47.7,
+            "{}",
+            r.half_life
+        );
+    }
+
+    /// R: GARCH(1,1) with fGarch's standardised-t errors on r_t, and the normal fit of the same series.
+    /// Fails before: `distribution = "std"` was ignored (TS-32), so the t fit was the old Gaussian
+    /// gradient ascent (R port: omega 1.662e7, alpha = beta = 0, logLik -13847.97, "converged" after 3
+    /// iterations) and identical to the normal one.
+    #[test]
+    fn test_validate_garch_student_t() {
+        let (case, x) = returns("garch_normal_t", "r_t");
+        let t = fit(&x, 1, 1, true, "std");
+        let g = fit(&x, 1, 1, true, "norm");
+        let core = ["mu", "omega", "alpha1", "beta1"];
+        Check::new(&case)
+            .named_subset(
+                "std_par_tight",
+                &core,
+                &names(1, 1, true),
+                &estimates(&t, true),
+                PAR,
+            )
+            .scalar("std_loglik_tight", t.log_likelihood, Tol::stat(N))
+            .scalar("std_aic", t.aic, Tol::stat(N))
+            .scalar("std_bic", t.bic, Tol::stat(N))
+            .named(
+                "norm_on_t_par_tight",
+                &names(1, 1, true),
+                &estimates(&g, true),
+                PAR,
+            )
+            .scalar("norm_on_t_loglik_tight", g.log_likelihood, Tol::stat(N))
+            .scalar("norm_on_t_aic", g.aic, Tol::stat(N))
+            .scalar("norm_on_t_bic", g.bic, Tol::stat(N))
+            .finish();
+        assert_eq!((t.n_params, g.n_params), (5, 4));
+        assert!(t.converged && g.converged);
+        // phantom-option pair (design section 3.2): R distinguishes the two distributions, so must p2a
+        assert!(
+            (t.omega - g.omega).abs() > 0.05 * g.omega
+                && (t.log_likelihood - g.log_likelihood) > 40.0
+        );
+    }
+
+    /// R: SEs sqrt(diag((-H)^-1)), H the Hessian of the log-likelihood in the natural parameters
+    /// (numDeriv::jacobian of the analytic gradient); z = estimate / SE; p = 2 Phi(-|z|) as fGarch and
+    /// tseries. Fails before: diagonal-only second differences at the degenerate estimate, with the
+    /// fabricated SE = 0.1 |param| wherever the curvature was not negative (R port: mu and omega t =
+    /// 10.000, '***') (TS-12). The diagonal rule is 2.6x-5.8x too small even at R's optimum (finding TS-12).
+    #[test]
+    fn test_validate_garch_se() {
+        let (case, x) = returns("garch_normal_t", "r_norm");
+        let r = fit(&x, 1, 1, true, "norm");
+        let (_, xt) = returns("garch_normal_t", "r_t");
+        let g = fit(&xt, 1, 1, true, "norm");
+        let nm = names(1, 1, true);
+        Check::new(&case)
+            .named("norm_se_tight", &nm, &r.std_errors, SE)
+            .named("norm_z_tight", &nm, &r.t_stats, SE)
+            .named("norm_p_tight", &nm, &r.p_values, Tol::new(1e-5, 1e-12))
+            .named("norm_on_t_se_tight", &nm, &g.std_errors, SE)
+            .finish();
+        let stars: Vec<&str> = r.significance.iter().map(|s| s.stars()).collect();
+        assert_eq!(stars, ["", "*", "***", "***"]);
+    }
+
+    /// Convention 5: the transformed problem is scale free, so data times 1e-6 and 1e6 converge in the
+    /// same number of iterations to the scaled solution (omega c^2, mu c, logLik - n ln c). Fails before:
+    /// the fixed 0.01 step and the absolute 1e-8 likelihood change diverged at every scale.
+    #[test]
+    fn test_validate_garch_scale_invariance() {
+        let (case, x) = returns("garch_normal_t", "r_norm");
+        let base = fit(&x, 1, 1, true, "norm");
+        for c in [1e-6_f64, 1e6] {
+            let xc: Vec<f64> = x.iter().map(|v| v * c).collect();
+            let r = fit(&xc, 1, 1, true, "norm");
+            assert!(r.converged, "scale {c}");
+            assert!(
+                r.iterations.abs_diff(base.iterations) <= 2,
+                "scale {c}: {} vs {} iterations",
+                r.iterations,
+                base.iterations
+            );
+            let back = [r.mu / c, r.omega / (c * c), r.alpha[0], r.beta[0]];
+            Check::new(&case)
+                .named("norm_par_tight", &names(1, 1, true), &back, PAR)
+                .scalar(
+                    "norm_loglik_tight",
+                    r.log_likelihood + N as f64 * c.ln(),
+                    Tol::stat(N),
+                )
+                .finish();
+        }
+    }
+
+    /// TS-19 (with the estimator's parameter vector): one row per estimated parameter, named from
+    /// include_mean and the orders, each with its own SE. Fails before: with include_mean = false the
+    /// table started with a "mu" row carrying omega's SE and lost the beta1 row; GARCH(3,2) was labelled
+    /// alpha1, alpha2, alpha2.
+    #[test]
+    fn test_validate_garch_display_rows() {
+        let (case, y) = returns("garch_normal_t", "r_norm_dm");
+        let r = fit(&y, 1, 1, false, "norm");
+        let rows = table_rows(&r.to_string());
+        let row_names: Vec<&str> = rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(row_names, ["omega", "alpha1", "beta1"]);
+        for (name, _, se) in &rows {
+            let want = case.named("zm_se_tight", name);
+            assert!(
+                (se - want).abs() <= 5e-4 * want,
+                "{name}: printed SE {se}, R {want}"
+            );
+        }
+        let (_, x) = returns("garch_normal_t", "r_g21");
+        let r = fit(&x, 3, 2, true, "norm");
+        let row_names: Vec<String> = table_rows(&r.to_string())
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        assert_eq!(
+            row_names,
+            [
+                "mu", "omega", "alpha1", "alpha2", "alpha3", "beta1", "beta2"
+            ]
+        );
+    }
+
+    /// Rows of the coefficient table as printed: (name, estimate, SE).
+    fn table_rows(text: &str) -> Vec<(String, f64, f64)> {
+        let mut rows = Vec::new();
+        let mut inside = false;
+        for line in text.lines() {
+            if line.starts_with("Parameter") {
+                inside = true;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            if line.starts_with('-') {
+                if rows.is_empty() {
+                    continue;
+                }
+                break;
+            }
+            let tok: Vec<&str> = line.split_whitespace().collect();
+            rows.push((
+                tok[0].to_string(),
+                tok[1].parse().unwrap(),
+                tok[2].parse().unwrap(),
+            ));
+        }
+        rows
+    }
 
     fn generate_garch_data(n: usize, omega: f64, alpha: f64, beta: f64) -> Vec<f64> {
         use std::collections::hash_map::DefaultHasher;
@@ -732,45 +1641,6 @@ mod tests {
         }
 
         data
-    }
-
-    #[test]
-    fn test_garch_basic() {
-        let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None);
-
-        assert!(
-            result.is_ok(),
-            "GARCH should succeed, got {:?}",
-            result.err()
-        );
-        let result = result.unwrap();
-
-        assert_eq!(result.model, "GARCH(1,1)");
-        assert!(result.omega > 0.0, "omega should be positive");
-        assert!(result.alpha[0] >= 0.0, "alpha should be non-negative");
-        assert!(result.beta[0] >= 0.0, "beta should be non-negative");
-        assert!(result.persistence < 1.0, "model should be stationary");
-    }
-
-    #[test]
-    fn test_garch_persistence() {
-        let data = generate_garch_data(300, 0.00005, 0.15, 0.80);
-        let result = garch(&data, None).unwrap();
-
-        // True persistence is 0.95
-        // With our simple test data generator, persistence should be positive and < 1
-        // The exact value depends on the data generation quality
-        assert!(
-            result.persistence >= 0.0 && result.persistence < 1.0,
-            "Persistence should be in [0, 1), got {}",
-            result.persistence
-        );
-        // Ensure model converged or at least iterated
-        assert!(
-            result.converged || result.iterations > 0,
-            "Model should iterate"
-        );
     }
 
     #[test]
@@ -803,25 +1673,6 @@ mod tests {
     }
 
     #[test]
-    fn test_garch_forecast() {
-        let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        let (var_fc, vol_fc, ret_fc) = garch_forecast(&result, 10).unwrap();
-
-        assert_eq!(var_fc.len(), 10);
-        assert_eq!(vol_fc.len(), 10);
-        assert_eq!(ret_fc.len(), 10);
-
-        // Variance forecasts should converge to unconditional variance
-        let last_fc = var_fc.last().unwrap();
-        assert!(
-            (*last_fc - result.unconditional_variance).abs() < result.unconditional_variance * 0.5,
-            "Long-horizon forecast should approach unconditional variance"
-        );
-    }
-
-    #[test]
     fn test_garch_insufficient_data() {
         let data = vec![0.01; 10];
         let result = garch(&data, None);
@@ -834,309 +1685,384 @@ mod tests {
         }
     }
 
+    /// R: the t fit's shape and all five SEs; the result reports the distribution.
     #[test]
-    fn test_run_garch() {
-        let data = generate_garch_data(150, 0.0001, 0.08, 0.85);
-        let result = run_garch(&data, Some(1), Some(1), Some(true));
-
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert!(result.converged || result.iterations > 0);
+    fn test_validate_garch_student_t_shape() {
+        let (case, x) = returns("garch_normal_t", "r_t");
+        let t = fit(&x, 1, 1, true, "std");
+        Check::new(&case)
+            .named("std_par_tight", &t.param_names, &t.estimates(), PAR)
+            .named("std_se_tight", &t.param_names, &t.std_errors, SE)
+            .vector("std_par", &t.estimates(), Tol::new(1e-5, 0.0)) // Appendix optim value, 4.9e-7 off
+            .finish();
+        assert_eq!(t.distribution, GarchDistribution::StudentT);
+        assert_eq!(t.param_names, ["mu", "omega", "alpha1", "beta1", "shape"]);
+        assert_eq!(t.shape, t.estimates().last().copied());
+        let text = t.to_string();
+        assert!(
+            text.contains("Conditional distribution: std") && text.contains("\nshape "),
+            "{text}"
+        );
+        // the shape adds a parameter to the n > n_params rule: 23 parameters need 24 observations
+        let x23 = generate_garch_data(23, 0.0001, 0.1, 0.8);
+        let mut c = GarchConfig::default();
+        c.p = 10;
+        c.q = 10;
+        c.distribution = GarchDistribution::StudentT;
+        assert!(matches!(
+            garch(&x23, Some(c)),
+            Err(EconError::InsufficientData {
+                required: 24,
+                provided: 23,
+                ..
+            })
+        ));
     }
 
+    /// R: the covariance of the estimates (inverse observed information); omega and beta are strongly
+    /// correlated, which the diagonal-only SE of TS-12 ignored.
     #[test]
-    fn test_garch_display() {
-        let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        let display = format!("{}", result);
-        assert!(display.contains("GARCH(1,1)"));
-        assert!(display.contains("omega"));
-        assert!(display.contains("alpha"));
-        assert!(display.contains("beta"));
-        assert!(display.contains("Persistence"));
-    }
-
-    // ========================================================================
-    // R-vs-Rust Validation Tests (Phase 6)
-    // ========================================================================
-
-    /// LCG for deterministic random numbers
-    fn lcg_rand_garch(seed: &mut u64) -> f64 {
-        let a: u64 = 1103515245;
-        let c: u64 = 12345;
-        let m: u64 = 2_u64.pow(31);
-        *seed = (a.wrapping_mul(*seed).wrapping_add(c)) % m;
-        (*seed as f64) / (m as f64)
-    }
-
-    fn box_muller_garch(seed: &mut u64) -> f64 {
-        let u1 = lcg_rand_garch(seed).max(1e-10);
-        let u2 = lcg_rand_garch(seed);
-        ((-2.0_f64 * u1.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u2).cos()
-    }
-
-    fn create_garch_validation_data(n: usize, omega: f64, alpha: f64, beta: f64) -> Vec<f64> {
-        // Generate GARCH(1,1) returns
-        let mut seed: u64 = 42;
-        let mut data = Vec::with_capacity(n);
-        let mut sigma2: f64 = omega / (1.0 - alpha - beta);
-        let mut epsilon: f64 = 0.0;
-
-        for _ in 0..n {
-            let z = box_muller_garch(&mut seed);
-            sigma2 = omega + alpha * epsilon.powi(2) + beta * sigma2;
-            epsilon = sigma2.sqrt() * z;
-            data.push(epsilon);
+    fn test_validate_garch_vcov() {
+        let (case, x) = returns("garch_normal_t", "r_norm");
+        let r = fit(&x, 1, 1, true, "norm");
+        let k = r.vcov.len();
+        assert_eq!(k, 4);
+        let col_major: Vec<f64> = (0..k)
+            .flat_map(|c| (0..k).map(move |i| (i, c)))
+            .map(|(i, c)| r.vcov[i][c])
+            .collect();
+        Check::new(&case)
+            .vector("norm_vcov_tight", &col_major, SE)
+            .finish();
+        for i in 0..k {
+            assert!((r.vcov[i][i].sqrt() - r.std_errors[i]).abs() <= 1e-14 * r.std_errors[i]);
         }
-        data
+        let corr = r.vcov[1][3] / (r.vcov[1][1] * r.vcov[3][3]).sqrt();
+        assert!(
+            (corr - -0.7115468641459799).abs() <= 1e-6,
+            "corr(omega, beta1) = {corr}"
+        ); // R
     }
 
+    /// R: GARCH(1,2) on r_norm, GARCH(2,1) on r_g21 (a GARCH(2,1) series), ARCH(1) on r_norm and the
+    /// zero-mean GARCH(1,1) on the demeaned r_norm_dm; h_1..h_3 pin the mean(e^2) start of the first
+    /// max(p, q) periods (equal h_1 = h_2 for m = 2).
     #[test]
-    fn test_validate_garch_parameter_constraints() {
-        // R reference: fGarch::garchFit()
-        // Constraints: omega > 0, alpha >= 0, beta >= 0, alpha + beta < 1
-        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        // omega should be positive
-        assert!(
-            result.omega > 0.0,
-            "omega should be positive: {}",
-            result.omega
-        );
-
-        // alpha should be non-negative
-        for a in &result.alpha {
-            assert!(*a >= 0.0, "alpha should be non-negative: {}", a);
-        }
-
-        // beta should be non-negative
-        for b in &result.beta {
-            assert!(*b >= 0.0, "beta should be non-negative: {}", b);
-        }
-
-        // Stationarity: alpha + beta < 1
-        assert!(
-            result.persistence < 1.0,
-            "persistence should be < 1: {}",
-            result.persistence
-        );
-    }
-
-    #[test]
-    fn test_validate_garch_persistence_calculation() {
-        // True persistence = 0.1 + 0.8 = 0.9
-        let data = create_garch_validation_data(300, 0.00005, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        // Persistence = sum(alpha) + sum(beta)
-        let calculated_persistence: f64 =
-            result.alpha.iter().sum::<f64>() + result.beta.iter().sum::<f64>();
-        assert!(
-            (result.persistence - calculated_persistence).abs() < 1e-10,
-            "persistence mismatch: {} vs {}",
-            result.persistence,
-            calculated_persistence
-        );
-
-        // Persistence should be in [0, 1) for stationarity (enforced by estimation)
-        assert!(
-            result.persistence >= 0.0 && result.persistence < 1.0,
-            "persistence should be in [0, 1): {}",
-            result.persistence
-        );
-    }
-
-    #[test]
-    fn test_validate_garch_unconditional_variance() {
-        // Unconditional variance = omega / (1 - alpha - beta) when persistence < 1
-        let omega = 0.0001;
-        let alpha = 0.1;
-        let beta = 0.8;
-        let data = create_garch_validation_data(300, omega, alpha, beta);
-        let result = garch(&data, None).unwrap();
-
-        // Unconditional variance should be positive
-        assert!(
-            result.unconditional_variance > 0.0,
-            "Unconditional variance should be positive: {}",
-            result.unconditional_variance
-        );
-
-        // Should be finite
-        assert!(
-            result.unconditional_variance.is_finite(),
-            "Unconditional variance should be finite"
-        );
-    }
-
-    #[test]
-    fn test_validate_garch_half_life() {
-        // Half-life = ln(0.5) / ln(persistence)
-        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        if result.persistence > 0.0 && result.persistence < 1.0 {
-            let expected_half_life = (0.5_f64).ln() / result.persistence.ln();
+    fn test_validate_garch_orders() {
+        let (case, rn) = returns("garch_normal_t", "r_norm");
+        let (_, r21) = returns("garch_normal_t", "r_g21");
+        let (_, dm) = returns("garch_normal_t", "r_norm_dm");
+        let fits = [
+            ("g12", fit(&rn, 1, 2, true, "norm"), 3),
+            ("g21", fit(&r21, 2, 1, true, "norm"), 3),
+            ("arch1", fit(&rn, 1, 0, true, "norm"), 0),
+            ("zm", fit(&dm, 1, 1, false, "norm"), 0),
+        ];
+        let mut check = Check::new(&case);
+        for (key, r, nh) in &fits {
+            check
+                .named(
+                    &format!("{key}_par_tight"),
+                    &r.param_names,
+                    &r.estimates(),
+                    PAR,
+                )
+                .named(
+                    &format!("{key}_se_tight"),
+                    &r.param_names,
+                    &r.std_errors,
+                    SE,
+                )
+                .scalar(
+                    &format!("{key}_loglik_tight"),
+                    r.log_likelihood,
+                    Tol::stat(N),
+                )
+                .scalar(&format!("{key}_aic"), r.aic, Tol::stat(N))
+                .scalar(&format!("{key}_bic"), r.bic, Tol::stat(N));
+            if *nh > 0 {
+                check.vector(
+                    &format!("{key}_h_first"),
+                    &r.conditional_variance[..*nh],
+                    PAR,
+                );
+            }
             assert!(
-                (result.half_life - expected_half_life).abs() < 0.01,
-                "Half-life mismatch: {} vs {}",
-                result.half_life,
-                expected_half_life
+                r.converged && r.at_bound.is_empty() && r.warnings.is_empty(),
+                "{key}: {:?}",
+                r.warnings
             );
         }
+        check.finish();
+        assert_eq!(fits[3].1.param_names, ["omega", "alpha1", "beta1"]);
+        assert_eq!(fits[3].1.mu, 0.0);
     }
 
+    /// R: GARCH(2,1) on the GARCH(1,1) series has its maximum on alpha2 = 0 (dl/dalpha2 = -30.496 there);
+    /// p2a stops at a tiny alpha2, flags it, and the other parameters and SEs are R's restricted ones.
     #[test]
-    fn test_validate_garch_conditional_variance() {
-        let data = create_garch_validation_data(150, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        // Conditional variances should all be positive
-        assert_eq!(result.conditional_variance.len(), data.len());
-        for (i, cv) in result.conditional_variance.iter().enumerate() {
-            assert!(
-                *cv > 0.0,
-                "Conditional variance at {} should be positive: {}",
-                i,
-                cv
-            );
-        }
-
-        // Average conditional variance should be close to unconditional
-        let avg_cond_var: f64 = result.conditional_variance.iter().sum::<f64>()
-            / result.conditional_variance.len() as f64;
-        let ratio = avg_cond_var / result.unconditional_variance;
+    fn test_validate_garch_bound() {
+        let (case, x) = returns("garch_normal_t", "r_norm");
+        let r = fit(&x, 2, 1, true, "norm");
+        let free = ["mu", "omega", "alpha1", "beta1"];
+        Check::new(&case)
+            .named_subset(
+                "g21b_par_tight",
+                &free,
+                &r.param_names,
+                &r.estimates(),
+                Tol::new(1e-6, 0.0),
+            )
+            .named_subset("g21b_se_tight", &free, &r.param_names, &r.std_errors, SE)
+            .scalar("g21b_loglik_tight", r.log_likelihood, Tol::stat(N))
+            .finish();
+        assert!(r.alpha[1] < 1e-6, "alpha2 = {}", r.alpha[1]);
+        assert_eq!(r.at_bound, ["alpha2"]);
+        assert!(r.std_errors[3].is_nan() && r.t_stats[3].is_nan() && r.p_values[3].is_nan());
+        assert!(r.vcov[3].iter().all(|v| v.is_nan()));
         assert!(
-            ratio > 0.3 && ratio < 3.0,
-            "Average conditional variance should be close to unconditional"
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("alpha2 = ") && w.contains("at its lower bound 0")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.converged);
+    }
+
+    /// The bound rule: a variance coefficient at or below 1e-4 of alpha + beta, or a shape above
+    /// GARCH_SHAPE_MAX - 1e-3 (GARCH_SHAPE_MAX - 2) = 199.802.
+    #[test]
+    fn test_garch_bound_rule() {
+        let x = generate_garch_data(200, 0.0001, 0.1, 0.8);
+        let s = Spec::new(&x, 2, 1, true, GarchDistribution::Normal);
+        assert_eq!(
+            at_bounds(&s, &[3e-4, 1.5e-6, 0.073, 9.0e-10, 0.9126]),
+            [false, false, false, true, false]
+        );
+        assert_eq!(
+            at_bounds(&s, &[3e-4, 1.5e-6, 0.073, 2.0e-4, 0.9126]),
+            [false; 5]
+        ); // 2e-4 > 9.858e-5
+        let s = Spec::new(&x, 1, 1, true, GarchDistribution::StudentT);
+        assert_eq!(
+            at_bounds(&s, &[3e-4, 1.5e-6, 0.07, 0.9, 199.9]),
+            [false, false, false, false, true]
+        );
+        assert_eq!(at_bounds(&s, &[3e-4, 1.5e-6, 0.07, 0.9, 29.0]), [false; 5]);
+    }
+
+    /// TS-12: where the observed information is not positive definite the SEs are NaN with a warning.
+    /// At omega = 10 s^2 the log-likelihood is convex in omega (R: eigen(-H) = 1463693.09, 838.47, -9.615,
+    /// -5.7589e8); the old rule printed SE(omega) = 0.1 omega = 1.0232e-4 and t = 10, '***'.
+    #[test]
+    fn test_garch_hessian_not_pd_gives_nan_se() {
+        let (_case, x) = returns("garch_normal_t", "r_norm");
+        let s = Spec::new(&x, 1, 1, true, GarchDistribution::Normal);
+        let nat = [s.xbar, 10.0 * s.s2, 0.05, 0.05];
+        let inf = inference(&s, &x, &nat, &[false; 4]).unwrap();
+        assert!(
+            inf.std_errors.iter().all(|v| v.is_nan()),
+            "{:?}",
+            inf.std_errors
+        );
+        assert!(inf.vcov.iter().flatten().all(|v| v.is_nan()));
+        assert!(
+            inf.warning
+                .as_deref()
+                .is_some_and(|w| w.contains("not positive definite")),
+            "{:?}",
+            inf.warning
+        );
+    }
+
+    /// R10: stopping at the iteration limit is reported, never "converged". With max_iter = 1 the t fit
+    /// stops at scaled gradient 1.4e-2 (R emulation, maxit.R).
+    #[test]
+    fn test_garch_reports_non_convergence() {
+        let (_case, x) = returns("garch_normal_t", "r_t");
+        let mut c = GarchConfig::default();
+        c.distribution = GarchDistribution::StudentT;
+        c.max_iter = 1;
+        let r = garch(&x, Some(c)).unwrap();
+        assert!(!r.converged && !r.convergence.converged);
+        assert_eq!(r.convergence.max_iterations, 1 + 3);
+        assert!(r.convergence.final_change > r.convergence.tolerance);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("GARCH did not converge after")),
+            "{:?}",
+            r.warnings
+        );
+        let text = r.to_string();
+        assert!(
+            text.contains("Converged: no (") && text.contains("Warning: GARCH did not converge"),
+            "{text}"
         );
     }
 
     #[test]
-    fn test_validate_garch_standardized_residuals() {
-        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        // Standardized residuals should have same length as data
-        assert_eq!(result.std_residuals.len(), data.len());
-
-        // All standardized residuals should be finite
-        for (i, z) in result.std_residuals.iter().enumerate() {
-            assert!(
-                z.is_finite(),
-                "Standardized residual at {} should be finite: {}",
-                i,
-                z
+    fn test_garch_distribution_parses_aliases_and_rejects_unknown() {
+        GarchDistribution::choices().validate().unwrap();
+        for s in ["norm", "Normal", "GAUSSIAN", " normal "] {
+            assert_eq!(
+                s.parse::<GarchDistribution>().unwrap(),
+                GarchDistribution::Normal,
+                "{s}"
             );
         }
-
-        // At least some variation should exist
-        let has_variation = result.std_residuals.iter().any(|z| z.abs() > 1e-10);
-        assert!(
-            has_variation,
-            "Standardized residuals should have variation"
-        );
-    }
-
-    #[test]
-    fn test_validate_garch_information_criteria() {
-        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        // AIC and BIC should be finite
-        assert!(result.aic.is_finite(), "AIC should be finite");
-        assert!(result.bic.is_finite(), "BIC should be finite");
-
-        // BIC >= AIC for n > e^2 ≈ 7.4 (which is always true for GARCH)
-        // BIC = -2*LL + k*ln(n), AIC = -2*LL + 2*k
-        // BIC - AIC = k*(ln(n) - 2) > 0 for n > e^2
-        assert!(
-            result.bic >= result.aic - 1e-6,
-            "BIC {} should be >= AIC {} for n=200",
-            result.bic,
-            result.aic
-        );
-    }
-
-    #[test]
-    fn test_validate_garch_forecast_structure() {
-        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        let horizon = 10;
-        let (var_fc, vol_fc, ret_fc) = garch_forecast(&result, horizon).unwrap();
-
-        assert_eq!(var_fc.len(), horizon);
-        assert_eq!(vol_fc.len(), horizon);
-        assert_eq!(ret_fc.len(), horizon);
-
-        // Variance forecasts should be positive
-        for v in &var_fc {
-            assert!(*v > 0.0, "Forecast variance should be positive");
-        }
-
-        // Volatility = sqrt(variance)
-        for (v, vol) in var_fc.iter().zip(vol_fc.iter()) {
-            assert!(
-                (vol - v.sqrt()).abs() < 1e-10,
-                "Volatility should be sqrt(variance)"
+        for s in [
+            "std",
+            "t",
+            "T",
+            "Student-t",
+            "student t",
+            "student_t",
+            "studentt",
+        ] {
+            assert_eq!(
+                s.parse::<GarchDistribution>().unwrap(),
+                GarchDistribution::StudentT,
+                "{s}"
             );
         }
-
-        // Return forecasts should equal mu
-        for r in &ret_fc {
-            assert!(
-                (*r - result.mu).abs() < 1e-10,
-                "Return forecast should equal mu"
-            );
+        match "sstd".parse::<GarchDistribution>() {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("distribution")
+                        && message.contains("norm")
+                        && message.contains("std"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_validate_garch_forecast_convergence() {
-        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
-
-        // Long horizon forecast should converge to unconditional variance
-        let (var_fc, _, _) = garch_forecast(&result, 50).unwrap();
-
-        let last_fc = var_fc.last().unwrap();
-        let diff = (last_fc - result.unconditional_variance).abs();
-        let rel_diff = diff / result.unconditional_variance;
-
-        // Should converge (within 50% of unconditional variance)
-        assert!(
-            rel_diff < 0.5,
-            "Long-horizon forecast {} should converge to unconditional {}",
-            last_fc,
-            result.unconditional_variance
+        assert_eq!(GarchDistribution::StudentT.to_string(), "std");
+        assert_eq!(
+            serde_json::to_string(&GarchDistribution::StudentT).unwrap(),
+            "\"std\""
         );
+        let c: GarchConfig = serde_json::from_str(
+            r#"{"p":1,"q":1,"include_mean":true,"max_iter":500,"tolerance":1e-8,"distribution":"normal"}"#,
+        )
+        .unwrap();
+        assert_eq!(c.distribution, GarchDistribution::Normal);
     }
 
+    /// run_garch is garch() with p, q, include_mean and the defaults.
     #[test]
-    fn test_validate_garch_inference() {
-        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
-        let result = garch(&data, None).unwrap();
+    fn test_run_garch_delegates() {
+        let (_case, x) = returns("garch_normal_t", "r_norm");
+        let a = run_garch(&x, Some(1), Some(2), Some(false)).unwrap();
+        let mut c = GarchConfig::default();
+        c.q = 2;
+        c.include_mean = false;
+        let b = garch(&x, Some(c)).unwrap();
+        assert_eq!(a.estimates(), b.estimates());
+        assert_eq!(a.log_likelihood.to_bits(), b.log_likelihood.to_bits());
+        assert_eq!(a.distribution, GarchDistribution::Normal);
+    }
 
-        // Standard errors should be positive
-        for se in &result.std_errors {
-            assert!(*se > 0.0, "Standard error should be positive");
+    /// A GARCH result with the given coefficients whose last conditional variances and squared residuals
+    /// are `h_last` and `e2_last` (oldest first, equal lengths); only these enter the forecast.
+    fn toy(
+        omega: f64,
+        alpha: Vec<f64>,
+        beta: Vec<f64>,
+        h_last: &[f64],
+        e2_last: &[f64],
+    ) -> GarchResult {
+        let mut r = fit(
+            &generate_garch_data(200, 0.0001, 0.1, 0.8),
+            alpha.len(),
+            beta.len(),
+            true,
+            "norm",
+        );
+        r.omega = omega;
+        r.alpha = alpha;
+        r.beta = beta;
+        r.mu = 0.0;
+        let (n, k) = (r.conditional_variance.len(), h_last.len());
+        for i in 0..k {
+            r.conditional_variance[n - k + i] = h_last[i];
+            r.std_residuals[n - k + i] = (e2_last[i] / h_last[i]).sqrt();
         }
+        r
+    }
 
-        // t-statistics should be finite
-        for t in &result.t_stats {
-            assert!(t.is_finite(), "t-statistic should be finite");
+    /// TS-21 hand cases (finding; extra.R). Fails before: the (1,1) path applied persistence^i to the
+    /// previous forecast ([3.7, 3.43, 2.9683, 2.4348907, ..]), and the (2,1) one-step forecast lumped
+    /// both ARCH lags onto e_T^2 (4.3).
+    #[test]
+    fn test_garch_forecast_recursion_hand() {
+        let r = toy(0.1, vec![0.1], vec![0.8], &[3.0], &[12.0]);
+        let (var, _, ret) = garch_forecast(&r, 6).unwrap();
+        let want = [3.7, 3.43, 3.187, 2.9683, 2.77147, 2.594323];
+        for (got, w) in var.iter().zip(want) {
+            assert!((got - w).abs() <= 1e-12, "{var:?}");
         }
-
-        // p-values should be in [0, 1]
-        for p in &result.p_values {
-            assert!(*p >= 0.0 && *p <= 1.0, "p-value should be in [0,1]: {}", p);
+        assert!(ret.iter().all(|m| *m == 0.0));
+        let r = toy(0.1, vec![0.05, 0.1], vec![0.8], &[3.0, 3.0], &[2.0, 12.0]);
+        let (var, _, _) = garch_forecast(&r, 5).unwrap();
+        let want = [3.3, 4.105, 3.91925, 3.8418625, 3.757508125];
+        for (got, w) in var.iter().zip(want) {
+            assert!((got - w).abs() <= 1e-12, "{var:?}");
         }
+    }
 
-        // Significance levels should be present
-        assert_eq!(result.significance.len(), result.p_values.len());
+    /// R: forecasts sigma2_{T+1..T+H} of the pinned fits by the GARCH recursion, including (1,2), (2,1),
+    /// ARCH(1) and the zero-mean fit; GARCH(1,1) equals the closed form. Fails before: degenerate
+    /// estimates and the compounded recursion.
+    #[test]
+    fn test_validate_garch_forecast() {
+        let (case, rn) = returns("garch_normal_t", "r_norm");
+        let (_, rt) = returns("garch_normal_t", "r_t");
+        let (_, r21) = returns("garch_normal_t", "r_g21");
+        let (_, dm) = returns("garch_normal_t", "r_norm_dm");
+        let fits = [
+            ("norm", fit(&rn, 1, 1, true, "norm"), 10),
+            ("std", fit(&rt, 1, 1, true, "std"), 10),
+            ("g12", fit(&rn, 1, 2, true, "norm"), 10),
+            ("g21", fit(&r21, 2, 1, true, "norm"), 10),
+            ("arch1", fit(&rn, 1, 0, true, "norm"), 5),
+            ("zm", fit(&dm, 1, 1, false, "norm"), 5),
+        ];
+        let mut check = Check::new(&case);
+        for (key, r, h) in &fits {
+            let (var, vol, ret) = garch_forecast(r, *h).unwrap();
+            check.vector(&format!("{key}_forecast_var_tight"), &var, PAR);
+            assert!(
+                vol.iter()
+                    .zip(&var)
+                    .all(|(s, v)| (s - v.sqrt()).abs() <= 1e-15 * s),
+                "{key}"
+            );
+            assert!(ret.iter().all(|m| *m == r.mu), "{key}");
+        }
+        check.finish();
+        let r = &fits[0].1;
+        let (var, _, _) = garch_forecast(r, 10).unwrap();
+        let mut pw = 1.0;
+        for v in &var {
+            let closed = r.unconditional_variance + pw * (var[0] - r.unconditional_variance);
+            assert!((v - closed).abs() <= 1e-13 * v, "{v} vs {closed}");
+            pw *= r.persistence;
+        }
+    }
+
+    /// A result without its (unserialised) conditional variances cannot be forecast.
+    #[test]
+    fn test_garch_forecast_needs_the_fit_path() {
+        let mut r = toy(0.1, vec![0.1], vec![0.8], &[3.0], &[12.0]);
+        r.conditional_variance.clear();
+        match garch_forecast(&r, 3) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("conditional variances"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 
     fn cancelled<R>(f: impl FnOnce() -> R) -> R {
@@ -1166,22 +2092,145 @@ mod tests {
 
     #[test]
     fn garch_likelihood_and_inference_passes_honour_cancellation() {
-        // At p = q = 20 one optimiser iteration is 85 likelihood passes, so on a
-        // series of millions of rows a check per iteration alone would let a
-        // cancelled fit run for many seconds; each pass checks as it goes, and
-        // the standard-error pass checks once per parameter.
+        // At p = q = 20 one likelihood pass over a long series takes seconds, so each pass
+        // checks the budget as it goes, and the Hessian checks once per column.
         let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
+        let s = Spec::new(&data, 1, 1, true, GarchDistribution::Normal);
+        let nat = [0.0, 1e-4, 0.1, 0.8];
+        let fixed = [false; 4];
         assert!(matches!(
-            cancelled(|| compute_garch_quantities(&data, 0.0, 1e-4, &[0.1], &[0.8])),
+            cancelled(|| loglik_grad(&s, &data, &nat)),
             Err(EconError::Cancelled(_))
         ));
         assert!(matches!(
-            cancelled(|| compute_garch_inference(&data, 0.0, 1e-4, &[0.1], &[0.8], true)),
+            cancelled(|| hessian_free(&s, &data, &nat, &fixed)),
             Err(EconError::Cancelled(_))
         ));
-        let (cond_var, _, ll) = compute_garch_quantities(&data, 0.0, 1e-4, &[0.1], &[0.8]).unwrap();
-        assert_eq!(cond_var.len(), data.len());
-        assert!(ll.is_finite());
+        assert!(matches!(
+            cancelled(|| inference(&s, &data, &nat, &fixed)),
+            Err(EconError::Cancelled(_))
+        ));
+        let (ll, g) = loglik_grad(&s, &data, &nat).unwrap().unwrap();
+        assert!(ll.is_finite() && g.len() == 4);
+        assert!(hessian_free(&s, &data, &nat, &fixed).unwrap().is_some());
+        assert!(inference(&s, &data, &nat, &fixed).is_ok());
+    }
+
+    /// The optimiser checks the budget every iteration and never takes a budget error for an
+    /// infeasible trial: a token cancelled during the 12th objective evaluation stops the run there,
+    /// while the free run needs more evaluations than that.
+    #[test]
+    fn garch_bfgs_checkpoints_each_iteration() {
+        // 1 evaluation at the start and 8 for its Hessian, so the 12th is inside the BFGS loop
+        const CANCEL_AT: usize = 12;
+        let (_case, x) = returns("garch_normal_t", "r_norm");
+        let s = Spec::new(&x, 1, 1, true, GarchDistribution::Normal);
+        let th0 = to_theta(&s, &starts(&s)[0]);
+        let mut free_evals = 0;
+        let mut obj = |th: &[f64]| {
+            free_evals += 1;
+            objective(&s, &x, th)
+        };
+        assert!(bfgs(&mut obj, th0.clone(), 500, 1e-8).unwrap().is_some());
+        assert!(
+            free_evals > CANCEL_AT,
+            "the free run needs {free_evals} evaluations"
+        );
+
+        let token = crate::resource::CancelToken::new();
+        let mut evals = 0;
+        let r =
+            crate::resource::with_budget(crate::resource::Budget::new(None, token.clone()), || {
+                let mut obj = |th: &[f64]| {
+                    evals += 1;
+                    if evals == CANCEL_AT {
+                        token.cancel();
+                    }
+                    objective(&s, &x, th)
+                };
+                bfgs(&mut obj, th0, 500, 1e-8).map(|o| o.map(|o| o.iterations))
+            });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
+        assert!(
+            evals <= CANCEL_AT,
+            "{evals} evaluations after the cancellation"
+        );
+    }
+
+    /// TS-20: the conditional likelihood needs more observations than parameters. Fails before: with
+    /// include_mean (22 parameters, 21 rows) `n - n_params` underflowed (debug: "attempt to subtract with
+    /// overflow"; release: df ~1.8e19 and p-values 1); without the mean (21 parameters) df was 0 and every
+    /// p-value NaN, returned as Ok.
+    #[test]
+    fn test_garch_rejects_n_le_params() {
+        let x = generate_garch_data(21, 0.0001, 0.1, 0.8);
+        for (include_mean, required) in [(true, 23), (false, 22)] {
+            let mut c = GarchConfig::default();
+            c.p = 10;
+            c.q = 10;
+            c.include_mean = include_mean;
+            match garch(&x, Some(c)) {
+                Err(EconError::InsufficientData {
+                    required: r,
+                    provided,
+                    context,
+                }) => {
+                    assert_eq!((r, provided), (required, 21), "{context}");
+                    assert!(
+                        context.contains("GARCH(10,10)") && context.contains("parameters"),
+                        "{context}"
+                    );
+                }
+                other => panic!(
+                    "include_mean = {include_mean}: expected InsufficientData, got {other:?}"
+                ),
+            }
+        }
+        // one observation more than parameters is accepted
+        let x22 = generate_garch_data(22, 0.0001, 0.1, 0.8);
+        let mut c = GarchConfig::default();
+        c.p = 10;
+        c.q = 10;
+        c.include_mean = false;
+        assert!(garch(&x22, Some(c)).is_ok());
+    }
+
+    /// R3/G1: degenerate settings and data are errors that name the problem. Fails before: each returned Ok
+    /// (p = 0 fitted a GARCH(0,1); NaN data propagated into the likelihood; a constant series gave log(0)).
+    #[test]
+    fn test_garch_rejects_degenerate_inputs() {
+        let x = generate_garch_data(200, 0.0001, 0.1, 0.8);
+        let expect_spec = |c: GarchConfig, data: &[f64], needle: &str| match garch(data, Some(c)) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains(needle), "{message}")
+            }
+            other => panic!("expected InvalidSpecification naming '{needle}', got {other:?}"),
+        };
+        let mut c = GarchConfig::default();
+        c.p = 0;
+        expect_spec(c, &x, "ARCH order p");
+        let mut c = GarchConfig::default();
+        c.max_iter = 0;
+        expect_spec(c, &x, "max_iter");
+        for tol in [0.0, -1e-8, f64::NAN, f64::INFINITY] {
+            let mut c = GarchConfig::default();
+            c.tolerance = tol;
+            expect_spec(c, &x, "tolerance");
+        }
+        expect_spec(GarchConfig::default(), &[0.01; 50], "constant");
+        let mut y = x.clone();
+        y[7] = f64::NAN;
+        y[9] = f64::NAN;
+        assert!(matches!(
+            garch(&y, None),
+            Err(EconError::NullValues { count: 2, .. })
+        ));
+        let mut y = x.clone();
+        y[3] = f64::INFINITY;
+        assert!(matches!(
+            garch(&y, None),
+            Err(EconError::NonFiniteValues { count: 1, .. })
+        ));
     }
 
     #[test]
