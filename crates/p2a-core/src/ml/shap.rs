@@ -47,6 +47,7 @@ use crate::errors::{EconError, EconResult};
 use crate::traits::convergence::{ResultNotes, notes_text};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Default seed of the Kernel SHAP sampling path (R13); `ShapConfig::seed = None` uses it too.
 pub const SHAP_DEFAULT_SEED: u64 = 42;
@@ -1120,23 +1121,249 @@ pub fn shap_tree_ensemble(
 // Kernel SHAP Implementation
 // ============================================================================
 
-/// Kernel SHAP for black-box model explanation.
+/// Rows of the Kernel SHAP regression: `z` (coalitions x M; 1.0 = the feature takes x's value)
+/// and their weights.
+struct CoalitionDesign {
+    z: Array2<f64>,
+    weights: Vec<f64>,
+    /// Rows from completely enumerated subset sizes (the rest were sampled).
+    n_fixed: usize,
+    /// Subset sizes (with their complements) enumerated completely.
+    num_full: usize,
+    /// Every proper non-empty coalition is in the design.
+    exact: bool,
+}
+
+/// Shapley kernel `pi(s) = (M - 1) / (C(M, s) s (M - s))`, `1 <= s <= M - 1` (Lundberg & Lee
+/// 2017, Theorem 2).
+fn shap_kernel_weight(m: usize, s: usize) -> f64 {
+    (m - 1) as f64 / (binomial_coefficient(m, s) * s as f64 * (m - s) as f64)
+}
+
+/// `C(n, k)`, exact while `C(n, k) < 2^53` (multiplicative; every partial product is an
+/// integer).
+fn binomial_coefficient(n: usize, k: usize) -> f64 {
+    if k > n {
+        return 0.0;
+    }
+    let k = k.min(n - k);
+    (0..k).fold(1.0, |c, i| c * (n - i) as f64 / (i + 1) as f64)
+}
+
+/// Every proper non-empty coalition (`2^M - 2` rows) with weight `pi(|S|)`. Caller: `2 <= m <= 62`.
+fn enumerate_coalitions(m: usize) -> EconResult<CoalitionDesign> {
+    use crate::resource;
+    let rows = ((1u64 << m) - 2) as usize;
+    let len = resource::checked_len(&[rows, m], "Kernel SHAP coalitions")?;
+    resource::check_alloc::<f64>(len, "Kernel SHAP coalitions")?;
+    let mut z = resource::try_zeros2(rows, m, "Kernel SHAP coalitions")?;
+    let mut weights = resource::try_vec(rows, 0.0, "Kernel SHAP weights")?;
+    for (r, mut row) in z.outer_iter_mut().enumerate() {
+        if r % 4096 == 0 {
+            resource::checkpoint()?;
+        }
+        let mask = r as u64 + 1;
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = ((mask >> j) & 1) as f64;
+        }
+        weights[r] = shap_kernel_weight(m, mask.count_ones() as usize);
+    }
+    Ok(CoalitionDesign {
+        z,
+        weights,
+        n_fixed: rows,
+        num_full: m / 2,
+        exact: true,
+    })
+}
+
+/// shap.KernelExplainer's coalition design (`explain()`, shap 0.4x):
+///  * subset sizes s = 1..=ceil((M-1)/2), paired with M - s when s <= floor((M-1)/2); size
+///    weights `w_s ∝ (M-1)/(s(M-s))`, doubled for paired sizes, normalised;
+///  * complete sizes from s = 1 upwards while `n_left * w_s / n_subsets(s) >= 1 - 1e-8`
+///    (renormalising the remaining weights after each), each subset (and complement) with weight
+///    `w_s / C(M, s)` (halved if paired);
+///  * the remaining budget: sizes drawn from the remaining size weights (halved if paired,
+///    renormalised), members drawn uniformly without replacement, the complement added for
+///    paired sizes; a repeated coalition increments its weight (and its complement's); at most
+///    4 x the remaining budget draws; the sampled weights are then scaled to sum to the remaining
+///    size weight `sum_{s > num_full} w_s`.
 ///
-/// Uses a weighted linear regression on binary coalition vectors to estimate
-/// SHAP values. This is an approximation that works for any model.
+/// The budget is capped at `2^M - 2` (as shap does for M <= 30), and `exact` is true when every
+/// size was complete.
+fn sampled_coalitions(
+    m: usize,
+    n_samples: usize,
+    rng: &mut rand_chacha::ChaCha8Rng,
+) -> EconResult<CoalitionDesign> {
+    use crate::resource;
+    use rand::distributions::{Distribution, WeightedIndex};
+
+    let n_samples = if m < 63 {
+        n_samples.min(((1u64 << m) - 2) as usize)
+    } else {
+        n_samples
+    };
+    let len = resource::checked_len(&[n_samples, m], "Kernel SHAP coalitions")?;
+    resource::check_alloc::<f64>(len, "Kernel SHAP coalitions")?;
+    let mut masks = resource::try_with_capacity::<bool>(len, "Kernel SHAP coalitions")?;
+    let mut weights = resource::try_with_capacity::<f64>(n_samples, "Kernel SHAP weights")?;
+    let add = |mask: &[bool],
+               w: f64,
+               masks: &mut Vec<bool>,
+               weights: &mut Vec<f64>|
+     -> EconResult<usize> {
+        let row = weights.len();
+        if row % 4096 == 0 {
+            resource::checkpoint()?;
+        }
+        masks.extend_from_slice(mask);
+        weights.push(w);
+        Ok(row)
+    };
+
+    let num_subset_sizes = m / 2; // ceil((m - 1) / 2)
+    let num_paired = (m - 1) / 2;
+    let mut weight_vector: Vec<f64> = (1..=num_subset_sizes)
+        .map(|s| {
+            let w = (m - 1) as f64 / (s * (m - s)) as f64;
+            if s <= num_paired { 2.0 * w } else { w }
+        })
+        .collect();
+    let total: f64 = weight_vector.iter().sum();
+    weight_vector.iter_mut().for_each(|w| *w /= total);
+
+    let mut num_full = 0usize;
+    let mut samples_left = n_samples;
+    let mut remaining = weight_vector.clone();
+    let mut mask = vec![false; m];
+    for s in 1..=num_subset_sizes {
+        let paired = s <= num_paired;
+        let n_subsets = binomial_coefficient(m, s) * if paired { 2.0 } else { 1.0 };
+        if samples_left as f64 * remaining[s - 1] / n_subsets < 1.0 - 1e-8 {
+            break;
+        }
+        num_full += 1;
+        samples_left -= n_subsets as usize;
+        if remaining[s - 1] < 1.0 {
+            let r = 1.0 - remaining[s - 1];
+            remaining.iter_mut().for_each(|w| *w /= r);
+        }
+        let w = weight_vector[s - 1] / binomial_coefficient(m, s) / if paired { 2.0 } else { 1.0 };
+        // every s-subset in lexicographic order
+        let mut idx: Vec<usize> = (0..s).collect();
+        loop {
+            mask.fill(false);
+            idx.iter().for_each(|&j| mask[j] = true);
+            add(&mask, w, &mut masks, &mut weights)?;
+            if paired {
+                mask.iter_mut().for_each(|b| *b = !*b);
+                add(&mask, w, &mut masks, &mut weights)?;
+            }
+            let Some(i) = (0..s).rev().find(|&i| idx[i] != i + m - s) else {
+                break;
+            };
+            idx[i] += 1;
+            for k in i + 1..s {
+                idx[k] = idx[k - 1] + 1;
+            }
+        }
+    }
+
+    let n_fixed = weights.len();
+    let exact = num_full == num_subset_sizes;
+    if !exact && samples_left > 0 {
+        let mut rem: Vec<f64> = weight_vector
+            .iter()
+            .enumerate()
+            .map(|(k, &w)| if k < num_paired { w / 2.0 } else { w })
+            .skip(num_full)
+            .collect();
+        let rs: f64 = rem.iter().sum();
+        rem.iter_mut().for_each(|w| *w /= rs);
+        let sizes = WeightedIndex::new(&rem)
+            .map_err(|e| EconError::Computation(format!("Kernel SHAP size weights: {e}")))?;
+        let draws = samples_left
+            .checked_mul(4)
+            .ok_or_else(|| spec("n_samples overflows".into()))?;
+        let mut used: HashMap<Vec<bool>, (usize, Option<usize>)> = HashMap::new();
+        for _ in 0..draws {
+            if samples_left == 0 {
+                break;
+            }
+            let size = sizes.sample(rng) + num_full + 1;
+            mask.fill(false);
+            for j in rand::seq::index::sample(rng, m, size).iter() {
+                mask[j] = true;
+            }
+            let paired = size <= num_paired;
+            if let Some(&(row, comp)) = used.get(&mask) {
+                weights[row] += 1.0;
+                if let Some(c) = comp {
+                    weights[c] += 1.0;
+                }
+                continue;
+            }
+            let row = add(&mask, 1.0, &mut masks, &mut weights)?;
+            samples_left -= 1;
+            let key = mask.clone();
+            let mut comp = None;
+            if samples_left > 0 && paired {
+                mask.iter_mut().for_each(|b| *b = !*b);
+                comp = Some(add(&mask, 1.0, &mut masks, &mut weights)?);
+                samples_left -= 1;
+            }
+            used.insert(key, (row, comp));
+        }
+        let weight_left: f64 = weight_vector[num_full..].iter().sum();
+        let sampled: f64 = weights[n_fixed..].iter().sum();
+        weights[n_fixed..]
+            .iter_mut()
+            .for_each(|w| *w *= weight_left / sampled);
+    }
+
+    let rows = weights.len();
+    let mut z = resource::try_zeros2(rows, m, "Kernel SHAP coalitions")?;
+    for (v, &b) in z.iter_mut().zip(&masks) {
+        *v = if b { 1.0 } else { 0.0 };
+    }
+    Ok(CoalitionDesign {
+        z,
+        weights,
+        n_fixed,
+        num_full,
+        exact,
+    })
+}
+
+/// Kernel SHAP: the interventional Shapley values of any model, `v(S) = mean_b f(x_S, b_notS)`
+/// over the rows `b` of `background` (Lundberg & Lee 2017; Janzing, Minorics & Blöbaum 2020), by
+/// shap.KernelExplainer's weighted regression on coalitions with the efficiency constraint
+/// `sum(phi) = f(x) - E f` imposed exactly (the last feature is eliminated) and the Shapley kernel
+/// applied once.
 ///
-/// # Algorithm (Lundberg & Lee, 2017)
+/// With `n = config.n_samples` (default `2 M + 2048`), every coalition is evaluated when
+/// `2^M - 2 <= n`, and the values are then exact (the default does so for M <= 11); otherwise
+/// shap's design with `n` coalitions: complete subset sizes first, then sizes drawn in proportion
+/// to the kernel mass and members without replacement, from ChaCha8 seeded with
+/// `config.seed` (default [`SHAP_DEFAULT_SEED`]) on stream i for row i, so each row is
+/// reproducible on its own. One feature gives `phi = f(x) - E f`. The base value is the mean
+/// prediction over the background.
 ///
-/// 1. Sample coalitions S from power set of features
-/// 2. For each coalition, compute model output with features in S from x
-///    and features not in S from background distribution
-/// 3. Fit weighted linear regression: f(x) = phi_0 + sum(phi_i * z_i)
-///    with SHAP kernel weights: pi(z) = (M-1) / (C(M, |z|) * |z| * (M - |z|))
+/// # Errors
+///
+/// `InvalidSpecification` for no rows or features, a non-finite value in `x` or `background`, a
+/// background with other columns or no rows, a feature-name count that differs from the columns,
+/// a `predict_fn` output of the wrong length or with a non-finite value, `n_samples = 0`, a
+/// sampled design that does not identify every feature, a perturbation other than
+/// interventional, and `compute_interactions`.
 ///
 /// # References
 ///
 /// - Lundberg, S. M., & Lee, S. I. (2017). "A Unified Approach to Interpreting
 ///   Model Predictions". NeurIPS 2017.
+/// - Janzing, D., Minorics, L., & Blöbaum, P. (2020). "Feature relevance quantification in
+///   explainable AI: A causal problem". AISTATS 2020.
 pub fn kernel_shap<F>(
     predict_fn: F,
     x: ArrayView2<f64>,
@@ -1147,315 +1374,151 @@ pub fn kernel_shap<F>(
 where
     F: Fn(ArrayView2<f64>) -> Vec<f64>,
 {
-    let n_samples = x.nrows();
-    let n_features = x.ncols();
+    use crate::linalg::solve::weighted_least_squares;
+    use crate::resource;
+    use rand::SeedableRng;
 
+    match config
+        .feature_perturbation
+        .unwrap_or(FeaturePerturbation::Interventional)
+    {
+        FeaturePerturbation::Interventional => {}
+        FeaturePerturbation::TreePathDependent => {
+            return Err(spec(
+                "Kernel SHAP computes interventional values; tree_path_dependent needs TreeSHAP"
+                    .into(),
+            ));
+        }
+        FeaturePerturbation::Observational => return Err(observational_error()),
+    }
+    if config.compute_interactions {
+        return Err(spec(
+            "SHAP interaction values are computed by TreeSHAP only".into(),
+        ));
+    }
     validate_explain_inputs(x, feature_names.as_deref())?;
-    validate_background(background, n_features)?;
+    let (n, m) = x.dim();
+    validate_background(background, m)?;
+    let n_samples = match config.n_samples {
+        Some(0) => return Err(spec("n_samples must be at least 1".into())),
+        Some(v) => v,
+        None => m
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(2048))
+            .ok_or_else(|| spec("n_samples overflows".into()))?,
+    };
 
-    // Number of coalition samples (default: 2 * n_features + 2048)
-    let n_coalition_samples = config.n_samples.unwrap_or(2 * n_features + 2048);
-    if n_coalition_samples == 0 {
-        return Err(spec("n_samples must be at least 1".into()));
-    }
+    let n_bg = background.nrows();
+    let background_preds = predict_fn(background);
+    check_predictions(&background_preds, n_bg)?;
+    let base_value = background_preds.iter().sum::<f64>() / n_bg as f64;
+    let predictions = predict_fn(x);
+    check_predictions(&predictions, n)?;
 
-    // Compute base value (expected prediction over background)
-    let background_preds = predict_fn(background.view());
-    check_predictions(&background_preds, background.nrows())?;
-    let base_value = background_preds.iter().sum::<f64>() / background_preds.len() as f64;
+    let mut shap_values = resource::try_zeros2(n, m, "SHAP values")?;
+    let mut warnings = Vec::new();
+    let (exact, n_coalitions, seed) = if m == 1 {
+        for (i, &f) in predictions.iter().enumerate() {
+            shap_values[[i, 0]] = f - base_value;
+        }
+        (true, 0, None)
+    } else {
+        let shared = if m < 63 && (1u64 << m) - 2 <= n_samples as u64 {
+            Some(enumerate_coalitions(m)?)
+        } else {
+            None
+        };
+        let seed = config.seed.unwrap_or(SHAP_DEFAULT_SEED);
+        let mut masked = resource::try_zeros2(n_bg, m, "Kernel SHAP masked rows")?;
+        let (mut min_rows, mut max_rows) = (usize::MAX, 0usize);
+        for i in 0..n {
+            resource::checkpoint()?;
+            let own;
+            let design = match &shared {
+                Some(d) => d,
+                None => {
+                    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+                    rng.set_stream(i as u64);
+                    own = sampled_coalitions(m, n_samples, &mut rng)?;
+                    &own
+                }
+            };
+            let k = design.z.nrows();
+            min_rows = min_rows.min(k);
+            max_rows = max_rows.max(k);
+            let delta = predictions[i] - base_value;
+            let mut e = resource::try_zeros2(k, m - 1, "Kernel SHAP regression")?;
+            let mut y2 = resource::try_zeros1(k, "Kernel SHAP regression")?;
+            for (r, z) in design.z.outer_iter().enumerate() {
+                resource::checkpoint()?;
+                masked.assign(&background);
+                for (j, &zj) in z.iter().enumerate() {
+                    if zj == 1.0 {
+                        masked.column_mut(j).fill(x[[i, j]]);
+                    }
+                }
+                let p = predict_fn(masked.view());
+                check_predictions(&p, n_bg)?;
+                let y = p.iter().sum::<f64>() / n_bg as f64 - base_value;
+                let last = z[m - 1];
+                for j in 0..m - 1 {
+                    e[[r, j]] = z[j] - last;
+                }
+                y2[r] = y - last * delta;
+            }
+            let w = ndarray::ArrayView1::from(&design.weights[..]);
+            let ls = weighted_least_squares(e.view(), y2.view(), w)?;
+            if ls.rank < m - 1 {
+                return Err(spec(format!(
+                    "Kernel SHAP: the {k} sampled coalitions do not identify all {m} features (rank {} of {}); increase n_samples",
+                    ls.rank,
+                    m - 1
+                )));
+            }
+            let mut rest = delta;
+            for j in 0..m - 1 {
+                shap_values[[i, j]] = ls.coefficients[j];
+                rest -= ls.coefficients[j];
+            }
+            shap_values[[i, m - 1]] = rest;
+        }
+        let exact = shared.is_some();
+        if min_rows != max_rows {
+            warnings.push(format!(
+                "Kernel SHAP: the sampled design reached between {min_rows} and {max_rows} distinct coalitions per row (budget {n_samples})"
+            ));
+        }
+        (exact, max_rows, (!exact).then_some(seed))
+    };
 
-    // Initialize RNG
-    let mut rng_state = config.seed.unwrap_or(42);
-
-    // Compute SHAP values for each sample
-    let mut shap_values = Array2::zeros((n_samples, n_features));
-    let predictions: Vec<f64> = predict_fn(x);
-    check_predictions(&predictions, n_samples)?;
-
-    for i in 0..n_samples {
-        let xi = x.row(i);
-        let phi = kernel_shap_single(
-            &predict_fn,
-            xi,
-            background.view(),
-            n_coalition_samples,
-            base_value,
-            &mut rng_state,
-        )
-        .map_err(EconError::Computation)?;
-        shap_values.row_mut(i).assign(&phi);
-    }
-
-    // Compute feature importance
-    let feature_importance: Vec<f64> = (0..n_features)
-        .map(|j| {
-            shap_values
-                .column(j)
-                .mapv(|v| v.abs())
-                .mean()
-                .unwrap_or(0.0)
-        })
-        .collect();
-
-    let (additivity_passed, max_error, additivity_warning) = additivity(
+    let feature_importance = mean_abs_columns(&shap_values);
+    let (additivity_check_passed, max_additivity_error, additivity_warning) = additivity(
         base_value,
         &shap_values,
         &predictions,
         config.check_additivity,
     );
+    warnings.extend(additivity_warning);
 
     Ok(ShapResult {
         shap_values,
         base_value,
         feature_names,
-        n_obs: n_samples,
-        n_features,
+        n_obs: n,
+        n_features: m,
         feature_importance,
         interaction_values: None,
-        additivity_check_passed: additivity_passed,
-        max_additivity_error: max_error,
+        additivity_check_passed,
+        max_additivity_error,
         method: ShapMethod::Kernel,
         feature_perturbation: FeaturePerturbation::Interventional,
-        exact: false,
-        n_coalitions: Some(n_coalition_samples),
-        seed: Some(config.seed.unwrap_or(SHAP_DEFAULT_SEED)),
+        exact,
+        n_coalitions: Some(n_coalitions),
+        seed,
         predictions,
-        warnings: additivity_warning.into_iter().collect(),
+        warnings,
     })
 }
-
-/// Compute Kernel SHAP for a single sample.
-fn kernel_shap_single<F>(
-    predict_fn: &F,
-    x: ArrayView1<f64>,
-    background: ArrayView2<f64>,
-    n_samples: usize,
-    base_value: f64,
-    rng_state: &mut u64,
-) -> Result<Array1<f64>, String>
-where
-    F: Fn(ArrayView2<f64>) -> Vec<f64>,
-{
-    let n_features = x.len();
-    let n_background = background.nrows();
-
-    // Generate coalition samples and their weights
-    let mut coalitions: Vec<Vec<bool>> = Vec::with_capacity(n_samples);
-    let mut weights: Vec<f64> = Vec::with_capacity(n_samples);
-    let mut y_values: Vec<f64> = Vec::with_capacity(n_samples);
-
-    // Always include empty and full coalitions
-    coalitions.push(vec![false; n_features]);
-    weights.push(1e6); // Large weight for boundary
-
-    coalitions.push(vec![true; n_features]);
-    weights.push(1e6);
-
-    // Sample random coalitions
-    for _ in 2..n_samples {
-        let mut coalition = vec![false; n_features];
-        let n_active = (lcg_random(rng_state) % (n_features - 1)) + 1; // 1 to M-1
-
-        // Randomly select features to include
-        for _ in 0..n_active {
-            let idx = lcg_random(rng_state) % n_features;
-            coalition[idx] = true;
-        }
-
-        let actual_active: usize = coalition.iter().filter(|&&b| b).count();
-        if actual_active > 0 && actual_active < n_features {
-            // SHAP kernel weight: (M-1) / (C(M, |z|) * |z| * (M - |z|))
-            let weight = shap_kernel_weight(n_features, actual_active);
-            coalitions.push(coalition);
-            weights.push(weight);
-        }
-    }
-
-    // Evaluate model on masked inputs
-    for coalition in &coalitions {
-        // Create masked input: use x for included features, background for excluded
-        let mut masked_inputs = Array2::zeros((n_background, n_features));
-
-        for (bg_idx, bg_row) in background.outer_iter().enumerate() {
-            for j in 0..n_features {
-                masked_inputs[[bg_idx, j]] = if coalition[j] { x[j] } else { bg_row[j] };
-            }
-        }
-
-        // Get predictions and average
-        let preds = predict_fn(masked_inputs.view());
-        let avg_pred = preds.iter().sum::<f64>() / preds.len() as f64;
-        y_values.push(avg_pred - base_value);
-    }
-
-    // Solve weighted least squares: min sum(w_i * (y_i - X_i * phi)^2)
-    // X is the coalition matrix (coalitions x features)
-    // This gives us the SHAP values
-
-    let n_coalitions = coalitions.len();
-    let mut x_matrix = Array2::zeros((n_coalitions, n_features));
-
-    for (i, coalition) in coalitions.iter().enumerate() {
-        for j in 0..n_features {
-            x_matrix[[i, j]] = if coalition[j] { 1.0 } else { 0.0 };
-        }
-    }
-
-    // Weighted least squares solution
-    // phi = (X'WX)^-1 X'Wy
-    let w = Array1::from_vec(weights);
-    let y = Array1::from_vec(y_values);
-
-    // X'WX
-    let mut xtwx = Array2::zeros((n_features, n_features));
-    for i in 0..n_features {
-        for j in 0..n_features {
-            let mut sum = 0.0;
-            for k in 0..n_coalitions {
-                sum += x_matrix[[k, i]] * w[k] * x_matrix[[k, j]];
-            }
-            xtwx[[i, j]] = sum;
-        }
-    }
-
-    // X'Wy
-    let mut xtwy = Array1::zeros(n_features);
-    for i in 0..n_features {
-        let mut sum = 0.0;
-        for k in 0..n_coalitions {
-            sum += x_matrix[[k, i]] * w[k] * y[k];
-        }
-        xtwy[i] = sum;
-    }
-
-    // Solve via Cholesky or regularized inverse
-    let phi = solve_linear_system(&xtwx, &xtwy)?;
-
-    Ok(phi)
-}
-
-/// Compute SHAP kernel weight.
-///
-/// pi(z) = (M-1) / (C(M, |z|) * |z| * (M - |z|))
-///
-/// where M is the number of features and |z| is the size of the coalition.
-fn shap_kernel_weight(m: usize, s: usize) -> f64 {
-    if s == 0 || s == m {
-        return 1e6; // Boundary cases get large weight
-    }
-
-    // Compute binomial coefficient C(M, s)
-    let binom = binomial_coefficient(m, s);
-
-    (m - 1) as f64 / (binom * s as f64 * (m - s) as f64)
-}
-
-/// Compute binomial coefficient C(n, k).
-fn binomial_coefficient(n: usize, k: usize) -> f64 {
-    if k > n {
-        return 0.0;
-    }
-    if k == 0 || k == n {
-        return 1.0;
-    }
-
-    // Use log for numerical stability
-    let mut log_result = 0.0;
-    let k = k.min(n - k); // Symmetry optimization
-
-    for i in 0..k {
-        log_result += ((n - i) as f64).ln() - ((i + 1) as f64).ln();
-    }
-
-    log_result.exp()
-}
-
-/// Solve linear system Ax = b using Cholesky decomposition.
-fn solve_linear_system(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>, String> {
-    let n = a.nrows();
-
-    // Add small regularization for numerical stability
-    let mut a_reg = a.clone();
-    for i in 0..n {
-        a_reg[[i, i]] += 1e-8;
-    }
-
-    // Cholesky decomposition: A = L L'
-    let mut l = Array2::zeros((n, n));
-
-    for i in 0..n {
-        for j in 0..=i {
-            let mut sum = a_reg[[i, j]];
-            for k in 0..j {
-                sum -= l[[i, k]] * l[[j, k]];
-            }
-
-            if i == j {
-                if sum <= 0.0 {
-                    // Fall back to pseudoinverse if not positive definite
-                    return solve_via_pseudoinverse(&a_reg, b);
-                }
-                l[[i, j]] = sum.sqrt();
-            } else {
-                l[[i, j]] = sum / l[[j, j]];
-            }
-        }
-    }
-
-    // Forward substitution: L y = b
-    let mut y = Array1::zeros(n);
-    for i in 0..n {
-        let mut sum = b[i];
-        for j in 0..i {
-            sum -= l[[i, j]] * y[j];
-        }
-        y[i] = sum / l[[i, i]];
-    }
-
-    // Back substitution: L' x = y
-    let mut x = Array1::zeros(n);
-    for i in (0..n).rev() {
-        let mut sum = y[i];
-        for j in (i + 1)..n {
-            sum -= l[[j, i]] * x[j];
-        }
-        x[i] = sum / l[[i, i]];
-    }
-
-    Ok(x)
-}
-
-/// Fallback solver using pseudoinverse.
-fn solve_via_pseudoinverse(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>, String> {
-    // Simple iterative solution (gradient descent)
-    let n = a.nrows();
-    let mut x = Array1::zeros(n);
-    let learning_rate = 0.01;
-    let max_iter = 1000;
-    let tol = 1e-8;
-
-    for _ in 0..max_iter {
-        // Compute residual: r = Ax - b
-        let ax = a.dot(&x);
-        let r = &ax - b;
-
-        // Check convergence
-        let norm: f64 = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if norm < tol {
-            break;
-        }
-
-        // Gradient: A' * r
-        let grad = a.t().dot(&r);
-
-        // Update
-        x = &x - &(learning_rate * &grad);
-    }
-
-    Ok(x)
-}
-
-use super::lcg_random;
 
 // ============================================================================
 // Public API
@@ -2269,6 +2332,370 @@ mod tests {
             .finish();
     }
 
+    fn f1(z: ArrayView2<f64>) -> Vec<f64> {
+        z.outer_iter()
+            .map(|r| (r[0] / 2.0).exp() + r[0] * r[0])
+            .collect()
+    }
+
+    fn f4(z: ArrayView2<f64>) -> Vec<f64> {
+        z.outer_iter()
+            .map(|r| r[0] * r[1] * r[2] + 2.0 * r[3] + 0.5 * r[0] * r[0])
+            .collect()
+    }
+
+    fn f11_row(r: ArrayView1<f64>) -> f64 {
+        r[0] * r[1] * r[2]
+            + r[3].sin() * r[4]
+            + r[5] * r[6] * r[7] * r[8]
+            + (5..=10).map(|j| (j as f64 - 4.0) / 4.0 * r[j]).sum::<f64>()
+    }
+
+    fn f11(z: ArrayView2<f64>) -> Vec<f64> {
+        z.outer_iter().map(f11_row).collect()
+    }
+
+    fn f12(z: ArrayView2<f64>) -> Vec<f64> {
+        z.outer_iter()
+            .map(|r| f11_row(r) + 0.5 * r[11] * r[0])
+            .collect()
+    }
+
+    /// The case's 20 x 12 matrix (rows 1-4 explained, 5-20 background); the test names the case id.
+    fn kernel_case(case_id: &str) -> (Case, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let names: Vec<String> = (0..12).map(|j| format!("x{j}")).collect();
+        let cols: Vec<&str> = names.iter().map(String::as_str).collect();
+        let x = case_matrix(&ds, &cols);
+        (case, x)
+    }
+
+    /// Row-major (logical order).
+    fn flat(a: &Array2<f64>) -> Vec<f64> {
+        a.iter().copied().collect()
+    }
+
+    #[test]
+    fn test_kernel_shap_exact_coalitions_match_bruteforce() {
+        // ML-100's example: exact (1/3, 1/3, 1/3, 1); before (seed 42): (0.2787, 0.2664, 0.3106, 1.1442).
+        let f = |z: ArrayView2<f64>| {
+            z.outer_iter()
+                .map(|r| r[0] * r[1] * r[2] + r[3])
+                .collect::<Vec<f64>>()
+        };
+        let r = kernel_shap(
+            f,
+            array![[1.0, 1.0, 1.0, 1.0]].view(),
+            Array2::zeros((1, 4)).view(),
+            &ShapConfig::default(),
+            None,
+        )
+        .unwrap();
+        for (j, e) in [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0].iter().enumerate() {
+            assert!(
+                EXACT_SHAP.allows(r.shap_values[[0, j]], *e),
+                "feature {j}: {}",
+                r.shap_values[[0, j]]
+            );
+        }
+        // A non-additive model on a random background against enumeration of the interventional game.
+        let g = |z: ArrayView2<f64>| {
+            z.outer_iter()
+                .map(|r| r[0] * r[1] + r[2] * r[3] * r[4] + (r[4]).exp())
+                .collect::<Vec<f64>>()
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(21);
+        let bg: Array2<f64> = Array2::from_shape_fn((7, 5), |_| rng.gen_range(-1.0..1.0));
+        let xs: Array2<f64> = Array2::from_shape_fn((3, 5), |_| rng.gen_range(-1.0..1.0));
+        let r = kernel_shap(g, xs.view(), bg.view(), &ShapConfig::default(), None).unwrap();
+        for i in 0..3 {
+            let v = |mask: usize| {
+                let mut z = bg.clone();
+                for j in 0..5 {
+                    if (mask >> j) & 1 == 1 {
+                        z.column_mut(j).fill(xs[[i, j]]);
+                    }
+                }
+                g(z.view()).iter().sum::<f64>() / 7.0
+            };
+            let exact = bruteforce_shapley(5, &v);
+            for j in 0..5 {
+                assert!(
+                    EXACT_SHAP.allows(r.shap_values[[i, j]], exact[j]),
+                    "row {i} feature {j}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_kernel_shap_sim_m4() {
+        let (case, x) = kernel_case("shap_kernel_sim");
+        let r = kernel_shap(
+            f4,
+            x.slice(s![0..4, 0..4]),
+            x.slice(s![4..20, 0..4]),
+            &ShapConfig::default(),
+            None,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("m4_phi", &flat(&r.shap_values), EXACT_SHAP)
+            .scalar("m4_base", r.base_value, EXACT_SHAP)
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_kernel_shap_sim_m11_enumerated() {
+        // default n_samples = 2 * 11 + 2048 = 2070 >= 2^11 - 2 = 2046: every coalition, exact
+        let (case, x) = kernel_case("shap_kernel_sim");
+        let r = kernel_shap(
+            f11,
+            x.slice(s![0..4, 0..11]),
+            x.slice(s![4..20, 0..11]),
+            &ShapConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert!(r.exact);
+        assert_eq!(r.n_coalitions, Some(2046));
+        Check::new(&case)
+            .vector("m11_phi", &flat(&r.shap_values), EXACT_SHAP)
+            .scalar("m11_base", r.base_value, EXACT_SHAP)
+            .vector("m11_fx", &r.predictions, EXACT_SHAP)
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_kernel_shap_sim_m12_sampled() {
+        // default n_samples = 2072 < 4094: shap's design (sizes 1-3 complete, 4-8 sampled), seeded
+        let (case, x) = kernel_case("shap_kernel_sim");
+        let (ex, bg) = (x.slice(s![0..4, ..]), x.slice(s![4..20, ..]));
+        let r = kernel_shap(f12, ex, bg, &ShapConfig::default(), None).unwrap();
+        assert!(!r.exact);
+        assert_eq!(r.n_coalitions, Some(2072));
+        assert_eq!(r.seed, Some(SHAP_DEFAULT_SEED));
+        let exact = case.vector("m12_phi");
+        let fx = case.vector("m12_fx");
+        let base = case.scalar("m12_base");
+        for i in 0..4 {
+            let s: f64 = r.shap_values.row(i).sum();
+            assert!((s - (fx[i] - base)).abs() < 1e-10, "efficiency row {i}"); // exact by construction
+            for j in 0..12 {
+                let d = (r.shap_values[[i, j]] - exact[i * 12 + j]).abs();
+                assert!(
+                    d < KERNEL_MC_TOL,
+                    "row {i} feature {j}: |diff| {d} >= {KERNEL_MC_TOL}"
+                );
+            }
+        }
+        Check::new(&case)
+            .scalar("m12_base", r.base_value, EXACT_SHAP)
+            .vector("m12_fx", &r.predictions, EXACT_SHAP)
+            .finish();
+        // seeds: identical seeds give identical values; another seed gives other samples
+        let again = kernel_shap(f12, ex, bg, &ShapConfig::default(), None).unwrap();
+        assert_eq!(again.shap_values, r.shap_values);
+        let mut c7 = ShapConfig::default();
+        c7.seed = Some(7);
+        let other = kernel_shap(f12, ex, bg, &c7, None).unwrap();
+        assert_ne!(other.shap_values, r.shap_values);
+    }
+
+    #[test]
+    fn test_kernel_shap_single_feature() {
+        // M = 1: phi = f(x) - E f (before: remainder by zero)
+        let f = |z: ArrayView2<f64>| {
+            z.outer_iter()
+                .map(|r| (r[0] / 2.0).exp() + r[0] * r[0])
+                .collect::<Vec<f64>>()
+        };
+        let bg = array![[-1.0], [0.5], [2.0]];
+        let x = array![[0.3], [1.7]];
+        let r = kernel_shap(f, x.view(), bg.view(), &ShapConfig::default(), None).unwrap();
+        let ef = f(bg.view()).iter().sum::<f64>() / 3.0;
+        let fx = f(x.view());
+        for i in 0..2 {
+            assert!((r.shap_values[[i, 0]] - (fx[i] - ef)).abs() < 1e-14);
+        }
+        assert!(r.exact);
+        assert_eq!(r.n_coalitions, Some(0));
+    }
+
+    #[test]
+    fn test_validate_kernel_shap_sim_m1() {
+        let (case, x) = kernel_case("shap_kernel_sim");
+        let r = kernel_shap(
+            f1,
+            x.slice(s![0..4, 0..1]),
+            x.slice(s![4..20, 0..1]),
+            &ShapConfig::default(),
+            None,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("m1_phi", &flat(&r.shap_values), EXACT_SHAP)
+            .scalar("m1_base", r.base_value, EXACT_SHAP)
+            .finish();
+    }
+
+    #[test]
+    fn test_kernel_shap_zero_features_is_error() {
+        let f = |z: ArrayView2<f64>| vec![1.0; z.nrows()];
+        let e = kernel_shap(
+            f,
+            Array2::<f64>::zeros((2, 0)).view(),
+            Array2::<f64>::zeros((3, 0)).view(),
+            &ShapConfig::default(),
+            None,
+        )
+        .unwrap_err(); // before: subtract-with-overflow panic
+        assert!(e.to_string().contains("at least one feature column"), "{e}");
+    }
+
+    #[test]
+    fn test_kernel_shap_small_budget_uses_the_sampled_design() {
+        // n_samples = 10 below the 14 coalitions of M = 4: shap's sampled design with that budget
+        let x = array![[0.3, -1.0, 2.0, 0.5]];
+        let bg = array![[0.0, 0.0, 0.0, 0.0], [1.0, -1.0, 0.5, 2.0]];
+        let mut c = ShapConfig::default();
+        c.n_samples = Some(10);
+        let r = kernel_shap(f4, x.view(), bg.view(), &c, None).unwrap();
+        assert!(!r.exact);
+        assert_eq!(r.n_coalitions, Some(10));
+        let delta = f4(x.view())[0] - f4(bg.view()).iter().sum::<f64>() / 2.0;
+        assert!((r.shap_values.row(0).sum() - delta).abs() < 1e-10);
+        let again = kernel_shap(f4, x.view(), bg.view(), &c, None).unwrap();
+        assert_eq!(again.shap_values, r.shap_values);
+        c.seed = Some(9);
+        let other = kernel_shap(f4, x.view(), bg.view(), &c, None).unwrap();
+        assert_ne!(other.shap_values, r.shap_values);
+        assert!(
+            r.to_string()
+                .contains("10 of 14 coalitions sampled, seed 42; Monte Carlo estimate")
+        );
+    }
+
+    #[test]
+    fn test_shap_display_reports_method_and_notes() {
+        let f = |z: ArrayView2<f64>| z.outer_iter().map(|r| r[0] * r[1]).collect::<Vec<f64>>();
+        let r = kernel_shap(
+            f,
+            array![[1.0, 2.0]].view(),
+            array![[0.0, 0.0], [1.0, 1.0]].view(),
+            &ShapConfig::default(),
+            None,
+        )
+        .unwrap();
+        let text = r.to_string();
+        assert!(
+            text.contains("Method: Kernel SHAP (interventional; all 2 coalitions, exact)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Additivity check: PASSED (max error: "),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_kernel_shap_rejects_tree_settings() {
+        let f = |z: ArrayView2<f64>| z.outer_iter().map(|r| r.sum()).collect::<Vec<f64>>();
+        let (x, bg) = (array![[1.0, 2.0]], array![[0.0, 0.0], [1.0, 1.0]]);
+        for (p, frag) in [
+            (
+                FeaturePerturbation::Observational,
+                "observational (conditional expectations) is not implemented",
+            ),
+            (
+                FeaturePerturbation::TreePathDependent,
+                "tree_path_dependent needs TreeSHAP",
+            ),
+        ] {
+            let mut c = ShapConfig::default();
+            c.feature_perturbation = Some(p);
+            let e = kernel_shap(f, x.view(), bg.view(), &c, None)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(frag), "{e}");
+        }
+        let mut c = ShapConfig::default();
+        c.compute_interactions = true;
+        assert!(
+            kernel_shap(f, x.view(), bg.view(), &c, None)
+                .unwrap_err()
+                .to_string()
+                .contains("TreeSHAP only")
+        );
+    }
+
+    fn neumaier_sum(v: &[f64]) -> f64 {
+        let (mut sum, mut c) = (0.0f64, 0.0f64);
+        for &x in v {
+            let t = sum + x;
+            c += if sum.abs() >= x.abs() {
+                (sum - t) + x
+            } else {
+                (x - t) + sum
+            };
+            sum = t;
+        }
+        sum + c
+    }
+
+    #[test]
+    fn test_kernel_design_matches_shap_explainer() {
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        for (m, n, rows, n_fixed, num_full, fixed_w) in [
+            (
+                12usize,
+                2072usize,
+                2072usize,
+                596usize,
+                3usize,
+                0.70709942540406878f64,
+            ),
+            (20, 2088, 2088, 420, 2, 0.45329908333738622),
+            (12, 100, 100, 24, 1, 0.36124284741551288),
+        ] {
+            let d = sampled_coalitions(m, n, &mut rng).unwrap();
+            // rows: seeded, so deterministic; the R port reached the full budget in all 100 runs
+            // at (12, 2072)
+            assert_eq!(
+                (d.z.nrows(), d.n_fixed, d.num_full, d.exact),
+                (rows, n_fixed, num_full, false),
+                "M = {m}"
+            );
+            // compensated sums: a plain sum of ~2000 weights carries ~1e-14 of rounding (R's
+            // reference sums in long double)
+            let wf = neumaier_sum(&d.weights[..d.n_fixed]);
+            let wt = neumaier_sum(&d.weights);
+            assert!(
+                (wf - fixed_w).abs() < 1e-14 && (wt - 1.0).abs() < 1e-14,
+                "M = {m}: {wf} {wt}"
+            );
+            let distinct: std::collections::HashSet<Vec<u8>> =
+                d.z.rows()
+                    .into_iter()
+                    .map(|r| r.iter().map(|&v| v as u8).collect())
+                    .collect();
+            assert_eq!(distinct.len(), d.z.nrows()); // every row is a distinct coalition
+            assert!(d.z.rows().into_iter().all(|r| {
+                let s = r.sum();
+                s >= 1.0 && s <= (m - 1) as f64
+            }));
+        }
+        let d = sampled_coalitions(11, 2070, &mut rng).unwrap();
+        assert!(d.exact);
+        assert_eq!((d.z.nrows(), d.n_fixed, d.num_full), (2046, 2046, 5));
+        let e = enumerate_coalitions(4).unwrap();
+        assert_eq!(e.z.nrows(), 14);
+        assert!(
+            (shap_kernel_weight(4, 1) - 0.25).abs() < 1e-15
+                && (shap_kernel_weight(4, 2) - 0.125).abs() < 1e-15
+        );
+    }
+
     #[test]
     fn test_shap_kernel_weight() {
         // Test that weights are computed correctly
@@ -2293,6 +2720,7 @@ mod tests {
         assert_eq!(binomial_coefficient(4, 3) as i64, 4);
         assert_eq!(binomial_coefficient(4, 4) as i64, 1);
         assert_eq!(binomial_coefficient(10, 5) as i64, 252);
+        assert_eq!(binomial_coefficient(30, 15), 155117520.0);
     }
 
     #[test]
@@ -2320,11 +2748,9 @@ mod tests {
         assert_eq!(result.n_obs, 1);
         assert_eq!(result.n_features, 2);
 
-        // Check that second feature has higher importance (coefficient is 2x)
-        assert!(
-            result.feature_importance[1] > result.feature_importance[0] * 1.5,
-            "Feature 1 (coef=2) should have ~2x importance of Feature 0 (coef=1)"
-        );
+        // f is linear: phi = (1 - 0.5, 2 * (2 - 0.5)) exactly
+        assert!((result.shap_values[[0, 0]] - 0.5).abs() < 1e-12);
+        assert!((result.shap_values[[0, 1]] - 3.0).abs() < 1e-12);
     }
 
     #[test]
@@ -2356,19 +2782,6 @@ mod tests {
         assert_eq!(summary.importance_rank[1], 1); // B is most important
         assert_eq!(summary.importance_rank[0], 2); // A is second
         assert_eq!(summary.importance_rank[2], 3); // C is third
-    }
-
-    #[test]
-    fn test_solve_linear_system() {
-        // Test: solve 2x + y = 5, x + 3y = 5
-        // Solution: x = 2, y = 1
-        let a = array![[2.0, 1.0], [1.0, 3.0]];
-        let b = array![5.0, 5.0];
-
-        let x = solve_linear_system(&a, &b).unwrap();
-
-        assert!((x[0] - 2.0).abs() < 1e-6);
-        assert!((x[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2500,5 +2913,16 @@ mod tests {
             result.feature_names.as_ref().unwrap(),
             &["x1".to_string(), "x2".to_string()]
         );
+        // f = x1 + x2: phi_ij = x_ij - mean_j(background)
+        let means = [3.25, 4.25];
+        let xs = [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5, 5.5],
+            [2.0, 3.0, 4.0, 5.0, 6.0, 2.5, 3.5, 4.5, 5.5, 6.5],
+        ];
+        for i in 0..10 {
+            for j in 0..2 {
+                assert!((result.shap_values[[i, j]] - (xs[j][i] - means[j])).abs() < 1e-12);
+            }
+        }
     }
 }
