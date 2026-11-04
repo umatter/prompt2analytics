@@ -111,14 +111,17 @@ coefficients and SEs, the same iterations and the same warnings); `test_rq_ci_us
    the fit, as rq does ("Singular design matrix").
 7. **A pivot cap** of 50 (n + p) gives `ConvergenceFailure`; R has none. Frisch-Newton stops
    after 500 iterations, as quantreg, and reports non-convergence.
-8. **Standard errors that cannot be computed** (iid with fewer than h + pz + 2 observations, a
-   singular density-weighted design) leave the fit in place with NaN SEs, t, p and intervals and
-   a warning; R's `rq` succeeds and `summary.rq` stops.
+8. **Standard errors that cannot be computed** (iid with fewer than h + pz + 1 observations, a
+   singular density-weighted design, a ker bandwidth of 0 because at least half the residuals are
+   tied) leave the fit in place with NaN SEs, t, p and intervals and a warning; R's `rq` succeeds
+   and `summary.rq` stops.
 9. **Automatic method** (the default): the simplex for n <= 5000 and Frisch-Newton above,
    quantreg's own advice for large problems; R's `rq` default is the simplex at every n. On unique
    problems the two agree within `Tol::iterative(1e-6)`. The nonunique flag is reported by the
    simplex only. The nid auxiliary fits and the bootstrap replicates use the algorithm that ran
-   (the simplex for an IRLS fit); the iid sparsity fit is always the simplex.
+   (the simplex for an IRLS fit), except that an auxiliary fit at tau -/+ h outside (tol, 1 - tol),
+   where Frisch-Newton cannot run, uses the simplex (R's nid would stop there); the iid sparsity
+   fit is always the simplex.
 10. **Bootstrap**: replicates are refitted with p2a's simplex (or Frisch-Newton), while
     `boot.rq.xy` uses `rq0` with tolerance 1e-4 (they agree exactly on the pinned indices);
     resampling is seeded ChaCha8 (stream = replicate index), so seeded p2a results do not equal

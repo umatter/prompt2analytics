@@ -545,6 +545,16 @@ fn resolve_method(method: QuantRegMethod, n: usize, tau: f64, tol: f64) -> Quant
     }
 }
 
+/// The algorithm of an auxiliary fit at `t` (nid's fits at tau -/+ h, the bootstrap's replicates)
+/// of a fit that ran `fit_algorithm`: Frisch-Newton only where it can run (`tol < t < 1 - tol`),
+/// the simplex otherwise (and for a simplex or IRLS fit).
+fn aux_method(fit_algorithm: QuantRegMethod, t: f64, tol: f64) -> QuantRegMethod {
+    match fit_algorithm {
+        QuantRegMethod::FrischNewton if t > tol && t < 1.0 - tol => QuantRegMethod::FrischNewton,
+        _ => QuantRegMethod::BarrodaleRoberts,
+    }
+}
+
 /// `mean |v - median(v)|` (type-7 median), or 1 when it is 0: the dispersion that makes the
 /// Frisch-Newton stopping rule and summary.rq's fuzz scale-free.
 fn dispersion(v: ArrayView1<'_, f64>) -> f64 {
@@ -1344,7 +1354,7 @@ fn density_sandwich(
 ///
 /// summary.rq's fuzz `eps = sqrt(.Machine$double.eps)` is multiplied by `mean |y -
 /// median(y)|` so that the iid and nid standard errors are scale-equivariant. Errors:
-/// `InsufficientData` (iid: fewer than h + pz + 2 observations, where R stops), `SingularMatrix`
+/// `InsufficientData` (iid: fewer than h + pz + 1 observations, where R stops), `SingularMatrix`
 /// (a singular density-weighted design).
 pub fn rq_se(
     x: ArrayView2<'_, f64>,
@@ -1406,12 +1416,20 @@ pub fn rq_se(
         }
         QuantRegSe::Nid => {
             let h = halved_bandwidth(tau, n)?;
-            let aux = match fit.algorithm {
-                QuantRegMethod::FrischNewton => QuantRegMethod::FrischNewton,
-                _ => QuantRegMethod::BarrodaleRoberts,
-            };
-            let hi = fit_full_rank(x, y, tau + h, aux, config)?;
-            let lo = fit_full_rank(x, y, tau - h, aux, config)?;
+            let hi = fit_full_rank(
+                x,
+                y,
+                tau + h,
+                aux_method(fit.algorithm, tau + h, config.tol),
+                config,
+            )?;
+            let lo = fit_full_rank(
+                x,
+                y,
+                tau - h,
+                aux_method(fit.algorithm, tau - h, config.tol),
+                config,
+            )?;
             for (f, t) in [(&hi, tau + h), (&lo, tau - h)] {
                 if f.nonunique {
                     warnings.push(format!("{NONUNIQUE} (nid fit at tau = {t:.4})"));
@@ -1442,6 +1460,16 @@ pub fn rq_se(
             let iqr = quantile_sorted(&sorted, 0.75, QuantileType::T7)
                 - quantile_sorted(&sorted, 0.25, QuantileType::T7);
             let hk = (normal_quantile(tau + h)? - normal_quantile(tau - h)?) * sd.min(iqr / 1.34);
+            if !(hk.is_finite() && hk > 0.0) {
+                return Err(EconError::SingularMatrix {
+                    context: format!(
+                        "ker standard errors: Powell's kernel bandwidth is {hk} because the \
+                         residual scale min(sd, IQR / 1.34) is 0 (at least half the residuals \
+                         are tied)"
+                    ),
+                    suggestion: "use se = nid, se = iid or se = boot".into(),
+                });
+            }
             let f = u.mapv(|v| dnorm(v / hk) / hk);
             out.bandwidth = Some(h);
             out.kernel_bandwidth = Some(hk);
@@ -1455,10 +1483,7 @@ pub fn rq_se(
                 config.bootstrap_samples
             };
             let seed = config.seed.unwrap_or(QUANTREG_BOOT_DEFAULT_SEED);
-            let method = match fit.algorithm {
-                QuantRegMethod::FrischNewton => QuantRegMethod::FrischNewton,
-                _ => QuantRegMethod::BarrodaleRoberts,
-            };
+            let method = aux_method(fit.algorithm, tau, config.tol);
             let draws = bootstrap_xy_coefficients(x, y, tau, reps, method, config, |r, idx| {
                 let mut rng = ChaCha8Rng::seed_from_u64(seed);
                 rng.set_stream(r as u64);
@@ -1501,7 +1526,6 @@ pub(crate) struct BootstrapDraws {
 /// The xy-pair bootstrap of `boot.rq(bsmethod = "xy")`: replication `r` refits on the rows
 /// `draw(r, idx)` writes into `idx` (one reused buffer). A resample whose design is singular is
 /// skipped and counted (R keeps rq0's output and warns).
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn bootstrap_xy_coefficients(
     x: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
@@ -2892,5 +2916,64 @@ mod tests {
             quantreg(&ds, "y", &["x"], &cfg),
             Err(EconError::InvalidSpecification { message }) if message.contains("at least 2")
         ));
+    }
+
+    /// ker on heavily tied outcomes: y in {0, 1, 2} with one binary regressor fits more than half
+    /// the rows exactly, so IQR(u) = 0 and Powell's bandwidth is 0. The fit is kept, the standard
+    /// errors are NaN and a warning names the cause (before: the whole call failed with "x
+    /// contains a non-finite value").
+    #[test]
+    fn test_rq_ker_zero_residual_scale_keeps_fit() {
+        let n = 60;
+        let x: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+        // mostly y = 1 + x, with a few 0s and 2s as noise
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let base = 1.0 + (i % 2) as f64;
+                match i % 7 {
+                    0 => base - 1.0,
+                    3 if base < 2.0 => base + 1.0,
+                    _ => base,
+                }
+            })
+            .collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        let mut cfg = QuantRegConfig::default();
+        cfg.se = QuantRegSe::Ker;
+        let r = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+        assert!(r.coefficients.iter().all(|c| c.estimate.is_finite()));
+        assert!(r.coefficients.iter().all(|c| c.std_error.is_nan()));
+        assert!(
+            r.warnings.iter().any(|w| w.contains("se = ker")
+                && w.contains("kernel bandwidth")
+                && w.contains("tied")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// nid after a Frisch-Newton fit: an auxiliary tau -/+ h outside (tol, 1 - tol) runs the
+    /// simplex instead of failing (Frisch-Newton cannot run there), as `Auto` does for the main fit.
+    #[test]
+    fn test_rq_nid_aux_fit_falls_back_to_simplex_outside_fn_range() {
+        let ds = hetero();
+        let tau = 0.1;
+        let n = ds.df().height();
+        let h = halved_bandwidth(tau, n).unwrap();
+        assert!(tau - h > 0.0 && tau - h < tau / 2.0, "h = {h}");
+        let mut cfg = QuantRegConfig::default();
+        cfg.tau = tau;
+        cfg.algorithm = QuantRegMethod::FrischNewton;
+        cfg.se = QuantRegSe::Nid;
+        // tau - h <= tol < tau: the main fit can run Frisch-Newton, the lower auxiliary fit cannot
+        cfg.tol = (tau - h + tau) / 2.0;
+        let r = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+        assert_eq!(r.algorithm, QuantRegMethod::FrischNewton);
+        assert!(r.coefficients.iter().all(|c| c.std_error.is_finite()));
+        use QuantRegMethod::*;
+        assert_eq!(aux_method(FrischNewton, tau - h, cfg.tol), BarrodaleRoberts);
+        assert_eq!(aux_method(FrischNewton, tau + h, cfg.tol), FrischNewton);
+        assert_eq!(aux_method(BarrodaleRoberts, 0.5, 1e-6), BarrodaleRoberts);
+        assert_eq!(aux_method(Irls, 0.5, 1e-6), BarrodaleRoberts);
     }
 }
