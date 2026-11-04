@@ -901,6 +901,66 @@ fn tree_shap_single(nodes: &[TreeShapNode], x: ArrayView1<f64>, n_features: usiz
     Array1::from_vec(phi)
 }
 
+/// The features a node table splits on, ascending, each once.
+fn split_features(nodes: &[TreeShapNode], n_features: usize) -> Vec<usize> {
+    let mut used = vec![false; n_features];
+    for n in nodes.iter().filter(|n| n.feature >= 0) {
+        used[n.feature as usize] = true;
+    }
+    (0..n_features).filter(|&j| used[j]).collect()
+}
+
+/// Adds one tree's SHAP interaction values at `x` to `out` (M x M; Lundberg et al. 2020, eqs.
+/// 8-9, computed as shap's `dense_tree_interactions_path_dependent`): for each feature j the tree
+/// splits on, `Phi[j][l] = (phi_l | j present - phi_l | j absent) / 2`, and
+/// `Phi[l][l] = phi_l - sum_{j != l} Phi[j][l]`. `phi` holds the tree's TreeSHAP values at `x`,
+/// `features` its [`split_features`], `scratch` 2 M values. The result is symmetric and its rows
+/// sum to `phi`.
+fn tree_interactions_into(
+    nodes: &[TreeShapNode],
+    features: &[usize],
+    x: ArrayView1<f64>,
+    phi: &[f64],
+    out: &mut Array2<f64>,
+    scratch: &mut [f64],
+    path: &mut [PathElement],
+) {
+    let m = phi.len();
+    let (on, off) = scratch.split_at_mut(m);
+    for (k, &p) in phi.iter().enumerate() {
+        out[[k, k]] += p;
+    }
+    for &j in features {
+        on.fill(0.0);
+        off.fill(0.0);
+        tree_shap_into(nodes, x, on, path, 1, j as i32);
+        tree_shap_into(nodes, x, off, path, -1, j as i32);
+        for l in 0..m {
+            let val = (on[l] - off[l]) / 2.0;
+            out[[j, l]] += val;
+            out[[l, l]] -= val;
+        }
+    }
+}
+
+/// SHAP interaction values of one tree at `x` (tests: a single valid table).
+#[cfg(test)]
+fn tree_shap_interactions_single(
+    nodes: &[TreeShapNode],
+    x: ArrayView1<f64>,
+    n_features: usize,
+) -> Array2<f64> {
+    let depth = validate_nodes(nodes, n_features, 0).expect("valid node table");
+    let mut path = vec![PathElement::default(); path_buffer_len(depth).unwrap()];
+    let mut phi = vec![0.0; n_features];
+    tree_shap_into(nodes, x, &mut phi, &mut path, 0, -1);
+    let mut out = Array2::zeros((n_features, n_features));
+    let mut scratch = vec![0.0; 2 * n_features];
+    let features = split_features(nodes, n_features);
+    tree_interactions_into(nodes, &features, x, &phi, &mut out, &mut scratch, &mut path);
+    out
+}
+
 /// The perturbation TreeSHAP computes; any other request is an error that names the route.
 fn tree_perturbation(config: &ShapConfig) -> EconResult<FeaturePerturbation> {
     match config
@@ -970,6 +1030,24 @@ pub fn shap_tree_ensemble(
 
     let mut shap_values = resource::try_zeros2(n, m, "SHAP values")?;
     let mut predictions = resource::try_vec(n, 0.0, "SHAP predictions")?;
+    let mut interactions = if config.compute_interactions {
+        let len = resource::checked_len(&[n, m, m], "SHAP interaction values")?;
+        resource::check_alloc::<f64>(len, "SHAP interaction values")?;
+        Some(resource::try_with_capacity::<Array2<f64>>(
+            n,
+            "SHAP interaction values",
+        )?)
+    } else {
+        None
+    };
+    let features: Vec<Vec<usize>> = match interactions {
+        Some(_) => flat.iter().map(|t| split_features(t, m)).collect(),
+        None => Vec::new(),
+    };
+    let mut scratch = match interactions {
+        Some(_) => resource::try_vec(3 * m, 0.0, "SHAP interaction scratch")?,
+        None => Vec::new(),
+    };
     for (i, mut row) in shap_values.outer_iter_mut().enumerate() {
         resource::checkpoint()?;
         let xi = x.row(i);
@@ -977,9 +1055,25 @@ pub fn shap_tree_ensemble(
             .as_slice_mut()
             .expect("rows of a standard-layout matrix are contiguous");
         let mut pred = 0.0;
-        for nodes in &flat {
-            tree_shap_into(nodes, xi, phi, &mut path, 0, -1);
-            pred += predict_nodes(nodes, xi);
+        if let Some(all) = interactions.as_mut() {
+            let mut acc = resource::try_zeros2(m, m, "SHAP interaction values")?;
+            let (tree_phi, rest) = scratch.split_at_mut(m);
+            for (nodes, used) in flat.iter().zip(&features) {
+                tree_phi.fill(0.0);
+                tree_shap_into(nodes, xi, tree_phi, &mut path, 0, -1);
+                for (p, t) in phi.iter_mut().zip(tree_phi.iter()) {
+                    *p += t;
+                }
+                tree_interactions_into(nodes, used, xi, tree_phi, &mut acc, rest, &mut path);
+                pred += predict_nodes(nodes, xi);
+            }
+            acc /= n_trees;
+            all.push(acc);
+        } else {
+            for nodes in &flat {
+                tree_shap_into(nodes, xi, phi, &mut path, 0, -1);
+                pred += predict_nodes(nodes, xi);
+            }
         }
         for v in phi.iter_mut() {
             *v /= n_trees;
@@ -1009,7 +1103,7 @@ pub fn shap_tree_ensemble(
         n_obs: n,
         n_features: m,
         feature_importance,
-        interaction_values: None,
+        interaction_values: interactions,
         additivity_check_passed,
         max_additivity_error,
         method: ShapMethod::Tree,
@@ -2091,6 +2185,88 @@ mod tests {
                 .to_string()
                 .contains("not implemented")
         );
+    }
+
+    #[test]
+    fn test_tree_interactions_sum_to_shap_values() {
+        let (x, y) = random_regression(80, 4, 11);
+        let model = super::super::trees::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(10),
+            Some(4),
+            Some(2),
+            Some("all"),
+            Some(3),
+            None,
+        )
+        .unwrap();
+        let mut config = ShapConfig::default();
+        config.compute_interactions = true;
+        let r = shap_values_model(&model, x.slice(s![0..20, ..]), &config).unwrap();
+        let inter = r.interaction_values.as_ref().expect("interaction values"); // before: None
+        assert_eq!(inter.len(), 20);
+        for (i, m) in inter.iter().enumerate() {
+            assert_eq!(m.dim(), (4, 4));
+            for a in 0..4 {
+                assert!(
+                    (m.row(a).sum() - r.shap_values[[i, a]]).abs() < 1e-10,
+                    "row {i} feature {a}"
+                );
+                for b in 0..4 {
+                    assert!((m[[a, b]] - m[[b, a]]).abs() < 1e-12);
+                }
+            }
+        }
+        assert!(
+            r.to_string()
+                .contains("Interaction values computed: Yes (TreeSHAP, 20 x 4 x 4)")
+        );
+    }
+
+    #[test]
+    fn test_treeshap_interactions_match_bruteforce() {
+        for seed in [4u64, 5] {
+            let (x, y) = random_regression(60, 4, seed);
+            let mut tree = super::super::trees::DecisionTree::new(5, 2, None);
+            let mut state = seed;
+            tree.fit(x.view(), y.view(), None, &mut state);
+            let nodes = extract_tree_structure(&tree);
+            for i in 0..8 {
+                let p = x.row(i);
+                let fast = tree_shap_interactions_single(&nodes, p, 4);
+                let exact = bruteforce_interactions(4, &|mask| expvalue(&nodes, 0, p, mask));
+                for a in 0..4 {
+                    for b in 0..4 {
+                        assert!(
+                            EXACT_SHAP.allows(fast[[a, b]], exact[[a, b]]),
+                            "({a},{b}): {} vs {}",
+                            fast[[a, b]],
+                            exact[[a, b]]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_treeshap_interactions_rpart_tree() {
+        let (case, ds) = crate::test_support::load_case("shap_tree_rpart");
+        let nodes = case_nodes(&case);
+        let x = case_matrix(&ds, &["x0", "x1", "x2", "x3"]);
+        // [point, i, j], row-major as the case
+        let inter: Vec<f64> = (0..10)
+            .flat_map(|i| {
+                tree_shap_interactions_single(&nodes, x.row(i), 4)
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        Check::new(&case)
+            .vector("interactions", &inter, EXACT_SHAP)
+            .finish();
     }
 
     #[test]
