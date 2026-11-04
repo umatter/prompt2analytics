@@ -1,10 +1,9 @@
-//! KD-tree for efficient nearest neighbor queries.
+//! k-d tree for exact nearest-neighbour and fixed-radius queries (DBSCAN; the core distances of
+//! HDBSCAN and the eps-neighbourhoods of OPTICS). Every distance comes from [`sq_euclidean`].
 //!
-//! Provides O(log n) nearest neighbor queries for spatial clustering algorithms.
-//! Enhanced with bounding boxes for dual-tree algorithms (HDBSCAN, OPTICS).
+//! The nodes carry bounding boxes for the dual-tree builders in [`crate::ml::dual_tree`].
 
 use rayon::prelude::*;
-use std::cmp::Ordering;
 
 /// A node in the KD-tree with bounding box for dual-tree pruning.
 #[derive(Debug)]
@@ -111,11 +110,7 @@ impl KdTree {
         let split_dim = depth % n_dims;
 
         // Sort indices by the split dimension
-        indices.sort_by(|&a, &b| {
-            data[a][split_dim]
-                .partial_cmp(&data[b][split_dim])
-                .unwrap_or(Ordering::Equal)
-        });
+        indices.sort_by(|&a, &b| data[a][split_dim].total_cmp(&data[b][split_dim]));
 
         let median_idx = indices.len() / 2;
         let point_idx = indices[median_idx];
@@ -206,13 +201,16 @@ impl KdTree {
 
     /// Find k nearest neighbors of a query point.
     ///
-    /// Returns vector of (distance, point_index) sorted by distance.
+    /// Returns vector of (distance, point_index) sorted by distance; empty for `k = 0`.
     pub fn k_nearest(
         &self,
         query: &[f64],
         k: usize,
         exclude_self: Option<usize>,
     ) -> Vec<(f64, usize)> {
+        if k == 0 {
+            return Vec::new();
+        }
         let mut neighbors = BoundedHeap::new(k);
 
         if let Some(root) = &self.root {
@@ -272,7 +270,7 @@ impl KdTree {
             self.search_radius(root, query, radius, &mut results, exclude_self);
         }
 
-        results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        results.sort_by(|a, b| a.0.total_cmp(&b.0));
         results
     }
 
@@ -390,20 +388,28 @@ impl BoundedHeap {
     }
 
     fn into_sorted_vec(mut self) -> Vec<(f64, usize)> {
-        self.items
-            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        self.items.sort_by(|a, b| a.0.total_cmp(&b.0));
         self.items
     }
 }
 
-/// Compute Euclidean distance between two points.
+/// Squared Euclidean distance, coordinate differences squared and summed in coordinate order: the one
+/// kernel behind every k-d tree, HDBSCAN, OPTICS and silhouette distance (bit-identical across paths;
+/// R's `dist()` and ANN sum in the same order).
+#[inline]
+pub fn sq_euclidean(a: &[f64], b: &[f64]) -> f64 {
+    let mut s = 0.0;
+    for (x, y) in a.iter().zip(b) {
+        let t = x - y;
+        s += t * t;
+    }
+    s
+}
+
+/// Euclidean distance between two points: `sq_euclidean(a, b).sqrt()`.
 #[inline]
 pub fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f64>()
-        .sqrt()
+    sq_euclidean(a, b).sqrt()
 }
 
 // =============================================================================
@@ -411,26 +417,26 @@ pub fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
 // =============================================================================
 
 impl KdTree {
-    /// Compute core distances for all points in parallel.
-    ///
-    /// Core distance = distance to k-th nearest neighbor.
-    /// Uses O(n * k * log n) via KD-tree queries instead of O(n²).
-    pub fn compute_core_distances(&self, min_samples: usize) -> Vec<f64> {
+    /// R `dbscan::kNNdist(x, k)`: the distance of every point to its k-th nearest *other* point, in
+    /// parallel; 0.0 for `k = 0` (the point itself); `f64::INFINITY` when fewer than `k` other points
+    /// exist. dbscan's core distance for `minPts` is `compute_core_distances(minPts - 1)`.
+    pub fn compute_core_distances(&self, k: usize) -> Vec<f64> {
         let n = self.n_points;
         if n == 0 {
             return Vec::new();
+        }
+        if k == 0 {
+            return vec![0.0; n];
         }
 
         (0..n)
             .into_par_iter()
             .map(|i| {
-                let neighbors = self.k_nearest(&self.data[i], min_samples, Some(i));
-                if neighbors.len() >= min_samples {
-                    neighbors[min_samples - 1].0
-                } else if !neighbors.is_empty() {
-                    neighbors.last().map(|x| x.0).unwrap_or(0.0)
+                let nb = self.k_nearest(&self.data[i], k, Some(i));
+                if nb.len() >= k {
+                    nb[k - 1].0
                 } else {
-                    0.0
+                    f64::INFINITY
                 }
             })
             .collect()
@@ -557,10 +563,13 @@ impl UnionFind {
 
 /// Build MST using Kruskal's algorithm from a list of edges.
 ///
-/// Returns edges in MST as (i, j, weight).
+/// Returns edges in MST as (i, j, weight); empty for `n <= 1`.
 pub fn kruskal_mst(edges: &[(usize, usize, f64)], n: usize) -> Vec<(usize, usize, f64)> {
+    if n <= 1 {
+        return Vec::new();
+    }
     let mut sorted_edges = edges.to_vec();
-    sorted_edges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
+    sorted_edges.sort_by(|a, b| a.2.total_cmp(&b.2));
 
     let mut uf = UnionFind::new(n);
     let mut mst = Vec::with_capacity(n - 1);
@@ -827,6 +836,58 @@ mod tests {
         // Total weight should be 1 + 2 + 1 = 4 (not including the 3.0 edge)
         let total: f64 = mst.iter().map(|e| e.2).sum();
         assert!((total - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_kdtree_k0() {
+        let tree = KdTree::new(vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.1],
+            vec![0.2, 1.3],
+            vec![5.1, 4.9],
+        ]);
+        assert!(tree.k_nearest(&[0.0, 0.0], 0, None).is_empty()); // panicked: index out of bounds (items[0])
+        assert_eq!(tree.compute_core_distances(0), vec![0.0; 4]); // panicked the same way
+        // three other points: the 4th nearest other point is undefined (was the farthest point)
+        assert!(
+            tree.compute_core_distances(4)
+                .iter()
+                .all(|d| d.is_infinite())
+        );
+        assert_eq!(
+            tree.compute_core_distances(3)[3],
+            euclidean_distance(&[5.1, 4.9], &[0.0, 0.0])
+        );
+        assert!(
+            KdTree::new(Vec::new())
+                .k_nearest(&[0.0], 3, None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_kruskal_mst_degenerate() {
+        assert!(kruskal_mst(&[], 0).is_empty()); // panicked: attempt to subtract with overflow
+        assert!(kruskal_mst(&[], 1).is_empty());
+        assert_eq!(
+            kruskal_mst(&[(0, 1, 0.5), (1, 2, 0.25), (0, 2, 0.75)], 3),
+            vec![(1, 2, 0.25), (0, 1, 0.5)]
+        );
+    }
+
+    /// HDBSCAN's k-d tree and brute-force core distances must agree bit for bit.
+    #[test]
+    fn test_euclidean_distance_is_sqrt_of_sq_euclidean() {
+        let pts = [[0.1, -2.3, 7.0], [1e-3, 4.25, -0.5], [3.0, 3.0, 3.0]];
+        for a in &pts {
+            for b in &pts {
+                assert_eq!(
+                    euclidean_distance(a, b).to_bits(),
+                    sq_euclidean(a, b).sqrt().to_bits()
+                );
+                assert_eq!(sq_euclidean(a, b).to_bits(), sq_euclidean(b, a).to_bits());
+            }
+        }
     }
 
     #[test]

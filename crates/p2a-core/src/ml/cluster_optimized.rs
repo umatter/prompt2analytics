@@ -5,8 +5,6 @@
 
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 // =============================================================================
 // Optimized Pairwise Distance Computation
@@ -89,12 +87,12 @@ pub fn compute_pairwise_sq_distances_parallel(data: &ArrayView2<f64>) -> Array2<
 // Optimized Silhouette Coefficient
 // =============================================================================
 
-/// Optimized silhouette computation with parallelization.
+/// Optimized silhouette computation with parallelization: R `cluster::silhouette` through the one core
+/// of [`crate::ml::cluster_validation::silhouette()`] (singletons and `a(i) = b(i)` score 0) on a
+/// parallel distance matrix.
 ///
-/// This version:
-/// - Parallelizes pairwise distance computation
-/// - Parallelizes silhouette computation for each point
-/// - Uses pre-computed cluster membership for O(1) lookups
+/// Refuses non-finite data, labellings without 2 to n - 1 distinct clusters (where R returns `NA`), and
+/// any label of n or above (labels are 0-indexed cluster indices below n).
 pub fn silhouette_optimized(
     data: ArrayView2<f64>,
     labels: &[usize],
@@ -109,69 +107,15 @@ pub fn silhouette_optimized(
         return Err("Empty data".to_string());
     }
 
-    let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
-    if n_clusters < 2 {
-        return Err("Need at least 2 clusters".to_string());
-    }
+    crate::ml::advanced_clustering_mod::common::check_points(&data, "silhouette_optimized")
+        .map_err(|e| e.to_string())?;
+    crate::ml::cluster_validation::check_silhouette_clusters(labels, n)?;
 
-    // Pre-compute cluster indices
-    let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_clusters];
-    for (i, &label) in labels.iter().enumerate() {
-        cluster_indices[label].push(i);
-    }
-
-    // Compute pairwise distances in parallel
     let distances = compute_pairwise_distances_parallel(&data);
+    let widths = crate::ml::cluster_validation::silhouette_core(distances.view(), labels).widths;
+    let average = widths.iter().sum::<f64>() / n as f64;
 
-    // Compute silhouette for each point in parallel
-    let silhouette_widths: Vec<f64> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let cluster_i = labels[i];
-            let cluster_i_indices = &cluster_indices[cluster_i];
-
-            // a(i): average distance to other points in same cluster
-            let a_i = if cluster_i_indices.len() > 1 {
-                let sum: f64 = cluster_i_indices
-                    .iter()
-                    .filter(|&&j| j != i)
-                    .map(|&j| distances[[i, j]])
-                    .sum();
-                sum / (cluster_i_indices.len() - 1) as f64
-            } else {
-                0.0
-            };
-
-            // b(i): min average distance to any other cluster
-            let mut b_i = f64::INFINITY;
-            for c in 0..n_clusters {
-                if c == cluster_i || cluster_indices[c].is_empty() {
-                    continue;
-                }
-                let avg_dist: f64 = cluster_indices[c]
-                    .iter()
-                    .map(|&j| distances[[i, j]])
-                    .sum::<f64>()
-                    / cluster_indices[c].len() as f64;
-                if avg_dist < b_i {
-                    b_i = avg_dist;
-                }
-            }
-
-            // Silhouette width
-            if a_i == 0.0 && b_i == 0.0 {
-                0.0
-            } else if a_i.is_infinite() || b_i.is_infinite() {
-                0.0
-            } else {
-                (b_i - a_i) / a_i.max(b_i)
-            }
-        })
-        .collect();
-
-    let average = silhouette_widths.iter().sum::<f64>() / n as f64;
-
-    Ok((silhouette_widths, average))
+    Ok((widths, average))
 }
 
 // =============================================================================
@@ -195,6 +139,8 @@ pub fn kmedoids_optimized(
     if k == 0 || k > n {
         return Err(format!("k must be between 1 and {}", n));
     }
+    crate::ml::advanced_clustering_mod::common::check_points(&data, "kmedoids_optimized")
+        .map_err(|e| e.to_string())?;
 
     let max_iter = max_iterations.unwrap_or(100);
 
@@ -311,7 +257,7 @@ fn build_medoids_fast(distances: &Array2<f64>, k: usize, _seed: Option<u64>) -> 
     let first_medoid = sums
         .iter()
         .enumerate()
-        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+        .min_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| i)
         .unwrap_or(0);
 
@@ -345,7 +291,7 @@ fn build_medoids_fast(distances: &Array2<f64>, k: usize, _seed: Option<u64>) -> 
         let best = gains
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(i, _)| i)
             .unwrap_or(0);
 
@@ -412,384 +358,31 @@ fn compute_nearest_medoids(
 // Optimized HDBSCAN
 // =============================================================================
 
-/// Optimized HDBSCAN with parallel core distance and MST computation.
+/// HDBSCAN labels, GLOSH outlier scores and the number of clusters. Delegates to
+/// [`crate::ml::hdbscan()`] (R `dbscan::hdbscan`); kept for compatibility.
 pub fn hdbscan_optimized(
     data: ArrayView2<f64>,
     min_cluster_size: Option<usize>,
     min_samples: Option<usize>,
 ) -> Result<(Vec<i32>, Vec<f64>, usize), String> {
-    let n = data.nrows();
-
-    if n < 2 {
-        return Err("Need at least 2 observations".to_string());
-    }
-
-    let mcs = min_cluster_size.unwrap_or(5).max(2);
-    let ms = min_samples.unwrap_or(mcs);
-
-    // Compute distances in parallel
-    let distances = compute_pairwise_distances_parallel(&data);
-
-    // Compute core distances in parallel
-    let core_distances: Vec<f64> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut dists: Vec<f64> = (0..n)
-                .filter(|&j| i != j)
-                .map(|j| distances[[i, j]])
-                .collect();
-            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-
-            if dists.len() >= ms {
-                dists[ms - 1]
-            } else {
-                dists.last().cloned().unwrap_or(0.0)
-            }
-        })
-        .collect();
-
-    // Compute mutual reachability distances in parallel
-    // Use references to avoid move issues with closures
-    let distances_ref = &distances;
-    let core_distances_ref = &core_distances;
-
-    let mr_results: Vec<(usize, usize, f64)> = (0..n)
-        .into_par_iter()
-        .flat_map(|i| {
-            ((i + 1)..n)
-                .map(move |j| {
-                    let mr = distances_ref[[i, j]]
-                        .max(core_distances_ref[i])
-                        .max(core_distances_ref[j]);
-                    (i, j, mr)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let mut mutual_reach = Array2::zeros((n, n));
-    for (i, j, mr) in mr_results {
-        mutual_reach[[i, j]] = mr;
-        mutual_reach[[j, i]] = mr;
-    }
-
-    // Build MST using Prim's (optimized)
-    let mst = build_mst_optimized(&mutual_reach);
-
-    // Extract clusters
-    let (labels, n_clusters) = extract_hdbscan_clusters_optimized(&mst, n, mcs);
-
-    // Compute outlier scores
-    let outlier_scores: Vec<f64> = core_distances.iter().map(|&cd| cd / (cd + 1.0)).collect();
-
-    Ok((labels, outlier_scores, n_clusters))
-}
-
-/// Optimized Prim's MST with better cache locality.
-fn build_mst_optimized(distances: &Array2<f64>) -> Vec<(usize, usize, f64)> {
-    let n = distances.nrows();
-    let mut in_tree = vec![false; n];
-    let mut min_dist = vec![f64::INFINITY; n];
-    let mut min_from = vec![0usize; n];
-    let mut mst = Vec::with_capacity(n - 1);
-
-    // Start from node 0
-    in_tree[0] = true;
-    for j in 1..n {
-        min_dist[j] = distances[[0, j]];
-        min_from[j] = 0;
-    }
-
-    for _ in 1..n {
-        // Find minimum using parallel reduction for large n
-        let (min_idx, min_val) = if n > 1000 {
-            (0..n)
-                .into_par_iter()
-                .filter(|&j| !in_tree[j])
-                .map(|j| (j, min_dist[j]))
-                .reduce(
-                    || (0, f64::INFINITY),
-                    |a, b| {
-                        if a.1 < b.1 { a } else { b }
-                    },
-                )
-        } else {
-            let mut min_idx = 0;
-            let mut min_val = f64::INFINITY;
-            for j in 0..n {
-                if !in_tree[j] && min_dist[j] < min_val {
-                    min_val = min_dist[j];
-                    min_idx = j;
-                }
-            }
-            (min_idx, min_val)
-        };
-
-        in_tree[min_idx] = true;
-        mst.push((min_from[min_idx], min_idx, min_val));
-
-        // Update distances (can be parallelized for large n)
-        if n > 1000 {
-            let updates: Vec<(usize, f64, usize)> = (0..n)
-                .into_par_iter()
-                .filter(|&j| !in_tree[j] && distances[[min_idx, j]] < min_dist[j])
-                .map(|j| (j, distances[[min_idx, j]], min_idx))
-                .collect();
-
-            for (j, d, from) in updates {
-                min_dist[j] = d;
-                min_from[j] = from;
-            }
-        } else {
-            for j in 0..n {
-                if !in_tree[j] && distances[[min_idx, j]] < min_dist[j] {
-                    min_dist[j] = distances[[min_idx, j]];
-                    min_from[j] = min_idx;
-                }
-            }
-        }
-    }
-
-    mst
-}
-
-/// Extract clusters from MST using single-linkage.
-fn extract_hdbscan_clusters_optimized(
-    mst: &[(usize, usize, f64)],
-    n: usize,
-    min_cluster_size: usize,
-) -> (Vec<i32>, usize) {
-    // Union-Find
-    let mut parent: Vec<usize> = (0..n).collect();
-    let mut rank: Vec<usize> = vec![0; n];
-    let mut size: Vec<usize> = vec![1; n];
-
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        if parent[x] != x {
-            parent[x] = find(parent, parent[x]);
-        }
-        parent[x]
-    }
-
-    fn union(parent: &mut [usize], rank: &mut [usize], size: &mut [usize], x: usize, y: usize) {
-        let px = find(parent, x);
-        let py = find(parent, y);
-        if px == py {
-            return;
-        }
-
-        let (smaller, larger) = if rank[px] < rank[py] {
-            (px, py)
-        } else {
-            (py, px)
-        };
-        parent[smaller] = larger;
-        size[larger] += size[smaller];
-        if rank[px] == rank[py] {
-            rank[larger] += 1;
-        }
-    }
-
-    // Sort MST edges by weight
-    let mut sorted_edges = mst.to_vec();
-    sorted_edges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
-
-    // Process edges
-    for &(i, j, _) in &sorted_edges {
-        union(&mut parent, &mut rank, &mut size, i, j);
-    }
-
-    // Assign cluster labels
-    let mut labels = vec![-1i32; n];
-    let mut root_to_cluster = std::collections::HashMap::new();
-    let mut cluster_id = 0i32;
-
-    for i in 0..n {
-        let root = find(&mut parent, i);
-        if size[root] >= min_cluster_size {
-            let cluster = *root_to_cluster.entry(root).or_insert_with(|| {
-                let id = cluster_id;
-                cluster_id += 1;
-                id
-            });
-            labels[i] = cluster;
-        }
-    }
-
-    (labels, cluster_id as usize)
+    let r = crate::ml::hdbscan(data, min_cluster_size, min_samples)?;
+    Ok((r.labels, r.outlier_scores, r.n_clusters))
 }
 
 // =============================================================================
 // Optimized OPTICS
 // =============================================================================
 
-/// Optimized OPTICS with parallel core distance computation.
+/// OPTICS ordering, reachabilities (in ordering order) and labels. Delegates to
+/// [`crate::ml::optics()`] (R `dbscan::optics`; labels by `extractDBSCAN(eps_cl = max_eps)` for a
+/// finite `max_eps`, none otherwise); kept for compatibility.
 pub fn optics_optimized(
     data: ArrayView2<f64>,
     min_samples: usize,
     max_eps: Option<f64>,
 ) -> Result<(Vec<usize>, Vec<f64>, Vec<i32>), String> {
-    let n = data.nrows();
-
-    if n == 0 {
-        return Err("Empty data".to_string());
-    }
-
-    if min_samples < 1 || min_samples > n {
-        return Err(format!("min_samples must be between 1 and {}", n));
-    }
-
-    let eps = max_eps.unwrap_or(f64::INFINITY);
-
-    // Compute distances in parallel
-    let distances = compute_pairwise_distances_parallel(&data);
-
-    // Compute core distances in parallel
-    let core_distances: Vec<f64> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut dists: Vec<f64> = (0..n)
-                .filter(|&j| i != j)
-                .map(|j| distances[[i, j]])
-                .collect();
-            dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-
-            if dists.len() >= min_samples {
-                dists[min_samples - 1].min(eps)
-            } else {
-                f64::INFINITY
-            }
-        })
-        .collect();
-
-    // OPTICS ordering (inherently sequential but with optimized neighbor queries)
-    let mut processed = vec![false; n];
-    let mut ordering = Vec::with_capacity(n);
-    let mut reachability = vec![f64::INFINITY; n];
-
-    #[derive(PartialEq)]
-    struct OrderedPoint {
-        reachability: f64,
-        index: usize,
-    }
-
-    impl Eq for OrderedPoint {}
-
-    impl Ord for OrderedPoint {
-        fn cmp(&self, other: &Self) -> Ordering {
-            other
-                .reachability
-                .partial_cmp(&self.reachability)
-                .unwrap_or(Ordering::Equal)
-        }
-    }
-
-    impl PartialOrd for OrderedPoint {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    for start in 0..n {
-        if processed[start] {
-            continue;
-        }
-
-        let mut seeds = BinaryHeap::new();
-        processed[start] = true;
-        ordering.push(start);
-
-        if core_distances[start] <= eps {
-            // Get neighbors and update reachability in parallel
-            let updates: Vec<(usize, f64)> = (0..n)
-                .into_par_iter()
-                .filter(|&j| !processed[j] && distances[[start, j]] <= eps)
-                .map(|j| {
-                    let new_reach = core_distances[start].max(distances[[start, j]]);
-                    (j, new_reach)
-                })
-                .collect();
-
-            for (j, new_reach) in updates {
-                if new_reach < reachability[j] {
-                    reachability[j] = new_reach;
-                    seeds.push(OrderedPoint {
-                        reachability: new_reach,
-                        index: j,
-                    });
-                }
-            }
-        }
-
-        while let Some(OrderedPoint { index: p, .. }) = seeds.pop() {
-            if processed[p] {
-                continue;
-            }
-
-            processed[p] = true;
-            ordering.push(p);
-
-            if core_distances[p] <= eps {
-                for j in 0..n {
-                    if !processed[j] && distances[[p, j]] <= eps {
-                        let new_reach = core_distances[p].max(distances[[p, j]]);
-                        if new_reach < reachability[j] {
-                            reachability[j] = new_reach;
-                            seeds.push(OrderedPoint {
-                                reachability: new_reach,
-                                index: j,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Extract clusters
-    let labels = extract_optics_clusters(&ordering, &reachability);
-
-    // Reorder reachability
-    let reachability_ordered: Vec<f64> = ordering.iter().map(|&i| reachability[i]).collect();
-
-    Ok((ordering, reachability_ordered, labels))
-}
-
-fn extract_optics_clusters(ordering: &[usize], reachability: &[f64]) -> Vec<i32> {
-    let n = ordering.len();
-    let mut labels = vec![-1i32; n];
-
-    // Use median reachability as threshold
-    let mut sorted_reach: Vec<f64> = reachability
-        .iter()
-        .filter(|&&r| r.is_finite())
-        .cloned()
-        .collect();
-    sorted_reach.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-
-    let threshold = if sorted_reach.is_empty() {
-        f64::INFINITY
-    } else {
-        sorted_reach[sorted_reach.len() / 2] * 1.5
-    };
-
-    let mut current_cluster = -1i32;
-    for &idx in ordering {
-        let r = reachability[idx];
-        if r > threshold {
-            if current_cluster >= 0 {
-                current_cluster += 1;
-            }
-            labels[idx] = -1;
-        } else {
-            if current_cluster < 0 {
-                current_cluster = 0;
-            }
-            labels[idx] = current_cluster;
-        }
-    }
-
-    labels
+    let r = crate::ml::optics(data, min_samples, max_eps, None)?;
+    Ok((r.ordering, r.reachability, r.labels))
 }
 
 // =============================================================================
@@ -814,6 +407,11 @@ pub fn affinity_propagation_optimized(
     if n < 2 {
         return Err("Need at least 2 observations".to_string());
     }
+    crate::ml::advanced_clustering_mod::common::check_points(
+        &data,
+        "affinity_propagation_optimized",
+    )
+    .map_err(|e| e.to_string())?;
 
     let damp = damping.unwrap_or(0.5);
     if !(0.5..1.0).contains(&damp) {
@@ -837,7 +435,7 @@ pub fn affinity_propagation_optimized(
                 }
             }
         }
-        sims.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        sims.sort_by(f64::total_cmp);
         if sims.is_empty() {
             0.0
         } else {
@@ -973,6 +571,87 @@ mod tests {
     use ndarray::array;
 
     #[test]
+    fn test_validate_hdbscan_optimized_matches_hdbscan() {
+        use crate::ml::advanced_clustering_mod::common::test_data::r_codes;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("hdbscan_blobs");
+        let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
+        let r = crate::ml::hdbscan(x.view(), Some(5), Some(5)).unwrap();
+        let (labels, outlier, k) = hdbscan_optimized(x.view(), Some(5), Some(5)).unwrap();
+        assert_eq!((&labels, k), (&r.labels, 3));
+        assert_eq!(
+            outlier.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            r.outlier_scores
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        Check::new(&case)
+            .vector("mp5_cluster", &r_codes(&labels), Tol::exact())
+            .vector("mp5_outlier_scores", &outlier, Tol::stat(x.nrows()))
+            .finish();
+    }
+
+    /// R: extractDBSCAN(optics(blobs_noise, eps = 0.35, minPts = 5), eps_cl = 0.35) through the
+    /// delegation (case optics_blobs).
+    #[test]
+    fn test_validate_optics_optimized_matches_optics() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("optics_blobs");
+        let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
+        let (ordering, reach, labels) = optics_optimized(x.view(), 5, Some(0.35)).unwrap();
+        let r = crate::ml::optics(x.view(), 5, Some(0.35), None).unwrap();
+        assert_eq!((ordering.clone(), labels.clone()), (r.ordering, r.labels));
+        assert_eq!(reach.len(), 115);
+        Check::new(&case)
+            .vector(
+                "eps035_order",
+                &ordering.iter().map(|&p| (p + 1) as f64).collect::<Vec<_>>(),
+                Tol::exact(),
+            )
+            .vector(
+                "eps035_dbscan_cluster",
+                &crate::ml::advanced_clustering_mod::common::test_data::r_codes(&labels),
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_kmedoids_and_affinity_optimized_refuse_non_finite() {
+        let data = array![[0.0, 0.0], [0.1, f64::NAN], [10.0, 10.0], [10.1, 10.1]];
+        assert!(
+            kmedoids_optimized(data.view(), 2, Some(10), Some(1))
+                .unwrap_err()
+                .contains("non-finite")
+        );
+        assert!(
+            affinity_propagation_optimized(data.view(), None, None, None, None)
+                .unwrap_err()
+                .contains("non-finite")
+        );
+    }
+
+    /// R: cluster::silhouette on blobs_noise with a singleton cluster (case silhouette_singletons).
+    #[test]
+    fn test_validate_silhouette_optimized_singletons() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("silhouette_singletons");
+        let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
+        let n = x.nrows();
+        let labels: Vec<usize> = case
+            .vector("labels")
+            .iter()
+            .map(|&v| v as usize - 1)
+            .collect();
+        let (widths, avg) = silhouette_optimized(x.view(), &labels).unwrap();
+        Check::new(&case)
+            .vector("sil_width", &widths, Tol::coef(n))
+            .scalar("avg_width", avg, Tol::stat(n))
+            .finish();
+    }
+
+    #[test]
     fn test_parallel_distances() {
         let data = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0],];
 
@@ -992,6 +671,16 @@ mod tests {
 
         assert_eq!(widths.len(), 4);
         assert!(avg > 0.9); // Well-separated clusters
+    }
+
+    #[test]
+    fn test_silhouette_optimized_refuses_label_of_n() {
+        let x = array![[0.0, 0.0], [0.13, 0.08], [10.0, 10.0], [10.11, 9.94]];
+        assert!(
+            silhouette_optimized(x.view(), &[0, 0, 1, 4])
+                .unwrap_err()
+                .contains("labels must be below n = 4 (got 4)")
+        );
     }
 
     #[test]

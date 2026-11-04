@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "hdbscan",
+      "name": "HDBSCAN: cluster tree, excess-of-mass selection, membership probabilities and GLOSH (dbscan::hdbscan)",
+      "category": "ml",
+      "reference": "dbscan::hdbscan(x, minPts) (dbscan 1.2.6: mst.cpp, hclustMergeOrder, computeStability, extractUnsupervised); dbscan::kNNdist(x, minPts - 1); stats::hclust(dist(x), 'single') for min_samples = 1",
+      "doc": "validation/ml/hdbscan.md",
+      "cases": [
+        "hdbscan_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hdbscan::tests::test_validate_hdbscan_blobs_mp5",
+        "p2a-core::ml::advanced_clustering_mod::hdbscan::tests::test_validate_hdbscan_blobs_mp10",
+        "p2a-core::ml::advanced_clustering_mod::hdbscan::tests::test_validate_hdbscan_blobs_tree",
+        "p2a-core::ml::advanced_clustering_mod::hdbscan::tests::test_validate_hdbscan_scale_free",
+        "p2a-core::ml::advanced_clustering_mod::hdbscan::tests::test_validate_hdbscan_no_split_and_boundary",
+        "p2a-core::ml::advanced_clustering_mod::hdbscan::tests::test_validate_hdbscan_min_samples_one_is_single_linkage",
+        "p2a-core::ml::cluster_optimized::tests::test_validate_hdbscan_optimized_matches_hdbscan"
+      ],
+      "quantities": [
+        "labels (noise, cluster numbering)",
+        "membership probabilities",
+        "GLOSH outlier scores",
+        "stability of the selected clusters",
+        "core distances",
+        "single-linkage merge heights",
+        "cluster tree: ids, parents, eps birth and death, stability, points at split, points leaving",
+        "selected cluster ids",
+        "scale invariance (1000x)",
+        "no-split subset (labels; GLOSH by property) and exact-minPts split",
+        "single-linkage heights for min_samples = 1"
+      ],
+      "tolerance": "validation/README.md, n = 115: labels, ids and counts exact; core distances, merge heights, eps birth/death 1e-8 relative (Tol::coef); stabilities, probabilities and GLOSH 1e-6 relative (Tol::stat)",
+      "deviations": [
+        {
+          "finding": "ML-49",
+          "quantity": "membership probabilities when no cluster is found",
+          "note": "dbscan 1.2.6 reports (max - coredist) / max over the root for every point although all are noise (case value nosplit_membership_prob_dbscan, not asserted); p2a reports 0, the value dbscan gives noise points whenever a cluster exists"
+        },
+        {
+          "finding": "ML-49",
+          "quantity": "membership probabilities when every member has core distance 0",
+          "note": "dbscan's (max - coredist) / max is 0/0 = NaN (min_samples = 1, which dbscan does not allow, or duplicate points); p2a reports 1 (asserted for min_samples = 1 in test_validate_hdbscan_min_samples_one_is_single_linkage)"
+        },
+        {
+          "finding": "ML-49",
+          "quantity": "GLOSH outlier scores when no split exists",
+          "note": "dbscan 1.2.6 leaves the root's eps_death at its unordered_map default 0, so every point scores 1 (case value nosplit_outlier_scores, not asserted); p2a computes GLOSH by its definition, 1 - eps_min / eps_p with eps_min the smallest merge height"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "optics",
+      "name": "OPTICS ordering and flat clusterings (dbscan::optics, extractDBSCAN, extractXi)",
+      "category": "ml",
+      "reference": "dbscan::optics(x, eps, minPts) (dbscan 1.2.6 optics_int); dbscan::extractDBSCAN(object, eps_cl); dbscan::extractXi(object, xi, minimum = FALSE, correctPredecessors)",
+      "doc": "validation/ml/optics.md",
+      "cases": [
+        "optics_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_inf",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_eps05",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_predecessor",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_extract_dbscan",
+        "p2a-core::ml::advanced_clustering_mod::optics::tests::test_validate_optics_extract_xi",
+        "p2a-core::ml::cluster_optimized::tests::test_validate_optics_optimized_matches_optics"
+      ],
+      "quantities": [
+        "ordering (eps Inf, 0.5, 0.35)",
+        "reachability distances",
+        "core distances (undefined beyond eps)",
+        "predecessors",
+        "extractDBSCAN labels (eps_cl 0.35 on three orderings)",
+        "extractXi labels and xi-cluster start/end, with and without the predecessor correction, eps Inf and 0.5"
+      ],
+      "tolerance": "validation/README.md, n = 115: orderings, predecessors, labels and positions exact; distances 1e-8 relative (Tol::coef)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "silhouette",
+      "name": "Silhouette widths (cluster::silhouette)",
+      "category": "ml",
+      "reference": "cluster::silhouette(x, dist) (cluster 2.1.6, C routine sildist): singletons and a(i) = b(i) score 0",
+      "doc": "validation/ml/silhouette.md",
+      "cases": [
+        "silhouette_singletons"
+      ],
+      "tests": [
+        "p2a-core::ml::cluster_validation::tests::test_validate_silhouette_singletons",
+        "p2a-core::ml::cluster_validation::tests::test_validate_silhouette_from_dist_singletons",
+        "p2a-core::ml::cluster_optimized::tests::test_validate_silhouette_optimized_singletons",
+        "p2a-core::ml::advanced_clustering_mod::common::tests::test_validate_silhouette_helpers_singletons"
+      ],
+      "quantities": [
+        "silhouette widths",
+        "average silhouette width",
+        "per-cluster average widths",
+        "neighbour cluster",
+        "number of singleton clusters"
+      ],
+      "tolerance": "validation/README.md, n = 115: widths 1e-8 relative (Tol::coef); averages 1e-6 relative (Tol::stat); neighbours and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

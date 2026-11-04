@@ -1,5 +1,6 @@
 //! Pieces shared by the advanced clustering methods: the HDBSCAN/OPTICS algorithm selection ([`ClusteringAlgorithm`]), distance matrices, silhouette helpers and cluster statistics ([`cluster_stats`]).
 
+use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, try_zeros2};
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
@@ -9,20 +10,22 @@ use serde::{Deserialize, Serialize};
 // Algorithm Selection
 // =============================================================================
 
-/// Algorithm selection for HDBSCAN/OPTICS.
+/// Neighbour-search choice of HDBSCAN and OPTICS. The variants choose only how neighbours are found;
+/// HDBSCAN's spanning tree is always Prim's algorithm on the dense mutual-reachability graph, so every
+/// variant gives the same result.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClusteringAlgorithm {
-    /// Brute-force O(n²) - best for small datasets
+    /// Brute-force neighbour search (n < 500)
     BruteForce,
-    /// KD-Tree with Prim's MST - good for medium datasets with low dimensions
+    /// k-d tree neighbour search (500 <= n < 10,000, d <= 15)
     KdTreePrim,
-    /// Dual-Tree Boruvka - best scaling for large datasets with low dimensions
+    /// k-d tree neighbour search (n >= 10,000, d <= 15). A historical name: no Boruvka tree is built.
     DualTreeBoruvka,
-    /// Parallel brute-force - for high-dimensional data where KD-tree degrades
+    /// Brute-force neighbour search for high-dimensional data, where a k-d tree degrades (d > 15)
     BruteForceParallel,
 }
 
-/// Automatically select the best algorithm based on data characteristics.
+/// Select the neighbour search from the data size.
 pub(crate) fn select_algorithm(n: usize, d: usize) -> ClusteringAlgorithm {
     match (n, d) {
         (n, _) if n < 500 => ClusteringAlgorithm::BruteForce,
@@ -32,41 +35,51 @@ pub(crate) fn select_algorithm(n: usize, d: usize) -> ClusteringAlgorithm {
     }
 }
 
-// =============================================================================
-// Shared helpers
-// =============================================================================
+/// The k-d tree serves the neighbour searches of this algorithm choice (HDBSCAN's core distances,
+/// OPTICS's eps-neighbourhoods).
+pub(crate) fn uses_tree(alg: ClusteringAlgorithm) -> bool {
+    matches!(
+        alg,
+        ClusteringAlgorithm::KdTreePrim | ClusteringAlgorithm::DualTreeBoruvka
+    )
+}
 
-/// Compute distance matrix in parallel.
-pub(crate) fn compute_distance_matrix_parallel(data: &ArrayView2<f64>) -> Array2<f64> {
-    let n = data.nrows();
-    let d = data.ncols();
+/// Data points copied row-major into one buffer, with the one distance kernel
+/// ([`crate::ml::kdtree::sq_euclidean`]).
+pub(crate) struct Points {
+    pub(crate) n: usize,
+    pub(crate) d: usize,
+    buf: Vec<f64>,
+}
 
-    let data_slice: Vec<f64> = data.iter().cloned().collect();
-    let data_ref = &data_slice;
-
-    let results: Vec<(usize, usize, f64)> = (0..n)
-        .into_par_iter()
-        .flat_map(|i| {
-            ((i + 1)..n)
-                .map(move |j| {
-                    let mut sum = 0.0;
-                    for k in 0..d {
-                        let diff = data_ref[i * d + k] - data_ref[j * d + k];
-                        sum += diff * diff;
-                    }
-                    (i, j, sum.sqrt())
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let mut distances = Array2::zeros((n, n));
-    for (i, j, dist) in results {
-        distances[[i, j]] = dist;
-        distances[[j, i]] = dist;
+impl Points {
+    /// Copy `data` (allocated through the resource guards).
+    pub(crate) fn new(data: &ArrayView2<f64>, what: &str) -> EconResult<Points> {
+        let (n, d) = data.dim();
+        let mut buf =
+            crate::resource::try_with_capacity(crate::resource::checked_len(&[n, d], what)?, what)?;
+        for row in data.rows() {
+            buf.extend(row.iter().copied());
+        }
+        Ok(Points { n, d, buf })
     }
 
-    distances
+    /// Row `i`.
+    #[inline]
+    pub(crate) fn row(&self, i: usize) -> &[f64] {
+        &self.buf[i * self.d..(i + 1) * self.d]
+    }
+
+    /// Squared Euclidean distance of rows `i` and `j`.
+    #[inline]
+    pub(crate) fn sq(&self, i: usize, j: usize) -> f64 {
+        crate::ml::kdtree::sq_euclidean(self.row(i), self.row(j))
+    }
+
+    /// The rows as vectors (for [`crate::ml::kdtree::KdTree::new`]).
+    pub(crate) fn rows_vec(&self) -> Vec<Vec<f64>> {
+        (0..self.n).map(|i| self.row(i).to_vec()).collect()
+    }
 }
 
 // =============================================================================
@@ -121,126 +134,74 @@ pub(crate) fn try_distance_matrix(
     Ok(distances)
 }
 
-/// Compute silhouette from precomputed distances.
+/// PAM's silhouette widths (`cluster::pam()$silinfo`): `cluster::silhouette` through the one core
+/// ([`crate::ml::cluster_validation`]); singletons score 0.
 pub(crate) fn compute_silhouette_from_distances(
     distances: &Array2<f64>,
     labels: &[usize],
-    n_clusters: usize,
+    _n_clusters: usize,
 ) -> Vec<f64> {
-    let n = distances.nrows();
-
-    // Group points by cluster
-    let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_clusters];
-    for (i, &label) in labels.iter().enumerate() {
-        cluster_indices[label].push(i);
-    }
-
-    // Compute silhouette for each point
-    let mut silhouette = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let cluster_i = labels[i];
-        let cluster_i_indices = &cluster_indices[cluster_i];
-
-        // a(i): average distance to other points in same cluster
-        let a_i = if cluster_i_indices.len() > 1 {
-            let sum: f64 = cluster_i_indices
-                .iter()
-                .filter(|&&j| j != i)
-                .map(|&j| distances[[i, j]])
-                .sum();
-            sum / (cluster_i_indices.len() - 1) as f64
-        } else {
-            0.0
-        };
-
-        // b(i): min average distance to any other cluster
-        let mut b_i = f64::INFINITY;
-        for c in 0..n_clusters {
-            if c == cluster_i || cluster_indices[c].is_empty() {
-                continue;
-            }
-            let avg_dist: f64 = cluster_indices[c]
-                .iter()
-                .map(|&j| distances[[i, j]])
-                .sum::<f64>()
-                / cluster_indices[c].len() as f64;
-            b_i = b_i.min(avg_dist);
-        }
-
-        let s_i = if a_i == 0.0 && b_i == 0.0 {
-            0.0
-        } else if b_i.is_infinite() {
-            0.0
-        } else {
-            (b_i - a_i) / a_i.max(b_i)
-        };
-
-        silhouette.push(s_i);
-    }
-
-    silhouette
+    crate::ml::cluster_validation::silhouette_core(distances.view(), labels).widths
 }
 
-// =============================================================================
-// Shared helpers
-// =============================================================================
-
-/// Compute average silhouette width.
+/// Average silhouette width (CLARA's `silinfo$avg.width`); 0 when n < 2 or k < 2.
 pub(crate) fn compute_silhouette_avg(labels: &[usize], distances: &Array2<f64>, k: usize) -> f64 {
     let n = labels.len();
     if n < 2 || k < 2 {
         return 0.0;
     }
+    crate::ml::cluster_validation::silhouette_core(distances.view(), labels)
+        .widths
+        .iter()
+        .sum::<f64>()
+        / n as f64
+}
 
-    let mut silhouette_sum = 0.0;
-
-    for i in 0..n {
-        let label_i = labels[i];
-
-        // Compute a(i) - average distance to points in same cluster
-        let mut same_cluster_dist = 0.0;
-        let mut same_cluster_count = 0;
-        for j in 0..n {
-            if i != j && labels[j] == label_i {
-                same_cluster_dist += distances[[i, j]];
-                same_cluster_count += 1;
-            }
-        }
-        let a_i = if same_cluster_count > 0 {
-            same_cluster_dist / same_cluster_count as f64
-        } else {
-            0.0
-        };
-
-        // Compute b(i) - minimum average distance to other clusters
-        let mut b_i = f64::INFINITY;
-        for other_label in 0..k {
-            if other_label == label_i {
-                continue;
-            }
-
-            let mut other_dist = 0.0;
-            let mut other_count = 0;
-            for j in 0..n {
-                if labels[j] == other_label {
-                    other_dist += distances[[i, j]];
-                    other_count += 1;
-                }
-            }
-            if other_count > 0 {
-                b_i = b_i.min(other_dist / other_count as f64);
-            }
-        }
-
-        // Silhouette width for point i
-        if b_i.is_finite() && (a_i > 0.0 || b_i > 0.0) {
-            let s_i = (b_i - a_i) / a_i.max(b_i);
-            silhouette_sum += s_i;
+/// Refuse data the distance-based clusterings cannot use: zero columns, non-finite values, and
+/// coordinates whose squared distances overflow. Data with no rows pass (the callers check `n`).
+pub(crate) fn check_points(data: &ArrayView2<f64>, method: &str) -> EconResult<()> {
+    let spec = |message: String| EconError::InvalidSpecification { message };
+    if data.nrows() == 0 {
+        return Ok(());
+    }
+    if data.ncols() == 0 {
+        return Err(spec(format!("{method}: the data have no columns")));
+    }
+    // one pass in memory order for the ranges and finiteness; the count and the first position are
+    // only gathered on failure
+    let d = data.ncols();
+    let mut lo = vec![f64::INFINITY; d];
+    let mut hi = vec![f64::NEG_INFINITY; d];
+    let mut finite = true;
+    for row in data.rows() {
+        for ((&v, l), h) in row.iter().zip(lo.iter_mut()).zip(hi.iter_mut()) {
+            finite &= v.is_finite();
+            *l = l.min(v);
+            *h = h.max(v);
         }
     }
-
-    silhouette_sum / n as f64
+    if !finite {
+        let bad = data.iter().filter(|v| !v.is_finite()).count();
+        let (i, j) = data
+            .indexed_iter()
+            .find(|(_, v)| !v.is_finite())
+            .map_or((0, 0), |(ij, _)| ij);
+        return Err(spec(format!(
+            "{method}: the data contain {bad} non-finite value(s) (first at row {i}, column {j}); remove or impute them"
+        )));
+    }
+    // every squared distance is <= the sum of squared column ranges (monotone rounding), so this
+    // bounds them all
+    let mut s = 0.0f64;
+    for (&l, &h) in lo.iter().zip(&hi) {
+        s += (h - l) * (h - l);
+    }
+    if !s.is_finite() {
+        return Err(spec(format!(
+            "{method}: squared distances overflow (the coordinate ranges are too large); rescale the data"
+        )));
+    }
+    Ok(())
 }
 
 // =============================================================================
@@ -543,7 +504,8 @@ pub fn cluster_stats(
     })
 }
 
-/// Compute silhouette with per-cluster breakdown.
+/// Silhouette with per-cluster breakdown (the one core): the mean width over all n, and per label
+/// `< k` the mean over all its members (0 for an empty label).
 fn compute_silhouette_details(
     labels: &[usize],
     distances: &Array2<f64>,
@@ -553,68 +515,22 @@ fn compute_silhouette_details(
     if n < 2 || k < 2 {
         return (0.0, vec![0.0; k]);
     }
-
-    let mut cluster_sil_sum = vec![0.0; k];
-    let mut cluster_sil_count = vec![0; k];
-    let mut total_sil = 0.0;
-
-    for i in 0..n {
-        let label_i = labels[i];
-
-        // a(i)
-        let mut same_dist = 0.0;
-        let mut same_count = 0;
-        for j in 0..n {
-            if i != j && labels[j] == label_i {
-                same_dist += distances[[i, j]];
-                same_count += 1;
-            }
-        }
-        let a_i = if same_count > 0 {
-            same_dist / same_count as f64
-        } else {
-            0.0
-        };
-
-        // b(i)
-        let mut b_i = f64::INFINITY;
-        for other in 0..k {
-            if other == label_i {
-                continue;
-            }
-            let mut other_dist = 0.0;
-            let mut other_count = 0;
-            for j in 0..n {
-                if labels[j] == other {
-                    other_dist += distances[[i, j]];
-                    other_count += 1;
-                }
-            }
-            if other_count > 0 {
-                b_i = b_i.min(other_dist / other_count as f64);
-            }
-        }
-
-        if b_i.is_finite() && (a_i > 0.0 || b_i > 0.0) {
-            let s_i = (b_i - a_i) / a_i.max(b_i);
-            total_sil += s_i;
-            cluster_sil_sum[label_i] += s_i;
-            cluster_sil_count[label_i] += 1;
+    let widths = crate::ml::cluster_validation::silhouette_core(distances.view(), labels).widths;
+    let mut sum = vec![0.0; k];
+    let mut count = vec![0usize; k];
+    for (&l, &w) in labels.iter().zip(&widths) {
+        if l < k {
+            sum[l] += w;
+            count[l] += 1;
         }
     }
-
-    let avg_sil = total_sil / n as f64;
-    let cluster_sil: Vec<f64> = (0..k)
-        .map(|l| {
-            if cluster_sil_count[l] > 0 {
-                cluster_sil_sum[l] / cluster_sil_count[l] as f64
-            } else {
-                0.0
-            }
-        })
+    let avg = widths.iter().sum::<f64>() / n as f64;
+    let per = sum
+        .iter()
+        .zip(&count)
+        .map(|(&s, &c)| if c > 0 { s / c as f64 } else { 0.0 })
         .collect();
-
-    (avg_sil, cluster_sil)
+    (avg, per)
 }
 
 /// Compute Davies-Bouldin index.
@@ -702,11 +618,77 @@ pub fn run_cluster_stats(
     cluster_stats(data, labels)
 }
 
+/// Shared test data of the HDBSCAN, OPTICS and silhouette tests.
+#[cfg(test)]
+pub(crate) mod test_data {
+    use ndarray::Array2;
+    use rand::prelude::*;
+
+    /// blobs_noise.csv (x, y) as an n x 2 matrix, read through the column extractor.
+    pub(crate) fn blobs(ds: &crate::data::Dataset) -> Array2<f64> {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let x = numeric_column(ds.df(), "x", NaPolicy::Fail).unwrap().0;
+        let y = numeric_column(ds.df(), "y", NaPolicy::Fail).unwrap().0;
+        Array2::from_shape_fn((x.len(), 2), |(i, j)| if j == 0 { x[i] } else { y[i] })
+    }
+
+    /// p2a labels (-1 noise, clusters from 0) as R's codes (0 noise, clusters from 1).
+    pub(crate) fn r_codes(labels: &[i32]) -> Vec<f64> {
+        labels.iter().map(|&l| f64::from(l + 1)).collect()
+    }
+
+    /// Undefined (infinite) distances as NaN, which is how the case JSON's null (R NA) is read.
+    pub(crate) fn na(v: &[f64]) -> Vec<f64> {
+        v.iter()
+            .map(|&x| if x.is_finite() { x } else { f64::NAN })
+            .collect()
+    }
+
+    /// Seeded uniform points with noise in every coordinate (large-n and degenerate-input tests).
+    pub(crate) fn uniform(n: usize, d: usize, seed: u64) -> Array2<f64> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        Array2::from_shape_fn((n, d), |_| rng.r#gen::<f64>())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use ndarray::array;
+
+    /// R: cluster::silhouette(cutree(hclust(dist(X), "average"), 6), dist(X)) on blobs_noise, through the
+    /// PAM (silinfo widths), CLARA (average) and cluster-statistics helpers. Case silhouette_singletons.
+    #[test]
+    fn test_validate_silhouette_helpers_singletons() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("silhouette_singletons");
+        let x = test_data::blobs(&ds);
+        let n = x.nrows();
+        let labels: Vec<usize> = case
+            .vector("labels")
+            .iter()
+            .map(|&v| v as usize - 1)
+            .collect();
+        let d = compute_distance_matrix(&x.view());
+        let (avg_details, cluster_details) = compute_silhouette_details(&labels, &d, 6);
+        let stats = cluster_stats(x.view(), &labels).unwrap();
+        Check::new(&case)
+            .vector(
+                "sil_width",
+                &compute_silhouette_from_distances(&d, &labels, 6),
+                Tol::coef(n),
+            )
+            .scalar(
+                "avg_width",
+                compute_silhouette_avg(&labels, &d, 6),
+                Tol::stat(n),
+            )
+            .vector("cluster_avg", &cluster_details, Tol::stat(n))
+            .finish();
+        assert!((avg_details - stats.average_silhouette).abs() < 1e-15);
+        assert_eq!(stats.cluster_silhouette, cluster_details);
+    }
 
     /// R 4.3.3: library(cluster); x <- <the 12 x 2 matrix of test_validate_agnes_heights_match_r>
     /// lab <- c(1,1,2,2,1,3,3,1,2,3,1,2); mean(silhouette(lab, dist(x))[, "sil_width"])  # 0.617882355558917
