@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "rq_boot_xy",
+  "area": "regression/quantreg",
+  "method": "summary.rq(se = 'boot') xy-pair bootstrap SEs (quantreg::boot.rq, bsmethod = 'xy') on a committed 100 x 50 resample index matrix",
+  "reference": "quantreg::boot.rq(bsmethod = 'xy', U = U); summary.rq(se = 'boot') takes sqrt(diag(cov(B)))",
+  "call": "sqrt(diag(cov(boot.rq(cbind(1, x), y, tau, R = 50, U = U)$B)))",
+  "dataset": "validation/datasets/generated/rq_boot_indices.csv",
+  "datasets": ["validation/datasets/generated/quantreg_hetero.csv", "validation/datasets/generated/rq_boot_indices.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "quantreg": "6.1"
+  },
+  "values": {
+    "n": 100,
+    "replications": 50,
+    "tau25_se_boot": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.32597688363751354, 0.16047624798360119]
+    },
+    "tau25_boot_mean": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3649360255068803, 2.6849875570989119]
+    },
+    "tau50_se_boot": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.24570002521529088, 0.099222009723237539]
+    },
+    "tau50_boot_mean": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.4084650946714843, 3.169534421939773]
+    },
+    "tau75_se_boot": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.66197595495074824, 0.13080697239402375]
+    },
+    "tau75_boot_mean": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.0835072200969669, 3.4124286589553599]
+    }
+  }
+}

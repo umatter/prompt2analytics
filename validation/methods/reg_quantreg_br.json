@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "quantreg_br",
+      "name": "Quantile regression by the Barrodale-Roberts simplex",
+      "category": "regression",
+      "reference": "quantreg::rq(method = 'br') (quantreg 6.1 src/ratfor/rqbr.r: Koenker and d'Orey 1987, AS 229)",
+      "doc": "validation/regression/quantreg.md",
+      "cases": [
+        "rq_br_se",
+        "rq_br_mtcars"
+      ],
+      "tests": [
+        "p2a-core::regression::quantreg::tests::test_validate_rq_br_coefficients",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_br_mtcars",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_br_nonunique_location",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_scale_equivariance",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_median_unchanged_by_outlying_responses",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_irls_scale_free_and_honest"
+      ],
+      "quantities": [
+        "coefficients (tau 0.02, 0.25, 0.5, 0.75 at n = 100; 0.25, 0.5, 0.75 at n = 32 with and without intercept)",
+        "check-loss objective",
+        "nonunique flag",
+        "nonunique location models: objective and solution interval (property, not R-pinned)",
+        "scale equivariance (x 1e-6, x 1e6)",
+        "LP invariance to outlying responses",
+        "IRLS objective within 1e-6 of rq's minimum, scale-free iteration counts (property)"
+      ],
+      "tolerance": "validation/README.md: n = 100 coefficients 1e-8, objective 1e-6 relative; n = 32 coefficients 1e-6, objective 1e-5 relative; flags exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "quantreg_summary_se",
+      "name": "Quantile-regression standard errors (summary.rq iid, nid, ker) and t(n - p) intervals",
+      "category": "regression",
+      "reference": "quantreg::summary.rq(se = 'iid' | 'nid' | 'ker', covariance = TRUE), quantreg::bandwidth.rq; interval coef -/+ qt(0.975, rdf) se written out (summary.rq has none for these types)",
+      "doc": "validation/regression/quantreg.md",
+      "cases": [
+        "rq_br_se",
+        "rq_br_mtcars"
+      ],
+      "tests": [
+        "p2a-core::regression::quantreg::tests::test_validate_rq_summary_se_iid",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_summary_se_nid",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_summary_se_ker",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_bandwidth_halving",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_small_sample_se",
+        "p2a-core::regression::quantreg::tests::test_validate_rq_multi_hetero"
+      ],
+      "quantities": [
+        "SE, t, p and 95% CI per se type (n = 100 and 32)",
+        "Hall-Sheather bandwidth with halving (tau = 0.02)",
+        "sparsity",
+        "Powell kernel bandwidth",
+        "R's warnings (nonunique sparsity fit, non-positive fis)",
+        "the n = 5 iid failure kept as NaN SEs with a warning",
+        "the tau 0.75 iid quantities depend on rqbr's vertex choice in the nonunique sparsity fit (algorithm-defined)",
+        "scale equivariance of the iid, nid and ker SEs at y x 1e-6 and 1e6 (property, not R-pinned)"
+      ],
+      "tolerance": "validation/README.md: n = 100 SE, t, CI and bandwidths 1e-6 relative, p 1e-6 relative / 1e-12 absolute; n = 32 1e-5; n = 5 coefficients 1e-6, SE 1e-5",
+      "deviations": [
+        {
+          "finding": "REG-26",
+          "quantity": "nid p-value, tau 0.25, (Intercept), rq_br_se",
+          "note": "summary.rq's absolute fuzz sqrt(eps) is replaced by sqrt(eps) * mean|y - median(y)| so that the iid and nid SEs are scale-equivariant (rule 4); this p-value moves 3.4e-6 relative"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "quantreg_fn",
+      "name": "Quantile regression by the Frisch-Newton interior point",
+      "category": "regression",
+      "reference": "quantreg::rq.fit.fnb (src/ratfor/rqfnb.r) on y / mean(|y - median(y)|), rescaled (p2a's scale-free stopping rule); judged against the exact rq(method = 'br') solution",
+      "doc": "validation/regression/quantreg.md",
+      "cases": [
+        "rq_br_se"
+      ],
+      "tests": [
+        "p2a-core::regression::quantreg::tests::test_validate_rq_fn_coefficients"
+      ],
+      "quantities": [
+        "coefficients within Tol::iterative(1e-6) of the BR solution",
+        "convergence (duality gap <= tol)",
+        "scale-free property (iterations and coefficients at y x 1e-6 and 1e6; not R-pinned)",
+        "R's tau range for fn"
+      ],
+      "tolerance": "Tol::iterative(1e-6) to the simplex solution (an interior-point method stops at a duality gap, not at a vertex); not R-pinned to rq.fit.fnb's iterates",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "quantreg_boot",
+      "name": "Quantile-regression xy-pair bootstrap standard errors",
+      "category": "regression",
+      "reference": "quantreg::boot.rq(bsmethod = 'xy', U = U); summary.rq(se = 'boot') takes sqrt(diag(cov(B)))",
+      "doc": "validation/regression/quantreg.md",
+      "cases": [
+        "rq_boot_xy",
+        "rq_br_se"
+      ],
+      "tests": [
+        "p2a-core::regression::quantreg::tests::test_validate_rq_boot_xy_indices"
+      ],
+      "quantities": [
+        "bootstrap SE and replicate means on a committed 100 x 50 index matrix",
+        "seeded reproducibility (property)",
+        "bootstrap_samples only with se = boot"
+      ],
+      "tolerance": "validation/README.md, n = 100: SE 1e-6, means 1e-8 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
