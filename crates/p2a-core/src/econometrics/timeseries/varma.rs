@@ -1246,7 +1246,6 @@ mod tests {
     #[test]
     fn test_varma_long_var_normal_equations_match_qr() {
         let y = varma11_series(400);
-        let names = vec!["y1".to_string(), "y2".to_string()];
         for m in [8, 35] {
             let z = lag_design(y.view(), y.view(), m, m, 0, 1 + 2 * m).unwrap();
             let target = y.slice(s![m.., ..]);
@@ -1274,7 +1273,7 @@ mod tests {
                 .is_none()
         );
         let mut warnings = Vec::new();
-        let dup_names = vec![names[0].clone(), "copy".to_string()];
+        let dup_names = ["y1".to_string(), "copy".to_string()];
         long_var_residuals(dup.view(), 4, &dup_names, &mut warnings).unwrap();
         assert!(
             warnings.len() == 1
