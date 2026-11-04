@@ -223,12 +223,41 @@ regressors and a constant).
 | standard, `run_ols_raw` (criterion) | 5.12, 1.07 | 14.4, **1.16** | 107, **1.20** |
 | HC0-HC3, `run_ols_raw`, n = 1,000 (criterion) | | 54.8-86.0, 1.01-1.03 | |
 
-The raw-matrix fit costs about 2 µs more per 1,000 rows at n >= 1,000, which grows with n and
-so is an O(nk) pass. The likely cause is the non-finite scan of X and y at the start of the
-fit, which `lm.fit` also makes (its columns are centred, so no refinement step is taken). On
-the dataset path the extractor has already checked them, and the scan is a few per cent of
-the fit. The pairs bootstrap
-costs 12-13% more. Neither has been signed off.
+The raw-matrix fit cost about 2 µs more per 1,000 rows at n >= 1,000 (an O(nk) pass), and
+the pairs bootstrap 12-13% more.
+
+**Timing, T3-PERF3 (after wave 2A).** Causes and changes, results unchanged:
+
+- `run_ols_raw` scanned X and y for non-finite values before the fit, and the normal-equations
+  solve copied y. X'X, which the solve decision forms anyway, now certifies X: its diagonal
+  (sums of squares) is finite only when every entry is, so X is scanned only when it is not, or
+  when no X'X is formed (n <= k); y is scanned in one pass without an early exit. `run_ols`
+  skips the scan, since `DesignMatrix` has refused non-finite values. The fit takes y by
+  reference. Tests: `test_ols_raw_rejects_non_finite_x_in_any_layout` (row-major,
+  column-major and strided X), `test_ols_raw_overflowing_gram_is_not_non_finite` (finite
+  entries whose squares overflow are scanned and fitted, as before).
+- `vcov_hac` accumulated the meat with indexed 2-D reads in a triple loop; it now runs the
+  same sums in the same order over flat score rows, so the matrix is bit for bit the old one
+  (`test_hac_meat_matches_indexed_reference_exactly`).
+- The pairs bootstrap formed each replicate's residuals, which it never read, and gathered
+  the resample one indexed entry at a time; it now takes `solve_ols`'s decision and
+  coefficients only and copies whole rows (`test_pairs_bootstrap_replicates_equal_solve_ols`:
+  every replicate equals `solve_ols` bit for bit).
+
+Lane timing against `fe13b889`, release build, one P core (`taskset -c 2`),
+`RAYON_NUM_THREADS=1`, base and head interleaved five times, on a machine loaded by other
+builds (load 6-12, so the spread is wide; the integration re-times on a quiet machine).
+Head / base as the median of the per-run medians, and in brackets the ratio of the fastest
+runs:
+
+| Fit | n = 100 | n = 500 | n = 1,000 | n = 5,000 | n = 10,000 |
+|---|---|---|---|---|---|
+| standard, `run_ols_raw` (criterion `OLS_Standard`) | 1.06 (0.89) | | 0.81 (0.79) | | 1.01 (0.71) |
+| HAC, Bartlett (criterion `vcovHAC`) | 0.88 (0.82) | 1.10 (0.60) | 1.08 (0.82) | 0.93 (0.72) | |
+| pairs bootstrap, B = 199 (unified) | 0.93 (0.96) | | 0.86 (0.88) | | |
+
+An earlier five-round run of the same code less the y copy gave 0.72 / 0.93 / 1.00 (standard),
+0.85 / 0.97 / 0.79 / 0.95 (HAC) and 0.96 / 0.89 (pairs bootstrap).
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 

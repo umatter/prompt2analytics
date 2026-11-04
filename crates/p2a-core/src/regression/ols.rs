@@ -581,7 +581,26 @@ pub fn run_ols_raw(
     // position (REG-19; R reads it from the terms, which a raw matrix does not have).
     let has_intercept = has_constant_column(x.view());
 
-    fit_ols(x.view(), y, variable_names, y_name, has_intercept, cov_type)
+    // lm.fit refuses NA/NaN/Inf; DesignMatrix (run_ols) has refused them already, so only
+    // the raw matrix is checked
+    fit_ols(
+        x.view(),
+        y,
+        variable_names,
+        y_name,
+        has_intercept,
+        cov_type,
+        true,
+    )
+}
+
+/// Whether every entry of `x` is finite, in one pass without an early exit (a
+/// reduction the compiler vectorises).
+fn all_finite(x: ndarray::ArrayView2<'_, f64>) -> bool {
+    match x.as_slice_memory_order() {
+        Some(s) => s.iter().fold(true, |ok, v| ok & v.is_finite()),
+        None => x.iter().fold(true, |ok, v| ok & v.is_finite()),
+    }
 }
 
 /// Run OLS regression on a dataset.
@@ -624,6 +643,7 @@ pub fn run_ols(
         y_col,
         intercept,
         cov_type,
+        false,
     )
 }
 
@@ -716,7 +736,12 @@ pub(crate) fn normal_equations_inverse(
     if k == 0 || n <= k {
         return Ok(None);
     }
-    let gram = xtx(&x);
+    normal_inverse_of_gram(&xtx(&x))
+}
+
+/// [`normal_equations_inverse`] from an X'X already formed (of a design with more rows
+/// than columns and at least one column).
+fn normal_inverse_of_gram(gram: &Array2<f64>) -> EconResult<Option<NormalInverse>> {
     match sym_inverse(gram.view(), SingularPolicy::Error, "X'X") {
         Ok(inv)
             if inv.reciprocal_condition >= OLS_NORMAL_EQUATIONS_MIN_RCOND
@@ -754,10 +779,22 @@ pub(crate) fn solve_ols(
     x: ndarray::ArrayView2<'_, f64>,
     y: ndarray::ArrayView1<'_, f64>,
 ) -> EconResult<OlsSolve> {
-    if let Some(normal) = normal_equations_inverse(x)? {
-        let y = y.to_owned();
-        let beta = normal.coefficients(x, &y);
-        let residuals = &y - &x.dot(&beta);
+    match normal_equations_inverse(x)? {
+        Some(normal) => solve_ols_with(x, &y.to_owned(), Some(normal)),
+        None => pivoted_qr_solve(x, y),
+    }
+}
+
+/// [`solve_ols`] given the outcome of [`normal_equations_inverse`] for `x` (and `y` owned,
+/// so that the fit does not copy it).
+fn solve_ols_with(
+    x: ndarray::ArrayView2<'_, f64>,
+    y: &Array1<f64>,
+    normal: Option<NormalInverse>,
+) -> EconResult<OlsSolve> {
+    if let Some(normal) = normal {
+        let beta = normal.coefficients(x, y);
+        let residuals = y - &x.dot(&beta);
         return Ok(OlsSolve {
             beta,
             residuals,
@@ -767,6 +804,14 @@ pub(crate) fn solve_ols(
             path: OlsPath::NormalEquations,
         });
     }
+    pivoted_qr_solve(x, y.view())
+}
+
+/// The pivoted-QR arm of [`solve_ols`].
+fn pivoted_qr_solve(
+    x: ndarray::ArrayView2<'_, f64>,
+    y: ndarray::ArrayView1<'_, f64>,
+) -> EconResult<OlsSolve> {
     let ls = least_squares(x, y)?;
     Ok(OlsSolve {
         beta: ls.coefficients,
@@ -927,6 +972,7 @@ impl FixedDesignSolver {
 /// solution ([`solve_ols`]), fit statistics on the identified columns as `summary.lm`, and
 /// the requested covariance on the identified columns (as `sandwich`). Aliased columns get
 /// `NaN` coefficients, SEs, t, p and CIs and R's warning.
+#[allow(clippy::too_many_arguments)]
 fn fit_ols(
     x: ndarray::ArrayView2<'_, f64>,
     y: &Array1<f64>,
@@ -934,19 +980,33 @@ fn fit_ols(
     y_name: &str,
     intercept: bool,
     cov_type: CovarianceType,
+    check_finite: bool,
 ) -> EconResult<OlsResult> {
     let (n, k) = x.dim();
-    // lm.fit refuses NA/NaN/Inf; run_ols input is already NA-checked by the extractor.
-    if x.iter().any(|v| !v.is_finite()) {
-        return Err(EconError::InvalidSpecification {
-            message: "OLS input contains non-finite values (NA/NaN/Inf) in x".to_string(),
-        });
+    // lm.fit refuses NA/NaN/Inf. With `check_finite` (a raw matrix) X'X, which the
+    // normal-equations decision forms anyway, certifies x: a finite diagonal (sums of
+    // squares) means every entry is finite, so x is scanned only when it is not (or when
+    // no X'X is formed). Without it the caller has checked (DesignMatrix).
+    let non_finite = |what: &str| EconError::InvalidSpecification {
+        message: format!("OLS input contains non-finite values (NA/NaN/Inf) in {what}"),
+    };
+    let gram = (k > 0 && n > k).then(|| xtx(&x));
+    if check_finite {
+        let certified = gram
+            .as_ref()
+            .is_some_and(|g| g.diag().iter().all(|v| v.is_finite()));
+        if !certified && !all_finite(x) {
+            return Err(non_finite("x"));
+        }
+        if !all_finite(y.view().insert_axis(ndarray::Axis(1))) {
+            return Err(non_finite("y"));
+        }
     }
-    if y.iter().any(|v| !v.is_finite()) {
-        return Err(EconError::InvalidSpecification {
-            message: "OLS input contains non-finite values (NA/NaN/Inf) in y".to_string(),
-        });
-    }
+    let normal = match &gram {
+        Some(g) => normal_inverse_of_gram(g)?,
+        None => None,
+    };
+    debug_assert!(all_finite(x) && y.iter().all(|v| v.is_finite()));
     if n == 0 {
         return Err(EconError::InsufficientData {
             required: 1,
@@ -955,7 +1015,7 @@ fn fit_ols(
         });
     }
 
-    let solve = solve_ols(x, y.view())?;
+    let solve = solve_ols_with(x, y, normal)?;
     let rank = solve.rank;
     if rank == 0 {
         return Err(EconError::SingularMatrix {
@@ -1942,27 +2002,34 @@ pub fn vcov_hac(
         (residuals.clone(), 0.0)
     };
 
-    // Compute score vectors: s_i = u_i * x_i (n × k matrix)
-    let mut scores = Array2::<f64>::zeros((n, k));
-    for i in 0..n {
-        for j in 0..k {
-            scores[[i, j]] = u[i] * x[[i, j]];
+    // Compute score vectors: s_i = u_i * x_i, row-major (n × k). The sums below run over
+    // flat rows (no index arithmetic or bounds checks per term) in the same order as
+    // before, so the meat is unchanged bit for bit.
+    let mut scores = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC scores")?,
+        0.0,
+        "HAC scores",
+    )?;
+    for (i, (row, &ui)) in x.rows().into_iter().zip(u.iter()).enumerate() {
+        for (s, &xij) in scores[i * k..(i + 1) * k].iter_mut().zip(row.iter()) {
+            *s = ui * xij;
         }
     }
 
     // Compute the meat of the sandwich: Ω̂ = Σⱼ w(j) (Γ̂ⱼ + Γ̂ⱼ')
-    let mut omega = Array2::<f64>::zeros((k, k));
+    let mut omega = vec![0.0; k * k];
 
     // Lag 0: Γ̂₀ = Σᵢ sᵢ sᵢ'
-    for i in 0..n {
-        for j in 0..k {
-            for l in 0..k {
-                omega[[j, l]] += scores[[i, j]] * scores[[i, l]];
+    for si in scores.chunks_exact(k.max(1)).take(n) {
+        for (j, &sij) in si.iter().enumerate() {
+            for (o, &sil) in omega[j * k..(j + 1) * k].iter_mut().zip(si) {
+                *o += sij * sil;
             }
         }
     }
 
     // Lags 1 to bw: add cross-products with kernel weights
+    let mut gamma_lag = vec![0.0; k * k];
     for lag in 1..=bw.min(n.saturating_sub(1)) {
         resource::checkpoint()?;
         let w = kernel.weight(lag, bw);
@@ -1970,11 +2037,13 @@ pub fn vcov_hac(
             continue;
         }
 
-        let mut gamma_lag = Array2::<f64>::zeros((k, k));
+        gamma_lag.fill(0.0);
         for i in lag..n {
-            for j in 0..k {
-                for l in 0..k {
-                    gamma_lag[[j, l]] += scores[[i, j]] * scores[[i - lag, l]];
+            let si = &scores[i * k..(i + 1) * k];
+            let sl = &scores[(i - lag) * k..(i - lag + 1) * k];
+            for (j, &sij) in si.iter().enumerate() {
+                for (g, &sll) in gamma_lag[j * k..(j + 1) * k].iter_mut().zip(sl) {
+                    *g += sij * sll;
                 }
             }
         }
@@ -1982,12 +2051,14 @@ pub fn vcov_hac(
         // Add symmetrically (Γ̂ⱼ + Γ̂ⱼ')
         for j in 0..k {
             for l in 0..k {
-                omega[[j, l]] += w * (gamma_lag[[j, l]] + gamma_lag[[l, j]]);
+                omega[j * k + l] += w * (gamma_lag[j * k + l] + gamma_lag[l * k + j]);
             }
         }
     }
 
     // Scale by 1/n
+    let mut omega = Array2::from_shape_vec((k, k), omega)
+        .map_err(|e| EconError::Computation(format!("HAC meat has the wrong shape: {e}")))?;
     omega /= n as f64;
 
     // If prewhitening was used, recolor the covariance matrix
@@ -2418,15 +2489,34 @@ pub fn vcov_bootstrap(
                     (0..n).map(|_| *indices.choose(&mut rng).unwrap()).collect();
 
                 let y_boot: Array1<f64> = sample.iter().map(|&i| y[i]).collect();
-                let x_boot: Array2<f64> =
-                    Array2::from_shape_fn((n, r), |(i, j)| x1[[sample[i], j]]);
-                let fit = solve_ols(x_boot.view(), y_boot.view())?;
-                if fit.rank < r {
+                // A row-major design is gathered one row slice at a time
+                let x_boot: Array2<f64> = match x1.as_slice() {
+                    Some(flat) if r > 0 => {
+                        let mut v = Vec::with_capacity(n * r);
+                        for &i in &sample {
+                            v.extend_from_slice(&flat[i * r..(i + 1) * r]);
+                        }
+                        Array2::from_shape_vec((n, r), v).map_err(|e| {
+                            EconError::Computation(format!("bootstrap resample: {e}"))
+                        })?
+                    }
+                    _ => Array2::from_shape_fn((n, r), |(i, j)| x1[[sample[i], j]]),
+                };
+                // solve_ols's decision and coefficients, without the residuals it would
+                // also form
+                let (beta, rank) = match normal_equations_inverse(x_boot.view())? {
+                    Some(normal) => (normal.coefficients(x_boot.view(), &y_boot), r),
+                    None => {
+                        let ls = least_squares(x_boot.view(), y_boot.view())?;
+                        (ls.coefficients, ls.rank)
+                    }
+                };
+                if rank < r {
                     // A resample that loses a column identifies no full coefficient vector
                     rank_deficient += 1;
                     continue;
                 }
-                fit.beta
+                beta
             }
             (BootstrapType::Residual, Some(solver)) => {
                 // Residual bootstrap: y* = ŷ + ε*, ε* resampled from the residuals
@@ -5586,5 +5676,204 @@ mod tests {
         );
         let c = run_ols_clustered(&ds, "y", &[name], "cl", None).unwrap();
         assert!(c.to_string().contains("Haushaltsgrö..."));
+    }
+
+    /// A deterministic noisy series for the T3-PERF3 equivalence tests.
+    fn perf3_noise(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            })
+            .collect()
+    }
+
+    /// run_ols_raw scans its matrix for non-finite values in any memory layout (run_ols
+    /// relies on DesignMatrix, which refuses them).
+    #[test]
+    fn test_ols_raw_rejects_non_finite_x_in_any_layout() {
+        let names = vec!["(Intercept)".to_string(), "x".to_string()];
+        let y = ndarray::array![1.0, 2.1, 3.1, 3.9, 5.2];
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let x = ndarray::array![[1.0, 0.3], [1.0, 1.1], [1.0, bad], [1.0, 2.9], [1.0, 4.2]];
+            // the same matrix in column-major order
+            let xf = Array2::from_shape_fn(ndarray::ShapeBuilder::f((5, 2)), |(i, j)| x[[i, j]]);
+            assert!(xf.as_slice().is_none() && xf.as_slice_memory_order().is_some());
+            // and as a non-contiguous copy with a step
+            let wide = ndarray::Array2::from_shape_fn((5, 4), |(i, j)| x[[i, j / 2]]);
+            let xs = wide.slice(ndarray::s![.., ..;2]).to_owned();
+            for m in [x, xf, xs] {
+                match run_ols_raw(&m, &y, &names, "y", CovarianceType::Standard).unwrap_err() {
+                    EconError::InvalidSpecification { message } => {
+                        assert!(
+                            message.contains("non-finite") && message.ends_with(" x"),
+                            "{message}"
+                        )
+                    }
+                    e => panic!("{e:?}"),
+                }
+            }
+        }
+        let x = ndarray::array![[1.0, 0.3], [1.0, 1.1], [1.0, 2.2], [1.0, 2.9], [1.0, 4.2]];
+        let y = ndarray::array![1.0, 2.1, f64::INFINITY, 3.9, 5.2];
+        match run_ols_raw(&x, &y, &names, "y", CovarianceType::Standard).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.ends_with(" y"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// X'X certifies a raw matrix finite only when its diagonal is: finite entries whose
+    /// squares overflow are scanned, found finite and fitted (by the QR, as before).
+    #[test]
+    fn test_ols_raw_overflowing_gram_is_not_non_finite() {
+        let names = vec!["(Intercept)".to_string(), "x".to_string()];
+        let x = ndarray::array![
+            [1.0, 3e200],
+            [1.0, 1.1e201],
+            [1.0, 2.2e201],
+            [1.0, 2.9e201],
+            [1.0, 4.2e201]
+        ];
+        let y = ndarray::array![1.0, 2.1, 3.1, 3.9, 5.2];
+        match run_ols_raw(&x, &y, &names, "y", CovarianceType::Standard) {
+            Err(EconError::InvalidSpecification { message }) if message.contains("non-finite") => {
+                panic!("{message}")
+            }
+            Ok(r) => assert!(r.coefficients[1].estimate.is_finite()),
+            Err(_) => {}
+        }
+    }
+
+    /// The HAC meat over flat score rows equals, bit for bit, the indexed triple loop it
+    /// replaced (same terms, same summation order), with and without an aliased column.
+    #[test]
+    fn test_hac_meat_matches_indexed_reference_exactly() {
+        let n = 157;
+        let e = perf3_noise(3 * n, 5);
+        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).sin() + e[i]).collect();
+        let x2: Vec<f64> = (0..n)
+            .map(|i| 0.5 * i as f64 / n as f64 + e[n + i])
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.4 * x1[i] - 0.7 * x2[i]
+                    + e[2 * n + i]
+                    + 0.6 * e[2 * n + i.saturating_sub(1)]
+            })
+            .collect();
+        let dup: Vec<f64> = x1.iter().map(|v| 2.0 * v).collect();
+        let ds = Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2, "dup" => dup }.unwrap());
+        for cols in [vec!["x1", "x2"], vec!["x1", "dup", "x2"]] {
+            let ols = run_ols(&ds, "y", &cols, true, CovarianceType::Standard).unwrap();
+            let design = DesignMatrix::from_dataframe(ds.df(), &cols, true).unwrap();
+            for (bw, kernel) in [(None, HacKernel::Bartlett), (Some(7), HacKernel::Parzen)] {
+                let hac = vcov_hac(&ols, &design.data, bw, kernel, false).unwrap();
+                // reference: the indexed loops on the identified columns
+                let keep: Vec<usize> = (0..ols.n_params)
+                    .filter(|&j| !ols.beta[j].is_nan())
+                    .collect();
+                let k = keep.len();
+                let x = Array2::from_shape_fn((n, k), |(i, j)| design.data[[i, keep[j]]]);
+                let u = &ols.resid;
+                let mut scores = Array2::<f64>::zeros((n, k));
+                for i in 0..n {
+                    for j in 0..k {
+                        scores[[i, j]] = u[i] * x[[i, j]];
+                    }
+                }
+                let mut omega = Array2::<f64>::zeros((k, k));
+                for i in 0..n {
+                    for j in 0..k {
+                        for l in 0..k {
+                            omega[[j, l]] += scores[[i, j]] * scores[[i, l]];
+                        }
+                    }
+                }
+                for lag in 1..=hac.bandwidth.min(n - 1) {
+                    let w = kernel.weight(lag, hac.bandwidth);
+                    if w.abs() < 1e-15 {
+                        continue;
+                    }
+                    let mut g = Array2::<f64>::zeros((k, k));
+                    for i in lag..n {
+                        for j in 0..k {
+                            for l in 0..k {
+                                g[[j, l]] += scores[[i, j]] * scores[[i - lag, l]];
+                            }
+                        }
+                    }
+                    for j in 0..k {
+                        for l in 0..k {
+                            omega[[j, l]] += w * (g[[j, l]] + g[[l, j]]);
+                        }
+                    }
+                }
+                omega /= n as f64;
+                let bread = Array2::from_shape_fn((k, k), |(a, b)| ols.xtx_inv[[keep[a], keep[b]]]);
+                let v = matmul(
+                    &bread.view(),
+                    &matmul(&omega.view(), &bread.view()).unwrap().view(),
+                )
+                .unwrap()
+                    * (n as f64);
+                for (a, &ca) in keep.iter().enumerate() {
+                    assert_eq!(
+                        hac.std_errors[ca].to_bits(),
+                        v[[a, a]].sqrt().to_bits(),
+                        "{cols:?} {a}"
+                    );
+                    for (b, &cb) in keep.iter().enumerate() {
+                        assert_eq!(hac.vcov[ca][cb].to_bits(), v[[a, b]].to_bits());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pairs bootstrap takes solve_ols's coefficients without forming residuals: every
+    /// replicate equals solve_ols on the same resample, bit for bit.
+    #[test]
+    fn test_pairs_bootstrap_replicates_equal_solve_ols() {
+        let n = 60;
+        let e = perf3_noise(2 * n, 9);
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => i as f64 / 7.0 + e[i],
+            _ => (i as f64).cos() + e[n + i],
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            0.3 + 0.2 * x[[i, 1]] - x[[i, 2]] + e[(7 * i) % (2 * n)]
+        });
+        let names: Vec<String> = ["(Intercept)", "a", "b"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let ols = run_ols_raw(&x, &y, &names, "y", CovarianceType::Standard).unwrap();
+        let boot = vcov_bootstrap(&ols, &x, &y, Some(25), BootstrapType::Pairs, Some(3)).unwrap();
+        let samples = boot.boot_samples.unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        let indices: Vec<usize> = (0..n).collect();
+        let mut got = samples.iter();
+        for _ in 0..25 {
+            let sample: Vec<usize> = (0..n).map(|_| *indices.choose(&mut rng).unwrap()).collect();
+            let xb = Array2::from_shape_fn((n, 3), |(i, j)| x[[sample[i], j]]);
+            let yb: Array1<f64> = sample.iter().map(|&i| y[i]).collect();
+            let fit = solve_ols(xb.view(), yb.view()).unwrap();
+            if fit.rank < 3 {
+                continue;
+            }
+            let b = got.next().unwrap();
+            for j in 0..3 {
+                assert_eq!(b[j].to_bits(), fit.beta[j].to_bits());
+            }
+        }
+        assert!(got.next().is_none());
     }
 }

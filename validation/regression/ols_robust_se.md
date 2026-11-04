@@ -104,7 +104,8 @@ solve every replicate with one factor of the fixed identified design
 (`test_validate_bootstrap_fixed_design_solve_matches_refit`: equal to a least-squares refit
 within 1e-12); the pairs bootstrap refits each replicate and skips one whose resampled
 design is rank deficient, reported as "{s} of {B} bootstrap replicates had a rank-deficient
-design and were skipped". `test_validate_bootstrap_aliased_design_uses_identified_columns`
+design and were skipped". Each pairs replicate takes `solve_ols`'s solve decision and
+coefficients and forms no residuals (T3-PERF3; timing in `ols.md`). `test_validate_bootstrap_aliased_design_uses_identified_columns`
 and `test_validate_bootstrap_wild_variants_near_hc0` (Rademacher, Mammen and Webb weights,
 B = 2000, seeded, within 10% of HC0) are Monte Carlo property tests: the bootstrap SEs are
 **not R-pinned**. The wild weights follow `sandwich::vcovBS`: Rademacher ±1, Mammen's
