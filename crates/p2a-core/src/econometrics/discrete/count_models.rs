@@ -761,30 +761,7 @@ pub fn run_negbin(
     let no_mle = n_falling > 0;
     let tiny = 10.0 * f64::EPSILON;
     let n_tiny = work.mu.iter().filter(|&&m| m < tiny).count();
-    let rows = |k: usize| if k == 1 { "row" } else { "rows" };
-    if no_mle {
-        warnings.push(format!(
-            "the coefficient IRLS was still driving the fitted means of {n_falling} \
-             zero-count {} to 0 (its last step lowered their linear predictor by more \
-             than {ETA_FALLING}): the outcome has no finite maximum-likelihood estimate \
-             (all counts 0, or zero counts that a regressor separates); the estimates are \
-             not reliable",
-            rows(n_falling)
-        ));
-    } else if !irls.converged {
-        warnings.push(
-            "the IRLS for the coefficients did not settle in 100 iterations at the final \
-             theta: neither the coefficients nor the log-likelihood stopped changing"
-                .to_string(),
-        );
-    } else if n_tiny > 0 {
-        warnings.push(format!(
-            "fitted means numerically 0 occurred for {n_tiny} {} (glm.fit: 'fitted rates \
-             numerically 0') at converged coefficients; check those rows for extreme \
-             regressor values",
-            rows(n_tiny)
-        ));
-    }
+    warnings.extend(nb_fit_warnings(n_falling, irls.converged, n_tiny));
     let log_likelihood = nb_loglik(theta, &work.mu, y);
 
     // Null log-likelihood (unchanged; ECON-64, Tier 4)
@@ -877,6 +854,40 @@ pub fn run_negbin(
         warnings,
         aliased,
     })
+}
+
+/// The warnings of the final negative binomial IRLS, in order: an IRLS that did not
+/// settle, then zero counts it was still driving to 0 (no finite MLE), or else fitted
+/// means numerically 0 at a converged fit. Both of the first two are reported when both
+/// hold.
+fn nb_fit_warnings(n_falling: usize, irls_converged: bool, n_tiny: usize) -> Vec<String> {
+    let rows = |k: usize| if k == 1 { "row" } else { "rows" };
+    let mut warnings = Vec::new();
+    if !irls_converged {
+        warnings.push(
+            "the IRLS for the coefficients did not settle in 100 iterations at the final \
+             theta: neither the coefficients nor the log-likelihood stopped changing"
+                .to_string(),
+        );
+    }
+    if n_falling > 0 {
+        warnings.push(format!(
+            "the coefficient IRLS was still driving the fitted means of {n_falling} \
+             zero-count {} to 0 (its last step lowered their linear predictor by more \
+             than {ETA_FALLING}): the outcome has no finite maximum-likelihood estimate \
+             (all counts 0, or zero counts that a regressor separates); the estimates are \
+             not reliable",
+            rows(n_falling)
+        ));
+    } else if irls_converged && n_tiny > 0 {
+        warnings.push(format!(
+            "fitted means numerically 0 occurred for {n_tiny} {} (glm.fit: 'fitted rates \
+             numerically 0') at converged coefficients; check those rows for extreme \
+             regressor values",
+            rows(n_tiny)
+        ));
+    }
+    warnings
 }
 
 /// `2 P(Z > |z|)` from the upper tail (X-17).
@@ -2497,7 +2508,11 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(2026);
         let nb = |mu: f64, rng: &mut ChaCha8Rng| -> f64 {
             let lambda = Gamma::new(2.0, mu / 2.0).unwrap().sample(rng);
-            Poisson::new(lambda.max(1e-300)).unwrap().sample(rng)
+            if lambda < 1e-12 {
+                0.0
+            } else {
+                Poisson::new(lambda).unwrap().sample(rng)
+            }
         };
         let unif = Uniform::new(10.0, 20.0);
         let (mut x, mut y) = (Vec::new(), Vec::new());
@@ -2580,7 +2595,11 @@ mod tests {
             let lambda = Gamma::new(2.0, (0.5 + 0.3 * xi).exp() / 2.0)
                 .unwrap()
                 .sample(&mut rng);
-            let count: f64 = Poisson::new(lambda.max(1e-300)).unwrap().sample(&mut rng);
+            let count: f64 = if lambda < 1e-12 {
+                0.0
+            } else {
+                Poisson::new(lambda).unwrap().sample(&mut rng)
+            };
             y.push(if di == 1.0 { 0.0 } else { count });
             d.push(di);
             x.push(xi);
@@ -2621,7 +2640,11 @@ mod tests {
             let lambda = Gamma::new(2.0, (0.5 + 0.1 * xi).exp() / 2.0)
                 .unwrap()
                 .sample(&mut rng);
-            let count: f64 = Poisson::new(lambda.max(1e-300)).unwrap().sample(&mut rng);
+            let count: f64 = if lambda < 1e-12 {
+                0.0
+            } else {
+                Poisson::new(lambda).unwrap().sample(&mut rng)
+            };
             y.push(if di == 1.0 { 0.0 } else { count });
             d.push(di);
             x.push(xi);
@@ -3907,5 +3930,36 @@ mod tests {
             )
             .finish();
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    /// No finite MLE and an IRLS that did not settle are both reported, the IRLS first
+    /// (T2-WP10 kept only the first). No data set reaches both: separated zero counts
+    /// add exponentially less to the log-likelihood each step, so the IRLS settles on
+    /// its log-likelihood test; the assembly is checked directly.
+    #[test]
+    fn test_negbin_no_mle_and_unconverged_irls_warn_both() {
+        let w = nb_fit_warnings(3, false, 0);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(
+            w[0].starts_with("the IRLS for the coefficients did not settle"),
+            "{w:?}"
+        );
+        assert!(
+            w[1].starts_with("the coefficient IRLS was still driving"),
+            "{w:?}"
+        );
+        assert!(w[1].contains("3 zero-count rows"), "{w:?}");
+        let w = nb_fit_warnings(1, true, 5);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("1 zero-count row to 0"), "{w:?}");
+        let w = nb_fit_warnings(0, true, 2);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].starts_with("fitted means numerically 0 occurred for 2 rows"),
+            "{w:?}"
+        );
+        assert!(nb_fit_warnings(0, true, 0).is_empty());
+        let w = nb_fit_warnings(0, false, 4);
+        assert_eq!(w.len(), 1, "{w:?}");
     }
 }
