@@ -7,7 +7,9 @@
 //! 1. *Step 1* (q > 0): a long VAR(m) with intercept by OLS on t = m + 1..n; its residuals
 //!    `ê_t` estimate the innovations `u_t`. Only the residuals are needed, so the long VAR is
 //!    solved by the (equilibrated) normal equations, with a fallback to the pivoted QR of
-//!    `stats::lm.fit` when the Cholesky factor is ill-conditioned or fails.
+//!    `stats::lm.fit` when the Cholesky factor is ill-conditioned or fails. Its cross products
+//!    are lagged sums over moving windows of rows, O(n K^2 m) operations rather than the
+//!    O(n K^2 m^2) of forming the lag matrix.
 //! 2. *Step 2*: OLS of `y_t` on `[1, y_{t-1..p}, ê_{t-1..q}]`, equation by equation, on
 //!    t = m + max(p, q) + 1..n (`n_obs = n - m - max(p, q)`), by the pivoted QR of `lm.fit`
 //!    (an aliased regressor is `NaN` with R's warning).
@@ -16,9 +18,14 @@
 //! + K)`, AIC/BIC over the identified coefficients (K x rank of the step-2 design).
 //!
 //! **Default long-VAR order** ([`VarmaConfig::long_var_order`] `None`): 0 when q = 0 (the fit is
-//! the OLS VAR(p), equal to `vars::VAR(type = "const")`); otherwise `max(floor(ln(n)^2), 2 max(p,
-//! q))` (Gómez & Maravall 2001), reduced to `floor((n - 2) / (2K + 1))` with a warning, so that
-//! the long VAR keeps at least as many residual degrees of freedom as it has regressors.
+//! the OLS VAR(p), equal to `vars::VAR(type = "const")`); otherwise `max(floor(2 ln n), 2 max(p,
+//! q))`, reduced to `floor((n - 2) / (2K + 1))` with a warning, so that the long VAR keeps at
+//! least as many residual degrees of freedom as it has regressors. An order growing like ln n
+//! is the rate of Hannan & Kavalieris (1984) for the long autoregression. In the Monte Carlo of
+//! `validation/econometrics/timeseries/varma.md` it estimated the coefficients about as well
+//! as the faster-growing `floor(ln(n)^2)` of Gómez & Maravall (2001) at small n and better at
+//! large n; the order chosen by AIC (`vars::VARselect`) did about as well but was erratic in
+//! small samples.
 //!
 //! **Standard errors.** Reported only for q = 0 (an OLS VAR). For q > 0 the step-2 OLS standard
 //! errors treat the estimated innovations as data: the step-1 estimation error enters the
@@ -30,6 +37,8 @@
 //!
 //! **References.** Hannan, E. J. & Rissanen, J. (1982), Recursive estimation of mixed
 //! autoregressive-moving average order, *Biometrika* 69(1), 81-94, doi:10.1093/biomet/69.1.81.
+//! Hannan, E. J. & Kavalieris, L. (1984), Multivariate linear time series models, *Advances in
+//! Applied Probability* 16(3), 492-561, doi:10.2307/1427288.
 //! Lütkepohl, H. (2005), *New Introduction to Multiple Time Series Analysis*, ch. 12. Gómez, V.
 //! & Maravall, A. (2001), Automatic modeling methods for univariate series, in Peña, Tiao &
 //! Tsay (eds.), *A Course in Time Series Analysis*, Wiley, 171-201.
@@ -46,7 +55,7 @@ use std::fmt;
 use super::common::df_to_array2;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{cholesky, xtx};
+use crate::linalg::matrix_ops::cholesky;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, aliasing_message, sym_inverse};
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -59,9 +68,8 @@ pub struct VarmaConfig {
     pub p: usize,
     /// MA order q.
     pub q: usize,
-    /// Order m of the step-1 long VAR. `None`: 0 when q = 0; otherwise max(floor(ln(n)^2),
-    /// 2 max(p, q)) (Gómez & Maravall 2001), reduced to floor((n - 2) / (2K + 1)) with a
-    /// warning. Must be at least 1 when q > 0. With q = 0 a given m only moves the sample
+    /// Order m of the step-1 long VAR. `None`: 0 when q = 0; otherwise max(floor(2 ln n),
+    /// 2 max(p, q)), reduced to floor((n - 2) / (2K + 1)) with a warning. Must be at least 1 when q > 0. With q = 0 a given m only moves the sample
     /// start to m + p + 1, so the criteria compare with VARMA(p, q) fits at that m.
     pub long_var_order: Option<usize>,
 }
@@ -337,10 +345,10 @@ fn default_long_var_order(
             ),
         });
     }
-    let rule = ((n as f64).ln().powi(2).floor() as usize).max(p.max(q).saturating_mul(2));
+    let rule = ((2.0 * (n as f64).ln()).floor() as usize).max(p.max(q).saturating_mul(2));
     if rule > cap {
         let warning = format!(
-            "long VAR order reduced from {rule} to {cap} (default max(floor(ln(n)^2), 2 max(p, \
+            "long VAR order reduced from {rule} to {cap} (default max(floor(2 ln n), 2 max(p, \
              q)) for n = {n}) so that the step-1 regression keeps at least as many residual \
              degrees of freedom as regressors; set long_var_order to choose it"
         );
@@ -400,22 +408,36 @@ fn lag_design(
 const LONG_VAR_CHOL_RATIO: f64 = 1e4;
 
 /// Residuals of the step-1 long VAR(m) on rows m..n (`(n - m) x k`). Only residuals are
-/// needed, so the equilibrated normal equations are solved by Cholesky; an ill-conditioned or
-/// failed factorisation falls back to the pivoted QR of `lm.fit` (with R's aliasing warning).
-/// The caller checked that n - m > 1 + k m.
+/// needed, so the equilibrated normal equations are solved by Cholesky, with the cross
+/// products from [`lagged_cross_products`]; an ill-conditioned or failed factorisation falls
+/// back to the pivoted QR of `lm.fit` (with R's aliasing warning). The caller checked that
+/// n - m > 1 + k m.
 fn long_var_residuals(
     y: ArrayView2<f64>,
     m: usize,
     var_names: &[String],
     warnings: &mut Vec<String>,
 ) -> EconResult<Array2<f64>> {
-    let c = 1 + y.ncols() * m; // checked by the caller
-    let z = lag_design(y, y, m, m, 0, c)?;
-    let target = y.slice(s![m.., ..]);
-    if let Some(b) = normal_equation_coefficients(z.view(), target)? {
-        return Ok(&target - &z.dot(&b));
+    let (n, k) = y.dim();
+    let c = 1 + k * m; // checked by the caller
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[c, c], "VARMA long VAR Z'Z")?,
+        "VARMA long VAR Z'Z",
+    )?;
+    // the series column by column (contiguous lagged slices)
+    let mut cols = Vec::with_capacity(k);
+    for j in 0..k {
+        let mut v = resource::try_with_capacity(n, "VARMA long VAR columns")?;
+        v.extend(y.column(j).iter().copied());
+        cols.push(v);
+    }
+    let (g, zy) = lagged_cross_products(&cols, m)?;
+    if let Some(b) = normal_equation_coefficients(&g, &zy)? {
+        return lagged_residuals(&cols, m, &b);
     }
     // Ill-conditioned or singular: lm.fit's pivoted QR (aliased lags get zero weight).
+    let z = lag_design(y, y, m, m, 0, c)?;
+    let target = y.slice(s![m.., ..]);
     let (b, aliased) = qr_coefficients(z.view(), target)?;
     if let Some(w) = aliasing_message(&aliased, &regressor_names(var_names, m, 0)) {
         warnings.push(format!("long VAR (step 1): {w}"));
@@ -423,20 +445,117 @@ fn long_var_residuals(
     Ok(&target - &z.dot(&b))
 }
 
-/// OLS coefficients (`c x k`) of every column of `target` on `z` by Cholesky of the
-/// diagonally equilibrated Z'Z, or `None` when a column of `z` is zero, the factorisation
-/// fails, or its diagonal ratio exceeds [`LONG_VAR_CHOL_RATIO`].
+/// `Z'Z` (`c x c`) and `Z'Y` (`c x k`) of the long VAR(m) on rows t = m..n, with
+/// `Z = [1, y_{t-1}, .., y_{t-m}]`, `Y = y_t` and c = 1 + k m, from the series' columns.
+///
+/// Every block of Z'Z is a lagged cross product over a window of rows: the block of lags
+/// (a, a + d) is `sum_{s = m - a}^{n - 1 - a} y_s y_{s - d}'`. The blocks of lag a = 0 (lag 0
+/// is Y) are computed as dot products over all rows; each further lag moves the window by
+/// one row (one row in, one out). That is O(n k^2 m) operations instead of the O(n k^2 m^2)
+/// of forming Z and Z'Z; the sums agree with `Z'Z` to rounding.
+fn lagged_cross_products(cols: &[Vec<f64>], m: usize) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let k = cols.len();
+    let n = cols.first().map_or(0, |c| c.len());
+    let c = 1 + k * m;
+    let dot =
+        |a: &[f64], b: &[f64]| ndarray::ArrayView1::from(a).dot(&ndarray::ArrayView1::from(b));
+    // blk[(a, d)] (a + d <= m): k x k block of lags (a, a + d), entry (i, j) at i * k + j
+    let nb = resource::checked_len(&[m + 1, m + 1, k, k], "VARMA long VAR cross products")?;
+    let mut blk = resource::try_vec(nb, 0.0, "VARMA long VAR cross products")?;
+    let at = |a: usize, d: usize| (a * (m + 1) + d) * k * k;
+    for d in 0..=m {
+        resource::checkpoint()?;
+        let o = at(0, d);
+        for i in 0..k {
+            for j in 0..k {
+                blk[o + i * k + j] = dot(&cols[i][m..n], &cols[j][m - d..n - d]);
+            }
+        }
+    }
+    for a in 1..=m {
+        let (add, rem) = (m - a, n - a); // the row entering and the row leaving the window
+        for d in 0..=m - a {
+            let (p, o) = (at(a - 1, d), at(a, d));
+            for i in 0..k {
+                for j in 0..k {
+                    blk[o + i * k + j] = blk[p + i * k + j] + cols[i][add] * cols[j][add - d]
+                        - cols[i][rem] * cols[j][rem - d];
+                }
+            }
+        }
+    }
+    // column sums of each lag's window (the intercept's cross products)
+    let mut sums = resource::try_vec((m + 1) * k, 0.0, "VARMA long VAR cross products")?;
+    for i in 0..k {
+        sums[i] = cols[i][m..n].iter().sum();
+    }
+    for a in 1..=m {
+        for i in 0..k {
+            sums[a * k + i] = sums[(a - 1) * k + i] + cols[i][m - a] - cols[i][n - a];
+        }
+    }
+    let mut g = resource::try_zeros2(c, c, "VARMA long VAR Z'Z")?;
+    let mut zy = resource::try_zeros2(c, k, "VARMA long VAR Z'Y")?;
+    g[[0, 0]] = (n - m) as f64;
+    for j in 0..k {
+        zy[[0, j]] = sums[j];
+    }
+    for a in 1..=m {
+        for i in 0..k {
+            let r = 1 + (a - 1) * k + i;
+            g[[0, r]] = sums[a * k + i];
+            g[[r, 0]] = sums[a * k + i];
+            for j in 0..k {
+                // sum_t y_{t-a}[i] y_t[j]: block (0, a) at (j, i)
+                zy[[r, j]] = blk[at(0, a) + j * k + i];
+            }
+            for b in a..=m {
+                for j in 0..k {
+                    let v = blk[at(a, b - a) + i * k + j];
+                    let s = 1 + (b - 1) * k + j;
+                    g[[r, s]] = v;
+                    g[[s, r]] = v;
+                }
+            }
+        }
+    }
+    Ok((g, zy))
+}
+
+/// Residuals `y_t - [1, y_{t-1..m}] B` on rows t = m..n (`(n - m) x k`), from the columns.
+fn lagged_residuals(cols: &[Vec<f64>], m: usize, b: &Array2<f64>) -> EconResult<Array2<f64>> {
+    let k = cols.len();
+    let n = cols.first().map_or(0, |c| c.len());
+    let mut out = resource::try_zeros2(n - m, k, "VARMA long VAR residuals")?;
+    let mut r = resource::try_vec(n - m, 0.0, "VARMA long VAR residuals")?;
+    for j in 0..k {
+        resource::checkpoint()?;
+        let b0 = b[[0, j]];
+        for (rv, &yv) in r.iter_mut().zip(&cols[j][m..n]) {
+            *rv = yv - b0;
+        }
+        for l in 1..=m {
+            for (i, col) in cols.iter().enumerate() {
+                let bl = b[[1 + (l - 1) * k + i, j]];
+                for (rv, &yv) in r.iter_mut().zip(&col[m - l..n - l]) {
+                    *rv -= bl * yv;
+                }
+            }
+        }
+        out.column_mut(j).assign(&ndarray::ArrayView1::from(&r[..]));
+    }
+    Ok(out)
+}
+
+/// OLS coefficients (`c x k`) from the cross products `g` = Z'Z and `zy` = Z'Y by Cholesky
+/// of the diagonally equilibrated Z'Z, or `None` when a column of Z is zero, the
+/// factorisation fails, or its diagonal ratio exceeds [`LONG_VAR_CHOL_RATIO`].
 fn normal_equation_coefficients(
-    z: ArrayView2<f64>,
-    target: ArrayView2<f64>,
+    g: &Array2<f64>,
+    zy: &Array2<f64>,
 ) -> EconResult<Option<Array2<f64>>> {
-    let (c, k) = (z.ncols(), target.ncols());
-    resource::check_alloc::<f64>(
-        resource::checked_len(&[c, c], "VARMA long VAR Z'Z")?,
-        "VARMA long VAR Z'Z",
-    )?;
+    let (c, k) = (g.ncols(), zy.ncols());
     resource::checkpoint()?;
-    let g = xtx(&z);
     let d: Vec<f64> = (0..c).map(|j| 1.0 / g[[j, j]].sqrt()).collect();
     if !d.iter().all(|v| v.is_finite()) {
         return Ok(None);
@@ -454,7 +573,6 @@ fn normal_equation_coefficients(
         return Ok(None);
     }
     resource::checkpoint()?;
-    let zy = z.t().dot(&target);
     let rhs = Mat::<f64>::from_fn(c, k, |i, j| zy[[i, j]] * d[i]);
     let sol = chol.solve(&rhs);
     Ok(Some(Array2::from_shape_fn((c, k), |(i, j)| {
@@ -550,7 +668,7 @@ pub fn run_varma(
 /// equals `vars::VAR(type = "const")`); VARMA(0, q) is a vector MA model. Standard errors, t
 /// and p values are reported for q = 0 only (see the module documentation).
 ///
-/// The default long-VAR order is max(floor(ln(n)^2), 2 max(p, q)) for q > 0, reduced to
+/// The default long-VAR order is max(floor(2 ln n), 2 max(p, q)) for q > 0, reduced to
 /// floor((n - 2) / (2K + 1)) with a warning.
 ///
 /// # Errors
@@ -814,16 +932,15 @@ mod tests {
         }
     }
 
-    /// R (varma_hr): HR VARMA(1, 1) at the default long-VAR order m = 35, n_eff = 364. Fails before:
-    /// run_varma fitted a VAR(1) on t = 2..n with zero MA coefficients (y1.l1 0.6142 instead of
-    /// 0.4737, e.y1.l1 0 instead of 0.3045, n 399 instead of 364, logLik from the product of the
-    /// |Sigma| entries).
+    /// R (varma_hr): HR VARMA(1, 1) at the default long-VAR order m = 11, n_eff = 388. Fails before
+    /// WP13: run_varma fitted a VAR(1) on t = 2..n with zero MA coefficients (n 399, logLik from the
+    /// product of the |Sigma| entries); fails before T3-PERF4: the default order was 35 (n 364).
     #[test]
     fn test_validate_varma_hr_default_order() {
         use p2a_validation::{Check, Tol};
         let (case, ds) = crate::test_support::load_case("varma_hr");
         let r = run_varma(&ds, &COLS, 1, 1).unwrap();
-        let n = 364;
+        let n = 388;
         let ar = ["const", "y1.l1", "y2.l1"];
         let ma = ["e.y1.l1", "e.y2.l1"];
         let mut check = Check::new(&case);
@@ -879,12 +996,12 @@ mod tests {
         let r10 = run_varma(&ds, &COLS, 1, 0).unwrap();
         let r01 = run_varma(&ds, &COLS, 0, 1).unwrap();
         let max_abs = |m: &[Vec<f64>]| m.iter().flatten().fold(0.0_f64, |a, x| a.max(x.abs()));
-        // R: (1,1) e.y1.l1 = 0.3044730844267806; (0,1) e.y1.l1 = 0.776823637785237 (both at m = 35)
+        // R: (1,1) e.y1.l1 = 0.37212517727520467 at the default m = 11
         assert!(max_abs(&r11.ma_params) > 0.25, "{:?}", r11.ma_params);
         assert!(max_abs(&r01.ma_params) > 0.7, "{:?}", r01.ma_params);
-        // y1.l1 in equation y1: 0.47369331597875647 (1,1) vs 0.61423754050749235 (1,0) = vars::VAR(p = 1)
+        // y1.l1 in equation y1: 0.4046283882317027 (1,1) vs 0.61423754050749235 (1,0) = vars::VAR(p = 1)
         assert!((r11.ar_params[0][1] - r10.ar_params[0][1]).abs() > 0.1);
-        assert_eq!((r11.n_obs, r10.n_obs, r01.n_obs), (364, 399, 364));
+        assert_eq!((r11.n_obs, r10.n_obs, r01.n_obs), (388, 399, 388));
     }
 
     /// ECON-79 / X-7 (VARMA sites): the step-2 regression needs at least K residual degrees of
@@ -955,8 +1072,8 @@ mod tests {
         let s = run_varma(&ds, &COLS, 1, 1).unwrap().to_string();
         for needle in [
             "Method: Hannan-Rissanen two-step",
-            "Long VAR order (step 1): 35",
-            "Observations: 364 (of 400; 36 initial values)",
+            "Long VAR order (step 1): 11",
+            "Observations: 388 (of 400; 12 initial values)",
             "Equation y1:",
             "Equation y2:",
             "e.y2.l1",
@@ -965,7 +1082,7 @@ mod tests {
             assert!(s.contains(needle), "missing {needle:?} in\n{s}");
         }
         assert!(!s.contains("Pr(>|t|)"), "{s}");
-        let e11 = case.named("default_coef_y1", "e.y1.l1"); // 0.3044730844267806
+        let e11 = case.named("default_coef_y1", "e.y1.l1"); // 0.37212517727520467
         assert!(s.contains(&format!("{e11:.6}")), "{s}");
         assert!(
             s.contains(&format!(
@@ -973,12 +1090,12 @@ mod tests {
                 case.scalar("default_loglik")
             )),
             "{s}"
-        ); // -976.9647
-        let short = Dataset::new(ds.df().slice(0, 60));
-        let s60 = run_varma(&short, &COLS, 1, 1).unwrap().to_string();
+        ); // -1041.3391
+        let short = Dataset::new(ds.df().slice(0, 30));
+        let s30 = run_varma(&short, &COLS, 1, 1).unwrap().to_string();
         assert!(
-            s60.contains("Warning: long VAR order reduced from 16 to 11"),
-            "{s60}"
+            s30.contains("Warning: long VAR order reduced from 6 to 5"),
+            "{s30}"
         );
         let s20 = run_varma(&ds, &COLS, 2, 0).unwrap().to_string();
         for needle in ["Equation y1:", "y2.l2", "Std. Error", "Pr(>|t|)"] {
@@ -1049,7 +1166,7 @@ mod tests {
     /// R (varma_hr, Hannan-Rissanen written out; MTS/marima not installed): VARMA(1,1) with a
     /// long VAR(8): step-2 coefficients, Sigma_ML, logLik -1046.1905002990459, AIC, BIC, n_eff
     /// 391; VARMA(1,0) (with SEs and p-values), (0,1), (2,1) at m = 8 and (2,2) at m = 10; the
-    /// default order (35) and its reduction at n = 60 (16 -> 11); q = 0 against vars::VAR(p = 2)
+    /// default order (11) and its reduction at n = 30 (6 -> 5); q = 0 against vars::VAR(p = 2)
     /// including SEs.
     #[test]
     fn test_validate_varma_hr_two_step() {
@@ -1080,14 +1197,14 @@ mod tests {
         );
         check_fit(&mut check, "default_", &rdef);
         assert!(rdef.warnings.is_empty(), "{:?}", rdef.warnings);
-        let short = Dataset::new(ds.df().slice(0, 60));
+        let short = Dataset::new(ds.df().slice(0, 30));
         let rs = fit(&short, &COLS, 1, 1, None);
         check.scalar(
-            "short60_long_var_order",
+            "short30_long_var_order",
             rs.long_var_order as f64,
             Tol::exact(),
         );
-        check_fit(&mut check, "short60_", &rs);
+        check_fit(&mut check, "short30_", &rs);
         let rv = fit(&ds, &COLS, 2, 0, None);
         assert_eq!(rv.long_var_order, 0);
         for (j, eq) in COLS.iter().enumerate() {
@@ -1165,29 +1282,33 @@ mod tests {
         assert!(r.ar_params[0][2].is_nan());
     }
 
-    /// The default long-VAR order rule, pinned to the case: 35 at n = 400 (floor(ln(400)^2)),
-    /// 16 reduced to 11 = floor(58 / 5) at n = 60 with a warning, 0 for q = 0, 2 max(p, q)
+    /// The default long-VAR order rule, pinned to the case: 11 at n = 400 (floor(2 ln 400)),
+    /// 6 reduced to 5 = floor(28 / 5) at n = 30 with a warning, 0 for q = 0, 2 max(p, q)
     /// when larger, and an error when no long VAR fits.
     #[test]
     fn test_validate_varma_long_var_order_rule() {
         use p2a_validation::{Check, Tol};
         let (case, _ds) = crate::test_support::load_case("varma_hr");
         let (m400, w400) = default_long_var_order(400, 2, 1, 1).unwrap();
-        let (m60, w60) = default_long_var_order(60, 2, 1, 1).unwrap();
+        let (m30, w30) = default_long_var_order(30, 2, 1, 1).unwrap();
         Check::new(&case)
             .scalar("default_long_var_order", m400 as f64, Tol::exact())
-            .scalar("short60_long_var_order", m60 as f64, Tol::exact())
+            .scalar("short30_long_var_order", m30 as f64, Tol::exact())
             .finish();
         assert!(w400.is_none());
-        let unreduced = case.scalar("short60_unreduced_order") as usize; // 16
-        let w60 = w60.expect("the n = 60 default is reduced");
+        let unreduced = case.scalar("short30_unreduced_order") as usize; // 6
+        let w30 = w30.expect("the n = 30 default is reduced");
         assert!(
-            w60.contains(&format!("reduced from {unreduced} to {m60}")),
-            "{w60}"
+            w30.contains(&format!("reduced from {unreduced} to {m30}")),
+            "{w30}"
         );
         assert_eq!(default_long_var_order(400, 2, 2, 0).unwrap(), (0, None));
         assert_eq!(default_long_var_order(400, 2, 20, 20).unwrap(), (40, None));
-        assert_eq!(default_long_var_order(1000, 10, 1, 1).unwrap(), (47, None)); // 47 = floor(998 / 21)
+        assert_eq!(default_long_var_order(1000, 10, 1, 1).unwrap(), (13, None)); // floor(2 ln 1000)
+        assert_eq!(default_long_var_order(10_000, 3, 1, 1).unwrap(), (18, None));
+        let (m100, w100) = default_long_var_order(100, 10, 1, 1).unwrap(); // 9 > floor(98 / 21)
+        assert_eq!(m100, 4);
+        assert!(w100.is_some_and(|w| w.contains("reduced from 9 to 4")));
         match default_long_var_order(6, 2, 1, 1) {
             Err(EconError::InsufficientData {
                 required: 7,
@@ -1240,16 +1361,74 @@ mod tests {
         y.slice(s![100.., ..]).to_owned()
     }
 
+    fn columns(y: &Array2<f64>) -> Vec<Vec<f64>> {
+        (0..y.ncols()).map(|j| y.column(j).to_vec()).collect()
+    }
+
+    /// T3-PERF4: the lagged-window cross products equal Z'Z and Z'Y of the lag matrix (to
+    /// rounding, 1e-12 relative to the largest entry of their row and column) and the
+    /// residuals from the columns equal Y - Z B, for K = 1, 2, 3 and m = 1..12, 35.
+    #[test]
+    fn test_varma_lagged_cross_products_match_lag_matrix() {
+        use crate::linalg::matrix_ops::xtx;
+        let y2 = varma11_series(400);
+        // a third series with an offset and a trend, so the intercept sums matter
+        let y3 = ndarray::concatenate![
+            ndarray::Axis(1),
+            y2.view(),
+            Array2::from_shape_fn((400, 1), |(t, _)| {
+                5.0 + 0.01 * t as f64 + y2[[t, 0]] * 0.3 - y2[[t, 1]] * 0.2
+            })
+            .view()
+        ];
+        let y1 = y2.slice(s![.., 0..1]).to_owned();
+        for y in [&y1, &y2, &y3] {
+            let k = y.ncols();
+            for m in (1..=12).chain([35]) {
+                let c = 1 + k * m;
+                let z = lag_design(y.view(), y.view(), m, m, 0, c).unwrap();
+                let target = y.slice(s![m.., ..]);
+                let (g, zy) = lagged_cross_products(&columns(y), m).unwrap();
+                let (g0, zy0) = (xtx(&z.view()), z.t().dot(&target));
+                for i in 0..c {
+                    for j in 0..c {
+                        let scale = (g0[[i, i]] * g0[[j, j]]).sqrt();
+                        assert!(
+                            (g[[i, j]] - g0[[i, j]]).abs() <= 1e-12 * scale,
+                            "K {k} m {m} Z'Z[{i}, {j}]: {} vs {}",
+                            g[[i, j]],
+                            g0[[i, j]]
+                        );
+                    }
+                    for j in 0..k {
+                        let scale = (g0[[i, i]] * target.column(j).dot(&target.column(j))).sqrt();
+                        assert!((zy[[i, j]] - zy0[[i, j]]).abs() <= 1e-12 * scale);
+                    }
+                }
+                let (b, _) = qr_coefficients(z.view(), target).unwrap();
+                let e = lagged_residuals(&columns(y), m, &b).unwrap();
+                let e0 = &target - &z.dot(&b);
+                let worst = e
+                    .iter()
+                    .zip(e0.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                assert!(worst < 1e-12, "K {k} m {m}: {worst:e}");
+            }
+        }
+    }
+
     /// The step-1 normal-equation path gives the QR (lm.fit) coefficients on well-conditioned
-    /// long VARs (m = 8 and m = 35 = the default at n = 400), and declines a design with
+    /// long VARs (m = 8, the default m = 11 at n = 400, and m = 35), and declines a design with
     /// duplicated lags, which then goes to the QR with R's aliasing warning.
     #[test]
     fn test_varma_long_var_normal_equations_match_qr() {
         let y = varma11_series(400);
-        for m in [8, 35] {
+        for m in [8, 11, 35] {
             let z = lag_design(y.view(), y.view(), m, m, 0, 1 + 2 * m).unwrap();
             let target = y.slice(s![m.., ..]);
-            let ne = normal_equation_coefficients(z.view(), target)
+            let (g, zy) = lagged_cross_products(&columns(&y), m).unwrap();
+            let ne = normal_equation_coefficients(&g, &zy)
                 .unwrap()
                 .expect("well-conditioned long VAR takes the normal equations");
             let (qr, aliased) = qr_coefficients(z.view(), target).unwrap();
@@ -1266,12 +1445,8 @@ mod tests {
             y.column(0).insert_axis(ndarray::Axis(1)),
             y.column(0).insert_axis(ndarray::Axis(1))
         ];
-        let z = lag_design(dup.view(), dup.view(), 4, 4, 0, 9).unwrap();
-        assert!(
-            normal_equation_coefficients(z.view(), dup.slice(s![4.., ..]))
-                .unwrap()
-                .is_none()
-        );
+        let (g, zy) = lagged_cross_products(&columns(&dup), 4).unwrap();
+        assert!(normal_equation_coefficients(&g, &zy).unwrap().is_none());
         let mut warnings = Vec::new();
         let dup_names = ["y1".to_string(), "copy".to_string()];
         long_var_residuals(dup.view(), 4, &dup_names, &mut warnings).unwrap();
