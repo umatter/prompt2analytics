@@ -29,24 +29,28 @@ g <- factor(c(rep("A", 5), rep("B", 5), rep("C", 5)))
 pairwise.t.test(x, g, pool.sd = TRUE, p.adjust.method = "none")
 
 #         A           B
-# B  1.4e-10       -
+# B  4.8e-10       -
 # C  7.1e-14  1.4e-10
 
 # With Holm adjustment
 pairwise.t.test(x, g, pool.sd = TRUE, p.adjust.method = "holm")
 
 #         A           B
-# B  2.7e-10       -
-# C  2.1e-13  2.7e-10
+# B  4.8e-10       -
+# C  2.1e-13  2.8e-10
 ```
 
-**Results Comparison:**
+**Results Comparison** (case `stat_pairwise_legacy`, set `a`; `validation/r/cases/stats_power_loglin.R`):
 
-| Comparison | R Raw p-value | Rust Raw p-value | Tolerance |
-|------------|---------------|------------------|-----------|
-| B vs A | 1.4e-10 | ~1.4e-10 | 1e-12 |
-| C vs A | 7.1e-14 | ~7.1e-14 | 1e-15 |
-| C vs B | 1.4e-10 | ~1.4e-10 | 1e-12 |
+| Comparison | pooled, none | pooled, Holm (= Hommel) | Welch, none |
+|---|---|---|---|
+| B vs A | 4.754648736160668e-10 | 4.754648736160668e-10 | 9.308830966371748e-08 |
+| C vs A | 7.095301791674144e-14 | 2.1285905375022432e-13 | 2.5252880786093754e-10 |
+| C vs B | 1.3947885992511475e-10 | 2.789577198502295e-10 | 4.073918328674927e-08 |
+
+Tolerance 1e-9 relative with no absolute floor: the t p-values come from the upper-tail helper
+(`traits::estimator::t_test_p_value`), so a tail of 7.1e-14 keeps its digits (formed as
+`2 (1 - cdf)` it was a multiple of 1.1e-16, about 1e-3 relative off; STAT-30, X-17).
 
 **Rust Test:** `crates/p2a-core/src/stats/pairwise.rs::tests::test_validate_pairwise_t_test_pooled_against_r`
 
@@ -81,6 +85,38 @@ p.adjust(p, method = "bonferroni")
 **Rust Tests:**
 - `crates/p2a-core/src/stats/pairwise.rs::tests::test_validate_p_adjust_holm_against_r`
 - `crates/p2a-core/src/stats/pairwise.rs::tests::test_validate_p_adjust_bh_against_r`
+
+### Test 2b: `p.adjust` as R, every method (R-pinned)
+
+`p_adjust` is R's `p.adjust`. NaN p-values (R's `NA`) are kept in place and left out of the
+number of tests n; with n <= 1 the input is returned; Hommel with n = 2 is Hochberg. With `o`
+the stable order of the p-values: Bonferroni `min(1, n p)`; Holm `min(1, cummax((n + 1 - i) p[o]))`
+(ascending); Hochberg `min(1, cummin((n + 1 - i) p[o]))` (descending, i = n..1); BH
+`min(1, cummin(n / i p[o]))`; BY the same times `sum_{k <= n} 1/k`; Hommel R's (Wright's)
+algorithm. `PValueAdjustMethod` parses R's names (`holm`, `hochberg`, `hommel`, `bonferroni`,
+`BH`/`fdr`, `BY`, `none`; case and `.`/`-`/`_` do not matter).
+
+Case `stat_p_adjust`: twelve vectors (the legacy ones, four Hommel examples, ties, two with `NA`,
+a single p-value, all ones) under all seven methods, tolerance 1e-12 relative + 1e-15 (NaN equals
+NaN).
+
+**Hommel (STAT-31).** `p.adjust(c(0.001, 0.2, 0.03, 0.04, 0.012, 0.5), "hommel")` is
+0.006, 0.4, 0.09, 0.12, 0.06, 0.5; the old code returned 0.002, 0.006, 0.006, 0.006, 0.006, 0.006,
+an adjusted p below the raw 0.5.
+
+**NA (STAT-30).** `p.adjust(c(0.04, NA, 0.001, 0.5), "holm")` is 0.08, NA, 0.003, 0.5 (n = 3); the
+old code counted the NA and gave 0.16, 1, 1, 1.
+
+**Rust Tests:** `stats::pairwise::tests::test_validate_p_adjust_stat_p_adjust`,
+`test_validate_p_adjust_hommel_against_r`, `test_validate_p_adjust_nan_kept_and_excluded_from_n`,
+`test_validate_p_adjust_holm`, `test_p_adjust_method_parses_aliases_and_rejects_unknown` (not R-pinned).
+
+### Test 2c: Pairwise Wilcoxon (R-pinned)
+
+Case `stat_pairwise_legacy`: set `a` with `exact = FALSE` (0.012185780355344811 for each pair),
+set `b` exact (0.1), set `c` exact with Holm (0.023809523809523808; raw 0.007936507936507936),
+tolerance `Tol::p_value(n)`. Tests: `test_validate_pairwise_wilcox_against_r`,
+`test_validate_pairwise_wilcox_exact_small_sample`, `test_validate_pairwise_wilcox_with_holm_adjustment`.
 
 ### Test 3: Missing values and an integer response (R-pinned)
 
@@ -125,8 +161,8 @@ p `Tol::p_value`; df and counts exact.
 
 | Component | Tolerance | Notes |
 |-----------|-----------|-------|
-| Raw p-values | 1e-12 | Relative tolerance for very small p-values |
-| Adjusted p-values | 1e-4 | Some methods involve sorting and cumulative operations |
+| Raw p-values | 1e-9 relative, no absolute floor | Down to 7.1e-14 |
+| Adjusted p-values | 1e-12 relative + 1e-15 | Arithmetic on the p-values (`stat_p_adjust`) |
 | t-statistics | 1e-6 | Same as underlying t-test |
 | Degrees of freedom | 1e-6 | Integer for pooled SD, Welch-Satterthwaite otherwise |
 
@@ -134,7 +170,7 @@ p `Tol::p_value`; df and counts exact.
 
 1. **Welch's t-test default**: R uses `pool.sd = !paired` (TRUE for unpaired by default), our default is FALSE (Welch's by default), matching modern best practices.
 
-2. **Sorting ties**: When p-values are identical, the order may differ slightly between R and Rust implementations, but final adjusted values are equivalent.
+2. **Sorting ties**: the sorts are stable on `f64::total_cmp`, as R's `order`; tied p-values get equal adjusted values under every method.
 
 3. **Group order**: the core function orders the groups by their label as text, so numeric labels 2 and 10 come out as 10, 2; R orders the levels of a numeric factor numerically. The p-values per pair are the same; only the order of the rows and columns differs.
 

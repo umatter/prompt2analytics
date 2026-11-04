@@ -21,6 +21,49 @@ The implied correlation structure is: `Σ = ΛΛ' + Ψ`
 - `rotation`: Rotation method (varimax, promax, none)
 - `scores`: Factor score computation method (none, regression, bartlett)
 
+## Rotations and sorting (R-pinned)
+
+- **varimax** (`stats::factanal::varimax`): R's `stats::varimax(x, normalize = TRUE)` algorithm, the SVD
+  iteration with Kaiser normalisation: `z = x T`, `B = x' (z^3 - z diag(colSums(z^2)) / p)`, `T = U V'` from
+  the SVD of B, stopping when the sum of singular values grows by less than 1e-14 relative (at most 1000
+  iterations). Varimax is R-pinned at the optimum (R's `varimax(eps = 1e-14)`). R's default output (and `factanal`'s)
+  stops at eps = 1e-5, up to 7.1e-4 from the optimum in a loading on `stat_factanal_promax` (promax: 6.9e-5),
+  so R's printed 3 decimals can differ in the last digit.
+- **promax** (`promax(x, m)`, m = 4 as R's default): varimax, the target `Q = xv |xv|^(m - 1)`,
+  `U = lm.fit(xv, Q)` (pivoted QR, `linalg::solve::least_squares`), `U = U diag(sqrt(diag(solve(U'U))))`;
+  loadings `xv U`, rotation matrix `T_v U`.
+- **Factor correlations** (`factor_correlation(T)`): `solve(T) solve(T)' = (T'T)^-1`.
+- **`sortLoadings`** (`sort_loadings`): for every rotation, including none, the columns are ordered by
+  descending sum of squared loadings (a stable sort) and a column with a negative sum is negated; the
+  factor correlations get the same permutation P and signs D (`D P' Phi P D`), so they are in the
+  loadings' order.
+- **Communalities** are `rowSums(L0^2)` of the unrotated loadings, which equals
+  `diag(Lambda Phi Lambda')` for every rotation (not the row sums of squared promax pattern loadings).
+- The p-value is the chi-square upper tail (`chi_squared_p_value`).
+
+### R case `stat_factanal_promax`
+
+`validation/r/cases/stats_power_loglin.R`, dataset `validation/datasets/generated/factanal_promax.csv`
+(n = 500, 12 variables, 3 factors). R: `factanal(X, 3, rotation = "none" | "varimax" | "promax",
+control = list(opt = list(factr = 1, pgtol = 0)))`, and on R's own unrotated loadings
+`varimax(L0, eps = 1e-14)` with promax's four lines on it, after `sortLoadings`' order and signs.
+
+Tests (`p2a-core`, `stats::factanal::tests::`):
+
+- `test_validate_factanal_rotation_promax`: the rotations of R's unrotated loadings (`rot_varimax_tight`,
+  `rot_varimax_rotmat_tight`, `rot_promax_tight`, `rot_promax_rotmat_tight`, `rot_promax_phi_tight`) at
+  `Tol::iterative(1e-8)`, and the normalised varimax criterion at least R's tight one minus 1e-12 (no
+  other local optimum). The keys of R's default eps 1e-5 iterate (`rot_varimax`, `rot_promax`, ...) are
+  not read: not R-pinned.
+- `test_validate_factanal_against_r`: the full fit for the three rotations at `Tol::iterative(1e-4)`;
+  p2a's fixed point at tolerance 1e-12 against R's L-BFGS-B. Unrotated: loadings and variance
+  proportions against `factanal`'s; uniquenesses, communalities, chi-square, p, objective, dof (exact).
+  Varimax and promax: loadings, variance proportions and promax factor correlations against R's
+  rotations at the optimum (`rot_*_tight`), since `factanal`'s own rotated output is R's eps 1e-5
+  iterate, up to 7.1e-4 away (registry deviation STAT-23).
+- `test_rotation_and_scores_methods_parse_aliases_and_reject_unknown` (not R-pinned): option spellings
+  (`varimax`, `promax`, `none`; scores `none`, `regression`/`thomson`, `bartlett`).
+
 ## Reference Implementations
 
 | Package | Language | Function | Version Tested |
@@ -154,13 +197,14 @@ print(result$dof)        # df = 4
 
 ## Numerical Precision Summary
 
-| Component | Typical Tolerance |
+| Component | Tolerance (`stat_factanal_promax`) |
 |-----------|-------------------|
-| Loadings | ±0.05 |
-| Uniquenesses | ±0.05 |
-| Communalities | ±0.05 |
-| Chi-squared | ±1.0 |
-| p-value | ±0.1 |
+| Rotations of R's unrotated loadings (varimax, promax, rotation matrices, Phi) | `Tol::iterative(1e-8)` |
+| Loadings, uniquenesses, communalities, variance proportions, Phi (full fit) | `Tol::iterative(1e-4)` |
+| Chi-squared, p-value, objective | `Tol::iterative(1e-4)` |
+| Degrees of freedom | exact |
+
+The synthetic tests 1-3 above check properties, not R values.
 
 ## Known Differences
 
@@ -168,11 +212,16 @@ print(result$dof)        # df = 4
 
 2. **Optimization Algorithm**: R uses `optim()` with L-BFGS-B. Rust uses EM-style alternating optimization. Results are equivalent within tolerance.
 
-3. **Varimax Implementation**: Both use Kaiser normalization. Minor floating-point differences possible.
+3. **Varimax stop**: p2a iterates varimax to its optimum (relative 1e-14); R's default stops at eps = 1e-5,
+   up to 7.1e-4 away in a loading. The rotated full fits are therefore pinned to R's tight rotation keys,
+   not to `factanal`'s default output.
 
-4. **Promax Power**: R defaults to power=3, Rust uses power=4. Adjust for exact comparison.
+4. **Promax power**: m = 4, R's default.
 
-5. **Missing values**: `run_factanal` refuses a null or NaN cell with `NullValues` naming the column, as R's `factanal` refuses NA; integer columns are accepted (T2-WP06; `stats::factanal::tests::test_na_factanal_columns`). Not R-pinned (STAT-23).
+5. **Missing values**: `run_factanal` refuses a null or NaN cell with `NullValues` naming the column, as R's `factanal` refuses NA; integer columns are accepted (T2-WP06; `stats::factanal::tests::test_na_factanal_columns`). That test is not R-pinned; the rotations and the fit are (above).
+
+6. **Uniqueness optimiser**: p2a's own fixed point, pinned at 1e-4 relative to R's L-BFGS-B optimum; R's
+   default `factr` itself moves R's uniquenesses by about 7e-6.
 
 ## Performance Comparison
 

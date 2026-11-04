@@ -631,7 +631,7 @@ impl AnalyticsServer {
 
     /// Mauchly's sphericity test.
     #[tool(
-        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test(). Uses the first-order chi-square approximation of the p-value (R's mauchly.test adds a second-order term). Subjects with a missing value are dropped and reported under missing; sphericity_violated is null when the p-value cannot be computed."
+        description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test(). The p-value includes Anderson's second-order correction (as R's mauchly.test, with R's typo in one coefficient corrected; see validation/stats/mauchly.md); p_value_first_order is the first-order chi-square tail. Subjects with a missing value are dropped and reported under missing; sphericity_violated is null when the p-value cannot be computed."
     )]
     pub async fn stats_mauchly_test(
         &self,
@@ -685,6 +685,7 @@ impl AnalyticsServer {
             "w_statistic": result.w,
             "chi_squared": result.chi_squared,
             "p_value": result.p_value,
+            "p_value_first_order": result.p_value_first_order,
             "df": result.df,
             "sphericity_violated": sphericity_verdict(result.p_value),
             "epsilon_corrections": {
@@ -2667,13 +2668,17 @@ mod tests {
                 .unwrap(),
         );
         let eps = &v["epsilon_corrections"];
-        // deviation STAT-82 (Tier 3): R's own p-value p_r adds Box's second-order term; p2a's
+        // deviation STAT-82: Anderson's w2 with pp (R's 3 * p), so p_value is left out; the
         // first-order p is pinned to R's intermediate Pr1 (p_first_order).
         Check::new(&case)
             .scalar("w", num(&v["w_statistic"]), Tol::stat(14))
             .scalar("chisq", num(&v["chi_squared"]), Tol::stat(14))
             .scalar("df", num(&v["df"]), Tol::exact())
-            .scalar("p_first_order", num(&v["p_value"]), Tol::p_value(14))
+            .scalar(
+                "p_first_order",
+                num(&v["p_value_first_order"]),
+                Tol::p_value(14),
+            )
             .scalar("gg", num(&eps["greenhouse_geisser"]), Tol::stat(14))
             .scalar("hf", num(&eps["huynh_feldt"]), Tol::stat(14))
             .scalar("lb", num(&eps["lower_bound"]), Tol::stat(14))

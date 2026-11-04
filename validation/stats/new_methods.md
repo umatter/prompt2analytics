@@ -187,7 +187,7 @@ power.t.test(n = 30, delta = 0.5, sd = 1, sig.level = 0.05, type = "two.sample")
 # power = 0.4778409859409388
 ```
 
-**Rust test**: `stats::power::tests::test_validate_power_t_test_compute_power` (`crates/p2a-core/src/stats/power.rs`): power within 0.1 of a quoted 0.477841. Not R-pinned (STAT-33).
+**Rust test**: R-pinned in `stats::power::tests::test_validate_power_legacy_api` and `test_validate_power_t_solve_power` (case `stat_power_solve`); see [power.md](power.md).
 
 ### smooth.spline Validation
 

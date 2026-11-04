@@ -197,8 +197,20 @@ Registry `validation/methods/mcp_stats.json`, ids `mcp_anova_two_way_ss_type` an
 1e-5 relative plus 1e-12 absolute, df and counts exact; MCP text at its 4 printed decimals. The
 algorithm reproduces R to about 1e-14 relative on every value above.
 
-## Legacy
+## Legacy tests (R-pinned)
 
-`stats::anova::tests::test_validate_two_way_anova_against_r` (a balanced 2 x 2 layout, cited
-in `validation/stats/hypothesis_tests.md`) is kept: on a balanced layout the least-squares
-sums of squares equal the old marginal formulas.
+Case files in `validation/r/cases/stats_power_loglin.R`; registry `validation/methods/stats_power_loglin.json`,
+method `anova_legacy`.
+
+- `stats::anova::tests::test_validate_one_way_anova_against_r`: case `stat_anova_oneway_legacy`
+  (`aov(yield ~ fertilizer)`, 15 rows, three levels A, B, C): sums of squares, mean squares, F, eta and
+  omega squared at `Tol::stat(15)`, p (1.0316137484534604e-11) at `Tol::p_value(15)`, df and n exact, the
+  grand and group means at `Tol::coef(15)`, the group SDs at `Tol::se(15)`, group sizes, minima and maxima
+  exact, in level order.
+- `stats::anova::tests::test_validate_two_way_anova_against_r` (a balanced 2 x 2 layout, cited in
+  `validation/stats/hypothesis_tests.md`): case `stat_anova_twoway_legacy` (`yield` is Int64),
+  `aov(yield ~ fertilizer * water)` (`int_*`) and `aov(yield ~ fertilizer + water)` (`add_*`): SS, MS and F
+  at `Tol::stat(12)`, p at `Tol::p_value(12)`, df exact for every term, total SS, grand mean
+  (`Tol::coef(12)`) and n; the additive fit has no interaction row. On a balanced layout the
+  least-squares sums of squares equal the old marginal formulas.
+

@@ -1,0 +1,312 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "power_t_test",
+      "name": "Power of the one-sample, two-sample and paired t test, solved for any one parameter",
+      "category": "stats",
+      "reference": "stats::power.t.test(n, delta, sd, sig.level, power, type, alternative, strict, tol)",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_power_legacy_api",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_power",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_n",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_delta",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_sd",
+        "p2a-core::stats::power::tests::test_validate_power_t_solve_sig"
+      ],
+      "quantities": [
+        "power, n, delta, sd, sig.level for type two.sample / one.sample / paired x alternative two.sided / one.sided (tol 1e-12)",
+        "R's defaults sd = 1, sig.level = 0.05",
+        "strict = TRUE power and n",
+        "R's default tol (2^-13) n and sd",
+        "an extended-bracket root below n = 2",
+        "two-sided |delta|"
+      ],
+      "tolerance": "power 1e-10 relative (+1e-14), roots 1e-9 relative (+1e-12); R's default-tolerance roots within 2 tol absolute",
+      "deviations": [
+        {
+          "finding": "STAT-61",
+          "quantity": "power_t_test (the Tier 0 function), one-sided power at a negative delta",
+          "note": "the Tier 0 function tests the one-sided alternative in the direction of delta (the power of |delta|); R and power_t_test_with test the upper tail whatever the sign of delta (power 1.0e-6 at n = 20, delta = -1). Not compared with R; power_t_test_with is."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "power_prop_test",
+      "name": "Power of the two-sample proportion test, solved for any one parameter",
+      "category": "stats",
+      "reference": "stats::power.prop.test(n, p1, p2, sig.level, power, alternative, strict, tol)",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_power_legacy_api",
+        "p2a-core::stats::power::tests::test_validate_power_prop_solve"
+      ],
+      "quantities": [
+        "power, n, p1, p2, sig.level for both alternatives (tol 1e-12)",
+        "strict = TRUE power",
+        "n = 100, 0.3 vs 0.5 power; n for power 0.8 at tol 1e-12 and R's default tol"
+      ],
+      "tolerance": "power 1e-10 relative (+1e-14), roots 1e-9 relative (+1e-12); R's default-tolerance roots within 2 tol absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "power_anova_test",
+      "name": "Power of the balanced one-way ANOVA, solved for any one parameter",
+      "category": "stats",
+      "reference": "stats::power.anova.test(groups, n, between.var, within.var, sig.level, power); solved values re-solved with uniroot(tol = 1e-12) over R's intervals",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_power_legacy_api",
+        "p2a-core::stats::power::tests::test_validate_power_anova_solve"
+      ],
+      "quantities": [
+        "power",
+        "n, groups, between.var, within.var, sig.level (tol 1e-12 and R's default)",
+        "groups 3, n 20, between 0.25: power and n (STAT-34)",
+        "Cohen's f"
+      ],
+      "tolerance": "power 1e-10 relative (+1e-14), roots 1e-9 relative (+1e-12); R's default-tolerance roots within 2 tol absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "noncentral_distributions",
+      "name": "Noncentral t and F distribution functions (Lenth's AS 243 and AS 226 series with Frick's start)",
+      "category": "stats",
+      "reference": "stats::pt(q, df, ncp, lower.tail); stats::pf(q, df1, df2, ncp, lower.tail)",
+      "doc": "validation/stats/power.md",
+      "cases": [
+        "stat_power_solve"
+      ],
+      "tests": [
+        "p2a-core::stats::power::tests::test_validate_noncentral_t_f_ports"
+      ],
+      "quantities": [
+        "pt at 16 points (one per pnt.c branch: series, normal approximation, df > 4e5, t < 0 with ncp > 40, ncp = 0, fractional df)",
+        "pf at 10 points (pnbeta series, df2 > 1e8 noncentral chi-square, x = 0, ncp = 0, large ncp)"
+      ],
+      "tolerance": "1e-12 relative + 1e-14 absolute (the published series (AS 243; AS 226 + R84) with R's constants; f64)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "loglin_ipf",
+      "name": "Log-linear models by iterative proportional fitting, non-decomposable models",
+      "category": "stats",
+      "reference": "stats::loglin(table, margin, eps, iter, fit = TRUE) (AS 51)",
+      "doc": "validation/stats/loglin.md",
+      "cases": [
+        "stat_loglin_nodecomp"
+      ],
+      "tests": [
+        "p2a-core::stats::loglin::tests::test_validate_loglin_nodecomp",
+        "p2a-core::stats::loglin::tests::test_validate_loglin_nodecomp_2x2x2"
+      ],
+      "quantities": [
+        "G2, X2, df, p-values, fitted table (eps 1e-12)",
+        "fitted tables and p-values at eps 1e-12 and 1e-10; non-convergence reported",
+        "a decomposable model",
+        "STAT-28's 2x2x2 table"
+      ],
+      "tolerance": "validation/README.md, n = 180-652: statistics and fit 1e-6 relative, p 1e-6 + 1e-12, df exact; iterations not pinned",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mauchly_sigma",
+      "name": "Mauchly's test of sphericity: T = I, X = ~1, X = ~f and a given Sigma",
+      "category": "stats",
+      "reference": "stats::mauchly.test.mlm (T, X, idata, Sigma); stats:::sphericity",
+      "doc": "validation/stats/mauchly.md",
+      "cases": [
+        "stat_mauchly_sigma"
+      ],
+      "tests": [
+        "p2a-core::stats::mauchly::tests::test_validate_mauchly_sigma",
+        "p2a-core::stats::mauchly::tests::test_validate_mauchly_two_columns"
+      ],
+      "quantities": [
+        "W, p (with Anderson's second-order term), first-order p, chi-square, df, number of contrasts, Greenhouse-Geisser and Huynh-Feldt epsilons for five designs",
+        "R's own contrast basis",
+        "two measures",
+        "designs T = I, X = ~1, X = ~f (through R's T), Sigma"
+      ],
+      "tolerance": "validation/README.md, n = 15: statistics 1e-5 relative, p 1e-5 + 1e-12, df exact; Huynh-Feldt against min(1, R) (anova.mlm's rule)",
+      "deviations": [
+        {
+          "finding": "STAT-82",
+          "quantity": "p-value when the number of contrasts pp is below the number of measures p",
+          "note": "Anderson's w2 with 3 pp; R's mauchly.test.SSD writes 3 * p (a typo against Anderson 2003, Sec. 10.7.4); differs from R by about 1e-4 relative (contrasts design 0.354922 vs 0.354953)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "p_adjust",
+      "name": "p-value adjustment (Holm, Hochberg, Hommel, Bonferroni, BH, BY, none) with NA p-values",
+      "category": "stats",
+      "reference": "stats::p.adjust (n = number of non-NA p-values)",
+      "doc": "validation/stats/pairwise_t_test.md",
+      "cases": [
+        "stat_p_adjust"
+      ],
+      "tests": [
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_stat_p_adjust",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_hommel_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_nan_kept_and_excluded_from_n",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_holm_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_bh_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_p_adjust_holm"
+      ],
+      "quantities": [
+        "12 vectors (legacy, STAT-31's Hommel examples, ties, NA, single, ones) x 7 methods"
+      ],
+      "tolerance": "1e-12 relative + 1e-15 (arithmetic in R's order); NaN equals NaN",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "pairwise_legacy",
+      "name": "Pairwise t and Wilcoxon tests on the legacy data of pairwise.rs",
+      "category": "stats",
+      "reference": "stats::pairwise.t.test(pool.sd, p.adjust.method); stats::pairwise.wilcox.test(exact, p.adjust.method)",
+      "doc": "validation/stats/pairwise_t_test.md",
+      "cases": [
+        "stat_pairwise_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_t_test_pooled_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_against_r",
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_exact_small_sample",
+        "p2a-core::stats::pairwise::tests::test_validate_pairwise_wilcox_with_holm_adjustment"
+      ],
+      "quantities": [
+        "pooled t p (none, Holm, Hommel), Welch t p, down to 7.1e-14",
+        "Wilcoxon normal-approximation, exact and Holm-adjusted p"
+      ],
+      "tolerance": "t p-values 1e-9 relative without an absolute floor; Wilcoxon p validation/README.md (n = 6-15)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "factanal_rotation",
+      "name": "Maximum-likelihood factor analysis with varimax and promax rotation",
+      "category": "stats",
+      "reference": "stats::factanal(rotation = 'none' | 'varimax' | 'promax', control = list(opt = list(factr = 1, pgtol = 0))); stats::varimax; stats::promax",
+      "doc": "validation/multivariate/factanal.md",
+      "cases": [
+        "stat_factanal_promax"
+      ],
+      "tests": [
+        "p2a-core::stats::factanal::tests::test_validate_factanal_rotation_promax",
+        "p2a-core::stats::factanal::tests::test_validate_factanal_against_r"
+      ],
+      "quantities": [
+        "varimax and promax loadings and rotation matrices of R's unrotated loadings (at the varimax optimum), normalised varimax criterion",
+        "promax factor correlations",
+        "uniquenesses, sorted loadings (none, varimax, promax), communalities, proportion of variance, chi-square, df, p, objective"
+      ],
+      "tolerance": "rotations Tol::iterative(1e-8) against R's varimax(eps = 1e-14) and a promax built on it, after sortLoadings; full fit Tol::iterative(1e-4) against R's tight refit (both optimisers iterative), rotated fits against those tight rotations",
+      "deviations": [
+        {
+          "finding": "STAT-23",
+          "quantity": "factanal's own varimax and promax loadings, variance proportions and promax factor correlations (loadings_varimax, loadings_promax, prop_var_varimax, prop_var_promax, promax_phi)",
+          "note": "R's factanal stops varimax at eps = 1e-5, up to 7.1e-4 in a loading from the varimax optimum (promax 6.9e-5); p2a iterates to the optimum, so the rotated fits are compared with R's rotations at the optimum (rot_varimax_tight, rot_promax_tight, rot_promax_phi_tight) instead"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "fisher_legacy",
+      "name": "Fisher's exact test on the legacy 2x2 tables of fisher.rs",
+      "category": "stats",
+      "reference": "stats::fisher.test(alternative = 'two.sided' | 'less' | 'greater'); limits and conditional MLE re-solved with uniroot(tol = 1e-15) (T2-WP05)",
+      "doc": "validation/stats/fisher.md",
+      "cases": [
+        "stat_fisher_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::fisher::tests::test_validate_against_r_basic",
+        "p2a-core::stats::fisher::tests::test_validate_against_r_lady_tea",
+        "p2a-core::stats::fisher::tests::test_validate_against_r_one_sided",
+        "p2a-core::stats::fisher::tests::test_validate_fisher_legacy_ci"
+      ],
+      "quantities": [
+        "p for three alternatives",
+        "two-sided and one-sided limits",
+        "conditional MLE",
+        "sample odds ratio",
+        "N"
+      ],
+      "tolerance": "p 1e-9 relative; limits and MLE 1e-9 relative + 1e-12 (T2-WP05's rule)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "anova_legacy",
+      "name": "One-way and balanced two-way ANOVA on the legacy data of anova.rs",
+      "category": "stats",
+      "reference": "stats::aov; summary.aov",
+      "doc": "validation/stats/anova.md",
+      "cases": [
+        "stat_anova_oneway_legacy",
+        "stat_anova_twoway_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::anova::tests::test_validate_one_way_anova_against_r",
+        "p2a-core::stats::anova::tests::test_validate_two_way_anova_against_r"
+      ],
+      "quantities": [
+        "SS, df, MS, F, p for every term and the residuals (one-way; two-way with and without the interaction)",
+        "eta squared, omega squared, grand mean, group n/mean/sd/min/max"
+      ],
+      "tolerance": "validation/README.md, n = 12-15: SS, MS, F 1e-5 relative; p 1e-5 + 1e-12; means 1e-6; df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "constroptim_legacy",
+      "name": "Linearly constrained optimisation on the legacy problems of constroptim.rs",
+      "category": "stats",
+      "reference": "stats::constrOptim (mu = 1e-4, outer.eps = 1e-5)",
+      "doc": "validation/stats/constroptim.md",
+      "cases": [
+        "stat_constroptim_legacy"
+      ],
+      "tests": [
+        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_quadratic",
+        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_linear_three_constraints",
+        "p2a-core::stats::constroptim::tests::test_validate_constr_optim_binding_constraint"
+      ],
+      "quantities": [
+        "par and value of three problems (quadratic, lp3, binding)"
+      ],
+      "tolerance": "Tol::iterative(1e-4)",
+      "deviations": [
+        {
+          "finding": "STAT-80",
+          "quantity": "convergence code and outer iterations",
+          "note": "R's adaptive barrier converges in 3 outer iterations (convergence 0); p2a's plain log barrier runs 100 (convergence 1) and stops about 1.5e-5 from the optimum; not compared until STAT-80 (Tier 4)"
+        },
+        {
+          "finding": "STAT-80",
+          "quantity": "Nelder-Mead problem: par and value (nelder_mead_par, nelder_mead_value)",
+          "note": "p2a's barrier with Nelder-Mead stops at (1.0021099915327514, 2.0010575190290307), value 5.570410765044598e-6; R at (1.0000008855605316, 2.0000000235991697), value 7.847743758893449e-13: 2.1e-3 relative, outside 1e-4; test_validate_constr_optim_nelder_mead checks feasibility only until STAT-80 (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

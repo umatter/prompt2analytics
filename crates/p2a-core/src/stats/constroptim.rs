@@ -749,21 +749,31 @@ mod tests {
     // Validation tests against R
     // =========================================================================
 
+    // Case stat_constroptim_legacy (validation/r/cases/stats_power_loglin.R): R's constrOptim
+    // on the same four problems.
+    //
+    // deviation STAT-80 (Tier 4): R converges in 3 outer iterations (convergence 0); p2a's
+    // plain log barrier runs 100 (convergence 1, mu = 0.9^99 leaves par about 1.5e-5 from
+    // R's); convergence code and outer iterations are not compared.
+
+    use p2a_validation::{Case, Check, Tol};
+
+    /// STAT-62's rule for iterative methods: 1e-4 relative at R's solution.
+    fn iter() -> Tol {
+        Tol::iterative(1e-4)
+    }
+
     #[test]
     fn test_validate_constr_optim_quadratic() {
         // R: constrOptim(c(1, 1), function(x) x[1]^2 + x[2]^2,
         //                grad = function(x) c(2*x[1], 2*x[2]),
         //                ui = matrix(c(1, 1), nrow = 1), ci = 1)
-        // R result: par = [0.5, 0.5], value = 0.5, constraint x + y = 1.0
         let f = |x: &[f64]| x[0].powi(2) + x[1].powi(2);
         let grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
-
         let ui = vec![vec![1.0, 1.0]];
         let ci = vec![1.0];
-        let theta0 = vec![1.0, 1.0];
-
-        let result = constr_optim(
-            &theta0,
+        let r = constr_optim(
+            &[1.0, 1.0],
             f,
             Some(grad),
             &ui,
@@ -771,52 +781,29 @@ mod tests {
             ConstrOptimConfig::default(),
         )
         .unwrap();
-
-        // Should improve from starting point (f(1,1) = 2)
-        assert!(
-            result.value < 2.0,
-            "Should improve from starting value 2.0: got {:.6}",
-            result.value
-        );
-
-        // Constraint should be satisfied: x + y >= 1
-        let constraint_value = result.par[0] + result.par[1];
-        assert!(
-            constraint_value >= 0.99,
-            "Constraint violated: x + y = {:.6} < 1",
-            constraint_value
-        );
-
-        // Value should be reasonably close to optimal (0.5)
-        // Barrier methods may not reach exact optimum
-        assert!(
-            result.value < 1.5,
-            "Value should be less than 1.5: got {:.6}",
-            result.value
-        );
+        // deviation STAT-80: convergence and outer iterations not compared
+        let case = Case::load("stat_constroptim_legacy");
+        Check::new(&case)
+            .vector("quadratic_par", &r.par, iter())
+            .scalar("quadratic_value", r.value, iter())
+            .finish();
     }
 
     #[test]
     fn test_validate_constr_optim_linear_three_constraints() {
-        // R: constrOptim(c(0.3, 0.3),
-        //                function(x) -x[1] - x[2],
-        //                grad = function(x) c(-1, -1),
+        // R: constrOptim(c(0.3, 0.3), function(x) -x[1] - x[2], grad = function(x) c(-1, -1),
         //                ui = matrix(c(1, 0, 0, 1, -1, -1), nrow = 3, byrow = TRUE),
         //                ci = c(0, 0, -1))
-        // R result: par = [0.5, 0.5], value = -1.0
         let f = |x: &[f64]| -x[0] - x[1];
         let grad = |_x: &[f64]| vec![-1.0, -1.0];
-
         let ui = vec![
             vec![1.0, 0.0],   // x >= 0
             vec![0.0, 1.0],   // y >= 0
-            vec![-1.0, -1.0], // -x - y >= -1, i.e., x + y <= 1
+            vec![-1.0, -1.0], // x + y <= 1
         ];
         let ci = vec![0.0, 0.0, -1.0];
-        let theta0 = vec![0.3, 0.3];
-
-        let result = constr_optim(
-            &theta0,
+        let r = constr_optim(
+            &[0.3, 0.3],
             f,
             Some(grad),
             &ui,
@@ -824,84 +811,51 @@ mod tests {
             ConstrOptimConfig::default(),
         )
         .unwrap();
-
-        // Optimal value should be -1.0 (maximize x + y subject to x + y <= 1)
-        let expected_value = -1.0;
-        assert!(
-            (result.value - expected_value).abs() < 0.2,
-            "Value mismatch: Rust={:.6}, R={:.6}",
-            result.value,
-            expected_value
-        );
-
-        // All constraints should be satisfied
-        assert!(
-            result.par[0] >= -0.01,
-            "x should be >= 0: x = {:.6}",
-            result.par[0]
-        );
-        assert!(
-            result.par[1] >= -0.01,
-            "y should be >= 0: y = {:.6}",
-            result.par[1]
-        );
-        assert!(
-            result.par[0] + result.par[1] <= 1.01,
-            "x + y should be <= 1: x + y = {:.6}",
-            result.par[0] + result.par[1]
-        );
+        // deviation STAT-80: convergence and outer iterations not compared
+        let case = Case::load("stat_constroptim_legacy");
+        Check::new(&case)
+            .vector("lp3_par", &r.par, iter())
+            .scalar("lp3_value", r.value, iter())
+            .finish();
     }
 
     #[test]
     fn test_validate_constr_optim_nelder_mead() {
-        // Test without gradient (Nelder-Mead)
-        // Minimize (x - 1)^2 + (y - 2)^2 subject to x >= 0, y >= 0
-        // Optimal is at (1, 2) which is feasible
+        // R: constrOptim(c(0.5, 0.5), function(x) (x[1] - 1)^2 + (x[2] - 2)^2, grad = NULL,
+        //                ui = diag(2), ci = c(0, 0))
         let f = |x: &[f64]| (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2);
-
         let ui = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let ci = vec![0.0, 0.0];
-        let theta0 = vec![0.5, 0.5];
-
         let config = ConstrOptimConfig {
             method: OptimMethod::NelderMead,
             ..Default::default()
         };
-
-        let result =
-            constr_optim::<_, fn(&[f64]) -> Vec<f64>>(&theta0, f, None, &ui, &ci, config).unwrap();
-
-        // Optimal at (1, 2), value = 0
+        let r = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(&[0.5, 0.5], f, None, &ui, &ci, config)
+            .unwrap();
+        // deviation STAT-80: rust par=(1.0021099915327514, 2.0010575190290307), value
+        // 5.570410765044598e-6; R par=(1.0000008855605316, 2.0000000235991697), value
+        // 7.847743758893449e-13 (stat_constroptim_legacy). p2a's barrier with Nelder-Mead
+        // stops 2.1e-3 from R's solution, outside 1e-4, so par and value are not compared with
+        // R (registry deviation in stats_power_loglin.json, constroptim_legacy). Not R-pinned:
+        // the solution is feasible and within 1e-2 of the optimum (1, 2).
+        assert!(r.par[0] >= 0.0 && r.par[1] >= 0.0, "{:?}", r.par);
         assert!(
-            (result.par[0] - 1.0).abs() < 0.2,
-            "x should be near 1: x = {:.6}",
-            result.par[0]
+            (r.par[0] - 1.0).abs() < 1e-2 && (r.par[1] - 2.0).abs() < 1e-2,
+            "{:?}",
+            r.par
         );
-        assert!(
-            (result.par[1] - 2.0).abs() < 0.2,
-            "y should be near 2: y = {:.6}",
-            result.par[1]
-        );
-        assert!(
-            result.value < 0.1,
-            "Value should be near 0: value = {:.6}",
-            result.value
-        );
+        assert!(r.value < 1e-4, "{}", r.value);
     }
 
     #[test]
     fn test_validate_constr_optim_binding_constraint() {
-        // Minimize x^2 subject to x >= 1
-        // Optimal is at x = 1 (constraint binding)
+        // R: constrOptim(2, function(x) x^2, grad = function(x) 2 * x, ui = matrix(1), ci = 1)
         let f = |x: &[f64]| x[0].powi(2);
         let grad = |x: &[f64]| vec![2.0 * x[0]];
-
         let ui = vec![vec![1.0]];
         let ci = vec![1.0];
-        let theta0 = vec![2.0];
-
-        let result = constr_optim(
-            &theta0,
+        let r = constr_optim(
+            &[2.0],
             f,
             Some(grad),
             &ui,
@@ -909,17 +863,11 @@ mod tests {
             ConstrOptimConfig::default(),
         )
         .unwrap();
-
-        // Optimal value should be 1.0 (at x = 1)
-        assert!(
-            (result.par[0] - 1.0).abs() < 0.1,
-            "x should be at constraint boundary: x = {:.6}",
-            result.par[0]
-        );
-        assert!(
-            (result.value - 1.0).abs() < 0.2,
-            "Value should be 1.0: value = {:.6}",
-            result.value
-        );
+        // deviation STAT-80: convergence and outer iterations not compared
+        let case = Case::load("stat_constroptim_legacy");
+        Check::new(&case)
+            .vector("binding_par", &r.par, iter())
+            .scalar("binding_value", r.value, iter())
+            .finish();
     }
 }

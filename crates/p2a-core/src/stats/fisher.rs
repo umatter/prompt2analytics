@@ -1167,115 +1167,73 @@ mod tests {
         assert!(result.odds_ratio > 100.0); // Very large odds ratio
     }
 
+    /// The legacy tables of `stat_fisher_legacy` (fisher.test, limits re-solved tight as
+    /// T2-WP05): p for the three alternatives, the tight limits and estimate, the sample odds
+    /// ratio and n.
+    fn check_legacy(case_id: &str, id: &str) {
+        let (case, tables) = case_tables(case_id);
+        let table = tables
+            .iter()
+            .find(|(name, _)| name == id)
+            .map(|(_, t)| *t)
+            .unwrap();
+        let run = |alt| fisher_exact_test(&table, alt, Some(0.95)).unwrap();
+        let (two, less, greater) = (
+            run(FisherAlternative::TwoSided),
+            run(FisherAlternative::Less),
+            run(FisherAlternative::Greater),
+        );
+        let p = Tol::new(1e-9, 0.0);
+        let (two_lo, two_hi) = two.odds_ratio_ci.unwrap();
+        let (less_lo, less_hi) = less.odds_ratio_ci.unwrap();
+        let (greater_lo, greater_hi) = greater.odds_ratio_ci.unwrap();
+        assert_eq!(less_lo, 0.0, "{id}");
+        assert_eq!(greater_hi, f64::INFINITY, "{id}");
+        Check::new(&case)
+            .scalar(&format!("{id}_p_two_sided"), two.p_value, p)
+            .scalar(&format!("{id}_p_less"), less.p_value, p)
+            .scalar(&format!("{id}_p_greater"), greater.p_value, p)
+            .scalar(&format!("{id}_ci_lower_two_sided_tight"), two_lo, TIGHT)
+            .scalar(&format!("{id}_ci_upper_two_sided_tight"), two_hi, TIGHT)
+            .scalar(&format!("{id}_ci_upper_less_tight"), less_hi, TIGHT)
+            .scalar(&format!("{id}_ci_lower_greater_tight"), greater_lo, TIGHT)
+            .scalar(
+                &format!("{id}_estimate_cond_mle_tight"),
+                two.conditional_mle,
+                TIGHT,
+            )
+            .scalar(
+                &format!("{id}_sample_odds_ratio"),
+                two.odds_ratio,
+                Tol::new(1e-15, 0.0),
+            )
+            .scalar(&format!("{id}_n"), two.n, Tol::exact())
+            .finish();
+    }
+
     #[test]
     fn test_validate_against_r_basic() {
-        // R code:
-        // M <- matrix(c(1, 9, 11, 3), nrow = 2, byrow = TRUE)
-        // # Note: R reads by column, so this is actually:
-        // # [[1, 11], [9, 3]]
-        // # We need to specify correctly:
-        // M <- matrix(c(1, 11, 9, 3), nrow = 2, byrow = TRUE)
-        // #      [,1] [,2]
-        // # [1,]    1   11
-        // # [2,]    9    3
-        // fisher.test(M)
-        //
-        // p-value = 0.002759
-        // odds ratio = 0.03717
-        let table = [[1.0, 11.0], [9.0, 3.0]];
-        let result = fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95)).unwrap();
-
-        // R gives p-value = 0.002759
-        assert!(
-            (result.p_value - 0.002759).abs() < 0.001,
-            "Expected p-value ~0.002759, got {}",
-            result.p_value
-        );
-
-        // Sample odds ratio = (1*3)/(11*9) = 3/99 ≈ 0.0303
-        let expected_or = (1.0 * 3.0) / (11.0 * 9.0);
-        assert!(
-            (result.odds_ratio - expected_or).abs() < 0.001,
-            "Expected OR ~{}, got {}",
-            expected_or,
-            result.odds_ratio
-        );
+        // R: fisher.test(matrix(c(1, 9, 11, 3), 2)); p 0.002759456185220086
+        check_legacy("stat_fisher_legacy", "basic");
     }
 
     #[test]
     fn test_validate_against_r_lady_tea() {
-        // R code:
-        // M <- matrix(c(3, 1, 1, 3), nrow = 2, byrow = TRUE)
-        // fisher.test(M)
-        //
-        // p-value = 0.4857
-        let table = [[3.0, 1.0], [1.0, 3.0]];
-        let result = fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95)).unwrap();
-
-        // R gives p-value = 0.4857
-        assert!(
-            (result.p_value - 0.4857).abs() < 0.01,
-            "Expected p-value ~0.4857, got {}",
-            result.p_value
-        );
+        // R: fisher.test(matrix(c(3, 1, 1, 3), 2)); p 0.4857142857142858
+        check_legacy("stat_fisher_legacy", "tea");
     }
 
     #[test]
     fn test_validate_against_r_one_sided() {
-        // R code:
-        // M <- matrix(c(6, 2, 1, 7), nrow = 2, byrow = TRUE)
-        // fisher.test(M, alternative = "greater")
-        //
-        // greater p-value: 0.0202797203
-        // two.sided p-value: 0.0405594406
-        // less p-value: 0.9993006993
-        let table = [[6.0, 2.0], [1.0, 7.0]];
-
-        // Test greater alternative
-        let result_greater = fisher_exact_test(&table, FisherAlternative::Greater, None).unwrap();
-        assert!(
-            (result_greater.p_value - 0.02028).abs() < 0.005,
-            "Expected greater p-value ~0.02028, got {}",
-            result_greater.p_value
-        );
-
-        // Test less alternative
-        let result_less = fisher_exact_test(&table, FisherAlternative::Less, None).unwrap();
-        assert!(
-            (result_less.p_value - 0.9993).abs() < 0.01,
-            "Expected less p-value ~0.9993, got {}",
-            result_less.p_value
-        );
-
-        // Test two-sided alternative
-        let result_two = fisher_exact_test(&table, FisherAlternative::TwoSided, None).unwrap();
-        assert!(
-            (result_two.p_value - 0.04056).abs() < 0.005,
-            "Expected two-sided p-value ~0.04056, got {}",
-            result_two.p_value
-        );
+        // R: fisher.test(matrix(c(6, 1, 2, 7), 2), alternative = "greater"); p 0.020279720279720286
+        check_legacy("stat_fisher_legacy", "one_sided");
     }
 
     #[test]
-    fn test_confidence_interval() {
-        let table = [[10.0, 5.0], [5.0, 10.0]];
-        let result = fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95)).unwrap();
-
-        // Check that CI is computed
-        assert!(result.odds_ratio_ci.is_some());
-        let (lo, hi) = result.odds_ratio_ci.unwrap();
-
-        // CI should contain the sample OR
-        assert!(lo < result.odds_ratio);
-        assert!(hi > result.odds_ratio);
-
-        // 95% CI should contain 1 when p > 0.05
-        if result.p_value > 0.05 {
-            assert!(
-                lo < 1.0 && hi > 1.0,
-                "95% CI should contain 1 when p > 0.05"
-            );
-        }
+    fn test_validate_fisher_legacy_ci() {
+        // R: fisher.test(matrix(c(10, 5, 5, 10), 2))$conf.int, re-solved tight:
+        // 0.7054372156512816, 23.921858982581192 (before T2-WP05 p2a gave (0, 40))
+        check_legacy("stat_fisher_legacy", "ci");
     }
 
     #[test]
