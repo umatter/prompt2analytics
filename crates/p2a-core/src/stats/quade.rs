@@ -23,13 +23,18 @@
 //!   Association, 74(367), 680-683.
 //! - Conover, W. J. (1999). Practical Nonparametric Statistics (3rd ed.).
 //!   New York: Wiley. Pages 373-380.
+//! Ranks with `stats::ranks::midranks` (exact ties, as R).
+//!
 //! - R Core Team. `stats::quade.test()` function.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/quade.test.html>
 
 use crate::data::Dataset;
 use crate::data::columns::MissingSummary;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::stats::friedman::unreplicated_blocks;
+use crate::stats::ranks::{midranks, midranks_into};
+use crate::traits::estimator::f_test_p_value;
 use serde::{Deserialize, Serialize};
 
 /// Result of the Quade test.
@@ -182,47 +187,48 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
         });
     }
 
+    // Non-finite cells cannot be ranked (run_quade_test drops incomplete blocks first)
+    for (i, row) in data.iter().enumerate() {
+        if row.iter().any(|v| !v.is_finite()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Quade test: block {} contains a missing or infinite value; quade_test needs complete, finite blocks (run_quade_test drops incomplete blocks, as quade.test does)",
+                    i + 1
+                ),
+            });
+        }
+    }
+
     // Step 1: Compute block ranges
-    let mut block_ranges: Vec<f64> = Vec::with_capacity(b);
+    let mut block_ranges: Vec<f64> = resource::try_with_capacity(b, "Quade block ranges")?;
     for row in data {
         let min = row.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         block_ranges.push(max - min);
     }
 
-    // Step 2: Rank the block ranges (Q_i)
-    let range_ranks = rank_values(&block_ranges);
+    // Step 2: Rank the block ranges (Q_i), exact ties as R's rank()
+    let (range_ranks, _) = midranks(&block_ranges)?;
 
-    // Step 3: Rank within each block (R_ij)
-    let mut within_ranks: Vec<Vec<f64>> = Vec::with_capacity(b);
-    for row in data {
-        within_ranks.push(rank_values(row));
-    }
-
-    // Step 4: Compute S_ij = Q_i * (R_ij - (k+1)/2)
+    // Steps 3-6: rank within each block (R_ij, on reused scratch buffers), score
+    // S_ij = Q_i * (R_ij - (k+1)/2), and accumulate the treatment totals S_j = Σ_i S_ij and
+    // A = ΣΣ S_ij²
     let center = (k as f64 + 1.0) / 2.0;
-    let mut s_matrix: Vec<Vec<f64>> = Vec::with_capacity(b);
-    for (i, ranks) in within_ranks.iter().enumerate() {
-        let q_i = range_ranks[i];
-        let s_row: Vec<f64> = ranks.iter().map(|&r_ij| q_i * (r_ij - center)).collect();
-        s_matrix.push(s_row);
-    }
-
-    // Step 5: Compute treatment totals S_j = Σ_i S_ij
+    let mut order: Vec<usize> = resource::try_with_capacity(k, "Quade ranks")?;
+    let mut ranks: Vec<f64> = resource::try_with_capacity(k, "Quade ranks")?;
+    let mut sizes: Vec<usize> = resource::try_with_capacity(k, "Quade ranks")?;
     let mut treatment_sums: Vec<f64> = vec![0.0; k];
-    for s_row in &s_matrix {
-        for (j, &s_ij) in s_row.iter().enumerate() {
-            treatment_sums[j] += s_ij;
+    let mut a = 0.0;
+    for (row, &q_i) in data.iter().zip(&range_ranks) {
+        midranks_into(row, &mut order, &mut ranks, &mut sizes)?;
+        for (sum, &r_ij) in treatment_sums.iter_mut().zip(&ranks) {
+            let s_ij = q_i * (r_ij - center);
+            *sum += s_ij;
+            a += s_ij * s_ij;
         }
     }
 
-    // Step 6: Compute A = ΣΣ S_ij² and B = (1/b) Σ S_j²
-    let a: f64 = s_matrix
-        .iter()
-        .flat_map(|row| row.iter())
-        .map(|&s| s * s)
-        .sum();
-
+    // B = (1/b) Σ S_j²
     let sum_sj_sq: f64 = treatment_sums.iter().map(|&s| s * s).sum();
     let b_stat = sum_sj_sq / b as f64;
 
@@ -242,7 +248,7 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
     let df2 = (b - 1) * (k - 1);
 
     // P-value from F distribution
-    let p_value = f_test_p_value(f_stat, df1, df2);
+    let p_value = f_test_p_value(f_stat, df1 as f64, df2 as f64);
 
     // Compute mean weighted ranks
     let mean_weighted_ranks: Vec<f64> = treatment_sums.iter().map(|&s| s / b as f64).collect();
@@ -262,59 +268,6 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
         b_statistic: b_stat,
         missing: MissingSummary::none(b * k),
     })
-}
-
-/// Rank values, handling ties with average ranks.
-///
-/// Ties are detected using exact equality (like R), not approximate equality.
-/// This matches R's rank() function behavior.
-fn rank_values(values: &[f64]) -> Vec<f64> {
-    let n = values.len();
-
-    // Create index-value pairs and sort
-    let mut indexed: Vec<(usize, f64)> = values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0.0; n];
-
-    let mut i = 0;
-    while i < n {
-        // Find extent of tie group - use exact equality like R does
-        let mut j = i + 1;
-        while j < n && indexed[j].1 == indexed[i].1 {
-            j += 1;
-        }
-
-        // Compute average rank for tie group (1-indexed)
-        let avg_rank = ((i + 1) + j) as f64 / 2.0;
-
-        for k in i..j {
-            ranks[indexed[k].0] = avg_rank;
-        }
-
-        i = j;
-    }
-
-    ranks
-}
-
-/// Compute p-value from F distribution.
-fn f_test_p_value(f_stat: f64, df1: usize, df2: usize) -> f64 {
-    use statrs::distribution::{ContinuousCDF, FisherSnedecor};
-
-    if df1 == 0 || df2 == 0 || f_stat.is_nan() {
-        return f64::NAN;
-    }
-    if f_stat.is_infinite() || f_stat < 0.0 {
-        return if f_stat > 0.0 { 0.0 } else { 1.0 };
-    }
-
-    let f_dist = match FisherSnedecor::new(df1 as f64, df2 as f64) {
-        Ok(d) => d,
-        Err(_) => return f64::NAN,
-    };
-
-    1.0 - f_dist.cdf(f_stat)
 }
 
 /// Run Quade test on a Dataset with long-format data (R `quade.test(value, group, block)`).
@@ -374,14 +327,6 @@ mod tests {
 
         let result = quade_test(&data, &names).unwrap();
 
-        println!(
-            "F = {}, df1 = {}, df2 = {}, p = {}",
-            result.statistic, result.df1, result.df2, result.p_value
-        );
-        println!("Block ranges: {:?}", result.block_ranges);
-        println!("Treatment sums: {:?}", result.treatment_sums);
-        println!("A = {}, B = {}", result.a_statistic, result.b_statistic);
-
         assert_eq!(result.n_blocks, 5);
         assert_eq!(result.n_treatments, 3);
         assert_eq!(result.df1, 2);
@@ -412,27 +357,6 @@ mod tests {
 
         // With similar values, should not reject H0
         assert!(result.p_value > 0.05);
-    }
-
-    #[test]
-    fn test_rank_values() {
-        let values = vec![3.0, 1.0, 2.0];
-        let ranks = rank_values(&values);
-
-        assert!((ranks[0] - 3.0).abs() < 1e-10); // 3.0 gets rank 3
-        assert!((ranks[1] - 1.0).abs() < 1e-10); // 1.0 gets rank 1
-        assert!((ranks[2] - 2.0).abs() < 1e-10); // 2.0 gets rank 2
-    }
-
-    #[test]
-    fn test_rank_values_with_ties() {
-        let values = vec![1.0, 2.0, 2.0, 3.0];
-        let ranks = rank_values(&values);
-
-        assert!((ranks[0] - 1.0).abs() < 1e-10);
-        assert!((ranks[1] - 2.5).abs() < 1e-10); // average of 2 and 3
-        assert!((ranks[2] - 2.5).abs() < 1e-10);
-        assert!((ranks[3] - 4.0).abs() < 1e-10);
     }
 
     #[test]
@@ -468,82 +392,6 @@ mod tests {
 
         assert_eq!(result.n_blocks, 3);
         assert_eq!(result.n_treatments, 3);
-    }
-
-    // ========================================================================
-    // Validation Tests Against R
-    // ========================================================================
-
-    #[test]
-    fn test_validate_quade_against_r() {
-        // R code:
-        // y <- matrix(c(5, 4, 7, 10, 12,
-        //               1, 3, 1, 0, 2,
-        //               16, 12, 22, 22, 35,
-        //               5, 4, 3, 5, 4,
-        //               10, 9, 7, 13, 10,
-        //               19, 18, 28, 25, 20,
-        //               10, 7, 6, 8, 7),
-        //             nrow = 7, byrow = TRUE,
-        //             dimnames = list(Store = as.character(1:7),
-        //                             Brand = LETTERS[1:5]))
-        // quade.test(y)
-        //
-        // Verified R output:
-        // Quade F = 2.4266, num df = 4, denom df = 24, p-value = 0.07566
-        // A = 1360, B = 391.6429
-        // Treatment sums: [-9.5, -38.0, -1.5, 23.0, 26.0]
-
-        let data = vec![
-            vec![5.0, 4.0, 7.0, 10.0, 12.0],
-            vec![1.0, 3.0, 1.0, 0.0, 2.0],
-            vec![16.0, 12.0, 22.0, 22.0, 35.0],
-            vec![5.0, 4.0, 3.0, 5.0, 4.0],
-            vec![10.0, 9.0, 7.0, 13.0, 10.0],
-            vec![19.0, 18.0, 28.0, 25.0, 20.0],
-            vec![10.0, 7.0, 6.0, 8.0, 7.0],
-        ];
-        let names = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-            "E".to_string(),
-        ];
-
-        let result = quade_test(&data, &names).unwrap();
-
-        println!(
-            "Quade result: F={}, df1={}, df2={}, p={}",
-            result.statistic, result.df1, result.df2, result.p_value
-        );
-        println!("Treatment sums: {:?}", result.treatment_sums);
-        println!("Block ranges: {:?}", result.block_ranges);
-        println!("A = {}, B = {}", result.a_statistic, result.b_statistic);
-
-        // Check against verified R results
-        assert!(
-            (result.statistic - 2.4266).abs() < 0.01,
-            "F statistic mismatch: got {}, expected 2.4266",
-            result.statistic
-        );
-        assert_eq!(result.df1, 4);
-        assert_eq!(result.df2, 24);
-        assert!(
-            (result.p_value - 0.07566).abs() < 0.01,
-            "p-value mismatch: got {}, expected 0.07566",
-            result.p_value
-        );
-        assert!(
-            (result.a_statistic - 1360.0).abs() < 1.0,
-            "A statistic mismatch: got {}, expected 1360",
-            result.a_statistic
-        );
-        assert!(
-            (result.b_statistic - 391.6429).abs() < 0.1,
-            "B statistic mismatch: got {}, expected 391.6429",
-            result.b_statistic
-        );
     }
 
     #[test]
@@ -662,5 +510,67 @@ mod tests {
             run_quade_test(&ds, "nope", "treat", "block"),
             Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
         ));
+    }
+
+    #[test]
+    fn test_validate_quade_small_scale() {
+        let (case, ds) = load_case("stat_rank_small_blocks");
+        let r = run_quade_test(&ds, "y", "treat", "block").unwrap();
+        Check::new(&case)
+            .scalar("quade_f", r.statistic, Tol::stat(32))
+            .scalar("quade_df1", r.df1 as f64, Tol::exact())
+            .scalar("quade_df2", r.df2 as f64, Tol::exact())
+            .scalar("quade_p", r.p_value, Tol::p_value(32))
+            .named(
+                "quade_treatment_sums",
+                &r.treatment_names,
+                &r.treatment_sums,
+                Tol::stat(32),
+            )
+            .scalar("quade_a", r.a_statistic, Tol::stat(32))
+            .scalar("quade_b", r.b_statistic, Tol::stat(32))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_quade_store() {
+        // R's own ?quade.test data (Conover 1999, p. 375); the old test used a modified row 6.
+        let (case, ds) = load_case("stat_rank_quade_store");
+        let r = run_quade_test(&ds, "sales", "brand", "store").unwrap();
+        Check::new(&case)
+            .scalar("f", r.statistic, Tol::stat(35))
+            .scalar("df1", r.df1 as f64, Tol::exact())
+            .scalar("df2", r.df2 as f64, Tol::exact())
+            .scalar("p", r.p_value, Tol::p_value(35))
+            .named(
+                "treatment_sums",
+                &r.treatment_names,
+                &r.treatment_sums,
+                Tol::stat(35),
+            )
+            .scalar("a", r.a_statistic, Tol::stat(35))
+            .scalar("b", r.b_statistic, Tol::stat(35))
+            .vector("block_ranges", &r.block_ranges, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_quade_rejects_non_finite() {
+        let names: Vec<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        for bad in [f64::NAN, f64::INFINITY] {
+            match quade_test(
+                &[
+                    vec![1.0, bad, 2.0],
+                    vec![1.0, 2.0, 3.0],
+                    vec![2.0, 3.0, 1.0],
+                ],
+                &names,
+            ) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("block 1"), "{message}")
+                }
+                other => panic!("{bad}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
     }
 }

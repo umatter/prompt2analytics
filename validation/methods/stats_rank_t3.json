@@ -45,7 +45,10 @@
         "stat_rank_small_groups",
         "stat_rank_fligner"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::fligner::tests::test_validate_fligner_small_scale",
+        "p2a-core::stats::fligner::tests::test_validate_fligner_examples"
+      ],
       "quantities": [
         "chi-squared",
         "df",
@@ -96,7 +99,10 @@
         "stat_rank_small_blocks",
         "stat_rank_quade_store"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::quade::tests::test_validate_quade_small_scale",
+        "p2a-core::stats::quade::tests::test_validate_quade_store"
+      ],
       "quantities": [
         "F",
         "df1",
@@ -259,7 +265,7 @@
       "tests": [],
       "quantities": [
         "yf (doc, doc3, ir4, mono, decr, unsorted)",
-        "number of blocks",
+        "number of knots (decr)",
         "sorted x",
         "ord"
       ],
@@ -268,7 +274,7 @@
         {
           "finding": "STAT-52",
           "quantity": "iKnots and yc (iknots_doc, iknots_ir4, yc_doc)",
-          "note": "p2a's i_knots are 0-based block starts ([0, 2] for doc; R iKnots (2, 9), 1-based block ends) and yc is cumsum(yf) of length n (R: cumsum(c(0, y)), length n + 1). Block counts agree and are pinned."
+          "note": "p2a's i_knots are 0-based block starts ([0, 2] for doc; R iKnots (2, 9), 1-based block ends) and yc is cumsum(yf) of length n (R: cumsum(c(0, y)), length n + 1). The knot counts agree on doc and decr; on ir4 R keeps two adjacent pooled blocks with the same fitted value 6 apart (iKnots 4, 5, 6, 9, 10) where p2a merges them (4 knots). The fitted values agree and are pinned."
         },
         {
           "finding": "STAT-52",
