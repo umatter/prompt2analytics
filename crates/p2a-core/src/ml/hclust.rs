@@ -38,7 +38,7 @@
 
 use crate::errors::{EconError, EconResult};
 use crate::options::Choices;
-use crate::resource::{checked_len, checkpoint, try_vec, try_zeros2};
+use crate::resource::{checked_len, checkpoint, try_vec, try_with_capacity, try_zeros2};
 use ndarray::{Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
 
@@ -685,7 +685,6 @@ fn hclust_owned(n: usize, mut diss: Vec<f64>, linkage: Linkage) -> EconResult<Hc
     const INF: f64 = f64::INFINITY;
     let idx = |i: usize, j: usize| condensed_index(n, i, j);
     let mut membr = try_vec(n, 1.0f64, WHAT)?;
-    let mut flag = try_vec(n, true, WHAT)?;
     let mut nn = try_vec(n, 0usize, WHAT)?;
     let mut disnn = try_vec(n, INF, WHAT)?;
     let mut ia = Vec::with_capacity(n - 1);
@@ -706,13 +705,19 @@ fn hclust_owned(n: usize, mut diss: Vec<f64>, linkage: Linkage) -> EconResult<Hc
         disnn[i] = dmin;
     }
 
+    // The clusters still alive (the Fortran's FLAG), ascending: every scan below visits them in the
+    // Fortran's index order, so ties resolve as in R, without walking the dead slots.
+    let mut active = try_with_capacity::<usize>(n, WHAT)?;
+    active.extend(0..n);
+
     let mut jj = usize::MAX;
     for _ in 0..n - 1 {
         checkpoint()?;
         let mut dmin = INF;
         let (mut im, mut jm) = (usize::MAX, usize::MAX);
-        for i in 0..n - 1 {
-            if flag[i] && disnn[i] < dmin {
+        // i < n - 1 as in the Fortran (disnn[n - 1] is never set)
+        for &i in &active {
+            if i < n - 1 && disnn[i] < dmin {
                 dmin = disnn[i];
                 im = i;
                 jm = nn[i];
@@ -725,13 +730,15 @@ fn hclust_owned(n: usize, mut diss: Vec<f64>, linkage: Linkage) -> EconResult<Hc
         ia.push(i2);
         ib.push(j2);
         crit.push(if ward2 { dmin.sqrt() } else { dmin });
-        flag[j2] = false;
+        if let Ok(p) = active.binary_search(&j2) {
+            active.remove(p);
+        }
 
         dmin = INF;
         let d12 = diss[idx(i2, j2)];
         let (m1, m2) = (membr[i2], membr[j2]);
-        for k in 0..n {
-            if !flag[k] || k == i2 {
+        for &k in &active {
+            if k == i2 {
                 continue;
             }
             let ind1 = if i2 < k { idx(i2, k) } else { idx(k, i2) };
@@ -768,16 +775,14 @@ fn hclust_owned(n: usize, mut diss: Vec<f64>, linkage: Linkage) -> EconResult<Hc
         disnn[i2] = dmin;
         nn[i2] = jj;
 
-        for i in 0..n - 1 {
-            if flag[i] && (nn[i] == i2 || nn[i] == j2) {
+        for (p, &i) in active.iter().enumerate() {
+            if i < n - 1 && (nn[i] == i2 || nn[i] == j2) {
                 let mut dm = INF;
-                for j in (i + 1)..n {
-                    if flag[j] {
-                        let v = diss[idx(i, j)];
-                        if v < dm {
-                            dm = v;
-                            jj = j;
-                        }
+                for &j in &active[p + 1..] {
+                    let v = diss[idx(i, j)];
+                    if v < dm {
+                        dm = v;
+                        jj = j;
                     }
                 }
                 nn[i] = jj;
