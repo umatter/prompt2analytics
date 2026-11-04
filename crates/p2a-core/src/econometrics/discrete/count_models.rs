@@ -2234,21 +2234,20 @@ fn fit_truncated_count_model(
     let y_var: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>()
         / variance_divisor(n, "hurdle model: variance of the positive counts")?;
 
-    // Workspaces of every iteration: the linear predictor, the gradient and the
-    // square-root-weighted design (the values the per-iteration arrays held).
-    let mut xb = Array1::<f64>::zeros(n);
-    let mut gradient = Array1::<f64>::zeros(k);
-    let mut wx = x.to_owned();
     for iter in 0..max_iter {
         resource::checkpoint()?;
         iterations = iter + 1;
 
-        ndarray::linalg::general_mat_vec_mul(1.0, x, &beta, 0.0, &mut xb);
-        gradient.fill(0.0);
+        let xb = x.dot(&beta);
+        let mu: Vec<f64> = xb.iter().map(|&v| v.exp()).collect();
+
+        // Compute gradient
+        let mut gradient = Array1::zeros(k);
+        let mut weights = Array1::zeros(n);
 
         for i in 0..n {
             let yi = y[i];
-            let mui = xb[i].exp();
+            let mui = mu[i];
 
             let (score_i, weight_i) = match model_type {
                 HurdleType::Poisson => {
@@ -2268,14 +2267,17 @@ fn fit_truncated_count_model(
             for j in 0..k {
                 gradient[j] += score_i * x[[i, j]];
             }
-            // Row i of the Hessian's factor: x_i * sqrt(w_i)
-            let w_sqrt = weight_i.sqrt();
-            for j in 0..k {
-                wx[[i, j]] = x[[i, j]] * w_sqrt;
-            }
+            weights[i] = weight_i;
         }
 
         // Compute Hessian
+        let mut wx = x.to_owned();
+        for i in 0..n {
+            let w_sqrt = weights[i].sqrt();
+            for j in 0..k {
+                wx[[i, j]] *= w_sqrt;
+            }
+        }
         let neg_hessian = wx.t().dot(&wx);
 
         let (delta, _) = equilibrated_newton_step(
