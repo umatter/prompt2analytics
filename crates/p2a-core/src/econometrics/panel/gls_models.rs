@@ -205,21 +205,7 @@ impl fmt::Display for PanelGlsResult {
         writeln!(f, "Sigma: {:.6}  RSS: {:.4}", self.sigma, self.rss)?;
 
         // The missing-value note is printed once, as the last line
-        let note = self.missing.note();
-        let shown: Vec<&String> = self
-            .warnings
-            .iter()
-            .filter(|w| note.as_deref() != Some(w.as_str()))
-            .collect();
-        if !shown.is_empty() {
-            writeln!(f, "\nWarnings:")?;
-            for warning in shown {
-                writeln!(f, "  - {}", warning)?;
-            }
-        }
-        if let Some(note) = note {
-            writeln!(f, "Missing values: {note}")?;
-        }
+        super::types::write_warnings_then_missing(f, "\nWarnings:", &self.warnings, &self.missing)?;
 
         Ok(())
     }
@@ -288,11 +274,11 @@ pub fn run_panel_gls(
     if let Some(note) = missing.note() {
         warnings.push(note);
     }
-    let y: Vec<f64> = cols.numeric(y_col).to_vec();
+    let y: &[f64] = cols.numeric(y_col);
     let entity = cols.factor(entity_col);
     let (entity_ids, n_groups) = entity_codes(entity);
-    let time_values: Vec<i64> = cols.time_index(time_col).to_vec();
-    let (row_time_idx, unique_times) = time_codes(&time_values);
+    let time_values: &[i64] = cols.time_index(time_col);
+    let (row_time_idx, unique_times) = time_codes(time_values);
     let n_periods = unique_times.len();
 
     let n = y.len();
@@ -327,7 +313,7 @@ pub fn run_panel_gls(
     let initial_resid = match model {
         PanelGlsModel::FixedEffects => {
             // Within transformation (demean by entity)
-            let y_arr = Array1::from(y.clone());
+            let y_arr = Array1::from(y.to_vec());
             let y_demeaned = demean_by_entity(&y_arr, &entity_ids, n_groups);
 
             let mut x_demeaned = Array2::<f64>::zeros((n, k));
@@ -351,7 +337,7 @@ pub fn run_panel_gls(
             // Simple OLS
             first_step_residuals(
                 x.view(),
-                ArrayView1::from(&y),
+                ArrayView1::from(y),
                 &dm.column_names,
                 &mut warnings,
             )?
@@ -476,7 +462,7 @@ pub fn run_panel_gls(
     let omega_inv = omega_s.inverse;
 
     // Step 3: GLS estimation
-    let y_arr = Array1::from(y.clone());
+    let y_arr = Array1::from(y.to_vec());
 
     // Compute GLS estimates using the formula:
     // beta_GLS = (X' * Omega_block^{-1} * X)^{-1} * (X' * Omega_block^{-1} * y)
@@ -993,6 +979,38 @@ mod tests {
                     .ends_with(&format!("Missing values: {note}")),
                 "{text}"
             );
+        }
+    }
+
+    /// The rows whose text firm id is missing (grunfeld_na.csv rows 77 and 133) are
+    /// dropped, not fitted as an 11th entity "".
+    #[test]
+    fn test_validate_na_panel_gls_missing_firm_id() {
+        let (_case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        let null_id = ds.df().column("firm_name").unwrap().is_null();
+        let mut df = early(ds.df());
+        df.vstack_mut(&ds.df().filter(&null_id).unwrap()).unwrap();
+        assert_eq!(df.height(), 103);
+        let complete = Dataset::new(df.drop_nulls::<String>(None).unwrap());
+        let ds = Dataset::new(df);
+        let note = "6 of 103 rows dropped because of missing values (inv: 2, firm_name: 2, \
+                    year: 2)";
+        for m in MODELS {
+            let fit = |d: &Dataset| {
+                run_panel_gls(
+                    d,
+                    "inv",
+                    &["value", "capital"],
+                    "firm_name",
+                    "year",
+                    Some(m),
+                )
+                .unwrap_or_else(|e| panic!("{m:?}: {e}"))
+            };
+            let r = fit(&ds);
+            assert_same_gls(&r, &fit(&complete));
+            assert_eq!(r.n_groups, 10, "{m:?}");
+            assert_eq!(r.missing.note().as_deref(), Some(note), "{m:?}");
         }
     }
 

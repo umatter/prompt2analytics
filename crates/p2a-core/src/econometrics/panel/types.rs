@@ -430,23 +430,33 @@ impl fmt::Display for PanelResult {
 
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-        // The missing-value note is printed once, as the last line
-        let note = self.missing.note();
-        let shown: Vec<&String> = self
-            .warnings
-            .iter()
-            .filter(|w| note.as_deref() != Some(w.as_str()))
-            .collect();
-        if !shown.is_empty() {
-            writeln!(f, "Warnings:")?;
-            for w in shown {
-                writeln!(f, "  - {w}")?;
-            }
-        }
-        if let Some(note) = note {
-            writeln!(f, "Missing values: {note}")?;
-        }
+        write_warnings_then_missing(f, "Warnings:", &self.warnings, &self.missing)?;
 
         Ok(())
     }
+}
+
+/// The warnings except the missing-value note under `header` ("  - " per line), then
+/// "Missing values: <note>" as the last line; nothing for an empty part.
+pub(crate) fn write_warnings_then_missing(
+    f: &mut fmt::Formatter<'_>,
+    header: &str,
+    warnings: &[String],
+    missing: &MissingSummary,
+) -> fmt::Result {
+    let note = missing.note();
+    let shown: Vec<&String> = warnings
+        .iter()
+        .filter(|w| note.as_deref() != Some(w.as_str()))
+        .collect();
+    if !shown.is_empty() {
+        writeln!(f, "{header}")?;
+        for w in shown {
+            writeln!(f, "  - {w}")?;
+        }
+    }
+    if let Some(note) = note {
+        writeln!(f, "Missing values: {note}")?;
+    }
+    Ok(())
 }
