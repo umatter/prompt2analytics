@@ -83,10 +83,10 @@
     },
     {
       "id": "discrete_multinom_nnet",
-      "name": "Multinomial logit as nnet::multinom, at the MLE (Newton), with aliasing refused and separation flagged",
+      "name": "Multinomial logit as nnet::multinom (Newton-polished MLE)",
       "category": "econometrics",
-      "reference": "nnet::multinom(y ~ x1 + x2) on overlapping three-category data, re-solved by Newton's method on the analytic score and information (*_tight); *_pkg = nnet at its default control",
-      "doc": "validation/econometrics/logit.md",
+      "reference": "nnet::multinom(y ~ x1 + x2), reltol 1e-16, re-solved by Newton's method; reference A and B; SEs from the analytic information (nnet's vcov agrees to 1e-6)",
+      "doc": "validation/econometrics/mlogit.md",
       "cases": [
         "disc_multinom_overlap"
       ],
@@ -97,19 +97,23 @@
         "p2a-core::validation_new_methods::test_validate_multinom_overlapping"
       ],
       "quantities": [
-        "coefficients and SEs per non-reference category",
+        "coefficients",
+        "SEs",
         "logLik",
         "AIC",
         "null logLik",
+        "n",
         "category counts",
-        "nnet's own estimates (coef_pkg)",
-        "scale-free convergence (x1 x 1e-6, x 1e6; iteration counts agree within one)",
-        "aliased regressor refused",
-        "reference category B through the crate-root API (refB_*)"
+        "reference category B through the crate-root API",
+        "scale-free convergence (x1 x 1e-6, x 1e6; iteration counts within one)",
+        "aliased regressor refused"
       ],
-      "tolerance": "coefficients Tol::iterative(1e-8), SEs Tol::iterative(1e-6) against the Newton-polished optimum; logLik, AIC Tol::stat(300); coef_pkg Tol::iterative(1e-4) (nnet stops 8.3e-6 off the MLE at its defaults)",
+      "tolerance": "coefficients 1e-8, SEs 1e-6 relative (iterative MLE, validation/README.md n = 300), logLik 1e-6; nnet at its default control cross-checked at 1e-4",
       "deviations": [],
-      "supersedes_legacy": []
+      "supersedes_legacy": [
+        "validation/expected/multinom_test.csv",
+        "validation/expected/multinom_4cat_test.csv"
+      ]
     },
     {
       "id": "discrete_count_domain_aliasing",
