@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::common::{compute_distance_matrix, try_distance_matrix};
+use super::common::try_distance_matrix;
 use crate::ml::extract::require_finite;
-use crate::ml::hclust::{Linkage, hclust_euclidean};
+use crate::ml::hclust::{Dissimilarity, HclustTree, Linkage, agnes_banner_order, hclust_euclidean};
+use crate::options::Choices;
 
 // =============================================================================
 // Helper functions
@@ -183,7 +184,7 @@ fn agglomerate(
 // DIANA (DIvisive ANAlysis)
 // =============================================================================
 
-/// Result of DIANA divisive hierarchical clustering.
+/// Result of DIANA divisive hierarchical clustering (`cluster::diana`).
 ///
 /// # References
 ///
@@ -193,20 +194,31 @@ fn agglomerate(
 ///   Source: <https://stat.ethz.ch/R-manual/R-devel/library/cluster/html/diana.html>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DianaResult {
-    /// Cluster assignments for each point (0 to n_clusters-1)
+    /// Cluster assignments for each point (0 to n_clusters-1): the full divisive tree cut into
+    /// `n_clusters` groups, as R's `cutree(as.hclust(diana(x)), k)` minus 1
     pub labels: Vec<usize>,
     /// Number of clusters
     pub n_clusters: usize,
-    /// Divisive coefficient (quality measure)
+    /// Divisive coefficient `dc` of the full tree (cluster's `bncoef`)
     pub divisive_coefficient: f64,
-    /// Split history: (cluster_split, new_cluster1, new_cluster2, diameter)
+    /// One entry per split of the full divisive tree, in split order: (0-based position in
+    /// `order` where the split cluster starts, size of its first part, size of its second part,
+    /// level of the split = the split cluster's diameter)
     pub merge_history: Vec<(usize, usize, usize, f64)>,
-    /// Heights at which splits occurred
+    /// The levels of `merge_history`, in split order
     pub heights: Vec<f64>,
-    /// Order of observations in the dendrogram
+    /// Order of observations in the banner (R's `$order` - 1)
     pub order: Vec<usize>,
     /// Number of observations
     pub n: usize,
+    /// The banner (R's `$height`): `banner[j]` is the level at which `order[j]` and
+    /// `order[j + 1]` are separated
+    #[serde(default)]
+    pub banner: Vec<f64>,
+    /// R's `$merge`: the agglomerative reading of the divisive tree (`-i` observation `i`,
+    /// `+s` the cluster of step `s`, both 1-based)
+    #[serde(default)]
+    pub merge: Vec<(i64, i64)>,
 }
 
 impl std::fmt::Display for DianaResult {
@@ -235,30 +247,28 @@ impl std::fmt::Display for DianaResult {
     }
 }
 
-/// Run DIANA divisive hierarchical clustering.
+/// Run DIANA divisive hierarchical clustering: `cluster::diana(x)`.
 ///
-/// DIANA is a divisive (top-down) hierarchical clustering algorithm that
-/// starts with all observations in one cluster and recursively splits
-/// the most heterogeneous cluster.
+/// DIANA starts with all observations in one cluster and splits, at every step, the cluster of
+/// largest diameter: the object with the largest average dissimilarity to the others starts a
+/// splinter group, and objects move to it while their average dissimilarity to the rest
+/// exceeds that to the splinter group. The full divisive tree is always built (as R does), so
+/// the divisive coefficient, the banner, the order and the merge matrix equal `cluster::diana`;
+/// `n_clusters` only cuts it (`cutree(as.hclust(diana(x)), k)`).
+///
+/// This follows cluster's `splyt` (`twins.c`, cluster 2.1.6) rule for rule (strict
+/// comparisons, the ordered insertion, the switch of the two parts, the order of the next
+/// cluster to split). The averages are kept as running sums per object, updated in O(m) when an
+/// object moves, instead of being recomputed: a split of `m` objects costs O(m² + m·moves),
+/// the full tree O(n²) on balanced data and O(n³) on chain-like data.
 ///
 /// # Arguments
-/// * `data` - Input data matrix (n_samples x n_features)
-/// * `n_clusters` - Number of clusters to form (default: 2)
-///
-/// # Algorithm
-///
-/// 1. Start with all points in one cluster
-/// 2. Find the cluster with largest diameter
-/// 3. Find the "splinter group": point with largest average dissimilarity
-/// 4. Move points to splinter group if closer to it than to rest
-/// 5. Repeat until desired number of clusters
-///
-/// # Returns
-/// * `DianaResult` containing cluster assignments and dendrogram info
+/// * `data` - Input data matrix (n_samples x n_features); refused if any value is not finite
+/// * `n_clusters` - Number of clusters to cut the tree into (default: 2)
 ///
 /// # References
 ///
-/// - Kaufman & Rousseeuw (1990). "Finding Groups in Data".
+/// - Kaufman & Rousseeuw (1990). "Finding Groups in Data", chapter 6.
 pub fn diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> EconResult<DianaResult> {
     let n = data.nrows();
 
@@ -272,205 +282,241 @@ pub fn diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> EconResult<Dia
             message: format!("n_clusters must be between 1 and {}", n),
         });
     }
+    if n < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("DIANA needs at least 2 observations (got {n})"),
+        });
+    }
+    require_finite(&data, "DIANA")
+        .map_err(|message| EconError::InvalidSpecification { message })?;
+    let d = Dissimilarity::euclidean(data, "DIANA dissimilarities")?;
+    let cs = d.as_slice().iter().cloned().fold(0.0, f64::max);
+    // 1-based objects and positions, as in twins.c
+    let dd = |a: usize, b: usize| d.get(a - 1, b - 1);
+    let what = "DIANA";
+    let mut kwan = try_vec(n + 1, 0usize, what)?;
+    let mut ban = try_vec(n + 1, 0.0f64, what)?;
+    let mut ner: Vec<usize> = (0..=n).collect();
+    // running sums per object: dissimilarities to the rest and to the splinter group
+    let mut sum_rest = try_vec(n + 1, 0.0f64, what)?;
+    let mut sum_spl = try_vec(n + 1, 0.0f64, what)?;
+    let mut merge_history = Vec::with_capacity(n - 1);
 
-    // Compute distance matrix
-    let distances = compute_distance_matrix(&data);
-
-    // Initialize: all points in cluster 0
-    let mut labels = vec![0usize; n];
-    let mut clusters: Vec<Vec<usize>> = vec![(0..n).collect()];
-    let mut merge_history = Vec::new();
-    let mut heights = Vec::new();
-    let mut next_cluster_id = 1;
-
-    // Divisive loop
-    while clusters.len() < target_k {
-        // Find cluster with largest diameter to split
-        let (split_idx, diameter) = find_largest_diameter_cluster(&clusters, &distances);
-
-        if clusters[split_idx].len() < 2 {
-            break; // Cannot split singleton
+    kwan[1] = n;
+    let mut ja = 1usize;
+    let mut nclu = 1usize;
+    loop {
+        checkpoint()?;
+        let jb = ja + kwan[ja] - 1;
+        if kwan[ja] == 2 {
+            kwan[ja] = 1;
+            kwan[jb] = 1;
+            ban[jb] = dd(ner[ja], ner[jb]);
+            merge_history.push((ja - 1, 1, 1, ban[jb]));
+        } else {
+            // One pass: each object's sum of dissimilarities to the cluster (in position order)
+            // and the cluster's diameter.
+            let mut bygsd = -1.0;
+            let mut lndsd = ja;
+            let mut diameter = 0.0f64;
+            for l in ja..=jb {
+                let mut sd = 0.0;
+                for j in ja..=jb {
+                    let v = dd(ner[l], ner[j]);
+                    sd += v;
+                    if j > l && diameter < v {
+                        diameter = v;
+                    }
+                }
+                sum_rest[ner[l]] = sd;
+                sum_spl[ner[l]] = 0.0;
+                if bygsd < sd {
+                    bygsd = sd;
+                    lndsd = l;
+                }
+            }
+            let move_object =
+                |o: usize, sum_rest: &mut [f64], sum_spl: &mut [f64], ner: &[usize]| {
+                    for &j in &ner[ja..=jb] {
+                        let v = dd(j, o);
+                        sum_rest[j] -= v;
+                        sum_spl[j] += v;
+                    }
+                };
+            kwan[ja] -= 1;
+            kwan[jb] = 1;
+            if jb != lndsd {
+                let lchan = ner[lndsd];
+                ner.copy_within(lndsd + 1..=jb, lndsd);
+                ner[jb] = lchan;
+            }
+            move_object(ner[jb], &mut sum_rest, &mut sum_spl, &ner);
+            let mut splyn = 0usize;
+            let mut jma = jb - 1;
+            let mut jmb;
+            loop {
+                splyn += 1;
+                let rest = (jma - ja) as f64;
+                let mut jaway = ja;
+                let mut bdyff = -1.0;
+                for l in ja..=jma {
+                    let da = sum_rest[ner[l]] / rest;
+                    let db = sum_spl[ner[l]] / splyn as f64;
+                    if bdyff < da - db {
+                        bdyff = da - db;
+                        jaway = l;
+                    }
+                }
+                jmb = jma + 1;
+                if bdyff <= 0.0 {
+                    break;
+                }
+                if jma != jaway {
+                    let lchan = ner[jaway];
+                    ner.copy_within(jaway + 1..=jma, jaway);
+                    ner[jma] = lchan;
+                }
+                move_object(ner[jma], &mut sum_rest, &mut sum_spl, &ner);
+                for lxx in jmb..=jb {
+                    let l1 = lxx - 1;
+                    if ner[l1] < ner[lxx] {
+                        break;
+                    }
+                    ner.swap(l1, lxx);
+                }
+                kwan[ja] -= 1;
+                kwan[jma] = kwan[jmb] + 1;
+                kwan[jmb] = 0;
+                jma -= 1;
+                jmb = jma + 1;
+                if jma == ja {
+                    break;
+                }
+            }
+            // the part holding the smaller object index comes first
+            if ner[ja] >= ner[jmb] {
+                let mut lxxa = ja;
+                for lgrb in jmb..=jb {
+                    lxxa += 1;
+                    let lchan = ner[lgrb];
+                    ner.copy_within(lxxa - 1..lgrb, lxxa);
+                    ner[lxxa - 1] = lchan;
+                }
+                let llq = kwan[jmb];
+                kwan[jmb] = 0;
+                jma = ja + jb - jma - 1;
+                jmb = jma + 1;
+                kwan[jmb] = kwan[ja];
+                kwan[ja] = llq;
+            }
+            ban[jmb] = if nclu == 1 { cs } else { diameter };
+            merge_history.push((ja - 1, jmb - ja, jb - jmb + 1, ban[jmb]));
         }
-
-        // Split the cluster
-        let (group1, group2) = diana_split(&clusters[split_idx], &distances);
-
-        if group1.is_empty() || group2.is_empty() {
-            break; // Split failed
+        nclu += 1;
+        if nclu >= n {
+            break;
         }
-
-        // Update labels
-        let new_cluster_id = next_cluster_id;
-        next_cluster_id += 1;
-
-        for &idx in &group2 {
-            labels[idx] = new_cluster_id;
+        // the next cluster to split: the next block of more than one object after this one,
+        // else the first such block from the start
+        let mut found = false;
+        if jb != n {
+            let mut ja2 = ja;
+            loop {
+                ja2 += kwan[ja2].max(1);
+                if ja2 > n {
+                    break;
+                }
+                if kwan[ja2] > 1 {
+                    ja = ja2;
+                    found = true;
+                    break;
+                }
+            }
         }
-
-        // Record split
-        merge_history.push((split_idx, split_idx, new_cluster_id, diameter));
-        heights.push(diameter);
-
-        // Update clusters
-        clusters[split_idx] = group1;
-        clusters.push(group2);
+        if !found {
+            ja = 1;
+            while kwan[ja] <= 1 {
+                ja += kwan[ja].max(1);
+                if ja > n {
+                    return Err(EconError::Computation(
+                        "DIANA: no cluster left to split".into(),
+                    ));
+                }
+            }
+        }
     }
 
-    // Renumber labels to be consecutive
-    let mut label_map: HashMap<usize, usize> = HashMap::new();
-    let mut next_label = 0;
-    for label in &mut labels {
-        if !label_map.contains_key(label) {
-            label_map.insert(*label, next_label);
-            next_label += 1;
+    // R's merge from the banner: n - 1 passes, each joining the two neighbours in the banner
+    // separated at the lowest level (the last such position on ties), as twins.c.
+    let mut parent: Vec<usize> = (0..=n).collect();
+    let mut step_of_root = vec![0i64; n + 1];
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
         }
-        *label = label_map[label];
+        x
+    }
+    let mut used = vec![false; n + 1];
+    let mut merge = Vec::with_capacity(n - 1);
+    let mut height = Vec::with_capacity(n - 1);
+    for step in 1..n {
+        let mut dmin = cs;
+        let mut jj = 0usize;
+        for j in 2..=n {
+            if !used[j] && dmin >= ban[j] {
+                dmin = ban[j];
+                jj = j;
+            }
+        }
+        if jj == 0 {
+            return Err(EconError::Computation(
+                "DIANA: the banner levels exceed the data diameter".into(),
+            ));
+        }
+        used[jj] = true;
+        let ra = find(&mut parent, jj - 1);
+        let rb = find(&mut parent, jj);
+        let side = |r: usize, pos: usize| {
+            if step_of_root[r] > 0 {
+                step_of_root[r]
+            } else {
+                -(ner[pos] as i64)
+            }
+        };
+        let (l1, l2) = (side(ra, jj - 1), side(rb, jj));
+        parent[rb] = ra;
+        step_of_root[ra] = step as i64;
+        merge.push((l1, l2));
+        height.push(ban[jj]);
     }
 
-    // Compute divisive coefficient
-    let divisive_coefficient = compute_diana_coefficient(&heights);
+    // dc: cluster's bncoef on the banner
+    let sup = ban[2..=n].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let mut cf = 0.0;
+    for k in 0..n {
+        let kearl = k.max(1);
+        let kafte = (k + 1).min(n - 1);
+        cf += 1.0 - ban[kearl + 1].min(ban[kafte + 1]) / sup;
+    }
+    let divisive_coefficient = cf / n as f64;
 
-    // Compute order (simple ordering for now)
-    let order: Vec<usize> = (0..n).collect();
+    let order: Vec<usize> = ner[1..=n].iter().map(|&o| o - 1).collect();
+    let tree = HclustTree::from_parts(n, merge.clone(), height, order.clone())?;
+    let labels = tree.cut_k(target_k)?.into_iter().map(|l| l - 1).collect();
+    let heights = merge_history.iter().map(|m| m.3).collect();
 
     Ok(DianaResult {
         labels,
-        n_clusters: clusters.len(),
+        n_clusters: target_k,
         divisive_coefficient,
         merge_history,
         heights,
         order,
         n,
+        banner: ban[2..=n].to_vec(),
+        merge,
     })
-}
-
-/// Find the cluster with the largest diameter.
-fn find_largest_diameter_cluster(clusters: &[Vec<usize>], distances: &Array2<f64>) -> (usize, f64) {
-    let mut max_diameter = 0.0f64;
-    let mut max_idx = 0;
-
-    for (idx, cluster) in clusters.iter().enumerate() {
-        if cluster.len() < 2 {
-            continue;
-        }
-
-        let diameter = compute_cluster_diameter(cluster, distances);
-        if diameter > max_diameter {
-            max_diameter = diameter;
-            max_idx = idx;
-        }
-    }
-
-    (max_idx, max_diameter)
-}
-
-/// Compute the diameter of a cluster (max pairwise distance).
-fn compute_cluster_diameter(cluster: &[usize], distances: &Array2<f64>) -> f64 {
-    let mut max_dist = 0.0f64;
-    for (i, &idx_i) in cluster.iter().enumerate() {
-        for &idx_j in cluster.iter().skip(i + 1) {
-            max_dist = max_dist.max(distances[[idx_i, idx_j]]);
-        }
-    }
-    max_dist
-}
-
-/// Split a cluster using DIANA algorithm.
-fn diana_split(cluster: &[usize], distances: &Array2<f64>) -> (Vec<usize>, Vec<usize>) {
-    if cluster.len() < 2 {
-        return (cluster.to_vec(), Vec::new());
-    }
-
-    // Find the object with largest average dissimilarity to rest
-    let mut max_avg_dissim = f64::NEG_INFINITY;
-    let mut splinter_idx = 0;
-
-    for (i, &idx_i) in cluster.iter().enumerate() {
-        let avg_dissim: f64 = cluster
-            .iter()
-            .filter(|&&j| j != idx_i)
-            .map(|&j| distances[[idx_i, j]])
-            .sum::<f64>()
-            / (cluster.len() - 1) as f64;
-
-        if avg_dissim > max_avg_dissim {
-            max_avg_dissim = avg_dissim;
-            splinter_idx = i;
-        }
-    }
-
-    // Initialize splinter group with the most dissimilar object
-    let mut splinter = vec![cluster[splinter_idx]];
-    let mut remaining: Vec<usize> = cluster
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != splinter_idx)
-        .map(|(_, &x)| x)
-        .collect();
-
-    // Iteratively move objects to splinter group
-    loop {
-        if remaining.is_empty() {
-            break;
-        }
-
-        // For each remaining object, compute:
-        // d_i = avg distance to remaining - avg distance to splinter
-        let mut best_diff = f64::NEG_INFINITY;
-        let mut best_idx = None;
-
-        for (i, &idx) in remaining.iter().enumerate() {
-            let avg_to_remaining = if remaining.len() > 1 {
-                remaining
-                    .iter()
-                    .filter(|&&j| j != idx)
-                    .map(|&j| distances[[idx, j]])
-                    .sum::<f64>()
-                    / (remaining.len() - 1) as f64
-            } else {
-                0.0
-            };
-
-            let avg_to_splinter = if !splinter.is_empty() {
-                splinter.iter().map(|&j| distances[[idx, j]]).sum::<f64>() / splinter.len() as f64
-            } else {
-                f64::INFINITY
-            };
-
-            let diff = avg_to_remaining - avg_to_splinter;
-            if diff > best_diff && diff > 0.0 {
-                best_diff = diff;
-                best_idx = Some(i);
-            }
-        }
-
-        match best_idx {
-            Some(i) => {
-                let idx = remaining.remove(i);
-                splinter.push(idx);
-            }
-            None => break, // No more objects want to move
-        }
-    }
-
-    (remaining, splinter)
-}
-
-/// Compute DIANA divisive coefficient.
-fn compute_diana_coefficient(heights: &[f64]) -> f64 {
-    if heights.is_empty() {
-        return 0.0;
-    }
-
-    // DC is based on the normalized height at which objects are separated
-    let max_height = heights.iter().cloned().fold(0.0, f64::max);
-    if max_height < 1e-10 {
-        return 0.0;
-    }
-
-    let normalized_heights: Vec<f64> = heights.iter().map(|&h| 1.0 - h / max_height).collect();
-
-    normalized_heights.iter().sum::<f64>() / normalized_heights.len() as f64
 }
 
 /// Convenience wrapper for diana.
@@ -540,7 +586,10 @@ impl std::fmt::Display for AgnesResult {
     }
 }
 
-/// Linkage method for AGNES.
+/// Linkage method for AGNES (`cluster::agnes`).
+///
+/// `Ward` is `agnes(method = "ward")`, which is `hclust`'s ward.D2; `Weighted` is WPGMA
+/// (`hclust`'s mcquitty).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AgnesLinkage {
     /// Average linkage (UPGMA)
@@ -556,49 +605,57 @@ pub enum AgnesLinkage {
     Weighted,
 }
 
-impl std::str::FromStr for AgnesLinkage {
-    type Err = String;
+crate::option_enum!(
+    AgnesLinkage,
+    Choices {
+        option: "linkage",
+        values: &[
+            (&["average", "upgma"], AgnesLinkage::Average),
+            (&["single"], AgnesLinkage::Single),
+            (&["complete"], AgnesLinkage::Complete),
+            (&["ward"], AgnesLinkage::Ward),
+            (&["weighted", "wpgma", "mcquitty"], AgnesLinkage::Weighted),
+        ],
+    }
+);
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "average" | "upgma" => Ok(AgnesLinkage::Average),
-            "single" => Ok(AgnesLinkage::Single),
-            "complete" => Ok(AgnesLinkage::Complete),
-            "ward" => Ok(AgnesLinkage::Ward),
-            "weighted" | "wpgma" => Ok(AgnesLinkage::Weighted),
-            _ => Err(format!(
-                "Unknown linkage: {}. Use average, single, complete, ward, or weighted",
-                s
-            )),
+impl From<AgnesLinkage> for Linkage {
+    /// The `stats::hclust` method of each AGNES method (agnes' Ward is ward.D2).
+    fn from(l: AgnesLinkage) -> Linkage {
+        match l {
+            AgnesLinkage::Average => Linkage::Average,
+            AgnesLinkage::Single => Linkage::Single,
+            AgnesLinkage::Complete => Linkage::Complete,
+            AgnesLinkage::Ward => Linkage::Ward,
+            AgnesLinkage::Weighted => Linkage::Mcquitty,
         }
     }
 }
 
-/// Run AGNES agglomerative hierarchical clustering.
+/// Run AGNES agglomerative hierarchical clustering: `cluster::agnes(x, method)`.
 ///
-/// AGNES is an agglomerative (bottom-up) hierarchical clustering algorithm
-/// that starts with each observation in its own cluster and iteratively
-/// merges the closest pair of clusters.
+/// The full tree is built by the shared core [`crate::ml::hclust`] and cut into `n_clusters`
+/// groups. On data without exactly tied dissimilarities the tree equals `cluster::agnes`'s
+/// (merges and heights), and `order` is agnes' banner order. On ties the core merges the first
+/// tied pair, as `stats::hclust` does, while `cluster::agnes` merges the last, so the order of
+/// tied merges can differ from R's `agnes`.
+///
+/// The agglomerative coefficient is `ac = mean(1 - m_i / max height)`, with `m_i` the height at
+/// which observation `i` first joins a cluster (cluster's `bncoef`); it is a property of the
+/// full tree and does not depend on `n_clusters`.
 ///
 /// # Arguments
-/// * `data` - Input data matrix (n_samples x n_features)
-/// * `n_clusters` - Number of clusters to form (default: 2)
+/// * `data` - Input data matrix (n_samples x n_features); refused if any value is not finite
+/// * `n_clusters` - Number of clusters to cut the tree into (default: 2)
 /// * `method` - Linkage method (default: average)
 ///
-/// # Algorithm
-///
-/// 1. Start with n clusters (each observation is a cluster)
-/// 2. Compute distance between all pairs of clusters
-/// 3. Merge the two closest clusters
-/// 4. Update distances using Lance-Williams formula
-/// 5. Repeat until desired number of clusters
-///
 /// # Returns
-/// * `AgnesResult` containing cluster assignments and dendrogram info
+/// * `AgnesResult`: `merge` is the full tree in SciPy linkage form (ids `< n` observations,
+///   `n + s` the cluster of merge `s`), `heights` the merge heights in merge order
 ///
 /// # References
 ///
-/// - Kaufman & Rousseeuw (1990). "Finding Groups in Data".
+/// - Kaufman & Rousseeuw (1990). "Finding Groups in Data", chapter 5.
 pub fn agnes(
     data: ArrayView2<f64>,
     n_clusters: Option<usize>,
@@ -614,86 +671,31 @@ pub fn agnes(
     if target_k == 0 || target_k > n {
         return Err(format!("n_clusters must be between 1 and {}", n));
     }
+    if n < 2 {
+        return Err(format!("AGNES needs at least 2 observations (got {n})"));
+    }
+    require_finite(&data, "AGNES")?;
 
     let linkage = method.unwrap_or(AgnesLinkage::Average);
-
-    // Compute distance matrix
-    let distances = try_distance_matrix(&data, "AGNES distance matrix")?;
-
-    let mut height_per_obs: Vec<f64> = vec![0.0; n];
-
-    // Agglomerative loop
-    let agglomeration = agglomerate(
-        distances,
-        target_k,
-        |lw| agnes_lance_williams(linkage, lw),
-        |members1, members2, height| {
-            // Update height for observations
-            for &idx in members1.iter().chain(members2) {
-                height_per_obs[idx] = height_per_obs[idx].max(height);
-            }
-        },
-    )?;
-    let active_clusters = agglomeration.active;
-    let cluster_members = agglomeration.members;
-    let merge_history = agglomeration.merges;
-    let heights: Vec<f64> = merge_history.iter().map(|m| m.2).collect();
-
-    // Assign final labels
-    let mut labels = vec![0usize; n];
-    for (cluster_label, &cluster_id) in active_clusters.iter().enumerate() {
-        for &idx in &cluster_members[cluster_id] {
-            labels[idx] = cluster_label;
-        }
-    }
-
-    // Compute agglomerative coefficient
-    let max_height = heights.iter().cloned().fold(0.0, f64::max);
-    let agglomerative_coefficient = if max_height > 1e-10 {
-        let sum: f64 = height_per_obs.iter().map(|&h| 1.0 - h / max_height).sum();
-        sum / n as f64
-    } else {
-        0.0
-    };
-
-    // Simple ordering
-    let order: Vec<usize> = (0..n).collect();
+    let tree = hclust_euclidean(data, linkage.into(), "AGNES dissimilarities")
+        .map_err(|e| e.to_string())?;
+    let labels = tree
+        .cut_k(target_k)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|l| l - 1)
+        .collect();
 
     Ok(AgnesResult {
         labels,
-        n_clusters: active_clusters.len(),
-        agglomerative_coefficient,
-        merge: merge_history,
-        heights,
-        order,
+        n_clusters: target_k,
+        agglomerative_coefficient: tree.agglomerative_coefficient(),
+        merge: tree.scipy_linkage(),
+        heights: tree.height().to_vec(),
+        order: agnes_banner_order(&tree),
         method: format!("{:?}", linkage).to_lowercase(),
         n,
     })
-}
-
-/// AGNES's Lance-Williams update for `linkage`.
-fn agnes_lance_williams(linkage: AgnesLinkage, lw: &LanceWilliams) -> f64 {
-    let LanceWilliams {
-        d_c1,
-        d_c2,
-        d_12,
-        n1,
-        n2,
-        n_other,
-    } = *lw;
-    match linkage {
-        AgnesLinkage::Single => d_c1.min(d_c2),
-        AgnesLinkage::Complete => d_c1.max(d_c2),
-        AgnesLinkage::Average => (n1 * d_c1 + n2 * d_c2) / (n1 + n2),
-        AgnesLinkage::Weighted => (d_c1 + d_c2) / 2.0,
-        AgnesLinkage::Ward => {
-            let n_total = n1 + n2 + n_other;
-            let alpha1 = (n1 + n_other) / n_total;
-            let alpha2 = (n2 + n_other) / n_total;
-            let beta = -n_other / n_total;
-            (alpha1 * d_c1.powi(2) + alpha2 * d_c2.powi(2) + beta * d_12.powi(2)).sqrt()
-        }
-    }
 }
 
 /// Convenience wrapper for agnes.
@@ -702,7 +704,10 @@ pub fn run_agnes(
     n_clusters: Option<usize>,
     method: Option<&str>,
 ) -> Result<AgnesResult, String> {
-    let linkage = method.map(|m| m.parse::<AgnesLinkage>()).transpose()?;
+    let linkage = method
+        .map(|m| m.parse::<AgnesLinkage>())
+        .transpose()
+        .map_err(|e| e.to_string())?;
     agnes(data, n_clusters, linkage)
 }
 
@@ -1381,6 +1386,7 @@ pub fn run_fastcluster(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ml::hclust::Dissimilarity;
     use crate::ml::hclust::test_util::*;
     use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
@@ -1593,7 +1599,8 @@ mod tests {
     fn agnes_distance_matrix_is_fallible_and_cancellable() {
         let mut rng = StdRng::seed_from_u64(3);
         let data = Array2::from_shape_fn((100, 2), |_| rng.r#gen::<f64>());
-        let e = with_alloc_ceiling(Some(40_000), || agnes(data.view(), Some(1), None)).unwrap_err(); // 80,000 B needed
+        // condensed triangle: 39,600 B needed
+        let e = with_alloc_ceiling(Some(20_000), || agnes(data.view(), Some(1), None)).unwrap_err();
         assert!(e.contains("limit"), "{e}");
         let e = with_budget(cancelled(), || agnes(data.view(), Some(2), None)).unwrap_err();
         assert!(e.contains("cancelled"), "{e}");
@@ -1655,376 +1662,6 @@ mod tests {
         })
         .unwrap_err();
         assert!(e.contains("cancelled"), "{e}");
-    }
-
-    /// Verbatim copy of `agnes` before the in-place engine (rewired to the
-    /// reference helpers below); the reference for
-    /// `in_place_engine_matches_reference`.
-    fn reference_agnes(
-        data: ArrayView2<f64>,
-        n_clusters: Option<usize>,
-        method: Option<AgnesLinkage>,
-    ) -> Result<AgnesResult, String> {
-        let n = data.nrows();
-
-        if n == 0 {
-            return Err("Empty data".to_string());
-        }
-
-        let target_k = n_clusters.unwrap_or(2);
-        if target_k == 0 || target_k > n {
-            return Err(format!("n_clusters must be between 1 and {}", n));
-        }
-
-        let linkage = method.unwrap_or(AgnesLinkage::Average);
-
-        // Compute distance matrix
-        let distances = compute_distance_matrix(&data);
-
-        // Initialize: each point in its own cluster
-        let mut cluster_members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-        let mut active_clusters: Vec<usize> = (0..n).collect();
-        let mut merge_history = Vec::new();
-        let mut heights = Vec::new();
-        let mut height_per_obs: Vec<f64> = vec![0.0; n];
-
-        // Initialize cluster distances
-        let mut cluster_dist = distances.clone();
-
-        let mut next_cluster = n;
-
-        // Agglomerative loop
-        while active_clusters.len() > target_k {
-            // Find closest pair of clusters
-            let (c1_idx, c2_idx, min_dist) =
-                reference_find_closest_pair(&active_clusters, &cluster_dist)?;
-
-            let c1 = active_clusters[c1_idx];
-            let c2 = active_clusters[c2_idx];
-
-            // Record merge
-            merge_history.push((
-                c1,
-                c2,
-                min_dist,
-                cluster_members[c1].len() + cluster_members[c2].len(),
-            ));
-            heights.push(min_dist);
-
-            // Update height for observations
-            for &idx in &cluster_members[c1] {
-                height_per_obs[idx] = height_per_obs[idx].max(min_dist);
-            }
-            for &idx in &cluster_members[c2] {
-                height_per_obs[idx] = height_per_obs[idx].max(min_dist);
-            }
-
-            // Merge clusters
-            let mut new_members = cluster_members[c1].clone();
-            new_members.extend(&cluster_members[c2]);
-
-            // Update distances using Lance-Williams formula
-            reference_update_agnes_distances(
-                &mut cluster_dist,
-                &cluster_members,
-                &active_clusters,
-                c1,
-                c2,
-                next_cluster,
-                linkage,
-            );
-
-            // Update cluster tracking
-            cluster_members.push(new_members);
-            cluster_members[c1] = Vec::new();
-            cluster_members[c2] = Vec::new();
-
-            // Remove c1 and c2 from active, add new cluster
-            // Remove in reverse order to avoid index shift issues
-            let remove_first = c1_idx.max(c2_idx);
-            let remove_second = c1_idx.min(c2_idx);
-            active_clusters.remove(remove_first);
-            active_clusters.remove(remove_second);
-            active_clusters.push(next_cluster);
-
-            next_cluster += 1;
-        }
-
-        // Assign final labels
-        let mut labels = vec![0usize; n];
-        for (cluster_label, &cluster_id) in active_clusters.iter().enumerate() {
-            for &idx in &cluster_members[cluster_id] {
-                labels[idx] = cluster_label;
-            }
-        }
-
-        // Compute agglomerative coefficient
-        let max_height = heights.iter().cloned().fold(0.0, f64::max);
-        let agglomerative_coefficient = if max_height > 1e-10 {
-            let sum: f64 = height_per_obs.iter().map(|&h| 1.0 - h / max_height).sum();
-            sum / n as f64
-        } else {
-            0.0
-        };
-
-        // Simple ordering
-        let order: Vec<usize> = (0..n).collect();
-
-        Ok(AgnesResult {
-            labels,
-            n_clusters: active_clusters.len(),
-            agglomerative_coefficient,
-            merge: merge_history,
-            heights,
-            order,
-            method: format!("{:?}", linkage).to_lowercase(),
-            n,
-        })
-    }
-
-    /// Verbatim copy of `find_closest_pair` before the in-place engine.
-    fn reference_find_closest_pair(
-        active: &[usize],
-        dist: &Array2<f64>,
-    ) -> Result<(usize, usize, f64), String> {
-        let mut min_dist = f64::INFINITY;
-        let mut best_pair = (0, 0);
-
-        for i in 0..active.len() {
-            for j in (i + 1)..active.len() {
-                let d = dist[[active[i], active[j]]];
-                if d < min_dist {
-                    min_dist = d;
-                    best_pair = (i, j);
-                }
-            }
-        }
-
-        if min_dist.is_infinite() {
-            return Err("No valid cluster pair found".to_string());
-        }
-
-        Ok((best_pair.0, best_pair.1, min_dist))
-    }
-
-    /// Verbatim copy of `update_agnes_distances` before the in-place engine.
-    fn reference_update_agnes_distances(
-        dist: &mut Array2<f64>,
-        members: &[Vec<usize>],
-        active: &[usize],
-        c1: usize,
-        c2: usize,
-        new_cluster: usize,
-        linkage: AgnesLinkage,
-    ) {
-        let n1 = members[c1].len() as f64;
-        let n2 = members[c2].len() as f64;
-
-        // Extend distance matrix if needed
-        let current_size = dist.nrows();
-        if new_cluster >= current_size {
-            let mut new_dist = Array2::zeros((new_cluster + 1, new_cluster + 1));
-            for i in 0..current_size {
-                for j in 0..current_size {
-                    new_dist[[i, j]] = dist[[i, j]];
-                }
-            }
-            *dist = new_dist;
-        }
-
-        // Lance-Williams parameters based on linkage method
-        for &other in active {
-            if other == c1 || other == c2 {
-                continue;
-            }
-
-            let d_c1 = dist[[c1, other]];
-            let d_c2 = dist[[c2, other]];
-            let d_12 = dist[[c1, c2]];
-            let n_other = members[other].len() as f64;
-
-            let new_dist = match linkage {
-                AgnesLinkage::Single => d_c1.min(d_c2),
-                AgnesLinkage::Complete => d_c1.max(d_c2),
-                AgnesLinkage::Average => (n1 * d_c1 + n2 * d_c2) / (n1 + n2),
-                AgnesLinkage::Weighted => (d_c1 + d_c2) / 2.0,
-                AgnesLinkage::Ward => {
-                    let n_total = n1 + n2 + n_other;
-                    let alpha1 = (n1 + n_other) / n_total;
-                    let alpha2 = (n2 + n_other) / n_total;
-                    let beta = -n_other / n_total;
-                    (alpha1 * d_c1.powi(2) + alpha2 * d_c2.powi(2) + beta * d_12.powi(2)).sqrt()
-                }
-            };
-
-            dist[[new_cluster, other]] = new_dist;
-            dist[[other, new_cluster]] = new_dist;
-        }
-    }
-
-    /// Verbatim copy of `hierarchical_clustering_merge` before the in-place
-    /// engine (rewired to the reference helpers).
-    fn reference_hierarchical_clustering_merge(
-        data: &ArrayView2<f64>,
-        method: &str,
-    ) -> Result<(Vec<(i32, i32)>, Vec<f64>), String> {
-        let n = data.nrows();
-
-        // Compute distance matrix
-        let distances = compute_distance_matrix(data);
-
-        // Initialize: each point in its own cluster
-        let mut cluster_members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-        let mut active: Vec<usize> = (0..n).collect();
-        let mut merge = Vec::new();
-        let mut heights = Vec::new();
-        let mut cluster_dist = distances.clone();
-        let mut next_cluster = n;
-
-        // Perform agglomerative clustering
-        while active.len() > 1 {
-            // Find closest pair
-            let (c1_idx, c2_idx, min_dist) = reference_find_closest_pair(&active, &cluster_dist)?;
-
-            let c1 = active[c1_idx];
-            let c2 = active[c2_idx];
-
-            // Record merge (using R-style indexing: negative for leaves, positive for internal)
-            let m1 = if c1 < n {
-                -((c1 as i32) + 1)
-            } else {
-                (c1 - n + 1) as i32
-            };
-            let m2 = if c2 < n {
-                -((c2 as i32) + 1)
-            } else {
-                (c2 - n + 1) as i32
-            };
-            merge.push((m1, m2));
-            heights.push(min_dist);
-
-            // Merge clusters
-            let mut new_members = cluster_members[c1].clone();
-            new_members.extend(&cluster_members[c2]);
-
-            // Update distances
-            reference_update_hclust_distances(
-                &mut cluster_dist,
-                &cluster_members,
-                &active,
-                c1,
-                c2,
-                next_cluster,
-                method,
-            );
-
-            // Update tracking
-            cluster_members.push(new_members);
-            cluster_members[c1] = Vec::new();
-            cluster_members[c2] = Vec::new();
-
-            let remove_first = c1_idx.max(c2_idx);
-            let remove_second = c1_idx.min(c2_idx);
-            active.remove(remove_first);
-            active.remove(remove_second);
-            active.push(next_cluster);
-
-            next_cluster += 1;
-        }
-
-        Ok((merge, heights))
-    }
-
-    /// Verbatim copy of `update_hclust_distances` before the in-place engine.
-    fn reference_update_hclust_distances(
-        dist: &mut Array2<f64>,
-        members: &[Vec<usize>],
-        active: &[usize],
-        c1: usize,
-        c2: usize,
-        new_cluster: usize,
-        method: &str,
-    ) {
-        let n1 = members[c1].len() as f64;
-        let n2 = members[c2].len() as f64;
-
-        // Extend distance matrix if needed
-        let current_size = dist.nrows();
-        if new_cluster >= current_size {
-            let mut new_dist = Array2::zeros((new_cluster + 1, new_cluster + 1));
-            for i in 0..current_size {
-                for j in 0..current_size {
-                    new_dist[[i, j]] = dist[[i, j]];
-                }
-            }
-            *dist = new_dist;
-        }
-
-        for &other in active {
-            if other == c1 || other == c2 {
-                continue;
-            }
-
-            let d_c1 = dist[[c1, other]];
-            let d_c2 = dist[[c2, other]];
-            let d_12 = dist[[c1, c2]];
-            let n_other = members[other].len() as f64;
-
-            let new_dist = match method {
-                "single" => d_c1.min(d_c2),
-                "complete" => d_c1.max(d_c2),
-                "average" => (n1 * d_c1 + n2 * d_c2) / (n1 + n2),
-                "ward" => {
-                    let n_total = n1 + n2 + n_other;
-                    let alpha1 = (n1 + n_other) / n_total;
-                    let alpha2 = (n2 + n_other) / n_total;
-                    let beta = -n_other / n_total;
-                    (alpha1 * d_c1.powi(2) + alpha2 * d_c2.powi(2) + beta * d_12.powi(2)).sqrt()
-                }
-                _ => (n1 * d_c1 + n2 * d_c2) / (n1 + n2), // default to average
-            };
-
-            dist[[new_cluster, other]] = new_dist;
-            dist[[other, new_cluster]] = new_dist;
-        }
-    }
-
-    /// Reference guard: the in-place engine with cached row minima must
-    /// reproduce the reallocating AGNES and pvclust hierarchies bit for bit,
-    /// including their tie order.
-    #[test]
-    fn in_place_engine_matches_reference() {
-        for seed in 0..4u64 {
-            // coordinates on a 0.5 grid: duplicate points and many exactly tied distances exercise tie-breaking
-            let mut rng = StdRng::seed_from_u64(seed);
-            let data = Array2::from_shape_fn((60, 2), |_| rng.gen_range(0..10) as f64 * 0.5);
-            for linkage in [
-                AgnesLinkage::Average,
-                AgnesLinkage::Single,
-                AgnesLinkage::Complete,
-                AgnesLinkage::Ward,
-                AgnesLinkage::Weighted,
-            ] {
-                for target in [1usize, 2, 5] {
-                    let got = agnes(data.view(), Some(target), Some(linkage)).unwrap();
-                    let want = reference_agnes(data.view(), Some(target), Some(linkage)).unwrap();
-                    assert_eq!(got.merge, want.merge, "seed {seed} {linkage:?} k={target}");
-                    assert_eq!(got.heights, want.heights);
-                    assert_eq!(got.labels, want.labels);
-                    assert_eq!(
-                        got.agglomerative_coefficient.to_bits(),
-                        want.agglomerative_coefficient.to_bits()
-                    );
-                }
-            }
-            for method in ["average", "single", "complete", "ward", "other"] {
-                assert_eq!(
-                    hierarchical_clustering_merge(&data.view(), method).unwrap(),
-                    reference_hierarchical_clustering_merge(&data.view(), method).unwrap(),
-                    "seed {seed} {method}"
-                );
-            }
-        }
     }
 
     /// Golden (characterization) test: captured on the code before the
@@ -2107,7 +1744,12 @@ mod tests {
 
         assert_eq!(result.labels.len(), 6);
         assert_eq!(result.n_clusters, 2);
-        assert!(result.divisive_coefficient >= 0.0 && result.divisive_coefficient <= 1.0);
+        // R: cluster::diana(six)$dc (before: 0)
+        assert!(
+            (result.divisive_coefficient - 0.98873252070075102).abs() < 1e-12,
+            "{}",
+            result.divisive_coefficient
+        );
 
         // Check points are separated correctly
         assert_eq!(result.labels[0], result.labels[1]);
@@ -2130,7 +1772,12 @@ mod tests {
 
         assert_eq!(result.labels.len(), 6);
         assert_eq!(result.n_clusters, 2);
-        assert!(result.agglomerative_coefficient >= 0.0 && result.agglomerative_coefficient <= 1.0);
+        // R: cluster::agnes(six, method = "average")$ac (before: 0.033 at k = 2)
+        assert!(
+            (result.agglomerative_coefficient - 0.98930988162683642).abs() < 1e-12,
+            "{}",
+            result.agglomerative_coefficient
+        );
 
         // Check points are separated correctly
         assert_eq!(result.labels[0], result.labels[1]);
@@ -2392,6 +2039,111 @@ mod tests {
             fastcluster(x.view(), None, None)
                 .unwrap_err()
                 .contains("finite")
+        );
+    }
+
+    const AGNES: [(AgnesLinkage, &str); 5] = [
+        (AgnesLinkage::Average, "average"),
+        (AgnesLinkage::Single, "single"),
+        (AgnesLinkage::Complete, "complete"),
+        (AgnesLinkage::Ward, "ward"),
+        (AgnesLinkage::Weighted, "weighted"),
+    ];
+
+    #[test]
+    fn test_validate_agnes_diana_coefficients() {
+        // ML-51: before, ac = 0 for k = 1 (0.033 for k = 2) and dc = 0 for k = 2; R: ac average
+        // 0.8259032898863274, single 0.6885297065427618, complete 0.8984982990829474, ward
+        // 0.9590527579487206, weighted 0.844242183861284; dc 0.8885450615416582. The coefficient
+        // does not depend on n_clusters. hclust_methods.
+        let (case, ds) = crate::test_support::load_case("hclust_methods");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let mut c = Check::new(&case);
+        for (l, tag) in AGNES {
+            for k in [1usize, 2, 3] {
+                c.scalar(
+                    &format!("agnes_{tag}_ac"),
+                    agnes(x.view(), Some(k), Some(l))
+                        .unwrap()
+                        .agglomerative_coefficient,
+                    Tol::stat(60),
+                );
+            }
+        }
+        for k in [1usize, 2, 3] {
+            c.scalar(
+                "diana_dc",
+                diana(x.view(), Some(k)).unwrap().divisive_coefficient,
+                Tol::stat(60),
+            );
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_agnes_tree() {
+        // R sort(agnes$height) (monotone methods), agnes$order, cutree(as.hclust(agnes), 3)
+        let (case, ds) = crate::test_support::load_case("hclust_methods");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let mut c = Check::new(&case);
+        for (l, tag) in AGNES {
+            let r = agnes(x.view(), Some(3), Some(l)).unwrap();
+            assert_eq!(r.merge.len(), 59);
+            c.vector(&format!("agnes_{tag}_height"), &r.heights, Tol::coef(60))
+                .vector(
+                    &format!("agnes_{tag}_order"),
+                    &plus_one(&r.order),
+                    Tol::exact(),
+                )
+                .vector(
+                    &format!("agnes_{tag}_cutree3"),
+                    &plus_one(&r.labels),
+                    Tol::exact(),
+                );
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_diana_banner() {
+        // cluster::diana(X): $height (banner), $order, $merge, cutree(as.hclust(.), 3). hclust_methods.
+        let (case, ds) = crate::test_support::load_case("hclust_methods");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let r = diana(x.view(), Some(3)).unwrap();
+        Check::new(&case)
+            .vector("diana_banner", &r.banner, Tol::coef(60))
+            .vector("diana_order", &plus_one(&r.order), Tol::exact())
+            .vector("diana_merge", &merge_colmajor(&r.merge), Tol::exact())
+            .vector("diana_cutree3", &plus_one(&r.labels), Tol::exact())
+            .finish();
+        assert_eq!(r.merge_history.len(), 59);
+        assert!(r.merge_history.iter().all(|&(_, a, b, _)| a >= 1 && b >= 1));
+        // twins.c: the first split sits at the data diameter cs (R: max(dist(X)) =
+        // max(diana(X)$height) = 10.304529754773773)
+        let cs = Dissimilarity::euclidean(x.view(), "test")
+            .unwrap()
+            .as_slice()
+            .iter()
+            .cloned()
+            .fold(0.0, f64::max);
+        assert_eq!(r.merge_history[0].3, cs);
+    }
+
+    #[test]
+    fn test_agnes_linkage_parses_aliases_and_rejects_unknown() {
+        AgnesLinkage::choices().validate().unwrap();
+        assert_eq!(
+            "UPGMA".parse::<AgnesLinkage>().unwrap(),
+            AgnesLinkage::Average
+        );
+        assert_eq!(
+            "mcquitty".parse::<AgnesLinkage>().unwrap(),
+            AgnesLinkage::Weighted
+        );
+        assert!(
+            run_agnes(array![[0.0], [1.0]].view(), Some(1), Some("ward.D"))
+                .unwrap_err()
+                .contains("unknown linkage")
         );
     }
 }

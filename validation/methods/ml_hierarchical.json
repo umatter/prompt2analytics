@@ -100,6 +100,59 @@
       "tolerance": "as ml_hclust",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_agnes",
+      "name": "AGNES",
+      "category": "ml",
+      "reference": "cluster::agnes",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_agnes_diana_coefficients",
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_agnes_tree"
+      ],
+      "quantities": [
+        "ac (5 methods)",
+        "sorted heights",
+        "banner order",
+        "cutree k = 3"
+      ],
+      "tolerance": "ac Tol::stat(60); heights Tol::coef(60); order, labels exact",
+      "deviations": [
+        {
+          "finding": "ML-55",
+          "quantity": "merge order under exactly tied dissimilarities",
+          "note": "AGNES uses the hclust core, which merges the first tied pair; cluster::agnes merges the last. Not pinned on tied data."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_diana",
+      "name": "DIANA",
+      "category": "ml",
+      "reference": "cluster::diana",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_agnes_diana_coefficients",
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_diana_banner"
+      ],
+      "quantities": [
+        "dc",
+        "banner (height)",
+        "order",
+        "merge",
+        "cutree k = 3"
+      ],
+      "tolerance": "dc Tol::stat(60); banner Tol::coef(60); rest exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
