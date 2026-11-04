@@ -755,7 +755,7 @@ impl TreeShapScratch {
             "TreeSHAP path buffer",
         )?;
         let len = depth.saturating_add(2);
-        let mut inv = resource::try_vec(len, 0.0, "TreeSHAP path buffer")?;
+        let mut inv = resource::try_vec(len, 0.0, "TreeSHAP reciprocal table")?;
         for (k, v) in inv.iter_mut().enumerate().skip(1) {
             *v = 1.0 / k as f64;
         }
@@ -1224,7 +1224,8 @@ pub fn shap_tree_ensemble(
         });
     }
     let n_trees = flat.len() as f64;
-    // Each worker clones this (a few hundred bytes for the deepest tree the forest allows).
+    // Cloned for each rayon job that runs rows (a few hundred bytes for the deepest tree the
+    // forest allows).
     let proto = (
         TreeShapScratch::new(max_depth)?,
         resource::try_vec(4 * m, 0.0, "SHAP row scratch")?,
@@ -1235,81 +1236,86 @@ pub fn shap_tree_ensemble(
         .sum::<f64>()
         / n_trees;
 
+    // Every output is allocated here, through the allocation checks, and each row writes only
+    // its own slots.
     let mut shap_values = resource::try_zeros2(n, m, "SHAP values")?;
-    if config.compute_interactions {
-        let len = resource::checked_len(&[n, m, m], "SHAP interaction values")?;
-        resource::check_alloc::<f64>(len, "SHAP interaction values")?;
-    }
-    // Rows are independent: each worker owns its path buffer and scratch, and writes only its
-    // row, so the values do not depend on the number of threads.
-    let budget = resource::current_budget();
-    let rows: Vec<(f64, Option<Array2<f64>>)> = shap_values
-        .as_slice_mut()
-        .expect("a freshly allocated matrix is in standard layout")
-        .par_chunks_mut(m)
-        .enumerate()
-        .map_init(
-            || proto.clone(),
-            |(path, scratch), (i, phi)| -> EconResult<(f64, Option<Array2<f64>>)> {
-                if let Some(b) = budget.as_ref() {
-                    b.check()?;
-                }
-                let (xi, rest) = scratch.split_at_mut(m);
-                for (v, &xv) in xi.iter_mut().zip(x.row(i)) {
-                    *v = xv;
-                }
-                let mut pred = 0.0;
-                let acc = if config.compute_interactions {
-                    let mut acc = resource::try_zeros2(m, m, "SHAP interaction values")?;
-                    let (tree_phi, rest) = rest.split_at_mut(m);
-                    for t in &flat {
-                        tree_phi.fill(0.0);
-                        tree_shap_into(&t.nodes, &t.frac, xi, tree_phi, path, 0, -1);
-                        for (p, v) in phi.iter_mut().zip(tree_phi.iter()) {
-                            *p += v;
-                        }
-                        tree_interactions_into(
-                            &t.nodes,
-                            &t.frac,
-                            &t.features,
-                            xi,
-                            tree_phi,
-                            &mut acc,
-                            rest,
-                            path,
-                        );
-                        pred += predict_nodes(&t.nodes, xi);
-                    }
-                    acc /= n_trees;
-                    Some(acc)
-                } else {
-                    for t in &flat {
-                        tree_shap_into(&t.nodes, &t.frac, xi, phi, path, 0, -1);
-                        pred += predict_nodes(&t.nodes, xi);
-                    }
-                    None
-                };
-                for v in phi.iter_mut() {
-                    *v /= n_trees;
-                }
-                Ok((pred / n_trees, acc))
-            },
-        )
-        .collect::<EconResult<_>>()?;
     let mut predictions = resource::try_vec(n, 0.0, "SHAP predictions")?;
     let mut interactions = if config.compute_interactions {
-        Some(resource::try_with_capacity::<Array2<f64>>(
-            n,
-            "SHAP interaction values",
-        )?)
+        let len = resource::checked_len(&[n, m, m], "SHAP interaction values")?;
+        resource::check_alloc::<f64>(len, "SHAP interaction values")?;
+        let mut all = resource::try_with_capacity::<Array2<f64>>(n, "SHAP interaction values")?;
+        for _ in 0..n {
+            all.push(resource::try_zeros2(m, m, "SHAP interaction values")?);
+        }
+        Some(all)
     } else {
         None
     };
-    for (i, (pred, acc)) in rows.into_iter().enumerate() {
-        predictions[i] = pred;
-        if let (Some(all), Some(acc)) = (interactions.as_mut(), acc) {
-            all.push(acc);
+    // Rows are independent: each worker owns its path buffer and scratch, so the values do not
+    // depend on the number of threads. The budget is captured here (rayon's threads have none).
+    let budget = resource::current_budget();
+    let row = |(path, scratch): &mut (TreeShapScratch, Vec<f64>),
+               i: usize,
+               phi: &mut [f64],
+               pred_out: &mut f64,
+               acc: Option<&mut Array2<f64>>|
+     -> EconResult<()> {
+        if let Some(b) = budget.as_ref() {
+            b.check()?;
         }
+        let (xi, rest) = scratch.split_at_mut(m);
+        for (v, &xv) in xi.iter_mut().zip(x.row(i)) {
+            *v = xv;
+        }
+        let mut pred = 0.0;
+        if let Some(acc) = acc {
+            let (tree_phi, rest) = rest.split_at_mut(m);
+            for t in &flat {
+                tree_phi.fill(0.0);
+                tree_shap_into(&t.nodes, &t.frac, xi, tree_phi, path, 0, -1);
+                for (p, v) in phi.iter_mut().zip(tree_phi.iter()) {
+                    *p += v;
+                }
+                tree_interactions_into(
+                    &t.nodes,
+                    &t.frac,
+                    &t.features,
+                    xi,
+                    tree_phi,
+                    acc,
+                    rest,
+                    path,
+                );
+                pred += predict_nodes(&t.nodes, xi);
+            }
+            *acc /= n_trees;
+        } else {
+            for t in &flat {
+                tree_shap_into(&t.nodes, &t.frac, xi, phi, path, 0, -1);
+                pred += predict_nodes(&t.nodes, xi);
+            }
+        }
+        for v in phi.iter_mut() {
+            *v /= n_trees;
+        }
+        *pred_out = pred / n_trees;
+        Ok(())
+    };
+    let rows = shap_values
+        .as_slice_mut()
+        .expect("a freshly allocated matrix is in standard layout")
+        .par_chunks_mut(m)
+        .zip(predictions.par_iter_mut())
+        .enumerate();
+    match interactions.as_mut() {
+        Some(all) => rows.zip(all.par_iter_mut()).try_for_each_init(
+            || proto.clone(),
+            |s, ((i, (phi, pred)), acc)| row(s, i, phi, pred, Some(acc)),
+        )?,
+        None => rows.try_for_each_init(
+            || proto.clone(),
+            |s, (i, (phi, pred))| row(s, i, phi, pred, None),
+        )?,
     }
 
     let feature_importance = mean_abs_columns(&shap_values);
@@ -2655,6 +2661,46 @@ mod tests {
                 .to_string()
                 .contains("not implemented")
         );
+    }
+
+    #[test]
+    fn test_treeshap_rows_do_not_depend_on_the_thread_count() {
+        // Rows run on rayon with per-worker scratch: one thread and four give identical bits
+        // (values, predictions, interactions), and a cancelled budget stops the parallel rows.
+        let (x, y) = random_regression(120, 4, 21);
+        let model = super::super::trees::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(8),
+            Some(5),
+            Some(2),
+            Some("all"),
+            Some(5),
+            None,
+        )
+        .unwrap();
+        let mut config = ShapConfig::default();
+        config.compute_interactions = true;
+        let run = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| shap_values_model(&model, x.view(), &config).unwrap())
+        };
+        let (one, four) = (run(1), run(4));
+        assert_eq!(one.shap_values, four.shap_values);
+        assert_eq!(one.predictions, four.predictions);
+        assert_eq!(one.base_value, four.base_value);
+        assert_eq!(one.interaction_values, four.interaction_values);
+        assert_eq!(one.interaction_values.as_ref().map(Vec::len), Some(120));
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        let e = crate::resource::with_budget(crate::resource::Budget::new(None, token), || {
+            shap_values_model(&model, x.view(), &config)
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e}");
     }
 
     #[test]
