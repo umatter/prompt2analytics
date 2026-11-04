@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_vecm",
+      "name": "Johansen VECM: trace and maximal-eigenvalue tests, cointegrating vectors, restricted VECM",
+      "category": "econometrics",
+      "reference": "urca::ca.jo(type = 'trace' | 'eigen', ecdet = 'none' | 'const' | 'trend', K, spec = 'transitory'); urca::cajorls(r)",
+      "doc": "validation/econometrics/timeseries/vecm.md",
+      "cases": ["vecm_denmark", "vecm_sim3"],
+      "tests": [
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_denmark_trace_eigen",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_denmark_beta_alpha_gamma",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_sim3_none_trend",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_beta_depends_on_data",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_rank_selected_by_trace_test",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_options_change_results",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_rejects_degenerate_inputs",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_display_shows_tests_and_notes",
+        "p2a-core::econometrics::timeseries::vecm::tests::test_validate_vecm_result_serde_round_trip"
+      ],
+      "quantities": ["eigenvalues", "trace statistics", "maximal-eigenvalue statistics", "Osterwald-Lenum critical values 10/5/1% (exact)", "normalised eigenvectors V", "weights W", "unrestricted PI", "beta (cajorls normalisation, r = 1 and 2)", "alpha, constant and Gamma of the restricted VECM (cajorls rlm)", "rank chosen by the trace test at 5% (derived from the pinned statistics and critical values)"],
+      "tolerance": "validation/README.md: vecm_denmark (N = 55, T = 53) coefficients 1e-6, statistics 1e-5 relative; vecm_sim3 (N = 250, T = 247) 1e-8 and 1e-6; critical values and counts exact; W of the structural zero eigenvalue (ecdet = const) abs 1e-11",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
