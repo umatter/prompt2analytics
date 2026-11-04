@@ -51,17 +51,21 @@ pub trait CsvExport {
 impl CsvExport for OlsResult {
     fn to_csv_string(&self) -> String {
         let mut csv = String::new();
-        csv.push_str("variable,estimate,std_error,t_value,p_value,significance\n");
+        csv.push_str(
+            "variable,estimate,std_error,t_value,p_value,significance,ci_lower_95,ci_upper_95\n",
+        );
 
         for coef in &self.coefficients {
             csv.push_str(&format!(
-                "{},{:.6},{:.6},{:.6},{:.6},{}\n",
+                "{},{:.6},{:.6},{:.6},{:.6},{},{:.6},{:.6}\n",
                 escape_csv(&coef.name),
                 coef.estimate,
                 coef.std_error,
                 coef.t_value,
                 coef.p_value,
-                coef.significance.code()
+                coef.significance.code(),
+                coef.ci_lower_95,
+                coef.ci_upper_95
             ));
         }
 
@@ -454,5 +458,47 @@ mod tests {
         let csv = <OlsResult as CsvExport>::to_csv_string(&r);
         assert!(csv.lines().any(|l| l.starts_with("'=1+2,")), "{csv}");
         assert!(csv.lines().any(|l| l.starts_with("(Intercept),")), "{csv}");
+    }
+
+    /// OlsResult's inherent to_csv_string shadowed CsvExport: raw names (a comma shifted
+    /// every field), other headers, no statistics block. Both spellings now produce the
+    /// trait's output.
+    #[test]
+    fn test_ols_csv_escapes_names() {
+        use crate::regression::run_ols;
+        let x: Vec<f64> = (0..20)
+            .map(|i| 10.0 + i as f64 + 0.4 * ((i * 7) % 3) as f64)
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 2.0 + 0.3 * v + 0.5 * ((i * 11) % 5) as f64)
+            .collect();
+        let ds = crate::data::Dataset::new(
+            polars::prelude::df! { "y" => y, "Income, USD" => x }.unwrap(),
+        );
+        let r = run_ols(&ds, "y", &["Income, USD"], true, CovarianceType::Standard).unwrap();
+        let inherent = r.to_csv_string();
+        let via_trait = <OlsResult as CsvExport>::to_csv_string(&r);
+        assert_eq!(inherent, via_trait);
+        assert!(
+            inherent.starts_with(
+                "variable,estimate,std_error,t_value,p_value,significance,ci_lower_95,ci_upper_95\n"
+            ),
+            "{inherent}"
+        );
+        assert!(
+            inherent
+                .lines()
+                .nth(2)
+                .unwrap()
+                .starts_with("\"Income, USD\","),
+            "{inherent}"
+        );
+        assert!(inherent.contains("\n# Model Statistics\n") && inherent.contains("\nn_obs,20\n"));
+        let path = std::env::temp_dir().join(format!("p2a_wp09_csv_{}.csv", std::process::id()));
+        r.to_csv(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), inherent);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -375,36 +375,19 @@ impl OlsResult {
         self.n_params - self.aliased.len()
     }
 
-    /// Export coefficient table to a CSV string.
+    /// The coefficient table and model statistics as CSV: the same as [`CsvExport`]
+    /// (`crate::export::CsvExport`), kept so method syntax works without importing the
+    /// trait. Names are escaped; the columns are `variable, estimate, std_error, t_value,
+    /// p_value, significance, ci_lower_95, ci_upper_95`, then a `# Model Statistics` block.
     ///
-    /// Produces a table with columns: variable, coefficient, std_error, t_stat, p_value,
-    /// significance, ci_lower_95, ci_upper_95
+    /// [`CsvExport`]: crate::export::CsvExport
     pub fn to_csv_string(&self) -> String {
-        let mut csv = String::new();
-        csv.push_str(
-            "variable,coefficient,std_error,t_stat,p_value,significance,ci_lower_95,ci_upper_95\n",
-        );
-
-        for coef in &self.coefficients {
-            csv.push_str(&format!(
-                "{},{:.6},{:.6},{:.4},{:.6},{},{:.6},{:.6}\n",
-                coef.name,
-                coef.estimate,
-                coef.std_error,
-                coef.t_value,
-                coef.p_value,
-                coef.significance.stars().replace(" ", ""),
-                coef.ci_lower_95,
-                coef.ci_upper_95
-            ));
-        }
-
-        csv
+        <Self as crate::export::CsvExport>::to_csv_string(self)
     }
 
-    /// Export coefficient table to a CSV file.
+    /// Write [`OlsResult::to_csv_string`] to a file (the same as `CsvExport::to_csv`).
     pub fn to_csv(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-        std::fs::write(path, self.to_csv_string())
+        crate::export::CsvExport::to_csv(self, path)
     }
 
     /// Export results to a JSON string.
