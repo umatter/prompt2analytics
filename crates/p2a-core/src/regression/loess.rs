@@ -297,32 +297,28 @@ impl SortedData {
     }
 
     /// The q nearest points of x0 by distance (ties to the left), extended by every point
-    /// at the q-th distance, so that a tie group is never split. O(q).
+    /// at the q-th distance, so that a tie group is never split. O(log q) to place the window
+    /// of the q nearest points, then O(ties at the q-th distance) to extend it.
     fn neighbourhood(&self, x0: f64) -> Nbhd {
         let xs = &self.x_sorted;
         let n = xs.len();
+        let q = self.q;
         let pos = xs.partition_point(|&v| v < x0);
-        let (mut l, mut r) = (pos, pos);
-        let mut d_q = 0.0f64;
-        for _ in 0..self.q {
-            let dl = if l > 0 {
-                (x0 - xs[l - 1]).abs()
+        // The q nearest points form a window [s, s + q). Moving the window right drops xs[s]
+        // and adds xs[s + q]; it pays exactly when x0 - xs[s] > xs[s + q] - x0, a condition
+        // that is monotone (true, then false) in s. The first s where it fails is the
+        // greedy window with ties to the left.
+        let (mut lo, mut hi) = (pos.saturating_sub(q), pos.min(n - q));
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if x0 - xs[mid] > xs[mid + q] - x0 {
+                lo = mid + 1;
             } else {
-                f64::INFINITY
-            };
-            let dr = if r < n {
-                (x0 - xs[r]).abs()
-            } else {
-                f64::INFINITY
-            };
-            if dl <= dr {
-                l -= 1;
-                d_q = dl;
-            } else {
-                r += 1;
-                d_q = dr;
+                hi = mid;
             }
         }
+        let (mut l, mut r) = (lo, lo + q);
+        let d_q = (x0 - xs[l]).abs().max((xs[r - 1] - x0).abs());
         while l > 0 && (x0 - xs[l - 1]).abs() <= d_q {
             l -= 1;
         }
@@ -335,6 +331,93 @@ impl SortedData {
             radius: d_q * self.radius_mult,
         }
     }
+}
+
+/// Moment sums `s[j] = sum w u^j` (j <= 2D) and `t[j] = sum w u^j y` (j <= D) over the
+/// rows of the neighbourhood with positive weight, and their count. `D` is the degree, a
+/// constant so that the inner loop is unrolled.
+#[inline]
+fn moments<const D: usize>(
+    sd: &SortedData,
+    x0: f64,
+    nb: &Nbhd,
+    zero_width: bool,
+    inv_r: f64,
+    rw: Option<&[f64]>,
+) -> ([f64; 5], [f64; 3], usize) {
+    match (zero_width, rw) {
+        (true, None) => moments_kernel::<D, true, false>(sd, x0, nb, inv_r, &[]),
+        (true, Some(rw)) => moments_kernel::<D, true, true>(sd, x0, nb, inv_r, rw),
+        (false, None) => moments_kernel::<D, false, false>(sd, x0, nb, inv_r, &[]),
+        (false, Some(rw)) => moments_kernel::<D, false, true>(sd, x0, nb, inv_r, rw),
+    }
+}
+
+/// [`moments`] with the zero-width and robustness branches resolved at compile time.
+#[inline]
+fn moments_kernel<const D: usize, const ZERO_WIDTH: bool, const ROBUST: bool>(
+    sd: &SortedData,
+    x0: f64,
+    nb: &Nbhd,
+    inv_r: f64,
+    rw: &[f64],
+) -> ([f64; 5], [f64; 3], usize) {
+    // Sums in d = x - x0 (unscaled), rescaled to u = d / radius at the end: one multiply
+    // fewer per row, and the same values up to rounding.
+    let (mut s0, mut s1, mut s2, mut s3, mut s4) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let (mut t0, mut t1, mut t2) = (0.0f64, 0.0f64, 0.0f64);
+    let mut m = 0usize;
+    let xs = &sd.x_sorted[nb.left..nb.right];
+    let ys = &sd.y_sorted[nb.left..nb.right];
+    let idx = &sd.orig_idx[nb.left..nb.right];
+    // In chunks: the weights first (a simple loop), then the sums over the chunk.
+    const CHUNK: usize = 64;
+    let mut wbuf = [0.0f64; CHUNK];
+    let mut start = 0;
+    while start < xs.len() {
+        let end = (start + CHUNK).min(xs.len());
+        let (xc, yc) = (&xs[start..end], &ys[start..end]);
+        let wc = &mut wbuf[..end - start];
+        for (w, &xi) in wc.iter_mut().zip(xc) {
+            *w = if ZERO_WIDTH {
+                1.0
+            } else {
+                tricubic_weight((xi - x0).abs() * inv_r)
+            };
+        }
+        if ROBUST {
+            for (w, &k) in wc.iter_mut().zip(&idx[start..end]) {
+                *w *= rw[k];
+            }
+        }
+        for ((&w, &xi), &yi) in wc.iter().zip(xc).zip(yc) {
+            if w > 0.0 {
+                m += 1;
+                let d = xi - x0;
+                s0 += w;
+                t0 += w * yi;
+                if D >= 1 {
+                    let wd = w * d;
+                    s1 += wd;
+                    t1 += wd * yi;
+                    let wd2 = wd * d;
+                    s2 += wd2;
+                    if D >= 2 {
+                        t2 += wd2 * yi;
+                        let wd3 = wd2 * d;
+                        s3 += wd3;
+                        s4 += wd3 * d;
+                    }
+                }
+            }
+        }
+        start = end;
+    }
+    let r1 = inv_r;
+    let r2 = r1 * r1;
+    let s = [s0, s1 * r1, s2 * r2, s3 * r2 * r1, s4 * r2 * r2];
+    let t = [t0, t1 * r1, t2 * r2];
+    (s, t, m)
 }
 
 /// Squared relative pivot tolerance: dqrdc2's column rule (`LM_QR_TOL`) on the sqrt(w)
@@ -366,35 +449,10 @@ fn local_fit(
     let zero_width = nb.radius == 0.0;
     let degree = if zero_width { 0 } else { degree };
     let inv_r = if zero_width { 0.0 } else { 1.0 / nb.radius };
-    let accumulate = |rw: Option<&[f64]>| {
-        let mut s = [0.0f64; 5];
-        let mut t = [0.0f64; 3];
-        let mut m = 0usize;
-        for i in nb.left..nb.right {
-            let d = sd.x_sorted[i] - x0;
-            let mut w = if zero_width {
-                1.0
-            } else {
-                tricubic_weight(d.abs() * inv_r)
-            };
-            if let Some(rw) = rw {
-                w *= rw[sd.orig_idx[i]];
-            }
-            if w > 0.0 {
-                m += 1;
-                let u = d * inv_r;
-                let yi = sd.y_sorted[i];
-                let mut p = w;
-                for j in 0..=2 * degree {
-                    s[j] += p;
-                    if j <= degree {
-                        t[j] += p * yi;
-                    }
-                    p *= u;
-                }
-            }
-        }
-        (s, t, m)
+    let accumulate = |rw: Option<&[f64]>| match degree {
+        0 => moments::<0>(sd, x0, nb, zero_width, inv_r, rw),
+        1 => moments::<1>(sd, x0, nb, zero_width, inv_r, rw),
+        _ => moments::<2>(sd, x0, nb, zero_width, inv_r, rw),
     };
     let (mut s, mut t, mut m) = accumulate(robust);
     let mut robust_fallback = false;
@@ -1475,5 +1533,68 @@ mod tests {
             insufficient_context(run_loess(&none, "y", "no_x", 0.75, 2, false)),
             "LOESS of 'y' on 'no_x': 0 of 60 rows have no missing value"
         );
+    }
+
+    /// The O(log q) window search gives the neighbourhood of the greedy q-nearest walk (ties
+    /// to the left, then extended by every point at the q-th distance), on noisy data with
+    /// ties, at data points, between them and outside the range.
+    #[test]
+    fn test_loess_neighbourhood_matches_greedy_reference() {
+        fn greedy(xs: &[f64], q: usize, x0: f64) -> (usize, usize, f64) {
+            let n = xs.len();
+            let pos = xs.partition_point(|&v| v < x0);
+            let (mut l, mut r, mut d_q) = (pos, pos, 0.0f64);
+            for _ in 0..q {
+                let dl = if l > 0 {
+                    (x0 - xs[l - 1]).abs()
+                } else {
+                    f64::INFINITY
+                };
+                let dr = if r < n {
+                    (x0 - xs[r]).abs()
+                } else {
+                    f64::INFINITY
+                };
+                if dl <= dr {
+                    l -= 1;
+                    d_q = dl;
+                } else {
+                    r += 1;
+                    d_q = dr;
+                }
+            }
+            while l > 0 && (x0 - xs[l - 1]).abs() <= d_q {
+                l -= 1;
+            }
+            while r < n && (x0 - xs[r]).abs() <= d_q {
+                r += 1;
+            }
+            (l, r, d_q)
+        }
+        let n = 97;
+        // rounded to 0.25: many ties; plus a mass point
+        let x: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 9 == 0 {
+                    1.5
+                } else {
+                    let v = ((i * 37) % 101) as f64 * 0.13 + (i as f64 * 0.7).sin();
+                    (v * 4.0).round() / 4.0
+                }
+            })
+            .collect();
+        let y: Vec<f64> = (0..n).map(|i| (i as f64 * 1.3).cos()).collect();
+        for span in [0.05, 0.2, 0.5, 0.75, 1.0] {
+            let sd = SortedData::new(&x, &y, span).unwrap();
+            let mut probes: Vec<f64> = sd.x_sorted.clone();
+            probes.extend(sd.x_sorted.windows(2).map(|w| 0.5 * (w[0] + w[1])));
+            probes.extend([-3.0, 100.0, 1.5 + 1e-12]);
+            for &x0 in &probes {
+                let nb = sd.neighbourhood(x0);
+                let (l, r, d_q) = greedy(&sd.x_sorted, sd.q, x0);
+                assert_eq!((nb.left, nb.right), (l, r), "span {span}, x0 {x0}");
+                assert_eq!(nb.radius, d_q * sd.radius_mult, "span {span}, x0 {x0}");
+            }
+        }
     }
 }
