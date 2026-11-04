@@ -1,5 +1,7 @@
 # Validation: Logistic Regression (Logit)
 
+R reference: `validation/r/cases/discrete_mlogit_asc.R` (T3-WP18).
+
 ## Method Overview
 
 Logistic regression models binary outcomes using the logistic (sigmoid) function. It estimates the probability that Y=1 given X via maximum likelihood.

@@ -1,5 +1,7 @@
 # Validation: McFadden Conditional Logit (mlogit)
 
+R reference: `validation/r/cases/discrete_mlogit_asc.R` (T3-WP18).
+
 ## Method Overview
 
 The McFadden conditional logit model is used for discrete choice analysis where individuals choose among a set of alternatives. It differs from standard multinomial logit by supporting:

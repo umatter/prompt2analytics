@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "id": "disc_mlogit_fishing",
+  "area": "econometrics/discrete",
+  "method": "mlogit with and without alternative-specific constants, Fishing (mode ~ price + catch | income)",
+  "reference": "mlogit::mlogit(chosen ~ price + catch | income) (ASCs, reflevel = 'beach'); '| 0 + income' without ASCs; Newton-polished optima (*_tight)",
+  "call": "mlogit(chosen ~ price + catch | income, data = dfidx(Fishing long), reflevel = 'beach')",
+  "dataset": "validation/datasets/generated/mlogit_fishing.csv",
+  "datasets": ["validation/datasets/generated/mlogit_fishing.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "mlogit": "2.0.0",
+    "dfidx": "0.2.0"
+  },
+  "values": {
+    "asc_coef": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [0.52727876963588161, 1.6943657363439351, 0.7779593983715638, -0.025116571272252031, 0.35778195423921383, 8.9439820718253756e-05, -3.3291726642615026e-05, -0.00012757715029144905]
+    },
+    "asc_se": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [0.22279268642962596, 0.22405060216105205, 0.22049393022582267, 0.0017316793239411405, 0.10977332155429416, 5.006706745123744e-05, 5.0340867515225877e-05, 5.0639540987476402e-05]
+    },
+    "asc_loglik": -1215.137603909621,
+    "noasc_coef": {
+      "names": ["price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [-0.021597385954929209, 0.71207860756670749, 0.00021014495176891216, 0.0002449845125864839, 3.1272498586396082e-05]
+    },
+    "noasc_se": {
+      "names": ["price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [0.0014390184467430128, 0.10051207259409481, 2.6216338888033539e-05, 2.8814873419472461e-05, 2.7300194771850235e-05]
+    },
+    "noasc_loglik": -1257.1292788310486,
+    "generic_asc_coef": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch"],
+      "values": [0.8713749092933174, 1.4988883832078355, 0.30705524536654988, -0.024789550178720674, 0.37716885385529442]
+    },
+    "generic_asc_loglik": -1230.78383041549,
+    "n_choices": 1182,
+    "asc_coef_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [0.52727876963588038, 1.6943657363439366, 0.77795939837156358, -0.025116571272252124, 0.35778195423921366, 8.9439820718254447e-05, -3.3291726642614328e-05, -0.00012757715029144899]
+    },
+    "asc_se_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [0.22279268642961156, 0.22405060216103923, 0.22049393022581906, 0.0017316793239411487, 0.1097733215542946, 5.0067067451234743e-05, 5.0340867515223302e-05, 5.0639540987475636e-05]
+    },
+    "asc_aic": 2446.275207819242,
+    "noasc_coef_tight": {
+      "names": ["price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [-0.021597385981916007, 0.71207860780446686, 0.00021014495193009562, 0.00024498451286729297, 3.1272498588213564e-05]
+    },
+    "noasc_se_tight": {
+      "names": ["price", "catch", "income:boat", "income:charter", "income:pier"],
+      "values": [0.0014390184467430113, 0.10051207259409496, 2.621633888803381e-05, 2.881487341947264e-05, 2.730019477185031e-05]
+    },
+    "generic_asc_coef_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch"],
+      "values": [0.87137491551805746, 1.4988884108281058, 0.30705524527827033, -0.024789550881999297, 0.37716885214202095]
+    },
+    "generic_asc_se_tight": {
+      "names": ["(Intercept):boat", "(Intercept):charter", "(Intercept):pier", "price", "catch"],
+      "values": [0.11404283053890034, 0.13293279570191199, 0.1145737962664141, 0.0017044027510731178, 0.10997065922402284]
+    },
+    "generic_noasc_coef_tight": {
+      "names": ["price", "catch"],
+      "values": [-0.020476534637820128, 0.95309850611037983]
+    },
+    "generic_noasc_se_tight": {
+      "names": ["price", "catch"],
+      "values": [0.0012230609699032773, 0.089413423954072022]
+    },
+    "generic_noasc_loglik": -1311.9796171077896,
+    "pier_coef_tight": {
+      "names": ["(Intercept):beach", "(Intercept):boat", "(Intercept):charter", "price", "catch", "income:beach", "income:boat", "income:charter"],
+      "values": [-0.77795939837156358, -0.25068062873568331, 0.91640633797237314, -0.025116571272252128, 0.35778195423921366, 0.00012757715029144899, 0.00021701697100970344, 9.4285423648834664e-05]
+    },
+    "pier_se_tight": {
+      "names": ["(Intercept):beach", "(Intercept):boat", "(Intercept):charter", "price", "catch", "income:beach", "income:boat", "income:charter"],
+      "values": [0.2204939302258192, 0.20393955023625079, 0.20726481785922865, 0.0017316793239411487, 0.10977332155429466, 5.0639540987475799e-05, 5.0058208929153486e-05, 5.0059985367488501e-05]
+    },
+    "pier_loglik": -1215.137603909621,
+    "choice_counts": {
+      "names": ["beach", "boat", "charter", "pier"],
+      "values": [134, 418, 452, 178]
+    },
+    "aliased_refused": 1
+  }
+}

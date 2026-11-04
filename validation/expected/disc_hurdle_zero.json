@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "id": "disc_hurdle_zero",
+  "area": "econometrics/discrete",
+  "method": "hurdle model zero part = binomial logit glm on 1(y > 0); count-outcome domain (pscl, MASS)",
+  "reference": "glm(I(y > 0) ~ x1 + x2, binomial) at glm.control(epsilon = 1e-10, maxit = 100) = pscl::hurdle's binomial zero hurdle (zero_coef_pkg, optim); pscl/MASS errors for negative and non-integer counts",
+  "call": "glm(I(y > 0) ~ x1 + x2, family = binomial, data = zeroinfl)",
+  "dataset": "validation/datasets/generated/zeroinfl.csv",
+  "datasets": ["validation/datasets/generated/zeroinfl.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "pscl": "1.5.9",
+    "MASS": "7.3.60.0.1"
+  },
+  "values": {
+    "n": 500,
+    "n_zeros": 259,
+    "n_positive": 241,
+    "zero_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.047698207107520624, -0.22030645794348402, -0.32901069748000511]
+    },
+    "zero_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.091650182116870788, 0.095738711703041435, 0.096636082889519775]
+    },
+    "zero_loglik": -337.13411120086465,
+    "zero_iter": 4,
+    "zero_coef_pkg": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.047698207108954754, -0.22030645794784193, -0.32901069748628398]
+    },
+    "zero_coef_tight": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.047698207107528937, -0.22030645794352369, -0.32901069748006179]
+    },
+    "zero_se_tight": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.091650186146035928, 0.095738718563152123, 0.096636092862919923]
+    },
+    "hurdle_neg_refused": 1,
+    "hurdle_frac_refused": 1,
+    "zeroinfl_neg_refused": 1,
+    "zeroinfl_frac_refused": 1,
+    "negbin_neg_refused": 1,
+    "negbin_frac_warned": 1
+  }
+}

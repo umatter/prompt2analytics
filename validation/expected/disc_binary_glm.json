@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "id": "disc_binary_glm",
+  "area": "econometrics/discrete",
+  "method": "glm binomial logit and probit: pins, aliasing, separation, near-collinearity, outcome domain",
+  "reference": "stats::glm(family = binomial('logit' | 'probit')) at glm.control(epsilon = 1e-10, maxit = 100) (p2a's control); summary.glm; *_tight at epsilon = 1e-14; sep_default_* at R's default control",
+  "call": "glm(y ~ x1 + x2 + d, family = binomial, data = binary_glm, control = glm.control(epsilon = 1e-10, maxit = 100))",
+  "dataset": "validation/datasets/generated/binary_glm.csv",
+  "datasets": ["validation/datasets/generated/binary_glm.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n": 400,
+    "logit_coef": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [-0.51175368266655574, 0.77872348654336587, -0.76382295747179407, 0.84267568852152619]
+    },
+    "logit_se": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.14705774820405887, 0.13347141337813478, 0.1248839467105505, 0.23161199850970471]
+    },
+    "logit_z": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [-3.4799504882696897, 5.8343840589833444, -6.1162621585154024, 3.63830757449389]
+    },
+    "logit_p": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.00050150645394181717, 5.3989633911797897e-09, 9.5795685521498199e-10, 0.00027443556092311482]
+    },
+    "logit_loglik": -230.22214189930239,
+    "logit_aic": 468.44428379860477,
+    "logit_null_loglik": -276.65356683347039,
+    "logit_iter": 4,
+    "logit_coef_tight": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [-0.51175368266664201, 0.77872348654350609, -0.76382295747192308, 0.8426756885216522]
+    },
+    "logit_se_tight": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.14705776629617115, 0.13347144118308718, 0.12488397237394158, 0.23161202506376255]
+    },
+    "probit_coef": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [-0.30527153450258387, 0.47416632697781491, -0.45313880208203505, 0.50448279420727826]
+    },
+    "probit_se": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.087757768621654256, 0.077520921921478192, 0.072160232705629712, 0.13856583168273218]
+    },
+    "probit_p": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.00050409690368435217, 9.5578555612733366e-10, 3.3940271004114749e-10, 0.00027185077446260626]
+    },
+    "probit_loglik": -230.18024884935829,
+    "probit_aic": 468.36049769871659,
+    "probit_iter": 5,
+    "probit_coef_tight": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [-0.3052715196183714, 0.4741663934641982, -0.45313881463455852, 0.50448277367354644]
+    },
+    "probit_se_tight": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.087757788313616789, 0.077520977455769455, 0.072160254907582835, 0.13856586476294841]
+    },
+    "probit_z_tight": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [-3.4785689735870937, 6.1166204171604992, -6.2796177094288677, 3.6407435159921273]
+    },
+    "probit_p_tight": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.00050409869082693908, 9.5580668376285198e-10, 3.3940654792784283e-10, 0.00027185184875177186]
+    },
+    "probit_loglik_tight": -230.18024884935789,
+    "probit_aic_tight": 468.36049769871579,
+    "quasi_limit_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [-0.52641111193774137, 0.80392921586835897, -0.88603267328460955]
+    },
+    "quasi_limit_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.15091186754074426, 0.172817226189103, 0.17361370084358321]
+    },
+    "aliased_coef": {
+      "names": ["(Intercept)", "x1", "x1b", "x2", "d"],
+      "values": [-0.51175368266655574, 0.77872348654336587, null, -0.76382295747179407, 0.84267568852152619]
+    },
+    "aliased_se": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.14705774820405887, 0.13347141337813478, 0.1248839467105505, 0.23161199850970471]
+    },
+    "aliased_rank": 4,
+    "trap_coef": {
+      "names": ["(Intercept)", "x1", "x2", "d", "nd"],
+      "values": [-0.51175368266655574, 0.77872348654336587, -0.76382295747179407, 0.84267568852152619, null]
+    },
+    "trap_se": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.14705774820405887, 0.13347141337813478, 0.1248839467105505, 0.23161199850970471]
+    },
+    "sep_converged": 1,
+    "sep_iter": 63,
+    "sep_fitted_extreme": 397,
+    "sep_default_converged": 0,
+    "sep_default_iter": 25,
+    "quasi_coef": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [-0.52641111193774148, 0.80392921586835975, -0.88603267328461022, 25.473010376279596]
+    },
+    "quasi_se": {
+      "names": ["(Intercept)", "x1", "x2", "d"],
+      "values": [0.15091186753966296, 0.17281722616326439, 0.17361370080325761, 9394.2958883088904]
+    },
+    "quasi_iter": 23,
+    "quasi_converged": 1,
+    "quasi_r_warned": 0,
+    "nc_coef": {
+      "names": ["(Intercept)", "x1", "xnc", "x2"],
+      "values": [-0.17289370904614926, 232972.28423622987, -232971.52787164436, -0.76546319025857867]
+    },
+    "nc_loglik": -236.98453067232009,
+    "nc_iter": 3,
+    "nc_coef_tight": {
+      "names": ["(Intercept)", "x1", "xnc", "x2"],
+      "values": [-0.17289370924252728, 232972.25608487436, -232971.49972028896, -0.76546319048742029]
+    },
+    "nc_loglik_tight": -236.984530672235,
+    "nc_restricted_loglik": -237.0063665657234,
+    "y012_refused": 1
+  }
+}
