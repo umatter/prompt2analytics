@@ -916,18 +916,13 @@ mod tests {
             .iter()
             .find(|r| r.lhs == vec!["A"] && r.rhs == vec!["B"]);
 
-        if let Some(rule) = rule {
-            // Support(A,B) = 2/4 = 0.5
-            assert!((rule.support - 0.5).abs() < 0.01);
-
-            // Support(A) = 3/4 = 0.75
-            // Confidence = 0.5 / 0.75 = 0.667
-            assert!((rule.confidence - 0.667).abs() < 0.01);
-
-            // Support(B) = 3/4 = 0.75
-            // Lift = 0.667 / 0.75 = 0.889
-            assert!((rule.lift - 0.889).abs() < 0.01);
-        }
+        let rule = rule.expect("A => B must be found: support 0.5 >= 0.25, confidence 2/3 >= 0.5");
+        // Support(A,B) = 2/4
+        assert_eq!(rule.support, 0.5);
+        // Confidence = support(A,B) / support(A) = 0.5 / 0.75
+        assert!((rule.confidence - 2.0 / 3.0).abs() < 1e-15);
+        // Lift = confidence / support(B) = (2/3) / 0.75
+        assert!((rule.lift - 8.0 / 9.0).abs() < 1e-15);
     }
 
     /// ML-62: the rule string is 49 bytes and 'ü' spans bytes 26..28, so &rule_str[..27] panicked in Display.
