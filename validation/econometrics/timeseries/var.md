@@ -129,7 +129,8 @@ The results of the two solves agree to 1e-14 relative on these fits. At n = 100 
 still 1.36x (K = 2, p = 1) and 1.40x (K = 3, p = 2) of base. That is the cost of the t and p
 values it now reports and base did not compute: one `t_test_p_value` per coefficient,
 1.31 µs for 6 and 4.17 µs for 21 (same in both builds). Without that cost the fits take 6.19 µs
-(1.12x) and 8.73 µs (0.95x). This slowdown at small n has not been signed off.
+(1.12x) and 8.73 µs (0.95x). This slowdown at small n was accepted by the maintainer
+(2026-11-04).
 
 ## History
 
