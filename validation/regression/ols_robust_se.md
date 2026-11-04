@@ -83,6 +83,44 @@ within 6e-16 and 3.8e-13 absolute.
 A deliberate perturbation of the HC1 factor (n/(n − k − 1) instead of n/(n − k)) makes the
 three tests fail (for example `se_hc1[value] rust=0.006828307235204594 R=0.006810954456871954`).
 
+## Aliased designs (T3-WP09)
+
+On a design with aliased columns (see [ols.md](ols.md), "Rank-deficient and
+ill-conditioned designs") every variance estimator works on the r identified columns, as
+`sandwich` does, and reports NaN for the aliased ones: HC0-HC3 (HC1 factor n/(n − r)),
+the clustered CR1 SEs ((G/(G − 1))·((n − 1)/(n − r))), Newey-West/HAC, Driscoll-Kraay and
+the bootstrap. They take the identified block of the fit's own (X'X)⁻¹, from whichever
+solve the fit used, so no second decomposition is made.
+
+Pinned to `ols_aliased` (`y ~ x1 + x2 + x3`, x2 = 2 x1): `dup_hc0_se`, `dup_hc1_se`,
+`dup_hc3_se` (`test_validate_ols_aliased_duplicate`), `dup_cl_hc1_se`
+(`vcovCL(cluster = ~cl, type = "HC1")`) and `dup_nw_lag4_se`
+(`NeweyWest(lag = 4, prewhite = FALSE)`) in `test_validate_ols_aliased_sandwich`; SE
+1e-6 relative (registry entry `ols_sandwich_aliased` in
+`validation/methods/reg_rank_qr.json`).
+
+**Bootstrap.** Replicates resample around y − residuals. The residual and wild bootstraps
+solve every replicate with one factor of the fixed identified design
+(`test_validate_bootstrap_fixed_design_solve_matches_refit`: equal to a least-squares refit
+within 1e-12); the pairs bootstrap refits each replicate and skips one whose resampled
+design is rank deficient, reported as "{s} of {B} bootstrap replicates had a rank-deficient
+design and were skipped". `test_validate_bootstrap_aliased_design_uses_identified_columns`
+and `test_validate_bootstrap_wild_variants_near_hc0` (Rademacher, Mammen and Webb weights,
+B = 2000, seeded, within 10% of HC0) are Monte Carlo property tests: the bootstrap SEs are
+**not R-pinned**. The wild weights follow `sandwich::vcovBS`: Rademacher ±1, Mammen's
+two-point law (−(√5 − 1)/2 with probability (√5 + 1)/(2√5), (√5 + 1)/2 otherwise), Webb's
+six points ±√(1/2), ±1, ±√(3/2).
+
+**Option names.** `kernel`: bartlett (newey_west, nw), parzen, quadratic_spectral (qs),
+truncated, tukey_hanning; `bootstrap_type`: pairs (xy), residual, wild (rademacher),
+mammen, webb. Case and separators are ignored; an unknown name is an error listing these
+(`sandwich`'s norm, jackknife and fractional are not offered).
+
+**Driscoll-Kraay.** Needs more time periods than identified coefficients (T > r);
+otherwise `InsufficientData`. Its t and p use T − r degrees of freedom; R's
+`coeftest(lm, vcov = vcovPL)` uses n − r. p2a keeps T − r because the estimator is
+asymptotic in T. Driscoll-Kraay SEs are not R-pinned (REG-24, Tier 4).
+
 ## Known Differences
 
 1. **Default type**: `sandwich::vcovHC` defaults to HC3; the p2a CLI and MCP default to

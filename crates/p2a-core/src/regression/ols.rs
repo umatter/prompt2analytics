@@ -66,8 +66,13 @@ use crate::data::columns::{
     ColumnRequest, Columns, Factor, MissingSummary, NaPolicy, econ_error_from_design,
 };
 use crate::errors::{EconError, EconResult, EstimationWarning};
-use crate::linalg::{CONDITION_THRESHOLD, DesignMatrix, matmul, safe_inverse, xtx, xty};
+use crate::linalg::solve::{
+    LM_QR_TOL, Qr, SingularPolicy, aliasing_message, least_squares, sym_inverse,
+};
+use crate::linalg::{DesignMatrix, matmul, xtx, xty};
+use crate::options::Choices;
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::{LinearEstimator, SignificanceLevel, f_test_p_value, t_test_p_value};
 
 /// Type of covariance/standard error estimation.
@@ -227,6 +232,11 @@ pub struct OlsResult {
     /// nothing was dropped.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Names of the aliased (linearly dependent) design columns, in column order; their
+    /// coefficient, SE, t, p and CI are NaN, as R's `lm` reports NA. Absent from JSON when
+    /// nothing is aliased.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliased: Vec<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal caches (not serialized)
@@ -336,7 +346,7 @@ impl std::fmt::Display for OlsResult {
             writeln!(
                 f,
                 "{:>15} {:>12.4} {:>12.4} {:>10.4} {:>10.4} {}",
-                truncate(&coef.name, 15),
+                p2a_text::ellipsize(&coef.name, 15),
                 coef.estimate,
                 coef.std_error,
                 coef.t_value,
@@ -360,36 +370,32 @@ impl std::fmt::Display for OlsResult {
 }
 
 impl OlsResult {
-    /// Export coefficient table to a CSV string.
-    ///
-    /// Produces a table with columns: variable, coefficient, std_error, t_stat, p_value,
-    /// significance, ci_lower_95, ci_upper_95
-    pub fn to_csv_string(&self) -> String {
-        let mut csv = String::new();
-        csv.push_str(
-            "variable,coefficient,std_error,t_stat,p_value,significance,ci_lower_95,ci_upper_95\n",
-        );
-
-        for coef in &self.coefficients {
-            csv.push_str(&format!(
-                "{},{:.6},{:.6},{:.4},{:.6},{},{:.6},{:.6}\n",
-                coef.name,
-                coef.estimate,
-                coef.std_error,
-                coef.t_value,
-                coef.p_value,
-                coef.significance.stars().replace(" ", ""),
-                coef.ci_lower_95,
-                coef.ci_upper_95
-            ));
-        }
-
-        csv
+    /// Number of identified coefficients (R's `fit$rank`): `n_params - aliased.len()`.
+    pub fn rank(&self) -> usize {
+        self.n_params - self.aliased.len()
     }
 
-    /// Export coefficient table to a CSV file.
+    /// R's aliasing note ("Coefficients not defined because of singularities: ..."),
+    /// rebuilt from [`aliased`](Self::aliased), for the estimators and tests built on this
+    /// fit; empty when nothing is aliased.
+    pub(crate) fn alias_notes(&self) -> Vec<String> {
+        let idx: Vec<usize> = (0..self.aliased.len()).collect();
+        aliasing_message(&idx, &self.aliased).into_iter().collect()
+    }
+
+    /// The coefficient table and model statistics as CSV: the same as [`CsvExport`]
+    /// (`crate::export::CsvExport`), kept so method syntax works without importing the
+    /// trait. Names are escaped; the columns are `variable, estimate, std_error, t_value,
+    /// p_value, significance, ci_lower_95, ci_upper_95`, then a `# Model Statistics` block.
+    ///
+    /// [`CsvExport`]: crate::export::CsvExport
+    pub fn to_csv_string(&self) -> String {
+        <Self as crate::export::CsvExport>::to_csv_string(self)
+    }
+
+    /// Write [`OlsResult::to_csv_string`] to a file (the same as `CsvExport::to_csv`).
     pub fn to_csv(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-        std::fs::write(path, self.to_csv_string())
+        crate::export::CsvExport::to_csv(self, path)
     }
 
     /// Export results to a JSON string.
@@ -398,12 +404,33 @@ impl OlsResult {
     }
 }
 
-/// Truncate a string to a maximum length.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    } else {
-        s.to_string()
+impl ResultNotes for OlsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+impl ResultNotes for OlsClusteredResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.ols.warnings.clone()
+    }
+}
+
+impl ResultNotes for HacResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+impl ResultNotes for DriscollKraayResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+impl ResultNotes for BootstrapResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 }
 
@@ -550,125 +577,11 @@ pub fn run_ols_raw(
         });
     }
 
-    // Check we have enough observations
-    if n <= k {
-        return Err(EconError::InsufficientData {
-            required: k + 1,
-            provided: n,
-            context: format!("OLS regression with {} parameters", k),
-        });
-    }
-
-    let mut warnings = Vec::new();
-
     // The model has an intercept when some column is constant and non-zero, in any
     // position (REG-19; R reads it from the terms, which a raw matrix does not have).
     let has_intercept = has_constant_column(x.view());
 
-    // Compute (X'X)^{-1}
-    let (xtx_inv, cond_warning) =
-        safe_inverse(&xtx(&x.view()).view()).map_err(|_e| EconError::SingularMatrix {
-            context: "X'X matrix in OLS".to_string(),
-            suggestion: "Check for perfect multicollinearity between independent variables"
-                .to_string(),
-        })?;
-
-    if let Some(cond) = cond_warning {
-        warnings.push(
-            EstimationWarning::HighConditionNumber {
-                value: cond,
-                threshold: CONDITION_THRESHOLD,
-            }
-            .message(),
-        );
-    }
-
-    // Compute β = (X'X)^{-1} X'y
-    let xty_vec = xty(&x.view(), y);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // Compute fitted values and residuals
-    let y_hat = x.dot(&beta);
-    let residuals: Array1<f64> = y - &y_hat;
-
-    // Compute statistics
-    let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
-    let df_resid = n - k;
-    let sigma_squared = ssr / (df_resid as f64);
-    let residual_std_error = sigma_squared.sqrt();
-    let FitSummary {
-        sst,
-        r_squared,
-        adj_r_squared,
-        df_model,
-        f_statistic,
-        f_p_value,
-    } = fit_summary(y, ssr, k, df_resid, sigma_squared, has_intercept);
-
-    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, k);
-
-    // Compute variance-covariance matrix based on cov_type
-    let vcov = compute_vcov(&x.view(), &residuals, &xtx_inv, cov_type, n, k)?;
-
-    // Extract standard errors from diagonal
-    let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
-
-    // Compute t-statistics and p-values
-    let t_stats: Array1<f64> = &beta / &se;
-    let p_values: Vec<f64> = t_stats
-        .iter()
-        .map(|&t| t_test_p_value(t, df_resid as f64))
-        .collect();
-
-    // Compute 95% confidence intervals
-    let t_crit = crate::traits::t_critical(0.05, df_resid as f64);
-
-    // Build coefficient results
-    let coefficients: Vec<OlsCoefficient> = variable_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let p = p_values[i];
-            OlsCoefficient {
-                name: name.clone(),
-                estimate: beta[i],
-                std_error: se[i],
-                t_value: t_stats[i],
-                p_value: p,
-                significance: SignificanceLevel::from_p_value(p),
-                ci_lower_95: beta[i] - t_crit * se[i],
-                ci_upper_95: beta[i] + t_crit * se[i],
-            }
-        })
-        .collect();
-
-    Ok(OlsResult {
-        dependent_var: y_name.to_string(),
-        variable_names: variable_names.to_vec(),
-        n_obs: n,
-        n_params: k,
-        df_resid,
-        df_model,
-        coefficients,
-        r_squared,
-        adj_r_squared,
-        residual_std_error,
-        f_statistic,
-        f_p_value,
-        log_likelihood,
-        aic,
-        bic,
-        cov_type,
-        warnings,
-        missing: MissingSummary::none(n),
-        beta,
-        se,
-        resid: residuals,
-        vcov,
-        xtx_inv,
-        ssr,
-        sst,
-    })
+    fit_ols(x.view(), y, variable_names, y_name, has_intercept, cov_type)
 }
 
 /// Run OLS regression on a dataset.
@@ -704,50 +617,354 @@ pub fn run_ols(
     // Extract y vector
     let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
 
-    let x = &design.data;
-    let n = design.n_obs;
-    let k = design.n_features;
+    fit_ols(
+        design.data.view(),
+        &y,
+        &design.column_names,
+        y_col,
+        intercept,
+        cov_type,
+    )
+}
 
-    // Check we have enough observations
-    if n <= k {
+/// Which solve an OLS fit took (decision D1, variant B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OlsPath {
+    /// Cholesky inverse of X'X: full rank and well conditioned.
+    NormalEquations,
+    /// `lm.fit`'s pivoted QR (`linalg::solve::least_squares`): rank-deficient or
+    /// ill-conditioned designs.
+    PivotedQr,
+}
+
+/// The normal equations are used only when the diagonally equilibrated X'X has a
+/// reciprocal condition of at least this value (`sym_inverse`'s estimate, which is a lower
+/// bound, so the check errs toward the QR). Below it the pivoted QR (coefficient error
+/// `eps * sqrt(1 / rcond)` plus a residual term) decides rank and coefficients.
+const OLS_NORMAL_EQUATIONS_MIN_RCOND: f64 = 1e-8;
+
+/// The coefficients of a normal-equations solve have a relative error of order
+/// `eps / rcond` (measured: up to about 50 `eps / rcond` on uncentred calendar-year
+/// designs). Below this reciprocal condition one step of iterative refinement
+/// (`b += (X'X)^{-1} X'(y - X b)`, O(n k)) brings them to the accuracy of a QR solve, so
+/// they meet `Tol::coef(n)` (1e-10 relative for n > 1000) across the range the normal
+/// equations accept (checked at 1e-10 relative against the QR at reciprocal conditions
+/// 2.7e-5, `ols_year_trend`, and about 1e-7, `test_ols_solve_path_threshold`, near the
+/// 1e-8 edge). The fixed-design bootstrap solver skips this step
+/// (see `FixedDesignSolver`). At or above it the unrefined error is below about 1e-12 and the solve
+/// is left as it was, bit for bit.
+const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
+
+/// `(X'X)^{-1}` of a full-rank, well-conditioned design and whether solves with it take a
+/// refinement step (see [`OLS_REFINE_BELOW_RCOND`]).
+struct NormalInverse {
+    inverse: Array2<f64>,
+    refine: bool,
+}
+
+impl NormalInverse {
+    /// `(X'X)^{-1} X'y`, refined once when the conditioning asks for it.
+    fn coefficients(&self, x: ndarray::ArrayView2<'_, f64>, y: &Array1<f64>) -> Array1<f64> {
+        let mut beta = self.inverse.dot(&xty(&x, y));
+        if self.refine {
+            let r = y - &x.dot(&beta);
+            beta += &self.inverse.dot(&xty(&x, &r));
+        }
+        beta
+    }
+}
+
+/// `(X'X)^{-1}` when the design is of full rank and well conditioned (see
+/// [`OLS_NORMAL_EQUATIONS_MIN_RCOND`]); `None` when the pivoted QR must decide.
+/// Cancellation and the allocation ceiling propagate; any other failure of the inverse
+/// (a singular or indefinite X'X) means "use the QR".
+fn normal_equations_inverse(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Option<NormalInverse>> {
+    let (n, k) = x.dim();
+    if k == 0 || n <= k {
+        return Ok(None);
+    }
+    let gram = xtx(&x);
+    match sym_inverse(gram.view(), SingularPolicy::Error, "X'X") {
+        Ok(inv)
+            if inv.reciprocal_condition >= OLS_NORMAL_EQUATIONS_MIN_RCOND
+                && inv.inverse.diag().iter().all(|v| v.is_finite() && *v > 0.0) =>
+        {
+            Ok(Some(NormalInverse {
+                refine: inv.reciprocal_condition < OLS_REFINE_BELOW_RCOND,
+                inverse: inv.inverse,
+            }))
+        }
+        Ok(_) => Ok(None),
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The least-squares solution of one OLS fit.
+pub(crate) struct OlsSolve {
+    /// Coefficients in column order, `NaN` for aliased columns.
+    pub(crate) beta: Array1<f64>,
+    pub(crate) residuals: Array1<f64>,
+    /// `(X'X)^{-1}` (k x k), `NaN` rows and columns for aliased columns.
+    pub(crate) unscaled: Array2<f64>,
+    pub(crate) rank: usize,
+    /// Indices of the aliased columns, ascending.
+    pub(crate) aliased: Vec<usize>,
+    pub(crate) path: OlsPath,
+}
+
+/// Solve `min ||y - X b||`: the normal equations on a full-rank, well-conditioned design
+/// (bit for bit the solve OLS always used there when the design is well conditioned,
+/// refined once when it is less so; see [`OLS_REFINE_BELOW_RCOND`]), `lm.fit`'s pivoted QR
+/// otherwise.
+pub(crate) fn solve_ols(
+    x: ndarray::ArrayView2<'_, f64>,
+    y: ndarray::ArrayView1<'_, f64>,
+) -> EconResult<OlsSolve> {
+    if let Some(normal) = normal_equations_inverse(x)? {
+        let y = y.to_owned();
+        let beta = normal.coefficients(x, &y);
+        let residuals = &y - &x.dot(&beta);
+        return Ok(OlsSolve {
+            beta,
+            residuals,
+            unscaled: normal.inverse,
+            rank: x.ncols(),
+            aliased: Vec::new(),
+            path: OlsPath::NormalEquations,
+        });
+    }
+    let ls = least_squares(x, y)?;
+    Ok(OlsSolve {
+        beta: ls.coefficients,
+        residuals: ls.residuals,
+        unscaled: ls.unscaled_cov,
+        rank: ls.rank,
+        aliased: ls.aliased,
+        path: OlsPath::PivotedQr,
+    })
+}
+
+/// The columns of `x` listed in `cols`, through the allocation ceiling.
+fn select_columns(x: ndarray::ArrayView2<'_, f64>, cols: &[usize]) -> EconResult<Array2<f64>> {
+    let mut out = resource::try_zeros2(x.nrows(), cols.len(), "OLS identified design")?;
+    for (j, &c) in cols.iter().enumerate() {
+        out.column_mut(j).assign(&x.column(c));
+    }
+    Ok(out)
+}
+
+/// The `(cols, cols)` block of a square matrix.
+fn select_block(m: &Array2<f64>, cols: &[usize]) -> Array2<f64> {
+    Array2::from_shape_fn((cols.len(), cols.len()), |(i, j)| m[[cols[i], cols[j]]])
+}
+
+/// A k x k matrix holding `m` at `(cols, cols)` and `NaN` elsewhere.
+fn embed_block(m: &Array2<f64>, cols: &[usize], k: usize) -> Array2<f64> {
+    let mut out = Array2::from_elem((k, k), f64::NAN);
+    for (i, &ci) in cols.iter().enumerate() {
+        for (j, &cj) in cols.iter().enumerate() {
+            out[[ci, cj]] = m[[i, j]];
+        }
+    }
+    out
+}
+
+/// The identified (non-aliased) columns of a fitted OLS model's design and the matching
+/// block of `(X'X)^{-1}`, taken from the fit itself (no second decomposition). `sandwich`
+/// drops aliased columns from `estfun` and `bread`; every sandwich and resampling estimator
+/// here works on these columns and embeds its result back with `NaN` for aliased ones.
+struct IdentifiedDesign<'a> {
+    /// Original indices of the identified columns, ascending.
+    cols: Vec<usize>,
+    /// Number of design columns (identified and aliased).
+    k: usize,
+    /// The identified columns (a view of the design when nothing is aliased).
+    x: ndarray::CowArray<'a, f64, ndarray::Ix2>,
+    /// `(X1'X1)^{-1}` of the identified columns.
+    unscaled: Array2<f64>,
+}
+
+impl<'a> IdentifiedDesign<'a> {
+    /// The identified part of `x`, the design `ols` was fitted on. Refuses an `x` whose shape
+    /// is not the fit's.
+    fn of(x: ndarray::ArrayView2<'a, f64>, ols: &OlsResult) -> EconResult<Self> {
+        let k = ols.n_params;
+        if x.nrows() != ols.n_obs || x.ncols() != k {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "design matrix is {} x {} but the OLS fit has {} observations and {} \
+                     parameters",
+                    x.nrows(),
+                    x.ncols(),
+                    ols.n_obs,
+                    k
+                ),
+            });
+        }
+        if ols.beta.len() != k || ols.xtx_inv.dim() != (k, k) {
+            return Err(EconError::InvalidSpecification {
+                message: "the OLS fit carries no coefficient/(X'X)^-1 cache (a deserialized \
+                          result); refit with run_ols"
+                    .to_string(),
+            });
+        }
+        let cols: Vec<usize> = (0..k).filter(|&j| !ols.beta[j].is_nan()).collect();
+        if cols.len() == k {
+            return Ok(IdentifiedDesign {
+                cols,
+                k,
+                x: ndarray::CowArray::from(x),
+                unscaled: ols.xtx_inv.clone(),
+            });
+        }
+        let x1 = select_columns(x, &cols)?;
+        let unscaled = select_block(&ols.xtx_inv, &cols);
+        Ok(IdentifiedDesign {
+            cols,
+            k,
+            x: ndarray::CowArray::from(x1),
+            unscaled,
+        })
+    }
+
+    /// Number of identified columns (the rank of the fit).
+    fn rank(&self) -> usize {
+        self.cols.len()
+    }
+
+    /// `m` (rank x rank) as a k x k matrix with `NaN` rows and columns for aliased columns.
+    fn embed(&self, m: &Array2<f64>) -> Array2<f64> {
+        if self.cols.len() == self.k {
+            m.clone()
+        } else {
+            embed_block(m, &self.cols, self.k)
+        }
+    }
+
+    /// `v` (length rank) as a length-k vector with `NaN` for aliased columns.
+    fn embed_vec(&self, v: &[f64]) -> Vec<f64> {
+        let mut out = vec![f64::NAN; self.k];
+        for (&c, &x) in self.cols.iter().zip(v) {
+            out[c] = x;
+        }
+        out
+    }
+}
+
+/// A fixed design's least-squares solver for many responses (the residual and wild
+/// bootstraps): the inverse of X'X on a full-rank, well-conditioned design (the same
+/// decision as [`solve_ols`]), the pivoted QR otherwise. One factorisation, one O(n k)
+/// pass per response.
+///
+/// Unlike [`solve_ols`], the normal-equations arm never takes the refinement step of
+/// [`OLS_REFINE_BELOW_RCOND`]: it would triple the per-replicate cost inside the
+/// user-sized replicate loop, and buys nothing there. A replicate's coefficients carry a
+/// relative error of order `eps / rcond` (at most about 1e-8 at the threshold), which moves
+/// the bootstrap standard error by far less than its Monte Carlo error; the replicates are
+/// random draws, not values that can be pinned to R.
+enum FixedDesignSolver {
+    /// `(X'X)^{-1}`, applied without refinement.
+    Normal(Array2<f64>),
+    Qr(Qr),
+}
+
+impl FixedDesignSolver {
+    fn new(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Self> {
+        Ok(match normal_equations_inverse(x)? {
+            Some(u) => FixedDesignSolver::Normal(u.inverse),
+            None => FixedDesignSolver::Qr(Qr::decompose(x, LM_QR_TOL)?),
+        })
+    }
+
+    /// Coefficients of `y` on `x` (the design this solver was built from).
+    fn coefficients(
+        &self,
+        x: ndarray::ArrayView2<'_, f64>,
+        y: &Array1<f64>,
+    ) -> EconResult<Array1<f64>> {
+        match self {
+            FixedDesignSolver::Normal(inverse) => Ok(inverse.dot(&xty(&x, y))),
+            FixedDesignSolver::Qr(q) => q.coefficients(y.view()),
+        }
+    }
+}
+
+/// One OLS fit on arrays, shared by [`run_ols`] and [`run_ols_raw`]: the least-squares
+/// solution ([`solve_ols`]), fit statistics on the identified columns as `summary.lm`, and
+/// the requested covariance on the identified columns (as `sandwich`). Aliased columns get
+/// `NaN` coefficients, SEs, t, p and CIs and R's warning.
+fn fit_ols(
+    x: ndarray::ArrayView2<'_, f64>,
+    y: &Array1<f64>,
+    names: &[String],
+    y_name: &str,
+    intercept: bool,
+    cov_type: CovarianceType,
+) -> EconResult<OlsResult> {
+    let (n, k) = x.dim();
+    // lm.fit refuses NA/NaN/Inf; run_ols input is already NA-checked by the extractor.
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "OLS input contains non-finite values (NA/NaN/Inf) in x".to_string(),
+        });
+    }
+    if y.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "OLS input contains non-finite values (NA/NaN/Inf) in y".to_string(),
+        });
+    }
+    if n == 0 {
         return Err(EconError::InsufficientData {
-            required: k + 1,
-            provided: n,
-            context: format!("OLS regression with {} parameters", k),
+            required: 1,
+            provided: 0,
+            context: "OLS regression".to_string(),
         });
     }
 
-    let mut warnings = Vec::new();
-
-    // Compute (X'X)^{-1}
-    let (xtx_inv, cond_warning) =
-        safe_inverse(&xtx(&x.view()).view()).map_err(|_e| EconError::SingularMatrix {
-            context: "X'X matrix in OLS".to_string(),
-            suggestion: "Check for perfect multicollinearity between independent variables"
+    let solve = solve_ols(x, y.view())?;
+    let rank = solve.rank;
+    if rank == 0 {
+        return Err(EconError::SingularMatrix {
+            context: "OLS design matrix has rank 0".to_string(),
+            suggestion: "every column is zero; include an intercept or a non-zero regressor"
                 .to_string(),
-        })?;
-
-    if let Some(cond) = cond_warning {
-        warnings.push(
-            EstimationWarning::HighConditionNumber {
-                value: cond,
-                threshold: CONDITION_THRESHOLD,
-            }
-            .message(),
-        );
+        });
     }
+    let df_resid =
+        n.checked_sub(rank)
+            .filter(|d| *d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: rank + 1,
+                provided: n,
+                context: format!("OLS regression with {rank} identified parameters"),
+            })?;
 
-    // Compute β = (X'X)^{-1} X'y
-    let xty_vec = xty(&x.view(), &y);
-    let beta = xtx_inv.dot(&xty_vec);
+    let mut warnings = Vec::new();
+    if let Some(w) = aliasing_message(&solve.aliased, names) {
+        warnings.push(w);
+    }
+    let aliased: Vec<String> = solve
+        .aliased
+        .iter()
+        .map(|&j| {
+            names
+                .get(j)
+                .cloned()
+                .unwrap_or_else(|| format!("x{}", j + 1))
+        })
+        .collect();
 
-    // Compute fitted values and residuals
-    let y_hat = x.dot(&beta);
-    let residuals: Array1<f64> = &y - &y_hat;
+    let OlsSolve {
+        beta,
+        residuals,
+        unscaled: xtx_inv,
+        aliased: aliased_idx,
+        ..
+    } = solve;
 
     // Compute statistics
     let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
-    let df_resid = n - k;
     let sigma_squared = ssr / (df_resid as f64);
     let residual_std_error = sigma_squared.sqrt();
     let FitSummary {
@@ -757,17 +974,25 @@ pub fn run_ols(
         df_model,
         f_statistic,
         f_p_value,
-    } = fit_summary(&y, ssr, k, df_resid, sigma_squared, intercept);
+    } = fit_summary(y, ssr, rank, df_resid, sigma_squared, intercept);
 
-    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, k);
+    let (log_likelihood, aic, bic) = gaussian_fit_criteria(ssr, n, rank);
 
-    // Compute variance-covariance matrix based on cov_type
-    let vcov = compute_vcov(&x.view(), &residuals, &xtx_inv, cov_type, n, k)?;
+    // Covariance on the identified columns; aliased rows and columns are NaN.
+    let vcov = if aliased.is_empty() {
+        compute_vcov(&x, &residuals, &xtx_inv, cov_type, n, df_resid)?
+    } else {
+        let cols: Vec<usize> = (0..k).filter(|j| !aliased_idx.contains(j)).collect();
+        let x1 = select_columns(x, &cols)?;
+        let u1 = select_block(&xtx_inv, &cols);
+        let v1 = compute_vcov(&x1.view(), &residuals, &u1, cov_type, n, df_resid)?;
+        embed_block(&v1, &cols, k)
+    };
 
     // Extract standard errors from diagonal
     let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
 
-    // Compute t-statistics and p-values
+    // Compute t-statistics and p-values (NaN for aliased columns)
     let t_stats: Array1<f64> = &beta / &se;
     let p_values: Vec<f64> = t_stats
         .iter()
@@ -778,8 +1003,7 @@ pub fn run_ols(
     let t_crit = crate::traits::t_critical(0.05, df_resid as f64);
 
     // Build coefficient results
-    let coefficients: Vec<OlsCoefficient> = design
-        .column_names
+    let coefficients: Vec<OlsCoefficient> = names
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -798,8 +1022,8 @@ pub fn run_ols(
         .collect();
 
     Ok(OlsResult {
-        dependent_var: y_col.to_string(),
-        variable_names: design.column_names.clone(),
+        dependent_var: y_name.to_string(),
+        variable_names: names.to_vec(),
         n_obs: n,
         n_params: k,
         df_resid,
@@ -816,6 +1040,7 @@ pub fn run_ols(
         cov_type,
         warnings,
         missing: MissingSummary::none(n),
+        aliased,
         beta,
         se,
         resid: residuals,
@@ -833,17 +1058,17 @@ fn compute_vcov(
     xtx_inv: &Array2<f64>,
     cov_type: CovarianceType,
     n: usize,
-    k: usize,
+    df_resid: usize,
 ) -> EconResult<Array2<f64>> {
     match cov_type {
         CovarianceType::Standard => {
             // Standard OLS: σ² (X'X)^{-1}
-            let sigma2 = residuals.iter().map(|&e| e.powi(2)).sum::<f64>() / ((n - k) as f64);
+            let sigma2 = residuals.iter().map(|&e| e.powi(2)).sum::<f64>() / (df_resid as f64);
             Ok(xtx_inv * sigma2)
         }
         CovarianceType::HC0 | CovarianceType::HC1 | CovarianceType::HC2 | CovarianceType::HC3 => {
             // Robust standard errors using sandwich estimator
-            compute_hc_vcov(x, residuals, xtx_inv, cov_type, n, k)
+            compute_hc_vcov(x, residuals, xtx_inv, cov_type, n, df_resid)
         }
     }
 }
@@ -858,7 +1083,7 @@ fn compute_hc_vcov(
     xtx_inv: &Array2<f64>,
     cov_type: CovarianceType,
     n: usize,
-    k: usize,
+    df_resid: usize,
 ) -> EconResult<Array2<f64>> {
     // Compute leverage values for HC2/HC3
     let leverage = if matches!(cov_type, CovarianceType::HC2 | CovarianceType::HC3) {
@@ -875,7 +1100,7 @@ fn compute_hc_vcov(
             match cov_type {
                 CovarianceType::HC0 => e2,
                 CovarianceType::HC1 => {
-                    let correction = (n as f64) / ((n - k) as f64);
+                    let correction = (n as f64) / (df_resid as f64);
                     e2 * correction
                 }
                 CovarianceType::HC2 => {
@@ -1028,7 +1253,7 @@ impl std::fmt::Display for OlsClusteredResult {
             writeln!(
                 f,
                 "{:>15} {:>12.4} {:>12.4} {:>10.4} {:>10.4} {}",
-                truncate(&coef.name, 15),
+                p2a_text::ellipsize(&coef.name, 15),
                 coef.estimate,
                 coef.std_error,
                 coef.t_value,
@@ -1118,10 +1343,11 @@ impl OlsClusteredResult {
         // First run standard OLS to get coefficients and residuals
         let mut base_result = run_ols(&sample, y_col, x_cols, intercept, CovarianceType::Standard)?;
 
-        // Build design matrix again (we need it for clustered SEs)
+        // Build design matrix again (we need it for clustered SEs); the sandwich uses the
+        // identified columns and the fit's (X'X)^{-1} block, as sandwich::vcovCL does.
         let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
             .map_err(|e| econ_error_from_design(e, df))?;
-        let x = &design.data;
+        let id = IdentifiedDesign::of(design.data.view(), &base_result)?;
 
         // Row indices (into the sample) of each cluster
         let factor1 = ids.factor(cluster1);
@@ -1169,31 +1395,27 @@ impl OlsClusteredResult {
                 });
             }
 
-            let intersection = intersection_groups(factor1, factor2)?;
+            let intersection = intersection_groups(factor1, factor2);
             let vcov = compute_twoway_clustered_vcov(
-                &x.view(),
+                &id.x.view(),
                 &base_result.resid,
-                &base_result.xtx_inv,
+                &id.unscaled,
                 &clusters1,
                 &clusters2,
                 &intersection,
             )?;
 
             (
-                vcov,
+                id.embed(&vcov),
                 Some(n_c2),
                 format!("Two-way clustered ({}, {})", cluster1, c2),
             )
         } else {
             // One-way clustering
-            let vcov = compute_clustered_vcov(
-                &x.view(),
-                &base_result.resid,
-                &base_result.xtx_inv,
-                &clusters1,
-            )?;
+            let vcov =
+                compute_clustered_vcov(&id.x.view(), &base_result.resid, &id.unscaled, &clusters1)?;
 
-            (vcov, None, format!("Clustered ({})", cluster1))
+            (id.embed(&vcov), None, format!("Clustered ({})", cluster1))
         };
 
         // Update standard errors and statistics
@@ -1289,7 +1511,7 @@ fn cluster_groups(f: &Factor) -> EconResult<Vec<Vec<usize>>> {
 
 /// Row indices of each observed (level of `a`, level of `b`) pair: the intersection
 /// clusters of a two-way clustering, keyed by factor codes.
-fn intersection_groups(a: &Factor, b: &Factor) -> EconResult<Vec<Vec<usize>>> {
+fn intersection_groups(a: &Factor, b: &Factor) -> Vec<Vec<usize>> {
     let mut index: HashMap<(u32, u32), usize> = HashMap::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, (&ca, &cb)) in a.codes.iter().zip(&b.codes).enumerate() {
@@ -1299,13 +1521,15 @@ fn intersection_groups(a: &Factor, b: &Factor) -> EconResult<Vec<Vec<usize>>> {
         });
         groups[g].push(i);
     }
-    Ok(groups)
+    groups
 }
 
 /// Compute one-way clustered variance-covariance matrix.
 ///
 /// Uses the cluster-robust sandwich estimator with small-sample correction:
 /// V = (G / (G-1)) * ((n-1)/(n-k)) * (X'X)^{-1} * B * (X'X)^{-1}
+///
+/// `x` holds the identified columns only, so k is the rank of the fit (sandwich's CR1).
 ///
 /// where B = sum_g (X_g' e_g) (X_g' e_g)'
 fn compute_clustered_vcov(
@@ -1407,6 +1631,9 @@ pub struct HacResult {
     pub names: Vec<String>,
     /// Whether the prewhitening option was used
     pub prewhiten: bool,
+    /// Residual degrees of freedom of the fit, n - rank (for t tests on the HAC SEs).
+    #[serde(default)]
+    pub df_resid: usize,
     /// Warnings about the estimate
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -1474,17 +1701,38 @@ impl std::fmt::Display for HacKernel {
     }
 }
 
+/// Accepted spellings of the HAC kernel (matched after `options::normalize`, so "Quadratic
+/// Spectral", "quadratic-spectral" and "QS" all parse): sandwich's names and common
+/// abbreviations. The first spelling of each entry is canonical.
+const HAC_KERNEL_CHOICES: Choices<HacKernel> = Choices {
+    option: "kernel",
+    values: &[
+        (
+            &["bartlett", "newey_west", "neweywest", "nw"],
+            HacKernel::Bartlett,
+        ),
+        (&["parzen"], HacKernel::Parzen),
+        (
+            &["quadratic_spectral", "qs", "quadraticspectral"],
+            HacKernel::QuadraticSpectral,
+        ),
+        (&["truncated", "rectangular"], HacKernel::Truncated),
+        (
+            &["tukey_hanning", "tukeyhanning", "tukey", "th"],
+            HacKernel::TukeyHanning,
+        ),
+    ],
+};
+
+// FromStr (unknown names are an error listing the accepted ones) and choices(); the
+// Display above ("Bartlett (Newey-West)") is printed by MCP and the CLI and stays.
+crate::option_enum!(HacKernel, HAC_KERNEL_CHOICES, no_display);
+
 impl HacKernel {
-    /// Parse kernel type from string.
+    /// Parse kernel type from string; `None` for an unknown name.
+    #[deprecated(note = "use str::parse, which reports unknown names")]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "bartlett" | "newey-west" | "nw" => Some(Self::Bartlett),
-            "parzen" => Some(Self::Parzen),
-            "quadratic-spectral" | "qs" | "quadraticspectral" => Some(Self::QuadraticSpectral),
-            "truncated" | "rectangular" => Some(Self::Truncated),
-            "tukey-hanning" | "tukeyhanning" | "th" => Some(Self::TukeyHanning),
-            _ => None,
-        }
+        s.parse().ok()
     }
 
     /// Compute the kernel weight for a given lag j and bandwidth m.
@@ -1552,7 +1800,9 @@ impl HacKernel {
 /// # Arguments
 ///
 /// * `ols_result` - OLS regression result
-/// * `x` - Design matrix (n × k)
+/// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
+///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
+///   fit, not recomputed from `x`, and only the shape of `x` is checked.
 /// * `bandwidth` - Optional bandwidth (number of lags). If None, uses Newey-West automatic selection.
 ///   A user bandwidth must be smaller than n (otherwise `InvalidSpecification`); one above n/4
 ///   adds an entry to `HacResult::warnings`.
@@ -1644,13 +1894,13 @@ pub fn vcov_hac(
         nw_bw.max(1).min(n - 1)
     });
 
-    // Compute X'X and its inverse
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _cond) =
-        safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-            context: "HAC covariance computation".to_string(),
-            suggestion: format!("Original error: {}", e),
-        })?;
+    // The identified columns and the fit's (X'X)^{-1} block (sandwich drops aliased
+    // columns from estfun and bread).
+    let id = IdentifiedDesign::of(x.view(), ols_result)?;
+    let full_k = k;
+    let k = id.rank();
+    let x = &id.x;
+    let xtx_inv = &id.unscaled;
 
     // Optionally prewhiten residuals with VAR(1)
     let (u, rho) = if prewhiten {
@@ -1727,20 +1977,24 @@ pub fn vcov_hac(
         })?;
 
     // Scale by n (to get variance, not sum of squares)
-    let vcov_scaled = &vcov_hac * (n as f64);
+    let vcov_identified = &vcov_hac * (n as f64);
 
-    // Extract standard errors (square root of diagonal)
-    let std_errors: Vec<f64> = (0..k)
+    // Extract standard errors (square root of diagonal); NaN for aliased columns
+    let identified_se: Vec<f64> = (0..k)
         .map(|i| {
-            let var = vcov_scaled[[i, i]];
+            let var = vcov_identified[[i, i]];
             if var >= 0.0 { var.sqrt() } else { 0.0 }
         })
         .collect();
+    let std_errors = id.embed_vec(&identified_se);
+    let vcov_scaled = id.embed(&vcov_identified);
+    let k = full_k;
 
     // Convert vcov to Vec<Vec<f64>> for output
     let vcov_vec: Vec<Vec<f64>> = (0..k)
         .map(|i| (0..k).map(|j| vcov_scaled[[i, j]]).collect())
         .collect();
+    warnings.extend(ols_result.alias_notes());
 
     // Extract coefficient values and names
     let coefficients: Vec<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
@@ -1760,6 +2014,7 @@ pub fn vcov_hac(
         coefficients,
         names,
         prewhiten,
+        df_resid: ols_result.df_resid,
         warnings,
     })
 }
@@ -1810,7 +2065,10 @@ fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
 /// * `x_cols` - Names of independent variable columns
 /// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than n; one above n/4
 ///   adds a warning (see [`vcov_hac`]).
-/// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", "truncated", "tukey-hanning")
+/// * `kernel` - Kernel name: `bartlett` (also `Newey-West`, `nw`), `parzen`,
+///   `quadratic_spectral` (`Quadratic Spectral`, `qs`), `truncated` (`rectangular`),
+///   `tukey_hanning` (`Tukey-Hanning`, `tukey`); case, spaces and dashes are ignored. `None`
+///   is Bartlett; an unknown name is `InvalidSpecification` listing the accepted ones.
 /// * `prewhiten` - Whether to use prewhitening
 ///
 /// # Returns
@@ -1851,10 +2109,8 @@ impl HacResult {
         let dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, intercept)?;
         let x = dm.view().to_owned();
 
-        // Parse kernel
-        let kernel_type = kernel
-            .and_then(HacKernel::from_str)
-            .unwrap_or(HacKernel::Bartlett);
+        // Parse kernel (unknown names are an error)
+        let kernel_type = crate::options::parse_or(kernel, HacKernel::Bartlett)?;
 
         vcov_hac(&ols_result, &x, bandwidth, kernel_type, prewhiten)
     }
@@ -1876,19 +2132,74 @@ pub enum BootstrapType {
     /// Residual bootstrap: Resample residuals, keeping X fixed.
     /// More efficient under correct specification but assumes homoskedasticity.
     Residual,
-    /// Wild bootstrap: Multiply residuals by random weights (Rademacher).
+    /// Wild bootstrap: Multiply residuals by random weights (Rademacher, ±1 with
+    /// probability 1/2; sandwich's `type = "wild"` default).
     /// Robust to heteroskedasticity, preserves X structure.
     Wild,
+    /// Wild bootstrap with Mammen's two-point weights (sandwich `type = "mammen"`):
+    /// -(sqrt5 - 1)/2 with probability (sqrt5 + 1)/(2 sqrt5), else (sqrt5 + 1)/2.
+    WildMammen,
+    /// Wild bootstrap with Webb's six-point weights (sandwich `type = "webb"`):
+    /// ±sqrt(1/2), ±1, ±sqrt(3/2), each with probability 1/6.
+    WildWebb,
 }
 
+/// Accepted spellings of the bootstrap type (sandwich's `vcovBS` names; `norm`,
+/// `jackknife` and `fractional` are not implemented and are refused).
+const BOOTSTRAP_TYPE_CHOICES: Choices<BootstrapType> = Choices {
+    option: "bootstrap_type",
+    values: &[
+        (&["pairs", "xy", "case", "cases"], BootstrapType::Pairs),
+        (&["residual", "resid", "residuals"], BootstrapType::Residual),
+        (
+            &["wild", "rademacher", "wild_rademacher"],
+            BootstrapType::Wild,
+        ),
+        (&["mammen", "wild_mammen"], BootstrapType::WildMammen),
+        (&["webb", "wild_webb"], BootstrapType::WildWebb),
+    ],
+};
+
+crate::option_enum!(BootstrapType, BOOTSTRAP_TYPE_CHOICES, no_display);
+
 impl BootstrapType {
-    /// Parse from string.
+    /// Parse from string; `None` for an unknown name.
+    #[deprecated(note = "use str::parse, which reports unknown names")]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "pairs" | "xy" | "case" => Some(BootstrapType::Pairs),
-            "residual" | "resid" => Some(BootstrapType::Residual),
-            "wild" => Some(BootstrapType::Wild),
-            _ => None,
+        s.parse().ok()
+    }
+}
+
+/// One wild-bootstrap weight (sandwich::vcovBS laws). Rademacher keeps the original
+/// `rng.r#gen::<bool>()` draw, so seeded `Wild` results are unchanged; Mammen draws one
+/// uniform against (sqrt5 + 1)/(2 sqrt5); Webb one of six points uniformly.
+fn wild_weight(kind: BootstrapType, rng: &mut ChaCha8Rng) -> f64 {
+    match kind {
+        BootstrapType::WildMammen => {
+            let s5 = 5f64.sqrt();
+            if rng.r#gen::<f64>() < (s5 + 1.0) / (2.0 * s5) {
+                -(s5 - 1.0) / 2.0
+            } else {
+                (s5 + 1.0) / 2.0
+            }
+        }
+        BootstrapType::WildWebb => {
+            const WEBB: [f64; 6] = [
+                -1.224_744_871_391_589,
+                -1.0,
+                -std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+                1.0,
+                1.224_744_871_391_589,
+            ];
+            WEBB[rng.gen_range(0..6)]
+        }
+        _ => {
+            if rng.r#gen::<bool>() {
+                1.0
+            } else {
+                -1.0
+            }
         }
     }
 }
@@ -1899,6 +2210,8 @@ impl std::fmt::Display for BootstrapType {
             BootstrapType::Pairs => write!(f, "Pairs (xy)"),
             BootstrapType::Residual => write!(f, "Residual"),
             BootstrapType::Wild => write!(f, "Wild"),
+            BootstrapType::WildMammen => write!(f, "Wild (Mammen)"),
+            BootstrapType::WildWebb => write!(f, "Wild (Webb)"),
         }
     }
 }
@@ -1929,6 +2242,10 @@ pub struct BootstrapResult {
     pub boot_samples: Option<Vec<Vec<f64>>>,
     /// Convergence rate (fraction of successful replications).
     pub convergence_rate: f64,
+    /// Warnings: R's aliasing note of the fit, and how many pairs replicates were skipped
+    /// because the resampled design lost rank. Absent from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl std::fmt::Display for BootstrapResult {
@@ -1947,7 +2264,7 @@ impl std::fmt::Display for BootstrapResult {
                 name, self.coefficients[i], self.std_errors[i]
             )?;
         }
-        Ok(())
+        f.write_str(&notes_text(self))
     }
 }
 
@@ -1956,7 +2273,9 @@ impl std::fmt::Display for BootstrapResult {
 /// # Arguments
 ///
 /// * `ols_result` - Result from OLS estimation
-/// * `x` - Design matrix (n × k)
+/// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
+///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
+///   fit, not recomputed from `x`, and only the shape of `x` is checked.
 /// * `y` - Response vector (n)
 /// * `n_boot` - Number of bootstrap replications (default: 999). At least 10, otherwise
 ///   `InvalidSpecification`; replicate storage above the allocation ceiling is `ResourceLimit`.
@@ -2003,6 +2322,18 @@ pub fn vcov_bootstrap(
         });
     }
 
+    if y.len() != n || n != ols_result.n_obs {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "y has {} values and the design {} rows, but the OLS fit has {} observations; \
+                 pass the response and design the fit was estimated on",
+                y.len(),
+                n,
+                ols_result.n_obs
+            ),
+        });
+    }
+
     if n < k {
         return Err(EconError::InsufficientData {
             required: k,
@@ -2024,63 +2355,69 @@ pub fn vcov_bootstrap(
         None => ChaCha8Rng::from_entropy(),
     };
 
-    // Original fitted values and residuals
-    let y_fitted = x.dot(&ols_result.coefficients().clone());
+    // The identified columns (aliased ones are left out of every replicate and get NaN)
+    let id = IdentifiedDesign::of(x.view(), ols_result)?;
+    let r = id.rank();
+    let x1 = id.x.view();
+
+    // Original fitted values (never X b: NaN for aliased columns) and residuals
     let residuals = ols_result.residuals();
+    let y_fitted: Array1<f64> = y - residuals;
+
+    // Residual and wild bootstraps keep X fixed: one factorisation, then O(n r) per
+    // replicate. The pairs bootstrap refits each resampled design.
+    let fixed = match bootstrap_type {
+        BootstrapType::Pairs => None,
+        _ => Some(FixedDesignSolver::new(x1)?),
+    };
 
     // Storage for bootstrap coefficient estimates
     let mut boot_coefs: Vec<Vec<f64>> = resource::try_with_capacity(replications, what)?;
     let indices: Vec<usize> = (0..n).collect();
+    let mut rank_deficient = 0usize;
 
     for _ in 0..replications {
         resource::checkpoint()?;
-        let (y_boot, x_boot) = match bootstrap_type {
-            BootstrapType::Pairs => {
+        let beta_boot = match (bootstrap_type, &fixed) {
+            (BootstrapType::Pairs, _) | (_, None) => {
                 // Pairs bootstrap: resample (y_i, x_i) pairs together
                 let sample: Vec<usize> =
                     (0..n).map(|_| *indices.choose(&mut rng).unwrap()).collect();
 
                 let y_boot: Array1<f64> = sample.iter().map(|&i| y[i]).collect();
-                let x_boot: Array2<f64> = Array2::from_shape_fn((n, k), |(i, j)| x[[sample[i], j]]);
-                (y_boot, x_boot)
+                let x_boot: Array2<f64> =
+                    Array2::from_shape_fn((n, r), |(i, j)| x1[[sample[i], j]]);
+                let fit = solve_ols(x_boot.view(), y_boot.view())?;
+                if fit.rank < r {
+                    // A resample that loses a column identifies no full coefficient vector
+                    rank_deficient += 1;
+                    continue;
+                }
+                fit.beta
             }
-            BootstrapType::Residual => {
-                // Residual bootstrap: y* = X*β̂ + ε*, where ε* resampled from residuals
-                let resid_sample: Vec<f64> = (0..n)
-                    .map(|_| residuals[*indices.choose(&mut rng).unwrap()])
+            (BootstrapType::Residual, Some(solver)) => {
+                // Residual bootstrap: y* = ŷ + ε*, ε* resampled from the residuals
+                let y_boot: Array1<f64> = (0..n)
+                    .map(|i| y_fitted[i] + residuals[*indices.choose(&mut rng).unwrap()])
                     .collect();
-
-                let y_boot: Array1<f64> = (0..n).map(|i| y_fitted[i] + resid_sample[i]).collect();
-
-                (y_boot, x.clone())
+                solver.coefficients(x1, &y_boot)?
             }
-            BootstrapType::Wild => {
-                // Wild bootstrap with Rademacher weights
+            (
+                BootstrapType::Wild | BootstrapType::WildMammen | BootstrapType::WildWebb,
+                Some(solver),
+            ) => {
+                // Wild bootstrap: residuals times Rademacher, Mammen or Webb weights
                 let weights: Vec<f64> = (0..n)
-                    .map(|_| if rng.r#gen::<bool>() { 1.0 } else { -1.0 })
+                    .map(|_| wild_weight(bootstrap_type, &mut rng))
                     .collect();
 
                 let y_boot: Array1<f64> = (0..n)
                     .map(|i| y_fitted[i] + weights[i] * residuals[i])
                     .collect();
-
-                (y_boot, x.clone())
+                solver.coefficients(x1, &y_boot)?
             }
         };
-
-        // Estimate OLS on bootstrap sample
-        let xtx_boot = xtx(&x_boot.view());
-        match safe_inverse(&xtx_boot.view()) {
-            Ok((xtx_inv, _)) => {
-                let xty_boot = xty(&x_boot.view(), &y_boot);
-                let beta_boot = xtx_inv.dot(&xty_boot);
-                boot_coefs.push(beta_boot.to_vec());
-            }
-            Err(_) => {
-                // Skip singular samples
-                continue;
-            }
-        }
+        boot_coefs.push(beta_boot.to_vec());
     }
 
     let successful_reps = boot_coefs.len();
@@ -2095,31 +2432,31 @@ pub fn vcov_bootstrap(
         });
     }
 
-    // Compute bootstrap covariance matrix
+    // Compute bootstrap covariance matrix on the identified columns
     // Cov(β) = (1/(B-1)) * Σᵢ (β*ᵢ - β̄*)(β*ᵢ - β̄*)'
-    let boot_mean: Vec<f64> = (0..k)
+    let boot_mean: Vec<f64> = (0..r)
         .map(|j| boot_coefs.iter().map(|b| b[j]).sum::<f64>() / successful_reps as f64)
         .collect();
 
-    let mut vcov = vec![vec![0.0; k]; k];
+    let mut vcov_r = Array2::<f64>::zeros((r, r));
     for boot in &boot_coefs {
-        for i in 0..k {
-            for j in 0..k {
-                vcov[i][j] += (boot[i] - boot_mean[i]) * (boot[j] - boot_mean[j]);
+        for i in 0..r {
+            for j in 0..r {
+                vcov_r[[i, j]] += (boot[i] - boot_mean[i]) * (boot[j] - boot_mean[j]);
             }
         }
     }
 
     // Normalize by (B-1)
     let divisor = (successful_reps - 1) as f64;
-    for i in 0..k {
-        for j in 0..k {
-            vcov[i][j] /= divisor;
-        }
-    }
+    vcov_r /= divisor;
 
-    // Standard errors from diagonal
-    let std_errors: Vec<f64> = (0..k).map(|i| vcov[i][i].max(0.0).sqrt()).collect();
+    // Standard errors from diagonal; NaN rows, columns and SEs for aliased columns
+    let se_r: Vec<f64> = (0..r).map(|i| vcov_r[[i, i]].max(0.0).sqrt()).collect();
+    let std_errors = id.embed_vec(&se_r);
+    let vcov_k = id.embed(&vcov_r);
+    let vcov: Vec<Vec<f64>> = vcov_k.rows().into_iter().map(|row| row.to_vec()).collect();
+    let boot_samples: Vec<Vec<f64>> = boot_coefs.iter().map(|b| id.embed_vec(b)).collect();
 
     // Extract original coefficients and names
     let coefficients: Vec<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
@@ -2128,6 +2465,14 @@ pub fn vcov_bootstrap(
         .iter()
         .map(|c| c.name.clone())
         .collect();
+
+    let mut warnings = ols_result.alias_notes();
+    if rank_deficient > 0 {
+        warnings.push(format!(
+            "{rank_deficient} of {replications} bootstrap replicates had a rank-deficient \
+             design and were skipped"
+        ));
+    }
 
     Ok(BootstrapResult {
         vcov,
@@ -2138,8 +2483,9 @@ pub fn vcov_bootstrap(
         names,
         n_obs: n,
         n_params: k,
-        boot_samples: Some(boot_coefs),
+        boot_samples: Some(boot_samples),
         convergence_rate: successful_reps as f64 / replications as f64,
+        warnings,
     })
 }
 
@@ -2152,7 +2498,9 @@ pub fn vcov_bootstrap(
 /// * `x_cols` - Names of independent variable columns
 /// * `n_boot` - Number of bootstrap replications (default: 999). At least 10 (see
 ///   [`vcov_bootstrap`]).
-/// * `bootstrap_type` - Type string ("pairs", "residual", "wild")
+/// * `bootstrap_type` - `pairs` (also `xy`, `case`), `residual`, `wild` (Rademacher), `mammen`,
+///   `webb` (sandwich's names). `None` is pairs; an unknown name (also sandwich's `norm`,
+///   `jackknife`, `fractional`, which are not implemented) is `InvalidSpecification`.
 /// * `seed` - Optional RNG seed
 ///
 /// # Returns
@@ -2184,10 +2532,8 @@ pub fn run_vcov_bootstrap(
     let x = dm.data;
     let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
 
-    // Parse bootstrap type
-    let boot_type = bootstrap_type
-        .and_then(BootstrapType::from_str)
-        .unwrap_or(BootstrapType::Pairs);
+    // Parse bootstrap type (unknown names are an error)
+    let boot_type = crate::options::parse_or(bootstrap_type, BootstrapType::Pairs)?;
 
     vcov_bootstrap(&ols_result, &x, &y, n_boot, boot_type, seed)
 }
@@ -2296,7 +2642,9 @@ impl std::fmt::Display for DriscollKraayResult {
 /// # Arguments
 ///
 /// * `ols_result` - Result from OLS estimation
-/// * `x` - Design matrix (n × k)
+/// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
+///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
+///   fit, not recomputed from `x`, and only the shape of `x` is checked.
 /// * `time_ids` - Time period identifier for each observation
 /// * `bandwidth` - Optional bandwidth (None for automatic). A user bandwidth must be smaller than
 ///   the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
@@ -2387,12 +2735,27 @@ pub fn vcov_driscoll_kraay(
         }
     }
 
-    // Compute (X'X)^{-1}
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Driscoll-Kraay covariance".to_string(),
-        suggestion: format!("Error: {}", e),
-    })?;
+    // The period-aggregated scores have rank at most T: the t tests use T - rank df and
+    // need T > rank (REG-51; the subtraction underflowed before).
+    let rank = ols_result.rank();
+    let df_periods = n_periods
+        .checked_sub(rank)
+        .filter(|d| *d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: rank + 1,
+            provided: n_periods,
+            context: format!(
+                "Driscoll-Kraay standard errors need more time periods than identified \
+                 coefficients (k = {rank}): the period-aggregated scores have rank at most T"
+            ),
+        })?;
+
+    // The identified columns and the fit's (X'X)^{-1} block (aliased columns: NaN).
+    let id = IdentifiedDesign::of(x.view(), ols_result)?;
+    let full_k = k;
+    let k = id.rank();
+    let x = &id.x;
+    let xtx_inv = &id.unscaled;
 
     // Step 1: Aggregate score vectors by time period
     // h̄_t = (1/N_t) Σᵢ∈t uᵢ xᵢ
@@ -2475,8 +2838,11 @@ pub fn vcov_driscoll_kraay(
             suggestion: format!("Error: {}", e),
         })?;
 
-    // Extract standard errors and compute statistics
-    let std_errors: Vec<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
+    // Extract standard errors and compute statistics; NaN for aliased columns
+    let identified_se: Vec<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
+    let std_errors = id.embed_vec(&identified_se);
+    let vcov = id.embed(&vcov);
+    let k = full_k;
 
     let coefficients: Vec<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
     let names: Vec<String> = ols_result
@@ -2485,11 +2851,20 @@ pub fn vcov_driscoll_kraay(
         .map(|c| c.name.clone())
         .collect();
 
-    let df = (n_periods - k) as f64;
+    let df = df_periods as f64;
+    // Aliased columns: NaN (the se > 0 rule would turn them into t = 0, p = 1)
     let t_stats: Vec<f64> = coefficients
         .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
+        .map(|(&b, &se)| {
+            if se.is_nan() {
+                f64::NAN
+            } else if se > 0.0 {
+                b / se
+            } else {
+                0.0
+            }
+        })
         .collect();
 
     let p_values: Vec<f64> = t_stats
@@ -2515,7 +2890,11 @@ pub fn vcov_driscoll_kraay(
         n_units,
         bandwidth: bw,
         kernel,
-        warnings,
+        warnings: {
+            let mut w = warnings;
+            w.extend(ols_result.alias_notes());
+            w
+        },
         missing: MissingSummary::none(n),
     })
 }
@@ -2534,7 +2913,8 @@ pub fn vcov_driscoll_kraay(
 ///   with an id is `InsufficientData` naming the column).
 /// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
 ///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
-/// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", etc.)
+/// * `kernel` - Kernel name, as for [`run_vcov_hac`] (`None` is Bartlett; an unknown name is
+///   `InvalidSpecification`)
 ///
 /// # Returns
 ///
@@ -2580,10 +2960,8 @@ pub fn run_vcov_driscoll_kraay(
     let dm = DesignMatrix::from_dataframe(df, x_cols, true)
         .map_err(|e| econ_error_from_design(e, df))?;
 
-    // Parse kernel
-    let kernel_type = kernel
-        .and_then(HacKernel::from_str)
-        .unwrap_or(HacKernel::Bartlett);
+    // Parse kernel (unknown names are an error)
+    let kernel_type = crate::options::parse_or(kernel, HacKernel::Bartlett)?;
 
     let mut result = vcov_driscoll_kraay(
         &ols_result,
@@ -2876,6 +3254,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_hac_kernel_parsing() {
         assert!(matches!(
             HacKernel::from_str("bartlett"),
@@ -2982,6 +3361,42 @@ mod tests {
         assert!(matches!(result.bootstrap_type, BootstrapType::Residual));
     }
 
+    /// vcov_bootstrap refuses a response whose length is not the fit's instead of panicking
+    /// on `y - residuals`.
+    #[test]
+    fn test_bootstrap_refuses_mismatched_y() {
+        let dataset = create_test_dataset();
+        let ols = run_ols(&dataset, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let d = DesignMatrix::from_dataframe(dataset.df(), &["x1"], true).unwrap();
+        let y = DesignMatrix::extract_column(dataset.df(), "y").unwrap();
+        let short = y.slice(ndarray::s![..y.len() - 1]).to_owned();
+        for bt in [BootstrapType::Pairs, BootstrapType::Residual] {
+            match vcov_bootstrap(&ols, &d.data, &short, Some(20), bt, Some(1)).unwrap_err() {
+                EconError::InvalidSpecification { message } => {
+                    assert!(message.contains("y has 9 values"), "{message}")
+                }
+                e => panic!("{e:?}"),
+            }
+        }
+    }
+
+    /// A fit without its coefficient and (X'X)^-1 caches (as a deserialized OlsResult has
+    /// them) is refused with an error, not an index panic.
+    #[test]
+    fn test_sandwich_refuses_fit_without_caches() {
+        let dataset = create_test_dataset();
+        let mut ols = run_ols(&dataset, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let d = DesignMatrix::from_dataframe(dataset.df(), &["x1"], true).unwrap();
+        ols.beta = Array1::zeros(0);
+        ols.xtx_inv = Array2::zeros((0, 0));
+        match vcov_hac(&ols, &d.data, Some(2), HacKernel::Bartlett, false).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("refit with run_ols"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
     #[test]
     fn test_bootstrap_wild() {
         let dataset = create_test_dataset();
@@ -3020,6 +3435,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_bootstrap_type_parsing() {
         assert!(matches!(
             BootstrapType::from_str("pairs"),
@@ -4336,13 +4752,8 @@ mod tests {
     /// without a case and is not registered as R-pinned.
     #[test]
     fn test_na_vcov_bootstrap_integer_outcome() {
-        use super::na_fixtures::as_float;
-        let ds = Dataset::new(
-            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
-                "validation/datasets/generated/mtcars.csv",
-            ))
-            .unwrap(),
-        );
+        use super::na_fixtures::{as_float, mtcars};
+        let ds = mtcars();
         assert_eq!(ds.df().column("hp").unwrap().dtype(), &DataType::Int64);
         let a = run_vcov_bootstrap(&ds, "hp", &["wt"], Some(200), Some("pairs"), Some(42)).unwrap();
         let b = run_vcov_bootstrap(
@@ -4374,5 +4785,773 @@ mod tests {
             run_vcov_bootstrap(&ds, "nope", &["wt"], Some(200), None, Some(1)),
             Err(EconError::ColumnNotFound { .. })
         ));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // T3-WP09: rank-deficient and ill-conditioned designs (validation/r/cases/reg_rank_qr.R;
+    // registry validation/methods/reg_rank_qr.json)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /// (names, values) of the identified coefficients: R prints only these in
+    /// coef(fit)[!is.na(coef(fit))].
+    fn identified(r: &OlsResult, f: impl Fn(&OlsCoefficient) -> f64) -> (Vec<String>, Vec<f64>) {
+        r.coefficients
+            .iter()
+            .filter(|c| c.estimate.is_finite())
+            .map(|c| (c.name.clone(), f(c)))
+            .unzip()
+    }
+
+    fn all_named(r: &OlsResult, f: impl Fn(&OlsCoefficient) -> f64) -> (Vec<String>, Vec<f64>) {
+        r.coefficients
+            .iter()
+            .map(|c| (c.name.clone(), f(c)))
+            .unzip()
+    }
+
+    fn alias_flags(r: &OlsResult) -> Vec<f64> {
+        r.coefficients
+            .iter()
+            .map(|c| if c.estimate.is_nan() { 1.0 } else { 0.0 })
+            .collect()
+    }
+
+    const ALIAS_MSG: &str = "Coefficients not defined because of singularities";
+
+    /// R: lm(y ~ x1 + da + db + dc) on ols_aliased (reg_rank_qr.R). dc is aliased; the
+    /// identified columns, df = n - rank, summary.lm, logLik (rank + 1 parameters) and
+    /// vcovHC(HC1) as R.
+    #[test]
+    fn test_validate_ols_aliased_dummy_trap() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let x = ["x1", "da", "db", "dc"];
+        let r = run_ols(&ds, "y", &x, true, CovarianceType::Standard).unwrap();
+        let hc1 = run_ols(&ds, "y", &x, true, CovarianceType::HC1).unwrap();
+        let n = r.n_obs;
+        let (cn, cv) = identified(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error); // dc: NaN, R: NA (null) -> equal
+        let (hn, hv) = identified(&hc1, |c| c.std_error);
+        Check::new(&case)
+            .named("trap_coef", &cn, &cv, Tol::coef(n))
+            .vector("trap_aliased", &alias_flags(&r), Tol::exact())
+            .named("trap_se", &sn, &sv, Tol::se(n))
+            .scalar("trap_rank", r.rank() as f64, Tol::exact())
+            .scalar("trap_df", r.df_resid as f64, Tol::exact())
+            .scalar("trap_r2", r.r_squared, Tol::stat(n))
+            .scalar("trap_adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("trap_sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("trap_fstat", r.f_statistic, Tol::stat(n))
+            .vector(
+                "trap_fstat_df",
+                &[r.df_model as f64, r.df_resid as f64],
+                Tol::exact(),
+            )
+            .scalar("trap_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("trap_aic", r.aic, Tol::stat(n))
+            .scalar("trap_bic", r.bic, Tol::stat(n))
+            .named("trap_hc1_se", &hn, &hv, Tol::se(n))
+            .finish();
+        assert_eq!(r.aliased, vec!["dc".to_string()]);
+        assert_eq!((r.n_params, r.rank()), (5, 4));
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains(ALIAS_MSG) && w.contains("dc")),
+            "{:?}",
+            r.warnings
+        );
+        let dc = &r.coefficients[4];
+        assert!(
+            dc.estimate.is_nan()
+                && dc.std_error.is_nan()
+                && dc.t_value.is_nan()
+                && dc.p_value.is_nan()
+        );
+        assert!(dc.ci_lower_95.is_nan() && r.vcov_matrix().row(4).iter().all(|v| v.is_nan()));
+        assert!(r.vcov_matrix()[[1, 1]].is_finite() && r.coefficients()[4].is_nan());
+        assert!(r.to_string().contains(ALIAS_MSG));
+    }
+
+    /// R: lm(y ~ x1 + x2 + x3), x2 = 2 x1 up to 1e-10: x2 (the later column) is aliased,
+    /// x3 is kept. Also the HC0/HC1/HC3 sandwiches on the identified columns, and
+    /// run_ols_raw on the same arrays.
+    #[test]
+    fn test_validate_ols_aliased_duplicate() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let x = ["x1", "x2", "x3"];
+        let fit = |cov| run_ols(&ds, "y", &x, true, cov).unwrap();
+        let (r, h0, h1, h3) = (
+            fit(CovarianceType::Standard),
+            fit(CovarianceType::HC0),
+            fit(CovarianceType::HC1),
+            fit(CovarianceType::HC3),
+        );
+        let n = r.n_obs;
+        let (cn, cv) = identified(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        let se = |m: &OlsResult| identified(m, |c| c.std_error);
+        let ((n0, v0), (n1, v1), (n3, v3)) = (se(&h0), se(&h1), se(&h3));
+        Check::new(&case)
+            .named("dup_coef", &cn, &cv, Tol::coef(n))
+            .vector("dup_aliased", &alias_flags(&r), Tol::exact())
+            .named("dup_se", &sn, &sv, Tol::se(n))
+            .scalar("dup_rank", r.rank() as f64, Tol::exact())
+            .scalar("dup_df", r.df_resid as f64, Tol::exact())
+            .scalar("dup_r2", r.r_squared, Tol::stat(n))
+            .scalar("dup_sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("dup_fstat", r.f_statistic, Tol::stat(n))
+            .named("dup_hc0_se", &n0, &v0, Tol::se(n))
+            .named("dup_hc1_se", &n1, &v1, Tol::se(n))
+            .named("dup_hc3_se", &n3, &v3, Tol::se(n))
+            .finish();
+        assert_eq!(r.aliased, vec!["x2".to_string()]);
+        // run_ols_raw: same design, same numbers (one solve path)
+        let dm = DesignMatrix::from_dataframe(ds.df(), &x, true).unwrap();
+        let y = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        let raw = run_ols_raw(&dm.data, &y, &dm.column_names, "y", CovarianceType::HC1).unwrap();
+        assert_eq!(raw.aliased, h1.aliased);
+        for (a, b) in raw.coefficients.iter().zip(&h1.coefficients) {
+            assert!(
+                (a.estimate.is_nan() && b.estimate.is_nan())
+                    || (a.estimate == b.estimate && a.std_error == b.std_error)
+            );
+        }
+    }
+
+    /// R: lm(y ~ x1 + k5) with k5 = 5: the constant is aliased with the intercept.
+    #[test]
+    fn test_validate_ols_aliased_constant() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let r = run_ols(&ds, "y", &["x1", "k5"], true, CovarianceType::Standard).unwrap();
+        let (cn, cv) = identified(&r, |c| c.estimate);
+        Check::new(&case)
+            .named("const_coef", &cn, &cv, Tol::coef(r.n_obs))
+            .vector("const_aliased", &alias_flags(&r), Tol::exact())
+            .finish();
+        assert_eq!(r.aliased, vec!["k5".to_string()]);
+    }
+
+    /// R: lm on kappa(X) = 1.68e8, at the README tolerance (Tol::coef(80) = 1e-6). The
+    /// normal equations miss by 2.8e-5 here, so the design must take the QR.
+    #[test]
+    fn test_validate_ols_illcond_qr() {
+        let (case, ds) = crate::test_support::load_case("ols_illcond");
+        let r = run_ols(
+            &ds,
+            "y",
+            &["x1", "x2", "x3"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let n = r.n_obs;
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        Check::new(&case)
+            .named("coef", &cn, &cv, Tol::coef(n))
+            .named("se", &sn, &sv, Tol::se(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("fstat", r.f_statistic, Tol::stat(n))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("rank", r.rank() as f64, Tol::exact())
+            .finish();
+        // lm warns about nothing
+        assert!(
+            r.aliased.is_empty() && r.warnings.is_empty(),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// Variant B's fast path at the README tolerance: an uncentred calendar-year regressor,
+    /// n = 5000, equilibrated rcond(X'X) 2.7e-5. The design takes the normal equations, and
+    /// the refinement step brings every coefficient within Tol::coef(5000) = 1e-10 of lm
+    /// (intercept 1.4e-11 relative; without the step 5.9e-9).
+    #[test]
+    fn test_validate_ols_year_trend_normal_equations() {
+        let (case, ds) = crate::test_support::load_case("ols_year_trend");
+        let d = DesignMatrix::from_dataframe(ds.df(), &["year", "z"], true).unwrap();
+        let yv = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        assert_eq!(
+            solve_ols(d.data.view(), yv.view()).unwrap().path,
+            OlsPath::NormalEquations
+        );
+        let r = run_ols(&ds, "y", &["year", "z"], true, CovarianceType::Standard).unwrap();
+        let n = r.n_obs;
+        assert_eq!(n, 5000);
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        Check::new(&case)
+            .named("coef", &cn, &cv, Tol::coef(n))
+            .named("se", &sn, &sv, Tol::se(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("fstat", r.f_statistic, Tol::stat(n))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("rank", r.rank() as f64, Tol::exact())
+            .finish();
+        assert!(
+            r.aliased.is_empty() && r.warnings.is_empty(),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// REG-18 on T1's Longley case: an accuracy check at 1e-10 (lm is 3.5e-14 from NIST's
+    /// certified values, and any Householder QR meets 1e-10 with a wide margin), not a path
+    /// pin. Before: 3.56e-8 (the normal equations).
+    #[test]
+    fn test_validate_ols_longley_qr() {
+        let (case, ds) = crate::test_support::load_case("ols_longley");
+        let x = [
+            "GNP.deflator",
+            "GNP",
+            "Unemployed",
+            "Armed.Forces",
+            "Population",
+            "Year",
+        ];
+        let r = run_ols(&ds, "Employed", &x, true, CovarianceType::Standard).unwrap();
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        Check::new(&case)
+            .named("coef", &cn, &cv, Tol::new(1e-10, 1e-12))
+            .named("se_classical", &sn, &sv, Tol::new(1e-10, 1e-14))
+            .finish();
+    }
+
+    /// Variant B of D1: a well-conditioned design takes the normal equations (today's
+    /// numbers, bit for bit), every design whose equilibrated X'X has a reciprocal condition
+    /// below 1e-8 or that is rank-deficient takes the pivoted QR. Each pinned design is
+    /// checked against its R case on the path it takes.
+    #[test]
+    fn test_validate_ols_solve_paths() {
+        let path_of = |ds: &Dataset, y: &str, x: &[&str]| {
+            let d = DesignMatrix::from_dataframe(ds.df(), x, true).unwrap();
+            let yv = DesignMatrix::extract_column(ds.df(), y).unwrap();
+            solve_ols(d.data.view(), yv.view()).unwrap().path
+        };
+        let (grunfeld, g) = crate::test_support::load_case("ols_grunfeld");
+        assert_eq!(
+            path_of(&g, "inv", &["value", "capital"]),
+            OlsPath::NormalEquations
+        );
+        let r = run_ols(
+            &g,
+            "inv",
+            &["value", "capital"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        Check::new(&grunfeld)
+            .named("coef", &cn, &cv, Tol::coef(r.n_obs))
+            .finish();
+        let (_, ill) = crate::test_support::load_case("ols_illcond");
+        assert_eq!(path_of(&ill, "y", &["x1", "x2", "x3"]), OlsPath::PivotedQr);
+        let (_, lo) = crate::test_support::load_case("ols_longley");
+        let lx = [
+            "GNP.deflator",
+            "GNP",
+            "Unemployed",
+            "Armed.Forces",
+            "Population",
+            "Year",
+        ];
+        assert_eq!(path_of(&lo, "Employed", &lx), OlsPath::PivotedQr);
+        let (_, al) = crate::test_support::load_case("ols_aliased");
+        assert_eq!(
+            path_of(&al, "y", &["x1", "da", "db", "dc"]),
+            OlsPath::PivotedQr
+        );
+        assert_eq!(path_of(&al, "y", &["x1", "x3"]), OlsPath::NormalEquations);
+    }
+
+    /// Two columns, no intercept, cosine c between them: the equilibrated X'X is
+    /// [[1, c], [c, 1]] with reciprocal condition (1 - c) / (1 + c). Just inside the
+    /// threshold (about 1e-7) the fit takes the normal equations; just past it (about
+    /// 3e-9) the QR. The refined normal-equations side agrees with the QR's coefficients
+    /// within 1e-10 relative, the README's tolerance for n > 1000, near the 1e-8 edge where
+    /// refinement has the most to correct (n = 50 here, so Tol::coef(n) would only ask 1e-6).
+    #[test]
+    fn test_ols_solve_path_threshold() {
+        let n = 50;
+        let base: Vec<f64> = (0..n).map(|i| 1.0 + (i as f64 * 0.7).sin()).collect();
+        let wiggle: Vec<f64> = (0..n).map(|i| (i as f64 * 1.9).cos()).collect();
+        let design = |eps: f64| {
+            let mut x = Array2::<f64>::zeros((n, 2));
+            for i in 0..n {
+                x[[i, 0]] = base[i];
+                x[[i, 1]] = base[i] + eps * wiggle[i];
+            }
+            x
+        };
+        let rcond = |x: &Array2<f64>| {
+            let a = x.t().dot(x);
+            let c = a[[0, 1]] / (a[[0, 0]] * a[[1, 1]]).sqrt();
+            (1.0 - c) / (1.0 + c)
+        };
+        let y: Vec<f64> = (0..n)
+            .map(|i| 0.5 * base[i] + 0.1 * ((i * 7) % 5) as f64)
+            .collect();
+        let y = Array1::from(y);
+        let (inside, past) = (design(1.1e-3), design(1.9e-4));
+        let (ri, rp) = (rcond(&inside), rcond(&past));
+        assert!(ri > 3e-8 && ri < 3e-7, "{ri}");
+        assert!(rp > 1e-9 && rp < 5e-9, "{rp}");
+        let fi = solve_ols(inside.view(), y.view()).unwrap();
+        let fp = solve_ols(past.view(), y.view()).unwrap();
+        assert_eq!(fi.path, OlsPath::NormalEquations);
+        assert_eq!(fp.path, OlsPath::PivotedQr);
+        assert_eq!((fi.rank, fp.rank), (2, 2));
+        let qi = crate::linalg::solve::least_squares(inside.view(), y.view()).unwrap();
+        let tol = Tol::new(1e-10, 1e-12);
+        for (a, b) in fi.beta.iter().zip(&qi.coefficients) {
+            assert!(tol.allows(*a, *b), "{a} vs {b}");
+        }
+    }
+
+    /// The fixed-design bootstrap solver applies (X'X)^{-1} X'y without the refinement
+    /// step, even where solve_ols refines (reciprocal condition in [1e-8, 1e-2)): one O(n k)
+    /// pass per replicate. Its coefficients still agree with a QR refit far within the
+    /// bootstrap's Monte Carlo error (1e-6 relative at reciprocal condition about 1e-7).
+    #[test]
+    fn test_bootstrap_fixed_design_solver_does_not_refine() {
+        let n = 50;
+        let mut x = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            let b = 1.0 + (i as f64 * 0.7).sin();
+            x[[i, 0]] = b;
+            x[[i, 1]] = b + 1.1e-3 * (i as f64 * 1.9).cos();
+        }
+        let y: Array1<f64> = (0..n)
+            .map(|i| 0.5 * x[[i, 0]] + 0.1 * ((i * 7) % 5) as f64)
+            .collect();
+        let normal = normal_equations_inverse(x.view()).unwrap().unwrap();
+        assert!(normal.refine, "the design must be one solve_ols refines");
+        let plain = normal.inverse.dot(&xty(&x.view(), &y));
+        let solver = FixedDesignSolver::new(x.view()).unwrap();
+        assert!(matches!(solver, FixedDesignSolver::Normal(_)));
+        let b = solver.coefficients(x.view(), &y).unwrap();
+        assert_eq!(b, plain, "bootstrap solve must be the unrefined one");
+        let q = crate::linalg::solve::least_squares(x.view(), y.view()).unwrap();
+        for (a, c) in b.iter().zip(&q.coefficients) {
+            assert!(Tol::new(1e-6, 1e-12).allows(*a, *c), "{a} vs {c}");
+        }
+    }
+
+    #[test]
+    fn test_ols_rank_zero_is_an_error() {
+        let df = df! {
+            "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 5.9],
+            "z" => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        }
+        .unwrap();
+        match run_ols(
+            &Dataset::new(df),
+            "y",
+            &["z"],
+            false,
+            CovarianceType::Standard,
+        )
+        .unwrap_err()
+        {
+            EconError::SingularMatrix { context, .. } => {
+                assert!(context.contains("rank 0"), "{context}")
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ols_raw_rejects_non_finite() {
+        let x = ndarray::array![[1.0, 0.3], [1.0, 1.1], [1.0, 2.2], [1.0, 2.9], [1.0, 4.2]];
+        let y = ndarray::array![1.0, f64::NAN, 3.1, 3.9, 5.2];
+        let names = vec!["(Intercept)".to_string(), "x".to_string()];
+        match run_ols_raw(&x, &y, &names, "y", CovarianceType::Standard).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("non-finite"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// sandwich::vcovCL(cluster = ~cl, type = "HC1") and NeweyWest(lag = 4, prewhite =
+    /// FALSE) on lm(y ~ x1 + x2 + x3): estfun and bread drop the aliased x2.
+    #[test]
+    fn test_validate_ols_aliased_sandwich() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let x = ["x1", "x2", "x3"];
+        let cl = run_ols_clustered(&ds, "y", &x, "cl", None).unwrap();
+        let hac = run_vcov_hac(&ds, "y", &x, Some(4), Some("bartlett"), false).unwrap();
+        let n = cl.ols.n_obs;
+        let (cn, cv) = identified(&cl.ols, |c| c.std_error);
+        let (hn, hv): (Vec<String>, Vec<f64>) = hac
+            .names
+            .iter()
+            .zip(&hac.std_errors)
+            .zip(&hac.coefficients)
+            .filter(|(_, b)| b.is_finite())
+            .map(|((nm, s), _)| (nm.clone(), *s))
+            .unzip();
+        // compute_clustered_vcov sums with a rayon reduce: compared with a tolerance
+        Check::new(&case)
+            .named("dup_cl_hc1_se", &cn, &cv, Tol::se(n))
+            .named("dup_nw_lag4_se", &hn, &hv, Tol::se(n))
+            .finish();
+        assert!(cl.ols.coefficients[2].std_error.is_nan() && hac.std_errors[2].is_nan());
+        assert_eq!((cl.n_clusters_1, hac.df_resid), (12, 117));
+        assert!(
+            cl.ols.warnings.iter().any(|w| w.contains(ALIAS_MSG))
+                && hac.warnings.iter().any(|w| w.contains(ALIAS_MSG))
+        );
+    }
+
+    /// Property test (not R-pinned: sandwich::vcovBS uses R's RNG). On the aliased design the
+    /// bootstrap resamples the identified columns: x2's SE is NaN (sandwich: NA), and the
+    /// Rademacher wild SEs are within 10% of R's HC0 (E[vcov_wild] = HC0 exactly; at B = 2000
+    /// the Monte Carlo sd is 1.6%, so 10% is 6 sd; seeded).
+    #[test]
+    fn test_validate_bootstrap_aliased_design_uses_identified_columns() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let b = run_vcov_bootstrap(
+            &ds,
+            "y",
+            &["x1", "x2", "x3"],
+            Some(2000),
+            Some("wild"),
+            Some(20261118),
+        )
+        .unwrap();
+        let hc0 = case.vector("dup_hc0_se");
+        assert!(b.std_errors[2].is_nan() && b.coefficients[2].is_nan());
+        for (s, h) in [b.std_errors[0], b.std_errors[1], b.std_errors[3]]
+            .iter()
+            .zip(&hc0)
+        {
+            assert!((s / h - 1.0).abs() < 0.10, "se {s} vs HC0 {h}");
+        }
+        assert_eq!(b.convergence_rate, 1.0);
+        assert!(b.warnings.iter().any(|w| w.contains(ALIAS_MSG)));
+        assert!(b.to_string().contains(ALIAS_MSG));
+    }
+
+    /// The residual and wild bootstraps solve every replicate on one factorisation of the
+    /// identified design; each solve equals a fresh least-squares refit (dup design of
+    /// ols_aliased, five seeded wild responses).
+    #[test]
+    fn test_validate_bootstrap_fixed_design_solve_matches_refit() {
+        let (_, ds) = crate::test_support::load_case("ols_aliased");
+        let ols = run_ols(
+            &ds,
+            "y",
+            &["x1", "x2", "x3"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let dm = DesignMatrix::from_dataframe(ds.df(), &["x1", "x2", "x3"], true).unwrap();
+        let id = IdentifiedDesign::of(dm.data.view(), &ols).unwrap();
+        assert_eq!(id.cols, vec![0, 1, 3]);
+        let solver = FixedDesignSolver::new(id.x.view()).unwrap();
+        let fitted = DesignMatrix::extract_column(ds.df(), "y").unwrap() - &ols.resid;
+        let mut rng = ChaCha8Rng::seed_from_u64(5);
+        for _ in 0..5 {
+            let y_star: Array1<f64> = fitted
+                .iter()
+                .zip(&ols.resid)
+                .map(|(f, e)| f + if rng.r#gen::<bool>() { *e } else { -*e })
+                .collect();
+            let b = solver.coefficients(id.x.view(), &y_star).unwrap();
+            let refit = least_squares(id.x.view(), y_star.view()).unwrap();
+            for (a, c) in b.iter().zip(&refit.coefficients) {
+                assert!((a - c).abs() <= 1e-12 * c.abs().max(1e-3), "{a} vs {c}");
+            }
+        }
+    }
+
+    /// Panel helper (Tasks 3 and 4 of T3-WP09): 20 units, noisy and non-collinear unless
+    /// `alias` (x4 = 2 x1).
+    fn short_panel(t_periods: usize, alias: bool) -> Dataset {
+        let (mut unit, mut time, mut x1, mut x2, mut x3, mut y) =
+            (vec![], vec![], vec![], vec![], vec![], vec![]);
+        for i in 0..20usize {
+            for t in 0..t_periods {
+                let s = (i * t_periods + t) as f64;
+                let (a, b, c) = (
+                    (s * 0.37).sin(),
+                    (s * 1.13).cos(),
+                    ((i * 7 + t * 3) % 11) as f64 / 11.0,
+                );
+                unit.push(i as i64);
+                time.push(2000 + t as i64);
+                x1.push(a);
+                x2.push(b);
+                x3.push(c);
+                y.push(1.0 + 0.5 * a - 0.3 * b + 0.8 * c + 0.1 * (s * 2.71).sin());
+            }
+        }
+        let x4: Vec<f64> = x1.iter().map(|v| 2.0 * v).collect();
+        let mut df =
+            df! { "unit" => unit, "time" => time, "x1" => x1, "x2" => x2, "x3" => x3, "y" => y }
+                .unwrap();
+        if alias {
+            df.with_column(Series::new("x4".into(), x4)).unwrap();
+        }
+        Dataset::new(df)
+    }
+
+    /// Driscoll-Kraay on an aliased panel: NaN for the aliased column, finite elsewhere (DK
+    /// SEs are not R-pinned: REG-24, Tier 4).
+    #[test]
+    fn test_driscoll_kraay_aliased_column_is_nan() {
+        let ds = short_panel(12, true);
+        let dk = run_vcov_driscoll_kraay(&ds, "y", &["x1", "x2", "x3", "x4"], "time", None, None)
+            .unwrap();
+        assert!(dk.std_errors[4].is_nan() && dk.p_values[4].is_nan());
+        assert!(
+            dk.std_errors[..4]
+                .iter()
+                .chain(&dk.p_values[..4])
+                .all(|v| v.is_finite())
+        );
+        assert!(dk.warnings.iter().any(|w| w.contains(ALIAS_MSG)));
+    }
+
+    /// k = 4 (intercept + x1, x2, x3): T = 3 underflowed n_periods - k (debug panic, release
+    /// p = 1 for every coefficient); T = 4 gave df 0 and NaN p-values. T must exceed the rank.
+    #[test]
+    fn test_driscoll_kraay_rejects_t_le_k() {
+        for t in [3usize, 4] {
+            match run_vcov_driscoll_kraay(
+                &short_panel(t, false),
+                "y",
+                &["x1", "x2", "x3"],
+                "time",
+                None,
+                None,
+            )
+            .unwrap_err()
+            {
+                EconError::InsufficientData {
+                    required,
+                    provided,
+                    context,
+                } => {
+                    assert_eq!((required, provided), (5, t));
+                    assert!(context.contains("time periods"), "{context}");
+                }
+                e => panic!("T = {t}: {e:?}"),
+            }
+        }
+        let ok = run_vcov_driscoll_kraay(
+            &short_panel(5, false),
+            "y",
+            &["x1", "x2", "x3"],
+            "time",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            ok.p_values
+                .iter()
+                .all(|p| p.is_finite() && (0.0..=1.0).contains(p))
+        );
+    }
+
+    #[test]
+    fn test_hac_kernel_parses_sandwich_names() {
+        use HacKernel::*;
+        HacKernel::choices().validate().unwrap();
+        for (s, k) in [
+            ("Quadratic Spectral", QuadraticSpectral),
+            ("quadratic-spectral", QuadraticSpectral),
+            ("QS", QuadraticSpectral),
+            ("Tukey-Hanning", TukeyHanning),
+            ("tukey_hanning", TukeyHanning),
+            ("tukey", TukeyHanning),
+            ("Bartlett", Bartlett),
+            ("Newey-West", Bartlett),
+            ("nw", Bartlett),
+            ("Parzen", Parzen),
+            ("Truncated", Truncated),
+            ("rectangular", Truncated),
+        ] {
+            assert_eq!(s.parse::<HacKernel>().unwrap(), k, "{s}");
+        }
+        match "qs2".parse::<HacKernel>().unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("kernel")
+                    && message.contains("'qs2'")
+                    && message.contains("quadratic_spectral"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+        let ts = create_timeseries_dataset();
+        let qs =
+            run_vcov_hac(&ts, "y", &["x"], Some(4), Some("Quadratic Spectral"), false).unwrap();
+        assert_eq!(qs.kernel, QuadraticSpectral); // before: Bartlett
+        assert!(run_vcov_hac(&ts, "y", &["x"], Some(4), Some("qs2"), false).is_err()); // before: Ok (Bartlett)
+        let p = create_panel_dataset();
+        assert_eq!(
+            run_vcov_driscoll_kraay(&p, "y", &["x"], "time", None, Some("Tukey-Hanning"))
+                .unwrap()
+                .kernel,
+            TukeyHanning
+        );
+        assert!(run_vcov_driscoll_kraay(&p, "y", &["x"], "time", None, Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_type_parses_aliases_and_rejects_unknown() {
+        use BootstrapType::*;
+        BootstrapType::choices().validate().unwrap();
+        for (s, t) in [
+            ("pairs", Pairs),
+            ("xy", Pairs),
+            ("case", Pairs),
+            ("Residual", Residual),
+            ("wild", Wild),
+            ("rademacher", Wild),
+            ("wild-rademacher", Wild),
+            ("Mammen", WildMammen),
+            ("wild-mammen", WildMammen),
+            ("webb", WildWebb),
+            ("wild_webb", WildWebb),
+        ] {
+            assert_eq!(s.parse::<BootstrapType>().unwrap(), t, "{s}");
+        }
+        for bad in ["norm", "jackknife", "mamen"] {
+            match bad.parse::<BootstrapType>().unwrap_err() {
+                EconError::InvalidSpecification { message } => assert!(
+                    message.contains("bootstrap_type") && message.contains("mammen"),
+                    "{message}"
+                ),
+                e => panic!("{e:?}"),
+            }
+        }
+        let ds = create_test_dataset();
+        let m = run_vcov_bootstrap(&ds, "y", &["x1"], Some(200), Some("mammen"), Some(42)).unwrap();
+        assert_eq!(m.bootstrap_type, WildMammen); // before: Pairs
+        assert!(run_vcov_bootstrap(&ds, "y", &["x1"], Some(200), Some("norm"), Some(42)).is_err());
+    }
+
+    /// The weight laws of sandwich::vcovBS (sandwich 3.1.3 source): Mammen -(sqrt5 - 1)/2
+    /// w.p. (sqrt5 + 1)/(2 sqrt5), else (sqrt5 + 1)/2; Webb ±sqrt(1/2), ±1, ±sqrt(3/2) w.p.
+    /// 1/6; Rademacher ±1. Seeded; the bounds are >= 4.5 Monte Carlo sd.
+    #[test]
+    fn test_wild_weights_match_sandwich() {
+        let n = 200_000;
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let draw = |kind, rng: &mut ChaCha8Rng| -> Vec<f64> {
+            (0..n).map(|_| wild_weight(kind, rng)).collect()
+        };
+        let moment = |w: &[f64], p: i32| w.iter().map(|v| v.powi(p)).sum::<f64>() / n as f64;
+        let m = draw(BootstrapType::WildMammen, &mut rng);
+        let (lo, hi) = (-(5f64.sqrt() - 1.0) / 2.0, (5f64.sqrt() + 1.0) / 2.0);
+        assert!(m.iter().all(|&w| w == lo || w == hi));
+        let p_lo = m.iter().filter(|&&w| w == lo).count() as f64 / n as f64;
+        assert!((p_lo - 0.723_606_797_749_978_9).abs() < 0.005, "{p_lo}");
+        assert!(
+            moment(&m, 1).abs() < 0.01
+                && (moment(&m, 2) - 1.0).abs() < 0.01
+                && (moment(&m, 3) - 1.0).abs() < 0.03
+        );
+        let w = draw(BootstrapType::WildWebb, &mut rng);
+        let support = [
+            -(1.5f64).sqrt(),
+            -1.0,
+            -(0.5f64).sqrt(),
+            (0.5f64).sqrt(),
+            1.0,
+            (1.5f64).sqrt(),
+        ];
+        for s in support {
+            let f = w.iter().filter(|&&v| v == s).count() as f64 / n as f64;
+            assert!((f - 1.0 / 6.0).abs() < 0.005, "{s}: {f}");
+        }
+        assert!((moment(&w, 2) - 1.0).abs() < 0.01);
+        let r = draw(BootstrapType::Wild, &mut rng);
+        assert!(r.iter().all(|&v| v == 1.0 || v == -1.0) && moment(&r, 3).abs() < 0.01);
+    }
+
+    /// Property test as test_validate_bootstrap_aliased_design_uses_identified_columns, for
+    /// the three wild laws; Mammen and Rademacher are different methods in R and must give
+    /// different p2a output.
+    #[test]
+    fn test_validate_bootstrap_wild_variants_near_hc0() {
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let hc0 = case.vector("dup_hc0_se");
+        let run = |t| {
+            run_vcov_bootstrap(
+                &ds,
+                "y",
+                &["x1", "x2", "x3"],
+                Some(2000),
+                Some(t),
+                Some(20261118),
+            )
+            .unwrap()
+        };
+        let (rad, mam, web) = (run("wild"), run("mammen"), run("webb"));
+        for b in [&rad, &mam, &web] {
+            assert!(b.std_errors[2].is_nan());
+            for (s, h) in [b.std_errors[0], b.std_errors[1], b.std_errors[3]]
+                .iter()
+                .zip(&hc0)
+            {
+                assert!(
+                    (s / h - 1.0).abs() < 0.10,
+                    "{}: se {s} vs HC0 {h}",
+                    b.bootstrap_type
+                );
+            }
+        }
+        assert_ne!(rad.std_errors[1], mam.std_errors[1]);
+        assert_ne!(mam.std_errors[1], web.std_errors[1]);
+    }
+
+    /// 'ö' spans bytes 11..13 of "Haushaltsgröße_netto": the byte slice &s[..12] panicked in
+    /// Display, which MCP regression_ols/regression_clustered return.
+    #[test]
+    fn test_ols_display_non_ascii_names() {
+        let name = "Haushaltsgröße_netto";
+        assert!(!name.is_char_boundary(12));
+        let n = 30;
+        let x: Vec<f64> = (0..n)
+            .map(|i| i as f64 + 0.3 * ((i * 7) % 5) as f64)
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 1.0 + 0.5 * v + 0.2 * ((i * 13) % 7) as f64)
+            .collect();
+        let cl: Vec<i64> = (0..n as i64).map(|i| i % 5).collect();
+        let long: Vec<f64> = x.iter().map(|v| v.sqrt() + 0.01 * v).collect();
+        let ds = Dataset::new(
+            df! { "y" => y, name => x, "a_very_long_variable_name" => long, "cl" => cl }.unwrap(),
+        );
+        let r = run_ols(
+            &ds,
+            "y",
+            &[name, "a_very_long_variable_name"],
+            true,
+            CovarianceType::HC1,
+        )
+        .unwrap();
+        let text = r.to_string();
+        // ASCII names are cut as before
+        assert!(
+            text.contains("Haushaltsgrö...") && text.contains("a_very_long_..."),
+            "{text}"
+        );
+        let c = run_ols_clustered(&ds, "y", &[name], "cl", None).unwrap();
+        assert!(c.to_string().contains("Haushaltsgrö..."));
     }
 }

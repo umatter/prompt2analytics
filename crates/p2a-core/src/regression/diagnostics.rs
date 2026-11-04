@@ -90,10 +90,14 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult, EstimationWarning};
-use crate::linalg::{DesignMatrix, condition_number, safe_inverse, xtx};
+use crate::linalg::solve::{LM_QR_TOL, least_squares};
+use crate::linalg::{DesignMatrix, condition_number};
+use crate::options::Choices;
+use crate::regression::ols::{OlsSolve, solve_ols};
 use crate::regression::{CovarianceType, run_ols};
 use crate::resource;
 use crate::traits::chi_squared_p_value;
+use crate::traits::convergence::{ResultNotes, notes_text};
 
 /// Result from regression diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +156,7 @@ pub struct VifResult {
 }
 
 /// Test statistic type for Breusch-Godfrey test.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BgTestType {
     /// Chi-squared statistic (asymptotic)
     #[default]
@@ -161,14 +165,23 @@ pub enum BgTestType {
     F,
 }
 
+/// Accepted spellings of the Breusch-Godfrey statistic (lmtest's `type = "Chisq" | "F"`).
+const BG_TEST_TYPE_CHOICES: Choices<BgTestType> = Choices {
+    option: "test_type",
+    values: &[
+        (&["chisq", "chi_squared", "chi2", "lm"], BgTestType::Chisq),
+        (&["f", "f_test"], BgTestType::F),
+    ],
+};
+
+// FromStr (unknown names are an error listing the accepted ones), choices(), Display.
+crate::option_enum!(BgTestType, BG_TEST_TYPE_CHOICES);
+
 impl BgTestType {
-    /// Parse from string representation.
+    /// Parse from string representation; `None` for an unknown name. Prefer `str::parse`,
+    /// which reports unknown names.
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "chisq" | "chi-squared" | "chi2" | "lm" => Some(BgTestType::Chisq),
-            "f" | "f-test" => Some(BgTestType::F),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
@@ -201,31 +214,41 @@ pub struct BgTestResult {
 }
 
 /// Type of variables to use for RESET test augmentation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ResetType {
     /// Use powers of fitted values (ŷ², ŷ³, ...) - most common
     #[default]
     Fitted,
     /// Use powers of regressors (x², x³, ...)
     Regressor,
-    /// Use powers of the first principal component of the regressors.
-    ///
-    /// NOTE: not yet implemented as described — this currently reuses the
-    /// powers-of-fitted-values augmentation (identical to `Fitted`) and emits a
-    /// runtime warning. It does not compute a principal component, so it does
-    /// not match R's `lmtest::resettest(type = "princomp")`.
+    /// Use powers of the first principal component of the regressors, as
+    /// `lmtest::resettest(type = "princomp")`: `Z` = the non-constant design columns,
+    /// `v1` = the first eigenvector of `cov(Z)`, `pc1 = Z v1` (not centred).
     PrinComp,
 }
 
+/// Accepted spellings of the RESET augmentation (lmtest's `type = "fitted" | "regressor" |
+/// "princomp"`).
+const RESET_TYPE_CHOICES: Choices<ResetType> = Choices {
+    option: "reset_type",
+    values: &[
+        (&["fitted", "fit", "fitted_values"], ResetType::Fitted),
+        (&["regressor", "reg", "regressors"], ResetType::Regressor),
+        (
+            &["princomp", "pca", "pc", "principal_component"],
+            ResetType::PrinComp,
+        ),
+    ],
+};
+
+// FromStr (unknown names are an error listing the accepted ones), choices(), Display.
+crate::option_enum!(ResetType, RESET_TYPE_CHOICES);
+
 impl ResetType {
-    /// Parse from string representation.
+    /// Parse from string representation; `None` for an unknown name. Prefer `str::parse`,
+    /// which reports unknown names.
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "fitted" | "fit" => Some(ResetType::Fitted),
-            "regressor" | "reg" | "regressors" => Some(ResetType::Regressor),
-            "princomp" | "pca" | "pc" => Some(ResetType::PrinComp),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
@@ -255,6 +278,10 @@ pub struct ResetTestResult {
     pub significant_at_05: bool,
     /// Interpretation of the result
     pub interpretation: String,
+    /// Warnings: the model's aliasing note, and augmentation terms dropped as collinear.
+    /// Absent from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Result from the Wald test for comparing nested models.
@@ -275,9 +302,9 @@ pub struct WaldTestResult {
     pub test_type: String,
     /// Number of observations
     pub n_obs: usize,
-    /// Number of parameters in unrestricted model
+    /// Identified parameters (rank) of the unrestricted model
     pub k_unrestricted: usize,
-    /// Number of parameters in restricted model
+    /// Identified parameters (rank) of the restricted model
     pub k_restricted: usize,
     /// Residual sum of squares for unrestricted model
     pub rss_unrestricted: f64,
@@ -287,6 +314,16 @@ pub struct WaldTestResult {
     pub significant_at_05: bool,
     /// Interpretation of the result
     pub interpretation: String,
+    /// Warnings: duplicate names ignored, the models' aliasing notes. Absent from JSON when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for WaldTestResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl std::fmt::Display for WaldTestResult {
@@ -312,7 +349,7 @@ impl std::fmt::Display for WaldTestResult {
         writeln!(f, "Number of restrictions: {}", self.df1)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
-        Ok(())
+        f.write_str(&notes_text(self))
     }
 }
 
@@ -324,6 +361,16 @@ impl std::fmt::Display for ResetTestResult {
         writeln!(f)?;
         writeln!(f, "F Statistic: {:.4}", self.statistic)?;
         writeln!(f, "df: ({}, {})", self.df.0, self.df.1)?;
+        let what = match self.reset_type {
+            ResetType::Fitted => "the fitted values",
+            ResetType::Regressor => "each regressor",
+            ResetType::PrinComp => "the first principal component of the regressors",
+        };
+        writeln!(
+            f,
+            "Augmentation: powers of {what} (type = \"{}\")",
+            self.reset_type
+        )?;
         writeln!(f, "p-value: {:.4}", self.p_value)?;
         writeln!(f)?;
         writeln!(f, "Powers tested: {:?}", self.powers)?;
@@ -331,7 +378,13 @@ impl std::fmt::Display for ResetTestResult {
         writeln!(f, "Augmented R²: {:.4}", self.r2_augmented)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
-        Ok(())
+        f.write_str(&notes_text(self))
+    }
+}
+
+impl ResultNotes for ResetTestResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 }
 
@@ -490,7 +543,7 @@ pub fn run_diagnostics(
     let jarque_bera = compute_jarque_bera(residuals);
 
     // Breusch-Pagan test for heteroskedasticity
-    let breusch_pagan = compute_breusch_pagan(residuals, &x.view(), k);
+    let breusch_pagan = compute_breusch_pagan(residuals, &x.view())?;
 
     // Durbin-Watson test for autocorrelation
     let durbin_watson = Some(compute_durbin_watson(residuals));
@@ -513,7 +566,7 @@ pub fn run_diagnostics(
     };
 
     // VIF for each variable
-    let vif = compute_vif(&x.view(), &design.column_names, &mut warnings);
+    let vif = compute_vif(&x.view(), &design.column_names, &mut warnings)?;
 
     Ok(DiagnosticsResult {
         jarque_bera,
@@ -646,52 +699,38 @@ pub fn jarque_bera_test(data: &[f64]) -> Option<TestResult> {
 /// Compute Breusch-Pagan test for heteroskedasticity.
 ///
 /// Tests H0: Var(e|X) = constant (homoskedasticity)
-/// LM = n * R² from regressing e² on X
-/// LM ~ χ²(k-1) under the null
+/// LM = n * R² from regressing e² on X (as OLS solves it: the normal equations on a
+/// well-conditioned full-rank design, `lm.fit`'s pivoted QR otherwise)
+/// LM ~ χ²(rank - 1) under the null, rank = the rank of the auxiliary design (bptest)
+///
+/// `Ok(None)` when the test is undefined; cancellation and the allocation ceiling propagate.
 fn compute_breusch_pagan(
     residuals: &Array1<f64>,
     x: &ndarray::ArrayView2<f64>,
-    k: usize,
-) -> Option<TestResult> {
+) -> EconResult<Option<TestResult>> {
     let n = residuals.len();
-    if n <= k {
-        return None;
+    if n <= x.ncols() {
+        return Ok(None);
     }
 
-    // Compute squared residuals
+    // Auxiliary regression of e² on X
     let e2: Array1<f64> = residuals.iter().map(|&e| e * e).collect();
-    let e2_mean = e2.mean()?;
-
-    // Regress e² on X (auxiliary regression)
-    // y = e², X = design matrix
-    // We compute R² = 1 - SSR/SST of this auxiliary regression
-
-    // Compute (X'X)^{-1}
-    let xtx_mat = xtx(x);
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).ok()?;
-
-    // Compute β = (X'X)^{-1} X'e²
-    let mut xty = Array1::zeros(k);
-    for i in 0..n {
-        for j in 0..k {
-            xty[j] += x[[i, j]] * e2[i];
-        }
-    }
-    let beta = xtx_inv.dot(&xty);
-
-    // Fitted values and residuals of auxiliary regression
-    let mut ssr_aux = 0.0;
-    let mut sst_aux = 0.0;
-
-    for i in 0..n {
-        let fitted: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-        let resid = e2[i] - fitted;
-        ssr_aux += resid * resid;
-        sst_aux += (e2[i] - e2_mean).powi(2);
+    let Some(e2_mean) = e2.mean() else {
+        return Ok(None);
+    };
+    let aux = match solve_ols(x.view(), e2.view()) {
+        Ok(aux) => aux,
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    if aux.rank < 2 {
+        return Ok(None);
     }
 
+    let ssr_aux: f64 = aux.residuals.iter().map(|r| r * r).sum();
+    let sst_aux: f64 = e2.iter().map(|v| (v - e2_mean).powi(2)).sum();
     if sst_aux <= 0.0 {
-        return None;
+        return Ok(None);
     }
 
     let r2_aux = 1.0 - ssr_aux / sst_aux;
@@ -699,8 +738,8 @@ fn compute_breusch_pagan(
     // LM statistic
     let lm = (n as f64) * r2_aux;
 
-    // Degrees of freedom = k - 1 (excluding intercept)
-    let df = (k - 1) as f64;
+    // Degrees of freedom = auxiliary rank - 1 (excluding intercept), as bptest
+    let df = (aux.rank - 1) as f64;
     let p_value = chi_squared_p_value(lm, df);
 
     let significant = p_value < 0.05;
@@ -710,13 +749,13 @@ fn compute_breusch_pagan(
         "Fail to reject H0: No significant heteroskedasticity".to_string()
     };
 
-    Some(TestResult {
+    Ok(Some(TestResult {
         name: "Breusch-Pagan".to_string(),
         statistic: lm,
         p_value,
         significant_at_05: significant,
         interpretation,
-    })
+    }))
 }
 
 /// Compute Durbin-Watson statistic for autocorrelation.
@@ -785,16 +824,18 @@ fn compute_durbin_watson(residuals: &Array1<f64>) -> DurbinWatsonResult {
 /// where R²_j is the R² from regressing X_j on all other X variables.
 ///
 /// VIF > 10 indicates problematic multicollinearity
+///
+/// `Ok(None)` when VIFs are undefined; cancellation and the allocation ceiling propagate.
 fn compute_vif(
     x: &ndarray::ArrayView2<f64>,
     variable_names: &[String],
     warnings: &mut Vec<String>,
-) -> Option<Vec<VifResult>> {
+) -> EconResult<Option<Vec<VifResult>>> {
     let n = x.nrows();
     let k = x.ncols();
 
     if n <= k || k < 2 {
-        return None;
+        return Ok(None);
     }
 
     let mut vif_results = Vec::with_capacity(k);
@@ -838,7 +879,7 @@ fn compute_vif(
         }
 
         // Compute R² from regressing X_j on X_other
-        let r2 = compute_auxiliary_r2(&y_j, &x_other);
+        let r2 = compute_auxiliary_r2(&y_j, &x_other)?;
 
         let vif = if r2 >= 1.0 {
             f64::INFINITY
@@ -874,51 +915,32 @@ fn compute_vif(
         });
     }
 
-    Some(vif_results)
+    Ok(Some(vif_results))
 }
 
-/// Compute R² for an auxiliary regression (y on X).
-fn compute_auxiliary_r2(y: &Array1<f64>, x: &Array2<f64>) -> f64 {
+/// Compute R² for an auxiliary regression (y on X), solved as OLS solves it
+/// ([`solve_ols`]). A `y` that `lm.fit` would alias against `X` (its residual norm below
+/// `LM_QR_TOL` of its norm) gives 1. Every error of the solve (cancellation, the allocation
+/// ceiling) propagates rather than turning into a plausible R².
+fn compute_auxiliary_r2(y: &Array1<f64>, x: &Array2<f64>) -> EconResult<f64> {
     let n = y.len();
-    let k = x.ncols();
-
-    if n <= k {
-        return 0.0;
+    if n <= x.ncols() {
+        return Ok(0.0);
+    }
+    let fit = solve_ols(x.view(), y.view())?;
+    let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
+    let norm2: f64 = y.iter().map(|v| v * v).sum();
+    if ssr <= LM_QR_TOL * LM_QR_TOL * norm2 {
+        return Ok(1.0); // collinear with the other columns
     }
 
-    // Compute (X'X)^{-1}
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = match safe_inverse(&xtx_mat.view()) {
-        Ok(inv) => inv,
-        Err(_) => return 1.0, // Singular = perfect collinearity
-    };
-
-    // Compute β = (X'X)^{-1} X'y
-    let mut xty = Array1::zeros(k);
-    for i in 0..n {
-        for j in 0..k {
-            xty[j] += x[[i, j]] * y[i];
-        }
-    }
-    let beta = xtx_inv.dot(&xty);
-
-    // Compute SSR and SST
     let y_mean = y.mean().unwrap_or(0.0);
-    let mut ssr = 0.0;
-    let mut sst = 0.0;
-
-    for i in 0..n {
-        let fitted: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-        let resid = y[i] - fitted;
-        ssr += resid * resid;
-        sst += (y[i] - y_mean).powi(2);
-    }
-
+    let sst: f64 = y.iter().map(|v| (v - y_mean).powi(2)).sum();
     if sst <= 0.0 {
-        return 0.0;
+        return Ok(0.0);
     }
 
-    1.0 - ssr / sst
+    Ok(1.0 - ssr / sst)
 }
 
 /// Ramsey's RESET test for functional form misspecification.
@@ -982,160 +1004,76 @@ pub fn reset_test(
     powers: &[usize],
     reset_type: ResetType,
 ) -> EconResult<ResetTestResult> {
-    // Validate powers
-    let powers = normalize_reset_powers(powers)?;
+    // Validate powers before fitting anything
+    normalize_reset_powers(powers)?;
 
     // Step 1: Run original OLS regression
     let ols_result = run_ols(dataset, y_col, x_cols, true, CovarianceType::Standard)?;
 
-    let n = ols_result.n_obs;
-    let k_original = ols_result.n_params;
-
-    // Step 2: Build design matrix and extract y
+    // Step 2: The design and y as run_ols read them
     let df = dataset.df();
     let design = DesignMatrix::from_dataframe(df, x_cols, true)
         .map_err(|e| EconError::Internal(e.to_string()))?;
-    let x_orig = &design.data;
-
-    // Get y values
     let y =
         DesignMatrix::extract_column(df, y_col).map_err(|e| EconError::Internal(e.to_string()))?;
 
-    // Compute fitted values: fitted = X * beta
-    let beta: Array1<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
-    let fitted: Array1<f64> = (0..n)
-        .map(|i| (0..k_original).map(|j| x_orig[[i, j]] * beta[j]).sum())
-        .collect();
+    // Steps 3-4: augmentation, augmented fit and F test (one implementation)
+    reset_test_from_ols(&ols_result, &design.data.view(), &y, powers, reset_type)
+}
 
-    if matches!(reset_type, ResetType::PrinComp) {
-        // First principal component of regressors, then powers
-        // Simple PC: weighted average of standardized regressors
-        let k_noint = x_cols.len(); // excluding intercept
-        if k_noint == 0 {
-            return Err(EconError::InvalidSpecification {
-                message: "PrinComp RESET requires at least one regressor".to_string(),
-            });
-        }
-
-        // Not yet implemented: this reuses the powers-of-fitted-values
-        // augmentation (identical to ResetType::Fitted) rather than
-        // computing the first principal component of the regressors, so it
-        // does not match R's resettest(type = "princomp").
-        tracing::warn!(
-            "RESET test: the 'princomp' augmentation is not implemented; using the \
-             powers-of-fitted-values augmentation (identical to 'fitted'). Results will \
-             not match R's resettest(type = \"princomp\")."
-        );
+/// lmtest's first principal component of the regressors `z` (n x p): `v1` is the
+/// eigenvector of `cov(z)` (n - 1 denominator) with the largest eigenvalue (chosen by its
+/// Rayleigh quotient, so the eigen solver's order is not relied on), signed so that its
+/// largest |entry| is positive (first index on ties); the scores are `z v1`, NOT centred
+/// (`resettest(type = "princomp")` uses `Z %*% v1`). Returns `(scores, loadings)`.
+fn first_principal_component(
+    z: ndarray::ArrayView2<'_, f64>,
+) -> EconResult<(Array1<f64>, Array1<f64>)> {
+    let (n, p) = z.dim();
+    if n < 2 || p == 0 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n,
+            context: "first principal component of the regressors".to_string(),
+        });
     }
-
-    // Size the augmented model before building it
-    let regressor_cols = reset_regressor_columns(&x_orig.view());
-    let k_augmented = reset_augmented_width(
-        n,
-        k_original,
-        powers.len(),
-        reset_type,
-        regressor_cols.len(),
-    )?;
-    let n_aug = k_augmented - k_original;
-
-    // Build augmented X matrix: [X_original, augmentation columns]
-    let mut x_aug = resource::try_zeros2(n, k_augmented, "RESET augmented design")?;
-
-    // Copy original X
+    let means: Vec<f64> = (0..p).map(|j| z.column(j).sum() / n as f64).collect();
+    let mut cov = Array2::<f64>::zeros((p, p));
     for i in 0..n {
-        for j in 0..k_original {
-            x_aug[[i, j]] = x_orig[[i, j]];
+        for a in 0..p {
+            let da = z[[i, a]] - means[a];
+            for b in a..p {
+                cov[[a, b]] += da * (z[[i, b]] - means[b]);
+            }
         }
     }
-
-    // Add augmentation variables
-    fill_reset_augmentation(
-        &mut x_aug,
-        k_original,
-        &powers,
-        reset_type,
-        &fitted,
-        &x_orig.view(),
-        &regressor_cols,
-    )?;
-
-    // Step 3: Run augmented regression
-    let xtx_aug = xtx(&x_aug.view());
-    let (xtx_aug_inv, _) =
-        safe_inverse(&xtx_aug.view()).map_err(|e| EconError::SingularMatrix {
-            context: "Augmented model X'X".to_string(),
-            suggestion: format!("Augmentation variables may be collinear: {}", e),
-        })?;
-
-    let mut xty_aug: Array1<f64> = Array1::zeros(k_augmented);
-    for i in 0..n {
-        for j in 0..k_augmented {
-            xty_aug[j] += x_aug[[i, j]] * y[i];
+    for a in 0..p {
+        for b in a..p {
+            cov[[a, b]] /= (n - 1) as f64;
+            cov[[b, a]] = cov[[a, b]];
         }
     }
-
-    let beta_aug: Array1<f64> = xtx_aug_inv.dot(&xty_aug);
-
-    // Compute SSR for augmented model
-    let y_mean = y.mean().unwrap_or(0.0);
-    let mut ssr_aug = 0.0;
-    let mut sst = 0.0;
-
-    for i in 0..n {
-        let fitted_aug: f64 = (0..k_augmented).map(|j| x_aug[[i, j]] * beta_aug[j]).sum();
-        let resid = y[i] - fitted_aug;
-        ssr_aug += resid * resid;
-        sst += (y[i] - y_mean).powi(2);
-    }
-
-    // SSR for original model
-    let ssr_orig: f64 = ols_result.resid.iter().map(|e| e * e).sum();
-
-    // R² values
-    let r2_original = if sst > 0.0 { 1.0 - ssr_orig / sst } else { 0.0 };
-    let r2_augmented = if sst > 0.0 { 1.0 - ssr_aug / sst } else { 0.0 };
-
-    // Step 4: F-test
-    // F = ((SSR_restricted - SSR_unrestricted) / q) / (SSR_unrestricted / (n - k_unrestricted))
-    // where q = number of restrictions (number of added variables)
-    let q = n_aug;
-    let df1 = q;
-    let df2 = n - k_augmented;
-
-    let f_stat = if ssr_aug > 0.0 && df2 > 0 {
-        ((ssr_orig - ssr_aug) / q as f64) / (ssr_aug / df2 as f64)
-    } else {
-        0.0
+    let (_, vecs) = crate::linalg::eig_symmetric(&cov.view())
+        .map_err(|e| EconError::Computation(format!("eigen decomposition of cov(Z): {e}")))?;
+    let rayleigh = |j: usize| {
+        let v = vecs.column(j);
+        v.dot(&cov.dot(&v))
     };
-
-    let p_value = crate::traits::f_test_p_value(f_stat, df1 as f64, df2 as f64);
-
-    let significant = p_value < 0.05;
-    let interpretation = if significant {
-        format!(
-            "Reject H0: Model misspecification detected (p={:.4} < 0.05). Consider adding nonlinear terms.",
-            p_value
-        )
-    } else {
-        format!(
-            "Fail to reject H0: No significant misspecification detected (p={:.4} >= 0.05)",
-            p_value
-        )
-    };
-
-    Ok(ResetTestResult {
-        statistic: f_stat,
-        p_value,
-        df: (df1, df2),
-        powers,
-        reset_type,
-        n_obs: n,
-        r2_original,
-        r2_augmented,
-        significant_at_05: significant,
-        interpretation,
-    })
+    let best = (0..vecs.ncols())
+        .max_by(|&a, &b| rayleigh(a).total_cmp(&rayleigh(b)))
+        .ok_or_else(|| EconError::Computation("cov(Z) has no eigenvectors".to_string()))?;
+    let mut v = vecs.column(best).to_owned();
+    let mut lead = 0;
+    for j in 1..p {
+        if v[j].abs() > v[lead].abs() {
+            lead = j;
+        }
+    }
+    if v[lead] < 0.0 {
+        v.mapv_inplace(|x| -x);
+    }
+    let scores = z.dot(&v);
+    Ok((scores, v))
 }
 
 /// RESET powers as both RESET variants use them: an empty list means `[2, 3]`,
@@ -1175,10 +1113,15 @@ fn reset_regressor_columns(x: &ndarray::ArrayView2<f64>) -> Vec<usize> {
 }
 
 /// Width of the augmented RESET design (original plus augmentation columns),
-/// checked against the sample size before anything is allocated.
+/// checked against the sample size before anything is allocated. The check counts the
+/// model's rank, not its columns (an aliased column costs no degree of freedom), so it
+/// refuses only a sample with no residual degree of freedom left even if every
+/// augmentation term is identified: n <= rank(X) + q. The degrees of freedom of the test
+/// itself come from the augmented fit's rank (df2 = n - rank([X, Z]) must be positive).
 fn reset_augmented_width(
     n: usize,
     k_original: usize,
+    rank_original: usize,
     n_powers: usize,
     reset_type: ResetType,
     n_regressor_cols: usize,
@@ -1195,9 +1138,10 @@ fn reset_augmented_width(
         });
     }
     let k_augmented = k_original.saturating_add(n_aug);
-    if n <= k_augmented {
+    let rank_bound = rank_original.min(k_original).saturating_add(n_aug);
+    if n <= rank_bound {
         return Err(EconError::InsufficientData {
-            required: k_augmented.saturating_add(1),
+            required: rank_bound.saturating_add(1),
             provided: n,
             context: "RESET test augmented model".to_string(),
         });
@@ -1206,14 +1150,15 @@ fn reset_augmented_width(
 }
 
 /// Fill the augmentation columns of `x_aug`, from column `k_original` on: for
-/// each power in order, the power of the fitted values (`Fitted`, `PrinComp`) or
-/// of each regressor column in `regressor_cols` (`Regressor`).
+/// each power in order, the power of `base` (the fitted values for `Fitted`, the first
+/// principal component of the regressors for `PrinComp`) or of each regressor column in
+/// `regressor_cols` (`Regressor`).
 fn fill_reset_augmentation(
     x_aug: &mut Array2<f64>,
     k_original: usize,
     powers: &[usize],
     reset_type: ResetType,
-    fitted: &Array1<f64>,
+    base: &Array1<f64>,
     x: &ndarray::ArrayView2<f64>,
     regressor_cols: &[usize],
 ) -> EconResult<()> {
@@ -1226,7 +1171,7 @@ fn fill_reset_augmentation(
         match reset_type {
             ResetType::Fitted | ResetType::PrinComp => {
                 for i in 0..n {
-                    x_aug[[i, col]] = fitted[i].powi(p);
+                    x_aug[[i, col]] = base[i].powi(p);
                 }
                 col += 1;
             }
@@ -1278,73 +1223,102 @@ pub fn reset_test_from_ols(
 
     let n = ols_result.n_obs;
     let k_original = ols_result.n_params;
+    if x.nrows() != n || x.ncols() != k_original || y.len() != n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "RESET: the design is {} x {} and y has {} values, but the OLS fit has {n} \
+                 observations and {k_original} parameters",
+                x.nrows(),
+                x.ncols(),
+                y.len()
+            ),
+        });
+    }
 
-    // Compute fitted values using vectorized matrix-vector multiplication
-    let beta: Array1<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
-    let x_view: ndarray::ArrayView2<f64> = x.view();
-    let fitted: Array1<f64> = x_view.dot(&beta);
+    // Fitted values of the fit: y - residuals (X b would be NaN for an aliased column)
+    let regressor_cols = reset_regressor_columns(x);
+    let base: Array1<f64> = match reset_type {
+        ResetType::PrinComp => {
+            if regressor_cols.is_empty() {
+                return Err(EconError::InvalidSpecification {
+                    message: "PrinComp RESET requires at least one regressor".to_string(),
+                });
+            }
+            let mut z = resource::try_zeros2(n, regressor_cols.len(), "RESET regressors")?;
+            for (c, &j) in regressor_cols.iter().enumerate() {
+                z.column_mut(c).assign(&x.column(j));
+            }
+            first_principal_component(z.view())?.0
+        }
+        _ => y - &ols_result.resid,
+    };
 
     // Size the augmented model before building it
-    let regressor_cols = reset_regressor_columns(x);
     let k_augmented = reset_augmented_width(
         n,
         k_original,
+        ols_result.rank(),
         powers.len(),
         reset_type,
         regressor_cols.len(),
     )?;
-    let n_aug = k_augmented - k_original;
+    let q = k_augmented - k_original;
 
-    // Build augmented X matrix using slice assignment (vectorized)
+    // Build augmented X matrix: [X, augmentation columns]
     let mut x_aug = resource::try_zeros2(n, k_augmented, "RESET augmented design")?;
     x_aug.slice_mut(ndarray::s![.., ..k_original]).assign(x);
-
-    // Add augmentation columns
     fill_reset_augmentation(
         &mut x_aug,
         k_original,
         &powers,
         reset_type,
-        &fitted,
+        &base,
         x,
         &regressor_cols,
     )?;
 
-    // Run augmented regression using vectorized operations
-    // X'X - use pure ndarray for speed
-    let xtx_aug = x_aug.t().dot(&x_aug);
-    // Use fast Cholesky inverse (no condition number check - OLS already succeeded)
-    let xtx_aug_inv = crate::linalg::cholesky_inverse(&xtx_aug.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "Augmented model X'X".to_string(),
-            suggestion: format!("Augmentation variables may be collinear: {}", e),
-        }
-    })?;
-
-    // X'y using vectorized dot product
-    let xty_aug = x_aug.t().dot(y);
-
-    // β_aug = (X'X)^{-1} X'y
-    let beta_aug = xtx_aug_inv.dot(&xty_aug);
-
-    // Compute SSR using vectorized operations
-    let fitted_aug = x_aug.dot(&beta_aug);
-    let resid_aug = y - &fitted_aug;
+    // Augmented fit (normal equations when well conditioned, pivoted QR otherwise)
+    let aug = solve_ols(x_aug.view(), y.view())?;
 
     let y_mean = y.mean().unwrap_or(0.0);
-    let ssr_aug: f64 = resid_aug.iter().map(|&r| r * r).sum();
+    let ssr_aug: f64 = aug.residuals.iter().map(|&r| r * r).sum();
     let sst: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-
     let ssr_orig: f64 = ols_result.resid.iter().map(|e| e * e).sum();
     let r2_original = if sst > 0.0 { 1.0 - ssr_orig / sst } else { 0.0 };
     let r2_augmented = if sst > 0.0 { 1.0 - ssr_aug / sst } else { 0.0 };
 
-    let q = n_aug;
-    let df1 = q;
-    let df2 = n - k_augmented;
+    // Degrees of freedom by rank (anova.lm's rule): df1 = rank([X, Z]) - rank(X),
+    // df2 = n - rank([X, Z]). lmtest counts ncol(X) and every augmentation column instead,
+    // which differs only when a column aliases.
+    let rank_x = ols_result.rank();
+    let df1 = aug
+        .rank
+        .checked_sub(rank_x)
+        .filter(|d| *d > 0)
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: "every RESET augmentation term is collinear with the model; nothing to test"
+                .to_string(),
+        })?;
+    let df2 =
+        n.checked_sub(aug.rank)
+            .filter(|d| *d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: aug.rank + 1,
+                provided: n,
+                context: "RESET test augmented model".to_string(),
+            })?;
 
-    let f_stat = if ssr_aug > 0.0 && df2 > 0 {
-        ((ssr_orig - ssr_aug) / q as f64) / (ssr_aug / df2 as f64)
+    let mut warnings = ols_result.alias_notes();
+    if df1 < q {
+        warnings.push(format!(
+            "RESET: {} of {q} augmentation terms are collinear with the model and were \
+             dropped; df1 = {df1}",
+            q - df1
+        ));
+    }
+
+    let f_stat = if ssr_aug > 0.0 {
+        ((ssr_orig - ssr_aug) / df1 as f64) / (ssr_aug / df2 as f64)
     } else {
         0.0
     };
@@ -1374,6 +1348,7 @@ pub fn reset_test_from_ols(
         r2_augmented,
         significant_at_05: significant,
         interpretation,
+        warnings,
     })
 }
 
@@ -1386,7 +1361,8 @@ pub fn reset_test_from_ols(
 /// - F-test: F = ((RSS_r - RSS_u) / q) / (RSS_u / (n - k_u)) ~ F(q, n - k_u)
 /// - Chi-squared: χ² = n * (RSS_r - RSS_u) / RSS_u ~ χ²(q)
 ///
-/// where q = k_u - k_r is the number of restrictions.
+/// where q = rank_u - rank_r is the number of restrictions (anova.lm: an aliased or
+/// collinear extra regressor adds none) and n - k_u is n - rank_u.
 ///
 /// # Arguments
 ///
@@ -1402,8 +1378,10 @@ pub fn reset_test_from_ols(
 ///
 /// # Note
 ///
-/// The restricted model's regressors must be a subset of the unrestricted model's
-/// regressors. If not, an error is returned.
+/// Repeated names are ignored (first occurrence kept, with a warning), as R's formula
+/// interface does. The restricted model's regressors must be a strict subset of the
+/// unrestricted model's, and the unrestricted model must identify more coefficients;
+/// otherwise the result is `InvalidSpecification`.
 ///
 /// # References
 ///
@@ -1437,105 +1415,51 @@ pub fn wald_test(
     x_cols_restricted: &[&str],
     use_f_test: bool,
 ) -> EconResult<WaldTestResult> {
-    // Check that restricted vars are a subset of unrestricted
-    for &r_col in x_cols_restricted {
-        if !x_cols_unrestricted.contains(&r_col) {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Restricted model variable '{}' must be in unrestricted model",
-                    r_col
-                ),
-            });
+    // Unique names (first occurrence kept), as R's formula interface treats a repeated
+    // term; each duplicate is reported.
+    let mut warnings = Vec::new();
+    let mut dedupe = |cols: &[&str], what: &str| -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(cols.len());
+        for &c in cols {
+            if out.iter().any(|o| o == c) {
+                let note =
+                    format!("'{c}' is listed more than once in {what}; duplicates are ignored");
+                if !warnings.contains(&note) {
+                    warnings.push(note);
+                }
+            } else {
+                out.push(c.to_string());
+            }
         }
-    }
+        out
+    };
+    let unrestricted = dedupe(x_cols_unrestricted, "x_unrestricted");
+    let restricted = dedupe(x_cols_restricted, "x_restricted");
 
-    let q = x_cols_unrestricted.len() - x_cols_restricted.len();
-    if q == 0 {
+    // The restricted model must be nested in the unrestricted one, strictly
+    if restricted.iter().any(|r| !unrestricted.contains(r))
+        || restricted.len() >= unrestricted.len()
+    {
         return Err(EconError::InvalidSpecification {
-            message: "Models must differ - restricted model must have fewer variables".to_string(),
+            message: format!(
+                "the restricted model's variables must be a strict subset of the unrestricted \
+                 model's (restricted: [{}], unrestricted: [{}])",
+                restricted.join(", "),
+                unrestricted.join(", ")
+            ),
         });
     }
 
     // Run both regressions
-    let ols_unrestricted = run_ols(
-        dataset,
-        y_col,
-        x_cols_unrestricted,
-        true,
-        CovarianceType::Standard,
-    )?;
-    let ols_restricted = run_ols(
-        dataset,
-        y_col,
-        x_cols_restricted,
-        true,
-        CovarianceType::Standard,
-    )?;
+    let u_cols: Vec<&str> = unrestricted.iter().map(String::as_str).collect();
+    let r_cols: Vec<&str> = restricted.iter().map(String::as_str).collect();
+    let ols_unrestricted = run_ols(dataset, y_col, &u_cols, true, CovarianceType::Standard)?;
+    let ols_restricted = run_ols(dataset, y_col, &r_cols, true, CovarianceType::Standard)?;
 
-    let n = ols_unrestricted.n_obs;
-    let k_u = ols_unrestricted.n_params; // includes intercept
-    let k_r = ols_restricted.n_params;
-
-    // Get RSS from both models
-    let rss_u: f64 = ols_unrestricted.resid.iter().map(|e| e * e).sum();
-    let rss_r: f64 = ols_restricted.resid.iter().map(|e| e * e).sum();
-
-    let df1 = q; // number of restrictions
-    let df2 = n - k_u; // residual df in unrestricted model
-
-    // Compute test statistic and p-value
-    // Note: In theory, RSS_r >= RSS_u (restricted has at least as much error).
-    // In practice, numerical issues can cause RSS_r < RSS_u, especially with
-    // multicollinear data. We clamp to ensure non-negative statistics.
-    let rss_diff = (rss_r - rss_u).max(0.0);
-
-    let (statistic, p_value, test_type, df2_opt) = if use_f_test {
-        // F = ((RSS_r - RSS_u) / q) / (RSS_u / (n - k_u))
-        let f_stat = if rss_u > 0.0 && df2 > 0 {
-            (rss_diff / df1 as f64) / (rss_u / df2 as f64)
-        } else {
-            0.0
-        };
-        let p = crate::traits::f_test_p_value(f_stat, df1 as f64, df2 as f64);
-        (f_stat, p, "F".to_string(), Some(df2))
-    } else {
-        // Chi-sq = n * (RSS_r - RSS_u) / RSS_u
-        let chi_stat = if rss_u > 0.0 {
-            (n as f64) * rss_diff / rss_u
-        } else {
-            0.0
-        };
-        let p = chi_squared_p_value(chi_stat, df1 as f64);
-        (chi_stat, p, "Chisq".to_string(), None)
-    };
-
-    let significant = p_value < 0.05;
-    let interpretation = if significant {
-        format!(
-            "Reject H0: The {} additional variable(s) are jointly significant (p={:.4} < 0.05). Use the unrestricted model.",
-            q, p_value
-        )
-    } else {
-        format!(
-            "Fail to reject H0: The {} additional variable(s) are not jointly significant (p={:.4} >= 0.05). The restricted model is adequate.",
-            q, p_value
-        )
-    };
-
-    Ok(WaldTestResult {
-        statistic,
-        p_value,
-        df1,
-        df2: df2_opt,
-        test_type,
-        n_obs: n,
-        k_unrestricted: k_u,
-        k_restricted: k_r,
-        rss_unrestricted: rss_u,
-        rss_restricted: rss_r,
-        significant_at_05: significant,
-        interpretation,
-    })
+    let mut result = wald_test_from_ols(&ols_unrestricted, &ols_restricted, use_f_test)?;
+    warnings.append(&mut result.warnings);
+    result.warnings = warnings;
+    Ok(result)
 }
 
 /// Convenience function for Wald test with F-statistic.
@@ -1564,9 +1488,6 @@ pub fn wald_test_from_ols(
     use_f_test: bool,
 ) -> EconResult<WaldTestResult> {
     let n = ols_unrestricted.n_obs;
-    let k_u = ols_unrestricted.n_params;
-    let k_r = ols_restricted.n_params;
-
     if n != ols_restricted.n_obs {
         return Err(EconError::InvalidSpecification {
             message: "Unrestricted and restricted models must have same number of observations"
@@ -1574,23 +1495,31 @@ pub fn wald_test_from_ols(
         });
     }
 
-    let q = k_u - k_r;
-    if q <= 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Unrestricted model must have more parameters than restricted model"
-                .to_string(),
-        });
-    }
+    // Restrictions counted by rank (anova.lm): an aliased or collinear extra regressor
+    // adds no restriction.
+    let (rank_u, rank_r) = (ols_unrestricted.rank(), ols_restricted.rank());
+    let q = rank_u
+        .checked_sub(rank_r)
+        .filter(|q| *q > 0)
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: format!(
+                "the unrestricted model must have more identified coefficients than the \
+                 restricted model (ranks {rank_u} and {rank_r}); collinear extra regressors \
+                 cannot be tested"
+            ),
+        })?;
 
     let rss_u: f64 = ols_unrestricted.resid.iter().map(|e| e * e).sum();
     let rss_r: f64 = ols_restricted.resid.iter().map(|e| e * e).sum();
+    // RSS_r >= RSS_u in exact arithmetic; rounding can invert a tiny difference
+    let rss_diff = (rss_r - rss_u).max(0.0);
 
     let df1 = q;
-    let df2 = n - k_u;
+    let df2 = ols_unrestricted.df_resid; // n - rank_u
 
     let (statistic, p_value, test_type, df2_opt) = if use_f_test {
         let f_stat = if rss_u > 0.0 && df2 > 0 {
-            ((rss_r - rss_u) / df1 as f64) / (rss_u / df2 as f64)
+            (rss_diff / df1 as f64) / (rss_u / df2 as f64)
         } else {
             0.0
         };
@@ -1598,7 +1527,7 @@ pub fn wald_test_from_ols(
         (f_stat, p, "F".to_string(), Some(df2))
     } else {
         let chi_stat = if rss_u > 0.0 {
-            (n as f64) * (rss_r - rss_u) / rss_u
+            (n as f64) * rss_diff / rss_u
         } else {
             0.0
         };
@@ -1619,6 +1548,13 @@ pub fn wald_test_from_ols(
         )
     };
 
+    let mut warnings = ols_unrestricted.alias_notes();
+    for w in ols_restricted.alias_notes() {
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
+
     Ok(WaldTestResult {
         statistic,
         p_value,
@@ -1626,12 +1562,13 @@ pub fn wald_test_from_ols(
         df2: df2_opt,
         test_type,
         n_obs: n,
-        k_unrestricted: k_u,
-        k_restricted: k_r,
+        k_unrestricted: rank_u,
+        k_restricted: rank_r,
         rss_unrestricted: rss_u,
         rss_restricted: rss_r,
         significant_at_05: significant,
         interpretation,
+        warnings,
     })
 }
 
@@ -1757,43 +1694,9 @@ pub fn bg_test(
         }
     }
 
-    // Step 3: Run auxiliary regression: e on [X, e_{t-1}, ..., e_{t-p}]
-    // Compute (X'X)^{-1}
-    let xtx_mat = xtx(&x_aux.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Auxiliary regression X'X".to_string(),
-        suggestion: format!("Check for multicollinearity or try lower order: {}", e),
-    })?;
-
-    // X'e (residuals are the dependent variable)
-    let mut xte: Array1<f64> = Array1::zeros(k_aux);
-    for i in 0..n {
-        for j in 0..k_aux {
-            xte[j] += x_aux[[i, j]] * residuals[i];
-        }
-    }
-
-    // β_aux = (X'X)^{-1} X'e
-    let beta_aux: Array1<f64> = xtx_inv.dot(&xte);
-
-    // Compute R² of auxiliary regression
-    let e_mean = residuals.mean().unwrap_or(0.0);
-    let mut ssr_aux = 0.0;
-    let mut sst_aux = 0.0;
-
-    for i in 0..n {
-        let fitted: f64 = (0..k_aux).map(|j| x_aux[[i, j]] * beta_aux[j]).sum();
-        let aux_resid = residuals[i] - fitted;
-        ssr_aux += aux_resid * aux_resid;
-        sst_aux += (residuals[i] - e_mean).powi(2);
-    }
-
-    // Handle edge case where residuals are constant
-    let r2_aux = if sst_aux > 0.0 {
-        1.0 - ssr_aux / sst_aux
-    } else {
-        0.0
-    };
+    // Step 3: Run auxiliary regression e on [X, e_{t-1}, ..., e_{t-p}] as OLS solves it
+    let aux = solve_ols(x_aux.view(), residuals.view())?;
+    let (r2_aux, beta_aux, rank_aux) = bg_auxiliary_r2(residuals, aux);
 
     // Extract coefficients on lagged residuals
     let lag_coefs: Vec<f64> = beta_aux.slice(ndarray::s![k..]).to_vec();
@@ -1807,9 +1710,10 @@ pub fn bg_test(
             (lm, p, (order as f64, None))
         }
         BgTestType::F => {
-            // F = (R² / p) / ((1 - R²) / (n - k - p)) ~ F(p, n - k - p)
+            // F = (R² / p) / ((1 - R²) / (n - rank)) ~ F(p, n - rank), rank = rank([X, lags])
+            // (n - k - p on a full-rank design, as bgtest)
             let df1 = order as f64;
-            let df2 = (n - k - order) as f64;
+            let df2 = (n - rank_aux) as f64;
 
             let f_stat = if r2_aux < 1.0 && df2 > 0.0 {
                 (r2_aux / df1) / ((1.0 - r2_aux) / df2)
@@ -1847,6 +1751,21 @@ pub fn bg_test(
         significant_at_05: significant,
         interpretation,
     })
+}
+
+/// R² of the Breusch-Godfrey auxiliary fit (centred on the mean of the residuals),
+/// its coefficients and its rank.
+fn bg_auxiliary_r2(residuals: &Array1<f64>, aux: OlsSolve) -> (f64, Array1<f64>, usize) {
+    let e_mean = residuals.mean().unwrap_or(0.0);
+    let ssr_aux: f64 = aux.residuals.iter().map(|r| r * r).sum();
+    let sst_aux: f64 = residuals.iter().map(|e| (e - e_mean).powi(2)).sum();
+    // Constant residuals: no variation to explain
+    let r2 = if sst_aux > 0.0 {
+        1.0 - ssr_aux / sst_aux
+    } else {
+        0.0
+    };
+    (r2, aux.beta, aux.rank)
 }
 
 /// Convenience function for Breusch-Godfrey test with default parameters.
@@ -1915,36 +1834,9 @@ pub fn bg_test_from_ols(
         }
     }
 
-    // Run auxiliary regression using vectorized operations
-    // X'X - use pure ndarray for speed
-    let xtx_mat = x_aux.t().dot(&x_aux);
-    // Use fast Cholesky inverse (no condition number check - OLS already succeeded)
-    let xtx_inv = crate::linalg::cholesky_inverse(&xtx_mat.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "Auxiliary regression X'X".to_string(),
-            suggestion: format!("Check for multicollinearity or try lower order: {}", e),
-        }
-    })?;
-
-    // X'e using vectorized dot product
-    let xte = x_aux.t().dot(residuals);
-
-    // β_aux = (X'X)^{-1} X'e
-    let beta_aux = xtx_inv.dot(&xte);
-
-    // Compute fitted values and R² using vectorized operations
-    let fitted_aux = x_aux.dot(&beta_aux);
-    let aux_resid = residuals - &fitted_aux;
-
-    let e_mean = residuals.mean().unwrap_or(0.0);
-    let ssr_aux: f64 = aux_resid.iter().map(|&r| r * r).sum();
-    let sst_aux: f64 = residuals.iter().map(|&e| (e - e_mean).powi(2)).sum();
-
-    let r2_aux = if sst_aux > 0.0 {
-        1.0 - ssr_aux / sst_aux
-    } else {
-        0.0
-    };
+    // Run auxiliary regression as OLS solves it
+    let aux = solve_ols(x_aux.view(), residuals.view())?;
+    let (r2_aux, beta_aux, rank_aux) = bg_auxiliary_r2(residuals, aux);
     let lag_coefs: Vec<f64> = beta_aux.slice(ndarray::s![k..]).to_vec();
 
     // Compute test statistic
@@ -1956,7 +1848,7 @@ pub fn bg_test_from_ols(
         }
         BgTestType::F => {
             let df1 = order as f64;
-            let df2 = (n - k - order) as f64;
+            let df2 = (n - rank_aux) as f64;
             let f_stat = if r2_aux < 1.0 && df2 > 0.0 {
                 (r2_aux / df1) / ((1.0 - r2_aux) / df2)
             } else {
@@ -2059,6 +1951,11 @@ impl fmt::Display for HarveyCollierResult {
 ///   w_t = (y_t - x_t' β̂_{t-1}) / √(1 + x_t'(X_{t-1}'X_{t-1})⁻¹x_t)
 ///
 /// where β̂_{t-1} is estimated using observations 1 to t-1.
+///
+/// The first prefix used is the first one of full column rank (by `lm.fit`'s pivoted QR,
+/// found by bisection: prefix rank never decreases); earlier prefixes have no unique fit.
+/// The forecasts then come from a QR factor of the prefix updated row by row with Givens
+/// rotations, `O(k²)` per observation instead of a refit.
 pub fn recursive_residuals(x: &ndarray::ArrayView2<f64>, y: &Array1<f64>) -> EconResult<Vec<f64>> {
     let n = y.len();
     let k = x.ncols();
@@ -2070,51 +1967,111 @@ pub fn recursive_residuals(x: &ndarray::ArrayView2<f64>, y: &Array1<f64>) -> Eco
             context: "Recursive residuals require n > k + 1".to_string(),
         });
     }
+    if x.nrows() != n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "recursive residuals: x has {} rows but y has {n}",
+                x.nrows()
+            ),
+        });
+    }
+    if x.iter().chain(y.iter()).any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "recursive residuals: x and y must be finite".to_string(),
+        });
+    }
 
-    let mut rec_resid = Vec::with_capacity(n - k);
+    let none = || EconError::InsufficientData {
+        required: 1,
+        provided: 0,
+        context: "No recursive residuals could be computed".to_string(),
+    };
+    let full_rank = |t: usize| -> EconResult<bool> {
+        let fit = least_squares(x.slice(ndarray::s![0..t, ..]), y.slice(ndarray::s![0..t]))?;
+        Ok(fit.rank == k)
+    };
 
-    // Start with first k observations for initial estimate
-    for t in k..n {
-        // Use observations 0 to t-1 for estimation
-        let x_sub = x.slice(ndarray::s![0..t, ..]);
-        let y_sub = y.slice(ndarray::s![0..t]);
+    // First prefix 0..t0 (k <= t0 < n) of full rank
+    if k == 0 || !full_rank(n - 1)? {
+        return Err(none());
+    }
+    let (mut lo, mut hi) = (k, n - 1);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if full_rank(mid)? {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let t0 = lo;
 
-        // Compute (X'X)⁻¹
-        let xtx_sub = xtx(&x_sub);
-        let (xtx_inv, _) = match safe_inverse(&xtx_sub.view()) {
-            Ok(inv) => inv,
-            Err(_) => continue, // Skip if singular
-        };
+    // R (k x k, upper triangular) and z = Q'y of the rows folded in so far
+    let mut r = Array2::<f64>::zeros((k, k));
+    let mut z = Array1::<f64>::zeros(k);
+    let mut row = vec![0.0; k];
+    let fold = |r: &mut Array2<f64>, z: &mut Array1<f64>, t: usize, row: &mut [f64]| {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = x[[t, j]];
+        }
+        let mut b = y[t];
+        for j in 0..k {
+            if row[j] == 0.0 {
+                continue;
+            }
+            let h = r[[j, j]].hypot(row[j]);
+            let (c, s) = (r[[j, j]] / h, row[j] / h);
+            r[[j, j]] = h;
+            for l in (j + 1)..k {
+                let (a, w) = (r[[j, l]], row[l]);
+                r[[j, l]] = c * a + s * w;
+                row[l] = c * w - s * a;
+            }
+            let zj = z[j];
+            z[j] = c * zj + s * b;
+            b = c * b - s * zj;
+        }
+    };
+    for t in 0..t0 {
+        if t % 256 == 0 {
+            resource::checkpoint()?;
+        }
+        fold(&mut r, &mut z, t, &mut row);
+    }
 
-        // Compute β̂ = (X'X)⁻¹ X'y
-        let xty_sub: Array1<f64> = x_sub.t().dot(&y_sub);
-        let beta_sub = xtx_inv.dot(&xty_sub);
-
-        // One-step-ahead forecast
-        let x_t = x.row(t);
-        let y_hat_t: f64 = x_t
-            .iter()
-            .zip(beta_sub.iter())
-            .map(|(&xi, &bi)| xi * bi)
-            .sum();
-        let forecast_error = y[t] - y_hat_t;
-
-        // Compute scaling factor: √(1 + x_t'(X'X)⁻¹x_t)
-        let x_t_arr: Array1<f64> = x_t.to_owned();
-        let quad_form = x_t_arr.dot(&xtx_inv.dot(&x_t_arr));
-        let scale = (1.0 + quad_form).sqrt();
-
-        // Recursive residual
-        let w_t = forecast_error / scale;
-        rec_resid.push(w_t);
+    let mut rec_resid = Vec::with_capacity(n - t0);
+    let mut v = vec![0.0; k];
+    let mut beta = vec![0.0; k];
+    for t in t0..n {
+        if (t - t0) % 256 == 0 {
+            resource::checkpoint()?;
+        }
+        // v = R^{-T} x_t (forward substitution), beta = R^{-1} z (back substitution)
+        for i in 0..k {
+            let mut acc = x[[t, i]];
+            for j in 0..i {
+                acc -= r[[j, i]] * v[j];
+            }
+            v[i] = acc / r[[i, i]];
+        }
+        for i in (0..k).rev() {
+            let mut acc = z[i];
+            for j in (i + 1)..k {
+                acc -= r[[i, j]] * beta[j];
+            }
+            beta[i] = acc / r[[i, i]];
+        }
+        let y_hat: f64 = (0..k).map(|j| x[[t, j]] * beta[j]).sum();
+        let f = 1.0 + v.iter().map(|a| a * a).sum::<f64>();
+        let w_t = (y[t] - y_hat) / f.sqrt();
+        if w_t.is_finite() {
+            rec_resid.push(w_t);
+        }
+        fold(&mut r, &mut z, t, &mut row);
     }
 
     if rec_resid.is_empty() {
-        return Err(EconError::InsufficientData {
-            required: 1,
-            provided: 0,
-            context: "No recursive residuals could be computed".to_string(),
-        });
+        return Err(none());
     }
 
     Ok(rec_resid)
@@ -2243,6 +2200,37 @@ mod tests {
         Dataset::new(df)
     }
 
+    /// A cancelled budget stops the VIF and Breusch-Pagan auxiliary fits with `Cancelled`
+    /// instead of turning into R2 = 0 (VIF = 1) or a missing test.
+    #[test]
+    fn test_vif_and_bp_propagate_cancellation() {
+        let x = Array2::from_shape_fn((30, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => (i as f64 * 0.7).sin() + 0.05 * i as f64,
+            _ => (i as f64 * 1.3).cos(),
+        });
+        let names: Vec<String> = ["(Intercept)", "a", "b"].map(String::from).to_vec();
+        let resid = Array1::from_shape_fn(30, |i| ((i * 7) % 5) as f64 - 2.1);
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        let budget = crate::resource::Budget::new(None, token);
+        crate::resource::with_budget(budget, || {
+            let mut w = Vec::new();
+            assert!(matches!(
+                compute_vif(&x.view(), &names, &mut w),
+                Err(EconError::Cancelled(_))
+            ));
+            assert!(matches!(
+                compute_breusch_pagan(&resid, &x.view()),
+                Err(EconError::Cancelled(_))
+            ));
+        });
+        let mut w = Vec::new();
+        let vif = compute_vif(&x.view(), &names, &mut w).unwrap().unwrap();
+        assert!(vif[1].vif.is_finite() && vif[1].vif >= 1.0);
+        assert!(compute_breusch_pagan(&resid, &x.view()).unwrap().is_some());
+    }
+
     #[test]
     fn test_reset_deduplicates_powers() {
         let ds = create_test_dataset();
@@ -2279,6 +2267,43 @@ mod tests {
         let e = crate::resource::with_alloc_ceiling(Some(1024), || {
             reset_test(&ds, "y", &["x1"], &powers, ResetType::Fitted)
         })
+        .unwrap_err();
+        assert!(matches!(e, EconError::InsufficientData { .. }), "{e:?}");
+    }
+
+    /// An aliased model whose sample has room for the rank-based test but not for every
+    /// design column: n = 5, ncol(X) = 3 (x2 = 2 x1), rank(X) = 2, q = 2. The size check
+    /// counts the rank (n > rank + q), so RESET runs with df = (2, n - rank([X, Z])) = (2, 1).
+    #[test]
+    fn test_reset_size_check_counts_rank_not_aliased_columns() {
+        let df = df! {
+            "y" => [1.3, 1.7, 3.6, 3.9, 5.8],
+            "x1" => [1.0, 2.1, 2.9, 4.2, 5.0],
+            "x2" => [2.0, 4.2, 5.8, 8.4, 10.0]
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        let r = reset_test(&ds, "y", &["x1", "x2"], &[2, 3], ResetType::Fitted).unwrap();
+        assert_eq!(r.df, (2, 1));
+        assert!(
+            r.statistic.is_finite() && r.statistic >= 0.0,
+            "{}",
+            r.statistic
+        );
+        // With one observation fewer even the rank-based test has no degree of freedom
+        let df4 = df! {
+            "y" => [1.3, 1.7, 3.6, 3.9],
+            "x1" => [1.0, 2.1, 2.9, 4.2],
+            "x2" => [2.0, 4.2, 5.8, 8.4]
+        }
+        .unwrap();
+        let e = reset_test(
+            &Dataset::new(df4),
+            "y",
+            &["x1", "x2"],
+            &[2, 3],
+            ResetType::Fitted,
+        )
         .unwrap_err();
         assert!(matches!(e, EconError::InsufficientData { .. }), "{e:?}");
     }
@@ -2609,9 +2634,24 @@ mod tests {
     // Wald Test Tests
     // ========================================
 
+    /// Noisy, x2 not collinear with x1 (create_test_dataset has x2 = 0.5 x1 exactly).
+    fn create_wald_dataset() -> Dataset {
+        let x1: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let x2: Vec<f64> = (1..=20)
+            .map(|i| ((i * 7) % 11) as f64 * 0.5 + 0.01 * i as f64)
+            .collect();
+        let y: Vec<f64> = x1
+            .iter()
+            .zip(&x2)
+            .enumerate()
+            .map(|(i, (a, b))| 0.9 * a + 0.2 * b + 0.3 * ((i * 13) % 5) as f64)
+            .collect();
+        Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap())
+    }
+
     #[test]
     fn test_wald_test_basic() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
 
         // Test unrestricted model (y ~ x1 + x2) vs restricted model (y ~ x1)
         let result = wald_test(&dataset, "y", &["x1", "x2"], &["x1"], true).unwrap();
@@ -2625,7 +2665,7 @@ mod tests {
 
     #[test]
     fn test_wald_test_chi_squared() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
 
         // Test with chi-squared statistic (use_f_test = false)
         let result = wald_test(&dataset, "y", &["x1", "x2"], &["x1"], false).unwrap();
@@ -2675,7 +2715,9 @@ mod tests {
     fn test_wald_test_multiple_restrictions() {
         // Create data with multiple variables
         let x1: Vec<f64> = (1..=40).map(|i| i as f64).collect();
-        let x2: Vec<f64> = (1..=40).map(|i| (i as f64) * 0.5).collect();
+        let x2: Vec<f64> = (1..=40)
+            .map(|i| ((i * 7) % 11) as f64 * 0.5 + 0.01 * i as f64)
+            .collect();
         let x3: Vec<f64> = (1..=40).map(|i| (i as f64).sqrt()).collect();
         let y: Vec<f64> = x1
             .iter()
@@ -2701,7 +2743,7 @@ mod tests {
 
     #[test]
     fn test_wald_test_displays_correctly() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
         let result = wald_test(&dataset, "y", &["x1", "x2"], &["x1"], true).unwrap();
 
         let display = format!("{}", result);
@@ -2712,7 +2754,7 @@ mod tests {
 
     #[test]
     fn test_run_wald_test_convenience() {
-        let dataset = create_test_dataset();
+        let dataset = create_wald_dataset();
 
         // Convenience function should use F-test by default
         let result = run_wald_test(&dataset, "y", &["x1", "x2"], &["x1"]).unwrap();
@@ -3014,5 +3056,345 @@ mod tests {
             .finish();
         // deviation REG-37: n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (wald_drop_capital_chisq)
         assert_eq!((f.df1, f.df2), (1, Some(197)));
+    }
+
+    #[test]
+    fn test_reset_type_parses_aliases_and_rejects_unknown() {
+        ResetType::choices().validate().unwrap();
+        for (s, t) in [
+            ("fitted", ResetType::Fitted),
+            ("FIT", ResetType::Fitted),
+            ("regressor", ResetType::Regressor),
+            ("regressors", ResetType::Regressor),
+            ("princomp", ResetType::PrinComp),
+            ("PCA", ResetType::PrinComp),
+            ("principal-component", ResetType::PrinComp),
+        ] {
+            assert_eq!(s.parse::<ResetType>().unwrap(), t, "{s}");
+        }
+        match "pca2".parse::<ResetType>().unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("reset_type") && message.contains("princomp"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bg_test_type_parses_aliases_and_rejects_unknown() {
+        BgTestType::choices().validate().unwrap();
+        for (s, t) in [
+            ("Chisq", BgTestType::Chisq),
+            ("chi-squared", BgTestType::Chisq),
+            ("LM", BgTestType::Chisq),
+            ("F", BgTestType::F),
+            ("f-test", BgTestType::F),
+        ] {
+            assert_eq!(s.parse::<BgTestType>().unwrap(), t, "{s}");
+        }
+        assert!(matches!(
+            "wald".parse::<BgTestType>(),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+    }
+
+    /// lmtest::resettest(type = "princomp"): pc1 = Z v1, v1 the first eigenvector of
+    /// cov(Z), NOT centred; power = 3 alone separates it from centred scores
+    /// (22.918632127631003 vs 6.540979982413889). Before: princomp returned the fitted
+    /// statistic 91.53815584456794.
+    #[test]
+    fn test_validate_reset_princomp() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("reset_princomp");
+        let x = ["x1", "x2"];
+        let pc = reset_test(&ds, "y", &x, &[2, 3], ResetType::PrinComp).unwrap();
+        let fit = reset_test(&ds, "y", &x, &[2, 3], ResetType::Fitted).unwrap();
+        let reg = reset_test(&ds, "y", &x, &[2, 3], ResetType::Regressor).unwrap();
+        let p3 = reset_test(&ds, "y", &x, &[3], ResetType::PrinComp).unwrap();
+        let n = pc.n_obs;
+        let df = |r: &ResetTestResult| [r.df.0 as f64, r.df.1 as f64];
+        Check::new(&case)
+            .scalar("princomp_stat", pc.statistic, Tol::stat(n))
+            .vector("princomp_df", &df(&pc), Tol::exact())
+            .scalar("princomp_p", pc.p_value, Tol::p_value(n))
+            .scalar("fitted_stat", fit.statistic, Tol::stat(n))
+            .scalar("fitted_p", fit.p_value, Tol::p_value(n))
+            .scalar("regressor_stat", reg.statistic, Tol::stat(n))
+            .vector("regressor_df", &df(&reg), Tol::exact())
+            .scalar("princomp_p3_stat", p3.statistic, Tol::stat(n))
+            .vector("princomp_p3_df", &df(&p3), Tol::exact())
+            .scalar("princomp_p3_p", p3.p_value, Tol::p_value(n))
+            .finish();
+        assert!((pc.statistic - fit.statistic).abs() > 1.0); // R distinguishes them
+        assert!((p3.statistic - case.scalar("princomp_p3_centred_stat")).abs() > 0.1);
+        assert!(pc.to_string().contains("princomp") && pc.warnings.is_empty());
+
+        // The component itself: a unit eigenvector of cov(Z) for the largest eigenvalue,
+        // scores = Z v (uncentred); the statistic does not depend on its sign.
+        let z = DesignMatrix::from_dataframe(ds.df(), &x, false)
+            .unwrap()
+            .data;
+        let (scores, v) = first_principal_component(z.view()).unwrap();
+        assert!((v.dot(&v) - 1.0).abs() < 1e-12);
+        let zc = &z - &z.mean_axis(ndarray::Axis(0)).unwrap();
+        let cov = zc.t().dot(&zc) / (n as f64 - 1.0);
+        let cv = cov.dot(&v);
+        let lambda = v.dot(&cv);
+        let tr = cov[[0, 0]] + cov[[1, 1]];
+        assert!(lambda >= tr / 2.0); // the larger of the two eigenvalues
+        for (a, b) in cv.iter().zip(v.iter()) {
+            assert!(
+                (a - lambda * b).abs() <= 1e-10 * lambda.abs(),
+                "{a} vs {}",
+                lambda * b
+            );
+        }
+        let zv = z.dot(&v);
+        assert!(
+            scores
+                .iter()
+                .zip(&zv)
+                .all(|(a, b)| (a - b).abs() <= 1e-12 * b.abs().max(1.0))
+        );
+        let xi = DesignMatrix::from_dataframe(ds.df(), &x, true)
+            .unwrap()
+            .data;
+        let y = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        let ssr = |m: &Array2<f64>| {
+            let f = crate::linalg::solve::least_squares(m.view(), y.view()).unwrap();
+            f.residuals.iter().map(|e| e * e).sum::<f64>()
+        };
+        let mut aug = Array2::<f64>::zeros((n, 5));
+        aug.slice_mut(ndarray::s![.., ..3]).assign(&xi);
+        for i in 0..n {
+            let s = -scores[i];
+            aug[[i, 3]] = s * s;
+            aug[[i, 4]] = s * s * s;
+        }
+        let (s0, s1) = (ssr(&xi), ssr(&aug));
+        let f_neg = ((s0 - s1) / 2.0) / (s1 / (n as f64 - 5.0));
+        assert!(
+            (f_neg - pc.statistic).abs() <= 1e-10 * pc.statistic,
+            "{f_neg}"
+        );
+
+        // the pre-computed-OLS variant agrees
+        let ols = run_ols(&ds, "y", &x, true, CovarianceType::Standard).unwrap();
+        let pc2 = reset_test_from_ols(&ols, &xi.view(), &y, &[2, 3], ResetType::PrinComp).unwrap();
+        Check::new(&case)
+            .scalar("princomp_stat", pc2.statistic, Tol::stat(n))
+            .finish();
+    }
+
+    /// RESET on the dummy-trap model: the fitted values of the QR fit, and the degrees of
+    /// freedom by rank, pinned to anova.lm of the augmented fit: df2 = n - rank = 114.
+    #[test]
+    fn test_validate_reset_aliased_model() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let r = reset_test(
+            &ds,
+            "y",
+            &["x1", "da", "db", "dc"],
+            &[2, 3],
+            ResetType::Fitted,
+        )
+        .unwrap();
+        // deviation REG-4: lmtest::resettest reports df2 = n - (ncol(X) + q) = 113 here
+        // (trap_reset_fitted*), counting the aliased column; p2a uses n - rank, as anova.lm.
+        Check::new(&case)
+            .scalar("trap_reset_fitted_anova_f", r.statistic, Tol::stat(r.n_obs))
+            .vector(
+                "trap_reset_fitted_anova_df",
+                &[r.df.0 as f64, r.df.1 as f64],
+                Tol::exact(),
+            )
+            .scalar(
+                "trap_reset_fitted_anova_p",
+                r.p_value,
+                Tol::p_value(r.n_obs),
+            )
+            .finish();
+        assert!(
+            r.warnings.iter().any(|w| w.contains("dc")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// type = regressor with a 0/1 dummy: d^2 = d^3 = d alias the model, so they add
+    /// nothing; df1 counts the identified terms (2 of 4).
+    #[test]
+    fn test_reset_collinear_augmentation_df_by_rank() {
+        let n = 40;
+        let x: Vec<f64> = (0..n)
+            .map(|i| (i as f64 * 0.37).sin() * 3.0 + i as f64 * 0.1)
+            .collect();
+        let d: Vec<f64> = (0..n).map(|i| ((i * 7) % 3 == 0) as i32 as f64).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                1.0 + 0.5 * x[i] + 0.8 * d[i] + 0.1 * x[i] * x[i] + 0.2 * ((i * 13) % 5) as f64
+            })
+            .collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x, "d" => d }.unwrap());
+        let r = reset_test(&ds, "y", &["x", "d"], &[2, 3], ResetType::Regressor).unwrap();
+        assert_eq!(r.df, (2, n - 5));
+        assert!(
+            r.warnings.iter().any(|w| w.contains("2 of 4")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.statistic.is_finite() && r.statistic > 0.0);
+    }
+
+    /// Grunfeld (T1 case ols_diagnostics_grunfeld). (a) a restricted list longer than the
+    /// unrestricted one underflowed len_u - len_r; (b) equal sets; (c) wald_test_from_ols
+    /// with swapped models underflowed k_u - k_r; (d) a duplicate in the unrestricted list
+    /// gave F = 0, p = 1, df (2, 196): duplicates are ignored as R's formula interface does,
+    /// F = 81.98954629331581 = waldtest(m, m_value).
+    #[test]
+    fn test_validate_wald_rejects_duplicates() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_diagnostics_grunfeld");
+        match wald_test(&ds, "inv", &["value"], &["value", "value"], true).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("strict subset"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+        assert!(matches!(
+            wald_test(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                &["capital", "value"],
+                true
+            ),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        let u = run_ols(
+            &ds,
+            "inv",
+            &["value", "capital"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        let r = run_ols(&ds, "inv", &["value"], true, CovarianceType::Standard).unwrap();
+        assert!(matches!(
+            wald_test_from_ols(&r, &u, true),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        let w = wald_test(
+            &ds,
+            "inv",
+            &["value", "capital", "capital"],
+            &["value"],
+            true,
+        )
+        .unwrap();
+        Check::new(&case)
+            .scalar("wald_drop_capital_f", w.statistic, Tol::stat(w.n_obs))
+            .scalar("wald_drop_capital_f_p", w.p_value, Tol::p_value(w.n_obs))
+            .finish();
+        assert_eq!((w.df1, w.df2), (1, Some(197)));
+        assert!(
+            w.warnings
+                .iter()
+                .any(|m| m.contains("capital") && m.contains("more than once")),
+            "{:?}",
+            w.warnings
+        );
+        assert!(w.to_string().contains("more than once"));
+    }
+
+    /// anova(lm(y ~ x1), lm(y ~ x1 + x2 + x3)) with x2 aliased: q = rank 3 - rank 2 = 1,
+    /// not 3 - 1 = 2 names.
+    #[test]
+    fn test_validate_wald_aliased_rank_q() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let w = wald_test(&ds, "y", &["x1", "x2", "x3"], &["x1"], true).unwrap();
+        Check::new(&case)
+            .scalar("wald_alias_f", w.statistic, Tol::stat(w.n_obs))
+            .scalar("wald_alias_df1", w.df1 as f64, Tol::exact())
+            .scalar("wald_alias_df2", w.df2.unwrap() as f64, Tol::exact())
+            .scalar("wald_alias_p", w.p_value, Tol::p_value(w.n_obs))
+            .finish();
+    }
+
+    /// x2 = 0.5 x1 exactly: the unrestricted model has the restricted model's rank, so
+    /// there is nothing to test (before: a statistic with df1 = 1).
+    #[test]
+    fn test_wald_collinear_restriction_is_an_error() {
+        match wald_test(&create_test_dataset(), "y", &["x1", "x2"], &["x1"], true).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("rank"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// lmtest::bgtest(order = 1) and bptest on the dummy-trap model: the auxiliary
+    /// regressions use lm.fit's QR, and bptest's df is the auxiliary rank - 1 = 3
+    /// (p 0.7106056688722927; with df 4 it would be 0.848).
+    #[test]
+    fn test_validate_diagnostics_aliased_model() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let x = ["x1", "da", "db", "dc"];
+        let bg = bg_test(&ds, "y", &x, 1, BgTestType::Chisq, 0.0).unwrap();
+        let d = run_diagnostics(&ds, "y", &x).unwrap();
+        let bp = d.breusch_pagan.unwrap();
+        let n = bg.n_obs;
+        Check::new(&case)
+            .scalar("trap_bgtest1_chisq", bg.statistic, Tol::stat(n))
+            .scalar("trap_bgtest1_p", bg.p_value, Tol::p_value(n))
+            .scalar("trap_bptest", bp.statistic, Tol::stat(n))
+            .scalar("trap_bptest_p", bp.p_value, Tol::p_value(n))
+            .finish();
+    }
+
+    /// The Givens-updated recursion equals refitting every prefix: w_t = (y_t - x_t'b_t) /
+    /// sqrt(1 + x_t'(X_t'X_t)^{-1}x_t), b_t from rows 0..t by least squares. One regressor
+    /// has a large offset; the first rows repeat so the first prefixes are rank deficient.
+    #[test]
+    fn test_recursive_residuals_match_prefix_refits() {
+        let n = 200;
+        let k = 4;
+        let mut x = Array2::<f64>::zeros((n, k));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let ii = if i < 6 { 0 } else { i } as f64; // rows 0..6 identical
+            x[[i, 0]] = 1.0;
+            x[[i, 1]] = (ii * 0.37).sin() * 2.0 + ii * 0.01;
+            x[[i, 2]] = 1000.0 + (ii * 0.11).cos() * 5.0;
+            x[[i, 3]] = ((i * 7) % 13) as f64 * 0.3;
+            y[i] = 0.5 + 1.2 * x[[i, 1]] - 0.03 * x[[i, 2]]
+                + 0.7 * x[[i, 3]]
+                + 0.4 * (((i * 31) % 17) as f64 / 17.0 - 0.5);
+        }
+        let got = recursive_residuals(&x.view(), &y).unwrap();
+        let mut want = Vec::new();
+        for t in k..n {
+            let xs = x.slice(ndarray::s![0..t, ..]);
+            let fit = least_squares(xs, y.slice(ndarray::s![0..t])).unwrap();
+            if fit.rank < k {
+                continue;
+            }
+            let xt = x.row(t);
+            let e = y[t] - xt.dot(&fit.coefficients);
+            let q = xt.dot(&fit.unscaled_cov.dot(&xt));
+            want.push(e / (1.0 + q).sqrt());
+        }
+        assert_eq!(got.len(), want.len());
+        assert!(want.len() < n - k); // the rank-deficient prefixes were skipped
+        for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-10 * b.abs().max(1e-3),
+                "{i}: {a} vs {b}"
+            );
+        }
     }
 }

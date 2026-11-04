@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ols_rank_qr",
+      "name": "OLS on rank-deficient and ill-conditioned designs: aliased regressors, rank, df, and the normal-equations / pivoted-QR choice",
+      "category": "regression",
+      "reference": "stats::lm (lm.fit, dqrdc2, tol = 1e-7); stats::summary.lm; stats::logLik; stats::AIC; stats::BIC; sandwich::vcovHC",
+      "doc": "validation/regression/ols.md",
+      "cases": [
+        "ols_aliased",
+        "ols_illcond",
+        "ols_year_trend",
+        "ols_longley",
+        "ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_dummy_trap",
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_duplicate",
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_constant",
+        "p2a-core::regression::ols::tests::test_validate_ols_illcond_qr",
+        "p2a-core::regression::ols::tests::test_validate_ols_year_trend_normal_equations",
+        "p2a-core::regression::ols::tests::test_validate_ols_longley_qr",
+        "p2a-core::regression::ols::tests::test_validate_ols_solve_paths"
+      ],
+      "quantities": [
+        "identified coefficients",
+        "aliased flags",
+        "SE classical (NA for aliased)",
+        "rank",
+        "df_resid",
+        "R2",
+        "adj. R2",
+        "sigma",
+        "F and its df",
+        "logLik",
+        "AIC",
+        "BIC",
+        "HC0/HC1/HC3 SE on the identified columns",
+        "run_ols_raw = run_ols",
+        "solve path per design (normal equations for Grunfeld and ols_year_trend, pivoted QR for Longley, ols_illcond and aliased designs)"
+      ],
+      "tolerance": "validation/README.md, n = 120 and 80: coefficients 1e-8 / 1e-6, SE and statistics 1e-6 / 1e-5 relative; ill-conditioned coefficients Tol::coef(80); ols_year_trend (n = 5000, normal equations) coefficients 1e-10, SE and statistics 1e-8 relative; Longley also 1e-10 (an accuracy check, not a path pin); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ols_sandwich_aliased",
+      "name": "Clustered (CR1), Newey-West and wild-bootstrap SEs on an aliased design",
+      "category": "regression",
+      "reference": "sandwich::vcovCL(cluster = ~cl, type = 'HC1'); sandwich::NeweyWest(lag = 4, prewhite = FALSE); sandwich::vcovHC(type = 'HC0') as the bootstrap expectation",
+      "doc": "validation/regression/ols_robust_se.md",
+      "cases": [
+        "ols_aliased"
+      ],
+      "tests": [
+        "p2a-core::regression::ols::tests::test_validate_ols_aliased_sandwich",
+        "p2a-core::regression::ols::tests::test_validate_bootstrap_aliased_design_uses_identified_columns",
+        "p2a-core::regression::ols::tests::test_validate_bootstrap_fixed_design_solve_matches_refit",
+        "p2a-core::regression::ols::tests::test_validate_bootstrap_wild_variants_near_hc0"
+      ],
+      "quantities": [
+        "CR1 SE",
+        "Newey-West lag 4 SE",
+        "NaN SE for the aliased column",
+        "bootstrap SE on the identified columns (Monte Carlo property, not R-pinned)",
+        "fixed-design bootstrap solve = refit by least squares",
+        "wild bootstrap SE (Rademacher, Mammen, Webb) within 10% of HC0 (Monte Carlo property, B = 2000, seeded; not R-pinned)"
+      ],
+      "tolerance": "validation/README.md, n = 120: SE 1e-6 relative; bootstrap: Monte Carlo property, 10% = 6 sd at B = 2000; fixed-design solve 1e-12 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "resettest_princomp",
+      "name": "RESET test, type = princomp (and fitted, regressor), also on an aliased model",
+      "category": "regression",
+      "reference": "lmtest::resettest(power = 2:3 | 3, type = 'princomp' | 'fitted' | 'regressor'); stats::anova.lm of the augmented fit (aliased model)",
+      "doc": "validation/diagnostics/regression_diagnostics.md",
+      "cases": [
+        "reset_princomp",
+        "ols_aliased"
+      ],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_princomp",
+        "p2a-core::regression::diagnostics::tests::test_validate_reset_aliased_model"
+      ],
+      "quantities": [
+        "RESET statistic, df, p (princomp, fitted, regressor; power 2:3 and 3)",
+        "RESET F, df and p on the dummy-trap model (anova.lm of the augmented fit)",
+        "reset_test_from_ols = reset_test"
+      ],
+      "tolerance": "validation/README.md, n = 150 and 120: statistics 1e-6 relative; p-values also 1e-12 absolute; df exact; the first principal component is checked by its properties (unit norm, cov(Z) v = lambda_max v within 1e-10, scores = Z v, sign invariance)",
+      "deviations": [
+        {
+          "finding": "REG-4",
+          "quantity": "RESET statistic and df2 on an aliased model",
+          "note": "lmtest::resettest uses df2 = n - (ncol(X) + q) = 113, counting the aliased column; p2a uses n - rank = 114, as anova.lm (rule 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "waldtest_nested_rank",
+      "name": "Wald F test of nested OLS models: duplicates, strict subsets, rank-based restrictions",
+      "category": "regression",
+      "reference": "lmtest::waldtest (full rank); stats::anova.lm (aliased unrestricted model)",
+      "doc": "validation/diagnostics/regression_diagnostics.md",
+      "cases": [
+        "ols_aliased",
+        "ols_diagnostics_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_rejects_duplicates",
+        "p2a-core::regression::diagnostics::tests::test_validate_wald_aliased_rank_q"
+      ],
+      "quantities": [
+        "F",
+        "df1 = rank difference",
+        "df2 = n - rank",
+        "p",
+        "errors for non-strict subsets and rank-equal models"
+      ],
+      "tolerance": "validation/README.md, n = 120 and 200: statistics 1e-6 relative; p-values also 1e-12 absolute; df exact",
+      "deviations": [
+        {
+          "finding": "REG-37",
+          "quantity": "Chisq form",
+          "note": "n (RSS_r - RSS_u) / RSS_u, not lmtest's q F (Tier 4); not exercised here"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "bgtest_bptest_aliased",
+      "name": "Breusch-Godfrey and Breusch-Pagan tests on an aliased model",
+      "category": "regression",
+      "reference": "lmtest::bgtest(order = 1); lmtest::bptest (studentized; df = auxiliary rank - 1)",
+      "doc": "validation/diagnostics/regression_diagnostics.md",
+      "cases": [
+        "ols_aliased"
+      ],
+      "tests": [
+        "p2a-core::regression::diagnostics::tests::test_validate_diagnostics_aliased_model"
+      ],
+      "quantities": [
+        "BG LM statistic and p",
+        "BP statistic and p (df 3)"
+      ],
+      "tolerance": "validation/README.md, n = 120: statistics 1e-6 relative; p-values also 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
