@@ -138,3 +138,27 @@ Barrodale-Roberts pass-through rescans the candidate rows), as in R; the default
 fits. That is why `Auto` switches to Frisch-Newton, which is linear in n (O(n p^2) per iteration),
 above 5000 observations. The long loops (pivots, interior-point and IRLS iterations, bootstrap
 replicates) are cancellable through resource checkpoints.
+
+**Timing, like for like (T3-PERF3).** The wave-2A timing compared the old default, IRLS with
+one sandwich standard error built on an Epanechnikov kernel density of the residuals at zero,
+against the new default, `Auto` with `nid` SEs, which fits two extra quantiles. Release build,
+one P core (`taskset -c 2`), `RAYON_NUM_THREADS=1`, tau = 0.5 with three regressors and an
+intercept, the scratch timing binaries, three interleaved rounds on a machine loaded by other
+builds; head / base against `fe13b889`'s default (base 3.2 ms at n = 1,000, 26.0 ms at
+n = 10,000):
+
+| Head fit | n = 1,000 | n = 10,000 |
+|---|---|---|
+| `Auto` (br up to 5,000, fn above), se = ker | 0.44 | 1.03 |
+| `Auto`, se = iid | 0.43 | 1.04-1.09 |
+| `Auto`, se = nid (the default) | 1.20 | 2.84 |
+| br, se = ker | 0.44 | 2.31 |
+| br, se = nid | 1.20 | 7.1 |
+| fn, se = ker | 0.48 | 1.05 |
+| fn, se = nid | 1.44 | 2.90 |
+
+With the same kind of standard error (a kernel or difference-quotient sparsity estimate and
+one fit), the default path is within 1.1x of the old fit (faster at n = 1,000). The rest is the
+nid SE's cost, 2.75 times the ker fit at both sizes: it refits at tau ± h to estimate each
+observation's density, which is what `summary.rq(se = "nid")` does. The simplex at
+n = 10,000 is not on the default path. No code change.
