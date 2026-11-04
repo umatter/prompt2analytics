@@ -345,12 +345,13 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Time Series
 | Method | File | Status |
 |--------|------|--------|
-| VAR | [var.md](econometrics/timeseries/var.md) | not R-pinned |
+| VAR | [var.md](econometrics/timeseries/var.md) | R-pinned |
 | VARMA | no validation document yet | not R-pinned |
 | VECM | [vecm.md](econometrics/timeseries/vecm.md) | not R-pinned |
-| IRF | [irf.md](econometrics/timeseries/irf.md) | not R-pinned |
+| IRF | [irf.md](econometrics/timeseries/irf.md) | R-pinned |
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
 | Granger causality | [granger.md](econometrics/granger.md) | R-pinned |
+| Granger causality (lag orders, small samples, default order) | [granger.md](econometrics/timeseries/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
 
 ### Forecasting

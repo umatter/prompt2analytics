@@ -1,191 +1,107 @@
 # Validation: Vector Autoregression (VAR)
 
-## Method Overview
+Registry: [`validation/methods/ts_var.json`](../../methods/ts_var.json) (method `ts_var`).
+R case: `var_canada` in [`validation/r/cases/ts_var.R`](../../r/cases/ts_var.R).
+Impulse responses: [irf.md](irf.md). Granger causality: [granger.md](granger.md).
 
-Vector Autoregression models multiple time series as a system where each variable depends on its own lags and lags of all other variables.
+## Method
 
-**Model (VAR(p))**:
+`run_var(dataset, columns, lags)` fits a VAR(p) with a constant,
+
 ```
-Y_t = c + A₁Y_{t-1} + A₂Y_{t-2} + ... + A_pY_{t-p} + ε_t
-```
-
-where Y_t is a k×1 vector, A_i are k×k coefficient matrices, and ε_t ~ N(0, Σ).
-
-**Estimation**: OLS equation-by-equation (equivalent to GLS for reduced-form VAR).
-
-## Reference Implementations
-
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| vars | R | `VAR()` | 1.5-x |
-| statsmodels | Python | `VAR()` | 0.14.x |
-
-## Test Cases
-
-### Test 1: Bivariate VAR(1)
-
-**Data Generating Process**:
-```
-y₁ₜ = 0.5×y₁ₜ₋₁ + 0.2×y₂ₜ₋₁ + ε₁ₜ
-y₂ₜ = 0.1×y₁ₜ₋₁ + 0.6×y₂ₜ₋₁ + ε₂ₜ
+y_t = c + A_1 y_{t-1} + ... + A_p y_{t-p} + u_t,
 ```
 
-**R Code**:
-```r
-library(vars)
+equation by equation on the common design `Z = [1, y_{t-1}', .., y_{t-p}']` with `T = n - p`
+rows and `m = 1 + K p` columns. `Z` is the same for the K equations, so one pivoted QR
+decomposition (`linalg::solve::Qr`, the `dqrdc2` algorithm behind `lm.fit`, tolerance 1e-7)
+serves them all, as `lm` does inside `vars::VAR(y, p, type = "const")`.
 
-set.seed(42)
-n <- 200
+**Coefficient layout.** `coefficients[eq]` is `[const, y1.l1, .., yK.l1, .., y1.lp, .., yK.lp]`;
+`coef_names` carries vars' names in that order (vars itself prints `const` last).
 
-# Generate VAR(1) data
-A <- matrix(c(0.5, 0.1, 0.2, 0.6), 2, 2, byrow = TRUE)
-y <- matrix(0, n, 2)
-y[1, ] <- rnorm(2)
+**Reported quantities.** With `U` the T x K residual matrix:
 
-for (t in 2:n) {
-  y[t, ] <- A %*% y[t-1, ] + rnorm(2, 0, 0.5)
-}
+| Field | Formula | R |
+|---|---|---|
+| `sigma_u` | `U'U / (T - m)` | `summary(m)$covres` |
+| `std_errors[eq][j]` | `sqrt(sigma_u[eq][eq] * ((Z'Z)^-1)_jj)` | `coef(summary(m$varresult[[eq]]))[, 2]` |
+| `t_values`, `p_values` | `coef / se`; two-sided on `t(T - m)` | columns 3 and 4 |
+| `df_residual` | `T - m` | `df.residual(m$varresult[[1]])` |
+| `sigma_u_ml` | `U'U / T` | `crossprod(resid(m)) / m$obs` |
+| `log_det_sigma_ml` | `ln det sigma_u_ml`, by its Cholesky factor | `log(det(..))` |
+| `log_likelihood` | `-T/2 (K ln 2 pi + ln det sigma_u_ml + K)` | `logLik(m)` (`logLik.varest`) |
+| `aic`, `bic` | `-2 logLik + 2 K m`, `-2 logLik + ln(T) K m` | `AIC(m)`, `BIC(m)` |
 
-data <- data.frame(y1 = y[, 1], y2 = y[, 2])
+AIC and BIC of fits with different p use different samples (T = n - p); compare lag orders
+on a common sample, as `vars::VARselect` does. p2a has no lag-selection routine.
 
-# Estimate VAR(1)
-var_fit <- VAR(data, p = 1, type = "none")
-summary(var_fit)
+## Requirements and errors
 
-# Check coefficient matrix
-coef(var_fit$varresult$y1)
-coef(var_fit$varresult$y2)
-```
+| Condition | Error | What `vars` does |
+|---|---|---|
+| `lags == 0` | `InvalidSpecification` | |
+| `n <= p + 1` | `InsufficientTimePeriods` | |
+| `T - m < K`, i.e. `n < (K + 1)(p + 1)` | `InsufficientData { required: (K + 1)(p + 1) }`, the context names `1 + K p` | NA coefficients and NaN SEs, `logLik()` stops ("system is exactly singular"); at `T = m` the residual SE is NaN |
+| an aliased lag (a series proportional to another, or constant) | `SingularMatrix`, the context names the lag (`b.l1`) | the coefficient is NA |
+| singular `sigma_u_ml` | `SingularMatrix` | |
 
-**Results Comparison**:
+With `T - m < K` the K residual columns lie in a space of dimension `T - m < K`, so the
+residual covariance is singular and neither the likelihood nor the orthogonalised impulse
+responses exist. Integer and Boolean columns are accepted, missing values and text are
+refused by name, as for Granger (see [../granger.md](../granger.md) for the extractor rule).
 
-| Coefficient | True Value | R Estimate | p2a Rust | Tolerance |
-|-------------|------------|------------|----------|-----------|
-| A[1,1] (y1.l1 in y1 eq) | 0.5 | ~0.5 | ~0.5 | 0.1 |
-| A[1,2] (y2.l1 in y1 eq) | 0.2 | ~0.2 | ~0.2 | 0.1 |
-| A[2,1] (y1.l1 in y2 eq) | 0.1 | ~0.1 | ~0.1 | 0.1 |
-| A[2,2] (y2.l1 in y2 eq) | 0.6 | ~0.6 | ~0.6 | 0.1 |
+## Reference case
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-80 and X-12):
-- `econometrics::timeseries::tests::test_validate_var_vs_r` (`crates/p2a-core/src/econometrics/timeseries.rs`): dimensions, finite AIC, BIC and log-likelihood, positive residual variances. No `vars::VAR` value is compared.
-- `econometrics::timeseries::tests::test_validate_var_coefficient_estimation` (`crates/p2a-core/src/econometrics/timeseries.rs`): the y1 lag coefficients lie in (-0.5, 1.5) and (-0.7, 1.3).
+`var_canada`: `vars::VAR(Canada, p = 2, type = "const")` on
+`validation/datasets/generated/var_canada.csv` (`vars::Canada`, 84 rows; T = 82, K = 4,
+p = 2, m = 9, residual df 73).
 
----
+| Quantity | R value |
+|---|---|
+| equation e, coefficients (e.l1 .. U.l2, const) | 1.6378206022871895, 0.16727166854704162, -0.06311863134491014, 0.2655847772119808, -0.4971337747484717, -0.10165006721151987, 0.0038444920542162852, 0.13268931262949596, -136.99844936947017 |
+| equation e, SEs | 0.15000904816881805, 0.061137825267054136, 0.055238725134005684, 0.20279708449069428, 0.1595260357375151, 0.06606917678329811, 0.05552228231226825, 0.20732747449850167, 55.848073200020195 |
+| e.l1: t, p | 10.918145420428303, 5.2825877991282224e-17 |
+| const: t, p | -2.45305596987759, 0.01655354150954215 |
+| `sigma_u[1,1]` (divisor 73), `sigma_u_ml[1,1]` (divisor 82) | 0.13163473833393352, 0.11718702315094082 |
+| ln det Sigma_ML | -7.063250506198347 |
+| logLik, AIC, BIC | -175.8185681370004, 423.6371362740008, 510.2790291755139 |
 
-### Test 2: VAR(2) with Intercept
+## Tests and tolerances
 
-**R Code**:
-```r
-library(vars)
+- `test_validate_var_canada_coefficients_se`: coefficients, SEs, t and p of all four
+  equations by name, `sigma_u`, the counts.
+- `test_validate_var_canada_loglik_ic`: logLik, AIC, BIC, ln det Sigma_ML, `sigma_u_ml`.
+- `test_validate_var_display_prints_coefficients`: the text `ts_var` returns contains every
+  equation's coefficient table (estimate and SE at their 6 printed decimals, t at 3).
+- Not R-pinned (behaviour tests): `test_var_rejects_saturated` (n = 10, 13, 15 refused, 16
+  runs for K = 3, p = 3), `test_var_rejects_collinear_series` (`b = 2 a`), and the DGP and
+  shape tests `test_var_recovers_dgp`, `test_var_irf_shapes_and_decay`.
 
-set.seed(42)
-n <- 300
-
-# VAR(2) process
-A1 <- matrix(c(0.4, 0.1, 0.15, 0.5), 2, 2, byrow = TRUE)
-A2 <- matrix(c(0.1, 0.05, 0.05, 0.1), 2, 2, byrow = TRUE)
-c <- c(1, 0.5)  # Intercepts
-
-y <- matrix(0, n, 2)
-y[1:2, ] <- rnorm(4)
-
-for (t in 3:n) {
-  y[t, ] <- c + A1 %*% y[t-1, ] + A2 %*% y[t-2, ] + rnorm(2, 0, 0.5)
-}
-
-data <- data.frame(y1 = y[, 1], y2 = y[, 2])
-
-# Estimate VAR(2) with intercept
-var_fit <- VAR(data, p = 2, type = "const")
-summary(var_fit)
-```
-
-**Validation Criteria**:
-- All lag coefficients close to true values
-- Intercepts close to true values
-- Correct number of parameters
-
----
-
-### Test 3: Lag Selection (Information Criteria)
-
-**R Code**:
-```r
-library(vars)
-
-set.seed(42)
-# Generate VAR(2) data
-# ... (as above)
-
-# Lag selection
-VARselect(data, lag.max = 5, type = "const")
-
-# AIC, BIC, HQ criteria
-# True order is 2, so p=2 should be selected by most criteria
-```
-
-**Validation Criteria**:
-- AIC, BIC, HQ computed correctly
-- Lag selection matches R's VARselect
-
----
-
-### Test 4: Residual Covariance Matrix
-
-**R Code**:
-```r
-library(vars)
-
-# Fit VAR
-var_fit <- VAR(data, p = 1, type = "const")
-
-# Residual covariance matrix
-summary(var_fit)$covres
-
-# Residual correlation
-summary(var_fit)$corres
-```
-
-**Validation Criteria**:
-- Residual covariance matches R
-- Correlation matrix computed correctly
-
----
-
-## Model Diagnostics
-
-| Diagnostic | R Function | Purpose |
-|------------|------------|---------|
-| Serial correlation | `serial.test()` | Portmanteau test |
-| Normality | `normality.test()` | JB test on residuals |
-| Stability | `stability()` | Check eigenvalues < 1 |
-
-## Numerical Precision Summary
-
-| VAR Order | n | Coefficient Precision |
-|-----------|---|----------------------|
-| VAR(1) | 200 | < 0.05 |
-| VAR(2) | 300 | < 0.05 |
-| VAR(3) | 500 | < 0.08 |
-
-## Known Differences
-
-1. **Constant term**: R's "type" = "const", "trend", "both", "none".
-2. **Coefficient ordering**: R stacks by equation; p2a uses matrix form.
-3. **Degrees of freedom**: Slight differences in small-sample adjustments.
-
-## Running the Tests
+Tolerances (validation/README.md, n = 82 < 100): coefficients 1e-6 relative; SEs, t, Sigma,
+logLik and criteria 1e-5 relative; p 1e-5 relative / 1e-12 absolute; counts exact.
 
 ```bash
-# Run VAR validation tests
-cargo test -p p2a-core --lib -- econometrics::timeseries::tests::test_validate_var
-
-# Run with output
-cargo test -p p2a-core --lib -- econometrics::timeseries::tests::test_validate_var --nocapture
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::timeseries::var
 ```
 
-## References
+## History
 
-- Lütkepohl, H. (2005). *New Introduction to Multiple Time Series Analysis*. Springer.
-- Sims, C.A. (1980). "Macroeconomics and Reality". *Econometrica*, 48(1), 1-48.
-- Pfaff, B. (2008). *Analysis of Integrated and Cointegrated Time Series with R*, 2nd ed. Springer.
+Before Tier 3 (review finding ids in parentheses):
+- the log-likelihood used the product of the absolute values of all K^2 entries of Sigma_u,
+  each floored at 1e-10, instead of its determinant (ECON-50): on this case logLik was
+  1586.1325945384274, AIC -3100.2651890768548 and BIC -3013.6232961753417;
+- `sigma_u` had the divisor T, so SEs and orthogonalised responses were too small by
+  `sqrt((T - m) / T)` (ECON-90; se(e.l1) 0.14153764305264271). The JSON field `sigma_u` of
+  `p2a ts var` now has the divisor T - Kp - 1; the old matrix is `sigma_u_ml`;
+- saturated and collinear designs were fitted through a pseudo-inverse and returned as a
+  perfect fit (ECON-79; AIC -1331 for any 10-row VAR(3) of three series);
+- the Display printed no coefficient (ECON-49).
+
+## Known differences
+
+- `type = "trend" | "both" | "none"`, exogenous variables and seasonal dummies are not
+  implemented: there is always one constant.
+- There is no lag-selection routine over a range of orders (`VARselect`).
+- Aliased lags and samples with fewer than K residual degrees of freedom are errors; vars
+  returns NA coefficients, NaN SEs or a degenerate logLik there.

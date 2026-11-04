@@ -1,201 +1,69 @@
-# Validation: Impulse Response Functions (IRF)
+# Validation: VAR impulse responses (IRF)
 
-## Method Overview
+Registry: [`validation/methods/ts_var.json`](../../methods/ts_var.json) (method `ts_var_irf`).
+R case: `var_canada` in [`validation/r/cases/ts_var.R`](../../r/cases/ts_var.R). The VAR
+itself: [var.md](var.md).
 
-Impulse Response Functions trace the effect of a one-time shock to one variable on the current and future values of all variables in a VAR system.
+## Method
 
-**Types**:
-- **Orthogonalized IRF**: Uses Cholesky decomposition of residual covariance
-- **Generalized IRF**: Order-invariant (Pesaran & Shin, 1998)
-- **Structural IRF**: Based on identified structural VAR
+`compute_irf(var_result, steps, orthogonalize)` computes the moving-average matrices of a
+fitted VAR(p),
 
-**Computation**:
 ```
-IRF_h = Φ_h × P
-```
-
-where Φ_h = A^h is the VAR(1) coefficient matrix to power h, and P is the Cholesky factor of Σ.
-
-## Reference Implementations
-
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| vars | R | `irf()` | 1.5-x |
-| statsmodels | Python | `IRAnalysis` | 0.14.x |
-
-## Test Cases
-
-### Test 1: Bivariate VAR(1) IRF
-
-**R Code**:
-```r
-library(vars)
-
-set.seed(42)
-n <- 200
-
-# VAR(1) with known dynamics
-A <- matrix(c(0.6, 0.1, 0.2, 0.4), 2, 2, byrow = TRUE)
-y <- matrix(0, n, 2)
-
-for (t in 2:n) {
-  y[t, ] <- A %*% y[t-1, ] + rnorm(2, 0, 0.5)
-}
-
-data <- data.frame(y1 = y[, 1], y2 = y[, 2])
-var_fit <- VAR(data, p = 1, type = "none")
-
-# Compute IRF
-irf_result <- irf(var_fit, impulse = "y1", response = "y2", n.ahead = 10)
-plot(irf_result)
-
-# IRF values
-irf_result$irf$y1
+Phi_0 = I,   Phi_h = sum_{j=1}^{min(h, p)} A_j Phi_{h-j},
 ```
 
-**Results Comparison**:
+and, for `orthogonalize = true`, `Psi_h = Phi_h P` with `P` the lower Cholesky factor of
+`sigma_u` (divisor T - Kp - 1), as `vars:::Psi.varest`; for `orthogonalize = false` the
+responses are `Phi_h` (unit shocks, `vars:::Phi.varest`). `run_var_irf` fits the VAR and
+returns the orthogonalised responses.
 
-| Horizon | R IRF (y1→y2) | p2a Rust | Tolerance |
-|---------|--------------|----------|-----------|
-| h=0 | 0.00 | 0.00 | 0.01 |
-| h=1 | ~0.2 | ~0.2 | 0.05 |
-| h=2 | ~0.2 | ~0.2 | 0.05 |
-| h=5 | ~0.1 | ~0.1 | 0.05 |
-| h=10 | ~0.0 | ~0.0 | 0.02 |
+**Steps and layout.** `steps` is the number of horizons including h = 0, i.e. vars'
+`n.ahead + 1`. `irf[h][response][impulse]`.
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-80):
-- `econometrics::timeseries::tests::test_validate_var_irf_structure` (`crates/p2a-core/src/econometrics/timeseries.rs`): the shape of the IRF array, a non-zero own-shock response at step 0, and a step-10 response no larger than twice step 0.
-- `econometrics::timeseries::tests::test_validate_var_non_orthogonalized_irf` (`crates/p2a-core/src/econometrics/timeseries.rs`): the orthogonalized flags of both IRFs; its only numeric assertion is `diff >= 0.0`.
+**Errors.** `steps == 0` and a `VarResult` whose vectors do not match `n_vars` and `lags`
+are `InvalidSpecification` (the message starts "VarResult is inconsistent"); a `sigma_u`
+that is not positive definite is `SingularMatrix` for `orthogonalize = true`.
 
----
+## Reference case
 
-### Test 2: Orthogonalized vs Non-Orthogonalized
+`var_canada`: `irf(VAR(Canada, p = 2, type = "const"), n.ahead = 12, ortho = TRUE | FALSE,
+boot = FALSE)` for every impulse (13 horizons x 4 responses x 4 impulses, both kinds).
 
-**R Code**:
-```r
-library(vars)
+| Orthogonalised, impulse e | e | prod | rw | U |
+|---|---|---|---|---|
+| h = 0 | 0.36281501944370154 | -0.020585540581001906 | -0.11603351918236395 | -0.19042004797535295 |
+| h = 1 | 0.5475337468458898 | -0.0012009465234944505 | -0.20208313974589998 | -0.32912415302801407 |
+| h = 2 | 0.6179181392574051 | 0.01480843588626763 | -0.1802773351180763 | -0.369053587402071 |
+| h = 12 | -0.1532799203358315 | -0.3244506552085916 | 0.5529087204934391 | 0.16340467454342417 |
 
-# Estimate VAR
-var_fit <- VAR(data, p = 1, type = "none")
+The plain response of e to e at h = 1 is `A_1[e, e]` = 1.6378206022871895; the
+orthogonalised response of U to its own impulse at h = 0 is `P[U, U]` = 0.20376704574855273.
 
-# Orthogonalized IRF (Cholesky ordering matters)
-irf_orth <- irf(var_fit, impulse = "y1", response = "y2", n.ahead = 10, ortho = TRUE)
+## Tests and tolerances
 
-# Non-orthogonalized
-irf_raw <- irf(var_fit, impulse = "y1", response = "y2", n.ahead = 10, ortho = FALSE)
+- `test_validate_var_irf_canada`: every orthogonalised and plain response of the case, and
+  `run_var_irf` equal to `compute_irf(.., true)`.
+- `test_validate_var_irf_display_prints_every_horizon`: the text `ts_var_irf` returns has one
+  table per impulse with all 13 horizons, pinned at its 6 printed decimals.
+- Not R-pinned: `test_irf_rejects_inconsistent_var_result` (shape check),
+  `test_var_irf_shapes_and_decay`, and the resource tests `test_irf_rejects_unallocatable_horizon`
+  and `test_irf_stops_when_cancelled`.
 
-# Compare
-cbind(Orthogonalized = irf_orth$irf$y1[, "y2"],
-      Raw = irf_raw$irf$y1[, "y2"])
-```
-
-**Validation Criteria**:
-- Orthogonalized at h=0 uses Cholesky decomposition
-- Non-orthogonalized at h=0 equals 0 (except own response)
-
----
-
-### Test 3: Cumulative IRF (Long-Run Effects)
-
-**R Code**:
-```r
-library(vars)
-
-var_fit <- VAR(data, p = 1, type = "const")
-
-# Cumulative IRF
-irf_cumul <- irf(var_fit, impulse = "y1", response = "y2",
-                 n.ahead = 20, cumulative = TRUE)
-plot(irf_cumul)
-
-# Long-run multiplier
-tail(irf_cumul$irf$y1[, "y2"], 1)
-```
-
-**Validation Criteria**:
-- Cumulative IRF converges if VAR is stable
-- Long-run effect = (I - A)⁻¹ for VAR(1)
-
----
-
-### Test 4: Confidence Bands (Bootstrap)
-
-**R Code**:
-```r
-library(vars)
-
-var_fit <- VAR(data, p = 1, type = "none")
-
-# IRF with bootstrap confidence intervals
-irf_boot <- irf(var_fit, impulse = "y1", response = "y2",
-                n.ahead = 10, boot = TRUE, runs = 500, ci = 0.95)
-
-# Check confidence bands
-irf_boot$Lower$y1
-irf_boot$Upper$y1
-```
-
-**Validation Criteria**:
-- 95% CI covers true IRF
-- Bands widen at longer horizons
-
----
-
-## Ordering Sensitivity
-
-For orthogonalized IRF, the Cholesky ordering matters:
-
-**R Code**:
-```r
-# Order 1: y1 first (y1 can affect y2 contemporaneously)
-data1 <- data[, c("y1", "y2")]
-var1 <- VAR(data1, p = 1)
-irf1 <- irf(var1, n.ahead = 5)
-
-# Order 2: y2 first (y2 can affect y1 contemporaneously)
-data2 <- data[, c("y2", "y1")]
-var2 <- VAR(data2, p = 1)
-irf2 <- irf(var2, n.ahead = 5)
-
-# IRFs will differ at h=0
-```
-
-## Computation Details
-
-For VAR(p):
-1. Convert to companion form VAR(1)
-2. Compute Φ_h = A_companion^h
-3. Extract relevant k×k block
-4. Apply Cholesky factor for orthogonalization
-
-## Numerical Precision Summary
-
-| Horizon | IRF Precision |
-|---------|---------------|
-| h=1-5 | < 0.01 |
-| h=5-10 | < 0.02 |
-| h=10-20 | < 0.05 |
-
-Precision decreases with horizon due to compounding matrix powers.
-
-## Known Differences
-
-1. **Bootstrap method**: Different bootstrap algorithms.
-2. **Cholesky implementation**: Numerical differences in decomposition.
-3. **Cumulative computation**: Accumulated at each step vs. post-processing.
-
-## Running the Tests
+Tolerance (validation/README.md, n = 82): 1e-5 relative, 1e-14 absolute; the structural zeros
+at h = 0 are exact in both implementations.
 
 ```bash
-# Run IRF validation tests
-cargo test -p p2a-core -- irf
-
-# Run with output
-cargo test -p p2a-core --lib -- econometrics::timeseries::tests::test_validate_var --nocapture
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::timeseries::var
 ```
 
-## References
+## History
 
-- Lütkepohl, H. (2005). *New Introduction to Multiple Time Series Analysis*. Springer. Chapter 2.
-- Sims, C.A. (1980). "Macroeconomics and Reality". *Econometrica*, 48(1), 1-48.
-- Pesaran, H.H. & Shin, Y. (1998). "Generalized Impulse Response Analysis in Linear Multivariate Models". *Economics Letters*, 58(1), 17-29.
+Before Tier 3 the impact matrix was the Cholesky factor of `U'U / T`, so every orthogonalised
+response was too small by `sqrt((T - Kp - 1) / T)` (h = 0 of e: 0.34232590195739032), and the
+Display printed horizons 0-4 followed by "... (n more steps)".
+
+## Known differences
+
+No bootstrap intervals (`boot = TRUE`), no cumulative responses, no generalised (Pesaran-Shin)
+or structural (SVAR) impulse responses.

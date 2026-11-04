@@ -1,13 +1,16 @@
 //! The Granger causality F test ([`granger_test`], [`run_granger_test`], [`granger_test_bidirectional`]).
 
-use ndarray::Array1;
+use ndarray::{Array1, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::linalg::solve::{LM_QR_TOL, Qr};
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
+use crate::traits::estimator::f_test_p_value;
 
 // =============================================================================
 // Granger Causality Test
@@ -40,6 +43,15 @@ pub struct GrangerResult {
     pub significant_at_05: bool,
     /// Interpretation of the result
     pub interpretation: String,
+    /// Warnings (a reduced default lag order)
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for GrangerResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for GrangerResult {
@@ -60,6 +72,7 @@ impl fmt::Display for GrangerResult {
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f)?;
         writeln!(f, "{}", self.interpretation)?;
+        write!(f, "{}", notes_text(self))?;
         Ok(())
     }
 }
@@ -80,16 +93,23 @@ impl fmt::Display for GrangerResult {
 /// yₜ = α + Σᵢ βᵢ yₜ₋ᵢ + Σⱼ γⱼ xₜ₋ⱼ + εₜ
 ///
 /// The F-statistic is:
-/// F = [(RSS_R - RSS_U) / p] / [RSS_U / (n - 2p - 1)]
+/// F = [(RSS_R - RSS_U) / p] / [RSS_U / (n - 3p - 1)]
 ///
-/// Under H0, F ~ F(p, n - 2p - 1).
+/// Under H0, F ~ F(p, n - 3p - 1), n = number of rows (each regression uses the n - p rows
+/// t = p + 1..n). Both regressions come from one pivoted QR of the unrestricted design.
+///
+/// # Requirements
+///
+/// `n >= 3p + 2`, so that df2 >= 1 (`InsufficientData` otherwise; lmtest::grangertest stops
+/// with "there are aliased coefficients in the model"), and lags of full rank (identical or
+/// proportional series are `SingularMatrix`).
 ///
 /// # Arguments
 ///
 /// * `dataset` - The dataset
 /// * `dependent` - Name of the dependent variable column (the "caused" variable)
 /// * `cause` - Name of the potential causing variable column
-/// * `lags` - Number of lags to include (default: 1)
+/// * `lags` - Number of lags to include (at least 1)
 ///
 /// # Returns
 ///
@@ -122,9 +142,6 @@ pub fn granger_test(
     cause: &str,
     lags: usize,
 ) -> EconResult<GrangerResult> {
-    use crate::linalg::{safe_inverse, xtx, xty};
-    use crate::traits::f_test_p_value;
-
     if lags == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Number of lags must be at least 1".to_string(),
@@ -145,29 +162,31 @@ pub fn granger_test(
             message: "Variables must have the same length".to_string(),
         });
     }
-    let bound = lags.checked_mul(2).and_then(|v| v.checked_add(1));
-    if bound.is_none_or(|b| n_total <= b) {
-        return Err(EconError::InsufficientData {
-            required: lags.saturating_mul(2).saturating_add(2),
-            provided: n_total,
-            context: "Granger causality test".to_string(),
-        });
-    }
+    // Both regressions use the n - p rows t = p + 1..n; the unrestricted one has 2p + 1
+    // coefficients, so df2 = (n - p) - (2p + 1) = n - 3p - 1 must be at least 1 (ECON-53).
+    let required = lags.checked_mul(3).and_then(|v| v.checked_add(2));
+    let df2 = match required {
+        Some(req) if n_total >= req => n_total - 3 * lags - 1,
+        _ => {
+            return Err(EconError::InsufficientData {
+                required: required.unwrap_or(usize::MAX),
+                provided: n_total,
+                context: format!(
+                    "Granger causality test with {lags} lags: the unrestricted regression has \
+                     2p + 1 = {} coefficients on n - p = {} rows, and df2 = n - 3p - 1 must be \
+                     at least 1 (lmtest::grangertest stops with \"there are aliased coefficients \
+                     in the model\")",
+                    lags.saturating_mul(2).saturating_add(1),
+                    n_total.saturating_sub(lags)
+                ),
+            });
+        }
+    };
 
     let n = n_total - lags;
 
     // Build dependent variable vector (y values from lags onwards)
     let y = Array1::from_vec(y_vec[lags..].to_vec());
-
-    // Build restricted design matrix: intercept + lagged y only
-    // X_R = [1, y_{t-1}, y_{t-2}, ..., y_{t-p}]
-    let mut x_restricted = resource::try_zeros2(n, lags + 1, "restricted Granger design")?;
-    for i in 0..n {
-        x_restricted[[i, 0]] = 1.0; // intercept
-        for lag in 1..=lags {
-            x_restricted[[i, lag]] = y_vec[lags + i - lag];
-        }
-    }
 
     // Build unrestricted design matrix: intercept + lagged y + lagged x
     // X_U = [1, y_{t-1}, ..., y_{t-p}, x_{t-1}, ..., x_{t-p}]
@@ -180,55 +199,63 @@ pub fn granger_test(
         }
     }
 
-    // Both X'X matrices are at most (2 * lags + 1)^2
-    resource::check_alloc::<f64>(
-        resource::checked_len(&[2 * lags + 1, 2 * lags + 1], "unrestricted Granger X'X")?,
-        "unrestricted Granger X'X",
-    )?;
-
-    // Estimate restricted model and compute RSS
-    let xtx_r = xtx(&x_restricted.view());
-    let (xtx_inv_r, _) = safe_inverse(&xtx_r.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Restricted Granger model".to_string(),
-        suggestion: format!("Check for multicollinearity: {}", e),
-    })?;
-    let xty_r = xty(&x_restricted.view(), &y);
-    let beta_r = xtx_inv_r.dot(&xty_r);
-    let fitted_r = x_restricted.dot(&beta_r);
-    let resid_r = &y - &fitted_r;
-    let rss_r = resid_r.iter().map(|r| r * r).sum::<f64>();
-
-    // Estimate unrestricted model and compute RSS
-    let xtx_u = xtx(&x_unrestricted.view());
-    let (xtx_inv_u, _) = safe_inverse(&xtx_u.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Unrestricted Granger model".to_string(),
-        suggestion: format!("Check for multicollinearity: {}", e),
-    })?;
-    let xty_u = xty(&x_unrestricted.view(), &y);
-    let beta_u = xtx_inv_u.dot(&xty_u);
-    let fitted_u = x_unrestricted.dot(&beta_u);
-    let resid_u = &y - &fitted_u;
-    let rss_u = resid_u.iter().map(|r| r * r).sum::<f64>();
-
-    // Compute F-statistic
-    // F = [(RSS_R - RSS_U) / p] / [RSS_U / (n - 2p - 1)]
-    let df1 = lags;
-    let df2 = n - 2 * lags - 1;
-
-    if df2 == 0 {
-        return Err(EconError::InsufficientData {
-            required: 2 * lags + 2,
-            provided: n,
-            context: "Granger test denominator degrees of freedom".to_string(),
+    // The restricted design [1, y lags] is the first p + 1 columns of the unrestricted one.
+    // At full rank dqrdc2 moves no column, so the first p + 1 reflectors of the unrestricted
+    // QR are the QR of the restricted design, and one decomposition gives both residual sums
+    // of squares from the effects Q'y: RSS_U = sum over i >= 2p + 1, RSS_R = sum over
+    // i >= p + 1 (lm.fit on each design gives the same).
+    let m = 2 * lags + 1;
+    let qr = Qr::decompose(x_unrestricted.view(), LM_QR_TOL)?;
+    if qr.rank() < m {
+        let aliased = qr.aliased();
+        let model = if aliased.iter().any(|&j| j <= lags) {
+            "restricted"
+        } else {
+            "unrestricted"
+        };
+        let labels: Vec<String> = aliased
+            .iter()
+            .map(|&j| match j {
+                0 => "(Intercept)".to_string(),
+                j if j <= lags => format!("{dependent}_{j}"),
+                j => format!("{cause}_{}", j - lags),
+            })
+            .collect();
+        return Err(EconError::SingularMatrix {
+            context: format!(
+                "{model} Granger regression has aliased coefficients ({}): the lags of \
+                 {dependent} and {cause} are collinear",
+                labels.join(", ")
+            ),
+            suggestion: "lmtest::grangertest stops here too; are the two series identical or \
+                         proportional?"
+                .to_string(),
         });
     }
-
-    let f_statistic = if rss_u > 1e-15 {
-        ((rss_r - rss_u) / df1 as f64) / (rss_u / df2 as f64)
-    } else {
-        // Perfect fit in unrestricted model (rare edge case)
-        f64::INFINITY
+    // RSS_R is read off the first p + 1 effects, which needs the identity pivot; checked in
+    // release builds too (m comparisons) so a change to Qr's pivoting cannot go unnoticed.
+    if !qr.pivot().iter().enumerate().all(|(i, &j)| i == j) {
+        return Err(EconError::Computation(
+            "Granger QR pivoted a full-rank design; restricted RSS undefined".to_string(),
+        ));
+    }
+    let effects = qr.qty(y.view())?;
+    let sum_sq = |from: usize, to: usize| {
+        effects
+            .slice(s![from..to])
+            .iter()
+            .map(|e| e * e)
+            .sum::<f64>()
     };
+    let rss_u = sum_sq(m, n);
+    // RSS_R - RSS_U as a sum of squares: never negative
+    let rss_gain = sum_sq(lags + 1, m);
+    let rss_r = rss_u + rss_gain;
+
+    // F without an absolute exact-fit threshold: it is scale-free. RSS_U = 0 gives F = inf
+    // (p = 0) when RSS_R > RSS_U, and NaN when both are 0, as in R.
+    let df1 = lags;
+    let f_statistic = (rss_gain / df1 as f64) / (rss_u / df2 as f64);
 
     let p_value = f_test_p_value(f_statistic, df1 as f64, df2 as f64);
     let significant = p_value < 0.05;
@@ -260,21 +287,49 @@ pub fn granger_test(
         rss_restricted: rss_r,
         significant_at_05: significant,
         interpretation,
+        warnings: Vec::new(),
     })
 }
 
-/// Convenience function for Granger causality test with default lag selection.
+/// Granger causality test with the default lag order.
 ///
-/// Uses lag = floor(12 * (n/100)^0.25) as a default (Schwert, 1989).
+/// The order is Schwert's `floor(12 (n/100)^(1/4))` (Schwert, 1989), capped at
+/// `(n - 2) / 3`, the largest order with at least one residual degree of freedom
+/// (n - 3p - 1 >= 1). When the cap applies the result carries a warning. Fewer than 5 rows
+/// is `InsufficientData`. lmtest::grangertest's own default order is 1.
 pub fn run_granger_test(
     dataset: &Dataset,
     dependent: &str,
     cause: &str,
 ) -> EconResult<GrangerResult> {
-    // Schwert rule for lag selection
-    let n = dataset.df().height();
-    let default_lags = ((12.0 * (n as f64 / 100.0).powf(0.25)).floor() as usize).max(1);
-    granger_test(dataset, dependent, cause, default_lags)
+    // Columns first, so a missing or text column is named as such on a short dataset too
+    let n = ColumnRequest::new(dataset.df())
+        .numerics(&[dependent, cause])
+        .na(NaPolicy::Fail)
+        .extract()?
+        .rows()
+        .len();
+    let schwert = ((12.0 * (n as f64 / 100.0).powf(0.25)).floor() as usize).max(1);
+    let cap = n.saturating_sub(2) / 3; // largest p with n - 3p - 1 >= 1
+    if cap == 0 {
+        return Err(EconError::InsufficientData {
+            required: 5,
+            provided: n,
+            context: "Granger causality test: one lag needs n - 3p - 1 >= 1, i.e. at least 5 \
+                      observations"
+                .to_string(),
+        });
+    }
+    let lags = schwert.min(cap);
+    let mut result = granger_test(dataset, dependent, cause, lags)?;
+    if lags < schwert {
+        result.warnings.push(format!(
+            "default lag order {schwert} (Schwert's rule floor(12 (n/100)^(1/4)), n = {n}) \
+             reduced to {lags}, the largest order with at least one residual degree of freedom \
+             (n - 3p - 1 >= 1); pass lags to choose the order (lmtest::grangertest's default is 1)"
+        ));
+    }
+    Ok(result)
 }
 
 /// Test bidirectional Granger causality between two variables.
@@ -344,6 +399,151 @@ mod tests {
         let e = run_var(&ds, &["a", "lab"], 1).unwrap_err();
         assert!(is_text(&e), "{e:?}");
         run_var(&ds, &["ai", "m"], 1).unwrap();
+    }
+
+    /// The dataset of case granger_short (20 rows), for tests that compare no case value.
+    fn short_series() -> Dataset {
+        crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/granger_short.csv",
+        )
+    }
+
+    /// R: lmtest::grangertest(y ~ x, order = p), p = 1..6, on granger_short (n = 20;
+    /// df2 = n - 3p - 1). run_granger_test: Schwert's floor(12 (n/100)^(1/4)) = 8 is capped
+    /// at (n - 2) / 3 = 6 so that df2 >= 1 (p2a's rule, written out in the case; R's own
+    /// default order is 1).
+    #[test]
+    fn test_validate_granger_short_lags() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("granger_short");
+        let n = 20;
+        let mut check = Check::new(&case);
+        for p in 1..=6usize {
+            let r = granger_test(&ds, "y", "x", p).unwrap();
+            let k = format!("lag{p}");
+            check
+                .scalar(&format!("{k}_F"), r.f_statistic, Tol::stat(n))
+                .scalar(&format!("{k}_p"), r.p_value, Tol::p_value(n))
+                .scalar(&format!("{k}_df1"), r.df1 as f64, Tol::exact())
+                .scalar(&format!("{k}_df2"), r.df2 as f64, Tol::exact())
+                .scalar(&format!("{k}_n_used"), r.n_obs as f64, Tol::exact());
+            assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        }
+        let d = run_granger_test(&ds, "y", "x").unwrap();
+        check
+            .scalar("default_lag", d.lags as f64, Tol::exact())
+            .scalar("lag6_F", d.f_statistic, Tol::stat(n))
+            .scalar("lag6_p", d.p_value, Tol::p_value(n))
+            .finish();
+        assert_eq!(case.scalar("schwert_lag"), 8.0);
+        assert_eq!(d.warnings.len(), 1, "{:?}", d.warnings);
+        assert!(
+            d.warnings[0].starts_with("default lag order 8")
+                && d.warnings[0].contains("reduced to 6"),
+            "{}",
+            d.warnings[0]
+        );
+        assert!(
+            d.to_string().contains("Warning: default lag order 8"),
+            "{d}"
+        );
+    }
+
+    /// n < 3p + 2 leaves the unrestricted regression (2p + 1 coefficients on n - p rows)
+    /// without residual df; R: grangertest(order = 7) on these 20 rows stops with "there are
+    /// aliased coefficients in the model".
+    #[test]
+    fn test_granger_rejects_lags_without_residual_df() {
+        let ds = short_series();
+        for (p, need) in [(7usize, 23usize), (8, 26)] {
+            match granger_test(&ds, "y", "x", p) {
+                Err(EconError::InsufficientData {
+                    required,
+                    provided,
+                    context,
+                }) => {
+                    assert_eq!((required, provided), (need, 20));
+                    assert!(context.contains("n - 3p - 1"), "{context}");
+                }
+                other => panic!("lags = {p}: expected InsufficientData, got {other:?}"),
+            }
+        }
+        let tiny = Dataset::new(
+            df! { "y" => [0.3, -1.2, 0.8, 0.1], "x" => [1.0, 0.4, -0.7, 0.9] }.unwrap(),
+        );
+        assert!(matches!(
+            run_granger_test(&tiny, "y", "x"),
+            Err(EconError::InsufficientData {
+                required: 5,
+                provided: 4,
+                ..
+            })
+        ));
+        // a misspelled column is named, not reported as too few rows
+        assert!(matches!(
+            run_granger_test(&tiny, "y", "z"),
+            Err(EconError::ColumnNotFound { ref column, .. }) if column == "z"
+        ));
+    }
+
+    /// The exact-fit shortcut compared RSS with an absolute 1e-15: the same series in units
+    /// 1e-10 smaller reported F = inf, p = 0. F is invariant to the scale of the data.
+    #[test]
+    fn test_granger_is_scale_invariant() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let ds = short_series();
+        let scaled = |name: &str| -> Vec<f64> {
+            numeric_column(ds.df(), name, NaPolicy::Fail)
+                .unwrap()
+                .0
+                .iter()
+                .map(|v| v * 1e-10)
+                .collect()
+        };
+        let small = Dataset::new(df! { "x" => scaled("x"), "y" => scaled("y") }.unwrap());
+        for p in [1usize, 3] {
+            let a = granger_test(&ds, "y", "x", p).unwrap();
+            let b = granger_test(&small, "y", "x", p).unwrap();
+            assert!(
+                (b.f_statistic / a.f_statistic - 1.0).abs() < 1e-8,
+                "lags {p}: {} vs {}",
+                b.f_statistic,
+                a.f_statistic
+            );
+        }
+    }
+
+    /// x = 3 y exactly: the lags of x are aliased with those of y (R: grangertest stops with
+    /// "there are aliased coefficients in the model").
+    #[test]
+    fn test_granger_rejects_proportional_series() {
+        let y: Vec<f64> = (0..30)
+            .map(|i| ((i * 7919) % 97) as f64 / 97.0 - 0.5)
+            .collect();
+        let x: Vec<f64> = y.iter().map(|v| 3.0 * v).collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        match granger_test(&ds, "y", "x", 2) {
+            Err(EconError::SingularMatrix { context, .. }) => {
+                assert!(
+                    context.contains("unrestricted") && context.contains("x_1"),
+                    "{context}"
+                )
+            }
+            other => panic!("expected SingularMatrix, got {other:?}"),
+        }
+    }
+
+    /// R: lmtest::grangertest(prod ~ e, order = 2) on vars::Canada (case var_canada).
+    #[test]
+    fn test_validate_granger_canada_prod_on_e() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("var_canada");
+        let r = granger_test(&ds, "prod", "e", 2).unwrap();
+        Check::new(&case)
+            .scalar("grangertest_prod_on_e_F", r.f_statistic, Tol::stat(r.n_obs))
+            .scalar("grangertest_prod_on_e_p", r.p_value, Tol::p_value(r.n_obs))
+            .scalar("grangertest_prod_on_e_df2", r.df2 as f64, Tol::exact())
+            .finish();
     }
 
     #[test]
@@ -427,49 +627,5 @@ mod tests {
         // Should fail with too many lags
         let result = granger_test(&dataset, "y", "x", 5);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_granger_f_statistic() {
-        // R reference:
-        // grangertest(y1 ~ y2, order = 2)
-        // F statistic and p-value structure
-        let dataset = create_var_validation_dataset();
-        let result = granger_test(&dataset, "y1", "y2", 2).unwrap();
-
-        // F-statistic should be non-negative
-        assert!(result.f_statistic >= 0.0);
-
-        // P-value should be in [0, 1]
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
-
-        // Degrees of freedom
-        assert_eq!(result.df1, 2); // Number of lags
-        assert!(result.df2 > 0); // Denominator df
-
-        // RSS ordering: unrestricted <= restricted
-        assert!(
-            result.rss_unrestricted <= result.rss_restricted + 1e-10,
-            "RSS ordering violated"
-        );
-    }
-
-    #[test]
-    fn test_validate_granger_causal_direction() {
-        // In our DGP, y2 should Granger-cause y1 (coefficient 0.3)
-        // and y1 should Granger-cause y2 (coefficient 0.2)
-        let dataset = create_var_validation_dataset();
-
-        let result_y2_to_y1 = granger_test(&dataset, "y1", "y2", 1).unwrap();
-        let result_y1_to_y2 = granger_test(&dataset, "y2", "y1", 1).unwrap();
-
-        // Both should show some Granger causality in DGP
-        // F-statistics should be positive
-        assert!(result_y2_to_y1.f_statistic >= 0.0);
-        assert!(result_y1_to_y2.f_statistic >= 0.0);
-
-        // Interpretations should be present
-        assert!(!result_y2_to_y1.interpretation.is_empty());
-        assert!(!result_y1_to_y2.interpretation.is_empty());
     }
 }
