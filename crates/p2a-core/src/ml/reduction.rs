@@ -317,7 +317,7 @@ pub struct TsneResult {
     pub perplexity: f64,
     /// Number of iterations performed
     pub n_iterations: usize,
-    /// Final KL divergence
+    /// KL(P || Q) of the returned embedding, with the unexaggerated P
     pub kl_divergence: f64,
 }
 
@@ -434,8 +434,6 @@ pub fn tsne(
     // Student-t similarities, overwritten every iteration
     let mut q = try_zeros2(n_samples, n_samples, "t-SNE similarity matrix").map_err(to_string)?;
 
-    let mut kl_div = 0.0;
-
     for iter in 0..max_iter {
         checkpoint().map_err(to_string)?;
 
@@ -462,11 +460,11 @@ pub fn tsne(
         // Update gains for adaptive learning rate
         for i in 0..n_samples {
             for j in 0..n_comp {
-                let sign_match = (gradient[[i, j]] > 0.0) == (y_velocity[[i, j]] > 0.0);
-                gains[[i, j]] = if sign_match {
-                    f64::max(gains[[i, j]] * 0.8, 0.01)
-                } else {
+                // bhtsne/Rtsne: sign(dY) != sign(uY), with sign(0) = 0
+                gains[[i, j]] = if sign3(gradient[[i, j]]) != sign3(y_velocity[[i, j]]) {
                     gains[[i, j]] + 0.2
+                } else {
+                    f64::max(gains[[i, j]] * 0.8, 0.01)
                 };
             }
         }
@@ -480,12 +478,11 @@ pub fn tsne(
         for mut row in y.rows_mut() {
             row -= &mean;
         }
-
-        // Compute KL divergence every 50 iterations
-        if iter % 50 == 0 || iter == max_iter - 1 {
-            kl_div = compute_kl_divergence(&p.view(), exaggeration, &q.view(), sum_q);
-        }
     }
+
+    // KL(P || Q) of the returned embedding, with the unexaggerated P
+    let sum_q = fill_q_distribution(&y.view(), &mut q);
+    let kl_div = compute_kl_divergence(&p.view(), 1.0, &q.view(), sum_q);
 
     Ok(TsneResult {
         embedding: y,
@@ -494,6 +491,17 @@ pub fn tsne(
         n_iterations: max_iter,
         kl_divergence: kl_div,
     })
+}
+
+/// Three-valued sign (`f64::signum(0.0)` is 1).
+fn sign3(v: f64) -> i8 {
+    if v > 0.0 {
+        1
+    } else if v < 0.0 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// Compute joint probability matrix P using Gaussian kernel.
@@ -1208,15 +1216,9 @@ mod tests {
     /// data entries, all of them, random subsets, the perplexity and the
     /// learning rate) moved these values by up to 8.1e-4 relative. Other
     /// targets therefore compare to a relative 1e-2.
-    #[test]
-    fn tsne_memory_refactor_is_bit_identical() {
-        const GOLDEN: [u64; 4] = [
-            13867541354597143110,
-            13857677031516769935,
-            4647298372589536596,
-            4612250860452238985,
-        ];
-        let data = array![
+    /// The 15 x 3 data of the t-SNE golden and step tests: three tight groups.
+    fn tsne_fixture() -> Array2<f64> {
+        array![
             [0.0, 0.0, 0.0],
             [0.1, 0.1, 0.1],
             [0.2, 0.0, 0.1],
@@ -1232,7 +1234,84 @@ mod tests {
             [10.0, 0.2, 5.0],
             [10.2, 0.0, 5.2],
             [10.1, 0.1, 5.0],
+        ]
+    }
+
+    /// ML-145: one iteration is bhtsne's first step. Velocity starts at 0 and sign(0) = 0, so
+    /// every gain becomes 1.2 (gains + 0.2) wherever the gradient is non-zero; momentum times 0
+    /// vanishes; then Y is centred.
+    #[test]
+    fn test_tsne_first_step_matches_bhtsne_update() {
+        let data = tsne_fixture();
+        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        let y0 = initialize_embedding(data.view(), 2, Some(42)).unwrap();
+        let mut q = Array2::zeros((15, 15));
+        let sq = fill_q_distribution(&y0.view(), &mut q);
+        // exaggeration 4 on iteration 0
+        let g = compute_gradient(&p.view(), 4.0, &q.view(), &y0.view(), sq);
+        assert!(
+            g.iter().any(|&v| v < 0.0),
+            "the fixture must have a negative gradient entry"
+        );
+        let gain = g.mapv(|v| if v == 0.0 { 1.0 } else { 1.2 });
+        let mut want = &y0 - &(200.0 * &gain * &g);
+        let mean = want.mean_axis(Axis(0)).unwrap();
+        for mut row in want.rows_mut() {
+            row -= &mean;
+        }
+        let r = tsne(
+            data.view(),
+            Some(2),
+            Some(4.0),
+            Some(1),
+            Some(200.0),
+            Some(42),
+        )
+        .unwrap();
+        for (a, b) in r.embedding.iter().zip(want.iter()) {
+            // before: entries with g < 0 used gain 0.8
+            assert!((a - b).abs() <= 1e-12 * (1.0 + b.abs()), "{a} vs {b}");
+        }
+    }
+
+    /// ML-146 (and ML-97's KL part): the reported KL is KL(P || Q(Y)) of the returned Y, with
+    /// the unexaggerated P.
+    #[test]
+    fn test_tsne_reports_kl_of_returned_embedding() {
+        let data = tsne_fixture();
+        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        // 1 and 50: inside early exaggeration
+        for iters in [1usize, 50, 120] {
+            let r = tsne(
+                data.view(),
+                Some(2),
+                Some(4.0),
+                Some(iters),
+                Some(200.0),
+                Some(42),
+            )
+            .unwrap();
+            let mut q = Array2::zeros((15, 15));
+            let sq = fill_q_distribution(&r.embedding.view(), &mut q);
+            let want = compute_kl_divergence(&p.view(), 1.0, &q.view(), sq);
+            assert!(
+                (r.kl_divergence - want).abs() <= 1e-12 * want.abs(),
+                "iters={iters}: {} vs {want}",
+                r.kl_divergence
+            );
+        }
+    }
+
+    /// Re-captured at T3-WP42 (ML-145 changes the path from step 1, ML-146 the reported KL).
+    #[test]
+    fn tsne_memory_refactor_is_bit_identical() {
+        const GOLDEN: [u64; 4] = [
+            13859390039091109202,
+            13872640547727622304,
+            13858743226655607939,
+            4613615299525055005,
         ];
+        let data = tsne_fixture();
         // 120 iterations cross the early-exaggeration switch at 100
         let r = tsne(
             data.view(),
