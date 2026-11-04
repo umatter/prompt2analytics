@@ -146,13 +146,24 @@ now takes the pivoted QR and agrees to 6.4e-15 (largest over the seven coefficie
 **Solve.** `fit_ols` (behind `run_ols` and `run_ols_raw`) forms X'X (`linalg::xtx`, the
 CUDA path under `cuda`) and inverts it with `sym_inverse(.., SingularPolicy::Error, "X'X")`.
 When that succeeds with a reciprocal condition of the column-equilibrated X'X of at least
-1e-8 and a positive, finite inverse diagonal, β̂ = (X'X)⁻¹X'y as before, bit for bit.
+1e-8 and a positive, finite inverse diagonal, β̂ = (X'X)⁻¹X'y. The coefficients of
+that solve have a relative error of order eps/rcond (up to about 50 eps/rcond measured on
+calendar-year designs), so when the reciprocal condition is below 1e-2 one step of
+iterative refinement follows, β̂ += (X'X)⁻¹X'(y − Xβ̂), at O(nk); it brings the error to
+that of a QR solve, within `Tol::coef(n)` (1e-10 for n > 1000) for every design the
+normal equations accept. At or above 1e-2 the unrefined error is below about 1e-12 and
+the solve is the one OLS always ran, bit for bit (Grunfeld). The residual and wild
+bootstraps (fixed design) and the Breusch-Pagan, Breusch-Godfrey and VIF auxiliary fits
+take the same two paths, as RESET's augmented fit already did.
 Otherwise the design goes to `linalg::solve::least_squares`, a transcription of `lm.fit`'s
 dqrdc2 pivoted QR with tol = 1e-7: the later of two collinear columns is aliased, exactly
 as R decides it. Measured reciprocal conditions (R): Grunfeld 0.121 (normal equations),
-Longley 5.34e-10 and `ols_illcond` 4.09e-12 (QR); every aliased design is singular and
-takes the QR. `test_validate_ols_solve_paths` asserts the path of each pinned design and
-`test_ols_solve_path_threshold` a design on either side of 1e-8.
+`ols_year_trend` 2.67e-5 (normal equations, refined), Longley 5.34e-10 and `ols_illcond`
+4.09e-12 (QR); every aliased design is singular and takes the QR.
+`test_validate_ols_solve_paths` asserts the path of each pinned design,
+`test_validate_ols_year_trend_normal_equations` pins the refined normal equations to lm at
+`Tol::coef(5000)`, and `test_ols_solve_path_threshold` checks a design on either side of
+1e-8, the normal-equations side against the QR at `Tol::coef(n)`.
 
 **What an aliased column reports.** Coefficient, SE, t, p and CI are NaN;
 `OlsResult.aliased` names it and `rank()` = k − |aliased|; the warnings carry R's text
@@ -168,13 +179,16 @@ identified columns ([ols_robust_se.md](ols_robust_se.md)).
 |---|---|---|
 | `ols_aliased` (n = 120) | `y ~ x1 + da + db + dc` (dummy trap: dc aliased); `y ~ x1 + x2 + x3` with x2 = 2 x1 (x2 aliased); `y ~ x1 + k5` (constant column aliased) | trap coef 0.6866082588992249, 0.45848569646633064, 0.2524436788731715, 0.5765620492704012; dup rank 3, df 117, sigma 0.5952841394745126, F 45.379581065647386 |
 | `ols_illcond` (n = 80) | `y ~ x1 + x2 + x3`, κ(X) = 1.68e8, full rank | coef -521.62338184282, 1.6205851564219942, -1.0683241910594095, 0.5114453636193678; the normal equations err by 2.8e-5 relative |
+| `ols_year_trend` (n = 5000) | `y ~ year + z`, year an integer in 1950..2020 (uncentred), equilibrated rcond(X'X) = 2.67e-5 | coef 2.7799542505245984, 0.29884566688664571, 0.49061624818943167; without the refinement step the normal equations miss the intercept by 5.9e-9 relative, with it by 1.4e-11 |
 | `ols_longley` | as above | κ(X) = 2.38e7 |
 
 **Tests** (`crates/p2a-core/src/regression/ols.rs`, registry entry `ols_rank_qr` in
 `validation/methods/reg_rank_qr.json`): `test_validate_ols_aliased_dummy_trap`,
 `test_validate_ols_aliased_duplicate`, `test_validate_ols_aliased_constant` (identified
 coefficients, aliased flags, SEs, rank, df, R², adjusted R², sigma, F and its df, logLik,
-AIC, BIC; HC0/HC1/HC3), `test_validate_ols_illcond_qr` (`Tol::coef(80)`) and
+AIC, BIC; HC0/HC1/HC3), `test_validate_ols_illcond_qr` (`Tol::coef(80)`),
+`test_validate_ols_year_trend_normal_equations` (`Tol::coef(5000)`, SEs and statistics
+`Tol::se(5000)`) and
 `test_validate_ols_longley_qr` (1e-10 relative: an accuracy check, lm itself is 3.5e-14
 from NIST's certified values, not a pin of dqrdc2's rounding), `test_validate_ols_solve_paths`;
 `test_ols_rank_zero_is_an_error` and `test_ols_raw_rejects_non_finite` are property tests.

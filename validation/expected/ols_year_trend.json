@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "ols_year_trend",
+  "area": "regression",
+  "method": "lm with an uncentred calendar-year regressor, n = 5000 (equilibrated rcond(X'X) ~ 3e-5: the normal-equations side of p2a's threshold, refined once)",
+  "reference": "stats::lm (Householder QR); rcond of the diagonally equilibrated X'X recorded for the record",
+  "call": "lm(y ~ year + z, data = ols_year_trend)",
+  "dataset": "validation/datasets/generated/ols_year_trend.csv",
+  "datasets": ["validation/datasets/generated/ols_year_trend.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "coef": {
+      "names": ["(Intercept)", "year", "z"],
+      "values": [2.7799542505245984, 0.29884566688664571, 0.49061624818943167]
+    },
+    "se": {
+      "names": ["(Intercept)", "year", "z"],
+      "values": [1.0764304423316038, 0.00054237668349064745, 0.011153029889448673]
+    },
+    "r2": 0.98391102919246731,
+    "sigma": 0.79007576752226405,
+    "adj_r2": 0.98390458974047312,
+    "fstat": 152794.21759447921,
+    "loglik": -5915.0600665235697,
+    "rank": 3,
+    "rcond_equilibrated": 2.6741885911417007e-05
+  }
+}

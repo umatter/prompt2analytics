@@ -375,6 +375,14 @@ impl OlsResult {
         self.n_params - self.aliased.len()
     }
 
+    /// R's aliasing note ("Coefficients not defined because of singularities: ..."),
+    /// rebuilt from [`aliased`](Self::aliased), for the estimators and tests built on this
+    /// fit; empty when nothing is aliased.
+    pub(crate) fn alias_notes(&self) -> Vec<String> {
+        let idx: Vec<usize> = (0..self.aliased.len()).collect();
+        aliasing_message(&idx, &self.aliased).into_iter().collect()
+    }
+
     /// The coefficient table and model statistics as CSV: the same as [`CsvExport`]
     /// (`crate::export::CsvExport`), kept so method syntax works without importing the
     /// trait. Names are escaped; the columns are `variable, estimate, std_error, t_value,
@@ -631,16 +639,43 @@ pub(crate) enum OlsPath {
 
 /// The normal equations are used only when the diagonally equilibrated X'X has a
 /// reciprocal condition of at least this value (`sym_inverse`'s estimate, which is a lower
-/// bound, so the check errs toward the QR). Their relative error grows like
-/// `eps / rcond`; below the threshold the pivoted QR (error `eps * sqrt(1 / rcond)`)
-/// decides rank and coefficients.
+/// bound, so the check errs toward the QR). Below it the pivoted QR (coefficient error
+/// `eps * sqrt(1 / rcond)` plus a residual term) decides rank and coefficients.
 const OLS_NORMAL_EQUATIONS_MIN_RCOND: f64 = 1e-8;
+
+/// The coefficients of a normal-equations solve have a relative error of order
+/// `eps / rcond` (measured: up to about 50 `eps / rcond` on uncentred calendar-year
+/// designs). Below this reciprocal condition one step of iterative refinement
+/// (`b += (X'X)^{-1} X'(y - X b)`, O(n k)) brings them to the accuracy of a QR solve, so
+/// they meet `Tol::coef(n)` (1e-10 relative for n > 1000) for every design the normal
+/// equations accept. At or above it the unrefined error is below about 1e-12 and the solve
+/// is left as it was, bit for bit.
+const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
+
+/// `(X'X)^{-1}` of a full-rank, well-conditioned design and whether solves with it take a
+/// refinement step (see [`OLS_REFINE_BELOW_RCOND`]).
+struct NormalInverse {
+    inverse: Array2<f64>,
+    refine: bool,
+}
+
+impl NormalInverse {
+    /// `(X'X)^{-1} X'y`, refined once when the conditioning asks for it.
+    fn coefficients(&self, x: ndarray::ArrayView2<'_, f64>, y: &Array1<f64>) -> Array1<f64> {
+        let mut beta = self.inverse.dot(&xty(&x, y));
+        if self.refine {
+            let r = y - &x.dot(&beta);
+            beta += &self.inverse.dot(&xty(&x, &r));
+        }
+        beta
+    }
+}
 
 /// `(X'X)^{-1}` when the design is of full rank and well conditioned (see
 /// [`OLS_NORMAL_EQUATIONS_MIN_RCOND`]); `None` when the pivoted QR must decide.
 /// Cancellation and the allocation ceiling propagate; any other failure of the inverse
 /// (a singular or indefinite X'X) means "use the QR".
-fn normal_equations_inverse(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Option<Array2<f64>>> {
+fn normal_equations_inverse(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Option<NormalInverse>> {
     let (n, k) = x.dim();
     if k == 0 || n <= k {
         return Ok(None);
@@ -651,7 +686,10 @@ fn normal_equations_inverse(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Optio
             if inv.reciprocal_condition >= OLS_NORMAL_EQUATIONS_MIN_RCOND
                 && inv.inverse.diag().iter().all(|v| v.is_finite() && *v > 0.0) =>
         {
-            Ok(Some(inv.inverse))
+            Ok(Some(NormalInverse {
+                refine: inv.reciprocal_condition < OLS_REFINE_BELOW_RCOND,
+                inverse: inv.inverse,
+            }))
         }
         Ok(_) => Ok(None),
         Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => Err(e),
@@ -673,19 +711,21 @@ pub(crate) struct OlsSolve {
 }
 
 /// Solve `min ||y - X b||`: the normal equations on a full-rank, well-conditioned design
-/// (bit for bit the solve OLS always used there), `lm.fit`'s pivoted QR otherwise.
+/// (bit for bit the solve OLS always used there when the design is well conditioned,
+/// refined once when it is less so; see [`OLS_REFINE_BELOW_RCOND`]), `lm.fit`'s pivoted QR
+/// otherwise.
 pub(crate) fn solve_ols(
     x: ndarray::ArrayView2<'_, f64>,
     y: ndarray::ArrayView1<'_, f64>,
 ) -> EconResult<OlsSolve> {
-    if let Some(unscaled) = normal_equations_inverse(x)? {
+    if let Some(normal) = normal_equations_inverse(x)? {
         let y = y.to_owned();
-        let beta = unscaled.dot(&xty(&x, &y));
+        let beta = normal.coefficients(x, &y);
         let residuals = &y - &x.dot(&beta);
         return Ok(OlsSolve {
             beta,
             residuals,
-            unscaled,
+            unscaled: normal.inverse,
             rank: x.ncols(),
             aliased: Vec::new(),
             path: OlsPath::NormalEquations,
@@ -759,6 +799,13 @@ impl<'a> IdentifiedDesign<'a> {
                 ),
             });
         }
+        if ols.beta.len() != k || ols.xtx_inv.dim() != (k, k) {
+            return Err(EconError::InvalidSpecification {
+                message: "the OLS fit carries no coefficient/(X'X)^-1 cache (a deserialized \
+                          result); refit with run_ols"
+                    .to_string(),
+            });
+        }
         let cols: Vec<usize> = (0..k).filter(|&j| !ols.beta[j].is_nan()).collect();
         if cols.len() == k {
             return Ok(IdentifiedDesign {
@@ -802,22 +849,12 @@ impl<'a> IdentifiedDesign<'a> {
     }
 }
 
-/// The aliasing warnings of a fit ("Coefficients not defined because of singularities: ..."),
-/// copied verbatim, for the estimators built on it.
-fn alias_notes(ols: &OlsResult) -> Vec<String> {
-    ols.warnings
-        .iter()
-        .filter(|w| w.starts_with("Coefficients not defined because of singularities"))
-        .cloned()
-        .collect()
-}
-
 /// A fixed design's least-squares solver for many responses (the residual and wild
 /// bootstraps): the inverse of X'X on a full-rank, well-conditioned design (the normal
 /// equations, as [`solve_ols`]), the pivoted QR otherwise. One factorisation, O(n k) per
 /// response.
 enum FixedDesignSolver {
-    Normal(Array2<f64>),
+    Normal(NormalInverse),
     Qr(Qr),
 }
 
@@ -836,7 +873,7 @@ impl FixedDesignSolver {
         y: &Array1<f64>,
     ) -> EconResult<Array1<f64>> {
         match self {
-            FixedDesignSolver::Normal(u) => Ok(u.dot(&xty(&x, y))),
+            FixedDesignSolver::Normal(u) => Ok(u.coefficients(x, y)),
             FixedDesignSolver::Qr(q) => q.coefficients(y.view()),
         }
     }
@@ -1752,7 +1789,9 @@ impl HacKernel {
 /// # Arguments
 ///
 /// * `ols_result` - OLS regression result
-/// * `x` - Design matrix (n × k)
+/// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
+///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
+///   fit, not recomputed from `x`, and only the shape of `x` is checked.
 /// * `bandwidth` - Optional bandwidth (number of lags). If None, uses Newey-West automatic selection.
 ///   A user bandwidth must be smaller than n (otherwise `InvalidSpecification`); one above n/4
 ///   adds an entry to `HacResult::warnings`.
@@ -1944,7 +1983,7 @@ pub fn vcov_hac(
     let vcov_vec: Vec<Vec<f64>> = (0..k)
         .map(|i| (0..k).map(|j| vcov_scaled[[i, j]]).collect())
         .collect();
-    warnings.extend(alias_notes(ols_result));
+    warnings.extend(ols_result.alias_notes());
 
     // Extract coefficient values and names
     let coefficients: Vec<f64> = ols_result.coefficients.iter().map(|c| c.estimate).collect();
@@ -2223,7 +2262,9 @@ impl std::fmt::Display for BootstrapResult {
 /// # Arguments
 ///
 /// * `ols_result` - Result from OLS estimation
-/// * `x` - Design matrix (n × k)
+/// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
+///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
+///   fit, not recomputed from `x`, and only the shape of `x` is checked.
 /// * `y` - Response vector (n)
 /// * `n_boot` - Number of bootstrap replications (default: 999). At least 10, otherwise
 ///   `InvalidSpecification`; replicate storage above the allocation ceiling is `ResourceLimit`.
@@ -2266,6 +2307,18 @@ pub fn vcov_bootstrap(
             message: format!(
                 "n_boot must be at least 10 (got {replications}): the bootstrap covariance \
                  needs at least 10 successful replications"
+            ),
+        });
+    }
+
+    if y.len() != n || n != ols_result.n_obs {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "y has {} values and the design {} rows, but the OLS fit has {} observations; \
+                 pass the response and design the fit was estimated on",
+                y.len(),
+                n,
+                ols_result.n_obs
             ),
         });
     }
@@ -2402,7 +2455,7 @@ pub fn vcov_bootstrap(
         .map(|c| c.name.clone())
         .collect();
 
-    let mut warnings = alias_notes(ols_result);
+    let mut warnings = ols_result.alias_notes();
     if rank_deficient > 0 {
         warnings.push(format!(
             "{rank_deficient} of {replications} bootstrap replicates had a rank-deficient \
@@ -2578,7 +2631,9 @@ impl std::fmt::Display for DriscollKraayResult {
 /// # Arguments
 ///
 /// * `ols_result` - Result from OLS estimation
-/// * `x` - Design matrix (n × k)
+/// * `x` - Design matrix (n × k). It must be the design `ols_result` was fitted on (the same
+///   rows and columns): the bread `(X'X)^{-1}` and the aliased columns are taken from the
+///   fit, not recomputed from `x`, and only the shape of `x` is checked.
 /// * `time_ids` - Time period identifier for each observation
 /// * `bandwidth` - Optional bandwidth (None for automatic). A user bandwidth must be smaller than
 ///   the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
@@ -2826,7 +2881,7 @@ pub fn vcov_driscoll_kraay(
         kernel,
         warnings: {
             let mut w = warnings;
-            w.extend(alias_notes(ols_result));
+            w.extend(ols_result.alias_notes());
             w
         },
         missing: MissingSummary::none(n),
@@ -3293,6 +3348,42 @@ mod tests {
         assert_eq!(result.n_params, 2);
         assert!(result.std_errors.iter().all(|&se| se > 0.0));
         assert!(matches!(result.bootstrap_type, BootstrapType::Residual));
+    }
+
+    /// vcov_bootstrap refuses a response whose length is not the fit's instead of panicking
+    /// on `y - residuals`.
+    #[test]
+    fn test_bootstrap_refuses_mismatched_y() {
+        let dataset = create_test_dataset();
+        let ols = run_ols(&dataset, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let d = DesignMatrix::from_dataframe(dataset.df(), &["x1"], true).unwrap();
+        let y = DesignMatrix::extract_column(dataset.df(), "y").unwrap();
+        let short = y.slice(ndarray::s![..y.len() - 1]).to_owned();
+        for bt in [BootstrapType::Pairs, BootstrapType::Residual] {
+            match vcov_bootstrap(&ols, &d.data, &short, Some(20), bt, Some(1)).unwrap_err() {
+                EconError::InvalidSpecification { message } => {
+                    assert!(message.contains("y has 9 values"), "{message}")
+                }
+                e => panic!("{e:?}"),
+            }
+        }
+    }
+
+    /// A fit without its coefficient and (X'X)^-1 caches (as a deserialized OlsResult has
+    /// them) is refused with an error, not an index panic.
+    #[test]
+    fn test_sandwich_refuses_fit_without_caches() {
+        let dataset = create_test_dataset();
+        let mut ols = run_ols(&dataset, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let d = DesignMatrix::from_dataframe(dataset.df(), &["x1"], true).unwrap();
+        ols.beta = Array1::zeros(0);
+        ols.xtx_inv = Array2::zeros((0, 0));
+        match vcov_hac(&ols, &d.data, Some(2), HacKernel::Bartlett, false).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains("refit with run_ols"), "{message}")
+            }
+            e => panic!("{e:?}"),
+        }
     }
 
     #[test]
@@ -4863,6 +4954,41 @@ mod tests {
         );
     }
 
+    /// Variant B's fast path at the README tolerance: an uncentred calendar-year regressor,
+    /// n = 5000, equilibrated rcond(X'X) 2.7e-5. The design takes the normal equations, and
+    /// the refinement step brings every coefficient within Tol::coef(5000) = 1e-10 of lm
+    /// (intercept 1.4e-11 relative; without the step 5.9e-9).
+    #[test]
+    fn test_validate_ols_year_trend_normal_equations() {
+        let (case, ds) = crate::test_support::load_case("ols_year_trend");
+        let d = DesignMatrix::from_dataframe(ds.df(), &["year", "z"], true).unwrap();
+        let yv = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        assert_eq!(
+            solve_ols(d.data.view(), yv.view()).unwrap().path,
+            OlsPath::NormalEquations
+        );
+        let r = run_ols(&ds, "y", &["year", "z"], true, CovarianceType::Standard).unwrap();
+        let n = r.n_obs;
+        assert_eq!(n, 5000);
+        let (cn, cv) = all_named(&r, |c| c.estimate);
+        let (sn, sv) = all_named(&r, |c| c.std_error);
+        Check::new(&case)
+            .named("coef", &cn, &cv, Tol::coef(n))
+            .named("se", &sn, &sv, Tol::se(n))
+            .scalar("r2", r.r_squared, Tol::stat(n))
+            .scalar("adj_r2", r.adj_r_squared, Tol::stat(n))
+            .scalar("sigma", r.residual_std_error, Tol::stat(n))
+            .scalar("fstat", r.f_statistic, Tol::stat(n))
+            .scalar("loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("rank", r.rank() as f64, Tol::exact())
+            .finish();
+        assert!(
+            r.aliased.is_empty() && r.warnings.is_empty(),
+            "{:?}",
+            r.warnings
+        );
+    }
+
     /// REG-18 on T1's Longley case: an accuracy check at 1e-10 (lm is 3.5e-14 from NIST's
     /// certified values, and any Householder QR meets 1e-10 with a wide margin), not a path
     /// pin. Before: 3.56e-8 (the normal equations).
@@ -4937,8 +5063,8 @@ mod tests {
     /// Two columns, no intercept, cosine c between them: the equilibrated X'X is
     /// [[1, c], [c, 1]] with reciprocal condition (1 - c) / (1 + c). Just inside the
     /// threshold (about 1e-7) the fit takes the normal equations; just past it (about
-    /// 3e-9) the QR. Both agree with each other's solve to the accuracy the conditioning
-    /// allows.
+    /// 3e-9) the QR. The normal-equations side agrees with the QR's coefficients at
+    /// Tol::coef(n).
     #[test]
     fn test_ols_solve_path_threshold() {
         let n = 50;
@@ -4971,8 +5097,9 @@ mod tests {
         assert_eq!(fp.path, OlsPath::PivotedQr);
         assert_eq!((fi.rank, fp.rank), (2, 2));
         let qi = crate::linalg::solve::least_squares(inside.view(), y.view()).unwrap();
+        let tol = Tol::coef(n);
         for (a, b) in fi.beta.iter().zip(&qi.coefficients) {
-            assert!((a - b).abs() <= 1e-6 * b.abs(), "{a} vs {b}");
+            assert!(tol.allows(*a, *b), "{a} vs {b}");
         }
     }
 

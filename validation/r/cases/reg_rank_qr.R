@@ -4,6 +4,8 @@
 #    rank and df = n - rank; summary.lm, logLik, sandwich and anova all work on the identified columns;
 #  * an ill-conditioned but full-rank design (kappa(X) ~ 1.7e8) where the normal equations lose
 #    digits; the reference is lm (Householder QR);
+#  * an uncentred calendar-year design, n = 5000 (equilibrated rcond ~ 3e-5), which p2a solves by the
+#    normal equations with one refinement step; pinned at Tol::coef(n) = 1e-10;
 #  * lmtest::resettest(type = 'princomp'): Z = the regressors, v1 = first eigenvector of cov(Z),
 #    pc1 = Z %*% v1 (NOT centred), augmentation pc1^power; df2 = n - (ncol(X) + length(power)).
 # The T3-WP09 package copy is canonical; it extends Appendix A.4 of plans/T3/00-design.md
@@ -79,6 +81,23 @@ case("ols_illcond", "regression", "lm on a full-rank but ill-conditioned design 
             lapack_qr_max_rel_diff = max(abs((b_lapack - coef(m)) / coef(m))))
   list(values = v, reference = "stats::lm (Householder QR); the Cholesky normal-equation error and the spread to LAPACK dgeqp3 are recorded for the record",
        call = "lm(y ~ x1 + x2 + x3, data = ols_illcond)", packages = character(0))
+})
+
+case("ols_year_trend", "regression", "lm with an uncentred calendar-year regressor, n = 5000 (equilibrated rcond(X'X) ~ 3e-5: the normal-equations side of p2a's threshold, refined once)", function(ctx) {
+  set.seed(20261104)
+  n <- 5000
+  year <- sample(1950:2020, n, replace = TRUE); z <- rnorm(n)
+  y <- 0.5 + 0.3 * year + 0.5 * z + rnorm(n, 0, 0.8)   # small intercept next to a large year term
+  d <- ctx$gen_dataset("ols_year_trend", data.frame(y = round(y, 10), year = year, z = round(z, 10)))
+  stopifnot(is.integer(d$year))
+  m <- lm(y ~ year + z, data = d)
+  X <- model.matrix(m); A <- crossprod(X); D <- diag(1 / sqrt(diag(A)))
+  s <- summary(m)
+  v <- list(coef = named(coef(m)), se = named(sqrt(diag(vcov(m)))), r2 = s$r.squared, sigma = s$sigma,
+            adj_r2 = s$adj.r.squared, fstat = unname(s$fstatistic[1]), loglik = as.numeric(logLik(m)),
+            rank = m$rank, rcond_equilibrated = rcond(D %*% A %*% D))
+  list(values = v, reference = "stats::lm (Householder QR); rcond of the diagonally equilibrated X'X recorded for the record",
+       call = "lm(y ~ year + z, data = ols_year_trend)", packages = character(0))
 })
 
 # Sign convention shared with p2a (diagnostics.rs first_principal_component): the loading with the

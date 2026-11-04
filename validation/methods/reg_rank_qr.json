@@ -10,6 +10,7 @@
       "cases": [
         "ols_aliased",
         "ols_illcond",
+        "ols_year_trend",
         "ols_longley",
         "ols_grunfeld"
       ],
@@ -18,6 +19,7 @@
         "p2a-core::regression::ols::tests::test_validate_ols_aliased_duplicate",
         "p2a-core::regression::ols::tests::test_validate_ols_aliased_constant",
         "p2a-core::regression::ols::tests::test_validate_ols_illcond_qr",
+        "p2a-core::regression::ols::tests::test_validate_ols_year_trend_normal_equations",
         "p2a-core::regression::ols::tests::test_validate_ols_longley_qr",
         "p2a-core::regression::ols::tests::test_validate_ols_solve_paths"
       ],
@@ -36,9 +38,9 @@
         "BIC",
         "HC0/HC1/HC3 SE on the identified columns",
         "run_ols_raw = run_ols",
-        "solve path per design (normal equations for Grunfeld, pivoted QR for Longley, ols_illcond and aliased designs)"
+        "solve path per design (normal equations for Grunfeld and ols_year_trend, pivoted QR for Longley, ols_illcond and aliased designs)"
       ],
-      "tolerance": "validation/README.md, n = 120 and 80: coefficients 1e-8 / 1e-6, SE and statistics 1e-6 / 1e-5 relative; ill-conditioned coefficients Tol::coef(80); Longley also 1e-10 (an accuracy check, not a path pin); counts exact",
+      "tolerance": "validation/README.md, n = 120 and 80: coefficients 1e-8 / 1e-6, SE and statistics 1e-6 / 1e-5 relative; ill-conditioned coefficients Tol::coef(80); ols_year_trend (n = 5000, normal equations) coefficients 1e-10, SE and statistics 1e-8 relative; Longley also 1e-10 (an accuracy check, not a path pin); counts exact",
       "deviations": [],
       "supersedes_legacy": []
     },

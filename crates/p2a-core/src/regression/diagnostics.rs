@@ -93,6 +93,7 @@ use crate::errors::{EconError, EconResult, EstimationWarning};
 use crate::linalg::solve::{LM_QR_TOL, least_squares};
 use crate::linalg::{DesignMatrix, condition_number};
 use crate::options::Choices;
+use crate::regression::ols::{OlsSolve, solve_ols};
 use crate::regression::{CovarianceType, run_ols};
 use crate::resource;
 use crate::traits::chi_squared_p_value;
@@ -542,7 +543,7 @@ pub fn run_diagnostics(
     let jarque_bera = compute_jarque_bera(residuals);
 
     // Breusch-Pagan test for heteroskedasticity
-    let breusch_pagan = compute_breusch_pagan(residuals, &x.view());
+    let breusch_pagan = compute_breusch_pagan(residuals, &x.view())?;
 
     // Durbin-Watson test for autocorrelation
     let durbin_watson = Some(compute_durbin_watson(residuals));
@@ -565,7 +566,7 @@ pub fn run_diagnostics(
     };
 
     // VIF for each variable
-    let vif = compute_vif(&x.view(), &design.column_names, &mut warnings);
+    let vif = compute_vif(&x.view(), &design.column_names, &mut warnings)?;
 
     Ok(DiagnosticsResult {
         jarque_bera,
@@ -698,29 +699,38 @@ pub fn jarque_bera_test(data: &[f64]) -> Option<TestResult> {
 /// Compute Breusch-Pagan test for heteroskedasticity.
 ///
 /// Tests H0: Var(e|X) = constant (homoskedasticity)
-/// LM = n * R² from regressing e² on X (by pivoted QR, as `lm.fit`)
+/// LM = n * R² from regressing e² on X (as OLS solves it: the normal equations on a
+/// well-conditioned full-rank design, `lm.fit`'s pivoted QR otherwise)
 /// LM ~ χ²(rank - 1) under the null, rank = the rank of the auxiliary design (bptest)
+///
+/// `Ok(None)` when the test is undefined; cancellation and the allocation ceiling propagate.
 fn compute_breusch_pagan(
     residuals: &Array1<f64>,
     x: &ndarray::ArrayView2<f64>,
-) -> Option<TestResult> {
+) -> EconResult<Option<TestResult>> {
     let n = residuals.len();
     if n <= x.ncols() {
-        return None;
+        return Ok(None);
     }
 
     // Auxiliary regression of e² on X
     let e2: Array1<f64> = residuals.iter().map(|&e| e * e).collect();
-    let e2_mean = e2.mean()?;
-    let aux = least_squares(x.view(), e2.view()).ok()?;
+    let Some(e2_mean) = e2.mean() else {
+        return Ok(None);
+    };
+    let aux = match solve_ols(x.view(), e2.view()) {
+        Ok(aux) => aux,
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+        Err(_) => return Ok(None),
+    };
     if aux.rank < 2 {
-        return None;
+        return Ok(None);
     }
 
     let ssr_aux: f64 = aux.residuals.iter().map(|r| r * r).sum();
     let sst_aux: f64 = e2.iter().map(|v| (v - e2_mean).powi(2)).sum();
     if sst_aux <= 0.0 {
-        return None;
+        return Ok(None);
     }
 
     let r2_aux = 1.0 - ssr_aux / sst_aux;
@@ -739,13 +749,13 @@ fn compute_breusch_pagan(
         "Fail to reject H0: No significant heteroskedasticity".to_string()
     };
 
-    Some(TestResult {
+    Ok(Some(TestResult {
         name: "Breusch-Pagan".to_string(),
         statistic: lm,
         p_value,
         significant_at_05: significant,
         interpretation,
-    })
+    }))
 }
 
 /// Compute Durbin-Watson statistic for autocorrelation.
@@ -814,16 +824,18 @@ fn compute_durbin_watson(residuals: &Array1<f64>) -> DurbinWatsonResult {
 /// where R²_j is the R² from regressing X_j on all other X variables.
 ///
 /// VIF > 10 indicates problematic multicollinearity
+///
+/// `Ok(None)` when VIFs are undefined; cancellation and the allocation ceiling propagate.
 fn compute_vif(
     x: &ndarray::ArrayView2<f64>,
     variable_names: &[String],
     warnings: &mut Vec<String>,
-) -> Option<Vec<VifResult>> {
+) -> EconResult<Option<Vec<VifResult>>> {
     let n = x.nrows();
     let k = x.ncols();
 
     if n <= k || k < 2 {
-        return None;
+        return Ok(None);
     }
 
     let mut vif_results = Vec::with_capacity(k);
@@ -867,7 +879,7 @@ fn compute_vif(
         }
 
         // Compute R² from regressing X_j on X_other
-        let r2 = compute_auxiliary_r2(&y_j, &x_other);
+        let r2 = compute_auxiliary_r2(&y_j, &x_other)?;
 
         let vif = if r2 >= 1.0 {
             f64::INFINITY
@@ -903,33 +915,32 @@ fn compute_vif(
         });
     }
 
-    Some(vif_results)
+    Ok(Some(vif_results))
 }
 
-/// Compute R² for an auxiliary regression (y on X), by pivoted QR. A `y` that `lm.fit`
-/// would alias against `X` (its residual norm below `LM_QR_TOL` of its norm) gives 1.
-fn compute_auxiliary_r2(y: &Array1<f64>, x: &Array2<f64>) -> f64 {
+/// Compute R² for an auxiliary regression (y on X), solved as OLS solves it
+/// ([`solve_ols`]). A `y` that `lm.fit` would alias against `X` (its residual norm below
+/// `LM_QR_TOL` of its norm) gives 1. Every error of the solve (cancellation, the allocation
+/// ceiling) propagates rather than turning into a plausible R².
+fn compute_auxiliary_r2(y: &Array1<f64>, x: &Array2<f64>) -> EconResult<f64> {
     let n = y.len();
     if n <= x.ncols() {
-        return 0.0;
+        return Ok(0.0);
     }
-    let fit = match least_squares(x.view(), y.view()) {
-        Ok(fit) => fit,
-        Err(_) => return 0.0,
-    };
+    let fit = solve_ols(x.view(), y.view())?;
     let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
     let norm2: f64 = y.iter().map(|v| v * v).sum();
     if ssr <= LM_QR_TOL * LM_QR_TOL * norm2 {
-        return 1.0; // collinear with the other columns
+        return Ok(1.0); // collinear with the other columns
     }
 
     let y_mean = y.mean().unwrap_or(0.0);
     let sst: f64 = y.iter().map(|v| (v - y_mean).powi(2)).sum();
     if sst <= 0.0 {
-        return 0.0;
+        return Ok(0.0);
     }
 
-    1.0 - ssr / sst
+    Ok(1.0 - ssr / sst)
 }
 
 /// Ramsey's RESET test for functional form misspecification.
@@ -1260,7 +1271,7 @@ pub fn reset_test_from_ols(
     )?;
 
     // Augmented fit (normal equations when well conditioned, pivoted QR otherwise)
-    let aug = crate::regression::ols::solve_ols(x_aug.view(), y.view())?;
+    let aug = solve_ols(x_aug.view(), y.view())?;
 
     let y_mean = y.mean().unwrap_or(0.0);
     let ssr_aug: f64 = aug.residuals.iter().map(|&r| r * r).sum();
@@ -1290,7 +1301,7 @@ pub fn reset_test_from_ols(
                 context: "RESET test augmented model".to_string(),
             })?;
 
-    let mut warnings = alias_warnings(ols_result);
+    let mut warnings = ols_result.alias_notes();
     if df1 < q {
         warnings.push(format!(
             "RESET: {} of {q} augmentation terms are collinear with the model and were \
@@ -1332,16 +1343,6 @@ pub fn reset_test_from_ols(
         interpretation,
         warnings,
     })
-}
-
-/// The aliasing warnings of a fit (R's "Coefficients not defined because of
-/// singularities: ..."), copied for the tests built on it.
-fn alias_warnings(ols: &crate::regression::OlsResult) -> Vec<String> {
-    ols.warnings
-        .iter()
-        .filter(|w| w.starts_with("Coefficients not defined because of singularities"))
-        .cloned()
-        .collect()
 }
 
 /// Wald test for comparing nested linear models.
@@ -1540,8 +1541,8 @@ pub fn wald_test_from_ols(
         )
     };
 
-    let mut warnings = alias_warnings(ols_unrestricted);
-    for w in alias_warnings(ols_restricted) {
+    let mut warnings = ols_unrestricted.alias_notes();
+    for w in ols_restricted.alias_notes() {
         if !warnings.contains(&w) {
             warnings.push(w);
         }
@@ -1686,8 +1687,8 @@ pub fn bg_test(
         }
     }
 
-    // Step 3: Run auxiliary regression e on [X, e_{t-1}, ..., e_{t-p}] by pivoted QR
-    let aux = least_squares(x_aux.view(), residuals.view())?;
+    // Step 3: Run auxiliary regression e on [X, e_{t-1}, ..., e_{t-p}] as OLS solves it
+    let aux = solve_ols(x_aux.view(), residuals.view())?;
     let (r2_aux, beta_aux, rank_aux) = bg_auxiliary_r2(residuals, aux);
 
     // Extract coefficients on lagged residuals
@@ -1747,10 +1748,7 @@ pub fn bg_test(
 
 /// R² of the Breusch-Godfrey auxiliary fit (centred on the mean of the residuals),
 /// its coefficients and its rank.
-fn bg_auxiliary_r2(
-    residuals: &Array1<f64>,
-    aux: crate::linalg::solve::LeastSquares,
-) -> (f64, Array1<f64>, usize) {
+fn bg_auxiliary_r2(residuals: &Array1<f64>, aux: OlsSolve) -> (f64, Array1<f64>, usize) {
     let e_mean = residuals.mean().unwrap_or(0.0);
     let ssr_aux: f64 = aux.residuals.iter().map(|r| r * r).sum();
     let sst_aux: f64 = residuals.iter().map(|e| (e - e_mean).powi(2)).sum();
@@ -1760,7 +1758,7 @@ fn bg_auxiliary_r2(
     } else {
         0.0
     };
-    (r2, aux.coefficients, aux.rank)
+    (r2, aux.beta, aux.rank)
 }
 
 /// Convenience function for Breusch-Godfrey test with default parameters.
@@ -1829,8 +1827,8 @@ pub fn bg_test_from_ols(
         }
     }
 
-    // Run auxiliary regression by pivoted QR
-    let aux = least_squares(x_aux.view(), residuals.view())?;
+    // Run auxiliary regression as OLS solves it
+    let aux = solve_ols(x_aux.view(), residuals.view())?;
     let (r2_aux, beta_aux, rank_aux) = bg_auxiliary_r2(residuals, aux);
     let lag_coefs: Vec<f64> = beta_aux.slice(ndarray::s![k..]).to_vec();
 
@@ -2193,6 +2191,37 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    /// A cancelled budget stops the VIF and Breusch-Pagan auxiliary fits with `Cancelled`
+    /// instead of turning into R2 = 0 (VIF = 1) or a missing test.
+    #[test]
+    fn test_vif_and_bp_propagate_cancellation() {
+        let x = Array2::from_shape_fn((30, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => (i as f64 * 0.7).sin() + 0.05 * i as f64,
+            _ => (i as f64 * 1.3).cos(),
+        });
+        let names: Vec<String> = ["(Intercept)", "a", "b"].map(String::from).to_vec();
+        let resid = Array1::from_shape_fn(30, |i| ((i * 7) % 5) as f64 - 2.1);
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        let budget = crate::resource::Budget::new(None, token);
+        crate::resource::with_budget(budget, || {
+            let mut w = Vec::new();
+            assert!(matches!(
+                compute_vif(&x.view(), &names, &mut w),
+                Err(EconError::Cancelled(_))
+            ));
+            assert!(matches!(
+                compute_breusch_pagan(&resid, &x.view()),
+                Err(EconError::Cancelled(_))
+            ));
+        });
+        let mut w = Vec::new();
+        let vif = compute_vif(&x.view(), &names, &mut w).unwrap().unwrap();
+        assert!(vif[1].vif.is_finite() && vif[1].vif >= 1.0);
+        assert!(compute_breusch_pagan(&resid, &x.view()).unwrap().is_some());
     }
 
     #[test]
