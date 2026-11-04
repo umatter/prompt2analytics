@@ -1738,6 +1738,13 @@ where
                 }
                 y2[r] = y - last * delta;
             }
+            // weighted_least_squares refuses a non-finite response; the factored shared design
+            // does not, so both paths check it here with one message
+            if let Some(r) = y2.iter().position(|v| !v.is_finite()) {
+                return Err(spec(format!(
+                    "Kernel SHAP: row {i}: the value of coalition {r} is not finite (the model's predictions overflow when averaged or differenced)"
+                )));
+            }
             let coefficients = match &shared_fit {
                 Some((qr, sw)) => {
                     for (v, s) in y2.iter_mut().zip(sw) {
@@ -2951,6 +2958,33 @@ mod tests {
         )
         .unwrap_err(); // before: subtract-with-overflow panic
         assert!(e.to_string().contains("at least one feature column"), "{e}");
+    }
+
+    #[test]
+    fn test_kernel_shap_non_finite_coalition_value_is_error() {
+        // Finite predictions whose differences overflow (f = +-1e308, one background row): the
+        // regression response is not finite. Before: the enumerated design (factored once)
+        // returned Ok with NaN SHAP values; the sampled design failed with linalg's generic
+        // "y contains a non-finite value".
+        let f = |z: ArrayView2<f64>| {
+            z.outer_iter()
+                .map(|r| if r[0] > 0.0 { 1e308 } else { -1e308 })
+                .collect::<Vec<f64>>()
+        };
+        let x = array![[1.0, 0.5]];
+        let bg = array![[-1.0, 0.5]];
+        for n_samples in [None, Some(1)] {
+            let mut c = ShapConfig::default();
+            c.n_samples = n_samples;
+            let e = kernel_shap(f, x.view(), bg.view(), &c, None)
+                .map(|r| r.shap_values)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("Kernel SHAP: row 0: the value of coalition"),
+                "{n_samples:?}: {e}"
+            );
+        }
     }
 
     #[test]
