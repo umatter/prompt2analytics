@@ -150,11 +150,16 @@ When that succeeds with a reciprocal condition of the column-equilibrated X'X of
 that solve have a relative error of order eps/rcond (up to about 50 eps/rcond measured on
 calendar-year designs), so when the reciprocal condition is below 1e-2 one step of
 iterative refinement follows, β̂ += (X'X)⁻¹X'(y − Xβ̂), at O(nk); it brings the error to
-that of a QR solve, within `Tol::coef(n)` (1e-10 for n > 1000) for every design the
-normal equations accept. At or above 1e-2 the unrefined error is below about 1e-12 and
-the solve is the one OLS always ran, bit for bit (Grunfeld). The residual and wild
-bootstraps (fixed design) and the Breusch-Pagan, Breusch-Godfrey and VIF auxiliary fits
-take the same two paths, as RESET's augmented fit already did.
+that of a QR solve, within `Tol::coef(n)` (1e-10 for n > 1000); measured at 1e-10
+relative against the QR at reciprocal conditions 2.7e-5 (`ols_year_trend`) and about 1e-7
+(`test_ols_solve_path_threshold`, next to the 1e-8 edge). At or above 1e-2 the unrefined error is below about 1e-12 and
+the solve is the one OLS always ran, bit for bit (Grunfeld). The Breusch-Pagan,
+Breusch-Godfrey and VIF auxiliary fits take the same two paths, refinement included, as
+RESET's augmented fit already did. The residual and wild bootstraps (fixed design) make the
+same normal-equations-or-QR decision once but solve each replicate without the refinement
+step: it would triple the per-replicate cost, and a replicate's error of order eps/rcond
+(at most about 1e-8 relative) moves the bootstrap standard error far less than its Monte
+Carlo error.
 Otherwise the design goes to `linalg::solve::least_squares`, a transcription of `lm.fit`'s
 dqrdc2 pivoted QR with tol = 1e-7: the later of two collinear columns is aliased, exactly
 as R decides it. Measured reciprocal conditions (R): Grunfeld 0.121 (normal equations),

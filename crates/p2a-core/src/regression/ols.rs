@@ -647,8 +647,11 @@ const OLS_NORMAL_EQUATIONS_MIN_RCOND: f64 = 1e-8;
 /// `eps / rcond` (measured: up to about 50 `eps / rcond` on uncentred calendar-year
 /// designs). Below this reciprocal condition one step of iterative refinement
 /// (`b += (X'X)^{-1} X'(y - X b)`, O(n k)) brings them to the accuracy of a QR solve, so
-/// they meet `Tol::coef(n)` (1e-10 relative for n > 1000) for every design the normal
-/// equations accept. At or above it the unrefined error is below about 1e-12 and the solve
+/// they meet `Tol::coef(n)` (1e-10 relative for n > 1000) across the range the normal
+/// equations accept (checked at 1e-10 relative against the QR at reciprocal conditions
+/// 2.7e-5, `ols_year_trend`, and about 1e-7, `test_ols_solve_path_threshold`, near the
+/// 1e-8 edge). The fixed-design bootstrap solver skips this step
+/// (see `FixedDesignSolver`). At or above it the unrefined error is below about 1e-12 and the solve
 /// is left as it was, bit for bit.
 const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 
@@ -850,18 +853,26 @@ impl<'a> IdentifiedDesign<'a> {
 }
 
 /// A fixed design's least-squares solver for many responses (the residual and wild
-/// bootstraps): the inverse of X'X on a full-rank, well-conditioned design (the normal
-/// equations, as [`solve_ols`]), the pivoted QR otherwise. One factorisation, O(n k) per
-/// response.
+/// bootstraps): the inverse of X'X on a full-rank, well-conditioned design (the same
+/// decision as [`solve_ols`]), the pivoted QR otherwise. One factorisation, one O(n k)
+/// pass per response.
+///
+/// Unlike [`solve_ols`], the normal-equations arm never takes the refinement step of
+/// [`OLS_REFINE_BELOW_RCOND`]: it would triple the per-replicate cost inside the
+/// user-sized replicate loop, and buys nothing there. A replicate's coefficients carry a
+/// relative error of order `eps / rcond` (at most about 1e-8 at the threshold), which moves
+/// the bootstrap standard error by far less than its Monte Carlo error; the replicates are
+/// random draws, not values that can be pinned to R.
 enum FixedDesignSolver {
-    Normal(NormalInverse),
+    /// `(X'X)^{-1}`, applied without refinement.
+    Normal(Array2<f64>),
     Qr(Qr),
 }
 
 impl FixedDesignSolver {
     fn new(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Self> {
         Ok(match normal_equations_inverse(x)? {
-            Some(u) => FixedDesignSolver::Normal(u),
+            Some(u) => FixedDesignSolver::Normal(u.inverse),
             None => FixedDesignSolver::Qr(Qr::decompose(x, LM_QR_TOL)?),
         })
     }
@@ -873,7 +884,7 @@ impl FixedDesignSolver {
         y: &Array1<f64>,
     ) -> EconResult<Array1<f64>> {
         match self {
-            FixedDesignSolver::Normal(u) => Ok(u.coefficients(x, y)),
+            FixedDesignSolver::Normal(inverse) => Ok(inverse.dot(&xty(&x, y))),
             FixedDesignSolver::Qr(q) => q.coefficients(y.view()),
         }
     }
@@ -5063,8 +5074,9 @@ mod tests {
     /// Two columns, no intercept, cosine c between them: the equilibrated X'X is
     /// [[1, c], [c, 1]] with reciprocal condition (1 - c) / (1 + c). Just inside the
     /// threshold (about 1e-7) the fit takes the normal equations; just past it (about
-    /// 3e-9) the QR. The normal-equations side agrees with the QR's coefficients at
-    /// Tol::coef(n).
+    /// 3e-9) the QR. The refined normal-equations side agrees with the QR's coefficients
+    /// within 1e-10 relative, the README's tolerance for n > 1000, near the 1e-8 edge where
+    /// refinement has the most to correct (n = 50 here, so Tol::coef(n) would only ask 1e-6).
     #[test]
     fn test_ols_solve_path_threshold() {
         let n = 50;
@@ -5097,9 +5109,38 @@ mod tests {
         assert_eq!(fp.path, OlsPath::PivotedQr);
         assert_eq!((fi.rank, fp.rank), (2, 2));
         let qi = crate::linalg::solve::least_squares(inside.view(), y.view()).unwrap();
-        let tol = Tol::coef(n);
+        let tol = Tol::new(1e-10, 1e-12);
         for (a, b) in fi.beta.iter().zip(&qi.coefficients) {
             assert!(tol.allows(*a, *b), "{a} vs {b}");
+        }
+    }
+
+    /// The fixed-design bootstrap solver applies (X'X)^{-1} X'y without the refinement
+    /// step, even where solve_ols refines (reciprocal condition in [1e-8, 1e-2)): one O(n k)
+    /// pass per replicate. Its coefficients still agree with a QR refit far within the
+    /// bootstrap's Monte Carlo error (1e-6 relative at reciprocal condition about 1e-7).
+    #[test]
+    fn test_bootstrap_fixed_design_solver_does_not_refine() {
+        let n = 50;
+        let mut x = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            let b = 1.0 + (i as f64 * 0.7).sin();
+            x[[i, 0]] = b;
+            x[[i, 1]] = b + 1.1e-3 * (i as f64 * 1.9).cos();
+        }
+        let y: Array1<f64> = (0..n)
+            .map(|i| 0.5 * x[[i, 0]] + 0.1 * ((i * 7) % 5) as f64)
+            .collect();
+        let normal = normal_equations_inverse(x.view()).unwrap().unwrap();
+        assert!(normal.refine, "the design must be one solve_ols refines");
+        let plain = normal.inverse.dot(&xty(&x.view(), &y));
+        let solver = FixedDesignSolver::new(x.view()).unwrap();
+        assert!(matches!(solver, FixedDesignSolver::Normal(_)));
+        let b = solver.coefficients(x.view(), &y).unwrap();
+        assert_eq!(b, plain, "bootstrap solve must be the unrefined one");
+        let q = crate::linalg::solve::least_squares(x.view(), y.view()).unwrap();
+        for (a, c) in b.iter().zip(&q.coefficients) {
+            assert!(Tol::new(1e-6, 1e-12).allows(*a, *c), "{a} vs {c}");
         }
     }
 
