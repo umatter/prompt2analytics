@@ -60,8 +60,13 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
+use crate::resource::try_with_capacity;
+use crate::stats::ranks::midranks;
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::{
+    normal_cdf, normal_p_value_two_sided, normal_quantile, validate_level,
+};
 
 /// Result of a Wilcoxon test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +291,14 @@ pub fn wilcoxon_rank_sum(
     alternative: Alternative,
     config: &WilcoxonConfig,
 ) -> EconResult<WilcoxonResult> {
+    if !mu.is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("mu must be finite, got {mu} (R: 'mu' must be a single number)"),
+        });
+    }
+    if config.conf_int {
+        validate_level(config.conf_level, "conf_level")?;
+    }
     // Filter out non-finite values
     let x: Vec<f64> = x.iter().copied().filter(|v| v.is_finite()).collect();
     let y: Vec<f64> = y.iter().copied().filter(|v| v.is_finite()).collect();
@@ -312,7 +325,7 @@ pub fn wilcoxon_rank_sum(
     let y_adj: Vec<f64> = y.iter().map(|&yi| yi - mu).collect();
 
     // Pool and rank all values
-    let (ranks_x, n_ties, _tie_correction) = compute_ranks_two_sample(&x, &y_adj);
+    let (ranks_x, n_ties) = compute_ranks_two_sample(&x, &y_adj)?;
 
     // W = sum of ranks in first sample (Wilcoxon rank sum statistic)
     let w: f64 = ranks_x.iter().sum();
@@ -422,6 +435,14 @@ pub fn wilcoxon_signed_rank(
     alternative: Alternative,
     config: &WilcoxonConfig,
 ) -> EconResult<WilcoxonResult> {
+    if !mu.is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("mu must be finite, got {mu} (R: 'mu' must be a single number)"),
+        });
+    }
+    if config.conf_int {
+        validate_level(config.conf_level, "conf_level")?;
+    }
     // Compute differences
     let differences: Vec<f64> = match y {
         Some(y_vals) => {
@@ -466,7 +487,7 @@ pub fn wilcoxon_signed_rank(
     let n = nonzero.len();
 
     // Rank absolute differences
-    let (ranks, signs, n_ties, _tie_correction) = compute_signed_ranks(&nonzero);
+    let (ranks, signs, n_ties) = compute_signed_ranks(&nonzero)?;
 
     // V = sum of positive ranks (V⁺)
     let v: f64 = ranks
@@ -635,108 +656,30 @@ pub fn wilcoxon_test(
 // Helper Functions: Ranking
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Compute ranks for two-sample test with tie handling.
-/// Returns (ranks for x, number of ties, tie correction factor).
-fn compute_ranks_two_sample(x: &[f64], y: &[f64]) -> (Vec<f64>, usize, f64) {
-    let n1 = x.len();
-    let n = n1 + y.len();
-
-    // Create indexed values: (value, is_from_x, original_index)
-    let mut values: Vec<(f64, bool, usize)> = Vec::with_capacity(n);
-    for (i, &v) in x.iter().enumerate() {
-        values.push((v, true, i));
-    }
-    for (i, &v) in y.iter().enumerate() {
-        values.push((v, false, i));
-    }
-
-    // Sort by value
-    values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Assign ranks, handling ties with average rank
-    let mut ranks_x = vec![0.0; n1];
-    let mut n_ties = 0;
-    let mut tie_correction = 0.0;
-
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        // Find all values equal to current
-        while j < n && values[j].0 == values[i].0 {
-            j += 1;
-        }
-
-        let tie_size = j - i;
-        if tie_size > 1 {
-            n_ties += tie_size;
-            // Tie correction: sum of t(t^2 - 1) for each tie group
-            let t = tie_size as f64;
-            tie_correction += t * (t * t - 1.0);
-        }
-
-        // Average rank for tied values
-        let avg_rank = (i + 1 + j) as f64 / 2.0;
-
-        // Assign average rank to all tied values
-        for k in i..j {
-            if values[k].1 {
-                // From x
-                ranks_x[values[k].2] = avg_rank;
-            }
-        }
-
-        i = j;
-    }
-
-    (ranks_x, n_ties, tie_correction)
+/// Ranks of `x` in the pooled sample `x` then `y` (exact ties, as R's rank()) and the number
+/// of tied observations (the size of every tie group of two or more, summed).
+fn compute_ranks_two_sample(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, usize)> {
+    let mut pooled: Vec<f64> = try_with_capacity(x.len() + y.len(), "Wilcoxon pooled sample")?;
+    pooled.extend_from_slice(x);
+    pooled.extend_from_slice(y);
+    let (mut ranks, sizes) = midranks(&pooled)?;
+    ranks.truncate(x.len());
+    let n_ties = sizes.iter().filter(|&&t| t > 1).sum();
+    Ok((ranks, n_ties))
 }
 
-/// Compute signed ranks with tie handling.
-/// Returns (ranks, signs, number of ties, tie correction).
-fn compute_signed_ranks(diffs: &[f64]) -> (Vec<f64>, Vec<i8>, usize, f64) {
-    let n = diffs.len();
-
-    // Create (|diff|, sign, original_index)
-    let mut abs_diffs: Vec<(f64, i8, usize)> = diffs
+/// Ranks of `|d|` (exact ties, as R's rank()), the sign of each difference and the number of
+/// tied observations.
+fn compute_signed_ranks(diffs: &[f64]) -> EconResult<(Vec<f64>, Vec<i8>, usize)> {
+    let mut abs_diffs: Vec<f64> = try_with_capacity(diffs.len(), "Wilcoxon |d|")?;
+    abs_diffs.extend(diffs.iter().map(|d| d.abs()));
+    let (ranks, sizes) = midranks(&abs_diffs)?;
+    let signs: Vec<i8> = diffs
         .iter()
-        .enumerate()
-        .map(|(i, &d)| (d.abs(), if d > 0.0 { 1 } else { -1 }, i))
+        .map(|&d| if d > 0.0 { 1 } else { -1 })
         .collect();
-
-    // Sort by absolute value
-    abs_diffs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Assign ranks with tie handling
-    let mut ranks = vec![0.0; n];
-    let mut signs = vec![0i8; n];
-    let mut n_ties = 0;
-    let mut tie_correction = 0.0;
-
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        while j < n && abs_diffs[j].0 == abs_diffs[i].0 {
-            j += 1;
-        }
-
-        let tie_size = j - i;
-        if tie_size > 1 {
-            n_ties += tie_size;
-            let t = tie_size as f64;
-            tie_correction += t * (t - 1.0) * (t + 1.0);
-        }
-
-        let avg_rank = (i + 1 + j) as f64 / 2.0;
-
-        for k in i..j {
-            ranks[abs_diffs[k].2] = avg_rank;
-            signs[abs_diffs[k].2] = abs_diffs[k].1;
-        }
-
-        i = j;
-    }
-
-    (ranks, signs, n_ties, tie_correction)
+    let n_ties = sizes.iter().filter(|&&t| t > 1).sum();
+    Ok((ranks, signs, n_ties))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -942,8 +885,6 @@ fn normal_approx_rank_sum(
     alternative: Alternative,
     correct: bool,
 ) -> (f64, f64) {
-    use statrs::distribution::{ContinuousCDF, Normal};
-
     let n1 = n1 as f64;
     let n2 = n2 as f64;
     let n = n1 + n2;
@@ -977,11 +918,10 @@ fn normal_approx_rank_sum(
         Alternative::Less => (w + correction - mean) / std,
     };
 
-    let normal = Normal::new(0.0, 1.0).unwrap();
     let p = match alternative {
-        Alternative::TwoSided => 2.0 * (1.0 - normal.cdf(z.abs())),
-        Alternative::Greater => 1.0 - normal.cdf(z),
-        Alternative::Less => normal.cdf(z),
+        Alternative::TwoSided => normal_p_value_two_sided(z),
+        Alternative::Greater => normal_cdf(-z),
+        Alternative::Less => normal_cdf(z),
     };
 
     (p.max(0.0).min(1.0), z)
@@ -995,8 +935,6 @@ fn normal_approx_signed_rank(
     alternative: Alternative,
     correct: bool,
 ) -> (f64, f64) {
-    use statrs::distribution::{ContinuousCDF, Normal};
-
     let n = n as f64;
 
     // Expected value: E(V) = n(n+1)/4
@@ -1027,11 +965,10 @@ fn normal_approx_signed_rank(
         Alternative::Less => (v + correction - mean) / std,
     };
 
-    let normal = Normal::new(0.0, 1.0).unwrap();
     let p = match alternative {
-        Alternative::TwoSided => 2.0 * (1.0 - normal.cdf(z.abs())),
-        Alternative::Greater => 1.0 - normal.cdf(z),
-        Alternative::Less => normal.cdf(z),
+        Alternative::TwoSided => normal_p_value_two_sided(z),
+        Alternative::Greater => normal_cdf(-z),
+        Alternative::Less => normal_cdf(z),
     };
 
     (p.max(0.0).min(1.0), z)
@@ -1050,7 +987,7 @@ fn hodges_lehmann_estimate(x: &[f64], y: &[f64]) -> f64 {
             diffs.push(xi - yj);
         }
     }
-    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    diffs.sort_by(|a, b| a.total_cmp(b));
 
     let n = diffs.len();
     if n % 2 == 0 {
@@ -1072,7 +1009,7 @@ fn pseudomedian(x: &[f64]) -> f64 {
         }
     }
 
-    walsh.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    walsh.sort_by(|a, b| a.total_cmp(b));
 
     let m = walsh.len();
     if m % 2 == 0 {
@@ -1090,8 +1027,6 @@ fn approximate_rank_sum_ci(
     alternative: Alternative,
     correct: bool,
 ) -> Option<(f64, f64)> {
-    use statrs::distribution::{ContinuousCDF, Normal};
-
     // Compute all pairwise differences
     let mut diffs: Vec<f64> = Vec::with_capacity(x.len() * y.len());
     for &xi in x {
@@ -1099,14 +1034,13 @@ fn approximate_rank_sum_ci(
             diffs.push(xi - yj);
         }
     }
-    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    diffs.sort_by(|a, b| a.total_cmp(b));
 
     let n = diffs.len();
     if n == 0 {
         return None;
     }
 
-    let normal = Normal::new(0.0, 1.0).unwrap();
     let alpha = 1.0 - conf_level;
 
     // Compute SE based on variance of W
@@ -1120,7 +1054,7 @@ fn approximate_rank_sum_ci(
 
     match alternative {
         Alternative::TwoSided => {
-            let z = normal.inverse_cdf(1.0 - alpha / 2.0);
+            let z = normal_quantile(1.0 - alpha / 2.0).ok()?;
             let lo_idx = ((n as f64 / 2.0) - z * scale * (n as f64).sqrt())
                 .floor()
                 .max(0.0) as usize;
@@ -1130,14 +1064,14 @@ fn approximate_rank_sum_ci(
             Some((diffs[lo_idx], diffs[hi_idx]))
         }
         Alternative::Greater => {
-            let z = normal.inverse_cdf(1.0 - alpha);
+            let z = normal_quantile(1.0 - alpha).ok()?;
             let lo_idx = ((n as f64 / 2.0) - z * scale * (n as f64).sqrt())
                 .floor()
                 .max(0.0) as usize;
             Some((diffs[lo_idx], f64::INFINITY))
         }
         Alternative::Less => {
-            let z = normal.inverse_cdf(1.0 - alpha);
+            let z = normal_quantile(1.0 - alpha).ok()?;
             let hi_idx = ((n as f64 / 2.0) + z * scale * (n as f64).sqrt())
                 .ceil()
                 .min(n as f64 - 1.0) as usize;
@@ -1153,8 +1087,6 @@ fn approximate_signed_rank_ci(
     alternative: Alternative,
     correct: bool,
 ) -> Option<(f64, f64)> {
-    use statrs::distribution::{ContinuousCDF, Normal};
-
     // Compute Walsh averages
     let n = x.len();
     let mut walsh: Vec<f64> = Vec::with_capacity(n * (n + 1) / 2);
@@ -1164,14 +1096,13 @@ fn approximate_signed_rank_ci(
             walsh.push((x[i] + x[j]) / 2.0);
         }
     }
-    walsh.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    walsh.sort_by(|a, b| a.total_cmp(b));
 
     let m = walsh.len();
     if m == 0 {
         return None;
     }
 
-    let normal = Normal::new(0.0, 1.0).unwrap();
     let alpha = 1.0 - conf_level;
 
     // Compute SE based on variance of V
@@ -1187,7 +1118,7 @@ fn approximate_signed_rank_ci(
 
     match alternative {
         Alternative::TwoSided => {
-            let z = normal.inverse_cdf(1.0 - alpha / 2.0);
+            let z = normal_quantile(1.0 - alpha / 2.0).ok()?;
             let lo_idx = ((m as f64 / 2.0) - z * scale * (m as f64).sqrt())
                 .floor()
                 .max(0.0) as usize;
@@ -1197,14 +1128,14 @@ fn approximate_signed_rank_ci(
             Some((walsh[lo_idx], walsh[hi_idx]))
         }
         Alternative::Greater => {
-            let z = normal.inverse_cdf(1.0 - alpha);
+            let z = normal_quantile(1.0 - alpha).ok()?;
             let lo_idx = ((m as f64 / 2.0) - z * scale * (m as f64).sqrt())
                 .floor()
                 .max(0.0) as usize;
             Some((walsh[lo_idx], f64::INFINITY))
         }
         Alternative::Less => {
-            let z = normal.inverse_cdf(1.0 - alpha);
+            let z = normal_quantile(1.0 - alpha).ok()?;
             let hi_idx = ((m as f64 / 2.0) + z * scale * (m as f64).sqrt())
                 .ceil()
                 .min(m as f64 - 1.0) as usize;
@@ -1398,131 +1329,193 @@ mod tests {
     // These tests validate results against R's wilcox.test() function.
 
     #[test]
-    fn test_validate_rank_sum_against_r() {
-        // R code:
-        // x <- c(1.2, 2.3, 3.1, 4.5, 5.2)
-        // y <- c(2.1, 3.4, 4.2, 5.8, 6.1, 7.2)
-        // wilcox.test(x, y, exact = FALSE, correct = TRUE)
-        //
-        // Expected from R:
-        //   W = 7, p-value ≈ 0.08182
-        //   (Note: R's W is U statistic, not rank sum)
-        let x = vec![1.2, 2.3, 3.1, 4.5, 5.2];
-        let y = vec![2.1, 3.4, 4.2, 5.8, 6.1, 7.2];
+    fn test_validate_wilcoxon_n30_exact_flag() {
+        // X-16: 5f86b49 made exact_used report the computation actually done. For 21 <= N < 50
+        // p2a's default asks for the exact test, its enumeration stops at N = 20 and the normal
+        // approximation is used: the result must say exact = false and match R's normal
+        // approximation. Reverting to `(p, None, true)` fails here.
+        // deviation STAT-73: R's default is the exact test here (n30_p_exact, sr25_p_exact).
+        // When STAT-73 extends the enumeration to N < 50 this test changes to exact = true and
+        // those keys.
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_wilcoxon");
+        let x = column_where(&ds, "value", &[("set", "n30"), ("group", "x")]);
+        let y = column_where(&ds, "value", &[("set", "n30"), ("group", "y")]);
+        let r = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
+        assert_eq!((r.n, r.n_2, r.n_ties), (15, Some(15), 0));
+        assert!(
+            !r.exact,
+            "N = 30 used the normal approximation and must say so"
+        );
+        assert!(r.continuity_correction);
+        let v = column_where(&ds, "value", &[("set", "sr25"), ("group", "x")]);
+        let s = wilcoxon_signed_rank(
+            &v,
+            None,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
+        assert_eq!((s.n, s.n_ties), (25, 0));
+        assert!(!s.exact && s.continuity_correction);
+        Check::new(&case)
+            .scalar("n30_rank_sum", r.statistic, Tol::exact())
+            // STAT-72: R's W = R1 - n1 (n1 + 1) / 2
+            .scalar("n30_W", r.statistic - 120.0, Tol::exact())
+            .scalar("n30_p_normal", r.p_value, Tol::p_value(30))
+            .scalar("sr25_V", s.statistic, Tol::exact())
+            .scalar("sr25_p_normal", s.p_value, Tol::p_value(25))
+            .finish();
+    }
 
-        let config = WilcoxonConfig {
+    #[test]
+    fn test_validate_wilcoxon_examples() {
+        // X-13: the old comments quoted "W = 7, p 0.08182" and "V = 40, p 0.1455"; R gives
+        // W = 8, p 0.2353 and V = 33, p 0.2361. STAT-62: the old assertions accepted p in
+        // (0.05, 0.35), (0.1, 0.3), (0.2, 0.8).
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_wilcoxon");
+        let col = |set: &str, g: &str| column_where(&ds, "value", &[("set", set), ("group", g)]);
+        let normal = WilcoxonConfig {
             exact: Some(false),
             correct: true,
             ..Default::default()
         };
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &config).unwrap();
-
-        // W = sum of x ranks in combined ranking
-        // Combined sorted: 1.2, 2.1, 2.3, 3.1, 3.4, 4.2, 4.5, 5.2, 5.8, 6.1, 7.2
-        // X ranks: 1, 3, 4, 7, 8 → W = 23
-
-        // Check p-value is in reasonable range (widened for normal approx variation)
-        // Normal approximation can differ from exact p-value
-        assert!(
-            result.p_value > 0.05 && result.p_value < 0.35,
-            "p-value {} not in expected range [0.05, 0.35]",
-            result.p_value
-        );
-        assert!(!result.exact);
-        assert!(result.continuity_correction);
-    }
-
-    #[test]
-    fn test_validate_signed_rank_against_r() {
-        // R code:
-        // x <- c(1.83, 0.50, 1.62, 2.48, 1.68, 1.88, 1.55, 3.06, 1.30)
-        // wilcox.test(x, mu = 1.5, exact = FALSE, correct = TRUE)
-        //
-        // Expected:
-        //   V = 40, p-value = 0.1455 (approx)
-        let x = vec![1.83, 0.50, 1.62, 2.48, 1.68, 1.88, 1.55, 3.06, 1.30];
-
-        let config = WilcoxonConfig {
-            exact: Some(false),
-            correct: true,
-            ..Default::default()
-        };
-        let result = wilcoxon_signed_rank(&x, None, 1.5, Alternative::TwoSided, &config).unwrap();
-
-        // Differences from 1.5: 0.33, -1.0, 0.12, 0.98, 0.18, 0.38, 0.05, 1.56, -0.2
-        // Ranks of |diff|: 0.05(1), 0.12(2), 0.18(3), -0.2(4), 0.33(5), 0.38(6), 0.98(7), -1.0(8), 1.56(9)
-        // Positive ranks: 1+2+3+5+6+7+9 = 33
-        // Wait, need to recalculate...
-
-        // The important thing is the p-value range
-        assert!(
-            result.p_value > 0.1 && result.p_value < 0.3,
-            "p-value {} not in expected range [0.1, 0.3]",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_exact_small_sample() {
-        // R code:
-        // x <- c(1, 2, 3)
-        // y <- c(4, 5, 6)
-        // wilcox.test(x, y, exact = TRUE)
-        //
-        // Expected:
-        //   W = 0, p-value = 0.1
-        let x = vec![1.0, 2.0, 3.0];
-        let y = vec![4.0, 5.0, 6.0];
-
-        let config = WilcoxonConfig {
+        let exact = WilcoxonConfig {
             exact: Some(true),
             ..Default::default()
         };
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &config).unwrap();
-
-        // X has ranks 1, 2, 3 → W = 6
-        assert!((result.statistic - 6.0).abs() < 0.001);
-        // R's W is computed differently (as U), but p-value should match
-        assert!(
-            result.p_value > 0.05 && result.p_value < 0.15,
-            "p-value {} not in expected range [0.05, 0.15]",
-            result.p_value
-        );
-        assert!(result.exact);
+        let a = wilcoxon_rank_sum(
+            &col("x13a", "x"),
+            &col("x13a", "y"),
+            0.0,
+            Alternative::TwoSided,
+            &normal,
+        )
+        .unwrap();
+        assert!(!a.exact && a.continuity_correction);
+        let b = wilcoxon_signed_rank(&col("x13b", "x"), None, 1.5, Alternative::TwoSided, &normal)
+            .unwrap();
+        let e = wilcoxon_rank_sum(
+            &col("exact3", "x"),
+            &col("exact3", "y"),
+            0.0,
+            Alternative::TwoSided,
+            &exact,
+        )
+        .unwrap();
+        assert!(e.exact);
+        let pr = wilcoxon_signed_rank(
+            &col("paired", "x"),
+            Some(&col("paired", "y")),
+            0.0,
+            Alternative::TwoSided,
+            &normal,
+        )
+        .unwrap();
+        // deviation STAT-42: paired_p (tied |d|: R 0.6352893188352069, p2a 0.6308000140667467)
+        // is not compared
+        Check::new(&case)
+            .scalar("x13a_rank_sum", a.statistic, Tol::exact())
+            .scalar("x13a_W", a.statistic - 15.0, Tol::exact())
+            .scalar("x13a_p", a.p_value, Tol::p_value(11))
+            .scalar("x13b_V", b.statistic, Tol::exact())
+            .scalar("x13b_p", b.p_value, Tol::p_value(9))
+            .scalar("exact3_rank_sum", e.statistic, Tol::exact())
+            .scalar("exact3_W", e.statistic - 6.0, Tol::exact())
+            .scalar("exact3_p", e.p_value, Tol::p_value(6))
+            .scalar("paired_V", pr.statistic, Tol::exact())
+            .finish();
     }
 
     #[test]
-    fn test_validate_paired_against_r() {
-        // R code:
-        // x <- c(125, 115, 130, 140, 140, 115, 140, 125, 140, 135)
-        // y <- c(110, 122, 125, 120, 140, 124, 123, 137, 135, 145)
-        // wilcox.test(x, y, paired = TRUE, exact = FALSE, correct = TRUE)
-        //
-        // Expected from R:
-        //   V = 35, p-value ≈ 0.376
-        let x = vec![
-            125.0, 115.0, 130.0, 140.0, 140.0, 115.0, 140.0, 125.0, 140.0, 135.0,
-        ];
-        let y = vec![
-            110.0, 122.0, 125.0, 120.0, 140.0, 124.0, 123.0, 137.0, 135.0, 145.0,
-        ];
+    fn test_validate_wilcoxon_small_scale() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_small_groups");
+        let x = column_where(&ds, "ynt", &[("g", "a")]);
+        let y = column_where(&ds, "ynt", &[("g", "b")]);
+        let r = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
+        assert!(r.exact && r.n_ties == 0);
+        Check::new(&case)
+            .scalar("wilcox_rank_sum", r.statistic, Tol::exact())
+            .scalar("wilcox_W", r.statistic - 28.0, Tol::exact())
+            .scalar("wilcox_p_exact", r.p_value, Tol::p_value(14))
+            .finish();
+    }
 
-        let config = WilcoxonConfig {
-            exact: Some(false),
-            correct: true,
+    #[test]
+    fn test_wilcoxon_rejects_invalid_conf_level_and_mu() {
+        // R checks conf.level only when conf.int = TRUE, and refuses a non-finite mu. Before:
+        // conf_level 1.5 or NaN panicked in statrs, 0.0 and a NaN mu returned Ok.
+        let x = [1.1, 2.3, 2.9, 4.2, 5.0];
+        let y = [3.4, 4.4, 5.9, 6.1, 7.7];
+        for level in [1.5, 0.0, f64::NAN] {
+            let cfg = WilcoxonConfig {
+                conf_int: true,
+                conf_level: level,
+                ..Default::default()
+            };
+            for r in [
+                wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &cfg),
+                wilcoxon_signed_rank(&x, Some(&y), 0.0, Alternative::TwoSided, &cfg),
+            ] {
+                match r {
+                    Err(EconError::InvalidSpecification { message }) => {
+                        assert!(message.contains("conf_level"), "{message}")
+                    }
+                    other => panic!("{level}: expected InvalidSpecification, got {other:?}"),
+                }
+            }
+        }
+        let off = WilcoxonConfig {
+            conf_int: false,
+            conf_level: 1.5,
             ..Default::default()
         };
-        let result =
-            wilcoxon_signed_rank(&x, Some(&y), 0.0, Alternative::TwoSided, &config).unwrap();
-
-        // Differences: 15, -7, 5, 20, 0, -9, 17, -12, 5, -10
-        // Zero removed, 9 pairs left
-        // Normal approximation p-value range widened
-        assert!(
-            result.p_value > 0.2 && result.p_value < 0.8,
-            "p-value {} not in expected range [0.2, 0.8]",
-            result.p_value
-        );
+        assert!(wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &off).is_ok());
+        for mu in [f64::NAN, f64::INFINITY] {
+            for r in [
+                wilcoxon_rank_sum(
+                    &x,
+                    &y,
+                    mu,
+                    Alternative::TwoSided,
+                    &WilcoxonConfig::default(),
+                ),
+                wilcoxon_signed_rank(
+                    &x,
+                    None,
+                    mu,
+                    Alternative::TwoSided,
+                    &WilcoxonConfig::default(),
+                ),
+            ] {
+                match r {
+                    Err(EconError::InvalidSpecification { message }) => {
+                        assert!(message.contains("mu"), "{message}")
+                    }
+                    other => panic!("{mu}: expected InvalidSpecification, got {other:?}"),
+                }
+            }
+        }
     }
 
     // ========================================================================

@@ -200,7 +200,11 @@
         "stat_rank_small_groups",
         "stat_rank_wilcoxon"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_small_scale",
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_n30_exact_flag",
+        "p2a-core::stats::wilcoxon::tests::test_validate_wilcoxon_examples"
+      ],
       "quantities": [
         "p (normal approximation with continuity correction)",
         "p (exact, N = 6 and N = 14)",
