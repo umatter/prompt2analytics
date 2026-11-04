@@ -226,6 +226,80 @@
       "tolerance": "labels exact; centers Tol::coef(60); tot.withinss Tol::stat(60); iteration counts and the state at the iteration limit are not R-pinned",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_pca",
+      "name": "PCA",
+      "category": "ml",
+      "reference": "stats::prcomp (scale. = TRUE and FALSE)",
+      "doc": "validation/ml/pca.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_prcomp"
+      ],
+      "quantities": [
+        "sdev",
+        "|rotation|",
+        "variance ratio"
+      ],
+      "tolerance": "sdev and ratio Tol::stat(60); rotation Tol::coef(60)",
+      "deviations": [
+        {
+          "finding": "ML-35",
+          "quantity": "explained_variance_ratio with n_components < p on the SVD path (n <= 4p)",
+          "note": "Tier 4; the pins use all components on the covariance path"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_cmdscale",
+      "name": "Classical MDS",
+      "category": "ml",
+      "reference": "stats::cmdscale(k, eig = TRUE)",
+      "doc": "validation/ml/cmdscale.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_eurodist",
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_line_configuration",
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_is_scale_equivariant"
+      ],
+      "quantities": [
+        "|points|",
+        "eig"
+      ],
+      "tolerance": "points Tol::coef(21); eig rel 1e-9 abs 1e-6 (null eigenvalue is roundoff)",
+      "deviations": [
+        {
+          "finding": "ML-98",
+          "quantity": "GOF",
+          "note": "p2a gof = [sum_pos/sum_abs, sum_k/sum_abs]; R GOF = sum_k / c(sum|ev|, sum(pmax(ev, 0))) = 0.7537543155079838, 0.8679134296478231 (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_dbscan",
+      "name": "DBSCAN",
+      "category": "ml",
+      "reference": "dbscan::dbscan(eps, minPts)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_dbscan_hclust60"
+      ],
+      "quantities": [
+        "cluster (noise 0)"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

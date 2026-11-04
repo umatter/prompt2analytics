@@ -2150,22 +2150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_dbscan_vs_r() {
-        // R reference:
-        // library(dbscan)
-        // dbscan(data, eps=2, minPts=3)
-        let data = create_validation_cluster_data();
-        let result = dbscan(data.view(), 2.0, 3).unwrap();
-
-        // Should find 3 clusters (no noise with these params)
-        assert_eq!(result.n_clusters, 3, "DBSCAN should find 3 clusters");
-
-        // No noise points expected
-        assert_eq!(result.n_noise, 0, "Should have no noise points");
-    }
-
-    #[test]
-    fn test_validate_dbscan_noise_detection() {
+    fn test_dbscan_labels_outlier_as_noise() {
         // Add an outlier to test noise detection
         let data = array![
             [0.0, 0.0],
@@ -2211,7 +2196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_dbscan_eps_sensitivity() {
+    fn test_dbscan_larger_eps_gives_no_more_clusters() {
         // Larger eps should result in fewer clusters
         let data = create_validation_cluster_data();
 
@@ -2424,5 +2409,18 @@ mod tests {
             (a.labels, a.n_iterations, a.inertia.to_bits()),
             (b.labels, b.n_iterations, b.inertia.to_bits())
         );
+    }
+
+    #[test]
+    fn test_validate_dbscan_hclust60() {
+        // ML-84: dbscan::dbscan(X, eps = 1, minPts = 5): 3 clusters, 30 noise; p2a label + 1 ==
+        // R cluster (noise -1 -> 0)
+        let (case, ds) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
+        let r = dbscan(matrix(ds.df(), &["a", "b", "c"]).view(), 1.0, 5).unwrap();
+        let lab: Vec<f64> = r.labels.iter().map(|&l| (l + 1) as f64).collect();
+        Check::new(&case)
+            .vector("dbscan_eps1_minpts5_cluster", &lab, Tol::exact())
+            .finish();
+        assert_eq!((r.n_clusters, r.n_noise), (3, 30));
     }
 }
