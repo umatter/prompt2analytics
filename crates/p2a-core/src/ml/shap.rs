@@ -407,7 +407,7 @@ impl std::fmt::Display for ShapSummary {
                 f,
                 "{:5} {:20} {:12.6} {:12.6} {:12.6}",
                 rank + 1,
-                &self.feature_names[i],
+                self.feature_names[i],
                 self.mean_abs_shap[i],
                 self.mean_shap[i],
                 self.std_shap[i]
@@ -1242,7 +1242,7 @@ fn sampled_coalitions(
                weights: &mut Vec<f64>|
      -> EconResult<usize> {
         let row = weights.len();
-        if row % 4096 == 0 {
+        if row.is_multiple_of(4096) {
             resource::checkpoint()?;
         }
         masks.extend_from_slice(mask);
@@ -2749,10 +2749,10 @@ mod tests {
                 2072usize,
                 596usize,
                 3usize,
-                0.70709942540406878f64,
+                0.7070994254040688f64,
             ),
-            (20, 2088, 2088, 420, 2, 0.45329908333738622),
-            (12, 100, 100, 24, 1, 0.36124284741551288),
+            (20, 2088, 2088, 420, 2, 0.4532990833373862),
+            (12, 100, 100, 24, 1, 0.3612428474155129),
         ] {
             let d = sampled_coalitions(m, n, &mut rng).unwrap();
             // rows: seeded, so deterministic; the R port reached the full budget in all 100 runs
