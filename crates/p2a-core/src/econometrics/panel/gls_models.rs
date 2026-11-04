@@ -837,7 +837,7 @@ mod tests {
     /// Characterisation test: the code before the T0-WP14 resource bounds gives
     /// the same numbers, and later refactors must not move them. Each fit uses a
     /// panel whose T x T Omega has full rank, so the pinned values do not depend
-    /// on rounding-level pivots inside `safe_inverse`.
+    /// on rounding-level pivots inside the inverse.
     ///
     /// FixedEffects is not pinned: under the current algorithm its Omega is
     /// singular along the vector of ones (the within residuals sum to zero in

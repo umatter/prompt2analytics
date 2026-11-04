@@ -1294,7 +1294,7 @@ mod tests {
         }
     }
 
-    /// The rank of the covariance, not the branch `safe_inverse` takes,
+    /// The rank of the covariance, not the branch the inverse takes,
     /// decides whether a Wald statistic exists: every rank-deficient
     /// clustered FE covariance above gives `None`, including those that
     /// Cholesky accepted.
