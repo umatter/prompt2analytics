@@ -395,10 +395,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx); quantile types 1-9, boxplot.stats; p-value and quantile helpers (pt, pchisq, pf, pnorm tails; qnorm, qt, qchisq) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-37, STAT-65, STAT-69, STAT-87) |
 | One-way ANOVA | [anova.md](stats/anova.md) | R-pinned |
 | Two-way ANOVA (Type I, II and III sums of squares) | [anova.md](stats/anova.md) | R-pinned |
-| Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned |
+| Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned, known deviations (STAT-53) |
 | Welch and classical one-way test (oneway.test) | [oneway.md](stats/oneway.md) | R-pinned |
 | Wilcoxon signed-rank and rank-sum tests | [wilcoxon.md](stats/wilcoxon.md) | R-pinned, known deviations (STAT-42, STAT-72, STAT-73) |
-| Friedman rank-sum test | [friedman.md](stats/friedman.md) | R-pinned |
+| Friedman rank-sum test | [friedman.md](stats/friedman.md) | R-pinned, known deviations (STAT-53) |
 | Quade test | [quade_test.md](stats/quade_test.md) | R-pinned |
 | One-way MANOVA (Pillai, Wilks, Hotelling-Lawley, Roy) | [manova.md](stats/manova.md) | R-pinned |
 | Power analysis (power.t.test, power.prop.test, power.anova.test) | [power.md](stats/power.md) | R-pinned, known deviations (STAT-61) |

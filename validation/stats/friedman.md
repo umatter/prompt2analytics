@@ -58,7 +58,7 @@ friedman.test(RoundingTimes)
 # Friedman chi-squared = 4.9787, df = 2, p-value = 0.08296
 ```
 
-**Rust Test:** `crates/p2a-core/src/stats/friedman.rs::tests::test_validate_friedman_against_r`
+**Rust Test:** `crates/p2a-core/src/stats/friedman.rs::tests::test_validate_friedman_rounding`
 
 **Results Comparison:**
 
@@ -80,7 +80,7 @@ friedman.test(RoundingTimes)
 - Rank sums: R1=3, R2=6, R3=9
 - Q = (12/(3×3×4)) × (9+36+81) - 3×3×4 = 6
 
-**Rust Test:** `crates/p2a-core/src/stats/friedman.rs::tests::test_validate_friedman_manual_calculation`
+**Rust Test:** `crates/p2a-core/src/stats/friedman.rs::tests::test_friedman_statistic_hand_computed`
 
 **Results Comparison:**
 

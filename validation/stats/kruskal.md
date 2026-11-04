@@ -48,7 +48,7 @@ kruskal.test(list(x, y, z))
 # Kruskal-Wallis chi-squared = 0.77143, df = 2, p-value = 0.68
 ```
 
-**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_validate_kruskal_against_r_basic`
+**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_validate_kruskal_hw`
 
 **Results Comparison:**
 
@@ -69,7 +69,7 @@ kruskal.test(list(x, y, z))
 - H = (12/(6×7)) × (9/2 + 49/2 + 121/2) - 3×7
 - H = 0.2857 × 89.5 - 21 = 4.571
 
-**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_validate_kruskal_statistic_calculation`
+**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_kruskal_statistic_hand_computed`
 
 **Results Comparison:**
 
@@ -90,7 +90,7 @@ t3 <- c(3, 4, 4, 5)
 kruskal.test(list(t1, t2, t3))
 ```
 
-**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_validate_kruskal_ties_correction`
+**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_kruskal_tie_correction_hand_computed`
 
 **Results Comparison:**
 

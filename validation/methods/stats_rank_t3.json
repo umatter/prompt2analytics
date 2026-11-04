@@ -11,7 +11,11 @@
         "stat_rank_small_groups",
         "stat_rank_kruskal_hw"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::ranks::tests::test_validate_midranks_exact_ties_small_scale",
+        "p2a-core::stats::kruskal::tests::test_validate_kruskal_small_scale",
+        "p2a-core::stats::kruskal::tests::test_validate_kruskal_hw"
+      ],
       "quantities": [
         "midranks and tie-group sizes",
         "chi-squared",
@@ -22,7 +26,13 @@
         "chi-squared on the unit-scale column"
       ],
       "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; ranks, tie sizes, df and rank sums exact",
-      "deviations": [],
+      "deviations": [
+        {
+          "finding": "STAT-53",
+          "quantity": "statistic on an all-tied sample",
+          "note": "p2a refuses with InvalidSpecification naming the reason; kruskal.test returns NaN."
+        }
+      ],
       "supersedes_legacy": []
     },
     {
@@ -55,7 +65,10 @@
         "stat_rank_small_blocks",
         "stat_rank_friedman_rounding"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::friedman::tests::test_validate_friedman_small_scale",
+        "p2a-core::stats::friedman::tests::test_validate_friedman_rounding"
+      ],
       "quantities": [
         "chi-squared",
         "df",
@@ -64,7 +77,13 @@
         "chi-squared on the unit-scale column"
       ],
       "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; df and rank sums exact",
-      "deviations": [],
+      "deviations": [
+        {
+          "finding": "STAT-53",
+          "quantity": "statistic on a design in which every block is tied",
+          "note": "p2a refuses with InvalidSpecification naming the reason; friedman.test returns NaN."
+        }
+      ],
       "supersedes_legacy": []
     },
     {

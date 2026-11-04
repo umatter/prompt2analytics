@@ -2,6 +2,7 @@
 //!
 //! A non-parametric test for comparing more than two related groups.
 //! This is the non-parametric alternative to one-way repeated measures ANOVA.
+//! Ranks each block with `stats::ranks::midranks` (exact ties, as R).
 //!
 //! # References
 //!
@@ -21,6 +22,8 @@ use crate::data::Dataset;
 use crate::data::columns::{MissingSummary, factor_options, numeric_options};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+use crate::stats::ranks::{midranks_into, tie_cube_sum};
+use crate::traits::estimator::chi_squared_p_value;
 
 /// Result of the Friedman rank sum test
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,26 +131,40 @@ pub fn friedman_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResul
         });
     }
 
-    // Rank within each block
-    let mut all_ranks: Vec<Vec<f64>> = Vec::with_capacity(n_blocks);
+    // Rank within each block (exact ties, as R's rank()); the scratch buffers are reused.
+    let mut rank_sums = vec![0.0; n_treatments];
+    let mut order: Vec<usize> = resource::try_with_capacity(n_treatments, "Friedman ranks")?;
+    let mut ranks: Vec<f64> = resource::try_with_capacity(n_treatments, "Friedman ranks")?;
+    let mut sizes: Vec<usize> = resource::try_with_capacity(n_treatments, "Friedman ranks")?;
     let mut total_tie_sum = 0.0;
     let mut has_ties = false;
-
-    for row in data {
-        let (ranks, tie_sum) = rank_within_block(row);
+    let mut all_tied = true;
+    for (b, row) in data.iter().enumerate() {
+        if row.iter().any(|v| v.is_nan()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Friedman test: block {} contains NaN; friedman_test needs complete blocks (run_friedman_test drops incomplete blocks, as friedman.test does)",
+                    b + 1
+                ),
+            });
+        }
+        midranks_into(row, &mut order, &mut ranks, &mut sizes)?;
+        for (sum, &r) in rank_sums.iter_mut().zip(&ranks) {
+            *sum += r;
+        }
+        let tie_sum = tie_cube_sum(&sizes);
         if tie_sum > 0.0 {
             has_ties = true;
         }
         total_tie_sum += tie_sum;
-        all_ranks.push(ranks);
+        all_tied &= sizes.len() == 1;
     }
-
-    // Compute rank sums for each treatment (column sums)
-    let mut rank_sums = vec![0.0; n_treatments];
-    for ranks in &all_ranks {
-        for (j, &r) in ranks.iter().enumerate() {
-            rank_sums[j] += r;
-        }
+    if all_tied {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Friedman test: every block is tied (all {n_treatments} values are equal within each of the {n_blocks} blocks), so the statistic is undefined (friedman.test returns NaN)"
+            ),
+        });
     }
 
     // Compute mean ranks
@@ -168,18 +185,14 @@ pub fn friedman_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResul
         1.0
     };
 
-    // Apply tie correction
-    let q_corrected = if tie_correction > 0.0 {
-        q / tie_correction
-    } else {
-        q
-    };
+    // Strictly positive: at least one block has two distinct values
+    let q_corrected = q / tie_correction;
 
     // Degrees of freedom
     let df = n_treatments - 1;
 
     // P-value from chi-squared distribution
-    let p_value = chi_squared_p_value(q_corrected, df);
+    let p_value = chi_squared_p_value(q_corrected, df as f64);
 
     Ok(FriedmanResult {
         statistic: q_corrected,
@@ -194,57 +207,6 @@ pub fn friedman_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResul
         tie_correction,
         missing: MissingSummary::none(n_blocks * n_treatments),
     })
-}
-
-/// Rank values within a single block, handling ties with midranks.
-/// Returns (ranks, tie_sum) where tie_sum = Σ(ti³ - ti) for this block.
-fn rank_within_block(values: &[f64]) -> (Vec<f64>, f64) {
-    let n = values.len();
-
-    // Create index-value pairs and sort
-    let mut indexed: Vec<(usize, f64)> = values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0.0; n];
-    let mut tie_sum = 0.0;
-
-    let mut i = 0;
-    while i < n {
-        // Find extent of tie group
-        let mut j = i + 1;
-        while j < n && (indexed[j].1 - indexed[i].1).abs() < 1e-10 {
-            j += 1;
-        }
-
-        // Compute average rank for tie group (1-indexed)
-        let avg_rank = ((i + 1) + j) as f64 / 2.0;
-        let tie_size = (j - i) as f64;
-
-        for k in i..j {
-            ranks[indexed[k].0] = avg_rank;
-        }
-
-        // Add to tie sum: ti³ - ti
-        if tie_size > 1.0 {
-            tie_sum += tie_size * tie_size * tie_size - tie_size;
-        }
-
-        i = j;
-    }
-
-    (ranks, tie_sum)
-}
-
-/// Compute p-value from chi-squared distribution
-fn chi_squared_p_value(statistic: f64, df: usize) -> f64 {
-    use statrs::distribution::{ChiSquared, ContinuousCDF};
-
-    if df == 0 || statistic.is_nan() || statistic.is_infinite() {
-        return f64::NAN;
-    }
-
-    let chi2 = ChiSquared::new(df as f64).unwrap();
-    1.0 - chi2.cdf(statistic)
 }
 
 /// A long-format block design pivoted to one row per complete block, by R's rules.
@@ -547,75 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_friedman_against_r() {
-        // R code:
-        // RoundingTimes <-
-        //   matrix(c(5.40, 5.50, 5.55,
-        //            5.85, 5.70, 5.75,
-        //            5.20, 5.60, 5.50,
-        //            5.55, 5.50, 5.40,
-        //            5.90, 5.85, 5.70,
-        //            5.45, 5.55, 5.60,
-        //            5.40, 5.40, 5.35,
-        //            5.45, 5.50, 5.35,
-        //            5.25, 5.15, 5.00,
-        //            5.85, 5.80, 5.70,
-        //            5.25, 5.20, 5.10,
-        //            5.65, 5.55, 5.45),
-        //          nrow=12, byrow=TRUE,
-        //          dimnames=list(1:12, c("Round Out", "Narrow Angle", "Wide Angle")))
-        // friedman.test(RoundingTimes)
-        //
-        // Result: Friedman chi-squared = 11.143, df = 2, p-value = 0.003805
-
-        let data = vec![
-            vec![5.40, 5.50, 5.55],
-            vec![5.85, 5.70, 5.75],
-            vec![5.20, 5.60, 5.50],
-            vec![5.55, 5.50, 5.40],
-            vec![5.90, 5.85, 5.70],
-            vec![5.45, 5.55, 5.60],
-            vec![5.40, 5.40, 5.35],
-            vec![5.45, 5.50, 5.35],
-            vec![5.25, 5.15, 5.00],
-            vec![5.85, 5.80, 5.70],
-            vec![5.25, 5.20, 5.10],
-            vec![5.65, 5.55, 5.45],
-        ];
-        let names = vec![
-            "Round Out".to_string(),
-            "Narrow Angle".to_string(),
-            "Wide Angle".to_string(),
-        ];
-
-        let result = friedman_test(&data, &names).unwrap();
-
-        // R gives: Friedman chi-squared = 4.9787, df = 2, p-value = 0.08296
-        // (with tie correction for row 7 which has 5.40, 5.40, 5.35)
-        println!(
-            "Friedman result: statistic={}, df={}, p={}",
-            result.statistic, result.df, result.p_value
-        );
-        println!("Rank sums: {:?}", result.rank_sums);
-        println!(
-            "Has ties: {}, tie_correction: {}",
-            result.has_ties, result.tie_correction
-        );
-        assert!(
-            (result.statistic - 4.9787).abs() < 0.05,
-            "statistic mismatch: got {}",
-            result.statistic
-        );
-        assert_eq!(result.df, 2);
-        assert!(
-            (result.p_value - 0.08296).abs() < 0.01,
-            "p-value mismatch: got {}",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_friedman_manual_calculation() {
+    fn test_friedman_statistic_hand_computed() {
         // Simple example for manual verification
         // 3 blocks, 3 treatments
         // Block 1: [1, 2, 3] -> ranks [1, 2, 3]
@@ -639,40 +533,12 @@ mod tests {
         assert_eq!(result.n_treatments, 3);
         assert!(!result.has_ties);
         assert!((result.tie_correction - 1.0).abs() < 1e-10);
-        assert!((result.statistic - 6.0).abs() < 0.01);
-
-        // Check rank sums
-        assert!((result.rank_sums[0] - 3.0).abs() < 1e-10);
-        assert!((result.rank_sums[1] - 6.0).abs() < 1e-10);
-        assert!((result.rank_sums[2] - 9.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_rank_within_block() {
-        let values = vec![3.0, 1.0, 2.0];
-        let (ranks, _) = rank_within_block(&values);
-
-        // 1.0 -> rank 1, 2.0 -> rank 2, 3.0 -> rank 3
-        assert!((ranks[0] - 3.0).abs() < 1e-10); // 3.0 gets rank 3
-        assert!((ranks[1] - 1.0).abs() < 1e-10); // 1.0 gets rank 1
-        assert!((ranks[2] - 2.0).abs() < 1e-10); // 2.0 gets rank 2
-    }
-
-    #[test]
-    fn test_rank_within_block_with_ties() {
-        let values = vec![1.0, 2.0, 2.0, 3.0];
-        let (ranks, tie_sum) = rank_within_block(&values);
-
-        // 1.0 -> rank 1
-        // 2.0, 2.0 -> ranks 2, 3 averaged to 2.5
-        // 3.0 -> rank 4
-        assert!((ranks[0] - 1.0).abs() < 1e-10);
-        assert!((ranks[1] - 2.5).abs() < 1e-10);
-        assert!((ranks[2] - 2.5).abs() < 1e-10);
-        assert!((ranks[3] - 4.0).abs() < 1e-10);
-
-        // tie_sum for 2 tied values: 2³ - 2 = 6
-        assert!((tie_sum - 6.0).abs() < 1e-10);
+        assert!(
+            (result.statistic - 6.0).abs() < 1e-12,
+            "{}",
+            result.statistic
+        );
+        assert_eq!(result.rank_sums, vec![3.0, 6.0, 9.0]);
     }
 
     #[test]
@@ -724,7 +590,11 @@ mod tests {
         let result = friedman_test(&data, &names).unwrap();
 
         assert!(result.has_ties);
-        assert!((result.tie_correction - 0.75).abs() < 0.01);
+        assert!(
+            (result.tie_correction - 0.75).abs() < 1e-15,
+            "{}",
+            result.tie_correction
+        );
     }
 
     // ========================================================================
@@ -810,5 +680,107 @@ mod tests {
             run_friedman_test(&ds, "y", "treat", "nope"),
             Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
         ));
+    }
+
+    #[test]
+    fn test_validate_friedman_small_scale() {
+        // R friedman.test on an 8 x 4 design of order 1e-12 with within-block ties (STAT-53).
+        // Before: Q = 0, p = 1.
+        let (case, ds) = load_case("stat_rank_small_blocks");
+        let r = run_friedman_test(&ds, "y", "treat", "block").unwrap();
+        let unit = run_friedman_test(&ds, "y_unit", "treat", "block").unwrap();
+        assert!(r.has_ties);
+        assert_eq!(r.statistic, unit.statistic);
+        assert_eq!((r.n_blocks, r.n_treatments), (8, 4));
+        Check::new(&case)
+            .scalar("friedman_chisq", r.statistic, Tol::stat(32))
+            .scalar("friedman_df", r.df as f64, Tol::exact())
+            .scalar("friedman_p", r.p_value, Tol::p_value(32))
+            .scalar("friedman_unit_chisq", unit.statistic, Tol::stat(32))
+            .named(
+                "friedman_rank_sums",
+                &r.treatment_names,
+                &r.rank_sums,
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_friedman_rounding() {
+        // STAT-44: R's ?friedman.test RoundingTimes has 22 players (11.142857142857142); the old
+        // test quoted that value above the first 12 players (4.9787234042553195). Both are
+        // pinned.
+        let (case, ds) = load_case("stat_rank_friedman_rounding");
+        let all = run_friedman_test(&ds, "time", "method", "block").unwrap();
+        let mask = ds
+            .df()
+            .column("first12")
+            .unwrap()
+            .as_materialized_series()
+            .equal(1)
+            .unwrap();
+        let first = Dataset::new(ds.df().filter(&mask).unwrap());
+        let f12 = run_friedman_test(&first, "time", "method", "block").unwrap();
+        assert_eq!((all.n_blocks, f12.n_blocks), (22, 12));
+        Check::new(&case)
+            .scalar("chisq_22", all.statistic, Tol::stat(66))
+            .scalar("df_22", all.df as f64, Tol::exact())
+            .scalar("p_22", all.p_value, Tol::p_value(66))
+            .named(
+                "rank_sums_22",
+                &all.treatment_names,
+                &all.rank_sums,
+                Tol::exact(),
+            )
+            .scalar("chisq_12", f12.statistic, Tol::stat(36))
+            .scalar("df_12", f12.df as f64, Tol::exact())
+            .scalar("p_12", f12.p_value, Tol::p_value(36))
+            .named(
+                "rank_sums_12",
+                &f12.treatment_names,
+                &f12.rank_sums,
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_friedman_all_tied_blocks_and_nan() {
+        let names: Vec<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        // R: friedman.test(matrix(c(1,1,1,2,2,2), 2, byrow = TRUE)) is NaN. Before: Ok with
+        // Q 0, p 1.
+        match friedman_test(&[vec![1.0, 1.0, 1.0], vec![2.0, 2.0, 2.0]], &names) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("every block is tied"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        // One tied block among untied ones is fine: R 3, p 0.22313016014842982 (= exp(-1.5))
+        let r = friedman_test(
+            &[
+                vec![1.0, 1.0, 1.0],
+                vec![1.0, 2.0, 3.0],
+                vec![2.0, 1.0, 3.0],
+            ],
+            &names,
+        )
+        .unwrap();
+        assert!((r.statistic - 3.0).abs() < 1e-12, "{}", r.statistic);
+        assert!(
+            (r.p_value - 0.22313016014842982).abs() < 1e-14,
+            "{}",
+            r.p_value
+        );
+        // NaN in a block (before: ranked as if it were a value)
+        match friedman_test(&[vec![1.0, f64::NAN, 2.0], vec![1.0, 2.0, 3.0]], &names) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("block 1") && message.contains("NaN"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 }
