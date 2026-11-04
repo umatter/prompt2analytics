@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_garch",
+      "name": "GARCH(p, q) by conditional maximum likelihood with normal or standardised Student-t errors; inverse-observed-information SEs; variance forecasts",
+      "category": "forecasting",
+      "reference": "conditional GARCH(p, q) likelihood written out in R (fGarch and rugarch not installed): fGarch's mci start h_t = mean(e^2) for t <= max(p, q) and its standardised t; maximised by optim, then Newton iterations on the analytic gradient; SEs sqrt(diag(-H^-1)) with H from numDeriv::jacobian of the analytic gradient; forecasts by the GARCH recursion; tseries::garch likelihood identity on the demeaned series",
+      "doc": "validation/forecasting/garch.md",
+      "cases": [
+        "garch_normal_t"
+      ],
+      "tests": [
+        "p2a-core::forecasting::garch::tests::test_validate_garch_normal",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_student_t",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_student_t_shape",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_se",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_vcov",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_orders",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_bound",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_scale_invariance",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_display_rows"
+      ],
+      "quantities": [
+        "mu, omega, alpha_i, beta_j",
+        "Student-t shape",
+        "SEs (inverse observed information)",
+        "covariance matrix",
+        "z and normal p-values",
+        "logLik",
+        "AIC",
+        "BIC",
+        "h_1..h_3 (mean(e^2) start) and h_T",
+        "unconditional variance",
+        "variance forecasts (GARCH(1,1), (1,2), (2,1), ARCH(1), zero mean)",
+        "parameter on the alpha2 = 0 bound (restricted maximum, SEs of the free parameters)",
+        "zero-mean fit",
+        "scale invariance (x 1e-6, x 1e6)",
+        "printed coefficient table (row names and SEs)"
+      ],
+      "tolerance": "iterative MLE with a finite-difference Hessian, looser than validation/README.md's n > 1000 row: parameters, h_t and forecasts 1e-8 relative (bound fit 1e-6), SEs, z and covariances 1e-6 relative, p-values 1e-5 relative + 1e-12 absolute, logLik/AIC/BIC 1e-8 relative (Tol::stat); Appendix A.31 optim keys as cross-checks at 1e-5",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
