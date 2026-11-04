@@ -655,9 +655,6 @@ mod tests {
         assert!(ok.log_likelihood.is_finite());
     }
 
-    /// ECON-79. b = 2 a exactly: the lag b.l1 is aliased (R: coef(VAR(..)$varresult$a)["b.l1"]
-    /// is NA, the later of two collinear columns, dqrdc2's rule). Before: the
-    /// pseudo-inverse fit was returned as Ok.
     /// Simulated stationary VAR(1) with Gaussian noise: K series, n rows, seed.
     fn simulated_var(n: usize, k: usize, seed: u64) -> (Dataset, Vec<String>) {
         use rand::SeedableRng;
@@ -753,6 +750,9 @@ mod tests {
         }
     }
 
+    /// ECON-79. b = 2 a exactly: the lag b.l1 is aliased (R: coef(VAR(..)$varresult$a)["b.l1"]
+    /// is NA, the later of two collinear columns, dqrdc2's rule). Before: the
+    /// pseudo-inverse fit was returned as Ok.
     #[test]
     fn test_var_rejects_collinear_series() {
         let a: Vec<f64> = (0..40)
