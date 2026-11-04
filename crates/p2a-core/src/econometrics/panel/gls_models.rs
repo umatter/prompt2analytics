@@ -11,21 +11,22 @@
 //!
 //! R equivalent: `plm::pggls()`
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::resource;
+use crate::traits::convergence::ResultNotes;
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 use super::utils::{demean_by_entity, entity_codes, time_codes};
 
-/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
-/// SVD fallback). Check the working set against the allocation ceiling before building it.
+/// `sym_inverse` holds several m x m copies at once (copy, equilibration, eigenvectors,
+/// solution). Check the working set against the allocation ceiling before building it.
 const DENSE_INVERSE_COPIES: usize = 6;
 
 fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
@@ -95,7 +96,7 @@ pub struct PanelGlsResult {
     #[serde(skip)]
     pub error_cov_dim: usize,
     /// Any warnings generated during estimation
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 
     // ── Trait-backing storage (LinearEstimator). Skipped from JSON.
@@ -112,6 +113,26 @@ pub struct PanelGlsResult {
     /// (plm `na.omit`).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+}
+
+impl ResultNotes for PanelGlsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+/// Residuals of a first-step OLS fit; aliased columns get R's aliasing warning.
+fn first_step_residuals(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    names: &[String],
+    warnings: &mut Vec<String>,
+) -> EconResult<Vec<f64>> {
+    let ls = least_squares(x, y)?;
+    if let Some(w) = ls.aliasing_warning(names) {
+        warnings.push(format!("first-step OLS: {w}"));
+    }
+    Ok(ls.residuals.to_vec())
 }
 
 impl crate::traits::estimator::LinearEstimator for PanelGlsResult {
@@ -303,7 +324,7 @@ pub fn run_panel_gls(
     let k = x.ncols();
 
     // Step 1: Initial estimation based on model type
-    let (initial_resid, _) = match model {
+    let initial_resid = match model {
         PanelGlsModel::FixedEffects => {
             // Within transformation (demean by entity)
             let y_arr = Array1::from(y.clone());
@@ -319,26 +340,21 @@ pub fn run_panel_gls(
             }
 
             // OLS on demeaned data
-            let xtx_mat = xtx(&x_demeaned.view());
-            let (xtx_inv, _) = safe_inverse(&xtx_mat.view())?;
-            let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
-            let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-            let fitted = x_demeaned.dot(&beta);
-            let resid = &y_demeaned - &fitted;
-
-            (resid.to_vec(), beta.to_vec())
+            first_step_residuals(
+                x_demeaned.view(),
+                y_demeaned.view(),
+                &dm.column_names,
+                &mut warnings,
+            )?
         }
         PanelGlsModel::Pooling => {
             // Simple OLS
-            let y_arr = Array1::from(y.clone());
-            let xtx_mat = xtx(&x.view());
-            let (xtx_inv, _) = safe_inverse(&xtx_mat.view())?;
-            let xty_vec = xty(&x.view(), &y_arr);
-            let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-            let fitted = x.dot(&beta);
-            let resid = &y_arr - &fitted;
-
-            (resid.to_vec(), beta.to_vec())
+            first_step_residuals(
+                x.view(),
+                ArrayView1::from(&y),
+                &dm.column_names,
+                &mut warnings,
+            )?
         }
         PanelGlsModel::FirstDifference => {
             // First-difference transformation
@@ -396,15 +412,13 @@ pub fn run_panel_gls(
                 }
             }
 
-            // OLS on differenced data
-            let xtx_mat = xtx(&x_diff_arr.view());
-            let (xtx_inv, _) = safe_inverse(&xtx_mat.view())?;
-            let xty_vec = xty(&x_diff_arr.view(), &y_diff_arr);
-            let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-            let fitted = x_diff_arr.dot(&beta);
-            let resid = &y_diff_arr - &fitted;
-
-            (resid.to_vec(), beta.to_vec())
+            // OLS on differenced data (the differenced intercept is zero: aliased)
+            first_step_residuals(
+                x_diff_arr.view(),
+                y_diff_arr.view(),
+                &dm.column_names,
+                &mut warnings,
+            )?
         }
     };
 
@@ -452,24 +466,14 @@ pub fn run_panel_gls(
         }
     }
 
-    // Ensure positive definiteness
-    let omega_inv = match safe_inverse(&omega.view()) {
-        Ok((inv, _)) => inv,
-        Err(_) => {
-            warnings.push("Omega matrix near-singular, using regularization".to_string());
-            // Add small ridge to diagonal
-            for i in 0..t_dim {
-                omega[[i, i]] += 1e-6;
-            }
-            safe_inverse(&omega.view())
-                .map(|(inv, _)| inv)
-                .map_err(|_| EconError::SingularMatrix {
-                    context: "Error covariance matrix".to_string(),
-                    suggestion: "Check for multicollinearity or insufficient time variation"
-                        .to_string(),
-                })?
-        }
-    };
+    // A singular Omega (the within residuals sum to zero in every entity, so its
+    // rank is T - 1) gets a generalized inverse, reported with its rank.
+    let omega_what = "panel GLS error covariance (T x T)";
+    let omega_s = sym_inverse(omega.view(), SingularPolicy::Generalized, omega_what)?;
+    if let Some(w) = omega_s.warning(omega_what) {
+        warnings.push(w);
+    }
+    let omega_inv = omega_s.inverse;
 
     // Step 3: GLS estimation
     let y_arr = Array1::from(y.clone());
@@ -514,12 +518,14 @@ pub fn run_panel_gls(
     }
 
     // Solve for GLS coefficients
-    let (xtox_inv, cond) = safe_inverse(&xtox.view()).map_err(|_| EconError::SingularMatrix {
-        context: "X'Omega^{-1}X in Panel GLS".to_string(),
-        suggestion: "Check for perfect collinearity".to_string(),
-    })?;
+    let xtox_s = sym_inverse(
+        xtox.view(),
+        SingularPolicy::Error,
+        "X'Omega^-1 X in panel GLS",
+    )?;
+    let xtox_inv = xtox_s.inverse;
 
-    if cond.is_some_and(|c| c > 1e10) {
+    if xtox_s.reciprocal_condition < 1e-10 {
         warnings.push(
             "High condition number detected, results may be numerically unstable".to_string(),
         );
@@ -538,12 +544,15 @@ pub fn run_panel_gls(
 
     let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
 
-    let df_residual = n.saturating_sub(k);
-    let sigma = if df_residual > 0 {
-        (rss / df_residual as f64).sqrt()
-    } else {
-        0.0
-    };
+    let df_residual =
+        n.checked_sub(k)
+            .filter(|&d| d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: k + 1,
+                provided: n,
+                context: format!("panel GLS with {k} coefficients"),
+            })?;
+    let sigma = (rss / df_residual as f64).sqrt();
 
     // Standard errors from (X'Omega^{-1}X)^{-1}
     let se_scale = rss / df_residual as f64;
@@ -1042,5 +1051,45 @@ mod tests {
             Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "firm_name"),
             other => panic!("expected NonNumericColumn, got {other:?}"),
         }
+    }
+
+    /// The within residuals sum to zero in every entity, so the T x T error covariance has
+    /// rank T - 1: its generalized inverse is reported.
+    #[test]
+    fn test_panel_gls_within_reports_singular_error_covariance() {
+        let (_case, ds) = crate::test_support::load_case("pggls_sim");
+        let r = run_fegls(&ds, "y", &["x1", "x2"], "id", "t").unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "panel GLS error covariance (T x T) is singular (rank 4 of 5); a \
+                    generalized inverse was used"),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("rank 4 of 5"));
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["warnings"].as_array().is_some_and(|w| !w.is_empty()));
+    }
+
+    /// The differenced intercept is a column of zeros: the first step names it.
+    #[test]
+    fn test_panel_gls_fd_reports_aliased_first_step() {
+        let (_case, ds) = crate::test_support::load_case("pggls_sim");
+        let r = run_panel_gls(
+            &ds,
+            "y",
+            &["x1", "x2"],
+            "id",
+            "t",
+            Some(PanelGlsModel::FirstDifference),
+        )
+        .unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "first-step OLS: Coefficients not defined because of singularities: \
+                    (Intercept)"),
+            "{:?}",
+            r.warnings
+        );
     }
 }
