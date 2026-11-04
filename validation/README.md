@@ -383,6 +383,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | t-tests (one-sample, Welch, pooled, paired) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
 | Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-27) |
 | Mood test of scale | [mood.md](stats/mood.md) | R-pinned, known deviations (STAT-29) |
+| Ansari-Bradley test of scale | [ansari.md](stats/ansari.md) | R-pinned, known deviations (STAT-12, STAT-13, STAT-14, STAT-79) |
+| Exact binomial test | [binom.md](stats/binom.md) | R-pinned, known deviations (STAT-15) |
 | Bartlett, Fligner-Killeen and F tests of variances | [bartlett.md](stats/bartlett.md) | R-pinned |
 | Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
 | Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned |
@@ -395,7 +397,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Two-way ANOVA (Type I, II and III sums of squares) | [anova.md](stats/anova.md) | R-pinned |
 | Kruskal-Wallis rank-sum test | [kruskal.md](stats/kruskal.md) | R-pinned |
 | Welch and classical one-way test (oneway.test) | [oneway.md](stats/oneway.md) | R-pinned |
-| Wilcoxon signed-rank and rank-sum tests | [wilcoxon.md](stats/wilcoxon.md) | R-pinned, known deviations (STAT-72) |
+| Wilcoxon signed-rank and rank-sum tests | [wilcoxon.md](stats/wilcoxon.md) | R-pinned, known deviations (STAT-42, STAT-72, STAT-73) |
 | Friedman rank-sum test | [friedman.md](stats/friedman.md) | R-pinned |
 | Quade test | [quade_test.md](stats/quade_test.md) | R-pinned |
 | One-way MANOVA (Pillai, Wilks, Hotelling-Lawley, Roy) | [manova.md](stats/manova.md) | R-pinned |

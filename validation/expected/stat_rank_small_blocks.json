@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "stat_rank_small_blocks",
+  "area": "stats/ranks",
+  "method": "Friedman and Quade tests on an 8 x 4 block design with values of order 1e-12 and within-block ties",
+  "reference": "stats::friedman.test, stats::quade.test (A, B and treatment sums as in quade.test.default)",
+  "call": "friedman.test(y_matrix); quade.test(y_matrix), y_matrix = 8 blocks x 4 treatments",
+  "dataset": "validation/datasets/generated/rank_small_blocks.csv",
+  "datasets": ["validation/datasets/generated/rank_small_blocks.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "friedman_chisq": 13.253164556962025,
+    "friedman_df": 3,
+    "friedman_p": 0.0041199134413093166,
+    "friedman_unit_chisq": 13.253164556962025,
+    "friedman_rank_sums": {
+      "names": ["t1", "t2", "t3", "t4"],
+      "values": [11.5, 16.5, 23, 29]
+    },
+    "quade_f": 6.7998027613412226,
+    "quade_df1": 3,
+    "quade_df2": 21,
+    "quade_p": 0.0022263060158933352,
+    "quade_treatment_sums": {
+      "names": ["t1", "t2", "t3", "t4"],
+      "values": [-37, -23, 19, 41]
+    },
+    "quade_a": 999.5,
+    "quade_b": 492.5
+  }
+}

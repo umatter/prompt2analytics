@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "stat_rank_kruskal_hw",
+  "area": "stats/kruskal",
+  "method": "Kruskal-Wallis test, Hollander & Wolfe (1973) p. 116 (the ?kruskal.test example)",
+  "reference": "stats::kruskal.test",
+  "call": "kruskal.test(value ~ group)",
+  "dataset": "validation/datasets/generated/rank_kruskal_hw.csv",
+  "datasets": ["validation/datasets/generated/rank_kruskal_hw.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "chisq": 0.77142857142857224,
+    "df": 2,
+    "p": 0.67996477357889362,
+    "rank_sums": {
+      "names": ["asbestosis", "normal", "obstructive"],
+      "values": [33, 36, 36]
+    }
+  }
+}

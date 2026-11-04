@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "stat_rank_quade_store",
+  "area": "stats/quade",
+  "method": "Quade test, Conover (1999) p. 375 (the ?quade.test hand-lotion example)",
+  "reference": "stats::quade.test (A, B, treatment sums and ranges as in quade.test.default)",
+  "call": "quade.test(y)",
+  "dataset": "validation/datasets/generated/rank_quade_store.csv",
+  "datasets": ["validation/datasets/generated/rank_quade_store.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "f": 3.8292515841753727,
+    "df1": 4,
+    "df2": 24,
+    "p": 0.015189020073274592,
+    "treatment_sums": {
+      "names": ["A", "B", "C", "D", "E"],
+      "values": [-9.5, -38, -14, 23.5, 38]
+    },
+    "a": 1366.5,
+    "b": 532.35714285714289,
+    "block_ranges": [8, 3, 23, 2, 6, 40, 4]
+  }
+}

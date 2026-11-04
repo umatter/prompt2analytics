@@ -1,0 +1,263 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "kruskal_wallis_ties",
+      "name": "Kruskal-Wallis rank sum test with exact-equality midranks (values of order 1e-12) and the Hollander & Wolfe example",
+      "category": "stats",
+      "reference": "stats::rank; stats::kruskal.test",
+      "doc": "validation/stats/kruskal.md",
+      "cases": [
+        "stat_rank_small_groups",
+        "stat_rank_kruskal_hw"
+      ],
+      "tests": [],
+      "quantities": [
+        "midranks and tie-group sizes",
+        "chi-squared",
+        "df",
+        "p",
+        "rank sums",
+        "tie correction",
+        "chi-squared on the unit-scale column"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; ranks, tie sizes, df and rank sums exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "fligner_ties_examples",
+      "name": "Fligner-Killeen test on values of order 1e-12 and on three example sets (with InsectSprays)",
+      "category": "stats",
+      "reference": "stats::fligner.test",
+      "doc": "validation/stats/kruskal.md",
+      "cases": [
+        "stat_rank_small_groups",
+        "stat_rank_fligner"
+      ],
+      "tests": [],
+      "quantities": [
+        "chi-squared",
+        "df",
+        "p"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "friedman_ties_rounding",
+      "name": "Friedman rank sum test on an 8 x 4 design of order 1e-12 with within-block ties, and RoundingTimes (22 and 12 players)",
+      "category": "stats",
+      "reference": "stats::friedman.test",
+      "doc": "validation/stats/friedman.md",
+      "cases": [
+        "stat_rank_small_blocks",
+        "stat_rank_friedman_rounding"
+      ],
+      "tests": [],
+      "quantities": [
+        "chi-squared",
+        "df",
+        "p",
+        "rank sums",
+        "chi-squared on the unit-scale column"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; df and rank sums exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "quade_ties_store",
+      "name": "Quade test on an 8 x 4 design of order 1e-12 and on the Conover (1999) hand-lotion data",
+      "category": "stats",
+      "reference": "stats::quade.test (A, B, treatment sums and ranges as in quade.test.default)",
+      "doc": "validation/stats/quade_test.md",
+      "cases": [
+        "stat_rank_small_blocks",
+        "stat_rank_quade_store"
+      ],
+      "tests": [],
+      "quantities": [
+        "F",
+        "df1",
+        "df2",
+        "p",
+        "treatment sums",
+        "A",
+        "B",
+        "block ranges"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, p abs 1e-12; df exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mood_scale_t3",
+      "name": "Mood two-sample test of scale on tie-free sets (z, two- and one-sided p, T), including values of order 1e-12",
+      "category": "stats",
+      "reference": "stats::mood.test(alternative)",
+      "doc": "validation/stats/mood.md",
+      "cases": [
+        "stat_rank_small_groups",
+        "stat_rank_two_sample"
+      ],
+      "tests": [],
+      "quantities": [
+        "z",
+        "p (two-sided, less, greater)",
+        "T"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-5 relative, abs 1e-14 (z) and 1e-12 (p); T exact",
+      "deviations": [
+        {
+          "finding": "STAT-29",
+          "quantity": "z and p with ties (mood_z_ties, mood_p_ties)",
+          "note": "R averages (i - (N+1)/2)^2 over the positions of a tie group; p2a squares the midrank deviation: R z 0.3293662746201299 against p2a 0.0823415686550325 ('ties'), 1.0371275614960966 against 1.015427524079116 ('serum')."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ansari_bradley",
+      "name": "Ansari-Bradley test of scale: statistic and two-sided normal approximation, including values of order 1e-12",
+      "category": "stats",
+      "reference": "stats::ansari.test(exact = FALSE | TRUE, alternative)",
+      "doc": "validation/stats/ansari.md",
+      "cases": [
+        "stat_rank_small_groups",
+        "stat_rank_two_sample"
+      ],
+      "tests": [],
+      "quantities": [
+        "AB (seven sets)",
+        "two-sided normal-approximation p (five tie-free sets)",
+        "exact flag off under ties"
+      ],
+      "tolerance": "validation/README.md, n < 100: p 1e-5 relative with abs 1e-12; AB exact",
+      "deviations": [
+        {
+          "finding": "STAT-13",
+          "quantity": "exact p (ansari_p_exact, ab_p_exact)",
+          "note": "Truncated exact distribution: R 0.0016887137630172688 against p2a 0.198862 ('scale'), R 1 against 0.869565 ('basic'), R 0.05128205128205132 against 0.295762 (small scale)."
+        },
+        {
+          "finding": "STAT-12",
+          "quantity": "one-sided p (ab_p_less, ab_p_greater)",
+          "note": "p2a maps 'less' to the lower tail of AB and 'greater' to the upper tail; R does the opposite (on 'scale' R less = 0.0012020898183661144, p2a less = 0.998798)."
+        },
+        {
+          "finding": "STAT-79",
+          "quantity": "normal approximation with ties (ab_p_ties)",
+          "note": "p2a ignores ties in the variance: R 0.8537871075965991 against p2a 0.832004 ('ties'), R 0.1814581997286707 against 0.184608 ('serum'). AB itself is pinned."
+        },
+        {
+          "finding": "STAT-14",
+          "quantity": "estimate and confidence interval",
+          "note": "Not R's Bauer (1972) inversion; not compared."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "wilcoxon_t3",
+      "name": "Wilcoxon rank-sum and signed-rank tests: normal approximation labelled as such for N = 30 / n = 25, the quoted examples, exact small samples, paired with a zero, values of order 1e-12",
+      "category": "stats",
+      "reference": "stats::wilcox.test(exact, correct = TRUE, mu, paired)",
+      "doc": "validation/stats/wilcoxon.md",
+      "cases": [
+        "stat_rank_small_groups",
+        "stat_rank_wilcoxon"
+      ],
+      "tests": [],
+      "quantities": [
+        "p (normal approximation with continuity correction)",
+        "p (exact, N = 6 and N = 14)",
+        "R's W (from p2a's rank sum)",
+        "rank sum",
+        "signed-rank V",
+        "exact flag",
+        "continuity flag"
+      ],
+      "tolerance": "validation/README.md, n < 100: p 1e-5 relative with abs 1e-12; statistics exact",
+      "deviations": [
+        {
+          "finding": "STAT-73",
+          "quantity": "R's default exact p for 21 <= N < 50 (n30_p_exact, sr25_p_exact)",
+          "note": "p2a's exact enumeration stops at N = 20 and falls back to the normal approximation, reported with exact = false: R exact 0.009874822650594207 and 0.06670159101486205; the normal-approximation values are pinned."
+        },
+        {
+          "finding": "STAT-42",
+          "quantity": "paired p with tied |d| (paired_p)",
+          "note": "p2a's tie variance uses the count of tied observations: R 0.6352893188352069 against p2a 0.6308000140667467. V is pinned."
+        },
+        {
+          "finding": "STAT-72",
+          "quantity": "statistic and u_statistic",
+          "note": "p2a reports the rank sum R1 (R's W = R1 - n1 (n1 + 1) / 2) and U = n1 n2 - W; W is pinned through that identity, u_statistic is not compared."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "binom_test",
+      "name": "Exact binomial test: one-sided tails, Clopper-Pearson intervals, two-sided relative-likelihood rule",
+      "category": "stats",
+      "reference": "stats::binom.test(alternative, conf.level = 0.95)",
+      "doc": "validation/stats/binom.md",
+      "cases": [
+        "stat_rank_binom"
+      ],
+      "tests": [],
+      "quantities": [
+        "two-sided p (14 cells)",
+        "p less",
+        "p greater",
+        "two-sided 95% CI",
+        "one-sided 95% bounds",
+        "estimate",
+        "relative accuracy of tiny upper tails"
+      ],
+      "tolerance": "validation/README.md at the smallest n (10): p 1e-5 relative with abs 1e-12, CI 1e-5 relative, estimate 1e-6; tiny tails 1e-10 relative",
+      "deviations": [
+        {
+          "finding": "STAT-15",
+          "quantity": "two-sided p in cells r04-r12 (p_two_stat15)",
+          "note": "p2a starts the upper search at floor(np) and adds P(X = 0) when no lower cell qualifies: e.g. (3, 10, 0.37) R 0.753923870210605 against 1, (5, 100, 0.01) R 0.0034323215877545264 against 0.369465."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "isoreg",
+      "name": "Isotonic regression (PAVA): fitted values, block counts, sorted x and order on tie-free x",
+      "category": "stats",
+      "reference": "stats::isoreg",
+      "doc": "validation/stats/isoreg.md",
+      "cases": [
+        "stat_rank_isoreg"
+      ],
+      "tests": [],
+      "quantities": [
+        "yf (doc, doc3, ir4, mono, decr, unsorted)",
+        "number of blocks",
+        "sorted x",
+        "ord"
+      ],
+      "tolerance": "validation/README.md, n < 100: 1e-6 relative, abs 1e-12; x, ord and block counts exact",
+      "deviations": [
+        {
+          "finding": "STAT-52",
+          "quantity": "iKnots and yc (iknots_doc, iknots_ir4, yc_doc)",
+          "note": "p2a's i_knots are 0-based block starts ([0, 2] for doc; R iKnots (2, 9), 1-based block ends) and yc is cumsum(yf) of length n (R: cumsum(c(0, y)), length n + 1). Block counts agree and are pinned."
+        },
+        {
+          "finding": "STAT-52",
+          "quantity": "fitted values with tied x (yf_tiedx, iknots_tiedx)",
+          "note": "R orders by (x, -y) so tied x are pooled: R yf (2, 2, 3, 3, 5); p2a (1, 2.5, 2.5, 4, 5)."
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

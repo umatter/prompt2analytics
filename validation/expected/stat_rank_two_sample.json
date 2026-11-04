@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "id": "stat_rank_two_sample",
+  "area": "stats/scale_tests",
+  "method": "Ansari-Bradley and Mood tests of scale on six two-sample sets (tie-free and tied)",
+  "reference": "stats::ansari.test(exact = FALSE | TRUE, alternative), stats::mood.test(alternative)",
+  "call": "ansari.test(x, y, exact = FALSE); mood.test(x, y) per set",
+  "dataset": "validation/datasets/generated/rank_two_sample.csv",
+  "datasets": ["validation/datasets/generated/rank_two_sample.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "ab": {
+      "names": ["basic", "scale", "manual", "sim", "ties", "serum"],
+      "values": [15, 75, 6, 251, 14.5, 185.5]
+    },
+    "ab_p_normal": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [1, 0.0024041796367322288, 1, 0.026405804321853132]
+    },
+    "ab_p_exact": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [1, 0.0016887137630172688, 1, 0.027141841742605921]
+    },
+    "ab_p_less": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [0.5, 0.0012020898183661144, 0.5, 0.013202902160926566]
+    },
+    "ab_p_greater": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [0.5, 0.99879791018163389, 0.5, 0.98679709783907343]
+    },
+    "ab_p_ties": {
+      "names": ["ties", "serum"],
+      "values": [0.85378710759659915, 0.18145819972867069]
+    },
+    "mood_z": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [0, -3.2366943748507482, 0, -2.5699457794613076]
+    },
+    "mood_p": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [1, 0.0012092284281239386, 1, 0.01017144333403517]
+    },
+    "mood_p_less": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [0.5, 0.00060461421406196928, 0.5, 0.0050857216670175849]
+    },
+    "mood_p_greater": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [0.5, 0.99939538578593801, 0.5, 0.9949142783329824]
+    },
+    "mood_T": {
+      "names": ["basic", "scale", "manual", "sim"],
+      "values": [41.25, 112.5, 8.75, 1685]
+    },
+    "mood_z_ties": {
+      "names": ["ties", "serum"],
+      "values": [0.32936627462012991, 1.0371275614960966]
+    },
+    "mood_p_ties": {
+      "names": ["ties", "serum"],
+      "values": [0.74187885591477443, 0.29967641185705918]
+    }
+  }
+}

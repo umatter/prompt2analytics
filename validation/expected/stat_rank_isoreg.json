@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "stat_rank_isoreg",
+  "area": "stats/isoreg",
+  "method": "Isotonic regression: the ?isoreg examples, an unsorted tie-free x, and tied x (STAT-52)",
+  "reference": "stats::isoreg(x, y) (C_isoreg; order(x, -y) when x is not strictly increasing)",
+  "call": "isoreg(y); isoreg(x, y)",
+  "dataset": "validation/datasets/generated/rank_isoreg.csv",
+  "datasets": ["validation/datasets/generated/rank_isoreg.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "yf_doc": [0.5, 0.5, 3, 3, 3, 3, 3, 3, 3],
+    "yf_doc3": [0.5, 0.5, 3.3333333333333335, 3.3333333333333335, 3.3333333333333335, 3.5, 3.5, 3.5, 3.5],
+    "yf_ir4": [4.25, 4.25, 4.25, 4.25, 5, 6, 6, 6, 6, 8],
+    "yf_mono": [1, 2, 3, 4, 5],
+    "yf_decr": [3, 3, 3, 3, 3],
+    "n_knots_decr": 1,
+    "yf_unsorted": [-0.055, 0.52000000000000002, 1.627, 1.9435, 1.9435, 2.0379999999999994, 2.2249999999999996, 2.2249999999999996, 2.3665000000000003, 2.3665000000000003, 2.4966666666666661, 2.4966666666666661, 2.4966666666666661, 2.7875000000000014, 2.7875000000000014],
+    "x_sorted_unsorted": [0.64100000000000001, 1.522, 2.569, 3.7570000000000001, 4.827, 5.6310000000000002, 6.7290000000000001, 7.6669999999999998, 8.7530000000000001, 9.8000000000000007, 10.722, 11.736000000000001, 12.749000000000001, 13.888, 14.888999999999999],
+    "ord_unsorted": [9, 5, 6, 8, 11, 14, 3, 10, 4, 1, 2, 13, 12, 15, 7],
+    "iknots_doc": [2, 9],
+    "iknots_ir4": [4, 5, 6, 9, 10],
+    "yc_doc": [0, 1, 1, 5, 8, 11, 16, 20, 22, 22],
+    "yf_tiedx": [2, 2, 3, 3, 5],
+    "iknots_tiedx": [2, 4, 5]
+  }
+}
