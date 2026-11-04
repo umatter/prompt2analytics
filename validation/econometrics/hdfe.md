@@ -194,12 +194,16 @@ FE (`run_fixed_effects`), RE, HDFE and FEGLM screen the demeaned regressors befo
    entity effects, a column that the entity and time effects together absorb). It is dropped
    with the warning "'z' dropped: no variation left after removing the 'id' fixed effects
    (not estimated, as in plm and fixest)".
-2. The remaining demeaned columns go through a pivoted QR at `lm.fit`'s tolerance 1e-7; the
+2. The remaining demeaned columns take OLS's solve decision (`regression::ols`): when they
+   are of full rank and well conditioned (equilibrated reciprocal condition of X'X at least
+   1e-8), no column can be aliased and the normal equations solve the fit (refined once
+   below 1e-2); otherwise they go through a pivoted QR at `lm.fit`'s tolerance 1e-7, and the
    later of exactly collinear regressors is dropped with "'x3' dropped: collinear with the
    other regressors after removing the 'id' + 't' fixed effects (the later of the collinear
    regressors is not estimated, as in fixest)".
 
-The names are in `dropped`, the warnings in `warnings`; the fit solves from the same QR.
+The names are in `dropped`, the warnings in `warnings`; the fit solves from the same
+factorization (see "Solve and timing").
 With no regressor left the call is an error ("no regressor left to estimate"), as plm's
 "empty model". Before Tier 3, FE and HDFE refused such a design with `SingularMatrix` (FE)
 or pseudo-inverted it (HDFE).
@@ -264,6 +268,40 @@ With the connected-design count (df_resid 53) the SEs would be 0.1204169838 and
 `econometrics::hdfe::tests::test_validate_hdfe_disconnected_components`, README tolerances
 for n = 80 (coefficients 1e-6, SE 1e-5). FEGLM keeps its own count, which over-counts on
 such designs (ECON-85, Tier 4).
+
+## Solve and timing
+
+The regressor screen (`hdfe::screen_regressors`), which FE, RE's within step, HDFE and FEGLM
+share, takes OLS's solve decision (`regression::ols::normal_equations_inverse`): on a
+full-rank design whose diagonally equilibrated X'X has a reciprocal condition of at least 1e-8
+the normal equations solve the fit (refined once below 1e-2) and no column is aliased, because
+each unit-scaled column then lies at a distance of at least 1e-4 from the span of the others,
+far above the QR's 1e-7; otherwise the pivoted QR at `lm.fit`'s tolerance decides the rank and
+the collinear columns, as before. The screen also hands the kept demeaned columns to the
+caller instead of a second copy. `test_screen_normal_equations_match_qr` holds the
+normal-equations coefficients, (X'X)^{-1} and RSS to 1e-10 relative of the QR's on noisy
+two-way designs (k = 2 to 5, a column scaled by 1e4 or 1e-3);
+`test_screen_near_collinear_reaches_qr` checks that a column equal to the sum of two others up
+to 1e-6 noise reaches the QR and is kept, and that an exactly collinear one is still dropped.
+
+Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
+runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
+times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
+wave-2A head, which solved by pivoted QR; now = the solve above). `unified` rows use R's
+`panel_n<n>.csv` (x1, x2, entity effects), `econometrics` rows criterion's simulated panels.
+Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
+(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
+the last one or two digits (1e-9 relative for the Hausman statistic).
+
+| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
+|---|---|---|---|---|
+| HDFE, unified, 2-way | 100 | 81.17 | 92.66 (1.14) | 57.05 (0.70) |
+| HDFE, unified, 2-way | 1000 | 364.1 | 366.2 (1.01) | 274.9 (0.76) |
+| HDFE, unified, 2-way | 10000 | 4055 | 4601 (1.13) | 2518 (0.62) |
+| HDFE, econometrics | 1000 | 350.1 | 302.7 (0.86) | 230.8 (0.66) |
+| HDFE, econometrics | 5000 | 1521 | 1543 (1.01) | 980.1 (0.64) |
+
+FE, RE and the Hausman test: `panel_fe.md`, `panel_re.md`, `hausman.md`.
 
 ## Known differences
 
