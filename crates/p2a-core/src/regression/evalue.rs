@@ -1009,65 +1009,39 @@ mod tests {
         assert!(evalue_smd(0.5, Some(-0.1)).is_err());
     }
 
-    /// Validate against R EValue package.
-    /// R code:
-    /// ```r
-    /// library(EValue)
-    /// evalue(RR = 2.5)
-    /// # E-value: 4.44
-    ///
-    /// evalue(RR = 2.5, lo = 1.8, hi = 3.5)
-    /// # Point E-value: 4.44
-    /// # CI E-value: 2.99
-    ///
-    /// evalues.OR(2.5, lo = 1.5, hi = 4.2, rare = FALSE)
-    /// # Uses sqrt transformation
-    ///
-    /// evalues.SMD(0.5, se = 0.1)
-    /// ```
+    /// Case `evalue_formulas`: EValue 4.1.4 evalues.RR / OR / HR / MD. Closed forms, so the
+    /// tolerance is 1e-12 relative plus 1e-14 absolute.
     #[test]
-    fn test_validate_against_r() {
-        // Test 1: Simple RR
-        let ev = evalue_rr(2.5);
-        assert!(
-            (ev - 4.44).abs() < 0.01,
-            "R evalue(RR=2.5) = 4.44, got {}",
-            ev
-        );
-
-        // Test 2: RR with CI
-        let result = evalue_rr_ci(2.5, Some(1.8), Some(3.5)).unwrap();
-        assert!(
-            (result.evalue_point - 4.44).abs() < 0.01,
-            "R point E-value = 4.44, got {}",
-            result.evalue_point
-        );
-        // E-value for lower CI limit (1.8)
-        // evalue_rr(1.8) = 1.8 + sqrt(1.8*0.8) = 1.8 + 1.2 = 3.0
-        let ev_ci = result.evalue_ci.unwrap();
-        assert!(
-            (ev_ci - 3.0).abs() < 0.02,
-            "R CI E-value approx 3.0, got {}",
-            ev_ci
-        );
-
-        // Test 3: OR with common outcome
-        // OR = 4 -> sqrt(4) = 2 -> E-value = 2 + sqrt(2*1) = 3.41
-        let or_result = evalue_or(4.0, None, None, false).unwrap();
-        assert!(
-            (or_result.evalue_point - 3.41).abs() < 0.01,
-            "R evalues.OR(4, rare=FALSE) approx 3.41, got {}",
-            or_result.evalue_point
-        );
-
-        // Test 4: SMD
-        // SMD = 0.5 -> exp(0.91*0.5) = 1.576 -> E-value = 1.576 + sqrt(1.576*0.576) = 2.53
-        let smd_result = evalue_smd(0.5, None).unwrap();
-        assert!(
-            (smd_result.evalue_point - 2.53).abs() < 0.05,
-            "R evalues.SMD(0.5) approx 2.53, got {}",
-            smd_result.evalue_point
-        );
+    fn test_validate_evalue_formulas() {
+        use p2a_validation::Check;
+        let (case, _ds) = crate::test_support::load_case("evalue_formulas");
+        let tol = p2a_validation::Tol::new(1e-12, 1e-14);
+        let rows = [
+            (1, evalue_rr_ci(2.5, Some(1.8), Some(3.5)).unwrap()),
+            (2, evalue_rr_ci(0.6, Some(0.45), Some(0.8)).unwrap()),
+            // CI crosses 1: E-value 1
+            (3, evalue_rr_ci(2.0, Some(0.9), Some(3.0)).unwrap()),
+            (4, evalue_or(2.5, Some(1.5), Some(4.0), true).unwrap()),
+            // sqrt(OR)
+            (5, evalue_or(4.0, Some(2.0), Some(8.0), false).unwrap()),
+            (6, evalue_hr(1.5, Some(1.2), Some(1.9), true).unwrap()),
+        ];
+        let mut c = Check::new(&case);
+        for (k, r) in &rows {
+            c.scalar(&format!("row{k}_rr"), r.risk_ratio, tol)
+                .scalar(&format!("row{k}_e_point"), r.evalue_point, tol)
+                .scalar(&format!("row{k}_e_ci"), r.evalue_ci.unwrap(), tol);
+        }
+        let smd = evalue_smd(0.5, Some(0.1)).unwrap();
+        c.scalar("row8_rr", smd.risk_ratio, tol)
+            .scalar("row8_e_point", smd.evalue_point, tol)
+            .scalar("evalue_rr_3_9", evalue_rr(3.9), tol)
+            .finish();
+        // deviation REG-5: row7 (HR 4, common outcome): EValue RR 2.560660171779822, E
+        //   4.559740046011876; p2a sqrt(HR).
+        // not pinned (new observation): row8_e_ci -- EValue exp(0.91 d - 1.78 se) gives
+        //   1.9680373469882557, p2a exp(0.91 (d - 1.96 se)) gives 1.9669630004308964.
+        // deviation REG-39: could_explain_away is not pinned.
     }
 
     /// Test Display implementation.

@@ -1255,99 +1255,76 @@ mod tests {
         assert!((result.coefficients[0] - 200.0).abs() < 20.0);
     }
 
-    /// Validate against R's nls() output
-    /// R code:
-    /// ```r
-    /// x <- c(0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
-    /// y <- c(11.8, 9.7, 8.0, 6.5, 5.7, 4.8, 4.2, 3.7, 3.4, 3.1, 2.9)
-    /// fit <- nls(y ~ a * exp(-b * x) + c, start = list(a = 8, b = 0.3, c = 1))
-    /// summary(fit)
-    /// ```
-    /// R output:
-    /// a = 9.776  SE = 0.366
-    /// b = 0.513  SE = 0.051
-    /// c = 2.208  SE = 0.150
-    /// RSS = 0.198
-    ///
-    /// Note: Our L-M implementation may find a better local optimum (lower RSS)
-    /// than R's default Gauss-Newton, particularly for well-behaved problems.
-    #[test]
-    fn test_validate_against_r_exponential_decay() {
-        let (x, y) = create_exponential_decay_data();
-        let start = Array1::from_vec(vec![8.0, 0.3, 1.0]);
+    fn nls_case_columns(ds: &Dataset, x: &str, y: &str) -> (Array1<f64>, Array1<f64>) {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let num = |c: &str| Array1::from(numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0);
+        (num(x), num(y))
+    }
 
-        let result = nls(
+    /// Case `nls_expdecay`: stats::nls(y ~ a * exp(-b * x) + c), start (8, 0.3, 1). Iterative: R
+    /// stops at relative offset 1e-7, p2a's Levenberg-Marquardt at a 1e-8 relative change in RSS;
+    /// p2a's SEs come from a forward-difference Jacobian (step 1e-7).
+    #[test]
+    fn test_validate_nls_expdecay() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("nls_expdecay");
+        let (x, y) = nls_case_columns(&ds, "x", "y");
+        let r = nls(
             &x,
             &y,
             model_exponential_decay,
-            &start,
+            &ndarray::array![8.0, 0.3, 1.0],
             &["a", "b", "c"],
             NlsConfig::default(),
         )
         .unwrap();
-
-        // Our L-M may find a better fit than R's Gauss-Newton
-        // Key validation: convergence and reasonable parameter estimates
-        assert!(result.converged, "Should converge");
-
-        // RSS should be small (fitting the data well)
-        // Rust often finds RSS <= R's RSS since L-M is more robust
-        assert!(result.rss < 0.5, "RSS should be small, got {}", result.rss);
-
-        // Check parameters are in reasonable range
-        // a (amplitude) should be positive and roughly 8-12
-        assert!(
-            result.coefficients[0] > 5.0 && result.coefficients[0] < 15.0,
-            "a should be in [5, 15], got {}",
-            result.coefficients[0]
-        );
-        // b (decay rate) should be positive and roughly 0.3-0.7
-        assert!(
-            result.coefficients[1] > 0.2 && result.coefficients[1] < 1.0,
-            "b should be in [0.2, 1.0], got {}",
-            result.coefficients[1]
-        );
-        // c (offset) should be roughly 1-3
-        assert!(
-            result.coefficients[2] > 0.0 && result.coefficients[2] < 5.0,
-            "c should be in [0, 5], got {}",
-            result.coefficients[2]
-        );
+        assert!(r.converged);
+        Check::new(&case)
+            .named(
+                "coef",
+                &r.param_names,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named("se", &r.param_names, &r.std_errors, Tol::iterative(1e-5))
+            .named("t", &r.param_names, &r.t_stats, Tol::iterative(1e-5))
+            .named("p", &r.param_names, &r.p_values, Tol::iterative(1e-3))
+            .scalar("rss", r.rss, Tol::iterative(1e-8))
+            .scalar("sigma", r.sigma, Tol::iterative(1e-8))
+            .scalar("df", r.df as f64, Tol::exact())
+            .finish();
     }
 
-    /// Validate Michaelis-Menten against R
-    /// R code:
-    /// ```r
-    /// S <- c(0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
-    /// V <- c(28.6, 65.0, 100.0, 133.3, 166.7, 181.8, 190.5, 196.1)
-    /// fit <- nls(V ~ Vmax * S / (Km + S), start = list(Vmax = 150, Km = 0.05))
-    /// coef(fit)
-    /// ```
-    /// R output: Vmax=200.2, Km=0.102
+    /// Case `nls_mm`: stats::nls(V ~ Vmax * S / (Km + S)), start (150, 0.05); iterative as
+    /// `test_validate_nls_expdecay`.
     #[test]
-    fn test_validate_against_r_michaelis_menten() {
-        let (x, y) = create_michaelis_menten_data();
-        let start = Array1::from_vec(vec![150.0, 0.05]);
-
-        let result = nls(
+    fn test_validate_nls_michaelis_menten() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("nls_mm");
+        let (x, y) = nls_case_columns(&ds, "S", "V");
+        let r = nls(
             &x,
             &y,
             model_michaelis_menten,
-            &start,
+            &ndarray::array![150.0, 0.05],
             &["Vmax", "Km"],
             NlsConfig::default(),
         )
         .unwrap();
-
-        assert!(
-            (result.coefficients[0] - 200.2).abs() < 5.0,
-            "Vmax: Rust={} vs R=200.2",
-            result.coefficients[0]
-        );
-        assert!(
-            (result.coefficients[1] - 0.102).abs() < 0.02,
-            "Km: Rust={} vs R=0.102",
-            result.coefficients[1]
-        );
+        assert!(r.converged);
+        Check::new(&case)
+            .named(
+                "coef",
+                &r.param_names,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named("se", &r.param_names, &r.std_errors, Tol::iterative(1e-5))
+            .named("t", &r.param_names, &r.t_stats, Tol::iterative(1e-5))
+            .named("p", &r.param_names, &r.p_values, Tol::iterative(1e-3))
+            .scalar("rss", r.rss, Tol::iterative(1e-8))
+            .scalar("sigma", r.sigma, Tol::iterative(1e-8))
+            .scalar("df", r.df as f64, Tol::exact())
+            .finish();
     }
 }

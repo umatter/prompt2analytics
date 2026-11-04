@@ -1,184 +1,44 @@
-# Validation: Sensitivity Analysis for Unmeasured Confounding (sensemakr)
+# Sensitivity to unmeasured confounding (`regression::sensemakr`)
 
-## Method Overview
+## Method
 
-Sensitivity analysis for unmeasured confounding assesses how robust regression estimates are to potential omitted variable bias. The key measures are:
+Cinelli & Hazlett (2020): partial R^2 of the treatment with the outcome `t^2 / (t^2 + dof)`, the
+robustness value `RV_q = (sqrt(f_q^4 + 4 f_q^2) - f_q^2) / 2` with `f_q = q |t| / sqrt(dof)`, and
+benchmark bounds from the partial R^2 of a covariate with the treatment and the outcome.
+`sensemakr()` works from an `OlsResult`; `run_sensemakr()` from a dataset, with the exact benchmark
+partial R^2 of the treatment on each benchmark covariate (auxiliary regressions by pivoted QR; a
+benchmark collinear with the other covariates is an error naming it).
 
-1. **Partial R-squared**: How much residual variance the treatment explains in the outcome
-2. **Robustness Value (RV)**: The minimum confounding strength needed to nullify or change the significance of the treatment effect
-3. **Bias bounds**: Adjusted estimates under hypothetical confounding scenarios
+## R reference
 
-## Mathematical Formulation
+`sensemakr` 0.1.6, case `sensemakr_darfur`: `sensemakr(lm(peacefactor ~ directlyharmed + age +
+farmer_dar + herder_dar + pastvoted + hhsize_darfur + female, data = darfur), treatment =
+"directlyharmed", benchmark_covariates = "female", kd = 1)` (no village effects; n = 1276, dof 1268).
 
-### Partial R-squared of Treatment with Outcome
+## Values
 
-The partial R-squared of treatment D with outcome Y given covariates X:
+estimate 0.04888549597934379, se 0.01839185800844235, t 2.6579965959341383, dof 1268, `r2yd_x`
+0.005540851802641748, `rv_q` 0.07191008791292285, `rv_q05` 0.036632022814959704, `rv_qa`
+0.019338593626010935; benchmark female: `female_r2dxj` 0.002574930988431467, `female_r2yxj`
+0.11546024184356445.
 
-```
-R²(Y~D|X) = t² / (t² + df)
-```
+## Tolerances
 
-where `t` is the t-statistic and `df` is the residual degrees of freedom.
+`Tol::coef(n)` for the estimate, `Tol::se(n)`, `Tol::stat(n)` for t, partial R^2 and RV, dof exact;
+`partial_r2(t, dof)` to 1e-14.
 
-### Robustness Value (RV)
+## Tests
 
-For q=1 (nullifying the effect), the RV is:
+`test_validate_sensemakr_darfur` (the formulas on the classical OLS t),
+`test_validate_sensemakr_darfur_benchmark` (X-16: the exact benchmark partial R^2 of the treatment on
+female; a revert to `0.5 * R^2_{Y~X_j}` fails it). Registry entry `sensemakr`. The old R test
+asserted RV in 0.10-0.20 at a dof of 1276, which is not the
+dataset's, and is deleted. `test_sensemakr_benchmark_collinear_is_an_error` checks the collinearity
+error.
 
-```
-f = |t| / sqrt(df)
-RV = 0.5 * (sqrt(f⁴ + 4f²) - f²)
-```
+## Deviations
 
-This represents the minimum partial R² that a confounder U would need to have with both D and Y to explain away the entire effect.
-
-### Bias from Confounding
-
-The bias from an unobserved confounder with partial R² values (R²_{Y~U|X,D}, R²_{D~U|X}) is:
-
-```
-bias = SE * sqrt(R²_{Y~U|X,D}) * sqrt(R²_{D~U|X} * df / (1 - R²_{D~U|X}))
-```
-
-## Reference Implementation
-
-**R package**: `sensemakr` (Cinelli, Ferwerda, & Hazlett, 2020)
-- CRAN: https://CRAN.R-project.org/package=sensemakr
-- Documentation: https://carloscinelli.com/sensemakr/
-
-**Version used for validation**: sensemakr 0.1.4
-
-## Test Case 1: Basic Sensitivity Analysis
-
-### Data Generation (R)
-
-```r
-library(sensemakr)
-
-# Use the Darfur dataset from the sensemakr package
-data(darfur)
-
-# Fit OLS model
-model <- lm(peacefactor ~ directlyharmed + age + farmer_dar + heression, data = darfur)
-summary(model)
-
-# Run sensitivity analysis
-sens <- sensemakr(model, treatment = "directlyharmed")
-summary(sens)
-```
-
-### Expected Results from R
-
-For the Darfur dataset with treatment "directlyharmed":
-
-| Metric | R Value |
-|--------|---------|
-| Estimate | 0.0973 |
-| Standard Error | 0.0232 |
-| t-statistic | 4.18 |
-| DF | 1276 |
-| Partial R²(Y~D|X) | 0.0135 |
-| RV(q=1) | ~0.138 |
-| RV(q=1, α=0.05) | ~0.075 |
-
-### Rust Test
-
-```rust
-#[test]
-fn test_validate_against_r_sensemakr() {
-    // Known values from R sensemakr Darfur example
-    let t_stat = 4.18;
-    let df = 1276.0;
-
-    // Partial R² = t² / (t² + df)
-    let partial_r2_expected = t_stat.powi(2) / (t_stat.powi(2) + df);
-    let partial_r2_calc = partial_r2(t_stat, df);
-    assert!((partial_r2_calc - partial_r2_expected).abs() < 1e-6);
-
-    // RV calculation
-    let rv = robustness_value(t_stat, df, 1.0);
-    // Expected range from R
-    assert!(rv > 0.10 && rv < 0.20);
-}
-```
-
-## Test Case 2: Synthetic Data
-
-### Data Generation
-
-```r
-set.seed(42)
-n <- 200
-
-# Generate data with known treatment effect
-treatment <- rbinom(n, 1, 0.5)
-x1 <- rnorm(n)
-x2 <- rnorm(n)
-y <- 0.5 + 2.0 * treatment + 1.0 * x1 + 0.5 * x2 + rnorm(n, 0, 0.5)
-
-df <- data.frame(y = y, treatment = treatment, x1 = x1, x2 = x2)
-model <- lm(y ~ treatment + x1 + x2, data = df)
-sens <- sensemakr(model, treatment = "treatment", benchmark_covariates = "x1")
-summary(sens)
-```
-
-### Validation Criteria
-
-1. Treatment coefficient should be approximately 2.0 (with noise)
-2. Partial R² should be substantial (> 0.3) given strong effect
-3. RV should be high (> 0.2) indicating robustness
-4. Benchmark bounds should provide reasonable adjusted estimates
-
-## Test Case 3: Edge Cases
-
-### Near-zero effect
-
-```r
-# Treatment with no effect
-treatment <- rbinom(n, 1, 0.5)
-y <- rnorm(n)
-model <- lm(y ~ treatment)
-sens <- sensemakr(model, treatment = "treatment")
-# RV should be near 0
-```
-
-### Very strong effect
-
-```r
-# Perfect separation (nearly)
-treatment <- rbinom(n, 1, 0.5)
-y <- 10 * treatment + rnorm(n, 0, 0.01)
-model <- lm(y ~ treatment)
-sens <- sensemakr(model, treatment = "treatment")
-# RV should be near 1
-```
-
-## Tolerance Guidelines
-
-| Sample Size | Partial R² | RV | Adjusted Estimates |
-|------------|------------|-----|-------------------|
-| n < 100 | 1e-4 | 0.01 | 0.01 |
-| n = 100-1000 | 1e-6 | 0.001 | 0.001 |
-| n > 1000 | 1e-8 | 0.0001 | 0.0001 |
-
-## Known Differences
-
-1. **Benchmark computation**: `run_sensemakr(dataset, ...)` now computes R²_{D~X_j|X_{-j}} exactly, via an auxiliary regression of the treatment on the control covariates (the design matrix is available on this path). The OLS-only `sensemakr(&ols_result, ...)` entry point still approximates R²_{D~X_j|X_{-j}} ≈ 0.5 · R²_{Y~X_j} because it has no design matrix, and now flags this in `SensemakrResult.warnings`. The exact benchmark-bounds path has not yet been cross-checked against the R `sensemakr` package to a fixed numerical tolerance (see status below).
-
-2. **Standard error adjustment**: The adjusted SE formula is an approximation. For exact results, the full sensitivity formula from Cinelli & Hazlett (2020) Equation 9 should be used.
-
-## References
-
-- Cinelli, C. & Hazlett, C. (2020). "Making Sense of Sensitivity: Extending Omitted Variable Bias". *Journal of the Royal Statistical Society: Series B*, 82(1), 39-67. https://doi.org/10.1111/rssb.12348
-
-- Cinelli, C., Ferwerda, J., & Hazlett, C. (2020). sensemakr: Sensitivity Analysis Tools for Regression Models. R package version 0.1.4. https://CRAN.R-project.org/package=sensemakr
-
-## Validation Status
-
-| Test Case | Status | Notes |
-|-----------|--------|-------|
-| Partial R² formula | Validated | Exact match |
-| RV formula | Validated | Within tolerance |
-| Bias calculation | Validated | Within tolerance |
-| Benchmark bounds (run_sensemakr) | Exact method | Auxiliary regression; not yet cross-checked vs R to tolerance |
-| Benchmark bounds (sensemakr, OLS-only) | Approximate | 0.5·R²_{Y~X_j} fallback, flagged in warnings |
-| Contour data | Validated | Grid matches expected |
+- REG-28: `rv_qa` (R uses `qt(alpha/2, dof - 1) / sqrt(dof - 1)` and the extreme-RV branch; p2a gives
+  0.019359950325335992). `run_sensemakr`'s se, t, partial R^2, RV and `r2_yd_benchmark` use the HC1
+  t (R: classical; `female_r2yxj` p2a 0.1204729846).
+- REG-27: `bound_r2dz_x`, `bound_r2yz_dx`, `bound_adjusted_*` (bound formulas, adjusted SE and CI).

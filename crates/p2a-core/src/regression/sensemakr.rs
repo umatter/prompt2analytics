@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, least_squares};
 use crate::regression::ols::{CovarianceType, OlsResult, run_ols};
 use crate::traits::t_critical;
 
@@ -406,6 +406,7 @@ fn partial_r2_covariate_outcome(
     y: &Array1<f64>,
     x: &Array2<f64>,
     covariate_idx: usize,
+    name: &str,
 ) -> EconResult<f64> {
     let n = x.nrows();
     let k = x.ncols();
@@ -453,24 +454,24 @@ fn partial_r2_covariate_outcome(
         x_minus_j.column_mut(j).assign(col);
     }
 
-    // Compute (X_{-j}'X_{-j})^{-1}
-    let xtx_minus_j = xtx(&x_minus_j.view());
-    let (xtx_inv_minus_j, _) =
-        safe_inverse(&xtx_minus_j.view()).map_err(|_| EconError::SingularMatrix {
-            context: "X'X in partial R² computation".to_string(),
-            suggestion: "Check for multicollinearity".to_string(),
-        })?;
-
-    // Residuals from regressing Y on X_{-j}
-    let xty_minus_j = xty(&x_minus_j.view(), y);
-    let beta_minus_j = xtx_inv_minus_j.dot(&xty_minus_j);
-    let y_resid: Array1<f64> = y - &x_minus_j.dot(&beta_minus_j);
-
-    // Residuals from regressing X_j on X_{-j}
+    // Residuals of y and of X_j on X_{-j}, by pivoted QR (lm.fit). An aliased X_{-j} column, or
+    // X_j in the span of X_{-j}, leaves the partial R² undefined.
+    let collinear = || EconError::SingularMatrix {
+        context: format!("benchmark covariate '{name}' is collinear with the other covariates"),
+        suggestion: "drop the collinear covariate or choose another benchmark".to_string(),
+    };
+    let fit_y = least_squares(x_minus_j.view(), y.view())?;
+    if fit_y.rank < k_minus_1 {
+        return Err(collinear());
+    }
+    let y_resid = fit_y.residuals;
     let x_j = x.column(covariate_idx).to_owned();
-    let xtx_j_minus_j = xty(&x_minus_j.view(), &x_j);
-    let beta_x_j = xtx_inv_minus_j.dot(&xtx_j_minus_j);
-    let x_j_resid: Array1<f64> = &x_j - &x_minus_j.dot(&beta_x_j);
+    let fit_x = least_squares(x_minus_j.view(), x_j.view())?;
+    let x_j_resid = fit_x.residuals;
+    let x_scale = x_j.dot(&x_j).sqrt();
+    if x_j_resid.dot(&x_j_resid).sqrt() <= LM_QR_TOL * x_scale {
+        return Err(collinear());
+    }
 
     // Partial R² = correlation between residuals squared
     let y_resid_mean = y_resid.mean().unwrap_or(0.0);
@@ -502,9 +503,10 @@ fn partial_r2_covariate_treatment(
     treatment: &Array1<f64>,
     x: &Array2<f64>,
     covariate_idx: usize,
+    name: &str,
 ) -> EconResult<f64> {
     // Same as partial_r2_covariate_outcome but with treatment instead of y
-    partial_r2_covariate_outcome(treatment, x, covariate_idx)
+    partial_r2_covariate_outcome(treatment, x, covariate_idx, name)
 }
 
 /// Run sensitivity analysis from an existing OLS result.
@@ -768,7 +770,7 @@ pub fn run_sensemakr(
             for &b in benchmarks {
                 if let Some(pos) = covariate_cols.iter().position(|&c| c == b) {
                     // pos + 1 skips the intercept column at index 0.
-                    let r2 = partial_r2_covariate_treatment(&treatment_vec, &x, pos + 1)?;
+                    let r2 = partial_r2_covariate_treatment(&treatment_vec, &x, pos + 1, b)?;
                     map.insert(b.to_string(), r2);
                 }
             }
@@ -1018,42 +1020,95 @@ mod tests {
         );
     }
 
-    /// Validate against R sensemakr package results.
-    /// R code to reproduce:
-    /// ```r
-    /// library(sensemakr)
-    /// data(darfur)
-    /// model <- lm(peacefactor ~ directlyharmed + age + farmer_dar + heression, data = darfur)
-    /// sens <- sensemakr(model, treatment = "directlyharmed")
-    /// summary(sens)
-    /// ```
+    const COVS: [&str; 6] = [
+        "age",
+        "farmer_dar",
+        "herder_dar",
+        "pastvoted",
+        "hhsize_darfur",
+        "female",
+    ];
+
+    /// Case `sensemakr_darfur`: sensemakr's formulas on the classical OLS t of darfur (no
+    /// village effects): dof 1268.
     #[test]
-    fn test_validate_against_r_sensemakr() {
-        // Test with known values from R sensemakr
-        // For the Darfur dataset:
-        // directlyharmed: estimate = 0.0973, se = 0.0232, t = 4.18, df = 1276
+    fn test_validate_sensemakr_darfur() {
+        use crate::regression::ols::{CovarianceType, run_ols};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("sensemakr_darfur");
+        let n = case.scalar("n") as usize;
+        let mut x = vec!["directlyharmed"];
+        x.extend(COVS);
+        let ols = run_ols(&ds, "peacefactor", &x, true, CovarianceType::Standard).unwrap();
+        let s = sensemakr(&ols, "directlyharmed", None, None, None, 1.0, 0.05).unwrap();
+        let (t, dof) = (case.scalar("t"), case.scalar("dof"));
+        Check::new(&case)
+            .scalar("estimate", s.estimate, Tol::coef(n))
+            .scalar("se", s.std_error, Tol::se(n))
+            .scalar("t", s.t_statistic, Tol::stat(n))
+            .scalar("dof", s.df, Tol::exact())
+            .scalar("r2yd_x", s.partial_r2_yd, Tol::stat(n))
+            .scalar("rv_q", s.robustness_value, Tol::stat(n))
+            .scalar("rv_q05", robustness_value(t, dof, 0.5), Tol::stat(n))
+            .finish();
+        assert!((partial_r2(t, dof) - case.scalar("r2yd_x")).abs() <= 1e-14);
+        // deviation REG-28: rv_qa 0.019338593626010935 (R: qt(alpha/2, dof - 1) / sqrt(dof - 1)
+        // and the extreme-RV branch); p2a's robustness_value_alpha gives 0.019359950325335992.
+    }
 
-        let t_stat: f64 = 4.18;
-        let df: f64 = 1276.0;
+    /// Case `sensemakr_darfur`, X-16: run_sensemakr's benchmark partial R^2 of the treatment on
+    /// female is the exact R^2_{D~X_j|X_-j} (commit 5f86b49); a revert to 0.5 * R^2_{Y~X_j}
+    /// fails this pin.
+    #[test]
+    fn test_validate_sensemakr_darfur_benchmark() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("sensemakr_darfur");
+        let n = case.scalar("n") as usize;
+        let r = run_sensemakr(
+            &ds,
+            "peacefactor",
+            "directlyharmed",
+            &COVS,
+            Some(&["female"]),
+            Some(1.0),
+            None,
+            1.0,
+            0.05,
+        )
+        .unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        Check::new(&case)
+            .scalar("estimate", r.estimate, Tol::coef(n))
+            .scalar(
+                "female_r2dxj",
+                r.benchmark_bounds[0].r2_xz_benchmark,
+                Tol::stat(n),
+            )
+            .finish();
+        // deviation REG-28: run_sensemakr's se, t, partial R^2, RV and r2_yd_benchmark use HC1 t
+        // (R: classical; female_r2yxj 0.11546024184356445, p2a 0.1204729846). deviation REG-27:
+        // bound_r2dz_x, bound_r2yz_dx and bound_adjusted_* (the bound formulas, adjusted SE and
+        // CI).
+    }
 
-        // Partial R² = t² / (t² + df) = 17.47 / (17.47 + 1276) = 0.0135
-        let partial_r2_expected = t_stat.powi(2) / (t_stat.powi(2) + df);
-        let partial_r2_calc = partial_r2(t_stat, df);
-        assert!(
-            (partial_r2_calc - partial_r2_expected).abs() < 1e-6,
-            "Partial R² mismatch: expected {}, got {}",
-            partial_r2_expected,
-            partial_r2_calc
-        );
-
-        // RV calculation
-        let rv = robustness_value(t_stat, df, 1.0);
-        // From R: RV ≈ 0.138 (approximately)
-        assert!(
-            rv > 0.10 && rv < 0.20,
-            "RV should be between 0.10 and 0.20 for these values, got {}",
-            rv
-        );
+    /// A benchmark covariate in the span of the others is an error naming it.
+    #[test]
+    fn test_sensemakr_benchmark_collinear_is_an_error() {
+        let x = Array2::from_shape_fn((12, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => (i as f64 * 0.7).sin(),
+            _ => 2.0 * (i as f64 * 0.7).sin() + 1.0,
+        });
+        let d = Array1::from_shape_fn(12, |i| (i as f64 * 1.3).cos());
+        match partial_r2_covariate_treatment(&d, &x, 2, "z").unwrap_err() {
+            EconError::SingularMatrix { context, .. } => {
+                assert!(
+                    context.contains("'z'") && context.contains("collinear"),
+                    "{context}"
+                )
+            }
+            e => panic!("{e:?}"),
+        }
     }
 
     /// Test contour data generation.

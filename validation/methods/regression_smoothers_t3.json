@@ -69,10 +69,10 @@
         "gls_compsymm"
       ],
       "tests": [
-        "test_validate_gls_compsymm_reml",
-        "test_validate_gls_compsymm_ml",
-        "test_validate_gls_compsymm_fixed_rho_grouped",
-        "test_validate_gls_ar1_grouped_reml"
+        "p2a-core::regression::gls::tests::test_validate_gls_compsymm_reml",
+        "p2a-core::regression::gls::tests::test_validate_gls_compsymm_ml",
+        "p2a-core::regression::gls::tests::test_validate_gls_compsymm_fixed_rho_grouped",
+        "p2a-core::regression::gls::tests::test_validate_gls_ar1_grouped_reml"
       ],
       "quantities": [
         "rho (REML, ML)",
@@ -97,7 +97,9 @@
       "cases": [
         "line_tukey_outliers"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::regression::line::tests::test_validate_line_resists_outliers"
+      ],
       "quantities": [],
       "tolerance": "to be pinned with REG-12",
       "deviations": [
@@ -119,7 +121,10 @@
         "nls_expdecay",
         "nls_mm"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::regression::nls::tests::test_validate_nls_expdecay",
+        "p2a-core::regression::nls::tests::test_validate_nls_michaelis_menten"
+      ],
       "quantities": [
         "coefficients",
         "SE",
@@ -145,7 +150,10 @@
       "cases": [
         "sensemakr_darfur"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::regression::sensemakr::tests::test_validate_sensemakr_darfur",
+        "p2a-core::regression::sensemakr::tests::test_validate_sensemakr_darfur_benchmark"
+      ],
       "quantities": [
         "estimate, SE, t, dof (classical OLS)",
         "partial R2 of the treatment",
@@ -176,7 +184,9 @@
       "cases": [
         "evalue_formulas"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::regression::evalue::tests::test_validate_evalue_formulas"
+      ],
       "quantities": [
         "RR-scale estimate",
         "E-value of the estimate",
