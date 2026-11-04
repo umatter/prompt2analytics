@@ -12,7 +12,9 @@
 //! arcs by block search (blocks of `max(ceil(sqrt(m)), 10)` arcs) and leaving arcs by
 //! Cunningham's rule, which keeps every tree strongly feasible and so never cycles on
 //! degenerate problems (Cunningham 1976; Ahuja, Magnanti and Orlin 1993, ch. 11). Costs, node
-//! potentials and reduced costs are `i128`, so nothing overflows for the documented bounds.
+//! potentials and reduced costs are `i128`, so nothing in the pivots overflows for the
+//! documented bounds; the reported total cost, a sum of up to `2^114` per arc, is computed
+//! with checked arithmetic and refused (`Computation`) in the extreme case it would not fit.
 //! The problem is infeasible when an artificial arc still carries flow at the optimum.
 //!
 //! Pinned to `rlemon::MinCostFlow(algorithm = "NetworkSimplex")` (rlemon 0.2.1, LEMON 1.3) and
@@ -52,12 +54,10 @@ fn spec(message: String) -> EconError {
 }
 
 impl Network {
-    /// A network of `nodes` nodes with zero supplies and no arcs.
-    pub fn new(nodes: usize) -> Network {
-        Network {
-            supplies: vec![0; nodes],
-            ..Network::default()
-        }
+    /// A network of `nodes` nodes with zero supplies and no arcs; `ResourceLimit` when the
+    /// node array exceeds the allocation ceiling.
+    pub fn new(nodes: usize) -> EconResult<Network> {
+        Network::with_arc_capacity(nodes, 0)
     }
 
     /// As [`Network::new`], with room for `arcs` arcs reserved fallibly.
@@ -449,7 +449,17 @@ pub fn network_simplex(network: &Network) -> EconResult<FlowSolution> {
         });
     }
     let flows: Vec<i64> = flow[..m].iter().map(|&f| f as i64).collect();
-    let total_cost = (0..m).map(|e| flow[e] * cost[e]).sum();
+    let total_cost = (0..m)
+        .try_fold(0i128, |acc, e| {
+            flow[e]
+                .checked_mul(cost[e])
+                .and_then(|c| acc.checked_add(c))
+        })
+        .ok_or_else(|| {
+            EconError::Computation(
+                "network simplex: the total cost of the optimal flow overflows i128".into(),
+            )
+        })?;
     pi.truncate(n);
     Ok(FlowSolution {
         status: FlowStatus::Optimal,
@@ -479,7 +489,7 @@ mod tests {
         (1..=5)
             .map(|k| {
                 let rows: Vec<usize> = (0..net.len()).filter(|&i| net[i] == k as f64).collect();
-                let mut g = Network::new(rows.iter().filter(|&&i| kind[i] == 2.0).count());
+                let mut g = Network::new(rows.iter().filter(|&&i| kind[i] == 2.0).count()).unwrap();
                 for &i in &rows {
                     if kind[i] == 1.0 {
                         g.add_arc(a[i] as usize, b[i] as usize, cap[i] as i64, cost[i] as i64)
@@ -548,7 +558,7 @@ mod tests {
     /// [0, 2], so a = 2 and the optimum is 20.
     #[test]
     fn test_network_simplex_transportation_by_hand() {
-        let mut g = Network::new(4);
+        let mut g = Network::new(4).unwrap();
         for (t, h, c) in [(0, 2, 4), (0, 3, 6), (1, 2, 5), (1, 3, 3)] {
             g.add_arc(t, h, 10, c).unwrap();
         }
@@ -568,7 +578,7 @@ mod tests {
     #[test]
     fn test_network_simplex_assignment_matches_brute_force() {
         let c = |i: usize, j: usize| ((7 * i + 13 * j) % 11) as i64 - 3;
-        let mut g = Network::new(12);
+        let mut g = Network::new(12).unwrap();
         for i in 0..6 {
             for j in 0..6 {
                 g.add_arc(i, 6 + j, 1, c(i, j)).unwrap();
@@ -587,7 +597,7 @@ mod tests {
     /// Fully degenerate: a 30 x 30 assignment with every cost 5 (Cunningham's rule must not cycle).
     #[test]
     fn test_network_simplex_degenerate_assignment_terminates() {
-        let mut g = Network::new(60);
+        let mut g = Network::new(60).unwrap();
         for i in 0..30 {
             for j in 0..30 {
                 g.add_arc(i, 30 + j, 1, 5).unwrap();
@@ -602,7 +612,7 @@ mod tests {
 
     #[test]
     fn test_network_simplex_infeasible() {
-        let mut g = Network::new(2);
+        let mut g = Network::new(2).unwrap();
         g.add_arc(0, 1, 3, 1).unwrap();
         g.set_supply(0, 5).unwrap();
         g.set_supply(1, -5).unwrap();
@@ -613,7 +623,7 @@ mod tests {
         );
         assert_eq!(
             network_simplex(&{
-                let mut h = Network::new(1);
+                let mut h = Network::new(1).unwrap();
                 h.set_supply(0, 0).unwrap();
                 h
             })
@@ -629,7 +639,7 @@ mod tests {
             EconError::InvalidSpecification { message } => message,
             o => panic!("{o:?}"),
         };
-        let mut g = Network::new(2);
+        let mut g = Network::new(2).unwrap();
         assert!(spec(g.add_arc(2, 0, 1, 1).unwrap_err()).contains("tail"));
         assert!(spec(g.add_arc(0, 5, 1, 1).unwrap_err()).contains("head"));
         assert!(spec(g.add_arc(0, 1, -1, 1).unwrap_err()).contains("capacity"));
@@ -642,7 +652,7 @@ mod tests {
     #[test]
     fn test_network_simplex_stops_when_cancelled() {
         use crate::resource::{Budget, CancelToken, with_budget};
-        let mut g = Network::new(60);
+        let mut g = Network::new(60).unwrap();
         for i in 0..30 {
             for j in 0..30 {
                 g.add_arc(i, 30 + j, 1, ((i * j) % 7) as i64).unwrap();
@@ -654,5 +664,30 @@ mod tests {
         token.cancel();
         let r = with_budget(Budget::new(None, token), || network_simplex(&g));
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    /// At the documented maxima each arc's flow * cost is 2^114, so 2^13 + 8 such arcs sum
+    /// past i128: an error, not a debug panic or a release wrap-around.
+    #[test]
+    fn test_network_simplex_total_cost_overflow_is_an_error() {
+        let pairs = (1usize << 13) + 8;
+        let mut g = Network::with_arc_capacity(2 * pairs, pairs).unwrap();
+        for i in 0..pairs {
+            g.add_arc(2 * i, 2 * i + 1, MAX_ARC_CAPACITY, MAX_ARC_COST)
+                .unwrap();
+            g.set_supply(2 * i, MAX_ARC_CAPACITY).unwrap();
+            g.set_supply(2 * i + 1, -MAX_ARC_CAPACITY).unwrap();
+        }
+        let r = network_simplex(&g);
+        assert!(
+            matches!(r, Err(EconError::Computation(ref m)) if m.contains("overflows")),
+            "{r:?}"
+        );
+        // a single arc at the maxima still reports its exact cost
+        let mut g = Network::new(2).unwrap();
+        g.add_arc(0, 1, MAX_ARC_CAPACITY, MAX_ARC_COST).unwrap();
+        g.set_supply(0, MAX_ARC_CAPACITY).unwrap();
+        g.set_supply(1, -MAX_ARC_CAPACITY).unwrap();
+        assert_eq!(network_simplex(&g).unwrap().total_cost, 1i128 << 114);
     }
 }

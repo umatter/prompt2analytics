@@ -7,7 +7,9 @@
 //! # Methods
 //!
 //! - **Nearest Neighbor Matching**: For each treated unit, find the closest control
-//!   unit(s) by propensity score distance. Supports with/without replacement and calipers.
+//!   unit(s) by propensity score distance (logit or probit), or by Mahalanobis (pooled
+//!   within-group covariance) or Euclidean covariate distance. Supports with/without
+//!   replacement, calipers and MatchIt's `m.order` (the order treated units are matched in).
 //!
 //! - **Coarsened Exact Matching (CEM)**: Coarsen covariates into bins and match exactly
 //!   within strata. Prunes observations in unmatched strata.
@@ -21,9 +23,9 @@
 //! # Balance Diagnostics
 //!
 //! All matching methods return balance diagnostics including:
-//! - Standardized mean differences (SMD)
-//! - Variance ratios
-//! - Kolmogorov-Smirnov statistics
+//! - Standardised mean differences (`summary.matchit`, treated SD of the full sample)
+//! - Variance ratios (NA for binary covariates)
+//! - eCDF mean and max (`ks_statistic` = eCDF max)
 //!
 //! # References
 //!
@@ -55,7 +57,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
-use crate::econometrics::glm::{GlmLink, GlmSpec, fit_propensity};
+use crate::econometrics::glm::{GlmLink, fit_propensity};
 use crate::econometrics::min_cost_flow::{FlowStatus, Network, network_simplex};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -281,7 +283,8 @@ pub const DEFAULT_MATCH_SEED: u64 = 42;
 pub struct MatchOptions {
     /// None = MatchIt's default: Largest for logit/probit distances, Data for
     /// Mahalanobis/Euclidean. Ignored by CEM, full and subclass matching, and by
-    /// nearest-neighbour matching with replacement (always data order, as MatchIt).
+    /// nearest-neighbour matching with replacement (always data order, as MatchIt; an
+    /// explicit order other than Data then adds a warning).
     pub m_order: Option<MOrder>,
     /// Seed of [`MOrder::Random`]; None = [`DEFAULT_MATCH_SEED`].
     pub seed: Option<u64>,
@@ -670,7 +673,13 @@ pub fn match_it_with(
         DistanceMethod::Probit => Some(GlmLink::Probit),
         DistanceMethod::Mahalanobis | DistanceMethod::Euclidean => None,
     };
-    validate_match_options(&method, distance_method, ps_link.is_some(), options)?;
+    validate_match_options(
+        &method,
+        distance_method,
+        ps_link.is_some(),
+        options,
+        covariate_cols,
+    )?;
 
     let balance_before = balance_table(&x, &covariate_names, &is_treated, &vec![1.0; n]);
 
@@ -805,6 +814,7 @@ fn validate_match_options(
     distance: DistanceMethod,
     has_ps: bool,
     options: &MatchOptions,
+    covariate_cols: &[&str],
 ) -> EconResult<()> {
     let spec = |message: String| Err(EconError::InvalidSpecification { message });
     let dname = DistanceMethod::choices().canonical(distance);
@@ -842,11 +852,10 @@ fn validate_match_options(
             cutpoints: Some(cuts),
             ..
         } => {
-            for (j, c) in cuts.iter().enumerate() {
+            for (name, c) in covariate_cols.iter().zip(cuts) {
                 if c.iter().any(|v| !v.is_finite()) {
                     return spec(format!(
-                        "cutpoints for covariate {} must be finite numbers",
-                        j + 1
+                        "cutpoints for covariate '{name}' must be finite numbers"
                     ));
                 }
             }
@@ -889,6 +898,12 @@ fn nearest_neighbour(
         options.seed.unwrap_or(DEFAULT_MATCH_SEED),
     );
     let mut warnings = Vec::new();
+    if let Some(o) = options.m_order.filter(|&o| replace && o != MOrder::Data) {
+        warnings.push(format!(
+            "m_order = '{o}' has no effect with replacement; treated units are matched in data \
+             order (as MatchIt)"
+        ));
+    }
     if !replace {
         if n_c < n_t {
             warnings.push(
@@ -902,12 +917,11 @@ fn nearest_neighbour(
     let (matched, caliper_abs, dist): (
         Vec<Vec<usize>>,
         Option<f64>,
-        Box<dyn Fn(usize, usize) -> f64>,
+        Box<dyn Fn(usize, usize) -> f64 + '_>,
     ) = match scores {
         Some(s) => {
             let caliper_abs = caliper.map(|c| c * sample_sd(s));
             let m = nn_on_scores(s, is_treated, &order, ratio, caliper_abs, replace)?;
-            let s = s.to_vec();
             (m, caliper_abs, Box::new(move |t, c| (s[t] - s[c]).abs()))
         }
         None => {
@@ -927,14 +941,6 @@ fn nearest_neighbour(
             (m, caliper, Box::new(move |t, c| metric.distance(t, c)))
         }
     };
-    let pairs = crate::resource::checked_len(
-        &[n_t, ratio],
-        "matched control lists (ratio controls per treated unit)",
-    )?;
-    crate::resource::check_alloc::<(usize, f64)>(
-        pairs,
-        "matched control lists (ratio controls per treated unit)",
-    )?;
     let mut subclass = vec![None; n];
     let mut label = 0;
     let mut matches = Vec::with_capacity(n_t);
@@ -1219,15 +1225,24 @@ fn estimate_propensity(
     design.column_mut(0).fill(1.0);
     design.slice_mut(ndarray::s![.., 1..]).assign(x);
     let fit = fit_propensity(design.view(), treat.view(), link)?;
-    let spec = GlmSpec::logit();
-    let convergence = Convergence::new(
-        fit.fit.converged,
-        fit.fit.iterations,
-        spec.max_iter,
-        "relative change in deviance",
-        f64::NAN,
-        spec.epsilon,
-    );
+    // the record of the fit that ran (its max_iter and epsilon); the non-canonical links
+    // also refine until the coefficients settle (fit_propensity)
+    let mut convergence = fit.fit.notes_convergence().unwrap_or_else(|| {
+        Convergence::new(
+            fit.fit.converged,
+            fit.fit.iterations,
+            fit.fit.max_iter,
+            "relative change in deviance",
+            f64::NAN,
+            fit.fit.epsilon,
+        )
+    });
+    if link != GlmLink::Logit {
+        convergence.criterion = format!(
+            "relative change in deviance, then relative coefficient change < {}",
+            crate::econometrics::glm::PROPENSITY_COEF_TOL
+        );
+    }
     let mut warnings: Vec<String> = convergence
         .note("propensity-score glm")
         .into_iter()
@@ -2046,8 +2061,15 @@ fn subclass_labels(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Largest treated x control problem optimal full matching accepts (optmatch's default
-/// maximum problem size), in every mode: the dense problem needs about 48 bytes per pair.
+/// maximum problem size), in every mode. The dense problem needs about
+/// [`FULL_MATCH_BYTES_PER_PAIR`] bytes per pair (the network's arcs, the simplex's arc state
+/// and the distance matrix), so the peak at this limit is about 1 GB.
 pub const FULL_MATCH_MAX_PAIRS: usize = 10_000_000;
+
+/// Approximate peak bytes per treated-control pair of optimal full matching: 32 in the
+/// `Network` arc (tail, head, capacity, cost), about 65 in `network_simplex` (source and
+/// target, capacity, cost and flow, state) and 8 in the distance matrix.
+pub const FULL_MATCH_BYTES_PER_PAIR: usize = 105;
 
 /// An optimal full matching of the rows (treated) and columns (controls) of a distance matrix.
 #[derive(Debug, Clone)]
@@ -2094,7 +2116,9 @@ fn check_full_pairs(n_t: usize, n_c: usize) -> EconResult<()> {
         Some(p) if p <= FULL_MATCH_MAX_PAIRS => Ok(()),
         p => {
             let pairs = p.map_or_else(|| "more than usize::MAX".to_string(), |p| p.to_string());
-            let mb = p.map_or(f64::INFINITY, |p| (48.0 * p as f64 / 1e6).round());
+            let mb = p.map_or(f64::INFINITY, |p| {
+                (FULL_MATCH_BYTES_PER_PAIR as f64 * p as f64 / 1e6).round()
+            });
             Err(EconError::InvalidSpecification {
                 message: format!(
                     "optimal full matching needs a dense {n_t} x {n_c} problem ({pairs} \
@@ -2258,7 +2282,11 @@ pub fn optimal_full_match(
                     .map(|s| (controls[s] as f64).min(max_c))
                     .sum();
                 if num == 0.0 {
-                    solved = solve_full(dist, min_c, max_c, None)?;
+                    // the unconstrained solve uses no control: retry the original problem
+                    // unless it has already been solved and found infeasible
+                    if !tried {
+                        solved = solve_full(dist, min_c, max_c, None)?;
+                    }
                 } else {
                     let omf = 1.0 - num / nc as f64;
                     solved = solve_full(dist, min_c, max_c, Some(omf))?;
@@ -2871,6 +2899,34 @@ mod tests {
         assert_eq!(run(Some(7)), run(Some(7)));
         assert_eq!(run(None), run(Some(DEFAULT_MATCH_SEED)));
         assert_ne!(run(Some(7)), run(Some(8)));
+        // with replacement the order does not matter: an explicit non-data order is reported
+        let r = match_it_with(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, true),
+            None,
+            &opts(MOrder::Random),
+        )
+        .unwrap();
+        assert_eq!(r.m_order, Some(MOrder::Data));
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "m_order = 'random' has no effect with replacement; treated units are matched \
+                    in data order (as MatchIt)"),
+            "{:?}",
+            r.warnings
+        );
+        let r = match_it_with(
+            &ds,
+            "treat",
+            &COVS,
+            nn(1, None, true),
+            None,
+            &opts(MOrder::Data),
+        )
+        .unwrap();
+        assert!(!r.warnings.iter().any(|w| w.contains("m_order")));
     }
 
     #[test]
@@ -3097,6 +3153,31 @@ mod tests {
         );
         assert!(
             matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("no units were matched"))
+        );
+    }
+
+    #[test]
+    fn test_cem_non_finite_cutpoints_name_the_covariate() {
+        let df = df! {
+            "d" => [1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            "x" => [0.0, 0.1, 10.0, 10.1, 3.2, 4.7],
+            "age" => [21.0, 34.0, 45.0, 29.0, 52.0, 38.0]
+        }
+        .unwrap();
+        let r = match_it(
+            &Dataset::new(df),
+            "d",
+            &["x", "age"],
+            MatchMethod::CoarsenedExact {
+                cutpoints: Some(vec![vec![5.0], vec![30.0, f64::NAN]]),
+                n_bins: None,
+            },
+            None,
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message })
+                if message == "cutpoints for covariate 'age' must be finite numbers"),
+            "{r:?}"
         );
     }
 

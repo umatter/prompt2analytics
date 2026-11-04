@@ -24,9 +24,10 @@ in data order, as MatchIt. Only the ATT is estimated.
 ## Algorithms
 
 - **Propensity score.** `econometrics::glm::fit_propensity` with the requested link, an intercept and the
-  covariates: R's `glm(binomial(link))`. After glm's deviance rule the coefficients are refined until their
-  relative change is below `PROPENSITY_COEF_TOL` (1e-10), so the scores are the MLE to about 1e-10 (R at
-  `epsilon = 1e-14`). Separation and non-convergence are reported in `warnings` and `propensity_convergence`.
+  covariates: R's `glm(binomial(link))`. The logit stops at glm's deviance rule (IRLS is Newton for the
+  canonical link and lands at about 1e-8); for the probit the coefficients are refined after the deviance rule
+  until their relative change is below `PROPENSITY_COEF_TOL` (1e-10), so the scores are the MLE to about 1e-10
+  (R at `epsilon = 1e-14`). Separation and non-convergence are reported in `warnings` and `propensity_convergence`.
 - **Nearest neighbour** (`matchit2nearest`, `nn_matchC_vec`). Treated units choose in `m.order`; `ratio = k` is
   matched in k rounds (every treated unit gets its first control before any gets a second). The caliper is
   `caliper * sd(ps)` with R's `sd`. Without replacement a used control is removed through skip lists; an exact
@@ -67,7 +68,7 @@ in data order, as MatchIt. Only the ATT is estimated.
 
 ## Limits
 
-Optimal full matching needs the dense treated x control problem (about 48 bytes per pair). As optmatch by
+Optimal full matching needs the dense treated x control problem (about 105 bytes per pair, `FULL_MATCH_BYTES_PER_PAIR`: about 1 GB at the limit). As optmatch by
 default, problems above `FULL_MATCH_MAX_PAIRS` = 1e7 treated-control pairs are refused in every mode, before the
 distance matrix is built. Nearest-neighbour lists, stratum control lists and the network are allocated fallibly
 under the allocation ceiling, and every user-sized loop checks the budget.
