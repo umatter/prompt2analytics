@@ -279,12 +279,34 @@ impl Dissimilarity {
 }
 
 /// A dendrogram in R's `hclust` convention.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+///
+/// Every constructor validates the merge matrix, heights and leaf order, and so does
+/// deserialization (through [`HclustTree::from_parts`]): the methods index merge entries
+/// directly and rely on that invariant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "HclustTreeParts")]
 pub struct HclustTree {
     n: usize,
     merge: Vec<(i64, i64)>,
     height: Vec<f64>,
     order: Vec<usize>,
+}
+
+/// The serialized fields of an [`HclustTree`], before validation.
+#[derive(Deserialize)]
+struct HclustTreeParts {
+    n: usize,
+    merge: Vec<(i64, i64)>,
+    height: Vec<f64>,
+    order: Vec<usize>,
+}
+
+impl TryFrom<HclustTreeParts> for HclustTree {
+    type Error = String;
+
+    fn try_from(p: HclustTreeParts) -> Result<Self, Self::Error> {
+        HclustTree::from_parts(p.n, p.merge, p.height, p.order).map_err(|e| e.to_string())
+    }
 }
 
 impl HclustTree {
@@ -405,17 +427,27 @@ impl HclustTree {
         n: usize,
         linkage: &[(usize, usize, f64, usize)],
     ) -> EconResult<Self> {
-        let map = |id: usize| -> i64 {
-            if id < n {
-                -(id as i64 + 1)
+        let bound = (2 * n).saturating_sub(1);
+        let map = |id: usize| -> EconResult<i64> {
+            // id < n: observation -(id + 1); otherwise the 1-based merge step id - n + 1.
+            let v = if id < n {
+                i64::try_from(id)
+                    .ok()
+                    .and_then(|v| v.checked_add(1))
+                    .map(|v| -v)
             } else {
-                (id - n) as i64 + 1
-            }
+                i64::try_from(id - n).ok().and_then(|v| v.checked_add(1))
+            };
+            v.ok_or_else(|| {
+                invalid(format!(
+                    "linkage id {id} is out of range (ids must be < 2n - 1 = {bound})"
+                ))
+            })
         };
         let merge = linkage
             .iter()
-            .map(|&(a, b, _, _)| (map(a), map(b)))
-            .collect();
+            .map(|&(a, b, _, _)| Ok((map(a)?, map(b)?)))
+            .collect::<EconResult<Vec<_>>>()?;
         let height = linkage.iter().map(|r| r.2).collect();
         Self::from_merge(n, merge, height)
     }
@@ -798,10 +830,19 @@ pub(crate) fn agnes_banner_order(tree: &HclustTree) -> Vec<usize> {
     let n = tree.n();
     let mut ner: Vec<usize> = (0..n).collect();
     let mut size = vec![1usize; n];
+    // The slots come from a validated tree (every constructor and deserialization validate),
+    // and each slot stays in the banner as the label of its block, so these lookups cannot
+    // fail on user input; a miss is a bug in this function.
     for (a, b) in tree.slots() {
-        let pb = ner.iter().position(|&v| v == b).unwrap_or(0);
+        let pb = ner
+            .iter()
+            .position(|&v| v == b)
+            .expect("slot is in the banner");
         let block: Vec<usize> = ner.drain(pb..pb + size[b]).collect();
-        let pa = ner.iter().position(|&v| v == a).unwrap_or(0);
+        let pa = ner
+            .iter()
+            .position(|&v| v == a)
+            .expect("slot is in the banner");
         let at = pa + size[a];
         ner.splice(at..at, block);
         size[a] += size[b];
@@ -1142,5 +1183,45 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    /// Deserialization validates like from_parts: a serialized tree round-trips, and a merge
+    /// row that refers to a later step is refused instead of panicking in cut_k.
+    #[test]
+    fn test_hclust_tree_deserialize_validates() {
+        let good = HclustTree::from_merge(3, vec![(-1, -2), (-3, 1)], vec![1.0, 2.5]).unwrap();
+        let json = serde_json::to_string(&good).unwrap();
+        let back: HclustTree = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, good);
+        assert_eq!(back.cut_k(2).unwrap(), good.cut_k(2).unwrap());
+
+        let forward = r#"{"n":3,"merge":[[-1,2],[-2,-3]],"height":[1.0,2.0],"order":[0,1,2]}"#;
+        let e = serde_json::from_str::<HclustTree>(forward)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not an earlier unused merge"), "{e}");
+        let bad_order = r#"{"n":3,"merge":[[-1,-2],[-3,1]],"height":[1.0,2.0],"order":[0,1]}"#;
+        let e = serde_json::from_str::<HclustTree>(bad_order)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("permutation"), "{e}");
+    }
+
+    /// A linkage id near usize::MAX is refused with the bound, not wrapped into a negative
+    /// (observation-looking) entry: usize::MAX used to map to observation 3 and this linkage
+    /// passed as a valid tree.
+    #[test]
+    fn test_hclust_scipy_linkage_rejects_huge_ids() {
+        let e = HclustTree::from_scipy_linkage(3, &[(0, usize::MAX, 1.0, 2), (1, 3, 2.0, 3)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("out of range") && e.contains("< 2n - 1 = 5"),
+            "{e}"
+        );
+        let e = HclustTree::from_scipy_linkage(3, &[(0, 1, 1.0, 2), (2, usize::MAX - 1, 2.0, 3)])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("out of range"), "{e}");
     }
 }
