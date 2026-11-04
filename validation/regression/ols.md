@@ -2,9 +2,11 @@
 
 ## Method Overview
 
-`run_ols` (and `run_ols_raw` on a prebuilt design matrix) estimates
-β̂ = (X'X)⁻¹X'y by the normal equations and reports the inference and fit statistics of
-R's `summary.lm`.
+`run_ols` (and `run_ols_raw` on a prebuilt design matrix) estimates β̂ by least squares
+and reports the inference and fit statistics of R's `summary.lm`. A full-rank,
+well-conditioned design is solved by the normal equations; any other design by `lm.fit`'s
+pivoted QR, which also decides which columns are aliased (see "Rank-deficient and
+ill-conditioned designs" below).
 
 **Parameters**: `y_col`, `x_cols`, `intercept`, `cov_type` (`Standard`, `HC0`-`HC3`; the
 HC variants are validated in [ols_robust_se.md](ols_robust_se.md), clustered SEs in
@@ -133,12 +135,58 @@ Largest differences on this machine (`P2A_VALIDATION_VERBOSE=1`):
 |---|---|---|---|---|---|
 | `ols_grunfeld` | 4.2e-15 rel | 1.6e-15 rel (classical), 5.5e-15 (HC1) | 7.5e-15 rel | 3.4e-13 rel | 1.9e-16 rel |
 | `ols_mtcars` | 3.9e-12 rel (disp) | 2.3e-14 rel | 3.9e-12 rel | 2.7e-13 rel | exact |
-| `ols_longley` | **3.56e-8 rel** (GNP.deflator); 1.88e-6 abs (intercept, 5.4e-10 rel) | 1.4e-9 rel | 3.5e-8 rel | 4.4e-9 rel | 2.4e-9 rel (logLik) |
+| `ols_longley` | 6.4e-15 rel (pivoted QR) | 1.8e-15 rel | 6.6e-15 rel | 3.3e-15 rel | 1.7e-14 rel (logLik) |
 
-p-values agree within 5.6e-9 absolute on Longley and within 3e-13 absolute elsewhere;
-tail p-values below about 1e-16 are 0 in p2a (see Known Differences). On Longley every
-error is inside the n < 100 tolerances, but the coefficients do **not** reach 1e-8
-relative.
+p-values agree within 3e-13 absolute on Grunfeld and mtcars. Before T3-WP09 the normal
+equations reached only 3.56e-8 relative on Longley's coefficients (GNP.deflator); Longley
+now takes the pivoted QR and agrees to 6.4e-15 (largest over the seven coefficients).
+
+## Rank-deficient and ill-conditioned designs (T3-WP09)
+
+**Solve.** `fit_ols` (behind `run_ols` and `run_ols_raw`) forms X'X (`linalg::xtx`, the
+CUDA path under `cuda`) and inverts it with `sym_inverse(.., SingularPolicy::Error, "X'X")`.
+When that succeeds with a reciprocal condition of the column-equilibrated X'X of at least
+1e-8 and a positive, finite inverse diagonal, β̂ = (X'X)⁻¹X'y as before, bit for bit.
+Otherwise the design goes to `linalg::solve::least_squares`, a transcription of `lm.fit`'s
+dqrdc2 pivoted QR with tol = 1e-7: the later of two collinear columns is aliased, exactly
+as R decides it. Measured reciprocal conditions (R): Grunfeld 0.121 (normal equations),
+Longley 5.34e-10 and `ols_illcond` 4.09e-12 (QR); every aliased design is singular and
+takes the QR. `test_validate_ols_solve_paths` asserts the path of each pinned design and
+`test_ols_solve_path_threshold` a design on either side of 1e-8.
+
+**What an aliased column reports.** Coefficient, SE, t, p and CI are NaN;
+`OlsResult.aliased` names it and `rank()` = k − |aliased|; the warnings carry R's text
+"Coefficients not defined because of singularities: <names>". df = n − rank; R², adjusted
+R², sigma and F (on rank − 1 and n − rank df) use the identified columns; logLik, AIC and
+BIC count rank + 1 parameters. A design of rank 0 is `SingularMatrix`; non-finite values in
+`run_ols_raw` input are refused (`lm.fit` refuses NA/NaN/Inf). HC0-HC3 work on the
+identified columns ([ols_robust_se.md](ols_robust_se.md)).
+
+**Cases** (`validation/r/cases/reg_rank_qr.R`, [source](../r/cases/reg_rank_qr.R)):
+
+| Case | Design | Decisive values |
+|---|---|---|
+| `ols_aliased` (n = 120) | `y ~ x1 + da + db + dc` (dummy trap: dc aliased); `y ~ x1 + x2 + x3` with x2 = 2 x1 (x2 aliased); `y ~ x1 + k5` (constant column aliased) | trap coef 0.6866082588992249, 0.45848569646633064, 0.2524436788731715, 0.5765620492704012; dup rank 3, df 117, sigma 0.5952841394745126, F 45.379581065647386 |
+| `ols_illcond` (n = 80) | `y ~ x1 + x2 + x3`, κ(X) = 1.68e8, full rank | coef -521.62338184282, 1.6205851564219942, -1.0683241910594095, 0.5114453636193678; the normal equations err by 2.8e-5 relative |
+| `ols_longley` | as above | κ(X) = 2.38e7 |
+
+**Tests** (`crates/p2a-core/src/regression/ols.rs`, registry entry `ols_rank_qr` in
+`validation/methods/reg_rank_qr.json`): `test_validate_ols_aliased_dummy_trap`,
+`test_validate_ols_aliased_duplicate`, `test_validate_ols_aliased_constant` (identified
+coefficients, aliased flags, SEs, rank, df, R², adjusted R², sigma, F and its df, logLik,
+AIC, BIC; HC0/HC1/HC3), `test_validate_ols_illcond_qr` (`Tol::coef(80)`) and
+`test_validate_ols_longley_qr` (1e-10 relative: an accuracy check, lm itself is 3.5e-14
+from NIST's certified values, not a pin of dqrdc2's rounding), `test_validate_ols_solve_paths`;
+`test_ols_rank_zero_is_an_error` and `test_ols_raw_rejects_non_finite` are property tests.
+
+**Measured agreement** (`P2A_VALIDATION_VERBOSE=1`): Longley coefficients within 6.4e-15
+relative; `ols_illcond` within 2.4e-12 relative (x1;
+the intercept 1.4e-12). LAPACK's dgeqp3 and dqrdc2 differ by 8.1e-11 on `ols_illcond`, which
+is why no tolerance tighter than the README's is applied there.
+
+**Timing.** The common path (full rank, reciprocal condition at least 1e-8) runs the
+normal equations it ran before plus one O(k²) condition certificate; no release-mode
+before/after table was measured in the package lane (see the package report).
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 
@@ -166,10 +214,10 @@ relative). Measured: criteria within 2.7e-15 relative, t within 1.7e-14.
 
 ## Known Differences
 
-1. **Normal equations** (REG-18, Tier 3): β̂ is solved from X'X, which loses digits on
-   ill-conditioned designs. Longley has κ(X) = 2.38e7 (`kappa(model.matrix, exact = TRUE)`)
-   and κ(X'X) = 5.69e14; the coefficients agree to 3.6e-8 relative, not to 1e-8. No
-   HC pin is added on Longley before REG-18 (its HC1 SEs agree to only 8.9e-6).
+1. **Solve path** (REG-18, fixed in T3-WP09): designs whose equilibrated X'X has a
+   reciprocal condition below 1e-8 are solved by pivoted QR, so the digits the normal
+   equations lost there (Longley 3.6e-8, `ols_illcond` 2.8e-5) are recovered; see the
+   section below. Well-conditioned designs keep the normal equations.
 2. **No-intercept models** report a centred R² (REG-19, Tier 4); R uses the uncentred one.
 3. **Tail p-values** below about 1e-16 are printed as 0 (X-17, Tier 3); the tests compare
    p-values with a 1e-12 absolute floor.
