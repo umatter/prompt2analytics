@@ -2,15 +2,44 @@
 //!
 //! GLS extends OLS to handle correlated and heteroscedastic errors.
 //! The model is Y = Xβ + ε where Var(ε) = σ²Ω.
+//!
+//! # Structures
+//!
+//! - Identity (OLS), AR(1) (`Ω[i, j] = ρ^|i - j|`), compound symmetry (`Ω[i, j] = ρ` off
+//!   the diagonal), and a known Ω ([`gls()`] only).
+//! - **Groups** (nlme `form = ~ 1 | g`): with [`GlsSpec::groups`] / [`GlsOptions::group_col`]
+//!   the AR(1) or compound-symmetry correlation acts within each group, in data order, and
+//!   rows of different groups are independent (Ω is block diagonal).
+//! - **ρ fixed or estimated.** A given ρ is used as is (nlme `fixed = TRUE`); without one,
+//!   ρ maximises nlme's restricted (REML, the default) or full (ML) profile log-likelihood,
+//!   by Brent's method on the open range of ρ.
+//!
+//! # Log-likelihood (nlme's)
+//!
+//! With the whitened data `(P y, P X)`, `P'P = Ω⁻¹`, and `SSE* = |P y - P X β|²`:
+//!
+//! - ML: `l = -N/2 (ln 2π + 1 + ln(SSE*/N)) - ½ ln det Ω`
+//! - REML: `l = -(N-p)/2 (ln 2π + 1 + ln(SSE*/(N-p))) - ½ ln det Ω - ½ ln det(X*'X*)`
+//!
+//! σ is `sqrt(SSE*/(N-p))` for REML and `sqrt(SSE*/N)` for ML; the standard errors use
+//! `SSE*/(N-p)` for both, as nlme's `vcov`. AIC and BIC count `p + 1` parameters plus an
+//! estimated ρ; BIC uses `ln(N - p)` for REML and `ln N` for ML.
+//!
+//! # Identification
+//!
+//! Compound-symmetry ρ is estimated only when it is identified: if every group indicator
+//! lies in the column space of X (one group with an intercept, or group dummies among the
+//! regressors), the profile likelihood is flat in ρ, and the fit is refused (give ρ).
+//! A rank-deficient (whitened) design is an error, as nlme's "computed gls fit is singular".
 
 use crate::data::Dataset;
-use crate::data::columns::econ_error_from_design;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares};
 use crate::resource;
+use crate::traits::convergence::{Convergence, ResultNotes};
 use crate::traits::estimator::t_test_p_value;
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
 /// Correlation structure for GLS.
@@ -24,6 +53,94 @@ pub enum CorrelationStructure {
     Known { omega: Array2<f64> },
     /// Identity (equivalent to OLS)
     Identity,
+}
+
+/// The likelihood GLS reports and, when ρ is estimated, maximises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum GlsMethod {
+    /// Restricted maximum likelihood (nlme's default).
+    #[default]
+    Reml,
+    /// Maximum likelihood.
+    Ml,
+}
+
+impl GlsMethod {
+    /// "REML" or "ML", as nlme prints it.
+    pub fn label(self) -> &'static str {
+        match self {
+            GlsMethod::Reml => "REML",
+            GlsMethod::Ml => "ML",
+        }
+    }
+}
+
+crate::option_enum!(
+    GlsMethod,
+    crate::options::Choices {
+        option: "method",
+        values: &[
+            (&["reml", "restricted"], GlsMethod::Reml),
+            (&["ml", "maximum_likelihood"], GlsMethod::Ml),
+        ],
+    }
+);
+
+/// A parametric correlation structure of [`gls_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlsCorrelation {
+    /// Independent errors (OLS).
+    #[default]
+    Identity,
+    /// AR(1) within groups (nlme `corAR1`).
+    Ar1,
+    /// Compound symmetry within groups (nlme `corCompSymm`).
+    CompoundSymmetry,
+}
+
+crate::option_enum!(
+    GlsCorrelation,
+    crate::options::Choices {
+        option: "correlation",
+        values: &[
+            (&["identity", "ols", "none"], GlsCorrelation::Identity),
+            (&["ar1", "ar(1)", "corar1"], GlsCorrelation::Ar1),
+            (
+                &["compound_symmetry", "cs", "exchangeable", "corcompsymm"],
+                GlsCorrelation::CompoundSymmetry
+            ),
+        ],
+    }
+);
+
+/// A GLS model for [`gls_with`].
+#[derive(Debug, Clone, Default)]
+pub struct GlsSpec {
+    /// The correlation structure.
+    pub correlation: GlsCorrelation,
+    /// Fixed correlation parameter; `None` estimates it by `method` (nlme without
+    /// `fixed = TRUE`).
+    pub rho: Option<f64>,
+    /// Group code per row (nlme `form = ~ 1 | g`): the correlation acts within groups, in row
+    /// order; rows of different groups are independent. `None` = one group of all rows.
+    pub groups: Option<Vec<u32>>,
+    /// REML (default) or ML.
+    pub method: GlsMethod,
+}
+
+/// Options of [`run_gls_with`]: [`GlsSpec`] with the group given as a column.
+#[derive(Debug, Clone, Default)]
+pub struct GlsOptions {
+    /// The correlation structure.
+    pub correlation: GlsCorrelation,
+    /// Fixed correlation parameter; `None` estimates it.
+    pub rho: Option<f64>,
+    /// Grouping column (any type, read as a factor); `None` = one group.
+    pub group_col: Option<String>,
+    /// REML (default) or ML.
+    pub method: GlsMethod,
 }
 
 /// Result of GLS estimation.
@@ -43,33 +160,58 @@ pub struct GlsResult {
     /// Fitted values
     #[serde(skip)]
     pub fitted: Vec<f64>,
-    /// Residual standard error (σ)
+    /// Residual standard error (σ; REML: SSE*/(n - p), ML: SSE*/n)
     pub sigma: f64,
     /// R-squared (generalized)
     pub r_squared: f64,
     /// Adjusted R-squared
     pub adj_r_squared: f64,
-    /// Log-likelihood
+    /// Log-likelihood (nlme's, by `method`)
     pub log_likelihood: f64,
     /// AIC
     pub aic: f64,
-    /// BIC
+    /// BIC (`ln(n - p)` for REML, `ln n` for ML)
     pub bic: f64,
     /// Number of observations
     pub n_obs: usize,
     /// Degrees of freedom for residuals
     pub df_residual: usize,
-    /// Number of parameters
+    /// Number of parameters (coefficients, σ and an estimated ρ)
     pub n_params: usize,
     /// Correlation structure used
     pub correlation: String,
-    /// Estimated correlation parameter (if applicable)
+    /// Correlation parameter (given or estimated)
     pub correlation_param: Option<f64>,
+    /// ρ was estimated (not given).
+    #[serde(default)]
+    pub rho_estimated: bool,
+    /// The likelihood reported (and maximised when ρ was estimated).
+    #[serde(default)]
+    pub method: GlsMethod,
+    /// Number of groups, when groups were given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_groups: Option<usize>,
+    /// The ρ search, when ρ was estimated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convergence: Option<Convergence>,
+    /// Notes on the fit (boundary estimates, non-convergence); absent from JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for GlsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
 }
 
 /// Fit a GLS model.
 ///
-/// Estimates Y = Xβ + ε where Var(ε) = σ²Ω using generalized least squares.
+/// Estimates Y = Xβ + ε where Var(ε) = σ²Ω using generalized least squares, at the given
+/// structure (no estimation), and reports nlme's REML log-likelihood, AIC and BIC.
 ///
 /// The data are whitened with a matrix `P` such that `P'P = Ω⁻¹` and OLS is fit
 /// to `(P y, P X)`, which gives exactly the GLS estimator, its standard errors
@@ -77,7 +219,7 @@ pub struct GlsResult {
 /// square root of `Ω⁻¹` for compound symmetry (both O(n p)), no transform for
 /// the identity, and `L⁻¹` applied by forward substitution, where `Ω = L L'`, for
 /// a known `Ω` (an O(n³) Cholesky factor, allocated fallibly, then O(n² p)
-/// whitening).
+/// whitening). A rank-deficient design is an error.
 ///
 /// # Arguments
 ///
@@ -93,15 +235,53 @@ pub fn gls(
     x: &ArrayView2<f64>,
     correlation: CorrelationStructure,
 ) -> EconResult<GlsResult> {
+    check_shapes(y, x)?;
+    let blocks = Blocks::single(y.len());
+    let (structure, kind) = match &correlation {
+        CorrelationStructure::Identity => (Structure::Identity, GlsCorrelation::Identity),
+        CorrelationStructure::AR1 { rho } => (Structure::Ar1(*rho), GlsCorrelation::Ar1),
+        CorrelationStructure::CompoundSymmetry { rho } => {
+            (Structure::Cs(*rho), GlsCorrelation::CompoundSymmetry)
+        }
+        CorrelationStructure::Known { omega } => {
+            (Structure::Known(omega), GlsCorrelation::Identity)
+        }
+    };
+    let engine = Engine {
+        y: y.view(),
+        x: x.view(),
+        blocks: &blocks,
+        method: GlsMethod::Reml,
+        names: None,
+        intercept: None,
+    };
+    let fit = engine.fit_at(&structure)?;
+    let mut r = engine.result(&fit, &structure, kind, false)?;
+    if matches!(correlation, CorrelationStructure::Known { .. }) {
+        r.correlation = "User-specified".to_string();
+        r.correlation_param = None;
+    }
+    Ok(r)
+}
+
+/// Fit GLS with an AR(1), compound-symmetry or identity structure, optionally within groups,
+/// with ρ fixed or estimated by REML or ML (nlme's `gls`).
+///
+/// `x` is the full design (include the intercept column). With `spec.rho = None` and a
+/// correlation structure, ρ maximises the profile log-likelihood of `spec.method`;
+/// compound-symmetry ρ is refused when it is not identified (see the module doc).
+pub fn gls_with(y: &ArrayView1<f64>, x: &ArrayView2<f64>, spec: &GlsSpec) -> EconResult<GlsResult> {
+    gls_engine(y, x, spec, None, None)
+}
+
+fn check_shapes(y: &ArrayView1<f64>, x: &ArrayView2<f64>) -> EconResult<()> {
     let n = y.len();
     let p = x.ncols();
-
     if x.nrows() != n {
         return Err(EconError::InvalidSpecification {
             message: "X and y must have the same number of observations".to_string(),
         });
     }
-
     if n <= p {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -109,213 +289,633 @@ pub fn gls(
             context: "GLS regression".to_string(),
         });
     }
-
-    // Transform data: y* = P y, X* = P X with P'P = Ω⁻¹
-    let (y_star, x_star) = whiten(y, x, &correlation)?;
-
-    // Now apply OLS to transformed data
-    let xtx_star = xtx(&x_star.view());
-    let xty_star: Array1<f64> = x_star.t().dot(&y_star);
-
-    let (xtx_inv, _cond) = safe_inverse(&xtx_star.view())?;
-
-    // Coefficients: β = (X*'X*)^(-1) X*'y*
-    let beta = xtx_inv.dot(&xty_star);
-
-    // Fitted values in original space
-    let fitted: Array1<f64> = x.dot(&beta);
-
-    // Residuals
-    let residuals: Array1<f64> = y.to_owned() - &fitted;
-
-    // Transformed residuals for sigma estimation
-    let residuals_star: Array1<f64> = &y_star - &x_star.dot(&beta);
-
-    // Residual variance: σ² = (e*'e*) / (n - p)
-    let df_residual = n - p;
-    let sse: f64 = residuals_star.dot(&residuals_star);
-    let sigma_sq = sse / df_residual as f64;
-    let sigma = sigma_sq.sqrt();
-
-    // Variance-covariance of β: Var(β) = σ² (X*'X*)^(-1)
-    let vcov = &xtx_inv * sigma_sq;
-
-    // Standard errors
-    let std_errors: Array1<f64> = vcov.diag().mapv(|v| v.max(0.0).sqrt());
-
-    // t-statistics
-    let t_values: Array1<f64> = &beta / &std_errors;
-
-    // p-values
-    let p_values: Array1<f64> = t_values.mapv(|t| t_test_p_value(t, df_residual as f64));
-
-    // R-squared (using original residuals). As summary.lm (REG-19): the total sum of
-    // squares is about the mean when X has an intercept (a constant column in any
-    // position) and about zero otherwise, and adjusted R² uses n - 1 or n accordingly.
-    let has_intercept = super::ols::has_constant_column(*x);
-    let sst: f64 = if has_intercept {
-        let y_mean = y.sum() / n as f64;
-        y.iter().map(|yi| (yi - y_mean).powi(2)).sum()
-    } else {
-        y.dot(y)
-    };
-    let ss_res: f64 = residuals.dot(&residuals);
-    let r_squared = if sst > 0.0 { 1.0 - ss_res / sst } else { 0.0 };
-    let adj_r_squared =
-        1.0 - (1.0 - r_squared) * (n - usize::from(has_intercept)) as f64 / df_residual as f64;
-
-    // Log-likelihood
-    let log_likelihood =
-        -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma_sq.ln());
-
-    // AIC and BIC
-    let n_params = p + 1; // +1 for sigma
-    let aic = -2.0 * log_likelihood + 2.0 * n_params as f64;
-    let bic = -2.0 * log_likelihood + (n as f64).ln() * n_params as f64;
-
-    // Extract correlation parameter if applicable
-    let (corr_name, corr_param) = match &correlation {
-        CorrelationStructure::AR1 { rho } => ("AR(1)".to_string(), Some(*rho)),
-        CorrelationStructure::CompoundSymmetry { rho } => {
-            ("Compound Symmetry".to_string(), Some(*rho))
-        }
-        CorrelationStructure::Known { .. } => ("User-specified".to_string(), None),
-        CorrelationStructure::Identity => ("Identity (OLS)".to_string(), None),
-    };
-
-    Ok(GlsResult {
-        coefficients: beta.to_vec(),
-        std_errors: std_errors.to_vec(),
-        t_values: t_values.to_vec(),
-        p_values: p_values.to_vec(),
-        residuals: residuals.to_vec(),
-        fitted: fitted.to_vec(),
-        sigma,
-        r_squared,
-        adj_r_squared,
-        log_likelihood,
-        aic,
-        bic,
-        n_obs: n,
-        df_residual,
-        n_params,
-        correlation: corr_name,
-        correlation_param: corr_param,
-    })
+    Ok(())
 }
 
-/// Whitened data `(P y, P X)` for a whitening matrix `P` with `P'P = Ω⁻¹`.
-///
-/// Any such `P` turns GLS into OLS on the transformed data. Checks the
-/// cancellation budget before any structure-specific work (rho validation,
-/// the Cholesky factor, or the copy).
-fn whiten(
+fn gls_engine(
     y: &ArrayView1<f64>,
     x: &ArrayView2<f64>,
-    structure: &CorrelationStructure,
-) -> EconResult<(Array1<f64>, Array2<f64>)> {
+    spec: &GlsSpec,
+    names: Option<&[String]>,
+    intercept: Option<bool>,
+) -> EconResult<GlsResult> {
     resource::checkpoint()?;
+    check_shapes(y, x)?;
     let n = y.len();
-    match structure {
-        // P = I: a plain copy, allocated fallibly like every other X*. The buffer
-        // takes x's own shape, so the copy cannot mismatch whatever the caller checked.
-        CorrelationStructure::Identity => {
-            let (rows, cols) = x.dim();
-            let mut x_star = resource::try_zeros2(rows, cols, WHITENED_DESIGN)?;
-            x_star.assign(x);
-            Ok((y.to_owned(), x_star))
+    if spec.correlation == GlsCorrelation::Identity && (spec.rho.is_some() || spec.groups.is_some())
+    {
+        return Err(EconError::InvalidSpecification {
+            message: "rho and groups are used only by ar1 and compound_symmetry".to_string(),
+        });
+    }
+    let blocks = match &spec.groups {
+        None => Blocks::single(n),
+        Some(codes) => Blocks::from_codes(codes, n)?,
+    };
+    let engine = Engine {
+        y: y.view(),
+        x: x.view(),
+        blocks: &blocks,
+        method: spec.method,
+        names,
+        intercept,
+    };
+    let structure_at = |rho: f64| match spec.correlation {
+        GlsCorrelation::Identity => Structure::Identity,
+        GlsCorrelation::Ar1 => Structure::Ar1(rho),
+        GlsCorrelation::CompoundSymmetry => Structure::Cs(rho),
+    };
+    if spec.correlation != GlsCorrelation::Identity && blocks.max_size() < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "{} needs a group with at least two observations",
+                spec.correlation
+            ),
+        });
+    }
+    let mut result = match (spec.correlation, spec.rho) {
+        (GlsCorrelation::Identity, _) => {
+            let fit = engine.fit_at(&Structure::Identity)?;
+            engine.result(&fit, &Structure::Identity, spec.correlation, false)?
         }
-        CorrelationStructure::AR1 { rho } => {
-            let rho = *rho;
-            if !rho.is_finite() || rho.abs() >= 1.0 {
-                return Err(EconError::InvalidSpecification {
-                    message: format!("AR(1) correlation |rho| must be < 1 (got {rho})"),
-                });
-            }
-            // Prais-Winsten: exactly L⁻¹ for the Cholesky factor of Ω[i,j] = ρ^|i-j|
-            let scale = (1.0 - rho * rho).sqrt();
-            let transform = |v: &mut [f64]| {
-                for t in (1..v.len()).rev() {
-                    v[t] = (v[t] - rho * v[t - 1]) / scale;
+        (_, Some(rho)) => {
+            let s = structure_at(rho);
+            let fit = engine.fit_at(&s)?;
+            engine.result(&fit, &s, spec.correlation, false)?
+        }
+        (corr, None) => {
+            let (lo, hi) = match corr {
+                GlsCorrelation::CompoundSymmetry => {
+                    engine.check_cs_identified()?;
+                    (-1.0 / (blocks.max_size() as f64 - 1.0), 1.0)
                 }
+                _ => (-1.0, 1.0),
             };
-            let mut y_star = y.to_vec();
-            transform(&mut y_star);
-            let x_star = whiten_columns(x, |col| {
-                transform(col);
-                Ok(())
-            })?;
-            Ok((Array1::from_vec(y_star), x_star))
-        }
-        CorrelationStructure::CompoundSymmetry { rho } => {
-            let rho = *rho;
-            if !rho.is_finite() || rho <= -1.0 / (n as f64 - 1.0) || rho >= 1.0 {
-                return Err(EconError::InvalidSpecification {
-                    message: format!(
-                        "compound symmetry rho must lie in (-1/(n - 1), 1) = ({:.6}, 1) \
-                         for n = {n} (got {rho})",
-                        -1.0 / (n as f64 - 1.0)
-                    ),
-                });
-            }
-            // Ω = (1 - ρ) I + ρ 11' has eigenvalue 1 + (n - 1)ρ on 1 and 1 - ρ on its
-            // complement, so P = c (I - a 11'/n) is symmetric with P² = Ω⁻¹.
-            let a = 1.0 - ((1.0 - rho) / (1.0 + (n as f64 - 1.0) * rho)).sqrt();
-            let c = 1.0 / (1.0 - rho).sqrt();
-            let transform = |v: &mut [f64]| {
-                let mean = v.iter().sum::<f64>() / v.len() as f64;
-                for e in v.iter_mut() {
-                    *e = c * (*e - a * mean);
-                }
+            // fail early (rank, shapes) at an interior rho
+            // and take its SSE* as the reference of the centred objective
+            let sse_ref = engine
+                .fit_at(&structure_at(0.5 * (lo + hi)))?
+                .sse
+                .max(f64::MIN_POSITIVE);
+            let objective = |rho: f64| -> EconResult<f64> {
+                resource::checkpoint()?;
+                let v = engine
+                    .fit_at(&structure_at(rho))?
+                    .profile_objective(sse_ref);
+                Ok(if v.is_finite() { v } else { f64::INFINITY })
             };
-            let mut y_star = y.to_vec();
-            transform(&mut y_star);
-            let x_star = whiten_columns(x, |col| {
-                transform(col);
-                Ok(())
-            })?;
-            Ok((Array1::from_vec(y_star), x_star))
-        }
-        CorrelationStructure::Known { omega } => {
-            if omega.nrows() != n || omega.ncols() != n {
-                return Err(EconError::InvalidSpecification {
-                    message: format!("Known Omega must be {}x{}", n, n),
-                });
+            let b = brent_fmin(lo + 1e-8, hi - 1e-8, objective, RHO_TOL, RHO_MAX_EVAL)?;
+            let s = structure_at(b.x);
+            let fit = engine.fit_at(&s)?;
+            let mut r = engine.result(&fit, &s, corr, true)?;
+            let conv = Convergence::new(
+                b.converged,
+                b.evaluations,
+                RHO_MAX_EVAL,
+                "Brent interval in rho",
+                b.final_width,
+                RHO_TOL,
+            );
+            if let Some(note) = conv.note("GLS rho") {
+                r.warnings.push(note);
             }
-            // Ω = L L', P = L⁻¹: solve L z = v by forward substitution
-            let l = cholesky_lower(omega)?;
-            let mut y_star = y.to_vec();
-            forward_substitute(&l, &mut y_star)?;
-            let x_star = whiten_columns(x, |col| forward_substitute(&l, col))?;
-            Ok((Array1::from_vec(y_star), x_star))
+            if b.x - lo < 1e-6 || hi - b.x < 1e-6 {
+                r.warnings.push(format!(
+                    "rho estimate {} is at the boundary of ({lo}, {hi}); the likelihood has no \
+                     interior maximum",
+                    b.x
+                ));
+            }
+            r.convergence = Some(conv);
+            r
+        }
+    };
+    if spec.groups.is_some() {
+        result.n_groups = Some(blocks.count());
+    }
+    Ok(result)
+}
+
+/// Brent tolerance and evaluation limit of the ρ search.
+const RHO_TOL: f64 = 1e-12;
+const RHO_MAX_EVAL: usize = 200;
+
+/// A structure at a given ρ (the known Ω is used by [`gls()`] only).
+enum Structure<'a> {
+    Identity,
+    Ar1(f64),
+    Cs(f64),
+    Known(&'a Array2<f64>),
+}
+
+/// Rows grouped by code: `order[starts[g]..starts[g + 1]]` are the rows of block g, in data
+/// order. `order` is `None` for a single block of all rows in order.
+struct Blocks {
+    order: Option<Vec<usize>>,
+    starts: Vec<usize>,
+}
+
+impl Blocks {
+    fn single(n: usize) -> Self {
+        Blocks {
+            order: None,
+            starts: vec![0, n],
         }
     }
+
+    fn from_codes(codes: &[u32], n: usize) -> EconResult<Self> {
+        if codes.len() != n {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "groups has {} codes but the data have {n} rows",
+                    codes.len()
+                ),
+            });
+        }
+        let mut order: Vec<usize> = resource::try_with_capacity(n, "GLS group order")?;
+        order.extend(0..n);
+        order.sort_by_key(|&i| codes[i]); // stable: data order within a group
+        let mut starts = vec![0];
+        for r in 1..n {
+            if codes[order[r]] != codes[order[r - 1]] {
+                starts.push(r);
+            }
+        }
+        starts.push(n);
+        Ok(Blocks {
+            order: Some(order),
+            starts,
+        })
+    }
+
+    fn count(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    fn max_size(&self) -> usize {
+        self.starts
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Row of the original data at position `r` of the grouped order.
+    fn row(&self, r: usize) -> usize {
+        self.order.as_ref().map_or(r, |o| o[r])
+    }
+}
+
+/// One fit at a fixed structure.
+struct FitAt {
+    beta: Array1<f64>,
+    unscaled: Array2<f64>,
+    sse: f64,
+    loglik: f64,
+    /// N (ML) or N - p (REML).
+    df_lik: f64,
+    /// ½ ln det Ω, plus ½ ln det(X*'X*) for REML.
+    penalty: f64,
+}
+
+impl FitAt {
+    /// `-l` up to a constant, centred on `sse_ref`: `df/2 ln(SSE*/sse_ref) + penalty`. Its
+    /// values do not grow with the scale of y, so the ρ search takes the same path at any scale.
+    fn profile_objective(&self, sse_ref: f64) -> f64 {
+        0.5 * self.df_lik * (self.sse / sse_ref).ln() + self.penalty
+    }
+}
+
+/// The data and settings shared by every fit of one GLS call.
+struct Engine<'a, 'd> {
+    y: ArrayView1<'d, f64>,
+    x: ArrayView2<'d, f64>,
+    blocks: &'a Blocks,
+    method: GlsMethod,
+    /// Column names for the aliasing message (`None`: "column j").
+    names: Option<&'a [String]>,
+    /// Whether X has an intercept, for R²; `None` detects a constant column.
+    intercept: Option<bool>,
+}
+
+impl Engine<'_, '_> {
+    /// Whitened `(P y, P X)` in grouped row order and `ln det Ω`.
+    fn whiten(&self, s: &Structure) -> EconResult<(Array1<f64>, Array2<f64>, f64)> {
+        resource::checkpoint()?;
+        let (n, p) = self.x.dim();
+        let b = self.blocks;
+        let m_max = b.max_size();
+        match s {
+            Structure::Ar1(rho) => {
+                let rho = *rho;
+                if !rho.is_finite() || rho.abs() >= 1.0 {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!("AR(1) correlation |rho| must be < 1 (got {rho})"),
+                    });
+                }
+            }
+            Structure::Cs(rho) => {
+                let rho = *rho;
+                let lo = -1.0 / (m_max as f64 - 1.0);
+                if !rho.is_finite() || rho <= lo || rho >= 1.0 {
+                    let size = if b.count() == 1 {
+                        format!("n = {m_max}")
+                    } else {
+                        format!("the largest group, n = {m_max}")
+                    };
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "compound symmetry rho must lie in (-1/(n - 1), 1) = ({lo:.6}, 1) \
+                             for {size} (got {rho})"
+                        ),
+                    });
+                }
+            }
+            Structure::Known(omega) => {
+                if omega.nrows() != n || omega.ncols() != n {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!("Known Omega must be {}x{}", n, n),
+                    });
+                }
+            }
+            Structure::Identity => {}
+        }
+        let mut y_star = resource::try_vec(n, 0.0, "GLS whitened response")?;
+        let mut x_star = resource::try_zeros2(n, p, WHITENED_DESIGN)?;
+        for r in 0..n {
+            let i = b.row(r);
+            y_star[r] = self.y[i];
+            for j in 0..p {
+                x_star[[r, j]] = self.x[[i, j]];
+            }
+        }
+        let mut col = vec![0.0; n];
+        let mut logdet = 0.0;
+        let apply = |v: &mut [f64]| -> EconResult<()> {
+            match s {
+                Structure::Identity => {}
+                Structure::Ar1(rho) => {
+                    let scale = (1.0 - rho * rho).sqrt();
+                    for g in b.starts.windows(2) {
+                        let blk = &mut v[g[0]..g[1]];
+                        for t in (1..blk.len()).rev() {
+                            blk[t] = (blk[t] - rho * blk[t - 1]) / scale;
+                        }
+                    }
+                }
+                Structure::Cs(rho) => {
+                    // Ω_g = (1 - ρ) I + ρ 11' has eigenvalue 1 + (m - 1)ρ on 1 and 1 - ρ on
+                    // its complement, so P_g = c (I - a 11'/m) is symmetric with P_g² = Ω_g⁻¹.
+                    let c = 1.0 / (1.0 - rho).sqrt();
+                    for g in b.starts.windows(2) {
+                        let blk = &mut v[g[0]..g[1]];
+                        let m = blk.len() as f64;
+                        let a = 1.0 - ((1.0 - rho) / (1.0 + (m - 1.0) * rho)).sqrt();
+                        let mean = blk.iter().sum::<f64>() / m;
+                        for e in blk.iter_mut() {
+                            *e = c * (*e - a * mean);
+                        }
+                    }
+                }
+                Structure::Known(_) => unreachable!("handled with its factor"),
+            }
+            Ok(())
+        };
+        match s {
+            Structure::Known(omega) => {
+                // Ω = L L', P = L⁻¹: solve L z = v by forward substitution
+                let l = cholesky_lower(omega)?;
+                logdet = 2.0 * (0..n).map(|i| l[[i, i]].ln()).sum::<f64>();
+                forward_substitute(&l, y_star.as_mut_slice())?;
+                for j in 0..p {
+                    resource::checkpoint()?;
+                    col.iter_mut()
+                        .zip(x_star.column(j))
+                        .for_each(|(c, &v)| *c = v);
+                    forward_substitute(&l, &mut col)?;
+                    x_star
+                        .column_mut(j)
+                        .iter_mut()
+                        .zip(&col)
+                        .for_each(|(d, &v)| *d = v);
+                }
+            }
+            _ => {
+                apply(y_star.as_mut_slice())?;
+                for j in 0..p {
+                    resource::checkpoint()?;
+                    col.iter_mut()
+                        .zip(x_star.column(j))
+                        .for_each(|(c, &v)| *c = v);
+                    apply(&mut col)?;
+                    x_star
+                        .column_mut(j)
+                        .iter_mut()
+                        .zip(&col)
+                        .for_each(|(d, &v)| *d = v);
+                }
+                for g in b.starts.windows(2) {
+                    let m = (g[1] - g[0]) as f64;
+                    logdet += match s {
+                        Structure::Ar1(rho) => (m - 1.0) * (1.0 - rho * rho).ln(),
+                        Structure::Cs(rho) => {
+                            (m - 1.0) * (1.0 - rho).ln() + (1.0 + (m - 1.0) * rho).ln()
+                        }
+                        _ => 0.0,
+                    };
+                }
+            }
+        }
+        Ok((Array1::from_vec(y_star), x_star, logdet))
+    }
+
+    /// Fit at `s`: coefficients, `(X*'X*)^-1`, SSE* and the log-likelihood of `method`.
+    fn fit_at(&self, s: &Structure) -> EconResult<FitAt> {
+        let (n, p) = self.x.dim();
+        let (ys, xs, logdet) = self.whiten(s)?;
+        let sol = least_squares(xs.view(), ys.view())?;
+        if sol.rank < p {
+            let cols: Vec<String> = sol
+                .aliased
+                .iter()
+                .map(|&j| match self.names {
+                    Some(nm) if j < nm.len() => format!("'{}'", nm[j]),
+                    _ => format!("column {}", j + 1),
+                })
+                .collect();
+            return Err(EconError::SingularMatrix {
+                context: format!(
+                    "GLS: the whitened design is rank deficient (rank {} of {p}); aliased: {}",
+                    sol.rank,
+                    cols.join(", ")
+                ),
+                suggestion: "drop collinear regressors".to_string(),
+            });
+        }
+        let sse = sol.residuals.dot(&sol.residuals);
+        let unscaled = sol.unscaled_cov;
+        let (nf, pf) = (n as f64, p as f64);
+        let ln2pi = (2.0 * std::f64::consts::PI).ln();
+        // l = -df/2 (ln 2π + 1 + ln(SSE*/df)) - penalty, with df = N (ML) or N - p (REML)
+        let (df_lik, penalty) = match self.method {
+            GlsMethod::Ml => (nf, 0.5 * logdet),
+            GlsMethod::Reml => {
+                // ½ ln det(X*'X*) = -½ ln det((X*'X*)^-1) = -Σ ln L_ii of its Cholesky factor
+                let l = cholesky_lower(&unscaled)?;
+                let half_logdet_xtx = -(0..p).map(|i| l[[i, i]].ln()).sum::<f64>();
+                (nf - pf, 0.5 * logdet + half_logdet_xtx)
+            }
+        };
+        let loglik = -0.5 * df_lik * (ln2pi + 1.0 + (sse / df_lik).ln()) - penalty;
+        Ok(FitAt {
+            beta: sol.coefficients,
+            unscaled,
+            sse,
+            loglik,
+            df_lik,
+            penalty,
+        })
+    }
+
+    /// The result at a fit.
+    fn result(
+        &self,
+        fit: &FitAt,
+        s: &Structure,
+        kind: GlsCorrelation,
+        estimated: bool,
+    ) -> EconResult<GlsResult> {
+        let (n, p) = self.x.dim();
+        let (nf, pf) = (n as f64, p as f64);
+        let df_residual = n - p;
+        let beta = &fit.beta;
+        let fitted: Array1<f64> = self.x.dot(beta);
+        let residuals: Array1<f64> = self.y.to_owned() - &fitted;
+        let s2_unbiased = fit.sse / (nf - pf);
+        let sigma = match self.method {
+            GlsMethod::Reml => s2_unbiased.sqrt(),
+            GlsMethod::Ml => (fit.sse / nf).sqrt(),
+        };
+        let std_errors: Array1<f64> = fit
+            .unscaled
+            .diag()
+            .mapv(|v| (v * s2_unbiased).max(0.0).sqrt());
+        let t_values: Array1<f64> = beta / &std_errors;
+        let p_values: Array1<f64> = t_values.mapv(|t| t_test_p_value(t, df_residual as f64));
+
+        // R-squared (using original residuals). As summary.lm (REG-19): the total sum of
+        // squares is about the mean when X has an intercept and about zero otherwise, and
+        // adjusted R² uses n - 1 or n accordingly.
+        let has_intercept = self
+            .intercept
+            .unwrap_or_else(|| super::ols::has_constant_column(self.x));
+        let sst: f64 = if has_intercept {
+            let y_mean = self.y.sum() / nf;
+            self.y.iter().map(|yi| (yi - y_mean).powi(2)).sum()
+        } else {
+            self.y.dot(&self.y)
+        };
+        let ss_res: f64 = residuals.dot(&residuals);
+        let r_squared = if sst > 0.0 { 1.0 - ss_res / sst } else { 0.0 };
+        let adj_r_squared =
+            1.0 - (1.0 - r_squared) * (n - usize::from(has_intercept)) as f64 / df_residual as f64;
+
+        let n_params = p + 1 + usize::from(estimated);
+        let k = n_params as f64;
+        let aic = -2.0 * fit.loglik + 2.0 * k;
+        let bic = -2.0 * fit.loglik
+            + k * match self.method {
+                GlsMethod::Reml => (nf - pf).ln(),
+                GlsMethod::Ml => nf.ln(),
+            };
+        let (corr_name, corr_param) = match (kind, s) {
+            (GlsCorrelation::Ar1, Structure::Ar1(rho)) => ("AR(1)".to_string(), Some(*rho)),
+            (GlsCorrelation::CompoundSymmetry, Structure::Cs(rho)) => {
+                ("Compound Symmetry".to_string(), Some(*rho))
+            }
+            _ => ("Identity (OLS)".to_string(), None),
+        };
+        Ok(GlsResult {
+            coefficients: beta.to_vec(),
+            std_errors: std_errors.to_vec(),
+            t_values: t_values.to_vec(),
+            p_values: p_values.to_vec(),
+            residuals: residuals.to_vec(),
+            fitted: fitted.to_vec(),
+            sigma,
+            r_squared,
+            adj_r_squared,
+            log_likelihood: fit.loglik,
+            aic,
+            bic,
+            n_obs: n,
+            df_residual,
+            n_params,
+            correlation: corr_name,
+            correlation_param: corr_param,
+            rho_estimated: estimated,
+            method: self.method,
+            n_groups: None,
+            convergence: None,
+            warnings: Vec::new(),
+        })
+    }
+
+    /// Compound-symmetry ρ is identified unless every group indicator lies in col(X).
+    fn check_cs_identified(&self) -> EconResult<()> {
+        let (n, p) = self.x.dim();
+        let b = self.blocks;
+        let mut wx = resource::try_zeros2(n, p, "GLS within-group design")?;
+        for j in 0..p {
+            let mut norm_x = 0.0f64;
+            let mut norm_w = 0.0f64;
+            for g in b.starts.windows(2) {
+                let m = (g[1] - g[0]) as f64;
+                let mean = (g[0]..g[1]).map(|r| self.x[[b.row(r), j]]).sum::<f64>() / m;
+                for r in g[0]..g[1] {
+                    let v = self.x[[b.row(r), j]];
+                    let w = v - mean;
+                    wx[[r, j]] = w;
+                    norm_x += v * v;
+                    norm_w += w * w;
+                }
+            }
+            // a group-constant column leaves rounding noise only
+            if norm_w.sqrt() <= LM_QR_TOL * norm_x.sqrt() {
+                wx.column_mut(j).fill(0.0);
+            }
+        }
+        let rank_w = Qr::decompose(wx.view(), LM_QR_TOL)?.rank();
+        let rank_x = Qr::decompose(self.x, LM_QR_TOL)?.rank();
+        if b.count() + rank_w == rank_x {
+            return Err(EconError::InvalidSpecification {
+                message: "compound-symmetry rho is not identified: every group indicator lies in \
+                          the column space of X (one group with an intercept, or group dummies \
+                          among the regressors); give rho, or groups whose effects are not in X"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Outcome of [`brent_fmin`].
+struct BrentMin {
+    x: f64,
+    evaluations: usize,
+    converged: bool,
+    final_width: f64,
+}
+
+/// Brent's minimiser on `[ax, bx]` (a port of R's `optimize.c` `Brent_fmin`), with at most
+/// `max_eval` evaluations of `f`.
+fn brent_fmin(
+    ax: f64,
+    bx: f64,
+    mut f: impl FnMut(f64) -> EconResult<f64>,
+    tol: f64,
+    max_eval: usize,
+) -> EconResult<BrentMin> {
+    let c = (3.0 - 5.0f64.sqrt()) * 0.5;
+    let eps = f64::EPSILON.sqrt();
+    let (mut a, mut b) = (ax, bx);
+    let mut v = a + c * (b - a);
+    let mut w = v;
+    let mut x = v;
+    let mut d = 0.0f64;
+    let mut e = 0.0f64;
+    let mut fx = f(x)?;
+    let mut evaluations = 1;
+    let mut fv = fx;
+    let mut fw = fx;
+    let tol3 = tol / 3.0;
+    let converged;
+    loop {
+        let xm = (a + b) * 0.5;
+        let tol1 = eps * x.abs() + tol3;
+        let t2 = tol1 * 2.0;
+        if (x - xm).abs() <= t2 - (b - a) * 0.5 {
+            converged = true;
+            break;
+        }
+        if evaluations >= max_eval {
+            converged = false;
+            break;
+        }
+        let (mut p, mut q, mut r) = (0.0f64, 0.0f64, 0.0f64);
+        if e.abs() > tol1 {
+            r = (x - w) * (fx - fv);
+            q = (x - v) * (fx - fw);
+            p = (x - v) * q - (x - w) * r;
+            q = (q - r) * 2.0;
+            if q > 0.0 {
+                p = -p;
+            } else {
+                q = -q;
+            }
+            r = e;
+            e = d;
+        }
+        if p.abs() >= (q * 0.5 * r).abs() || p <= q * (a - x) || p >= q * (b - x) {
+            // golden-section step
+            e = if x < xm { b - x } else { a - x };
+            d = c * e;
+        } else {
+            // parabolic-interpolation step
+            d = p / q;
+            let u = x + d;
+            if u - a < t2 || b - u < t2 {
+                d = if x < xm { tol1 } else { -tol1 };
+            }
+        }
+        let u = if d.abs() >= tol1 {
+            x + d
+        } else if d > 0.0 {
+            x + tol1
+        } else {
+            x - tol1
+        };
+        let fu = f(u)?;
+        evaluations += 1;
+        if fu <= fx {
+            if u < x {
+                b = x;
+            } else {
+                a = x;
+            }
+            v = w;
+            fv = fw;
+            w = x;
+            fw = fx;
+            x = u;
+            fx = fu;
+        } else {
+            if u < x {
+                a = u;
+            } else {
+                b = u;
+            }
+            if fu <= fw || w == x {
+                v = w;
+                fv = fw;
+                w = u;
+                fw = fu;
+            } else if fu <= fv || v == x || v == w {
+                v = u;
+                fv = fu;
+            }
+        }
+    }
+    Ok(BrentMin {
+        x,
+        evaluations,
+        converged,
+        final_width: b - a,
+    })
 }
 
 /// Allocation label for the whitened design `X*`, shared by every structure.
 const WHITENED_DESIGN: &str = "GLS whitened design";
-
-/// Apply a whitening transform to each column of `x`, checking the
-/// cancellation budget once per column. The output is allocated fallibly.
-fn whiten_columns(
-    x: &ArrayView2<f64>,
-    mut transform: impl FnMut(&mut [f64]) -> EconResult<()>,
-) -> EconResult<Array2<f64>> {
-    let (n, p) = x.dim();
-    let mut x_star = resource::try_zeros2(n, p, WHITENED_DESIGN)?;
-    let mut col = vec![0.0; n];
-    for j in 0..p {
-        resource::checkpoint()?;
-        for (c, &v) in col.iter_mut().zip(x.column(j)) {
-            *c = v;
-        }
-        transform(&mut col)?;
-        for (dst, &v) in x_star.column_mut(j).iter_mut().zip(&col) {
-            *dst = v;
-        }
-    }
-    Ok(x_star)
-}
 
 /// Solve `L z = v` in place for a lower-triangular `L` (forward substitution).
 fn forward_substitute(l: &Array2<f64>, v: &mut [f64]) -> EconResult<()> {
@@ -369,48 +969,14 @@ fn cholesky_lower(a: &Array2<f64>) -> EconResult<Array2<f64>> {
     Ok(l)
 }
 
-/// Fit GLS with automatic AR(1) correlation parameter estimation.
-///
-/// First fits OLS, then estimates rho from residuals, then fits GLS.
+/// Fit GLS with an AR(1) correlation whose ρ is nlme's REML estimate (`gls(correlation =
+/// corAR1())`), on one group of all rows in order.
 pub fn gls_ar1_auto(y: &ndarray::ArrayView1<f64>, x: &ArrayView2<f64>) -> EconResult<GlsResult> {
-    // Step 1: OLS to get residuals
-    let xtx_mat = xtx(x);
-    let xty_vec: Array1<f64> = x.t().dot(&y.to_owned());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view())?;
-    let beta_ols = xtx_inv.dot(&xty_vec);
-    let residuals_ols: Array1<f64> = y.to_owned() - x.dot(&beta_ols);
-
-    // Step 2: Estimate rho from residuals: rho = cor(e_t, e_{t-1})
-    let e_lag: Vec<f64> = residuals_ols.slice(s![..-1]).to_vec();
-    let e_lead: Vec<f64> = residuals_ols.slice(s![1..]).to_vec();
-
-    let n_lag = e_lag.len() as f64;
-    let mean_lag: f64 = e_lag.iter().sum::<f64>() / n_lag;
-    let mean_lead: f64 = e_lead.iter().sum::<f64>() / n_lag;
-
-    let mut cov = 0.0;
-    let mut var_lag = 0.0;
-    let mut var_lead = 0.0;
-
-    for i in 0..e_lag.len() {
-        let d_lag = e_lag[i] - mean_lag;
-        let d_lead = e_lead[i] - mean_lead;
-        cov += d_lag * d_lead;
-        var_lag += d_lag * d_lag;
-        var_lead += d_lead * d_lead;
-    }
-
-    let rho = if var_lag > 0.0 && var_lead > 0.0 {
-        cov / (var_lag * var_lead).sqrt()
-    } else {
-        0.0
+    let spec = GlsSpec {
+        correlation: GlsCorrelation::Ar1,
+        ..GlsSpec::default()
     };
-
-    // Bound rho to valid range
-    let rho = rho.max(-0.99).min(0.99);
-
-    // Step 3: Fit GLS with estimated rho
-    gls(y, x, CorrelationStructure::AR1 { rho })
+    gls_with(y, x, &spec)
 }
 
 /// Run GLS from raw flat slices.
@@ -431,7 +997,8 @@ pub fn run_gls_raw(
             message: format!("Invalid X matrix shape: {}", e),
         }
     })?;
-    dispatch_gls(&y_arr, &x_arr, correlation_type, correlation_param)
+    let spec = spec_from_strings(correlation_type, correlation_param)?;
+    gls_engine(&y_arr.view(), &x_arr.view(), &spec, None, None)
 }
 
 /// Run GLS against a `Dataset`, matching the column-based pattern used by
@@ -442,10 +1009,13 @@ pub fn run_gls_raw(
 /// * `y_col` - Name of the dependent variable column.
 /// * `x_cols` - Names of the regressor columns.
 /// * `intercept` - If `true`, a leading intercept column of ones is added to X.
-/// * `correlation_type` - One of `"ar1"`, `"ar1_auto"`, `"compound_symmetry"`
-///   (alias `"cs"`), `"identity"` (alias `"ols"`).
-/// * `correlation_param` - Required by `"ar1"` and `"compound_symmetry"`,
-///   ignored by `"ar1_auto"` and `"identity"`.
+/// * `correlation_type` - `"identity"` (aliases `"ols"`, `"none"`), `"ar1"`,
+///   `"compound_symmetry"` (aliases `"cs"`, `"exchangeable"`), or `"ar1_auto"` (alias
+///   `"auto"`: AR(1) with ρ estimated).
+/// * `correlation_param` - A fixed ρ for `"ar1"` and `"compound_symmetry"`; `None` estimates
+///   ρ by REML (nlme's default). Ignored by `"identity"` and `"ar1_auto"`.
+///
+/// Use [`run_gls_with`] for groups and ML.
 pub fn run_gls(
     dataset: &Dataset,
     y_col: &str,
@@ -454,50 +1024,87 @@ pub fn run_gls(
     correlation_type: &str,
     correlation_param: Option<f64>,
 ) -> EconResult<GlsResult> {
-    let df = dataset.df();
-    let design = DesignMatrix::from_dataframe(df, x_cols, intercept)
-        .map_err(|e| econ_error_from_design(e, df))?;
-    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| econ_error_from_design(e, df))?;
-    dispatch_gls(&y, &design.data, correlation_type, correlation_param)
+    let spec = spec_from_strings(correlation_type, correlation_param)?;
+    let options = GlsOptions {
+        correlation: spec.correlation,
+        rho: spec.rho,
+        group_col: None,
+        method: spec.method,
+    };
+    run_gls_with(dataset, y_col, x_cols, intercept, &options)
 }
 
-fn dispatch_gls(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    correlation_type: &str,
-    correlation_param: Option<f64>,
+/// GLS against a `Dataset` with groups, a fixed or estimated ρ, and REML or ML (nlme's
+/// `gls(y ~ x, correlation = corAR1(form = ~ 1 | g), method = ...)`).
+///
+/// Rows are used in data order (the AR(1) chain follows it within each group); a missing
+/// value in any model column or the group column is an error, since dropping a row would
+/// change the correlation structure.
+pub fn run_gls_with(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    intercept: bool,
+    options: &GlsOptions,
 ) -> EconResult<GlsResult> {
-    let correlation = match correlation_type.to_lowercase().as_str() {
-        "ar1" => {
-            let rho = correlation_param.ok_or_else(|| EconError::InvalidSpecification {
-                message: "AR(1) requires rho parameter".to_string(),
-            })?;
-            CorrelationStructure::AR1 { rho }
-        }
-        "ar1_auto" => {
-            // gls_ar1_auto fits ρ from the data and produces a full GlsResult itself,
-            // so we short-circuit here rather than building a CorrelationStructure.
-            return gls_ar1_auto(&y.view(), &x.view());
-        }
-        "compound_symmetry" | "cs" => {
-            let rho = correlation_param.ok_or_else(|| EconError::InvalidSpecification {
-                message: "Compound symmetry requires rho parameter".to_string(),
-            })?;
-            CorrelationStructure::CompoundSymmetry { rho }
-        }
-        "identity" | "ols" => CorrelationStructure::Identity,
-        other => {
-            return Err(EconError::InvalidSpecification {
-                message: format!("Unknown correlation type: {}", other),
-            });
+    let df = dataset.df();
+    let mut request = ColumnRequest::new(df).numeric(y_col).numerics(x_cols);
+    if let Some(g) = &options.group_col {
+        request = request.factor(g);
+    }
+    let cols = request.na(NaPolicy::Fail).extract()?;
+    let design = cols.matrix(x_cols, intercept)?;
+    let y = cols.numeric_array(y_col);
+    let groups = options
+        .group_col
+        .as_ref()
+        .map(|g| cols.factor(g).codes.clone());
+    let spec = GlsSpec {
+        correlation: options.correlation,
+        rho: options.rho,
+        groups,
+        method: options.method,
+    };
+    gls_engine(
+        &y.view(),
+        &design.data.view(),
+        &spec,
+        Some(&design.column_names),
+        Some(intercept),
+    )
+}
+
+/// The [`GlsSpec`] (REML, one group) of the string entry points.
+fn spec_from_strings(correlation_type: &str, rho: Option<f64>) -> EconResult<GlsSpec> {
+    let lower = correlation_type.trim().to_lowercase();
+    let (correlation, rho) = if lower == "ar1_auto" || lower == "auto" {
+        (GlsCorrelation::Ar1, None)
+    } else {
+        match correlation_type.parse::<GlsCorrelation>() {
+            Ok(GlsCorrelation::Identity) => (GlsCorrelation::Identity, None),
+            Ok(c) => (c, rho),
+            Err(_) => {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "unknown correlation type '{correlation_type}': expected identity | ar1 | \
+                         compound_symmetry, or ar1_auto (AR(1) with rho estimated)"
+                    ),
+                });
+            }
         }
     };
-    gls(&y.view(), &x.view(), correlation)
+    Ok(GlsSpec {
+        correlation,
+        rho,
+        groups: None,
+        method: GlsMethod::Reml,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::matrix_ops::safe_inverse;
     use ndarray::array;
 
     /// GLS with identity correlation is OLS: pinned to lm without intercept (ols_no_intercept_grunfeld)
@@ -967,114 +1574,40 @@ mod tests {
             .scalar("df_resid", g.df_residual as f64, Tol::exact())
             .scalar("n_obs", g.n_obs as f64, Tol::exact())
             .finish();
-        // deviation REG-9: log_likelihood, aic, bic (log_lik_reml, aic_reml, bic_reml, log_lik_ml).
-        // deviation REG-43: "ar1_auto" estimates rho as the lag-1 correlation of OLS residuals,
-        //   not REML/ML (phi, phi_ml).
+        // REG-9 (moved into T3-WP11): at nlme's phi the log-likelihood is nlme's REML logLik
+        // (fixed phi: 3 parameters, so AIC/BIC differ from nlme's estimated-phi values by 2 and ln(48)).
+        Check::new(&case)
+            .scalar("log_lik_reml", g.log_likelihood, Tol::stat(n))
+            .finish();
         assert_eq!(g.n_params, 3);
         assert!(g.correlation.contains("AR(1)") && g.correlation_param == Some(phi));
+        // REG-43 (moved in): "ar1_auto" estimates phi by REML as nlme (it was the lag-1 residual
+        // correlation, 0.6542)
         let auto = run_gls(&ds, "y", &["x"], true, "ar1_auto", None).unwrap();
-        let rho = auto.correlation_param.unwrap();
-        assert!(
-            rho > 0.0 && rho < 1.0,
-            "AR(1) errors with rho = 0.6 give a positive estimate: {rho}"
-        );
-    }
-
-    /// Validation test: GLS with automatic rho estimation
-    #[test]
-    fn test_validate_gls_ar1_auto() {
-        // Create data with AR(1) errors
-        let n = 50;
-        let x: Vec<f64> = (0..n).map(|i| 10.0 * (i as f64) / (n as f64)).collect();
-
-        let mut ar_error = 0.0;
-        let true_rho = 0.5;
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let innovation = ((i as f64 * 1.234).cos()) * 0.6;
-                ar_error = true_rho * ar_error + innovation;
-                3.0 + 1.5 * xi + ar_error
-            })
-            .collect();
-
-        // Build design matrix
-        let mut x_mat = Array2::<f64>::zeros((n, 2));
-        for i in 0..n {
-            x_mat[[i, 0]] = 1.0;
-            x_mat[[i, 1]] = x[i];
-        }
-        let y_arr = Array1::from_vec(y);
-
-        // Fit GLS with auto rho estimation
-        let result = gls_ar1_auto(&y_arr.view(), &x_mat.view()).unwrap();
-
-        // Should estimate rho automatically
-        assert!(result.correlation_param.is_some());
-        let estimated_rho = result.correlation_param.unwrap();
-
-        // Estimated rho should be in valid range and roughly close to true value
-        assert!(
-            estimated_rho > -1.0 && estimated_rho < 1.0,
-            "Estimated rho should be in (-1, 1)"
-        );
-
-        // Coefficients should be reasonable
-        assert!(
-            (result.coefficients[0] - 3.0).abs() < 1.5,
-            "GLS auto intercept should be close to 3: got {}",
-            result.coefficients[0]
-        );
-        assert!(
-            (result.coefficients[1] - 1.5).abs() < 0.5,
-            "GLS auto slope should be close to 1.5: got {}",
-            result.coefficients[1]
-        );
-    }
-
-    /// Validation test: GLS with compound symmetry correlation
-    #[test]
-    fn test_validate_gls_compound_symmetry() {
-        // Compound symmetry: all off-diagonal correlations are equal (rho)
-        // This is appropriate for clustered data where observations within
-        // a cluster have the same correlation
-
-        let n = 30;
-        let x: Vec<f64> = (0..n).map(|i| (i as f64) / 5.0).collect();
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let noise = ((i as f64 * 0.789).sin()) * 0.3;
-                2.0 + xi + noise
-            })
-            .collect();
-
-        let mut x_mat = Array2::<f64>::zeros((n, 2));
-        for i in 0..n {
-            x_mat[[i, 0]] = 1.0;
-            x_mat[[i, 1]] = x[i];
-        }
-        let y_arr = Array1::from_vec(y);
-
-        // Fit with compound symmetry
-        let result = gls(
-            &y_arr.view(),
-            &x_mat.view(),
-            CorrelationStructure::CompoundSymmetry { rho: 0.3 },
-        )
-        .unwrap();
-
-        assert!(result.correlation.contains("Compound Symmetry"));
-        assert!((result.correlation_param.unwrap() - 0.3).abs() < 1e-10);
-
-        // Should still recover reasonable coefficients
-        assert!(
-            (result.coefficients[1] - 1.0).abs() < 0.3,
-            "CS slope should be close to 1: got {}",
-            result.coefficients[1]
-        );
+        Check::new(&case)
+            .scalar("phi", auto.correlation_param.unwrap(), Tol::iterative(1e-6))
+            .named("coef", &names, &auto.coefficients, Tol::coef(n))
+            .named("se", &names, &auto.std_errors, Tol::se(n))
+            .scalar("log_lik_reml", auto.log_likelihood, Tol::stat(n))
+            .scalar("aic_reml", auto.aic, Tol::stat(n))
+            .scalar("bic_reml", auto.bic, Tol::stat(n))
+            .finish();
+        let ml = GlsOptions {
+            correlation: GlsCorrelation::Ar1,
+            method: GlsMethod::Ml,
+            ..GlsOptions::default()
+        };
+        let gml = run_gls_with(&ds, "y", &["x"], true, &ml).unwrap();
+        Check::new(&case)
+            .scalar(
+                "phi_ml",
+                gml.correlation_param.unwrap(),
+                Tol::iterative(1e-6),
+            )
+            .named("coef_ml", &names, &gml.coefficients, Tol::coef(n))
+            .scalar("log_lik_ml", gml.log_likelihood, Tol::stat(n))
+            .finish();
+        assert!(auto.rho_estimated && auto.n_params == 4 && !g.rho_estimated && g.n_params == 3);
     }
 
     #[test]
@@ -1100,5 +1633,305 @@ mod tests {
             }
             other => panic!("expected ColumnNotFound, got {other:?}"),
         }
+    }
+
+    fn cs_options(method: GlsMethod, rho: Option<f64>) -> GlsOptions {
+        GlsOptions {
+            correlation: GlsCorrelation::CompoundSymmetry,
+            group_col: Some("g".into()),
+            method,
+            rho,
+        }
+    }
+    const NAMES: [&str; 3] = ["(Intercept)", "x", "z"];
+
+    /// The data of case `gls_compsymm` (for tests that do not compare its values).
+    fn gls_cs_data() -> Dataset {
+        crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/gls_cs.csv",
+        )
+    }
+
+    /// `y` and `[1, x, z]` of the `gls_compsymm` data.
+    fn gls_cs_arrays(ds: &Dataset) -> (Array1<f64>, Array2<f64>) {
+        use crate::data::columns::numeric_column;
+        let df = ds.df();
+        let y = numeric_column(df, "y", NaPolicy::Fail).unwrap().0;
+        let x = numeric_column(df, "x", NaPolicy::Fail).unwrap().0;
+        let z = numeric_column(df, "z", NaPolicy::Fail).unwrap().0;
+        let n = y.len();
+        let design = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => x[i],
+            _ => z[i],
+        });
+        (Array1::from_vec(y), design)
+    }
+
+    fn groups_of(ds: &Dataset) -> Vec<u32> {
+        let cols = ColumnRequest::new(ds.df()).factor("g").extract().unwrap();
+        cols.factor("g").codes.clone()
+    }
+
+    /// Case `gls_compsymm`: nlme::gls(y ~ x + z, correlation = corCompSymm(form = ~ 1 | g)) with
+    /// rho estimated. Pins: nlme's profile likelihood maximised by optimize(tol = 1e-12)
+    /// (`<m>_profile_*`, the tight refit); cross-check: nlme's own fit (`<m>_*`), whose optimiser
+    /// stops up to 3e-8 relative short in rho.
+    fn check_compsymm(case_id: &str, method: GlsMethod, m: &str) {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let n = case.scalar("n") as usize;
+        let g = run_gls_with(&ds, "y", &["x", "z"], true, &cs_options(method, None)).unwrap();
+        let rho = g.correlation_param.unwrap();
+        let k = |s: &str| format!("{m}_{s}");
+        let p = |s: &str| format!("{m}_profile_{s}");
+        Check::new(&case)
+            // flat maximum: Brent resolves rho to about 1.5e-8 |rho|
+            .scalar(&p("rho"), rho, Tol::iterative(1e-6))
+            .named(&p("coef"), &NAMES, &g.coefficients, Tol::coef(n))
+            .named(&p("se"), &NAMES, &g.std_errors, Tol::se(n))
+            .scalar(&p("sigma"), g.sigma, Tol::stat(n))
+            .scalar(&p("loglik"), g.log_likelihood, Tol::stat(n))
+            .scalar(&k("rho"), rho, Tol::iterative(1e-6))
+            .named(&k("coef"), &NAMES, &g.coefficients, Tol::iterative(1e-6))
+            .named(&k("se"), &NAMES, &g.std_errors, Tol::iterative(1e-6))
+            .scalar(&k("sigma"), g.sigma, Tol::iterative(1e-6))
+            .scalar(&k("loglik"), g.log_likelihood, Tol::stat(n))
+            .scalar(&k("aic"), g.aic, Tol::stat(n))
+            .scalar(&k("bic"), g.bic, Tol::stat(n))
+            .scalar("n_groups", g.n_groups.unwrap() as f64, Tol::exact())
+            .finish();
+        assert!(
+            g.rho_estimated && g.method == method && g.n_params == 5,
+            "{g:?}"
+        );
+        assert!(
+            g.convergence.as_ref().is_some_and(|c| c.converged),
+            "{:?}",
+            g.convergence
+        );
+    }
+
+    #[test]
+    fn test_validate_gls_compsymm_reml() {
+        check_compsymm("gls_compsymm", GlsMethod::Reml, "reml")
+    }
+
+    #[test]
+    fn test_validate_gls_compsymm_ml() {
+        check_compsymm("gls_compsymm", GlsMethod::Ml, "ml")
+    }
+
+    /// Case `gls_compsymm`: corCompSymm(0.3, form = ~ 1 | g, fixed = TRUE), REML and ML (no
+    /// optimisation).
+    #[test]
+    fn test_validate_gls_compsymm_fixed_rho_grouped() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gls_compsymm");
+        let n = case.scalar("n") as usize;
+        for (method, m) in [(GlsMethod::Reml, "reml"), (GlsMethod::Ml, "ml")] {
+            let g =
+                run_gls_with(&ds, "y", &["x", "z"], true, &cs_options(method, Some(0.3))).unwrap();
+            let k = |s: &str| format!("cs03_{m}_{s}");
+            Check::new(&case)
+                .named(&k("coef"), &NAMES, &g.coefficients, Tol::coef(n))
+                .named(&k("se"), &NAMES, &g.std_errors, Tol::se(n))
+                .scalar(&k("sigma"), g.sigma, Tol::stat(n))
+                .scalar(&k("loglik"), g.log_likelihood, Tol::stat(n))
+                .scalar(&k("aic"), g.aic, Tol::stat(n))
+                .scalar(&k("bic"), g.bic, Tol::stat(n))
+                .finish();
+            assert!(!g.rho_estimated && g.n_params == 4 && g.convergence.is_none());
+        }
+    }
+
+    /// Case `gls_compsymm`: corAR1(form = ~ 1 | g) by REML. nlme stops 2.2e-6 relative short in
+    /// rho here (its logLik is 4.3e-11 below the profile maximum), so its keys are a looser
+    /// cross-check.
+    #[test]
+    fn test_validate_gls_ar1_grouped_reml() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gls_compsymm");
+        let n = case.scalar("n") as usize;
+        let o = GlsOptions {
+            correlation: GlsCorrelation::Ar1,
+            group_col: Some("g".into()),
+            ..GlsOptions::default()
+        };
+        let g = run_gls_with(&ds, "y", &["x", "z"], true, &o).unwrap();
+        let rho = g.correlation_param.unwrap();
+        Check::new(&case)
+            .scalar("ar1g_profile_rho", rho, Tol::iterative(1e-6))
+            .named("ar1g_profile_coef", &NAMES, &g.coefficients, Tol::coef(n))
+            .named("ar1g_profile_se", &NAMES, &g.std_errors, Tol::se(n))
+            .scalar("ar1g_profile_sigma", g.sigma, Tol::stat(n))
+            .scalar("ar1g_profile_loglik", g.log_likelihood, Tol::stat(n))
+            .scalar("ar1g_rho", rho, Tol::iterative(1e-5))
+            .named("ar1g_coef", &NAMES, &g.coefficients, Tol::iterative(1e-6))
+            .named("ar1g_se", &NAMES, &g.std_errors, Tol::iterative(1e-5))
+            .scalar("ar1g_loglik", g.log_likelihood, Tol::stat(n))
+            .finish();
+    }
+
+    /// One block with an intercept: the common within-block shock is the intercept; rho is not
+    /// identified.
+    #[test]
+    fn test_gls_compsymm_rho_not_identified() {
+        let ds = gls_cs_data();
+        let mut o = cs_options(GlsMethod::Reml, None);
+        o.group_col = None;
+        match run_gls_with(&ds, "y", &["x", "z"], true, &o).unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("rho") && message.contains("not identified"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+        // the old string API reaches the same check
+        assert!(run_gls(&ds, "y", &["x", "z"], true, "cs", None).is_err());
+        // groups with one row each give no within-group pairs
+        let (y, x) = gls_cs_arrays(&ds);
+        let spec = GlsSpec {
+            correlation: GlsCorrelation::CompoundSymmetry,
+            rho: None,
+            groups: Some((0..y.len() as u32).collect()),
+            method: GlsMethod::Reml,
+        };
+        assert!(matches!(
+            gls_with(&y.view(), &x.view(), &spec),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        // rho or groups with identity
+        let spec = GlsSpec {
+            correlation: GlsCorrelation::Identity,
+            rho: Some(0.3),
+            ..GlsSpec::default()
+        };
+        assert!(matches!(
+            gls_with(&y.view(), &x.view(), &spec),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+    }
+
+    /// An aliased column is an error, as nlme's "computed gls fit is singular".
+    #[test]
+    fn test_gls_rejects_rank_deficient_design() {
+        let ds = gls_cs_data();
+        let (y, x) = gls_cs_arrays(&ds);
+        let n = y.len();
+        let mut x2 = Array2::zeros((n, 4));
+        x2.slice_mut(ndarray::s![.., ..3]).assign(&x);
+        x2.column_mut(3).assign(&(&x.column(1) * 2.0));
+        let spec = GlsSpec {
+            correlation: GlsCorrelation::CompoundSymmetry,
+            rho: Some(0.3),
+            groups: Some(groups_of(&ds)),
+            method: GlsMethod::Reml,
+        };
+        match gls_with(&y.view(), &x2.view(), &spec).unwrap_err() {
+            EconError::SingularMatrix { context, .. } => assert!(
+                context.contains("rank 3 of 4") && context.contains("column 4"),
+                "{context}"
+            ),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// The profile maximisation is scale-free (y * 1e-6 and y * 1e6).
+    #[test]
+    fn test_gls_rho_estimate_is_scale_invariant() {
+        let ds = gls_cs_data();
+        let (y, x) = gls_cs_arrays(&ds);
+        let spec = GlsSpec {
+            correlation: GlsCorrelation::CompoundSymmetry,
+            rho: None,
+            groups: Some(groups_of(&ds)),
+            method: GlsMethod::Reml,
+        };
+        let base = gls_with(&y.view(), &x.view(), &spec).unwrap();
+        let (rho0, it0) = (
+            base.correlation_param.unwrap(),
+            base.convergence.as_ref().unwrap().iterations as i64,
+        );
+        for s in [1e-6, 1e6] {
+            let ys = &y * s;
+            let g = gls_with(&ys.view(), &x.view(), &spec).unwrap();
+            assert!(
+                (g.correlation_param.unwrap() - rho0).abs() <= 1e-6 * rho0.abs(),
+                "y*{s}: rho {:?} vs {rho0}",
+                g.correlation_param
+            );
+            for j in 0..3 {
+                assert!(
+                    (g.coefficients[j] / s - base.coefficients[j]).abs()
+                        <= 1e-6 * base.coefficients[j].abs()
+                );
+            }
+            let it = g.convergence.as_ref().unwrap().iterations as i64;
+            assert!((it - it0).abs() <= 5, "y*{s}: {it} vs {it0} evaluations");
+        }
+    }
+
+    #[test]
+    fn test_gls_options_parse_aliases_and_reject_unknown() {
+        assert_eq!("REML".parse::<GlsMethod>().unwrap(), GlsMethod::Reml);
+        assert_eq!(
+            "maximum-likelihood".parse::<GlsMethod>().unwrap(),
+            GlsMethod::Ml
+        );
+        for s in ["cs", "Compound Symmetry", "exchangeable", "corCompSymm"] {
+            assert_eq!(
+                s.parse::<GlsCorrelation>().unwrap(),
+                GlsCorrelation::CompoundSymmetry,
+                "{s}"
+            );
+        }
+        assert_eq!(
+            "AR1".parse::<GlsCorrelation>().unwrap(),
+            GlsCorrelation::Ar1
+        );
+        match "gmm".parse::<GlsMethod>().unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("method") && message.contains("reml") && message.contains("ml"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+        let ds = gls_cs_data();
+        match run_gls(&ds, "y", &["x"], true, "toeplitz", None).unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("compound_symmetry") && message.contains("ar1"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// The explicit `intercept` decides the R² rule: a constant non-zero regressor with
+    /// `intercept = false` is not an intercept (summary.lm keys on the formula's intercept).
+    #[test]
+    fn test_gls_r_squared_follows_explicit_intercept() {
+        let ds = Dataset::new(
+            polars::prelude::df! {
+                "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 6.3, 6.8, 8.2],
+                "c" => [2.0; 8],
+                "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            }
+            .unwrap(),
+        );
+        let r = run_gls(&ds, "y", &["c", "x"], false, "identity", None).unwrap();
+        let y = [1.1, 1.9, 3.2, 3.8, 5.1, 6.3, 6.8, 8.2];
+        let ss_res: f64 = r.residuals.iter().map(|e| e * e).sum();
+        let uncentred = 1.0 - ss_res / y.iter().map(|v| v * v).sum::<f64>();
+        assert!((r.r_squared - uncentred).abs() < 1e-12, "{}", r.r_squared);
+        // the raw-matrix entry point still detects the constant column
+        let x = Array2::from_shape_fn((8, 2), |(i, j)| if j == 0 { 2.0 } else { i as f64 + 1.0 });
+        let g = gls(
+            &Array1::from_vec(y.to_vec()).view(),
+            &x.view(),
+            CorrelationStructure::Identity,
+        )
+        .unwrap();
+        assert!((g.r_squared - uncentred).abs() > 1e-6);
     }
 }

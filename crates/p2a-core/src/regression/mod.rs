@@ -16,7 +16,7 @@
 //!
 //! ## Generalized & Specialized Regression
 //!
-//! - [`run_gls`] - Generalized least squares (AR(1), compound symmetry or identity; `gls()` also takes a known Omega)
+//! - [`run_gls`] / [`run_gls_with`] - Generalized least squares (AR(1), compound symmetry or identity, within groups, rho fixed or by REML/ML; `gls()` also takes a known Omega)
 //! - [`run_quantreg`] - Quantile/median regression
 //! - [`run_loess`] - Local polynomial regression (LOESS/LOWESS)
 //! - [`smooth_spline()`] - Smoothing splines
@@ -126,7 +126,10 @@ pub use evalue::{
     evalue_rr_ci,
     evalue_smd,
 };
-pub use gls::{CorrelationStructure, GlsResult, gls, gls_ar1_auto, run_gls, run_gls_raw};
+pub use gls::{
+    CorrelationStructure, GlsCorrelation, GlsMethod, GlsOptions, GlsResult, GlsSpec, gls,
+    gls_ar1_auto, gls_with, run_gls, run_gls_raw, run_gls_with,
+};
 pub use line::{LineResult, line, run_line};
 pub use loess::{LoessConfig, LoessModel, LoessResult, loess, loess_predict, run_loess};
 pub use marginal_effects::{

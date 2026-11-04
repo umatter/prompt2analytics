@@ -46,7 +46,9 @@
 //! Pairs with a missing (NaN) or infinite x or y are deleted first (R's `line()` uses the
 //! complete pairs too) and reported in [`LineResult::missing`].
 //!
-//! R equivalent: `stats::line()`
+//! Related to R's `stats::line()`; R >= 3.5's `tukeyline` differs (iteration count, the intercept
+//! as `median(y - b x)`, its third cut points; REG-12, open). The R values for the old test data
+//! are in case `line_tukey_outliers`: iter 1: 1.739 / 0.513.
 
 use serde::{Deserialize, Serialize};
 
@@ -458,78 +460,48 @@ mod tests {
     // VALIDATION TESTS - Comparing against R reference implementations
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Validation test: Tukey's resistant line vs R's MASS::line()
-    ///
-    /// R code (from validation/scripts/validate_regression_diag.R):
-    /// ```r
-    /// set.seed(42)
-    /// n <- 30
-    /// x_line <- 1:n
-    /// y_line <- 2 + 0.5*x_line + rnorm(n, 0, 0.5)
-    /// y_line[c(5, 15, 25)] <- y_line[c(5, 15, 25)] + c(10, -8, 12)  # outliers
-    /// line_result <- line(x_line, y_line)
-    /// # Expected: intercept ≈ 2.42, slope ≈ 0.475
-    /// # OLS: intercept ≈ 2.72, slope ≈ 0.486 (affected by outliers)
-    /// ```
+    /// Case `line_tukey_outliers` (three outliers in 30 points, y = 2 + 0.5 x + noise): the
+    /// resistant slope is near 0.5 and closer to it than the OLS slope R's `lm` gives on the same
+    /// data (`ols_coef`, pinned here through `run_ols`). The line coefficients themselves are not
+    /// pinned: R's `line` differs (REG-12, open).
     #[test]
-    fn test_validate_line_with_outliers() {
-        // Create data matching R's set.seed(42)
-        // y_line <- 2 + 0.5*x_line + rnorm(n, 0, 0.5) with outliers
-        // Pre-computed from R for reproducibility
-        let x: Vec<f64> = (1..=30).map(|i| i as f64).collect();
-
-        // y values from R set.seed(42) with noise
-        let y = vec![
-            2.69, 2.72, 3.29, 3.82, 14.41, // 5th has +10 outlier
-            5.00, 4.87, 4.88, 6.28, 6.47, 7.98, 8.13, 8.54, 9.21, 1.17, // 15th has -8 outlier
-            9.71, 10.22, 11.09, 11.57, 11.97, 12.50, 13.61, 13.35, 13.95,
-            26.70, // 25th has +12 outlier
-            14.85, 15.42, 16.69, 16.47, 17.15,
-        ];
-
-        let result = line(&x, &y, Some(1)).unwrap();
-
-        // R reference: line() intercept ≈ 2.42, slope ≈ 0.475
-        // The resistant line should be robust to the 3 outliers
-        let r_intercept = 2.42169727298821;
-        let r_slope = 0.475089391721295;
-
-        // Resistant line should be close to R
-        // Note: tolerance is loose because Rust implementation may differ slightly
-        // in median calculation and polishing iterations
+    fn test_validate_line_resists_outliers() {
+        use crate::regression::ols::{CovarianceType, run_ols};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("line_tukey_outliers");
+        let n = case.scalar("n") as usize;
+        let ols = run_ols(&ds, "y", &["x"], true, CovarianceType::Standard).unwrap();
+        Check::new(&case)
+            .vector(
+                "ols_coef",
+                &ols.coefficients
+                    .iter()
+                    .map(|c| c.estimate)
+                    .collect::<Vec<_>>(),
+                Tol::coef(n),
+            )
+            .scalar("n", ols.n_obs as f64, Tol::exact())
+            .finish();
+        let df = ds.df();
+        let num = |c: &str| {
+            crate::data::columns::numeric_column(df, c, crate::data::columns::NaPolicy::Fail)
+                .unwrap()
+                .0
+        };
+        let result = line(&num("x"), &num("y"), Some(1)).unwrap();
+        // deviation REG-12: iter1_coef, iter2_coef, iter3_coef (R's tukeyline).
+        let ols_slope = case.vector("ols_coef")[1];
+        assert!((result.slope - 0.5).abs() < 0.03, "slope {}", result.slope);
         assert!(
-            (result.intercept - r_intercept).abs() < 1.0,
-            "Line intercept mismatch: Rust={:.4}, R={:.4}",
-            result.intercept,
-            r_intercept
-        );
-        assert!(
-            (result.slope - r_slope).abs() < 0.1,
-            "Line slope mismatch: Rust={:.4}, R={:.4}",
-            result.slope,
-            r_slope
-        );
-
-        // Verify resistant line is closer to true values (2, 0.5) than OLS would be
-        // OLS is pulled by outliers: intercept ≈ 2.72, slope ≈ 0.486
-        let ols_intercept: f64 = 2.72269385790876;
-
-        // Key property: resistant line intercept should be closer to true value (2.0)
-        // than OLS, even though both are affected somewhat
-        let line_error: f64 = (result.intercept - 2.0).abs();
-        let ols_error: f64 = (ols_intercept - 2.0).abs();
-
-        // The line method is resistant to outliers (gives result closer to true model)
-        assert!(
-            line_error < ols_error + 0.5,
-            "Resistant line should be closer to true intercept than OLS"
+            (result.slope - 0.5).abs() < (ols_slope - 0.5).abs(),
+            "resistant slope {} vs OLS {ols_slope}",
+            result.slope
         );
     }
 
-    /// Validation test: Resistant line on clean data (no outliers)
-    /// When there are no outliers, line() and lm() should give similar results
+    /// Resistant line on clean data (no outliers) recovers y = 2 + 0.5 x.
     #[test]
-    fn test_validate_line_clean_data() {
+    fn test_line_clean_data_recovers_dgp() {
         // Simple linear data without outliers
         let x: Vec<f64> = (1..=20).map(|i| i as f64).collect();
         let y: Vec<f64> = x

@@ -280,12 +280,14 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Regression through the origin: uncentered R², adjusted R² with n, F on k df (OLS, raw design, GLS, clustered, HAC) | [no_intercept.md](regression/no_intercept.md) | R-pinned |
 | HAC, Driscoll-Kraay, quantile regression, AR(1) GLS, RESET, Wald (legacy DGPs) | [regression_legacy_cases.md](regression/regression_legacy_cases.md) | R-pinned, known deviations (REG-22, REG-24, REG-26, REG-35, REG-37, REG-43, REG-50, REG-52, REG-61, REG-64, REG-9) |
 | Bootstrap covariance (vcovBS) | [vcovBS.md](regression/vcovBS.md) | not R-pinned |
-| LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-14, REG-26) |
-| Nonlinear least squares | [nls.md](regression/nls.md) | not R-pinned |
+| LOESS | [loess.md](regression/loess.md) | R-pinned, known deviations (REG-26) |
+| Nonlinear least squares | [nls.md](regression/nls.md) | R-pinned |
 | Tukey's Resistant Line | [line.md](regression/line.md) | R-pinned, known deviations (REG-12) |
-| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned, known deviations (REG-31) |
-| Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | not R-pinned |
-| E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | not R-pinned |
+| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | R-pinned |
+| Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | R-pinned, known deviations (REG-27, REG-28) |
+| E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | R-pinned, known deviations (REG-5, REG-39) |
+| GLS with grouped AR(1) / compound-symmetry errors, rho by REML or ML | [gls.md](regression/gls.md) | R-pinned |
+| Smoothing spline (GCV / CV selection) | [smooth_spline.md](regression/smooth_spline.md) | not R-pinned |
 | Lasso, ridge and elastic net (glmnet gaussian and binomial paths, cv.glmnet, predict) | [glmnet.md](regression/glmnet.md) | R-pinned |
 | Quantile regression (Barrodale-Roberts simplex, Frisch-Newton, summary.rq iid/nid/ker SEs, xy bootstrap) | [quantreg.md](regression/quantreg.md) | R-pinned, known deviations (REG-26) |
 

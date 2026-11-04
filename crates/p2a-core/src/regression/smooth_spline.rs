@@ -1,7 +1,12 @@
 //! Smoothing spline regression.
 //!
-//! Implements R's `smooth.spline()` function which fits a cubic smoothing spline
-//! to data by minimizing a penalized sum of squares criterion.
+//! A cubic smoothing spline modelled on R's `smooth.spline()`: it minimises a penalized
+//! sum of squares. If neither df, spar nor lambda is given, lambda minimises GCV (R's
+//! default) or, with `criterion = Cv` / `cv = true`, ordinary leave-one-out CV; the result
+//! reports the criterion used.
+//!
+//! The penalty, the spar scale and the df/leverages are p2a's own approximation, not R's
+//! smooth.spline (REG-29, REG-30), so its numbers are not R's.
 //!
 //! # References
 //!
@@ -14,23 +19,71 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+use crate::traits::convergence::ResultNotes;
 use serde::{Deserialize, Serialize};
 
+/// The criterion that selects lambda when neither df, spar nor lambda is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SplineCriterion {
+    /// Generalized cross-validation (R's default, `cv = FALSE`).
+    #[default]
+    Gcv,
+    /// Ordinary leave-one-out cross-validation (R's `cv = TRUE`).
+    Cv,
+}
+
+crate::option_enum!(
+    SplineCriterion,
+    crate::options::Choices {
+        option: "criterion",
+        values: &[
+            (
+                &["gcv", "generalized_cv", "generalized_cross_validation"],
+                SplineCriterion::Gcv
+            ),
+            (
+                &["cv", "loocv", "loo", "ordinary_cv", "leave_one_out"],
+                SplineCriterion::Cv
+            ),
+        ],
+    }
+);
+
 /// Configuration for smooth.spline fitting.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SmoothSplineConfig {
-    /// Equivalent degrees of freedom for the spline. If specified, spar is ignored.
+    /// Equivalent degrees of freedom for the spline (1 < df <= number of unique x).
+    /// If specified, spar is ignored.
     pub df: Option<f64>,
-    /// Smoothing parameter. If neither df nor spar is specified, uses cross-validation.
+    /// Smoothing parameter. If neither df, spar nor lambda is given, `criterion` selects
+    /// lambda.
     pub spar: Option<f64>,
     /// Penalty parameter lambda (alternative to spar). spar = log(lambda) / 6.
     pub lambda: Option<f64>,
     /// Use all unique x values as knots (default: false, uses a subset for efficiency).
     pub all_knots: bool,
-    /// Use generalized cross-validation (true) or ordinary leave-one-out CV (false).
+    /// R's meaning: `true` selects ordinary leave-one-out CV (R `cv = TRUE`) and overrides
+    /// `criterion`; `false` leaves the choice to `criterion`. Prefer `criterion`.
     pub cv: bool,
-    /// Weights for observations (optional).
+    /// The criterion minimised when neither df, spar nor lambda is given (default GCV, as R).
+    pub criterion: SplineCriterion,
+    /// Weights for observations (optional, finite and non-negative).
     pub weights: Option<Vec<f64>>,
+}
+
+impl Default for SmoothSplineConfig {
+    fn default() -> Self {
+        Self {
+            df: None,
+            spar: None,
+            lambda: None,
+            all_knots: false,
+            cv: false,
+            criterion: SplineCriterion::Gcv,
+            weights: None,
+        }
+    }
 }
 
 impl SmoothSplineConfig {
@@ -50,11 +103,32 @@ impl SmoothSplineConfig {
         }
     }
 
-    /// Use cross-validation to select smoothing parameter.
+    /// Select lambda by cross-validation: `true` = GCV, `false` = ordinary leave-one-out CV.
+    ///
+    /// Kept for source compatibility; its argument has the opposite sense of R's `cv`
+    /// (and of the `cv` field). Prefer [`SmoothSplineConfig::with_criterion`].
     pub fn with_cv(gcv: bool) -> Self {
+        Self::with_criterion(if gcv {
+            SplineCriterion::Gcv
+        } else {
+            SplineCriterion::Cv
+        })
+    }
+
+    /// Select lambda by `criterion`.
+    pub fn with_criterion(criterion: SplineCriterion) -> Self {
         Self {
-            cv: gcv,
+            criterion,
             ..Default::default()
+        }
+    }
+
+    /// The criterion in force: ordinary CV when `cv` is true (R's meaning), else `criterion`.
+    pub fn effective_criterion(&self) -> SplineCriterion {
+        if self.cv {
+            SplineCriterion::Cv
+        } else {
+            self.criterion
         }
     }
 }
@@ -84,6 +158,19 @@ pub struct SmoothSplineResult {
     pub n_obs: usize,
     /// Number of unique x values (knots).
     pub n_knots: usize,
+    /// The criterion that selected lambda; `None` when df, spar or lambda was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion: Option<SplineCriterion>,
+    /// Notes on the fit (a df target the bisection did not reach); absent from JSON when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for SmoothSplineResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 /// Fit a cubic smoothing spline to data.
@@ -92,7 +179,13 @@ pub struct SmoothSplineResult {
 ///
 /// RSS(f, λ) = Σ w_i (y_i - f(x_i))² + λ ∫ (f''(x))² dx
 ///
-/// where λ controls the trade-off between fit and smoothness.
+/// where λ controls the trade-off between fit and smoothness. With neither df, spar nor
+/// lambda, λ minimises GCV (R's default) or, with `criterion = Cv` / `cv = true`, ordinary
+/// leave-one-out CV.
+///
+/// df must lie in (1, number of unique x], spar must be finite, lambda finite and
+/// non-negative, weights finite and non-negative. A df target that the bisection misses
+/// is reported in `warnings`.
 ///
 /// # Arguments
 ///
@@ -146,6 +239,33 @@ pub fn smooth_spline(
             message: "Input contains non-finite values".to_string(),
         });
     }
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    if let Some(spar) = config.spar
+        && !spar.is_finite()
+    {
+        return spec(format!("spar must be finite, got {spar}"));
+    }
+    if let Some(lambda) = config.lambda
+        && !(lambda.is_finite() && lambda >= 0.0)
+    {
+        return spec(format!(
+            "lambda must be finite and non-negative, got {lambda}"
+        ));
+    }
+    if let Some(w) = config.weights.as_deref() {
+        if w.len() != n {
+            return spec(format!(
+                "weights must have the same length as the data: {} vs {n}",
+                w.len()
+            ));
+        }
+        if let Some(i) = w.iter().position(|v| !(v.is_finite() && *v >= 0.0)) {
+            return spec(format!(
+                "weights must be finite and non-negative; weight {i} is {}",
+                w[i]
+            ));
+        }
+    }
 
     // Sort by x and handle ties by averaging y values
     let (xs, ys, ws, _original_indices) = prepare_data(x, y, config.weights.as_deref())?;
@@ -159,6 +279,14 @@ pub fn smooth_spline(
         });
     }
 
+    if let Some(df) = config.df
+        && !(df.is_finite() && df > 1.0 && df <= n_unique as f64)
+    {
+        return spec(format!(
+            "df must be in (1, {n_unique}] (the number of unique x values), got {df}"
+        ));
+    }
+
     // Select knots (all unique x values if all_knots=true, else use a subset)
     let knots: Vec<f64> = if config.all_knots || n_unique <= 50 {
         xs.clone()
@@ -170,9 +298,18 @@ pub fn smooth_spline(
     let penalty = penalty_bands(&xs)?;
 
     // Determine lambda
+    let mut warnings = Vec::new();
+    let mut criterion = None;
     let (lambda, cv_score) = if let Some(df) = config.df {
         // Convert df to lambda
-        (df_to_lambda(&penalty, &ws, df)?, None)
+        let (lambda, reached) = df_to_lambda(&penalty, &ws, df)?;
+        if !reached {
+            let (_, got, _) = fit_smoothing_spline(&penalty, &ys, &ws, lambda)?;
+            warnings.push(format!(
+                "df target {df} not reached after 30 bisection steps: df = {got}"
+            ));
+        }
+        (lambda, None)
     } else if let Some(spar) = config.spar {
         // Convert spar to lambda
         let range = xs[xs.len() - 1] - xs[0];
@@ -182,7 +319,9 @@ pub fn smooth_spline(
         (lam, None)
     } else {
         // Use cross-validation to select lambda
-        cross_validate(&penalty, &ys, &ws, config.cv)?
+        let c = config.effective_criterion();
+        criterion = Some(c);
+        cross_validate(&penalty, &ys, &ws, c == SplineCriterion::Gcv)?
     };
 
     // Fit the smoothing spline with the selected lambda
@@ -207,6 +346,8 @@ pub fn smooth_spline(
         leverage: Some(leverage),
         n_obs: n,
         n_knots: knots.len(),
+        criterion,
+        warnings,
     })
 }
 
@@ -386,7 +527,12 @@ fn penalty_bands(x: &[f64]) -> EconResult<PentaPenalty> {
 }
 
 /// Convert degrees of freedom to lambda using bisection.
-fn df_to_lambda(penalty: &PentaPenalty, weights: &[f64], target_df: f64) -> EconResult<f64> {
+/// Bisection in log10(lambda) for the target df; returns (lambda, |df - target| < 0.05 reached).
+fn df_to_lambda(
+    penalty: &PentaPenalty,
+    weights: &[f64],
+    target_df: f64,
+) -> EconResult<(f64, bool)> {
     let n = penalty.n();
 
     // Binary search for lambda that gives target df
@@ -401,7 +547,7 @@ fn df_to_lambda(penalty: &PentaPenalty, weights: &[f64], target_df: f64) -> Econ
         let (_, df, _) = fit_smoothing_spline(penalty, &vec![0.0; n], weights, lambda_mid)?;
 
         if (df - target_df).abs() < 0.05 {
-            return Ok(lambda_mid);
+            return Ok((lambda_mid, true));
         }
 
         if df > target_df {
@@ -411,7 +557,10 @@ fn df_to_lambda(penalty: &PentaPenalty, weights: &[f64], target_df: f64) -> Econ
         }
     }
 
-    Ok(10.0_f64.powf((log_lambda_low + log_lambda_high) / 2.0))
+    Ok((
+        10.0_f64.powf((log_lambda_low + log_lambda_high) / 2.0),
+        false,
+    ))
 }
 
 /// Cross-validation to select lambda.
@@ -972,33 +1121,159 @@ mod tests {
         );
     }
 
-    /// Validation test against R's smooth.spline()
+    /// REG-44: df = 6 is met within the bisection's stop rule (|df - 6| < 0.05), with no
+    /// warning. A property test: p2a's smoother is not R's (REG-29, REG-30).
     #[test]
-    fn test_validate_smooth_spline_against_r() {
-        // R code:
-        // set.seed(42)
-        // x <- 1:20
-        // y <- sin(x/5) + rnorm(20, sd=0.1)
-        // result <- smooth.spline(x, y, df=6)
-        // result$df  # should be close to 6
-        // result$lambda
-
+    fn test_smooth_spline_df_target_is_met() {
         let x: Vec<f64> = (1..=20).map(|i| i as f64).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| (xi / 5.0).sin()).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| (xi / 5.0).sin() + 0.05 * (((i * 7) % 5) as f64 - 2.0))
+            .collect();
 
-        let config = SmoothSplineConfig::with_df(6.0);
-        let result = smooth_spline(&x, &y, config).unwrap();
-
-        // df should be close to requested
+        let result = smooth_spline(&x, &y, SmoothSplineConfig::with_df(6.0)).unwrap();
         assert!(
-            (result.df - 6.0).abs() < 1.0,
+            (result.df - 6.0).abs() < 0.05,
             "Expected df ~6, got {}",
             result.df
         );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
         // Residuals should be small for smooth data
         let max_resid = result.residuals.iter().map(|r| r.abs()).fold(0.0, f64::max);
         assert!(max_resid < 0.5, "Residuals too large: max = {}", max_resid);
+    }
+
+    /// REG-53: with neither df, spar nor lambda the smoothing parameter minimises GCV (R's
+    /// default cv = FALSE); SmoothSplineConfig::cv = true is R's cv = TRUE (ordinary
+    /// leave-one-out CV). Not an R pin: p2a's smoother is not R's yet (REG-29, REG-30 for
+    /// gcv_df, cv_df, ... of case `smoothers_gcv_periodic_loess`), so it reads the case's
+    /// dataset only.
+    #[test]
+    fn test_smooth_spline_default_criterion_is_gcv() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let ds = crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/smoothers_t3.csv",
+        );
+        let x = numeric_column(ds.df(), "x", NaPolicy::Fail).unwrap().0;
+        let y = numeric_column(ds.df(), "y", NaPolicy::Fail).unwrap().0;
+        let def = smooth_spline(&x, &y, SmoothSplineConfig::default()).unwrap();
+        let gcv = smooth_spline(
+            &x,
+            &y,
+            SmoothSplineConfig::with_criterion(SplineCriterion::Gcv),
+        )
+        .unwrap();
+        let cv = smooth_spline(
+            &x,
+            &y,
+            SmoothSplineConfig::with_criterion(SplineCriterion::Cv),
+        )
+        .unwrap();
+        let mut r_cv = SmoothSplineConfig::default();
+        r_cv.cv = true;
+        let r_cv = smooth_spline(&x, &y, r_cv).unwrap();
+        assert_eq!(def.criterion, Some(SplineCriterion::Gcv));
+        assert_eq!(
+            (def.lambda.to_bits(), def.df.to_bits()),
+            (gcv.lambda.to_bits(), gcv.df.to_bits())
+        );
+        assert_eq!(
+            (r_cv.criterion, r_cv.lambda.to_bits()),
+            (Some(SplineCriterion::Cv), cv.lambda.to_bits())
+        );
+        assert_ne!(def.lambda.to_bits(), cv.lambda.to_bits());
+        // the reported criterion is R's definition on the returned fit (100 distinct x,
+        // unit weights)
+        let n = def.x.len() as f64;
+        let rss: f64 = def.residuals.iter().map(|r| r * r).sum();
+        let gcv_formula = rss / n / (1.0 - def.df / n).powi(2);
+        assert!(
+            (def.cv_crit.unwrap() - gcv_formula).abs() <= 1e-12 * gcv_formula,
+            "{:?} vs {gcv_formula}",
+            def.cv_crit
+        );
+        let lev = cv.leverage.as_ref().unwrap();
+        let cv_formula = cv
+            .residuals
+            .iter()
+            .zip(lev)
+            .map(|(r, h)| (r / (1.0 - h)).powi(2))
+            .sum::<f64>()
+            / n;
+        assert!((cv.cv_crit.unwrap() - cv_formula).abs() <= 1e-12 * cv_formula);
+        // with_cv keeps its old meaning for source compatibility: true = GCV
+        assert_eq!(
+            smooth_spline(&x, &y, SmoothSplineConfig::with_cv(true))
+                .unwrap()
+                .criterion,
+            Some(SplineCriterion::Gcv)
+        );
+        assert_eq!(
+            smooth_spline(&x, &y, SmoothSplineConfig::with_df(6.0))
+                .unwrap()
+                .criterion,
+            None
+        );
+    }
+
+    #[test]
+    fn test_spline_criterion_parses_aliases_and_rejects_unknown() {
+        SplineCriterion::choices().validate().unwrap();
+        for s in [
+            "gcv",
+            "GCV",
+            "generalized-cv",
+            "Generalized Cross Validation",
+        ] {
+            assert_eq!(
+                s.parse::<SplineCriterion>().unwrap(),
+                SplineCriterion::Gcv,
+                "{s}"
+            );
+        }
+        for s in ["cv", "LOOCV", "loo", "ordinary_cv", "leave-one-out"] {
+            assert_eq!(
+                s.parse::<SplineCriterion>().unwrap(),
+                SplineCriterion::Cv,
+                "{s}"
+            );
+        }
+        assert_eq!(SplineCriterion::Gcv.to_string(), "gcv");
+        match "aic".parse::<SplineCriterion>().unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("criterion") && message.contains("gcv") && message.contains("cv"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_smooth_spline_rejects_invalid_controls() {
+        let x: Vec<f64> = (0..20).map(|i| i as f64 * 0.3).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.sin() + 0.05 * ((i * 7) % 5) as f64)
+            .collect();
+        let bad = |c: SmoothSplineConfig, what: &str| match smooth_spline(&x, &y, c).unwrap_err() {
+            EconError::InvalidSpecification { message } => {
+                assert!(message.contains(what), "{what}: {message}")
+            }
+            e => panic!("{what}: {e:?}"),
+        };
+        bad(SmoothSplineConfig::with_df(1.0), "df");
+        bad(SmoothSplineConfig::with_df(21.0), "df");
+        bad(SmoothSplineConfig::with_df(f64::NAN), "df");
+        bad(SmoothSplineConfig::with_spar(f64::INFINITY), "spar");
+        let mut c = SmoothSplineConfig::default();
+        c.lambda = Some(-1.0);
+        bad(c, "lambda");
+        let mut c = SmoothSplineConfig::default();
+        c.weights = Some(vec![-1.0; 20]);
+        bad(c, "weights");
     }
 
     /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.

@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "id": "gls_compsymm",
+  "area": "regression",
+  "method": "nlme::gls with corCompSymm(form = ~ 1 | g), REML and ML: rho estimated",
+  "reference": "nlme::gls(correlation = corCompSymm(form = ~ 1 | g) | corCompSymm(0.3, fixed = TRUE) | corAR1(form = ~ 1 | g), method = 'REML' | 'ML', glsControl(tolerance = 1e-12, msTol = 1e-12)); *_profile: nlme's profile likelihood maximised by optimize(tol = 1e-12)",
+  "call": "gls(y ~ x + z, data = gls_cs, correlation = corCompSymm(form = ~ 1 | g))",
+  "dataset": "validation/datasets/generated/gls_cs.csv",
+  "datasets": ["validation/datasets/generated/gls_cs.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "nlme": "3.1.164"
+  },
+  "values": {
+    "reml_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.93199069425035774, 0.46353630557826775, -0.38070416038239729]
+    },
+    "reml_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.1573382359152812, 0.089537489880766291, 0.18419871012808967]
+    },
+    "reml_rho": 0.38394302085494719,
+    "reml_sigma": 1.2029756776026339,
+    "reml_loglik": -227.15680980384658,
+    "reml_aic": 464.31361960769317,
+    "reml_bic": 479.26578254158687,
+    "cs03_reml_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.93206183294464462, 0.46422216610567346, -0.38066040256369488]
+    },
+    "cs03_reml_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.14153980551017312, 0.091125311055774413, 0.16564449439298579]
+    },
+    "cs03_reml_sigma": 1.1612676360032996,
+    "cs03_reml_loglik": -227.59278201183022,
+    "cs03_reml_aic": 463.18556402366045,
+    "cs03_reml_bic": 475.1472943707754,
+    "ml_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.93200609233854725, 0.46368476122527619, -0.38069468893007224]
+    },
+    "ml_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.15336523777270439, 0.089883558044555972, 0.1795336716863439]
+    },
+    "ml_rho": 0.36400658865273927,
+    "ml_sigma": 1.1793836414585257,
+    "ml_loglik": -223.91372122163054,
+    "ml_aic": 457.82744244326108,
+    "ml_bic": 472.88061891374235,
+    "cs03_ml_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.93206183294464462, 0.46422216610567346, -0.38066040256369488]
+    },
+    "cs03_ml_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.14153980551017314, 0.091125311055774413, 0.16564449439298581]
+    },
+    "cs03_ml_sigma": 1.1495963082665663,
+    "cs03_ml_loglik": -224.17877041847427,
+    "cs03_ml_aic": 456.35754083694854,
+    "cs03_ml_bic": 468.40008201333359,
+    "ar1g_rho": 0.36858588148397231,
+    "ar1g_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.94189316560602021, 0.46871954313861719, -0.37537835011458714]
+    },
+    "ar1g_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.13051520060152907, 0.091129117557240125, 0.15306768804713786]
+    },
+    "ar1g_sigma": 1.199149386934012,
+    "ar1g_loglik": -233.38103565889926,
+    "reml_profile_rho": 0.38394302666627544,
+    "reml_profile_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.9319906942459919, 0.46353630553615655, -0.38070416038508409]
+    },
+    "reml_profile_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.15733823709580111, 0.089537489782409732, 0.18419871151415559]
+    },
+    "reml_profile_sigma": 1.2029756811510077,
+    "reml_profile_loglik": -227.15680980384656,
+    "ml_profile_rho": 0.36400657810618053,
+    "ml_profile_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.932006092346915, 0.46368476130597902, -0.38069468892492364]
+    },
+    "ml_profile_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.15336523571053162, 0.089883558232320165, 0.17953366926481809]
+    },
+    "ml_profile_sigma": 1.1793836356613099,
+    "ml_profile_loglik": -223.91372122163048,
+    "ar1g_profile_rho": 0.36858508852814847,
+    "ar1g_profile_coef": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.94189313973364552, 0.46871954307751018, -0.3753783639185293]
+    },
+    "ar1g_profile_se": {
+      "names": ["(Intercept)", "x", "z"],
+      "values": [0.13051508706980811, 0.091129138785381966, 0.15306755400874467]
+    },
+    "ar1g_profile_sigma": 1.1991490503304092,
+    "ar1g_profile_loglik": -233.38103565885598,
+    "n": 150,
+    "n_groups": 30
+  }
+}

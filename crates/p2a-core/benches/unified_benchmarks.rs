@@ -54,6 +54,7 @@ use p2a_core::forecasting::{
     holt_winters, kalman_filter, run_arima_with, stl, struct_ts,
 };
 use p2a_core::ml::{cmdscale_from_data, kmedoids, linear_svm, silhouette, tsne};
+use p2a_core::regression::smooth_spline::SplineCriterion;
 use p2a_core::regression::{
     BgTestType, BootstrapType, CorrelationStructure, CovarianceType, HacKernel, ModelFn, ModelType,
     NlsConfig, QuantRegConfig, ResetType, SmoothSplineConfig, StepConfig, StepDirection, bg_test,
@@ -3630,7 +3631,7 @@ fn main() {
         let y_vec: Vec<f64> = y_col.into_iter().map(|v| v.unwrap_or(0.0)).collect();
 
         let gcv_config = SmoothSplineConfig {
-            cv: true,
+            criterion: SplineCriterion::Gcv,
             all_knots: true,
             ..Default::default()
         };

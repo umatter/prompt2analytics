@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "nls_expdecay",
+  "area": "regression/nls",
+  "method": "stats::nls(y ~ a * exp(-b * x) + c) on the old nls test data",
+  "reference": "stats::nls (Gauss-Newton, nls.control(tol = 1e-7); the tightest tolerance R reaches on these data)",
+  "call": "nls(y ~ a * exp(-b * x) + c, start = list(a = 8, b = 0.3, c = 1))",
+  "dataset": "validation/datasets/generated/nls_expdecay.csv",
+  "datasets": ["validation/datasets/generated/nls_expdecay.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "coef": {
+      "names": ["a", "b", "c"],
+      "values": [9.7068012333167282, 0.51299979264736895, 2.13177718560619]
+    },
+    "se": {
+      "names": ["a", "b", "c"],
+      "values": [0.083011989187722041, 0.012367990386702051, 0.085296855805285926]
+    },
+    "t": {
+      "names": ["a", "b", "c"],
+      "values": [116.93252177545001, 41.478023236413698, 24.992447441117541]
+    },
+    "p": {
+      "names": ["a", "b", "c"],
+      "values": [3.1975769258858545e-14, 1.2572454806981947e-10, 7.028268946538354e-09]
+    },
+    "rss": 0.036028950194827922,
+    "sigma": 0.06710900665598836,
+    "df": 8,
+    "n": 11
+  }
+}

@@ -34,6 +34,21 @@ impl std::fmt::Display for StepDirection {
     }
 }
 
+/// Accepted spellings of the stepwise direction (matched after `options::normalize`). The
+/// first spelling of each entry is canonical.
+const STEP_DIRECTION_CHOICES: crate::options::Choices<StepDirection> = crate::options::Choices {
+    option: "direction",
+    values: &[
+        (&["forward", "forwards", "fwd"], StepDirection::Forward),
+        (&["backward", "backwards", "bwd"], StepDirection::Backward),
+        (&["both"], StepDirection::Both),
+    ],
+};
+
+// FromStr (unknown names are an error listing the accepted ones) and choices(); the Display
+// above stays.
+crate::option_enum!(StepDirection, STEP_DIRECTION_CHOICES, no_display);
+
 // ============================================================================
 // Step Result
 // ============================================================================
@@ -468,7 +483,8 @@ fn compute_rss(model: &OlsResult) -> f64 {
 /// * `y_col` - Dependent variable
 /// * `scope_lower` - Variables always included (minimum model)
 /// * `scope_upper` - All candidate variables (maximum model)
-/// * `direction` - "forward", "backward", or "both"
+/// * `direction` - "forward" (or "forwards", "fwd"), "backward" (or "backwards", "bwd"), or
+///   "both"; anything else is an error
 /// * `use_bic` - Use BIC instead of AIC
 /// * `intercept` - Include intercept
 pub fn run_step(
@@ -480,11 +496,7 @@ pub fn run_step(
     use_bic: bool,
     intercept: bool,
 ) -> EconResult<StepResult> {
-    let direction = match direction.to_lowercase().as_str() {
-        "forward" => StepDirection::Forward,
-        "backward" => StepDirection::Backward,
-        _ => StepDirection::Both,
-    };
+    let direction = direction.parse::<StepDirection>()?;
 
     step(
         dataset,
@@ -930,5 +942,31 @@ mod tests {
     fn test_validate_step_borderline() {
         let (case, ds) = crate::test_support::load_case("step_borderline");
         pin_step(&case, &ds);
+    }
+
+    #[test]
+    fn test_step_direction_parses_aliases_and_rejects_unknown() {
+        use std::str::FromStr;
+        for (s, d) in [
+            ("forward", StepDirection::Forward),
+            ("Forwards", StepDirection::Forward),
+            ("fwd", StepDirection::Forward),
+            ("backward", StepDirection::Backward),
+            ("BACKWARDS", StepDirection::Backward),
+            ("bwd", StepDirection::Backward),
+            ("both", StepDirection::Both),
+        ] {
+            assert_eq!(StepDirection::from_str(s).unwrap(), d, "{s}");
+        }
+        let ds = create_test_dataset();
+        match run_step(&ds, "y", &[], &["x1", "x2"], "sideways", false, true).unwrap_err() {
+            EconError::InvalidSpecification { message } => assert!(
+                message.contains("direction")
+                    && message.contains("forward")
+                    && message.contains("both"),
+                "{message}"
+            ),
+            e => panic!("{e:?}"),
+        }
     }
 }

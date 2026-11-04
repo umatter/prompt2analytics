@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "line_tukey_outliers",
+  "area": "regression/line",
+  "method": "stats::line (R >= 3.5 tukeyline) on the old line test's data, iter = 1, 2, 3",
+  "reference": "stats::line(iter = 1 | 2 | 3) (R >= 3.5); stats::lm",
+  "call": "line(x, y, iter)",
+  "dataset": "validation/datasets/generated/line_outliers.csv",
+  "datasets": ["validation/datasets/generated/line_outliers.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "iter1_coef": [1.7390000000000001, 0.51300000000000001],
+    "iter2_coef": [1.7630000000000001, 0.51100000000000001],
+    "iter3_coef": [1.7630000000000001, 0.51100000000000001],
+    "ols_coef": [2.0836551724137866, 0.52086095661846532],
+    "n": 30
+  }
+}
