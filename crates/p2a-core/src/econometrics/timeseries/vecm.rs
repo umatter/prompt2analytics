@@ -7,7 +7,80 @@ use super::common::df_to_array2;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::options::Choices;
 use crate::resource;
+
+/// Deterministic terms of the Johansen procedure (`urca::ca.jo(ecdet = ...)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VecmDeterministic {
+    /// `"none"`: an unrestricted constant in the VECM (a linear trend in the levels) and nothing
+    /// in the cointegration relations (urca's default).
+    #[default]
+    None,
+    /// `"const"`: a constant restricted to the cointegration relations (the last row of beta), no
+    /// unrestricted constant.
+    Const,
+    /// `"trend"`: a linear trend restricted to the cointegration relations, plus an unrestricted constant.
+    Trend,
+}
+
+crate::option_enum!(
+    VecmDeterministic,
+    Choices {
+        option: "ecdet",
+        values: &[
+            (&["none"], VecmDeterministic::None),
+            (&["const", "constant"], VecmDeterministic::Const),
+            (&["trend"], VecmDeterministic::Trend),
+        ],
+    }
+);
+
+impl VecmDeterministic {
+    /// urca's `@model` text for the case.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::None => "with linear trend",
+            Self::Const => "without linear trend and constant in cointegration",
+            Self::Trend => "with linear trend in cointegration",
+        }
+    }
+}
+
+/// Configuration of the Johansen VECM.
+///
+/// Only the transitory error-correction form is estimated (level term `y_{t-1}`, as `vars` and
+/// Lütkepohl write it; `urca::ca.jo(spec = "transitory")`).
+///
+/// ```
+/// use p2a_core::econometrics::timeseries::vecm::{VecmConfig, VecmDeterministic};
+/// let mut config = VecmConfig::default(); // K = 2, ecdet = none, rank by the trace test
+/// config.ecdet = "const".parse::<VecmDeterministic>().unwrap();
+/// config.rank = Some(1);
+/// assert_eq!((config.lag_order, config.ecdet), (2, VecmDeterministic::Const));
+/// assert!("drift".parse::<VecmDeterministic>().is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VecmConfig {
+    /// Lag order K of the VAR in levels (urca's `K`); the VECM has K - 1 lagged differences. At least 2.
+    pub lag_order: usize,
+    /// Deterministic terms (urca's `ecdet`).
+    pub ecdet: VecmDeterministic,
+    /// Cointegration rank r of the restricted estimates, 1..=k-1 (`cajorls`'s `r`);
+    /// `None`: the first r that the trace test does not reject at the 5% level.
+    pub rank: Option<usize>,
+}
+
+impl Default for VecmConfig {
+    fn default() -> Self {
+        Self {
+            lag_order: 2,
+            ecdet: VecmDeterministic::None,
+            rank: None,
+        }
+    }
+}
 
 /// Result from a VECM model estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +304,45 @@ mod tests {
     use super::*;
     use crate::econometrics::timeseries::common::test_fixtures::*;
     use polars::prelude::*;
+
+    /// R, CLI and MCP spellings of urca's ecdet; unknown values list the accepted ones.
+    #[test]
+    fn test_vecm_deterministic_parses_aliases_and_rejects_unknown() {
+        VecmDeterministic::choices().validate().unwrap();
+        for (s, v) in [
+            ("none", VecmDeterministic::None),
+            ("NONE", VecmDeterministic::None),
+            ("const", VecmDeterministic::Const),
+            ("constant", VecmDeterministic::Const),
+            (" Const ", VecmDeterministic::Const),
+            ("trend", VecmDeterministic::Trend),
+        ] {
+            assert_eq!(s.parse::<VecmDeterministic>().unwrap(), v, "{s}");
+        }
+        let message = "drift"
+            .parse::<VecmDeterministic>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("unknown ecdet 'drift'") && message.contains("none, const, trend"),
+            "{message}"
+        );
+        assert_eq!(VecmDeterministic::Const.to_string(), "const");
+        assert_eq!(
+            serde_json::to_value(VecmDeterministic::Trend).unwrap(),
+            "trend"
+        );
+    }
+
+    /// urca's defaults K = 2 and ecdet = "none"; rank by the trace test.
+    #[test]
+    fn test_vecm_config_default() {
+        let c = VecmConfig::default();
+        assert_eq!(
+            (c.lag_order, c.ecdet, c.rank),
+            (2, VecmDeterministic::None, None)
+        );
+    }
 
     #[test]
     fn test_validate_vecm_structure() {
