@@ -13,6 +13,16 @@
         "dpd_sys_empluk"
       ],
       "tests": [
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_balanced_onestep",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_balanced_twostep",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_balanced_variants",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_spec_lags3_minlag4",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_gaps",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_empluk",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_differs_from_difference",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_onestep_classical_se_is_refused",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_scale_equivariance",
+        "p2a-core::econometrics::panel::dynamic_panel::tests::test_validate_sysgmm_rejects_max_lag_below_min_lag",
         "p2a-core::econometrics::panel::utils::tests::test_validate_system_equations_balanced_layout",
         "p2a-core::econometrics::panel::utils::tests::test_validate_system_equations_gaps_layout"
       ],
