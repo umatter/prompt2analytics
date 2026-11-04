@@ -143,8 +143,8 @@ EXAMPLES:
         #[arg(long, num_args = 2..)]
         cols: Vec<String>,
 
-        /// Number of lags
-        #[arg(long, default_value = "1")]
+        /// Lag order of the VAR in levels (urca::ca.jo's K, at least 2)
+        #[arg(long, default_value = "2")]
         lags: usize,
 
         /// Cointegration rank
