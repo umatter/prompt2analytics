@@ -91,7 +91,8 @@ pub fn compute_pairwise_sq_distances_parallel(data: &ArrayView2<f64>) -> Array2<
 /// of [`crate::ml::cluster_validation::silhouette()`] (singletons and `a(i) = b(i)` score 0) on a
 /// parallel distance matrix.
 ///
-/// Refuses non-finite data and labellings without 2 to n - 1 distinct clusters (where R returns `NA`).
+/// Refuses non-finite data, labellings without 2 to n - 1 distinct clusters (where R returns `NA`), and
+/// any label of n or above (labels are 0-indexed cluster indices below n).
 pub fn silhouette_optimized(
     data: ArrayView2<f64>,
     labels: &[usize],
@@ -577,7 +578,7 @@ mod tests {
         let x = crate::ml::advanced_clustering_mod::common::test_data::blobs(&ds);
         let r = crate::ml::hdbscan(x.view(), Some(5), Some(5)).unwrap();
         let (labels, outlier, k) = hdbscan_optimized(x.view(), Some(5), Some(5)).unwrap();
-        assert_eq!((labels.clone(), k), (r.labels, 3));
+        assert_eq!((&labels, k), (&r.labels, 3));
         assert_eq!(
             outlier.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             r.outlier_scores
@@ -670,6 +671,16 @@ mod tests {
 
         assert_eq!(widths.len(), 4);
         assert!(avg > 0.9); // Well-separated clusters
+    }
+
+    #[test]
+    fn test_silhouette_optimized_refuses_label_of_n() {
+        let x = array![[0.0, 0.0], [0.13, 0.08], [10.0, 10.0], [10.11, 9.94]];
+        assert!(
+            silhouette_optimized(x.view(), &[0, 0, 1, 4])
+                .unwrap_err()
+                .contains("labels must be below n = 4 (got 4)")
+        );
     }
 
     #[test]

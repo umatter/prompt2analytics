@@ -269,10 +269,10 @@ pub fn hdbscan_with(data: ArrayView2<f64>, config: &HdbscanConfig) -> EconResult
     }
     // a cluster born at eps 0 has stability 1/0 - 1/0 = NaN (as dbscan's cluster_scores), one
     // that dies at eps 0 has +Inf: both come from coincident points
-    let n_inf = cluster_stability.iter().filter(|s| !s.is_finite()).count();
-    if n_inf > 0 {
+    let n_nonfinite = cluster_stability.iter().filter(|s| !s.is_finite()).count();
+    if n_nonfinite > 0 {
         warnings.push(format!(
-            "{n_inf} selected cluster(s) have non-finite (infinite or NaN) stability: at least min_samples points coincide, so some mutual-reachability distances are 0 (lambda = 1/0); excess of mass then keeps the parent, as dbscan does"
+            "{n_nonfinite} selected cluster(s) have non-finite (infinite or NaN) stability: at least min_samples points coincide, so some mutual-reachability distances are 0 (lambda = 1/0); excess of mass then keeps the parent, as dbscan does"
         ));
     }
 
