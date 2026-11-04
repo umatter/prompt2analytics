@@ -1,0 +1,350 @@
+{
+  "schema": 1,
+  "id": "rq_br_se",
+  "area": "regression/quantreg",
+  "method": "quantreg::rq(method = 'br') and summary.rq(se = 'iid' | 'nid' | 'ker') on quantreg_hetero; rq.fit.fnb; scale equivariance; location model",
+  "reference": "quantreg::rq(method = 'br'); quantreg::summary.rq(se = 'iid' | 'nid' | 'ker' | 'rank', covariance = TRUE); quantreg::rq.fit.fnb on y / mean(|y - median(y)|); quantreg::bandwidth.rq",
+  "call": "rq(y ~ x, tau, data = quantreg_hetero, method = 'br'); summary(f, se = 'nid')",
+  "dataset": "validation/datasets/generated/quantreg_hetero.csv",
+  "datasets": ["validation/datasets/generated/quantreg_hetero.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "quantreg": "6.1"
+  },
+  "values": {
+    "n": 100,
+    "rdf": 98,
+    "tau25_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.380407426551238, 2.7682582131912987]
+    },
+    "tau25_objective": 111.28561420761872,
+    "tau25_nonunique": 0,
+    "tau25_hs_bandwidth": 0.14496914586992257,
+    "tau25_ker_bandwidth": 3.26499657126723,
+    "tau25_se_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.30915974418725783, 0.051148796329350571]
+    },
+    "tau25_t_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [4.465029657014874, 54.121668775278621]
+    },
+    "tau25_p_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.1443438521728808e-05, 0]
+    },
+    "tau25_ci_lower_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.76688997596745723, 2.6667550915384197]
+    },
+    "tau25_ci_upper_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.9939248771350189, 2.8697613348441777]
+    },
+    "tau25_scale_iid": 0.28178446893792336,
+    "tau25_nonunique_iid": 0,
+    "tau25_se_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.29824513300304373, 0.14112748069211051]
+    },
+    "tau25_t_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [4.6284323658590951, 19.615302417469241]
+    },
+    "tau25_p_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.1302740977381376e-05, 0]
+    },
+    "tau25_ci_lower_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.78854966664114434, 2.4881953208210312]
+    },
+    "tau25_ci_upper_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.9722651864613319, 3.0483211055615662]
+    },
+    "tau25_scale_nid": 0.14317680967687046,
+    "tau25_nonunique_nid": 0,
+    "tau25_nonpositive_fis": 0,
+    "tau25_se_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.8689262396811126, 0.1955905428764981]
+    },
+    "tau25_t_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.5886359089096378, 14.153333655499194]
+    },
+    "tau25_p_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.11536379615993431, 0]
+    },
+    "tau25_ci_lower_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [-0.34394841646436625, 2.3801151464432424]
+    },
+    "tau25_ci_upper_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [3.1047632695668423, 3.156401279939355]
+    },
+    "tau25_scale_ker": 0.079288933736352762,
+    "tau25_nonunique_ker": 0,
+    "tau25_ci_rank": [0.78442748428940734, 2.5013216551302451, 1.7904294578670088, 2.88450130663837],
+    "fn_tau25_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3804074267814688, 2.7682582131319906]
+    },
+    "fn_tau25_nit": 9,
+    "fn_r_tau25_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3804074267814685, 2.7682582131319911]
+    },
+    "tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3487349841266367, 3.1699511987566726]
+    },
+    "tau50_objective": 133.80525751476506,
+    "tau50_nonunique": 0,
+    "tau50_hs_bandwidth": 0.20931604694700326,
+    "tau50_ker_bandwidth": 3.3711555303829153,
+    "tau50_se_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.48072477683550652, 0.07953329682514744]
+    },
+    "tau50_t_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.8056281870991313, 39.856906796228436]
+    },
+    "tau50_p_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.0060575304359051785, 0]
+    },
+    "tau50_ci_lower_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.3947523099207213, 3.0121199596574049]
+    },
+    "tau50_ci_upper_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.3027176583325524, 3.3277824378559404]
+    },
+    "tau50_scale_iid": 0.20925355916523561,
+    "tau50_nonunique_iid": 0,
+    "tau50_se_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.17987111706382683, 0.107953087584705]
+    },
+    "tau50_t_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [7.4983410685554448, 29.364155020294181]
+    },
+    "tau50_p_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.9345192942287213e-11, 0]
+    },
+    "tau50_ci_lower_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.99178660630738724, 2.9557218098311218]
+    },
+    "tau50_ci_upper_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.7056833619458862, 3.3841805876822235]
+    },
+    "tau50_scale_nid": 0.24841671374205465,
+    "tau50_nonunique_nid": 0,
+    "tau50_nonpositive_fis": 0,
+    "tau50_se_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.97743758720237617, 0.19853639127827996]
+    },
+    "tau50_t_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3798681386777736, 15.966600270846506]
+    },
+    "tau50_p_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.17076731987226035, 0]
+    },
+    "tau50_ci_lower_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [-0.59095809648977471, 2.7759621917293646]
+    },
+    "tau50_ci_upper_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [3.2884280647430479, 3.5639402057839806]
+    },
+    "tau50_scale_ker": 0.084900845235788988,
+    "tau50_nonunique_ker": 0,
+    "tau50_ci_rank": [1.1091280941793511, 3.0749174254739358, 1.8159706885554909, 3.3026674161993768],
+    "fn_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3487349800206783, 3.1699512027382255]
+    },
+    "fn_tau50_nit": 7,
+    "fn_r_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.348734980020678, 3.1699512027382264]
+    },
+    "tau75_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.7406414250496087, 3.4670761595702593]
+    },
+    "tau75_objective": 106.30087369098629,
+    "tau75_nonunique": 0,
+    "tau75_hs_bandwidth": 0.14496914586992257,
+    "tau75_ker_bandwidth": 2.8888243453565918,
+    "tau75_se_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.55935148703558002, 0.092541657912529204]
+    },
+    "tau75_t_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [3.1118920131500207, 37.465031832986561]
+    },
+    "tau75_p_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.0024358772508947801, 0]
+    },
+    "tau75_ci_lower_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.63062660339657728, 3.2834302512565876]
+    },
+    "tau75_ci_upper_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.8506562467026404, 3.6507220678839309]
+    },
+    "tau75_scale_iid": 0.15574538792143997,
+    "tau75_nonunique_iid": 1,
+    "tau75_se_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.61951152820404232, 0.16437751946671322]
+    },
+    "tau75_t_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.8096998131668522, 21.092155246157908]
+    },
+    "tau75_p_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.0059871586582358471, 0]
+    },
+    "tau75_ci_lower_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.51124095963587357, 3.1408743219357325]
+    },
+    "tau75_ci_upper_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.9700418904633441, 3.7932779972047861]
+    },
+    "tau75_scale_nid": 0.094173308635189093,
+    "tau75_nonunique_nid": 0,
+    "tau75_nonpositive_fis": 0,
+    "tau75_se_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.77029059211665707, 0.16764168448920108]
+    },
+    "tau75_t_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [2.2597204780426505, 20.681468157125305]
+    },
+    "tau75_p_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.02605257161920127, 0]
+    },
+    "tau75_ci_lower_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.21202481448003518, 3.1343966926824605]
+    },
+    "tau75_ci_upper_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [3.269258035619182, 3.7997556264580581]
+    },
+    "tau75_scale_ker": 0.0870397855307634,
+    "tau75_nonunique_ker": 0,
+    "tau75_ci_rank": [1.1637532163409834, 3.2384047458032081, 3.3495061138165441, 3.6287681459652683],
+    "fn_tau75_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.7406415690443509, 3.4670761413883757]
+    },
+    "fn_tau75_nit": 7,
+    "fn_r_tau75_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.7406414250568085, 3.4670761595693502]
+    },
+    "fn_scale": 8.6116093245835366,
+    "scale_m6_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3487349841266365e-06, 3.1699511987566718e-06]
+    },
+    "scale_m6_tau50_se_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [5.1794615345778644e-07, 8.5691370920324261e-08]
+    },
+    "scale_m6_tau50_se_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.7270932631126209e-07, 1.0700682106362598e-07]
+    },
+    "scale_m6_tau50_se_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [9.7743758720237674e-07, 1.9853639127827998e-07]
+    },
+    "scale_m6_fn_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3487349800206779e-06, 3.169951202738226e-06]
+    },
+    "scale_m6_fn_r_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1.3361426073067931e-06, 3.1798971965523852e-06]
+    },
+    "scale_p6_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1348734.9841266365, 3169951.1987566724]
+    },
+    "scale_p6_tau50_se_iid": {
+      "names": ["(Intercept)", "x"],
+      "values": [480724.77683550672, 79533.296825147481]
+    },
+    "scale_p6_tau50_se_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [179871.12413482455, 107953.08852230052]
+    },
+    "scale_p6_tau50_se_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [977437.58720237634, 198536.39127827995]
+    },
+    "scale_p6_fn_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1348734.9800206781, 3169951.2027382264]
+    },
+    "scale_p6_fn_r_tau50_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [1348734.9841266365, 3169951.1987566738]
+    },
+    "tau02_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [-1.5356848188840879, 2.3900704932150578]
+    },
+    "tau02_hs_bandwidth_unhalved": 0.024281494906297038,
+    "tau02_hs_bandwidth": 0.012140747453148519,
+    "tau02_se_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.69771980031016501, 0.6743842168469969]
+    },
+    "tau02_se_ker": {
+      "names": ["(Intercept)", "x"],
+      "values": [0.62104020877258359, 0.16170713535598902]
+    },
+    "loc_tau25_coef": 8.8844930833537319,
+    "loc_tau25_nonunique": 1,
+    "loc_tau50_coef": 16.71290069352456,
+    "loc_tau50_nonunique": 1,
+    "small5_coef": {
+      "names": ["(Intercept)", "x"],
+      "values": [6.7566706692436007, 2.6761882440233609]
+    },
+    "small5_se_nid": {
+      "names": ["(Intercept)", "x"],
+      "values": [39.655968686611253, 4.8259666421162919]
+    },
+    "small5_nonpositive_fis": 1,
+    "small5_iid_fails": 1
+  }
+}

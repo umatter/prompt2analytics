@@ -217,8 +217,10 @@ Deviations (left out of the test):
 | REG-26 | standard errors, tau = 0.5 (`se_iid_tau50`, `se_nid_tau50`) | iid 0.4807247768, 0.07953329683; nid 0.1798711171, 0.1079530876 | 0.05028920546, 0.008320075224 |
 | REG-64 | 95% confidence intervals | not recorded | estimate +/- 1.96 SE (slope at tau 0.5: 3.153668270 to 3.186282965) |
 
-`test_validate_quantreg_multi` and `test_validate_quantreg_median_simple` cite no R values and
-are not registered (REG-44, Tier 3).
+The simplex, summary.rq's SEs, Frisch-Newton and the bootstrap are validated in
+[quantreg.md](quantreg.md) (methods `quantreg_br`, `quantreg_summary_se`, `quantreg_fn`,
+`quantreg_boot`); `test_validate_rq_multi_hetero` there replaces the range-only multi-quantile
+test (REG-44).
 
 ## GLS AR(1) (gls_ar1)
 
