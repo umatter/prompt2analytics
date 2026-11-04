@@ -108,6 +108,35 @@
       "tolerance": "coefficients Tol::iterative(1e-8), SEs Tol::iterative(1e-6) against the Newton-polished optimum; logLik, AIC Tol::stat(300); coef_pkg Tol::iterative(1e-4) (nnet stops 8.3e-6 off the MLE at its defaults)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_count_domain_aliasing",
+      "name": "Count models: outcome domain (MASS, pscl), aliased regressors (glm.nb NA; pscl fails), hurdle zero part = binomial glm",
+      "category": "econometrics",
+      "reference": "glm(I(y > 0) ~ x1 + x2, binomial) at glm.control(1e-10, 100) = pscl::hurdle zero hurdle; MASS::glm.nb and pscl::{zeroinfl, hurdle} on negative / non-integer counts; glm.nb with an aliased column (T2-WP10's disc_negbin values)",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": [
+        "disc_hurdle_zero",
+        "disc_negbin",
+        "disc_zeroinfl"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_zero_part_is_binomial_glm",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_aliased_column_is_na",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_and_hurdle_aliased_regressor_is_an_error",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_count_models_refuse_negative_counts",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_count_models_refuse_non_integer_counts"
+      ],
+      "quantities": [
+        "hurdle zero-part coefficients, SEs, logLik, n, zeros, positives",
+        "NB with an aliased column: NA, other coefficients and theta unchanged",
+        "ZIP/ZINB/hurdle aliased designs refused",
+        "negative counts refused (all)",
+        "non-integer counts refused (pscl) / warned (glm.nb)"
+      ],
+      "tolerance": "hurdle zero part at the tight glm fit: coefficients 1e-8, SEs and logLik 1e-6 (glm at R's control also within 1e-8); NB 1e-6 (T2-WP10's tolerance) and 1e-12 against p2a's own fit without the aliased column",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
