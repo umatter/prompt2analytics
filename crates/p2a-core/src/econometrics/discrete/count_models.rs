@@ -28,7 +28,9 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes};
 use crate::traits::estimator::{logistic_cdf, normal_p_value_two_sided};
 
-use super::conditional_logit::{covariance_from_information, equilibrated_newton_step};
+use super::conditional_logit::{
+    certainly_full_rank, covariance_from_information, equilibrated_newton_step,
+};
 use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits, newton_step};
 
 /// QR tolerance of glm.nb's `glm.fitter`: `min(1e-7, control$epsilon / 1000)` at its
@@ -91,6 +93,9 @@ fn check_count_outcome(
 /// `SingularMatrix` naming the regressors of one part of a pscl model (zero-inflated or
 /// hurdle) that are linear combinations of the others; pscl itself stops in optim.
 fn refuse_aliased(x: ArrayView2<f64>, names: &[String], model: &str, part: &str) -> EconResult<()> {
+    if certainly_full_rank(x)? {
+        return Ok(());
+    }
     let qr = Qr::decompose(x, LM_QR_TOL)?;
     let aliased = qr.aliased();
     if aliased.is_empty() {
@@ -2081,10 +2086,19 @@ pub fn run_hurdle(
     let x_full = cols.matrix(x_cols, true)?.data;
     let k_count = x_full.ncols();
 
-    let x_binary = cols.matrix(binary_cols, true)?.data;
-    let k_binary = x_binary.ncols();
     refuse_aliased(x_full.view(), &count_variables, "hurdle model", "count")?;
-    refuse_aliased(x_binary.view(), &binary_variables, "hurdle model", "zero")?;
+    // Without zero-part regressors the zero part has the count part's design, which was
+    // just checked: it is not built or decomposed twice.
+    let x_binary_own = match z_cols {
+        Some(_) => {
+            let xb = cols.matrix(binary_cols, true)?.data;
+            refuse_aliased(xb.view(), &binary_variables, "hurdle model", "zero")?;
+            Some(xb)
+        }
+        None => None,
+    };
+    let x_binary = x_binary_own.as_ref().unwrap_or(&x_full);
+    let k_binary = x_binary.ncols();
 
     // Part 1: the zero hurdle, a binomial GLM (glm.fit, as pscl's zero hurdle)
     let y_binary = Array1::from_vec(y_binary);
@@ -2220,20 +2234,21 @@ fn fit_truncated_count_model(
     let y_var: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>()
         / variance_divisor(n, "hurdle model: variance of the positive counts")?;
 
+    // Workspaces of every iteration: the linear predictor, the gradient and the
+    // square-root-weighted design (the values the per-iteration arrays held).
+    let mut xb = Array1::<f64>::zeros(n);
+    let mut gradient = Array1::<f64>::zeros(k);
+    let mut wx = x.to_owned();
     for iter in 0..max_iter {
         resource::checkpoint()?;
         iterations = iter + 1;
 
-        let xb = x.dot(&beta);
-        let mu: Vec<f64> = xb.iter().map(|&v| v.exp()).collect();
-
-        // Compute gradient
-        let mut gradient = Array1::zeros(k);
-        let mut weights = Array1::zeros(n);
+        ndarray::linalg::general_mat_vec_mul(1.0, x, &beta, 0.0, &mut xb);
+        gradient.fill(0.0);
 
         for i in 0..n {
             let yi = y[i];
-            let mui = mu[i];
+            let mui = xb[i].exp();
 
             let (score_i, weight_i) = match model_type {
                 HurdleType::Poisson => {
@@ -2253,17 +2268,14 @@ fn fit_truncated_count_model(
             for j in 0..k {
                 gradient[j] += score_i * x[[i, j]];
             }
-            weights[i] = weight_i;
+            // Row i of the Hessian's factor: x_i * sqrt(w_i)
+            let w_sqrt = weight_i.sqrt();
+            for j in 0..k {
+                wx[[i, j]] = x[[i, j]] * w_sqrt;
+            }
         }
 
         // Compute Hessian
-        let mut wx = x.to_owned();
-        for i in 0..n {
-            let w_sqrt = weights[i].sqrt();
-            for j in 0..k {
-                wx[[i, j]] *= w_sqrt;
-            }
-        }
         let neg_hessian = wx.t().dot(&wx);
 
         let (delta, _) = equilibrated_newton_step(
