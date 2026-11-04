@@ -44,12 +44,14 @@
 //! to account for reduced variability in the test statistic.
 
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
+use crate::resource::try_with_capacity;
+use crate::stats::ranks::midranks;
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::{normal_cdf, normal_p_value_two_sided};
 
 /// Result of Mood's two-sample test of scale.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,36 +178,19 @@ pub fn mood_test(x: &[f64], y: &[f64], alternative: Alternative) -> EconResult<M
         });
     }
 
-    // Combine samples and track which sample each observation belongs to
-    // 0 = from x, 1 = from y
-    let mut combined: Vec<(f64, usize)> = Vec::with_capacity(total_n);
-    for &val in &x_clean {
-        combined.push((val, 0));
-    }
-    for &val in &y_clean {
-        combined.push((val, 1));
-    }
-
-    // Sort by value
-    combined.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // Check for ties and compute tie structure
-    let (has_ties, tie_counts) = compute_tie_structure(&combined);
-
-    // Compute ranks (1 to N) with midranks for ties
-    let ranks = compute_midranks(&combined);
+    // Pool x then y and rank (exact ties, as R's rank())
+    let mut z: Vec<f64> = try_with_capacity(total_n, "Mood pooled sample")?;
+    z.extend_from_slice(&x_clean);
+    z.extend_from_slice(&y_clean);
+    let (ranks, tie_counts) = midranks(&z)?;
+    let has_ties = tie_counts.iter().any(|&t| t > 1);
 
     // Mean rank
     let mean_rank = (total_n as f64 + 1.0) / 2.0;
 
     // Compute test statistic T = sum of (r_i - mean_rank)^2 for sample x
     // Equation from Conover (1971), p. 234
-    let t_stat: f64 = combined
-        .iter()
-        .zip(&ranks)
-        .filter(|((_, group), _)| *group == 0)
-        .map(|(_, &r)| (r - mean_rank).powi(2))
-        .sum();
+    let t_stat: f64 = ranks[..m].iter().map(|&r| (r - mean_rank).powi(2)).sum();
 
     // Expected value under H0: E[T] = m(N² - 1)/12
     // Equation (3) from Conover (1971)
@@ -246,11 +231,10 @@ pub fn mood_test(x: &[f64], y: &[f64], alternative: Alternative) -> EconResult<M
     };
 
     // P-value from standard normal distribution
-    let normal = Normal::new(0.0, 1.0).unwrap();
     let p_value = match alternative {
-        Alternative::TwoSided => 2.0 * (1.0 - normal.cdf(z_score.abs())),
-        Alternative::Less => normal.cdf(z_score),
-        Alternative::Greater => 1.0 - normal.cdf(z_score),
+        Alternative::TwoSided => normal_p_value_two_sided(z_score),
+        Alternative::Less => normal_cdf(z_score),
+        Alternative::Greater => normal_cdf(-z_score),
     };
 
     Ok(MoodTestResult {
@@ -295,55 +279,6 @@ pub fn run_mood_test(
     let mut result = mood_test(&x, &y, alternative.unwrap_or(Alternative::TwoSided))?;
     result.missing = MissingSummary::merge_samples(&missing_x, &missing_y);
     Ok(result)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helper Functions
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Compute midranks for sorted data with potential ties.
-fn compute_midranks(data: &[(f64, usize)]) -> Vec<f64> {
-    let n = data.len();
-    let mut ranks = vec![0.0; n];
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        // Find all ties
-        while j < n && data[j].0 == data[i].0 {
-            j += 1;
-        }
-        // Average rank for ties (1-indexed)
-        let avg_rank = ((i + 1) + j) as f64 / 2.0;
-        for k in i..j {
-            ranks[k] = avg_rank;
-        }
-        i = j;
-    }
-    ranks
-}
-
-/// Compute tie structure for variance adjustment.
-/// Returns (has_ties, vector of tie counts).
-fn compute_tie_structure(data: &[(f64, usize)]) -> (bool, Vec<usize>) {
-    let n = data.len();
-    let mut tie_counts = Vec::new();
-    let mut has_ties = false;
-
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        while j < n && data[j].0 == data[i].0 {
-            j += 1;
-        }
-        let count = j - i;
-        if count > 1 {
-            has_ties = true;
-        }
-        tie_counts.push(count);
-        i = j;
-    }
-
-    (has_ties, tie_counts)
 }
 
 #[cfg(test)]
@@ -453,118 +388,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Validation Tests Against R
-    // ========================================================================
-
-    #[test]
-    fn test_validate_mood_against_r_basic() {
-        // R code:
-        // x <- c(1, 2, 3, 4, 5)
-        // y <- c(10, 20, 30, 40, 50)
-        // mood.test(x, y)
-        // Z = 0, p-value = 1
-        // (Both samples have identical spread relative to their medians)
-
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let y = vec![10.0, 20.0, 30.0, 40.0, 50.0];
-
-        let result = mood_test(&x, &y, Alternative::TwoSided).unwrap();
-
-        // Z should be close to 0 for equal scales
-        assert!(
-            result.z_score.abs() < 0.5,
-            "z_score should be close to 0 for equal scales, got {}",
-            result.z_score
-        );
-        // p-value should be high (non-significant)
-        assert!(
-            result.p_value > 0.5,
-            "p-value should be > 0.5 for equal scales, got {}",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_mood_against_r_randu() {
-        // R code from documentation:
-        // mood.test(c(randu$x[1:50], randu$x[51:100]))
-        // This tests with random uniform data
-        // We use similar uniform-ish data
-
-        let x: Vec<f64> = (1..=50).map(|i| (i as f64 * 0.02) % 1.0).collect();
-        let y: Vec<f64> = (51..=100).map(|i| (i as f64 * 0.02) % 1.0).collect();
-
-        let result = mood_test(&x, &y, Alternative::TwoSided).unwrap();
-
-        // Both samples from same distribution should be non-significant
-        assert!(
-            result.p_value > 0.01,
-            "Random uniform data should not show significant scale difference"
-        );
-    }
-
-    #[test]
-    fn test_validate_mood_different_scales_r() {
-        // R code:
-        // set.seed(42)
-        // x <- rnorm(20, 0, 1)   # sd = 1
-        // y <- rnorm(20, 0, 3)   # sd = 3
-        // mood.test(x, y)
-        // Should show significant difference
-
-        // Simulated data with different scales
-        let x = vec![
-            0.37, -0.56, 0.36, 0.63, 0.40, -0.11, 1.51, -0.09, 2.02, -0.06, 1.30, 1.27, -0.69,
-            -0.45, 1.03, 0.74, -0.60, -0.47, -1.06, 0.59,
-        ];
-        let y = vec![
-            -2.65, 4.76, 1.64, -3.21, -1.88, 2.23, -0.65, 0.98, 3.45, -2.12, 5.34, -4.21, 1.87,
-            -0.34, 2.98, -3.67, 0.12, 4.56, -1.23, 3.89,
-        ];
-
-        let result = mood_test(&x, &y, Alternative::TwoSided).unwrap();
-
-        // With different scales, should detect difference
-        // Note: exact p-value depends on data, but should show trend
-        assert!(
-            result.z_score.abs() > 0.5,
-            "z-score should be substantial for different scales"
-        );
-    }
-
-    #[test]
-    fn test_validate_mood_statistic_calculation() {
-        // Manual verification of test statistic
-        // x = [1, 2, 3], y = [4, 5, 6]
-        // Combined ranks: 1, 2, 3, 4, 5, 6
-        // Mean rank = 3.5
-        // T = (1-3.5)² + (2-3.5)² + (3-3.5)² = 6.25 + 2.25 + 0.25 = 8.75
-        // But x gets ranks 1,2,3 when combined is sorted: 1,2,3,4,5,6
-        // So for x: T = (1-3.5)² + (2-3.5)² + (3-3.5)² = 6.25 + 2.25 + 0.25 = 8.75
-
-        let x = vec![1.0, 2.0, 3.0];
-        let y = vec![4.0, 5.0, 6.0];
-
-        let result = mood_test(&x, &y, Alternative::TwoSided).unwrap();
-
-        // Verify statistic matches manual calculation
-        let expected_t = 8.75;
-        assert!(
-            (result.statistic - expected_t).abs() < 0.01,
-            "Statistic mismatch: Rust={}, Expected={}",
-            result.statistic,
-            expected_t
-        );
-
-        // Expected value: m(N²-1)/12 = 3*(36-1)/12 = 3*35/12 = 8.75
-        // So z should be close to 0
-        assert!(
-            result.z_score.abs() < 0.5,
-            "z-score should be close to 0 when T = E[T]"
-        );
-    }
-
-    // ========================================================================
     // Missing values and integer columns (case stat_two_sample_na,
     // validation/r/cases/stats_onesample.R)
     // ========================================================================
@@ -611,5 +434,58 @@ mod tests {
             run_mood_test(&ds, "x", "nope", None),
             Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
         ));
+    }
+
+    #[test]
+    fn test_validate_mood_two_sample() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_two_sample");
+        let sets = ["basic", "scale", "manual", "sim"];
+        let mut v: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
+        for set in sets {
+            let x = column_where(&ds, "value", &[("set", set), ("group", "x")]);
+            let y = column_where(&ds, "value", &[("set", set), ("group", "y")]);
+            let two = mood_test(&x, &y, Alternative::TwoSided).unwrap();
+            assert!(!two.has_ties, "{set}");
+            v.entry("z").or_default().push(two.z_score);
+            v.entry("p").or_default().push(two.p_value);
+            v.entry("less")
+                .or_default()
+                .push(mood_test(&x, &y, Alternative::Less).unwrap().p_value);
+            v.entry("greater")
+                .or_default()
+                .push(mood_test(&x, &y, Alternative::Greater).unwrap().p_value);
+            v.entry("t").or_default().push(two.statistic);
+        }
+        for set in ["ties", "serum"] {
+            let x = column_where(&ds, "value", &[("set", set), ("group", "x")]);
+            let y = column_where(&ds, "value", &[("set", set), ("group", "y")]);
+            assert!(mood_test(&x, &y, Alternative::TwoSided).unwrap().has_ties);
+            // deviation STAT-29: mood_z_ties / mood_p_ties (R's Mielke scores) are not compared
+        }
+        Check::new(&case)
+            .named("mood_z", &sets, &v["z"], Tol::stat(6))
+            .named("mood_p", &sets, &v["p"], Tol::p_value(6))
+            .named("mood_p_less", &sets, &v["less"], Tol::p_value(6))
+            .named("mood_p_greater", &sets, &v["greater"], Tol::p_value(6))
+            .named("mood_T", &sets, &v["t"], Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_mood_small_scale() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_small_groups");
+        let x = column_where(&ds, "ynt", &[("g", "a")]);
+        let y = column_where(&ds, "ynt", &[("g", "b")]);
+        let r = mood_test(&x, &y, Alternative::TwoSided).unwrap();
+        assert!(!r.has_ties);
+        Check::new(&case)
+            .scalar("mood_z", r.z_score, Tol::stat(14))
+            .scalar("mood_p", r.p_value, Tol::p_value(14))
+            .scalar("mood_T", r.statistic, Tol::exact())
+            .finish();
     }
 }

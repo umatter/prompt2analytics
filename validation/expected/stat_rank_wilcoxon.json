@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "stat_rank_wilcoxon",
+  "area": "stats/wilcoxon",
+  "method": "Wilcoxon rank-sum and signed-rank tests: N = 30 and n = 25 (normal approximation in p2a), the quoted examples, a paired set with a zero and ties",
+  "reference": "stats::wilcox.test(exact = TRUE | FALSE, correct = TRUE, mu, paired)",
+  "call": "wilcox.test(x, y, exact = FALSE, correct = TRUE); wilcox.test(x, y); wilcox.test(x, mu = 1.5, ...); wilcox.test(x, y, paired = TRUE, exact = FALSE)",
+  "dataset": "validation/datasets/generated/rank_wilcoxon.csv",
+  "datasets": ["validation/datasets/generated/rank_wilcoxon.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n30_p_normal": 0.011400982911555176,
+    "n30_W": 51,
+    "n30_rank_sum": 171,
+    "n30_p_exact": 0.0098748226505942071,
+    "sr25_p_normal": 0.067299299523867553,
+    "sr25_V": 231,
+    "sr25_p_exact": 0.066701591014862047,
+    "x13a_W": 8,
+    "x13a_rank_sum": 23,
+    "x13a_p": 0.23533326650958575,
+    "x13b_V": 33,
+    "x13b_p": 0.23613697022165284,
+    "exact3_W": 0,
+    "exact3_rank_sum": 6,
+    "exact3_p": 0.10000000000000001,
+    "paired_V": 27,
+    "paired_p": 0.6352893188352069
+  }
+}

@@ -34,73 +34,71 @@ Where ti is the number of tied observations in the i-th tie group within each bl
 
 ## Test Cases
 
-### Test 1: RoundingTimes from R Documentation
-**Description:** Classic example from R documentation with 12 blocks and 3 treatments.
+Registry: `validation/methods/stats_rank_t3.json`, id `friedman_ties_rounding` (R 4.3.3, cases of
+`validation/r/cases/stats_rank_t3.R`). Tolerances: the `validation/README.md` rows for n < 100
+(statistics `Tol::stat`, p `Tol::p_value`); df and rank sums exact.
 
-**R Code:**
+### Test 1: RoundingTimes (Hollander & Wolfe 1973, p. 140; `?friedman.test`)
+
+Case `stat_rank_friedman_rounding` (dataset `validation/datasets/generated/rank_friedman_rounding.csv`,
+22 players x 3 methods; column `first12` marks the first 12 players).
+
 ```r
-RoundingTimes <- matrix(c(5.40, 5.50, 5.55,
-                          5.85, 5.70, 5.75,
-                          5.20, 5.60, 5.50,
-                          5.55, 5.50, 5.40,
-                          5.90, 5.85, 5.70,
-                          5.45, 5.55, 5.60,
-                          5.40, 5.40, 5.35,
-                          5.45, 5.50, 5.35,
-                          5.25, 5.15, 5.00,
-                          5.85, 5.80, 5.70,
-                          5.25, 5.20, 5.10,
-                          5.65, 5.55, 5.45),
-                        nrow=12, byrow=TRUE)
-friedman.test(RoundingTimes)
-
-# Expected output:
-# Friedman chi-squared = 4.9787, df = 2, p-value = 0.08296
+friedman.test(RoundingTimes)            # all 22 players
+friedman.test(RoundingTimes[1:12, ])    # the first 12
 ```
 
-**Rust Test:** `crates/p2a-core/src/stats/friedman.rs::tests::test_validate_friedman_against_r`
+| Quantity | 22 players | first 12 players |
+|---|---|---|
+| Friedman chi-squared | 11.142857142857142 | 4.9787234042553195 |
+| df | 2 | 2 |
+| p-value | 0.003805040775511363 | 0.08296290472378988 |
+| rank sums (Round Out, Narrow Angle, Wide Angle) | 53, 47, 32 | 28.5, 25.5, 18 |
 
-**Results Comparison:**
+The previous version of this test showed the 12-player data under R's 22-player example and
+compared it at tolerance 0.05.
 
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| Q statistic | 4.9787 | 4.9787 | 0.05 | PASS |
-| df | 2 | 2 | exact | PASS |
-| p-value | 0.08296 | 0.08296 | 0.01 | PASS |
-| has_ties | TRUE | TRUE | - | PASS |
+**Rust test:** `stats::friedman::tests::test_validate_friedman_rounding`
 
-### Test 2: Manual Calculation Verification
-**Description:** Simple 3x3 matrix for manual verification.
+### Test 2: Hand computation
 
-**Data:**
-- 3 blocks, 3 treatments
-- Block 1: [1, 2, 3] -> ranks [1, 2, 3]
-- Block 2: [1, 2, 3] -> ranks [1, 2, 3]
-- Block 3: [1, 2, 3] -> ranks [1, 2, 3]
-- Rank sums: R1=3, R2=6, R3=9
-- Q = (12/(3×3×4)) × (9+36+81) - 3×3×4 = 6
+3 blocks of (1, 2, 3): rank sums 3, 6, 9 and Q = (12 / 36) × 126 − 36 = 6 (asserted to 1e-12, rank
+sums exactly).
 
-**Rust Test:** `crates/p2a-core/src/stats/friedman.rs::tests::test_validate_friedman_manual_calculation`
+**Rust test:** `stats::friedman::tests::test_friedman_statistic_hand_computed`
 
-**Results Comparison:**
+### Test 3: Tie correction by hand
 
-| Metric | Expected | Rust Value | Tolerance | Status |
-|--------|----------|------------|-----------|--------|
-| Q statistic | 6.0 | 6.0 | 0.01 | PASS |
-| rank_sums | [3, 6, 9] | [3, 6, 9] | exact | PASS |
-| has_ties | FALSE | FALSE | - | PASS |
+3 blocks of (1, 1, 2): Σ(t³ − t) = 18, C = 1 − 18 / (3 · 3 · 8) = 0.75 (asserted to 1e-15).
 
-### Test 3: Data with Ties
-**Description:** Verifies tie correction is applied correctly.
+**Rust test:** `stats::friedman::tests::test_friedman_ties_correction_value`
 
-**Rust Test:** `crates/p2a-core/src/stats/friedman.rs::tests::test_friedman_ties_correction_value`
+### Test 4: Ties at any scale (STAT-53)
 
-**Results Comparison:**
+Case `stat_rank_small_blocks` (8 blocks x 4 treatments, values of order 1e-12 with ties within
+blocks; every block's range is below 1e-10). Before, values within 1e-10 were treated as tied, so
+every block was one tie group and the test returned Q = 0, p = 1.
 
-| Metric | Expected | Rust Value | Status |
-|--------|----------|------------|--------|
-| has_ties | TRUE | TRUE | PASS |
-| tie_correction | 0.75 | 0.75 | PASS |
+| Quantity | R value | p2a before |
+|---|---|---|
+| Friedman chi-squared (y and y_unit = y × 1e12) | 13.253164556962025 | 0 |
+| df | 3 | 3 |
+| p-value | 0.004119913441309317 | 1 |
+| rank sums t1..t4 | 11.5, 16.5, 23, 29 | 20, 20, 20, 20 |
+
+**Rust test:** `stats::friedman::tests::test_validate_friedman_small_scale`
+
+### Test 5: Degenerate designs
+
+- Every block tied, `friedman.test(matrix(c(1, 1, 1, 2, 2, 2), 2, byrow = TRUE))`: R gives NaN;
+  p2a refuses the design (`InvalidSpecification`: "every block is tied ... the statistic is
+  undefined"). Known deviation STAT-53 (the registry records the error in place of R's NaN).
+- One tied block among untied ones, `friedman.test(matrix(c(1, 1, 1, 1, 2, 3, 2, 1, 3), 3, byrow =
+  TRUE))`: 3, p 0.22313016014842982 (= exp(−1.5)) in R and p2a.
+- NaN in a block of `friedman_test` is an error naming the block; `run_friedman_test` drops
+  incomplete blocks first, as `friedman.test` does.
+
+**Rust test:** `stats::friedman::tests::test_friedman_all_tied_blocks_and_nan`
 
 ## Missing values, design checks and the R case
 
@@ -151,16 +149,19 @@ friedman.test(d$y, d$treat, d$block); friedman.test(d$y_na, d$treat, d$block)
 
 ## Numerical Precision Summary
 
-- Q statistics match R within 0.01
-- Degrees of freedom match exactly
-- P-values match R's chi-squared approximation within 0.001
-- Tie correction matches R's implementation
+- Statistics and p-values are pinned at the `validation/README.md` rows; df and rank sums are
+  exact.
+- Blocks are ranked with `stats::ranks::midranks` (R's `rank()`, exact ties); p-values are upper
+  tails computed directly (`traits::estimator::chi_squared_p_value`).
 
 ## Known Differences
 
 1. **Chi-squared approximation:** Both R and our implementation use the chi-squared approximation, which is accurate when the number of blocks and treatments is not too small.
 
 2. **Tie handling:** Both implementations apply tie correction using average (mid) ranks and adjust the variance.
+
+3. **Every block tied (STAT-53, registry deviation):** p2a returns an error where
+   `friedman.test` returns NaN.
 
 ## Performance Comparison
 

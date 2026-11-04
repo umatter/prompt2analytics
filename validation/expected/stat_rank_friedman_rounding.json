@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "stat_rank_friedman_rounding",
+  "area": "stats/friedman",
+  "method": "Friedman test on RoundingTimes (Hollander & Wolfe 1973 p. 140; ?friedman.test): all 22 players and the first 12",
+  "reference": "stats::friedman.test",
+  "call": "friedman.test(RoundingTimes); friedman.test(RoundingTimes[1:12, ])",
+  "dataset": "validation/datasets/generated/rank_friedman_rounding.csv",
+  "datasets": ["validation/datasets/generated/rank_friedman_rounding.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "chisq_22": 11.142857142857142,
+    "df_22": 2,
+    "p_22": 0.003805040775511363,
+    "rank_sums_22": {
+      "names": ["Round Out", "Narrow Angle", "Wide Angle"],
+      "values": [53, 47, 32]
+    },
+    "chisq_12": 4.9787234042553195,
+    "df_12": 2,
+    "p_12": 0.082962904723789879,
+    "rank_sums_12": {
+      "names": ["Round Out", "Narrow Angle", "Wide Angle"],
+      "values": [28.5, 25.5, 18]
+    }
+  }
+}

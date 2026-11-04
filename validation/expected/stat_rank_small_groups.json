@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "id": "stat_rank_small_groups",
+  "area": "stats/ranks",
+  "method": "Kruskal-Wallis, Fligner-Killeen, Mood, Ansari-Bradley and Wilcoxon on values of order 1e-12 (exact-equality midranks)",
+  "reference": "stats::rank, kruskal.test, fligner.test, mood.test, ansari.test(exact = FALSE | TRUE), wilcox.test",
+  "call": "kruskal.test(y ~ g); fligner.test(y ~ g); mood.test(x, y); ansari.test(x, y); wilcox.test(x, y) with x = ynt[g == 'a'], y = ynt[g == 'b']",
+  "dataset": "validation/datasets/generated/rank_small_groups.csv",
+  "datasets": ["validation/datasets/generated/rank_small_groups.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "midranks_y": [2, 10, 5, 3.5, 3.5, 7, 12.5, 6, 17.5, 12.5, 8, 14, 1, 11, 15.5, 15.5, 9, 21, 17.5, 20, 19],
+    "tie_sizes_y": [1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 2, 1, 1, 1],
+    "midranks_ynt": [13, 19, 11, 6, 17, 14, 7, 4, 2, 5, 21, 1, 20, 12, 8, 3, 18, 16, 10, 15, 9],
+    "kw_chisq": 10.459449404761912,
+    "kw_df": 2,
+    "kw_p": 0.0053549993183164089,
+    "kw_unit_chisq": 10.459449404761912,
+    "kw_tie_correction": 0.9974025974025974,
+    "kw_rank_sums": {
+      "names": ["a", "b", "c"],
+      "values": [43.5, 70, 117.5]
+    },
+    "fligner_chisq": 0.19930844116601584,
+    "fligner_df": 2,
+    "fligner_p": 0.9051503462897974,
+    "mood_z": -2.2857142857142856,
+    "mood_p": 0.022270978959232801,
+    "mood_T": 49.75,
+    "ansari_ab": 36,
+    "ansari_p_normal": 0.039368435465216844,
+    "ansari_p_exact": 0.051282051282051322,
+    "wilcox_W": 32,
+    "wilcox_rank_sum": 60,
+    "wilcox_p_exact": 0.38286713286713292
+  }
+}

@@ -42,8 +42,11 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::resource::try_with_capacity;
 use crate::stats::bartlett::values_by_level;
+use crate::stats::ranks::midranks;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::{chi_squared_p_value, normal_quantile};
 
 /// Result of Fligner-Killeen test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,9 +157,24 @@ pub fn fligner_test(groups: &[(String, Vec<f64>)]) -> EconResult<FlignerResult> 
         total_n += data.len();
     }
 
+    for (name, data) in groups {
+        if let Some(v) = data.iter().find(|v| !v.is_finite()) {
+            let what = if v.is_nan() {
+                "NaN"
+            } else {
+                "an infinite value"
+            };
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Fligner-Killeen test: group '{name}' contains {what}; the test needs finite values (run_fligner_test drops missing values, as fligner.test does; infinite values are refused)"
+                ),
+            });
+        }
+    }
+
     // Step 1: Compute absolute deviations from group medians
-    let mut all_deviations: Vec<f64> = Vec::with_capacity(total_n);
-    let mut group_indices: Vec<usize> = Vec::with_capacity(total_n);
+    let mut all_deviations: Vec<f64> = try_with_capacity(total_n, "Fligner-Killeen deviations")?;
+    let mut group_indices: Vec<usize> = try_with_capacity(total_n, "Fligner-Killeen groups")?;
 
     for (group_idx, (_, data)) in groups.iter().enumerate() {
         let median = compute_median(data);
@@ -166,24 +184,17 @@ pub fn fligner_test(groups: &[(String, Vec<f64>)]) -> EconResult<FlignerResult> 
         }
     }
 
-    // Step 2: Rank all absolute deviations
-    let ranks = compute_ranks(&all_deviations);
+    // Step 2: Rank all absolute deviations (exact ties, as R's rank())
+    let (ranks, _) = midranks(&all_deviations)?;
 
     // Step 3: Transform ranks to normal scores
     // R uses: a(i) = qnorm((1 + i/(n+1))/2)
     // where i is the rank (1 to n)
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
     let n_f = total_n as f64;
-
     let z_scores: Vec<f64> = ranks
         .iter()
-        .map(|&r| {
-            // R formula: qnorm((1 + r/(n+1))/2)
-            let p = (1.0 + r / (n_f + 1.0)) / 2.0;
-            normal.inverse_cdf(p)
-        })
-        .collect();
+        .map(|&r| normal_quantile((1.0 + r / (n_f + 1.0)) / 2.0))
+        .collect::<EconResult<Vec<f64>>>()?;
 
     // Step 4: Compute test statistic
     // Overall mean of z scores
@@ -215,9 +226,7 @@ pub fn fligner_test(groups: &[(String, Vec<f64>)]) -> EconResult<FlignerResult> 
     let df = k - 1;
 
     // P-value from chi-squared distribution
-    use statrs::distribution::ChiSquared;
-    let chi_dist = ChiSquared::new(df as f64).unwrap();
-    let p_value = 1.0 - chi_dist.cdf(chi_squared);
+    let p_value = chi_squared_p_value(chi_squared, df as f64);
 
     Ok(FlignerResult {
         test_name: "Fligner-Killeen test of homogeneity of variances".to_string(),
@@ -275,30 +284,6 @@ fn compute_median(data: &[f64]) -> f64 {
     } else {
         sorted[n / 2]
     }
-}
-
-/// Compute ranks with average tie-breaking.
-fn compute_ranks(data: &[f64]) -> Vec<f64> {
-    let n = data.len();
-    let mut indexed: Vec<(usize, f64)> = data.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
-
-    let mut ranks = vec![0.0; n];
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        // Find all ties
-        while j < n && indexed[j].1 == indexed[i].1 {
-            j += 1;
-        }
-        // Average rank for ties
-        let avg_rank = (i + 1 + j) as f64 / 2.0;
-        for k in i..j {
-            ranks[indexed[k].0] = avg_rank;
-        }
-        i = j;
-    }
-    ranks
 }
 
 #[cfg(test)]
@@ -368,68 +353,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Validation Tests Against R
-    // ========================================================================
-
-    #[test]
-    fn test_validate_fligner_three_groups() {
-        // R code:
-        // g1 <- c(2.1, 2.5, 2.3, 2.8, 2.6, 2.4, 2.7)
-        // g2 <- c(3.2, 3.5, 3.1, 3.8, 3.4, 3.6, 3.3)
-        // g3 <- c(4.1, 5.2, 3.9, 4.5, 4.8, 5.0)
-        // fligner.test(list(g1, g2, g3))
-        // Fligner-Killeen:med chi-squared = 5.1024, df = 2, p-value = 0.07799
-
-        let groups = vec![
-            ("A".to_string(), vec![2.1, 2.5, 2.3, 2.8, 2.6, 2.4, 2.7]),
-            ("B".to_string(), vec![3.2, 3.5, 3.1, 3.8, 3.4, 3.6, 3.3]),
-            ("C".to_string(), vec![4.1, 5.2, 3.9, 4.5, 4.8, 5.0]),
-        ];
-
-        let result = fligner_test(&groups).unwrap();
-
-        assert!(
-            (result.chi_squared - 5.1024).abs() < 0.1,
-            "chi-squared mismatch: Rust={}, R=5.1024",
-            result.chi_squared
-        );
-        assert_eq!(result.df, 2);
-        assert!(
-            (result.p_value - 0.07799).abs() < 0.01,
-            "p-value mismatch: Rust={}, R=0.07799",
-            result.p_value
-        );
-    }
-
-    #[test]
-    fn test_validate_fligner_two_groups() {
-        // R code:
-        // x <- c(1, 2, 3, 4, 5)
-        // y <- c(10, 20, 30, 40, 50)
-        // fligner.test(list(x, y))
-        // Fligner-Killeen:med chi-squared = 3.3306, df = 1, p-value = 0.068
-
-        let groups = vec![
-            ("A".to_string(), vec![1.0, 2.0, 3.0, 4.0, 5.0]),
-            ("B".to_string(), vec![10.0, 20.0, 30.0, 40.0, 50.0]),
-        ];
-
-        let result = fligner_test(&groups).unwrap();
-
-        assert!(
-            (result.chi_squared - 3.3306).abs() < 0.1,
-            "chi-squared mismatch: Rust={}, R=3.3306",
-            result.chi_squared
-        );
-        assert_eq!(result.df, 1);
-        assert!(
-            (result.p_value - 0.068).abs() < 0.01,
-            "p-value mismatch: Rust={}, R=0.068",
-            result.p_value
-        );
-    }
-
-    // ========================================================================
     // Missing values and integer columns (case stat_two_sample_na,
     // validation/r/cases/stats_onesample.R)
     // ========================================================================
@@ -477,5 +400,82 @@ mod tests {
             run_fligner_test(&ds, "xi", "nope"),
             Err(EconError::ColumnNotFound { column, .. }) if column == "nope"
         ));
+    }
+
+    #[test]
+    fn test_validate_fligner_small_scale() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_small_groups");
+        let r = run_fligner_test(&ds, "y", "g").unwrap();
+        Check::new(&case)
+            .scalar("fligner_chisq", r.chi_squared, Tol::stat(21))
+            .scalar("fligner_df", r.df as f64, Tol::exact())
+            .scalar("fligner_p", r.p_value, Tol::p_value(21))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_fligner_examples() {
+        // The two examples the old tests quoted at tolerance 0.1 ("three", "two") and R's
+        // ?fligner.test InsectSprays.
+        use crate::stats::ranks::test_data::{column_where, levels_where};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_fligner");
+        let sets = ["three", "two", "insect"];
+        let (mut chi, mut df, mut p) = (Vec::new(), Vec::new(), Vec::new());
+        for set in sets {
+            let groups: Vec<(String, Vec<f64>)> = levels_where(&ds, "group", &[("set", set)])
+                .into_iter()
+                .map(|g| {
+                    let v = column_where(&ds, "value", &[("set", set), ("group", g.as_str())]);
+                    (g, v)
+                })
+                .collect();
+            let r = fligner_test(&groups).unwrap();
+            chi.push(r.chi_squared);
+            df.push(r.df as f64);
+            p.push(r.p_value);
+        }
+        Check::new(&case)
+            .named("chisq", &sets, &chi, Tol::stat(10))
+            .named("df", &sets, &df, Tol::exact())
+            .named("p", &sets, &p, Tol::p_value(10))
+            .finish();
+    }
+
+    #[test]
+    fn test_fligner_rejects_nan() {
+        let groups = vec![
+            ("A".to_string(), vec![1.0, f64::NAN, 3.0]),
+            ("B".to_string(), vec![2.0, 3.0, 5.0]),
+        ];
+        match fligner_test(&groups) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("'A'") && message.contains("NaN"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fligner_rejects_infinite_values() {
+        // An infinite group median made Inf - Inf = NaN deviations, refused inside midranks
+        // with an internal deviation index instead of the user's group.
+        let groups = vec![
+            ("A".to_string(), vec![2.0, 3.0, 5.0]),
+            ("B".to_string(), vec![1.0, f64::INFINITY, f64::INFINITY]),
+        ];
+        match fligner_test(&groups) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("'B'") && message.contains("infinite"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 }

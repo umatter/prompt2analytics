@@ -37,8 +37,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::try_with_capacity;
+use crate::stats::ranks::midranks;
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::{normal_cdf, normal_p_value_two_sided, validate_level, z_critical};
 
 /// Result of Ansari-Bradley test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +151,9 @@ pub fn ansari_test(
     exact: bool,
     conf_level: Option<f64>,
 ) -> EconResult<AnsariBradleyResult> {
+    if let Some(level) = conf_level {
+        validate_level(level, "conf_level")?;
+    }
     let m = x.len();
     let n = y.len();
     let total_n = m + n;
@@ -160,22 +166,13 @@ pub fn ansari_test(
         });
     }
 
-    // Combine samples and track which sample each observation belongs to
-    let mut combined: Vec<(f64, usize)> = Vec::with_capacity(total_n);
-    for &val in x {
-        if val.is_finite() {
-            combined.push((val, 0)); // 0 = from x
-        }
-    }
-    for &val in y {
-        if val.is_finite() {
-            combined.push((val, 1)); // 1 = from y
-        }
-    }
-
-    let m_finite = combined.iter().filter(|(_, g)| *g == 0).count();
-    let n_finite = combined.iter().filter(|(_, g)| *g == 1).count();
-    let n_total = m_finite + n_finite;
+    // Pool the finite values of x then y, in input order
+    let mut values: Vec<f64> = try_with_capacity(total_n, "Ansari-Bradley pooled sample")?;
+    values.extend(x.iter().copied().filter(|v| v.is_finite()));
+    let m_finite = values.len();
+    values.extend(y.iter().copied().filter(|v| v.is_finite()));
+    let n_finite = values.len() - m_finite;
+    let n_total = values.len();
 
     if m_finite == 0 || n_finite == 0 {
         return Err(EconError::InsufficientData {
@@ -185,28 +182,14 @@ pub fn ansari_test(
         });
     }
 
-    // Sort by value
-    combined.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Ranks (1 to N) with midranks for ties, exact ties as R's rank()
+    let (ranks, tie_sizes) = midranks(&values)?;
+    let has_ties = tie_sizes.iter().any(|&t| t > 1);
 
-    // Check for ties
-    let has_ties = (1..combined.len()).any(|i| combined[i].0 == combined[i - 1].0);
-
-    // Compute ranks (1 to N) with midranks for ties
-    let ranks = compute_midranks(&combined);
-
-    // Compute Ansari-Bradley scores
-    // For rank r in 1..=N: score = min(r, N+1-r)
-    let scores: Vec<f64> = ranks
+    // Ansari-Bradley scores min(r, N+1-r); AB = sum of the scores of sample x
+    let ab_stat: f64 = ranks[..m_finite]
         .iter()
         .map(|&r| r.min((n_total as f64 + 1.0) - r))
-        .collect();
-
-    // Test statistic AB = sum of scores for sample x
-    let ab_stat: f64 = combined
-        .iter()
-        .zip(&scores)
-        .filter(|((_, group), _)| *group == 0)
-        .map(|(_, score)| score)
         .sum();
 
     // Determine if we use exact or approximate
@@ -226,7 +209,7 @@ pub fn ansari_test(
             alternative,
             conf_level,
             has_ties,
-        );
+        )?;
         (pval, lower, upper, est)
     };
 
@@ -249,27 +232,6 @@ pub fn ansari_test(
 // ═══════════════════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Compute midranks for sorted data with potential ties.
-fn compute_midranks(data: &[(f64, usize)]) -> Vec<f64> {
-    let n = data.len();
-    let mut ranks = vec![0.0; n];
-    let mut i = 0;
-    while i < n {
-        let mut j = i;
-        // Find all ties
-        while j < n && data[j].0 == data[i].0 {
-            j += 1;
-        }
-        // Average rank for ties (1-indexed)
-        let avg_rank = ((i + 1) + j) as f64 / 2.0;
-        for k in i..j {
-            ranks[k] = avg_rank;
-        }
-        i = j;
-    }
-    ranks
-}
 
 /// Exact p-value and confidence interval for Ansari-Bradley test.
 fn exact_ansari(
@@ -376,7 +338,7 @@ fn approx_ansari(
     alternative: Alternative,
     conf_level: Option<f64>,
     _has_ties: bool,
-) -> (f64, Option<f64>, Option<f64>, Option<f64>) {
+) -> EconResult<(f64, Option<f64>, Option<f64>, Option<f64>)> {
     let total_n = m + n;
 
     // Mean under H0
@@ -390,19 +352,16 @@ fn approx_ansari(
     let sigma = ansari_sigma(m, n);
 
     if sigma == 0.0 {
-        return (1.0, None, None, Some(1.0));
+        return Ok((1.0, None, None, Some(1.0)));
     }
-
-    // Z-score with continuity correction
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
 
     let z = (stat - mu) / sigma;
 
+    // The tail mapping is unchanged here (STAT-12 swaps it); tails computed without 1 - cdf
     let p_value = match alternative {
-        Alternative::TwoSided => 2.0 * (1.0 - normal.cdf(z.abs())),
-        Alternative::Less => normal.cdf(z),
-        Alternative::Greater => 1.0 - normal.cdf(z),
+        Alternative::TwoSided => normal_p_value_two_sided(z),
+        Alternative::Less => normal_cdf(z),
+        Alternative::Greater => normal_cdf(-z),
     };
 
     // Point estimate
@@ -410,8 +369,7 @@ fn approx_ansari(
 
     // Confidence interval based on normal approximation
     let ci = if let Some(level) = conf_level {
-        let alpha = 1.0 - level;
-        let z_crit = normal.inverse_cdf(1.0 - alpha / 2.0);
+        let z_crit = z_critical(level)?;
 
         // CI for scale ratio is complex, approximate using ratio
         let lower = (stat - z_crit * sigma) / mu;
@@ -422,7 +380,7 @@ fn approx_ansari(
         (None, None)
     };
 
-    (p_value, ci.0, ci.1, estimate)
+    Ok((p_value, ci.0, ci.1, estimate))
 }
 
 /// Compute standard deviation under H0 for Ansari-Bradley statistic.
@@ -494,70 +452,68 @@ mod tests {
         assert!(!result.exact); // Should use approximation for n >= 50
     }
 
-    // ========================================================================
-    // Validation Tests Against R
-    // ========================================================================
-
     #[test]
-    fn test_validate_ansari_basic() {
-        // R code:
-        // x <- c(1, 2, 3, 4, 5)
-        // y <- c(10, 20, 30, 40, 50)
-        // ansari.test(x, y)
-        // AB = 15, p-value = 1 (in R)
-        // Note: R's exact algorithm may give p=1 while our DP gives p=0.87
-        // Both indicate non-significance, which is correct for equal-scale data
-
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let y = vec![10.0, 20.0, 30.0, 40.0, 50.0];
-
-        let result = ansari_test(&x, &y, Alternative::TwoSided, true, None).unwrap();
-
-        assert!(
-            (result.statistic - 15.0).abs() < 0.1,
-            "statistic mismatch: Rust={}, R=15",
-            result.statistic
-        );
-        // Both samples have same dispersion pattern (equally spaced)
-        // p-value should be non-significant (> 0.05)
-        assert!(
-            result.p_value > 0.05,
-            "p-value should indicate non-significance, got {}",
-            result.p_value
-        );
+    fn test_validate_ansari_two_sample() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_two_sample");
+        let all = ["basic", "scale", "manual", "sim", "ties", "serum"];
+        let tie_free = ["basic", "scale", "manual", "sim"];
+        let (mut ab, mut p) = (Vec::new(), Vec::new());
+        for set in all {
+            let x = column_where(&ds, "value", &[("set", set), ("group", "x")]);
+            let y = column_where(&ds, "value", &[("set", set), ("group", "y")]);
+            let r = ansari_test(&x, &y, Alternative::TwoSided, false, None).unwrap();
+            assert!(!r.exact);
+            ab.push(r.statistic);
+            if tie_free.contains(&set) {
+                p.push(r.p_value);
+            }
+            // R: exact = TRUE falls back to the normal approximation under ties
+            let e = ansari_test(&x, &y, Alternative::TwoSided, true, None).unwrap();
+            assert_eq!(e.exact, tie_free.contains(&set), "{set}");
+        }
+        // deviation STAT-13: ab_p_exact; STAT-12: ab_p_less / ab_p_greater; STAT-79: ab_p_ties;
+        // STAT-14: estimate, CI
+        Check::new(&case)
+            .named("ab", &all, &ab, Tol::exact())
+            .named("ab_p_normal", &tie_free, &p, Tol::p_value(6))
+            .finish();
     }
 
     #[test]
-    fn test_validate_ansari_different_scales() {
-        // R code:
-        // set.seed(42)
-        // x <- rnorm(10, mean = 5, sd = 1)
-        // y <- rnorm(10, mean = 5, sd = 3)
-        // ansari.test(x, y)
-        // Note: exact values depend on random seed; this tests the algorithm
-
-        // Simulated data with different scales
-        let x = vec![5.5, 4.8, 5.2, 4.6, 5.8, 5.1, 4.9, 5.3, 5.0, 4.7];
-        let y = vec![2.1, 7.8, 5.0, 1.5, 9.2, 6.3, 3.8, 8.1, 4.5, 0.8];
-
-        let result = ansari_test(&x, &y, Alternative::TwoSided, true, None).unwrap();
-
-        // x should have higher AB score (less spread = higher score)
-        // We just verify the test runs and gives reasonable output
-        assert!(result.statistic > 0.0);
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
+    fn test_validate_ansari_small_scale() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_small_groups");
+        let x = column_where(&ds, "ynt", &[("g", "a")]);
+        let y = column_where(&ds, "ynt", &[("g", "b")]);
+        let r = ansari_test(&x, &y, Alternative::TwoSided, false, None).unwrap();
+        // deviation STAT-13: the exact p (ansari_p_exact) is not compared
+        assert!(
+            ansari_test(&x, &y, Alternative::TwoSided, true, None)
+                .unwrap()
+                .exact
+        );
+        Check::new(&case)
+            .scalar("ansari_ab", r.statistic, Tol::exact())
+            .scalar("ansari_p_normal", r.p_value, Tol::p_value(14))
+            .finish();
     }
 
     #[test]
-    fn test_validate_ansari_with_ties() {
-        // Data with ties forces normal approximation
-        let x = vec![1.0, 2.0, 2.0, 3.0, 4.0];
-        let y = vec![2.0, 3.0, 3.0, 4.0, 5.0];
-
-        let result = ansari_test(&x, &y, Alternative::TwoSided, true, None).unwrap();
-
-        // With ties, should use approximation
-        assert!(!result.exact);
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
+    fn test_ansari_rejects_invalid_conf_level() {
+        // R: "'conf.level' must be a single number between 0 and 1". Before: statrs panicked on
+        // the normal-approximation path for 1.5 and NaN.
+        let x = [4.6, 4.8, 5.05, 5.2, 5.5];
+        let y = [1.0, 3.0, 5.3, 7.0, 9.0];
+        for level in [1.5, 0.0, f64::NAN] {
+            match ansari_test(&x, &y, Alternative::TwoSided, false, Some(level)) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("conf_level"), "{message}")
+                }
+                other => panic!("{level}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
     }
 }

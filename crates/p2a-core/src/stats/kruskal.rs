@@ -2,6 +2,7 @@
 //!
 //! A non-parametric test for comparing the medians of two or more independent samples.
 //! This is the non-parametric alternative to one-way ANOVA.
+//! Ranks with `stats::ranks::midranks` (exact ties, as R).
 //!
 //! # References
 //!
@@ -14,7 +15,10 @@
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::resource::try_with_capacity;
 use crate::stats::anova::values_by_level;
+use crate::stats::ranks::{midranks, tie_cube_sum};
+use crate::traits::estimator::chi_squared_p_value;
 use serde::{Deserialize, Serialize};
 
 /// Result of the Kruskal-Wallis rank sum test
@@ -107,37 +111,31 @@ pub fn kruskal_test(groups: &[(String, Vec<f64>)]) -> EconResult<KruskalWallisRe
     let group_names: Vec<String> = clean_groups.iter().map(|(n, _)| n.clone()).collect();
     let n_total: usize = group_sizes.iter().sum();
 
-    // Combine all observations with their group index
-    let mut combined: Vec<(f64, usize)> = Vec::with_capacity(n_total);
+    // Pool the observations in group order and rank them (exact ties, as R's rank()).
+    let mut values: Vec<f64> = try_with_capacity(n_total, "Kruskal-Wallis values")?;
+    let mut group_of: Vec<usize> = try_with_capacity(n_total, "Kruskal-Wallis groups")?;
     for (group_idx, (_, vals)) in clean_groups.iter().enumerate() {
-        for &val in vals {
-            combined.push((val, group_idx));
-        }
+        values.extend_from_slice(vals);
+        group_of.extend(std::iter::repeat_n(group_idx, vals.len()));
+    }
+    let (ranks, tie_sizes) = midranks(&values)?;
+    if tie_sizes.len() == 1 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Kruskal-Wallis test: all {n_total} observations are tied, so the statistic is undefined (kruskal.test returns NaN)"
+            ),
+        });
     }
 
-    // Sort by value and compute ranks (with ties handled by averaging)
-    combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Compute ranks with tie handling
-    let (ranks, tie_counts) = compute_ranks_with_ties(&combined);
-
-    // Compute tie correction factor
-    // C = 1 - Σ(ti³ - ti) / (N³ - N)
-    let tie_sum: f64 = tie_counts
-        .iter()
-        .map(|&t| {
-            let t = t as f64;
-            t * t * t - t
-        })
-        .sum();
+    // Tie correction C = 1 - Σ(ti³ - ti) / (N³ - N), strictly positive once two values differ
     let n = n_total as f64;
-    let tie_correction = 1.0 - tie_sum / (n * n * n - n);
-    let has_ties = tie_counts.iter().any(|&t| t > 1);
+    let tie_correction = 1.0 - tie_cube_sum(&tie_sizes) / (n * n * n - n);
+    let has_ties = tie_sizes.iter().any(|&t| t > 1);
 
-    // Compute rank sums for each group
+    // Rank sums per group
     let mut rank_sums = vec![0.0; k];
-    for (i, &(_, group_idx)) in combined.iter().enumerate() {
-        rank_sums[group_idx] += ranks[i];
+    for (&rank, &group_idx) in ranks.iter().zip(&group_of) {
+        rank_sums[group_idx] += rank;
     }
 
     // Compute mean ranks
@@ -157,18 +155,13 @@ pub fn kruskal_test(groups: &[(String, Vec<f64>)]) -> EconResult<KruskalWallisRe
 
     let h_uncorrected = (12.0 / (n * (n + 1.0))) * sum_r2_over_n - 3.0 * (n + 1.0);
 
-    // Apply tie correction
-    let h = if tie_correction > 0.0 {
-        h_uncorrected / tie_correction
-    } else {
-        h_uncorrected
-    };
+    let h = h_uncorrected / tie_correction;
 
     // Degrees of freedom
     let df = k - 1;
 
     // P-value from chi-squared distribution
-    let p_value = chi_squared_p_value(h, df);
+    let p_value = chi_squared_p_value(h, df as f64);
 
     Ok(KruskalWallisResult {
         statistic: h,
@@ -184,48 +177,6 @@ pub fn kruskal_test(groups: &[(String, Vec<f64>)]) -> EconResult<KruskalWallisRe
         tie_correction,
         missing: MissingSummary::none(n_total),
     })
-}
-
-/// Compute ranks with tie handling (midranks for tied values)
-fn compute_ranks_with_ties(sorted_data: &[(f64, usize)]) -> (Vec<f64>, Vec<usize>) {
-    let n = sorted_data.len();
-    let mut ranks = vec![0.0; n];
-    let mut tie_counts = Vec::new();
-
-    let mut i = 0;
-    while i < n {
-        // Find extent of tie group
-        let mut j = i + 1;
-        while j < n && (sorted_data[j].0 - sorted_data[i].0).abs() < 1e-10 {
-            j += 1;
-        }
-
-        // Compute average rank for this tie group
-        // Ranks are 1-indexed: positions i+1 through j
-        let avg_rank = ((i + 1) + j) as f64 / 2.0;
-        let tie_size = j - i;
-
-        for idx in i..j {
-            ranks[idx] = avg_rank;
-        }
-
-        tie_counts.push(tie_size);
-        i = j;
-    }
-
-    (ranks, tie_counts)
-}
-
-/// Compute p-value from chi-squared distribution
-fn chi_squared_p_value(statistic: f64, df: usize) -> f64 {
-    use statrs::distribution::{ChiSquared, ContinuousCDF};
-
-    if df == 0 || statistic.is_nan() || statistic.is_infinite() {
-        return f64::NAN;
-    }
-
-    let chi2 = ChiSquared::new(df as f64).unwrap();
-    1.0 - chi2.cdf(statistic)
 }
 
 /// Run Kruskal-Wallis test on a Dataset with grouping variable (R `kruskal.test(value ~ group)`).
@@ -341,52 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_kruskal_against_r_basic() {
-        // R code:
-        // x <- c(2.9, 3.0, 2.5, 2.6, 3.2)
-        // y <- c(3.8, 2.7, 4.0, 2.4)
-        // z <- c(2.8, 3.4, 3.7, 2.2, 2.0)
-        // kruskal.test(list(x, y, z))
-        //
-        // Expected output:
-        // Kruskal-Wallis chi-squared = 0.77143, df = 2, p-value = 0.68
-        let groups = vec![
-            ("x".to_string(), vec![2.9, 3.0, 2.5, 2.6, 3.2]),
-            ("y".to_string(), vec![3.8, 2.7, 4.0, 2.4]),
-            ("z".to_string(), vec![2.8, 3.4, 3.7, 2.2, 2.0]),
-        ];
-
-        let result = kruskal_test(&groups).unwrap();
-
-        // R gives H = 0.77143, df = 2, p-value = 0.68
-        assert!((result.statistic - 0.77143).abs() < 0.01);
-        assert_eq!(result.df, 2);
-        assert!((result.p_value - 0.68).abs() < 0.05);
-    }
-
-    #[test]
-    fn test_validate_kruskal_airquality_like() {
-        // Based on R's airquality example but simplified
-        // kruskal.test(Ozone ~ Month, data = airquality)
-        //
-        // Using made-up data with similar structure
-        let groups = vec![
-            ("May".to_string(), vec![41.0, 36.0, 12.0, 18.0, 23.0]),
-            ("Jun".to_string(), vec![29.0, 45.0, 71.0, 39.0, 32.0]),
-            ("Jul".to_string(), vec![135.0, 49.0, 32.0, 64.0, 40.0]),
-        ];
-
-        let result = kruskal_test(&groups).unwrap();
-
-        // Just check reasonable output
-        assert_eq!(result.n_groups, 3);
-        assert_eq!(result.df, 2);
-        assert!(result.statistic >= 0.0);
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
-    }
-
-    #[test]
-    fn test_validate_kruskal_statistic_calculation() {
+    fn test_kruskal_statistic_hand_computed() {
         // Manual calculation verification
         // Groups: A = [1, 2], B = [3, 4], C = [5, 6]
         // Combined: 1, 2, 3, 4, 5, 6 with ranks 1, 2, 3, 4, 5, 6
@@ -410,28 +316,12 @@ mod tests {
         assert!(!result.has_ties);
         assert!((result.tie_correction - 1.0).abs() < 1e-10);
 
-        // Manual calculation gives H ≈ 4.571
-        assert!((result.statistic - 4.571).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_rank_computation() {
-        let data = vec![(1.0, 0), (2.0, 0), (2.0, 1), (3.0, 1), (3.0, 2), (3.0, 2)];
-
-        let (ranks, tie_counts) = compute_ranks_with_ties(&data);
-
-        // Value 1.0 -> rank 1
-        assert!((ranks[0] - 1.0).abs() < 1e-10);
-        // Value 2.0 (tied) -> average of ranks 2,3 = 2.5
-        assert!((ranks[1] - 2.5).abs() < 1e-10);
-        assert!((ranks[2] - 2.5).abs() < 1e-10);
-        // Value 3.0 (three tied) -> average of ranks 4,5,6 = 5
-        assert!((ranks[3] - 5.0).abs() < 1e-10);
-        assert!((ranks[4] - 5.0).abs() < 1e-10);
-        assert!((ranks[5] - 5.0).abs() < 1e-10);
-
-        // Tie counts: 1, 2, 3
-        assert_eq!(tie_counts, vec![1, 2, 3]);
+        // H = (12/42) * 89.5 - 21 = 32/7
+        assert!(
+            (result.statistic - 32.0 / 7.0).abs() < 1e-12,
+            "{}",
+            result.statistic
+        );
     }
 
     #[test]
@@ -465,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_kruskal_ties_correction() {
+    fn test_kruskal_tie_correction_hand_computed() {
         // Test with extensive ties to verify correction
         let groups = vec![
             ("A".to_string(), vec![1.0, 1.0, 2.0, 2.0, 3.0]),
@@ -476,9 +366,12 @@ mod tests {
         let result = kruskal_test(&groups).unwrap();
 
         assert!(result.has_ties);
-        // With ties, correction should be < 1.0
-        assert!(result.tie_correction < 1.0);
-        assert!(result.tie_correction > 0.0);
+        // Tie groups 1 (2), 2 (4), 3 (5), 4 (3), 5 (1) of N = 15: 1 - 210/3360
+        assert!(
+            (result.tie_correction - 0.9375).abs() < 1e-15,
+            "{}",
+            result.tie_correction
+        );
     }
 
     // ========================================================================
@@ -549,5 +442,67 @@ mod tests {
             run_kruskal_test(&ds, "nope", "g9"),
             Err(EconError::ColumnNotFound { ref column, .. }) if column == "nope"
         ));
+    }
+
+    #[test]
+    fn test_validate_kruskal_small_scale() {
+        // R kruskal.test(y ~ g) on values of order 1e-12 (STAT-53). Before: H = 0, p = 1,
+        // tie_correction = 0.
+        let (case, ds) = load_case("stat_rank_small_groups");
+        let r = run_kruskal_test(&ds, "y", "g").unwrap();
+        let unit = run_kruskal_test(&ds, "y_unit", "g").unwrap();
+        assert!(r.has_ties);
+        assert_eq!(
+            r.statistic, unit.statistic,
+            "the statistic does not depend on the unit"
+        );
+        let n = r.n_total; // 21
+        Check::new(&case)
+            .scalar("kw_chisq", r.statistic, Tol::stat(n))
+            .scalar("kw_df", r.df as f64, Tol::exact())
+            .scalar("kw_p", r.p_value, Tol::p_value(n))
+            .scalar("kw_unit_chisq", unit.statistic, Tol::stat(n))
+            .scalar("kw_tie_correction", r.tie_correction, Tol::stat(n))
+            .named("kw_rank_sums", &r.group_names, &r.rank_sums, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_kruskal_hw() {
+        // R ?kruskal.test example (Hollander & Wolfe 1973, p. 116)
+        let (case, ds) = load_case("stat_rank_kruskal_hw");
+        let r = run_kruskal_test(&ds, "value", "group").unwrap();
+        let n = r.n_total; // 14
+        Check::new(&case)
+            .scalar("chisq", r.statistic, Tol::stat(n))
+            .scalar("df", r.df as f64, Tol::exact())
+            .scalar("p", r.p_value, Tol::p_value(n))
+            .named("rank_sums", &r.group_names, &r.rank_sums, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_kruskal_all_tied_is_error() {
+        // R: kruskal.test(list(c(1, 1, 1), c(1, 1))) gives chi-squared NaN, p NA. Before: Ok
+        // with H 0, p 1.
+        let groups = vec![
+            ("A".to_string(), vec![2.5, 2.5, 2.5]),
+            ("B".to_string(), vec![2.5, 2.5]),
+        ];
+        match kruskal_test(&groups) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("all 5 observations are tied"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        // Distinct values far below 1e-10 are not ties: R kruskal.test(list(c(1e-300, 2e-300),
+        // 3e-300)) = 1.5
+        let tiny = vec![
+            ("A".to_string(), vec![1e-300, 2e-300]),
+            ("B".to_string(), vec![3e-300]),
+        ];
+        let r = kruskal_test(&tiny).unwrap();
+        assert!(!r.has_ties);
+        assert!((r.statistic - 1.5).abs() < 1e-12, "{}", r.statistic);
     }
 }

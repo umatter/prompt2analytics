@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "stat_rank_fligner",
+  "area": "stats/fligner",
+  "method": "Fligner-Killeen test: the two examples the old tests quoted and InsectSprays (?fligner.test)",
+  "reference": "stats::fligner.test",
+  "call": "fligner.test(value, group) per set",
+  "dataset": "validation/datasets/generated/rank_fligner.csv",
+  "datasets": ["validation/datasets/generated/rank_fligner.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "datasets": "4.3.3"
+  },
+  "values": {
+    "chisq": {
+      "names": ["three", "two", "insect"],
+      "values": [5.102420538669544, 3.330636988639434, 14.482781038458608]
+    },
+    "df": {
+      "names": ["three", "two", "insect"],
+      "values": [2, 1, 5]
+    },
+    "p": {
+      "names": ["three", "two", "insect"],
+      "values": [0.077987223317254079, 0.068000533684779166, 0.012816779189709193]
+    }
+  }
+}
