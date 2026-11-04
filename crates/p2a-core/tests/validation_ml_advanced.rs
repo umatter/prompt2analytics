@@ -15,12 +15,15 @@ use p2a_core::ml::{
     CtreeConfig,
     // Cubist
     CubistConfig,
+    // SHAP (public tree API for the enumeration)
+    DecisionTree,
     // MBoost
     MboostBaseLearner,
     MboostConfig,
     MboostFamily,
     // SHAP
     ShapConfig,
+    TreeNode,
     c50,
     c50_predict,
     ctree,
@@ -32,6 +35,7 @@ use p2a_core::ml::{
     random_forest_with_trees,
     shap_values_model,
 };
+use p2a_validation::Tol;
 
 /// Create synthetic regression data: y = 2*x1 + 0.5*x2 + noise
 fn create_regression_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
@@ -557,75 +561,113 @@ fn test_validate_mboost_poisson() {
 // SHAP Validation Tests
 // ============================================================================
 
-#[test]
-fn test_validate_shap_tree_ensemble() {
-    let (x, y) = create_regression_data(100, 42);
+fn node_cover(node: &TreeNode) -> f64 {
+    match node {
+        TreeNode::Leaf { n_samples, .. } => *n_samples as f64,
+        TreeNode::Split { left, right, .. } => node_cover(left) + node_cover(right),
+    }
+}
 
-    // Train a random forest
+/// Lundberg et al. (2020) Algorithm 1 on the public tree: E[f(x) | x_S] from the training cover.
+fn expvalue(node: &TreeNode, x: &[f64], mask: usize) -> f64 {
+    match node {
+        TreeNode::Leaf { value, .. } => *value,
+        TreeNode::Split {
+            feature_index,
+            threshold,
+            left,
+            right,
+            ..
+        } => {
+            if (mask >> feature_index) & 1 == 1 {
+                if x[*feature_index] <= *threshold {
+                    expvalue(left, x, mask)
+                } else {
+                    expvalue(right, x, mask)
+                }
+            } else {
+                let (cl, cr) = (node_cover(left), node_cover(right));
+                (cl * expvalue(left, x, mask) + cr * expvalue(right, x, mask)) / (cl + cr)
+            }
+        }
+    }
+}
+
+/// Shapley values of the forest's path-dependent game by enumeration of every coalition.
+fn bruteforce_forest_shap(trees: &[DecisionTree], x: &[f64]) -> Vec<f64> {
+    let m = x.len();
+    let fact = |k: usize| (1..=k).map(|i| i as f64).product::<f64>();
+    let v = |mask: usize| {
+        trees
+            .iter()
+            .map(|t| expvalue(t.root().unwrap(), x, mask))
+            .sum::<f64>()
+            / trees.len() as f64
+    };
+    (0..m)
+        .map(|i| {
+            (0..1usize << m)
+                .filter(|s| (s >> i) & 1 == 0)
+                .map(|s| {
+                    let k = s.count_ones() as usize;
+                    fact(k) * fact(m - k - 1) / fact(m) * (v(s | 1 << i) - v(s))
+                })
+                .sum()
+        })
+        .collect()
+}
+
+#[test]
+fn test_shap_forest_matches_bruteforce_shapley() {
+    let (x, y) = create_regression_data(100, 42);
     let rf = random_forest_with_trees(
         x.view(),
         y.view(),
-        Some(20),     // 20 trees
-        Some(5),      // max depth 5
-        Some(5),      // min samples split
-        Some("sqrt"), // sqrt features
+        Some(20),
+        Some(5),
+        Some(5),
+        Some("sqrt"),
         Some(42),
         Some(vec!["x1".into(), "x2".into(), "x3".into()]),
     )
     .unwrap();
-
-    let config = ShapConfig {
-        seed: Some(42),
-        ..Default::default()
-    };
-
-    let shap_result = shap_values_model(&rf, x.view(), &config).unwrap();
-
-    println!("SHAP Tree Ensemble Results:");
-    println!("  Base value: {:.4}", shap_result.base_value);
-    println!("  N observations: {}", shap_result.n_obs);
-    println!("  N features: {}", shap_result.n_features);
-    println!(
-        "  Mean |SHAP|: x1={:.4}, x2={:.4}, x3={:.4}",
-        shap_result.feature_importance[0],
-        shap_result.feature_importance[1],
-        shap_result.feature_importance[2]
-    );
-
-    // SHAP values should have correct dimensions
-    assert_eq!(shap_result.n_features, 3);
-    assert_eq!(shap_result.n_obs, 100);
-
-    // x1 should have higher mean |SHAP| than x3 (it has coefficient 2.0)
-    assert!(
-        shap_result.feature_importance[0] > shap_result.feature_importance[2],
-        "x1 should have higher SHAP importance than x3 (noise)"
-    );
-
-    // SHAP additivity: sum of SHAP values + base ≈ prediction
-    // Tree SHAP approximation may not be exact, so we check average error
-    let mut total_diff = 0.0;
-    for i in 0..shap_result.n_obs {
-        let shap_sum: f64 = shap_result.shap_values.row(i).sum();
-        let pred = rf.predictions[i];
-        let reconstructed = shap_result.base_value + shap_sum;
-        total_diff += (pred - reconstructed).abs();
+    let (x_new, _) = create_regression_data(10, 7); // rows the forest never saw
+    let x_eval = ndarray::concatenate(
+        ndarray::Axis(0),
+        &[x.slice(ndarray::s![0..20, ..]), x_new.view()],
+    )
+    .unwrap();
+    let shap = shap_values_model(&rf, x_eval.view(), &ShapConfig::default()).unwrap();
+    let tol = Tol::new(1e-10, 1e-12);
+    for i in 0..x_eval.nrows() {
+        let row: Vec<f64> = x_eval.row(i).to_vec();
+        let exact = bruteforce_forest_shap(&rf.trees, &row);
+        for j in 0..3 {
+            assert!(
+                tol.allows(shap.shap_values[[i, j]], exact[j]),
+                "row {i} feature {j}: {} vs {}",
+                shap.shap_values[[i, j]],
+                exact[j]
+            );
+        }
+        let f: f64 = rf
+            .trees
+            .iter()
+            .map(|t| t.predict_one(&x_eval.row(i)))
+            .sum::<f64>()
+            / rf.trees.len() as f64;
+        assert!(
+            (shap.base_value + shap.shap_values.row(i).sum() - f).abs() < 1e-8,
+            "additivity row {i}"
+        );
     }
-    let mean_diff = total_diff / shap_result.n_obs as f64;
-    println!("  Mean additivity error: {:.6}", mean_diff);
-
-    // Mean error should be reasonable (tree SHAP is approximate)
-    assert!(
-        mean_diff < 1.0,
-        "SHAP mean additivity error should be < 1.0, got {:.4}",
-        mean_diff
-    );
+    assert_eq!(shap.additivity_check_passed, Some(true));
 }
 
 #[test]
-fn test_validate_shap_feature_importance_ordering() {
+fn test_shap_importance_recovers_dgp_ordering() {
+    // y = 2 x1 + 0.5 x2 + noise, x3 pure noise: mean |SHAP| orders x1 > x2 > x3 (a DGP property).
     let (x, y) = create_regression_data(150, 42);
-
     let rf = random_forest_with_trees(
         x.view(),
         y.view(),
@@ -637,28 +679,11 @@ fn test_validate_shap_feature_importance_ordering() {
         None,
     )
     .unwrap();
-
-    let config = ShapConfig {
-        seed: Some(42),
-        ..Default::default()
-    };
-
-    let shap_result = shap_values_model(&rf, x.view(), &config).unwrap();
-
-    // For y = 2*x1 + 0.5*x2 + noise, SHAP importance of x1 > x2 > x3
-    println!(
-        "SHAP importance ordering: x1={:.4}, x2={:.4}, x3={:.4}",
-        shap_result.feature_importance[0],
-        shap_result.feature_importance[1],
-        shap_result.feature_importance[2]
-    );
-
+    let s = shap_values_model(&rf, x.view(), &ShapConfig::default()).unwrap();
     assert!(
-        shap_result.feature_importance[0] > shap_result.feature_importance[1],
-        "x1 (coef=2) should have higher SHAP importance than x2 (coef=0.5)"
-    );
-    assert!(
-        shap_result.feature_importance[0] > shap_result.feature_importance[2],
-        "x1 (coef=2) should have higher SHAP importance than x3 (noise)"
+        s.feature_importance[0] > s.feature_importance[1]
+            && s.feature_importance[1] > s.feature_importance[2],
+        "{:?}",
+        s.feature_importance
     );
 }

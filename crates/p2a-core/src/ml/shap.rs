@@ -47,7 +47,6 @@ use crate::errors::{EconError, EconResult};
 use crate::traits::convergence::{ResultNotes, notes_text};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Default seed of the Kernel SHAP sampling path (R13); `ShapConfig::seed = None` uses it too.
 pub const SHAP_DEFAULT_SEED: u64 = 42;
@@ -600,100 +599,41 @@ fn validate_nodes(nodes: &[TreeShapNode], n_features: usize, tree: usize) -> Eco
     Ok(max_depth)
 }
 
-/// Extract tree structure from a DecisionTree for TreeSHAP.
+/// The flat node table of a fitted tree (preorder; `x[feature] <= threshold` goes left). Each
+/// internal `n_samples` is the sum of its children's and its `value` the cover-weighted mean of
+/// theirs. An unfitted tree gives an empty table, which [`validate_nodes`] reports.
 fn extract_tree_structure(tree: &super::trees::DecisionTree) -> Vec<TreeShapNode> {
-    // We need to traverse the tree and build a flat representation
-    // This requires accessing the internal tree structure
-
     let mut nodes = Vec::new();
-    let mut node_queue: Vec<(&super::trees::TreeNode, i32)> = Vec::new();
-
-    // Start with root if it exists
     if let Some(root) = tree.root() {
-        node_queue.push((root, -1));
+        flatten(root, &mut nodes);
     }
-
-    while let Some((node, _parent_idx)) = node_queue.pop() {
-        let current_idx = nodes.len() as i32;
-
-        match node {
-            super::trees::TreeNode::Leaf { value, n_samples } => {
-                nodes.push(TreeShapNode {
-                    feature: -1,
-                    threshold: 0.0,
-                    left: -1,
-                    right: -1,
-                    value: *value,
-                    n_samples: *n_samples,
-                });
-            }
-            super::trees::TreeNode::Split {
-                feature_index,
-                threshold,
-                left,
-                right,
-            } => {
-                // Placeholder - we'll fill in child indices after processing children
-                nodes.push(TreeShapNode {
-                    feature: *feature_index as i32,
-                    threshold: *threshold,
-                    left: -1,     // Will be updated
-                    right: -1,    // Will be updated
-                    value: 0.0,   // Internal node
-                    n_samples: 0, // Will compute from children
-                });
-
-                // Process children
-                let left_idx = nodes.len() as i32;
-                extract_subtree(left, &mut nodes);
-                let right_idx = nodes.len() as i32;
-                extract_subtree(right, &mut nodes);
-
-                // Update parent's child indices
-                nodes[current_idx as usize].left = left_idx;
-                nodes[current_idx as usize].right = right_idx;
-
-                // Compute n_samples from children
-                let left_samples = nodes[left_idx as usize].n_samples;
-                let right_samples = nodes[right_idx as usize].n_samples;
-                nodes[current_idx as usize].n_samples = left_samples + right_samples;
-
-                // Compute weighted value for internal node
-                let total = (left_samples + right_samples) as f64;
-                if total > 0.0 {
-                    nodes[current_idx as usize].value = (nodes[left_idx as usize].value
-                        * left_samples as f64
-                        + nodes[right_idx as usize].value * right_samples as f64)
-                        / total;
-                }
-            }
-        }
-    }
-
     nodes
 }
 
-/// Recursively extract subtree structure.
-fn extract_subtree(node: &super::trees::TreeNode, nodes: &mut Vec<TreeShapNode>) {
+/// Appends `node`'s subtree in preorder and returns the index of `node`. The recursion depth is
+/// the tree's depth, which the fitting recursion has already reached.
+fn flatten(node: &super::trees::TreeNode, out: &mut Vec<TreeShapNode>) -> usize {
+    use super::trees::TreeNode;
+    let k = out.len();
     match node {
-        super::trees::TreeNode::Leaf { value, n_samples } => {
-            nodes.push(TreeShapNode {
-                feature: -1,
-                threshold: 0.0,
-                left: -1,
-                right: -1,
-                value: *value,
-                n_samples: *n_samples,
-            });
-        }
-        super::trees::TreeNode::Split {
+        TreeNode::Leaf {
+            value, n_samples, ..
+        } => out.push(TreeShapNode {
+            feature: -1,
+            threshold: 0.0,
+            left: -1,
+            right: -1,
+            value: *value,
+            n_samples: *n_samples,
+        }),
+        TreeNode::Split {
             feature_index,
             threshold,
             left,
             right,
+            ..
         } => {
-            let current_idx = nodes.len();
-            nodes.push(TreeShapNode {
+            out.push(TreeShapNode {
                 feature: *feature_index as i32,
                 threshold: *threshold,
                 left: -1,
@@ -701,284 +641,384 @@ fn extract_subtree(node: &super::trees::TreeNode, nodes: &mut Vec<TreeShapNode>)
                 value: 0.0,
                 n_samples: 0,
             });
+            let l = flatten(left, out);
+            let r = flatten(right, out);
+            let (cl, cr) = (out[l].n_samples, out[r].n_samples);
+            let total = cl + cr;
+            let value = if total > 0 {
+                (out[l].value * cl as f64 + out[r].value * cr as f64) / total as f64
+            } else {
+                0.0
+            };
+            let n = &mut out[k];
+            n.left = l as i32;
+            n.right = r as i32;
+            n.n_samples = total;
+            n.value = value;
+        }
+    }
+    k
+}
 
-            let left_idx = nodes.len() as i32;
-            extract_subtree(left, nodes);
-            let right_idx = nodes.len() as i32;
-            extract_subtree(right, nodes);
+/// The leaf a point reaches (`x[feature] <= threshold` goes left, as `DecisionTree::predict_one`).
+fn predict_nodes(nodes: &[TreeShapNode], x: ArrayView1<f64>) -> f64 {
+    let mut j = 0usize;
+    while nodes[j].feature >= 0 {
+        let n = &nodes[j];
+        j = if x[n.feature as usize] <= n.threshold {
+            n.left
+        } else {
+            n.right
+        } as usize;
+    }
+    nodes[j].value
+}
 
-            // Update indices and compute values
-            nodes[current_idx].left = left_idx;
-            nodes[current_idx].right = right_idx;
+/// `sum_leaf value * cover / root cover`: `E[f]` under the tree's training distribution, the
+/// value of the empty coalition of the path-dependent game.
+fn tree_expected_value(nodes: &[TreeShapNode]) -> f64 {
+    nodes
+        .iter()
+        .filter(|n| n.feature < 0)
+        .map(|n| n.value * n.n_samples as f64)
+        .sum::<f64>()
+        / nodes[0].n_samples as f64
+}
 
-            let left_samples = nodes[left_idx as usize].n_samples;
-            let right_samples = nodes[right_idx as usize].n_samples;
-            nodes[current_idx].n_samples = left_samples + right_samples;
+/// One element of TreeSHAP's unique-feature path (Lundberg et al. 2020, Algorithm 2).
+#[derive(Debug, Clone, Copy, Default)]
+struct PathElement {
+    feature: i32,
+    zero: f64,
+    one: f64,
+    weight: f64,
+}
 
-            let total = (left_samples + right_samples) as f64;
-            if total > 0.0 {
-                nodes[current_idx].value = (nodes[left_idx as usize].value * left_samples as f64
-                    + nodes[right_idx as usize].value * right_samples as f64)
-                    / total;
+/// Length of the path buffer for a tree whose deepest leaf is at `depth`: the recursion at depth
+/// d keeps its path (at most d + 1 elements) after its ancestors', `(D + 1)(D + 2) / 2` in all
+/// (shap's `unique_path` layout).
+fn path_buffer_len(depth: usize) -> EconResult<usize> {
+    Ok(crate::resource::checked_len(
+        &[depth.saturating_add(1), depth.saturating_add(2)],
+        "TreeSHAP path buffer",
+    )? / 2)
+}
+
+/// EXTEND: append (feature, zero fraction, one fraction) to the path of length `len` and update
+/// the permutation weights.
+fn extend_path(path: &mut [PathElement], len: usize, zero: f64, one: f64, feature: i32) {
+    path[len] = PathElement {
+        feature,
+        zero,
+        one,
+        weight: if len == 0 { 1.0 } else { 0.0 },
+    };
+    let l1 = (len + 1) as f64;
+    for i in (0..len).rev() {
+        path[i + 1].weight += one * path[i].weight * (i + 1) as f64 / l1;
+        path[i].weight = zero * path[i].weight * (len - i) as f64 / l1;
+    }
+}
+
+/// UNWIND: undo the extension of element `k` of the path of length `len` (a feature split on
+/// again further down); the path then has length `len - 1`.
+fn unwind_path(path: &mut [PathElement], len: usize, k: usize) {
+    let depth = len - 1;
+    let (one, zero) = (path[k].one, path[k].zero);
+    let d1 = (depth + 1) as f64;
+    let mut next_one = path[depth].weight;
+    for i in (0..depth).rev() {
+        if one != 0.0 {
+            let tmp = path[i].weight;
+            path[i].weight = next_one * d1 / ((i + 1) as f64 * one);
+            next_one = tmp - path[i].weight * zero * (depth - i) as f64 / d1;
+        } else {
+            path[i].weight = path[i].weight * d1 / (zero * (depth - i) as f64);
+        }
+    }
+    for i in k..depth {
+        path[i].feature = path[i + 1].feature;
+        path[i].zero = path[i + 1].zero;
+        path[i].one = path[i + 1].one;
+    }
+}
+
+/// The total permutation weight of the path of length `len` if element `k` were unwound (the
+/// leaf contribution's weight).
+fn unwound_path_sum(path: &[PathElement], len: usize, k: usize) -> f64 {
+    let depth = len - 1;
+    let (one, zero) = (path[k].one, path[k].zero);
+    let d1 = (depth + 1) as f64;
+    let mut total = 0.0;
+    if one != 0.0 {
+        let mut next_one = path[depth].weight;
+        for i in (0..depth).rev() {
+            let tmp = next_one * d1 / ((i + 1) as f64 * one);
+            total += tmp;
+            next_one = path[i].weight - tmp * zero * (depth - i) as f64 / d1;
+        }
+    } else {
+        for i in (0..depth).rev() {
+            total += path[i].weight * d1 / (zero * (depth - i) as f64);
+        }
+    }
+    total
+}
+
+/// TreeSHAP recursion state over one validated node table. `condition` 0: plain SHAP; +1 / -1:
+/// feature `condition_feature` held present / absent (shap's `tree_shap_recursive` condition
+/// mechanism, used for interaction values). `phi` is added to; `path` is the preallocated
+/// buffer of [`path_buffer_len`] elements, reused across calls.
+struct TreeShapRun<'n, 'x, 'p> {
+    nodes: &'n [TreeShapNode],
+    x: ArrayView1<'x, f64>,
+    phi: &'p mut [f64],
+    path: &'p mut [PathElement],
+    condition: i8,
+    condition_feature: i32,
+}
+
+impl TreeShapRun<'_, '_, '_> {
+    /// Visit `node`; the parent's path is `path[off..off + parent_len]`, and this node's path is
+    /// built right after it.
+    #[allow(clippy::too_many_arguments)]
+    fn recurse(
+        &mut self,
+        node: usize,
+        off: usize,
+        parent_len: usize,
+        parent_zero: f64,
+        parent_one: f64,
+        parent_feature: i32,
+        condition_fraction: f64,
+    ) {
+        if condition_fraction == 0.0 {
+            return;
+        }
+        let start = off + parent_len;
+        self.path.copy_within(off..start, start);
+        let mut len = parent_len;
+        if self.condition == 0 || self.condition_feature != parent_feature {
+            extend_path(
+                &mut self.path[start..],
+                len,
+                parent_zero,
+                parent_one,
+                parent_feature,
+            );
+            len += 1;
+        }
+        let nodes = self.nodes;
+        let n = &nodes[node];
+        if n.feature < 0 {
+            let path = &self.path[start..start + len];
+            for i in 1..len {
+                let w = unwound_path_sum(path, len, i);
+                let el = path[i];
+                self.phi[el.feature as usize] +=
+                    w * (el.one - el.zero) * n.value * condition_fraction;
             }
+            return;
         }
-    }
-}
-
-/// TreeSHAP algorithm for a single tree.
-///
-/// Implements the polynomial-time algorithm from Lundberg et al. (2018).
-///
-/// # Algorithm
-///
-/// The TreeSHAP algorithm computes exact Shapley values by:
-/// 1. Recursively traversing the tree from root to leaves
-/// 2. Tracking which features have been "used" in the path
-/// 3. Weighting leaf values by the fraction of all feature orderings
-///    that would result in reaching that leaf
-///
-/// Time complexity: O(TLD^2) where T = #trees, L = #leaves, D = depth
-fn tree_shap_single(
-    tree_nodes: &[TreeShapNode],
-    x: ArrayView1<f64>,
-    n_features: usize,
-) -> Array1<f64> {
-    let mut phi = Array1::zeros(n_features);
-
-    if tree_nodes.is_empty() {
-        return phi;
-    }
-
-    // Stack for DFS traversal
-    // (node_index, parent_node, parent_feat, parent_zero_frac, parent_one_frac, parent_branch, path)
-    let mut phi_m: HashMap<i32, f64> = HashMap::new();
-    let mut phi_p: HashMap<i32, f64> = HashMap::new();
-
-    // Simplified path tracking for TreeSHAP
-    tree_shap_recurse(
-        tree_nodes, 0, &x, &mut phi, 1.0, 1.0, -1, &mut phi_m, &mut phi_p,
-    );
-
-    phi
-}
-
-/// Recursive TreeSHAP computation.
-///
-/// Based on Algorithm 2 from Lundberg et al. (2018), "Consistent Individualized
-/// Feature Attribution for Tree Ensembles", arXiv:1802.03888.
-fn tree_shap_recurse(
-    nodes: &[TreeShapNode],
-    node_idx: usize,
-    x: &ArrayView1<f64>,
-    phi: &mut Array1<f64>,
-    zero_fraction: f64,
-    one_fraction: f64,
-    parent_feature: i32,
-    phi_m: &mut HashMap<i32, f64>,
-    phi_p: &mut HashMap<i32, f64>,
-) {
-    let node = &nodes[node_idx];
-
-    // If we're at a leaf, accumulate SHAP values
-    if node.feature < 0 {
-        // Leaf node - attribute value based on path
-        if parent_feature >= 0 {
-            let contrib = (one_fraction - zero_fraction) * node.value;
-            phi[parent_feature as usize] += contrib;
+        let f = n.feature as usize;
+        let (hot, cold) = if self.x[f] <= n.threshold {
+            (n.left as usize, n.right as usize)
+        } else {
+            (n.right as usize, n.left as usize)
+        };
+        let cover = n.n_samples as f64;
+        let hot_zero = nodes[hot].n_samples as f64 / cover;
+        let cold_zero = nodes[cold].n_samples as f64 / cover;
+        let (mut inc_zero, mut inc_one) = (1.0, 1.0);
+        // never the root element's feature -1
+        if let Some(k) = self.path[start..start + len]
+            .iter()
+            .position(|e| e.feature == n.feature)
+        {
+            inc_zero = self.path[start + k].zero;
+            inc_one = self.path[start + k].one;
+            unwind_path(&mut self.path[start..], len, k);
+            len -= 1;
         }
-        return;
-    }
-
-    // Internal node - decide which branches to explore
-    let feature = node.feature as usize;
-    let go_left = x[feature] <= node.threshold;
-
-    let left_idx = node.left as usize;
-    let right_idx = node.right as usize;
-
-    // Get child node weights (based on training samples)
-    let left_weight = if left_idx < nodes.len() {
-        nodes[left_idx].n_samples as f64
-    } else {
-        0.0
-    };
-    let right_weight = if right_idx < nodes.len() {
-        nodes[right_idx].n_samples as f64
-    } else {
-        0.0
-    };
-    let total_weight = left_weight + right_weight;
-
-    if total_weight == 0.0 {
-        return;
-    }
-
-    let left_frac = left_weight / total_weight;
-    let right_frac = right_weight / total_weight;
-
-    // Update phi contributions from parent
-    if parent_feature >= 0 && parent_feature != node.feature {
-        // Different feature - attribute contribution
-        let contrib = (one_fraction - zero_fraction) * node.value;
-        phi[parent_feature as usize] += contrib * 0.5; // Split contribution
-    }
-
-    // Recurse into children
-    if go_left {
-        // Instance goes left
-        // one_fraction: probability when feature is known
-        // zero_fraction: probability when feature is marginalized
-        tree_shap_recurse(
-            nodes,
-            left_idx,
-            x,
-            phi,
-            zero_fraction * left_frac, // Marginalize: use training proportion
-            one_fraction,              // Condition: follow instance path
-            node.feature,
-            phi_m,
-            phi_p,
+        let (mut hot_cf, mut cold_cf) = (condition_fraction, condition_fraction);
+        if self.condition > 0 && n.feature == self.condition_feature {
+            cold_cf = 0.0;
+        } else if self.condition < 0 && n.feature == self.condition_feature {
+            hot_cf *= hot_zero;
+            cold_cf *= cold_zero;
+        }
+        self.recurse(
+            hot,
+            start,
+            len,
+            hot_zero * inc_zero,
+            inc_one,
+            n.feature,
+            hot_cf,
         );
-        tree_shap_recurse(
-            nodes,
-            right_idx,
-            x,
-            phi,
-            zero_fraction * right_frac, // Marginalize: use training proportion
-            0.0,                        // Condition: instance doesn't go here
-            node.feature,
-            phi_m,
-            phi_p,
-        );
-    } else {
-        // Instance goes right
-        tree_shap_recurse(
-            nodes,
-            left_idx,
-            x,
-            phi,
-            zero_fraction * left_frac,
+        self.recurse(
+            cold,
+            start,
+            len,
+            cold_zero * inc_zero,
             0.0,
-            node.feature,
-            phi_m,
-            phi_p,
-        );
-        tree_shap_recurse(
-            nodes,
-            right_idx,
-            x,
-            phi,
-            zero_fraction * right_frac,
-            one_fraction,
-            node.feature,
-            phi_m,
-            phi_p,
+            n.feature,
+            cold_cf,
         );
     }
 }
 
-/// Compute TreeSHAP values for a Random Forest model.
+/// Adds one tree's (conditioned) TreeSHAP values at `x` to `phi`. `nodes` must have passed
+/// [`validate_nodes`] and `path` must hold `path_buffer_len(depth)` elements.
+fn tree_shap_into(
+    nodes: &[TreeShapNode],
+    x: ArrayView1<f64>,
+    phi: &mut [f64],
+    path: &mut [PathElement],
+    condition: i8,
+    condition_feature: i32,
+) {
+    let mut run = TreeShapRun {
+        nodes,
+        x,
+        phi,
+        path,
+        condition,
+        condition_feature,
+    };
+    run.recurse(0, 0, 0, 1.0, 1.0, -1, 1.0);
+}
+
+/// Exact TreeSHAP values of one tree (Lundberg, Erion & Lee 2020, Algorithm 2): the Shapley values
+/// of v(S) = E[f(x) | x_S] computed from node covers (Algorithm 1). O(L D^2) for L leaves and
+/// depth D. `nodes` must be a valid table (it is checked).
+#[cfg(test)]
+fn tree_shap_single(nodes: &[TreeShapNode], x: ArrayView1<f64>, n_features: usize) -> Array1<f64> {
+    let depth = validate_nodes(nodes, n_features, 0).expect("valid node table");
+    let mut path = vec![PathElement::default(); path_buffer_len(depth).unwrap()];
+    let mut phi = vec![0.0; n_features];
+    tree_shap_into(nodes, x, &mut phi, &mut path, 0, -1);
+    Array1::from_vec(phi)
+}
+
+/// The perturbation TreeSHAP computes; any other request is an error that names the route.
+fn tree_perturbation(config: &ShapConfig) -> EconResult<FeaturePerturbation> {
+    match config
+        .feature_perturbation
+        .unwrap_or(FeaturePerturbation::TreePathDependent)
+    {
+        FeaturePerturbation::TreePathDependent => Ok(FeaturePerturbation::TreePathDependent),
+        FeaturePerturbation::Interventional => Err(spec(
+            "TreeSHAP computes tree_path_dependent values; interventional SHAP values of a forest come from the Kernel path (shap_values_model_with(.., ShapMethod::Kernel, ..) with a background sample)"
+                .into(),
+        )),
+        FeaturePerturbation::Observational => Err(observational_error()),
+    }
+}
+
+fn observational_error() -> EconError {
+    spec("feature_perturbation = observational (conditional expectations) is not implemented; use tree_path_dependent (TreeSHAP) or interventional (Kernel SHAP)".into())
+}
+
+/// TreeSHAP values of a tree ensemble whose prediction is the mean of its trees (a random
+/// forest): the exact Shapley values of the path-dependent game `v(S) = E[f(x) | x_S]`
+/// (Lundberg, Erion & Lee 2020, Algorithms 1-2; shap's `TreeExplainer` with
+/// `feature_perturbation = "tree_path_dependent"`), averaged over the trees.
 ///
-/// # Arguments
-/// * `forest` - A trained Random Forest model
-/// * `x` - Input data matrix (n_samples x n_features)
-/// * `config` - SHAP configuration
+/// The base value is the mean over trees of `sum_leaf value * cover / root cover`, and the
+/// additivity check compares `base + sum(phi)` with the ensemble's predictions of the rows
+/// explained, computed here (tolerance [`ADDITIVITY_TOLERANCE`] relative to `max(1, |f|)`).
+/// Cost O(T L D^2) per row for T trees with L leaves and depth D.
 ///
-/// # Returns
-/// * `ShapResult` containing SHAP values and summary statistics
+/// # Errors
+///
+/// `InvalidSpecification` for no rows or columns, a non-finite value, a feature-name count
+/// that differs from the columns, no trees, an unfitted or malformed tree, a tree splitting on a
+/// column `x` does not have, and a perturbation other than tree_path_dependent.
 ///
 /// # References
 ///
-/// - Lundberg, S. M., Erion, G. G., & Lee, S. I. (2018). "Consistent Individualized
-///   Feature Attribution for Tree Ensembles". arXiv:1802.03888.
+/// - Lundberg, S. M., Erion, G., Chen, H., et al. (2020). "From local explanations to global
+///   understanding with explainable AI for trees". Nature Machine Intelligence 2, 56-67.
 pub fn shap_tree_ensemble(
     trees: &[super::trees::DecisionTree],
-    predictions: &[f64],
     x: ArrayView2<f64>,
-    base_value: f64,
     feature_names: Option<Vec<String>>,
     config: &ShapConfig,
 ) -> EconResult<ShapResult> {
-    let n_samples = x.nrows();
-    let n_features = x.ncols();
-    let n_trees = trees.len();
-
+    use crate::resource;
+    let feature_perturbation = tree_perturbation(config)?;
     validate_explain_inputs(x, feature_names.as_deref())?;
-    if n_trees == 0 {
+    if trees.is_empty() {
         return Err(spec("TreeSHAP needs at least one tree".into()));
     }
-
-    // Extract tree structures
-    let tree_structures: Vec<Vec<TreeShapNode>> =
-        trees.iter().map(extract_tree_structure).collect();
-    for (t, nodes) in tree_structures.iter().enumerate() {
-        validate_nodes(nodes, n_features, t)?;
+    let (n, m) = x.dim();
+    let mut flat = resource::try_with_capacity::<Vec<TreeShapNode>>(trees.len(), "TreeSHAP trees")?;
+    let mut max_depth = 0usize;
+    for (t, tree) in trees.iter().enumerate() {
+        let nodes = extract_tree_structure(tree);
+        max_depth = max_depth.max(validate_nodes(&nodes, m, t)?);
+        flat.push(nodes);
     }
+    let n_trees = flat.len() as f64;
+    let mut path = resource::try_vec(
+        path_buffer_len(max_depth)?,
+        PathElement::default(),
+        "TreeSHAP path buffer",
+    )?;
+    let base_value = flat.iter().map(|t| tree_expected_value(t)).sum::<f64>() / n_trees;
 
-    // Compute SHAP values for each sample
-    let mut shap_values = Array2::zeros((n_samples, n_features));
-
-    for i in 0..n_samples {
+    let mut shap_values = resource::try_zeros2(n, m, "SHAP values")?;
+    let mut predictions = resource::try_vec(n, 0.0, "SHAP predictions")?;
+    for (i, mut row) in shap_values.outer_iter_mut().enumerate() {
+        resource::checkpoint()?;
         let xi = x.row(i);
-        let mut sample_shap = Array1::zeros(n_features);
-
-        // Average SHAP values across all trees
-        for tree_nodes in &tree_structures {
-            if !tree_nodes.is_empty() {
-                let tree_shap = tree_shap_single(tree_nodes, xi, n_features);
-                sample_shap = sample_shap + tree_shap;
-            }
+        let phi = row
+            .as_slice_mut()
+            .expect("rows of a standard-layout matrix are contiguous");
+        let mut pred = 0.0;
+        for nodes in &flat {
+            tree_shap_into(nodes, xi, phi, &mut path, 0, -1);
+            pred += predict_nodes(nodes, xi);
         }
-
-        // Average across trees
-        sample_shap /= n_trees as f64;
-        shap_values.row_mut(i).assign(&sample_shap);
+        for v in phi.iter_mut() {
+            *v /= n_trees;
+        }
+        predictions[i] = pred / n_trees;
     }
 
-    // Compute feature importance (mean absolute SHAP)
-    let feature_importance: Vec<f64> = (0..n_features)
-        .map(|j| {
-            shap_values
-                .column(j)
-                .mapv(|v| v.abs())
-                .mean()
-                .unwrap_or(0.0)
-        })
-        .collect();
-
-    // Check additivity: sum of SHAP values + base should equal prediction
-    let (additivity_passed, max_error) = if config.check_additivity {
-        let mut max_err = 0.0f64;
-        for i in 0..n_samples {
-            let shap_sum: f64 = shap_values.row(i).sum();
-            let predicted = predictions[i];
-            let reconstructed = base_value + shap_sum;
-            let err = (predicted - reconstructed).abs();
-            max_err = max_err.max(err);
-        }
-        // Allow small numerical error
-        (Some(max_err < 0.01), Some(max_err))
-    } else {
-        (None, None)
-    };
+    let feature_importance = mean_abs_columns(&shap_values);
+    let (additivity_check_passed, max_additivity_error, additivity_warning) = additivity(
+        base_value,
+        &shap_values,
+        &predictions,
+        config.check_additivity,
+    );
+    let mut warnings = Vec::new();
+    if let Some(ns) = config.n_samples {
+        warnings.push(format!(
+            "n_samples = {ns} is a Kernel SHAP setting; TreeSHAP is exact and does not sample"
+        ));
+    }
+    warnings.extend(additivity_warning);
 
     Ok(ShapResult {
         shap_values,
         base_value,
         feature_names,
-        n_obs: n_samples,
-        n_features,
+        n_obs: n,
+        n_features: m,
         feature_importance,
-        interaction_values: None, // TreeSHAP interactions not implemented yet
-        additivity_check_passed: additivity_passed,
-        max_additivity_error: max_error,
+        interaction_values: None,
+        additivity_check_passed,
+        max_additivity_error,
         method: ShapMethod::Tree,
-        feature_perturbation: FeaturePerturbation::TreePathDependent,
-        exact: false,
+        feature_perturbation,
+        exact: true,
         n_coalitions: None,
         seed: None,
-        predictions: Vec::new(),
-        warnings: Vec::new(),
+        predictions,
+        warnings,
     })
 }
 
@@ -1329,7 +1369,8 @@ use super::lcg_random;
 
 /// Compute SHAP values for a Random Forest model.
 ///
-/// Uses TreeSHAP algorithm for exact computation in polynomial time.
+/// Uses TreeSHAP ([`shap_tree_ensemble`]) on `trees`; `result` supplies only the feature names
+/// (its training predictions are not read: the rows explained are predicted here).
 ///
 /// # Arguments
 /// * `result` - A trained Random Forest result
@@ -1356,16 +1397,7 @@ pub fn shap_values_random_forest(
     trees: &[super::trees::DecisionTree],
     config: &ShapConfig,
 ) -> EconResult<ShapResult> {
-    let base_value = result.predictions.iter().sum::<f64>() / result.predictions.len() as f64;
-
-    shap_tree_ensemble(
-        trees,
-        &result.predictions,
-        x,
-        base_value,
-        result.feature_names.clone(),
-        config,
-    )
+    shap_tree_ensemble(trees, x, result.feature_names.clone(), config)
 }
 
 /// Compute SHAP summary statistics.
@@ -1497,14 +1529,7 @@ pub fn shap_values_model(
     x: ArrayView2<f64>,
     config: &ShapConfig,
 ) -> EconResult<ShapResult> {
-    shap_tree_ensemble(
-        &model.trees,
-        &model.predictions,
-        x,
-        model.base_value,
-        model.feature_names.clone(),
-        config,
-    )
+    shap_tree_ensemble(&model.trees, x, model.feature_names.clone(), config)
 }
 
 /// Compute SHAP values for a Random Forest model using a Dataset.
@@ -1895,6 +1920,180 @@ mod tests {
     }
 
     #[test]
+    fn test_treeshap_matches_bruteforce_shapley() {
+        // Random CART trees (depth 6, 60 rows, 5 features: features repeat on paths), 10 training
+        // rows and 10 points outside [0, 1]; TreeSHAP against enumeration of E[f(x) | x_S] over all
+        // 32 coalitions.
+        for seed in [1u64, 2, 3] {
+            let (x, y) = random_regression(60, 5, seed);
+            let mut tree = super::super::trees::DecisionTree::new(6, 2, None);
+            let mut state = seed;
+            tree.fit(x.view(), y.view(), None, &mut state);
+            let nodes = extract_tree_structure(&tree);
+            let mut rng = ChaCha8Rng::seed_from_u64(100 + seed);
+            let mut points: Vec<Array1<f64>> = (0..10).map(|i| x.row(i).to_owned()).collect();
+            points.extend((0..10).map(|_| Array1::from_shape_fn(5, |_| rng.gen_range(-0.1..1.1))));
+            for p in &points {
+                let fast = tree_shap_single(&nodes, p.view(), 5);
+                let exact = bruteforce_shapley(5, &|mask| expvalue(&nodes, 0, p.view(), mask));
+                for j in 0..5 {
+                    assert!(
+                        EXACT_SHAP.allows(fast[j], exact[j]),
+                        "seed {seed}, feature {j}: {} vs {}",
+                        fast[j],
+                        exact[j]
+                    );
+                }
+                let total: f64 = fast.sum();
+                assert!((total + leaf_expectation(&nodes) - walk(&nodes, p.view())).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_treeshap_rpart_tree() {
+        let (case, ds) = crate::test_support::load_case("shap_tree_rpart");
+        let nodes = case_nodes(&case);
+        let x = case_matrix(&ds, &["x0", "x1", "x2", "x3"]);
+        let phi: Vec<f64> = x
+            .rows()
+            .into_iter()
+            .flat_map(|r| tree_shap_single(&nodes, r, 4).to_vec())
+            .collect();
+        let pred: Vec<f64> = x.rows().into_iter().map(|r| walk(&nodes, r)).collect();
+        let x_new = Array2::from_shape_vec((5, 4), case.vector("x_new")).unwrap();
+        let phi_new: Vec<f64> = x_new
+            .rows()
+            .into_iter()
+            .flat_map(|r| tree_shap_single(&nodes, r, 4).to_vec())
+            .collect();
+        let pred_new: Vec<f64> = x_new.rows().into_iter().map(|r| walk(&nodes, r)).collect();
+        Check::new(&case)
+            .vector("pred", &pred, Tol::exact()) // the leaf values themselves
+            .vector("pred_new", &pred_new, Tol::exact())
+            .scalar("expected_value", leaf_expectation(&nodes), EXACT_SHAP)
+            .vector("phi", &phi, EXACT_SHAP)
+            .vector("phi_new", &phi_new, EXACT_SHAP)
+            .finish();
+    }
+
+    #[test]
+    fn test_extract_tree_matches_predict_one() {
+        let (x, y) = random_regression(60, 5, 9);
+        let mut tree = super::super::trees::DecisionTree::new(6, 2, None);
+        let mut state = 9u64;
+        tree.fit(x.view(), y.view(), None, &mut state);
+        let nodes = extract_tree_structure(&tree);
+        validate_nodes(&nodes, 5, 0).unwrap();
+        assert_eq!(nodes[0].n_samples, 60);
+        for r in x.rows() {
+            assert_eq!(predict_nodes(&nodes, r), tree.predict_one(&r));
+            assert_eq!(walk(&nodes, r), tree.predict_one(&r));
+        }
+    }
+
+    #[test]
+    fn test_treeshap_additivity_new_rows() {
+        // 150 training rows, 155 explained (5 new): before, predictions[150] panicked.
+        let (x, y) = random_regression(150, 3, 7);
+        let model = super::super::trees::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(20),
+            Some(5),
+            Some(5),
+            Some("sqrt"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+        let (x_new, _) = random_regression(5, 3, 8);
+        let x_all = ndarray::concatenate(Axis(0), &[x.view(), x_new.view()]).unwrap();
+        let shap = shap_values_model(&model, x_all.view(), &ShapConfig::default()).unwrap();
+        let t = model.trees.len() as f64;
+        let base: f64 = model
+            .trees
+            .iter()
+            .map(|tr| leaf_expectation(&extract_tree_structure(tr)))
+            .sum::<f64>()
+            / t;
+        assert!(
+            (shap.base_value - base).abs() < 1e-12,
+            "base {} vs E[f] {}",
+            shap.base_value,
+            base
+        );
+        for i in 0..x_all.nrows() {
+            let f: f64 = model
+                .trees
+                .iter()
+                .map(|tr| tr.predict_one(&x_all.row(i)))
+                .sum::<f64>()
+                / t;
+            let err = (shap.base_value + shap.shap_values.row(i).sum() - f).abs();
+            assert!(err < 1e-10, "row {i}: additivity error {err}");
+        }
+        assert_eq!(shap.additivity_check_passed, Some(true));
+        assert!(shap.max_additivity_error.unwrap() < 1e-10);
+        // the training rows alone: the flag was false before (max error 0.48 in the verifier's repro)
+        let train = shap_values_model(&model, x.view(), &ShapConfig::default()).unwrap();
+        assert_eq!(train.additivity_check_passed, Some(true));
+        assert!(
+            train
+                .to_string()
+                .contains("Method: TreeSHAP (tree path-dependent; exact)")
+        );
+        assert!(
+            train
+                .to_string()
+                .contains("Additivity check: PASSED (max error: ")
+        );
+    }
+
+    #[test]
+    fn test_tree_path_settings_are_honoured() {
+        // Before: n_samples (the MCP field reaches this path) and feature_perturbation were ignored
+        // silently.
+        let (x, y) = random_regression(40, 3, 15);
+        let model = super::super::trees::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(3),
+            Some(3),
+            Some(2),
+            Some("all"),
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let mut c = ShapConfig::default();
+        c.n_samples = Some(50);
+        let r = shap_values_model(&model, x.view(), &c).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("n_samples = 50 is a Kernel SHAP setting")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Warning: n_samples = 50"));
+        let mut interv = ShapConfig::default();
+        interv.feature_perturbation = Some(FeaturePerturbation::Interventional);
+        let e = shap_values_model(&model, x.view(), &interv)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("come from the Kernel path"), "{e}");
+        let mut obs = ShapConfig::default();
+        obs.feature_perturbation = Some(FeaturePerturbation::Observational);
+        assert!(
+            shap_values_model(&model, x.view(), &obs)
+                .unwrap_err()
+                .to_string()
+                .contains("not implemented")
+        );
+    }
+
+    #[test]
     fn test_shap_kernel_weight() {
         // Test that weights are computed correctly
         let m = 4; // 4 features
@@ -2081,6 +2280,9 @@ mod tests {
             x1_importance > noise_importance || x2_importance > noise_importance,
             "True predictors should generally be more important than noise"
         );
+
+        assert_eq!(shap_result.additivity_check_passed, Some(true));
+        assert!(shap_result.max_additivity_error.unwrap() < 1e-10);
 
         // Compute summary
         let summary = shap_summary(&shap_result);
