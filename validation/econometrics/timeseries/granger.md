@@ -18,11 +18,13 @@ and reports
 F = ((RSS_R - RSS_U) / p) / (RSS_U / (n - 3p - 1)),   F ~ F(p, n - 3p - 1),
 ```
 
-as `lmtest::grangertest(y ~ x, order = p)`. Both residual sums of squares come from one
-pivoted QR of the unrestricted design (`linalg::solve::Qr`, `dqrdc2`, tolerance 1e-7): its
-first p + 1 columns are the restricted design, so `RSS_U` is the sum of the squared effects
-`(Q'y)_i` for i >= 2p + 1 and `RSS_R` for i >= p + 1, the values `lm.fit` gives on each
-design. There is no absolute exact-fit threshold: F is
+as `lmtest::grangertest(y ~ x, order = p)`. The two fits take OLS's solve decision: on
+full-rank, well-conditioned designs the normal equations of each (the restricted design is the
+first p + 1 columns of the unrestricted one), with `RSS_R - RSS_U = ||X_U b_U - X_R b_R||^2`;
+otherwise one pivoted QR of the unrestricted design (`linalg::solve::Qr`, `dqrdc2`, tolerance
+1e-7), which names aliased lags, and where `RSS_U` is the sum of the squared effects `(Q'y)_i`
+for i >= 2p + 1 and `RSS_R` for i >= p + 1, the values `lm.fit` gives on each design (timing:
+[var.md](var.md), "Solve and timing"). There is no absolute exact-fit threshold: F is
 invariant to the scale of the data, and an exact fit (RSS_U = 0) gives F = inf and p = 0, as
 in R.
 
@@ -73,8 +75,9 @@ p 0.18901456524925964, df2 77.
 - `test_validate_granger_canada_prod_on_e`: the Canada test.
 - Not R-pinned: `test_granger_rejects_lags_without_residual_df` (orders 7 and 8 on 20 rows,
   the 4-row default), `test_granger_rejects_proportional_series` (x = 3 y is
-  `SingularMatrix`), `test_granger_is_scale_invariant` (the series times 1e-10 give the same
-  F to 1e-8).
+  `SingularMatrix`), `test_granger_rejects_nearly_proportional_series` (the same up to 1e-12
+  noise), `test_granger_is_scale_invariant` (the series times 1e-10 give the same F to 1e-8),
+  `test_granger_normal_equations_match_pivoted_qr` (the two solves agree to 1e-10).
 
 Tolerances (validation/README.md): F `Tol::stat`, p `Tol::p_value` (1e-5 relative / 1e-12
 absolute at n = 20 and 82); counts exact.

@@ -1,6 +1,6 @@
 //! The Granger causality F test ([`granger_test`], [`run_granger_test`], [`granger_test_bidirectional`]).
 
-use ndarray::{Array1, s};
+use ndarray::{Array1, Array2, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -8,6 +8,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{LM_QR_TOL, Qr};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::f_test_p_value;
@@ -96,7 +97,9 @@ impl fmt::Display for GrangerResult {
 /// F = [(RSS_R - RSS_U) / p] / [RSS_U / (n - 3p - 1)]
 ///
 /// Under H0, F ~ F(p, n - 3p - 1), n = number of rows (each regression uses the n - p rows
-/// t = p + 1..n). Both regressions come from one pivoted QR of the unrestricted design.
+/// t = p + 1..n). Both regressions are solved as OLS solves them: the normal equations when
+/// the designs are of full rank and well conditioned, otherwise one pivoted QR of the
+/// unrestricted design (`lm.fit`'s, which decides rank and names aliased lags).
 ///
 /// # Requirements
 ///
@@ -199,12 +202,102 @@ pub fn granger_test(
         }
     }
 
+    // OLS's solve decision (regression::ols): the normal equations when both designs are of
+    // full rank and well conditioned, otherwise one pivoted QR, which decides rank and names
+    // the aliased lags as lm.fit does.
+    let (rss_u, rss_gain) = match granger_normal_rss(&x_unrestricted, &y, lags)? {
+        Some(v) => v,
+        None => granger_qr_rss(&x_unrestricted, &y, lags, dependent, cause)?,
+    };
+    let rss_r = rss_u + rss_gain;
+
+    // F without an absolute exact-fit threshold: it is scale-free. RSS_U = 0 gives F = inf
+    // (p = 0) when RSS_R > RSS_U, and NaN when both are 0, as in R.
+    let df1 = lags;
+    let f_statistic = (rss_gain / df1 as f64) / (rss_u / df2 as f64);
+
+    let p_value = f_test_p_value(f_statistic, df1 as f64, df2 as f64);
+    let significant = p_value < 0.05;
+
+    let interpretation = if significant {
+        format!(
+            "Reject H0 at 5% level: {} Granger-causes {} (p = {:.4}). \
+             Lagged values of {} significantly improve predictions of {}.",
+            cause, dependent, p_value, cause, dependent
+        )
+    } else {
+        format!(
+            "Cannot reject H0 at 5% level: {} does not Granger-cause {} (p = {:.4}). \
+             No evidence that lagged values of {} improve predictions of {}.",
+            cause, dependent, p_value, cause, dependent
+        )
+    };
+
+    Ok(GrangerResult {
+        f_statistic,
+        p_value,
+        df1,
+        df2,
+        lags,
+        n_obs: n,
+        dependent: dependent.to_string(),
+        cause: cause.to_string(),
+        rss_unrestricted: rss_u,
+        rss_restricted: rss_r,
+        significant_at_05: significant,
+        interpretation,
+        warnings: Vec::new(),
+    })
+}
+
+/// `(RSS_U, RSS_R - RSS_U)` by the normal equations of the unrestricted design and of the
+/// restricted one (its first p + 1 columns), or `None` when either is rank-deficient or ill
+/// conditioned for them (the QR then decides). The gain is the sum of squares of the
+/// difference of the two fitted vectors, `||X_U b_U - X_R b_R||^2`, which equals
+/// RSS_R - RSS_U for nested least-squares fits and is never negative.
+fn granger_normal_rss(
+    x_unrestricted: &Array2<f64>,
+    y: &Array1<f64>,
+    lags: usize,
+) -> EconResult<Option<(f64, f64)>> {
+    let Some(unrestricted) = normal_equations_inverse(x_unrestricted.view())? else {
+        return Ok(None);
+    };
+    let x_restricted = x_unrestricted.slice(s![.., ..=lags]).to_owned();
+    let Some(restricted) = normal_equations_inverse(x_restricted.view())? else {
+        return Ok(None);
+    };
+    let fit_u = x_unrestricted.dot(&unrestricted.coefficients(x_unrestricted.view(), y));
+    let fit_r = x_restricted.dot(&restricted.coefficients(x_restricted.view(), y));
+    let rss_u = y
+        .iter()
+        .zip(&fit_u)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f64>();
+    let rss_gain = fit_u
+        .iter()
+        .zip(&fit_r)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f64>();
+    Ok(Some((rss_u, rss_gain)))
+}
+
+/// `(RSS_U, RSS_R - RSS_U)` from one pivoted QR of the unrestricted design, or
+/// `SingularMatrix` naming the aliased lags.
+fn granger_qr_rss(
+    x_unrestricted: &Array2<f64>,
+    y: &Array1<f64>,
+    lags: usize,
+    dependent: &str,
+    cause: &str,
+) -> EconResult<(f64, f64)> {
     // The restricted design [1, y lags] is the first p + 1 columns of the unrestricted one.
     // At full rank dqrdc2 moves no column, so the first p + 1 reflectors of the unrestricted
     // QR are the QR of the restricted design, and one decomposition gives both residual sums
     // of squares from the effects Q'y: RSS_U = sum over i >= 2p + 1, RSS_R = sum over
     // i >= p + 1 (lm.fit on each design gives the same).
-    let m = 2 * lags + 1;
+    let m = x_unrestricted.ncols();
+    let n = x_unrestricted.nrows();
     let qr = Qr::decompose(x_unrestricted.view(), LM_QR_TOL)?;
     if qr.rank() < m {
         let aliased = qr.aliased();
@@ -250,45 +343,7 @@ pub fn granger_test(
     let rss_u = sum_sq(m, n);
     // RSS_R - RSS_U as a sum of squares: never negative
     let rss_gain = sum_sq(lags + 1, m);
-    let rss_r = rss_u + rss_gain;
-
-    // F without an absolute exact-fit threshold: it is scale-free. RSS_U = 0 gives F = inf
-    // (p = 0) when RSS_R > RSS_U, and NaN when both are 0, as in R.
-    let df1 = lags;
-    let f_statistic = (rss_gain / df1 as f64) / (rss_u / df2 as f64);
-
-    let p_value = f_test_p_value(f_statistic, df1 as f64, df2 as f64);
-    let significant = p_value < 0.05;
-
-    let interpretation = if significant {
-        format!(
-            "Reject H0 at 5% level: {} Granger-causes {} (p = {:.4}). \
-             Lagged values of {} significantly improve predictions of {}.",
-            cause, dependent, p_value, cause, dependent
-        )
-    } else {
-        format!(
-            "Cannot reject H0 at 5% level: {} does not Granger-cause {} (p = {:.4}). \
-             No evidence that lagged values of {} improve predictions of {}.",
-            cause, dependent, p_value, cause, dependent
-        )
-    };
-
-    Ok(GrangerResult {
-        f_statistic,
-        p_value,
-        df1,
-        df2,
-        lags,
-        n_obs: n,
-        dependent: dependent.to_string(),
-        cause: cause.to_string(),
-        rss_unrestricted: rss_u,
-        rss_restricted: rss_r,
-        significant_at_05: significant,
-        interpretation,
-        warnings: Vec::new(),
-    })
+    Ok((rss_u, rss_gain))
 }
 
 /// Granger causality test with the default lag order.
@@ -521,6 +576,75 @@ mod tests {
             .map(|i| ((i * 7919) % 97) as f64 / 97.0 - 0.5)
             .collect();
         let x: Vec<f64> = y.iter().map(|v| 3.0 * v).collect();
+        let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
+        match granger_test(&ds, "y", "x", 2) {
+            Err(EconError::SingularMatrix { context, .. }) => {
+                assert!(
+                    context.contains("unrestricted") && context.contains("x_1"),
+                    "{context}"
+                )
+            }
+            other => panic!("expected SingularMatrix, got {other:?}"),
+        }
+    }
+
+    /// Simulated noisy pair: y depends on its own lag and (with weight `beta`) on x's.
+    fn simulated_pair(n: usize, beta: f64, seed: u64) -> (Vec<f64>, Vec<f64>) {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let (mut y, mut x) = (vec![0.0f64; n], vec![0.0f64; n]);
+        for t in 1..n {
+            let (e, u): (f64, f64) = (
+                StandardNormal.sample(&mut rng),
+                StandardNormal.sample(&mut rng),
+            );
+            x[t] = 0.5 * x[t - 1] + u;
+            y[t] = 0.3 * y[t - 1] + beta * x[t - 1] + e;
+        }
+        (y, x)
+    }
+
+    /// The normal-equations RSS pair (OLS's decision) agrees with the one-QR effects it
+    /// replaces on well-conditioned designs, also when x adds almost nothing (small gain).
+    #[test]
+    fn test_granger_normal_equations_match_pivoted_qr() {
+        for (n, beta, lags) in [
+            (200usize, 0.4, 1usize),
+            (200, 0.0, 4),
+            (1000, 0.02, 6),
+            (40, 0.3, 3),
+        ] {
+            let (yv, xv) = simulated_pair(n, beta, n as u64 + lags as u64);
+            let y = Array1::from_vec(yv[lags..].to_vec());
+            let x = Array2::from_shape_fn((n - lags, 2 * lags + 1), |(i, j)| match j {
+                0 => 1.0,
+                j if j <= lags => yv[lags + i - j],
+                j => xv[lags + i - (j - lags)],
+            });
+            let (ru, gain) = granger_normal_rss(&x, &y, lags)
+                .unwrap()
+                .expect("the design must take the normal equations");
+            let (ru_qr, gain_qr) = granger_qr_rss(&x, &y, lags, "y", "x").unwrap();
+            assert!(gain >= 0.0);
+            assert!((ru / ru_qr - 1.0).abs() < 1e-12, "RSS_U {ru} vs {ru_qr}");
+            assert!(
+                (gain - gain_qr).abs() <= 1e-10 * gain_qr + 1e-13 * ru_qr,
+                "n = {n}, lags = {lags}: gain {gain} vs {gain_qr}"
+            );
+        }
+    }
+
+    /// x = 3 y up to noise far below lm.fit's tolerance is still aliased (the normal
+    /// equations leave the design to the QR, which names the lags).
+    #[test]
+    fn test_granger_rejects_nearly_proportional_series() {
+        let (y, _) = simulated_pair(40, 0.0, 9);
+        let x: Vec<f64> = y
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 3.0 * v + 1e-12 * (((i * 7919) % 97) as f64 - 48.0))
+            .collect();
         let ds = Dataset::new(df! { "y" => y, "x" => x }.unwrap());
         match granger_test(&ds, "y", "x", 2) {
             Err(EconError::SingularMatrix { context, .. }) => {

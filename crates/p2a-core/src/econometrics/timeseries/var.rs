@@ -9,6 +9,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::cholesky;
 use crate::linalg::solve::{LM_QR_TOL, Qr};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::estimator::t_test_p_value;
 
@@ -233,7 +234,8 @@ impl fmt::Display for VarIrfResult {
 /// # Model
 /// VAR(p) model: y_t = c + A_1 y_{t-1} + ... + A_p y_{t-p} + e_t, estimated equation by
 /// equation on the common design Z = [1, y_{t-1}', .., y_{t-p}'] (T = n - p rows,
-/// m = 1 + K p columns) by pivoted QR.
+/// m = 1 + K p columns), solved as OLS solves: the normal equations when Z is of full rank
+/// and well conditioned, `lm.fit`'s pivoted QR otherwise.
 ///
 /// # Requirements
 /// `lags >= 1`; `n > p + 1` (`InsufficientTimePeriods`); `n >= (K + 1)(p + 1)`, so that each
@@ -318,37 +320,20 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
         }
     }
 
-    // Every equation has the same design, so one pivoted QR (dqrdc2, as lm.fit inside
-    // vars::VAR) serves all K of them.
+    // Every equation has the same design, so one solve serves all K of them: OLS's
+    // decision (regression::ols), the normal equations on a full-rank, well-conditioned
+    // design and otherwise one pivoted QR (dqrdc2, as lm.fit inside vars::VAR), which
+    // decides rank and names the aliased lags.
     let coef_names = var_coef_names(&var_names, lags);
-    let qr = Qr::decompose(z.view(), LM_QR_TOL)?;
-    if qr.rank() < n_regressors {
-        let names: Vec<&str> = qr
-            .aliased()
-            .iter()
-            .map(|&j| coef_names[j].as_str())
-            .collect();
-        return Err(EconError::SingularMatrix {
-            context: format!(
-                "VAR design has rank {} of {n_regressors}: {} aliased (coefficients not defined \
-                 because of singularities)",
-                qr.rank(),
-                names.join(", ")
-            ),
-            suggestion:
-                "Drop the series that is a linear combination of the others (or constant), \
-                         or lower the lag order"
-                    .to_string(),
-        });
-    }
-    let unscaled = qr.unscaled_covariance()?;
-
-    let mut coefficients = Array2::zeros((k, n_regressors));
-    for eq in 0..k {
-        coefficients
-            .row_mut(eq)
-            .assign(&qr.coefficients(y.column(eq))?);
-    }
+    let (coefficients, unscaled) = match normal_equations_inverse(z.view())? {
+        Some(normal) => (
+            normal
+                .coefficients_multi(z.view(), y.view())
+                .reversed_axes(),
+            normal.inverse,
+        ),
+        None => var_qr_solve(&z, &y, &coef_names)?,
+    };
     // U = Y - Z B' in one matrix product (cheaper than K more passes over the reflectors)
     let residuals = &y - &z.dot(&coefficients.t());
 
@@ -408,6 +393,44 @@ pub fn run_var(dataset: &Dataset, columns: &[&str], lags: usize) -> EconResult<V
         sigma_u_ml: array2_to_vec(&sigma_u_ml),
         log_det_sigma_ml,
     })
+}
+
+/// The pivoted-QR arm of [`run_var`]'s solve: the coefficients (K x m, row = equation) and
+/// `(Z'Z)^{-1}`, or `SingularMatrix` naming the aliased lags when Z is rank-deficient.
+fn var_qr_solve(
+    z: &Array2<f64>,
+    y: &Array2<f64>,
+    coef_names: &[String],
+) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let (k, n_regressors) = (y.ncols(), z.ncols());
+    let qr = Qr::decompose(z.view(), LM_QR_TOL)?;
+    if qr.rank() < n_regressors {
+        let names: Vec<&str> = qr
+            .aliased()
+            .iter()
+            .map(|&j| coef_names[j].as_str())
+            .collect();
+        return Err(EconError::SingularMatrix {
+            context: format!(
+                "VAR design has rank {} of {n_regressors}: {} aliased (coefficients not defined \
+                 because of singularities)",
+                qr.rank(),
+                names.join(", ")
+            ),
+            suggestion:
+                "Drop the series that is a linear combination of the others (or constant), \
+                         or lower the lag order"
+                    .to_string(),
+        });
+    }
+    let unscaled = qr.unscaled_covariance()?;
+    let mut coefficients = Array2::zeros((k, n_regressors));
+    for eq in 0..k {
+        coefficients
+            .row_mut(eq)
+            .assign(&qr.coefficients(y.column(eq))?);
+    }
+    Ok((coefficients, unscaled))
 }
 
 /// vars' coefficient names in the column order of the design: `const`, then `<var>.l<lag>`
@@ -635,6 +658,101 @@ mod tests {
     /// ECON-79. b = 2 a exactly: the lag b.l1 is aliased (R: coef(VAR(..)$varresult$a)["b.l1"]
     /// is NA, the later of two collinear columns, dqrdc2's rule). Before: the
     /// pseudo-inverse fit was returned as Ok.
+    /// Simulated stationary VAR(1) with Gaussian noise: K series, n rows, seed.
+    fn simulated_var(n: usize, k: usize, seed: u64) -> (Dataset, Vec<String>) {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let mut y = vec![vec![0.0f64; k]; n + 30];
+        for t in 1..n + 30 {
+            for j in 0..k {
+                let e: f64 = StandardNormal.sample(&mut rng);
+                y[t][j] = 0.4 * y[t - 1][j] + 0.15 * y[t - 1][(j + 1) % k] + e;
+            }
+        }
+        let names: Vec<String> = (0..k).map(|j| format!("y{j}")).collect();
+        let cols: Vec<Column> = (0..k)
+            .map(|j| {
+                Column::new(
+                    names[j].as_str().into(),
+                    (30..n + 30).map(|t| y[t][j]).collect::<Vec<f64>>(),
+                )
+            })
+            .collect();
+        (Dataset::new(DataFrame::new(cols).unwrap()), names)
+    }
+
+    /// The normal-equations solve (OLS's decision) agrees with the pivoted QR it replaces on
+    /// well-conditioned designs: coefficients, (Z'Z)^-1 and hence SEs to 1e-10 relative.
+    #[test]
+    fn test_var_normal_equations_match_pivoted_qr() {
+        for (n, k, p) in [(200usize, 3usize, 2usize), (400, 10, 4), (120, 2, 1)] {
+            let (ds, names) = simulated_var(n, k, 11 + p as u64);
+            let cols: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let fit = run_var(&ds, &cols, p).unwrap();
+
+            let (data, _) = df_to_array2(ds.df(), &cols).unwrap();
+            let t = n - p;
+            let m = 1 + k * p;
+            let z = Array2::from_shape_fn((t, m), |(i, j)| {
+                if j == 0 {
+                    1.0
+                } else {
+                    data[[i + p - (j - 1) / k - 1, (j - 1) % k]]
+                }
+            });
+            let y = Array2::from_shape_fn((t, k), |(i, v)| data[[i + p, v]]);
+            assert!(
+                normal_equations_inverse(z.view()).unwrap().is_some(),
+                "n = {n}, K = {k}, p = {p}: the design must take the normal equations"
+            );
+            let (b_qr, u_qr) = var_qr_solve(&z, &y, &var_coef_names(&names, p)).unwrap();
+            let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-300);
+            for eq in 0..k {
+                for j in 0..m {
+                    let (a, b) = (fit.coefficients[eq][j], b_qr[[eq, j]]);
+                    assert!(rel(a, b) < 1e-10, "coef [{eq}][{j}]: {a} vs {b}");
+                    let se_qr = (fit.sigma_u[eq][eq] * u_qr[[j, j]]).sqrt();
+                    let se = fit.std_errors[eq][j];
+                    assert!(rel(se, se_qr) < 1e-10, "se [{eq}][{j}]: {se} vs {se_qr}");
+                }
+            }
+        }
+    }
+
+    /// A series equal to twice another up to noise far below lm.fit's tolerance is still
+    /// aliased (the normal equations leave such a design to the QR, which names the lag).
+    #[test]
+    fn test_var_rejects_nearly_collinear_series() {
+        let (ds, _) = simulated_var(60, 2, 3);
+        let a = ds.df().column("y0").unwrap().f64().unwrap().to_vec();
+        let a: Vec<f64> = a.into_iter().map(|v| v.unwrap()).collect();
+        let b: Vec<f64> = a
+            .iter()
+            .enumerate()
+            .map(|(i, v)| 2.0 * v + 1e-12 * (((i * 7919) % 97) as f64 - 48.0))
+            .collect();
+        let c: Vec<f64> = ds
+            .df()
+            .column("y1")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap())
+            .collect();
+        let ds = Dataset::new(df! { "a" => a, "b" => b, "c" => c }.unwrap());
+        match run_var(&ds, &["a", "b", "c"], 2) {
+            Err(EconError::SingularMatrix { context, .. }) => {
+                assert!(
+                    context.contains("b.l1") && context.contains("b.l2"),
+                    "{context}"
+                )
+            }
+            other => panic!("expected SingularMatrix naming b.l1 and b.l2, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_var_rejects_collinear_series() {
         let a: Vec<f64> = (0..40)

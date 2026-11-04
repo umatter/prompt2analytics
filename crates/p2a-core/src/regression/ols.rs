@@ -657,18 +657,44 @@ const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 
 /// `(X'X)^{-1}` of a full-rank, well-conditioned design and whether solves with it take a
 /// refinement step (see [`OLS_REFINE_BELOW_RCOND`]).
-struct NormalInverse {
-    inverse: Array2<f64>,
-    refine: bool,
+///
+/// Built by [`normal_equations_inverse`]; the OLS fit ([`solve_ols`]) and the other
+/// least-squares fits that take OLS's solve decision (VAR, Granger) use it, so the
+/// thresholds and the refinement live here only.
+pub(crate) struct NormalInverse {
+    /// `(X'X)^{-1}` (k x k), the unscaled covariance of the coefficients.
+    pub(crate) inverse: Array2<f64>,
+    /// Whether solves take one refinement step.
+    pub(crate) refine: bool,
 }
 
 impl NormalInverse {
     /// `(X'X)^{-1} X'y`, refined once when the conditioning asks for it.
-    fn coefficients(&self, x: ndarray::ArrayView2<'_, f64>, y: &Array1<f64>) -> Array1<f64> {
+    pub(crate) fn coefficients(
+        &self,
+        x: ndarray::ArrayView2<'_, f64>,
+        y: &Array1<f64>,
+    ) -> Array1<f64> {
         let mut beta = self.inverse.dot(&xty(&x, y));
         if self.refine {
             let r = y - &x.dot(&beta);
             beta += &self.inverse.dot(&xty(&x, &r));
+        }
+        beta
+    }
+
+    /// [`Self::coefficients`] for every column of `y` (n x q) at once: the k x q
+    /// coefficient matrix `(X'X)^{-1} X'Y`, refined once when the conditioning asks for it.
+    /// Two matrix products (four when refined) instead of q matrix-vector passes over `x`.
+    pub(crate) fn coefficients_multi(
+        &self,
+        x: ndarray::ArrayView2<'_, f64>,
+        y: ndarray::ArrayView2<'_, f64>,
+    ) -> Array2<f64> {
+        let mut beta = self.inverse.dot(&x.t().dot(&y));
+        if self.refine {
+            let r = &y - &x.dot(&beta);
+            beta += &self.inverse.dot(&x.t().dot(&r));
         }
         beta
     }
@@ -678,7 +704,14 @@ impl NormalInverse {
 /// [`OLS_NORMAL_EQUATIONS_MIN_RCOND`]); `None` when the pivoted QR must decide.
 /// Cancellation and the allocation ceiling propagate; any other failure of the inverse
 /// (a singular or indefinite X'X) means "use the QR".
-fn normal_equations_inverse(x: ndarray::ArrayView2<'_, f64>) -> EconResult<Option<NormalInverse>> {
+///
+/// This is OLS's solve decision (normal equations, pivoted QR otherwise) for callers that
+/// fit one design to several responses or need the inverse itself: on `None` they run
+/// `linalg::solve::Qr` (`LM_QR_TOL`, `lm.fit`'s pivoting and aliasing) as [`solve_ols`]
+/// does. A design with fewer rows than columns, or no column, is `None`.
+pub(crate) fn normal_equations_inverse(
+    x: ndarray::ArrayView2<'_, f64>,
+) -> EconResult<Option<NormalInverse>> {
     let (n, k) = x.dim();
     if k == 0 || n <= k {
         return Ok(None);
