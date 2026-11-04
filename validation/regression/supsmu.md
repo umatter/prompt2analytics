@@ -126,3 +126,9 @@ None: the port agrees with R on every case.
 1. Friedman, J. H. (1984). A Variable Span Smoother. Technical Report No. 5, Laboratory for Computational Statistics, Stanford University.
 2. Friedman, J. H., & Stuetzle, W. (1981). Projection Pursuit Regression. JASA, 76(376), 817-823.
 3. R Core Team. supsmu() documentation.
+
+## Timing (WP11-13)
+
+Release build, same protocol as `loess.md`. Head/base at n = 50 / 200 / 1,000: automatic span 2.68 /
+3.13 / 3.28 (three running-line passes and the CV smoothing of R's algorithm; pre-approved, WP11-5);
+fixed span 0.1: 1.35 / 1.36 / 1.55.

@@ -85,3 +85,11 @@ data at 1e-8 (values quoted in the test; not registered).
 The MCP tool and the CLI command call `gls()` / `run_gls` and have no `group` or `method` option yet.
 Recommendation for WP58/WP60: expose `group` (a column) and `method` (`reml` | `ml`), drop the
 handler's 0.5 default rho (estimate instead), and append the result's notes.
+
+## Timing (WP11-13)
+
+Release build, same protocol as `loess.md`. Head/base: AR(1) with fixed rho 1.17 (n = 100), 1.44
+(n = 1,000; the pivoted QR replaces the normal equations); `ar1_auto` 11.6 (n = 100), 15.7 (n = 1,000),
+5.0 on `gls_ar1` (REML by Brent instead of one lag-1 correlation; pre-approved, WP11-8); grouped CS
+REML on `gls_cs` 12.3x the old fixed-rho, ungrouped fit (a new estimator; WP11-9). Smoothing spline
+(GCV) 1.00 at n = 100 and 1,000; sensemakr 1.17 (n = 1,000), 1.35 (n = 10,000).

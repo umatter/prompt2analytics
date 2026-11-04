@@ -208,3 +208,10 @@ smooth.spline fit differs from R (REG-29, REG-30, Tier 4), which no registered t
 - Cleveland, W. S., & Devlin, S. J. (1988). "Locally weighted regression: an approach to regression analysis by local fitting." *Journal of the American Statistical Association*, 83(403), 596-610.
 - Cleveland, W. S., Grosse, E., & Shyu, W. M. (1992). "Local regression models." Chapter 8 of *Statistical Models in S*, eds J.M. Chambers and T.J. Hastie.
 - R Documentation: `stats::loess()` - https://stat.ethz.ch/R-manual/R-devel/library/stats/html/loess.html
+
+## Timing (WP11-13)
+
+Release build, CPU 0-3, `RAYON_NUM_THREADS=1`, base (pre-package engine, 96adf9b) and head interleaved,
+medians; synthetic noisy data. Head/base: degree 1 span 0.75 (unified): 1.13 / 1.06 / 1.07 at n = 100 /
+1,000 / 10,000; degree 2 span 0.5 (LOESS_Gaussian): 1.10 / 0.98 / 0.99; robust (LOESS_Robust): 0.99 /
+0.90 / 0.89.
