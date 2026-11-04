@@ -9,6 +9,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use super::common::{compute_distance_matrix, try_distance_matrix};
+use crate::ml::extract::require_finite;
+use crate::ml::hclust::{Linkage, hclust_euclidean};
 
 // =============================================================================
 // Helper functions
@@ -1223,6 +1225,16 @@ pub fn run_pvclust(
 // =============================================================================
 
 /// Linkage method for fast hierarchical clustering.
+///
+/// | Variant | R method (`fastcluster::hclust`, `stats::hclust`) |
+/// |---|---|
+/// | `Single` | `"single"` |
+/// | `Complete` | `"complete"` |
+/// | `Average` | `"average"` |
+/// | `Ward` (default) | `"ward.D2"` (`hclust.vector(method = "ward")`) |
+/// | `Weighted` | `"mcquitty"` |
+/// | `Centroid` | `"centroid"` (on squared distances; heights square-rooted) |
+/// | `Median` | `"median"` (on squared distances; heights square-rooted) |
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum FastLinkage {
     /// Single linkage (minimum distance)
@@ -1283,20 +1295,35 @@ impl std::fmt::Display for FastClusterResult {
     }
 }
 
-/// Run fast hierarchical clustering.
+impl From<FastLinkage> for Linkage {
+    /// The `stats::hclust` method of each variant (`Weighted` is mcquitty, `Ward` is ward.D2).
+    fn from(l: FastLinkage) -> Linkage {
+        match l {
+            FastLinkage::Single => Linkage::Single,
+            FastLinkage::Complete => Linkage::Complete,
+            FastLinkage::Average => Linkage::Average,
+            FastLinkage::Ward => Linkage::Ward,
+            FastLinkage::Weighted => Linkage::Mcquitty,
+            FastLinkage::Centroid => Linkage::Centroid,
+            FastLinkage::Median => Linkage::Median,
+        }
+    }
+}
+
+/// Run hierarchical clustering with the results of `fastcluster::hclust` /
+/// `fastcluster::hclust.vector`.
 ///
-/// This is an optimized O(n²) implementation of hierarchical clustering
-/// using the nearest-neighbor chain algorithm and condensed distance storage.
+/// The tree is built by the shared core [`crate::ml::hclust`] (R's `hclust.f`), so merges,
+/// heights and order equal `stats::hclust(dist(data), method)` and `fastcluster::hclust`, which
+/// agree. Centroid and median are computed on squared Euclidean distances and their heights
+/// reported as square roots, as `fastcluster::hclust.vector` does. Memory is one condensed
+/// triangle (O(n²)); time is typically O(n²) (nearest-neighbour list), O(n³) in the worst case.
 ///
 /// # Arguments
-/// * `data` - Input data matrix (n_samples x n_features)
-/// * `linkage` - Linkage method (default: Ward)
-/// * `n_clusters` - Optional: cut dendrogram to produce this many clusters
-///
-/// # Algorithm
-///
-/// Uses the nearest-neighbor chain algorithm which achieves O(n²) complexity
-/// for reducible linkage methods (single, complete, average, Ward, weighted).
+/// * `data` - Input data matrix (n_samples x n_features); refused if any value is not finite
+/// * `linkage` - Linkage method (default: Ward = ward.D2)
+/// * `n_clusters` - Optional: cut the tree into this many clusters (R's `cutree`; labels
+///   0-based and numbered by first appearance)
 ///
 /// # Returns
 /// * `FastClusterResult` containing merge matrix and heights
@@ -1306,386 +1333,40 @@ pub fn fastcluster(
     n_clusters: Option<usize>,
 ) -> Result<FastClusterResult, String> {
     let n = data.nrows();
-    let d = data.ncols();
-
     if n < 2 {
         return Err("Need at least 2 observations for hierarchical clustering".to_string());
     }
-
-    let method = linkage.unwrap_or(FastLinkage::Ward);
-
-    // Compute condensed distance matrix (upper triangle only, stored as 1D)
-    // Index formula: condensed_index(i, j, n) = i*n - i*(i+1)/2 + j - i - 1 for i < j
-    let condensed_size = n * (n - 1) / 2;
-    let mut condensed_dist = vec![0.0f64; condensed_size];
-
-    // Compute squared Euclidean distances (avoid sqrt until needed)
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let sq_dist: f64 = (0..d)
-                .map(|k| {
-                    let diff = data[[i, k]] - data[[j, k]];
-                    diff * diff
-                })
-                .sum();
-            condensed_dist[condensed_idx(i, j, n)] = sq_dist;
-        }
-    }
-
-    // Use optimized nearest-neighbor chain algorithm
-    let (merge, height) = fastcluster_nnchain_optimized(&mut condensed_dist, method, n)?;
-
-    // Compute leaf ordering
-    let order = compute_dendrogram_order(&merge, n);
-
-    // Cut tree if n_clusters specified
-    let labels = if let Some(k) = n_clusters {
+    require_finite(&data, "fastcluster")?;
+    let method = linkage.unwrap_or_default();
+    if let Some(k) = n_clusters {
         if k < 1 || k > n {
             return Err(format!("n_clusters must be between 1 and n ({})", n));
         }
-        Some(cut_dendrogram(&merge, &height, n, k))
+    }
+    let lk: Linkage = method.into();
+    let tree =
+        hclust_euclidean(data, lk, "fastcluster distance matrix").map_err(|e| e.to_string())?;
+    let height = if lk.uses_squared_euclidean() {
+        tree.height().iter().map(|h| h.max(0.0).sqrt()).collect()
     } else {
-        None
+        tree.height().to_vec()
     };
+    let labels = n_clusters
+        .map(|k| {
+            tree.cut_k(k)
+                .map(|v| v.into_iter().map(|l| l - 1).collect())
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?;
 
     Ok(FastClusterResult {
-        merge,
+        merge: tree.merge_array(),
         height,
-        order,
+        order: tree.order().to_vec(),
         labels,
         n,
         linkage: method,
     })
-}
-
-/// Compute index into condensed distance matrix for i < j
-#[inline(always)]
-fn condensed_idx(i: usize, j: usize, n: usize) -> usize {
-    debug_assert!(i < j);
-    i * n - (i * (i + 1)) / 2 + j - i - 1
-}
-
-/// Get distance from condensed matrix (handles i > j by swapping)
-#[inline(always)]
-fn get_dist(condensed: &[f64], i: usize, j: usize, n: usize) -> f64 {
-    if i == j {
-        0.0
-    } else if i < j {
-        condensed[condensed_idx(i, j, n)]
-    } else {
-        condensed[condensed_idx(j, i, n)]
-    }
-}
-
-/// Set distance in condensed matrix (handles i > j by swapping)
-#[inline(always)]
-fn set_dist(condensed: &mut [f64], i: usize, j: usize, n: usize, val: f64) {
-    if i < j {
-        condensed[condensed_idx(i, j, n)] = val;
-    } else if j < i {
-        condensed[condensed_idx(j, i, n)] = val;
-    }
-}
-
-/// Optimized nearest-neighbor chain algorithm for hierarchical clustering.
-///
-/// This implementation uses:
-/// 1. Condensed distance matrix (O(n²/2) space instead of O(n²))
-/// 2. Nearest-neighbor tracking to avoid full scans
-/// 3. Union-find structure for efficient cluster merging
-fn fastcluster_nnchain_optimized(
-    condensed_dist: &mut [f64],
-    method: FastLinkage,
-    n: usize,
-) -> Result<(Array2<i64>, Vec<f64>), String> {
-    // Union-find structure: maps each original index to its current cluster representative
-    let mut parent: Vec<usize> = (0..n).collect();
-    let mut cluster_size: Vec<usize> = vec![1; n];
-
-    // Track which clusters are still active
-    let mut active: Vec<bool> = vec![true; n];
-    let mut n_active = n;
-
-    // Nearest neighbor for each cluster (cache)
-    let mut nearest: Vec<usize> = vec![usize::MAX; n];
-    let mut nearest_dist: Vec<f64> = vec![f64::INFINITY; n];
-
-    // Initialize nearest neighbors
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let d = get_dist(condensed_dist, i, j, n);
-            if d < nearest_dist[i] {
-                nearest_dist[i] = d;
-                nearest[i] = j;
-            }
-            if d < nearest_dist[j] {
-                nearest_dist[j] = d;
-                nearest[j] = i;
-            }
-        }
-    }
-
-    // Output arrays
-    let mut merge = Array2::<i64>::zeros((n - 1, 2));
-    let mut height = Vec::with_capacity(n - 1);
-
-    // Track merge history for R-style indexing
-    let mut merge_step: Vec<Option<usize>> = vec![None; n];
-
-    // Nearest-neighbor chain
-    let mut chain: Vec<usize> = Vec::with_capacity(n);
-
-    for step in 0..(n - 1) {
-        // Find a starting point if chain is empty
-        if chain.is_empty() {
-            for i in 0..n {
-                if active[i] {
-                    chain.push(i);
-                    break;
-                }
-            }
-        }
-
-        // Build chain until we find a reciprocal pair
-        loop {
-            let current = *chain
-                .last()
-                .ok_or_else(|| "Internal error: nearest-neighbor chain is empty".to_string())?;
-
-            // Find nearest neighbor of current (update if stale)
-            let mut nn = nearest[current];
-            let mut nn_dist = if nn < n && active[nn] {
-                get_dist(condensed_dist, current, nn, n)
-            } else {
-                f64::INFINITY
-            };
-
-            // Check if cached nearest is still valid, otherwise recompute
-            if !active[nn] || nn_dist > nearest_dist[current] * 1.001 {
-                nn = usize::MAX;
-                nn_dist = f64::INFINITY;
-                for j in 0..n {
-                    if j != current && active[j] {
-                        let d = get_dist(condensed_dist, current, j, n);
-                        if d < nn_dist {
-                            nn_dist = d;
-                            nn = j;
-                        }
-                    }
-                }
-                nearest[current] = nn;
-                nearest_dist[current] = nn_dist;
-            }
-
-            // Check if we have a reciprocal pair (nn's nearest is current)
-            if chain.len() >= 2 && chain[chain.len() - 2] == nn {
-                // Found reciprocal pair: merge current and nn
-                let (a, b) = if current < nn {
-                    (current, nn)
-                } else {
-                    (nn, current)
-                };
-
-                // Record the merge with proper height
-                let merge_dist = nn_dist.sqrt(); // Convert squared distance to distance
-
-                // R-style merge indices: negative for leaves, positive for merged clusters
-                let idx_a = match merge_step[a] {
-                    None => -(a as i64 + 1),
-                    Some(s) => s as i64 + 1,
-                };
-                let idx_b = match merge_step[b] {
-                    None => -(b as i64 + 1),
-                    Some(s) => s as i64 + 1,
-                };
-
-                merge[[step, 0]] = idx_a.min(idx_b);
-                merge[[step, 1]] = idx_a.max(idx_b);
-                height.push(merge_dist);
-
-                // Merge b into a
-                let size_a = cluster_size[a];
-                let size_b = cluster_size[b];
-                let new_size = size_a + size_b;
-
-                // Update distances from merged cluster to all other active clusters
-                for k in 0..n {
-                    if !active[k] || k == a || k == b {
-                        continue;
-                    }
-
-                    let d_ak = get_dist(condensed_dist, a, k, n);
-                    let d_bk = get_dist(condensed_dist, b, k, n);
-                    let d_ab = nn_dist; // squared distance
-                    let n_a = size_a as f64;
-                    let n_b = size_b as f64;
-                    let n_k = cluster_size[k] as f64;
-
-                    // Lance-Williams formula (using squared distances for efficiency)
-                    let new_dist_sq = match method {
-                        FastLinkage::Single => d_ak.min(d_bk),
-                        FastLinkage::Complete => d_ak.max(d_bk),
-                        FastLinkage::Average => (n_a * d_ak + n_b * d_bk) / (n_a + n_b),
-                        FastLinkage::Weighted => (d_ak + d_bk) / 2.0,
-                        FastLinkage::Ward => {
-                            // Ward's method with squared distances
-                            let n_total = n_a + n_b + n_k;
-                            ((n_a + n_k) * d_ak + (n_b + n_k) * d_bk - n_k * d_ab) / n_total
-                        }
-                        FastLinkage::Centroid => {
-                            let alpha_a = n_a / (n_a + n_b);
-                            let alpha_b = n_b / (n_a + n_b);
-                            let beta = -n_a * n_b / ((n_a + n_b) * (n_a + n_b));
-                            (alpha_a * d_ak + alpha_b * d_bk + beta * d_ab).max(0.0)
-                        }
-                        FastLinkage::Median => (0.5 * d_ak + 0.5 * d_bk - 0.25 * d_ab).max(0.0),
-                    };
-
-                    set_dist(condensed_dist, a, k, n, new_dist_sq);
-
-                    // Invalidate k's nearest neighbor cache if it was a or b
-                    if nearest[k] == a || nearest[k] == b {
-                        nearest_dist[k] = f64::INFINITY;
-                    }
-                }
-
-                // Update cluster info
-                cluster_size[a] = new_size;
-                active[b] = false;
-                merge_step[a] = Some(step);
-                parent[b] = a;
-                n_active -= 1;
-
-                // Invalidate a's nearest neighbor cache
-                nearest_dist[a] = f64::INFINITY;
-
-                // Pop both from chain
-                chain.pop(); // current
-                chain.pop(); // nn (was second-to-last)
-
-                break;
-            } else {
-                // Not a reciprocal pair, extend chain
-                chain.push(nn);
-            }
-        }
-    }
-
-    Ok((merge, height))
-}
-
-/// Compute dendrogram leaf ordering for optimal display.
-fn compute_dendrogram_order(merge: &Array2<i64>, n: usize) -> Vec<usize> {
-    let mut order = Vec::with_capacity(n);
-
-    fn traverse(merge: &Array2<i64>, n: usize, node: i64, order: &mut Vec<usize>) {
-        if node < 0 {
-            // Leaf node
-            order.push((-node - 1) as usize);
-        } else {
-            // Internal node
-            let step = (node - 1) as usize;
-            traverse(merge, n, merge[[step, 0]], order);
-            traverse(merge, n, merge[[step, 1]], order);
-        }
-    }
-
-    // Start from root (last merge)
-    let n_merges = merge.nrows();
-    if n_merges > 0 {
-        traverse(merge, n, n_merges as i64, &mut order);
-    }
-
-    if order.len() != n {
-        // Fallback: simple ordering
-        order = (0..n).collect();
-    }
-
-    order
-}
-
-/// Cut dendrogram at a height to produce k clusters.
-fn cut_dendrogram(merge: &Array2<i64>, height: &[f64], n: usize, k: usize) -> Vec<usize> {
-    if k >= n {
-        return (0..n).collect();
-    }
-
-    // Find height threshold: we need n - k merges
-    let n_merges_needed = n - k;
-    let threshold = if n_merges_needed == 0 {
-        0.0
-    } else if n_merges_needed <= height.len() {
-        height[n_merges_needed - 1]
-    } else {
-        height.last().copied().unwrap_or(f64::INFINITY)
-    };
-
-    // Build cluster assignments
-    let mut labels = vec![0usize; n];
-    let mut cluster_labels: HashMap<i64, usize> = HashMap::new();
-    let mut next_label = 0usize;
-
-    // Process merges up to threshold
-    for (step, &h) in height.iter().enumerate() {
-        if h > threshold && step >= n_merges_needed {
-            break;
-        }
-
-        let left = merge[[step, 0]];
-        let right = merge[[step, 1]];
-
-        // Get or assign labels for children
-        let left_label = if left < 0 {
-            *cluster_labels.entry(left).or_insert_with(|| {
-                let l = next_label;
-                next_label += 1;
-                l
-            })
-        } else {
-            *cluster_labels.get(&left).unwrap_or(&0)
-        };
-
-        let right_label = if right < 0 {
-            *cluster_labels.entry(right).or_insert_with(|| {
-                let l = next_label;
-                next_label += 1;
-                l
-            })
-        } else {
-            *cluster_labels.get(&right).unwrap_or(&0)
-        };
-
-        // Merge: assign same label to merged cluster
-        let merged_label = left_label.min(right_label);
-        cluster_labels.insert(step as i64 + 1, merged_label);
-
-        // Update any nodes with the higher label
-        for (_, v) in cluster_labels.iter_mut() {
-            if *v == left_label.max(right_label) {
-                *v = merged_label;
-            }
-        }
-    }
-
-    // Assign final labels to observations
-    for i in 0..n {
-        labels[i] = *cluster_labels.get(&(-(i as i64) - 1)).unwrap_or(&i);
-    }
-
-    // Renumber labels to be consecutive
-    let mut label_map: HashMap<usize, usize> = HashMap::new();
-    let mut next = 0;
-    for l in labels.iter_mut() {
-        if let Some(&new_l) = label_map.get(l) {
-            *l = new_l;
-        } else {
-            label_map.insert(*l, next);
-            *l = next;
-            next += 1;
-        }
-    }
-
-    labels
 }
 
 /// Convenience wrapper for fastcluster.
@@ -1700,8 +1381,10 @@ pub fn run_fastcluster(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ml::hclust::test_util::*;
     use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+    use p2a_validation::{Check, Tol};
 
     fn cancelled() -> Budget {
         let t = CancelToken::new();
@@ -2546,16 +2229,7 @@ mod tests {
         let labels = result.labels.unwrap();
         assert_eq!(labels.len(), 6);
 
-        // Should produce 2 clusters
-        let unique_labels: std::collections::HashSet<_> = labels.iter().cloned().collect();
-        assert!(unique_labels.len() <= 2);
-
-        // First three points should be in same cluster
-        assert_eq!(labels[0], labels[1]);
-        assert_eq!(labels[1], labels[2]);
-        // Last three points should be in same cluster
-        assert_eq!(labels[3], labels[4]);
-        assert_eq!(labels[4], labels[5]);
+        assert_eq!(labels, vec![0, 0, 0, 1, 1, 1]);
     }
 
     #[test]
@@ -2575,5 +2249,149 @@ mod tests {
             let result = fastcluster(data.view(), Some(linkage), None);
             assert!(result.is_ok(), "Linkage {:?} should work", linkage);
         }
+    }
+
+    const FAST: [(FastLinkage, &str); 7] = [
+        (FastLinkage::Single, "single"),
+        (FastLinkage::Complete, "complete"),
+        (FastLinkage::Average, "average"),
+        (FastLinkage::Weighted, "mcquitty"),
+        (FastLinkage::Ward, "wardD2"),
+        (FastLinkage::Centroid, "centroid"),
+        (FastLinkage::Median, "median"),
+    ];
+
+    #[test]
+    fn test_validate_fastcluster_linkages() {
+        // ML-13 (average/weighted squared before averaging), ML-12 (NN-chain hang), ML-56
+        // (centroid/median through an NN-chain). fastcluster::hclust.vector: centroid/median heights
+        // are sqrt of hclust(dist(x)^2, m) heights (checked in R: equal merge and order, heights
+        // within 1.1e-15). hclust_methods, validation/r/cases/ml_hierarchical.R.
+        let (case, ds) = crate::test_support::load_case("hclust_methods");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let g = matrix(&case_frame(&case, "hclust_ties.csv"), &["u", "v"]);
+        let squared = |l: FastLinkage, h: &[f64]| -> Vec<f64> {
+            if matches!(l, FastLinkage::Centroid | FastLinkage::Median) {
+                h.iter().map(|v| v * v).collect()
+            } else {
+                h.to_vec()
+            }
+        };
+        let mut c = Check::new(&case);
+        for (l, tag) in FAST {
+            for (data, pre, n) in [(&x, "", 60usize), (&g, "ties_", 40usize)] {
+                let r = fastcluster(data.view(), Some(l), Some(3)).unwrap();
+                let merge: Vec<(i64, i64)> = r
+                    .merge
+                    .rows()
+                    .into_iter()
+                    .map(|row| (row[0], row[1]))
+                    .collect();
+                c.vector(
+                    &format!("{pre}{tag}_merge"),
+                    &merge_colmajor(&merge),
+                    Tol::exact(),
+                )
+                .vector(
+                    &format!("{pre}{tag}_height"),
+                    &squared(l, &r.height),
+                    Tol::coef(n),
+                )
+                .vector(
+                    &format!("{pre}{tag}_order"),
+                    &plus_one(&r.order),
+                    Tol::exact(),
+                );
+            }
+            let r = fastcluster(x.view(), Some(l), Some(3)).unwrap();
+            c.vector(
+                &format!("{tag}_cutree3"),
+                &plus_one(&r.labels.unwrap()),
+                Tol::exact(),
+            );
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_fastcluster_finding_cases() {
+        // ML-13: {0,1,3,7,15}; ML-14: the four cut cases (before: [0,1,0,0,2], [0,0,0,0,0],
+        // [0,0,1,1,2], 3 clusters). hclust_methods.
+        let (case, _) = crate::test_support::load_case("hclust_methods");
+        let col = |v: &[f64]| Array2::from_shape_vec((v.len(), 1), v.to_vec()).unwrap();
+        let cut = |v: &[f64], l, k| {
+            plus_one(
+                &fastcluster(col(v).view(), Some(l), Some(k))
+                    .unwrap()
+                    .labels
+                    .unwrap(),
+            )
+        };
+        let h = |l| {
+            fastcluster(col(&[0., 1., 3., 7., 15.]).view(), Some(l), None)
+                .unwrap()
+                .height
+        };
+        Check::new(&case)
+            .vector(
+                "ml13_average_height",
+                &h(FastLinkage::Average),
+                Tol::coef(5),
+            )
+            .vector(
+                "ml13_mcquitty_height",
+                &h(FastLinkage::Weighted),
+                Tol::coef(5),
+            )
+            .vector(
+                "ml14_single_cutree4",
+                &cut(&[0., 100., 1., 1.1, 300.], FastLinkage::Single, 4),
+                Tol::exact(),
+            )
+            .vector(
+                "ml14_complete_cutree2",
+                &cut(&[1000., 1., 2., 3., 4.], FastLinkage::Complete, 2),
+                Tol::exact(),
+            )
+            .vector(
+                "ml14_ties_cutree4",
+                &cut(&[0., 0., 5., 5., 10.], FastLinkage::Complete, 4),
+                Tol::exact(),
+            )
+            .vector(
+                "ml14_chain_cutree4",
+                &cut(&[0., 1., 10., 10.5, 30.], FastLinkage::Single, 4),
+                Tol::exact(),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_fastcluster_terminates_and_refuses_nan() {
+        // ML-12: 40-60 points in two blobs hung for complete/weighted/ward/median/centroid on
+        // most seeds; one NaN cell panicked
+        for seed in 0..5u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let x = Array2::from_shape_fn((60, 2), |(i, _)| {
+                (if i < 30 { 0.0 } else { 4.0 }) + rng.r#gen::<f64>() * 2.0
+            });
+            for (l, _) in FAST {
+                let r = fastcluster(x.view(), Some(l), Some(2)).unwrap();
+                assert_eq!(r.merge.nrows(), 59, "{l:?} seed {seed}");
+                if !matches!(l, FastLinkage::Centroid | FastLinkage::Median) {
+                    assert!(
+                        r.height.windows(2).all(|w| w[0] <= w[1]),
+                        "{l:?} seed {seed}"
+                    );
+                }
+            }
+        }
+        let mut x = array![[0.0, 0.0], [1.0, 0.0], [5.0, 5.0], [6.0, 5.0]];
+        x[[2, 1]] = f64::NAN;
+        assert!(
+            fastcluster(x.view(), None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
     }
 }

@@ -77,6 +77,29 @@
       "tolerance": "exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_fastcluster",
+      "name": "fastcluster",
+      "category": "ml",
+      "reference": "fastcluster::hclust / hclust.vector (equal to stats::hclust; centroid/median heights square-rooted)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_fastcluster_linkages",
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_fastcluster_finding_cases"
+      ],
+      "quantities": [
+        "merge",
+        "height",
+        "order",
+        "cut labels"
+      ],
+      "tolerance": "as ml_hclust",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
