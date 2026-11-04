@@ -201,6 +201,31 @@
       "tolerance": "exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_kmeans",
+      "name": "K-means (Lloyd)",
+      "category": "ml",
+      "reference": "stats::kmeans(algorithm = 'Lloyd')",
+      "doc": "validation/ml/kmeans.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_unit_scale",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_small_scale",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_not_converged",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_scale_invariant",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_labels_match_final_centroids"
+      ],
+      "quantities": [
+        "cluster",
+        "centers",
+        "tot.withinss"
+      ],
+      "tolerance": "labels exact; centers Tol::coef(60); tot.withinss Tol::stat(60); iteration counts and the state at the iteration limit are not R-pinned",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

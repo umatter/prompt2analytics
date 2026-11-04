@@ -12,6 +12,7 @@ use super::extract::require_finite;
 use super::hclust::{HclustTree, hclust_euclidean};
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checked_len, checkpoint, current_budget, try_vec};
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -24,12 +25,26 @@ pub struct KMeansResult {
     pub labels: Vec<usize>,
     /// Centroid positions (k x features)
     pub centroids: Array2<f64>,
-    /// Number of iterations until convergence
+    /// Number of assignment passes (the last one, on convergence, reassigns no point)
     pub n_iterations: usize,
     /// Within-cluster sum of squares (inertia)
     pub inertia: f64,
     /// Number of points in each cluster
     pub cluster_sizes: Vec<usize>,
+    /// Convergence of the Lloyd iterations (the reported run)
+    pub convergence: Convergence,
+    /// Warnings (the iteration limit reached)
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for KMeansResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 impl std::fmt::Display for KMeansResult {
@@ -55,7 +70,7 @@ impl std::fmt::Display for KMeansResult {
                 .collect();
             writeln!(f, "  Cluster {}: [{}]", i, centroid.join(", "))?;
         }
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -106,13 +121,24 @@ impl std::fmt::Display for DBSCANResult {
     }
 }
 
-/// Run K-means clustering.
+/// Run K-means clustering: Lloyd iterations from k-means++ starts.
+///
+/// Each run alternates an assignment pass (each point to its nearest centroid, the first on
+/// ties) and a centroid update, and stops when an assignment pass changes no label, as R's
+/// `kmeans(x, centers, algorithm = "Lloyd")`. A positive `tolerance` stops earlier, when the
+/// sum over centroids of their squared shift is at most `tolerance` times the mean column
+/// variance of `data` (scikit-learn's relative `tol`); a final assignment pass then makes the
+/// labels those of the returned centroids. Either way the result does not depend on the scale
+/// of the data. A run that reaches `max_iterations` is reported with `convergence.converged ==
+/// false` and a warning. The best of `n_init` runs (smallest inertia, the first on ties) is
+/// returned.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `k` - Number of clusters
-/// * `max_iterations` - Maximum iterations (default 300)
-/// * `tolerance` - Convergence tolerance (default 1e-4)
+/// * `max_iterations` - Maximum assignment passes per run (default 300)
+/// * `tolerance` - Relative tolerance on the centroid shift (default 0: until no point is
+///   reassigned)
 /// * `n_init` - Number of initializations to try (default 10)
 /// * `seed` - Optional random seed for reproducibility
 ///
@@ -126,7 +152,6 @@ pub fn kmeans(
     seed: Option<u64>,
 ) -> Result<KMeansResult, String> {
     let n_samples = data.nrows();
-    let _n_features = data.ncols();
 
     if k == 0 {
         return Err("k must be at least 1".to_string());
@@ -139,21 +164,12 @@ pub fn kmeans(
     }
 
     let max_iter = max_iterations.unwrap_or(300);
-    let tol = tolerance.unwrap_or(1e-4);
     let n_initializations = n_init.unwrap_or(10);
 
     if n_initializations == 0 {
         return Err("n_init must be at least 1 (got 0)".to_string());
     }
-    if max_iter == 0 {
-        return Err("max_iterations must be at least 1 (got 0)".to_string());
-    }
-    if !(tol.is_finite() && tol >= 0.0) {
-        return Err(format!(
-            "tolerance must be finite and non-negative (got {tol})"
-        ));
-    }
-    require_finite(&data, "k-means")?;
+    let tol_abs = check_kmeans_options(&data, max_iter, tolerance)?;
 
     let mut rng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
@@ -170,7 +186,7 @@ pub fn kmeans(
         let centroids = kmeans_plusplus_init(&data, k, &mut rng)?;
 
         // Run k-means
-        let result = kmeans_single(&data, centroids, max_iter, tol)?;
+        let result = kmeans_single(&data, centroids, max_iter, tol_abs, false)?;
 
         if result.inertia < best_inertia {
             best_inertia = result.inertia;
@@ -179,6 +195,85 @@ pub fn kmeans(
     }
 
     best_result.ok_or_else(|| "K-means failed to converge".to_string())
+}
+
+/// Checks `max_iterations`, `tolerance` and the data; returns the absolute tolerance on the
+/// sum of squared centroid shifts (`tolerance` x mean column variance; 0 = until no point is
+/// reassigned).
+fn check_kmeans_options(
+    data: &ArrayView2<f64>,
+    max_iter: usize,
+    tolerance: Option<f64>,
+) -> Result<f64, String> {
+    let tol = tolerance.unwrap_or(0.0);
+    if max_iter == 0 {
+        return Err("max_iterations must be at least 1 (got 0)".to_string());
+    }
+    if !(tol.is_finite() && tol >= 0.0) {
+        return Err(format!(
+            "tolerance must be finite and non-negative (got {tol})"
+        ));
+    }
+    require_finite(data, "k-means")?;
+    if tol == 0.0 {
+        return Ok(0.0);
+    }
+    let n = data.nrows() as f64;
+    let p = data.ncols();
+    if p == 0 {
+        return Ok(0.0);
+    }
+    let mean_var = data
+        .columns()
+        .into_iter()
+        .map(|c| {
+            let m = c.sum() / n;
+            c.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / n
+        })
+        .sum::<f64>()
+        / p as f64;
+    Ok(tol * mean_var)
+}
+
+/// K-means (Lloyd) from given initial centres: R's `kmeans(x, centers = <matrix>,
+/// algorithm = "Lloyd", iter.max = max_iterations)`.
+///
+/// The centres must have the data's columns, be finite and distinct ("initial centers are not
+/// distinct", as R), and every cluster must keep at least one point ("empty cluster: try a
+/// better set of initial centers", as R). `max_iterations` defaults to 300 and `tolerance` to
+/// 0, with the meaning of [`kmeans`].
+pub fn kmeans_from_centers(
+    data: ArrayView2<f64>,
+    centers: ArrayView2<f64>,
+    max_iterations: Option<usize>,
+    tolerance: Option<f64>,
+) -> Result<KMeansResult, String> {
+    let (n, p) = data.dim();
+    let k = centers.nrows();
+    if centers.ncols() != p {
+        return Err(format!(
+            "centers must have {p} columns (got {})",
+            centers.ncols()
+        ));
+    }
+    if k == 0 || k > n {
+        return Err(format!(
+            "the number of centers must be between 1 and the number of rows ({n}), got {k}"
+        ));
+    }
+    if centers.iter().any(|v| !v.is_finite()) {
+        return Err("centers must contain only finite values".to_string());
+    }
+    for a in 0..k {
+        for b in a + 1..k {
+            if centers.row(a) == centers.row(b) {
+                return Err("initial centers are not distinct".to_string());
+            }
+        }
+    }
+    let max_iter = max_iterations.unwrap_or(300);
+    let tol_abs = check_kmeans_options(&data, max_iter, tolerance)?;
+    kmeans_single(&data, centers.to_owned(), max_iter, tol_abs, true)
 }
 
 /// K-means++ initialization.
@@ -234,7 +329,9 @@ fn kmeans_plusplus_init(
     Ok(centroids)
 }
 
-/// Single run of k-means.
+/// One Lloyd run from `centroids`: assignment passes and centroid updates until a pass
+/// reassigns no point (or, with `tol_abs > 0`, the squared centroid shift is at most `tol_abs`,
+/// followed by a final assignment pass), or `max_iter` passes.
 ///
 /// When the `cuda` feature is enabled and a GPU is available, uses DGEMM-based
 /// pairwise distance computation for the assignment step (n >= threshold).
@@ -242,13 +339,11 @@ fn kmeans_single(
     data: &ArrayView2<f64>,
     mut centroids: Array2<f64>,
     max_iter: usize,
-    tol: f64,
+    tol_abs: f64,
+    refuse_empty: bool,
 ) -> Result<KMeansResult, String> {
     let n_samples = data.nrows();
     let k = centroids.nrows();
-
-    let mut labels = vec![0usize; n_samples];
-    let mut n_iterations = 0;
 
     // Check if GPU is available for distance computation.
     // GPU helps for d >= 20 (DGEMM-based distances) but hurts for small d.
@@ -257,57 +352,76 @@ fn kmeans_single(
         let d = data.ncols();
         n_samples >= ctx.thresholds.kmeans_min_n && d >= ctx.thresholds.kmeans_min_d
     });
-    #[cfg(not(feature = "cuda"))]
-    let gpu_ctx: Option<&()> = None;
+
+    let assign = |centroids: &Array2<f64>, labels: &mut [usize]| {
+        #[cfg(feature = "cuda")]
+        if let Some(ctx) = gpu_ctx {
+            // GPU path: compute all pairwise distances via DGEMM
+            if let Ok(distances) =
+                crate::linalg::gpu::pairwise_distances_gpu(ctx, data, &centroids.view())
+            {
+                for (i, label) in labels.iter_mut().enumerate() {
+                    let mut min_dist = f64::INFINITY;
+                    let mut min_idx = 0;
+                    for j in 0..k {
+                        if distances[[i, j]] < min_dist {
+                            min_dist = distances[[i, j]];
+                            min_idx = j;
+                        }
+                    }
+                    *label = min_idx;
+                }
+                return;
+            }
+        }
+        // CPU path (and GPU fallback): point-by-point distance
+        assign_labels_cpu(data, centroids, labels);
+    };
+
+    // R's cl = 0: the first pass always counts as a change
+    let mut labels = vec![usize::MAX; n_samples];
+    let mut new_labels = vec![0usize; n_samples];
+    let mut n_iterations = 0;
+    let mut reassigned = n_samples;
+    let mut converged = false;
 
     for iter in 0..max_iter {
         checkpoint().map_err(|e| e.to_string())?;
+        assign(&centroids, &mut new_labels);
+        reassigned = labels
+            .iter()
+            .zip(&new_labels)
+            .filter(|(a, b)| a != b)
+            .count();
+        labels.copy_from_slice(&new_labels);
         n_iterations = iter + 1;
-
-        if gpu_ctx.is_some() {
-            // GPU path: compute all pairwise distances via DGEMM
-            #[cfg(feature = "cuda")]
-            {
-                let ctx = gpu_ctx.unwrap();
-                match crate::linalg::gpu::pairwise_distances_gpu(ctx, data, &centroids.view()) {
-                    Ok(distances) => {
-                        // Assign each point to nearest centroid
-                        for i in 0..n_samples {
-                            let mut min_dist = f64::INFINITY;
-                            let mut min_idx = 0;
-                            for j in 0..k {
-                                if distances[[i, j]] < min_dist {
-                                    min_dist = distances[[i, j]];
-                                    min_idx = j;
-                                }
-                            }
-                            labels[i] = min_idx;
-                        }
-                    }
-                    Err(_) => {
-                        // Fall back to CPU assignment
-                        assign_labels_cpu(data, &centroids, &mut labels);
-                    }
-                }
-            }
-        } else {
-            // CPU path: point-by-point distance
-            assign_labels_cpu(data, &centroids, &mut labels);
-        }
-
-        // Update centroids
-        let old_centroids = centroids.clone();
-        update_centroids(data, &labels, &mut centroids);
-
-        // Check convergence
-        let mut max_shift: f64 = 0.0;
-        for j in 0..k {
-            let shift = euclidean_distance_squared(&old_centroids.row(j), &centroids.row(j)).sqrt();
-            max_shift = max_shift.max(shift);
-        }
-
-        if max_shift < tol {
+        if reassigned == 0 {
+            converged = true;
             break;
+        }
+
+        let old_centroids = (tol_abs > 0.0).then(|| centroids.clone());
+        let counts = update_centroids(data, &labels, &mut centroids);
+        if refuse_empty && counts.contains(&0) {
+            return Err("empty cluster: try a better set of initial centers".to_string());
+        }
+        if let Some(old) = old_centroids {
+            let shift: f64 = (0..k)
+                .map(|j| euclidean_distance_squared(&old.row(j), &centroids.row(j)))
+                .sum();
+            if shift <= tol_abs {
+                checkpoint().map_err(|e| e.to_string())?;
+                assign(&centroids, &mut new_labels);
+                reassigned = labels
+                    .iter()
+                    .zip(&new_labels)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                labels.copy_from_slice(&new_labels);
+                n_iterations += 1;
+                converged = true;
+                break;
+            }
         }
     }
 
@@ -319,6 +433,15 @@ fn kmeans_single(
         inertia += dist;
         cluster_sizes[labels[i]] += 1;
     }
+    let convergence = Convergence::new(
+        converged,
+        n_iterations,
+        max_iter,
+        "points reassigned in the last assignment pass",
+        reassigned as f64,
+        0.0,
+    );
+    let warnings = convergence.note("k-means (Lloyd)").into_iter().collect();
 
     Ok(KMeansResult {
         labels,
@@ -326,6 +449,8 @@ fn kmeans_single(
         n_iterations,
         inertia,
         cluster_sizes,
+        convergence,
+        warnings,
     })
 }
 
@@ -335,7 +460,12 @@ fn kmeans_single(
 /// One pass over the rows: row `i` is added to the sum of cluster `labels[i]`, so each
 /// cluster's sum takes its rows in row order, the same additions in the same order as a
 /// separate pass per cluster (O(n k d)), and the centroids are bit-identical to that.
-fn update_centroids(data: &ArrayView2<f64>, labels: &[usize], centroids: &mut Array2<f64>) {
+/// Returns the number of points in each cluster.
+fn update_centroids(
+    data: &ArrayView2<f64>,
+    labels: &[usize],
+    centroids: &mut Array2<f64>,
+) -> Vec<usize> {
     let (k, d) = centroids.dim();
     let mut sums = vec![0.0f64; k * d];
     let mut counts = vec![0usize; k];
@@ -354,6 +484,7 @@ fn update_centroids(data: &ArrayView2<f64>, labels: &[usize], centroids: &mut Ar
             }
         }
     }
+    counts
 }
 
 /// CPU path for K-means label assignment.
@@ -1536,26 +1667,6 @@ mod tests {
         }
     }
 
-    /// Golden (characterization) test: captured on the code before the
-    /// running-minimum k-means++; it passes before and after.
-    #[test]
-    fn kmeans_plusplus_running_min_is_unchanged() {
-        const GOLDEN_INERTIA: u64 = 4633615604438900480;
-        const GOLDEN_ITERS: usize = 8;
-        const GOLDEN_LABELS: [usize; 12] = [3, 2, 0, 1, 4, 0, 1, 2, 0, 1, 2, 0];
-        let data = three_clusters(300, 3, 4);
-        let r = kmeans(data.view(), 5, Some(100), Some(1e-6), Some(3), Some(11)).unwrap();
-        assert_eq!(
-            (r.inertia.to_bits(), r.n_iterations, &r.labels[..12]),
-            (GOLDEN_INERTIA, GOLDEN_ITERS, &GOLDEN_LABELS[..]),
-            "got inertia {:?} ({}), iterations {}, labels {:?}",
-            r.inertia,
-            r.inertia.to_bits(),
-            r.n_iterations,
-            &r.labels[..12]
-        );
-    }
-
     #[test]
     fn test_kmeans_basic() {
         // Simple 2D data with 2 clear clusters
@@ -2011,97 +2122,31 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_kmeans_vs_r() {
-        // R reference:
-        // set.seed(42)
-        // kmeans(data, centers=3)
+    fn test_kmeans_separates_three_blobs() {
+        // three blobs of 5: sizes 5, centroids near the true centres (0, 0), (10, 0), (5, 10),
+        // blocks of labels
         let data = create_validation_cluster_data();
-        let result = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(10), Some(42)).unwrap();
-
-        // Should find 3 clusters
-        assert_eq!(result.centroids.nrows(), 3);
+        let result = kmeans(data.view(), 3, Some(100), None, Some(10), Some(42)).unwrap();
         assert_eq!(result.labels.len(), 15);
-
-        // Each cluster should have 5 points
-        for size in &result.cluster_sizes {
-            assert_eq!(*size, 5, "Each cluster should have 5 points");
-        }
-
-        // Inertia should be small for well-separated clusters
-        assert!(
-            result.inertia < 10.0,
-            "Inertia {} should be small for well-separated clusters",
-            result.inertia
-        );
-    }
-
-    #[test]
-    fn test_validate_kmeans_centroids() {
-        let data = create_validation_cluster_data();
-        let result = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(10), Some(42)).unwrap();
-
-        // Centroids should be near the true centers
-        // True centers: (0, 0), (10, 0), (5, 10)
-        let mut found_near_origin = false;
-        let mut found_near_10_0 = false;
-        let mut found_near_5_10 = false;
-
-        for i in 0..3 {
-            let cx = result.centroids[[i, 0]];
-            let cy = result.centroids[[i, 1]];
-
-            if (cx - 0.0).abs() < 1.5 && (cy - 0.0).abs() < 1.5 {
-                found_near_origin = true;
-            }
-            if (cx - 10.0).abs() < 1.5 && (cy - 0.0).abs() < 1.5 {
-                found_near_10_0 = true;
-            }
-            if (cx - 5.0).abs() < 1.5 && (cy - 10.0).abs() < 1.5 {
-                found_near_5_10 = true;
-            }
-        }
-
-        assert!(found_near_origin, "Should find centroid near (0, 0)");
-        assert!(found_near_10_0, "Should find centroid near (10, 0)");
-        assert!(found_near_5_10, "Should find centroid near (5, 10)");
-    }
-
-    #[test]
-    fn test_validate_kmeans_cluster_assignment() {
-        let data = create_validation_cluster_data();
-        let result = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(10), Some(42)).unwrap();
-
-        // Points 0-4 should be in the same cluster
-        let cluster1 = result.labels[0];
-        for i in 1..5 {
-            assert_eq!(
-                result.labels[i], cluster1,
-                "Points 0-4 should be in same cluster"
+        assert_eq!(result.cluster_sizes, vec![5, 5, 5]);
+        for (cx, cy) in [(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)] {
+            assert!(
+                (0..3).any(|i| (result.centroids[[i, 0]] - cx).abs() < 1.5
+                    && (result.centroids[[i, 1]] - cy).abs() < 1.5),
+                "no centroid near ({cx}, {cy})"
             );
         }
-
-        // Points 5-9 should be in the same cluster
-        let cluster2 = result.labels[5];
-        for i in 6..10 {
-            assert_eq!(
-                result.labels[i], cluster2,
-                "Points 5-9 should be in same cluster"
+        for block in 0..3 {
+            let l = result.labels[5 * block];
+            assert!(
+                result.labels[5 * block..5 * block + 5]
+                    .iter()
+                    .all(|&x| x == l)
             );
         }
-
-        // Points 10-14 should be in the same cluster
-        let cluster3 = result.labels[10];
-        for i in 11..15 {
-            assert_eq!(
-                result.labels[i], cluster3,
-                "Points 10-14 should be in same cluster"
-            );
-        }
-
-        // Clusters should be different
-        assert_ne!(cluster1, cluster2);
-        assert_ne!(cluster2, cluster3);
-        assert_ne!(cluster1, cluster3);
+        assert_ne!(result.labels[0], result.labels[5]);
+        assert_ne!(result.labels[5], result.labels[10]);
+        assert_ne!(result.labels[0], result.labels[10]);
     }
 
     #[test]
@@ -2143,7 +2188,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_kmeans_inertia_decreases() {
+    fn test_kmeans_inertia_decreases_with_k() {
         // Adding more clusters should decrease inertia
         let data = create_validation_cluster_data();
 
@@ -2209,7 +2254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_kmeans_reproducibility() {
+    fn test_kmeans_same_seed_same_result() {
         // Same seed should produce same results
         let data = create_validation_cluster_data();
 
@@ -2226,6 +2271,158 @@ mod tests {
         assert!(
             (result1.inertia - result2.inertia).abs() < 1e-10,
             "Same seed should give same inertia"
+        );
+    }
+
+    fn km_x(case_id: &str) -> (p2a_validation::Case, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        (case, x)
+    }
+
+    fn centers_colmajor(c: &Array2<f64>) -> Vec<f64> {
+        (0..c.ncols())
+            .flat_map(|j| (0..c.nrows()).map(move |i| c[[i, j]]))
+            .collect()
+    }
+
+    fn rows_1_21_41(x: &Array2<f64>) -> Array2<f64> {
+        ndarray::stack![ndarray::Axis(0), x.row(0), x.row(20), x.row(40)]
+    }
+
+    #[test]
+    fn test_validate_kmeans_unit_scale() {
+        // R kmeans(X, centers = X[c(1, 21, 41), ], algorithm = "Lloyd"): tot.withinss
+        // 152.68291992468085. km_unit_iter is not pinned: iteration path (re-scope rule 2).
+        let (case, x) = km_x("kmeans_lloyd_pca_mds");
+        let r = kmeans_from_centers(x.view(), rows_1_21_41(&x).view(), Some(100), None).unwrap();
+        assert!(r.convergence.converged);
+        Check::new(&case)
+            .vector("km_unit_cluster", &plus_one(&r.labels), Tol::exact())
+            .vector(
+                "km_unit_centers",
+                &centers_colmajor(&r.centroids),
+                Tol::coef(60),
+            )
+            .scalar("km_unit_tot_withinss", r.inertia, Tol::stat(60))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_kmeans_small_scale() {
+        // ML-81: the same at 1e-5 scale (R 1.5268291992468086e-08); before: stops after 1 pass.
+        // km_small_iter is not pinned: iteration path (re-scope rule 2).
+        let (case, x) = km_x("kmeans_lloyd_pca_mds");
+        let xs = &x * 1e-5;
+        let r = kmeans_from_centers(xs.view(), rows_1_21_41(&xs).view(), Some(100), None).unwrap();
+        assert!(r.convergence.converged);
+        Check::new(&case)
+            .vector("km_small_cluster", &plus_one(&r.labels), Tol::exact())
+            .scalar("km_small_tot_withinss", r.inertia, Tol::stat(60))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_kmeans_not_converged() {
+        // R iter.max = 2 warns "did not converge in 2 iterations". The state after exactly two
+        // Lloyd passes is an intermediate value: km_iter2_* are not pinned (re-scope rule 2).
+        let (_, x) = km_x("kmeans_lloyd_pca_mds");
+        let cen = rows_1_21_41(&x);
+        let r = kmeans_from_centers(x.view(), cen.view(), Some(2), None).unwrap();
+        assert!(!r.convergence.converged);
+        assert_eq!(r.n_iterations, 2);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("did not converge after 2 iterations")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(format!("{r}").contains("Converged: no"));
+        let full = kmeans_from_centers(x.view(), cen.view(), Some(100), None).unwrap();
+        assert!(
+            r.inertia >= full.inertia,
+            "{} < {}",
+            r.inertia,
+            full.inertia
+        );
+    }
+
+    #[test]
+    fn test_validate_kmeans_scale_invariant() {
+        // convention 5: x 2^-20 (~1e-6) and x 2^20 (~1e6) are exact rescalings, so k-means++
+        // draws the same points and Lloyd must give identical labels and iteration counts.
+        // Before: 1 iteration at 2^-20 (absolute tol 1e-4). Data: kmeans_lloyd_pca_mds.
+        let (_, x) = km_x("kmeans_lloyd_pca_mds");
+        let s = 2f64.powi(-20);
+        let base = kmeans(x.view(), 3, Some(300), None, Some(1), Some(5)).unwrap();
+        assert!(base.n_iterations >= 2);
+        for (scale, back) in [(s, 1.0 / (s * s)), (1.0 / s, s * s)] {
+            let r = kmeans((&x * scale).view(), 3, Some(300), None, Some(1), Some(5)).unwrap();
+            assert_eq!(
+                (r.labels.clone(), r.n_iterations),
+                (base.labels.clone(), base.n_iterations),
+                "scale {scale}"
+            );
+            assert_eq!(r.inertia * back, base.inertia, "scale {scale}");
+            let rt = kmeans(
+                (&x * scale).view(),
+                3,
+                Some(300),
+                Some(1e-4),
+                Some(1),
+                Some(5),
+            )
+            .unwrap();
+            let bt = kmeans(x.view(), 3, Some(300), Some(1e-4), Some(1), Some(5)).unwrap();
+            assert_eq!(
+                (rt.labels, rt.n_iterations),
+                (bt.labels, bt.n_iterations),
+                "relative tolerance, scale {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_kmeans_labels_match_final_centroids() {
+        // ML-81 second effect: up to 104 of 600 labels disagreed with the returned centroids
+        // before. Data: kmeans_lloyd_pca_mds.
+        let (_, x) = km_x("kmeans_lloyd_pca_mds");
+        for tol in [None, Some(1e-4)] {
+            let r = kmeans(x.view(), 4, Some(300), tol, Some(3), Some(9)).unwrap();
+            for i in 0..x.nrows() {
+                let d = |j: usize| euclidean_distance_squared(&x.row(i), &r.centroids.row(j));
+                let best = (0..4).min_by(|&a, &b| d(a).total_cmp(&d(b))).unwrap();
+                assert_eq!(d(r.labels[i]), d(best), "row {i}, tol {tol:?}");
+            }
+            assert!(r.convergence.converged && r.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_kmeans_from_centers_validates() {
+        // R: "initial centers are not distinct", "empty cluster: try a better set of initial
+        // centers"
+        let x = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.0]];
+        let e = |c: Array2<f64>| kmeans_from_centers(x.view(), c.view(), None, None).unwrap_err();
+        assert!(e(array![[0.0, 0.0], [0.0, 0.0]]).contains("not distinct"));
+        assert!(e(array![[0.0], [1.0]]).contains("columns"));
+        assert!(e(array![[0.0, 0.0], [5.0, 5.0], [100.0, 100.0]]).contains("empty cluster"));
+        assert!(e(array![[0.0, f64::NAN]]).contains("finite"));
+    }
+
+    #[test]
+    fn test_kmeans_plusplus_start_feeds_lloyd() {
+        // replaces T0-WP16's bit-golden kmeans_plusplus_running_min_is_unchanged (it pinned the
+        // old stop rule); keeps the k-means++ seeding pinned: kmeans(seed) == Lloyd from the
+        // seed's k-means++ start
+        let data = three_clusters(300, 3, 4);
+        let init = kmeans_plusplus_init(&data.view(), 5, &mut StdRng::seed_from_u64(11)).unwrap();
+        let a = kmeans(data.view(), 5, Some(100), Some(1e-6), Some(1), Some(11)).unwrap();
+        let b = kmeans_from_centers(data.view(), init.view(), Some(100), Some(1e-6)).unwrap();
+        assert_eq!(
+            (a.labels, a.n_iterations, a.inertia.to_bits()),
+            (b.labels, b.n_iterations, b.inertia.to_bits())
         );
     }
 }
