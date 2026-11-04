@@ -51,7 +51,7 @@
         "p2a-core::econometrics::glm::tests::test_validate_glm_zero_weights_match_subset"
       ],
       "quantities": ["coefficients (NA for aliased)", "SE (summary.glm)", "deviance", "null deviance (incl. the offset + intercept refit)", "dispersion", "residual df", "AIC", "logLik", "propensity scores (logit, probit)", "TMLE fluctuation fits", "binomial AIC with non-integer weights", "convergence, separation and scale equivariance (property tests, not R-pinned)"],
-      "tolerance": "validation/README.md, n = 120: coefficients 1e-8, SE and statistics 1e-6 relative, counts exact; fits at the default epsilon 1e-10 against R at 1e-14: Tol::iterative(1e-8), and Tol::new(1e-5, 1e-12) for the linearly converging probit of fit_glm at the default spec and the fluctuation SE and dispersion (R at epsilon 1e-10 shows the same gap); fit_propensity refines the coefficients after the deviance rule (relative change below 1e-10), so its logit and probit scores and coefficients are at Tol::iterative(1e-8)",
+      "tolerance": "validation/README.md, n = 120: coefficients 1e-8, SE and statistics 1e-6 relative, counts exact; fits at the default epsilon 1e-10 against R at 1e-14: Tol::iterative(1e-8), and Tol::new(1e-5, 1e-12) for the linearly converging probit of fit_glm at the default spec and the fluctuation SE and dispersion (R at epsilon 1e-10 shows the same gap); fit_propensity refines the probit and cloglog coefficients after the deviance rule (relative change below 1e-10) and stops the logit at the deviance rule (Newton, quadratic convergence), so its logit and probit scores and coefficients are at Tol::iterative(1e-8)",
       "deviations": [],
       "supersedes_legacy": []
     }

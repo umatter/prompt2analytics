@@ -38,8 +38,10 @@
 //! * The separation flag and its warning also cover the quasi-binomial family, and the
 //!   "fitted rates numerically 0" warning the quasi-Poisson family.
 //! * [`GlmSpec::coef_tol`] optionally keeps iterating after the deviance rule until the
-//!   coefficients settle; [`fit_propensity`] uses it, so probit (and cloglog) propensity
-//!   scores reach the MLE to about 1e-10 instead of the deviance rule's 2e-6.
+//!   coefficients settle; [`fit_propensity`] uses it for the non-canonical links only, so
+//!   probit (and cloglog) propensity scores reach the MLE to about 1e-10 instead of the
+//!   deviance rule's 2e-6. The canonical logit keeps the deviance rule alone: its IRLS is
+//!   Newton's method, which converges quadratically and already lands at about 1e-8.
 //!
 //! ```
 //! use ndarray::array;
@@ -116,7 +118,7 @@ pub struct GlmSpec<'a> {
     /// counts as converged once the deviance rule is met. The deviance rule alone leaves an
     /// `O(sqrt(epsilon))` coefficient error when the link is not canonical (Fisher scoring
     /// converges linearly), about 2e-6 relative for the probit at `epsilon` 1e-10. Default
-    /// `None`; [`fit_propensity`] uses 1e-10.
+    /// `None`; [`fit_propensity`] uses 1e-10 for the probit and cloglog links.
     pub coef_tol: Option<f64>,
 }
 
@@ -1021,15 +1023,19 @@ impl ResultNotes for GlmFit {
 }
 
 /// Relative coefficient change at which [`fit_propensity`] stops refining after the
-/// deviance rule ([`GlmSpec::coef_tol`]).
+/// deviance rule ([`GlmSpec::coef_tol`]); applied to the non-canonical links (probit,
+/// cloglog) only.
 pub const PROPENSITY_COEF_TOL: f64 = 1e-10;
 
 /// Propensity scores: the binomial MLE of `treat` (coded 0/1) on `x` with the logit,
 /// probit or complementary log-log link. The caller includes the intercept column.
 ///
-/// After the deviance rule the fit keeps iterating until the relative coefficient change
-/// is below [`PROPENSITY_COEF_TOL`] (or a fitted probability reaches the link's clamp), so
-/// the non-canonical links reach the MLE as closely as the canonical logit.
+/// For the probit and cloglog links the fit keeps iterating after the deviance rule until
+/// the relative coefficient change is below [`PROPENSITY_COEF_TOL`] (or a fitted
+/// probability reaches the link's clamp), so the non-canonical links, whose Fisher scoring
+/// converges only linearly, reach the MLE as closely as the canonical logit. The logit
+/// stops at the deviance rule (`glm.fit`'s): Newton's method converges quadratically, and
+/// extra passes would cost `O(n p^2)` each for nothing.
 pub fn fit_propensity(
     x: ArrayView2<f64>,
     treat: ArrayView1<f64>,
@@ -1050,7 +1056,9 @@ pub fn fit_propensity(
         )));
     }
     let mut spec = GlmSpec::new(GlmFamily::Binomial, link);
-    spec.coef_tol = Some(PROPENSITY_COEF_TOL);
+    if link != GlmLink::Logit {
+        spec.coef_tol = Some(PROPENSITY_COEF_TOL);
+    }
     let fit = fit_glm(x, treat, &spec)?;
     Ok(PropensityFit {
         scores: fit.fitted.clone(),
@@ -1384,8 +1392,9 @@ mod tests {
             .scalar("aliased_aic", fa.aic, Tol::stat(n))
             .scalar("aliased_loglik", fa.log_likelihood, Tol::stat(n));
         // fit_propensity: the logit and probit MLE (CAUS-20), against R at 1e-14, both at
-        // 1e-8: the coefficient refinement (PROPENSITY_COEF_TOL) removes the deviance rule's
-        // linear-convergence gap of the probit
+        // 1e-8: the logit stops at the deviance rule (Newton, quadratic convergence), and the
+        // probit's coefficient refinement (PROPENSITY_COEF_TOL) removes the deviance rule's
+        // linear-convergence gap
         let x = design(&c, &["1", "x1", "x2"]);
         let pl = fit_propensity(x.view(), yb.view(), GlmLink::Logit).unwrap();
         let pp = fit_propensity(x.view(), yb.view(), GlmLink::Probit).unwrap();
@@ -1409,6 +1418,11 @@ mod tests {
         // the probit's default-spec fit is the deviance rule alone (about 2e-6 away)
         let pd = fit_glm(x.view(), yb.view(), &GlmSpec::probit()).unwrap();
         assert!(pd.converged && pp.fit.converged && pp.fit.iterations > pd.iterations);
+        // the logit is not refined: Newton converges quadratically, so fit_propensity runs
+        // exactly the deviance rule's iterations (no extra O(n p^2) passes)
+        let ld = fit_glm(x.view(), yb.view(), &GlmSpec::logit()).unwrap();
+        assert_eq!(pl.fit.iterations, ld.iterations);
+        assert_eq!(pl.fit.coefficients, ld.coefficients);
         assert_eq!(pl.scores, pl.fit.fitted);
         // (a) start values work: start = 0 converges to the default-start solution
         let zero = Array1::<f64>::zeros(3);
