@@ -104,8 +104,7 @@
       "reference": "quantreg::boot.rq(bsmethod = 'xy', U = U); summary.rq(se = 'boot') takes sqrt(diag(cov(B)))",
       "doc": "validation/regression/quantreg.md",
       "cases": [
-        "rq_boot_xy",
-        "rq_br_se"
+        "rq_boot_xy"
       ],
       "tests": [
         "p2a-core::regression::quantreg::tests::test_validate_rq_boot_xy_indices"

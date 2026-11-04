@@ -287,6 +287,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | not R-pinned |
 | E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | not R-pinned |
 | Lasso, ridge and elastic net (glmnet gaussian and binomial paths, cv.glmnet, predict) | [glmnet.md](regression/glmnet.md) | R-pinned |
+| Quantile regression (Barrodale-Roberts simplex, Frisch-Newton, summary.rq iid/nid/ker SEs, xy bootstrap) | [quantreg.md](regression/quantreg.md) | R-pinned, known deviations (REG-26) |
 
 ### Econometrics
 | Method | File | Status |
