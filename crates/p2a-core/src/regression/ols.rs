@@ -661,6 +661,7 @@ const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 /// Built by [`normal_equations_inverse`]; the OLS fit ([`solve_ols`]) and the other
 /// least-squares fits that take OLS's solve decision (VAR, Granger) use it, so the
 /// thresholds and the refinement live here only.
+#[derive(Debug, Clone)]
 pub(crate) struct NormalInverse {
     /// `(X'X)^{-1}` (k x k), the unscaled covariance of the coefficients.
     pub(crate) inverse: Array2<f64>,

@@ -31,7 +31,7 @@
 //! println!("Converged in {} iterations", result.iterations);
 //! ```
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis, CowArray, Ix2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -40,6 +40,7 @@ use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{LM_QR_TOL, Qr};
 use crate::regression::CovarianceType;
+use crate::regression::ols::{NormalInverse, normal_equations_inverse};
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, f_test_p_value, t_test_p_value};
@@ -350,8 +351,21 @@ pub(crate) const WITHIN_VARIATION_TOL: f64 = 1e-12;
 /// below `tolerance * 1e-6 * ||column||`.
 pub(crate) const MAP_SCALE_FLOOR: f64 = 1e-6;
 
+/// How a [`RegressorScreen`] solves: OLS's decision (`regression::ols`), the normal
+/// equations on a full-rank, well-conditioned design and `lm.fit`'s pivoted QR otherwise.
+#[derive(Debug, Clone)]
+enum ScreenSolve {
+    /// `(X'X)^{-1}` of the screened columns; none is aliased (the reciprocal-condition
+    /// threshold keeps every column far above the QR's `LM_QR_TOL`).
+    Normal(NormalInverse),
+    /// Pivoted QR (`LM_QR_TOL`) of the screened columns in their original order; its
+    /// `aliased()` columns are the collinear ones. `kept_pos` are the positions of the kept
+    /// columns among the screened ones.
+    Qr { qr: Qr, kept_pos: Vec<usize> },
+}
+
 /// The outcome of [`screen_regressors`]: which columns are estimated, which were dropped
-/// and why, and the factorization the caller solves from.
+/// and why, the kept demeaned columns and the factorization the caller solves from.
 #[derive(Debug, Clone)]
 pub(crate) struct RegressorScreen {
     /// Original indices of the estimated columns, ascending.
@@ -360,45 +374,60 @@ pub(crate) struct RegressorScreen {
     pub dropped: Vec<String>,
     /// One warning per kind of drop (absorbed, collinear).
     pub warnings: Vec<String>,
-    /// Pivoted QR (`LM_QR_TOL`) of the non-absorbed demeaned columns, in their original
-    /// order; its `aliased()` columns are the collinear ones. Callers solve from it
-    /// instead of factorising the kept columns again.
-    pub qr: Qr,
-    /// Original column indices of `qr`'s columns.
-    pub screened: Vec<usize>,
-    /// Positions of the kept columns among `screened`.
-    kept_pos: Vec<usize>,
+    /// The kept demeaned columns (n x kept), in `kept` order.
+    pub x: Array2<f64>,
+    solve: ScreenSolve,
 }
 
 impl RegressorScreen {
     /// Least-squares coefficients of `y` (demeaned like the columns) on the kept
     /// columns, in `kept` order.
-    pub fn coefficients(&self, y: ArrayView1<f64>) -> EconResult<Array1<f64>> {
-        let all = self.qr.coefficients(y)?;
-        Ok(self.kept_pos.iter().map(|&p| all[p]).collect())
+    pub fn coefficients(&self, y: &Array1<f64>) -> EconResult<Array1<f64>> {
+        match &self.solve {
+            ScreenSolve::Normal(normal) => Ok(normal.coefficients(self.x.view(), y)),
+            ScreenSolve::Qr { qr, kept_pos } => {
+                let all = qr.coefficients(y.view())?;
+                Ok(kept_pos.iter().map(|&p| all[p]).collect())
+            }
+        }
     }
 
     /// `(X_k' X_k)^{-1}` of the kept demeaned columns, in `kept` order.
     pub fn unscaled_covariance(&self) -> EconResult<Array2<f64>> {
-        let all = self.qr.unscaled_covariance()?;
-        let k = self.kept_pos.len();
-        let mut out = resource::try_zeros2(k, k, "unscaled covariance")?;
-        for (a, &pa) in self.kept_pos.iter().enumerate() {
-            for (b, &pb) in self.kept_pos.iter().enumerate() {
-                out[[a, b]] = all[[pa, pb]];
+        match &self.solve {
+            ScreenSolve::Normal(normal) => Ok(normal.inverse.clone()),
+            ScreenSolve::Qr { qr, kept_pos } => {
+                let all = qr.unscaled_covariance()?;
+                let k = kept_pos.len();
+                let mut out = resource::try_zeros2(k, k, "unscaled covariance")?;
+                for (a, &pa) in kept_pos.iter().enumerate() {
+                    for (b, &pb) in kept_pos.iter().enumerate() {
+                        out[[a, b]] = all[[pa, pb]];
+                    }
+                }
+                Ok(out)
             }
         }
-        Ok(out)
     }
 
     /// Residual sum of squares of `y` (demeaned like the columns) on the kept columns.
-    pub fn rss(&self, y: ArrayView1<f64>) -> EconResult<f64> {
-        let effects = self.qr.qty(y)?;
-        Ok(effects
-            .iter()
-            .skip(self.qr.rank())
-            .map(|v| v * v)
-            .sum::<f64>())
+    pub fn rss(&self, y: &Array1<f64>) -> EconResult<f64> {
+        match &self.solve {
+            ScreenSolve::Normal(normal) => {
+                let beta = normal.coefficients(self.x.view(), y);
+                let residuals = y - &self.x.dot(&beta);
+                Ok(residuals.iter().map(|v| v * v).sum::<f64>())
+            }
+            ScreenSolve::Qr { qr, .. } => {
+                let effects = qr.qty(y.view())?;
+                Ok(effects.iter().skip(qr.rank()).map(|v| v * v).sum::<f64>())
+            }
+        }
+    }
+
+    /// Whether the fit solves by the normal equations (`false`: the pivoted QR).
+    pub fn uses_normal_equations(&self) -> bool {
+        matches!(self.solve, ScreenSolve::Normal(_))
     }
 }
 
@@ -424,17 +453,20 @@ fn quoted(names: &[String]) -> String {
 ///
 /// 1. Column `j` is absorbed when its centred raw sum of squares is 0 or its demeaned sum
 ///    of squares is at most [`WITHIN_VARIATION_TOL`] times the centred one.
-/// 2. The remaining demeaned columns are decomposed by pivoted QR at `LM_QR_TOL`
-///    (`lm.fit`); its aliased columns, the later of each collinear set, are dropped.
+/// 2. The remaining demeaned columns take OLS's solve decision: the normal equations
+///    when they are of full rank and well conditioned (no column can be aliased then),
+///    otherwise pivoted QR at `LM_QR_TOL` (`lm.fit`), whose aliased columns, the later of
+///    each collinear set, are dropped.
 ///
 /// `raw` and `demeaned` are n x k in the same column order as `names`. With no column
 /// left the call is `InvalidSpecification` ("no regressor left to estimate: ...").
-pub(crate) fn screen_regressors(
+pub(crate) fn screen_regressors<'a>(
     raw: ArrayView2<f64>,
-    demeaned: ArrayView2<f64>,
+    demeaned: impl Into<CowArray<'a, f64, Ix2>>,
     names: &[String],
     fe_label: &str,
 ) -> EconResult<RegressorScreen> {
+    let demeaned: CowArray<'a, f64, Ix2> = demeaned.into();
     let k = raw.ncols();
     let mut absorbed = Vec::new();
     let mut screened = Vec::new();
@@ -470,7 +502,25 @@ pub(crate) fn screen_regressors(
             message: format!("no regressor left to estimate: {}", warnings.join("; ")),
         });
     }
-    let sub = demeaned.select(Axis(1), &screened);
+    // The screened demeaned columns, without a copy when none was absorbed
+    let sub: Array2<f64> = if screened.len() == k {
+        demeaned.into_owned()
+    } else {
+        demeaned.select(Axis(1), &screened)
+    };
+    // OLS's solve decision: a full-rank, well-conditioned design has no aliased column
+    // (its equilibrated reciprocal condition of at least 1e-8 keeps each unit-scaled
+    // column at distance >= 1e-4 from the span of the others, far above LM_QR_TOL), so
+    // the QR would keep every column and the normal equations solve it.
+    if let Some(normal) = normal_equations_inverse(sub.view())? {
+        return Ok(RegressorScreen {
+            kept: screened,
+            dropped,
+            warnings,
+            x: sub,
+            solve: ScreenSolve::Normal(normal),
+        });
+    }
     let qr = Qr::decompose(sub.view(), LM_QR_TOL)?;
     let aliased = qr.aliased();
     if !aliased.is_empty() {
@@ -486,13 +536,17 @@ pub(crate) fn screen_regressors(
         .filter(|p| !aliased.contains(p))
         .collect();
     let kept: Vec<usize> = kept_pos.iter().map(|&p| screened[p]).collect();
+    let x = if kept_pos.len() == screened.len() {
+        sub
+    } else {
+        sub.select(Axis(1), &kept_pos)
+    };
     Ok(RegressorScreen {
         kept,
         dropped,
         warnings,
-        qr,
-        screened,
-        kept_pos,
+        x,
+        solve: ScreenSolve::Qr { qr, kept_pos },
     })
 }
 
@@ -895,12 +949,7 @@ pub fn run_hdfe(
     let converged = y_converged && x_converged;
 
     // Regressors absorbed by the effects or collinear after them are not estimated
-    let screen = screen_regressors(
-        x.view(),
-        x_demeaned_all.view(),
-        &all_names,
-        &fe_label(fe_cols),
-    )?;
+    let screen = screen_regressors(x.view(), x_demeaned_all, &all_names, &fe_label(fe_cols))?;
     let mut warnings = screen.warnings.clone();
     if !converged {
         // fixest warns and returns the last iterate ("Absence of convergence")
@@ -914,7 +963,7 @@ pub fn run_hdfe(
         );
         warnings.extend(record.note("HDFE alternating projections"));
     }
-    let x_demeaned = x_demeaned_all.select(Axis(1), &screen.kept);
+    let x_demeaned = &screen.x;
     let var_names: Vec<String> = screen.kept.iter().map(|&j| all_names[j].clone()).collect();
     let k = screen.kept.len();
 
@@ -928,8 +977,8 @@ pub fn run_hdfe(
             context: "Not enough observations for HDFE estimation".to_string(),
         })?;
 
-    // OLS on demeaned data from the screen's pivoted QR (one factorization)
-    let beta = screen.coefficients(y_demeaned.view())?;
+    // OLS on demeaned data from the screen's factorization
+    let beta = screen.coefficients(&y_demeaned)?;
     let xtx_inv = screen.unscaled_covariance()?;
 
     // Residuals from demeaned model
@@ -2530,5 +2579,125 @@ mod tests {
             .finish();
         // the pre-5f86b49 rule (n0 + n1 - 1 = 25 absorbed, df 53) would give se_naive_df
         assert!((r.std_errors[0] / case.named("se_naive_df", "x") - 1.0).abs() > 5e-3);
+    }
+
+    // ── T3-PERF1: normal equations first, pivoted QR fallback
+
+    /// A noisy two-way design: `k` regressors with a common component (correlated, not
+    /// collinear), demeaned by firm and year; the last column is scaled by `scale`.
+    fn noisy_two_way_design(
+        n_firm: usize,
+        n_year: usize,
+        k: usize,
+        scale: f64,
+        seed: u64,
+    ) -> (Array2<f64>, Array2<f64>, Array1<f64>, Vec<FactorInfo>) {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Normal};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let nd = Normal::new(0.0, 1.0).unwrap();
+        let n = n_firm * n_year;
+        let firm = FactorInfo {
+            name: "firm".to_string(),
+            n_levels: n_firm,
+            ids: (0..n).map(|i| i / n_year).collect(),
+            counts: vec![n_year; n_firm],
+        };
+        let year = FactorInfo {
+            name: "year".to_string(),
+            n_levels: n_year,
+            ids: (0..n).map(|i| i % n_year).collect(),
+            counts: vec![n_firm; n_year],
+        };
+        let common: Vec<f64> = (0..n).map(|_| nd.sample(&mut rng)).collect();
+        let mut raw = Array2::from_shape_fn((n, k), |(i, _)| 0.6 * common[i]);
+        for v in raw.iter_mut() {
+            *v += nd.sample(&mut rng);
+        }
+        raw.column_mut(k - 1).mapv_inplace(|v| v * scale);
+        let factors = vec![firm, year];
+        let (dm, _, _, converged) = demean_matrix_map(&raw, &factors, 1e-12, 10_000, true).unwrap();
+        assert!(converged);
+        let y_raw =
+            Array1::from_shape_fn(n, |i| raw.row(i).sum() + nd.sample(&mut rng) + common[i]);
+        let (y, _, _, _) = demean_map(&y_raw, &factors, 1e-12, 10_000, true).unwrap();
+        (raw, dm, y, factors)
+    }
+
+    fn max_rel(a: &[f64], b: &[f64]) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs() / y.abs().max(f64::MIN_POSITIVE))
+            .fold(0.0, f64::max)
+    }
+
+    /// The normal-equations solve of a well-conditioned screen agrees with the pivoted
+    /// QR it replaces to 1e-10 relative: coefficients, (X'X)^{-1} and the RSS, on noisy
+    /// designs of several shapes and scales (one with a regressor of scale 1e4, refined).
+    #[test]
+    fn test_screen_normal_equations_match_qr() {
+        for (nf, ny, k, scale, seed) in [
+            (12, 8, 2, 1.0, 1),
+            (30, 20, 4, 1.0, 2),
+            (50, 10, 3, 1e4, 3),
+            (7, 5, 5, 1e-3, 4),
+        ] {
+            let (raw, dm, y, _) = noisy_two_way_design(nf, ny, k, scale, seed);
+            let names: Vec<String> = (0..k).map(|j| format!("x{}", j + 1)).collect();
+            let screen = screen_regressors(raw.view(), dm.view(), &names, "'firm'").unwrap();
+            assert!(screen.uses_normal_equations(), "shape {nf}x{ny}x{k}");
+            assert_eq!(screen.kept, (0..k).collect::<Vec<_>>());
+            assert!(screen.dropped.is_empty() && screen.warnings.is_empty());
+            assert_eq!(screen.x, dm);
+            let qr = Qr::decompose(dm.view(), LM_QR_TOL).unwrap();
+            assert_eq!(qr.rank(), k);
+            let b = screen.coefficients(&y).unwrap();
+            let b_qr = qr.coefficients(y.view()).unwrap();
+            assert!(max_rel(b.as_slice().unwrap(), b_qr.as_slice().unwrap()) < 1e-10);
+            let u = screen.unscaled_covariance().unwrap();
+            let u_qr = qr.unscaled_covariance().unwrap();
+            assert!(max_rel(u.as_slice().unwrap(), u_qr.as_slice().unwrap()) < 1e-10);
+            let rss_qr: f64 = qr
+                .qty(y.view())
+                .unwrap()
+                .iter()
+                .skip(k)
+                .map(|v| v * v)
+                .sum();
+            let rss = screen.rss(&y).unwrap();
+            assert!((rss / rss_qr - 1.0).abs() < 1e-10, "{rss} vs {rss_qr}");
+        }
+    }
+
+    /// Nearly collinear demeaned columns (x3 = x1 + x2 + 1e-6 noise) are declined by the
+    /// normal equations and decided by the pivoted QR, which keeps all three (their
+    /// relative distance is far above LM_QR_TOL) and solves as before; exactly collinear
+    /// ones still reach the QR and are dropped.
+    #[test]
+    fn test_screen_near_collinear_reaches_qr() {
+        let (raw, mut dm, y, factors) = noisy_two_way_design(20, 10, 3, 1.0, 5);
+        let (x1, x2) = (dm.column(0).to_owned(), dm.column(1).to_owned());
+        let wiggle = dm.column(2).to_owned();
+        let near = &x1 + &x2 + &(&wiggle * 1e-6);
+        dm.column_mut(2).assign(&near);
+        let names: Vec<String> = ["x1", "x2", "x3"].iter().map(|s| s.to_string()).collect();
+        let screen = screen_regressors(raw.view(), dm.view(), &names, "'firm'").unwrap();
+        assert!(!screen.uses_normal_equations());
+        assert_eq!(screen.kept, vec![0, 1, 2]);
+        let qr = Qr::decompose(dm.view(), LM_QR_TOL).unwrap();
+        assert_eq!(
+            screen.coefficients(&y).unwrap(),
+            qr.coefficients(y.view()).unwrap()
+        );
+        // exactly collinear after the effects: the QR drops the later column
+        let mut raw2 = raw.clone();
+        let sum = &raw.column(0) + &raw.column(1);
+        raw2.column_mut(2).assign(&sum);
+        let (dm2, _, _, _) = demean_matrix_map(&raw2, &factors, 1e-12, 10_000, true).unwrap();
+        let screen2 = screen_regressors(raw2.view(), dm2, &names, "'firm'").unwrap();
+        assert!(!screen2.uses_normal_equations());
+        assert_eq!(screen2.kept, vec![0, 1]);
+        assert_eq!(screen2.dropped, vec!["x3".to_string()]);
+        assert_eq!(screen2.x.ncols(), 2);
     }
 }
