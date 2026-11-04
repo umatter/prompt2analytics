@@ -1,29 +1,52 @@
 //! SHAP (SHapley Additive exPlanations) for model interpretation.
 //!
-//! This module provides SHAP value computation for interpreting machine learning models.
-//! SHAP values quantify the contribution of each feature to a prediction, based on
-//! cooperative game theory (Shapley values).
+//! SHAP values are the Shapley values of a game `v(S)` defined by a model, a point `x` and a
+//! coalition `S` of features: `phi_i = sum_{S not containing i} |S|! (M - |S| - 1)! / M! (v(S + i)
+//! - v(S))`. They add up: `v(empty) + sum_i phi_i = f(x)` (the base value plus the SHAP values is
+//! the prediction), which every result checks on the rows it explains
+//! ([`ShapResult::additivity_check_passed`]).
 //!
-//! ## Supported Methods
+//! ## Methods and games
 //!
-//! - **TreeSHAP**: Exact O(TLD^2) algorithm for tree ensembles (Random Forest, CART, GBM)
-//! - **Kernel SHAP**: Approximation for black-box models
+//! - **TreeSHAP** ([`ShapMethod::Tree`]; [`shap_values_model`], [`shap_tree_ensemble`]): the
+//!   path-dependent game `v(S) = E[f(x) | x_S]` of a tree, which follows `x` at splits on
+//!   features in `S` and weights both children by their training cover otherwise (Lundberg et
+//!   al. 2020, Algorithm 1; shap's `feature_perturbation = "tree_path_dependent"`). Algorithm 2
+//!   computes its Shapley values exactly in O(L D^2) per tree and row (L leaves, depth D); an
+//!   ensemble's values are the tree average and its base value is the mean over trees of
+//!   `sum_leaf value * cover / root cover`. With `compute_interactions` it also returns the
+//!   Shapley interaction index (eqs. 8-9), one symmetric M x M matrix per row whose rows sum to
+//!   the SHAP values.
+//! - **Kernel SHAP** ([`ShapMethod::Kernel`]; [`kernel_shap`], and for a forest
+//!   [`shap_values_model_with`]): the interventional game `v(S) = mean_b f(x_S, b_notS)` over a
+//!   background sample, for any model (Lundberg & Lee 2017; Janzing et al. 2020), by
+//!   shap.KernelExplainer's constrained weighted regression. `n_samples` is the coalition budget:
+//!   every coalition is evaluated, and the values are exact, when `2^M - 2 <= n_samples` (the
+//!   default `2 M + 2048` does so for M <= 11); otherwise shap's sampled design with a seeded,
+//!   per-row ChaCha8 stream gives a Monte Carlo estimate that still adds up exactly. One feature
+//!   gives `f(x) - E f`.
+//! - **Perturbations** ([`FeaturePerturbation`]): each method computes its own game, and asking
+//!   for the other one is an error that names the route. Observational (true conditional) SHAP
+//!   is not implemented: it needs a model of the feature distribution.
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use p2a_core::ml::{random_forest, shap_values, ShapConfig};
-//! use ndarray::Array2;
+//! ```
+//! use ndarray::{Array1, Array2};
+//! use p2a_core::ml::{ShapConfig, random_forest_with_trees, shap_values_model};
 //!
-//! // Train a model
-//! let model = random_forest(x.view(), y.view(), Some(50), None, None, None, Some(42), None)?;
-//!
-//! // Compute SHAP values
-//! let config = ShapConfig::default();
-//! let shap_result = shap_values(&model, x.view(), &config)?;
-//!
-//! println!("Base value: {:.4}", shap_result.base_value);
-//! println!("Feature contributions: {:?}", shap_result.shap_values);
+//! // 30 rows: y = 2 x0 + x1 x2 plus a deterministic wiggle
+//! let x = Array2::from_shape_fn((30, 3), |(i, j)| ((i * 7 + j * 3) % 11) as f64 / 10.0);
+//! let y = Array1::from_shape_fn(30, |i| {
+//!     2.0 * x[[i, 0]] + x[[i, 1]] * x[[i, 2]] + 0.05 * ((i * 13) % 5) as f64
+//! });
+//! let model = random_forest_with_trees(
+//!     x.view(), y.view(), Some(10), Some(4), Some(2), Some("all"), Some(42), None,
+//! )
+//! .unwrap();
+//! let shap = shap_values_model(&model, x.view(), &ShapConfig::default()).unwrap();
+//! assert!(shap.exact);
+//! assert_eq!(shap.additivity_check_passed, Some(true));
 //! ```
 //!
 //! # References
@@ -36,11 +59,16 @@
 //!   Attribution for Tree Ensembles". arXiv:1802.03888.
 //!   <https://arxiv.org/abs/1802.03888>
 //!
-//! - Implementation validated against Python's `shap` package (Lundberg, 2018).
-//!   <https://github.com/slundberg/shap>
+//! - Lundberg, S. M., Erion, G., Chen, H., et al. (2020). "From local explanations to global
+//!   understanding with explainable AI for trees". Nature Machine Intelligence 2, 56-67.
 //!
-//! - R package `fastshap` (Greenwell, 2020).
-//!   <https://cran.r-project.org/package=fastshap>
+//! - Janzing, D., Minorics, L., & Blöbaum, P. (2020). "Feature relevance quantification in
+//!   explainable AI: A causal problem". AISTATS 2020.
+//!
+//! - Python `shap` (Lundberg): `TreeExplainer` (`tree_shap_recursive`) and `KernelExplainer`.
+//!   <https://github.com/shap/shap>
+//!
+//! Validation: `validation/ml/shap.md` (exact enumeration written out in R).
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
@@ -1537,10 +1565,11 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// use p2a_core::ml::{random_forest, shap_values_random_forest, ShapConfig};
+/// use p2a_core::ml::{random_forest, random_forest_with_trees, shap_values_random_forest, ShapConfig};
 ///
-/// let rf_result = random_forest(x.view(), y.view(), Some(50), None, None, None, Some(42), None)?;
-/// let shap = shap_values_random_forest(&rf_result, x.view(), &ShapConfig::default())?;
+/// let rf_result = random_forest(x.view(), y.view(), Some(50), None, None, None, Some(42), names)?;
+/// let model = random_forest_with_trees(x.view(), y.view(), Some(50), None, None, None, Some(42), None)?;
+/// let shap = shap_values_random_forest(&rf_result, x.view(), &model.trees, &ShapConfig::default())?;
 /// println!("Feature importance: {:?}", shap.feature_importance);
 /// ```
 ///
@@ -1617,8 +1646,9 @@ pub fn shap_summary(result: &ShapResult) -> ShapSummary {
 
 /// Compute SHAP values using Kernel SHAP (for any model).
 ///
-/// This is a model-agnostic approach that approximates SHAP values using
-/// weighted linear regression on coalition samples.
+/// An alias of [`kernel_shap`]: the interventional Shapley values of any model by the
+/// constrained weighted regression on coalitions, exact when every coalition fits the
+/// `n_samples` budget.
 ///
 /// # Arguments
 /// * `predict_fn` - Function that takes a batch of inputs and returns predictions
@@ -1629,15 +1659,20 @@ pub fn shap_summary(result: &ShapResult) -> ShapSummary {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use p2a_core::ml::{shap_kernel, ShapConfig};
+/// ```
+/// use ndarray::{ArrayView2, array};
+/// use p2a_core::ml::{ShapConfig, shap_kernel};
 ///
-/// // Define prediction function
-/// let predict = |x: ArrayView2<f64>| {
-///     x.outer_iter().map(|row| row.sum()).collect()
+/// // a linear model: phi_j = beta_j (x_j - mean of the background), exactly
+/// let predict = |z: ArrayView2<f64>| {
+///     z.outer_iter().map(|r| r[0] + 2.0 * r[1]).collect::<Vec<f64>>()
 /// };
-///
-/// let shap = shap_kernel(predict, x.view(), background.view(), &ShapConfig::default(), None)?;
+/// let x = array![[1.0, 2.0]];
+/// let background = array![[0.0, 0.0], [1.0, 1.0]];
+/// let shap = shap_kernel(predict, x.view(), background.view(), &ShapConfig::default(), None).unwrap();
+/// assert!((shap.shap_values[[0, 0]] - 0.5).abs() < 1e-12);
+/// assert!((shap.shap_values[[0, 1]] - 3.0).abs() < 1e-12);
+/// assert!(shap.exact);
 /// ```
 ///
 /// # References
@@ -1677,6 +1712,9 @@ where
 /// println!("Feature importance: {:?}", shap.feature_importance);
 /// ```
 ///
+/// TreeSHAP ([`shap_values_model_with`] with [`ShapMethod::Tree`]): the exact Shapley values of
+/// the trees' path-dependent game `E[f(x) | x_S]`.
+///
 /// # References
 ///
 /// - Lundberg et al. (2018). "Consistent Individualized Feature Attribution for
@@ -1686,7 +1724,65 @@ pub fn shap_values_model(
     x: ArrayView2<f64>,
     config: &ShapConfig,
 ) -> EconResult<ShapResult> {
-    shap_tree_ensemble(&model.trees, x, model.feature_names.clone(), config)
+    shap_values_model_with(model, x, None, ShapMethod::Tree, config)
+}
+
+/// SHAP values of a random forest by the chosen method (the explicit entry point).
+///
+/// - [`ShapMethod::Tree`]: TreeSHAP, the exact Shapley values of the trees' path-dependent game
+///   `E[f(x) | x_S]` ([`shap_tree_ensemble`]); `background` must be `None` (the expectation uses
+///   the trees' training cover).
+/// - [`ShapMethod::Kernel`]: Kernel SHAP ([`kernel_shap`]) of the forest's mean prediction, the
+///   interventional game `v(S) = mean_b f(x_S, b_notS)` over the rows of `background`
+///   (required); exact with every coalition when `2^M - 2 <= n_samples` (M <= 11 at the default
+///   budget).
+///
+/// `config.feature_perturbation` must be the method's own game, and `compute_interactions` is
+/// TreeSHAP's only; anything else is `InvalidSpecification`.
+///
+/// # References
+///
+/// - Lundberg et al. (2020). Nature Machine Intelligence 2, 56-67 (TreeSHAP).
+/// - Lundberg & Lee (2017). NeurIPS 2017 (Kernel SHAP).
+pub fn shap_values_model_with(
+    model: &super::trees::RandomForestModel,
+    x: ArrayView2<f64>,
+    background: Option<ArrayView2<f64>>,
+    method: ShapMethod,
+    config: &ShapConfig,
+) -> EconResult<ShapResult> {
+    match method {
+        ShapMethod::Tree => {
+            if background.is_some() {
+                return Err(spec(
+                    "TreeSHAP does not use a background sample (the path-dependent expectation uses the trees' training cover)"
+                        .into(),
+                ));
+            }
+            shap_tree_ensemble(&model.trees, x, model.feature_names.clone(), config)
+        }
+        ShapMethod::Kernel => {
+            let Some(bg) = background else {
+                return Err(spec("Kernel SHAP needs a background sample".into()));
+            };
+            validate_explain_inputs(x, model.feature_names.as_deref())?;
+            let trees = &model.trees;
+            if trees.is_empty() {
+                return Err(spec("SHAP: the forest has no trees".into()));
+            }
+            // the trees are predicted on rows of x's width: check their splits first
+            for (t, tree) in trees.iter().enumerate() {
+                validate_nodes(&extract_tree_structure(tree), x.ncols(), t)?;
+            }
+            let n_trees = trees.len() as f64;
+            let forest_mean = |z: ArrayView2<f64>| -> Vec<f64> {
+                z.outer_iter()
+                    .map(|r| trees.iter().map(|t| t.predict_one(&r)).sum::<f64>() / n_trees)
+                    .collect()
+            };
+            kernel_shap(forest_mean, x, bg, config, model.feature_names.clone())
+        }
+    }
 }
 
 /// Compute SHAP values for a Random Forest model using a Dataset.
@@ -2693,6 +2789,129 @@ mod tests {
         assert!(
             (shap_kernel_weight(4, 1) - 0.25).abs() < 1e-15
                 && (shap_kernel_weight(4, 2) - 0.125).abs() < 1e-15
+        );
+    }
+
+    #[test]
+    fn test_shap_values_model_with_kernel_matches_interventional_enumeration() {
+        let (x, y) = random_regression(80, 3, 13);
+        let model = super::super::trees::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(8),
+            Some(4),
+            Some(2),
+            Some("all"),
+            Some(5),
+            None,
+        )
+        .unwrap();
+        let bg = x.slice(s![40..60, ..]);
+        let ex = x.slice(s![0..5, ..]);
+        let r = shap_values_model_with(
+            &model,
+            ex,
+            Some(bg),
+            ShapMethod::Kernel,
+            &ShapConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (r.method, r.feature_perturbation, r.exact),
+            (
+                ShapMethod::Kernel,
+                FeaturePerturbation::Interventional,
+                true
+            )
+        );
+        let forest = |z: ArrayView2<f64>| -> Vec<f64> {
+            z.outer_iter()
+                .map(|row| {
+                    model.trees.iter().map(|t| t.predict_one(&row)).sum::<f64>()
+                        / model.trees.len() as f64
+                })
+                .collect()
+        };
+        for i in 0..5 {
+            let v = |mask: usize| {
+                let mut z = bg.to_owned();
+                for j in 0..3 {
+                    if (mask >> j) & 1 == 1 {
+                        z.column_mut(j).fill(ex[[i, j]]);
+                    }
+                }
+                forest(z.view()).iter().sum::<f64>() / 20.0
+            };
+            let exact = bruteforce_shapley(3, &v);
+            for j in 0..3 {
+                assert!(
+                    EXACT_SHAP.allows(r.shap_values[[i, j]], exact[j]),
+                    "row {i} feature {j}"
+                );
+            }
+        }
+        // the tree method through the same entry point is TreeSHAP
+        let t = shap_values_model_with(&model, ex, None, ShapMethod::Tree, &ShapConfig::default())
+            .unwrap();
+        let direct = shap_values_model(&model, ex, &ShapConfig::default()).unwrap();
+        assert_eq!(t.shap_values, direct.shap_values);
+        assert_eq!(t.method, ShapMethod::Tree);
+    }
+
+    #[test]
+    fn test_shap_values_model_with_refuses_mismatched_settings() {
+        let (x, y) = random_regression(40, 3, 14);
+        let model = super::super::trees::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(3),
+            Some(3),
+            Some(2),
+            Some("all"),
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let bg = x.slice(s![0..10, ..]);
+        assert!(
+            shap_values_model_with(
+                &model,
+                x.view(),
+                Some(bg),
+                ShapMethod::Tree,
+                &ShapConfig::default()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("does not use a background sample")
+        );
+        assert!(
+            shap_values_model_with(
+                &model,
+                x.view(),
+                None,
+                ShapMethod::Kernel,
+                &ShapConfig::default()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("needs a background sample")
+        );
+        let mut inter = ShapConfig::default();
+        inter.compute_interactions = true;
+        assert!(
+            shap_values_model_with(&model, x.view(), Some(bg), ShapMethod::Kernel, &inter)
+                .unwrap_err()
+                .to_string()
+                .contains("TreeSHAP only")
+        );
+        let mut tpd = ShapConfig::default();
+        tpd.feature_perturbation = Some(FeaturePerturbation::TreePathDependent);
+        assert!(
+            shap_values_model_with(&model, x.view(), Some(bg), ShapMethod::Kernel, &tpd)
+                .unwrap_err()
+                .to_string()
+                .contains("tree_path_dependent needs TreeSHAP")
         );
     }
 
