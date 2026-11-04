@@ -90,7 +90,8 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult, EstimationWarning};
-use crate::linalg::{DesignMatrix, condition_number, safe_inverse, xtx};
+use crate::linalg::solve::{LM_QR_TOL, least_squares};
+use crate::linalg::{DesignMatrix, condition_number};
 use crate::options::Choices;
 use crate::regression::{CovarianceType, run_ols};
 use crate::resource;
@@ -541,7 +542,7 @@ pub fn run_diagnostics(
     let jarque_bera = compute_jarque_bera(residuals);
 
     // Breusch-Pagan test for heteroskedasticity
-    let breusch_pagan = compute_breusch_pagan(residuals, &x.view(), k);
+    let breusch_pagan = compute_breusch_pagan(residuals, &x.view());
 
     // Durbin-Watson test for autocorrelation
     let durbin_watson = Some(compute_durbin_watson(residuals));
@@ -697,50 +698,27 @@ pub fn jarque_bera_test(data: &[f64]) -> Option<TestResult> {
 /// Compute Breusch-Pagan test for heteroskedasticity.
 ///
 /// Tests H0: Var(e|X) = constant (homoskedasticity)
-/// LM = n * R² from regressing e² on X
-/// LM ~ χ²(k-1) under the null
+/// LM = n * R² from regressing e² on X (by pivoted QR, as `lm.fit`)
+/// LM ~ χ²(rank - 1) under the null, rank = the rank of the auxiliary design (bptest)
 fn compute_breusch_pagan(
     residuals: &Array1<f64>,
     x: &ndarray::ArrayView2<f64>,
-    k: usize,
 ) -> Option<TestResult> {
     let n = residuals.len();
-    if n <= k {
+    if n <= x.ncols() {
         return None;
     }
 
-    // Compute squared residuals
+    // Auxiliary regression of e² on X
     let e2: Array1<f64> = residuals.iter().map(|&e| e * e).collect();
     let e2_mean = e2.mean()?;
-
-    // Regress e² on X (auxiliary regression)
-    // y = e², X = design matrix
-    // We compute R² = 1 - SSR/SST of this auxiliary regression
-
-    // Compute (X'X)^{-1}
-    let xtx_mat = xtx(x);
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).ok()?;
-
-    // Compute β = (X'X)^{-1} X'e²
-    let mut xty = Array1::zeros(k);
-    for i in 0..n {
-        for j in 0..k {
-            xty[j] += x[[i, j]] * e2[i];
-        }
-    }
-    let beta = xtx_inv.dot(&xty);
-
-    // Fitted values and residuals of auxiliary regression
-    let mut ssr_aux = 0.0;
-    let mut sst_aux = 0.0;
-
-    for i in 0..n {
-        let fitted: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-        let resid = e2[i] - fitted;
-        ssr_aux += resid * resid;
-        sst_aux += (e2[i] - e2_mean).powi(2);
+    let aux = least_squares(x.view(), e2.view()).ok()?;
+    if aux.rank < 2 {
+        return None;
     }
 
+    let ssr_aux: f64 = aux.residuals.iter().map(|r| r * r).sum();
+    let sst_aux: f64 = e2.iter().map(|v| (v - e2_mean).powi(2)).sum();
     if sst_aux <= 0.0 {
         return None;
     }
@@ -750,8 +728,8 @@ fn compute_breusch_pagan(
     // LM statistic
     let lm = (n as f64) * r2_aux;
 
-    // Degrees of freedom = k - 1 (excluding intercept)
-    let df = (k - 1) as f64;
+    // Degrees of freedom = auxiliary rank - 1 (excluding intercept), as bptest
+    let df = (aux.rank - 1) as f64;
     let p_value = chi_squared_p_value(lm, df);
 
     let significant = p_value < 0.05;
@@ -928,43 +906,25 @@ fn compute_vif(
     Some(vif_results)
 }
 
-/// Compute R² for an auxiliary regression (y on X).
+/// Compute R² for an auxiliary regression (y on X), by pivoted QR. A `y` that `lm.fit`
+/// would alias against `X` (its residual norm below `LM_QR_TOL` of its norm) gives 1.
 fn compute_auxiliary_r2(y: &Array1<f64>, x: &Array2<f64>) -> f64 {
     let n = y.len();
-    let k = x.ncols();
-
-    if n <= k {
+    if n <= x.ncols() {
         return 0.0;
     }
-
-    // Compute (X'X)^{-1}
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = match safe_inverse(&xtx_mat.view()) {
-        Ok(inv) => inv,
-        Err(_) => return 1.0, // Singular = perfect collinearity
+    let fit = match least_squares(x.view(), y.view()) {
+        Ok(fit) => fit,
+        Err(_) => return 0.0,
     };
-
-    // Compute β = (X'X)^{-1} X'y
-    let mut xty = Array1::zeros(k);
-    for i in 0..n {
-        for j in 0..k {
-            xty[j] += x[[i, j]] * y[i];
-        }
+    let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
+    let norm2: f64 = y.iter().map(|v| v * v).sum();
+    if ssr <= LM_QR_TOL * LM_QR_TOL * norm2 {
+        return 1.0; // collinear with the other columns
     }
-    let beta = xtx_inv.dot(&xty);
 
-    // Compute SSR and SST
     let y_mean = y.mean().unwrap_or(0.0);
-    let mut ssr = 0.0;
-    let mut sst = 0.0;
-
-    for i in 0..n {
-        let fitted: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-        let resid = y[i] - fitted;
-        ssr += resid * resid;
-        sst += (y[i] - y_mean).powi(2);
-    }
-
+    let sst: f64 = y.iter().map(|v| (v - y_mean).powi(2)).sum();
     if sst <= 0.0 {
         return 0.0;
     }
@@ -1726,43 +1686,9 @@ pub fn bg_test(
         }
     }
 
-    // Step 3: Run auxiliary regression: e on [X, e_{t-1}, ..., e_{t-p}]
-    // Compute (X'X)^{-1}
-    let xtx_mat = xtx(&x_aux.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Auxiliary regression X'X".to_string(),
-        suggestion: format!("Check for multicollinearity or try lower order: {}", e),
-    })?;
-
-    // X'e (residuals are the dependent variable)
-    let mut xte: Array1<f64> = Array1::zeros(k_aux);
-    for i in 0..n {
-        for j in 0..k_aux {
-            xte[j] += x_aux[[i, j]] * residuals[i];
-        }
-    }
-
-    // β_aux = (X'X)^{-1} X'e
-    let beta_aux: Array1<f64> = xtx_inv.dot(&xte);
-
-    // Compute R² of auxiliary regression
-    let e_mean = residuals.mean().unwrap_or(0.0);
-    let mut ssr_aux = 0.0;
-    let mut sst_aux = 0.0;
-
-    for i in 0..n {
-        let fitted: f64 = (0..k_aux).map(|j| x_aux[[i, j]] * beta_aux[j]).sum();
-        let aux_resid = residuals[i] - fitted;
-        ssr_aux += aux_resid * aux_resid;
-        sst_aux += (residuals[i] - e_mean).powi(2);
-    }
-
-    // Handle edge case where residuals are constant
-    let r2_aux = if sst_aux > 0.0 {
-        1.0 - ssr_aux / sst_aux
-    } else {
-        0.0
-    };
+    // Step 3: Run auxiliary regression e on [X, e_{t-1}, ..., e_{t-p}] by pivoted QR
+    let aux = least_squares(x_aux.view(), residuals.view())?;
+    let (r2_aux, beta_aux, rank_aux) = bg_auxiliary_r2(residuals, aux);
 
     // Extract coefficients on lagged residuals
     let lag_coefs: Vec<f64> = beta_aux.slice(ndarray::s![k..]).to_vec();
@@ -1776,9 +1702,10 @@ pub fn bg_test(
             (lm, p, (order as f64, None))
         }
         BgTestType::F => {
-            // F = (R² / p) / ((1 - R²) / (n - k - p)) ~ F(p, n - k - p)
+            // F = (R² / p) / ((1 - R²) / (n - rank)) ~ F(p, n - rank), rank = rank([X, lags])
+            // (n - k - p on a full-rank design, as bgtest)
             let df1 = order as f64;
-            let df2 = (n - k - order) as f64;
+            let df2 = (n - rank_aux) as f64;
 
             let f_stat = if r2_aux < 1.0 && df2 > 0.0 {
                 (r2_aux / df1) / ((1.0 - r2_aux) / df2)
@@ -1816,6 +1743,24 @@ pub fn bg_test(
         significant_at_05: significant,
         interpretation,
     })
+}
+
+/// R² of the Breusch-Godfrey auxiliary fit (centred on the mean of the residuals),
+/// its coefficients and its rank.
+fn bg_auxiliary_r2(
+    residuals: &Array1<f64>,
+    aux: crate::linalg::solve::LeastSquares,
+) -> (f64, Array1<f64>, usize) {
+    let e_mean = residuals.mean().unwrap_or(0.0);
+    let ssr_aux: f64 = aux.residuals.iter().map(|r| r * r).sum();
+    let sst_aux: f64 = residuals.iter().map(|e| (e - e_mean).powi(2)).sum();
+    // Constant residuals: no variation to explain
+    let r2 = if sst_aux > 0.0 {
+        1.0 - ssr_aux / sst_aux
+    } else {
+        0.0
+    };
+    (r2, aux.coefficients, aux.rank)
 }
 
 /// Convenience function for Breusch-Godfrey test with default parameters.
@@ -1884,36 +1829,9 @@ pub fn bg_test_from_ols(
         }
     }
 
-    // Run auxiliary regression using vectorized operations
-    // X'X - use pure ndarray for speed
-    let xtx_mat = x_aux.t().dot(&x_aux);
-    // Use fast Cholesky inverse (no condition number check - OLS already succeeded)
-    let xtx_inv = crate::linalg::cholesky_inverse(&xtx_mat.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "Auxiliary regression X'X".to_string(),
-            suggestion: format!("Check for multicollinearity or try lower order: {}", e),
-        }
-    })?;
-
-    // X'e using vectorized dot product
-    let xte = x_aux.t().dot(residuals);
-
-    // β_aux = (X'X)^{-1} X'e
-    let beta_aux = xtx_inv.dot(&xte);
-
-    // Compute fitted values and R² using vectorized operations
-    let fitted_aux = x_aux.dot(&beta_aux);
-    let aux_resid = residuals - &fitted_aux;
-
-    let e_mean = residuals.mean().unwrap_or(0.0);
-    let ssr_aux: f64 = aux_resid.iter().map(|&r| r * r).sum();
-    let sst_aux: f64 = residuals.iter().map(|&e| (e - e_mean).powi(2)).sum();
-
-    let r2_aux = if sst_aux > 0.0 {
-        1.0 - ssr_aux / sst_aux
-    } else {
-        0.0
-    };
+    // Run auxiliary regression by pivoted QR
+    let aux = least_squares(x_aux.view(), residuals.view())?;
+    let (r2_aux, beta_aux, rank_aux) = bg_auxiliary_r2(residuals, aux);
     let lag_coefs: Vec<f64> = beta_aux.slice(ndarray::s![k..]).to_vec();
 
     // Compute test statistic
@@ -1925,7 +1843,7 @@ pub fn bg_test_from_ols(
         }
         BgTestType::F => {
             let df1 = order as f64;
-            let df2 = (n - k - order) as f64;
+            let df2 = (n - rank_aux) as f64;
             let f_stat = if r2_aux < 1.0 && df2 > 0.0 {
                 (r2_aux / df1) / ((1.0 - r2_aux) / df2)
             } else {
@@ -2028,6 +1946,11 @@ impl fmt::Display for HarveyCollierResult {
 ///   w_t = (y_t - x_t' β̂_{t-1}) / √(1 + x_t'(X_{t-1}'X_{t-1})⁻¹x_t)
 ///
 /// where β̂_{t-1} is estimated using observations 1 to t-1.
+///
+/// The first prefix used is the first one of full column rank (by `lm.fit`'s pivoted QR,
+/// found by bisection: prefix rank never decreases); earlier prefixes have no unique fit.
+/// The forecasts then come from a QR factor of the prefix updated row by row with Givens
+/// rotations, `O(k²)` per observation instead of a refit.
 pub fn recursive_residuals(x: &ndarray::ArrayView2<f64>, y: &Array1<f64>) -> EconResult<Vec<f64>> {
     let n = y.len();
     let k = x.ncols();
@@ -2039,51 +1962,111 @@ pub fn recursive_residuals(x: &ndarray::ArrayView2<f64>, y: &Array1<f64>) -> Eco
             context: "Recursive residuals require n > k + 1".to_string(),
         });
     }
+    if x.nrows() != n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "recursive residuals: x has {} rows but y has {n}",
+                x.nrows()
+            ),
+        });
+    }
+    if x.iter().chain(y.iter()).any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "recursive residuals: x and y must be finite".to_string(),
+        });
+    }
 
-    let mut rec_resid = Vec::with_capacity(n - k);
+    let none = || EconError::InsufficientData {
+        required: 1,
+        provided: 0,
+        context: "No recursive residuals could be computed".to_string(),
+    };
+    let full_rank = |t: usize| -> EconResult<bool> {
+        let fit = least_squares(x.slice(ndarray::s![0..t, ..]), y.slice(ndarray::s![0..t]))?;
+        Ok(fit.rank == k)
+    };
 
-    // Start with first k observations for initial estimate
-    for t in k..n {
-        // Use observations 0 to t-1 for estimation
-        let x_sub = x.slice(ndarray::s![0..t, ..]);
-        let y_sub = y.slice(ndarray::s![0..t]);
+    // First prefix 0..t0 (k <= t0 < n) of full rank
+    if k == 0 || !full_rank(n - 1)? {
+        return Err(none());
+    }
+    let (mut lo, mut hi) = (k, n - 1);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if full_rank(mid)? {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let t0 = lo;
 
-        // Compute (X'X)⁻¹
-        let xtx_sub = xtx(&x_sub);
-        let (xtx_inv, _) = match safe_inverse(&xtx_sub.view()) {
-            Ok(inv) => inv,
-            Err(_) => continue, // Skip if singular
-        };
+    // R (k x k, upper triangular) and z = Q'y of the rows folded in so far
+    let mut r = Array2::<f64>::zeros((k, k));
+    let mut z = Array1::<f64>::zeros(k);
+    let mut row = vec![0.0; k];
+    let fold = |r: &mut Array2<f64>, z: &mut Array1<f64>, t: usize, row: &mut [f64]| {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = x[[t, j]];
+        }
+        let mut b = y[t];
+        for j in 0..k {
+            if row[j] == 0.0 {
+                continue;
+            }
+            let h = r[[j, j]].hypot(row[j]);
+            let (c, s) = (r[[j, j]] / h, row[j] / h);
+            r[[j, j]] = h;
+            for l in (j + 1)..k {
+                let (a, w) = (r[[j, l]], row[l]);
+                r[[j, l]] = c * a + s * w;
+                row[l] = c * w - s * a;
+            }
+            let zj = z[j];
+            z[j] = c * zj + s * b;
+            b = c * b - s * zj;
+        }
+    };
+    for t in 0..t0 {
+        if t % 256 == 0 {
+            resource::checkpoint()?;
+        }
+        fold(&mut r, &mut z, t, &mut row);
+    }
 
-        // Compute β̂ = (X'X)⁻¹ X'y
-        let xty_sub: Array1<f64> = x_sub.t().dot(&y_sub);
-        let beta_sub = xtx_inv.dot(&xty_sub);
-
-        // One-step-ahead forecast
-        let x_t = x.row(t);
-        let y_hat_t: f64 = x_t
-            .iter()
-            .zip(beta_sub.iter())
-            .map(|(&xi, &bi)| xi * bi)
-            .sum();
-        let forecast_error = y[t] - y_hat_t;
-
-        // Compute scaling factor: √(1 + x_t'(X'X)⁻¹x_t)
-        let x_t_arr: Array1<f64> = x_t.to_owned();
-        let quad_form = x_t_arr.dot(&xtx_inv.dot(&x_t_arr));
-        let scale = (1.0 + quad_form).sqrt();
-
-        // Recursive residual
-        let w_t = forecast_error / scale;
-        rec_resid.push(w_t);
+    let mut rec_resid = Vec::with_capacity(n - t0);
+    let mut v = vec![0.0; k];
+    let mut beta = vec![0.0; k];
+    for t in t0..n {
+        if (t - t0) % 256 == 0 {
+            resource::checkpoint()?;
+        }
+        // v = R^{-T} x_t (forward substitution), beta = R^{-1} z (back substitution)
+        for i in 0..k {
+            let mut acc = x[[t, i]];
+            for j in 0..i {
+                acc -= r[[j, i]] * v[j];
+            }
+            v[i] = acc / r[[i, i]];
+        }
+        for i in (0..k).rev() {
+            let mut acc = z[i];
+            for j in (i + 1)..k {
+                acc -= r[[i, j]] * beta[j];
+            }
+            beta[i] = acc / r[[i, i]];
+        }
+        let y_hat: f64 = (0..k).map(|j| x[[t, j]] * beta[j]).sum();
+        let f = 1.0 + v.iter().map(|a| a * a).sum::<f64>();
+        let w_t = (y[t] - y_hat) / f.sqrt();
+        if w_t.is_finite() {
+            rec_resid.push(w_t);
+        }
+        fold(&mut r, &mut z, t, &mut row);
     }
 
     if rec_resid.is_empty() {
-        return Err(EconError::InsufficientData {
-            required: 1,
-            provided: 0,
-            context: "No recursive residuals could be computed".to_string(),
-        });
+        return Err(none());
     }
 
     Ok(rec_resid)
@@ -3277,6 +3260,68 @@ mod tests {
                 assert!(message.contains("rank"), "{message}")
             }
             e => panic!("{e:?}"),
+        }
+    }
+
+    /// lmtest::bgtest(order = 1) and bptest on the dummy-trap model: the auxiliary
+    /// regressions use lm.fit's QR, and bptest's df is the auxiliary rank - 1 = 3
+    /// (p 0.7106056688722927; with df 4 it would be 0.848).
+    #[test]
+    fn test_validate_diagnostics_aliased_model() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("ols_aliased");
+        let x = ["x1", "da", "db", "dc"];
+        let bg = bg_test(&ds, "y", &x, 1, BgTestType::Chisq, 0.0).unwrap();
+        let d = run_diagnostics(&ds, "y", &x).unwrap();
+        let bp = d.breusch_pagan.unwrap();
+        let n = bg.n_obs;
+        Check::new(&case)
+            .scalar("trap_bgtest1_chisq", bg.statistic, Tol::stat(n))
+            .scalar("trap_bgtest1_p", bg.p_value, Tol::p_value(n))
+            .scalar("trap_bptest", bp.statistic, Tol::stat(n))
+            .scalar("trap_bptest_p", bp.p_value, Tol::p_value(n))
+            .finish();
+    }
+
+    /// The Givens-updated recursion equals refitting every prefix: w_t = (y_t - x_t'b_t) /
+    /// sqrt(1 + x_t'(X_t'X_t)^{-1}x_t), b_t from rows 0..t by least squares. One regressor
+    /// has a large offset; the first rows repeat so the first prefixes are rank deficient.
+    #[test]
+    fn test_recursive_residuals_match_prefix_refits() {
+        let n = 200;
+        let k = 4;
+        let mut x = Array2::<f64>::zeros((n, k));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let ii = if i < 6 { 0 } else { i } as f64; // rows 0..6 identical
+            x[[i, 0]] = 1.0;
+            x[[i, 1]] = (ii * 0.37).sin() * 2.0 + ii * 0.01;
+            x[[i, 2]] = 1000.0 + (ii * 0.11).cos() * 5.0;
+            x[[i, 3]] = ((i * 7) % 13) as f64 * 0.3;
+            y[i] = 0.5 + 1.2 * x[[i, 1]] - 0.03 * x[[i, 2]]
+                + 0.7 * x[[i, 3]]
+                + 0.4 * (((i * 31) % 17) as f64 / 17.0 - 0.5);
+        }
+        let got = recursive_residuals(&x.view(), &y).unwrap();
+        let mut want = Vec::new();
+        for t in k..n {
+            let xs = x.slice(ndarray::s![0..t, ..]);
+            let fit = least_squares(xs, y.slice(ndarray::s![0..t])).unwrap();
+            if fit.rank < k {
+                continue;
+            }
+            let xt = x.row(t);
+            let e = y[t] - xt.dot(&fit.coefficients);
+            let q = xt.dot(&fit.unscaled_cov.dot(&xt));
+            want.push(e / (1.0 + q).sqrt());
+        }
+        assert_eq!(got.len(), want.len());
+        assert!(want.len() < n - k); // the rank-deficient prefixes were skipped
+        for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-10 * b.abs().max(1e-3),
+                "{i}: {a} vs {b}"
+            );
         }
     }
 }
