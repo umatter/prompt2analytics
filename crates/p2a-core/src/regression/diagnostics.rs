@@ -1113,10 +1113,15 @@ fn reset_regressor_columns(x: &ndarray::ArrayView2<f64>) -> Vec<usize> {
 }
 
 /// Width of the augmented RESET design (original plus augmentation columns),
-/// checked against the sample size before anything is allocated.
+/// checked against the sample size before anything is allocated. The check counts the
+/// model's rank, not its columns (an aliased column costs no degree of freedom), so it
+/// refuses only a sample with no residual degree of freedom left even if every
+/// augmentation term is identified: n <= rank(X) + q. The degrees of freedom of the test
+/// itself come from the augmented fit's rank (df2 = n - rank([X, Z]) must be positive).
 fn reset_augmented_width(
     n: usize,
     k_original: usize,
+    rank_original: usize,
     n_powers: usize,
     reset_type: ResetType,
     n_regressor_cols: usize,
@@ -1133,9 +1138,10 @@ fn reset_augmented_width(
         });
     }
     let k_augmented = k_original.saturating_add(n_aug);
-    if n <= k_augmented {
+    let rank_bound = rank_original.min(k_original).saturating_add(n_aug);
+    if n <= rank_bound {
         return Err(EconError::InsufficientData {
-            required: k_augmented.saturating_add(1),
+            required: rank_bound.saturating_add(1),
             provided: n,
             context: "RESET test augmented model".to_string(),
         });
@@ -1251,6 +1257,7 @@ pub fn reset_test_from_ols(
     let k_augmented = reset_augmented_width(
         n,
         k_original,
+        ols_result.rank(),
         powers.len(),
         reset_type,
         regressor_cols.len(),
@@ -2260,6 +2267,43 @@ mod tests {
         let e = crate::resource::with_alloc_ceiling(Some(1024), || {
             reset_test(&ds, "y", &["x1"], &powers, ResetType::Fitted)
         })
+        .unwrap_err();
+        assert!(matches!(e, EconError::InsufficientData { .. }), "{e:?}");
+    }
+
+    /// An aliased model whose sample has room for the rank-based test but not for every
+    /// design column: n = 5, ncol(X) = 3 (x2 = 2 x1), rank(X) = 2, q = 2. The size check
+    /// counts the rank (n > rank + q), so RESET runs with df = (2, n - rank([X, Z])) = (2, 1).
+    #[test]
+    fn test_reset_size_check_counts_rank_not_aliased_columns() {
+        let df = df! {
+            "y" => [1.3, 1.7, 3.6, 3.9, 5.8],
+            "x1" => [1.0, 2.1, 2.9, 4.2, 5.0],
+            "x2" => [2.0, 4.2, 5.8, 8.4, 10.0]
+        }
+        .unwrap();
+        let ds = Dataset::new(df);
+        let r = reset_test(&ds, "y", &["x1", "x2"], &[2, 3], ResetType::Fitted).unwrap();
+        assert_eq!(r.df, (2, 1));
+        assert!(
+            r.statistic.is_finite() && r.statistic >= 0.0,
+            "{}",
+            r.statistic
+        );
+        // With one observation fewer even the rank-based test has no degree of freedom
+        let df4 = df! {
+            "y" => [1.3, 1.7, 3.6, 3.9],
+            "x1" => [1.0, 2.1, 2.9, 4.2],
+            "x2" => [2.0, 4.2, 5.8, 8.4]
+        }
+        .unwrap();
+        let e = reset_test(
+            &Dataset::new(df4),
+            "y",
+            &["x1", "x2"],
+            &[2, 3],
+            ResetType::Fitted,
+        )
         .unwrap_err();
         assert!(matches!(e, EconError::InsufficientData { .. }), "{e:?}");
     }

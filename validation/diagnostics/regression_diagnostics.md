@@ -117,7 +117,9 @@ Degrees of freedom count ranks:
 - RESET: df1 = rank([X, Z]) − rank(X), df2 = n − rank([X, Z]), as `anova.lm` of the
   augmented fit; terms that alias are dropped with a warning ("RESET: a of q augmentation
   terms are collinear with the model and were dropped"), and an augmentation that adds
-  nothing is `InvalidSpecification`.
+  nothing is `InvalidSpecification`. The sample-size check made before the augmented
+  design is built counts ranks too (n > rank(X) + q), so an aliased column costs no
+  observation; df2 > 0 is the binding check.
 
 `lmtest::resettest` counts ncol(X) and every augmentation column instead (df2 = 113 on
 the dummy-trap model, where anova gives 114). p2a keeps the rank count; the registry
