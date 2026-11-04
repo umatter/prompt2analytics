@@ -2116,30 +2116,116 @@ mod tests {
         }
     }
 
-    /// The IRLS step takes OLS's solve decision: on every family of the R case (noisy
-    /// data, offsets and weights included) the last step is a normal-equations solve, and
-    /// the fit equals the one whose every step is the pivoted QR to 1e-10 relative.
+    /// A deterministic noisy design (intercept and three regressors) with binary, count
+    /// and positive responses, an offset and weights (every 13th weight 0).
+    struct SimData {
+        x: Array2<f64>,
+        yb: Array1<f64>,
+        yc: Array1<f64>,
+        yg: Array1<f64>,
+        offset: Array1<f64>,
+        weights: Array1<f64>,
+    }
+
+    fn sim_data(n: usize, seed: u64) -> SimData {
+        let mut state = seed;
+        let mut u = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut x = Array2::<f64>::zeros((n, 4));
+        for i in 0..n {
+            x[[i, 0]] = 1.0;
+            for j in 1..4 {
+                x[[i, j]] = 2.0 * u() - 1.0 + 0.3 * j as f64;
+            }
+        }
+        let eta: Vec<f64> = (0..n)
+            .map(|i| 0.2 + 0.8 * x[[i, 1]] - 0.5 * x[[i, 2]] + 0.3 * x[[i, 3]])
+            .collect();
+        let yb = eta
+            .iter()
+            .map(|&e| f64::from(u() < 1.0 / (1.0 + (-e).exp())))
+            .collect();
+        let yc = eta.iter().map(|&e| (e.exp() * 2.0 * u()).floor()).collect();
+        let yg = eta.iter().map(|&e| e.exp() + 0.3 * u()).collect();
+        let offset = (0..n).map(|_| 0.1 * u()).collect();
+        let weights = (0..n)
+            .map(|i| if i % 13 == 0 { 0.0 } else { 0.5 + u() })
+            .collect();
+        SimData {
+            x,
+            yb,
+            yc,
+            yg,
+            offset,
+            weights,
+        }
+    }
+
+    /// The IRLS step takes OLS's solve decision: on every family and link (noisy data,
+    /// offsets and weights included) the last step is a normal-equations solve, and the
+    /// fit equals the one whose every step is the pivoted QR to 1e-10 relative.
     #[test]
     fn test_glm_normal_equations_match_qr() {
-        let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
-        let c = columns(&ds);
-        for &(key, yname, xs, family, link, off, wts, _) in FAMILIES {
-            let x = design(&c, xs);
-            let y = response(&c, yname);
-            let offset = off.map(|o| c.numeric_array(o));
-            let weights = wts.map(|w| c.numeric_array(w));
-            let mut spec = GlmSpec::new(family, link);
-            if let Some(o) = &offset {
-                spec = spec.offset(o.view());
+        use GlmFamily as F;
+        use GlmLink as L;
+        for (n, seed) in [(60, 3), (500, 11), (3000, 29)] {
+            let d = sim_data(n, seed);
+            let cases: [(&str, F, L, &Array1<f64>, bool, bool); 12] = [
+                ("logit", F::Binomial, L::Logit, &d.yb, false, false),
+                ("probit", F::Binomial, L::Probit, &d.yb, false, false),
+                ("cloglog", F::Binomial, L::Cloglog, &d.yb, false, false),
+                (
+                    "logit offset weights",
+                    F::Binomial,
+                    L::Logit,
+                    &d.yb,
+                    true,
+                    true,
+                ),
+                (
+                    "quasibinomial",
+                    F::QuasiBinomial,
+                    L::Logit,
+                    &d.yb,
+                    false,
+                    true,
+                ),
+                ("poisson", F::Poisson, L::Log, &d.yc, false, false),
+                ("poisson offset", F::Poisson, L::Log, &d.yc, true, false),
+                ("poisson weights", F::Poisson, L::Log, &d.yc, false, true),
+                ("quasipoisson", F::QuasiPoisson, L::Log, &d.yc, false, false),
+                ("gaussian", F::Gaussian, L::Identity, &d.yg, false, false),
+                ("gaussian log", F::Gaussian, L::Log, &d.yg, true, false),
+                (
+                    "gaussian weights",
+                    F::Gaussian,
+                    L::Identity,
+                    &d.yg,
+                    false,
+                    true,
+                ),
+            ];
+            for (key, family, link, y, off, wts) in cases {
+                let mut spec = GlmSpec::new(family, link);
+                if off {
+                    spec = spec.offset(d.offset.view());
+                }
+                if wts {
+                    spec = spec.weights(d.weights.view());
+                }
+                let key = format!("{key}, n {n}");
+                let (normal, used_normal) =
+                    fit_glm_solved(d.x.view(), y.view(), &spec, false).unwrap();
+                let (qr, used_normal_qr) =
+                    fit_glm_solved(d.x.view(), y.view(), &spec, true).unwrap();
+                assert!(used_normal, "{key}: the normal equations were not used");
+                assert!(!used_normal_qr, "{key}");
+                assert_fits_agree(&key, &normal, &qr, 1e-10);
             }
-            if let Some(w) = &weights {
-                spec = spec.weights(w.view());
-            }
-            let (normal, used_normal) = fit_glm_solved(x.view(), y.view(), &spec, false).unwrap();
-            let (qr, used_normal_qr) = fit_glm_solved(x.view(), y.view(), &spec, true).unwrap();
-            assert!(used_normal, "{key}: the normal equations were not used");
-            assert!(!used_normal_qr, "{key}");
-            assert_fits_agree(key, &normal, &qr, 1e-10);
         }
     }
 
@@ -2148,29 +2234,34 @@ mod tests {
     /// exactly duplicated column is aliased as before.
     #[test]
     fn test_glm_near_collinear_design_takes_qr() {
-        let (_case, ds) = crate::test_support::load_case("linalg_qr_glm");
-        let c = columns(&ds);
-        let mut x = design(&c, &["1", "x1", "x2"]);
+        let d = sim_data(400, 7);
+        let mut x = d.x.slice(ndarray::s![.., ..3]).to_owned();
         let n = x.nrows();
         let mut near = x.column(1).to_owned();
         for (i, v) in near.iter_mut().enumerate() {
             // x1 plus a deterministic perturbation of relative size 1e-7
             *v += 1e-7 * ((i * 7919 % 101) as f64 / 101.0 - 0.5);
         }
-        let mut xn = ndarray::Array2::zeros((n, 4));
+        let mut xn = Array2::zeros((n, 4));
         xn.slice_mut(ndarray::s![.., ..3]).assign(&x);
         xn.column_mut(3).assign(&near);
-        let y = c.numeric_array("yb");
-        let spec = GlmSpec::logit();
-        let (fit, used_normal) = fit_glm_solved(xn.view(), y.view(), &spec, false).unwrap();
-        let (qr, _) = fit_glm_solved(xn.view(), y.view(), &spec, true).unwrap();
-        assert!(!used_normal, "a near-collinear design must take the QR");
-        assert_eq!(fit.rank, 4);
-        assert_fits_agree("near-collinear", &fit, &qr, 0.0);
+        for spec in [GlmSpec::logit(), GlmSpec::poisson()] {
+            let y = if spec.family == GlmFamily::Poisson {
+                &d.yc
+            } else {
+                &d.yb
+            };
+            let (fit, used_normal) = fit_glm_solved(xn.view(), y.view(), &spec, false).unwrap();
+            let (qr, _) = fit_glm_solved(xn.view(), y.view(), &spec, true).unwrap();
+            assert!(!used_normal, "a near-collinear design must take the QR");
+            assert_eq!(fit.rank, 4);
+            assert_fits_agree("near-collinear", &fit, &qr, 0.0);
+        }
 
         let x1 = x.column(1).to_owned();
         x.column_mut(2).assign(&x1);
-        let (dup, used_normal) = fit_glm_solved(x.view(), y.view(), &spec, false).unwrap();
+        let spec = GlmSpec::logit();
+        let (dup, used_normal) = fit_glm_solved(x.view(), d.yb.view(), &spec, false).unwrap();
         assert!(!used_normal);
         assert_eq!((dup.rank, dup.aliased.clone()), (2, vec![2]));
         assert!(dup.coefficients[2].is_nan() && dup.std_errors[2].is_nan());
