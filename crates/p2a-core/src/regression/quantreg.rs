@@ -43,6 +43,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::{safe_inverse, xtx};
+use crate::options::Choices;
 use crate::traits::t_test_p_value;
 
 /// Result from quantile regression.
@@ -63,7 +64,7 @@ pub struct QuantRegResult {
     /// Number of iterations
     pub iterations: usize,
     /// Algorithm used
-    pub algorithm: QuantRegAlgorithm,
+    pub algorithm: QuantRegMethod,
     /// Variable names
     pub variable_names: Vec<String>,
     /// Rows dropped because y or a regressor was missing; absent from JSON when
@@ -97,51 +98,123 @@ pub struct QuantRegCoefficient {
     pub ci_upper_95: f64,
 }
 
-/// Algorithm for quantile regression.
+/// Fitting algorithm (R `quantreg::rq(method = )`).
 ///
-/// NOTE: `InteriorPoint` and `Simplex` are not yet implemented as distinct
-/// algorithms — both currently fall back to `IRLS` (a runtime warning is
-/// emitted when they are selected). They are retained so the public API and
-/// the parsed CLI/MCP options are stable, but they do not change the numerical
-/// result relative to `IRLS`.
+/// Parsed from strings through [`crate::options`]: `auto`, `br` (`simplex`, `barrodale_roberts`),
+/// `fn` (`fnb`, `frisch_newton`, `interior_point`, `ip`) and `irls` (`reweighted`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum QuantRegAlgorithm {
-    /// Interior point method. Currently falls back to IRLS.
+pub enum QuantRegMethod {
+    /// `br` for n <= 5000 observations, `fn` above (quantreg's advice for large problems).
     #[default]
-    InteriorPoint,
-    /// Barrodale-Roberts simplex algorithm. Currently falls back to IRLS.
-    Simplex,
-    /// Iteratively reweighted least squares (the algorithm actually used).
-    IRLS,
+    #[serde(rename = "auto", alias = "Auto")]
+    Auto,
+    /// Barrodale-Roberts simplex (quantreg `rqbr`, Koenker and d'Orey 1987, AS 229): the exact
+    /// LP solution of `rq(method = "br")`.
+    #[serde(rename = "br", alias = "BarrodaleRoberts", alias = "Simplex")]
+    BarrodaleRoberts,
+    /// Frisch-Newton interior point (quantreg `rqfnb`) on `y / mean |y - median(y)|`.
+    #[serde(rename = "fn", alias = "FrischNewton", alias = "InteriorPoint")]
+    FrischNewton,
+    /// Iteratively reweighted least squares: an approximation, not an R method.
+    #[serde(rename = "irls", alias = "Irls", alias = "IRLS")]
+    Irls,
 }
 
-impl std::fmt::Display for QuantRegAlgorithm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// Former name of [`QuantRegMethod`].
+pub type QuantRegAlgorithm = QuantRegMethod;
+
+const QUANTREG_METHOD_CHOICES: Choices<QuantRegMethod> = Choices {
+    option: "method",
+    values: &[
+        (&["auto", "automatic"], QuantRegMethod::Auto),
+        (
+            &["br", "barrodale_roberts", "barrodale", "simplex"],
+            QuantRegMethod::BarrodaleRoberts,
+        ),
+        (
+            &[
+                "fn",
+                "fnb",
+                "frisch_newton",
+                "interior_point",
+                "interiorpoint",
+                "interior",
+                "ip",
+            ],
+            QuantRegMethod::FrischNewton,
+        ),
+        (&["irls", "reweighted"], QuantRegMethod::Irls),
+    ],
+};
+crate::option_enum!(QuantRegMethod, QUANTREG_METHOD_CHOICES);
+
+#[allow(non_upper_case_globals)]
+impl QuantRegMethod {
+    /// Former variant name.
+    #[deprecated(note = "use QuantRegMethod::FrischNewton")]
+    pub const InteriorPoint: Self = Self::FrischNewton;
+    /// Former variant name.
+    #[deprecated(note = "use QuantRegMethod::BarrodaleRoberts")]
+    pub const Simplex: Self = Self::BarrodaleRoberts;
+    /// Former variant name.
+    #[deprecated(note = "use QuantRegMethod::Irls")]
+    pub const IRLS: Self = Self::Irls;
+
+    /// Human-readable name, for Display.
+    pub fn label(self) -> &'static str {
         match self {
-            Self::InteriorPoint => write!(f, "Interior Point (IRLS fallback)"),
-            Self::Simplex => write!(f, "Simplex (IRLS fallback)"),
-            Self::IRLS => write!(f, "IRLS"),
+            Self::Auto => "automatic: br for n <= 5000, fn above",
+            Self::BarrodaleRoberts => "Barrodale-Roberts simplex (br)",
+            Self::FrischNewton => "Frisch-Newton interior point (fn)",
+            Self::Irls => "IRLS approximation (irls)",
         }
+    }
+
+    /// Parse a method name; `None` for an unknown one.
+    #[deprecated(note = "use str::parse, which reports unknown values")]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        s.parse().ok()
     }
 }
 
-impl QuantRegAlgorithm {
-    /// Parse algorithm from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "ip" | "interior" | "interior-point" | "interiorpoint" => Some(Self::InteriorPoint),
-            "simplex" | "br" | "barrodale" => Some(Self::Simplex),
-            "irls" | "reweighted" => Some(Self::IRLS),
-            _ => None,
-        }
-    }
+/// Standard errors (R `quantreg::summary.rq(se = )`).
+///
+/// Parsed from strings: `nid` (`hendricks_koenker`, `sandwich`), `iid` (`koenker_bassett`), `ker`
+/// (`kernel`, `powell`) and `boot` (`bootstrap`, `xy`). R's `se = "rank"` is not implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QuantRegSe {
+    /// Koenker-Bassett sparsity estimate under iid errors.
+    Iid,
+    /// Hendricks-Koenker sandwich with a local density estimate (summary.rq's default for n > 1000).
+    #[default]
+    Nid,
+    /// Powell's kernel sandwich.
+    Ker,
+    /// xy-pair bootstrap (`boot.rq(bsmethod = "xy")`).
+    Boot,
 }
+
+const QUANTREG_SE_CHOICES: Choices<QuantRegSe> = Choices {
+    option: "se",
+    values: &[
+        (&["nid", "hendricks_koenker", "sandwich"], QuantRegSe::Nid),
+        (&["iid", "koenker_bassett"], QuantRegSe::Iid),
+        (&["ker", "kernel", "powell"], QuantRegSe::Ker),
+        (&["boot", "bootstrap", "xy"], QuantRegSe::Boot),
+    ],
+};
+crate::option_enum!(QuantRegSe, QUANTREG_SE_CHOICES);
+
+/// Seed of the bootstrap standard errors when `QuantRegConfig::seed` is `None`.
+pub const QUANTREG_BOOT_DEFAULT_SEED: u64 = 42;
 
 impl std::fmt::Display for QuantRegResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Quantile Regression (τ = {:.2})", self.tau)?;
         writeln!(f, "=================================")?;
-        writeln!(f, "Algorithm: {}", self.algorithm)?;
+        writeln!(f, "Algorithm: {}", self.algorithm.label())?;
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "Parameters: {}", self.n_params)?;
         writeln!(f, "Objective: {:.4}", self.objective)?;
@@ -175,8 +248,8 @@ impl std::fmt::Display for QuantRegResult {
 pub struct QuantRegConfig {
     /// Quantile (τ) to estimate
     pub tau: f64,
-    /// Algorithm to use
-    pub algorithm: QuantRegAlgorithm,
+    /// Fitting algorithm
+    pub algorithm: QuantRegMethod,
     /// Maximum iterations
     pub max_iter: usize,
     /// Convergence tolerance
@@ -189,17 +262,23 @@ pub struct QuantRegConfig {
     /// sandwich estimator regardless of this value. A runtime warning is
     /// emitted when it is set to a non-zero value.
     pub bootstrap_samples: usize,
+    /// Standard errors (summary.rq's `se`); default `Nid`.
+    pub se: QuantRegSe,
+    /// Seed of the bootstrap standard errors (`None`: [`QUANTREG_BOOT_DEFAULT_SEED`]).
+    pub seed: Option<u64>,
 }
 
 impl Default for QuantRegConfig {
     fn default() -> Self {
         Self {
             tau: 0.5, // median regression by default
-            algorithm: QuantRegAlgorithm::IRLS,
+            algorithm: QuantRegMethod::Irls,
             max_iter: 100,
             tol: 1e-6,
             intercept: true,
             bootstrap_samples: 0, // Use sandwich formula approximation
+            se: QuantRegSe::Nid,
+            seed: None,
         }
     }
 }
@@ -289,13 +368,11 @@ pub fn quantreg(
 
     // Run the selected algorithm
     let (beta, iterations) = match config.algorithm {
-        QuantRegAlgorithm::IRLS => {
-            irls_quantreg(&x, &y_arr, config.tau, config.max_iter, config.tol)?
-        }
-        QuantRegAlgorithm::InteriorPoint => {
+        QuantRegMethod::Irls => irls_quantreg(&x, &y_arr, config.tau, config.max_iter, config.tol)?,
+        QuantRegMethod::Auto | QuantRegMethod::FrischNewton => {
             interior_point_quantreg(&x, &y_arr, config.tau, config.max_iter, config.tol)?
         }
-        QuantRegAlgorithm::Simplex => simplex_quantreg(&x, &y_arr, config.tau)?,
+        QuantRegMethod::BarrodaleRoberts => simplex_quantreg(&x, &y_arr, config.tau)?,
     };
 
     // Compute fitted values and residuals
@@ -655,6 +732,100 @@ mod tests {
         assert!(display.contains("Quantile Regression"));
         assert!(display.contains("τ = 0.50"));
         assert!(display.contains("Estimate"));
+    }
+
+    #[test]
+    fn test_quantreg_method_parses_aliases_and_rejects_unknown() {
+        use QuantRegMethod::*;
+        for (s, m) in [
+            ("auto", Auto),
+            ("br", BarrodaleRoberts),
+            ("BR", BarrodaleRoberts),
+            ("simplex", BarrodaleRoberts),
+            ("Barrodale-Roberts", BarrodaleRoberts),
+            ("fn", FrischNewton),
+            ("fnb", FrischNewton),
+            ("interior point", FrischNewton),
+            ("Interior-Point", FrischNewton),
+            ("ip", FrischNewton),
+            ("irls", Irls),
+            ("IRLS", Irls),
+            ("reweighted", Irls),
+        ] {
+            assert_eq!(s.parse::<QuantRegMethod>().unwrap(), m, "{s}");
+        }
+        let err = "lasso".parse::<QuantRegMethod>().unwrap_err().to_string();
+        assert!(
+            err.contains("method")
+                && err.contains("auto")
+                && err.contains("br")
+                && err.contains("fn")
+                && err.contains("irls"),
+            "{err}"
+        );
+        QuantRegMethod::choices().validate().unwrap();
+        assert_eq!(QuantRegMethod::default(), Auto);
+        assert_eq!(Irls.to_string(), "irls");
+        assert_eq!(serde_json::to_string(&BarrodaleRoberts).unwrap(), "\"br\"");
+        assert_eq!(serde_json::to_string(&Auto).unwrap(), "\"auto\"");
+        // JSON written before the rename
+        assert_eq!(
+            serde_json::from_str::<QuantRegMethod>("\"IRLS\"").unwrap(),
+            Irls
+        );
+        assert_eq!(
+            serde_json::from_str::<QuantRegMethod>("\"InteriorPoint\"").unwrap(),
+            FrischNewton
+        );
+        assert_eq!(
+            serde_json::from_str::<QuantRegMethod>("\"Simplex\"").unwrap(),
+            BarrodaleRoberts
+        );
+    }
+
+    #[test]
+    fn test_quantreg_se_parses_aliases_and_rejects_unknown() {
+        use QuantRegSe::*;
+        for (s, v) in [
+            ("nid", Nid),
+            ("Hendricks-Koenker", Nid),
+            ("iid", Iid),
+            ("ker", Ker),
+            ("kernel", Ker),
+            ("Powell", Ker),
+            ("boot", Boot),
+            ("bootstrap", Boot),
+            ("xy", Boot),
+        ] {
+            assert_eq!(s.parse::<QuantRegSe>().unwrap(), v, "{s}");
+        }
+        // R's se = "rank" is not implemented
+        let err = "rank".parse::<QuantRegSe>().unwrap_err().to_string();
+        assert!(
+            err.contains("se") && err.contains("nid") && err.contains("boot"),
+            "{err}"
+        );
+        QuantRegSe::choices().validate().unwrap();
+        assert_eq!(QuantRegSe::default(), Nid);
+        assert_eq!(QuantRegConfig::default().se, Nid);
+        assert_eq!(QuantRegConfig::default().seed, None);
+        assert_eq!(serde_json::to_string(&Ker).unwrap(), "\"ker\"");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_quantreg_algorithm_old_names_still_compile() {
+        assert_eq!(QuantRegAlgorithm::Simplex, QuantRegMethod::BarrodaleRoberts);
+        assert_eq!(
+            QuantRegAlgorithm::InteriorPoint,
+            QuantRegMethod::FrischNewton
+        );
+        assert_eq!(QuantRegAlgorithm::IRLS, QuantRegMethod::Irls);
+        assert_eq!(
+            QuantRegAlgorithm::from_str("br"),
+            Some(QuantRegMethod::BarrodaleRoberts)
+        );
+        assert_eq!(QuantRegAlgorithm::from_str("qs"), None);
     }
 
     #[test]
