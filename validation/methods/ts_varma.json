@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ts_varma",
+      "name": "VARMA(p, q) by the Hannan-Rissanen two-step estimator (long VAR by OLS, then OLS on lagged y and lagged long-VAR residuals)",
+      "category": "econometrics",
+      "reference": "Hannan & Rissanen (1982) written out in R (no VARMA package installed: MTS, marima, dse); each OLS step stats::lm.fit / stats::lm with summary.lm SEs and p-values for q = 0; q = 0 against vars::VAR(type = 'const'), logLik.varest, AIC, BIC; default long-VAR order max(floor(log(n)^2), 2 max(p, q)) (Gomez & Maravall 2001) reduced to floor((n - 2) / (2K + 1))",
+      "doc": "validation/econometrics/timeseries/varma.md",
+      "cases": ["varma_hr"],
+      "tests": [
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_hr_two_step",
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_hr_default_order",
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_q0_matches_vars_var",
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_aliased_regressor_is_nan",
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_ma_terms_change_fit",
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_long_var_order_rule",
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_linearly_dependent_series_is_error",
+        "p2a-core::econometrics::timeseries::varma::tests::test_validate_varma_display_prints_coefficient_table"
+      ],
+      "quantities": ["constant, AR and MA coefficients per equation", "standard errors and p-values (q = 0 only; not reported for q > 0)", "Sigma_u (ML)", "logLik", "AIC", "BIC", "effective sample", "residual df", "parameter count", "long-VAR order (default rule and its reduction)", "q = 0 equals vars::VAR", "aliased regressor NA as lm"],
+      "tolerance": "validation/README.md: n_eff 364-399 coefficients 1e-8, SEs (q = 0), statistics, Sigma_u and logLik/AIC/BIC 1e-6, p-values (q = 0) 1e-6 relative + 1e-12 absolute; short60 (n_eff 48) coefficients 1e-6, statistics 1e-5; orders and counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
