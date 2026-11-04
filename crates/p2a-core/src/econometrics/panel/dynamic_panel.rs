@@ -112,6 +112,24 @@ impl fmt::Display for GmmTransform {
     }
 }
 
+crate::option_enum!(
+    GmmTransform,
+    crate::options::Choices {
+        option: "transform",
+        values: &[
+            (
+                &["difference", "diff", "d", "arellano_bond"],
+                GmmTransform::Difference
+            ),
+            (
+                &["system", "sys", "ld", "blundell_bond"],
+                GmmTransform::System
+            ),
+        ],
+    },
+    no_display
+);
+
 /// GMM estimation step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum GmmStep {
@@ -130,6 +148,21 @@ impl fmt::Display for GmmStep {
         }
     }
 }
+
+crate::option_enum!(
+    GmmStep,
+    crate::options::Choices {
+        option: "step",
+        values: &[
+            (&["onestep", "one_step", "one", "1"], GmmStep::OneStep),
+            (
+                &["twostep", "two_step", "twosteps", "two", "2"],
+                GmmStep::TwoStep
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for GMM estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1108,6 +1141,70 @@ mod tests {
             polars::prelude::df! { "entity" => entity, "time" => time, "x" => x, "y" => y }
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn test_gmm_transform_parses_aliases_and_rejects_unknown() {
+        for s in [
+            "difference",
+            "Difference",
+            " diff ",
+            "d",
+            "Arellano-Bond",
+            "arellano bond",
+        ] {
+            assert_eq!(
+                s.parse::<GmmTransform>().unwrap(),
+                GmmTransform::Difference,
+                "{s}"
+            );
+        }
+        for s in [
+            "system",
+            "System",
+            "SYS",
+            "ld",
+            "Blundell-Bond",
+            "blundell_bond",
+        ] {
+            assert_eq!(
+                s.parse::<GmmTransform>().unwrap(),
+                GmmTransform::System,
+                "{s}"
+            );
+        }
+        match "levels".parse::<GmmTransform>() {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown transform 'levels'; expected one of: difference, system"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!("".parse::<GmmTransform>().is_err());
+        assert_eq!(GmmTransform::choices().validate(), Ok(()));
+        assert_eq!(
+            GmmTransform::System.to_string(),
+            "System GMM (Blundell-Bond)"
+        );
+    }
+
+    #[test]
+    fn test_gmm_step_parses_aliases_and_rejects_unknown() {
+        for s in ["onestep", "OneStep", "one-step", "One Step", "one", "1"] {
+            assert_eq!(s.parse::<GmmStep>().unwrap(), GmmStep::OneStep, "{s}");
+        }
+        for s in ["twostep", "two_step", "twosteps", "Two", "2"] {
+            assert_eq!(s.parse::<GmmStep>().unwrap(), GmmStep::TwoStep, "{s}");
+        }
+        match "three".parse::<GmmStep>() {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown step 'three'; expected one of: onestep, twostep"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(GmmStep::choices().validate(), Ok(()));
+        assert_eq!(GmmStep::TwoStep.to_string(), "Two-step");
     }
 
     #[test]
