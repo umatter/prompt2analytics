@@ -179,6 +179,28 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_dynamic_tree_cut",
+      "name": "Dynamic tree cut",
+      "category": "ml",
+      "reference": "dynamicTreeCut::cutreeDynamic (1.63.1)",
+      "doc": "validation/ml/dynamic_tree_cut.md",
+      "cases": [
+        "dynamic_tree_cut"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_cutree_dynamic_tree",
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_cutree_dynamic_hybrid",
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_dynamic_tree_cut_options_change_the_result",
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_dynamic_tree_cut_defaults_and_fallback"
+      ],
+      "quantities": [
+        "labels: tree deepSplit FALSE/TRUE, cutHeight; hybrid deepSplit 0-4, pamStage FALSE, cutHeight, maxPamDist 0, defaults; ward.D2 tree"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
