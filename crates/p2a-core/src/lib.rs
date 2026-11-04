@@ -58,7 +58,7 @@
 //! |--------|-------------|----------|
 //! | **OLS** | Ordinary least squares with HC0-HC3 robust SEs | [`run_ols`] |
 //! | **Clustered SE** | Clustered standard errors | [`run_ols_clustered`] |
-//! | **GLS** | Generalized least squares (AR(1), compound symmetry or identity; `gls()` also takes a known Omega) | [`run_gls`] |
+//! | **GLS** | Generalized least squares (AR(1), compound symmetry or identity, within groups, rho fixed or by REML/ML; `gls()` also takes a known Omega) | [`run_gls`], [`run_gls_with`] |
 //! | **Quantile Reg** | Quantile/median regression | [`run_quantreg`] |
 //! | **LOESS** | Local polynomial regression | [`run_loess`] |
 //! | **NLS** | Nonlinear least squares | [`run_nls`] |
@@ -1275,7 +1275,11 @@ pub use regression::{
     GlmnetFamily,
     GlmnetResult,
     // GLS (generalized least squares)
+    GlsCorrelation,
+    GlsMethod,
+    GlsOptions,
     GlsResult,
+    GlsSpec,
     HacKernel,
     // HAC (Newey-West) standard errors
     HacResult,
@@ -1347,6 +1351,7 @@ pub use regression::{
     glmnet_predict,
     gls,
     gls_ar1_auto,
+    gls_with,
     harvey_collier_test,
     lasso,
     line,
@@ -1378,6 +1383,7 @@ pub use regression::{
     run_glmnet,
     run_gls,
     run_gls_raw,
+    run_gls_with,
     run_harvey_collier,
     run_lasso,
     run_line,

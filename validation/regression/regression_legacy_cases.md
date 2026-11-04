@@ -259,8 +259,9 @@ Deviations (left out of the test):
 
 T0-WP14's `test_validate_gls_fixed_correlation_vs_nlme` pins fixed-rho AR(1), compound-symmetry
 and identity fits on its own 30-point data to `nlme::gls` at 1e-8, with the R values quoted in
-the test; it loads no case and is not registered. `test_validate_gls_ar1_auto` and
-`test_validate_gls_compound_symmetry` cite no R values and are not registered (REG-44, Tier 3).
+the test; it loads no case and is not registered. Estimated and grouped correlation, and the
+deviations above (fixed by T3-WP11), are documented in [gls.md](gls.md) and the
+`gls_estimated_correlation` registry entry.
 
 ## Legacy files superseded
 

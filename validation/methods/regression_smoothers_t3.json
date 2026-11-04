@@ -68,7 +68,12 @@
       "cases": [
         "gls_compsymm"
       ],
-      "tests": [],
+      "tests": [
+        "test_validate_gls_compsymm_reml",
+        "test_validate_gls_compsymm_ml",
+        "test_validate_gls_compsymm_fixed_rho_grouped",
+        "test_validate_gls_ar1_grouped_reml"
+      ],
       "quantities": [
         "rho (REML, ML)",
         "coefficients",
