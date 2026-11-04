@@ -36,6 +36,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes};
 use crate::traits::estimator::t_test_p_value;
@@ -254,6 +255,7 @@ pub fn gls(
         method: GlsMethod::Reml,
         names: None,
         intercept: None,
+        qr_only: false,
     };
     let fit = engine.fit_at(&structure)?;
     let mut r = engine.result(&fit, &structure, kind, false)?;
@@ -319,6 +321,7 @@ fn gls_engine(
         method: spec.method,
         names,
         intercept,
+        qr_only: false,
     };
     let structure_at = |rho: f64| match spec.correlation {
         GlsCorrelation::Identity => Structure::Identity,
@@ -344,6 +347,10 @@ fn gls_engine(
             engine.result(&fit, &s, spec.correlation, false)?
         }
         (corr, None) => {
+            let engine = Engine {
+                qr_only: true,
+                ..engine
+            };
             let (lo, hi) = match corr {
                 GlsCorrelation::CompoundSymmetry => {
                     engine.check_cs_identified()?;
@@ -394,6 +401,54 @@ fn gls_engine(
         result.n_groups = Some(blocks.count());
     }
     Ok(result)
+}
+
+/// The least-squares solution of one whitened fit.
+struct WhitenedSolve {
+    coefficients: Array1<f64>,
+    /// `(X*'X*)^{-1}`.
+    unscaled: Array2<f64>,
+    sse: f64,
+    rank: usize,
+    aliased: Vec<usize>,
+}
+
+/// `min ||y* - X* b||` with the solve decision OLS takes (`ols::normal_equations_inverse`):
+/// the normal equations, refined once when less well conditioned, on a full-rank,
+/// well-conditioned design; `lm.fit`'s pivoted QR otherwise, which decides rank and names
+/// the aliased columns. A non-finite residual sum of squares (non-finite data) also goes to
+/// the QR, which refuses such input as before. `qr_only` skips the normal equations.
+fn whitened_least_squares(
+    xs: ArrayView2<'_, f64>,
+    ys: &Array1<f64>,
+    qr_only: bool,
+) -> EconResult<WhitenedSolve> {
+    if let Some(normal) = (!qr_only)
+        .then(|| normal_equations_inverse(xs))
+        .transpose()?
+        .flatten()
+    {
+        let beta = normal.coefficients(xs, ys);
+        let resid = ys - &xs.dot(&beta);
+        let sse = resid.dot(&resid);
+        if sse.is_finite() {
+            return Ok(WhitenedSolve {
+                coefficients: beta,
+                unscaled: normal.inverse,
+                sse,
+                rank: xs.ncols(),
+                aliased: Vec::new(),
+            });
+        }
+    }
+    let sol = least_squares(xs, ys.view())?;
+    Ok(WhitenedSolve {
+        sse: sol.residuals.dot(&sol.residuals),
+        coefficients: sol.coefficients,
+        unscaled: sol.unscaled_cov,
+        rank: sol.rank,
+        aliased: sol.aliased,
+    })
 }
 
 /// Brent tolerance and evaluation limit of the ρ search.
@@ -496,6 +551,11 @@ struct Engine<'a, 'd> {
     names: Option<&'a [String]>,
     /// Whether X has an intercept, for R²; `None` detects a constant column.
     intercept: Option<bool>,
+    /// Solve every fit by the pivoted QR. The ρ search sets it: its Brent path is
+    /// scale-free with the QR's rounding (`test_gls_rho_estimate_is_scale_invariant`),
+    /// which the normal equations do not reproduce. Fits at a given ρ take OLS's
+    /// decision ([`whitened_least_squares`]).
+    qr_only: bool,
 }
 
 impl Engine<'_, '_> {
@@ -541,15 +601,22 @@ impl Engine<'_, '_> {
             Structure::Identity => {}
         }
         let mut y_star = resource::try_vec(n, 0.0, "GLS whitened response")?;
-        let mut x_star = resource::try_zeros2(n, p, WHITENED_DESIGN)?;
-        for r in 0..n {
-            let i = b.row(r);
-            y_star[r] = self.y[i];
-            for j in 0..p {
-                x_star[[r, j]] = self.x[[i, j]];
+        // X* column by column (column-major), so that each column is whitened in place
+        let mut x_star = resource::try_vec(
+            resource::checked_len(&[n, p], WHITENED_DESIGN)?,
+            0.0,
+            WHITENED_DESIGN,
+        )?;
+        for (r, v) in y_star.iter_mut().enumerate() {
+            *v = self.y[b.row(r)];
+        }
+        for (j, col) in x_star.chunks_exact_mut(n.max(1)).take(p).enumerate() {
+            let src = self.x.column(j);
+            match &b.order {
+                None => col.iter_mut().zip(src).for_each(|(d, &v)| *d = v),
+                Some(order) => col.iter_mut().zip(order).for_each(|(d, &i)| *d = src[i]),
             }
         }
-        let mut col = vec![0.0; n];
         let mut logdet = 0.0;
         let apply = |v: &mut [f64]| -> EconResult<()> {
             match s {
@@ -587,32 +654,16 @@ impl Engine<'_, '_> {
                 let l = cholesky_lower(omega)?;
                 logdet = 2.0 * (0..n).map(|i| l[[i, i]].ln()).sum::<f64>();
                 forward_substitute(&l, y_star.as_mut_slice())?;
-                for j in 0..p {
+                for col in x_star.chunks_exact_mut(n.max(1)).take(p) {
                     resource::checkpoint()?;
-                    col.iter_mut()
-                        .zip(x_star.column(j))
-                        .for_each(|(c, &v)| *c = v);
-                    forward_substitute(&l, &mut col)?;
-                    x_star
-                        .column_mut(j)
-                        .iter_mut()
-                        .zip(&col)
-                        .for_each(|(d, &v)| *d = v);
+                    forward_substitute(&l, col)?;
                 }
             }
             _ => {
                 apply(y_star.as_mut_slice())?;
-                for j in 0..p {
+                for col in x_star.chunks_exact_mut(n.max(1)).take(p) {
                     resource::checkpoint()?;
-                    col.iter_mut()
-                        .zip(x_star.column(j))
-                        .for_each(|(c, &v)| *c = v);
-                    apply(&mut col)?;
-                    x_star
-                        .column_mut(j)
-                        .iter_mut()
-                        .zip(&col)
-                        .for_each(|(d, &v)| *d = v);
+                    apply(col)?;
                 }
                 for g in b.starts.windows(2) {
                     let m = (g[1] - g[0]) as f64;
@@ -626,6 +677,8 @@ impl Engine<'_, '_> {
                 }
             }
         }
+        let x_star = Array2::from_shape_vec(ndarray::ShapeBuilder::f((n, p)), x_star)
+            .map_err(|e| EconError::Computation(format!("GLS whitened design: {e}")))?;
         Ok((Array1::from_vec(y_star), x_star, logdet))
     }
 
@@ -633,7 +686,7 @@ impl Engine<'_, '_> {
     fn fit_at(&self, s: &Structure) -> EconResult<FitAt> {
         let (n, p) = self.x.dim();
         let (ys, xs, logdet) = self.whiten(s)?;
-        let sol = least_squares(xs.view(), ys.view())?;
+        let sol = whitened_least_squares(xs.view(), &ys, self.qr_only)?;
         if sol.rank < p {
             let cols: Vec<String> = sol
                 .aliased
@@ -652,8 +705,8 @@ impl Engine<'_, '_> {
                 suggestion: "drop collinear regressors".to_string(),
             });
         }
-        let sse = sol.residuals.dot(&sol.residuals);
-        let unscaled = sol.unscaled_cov;
+        let sse = sol.sse;
+        let unscaled = sol.unscaled;
         let (nf, pf) = (n as f64, p as f64);
         let ln2pi = (2.0 * std::f64::consts::PI).ln();
         // l = -df/2 (ln 2π + 1 + ln(SSE*/df)) - penalty, with df = N (ML) or N - p (REML)
@@ -1933,5 +1986,105 @@ mod tests {
         )
         .unwrap();
         assert!((g.r_squared - uncentred).abs() > 1e-6);
+    }
+
+    /// A deterministic noisy series for the T3-PERF3 equivalence tests.
+    fn perf3_noise(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            })
+            .collect()
+    }
+
+    /// The whitened solve takes OLS's decision: on noisy full-rank designs the normal
+    /// equations give the pivoted QR's coefficients, (X*'X*)^-1 and SSE* to 1e-10 relative,
+    /// and so the GLS fit at a given rho.
+    #[test]
+    fn test_gls_normal_equations_match_pivoted_qr() {
+        let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-300);
+        for (n, p, seed) in [(40usize, 2usize, 1u64), (300, 4, 2), (1000, 3, 3)] {
+            let e = perf3_noise(n * (p + 1), seed);
+            let x = Array2::from_shape_fn((n, p), |(i, j)| {
+                if j == 0 {
+                    1.0
+                } else {
+                    (i as f64 * 0.1 * j as f64).sin() + e[j * n + i]
+                }
+            });
+            let mut y = Array1::zeros(n);
+            for i in 0..n {
+                let ar = if i > 0 { 0.5 * y[i - 1] } else { 0.0 };
+                y[i] = ar + 1.0 + x.row(i).sum() * 0.3 + e[i];
+            }
+            assert!(normal_equations_inverse(x.view()).unwrap().is_some());
+            for rho in [0.5, -0.3] {
+                let blocks = Blocks::single(n);
+                let engine = Engine {
+                    y: y.view(),
+                    x: x.view(),
+                    blocks: &blocks,
+                    method: GlsMethod::Reml,
+                    names: None,
+                    intercept: None,
+                    qr_only: false,
+                };
+                let (ys, xs, _) = engine.whiten(&Structure::Ar1(rho)).unwrap();
+                let fast = whitened_least_squares(xs.view(), &ys, false).unwrap();
+                let qr = least_squares(xs.view(), ys.view()).unwrap();
+                assert_eq!(fast.rank, p);
+                let sse_qr = qr.residuals.dot(&qr.residuals);
+                assert!(
+                    rel(fast.sse, sse_qr) < 1e-10,
+                    "n {n} sse {} vs {sse_qr}",
+                    fast.sse
+                );
+                for j in 0..p {
+                    assert!(rel(fast.coefficients[j], qr.coefficients[j]) < 1e-10);
+                    for l in 0..p {
+                        let (a, b) = (fast.unscaled[[j, l]], qr.unscaled_cov[[j, l]]);
+                        assert!(
+                            (a - b).abs() <= 1e-10 * b.abs().max(qr.unscaled_cov[[j, j]].abs())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A regressor equal to another up to noise far below lm.fit's tolerance is still
+    /// refused (the normal equations leave such a design to the QR, which names it), and a
+    /// non-finite response is refused as before.
+    #[test]
+    fn test_gls_nearly_collinear_and_non_finite_reach_the_qr() {
+        let n = 50;
+        let e = perf3_noise(2 * n, 7);
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => i as f64 / 10.0 + e[i],
+            _ => 2.0 * (i as f64 / 10.0 + e[i]) + 1e-13 * e[n + i],
+        });
+        assert!(normal_equations_inverse(x.view()).unwrap().is_none());
+        let y = Array1::from_shape_fn(n, |i| 1.0 + x[[i, 1]] + e[n + i]);
+        let ar1 = CorrelationStructure::AR1 { rho: 0.4 };
+        match gls(&y.view(), &x.view(), ar1.clone()).unwrap_err() {
+            EconError::SingularMatrix { context, .. } => {
+                assert!(context.contains("rank 2 of 3"), "{context}")
+            }
+            e => panic!("{e:?}"),
+        }
+        let x2 = x.slice(ndarray::s![.., ..2]).to_owned();
+        let mut y2 = y.clone();
+        y2[7] = f64::INFINITY;
+        assert!(matches!(
+            gls(&y2.view(), &x2.view(), ar1).unwrap_err(),
+            EconError::InvalidSpecification { .. }
+        ));
     }
 }

@@ -68,7 +68,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::solve::{LM_QR_TOL, least_squares};
-use crate::regression::ols::{CovarianceType, OlsResult, run_ols};
+use crate::regression::ols::{CovarianceType, OlsResult, normal_equations_inverse, run_ols};
 use crate::traits::t_critical;
 
 /// Result of sensitivity analysis for a single treatment variable.
@@ -420,15 +420,7 @@ fn partial_r2_covariate_outcome(
     // Regress y on all covariates except the one at covariate_idx
     // Then get residuals and compute partial R² from the t-stat
 
-    // Build X_{-j}: X without column j
-    let mut x_minus_j_cols = Vec::with_capacity(k - 1);
-    for j in 0..k {
-        if j != covariate_idx {
-            x_minus_j_cols.push(x.column(j).to_owned());
-        }
-    }
-
-    if x_minus_j_cols.is_empty() {
+    if k == 1 {
         // Only one covariate - partial R² is total R²
         let y_mean = y.mean().unwrap_or(0.0);
         let tss: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
@@ -448,26 +440,38 @@ fn partial_r2_covariate_outcome(
         return Ok(if tss > 1e-10 { 1.0 - rss / tss } else { 0.0 });
     }
 
-    let k_minus_1 = x_minus_j_cols.len();
+    // X_{-j}: X without column j
+    let k_minus_1 = k - 1;
     let mut x_minus_j = Array2::<f64>::zeros((n, k_minus_1));
-    for (j, col) in x_minus_j_cols.iter().enumerate() {
-        x_minus_j.column_mut(j).assign(col);
+    for (dst, src) in (0..k).filter(|&j| j != covariate_idx).enumerate() {
+        x_minus_j.column_mut(dst).assign(&x.column(src));
     }
 
-    // Residuals of y and of X_j on X_{-j}, by pivoted QR (lm.fit). An aliased X_{-j} column, or
-    // X_j in the span of X_{-j}, leaves the partial R² undefined.
+    // Residuals of y and of X_j on X_{-j}. An aliased X_{-j} column (which the pivoted QR,
+    // lm.fit, decides), or X_j in the span of X_{-j}, leaves the partial R² undefined.
     let collinear = || EconError::SingularMatrix {
         context: format!("benchmark covariate '{name}' is collinear with the other covariates"),
         suggestion: "drop the collinear covariate or choose another benchmark".to_string(),
     };
-    let fit_y = least_squares(x_minus_j.view(), y.view())?;
-    if fit_y.rank < k_minus_1 {
-        return Err(collinear());
-    }
-    let y_resid = fit_y.residuals;
+    // Both regressions share X_{-j}, so they share one solve decision (OLS's: the normal
+    // equations on a full-rank, well-conditioned X_{-j}, the QR otherwise).
     let x_j = x.column(covariate_idx).to_owned();
-    let fit_x = least_squares(x_minus_j.view(), x_j.view())?;
-    let x_j_resid = fit_x.residuals;
+    let (y_resid, x_j_resid) = match normal_equations_inverse(x_minus_j.view())? {
+        Some(normal) => {
+            let xm = x_minus_j.view();
+            let y_resid = y - &xm.dot(&normal.coefficients(xm, y));
+            let x_j_resid = &x_j - &xm.dot(&normal.coefficients(xm, &x_j));
+            (y_resid, x_j_resid)
+        }
+        None => {
+            let fit_y = least_squares(x_minus_j.view(), y.view())?;
+            if fit_y.rank < k_minus_1 {
+                return Err(collinear());
+            }
+            let fit_x = least_squares(x_minus_j.view(), x_j.view())?;
+            (fit_y.residuals, fit_x.residuals)
+        }
+    };
     let x_scale = x_j.dot(&x_j).sqrt();
     if x_j_resid.dot(&x_j_resid).sqrt() <= LM_QR_TOL * x_scale {
         return Err(collinear());
@@ -1168,5 +1172,75 @@ mod tests {
         assert_eq!(r.benchmark_bounds.len(), 1);
         let out = r.to_string();
         assert!(out.contains("Wohnfläche_in_m²_... "), "{out}"); // 20 chars, {:>20}
+    }
+
+    /// A deterministic noisy series for the T3-PERF3 equivalence tests.
+    fn perf3_noise(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+            })
+            .collect()
+    }
+
+    /// The benchmark partial R² by OLS's solve decision (one normal-equations inverse for
+    /// both auxiliary regressions) equals the pivoted-QR value to 1e-10 relative.
+    #[test]
+    fn test_partial_r2_normal_equations_match_pivoted_qr() {
+        for (n, k, seed) in [(30usize, 2usize, 1u64), (500, 4, 2), (2000, 3, 3)] {
+            let e = perf3_noise(n * (k + 1), seed);
+            let x = Array2::from_shape_fn((n, k), |(i, j)| {
+                if j == 0 {
+                    1.0
+                } else {
+                    (i as f64 * 0.01 * j as f64).cos() + e[j * n + i]
+                }
+            });
+            let d = Array1::from_shape_fn(n, |i| 0.4 * x.row(i).sum() + e[i]);
+            for jx in 1..k {
+                let got = partial_r2_covariate_treatment(&d, &x, jx, "b").unwrap();
+                let cols: Vec<usize> = (0..k).filter(|&c| c != jx).collect();
+                let xm = Array2::from_shape_fn((n, k - 1), |(i, c)| x[[i, cols[c]]]);
+                assert!(normal_equations_inverse(xm.view()).unwrap().is_some());
+                let ry = least_squares(xm.view(), d.view()).unwrap().residuals;
+                let rx = least_squares(xm.view(), x.column(jx)).unwrap().residuals;
+                let (my, mx) = (ry.mean().unwrap(), rx.mean().unwrap());
+                let cov: f64 = ry.iter().zip(&rx).map(|(a, b)| (a - my) * (b - mx)).sum();
+                let vy: f64 = ry.iter().map(|a| (a - my).powi(2)).sum();
+                let vx: f64 = rx.iter().map(|b| (b - mx).powi(2)).sum();
+                let want = (cov / (vy.sqrt() * vx.sqrt())).powi(2);
+                assert!(
+                    (got - want).abs() <= 1e-10 * want,
+                    "n {n} j {jx}: {got} vs {want}"
+                );
+            }
+        }
+    }
+
+    /// Two other covariates equal up to noise far below lm.fit's tolerance leave X_{-j}
+    /// to the pivoted QR, which finds it aliased: an error naming the benchmark.
+    #[test]
+    fn test_sensemakr_nearly_aliased_controls_reach_the_qr() {
+        let n = 40;
+        let e = perf3_noise(3 * n, 4);
+        let x = Array2::from_shape_fn((n, 4), |(i, j)| match j {
+            0 => 1.0,
+            1 => i as f64 / 9.0 + e[i],
+            2 => e[n + i],
+            _ => 3.0 * (i as f64 / 9.0 + e[i]) + 1e-13 * e[2 * n + i],
+        });
+        let d = Array1::from_shape_fn(n, |i| x[[i, 1]] + e[2 * n + i]);
+        match partial_r2_covariate_treatment(&d, &x, 2, "w").unwrap_err() {
+            EconError::SingularMatrix { context, .. } => {
+                assert!(context.contains("'w'"), "{context}")
+            }
+            e => panic!("{e:?}"),
+        }
     }
 }

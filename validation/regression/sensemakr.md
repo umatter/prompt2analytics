@@ -42,3 +42,9 @@ error.
   0.019359950325335992). `run_sensemakr`'s se, t, partial R^2, RV and `r2_yd_benchmark` use the HC1
   t (R: classical; `female_r2yxj` p2a 0.1204729846).
 - REG-27: `bound_r2dz_x`, `bound_r2yz_dx`, `bound_adjusted_*` (bound formulas, adjusted SE and CI).
+
+## Timing
+
+The benchmark partial R² takes OLS's solve decision (normal equations on a full-rank,
+well-conditioned X_{-j}, the pivoted QR otherwise) for both auxiliary regressions; head / base
+against `fe13b889` and the tests are in `gls.md` ("T3-PERF3").
