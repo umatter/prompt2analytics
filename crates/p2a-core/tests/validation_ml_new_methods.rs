@@ -1,18 +1,13 @@
-//! Validation tests comparing new ML methods against R reference values.
+//! Property tests for kernel SVM, ROC/AUC and confusion matrices on deterministic data. No R
+//! output is compared here. CART is pinned to rpart in `ml::cart::tests` (T3-WP44); the SVM pins
+//! to e1071 live in `ml::svm`/`ml::svm_fast` (T3-WP45).
 //!
-//! Reference values from: validation/scripts/validate_new_ml_simple.R
 //! Run with: cargo test -p p2a-core --test validation_ml_new_methods
 
 use ndarray::{Array1, Array2};
 use p2a_core::{
-    CartConfig,
-    CartMethod,
     KernelSvmConfig,
     SvmKernel,
-    // CART
-    cart,
-    // Variable Importance
-    cart_variable_importance,
     confusion_matrix,
     // Kernel SVM
     kernel_svm,
@@ -50,191 +45,56 @@ fn generate_test_data(n: usize) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
     (x, y_reg, y_class)
 }
 
-/// R Reference: RBF accuracy ~0.70, Linear ~0.72
+/// Training accuracy on 200 deterministic rows whose classes are separated by x1 + x2 = 1 (x3 is
+/// noise). `e1071::svm(X, factor(y), cost = 1, gamma = 1/3, scale = FALSE, tolerance = 1e-3)`
+/// reaches 0.995 on these exact rows for both kernels (nSV 83 linear, 97 radial; computed for
+/// T3-WP48); the bound allows two more misclassifications (197 of 200).
 #[test]
-fn test_kernel_svm_vs_r() {
+fn test_kernel_svm_separable_training_accuracy() {
     let (x, _, y_class) = generate_test_data(200);
-
-    // RBF Kernel SVM
-    let config_rbf = KernelSvmConfig {
-        kernel: SvmKernel::Rbf,
-        c: 1.0,
-        gamma: Some(1.0 / 3.0),
-        max_iter: 1000,
-        tolerance: 1e-3,
-        ..Default::default()
+    let accuracy = |predictions: &[i32]| {
+        predictions
+            .iter()
+            .zip(y_class.iter())
+            .filter(|(p, l)| (**p as f64 - **l).abs() < 0.5)
+            .count() as f64
+            / y_class.len() as f64
     };
 
+    let mut config_rbf = KernelSvmConfig::default();
+    config_rbf.kernel = SvmKernel::Rbf;
+    config_rbf.c = 1.0;
+    config_rbf.gamma = Some(1.0 / 3.0);
+    config_rbf.max_iter = 1000;
+    config_rbf.tolerance = 1e-3;
     let result_rbf =
         kernel_svm(x.view(), y_class.view(), &config_rbf, None).expect("RBF SVM should succeed");
+    let acc_rbf = accuracy(&result_rbf.predictions);
+    assert!(acc_rbf >= 0.985, "RBF SVM training accuracy {acc_rbf}");
 
-    let correct_rbf: usize = result_rbf
-        .predictions
-        .iter()
-        .zip(y_class.iter())
-        .filter(|(p, l)| (**p as f64 - **l).abs() < 0.5)
-        .count();
-    let acc_rbf = correct_rbf as f64 / y_class.len() as f64;
-
-    println!("RBF SVM Accuracy: {:.4} (R ref: ~0.70)", acc_rbf);
-    assert!(
-        acc_rbf > 0.50,
-        "RBF SVM accuracy should be reasonable: {}",
-        acc_rbf
-    );
-
-    // Linear Kernel SVM
-    let config_linear = KernelSvmConfig {
-        kernel: SvmKernel::Linear,
-        c: 1.0,
-        max_iter: 1000,
-        tolerance: 1e-3,
-        ..Default::default()
-    };
-
+    let mut config_linear = KernelSvmConfig::default();
+    config_linear.kernel = SvmKernel::Linear;
+    config_linear.c = 1.0;
+    config_linear.max_iter = 1000;
+    config_linear.tolerance = 1e-3;
     let result_linear = kernel_svm(x.view(), y_class.view(), &config_linear, None)
         .expect("Linear SVM should succeed");
-
-    let correct_linear: usize = result_linear
-        .predictions
-        .iter()
-        .zip(y_class.iter())
-        .filter(|(p, l)| (**p as f64 - **l).abs() < 0.5)
-        .count();
-    let acc_linear = correct_linear as f64 / y_class.len() as f64;
-
-    println!("Linear SVM Accuracy: {:.4} (R ref: ~0.72)", acc_linear);
+    let acc_linear = accuracy(&result_linear.predictions);
     assert!(
-        acc_linear > 0.50,
-        "Linear SVM accuracy should be reasonable: {}",
-        acc_linear
+        acc_linear >= 0.985,
+        "linear SVM training accuracy {acc_linear}"
     );
-
-    println!(
-        "RBF SVs: {} ({:.1}%)",
-        result_rbf.n_support_vectors,
-        100.0 * result_rbf.n_support_vectors as f64 / y_class.len() as f64
-    );
+    println!("training accuracy: rbf {acc_rbf}, linear {acc_linear}");
 }
 
-/// R Reference: CART R² ~0.80, Accuracy ~0.81
-#[test]
-fn test_cart_vs_r() {
-    let (x, y_reg, y_class) = generate_test_data(200);
-
-    // CART Regression
-    let mut config = CartConfig::default();
-    config.method = CartMethod::Anova;
-    config.max_depth = 5;
-    config.min_split = 10;
-    config.min_bucket = 5;
-    config.cp = 0.01;
-    config.xval = 0;
-    config.max_surrogate = 0;
-    config.use_surrogate = false;
-    config.seed = Some(42);
-
-    let result = cart(x.view(), y_reg.view(), &config).expect("CART regression should succeed");
-
-    // Calculate MSE and R²
-    let mse: f64 = result
-        .predictions
-        .iter()
-        .zip(y_reg.iter())
-        .map(|(p, a)| (p - a).powi(2))
-        .sum::<f64>()
-        / y_reg.len() as f64;
-
-    let y_mean = y_reg.mean().unwrap();
-    let ss_tot: f64 = y_reg.iter().map(|y| (y - y_mean).powi(2)).sum();
-    let r2 = 1.0 - (mse * y_reg.len() as f64) / ss_tot;
-
-    println!("CART Regression MSE: {:.6} (R ref: ~0.09)", mse);
-    println!("CART Regression R²: {:.4} (R ref: ~0.80)", r2);
-
-    assert!(r2 > 0.50, "CART R² should be reasonable: {}", r2);
-
-    // CART Classification
-    let mut config_class = CartConfig::default();
-    config_class.method = CartMethod::Gini;
-    config_class.max_depth = 5;
-    config_class.min_split = 10;
-    config_class.min_bucket = 5;
-    config_class.cp = 0.01;
-    config_class.xval = 0;
-    config_class.max_surrogate = 0;
-    config_class.use_surrogate = false;
-    config_class.seed = Some(42);
-
-    // Convert y_class from {-1, 1} to {0, 1}
-    let y_class_01: Array1<f64> = y_class.mapv(|v| if v > 0.0 { 1.0 } else { 0.0 });
-
-    let result_class = cart(x.view(), y_class_01.view(), &config_class)
-        .expect("CART classification should succeed");
-
-    let correct: usize = result_class
-        .predictions
-        .iter()
-        .zip(y_class_01.iter())
-        .filter(|(p, a)| (p.round() - *a).abs() < 0.5)
-        .count();
-    let acc = correct as f64 / y_class_01.len() as f64;
-
-    println!("CART Classification Accuracy: {:.4} (R ref: ~0.81)", acc);
-    assert!(
-        acc > 0.50,
-        "CART classification should be reasonable: {}",
-        acc
-    );
-}
-
-/// R Reference: Variable Importance x1 > x2 > x3
-#[test]
-fn test_variable_importance_ranking() {
-    let (x, y_reg, _) = generate_test_data(200);
-
-    let mut config = CartConfig::default();
-    config.method = CartMethod::Anova;
-    config.max_depth = 5;
-    config.min_split = 10;
-    config.min_bucket = 5;
-    config.cp = 0.01;
-    config.xval = 0;
-    config.max_surrogate = 0;
-    config.use_surrogate = false;
-    config.seed = Some(42);
-
-    let result = cart(x.view(), y_reg.view(), &config).expect("CART should succeed");
-
-    let feature_names = vec!["x1".to_string(), "x2".to_string(), "x3".to_string()];
-    let vimp = cart_variable_importance(&result, Some(&feature_names));
-
-    println!("Variable Importance:");
-    for (i, name) in feature_names.iter().enumerate() {
-        println!(
-            "  {}: {:.4} (rank {})",
-            name, vimp.importance[i], vimp.ranks[i]
-        );
-    }
-
-    // R reference: x1: 0.8221, x2: 0.1139, x3: 0.0640
-    // x1 should be most important (rank 1) since y = 2*x1 + 0.5*x2 + noise
-    assert_eq!(vimp.ranks[0], 1, "x1 should be rank 1 (most important)");
-    assert!(
-        vimp.importance[0] >= vimp.importance[1],
-        "x1 should be more important than x2"
-    );
-}
-
-/// R Reference: AUC ~0.86
+/// Negatives 0.2 + 0.01 i, positives 0.6 + 0.008 i (i = 0..49). AUC = Mann-Whitney U / (n1 n0) =
+/// 2438/2500 (R: `wilcox.test(pos, neg)$statistic / 2500`; 2437 pairs pos > neg, 2 ties). The
+/// first maximal Youden threshold is 0.6 (sensitivity 1, specificity 0.8).
 #[test]
 fn test_roc_auc_calculation() {
-    // Create a well-separated dataset
     let n = 100;
     let mut predictions = Vec::with_capacity(n);
     let mut actual = Vec::with_capacity(n);
-
-    // Good separation: positives have higher probabilities
     for i in 0..50 {
         predictions.push(0.2 + (i as f64) * 0.01);
         actual.push(0.0);
@@ -246,21 +106,13 @@ fn test_roc_auc_calculation() {
 
     let result = roc_auc(&predictions, &actual, Some(100)).expect("ROC/AUC should succeed");
 
-    println!("AUC: {:.4}", result.auc);
-    println!("Optimal Threshold: {:.4}", result.optimal_threshold);
-    println!("Sensitivity: {:.4}", result.optimal_metrics.sensitivity);
-    println!("Specificity: {:.4}", result.optimal_metrics.specificity);
-
-    // With good separation, AUC should be high
+    assert!((result.auc - 0.9752).abs() < 1e-12, "AUC {}", result.auc);
+    assert_eq!(result.optimal_threshold, 0.6);
+    assert_eq!(result.optimal_metrics.sensitivity, 1.0);
     assert!(
-        result.auc > 0.90,
-        "AUC should be high for well-separated data: {}",
-        result.auc
-    );
-    assert!(
-        result.optimal_threshold > 0.3 && result.optimal_threshold < 0.8,
-        "Optimal threshold should be reasonable: {}",
-        result.optimal_threshold
+        (result.optimal_metrics.specificity - 0.8).abs() < 1e-12,
+        "specificity {}",
+        result.optimal_metrics.specificity
     );
 }
 
@@ -288,22 +140,4 @@ fn test_confusion_matrix_metrics() {
     assert_eq!(result.fp, 1);
     assert_eq!(result.fn_count, 2);
     assert!((result.accuracy - 5.0 / 8.0).abs() < 1e-10);
-}
-
-/// Summary comparison
-#[test]
-fn test_summary_vs_r() {
-    println!("\n========================================");
-    println!("RUST vs R COMPARISON SUMMARY");
-    println!("========================================\n");
-
-    println!("Method             | Rust    | R       | Status");
-    println!("-------------------|---------|---------|--------");
-    println!("Kernel SVM (RBF)   | >0.50   | 0.70    | ✓ Working");
-    println!("Kernel SVM (Lin)   | >0.50   | 0.72    | ✓ Working");
-    println!("CART Regression    | >0.50   | 0.80    | ✓ Working");
-    println!("CART Class.        | >0.50   | 0.81    | ✓ Working");
-    println!("ROC/AUC            | >0.90   | 0.86    | ✓ Working");
-    println!("Var Importance     | x1>x2>x3| x1>x2>x3| ✓ Match");
-    println!("\nAll methods produce reasonable, usable results.");
 }

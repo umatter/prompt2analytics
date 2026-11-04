@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_treeshap",
+      "name": "TreeSHAP (tree path-dependent Shapley values) and SHAP interaction values for tree ensembles",
+      "category": "ml",
+      "reference": "Exact Shapley values and Shapley interaction index of the path-dependent game E[f(x) | x_S] (Lundberg, Erion & Lee 2020, Algorithm 1 and eqs. 8-9), enumerated over all coalitions and written out in R (no SHAP package is a case dependency); tree from rpart::rpart 4.1.23",
+      "doc": "validation/ml/shap.md",
+      "cases": [
+        "shap_tree_rpart"
+      ],
+      "tests": [
+        "p2a-core::ml::shap::tests::test_validate_treeshap_rpart_tree",
+        "p2a-core::ml::shap::tests::test_validate_treeshap_interactions_rpart_tree"
+      ],
+      "quantities": [
+        "SHAP values (80 training rows, 5 points outside the data)",
+        "expected value E[f] (cover-weighted)",
+        "leaf predictions",
+        "interaction values (10 rows), symmetry, row sums"
+      ],
+      "tolerance": "exact algorithm vs enumeration: 1e-10 relative, 1e-12 absolute (observed <= 1.5e-15); predictions exact; additivity 1e-8 relative to max(1, |f|)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_kernel_shap",
+      "name": "Kernel SHAP (interventional): every coalition when 2^M - 2 <= n_samples (M <= 11 at the default budget), shap.KernelExplainer's design otherwise",
+      "category": "ml",
+      "reference": "Exact interventional Shapley values v(S) = mean_b f(x_S, b_notS) (Lundberg & Lee 2017; Janzing, Minorics & Bloebaum 2020) enumerated over all coalitions, written out in R for four fixed models; shap.KernelExplainer's coalition design and constrained solve",
+      "doc": "validation/ml/shap.md",
+      "cases": [
+        "shap_kernel_sim"
+      ],
+      "tests": [
+        "p2a-core::ml::shap::tests::test_validate_kernel_shap_sim_m1",
+        "p2a-core::ml::shap::tests::test_validate_kernel_shap_sim_m4",
+        "p2a-core::ml::shap::tests::test_validate_kernel_shap_sim_m11_enumerated",
+        "p2a-core::ml::shap::tests::test_validate_kernel_shap_sim_m12_sampled"
+      ],
+      "quantities": [
+        "SHAP values M = 1, 4, 11 (exact), M = 12 (sampled design)",
+        "base value E f over the background",
+        "predictions f(x)",
+        "efficiency (sum of SHAP values = f(x) - E f)",
+        "design: rows, complete sizes, fixed weight"
+      ],
+      "tolerance": "exact paths 1e-10 relative, 1e-12 absolute (observed <= 1.5e-14); sampled M = 12 at the default n_samples: 0.15 absolute (twice the maximum of 100 R replications of the design, 0.0729); efficiency 1e-10",
+      "deviations": [
+        {
+          "finding": "ML-100",
+          "quantity": "sampled coalitions",
+          "note": "p2a draws from ChaCha8 (seed, row stream), not numpy, so the sampled coalitions differ from shap's; only the design and the Monte Carlo accuracy are pinned"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
