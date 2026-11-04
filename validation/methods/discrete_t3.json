@@ -93,7 +93,8 @@
       "tests": [
         "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_overlap",
         "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_convergence_is_scale_free",
-        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_aliased_regressor_is_an_error"
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_aliased_regressor_is_an_error",
+        "p2a-core::validation_new_methods::test_validate_multinom_overlapping"
       ],
       "quantities": [
         "coefficients and SEs per non-reference category",
@@ -103,7 +104,8 @@
         "category counts",
         "nnet's own estimates (coef_pkg)",
         "scale-free convergence (x1 x 1e-6, x 1e6; iteration counts agree within one)",
-        "aliased regressor refused"
+        "aliased regressor refused",
+        "reference category B through the crate-root API (refB_*)"
       ],
       "tolerance": "coefficients Tol::iterative(1e-8), SEs Tol::iterative(1e-6) against the Newton-polished optimum; logLik, AIC Tol::stat(300); coef_pkg Tol::iterative(1e-4) (nnet stops 8.3e-6 off the MLE at its defaults)",
       "deviations": [],
