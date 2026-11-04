@@ -45,7 +45,10 @@
         "smoothers_gcv_periodic_loess",
         "supsmu_sine"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::regression::supsmu::tests::test_validate_supsmu_periodic",
+        "p2a-core::regression::supsmu::tests::test_validate_supsmu_sine"
+      ],
       "quantities": [
         "smoothed values: cv, fixed span, bass, periodic, weights, ties",
         "unique x grid"

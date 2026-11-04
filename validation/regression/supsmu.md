@@ -1,90 +1,74 @@
 # Friedman's SuperSmoother Validation
 
-## Method Overview
+## Method
 
-SuperSmoother (`supsmu`) is a nonparametric regression method that uses locally weighted linear regression with an adaptive span. It automatically selects the optimal smoothing span based on cross-validation.
+`regression::supsmu::supsmu` is a port of R's `stats::supsmu` (Friedman's Fortran
+`supsmu`/`smooth` in R's `ppr.f`): running lines with uniform weights in windows of
+`2 ibw + 1` points, `ibw = int(0.5 span n + 0.5)` (at least 2), shifted at the ends or
+wrapped around [0, 1] with `periodic = TRUE`. With `span = "cv"` (None) it smooths with the
+tweeter, midrange and woofer spans (0.05, 0.2, 0.5, R's single-precision constants
+widened to double), smooths each span's exact leave-one-out absolute residuals with the
+midrange span, picks the best span at each point, moves it toward the woofer by `bass`
+(Friedman's rule), smooths, clamps and interpolates the spans, and ends with a tweeter
+smooth. Tied x enter the windows one by one and their fits are averaged afterwards; the
+result has one value per distinct x (R's `!duplicated(xo)`).
 
-**Key Parameters:**
-- `x`: Predictor variable (must be sorted)
-- `y`: Response variable
-- `wt`: Optional weights
-- `span`: Fixed span (0 to 1) or automatic selection if not specified
-- `periodic`: Whether data is periodic
-- `bass`: Bass tone control (0-10, higher = smoother)
+Before this, `supsmu` was a different smoother (tricube windows of rounded sizes, ties merged
+first, approximate CV residuals; REG-31) and ignored `periodic` (REG-55).
 
-## Reference Implementations
+Inputs as R: `periodic` needs x in [0, 1]; `span` must be in [0, 1]; `bass` in [0, 10] (R
+ignores values outside (0, 10]; p2a refuses them); weights non-negative. A periodic smooth
+whose widest window exceeds n is an error (R reads past its array there).
 
-| Package | Function | Notes |
-|---------|----------|-------|
-| R stats | `supsmu()` | Reference implementation |
+## R reference
 
-## Algorithm
+Cases in `validation/r/cases/regression_smoothers_t3.R`:
 
-1. For each point, select neighbors based on span
-2. Fit local linear regression with tricube weights
-3. If span not specified, use cross-validation to select optimal span
-4. Apply bass enhancement if requested (additional smoothing)
+- `smoothers_gcv_periodic_loess`: x = sorted `runif(100)`, y = sin(2 pi x) + N(0, 0.3^2)
+  (`set.seed(20261127)`):
+  ```r
+  supsmu(x, y, periodic = TRUE); supsmu(x, y, periodic = FALSE)
+  supsmu(x, y, span = 0.3, periodic = TRUE); supsmu(x, y, span = 0.3)
+  supsmu(x, y, bass = 5); supsmu(x, y, bass = 5, periodic = TRUE)
+  ```
+- `supsmu_sine`: the legacy `validate_regression_diag.R` DGP (`set.seed(42)`, x = sorted
+  `runif(100, 0, 2 pi)`, y = sin(x) + N(0, 0.3^2)); supersedes `supsmu_test.csv`:
+  ```r
+  supsmu(x, y); supsmu(x, y, span = 0.3); supsmu(x, y, bass = 5); supsmu(x, y, wt = w); supsmu(round(x, 1), y)
+  ```
 
-## Test Cases
+## Values
 
-### Test Case 1: Sine Wave Recovery
+| Key | R (first values, ..., last) |
+|---|---|
+| `supsmu_periodic_y` | 0.05406098939563001, 0.05089869608987187, 0.07043700555743775, ..., -0.0036871704595962396 |
+| `supsmu_plain_y` | 0.3721017324147564, 0.37179504877741937, 0.3658049366798011, ..., -0.2448389761845025 |
+| `supsmu_span03_periodic_y` | 0.020128144899512465, 0.018171832200386623, 0.05037921783266596, ..., -0.03187916957288198 |
+| `supsmu_span03_plain_y` | 0.19730074531476421, 0.19807899986174776, 0.2132797846750213, ..., -0.36707986702824796 |
+| `supsmu_bass5_y` | 0.3901069225946856, 0.3901178289723678, 0.390330851178126, ..., -0.2486110828717627 |
+| `supsmu_bass5_periodic_y` | 0.06590949818723782, 0.06223518419001231, 0.0812102175071758, ..., 0.010015485926487058 |
+| `supsmu_sine` `cv_y` | 0.08836614520859382, 0.0945472103290684, 0.10558401206586905, ... |
+| `span03_y`, `bass5_y`, `weighted_y` | 0.23794559748436644, ...; 0.08976977516918519, ...; 0.07547843596009472, ... |
+| `ties_x`, `ties_y` | 0, 0.2, 0.3, 0.5, ... (54 values); 0.11071908799385004, 0.24979831134634112, 0.312820578487983, ... |
+| `reg_smoothers_na` `supsmu_y` | 0.15651909282843657, 0.26487134495896175, 0.50685449350390188, ... (56) |
 
-**R Code:**
-```r
-x <- (1:100) / 100
-y <- sin(x * 2 * pi) + rnorm(100, sd = 0.2)
-fit <- supsmu(x, y)
-# Should recover approximate sine wave
-plot(x, y)
-lines(fit$x, fit$y, col = "red")
-```
+## Tolerances
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
-- `regression::supsmu::tests::test_validate_supsmu_sine_wave` (`crates/p2a-core/src/regression/supsmu.rs`): on the first 20 rows of the legacy `supsmu_test.csv` (R's input and smoothed values, typed into the test), the smoothed values lie in (-1.5, 1.5), are smoother than the input, and correlate above 0.9 with R's. A loose comparison, not R-pinned.
+`validation/README.md` coefficient row: n = 100: 1e-8, n = 56: 1e-6. The port agrees with
+R to about 1e-15.
 
-### Test Case 2: Fixed Span
+## Tests
 
-**R Code:**
-```r
-x <- (1:50) / 50
-y <- x^2 + rnorm(50, sd = 0.1)
-fit <- supsmu(x, y, span = 0.2)
-print(fit$y[1:5])
-```
+Registered (`supsmu` in `validation/methods/regression_smoothers_t3.json`):
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
-- `regression::supsmu::tests::test_validate_supsmu_fixed_span` (`crates/p2a-core/src/regression/supsmu.rs`): n = 50 and, on linear data, more than 40 smoothed values increase.
+- `test_validate_supsmu_periodic`: cv, span 0.3 and bass 5, periodic and not; periodic and
+  plain fits differ.
+- `test_validate_supsmu_sine`: the x grid (exact), cv, span 0.3, bass 5, weights and ties.
 
-### Test Case 3: Comparison with R Output
-
-**R Code:**
-```r
-set.seed(42)
-x <- (1:20) / 20
-y <- sin(x * 2 * pi) + c(0.1, -0.05, 0.08, -0.12, 0.03, -0.07, 0.11, -0.02,
-                         0.06, -0.09, 0.04, -0.08, 0.07, -0.03, 0.09, -0.06,
-                         0.02, -0.1, 0.05, -0.04)
-fit <- supsmu(x, y, span = 0.2)
-print(round(fit$y[1:5], 6))
-# [1] 0.298291 0.509294 0.687844 0.816543 0.886892
-```
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
-- `regression::supsmu::tests::test_validate_supsmu_sine_wave` (`crates/p2a-core/src/regression/supsmu.rs`): on the first 20 rows of the legacy `supsmu_test.csv` (R's input and smoothed values, typed into the test), the smoothed values lie in (-1.5, 1.5), are smoother than the input, and correlate above 0.9 with R's. A loose comparison, not R-pinned.
-
-### Test Case 4: Bass Enhancement
-
-**R Code:**
-```r
-x <- 1:100
-y <- sin(x / 10) + rnorm(100, sd = 0.5)
-fit_bass0 <- supsmu(x, y, bass = 0)
-fit_bass5 <- supsmu(x, y, bass = 5)
-# bass=5 should be smoother
-```
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with REG-31 for the estimator and REG-44 for the tests):
-- `regression::supsmu::tests::test_supsmu_bass_parameter` (`crates/p2a-core/src/regression/supsmu.rs`): the bass value is stored (0 and 10). No smoothed value is compared.
+Also `test_validate_supsmu_na` (below) now pins `supsmu_y`. Property tests (not registered):
+`test_supsmu_periodic_is_rotation_invariant` (a periodic smooth does not depend on where
+[0, 1) is cut, 1e-10), `test_supsmu_rejects_invalid_inputs` (periodic x outside [0, 1],
+span, bass, negative weights, a periodic window wider than n).
 
 ## Missing and Non-finite Values (REG-13)
 
@@ -111,7 +95,7 @@ Tests (registry entry `supsmu_missing` in `validation/methods/regression_na.json
 comparison is exact except the CLI text's grid, which is printed with 4 decimals:
 
 - `test_validate_supsmu_na`: the x grid equals R's `supsmu_x` exactly; `n` is
-  `n_complete`; every smoothed value is finite and equals the smooth on the complete rows;
+  `n_complete`; the smooth equals R's `supsmu_y`; every smoothed value is finite and equals the smooth on the complete rows;
   a NaN weight and an infinite x are deleted jointly;
 - `test_validate_mcp_regression_supsmu_na`: the first 20 grid points equal R's, the
   smoothed values are numbers, a missing weight drops its row, a text weights column is an
@@ -126,31 +110,16 @@ Property tests, not registered (no R value):
 `test_cli_reg_line_supsmu_too_few_complete_rows` check the too-few-rows error of supsmu and
 line through MCP and the CLI.
 
-### Known difference (REG-31)
+### REG-31 (fixed)
 
-p2a's super smoother is not Friedman's algorithm (Tier 4): on this case its smoothed values
-differ from R's `supsmu_y` by up to 0.673 (absolute). `supsmu_y` is recorded in the case and
-not compared (registry deviation).
+The smooth on this case is now pinned: `supsmu_y` is compared at `Tol::coef(56)` (the old
+smoother was up to 0.673 off). The `supsmu_missing` registry entry in
+`validation/methods/regression_na.json` still lists REG-31 as a deviation; its removal is
+left to the status integration.
 
-## Numerical Precision Summary
+## Deviations
 
-| Sample Size | Smoothed Value Tolerance |
-|-------------|-------------------------|
-| n < 100 | 1e-4 |
-| n = 100-500 | 1e-5 |
-| n > 500 | 1e-6 |
-
-## Known Differences
-
-1. **Automatic span selection**: May differ slightly due to cross-validation implementation
-2. **Edge handling**: Boundary effects may vary
-3. **Tie handling**: Different tie-breaking in sorting
-
-## Performance Notes
-
-- O(n^2) for naive implementation, O(n log n) with optimizations
-- Rust implementation 5-15x faster than R
-- Memory usage scales linearly with n
+None: the port agrees with R on every case.
 
 ## References
 
