@@ -354,13 +354,14 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Machine Learning
 | Method | File | Status |
 |--------|------|--------|
-| K-means | [kmeans.md](ml/kmeans.md) | not R-pinned |
-| DBSCAN | no validation document yet | not R-pinned |
-| Hierarchical | no validation document yet | not R-pinned |
-| Cutree | [cutree.md](ml/cutree.md) | not R-pinned |
-| PCA | [pca.md](ml/pca.md) | not R-pinned |
+| K-means | [kmeans.md](ml/kmeans.md) | R-pinned |
+| DBSCAN | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
+| Hierarchical (stats::hclust core; hierarchical, fastcluster, AGNES, DIANA, pvclust) | [hclust.md](ml/hclust.md) | R-pinned, known deviations (ML-10, ML-55) |
+| Cutree | [cutree.md](ml/cutree.md) | R-pinned |
+| Dynamic tree cut (dynamicTreeCut::cutreeDynamic) | [dynamic_tree_cut.md](ml/dynamic_tree_cut.md) | R-pinned |
+| PCA | [pca.md](ml/pca.md) | R-pinned, known deviations (ML-35) |
 | t-SNE | no validation document yet | not R-pinned |
-| Classical MDS (cmdscale) | [cmdscale.md](ml/cmdscale.md) | not R-pinned |
+| Classical MDS (cmdscale) | [cmdscale.md](ml/cmdscale.md) | R-pinned, known deviations (ML-98) |
 | Projection Pursuit Regression | [ppr.md](ml/ppr.md) | not R-pinned |
 | Random Forest | no validation document yet | not R-pinned |
 | SVM | no validation document yet | not R-pinned |
