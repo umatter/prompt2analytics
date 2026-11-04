@@ -11,21 +11,22 @@
 //!
 //! R equivalent: `plm::pggls()`
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::resource;
+use crate::traits::convergence::ResultNotes;
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 use super::utils::{demean_by_entity, entity_codes, time_codes};
 
-/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
-/// SVD fallback). Check the working set against the allocation ceiling before building it.
+/// `sym_inverse` holds several m x m copies at once (copy, equilibration, eigenvectors,
+/// solution). Check the working set against the allocation ceiling before building it.
 const DENSE_INVERSE_COPIES: usize = 6;
 
 fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
@@ -95,7 +96,7 @@ pub struct PanelGlsResult {
     #[serde(skip)]
     pub error_cov_dim: usize,
     /// Any warnings generated during estimation
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 
     // ── Trait-backing storage (LinearEstimator). Skipped from JSON.
@@ -112,6 +113,26 @@ pub struct PanelGlsResult {
     /// (plm `na.omit`).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+}
+
+impl ResultNotes for PanelGlsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+/// Residuals of a first-step OLS fit; aliased columns get R's aliasing warning.
+fn first_step_residuals(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    names: &[String],
+    warnings: &mut Vec<String>,
+) -> EconResult<Vec<f64>> {
+    let ls = least_squares(x, y)?;
+    if let Some(w) = ls.aliasing_warning(names) {
+        warnings.push(format!("first-step OLS: {w}"));
+    }
+    Ok(ls.residuals.to_vec())
 }
 
 impl crate::traits::estimator::LinearEstimator for PanelGlsResult {
@@ -184,21 +205,7 @@ impl fmt::Display for PanelGlsResult {
         writeln!(f, "Sigma: {:.6}  RSS: {:.4}", self.sigma, self.rss)?;
 
         // The missing-value note is printed once, as the last line
-        let note = self.missing.note();
-        let shown: Vec<&String> = self
-            .warnings
-            .iter()
-            .filter(|w| note.as_deref() != Some(w.as_str()))
-            .collect();
-        if !shown.is_empty() {
-            writeln!(f, "\nWarnings:")?;
-            for warning in shown {
-                writeln!(f, "  - {}", warning)?;
-            }
-        }
-        if let Some(note) = note {
-            writeln!(f, "Missing values: {note}")?;
-        }
+        super::types::write_warnings_then_missing(f, "\nWarnings:", &self.warnings, &self.missing)?;
 
         Ok(())
     }
@@ -267,11 +274,11 @@ pub fn run_panel_gls(
     if let Some(note) = missing.note() {
         warnings.push(note);
     }
-    let y: Vec<f64> = cols.numeric(y_col).to_vec();
+    let y: &[f64] = cols.numeric(y_col);
     let entity = cols.factor(entity_col);
     let (entity_ids, n_groups) = entity_codes(entity);
-    let time_values: Vec<i64> = cols.time_index(time_col).to_vec();
-    let (row_time_idx, unique_times) = time_codes(&time_values);
+    let time_values: &[i64] = cols.time_index(time_col);
+    let (row_time_idx, unique_times) = time_codes(time_values);
     let n_periods = unique_times.len();
 
     let n = y.len();
@@ -303,10 +310,10 @@ pub fn run_panel_gls(
     let k = x.ncols();
 
     // Step 1: Initial estimation based on model type
-    let (initial_resid, _) = match model {
+    let initial_resid = match model {
         PanelGlsModel::FixedEffects => {
             // Within transformation (demean by entity)
-            let y_arr = Array1::from(y.clone());
+            let y_arr = Array1::from(y.to_vec());
             let y_demeaned = demean_by_entity(&y_arr, &entity_ids, n_groups);
 
             let mut x_demeaned = Array2::<f64>::zeros((n, k));
@@ -319,26 +326,21 @@ pub fn run_panel_gls(
             }
 
             // OLS on demeaned data
-            let xtx_mat = xtx(&x_demeaned.view());
-            let (xtx_inv, _) = safe_inverse(&xtx_mat.view())?;
-            let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
-            let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-            let fitted = x_demeaned.dot(&beta);
-            let resid = &y_demeaned - &fitted;
-
-            (resid.to_vec(), beta.to_vec())
+            first_step_residuals(
+                x_demeaned.view(),
+                y_demeaned.view(),
+                &dm.column_names,
+                &mut warnings,
+            )?
         }
         PanelGlsModel::Pooling => {
             // Simple OLS
-            let y_arr = Array1::from(y.clone());
-            let xtx_mat = xtx(&x.view());
-            let (xtx_inv, _) = safe_inverse(&xtx_mat.view())?;
-            let xty_vec = xty(&x.view(), &y_arr);
-            let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-            let fitted = x.dot(&beta);
-            let resid = &y_arr - &fitted;
-
-            (resid.to_vec(), beta.to_vec())
+            first_step_residuals(
+                x.view(),
+                ArrayView1::from(y),
+                &dm.column_names,
+                &mut warnings,
+            )?
         }
         PanelGlsModel::FirstDifference => {
             // First-difference transformation
@@ -396,15 +398,13 @@ pub fn run_panel_gls(
                 }
             }
 
-            // OLS on differenced data
-            let xtx_mat = xtx(&x_diff_arr.view());
-            let (xtx_inv, _) = safe_inverse(&xtx_mat.view())?;
-            let xty_vec = xty(&x_diff_arr.view(), &y_diff_arr);
-            let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-            let fitted = x_diff_arr.dot(&beta);
-            let resid = &y_diff_arr - &fitted;
-
-            (resid.to_vec(), beta.to_vec())
+            // OLS on differenced data (the differenced intercept is zero: aliased)
+            first_step_residuals(
+                x_diff_arr.view(),
+                y_diff_arr.view(),
+                &dm.column_names,
+                &mut warnings,
+            )?
         }
     };
 
@@ -452,27 +452,17 @@ pub fn run_panel_gls(
         }
     }
 
-    // Ensure positive definiteness
-    let omega_inv = match safe_inverse(&omega.view()) {
-        Ok((inv, _)) => inv,
-        Err(_) => {
-            warnings.push("Omega matrix near-singular, using regularization".to_string());
-            // Add small ridge to diagonal
-            for i in 0..t_dim {
-                omega[[i, i]] += 1e-6;
-            }
-            safe_inverse(&omega.view())
-                .map(|(inv, _)| inv)
-                .map_err(|_| EconError::SingularMatrix {
-                    context: "Error covariance matrix".to_string(),
-                    suggestion: "Check for multicollinearity or insufficient time variation"
-                        .to_string(),
-                })?
-        }
-    };
+    // A singular Omega (the within residuals sum to zero in every entity, so its
+    // rank is T - 1) gets a generalized inverse, reported with its rank.
+    let omega_what = "panel GLS error covariance (T x T)";
+    let omega_s = sym_inverse(omega.view(), SingularPolicy::Generalized, omega_what)?;
+    if let Some(w) = omega_s.warning(omega_what) {
+        warnings.push(w);
+    }
+    let omega_inv = omega_s.inverse;
 
     // Step 3: GLS estimation
-    let y_arr = Array1::from(y.clone());
+    let y_arr = Array1::from(y.to_vec());
 
     // Compute GLS estimates using the formula:
     // beta_GLS = (X' * Omega_block^{-1} * X)^{-1} * (X' * Omega_block^{-1} * y)
@@ -514,12 +504,14 @@ pub fn run_panel_gls(
     }
 
     // Solve for GLS coefficients
-    let (xtox_inv, cond) = safe_inverse(&xtox.view()).map_err(|_| EconError::SingularMatrix {
-        context: "X'Omega^{-1}X in Panel GLS".to_string(),
-        suggestion: "Check for perfect collinearity".to_string(),
-    })?;
+    let xtox_s = sym_inverse(
+        xtox.view(),
+        SingularPolicy::Error,
+        "X'Omega^-1 X in panel GLS",
+    )?;
+    let xtox_inv = xtox_s.inverse;
 
-    if cond.is_some_and(|c| c > 1e10) {
+    if xtox_s.reciprocal_condition < 1e-10 {
         warnings.push(
             "High condition number detected, results may be numerically unstable".to_string(),
         );
@@ -538,12 +530,15 @@ pub fn run_panel_gls(
 
     let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
 
-    let df_residual = n.saturating_sub(k);
-    let sigma = if df_residual > 0 {
-        (rss / df_residual as f64).sqrt()
-    } else {
-        0.0
-    };
+    let df_residual =
+        n.checked_sub(k)
+            .filter(|&d| d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: k + 1,
+                provided: n,
+                context: format!("panel GLS with {k} coefficients"),
+            })?;
+    let sigma = (rss / df_residual as f64).sqrt();
 
     // Standard errors from (X'Omega^{-1}X)^{-1}
     let se_scale = rss / df_residual as f64;
@@ -842,7 +837,7 @@ mod tests {
     /// Characterisation test: the code before the T0-WP14 resource bounds gives
     /// the same numbers, and later refactors must not move them. Each fit uses a
     /// panel whose T x T Omega has full rank, so the pinned values do not depend
-    /// on rounding-level pivots inside `safe_inverse`.
+    /// on rounding-level pivots inside the inverse.
     ///
     /// FixedEffects is not pinned: under the current algorithm its Omega is
     /// singular along the vector of ones (the within residuals sum to zero in
@@ -987,6 +982,38 @@ mod tests {
         }
     }
 
+    /// The rows whose text firm id is missing (grunfeld_na.csv rows 77 and 133) are
+    /// dropped, not fitted as an 11th entity "".
+    #[test]
+    fn test_validate_na_panel_gls_missing_firm_id() {
+        let (_case, ds) = crate::test_support::load_case("panel_grunfeld_na");
+        let null_id = ds.df().column("firm_name").unwrap().is_null();
+        let mut df = early(ds.df());
+        df.vstack_mut(&ds.df().filter(&null_id).unwrap()).unwrap();
+        assert_eq!(df.height(), 103);
+        let complete = Dataset::new(df.drop_nulls::<String>(None).unwrap());
+        let ds = Dataset::new(df);
+        let note = "6 of 103 rows dropped because of missing values (inv: 2, firm_name: 2, \
+                    year: 2)";
+        for m in MODELS {
+            let fit = |d: &Dataset| {
+                run_panel_gls(
+                    d,
+                    "inv",
+                    &["value", "capital"],
+                    "firm_name",
+                    "year",
+                    Some(m),
+                )
+                .unwrap_or_else(|e| panic!("{m:?}: {e}"))
+            };
+            let r = fit(&ds);
+            assert_same_gls(&r, &fit(&complete));
+            assert_eq!(r.n_groups, 10, "{m:?}");
+            assert_eq!(r.missing.note().as_deref(), Some(note), "{m:?}");
+        }
+    }
+
     /// Integer outcomes and times of any integer width are read as numbers; a
     /// fractional time is an error; the errors name the column.
     #[test]
@@ -1042,5 +1069,74 @@ mod tests {
             Err(EconError::NonNumericColumn { column }) => assert_eq!(column, "firm_name"),
             other => panic!("expected NonNumericColumn, got {other:?}"),
         }
+    }
+
+    /// The within residuals sum to zero in every entity, so the T x T error covariance has
+    /// rank T - 1: its generalized inverse is reported.
+    #[test]
+    fn test_validate_panel_gls_within_reports_singular_error_covariance() {
+        let (_case, ds) = crate::test_support::load_case("pggls_sim");
+        let r = run_fegls(&ds, "y", &["x1", "x2"], "id", "t").unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "panel GLS error covariance (T x T) is singular (rank 4 of 5); a \
+                    generalized inverse was used"),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("rank 4 of 5"));
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["warnings"].as_array().is_some_and(|w| !w.is_empty()));
+    }
+
+    /// The differenced intercept is a column of zeros: the first step names it.
+    #[test]
+    fn test_validate_panel_gls_fd_reports_aliased_first_step() {
+        let (_case, ds) = crate::test_support::load_case("pggls_sim");
+        let r = run_panel_gls(
+            &ds,
+            "y",
+            &["x1", "x2"],
+            "id",
+            "t",
+            Some(PanelGlsModel::FirstDifference),
+        )
+        .unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "first-step OLS: Coefficients not defined because of singularities: \
+                    (Intercept)"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// plm::pggls(model = "pooling") on pggls_sim (N = 40, T = 5).
+    #[test]
+    fn test_validate_pggls_pooling_sim() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("pggls_sim");
+        let r = run_pooled_gls(&ds, "y", &["x1", "x2"], "id", "t").unwrap();
+        // deviation ECON-33: pooling_se (SEs scaled by rss/df twice)
+        Check::new(&case)
+            .named(
+                "pooling_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(200),
+            )
+            .scalar("pooling_rss", r.rss, Tol::stat(200))
+            .scalar("pooling_r2", r.r_squared, Tol::stat(200))
+            .scalar("pooling_df_resid", r.df_residual as f64, Tol::exact())
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!((r.n_obs, r.n_groups, r.n_periods), (200, 40, 5));
+        // deviation ECON-33: within_*/fd_* coefficients and SEs, fd_df_resid (GLS step
+        // ignores the transformation)
+        let w = run_fegls(&ds, "y", &["x1", "x2"], "id", "t").unwrap();
+        Check::new(&case)
+            .scalar("within_df_resid", w.df_residual as f64, Tol::exact())
+            .finish();
+        assert_eq!(w.n_obs, 200);
     }
 }

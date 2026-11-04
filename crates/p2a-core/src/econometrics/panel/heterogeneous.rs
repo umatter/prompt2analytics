@@ -28,8 +28,9 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
 
 /// Result from a variable coefficients model (pvcm).
@@ -72,6 +73,9 @@ pub struct PvcmResult {
     pub df: usize,
     /// Entity variable name
     pub entity_var: String,
+    /// Entities skipped (too few rows, collinear regressors)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 
     // ── Trait-backing storage (LinearEstimator). Skipped from JSON.
     #[serde(skip, default)]
@@ -110,6 +114,12 @@ impl crate::traits::estimator::LinearEstimator for PvcmResult {
     }
     fn n_obs(&self) -> usize {
         self.n_obs
+    }
+}
+
+impl ResultNotes for PvcmResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 }
 
@@ -167,8 +177,21 @@ impl fmt::Display for PvcmResult {
         writeln!(f)?;
 
         writeln!(f, "Individual Coefficients (first 5 entities shown):")?;
+        // R factor() order, the order of the fit: numerically when every id is a number,
+        // else in byte order.
         let mut entities: Vec<&String> = self.individual_coefficients.keys().collect();
-        entities.sort();
+        let numeric: Option<Vec<f64>> = entities.iter().map(|k| k.parse::<f64>().ok()).collect();
+        if numeric.is_some() {
+            entities.sort_by(|a, b| {
+                let (x, y) = (
+                    a.parse::<f64>().unwrap_or(0.0),
+                    b.parse::<f64>().unwrap_or(0.0),
+                );
+                x.total_cmp(&y).then_with(|| a.cmp(b))
+            });
+        } else {
+            entities.sort();
+        }
         let mut count = 0;
         for entity in entities {
             let coeffs = &self.individual_coefficients[entity];
@@ -190,6 +213,8 @@ impl fmt::Display for PvcmResult {
         if self.n_entities > 5 {
             writeln!(f, "  ... ({} more entities)", self.n_entities - 5)?;
         }
+        // The warnings, then the missing-value note as the last line.
+        f.write_str(&notes_text(self))?;
         if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
@@ -259,13 +284,17 @@ pub fn run_pvcm(
     let mut individual_std_errors: HashMap<String, Vec<f64>> = HashMap::new();
     let mut all_betas: Vec<Array1<f64>> = Vec::new();
     let mut all_vcovs: Vec<Array2<f64>> = Vec::new();
+    let mut all_labels: Vec<&str> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for (level, indices) in rows_by_entity.iter().enumerate() {
         resource::checkpoint()?;
         let entity_label = &entity.levels[level];
         let n_i = indices.len();
         if n_i <= k {
-            // Not enough observations for this entity
+            warnings.push(format!(
+                "entity '{entity_label}' skipped: {n_i} observations for {k} coefficients"
+            ));
             continue;
         }
 
@@ -280,34 +309,29 @@ pub fn run_pvcm(
             }
         }
 
-        // OLS for entity i
-        let xtx_i = xtx(&x_i.view());
-        let (xtx_inv_i, _) = match safe_inverse(&xtx_i.view()) {
-            Ok(inv) => inv,
-            Err(_) => continue, // Skip singular entities
-        };
+        // OLS for entity i; collinear regressors are skipped, not pseudo-inverted
+        let ls = least_squares(x_i.view(), y_i.view())?;
+        if ls.rank < k {
+            warnings.push(format!(
+                "entity '{entity_label}' skipped: its regressors are collinear (rank {} of {k})",
+                ls.rank
+            ));
+            continue;
+        }
+        let beta_i = ls.coefficients;
 
-        let xty_i = xty(&x_i.view(), &y_i);
-        let beta_i: Array1<f64> = xtx_inv_i.dot(&xty_i);
-
-        // Residuals and variance
-        let fitted_i = x_i.dot(&beta_i);
-        let resid_i = &y_i - &fitted_i;
-        let df_i = n_i.saturating_sub(k);
-        let sigma2_i: f64 = if df_i > 0 {
-            resid_i.iter().map(|r| r * r).sum::<f64>() / df_i as f64
-        } else {
-            resid_i.iter().map(|r| r * r).sum::<f64>()
-        };
+        // Residual variance (n_i > k above)
+        let sigma2_i: f64 = ls.residuals.iter().map(|r| r * r).sum::<f64>() / (n_i - k) as f64;
 
         // Variance-covariance of beta_i
-        let vcov_i = &xtx_inv_i * sigma2_i;
+        let vcov_i = &ls.unscaled_cov * sigma2_i;
         let std_err_i: Vec<f64> = vcov_i.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();
 
         individual_coefficients.insert(entity_label.clone(), beta_i.to_vec());
         individual_std_errors.insert(entity_label.clone(), std_err_i);
         all_betas.push(beta_i);
         all_vcovs.push(vcov_i);
+        all_labels.push(entity_label);
     }
 
     let n_valid_entities = all_betas.len();
@@ -380,19 +404,25 @@ pub fn run_pvcm(
             let mut sum_wb: Array1<f64> = Array1::zeros(k);
 
             for (i, beta) in all_betas.iter().enumerate() {
+                resource::checkpoint()?;
                 let vcov_plus_delta = &all_vcovs[i] + &delta_mat;
-                if let Ok((w_i, _)) = safe_inverse(&vcov_plus_delta.view()) {
-                    sum_w = &sum_w + &w_i;
-                    sum_wb = &sum_wb + &w_i.dot(beta);
-                }
+                let w_i = sym_inverse(
+                    vcov_plus_delta.view(),
+                    SingularPolicy::Error,
+                    &format!("Var(b_i) + Delta for entity '{}'", all_labels[i]),
+                )?
+                .inverse;
+                sum_w = &sum_w + &w_i;
+                sum_wb = &sum_wb + &w_i.dot(beta);
             }
 
             // GLS estimate
-            let (sum_w_inv, _) =
-                safe_inverse(&sum_w.view()).map_err(|_| EconError::SingularMatrix {
-                    context: "GLS weight matrix in pvcm".to_string(),
-                    suggestion: "Check for collinearity".to_string(),
-                })?;
+            let sum_w_inv = sym_inverse(
+                sum_w.view(),
+                SingularPolicy::Error,
+                "the Swamy weight sum (sum of (Var(b_i) + Delta)^-1)",
+            )?
+            .inverse;
 
             let beta_gls: Array1<f64> = sum_w_inv.dot(&sum_wb);
             let se_gls: Vec<f64> = sum_w_inv.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();
@@ -403,7 +433,13 @@ pub fn run_pvcm(
     };
 
     // Compute t-statistics and p-values
-    let df = n.saturating_sub(k);
+    let df = n
+        .checked_sub(k)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: k,
+            provided: n,
+            context: "pvcm: fewer rows than coefficients".to_string(),
+        })?;
     let t_stats: Vec<f64> = coefficients
         .iter()
         .zip(std_errors.iter())
@@ -430,10 +466,13 @@ pub fn run_pvcm(
     let mut homogeneity_stat = 0.0;
     for (i, beta) in all_betas.iter().enumerate() {
         let diff = beta - &beta_bar_test;
-        if let Ok((vcov_inv, _)) = safe_inverse(&all_vcovs[i].view()) {
-            let quad_form = diff.dot(&vcov_inv.dot(&diff));
-            homogeneity_stat += quad_form;
-        }
+        let vcov_inv = sym_inverse(
+            all_vcovs[i].view(),
+            SingularPolicy::Error,
+            &format!("Var(b_i) of entity '{}'", all_labels[i]),
+        )?
+        .inverse;
+        homogeneity_stat += diff.dot(&vcov_inv.dot(&diff));
     }
 
     let homogeneity_df = ((n_valid_entities - 1) * k) as f64;
@@ -470,6 +509,7 @@ pub fn run_pvcm(
         n_entities,
         df,
         entity_var: entity_col.to_string(),
+        warnings,
         coef_arr,
         se_arr,
         residuals,
@@ -574,5 +614,150 @@ mod tests {
             Err(EconError::ColumnNotFound { column, .. }) => assert_eq!(column, "nope"),
             other => panic!("expected ColumnNotFound, got {other:?}"),
         }
+    }
+
+    /// `pvcm_panel` with entity 3's `x2` set to `2 * x1`, and, with `cut_12`, entity 12
+    /// cut to its first 3 rows.
+    fn pvcm_panel_degenerate(ds: &Dataset, cut_12: bool) -> Dataset {
+        use polars::prelude::*;
+        let df = ds.df();
+        let get = |c: &str| -> Vec<f64> {
+            df.column(c)
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter() // na-ok: test fixture without missing cells
+                .collect()
+        };
+        let (id, t, x1, mut x2, y) = (get("id"), get("t"), get("x1"), get("x2"), get("y"));
+        for i in 0..id.len() {
+            if id[i] == 3.0 {
+                x2[i] = 2.0 * x1[i];
+            }
+        }
+        let keep: Vec<usize> = (0..id.len())
+            .filter(|&i| !(cut_12 && id[i] == 12.0 && t[i] > 3.0))
+            .collect();
+        let pick = |v: &[f64]| keep.iter().map(|&i| v[i]).collect::<Vec<f64>>();
+        let ids: Vec<i64> = keep.iter().map(|&i| id[i] as i64).collect();
+        Dataset::new(
+            df! {
+                "id" => ids,
+                "x1" => pick(&x1),
+                "x2" => pick(&x2),
+                "y" => pick(&y),
+            }
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_validate_pvcm_skips_collinear_entity_with_warning() {
+        let (_case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pvcm(
+            &pvcm_panel_degenerate(&ds, false),
+            "y",
+            &["x1", "x2"],
+            "id",
+            PvcmType::Within,
+        )
+        .unwrap();
+        assert_eq!(r.individual_coefficients.len(), 11);
+        assert!(!r.individual_coefficients.contains_key("3"));
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "entity '3' skipped: its regressors are collinear (rank 2 of 3)"),
+            "{:?}",
+            r.warnings
+        );
+        let r = run_pvcm(
+            &pvcm_panel_degenerate(&ds, true),
+            "y",
+            &["x1", "x2"],
+            "id",
+            PvcmType::Random,
+        )
+        .unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "entity '12' skipped: 3 observations for 3 coefficients"),
+            "{:?}",
+            r.warnings
+        );
+        let text = r.to_string();
+        assert!(text.contains("Warning: entity '12' skipped"), "{text}");
+    }
+
+    /// plm::pvcm(model = "within") on pvcm_pmg_sim: every entity's coefficients and SEs.
+    #[test]
+    fn test_validate_pvcm_within_sim() {
+        let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Within).unwrap();
+        let mut c = Check::new(&case);
+        for i in 1..=12 {
+            let id = i.to_string();
+            c.named(
+                &format!("within_coef_{i}"),
+                &r.variables,
+                &r.individual_coefficients[&id],
+                Tol::coef(240),
+            )
+            .named(
+                &format!("within_se_{i}"),
+                &r.variables,
+                &r.individual_std_errors[&id],
+                Tol::se(240),
+            );
+        }
+        c.scalar("n_obs", r.n_obs as f64, Tol::exact());
+        c.finish();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    /// plm::pvcm(model = "random") on pvcm_pmg_sim (Delta positive definite).
+    #[test]
+    fn test_validate_pvcm_random_sim() {
+        let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Random).unwrap();
+        // deviation ECON-35: random_chisq (homogeneity test around the unweighted mean); Delta clamp when not PD
+        Check::new(&case)
+            .named("random_coef", &r.variables, &r.coefficients, Tol::coef(240))
+            .named("random_se", &r.variables, &r.std_errors, Tol::se(240))
+            .named("random_delta_diag", &r.variables, &r.delta, Tol::stat(240))
+            .finish();
+    }
+
+    /// plm::pmg(model = "mg") on pvcm_pmg_sim.
+    #[test]
+    fn test_validate_pmg_sim() {
+        let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pmg(&ds, "y", &["x1", "x2"], "id").unwrap();
+        // deviation ECON-34: mg_se
+        Check::new(&case)
+            .named("mg_coef", &r.variables, &r.coefficients, Tol::coef(240))
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_pvcm_display_lists_entities_in_level_order() {
+        let (_case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Within).unwrap();
+        let text = r.to_string();
+        let block = text
+            .split("Individual Coefficients")
+            .nth(1)
+            .expect("individual block");
+        let ids: Vec<&str> = block
+            .lines()
+            .filter_map(|l| l.trim().split_once(':').map(|(id, _)| id))
+            .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+            .take(5)
+            .collect();
+        assert_eq!(ids, ["1", "2", "3", "4", "5"], "{text}");
     }
 }

@@ -72,7 +72,7 @@ warning appears exactly when one is negative (only `panel_hausman_sim_corr`).
   `test_hausman_form_zero_difference_is_an_error`, `test_hausman_form_units_do_not_matter`;
   and `econometrics::panel::tests::test_hausman_refuses_when_fe_and_re_coincide`,
   `econometrics::panel::tests::test_hausman_small_panel_recommendation`,
-  `econometrics::panel::tests::test_collinear_regressors_are_refused`.
+  `econometrics::panel::tests::test_collinear_regressors_are_dropped`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_hausman_test` checks the
   `hausman_test` text against the case at display precision.
 - Registry: `validation/methods/panel.json`, method `panel_hausman`.

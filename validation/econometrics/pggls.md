@@ -13,11 +13,14 @@ Panel GLS (Feasible Generalized Least Squares) estimates panel data models while
 2. **Pooled GLS**: Standard pooled estimation with GLS variance
 3. **First Difference GLS**: FD transformation + GLS (see Known Differences 2)
 
-**Status**: not R-pinned (ECON-36). Since T0-WP14 p2a refuses panels with more distinct
-periods than entities (T > N; ECON-32). The T × T error covariance is estimated from N
+**Status**: R-pinned with known deviations (method `panel_gls` in
+`validation/methods/econ_panel_t3.json`): the pooled coefficients, RSS, R² and df on the
+simulated panel `pggls_sim` (N = 40, T = 5), and the within df. The SEs and the within and FD
+fits are deviations (ECON-33, Tier 4). Since T0-WP14 p2a refuses panels with more distinct
+periods than entities (T > N; ECON-32): the T × T error covariance is estimated from N
 residual vectors and has no inverse there, so full Grunfeld (N = 10, T = 20) is refused,
-while plm's `pggls` returns a generalised-inverse fit. Only the pooled coefficients are
-compared with R, on Grunfeld 1935-1944 (N = T = 10).
+while plm's `pggls` returns a generalised-inverse fit. That is why the pins use a simulated
+panel with N > T, and Grunfeld appears only in the refusal tests and the 1935-1944 check.
 
 ## Reference Implementations
 
@@ -30,6 +33,44 @@ compared with R, on Grunfeld 1935-1944 (N = T = 10).
 
 Both use `inv ~ value + capital` on `validation/datasets/grunfeld.csv`. Values are printed
 with `formatC(digits = 16, format = "g")`.
+
+### `pggls_sim` (N = 40, T = 5): the registered pin
+
+`validation/r/cases/econ_panel_t3.R`, R 4.3.3, plm 2.6.7;
+`validation/datasets/generated/pggls_panel.csv` (`id`, `t`, `x1`, `x2`, `y`; n = 200):
+
+```r
+d <- pdata.frame(read.csv("validation/datasets/generated/pggls_panel.csv"), index = c("id", "t"))
+pggls(y ~ x1 + x2, data = d, model = "pooling")   # also "within", "fd"
+```
+
+| Model | Quantity | R |
+|---|---|---|
+| pooling | coef (Intercept), x1, x2 (pinned) | 1.150322778, 0.7532237028, -0.3709417407 |
+| | RSS, R² (pinned) | 551.2630702, 0.1111792491 |
+| | df_resid (pinned) | 197 |
+| | SE (not pinned, ECON-33) | 0.1937637705, 0.09185105405, 0.07790031066 |
+| within | df_resid (pinned) | 198 |
+| | coef x1, x2 (not pinned, ECON-33) | 0.7651582127, -0.3652536682 |
+| fd | coef (Intercept), x1, x2 (not pinned, ECON-33) | 0.007046468406, 0.7822919666, -0.3756904277 |
+| | df_resid (not pinned) | 157 |
+
+p2a's pooled SEs are 0.3241298, 0.1536493, 0.1303123: `(X'Ω⁻¹X)⁻¹` scaled by rss/df (an R
+replica of p2a's algorithm), where pggls reports the unscaled diagonal (ECON-33). p2a's FD
+df_resid is n - k = 197 on the levels, not plm's 157 on the differences.
+
+Tests (method `panel_gls`):
+- `econometrics::panel::gls_models::tests::test_validate_pggls_pooling_sim`: pooled
+  coefficients (README tolerance for n = 200, 1e-8), RSS and R² (1e-6), df, n, N and T exact;
+  the within df exact.
+- `econometrics::panel::gls_models::tests::test_validate_panel_gls_within_reports_singular_error_covariance`:
+  the within residuals sum to zero in every entity, so Ω has rank T - 1 (eigenvalues 1.99,
+  1.47, 1.02, 0.60 and -5.6e-17 in pggls's estimate). The fit warns "panel GLS error
+  covariance (T x T) is singular (rank 4 of 5); a generalized inverse was used". This warning
+  fires on every within fit until ECON-33 (Tier 4) transforms the GLS step.
+- `econometrics::panel::gls_models::tests::test_validate_panel_gls_fd_reports_aliased_first_step`:
+  the differenced intercept is a column of zeros, so the first-step OLS warns "first-step OLS:
+  Coefficients not defined because of singularities: (Intercept)", as `lm` does.
 
 ### Grunfeld 1935-1944 (N = T = 10)
 
@@ -142,9 +183,15 @@ benchmarks of `crates/p2a-core/benches/` against R.
 1. First-step OLS on the within-transformed (FE), untransformed (pooling) or
    first-differenced (FD) data. The transformation is used only for these first-step
    residuals.
+   The first steps are least-squares fits by pivoted QR; an aliased column (the zero
+   differenced intercept of FD) is named in a warning, as `lm` does.
 2. The T × T error covariance from those residuals, `Omega[s,t] = (1/N) * sum_i(e_is * e_it)`
-   over the entities observed in both periods, as pggls estimates it. A 1e-6 ridge is added
-   to its diagonal when it cannot be inverted.
+   over the entities observed in both periods, as pggls estimates it. A singular Ω gets a
+   symmetric generalized inverse and the warning "panel GLS error covariance (T x T) is
+   singular (rank r of T); a generalized inverse was used" (before Tier 3: a silent
+   pseudo-inverse, or a 1e-6 ridge on the diagonal). A singular X'Ω⁻¹X is an error; a
+   reciprocal condition number below 1e-10 adds "High condition number detected, results may
+   be numerically unstable". The warnings are part of the JSON result.
 3. GLS, β_GLS = (Σ_i X_i'Ω_i⁻¹X_i)⁻¹ Σ_i X_i'Ω_i⁻¹y_i with Ω_i⁻¹ the submatrix of Ω⁻¹ for
    the entity's periods, on the untransformed data for all three models: FE and FD do not
    transform the GLS step (ECON-33; FE only drops the intercept column).

@@ -326,6 +326,11 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | R-pinned, known deviations (CAUS-77) |
 | Matching (MatchIt: nearest neighbour, CEM, subclassification; optimal full matching as optmatch) | [matching.md](econometrics/matching.md) | R-pinned, known deviations (CAUS-67, CAUS-70) |
 | Minimum-cost flow (network simplex) | [matching.md](econometrics/matching.md) | R-pinned |
+| Panel GLS (pggls): pooled pin on a simulated N > T panel, within and FD warnings (Tier 3) | [pggls.md](econometrics/pggls.md) | R-pinned, known deviations (ECON-33) |
+| FEGLM: Gaussian pin, IRLS convergence reporting (Tier 3) | [feglm.md](econometrics/feglm.md) | R-pinned, known deviations (ECON-20, ECON-66, ECON-67, ECON-85) |
+| Variable coefficients (pvcm within, random) and mean group (pmg) | [pvcm.md](econometrics/pvcm.md) | R-pinned, known deviations (ECON-34, ECON-35) |
+| HDFE: relative MAP rule, absorbed regressors (FE, RE, Hausman, HDFE, FEGLM), disconnected effects | [hdfe.md](econometrics/hdfe.md) | R-pinned |
+| Panel unit-root tests: per-unit lag selection (AIC, SIC, Hall) | [panel_unit_root.md](econometrics/panel_unit_root.md) | R-pinned, known deviations (ECON-41, ECON-43, ECON-44, ECON-88) |
 
 ### Survival Analysis
 | Method | File | Status |

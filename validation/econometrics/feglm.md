@@ -32,12 +32,15 @@ Fixed Effects Generalized Linear Model (FEGLM) combines GLM estimation with high
 | fixest | R | `fepois()$ll_null`, with `stats::dpois()` for the pointwise values (Case D) | 0.14.2 (R 4.3.3) |
 | ppmlhdfe | Stata | `ppmlhdfe` | 2.x |
 
-**Status**: not R-pinned (X-10). Four tests compare quoted R values (the three
-`test_validate_*` tests of Case D and `test_poisson_log_lik_large_counts`, added in Tier 0), all
-for the Poisson log-likelihood convention and fixest's null log-likelihood. No test compares
-an FEGLM coefficient, SE or deviance with R. Estimator issues: IRLS does not converge to the
-FE-GLM MLE (ECON-20), Gaussian log-likelihood (ECON-66), quasi-Poisson SEs (ECON-67), absorbed
-degrees of freedom (ECON-85).
+**Status**: R-pinned with known deviations (method `feglm` in
+`validation/methods/econ_panel_t3.json`, Case E). The Gaussian coefficients, residual df and n
+are pinned to fixest; logit, probit and Poisson are checked for convergence reporting only.
+Not pinned, as Tier 4 findings: IRLS does not converge to the FE-GLM MLE for the non-Gaussian
+families, and the Gaussian SE and deviance carry the one-pass FE recovery in eta (ECON-20);
+the Gaussian log-likelihood (ECON-66); quasi-Poisson SEs (ECON-67); absorbed degrees of
+freedom on disconnected designs (ECON-85). The Poisson log-likelihood convention (Case D) is
+compared with quoted R values, and regressors absorbed by the fixed effects are pinned in
+`validation/econometrics/hdfe.md` (case `panel_absorbed_regressors`).
 
 **Primary Reference**:
 > Stammann, A. (2018). "Fast and Feasible Estimation of Generalized Linear Models with High-Dimensional k-way Fixed Effects". arXiv:1707.01815.
@@ -68,7 +71,20 @@ The FEGLM algorithm iterates between:
    beta_new = (X_tilde' W X_tilde)^-1 X_tilde' W z_tilde
    ```
 
-4. **Convergence**: Check coefficient change < tolerance
+4. **Convergence**: stop when the relative change in deviance
+   `|dev - dev_old| / (|dev| + 0.1)` falls below `tolerance` (default 1e-8), R's `glm.fit`
+   and fixest's `glm.tol` rule. `dev_old` at the first iteration is the deviance at the
+   starting values. Each weighted MAP stops on the relative rule of HDFE
+   (`validation/econometrics/hdfe.md`, "Convergence of the alternating projections").
+   Reaching `max_iter` (default 25) returns the fit with `converged = false`, the warning
+   "FEGLM IRLS did not converge after ..." and `Converged: no` in the output; a MAP that
+   stops at its iteration limit adds one warning. Before Tier 3 the rule was the maximum
+   absolute coefficient change and an absolute MAP tolerance, which never stopped on an
+   outcome of order 1e9.
+
+Regressors absorbed by the fixed effects, or collinear with others after them, are dropped
+before the IRLS loop with a warning and named in `dropped` (the screen of
+`validation/econometrics/hdfe.md`, "Regressors absorbed by the fixed effects").
 
 ## Test Cases
 
@@ -107,9 +123,8 @@ summary(fixest::feglm(y ~ x | id + time, data = vd, family = binomial("logit"), 
   small-sample factor. A case must name which one it pins.
 - R's logit/probit ratio is 2.93615099246126 / 1.643750005584502 = 1.786247.
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with X-10):
-- `econometrics::feglm::tests::test_validate_feglm_logit_against_alpaca` (`crates/p2a-core/src/econometrics/feglm.rs`): β > 0, pseudo-R² in (0, 1), SE > 0; none of alpaca's numbers.
-- `econometrics::feglm::tests::test_validate_feglm_probit_coefficient_scaling` (`crates/p2a-core/src/econometrics/feglm.rs`): the logit/probit ratio lies in (1.2, 2.2) and the signs agree.
+**Rust tests** (not R-pinned: the data are deterministic, not an R reference):
+- `econometrics::feglm::tests::test_feglm_logit_probit_ratio_plausible` (`crates/p2a-core/src/econometrics/feglm.rs`): a plausibility band, the logit/probit ratio lies in (1.2, 2.2) and the signs agree. The test that checked only β > 0 against this case was deleted in Tier 3.
 
 ### Case B: Poisson with two-way fixed effects (`create_count_panel()`)
 
@@ -186,6 +201,44 @@ The Rust tests build the same 40-row panel (`id = i / 8`, `x = ((i * 7) % 11) / 
 - `econometrics::feglm::tests::test_validate_poisson_log_lik_against_r` (`crates/p2a-core/src/econometrics/feglm.rs`): the pointwise values at 1e-12 × scale.
 - `econometrics::feglm::tests::test_validate_feglm_poisson_null_loglik_fixest_non_integer` and `econometrics::feglm::tests::test_validate_feglm_poisson_null_loglik_fixest_large_counts` (`crates/p2a-core/src/econometrics/feglm.rs`): the null log-likelihood at 1e-10 relative.
 - `econometrics::feglm::tests::test_poisson_log_lik_large_counts` (`crates/p2a-core/src/econometrics/feglm.rs`): `dpois(1e12, 1e12 + 1e6)` at 1e-14 × scale.
+
+### Case E: Gaussian, logit, probit and Poisson on a simulated panel (`feglm_families`)
+
+`validation/r/cases/econ_panel_t3.R`, R 4.3.3, fixest 0.14.2;
+`validation/datasets/generated/feglm_panel.csv` (N = 60 ids, T = 8 periods, n = 480):
+
+```r
+fixest::feglm(y_gauss ~ x + x2 | id + time, d, family = gaussian(), vcov = "iid")
+fixest::feglm(y_bin ~ x + x2 | id + time, d, family = binomial("logit"), vcov = "iid")   # and "probit"
+fixest::fepois(y_cnt ~ x + x2 | id + time, d, vcov = "iid")
+```
+
+| Quantity | R |
+|---|---|
+| Gaussian coef x, x2 (pinned) | 0.5370626024, -0.3308561515 |
+| Gaussian df_resid (pinned) | 411 |
+| n (pinned) | 480 |
+| Gaussian SE x, x2 (`lm`) | 0.05220577326, 0.05127532555 |
+| Gaussian deviance, dispersion | 429.7321626, 1.045577038 |
+| Gaussian logLik (`glm`) | -654.5407439 |
+| logit coef x, x2 (fixest, n = 464) | 0.8004381609, -0.4102608802 |
+| probit coef x, x2 (fixest, n = 464) | 0.4865580389, -0.2515681450 |
+| Poisson coef x, x2 (fixest, n = 480) | 0.2752772215, -0.1498773237 |
+| Poisson SE x, x2 (`glm`) | 0.04469063846, 0.04388206037 |
+
+Tests (method `feglm`):
+- `econometrics::feglm::tests::test_validate_feglm_gaussian_families`: the Gaussian
+  coefficients (README tolerance for n = 480, 1e-8; the design is balanced, so the MAP is
+  exact after two sweeps), df_resid and n exact.
+- `econometrics::feglm::tests::test_validate_feglm_families_report_convergence`: logit,
+  probit and Poisson return finite coefficients within `max_iter`, and a fit that does not
+  converge says so in its warnings and its output.
+
+Deviations (registry): the Gaussian SE, deviance and dispersion and the logit, probit and
+Poisson coefficients (ECON-20: the Gaussian SE and deviance come from the one-pass FE
+recovery in eta, an R replica of p2a's algorithm gives SE 0.05227764747 and deviance
+430.9162433 at the coefficients above; fixest also drops the 16 rows of ids whose binary
+outcome is constant), the Gaussian log-likelihood (ECON-66), the Poisson SEs (ECON-67).
 
 ### The previous examples, recomputed
 
@@ -420,13 +473,14 @@ For IRLS, we compute:
 
 ## Numerical Precision Summary
 
-No coefficient, SE or deviance tolerance is claimed until an R-pinned case exists (X-10).
-FEGLM is iterative, so such a case uses `Tol::iterative` with the documented convergence
-tolerance.
-
 | Quantity | n | Precision |
 |----------|---|-----------|
+| Gaussian coefficients (Case E) | 480 | 1e-8 relative |
+| Gaussian coefficient at y x 1e9 (`hdfe_map_scale`) | 1000 | `Tol::iterative(1e-8)` |
+| Gaussian coefficients with absorbed regressors (`panel_absorbed_regressors`) | 180 | 1e-8 relative |
 | Poisson LL / null LL (Case D, fixest convention) | 40 | 1e-12 × scale pointwise; 1e-10 relative (null) |
+
+No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67).
 
 ## Missing values
 
@@ -449,7 +503,7 @@ not pinned to R here: ECON-20, ECON-66, ECON-67, ECON-85 (FEGLM), Tier 4.
 
 3. **Separated Data**: Different handling of quasi/complete separation in binary models.
 
-4. **Convergence Criteria**: IRLS convergence based on max coefficient change; alpaca may use different criterion.
+4. **Convergence Criteria**: IRLS stops on the relative change in deviance, as fixest and `glm.fit`; the non-Gaussian fits still differ from fixest (ECON-20).
 
 5. **Degrees of Freedom**: Both use: `df = n - k - sum(FE levels) + absorbed`
 

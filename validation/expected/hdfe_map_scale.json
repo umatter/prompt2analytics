@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "hdfe_map_scale",
+  "area": "econometrics/hdfe",
+  "method": "Two-way FE (firm + year, unbalanced) on y and y * 1e9: fixest feols / feglm(gaussian)",
+  "reference": "fixest::feols(y ~ x | firm + year, vcov = 'iid'); fixest::feglm(family = gaussian); lm with factor dummies for the classical SE",
+  "call": "feols(y_big ~ x | firm + year, hdfe_scale, vcov = 'iid')",
+  "dataset": "validation/datasets/generated/hdfe_scale.csv",
+  "datasets": ["validation/datasets/generated/hdfe_scale.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "fixest": "0.14.2"
+  },
+  "values": {
+    "coef": {
+      "names": ["x"],
+      "values": [0.5412754728371314]
+    },
+    "se_iid": {
+      "names": ["x"],
+      "values": [0.032490378636368639]
+    },
+    "coef_big": {
+      "names": ["x"],
+      "values": [541275472.83713126]
+    },
+    "se_iid_big": {
+      "names": ["x"],
+      "values": [32490378.636368617]
+    },
+    "coef_feglm_big": {
+      "names": ["x"],
+      "values": [541275472.83713186]
+    },
+    "se_feglm_big_lm": {
+      "names": ["x"],
+      "values": [32490378.636368651]
+    },
+    "deviance_big": 8.7181087297236081e+20,
+    "dispersion_big": 9.9069417383222822e+17,
+    "r2_within": 0.23976775000567274,
+    "df_resid": 880,
+    "n_obs": 1000
+  }
+}

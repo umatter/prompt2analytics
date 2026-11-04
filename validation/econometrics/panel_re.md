@@ -271,8 +271,8 @@ untransformed data, which p2a reported as `r_squared` before Tier 1.
   `econometrics::panel::linear_models::tests::test_random_effects_needs_more_entities_than_coefficients`,
   `econometrics::panel::linear_models::tests::test_random_effects_stops_when_cancelled`,
   `econometrics::panel::linear_models::tests::test_random_effects_non_finite_data`,
-  `econometrics::panel::tests::test_collinear_regressors_are_refused`,
-  `econometrics::panel::tests::test_time_invariant_regressor_fe_refuses_re_warns`.
+  `econometrics::panel::tests::test_collinear_regressors_are_dropped`,
+  `econometrics::panel::tests::test_time_invariant_regressor_fe_drops_re_keeps`.
 - `p2a-mcp`: `tools::handlers::panel::tests::test_validate_mcp_panel_random_effects` checks
   the `panel_random_effects` text against the case at display precision, with the default
   and with `vcov = "cluster"`.

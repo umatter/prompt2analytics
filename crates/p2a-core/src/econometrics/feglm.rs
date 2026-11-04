@@ -49,18 +49,25 @@
 //! println!("Converged in {} iterations", result.iterations);
 //! ```
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::xtx;
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::resource;
-use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
+use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text, sci};
+use crate::traits::estimator::{
+    SignificanceLevel, logistic_cdf, normal_cdf, normal_p_value_two_sided, normal_pdf,
+    normal_quantile,
+};
 
-use super::hdfe::{FactorInfo, factor_info};
+use super::hdfe::{
+    FactorInfo, MAP_SCALE_FLOOR, demean_matrix_map, factor_info, fe_label, screen_regressors,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GLM Family
@@ -127,8 +134,9 @@ impl GlmFamily {
             }
             GlmFamily::Probit => {
                 // Φ⁻¹(μ) - inverse normal CDF (probit function)
+                // mu_safe is inside (0, 1), so the quantile always exists
                 let mu_safe = mu.clamp(1e-10, 1.0 - 1e-10);
-                probit_inv(mu_safe)
+                normal_quantile(mu_safe).unwrap_or(f64::NAN)
             }
             GlmFamily::Poisson => {
                 // log(μ)
@@ -296,29 +304,6 @@ impl GlmFamily {
     }
 }
 
-/// Inverse of the standard normal CDF (probit function).
-fn probit_inv(p: f64) -> f64 {
-    // Rational approximation for the probit function
-    // Abramowitz and Stegun approximation
-    let p = p.clamp(1e-10, 1.0 - 1e-10);
-
-    let sign = if p < 0.5 { -1.0 } else { 1.0 };
-    let p_adj = if p < 0.5 { p } else { 1.0 - p };
-
-    // Coefficients for the approximation
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    let t = (-2.0 * p_adj.ln()).sqrt();
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
-    sign * z
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -331,13 +316,15 @@ pub struct FeglmConfig {
     /// Default: 25
     pub max_iter: usize,
 
-    /// Convergence tolerance for coefficient changes.
-    /// Iteration stops when max(|Δβ|) < tolerance.
+    /// IRLS stops when |dev - dev_old| / (|dev| + 0.1) < tolerance (fixest's
+    /// glm.tol rule).
     /// Must be finite and greater than 0.
     /// Default: 1e-8
     pub tolerance: f64,
 
-    /// MAP tolerance for demeaning within each IRLS step.
+    /// Relative MAP tolerance for demeaning within each IRLS step: a sweep stops when
+    /// the weighted norm of the change is at most map_tolerance times
+    /// max(||demeaned column||, 1e-6 ||column||).
     /// Must be finite and greater than 0.
     /// Default: 1e-8
     pub map_tolerance: f64,
@@ -440,8 +427,14 @@ pub struct FeglmResult {
     pub iterations: usize,
     /// Whether convergence was achieved
     pub converged: bool,
-    /// Final maximum coefficient change
+    /// Final relative deviance change |dev - dev_old| / (|dev| + 0.1)
     pub final_change: f64,
+    /// The IRLS iteration limit
+    #[serde(default)]
+    pub max_iter: usize,
+    /// The IRLS tolerance
+    #[serde(default)]
+    pub tolerance: f64,
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Dimensions
@@ -469,6 +462,30 @@ pub struct FeglmResult {
     /// (fixest drops them too).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+
+    /// Regressors not estimated: absorbed by the fixed effects or collinear with the
+    /// others after removing them (fixest drops them too)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
+    /// Warnings: dropped regressors, non-convergence (IRLS or the demeaning)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for FeglmResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(Convergence::new(
+            self.converged,
+            self.iterations,
+            self.max_iter,
+            "relative change in deviance",
+            self.final_change,
+            self.tolerance,
+        ))
+    }
 }
 
 impl fmt::Display for FeglmResult {
@@ -489,15 +506,6 @@ impl fmt::Display for FeglmResult {
         for (name, count) in self.fe_dimensions.iter().zip(self.fe_counts.iter()) {
             writeln!(f, "  {}: {} levels", name, count)?;
         }
-        writeln!(f)?;
-
-        writeln!(
-            f,
-            "Convergence: {} in {} iterations (final change: {:.2e})",
-            if self.converged { "Yes" } else { "No" },
-            self.iterations,
-            self.final_change
-        )?;
         writeln!(f)?;
 
         writeln!(f, "Log-Likelihood: {:.4}", self.log_likelihood)?;
@@ -532,6 +540,8 @@ impl fmt::Display for FeglmResult {
 
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        // Notes before the missing-value note, which stays the last line
+        write!(f, "{}", notes_text(self))?;
         if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
@@ -598,7 +608,9 @@ fn weighted_map_step(
 
 /// Weighted demean using the Method of Alternating Projections.
 ///
-/// Returns `EconError::Cancelled` when the current budget runs out between sweeps.
+/// Stops when the weighted norm of a sweep's change is at most `tolerance` times
+/// `max(||current||_w, MAP_SCALE_FLOOR * ||data||_w)`; the returned change is that
+/// ratio. Returns `EconError::Cancelled` when the current budget runs out between sweeps.
 fn weighted_demean_map(
     data: &Array1<f64>,
     weights: &Array1<f64>,
@@ -622,6 +634,14 @@ fn weighted_demean_map(
     let mut prev_prev = data.clone();
     let mut converged = false;
     let mut final_change = f64::MAX;
+    let w_norm = |v: &Array1<f64>| -> f64 {
+        v.iter()
+            .zip(weights.iter())
+            .map(|(&c, &w)| w * c * c)
+            .sum::<f64>()
+            .sqrt()
+    };
+    let floor = MAP_SCALE_FLOOR * w_norm(data);
 
     for iter in 1..=max_iter {
         resource::checkpoint()?;
@@ -640,10 +660,12 @@ fn weighted_demean_map(
             .zip(weights.iter())
             .map(|((&c, &p), &w)| w * (c - p).powi(2))
             .sum();
-        final_change = delta.sqrt();
+        let delta = delta.sqrt();
+        let scale = w_norm(&current).max(floor).max(f64::MIN_POSITIVE);
+        final_change = delta / scale;
 
-        // Check convergence
-        if final_change < tolerance {
+        // Relative stopping rule: invariant to rescaling the column
+        if delta <= tolerance * scale {
             converged = true;
             return Ok((current, iter, final_change, converged));
         }
@@ -659,8 +681,10 @@ fn weighted_demean_map(
                 .map(|(&d, &dp)| d * dp)
                 .sum();
             let denominator: f64 = delta_prev.iter().map(|&dp| dp * dp).sum();
+            let current_norm = current.iter().map(|v| v * v).sum::<f64>().sqrt();
 
-            if denominator > 1e-16 {
+            // Scale-free guard: skip only a step that is rounding noise
+            if denominator > (f64::EPSILON * current_norm).powi(2) {
                 let alpha = (numerator / denominator).clamp(0.0, 1.0);
                 if alpha > 0.0 && alpha < 1.0 {
                     current = &prev + &delta_vec * (1.0 + alpha);
@@ -863,10 +887,9 @@ pub fn run_feglm(
 
     // Design matrix WITHOUT intercept (FE absorbs the constant)
     let design = cols.matrix(x_cols, false)?;
-    let x = design.data;
-    let var_names = design.column_names;
+    let x_all = design.data;
+    let all_names = design.column_names;
     let n = y.len();
-    let k = x.ncols();
 
     // Factor information for each FE dimension (levels in R factor order)
     let factors: Vec<FactorInfo> = fe_cols
@@ -874,50 +897,76 @@ pub fn run_feglm(
         .map(|col| factor_info(col, cols.factor(col)))
         .collect::<EconResult<Vec<_>>>()?;
 
+    // Demeaning steps that stopped at map_max_iter: (step, relative change)
+    let mut map_stalls: Vec<(String, f64)> = Vec::new();
+
+    // Regressors absorbed by the effects or collinear after them are not estimated.
+    // Rank against the fixed effects does not depend on positive weights
+    // (rank(M_D^W X) = rank([X D]) - rank(D)), so one unit-weight screen covers every
+    // IRLS step.
+    let (x_screen_dm, _, screen_change, screen_conv) = demean_matrix_map(
+        &x_all,
+        &factors,
+        config.map_tolerance,
+        config.map_max_iter,
+        config.accelerate,
+    )?;
+    if !screen_conv {
+        map_stalls.push(("the regressor screen".to_string(), screen_change));
+    }
+    let screen = screen_regressors(
+        x_all.view(),
+        x_screen_dm.view(),
+        &all_names,
+        &fe_label(fe_cols),
+    )?;
+    let mut warnings = screen.warnings.clone();
+    let x = x_all.select(Axis(1), &screen.kept);
+    let var_names: Vec<String> = screen.kept.iter().map(|&j| all_names[j].clone()).collect();
+    let k = screen.kept.len();
+
     // Compute absorbed degrees of freedom
     let df_absorbed = compute_absorbed_df(&factors);
 
     // Check we have enough observations
-    let df_resid = n.saturating_sub(k).saturating_sub(df_absorbed);
-    if df_resid == 0 {
-        return Err(EconError::InsufficientData {
+    let df_resid = n
+        .checked_sub(k + df_absorbed)
+        .filter(|&d| d > 0)
+        .ok_or_else(|| EconError::InsufficientData {
             required: k + df_absorbed + 1,
             provided: n,
             context: "Not enough observations for FEGLM estimation".to_string(),
-        });
-    }
+        })?;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Initialize
     // ═══════════════════════════════════════════════════════════════════════════
     let mut beta = Array1::zeros(k);
-    let mut eta = Array1::zeros(n);
 
     // Initial guess for eta based on family
-    match family {
+    let mut eta: Array1<f64> = match family {
         GlmFamily::Logit | GlmFamily::Probit => {
             let p_bar = (n_positive as f64 / n as f64).clamp(0.01, 0.99);
-            let eta_init = family.link(p_bar);
-            eta = Array1::from_elem(n, eta_init);
+            Array1::from_elem(n, family.link(p_bar))
         }
-        GlmFamily::Poisson => {
-            // Initialize with log(y+1) or log(mean(y))
-            let y_mean = y.mean().unwrap_or(1.0).max(0.1);
-            eta = y.mapv(|yi| (yi.max(0.1)).ln());
-            // Or use the mean
-            let _eta_mean = y_mean.ln();
-        }
-        GlmFamily::Gaussian => {
-            eta = y.clone();
-        }
-    }
+        GlmFamily::Poisson => y.mapv(|yi| (yi.max(0.1)).ln()),
+        GlmFamily::Gaussian => y.clone(),
+    };
+
+    let deviance_at = |eta: &Array1<f64>| -> f64 {
+        y.iter()
+            .zip(eta.iter())
+            .map(|(&yi, &e)| family.deviance(yi, family.inv_link(e)))
+            .sum()
+    };
 
     // ═══════════════════════════════════════════════════════════════════════════
     // IRLS Loop
     // ═══════════════════════════════════════════════════════════════════════════
     let mut iterations = 0;
     let mut converged = false;
-    let mut final_change = f64::MAX;
+    let mut final_change = f64::NAN;
+    let mut devold = deviance_at(&eta);
 
     for iter in 0..config.max_iter {
         resource::checkpoint()?;
@@ -956,7 +1005,7 @@ pub fn run_feglm(
 
         // 5. Weighted demean z and X by fixed effects
         // Note: We demean the pre-scaled data, which effectively applies weighted demeaning
-        let (z_demeaned, _, _, z_conv) = weighted_demean_map(
+        let (z_demeaned, _, z_change, z_conv) = weighted_demean_map(
             &z_scaled,
             &weights,
             &factors,
@@ -965,7 +1014,7 @@ pub fn run_feglm(
             config.accelerate,
         )?;
 
-        let (x_demeaned, _, _, x_conv) = weighted_demean_matrix_map(
+        let (x_demeaned, _, x_change, x_conv) = weighted_demean_matrix_map(
             &x_scaled,
             &weights,
             &factors,
@@ -975,50 +1024,26 @@ pub fn run_feglm(
         )?;
 
         if !z_conv || !x_conv {
-            return Err(EconError::ConvergenceFailure {
-                iterations: config.map_max_iter,
-                last_change: final_change,
-                suggestion: format!(
-                    "MAP demeaning did not converge in IRLS iteration {}. \
-                     Try increasing map_max_iter or relaxing map_tolerance.",
-                    iterations
-                ),
-            });
+            map_stalls.push((
+                format!("IRLS iteration {iterations}"),
+                z_change.max(x_change),
+            ));
         }
 
         // 6. Solve weighted least squares on demeaned data
-        let xtx_mat = xtx(&x_demeaned.view());
-        let xty_vec = xty(&x_demeaned.view(), &z_demeaned);
-
-        let (xtx_inv, _) =
-            safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-                context: format!("X'WX in FEGLM iteration {}", iterations),
-                suggestion: format!("Check for perfect multicollinearity or separation: {:?}", e),
-            })?;
-
-        let beta_new: Array1<f64> = xtx_inv.dot(&xty_vec);
-
-        // 7. Check convergence
-        let mut max_change = 0.0f64;
-        for i in 0..k {
-            let b_new: f64 = beta_new[i];
-            let b_old: f64 = beta[i];
-            let delta = (b_new - b_old).abs();
-            if delta > max_change {
-                max_change = delta;
-            }
+        let ls = least_squares(x_demeaned.view(), z_demeaned.view())?;
+        if ls.rank < k {
+            return Err(EconError::SingularMatrix {
+                context: format!(
+                    "FEGLM IRLS iteration {iterations}: weighted design rank {} of {k}",
+                    ls.rank
+                ),
+                suggestion: "Check for perfect multicollinearity or separation".to_string(),
+            });
         }
-        final_change = max_change;
+        beta = ls.coefficients;
 
-        if max_change < config.tolerance {
-            converged = true;
-            beta = beta_new;
-            break;
-        }
-
-        beta = beta_new;
-
-        // 8. Update linear predictor
+        // 7. Update linear predictor
         // For FEGLM, we need to recover the FE contribution
         // η_new = Xβ + FE effects
         // The FE effects are implicitly in the demeaned residuals
@@ -1052,7 +1077,7 @@ pub fn run_feglm(
 
         // Add back FE effects by computing group means from residuals
         // This is a simplified approximation
-        let z_residual = &z - &x.dot(&beta);
+        let z_residual = &z - &x_beta;
         for factor in &factors {
             let mut group_sums = vec![0.0; factor.n_levels];
             let mut group_counts = vec![0.0; factor.n_levels];
@@ -1072,6 +1097,15 @@ pub fn run_feglm(
             for i in 0..n {
                 eta[i] += group_means[factor.ids[i]];
             }
+        }
+
+        // 8. Check convergence: fixest's (glm.fit's) relative deviance change
+        let dev = deviance_at(&eta);
+        final_change = deviance_change(dev, devold);
+        devold = dev;
+        if final_change < config.tolerance {
+            converged = true;
+            break;
         }
     }
 
@@ -1177,7 +1211,7 @@ pub fn run_feglm(
         }
     }
 
-    let (x_demeaned_final, _, _, _) = weighted_demean_matrix_map(
+    let (x_demeaned_final, _, final_map_change, final_map_conv) = weighted_demean_matrix_map(
         &x_scaled_final,
         &weights_final,
         &factors,
@@ -1185,12 +1219,17 @@ pub fn run_feglm(
         config.map_max_iter,
         config.accelerate,
     )?;
+    if !final_map_conv {
+        map_stalls.push(("the final information matrix".to_string(), final_map_change));
+    }
 
     let xtx_final = xtx(&x_demeaned_final.view());
-    let (vcov, _) = safe_inverse(&xtx_final.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Information matrix in FEGLM".to_string(),
-        suggestion: format!("Check for separation or multicollinearity: {:?}", e),
-    })?;
+    let vcov = sym_inverse(
+        xtx_final.view(),
+        SingularPolicy::Error,
+        "FEGLM information matrix",
+    )?
+    .inverse;
 
     // Apply dispersion scaling for Gaussian/Poisson
     let vcov = match family {
@@ -1211,8 +1250,33 @@ pub fn run_feglm(
 
     let p_values: Vec<f64> = z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
+
+    if !converged {
+        let record = Convergence::new(
+            false,
+            iterations,
+            config.max_iter,
+            "relative change in deviance",
+            final_change,
+            config.tolerance,
+        );
+        warnings.extend(record.note("FEGLM IRLS"));
+    }
+    if let Some((step, change)) = map_stalls.first() {
+        let more = match map_stalls.len() - 1 {
+            0 => String::new(),
+            m => format!("; also in {m} later step(s)"),
+        };
+        warnings.push(format!(
+            "FEGLM: the weighted alternating projections reached map_max_iter = {} in {step} \
+             (relative change {}, map_tolerance {}){more}; that step used the last iterate",
+            config.map_max_iter,
+            sci(*change),
+            sci(config.map_tolerance)
+        ));
+    }
 
     let significance: Vec<SignificanceLevel> = p_values
         .iter()
@@ -1241,6 +1305,8 @@ pub fn run_feglm(
         iterations,
         converged,
         final_change,
+        max_iter: config.max_iter,
+        tolerance: config.tolerance,
         n_obs: n,
         n_positive,
         df_resid,
@@ -1248,6 +1314,8 @@ pub fn run_feglm(
         beta,
         vcov,
         missing: cols.missing().clone(),
+        dropped: screen.dropped,
+        warnings,
     })
 }
 
@@ -1537,9 +1605,8 @@ mod tests {
     // Validation Tests: Comparison with R's alpaca::feglm()
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// Test data matching R's alpaca package documentation example.
-    ///
-    /// R code to generate expected values:
+    /// Deterministic data; not an R reference. The R code below shows the kind of DGP
+    /// it imitates; no test compares against its output:
     /// ```r
     /// library(alpaca)
     /// set.seed(42)
@@ -1567,8 +1634,7 @@ mod tests {
     /// summary(fit)
     /// ```
     fn create_validation_dataset() -> Dataset {
-        // Pre-computed dataset matching R's set.seed(42) output
-        // This allows exact comparison with R results
+        // Deterministic data; not an R reference (the R code above is illustrative)
         let n = 50;
         let n_id = 5;
         let n_time = 10;
@@ -1612,51 +1678,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_feglm_logit_against_alpaca() {
-        let dataset = create_validation_dataset();
-
-        let result = run_feglm(
-            &dataset,
-            "y",
-            &["x"],
-            &["id", "time"],
-            GlmFamily::Logit,
-            None,
-        )
-        .unwrap();
-
-        // The coefficient should be positive (matching the true DGP of beta=1.0)
-        // Due to noise and finite sample, we check direction and rough magnitude
-        assert!(
-            result.coefficients[0] > 0.0,
-            "Coefficient should be positive, got {}",
-            result.coefficients[0]
-        );
-
-        // Should have reasonable pseudo R²
-        assert!(
-            result.pseudo_r_squared > 0.0 && result.pseudo_r_squared < 1.0,
-            "Pseudo R² should be in (0,1), got {}",
-            result.pseudo_r_squared
-        );
-
-        // Standard error should be positive and reasonable
-        assert!(
-            result.std_errors[0] > 0.0,
-            "SE should be positive, got {}",
-            result.std_errors[0]
-        );
-
-        println!("Validation test - FEGLM Logit:");
-        println!("  Coefficient: {:.4}", result.coefficients[0]);
-        println!("  Std Error: {:.4}", result.std_errors[0]);
-        println!("  z-stat: {:.4}", result.z_stats[0]);
-        println!("  p-value: {:.4}", result.p_values[0]);
-        println!("  Pseudo R²: {:.4}", result.pseudo_r_squared);
-    }
-
-    #[test]
-    fn test_validate_feglm_probit_coefficient_scaling() {
+    /// A plausibility band, not an R comparison: logit/probit coefficient ratio near 1.6.
+    fn test_feglm_logit_probit_ratio_plausible() {
         let dataset = create_validation_dataset();
 
         let logit_result = run_feglm(
@@ -1998,5 +2021,150 @@ mod tests {
         expect_cancelled(with_budget(cancelled(), || {
             weighted_demean_map(&data, &weights, &[factor1, factor2], 1e-8, 1000, true)
         }));
+    }
+
+    // =========================================================================
+    // T3-WP17: relative MAP rule and deviance stopping rule (ECON-69),
+    // absorbed regressors (ECON-72)
+    // =========================================================================
+
+    #[test]
+    fn test_validate_feglm_gaussian_converges_at_scale_1e9() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("hdfe_map_scale");
+        let r = run_feglm(
+            &ds,
+            "y_big",
+            &["x"],
+            &["firm", "year"],
+            GlmFamily::Gaussian,
+            None,
+        )
+        .unwrap();
+        assert!(r.converged, "{:?}", r.warnings);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        // Gaussian coefficients are exact after one IRLS step (MAP to relative 1e-8; R
+        // replica 6.7e-16 from fixest); the SE carries ECON-20 (one-pass FE recovery).
+        Check::new(&case)
+            .named(
+                "coef_feglm_big",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-8),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_feglm_absorbed_regressors() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("panel_absorbed_regressors");
+        let r = run_feglm(
+            &ds,
+            "y",
+            &["x1", "x2", "z", "w"],
+            &["id", "t"],
+            GlmFamily::Gaussian,
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.dropped, vec!["z".to_string(), "w".to_string()]);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("'z', 'w' dropped: no variation left"))
+        );
+        // MAP exact after 2 sweeps on this balanced design: README tolerances
+        Check::new(&case)
+            .named("feglm2_coef", &r.variables, &r.coefficients, Tol::coef(180))
+            .finish();
+        let e = run_feglm(&ds, "y", &["z"], &["id", "t"], GlmFamily::Gaussian, None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.starts_with("no regressor left to estimate: 'z' dropped")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn test_feglm_irls_limit_is_reported() {
+        let config = FeglmConfig {
+            max_iter: 1,
+            ..FeglmConfig::default()
+        };
+        let r = run_feglm(
+            &create_binary_panel(),
+            "y",
+            &["x"],
+            &["firm"],
+            GlmFamily::Logit,
+            Some(config),
+        )
+        .unwrap();
+        assert!(!r.converged);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("FEGLM IRLS did not converge after 1 iteration")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(format!("{r}").contains("Converged: no (1 iteration"));
+    }
+
+    /// fixest::feglm(gaussian) on feglm_families: the coefficients, the residual df and n.
+    #[test]
+    fn test_validate_feglm_gaussian_families() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("feglm_families");
+        let r = run_feglm(
+            &ds,
+            "y_gauss",
+            &["x", "x2"],
+            &["id", "time"],
+            GlmFamily::Gaussian,
+            None,
+        )
+        .unwrap();
+        // deviation ECON-20: gauss_se_lm, gauss_deviance, gauss_dispersion (eta's one-pass FE recovery)
+        // deviation ECON-66: gauss_loglik_glm
+        Check::new(&case)
+            .named("gauss_coef", &r.variables, &r.coefficients, Tol::coef(480))
+            .scalar("gauss_df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+    }
+
+    /// Logit, probit and Poisson on feglm_families either converge or say that they did
+    /// not; the coefficients are finite.
+    #[test]
+    fn test_validate_feglm_families_report_convergence() {
+        let (_case, ds) = crate::test_support::load_case("feglm_families");
+        // deviation ECON-20 (coefficients; fixest drops 16 rows, the entities whose outcome is
+        // all 0 or all 1, for logit/probit: logit_nobs 464 of 480), ECON-67 (poisson SE)
+        for (y, family) in [
+            ("y_bin", GlmFamily::Logit),
+            ("y_bin", GlmFamily::Probit),
+            ("y_cnt", GlmFamily::Poisson),
+        ] {
+            let r = run_feglm(&ds, y, &["x", "x2"], &["id", "time"], family, None)
+                .unwrap_or_else(|e| panic!("{family:?}: {e}"));
+            assert!(r.iterations <= r.max_iter, "{family:?}");
+            if !r.converged {
+                assert!(
+                    r.warnings
+                        .iter()
+                        .any(|w| w.starts_with("FEGLM IRLS did not converge after")),
+                    "{family:?} {:?}",
+                    r.warnings
+                );
+                assert!(r.to_string().contains("Converged: no"), "{family:?}");
+            }
+            assert!(
+                r.coefficients.iter().all(|b| b.is_finite()),
+                "{family:?} {:?}",
+                r.coefficients
+            );
+        }
     }
 }
