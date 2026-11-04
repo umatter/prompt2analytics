@@ -133,7 +133,7 @@ pub fn friedman_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResul
 
     // Rank within each block (exact ties, as R's rank()); the scratch buffers are reused.
     let mut rank_sums = vec![0.0; n_treatments];
-    let mut order: Vec<(f64, usize)> = resource::try_with_capacity(n_treatments, "Friedman ranks")?;
+    let mut pairs: Vec<(f64, usize)> = resource::try_with_capacity(n_treatments, "Friedman ranks")?;
     let mut ranks: Vec<f64> = resource::try_with_capacity(n_treatments, "Friedman ranks")?;
     let mut sizes: Vec<usize> = resource::try_with_capacity(n_treatments, "Friedman ranks")?;
     let mut total_tie_sum = 0.0;
@@ -148,7 +148,7 @@ pub fn friedman_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResul
                 ),
             });
         }
-        midranks_into(row, &mut order, &mut ranks, &mut sizes)?;
+        midranks_into(row, &mut pairs, &mut ranks, &mut sizes)?;
         for (sum, &r) in rank_sums.iter_mut().zip(&ranks) {
             *sum += r;
         }

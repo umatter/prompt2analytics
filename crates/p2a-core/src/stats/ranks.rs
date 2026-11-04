@@ -34,8 +34,8 @@ pub fn midranks(x: &[f64]) -> EconResult<(Vec<f64>, Vec<usize>)> {
 /// block): the three buffers are cleared and refilled, so a loop allocates nothing once they
 /// have grown to the longest input. `ranks` holds the midranks of `x` in input order and `sizes`
 /// the tie-group sizes in ascending order of the value; `pairs` is scratch. Sorting
-/// `(value, index)` pairs keeps each comparison on contiguous memory; an index vector compared
-/// through `x[order[j]]` measured 1.1-1.2x slower on the pooled tests (n = 100-10,000).
+/// `(value, index)` pairs keeps each comparison on contiguous memory (cheaper than comparing
+/// through an index vector).
 pub(crate) fn midranks_into(
     x: &[f64],
     pairs: &mut Vec<(f64, usize)>,

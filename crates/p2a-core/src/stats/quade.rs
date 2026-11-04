@@ -214,13 +214,13 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
     // S_ij = Q_i * (R_ij - (k+1)/2), and accumulate the treatment totals S_j = Σ_i S_ij and
     // A = ΣΣ S_ij²
     let center = (k as f64 + 1.0) / 2.0;
-    let mut order: Vec<(f64, usize)> = resource::try_with_capacity(k, "Quade ranks")?;
+    let mut pairs: Vec<(f64, usize)> = resource::try_with_capacity(k, "Quade ranks")?;
     let mut ranks: Vec<f64> = resource::try_with_capacity(k, "Quade ranks")?;
     let mut sizes: Vec<usize> = resource::try_with_capacity(k, "Quade ranks")?;
     let mut treatment_sums: Vec<f64> = vec![0.0; k];
     let mut a = 0.0;
     for (row, &q_i) in data.iter().zip(&range_ranks) {
-        midranks_into(row, &mut order, &mut ranks, &mut sizes)?;
+        midranks_into(row, &mut pairs, &mut ranks, &mut sizes)?;
         for (sum, &r_ij) in treatment_sums.iter_mut().zip(&ranks) {
             let s_ij = q_i * (r_ij - center);
             *sum += s_ij;
