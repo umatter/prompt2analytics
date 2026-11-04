@@ -1,65 +1,54 @@
-# Validation: K-Means Clustering
+# Validation: K-Means Clustering (Lloyd)
 
-## Method Overview
+## Method
 
-K-means partitions data into K clusters by minimizing within-cluster variance.
+`p2a_core::ml::kmeans` and `kmeans_from_centers` (`crates/p2a-core/src/ml/clustering.rs`) run Lloyd
+iterations, R's `kmeans(x, centers, algorithm = "Lloyd")` (not R's default Hartigan-Wong):
 
-**Algorithm**:
-1. Initialize K centroids
-2. Assign points to nearest centroid
-3. Update centroids as cluster means
-4. Repeat until convergence
+1. assign each point to its nearest centroid (the first on ties, R's `dd < best`);
+2. stop when no point changed cluster (the first pass always counts as a change);
+3. move each centroid to the mean of its points; repeat, at most `max_iterations` passes (default 300).
 
-## Reference Implementations
+An explicit `tolerance` > 0 stops earlier, when the sum of the squared centroid shifts is at most
+`tolerance` times the mean column variance (scikit-learn's relative `tol`), and is followed by a final
+assignment pass, so the labels are always those of the returned centroids. Both rules are scale-free.
+`tolerance = None` (the MCP and CLI default) is 0: until no point is reassigned. A run that reaches the
+limit has `convergence.converged == false` and a warning ("k-means (Lloyd) did not converge after ...").
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| stats | R | `kmeans()` | 4.3.x |
-| scikit-learn | Python | `KMeans()` | 1.3-x |
+`kmeans` starts each of `n_init` runs from k-means++ and keeps the smallest inertia (the first on ties).
+`kmeans_from_centers` starts from given centres, as R's `centers =` matrix: the centres must be finite,
+have the data's columns and be distinct ("initial centers are not distinct"), and a cluster that empties is
+an error ("empty cluster: try a better set of initial centers"), both R's texts.
 
-## Test Cases
+Iteration counts and the state at the iteration limit (an intermediate value) are not R-pinned (re-scope
+rule 2): the case records them (`km_unit_iter`, `km_small_iter`, `km_iter2_*`) but no test compares them.
 
-### Test 1: Well-Separated Clusters
+## R code
 
-**R Code**:
-```r
-set.seed(42)
+`validation/r/cases/ml_hierarchical.R`, case `kmeans_lloyd_pca_mds` (R 4.3.3), on
+`validation/datasets/generated/hclust_60.csv`: `kmeans(X, centers = X[c(1, 21, 41), ], algorithm = "Lloyd")`,
+the same on `X * 1e-5`, and with `iter.max = 2`.
 
-# Three well-separated clusters
-n <- 150
-cluster1 <- matrix(rnorm(n/3 * 2, mean = 0), ncol = 2)
-cluster2 <- matrix(rnorm(n/3 * 2, mean = 5), ncol = 2)
-cluster3 <- matrix(rnorm(n/3 * 2, mean = c(0, 5)), ncol = 2, byrow = TRUE)
+## Values
 
-data <- rbind(cluster1, cluster2, cluster3)
+| Key | R |
+|---|---|
+| `km_unit_cluster` | three groups of 20 |
+| `km_unit_tot_withinss` | 152.68291992468085 |
+| `km_small_cluster` | three groups of 20 (the same partition) |
+| `km_small_tot_withinss` | 1.5268291992468086e-08 (= 152.68291992468085 x 1e-10) |
+| `km_unit_centers` | 3 x 3, column-major |
 
-# K-means with K=3
-result <- kmeans(data, centers = 3, nstart = 10)
-print(result$centers)
-print(result$withinss)
-```
+## Tests and tolerances
 
-**Validation Criteria**:
-- All points correctly assigned
-- Centroids close to true means
-- Within-cluster SS minimized
-
----
-
-### Test 2: Iris Dataset
-
-**R Code**:
-```r
-data(iris)
-result <- kmeans(iris[, 1:4], centers = 3, nstart = 25)
-
-# Compare to true species
-table(result$cluster, iris$Species)
-```
-
-## Numerical Precision
-
-Centroids should match within 1e-4 (given same initialization).
+| Test (`crates/p2a-core/src/ml/clustering.rs`) | Keys | Tolerance |
+|---|---|---|
+| `test_validate_kmeans_unit_scale` | `km_unit_cluster`, `km_unit_centers`, `km_unit_tot_withinss` | labels exact; centres `Tol::coef(60)`; tot.withinss `Tol::stat(60)` |
+| `test_validate_kmeans_small_scale` | `km_small_cluster`, `km_small_tot_withinss` | labels exact; `Tol::stat(60)` |
+| `test_validate_kmeans_not_converged` | (iteration limit 2: not converged, warning, inertia at least the converged run's) | property |
+| `test_validate_kmeans_scale_invariant` | (x 2^-20 and x 2^20: same labels and passes, with and without a tolerance) | exact |
+| `test_validate_kmeans_labels_match_final_centroids` | (every label is a nearest returned centroid) | exact |
+| `test_kmeans_from_centers_validates`, `test_kmeans_plusplus_start_feeds_lloyd`, `test_kmeans_separates_three_blobs`, `test_kmeans_inertia_decreases_with_k`, `test_kmeans_same_seed_same_result` | p2a properties | |
 
 ## Missing and non-finite values
 
@@ -82,9 +71,10 @@ Centroids should match within 1e-4 (given same initialization).
 ## Running the Tests
 
 ```bash
-cargo test -p p2a-core -- kmeans
+cargo test -p p2a-core --lib --no-default-features --features ci -- ml::clustering::tests::test_validate_kmeans ml::clustering::tests::test_kmeans
 ```
 
 ## References
 
 - Lloyd, S.P. (1982). "Least Squares Quantization in PCM". *IEEE Transactions on Information Theory*, 28(2), 129-137.
+- R `stats::kmeans`; scikit-learn `KMeans` (`tol`).

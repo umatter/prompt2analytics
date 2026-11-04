@@ -1,84 +1,37 @@
 # Validation: Cut Dendrogram (cutree)
 
-## Method Overview
+## Method
 
-Cuts a hierarchical clustering dendrogram into groups. Given the output of `hclust()`, this function assigns each observation to a cluster based on either:
-- A specified number of clusters (k)
-- A specified height cutoff (h)
+`cutree`, `cutree_multiple_k` and `run_cutree` (`crates/p2a-core/src/ml/clustering.rs`) cut the tree of
+`hierarchical` with the hclust core's `cut_k` / `cut_height` (`crates/p2a-core/src/ml/hclust.rs`), R's
+`cutree(tree, k =)` and `cutree(tree, h =)`:
 
-Key outputs:
-- Cluster labels (1 to k) for each observation
-- Optional: labels for multiple k values
+- groups are numbered by first appearance in observation order, as R (labels are R's minus 1);
+- `cutree(h =)` takes R's rule for the number of groups and is refused for a tree whose heights decrease
+  (centroid, median), as R refuses it;
+- the linkage matrix must hold the complete tree (n - 1 merges): a truncated one is refused ("cutree needs the
+  complete tree: ...").
 
-## Reference Implementations
+## R code
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| stats   | R        | `cutree()` | R 4.3+ |
+`validation/r/cases/ml_hierarchical.R`, case `hclust_methods` (see `validation/ml/hclust.md`):
+`cutree(hclust(dist(X), m), 3)` for the eight methods, `cutree(, k = c(2, 4, 6))` and `cutree(, h = 1.5)` of
+the average tree.
 
-## Test Cases
+## Values
 
-### Test 1: Simple 6-Point Clustering
+`cutree(, 3)` group sizes on hclust_60: single 39, 1, 20; complete 27, 13, 20; average, ward.D, ward.D2,
+centroid 22, 18, 20; mcquitty, median 21, 19, 20. The review's four hand cases (ML-14) are in
+`hclust.md`.
 
-**R Code**:
-```r
-# Six points in two distinct clusters
-points <- matrix(c(1, 1.1, 1.2, 5, 5.1, 5.2,
-                   1, 1.1, 1.2, 5, 5.1, 5.2), ncol = 2)
-hc <- hclust(dist(points), method = "complete")
-ct <- cutree(hc, k = 2)
-print(ct)
-```
+## Tests and tolerances
 
-**Results Comparison**:
-
-| Output | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| labels[0:2] | 1, 1, 1 | 1, 1, 1 | exact | PASS |
-| labels[3:5] | 2, 2, 2 | 2, 2, 2 | exact | PASS |
-
-**Rust Test**: `crates/p2a-core/src/ml/clustering.rs::tests::test_cutree_basic`
-
-### Test 2: Cut by Height
-
-**R Code**:
-```r
-# Cut at a specific height
-hc <- hclust(dist(matrix(rnorm(20), ncol=2)), method = "complete")
-ct <- cutree(hc, h = 1.5)
-print(ct)
-```
-
-**Rust Test**: `crates/p2a-core/src/ml/clustering.rs::tests::test_cutree_by_height`
-
-### Test 3: Multiple k Values
-
-**R Code**:
-```r
-# Get cluster assignments for k=2, 3, 4
-hc <- hclust(dist(matrix(rnorm(20), ncol=2)), method = "complete")
-ct <- cutree(hc, k = 2:4)
-print(ct)  # Matrix with columns for each k
-```
-
-**Rust Test**: `crates/p2a-core/src/ml/clustering.rs::tests::test_cutree_multiple_k`
-
-## Numerical Precision Summary
-
-- Cluster labels match R exactly
-- The algorithm uses union-find with path compression for efficiency
-
-## Known Differences
-
-- None identified for same input data
-
-## Performance Comparison
-
-| n Points | Rust (µs) | R (µs) | Speedup |
-|----------|-----------|--------|---------|
-| n=50     | TBD       | TBD    | TBD     |
-| n=100    | TBD       | TBD    | TBD     |
-| n=200    | TBD       | TBD    | TBD     |
+| Test (`crates/p2a-core/src/ml/clustering.rs`) | Keys | Tolerance |
+|---|---|---|
+| `test_validate_cutree3` | `<method>_cutree3`, `average_cutree_k246`, `average_cutree_h15`, `average_k_h15` | exact |
+| `test_validate_cutree_labels_deterministic_first_appearance` | (ward.D2 tree of hclust_60 cut repeatedly: identical labels, the first observation in group 1) | exact |
+| `test_cutree_refuses_a_truncated_tree`, `test_hierarchical_height_cut_refuses_inversions` | error texts | |
+| `test_cutree_basic`, `test_cutree_by_height`, `test_cutree_multiple_k`, `test_cutree_validation` | p2a properties | |
 
 ## Missing and non-finite values
 
@@ -89,7 +42,9 @@ print(ct)  # Matrix with columns for each k
   loop merged anyway (self-merges, more clusters than requested). The merge loop also
   returns an error instead of merging when no finite distance is left, which finite data
   reach when their distances overflow f64 (values around 1e200): "no finite distance
-  remains between the clusters still to be merged ...".
+  remains between the clusters still to be merged ...". Distances that overflow f64 (also
+  after squaring, for Ward, centroid and median) are refused in both modes, with or without
+  `distance_threshold`; rescale the columns.
 - **R.** `dist()` uses the coordinates both rows have (scaled up), so
   `hclust(dist(m), "ward.D2")` clusters a row with one `NA` (heights 1, 1, 1.5275252316519468,
   10.220893633467998 on the review's rows (0,0), (1,0), (5,5), (6,5), (NA,1); R 4.3.3).
