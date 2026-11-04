@@ -170,7 +170,10 @@ async fn test_mcp_panel_gmm_system_warns() {
     let args = gmm_args("ab_balanced", json!({"transform": "system"}));
     let r = call(&server, &session, "panel_gmm", args).await;
     let t = text(&r);
+    // T3-WP15 implemented system GMM; T3-WP58 renames/moves this test with the panel_gmm description
     assert!(r.success, "{t}");
-    assert!(t.contains("ECON-30"), "{t}");
-    assert!(t.contains("Difference GMM (Arellano-Bond)"), "{t}");
+    assert!(t.contains("System GMM (Blundell-Bond) (Two-step)"), "{t}");
+    assert!(!t.contains("ECON-30"), "{t}");
+    assert!(!t.contains("Difference GMM (Arellano-Bond)"), "{t}");
+    assert!(t.contains("No. Observations: 1300"), "{t}");
 }

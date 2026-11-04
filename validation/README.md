@@ -298,7 +298,8 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Random Effects | [panel_re.md](econometrics/panel_re.md) | R-pinned |
 | Hausman Test | [hausman.md](econometrics/hausman.md) | R-pinned |
 | HDFE | [hdfe.md](econometrics/hdfe.md) | R-pinned |
-| Arellano-Bond difference GMM | [gmm.md](econometrics/gmm.md) | R-pinned |
+| Arellano-Bond difference GMM | [gmm.md](econometrics/gmm.md) | R-pinned, known deviations (ECON-30) |
+| Blundell-Bond system GMM | [gmm.md](econometrics/gmm.md) | R-pinned, known deviations (ECON-30) |
 | Panel unit-root tests: data extraction (unit ids, time, gaps, missing values) | [panel_unit_root.md](econometrics/panel_unit_root.md) | R-pinned |
 | Panel GLS (pggls) | [pggls.md](econometrics/pggls.md) | not R-pinned |
 | FEGLM | [feglm.md](econometrics/feglm.md) | not R-pinned |

@@ -87,7 +87,7 @@ pub(crate) fn time_codes(times: &[i64]) -> (Vec<usize>, Vec<i64>) {
     (codes, distinct)
 }
 
-/// Lag specification of a difference-GMM model.
+/// Lag specification of a dynamic-panel GMM model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GmmLagSpec {
     /// Lags of the dependent variable among the regressors.
@@ -98,21 +98,42 @@ pub(crate) struct GmmLagSpec {
     pub max_lag: Option<usize>,
     /// One instrument column per lag depth instead of one per (period, lag).
     pub collapse: bool,
+    /// System GMM: level equations after the difference equations (pgmm "ld").
+    pub system: bool,
 }
 
-/// The first-differenced equations of a dynamic panel in plm::pgmm's layout.
-pub(crate) struct DiffEquations {
-    /// Δy_t, one per equation.
-    pub dy: Vec<f64>,
-    /// `[Δy_{t-1} .. Δy_{t-lags}, Δx_t]`, n_eq x k.
+/// The kind of a GMM equation row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EqKind {
+    /// First-differenced equation (Δy_t on Δy_{t-1}, .., Δx_t).
+    Difference,
+    /// Level equation of system GMM (y_t on y_{t-1}, .., x_t).
+    Level,
+}
+
+/// The equations of a dynamic panel in plm::pgmm's layout: per entity its difference
+/// rows (time order), then, for system GMM, its level rows (time order).
+pub(crate) struct GmmEquations {
+    /// Δy_t (difference rows) or y_t (level rows), one per equation.
+    pub lhs: Vec<f64>,
+    /// `[Δy_{t-1} .. Δy_{t-lags}, Δx_t]` or `[y_{t-1} .. y_{t-lags}, x_t]`, n_eq x k.
     pub x: Array2<f64>,
-    /// `[GMM columns, Δx_t]`, n_eq x L.
+    /// `[difference GMM | level GMM | Δx | x (system only)]`, n_eq x L.
     pub z: Array2<f64>,
-    /// Number of GMM columns (L - k_x).
+    /// Kind of each equation.
+    pub kind: Vec<EqKind>,
+    /// Number of difference-GMM columns.
     pub n_gmm_instruments: usize,
+    /// Number of level-GMM columns (0 without system).
+    pub n_level_gmm_instruments: usize,
+    /// Number of difference equations.
+    pub n_diff: usize,
+    /// Number of level equations (0 without system).
+    pub n_level: usize,
     /// t of each equation.
     pub time: Vec<i64>,
-    /// Equation rows of each entity with at least one equation, in level order.
+    /// Equation rows of each entity with at least one equation, in level order; within a
+    /// block the difference rows come first.
     pub blocks: Vec<Range<usize>>,
     /// Factor label of each block.
     pub block_labels: Vec<String>,
@@ -120,6 +141,48 @@ pub(crate) struct DiffEquations {
     pub entities_without_equations: Vec<String>,
     /// t_max - t_min + 1.
     pub span: usize,
+}
+
+impl GmmEquations {
+    /// The difference rows of `block` (its prefix).
+    pub(crate) fn difference_rows(&self, block: &Range<usize>) -> Range<usize> {
+        let d = self.kind[block.clone()].partition_point(|k| *k == EqKind::Difference);
+        block.start..block.start + d
+    }
+}
+
+/// `plm:::FSM(., "full")` entry for two equation rows `(kind, time)` of one entity:
+/// difference-difference 2 (same t) / -1 (one period apart) / 0; level-level 1 (same t)
+/// / 0; a difference row at t with a level row at s: +1 (s = t), -1 (s = t - 1), else 0.
+pub(crate) fn h_entry(a: (EqKind, i64), b: (EqKind, i64)) -> f64 {
+    use EqKind::{Difference as D, Level as L};
+    match (a, b) {
+        ((D, ta), (D, tb)) => {
+            if ta == tb {
+                2.0
+            } else if ta.abs_diff(tb) == 1 {
+                -1.0
+            } else {
+                0.0
+            }
+        }
+        ((L, ta), (L, tb)) => {
+            if ta == tb {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        ((D, td), (L, tl)) | ((L, tl), (D, td)) => {
+            if tl == td {
+                1.0
+            } else if td.checked_sub(1) == Some(tl) {
+                -1.0
+            } else {
+                0.0
+            }
+        }
+    }
 }
 
 /// Greatest common divisor of two positive numbers.
@@ -130,26 +193,34 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
     a
 }
 
-/// The first-differenced equations of `y` on its `spec.lags` lags and `x`, in the
-/// layout of `plm::pgmm(transformation = "d")`.
+/// The equations of `y` on its `spec.lags` lags and `x`, in the layout of
+/// `plm::pgmm(transformation = "d")`, or of `"ld"` with `spec.system`.
 ///
 /// `cols` must hold `entity` (factor), `time` (time index), `y` and every `x`
 /// (numeric), complete rows. Lags are steps of 1 in `time` (plm's time-aware `lag()`,
-/// Stata without `delta()`): the equation of (entity, t) exists only where the entity
-/// has y at t, t-1, ..., t-lags-1 and t - t_min >= max(lags + 1, min_lag). Its GMM
-/// instruments are the entity's observed levels y_s, s in [t - max_lag, t - min_lag],
-/// one column per (t, s), or per lag depth t - s with `collapse`; a column that no
-/// equation observes is not created. The Δx columns follow as standard instruments.
-/// Nothing is zero-filled except the instrument cells an equation does not have. A
-/// repeated (entity, time) is an error.
-pub(crate) fn difference_equations(
+/// Stata without `delta()`).
+///
+/// - **Difference rows.** The equation of (entity, t) exists only where the entity has y
+///   at t, t-1, ..., t-lags-1 and t - t_min >= TL1 = max(lags + 1, min_lag). Its GMM
+///   instruments are the entity's observed levels y_s, s in [t - max_lag, t - min_lag],
+///   one column per (t, s), or per lag depth t - s with `collapse`; Δx follows as its own
+///   instrument.
+/// - **Level rows** (system only). The equation of (entity, t) exists where the entity
+///   has y at t, ..., t-lags and t - t_min >= TL1 - 1. Its GMM instrument is
+///   y_{t-1} - y_{t-2} where both are observed, one column per t (one column with
+///   `collapse`); x in levels follows as its own instrument (Δx is 0 in these rows, and
+///   x is 0 in the difference rows).
+///
+/// A column that no equation observes is not created. Nothing is zero-filled except the
+/// instrument cells an equation does not have. A repeated (entity, time) is an error.
+pub(crate) fn gmm_equations(
     cols: &Columns,
     y: &str,
     x: &[&str],
     entity: &str,
     time: &str,
     spec: &GmmLagSpec,
-) -> EconResult<DiffEquations> {
+) -> EconResult<GmmEquations> {
     let factor = cols.factor(entity);
     let (codes, n_levels) = entity_codes(factor);
     let times = cols.time_index(time);
@@ -157,6 +228,7 @@ pub(crate) fn difference_equations(
     let xv: Vec<&[f64]> = x.iter().map(|name| cols.numeric(name)).collect();
     let n = codes.len();
     let k_x = x.len();
+    let system = spec.system;
 
     // Rows grouped by entity in level order (a stable counting sort), then by time.
     let mut start = resource::try_vec(n_levels.saturating_add(1), 0usize, "GMM entity offsets")?;
@@ -185,8 +257,8 @@ pub(crate) fn difference_equations(
             if b - a > 1 {
                 return Err(EconError::InvalidSpecification {
                     message: format!(
-                        "Entity '{}' has {} rows for time {t}; difference GMM needs one row \
-                         per (entity, time).",
+                        "Entity '{}' has {} rows for time {t}; dynamic-panel GMM needs one \
+                         row per (entity, time).",
                         factor.levels[e],
                         b - a
                     ),
@@ -195,8 +267,6 @@ pub(crate) fn difference_equations(
             a = b;
         }
     }
-    let mut st: Vec<i64> = resource::try_with_capacity(n, "GMM sorted times")?;
-    st.extend(order.iter().map(|&r| times[r]));
 
     // The time span and the lag checks.
     let (Some(&t_min), Some(&t_max)) = (times.iter().min(), times.iter().max()) else {
@@ -247,55 +317,77 @@ pub(crate) fn difference_equations(
             ),
         });
     }
-    // lags < span - 1 and min_lag <= max_lag_eff < span, and span fits in i64.
+    // Positions p = t - t_min lie in [0, span), and lags < span - 1, min_lag <= max_lag_eff
+    // < span, all of which fit in i64.
+    let mut pos: Vec<i64> = resource::try_with_capacity(n, "GMM sorted times")?;
+    pos.extend(order.iter().map(|&r| times[r] - t_min));
     let k = lags + k_x;
     let lags_i = lags as i64;
     let min_lag = spec.min_lag as i64;
     let max_lag = max_lag_eff as i64;
     let tl1 = (lags_i + 1).max(min_lag);
+    let tl2 = tl1 - 1;
     let collapse = spec.collapse;
 
-    // An equation at sorted position j of an entity's times `ts`.
-    let is_equation = |ts: &[i64], j: usize| -> bool {
-        let t = ts[j];
-        t - t_min >= tl1 && j > lags && ts[j - lags - 1] == t - lags_i - 1
+    // Whether the entity (positions `ps`) has the `l` periods before row j, consecutive.
+    let has_lags = |ps: &[i64], j: usize, l: usize| -> bool {
+        j.checked_sub(l)
+            .is_some_and(|i| ps[j].checked_sub(l as i64) == Some(ps[i]))
     };
-    // Positions of the entity's instrument rows for the equation at time t.
-    let instruments = |ts: &[i64], t: i64| -> Range<usize> {
-        let lo = ts.partition_point(|&s| s < t.saturating_sub(max_lag));
-        let hi = ts.partition_point(|&s| s <= t - min_lag);
+    // A difference equation at sorted index j of an entity's positions `ps`.
+    let is_difference = |ps: &[i64], j: usize| ps[j] >= tl1 && has_lags(ps, j, lags + 1);
+    // A level equation at j (system only).
+    let is_level = |ps: &[i64], j: usize| system && ps[j] >= tl2 && has_lags(ps, j, lags);
+    // Whether the level equation at j has its instrument y_{t-1} - y_{t-2}.
+    let has_level_instrument = |ps: &[i64], j: usize| has_lags(ps, j, 2);
+    // Indexes of the entity's instrument rows for the difference equation at position p.
+    let instruments = |ps: &[i64], p: i64| -> Range<usize> {
+        let lo = ps.partition_point(|&s| s < p - max_lag);
+        let hi = ps.partition_point(|&s| s <= p - min_lag);
         lo..hi.max(lo)
     };
-    let key = |t: i64, s: i64| if collapse { (t - s, 0) } else { (t, s) };
+    let key = |p: i64, s: i64| if collapse { (p - s, 0) } else { (p, s) };
+    let level_key = |p: i64| if collapse { 0 } else { p };
 
     // First pass: count the equations and the entities that have one, and bound the
     // instrument matrix before collecting its columns.
-    let mut n_eq = 0usize;
+    let mut n_diff = 0usize;
+    let mut n_level = 0usize;
     let mut n_blocks = 0usize;
     let mut widest = 0usize;
     for e in 0..n_levels {
         resource::checkpoint()?;
-        let ts = &st[start[e]..start[e + 1]];
-        let before = n_eq;
-        for j in 0..ts.len() {
-            if is_equation(ts, j) {
-                n_eq += 1;
-                widest = widest.max(instruments(ts, ts[j]).len());
+        let ps = &pos[start[e]..start[e + 1]];
+        let before = n_diff + n_level;
+        for j in 0..ps.len() {
+            if is_difference(ps, j) {
+                n_diff += 1;
+                widest = widest.max(instruments(ps, ps[j]).len());
+            }
+            if is_level(ps, j) {
+                n_level += 1;
             }
         }
-        if n_eq > before {
+        if n_diff + n_level > before {
             n_blocks += 1;
         }
     }
+    let n_eq = n_diff + n_level;
     if n_eq == 0 {
         let mut distinct: Vec<i64> = resource::try_with_capacity(n, "GMM distinct times")?;
         distinct.extend_from_slice(times);
         distinct.sort_unstable();
         distinct.dedup();
         let g = distinct.windows(2).fold(0, |g, w| gcd(g, w[1] - w[0]));
+        let d = distinct.windows(2).map(|w| w[1] - w[0]).min().unwrap_or(0);
         let hint = if g > 1 {
             format!(
                 "; the values of '{time}' are all multiples of {g} apart; recode them as \
+                 consecutive period numbers"
+            )
+        } else if d > 1 {
+            format!(
+                "; consecutive values of '{time}' are at least {d} apart; recode them as \
                  consecutive period numbers"
             )
         } else {
@@ -305,9 +397,8 @@ pub(crate) fn difference_equations(
             required: 1,
             provided: 0,
             context: format!(
-                "difference GMM formed no equation: the equation of period t needs '{y}' \
-                 observed at t, t-1, ..., t-{} of one entity, and lags are steps of 1 in \
-                 '{time}'{hint}",
+                "GMM formed no equation: the equation of period t needs '{y}' observed at \
+                 t, t-1, ..., t-{} of one entity, and lags are steps of 1 in '{time}'{hint}",
                 lags + 1
             ),
         });
@@ -316,7 +407,11 @@ pub(crate) fn difference_equations(
         return Err(EconError::InsufficientData {
             required: 2,
             provided: n_blocks,
-            context: "GMM requires at least 2 entities with a differenced equation".to_string(),
+            context: if system {
+                "GMM requires at least 2 entities with an equation".to_string()
+            } else {
+                "GMM requires at least 2 entities with a differenced equation".to_string()
+            },
         });
     }
     if n_eq < k + 1 {
@@ -327,28 +422,45 @@ pub(crate) fn difference_equations(
         });
     }
     let what = "GMM instrument matrix";
+    let n_standard = if system { 2 * k_x } else { k_x };
     resource::check_alloc::<f64>(
-        resource::checked_len(&[n_eq, widest.saturating_add(k_x)], what)?,
+        resource::checked_len(
+            &[
+                n_eq,
+                widest
+                    .saturating_add(usize::from(system))
+                    .saturating_add(n_standard),
+            ],
+            what,
+        )?,
         what,
     )?;
 
     // Second pass: the instrument columns some equation observes, in ascending order.
     let mut keys = BTreeSet::new();
+    let mut level_keys = BTreeSet::new();
     for e in 0..n_levels {
         resource::checkpoint()?;
-        let ts = &st[start[e]..start[e + 1]];
-        for j in 0..ts.len() {
-            if is_equation(ts, j) {
-                let t = ts[j];
-                for &s in &ts[instruments(ts, t)] {
-                    keys.insert(key(t, s));
+        let ps = &pos[start[e]..start[e + 1]];
+        for j in 0..ps.len() {
+            let p = ps[j];
+            if is_difference(ps, j) {
+                for &s in &ps[instruments(ps, p)] {
+                    keys.insert(key(p, s));
                 }
+            }
+            if is_level(ps, j) && has_level_instrument(ps, j) {
+                level_keys.insert(level_key(p));
             }
         }
     }
     let keys: Vec<(i64, i64)> = keys.into_iter().collect();
+    let level_keys: Vec<i64> = level_keys.into_iter().collect();
     let n_gmm = keys.len();
-    let n_inst = n_gmm + k_x;
+    let n_level_gmm = level_keys.len();
+    let dx_col = n_gmm + n_level_gmm;
+    let lx_col = dx_col + k_x;
+    let n_inst = dx_col + n_standard;
     if n_inst < k {
         return Err(EconError::InvalidSpecification {
             message: format!("Underidentified: {n_inst} instruments for {k} parameters"),
@@ -356,9 +468,10 @@ pub(crate) fn difference_equations(
     }
 
     // Third pass: the equations, entity block by entity block.
-    let mut dy = resource::try_vec(n_eq, 0.0, "GMM differenced outcome")?;
+    let mut lhs = resource::try_vec(n_eq, 0.0, "GMM outcome")?;
     let mut xm = resource::try_zeros2(n_eq, k, "GMM regressor matrix")?;
     let mut z = resource::try_zeros2(n_eq, n_inst, what)?;
+    let mut kind = resource::try_vec(n_eq, EqKind::Difference, "GMM equation kinds")?;
     let mut eq_time = resource::try_vec(n_eq, 0i64, "GMM equation times")?;
     let mut blocks = resource::try_with_capacity(n_blocks, "GMM entity blocks")?;
     let mut block_labels = resource::try_with_capacity(n_blocks, "GMM entity blocks")?;
@@ -367,30 +480,53 @@ pub(crate) fn difference_equations(
     for e in 0..n_levels {
         resource::checkpoint()?;
         let base = start[e];
-        let ts = &st[base..start[e + 1]];
-        let row = |p: usize| order[base + p];
+        let ps = &pos[base..start[e + 1]];
+        let row = |j: usize| order[base + j];
         let first = r;
-        for j in 0..ts.len() {
-            if !is_equation(ts, j) {
+        for j in 0..ps.len() {
+            if !is_difference(ps, j) {
                 continue;
             }
-            let t = ts[j];
+            let p = ps[j];
             let (now, prev) = (row(j), row(j - 1));
-            dy[r] = yv[now] - yv[prev];
+            lhs[r] = yv[now] - yv[prev];
             for l in 1..=lags {
                 xm[[r, l - 1]] = yv[row(j - l)] - yv[row(j - l - 1)];
             }
             for (m, xc) in xv.iter().enumerate() {
                 let d = xc[now] - xc[prev];
                 xm[[r, lags + m]] = d;
-                z[[r, n_gmm + m]] = d;
+                z[[r, dx_col + m]] = d;
             }
-            for p in instruments(ts, t) {
-                if let Ok(c) = keys.binary_search(&key(t, ts[p])) {
-                    z[[r, c]] = yv[row(p)];
+            for i in instruments(ps, p) {
+                if let Ok(c) = keys.binary_search(&key(p, ps[i])) {
+                    z[[r, c]] = yv[row(i)];
                 }
             }
-            eq_time[r] = t;
+            eq_time[r] = t_min + p;
+            r += 1;
+        }
+        for j in 0..ps.len() {
+            if !is_level(ps, j) {
+                continue;
+            }
+            let p = ps[j];
+            let now = row(j);
+            lhs[r] = yv[now];
+            for l in 1..=lags {
+                xm[[r, l - 1]] = yv[row(j - l)];
+            }
+            for (m, xc) in xv.iter().enumerate() {
+                xm[[r, lags + m]] = xc[now];
+                z[[r, lx_col + m]] = xc[now];
+            }
+            if has_level_instrument(ps, j)
+                && let Ok(c) = level_keys.binary_search(&level_key(p))
+            {
+                z[[r, n_gmm + c]] = yv[row(j - 1)] - yv[row(j - 2)];
+            }
+            kind[r] = EqKind::Level;
+            eq_time[r] = t_min + p;
             r += 1;
         }
         if r > first {
@@ -401,11 +537,15 @@ pub(crate) fn difference_equations(
         }
     }
 
-    Ok(DiffEquations {
-        dy,
+    Ok(GmmEquations {
+        lhs,
         x: xm,
         z,
+        kind,
         n_gmm_instruments: n_gmm,
+        n_level_gmm_instruments: n_level_gmm,
+        n_diff,
+        n_level,
         time: eq_time,
         blocks,
         block_labels,
@@ -454,11 +594,12 @@ mod tests {
             min_lag: 2,
             max_lag: None,
             collapse,
+            system: false,
         }
     }
 
     /// The equations of `y` on `x` with entity `id` and time `year`.
-    fn ab_equations(ds: &Dataset, spec: &GmmLagSpec) -> EconResult<DiffEquations> {
+    fn ab_equations(ds: &Dataset, spec: &GmmLagSpec) -> EconResult<GmmEquations> {
         let cols = ColumnRequest::new(ds.df())
             .factor("id")
             .time_index("year")
@@ -466,7 +607,7 @@ mod tests {
             .numeric("x")
             .na(NaPolicy::Omit)
             .extract()?;
-        difference_equations(&cols, "y", &["x"], "id", "year", spec)
+        gmm_equations(&cols, "y", &["x"], "id", "year", spec)
     }
 
     /// pgmm's layout on a panel with interior gaps and late entry: an equation needs
@@ -479,9 +620,9 @@ mod tests {
         let mut check = p2a_validation::Check::new(&case);
         let exact = p2a_validation::Tol::exact();
         check
-            .scalar("onestep_n_obs", eq.dy.len() as f64, exact)
+            .scalar("onestep_n_obs", eq.lhs.len() as f64, exact)
             .scalar("onestep_n_instruments_nonzero", eq.z.ncols() as f64, exact);
-        let n_eq = eq.dy.len();
+        let n_eq = eq.lhs.len();
         assert_eq!(eq.x.dim(), (n_eq, 2));
         assert_eq!(eq.z.nrows(), n_eq);
         assert_eq!(eq.time.len(), n_eq);
@@ -517,7 +658,7 @@ mod tests {
         expected.sort_by(f64::total_cmp);
         assert_eq!(gmm, expected, "GMM instruments of (id 9, 2007)");
         assert_eq!(eq.z[[r, 21]], x_at(2007) - x_at(2006));
-        assert_eq!(eq.dy[r], y_at(2007) - y_at(2006));
+        assert_eq!(eq.lhs[r], y_at(2007) - y_at(2006));
         assert_eq!(
             eq.x.row(r).to_vec(),
             [y_at(2006) - y_at(2005), x_at(2007) - x_at(2006)]
@@ -530,7 +671,7 @@ mod tests {
             exact,
         );
         let lags2 = ab_equations(&ds, &lag_spec(2, false)).unwrap();
-        check.scalar("lags2_twostep_n_obs", lags2.dy.len() as f64, exact);
+        check.scalar("lags2_twostep_n_obs", lags2.lhs.len() as f64, exact);
         check.finish();
     }
 
@@ -573,7 +714,7 @@ mod tests {
             let span = lags + 2;
             let eq = ab_equations(&first_periods(span as i64), &lag_spec(lags, false)).unwrap();
             assert_eq!(eq.span, span);
-            assert_eq!(eq.dy.len(), 100, "one equation per entity");
+            assert_eq!(eq.lhs.len(), 100, "one equation per entity");
             assert!(eq.time.iter().all(|&t| t == 2000 + span as i64 - 1));
             assert_eq!(eq.n_gmm_instruments, lags);
             match ab_equations(&first_periods(span as i64 - 1), &lag_spec(lags, false)) {
@@ -621,6 +762,229 @@ mod tests {
             Err(e) => panic!("expected InsufficientData, got {e:?}"),
             Ok(_) => panic!("expected InsufficientData, got equations"),
         }
+    }
+
+    /// Yearly dates (1 January of each year) are 365 or 366 days apart, so their gcd is 1:
+    /// the error still says to recode them.
+    #[test]
+    fn test_gmm_equations_date_time_hint() {
+        use polars::prelude::{DataType, NamedFrom, Series};
+        let ds = repo_dataset(AB_BALANCED);
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        let days: Vec<i32> = ds
+            .df()
+            .column("year")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .map(|y| {
+                chrono::NaiveDate::from_ymd_opt(y.unwrap() as i32, 1, 1)
+                    .unwrap()
+                    .signed_duration_since(epoch)
+                    .num_days() as i32
+            })
+            .collect();
+        let dates = Series::new("year".into(), days)
+            .cast(&DataType::Date)
+            .unwrap();
+        let dated = with(&ds, dates.into());
+        match ab_equations(&dated, &lag_spec(1, false)) {
+            Err(EconError::InsufficientData { context, .. }) => assert!(
+                context.contains("recode them as consecutive period numbers")
+                    && context.contains("at least 365 apart"),
+                "{context}"
+            ),
+            Err(e) => panic!("expected InsufficientData, got {e:?}"),
+            Ok(_) => panic!("expected InsufficientData, got equations"),
+        }
+    }
+
+    /// `plm:::FSM(4, "full")` (T = 5, TL2 = 1) and, without level rows, T2's tridiagonal H.
+    #[test]
+    fn test_system_h_weight_is_pgmm_fsm_full() {
+        use EqKind::{Difference as D, Level as L};
+        // difference rows t = 3, 4, 5, then level rows t = 2, 3, 4, 5
+        let rows = [(D, 3), (D, 4), (D, 5), (L, 2), (L, 3), (L, 4), (L, 5)];
+        let fsm4: [[f64; 7]; 7] = [
+            [2., -1., 0., -1., 1., 0., 0.],
+            [-1., 2., -1., 0., -1., 1., 0.],
+            [0., -1., 2., 0., 0., -1., 1.],
+            [-1., 0., 0., 1., 0., 0., 0.],
+            [1., -1., 0., 0., 1., 0., 0.],
+            [0., 1., -1., 0., 0., 1., 0.],
+            [0., 0., 1., 0., 0., 0., 1.],
+        ];
+        for a in 0..7 {
+            for b in 0..7 {
+                assert_eq!(h_entry(rows[a], rows[b]), fsm4[a][b], "({a}, {b})");
+            }
+        }
+        // difference rows only, with a gap at 5
+        let d = [(D, 3), (D, 4), (D, 6)];
+        let g = [[2., -1., 0.], [-1., 2., 0.], [0., 0., 2.]];
+        for a in 0..3 {
+            for b in 0..3 {
+                assert_eq!(h_entry(d[a], d[b]), g[a][b]);
+            }
+        }
+    }
+
+    /// The system equations of `y` on `x` with entity `id` and time `year`.
+    fn sys_equations(
+        ds: &Dataset,
+        x: &[&str],
+        lags: usize,
+        collapse: bool,
+        system: bool,
+    ) -> GmmEquations {
+        let cols = ColumnRequest::new(ds.df())
+            .factor("id")
+            .time_index("year")
+            .numeric("y")
+            .numerics(x)
+            .na(NaPolicy::Omit)
+            .extract()
+            .unwrap();
+        let spec = GmmLagSpec {
+            lags,
+            min_lag: 2,
+            max_lag: None,
+            collapse,
+            system,
+        };
+        gmm_equations(&cols, "y", x, "id", "year", &spec).unwrap()
+    }
+
+    /// The kinds and times of block `b`, and the times of its level rows that have a
+    /// level-GMM instrument.
+    fn block_layout(eq: &GmmEquations, b: usize) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+        let block = eq.blocks[b].clone();
+        let diff = eq.difference_rows(&block);
+        let lev = diff.end..block.end;
+        assert!(eq.kind[lev.clone()].iter().all(|k| *k == EqKind::Level));
+        let gmm = eq.n_gmm_instruments..eq.n_gmm_instruments + eq.n_level_gmm_instruments;
+        let with_instrument = lev
+            .clone()
+            .filter(|&r| gmm.clone().any(|c| eq.z[[r, c]] != 0.0))
+            .map(|r| eq.time[r])
+            .collect();
+        (
+            eq.time[diff].to_vec(),
+            eq.time[lev].to_vec(),
+            with_instrument,
+        )
+    }
+
+    /// pgmm "ld" on the balanced panel: per entity 6 difference rows (2002..2007) and 7
+    /// level rows (2001..2007), the 2001 level row without a level instrument.
+    #[test]
+    fn test_validate_system_equations_balanced_layout() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let eq = sys_equations(&ds, &["x"], 1, false, true);
+        let mut check = p2a_validation::Check::new(&case);
+        let exact = p2a_validation::Tol::exact();
+        check
+            .scalar("onestep_n_obs", eq.lhs.len() as f64, exact)
+            .scalar("onestep_n_obs_diff", eq.n_diff as f64, exact)
+            .scalar("onestep_n_obs_level", eq.n_level as f64, exact)
+            .scalar("onestep_n_instruments", eq.z.ncols() as f64, exact)
+            .scalar("onestep_n_groups", eq.blocks.len() as f64, exact);
+        assert_eq!((eq.lhs.len(), eq.n_diff, eq.n_level), (1300, 600, 700));
+        assert_eq!(eq.x.dim(), (1300, 2));
+        assert_eq!(eq.z.dim(), (1300, 29));
+        assert_eq!((eq.n_gmm_instruments, eq.n_level_gmm_instruments), (21, 6));
+        assert_eq!((eq.blocks.len(), eq.span), (100, 8));
+        assert_eq!(eq.block_labels[0], "1");
+        let b = eq.blocks[0].clone();
+        assert_eq!(
+            eq.kind[b.clone()],
+            [[EqKind::Difference; 6].as_slice(), &[EqKind::Level; 7]].concat()
+        );
+        assert_eq!(
+            eq.time[b.clone()],
+            [
+                2002, 2003, 2004, 2005, 2006, 2007, 2001, 2002, 2003, 2004, 2005, 2006, 2007
+            ]
+        );
+        // The level row for 2001: y_2001 on y_2000 and x_2001, no level instrument.
+        let r = b.start + 6;
+        assert_eq!(eq.lhs[r], 0.7948912689);
+        assert_eq!(eq.x.row(r).to_vec(), [2.8379418339, 0.1412519848]);
+        assert!((21..27).all(|c| eq.z[[r, c]] == 0.0));
+        assert_eq!(eq.z[[r, 27]], 0.0);
+        assert_eq!(eq.z[[r, 28]], 0.1412519848);
+        // The level row for 2002: instrument y_2001 - y_2000.
+        let r = b.start + 7;
+        let level_gmm: Vec<f64> = (21..27)
+            .map(|c| eq.z[[r, c]])
+            .filter(|v| *v != 0.0)
+            .collect();
+        assert_eq!(level_gmm, [0.7948912689 - 2.8379418339]);
+        assert_eq!(eq.x.row(r).to_vec(), [0.7948912689, -0.5654468719]);
+
+        let collapsed = sys_equations(&ds, &["x"], 1, true, true);
+        assert_eq!(collapsed.z.ncols(), 9);
+        assert_eq!(collapsed.n_level_gmm_instruments, 1);
+        check.scalar(
+            "collapse_twostep_n_instruments",
+            collapsed.z.ncols() as f64,
+            exact,
+        );
+        let lags3 = sys_equations(&ds, &["x"], 3, false, true);
+        assert_eq!(
+            (lags3.lhs.len(), lags3.n_diff, lags3.n_level),
+            (900, 400, 500)
+        );
+        assert_eq!(lags3.z.ncols(), 25);
+        assert_eq!(lags3.n_level_gmm_instruments, 5);
+        check.scalar("lags3_spec_n_instruments", lags3.z.ncols() as f64, exact);
+        let nox = sys_equations(&ds, &[], 1, false, true);
+        assert_eq!(nox.z.ncols(), 27);
+        check.scalar("nox_onestep_n_instruments", nox.z.ncols() as f64, exact);
+        let diff = sys_equations(&ds, &["x"], 1, false, false);
+        assert_eq!((diff.lhs.len(), diff.n_diff, diff.n_level), (600, 600, 0));
+        assert_eq!(diff.z.ncols(), 22);
+        assert_eq!(diff.n_level_gmm_instruments, 0);
+        assert!(diff.kind.iter().all(|k| *k == EqKind::Difference));
+        check.finish();
+    }
+
+    /// pgmm "ld" with interior gaps (ids divisible by 9 miss 2004) and late entry (ids
+    /// divisible by 13 start in 2002): level rows need y_{t-1}, their instrument y_{t-2}.
+    #[test]
+    fn test_validate_system_equations_gaps_layout() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_gaps");
+        let eq = sys_equations(&ds, &["x"], 1, false, true);
+        let mut check = p2a_validation::Check::new(&case);
+        let exact = p2a_validation::Tol::exact();
+        check
+            .scalar("onestep_n_obs", eq.lhs.len() as f64, exact)
+            .scalar("onestep_n_obs_diff", eq.n_diff as f64, exact)
+            .scalar("onestep_n_obs_level", eq.n_level as f64, exact)
+            .scalar("onestep_n_instruments", eq.z.ncols() as f64, exact);
+        assert_eq!((eq.lhs.len(), eq.n_diff, eq.n_level), (1217, 553, 664));
+        assert_eq!(eq.z.dim(), (1217, 29));
+        assert_eq!(eq.blocks.len(), 100);
+        assert_eq!(eq.block_labels[8], "9");
+        assert_eq!(
+            block_layout(&eq, 8),
+            (
+                vec![2002, 2003, 2007],
+                vec![2001, 2002, 2003, 2006, 2007],
+                vec![2002, 2003, 2007]
+            )
+        );
+        assert_eq!(eq.block_labels[12], "13");
+        assert_eq!(
+            block_layout(&eq, 12),
+            (
+                vec![2004, 2005, 2006, 2007],
+                vec![2003, 2004, 2005, 2006, 2007],
+                vec![2004, 2005, 2006, 2007]
+            )
+        );
+        check.finish();
     }
 
     /// The crate-internal codes: dense period indexes and factor codes as `usize`.

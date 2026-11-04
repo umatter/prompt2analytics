@@ -1,5 +1,5 @@
-//! Arellano-Bond difference GMM for dynamic panel data, as R's
-//! `plm::pgmm(transformation = "d")`.
+//! Arellano-Bond difference GMM and Blundell-Bond system GMM for dynamic panel data, as
+//! R's `plm::pgmm(transformation = "d")` and `plm::pgmm(transformation = "ld")`.
 //!
 //! # Model
 //!
@@ -41,8 +41,32 @@
 //!   that many periods apart is NaN, with a warning.
 //! - **Missing values.** Rows with a missing value in y, x, the entity or the time are
 //!   dropped (`na.omit`) and reported in `missing` and `warnings`.
-//! - **System GMM** (Blundell-Bond) is not implemented yet (ECON-30): `GmmTransform::System`
-//!   runs difference GMM, reports `GmmTransform::Difference` and warns.
+//!
+//! # System GMM (`GmmTransform::System`; `pgmm` "ld", `fsm = "full"`)
+//!
+//! - **Equations.** Each entity's difference equations (as above) are stacked with its
+//!   level equations: y_t on y_{t-1}, ..., y_{t-p} and x_t, for each t with y observed at
+//!   t, ..., t-p and t - t_min >= max(p + 1, min_lag) - 1. `n_obs` counts both kinds
+//!   (`n_obs_diff`, `n_obs_level`).
+//! - **Instruments.** The level equation at t is instrumented by Δy_{t-1} = y_{t-1} -
+//!   y_{t-2} where both are observed, one column per period (one column with `collapse`),
+//!   whatever `min_lag`; x enters as its own instrument in differences (difference rows)
+//!   and in levels (level rows).
+//! - **No intercept.** The level equations have no intercept (plm::pgmm `effect =
+//!   "individual"`); with x in levels as its own instrument they are valid only when
+//!   E[eta_i] = 0 or x has mean zero; Stata's xtabond2 adds `_cons`.
+//! - **Weights.** One-step: (Σ_i Z_i' H_i Z_i)^-1 with pgmm's "full" H: the tridiagonal
+//!   difference block, the identity level block, and +1 between the difference and the
+//!   level equation of the same period, -1 between the difference equation at t and the
+//!   level equation at t - 1. Two-step as above.
+//! - **Standard errors and tests.** One-step robust (`vcovHC.pgmm`), two-step uncorrected
+//!   or Windmeijer; one-step classical standard errors are refused, because H is the error
+//!   covariance of the level equations only when var(eta_i) = 0, and so the homoskedastic
+//!   Sargan statistic is not reported. σ² comes from the difference equations. Sargan as
+//!   `plm::sargan`; the AR(1)/AR(2) m-tests use the differenced residuals, as `plm::mtest`.
+//! - **`lags >= 3` or `min_lag >= 4`.** plm 2.6.7 fills its level-instrument matrix from a
+//!   vector of the wrong length in these settings; p2a applies the rule pgmm applies
+//!   otherwise (Δy_{t-1} at t) and is pinned there to the estimator written out in R.
 //!
 //! # References
 //!
@@ -70,10 +94,12 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{cholesky_inverse, eig_symmetric};
+use crate::linalg::solve::{SingularPolicy, sym_inverse};
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::SignificanceLevel;
 
-use super::utils::{DiffEquations, GmmLagSpec, difference_equations};
+use super::utils::{EqKind, GmmEquations, GmmLagSpec, gmm_equations, h_entry};
 
 /// The inversions of the L x L weighting matrices hold about this many L x L matrices at
 /// their peak: the moment matrix and its symmetrised and scaled copies, the
@@ -98,8 +124,8 @@ pub enum GmmTransform {
     /// First-differences to eliminate fixed effects
     #[default]
     Difference,
-    /// System GMM (Blundell-Bond 1998). Not implemented yet (ECON-30): `run_gmm` runs
-    /// difference GMM with a warning.
+    /// System GMM (Blundell-Bond 1998), as `plm::pgmm(transformation = "ld")`: the
+    /// difference equations stacked with level equations instrumented by y_{t-1} - y_{t-2}
     System,
 }
 
@@ -111,6 +137,24 @@ impl fmt::Display for GmmTransform {
         }
     }
 }
+
+crate::option_enum!(
+    GmmTransform,
+    crate::options::Choices {
+        option: "transform",
+        values: &[
+            (
+                &["difference", "diff", "d", "arellano_bond"],
+                GmmTransform::Difference
+            ),
+            (
+                &["system", "sys", "ld", "blundell_bond"],
+                GmmTransform::System
+            ),
+        ],
+    },
+    no_display
+);
 
 /// GMM estimation step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -131,11 +175,29 @@ impl fmt::Display for GmmStep {
     }
 }
 
+crate::option_enum!(
+    GmmStep,
+    crate::options::Choices {
+        option: "step",
+        values: &[
+            (&["onestep", "one_step", "one", "1"], GmmStep::OneStep),
+            (
+                &["twostep", "two_step", "twosteps", "two", "2"],
+                GmmStep::TwoStep
+            ),
+        ],
+    },
+    no_display
+);
+
 /// Configuration for GMM estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GmmConfig {
-    /// Transformation. `System` is not implemented yet (ECON-30): it runs Difference
-    /// with a warning.
+    /// Transformation: `Difference` (Arellano-Bond, `pgmm` "d") or `System`
+    /// (Blundell-Bond, `pgmm` "ld" with `fsm = "full"`). The level equations of `System`
+    /// have no intercept (plm::pgmm `effect = "individual"`); with x in levels as its own
+    /// instrument they are valid only when E[eta_i] = 0 or x has mean zero; Stata's
+    /// xtabond2 adds `_cons`.
     pub transform: GmmTransform,
     /// Estimation step (one-step or two-step; default two-step)
     pub step: GmmStep,
@@ -146,7 +208,8 @@ pub struct GmmConfig {
     /// One instrument column per lag depth instead of one per (period, lag)
     pub collapse: bool,
     /// One-step: `plm::vcovHC` robust (true) or Arellano-Bond (1991) classical (false)
-    /// standard errors. Two-step: Windmeijer (2005)-corrected (true) or uncorrected.
+    /// standard errors; system GMM has no classical one-step standard errors (false is an
+    /// error). Two-step: Windmeijer (2005)-corrected (true) or uncorrected.
     pub robust: bool,
 }
 
@@ -163,14 +226,14 @@ impl Default for GmmConfig {
     }
 }
 
-/// Result from Arellano-Bond difference GMM estimation.
+/// Result from dynamic-panel GMM estimation (difference or system).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GmmResult {
-    /// Estimator run (always `Difference`; see `GmmConfig::transform`)
+    /// Estimator run
     pub transform: GmmTransform,
     /// Estimation step
     pub step: GmmStep,
-    /// Dependent variable name ("D.y")
+    /// Dependent variable name ("D.y" for difference GMM, "y" for system GMM)
     pub dep_var: String,
     /// Variable names: L1.y, ..., Lp.y, then the x columns
     pub variables: Vec<String>,
@@ -184,11 +247,13 @@ pub struct GmmResult {
     pub p_values: Vec<f64>,
     /// Significance levels
     pub significance: Vec<SignificanceLevel>,
-    /// Number of differenced equations used
+    /// Number of equations used: differenced plus level equations (pgmm's "Number of
+    /// Observations Used")
     pub n_obs: usize,
-    /// Number of entities with at least one equation
+    /// Number of entities with at least one equation of either kind
     pub n_groups: usize,
-    /// Number of instrument columns used (columns no equation observes are not created)
+    /// Number of instrument columns used (columns no equation observes are not created):
+    /// difference GMM, level GMM (system), D.x, x (system)
     pub n_instruments: usize,
     /// Sargan/Hansen statistic as `plm::sargan` (two-step weights, for one- and two-step
     /// fits)
@@ -214,11 +279,13 @@ pub struct GmmResult {
     /// Standard-error type of `std_errors`.
     #[serde(default)]
     pub se_type: String,
-    /// σ² = Σ (one-step differenced residual)² / (2 (n_obs - k)) (Arellano-Bond 1991).
+    /// σ² = Σ (one-step differenced residual)² / (2 (n_obs_diff - k)) over the difference
+    /// equations (Arellano-Bond 1991); NaN when n_obs_diff <= k.
     #[serde(default)]
     pub sigma2: f64,
     /// Arellano-Bond (1991) Sargan statistic of a one-step fit under homoskedastic errors:
-    /// (Z'e)' (Σ_i Z_i' H Z_i)^-1 (Z'e) / σ², df = `sargan_df`. `None` for two-step fits.
+    /// (Z'e)' (Σ_i Z_i' H Z_i)^-1 (Z'e) / σ², df = `sargan_df`. `None` for two-step fits
+    /// and for system GMM (its H is not the error covariance of the level equations).
     #[serde(default)]
     pub sargan_homoskedastic: Option<f64>,
     /// p-value of `sargan_homoskedastic`.
@@ -250,6 +317,12 @@ pub struct GmmResult {
     /// Rows dropped because of missing values.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Differenced equations used (equals `n_obs` for difference GMM).
+    #[serde(default)]
+    pub n_obs_diff: usize,
+    /// Level equations used (system GMM; 0 for difference GMM).
+    #[serde(default)]
+    pub n_obs_level: usize,
 
     // ── Trait-backing storage (LinearEstimator). Skipped from JSON to keep the
     //    public surface stable.
@@ -259,7 +332,8 @@ pub struct GmmResult {
     /// Standard errors as `Array1`, used by `LinearEstimator::std_errors`.
     #[serde(skip, default)]
     pub se_arr: ndarray::Array1<f64>,
-    /// Differenced residuals of the reported step.
+    /// Residuals of the reported step: per entity its difference rows, then (system GMM)
+    /// its level rows.
     #[serde(skip, default)]
     pub residuals: ndarray::Array1<f64>,
     /// The reported coefficient covariance matrix (of type `se_type`).
@@ -292,24 +366,54 @@ impl crate::traits::estimator::LinearEstimator for GmmResult {
 }
 
 impl GmmResult {
-    /// "y lags 2..all, one column per period and lag; D.x": what the instruments are.
+    /// "y lags 2..all, one column per period and lag; D.x": what the instruments are; for
+    /// system GMM the differenced and the level parts.
     fn instrument_description(&self) -> String {
         let y = self.dep_var.strip_prefix("D.").unwrap_or(&self.dep_var);
-        let max = self
-            .max_lag
-            .map_or_else(|| "all".to_string(), |m| m.to_string());
-        let layout = if self.collapse {
+        if self.transform == GmmTransform::System {
+            let difference = Self::difference_instruments(
+                y,
+                self.min_lag,
+                self.max_lag,
+                self.collapse,
+                self.x_names(),
+            );
+            let layout = if self.collapse {
+                "collapsed: one column"
+            } else {
+                "one column per period"
+            };
+            let mut level = format!("D.{y} lag 1, {layout}");
+            for v in self.x_names() {
+                level.push_str("; ");
+                level.push_str(v);
+            }
+            return format!("differenced equations: {difference} | level equations: {level}");
+        }
+        Self::difference_instruments(y, self.min_lag, self.max_lag, self.collapse, self.x_names())
+    }
+
+    /// The names of the x columns (the variables after the lags of y).
+    fn x_names(&self) -> &[String] {
+        self.variables.get(self.lags..).unwrap_or_default()
+    }
+
+    /// The instruments of the differenced equations.
+    fn difference_instruments(
+        y: &str,
+        min_lag: usize,
+        max_lag: Option<usize>,
+        collapse: bool,
+        x: &[String],
+    ) -> String {
+        let max = max_lag.map_or_else(|| "all".to_string(), |m| m.to_string());
+        let layout = if collapse {
             "collapsed: one column per lag depth"
         } else {
             "one column per period and lag"
         };
-        let mut text = format!("{y} lags {}..{max}, {layout}", self.min_lag);
-        let dx: Vec<String> = self
-            .variables
-            .iter()
-            .skip(self.lags)
-            .map(|v| format!("D.{v}"))
-            .collect();
+        let mut text = format!("{y} lags {min_lag}..{max}, {layout}");
+        let dx: Vec<String> = x.iter().map(|v| format!("D.{v}")).collect();
         if !dx.is_empty() {
             text.push_str("; ");
             text.push_str(&dx.join(", "));
@@ -320,16 +424,33 @@ impl GmmResult {
 
 impl fmt::Display for GmmResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let system = self.transform == GmmTransform::System;
         writeln!(f, "{} ({}) Panel GMM Results", self.transform, self.step)?;
         writeln!(f, "===========================================")?;
-        writeln!(f, "Dep. Variable: {}", self.dep_var)?;
+        if system {
+            writeln!(
+                f,
+                "Dep. Variable: {} (differenced and level equations)",
+                self.dep_var
+            )?;
+        } else {
+            writeln!(f, "Dep. Variable: {}", self.dep_var)?;
+        }
         writeln!(f, "Entity: {}", self.entity_var)?;
         writeln!(f, "Time: {}", self.time_var)?;
-        writeln!(
-            f,
-            "No. Observations: {} (differenced equations)",
-            self.n_obs
-        )?;
+        if system {
+            writeln!(
+                f,
+                "No. Observations: {} ({} differenced, {} level equations)",
+                self.n_obs, self.n_obs_diff, self.n_obs_level
+            )?;
+        } else {
+            writeln!(
+                f,
+                "No. Observations: {} (differenced equations)",
+                self.n_obs
+            )?;
+        }
         writeln!(f, "No. Groups: {}", self.n_groups)?;
         writeln!(
             f,
@@ -397,28 +518,27 @@ impl fmt::Display for GmmResult {
             "  H0: No autocorrelation (robust m-tests, as plm::mtest)"
         )?;
 
-        // The missing-value note is the last line, not a warning line.
-        let note = self.missing.note();
-        let warnings: Vec<&String> = self
-            .warnings
-            .iter()
-            .filter(|w| Some(w.as_str()) != note.as_deref())
-            .collect();
-        if !warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-        if let Some(note) = note {
+        // The warnings, then the missing-value note as the last line (not a warning line).
+        f.write_str(&notes_text(self))?;
+        if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
 
         Ok(())
+    }
+}
+
+impl ResultNotes for GmmResult {
+    /// The warnings without the missing-value note, which Display prints as its last line.
+    fn notes_warnings(&self) -> Vec<String> {
+        let note = self.missing.note();
+        self.warnings
+            .iter()
+            .filter(|w| Some(w.as_str()) != note.as_deref())
+            .cloned()
+            .collect()
     }
 }
 
@@ -523,15 +643,19 @@ fn weight_inverse(s: &Array2<f64>, with_kept: bool) -> EconResult<WeightInverse>
     })
 }
 
-/// k x k inverse of a bread matrix X'Z A Z'X (equilibrated Cholesky); singular is
-/// `EconError::SingularMatrix`.
+/// k x k inverse of a bread matrix X'Z A Z'X (`linalg::solve::sym_inverse`); singular is
+/// `EconError::SingularMatrix` with the context "<what>: rank r of k".
 fn small_inverse(m: &Array2<f64>, what: &str) -> EconResult<Array2<f64>> {
-    equilibrated_inverse(&symmetrized(m)).ok_or_else(|| EconError::SingularMatrix {
-        context: what.to_string(),
-        suggestion: "The regressors are collinear given the instruments (for example a \
-                     time-invariant x, whose difference is zero); drop or recode them."
-            .to_string(),
-    })
+    match sym_inverse(symmetrized(m).view(), SingularPolicy::Error, what) {
+        Ok(inv) => Ok(inv.inverse),
+        Err(EconError::SingularMatrix { context, .. }) => Err(EconError::SingularMatrix {
+            context,
+            suggestion: "The regressors are collinear given the instruments (for example a \
+                         time-invariant x, whose difference is zero); drop or recode them."
+                .to_string(),
+        }),
+        Err(e) => Err(e),
+    }
 }
 
 /// Two-sided standard-normal p-value of `z`; NaN for NaN.
@@ -619,29 +743,57 @@ impl BlockSum {
     }
 }
 
-/// Σ_i Z_i' H_i Z_i, H_i[a, b] = 2 if a = b, -1 if the equations are one period apart.
-fn one_step_moment_matrix(eq: &DiffEquations, sp: &SparseRows) -> EconResult<Array2<f64>> {
+/// `s1 += h z_a z_b'` (and its transpose when a != b) over the non-zero cells of the rows.
+fn add_moment_pair(s1: &mut Array2<f64>, sp: &SparseRows, a: usize, b: usize, h: f64) {
+    let (ca, va) = sp.row(a);
+    if a == b {
+        for (&c, &v) in ca.iter().zip(va) {
+            for (&d, &w) in ca.iter().zip(va) {
+                s1[[c, d]] += h * v * w;
+            }
+        }
+        return;
+    }
+    let (cb, vb) = sp.row(b);
+    for (&c, &v) in ca.iter().zip(va) {
+        for (&d, &w) in cb.iter().zip(vb) {
+            s1[[c, d]] += h * v * w;
+            s1[[d, c]] += h * v * w;
+        }
+    }
+}
+
+/// Σ_i Z_i' H_i Z_i with `plm:::FSM(., "full")`'s H ([`h_entry`]): 2 on the diagonal of
+/// the difference rows and -1 between difference rows one period apart; for system GMM
+/// also 1 on the diagonal of the level rows and the cross terms between the difference
+/// row at t and the level rows at t (+1) and t - 1 (-1). H is sparse: each pair with a
+/// non-zero entry is added once, as outer products of the sparse instrument rows.
+fn one_step_moment_matrix(eq: &GmmEquations, sp: &SparseRows) -> EconResult<Array2<f64>> {
     let l = eq.z.ncols();
     let mut s1 = resource::try_zeros2(l, l, "GMM one-step weighting matrix")?;
+    let row = |r: usize| (eq.kind[r], eq.time[r]);
     for block in &eq.blocks {
         resource::checkpoint()?;
-        for a in block.clone() {
-            let (ca, va) = sp.row(a);
-            for (&c, &v) in ca.iter().zip(va) {
-                for (&d, &w) in ca.iter().zip(va) {
-                    s1[[c, d]] += 2.0 * v * w;
-                }
-            }
+        let diff = eq.difference_rows(block);
+        let level = diff.end..block.end;
+        let level_times = &eq.time[level.clone()];
+        for a in diff.clone() {
+            add_moment_pair(&mut s1, sp, a, a, h_entry(row(a), row(a)));
             let b = a + 1;
-            if b < block.end && eq.time[b] == eq.time[a] + 1 {
-                let (cb, vb) = sp.row(b);
-                for (&c, &v) in ca.iter().zip(va) {
-                    for (&d, &w) in cb.iter().zip(vb) {
-                        s1[[c, d]] -= v * w;
-                        s1[[d, c]] -= v * w;
-                    }
+            if b < diff.end && eq.time[b] == eq.time[a] + 1 {
+                add_moment_pair(&mut s1, sp, a, b, h_entry(row(a), row(b)));
+            }
+            // The level rows at t - 1 and t (ascending times).
+            let t = eq.time[a];
+            for s in [t - 1, t] {
+                if let Ok(q) = level_times.binary_search(&s) {
+                    let b = level.start + q;
+                    add_moment_pair(&mut s1, sp, a, b, h_entry(row(a), row(b)));
                 }
             }
+        }
+        for a in level {
+            add_moment_pair(&mut s1, sp, a, a, h_entry(row(a), row(a)));
         }
     }
     Ok(s1)
@@ -649,7 +801,7 @@ fn one_step_moment_matrix(eq: &DiffEquations, sp: &SparseRows) -> EconResult<Arr
 
 /// Σ_i g_i g_i', g_i = Z_i' e_i.
 fn two_step_moment_matrix(
-    eq: &DiffEquations,
+    eq: &GmmEquations,
     sp: &SparseRows,
     e: &Array1<f64>,
     acc: &mut BlockSum,
@@ -680,7 +832,7 @@ fn two_step_moment_matrix(
 /// -B2 ZX' W2 q_j, q_j = -Σ_i [a_ij (g_i·u) + g_i (a_ij·u)], a_ij = Z_i' X_i[:, j],
 /// g_i = Z_i' e1_i, u = W2 Z' e2, and `r` = B2 ZX' W2.
 fn windmeijer_d(
-    eq: &DiffEquations,
+    eq: &GmmEquations,
     sp: &SparseRows,
     e1: &Array1<f64>,
     u: &Array1<f64>,
@@ -719,9 +871,9 @@ fn windmeijer_d(
 }
 
 /// Whether some entity has two equations `order` periods apart.
-fn has_lag_pair(eq: &DiffEquations, order: i64) -> bool {
+fn has_lag_pair(eq: &GmmEquations, order: i64) -> bool {
     eq.blocks.iter().any(|block| {
-        let times = &eq.time[block.clone()];
+        let times = &eq.time[eq.difference_rows(block)];
         times
             .iter()
             .enumerate()
@@ -729,14 +881,15 @@ fn has_lag_pair(eq: &DiffEquations, order: i64) -> bool {
     })
 }
 
-/// The Arellano-Bond m-test of order `order`, as `plm::mtest`: (statistic, p-value), NaN
+/// The Arellano-Bond m-test of order `order`, as `plm::mtest`, on the differenced
+/// residuals (for system GMM the level rows do not enter): (statistic, p-value), NaN
 /// when the variance estimate is not positive (no entity has two equations `order`
 /// periods apart, or the estimate is negative). `b` is the bread (X'Z W Z'X)^-1, `w` the
 /// weighting matrix and `v_robust` the robust coefficient covariance of the fit whose
 /// residuals are `e`.
 fn ab_mtest(
     e: &[f64],
-    eq: &DiffEquations,
+    eq: &GmmEquations,
     order: i64,
     b: &Array2<f64>,
     w: &Array2<f64>,
@@ -749,11 +902,12 @@ fn ab_mtest(
     let mut ex = Array1::<f64>::zeros(k);
     let mut zve = Array1::<f64>::zeros(l);
     for block in &eq.blocks {
-        let times = &eq.time[block.clone()];
+        let diff = eq.difference_rows(block);
+        let times = &eq.time[diff.clone()];
         let mut s = 0.0;
-        for (p, a) in block.clone().enumerate() {
+        for (p, a) in diff.clone().enumerate() {
             if let Ok(q) = times[..p].binary_search(&(times[p] - order)) {
-                let lagged = e[block.start + q];
+                let lagged = e[diff.start + q];
                 s += e[a] * lagged;
                 ex.scaled_add(lagged, &eq.x.row(a));
             }
@@ -761,7 +915,7 @@ fn ab_mtest(
         num += s;
         eve += s * s;
         if s != 0.0 {
-            for a in block.clone() {
+            for a in diff {
                 zve.scaled_add(e[a] * s, &eq.z.row(a));
             }
         }
@@ -784,8 +938,9 @@ fn label_list(labels: &[String]) -> String {
     text
 }
 
-/// Arellano-Bond difference GMM, as `plm::pgmm(transformation = "d")` (see the module
-/// docs for the conventions).
+/// Arellano-Bond difference GMM, as `plm::pgmm(transformation = "d")`, or Blundell-Bond
+/// system GMM with `config.transform = System`, as `plm::pgmm(transformation = "ld")`
+/// (see the module docs for the conventions).
 ///
 /// # Arguments
 ///
@@ -794,8 +949,8 @@ fn label_list(labels: &[String]) -> String {
 /// * `x_cols` - Names of the strictly exogenous regressors (not the lagged y: `lags`
 ///   adds it); they enter in differences and serve as their own instruments
 /// * `entity_col` - Column name for entity/individual identifier (numbers or text)
-/// * `time_col` - Column name for the time period: whole numbers or dates, lags are
-///   steps of 1
+/// * `time_col` - Column name for the time period: whole numbers (a Date column counts
+///   days, so recode dates as period numbers); lags are steps of 1
 /// * `lags` - Number of lags of the dependent variable among the regressors
 /// * `config` - GMM configuration options (default: two-step, Windmeijer SEs)
 ///
@@ -814,10 +969,20 @@ pub fn run_gmm(
 ) -> EconResult<GmmResult> {
     let config = config.unwrap_or_default();
     let mut warnings = Vec::new();
+    let system = config.transform == GmmTransform::System;
 
     if lags == 0 && x_cols.is_empty() {
         return Err(EconError::InvalidSpecification {
             message: "GMM has no regressors: set lags to at least 1 or name x columns".to_string(),
+        });
+    }
+    if system && config.step == GmmStep::OneStep && !config.robust {
+        return Err(EconError::InvalidSpecification {
+            message: "System GMM has no classical one-step standard errors: the one-step \
+                      weight H is the error covariance of the level equations only when the \
+                      individual effect has zero variance (Blundell and Bond 1998). Use \
+                      robust = true for one-step robust standard errors, or step = two-step."
+                .to_string(),
         });
     }
     let cols = ColumnRequest::new(dataset.df())
@@ -832,18 +997,12 @@ pub fn run_gmm(
         min_lag: config.min_lag,
         max_lag: config.max_lag,
         collapse: config.collapse,
+        system,
     };
-    let eq = difference_equations(&cols, y_col, x_cols, entity_col, time_col, &spec)?;
+    let mut eq = gmm_equations(&cols, y_col, x_cols, entity_col, time_col, &spec)?;
     let (n_obs, k) = eq.x.dim();
     let l = eq.z.ncols();
-
-    if config.transform == GmmTransform::System {
-        warnings.push(
-            "System GMM (Blundell-Bond) is not implemented yet (ECON-30); these are \
-             difference-GMM (Arellano-Bond) estimates."
-                .to_string(),
-        );
-    }
+    let (n_obs_diff, n_obs_level) = (eq.n_diff, eq.n_level);
     if config.min_lag == 1 {
         warnings.push(
             "min_lag = 1 uses y_{t-1} as an instrument, which is correlated with the \
@@ -860,7 +1019,7 @@ pub fn run_gmm(
         };
         warnings.push(format!(
             "{m} {noun} {verb} no equation (no {} consecutive periods): {}",
-            lags + 2,
+            if system { lags + 1 } else { lags + 2 },
             label_list(&eq.entities_without_equations)
         ));
     }
@@ -868,16 +1027,16 @@ pub fn run_gmm(
     ensure_dense_inverse_fits(l, "GMM weighting matrix")?;
     let sp = SparseRows::of(&eq.z)?;
     let mut acc = BlockSum::new(l)?;
-    let dy = Array1::from_vec(eq.dy.clone());
+    let lhs = Array1::from_vec(std::mem::take(&mut eq.lhs));
     let zx = eq.z.t().dot(&eq.x);
-    let zy = eq.z.t().dot(&dy);
+    let zy = eq.z.t().dot(&lhs);
 
     // One step.
     let w1 = weight_inverse(&one_step_moment_matrix(&eq, &sp)?, false)?;
     let w1zx = w1.inv.dot(&zx);
     let b1 = small_inverse(&zx.t().dot(&w1zx), "X'Z A Z'X in one-step GMM")?;
     let beta1 = b1.dot(&w1zx.t().dot(&zy));
-    let e1 = &dy - &eq.x.dot(&beta1);
+    let e1 = &lhs - &eq.x.dot(&beta1);
 
     // Two-step weights from the one-step residuals: the weights of the Sargan/Hansen test
     // of either step, and of the two-step estimates.
@@ -888,32 +1047,52 @@ pub fn run_gmm(
             let w2zx = w2.inv.dot(&zx);
             let b2 = small_inverse(&zx.t().dot(&w2zx), "X'Z A Z'X in two-step GMM")?;
             let beta2 = b2.dot(&w2zx.t().dot(&zy));
-            let e2 = &dy - &eq.x.dot(&beta2);
+            let e2 = &lhs - &eq.x.dot(&beta2);
             Some((w2zx, b2, beta2, e2))
         }
     };
 
-    for (name, sum, w) in [
-        ("one-step", "Z_i' H Z_i", &w1),
-        ("two-step", "Z_i' e_i e_i' Z_i", &w2),
-    ] {
-        if w.rank < l {
-            warnings.push(format!(
-                "The {name} weighting matrix (sum of {sum}) has numerical rank {} of {l} \
-                 instruments; a generalized inverse is used, as plm::pgmm does.{}",
-                w.rank,
-                if name == "two-step" {
-                    " Two-step GMM needs at least as many entities as instruments: reduce \
-                     them with max_lag or collapse."
-                } else {
-                    " Reduce the instruments with max_lag or collapse."
-                }
-            ));
-        }
+    if w1.rank < l {
+        warnings.push(format!(
+            "The one-step weighting matrix (sum of Z_i' H Z_i) has numerical rank {} of {l} \
+             instruments; a generalized inverse is used, as plm::pgmm does. Reduce the \
+             instruments with max_lag or collapse.",
+            w1.rank
+        ));
+    }
+    if w2.rank < l {
+        warnings.push(match config.step {
+            GmmStep::OneStep => format!(
+                "The Sargan/Hansen weighting matrix (sum of Z_i' e_i e_i' Z_i) has numerical \
+                 rank {} of {l} instruments; a generalized inverse is used, as plm::sargan \
+                 does. Reduce the instruments with max_lag or collapse.",
+                w2.rank
+            ),
+            GmmStep::TwoStep => format!(
+                "The two-step weighting matrix (sum of Z_i' e_i e_i' Z_i) has numerical rank \
+                 {} of {l} instruments; a generalized inverse is used, as plm::pgmm does. \
+                 Two-step GMM needs at least as many entities as instruments: reduce them \
+                 with max_lag or collapse.",
+                w2.rank
+            ),
+        });
     }
 
-    // Covariances.
-    let sigma2 = e1.dot(&e1) / (2.0 * (n_obs - k) as f64);
+    // Covariances. σ² from the one-step residuals of the difference equations.
+    let ss_diff = if system {
+        eq.kind
+            .iter()
+            .zip(&e1)
+            .filter(|(kind, _)| **kind == EqKind::Difference)
+            .map(|(_, &e)| e * e)
+            .sum()
+    } else {
+        e1.dot(&e1)
+    };
+    let sigma2 = match n_obs_diff.checked_sub(k) {
+        Some(df) if df > 0 => ss_diff / (2.0 * df as f64),
+        _ => f64::NAN,
+    };
     let w2_kept = w2.kept.as_ref().ok_or_else(|| {
         EconError::Computation("GMM: the two-step weighting matrix has no kept part".to_string())
     })?;
@@ -980,12 +1159,12 @@ pub fn run_gmm(
         );
     }
     let (sargan_homoskedastic, sargan_homoskedastic_p_value) = match config.step {
-        GmmStep::OneStep => {
+        GmmStep::OneStep if !system => {
             let z1 = eq.z.t().dot(&e1);
             let stat = z1.dot(&w1.inv.dot(&z1)) / sigma2;
             (Some(stat), Some(chi_squared_upper(stat, sargan_df)))
         }
-        GmmStep::TwoStep => (None, None),
+        _ => (None, None),
     };
 
     // Arellano-Bond m-tests.
@@ -1019,9 +1198,13 @@ pub fn run_gmm(
     variables.extend(x_cols.iter().map(|x| x.to_string()));
 
     Ok(GmmResult {
-        transform: GmmTransform::Difference,
+        transform: config.transform,
         step: config.step,
-        dep_var: format!("D.{}", y_col),
+        dep_var: if system {
+            y_col.to_string()
+        } else {
+            format!("D.{}", y_col)
+        },
         variables,
         coef_arr: Array1::from_vec(coefficients.clone()),
         se_arr: Array1::from_vec(std_errors.clone()),
@@ -1055,6 +1238,8 @@ pub fn run_gmm(
         max_lag: config.max_lag,
         collapse: config.collapse,
         missing,
+        n_obs_diff,
+        n_obs_level,
         residuals: resid.clone(),
         vcov,
     })
@@ -1108,6 +1293,70 @@ mod tests {
             polars::prelude::df! { "entity" => entity, "time" => time, "x" => x, "y" => y }
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn test_gmm_transform_parses_aliases_and_rejects_unknown() {
+        for s in [
+            "difference",
+            "Difference",
+            " diff ",
+            "d",
+            "Arellano-Bond",
+            "arellano bond",
+        ] {
+            assert_eq!(
+                s.parse::<GmmTransform>().unwrap(),
+                GmmTransform::Difference,
+                "{s}"
+            );
+        }
+        for s in [
+            "system",
+            "System",
+            "SYS",
+            "ld",
+            "Blundell-Bond",
+            "blundell_bond",
+        ] {
+            assert_eq!(
+                s.parse::<GmmTransform>().unwrap(),
+                GmmTransform::System,
+                "{s}"
+            );
+        }
+        match "levels".parse::<GmmTransform>() {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown transform 'levels'; expected one of: difference, system"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!("".parse::<GmmTransform>().is_err());
+        assert_eq!(GmmTransform::choices().validate(), Ok(()));
+        assert_eq!(
+            GmmTransform::System.to_string(),
+            "System GMM (Blundell-Bond)"
+        );
+    }
+
+    #[test]
+    fn test_gmm_step_parses_aliases_and_rejects_unknown() {
+        for s in ["onestep", "OneStep", "one-step", "One Step", "one", "1"] {
+            assert_eq!(s.parse::<GmmStep>().unwrap(), GmmStep::OneStep, "{s}");
+        }
+        for s in ["twostep", "two_step", "twosteps", "Two", "2"] {
+            assert_eq!(s.parse::<GmmStep>().unwrap(), GmmStep::TwoStep, "{s}");
+        }
+        match "three".parse::<GmmStep>() {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown step 'three'; expected one of: onestep, twostep"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(GmmStep::choices().validate(), Ok(()));
+        assert_eq!(GmmStep::TwoStep.to_string(), "Two-step");
     }
 
     #[test]
@@ -1736,26 +1985,499 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_gmm_system_transform_reports_difference() {
-        let ds = repo_dataset(AB_BALANCED);
-        let diff = run_arellano_bond(&ds, "y", &["x"], "id", "year").unwrap();
-        let cfg = GmmConfig {
-            transform: GmmTransform::System,
-            ..Default::default()
-        };
-        let sys = run_gmm(&ds, "y", &["x"], "id", "year", 1, Some(cfg)).unwrap();
-        assert_eq!(sys.coefficients, diff.coefficients);
-        assert_eq!(sys.std_errors, diff.std_errors);
-        assert_eq!(sys.transform, GmmTransform::Difference);
+    // ── System GMM: pgmm(transformation = "ld") (validation/r/cases/econ_sysgmm.R) ─────
+
+    const SYS_FIT_LAGS1: &[&str] = &["L1.y", "x"];
+
+    #[allow(clippy::too_many_arguments)]
+    fn sys_fit(
+        ds: &Dataset,
+        y: &str,
+        x: &[&str],
+        e: &str,
+        t: &str,
+        lags: usize,
+        step: GmmStep,
+        robust: bool,
+        min_lag: usize,
+        max_lag: Option<usize>,
+        collapse: bool,
+    ) -> GmmResult {
+        let mut cfg = GmmConfig::default();
+        cfg.transform = GmmTransform::System;
+        cfg.step = step;
+        cfg.robust = robust;
+        cfg.min_lag = min_lag;
+        cfg.max_lag = max_lag;
+        cfg.collapse = collapse;
+        run_gmm(ds, y, x, e, t, lags, Some(cfg)).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// A system fit on `ab_balanced`/`ab_gaps` (y on x, entity id, time year).
+    #[allow(clippy::too_many_arguments)]
+    fn sys_ab(
+        ds: &Dataset,
+        x: &[&str],
+        lags: usize,
+        step: GmmStep,
+        robust: bool,
+        min_lag: usize,
+        max_lag: Option<usize>,
+        collapse: bool,
+    ) -> GmmResult {
+        sys_fit(
+            ds, "y", x, "id", "year", lags, step, robust, min_lag, max_lag, collapse,
+        )
+    }
+
+    /// The properties every pinned system fit has.
+    fn assert_sys(r: &GmmResult, variables: &[&str]) {
+        assert_eq!(r.transform, GmmTransform::System);
+        assert_eq!(r.variables, variables);
+        assert_eq!(
+            (r.one_step_weight_rank, r.two_step_weight_rank),
+            (r.n_instruments, r.n_instruments)
+        );
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(r.sargan_homoskedastic, None);
+        assert_eq!(r.sargan_homoskedastic_p_value, None);
+        assert_eq!(r.n_obs, r.n_obs_diff + r.n_obs_level);
+    }
+
+    /// `{p}_*` of a robust fit (one-step vcovHC or two-step Windmeijer) for `n` equations.
+    fn check_sys(c: &mut Check<'_>, p: &str, names: &[&str], r: &GmmResult, n: usize) {
+        let t = Tols::n(n);
+        let exact = Tol::exact();
+        c.named(&format!("{p}_coef"), names, &r.coefficients, t.coef)
+            .named(&format!("{p}_se_robust"), names, &r.std_errors, t.se)
+            .scalar(&format!("{p}_sargan"), r.sargan_statistic, t.stat)
+            .scalar(&format!("{p}_sargan_p"), r.sargan_p_value, t.p)
+            .scalar(&format!("{p}_ar1"), r.ar1_statistic, t.stat)
+            .scalar(&format!("{p}_ar1_p"), r.ar1_p_value, t.p)
+            .scalar(&format!("{p}_ar2"), r.ar2_statistic, t.stat)
+            .scalar(&format!("{p}_ar2_p"), r.ar2_p_value, t.p)
+            .scalar(&format!("{p}_sargan_df"), r.sargan_df as f64, exact)
+            .scalar(&format!("{p}_n_instruments"), r.n_instruments as f64, exact)
+            .scalar(&format!("{p}_n_obs"), r.n_obs as f64, exact)
+            .scalar(&format!("{p}_n_obs_diff"), r.n_obs_diff as f64, exact)
+            .scalar(&format!("{p}_n_obs_level"), r.n_obs_level as f64, exact)
+            .scalar(&format!("{p}_n_groups"), r.n_groups as f64, exact);
         assert!(
-            sys.warnings.iter().any(|w| w.contains("ECON-30")),
+            r.se_type.contains("robust") || r.se_type.contains("Windmeijer"),
+            "{}",
+            r.se_type
+        );
+    }
+
+    /// A two-step fit's uncorrected SEs (`{p}_se`); its coefficients equal the Windmeijer
+    /// fit's bit for bit.
+    fn check_sys_uncorrected(
+        c: &mut Check<'_>,
+        p: &str,
+        names: &[&str],
+        uncorrected: &GmmResult,
+        windmeijer: &GmmResult,
+        n: usize,
+    ) {
+        c.named(
+            &format!("{p}_se"),
+            names,
+            &uncorrected.std_errors,
+            Tols::n(n).se,
+        );
+        assert_eq!(uncorrected.coefficients, windmeijer.coefficients);
+        assert_eq!(
+            uncorrected.se_type,
+            "two-step, uncorrected (biased downward in finite samples)"
+        );
+    }
+
+    #[test]
+    fn test_validate_sysgmm_balanced_onestep() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let r1 = sys_ab(&ds, &["x"], 1, GmmStep::OneStep, true, 2, None, false);
+        let mut c = Check::new(&case);
+        check_sys(&mut c, "onestep", &["lag(y, 1)", "x"], &r1, 1300);
+        c.scalar("onestep_sigma2", r1.sigma2, Tol::stat(1300));
+        c.finish();
+        assert_sys(&r1, SYS_FIT_LAGS1);
+        assert_eq!(
+            r1.se_type,
+            "one-step, robust (plm vcovHC: heteroskedasticity and within-entity correlation)"
+        );
+        assert_eq!(r1.one_step_coefficients, r1.coefficients);
+    }
+
+    #[test]
+    fn test_validate_sysgmm_balanced_twostep() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let rb = sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, true, 2, None, false);
+        let cl = sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, false, 2, None, false);
+        let names = ["lag(y, 1)", "x"];
+        let mut c = Check::new(&case);
+        check_sys(&mut c, "twostep", &names, &rb, 1300);
+        check_sys_uncorrected(&mut c, "twostep", &names, &cl, &rb, 1300);
+        c.finish();
+        for r in [&rb, &cl] {
+            assert_sys(r, SYS_FIT_LAGS1);
+        }
+        assert_eq!(rb.se_type, "two-step, Windmeijer (2005) corrected");
+    }
+
+    #[test]
+    fn test_validate_sysgmm_balanced_variants() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let mut c = Check::new(&case);
+        let two = |lags, max_lag, collapse| {
+            [true, false].map(|robust| {
+                sys_ab(
+                    &ds,
+                    &["x"],
+                    lags,
+                    GmmStep::TwoStep,
+                    robust,
+                    2,
+                    max_lag,
+                    collapse,
+                )
+            })
+        };
+
+        let [rb, cl] = two(2, None, false);
+        let names = ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"];
+        check_sys(&mut c, "lags2_twostep", &names, &rb, 1100);
+        check_sys_uncorrected(&mut c, "lags2_twostep", &names, &cl, &rb, 1100);
+        assert_sys(&rb, &["L1.y", "L2.y", "x"]);
+
+        let [rb, cl] = two(1, Some(3), false);
+        let names = ["lag(y, 1)", "x"];
+        check_sys(&mut c, "maxlag3_twostep", &names, &rb, 1300);
+        check_sys_uncorrected(&mut c, "maxlag3_twostep", &names, &cl, &rb, 1300);
+        assert_sys(&rb, SYS_FIT_LAGS1);
+
+        let [rb, cl] = two(1, None, true);
+        check_sys(&mut c, "collapse_twostep", &names, &rb, 1300);
+        check_sys_uncorrected(&mut c, "collapse_twostep", &names, &cl, &rb, 1300);
+        assert_sys(&rb, SYS_FIT_LAGS1);
+        assert!(
+            rb.to_string().contains("D.y lag 1, collapsed: one column"),
+            "{rb}"
+        );
+
+        let r = sys_ab(&ds, &["x"], 1, GmmStep::OneStep, true, 3, None, false);
+        check_sys(&mut c, "minlag3_onestep", &names, &r, 1100);
+        c.scalar("minlag3_onestep_sigma2", r.sigma2, Tol::stat(1100));
+        assert_sys(&r, SYS_FIT_LAGS1);
+
+        let r = sys_ab(&ds, &[], 1, GmmStep::OneStep, true, 2, None, false);
+        check_sys(&mut c, "nox_onestep", &["lag(y, 1)"], &r, 1300);
+        c.scalar("nox_onestep_sigma2", r.sigma2, Tol::stat(1300));
+        assert_sys(&r, &["L1.y"]);
+        let text = r.to_string();
+        assert!(!text.contains("D.x") && !text.contains("; x)"), "{text}");
+        c.finish();
+    }
+
+    /// pgmm 2.6.7 mis-builds its level instruments for TL2 >= 3; reference = the estimator
+    /// written out in R (econ_sysgmm.R .sys_spec), which reproduces pgmm on every other
+    /// variant.
+    #[test]
+    fn test_validate_sysgmm_spec_lags3_minlag4() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let mut c = Check::new(&case);
+        let t = Tols::n(900);
+        let exact = Tol::exact();
+        for (p, lags, min_lag, variables) in [
+            ("lags3_spec", 3, 2, ["L1.y", "L2.y", "L3.y", "x"].as_slice()),
+            ("minlag4_spec", 1, 4, ["L1.y", "x"].as_slice()),
+        ] {
+            let one = sys_ab(
+                &ds,
+                &["x"],
+                lags,
+                GmmStep::OneStep,
+                true,
+                min_lag,
+                None,
+                false,
+            );
+            let two = sys_ab(
+                &ds,
+                &["x"],
+                lags,
+                GmmStep::TwoStep,
+                true,
+                min_lag,
+                None,
+                false,
+            );
+            c.vector(&format!("{p}_onestep_coef"), &one.coefficients, t.coef)
+                .vector(&format!("{p}_twostep_coef"), &two.coefficients, t.coef)
+                .vector(&format!("{p}_twostep_se_robust"), &two.std_errors, t.se)
+                .scalar(&format!("{p}_twostep_sargan"), two.sargan_statistic, t.stat)
+                .scalar(&format!("{p}_n_obs"), two.n_obs as f64, exact)
+                .scalar(&format!("{p}_n_obs_diff"), two.n_obs_diff as f64, exact)
+                .scalar(&format!("{p}_n_obs_level"), two.n_obs_level as f64, exact)
+                .scalar(
+                    &format!("{p}_n_instruments"),
+                    two.n_instruments as f64,
+                    exact,
+                );
+            for r in [&one, &two] {
+                assert_sys(r, variables);
+            }
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_sysgmm_gaps() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_gaps");
+        let mut c = Check::new(&case);
+        let names = ["lag(y, 1)", "x"];
+        let r1 = sys_ab(&ds, &["x"], 1, GmmStep::OneStep, true, 2, None, false);
+        check_sys(&mut c, "onestep", &names, &r1, 1217);
+        c.scalar("onestep_sigma2", r1.sigma2, Tol::stat(1217));
+        let rb = sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, true, 2, None, false);
+        let cl = sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, false, 2, None, false);
+        check_sys(&mut c, "twostep", &names, &rb, 1217);
+        check_sys_uncorrected(&mut c, "twostep", &names, &cl, &rb, 1217);
+        for r in [&r1, &rb, &cl] {
+            assert_sys(r, SYS_FIT_LAGS1);
+        }
+        assert_eq!(
+            (rb.n_obs, rb.n_obs_diff, rb.n_obs_level, rb.n_groups),
+            (1217, 553, 664, 100)
+        );
+
+        let lags2 = [true, false]
+            .map(|robust| sys_ab(&ds, &["x"], 2, GmmStep::TwoStep, robust, 2, None, false));
+        let l2 = ["lag(y, 1:2)1", "lag(y, 1:2)2", "x"];
+        check_sys(&mut c, "lags2_twostep", &l2, &lags2[0], 995);
+        check_sys_uncorrected(&mut c, "lags2_twostep", &l2, &lags2[1], &lags2[0], 995);
+        assert_sys(&lags2[0], &["L1.y", "L2.y", "x"]);
+        let col = [true, false]
+            .map(|robust| sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, robust, 2, None, true));
+        check_sys(&mut c, "collapse_twostep", &names, &col[0], 1217);
+        check_sys_uncorrected(&mut c, "collapse_twostep", &names, &col[1], &col[0], 1217);
+        assert_sys(&col[0], SYS_FIT_LAGS1);
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_sysgmm_empluk() {
+        let (case, ds) = crate::test_support::load_case("dpd_sys_empluk");
+        let fit = |step, robust| {
+            sys_fit(
+                &ds,
+                "lemp",
+                &["lwage", "lcap"],
+                "firm",
+                "year",
+                1,
+                step,
+                robust,
+                2,
+                None,
+                false,
+            )
+        };
+        let names = ["lag(lemp, 1)", "lwage", "lcap"];
+        let variables = ["L1.lemp", "lwage", "lcap"];
+        let mut c = Check::new(&case);
+        let r1 = fit(GmmStep::OneStep, true);
+        check_sys(&mut c, "onestep", &names, &r1, 1642);
+        c.scalar("onestep_sigma2", r1.sigma2, Tol::stat(1642));
+        let rb = fit(GmmStep::TwoStep, true);
+        let cl = fit(GmmStep::TwoStep, false);
+        check_sys(&mut c, "twostep", &names, &rb, 1642);
+        check_sys_uncorrected(&mut c, "twostep", &names, &cl, &rb, 1642);
+        c.finish();
+        for r in [&r1, &rb, &cl] {
+            assert_sys(r, &variables);
+            assert_eq!((r.n_groups, r.n_instruments), (140, 39));
+        }
+    }
+
+    #[test]
+    fn test_validate_sysgmm_differs_from_difference() {
+        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let s = sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, true, 2, None, false);
+        let d = fit(
+            &ds,
+            "y",
+            &["x"],
+            "id",
+            "year",
+            1,
+            GmmStep::TwoStep,
+            true,
+            2,
+            None,
+            false,
+        );
+        assert_eq!(s.transform, GmmTransform::System);
+        assert!(
+            !s.warnings.iter().any(|w| w.contains("ECON-30")),
             "{:?}",
-            sys.warnings
+            s.warnings
         );
         assert!(
-            sys.to_string()
-                .starts_with("Difference GMM (Arellano-Bond)")
+            (s.coefficients[0] - d.coefficients[0]).abs() > 0.3,
+            "system {} vs difference {}",
+            s.coefficients[0],
+            d.coefficients[0]
+        );
+        assert_eq!((s.n_obs, d.n_obs), (1300, 600));
+        assert_eq!((s.n_obs_diff, s.n_obs_level), (600, 700));
+        assert_eq!((d.n_obs_diff, d.n_obs_level), (600, 0));
+        assert_eq!((s.n_instruments, d.n_instruments), (29, 22));
+        let text = s.to_string();
+        assert!(
+            text.starts_with("System GMM (Blundell-Bond) (Two-step)"),
+            "{text}"
+        );
+        for needle in [
+            "Dep. Variable: y (differenced and level equations)",
+            "No. Observations: 1300 (600 differenced, 700 level equations)",
+            "No. Instruments: 29 (differenced equations: y lags 2..all, one column per \
+             period and lag; D.x | level equations: D.y lag 1, one column per period; x)",
+        ] {
+            assert!(text.contains(needle), "{needle:?} not in:\n{text}");
+        }
+        assert!(
+            d.to_string()
+                .starts_with("Difference GMM (Arellano-Bond) (Two-step)")
+        );
+    }
+
+    #[test]
+    fn test_validate_sysgmm_onestep_classical_se_is_refused() {
+        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let mut cfg = GmmConfig::default();
+        cfg.transform = GmmTransform::System;
+        cfg.step = GmmStep::OneStep;
+        cfg.robust = false;
+        match run_gmm(&ds, "y", &["x"], "id", "year", 1, Some(cfg.clone())) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("System GMM has no classical one-step standard errors")
+                    && message.contains("robust = true"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        cfg.step = GmmStep::TwoStep;
+        assert!(run_gmm(&ds, "y", &["x"], "id", "year", 1, Some(cfg)).is_ok());
+    }
+
+    /// x in millions: the same system estimates, scaled.
+    #[test]
+    fn test_validate_sysgmm_scale_equivariance() {
+        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        let x: Vec<f64> = ds
+            .df()
+            .column("x")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|v| 1e6 * v.unwrap())
+            .collect();
+        let scaled = with_column(&ds, Column::new("x".into(), x));
+        let a = sys_ab(&ds, &["x"], 1, GmmStep::TwoStep, true, 2, None, false);
+        let b = sys_ab(&scaled, &["x"], 1, GmmStep::TwoStep, true, 2, None, false);
+        assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+        assert_eq!((b.one_step_weight_rank, b.two_step_weight_rank), (29, 29));
+        let tol = Tol::new(1e-9, 0.0);
+        let pairs = [
+            (b.coefficients[0], a.coefficients[0]),
+            (1e6 * b.coefficients[1], a.coefficients[1]),
+            (b.std_errors[0], a.std_errors[0]),
+            (1e6 * b.std_errors[1], a.std_errors[1]),
+        ];
+        for (got, want) in pairs {
+            assert!(tol.allows(got, want), "{got} vs {want}");
+        }
+    }
+
+    /// X-7, panel/utils.rs:202 (d6a3a3b): guarded since T0-WP14, site removed by T2-WP19;
+    /// regression guard for the System path.
+    #[test]
+    fn test_validate_sysgmm_rejects_max_lag_below_min_lag() {
+        let (_case, ds) = crate::test_support::load_case("dpd_sys_balanced");
+        for (min_lag, max_lag) in [(3, Some(2)), (2, Some(1)), (2, Some(0))] {
+            let mut cfg = GmmConfig::default();
+            cfg.transform = GmmTransform::System;
+            cfg.min_lag = min_lag;
+            cfg.max_lag = max_lag;
+            let e = run_gmm(&ds, "y", &["x"], "id", "year", 1, Some(cfg)).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("max_lag")),
+                "{min_lag} {max_lag:?}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sysgmm_scaling_many_entities() {
+        if cfg!(debug_assertions) {
+            return; // release-only timing check
+        }
+        let ds = synthetic_panel(50_000, 5);
+        let mut cfg = GmmConfig::default();
+        cfg.transform = GmmTransform::System;
+        let t0 = std::time::Instant::now();
+        let r = run_gmm(&ds, "y", &["x"], "entity", "time", 1, Some(cfg)).unwrap();
+        assert_eq!(r.n_groups, 50_000);
+        assert_eq!(r.n_obs, 50_000 * 7);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// One-step fits do not need the two-step weight: its rank warning names it as the
+    /// Sargan/Hansen weighting matrix without the two-step advice.
+    #[test]
+    fn test_gmm_onestep_rank_warning_names_the_sargan_weight() {
+        let ds = grunfeld();
+        let x = ["value", "capital"];
+        let run = |transform, step, robust| {
+            let mut cfg = GmmConfig::default();
+            cfg.transform = transform;
+            cfg.step = step;
+            cfg.robust = robust;
+            run_gmm(&ds, "inv", &x, "firm", "year", 1, Some(cfg)).unwrap()
+        };
+        for (transform, robust) in [
+            (GmmTransform::Difference, false),
+            (GmmTransform::Difference, true),
+            (GmmTransform::System, true),
+        ] {
+            let r = run(transform, GmmStep::OneStep, robust);
+            assert!(
+                !r.warnings.iter().any(|w| w.contains("Two-step GMM needs")),
+                "{:?}",
+                r.warnings
+            );
+            let sargan = r
+                .warnings
+                .iter()
+                .find(|w| w.contains("Sargan/Hansen weighting matrix"))
+                .unwrap_or_else(|| panic!("{:?}", r.warnings));
+            assert!(sargan.contains("a generalized inverse is used"), "{sargan}");
+            if transform == GmmTransform::Difference {
+                assert!(sargan.contains("rank 9 of 173"), "{sargan}");
+            }
+        }
+        let r = run(GmmTransform::Difference, GmmStep::TwoStep, true);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("Two-step GMM needs at least as many entities as instruments")),
+            "{:?}",
+            r.warnings
         );
     }
 

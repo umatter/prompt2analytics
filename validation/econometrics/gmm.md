@@ -1,4 +1,4 @@
-# Validation: Arellano-Bond difference GMM
+# Validation: Arellano-Bond difference GMM and Blundell-Bond system GMM
 
 ## Method Overview
 
@@ -19,8 +19,8 @@ Options: `lags` (lags of y among the regressors), `step` (one-step or two-step),
 `min_lag`/`max_lag` (instrument lags; default 2 and all available), `collapse` (one
 instrument column per lag depth), `robust` (one-step: vcovHC robust instead of
 Arellano-Bond (1991) classical; two-step: Windmeijer instead of uncorrected).
-`transform = System` (Blundell-Bond) is not implemented yet (ECON-30): it runs difference
-GMM, reports `Difference` and warns.
+`transform = System` runs Blundell-Bond system GMM as `plm::pgmm(transformation = "ld")`;
+see [System GMM](#system-gmm-blundell-bond-1998).
 
 ## Conventions (those of pgmm)
 
@@ -192,12 +192,16 @@ reflects instrument proliferation with N = 10 firms, not a good fit.
 | equations | 180 | 180 |
 | instruments (non-zero; pgmm) | 173; 173 | 173; 173 |
 
-System GMM (`transformation = "ld"`, two-step, robust) on the same model, kept as an R-only
-reference for ECON-30 (not compared; no p2a value is claimed): lag(inv, 1)
-0.904434323720773, value 0.0210772058500476, capital 0.02408375709498078; robust SEs
-0.08635876354389636, 0.01047086634052574, 0.03152250547905452; Sargan 6.519993993604108
-(190), p 1; AR(1) -1.378238393462307 (p 0.1681296969832509); AR(2) -1.413475217229229 (p
-0.1575160432179447).
+System GMM (`transformation = "ld"`) on the same model: pgmm gives lag(inv, 1)
+0.904434323720773, value 0.0210772058500476, capital 0.02408375709498078 (two-step, robust
+SEs 0.08635876354389636, 0.01047086634052574, 0.03152250547905452; Sargan 6.519993993604108
+(190), p 1; AR(1) -1.378238393462307; AR(2) -1.413475217229229), with both weighting
+matrices rank-deficient (ranks 137 and 9 of 193 instruments). p2a computes it: the
+estimator written out in R during planning reproduced pgmm to 8.3e-13 (one-step) and
+6.5e-13 (two-step) in the coefficients and 3.3e-10 in the SEs, and p2a's two-step fit gives
+0.9044343237199635, 0.021077205850118123, 0.024083757095145986 (Windmeijer SEs
+0.08635876356770433, 0.010470866342362207, 0.03152250548453445; ranks 137 and 9). No case
+pins it.
 
 ## Tests
 
@@ -232,9 +236,17 @@ Property tests, not registered as R-pinned (no value is compared with R; they lo
 - `test_gmm_fractional_time_is_an_error`: a fractional time is refused;
 - `test_gmm_scale_equivariance`: x in millions gives the same lag coefficient and the x
   coefficient and SE scaled by 1e-6 (to 1e-9), with no rank warning;
-- `test_gmm_system_transform_reports_difference`,
-  `tier2::wp19_dynamic_panel::test_mcp_panel_gmm_system_warns`: `transform = System` gives
-  the difference estimates, labelled as such, with the ECON-30 warning;
+- `tier2::wp19_dynamic_panel::test_mcp_panel_gmm_system_warns`: `panel_gmm` with
+  `transform = "system"` prints the system-GMM header and equation counts, without the old
+  ECON-30 warning;
+- `utils::tests::test_gmm_equations_date_time_hint`: yearly dates (365 or 366 days apart)
+  form no equation, and the error says to recode them as consecutive period numbers;
+- `test_gmm_onestep_rank_warning_names_the_sargan_weight`: on Grunfeld, one-step fits name
+  the rank-deficient two-step weight as the Sargan/Hansen weighting matrix, without the
+  two-step advice, which two-step fits keep;
+- `test_gmm_transform_parses_aliases_and_rejects_unknown`,
+  `test_gmm_step_parses_aliases_and_rejects_unknown`: the transform and step spellings, and
+  the error for an unknown one;
 - `test_na_gmm_int64_equals_float64`, `test_na_gmm_text_outcome_is_non_numeric`,
   `test_na_gmm_absent_column`, `test_na_gmm_missing_ids_and_times_are_dropped`: integer
   and float columns agree bit for bit, a text y is `NonNumericColumn` and an absent column
@@ -243,6 +255,185 @@ Property tests, not registered as R-pinned (no value is compared with R; they lo
   `test_gmm_instrument_matrix_respects_alloc_ceiling`, `test_gmm_stops_when_cancelled` and
   `test_gmm_scaling_many_entities` (release only), and
   `econometrics::panel::tests::test_arellano_bond_convenience`.
+
+## System GMM (Blundell-Bond 1998)
+
+`run_gmm` with `GmmConfig.transform = GmmTransform::System` computes system GMM as
+`plm::pgmm(transformation = "ld")` with its defaults `fsm = "full"` and `effect =
+"individual"`.
+
+### Estimator and pgmm conventions
+
+- **Equations.** Each entity's difference equations (as for difference GMM) are stacked
+  with its level equations, difference rows first: the level equation of (entity, t) is y_t
+  on y_t-1, ..., y_t-lags and x_t, and exists where y is observed at t, ..., t-lags and t
+  is at least max(lags + 1, min_lag) - 1 periods after the first period. `n_obs` counts
+  both kinds (`n_obs_diff`, `n_obs_level`), as pgmm's "Number of Observations Used".
+- **Instruments.** The level equation at t is instrumented by Delta y_t-1 = y_t-1 - y_t-2
+  where both are observed, one column per period (one column with `collapse`), whatever
+  `min_lag`. x is its own instrument in differences for the difference rows and in levels
+  for the level rows (pgmm's `bdiag(Z1, Z2)`), so L = difference GMM + level GMM + 2 k_x
+  columns.
+- **No intercept or time dummies** (`effect = "individual"`). The level equations have no
+  intercept (plm::pgmm `effect = "individual"`); with x in levels as its own instrument they
+  are valid only when E[eta_i] = 0 or x has mean zero; Stata's xtabond2 adds `_cons`.
+- **Weights.** One-step: (sum_i Z_i' H_i Z_i)^-1 with pgmm's `FSM(., "full")` H: the
+  tridiagonal difference block (2, -1), the identity level block, and the cross term +1
+  between the difference and the level equation of the same period, -1 between the
+  difference equation at t and the level equation at t - 1. Two-step: (sum_i Z_i' e_i e_i'
+  Z_i)^-1 from the one-step residuals, as for difference GMM, with the same generalized
+  inverse rule.
+- **Standard errors.** One-step robust (`vcovHC.pgmm`), two-step uncorrected or Windmeijer
+  (2005). sigma2 = sum e^2 / (2 (n_obs_diff - k)) from the one-step residuals of the
+  difference equations; it is reported, but not used for standard errors (see below).
+- **Tests.** Sargan/Hansen as `plm::sargan`, df = L - k. The AR(1)/AR(2) m-tests as
+  `plm::mtest`, on the differenced residuals only (pgmm keeps the first `Kt - 1` rows of
+  each entity and zeroes the level rows).
+
+### R code
+
+`validation/r/cases/econ_sysgmm.R` ([source](../r/cases/econ_sysgmm.R)), cases
+`dpd_sys_balanced`, `dpd_sys_gaps` and `dpd_sys_empluk`. Each fits `pgmm(...,
+effect = "individual", transformation = "ld")` one-step and two-step and reads the SEs from
+`summary(robust = FALSE)` and `summary(robust = TRUE)`, the equation counts from pgmm's
+residuals, and sigma2 from the one-step difference residuals. The non-robust one-step SEs
+(`onestep_se`, pgmm's unscaled `m$B1`) and the Wald statistics are recorded and not pinned.
+The `lags3_spec_*` and `minlag4_spec_*` keys come from `.sys_spec`, the estimator written
+out in R, which the case first checks against pgmm on the default, two-lag and `min_lag =
+3` fits. `dpd_sys_empluk` writes `validation/datasets/generated/sysgmm_empluk.csv`
+(`plm::EmplUK` with `lemp`, `lwage`, `lcap` the logs of employment, wage and capital; 1031
+rows, 140 firms, 1976-1984).
+
+### Values
+
+`dpd_sys_balanced` (`ab_balanced.csv`, `y ~ lag(y, 1) + x | lag(y, 2:99)`):
+
+| Quantity | `onestep` | `twostep` |
+|---|---|---|
+| coefficients | 0.822771528612361, 0.30670618306258884 | 0.8194537186389175, 0.2997533922594534 |
+| SE one-step robust (vcovHC) | 0.027320976059039045, 0.041764270438180796 |  |
+| sigma2 | 1.4401318877737306 |  |
+| SE two-step uncorrected |  | 0.021471081529256232, 0.03636035462874532 |
+| SE two-step Windmeijer |  | 0.035723644003136414, 0.0539568926255106 |
+| Sargan/Hansen (df, p) | 40.146725761163744 (27, 0.04963971040629556) | 40.08030035403464 (27, 0.05035732750818256) |
+| AR(1) z (p) | -5.881080194063606 (4.075976103952484e-09) | -6.409008658808723 (1.4646887678573905e-10) |
+| AR(2) z (p) | 0.004695445769111646 (0.9962535900810587) | -0.001233961287909219 (0.9990154415896069) |
+| equations (differenced + level) | 1300 (600 + 700) | 1300 (600 + 700) |
+| entities; instruments | 100; 29 | 100; 29 |
+
+| Variant (pgmm-pinned) | coefficients | SE (Windmeijer or one-step robust) | Sargan (df) | equations; instruments |
+|---|---|---|---|---|
+| `lags2_twostep`, `lag(y, 1:2)` | 0.7368965251942556, 0.13090302697822137, 0.3113979598258415 | 0.04292180051013481, 0.044844528203951385, 0.052062499282716924 | 30.51741283159093 (25) | 1100 (500 + 600); 28 |
+| `maxlag3_twostep`, `lag(y, 2:3)` | 0.7754697608200896, 0.3099686672475889 | 0.03853162869957186, 0.05202876375183004 | 27.262566188077034 (17) | 1300; 19 |
+| `minlag3_onestep`, `lag(y, 3:99)` | 0.7471714147040462, 0.3119214733144682 | 0.04614527133814925, 0.04256093288003956 | 30.597286885044866 (21) | 1100 (500 + 600); 23 |
+| `collapse_twostep` | 0.7209148422479621, 0.3038418175872592 | 0.05064007304659357, 0.042879263596668146 | 6.564539943650787 (7) | 1300; 9 |
+| `nox_onestep`, no x | 0.8222549260440193 | 0.027743932321347996 | 40.24311497797024 (26) | 1300; 27 |
+
+`minlag3_onestep` sigma2 1.355930797057432, `nox_onestep` sigma2 1.5490978881916444.
+
+| Variant (pinned to `.sys_spec`) | one-step coefficients | two-step coefficients | two-step Windmeijer SE | two-step Sargan | equations; instruments |
+|---|---|---|---|---|---|
+| `lags3_spec`, 3 lags | 0.6823946139175225, 0.07849583437903809, 0.09724696259278708, 0.3183205081696201 | 0.6869588743703935, 0.08593549657995833, 0.09977245086217795, 0.3335396065256411 | 0.06389356058319648, 0.05899080007754918, 0.05516705118816765, 0.05650419917498504 | 24.896962804697843 | 900 (400 + 500); 25 |
+| `minlag4_spec`, min_lag 4 | 0.6991752653753088, 0.3236478951628366 | 0.6866577847126246, 0.3218254229448384 | 0.09953987440185884, 0.06175884623471312 | 25.400291262580367 | 900 (400 + 500); 17 |
+
+`dpd_sys_gaps` (`ab_gaps.csv`: ids divisible by 9 miss 2004, ids divisible by 13 start in
+2002; id 9 has level equations at 2001, 2002, 2003, 2006 and 2007, of which 2002, 2003 and
+2007 have a level instrument):
+
+| Quantity | `onestep` | `twostep` | `lags2_twostep` | `collapse_twostep` |
+|---|---|---|---|---|
+| coefficients | 0.8083649768862912, 0.3222860051423028 | 0.8252338934470143, 0.3120869394422262 | 0.7434769384411624, 0.1710358674000927, 0.3120629857776108 | 0.6969852538407156, 0.3257326446129133 |
+| SE one-step robust (vcovHC) | 0.030483014938680154, 0.043068173842383074 |  |  |  |
+| sigma2 | 1.4400761395143025 |  |  |  |
+| SE two-step uncorrected |  | 0.025227107725092856, 0.0369811961916684 | 0.03159108210545694, 0.03998365555446948, 0.040958543242977395 | 0.05372702470725777, 0.041305426327512336 |
+| SE two-step Windmeijer |  | 0.0406709345050405, 0.053698228810411766 | 0.046212695931643635, 0.0593922222428899, 0.05289003112109152 | 0.055997929924971115, 0.044317436938468006 |
+| Sargan/Hansen (df, p) | 42.29152381483864 (27, 0.030800475883339395) | 41.79936019427313 (27, 0.03444511631784372) | 29.67505219601324 (25, 0.23668699201393834) | 4.837459193828679 (7, 0.6797910811348671) |
+| AR(1) z | -5.578384358132303 | -6.053263312942498 | -5.011714571511001 | -5.365214687604275 |
+| AR(2) z (p) | 0.2986312965592522 (0.765221383297685) | 0.302685146002729 (0.7621298188668887) | -0.5390038071642562 (0.5898842275828156) | 0.2857494239072926 (0.7750700474057157) |
+| equations (differenced + level) | 1217 (553 + 664) | 1217 (553 + 664) | 995 (442 + 553) | 1217 (553 + 664) |
+| instruments | 29 | 29 | 28 | 9 |
+
+`dpd_sys_empluk` (`lemp ~ lag(lemp, 1) + lwage + lcap | lag(lemp, 2:99)`, index (`firm`,
+`year`)):
+
+| Quantity | `onestep` | `twostep` |
+|---|---|---|
+| coefficients | 0.7456410279393282, 0.10192324280488663, 0.20831291642498684 | 0.7379632375194216, 0.10317196014058094, 0.21597642070575596 |
+| SE one-step robust (vcovHC) | 0.0627844634554638, 0.0288880089561445, 0.04784663251710622 |  |
+| sigma2 | 0.010846797402085849 |  |
+| SE two-step uncorrected |  | 0.024963497103525963, 0.012125288841971418, 0.01960128919094153 |
+| SE two-step Windmeijer |  | 0.0646288566904284, 0.028639170446890516, 0.048257985107939334 |
+| Sargan/Hansen (df, p) | 70.90449348613491 (36, 0.0004589438876224779) | 69.8754641054323 (36, 0.0006057443613799031) |
+| AR(1) z (p) | -1.9581956560524971 (0.050207058666891055) | -2.0030574991247927 (0.04517111713583335) |
+| AR(2) z (p) | -0.3671030450385006 (0.7135421560204294) | -0.348825415565596 (0.7272203816070718) |
+| equations (differenced + level) | 1642 (751 + 891) | 1642 (751 + 891) |
+| entities; instruments | 140; 39 | 140; 39 |
+
+### Tests and tolerances
+
+Registered tests (`panel_gmm_system` in `validation/methods/econ_sysgmm.json`), in
+`econometrics::panel::dynamic_panel::tests` unless named otherwise:
+
+- `test_validate_sysgmm_balanced_onestep`, `test_validate_sysgmm_balanced_twostep`,
+  `test_validate_sysgmm_balanced_variants`, `test_validate_sysgmm_gaps`,
+  `test_validate_sysgmm_empluk`: every quantity of the tables above (coefficients, SEs,
+  sigma2, Sargan and its df and p, AR(1)/AR(2) and their p, the equation, entity and
+  instrument counts); each fit also has full-rank weights, no warning, no homoskedastic
+  Sargan, and two-step uncorrected and Windmeijer coefficients equal bit for bit;
+- `test_validate_sysgmm_spec_lags3_minlag4`: the `lags3_spec_*` and `minlag4_spec_*` keys;
+- `test_validate_sysgmm_differs_from_difference`: on `ab_balanced`, system and difference
+  GMM differ (0.81945 against 0.37752), with their equation and instrument counts and
+  output headers;
+- `test_validate_sysgmm_onestep_classical_se_is_refused`: one-step classical SEs are an
+  error for system GMM, two-step uncorrected SEs are not;
+- `test_validate_sysgmm_scale_equivariance`: x in millions gives the same lag estimate and
+  the x estimate and SE scaled by 1e-6 (to 1e-9), with full-rank weights;
+- `test_validate_sysgmm_rejects_max_lag_below_min_lag`: `max_lag` below `min_lag` is an
+  error on the system path (X-7's repro, `max_lag` 0 or 1);
+- `econometrics::panel::utils::tests::test_validate_system_equations_balanced_layout`,
+  `test_validate_system_equations_gaps_layout`: the stacked equations (counts, row kinds,
+  times, the level rows' instruments read from the CSV digits).
+
+Property tests, not registered: `utils::tests::test_system_h_weight_is_pgmm_fsm_full` (H
+against `plm:::FSM(4, "full")`), and `test_sysgmm_scaling_many_entities` (release only:
+50,000 entities, 5 periods, below 10 s).
+
+Tolerances: `validation/README.md` with n = equations used. For n > 1000 (1100, 1217,
+1300, 1642) coefficients `Tol::coef(n)` = 1e-10, SEs, sigma2 and statistics 1e-8; for n =
+900 and 995, 1e-8 and 1e-6 relative; counts and df exact. The estimator written out in R
+agrees with pgmm to 1.3e-12 relative on every pinned pgmm quantity.
+
+### Differences from pgmm
+
+- **`lags >= 3` or `min_lag >= 4`.** pgmm 2.6.7 builds its level-instrument matrix with
+  `matrix(..., nrow = T - TL2)` from a vector of length (T - 2)^2, which is right only for
+  TL2 <= 2; beyond it R recycles the vector (warning "data length [36] is not a
+  sub-multiple or multiple of the number of rows [5]") and the estimates are not the
+  system estimator. For lags 3 pgmm returns 0.72174827332, 0.06695246557, 0.09088908737,
+  0.36034067886 against the estimator's 0.6869588743703935, 0.08593549657995833,
+  0.09977245086217795, 0.3335396065256411. p2a applies pgmm's rule for TL2 <= 2 (the level
+  instrument at t is y_t-1 - y_t-2) to every TL2, and these values are pinned to `.sys_spec`,
+  not to plm.
+- **One-step classical SEs: refused.** pgmm's `summary(robust = FALSE)` one-step SEs are
+  sqrt(diag(m$B1)), without sigma2 and with a 1/N factor, and H is the error covariance of
+  the stacked errors only when var(eta_i) = 0. On EmplUK the homoskedastic Sargan statistic
+  this H implies would be 291.2 against the robust 70.9. `step = OneStep, robust = false`
+  is an `InvalidSpecification` for system GMM, and `sargan_homoskedastic` is `None`.
+- **Instrument columns.** As for difference GMM, all-zero instrument columns are not
+  created. None occur in these cases.
+- **Missing values.** Rows with a missing value are dropped (`na.omit`), as for difference
+  GMM.
+
+### Conventions others use
+
+Stata's xtabond2 (Roodman 2009) includes `_cons` in the level equations and dates the level
+instrument at `t - min_lag + 1`. pgmm and p2a use t - 1 and no constant, so results differ
+from xtabond2 when `min_lag > 2` or E[eta_i] != 0.
+
+### Not covered (system GMM)
+
+Time dummies (`effect = "twoways"`), an intercept in the level equations, `fsm = "GI"`, and
+predetermined or endogenous x.
 
 ## Numerical Precision Summary
 
@@ -274,7 +465,6 @@ Grunfeld). The MCP text is compared at `Tol::printed(4)`, the CLI text at
 
 ## Not covered
 
-- System GMM (Blundell-Bond, `transformation = "ld"`; ECON-30, Tier 3).
 - Time dummies (`effect = "twoways"`).
 - Predetermined or endogenous x (GMM-style instruments for x).
 
