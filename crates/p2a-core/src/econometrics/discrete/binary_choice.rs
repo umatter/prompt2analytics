@@ -1,6 +1,12 @@
 //! Binary choice models: Logit and Probit.
 //!
-//! Pure Rust implementation using Newton-Raphson MLE.
+//! Fitted by IRLS (Fisher scoring) as R's `glm.fit`, through the shared
+//! [`crate::econometrics::glm::fit_glm`]: probit SEs come from the expected information, as
+//! `summary.glm`; aliased regressors get `NaN` coefficients with R's "Coefficients not
+//! defined because of singularities" warning; separation is reported (glm's flag, with a
+//! sentence counting the extreme fitted probabilities, plus exact univariate complete and
+//! quasi-complete checks). The outcome must be coded 0/1. The control is [`MleSettings`]
+//! (`glm.control(epsilon, maxit)`), by default epsilon 1e-10 and 100 iterations.
 //!
 //! # Mathematical Background
 //!
@@ -27,134 +33,92 @@
 //! - McFadden, D. (1974). Conditional logit analysis of qualitative choice behavior.
 //! - Train, K.E. (2009). *Discrete Choice Methods with Simulation* (2nd ed.).
 
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
+use crate::econometrics::glm::{GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::safe_inverse;
-use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
+use crate::linalg::solve::aliasing_message;
+use crate::traits::convergence::Convergence;
+use crate::traits::estimator::{
+    SignificanceLevel, logistic_cdf, normal_p_value_two_sided, normal_pdf,
+};
 
 use super::types::{DiscreteModelType, DiscreteResult, MleSettings};
 
 /// Run logit regression.
 ///
-/// R equivalent: `stats::glm(y ~ x1 + x2, family = binomial(link = "logit"), data = df)`
+/// R equivalent: `stats::glm(y ~ x1 + x2, family = binomial(link = "logit"), data = df,
+/// control = glm.control(epsilon = 1e-10, maxit = 100))`
 ///
 /// Rows with a missing outcome or regressor are dropped (as `glm`'s `na.omit`) and
-/// reported in `missing`. The outcome must be numeric 0/1 (Int64 and Boolean columns are
-/// accepted); a text outcome is `NonNumericColumn`.
+/// reported in `missing`. The outcome must be numeric and coded 0/1 (Int64 and Boolean
+/// columns are accepted); a text outcome is `NonNumericColumn`, any other value is
+/// `InvalidSpecification`.
 pub fn run_logit(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconResult<DiscreteResult> {
     run_discrete_model(dataset, y_col, x_cols, DiscreteModelType::Logit, None)
 }
 
 /// Run probit regression.
 ///
-/// R equivalent: `stats::glm(y ~ x1 + x2, family = binomial(link = "probit"), data = df)`
+/// R equivalent: `stats::glm(y ~ x1 + x2, family = binomial(link = "probit"), data = df,
+/// control = glm.control(epsilon = 1e-10, maxit = 100))`
 ///
 /// Missing values and outcome types as in [`run_logit`].
 pub fn run_probit(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconResult<DiscreteResult> {
     run_discrete_model(dataset, y_col, x_cols, DiscreteModelType::Probit, None)
 }
 
-/// Detect perfect or quasi-complete separation in binary response data.
-///
-/// Perfect separation occurs when a linear combination of predictors perfectly
-/// predicts the binary outcome. Quasi-complete separation occurs when the
-/// predictions are nearly perfect.
-///
-/// Returns (has_perfect_separation, has_quasi_separation, problematic_variables)
-fn detect_separation(
+/// Exact univariate separation rules: for each non-constant column, with both outcome
+/// groups non-empty, complete separation when the ranges of the column for y = 0 and y = 1
+/// do not overlap, quasi-complete separation when they touch at one value. Returns the
+/// names of the completely and of the quasi-completely separating columns.
+fn univariate_separation(
     y: &[f64],
     x: &Array2<f64>,
-    var_names: &[String],
-) -> (bool, bool, Vec<String>) {
-    let n = y.len();
-    let k = x.ncols();
-    let mut problematic_vars = Vec::new();
-
-    // Check each variable individually for separation
-    for j in 0..k {
-        // Get min and max of x[j] for y=0 and y=1 cases
-        let mut x_when_y0: Vec<f64> = Vec::new();
-        let mut x_when_y1: Vec<f64> = Vec::new();
-
-        for i in 0..n {
-            if y[i] < 0.5 {
-                x_when_y0.push(x[[i, j]]);
+    names: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut complete = Vec::new();
+    let mut quasi = Vec::new();
+    for (j, name) in names.iter().enumerate().take(x.ncols()) {
+        let col = x.column(j);
+        let (mut lo0, mut hi0, mut lo1, mut hi1) = (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for (&v, &yi) in col.iter().zip(y) {
+            if yi == 1.0 {
+                lo1 = lo1.min(v);
+                hi1 = hi1.max(v);
             } else {
-                x_when_y1.push(x[[i, j]]);
+                lo0 = lo0.min(v);
+                hi0 = hi0.max(v);
             }
         }
-
-        if x_when_y0.is_empty() || x_when_y1.is_empty() {
-            // All outcomes are same value - not really separation but problematic
+        // an empty group leaves its bounds infinite; a constant column has lo == hi
+        if !(lo0.is_finite() && lo1.is_finite()) || lo0.min(lo1) == hi0.max(hi1) {
             continue;
         }
-
-        let min_y0 = x_when_y0.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_y0 = x_when_y0.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min_y1 = x_when_y1.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_y1 = x_when_y1.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-        // Perfect separation: ranges don't overlap
-        if (max_y0 < min_y1 || max_y1 < min_y0) && j < var_names.len() {
-            problematic_vars.push(var_names[j].clone());
+        if hi0 < lo1 || hi1 < lo0 {
+            complete.push(name.clone());
+        } else if hi0 == lo1 || hi1 == lo0 {
+            quasi.push(name.clone());
         }
     }
-
-    let has_perfect = !problematic_vars.is_empty();
-
-    // Check for quasi-complete separation (ranges barely touch)
-    let mut quasi_vars = Vec::new();
-    for j in 0..k {
-        if problematic_vars.iter().any(|v| var_names.get(j) == Some(v)) {
-            continue;
-        }
-
-        let mut x_when_y0: Vec<f64> = Vec::new();
-        let mut x_when_y1: Vec<f64> = Vec::new();
-
-        for i in 0..n {
-            if y[i] < 0.5 {
-                x_when_y0.push(x[[i, j]]);
-            } else {
-                x_when_y1.push(x[[i, j]]);
-            }
-        }
-
-        if x_when_y0.is_empty() || x_when_y1.is_empty() {
-            continue;
-        }
-
-        let min_y0 = x_when_y0.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_y0 = x_when_y0.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min_y1 = x_when_y1.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_y1 = x_when_y1.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-        // Count overlap points
-        let overlap_count = x_when_y0
-            .iter()
-            .filter(|&&x| x >= min_y1 && x <= max_y1)
-            .count()
-            + x_when_y1
-                .iter()
-                .filter(|&&x| x >= min_y0 && x <= max_y0)
-                .count();
-
-        // Quasi-separation if overlap is very small (< 5% of data)
-        if overlap_count > 0 && overlap_count < n / 20 && j < var_names.len() {
-            quasi_vars.push(var_names[j].clone());
-        }
-    }
-
-    let has_quasi = !quasi_vars.is_empty();
-    problematic_vars.extend(quasi_vars);
-
-    (has_perfect, has_quasi, problematic_vars)
+    (complete, quasi)
 }
 
-/// Run a discrete choice model (Logit or Probit).
+/// Run a discrete choice model (Logit or Probit) by IRLS as R's `glm.fit`.
+///
+/// `settings` is `glm.control(epsilon, maxit)` ([`MleSettings`]; default epsilon 1e-10,
+/// 100 iterations). Refused ([`EconError::InvalidSpecification`]): `max_iter` 0, a
+/// tolerance that is not a positive finite number, and an outcome with a value other than
+/// 0 or 1. A regressor whose ranges for y = 0 and y = 1 do not overlap is
+/// [`EconError::PerfectSeparation`]; ranges that touch give a quasi-separation warning.
+/// Aliased regressors get `NaN` coefficients, SEs, z, p and marginal effects.
 pub fn run_discrete_model(
     dataset: &Dataset,
     y_col: &str,
@@ -163,6 +127,19 @@ pub fn run_discrete_model(
     settings: Option<MleSettings>,
 ) -> EconResult<DiscreteResult> {
     let settings = settings.unwrap_or_default();
+    if settings.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1 (got 0)".to_string(),
+        });
+    }
+    if !(settings.tolerance.is_finite() && settings.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be a positive, finite number (got {})",
+                settings.tolerance
+            ),
+        });
+    }
     let df = dataset.df();
 
     // y and X from the same rows: a row with a missing outcome or regressor is dropped
@@ -174,19 +151,28 @@ pub fn run_discrete_model(
         .extract()?;
     let n = cols.n();
     let y: Vec<f64> = cols.numeric(y_col).to_vec();
+
+    // Outcome domain (R's glm refuses y outside [0, 1]; a proportion is not binary).
+    let mut off = y.iter().filter(|&&v| v != 0.0 && v != 1.0);
+    if let Some(first) = off.next() {
+        let k = 1 + off.count();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "{model_type}: the outcome '{y_col}' must be coded 0/1 (a binary outcome), but \
+                 {k} of {n} values are not (first: {first}); R's glm refuses y outside [0, 1]"
+            ),
+        });
+    }
+
     let x = cols.matrix(x_cols, true)?.data;
     let k = x.ncols();
-
-    // Build variable names
     let mut var_names = vec!["(Intercept)".to_string()];
     var_names.extend(x_cols.iter().map(|s| s.to_string()));
 
-    // Check for separation
-    let (has_perfect, has_quasi, problem_vars) = detect_separation(&y, &x, &var_names);
-
-    if has_perfect {
+    let (complete, quasi) = univariate_separation(&y, &x, &var_names);
+    if !complete.is_empty() {
         return Err(EconError::PerfectSeparation {
-            variables: problem_vars,
+            variables: complete,
         });
     }
 
@@ -194,294 +180,105 @@ pub fn run_discrete_model(
     if let Some(note) = cols.missing().note() {
         warnings.push(note);
     }
-    if has_quasi {
+    if !quasi.is_empty() {
         warnings.push(format!(
             "Quasi-complete separation detected for: {}. Coefficients may be unstable.",
-            problem_vars.join(", ")
+            quasi.join(", ")
         ));
     }
 
-    // Initialize coefficients
-    let mut beta: Array1<f64> = Array1::zeros(k);
+    let mut spec = match model_type {
+        DiscreteModelType::Logit => GlmSpec::logit(),
+        DiscreteModelType::Probit => GlmSpec::probit(),
+    };
+    spec.epsilon = settings.tolerance;
+    spec.max_iter = settings.max_iter;
+    let y_arr = ndarray::Array1::from(y);
+    let fit = fit_glm(x.view(), y_arr.view(), &spec)?;
 
-    // Null log-likelihood (intercept only)
-    let p_bar = y.iter().sum::<f64>() / n as f64;
-    let log_likelihood_null = n as f64 * (p_bar * p_bar.ln() + (1.0 - p_bar) * (1.0 - p_bar).ln());
-
-    let mut converged = false;
-    let mut iterations = 0;
-    let mut prev_ll = f64::NEG_INFINITY;
-
-    // Track coefficient explosion for detecting multivariate separation
-    let mut max_coef_magnitude = 0.0f64;
-    let explosion_threshold = 50.0;
-
-    for iter in 0..settings.max_iter {
-        iterations = iter + 1;
-
-        // Compute linear predictor: eta = X * beta
-        let eta: Vec<f64> = (0..n)
-            .map(|i| {
-                let mut sum = 0.0;
-                for j in 0..k {
-                    sum += x[[i, j]] * beta[j];
-                }
-                sum
-            })
-            .collect();
-
-        // Compute probabilities and log-likelihood
-        let (probs, ll): (Vec<f64>, f64) = match model_type {
-            DiscreteModelType::Logit => {
-                let p: Vec<f64> = eta.iter().map(|&e| logistic_cdf(e)).collect();
-                let ll: f64 = y
-                    .iter()
-                    .zip(p.iter())
-                    .map(|(&yi, &pi)| {
-                        yi * pi.max(1e-15).ln() + (1.0 - yi) * (1.0 - pi).max(1e-15).ln()
-                    })
-                    .sum();
-                (p, ll)
-            }
-            DiscreteModelType::Probit => {
-                let p: Vec<f64> = eta.iter().map(|&e| normal_cdf(e)).collect();
-                let ll: f64 = y
-                    .iter()
-                    .zip(p.iter())
-                    .map(|(&yi, &pi)| {
-                        yi * pi.max(1e-15).ln() + (1.0 - yi) * (1.0 - pi).max(1e-15).ln()
-                    })
-                    .sum();
-                (p, ll)
-            }
-        };
-
-        // Check coefficient explosion (sign of multivariate separation)
-        let current_max = beta.iter().map(|b| b.abs()).fold(0.0f64, f64::max);
-        if current_max > explosion_threshold && current_max > max_coef_magnitude * 2.0 {
-            return Err(EconError::PerfectSeparation {
-                variables: var_names
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| beta[*i].abs() > explosion_threshold)
-                    .map(|(_, v)| v.clone())
-                    .collect(),
-            });
-        }
-        max_coef_magnitude = max_coef_magnitude.max(current_max);
-
-        // Check convergence on log-likelihood change
-        if (ll - prev_ll).abs() < settings.tolerance && iter > 0 {
-            converged = true;
-            break;
-        }
-        prev_ll = ll;
-
-        // Compute gradient and Hessian
-        let (gradient, hessian) = match model_type {
-            DiscreteModelType::Logit => {
-                // Gradient: X'(y - p)
-                let mut grad = Array1::zeros(k);
-                for i in 0..n {
-                    let residual = y[i] - probs[i];
-                    for j in 0..k {
-                        grad[j] += x[[i, j]] * residual;
-                    }
-                }
-
-                // Hessian: -X' diag(p(1-p)) X
-                let mut hess = Array2::zeros((k, k));
-                for i in 0..n {
-                    let w = probs[i] * (1.0 - probs[i]);
-                    for j in 0..k {
-                        for l in 0..k {
-                            hess[[j, l]] -= x[[i, j]] * w * x[[i, l]];
-                        }
-                    }
-                }
-
-                (grad, hess)
-            }
-            DiscreteModelType::Probit => {
-                // For probit, gradient involves inverse Mills ratio
-                let mut grad = Array1::zeros(k);
-                for i in 0..n {
-                    let phi = normal_pdf(eta[i]);
-                    let big_phi = probs[i];
-                    let lambda = if y[i] > 0.5 {
-                        phi / big_phi.max(1e-15)
-                    } else {
-                        -phi / (1.0 - big_phi).max(1e-15)
-                    };
-                    for j in 0..k {
-                        grad[j] += x[[i, j]] * lambda;
-                    }
-                }
-
-                // Hessian approximation using outer product of gradient
-                let mut hess = Array2::zeros((k, k));
-                for i in 0..n {
-                    let phi = normal_pdf(eta[i]);
-                    let big_phi = probs[i].clamp(1e-15, 1.0 - 1e-15);
-                    let w = phi * phi / (big_phi * (1.0 - big_phi));
-                    for j in 0..k {
-                        for l in 0..k {
-                            hess[[j, l]] -= x[[i, j]] * w * x[[i, l]];
-                        }
-                    }
-                }
-
-                (grad, hess)
-            }
-        };
-
-        // Newton-Raphson update with line search
-        let (h_inv, _) = match safe_inverse(&hessian.view()) {
-            Ok(inv) => inv,
-            Err(_) => {
-                // If Hessian is singular, try gradient descent step
-                let step = 0.01;
-                for j in 0..k {
-                    beta[j] += step * gradient[j];
-                }
-                continue;
-            }
-        };
-
-        let delta = h_inv.dot(&gradient);
-
-        if settings.use_line_search {
-            // Backtracking line search (Armijo condition)
-            let mut step = settings.step_size;
-            let grad_dot_delta: f64 = gradient.iter().zip(delta.iter()).map(|(g, d)| g * d).sum();
-
-            for _ in 0..settings.max_line_search {
-                let beta_new: Array1<f64> =
-                    Array1::from_iter(beta.iter().zip(delta.iter()).map(|(b, d)| b - step * d));
-
-                let new_ll = compute_log_likelihood(&y, &x, &beta_new, model_type);
-
-                // Armijo condition: sufficient decrease
-                if new_ll >= ll + settings.armijo_c * step * grad_dot_delta {
-                    beta = beta_new;
-                    break;
-                }
-                step *= settings.step_reduction;
-            }
-        } else {
-            // Simple Newton step
-            beta = &beta - &(settings.step_size * &delta);
-        }
+    warnings.extend(fit.warnings.iter().cloned());
+    if let Some(msg) = aliasing_message(&fit.aliased, &var_names) {
+        warnings.push(msg);
+    }
+    if fit.separation {
+        let eps10 = 10.0 * f64::EPSILON;
+        let extreme = fit
+            .fitted
+            .iter()
+            .filter(|&&m| m < eps10 || m > 1.0 - eps10)
+            .count();
+        warnings.push(format!(
+            "Separation: fitted probabilities are numerically 0 or 1 for {extreme} of {n} \
+             observations; the regressors (almost) perfectly predict '{y_col}', so the maximum \
+             likelihood estimates do not exist and the coefficients, standard errors and \
+             p-values are not reliable"
+        ));
+    }
+    let model_name = match model_type {
+        DiscreteModelType::Logit => "logit",
+        DiscreteModelType::Probit => "probit",
+    };
+    let convergence = Convergence::new(
+        fit.converged,
+        fit.iterations,
+        settings.max_iter,
+        "relative change in deviance (glm.fit)",
+        f64::NAN,
+        settings.tolerance,
+    );
+    if let Some(note) = convergence.note(model_name) {
+        warnings.push(note);
     }
 
-    // Final evaluation
-    let eta: Vec<f64> = (0..n)
-        .map(|i| {
-            let mut sum = 0.0;
-            for j in 0..k {
-                sum += x[[i, j]] * beta[j];
+    let coefficients = fit.coefficients.to_vec();
+    let std_errors = fit.std_errors.to_vec();
+    let z_stats: Vec<f64> = coefficients
+        .iter()
+        .zip(&std_errors)
+        .map(|(&b, &se)| {
+            if se > 0.0 && se.is_finite() {
+                b / se
+            } else {
+                f64::NAN
             }
-            sum
         })
         .collect();
-
-    let probs: Vec<f64> = match model_type {
-        DiscreteModelType::Logit => eta.iter().map(|&e| logistic_cdf(e)).collect(),
-        DiscreteModelType::Probit => eta.iter().map(|&e| normal_cdf(e)).collect(),
-    };
-
-    let log_likelihood: f64 = y
-        .iter()
-        .zip(probs.iter())
-        .map(|(&yi, &pi)| yi * pi.max(1e-15).ln() + (1.0 - yi) * (1.0 - pi).max(1e-15).ln())
-        .sum();
-
-    // Compute variance-covariance matrix from Hessian
-    let hessian = match model_type {
-        DiscreteModelType::Logit => {
-            let mut hess = Array2::zeros((k, k));
-            for i in 0..n {
-                let w = probs[i] * (1.0 - probs[i]);
-                for j in 0..k {
-                    for l in 0..k {
-                        hess[[j, l]] -= x[[i, j]] * w * x[[i, l]];
-                    }
-                }
-            }
-            hess
-        }
-        DiscreteModelType::Probit => {
-            let mut hess = Array2::zeros((k, k));
-            for i in 0..n {
-                let phi = normal_pdf(eta[i]);
-                let big_phi = probs[i].clamp(1e-15, 1.0 - 1e-15);
-                let w = phi * phi / (big_phi * (1.0 - big_phi));
-                for j in 0..k {
-                    for l in 0..k {
-                        hess[[j, l]] -= x[[i, j]] * w * x[[i, l]];
-                    }
-                }
-            }
-            hess
-        }
-    };
-
-    let neg_hessian = -hessian;
-    let vcov = match safe_inverse(&neg_hessian.view()) {
-        Ok((inv, _)) => inv,
-        Err(_) => Array2::eye(k) * 1e-6,
-    };
-
-    let std_errors: Vec<f64> = (0..k).map(|i| vcov[[i, i]].max(0.0).sqrt()).collect();
-
-    let z_stats: Vec<f64> = beta
-        .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
-        .collect();
-
     let p_values: Vec<f64> = z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
-    // Marginal effects at the mean
-    let x_mean: Vec<f64> = (0..k)
-        .map(|j| (0..n).map(|i| x[[i, j]]).sum::<f64>() / n as f64)
-        .collect();
-
-    let eta_mean: f64 = x_mean.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
-
-    let marginal_effects: Vec<f64> = match model_type {
+    // Marginal effects at the mean, over the identified columns.
+    let eta_mean: f64 = (0..k)
+        .filter(|j| coefficients[*j].is_finite())
+        .map(|j| x.column(j).mean().unwrap_or(0.0) * coefficients[j])
+        .sum();
+    let density = match model_type {
         DiscreteModelType::Logit => {
             let p = logistic_cdf(eta_mean);
-            beta.iter().map(|&b| b * p * (1.0 - p)).collect()
+            p * (1.0 - p)
         }
-        DiscreteModelType::Probit => {
-            let phi = normal_pdf(eta_mean);
-            beta.iter().map(|&b| b * phi).collect()
-        }
+        DiscreteModelType::Probit => normal_pdf(eta_mean),
     };
+    let marginal_effects: Vec<f64> = coefficients.iter().map(|&b| b * density).collect();
 
-    // Model fit statistics
+    let log_likelihood = fit.log_likelihood;
+    // the saturated log-likelihood of a 0/1 outcome is 0
+    let log_likelihood_null = -fit.null_deviance / 2.0;
     let pseudo_r_squared = 1.0 - log_likelihood / log_likelihood_null;
-    let aic = -2.0 * log_likelihood + 2.0 * k as f64;
-    let bic = -2.0 * log_likelihood + (k as f64) * (n as f64).ln();
-
-    // Calculate significance levels
+    let bic = -2.0 * log_likelihood + fit.rank as f64 * (n as f64).ln();
     let significance: Vec<SignificanceLevel> = p_values
         .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
-
-    // Count positive outcomes
-    let n_positive = y.iter().filter(|&&yi| yi > 0.5).count();
+    let n_positive = y_arr.iter().filter(|&&yi| yi == 1.0).count();
+    let aliased = fit.aliased.iter().map(|&j| var_names[j].clone()).collect();
 
     Ok(DiscreteResult {
         model_type,
         dep_var: y_col.to_string(),
         variables: var_names,
-        coefficients: beta.to_vec(),
+        coefficients,
         std_errors,
         z_stats,
         p_values,
@@ -490,46 +287,18 @@ pub fn run_discrete_model(
         log_likelihood,
         log_likelihood_null,
         pseudo_r_squared,
-        aic,
+        aic: fit.aic,
         bic,
         n_obs: n,
         n_positive,
-        iterations,
-        converged,
+        iterations: fit.iterations,
+        converged: fit.converged,
         warnings,
         missing: cols.missing().clone(),
+        aliased,
+        separation: fit.separation,
+        convergence,
     })
-}
-
-/// Compute log-likelihood for a given beta.
-fn compute_log_likelihood(
-    y: &[f64],
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    model_type: DiscreteModelType,
-) -> f64 {
-    let n = y.len();
-    let k = beta.len();
-
-    let eta: Vec<f64> = (0..n)
-        .map(|i| {
-            let mut sum = 0.0;
-            for j in 0..k {
-                sum += x[[i, j]] * beta[j];
-            }
-            sum
-        })
-        .collect();
-
-    let probs: Vec<f64> = match model_type {
-        DiscreteModelType::Logit => eta.iter().map(|&e| logistic_cdf(e)).collect(),
-        DiscreteModelType::Probit => eta.iter().map(|&e| normal_cdf(e)).collect(),
-    };
-
-    y.iter()
-        .zip(probs.iter())
-        .map(|(&yi, &pi)| yi * pi.max(1e-15).ln() + (1.0 - yi) * (1.0 - pi).max(1e-15).ln())
-        .sum()
 }
 
 #[cfg(test)]
@@ -711,325 +480,320 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════════════
-    // VALIDATION TESTS - Comparing against R's glm()
+    // R pins: stats::glm(binomial) on disc_binary_glm (validation/r/cases/discrete_mlogit_asc.R)
     // ════════════════════════════════════════════════════════════════════════════
 
-    /// Create dataset for logit validation
-    /// DGP: P(Y=1|X) = Λ(-1 + 2*x)
-    fn create_validation_logit_dataset() -> Dataset {
-        // Generate binary outcome from logistic model
-        // True parameters: intercept = -1, slope = 2
-
-        let n = 200;
-        let x: Vec<f64> = (0..n)
-            .map(|i| {
-                // Spread x around 0 to have good variation in probabilities
-                (i as f64 - n as f64 / 2.0) * 0.05
-            })
-            .collect();
-
-        let y: Vec<f64> = x
+    /// `names` and `v` without the entries named in `drop` (summary.glm drops NA rows).
+    fn names_except(r: &DiscreteResult, drop: &[&str], v: &[f64]) -> (Vec<String>, Vec<f64>) {
+        r.variables
             .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let latent = -1.0 + 2.0 * xi;
-                let prob = 1.0 / (1.0 + (-latent).exp());
-                // Deterministic assignment based on prob threshold and pseudo-random
-                let threshold = (i as f64 * 0.618).fract(); // Golden ratio for pseudo-random
-                if prob > threshold { 1.0 } else { 0.0 }
-            })
-            .collect();
+            .zip(v)
+            .filter(|(n, _)| !drop.contains(&n.as_str()))
+            .map(|(n, x)| (n.clone(), *x))
+            .unzip()
+    }
 
+    /// The logit at p2a's control (epsilon 1e-10) is the MLE to about 1e-13: glm's
+    /// coefficients, SEs, z, p, logLik, AIC and the tight refit.
+    #[test]
+    fn test_validate_logit_binary_glm() {
+        let (case, ds) = crate::test_support::load_case("disc_binary_glm");
+        let r = run_logit(&ds, "y", &["x1", "x2", "d"]).unwrap();
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("n", n as f64, Tol::exact())
+            .named("logit_coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .named("logit_se", &r.variables, &r.std_errors, Tol::se(n))
+            .named("logit_z", &r.variables, &r.z_stats, Tol::stat(n))
+            .named("logit_p", &r.variables, &r.p_values, Tol::p_value(n))
+            .scalar("logit_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("logit_aic", r.aic, Tol::stat(n))
+            .scalar("logit_null_loglik", r.log_likelihood_null, Tol::stat(n))
+            .named(
+                "logit_coef_tight",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-8),
+            )
+            .finish();
+        assert!(r.converged && r.aliased.is_empty() && !r.separation && r.warnings.is_empty());
+        assert!(r.to_string().contains("Converged: yes ("), "{r}");
+    }
+
+    /// The probit MLE (glm at epsilon 1e-14), and the default control against it: Fisher
+    /// scoring converges linearly for the probit link, so glm's rule at 1e-10 stops about
+    /// 1.4e-7 from the MLE (R too).
+    #[test]
+    fn test_validate_probit_binary_glm() {
+        let (case, ds) = crate::test_support::load_case("disc_binary_glm");
+        let mut s = MleSettings::default();
+        s.tolerance = 1e-14;
+        s.max_iter = 100;
+        let t = run_discrete_model(
+            &ds,
+            "y",
+            &["x1", "x2", "d"],
+            DiscreteModelType::Probit,
+            Some(s),
+        )
+        .unwrap();
+        let n = t.n_obs;
+        Check::new(&case)
+            .named(
+                "probit_coef_tight",
+                &t.variables,
+                &t.coefficients,
+                Tol::coef(n),
+            )
+            .named("probit_se_tight", &t.variables, &t.std_errors, Tol::se(n))
+            .named("probit_z_tight", &t.variables, &t.z_stats, Tol::stat(n))
+            .named("probit_p_tight", &t.variables, &t.p_values, Tol::p_value(n))
+            .scalar("probit_loglik_tight", t.log_likelihood, Tol::stat(n))
+            .scalar("probit_aic_tight", t.aic, Tol::stat(n))
+            .finish();
+        assert!(t.converged, "{:?}", t.warnings);
+        let r = run_probit(&ds, "y", &["x1", "x2", "d"]).unwrap();
+        Check::new(&case)
+            .named(
+                "probit_coef_tight",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .finish();
+        assert!(r.converged && r.warnings.is_empty());
+    }
+
+    /// x1b = 2 x1 and a dummy trap: R's NA coefficients and message; the other
+    /// coefficients, the SEs and the AIC (which counts the rank) are the full-rank fit's.
+    #[test]
+    fn test_validate_logit_aliased_is_na() {
+        let (case, ds) = crate::test_support::load_case("disc_binary_glm");
+        let r = run_logit(&ds, "y", &["x1", "x1b", "x2", "d"]).unwrap();
+        assert_eq!(r.aliased, vec!["x1b".to_string()]);
+        assert!(
+            r.coefficients[2].is_nan()
+                && r.std_errors[2].is_nan()
+                && r.z_stats[2].is_nan()
+                && r.p_values[2].is_nan()
+        );
+        assert!(r.marginal_effects[2].is_nan());
+        assert!(r.marginal_effects[1].is_finite());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Coefficients not defined because of singularities: x1b"),
+            "{:?}",
+            r.warnings
+        );
+        let (sn, sv) = names_except(&r, &["x1b"], &r.std_errors);
+        Check::new(&case)
+            .named(
+                "aliased_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(400),
+            )
+            .named("aliased_se", &sn, &sv, Tol::se(400))
+            .scalar(
+                "aliased_rank",
+                (r.variables.len() - r.aliased.len()) as f64,
+                Tol::exact(),
+            )
+            .scalar("logit_aic", r.aic, Tol::stat(400))
+            .finish();
+        let t = run_logit(&ds, "y", &["x1", "x2", "d", "nd"]).unwrap();
+        assert_eq!(t.aliased, vec!["nd".to_string()]);
+        let (tn, tv) = names_except(&t, &["nd"], &t.std_errors);
+        Check::new(&case)
+            .named("trap_coef", &t.variables, &t.coefficients, Tol::coef(400))
+            .named("trap_se", &tn, &tv, Tol::se(400))
+            .finish();
+        assert!(r.converged && t.converged);
+    }
+
+    /// ysep = 1[x1 + x2 > 0.5] is separated by x1 + x2 and by neither alone: no MLE. The
+    /// test checks glm's flag and warnings, p2a's sentence and a floor on its count, and
+    /// that a fit stopped early says so; iteration counts and coefficients are not pinned.
+    #[test]
+    fn test_validate_logit_multivariate_separation_warns() {
+        let (case, ds) = crate::test_support::load_case("disc_binary_glm");
+        assert_eq!(case.scalar("n"), 400.0);
+        // (a) p2a's control: most fitted values reach glm's clamp before its criterion is
+        // met (R: 397 of 400 at this control)
+        let r = run_logit(&ds, "ysep", &["x1", "x2"]).unwrap();
+        assert!(r.separation);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "glm.fit: fitted probabilities numerically 0 or 1 occurred")
+        );
+        let sentence = r
+            .warnings
+            .iter()
+            .find(|w| w.starts_with("Separation:"))
+            .unwrap_or_else(|| panic!("{:?}", r.warnings));
+        let k: usize = sentence
+            .split("for ")
+            .nth(1)
+            .and_then(|t| t.split(" of 400 observations").next())
+            .and_then(|t| t.parse().ok())
+            .unwrap_or_else(|| panic!("{sentence}"));
+        assert!(k >= 200, "{sentence}");
+        assert!(
+            r.to_string()
+                .contains("Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred")
+        );
+        // (b) stopped after 5 IRLS steps: the deviance still falls by a large fraction per
+        // step, so the fit is reported as not converged
+        let mut s = MleSettings::default();
+        s.max_iter = 5;
+        s.tolerance = 1e-10;
+        let d = run_discrete_model(
+            &ds,
+            "ysep",
+            &["x1", "x2"],
+            DiscreteModelType::Logit,
+            Some(s),
+        )
+        .unwrap();
+        assert!(!d.converged);
+        assert!(
+            d.warnings
+                .iter()
+                .any(|w| w == "glm.fit: algorithm did not converge")
+        );
+        assert!(d.to_string().contains("Converged: no (5 iterations"), "{d}");
+        // (c) R's default glm.control(epsilon = 1e-8, maxit = 25): R warns too
+        let mut s = MleSettings::default();
+        s.max_iter = 25;
+        s.tolerance = 1e-8;
+        let d = run_discrete_model(
+            &ds,
+            "ysep",
+            &["x1", "x2"],
+            DiscreteModelType::Logit,
+            Some(s),
+        )
+        .unwrap();
+        assert!(d.separation);
+        assert!(
+            d.warnings
+                .iter()
+                .any(|w| w == "glm.fit: fitted probabilities numerically 0 or 1 occurred")
+        );
+    }
+
+    /// ECON-60: x1 and xnc differ by 1e-7 noise. Not aliased at glm.fit's QR tolerance;
+    /// the old Newton/Armijo loop stopped "converged" at the optimum with the two
+    /// coefficients forced equal (logLik -237.0064 against glm's -236.9845).
+    #[test]
+    fn test_validate_logit_near_collinear_reaches_optimum() {
+        let (case, ds) = crate::test_support::load_case("disc_binary_glm");
+        let r = run_logit(&ds, "y", &["x1", "xnc", "x2"]).unwrap();
+        assert!(r.converged && r.aliased.is_empty(), "{:?}", r.warnings);
+        Check::new(&case)
+            .scalar("nc_loglik_tight", r.log_likelihood, Tol::stat(400))
+            // condition number ~1e7: glm at epsilon 1e-10 is 1.2e-7 from the tight fit
+            .named(
+                "nc_coef_tight",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .finish();
+        assert!(r.log_likelihood > case.scalar("nc_restricted_loglik") + 0.02);
+    }
+
+    /// ECON-58: an outcome outside {0, 1} is refused (R's glm: "y values must be 0 <= y
+    /// <= 1"); a proportion, which glm fits with a warning, is not a binary outcome here.
+    #[test]
+    fn test_validate_logit_rejects_y_outside_0_1() {
+        let (case, ds) = crate::test_support::load_case("disc_binary_glm");
+        assert_eq!(case.scalar("y012_refused"), 1.0);
+        for (label, res) in [
+            ("logit", run_logit(&ds, "y012", &["x1"])),
+            ("probit", run_probit(&ds, "y012", &["x1"])),
+        ] {
+            match res {
+                Err(EconError::InvalidSpecification { message }) => assert!(
+                    message.contains("'y012'")
+                        && message.contains("0/1")
+                        && message.contains("10 of 400")
+                        && message.contains("first: 2"),
+                    "{label}: {message}"
+                ),
+                other => panic!("{label}: expected InvalidSpecification, got {other:?}"),
+            }
+        }
         let df = df! {
-            "y" => y,
-            "x" => x
+            "y" => [0.0, 0.5, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            "x" => [1.2, 0.4, 2.2, -0.3, 1.9, 0.8, -1.1, 0.1]
         }
         .unwrap();
-        Dataset::new(df)
-    }
-
-    /// Create dataset for probit validation
-    /// DGP: P(Y=1|X) = Φ(-0.5 + 1.5*x)
-    fn create_validation_probit_dataset() -> Dataset {
-        let n = 200;
-        let x: Vec<f64> = (0..n).map(|i| (i as f64 - n as f64 / 2.0) * 0.05).collect();
-
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let latent = -0.5 + 1.5 * xi;
-                // Probit uses normal CDF
-                let prob = normal_cdf(latent);
-                let threshold = (i as f64 * 0.618).fract();
-                if prob > threshold { 1.0 } else { 0.0 }
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
+        match run_logit(&Dataset::new(df), "y", &["x"]) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("1 of 8") && message.contains("first: 0.5"),
+                "{message}"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
         }
-        .unwrap();
-        Dataset::new(df)
     }
 
-    /// Validation test: Simple logit regression
-    /// Compared against R's glm(y ~ x, family=binomial(link="logit"))
-    ///
-    /// R code:
-    /// ```r
-    /// set.seed(42)
-    /// n <- 500
-    /// x <- rnorm(n)
-    /// latent <- -1 + 2*x
-    /// prob <- 1 / (1 + exp(-latent))
-    /// y <- rbinom(n, 1, prob)
-    /// logit_fit <- glm(y ~ x, family = binomial(link = "logit"))
-    /// # Intercept ≈ -1, x ≈ 2
-    /// ```
+    /// Every d = 1 has yq = 1: no MLE for d's coefficient. The univariate rule warns; as
+    /// d's coefficient grows, the identified coefficients and their SEs converge to the
+    /// logit on the d = 0 rows (`quasi_limit_*`), which is what is pinned.
     #[test]
-    fn test_validate_logit_simple() {
-        let dataset = create_validation_logit_dataset();
-        let result = run_logit(&dataset, "y", &["x"]).unwrap();
-
-        // Structure checks
-        assert_eq!(result.n_obs, 200);
+    fn test_validate_logit_quasi_separated_dummy_warns() {
+        let (case, ds) = crate::test_support::load_case("disc_binary_glm");
+        let r = run_logit(&ds, "yq", &["x1", "x2", "d"]).unwrap();
         assert!(
-            result.variables.contains(&"(Intercept)".to_string())
-                || result.variables.contains(&"const".to_string())
+            r.warnings
+                .iter()
+                .any(|w| w
+                    == "Quasi-complete separation detected for: d. Coefficients may be unstable."),
+            "{:?}",
+            r.warnings
         );
-        assert!(result.variables.contains(&"x".to_string()));
+        let identified = ["(Intercept)", "x1", "x2"];
+        Check::new(&case)
+            .named_subset(
+                "quasi_limit_coef",
+                &identified,
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .named_subset(
+                "quasi_limit_se",
+                &identified,
+                &r.variables,
+                &r.std_errors,
+                Tol::iterative(1e-5),
+            )
+            .finish();
+        // R stops at 25.47 (SE 9394)
+        assert!(r.coefficients[3] > 10.0 && r.std_errors[3] > 100.0);
+    }
 
-        // Find coefficient indices
-        let x_idx = result.variables.iter().position(|v| v == "x").unwrap();
-        let intercept_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "(Intercept)" || v == "const")
-            .unwrap();
-
-        // Coefficients should be in the right direction
-        // True: intercept = -1, slope = 2
-        // Allow wider tolerance due to finite sample and pseudo-random data
-        assert!(
-            result.coefficients[intercept_idx] < 0.5,
-            "Logit intercept should be negative (true=-1), got {}",
-            result.coefficients[intercept_idx]
-        );
-
-        assert!(
-            result.coefficients[x_idx] > 0.5,
-            "Logit slope should be positive (true=2), got {}",
-            result.coefficients[x_idx]
-        );
-
-        // Standard errors should be positive
-        for se in &result.std_errors {
-            assert!(
-                *se > 0.0 && se.is_finite(),
-                "SEs should be positive and finite"
-            );
+    #[test]
+    fn test_mle_settings_reject_invalid_controls() {
+        let ds = create_binary_dataset();
+        for (max_iter, tolerance, needle) in [
+            (0, 1e-10, "max_iter"),
+            (100, 0.0, "tolerance"),
+            (100, f64::NAN, "tolerance"),
+            (100, -1e-8, "tolerance"),
+        ] {
+            let mut s = MleSettings::default();
+            s.max_iter = max_iter;
+            s.tolerance = tolerance;
+            match run_discrete_model(&ds, "y", &["x"], DiscreteModelType::Logit, Some(s)) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains(needle), "{message}")
+                }
+                other => panic!("expected InvalidSpecification naming {needle}, got {other:?}"),
+            }
         }
-
-        // Log-likelihood should be negative (log of probability)
-        assert!(
-            result.log_likelihood < 0.0,
-            "Log-likelihood should be negative, got {}",
-            result.log_likelihood
-        );
-
-        // AIC and BIC should be positive
-        assert!(result.aic > 0.0, "AIC should be positive");
-        assert!(result.bic > 0.0, "BIC should be positive");
-    }
-
-    /// Validation test: Simple probit regression
-    /// Compared against R's glm(y ~ x, family=binomial(link="probit"))
-    #[test]
-    fn test_validate_probit_simple() {
-        let dataset = create_validation_probit_dataset();
-        let result = run_probit(&dataset, "y", &["x"]).unwrap();
-
-        // Structure checks
-        assert_eq!(result.n_obs, 200);
-
-        // Find coefficient index for x
-        let x_idx = result.variables.iter().position(|v| v == "x").unwrap();
-        let intercept_idx = result
-            .variables
-            .iter()
-            .position(|v| v == "(Intercept)" || v == "const")
-            .unwrap();
-
-        // Coefficients should be in the right direction
-        // True: intercept = -0.5, slope = 1.5
-        assert!(
-            result.coefficients[intercept_idx] < 0.5,
-            "Probit intercept should be close to -0.5, got {}",
-            result.coefficients[intercept_idx]
-        );
-
-        assert!(
-            result.coefficients[x_idx] > 0.5,
-            "Probit slope should be positive (true=1.5), got {}",
-            result.coefficients[x_idx]
-        );
-
-        // Probit coefficients are typically smaller than logit (by factor ~1.6)
-        // due to difference in distribution scale
-    }
-
-    /// Validation test: Logit with multiple predictors
-    /// DGP: P(Y=1|X) = Λ(0.5 + 1.5*x1 - 0.8*x2)
-    #[test]
-    fn test_validate_logit_multiple_predictors() {
-        let n = 300;
-        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.7).sin() * 2.0).collect();
-        let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 0.9).cos() * 1.5).collect();
-
-        let y: Vec<f64> = x1
-            .iter()
-            .zip(x2.iter())
-            .enumerate()
-            .map(|(i, (&x1i, &x2i))| {
-                let latent = 0.5 + 1.5 * x1i - 0.8 * x2i;
-                let prob = 1.0 / (1.0 + (-latent).exp());
-                let threshold = (i as f64 * 0.618).fract();
-                if prob > threshold { 1.0 } else { 0.0 }
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x1" => x1,
-            "x2" => x2
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_logit(&dataset, "y", &["x1", "x2"]).unwrap();
-
-        // Structure checks
-        assert_eq!(result.n_obs, n);
-        assert!(result.variables.len() >= 3); // intercept + x1 + x2
-
-        // Find coefficient indices
-        let x1_idx = result.variables.iter().position(|v| v == "x1").unwrap();
-        let x2_idx = result.variables.iter().position(|v| v == "x2").unwrap();
-
-        // Check signs are correct
-        // True: x1 = +1.5 (positive), x2 = -0.8 (negative)
-        assert!(
-            result.coefficients[x1_idx] > 0.0,
-            "Coefficient on x1 should be positive, got {}",
-            result.coefficients[x1_idx]
-        );
-
-        // x2 coefficient should be negative (or at least < x1)
-        // Note: with pseudo-random data, exact sign may vary
-        println!(
-            "Logit multiple: x1={:.3}, x2={:.3} (true: 1.5, -0.8)",
-            result.coefficients[x1_idx], result.coefficients[x2_idx]
-        );
-    }
-
-    /// Validation test: Probit with multiple predictors
-    /// DGP: P(Y=1|X) = Φ(0.3 + 1.0*x1 - 0.5*x2)
-    #[test]
-    fn test_validate_probit_multiple_predictors() {
-        let n = 300;
-        let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.6).sin() * 2.0).collect();
-        let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 0.8).cos() * 1.5).collect();
-
-        let y: Vec<f64> = x1
-            .iter()
-            .zip(x2.iter())
-            .enumerate()
-            .map(|(i, (&x1i, &x2i))| {
-                let latent = 0.3 + 1.0 * x1i - 0.5 * x2i;
-                let prob = normal_cdf(latent);
-                let threshold = (i as f64 * 0.618).fract();
-                if prob > threshold { 1.0 } else { 0.0 }
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x1" => x1,
-            "x2" => x2
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_probit(&dataset, "y", &["x1", "x2"]).unwrap();
-
-        // Structure checks
-        assert_eq!(result.n_obs, n);
-        assert!(result.variables.len() >= 3);
-
-        // Find coefficient indices
-        let x1_idx = result.variables.iter().position(|v| v == "x1").unwrap();
-        let x2_idx = result.variables.iter().position(|v| v == "x2").unwrap();
-
-        // Check signs
-        assert!(
-            result.coefficients[x1_idx] > 0.0,
-            "Probit coefficient on x1 should be positive, got {}",
-            result.coefficients[x1_idx]
-        );
-
-        println!(
-            "Probit multiple: x1={:.3}, x2={:.3} (true: 1.0, -0.5)",
-            result.coefficients[x1_idx], result.coefficients[x2_idx]
-        );
-    }
-
-    /// Validation test: Odds ratios (logit)
-    /// exp(β) should give odds ratio
-    #[test]
-    fn test_validate_logit_odds_ratios() {
-        // DGP: P(Y=1|X) = Λ(-0.5 + 1.0*x)
-        // True OR for x = exp(1.0) ≈ 2.718
-
-        let n = 200;
-        let x: Vec<f64> = (0..n).map(|i| (i as f64 - n as f64 / 2.0) * 0.08).collect();
-
-        let y: Vec<f64> = x
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let latent = -0.5 + 1.0 * xi;
-                let prob = 1.0 / (1.0 + (-latent).exp());
-                let threshold = (i as f64 * 0.618).fract();
-                if prob > threshold { 1.0 } else { 0.0 }
-            })
-            .collect();
-
-        let df = df! {
-            "y" => y,
-            "x" => x
-        }
-        .unwrap();
-        let dataset = Dataset::new(df);
-
-        let result = run_logit(&dataset, "y", &["x"]).unwrap();
-
-        let x_idx = result.variables.iter().position(|v| v == "x").unwrap();
-
-        // Compute odds ratio
-        let odds_ratio = result.coefficients[x_idx].exp();
-
-        // True OR ≈ 2.718; allow for sampling variability
-        assert!(
-            odds_ratio > 1.0,
-            "Odds ratio should be > 1 (coefficient is positive), got {}",
-            odds_ratio
-        );
-
-        println!(
-            "Logit coefficient: {:.3}, Odds Ratio: {:.3} (true OR ≈ 2.718)",
-            result.coefficients[x_idx], odds_ratio
-        );
     }
 }

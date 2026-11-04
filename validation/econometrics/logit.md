@@ -60,7 +60,7 @@ summary(logit_fit)
 | β₁ (x) | 2.0 | ~2.0 | ~2.0 | 0.3 |
 | Log-likelihood | - | varies | varies | 0.1 |
 
-**Rust Test**: `econometrics::discrete::binary_choice::tests::test_validate_logit_simple` (`crates/p2a-core/src/econometrics/discrete/binary_choice.rs`; not R-pinned: it checks signs and finiteness on a deterministic fixture)
+**Rust Test**: superseded by `econometrics::discrete::binary_choice::tests::test_validate_logit_binary_glm` (R-pinned on `disc_binary_glm`; section rewritten with the validation docs)
 
 ---
 

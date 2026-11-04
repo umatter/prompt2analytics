@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::columns::MissingSummary;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 use crate::traits::estimator::SignificanceLevel;
 
 /// Discrete choice model type.
@@ -66,6 +67,17 @@ pub struct DiscreteResult {
     /// Rows dropped because of a missing outcome or regressor (R `glm`: `na.omit`).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Names of aliased (linearly dependent) regressors, as R's `NA` coefficients; their
+    /// coefficient, SE, z, p and marginal effect are `NaN`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliased: Vec<String>,
+    /// glm.fit's flag: some fitted probability is numerically 0 or 1 (within `10 eps` of
+    /// the bound).
+    #[serde(default)]
+    pub separation: bool,
+    /// Convergence record of the IRLS fit.
+    #[serde(default)]
+    pub convergence: Convergence,
 }
 
 impl fmt::Display for DiscreteResult {
@@ -88,27 +100,7 @@ impl fmt::Display for DiscreteResult {
             self.pseudo_r_squared, self.log_likelihood_null
         )?;
         writeln!(f, "AIC: {:<25.4}  BIC: {:.4}", self.aic, self.bic)?;
-        writeln!(
-            f,
-            "Converged: {:<17}  Iterations: {}",
-            self.converged, self.iterations
-        )?;
         writeln!(f)?;
-
-        // Warnings (the missing-value note is printed once, as the last line)
-        let note = self.missing.note();
-        let shown: Vec<&String> = self
-            .warnings
-            .iter()
-            .filter(|w| note.as_deref() != Some(w.as_str()))
-            .collect();
-        if !shown.is_empty() {
-            writeln!(f, "Warnings:")?;
-            for warning in shown {
-                writeln!(f, "  {}", warning)?;
-            }
-            writeln!(f)?;
-        }
 
         // Coefficient table
         writeln!(f, "{:-<75}", "")?;
@@ -148,7 +140,9 @@ impl fmt::Display for DiscreteResult {
             )?;
         }
         writeln!(f, "{:-<45}", "")?;
-        if let Some(note) = note {
+        // convergence and warnings, then the missing-value note once, as the last line
+        write!(f, "{}", notes_text(self))?;
+        if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
 
@@ -156,35 +150,43 @@ impl fmt::Display for DiscreteResult {
     }
 }
 
-/// Settings for Maximum Likelihood Estimation.
+impl ResultNotes for DiscreteResult {
+    /// The warnings without the missing-value note (Display prints that last).
+    fn notes_warnings(&self) -> Vec<String> {
+        let note = self.missing.note();
+        self.warnings
+            .iter()
+            .filter(|w| note.as_deref() != Some(w.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
+}
+
+/// Control of the logit/probit fit, R's `glm.control(epsilon, maxit)`: IRLS (Fisher
+/// scoring) as `glm.fit` through [`crate::econometrics::glm::fit_glm`], converged when
+/// the relative change in deviance falls below `tolerance`.
+///
+/// The defaults are the shared GLM's (100 iterations, 1e-10), not R's (25, 1e-8): at
+/// R's defaults the probit stops about 1e-6 relative from the MLE. R's values remain
+/// settable (`max_iter = 25`, `tolerance = 1e-8`).
 #[derive(Debug, Clone)]
 pub struct MleSettings {
-    /// Maximum number of iterations
+    /// Maximum number of IRLS iterations (`maxit`); at least 1.
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence tolerance on the relative deviance change (`epsilon`); positive and
+    /// finite.
     pub tolerance: f64,
-    /// Step size for Newton-Raphson
-    pub step_size: f64,
-    /// Use backtracking line search
-    pub use_line_search: bool,
-    /// Armijo condition parameter (sufficient decrease)
-    pub armijo_c: f64,
-    /// Step reduction factor for line search
-    pub step_reduction: f64,
-    /// Maximum line search iterations
-    pub max_line_search: usize,
 }
 
 impl Default for MleSettings {
     fn default() -> Self {
         Self {
             max_iter: 100,
-            tolerance: 1e-8,
-            step_size: 1.0,
-            use_line_search: true,
-            armijo_c: 1e-4,
-            step_reduction: 0.5,
-            max_line_search: 20,
+            tolerance: 1e-10,
         }
     }
 }
