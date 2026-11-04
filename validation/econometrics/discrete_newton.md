@@ -209,7 +209,7 @@ R-pinned (load a case):
 Helpers, the category cap and the separated fits:
 
 - `econometrics::discrete::multinomial_logit::tests::test_softmax_into_log_sum_exp`
-- `econometrics::discrete::multinomial_logit::tests::test_max_abs_step_rejects_non_finite`
+- (T3-WP18 removed the multinomial logit's max_abs_step helper and its test: the Newton-decrement rule replaced the absolute step rule, and a non-finite step now falls back to the generalized inverse)
 - `econometrics::discrete::multinomial_logit::tests::test_multinom_accepts_100_categories`
 - `econometrics::discrete::multinomial_logit::tests::test_multinom_one_row_per_category_does_not_converge`
 - `econometrics::discrete::ordered_models::tests::test_ordered_max_abs_step_rejects_non_finite`

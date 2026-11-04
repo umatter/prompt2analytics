@@ -80,6 +80,34 @@
       "tolerance": "coefficients 1e-9, SEs 1e-8 relative against the Newton-polished optimum (iterative MLE converged to ~1e-14), logLik 1e-8 (validation/README.md, n = 1182); mlogit's own estimates cross-checked at 1e-6",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_multinom_nnet",
+      "name": "Multinomial logit as nnet::multinom, at the MLE (Newton), with aliasing refused and separation flagged",
+      "category": "econometrics",
+      "reference": "nnet::multinom(y ~ x1 + x2) on overlapping three-category data, re-solved by Newton's method on the analytic score and information (*_tight); *_pkg = nnet at its default control",
+      "doc": "validation/econometrics/logit.md",
+      "cases": [
+        "disc_multinom_overlap"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_overlap",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_convergence_is_scale_free",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_aliased_regressor_is_an_error"
+      ],
+      "quantities": [
+        "coefficients and SEs per non-reference category",
+        "logLik",
+        "AIC",
+        "null logLik",
+        "category counts",
+        "nnet's own estimates (coef_pkg)",
+        "scale-free convergence (x1 x 1e-6, x 1e6; iteration counts agree within one)",
+        "aliased regressor refused"
+      ],
+      "tolerance": "coefficients Tol::iterative(1e-8), SEs Tol::iterative(1e-6) against the Newton-polished optimum; logLik, AIC Tol::stat(300); coef_pkg Tol::iterative(1e-4) (nnet stops 8.3e-6 off the MLE at its defaults)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
