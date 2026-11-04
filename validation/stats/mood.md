@@ -22,86 +22,49 @@ Mood's two-sample test is a non-parametric test for comparing scale parameters o
 
 ## Test Cases
 
-### Test 1: Equal Scales - Basic
-**Description:** Two samples with identical dispersion patterns, different locations.
+All values in Tests 1-3 are R 4.3.3 from cases `stat_rank_two_sample` and
+`stat_rank_small_groups` (`validation/r/cases/stats_rank_t3.R`; datasets
+`validation/datasets/generated/rank_two_sample.csv` and `rank_small_groups.csv`), registry
+`validation/methods/stats_rank_t3.json`, id `mood_scale_t3`. Tolerances: `validation/README.md`
+rows for n < 100 (z `Tol::stat`, p `Tol::p_value`); T exact.
 
-**R Code:**
+### Test 1: Four tie-free two-sample sets
+
 ```r
-x <- c(1, 2, 3, 4, 5)
-y <- c(10, 20, 30, 40, 50)
-mood.test(x, y)
-
-# Expected output:
-# Mood two-sample test of scale
-# Z = 0, p-value = 1
+mood.test(x, y, alternative = "two.sided" | "less" | "greater")
 ```
 
-**Rust Test:** `crates/p2a-core/src/stats/mood.rs::tests::test_validate_mood_against_r_basic`
+| Set | x, y | z | p | p (less) | p (greater) | T |
+|---|---|---|---|---|---|---|
+| basic | 1:5, 10 * (1:5) | 0 | 1 | 0.5 | 0.5 | 41.25 |
+| scale | 10 values near 5, 10 spread over 0.8-9.2 | -3.236694374850748 | 0.0012092284281239386 | 0.0006046142140619693 | 0.999395385785938 | 112.5 |
+| manual | 1:3, 4:6 | 0 | 1 | 0.5 | 0.5 | 8.75 |
+| sim | 20 + 20 normal draws, sd 1 and 3 (seed 20261024) | -2.5699457794613076 | 0.01017144333403517 | 0.005085721667017585 | 0.9949142783329824 | 1685 |
 
-**Results Comparison:**
+T is the sum of the squared deviations of the x ranks from (N + 1)/2 (for "manual": (1 - 3.5)² +
+(2 - 3.5)² + (3 - 3.5)² = 8.75 = E[T], so z = 0). p2a ranks the pooled sample with
+`stats::ranks::midranks` (R's `rank()`).
 
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| Z-score | 0.0 | ~0.0 | 0.5 | PASS |
-| p-value | 1.0 | ~1.0 | 0.1 | PASS |
+**Rust test:** `stats::mood::tests::test_validate_mood_two_sample`
 
-### Test 2: Manual Calculation Verification
-**Description:** Small example for manual verification of test statistic.
+### Test 2: Values of order 1e-12
 
-**Data:**
-- x = [1, 2, 3]
-- y = [4, 5, 6]
-- Combined ranks: 1, 2, 3, 4, 5, 6
-- Mean rank = 3.5
-- T for x = (1-3.5)² + (2-3.5)² + (3-3.5)² = 6.25 + 2.25 + 0.25 = 8.75
-- Expected E[T] = m(N²-1)/12 = 3(35)/12 = 8.75
-- z ≈ 0 (T = E[T])
+x and y are the tie-free column `ynt` of groups a and b of `stat_rank_small_groups` (7 + 7 values,
+all within 1e-10 of each other): z -2.2857142857142856, p 0.0222709789592328, T 49.75.
 
-**Rust Test:** `crates/p2a-core/src/stats/mood.rs::tests::test_validate_mood_statistic_calculation`
+**Rust test:** `stats::mood::tests::test_validate_mood_small_scale`
 
-**Results Comparison:**
+### Test 3: Data with ties (known deviation STAT-29)
 
-| Metric | Expected | Rust Value | Tolerance | Status |
-|--------|----------|------------|-----------|--------|
-| T statistic | 8.75 | 8.75 | 0.01 | PASS |
-| Z-score | ~0 | ~0 | 0.5 | PASS |
+| Set | x, y | R z | R p | p2a z |
+|---|---|---|---|---|
+| ties | (1, 2, 2, 3, 4), (2, 3, 3, 4, 5) | 0.3293662746201299 | 0.7418788559147744 | 0.082341568655032477 |
+| serum | Hollander & Wolfe serum data (`?ansari.test`), 20 + 20 | 1.0371275614960966 | 0.2996764118570592 | 1.015427524079116 |
 
-### Test 3: Different Scales
-**Description:** Two samples with clearly different dispersions.
+The test checks only that both sets are flagged as tied; R's values are kept in the case under
+`mood_z_ties` and `mood_p_ties` for the STAT-29 fix.
 
-**R Code:**
-```r
-# Sample with small variance
-x <- c(4.5, 4.8, 5.0, 5.2, 5.5)  # range = 1
-
-# Sample with large variance
-y <- c(1.0, 3.0, 5.0, 7.0, 9.0)  # range = 8
-
-mood.test(x, y)
-```
-
-**Rust Test:** `crates/p2a-core/src/stats/mood.rs::tests::test_mood_test_different_scales`
-
-### Test 4: Data with Ties
-**Description:** Verifies the Mielke (1967) tie correction is applied.
-
-**R Code:**
-```r
-x <- c(1, 2, 2, 3, 4)
-y <- c(2, 3, 3, 4, 5)
-mood.test(x, y)
-```
-
-**Rust Test:** `crates/p2a-core/src/stats/mood.rs::tests::test_mood_test_with_ties`
-
-**Results Comparison:**
-
-| Metric | Expected | Rust Value | Status |
-|--------|----------|------------|--------|
-| has_ties | TRUE | TRUE | PASS |
-| p-value in [0,1] | TRUE | TRUE | PASS |
-
-### Test 5: Missing values and integer columns (R-pinned)
+### Test 4: Missing values and integer columns (R-pinned)
 
 **R Code** (case `stat_two_sample_na` in `validation/r/cases/stats_onesample.R`; `mi`, `mj` are
 tie-free Int64 columns of `validation/datasets/generated/two_sample_na.csv` with 15 and 12
@@ -145,9 +108,9 @@ above at the same tolerances and checks `has_ties` and `missing` (registry
 
 ## Numerical Precision Summary
 
-- Z-scores match R within 0.5 for equal-scale data
-- Test statistic T matches manual calculation within 0.01
-- P-values match R's asymptotic approximation
+- On tie-free data z and the three p-values are pinned at the `validation/README.md` rows
+  (`Tol::stat`, `Tol::p_value`); T is exact.
+- With ties z and p differ from R (STAT-29, below).
 
 ## Known Differences
 

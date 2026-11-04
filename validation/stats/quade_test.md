@@ -27,70 +27,68 @@ The Quade test is a non-parametric test for unreplicated complete block designs,
 
 ## Test Cases
 
-### Test 1: Store-Brand Data (R Documentation Example)
+Registry: `validation/methods/stats_rank_t3.json`, id `quade_ties_store` (R 4.3.3, cases of
+`validation/r/cases/stats_rank_t3.R`). Tolerances: the `validation/README.md` rows for n < 100
+(F, A, B and treatment sums `Tol::stat`, p `Tol::p_value`); df and block ranges exact.
 
-**R Code:**
+### Test 1: Store-brand data (Conover 1999, p. 375; the `?quade.test` example)
+
+Case `stat_rank_quade_store` (dataset `validation/datasets/generated/rank_quade_store.csv`).
+
 ```r
-y <- matrix(c(5, 4, 7, 10, 12,
-              1, 3, 1, 0, 2,
+y <- matrix(c( 5,  4,  7, 10, 12,
+               1,  3,  1,  0,  2,
               16, 12, 22, 22, 35,
-              5, 4, 3, 5, 4,
-              10, 9, 7, 13, 10,
-              19, 18, 28, 25, 20,
-              10, 7, 6, 8, 7),
+               5,  4,  3,  5,  4,
+              10,  9,  7, 13, 10,
+              19, 18, 28, 37, 58,
+              10,  7,  6,  8,  7),
             nrow = 7, byrow = TRUE,
-            dimnames = list(Store = as.character(1:7),
-                            Brand = LETTERS[1:5]))
+            dimnames = list(Store = as.character(1:7), Brand = LETTERS[1:5]))
 quade.test(y)
-
-# Result: Quade F = 2.4266, num df = 4, denom df = 24, p-value = 0.07566
-
-# Intermediate values:
-# A = 1360, B = 391.6429
-# Block ranges: 8, 3, 23, 2, 6, 10, 4
-# Treatment sums: -9.5, -38.0, -1.5, 23.0, 26.0
 ```
 
-**Results Comparison:**
+| Quantity | R value |
+|---|---|
+| Quade F | 3.8292515841753727 |
+| df | 4, 24 |
+| p-value | 0.015189020073274592 |
+| treatment sums A..E | -9.5, -38, -14, 23.5, 38 |
+| A | 1366.5 |
+| B | 532.3571428571429 |
+| block ranges | 8, 3, 23, 2, 6, 40, 4 |
 
-| Metric | R Value | Rust Value | Tolerance |
-|--------|---------|------------|-----------|
-| F statistic | 2.4266 | 2.4266 | 0.01 |
-| df1 | 4 | 4 | exact |
-| df2 | 24 | 24 | exact |
-| p-value | 0.07566 | 0.07566 | 0.01 |
-| A statistic | 1360 | 1360 | 1.0 |
-| B statistic | 391.6429 | 391.6429 | 0.1 |
+A, B and the treatment sums are written out in the case as `quade.test.default` computes them.
+The previous version of this test used a modified row 6 (19, 18, 28, 25, 20), for which R gives
+F 2.4266430626244748 and p 0.075661171848975223, and quoted it as R's example.
 
-**Rust Test:** `crates/p2a-core/src/stats/quade.rs::tests::test_validate_quade_against_r`
+**Rust test:** `stats::quade::tests::test_validate_quade_store`
 
-### Test 2: Perfect Treatment Ordering (All Ties in Range)
+### Test 2: Perfect treatment ordering
 
-**R Code:**
 ```r
-y <- matrix(c(1.0, 2.0, 3.0,
-              1.5, 2.5, 3.5,
-              1.2, 2.2, 3.2,
-              1.8, 2.8, 3.8,
-              1.1, 2.1, 3.1),
+y <- matrix(c(1.0, 2.0, 3.0, 1.5, 2.5, 3.5, 1.2, 2.2, 3.2, 1.8, 2.8, 3.8, 1.1, 2.1, 3.1),
             nrow = 5, byrow = TRUE)
-quade.test(y)
-
-# Result: Quade F = 36, num df = 2, denom df = 8, p-value = 1e-04
-# Note: All block ranges are 2.0 (ties), but floating-point differences
-# cause one block to get rank 1 while others get average rank 3.5
+quade.test(y)   # F = 36 on (2, 8), p = 1.0000000000000011e-04
 ```
 
-**Results Comparison:**
+Every block range is 2 in exact arithmetic; in floating point one differs (2.0 vs
+1.9999999999999998), so the ranks of the ranges are not all tied, in R and in p2a alike. Property
+test (df, F near 36, p < 0.05): `stats::quade::tests::test_quade_basic`.
 
-| Metric | R Value | Rust Value | Tolerance |
-|--------|---------|------------|-----------|
-| F statistic | 36 | 36 | 1.0 |
-| df1 | 2 | 2 | exact |
-| df2 | 8 | 8 | exact |
-| p-value | 0.0001 | ~0.0001 | 0.001 |
+### Test 3: Ties at any scale
 
-**Rust Test:** `crates/p2a-core/src/stats/quade.rs::tests::test_quade_basic`
+Case `stat_rank_small_blocks` (8 blocks x 4 treatments of order 1e-12 with ties within blocks):
+F 6.799802761341223 on (3, 21), p 0.002226306015893335, treatment sums t1..t4 -37, -23, 19, 41,
+A 999.5, B 492.5.
+
+**Rust test:** `stats::quade::tests::test_validate_quade_small_scale`
+
+### Input checks
+
+A NaN or infinite cell in `quade_test` is an error naming the block ("block 1 contains a missing
+or infinite value"); `run_quade_test` drops incomplete blocks first. Test:
+`stats::quade::tests::test_quade_rejects_non_finite`.
 
 ## Missing values, design checks and the R case
 
@@ -141,13 +139,10 @@ keep <- d$block != "S2"; quade.test(d$y_na[keep], d$treat[keep], d$block[keep])
 
 ## Numerical Precision Summary
 
-| Component | Tolerance | Notes |
-|-----------|-----------|-------|
-| F statistic | 0.01 | May differ slightly due to floating-point ranking |
-| p-value | 0.01 | From F distribution CDF |
-| Degrees of freedom | exact | Integer valued |
-| A, B statistics | 1.0 | Sum of squared scores |
-| Block ranges | exact | max - min within block |
+- F, A, B and treatment sums are pinned at the `validation/README.md` rows (`Tol::stat`), the
+  p-value at `Tol::p_value`; df and block ranges are exact.
+- Ranks (within blocks and of the block ranges) come from `stats::ranks::midranks` (R's `rank()`,
+  exact ties); the p-value is an upper tail computed directly (`traits::estimator::f_test_p_value`).
 
 ## Known Differences
 

@@ -34,84 +34,88 @@ Where ti is the number of tied observations in the i-th tie group.
 
 ## Test Cases
 
-### Test 1: Basic Three-Group Comparison
-**Description:** Three samples with different distributions.
+Registry: `validation/methods/stats_rank_t3.json`, ids `kruskal_wallis_ties` and
+`fligner_ties_examples` (R 4.3.3, cases of `validation/r/cases/stats_rank_t3.R`). Tolerances: the
+`validation/README.md` rows for n < 100 (statistics `Tol::stat`, p `Tol::p_value`); df, ranks,
+tie sizes and rank sums exact.
 
-**R Code:**
+### Test 1: Hollander & Wolfe (1973), p. 116 (the `?kruskal.test` example)
+
 ```r
-x <- c(2.9, 3.0, 2.5, 2.6, 3.2)
-y <- c(3.8, 2.7, 4.0, 2.4)
-z <- c(2.8, 3.4, 3.7, 2.2, 2.0)
-kruskal.test(list(x, y, z))
-
-# Expected output:
-# Kruskal-Wallis chi-squared = 0.77143, df = 2, p-value = 0.68
+x <- c(2.9, 3.0, 2.5, 2.6, 3.2)   # normal
+y <- c(3.8, 2.7, 4.0, 2.4)        # obstructive
+z <- c(2.8, 3.4, 3.7, 2.2, 2.0)   # asbestosis
+kruskal.test(value ~ group)       # case stat_rank_kruskal_hw
 ```
 
-**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_validate_kruskal_hw`
+| Quantity | R value |
+|---|---|
+| Kruskal-Wallis chi-squared | 0.7714285714285722 |
+| df | 2 |
+| p-value | 0.6799647735788936 |
+| rank sums | asbestosis 33, normal 36, obstructive 36 |
 
-**Results Comparison:**
+**Rust test:** `stats::kruskal::tests::test_validate_kruskal_hw`
 
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| H statistic | 0.77143 | ~0.77 | 0.01 | PASS |
-| df | 2 | 2 | exact | PASS |
-| p-value | ~0.68 | ~0.68 | 0.05 | PASS |
+### Test 2: Hand computation
 
-### Test 2: Manual Calculation Verification
-**Description:** Simple example for manual verification.
+Groups A = (1, 2), B = (3, 4), C = (5, 6): rank sums 3, 7, 11 and
+H = (12 / 42) × (9/2 + 49/2 + 121/2) − 21 = 32/7. Asserted to 1e-12.
 
-**Data:**
-- Group A = [1, 2], Group B = [3, 4], Group C = [5, 6]
-- Combined ranks: 1, 2, 3, 4, 5, 6
-- R_A = 3, R_B = 7, R_C = 11
-- n = 6, each nj = 2
-- H = (12/(6×7)) × (9/2 + 49/2 + 121/2) - 3×7
-- H = 0.2857 × 89.5 - 21 = 4.571
+**Rust test:** `stats::kruskal::tests::test_kruskal_statistic_hand_computed`
 
-**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_kruskal_statistic_hand_computed`
+### Test 3: Tie correction by hand
 
-**Results Comparison:**
+Groups (1, 1, 2, 2, 3), (2, 2, 3, 3, 4), (3, 3, 4, 4, 5): tie groups of sizes 2, 4, 5, 3, 1 in
+N = 15, so C = 1 − 210 / 3360 = 0.9375. Asserted to 1e-15.
 
-| Metric | Expected | Rust Value | Tolerance | Status |
-|--------|----------|------------|-----------|--------|
-| H statistic | 4.571 | ~4.571 | 0.01 | PASS |
-| n_total | 6 | 6 | exact | PASS |
-| has_ties | false | false | exact | PASS |
+**Rust test:** `stats::kruskal::tests::test_kruskal_tie_correction_hand_computed`
 
-### Test 3: Data with Ties
-**Description:** Verifies tie correction is applied correctly.
+### Test 4: Ties at any scale (STAT-53)
 
-**R Code:**
-```r
-t1 <- c(1, 2, 2, 3)
-t2 <- c(2, 3, 3, 4)
-t3 <- c(3, 4, 4, 5)
-kruskal.test(list(t1, t2, t3))
-```
+Case `stat_rank_small_groups` (21 values of order 1e-12 in groups a, b, c of 7, with genuine ties
+at 1e-13 spacing; every value lies within 1e-10 of every other). Before, ranks treated values
+within 1e-10 as tied: the whole sample became one tie group, the tie correction 0, and the test
+returned H = 0, p = 1.
 
-**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_kruskal_tie_correction_hand_computed`
+| Quantity | R value | p2a before |
+|---|---|---|
+| chi-squared (y and y_unit = y × 1e12) | 10.459449404761912 | 0 |
+| p-value | 0.005354999318316409 | 1 |
+| tie correction | 0.9974025974025974 | 0 |
+| rank sums | a 43.5, b 70, c 117.5 | 77, 77, 77 |
+| midranks of y | 2, 10, 5, 3.5, 3.5, 7, 12.5, 6, 17.5, 12.5, 8, 14, 1, 11, 15.5, 15.5, 9, 21, 17.5, 20, 19 | all 11 |
 
-**Results Comparison:**
+**Rust tests:** `stats::ranks::tests::test_validate_midranks_exact_ties_small_scale` (midranks,
+tie sizes), `stats::kruskal::tests::test_validate_kruskal_small_scale`
 
-| Metric | Expected | Rust Value | Status |
-|--------|----------|------------|--------|
-| has_ties | TRUE | TRUE | PASS |
-| tie_correction < 1.0 | TRUE | TRUE | PASS |
-| p-value in [0,1] | TRUE | TRUE | PASS |
+### Test 5: All observations tied
 
-### Test 4: Well-Separated Groups
-**Description:** Groups with clearly different medians.
+`kruskal.test(list(c(1, 1, 1), c(1, 1)))` gives chi-squared NaN and p NA in R. p2a refuses the
+sample (`InvalidSpecification`: "all 5 observations are tied, so the statistic is undefined");
+known deviation STAT-53 (the registry records the error in place of R's NaN). Distinct values far
+below 1e-10 are not ties: `kruskal.test(list(c(1e-300, 2e-300), 3e-300))` = 1.5 in R and p2a.
 
-**Rust Test:** `crates/p2a-core/src/stats/kruskal.rs::tests::test_kruskal_basic`
+**Rust test:** `stats::kruskal::tests::test_kruskal_all_tied_is_error`
 
-**Results Comparison:**
+### One midrank helper
 
-| Metric | Expected | Rust Value | Status |
-|--------|----------|------------|--------|
-| p-value < 0.05 | TRUE | TRUE | PASS |
-| n_groups | 3 | 3 | PASS |
-| n_total | 9 | 9 | PASS |
+Kruskal-Wallis, Friedman, Quade, Fligner-Killeen, Mood, Ansari-Bradley and both Wilcoxon tests
+rank through `stats::ranks::midranks`, R's `rank()` (`f64::total_cmp` order, ties by exact
+equality, so `-0.0` and `0.0` tie and two distinct doubles never do). The Fligner-Killeen pins
+(Fligner's own document is [bartlett.md](bartlett.md)):
+
+| Data | chi-squared | df | p-value |
+|---|---|---|---|
+| `stat_rank_small_groups`, y ~ g | 0.19930844116601584 | 2 | 0.9051503462897974 |
+| "three" (7, 7, 6 values) | 5.102420538669544 | 2 | 0.07798722331725408 |
+| "two" (1:5 vs 10 × (1:5)) | 3.330636988639434 | 1 | 0.06800053368477917 |
+| InsectSprays (`?fligner.test`) | 14.482781038458608 | 5 | 0.012816779189709193 |
+
+**Rust tests:** `stats::fligner::tests::test_validate_fligner_small_scale`,
+`stats::fligner::tests::test_validate_fligner_examples` (case `stat_rank_fligner`);
+`stats::fligner::tests::test_fligner_rejects_nan` (a NaN inside a group is an error; the dataset
+wrapper drops missing values first, as `fligner.test` does).
 
 ## Missing values, labels and the R case
 
@@ -151,16 +155,20 @@ kruskal.test(v9 ~ g9, data = d)   # 6 rows used: groups a (1, 2, 3) and b (4, 5,
 
 ## Numerical Precision Summary
 
-- H statistics match R within 0.01
-- Degrees of freedom match exactly
-- P-values match R's chi-squared approximation within 0.05
-- Tie correction matches R's implementation
+- Statistics and p-values are pinned at the `validation/README.md` rows; ranks, tie sizes, df
+  and rank sums are exact.
+- P-values are upper tails computed directly (`traits::estimator::chi_squared_p_value`), not
+  `1 - cdf`.
 
 ## Known Differences
 
 1. **Chi-squared approximation:** Both R and our implementation use the chi-squared approximation, which is accurate when no group has fewer than 5 observations.
 
-2. **Tie handling:** Both implementations apply the standard tie correction factor.
+2. **Tie handling:** Both implementations rank with exact ties and apply the standard tie
+   correction factor.
+
+3. **All observations tied (STAT-53, registry deviation):** p2a returns an error where
+   `kruskal.test` returns NaN.
 
 ## Performance Comparison
 

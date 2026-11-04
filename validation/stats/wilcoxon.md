@@ -63,78 +63,76 @@ z = (V - E(V) ± 0.5) / √Var(V)
 
 ## Test Cases
 
-### Test 1: Two-Sample Rank Sum
+All values in Tests 1-6 are R 4.3.3 from cases `stat_rank_wilcoxon` and `stat_rank_small_groups`
+(`validation/r/cases/stats_rank_t3.R`; datasets `validation/datasets/generated/rank_wilcoxon.csv`
+and `rank_small_groups.csv`), registry `validation/methods/stats_rank_t3.json`, id `wilcoxon_t3`.
+Tolerances: the `validation/README.md` rows for n < 100 (p `Tol::p_value`); statistics exact.
+p2a's rank-sum `statistic` is the rank sum R1; R's W = R1 − n₁(n₁ + 1)/2 is compared through that
+identity (STAT-72).
 
-**R Code:**
+### Test 1: Two-sample rank sum (x13a)
+
 ```r
-x <- c(1.2, 2.3, 3.1, 4.5, 5.2)
-y <- c(2.1, 3.4, 4.2, 5.8, 6.1, 7.2)
-wilcox.test(x, y, exact = FALSE, correct = TRUE)
+wilcox.test(c(1.2, 2.3, 3.1, 4.5, 5.2), c(2.1, 3.4, 4.2, 5.8, 6.1, 7.2), exact = FALSE, correct = TRUE)
 ```
 
-**Results Comparison:**
+R: W = 8 (rank sum 23), p = 0.23533326650958575. Pinned.
 
-| Statistic | Rust (p2a) | R | Tolerance | Status |
-|-----------|------------|---|-----------|--------|
-| W (rank sum) | 23.0 | 7* | - | ✅ |
-| p-value (approx) | ~0.08-0.24 | 0.082 | 0.2 | ✅ |
+### Test 2: One-sample signed rank (x13b)
 
-*Note: R reports U statistic, not rank sum W. Our W matches rank sum definition.
-
-**Rust Test:** `crates/p2a-core/src/stats/wilcoxon.rs::tests::test_validate_rank_sum_against_r`
-
-### Test 2: One-Sample Signed Rank
-
-**R Code:**
 ```r
-x <- c(1.83, 0.50, 1.62, 2.48, 1.68, 1.88, 1.55, 3.06, 1.30)
-wilcox.test(x, mu = 1.5, exact = FALSE, correct = TRUE)
+wilcox.test(c(1.83, 0.50, 1.62, 2.48, 1.68, 1.88, 1.55, 3.06, 1.30), mu = 1.5, exact = FALSE, correct = TRUE)
 ```
 
-**Results Comparison:**
+R: V = 33, p = 0.23613697022165284. Pinned.
 
-| Statistic | Rust (p2a) | R | Tolerance | Status |
-|-----------|------------|---|-----------|--------|
-| V | ~33-40 | 40 | 10 | ✅ |
-| p-value (approx) | ~0.1-0.2 | 0.146 | 0.1 | ✅ |
+The previous version of Tests 1 and 2 quoted "W = 7, p 0.082" and "V = 40, p 0.146", which R does
+not print, and accepted p-value ranges.
 
-**Rust Test:** `crates/p2a-core/src/stats/wilcoxon.rs::tests::test_validate_signed_rank_against_r`
+### Test 3: Exact test, small sample (exact3)
 
-### Test 3: Exact Test (Small Sample)
+`wilcox.test(1:3, 4:6, exact = TRUE)`: W = 0 (rank sum 6), p = 0.1 (= 2/20). Pinned.
 
-**R Code:**
-```r
-x <- c(1, 2, 3)
-y <- c(4, 5, 6)
-wilcox.test(x, y, exact = TRUE)
-```
+### Test 4: Paired signed rank with a zero and tied |d| (paired)
 
-**Results Comparison:**
-
-| Statistic | Rust (p2a) | R | Tolerance | Status |
-|-----------|------------|---|-----------|--------|
-| W | 6 | 0* | - | ✅ |
-| p-value (exact) | ~0.1 | 0.1 | 0.05 | ✅ |
-
-**Rust Test:** `crates/p2a-core/src/stats/wilcoxon.rs::tests::test_validate_exact_small_sample`
-
-### Test 4: Paired Signed Rank
-
-**R Code:**
 ```r
 x <- c(125, 115, 130, 140, 140, 115, 140, 125, 140, 135)
 y <- c(110, 122, 125, 120, 140, 124, 123, 137, 135, 145)
 wilcox.test(x, y, paired = TRUE, exact = FALSE, correct = TRUE)
 ```
 
-**Results Comparison:**
+R: V = 27 (pinned), p = 0.6352893188352069; p2a's p is 0.6308000140667467 (its tie variance
+uses the count of tied observations): known deviation STAT-42, not compared.
 
-| Statistic | Rust (p2a) | R | Tolerance | Status |
-|-----------|------------|---|-----------|--------|
-| V | ~30-40 | 35 | 10 | ✅ |
-| p-value (approx) | ~0.3-0.7 | 0.376 | 0.3 | ✅ |
+**Rust test (Tests 1-4):** `stats::wilcoxon::tests::test_validate_wilcoxon_examples`
 
-**Rust Test:** `crates/p2a-core/src/stats/wilcoxon.rs::tests::test_validate_paired_against_r`
+### Test 5: N = 30 and n = 25: normal approximation, labelled
+
+Rank sum on 15 + 15 tie-free values (set n30) and signed rank on 25 tie-free values without zeros
+(set sr25), with the default configuration. p2a's default asks for the exact test below N = 50,
+but its enumeration stops at N = 20, so it uses the normal approximation with continuity
+correction and reports `exact = false` (the label 5f86b49 fixed; reverting it fails the test).
+
+| Set | R (exact = FALSE, correct = TRUE) | pinned | R default (exact) |
+|---|---|---|---|
+| n30 | W 51 (rank sum 171), p 0.011400982911555176 | rank sum, W, p, `exact == false`, continuity flag | 0.009874822650594207 (STAT-73) |
+| sr25 | V 231, p 0.06729929952386755 | V, p, `exact == false`, continuity flag | 0.06670159101486205 (STAT-73) |
+
+**Rust test:** `stats::wilcoxon::tests::test_validate_wilcoxon_n30_exact_flag`
+
+### Test 6: Values of order 1e-12
+
+Rank sum on the tie-free column `ynt` of groups a and b of `stat_rank_small_groups` (7 + 7, all
+within 1e-10 of each other), exact: W = 32 (rank sum 60), p = 0.3828671328671329.
+
+**Rust test:** `stats::wilcoxon::tests::test_validate_wilcoxon_small_scale`
+
+### Input checks
+
+`conf_level` is validated when `conf_int` is set (outside (0, 1) or NaN is an error naming
+`conf_level`, as R's "'conf.level' must be a single number between 0 and 1"; before, 1.5 or NaN
+panicked in the normal quantile), and a non-finite `mu` is an error naming `mu` (R: "'mu' must be
+a single number"). Test: `stats::wilcoxon::tests::test_wilcoxon_rejects_invalid_conf_level_and_mu`.
 
 ## Missing values and the R case
 
@@ -190,32 +188,30 @@ until STAT-72 (Tier 4) changes the reported statistic.
 
 ## Numerical Precision Summary
 
-| Statistic | Typical Tolerance | Notes |
-|-----------|-------------------|-------|
-| Test statistic (W/V) | Exact | Integer rank sums |
-| p-value (exact) | 1e-6 | Combinatorial enumeration |
-| p-value (approx) | 0.1-0.2 | Normal approximation varies |
-| Hodges-Lehmann est. | 0.5 | Depends on data |
-| Confidence intervals | 10% | Approximation-based |
+- Statistics (rank sum, W through the identity, V) are exact; p-values are pinned at the
+  `validation/README.md` rows.
+- Ranks come from `stats::ranks::midranks` (R's `rank()`, exact ties); normal tails are computed
+  directly (no `1 - cdf`) and CI quantiles from `traits::estimator::normal_quantile`.
+- The Hodges-Lehmann estimate and the confidence interval are not R-pinned (STAT-74).
 
 ## Known Differences
 
-1. **Statistic Definition:**
-   - R's `wilcox.test()` returns U statistic by default
-   - Our implementation returns W (rank sum) and U separately
-   - Both are correct; W = n₁n₂ + n₁(n₁+1)/2 - U
+1. **Statistic (STAT-72, registry deviation):** p2a reports the rank sum R1 as `statistic`; R's W
+   is R1 − n₁(n₁ + 1)/2 and is compared through that identity. `u_statistic` is not compared.
 
-2. **Tie Handling:**
-   - Both use average ranks for ties
-   - Both warn and fall back to normal approximation when ties present
+2. **Exact enumeration (STAT-73, registry deviation):** p2a enumerates the exact distribution
+   only for N ≤ 20; R uses the exact test for N < 50 without ties. Between, p2a uses the normal
+   approximation and says so (`exact = false`, Test 5).
 
-3. **Exact vs Approximate:**
-   - R auto-decides based on n < 50 and no ties
-   - Our implementation follows same logic
+3. **Tie variance (STAT-42, registry deviation):** p2a's tie correction of the variance uses the
+   number of tied observations rather than Σ(t³ − t); statistics agree, p-values with ties
+   differ (Test 4).
 
-4. **Continuity Correction:**
-   - Both apply ±0.5 correction to z-score
-   - Applied by default in normal approximation
+4. **Not yet pinned:** the sign of the `mu` shift in the rank-sum test (STAT-41) and the
+   confidence interval, an approximation rather than R's inversion (STAT-74).
+
+5. **Continuity correction:** both apply the ±0.5 correction by default in the normal
+   approximation.
 
 ## Performance Comparison
 

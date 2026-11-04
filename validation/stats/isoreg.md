@@ -17,55 +17,66 @@ Key outputs:
 
 ## Test Cases
 
-### Test 1: R Documentation Example
+All values below are R 4.3.3 from case `stat_rank_isoreg` (`validation/r/cases/stats_rank_t3.R`;
+dataset `validation/datasets/generated/rank_isoreg.csv`, one row per point, column `set` naming
+the example). Rust test: `stats::isoreg::tests::test_validate_isoreg_examples` (registry
+`validation/methods/stats_rank_t3.json`, id `isoreg`). Tolerances are the `validation/README.md`
+rows for n < 100 (fitted values `Tol::coef`, 1e-6 relative); sorted x, order and knot counts
+exact.
 
-**R Code**:
+### Test 1: R documentation example (doc)
+
 ```r
-# Example from R documentation
-y <- c(1, 0, 4, 3, 3, 5, 4, 2, 0)
-ir <- isoreg(y)
-print(ir$y)
-print(ir$yf)
-print(ir$iKnots)
+ir <- isoreg(c(1, 0, 4, 3, 3, 5, 4, 2, 0))
 ```
 
-**Results Comparison**:
+| Quantity | R value | p2a | Status |
+|---|---|---|---|
+| `yf` | 0.5, 0.5, 3, 3, 3, 3, 3, 3, 3 | the same | pinned |
+| number of knots | 2 | 2 | pinned |
+| `iKnots` | 2, 9 (1-based block ends) | `i_knots` 0, 2 (0-based block starts) | deviation STAT-52 (definitions) |
+| `yc` | 0, 1, 1, 5, 8, 11, 16, 20, 22, 22 (`cumsum(c(0, y))`, n + 1 values) | cumsum(yf), n values | deviation STAT-52 (definitions) |
 
-| Output | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| n | 9 | 9 | exact | PASS |
-| yf[0] | 0.5 | 0.5 | 1e-6 | PASS |
-| yf[1] | 0.5 | 0.5 | 1e-6 | PASS |
-| yf[2:4] | 3.33... | 3.33... | 1e-6 | PASS |
-| yf[5:8] | 2.75 | 2.75 | 1e-6 | PASS |
+The previous version of this table listed `yf[2:4]` = 3.33 and `yf[5:8]` = 2.75, a decreasing
+fit that neither R nor p2a produces; both give 3 for the last seven values.
 
-**Rust Test**: `crates/p2a-core/src/stats/isoreg.rs::tests::test_isoreg_basic`
+### Test 2: last value changed (doc3)
 
-### Test 2: Already Monotone Data
+`isoreg(c(1, 0, 4, 3, 3, 5, 4, 2, 3))`: `yf` 0.5, 0.5, 3.3333333333333335 (x3), 3.5 (x4), pinned.
 
-**R Code**:
-```r
-x <- 1:5
-y <- 1:5
-ir <- isoreg(x, y)
-# Fitted should equal original
-all.equal(ir$yf, ir$y)  # TRUE
-```
+### Test 3: with x (ir4, the `?isoreg` example)
 
-**Rust Test**: `crates/p2a-core/src/stats/isoreg.rs::tests::test_isoreg_already_monotone`
+`isoreg(1:10, c(5, 9, 1:2, 5:8, 3, 8))`: `yf` 4.25 (x4), 5, 6 (x4), 8, pinned. R's `iKnots` are
+4, 5, 6, 9, 10: R keeps the two adjacent pooled blocks with the fitted value 6 apart, p2a merges
+them into one (4 knots); deviation STAT-52, not compared.
 
-### Test 3: Strictly Decreasing Data
+### Test 4: already monotone and strictly decreasing
 
-**R Code**:
-```r
-x <- 1:5
-y <- 5:1  # Decreasing
-ir <- isoreg(x, y)
-# All fitted values should be the mean (3.0)
-print(ir$yf)  # [3, 3, 3, 3, 3]
-```
+`isoreg(1:5)`: `yf` 1, 2, 3, 4, 5. `isoreg(5:1)`: `yf` 3 (x5), one knot. Both pinned.
 
-**Rust Test**: `crates/p2a-core/src/stats/isoreg.rs::tests::test_isoreg_decreasing`
+### Test 5: unsorted, tie-free x
+
+15 points (seed 20261026; x a permutation of 0.641 ... 14.889):
+
+| Quantity | R value |
+|---|---|
+| `yf` | -0.055, 0.52, 1.627, 1.9435, 1.9435, 2.0379999999999994, 2.2249999999999996, 2.2249999999999996, 2.3665000000000003, 2.3665000000000003, 2.496666666666666 (x3), 2.7875000000000014 (x2) |
+| sorted x | 0.641, 1.522, 2.569, 3.757, 4.827, 5.631, 6.729, 7.667, 8.753, 9.8, 10.722, 11.736, 12.749, 13.888, 14.889 |
+| `ord` (1-based) | 9, 5, 6, 8, 11, 14, 3, 10, 4, 1, 2, 13, 12, 15, 7 |
+
+All three are pinned (p2a's `ord` is 0-based; the test adds 1).
+
+### Known difference: tied x (STAT-52)
+
+`isoreg(c(3, 1, 2, 2, 1), c(5, 1, 2, 4, 3))`: R orders by (x, -y) and pools tied x, `yf` 2, 2, 3,
+3, 5 (`iKnots` 2, 4, 5); p2a gives 1, 2.5, 2.5, 4, 5. Kept in the case as `yf_tiedx` and
+`iknots_tiedx`, not compared.
+
+### Input checks
+
+A NaN in x or a non-finite y is refused ("missing values not allowed: x[1] is NaN", as R's
+"missing values not allowed"); x is sorted with `f64::total_cmp`. Test:
+`stats::isoreg::tests::test_isoreg_rejects_nan_x`.
 
 ### MCP tool on an integer response (R-pinned)
 
@@ -101,15 +112,16 @@ exact.
 
 ## Numerical Precision Summary
 
-- Fitted values match R within 1e-10 tolerance
-- Knot positions: see Known Differences
+- Fitted values agree with R to 6.4e-16 relative on every tie-free set (planning port) and are
+  pinned at the `validation/README.md` rows (`Tol::coef`).
+- Sorted x, order and the knot counts of doc and decr are exact.
 
 ## Known Differences
 
 - **STAT-52 (Tier 4):** p2a reports the first index (0-based) of each constant block as its
   knots (0, 1, 2, 5, 9 on the case above), R's `iKnots` the last (1-based: 1, 2, 5, 9, 10); tied
-  x values are not pooled as R pools them. Only the number of knots is pinned, on an x without
-  ties.
+  x values are not pooled as R pools them; adjacent pooled blocks with equal fitted values are
+  one block in p2a (ir4: 4 knots, R 5). Only the number of knots is pinned, where it agrees.
 
 ## Performance Comparison
 
