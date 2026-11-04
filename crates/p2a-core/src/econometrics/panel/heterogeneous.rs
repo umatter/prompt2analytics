@@ -177,8 +177,21 @@ impl fmt::Display for PvcmResult {
         writeln!(f)?;
 
         writeln!(f, "Individual Coefficients (first 5 entities shown):")?;
+        // R factor() order, the order of the fit: numerically when every id is a number,
+        // else in byte order.
         let mut entities: Vec<&String> = self.individual_coefficients.keys().collect();
-        entities.sort();
+        let numeric: Option<Vec<f64>> = entities.iter().map(|k| k.parse::<f64>().ok()).collect();
+        if numeric.is_some() {
+            entities.sort_by(|a, b| {
+                let (x, y) = (
+                    a.parse::<f64>().unwrap_or(0.0),
+                    b.parse::<f64>().unwrap_or(0.0),
+                );
+                x.total_cmp(&y).then_with(|| a.cmp(b))
+            });
+        } else {
+            entities.sort();
+        }
         let mut count = 0;
         for entity in entities {
             let coeffs = &self.individual_coefficients[entity];
@@ -728,5 +741,23 @@ mod tests {
             .named("mg_coef", &r.variables, &r.coefficients, Tol::coef(240))
             .scalar("n_obs", r.n_obs as f64, Tol::exact())
             .finish();
+    }
+
+    #[test]
+    fn test_validate_pvcm_display_lists_entities_in_level_order() {
+        let (_case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Within).unwrap();
+        let text = r.to_string();
+        let block = text
+            .split("Individual Coefficients")
+            .nth(1)
+            .expect("individual block");
+        let ids: Vec<&str> = block
+            .lines()
+            .filter_map(|l| l.trim().split_once(':').map(|(id, _)| id))
+            .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+            .take(5)
+            .collect();
+        assert_eq!(ids, ["1", "2", "3", "4", "5"], "{text}");
     }
 }
