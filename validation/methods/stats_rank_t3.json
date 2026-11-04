@@ -275,7 +275,9 @@
       "cases": [
         "stat_rank_isoreg"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::isoreg::tests::test_validate_isoreg_examples"
+      ],
       "quantities": [
         "yf (doc, doc3, ir4, mono, decr, unsorted)",
         "number of knots (decr)",

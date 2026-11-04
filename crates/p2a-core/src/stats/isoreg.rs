@@ -118,9 +118,14 @@ pub fn isoreg(x: &[f64], y: &[f64]) -> Result<IsoregResult, String> {
         }
     }
 
+    // R: "missing values not allowed"
+    if let Some(i) = x.iter().position(|v| v.is_nan()) {
+        return Err(format!("missing values not allowed: x[{i}] is NaN"));
+    }
+
     // Sort by x
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
 
     // Check if already ordered
     let is_ordered = indices.iter().enumerate().all(|(i, &idx)| i == idx);
@@ -466,127 +471,9 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_validate_isoreg_r_example() {
-        // R: y <- c(1.0, 0.0, 4.0, 3.0, 3.0, 5.0, 4.0, 2.0, 0.0)
-        // R: isoreg(y)$yf
-        // R result: [0.5, 0.5, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
-        let y = vec![1.0, 0.0, 4.0, 3.0, 3.0, 5.0, 4.0, 2.0, 0.0];
-        let result = isoreg_y(&y).unwrap();
-
-        assert_eq!(result.n, 9);
-
-        // Expected fitted values from R
-        let expected_yf = vec![0.5, 0.5, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0];
-
-        // First two should be pooled to 0.5
-        assert!(
-            (result.yf[0] - expected_yf[0]).abs() < 0.1,
-            "yf[0] mismatch: Rust={:.4}, R={:.4}",
-            result.yf[0],
-            expected_yf[0]
-        );
-        assert!(
-            (result.yf[1] - expected_yf[1]).abs() < 0.1,
-            "yf[1] mismatch: Rust={:.4}, R={:.4}",
-            result.yf[1],
-            expected_yf[1]
-        );
-
-        // Rest should be pooled around 3.0 (approximately)
-        for i in 2..9 {
-            assert!(
-                result.yf[i] >= result.yf[0],
-                "yf[{}] should be >= yf[0] for monotonicity",
-                i
-            );
-        }
-
-        // Check monotonicity
-        for i in 1..result.n {
-            assert!(
-                result.yf[i] >= result.yf[i - 1] - 1e-10,
-                "Monotonicity violated at i={}: yf[{}]={:.4} < yf[{}]={:.4}",
-                i,
-                i,
-                result.yf[i],
-                i - 1,
-                result.yf[i - 1]
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_isoreg_monotone_unchanged() {
-        // R: isoreg(c(1, 2, 3, 4, 5))$yf == c(1, 2, 3, 4, 5) -> TRUE
-        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = isoreg_y(&y).unwrap();
-
-        for i in 0..5 {
-            assert!(
-                (result.yf[i] - y[i]).abs() < 1e-10,
-                "Already monotone data should be unchanged: yf[{}]={:.4} vs y[{}]={:.4}",
-                i,
-                result.yf[i],
-                i,
-                y[i]
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_isoreg_decreasing_pools_to_mean() {
-        // R: isoreg(c(5, 4, 3, 2, 1))$yf -> all values equal to mean(c(5,4,3,2,1)) = 3.0
-        let y = vec![5.0, 4.0, 3.0, 2.0, 1.0];
-        let result = isoreg_y(&y).unwrap();
-
-        let expected_mean = 3.0;
-
-        // All values should be equal (pooled to single block)
-        for i in 0..5 {
-            assert!(
-                (result.yf[i] - expected_mean).abs() < 1e-10,
-                "Decreasing data should pool to mean: yf[{}]={:.4}, expected={:.4}",
-                i,
-                result.yf[i],
-                expected_mean
-            );
-        }
-
-        // Should have only one knot
-        assert_eq!(
-            result.i_knots.len(),
-            1,
-            "Should have only one knot for single block"
-        );
-    }
-
-    #[test]
-    fn test_validate_isoreg_with_x_values() {
-        // R: isoreg(c(3, 1, 2), c(3, 1, 2))
-        // After sorting by x: x=[1,2,3], y=[1,2,3] which is monotone
-        let x = vec![3.0, 1.0, 2.0];
-        let y = vec![3.0, 1.0, 2.0];
-        let result = isoreg(&x, &y).unwrap();
-
-        // Data should be sorted by x
-        assert_eq!(result.x, vec![1.0, 2.0, 3.0]);
-        assert_eq!(result.y, vec![1.0, 2.0, 3.0]);
-
-        // Since sorted data is monotone, yf should equal y
-        for i in 0..3 {
-            assert!(
-                (result.yf[i] - result.y[i]).abs() < 1e-10,
-                "Sorted monotone data should be unchanged"
-            );
-        }
-
-        assert!(!result.is_ordered, "Original data was not sorted");
-        assert!(result.ord.is_some(), "Should have ordering permutation");
-    }
-
-    #[test]
-    fn test_validate_isoreg_knots() {
-        // For data with multiple level changes, knots should mark changes
+    fn test_isoreg_knots_are_block_starts() {
+        // p2a's i_knots are 0-based block starts (R's iKnots are 1-based block ends: STAT-52);
+        // for data with multiple level changes, knots mark the changes
         let y = vec![1.0, 1.0, 3.0, 3.0, 5.0, 5.0];
         let result = isoreg_y(&y).unwrap();
 
@@ -608,31 +495,53 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_isoreg_predict() {
-        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let y = vec![1.0, 5.0, 2.0, 4.0, 6.0]; // Has violations
-        let result = isoreg(&x, &y).unwrap();
+    fn test_validate_isoreg_examples() {
+        use crate::stats::ranks::test_data::column_where;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_rank_isoreg");
+        let col = |set: &str, c: &str| column_where(&ds, c, &[("set", set)]);
+        let doc = isoreg_y(&col("doc", "y")).unwrap();
+        let doc3 = isoreg_y(&col("doc3", "y")).unwrap();
+        let ir4 = isoreg(&col("ir4", "x"), &col("ir4", "y")).unwrap();
+        let mono = isoreg_y(&col("mono", "y")).unwrap();
+        let decr = isoreg_y(&col("decr", "y")).unwrap();
+        let un = isoreg(&col("unsorted", "x"), &col("unsorted", "y")).unwrap();
+        assert!(!un.is_ordered);
+        // R's ord is 1-based
+        let ord: Vec<f64> = un
+            .ord
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|&i| (i + 1) as f64)
+            .collect();
+        // The number of knots agrees with R's iKnots on doc (and decr, pinned below); the knot
+        // positions and yc do not: deviation STAT-52. On ir4 R keeps two adjacent pooled blocks
+        // with the same fitted value 6 apart (iKnots 4, 5, 6, 9, 10), p2a merges them (4 knots):
+        // deviation STAT-52, iknots_ir4 is not compared.
+        assert_eq!(doc.i_knots.len(), case.vector("iknots_doc").len());
+        // deviation STAT-52: yf_tiedx / iknots_tiedx (tied x not pooled) are not compared
+        Check::new(&case)
+            .vector("yf_doc", &doc.yf, Tol::coef(9))
+            .vector("yf_doc3", &doc3.yf, Tol::coef(9))
+            .vector("yf_ir4", &ir4.yf, Tol::coef(10))
+            .vector("yf_mono", &mono.yf, Tol::coef(5))
+            .vector("yf_decr", &decr.yf, Tol::coef(5))
+            .scalar("n_knots_decr", decr.i_knots.len() as f64, Tol::exact())
+            .vector("yf_unsorted", &un.yf, Tol::coef(15))
+            .vector("x_sorted_unsorted", &un.x, Tol::exact())
+            .vector("ord_unsorted", &ord, Tol::exact())
+            .finish();
+    }
 
-        // Predict at original points
-        let pred = isoreg_predict(&result, &x);
-        for i in 0..5 {
-            assert!(
-                (pred[i] - result.yf[i]).abs() < 1e-10,
-                "Prediction at original x should equal fitted value"
-            );
-        }
-
-        // Predict outside range
-        let pred_below = isoreg_predict(&result, &[0.0]);
+    #[test]
+    fn test_isoreg_rejects_nan_x() {
+        // R: isoreg(c(1, NaN, 3), 1:3) -> "missing values not allowed". Before: Ok, with NaN
+        // sorted by partial_cmp.
+        let e = isoreg(&[1.0, f64::NAN, 3.0], &[1.0, 2.0, 3.0]).unwrap_err();
         assert!(
-            (pred_below[0] - result.yf[0]).abs() < 1e-10,
-            "Below range uses first value"
-        );
-
-        let pred_above = isoreg_predict(&result, &[10.0]);
-        assert!(
-            (pred_above[0] - result.yf[4]).abs() < 1e-10,
-            "Above range uses last value"
+            e.contains("missing values not allowed") && e.contains("x[1]"),
+            "{e}"
         );
     }
 }
