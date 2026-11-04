@@ -202,6 +202,26 @@ ids may be text, integers or floats; situations and alternatives follow R `facto
 and the default reference alternative is the first in that order (it followed string
 order). The likelihood is summed over the situations in that order.
 
+## Timing (T3-PERF2)
+
+Release build, `taskset -c 1`, `RAYON_NUM_THREADS=1`; base is the prebuilt `fe13b889` bench
+binaries of the wave-2A integration timing, head the T3-PERF2 lane; three interleaved rounds,
+medians of the per-run medians (`unified_benchmarks`, criterion `new_methods_benchmarks`, and the
+integration's scratch timing crate for the conditional logit). The machine was shared with other
+lanes' builds; the integration re-times on a quiet machine. Both models now evaluate the accepted
+Newton step with its derivatives, which the next iteration and the standard errors reuse,
+count separation in that pass, and run the aliasing QR only when the normal-equations test
+(`certainly_full_rank`) cannot certify full rank.
+
+| Fit | n: base µs, head/base | | | |
+|---|---|---|---|---|
+| multinomial logit (criterion `multinom`) | 100: 80.6, 0.97 | 500: 371, 0.92 | 1,000: 736, 0.92 | 5,000: 3,695, 0.91 |
+| multinomial logit (unified) | 100: 81.5, 1.01 | 1,000: 718, 0.93 | 10,000: 7,322, 0.91 | |
+| conditional logit, constants (3 alternatives, situations) | 300: 229, 1.06 | 1,000: 792, 1.03 | 3,000: 2,402, 1.01 | |
+| conditional logit, no constants (head; base fits constants) | 300: 230, 0.92 | 1,000: 790, 0.85 | 3,000: 2,400, 0.84 | |
+
+Within 1.1x of `fe13b889` at every size.
+
 ## References
 
 - McFadden, D. (1974). "Conditional Logit Analysis of Qualitative Choice Behavior."
