@@ -8,10 +8,16 @@
 //!
 //! # Algorithms ([`QuantRegMethod`])
 //!
-//! - **Barrodale-Roberts simplex** (`br`, the default): a port of quantreg's `rqbr` (Koenker and
-//!   d'Orey 1987, AS 229, a modification of Barrodale and Roberts 1974) for one τ. It returns a vertex
-//!   of the LP, the solution `rq(method = "br")` returns, and flags a nonunique solution as R does
-//!   ("Solution may be nonunique").
+//! - **Barrodale-Roberts simplex** (`br`): a port of quantreg's `rqbr` (Koenker and d'Orey 1987,
+//!   AS 229, a modification of Barrodale and Roberts 1974) for one τ. It returns a vertex of the LP,
+//!   the solution `rq(method = "br")` returns, and flags a nonunique solution as R does ("Solution
+//!   may be nonunique"). Its cost grows about quadratically in n.
+//! - **Frisch-Newton interior point** (`fn`): a port of quantreg's `rqfnb` (Portnoy and Koenker 1997),
+//!   a primal-dual log-barrier method with Mehrotra's predictor-corrector, linear in n. It runs on
+//!   `y / s` with `s = mean |y - median(y)|`, so its duality-gap rule is scale-free; it stops within
+//!   that gap of the LP optimum, not at a vertex.
+//! - **Automatic** (`auto`, the default): `br` for n <= 5000 and `fn` above, quantreg's own advice
+//!   for large problems. The result names the algorithm that ran.
 //! - **IRLS** (`irls`): iteratively reweighted least squares with a relative weight floor
 //!   (1e-6 times the residual MAD). An approximation that no R method computes; its objective is
 //!   close to, but not at, the LP minimum.
@@ -56,6 +62,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::linalg::cholesky;
 use crate::linalg::solve::{LM_QR_TOL, Qr, least_squares, weighted_least_squares};
 use crate::options::Choices;
 use crate::resource;
@@ -68,6 +75,12 @@ const BR_TOLER: f64 = 3.666852862501036e-11;
 /// `sqrt(.Machine$double.eps)`: summary.rq's fuzz `eps` (multiplied here by the outcome's
 /// dispersion, see [`rq_se`]).
 const RQ_FUZZ: f64 = 1.4901161193847656e-8;
+/// `QuantRegMethod::Auto` uses the simplex up to this many observations.
+const AUTO_BR_MAX_N: usize = 5000;
+/// Iteration limit of the Frisch-Newton method (quantreg's `rq.fit.fnb`).
+const FN_MAX_ITER: usize = 500;
+/// Step-length factor of the Frisch-Newton method (quantreg's `beta`).
+const FN_BETA: f64 = 0.99995;
 /// R's warning for a nonunique simplex solution.
 const NONUNIQUE: &str = "Solution may be nonunique";
 
@@ -513,8 +526,11 @@ fn check_function(u: f64, tau: f64) -> f64 {
 
 /// `Auto` resolved for `n` rows: the simplex up to [`AUTO_BR_MAX_N`] rows (and wherever
 /// Frisch-Newton cannot run, at tau within `tol` of 0 or 1), Frisch-Newton above.
-fn resolve_method(method: QuantRegMethod, _n: usize, _tau: f64, _tol: f64) -> QuantRegMethod {
+fn resolve_method(method: QuantRegMethod, n: usize, tau: f64, tol: f64) -> QuantRegMethod {
     match method {
+        QuantRegMethod::Auto if n > AUTO_BR_MAX_N && tau > tol && tau < 1.0 - tol => {
+            QuantRegMethod::FrischNewton
+        }
         QuantRegMethod::Auto => QuantRegMethod::BarrodaleRoberts,
         m => m,
     }
@@ -615,7 +631,9 @@ fn fit_full_rank(
             (s.coef, s.pivots, s.nonunique, s.convergence)
         }
         QuantRegMethod::FrischNewton => {
-            return Err(spec("method fn arrives in Task 5".into()));
+            let (b, c) = frisch_newton(x, y, tau, config.tol)?;
+            warnings.extend(c.note("Frisch-Newton quantile regression"));
+            (b, c.iterations, false, c)
         }
         QuantRegMethod::Irls => {
             let (b, c) = irls_quantreg(x, y, tau, config.max_iter, config.tol)?;
@@ -1027,6 +1045,178 @@ fn irls_quantreg(
             tol,
         ),
     ))
+}
+
+/// Solve `L L' v = b` in place (`l` lower triangular).
+fn chol_solve(l: &Array2<f64>, b: &mut Array1<f64>) {
+    let p = b.len();
+    for i in 0..p {
+        let mut s = b[i];
+        for k in 0..i {
+            s -= l[[i, k]] * b[k];
+        }
+        b[i] = s / l[[i, i]];
+    }
+    for i in (0..p).rev() {
+        let mut s = b[i];
+        for k in i + 1..p {
+            s -= l[[k, i]] * b[k];
+        }
+        b[i] = s / l[[i, i]];
+    }
+}
+
+/// The Cholesky factor of `X' D X`.
+fn weighted_gram_cholesky(x: ArrayView2<'_, f64>, d: &Array1<f64>) -> EconResult<Array2<f64>> {
+    let p = x.ncols();
+    let mut ada = Array2::<f64>::zeros((p, p));
+    for (row, &di) in x.rows().into_iter().zip(d.iter()) {
+        for j in 0..p {
+            let v = di * row[j];
+            for k in 0..=j {
+                ada[[j, k]] += v * row[k];
+            }
+        }
+    }
+    for j in 0..p {
+        for k in 0..j {
+            ada[[k, j]] = ada[[j, k]];
+        }
+    }
+    cholesky(&ada.view()).map_err(|_| EconError::SingularMatrix {
+        context: "Frisch-Newton: X'DX is not positive definite (possibly singular design)".into(),
+        suggestion: "use method = br".into(),
+    })
+}
+
+/// The largest step in (0, 1e20] keeping `v + step * dv` positive (`min(-v / dv)` over `dv <
+/// 0`), for two vectors at once.
+fn max_step(v1: &Array1<f64>, d1: &Array1<f64>, v2: &Array1<f64>, d2: &Array1<f64>) -> f64 {
+    let mut m = 1e20f64;
+    for (v, d) in [(v1, d1), (v2, d2)] {
+        for (&vi, &di) in v.iter().zip(d.iter()) {
+            if di < 0.0 {
+                m = m.min(-vi / di);
+            }
+        }
+    }
+    m
+}
+
+/// quantreg's `rqfnb` (Portnoy and Koenker 1997): the primal-dual log-barrier method with
+/// Mehrotra's predictor-corrector for the dual of the quantile-regression LP, run on `y / s`
+/// with `s = mean |y - median(y)|` so that the duality-gap rule `gap <= tol` is scale-free
+/// (quantreg's absolute rule stops early on small-scale outcomes). The coefficients are
+/// rescaled by `s`.
+fn frisch_newton(
+    x: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    tau: f64,
+    tol: f64,
+) -> EconResult<(Array1<f64>, Convergence)> {
+    if !(tau > tol && tau < 1.0 - tol) {
+        return Err(spec(format!(
+            "method fn needs tol < tau < 1 - tol (quantreg: \"No parametric Frisch-Newton \
+             method\"), got tau = {tau}"
+        )));
+    }
+    let n = x.nrows();
+    let scale = dispersion(y);
+    let eps = tol;
+    let xt = x.t();
+    // LP data: A = X', c = -y / s, b = (1 - tau) X'1, upper bound u = 1
+    let c: Array1<f64> = y.mapv(|v| -v / scale);
+    let b: Array1<f64> = xt.dot(&Array1::<f64>::ones(n)) * (1.0 - tau);
+    let mut xv = Array1::from_elem(n, 1.0 - tau);
+    let mut d = Array1::<f64>::ones(n);
+    let l0 = weighted_gram_cholesky(x, &d)?;
+    let mut yd = xt.dot(&c);
+    chol_solve(&l0, &mut yd);
+    let r0 = &c - &x.dot(&yd);
+    let mut z = r0.mapv(|v| {
+        if v.abs() < eps {
+            v.max(0.0) + eps
+        } else {
+            v.max(0.0)
+        }
+    });
+    let mut w = r0.mapv(|v| {
+        if v.abs() < eps {
+            (-v).max(0.0) + eps
+        } else {
+            (-v).max(0.0)
+        }
+    });
+    let mut sv = xv.mapv(|v| 1.0 - v);
+    let gap_of = |z: &Array1<f64>, xv: &Array1<f64>, w: &Array1<f64>, sv: &Array1<f64>| {
+        z.dot(xv) + w.dot(sv)
+    };
+    let mut gap = gap_of(&z, &xv, &w, &sv);
+    let mut it = 0usize;
+    while gap > eps && it < FN_MAX_ITER {
+        resource::checkpoint()?;
+        it += 1;
+        for i in 0..n {
+            d[i] = 1.0 / (z[i] / xv[i] + w[i] / sv[i]);
+        }
+        let mut ds = &z - &w;
+        let dz = &d * &ds;
+        let mut dy = &b - &xt.dot(&(&xv - &dz));
+        let mut rhs = dy.clone();
+        let l = weighted_gram_cholesky(x, &d)?;
+        chol_solve(&l, &mut dy);
+        ds = &x.dot(&dy) - &ds;
+        let mut dx = &d * &ds;
+        let mut ds = -&dx;
+        let mut dz: Array1<f64> = Array1::from_iter((0..n).map(|i| -z[i] * (dx[i] / xv[i] + 1.0)));
+        let mut dw: Array1<f64> = Array1::from_iter((0..n).map(|i| -w[i] * (ds[i] / sv[i] + 1.0)));
+        let mut deltap = (FN_BETA * max_step(&xv, &dx, &sv, &ds)).min(1.0);
+        let mut deltad = (FN_BETA * max_step(&z, &dz, &w, &dw)).min(1.0);
+        if deltap.min(deltad) < 1.0 {
+            // Mehrotra's corrector
+            let mut mu = xv.dot(&z) + sv.dot(&w);
+            let g = mu
+                + deltap * dx.dot(&z)
+                + deltad * dz.dot(&xv)
+                + deltap * deltad * dz.dot(&dx)
+                + deltap * ds.dot(&w)
+                + deltad * dw.dot(&sv)
+                + deltap * deltad * ds.dot(&dw);
+            mu = mu * (g / mu).powi(3) / (2.0 * n as f64);
+            let dr: Array1<f64> = Array1::from_iter((0..n).map(|i| {
+                d[i] * (mu * (1.0 / sv[i] - 1.0 / xv[i]) + dx[i] * dz[i] / xv[i]
+                    - ds[i] * dw[i] / sv[i])
+            }));
+            std::mem::swap(&mut rhs, &mut dy);
+            dy = &dy + &xt.dot(&dr);
+            chol_solve(&l, &mut dy);
+            let uu = x.dot(&dy);
+            let dxdz = &dx * &dz;
+            let dsdw = &ds * &dw;
+            dx = Array1::from_iter((0..n).map(|i| d[i] * (uu[i] - z[i] + w[i]) - dr[i]));
+            ds = -&dx;
+            dz = Array1::from_iter((0..n).map(|i| -z[i] + (mu - z[i] * dx[i] - dxdz[i]) / xv[i]));
+            dw = Array1::from_iter((0..n).map(|i| -w[i] + (mu - w[i] * ds[i] - dsdw[i]) / sv[i]));
+            deltap = (FN_BETA * max_step(&xv, &dx, &sv, &ds)).min(1.0);
+            deltad = (FN_BETA * max_step(&z, &dz, &w, &dw)).min(1.0);
+        }
+        xv.scaled_add(deltap, &dx);
+        sv.scaled_add(deltap, &ds);
+        yd.scaled_add(deltad, &dy);
+        z.scaled_add(deltad, &dz);
+        w.scaled_add(deltad, &dw);
+        gap = gap_of(&z, &xv, &w, &sv);
+    }
+    let coef = yd.mapv(|v| -v * scale);
+    let convergence = Convergence::new(
+        gap <= eps,
+        it,
+        FN_MAX_ITER,
+        "duality gap of the standardised LP (rqfnb)",
+        gap,
+        eps,
+    );
+    Ok((coef, convergence))
 }
 
 /// The standard normal density (R `dnorm`).
@@ -2347,5 +2537,130 @@ mod tests {
             quantreg_multi(&ds, "y", &["x"], &[]),
             Err(EconError::InvalidSpecification { message }) if message.contains("taus")
         ));
+    }
+
+    // ── Frisch-Newton interior point and the automatic choice ──
+
+    /// method = fn (rqfnb on y / mean |y - median(y)|): converged, and within the duality-gap
+    /// tolerance of the exact LP solution rq(method = "br") (Tol::iterative(1e-6); R's rq.fit.fnb
+    /// on the standardised outcome is 1.7e-10 / 3.0e-9 / 8.3e-8 away). The iterates are not pinned
+    /// (fn_*_coef and fn_*_nit stay in the case as R facts). Fails before WP10: InteriorPoint ran
+    /// IRLS.
+    #[test]
+    fn test_validate_rq_fn_coefficients() {
+        let (case, ds) = crate::test_support::load_case("rq_br_se");
+        let mut check = Check::new(&case);
+        for (tau, tag) in [(0.25, "tau25"), (0.5, "tau50"), (0.75, "tau75")] {
+            let mut cfg = QuantRegConfig::default();
+            cfg.tau = tau;
+            cfg.algorithm = QuantRegMethod::FrischNewton;
+            let r = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+            check.named(
+                &format!("{tag}_coef"),
+                &r.variable_names,
+                &estimates(&r),
+                Tol::iterative(1e-6),
+            );
+            assert!(
+                r.convergence.converged && r.algorithm == QuantRegMethod::FrischNewton,
+                "{tag}"
+            );
+            assert!(
+                r.convergence.final_change <= cfg.tol,
+                "{tag}: gap {}",
+                r.convergence.final_change
+            );
+            assert!(!r.nonunique);
+            assert!(
+                r.to_string()
+                    .contains("Algorithm: Frisch-Newton interior point (fn)\n")
+            );
+        }
+        check.finish();
+    }
+
+    /// Scale-free stopping: y x 1e-6 and 1e6 take the same iterations and give the factor times the
+    /// unscaled coefficients. R's own rq(method = "fn") at 1e-6 stops after 3 iterations, 0.93% off
+    /// (scale_m6_fn_r_tau50_coef, recorded, not pinned).
+    #[test]
+    fn test_rq_fn_scale_free() {
+        let ds = hetero();
+        let mut cfg = QuantRegConfig::default();
+        cfg.algorithm = QuantRegMethod::FrischNewton;
+        let base = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+        for factor in [1e-6, 1e6] {
+            let r = quantreg(
+                &with_derived(&ds, "ys", "y", |v| v * factor),
+                "ys",
+                &["x"],
+                &cfg,
+            )
+            .unwrap();
+            assert_eq!(r.iterations, base.iterations, "x {factor}");
+            for (c, b) in r.coefficients.iter().zip(&base.coefficients) {
+                assert!(
+                    (c.estimate / factor / b.estimate - 1.0).abs() < 1e-9,
+                    "x {factor}"
+                );
+                assert!(
+                    (c.std_error / factor / b.std_error - 1.0).abs() < 1e-9,
+                    "x {factor}"
+                );
+            }
+        }
+    }
+
+    /// R: rq.fit.fnb stops with "No parametric Frisch-Newton method.  Set tau in (0,1)" when tau <
+    /// eps or > 1 - eps.
+    #[test]
+    fn test_rq_fn_rejects_extreme_tau() {
+        let mut cfg = QuantRegConfig::default();
+        cfg.algorithm = QuantRegMethod::FrischNewton;
+        for tau in [5e-7, 1.0 - 5e-7] {
+            cfg.tau = tau;
+            assert!(matches!(
+                quantreg(&hetero(), "y", &["x"], &cfg),
+                Err(EconError::InvalidSpecification { message }) if message.contains("fn") && message.contains("tau")
+            ));
+        }
+        // the automatic choice falls back to the simplex there
+        assert_eq!(
+            resolve_method(QuantRegMethod::Auto, 10_000, 5e-7, 1e-6),
+            QuantRegMethod::BarrodaleRoberts
+        );
+    }
+
+    /// Auto: the simplex up to 5000 rows, Frisch-Newton above (the result names the one that ran);
+    /// on a unique problem the two agree within Tol::iterative(1e-6).
+    #[test]
+    fn test_rq_auto_selects_by_n() {
+        use QuantRegMethod::*;
+        assert_eq!(resolve_method(Auto, 5000, 0.5, 1e-6), BarrodaleRoberts);
+        assert_eq!(resolve_method(Auto, 5001, 0.5, 1e-6), FrischNewton);
+        assert_eq!(resolve_method(Irls, 5001, 0.5, 1e-6), Irls);
+        let n = 5001;
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            if j == 0 {
+                1.0
+            } else {
+                ((i * 37) % 101) as f64 / 10.0
+            }
+        });
+        let y = Array1::from_iter((0..n).map(|i| {
+            1.0 + 0.5 * x[[i, 1]] + (((i * 7919) % 1009) as f64 / 1009.0 - 0.5) * (1.0 + x[[i, 1]])
+        }));
+        let auto = rq_fit(x.view(), y.view(), 0.5, &QuantRegConfig::default()).unwrap();
+        assert_eq!(auto.algorithm, FrischNewton);
+        let mut cfg = QuantRegConfig::default();
+        cfg.algorithm = BarrodaleRoberts;
+        let br = rq_fit(x.view(), y.view(), 0.5, &cfg).unwrap();
+        assert_eq!(br.algorithm, BarrodaleRoberts);
+        for (a, b) in auto.coefficients.iter().zip(&br.coefficients) {
+            assert!(Tol::iterative(1e-6).allows(*a, *b), "{a} vs {b}");
+        }
+        assert!(
+            auto.objective >= br.objective * (1.0 - 1e-12)
+                && auto.objective <= br.objective * (1.0 + 1e-6)
+        );
     }
 }
