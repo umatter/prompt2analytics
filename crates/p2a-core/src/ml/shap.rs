@@ -44,28 +44,102 @@
 
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::traits::convergence::{ResultNotes, notes_text};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Default seed of the Kernel SHAP sampling path (R13); `ShapConfig::seed = None` uses it too.
+pub const SHAP_DEFAULT_SEED: u64 = 42;
+/// Additivity tolerance, relative to `max(1, max_i |f(x_i)|)`.
+pub const ADDITIVITY_TOLERANCE: f64 = 1e-8;
+
+/// Which SHAP algorithm (option "method").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapMethod {
+    /// TreeSHAP (Lundberg, Erion & Lee 2020, Algorithm 2): exact, tree path-dependent.
+    #[default]
+    Tree,
+    /// Kernel SHAP (Lundberg & Lee 2017; shap.KernelExplainer): interventional, any model.
+    Kernel,
+}
+crate::option_enum!(
+    ShapMethod,
+    crate::options::Choices {
+        option: "method",
+        values: &[
+            (&["tree", "treeshap", "tree_shap"], ShapMethod::Tree),
+            (&["kernel", "kernelshap", "kernel_shap"], ShapMethod::Kernel),
+        ],
+    }
+);
+
+/// The game whose Shapley values are computed (option "feature_perturbation").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeaturePerturbation {
+    /// `v(S) = mean_b f(x_S, b_notS)` over a background sample (Kernel SHAP).
+    Interventional,
+    /// `v(S) = E[f(x) | x_S]` from the trees' training cover (TreeSHAP; shap's
+    /// "tree_path_dependent").
+    TreePathDependent,
+    /// True conditional expectations; not implemented (it needs a model of the feature
+    /// distribution), so requesting it is an error.
+    Observational,
+}
+crate::option_enum!(
+    FeaturePerturbation,
+    crate::options::Choices {
+        option: "feature_perturbation",
+        values: &[
+            (
+                &["interventional", "marginal", "independent"],
+                FeaturePerturbation::Interventional
+            ),
+            (
+                &["tree_path_dependent", "path_dependent"],
+                FeaturePerturbation::TreePathDependent
+            ),
+            (
+                &["observational", "conditional", "correlation_dependent"],
+                FeaturePerturbation::Observational
+            ),
+        ],
+    }
+);
+
+impl FeaturePerturbation {
+    /// The perturbation a method computes: Tree -> TreePathDependent, Kernel -> Interventional.
+    pub fn default_for(method: ShapMethod) -> Self {
+        match method {
+            ShapMethod::Tree => FeaturePerturbation::TreePathDependent,
+            ShapMethod::Kernel => FeaturePerturbation::Interventional,
+        }
+    }
+}
 
 /// Configuration for SHAP value computation.
 #[derive(Debug, Clone)]
 pub struct ShapConfig {
-    /// Number of samples for Kernel SHAP approximation (default: 2 * n_features + 2048)
+    /// Kernel SHAP coalition budget (shap's `nsamples`; default `2 M + 2048`): every coalition is
+    /// evaluated (exact) when `2^M - 2 <= n_samples`, which the default does for M <= 11;
+    /// otherwise shap.KernelExplainer's sampled design with `n_samples` coalitions. TreeSHAP does
+    /// not sample: a value given to the tree path is reported in `warnings`. Must be >= 1.
     pub n_samples: Option<usize>,
 
-    /// Feature perturbation method: "interventional" or "observational"
-    /// - Interventional: Replaces features with background distribution (default)
-    /// - Observational: Conditions on feature values
-    pub feature_perturbation: FeaturePerturbation,
+    /// `None`: the method's own perturbation ([`FeaturePerturbation::default_for`]). Anything
+    /// else must be the one the method computes, or the call is an error.
+    pub feature_perturbation: Option<FeaturePerturbation>,
 
-    /// Whether to compute interaction values (more expensive)
+    /// TreeSHAP interaction values (Lundberg et al. 2020, eqs. 8-9); an error for Kernel SHAP.
     pub compute_interactions: bool,
 
-    /// Random seed for reproducibility
+    /// Seed of the Kernel sampling path (row i uses ChaCha8 stream i); `None` uses
+    /// [`SHAP_DEFAULT_SEED`].
     pub seed: Option<u64>,
 
-    /// Whether to check model additivity (SHAP values should sum to prediction - base)
+    /// Check `base + sum(phi) = f(x)` on the explained rows (default true).
     pub check_additivity: bool,
 }
 
@@ -73,38 +147,30 @@ impl Default for ShapConfig {
     fn default() -> Self {
         Self {
             n_samples: None,
-            feature_perturbation: FeaturePerturbation::Interventional,
+            feature_perturbation: None,
             compute_interactions: false,
-            seed: Some(42),
+            seed: Some(SHAP_DEFAULT_SEED),
             check_additivity: true,
         }
     }
 }
 
-/// Feature perturbation method for SHAP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FeaturePerturbation {
-    /// Interventional: Marginalizes over background distribution
-    Interventional,
-    /// Observational: Conditions on observed feature correlations
-    Observational,
-}
-
 /// Result of SHAP value computation.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShapResult {
-    /// SHAP values matrix (n_samples x n_features)
-    /// Each row contains the contribution of each feature to that sample's prediction
+    /// SHAP values matrix (n_obs x n_features): the contribution of each feature to each
+    /// explained row's prediction.
     #[serde(skip)]
     pub shap_values: Array2<f64>,
 
-    /// Base value (expected prediction over the background dataset)
+    /// TreeSHAP: the mean over trees of `sum_leaf value * cover / root cover` (`E[f]` under the
+    /// trees' training distribution); Kernel SHAP: the mean prediction over the background.
     pub base_value: f64,
 
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
 
-    /// Number of observations
+    /// Number of explained rows
     pub n_obs: usize,
 
     /// Number of features
@@ -113,58 +179,107 @@ pub struct ShapResult {
     /// Mean absolute SHAP values per feature (global importance)
     pub feature_importance: Vec<f64>,
 
-    /// Interaction values (if computed): n_samples x n_features x n_features
+    /// Interaction values (TreeSHAP with `compute_interactions`): one M x M matrix per row.
     #[serde(skip)]
     pub interaction_values: Option<Vec<Array2<f64>>>,
 
-    /// Whether the model passed the additivity check
+    /// Whether `base + sum(phi)` reproduced the predictions; `None` when not checked.
     pub additivity_check_passed: Option<bool>,
 
-    /// Max additivity error (should be close to 0)
+    /// `max_i |base + sum_j phi_ij - f(x_i)|`; `None` when not checked.
     pub max_additivity_error: Option<f64>,
+
+    /// The algorithm that ran.
+    pub method: ShapMethod,
+
+    /// The game whose Shapley values these are.
+    pub feature_perturbation: FeaturePerturbation,
+
+    /// TreeSHAP, or Kernel SHAP with every coalition enumerated (or one feature).
+    pub exact: bool,
+
+    /// Kernel SHAP: coalitions per row (0 for one feature); `None` for TreeSHAP.
+    pub n_coalitions: Option<usize>,
+
+    /// Kernel SHAP sampling seed actually used; `None` when no coalition was sampled.
+    pub seed: Option<u64>,
+
+    /// `f(x_i)` of the explained rows (the additivity target).
+    #[serde(skip)]
+    pub predictions: Vec<f64>,
+
+    /// Warnings about the computation.
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for ShapResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+impl ShapResult {
+    /// The "Method: ..." line of the Display: which algorithm ran on which game, and whether the
+    /// values are exact.
+    fn method_line(&self) -> String {
+        match self.method {
+            ShapMethod::Tree => "Method: TreeSHAP (tree path-dependent; exact)".to_string(),
+            ShapMethod::Kernel => {
+                let n = self.n_coalitions.unwrap_or(0);
+                if self.n_features == 1 {
+                    "Method: Kernel SHAP (interventional; one feature: phi = f(x) - E f, exact)"
+                        .to_string()
+                } else if self.exact {
+                    format!("Method: Kernel SHAP (interventional; all {n} coalitions, exact)")
+                } else {
+                    let total = if self.n_features <= 127 {
+                        ((1u128 << self.n_features) - 2).to_string()
+                    } else {
+                        "2^M - 2".to_string()
+                    };
+                    format!(
+                        "Method: Kernel SHAP (interventional; {n} of {total} coalitions sampled, seed {}; Monte Carlo estimate)",
+                        self.seed.unwrap_or(SHAP_DEFAULT_SEED)
+                    )
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for ShapResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "SHAP Values Summary")?;
         writeln!(f, "===================")?;
+        writeln!(f, "{}", self.method_line())?;
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "Features: {}", self.n_features)?;
         writeln!(f, "Base value: {:.6}", self.base_value)?;
 
-        if let Some(passed) = self.additivity_check_passed {
-            if passed {
-                writeln!(f, "Additivity check: PASSED")?;
-            } else {
-                writeln!(
-                    f,
-                    "Additivity check: FAILED (max error: {:.6})",
-                    self.max_additivity_error.unwrap_or(f64::NAN)
-                )?;
-            }
+        match (self.additivity_check_passed, self.max_additivity_error) {
+            (Some(passed), err) => writeln!(
+                f,
+                "Additivity check: {} (max error: {:.1e})",
+                if passed { "PASSED" } else { "FAILED" },
+                err.unwrap_or(f64::NAN)
+            )?,
+            (None, _) => writeln!(f, "Additivity check: not run")?,
         }
 
         writeln!(f)?;
         writeln!(f, "Feature Importance (mean |SHAP|):")?;
 
-        // Sort features by importance
+        // Sort features by importance (finite: inputs and predictions are validated)
         let mut indexed: Vec<(usize, f64)> = self
             .feature_importance
             .iter()
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(15) {
-            let name = match &self.feature_names {
-                Some(names) => names
-                    .get(*i)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Feature_{}", i)),
-                None => format!("Feature_{}", i),
-            };
-            writeln!(f, "  {:20} {:.6}", name, importance)?;
+            writeln!(f, "  {:20} {:.6}", self.feature_name(*i), importance)?;
         }
 
         if self.n_features > 15 {
@@ -185,23 +300,38 @@ impl std::fmt::Display for ShapResult {
             let min = col.iter().cloned().fold(f64::INFINITY, f64::min);
             let max = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let mean = col.sum() / col.len() as f64;
-
-            let name = match &self.feature_names {
-                Some(names) => names
-                    .get(*i)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Feature_{}", i)),
-                None => format!("Feature_{}", i),
-            };
-            writeln!(f, "  {:20} {:10.4} {:10.4} {:10.4}", name, min, mean, max)?;
+            writeln!(
+                f,
+                "  {:20} {:10.4} {:10.4} {:10.4}",
+                self.feature_name(*i),
+                min,
+                mean,
+                max
+            )?;
         }
 
         if self.interaction_values.is_some() {
             writeln!(f)?;
-            writeln!(f, "Interaction values computed: Yes")?;
+            writeln!(
+                f,
+                "Interaction values computed: Yes (TreeSHAP, {} x {} x {})",
+                self.n_obs, self.n_features, self.n_features
+            )?;
         }
 
-        Ok(())
+        write!(f, "{}", notes_text(self))
+    }
+}
+
+impl ShapResult {
+    fn feature_name(&self, i: usize) -> String {
+        match &self.feature_names {
+            Some(names) => names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("Feature_{}", i)),
+            None => format!("Feature_{}", i),
+        }
     }
 }
 
@@ -242,11 +372,7 @@ impl std::fmt::Display for ShapSummary {
 
         // Create sorted indices by importance
         let mut indices: Vec<usize> = (0..self.feature_names.len()).collect();
-        indices.sort_by(|&a, &b| {
-            self.mean_abs_shap[b]
-                .partial_cmp(&self.mean_abs_shap[a])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indices.sort_by(|&a, &b| self.mean_abs_shap[b].total_cmp(&self.mean_abs_shap[a]));
 
         for (rank, &i) in indices.iter().enumerate().take(20) {
             writeln!(
@@ -269,6 +395,117 @@ impl std::fmt::Display for ShapSummary {
 }
 
 // ============================================================================
+// Input checks and the additivity check (shared by both methods)
+// ============================================================================
+
+fn spec(message: String) -> EconError {
+    EconError::InvalidSpecification { message }
+}
+
+/// The rows to explain: at least one row and one column, every value finite, names matching.
+fn validate_explain_inputs(x: ArrayView2<f64>, feature_names: Option<&[String]>) -> EconResult<()> {
+    if x.nrows() == 0 {
+        return Err(spec("SHAP: x has no rows to explain".into()));
+    }
+    if x.ncols() == 0 {
+        return Err(spec("SHAP needs at least one feature column".into()));
+    }
+    if let Some(((i, j), _)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(spec(format!(
+            "SHAP: x has a non-finite value at row {i}, column {j}"
+        )));
+    }
+    if let Some(names) = feature_names
+        && names.len() != x.ncols()
+    {
+        return Err(spec(format!(
+            "SHAP: {} feature names for {} features",
+            names.len(),
+            x.ncols()
+        )));
+    }
+    Ok(())
+}
+
+/// The Kernel SHAP background: `m` columns, at least one row, every value finite.
+fn validate_background(bg: ArrayView2<f64>, m: usize) -> EconResult<()> {
+    if bg.ncols() != m {
+        return Err(spec(format!(
+            "Kernel SHAP: the background has {} columns but x has {m}",
+            bg.ncols()
+        )));
+    }
+    if bg.nrows() == 0 {
+        return Err(spec("Kernel SHAP: the background has no rows".into()));
+    }
+    if let Some(((i, j), _)) = bg.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(spec(format!(
+            "SHAP: the background has a non-finite value at row {i}, column {j}"
+        )));
+    }
+    Ok(())
+}
+
+/// A `predict_fn` output: one finite value per row.
+fn check_predictions(p: &[f64], rows: usize) -> EconResult<()> {
+    if p.len() != rows {
+        return Err(spec(format!(
+            "Kernel SHAP: predict_fn returned {} values for {rows} rows",
+            p.len()
+        )));
+    }
+    if p.iter().any(|v| !v.is_finite()) {
+        return Err(spec(
+            "Kernel SHAP: predict_fn returned a non-finite value".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `max_i |base + sum_j phi_ij - pred_i|` against `ADDITIVITY_TOLERANCE * max(1, max_i |pred_i|)`:
+/// (passed, max error, failure warning); `(None, None, None)` when the check is off. NaN fails.
+fn additivity(
+    base: f64,
+    phi: &Array2<f64>,
+    pred: &[f64],
+    check: bool,
+) -> (Option<bool>, Option<f64>, Option<String>) {
+    if !check {
+        return (None, None, None);
+    }
+    let mut max_err = 0.0f64;
+    let mut any_nan = false;
+    let mut scale = 1.0f64;
+    for (row, &p) in phi.outer_iter().zip(pred) {
+        let e = (base + row.sum() - p).abs();
+        if e.is_nan() {
+            any_nan = true;
+        } else if e > max_err {
+            max_err = e;
+        }
+        scale = scale.max(p.abs());
+    }
+    if any_nan {
+        max_err = f64::NAN;
+    }
+    let tol = ADDITIVITY_TOLERANCE * scale;
+    let passed = !any_nan && max_err <= tol;
+    let warning = (!passed).then(|| {
+        format!(
+            "SHAP values do not add up to the predictions (max error {max_err:.1e} > tolerance {tol:.1e}); please report this"
+        )
+    });
+    (Some(passed), Some(max_err), warning)
+}
+
+fn mean_abs_columns(phi: &Array2<f64>) -> Vec<f64> {
+    phi.columns()
+        .into_iter()
+        .map(|c| c.mapv(f64::abs).mean().unwrap_or(0.0))
+        .collect()
+}
+
+// ============================================================================
 // TreeSHAP Implementation
 // ============================================================================
 
@@ -287,6 +524,80 @@ pub(crate) struct TreeShapNode {
     pub value: f64,
     /// Number of samples that reach this node
     pub n_samples: usize,
+}
+
+/// Node table checks before any traversal: preorder ids with children after their parent and
+/// every non-root node reached once, leaves without children, split features below
+/// `n_features`, leaf covers >= 1 and every internal cover the sum of its children's, finite leaf
+/// values and non-NaN thresholds. Returns the depth of the deepest leaf (root depth 0). `tree`
+/// numbers the tree in messages.
+fn validate_nodes(nodes: &[TreeShapNode], n_features: usize, tree: usize) -> EconResult<usize> {
+    if nodes.is_empty() {
+        return Err(spec(format!("TreeSHAP: tree {tree} is not fitted")));
+    }
+    let len = nodes.len();
+    let bad = |k: usize, what: String| spec(format!("TreeSHAP: tree {tree}, node {k}: {what}"));
+    let mut depth = crate::resource::try_vec(len, 0usize, "TreeSHAP node depths")?;
+    let mut parents = crate::resource::try_vec(len, 0u8, "TreeSHAP node parents")?;
+    let mut max_depth = 0usize;
+    for (k, n) in nodes.iter().enumerate() {
+        if k > 0 && parents[k] != 1 {
+            return Err(bad(
+                k,
+                "the node is not reached exactly once from the root".into(),
+            ));
+        }
+        if n.feature < 0 {
+            if n.left != -1 || n.right != -1 {
+                return Err(bad(k, "a leaf has children".into()));
+            }
+            if n.n_samples == 0 {
+                return Err(bad(k, "leaf cover is 0".into()));
+            }
+            if !n.value.is_finite() {
+                return Err(bad(k, "leaf value is not finite".into()));
+            }
+            max_depth = max_depth.max(depth[k]);
+            continue;
+        }
+        let f = n.feature as usize;
+        if f >= n_features {
+            return Err(spec(format!(
+                "TreeSHAP: tree {tree} splits on feature {f} but x has {n_features} columns"
+            )));
+        }
+        if n.threshold.is_nan() {
+            return Err(bad(k, "split threshold is NaN".into()));
+        }
+        let child = |c: i32| (c > k as i32 && (c as usize) < len).then_some(c as usize);
+        let (Some(l), Some(r)) = (child(n.left), child(n.right)) else {
+            return Err(bad(
+                k,
+                format!(
+                    "children {} and {} must follow their parent in preorder",
+                    n.left, n.right
+                ),
+            ));
+        };
+        if l == r {
+            return Err(bad(k, "both children are the same node".into()));
+        }
+        let (cl, cr) = (nodes[l].n_samples, nodes[r].n_samples);
+        if cl.checked_add(cr) != Some(n.n_samples) {
+            return Err(bad(
+                k,
+                format!(
+                    "cover {} is not the sum of its children's ({cl} + {cr})",
+                    n.n_samples
+                ),
+            ));
+        }
+        for c in [l, r] {
+            parents[c] = parents[c].saturating_add(1);
+            depth[c] = depth[k] + 1;
+        }
+    }
+    Ok(max_depth)
 }
 
 /// Extract tree structure from a DecisionTree for TreeSHAP.
@@ -587,18 +898,22 @@ pub fn shap_tree_ensemble(
     base_value: f64,
     feature_names: Option<Vec<String>>,
     config: &ShapConfig,
-) -> Result<ShapResult, String> {
+) -> EconResult<ShapResult> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
     let n_trees = trees.len();
 
+    validate_explain_inputs(x, feature_names.as_deref())?;
     if n_trees == 0 {
-        return Err("No trees in ensemble".to_string());
+        return Err(spec("TreeSHAP needs at least one tree".into()));
     }
 
     // Extract tree structures
     let tree_structures: Vec<Vec<TreeShapNode>> =
         trees.iter().map(extract_tree_structure).collect();
+    for (t, nodes) in tree_structures.iter().enumerate() {
+        validate_nodes(nodes, n_features, t)?;
+    }
 
     // Compute SHAP values for each sample
     let mut shap_values = Array2::zeros((n_samples, n_features));
@@ -642,9 +957,9 @@ pub fn shap_tree_ensemble(
             max_err = max_err.max(err);
         }
         // Allow small numerical error
-        (max_err < 0.01, Some(max_err))
+        (Some(max_err < 0.01), Some(max_err))
     } else {
-        (true, None)
+        (None, None)
     };
 
     Ok(ShapResult {
@@ -655,8 +970,15 @@ pub fn shap_tree_ensemble(
         n_features,
         feature_importance,
         interaction_values: None, // TreeSHAP interactions not implemented yet
-        additivity_check_passed: Some(additivity_passed),
+        additivity_check_passed: additivity_passed,
         max_additivity_error: max_error,
+        method: ShapMethod::Tree,
+        feature_perturbation: FeaturePerturbation::TreePathDependent,
+        exact: false,
+        n_coalitions: None,
+        seed: None,
+        predictions: Vec::new(),
+        warnings: Vec::new(),
     })
 }
 
@@ -687,22 +1009,25 @@ pub fn kernel_shap<F>(
     background: ArrayView2<f64>,
     config: &ShapConfig,
     feature_names: Option<Vec<String>>,
-) -> Result<ShapResult, String>
+) -> EconResult<ShapResult>
 where
     F: Fn(ArrayView2<f64>) -> Vec<f64>,
 {
     let n_samples = x.nrows();
     let n_features = x.ncols();
 
-    if background.ncols() != n_features {
-        return Err("Background data must have same number of features as x".to_string());
-    }
+    validate_explain_inputs(x, feature_names.as_deref())?;
+    validate_background(background, n_features)?;
 
     // Number of coalition samples (default: 2 * n_features + 2048)
     let n_coalition_samples = config.n_samples.unwrap_or(2 * n_features + 2048);
+    if n_coalition_samples == 0 {
+        return Err(spec("n_samples must be at least 1".into()));
+    }
 
     // Compute base value (expected prediction over background)
     let background_preds = predict_fn(background.view());
+    check_predictions(&background_preds, background.nrows())?;
     let base_value = background_preds.iter().sum::<f64>() / background_preds.len() as f64;
 
     // Initialize RNG
@@ -711,6 +1036,7 @@ where
     // Compute SHAP values for each sample
     let mut shap_values = Array2::zeros((n_samples, n_features));
     let predictions: Vec<f64> = predict_fn(x);
+    check_predictions(&predictions, n_samples)?;
 
     for i in 0..n_samples {
         let xi = x.row(i);
@@ -721,7 +1047,8 @@ where
             n_coalition_samples,
             base_value,
             &mut rng_state,
-        )?;
+        )
+        .map_err(EconError::Computation)?;
         shap_values.row_mut(i).assign(&phi);
     }
 
@@ -736,20 +1063,12 @@ where
         })
         .collect();
 
-    // Check additivity
-    let (additivity_passed, max_error) = if config.check_additivity {
-        let mut max_err = 0.0f64;
-        for i in 0..n_samples {
-            let shap_sum: f64 = shap_values.row(i).sum();
-            let predicted = predictions[i];
-            let reconstructed = base_value + shap_sum;
-            let err = (predicted - reconstructed).abs();
-            max_err = max_err.max(err);
-        }
-        (max_err < 0.1, Some(max_err)) // Kernel SHAP has more error
-    } else {
-        (true, None)
-    };
+    let (additivity_passed, max_error, additivity_warning) = additivity(
+        base_value,
+        &shap_values,
+        &predictions,
+        config.check_additivity,
+    );
 
     Ok(ShapResult {
         shap_values,
@@ -759,8 +1078,15 @@ where
         n_features,
         feature_importance,
         interaction_values: None,
-        additivity_check_passed: Some(additivity_passed),
+        additivity_check_passed: additivity_passed,
         max_additivity_error: max_error,
+        method: ShapMethod::Kernel,
+        feature_perturbation: FeaturePerturbation::Interventional,
+        exact: false,
+        n_coalitions: Some(n_coalition_samples),
+        seed: Some(config.seed.unwrap_or(SHAP_DEFAULT_SEED)),
+        predictions,
+        warnings: additivity_warning.into_iter().collect(),
     })
 }
 
@@ -1029,7 +1355,7 @@ pub fn shap_values_random_forest(
     x: ArrayView2<f64>,
     trees: &[super::trees::DecisionTree],
     config: &ShapConfig,
-) -> Result<ShapResult, String> {
+) -> EconResult<ShapResult> {
     let base_value = result.predictions.iter().sum::<f64>() / result.predictions.len() as f64;
 
     shap_tree_ensemble(
@@ -1083,7 +1409,7 @@ pub fn shap_summary(result: &ShapResult) -> ShapSummary {
         .enumerate()
         .map(|(i, &v)| (i, v))
         .collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let mut importance_rank = vec![0; n_features];
     for (rank, (idx, _)) in indexed.iter().enumerate() {
@@ -1135,7 +1461,7 @@ pub fn shap_kernel<F>(
     background: ArrayView2<f64>,
     config: &ShapConfig,
     feature_names: Option<Vec<String>>,
-) -> Result<ShapResult, String>
+) -> EconResult<ShapResult>
 where
     F: Fn(ArrayView2<f64>) -> Vec<f64>,
 {
@@ -1170,7 +1496,7 @@ pub fn shap_values_model(
     model: &super::trees::RandomForestModel,
     x: ArrayView2<f64>,
     config: &ShapConfig,
-) -> Result<ShapResult, String> {
+) -> EconResult<ShapResult> {
     shap_tree_ensemble(
         &model.trees,
         &model.predictions,
@@ -1203,7 +1529,7 @@ pub fn run_shap_values_model(
     let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
     let x = design.data;
 
-    shap_values_model(model, x.view(), config).map_err(EconError::Computation)
+    shap_values_model(model, x.view(), config)
 }
 
 /// Compute Kernel SHAP values using a Dataset.
@@ -1243,13 +1569,330 @@ where
         config,
         Some(feature_names),
     )
-    .map_err(EconError::Computation)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use ndarray::{array, s};
+    use p2a_validation::{Case, Check, Tol};
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    /// Exact algorithm against exact enumeration: observed <= 1.5e-14 (plan-time R and rustc checks).
+    const EXACT_SHAP: Tol = Tol::new(1e-10, 1e-12);
+    /// Kernel SHAP sampled at M = 12, default n_samples: 2x the largest of 100 R replications (0.07295).
+    const KERNEL_MC_TOL: f64 = 0.15;
+
+    fn case_matrix(ds: &crate::Dataset, cols: &[&str]) -> Array2<f64> {
+        let mut m = Array2::zeros((ds.nrows(), cols.len()));
+        for (j, c) in cols.iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            m.column_mut(j).assign(&Array1::from_vec(v));
+        }
+        m
+    }
+
+    /// The case's node table (0-based preorder ids; x[feature] <= threshold goes left).
+    fn case_nodes(case: &Case) -> Vec<TreeShapNode> {
+        let (f, t, l, r, v, c) = (
+            case.vector("node_feature"),
+            case.vector("node_threshold"),
+            case.vector("node_left"),
+            case.vector("node_right"),
+            case.vector("node_value"),
+            case.vector("node_cover"),
+        );
+        (0..f.len())
+            .map(|k| TreeShapNode {
+                feature: f[k] as i32,
+                threshold: t[k],
+                left: l[k] as i32,
+                right: r[k] as i32,
+                value: v[k],
+                n_samples: c[k] as usize,
+            })
+            .collect()
+    }
+
+    /// Leaf lookup on the node table (test-side, independent of the library's predictor).
+    fn walk(nodes: &[TreeShapNode], x: ArrayView1<f64>) -> f64 {
+        let mut j = 0usize;
+        while nodes[j].feature >= 0 {
+            j = if x[nodes[j].feature as usize] <= nodes[j].threshold {
+                nodes[j].left
+            } else {
+                nodes[j].right
+            } as usize;
+        }
+        nodes[j].value
+    }
+
+    /// Lundberg et al. (2020) Algorithm 1 (EXPVALUE): E[f(x) | x_S] for the coalition bitmask `mask`.
+    fn expvalue(nodes: &[TreeShapNode], j: usize, x: ArrayView1<f64>, mask: usize) -> f64 {
+        let n = &nodes[j];
+        if n.feature < 0 {
+            return n.value;
+        }
+        let (l, r, f) = (n.left as usize, n.right as usize, n.feature as usize);
+        if (mask >> f) & 1 == 1 {
+            return expvalue(nodes, if x[f] <= n.threshold { l } else { r }, x, mask);
+        }
+        let (cl, cr) = (nodes[l].n_samples as f64, nodes[r].n_samples as f64);
+        (cl * expvalue(nodes, l, x, mask) + cr * expvalue(nodes, r, x, mask)) / (cl + cr)
+    }
+
+    fn fact(k: usize) -> f64 {
+        (1..=k).map(|i| i as f64).product()
+    }
+
+    /// Shapley values of the game `v` (coalition bitmask -> value) by enumeration of all 2^m coalitions.
+    fn bruteforce_shapley(m: usize, v: &dyn Fn(usize) -> f64) -> Vec<f64> {
+        let vals: Vec<f64> = (0..1usize << m).map(v).collect();
+        (0..m)
+            .map(|i| {
+                (0..1usize << m)
+                    .filter(|s| (s >> i) & 1 == 0)
+                    .map(|s| {
+                        let k = s.count_ones() as usize;
+                        fact(k) * fact(m - k - 1) / fact(m) * (vals[s | 1 << i] - vals[s])
+                    })
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// Shapley interaction index (Lundberg et al. 2020, eqs. 8-9) by enumeration.
+    fn bruteforce_interactions(m: usize, v: &dyn Fn(usize) -> f64) -> Array2<f64> {
+        let vals: Vec<f64> = (0..1usize << m).map(v).collect();
+        let phi = bruteforce_shapley(m, v);
+        let mut out = Array2::zeros((m, m));
+        for i in 0..m {
+            for j in 0..m {
+                if i == j {
+                    continue;
+                }
+                out[[i, j]] = (0..1usize << m)
+                    .filter(|s| (s >> i) & 1 == 0 && (s >> j) & 1 == 0)
+                    .map(|s| {
+                        let k = s.count_ones() as usize;
+                        fact(k) * fact(m - k - 2) / (2.0 * fact(m - 1))
+                            * (vals[s | 1 << i | 1 << j] - vals[s | 1 << i] - vals[s | 1 << j]
+                                + vals[s])
+                    })
+                    .sum();
+            }
+        }
+        for i in 0..m {
+            out[[i, i]] = phi[i] - (0..m).filter(|&j| j != i).map(|j| out[[i, j]]).sum::<f64>();
+        }
+        out
+    }
+
+    /// y = 4 x0 x1 + sin(6 x0) + x2^2 + noise; x ~ U(0, 1) (noisy: CLAUDE.md test-data rule).
+    fn random_regression(n: usize, m: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let x: Array2<f64> = Array2::from_shape_fn((n, m), |_| rng.gen_range(0.0..1.0));
+        let y = Array1::from_shape_fn(n, |i| {
+            4.0 * x[[i, 0]] * x[[i, 1]]
+                + (6.0 * x[[i, 0]]).sin()
+                + x[[i, 2]] * x[[i, 2]]
+                + 0.2 * (rng.gen_range(0.0..1.0) - 0.5)
+        });
+        (x, y)
+    }
+
+    fn leaf_expectation(nodes: &[TreeShapNode]) -> f64 {
+        nodes
+            .iter()
+            .filter(|n| n.feature < 0)
+            .map(|n| n.value * n.n_samples as f64)
+            .sum::<f64>()
+            / nodes[0].n_samples as f64
+    }
+
+    #[test]
+    fn test_shap_method_parses_aliases_and_rejects_unknown() {
+        ShapMethod::choices().validate().unwrap();
+        for s in ["tree", "TreeSHAP", "tree-shap", "tree_shap"] {
+            assert_eq!(s.parse::<ShapMethod>().unwrap(), ShapMethod::Tree);
+        }
+        for s in ["kernel", "KernelSHAP", "kernel shap"] {
+            assert_eq!(s.parse::<ShapMethod>().unwrap(), ShapMethod::Kernel);
+        }
+        let e = "permutation".parse::<ShapMethod>().unwrap_err().to_string();
+        assert!(
+            e.contains("unknown method 'permutation'") && e.contains("tree, kernel"),
+            "{e}"
+        );
+        assert_eq!(ShapMethod::Kernel.to_string(), "kernel");
+    }
+
+    #[test]
+    fn test_feature_perturbation_parses_aliases_and_rejects_unknown() {
+        use FeaturePerturbation::*;
+        FeaturePerturbation::choices().validate().unwrap();
+        for (s, v) in [
+            ("interventional", Interventional),
+            ("Marginal", Interventional),
+            ("independent", Interventional),
+            ("tree_path_dependent", TreePathDependent),
+            ("tree-path-dependent", TreePathDependent),
+            ("path_dependent", TreePathDependent),
+            ("observational", Observational),
+            ("conditional", Observational),
+            ("correlation_dependent", Observational),
+        ] {
+            assert_eq!(s.parse::<FeaturePerturbation>().unwrap(), v, "{s}");
+        }
+        let e = "causal"
+            .parse::<FeaturePerturbation>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("unknown feature_perturbation 'causal'")
+                && e.contains("interventional, tree_path_dependent, observational"),
+            "{e}"
+        );
+        assert_eq!(
+            FeaturePerturbation::default_for(ShapMethod::Tree),
+            TreePathDependent
+        );
+        assert_eq!(
+            FeaturePerturbation::default_for(ShapMethod::Kernel),
+            Interventional
+        );
+    }
+
+    #[test]
+    fn test_additivity_not_checked_is_none() {
+        // Before: check_additivity = false reported Some(true) for a check that never ran.
+        let f = |z: ArrayView2<f64>| {
+            z.outer_iter()
+                .map(|r| r[0] + 2.0 * r[1])
+                .collect::<Vec<f64>>()
+        };
+        let mut config = ShapConfig::default();
+        config.check_additivity = false;
+        let r = kernel_shap(
+            f,
+            array![[1.0, 2.0]].view(),
+            array![[0.0, 0.0], [1.0, 1.0]].view(),
+            &config,
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.additivity_check_passed, None);
+        assert_eq!(r.max_additivity_error, None);
+    }
+
+    #[test]
+    fn test_shap_inputs_are_validated() {
+        let f = |z: ArrayView2<f64>| z.outer_iter().map(|r| r.sum()).collect::<Vec<f64>>();
+        let bg = array![[0.0, 0.0], [1.0, 1.0]];
+        let c = ShapConfig::default();
+        let err = |r: EconResult<ShapResult>| r.unwrap_err().to_string();
+        assert!(
+            err(kernel_shap(
+                f,
+                Array2::<f64>::zeros((0, 2)).view(),
+                bg.view(),
+                &c,
+                None
+            ))
+            .contains("no rows to explain")
+        );
+        assert!(
+            err(kernel_shap(
+                f,
+                array![[1.0, f64::NAN]].view(),
+                bg.view(),
+                &c,
+                None
+            ))
+            .contains("row 0, column 1")
+        );
+        assert!(
+            err(kernel_shap(
+                f,
+                array![[1.0, 2.0]].view(),
+                array![[0.0, 0.0, 0.0]].view(),
+                &c,
+                None
+            ))
+            .contains("3 columns but x has 2")
+        );
+        assert!(
+            err(kernel_shap(
+                f,
+                array![[1.0, 2.0]].view(),
+                Array2::<f64>::zeros((0, 2)).view(),
+                &c,
+                None
+            ))
+            .contains("no rows")
+        );
+        assert!(
+            err(kernel_shap(
+                f,
+                array![[1.0, 2.0]].view(),
+                bg.view(),
+                &c,
+                Some(vec!["a".into()])
+            ))
+            .contains("1 feature names for 2 features")
+        );
+        let short = |z: ArrayView2<f64>| vec![0.0; z.nrows().saturating_sub(1)];
+        assert!(
+            err(kernel_shap(
+                short,
+                array![[1.0, 2.0]].view(),
+                bg.view(),
+                &c,
+                None
+            ))
+            .contains("returned 1 values for 2 rows")
+        );
+        let nan = |z: ArrayView2<f64>| vec![f64::NAN; z.nrows()];
+        assert!(
+            err(kernel_shap(
+                nan,
+                array![[1.0, 2.0]].view(),
+                bg.view(),
+                &c,
+                None
+            ))
+            .contains("non-finite value")
+        );
+        let mut c0 = ShapConfig::default();
+        c0.n_samples = Some(0);
+        assert!(
+            err(kernel_shap(
+                f,
+                array![[1.0, 2.0]].view(),
+                bg.view(),
+                &c0,
+                None
+            ))
+            .contains("n_samples must be at least 1")
+        );
+        // Tree path: a model on 3 features explained on 2 columns (before: index out of bounds).
+        let (x, y) = random_regression(40, 3, 5);
+        let model = super::super::trees::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(3),
+            Some(3),
+            Some(2),
+            Some("all"),
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let e = err(shap_values_model(&model, x.slice(s![.., 0..2]), &c));
+        assert!(e.contains("splits on feature 2 but x has 2 columns"), "{e}");
+    }
 
     #[test]
     fn test_shap_kernel_weight() {
@@ -1323,6 +1966,13 @@ mod tests {
             interaction_values: None,
             additivity_check_passed: Some(true),
             max_additivity_error: Some(0.001),
+            method: ShapMethod::Tree,
+            feature_perturbation: FeaturePerturbation::TreePathDependent,
+            exact: true,
+            n_coalitions: None,
+            seed: None,
+            predictions: vec![0.0; 3],
+            warnings: Vec::new(),
         };
 
         let summary = shap_summary(&result);
@@ -1351,10 +2001,7 @@ mod tests {
         let config = ShapConfig::default();
 
         assert!(config.n_samples.is_none());
-        assert_eq!(
-            config.feature_perturbation,
-            FeaturePerturbation::Interventional
-        );
+        assert_eq!(config.feature_perturbation, None);
         assert!(!config.compute_interactions);
         assert!(config.check_additivity);
     }
