@@ -686,7 +686,7 @@ fn hclust_owned(n: usize, mut diss: Vec<f64>, linkage: Linkage) -> EconResult<Hc
                 jm = nn[i];
             }
         }
-        if !(dmin < INF) {
+        if dmin.is_nan() || dmin >= INF {
             return Err(overflow_error(WHAT));
         }
         let (i2, j2) = (im.min(jm), im.max(jm));

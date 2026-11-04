@@ -1421,7 +1421,7 @@ mod tests {
         assert_eq!(result.n_clusters, 2);
         // R: cluster::diana(six)$dc (before: 0)
         assert!(
-            (result.divisive_coefficient - 0.98873252070075102).abs() < 1e-12,
+            (result.divisive_coefficient - 0.988732520700751).abs() < 1e-12,
             "{}",
             result.divisive_coefficient
         );
@@ -1449,7 +1449,7 @@ mod tests {
         assert_eq!(result.n_clusters, 2);
         // R: cluster::agnes(six, method = "average")$ac (before: 0.033 at k = 2)
         assert!(
-            (result.agglomerative_coefficient - 0.98930988162683642).abs() < 1e-12,
+            (result.agglomerative_coefficient - 0.9893098816268364).abs() < 1e-12,
             "{}",
             result.agglomerative_coefficient
         );
@@ -1899,6 +1899,6 @@ mod tests {
         let ratios = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4];
         let counts = [512, 547, 571, 603, 622, 650, 668, 684, 701, 715];
         let au = compute_au_pvalue(&counts, &ratios, 1000).unwrap();
-        assert!((au - 0.77754497438747294).abs() <= 1e-10 * 0.7775, "{au}");
+        assert!((au - 0.7775449743874729).abs() <= 1e-10 * 0.7775, "{au}");
     }
 }
