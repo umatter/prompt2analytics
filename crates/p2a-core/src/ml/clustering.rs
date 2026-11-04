@@ -9,12 +9,13 @@
 //! result.
 
 use super::extract::require_finite;
+use super::hclust::{HclustTree, hclust_euclidean};
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checked_len, checkpoint, current_budget, try_vec};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::prelude::*;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// K-means clustering result.
 #[derive(Debug, Clone)]
@@ -734,35 +735,7 @@ fn dbscan_naive(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResu
     })
 }
 
-/// Linkage method for hierarchical clustering.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Linkage {
-    /// Minimum distance between clusters (nearest neighbor)
-    Single,
-    /// Maximum distance between clusters (furthest neighbor)
-    Complete,
-    /// Average distance between all pairs
-    Average,
-    /// Ward's minimum variance method
-    Ward,
-}
-
-impl std::str::FromStr for Linkage {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "single" => Ok(Linkage::Single),
-            "complete" => Ok(Linkage::Complete),
-            "average" => Ok(Linkage::Average),
-            "ward" => Ok(Linkage::Ward),
-            _ => Err(format!(
-                "Unknown linkage method: {}. Use single, complete, average, or ward",
-                s
-            )),
-        }
-    }
-}
+pub use super::hclust::Linkage;
 
 /// Hierarchical clustering result.
 #[derive(Debug, Clone)]
@@ -820,20 +793,30 @@ impl std::fmt::Display for HierarchicalResult {
     }
 }
 
-/// Run hierarchical agglomerative clustering.
+/// Run hierarchical agglomerative clustering: R's `hclust(dist(data), linkage.r_name())`.
 ///
-/// Uses an optimized nearest-neighbor algorithm with condensed distance matrix
-/// and Lance-Williams recurrence for O(n^2) time and O(n^2) memory.
+/// The tree is built by the shared core [`crate::ml::hclust`] (R's `hclust.f`): all eight R
+/// methods, with [`Linkage::Ward`] = `ward.D2`; centroid and median work on squared Euclidean
+/// distances, as `?hclust` documents, and their heights are those of `hclust(dist(x)^2, m)`.
+/// The full tree is always returned (`linkage_matrix` and `merge_distances` hold all `n - 1`
+/// merges); the labels cut it, numbered by first appearance in observation order (R's
+/// `cutree`, minus 1):
+///
+/// * `n_clusters = Some(k)`: `cutree(k = k)`; as in R, `k` overrides `distance_threshold`;
+/// * `distance_threshold = Some(h)`: `cutree(h = h)`; refused for a tree whose heights decrease
+///   (centroid, median), as R's `cutree` refuses it;
+/// * neither: one cluster.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
-/// * `n_clusters` - Number of clusters to form (if None, returns full dendrogram)
-/// * `linkage` - Linkage method (single, complete, average, ward)
-/// * `distance_threshold` - If set, cut tree at this distance instead of n_clusters
+/// * `n_clusters` - Number of clusters to cut the tree into
+/// * `linkage` - Linkage method (any of the eight R methods)
+/// * `distance_threshold` - If set (and `n_clusters` is not), cut the tree at this height
 ///
-/// Refuses NaN and ±Inf, naming the first non-finite cell, and returns an error when the
-/// distances overflow f64 (as R `hclust`). A row with one missing coordinate is refused:
-/// R's `dist()` would use the coordinates both rows have, which is not implemented here.
+/// Refuses NaN and ±Inf, naming the first non-finite cell. Distances that overflow f64 (also
+/// after squaring, for Ward, centroid and median) are refused in both modes, with or without
+/// `distance_threshold`; rescale the columns. A row with one missing coordinate is refused: R's
+/// `dist()` would use the coordinates both rows have, which is not implemented here.
 ///
 /// # References
 ///
@@ -841,8 +824,6 @@ impl std::fmt::Display for HierarchicalResult {
 ///   Algorithms". The Computer Journal, 26(4), 354-359.
 /// - Lance, G. N. & Williams, W. T. (1967). "A General Theory of Classificatory
 ///   Sorting Strategies: 1. Hierarchical Systems". The Computer Journal, 9(4), 373-380.
-/// - Mullner, D. (2011). "Modern hierarchical, agglomerative clustering algorithms".
-///   arXiv:1109.2378.
 pub fn hierarchical(
     data: ArrayView2<f64>,
     n_clusters: Option<usize>,
@@ -855,434 +836,47 @@ pub fn hierarchical(
         return Err("Cannot cluster empty data".to_string());
     }
     require_finite(&data, "hierarchical clustering")?;
+    if let Some(nc) = n_clusters {
+        if nc == 0 || nc > n {
+            return Err(format!(
+                "n_clusters must be between 1 and {} (n_samples)",
+                n
+            ));
+        }
+    }
+    if let Some(h) = distance_threshold {
+        if !h.is_finite() {
+            return Err(format!("distance_threshold must be finite (got {h})"));
+        }
+    }
     if n == 1 {
         return Ok(HierarchicalResult {
             labels: vec![0],
             n_clusters: 1,
             linkage_matrix: vec![],
             merge_distances: vec![],
-            linkage: format!("{:?}", linkage).to_lowercase(),
+            linkage: linkage.r_name().to_string(),
         });
     }
 
-    let target_clusters = match (n_clusters, distance_threshold) {
-        (Some(nc), _) => {
-            if nc == 0 || nc > n {
-                return Err(format!(
-                    "n_clusters must be between 1 and {} (n_samples)",
-                    n
-                ));
-            }
-            Some(nc)
-        }
-        (None, None) => Some(1),
-        (None, Some(_)) => None,
-    };
-
-    // --- Condensed distance matrix ---
-    // Store pairwise distances in a flat Vec using the condensed index formula.
-    // For Ward's method we store squared Euclidean distances; for others, Euclidean distances.
-    let use_squared = linkage == Linkage::Ward;
-    let what = "hierarchical clustering distance matrix";
-    let condensed_len = checked_len(&[n, n - 1], what).map_err(|e| e.to_string())? / 2;
-    let mut dist = try_vec(condensed_len, 0.0f64, what).map_err(|e| e.to_string())?;
-    for i in 0..n {
-        checkpoint().map_err(|e| e.to_string())?;
-        let row_i = data.row(i);
-        for j in (i + 1)..n {
-            let d = euclidean_distance_squared(&row_i, &data.row(j));
-            let idx = condensed_index(n, i, j);
-            dist[idx] = if use_squared { d } else { d.sqrt() };
-        }
+    let tree = hclust_euclidean(data, linkage, "hierarchical clustering distance matrix")
+        .map_err(|e| e.to_string())?;
+    let cut = match (n_clusters, distance_threshold) {
+        (Some(k), _) => tree.cut_k(k),
+        (None, Some(h)) => tree.cut_height(h),
+        (None, None) => tree.cut_k(1),
     }
-
-    // --- Cluster sizes ---
-    // size[i] = number of original observations in cluster i.
-    // Indices 0..n are original observations (size 1).
-    // We use a Vec indexed by cluster label; new clusters get appended.
-    let mut size = vec![1usize; n];
-
-    // --- Nearest neighbor tracking ---
-    // nn[i] = index of nearest active neighbor of cluster i (among active clusters).
-    // nn_dist[i] = distance to that neighbor.
-    // We also track which clusters are active.
-    let mut active = vec![true; n];
-    let mut nn = vec![0usize; n];
-    let mut nn_dist = vec![f64::INFINITY; n];
-
-    // Initialize nearest neighbors for each cluster.
-    for i in 0..n {
-        checkpoint().map_err(|e| e.to_string())?;
-        for j in (i + 1)..n {
-            let d = ward_or_raw_dist(&dist, n, i, j, &size, linkage);
-            if d < nn_dist[i] {
-                nn_dist[i] = d;
-                nn[i] = j;
-            }
-            if d < nn_dist[j] {
-                nn_dist[j] = d;
-                nn[j] = i;
-            }
-        }
-    }
-
-    // --- Linkage matrix storage ---
-    let mut linkage_matrix: Vec<(usize, usize, f64, usize)> = Vec::with_capacity(n - 1);
-    let mut merge_distances: Vec<f64> = Vec::with_capacity(n - 1);
-
-    // Mapping: original cluster labels (0..n, n, n+1, ...) -> internal labels.
-    // Internal labels grow as new clusters form; we keep track via `label_map`.
-    // label_map[internal] = external label used in the linkage_matrix output.
-    let mut label_map: Vec<usize> = (0..n).collect();
-    let mut next_external_id = n;
-
-    // --- Union-find for final label assignment ---
-    let mut uf_parent: Vec<usize> = (0..n).collect();
-    let mut uf_rank: Vec<usize> = vec![0; n];
-
-    let mut n_active = n;
-
-    // --- Main agglomerative loop ---
-    for _step in 0..(n - 1) {
-        checkpoint().map_err(|e| e.to_string())?;
-        if let Some(target) = target_clusters {
-            if n_active <= target {
-                break;
-            }
-        }
-
-        // Find the global minimum distance pair using the nearest-neighbor cache.
-        // Scan all active clusters to find the one with smallest nn_dist.
-        let mut min_d = f64::INFINITY;
-        let mut c_i = 0;
-        for i in 0..active.len() {
-            if active[i] && nn_dist[i] < min_d {
-                min_d = nn_dist[i];
-                c_i = i;
-            }
-        }
-        let mut c_j = nn[c_i];
-
-        // Validate that nn[c_i] is still active; if not, rescan.
-        if !active[c_j] {
-            // Recompute nn for c_i
-            nn_dist[c_i] = f64::INFINITY;
-            for k in 0..active.len() {
-                if k != c_i && active[k] {
-                    let d = ward_or_raw_dist(&dist, n, c_i, k, &size, linkage);
-                    if d < nn_dist[c_i] {
-                        nn_dist[c_i] = d;
-                        nn[c_i] = k;
-                    }
-                }
-            }
-            // Restart search for global minimum -- this invalidated our choice.
-            // Re-scan for global minimum.
-            min_d = f64::INFINITY;
-            for i in 0..active.len() {
-                if active[i] && nn_dist[i] < min_d {
-                    min_d = nn_dist[i];
-                    c_i = i;
-                }
-            }
-            c_j = nn[c_i];
-            // If still invalid, do a full nn rebuild (rare edge case)
-            if !active[c_j] {
-                rebuild_nn_full(&dist, n, &active, &size, linkage, &mut nn, &mut nn_dist);
-                min_d = f64::INFINITY;
-                for i in 0..active.len() {
-                    if active[i] && nn_dist[i] < min_d {
-                        min_d = nn_dist[i];
-                        c_i = i;
-                    }
-                }
-                c_j = nn[c_i];
-            }
-        }
-
-        // No finite distance between two active clusters: every scan above left its
-        // defaults (c_i = 0, possibly inactive or its own neighbour), and merging them
-        // would record self-merges. Finite input reaches this only when the distances
-        // overflow f64; R hclust stops there too.
-        if !min_d.is_finite() || c_i == c_j || !active[c_i] || !active[c_j] {
-            return Err(
-                "hierarchical clustering: no finite distance remains between the \
-                        clusters still to be merged (the data are too large for f64 \
-                        arithmetic); rescale the columns"
-                    .to_string(),
-            );
-        }
-
-        // Ensure c_i < c_j for canonical ordering in output.
-        if c_i > c_j {
-            std::mem::swap(&mut c_i, &mut c_j);
-        }
-
-        // Compute the reported merge distance (for display / cutree).
-        // For Ward, convert squared distance to the Ward distance metric:
-        //   ward_dist = sqrt(2 * n_i * n_j / (n_i + n_j) * d_sq_euclidean(centroid_i, centroid_j))
-        // The condensed matrix stores squared Euclidean centroid distances already embedded in
-        // the Lance-Williams updates; the stored value equals (n_i + n_j) / (n_i * n_j) * ward_dist^2 / 2.
-        // Actually for Ward we store the quantity that the Lance-Williams formula preserves, which is
-        // the squared Euclidean distance between centroids scaled appropriately.
-        // The conventional Ward merge height is sqrt(2*n_i*n_j/(n_i+n_j)) * ||c_i - c_j||.
-        let merge_dist = if use_squared {
-            let raw = get_condensed(&dist, n, c_i, c_j);
-            let ni = size[c_i] as f64;
-            let nj = size[c_j] as f64;
-            // raw = squared Euclidean distance between centroids
-            // Ward merge distance = sqrt(2 * ni * nj / (ni + nj)) * sqrt(raw)
-            ((2.0 * ni * nj / (ni + nj)) * raw).sqrt()
-        } else {
-            get_condensed(&dist, n, c_i, c_j)
-        };
-
-        // Check distance threshold
-        if let Some(thresh) = distance_threshold {
-            if merge_dist > thresh {
-                break;
-            }
-        }
-
-        let new_size = size[c_i] + size[c_j];
-
-        // Record merge in linkage matrix using external labels
-        linkage_matrix.push((label_map[c_i], label_map[c_j], merge_dist, new_size));
-        merge_distances.push(merge_dist);
-
-        // --- Lance-Williams distance update ---
-        // Update dist[c_i, k] for all active k != c_i, c_j using the recurrence.
-        // After update, c_i becomes the merged cluster; c_j is deactivated.
-        let ni = size[c_i] as f64;
-        let nj = size[c_j] as f64;
-        let d_ij = get_condensed(&dist, n, c_i, c_j);
-
-        for k in 0..active.len() {
-            if !active[k] || k == c_i || k == c_j {
-                continue;
-            }
-            let nk = size[k] as f64;
-            let d_ki = get_condensed(&dist, n, k, c_i);
-            let d_kj = get_condensed(&dist, n, k, c_j);
-
-            // Lance-Williams recurrence (Lance & Williams, 1967)
-            let new_d = match linkage {
-                Linkage::Single => {
-                    // d(k, i+j) = min(d(k,i), d(k,j))
-                    d_ki.min(d_kj)
-                }
-                Linkage::Complete => {
-                    // d(k, i+j) = max(d(k,i), d(k,j))
-                    d_ki.max(d_kj)
-                }
-                Linkage::Average => {
-                    // d(k, i+j) = (n_i * d(k,i) + n_j * d(k,j)) / (n_i + n_j)
-                    (ni * d_ki + nj * d_kj) / (ni + nj)
-                }
-                Linkage::Ward => {
-                    // Lance-Williams for Ward (on squared Euclidean distances):
-                    // d(k, i+j) = ((n_i+n_k)*d(k,i) + (n_j+n_k)*d(k,j) - n_k*d(i,j)) / (n_i+n_j+n_k)
-                    ((ni + nk) * d_ki + (nj + nk) * d_kj - nk * d_ij) / (ni + nj + nk)
-                }
-            };
-
-            set_condensed(&mut dist, n, c_i, k, new_d);
-        }
-
-        // Update cluster size and label
-        size[c_i] = new_size;
-        label_map[c_i] = next_external_id;
-        next_external_id += 1;
-
-        // Deactivate c_j
-        active[c_j] = false;
-        nn_dist[c_j] = f64::INFINITY;
-        n_active -= 1;
-
-        // Union-find: merge original observations.
-        // We track which original observations belong to c_i and c_j via the union-find.
-        // For the union-find, we just need a representative from each.
-        // c_i and c_j are internal indices (0..n), so we use them directly.
-        uf_union(&mut uf_parent, &mut uf_rank, c_i, c_j);
-
-        // --- Update nearest neighbors ---
-        // For the merged cluster c_i, recompute its nearest neighbor from scratch.
-        nn_dist[c_i] = f64::INFINITY;
-        for k in 0..active.len() {
-            if k != c_i && active[k] {
-                let d = ward_or_raw_dist(&dist, n, c_i, k, &size, linkage);
-                if d < nn_dist[c_i] {
-                    nn_dist[c_i] = d;
-                    nn[c_i] = k;
-                }
-                // Update k's nearest neighbor:
-                // - If k's NN was c_j (now deactivated) or c_i (distances changed),
-                //   we must do a full rescan for k.
-                // - Otherwise, just check if the merged cluster c_i is now closer.
-                if nn[k] == c_j || nn[k] == c_i {
-                    // NN invalidated — full rescan required
-                    nn_dist[k] = f64::INFINITY;
-                    for m in 0..active.len() {
-                        if m != k && active[m] {
-                            let dm = ward_or_raw_dist(&dist, n, k, m, &size, linkage);
-                            if dm < nn_dist[k] {
-                                nn_dist[k] = dm;
-                                nn[k] = m;
-                            }
-                        }
-                    }
-                } else if d < nn_dist[k] {
-                    // Merged cluster is closer than current NN — just update
-                    nn_dist[k] = d;
-                    nn[k] = c_i;
-                }
-            }
-        }
-    }
-
-    // --- Assign final labels using union-find ---
-    let mut labels = vec![0usize; n];
-    // Find roots
-    for i in 0..n {
-        labels[i] = uf_find(&mut uf_parent, i);
-    }
-    // Map roots to consecutive 0-based labels
-    let mut root_to_label: HashMap<usize, usize> = HashMap::new();
-    let mut next_label = 0;
-    for i in 0..n {
-        let root = labels[i];
-        if !root_to_label.contains_key(&root) {
-            root_to_label.insert(root, next_label);
-            next_label += 1;
-        }
-        labels[i] = root_to_label[&root];
-    }
+    .map_err(|e| e.to_string())?;
+    let n_found = cut.iter().copied().max().unwrap_or(0);
+    let labels = cut.into_iter().map(|l| l - 1).collect();
 
     Ok(HierarchicalResult {
         labels,
-        n_clusters: root_to_label.len(),
-        linkage_matrix,
-        merge_distances,
-        linkage: format!("{:?}", linkage).to_lowercase(),
+        n_clusters: n_found,
+        linkage_matrix: tree.scipy_linkage(),
+        merge_distances: tree.height().to_vec(),
+        linkage: linkage.r_name().to_string(),
     })
-}
-
-// =============================================================================
-// Condensed distance matrix helpers
-// =============================================================================
-
-/// Compute condensed index for pair (i, j) where i < j in an n-element matrix.
-/// Formula: idx = n*(n-1)/2 - (n-i)*(n-i-1)/2 + j - i - 1
-#[inline(always)]
-fn condensed_index(n: usize, i: usize, j: usize) -> usize {
-    debug_assert!(i < j && j < n);
-    let ni = n - i;
-    n * (n - 1) / 2 - ni * (ni - 1) / 2 + j - i - 1
-}
-
-/// Get distance from condensed matrix, handling i == j and i > j.
-#[inline(always)]
-fn get_condensed(dist: &[f64], n: usize, i: usize, j: usize) -> f64 {
-    if i == j {
-        0.0
-    } else if i < j {
-        dist[condensed_index(n, i, j)]
-    } else {
-        dist[condensed_index(n, j, i)]
-    }
-}
-
-/// Set distance in condensed matrix, handling i > j.
-#[inline(always)]
-fn set_condensed(dist: &mut [f64], n: usize, i: usize, j: usize, val: f64) {
-    if i < j {
-        dist[condensed_index(n, i, j)] = val;
-    } else if j < i {
-        dist[condensed_index(n, j, i)] = val;
-    }
-}
-
-/// Get the "effective" distance for nearest-neighbor comparison.
-/// For Ward's method (squared distances), we convert to the Ward merge metric
-/// for comparison: sqrt(2*ni*nj/(ni+nj) * d_sq).
-/// For other linkages, the raw stored value is the distance.
-#[inline]
-fn ward_or_raw_dist(
-    dist: &[f64],
-    n: usize,
-    i: usize,
-    j: usize,
-    size: &[usize],
-    linkage: Linkage,
-) -> f64 {
-    let raw = get_condensed(dist, n, i, j);
-    if linkage == Linkage::Ward {
-        let ni = size[i] as f64;
-        let nj = size[j] as f64;
-        // Ward merge distance = sqrt(2 * ni * nj / (ni + nj) * raw)
-        // where raw = squared Euclidean distance between centroids
-        ((2.0 * ni * nj / (ni + nj)) * raw).sqrt()
-    } else {
-        raw
-    }
-}
-
-/// Full rebuild of nearest-neighbor arrays (fallback for edge cases).
-fn rebuild_nn_full(
-    dist: &[f64],
-    n: usize,
-    active: &[bool],
-    size: &[usize],
-    linkage: Linkage,
-    nn: &mut [usize],
-    nn_dist: &mut [f64],
-) {
-    for i in 0..active.len() {
-        if !active[i] {
-            nn_dist[i] = f64::INFINITY;
-            continue;
-        }
-        nn_dist[i] = f64::INFINITY;
-        for j in 0..active.len() {
-            if j != i && active[j] {
-                let d = ward_or_raw_dist(dist, n, i, j, size, linkage);
-                if d < nn_dist[i] {
-                    nn_dist[i] = d;
-                    nn[i] = j;
-                }
-            }
-        }
-    }
-}
-
-// =============================================================================
-// Union-find helpers
-// =============================================================================
-
-/// Find with path compression.
-fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
-    while parent[x] != x {
-        parent[x] = parent[parent[x]]; // path splitting
-        x = parent[x];
-    }
-    x
-}
-
-/// Union by rank.
-fn uf_union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
-    let px = uf_find(parent, x);
-    let py = uf_find(parent, y);
-    if px == py {
-        return;
-    }
-    if rank[px] < rank[py] {
-        parent[px] = py;
-    } else if rank[px] > rank[py] {
-        parent[py] = px;
-    } else {
-        parent[py] = px;
-        rank[px] += 1;
-    }
 }
 
 /// Squared Euclidean distance between two vectors.
@@ -1364,7 +958,7 @@ impl std::fmt::Display for CutreeResult {
     }
 }
 
-/// Cut a hierarchical clustering tree into groups.
+/// Cut a hierarchical clustering tree into groups: R's `cutree`.
 ///
 /// Given a `HierarchicalResult` from `hierarchical()`, this function divides
 /// the tree by specifying the desired number of groups (`k`) or the cut height (`h`).
@@ -1375,12 +969,11 @@ impl std::fmt::Display for CutreeResult {
 /// * `h` - Height at which to cut the tree
 ///
 /// # Returns
-/// * `CutreeResult` containing cluster assignments
+/// * `CutreeResult` containing cluster assignments (1-based, numbered by first appearance in
+///   observation order, as R)
 ///
-/// # Algorithm
-///
-/// The function traverses the linkage matrix (merge history) to reconstruct
-/// which observations belong to which cluster at the desired cut level.
+/// The linkage matrix must hold the complete tree (`n - 1` merges); a cut by `h` is refused
+/// for a tree whose heights decrease (centroid, median), as R's `cutree` refuses it.
 ///
 /// # References
 ///
@@ -1393,43 +986,30 @@ pub fn cutree(
     if k.is_none() && h.is_none() {
         return Err("Must specify either k (number of clusters) or h (cut height)".to_string());
     }
-
-    // Get number of original observations
     let n = hclust.labels.len();
-
     if n == 0 {
         return Err("Empty clustering result".to_string());
     }
-
-    // If k is specified, use it; otherwise use h to determine k
-    let target_k = if let Some(k_val) = k {
-        if k_val == 0 || k_val > n {
-            return Err(format!(
-                "k must be between 1 and {} (number of observations)",
-                n
-            ));
+    if let Some(k_val) = k {
+        check_cut_k(k_val, n)?;
+    }
+    let (labels, target_k) = if n == 1 {
+        if let Some(h_val) = h.filter(|_| k.is_none()) {
+            if !h_val.is_finite() {
+                return Err(format!("the cut height must be finite (got {h_val})"));
+            }
         }
-        k_val
-    } else if let Some(h_val) = h {
-        // Determine k from height: count how many merges happen below height h
-        // n - (number of merges at or below h) = k
-        let merges_below_h = hclust
-            .merge_distances
-            .iter()
-            .filter(|&&d| d <= h_val)
-            .count();
-        let computed_k = n - merges_below_h;
-        if computed_k == 0 {
-            n // All merges above h means n clusters
-        } else {
-            computed_k
-        }
+        (vec![1], 1)
     } else {
-        unreachable!()
+        let tree = complete_tree(hclust)?;
+        let target_k = match k {
+            Some(k_val) => k_val,
+            None => tree
+                .k_for_height(h.unwrap_or(f64::NAN))
+                .map_err(|e| e.to_string())?,
+        };
+        (tree.cut_k(target_k).map_err(|e| e.to_string())?, target_k)
     };
-
-    // Cut the tree to get target_k clusters
-    let labels = cut_at_k(hclust, target_k, n)?;
 
     // Determine cut height if cutting by k
     let cut_height = if k.is_some() && !hclust.merge_distances.is_empty() {
@@ -1455,6 +1035,30 @@ pub fn cutree(
     })
 }
 
+fn check_cut_k(k: usize, n: usize) -> Result<(), String> {
+    if k == 0 || k > n {
+        return Err(format!(
+            "k must be between 1 and {} (number of observations)",
+            n
+        ));
+    }
+    Ok(())
+}
+
+/// The tree of a `HierarchicalResult`; refuses a linkage matrix without all `n - 1` merges.
+fn complete_tree(hclust: &HierarchicalResult) -> Result<HclustTree, String> {
+    let n = hclust.labels.len();
+    let need = n.saturating_sub(1);
+    if hclust.linkage_matrix.len() != need {
+        return Err(format!(
+            "cutree needs the complete tree: the linkage matrix has {} merges, {need} merges are \
+             needed for {n} observations",
+            hclust.linkage_matrix.len()
+        ));
+    }
+    HclustTree::from_scipy_linkage(n, &hclust.linkage_matrix).map_err(|e| e.to_string())
+}
+
 /// Cut a hierarchical clustering tree at multiple k values.
 ///
 /// # Arguments
@@ -1472,18 +1076,19 @@ pub fn cutree_multiple_k(
     }
 
     let n = hclust.labels.len();
-    let mut labels_matrix: Vec<Vec<usize>> = Vec::with_capacity(k_values.len());
-
-    for &k in k_values {
-        if k == 0 || k > n {
-            return Err(format!(
-                "k must be between 1 and {} (number of observations)",
-                n
-            ));
-        }
-        let labels = cut_at_k(hclust, k, n)?;
-        labels_matrix.push(labels);
+    if n == 0 {
+        return Err("Empty clustering result".to_string());
     }
+    for &k in k_values {
+        check_cut_k(k, n)?;
+    }
+    let labels_matrix: Vec<Vec<usize>> = if n == 1 {
+        vec![vec![1]; k_values.len()]
+    } else {
+        complete_tree(hclust)?
+            .cut_ks(k_values)
+            .map_err(|e| e.to_string())?
+    };
 
     // Use first k's labels as the primary result
     let first_labels = labels_matrix[0].clone();
@@ -1497,108 +1102,6 @@ pub fn cutree_multiple_k(
         labels_matrix: Some(labels_matrix),
         k_values: Some(k_values.to_vec()),
     })
-}
-
-/// Internal function to cut tree at a specific k.
-fn cut_at_k(hclust: &HierarchicalResult, target_k: usize, n: usize) -> Result<Vec<usize>, String> {
-    if target_k == n {
-        // Each point is its own cluster
-        return Ok((1..=n).collect());
-    }
-
-    if target_k == 1 {
-        // All points in one cluster
-        return Ok(vec![1; n]);
-    }
-
-    // Build union-find structure by replaying merges up to the point
-    // where we have target_k clusters
-    let mut parent: Vec<usize> = (0..n).collect();
-    let mut rank: Vec<usize> = vec![0; n];
-
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        if parent[x] != x {
-            parent[x] = find(parent, parent[x]);
-        }
-        parent[x]
-    }
-
-    fn union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
-        let px = find(parent, x);
-        let py = find(parent, y);
-        if px == py {
-            return;
-        }
-        if rank[px] < rank[py] {
-            parent[px] = py;
-        } else if rank[px] > rank[py] {
-            parent[py] = px;
-        } else {
-            parent[py] = px;
-            rank[px] += 1;
-        }
-    }
-
-    // We need to map cluster IDs in linkage_matrix back to original observations
-    // The linkage matrix uses IDs: 0..n are original observations,
-    // n, n+1, ... are newly formed clusters from merges
-
-    // Map: cluster_id -> set of original observation indices
-    let mut cluster_members: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..n {
-        cluster_members.insert(i, vec![i]);
-    }
-
-    // Perform merges until we have target_k clusters
-    let num_merges_needed = n - target_k;
-
-    for (merge_idx, &(c1, c2, _dist, _size)) in hclust.linkage_matrix.iter().enumerate() {
-        if merge_idx >= num_merges_needed {
-            break;
-        }
-
-        // Get members of c1 and c2
-        let members1 = cluster_members.remove(&c1).unwrap_or_default();
-        let members2 = cluster_members.remove(&c2).unwrap_or_default();
-
-        // Union in union-find
-        if !members1.is_empty() && !members2.is_empty() {
-            union(&mut parent, &mut rank, members1[0], members2[0]);
-            // Union all members
-            for &m in &members1[1..] {
-                union(&mut parent, &mut rank, members1[0], m);
-            }
-            for &m in &members2 {
-                union(&mut parent, &mut rank, members1[0], m);
-            }
-        }
-
-        // New cluster ID
-        let new_id = n + merge_idx;
-        let mut new_members = members1;
-        new_members.extend(members2);
-        cluster_members.insert(new_id, new_members);
-    }
-
-    // Extract final cluster assignments
-    // Find root for each observation
-    let mut labels = vec![0usize; n];
-    for i in 0..n {
-        labels[i] = find(&mut parent, i);
-    }
-
-    // Renumber clusters to be 1-indexed consecutive integers
-    let unique_roots: HashSet<usize> = labels.iter().cloned().collect();
-    let mut root_to_label: HashMap<usize, usize> = HashMap::new();
-    for (idx, &root) in unique_roots.iter().enumerate() {
-        root_to_label.insert(root, idx + 1); // 1-indexed
-    }
-
-    for label in &mut labels {
-        *label = root_to_label[label];
-    }
-
-    Ok(labels)
 }
 
 /// Convenience function to run cutree.
@@ -2333,6 +1836,149 @@ mod tests {
         assert!(display.contains("Number of clusters: 2"));
     }
 
+    use crate::ml::hclust::{HclustTree, test_util::*};
+    use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_validate_hierarchical_linkages() {
+        // ML-25: ml::hierarchical with Linkage::Ward is hclust(dist(x), "ward.D2"); before: heights inflated
+        // and the merge order differs. hclust_methods, validation/r/cases/ml_hierarchical.R.
+        let (case, ds) = crate::test_support::load_case("hclust_methods");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let g = matrix(&case_frame(&case, "hclust_ties.csv"), &["u", "v"]);
+        let mut c = Check::new(&case);
+        for (l, tag) in METHODS {
+            for (data, pre, n) in [(&x, "", 60usize), (&g, "ties_", 40usize)] {
+                let r = hierarchical(data.view(), None, l, None).unwrap();
+                let tree = HclustTree::from_scipy_linkage(n, &r.linkage_matrix).unwrap();
+                c.vector(
+                    &format!("{pre}{tag}_merge"),
+                    &merge_colmajor(tree.merge()),
+                    Tol::exact(),
+                )
+                .vector(
+                    &format!("{pre}{tag}_height"),
+                    &r.merge_distances,
+                    Tol::coef(n),
+                );
+                assert_eq!(r.linkage, l.r_name());
+            }
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_cutree3() {
+        // ML-83 / ML-14 (ml::cutree): R numbers groups by first appearance; before: HashSet order, and Ward wrong.
+        let (case, ds) = crate::test_support::load_case("hclust_methods");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let mut c = Check::new(&case);
+        for (l, tag) in METHODS {
+            let full = hierarchical(x.view(), Some(1), l, None).unwrap();
+            c.vector(
+                &format!("{tag}_cutree3"),
+                &as_f64(&cutree(&full, Some(3), None).unwrap().labels),
+                Tol::exact(),
+            );
+            c.vector(
+                &format!("{tag}_cutree3"),
+                &plus_one(&hierarchical(x.view(), Some(3), l, None).unwrap().labels),
+                Tol::exact(),
+            );
+        }
+        let avg = hierarchical(x.view(), None, Linkage::Average, None).unwrap();
+        let multi = cutree_multiple_k(&avg, &[2, 4, 6]).unwrap();
+        c.vector(
+            "average_cutree_k246",
+            &as_f64(&multi.labels_matrix.unwrap().concat()),
+            Tol::exact(),
+        );
+        let h = cutree(&avg, None, Some(1.5)).unwrap();
+        c.vector("average_cutree_h15", &as_f64(&h.labels), Tol::exact())
+            .scalar("average_k_h15", h.k as f64, Tol::exact());
+        c.vector(
+            "average_cutree_h15",
+            &plus_one(
+                &hierarchical(x.view(), None, Linkage::Average, Some(1.5))
+                    .unwrap()
+                    .labels,
+            ),
+            Tol::exact(),
+        );
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_cutree_labels_deterministic_first_appearance() {
+        // ML-83: three calls gave [3,3,..], [2,2,..], [2,2,..] before
+        let (_, ds) = crate::test_support::load_case("hclust_methods");
+        let h = hierarchical(
+            matrix(ds.df(), &["a", "b", "c"]).view(),
+            Some(1),
+            Linkage::Ward,
+            None,
+        )
+        .unwrap();
+        let first = cutree(&h, Some(3), None).unwrap().labels;
+        assert_eq!(first[0], 1);
+        for _ in 0..8 {
+            assert_eq!(cutree(&h, Some(3), None).unwrap().labels, first);
+        }
+    }
+
+    #[test]
+    fn test_cutree_refuses_a_truncated_tree() {
+        // ML-82: a HierarchicalResult whose linkage matrix lacks merges (built by hand, or by old code) is refused
+        let x = array![[0.0], [1.0], [5.0], [6.0], [20.0]];
+        let mut h = hierarchical(x.view(), Some(1), Linkage::Average, None).unwrap();
+        h.linkage_matrix.truncate(2);
+        let e = cutree(&h, Some(2), None).unwrap_err();
+        assert!(e.contains("4 merges"), "{e}");
+        // always the full tree
+        assert_eq!(
+            hierarchical(x.view(), Some(5), Linkage::Average, None)
+                .unwrap()
+                .linkage_matrix
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn test_hierarchical_height_cut_refuses_inversions() {
+        let x = array![[0.0, 0.0], [2.0, 0.0], [1.0, 1.8]];
+        assert!(
+            hierarchical(x.view(), None, Linkage::Centroid, Some(1.0))
+                .unwrap_err()
+                .contains("not sorted")
+        );
+        assert!(
+            hierarchical(x.view(), None, Linkage::Single, Some(f64::NAN))
+                .unwrap_err()
+                .starts_with("distance_threshold")
+        );
+    }
+
+    #[test]
+    fn test_hierarchical_threshold_mode_refuses_overflow_like_k_mode() {
+        // T2-WP17 leftover: with distance_threshold, overflowing distances gave an error or a
+        // partition depending on where the overflow happened (condensed distance vs Ward height). One
+        // rule now: the tree needs every dissimilarity finite, in both modes and for every linkage.
+        let big = array![[0.0, 0.0], [1e200, 0.0], [2e200, 0.0]];
+        for l in [Linkage::Single, Linkage::Ward] {
+            let e = hierarchical(big.view(), None, l, Some(10.0)).unwrap_err();
+            assert!(e.contains("no finite distance remains"), "{l:?}: {e}");
+            assert_eq!(e, hierarchical(big.view(), Some(2), l, None).unwrap_err());
+        }
+        // finite distances whose squares overflow: Ward (internally squared) is refused as well
+        let wide = array![[0.0], [1e155], [3e155]];
+        assert!(
+            hierarchical(wide.view(), None, Linkage::Ward, Some(10.0))
+                .unwrap_err()
+                .contains("no finite distance remains")
+        );
+    }
+
     // ========================================================================
     // R-vs-Rust Validation Tests (Phase 8)
     // ========================================================================
@@ -2497,87 +2143,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_hierarchical_single_linkage_vs_r() {
-        // R reference:
-        // hclust(dist(data), method="single")
-        let data = create_validation_cluster_data();
-        let result = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
-
-        // n_clusters is the target, linkage_matrix has n-1 merges
-        assert_eq!(
-            result.linkage_matrix.len(),
-            14,
-            "Should have n-1 = 14 merges"
-        );
-        assert_eq!(result.labels.len(), 15);
-        assert_eq!(result.merge_distances.len(), 14);
-
-        // Heights should be increasing for single linkage
-        for i in 1..result.merge_distances.len() {
-            assert!(
-                result.merge_distances[i] >= result.merge_distances[i - 1] - 1e-10,
-                "Heights should be monotonically increasing"
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_hierarchical_complete_linkage_vs_r() {
-        // R reference:
-        // hclust(dist(data), method="complete")
-        let data = create_validation_cluster_data();
-        let result = hierarchical(data.view(), Some(1), Linkage::Complete, None).unwrap();
-
-        // linkage_matrix should have n-1 merges
-        assert_eq!(result.linkage_matrix.len(), 14);
-
-        // Heights should be increasing
-        for i in 1..result.merge_distances.len() {
-            assert!(
-                result.merge_distances[i] >= result.merge_distances[i - 1] - 1e-10,
-                "Heights should increase in complete linkage"
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_hierarchical_ward_vs_r() {
-        // R reference:
-        // hclust(dist(data), method="ward.D2")
-        let data = create_validation_cluster_data();
-        let result = hierarchical(data.view(), Some(1), Linkage::Ward, None).unwrap();
-
-        assert_eq!(result.linkage_matrix.len(), 14);
-        assert_eq!(result.linkage, "ward");
-
-        // Heights should increase
-        for i in 1..result.merge_distances.len() {
-            assert!(
-                result.merge_distances[i] >= result.merge_distances[i - 1] - 1e-10,
-                "Ward heights should increase"
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_cutree_vs_r() {
-        // R reference:
-        // hc <- hclust(dist(data))
-        // cutree(hc, k=3)
-        let data = create_validation_cluster_data();
-        let hclust = hierarchical(data.view(), Some(1), Linkage::Ward, None).unwrap();
-        let result = cutree(&hclust, Some(3), None).unwrap();
-
-        assert_eq!(result.k, 3);
-        assert_eq!(result.n, 15);
-        assert_eq!(result.labels.len(), 15);
-
-        // Should produce 3 distinct cluster labels
-        let unique_labels: HashSet<_> = result.labels.iter().collect();
-        assert_eq!(unique_labels.len(), 3, "Should have 3 distinct clusters");
-    }
-
-    #[test]
     fn test_validate_kmeans_inertia_decreases() {
         // Adding more clusters should decrease inertia
         let data = create_validation_cluster_data();
@@ -2616,7 +2181,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_hierarchical_linkage_heights() {
+    fn test_hierarchical_complete_max_height_at_least_single() {
         // Different linkages should produce different merge heights
         let data = create_validation_cluster_data();
 

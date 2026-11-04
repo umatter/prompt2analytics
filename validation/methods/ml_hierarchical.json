@@ -34,6 +34,49 @@
       "tolerance": "merge, order, labels exact; heights Tol::coef(n) (n = 40-60: 1e-6 relative)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_hierarchical",
+      "name": "ml::hierarchical (MCP ml_hierarchical, CLI ml hierarchical)",
+      "category": "ml",
+      "reference": "stats::hclust(dist(x), method)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_hierarchical_linkages"
+      ],
+      "quantities": [
+        "linkage matrix",
+        "merge distances"
+      ],
+      "tolerance": "as ml_hclust",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_cutree",
+      "name": "ml::cutree, cutree_multiple_k (MCP ml_cutree)",
+      "category": "ml",
+      "reference": "stats::cutree",
+      "doc": "validation/ml/cutree.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_cutree3",
+        "p2a-core::ml::clustering::tests::test_validate_cutree_labels_deterministic_first_appearance"
+      ],
+      "quantities": [
+        "labels k = 3 (8 linkages)",
+        "labels k = 2, 4, 6",
+        "labels h = 1.5",
+        "k(h)"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
