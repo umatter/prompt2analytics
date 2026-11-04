@@ -1297,58 +1297,61 @@ fn validate_inputs(data: &[f64], config: &GarchConfig) -> EconResult<()> {
     Ok(())
 }
 
-/// Forecast conditional variance and returns using a fitted GARCH model.
+/// Forecast conditional variances, volatilities and returns from a fitted GARCH model.
 ///
-/// # Arguments
-///
-/// * `result` - Fitted GARCH result
-/// * `h` - Forecast horizon
+/// sigma^2_{T+k} = omega + sum_{i=1..p} alpha_i E[e^2_{T+k-i}] + sum_{j=1..q} beta_j sigma^2_{T+k-j},
+/// with E[e^2_s] = e_s^2 = z_s^2 h_s and sigma^2_s = h_s for s <= T, and E[e^2_s] = sigma^2_s for
+/// s > T. For GARCH(1,1) this is uncond + (alpha + beta)^(k-1) (sigma^2_{T+1} - uncond). The
+/// return forecast is mu.
 ///
 /// # Returns
 ///
 /// Tuple of (forecast variances, forecast volatilities, forecast returns), or
-/// [`EconError::ResourceLimit`] when the horizon is too large to allocate.
+/// [`EconError::ResourceLimit`] when the horizon is too large to allocate, or
+/// [`EconError::InvalidSpecification`] for a result without the conditional variances and
+/// standardised residuals of its fit (they are not serialised).
 pub fn garch_forecast(
     result: &GarchResult,
     h: usize,
 ) -> EconResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     const WHAT: &str = "the GARCH forecast horizon";
-
-    let alpha_sum: f64 = result.alpha.iter().sum();
-    let beta_sum: f64 = result.beta.iter().sum();
-    let persistence = alpha_sum + beta_sum;
-
-    // Get last conditional variance and residual
-    let last_var = *result
-        .conditional_variance
-        .last()
-        .unwrap_or(&result.unconditional_variance);
-    let last_resid_sq = result
-        .std_residuals
-        .last()
-        .map(|z| z.powi(2) * last_var)
-        .unwrap_or(result.unconditional_variance);
+    let n = result.conditional_variance.len();
+    let (p, q) = (result.alpha.len(), result.beta.len());
+    if n == 0 || result.std_residuals.len() != n || n < p.max(q) {
+        return Err(EconError::InvalidSpecification {
+            message: "garch_forecast needs the conditional variances and standardised residuals of the fit; a GarchResult read back from JSON does not carry them (they are not serialised), so refit the model".to_string(),
+        });
+    }
 
     let mut forecast_var = try_with_capacity(h, WHAT)?;
     let mut forecast_vol = try_with_capacity(h, WHAT)?;
     let mut forecast_ret = try_with_capacity(h, WHAT)?;
 
-    let uncond_var = result.unconditional_variance;
-
-    for i in 0..h {
-        // Multi-step ahead variance forecast
-        // For GARCH(1,1): E[σ²_{t+h}] = σ² + (α+β)^(h-1) * (σ²_{t+1} - σ²)
-        let var_h = if i == 0 {
-            result.omega
-                + result.alpha.iter().sum::<f64>() * last_resid_sq
-                + result.beta.iter().sum::<f64>() * last_var
-        } else {
-            uncond_var + persistence.powi(i as i32) * (forecast_var[i - 1] - uncond_var)
-        };
-
-        forecast_var.push(var_h);
-        forecast_vol.push(var_h.sqrt());
+    // Last p squared residuals and last q variances, oldest first.
+    let mut e2_hist: Vec<f64> = (n - p..n)
+        .map(|t| result.std_residuals[t] * result.std_residuals[t] * result.conditional_variance[t])
+        .collect();
+    let mut h_hist: Vec<f64> = result.conditional_variance[n - q..].to_vec();
+    for _ in 0..h {
+        // O(p + q) per step: no budget check, as for Holt-Winters
+        let mut var = result.omega;
+        for (i, a) in result.alpha.iter().enumerate() {
+            var += a * e2_hist[p - 1 - i];
+        }
+        for (j, b) in result.beta.iter().enumerate() {
+            var += b * h_hist[q - 1 - j];
+        }
+        forecast_var.push(var);
+        forecast_vol.push(var.sqrt());
         forecast_ret.push(result.mu);
+        if p > 0 {
+            e2_hist.remove(0);
+            e2_hist.push(var);
+        }
+        if q > 0 {
+            h_hist.remove(0);
+            h_hist.push(var);
+        }
     }
 
     Ok((forecast_var, forecast_vol, forecast_ret))
@@ -1959,6 +1962,107 @@ mod tests {
         assert_eq!(a.estimates(), b.estimates());
         assert_eq!(a.log_likelihood.to_bits(), b.log_likelihood.to_bits());
         assert_eq!(a.distribution, GarchDistribution::Normal);
+    }
+
+    /// A GARCH result with the given coefficients whose last conditional variances and squared residuals
+    /// are `h_last` and `e2_last` (oldest first, equal lengths); only these enter the forecast.
+    fn toy(
+        omega: f64,
+        alpha: Vec<f64>,
+        beta: Vec<f64>,
+        h_last: &[f64],
+        e2_last: &[f64],
+    ) -> GarchResult {
+        let mut r = fit(
+            &generate_garch_data(200, 0.0001, 0.1, 0.8),
+            alpha.len(),
+            beta.len(),
+            true,
+            "norm",
+        );
+        r.omega = omega;
+        r.alpha = alpha;
+        r.beta = beta;
+        r.mu = 0.0;
+        let (n, k) = (r.conditional_variance.len(), h_last.len());
+        for i in 0..k {
+            r.conditional_variance[n - k + i] = h_last[i];
+            r.std_residuals[n - k + i] = (e2_last[i] / h_last[i]).sqrt();
+        }
+        r
+    }
+
+    /// TS-21 hand cases (finding; extra.R). Fails before: the (1,1) path applied persistence^i to the
+    /// previous forecast ([3.7, 3.43, 2.9683, 2.4348907, ..]), and the (2,1) one-step forecast lumped
+    /// both ARCH lags onto e_T^2 (4.3).
+    #[test]
+    fn test_garch_forecast_recursion_hand() {
+        let r = toy(0.1, vec![0.1], vec![0.8], &[3.0], &[12.0]);
+        let (var, _, ret) = garch_forecast(&r, 6).unwrap();
+        let want = [3.7, 3.43, 3.187, 2.9683, 2.77147, 2.594323];
+        for (got, w) in var.iter().zip(want) {
+            assert!((got - w).abs() <= 1e-12, "{var:?}");
+        }
+        assert!(ret.iter().all(|m| *m == 0.0));
+        let r = toy(0.1, vec![0.05, 0.1], vec![0.8], &[3.0, 3.0], &[2.0, 12.0]);
+        let (var, _, _) = garch_forecast(&r, 5).unwrap();
+        let want = [3.3, 4.105, 3.91925, 3.8418625, 3.757508125];
+        for (got, w) in var.iter().zip(want) {
+            assert!((got - w).abs() <= 1e-12, "{var:?}");
+        }
+    }
+
+    /// R: forecasts sigma2_{T+1..T+H} of the pinned fits by the GARCH recursion, including (1,2), (2,1),
+    /// ARCH(1) and the zero-mean fit; GARCH(1,1) equals the closed form. Fails before: degenerate
+    /// estimates and the compounded recursion.
+    #[test]
+    fn test_validate_garch_forecast() {
+        let (case, rn) = returns("garch_normal_t", "r_norm");
+        let (_, rt) = returns("garch_normal_t", "r_t");
+        let (_, r21) = returns("garch_normal_t", "r_g21");
+        let (_, dm) = returns("garch_normal_t", "r_norm_dm");
+        let fits = [
+            ("norm", fit(&rn, 1, 1, true, "norm"), 10),
+            ("std", fit(&rt, 1, 1, true, "std"), 10),
+            ("g12", fit(&rn, 1, 2, true, "norm"), 10),
+            ("g21", fit(&r21, 2, 1, true, "norm"), 10),
+            ("arch1", fit(&rn, 1, 0, true, "norm"), 5),
+            ("zm", fit(&dm, 1, 1, false, "norm"), 5),
+        ];
+        let mut check = Check::new(&case);
+        for (key, r, h) in &fits {
+            let (var, vol, ret) = garch_forecast(r, *h).unwrap();
+            check.vector(&format!("{key}_forecast_var_tight"), &var, PAR);
+            assert!(
+                vol.iter()
+                    .zip(&var)
+                    .all(|(s, v)| (s - v.sqrt()).abs() <= 1e-15 * s),
+                "{key}"
+            );
+            assert!(ret.iter().all(|m| *m == r.mu), "{key}");
+        }
+        check.finish();
+        let r = &fits[0].1;
+        let (var, _, _) = garch_forecast(r, 10).unwrap();
+        let mut pw = 1.0;
+        for v in &var {
+            let closed = r.unconditional_variance + pw * (var[0] - r.unconditional_variance);
+            assert!((v - closed).abs() <= 1e-13 * v, "{v} vs {closed}");
+            pw *= r.persistence;
+        }
+    }
+
+    /// A result without its (unserialised) conditional variances cannot be forecast.
+    #[test]
+    fn test_garch_forecast_needs_the_fit_path() {
+        let mut r = toy(0.1, vec![0.1], vec![0.8], &[3.0], &[12.0]);
+        r.conditional_variance.clear();
+        match garch_forecast(&r, 3) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("conditional variances"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 
     fn cancelled<R>(f: impl FnOnce() -> R) -> R {

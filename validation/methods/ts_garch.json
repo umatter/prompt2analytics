@@ -18,6 +18,7 @@
         "p2a-core::forecasting::garch::tests::test_validate_garch_vcov",
         "p2a-core::forecasting::garch::tests::test_validate_garch_orders",
         "p2a-core::forecasting::garch::tests::test_validate_garch_bound",
+        "p2a-core::forecasting::garch::tests::test_validate_garch_forecast",
         "p2a-core::forecasting::garch::tests::test_validate_garch_scale_invariance",
         "p2a-core::forecasting::garch::tests::test_validate_garch_display_rows"
       ],
