@@ -114,7 +114,29 @@ the default reproducible from n alone.
   estimated but not detected, and its MA/AR split can be weakly identified.
 
 **Cost.** One long VAR(m) by its lagged cross products, O(n K^2 m + (K m)^3) with m about 2 ln n,
-where the old code fitted one VAR(p) (and no long VAR at all). Timing below.
+where the old code fitted one VAR(p) (and no long VAR at all).
+
+**Timing (T3-PERF4).** Default VARMA(1, 1) against `fe13b889` (the pre-wave-2A estimator, which
+fitted a VAR(1) and no long VAR), the scratch timing crate of the wave-2A review, release, one P
+core, `RAYON_NUM_THREADS=1`, three interleaved rounds, medians in microseconds. The machine was
+loaded by other builds (both sides about 2.5 times slower than on a quiet machine); the
+authoritative re-time is at integration. WP13 is the wave-2A head (default m = floor(ln(n)^2),
+lag-matrix Gram).
+
+| K | n | m | base | head (T3-PERF4) | ratio | WP13 ratio (quiet) |
+|---|---|---|---|---|---|---|
+| 2 | 100 | 9 | 13.9 | 42.5 | 3.05 | 6.5 |
+| 2 | 1,000 | 13 | 84.3 | 207.3 | 2.46 | 28.6 |
+| 2 | 10,000 | 18 | 1,237.1 | 2,847.6 | 2.30 | 65.6 |
+| 3 | 100 | 9 | 19.4 | 62.6 | 3.23 | 5.4 |
+| 3 | 1,000 | 13 | 126.1 | 388.9 | 3.08 | 33.6 |
+| 3 | 10,000 | 18 | 1,787.7 | 4,511.8 | 2.52 | 77.5 |
+
+At the old order m = 7, which the maintainer accepted at 2.6-4.3 times the base (the cost of
+fitting the long VAR at all), the lagged cross products cut the time of the WP13 code at K = 3 from
+72 to 58 us at n = 100 and from 10.0 to 3.9 ms at n = 10,000 (same machine, same load), with the
+same AIC to 10 digits. The remaining factor over the base is the long VAR itself, which the base
+did not fit; it stays below the factor of about 4.5 accepted for it (T3 plan sync, 2026-11-04).
 
 ## R reference
 
