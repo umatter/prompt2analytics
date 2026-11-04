@@ -158,10 +158,15 @@ pub fn fligner_test(groups: &[(String, Vec<f64>)]) -> EconResult<FlignerResult> 
     }
 
     for (name, data) in groups {
-        if data.iter().any(|v| v.is_nan()) {
+        if let Some(v) = data.iter().find(|v| !v.is_finite()) {
+            let what = if v.is_nan() {
+                "NaN"
+            } else {
+                "an infinite value"
+            };
             return Err(EconError::InvalidSpecification {
                 message: format!(
-                    "Fligner-Killeen test: group '{name}' contains NaN; remove missing values first (run_fligner_test drops them, as fligner.test does)"
+                    "Fligner-Killeen test: group '{name}' contains {what}; the test needs finite values (run_fligner_test drops missing values, as fligner.test does; infinite values are refused)"
                 ),
             });
         }
@@ -448,6 +453,25 @@ mod tests {
             Err(EconError::InvalidSpecification { message }) => {
                 assert!(
                     message.contains("'A'") && message.contains("NaN"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fligner_rejects_infinite_values() {
+        // An infinite group median made Inf - Inf = NaN deviations, refused inside midranks
+        // with an internal deviation index instead of the user's group.
+        let groups = vec![
+            ("A".to_string(), vec![2.0, 3.0, 5.0]),
+            ("B".to_string(), vec![1.0, f64::INFINITY, f64::INFINITY]),
+        ];
+        match fligner_test(&groups) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("'B'") && message.contains("infinite"),
                     "{message}"
                 )
             }

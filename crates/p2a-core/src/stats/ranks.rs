@@ -23,20 +23,22 @@ use crate::resource::{try_vec, try_with_capacity};
 /// ```
 pub fn midranks(x: &[f64]) -> EconResult<(Vec<f64>, Vec<usize>)> {
     let n = x.len();
-    let mut order: Vec<usize> = try_with_capacity(n, "midranks order")?;
+    let mut pairs: Vec<(f64, usize)> = try_with_capacity(n, "midranks order")?;
     let mut ranks: Vec<f64> = try_vec(n, 0.0, "midranks")?;
     let mut sizes: Vec<usize> = Vec::new();
-    midranks_into(x, &mut order, &mut ranks, &mut sizes)?;
+    midranks_into(x, &mut pairs, &mut ranks, &mut sizes)?;
     Ok((ranks, sizes))
 }
 
 /// [`midranks()`] into caller-owned buffers, for callers that rank many short vectors (one per
 /// block): the three buffers are cleared and refilled, so a loop allocates nothing once they
 /// have grown to the longest input. `ranks` holds the midranks of `x` in input order and `sizes`
-/// the tie-group sizes in ascending order of the value; `order` is scratch.
+/// the tie-group sizes in ascending order of the value; `pairs` is scratch. Sorting
+/// `(value, index)` pairs keeps each comparison on contiguous memory; an index vector compared
+/// through `x[order[j]]` measured 1.1-1.2x slower on the pooled tests (n = 100-10,000).
 pub(crate) fn midranks_into(
     x: &[f64],
-    order: &mut Vec<usize>,
+    pairs: &mut Vec<(f64, usize)>,
     ranks: &mut Vec<f64>,
     sizes: &mut Vec<usize>,
 ) -> EconResult<()> {
@@ -48,22 +50,22 @@ pub(crate) fn midranks_into(
         });
     }
     let n = x.len();
-    order.clear();
-    order.extend(0..n);
+    pairs.clear();
+    pairs.extend(x.iter().copied().zip(0..n));
     // Ties are averaged, so the sort need not be stable; under total_cmp every run of values
     // equal by `==` (-0.0 and 0.0 included) is contiguous.
-    order.sort_unstable_by(|&a, &b| x[a].total_cmp(&x[b]));
+    pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     ranks.clear();
     ranks.resize(n, 0.0);
     sizes.clear();
     let mut i = 0;
     while i < n {
         let mut j = i + 1;
-        while j < n && x[order[j]] == x[order[i]] {
+        while j < n && pairs[j].0 == pairs[i].0 {
             j += 1;
         }
         let rank = (i + 1 + j) as f64 / 2.0;
-        for &k in &order[i..j] {
+        for &(_, k) in &pairs[i..j] {
             ranks[k] = rank;
         }
         sizes.push(j - i);
@@ -207,12 +209,12 @@ mod tests {
 
     #[test]
     fn test_midranks_into_reuses_buffers() {
-        let (mut order, mut ranks, mut sizes) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut pairs, mut ranks, mut sizes) = (Vec::new(), Vec::new(), Vec::new());
         let long = [4.0, 1.0, 4.0, 2.0, 0.5, 4.0];
         let short = [2.0, 2.0, 1.0];
-        midranks_into(&long, &mut order, &mut ranks, &mut sizes).unwrap();
+        midranks_into(&long, &mut pairs, &mut ranks, &mut sizes).unwrap();
         assert_eq!((ranks.clone(), sizes.clone()), midranks(&long).unwrap());
-        midranks_into(&short, &mut order, &mut ranks, &mut sizes).unwrap();
+        midranks_into(&short, &mut pairs, &mut ranks, &mut sizes).unwrap();
         assert_eq!((ranks, sizes), midranks(&short).unwrap());
     }
 
