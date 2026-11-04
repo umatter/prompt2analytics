@@ -127,7 +127,10 @@
         "stat_rank_small_groups",
         "stat_rank_two_sample"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::mood::tests::test_validate_mood_small_scale",
+        "p2a-core::stats::mood::tests::test_validate_mood_two_sample"
+      ],
       "quantities": [
         "z",
         "p (two-sided, less, greater)",
@@ -153,7 +156,10 @@
         "stat_rank_small_groups",
         "stat_rank_two_sample"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::stats::ansari::tests::test_validate_ansari_small_scale",
+        "p2a-core::stats::ansari::tests::test_validate_ansari_two_sample"
+      ],
       "quantities": [
         "AB (seven sets)",
         "two-sided normal-approximation p (five tie-free sets)",
