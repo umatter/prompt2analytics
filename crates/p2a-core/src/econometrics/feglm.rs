@@ -1605,9 +1605,8 @@ mod tests {
     // Validation Tests: Comparison with R's alpaca::feglm()
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// Test data matching R's alpaca package documentation example.
-    ///
-    /// R code to generate expected values:
+    /// Deterministic data; not an R reference. The R code below shows the kind of DGP
+    /// it imitates; no test compares against its output:
     /// ```r
     /// library(alpaca)
     /// set.seed(42)
@@ -1635,8 +1634,7 @@ mod tests {
     /// summary(fit)
     /// ```
     fn create_validation_dataset() -> Dataset {
-        // Pre-computed dataset matching R's set.seed(42) output
-        // This allows exact comparison with R results
+        // Deterministic data; not an R reference (the R code above is illustrative)
         let n = 50;
         let n_id = 5;
         let n_time = 10;
@@ -1680,51 +1678,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_feglm_logit_against_alpaca() {
-        let dataset = create_validation_dataset();
-
-        let result = run_feglm(
-            &dataset,
-            "y",
-            &["x"],
-            &["id", "time"],
-            GlmFamily::Logit,
-            None,
-        )
-        .unwrap();
-
-        // The coefficient should be positive (matching the true DGP of beta=1.0)
-        // Due to noise and finite sample, we check direction and rough magnitude
-        assert!(
-            result.coefficients[0] > 0.0,
-            "Coefficient should be positive, got {}",
-            result.coefficients[0]
-        );
-
-        // Should have reasonable pseudo R²
-        assert!(
-            result.pseudo_r_squared > 0.0 && result.pseudo_r_squared < 1.0,
-            "Pseudo R² should be in (0,1), got {}",
-            result.pseudo_r_squared
-        );
-
-        // Standard error should be positive and reasonable
-        assert!(
-            result.std_errors[0] > 0.0,
-            "SE should be positive, got {}",
-            result.std_errors[0]
-        );
-
-        println!("Validation test - FEGLM Logit:");
-        println!("  Coefficient: {:.4}", result.coefficients[0]);
-        println!("  Std Error: {:.4}", result.std_errors[0]);
-        println!("  z-stat: {:.4}", result.z_stats[0]);
-        println!("  p-value: {:.4}", result.p_values[0]);
-        println!("  Pseudo R²: {:.4}", result.pseudo_r_squared);
-    }
-
-    #[test]
-    fn test_validate_feglm_probit_coefficient_scaling() {
+    /// A plausibility band, not an R comparison: logit/probit coefficient ratio near 1.6.
+    fn test_feglm_logit_probit_ratio_plausible() {
         let dataset = create_validation_dataset();
 
         let logit_result = run_feglm(
@@ -2155,5 +2110,61 @@ mod tests {
             r.warnings
         );
         assert!(format!("{r}").contains("Converged: no (1 iteration"));
+    }
+
+    /// fixest::feglm(gaussian) on feglm_families: the coefficients, the residual df and n.
+    #[test]
+    fn test_validate_feglm_gaussian_families() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("feglm_families");
+        let r = run_feglm(
+            &ds,
+            "y_gauss",
+            &["x", "x2"],
+            &["id", "time"],
+            GlmFamily::Gaussian,
+            None,
+        )
+        .unwrap();
+        // deviation ECON-20: gauss_se_lm, gauss_deviance, gauss_dispersion (eta's one-pass FE recovery)
+        // deviation ECON-66: gauss_loglik_glm
+        Check::new(&case)
+            .named("gauss_coef", &r.variables, &r.coefficients, Tol::coef(480))
+            .scalar("gauss_df_resid", r.df_resid as f64, Tol::exact())
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+    }
+
+    /// Logit, probit and Poisson on feglm_families either converge or say that they did
+    /// not; the coefficients are finite.
+    #[test]
+    fn test_feglm_families_report_convergence() {
+        let (_case, ds) = crate::test_support::load_case("feglm_families");
+        // deviation ECON-20 (coefficients; fixest drops 16 rows, the entities whose outcome is
+        // all 0 or all 1, for logit/probit: logit_nobs 464 of 480), ECON-67 (poisson SE)
+        for (y, family) in [
+            ("y_bin", GlmFamily::Logit),
+            ("y_bin", GlmFamily::Probit),
+            ("y_cnt", GlmFamily::Poisson),
+        ] {
+            let r = run_feglm(&ds, y, &["x", "x2"], &["id", "time"], family, None)
+                .unwrap_or_else(|e| panic!("{family:?}: {e}"));
+            assert!(r.iterations <= r.max_iter, "{family:?}");
+            if !r.converged {
+                assert!(
+                    r.warnings
+                        .iter()
+                        .any(|w| w.starts_with("FEGLM IRLS did not converge after")),
+                    "{family:?} {:?}",
+                    r.warnings
+                );
+                assert!(r.to_string().contains("Converged: no"), "{family:?}");
+            }
+            assert!(
+                r.coefficients.iter().all(|b| b.is_finite()),
+                "{family:?} {:?}",
+                r.coefficients
+            );
+        }
     }
 }

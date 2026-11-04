@@ -678,4 +678,55 @@ mod tests {
         let text = r.to_string();
         assert!(text.contains("Warning: entity '12' skipped"), "{text}");
     }
+
+    /// plm::pvcm(model = "within") on pvcm_pmg_sim: every entity's coefficients and SEs.
+    #[test]
+    fn test_validate_pvcm_within_sim() {
+        let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Within).unwrap();
+        let mut c = Check::new(&case);
+        for i in 1..=12 {
+            let id = i.to_string();
+            c.named(
+                &format!("within_coef_{i}"),
+                &r.variables,
+                &r.individual_coefficients[&id],
+                Tol::coef(240),
+            )
+            .named(
+                &format!("within_se_{i}"),
+                &r.variables,
+                &r.individual_std_errors[&id],
+                Tol::se(240),
+            );
+        }
+        c.scalar("n_obs", r.n_obs as f64, Tol::exact());
+        c.finish();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    /// plm::pvcm(model = "random") on pvcm_pmg_sim (Delta positive definite).
+    #[test]
+    fn test_validate_pvcm_random_sim() {
+        let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pvcm(&ds, "y", &["x1", "x2"], "id", PvcmType::Random).unwrap();
+        // deviation ECON-35: random_chisq (homogeneity test around the unweighted mean); Delta clamp when not PD
+        Check::new(&case)
+            .named("random_coef", &r.variables, &r.coefficients, Tol::coef(240))
+            .named("random_se", &r.variables, &r.std_errors, Tol::se(240))
+            .named("random_delta_diag", &r.variables, &r.delta, Tol::stat(240))
+            .finish();
+    }
+
+    /// plm::pmg(model = "mg") on pvcm_pmg_sim.
+    #[test]
+    fn test_validate_pmg_sim() {
+        let (case, ds) = crate::test_support::load_case("pvcm_pmg_sim");
+        let r = run_pmg(&ds, "y", &["x1", "x2"], "id").unwrap();
+        // deviation ECON-34: mg_se
+        Check::new(&case)
+            .named("mg_coef", &r.variables, &r.coefficients, Tol::coef(240))
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+    }
 }

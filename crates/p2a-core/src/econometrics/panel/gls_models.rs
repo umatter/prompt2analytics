@@ -1092,4 +1092,33 @@ mod tests {
             r.warnings
         );
     }
+
+    /// plm::pggls(model = "pooling") on pggls_sim (N = 40, T = 5).
+    #[test]
+    fn test_validate_pggls_pooling_sim() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("pggls_sim");
+        let r = run_pooled_gls(&ds, "y", &["x1", "x2"], "id", "t").unwrap();
+        // deviation ECON-33: pooling_se (SEs scaled by rss/df twice)
+        Check::new(&case)
+            .named(
+                "pooling_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(200),
+            )
+            .scalar("pooling_rss", r.rss, Tol::stat(200))
+            .scalar("pooling_r2", r.r_squared, Tol::stat(200))
+            .scalar("pooling_df_resid", r.df_residual as f64, Tol::exact())
+            .scalar("n_obs", r.n_obs as f64, Tol::exact())
+            .finish();
+        assert_eq!((r.n_obs, r.n_groups, r.n_periods), (200, 40, 5));
+        // deviation ECON-33: within_*/fd_* coefficients and SEs, fd_df_resid (GLS step
+        // ignores the transformation)
+        let w = run_fegls(&ds, "y", &["x1", "x2"], "id", "t").unwrap();
+        Check::new(&case)
+            .scalar("within_df_resid", w.df_residual as f64, Tol::exact())
+            .finish();
+        assert_eq!(w.n_obs, 200);
+    }
 }
