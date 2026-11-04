@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "pggls_sim",
+  "area": "econometrics/panel_gls",
+  "method": "plm::pggls pooling / within / fd on a simulated N = 40, T = 5 panel (AR(1), heteroskedastic errors)",
+  "reference": "plm::pggls(model = 'pooling' | 'within' | 'fd') (unrestricted T x T FGLS)",
+  "call": "pggls(y ~ x1 + x2, data = pdata.frame(d, index = c('id', 't')), model)",
+  "dataset": "validation/datasets/generated/pggls_panel.csv",
+  "datasets": ["validation/datasets/generated/pggls_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "plm": "2.6.7"
+  },
+  "values": {
+    "pooling_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [1.1503227784079546, 0.75322370282763162, -0.3709417407306973]
+    },
+    "pooling_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.19376377054730393, 0.091851054054957054, 0.077900310657739433]
+    },
+    "pooling_df_resid": 197,
+    "pooling_rss": 551.26307016632222,
+    "pooling_r2": 0.11117924908150933,
+    "within_coef": {
+      "names": ["x1", "x2"],
+      "values": [0.76515821265185657, -0.36525366820321237]
+    },
+    "within_se": {
+      "names": ["x1", "x2"],
+      "values": [0.094326806477504466, 0.080340758401561796]
+    },
+    "within_df_resid": 198,
+    "within_rss": 203.48732494298346,
+    "within_r2": 0.6719102607333215,
+    "fd_coef": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.0070464684061823882, 0.78229196657752587, -0.37569042767521382]
+    },
+    "fd_se": {
+      "names": ["(Intercept)", "x1", "x2"],
+      "values": [0.064544865475968424, 0.094606045200303829, 0.080642838549330395]
+    },
+    "fd_df_resid": 157,
+    "fd_rss": 337.42452984750344,
+    "fd_r2": 0.45595861535420756,
+    "n_obs": 200
+  }
+}

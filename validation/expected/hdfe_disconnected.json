@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "hdfe_disconnected",
+  "area": "econometrics/hdfe",
+  "method": "Two-way FE with two disconnected firm-year components: exact residual df from lm with dummies",
+  "reference": "stats::lm(y ~ x + z + factor(firm) + factor(year)) (rank-based df: n0 + n1 - 2 components)",
+  "call": "lm(y ~ x + z + factor(firm) + factor(year), hdfe_disconnected)",
+  "dataset": "validation/datasets/generated/hdfe_disconnected.csv",
+  "datasets": ["validation/datasets/generated/hdfe_disconnected.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3"
+  },
+  "values": {
+    "coef": {
+      "names": ["x", "z"],
+      "values": [0.61305666904133704, -0.19632157739860001]
+    },
+    "se": {
+      "names": ["x", "z"],
+      "values": [0.11929680146935208, 0.10479347160495987]
+    },
+    "df_resid": 54,
+    "df_absorbed": 24,
+    "se_naive_df": {
+      "names": ["x", "z"],
+      "values": [0.12041698380526714, 0.1057774694520543]
+    },
+    "n_obs": 80
+  }
+}

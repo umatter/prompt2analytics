@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "id": "feglm_families",
+  "area": "econometrics/feglm",
+  "method": "fixest::feglm gaussian / logit / probit / poisson with id + time effects; glm with dummies",
+  "reference": "fixest::feglm(| id + time, vcov = 'iid'); stats::glm with factor dummies",
+  "call": "feglm(y ~ x + x2 | id + time, feglm_panel, family)",
+  "dataset": "validation/datasets/generated/feglm_panel.csv",
+  "datasets": ["validation/datasets/generated/feglm_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "fixest": "0.14.2",
+    "stats": "4.3.3"
+  },
+  "values": {
+    "gauss_coef": {
+      "names": ["x", "x2"],
+      "values": [0.5370626023737084, -0.33085615145492808]
+    },
+    "gauss_se_lm": {
+      "names": ["x", "x2"],
+      "values": [0.052205773255508701, 0.051275325546290655]
+    },
+    "gauss_deviance": 429.73216262558424,
+    "gauss_dispersion": 1.0455770380184528,
+    "gauss_df_resid": 411,
+    "gauss_loglik_glm": -654.54074388269851,
+    "logit_coef": {
+      "names": ["x", "x2"],
+      "values": [0.80043816087652497, -0.41026088021219059]
+    },
+    "logit_se": {
+      "names": ["x", "x2"],
+      "values": [0.14468324970776264, 0.13198896666824858]
+    },
+    "logit_nobs": 464,
+    "logit_glm_coef": {
+      "names": ["x", "x2"],
+      "values": [0.80043817007671869, -0.41026088885247175]
+    },
+    "logit_glm_se": {
+      "names": ["x", "x2"],
+      "values": [0.13397990990372019, 0.12222422960214938]
+    },
+    "probit_coef": {
+      "names": ["x", "x2"],
+      "values": [0.48655803889888888, -0.25156814501746139]
+    },
+    "probit_se": {
+      "names": ["x", "x2"],
+      "values": [0.083849213651786839, 0.078298508298122724]
+    },
+    "probit_nobs": 464,
+    "probit_glm_coef": {
+      "names": ["x", "x2"],
+      "values": [0.48655868539908748, -0.25156871663320191]
+    },
+    "probit_glm_se": {
+      "names": ["x", "x2"],
+      "values": [0.077643646489016449, 0.072503653507536958]
+    },
+    "poisson_coef": {
+      "names": ["x", "x2"],
+      "values": [0.27527722147732192, -0.14987732369958892]
+    },
+    "poisson_se": {
+      "names": ["x", "x2"],
+      "values": [0.048246232438855771, 0.047373323764991176]
+    },
+    "poisson_nobs": 480,
+    "poisson_glm_coef": {
+      "names": ["x", "x2"],
+      "values": [0.27527722147731987, -0.14987732369959109]
+    },
+    "poisson_glm_se": {
+      "names": ["x", "x2"],
+      "values": [0.044690638455337869, 0.043882060374938844]
+    },
+    "n_obs": 480
+  }
+}
