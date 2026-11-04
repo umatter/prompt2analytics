@@ -29,6 +29,7 @@
 //!   intervals), which is not computed here.
 //! - `iid`: the Koenker-Bassett sparsity estimate.
 //! - `ker`: Powell's kernel sandwich.
+//! - `boot`: the xy-pair bootstrap (`boot.rq(bsmethod = "xy")`), seeded.
 //!
 //! summary.rq's absolute fuzz `sqrt(.Machine$double.eps)` is multiplied by `mean |y - median(y)|`
 //! here, so every standard error is scale-equivariant. t, p and the 95% interval use t(n - k).
@@ -57,6 +58,8 @@
 //! ```
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
@@ -81,6 +84,8 @@ const AUTO_BR_MAX_N: usize = 5000;
 const FN_MAX_ITER: usize = 500;
 /// Step-length factor of the Frisch-Newton method (quantreg's `beta`).
 const FN_BETA: f64 = 0.99995;
+/// summary.rq(se = "boot")'s default number of replications.
+const BOOT_DEFAULT_REPLICATIONS: usize = 200;
 /// R's warning for a nonunique simplex solution.
 const NONUNIQUE: &str = "Solution may be nonunique";
 
@@ -372,6 +377,17 @@ fn validate_config(config: &QuantRegConfig) -> EconResult<()> {
             config.tol
         )));
     }
+    if config.se != QuantRegSe::Boot && config.bootstrap_samples > 0 {
+        return Err(spec(format!(
+            "bootstrap_samples = {} is used only with se = boot",
+            config.bootstrap_samples
+        )));
+    }
+    if config.se == QuantRegSe::Boot && config.bootstrap_samples == 1 {
+        return Err(spec(
+            "bootstrap_samples must be at least 2 (or 0 for R's default 200)".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -402,13 +418,6 @@ pub fn quantreg(
 ) -> EconResult<QuantRegResult> {
     validate_level(config.tau, "tau")?;
     validate_config(config)?;
-    if config.bootstrap_samples > 0 {
-        tracing::warn!(
-            "quantile regression: bootstrap_samples={} was requested, but bootstrap standard \
-             errors are not implemented; the setting is ignored",
-            config.bootstrap_samples
-        );
-    }
 
     // y and X with R's na.omit: a row with a missing value in any of them is dropped
     let cols = ColumnRequest::new(dataset.df())
@@ -1440,13 +1449,125 @@ pub fn rq_se(
             density_sandwich(x, &f, tau, "ker")?
         }
         QuantRegSe::Boot => {
-            return Err(spec("se = boot arrives in Task 6".into()));
+            let reps = if config.bootstrap_samples == 0 {
+                BOOT_DEFAULT_REPLICATIONS
+            } else {
+                config.bootstrap_samples
+            };
+            let seed = config.seed.unwrap_or(QUANTREG_BOOT_DEFAULT_SEED);
+            let method = match fit.algorithm {
+                QuantRegMethod::FrischNewton => QuantRegMethod::FrischNewton,
+                _ => QuantRegMethod::BarrodaleRoberts,
+            };
+            let draws = bootstrap_xy_coefficients(x, y, tau, reps, method, config, |r, idx| {
+                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                rng.set_stream(r as u64);
+                idx.clear();
+                idx.extend((0..n).map(|_| rng.gen_range(0..n)));
+            })?;
+            if draws.dropped > 0 {
+                warnings.push(format!(
+                    "{} of {reps} bootstrap replications had a singular design and were dropped",
+                    draws.dropped
+                ));
+            }
+            if draws.nonunique > 0 {
+                warnings.push(format!(
+                    "{} of {reps} bootstrap fits may be nonunique",
+                    draws.nonunique
+                ));
+            }
+            out.replications = Some(draws.coefficients.nrows());
+            out.method = format!("boot (xy-pair bootstrap, R = {reps}, seed {seed})");
+            bootstrap_se(&draws.coefficients).1
         }
     };
     out.std_errors = vcov.diag().mapv(f64::sqrt);
     out.vcov = vcov;
     out.warnings = warnings;
     Ok(out)
+}
+
+/// Bootstrap replicate coefficients (kept replications by row).
+pub(crate) struct BootstrapDraws {
+    /// kept replications x p
+    pub coefficients: Array2<f64>,
+    /// replications with a singular resampled design
+    pub dropped: usize,
+    /// kept simplex fits flagged nonunique
+    pub nonunique: usize,
+}
+
+/// The xy-pair bootstrap of `boot.rq(bsmethod = "xy")`: replication `r` refits on the rows
+/// `draw(r, idx)` writes into `idx` (one reused buffer). A resample whose design is singular is
+/// skipped and counted (R keeps rq0's output and warns).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bootstrap_xy_coefficients(
+    x: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    tau: f64,
+    replications: usize,
+    method: QuantRegMethod,
+    config: &QuantRegConfig,
+    mut draw: impl FnMut(usize, &mut Vec<usize>),
+) -> EconResult<BootstrapDraws> {
+    let (n, p) = x.dim();
+    let mut b = resource::try_zeros2(replications, p, "quantreg bootstrap draws")?;
+    let mut xb = resource::try_zeros2(n, p, "quantreg bootstrap resample")?;
+    let mut yb = resource::try_zeros1(n, "quantreg bootstrap resample")?;
+    let mut idx: Vec<usize> = Vec::with_capacity(n);
+    let (mut kept, mut dropped, mut nonunique) = (0usize, 0usize, 0usize);
+    for r in 0..replications {
+        resource::checkpoint()?;
+        draw(r, &mut idx);
+        if idx.len() != n || idx.iter().any(|&i| i >= n) {
+            return Err(EconError::Computation(format!(
+                "bootstrap replication {r}: {} indices for {n} rows",
+                idx.len()
+            )));
+        }
+        for (k, &i) in idx.iter().enumerate() {
+            xb.row_mut(k).assign(&x.row(i));
+            yb[k] = y[i];
+        }
+        if Qr::decompose(xb.view(), LM_QR_TOL)?.rank() < p {
+            dropped += 1;
+            continue;
+        }
+        let fit = fit_full_rank(xb.view(), yb.view(), tau, method, config)?;
+        nonunique += fit.nonunique as usize;
+        b.row_mut(kept).assign(&fit.coefficients);
+        kept += 1;
+    }
+    if kept < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: kept,
+            context: "bootstrap replications with a non-singular design".into(),
+        });
+    }
+    Ok(BootstrapDraws {
+        coefficients: b.slice(ndarray::s![..kept, ..]).to_owned(),
+        dropped,
+        nonunique,
+    })
+}
+
+/// `sqrt(diag(cov(draws)))` and `cov(draws)` (denominator R - 1), as summary.rq(se = "boot").
+pub(crate) fn bootstrap_se(draws: &Array2<f64>) -> (Array1<f64>, Array2<f64>) {
+    let (r, p) = draws.dim();
+    let mean: Array1<f64> = (0..p).map(|j| draws.column(j).sum() / r as f64).collect();
+    let mut cov = Array2::<f64>::zeros((p, p));
+    for row in draws.rows() {
+        for j in 0..p {
+            let dj = row[j] - mean[j];
+            for k in 0..p {
+                cov[[j, k]] += dj * (row[k] - mean[k]);
+            }
+        }
+    }
+    cov /= (r as f64 - 1.0).max(1.0);
+    (cov.diag().mapv(f64::sqrt), cov)
 }
 
 /// Convenience function for quantile regression with default settings.
@@ -2662,5 +2783,114 @@ mod tests {
             auto.objective >= br.objective * (1.0 - 1e-12)
                 && auto.objective <= br.objective * (1.0 + 1e-6)
         );
+    }
+
+    // ── xy-pair bootstrap ──
+
+    /// boot.rq(bsmethod = "xy") on the committed index matrix: each replicate is the simplex fit on
+    /// rows U[, b]; the SE is sqrt(diag(cov(B))) (summary.rq(se = "boot")). R's boot.rq.xy uses
+    /// quantreg's rq0; on this matrix all 150 replicate fits equal rqbr's exactly.
+    #[test]
+    fn test_validate_rq_boot_xy_indices() {
+        let (case, idx) = crate::test_support::load_case("rq_boot_xy");
+        let ds = hetero();
+        let n = case.scalar("n") as usize;
+        let reps = case.scalar("replications") as usize;
+        let y = Array1::from(nan_vec(&ds, "y"));
+        let xv = nan_vec(&ds, "x");
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| if j == 0 { 1.0 } else { xv[i] });
+        let cols: Vec<Vec<usize>> = (1..=reps)
+            .map(|b| {
+                nan_vec(&idx, &format!("b{b:02}"))
+                    .iter()
+                    .map(|&v| v as usize - 1)
+                    .collect()
+            })
+            .collect();
+        let names = ["(Intercept)", "x"];
+        let mut check = Check::new(&case);
+        let cfg = QuantRegConfig::default();
+        for (tau, tag) in [(0.25, "tau25"), (0.5, "tau50"), (0.75, "tau75")] {
+            let d = bootstrap_xy_coefficients(
+                x.view(),
+                y.view(),
+                tau,
+                reps,
+                QuantRegMethod::BarrodaleRoberts,
+                &cfg,
+                |r, out| {
+                    out.clear();
+                    out.extend_from_slice(&cols[r]);
+                },
+            )
+            .unwrap();
+            assert_eq!((d.dropped, d.coefficients.nrows()), (0, reps));
+            let (se, _) = bootstrap_se(&d.coefficients);
+            let mean: Vec<f64> = (0..2)
+                .map(|j| d.coefficients.column(j).mean().unwrap())
+                .collect();
+            check
+                .named(
+                    &format!("{tag}_se_boot"),
+                    &names,
+                    se.as_slice().unwrap(),
+                    Tol::se(n),
+                )
+                .named(&format!("{tag}_boot_mean"), &names, &mean, Tol::coef(n));
+        }
+        check.finish();
+    }
+
+    /// Public path: seeded ChaCha8 resampling (stream = replicate index); the same seed gives the
+    /// same SEs, another seed different ones; bootstrap_samples = 0 means R's 200.
+    #[test]
+    fn test_rq_boot_seeded_reproducible() {
+        let ds = hetero();
+        let mut cfg = QuantRegConfig::default();
+        cfg.se = QuantRegSe::Boot;
+        cfg.bootstrap_samples = 60;
+        cfg.seed = Some(7);
+        let a = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+        let b = quantreg(&ds, "y", &["x"], &cfg).unwrap();
+        assert_eq!(table(&a)[0], table(&b)[0]);
+        assert!(table(&a)[0].iter().all(|s| s.is_finite() && *s > 0.0));
+        assert!(
+            a.se_method.contains("R = 60") && a.se_method.contains("seed 7"),
+            "{}",
+            a.se_method
+        );
+        assert_eq!(a.se_type, QuantRegSe::Boot);
+        cfg.seed = Some(8);
+        assert_ne!(
+            table(&quantreg(&ds, "y", &["x"], &cfg).unwrap())[0],
+            table(&a)[0]
+        );
+        cfg.bootstrap_samples = 0;
+        cfg.seed = None;
+        assert!(
+            quantreg(&ds, "y", &["x"], &cfg)
+                .unwrap()
+                .se_method
+                .contains("R = 200, seed 42")
+        );
+    }
+
+    /// bootstrap_samples is used only with se = boot (R2: a setting that would be ignored is an
+    /// error), and needs >= 2. Fails before WP10: accepted and ignored (a tracing warning only).
+    #[test]
+    fn test_rq_bootstrap_samples_requires_boot_se() {
+        let ds = hetero();
+        let mut cfg = QuantRegConfig::default();
+        cfg.bootstrap_samples = 10;
+        assert!(matches!(
+            quantreg(&ds, "y", &["x"], &cfg),
+            Err(EconError::InvalidSpecification { message }) if message.contains("bootstrap_samples")
+        ));
+        cfg.se = QuantRegSe::Boot;
+        cfg.bootstrap_samples = 1;
+        assert!(matches!(
+            quantreg(&ds, "y", &["x"], &cfg),
+            Err(EconError::InvalidSpecification { message }) if message.contains("at least 2")
+        ));
     }
 }
