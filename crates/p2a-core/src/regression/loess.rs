@@ -421,7 +421,8 @@ fn local_fit(
         for k in 0..j {
             dj -= l[j][k] * l[j][k] * dd[k];
         }
-        if !(dj > MOMENT_PIVOT_TOL * mjj) {
+        // not above the pivot bound (NaN included)
+        if dj.partial_cmp(&(MOMENT_PIVOT_TOL * mjj)) != Some(std::cmp::Ordering::Greater) {
             break;
         }
         dd[j] = dj;

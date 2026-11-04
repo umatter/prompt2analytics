@@ -399,7 +399,7 @@ fn super_smoother(
     // scale: an interquartile-type range of x, widened until positive
     let (mut i, mut j) = (n / 4, 3 * (n / 4));
     let mut scale = x[j - 1] - x[i - 1];
-    while !(scale > 0.0) {
+    while scale.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         if j < n {
             j += 1;
         }
