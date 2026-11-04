@@ -1,0 +1,170 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "discrete_logit_probit_glm",
+      "name": "Logit and probit as stats::glm (IRLS), with aliasing, separation and outcome-domain handling",
+      "category": "econometrics",
+      "reference": "stats::glm(family = binomial('logit' | 'probit')) at glm.control(epsilon = 1e-10, maxit = 100); summary.glm; tight refit at epsilon = 1e-14; R's default control for the separated case",
+      "doc": "validation/econometrics/logit.md",
+      "cases": [
+        "disc_binary_glm"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_binary_glm",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_probit_binary_glm",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_aliased_is_na",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_multivariate_separation_warns",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_near_collinear_reaches_optimum",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_rejects_y_outside_0_1",
+        "p2a-core::econometrics::discrete::binary_choice::tests::test_validate_logit_quasi_separated_dummy_warns"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE (expected information)",
+        "z",
+        "p",
+        "logLik",
+        "AIC",
+        "null logLik",
+        "aliased coefficients NA and the rank",
+        "separation flag and warnings (p2a's and R's default control)",
+        "limit of the identified coefficients of a quasi-separated fit",
+        "near-collinear fit (logLik, coefficients)",
+        "outcome outside {0, 1} refused"
+      ],
+      "tolerance": "logit at epsilon 1e-10 (the MLE to 1e-13) and probit at epsilon 1e-14: coefficients 1e-8, SEs, z, logLik, AIC 1e-6, p 1e-6 + 1e-12 (validation/README.md, n = 400); the default-control probit 1e-6 against the tight MLE; quasi-separated limit coefficients 1e-6 and SEs 1e-5; near-collinear fit 1e-6",
+      "deviations": [
+        {
+          "finding": "ECON-60",
+          "quantity": "default control",
+          "note": "MleSettings defaults to max_iter 100, tolerance 1e-10 (R glm.control: 25, 1e-8); at R's default probit stops 1.6e-6 from the MLE on disc_choice_na; R's values remain settable"
+        }
+      ],
+      "supersedes_legacy": [
+        "validation/expected/logit_simple.csv",
+        "validation/expected/logit_multiple.csv",
+        "validation/expected/probit_simple.csv",
+        "validation/expected/probit_multiple.csv"
+      ]
+    },
+    {
+      "id": "discrete_mlogit_asc",
+      "name": "Conditional (McFadden) logit with alternative-specific constants as mlogit::mlogit",
+      "category": "econometrics",
+      "reference": "mlogit::mlogit(chosen ~ price + catch | income), '| 0 + income', '~ price + catch', '| 0', reflevel = 'beach' | 'pier' on Fishing, re-solved by Newton's method on the analytic score and information",
+      "doc": "validation/econometrics/mlogit.md",
+      "cases": [
+        "disc_mlogit_fishing"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_fishing_asc",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_fishing_noasc",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_conditional_logit_fishing_generic",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_fishing_reflevel",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_convergence_is_scale_free",
+        "p2a-core::econometrics::discrete::conditional_logit::tests::test_validate_mlogit_aliased_attribute_is_an_error"
+      ],
+      "quantities": [
+        "constants, generic and individual-specific coefficients (mlogit names)",
+        "SEs",
+        "logLik",
+        "AIC",
+        "choice counts",
+        "asc = false",
+        "generic-only with and without constants",
+        "reflevel",
+        "scale-free convergence (income x 1e-6, x 1e6; iteration counts agree within one)",
+        "aliased / within-situation-constant attributes refused"
+      ],
+      "tolerance": "coefficients 1e-9, SEs 1e-8 relative against the Newton-polished optimum (iterative MLE converged to ~1e-14), logLik 1e-8 (validation/README.md, n = 1182); mlogit's own estimates cross-checked at 1e-6",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_multinom_nnet",
+      "name": "Multinomial logit as nnet::multinom (Newton-polished MLE)",
+      "category": "econometrics",
+      "reference": "nnet::multinom(y ~ x1 + x2), reltol 1e-16, re-solved by Newton's method; reference A and B; SEs from the analytic information (nnet's vcov agrees to 1e-6)",
+      "doc": "validation/econometrics/mlogit.md",
+      "cases": [
+        "disc_multinom_overlap"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_overlap",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_convergence_is_scale_free",
+        "p2a-core::econometrics::discrete::multinomial_logit::tests::test_validate_multinom_aliased_regressor_is_an_error",
+        "p2a-core::validation_new_methods::test_validate_multinom_overlapping"
+      ],
+      "quantities": [
+        "coefficients",
+        "SEs",
+        "logLik",
+        "AIC",
+        "null logLik",
+        "n",
+        "category counts",
+        "reference category B through the crate-root API",
+        "scale-free convergence (x1 x 1e-6, x 1e6; iteration counts within one)",
+        "aliased regressor refused"
+      ],
+      "tolerance": "coefficients 1e-8, SEs 1e-6 relative (iterative MLE, validation/README.md n = 300), logLik 1e-6; nnet at its default control cross-checked at 1e-4",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/multinom_test.csv",
+        "validation/expected/multinom_4cat_test.csv"
+      ]
+    },
+    {
+      "id": "discrete_count_domain_aliasing",
+      "name": "Count models: outcome domain (MASS, pscl), aliased regressors (glm.nb NA; pscl fails), hurdle zero part = binomial glm",
+      "category": "econometrics",
+      "reference": "glm(I(y > 0) ~ x1 + x2, binomial) at glm.control(1e-10, 100) = pscl::hurdle zero hurdle; MASS::glm.nb and pscl::{zeroinfl, hurdle} on negative / non-integer counts; glm.nb with an aliased column (T2-WP10's disc_negbin values)",
+      "doc": "validation/econometrics/count_models.md",
+      "cases": [
+        "disc_hurdle_zero",
+        "disc_negbin",
+        "disc_zeroinfl"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_hurdle_zero_part_is_binomial_glm",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_negbin_aliased_column_is_na",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_zeroinfl_and_hurdle_aliased_regressor_is_an_error",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_count_models_refuse_negative_counts",
+        "p2a-core::econometrics::discrete::count_models::tests::test_validate_count_models_refuse_non_integer_counts"
+      ],
+      "quantities": [
+        "hurdle zero-part coefficients, SEs, logLik, n, zeros, positives",
+        "NB with an aliased column: NA, other coefficients and theta unchanged",
+        "ZIP/ZINB/hurdle aliased designs refused",
+        "negative counts refused (all)",
+        "non-integer counts refused (pscl) / warned (glm.nb)"
+      ],
+      "tolerance": "hurdle zero part at the tight glm fit: coefficients 1e-8, SEs and logLik 1e-6 (glm at R's control also within 1e-8); NB 1e-6 (T2-WP10's tolerance) and 1e-12 against p2a's own fit without the aliased column",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "discrete_ordered_aliasing",
+      "name": "Ordered logit/probit with an aliased regressor: dropped (NaN) as MASS::polr drops it",
+      "category": "econometrics",
+      "reference": "MASS::polr(y ~ x + xb, method = 'logistic' | 'probit') with xb = 2 x on ordered_j5 (warns 'design appears to be rank-deficient' and keeps x), against polr(y ~ x) at reltol 1e-14",
+      "doc": "validation/econometrics/discrete_newton.md",
+      "cases": [
+        "disc_polr_aliased"
+      ],
+      "tests": [
+        "p2a-core::econometrics::discrete::ordered_models::tests::test_validate_ordered_aliased_regressor_is_nan"
+      ],
+      "quantities": [
+        "x coefficient and cut points of both links",
+        "xb coefficient, SE, z, p NaN",
+        "R's aliasing message",
+        "polr's warning and the kept-coefficient count (case flags)"
+      ],
+      "tolerance": "coefficient and cut points Tol::iterative(1e-6), T1's pin_ordered tolerance (polr's BFGS optimum)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

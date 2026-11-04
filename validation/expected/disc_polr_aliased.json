@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "disc_polr_aliased",
+  "area": "econometrics/discrete",
+  "method": "MASS::polr with an aliased regressor (xb = 2 x) on ordered_j5",
+  "reference": "MASS::polr on x + 2x (rank-deficient design) against polr on x",
+  "call": "polr(y ~ x + xb, ordered_j5)",
+  "dataset": "validation/datasets/generated/ordered_j5.csv",
+  "datasets": ["validation/datasets/generated/ordered_j5.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "MASS": "7.3.60.0.1"
+  },
+  "values": {
+    "n": 30,
+    "logit_warned": 1,
+    "logit_kept": 1,
+    "logit_coef": {
+      "names": ["x"],
+      "values": [1.7754875148526819]
+    },
+    "logit_zeta": {
+      "names": ["c001|c002", "c002|c003", "c003|c004", "c004|c005"],
+      "values": [1.9828275771681418, 3.7887208360834146, 6.219092824420331, 8.9638559658183468]
+    },
+    "probit_warned": 1,
+    "probit_kept": 1,
+    "probit_coef": {
+      "names": ["x"],
+      "values": [1.0336598299593971]
+    },
+    "probit_zeta": {
+      "names": ["c001|c002", "c002|c003", "c003|c004", "c004|c005"],
+      "values": [1.2357414051483879, 2.2462215611926917, 3.6251707699314855, 5.197332347225653]
+    }
+  }
+}

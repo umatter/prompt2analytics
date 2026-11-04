@@ -13,19 +13,124 @@
 //!
 //! R equivalents: `MASS::glm.nb()`, `pscl::zeroinfl()`, `pscl::hurdle()`
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::econometrics::glm::{GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{cholesky_inverse, safe_inverse};
+use crate::linalg::matrix_ops::cholesky_inverse;
+use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
 use crate::resource;
-use crate::traits::estimator::{logistic_cdf, normal_cdf};
+use crate::traits::convergence::{Convergence, ResultNotes};
+use crate::traits::estimator::{logistic_cdf, normal_p_value_two_sided};
 
+use super::conditional_logit::{covariance_from_information, equilibrated_newton_step};
 use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits, newton_step};
+
+/// QR tolerance of glm.nb's `glm.fitter`: `min(1e-7, control$epsilon / 1000)` at its
+/// default epsilon 1e-8.
+const NB_QR_TOL: f64 = 1e-11;
+
+/// Rounds of the negative binomial beta/theta alternation.
+const NB_MAX_ROUNDS: usize = 100;
+/// Newton iterations of the hurdle count part.
+const HURDLE_COUNT_MAX_ITER: usize = 50;
+
+/// The outcome domain of a count model (ECON-58). Negative values are an error (R:
+/// glm.nb and pscl refuse them); non-integer values are an error for the pscl models
+/// and, with `allow_non_integer` (the negative binomial, as glm.nb), a returned warning.
+fn check_count_outcome(
+    y: &[f64],
+    y_col: &str,
+    model: &str,
+    allow_non_integer: bool,
+) -> EconResult<Vec<String>> {
+    let n = y.len();
+    let negative: Vec<f64> = y.iter().copied().filter(|&v| v < 0.0).collect();
+    if let Some(first) = negative.first() {
+        let r = if allow_non_integer {
+            "glm.nb: negative values not allowed for the 'Poisson' family"
+        } else {
+            "pscl: invalid dependent variable, negative counts"
+        };
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "{model}: the outcome '{y_col}' has {} of {n} values negative (first: \
+                 {first}); counts must be non-negative (R: {r})",
+                negative.len()
+            ),
+        });
+    }
+    let fractional: Vec<f64> = y.iter().copied().filter(|v| v.fract() != 0.0).collect();
+    let mut warnings = Vec::new();
+    if let Some(first) = fractional.first() {
+        let k = fractional.len();
+        if allow_non_integer {
+            warnings.push(format!(
+                "non-integer counts in '{y_col}' ({k} values, first {first}): the negative \
+                 binomial likelihood is evaluated at them, as MASS::glm.nb does (it warns \
+                 'non-integer x')"
+            ));
+        } else {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "{model}: the outcome '{y_col}' has {k} of {n} non-integer values (first: \
+                     {first}); counts must be integers (pscl: invalid dependent variable, \
+                     non-integer values)"
+                ),
+            });
+        }
+    }
+    Ok(warnings)
+}
+
+/// `SingularMatrix` naming the regressors of one part of a pscl model (zero-inflated or
+/// hurdle) that are linear combinations of the others; pscl itself stops in optim.
+fn refuse_aliased(x: ArrayView2<f64>, names: &[String], model: &str, part: &str) -> EconResult<()> {
+    let qr = Qr::decompose(x, LM_QR_TOL)?;
+    let aliased = qr.aliased();
+    if aliased.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<&str> = aliased.iter().map(|&a| names[a].as_str()).collect();
+    Err(EconError::SingularMatrix {
+        context: format!(
+            "{model}: the {part}-part regressors {} are linear combinations of the other \
+             columns (rank {} of {})",
+            list.join(", "),
+            qr.rank(),
+            x.ncols()
+        ),
+        suggestion: "drop the listed regressors (pscl stops with 'non-finite value supplied by \
+                     optim')"
+            .to_string(),
+    })
+}
+
+/// `values` of the identified columns, with `NaN` at the aliased positions.
+fn scatter_identified(values: &[f64], identified: &[usize], k: usize) -> Vec<f64> {
+    let mut out = vec![f64::NAN; k];
+    for (&j, &v) in identified.iter().zip(values) {
+        out[j] = v;
+    }
+    out
+}
+
+/// `n - 1` for a sample variance, or `InsufficientData` (X-7).
+fn variance_divisor(n: usize, context: &str) -> EconResult<f64> {
+    n.checked_sub(1)
+        .filter(|&d| d > 0)
+        .map(|d| d as f64)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: 2,
+            provided: n,
+            context: context.to_string(),
+        })
+}
 
 // ============================================================================
 // Negative Binomial Regression
@@ -76,6 +181,10 @@ pub struct NegBinResult {
     /// Estimation problems in plain words (non-convergence, no overdispersion).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Regressors dropped as linear combinations of the others (`NaN` estimates; R
+    /// glm.nb: `NA`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliased: Vec<String>,
 }
 
 impl fmt::Display for NegBinResult {
@@ -508,9 +617,13 @@ fn theta_newton(theta: f64, mu: &[f64], y: &[f64]) -> EconResult<(f64, bool)> {
 ///
 /// `InvalidSpecification` for an `initial_theta` outside `[1e-8, 1e6]` (or not a
 /// number): below it the theta score cannot be evaluated, above it the data show no
-/// overdispersion the alternation could move from. Column errors (`ColumnNotFound`,
-/// `NonNumericColumn`, `NonFiniteValues`) name the column; `InsufficientData` below 2
-/// complete rows; `SingularMatrix` for collinear regressors.
+/// overdispersion the alternation could move from. `InvalidSpecification` for a
+/// negative count (glm.nb refuses them); non-integer counts are fitted with a warning,
+/// as glm.nb. Column errors (`ColumnNotFound`, `NonNumericColumn`, `NonFiniteValues`)
+/// name the column; `InsufficientData` below 2 complete rows. Regressors that are
+/// linear combinations of the others (QR at glm.nb's tolerance 1e-11) are dropped:
+/// their estimates are `NaN`, their names in `aliased`, with R's message in
+/// `warnings`.
 pub fn run_negbin(
     dataset: &Dataset,
     y_col: &str,
@@ -537,15 +650,33 @@ pub fn run_negbin(
         .extract()?;
     let y = cols.numeric(y_col);
     let n = cols.n();
+    let mut warnings = check_count_outcome(y, y_col, "negative binomial regression", true)?;
     let dm = cols.matrix(x_cols, true)?;
-    let x = dm.view();
-    let k = x.ncols();
-
-    let y_mean = y.iter().sum::<f64>() / n as f64;
-    let y_var = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n - 1) as f64;
 
     let mut var_names = vec!["(Intercept)".to_string()];
     var_names.extend(x_cols.iter().map(|s| s.to_string()));
+
+    // Aliased regressors are dropped and reported as NaN, as glm.nb's glm.fitter does.
+    let k_full = dm.view().ncols();
+    let qr = Qr::decompose(dm.view(), NB_QR_TOL)?;
+    let aliased_idx = qr.aliased();
+    drop(qr);
+    let identified: Vec<usize> = (0..k_full).filter(|j| !aliased_idx.contains(j)).collect();
+    let x_identified;
+    let x = if aliased_idx.is_empty() {
+        dm.view()
+    } else {
+        x_identified = dm.view().select(Axis(1), &identified);
+        if let Some(msg) = aliasing_message(&aliased_idx, &var_names) {
+            warnings.push(msg);
+        }
+        x_identified.view()
+    };
+    let k = x.ncols();
+
+    let y_mean = y.iter().sum::<f64>() / n as f64;
+    let y_var = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>()
+        / variance_divisor(n, "negative binomial regression: variance of the counts")?;
 
     let mut work = NbWork::new(n)?;
 
@@ -571,12 +702,11 @@ pub fn run_negbin(
         }
     };
 
-    let mut warnings: Vec<String> = Vec::new();
     let mut converged = false;
     let mut theta_stuck = false;
     let mut iterations = 0;
     let mut ll = nb_loglik(theta, &work.mu, y);
-    for round in 1..=100 {
+    for round in 1..=NB_MAX_ROUNDS {
         resource::checkpoint()?;
         iterations = round;
         beta = irls_beta(&x, y, Some(&beta), theta, &mut work)?.0;
@@ -631,30 +761,7 @@ pub fn run_negbin(
     let no_mle = n_falling > 0;
     let tiny = 10.0 * f64::EPSILON;
     let n_tiny = work.mu.iter().filter(|&&m| m < tiny).count();
-    let rows = |k: usize| if k == 1 { "row" } else { "rows" };
-    if no_mle {
-        warnings.push(format!(
-            "the coefficient IRLS was still driving the fitted means of {n_falling} \
-             zero-count {} to 0 (its last step lowered their linear predictor by more \
-             than {ETA_FALLING}): the outcome has no finite maximum-likelihood estimate \
-             (all counts 0, or zero counts that a regressor separates); the estimates are \
-             not reliable",
-            rows(n_falling)
-        ));
-    } else if !irls.converged {
-        warnings.push(
-            "the IRLS for the coefficients did not settle in 100 iterations at the final \
-             theta: neither the coefficients nor the log-likelihood stopped changing"
-                .to_string(),
-        );
-    } else if n_tiny > 0 {
-        warnings.push(format!(
-            "fitted means numerically 0 occurred for {n_tiny} {} (glm.fit: 'fitted rates \
-             numerically 0') at converged coefficients; check those rows for extreme \
-             regressor values",
-            rows(n_tiny)
-        ));
-    }
+    warnings.extend(nb_fit_warnings(n_falling, irls.converged, n_tiny));
     let log_likelihood = nb_loglik(theta, &work.mu, y);
 
     // Null log-likelihood (unchanged; ECON-64, Tier 4)
@@ -712,10 +819,22 @@ pub fn run_negbin(
         }
     };
 
+    let aliased: Vec<String> = aliased_idx.iter().map(|&a| var_names[a].clone()).collect();
+    let (coefficients, std_errors, z_stats, p_values) = if aliased.is_empty() {
+        (beta.to_vec(), std_errors, z_stats, p_values)
+    } else {
+        (
+            scatter_identified(&beta.to_vec(), &identified, k_full),
+            scatter_identified(&std_errors, &identified, k_full),
+            scatter_identified(&z_stats, &identified, k_full),
+            scatter_identified(&p_values, &identified, k_full),
+        )
+    };
+
     Ok(NegBinResult {
         dep_var: y_col.to_string(),
         variables: var_names,
-        coefficients: beta.to_vec(),
+        coefficients,
         std_errors,
         z_stats,
         p_values,
@@ -733,7 +852,42 @@ pub fn run_negbin(
         y_var,
         missing: cols.missing().clone(),
         warnings,
+        aliased,
     })
+}
+
+/// The warnings of the final negative binomial IRLS, in order: an IRLS that did not
+/// settle, then zero counts it was still driving to 0 (no finite MLE), or else fitted
+/// means numerically 0 at a converged fit. Both of the first two are reported when both
+/// hold.
+fn nb_fit_warnings(n_falling: usize, irls_converged: bool, n_tiny: usize) -> Vec<String> {
+    let rows = |k: usize| if k == 1 { "row" } else { "rows" };
+    let mut warnings = Vec::new();
+    if !irls_converged {
+        warnings.push(
+            "the IRLS for the coefficients did not settle in 100 iterations at the final \
+             theta: neither the coefficients nor the log-likelihood stopped changing"
+                .to_string(),
+        );
+    }
+    if n_falling > 0 {
+        warnings.push(format!(
+            "the coefficient IRLS was still driving the fitted means of {n_falling} \
+             zero-count {} to 0 (its last step lowered their linear predictor by more \
+             than {ETA_FALLING}): the outcome has no finite maximum-likelihood estimate \
+             (all counts 0, or zero counts that a regressor separates); the estimates are \
+             not reliable",
+            rows(n_falling)
+        ));
+    } else if irls_converged && n_tiny > 0 {
+        warnings.push(format!(
+            "fitted means numerically 0 occurred for {n_tiny} {} (glm.fit: 'fitted rates \
+             numerically 0') at converged coefficients; check those rows for extreme \
+             regressor values",
+            rows(n_tiny)
+        ));
+    }
+    warnings
 }
 
 /// `2 P(Z > |z|)` from the upper tail (X-17).
@@ -912,7 +1066,9 @@ impl fmt::Display for ZeroInflResult {
 /// # Errors
 ///
 /// `InvalidSpecification` when the outcome has no zero count (pscl: "minimum count is
-/// not zero"); column errors (`ColumnNotFound`, `NonNumericColumn`, `NonFiniteValues`)
+/// not zero") or has a negative or non-integer value (pscl: "invalid dependent
+/// variable"); `SingularMatrix` naming count- or zero-part regressors that are linear
+/// combinations of the others (pscl stops in optim); column errors (`ColumnNotFound`, `NonNumericColumn`, `NonFiniteValues`)
 /// name the column.
 pub fn run_zip(
     dataset: &Dataset,
@@ -1397,6 +1553,11 @@ fn run_zeroinfl(
         .extract()?;
     let y = cols.numeric(y_col);
     let n = cols.n();
+    let model_name = match model_type {
+        ZeroInflatedType::Poisson => "zero-inflated Poisson",
+        ZeroInflatedType::NegBin => "zero-inflated negative binomial",
+    };
+    check_count_outcome(y, y_col, model_name, false)?;
     let dm_count = cols.matrix(x_cols, true)?;
     let dm_zero = cols.matrix(zero_cols, true)?;
     let x_count = dm_count.view();
@@ -1404,10 +1565,17 @@ fn run_zeroinfl(
     let k_count = x_count.ncols();
     let k_zero = x_zero.ncols();
 
-    // Zeros keep the rule y < 0.5 (ECON-58, Tier 4).
+    let mut count_vars = vec!["(Intercept)".to_string()];
+    count_vars.extend(x_cols.iter().map(|s| s.to_string()));
+    let mut zero_vars = vec!["(Intercept)".to_string()];
+    zero_vars.extend(zero_cols.iter().map(|s| s.to_string()));
+    refuse_aliased(x_count, &count_vars, model_name, "count")?;
+    refuse_aliased(x_zero, &zero_vars, model_name, "zero")?;
+
+    // Counts are non-negative integers (checked above), so a zero is y == 0.
     let mut zero = resource::try_vec(n, 0.0, "zero indicator")?;
     for (z, &yi) in zero.iter_mut().zip(y) {
-        *z = if yi < 0.5 { 1.0 } else { 0.0 };
+        *z = if yi == 0.0 { 1.0 } else { 0.0 };
     }
     let n_zeros = zero.iter().filter(|&&z| z > 0.5).count();
     if n_zeros == 0 {
@@ -1418,11 +1586,6 @@ fn run_zeroinfl(
             ),
         });
     }
-
-    let mut count_vars = vec!["(Intercept)".to_string()];
-    count_vars.extend(x_cols.iter().map(|s| s.to_string()));
-    let mut zero_vars = vec!["(Intercept)".to_string()];
-    zero_vars.extend(zero_cols.iter().map(|s| s.to_string()));
 
     let data = ZiData {
         x: x_count,
@@ -1732,6 +1895,10 @@ pub struct HurdleResult {
     /// Rows dropped because of missing values in the outcome or a regressor (R: na.omit).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Estimation problems in plain words (separation in the zero part, singular
+    /// information, non-convergence).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl fmt::Display for HurdleResult {
@@ -1789,7 +1956,59 @@ impl fmt::Display for HurdleResult {
             "Converged: {} ({} iterations)",
             self.converged, self.iterations
         )?;
-        write_notes(f, &[], &self.missing)
+        write_notes(f, &self.warnings, &self.missing)
+    }
+}
+
+impl ResultNotes for NegBinResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(Convergence::new(
+            self.converged,
+            self.iterations,
+            NB_MAX_ROUNDS,
+            "log-likelihood change below 1e-12 relative and theta settled (beta/theta \
+             alternation)",
+            f64::NAN,
+            1e-12,
+        ))
+    }
+}
+
+impl ResultNotes for ZeroInflResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(Convergence::new(
+            self.converged,
+            self.iterations,
+            ZI_MAX_ITER,
+            "Newton decrement, relative log-likelihood change and relative step",
+            f64::NAN,
+            1e-12,
+        ))
+    }
+}
+
+impl ResultNotes for HurdleResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(Convergence::new(
+            self.converged,
+            self.iterations,
+            GlmSpec::logit().max_iter + HURDLE_COUNT_MAX_ITER,
+            "glm.fit relative deviance change (zero part) and largest step (count part)",
+            f64::NAN,
+            1e-6,
+        ))
     }
 }
 
@@ -1797,8 +2016,17 @@ impl fmt::Display for HurdleResult {
 ///
 /// R equivalent: `pscl::hurdle()`. Rows with a missing outcome or regressor (count or
 /// binary part) are dropped from both parts (R `na.omit`) and reported in `missing`.
-/// The estimates are not yet pscl's for the NB hurdle theta and the count-part
-/// standard errors (ECON-16).
+/// The zero part is the binomial GLM `glm(y > 0 ~ z, binomial)` (glm.fit; pscl's zero
+/// hurdle), with glm's warnings (separation) in `warnings`. The count-part estimates
+/// are not yet pscl's for the NB hurdle theta and the count-part standard errors
+/// (ECON-16); a singular count-part information gives `NaN` standard errors and a
+/// warning.
+///
+/// # Errors
+///
+/// `InvalidSpecification` for a negative or non-integer count (pscl: "invalid dependent
+/// variable"); `SingularMatrix` naming count- or zero-part regressors that are linear
+/// combinations of the others; `InsufficientData` below 3 positive counts.
 pub fn run_hurdle(
     dataset: &Dataset,
     y_col: &str,
@@ -1816,8 +2044,10 @@ pub fn run_hurdle(
         .extract()?;
     let y = cols.numeric(y_col);
     let n = cols.n();
+    check_count_outcome(y, y_col, "hurdle model", false)?;
 
-    // Create binary indicator
+    // Binary indicator: counts are non-negative integers (checked above), so y > 0 is
+    // a positive count.
     let y_binary: Vec<f64> = y
         .iter()
         .map(|&yi| if yi > 0.0 { 1.0 } else { 0.0 })
@@ -1842,35 +2072,30 @@ pub fn run_hurdle(
         });
     }
 
+    let mut binary_variables = vec!["(Intercept)".to_string()];
+    binary_variables.extend(binary_cols.iter().map(|s| s.to_string()));
+    let mut count_variables = vec!["(Intercept)".to_string()];
+    count_variables.extend(x_cols.iter().map(|s| s.to_string()));
+
     // Build design matrices
     let x_full = cols.matrix(x_cols, true)?.data;
     let k_count = x_full.ncols();
 
     let x_binary = cols.matrix(binary_cols, true)?.data;
     let k_binary = x_binary.ncols();
+    refuse_aliased(x_full.view(), &count_variables, "hurdle model", "count")?;
+    refuse_aliased(x_binary.view(), &binary_variables, "hurdle model", "zero")?;
 
-    // Part 1: Binary logit model
-    let (beta_binary, ll_binary, converged_binary, iter_binary) =
-        fit_logit_model(&y_binary, &x_binary, 50, 1e-8)?;
-
-    // Compute binary standard errors
-    let pi_hat: Vec<f64> = (0..n)
-        .map(|i| {
-            let xb: f64 = (0..k_binary)
-                .map(|j| x_binary[[i, j]] * beta_binary[j])
-                .sum();
-            logistic_cdf(xb)
-        })
-        .collect();
-
-    let binary_info = compute_logit_information(&x_binary.view(), &pi_hat);
-    let binary_vcov = match safe_inverse(&binary_info.view()) {
-        Ok((inv, _)) => inv,
-        Err(_) => Array2::eye(k_binary) * 1e-6,
-    };
-    let binary_std_errors: Vec<f64> = (0..k_binary)
-        .map(|i| binary_vcov[[i, i]].max(1e-10).sqrt())
-        .collect();
+    // Part 1: the zero hurdle, a binomial GLM (glm.fit, as pscl's zero hurdle)
+    let y_binary = Array1::from_vec(y_binary);
+    let zf = fit_glm(x_binary.view(), y_binary.view(), &GlmSpec::logit())?;
+    let mut warnings: Vec<String> = zf.warnings.clone();
+    let beta_binary = zf.coefficients.to_vec();
+    let binary_std_errors = zf.std_errors.to_vec();
+    let ll_binary = zf.log_likelihood;
+    let converged_binary = zf.converged;
+    let iter_binary = zf.iterations;
+    drop(zf);
 
     // Part 2: Truncated count model (positive y only)
     let y_positive: Vec<f64> = positive_indices.iter().map(|&i| y[i]).collect();
@@ -1879,17 +2104,23 @@ pub fn run_hurdle(
     });
 
     let (beta_count, theta, ll_count, converged_count, iter_count) =
-        fit_truncated_count_model(&y_positive, &x_positive, model_type)?;
+        fit_truncated_count_model(&y_positive, &x_positive, model_type, &mut warnings)?;
 
-    // Compute count standard errors
+    // Count standard errors from the inverse information (NaN and a warning when it is
+    // singular at the estimates)
     let count_info =
         compute_truncated_count_information(&y_positive, &x_positive.view(), &beta_count, theta);
-    let count_vcov = match safe_inverse(&count_info.view()) {
-        Ok((inv, _)) => inv,
-        Err(_) => Array2::eye(k_count) * 1e-6,
-    };
+    let count_vcov = covariance_from_information(
+        &count_info,
+        "hurdle count-part information matrix",
+        &mut warnings,
+    )?;
     let count_std_errors: Vec<f64> = (0..k_count)
-        .map(|i| count_vcov[[i, i]].max(1e-10).sqrt())
+        .map(|i| {
+            count_vcov
+                .as_ref()
+                .map_or(f64::NAN, |v| v[[i, i]].max(0.0).sqrt())
+        })
         .collect();
 
     // Z-statistics and p-values
@@ -1900,7 +2131,7 @@ pub fn run_hurdle(
         .collect();
     let binary_p_values: Vec<f64> = binary_z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
     let count_z_stats: Vec<f64> = beta_count
@@ -1910,7 +2141,7 @@ pub fn run_hurdle(
         .collect();
     let count_p_values: Vec<f64> = count_z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
     let log_likelihood = ll_binary + ll_count;
@@ -1924,13 +2155,13 @@ pub fn run_hurdle(
     let aic = -2.0 * log_likelihood + 2.0 * n_params as f64;
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
 
-    let mut binary_variables = vec!["(Intercept)".to_string()];
-    binary_variables.extend(binary_cols.iter().map(|s| s.to_string()));
-
-    let mut count_variables = vec!["(Intercept)".to_string()];
-    count_variables.extend(x_cols.iter().map(|s| s.to_string()));
-
     let converged = converged_binary && converged_count;
+    if !converged_count {
+        warnings.push(format!(
+            "the hurdle count part did not converge in {HURDLE_COUNT_MAX_ITER} iterations; \
+             the estimates are not reliable"
+        ));
+    }
     let iterations = iter_binary + iter_count;
 
     Ok(HurdleResult {
@@ -1962,104 +2193,17 @@ pub fn run_hurdle(
         n_zeros,
         n_positive,
         missing: cols.missing().clone(),
+        warnings,
     })
 }
 
 // Helper functions for hurdle models
 
-fn fit_logit_model(
-    y: &[f64],
-    x: &Array2<f64>,
-    max_iter: usize,
-    tol: f64,
-) -> EconResult<(Vec<f64>, f64, bool, usize)> {
-    let n = y.len();
-    let k = x.ncols();
-    let mut beta = vec![0.0; k];
-    let mut converged = false;
-    let mut iterations = 0;
-
-    for iter in 0..max_iter {
-        iterations = iter + 1;
-
-        let mut ll = 0.0;
-        let mut gradient = vec![0.0; k];
-        let mut hessian = vec![vec![0.0; k]; k];
-
-        for i in 0..n {
-            let xb: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-            let pi = logistic_cdf(xb);
-            let yi = y[i];
-
-            ll += yi * pi.max(1e-15).ln() + (1.0 - yi) * (1.0 - pi).max(1e-15).ln();
-
-            let error = yi - pi;
-            for j in 0..k {
-                gradient[j] += error * x[[i, j]];
-            }
-
-            let w = pi * (1.0 - pi);
-            for j in 0..k {
-                for l in 0..k {
-                    hessian[j][l] -= w * x[[i, j]] * x[[i, l]];
-                }
-            }
-        }
-
-        let hess_arr = Array2::from_shape_fn((k, k), |(i, j)| hessian[i][j]);
-        let delta = match safe_inverse(&hess_arr.view()) {
-            Ok((inv, _)) => {
-                let grad_arr: Array1<f64> = gradient.iter().cloned().collect();
-                let d = inv.dot(&grad_arr);
-                d.iter().map(|&x| -x).collect::<Vec<f64>>()
-            }
-            Err(_) => gradient.iter().map(|&g| 0.01 * g).collect(),
-        };
-
-        let mut max_change = 0.0f64;
-        for j in 0..k {
-            beta[j] += delta[j];
-            max_change = max_change.max(delta[j].abs());
-        }
-
-        if max_change < tol {
-            converged = true;
-            break;
-        }
-    }
-
-    // Final log-likelihood
-    let mut ll = 0.0;
-    for i in 0..n {
-        let xb: f64 = (0..k).map(|j| x[[i, j]] * beta[j]).sum();
-        let pi = logistic_cdf(xb);
-        ll += y[i] * pi.max(1e-15).ln() + (1.0 - y[i]) * (1.0 - pi).max(1e-15).ln();
-    }
-
-    Ok((beta, ll, converged, iterations))
-}
-
-fn compute_logit_information(x: &ArrayView2<f64>, pi: &[f64]) -> Array2<f64> {
-    let n = pi.len();
-    let k = x.ncols();
-    let mut info = Array2::zeros((k, k));
-
-    for i in 0..n {
-        let w = pi[i] * (1.0 - pi[i]);
-        for j in 0..k {
-            for l in 0..k {
-                info[[j, l]] += w * x[[i, j]] * x[[i, l]];
-            }
-        }
-    }
-
-    info
-}
-
 fn fit_truncated_count_model(
     y: &[f64],
     x: &Array2<f64>,
     model_type: HurdleType,
+    warnings: &mut Vec<String>,
 ) -> EconResult<(Vec<f64>, f64, f64, bool, usize)> {
     let n = y.len();
     let k = x.ncols();
@@ -2069,12 +2213,15 @@ fn fit_truncated_count_model(
     beta[0] = y_mean.max(0.1).ln();
     let mut theta = 1.0;
 
-    let max_iter = 50;
+    let max_iter = HURDLE_COUNT_MAX_ITER;
     let tol = 1e-6;
     let mut converged = false;
     let mut iterations = 0;
+    let y_var: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>()
+        / variance_divisor(n, "hurdle model: variance of the positive counts")?;
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         let xb = x.dot(&beta);
@@ -2119,10 +2266,12 @@ fn fit_truncated_count_model(
         }
         let neg_hessian = wx.t().dot(&wx);
 
-        let delta = match safe_inverse(&neg_hessian.view()) {
-            Ok((inv, _)) => inv.dot(&gradient),
-            Err(_) => gradient.mapv(|g| 0.01 * g),
-        };
+        let (delta, _) = equilibrated_newton_step(
+            &neg_hessian,
+            &gradient,
+            "hurdle count-part information",
+            warnings,
+        )?;
 
         let max_change = delta.iter().map(|&d| d.abs()).fold(0.0f64, f64::max);
         beta = &beta + &delta;
@@ -2130,8 +2279,6 @@ fn fit_truncated_count_model(
         // Update theta for NegBin
         if model_type == HurdleType::NegBin && iter % 2 == 0 {
             let mu: Vec<f64> = x.dot(&beta).iter().map(|&v| v.exp()).collect();
-            let y_var: f64 =
-                y.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>() / (n - 1) as f64;
             let mu_mean: f64 = mu.iter().sum::<f64>() / n as f64;
             let excess_var = y_var - mu_mean;
             if excess_var > 0.0 {
@@ -2361,7 +2508,11 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(2026);
         let nb = |mu: f64, rng: &mut ChaCha8Rng| -> f64 {
             let lambda = Gamma::new(2.0, mu / 2.0).unwrap().sample(rng);
-            Poisson::new(lambda.max(1e-300)).unwrap().sample(rng)
+            if lambda < 1e-12 {
+                0.0
+            } else {
+                Poisson::new(lambda).unwrap().sample(rng)
+            }
         };
         let unif = Uniform::new(10.0, 20.0);
         let (mut x, mut y) = (Vec::new(), Vec::new());
@@ -2444,7 +2595,11 @@ mod tests {
             let lambda = Gamma::new(2.0, (0.5 + 0.3 * xi).exp() / 2.0)
                 .unwrap()
                 .sample(&mut rng);
-            let count: f64 = Poisson::new(lambda.max(1e-300)).unwrap().sample(&mut rng);
+            let count: f64 = if lambda < 1e-12 {
+                0.0
+            } else {
+                Poisson::new(lambda).unwrap().sample(&mut rng)
+            };
             y.push(if di == 1.0 { 0.0 } else { count });
             d.push(di);
             x.push(xi);
@@ -2485,7 +2640,11 @@ mod tests {
             let lambda = Gamma::new(2.0, (0.5 + 0.1 * xi).exp() / 2.0)
                 .unwrap()
                 .sample(&mut rng);
-            let count: f64 = Poisson::new(lambda.max(1e-300)).unwrap().sample(&mut rng);
+            let count: f64 = if lambda < 1e-12 {
+                0.0
+            } else {
+                Poisson::new(lambda).unwrap().sample(&mut rng)
+            };
             y.push(if di == 1.0 { 0.0 } else { count });
             d.push(di);
             x.push(xi);
@@ -3578,5 +3737,229 @@ mod tests {
             result.log_likelihood.is_finite(),
             "Log-likelihood should be finite"
         );
+    }
+
+    // ==========================================================================
+    // T3-WP18: outcome domain, aliasing, hurdle zero part on glm.fit
+    // ==========================================================================
+
+    /// `to = from * scale` as a Float64 column.
+    fn with_scaled(ds: &Dataset, from: &str, to: &str, scale: f64) -> Dataset {
+        crate::regression::ols::na_fixtures::with_derived(ds, to, from, |v| v * scale)
+    }
+
+    fn counts(y: [f64; 12]) -> Dataset {
+        Dataset::new(
+            df! { "y" => y, "x" => [1.0, 1.5, 2.0, 1.2, 2.5, 3.0, 2.8, 4.0, 4.5, 2.2, 3.5, 5.0] }
+                .unwrap(),
+        )
+    }
+
+    fn spec_err<T: std::fmt::Debug>(r: EconResult<T>, needles: &[&str]) {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(needles.iter().all(|n| message.contains(n)), "{message}")
+            }
+            other => panic!("expected InvalidSpecification containing {needles:?}, got {other:?}"),
+        }
+    }
+
+    /// R refuses negative counts in glm.nb, zeroinfl and hurdle (disc_hurdle_zero's
+    /// `*_neg_refused` flags).
+    #[test]
+    fn test_validate_count_models_refuse_negative_counts() {
+        let (case, _) = load_case("disc_hurdle_zero");
+        for flag in [
+            "negbin_neg_refused",
+            "zeroinfl_neg_refused",
+            "hurdle_neg_refused",
+        ] {
+            assert_eq!(case.scalar(flag), 1.0, "{flag}");
+        }
+        let ds = counts([
+            0.0, -1.0, 2.0, 0.0, 3.0, 5.0, -3.0, 7.0, 8.0, 2.0, 6.0, 10.0,
+        ]);
+        spec_err(
+            run_negbin(&ds, "y", &["x"], None),
+            &["'y'", "negative", "2 of 12"],
+        );
+        spec_err(run_zip(&ds, "y", &["x"], None), &["'y'", "negative counts"]);
+        spec_err(
+            run_zinb(&ds, "y", &["x"], None),
+            &["'y'", "negative counts"],
+        );
+        spec_err(
+            run_hurdle(&ds, "y", &["x"], None, HurdleType::Poisson),
+            &["'y'", "negative counts"],
+        );
+        spec_err(
+            run_hurdle(&ds, "y", &["x"], None, HurdleType::NegBin),
+            &["'y'", "negative counts"],
+        );
+    }
+
+    /// pscl refuses non-integer counts; glm.nb fits them with a warning
+    /// (disc_hurdle_zero's `*_frac_refused` and `negbin_frac_warned` flags).
+    #[test]
+    fn test_validate_count_models_refuse_non_integer_counts() {
+        let (case, _) = load_case("disc_hurdle_zero");
+        for flag in [
+            "zeroinfl_frac_refused",
+            "hurdle_frac_refused",
+            "negbin_frac_warned",
+        ] {
+            assert_eq!(case.scalar(flag), 1.0, "{flag}");
+        }
+        let ds = counts([0.0, 1.0, 2.5, 0.0, 3.0, 5.0, 4.0, 6.5, 8.0, 2.0, 6.0, 10.0]);
+        spec_err(run_zip(&ds, "y", &["x"], None), &["'y'", "non-integer"]);
+        spec_err(run_zinb(&ds, "y", &["x"], None), &["'y'", "non-integer"]);
+        spec_err(
+            run_hurdle(&ds, "y", &["x"], None, HurdleType::Poisson),
+            &["'y'", "non-integer"],
+        );
+        let r = run_negbin(&ds, "y", &["x"], None).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("non-integer counts in 'y'") && w.contains("2 values")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// x1b = 2 x1: glm.nb reports x1b as NA and fits the rest.
+    #[test]
+    fn test_validate_negbin_aliased_column_is_na() {
+        let (case, ds) = load_case("disc_negbin");
+        let s = with_scaled(&ds, "x1", "x1b", 2.0);
+        let r = run_negbin(&s, "y", &["x1", "x1b", "x2"], None).unwrap();
+        let full = run_negbin(&ds, "y", &["x1", "x2"], None).unwrap();
+        assert_eq!(r.aliased, vec!["x1b".to_string()]);
+        assert_eq!(r.variables.len(), 4);
+        assert!(r.coefficients[2].is_nan() && r.std_errors[2].is_nan());
+        assert!(r.z_stats[2].is_nan() && r.p_values[2].is_nan());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Coefficients not defined because of singularities: x1b"),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .named_subset(
+                "coef",
+                &["(Intercept)", "x1", "x2"],
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-6),
+            )
+            .scalar("theta", r.theta, Tol::iterative(1e-6))
+            .finish();
+        for (i, j) in [(0, 0), (1, 1), (3, 2)] {
+            assert!(Tol::new(1e-12, 1e-14).allows(r.coefficients[i], full.coefficients[j]));
+            assert!(Tol::new(1e-12, 1e-14).allows(r.std_errors[i], full.std_errors[j]));
+        }
+    }
+
+    /// pscl fails on an aliased count or zero design ("non-finite value supplied by
+    /// optim"); p2a names the columns.
+    #[test]
+    fn test_validate_zeroinfl_and_hurdle_aliased_regressor_is_an_error() {
+        let (case, ds) = load_case("disc_zeroinfl");
+        // the rows the unaliased ZIP fit uses
+        assert_eq!(case.scalar("zip_n"), ds.df().height() as f64);
+        let s = with_scaled(&ds, "x1", "x1b", 2.0);
+        let singular = |r: EconResult<String>| match r {
+            Err(EconError::SingularMatrix { context, .. }) => {
+                assert!(context.contains("x1b"), "{context}")
+            }
+            other => panic!("expected SingularMatrix naming x1b, got {other:?}"),
+        };
+        singular(run_zip(&s, "y", &["x1", "x1b", "x2"], None).map(|r| r.to_string()));
+        singular(run_zip(&s, "y", &["x1", "x2"], Some(&["x1", "x1b"][..])).map(|r| r.to_string()));
+        singular(run_zinb(&s, "y_nb", &["x1", "x1b", "x2"], None).map(|r| r.to_string()));
+        singular(
+            run_hurdle(&s, "y", &["x1", "x1b", "x2"], None, HurdleType::Poisson)
+                .map(|r| r.to_string()),
+        );
+        singular(
+            run_hurdle(
+                &s,
+                "y",
+                &["x1", "x2"],
+                Some(&["x1", "x1b"][..]),
+                HurdleType::Poisson,
+            )
+            .map(|r| r.to_string()),
+        );
+    }
+
+    /// The hurdle's zero part is glm(y > 0 ~ x1 + x2, binomial), as pscl's zero hurdle.
+    #[test]
+    fn test_validate_hurdle_zero_part_is_binomial_glm() {
+        let (case, ds) = load_case("disc_hurdle_zero");
+        let r = run_hurdle(&ds, "y", &["x1", "x2"], None, HurdleType::Poisson).unwrap();
+        Check::new(&case)
+            .scalar("n", r.n_obs as f64, Tol::exact())
+            .scalar("n_zeros", r.n_zeros as f64, Tol::exact())
+            .scalar("n_positive", r.n_positive as f64, Tol::exact())
+            .named(
+                "zero_coef",
+                &r.binary_variables,
+                &r.binary_coefficients,
+                Tol::coef(500),
+            )
+            .named(
+                "zero_coef_tight",
+                &r.binary_variables,
+                &r.binary_coefficients,
+                Tol::iterative(1e-8),
+            )
+            .named(
+                "zero_se_tight",
+                &r.binary_variables,
+                &r.binary_std_errors,
+                Tol::se(500),
+            )
+            .scalar("zero_loglik", r.ll_binary, Tol::stat(500))
+            .named(
+                "zero_coef_pkg",
+                &r.binary_variables,
+                &r.binary_coefficients,
+                Tol::iterative(1e-6),
+            )
+            .finish();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    /// No finite MLE and an IRLS that did not settle are both reported, the IRLS first
+    /// (T2-WP10 kept only the first). No data set reaches both: separated zero counts
+    /// add exponentially less to the log-likelihood each step, so the IRLS settles on
+    /// its log-likelihood test; the assembly is checked directly.
+    #[test]
+    fn test_negbin_no_mle_and_unconverged_irls_warn_both() {
+        let w = nb_fit_warnings(3, false, 0);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(
+            w[0].starts_with("the IRLS for the coefficients did not settle"),
+            "{w:?}"
+        );
+        assert!(
+            w[1].starts_with("the coefficient IRLS was still driving"),
+            "{w:?}"
+        );
+        assert!(w[1].contains("3 zero-count rows"), "{w:?}");
+        let w = nb_fit_warnings(1, true, 5);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("1 zero-count row to 0"), "{w:?}");
+        let w = nb_fit_warnings(0, true, 2);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].starts_with("fitted means numerically 0 occurred for 2 rows"),
+            "{w:?}"
+        );
+        assert!(nb_fit_warnings(0, true, 0).is_empty());
+        let w = nb_fit_warnings(0, false, 4);
+        assert_eq!(w.len(), 1, "{w:?}");
     }
 }

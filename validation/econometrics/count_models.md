@@ -371,10 +371,41 @@ ECON-64), `discrete_zip` and `discrete_zinb`.
 - ZIP/ZINB: pscl's BFGS stops about 1e-7 relative from the MLE (`*_pkg`, checked at
   1e-4); p2a warns about fitted zero-inflation probabilities numerically 0 or 1, which
   pscl's EM suppresses, and refuses an outcome without zeros as pscl does.
-- Open items: ECON-58 (Tier 4) keeps negative and non-integer counts and the `y < 0.5`
-  zero rule; TOOL-30 (Tier 4) the MCP description of the `z` argument.
+- Open items: TOOL-30 (Tier 4) the MCP description of the `z` argument. (ECON-58, the
+  outcome domain, is closed by T3-WP18; see below.)
 - `validation/expected/negbin_test.csv`, `zip_test.csv` and `zinb_test.csv` are legacy
   files that no test reads.
+
+## Outcome domain and aliased regressors (T3-WP18)
+
+Case `disc_hurdle_zero` in [`validation/r/cases/discrete_mlogit_asc.R`](../r/cases/discrete_mlogit_asc.R)
+(registry `validation/methods/discrete_t3.json`, id `discrete_count_domain_aliasing`) records
+what R does with a bad count outcome: `MASS::glm.nb` refuses negative counts
+(`negbin_neg_refused` = 1, "negative values not allowed for the 'Poisson' family") and fits
+non-integer counts with a warning (`negbin_frac_warned` = 1, "non-integer x"); `pscl::zeroinfl`
+and `pscl::hurdle` refuse both (`zeroinfl_neg_refused`, `zeroinfl_frac_refused`,
+`hurdle_neg_refused`, `hurdle_frac_refused` = 1, "invalid dependent variable").
+
+p2a does the same: a negative count is `InvalidSpecification` in `run_negbin`, `run_zip`,
+`run_zinb` and `run_hurdle` (naming the column, the count and the first value); a non-integer
+count is `InvalidSpecification` for the pscl models and a warning for the negative binomial.
+A zero is `y == 0` (the zero-inflated rule was `y < 0.5`).
+
+Aliased regressors: the negative binomial drops a regressor that is a linear combination of the
+others, as glm.nb's `glm.fitter` does at its QR tolerance (1e-11): its coefficient, SE, z and p
+are `NaN`, its name is in `NegBinResult.aliased`, and the warning is R's "Coefficients not
+defined because of singularities". The zero-inflated and hurdle models refuse an aliased count
+or zero design with `SingularMatrix` naming the columns (pscl stops in optim with "non-finite
+value supplied by optim").
+
+Tests:
+
+- `econometrics::discrete::count_models::tests::test_validate_count_models_refuse_negative_counts`
+- `econometrics::discrete::count_models::tests::test_validate_count_models_refuse_non_integer_counts`
+- `econometrics::discrete::count_models::tests::test_validate_negbin_aliased_column_is_na`
+  (`x1b = 2 x1` on `disc_negbin`: the other coefficients and theta at T2-WP10's tolerance 1e-6,
+  and 1e-12 against p2a's own fit without x1b)
+- `econometrics::discrete::count_models::tests::test_validate_zeroinfl_and_hurdle_aliased_regressor_is_an_error`
 
 ## References
 

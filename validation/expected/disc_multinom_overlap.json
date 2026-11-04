@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "disc_multinom_overlap",
+  "area": "econometrics/discrete",
+  "method": "nnet::multinom on overlapping three-category data (finite MLE)",
+  "reference": "nnet::multinom(y ~ x1 + x2) re-solved by Newton's method on the analytic score and information (*_tight; nnet's vcov at reltol 1e-16 agrees to 1e-6); *_pkg = nnet at its default control",
+  "call": "multinom(y ~ x1 + x2, data = multinom_overlap, Hess = TRUE)",
+  "dataset": "validation/datasets/generated/multinom_overlap.csv",
+  "datasets": ["validation/datasets/generated/multinom_overlap.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "nnet": "7.3.19"
+  },
+  "values": {
+    "n": 300,
+    "counts": {
+      "names": ["A", "B", "C"],
+      "values": [90, 134, 76]
+    },
+    "coef_tight": {
+      "names": ["B:(Intercept)", "B:x1", "B:x2", "C:(Intercept)", "C:x1", "C:x2"],
+      "values": [0.37858810180401281, 0.76590985364723674, -0.54579581525886101, -0.30973804584828452, 0.27667023451129158, 0.55874181405887546]
+    },
+    "se_tight": {
+      "names": ["B:(Intercept)", "B:x1", "B:x2", "C:(Intercept)", "C:x1", "C:x2"],
+      "values": [0.14741841585273519, 0.17001272144209154, 0.16762883134766654, 0.17881863651938815, 0.17734260710942204, 0.17940214894702464]
+    },
+    "loglik": -287.64340189587034,
+    "aic": 587.28680379174068,
+    "null_loglik": -320.70560501195314,
+    "coef_pkg": {
+      "names": ["B:(Intercept)", "B:x1", "B:x2", "C:(Intercept)", "C:x1", "C:x2"],
+      "values": [0.37859007355066804, 0.76591002942433406, -0.54579712048337237, -0.30973751291802826, 0.27667254057540153, 0.55874337089533654]
+    },
+    "loglik_pkg": -287.64340189620862,
+    "refB_coef_tight": {
+      "names": ["A:(Intercept)", "A:x1", "A:x2", "C:(Intercept)", "C:x1", "C:x2"],
+      "values": [-0.37858810180401276, -0.76590985364723663, 0.54579581525886101, -0.68832614765229727, -0.48923961913594505, 1.1045376293177365]
+    },
+    "refB_se_tight": {
+      "names": ["A:(Intercept)", "A:x1", "A:x2", "C:(Intercept)", "C:x1", "C:x2"],
+      "values": [0.14741841585273521, 0.1700127214420914, 0.16762883134766646, 0.16730335024212853, 0.17877000085944891, 0.18526226071780577]
+    }
+  }
+}
