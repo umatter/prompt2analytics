@@ -93,12 +93,12 @@ fn no_features() -> EconError {
 }
 
 /// `Err` naming the first non-finite cell in row-major order:
-/// "<method>: x must contain only finite values (row 4, column 0 is NaN); remove or impute
+/// "<method>: data must contain only finite values (row 4, column 0 is NaN); remove or impute
 /// missing values first".
 pub(crate) fn require_finite(data: &ArrayView2<f64>, method: &str) -> Result<(), String> {
     match data.indexed_iter().find(|(_, v)| !v.is_finite()) {
         Some(((i, j), v)) => Err(format!(
-            "{method}: x must contain only finite values (row {i}, column {j} is {v}); \
+            "{method}: data must contain only finite values (row {i}, column {j} is {v}); \
              remove or impute missing values first"
         )),
         None => Ok(()),
@@ -290,7 +290,7 @@ mod tests {
         let e = require_finite(&bad.view(), "PCA").unwrap_err();
         assert_eq!(
             e,
-            "PCA: x must contain only finite values (row 1, column 0 is NaN); remove or impute missing values first"
+            "PCA: data must contain only finite values (row 1, column 0 is NaN); remove or impute missing values first"
         );
         assert_eq!(
             class_labels_line(&["no".into(), "yes".into()]),

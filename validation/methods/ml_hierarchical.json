@@ -1,0 +1,305 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_hclust",
+      "name": "Hierarchical clustering core (8 linkages), cutree",
+      "category": "ml",
+      "reference": "stats::hclust; stats::cutree",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::hclust::tests::test_validate_hclust_single",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_complete",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_average",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_mcquitty",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_wardD",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_wardD2",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_centroid",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_median",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_cuts",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_hand_cases",
+        "p2a-core::ml::hclust::tests::test_validate_hclust_tree_conversions_round_trip"
+      ],
+      "quantities": [
+        "merge",
+        "height",
+        "order",
+        "cutree k",
+        "cutree h",
+        "tie-breaking (hclust_ties)"
+      ],
+      "tolerance": "merge, order, labels exact; heights Tol::coef(n) (n = 40-60: 1e-6 relative)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_hierarchical",
+      "name": "ml::hierarchical (MCP ml_hierarchical, CLI ml hierarchical)",
+      "category": "ml",
+      "reference": "stats::hclust(dist(x), method)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_hierarchical_linkages"
+      ],
+      "quantities": [
+        "linkage matrix",
+        "merge distances"
+      ],
+      "tolerance": "as ml_hclust",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_cutree",
+      "name": "ml::cutree, cutree_multiple_k (MCP ml_cutree)",
+      "category": "ml",
+      "reference": "stats::cutree",
+      "doc": "validation/ml/cutree.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_cutree3",
+        "p2a-core::ml::clustering::tests::test_validate_cutree_labels_deterministic_first_appearance"
+      ],
+      "quantities": [
+        "labels k = 3 (8 linkages)",
+        "labels k = 2, 4, 6",
+        "labels h = 1.5",
+        "k(h)"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_fastcluster",
+      "name": "fastcluster",
+      "category": "ml",
+      "reference": "fastcluster::hclust / hclust.vector (equal to stats::hclust; centroid/median heights square-rooted)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_fastcluster_linkages",
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_fastcluster_finding_cases"
+      ],
+      "quantities": [
+        "merge",
+        "height",
+        "order",
+        "cut labels"
+      ],
+      "tolerance": "as ml_hclust",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_agnes",
+      "name": "AGNES",
+      "category": "ml",
+      "reference": "cluster::agnes",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_agnes_diana_coefficients",
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_agnes_tree"
+      ],
+      "quantities": [
+        "ac (5 methods)",
+        "sorted heights",
+        "banner order",
+        "cutree k = 3"
+      ],
+      "tolerance": "ac Tol::stat(60); heights Tol::coef(60); order, labels exact",
+      "deviations": [
+        {
+          "finding": "ML-55",
+          "quantity": "merge order under exactly tied dissimilarities",
+          "note": "AGNES uses the hclust core, which merges the first tied pair; cluster::agnes merges the last. Not pinned on tied data."
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_diana",
+      "name": "DIANA",
+      "category": "ml",
+      "reference": "cluster::diana",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_agnes_diana_coefficients",
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_diana_banner"
+      ],
+      "quantities": [
+        "dc",
+        "banner (height)",
+        "order",
+        "merge",
+        "cutree k = 3"
+      ],
+      "tolerance": "dc Tol::stat(60); banner Tol::coef(60); rest exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_pvclust_tree",
+      "name": "pvclust (tree)",
+      "category": "ml",
+      "reference": "stats::hclust(dist(x), 'average')",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "hclust_methods"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::hierarchical::tests::test_validate_pvclust_tree"
+      ],
+      "quantities": [
+        "merge",
+        "heights"
+      ],
+      "tolerance": "as ml_hclust",
+      "deviations": [
+        {
+          "finding": "ML-10",
+          "quantity": "AU and BP p-values",
+          "note": "pvclust resamples observations instead of variables (Tier 4); only the tree is pinned"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_dynamic_tree_cut",
+      "name": "Dynamic tree cut",
+      "category": "ml",
+      "reference": "dynamicTreeCut::cutreeDynamic (1.63.1)",
+      "doc": "validation/ml/dynamic_tree_cut.md",
+      "cases": [
+        "dynamic_tree_cut"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_cutree_dynamic_tree",
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_cutree_dynamic_hybrid",
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_dynamic_tree_cut_options_change_the_result",
+        "p2a-core::ml::advanced_clustering_mod::dynamic_tree_cut::tests::test_validate_dynamic_tree_cut_defaults_and_fallback"
+      ],
+      "quantities": [
+        "labels: tree deepSplit FALSE/TRUE, cutHeight; hybrid deepSplit 0-4, pamStage FALSE, cutHeight, maxPamDist 0, defaults; ward.D2 tree"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_kmeans",
+      "name": "K-means (Lloyd)",
+      "category": "ml",
+      "reference": "stats::kmeans(algorithm = 'Lloyd')",
+      "doc": "validation/ml/kmeans.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_unit_scale",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_small_scale",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_not_converged",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_scale_invariant",
+        "p2a-core::ml::clustering::tests::test_validate_kmeans_labels_match_final_centroids"
+      ],
+      "quantities": [
+        "cluster",
+        "centers",
+        "tot.withinss"
+      ],
+      "tolerance": "labels exact; centers Tol::coef(60); tot.withinss Tol::stat(60); iteration counts and the state at the iteration limit are not R-pinned",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_pca",
+      "name": "PCA",
+      "category": "ml",
+      "reference": "stats::prcomp (scale. = TRUE and FALSE)",
+      "doc": "validation/ml/pca.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_prcomp"
+      ],
+      "quantities": [
+        "sdev",
+        "|rotation|",
+        "variance ratio"
+      ],
+      "tolerance": "sdev and ratio Tol::stat(60); rotation Tol::coef(60)",
+      "deviations": [
+        {
+          "finding": "ML-35",
+          "quantity": "explained_variance_ratio with n_components < p on the SVD path (n <= 4p)",
+          "note": "Tier 4; the pins use all components on the covariance path"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_cmdscale",
+      "name": "Classical MDS",
+      "category": "ml",
+      "reference": "stats::cmdscale(k, eig = TRUE)",
+      "doc": "validation/ml/cmdscale.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_eurodist",
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_line_configuration",
+        "p2a-core::ml::reduction::tests::test_validate_cmdscale_is_scale_equivariant"
+      ],
+      "quantities": [
+        "|points|",
+        "eig"
+      ],
+      "tolerance": "points Tol::coef(21); eig rel 1e-9 abs 1e-6 (null eigenvalue is roundoff)",
+      "deviations": [
+        {
+          "finding": "ML-98",
+          "quantity": "GOF",
+          "note": "p2a gof = [sum_pos/sum_abs, sum_k/sum_abs]; R GOF = sum_k / c(sum|ev|, sum(pmax(ev, 0))) = 0.7537543155079838, 0.8679134296478231 (Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_dbscan",
+      "name": "DBSCAN",
+      "category": "ml",
+      "reference": "dbscan::dbscan(eps, minPts)",
+      "doc": "validation/ml/hclust.md",
+      "cases": [
+        "kmeans_lloyd_pca_mds"
+      ],
+      "tests": [
+        "p2a-core::ml::clustering::tests::test_validate_dbscan_hclust60"
+      ],
+      "quantities": [
+        "cluster (noise 0)"
+      ],
+      "tolerance": "exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

@@ -1,73 +1,42 @@
 # Validation: Principal Component Analysis (PCA)
 
-## Method Overview
+## Method
 
-PCA finds orthogonal directions (principal components) that maximize variance in the data.
+`pca` (`crates/p2a-core/src/ml/reduction.rs`) centres the data and takes the eigendecomposition of the
+covariance matrix (n - 1 denominator) or, for n <= 4p, the SVD of the centred data; components are sorted by
+decreasing variance. `explained_variance` is R's `prcomp()$sdev^2`; `components` (rows = PCs) is R's
+`rotation` transposed. Loadings are unique up to sign: compare absolute values.
 
-**Computation**:
-1. Center data: X_centered = X - mean(X)
-2. Compute covariance matrix: C = X'X / (n-1)
-3. Eigendecomposition: C = VΛV'
-4. PCs are columns of V, sorted by eigenvalues
+## R code
 
-## Reference Implementations
+`validation/r/cases/ml_hierarchical.R`, case `kmeans_lloyd_pca_mds` (R 4.3.3):
+`prcomp(X, scale. = TRUE)` and `prcomp(X)` on `validation/datasets/generated/hclust_60.csv` (60 x 3). The
+scaled run passes the standardised data to `pca`.
 
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-| stats | R | `prcomp()` | 4.3.x |
-| scikit-learn | Python | `PCA()` | 1.3-x |
+## Values
 
-## Test Cases
+| Key | R |
+|---|---|
+| `pca_sdev` | 1.3221524880813766, 0.9819157249713941, 0.5364273551135557 |
+| `pca_var_ratio` | 0.5826957339132586, 0.3213861636486997, 0.09591810243804165 |
+| `pca_unscaled_sdev` | 2.6485861925208094, 1.9008767308107948, 0.8828277799830404 |
+| `pca_unscaled_var_ratio` | 0.6149348946467286, 0.316744312461122, 0.06832079289214951 |
+| `pca_rotation_abs`, `pca_unscaled_rotation_abs` | `abs(rotation)`, column-major |
 
-### Test 1: Simple 2D Data
+**Deviation ML-35** (Tier 4): with `n_components < p` on the SVD path (n <= 4p), `explained_variance_ratio` is
+relative to the kept components only. The pins use all components on the covariance path (n = 60 > 4p).
 
-**R Code**:
-```r
-set.seed(42)
-n <- 100
+## Tests and tolerances
 
-# Correlated 2D data
-x1 <- rnorm(n)
-x2 <- 0.8 * x1 + rnorm(n, 0, 0.5)
-data <- cbind(x1, x2)
-
-pca_result <- prcomp(data, center = TRUE, scale = FALSE)
-
-# Loadings
-print(pca_result$rotation)
-
-# Variance explained
-summary(pca_result)
-```
-
-**Results Comparison**:
-
-| Statistic | R prcomp | p2a Rust | Tolerance |
-|-----------|----------|----------|-----------|
-| PC1 loading | varies | varies | 0.01 |
-| % Variance PC1 | ~85% | ~85% | 2% |
-
----
-
-### Test 2: Iris Dataset
-
-**R Code**:
-```r
-data(iris)
-pca_result <- prcomp(iris[, 1:4], center = TRUE, scale = TRUE)
-summary(pca_result)
-
-# First 2 PCs explain ~95% of variance
-```
-
-## Sign Ambiguity
-
-Note: PCA loadings are unique up to sign. Compare absolute values or check correlation.
+| Test (`crates/p2a-core/src/ml/reduction.rs`) | Keys | Tolerance |
+|---|---|---|
+| `test_validate_prcomp` | `pca_*`, `pca_unscaled_*` | sdev, ratio `Tol::stat(60)`; rotation `Tol::coef(60)` |
+| `test_pca_n_components_shapes`, `test_pca_components_orthonormal`, `test_pca_transformation_matches_projection`, `test_pca_n_components_bound`, `test_pca_deterministic`, `test_pca_centering` | p2a properties | |
 
 ## Missing and non-finite values
 
 - **Core.** `pca` refuses NaN and ±Inf and names the first bad cell in row-major order:
-  "PCA: x must contain only finite values (row 4, column 0 is NaN); remove or impute
+  "PCA: data must contain only finite values (row 4, column 0 is NaN); remove or impute
   missing values first". It used to return NaN variances (or an SVD failure). R stops as
   well: `prcomp(m)` on a matrix with an `NA` gives "infinite or missing values in 'x'"
   (R 4.3.3).
@@ -84,7 +53,7 @@ Note: PCA loadings are unique up to sign. Compare absolute values or check corre
 ## Running the Tests
 
 ```bash
-cargo test -p p2a-core -- pca
+cargo test -p p2a-core --lib --no-default-features --features ci -- ml::reduction::tests::test_validate_prcomp ml::reduction::tests::test_pca
 ```
 
 ## References

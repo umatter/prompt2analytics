@@ -317,7 +317,7 @@ pub struct TsneResult {
     pub perplexity: f64,
     /// Number of iterations performed
     pub n_iterations: usize,
-    /// Final KL divergence
+    /// KL(P || Q) of the returned embedding, with the unexaggerated P
     pub kl_divergence: f64,
 }
 
@@ -434,8 +434,6 @@ pub fn tsne(
     // Student-t similarities, overwritten every iteration
     let mut q = try_zeros2(n_samples, n_samples, "t-SNE similarity matrix").map_err(to_string)?;
 
-    let mut kl_div = 0.0;
-
     for iter in 0..max_iter {
         checkpoint().map_err(to_string)?;
 
@@ -462,11 +460,11 @@ pub fn tsne(
         // Update gains for adaptive learning rate
         for i in 0..n_samples {
             for j in 0..n_comp {
-                let sign_match = (gradient[[i, j]] > 0.0) == (y_velocity[[i, j]] > 0.0);
-                gains[[i, j]] = if sign_match {
-                    f64::max(gains[[i, j]] * 0.8, 0.01)
-                } else {
+                // bhtsne/Rtsne: sign(dY) != sign(uY), with sign(0) = 0
+                gains[[i, j]] = if sign3(gradient[[i, j]]) != sign3(y_velocity[[i, j]]) {
                     gains[[i, j]] + 0.2
+                } else {
+                    f64::max(gains[[i, j]] * 0.8, 0.01)
                 };
             }
         }
@@ -480,12 +478,11 @@ pub fn tsne(
         for mut row in y.rows_mut() {
             row -= &mean;
         }
-
-        // Compute KL divergence every 50 iterations
-        if iter % 50 == 0 || iter == max_iter - 1 {
-            kl_div = compute_kl_divergence(&p.view(), exaggeration, &q.view(), sum_q);
-        }
     }
+
+    // KL(P || Q) of the returned embedding, with the unexaggerated P
+    let sum_q = fill_q_distribution(&y.view(), &mut q);
+    let kl_div = compute_kl_divergence(&p.view(), 1.0, &q.view(), sum_q);
 
     Ok(TsneResult {
         embedding: y,
@@ -494,6 +491,17 @@ pub fn tsne(
         n_iterations: max_iter,
         kl_divergence: kl_div,
     })
+}
+
+/// Three-valued sign (`f64::signum(0.0)` is 1).
+fn sign3(v: f64) -> i8 {
+    if v > 0.0 {
+        1
+    } else if v < 0.0 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// Compute joint probability matrix P using Gaussian kernel.
@@ -1125,7 +1133,7 @@ mod tests {
         x[[4, 0]] = f64::NAN;
         let err = pca(x.view(), None, false).unwrap_err();
         assert!(
-            err.starts_with("PCA: x must contain only finite values (row 4, column 0 is NaN)"),
+            err.starts_with("PCA: data must contain only finite values (row 4, column 0 is NaN)"),
             "{err}"
         );
         x[[4, 0]] = 9.0;
@@ -1208,15 +1216,9 @@ mod tests {
     /// data entries, all of them, random subsets, the perplexity and the
     /// learning rate) moved these values by up to 8.1e-4 relative. Other
     /// targets therefore compare to a relative 1e-2.
-    #[test]
-    fn tsne_memory_refactor_is_bit_identical() {
-        const GOLDEN: [u64; 4] = [
-            13867541354597143110,
-            13857677031516769935,
-            4647298372589536596,
-            4612250860452238985,
-        ];
-        let data = array![
+    /// The 15 x 3 data of the t-SNE golden and step tests: three tight groups.
+    fn tsne_fixture() -> Array2<f64> {
+        array![
             [0.0, 0.0, 0.0],
             [0.1, 0.1, 0.1],
             [0.2, 0.0, 0.1],
@@ -1232,7 +1234,84 @@ mod tests {
             [10.0, 0.2, 5.0],
             [10.2, 0.0, 5.2],
             [10.1, 0.1, 5.0],
+        ]
+    }
+
+    /// ML-145: one iteration is bhtsne's first step. Velocity starts at 0 and sign(0) = 0, so
+    /// every gain becomes 1.2 (gains + 0.2) wherever the gradient is non-zero; momentum times 0
+    /// vanishes; then Y is centred.
+    #[test]
+    fn test_tsne_first_step_matches_bhtsne_update() {
+        let data = tsne_fixture();
+        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        let y0 = initialize_embedding(data.view(), 2, Some(42)).unwrap();
+        let mut q = Array2::zeros((15, 15));
+        let sq = fill_q_distribution(&y0.view(), &mut q);
+        // exaggeration 4 on iteration 0
+        let g = compute_gradient(&p.view(), 4.0, &q.view(), &y0.view(), sq);
+        assert!(
+            g.iter().any(|&v| v < 0.0),
+            "the fixture must have a negative gradient entry"
+        );
+        let gain = g.mapv(|v| if v == 0.0 { 1.0 } else { 1.2 });
+        let mut want = &y0 - &(200.0 * &gain * &g);
+        let mean = want.mean_axis(Axis(0)).unwrap();
+        for mut row in want.rows_mut() {
+            row -= &mean;
+        }
+        let r = tsne(
+            data.view(),
+            Some(2),
+            Some(4.0),
+            Some(1),
+            Some(200.0),
+            Some(42),
+        )
+        .unwrap();
+        for (a, b) in r.embedding.iter().zip(want.iter()) {
+            // before: entries with g < 0 used gain 0.8
+            assert!((a - b).abs() <= 1e-12 * (1.0 + b.abs()), "{a} vs {b}");
+        }
+    }
+
+    /// ML-146 (and ML-97's KL part): the reported KL is KL(P || Q(Y)) of the returned Y, with
+    /// the unexaggerated P.
+    #[test]
+    fn test_tsne_reports_kl_of_returned_embedding() {
+        let data = tsne_fixture();
+        let p = compute_joint_probabilities(&data.view(), 4.0).unwrap();
+        // 1 and 50: inside early exaggeration
+        for iters in [1usize, 50, 120] {
+            let r = tsne(
+                data.view(),
+                Some(2),
+                Some(4.0),
+                Some(iters),
+                Some(200.0),
+                Some(42),
+            )
+            .unwrap();
+            let mut q = Array2::zeros((15, 15));
+            let sq = fill_q_distribution(&r.embedding.view(), &mut q);
+            let want = compute_kl_divergence(&p.view(), 1.0, &q.view(), sq);
+            assert!(
+                (r.kl_divergence - want).abs() <= 1e-12 * want.abs(),
+                "iters={iters}: {} vs {want}",
+                r.kl_divergence
+            );
+        }
+    }
+
+    /// Re-captured at T3-WP42 (ML-145 changes the path from step 1, ML-146 the reported KL).
+    #[test]
+    fn tsne_memory_refactor_is_bit_identical() {
+        const GOLDEN: [u64; 4] = [
+            13859390039091109202,
+            13872640547727622304,
+            13858743226655607939,
+            4613615299525055005,
         ];
+        let data = tsne_fixture();
         // 120 iterations cross the early-exaggeration switch at 100
         let r = tsne(
             data.view(),
@@ -1716,35 +1795,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pca_vs_r() {
-        // R reference:
-        // prcomp(data, center=TRUE, scale=FALSE)
-        let data = create_validation_pca_data();
-        let result = pca(data.view(), None, true).unwrap();
-
-        // Should have 4 components (min of 10 samples, 4 features)
-        assert_eq!(result.n_components, 4);
-
-        // Mean should be computed
-        assert_eq!(result.mean.len(), 4);
-
-        // Explained variance should sum to total
-        let sum_var: f64 = result.explained_variance.iter().sum();
-        assert!(
-            (sum_var - result.total_variance).abs() / result.total_variance < 0.01,
-            "Explained variance should sum to total"
-        );
-
-        // Variance ratio should sum to 1
-        let sum_ratio: f64 = result.explained_variance_ratio.iter().sum();
-        assert!(
-            (sum_ratio - 1.0).abs() < 0.01,
-            "Variance ratios should sum to 1"
-        );
-    }
-
-    #[test]
-    fn test_validate_pca_variance_ordering() {
+    fn test_pca_n_components_shapes() {
         // R reference: eigenvalues in decreasing order
         let data = create_validation_pca_data();
         let result = pca(data.view(), None, false).unwrap();
@@ -1769,7 +1820,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pca_components_orthonormal() {
+    fn test_pca_components_orthonormal() {
         let data = create_validation_pca_data();
         let result = pca(data.view(), None, false).unwrap();
 
@@ -1811,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pca_transformation() {
+    fn test_pca_transformation_matches_projection() {
         let data = create_validation_pca_data();
         let result = pca(data.view(), Some(2), true).unwrap();
 
@@ -1844,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pca_n_components() {
+    fn test_pca_n_components_bound() {
         let data = create_validation_pca_data();
 
         // Request fewer components
@@ -1858,37 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cmdscale_vs_r() {
-        // R reference:
-        // cmdscale(dist(data), k=2, eig=TRUE)
-        // Test with points forming a square
-        let dist = vec![
-            vec![0.0, 1.0, 1.414, 1.0], // Point 0: (0, 0)
-            vec![1.0, 0.0, 1.0, 1.414], // Point 1: (1, 0)
-            vec![1.414, 1.0, 0.0, 1.0], // Point 2: (1, 1)
-            vec![1.0, 1.414, 1.0, 0.0], // Point 3: (0, 1)
-        ];
-
-        let result = cmdscale(&dist, Some(2), Some(true), None).unwrap();
-
-        assert_eq!(result.n, 4);
-        assert_eq!(result.k, 2);
-        assert_eq!(result.points.len(), 4);
-
-        // Each point should have 2 coordinates
-        for p in &result.points {
-            assert_eq!(p.len(), 2);
-        }
-
-        // GOF should be very high for perfect distance matrix
-        assert!(
-            result.gof[0] > 0.95,
-            "GOF should be > 0.95 for perfect square"
-        );
-    }
-
-    #[test]
-    fn test_validate_cmdscale_distance_preservation() {
+    fn test_cmdscale_preserves_euclidean_distances() {
         // MDS should preserve original distances
         let original_dist = vec![
             vec![0.0, 1.0, 2.0],
@@ -1911,7 +1932,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_tsne_preserves_local_structure() {
+    fn test_tsne_preserves_local_structure() {
         // t-SNE should preserve local neighborhood structure
         // Create 3 tight clusters with enough points for perplexity requirement
         let data = array![
@@ -1952,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pca_deterministic() {
+    fn test_pca_deterministic() {
         // PCA should be deterministic (no random state)
         let data = create_validation_pca_data();
 
@@ -1969,7 +1990,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_pca_centering() {
+    fn test_pca_centering() {
         let data = create_validation_pca_data();
         let result = pca(data.view(), None, false).unwrap();
 
@@ -1983,6 +2004,109 @@ mod tests {
                 result.mean[j],
                 col_mean
             );
+        }
+    }
+
+    use crate::ml::hclust::test_util::{case_frame, matrix};
+    use p2a_validation::{Check, Tol};
+
+    #[test]
+    fn test_validate_prcomp() {
+        // prcomp(X, scale. = TRUE): sdev 1.3221524880813766 0.9819157249713941
+        // 0.5364273551135557; prcomp(X) unscaled. Rotation signs are arbitrary: absolute values.
+        // n = 60 > 4p: the covariance path (ML-35's SVD-path ratio with n_components < p is not
+        // exercised; registry deviation ML-35).
+        let (case, ds) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let mean = x.mean_axis(ndarray::Axis(0)).unwrap();
+        let sd = x.std_axis(ndarray::Axis(0), 1.0);
+        let z = (&x - &mean) / &sd;
+        let mut c = Check::new(&case);
+        for (data, pre) in [(&z, "pca_"), (&x, "pca_unscaled_")] {
+            let r = pca(data.view(), None, false).unwrap();
+            let sdev: Vec<f64> = r.explained_variance.iter().map(|v| v.sqrt()).collect();
+            // rows = PCs: R's rotation in column-major order
+            let rot: Vec<f64> = r.components.iter().map(|v| v.abs()).collect();
+            c.vector(&format!("{pre}sdev"), &sdev, Tol::stat(60))
+                .vector(&format!("{pre}rotation_abs"), &rot, Tol::coef(60))
+                .vector(
+                    &format!("{pre}var_ratio"),
+                    r.explained_variance_ratio.as_slice().unwrap(),
+                    Tol::stat(60),
+                );
+        }
+        c.finish();
+    }
+
+    #[test]
+    fn test_validate_cmdscale_eurodist() {
+        // ML-36: before (power iteration) eig = 19538377, 11856555, -2251844, 1528844, ...; R
+        // sorts algebraically. GOF is ML-98 (Tier 4): deviation, not pinned.
+        let (case, _) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
+        let df = case_frame(&case, "eurodist_matrix.csv");
+        let names: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cols: Vec<Vec<f64>> = names
+            .iter()
+            .map(|n| {
+                crate::data::columns::numeric_column(&df, n, crate::data::columns::NaPolicy::Fail)
+                    .unwrap()
+                    .0
+            })
+            .collect();
+        let d: Vec<Vec<f64>> = (0..21)
+            .map(|i| (0..21).map(|j| cols[j][i]).collect())
+            .collect();
+        let r = cmdscale(&d, Some(2), Some(true), None).unwrap();
+        let pts: Vec<f64> = (0..2)
+            .flat_map(|j| r.points.iter().map(move |p| p[j].abs()))
+            .collect();
+        // deviation ML-98: r.gof is [sum_pos/sum_abs, sum_k/sum_abs], R GOF 0.7537543155079838
+        // 0.8679134296478231
+        Check::new(&case)
+            .vector("mds_points_abs", &pts, Tol::coef(21))
+            // the null eigenvalue is roundoff (R -3.7e-09; |lambda| <~ 21 eps lambda_max ~ 1e-7):
+            // abs 1e-6
+            .vector("mds_eig", &r.eig, Tol::new(1e-9, 1e-6))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cmdscale_line_configuration() {
+        // ML-36: (0, -1, 1) with k = 1 returned [[2e-24],[4e-24],[4e-24]] and eig 3e-16 before;
+        // R points 0 -1 1, eig 2 0 0
+        let (case, _) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
+        let x = array![[0.0], [-1.0], [1.0]];
+        let r = cmdscale_from_data(x.view(), Some(1)).unwrap();
+        Check::new(&case)
+            .vector(
+                "mds_line_points_abs",
+                &r.points.iter().map(|p| p[0].abs()).collect::<Vec<_>>(),
+                Tol::new(1e-12, 1e-12),
+            )
+            .vector("mds_line_eig", &r.eig, Tol::new(1e-12, 1e-12))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cmdscale_is_scale_equivariant() {
+        // ML-36 verification: data x 1e-5 collapsed to an all-zero configuration under the
+        // absolute 1e-10 stop rule
+        let (_, ds) = crate::test_support::load_case("kmeans_lloyd_pca_mds");
+        let x = matrix(ds.df(), &["a", "b", "c"]);
+        let s = 2f64.powi(-17);
+        let a = cmdscale_from_data(x.view(), Some(2)).unwrap();
+        let b = cmdscale_from_data((&x * s).view(), Some(2)).unwrap();
+        for (ea, eb) in a.eig.iter().zip(&b.eig).take(3) {
+            assert!((eb / (s * s) - ea).abs() <= 1e-9 * ea.abs(), "{ea} {eb}");
+        }
+        for (pa, pb) in a.points.iter().zip(&b.points) {
+            for j in 0..2 {
+                assert!((pb[j].abs() / s - pa[j].abs()).abs() <= 1e-9 * (1.0 + pa[j].abs()));
+            }
         }
     }
 }
