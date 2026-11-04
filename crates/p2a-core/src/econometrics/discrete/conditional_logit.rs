@@ -29,7 +29,7 @@
 //! R equivalent: `mlogit::mlogit()`
 
 use faer::linalg::solvers::Solve;
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -38,6 +38,7 @@ use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::ndarray_to_faer;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
@@ -413,7 +414,9 @@ fn compute_mlogit_loglik_fast(data: &MlogitData, params: &[f64]) -> f64 {
 fn compute_mlogit_derivatives_fast(
     data: &MlogitData,
     params: &[f64],
-) -> EconResult<(f64, Array1<f64>, Array2<f64>)> {
+) -> EconResult<MlogitDerivatives> {
+    let eps10 = 10.0 * f64::EPSILON;
+    let (mut n_extreme, mut n_situations_extreme) = (0, 0);
     let m = data.n_params;
     let params_arr = ArrayView1::from(params);
     let mut ll = 0.0;
@@ -425,11 +428,19 @@ fn compute_mlogit_derivatives_fast(
     let mut probs = vec![0.0; max_alts];
     let mut xbar = vec![0.0; m];
     let mut dev = vec![0.0; m];
+    // Row-major slices of the features and the information: the same sums in the same
+    // order as indexing the arrays, without the per-element index checks.
+    let (Some(feat), Some(inf)) = (data.features.as_slice(), info.as_slice_mut()) else {
+        return Err(EconError::Computation(
+            "conditional logit: feature or information matrix not in standard layout".into(),
+        ));
+    };
+    let row = |r: usize| &feat[r * m..(r + 1) * m];
 
     for &(start, n_alts, chosen_local) in &data.choice_info {
         let mut max_v = f64::NEG_INFINITY;
         for i in 0..n_alts {
-            let v = data.features.row(start + i).dot(&params_arr);
+            let v = ArrayView1::from(row(start + i)).dot(&params_arr);
             utilities[i] = v;
             max_v = max_v.max(v);
         }
@@ -439,26 +450,31 @@ fn compute_mlogit_derivatives_fast(
             probs[i] = e;
             sum_exp += e;
         }
+        let mut k_extreme = 0;
         for p in probs.iter_mut().take(n_alts) {
             *p /= sum_exp;
+            k_extreme += usize::from(*p < eps10 || *p > 1.0 - eps10);
         }
+        n_extreme += k_extreme;
+        n_situations_extreme += usize::from(k_extreme > 0);
         ll += utilities[chosen_local] - max_v - sum_exp.ln();
 
         xbar.iter_mut().for_each(|v| *v = 0.0);
         for i in 0..n_alts {
-            let row = data.features.row(start + i);
-            for (xb, &x) in xbar.iter_mut().zip(row.iter()) {
+            for (xb, &x) in xbar.iter_mut().zip(row(start + i)) {
                 *xb += probs[i] * x;
             }
         }
-        let chosen = data.features.row(start + chosen_local);
-        for k in 0..m {
-            gradient[k] += chosen[k] - xbar[k];
+        for ((g, &c), &xb) in gradient
+            .iter_mut()
+            .zip(row(start + chosen_local))
+            .zip(&xbar)
+        {
+            *g += c - xb;
         }
         for i in 0..n_alts {
-            let row = data.features.row(start + i);
-            for k in 0..m {
-                dev[k] = row[k] - xbar[k];
+            for ((d, &x), &xb) in dev.iter_mut().zip(row(start + i)).zip(&xbar) {
+                *d = x - xb;
             }
             let p = probs[i];
             for k in 0..m {
@@ -466,8 +482,8 @@ fn compute_mlogit_derivatives_fast(
                 if pk == 0.0 {
                     continue;
                 }
-                for l in k..m {
-                    info[[k, l]] += pk * dev[l];
+                for (cell, &dl) in inf[k * m + k..(k + 1) * m].iter_mut().zip(&dev[k..]) {
+                    *cell += pk * dl;
                 }
             }
         }
@@ -477,7 +493,24 @@ fn compute_mlogit_derivatives_fast(
             info[[l, k]] = info[[k, l]];
         }
     }
-    Ok((ll, gradient, info))
+    Ok(MlogitDerivatives {
+        ll,
+        grad: gradient,
+        info,
+        n_extreme,
+        n_situations_extreme,
+    })
+}
+
+/// What [`compute_mlogit_derivatives_fast`] computes at one parameter vector.
+struct MlogitDerivatives {
+    ll: f64,
+    grad: Array1<f64>,
+    info: Array2<f64>,
+    /// Fitted probabilities within `10 eps` of 0 or 1.
+    n_extreme: usize,
+    /// Choice situations with at least one such probability.
+    n_situations_extreme: usize,
 }
 
 /// `s_k = 1 / sqrt(info_kk)` (1 for a zero diagonal entry) and `E = S info S`.
@@ -557,6 +590,17 @@ pub(super) fn covariance_from_information(
         }
         Err(err) => Err(err),
     }
+}
+
+/// Whether `x` certainly has full column rank, by OLS's normal-equations test
+/// ([`normal_equations_inverse`]): the reciprocal condition of the equilibrated `X'X` is
+/// at least 1e-8, a lower bound. A pivoted QR at a column tolerance `tol <= 1e-7` (such as
+/// [`LM_QR_TOL`]) aliases a column only when its residual norm is below `tol` times its
+/// norm, which makes that reciprocal condition below `tol^2 = 1e-14`; so `true` is the
+/// QR's verdict, at a fraction of its cost. `false` (rank-deficient, ill-conditioned, not
+/// finite, or fewer rows than columns) means: decide by the QR.
+pub(super) fn certainly_full_rank(x: ArrayView2<f64>) -> EconResult<bool> {
+    Ok(normal_equations_inverse(x)?.is_some())
 }
 
 /// Validate a Newton control: `max_iter >= 1` and a positive, finite `tolerance`.
@@ -770,7 +814,7 @@ pub fn run_mlogit_with(
     let mut params = vec![0.0; n_params];
     let mut warnings: Vec<String> = Vec::new();
     let what = "conditional logit information matrix";
-    let (converged, iterations, final_change) =
+    let (converged, iterations, final_change, at_params) =
         newton_maximise(&mlogit_data, &mut params, config, what, &mut warnings)?;
     let convergence = Convergence::new(
         converged,
@@ -784,7 +828,16 @@ pub fn run_mlogit_with(
         warnings.push(note);
     }
 
-    let (log_likelihood, _, info) = compute_mlogit_derivatives_fast(&mlogit_data, &params)?;
+    let MlogitDerivatives {
+        ll: log_likelihood,
+        info,
+        n_extreme,
+        n_situations_extreme,
+        ..
+    } = match at_params {
+        Some(known) => known,
+        None => compute_mlogit_derivatives_fast(&mlogit_data, &params)?,
+    };
     let log_likelihood_null = n_choice_situations as f64 * (-(n_alternatives as f64).ln());
 
     let std_errors: Vec<f64> = match covariance_from_information(&info, what, &mut warnings)? {
@@ -794,8 +847,8 @@ pub fn run_mlogit_with(
         None => vec![f64::NAN; n_params],
     };
 
-    // Separation: fitted probabilities numerically 0 or 1
-    let (n_extreme, n_situations_extreme) = extreme_probabilities(&mlogit_data, &params);
+    // Separation: fitted probabilities numerically 0 or 1 (counted in the pass of the
+    // final derivatives)
     let separation = n_extreme > 0;
     if separation {
         warnings.push(format!(
@@ -894,12 +947,22 @@ pub fn run_mlogit_with(
 fn check_identified(data: &MlogitData, names: &[String]) -> EconResult<()> {
     let (rows, m) = data.features.dim();
     let mut centred = resource::try_zeros2(rows, m, "conditional logit identification check")?;
+    // Situation means as `mean_axis(Axis(0))` computes them (the rows summed in order from
+    // 0, divided by the number of rows), in one buffer instead of one array per situation.
+    let mut mean = vec![0.0; m];
     for &(start, n_alts, _) in &data.choice_info {
         let block = data.features.slice(ndarray::s![start..start + n_alts, ..]);
-        let mean = block.mean_axis(ndarray::Axis(0));
+        mean.iter_mut().for_each(|v| *v = 0.0);
+        for r in block.rows() {
+            for (mu, &x) in mean.iter_mut().zip(r.iter()) {
+                *mu += x;
+            }
+        }
+        let count = n_alts as f64;
+        mean.iter_mut().for_each(|v| *v /= count);
         for i in 0..n_alts {
             for k in 0..m {
-                centred[[start + i, k]] = block[[i, k]] - mean.as_ref().map_or(0.0, |mu| mu[k]);
+                centred[[start + i, k]] = block[[i, k]] - mean[k];
             }
         }
     }
@@ -909,6 +972,9 @@ fn check_identified(data: &MlogitData, names: &[String]) -> EconResult<()> {
         if cen <= LM_QR_TOL * raw {
             centred.column_mut(k).fill(0.0);
         }
+    }
+    if certainly_full_rank(centred.view())? {
+        return Ok(());
     }
     let qr = Qr::decompose(centred.view(), LM_QR_TOL)?;
     let aliased = qr.aliased();
@@ -929,77 +995,72 @@ fn check_identified(data: &MlogitData, names: &[String]) -> EconResult<()> {
 }
 
 /// Newton's method on the conditional-logit log-likelihood from `params`; returns
-/// (converged, iterations, last criterion value). Converged when the Newton decrement on
-/// glm.fit's scale, `lambda2 / (|dev - lambda2| + 0.1)`, is below the tolerance; the last
-/// full step is then taken when it does not lower the log-likelihood.
+/// (converged, iterations, last criterion value, the derivatives at the returned `params`
+/// when a step already computed them). Converged when the Newton decrement on glm.fit's
+/// scale, `lambda2 / (|dev - lambda2| + 0.1)`, is below the tolerance; the last full step
+/// is then taken when it does not lower the log-likelihood. The full step of the line
+/// search is evaluated with its derivatives, which the next iteration reuses (the values
+/// a fresh pass gives, bit for bit).
 fn newton_maximise(
     data: &MlogitData,
     params: &mut [f64],
     config: &MlogitConfig,
     what: &str,
     warnings: &mut Vec<String>,
-) -> EconResult<(bool, usize, f64)> {
+) -> EconResult<(bool, usize, f64, Option<MlogitDerivatives>)> {
     let mut final_change = f64::NAN;
     let mut iterations = 0;
+    let mut at_params: Option<MlogitDerivatives> = None;
     while iterations < config.max_iter {
         resource::checkpoint()?;
-        let (ll, grad, info) = compute_mlogit_derivatives_fast(data, params)?;
+        let MlogitDerivatives { ll, grad, info, .. } = match at_params.take() {
+            Some(known) => known,
+            None => compute_mlogit_derivatives_fast(data, params)?,
+        };
         let (d, lambda2) = equilibrated_newton_step(&info, &grad, what, warnings)?;
+        drop(info);
         let dev = -2.0 * ll;
         final_change = deviance_change(dev - lambda2, dev);
         let trial =
             |t: f64| -> Vec<f64> { params.iter().zip(&d).map(|(p, s)| p + t * s).collect() };
         if final_change < config.tolerance {
             let full = trial(1.0);
-            if compute_mlogit_loglik_fast(data, &full) >= ll - 1e-12 * ll.abs() {
+            let at_full = compute_mlogit_derivatives_fast(data, &full)?;
+            if at_full.ll >= ll - 1e-12 * ll.abs() {
                 params.copy_from_slice(&full);
+                return Ok((true, iterations, final_change, Some(at_full)));
             }
-            return Ok((true, iterations, final_change));
+            return Ok((true, iterations, final_change, None));
         }
         let mut t = 1.0;
         let mut accepted = None;
-        for _ in 0..=MAX_HALVINGS {
+        for h in 0..=MAX_HALVINGS {
             let cand = trial(t);
-            if compute_mlogit_loglik_fast(data, &cand) > ll {
-                accepted = Some(cand);
+            if h == 0 {
+                let at_cand = compute_mlogit_derivatives_fast(data, &cand)?;
+                if at_cand.ll > ll {
+                    accepted = Some((cand, Some(at_cand)));
+                    break;
+                }
+            } else if compute_mlogit_loglik_fast(data, &cand) > ll {
+                accepted = Some((cand, None));
                 break;
             }
             t *= 0.5;
         }
-        let Some(cand) = accepted else {
+        let Some((cand, at_cand)) = accepted else {
             warnings.push(format!(
                 "line search failed at iteration {}: no step along the Newton direction \
                  increases the log-likelihood; the estimates are not at the optimum",
                 iterations + 1
             ));
-            return Ok((false, iterations, final_change));
+            return Ok((false, iterations, final_change, None));
         };
         params.copy_from_slice(&cand);
+        at_params = at_cand;
         iterations += 1;
     }
-    Ok((false, iterations, final_change))
-}
-
-/// (fitted probabilities within `10 eps` of 0 or 1, situations with at least one).
-fn extreme_probabilities(data: &MlogitData, params: &[f64]) -> (usize, usize) {
-    let params_arr = ArrayView1::from(params);
-    let eps10 = 10.0 * f64::EPSILON;
-    let (mut n_extreme, mut n_sit) = (0, 0);
-    let mut v = Vec::new();
-    for &(start, n_alts, _) in &data.choice_info {
-        v.clear();
-        v.extend((0..n_alts).map(|i| data.features.row(start + i).dot(&params_arr)));
-        let max_v = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let sum: f64 = v.iter().map(|u| (u - max_v).exp()).sum();
-        let k = v
-            .iter()
-            .map(|u| (u - max_v).exp() / sum)
-            .filter(|&p| p < eps10 || p > 1.0 - eps10)
-            .count();
-        n_extreme += k;
-        n_sit += usize::from(k > 0);
-    }
-    (n_extreme, n_sit)
+    Ok((false, iterations, final_change, at_params))
 }
 
 /// [`run_conditional_logit`] with a model and control ([`MlogitConfig`]).
@@ -1027,6 +1088,54 @@ mod tests {
     use super::*;
     use p2a_validation::{Check, Tol};
     use polars::prelude::*;
+
+    /// `certainly_full_rank` says yes only where the pivoted QR at `LM_QR_TOL` aliases
+    /// nothing: a noisy full-rank design passes; a nearly collinear one (relative
+    /// perturbation 1e-6, which the QR still keeps) and an exactly collinear one are left
+    /// to the QR.
+    #[test]
+    fn test_certainly_full_rank_agrees_with_the_qr() {
+        let n = 200;
+        let mut x = Array2::<f64>::zeros((n, 4));
+        for i in 0..n {
+            let t = i as f64;
+            x[[i, 0]] = 1.0;
+            x[[i, 1]] = (0.37 * t).sin() + 0.01 * ((i * 7919 % 101) as f64);
+            x[[i, 2]] = (0.11 * t).cos() * 3.0 + 0.02 * ((i * 104_729 % 89) as f64);
+            x[[i, 3]] = 0.5 * x[[i, 1]] - x[[i, 2]] + 0.3 * ((i * 31 % 17) as f64 / 17.0);
+        }
+        assert!(certainly_full_rank(x.view()).unwrap());
+        assert!(
+            Qr::decompose(x.view(), LM_QR_TOL)
+                .unwrap()
+                .aliased()
+                .is_empty()
+        );
+
+        let mut near = x.clone();
+        for i in 0..n {
+            near[[i, 3]] = near[[i, 1]] * (1.0 + 1e-6 * ((i * 13 % 7) as f64 - 3.0));
+        }
+        assert!(!certainly_full_rank(near.view()).unwrap());
+        assert!(
+            Qr::decompose(near.view(), LM_QR_TOL)
+                .unwrap()
+                .aliased()
+                .is_empty()
+        );
+
+        let mut dup = x.clone();
+        let c1 = dup.column(1).to_owned();
+        dup.column_mut(3).assign(&c1);
+        assert!(!certainly_full_rank(dup.view()).unwrap());
+        assert_eq!(
+            Qr::decompose(dup.view(), LM_QR_TOL).unwrap().aliased(),
+            vec![3]
+        );
+
+        // fewer rows than columns: the QR decides
+        assert!(!certainly_full_rank(x.slice(ndarray::s![..3, ..]).view()).unwrap());
+    }
 
     /// Case data for tests that compare no R value.
     fn case_data(id: &str) -> (p2a_validation::Case, Dataset) {
