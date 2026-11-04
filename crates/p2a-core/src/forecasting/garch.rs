@@ -231,37 +231,8 @@ impl fmt::Display for GarchResult {
 pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResult> {
     let config = config.unwrap_or_default();
 
+    validate_inputs(data, &config)?;
     let n = data.len();
-    if n < 20 {
-        return Err(EconError::InsufficientData {
-            required: 20,
-            provided: n,
-            context: "GARCH estimation requires at least 20 observations".to_string(),
-        });
-    }
-
-    // Validate the ARCH/GARCH orders. `p`/`q` come from the caller (and, via the
-    // MCP/CLI tools, ultimately from untrusted input). The warm-up loop in
-    // `compute_garch_quantities` indexes the series up to `p.max(q)`, so an order
-    // at or beyond `n` would index out of bounds and panic. Also cap the orders
-    // to a sane maximum to avoid pathological parameter counts.
-    const MAX_GARCH_ORDER: usize = 20;
-    if config.p > MAX_GARCH_ORDER || config.q > MAX_GARCH_ORDER {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "GARCH orders p={} and q={} must not exceed {}",
-                config.p, config.q, MAX_GARCH_ORDER
-            ),
-        });
-    }
-    if config.p.max(config.q) >= n {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "GARCH orders p={} and q={} must be smaller than the number of observations ({})",
-                config.p, config.q, n
-            ),
-        });
-    }
 
     // Calculate initial estimates
     let mean: f64 = data.iter().sum::<f64>() / n as f64;
@@ -344,6 +315,95 @@ pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResul
         converged,
         iterations,
     })
+}
+
+/// Refuse settings and data the likelihood cannot use, before any work.
+fn validate_inputs(data: &[f64], config: &GarchConfig) -> EconResult<()> {
+    const MAX_GARCH_ORDER: usize = 20;
+    const MIN_OBS: usize = 20;
+    let n = data.len();
+    if n < MIN_OBS {
+        return Err(EconError::InsufficientData {
+            required: MIN_OBS,
+            provided: n,
+            context: "GARCH estimation requires at least 20 observations".to_string(),
+        });
+    }
+    let nan = data.iter().filter(|v| v.is_nan()).count();
+    if nan > 0 {
+        return Err(EconError::NullValues {
+            column: "data".into(),
+            count: nan,
+        });
+    }
+    let inf = data.iter().filter(|v| v.is_infinite()).count();
+    if inf > 0 {
+        return Err(EconError::NonFiniteValues {
+            column: "data".into(),
+            count: inf,
+        });
+    }
+    let (p, q) = (config.p, config.q);
+    // `p`/`q` come from the caller (and, via the MCP/CLI tools, from untrusted input).
+    if p > MAX_GARCH_ORDER || q > MAX_GARCH_ORDER {
+        return Err(EconError::InvalidSpecification {
+            message: format!("GARCH orders p={p} and q={q} must not exceed {MAX_GARCH_ORDER}"),
+        });
+    }
+    if p == 0 {
+        return Err(EconError::InvalidSpecification {
+            message:
+                "GARCH needs at least one ARCH term: the ARCH order p must be at least 1, got 0"
+                    .to_string(),
+        });
+    }
+    if p.max(q) >= n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "GARCH orders p={p} and q={q} must be smaller than the number of observations ({n})"
+            ),
+        });
+    }
+    let n_params = usize::from(config.include_mean) + 1 + p + q;
+    if n <= n_params {
+        return Err(EconError::InsufficientData {
+            required: n_params + 1,
+            provided: n,
+            context: format!(
+                "GARCH({p},{q}) {} a mean term has {n_params} parameters; the conditional likelihood needs more observations than parameters",
+                if config.include_mean {
+                    "with"
+                } else {
+                    "without"
+                }
+            ),
+        });
+    }
+    if config.max_iter < 1 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("max_iter must be at least 1, got {}", config.max_iter),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be finite and positive, got {}",
+                config.tolerance
+            ),
+        });
+    }
+    let xbar = data.iter().sum::<f64>() / n as f64;
+    let s2 = data.iter().map(|x| (x - xbar) * (x - xbar)).sum::<f64>() / n as f64;
+    // all-equal first: the two-pass s2 of a constant series can be a rounding residue above 0
+    if data.iter().all(|&v| v == data[0]) || s2 <= 0.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "GARCH needs a series with positive variance; the data are constant ({})",
+                data[0]
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Estimate GARCH parameters using quasi-Newton optimization.
@@ -563,7 +623,7 @@ fn compute_garch_inference(
     params.extend(beta);
 
     let n_params = params.len();
-    let df = (n - n_params) as f64;
+    let df = n.checked_sub(n_params).map_or(f64::NAN, |d| d as f64);
 
     // Compute numerical Hessian diagonal (for standard errors)
     let mut std_errors = Vec::with_capacity(n_params);
@@ -1182,6 +1242,82 @@ mod tests {
         let (cond_var, _, ll) = compute_garch_quantities(&data, 0.0, 1e-4, &[0.1], &[0.8]).unwrap();
         assert_eq!(cond_var.len(), data.len());
         assert!(ll.is_finite());
+    }
+
+    /// TS-20: the conditional likelihood needs more observations than parameters. Fails before: with
+    /// include_mean (22 parameters, 21 rows) `n - n_params` underflowed (debug: "attempt to subtract with
+    /// overflow"; release: df ~1.8e19 and p-values 1); without the mean (21 parameters) df was 0 and every
+    /// p-value NaN, returned as Ok.
+    #[test]
+    fn test_garch_rejects_n_le_params() {
+        let x = generate_garch_data(21, 0.0001, 0.1, 0.8);
+        for (include_mean, required) in [(true, 23), (false, 22)] {
+            let mut c = GarchConfig::default();
+            c.p = 10;
+            c.q = 10;
+            c.include_mean = include_mean;
+            match garch(&x, Some(c)) {
+                Err(EconError::InsufficientData {
+                    required: r,
+                    provided,
+                    context,
+                }) => {
+                    assert_eq!((r, provided), (required, 21), "{context}");
+                    assert!(
+                        context.contains("GARCH(10,10)") && context.contains("parameters"),
+                        "{context}"
+                    );
+                }
+                other => panic!(
+                    "include_mean = {include_mean}: expected InsufficientData, got {other:?}"
+                ),
+            }
+        }
+        // one observation more than parameters is accepted
+        let x22 = generate_garch_data(22, 0.0001, 0.1, 0.8);
+        let mut c = GarchConfig::default();
+        c.p = 10;
+        c.q = 10;
+        c.include_mean = false;
+        assert!(garch(&x22, Some(c)).is_ok());
+    }
+
+    /// R3/G1: degenerate settings and data are errors that name the problem. Fails before: each returned Ok
+    /// (p = 0 fitted a GARCH(0,1); NaN data propagated into the likelihood; a constant series gave log(0)).
+    #[test]
+    fn test_garch_rejects_degenerate_inputs() {
+        let x = generate_garch_data(200, 0.0001, 0.1, 0.8);
+        let expect_spec = |c: GarchConfig, data: &[f64], needle: &str| match garch(data, Some(c)) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains(needle), "{message}")
+            }
+            other => panic!("expected InvalidSpecification naming '{needle}', got {other:?}"),
+        };
+        let mut c = GarchConfig::default();
+        c.p = 0;
+        expect_spec(c, &x, "ARCH order p");
+        let mut c = GarchConfig::default();
+        c.max_iter = 0;
+        expect_spec(c, &x, "max_iter");
+        for tol in [0.0, -1e-8, f64::NAN, f64::INFINITY] {
+            let mut c = GarchConfig::default();
+            c.tolerance = tol;
+            expect_spec(c, &x, "tolerance");
+        }
+        expect_spec(GarchConfig::default(), &[0.01; 50], "constant");
+        let mut y = x.clone();
+        y[7] = f64::NAN;
+        y[9] = f64::NAN;
+        assert!(matches!(
+            garch(&y, None),
+            Err(EconError::NullValues { count: 2, .. })
+        ));
+        let mut y = x.clone();
+        y[3] = f64::INFINITY;
+        assert!(matches!(
+            garch(&y, None),
+            Err(EconError::NonFiniteValues { count: 1, .. })
+        ));
     }
 
     #[test]
