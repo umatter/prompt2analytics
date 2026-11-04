@@ -370,6 +370,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | HDBSCAN (dbscan::hdbscan) | [hdbscan.md](ml/hdbscan.md) | R-pinned, known deviations (ML-49) |
 | OPTICS (dbscan::optics, extractDBSCAN, extractXi) | [optics.md](ml/optics.md) | R-pinned |
 | Silhouette (cluster::silhouette) | [silhouette.md](ml/silhouette.md) | R-pinned |
+| SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
 
 ### Statistical Methods
 | Method | File | Status |
