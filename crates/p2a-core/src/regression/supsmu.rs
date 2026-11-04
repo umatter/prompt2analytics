@@ -250,6 +250,8 @@ pub fn supsmu(
 /// Running-lines smooth of `y` on sorted `x` with windows of `2 ibw + 1` points (R `ppr.f`
 /// `smooth`). `|iper| == 2` wraps the windows around [0, 1]; `iper > 0` also writes the
 /// exact leave-one-out absolute residuals into `acvr`. Tied x are averaged at the end.
+// Out of line: inlined into the call sites of `super_smoother` it measured 4-6% slower.
+#[inline(never)]
 fn smooth(
     x: &[f64],
     y: &[f64],
@@ -384,6 +386,249 @@ fn smooth(
     Ok(())
 }
 
+// The three residual smooths of supsmu's cross-validation share their span, x and weights,
+// so the part of Friedman's updating formulas that depends on x only (the window's weighted
+// mean and variance of x and the update factors, `XWindow`) is computed once for the three
+// responses (`YState`, their weighted means and covariances with x) in `smooth_many`. Each
+// division of the formulas is a dependent step, so a smooth costs about its number of
+// divisions; sharing the x part removes the x divisions of two of the three residual smooths.
+
+/// A running-lines window of `2 ibw + 1` points over sorted `x` (1-based, as the Fortran);
+/// `periodic` wraps it around [0, 1].
+struct XWindow<'a> {
+    x: &'a [f64],
+    w: &'a [f64],
+    n: i64,
+    ibw: i64,
+    periodic: bool,
+    xm: f64,
+    var: f64,
+    fbw: f64,
+}
+
+impl<'a> XWindow<'a> {
+    fn new(x: &'a [f64], w: &'a [f64], span: f64, iper: i32) -> Self {
+        XWindow {
+            x,
+            w,
+            n: x.len() as i64,
+            ibw: half_window(span, x.len()) as i64,
+            periodic: iper.abs() == 2,
+            xm: 0.0,
+            var: 0.0,
+            fbw: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn xa(&self, j: i64) -> f64 {
+        self.x[(j - 1) as usize]
+    }
+
+    #[inline(always)]
+    fn wa(&self, j: i64) -> f64 {
+        self.w[(j - 1) as usize]
+    }
+
+    /// Number of points of the initial window.
+    fn n_init(&self) -> i64 {
+        (2 * self.ibw + 1).min(self.n)
+    }
+
+    /// Point `i` (1..=n_init) of the initial window: its index and abscissa (shifted by one
+    /// when wrapped).
+    #[inline(always)]
+    fn init_point(&self, i: i64) -> (i64, f64) {
+        let mut j = i;
+        if self.periodic {
+            j = i - self.ibw - 1;
+        }
+        if j >= 1 {
+            (j, self.xa(j))
+        } else {
+            j += self.n;
+            (j, self.xa(j) - 1.0)
+        }
+    }
+
+    /// The points leaving and entering the window when it moves to point `j`, with their
+    /// abscissae; `None` at the ends of a non-periodic smooth, where the window stays.
+    #[inline(always)]
+    fn moves(&self, j: i64) -> Option<(i64, f64, i64, f64)> {
+        let (n, ibw) = (self.n, self.ibw);
+        let mut out = j - ibw - 1;
+        let mut inn = j + ibw;
+        if !self.periodic && (out < 1 || inn > n) {
+            return None;
+        }
+        Some(if out < 1 {
+            out += n;
+            (out, self.xa(out) - 1.0, inn, self.xa(inn))
+        } else if inn > n {
+            inn -= n;
+            (out, self.xa(out), inn, self.xa(inn) + 1.0)
+        } else {
+            (out, self.xa(out), inn, self.xa(inn))
+        })
+    }
+
+    /// Add point `j` with abscissa `xti`: the new weight sum and the update factor.
+    #[inline(always)]
+    fn add(&mut self, j: i64, xti: f64) -> (f64, f64) {
+        let wt = self.wa(j);
+        let fbo = self.fbw;
+        self.fbw += wt;
+        if self.fbw > 0.0 {
+            self.xm = (fbo * self.xm + wt * xti) / self.fbw;
+        }
+        let tmp = if fbo > 0.0 {
+            self.fbw * wt * (xti - self.xm) / fbo
+        } else {
+            0.0
+        };
+        self.var += tmp * (xti - self.xm);
+        (self.fbw, tmp)
+    }
+
+    /// Remove point `j` with abscissa `xto`: the new weight sum and the update factor.
+    #[inline(always)]
+    fn remove(&mut self, j: i64, xto: f64) -> (f64, f64) {
+        let wt = self.wa(j);
+        let fbo = self.fbw;
+        self.fbw -= wt;
+        let tmp = if self.fbw > 0.0 {
+            fbo * wt * (xto - self.xm) / self.fbw
+        } else {
+            0.0
+        };
+        self.var -= tmp * (xto - self.xm);
+        if self.fbw > 0.0 {
+            self.xm = (fbo * self.xm - wt * xto) / self.fbw;
+        }
+        (self.fbw, tmp)
+    }
+}
+
+/// The response part of `N` running-lines smooths sharing one window: each response's
+/// weighted mean `ym` and covariance with x `cvar`.
+struct YState<'a, const N: usize> {
+    ys: [&'a [f64]; N],
+    ym: [f64; N],
+    cvar: [f64; N],
+}
+
+impl<'a, const N: usize> YState<'a, N> {
+    fn new(ys: [&'a [f64]; N]) -> Self {
+        YState {
+            ys,
+            ym: [0.0; N],
+            cvar: [0.0; N],
+        }
+    }
+
+    /// Point `j` (weight `wt`) entered the window, whose weight sum went from `fbo` to `fbw`
+    /// with update factor `tmp`.
+    #[inline(always)]
+    fn add(&mut self, j: i64, wt: f64, fbo: f64, fbw: f64, tmp: f64) {
+        let ju = (j - 1) as usize;
+        for k in 0..N {
+            let y = self.ys[k][ju];
+            if fbw > 0.0 {
+                self.ym[k] = (fbo * self.ym[k] + wt * y) / fbw;
+            }
+            self.cvar[k] += tmp * (y - self.ym[k]);
+        }
+    }
+
+    /// Point `j` (weight `wt`) left the window, whose weight sum went from `fbo` to `fbw`
+    /// with update factor `tmp`.
+    #[inline(always)]
+    fn remove(&mut self, j: i64, wt: f64, fbo: f64, fbw: f64, tmp: f64) {
+        let ju = (j - 1) as usize;
+        for k in 0..N {
+            let y = self.ys[k][ju];
+            self.cvar[k] -= tmp * (y - self.ym[k]);
+            if fbw > 0.0 {
+                self.ym[k] = (fbo * self.ym[k] - wt * y) / fbw;
+            }
+        }
+    }
+}
+
+/// Tied x: replace the fits of each run of equal x by their weighted mean (the end of R
+/// `ppr.f` `smooth`).
+fn average_ties(x: &[f64], w: &[f64], smo: &mut [f64]) {
+    let nu = x.len();
+    let mut j = 0usize;
+    while j < nu {
+        let j0 = j;
+        let mut sy = smo[j] * w[j];
+        let mut fbw = w[j];
+        while j + 1 < nu && x[j + 1] <= x[j] {
+            j += 1;
+            sy += w[j] * smo[j];
+            fbw += w[j];
+        }
+        if j > j0 {
+            let a = if fbw > 0.0 { sy / fbw } else { 0.0 };
+            smo[j0..=j].iter_mut().for_each(|v| *v = a);
+        }
+        j += 1;
+    }
+}
+
+/// Running-lines smooths of the `N` responses `ys` on sorted `x` with one span and no
+/// leave-one-out residuals (R `ppr.f` `smooth` once per response), with one x part for all of
+/// them; each smooth is bit-identical to its own `smooth` call. Tied x are averaged at the end.
+fn smooth_many<const N: usize>(
+    x: &[f64],
+    w: &[f64],
+    ys: [&[f64]; N],
+    span: f64,
+    iper: i32,
+    vsmlsq: f64,
+    mut out: [&mut [f64]; N],
+) -> EconResult<()> {
+    crate::resource::checkpoint()?;
+    let mut win = XWindow::new(x, w, span, iper);
+    let mut yst = YState::new(ys);
+    for i in 1..=win.n_init() {
+        let (j, xti) = win.init_point(i);
+        let fbo = win.fbw;
+        let (fbw, tmp) = win.add(j, xti);
+        yst.add(j, win.wa(j), fbo, fbw, tmp);
+    }
+    let mut a = [0.0; N];
+    for j in 1..=win.n {
+        let ju = (j - 1) as usize;
+        let moved = win.moves(j);
+        if let Some((out_j, xto, inn_j, xti)) = moved {
+            let fbo = win.fbw;
+            let (fbw_out, tmp_out) = win.remove(out_j, xto);
+            yst.remove(out_j, win.wa(out_j), fbo, fbw_out, tmp_out);
+            let (fbw_in, tmp_in) = win.add(inn_j, xti);
+            yst.add(inn_j, win.wa(inn_j), fbw_out, fbw_in, tmp_in);
+        }
+        if moved.is_some() || j == 1 {
+            for k in 0..N {
+                a[k] = if win.var > vsmlsq {
+                    yst.cvar[k] / win.var
+                } else {
+                    0.0
+                };
+            }
+        }
+        let xj = win.xa(j);
+        for (k, o) in out.iter_mut().enumerate() {
+            o[ju] = a[k] * (xj - win.xm) + yst.ym[k];
+        }
+    }
+    for o in out.iter_mut() {
+        average_ties(x, w, o);
+    }
+    Ok(())
+}
+
 /// Friedman's super smoother on sorted data (R `ppr.f` `supsmu`); `span > 0` is a fixed
 /// span, 0 is cross-validation.
 fn super_smoother(
@@ -415,19 +660,51 @@ fn super_smoother(
         smooth(x, y, w, span, jper, vsmlsq, &mut smo, None)?;
         return Ok(smo);
     }
-    // sc(n, 7): smooths and residual smooths of the three spans, and a work column
-    let mut fits: Vec<Vec<f64>> = Vec::with_capacity(3);
-    let mut res: Vec<Vec<f64>> = Vec::with_capacity(3);
-    let mut work = try_vec(n, 0.0, "supsmu work")?;
-    for &s in &SPANS {
-        let mut f = try_vec(n, 0.0, "supsmu smooth")?;
-        smooth(x, y, w, s, jper, vsmlsq, &mut f, Some(&mut work))?;
-        let mut r = try_vec(n, 0.0, "supsmu residual smooth")?;
-        smooth(x, &work, w, SPANS[1], -jper, vsmlsq, &mut r, None)?;
-        fits.push(f);
-        res.push(r);
+    // sc(n, 7) of the Fortran: the three smooths, their leave-one-out residuals and the
+    // residual smooths
+    let buf = |what| try_vec(n, 0.0, what);
+    let mut fits = [
+        buf("supsmu smooth")?,
+        buf("supsmu smooth")?,
+        buf("supsmu smooth")?,
+    ];
+    let mut acvr = [
+        buf("supsmu residuals")?,
+        buf("supsmu residuals")?,
+        buf("supsmu residuals")?,
+    ];
+    for k in 0..3 {
+        smooth(
+            x,
+            y,
+            w,
+            SPANS[k],
+            jper,
+            vsmlsq,
+            &mut fits[k],
+            Some(&mut acvr[k]),
+        )?;
+    }
+    let mut res = [
+        buf("supsmu residual smooth")?,
+        buf("supsmu residual smooth")?,
+        buf("supsmu residual smooth")?,
+    ];
+    {
+        let [r0, r1, r2] = &mut res;
+        smooth_many(
+            x,
+            w,
+            [&acvr[0][..], &acvr[1][..], &acvr[2][..]],
+            SPANS[1],
+            -jper,
+            vsmlsq,
+            [&mut r0[..], &mut r1[..], &mut r2[..]],
+        )?;
     }
     // per-point span: the smallest smoothed CV residual, moved toward the woofer by bass
+    // the work column of the Fortran, which holds the woofer's residuals at this point
+    let [_, _, work] = &mut acvr;
     for jj in 0..n {
         let mut resmin = BIG;
         for k in 0..3 {
@@ -441,17 +718,8 @@ fn super_smoother(
         }
     }
     // smooth the spans, clamp them and interpolate between the three smooths
-    let mut spans_smooth = try_vec(n, 0.0, "supsmu spans")?;
-    smooth(
-        x,
-        &work,
-        w,
-        SPANS[1],
-        -jper,
-        vsmlsq,
-        &mut spans_smooth,
-        None,
-    )?;
+    let [spans_smooth, ..] = &mut res;
+    smooth(x, work, w, SPANS[1], -jper, vsmlsq, spans_smooth, None)?;
     for jj in 0..n {
         let s = spans_smooth[jj].clamp(SPANS[0], SPANS[2]);
         let f = s - SPANS[1];
@@ -463,7 +731,7 @@ fn super_smoother(
             (1.0 - f) * fits[1][jj] + f * fits[2][jj]
         };
     }
-    smooth(x, &work, w, SPANS[0], -jper, vsmlsq, &mut smo, None)?;
+    smooth(x, work, w, SPANS[0], -jper, vsmlsq, &mut smo, None)?;
     Ok(smo)
 }
 
@@ -483,6 +751,136 @@ pub fn run_supsmu(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    /// supsmu before T3-PERF4, the reference of the bit-identity test: each of the three
+    /// residual smooths is its own `smooth` call.
+    fn super_smoother_reference(
+        x: &[f64],
+        y: &[f64],
+        w: &[f64],
+        span: f64,
+        iper: i32,
+        bass: f64,
+    ) -> EconResult<Vec<f64>> {
+        use crate::resource::try_vec;
+        let n = x.len();
+        // scale: an interquartile-type range of x, widened until positive
+        let (mut i, mut j) = (n / 4, 3 * (n / 4));
+        let mut scale = x[j - 1] - x[i - 1];
+        while scale.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            if j < n {
+                j += 1;
+            }
+            if i > 1 {
+                i -= 1;
+            }
+            scale = x[j - 1] - x[i - 1];
+        }
+        let vsmlsq = (EPS * scale).powi(2);
+        let jper = iper;
+        let mut smo = try_vec(n, 0.0, "supsmu smooth")?;
+        if span > 0.0 {
+            smooth(x, y, w, span, jper, vsmlsq, &mut smo, None)?;
+            return Ok(smo);
+        }
+        // sc(n, 7): smooths and residual smooths of the three spans, and a work column
+        let mut fits: Vec<Vec<f64>> = Vec::with_capacity(3);
+        let mut res: Vec<Vec<f64>> = Vec::with_capacity(3);
+        let mut work = try_vec(n, 0.0, "supsmu work")?;
+        for &s in &SPANS {
+            let mut f = try_vec(n, 0.0, "supsmu smooth")?;
+            smooth(x, y, w, s, jper, vsmlsq, &mut f, Some(&mut work))?;
+            let mut r = try_vec(n, 0.0, "supsmu residual smooth")?;
+            smooth(x, &work, w, SPANS[1], -jper, vsmlsq, &mut r, None)?;
+            fits.push(f);
+            res.push(r);
+        }
+        // per-point span: the smallest smoothed CV residual, moved toward the woofer by bass
+        for jj in 0..n {
+            let mut resmin = BIG;
+            for k in 0..3 {
+                if res[k][jj] < resmin {
+                    resmin = res[k][jj];
+                    work[jj] = SPANS[k];
+                }
+            }
+            if bass > 0.0 && bass <= 10.0 && resmin < res[2][jj] && resmin > 0.0 {
+                work[jj] += (SPANS[2] - work[jj]) * SML.max(resmin / res[2][jj]).powf(10.0 - bass);
+            }
+        }
+        // smooth the spans, clamp them and interpolate between the three smooths
+        let mut spans_smooth = try_vec(n, 0.0, "supsmu spans")?;
+        smooth(
+            x,
+            &work,
+            w,
+            SPANS[1],
+            -jper,
+            vsmlsq,
+            &mut spans_smooth,
+            None,
+        )?;
+        for jj in 0..n {
+            let s = spans_smooth[jj].clamp(SPANS[0], SPANS[2]);
+            let f = s - SPANS[1];
+            work[jj] = if f < 0.0 {
+                let f = -f / (SPANS[1] - SPANS[0]);
+                (1.0 - f) * fits[1][jj] + f * fits[0][jj]
+            } else {
+                let f = f / (SPANS[2] - SPANS[1]);
+                (1.0 - f) * fits[1][jj] + f * fits[2][jj]
+            };
+        }
+        smooth(x, &work, w, SPANS[0], -jper, vsmlsq, &mut smo, None)?;
+        Ok(smo)
+    }
+
+    /// T3-PERF4: the three residual smooths sharing their x updates (`smooth_many`) give
+    /// bit-identical results to three `smooth` calls, on noisy data with ties and zero and
+    /// unequal weights, periodic and not, three bass values and two fixed spans.
+    #[test]
+    fn test_supsmu_shared_residual_smooths_are_bit_identical() {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut u = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for &n in &[7usize, 23, 50, 200, 1003] {
+            let mut x: Vec<f64> = (0..n).map(|_| u()).collect();
+            // ties: round a third of the points to two decimals
+            for v in x.iter_mut().step_by(3) {
+                *v = (*v * 100.0).round() / 100.0;
+            }
+            x.sort_by(f64::total_cmp);
+            let y: Vec<f64> = x
+                .iter()
+                .map(|&v| (6.0 * v).sin() + 0.4 * (u() - 0.5))
+                .collect();
+            let w: Vec<f64> = (0..n)
+                .map(|i| if i % 11 == 0 { 0.0 } else { 0.5 + u() })
+                .collect();
+            let ones = vec![1.0; n];
+            for wt in [&ones, &w] {
+                for iper in [1, 2] {
+                    for (span, bass) in
+                        [(0.0, 0.0), (0.0, 3.0), (0.0, 10.0), (0.3, 0.0), (0.05, 0.0)]
+                    {
+                        let fused = super_smoother(&x, &y, wt, span, iper, bass).unwrap();
+                        let reference =
+                            super_smoother_reference(&x, &y, wt, span, iper, bass).unwrap();
+                        let bits = |v: &[f64]| v.iter().map(|a| a.to_bits()).collect::<Vec<_>>();
+                        assert_eq!(
+                            bits(&fused),
+                            bits(&reference),
+                            "n {n} iper {iper} span {span} bass {bass}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_supsmu_basic() {
