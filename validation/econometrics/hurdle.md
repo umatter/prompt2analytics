@@ -173,9 +173,10 @@ of the 500 rows (`hurdle_na_n_used`; `y_na` has 3 and `x2_na` 2 missing cells).
 
 The Rust implementation:
 1. Separates observations into binary indicators (y > 0 vs y = 0)
-2. Fits logit model on binary indicators using Newton-Raphson
+2. Fits the zero hurdle as the shared binomial GLM (`fit_glm`, glm.fit's IRLS)
 3. Extracts positive observations (y > 0)
-4. Fits truncated Poisson/NegBin on positive subset using IRLS
+4. Fits truncated Poisson/NegBin on positive subset by Newton steps solved on the
+   equilibrated information (Cholesky first)
 5. For NegBin: estimates theta using profile likelihood
 6. Computes combined log-likelihood: LL = LL_binary + LL_count
 7. Returns coefficients, standard errors, z-statistics, p-values for both parts
@@ -186,6 +187,51 @@ R-pinned for the rows used, known deviations (ECON-16): registry
 `validation/methods/discrete_ordered_count.json`, id `discrete_hurdle_rows`. The hurdle
 estimates, standard errors and theta are not R-pinned (ECON-16, Tier 4: the
 truncated-count information and the NB hurdle theta).
+
+## Zero part = binomial glm (T3-WP18)
+
+The hurdle's zero part is `glm(I(y > 0) ~ x1 + x2, binomial)`, which is pscl's zero hurdle.
+Case `disc_hurdle_zero` (registry `validation/methods/discrete_t3.json`, id
+`discrete_count_domain_aliasing`) fits it on T2-WP10's `zeroinfl.csv` (n 500): `zero_coef`
+(-0.0476982071, -0.2203064579, -0.3290106975 for (Intercept), x1, x2) at glm's control
+1e-10, `zero_coef_tight` and `zero_se_tight` at epsilon 1e-14, `zero_loglik`, and pscl's own
+`zero_coef_pkg`. `econometrics::discrete::count_models::tests::test_validate_hurdle_zero_part_is_binomial_glm`
+pins it at the tight glm fit: coefficients 1e-8, SEs and logLik 1e-6, pscl's estimate 1e-6;
+n, zeros and positives exact. glm's warnings (separation in the zero part) are in
+`HurdleResult.warnings`, printed in the Warnings block. The truncated count part stays
+unpinned (ECON-16, Tier 4); a singular count-part information gives `NaN` standard errors and a
+warning (the `eye * 1e-6` covariance fallback is gone).
+
+## Outcome domain and aliased regressors (T3-WP18)
+
+Case `disc_hurdle_zero` in [`validation/r/cases/discrete_mlogit_asc.R`](../r/cases/discrete_mlogit_asc.R)
+(registry `validation/methods/discrete_t3.json`, id `discrete_count_domain_aliasing`) records
+what R does with a bad count outcome: `MASS::glm.nb` refuses negative counts
+(`negbin_neg_refused` = 1, "negative values not allowed for the 'Poisson' family") and fits
+non-integer counts with a warning (`negbin_frac_warned` = 1, "non-integer x"); `pscl::zeroinfl`
+and `pscl::hurdle` refuse both (`zeroinfl_neg_refused`, `zeroinfl_frac_refused`,
+`hurdle_neg_refused`, `hurdle_frac_refused` = 1, "invalid dependent variable").
+
+p2a does the same: a negative count is `InvalidSpecification` in `run_negbin`, `run_zip`,
+`run_zinb` and `run_hurdle` (naming the column, the count and the first value); a non-integer
+count is `InvalidSpecification` for the pscl models and a warning for the negative binomial.
+A zero is `y == 0` (the zero-inflated rule was `y < 0.5`).
+
+Aliased regressors: the negative binomial drops a regressor that is a linear combination of the
+others, as glm.nb's `glm.fitter` does at its QR tolerance (1e-11): its coefficient, SE, z and p
+are `NaN`, its name is in `NegBinResult.aliased`, and the warning is R's "Coefficients not
+defined because of singularities". The zero-inflated and hurdle models refuse an aliased count
+or zero design with `SingularMatrix` naming the columns (pscl stops in optim with "non-finite
+value supplied by optim").
+
+Tests:
+
+- `econometrics::discrete::count_models::tests::test_validate_count_models_refuse_negative_counts`
+- `econometrics::discrete::count_models::tests::test_validate_count_models_refuse_non_integer_counts`
+- `econometrics::discrete::count_models::tests::test_validate_negbin_aliased_column_is_na`
+  (`x1b = 2 x1` on `disc_negbin`: the other coefficients and theta at T2-WP10's tolerance 1e-6,
+  and 1e-12 against p2a's own fit without x1b)
+- `econometrics::discrete::count_models::tests::test_validate_zeroinfl_and_hurdle_aliased_regressor_is_an_error`
 
 ## References
 
