@@ -85,19 +85,23 @@ R-pinned: `econometrics::discrete::binary_choice::tests::test_validate_probit_na
 (coefficients 1e-6, SEs 1e-5 relative, log-likelihood 1e-6, nobs exact; registry
 `validation/methods/discrete_mixed.json`, id `probit_missing_values`).
 
-## Timing (T3-PERF2)
+## Timing
 
-Release build, `taskset -c 1`, `RAYON_NUM_THREADS=1`; base is the prebuilt `fe13b889` bench
-binaries of the wave-2A integration timing, head the T3-PERF2 lane; three interleaved rounds,
-medians of the per-run medians (`unified_benchmarks`, criterion `new_methods_benchmarks`, and the
-integration's scratch timing crate for the conditional logit). The machine was shared with other
-lanes' builds; the integration re-times on a quiet machine. Each IRLS step of the shared GLM fit
+Each IRLS step of the shared GLM fit
 (`econometrics::glm`) takes OLS's solve decision: the normal equations of the weighted design
 when it is of full rank with reciprocal condition at least 1e-8 (refined once below 1e-2),
 the pivoted QR otherwise, which still decides rank and aliasing; both paths agree to 1e-10
 relative (`econometrics::glm::tests::test_glm_normal_equations_match_qr`), and a nearly collinear design still
-reaches the QR (`econometrics::glm::tests::test_glm_near_collinear_design_takes_qr`). Unified `Probit`, head/base:
-100: 55.5 µs base, 0.58; 1,000: 504, 0.53; 10,000: 5,432, 0.60.
+reaches the QR (`econometrics::glm::tests::test_glm_near_collinear_design_takes_qr`).
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds against
+`fe13b889` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
+criterion `econometrics_benchmarks`).
+
+| Bench | n | new / base |
+|---|---|---|
+| unified `Probit` | 100 / 1,000 / 10,000 | 0.53 / 0.47 / 0.60 |
+| criterion `Probit` | 100 / 500 / 1,000 | 0.79 / 0.65 / 0.63 |
 
 ## Running the Tests
 

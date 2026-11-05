@@ -498,30 +498,22 @@ No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67
 
 These change no result: the R pins and the convergence tests pass at their tolerances.
 
-Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
-runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
-times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
-wave-2A head, which solved by pivoted QR; now = the solve above). Gaussian: the unified runner on R's
-`panel_n<n>.csv` (entity effects); logit and Poisson: criterion's simulated panels (two-way
-rows: 4 interleaved rounds).
-Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
-(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
-the last one or two digits (1e-9 relative for the Hausman statistic).
+Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
+against `fe13b889` (before these changes); new / base as the ratio of medians.
+Gaussian: the unified runner on R's `panel_n<n>.csv` (entity effects); logit and Poisson:
+criterion's simulated panels.
+Two rows are above 1.1x of base: Gaussian at n = 100 (1.51) and the two-way logit at
+n = 1,000 (1.14); both are under further work.
+The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal
+base's bit for bit; a pivoted-QR solve differs from them in the last one or two digits (1e-9
+relative for the Hausman statistic).
 
-| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
-|---|---|---|---|---|
-| Gaussian, entity | 100 | 59.01 | 112.8 (1.91) | 52.66 (0.89) |
-| Gaussian, entity | 1000 | 344.1 | 512.3 (1.49) | 233.7 (0.68) |
-| Gaussian, entity | 10000 | 4987 | 6441 (1.29) | 2582 (0.52) |
-| Logit, entity | 100 | 180.2 | 192.9 (1.07) | 122.1 (0.68) |
-| Logit, entity | 400 | 611 | 679.2 (1.11) | 347.9 (0.57) |
-| Logit, entity | 1000 | 1151 | 1391 (1.21) | 841.4 (0.73) |
-| Logit, two-way | 100 | 803.6 | 625.6 (0.78) | 694.5 (0.86) |
-| Logit, two-way | 400 | 2907 | 2525 (0.87) | 1860 (0.64) |
-| Logit, two-way | 1000 | 3515 | 5113 (1.45) | 3069 (0.87) |
-| Poisson, two-way | 100 | 1680 | 2455 (1.46) | 1451 (0.86) |
-| Poisson, two-way | 400 | 4178 | 6207 (1.49) | 3701 (0.89) |
-| Poisson, two-way | 1000 | 11490 | 12730 (1.11) | 8016 (0.70) |
+| Fit | n | new / base |
+|---|---|---|
+| Gaussian, entity | 100 / 1,000 / 10,000 | 1.51 / 1.04 / 0.99 |
+| Logit, entity | 100 / 400 / 1,000 | 1.07 / 0.93 / 0.97 |
+| Logit, two-way | 100 / 400 / 1,000 | 0.80 / 0.76 / 1.14 |
+| Poisson, two-way | 100 / 400 / 1,000 | 0.93 / 0.95 / 0.99 |
 
 ## Missing values
 

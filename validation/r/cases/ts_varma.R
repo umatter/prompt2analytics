@@ -14,7 +14,7 @@
 # valid for inference, and p2a does not report them.
 # Default long-VAR order (p2a's rule, pinned here): q = 0 -> m = 0 (no innovations needed; the fit is
 # vars::VAR); q > 0 -> m = max(floor(2 log(n)), 2 max(p, q)) (an order growing like log n, the rate of
-# Hannan & Kavalieris 1984; T3-PERF4 replaced floor(log(n)^2), Gomez & Maravall 2001), reduced to
+# Hannan & Kavalieris 1984; replaced floor(log(n)^2), Gomez & Maravall 2001, in November 2026), reduced to
 # floor((n - 2) / (2K + 1)) when larger, so that the long VAR keeps at least as many residual degrees of
 # freedom as it has regressors.
 # The design keys (long_var_order, step2_coef, sigma_ml, loglik, n_eff) are computed exactly as in T3

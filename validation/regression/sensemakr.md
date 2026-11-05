@@ -46,5 +46,5 @@ error.
 ## Timing
 
 The benchmark partial R² takes OLS's solve decision (normal equations on a full-rank,
-well-conditioned X_{-j}, the pivoted QR otherwise) for both auxiliary regressions; head / base
-against `fe13b889` and the tests are in `gls.md` ("T3-PERF3").
+well-conditioned X_{-j}, the pivoted QR otherwise) for both auxiliary regressions; new / base
+against `fe13b889` and the tests are in `gls.md` ("Normal equations at a given rho").

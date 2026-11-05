@@ -233,31 +233,29 @@ Tests:
   and 1e-12 against p2a's own fit without x1b)
 - `econometrics::discrete::count_models::tests::test_validate_zeroinfl_and_hurdle_aliased_regressor_is_an_error`
 
-## Timing (T3-PERF2)
+## Timing
 
-Release build, `taskset -c 1`, `RAYON_NUM_THREADS=1`; base is the prebuilt `fe13b889` bench
-binaries of the wave-2A integration timing, head the T3-PERF2 lane; three interleaved rounds,
-medians of the per-run medians (`unified_benchmarks`, criterion `new_methods_benchmarks`, and the
-integration's scratch timing crate for the conditional logit). The machine was shared with other
-lanes' builds; the integration re-times on a quiet machine.
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds against
+`fe13b889` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
+criterion `new_methods_benchmarks`).
 
-| Fit | n: base µs, head/base | | | |
-|---|---|---|---|---|
-| Poisson hurdle, two regressors (unified, `zeroinfl` data) | 100: 88.7, 0.84 | 1,000: 377, 1.23 | 10,000: 4,003, 1.30 | |
-| Poisson hurdle, one regressor (criterion `hurdle/poisson`) | 100: 92.8, 0.99 | 500: 261, 1.08 | 1,000: 438, 1.14 | 2,000: 875, 1.17 |
-| negative binomial hurdle (criterion `hurdle/negbin`) | 100: 197, 0.95 | 500: 643, 0.99 | 1,000: 1,145, 1.04 | 2,000: 2,238, 1.06 |
+| Fit | n | new / base |
+|---|---|---|
+| Poisson hurdle, two regressors (unified, `zeroinfl` data) | 100 / 1,000 / 10,000 | 1.06 / 1.09 / 1.23 |
+| Poisson hurdle, one regressor (criterion `hurdle/poisson`) | 100 / 500 / 1,000 / 2,000 | 0.90 / 1.09 / 1.15 / 1.14 |
+| negative binomial hurdle (criterion `hurdle/negbin`) | 100 / 500 / 1,000 / 2,000 | 0.88 / 1.04 / 1.06 / 1.06 |
 
-Not signed off: the Poisson hurdle is above 1.1x at n >= 1,000 (it was 1.27-1.49 unified and
-1.12-1.34 criterion at the wave-2A integration). What T3-PERF2 removed: the zero part's design
-is no longer built and decomposed twice, the aliasing QR runs only when the normal-equations
-test cannot certify full rank, and the zero part's IRLS steps take the normal equations with
-the QR fallback. What is left is the cost of the results WP18 chose. Measured piece by piece at
-n = 1,000 (scratch harness): the zero part, R's `glm.fit` IRLS (working weights and response,
-the deviance at every step, `family$aic`), takes about 170 µs where the old hand-written
-Newton logit took about 140; the count part's Newton steps solve the equilibrated
-information by Cholesky (about 1.5 µs a step over 19 steps) where the old code took a plain
-inverse. Both loops are bound by the per-row `exp`, `ln` and divisions; fusing their passes
-was measured slower, and no cheaper form gives the same values.
+The Poisson hurdle is above 1.1x of base at n >= 1,000 (1.09-1.23). The maintainer accepted
+this on 2026-11-05 as the cost of fitting the zero part with `glm.fit`'s IRLS (see "Zero part =
+binomial glm"). The zero part's design is built and decomposed once, the aliasing QR runs
+only when the normal-equations test cannot certify full rank, and the zero part's IRLS steps
+take the normal equations with the QR fallback. Measured piece by piece at n = 1,000: the zero
+part, R's `glm.fit` IRLS (working weights and response, the deviance at every step,
+`family$aic`), takes about 170 µs where the old hand-written Newton logit took about 140; the
+count part's Newton steps solve the equilibrated information by Cholesky (about 1.5 µs a step
+over 19 steps) where the old code took a plain inverse. Both loops are bound by the per-row
+`exp`, `ln` and divisions; fusing their passes was measured slower, and no cheaper form gives
+the same values.
 
 ## References
 

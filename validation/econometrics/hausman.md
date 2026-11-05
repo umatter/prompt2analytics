@@ -97,22 +97,19 @@ warning appears exactly when one is negative (only `panel_hausman_sim_corr`).
 The test runs FE and RE, which take OLS's solve decision (`panel_fe.md`, `panel_re.md`). The
 statistic is a quadratic form in the difference of two close coefficient vectors, so its
 last digits follow the solve: on `panel_n10000` it is 0.0042165774106789 with the normal
-equations (base and now) and 0.0042165774064030 with the QR head (1e-9 relative).
+equations (base and now) and 0.0042165774064030 with a pivoted-QR solve (1e-9 relative).
 
-Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
-runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
-times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
-wave-2A head, which solved by pivoted QR; now = the solve above). `unified` rows use R's
-`panel_n<n>.csv` (x1, x2, entity effects), `econometrics` rows criterion's simulated panels.
-Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
-(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
-the last one or two digits (1e-9 relative for the Hausman statistic).
+Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
+against `fe13b889` (before these changes); new / base as the ratio of medians.
+The unified runner uses R's `panel_n<n>.csv` (x1, x2, entity effects).
+Every row is within 1.1x of base.
+The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal
+base's bit for bit; a pivoted-QR solve differs from them in the last one or two digits (1e-9
+relative for the Hausman statistic).
 
-| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
-|---|---|---|---|---|
-| Hausman, unified | 100 | 136.2 | 147.9 (1.09) | 74.53 (0.55) |
-| Hausman, unified | 1000 | 615.5 | 727.3 (1.18) | 375.4 (0.61) |
-| Hausman, unified | 10000 | 6187 | 7861 (1.27) | 3681 (0.59) |
+| Fit | n | new / base |
+|---|---|---|
+| Hausman, unified | 100 / 1,000 / 10,000 | 0.94 / 0.99 / 0.95 |
 
 ## Known differences
 

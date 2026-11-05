@@ -136,7 +136,7 @@ Re-measured on the merged tree against `fe13b889` (one P core, three interleaved
 criterion `supsmu`): automatic span 2.73 / 3.53 / 3.75 at n = 50 / 200 / 1,000, fixed span 0.1
 1.13 / 1.33 / 1.39.
 
-**T3-PERF4.** Two changes, in `smooth` and in the shared-window smoother:
+**Shared and reciprocal updates.** Two changes, in `smooth` and in the shared-window smoother:
 
 - The three residual smooths of the cross-validation have the same span, x and weights, so the
   x part of Friedman's updating formulas (the window's weighted mean and variance of x and the
@@ -159,20 +159,14 @@ criterion `supsmu`): automatic span 2.73 / 3.53 / 3.75 at n = 50 / 200 / 1,000, 
   rejected: with constant W the error of 1 / W has one sign at every step, and with x shifted
   by 1000 the error grew to up to 15 times that of the division form.
 
-Release, one P core (`taskset -c 3`), `RAYON_NUM_THREADS=1`, criterion `supsmu`, five
-interleaved rounds of base (`fe13b889`), the wave-2A head and this lane, medians of the
-per-round ratios. The machine was loaded by other lanes' builds (load 7-17, absolute times up to
-twice the quiet ones, single rounds up to 1.5 times off); the authoritative re-time is at
-integration.
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), criterion `supsmu`, three
+interleaved rounds against `fe13b889`; new / base as the ratio of medians.
 
-| Variant | n | head/base | lane/base |
+| Variant | n = 50 | n = 200 | n = 1,000 |
 |---|---|---|---|
-| automatic span | 50 | 4.29 | 1.91 |
-| automatic span | 200 | 3.50 | 1.98 |
-| automatic span | 1,000 | 3.95 | 2.13 |
-| fixed span 0.1 | 50 | 1.06 | 0.81 |
-| fixed span 0.1 | 200 | 1.48 | 1.02 |
-| fixed span 0.1 | 1,000 | 1.45 | 1.02 |
+| automatic span | 1.92 | 2.31 | 2.45 |
+| fixed span 0.1 | 0.96 | 1.13 | 1.18 |
 
-The plan's targets (automatic span at most 2.5, fixed span at most 1.1 times `fe13b889`) are
-met.
+The automatic span's 1.9-2.5x (three running-line passes and the CV smoothing of R's
+algorithm) is accepted; the target was at most 2.5. The fixed span is above the 1.1x target at
+n = 200 and 1,000 (1.13 / 1.18) and is under further work.

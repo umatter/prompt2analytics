@@ -226,7 +226,7 @@ regressors and a constant).
 The raw-matrix fit cost about 2 µs more per 1,000 rows at n >= 1,000 (an O(nk) pass), and
 the pairs bootstrap 12-13% more.
 
-**Timing, T3-PERF3 (after wave 2A).** Causes and changes, results unchanged:
+**Later timing changes.** Causes and changes, results unchanged:
 
 - `run_ols_raw` scanned X and y for non-finite values before the fit, and the normal-equations
   solve copied y. X'X, which the solve decision forms anyway, now certifies X: its diagonal
@@ -244,20 +244,22 @@ the pairs bootstrap 12-13% more.
   coefficients only and copies whole rows (`test_pairs_bootstrap_replicates_equal_solve_ols`:
   every replicate equals `solve_ols` bit for bit).
 
-Lane timing against `fe13b889`, release build, one P core (`taskset -c 2`),
-`RAYON_NUM_THREADS=1`, base and head interleaved five times, on a machine loaded by other
-builds (load 6-12, so the spread is wide; the integration re-times on a quiet machine).
-Head / base as the median of the per-run medians, and in brackets the ratio of the fastest
-runs:
+Timing after these changes: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three
+interleaved rounds against `fe13b889`; new / base as the ratio of medians.
 
-| Fit | n = 100 | n = 500 | n = 1,000 | n = 5,000 | n = 10,000 |
-|---|---|---|---|---|---|
-| standard, `run_ols_raw` (criterion `OLS_Standard`) | 1.06 (0.89) | | 0.81 (0.79) | | 1.01 (0.71) |
-| HAC, Bartlett (criterion `vcovHAC`) | 0.88 (0.82) | 1.10 (0.60) | 1.08 (0.82) | 0.93 (0.72) | |
-| pairs bootstrap, B = 199 (unified) | 0.93 (0.96) | | 0.86 (0.88) | | |
+| Fit | n | new / base |
+|---|---|---|
+| standard, `run_ols_raw` (criterion `OLS_Standard`) | 100 / 1,000 / 10,000 | 0.89 / 1.09 / 1.01 |
+| HC0-HC3, `run_ols_raw` (criterion, n = 1,000) | | 0.99-1.01 |
+| standard / HC1 (unified) | 100 / 1,000 / 10,000 | 0.82 / 0.68 / 0.95; 0.83 / 0.88 / 0.93 |
+| clustered by entity (unified) | 100 / 1,000 / 10,000 | 0.98 / 0.99 / 0.99 |
+| HAC, Newey-West (unified) | 100 / 1,000 / 10,000 | 0.73 / 0.66 / 0.63 |
+| HAC, Bartlett (criterion `vcovHAC`) | 100 / 500 / 1,000 / 5,000 | 0.80 / 1.04 / 1.12 / 1.21 |
+| Driscoll-Kraay (unified) | 100 / 500 / 1,000 | 0.87 / 0.89 / 0.92 |
+| pairs bootstrap, B = 199 (unified) | 100 / 1,000 | 0.98 / 0.93 |
 
-An earlier five-round run of the same code less the y copy gave 0.72 / 0.93 / 1.00 (standard),
-0.85 / 0.97 / 0.79 / 0.95 (HAC) and 0.96 / 0.89 (pairs bootstrap).
+The criterion `vcovHAC` bench is above 1.1x of base at n = 1,000 and 5,000 (1.12 / 1.21); it is
+under further work. Every other row is within 1.1x.
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 

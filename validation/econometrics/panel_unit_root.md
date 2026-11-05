@@ -209,20 +209,17 @@ is still skipped as rank deficient. `test_llc_residuals_normal_equations_match_q
 residual vectors to 1e-10 of the QR's (relative to the residual norm) on noisy AR(1) units,
 with an intercept and with a trend.
 
-Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
-runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
-times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
-wave-2A head, which solved by pivoted QR; now = the solve above). `unified` rows use R's
-`panel_n<n>.csv` (y by entity and time, `floor(T^(1/3))` lags), `econometrics` rows criterion's simulated panels.
-Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
-(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
-the last one or two digits (1e-9 relative for the Hausman statistic).
+Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
+against `fe13b889` (before these changes); new / base as the ratio of medians.
+`unified` rows use R's `panel_n<n>.csv` (y by entity and time, `floor(T^(1/3))` lags).
+Every row is within 1.1x of base.
+The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal
+base's bit for bit; a pivoted-QR solve differs from them in the last one or two digits (1e-9
+relative for the Hausman statistic).
 
-| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
-|---|---|---|---|---|
-| LLC, unified | 100 | 95.72 | 67.92 (0.71) | 47.53 (0.50) |
-| LLC, unified | 1000 | 514.1 | 459.3 (0.89) | 280.5 (0.55) |
-| LLC, unified | 10000 | 2778 | 3361 (1.21) | 1532 (0.55) |
+| Fit | n | new / base |
+|---|---|---|
+| LLC, unified | 100 / 1,000 / 10,000 | 0.78 / 0.84 / 0.80 |
 
 ## Tolerances
 

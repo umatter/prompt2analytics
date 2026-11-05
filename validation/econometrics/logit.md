@@ -185,19 +185,23 @@ One-unit increase in X multiplies odds by OR.
 | AIC | -2LL + 2k | Lower is better |
 | BIC | -2LL + k×log(n) | Lower is better |
 
-## Timing (T3-PERF2)
+## Timing
 
-Release build, `taskset -c 1`, `RAYON_NUM_THREADS=1`; base is the prebuilt `fe13b889` bench
-binaries of the wave-2A integration timing, head the T3-PERF2 lane; three interleaved rounds,
-medians of the per-run medians (`unified_benchmarks`, criterion `new_methods_benchmarks`, and the
-integration's scratch timing crate for the conditional logit). The machine was shared with other
-lanes' builds; the integration re-times on a quiet machine. Each IRLS step of the shared GLM fit
+Each IRLS step of the shared GLM fit
 (`econometrics::glm`) takes OLS's solve decision: the normal equations of the weighted design
 when it is of full rank with reciprocal condition at least 1e-8 (refined once below 1e-2),
 the pivoted QR otherwise, which still decides rank and aliasing; both paths agree to 1e-10
 relative (`econometrics::glm::tests::test_glm_normal_equations_match_qr`), and a nearly collinear design still
-reaches the QR (`econometrics::glm::tests::test_glm_near_collinear_design_takes_qr`). Unified `Logit`, head/base:
-100: 40.1 µs base, 0.72; 1,000: 371, 0.57; 10,000: 3,606, 0.72.
+reaches the QR (`econometrics::glm::tests::test_glm_near_collinear_design_takes_qr`).
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds against
+`fe13b889` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
+criterion `econometrics_benchmarks`).
+
+| Bench | n | new / base |
+|---|---|---|
+| unified `Logit` | 100 / 1,000 / 10,000 | 0.69 / 0.54 / 0.63 |
+| criterion `Logit` | 100 / 500 / 1,000 | 0.83 / 0.69 / 0.75 |
 
 ## Running the Tests
 

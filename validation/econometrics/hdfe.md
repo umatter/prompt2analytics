@@ -284,22 +284,19 @@ two-way designs (k = 2 to 5, a column scaled by 1e4 or 1e-3);
 `test_screen_near_collinear_reaches_qr` checks that a column equal to the sum of two others up
 to 1e-6 noise reaches the QR and is kept, and that an exactly collinear one is still dropped.
 
-Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
-runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
-times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
-wave-2A head, which solved by pivoted QR; now = the solve above). `unified` rows use R's
-`panel_n<n>.csv` (x1, x2, entity effects), `econometrics` rows criterion's simulated panels.
-Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
-(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
-the last one or two digits (1e-9 relative for the Hausman statistic).
+Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds
+against `fe13b889` (before these changes); new / base as the ratio of medians.
+`unified` rows use R's `panel_n<n>.csv` (x1, x2, entity effects), `econometrics` rows
+criterion's simulated panels.
+Every row is within 1.1x of base.
+The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal
+base's bit for bit; a pivoted-QR solve differs from them in the last one or two digits (1e-9
+relative for the Hausman statistic).
 
-| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
-|---|---|---|---|---|
-| HDFE, unified, 2-way | 100 | 81.17 | 92.66 (1.14) | 57.05 (0.70) |
-| HDFE, unified, 2-way | 1000 | 364.1 | 366.2 (1.01) | 274.9 (0.76) |
-| HDFE, unified, 2-way | 10000 | 4055 | 4601 (1.13) | 2518 (0.62) |
-| HDFE, econometrics | 1000 | 350.1 | 302.7 (0.86) | 230.8 (0.66) |
-| HDFE, econometrics | 5000 | 1521 | 1543 (1.01) | 980.1 (0.64) |
+| Fit | n | new / base |
+|---|---|---|
+| HDFE, unified, 2-way | 100 / 1,000 / 10,000 | 0.97 / 0.97 / 0.81 |
+| HDFE, econometrics | 100 / 1,000 / 5,000 | 0.91 / 0.95 / 1.04 |
 
 FE, RE and the Hausman test: `panel_fe.md`, `panel_re.md`, `hausman.md`.
 
