@@ -210,10 +210,10 @@ impl Ord for OrderedF64 {
 /// Parsed from "efron" or "breslow" (case-insensitive, `FromStr`); other values are refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TiesMethod {
-    /// Breslow approximation (default, faster)
-    #[default]
+    /// Breslow approximation.
     Breslow,
-    /// Efron approximation (more accurate with many ties)
+    /// Efron approximation (default, as coxph).
+    #[default]
     Efron,
 }
 
@@ -1203,7 +1203,7 @@ impl fmt::Display for CoxSeType {
 impl Default for CoxConfig {
     fn default() -> Self {
         Self {
-            ties: TiesMethod::Breslow,
+            ties: TiesMethod::Efron,
             max_iter: 25,
             tolerance: 1e-9,
             robust_se: false,
@@ -5126,5 +5126,24 @@ mod tests {
                 Err(EconError::ConvergenceFailure { iterations: 7, .. })
             ));
         }
+    }
+
+    /// coxph's default ties are Efron (and MCP cox_ph already defaults to Efron).
+    #[test]
+    fn test_validate_cox_default_ties_is_efron() {
+        assert_eq!(CoxConfig::default().ties, TiesMethod::Efron);
+        assert_eq!(TiesMethod::default(), TiesMethod::Efron);
+        let (case, ds) = load_case("surv_cox_robust");
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, None).unwrap();
+        assert_eq!(r.ties_method, TiesMethod::Efron);
+        // default eps 1e-9 stops at iteration 3, 3.3e-9 relative from the tight fit (measured in R)
+        Check::new(&case)
+            .named(
+                "efron_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-7),
+            )
+            .finish();
     }
 }

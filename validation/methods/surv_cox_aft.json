@@ -17,7 +17,8 @@
         "p2a-core::econometrics::survival::tests::test_validate_cox_efron_model",
         "p2a-core::econometrics::survival::tests::test_validate_cox_breslow_model",
         "p2a-core::econometrics::survival::tests::test_validate_cox_converges_at_large_scale",
-        "p2a-core::econometrics::survival::tests::test_validate_cox_aliased_covariate"
+        "p2a-core::econometrics::survival::tests::test_validate_cox_aliased_covariate",
+        "p2a-core::econometrics::survival::tests::test_validate_cox_default_ties_is_efron"
       ],
       "quantities": [
         "coefficients",
