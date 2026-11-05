@@ -1,34 +1,86 @@
-//! Parametric G-Formula for causal inference with time-varying treatments.
+//! Parametric g-formula for causal inference with time-varying treatments.
 //!
-//! The parametric g-formula (generalized formula) uses Monte Carlo simulation to
-//! estimate causal effects under different treatment regimes. It is particularly
-//! useful for:
-//! - Time-varying treatments and confounders
-//! - Longitudinal/panel data
-//! - Counterfactual "what-if" scenarios
+//! The parametric g-formula (Robins 1986) estimates the mean outcome, or the risk of an
+//! event, under a treatment regime: it fits models for the time-varying covariates, the
+//! treatment and the outcome, and integrates over the covariate paths the regime would
+//! produce by simulating them from those models.
+//!
+//! # Model specification
+//!
+//! Data are wide: one row per subject, covariates and a 0/1 treatment per period
+//! `t = 1..T` ([`GFormulaData`]). In period `t`:
+//!
+//! - each time-varying covariate `L_t[j]` is regressed on `[1, baseline, L_(t-1), A_(t-1)]`
+//!   (the lags for `t > 1`): linear (`lm`) unless its values are all 0 or 1, then logistic;
+//! - the treatment `A_t` on `[1, baseline, L_t, A_(t-1)]` (logistic).
+//!
+//! The outcome model depends on [`GFormulaOutcomeType`]:
+//!
+//! - `Continuous` / `Binary`: an end-of-follow-up model on
+//!   `[1, baseline, L_T, A_1, ..., A_T]`, linear or logistic;
+//! - `Survival` (data from [`GFormulaData::new_survival`]): a pooled logistic discrete-time
+//!   hazard `logit h(t) = b0 + b1 t + b2 A_t + baseline + L_t` on the person-periods at
+//!   risk. The models of period `t` are fitted on the subjects at risk at its start
+//!   (`time >= t`). The form is fixed: a linear period term and the current treatment.
+//!
+//! **Point treatment.** When the treatment never changes within any subject's follow-up,
+//! it is modelled as a point treatment: one treatment model (period 1), its value carried
+//! forward under every regime, and one treatment column in the outcome model (a note says
+//! so). Per-period models would otherwise be perfectly separated.
+//!
+//! Linear models take OLS's solve decision (normal equations on a well-conditioned design,
+//! `lm.fit`'s pivoted QR otherwise); logistic models use the shared `glm.fit` IRLS
+//! ([`crate::econometrics::glm::fit_glm`], `epsilon` = `tolerance`). Aliased columns are
+//! reported and predicted with the identified columns.
 //!
 //! # Algorithm
 //!
-//! The g-formula proceeds in three main stages:
+//! For each simulated unit a baseline row is drawn with replacement; in each period every
+//! continuous covariate is drawn from `Normal(eta, sigma)` (`sigma` the residual SD), every
+//! binary one from `Bernoulli(plogis(eta))`, and the treatment is set by the regime (drawn
+//! from the treatment model for the natural course). The unit's value is the outcome
+//! model's expectation; for survival the path accumulates `S(t) = prod_{s <= t} (1 - h_s)`
+//! as a probability and reports `1 - S(t)` by period. A regime's risk is the mean over
+//! units.
 //!
-//! **Stage 1: Model Fitting**
-//! 1. Fit models for time-varying confounders: L_t ~ f(L_{t-1}, A_{t-1}, baseline)
-//! 2. Fit treatment model (for natural course): A_t ~ g(L_t, A_{t-1}, baseline)
-//! 3. Fit outcome model: Y_t ~ h(L_t, A_t, baseline)
+//! - **Common random numbers.** Every regime replays one seeded stream and consumes the
+//!   same draws, so contrasts carry no independent Monte Carlo noise (natural against
+//!   natural is exactly 0).
+//! - **Exact standardisation.** A static regime without time-varying covariates involves no
+//!   randomness: its risk is the mean over the observed baseline rows.
+//! - **Inference.** Subjects are resampled `n_bootstrap` times (models refitted,
+//!   `n_simulations / 2` units, at least 100); the risk difference gets the bootstrap SD,
+//!   a type-7 percentile interval and a two-sided normal p-value, the risk ratio a
+//!   log-normal interval.
 //!
-//! **Stage 2: Monte Carlo Simulation**
-//! For each simulation:
-//! 1. Sample baseline values from observed data (with replacement)
-//! 2. At each time point t:
-//!    - Simulate L_t from fitted confounder models
-//!    - Assign A_t according to the intervention (or sample from treatment model)
-//!    - Compute outcome probability/expected value
-//! 3. Record the final outcome
+//! # Assumptions
 //!
-//! **Stage 3: Estimation and Inference**
-//! 1. Average simulated outcomes for risk under each regime
-//! 2. Compute risk difference, risk ratio
-//! 3. Bootstrap for standard errors and confidence intervals
+//! The usual g-formula conditions (no unmeasured confounding, positivity, correct models).
+//! The natural course assumes no loss to follow-up; the observed Kaplan-Meier risk assumes
+//! independent censoring. Treatments are binary; there are no competing events.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use ndarray::{Array1, Array2};
+//! use p2a_core::econometrics::{
+//!     run_gformula, GFormulaConfig, GFormulaData, GFormulaIntervention, GFormulaOutcomeType,
+//! };
+//! # fn main() -> Result<(), p2a_core::EconError> {
+//! let baseline = Array2::from_shape_vec((3, 1), vec![0.2, -0.4, 1.1]).unwrap();
+//! let time_varying = vec![Array2::zeros((3, 0)); 2]; // 2 periods, no time-varying covariate
+//! let treatment = vec![Array1::from(vec![1.0, 0.0, 1.0]); 2];
+//! let time = Array1::from(vec![2.0, 1.0, 2.0]); // last period observed (1-based)
+//! let event = Array1::from(vec![0.0, 1.0, 1.0]); // event in that period
+//! let data = GFormulaData::new_survival(baseline, time_varying, treatment, time, event)?;
+//! let mut config = GFormulaConfig::default();
+//! config.outcome_type = GFormulaOutcomeType::Survival;
+//! config.intervention = GFormulaIntervention::Static { treat_all: true };
+//! let result = run_gformula(&data, config)?;
+//! println!("risk by period: {:?}", result.risk_curve_intervention);
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # References
 //!
@@ -38,7 +90,8 @@
 //!   https://doi.org/10.1016/0270-0255(86)90088-6
 //!
 //! - Hernan, M.A. & Robins, J.M. (2020). *Causal Inference: What If*.
-//!   Chapman & Hall/CRC. Chapter 21. https://www.hsph.harvard.edu/miguel-hernan/causal-inference-book/
+//!   Chapman & Hall/CRC. Chapters 17 and 21.
+//!   https://www.hsph.harvard.edu/miguel-hernan/causal-inference-book/
 //!
 //! - McGrath, S., et al. (2020). gfoRmula: An R Package for Estimating the Effects
 //!   of Sustained Treatment Strategies via the Parametric g-formula.
@@ -48,7 +101,10 @@
 //!   intuition and a worked example. *Epidemiology*, 25(6), 889-897.
 //!   https://doi.org/10.1097/EDE.0000000000000160
 //!
-//! R equivalent: `gfoRmula::gformula()`, `gfoRmula::gformula_binary_eof()`
+//! R equivalent: `gfoRmula::gformula_survival()`, `gformula_binary_eof()`,
+//! `gformula_continuous_eof()` (not validated against gfoRmula, which is not installed;
+//! validated against the written-out formulas in `validation/r/cases/causal_gformula.R`,
+//! see `validation/econometrics/gformula.md`).
 
 use ndarray::{Array1, Array2};
 use rand::{Rng, SeedableRng};
@@ -129,7 +185,8 @@ pub enum GFormulaOutcomeType {
     Continuous,
     /// Binary outcome (logistic model)
     Binary,
-    /// Survival/time-to-event (hazard model)
+    /// Survival/time-to-event: discrete-time pooled logistic hazard (data from
+    /// [`GFormulaData::new_survival`])
     Survival,
 }
 

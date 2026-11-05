@@ -75,6 +75,22 @@ nothing in the simulation is random: the intervention's risk is the mean over th
 observed baseline rows (`standardization = Empirical`). The natural course is always Monte
 Carlo.
 
+## Inference
+
+Subjects are resampled with replacement `n_bootstrap` times (0, or at least 2). Replicate
+`b` uses the seed `seed + 1000 b`: the resample is drawn from ChaCha8 stream 0 of that
+seed and the replicate's simulations (models refitted, `n_simulations / 2` units, at least
+100) from stream 1, so results do not depend on the chunked parallel evaluation or the
+thread count. Replicates that fail or give a non-finite risk difference are dropped and
+reported in a warning; more than half dropped is an error.
+
+- Risk difference: SE = SD of the replicates (`n - 1`), a type-7 percentile interval
+  (`stats::robust::percentile_interval`) and the two-sided normal p-value
+  `2 Phi(-|RD / SE|)` computed as an upper tail.
+- Risk ratio: `exp(ln RR -/+ z SE(ln RR))` with the exact `z = Phi^-1((1 + level) / 2)`.
+- Without a bootstrap the SE, intervals and p-value are `NaN` and printed "not computed".
+- `confidence_level` must lie strictly between 0 and 1.
+
 ## Reference implementation
 
 gfoRmula is not installed, so the references are written out from the published formulas
@@ -155,7 +171,20 @@ Property tests (not registered; they load no case): `test_gformula_natural_vs_na
 `test_gformula_static_contrast_is_exact_under_common_random_numbers`,
 `test_gformula_threshold_extreme_cutoffs_equal_static`, `test_gformula_covariate_scale_invariance`,
 `test_gformula_bootstrap_is_reproducible_and_thread_invariant`, `test_gformula_survival_requires_event_times`,
-`test_gformula_survival_data_validation`, `test_gformula_survival_empty_risk_set_is_an_error`.
+`test_gformula_survival_data_validation`, `test_gformula_survival_empty_risk_set_is_an_error`,
+`test_gformula_display_survival_and_notes` (these two read `gformula_surv.csv` directly and pin no
+value); the inference helpers against small R values: `test_gformula_rd_inference_percentile_type7`,
+`test_gformula_p_value_uses_the_upper_tail`, `test_gformula_rr_interval_uses_exact_z`,
+`test_gformula_without_bootstrap_reports_nan_inference`, `test_gformula_confidence_level_validated`;
+data checks: `test_gformula_rejects_zero_rows`, `test_run_gformula_guards_zero_rows`,
+`test_gformula_data_rejects_malformed_cells`, `test_gformula_rejects_unknown_threshold_covariate`.
+
+## Limitations
+
+- No censoring model and no inverse-probability-weighted natural course: the natural course
+  assumes no loss to follow-up.
+- The hazard is linear in the period and depends on the current treatment only.
+- Binary (0/1) treatments only; no competing events.
 
 ## Running
 
