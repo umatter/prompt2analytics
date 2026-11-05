@@ -482,6 +482,47 @@ For IRLS, we compute:
 
 No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67).
 
+## Solve and timing
+
+- The regressor screen and every IRLS step take OLS's solve decision: the normal equations on a
+  full-rank, well-conditioned weighted demeaned design (refined once below a reciprocal
+  condition of 1e-2), the pivoted QR otherwise, which still refuses a rank-deficient weighted
+  design (`hdfe.md`, "Solve and timing").
+- μ is computed once per update of η and serves the deviance rule, the next iteration and the
+  final statistics; the final deviance is the one the convergence check computed.
+- The weighted demeaning of X is memoized on the weights: when an iteration's weights equal the
+  previous ones bit for bit (Gaussian: all 1), the same scaled X demeans to the same result
+  and is reused, as is the final information matrix's when the final weights repeat.
+- The weighted alternating projections compute the change and the norm of a sweep in one
+  pass, and the acceleration terms in another, each sum accumulating in row order as before.
+
+These change no result: the R pins and the convergence tests pass at their tolerances.
+
+Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
+runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
+times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
+wave-2A head, which solved by pivoted QR; now = the solve above). Gaussian: the unified runner on R's
+`panel_n<n>.csv` (entity effects); logit and Poisson: criterion's simulated panels (two-way
+rows: 4 interleaved rounds).
+Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
+(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
+the last one or two digits (1e-9 relative for the Hausman statistic).
+
+| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
+|---|---|---|---|---|
+| Gaussian, entity | 100 | 59.01 | 112.8 (1.91) | 52.66 (0.89) |
+| Gaussian, entity | 1000 | 344.1 | 512.3 (1.49) | 233.7 (0.68) |
+| Gaussian, entity | 10000 | 4987 | 6441 (1.29) | 2582 (0.52) |
+| Logit, entity | 100 | 180.2 | 192.9 (1.07) | 122.1 (0.68) |
+| Logit, entity | 400 | 611 | 679.2 (1.11) | 347.9 (0.57) |
+| Logit, entity | 1000 | 1151 | 1391 (1.21) | 841.4 (0.73) |
+| Logit, two-way | 100 | 803.6 | 625.6 (0.78) | 694.5 (0.86) |
+| Logit, two-way | 400 | 2907 | 2525 (0.87) | 1860 (0.64) |
+| Logit, two-way | 1000 | 3515 | 5113 (1.45) | 3069 (0.87) |
+| Poisson, two-way | 100 | 1680 | 2455 (1.46) | 1451 (0.86) |
+| Poisson, two-way | 400 | 4178 | 6207 (1.49) | 3701 (0.89) |
+| Poisson, two-way | 1000 | 11490 | 12730 (1.11) | 8016 (0.70) |
+
 ## Missing values
 
 `run_feglm` reads y, the regressors and every fixed-effect column with one NA-aware request

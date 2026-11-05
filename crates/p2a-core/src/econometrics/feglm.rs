@@ -58,6 +58,7 @@ use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::xtx;
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text, sci};
 use crate::traits::estimator::{
@@ -646,22 +647,23 @@ fn weighted_demean_map(
     for iter in 1..=max_iter {
         resource::checkpoint()?;
         if iter > 1 {
-            prev_prev = prev.clone();
+            prev_prev.assign(&prev);
         }
-        prev = current.clone();
+        prev.assign(&current);
 
         // One round of weighted alternating projections
         current = weighted_map_step(&current, weights, factors);
 
-        // Compute change (weighted L2 norm)
-        let delta: f64 = current
-            .iter()
-            .zip(prev.iter())
-            .zip(weights.iter())
-            .map(|((&c, &p), &w)| w * (c - p).powi(2))
-            .sum();
+        // Change and current norm (weighted L2) in one pass; each sum accumulates in
+        // row order, as two separate passes would
+        let mut delta = 0.0f64;
+        let mut norm_w = 0.0f64;
+        for ((&c, &p), &w) in current.iter().zip(prev.iter()).zip(weights.iter()) {
+            delta += w * (c - p).powi(2);
+            norm_w += w * c * c;
+        }
         let delta = delta.sqrt();
-        let scale = w_norm(&current).max(floor).max(f64::MIN_POSITIVE);
+        let scale = norm_w.sqrt().max(floor).max(f64::MIN_POSITIVE);
         final_change = delta / scale;
 
         // Relative stopping rule: invariant to rescaling the column
@@ -672,28 +674,60 @@ fn weighted_demean_map(
 
         // Gearhart-Koshy acceleration
         if accelerate && iter > 2 {
-            let delta_vec: Array1<f64> = &current - &prev;
-            let delta_prev: Array1<f64> = &prev - &prev_prev;
-
-            let numerator: f64 = delta_vec
-                .iter()
-                .zip(delta_prev.iter())
-                .map(|(&d, &dp)| d * dp)
-                .sum();
-            let denominator: f64 = delta_prev.iter().map(|&dp| dp * dp).sum();
-            let current_norm = current.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let mut numerator = 0.0f64;
+            let mut denominator = 0.0f64;
+            let mut norm_sq = 0.0f64;
+            for ((&c, &p), &pp) in current.iter().zip(prev.iter()).zip(prev_prev.iter()) {
+                let d = c - p;
+                let dp = p - pp;
+                numerator += d * dp;
+                denominator += dp * dp;
+                norm_sq += c * c;
+            }
+            let current_norm = norm_sq.sqrt();
 
             // Scale-free guard: skip only a step that is rounding noise
             if denominator > (f64::EPSILON * current_norm).powi(2) {
                 let alpha = (numerator / denominator).clamp(0.0, 1.0);
                 if alpha > 0.0 && alpha < 1.0 {
-                    current = &prev + &delta_vec * (1.0 + alpha);
+                    for (c, &p) in current.iter_mut().zip(prev.iter()) {
+                        let d = *c - p;
+                        *c = p + d * (1.0 + alpha);
+                    }
                 }
             }
         }
     }
 
     Ok((current, max_iter, final_change, converged))
+}
+
+/// A weighted demeaning of the scaled design and the weights it was computed with.
+struct DemeanedX {
+    weights: Array1<f64>,
+    x: Array2<f64>,
+    change: f64,
+    converged: bool,
+}
+
+/// `x` with row `i` multiplied by `s[i]`.
+fn scale_rows(x: &Array2<f64>, s: &Array1<f64>) -> Array2<f64> {
+    let (n, k) = x.dim();
+    let mut out = Array2::zeros((n, k));
+    for j in 0..k {
+        for i in 0..n {
+            out[[i, j]] = x[[i, j]] * s[i];
+        }
+    }
+    out
+}
+
+/// Whether two vectors hold the same values, bit for bit.
+fn same_values(a: &Array1<f64>, b: &Array1<f64>) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(p, q)| p.to_bits() == q.to_bits())
 }
 
 /// Weighted demean a matrix column-wise.
@@ -914,14 +948,13 @@ pub fn run_feglm(
     if !screen_conv {
         map_stalls.push(("the regressor screen".to_string(), screen_change));
     }
-    let screen = screen_regressors(
-        x_all.view(),
-        x_screen_dm.view(),
-        &all_names,
-        &fe_label(fe_cols),
-    )?;
+    let screen = screen_regressors(x_all.view(), x_screen_dm, &all_names, &fe_label(fe_cols))?;
     let mut warnings = screen.warnings.clone();
-    let x = x_all.select(Axis(1), &screen.kept);
+    let x = if screen.kept.len() == x_all.ncols() {
+        x_all
+    } else {
+        x_all.select(Axis(1), &screen.kept)
+    };
     let var_names: Vec<String> = screen.kept.iter().map(|&j| all_names[j].clone()).collect();
     let k = screen.kept.len();
 
@@ -953,12 +986,18 @@ pub fn run_feglm(
         GlmFamily::Gaussian => y.clone(),
     };
 
-    let deviance_at = |eta: &Array1<f64>| -> f64 {
+    // μ is kept in step with η: computed once per update of η and used by the deviance,
+    // the next iteration and the final statistics.
+    let deviance_of = |mu: &Array1<f64>| -> f64 {
         y.iter()
-            .zip(eta.iter())
-            .map(|(&yi, &e)| family.deviance(yi, family.inv_link(e)))
+            .zip(mu.iter())
+            .map(|(&yi, &m)| family.deviance(yi, m))
             .sum()
     };
+    let mut mu: Array1<f64> = eta.mapv(|e| family.inv_link(e));
+    // The weighted demeaning of X from the last IRLS iteration and its weights: when the
+    // weights repeat (Gaussian: all 1), the same inputs give the same demeaned X.
+    let mut x_demeaned_cache: Option<DemeanedX> = None;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // IRLS Loop
@@ -966,14 +1005,13 @@ pub fn run_feglm(
     let mut iterations = 0;
     let mut converged = false;
     let mut final_change = f64::NAN;
-    let mut devold = deviance_at(&eta);
+    let mut devold = deviance_of(&mu);
 
     for iter in 0..config.max_iter {
         resource::checkpoint()?;
         iterations = iter + 1;
 
-        // 1. Compute μ from η
-        let mu: Array1<f64> = eta.mapv(|e| family.inv_link(e));
+        // 1. μ from η (kept in step with η)
 
         // 2. Compute working weights
         let weights: Array1<f64> = eta
@@ -996,13 +1034,6 @@ pub fn run_feglm(
         // Scale z and X by sqrt(weights)
         let z_scaled: Array1<f64> = &z * &sqrt_w;
 
-        let mut x_scaled = Array2::zeros((n, k));
-        for j in 0..k {
-            for i in 0..n {
-                x_scaled[[i, j]] = x[[i, j]] * sqrt_w[i];
-            }
-        }
-
         // 5. Weighted demean z and X by fixed effects
         // Note: We demean the pre-scaled data, which effectively applies weighted demeaning
         let (z_demeaned, _, z_change, z_conv) = weighted_demean_map(
@@ -1014,14 +1045,40 @@ pub fn run_feglm(
             config.accelerate,
         )?;
 
-        let (x_demeaned, _, x_change, x_conv) = weighted_demean_matrix_map(
-            &x_scaled,
-            &weights,
-            &factors,
-            config.map_tolerance,
-            config.map_max_iter,
-            config.accelerate,
-        )?;
+        // Memoized on the weights: the same weights demean the same scaled X to the
+        // same result (Gaussian weights are all 1 in every iteration)
+        if !x_demeaned_cache
+            .as_ref()
+            .is_some_and(|c| same_values(&c.weights, &weights))
+        {
+            let x_scaled = scale_rows(&x, &sqrt_w);
+            let (x_dm, _, change, conv) = weighted_demean_matrix_map(
+                &x_scaled,
+                &weights,
+                &factors,
+                config.map_tolerance,
+                config.map_max_iter,
+                config.accelerate,
+            )?;
+            x_demeaned_cache = Some(DemeanedX {
+                weights: weights.clone(),
+                x: x_dm,
+                change,
+                converged: conv,
+            });
+        }
+        let Some(DemeanedX {
+            x: x_demeaned,
+            change: x_change,
+            converged: x_conv,
+            ..
+        }) = x_demeaned_cache.as_ref()
+        else {
+            return Err(EconError::Internal(
+                "FEGLM: demeaned design missing".to_string(),
+            ));
+        };
+        let (x_change, x_conv) = (*x_change, *x_conv);
 
         if !z_conv || !x_conv {
             map_stalls.push((
@@ -1030,18 +1087,24 @@ pub fn run_feglm(
             ));
         }
 
-        // 6. Solve weighted least squares on demeaned data
-        let ls = least_squares(x_demeaned.view(), z_demeaned.view())?;
-        if ls.rank < k {
-            return Err(EconError::SingularMatrix {
-                context: format!(
-                    "FEGLM IRLS iteration {iterations}: weighted design rank {} of {k}",
-                    ls.rank
-                ),
-                suggestion: "Check for perfect multicollinearity or separation".to_string(),
-            });
-        }
-        beta = ls.coefficients;
+        // 6. Solve weighted least squares on demeaned data (OLS's solve decision: the
+        // normal equations when well conditioned, the pivoted QR otherwise)
+        beta = match normal_equations_inverse(x_demeaned.view())? {
+            Some(normal) => normal.coefficients(x_demeaned.view(), &z_demeaned),
+            None => {
+                let ls = least_squares(x_demeaned.view(), z_demeaned.view())?;
+                if ls.rank < k {
+                    return Err(EconError::SingularMatrix {
+                        context: format!(
+                            "FEGLM IRLS iteration {iterations}: weighted design rank {} of {k}",
+                            ls.rank
+                        ),
+                        suggestion: "Check for perfect multicollinearity or separation".to_string(),
+                    });
+                }
+                ls.coefficients
+            }
+        };
 
         // 7. Update linear predictor
         // For FEGLM, we need to recover the FE contribution
@@ -1100,7 +1163,8 @@ pub fn run_feglm(
         }
 
         // 8. Check convergence: fixest's (glm.fit's) relative deviance change
-        let dev = deviance_at(&eta);
+        mu = eta.mapv(|e| family.inv_link(e));
+        let dev = deviance_of(&mu);
         final_change = deviance_change(dev, devold);
         devold = dev;
         if final_change < config.tolerance {
@@ -1113,8 +1177,8 @@ pub fn run_feglm(
     // Compute Final Statistics
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // Final μ and log-likelihood
-    let mu_final: Array1<f64> = eta.mapv(|e| family.inv_link(e));
+    // Final μ (in step with η) and log-likelihood
+    let mu_final = mu;
 
     let log_likelihood: f64 = y
         .iter()
@@ -1138,12 +1202,8 @@ pub fn run_feglm(
         }
     };
 
-    // Deviance
-    let deviance: f64 = y
-        .iter()
-        .zip(mu_final.iter())
-        .map(|(&yi, &mi)| family.deviance(yi, mi))
-        .sum();
+    // Deviance (of the final μ, computed with the convergence check)
+    let deviance: f64 = devold;
 
     // Null deviance (approximated)
     let null_deviance = match family {
@@ -1204,21 +1264,22 @@ pub fn run_feglm(
 
     let sqrt_w_final: Array1<f64> = weights_final.mapv(|w| w.sqrt());
 
-    let mut x_scaled_final = Array2::zeros((n, k));
-    for j in 0..k {
-        for i in 0..n {
-            x_scaled_final[[i, j]] = x[[i, j]] * sqrt_w_final[i];
-        }
-    }
-
-    let (x_demeaned_final, _, final_map_change, final_map_conv) = weighted_demean_matrix_map(
-        &x_scaled_final,
-        &weights_final,
-        &factors,
-        config.map_tolerance,
-        config.map_max_iter,
-        config.accelerate,
-    )?;
+    let (x_demeaned_final, final_map_change, final_map_conv) =
+        match x_demeaned_cache.filter(|c| same_values(&c.weights, &weights_final)) {
+            Some(c) => (c.x, c.change, c.converged),
+            None => {
+                let x_scaled_final = scale_rows(&x, &sqrt_w_final);
+                let (x_dm, _, change, conv) = weighted_demean_matrix_map(
+                    &x_scaled_final,
+                    &weights_final,
+                    &factors,
+                    config.map_tolerance,
+                    config.map_max_iter,
+                    config.accelerate,
+                )?;
+                (x_dm, change, conv)
+            }
+        };
     if !final_map_conv {
         map_stalls.push(("the final information matrix".to_string(), final_map_change));
     }

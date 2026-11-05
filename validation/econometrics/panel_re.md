@@ -341,6 +341,29 @@ and `econometrics::panel::linear_models::tests::test_validate_na_fe_re_errors_an
 a NaN cell is dropped like a null one
 (`econometrics::panel::linear_models::tests::test_random_effects_non_finite_data`).
 
+## Solve and timing
+
+The three least-squares steps take OLS's solve decision (`regression::ols::normal_equations_inverse`):
+step 0 runs the pivoted QR of `[1, X]` only when the normal equations decline the design (a
+full-rank, well-conditioned design has no aliased column); the within step solves from the
+regressor screen (`hdfe.md`, "Solve and timing"); the quasi-demeaned regression uses the normal
+equations (refined once below a reciprocal condition of 1e-2) and the pivoted QR otherwise.
+
+Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
+runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
+times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
+wave-2A head, which solved by pivoted QR; now = the solve above). `unified` rows use R's
+`panel_n<n>.csv` (x1, x2, entity effects), `econometrics` rows criterion's simulated panels.
+Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
+(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
+the last one or two digits (1e-9 relative for the Hausman statistic).
+
+| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
+|---|---|---|---|---|
+| RE, unified | 100 | 77.71 | 85.8 (1.10) | 51.57 (0.66) |
+| RE, unified | 1000 | 344.7 | 390.7 (1.13) | 262.2 (0.76) |
+| RE, unified | 10000 | 4058 | 5913 (1.46) | 3153 (0.78) |
+
 ## Known differences
 
 - A between regression without full rank (collinear entity means, for example a regressor

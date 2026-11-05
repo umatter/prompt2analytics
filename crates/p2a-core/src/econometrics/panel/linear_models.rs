@@ -52,6 +52,7 @@ use crate::econometrics::hdfe::screen_regressors;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::eig_symmetric;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, least_squares, sym_inverse};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::estimator::{
     SignificanceLevel, chi_squared_p_value, f_test_p_value, normal_cdf, t_test_p_value,
@@ -159,16 +160,16 @@ pub fn run_fixed_effects_with(
     let x_demeaned_all = demean_matrix_by_entity(&x, &entity_ids, n_groups);
 
     // Regressors absorbed by the entity effects or collinear after them are not
-    // estimated (plm drops them); the fit solves from the screen's pivoted QR
+    // estimated (plm drops them); the fit solves from the screen's factorization
     let mut warnings = warnings_with_note(&missing);
     let screen = screen_regressors(
         x.view(),
-        x_demeaned_all.view(),
+        x_demeaned_all,
         &all_names,
         &format!("'{entity_col}'"),
     )?;
     warnings.extend(screen.warnings.iter().cloned());
-    let x_demeaned = x_demeaned_all.select(Axis(1), &screen.kept);
+    let x_demeaned = &screen.x;
     let var_names: Vec<String> = screen.kept.iter().map(|&j| all_names[j].clone()).collect();
     let k = screen.kept.len();
 
@@ -182,8 +183,9 @@ pub fn run_fixed_effects_with(
             context: "Not enough observations for degrees of freedom".to_string(),
         })?;
 
-    // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ, from the screen's QR
-    let beta = screen.coefficients(y_demeaned.view())?;
+    // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ, from the screen's factorization
+    // (OLS's decision: normal equations, pivoted QR when ill-conditioned)
+    let beta = screen.coefficients(&y_demeaned)?;
     let xtx_inv = screen.unscaled_covariance()?;
 
     // Residuals from demeaned model
@@ -200,7 +202,7 @@ pub fn run_fixed_effects_with(
     let vcov = match config.vcov {
         PanelVcov::Classical => &xtx_inv * sigma2,
         PanelVcov::Arellano(adj) => {
-            let scores = entity_scores(&x_demeaned, &residuals, &entity_ids, n_groups)?;
+            let scores = entity_scores(x_demeaned, &residuals, &entity_ids, n_groups)?;
             cluster_vcov(&xtx_inv, &scores, n, k, adj)?
         }
     };
@@ -405,9 +407,14 @@ pub fn run_random_effects_with(
 
     // Step 0: raw collinearity. The later of exactly collinear columns of [1, X] is
     // dropped from every step (plm's aliased coefficients); the intercept is column 0,
-    // so it is never the aliased one.
-    let raw_qr = Qr::decompose(x_all.view(), LM_QR_TOL)?;
-    let aliased = raw_qr.aliased();
+    // so it is never the aliased one. OLS's decision: a full-rank, well-conditioned
+    // design has no aliased column (see `screen_regressors`), so the QR runs only when
+    // the normal equations decline it.
+    let aliased = if normal_equations_inverse(x_all.view())?.is_some() {
+        Vec::new()
+    } else {
+        Qr::decompose(x_all.view(), LM_QR_TOL)?.aliased()
+    };
     let dropped: Vec<String> = aliased.iter().map(|&j| all_names[j].clone()).collect();
     if !dropped.is_empty() {
         let quoted: Vec<String> = dropped.iter().map(|d| format!("'{d}'")).collect();
@@ -420,7 +427,11 @@ pub fn run_random_effects_with(
     let keep: Vec<usize> = (0..x_all.ncols())
         .filter(|j| !aliased.contains(j))
         .collect();
-    let x = x_all.select(Axis(1), &keep);
+    let x = if aliased.is_empty() {
+        x_all
+    } else {
+        x_all.select(Axis(1), &keep)
+    };
     let var_names: Vec<String> = keep.iter().map(|&j| all_names[j].clone()).collect();
     let p = x.ncols(); // K + 1
     let k_s = p - 1; // K
@@ -464,7 +475,7 @@ pub fn run_random_effects_with(
                 .to_string(),
         });
     }
-    let sigma2_nu = within.rss(y_w.view())? / (n - n_groups - k_w) as f64;
+    let sigma2_nu = within.rss(&y_w)? / (n - n_groups - k_w) as f64;
 
     // Step 2: per-entity sums in one pass over the observations
     let what = "random effects group means";
@@ -557,19 +568,27 @@ pub fn run_random_effects_with(
 
     // Step 5: OLS on the transformed model. X* c = 0 exactly when X c = 0
     // (average over t: (1 - theta_i) xbar_i'c = 0 with theta_i < 1), so its rank
-    // is that of the data with the intercept, which step 0 made full.
-    let ls = least_squares(x_q.view(), y_q.view())?;
-    if ls.rank < p {
-        return Err(EconError::Internal(format!(
-            "random effects: the quasi-demeaned design has rank {} of {p} after the \
-             collinear regressors were dropped",
-            ls.rank
-        )));
-    }
-    let bread = ls.unscaled_cov;
-    let beta: Array1<f64> = ls.coefficients;
-    let fitted = ls.fitted;
-    let residuals = ls.residuals;
+    // is that of the data with the intercept, which step 0 made full. OLS's solve
+    // decision: the normal equations when well conditioned, the pivoted QR otherwise.
+    let (bread, beta, fitted, residuals) = match normal_equations_inverse(x_q.view())? {
+        Some(normal) => {
+            let beta = normal.coefficients(x_q.view(), &y_q);
+            let fitted = x_q.dot(&beta);
+            let residuals = &y_q - &fitted;
+            (normal.inverse, beta, fitted, residuals)
+        }
+        None => {
+            let ls = least_squares(x_q.view(), y_q.view())?;
+            if ls.rank < p {
+                return Err(EconError::Internal(format!(
+                    "random effects: the quasi-demeaned design has rank {} of {p} after the \
+                     collinear regressors were dropped",
+                    ls.rank
+                )));
+            }
+            (ls.unscaled_cov, ls.coefficients, ls.fitted, ls.residuals)
+        }
+    };
     let df = n
         .checked_sub(p)
         .filter(|&d| d > 0)

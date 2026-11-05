@@ -81,6 +81,7 @@ use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::least_squares;
 use crate::options::Choices;
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::traits::convergence::ResultNotes;
 use crate::traits::estimator::{chi_squared_p_value, normal_cdf};
@@ -1211,6 +1212,16 @@ fn compute_llc_residuals(
         return Ok((dy_vec, ylag_vec));
     }
 
+    // OLS's solve decision: on a full-rank, well-conditioned design the normal equations
+    // give both residual vectors from one X'X; otherwise lm.fit's pivoted QR decides rank.
+    if let Some(normal) = normal_equations_inverse(x.view())? {
+        let residuals = |v: Vec<f64>| -> Vec<f64> {
+            let v = Array1::from(v);
+            let b = normal.coefficients(x.view(), &v);
+            (&v - &x.dot(&b)).to_vec()
+        };
+        return Ok((residuals(dy_vec), residuals(ylag_vec)));
+    }
     let dy = least_squares(x.view(), ArrayView1::from(&dy_vec))?;
     if dy.rank < n_cols {
         return Err(rank_deficient(
@@ -2431,5 +2442,85 @@ mod tests {
                 r.warnings
             );
         }
+    }
+
+    // ── T3-PERF1: the LLC auxiliary regressions take OLS's solve decision
+
+    /// The LLC auxiliary design of `series` (as `compute_llc_residuals` builds it).
+    fn llc_design(
+        series: &[f64],
+        model: PanelModel,
+        lags: usize,
+    ) -> (Array2<f64>, Vec<f64>, Vec<f64>) {
+        let d: Vec<f64> = series.windows(2).map(|w| w[1] - w[0]).collect();
+        let t = d.len();
+        let nd = n_det(model);
+        let x = Array2::from_shape_fn((t - lags, nd + lags), |(r, c)| {
+            let i = r + lags;
+            if c < nd {
+                if c == 0 { 1.0 } else { (i + 1) as f64 }
+            } else {
+                d[i - (c - nd) - 1]
+            }
+        });
+        (x, d[lags..].to_vec(), series[lags..t].to_vec())
+    }
+
+    /// On noisy AR(1) units the normal-equations residuals of both auxiliary regressions
+    /// agree with lm.fit's QR residuals to 1e-10 relative (to the residual norm), with an
+    /// intercept and with a trend (whose uncentred time column is refined once); an exactly
+    /// linear unit still reaches the QR and is skipped as rank deficient.
+    #[test]
+    fn test_llc_residuals_normal_equations_match_qr() {
+        // AR(1) units, rho 0.5, uniform noise (as noisy_panel)
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut y = Vec::new();
+        for len in [60usize, 100, 35] {
+            let mut v = 0.0;
+            let mut s = Vec::new();
+            for _ in 0..len {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                v = 0.5 * v + ((state >> 33) as f64 / 2147483648.0) - 1.0;
+                s.push(v);
+            }
+            y.push(s);
+        }
+        let units = [&y[0][..], &y[1][..], &y[2][..]];
+        for model in [PanelModel::Intercept, PanelModel::Trend] {
+            for lags in [1usize, 4] {
+                for s in units {
+                    let (x, dy, yl) = llc_design(s, model, lags);
+                    assert!(normal_equations_inverse(x.view()).unwrap().is_some());
+                    let (e, v) = match compute_llc_residuals(s, model, lags) {
+                        Ok(r) => r,
+                        Err(_) => panic!("unit not estimated"),
+                    };
+                    for (got, resp) in [(&e, &dy), (&v, &yl)] {
+                        let r = least_squares(x.view(), ArrayView1::from(resp))
+                            .unwrap()
+                            .residuals;
+                        let scale = r.iter().map(|a| a * a).sum::<f64>().sqrt();
+                        let diff = got
+                            .iter()
+                            .zip(r.iter())
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0, f64::max);
+                        assert!(
+                            diff <= 1e-10 * scale,
+                            "{model:?} lags {lags}: {diff} vs {scale}"
+                        );
+                    }
+                }
+            }
+        }
+        let line: Vec<f64> = (1..=40).map(|t| 2.0 * t as f64).collect();
+        let (x, _, _) = llc_design(&line, PanelModel::Intercept, 2);
+        assert!(normal_equations_inverse(x.view()).unwrap().is_none());
+        assert!(matches!(
+            compute_llc_residuals(&line, PanelModel::Intercept, 2),
+            Err(UnitError::Skip { .. })
+        ));
     }
 }

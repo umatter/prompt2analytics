@@ -258,6 +258,29 @@ The CLI panel commands report the dropped rows too: `p2a panel hdfe`, `feglm`, `
 `tier2::wp19_dynamic_panel::test_validate_cli_panel_missing_notes` (p2a-cli; registry entry
 `panel_cli_missing_notes` in `validation/methods/econ_dynamic_panel.json`).
 
+## Solve and timing
+
+The within regression solves from the regressor screen's factorization: the normal equations
+on a full-rank, well-conditioned demeaned design, the pivoted QR otherwise (see `hdfe.md`,
+"Solve and timing", for the decision and its tests).
+
+Timing (release bench binaries, one P core, `RAYON_NUM_THREADS=1`, criterion and the unified
+runner, medians of 3 interleaved rounds on a machine shared with other builds, so absolute
+times are about 3-4x those of a quiet run; base = fe13b889, before Tier 3 wave 2A; QR = the
+wave-2A head, which solved by pivoted QR; now = the solve above). `unified` rows use R's
+`panel_n<n>.csv` (x1, x2, entity effects), `econometrics` rows criterion's simulated panels.
+Every row is within rule 5's 1.1x of base. The outputs the unified runner captures
+(coefficients, SEs, R², test statistics) equal base's bit for bit; the QR head's differed in
+the last one or two digits (1e-9 relative for the Hausman statistic).
+
+| Fit | n | base µs | QR µs (ratio) | now µs (ratio) |
+|---|---|---|---|---|
+| FE, unified | 100 | 38.38 | 37.2 (0.97) | 26.85 (0.70) |
+| FE, unified | 1000 | 218.5 | 231.9 (1.06) | 170.6 (0.78) |
+| FE, unified | 10000 | 2837 | 3285 (1.16) | 2146 (0.76) |
+| FE, econometrics | 1000 | 211.1 | 212.2 (1.01) | 147.3 (0.70) |
+| FE, econometrics | 5000 | 926.5 | 1008 (1.09) | 661.9 (0.71) |
+
 ## Known differences
 
 - A regressor that is constant within every entity, or one that is exactly collinear with
