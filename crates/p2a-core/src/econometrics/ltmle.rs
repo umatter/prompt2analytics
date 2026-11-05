@@ -1332,7 +1332,7 @@ fn outcome_scale(y: &Array1<f64>, q_model: LtmleQModel) -> EconResult<OutcomeSca
         });
     if q_model == LtmleQModel::Logistic && (min < 0.0 || max > 1.0) {
         let width = max - min;
-        if !(width > 0.0) {
+        if width.is_nan() || width <= 0.0 {
             return Err(spec_err(format!(
                 "LTMLE: the outcome is constant ({min}); nothing to estimate"
             )));
@@ -1708,7 +1708,7 @@ fn fit_fluctuation(
             score += h[i] * (y[i] - p);
             info += h[i] * p * (1.0 - p);
         }
-        if !(info > 0.0) || score == 0.0 {
+        if info.is_nan() || info <= 0.0 || score == 0.0 {
             return Ok(Fluctuation {
                 epsilon: eps,
                 converged: score == 0.0,
