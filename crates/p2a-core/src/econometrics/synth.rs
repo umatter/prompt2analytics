@@ -2257,16 +2257,50 @@ pub enum GsynthForce {
     None,
 }
 
+crate::option_enum!(
+    GsynthEstimator,
+    crate::options::Choices {
+        option: "gsynth estimator",
+        values: &[
+            (
+                &["ife", "gsynth", "interactive_fixed_effects"],
+                GsynthEstimator::Ife,
+            ),
+            (
+                &["mc", "matrix_completion", "matrixcompletion"],
+                GsynthEstimator::MatrixCompletion,
+            ),
+        ],
+    }
+);
+
+crate::option_enum!(
+    GsynthForce,
+    crate::options::Choices {
+        option: "gsynth fixed effects (force)",
+        values: &[
+            (&["none"], GsynthForce::None),
+            (&["unit", "individual"], GsynthForce::Unit),
+            (&["time"], GsynthForce::Time),
+            (&["two_way", "twoway"], GsynthForce::TwoWay),
+        ],
+    }
+);
+
+/// Default bootstrap seed when `GsynthConfig::seed` is `None`.
+pub const GSYNTH_DEFAULT_SEED: u64 = 42;
+
 /// Configuration for generalized synthetic control.
 #[derive(Debug, Clone)]
 pub struct GsynthConfig {
-    /// Number of latent factors (0 = auto-select via cross-validation)
+    /// Number of latent factors: the fixed r without cross-validation, the smallest r
+    /// tried with it (R `r[1]`)
     pub n_factors: usize,
-    /// Maximum number of factors to try in cross-validation
+    /// Largest r tried by cross-validation (R `r[2]`); capped at what the data identify
     pub max_factors: usize,
-    /// Use cross-validation for factor selection
+    /// Cross-validate r (IFE: leave one pre-treatment period out) or lambda (MC: k-fold)
     pub cross_validate: bool,
-    /// Number of folds for cross-validation
+    /// Matrix-completion CV folds over the treated pre-period positions (>= 2 with CV)
     pub cv_folds: usize,
     /// Fixed effects specification
     pub force: GsynthForce,
@@ -2278,10 +2312,20 @@ pub struct GsynthConfig {
     pub n_bootstrap: usize,
     /// Minimum pre-treatment periods required
     pub min_pre_periods: usize,
-    /// Convergence tolerance
+    /// Relative convergence criterion of the IFE iteration with covariates and of
+    /// matrix completion
     pub tolerance: f64,
-    /// Maximum iterations for EM algorithm
+    /// Maximum iterations per fit
     pub max_iter: usize,
+    /// Matrix-completion penalty (R `lambda`): empty = fect's default grid (needs CV), one
+    /// value = fixed, several = the CV grid
+    pub lambda: Vec<f64>,
+    /// Size of the default lambda grid (R `nlambda`, at least 3)
+    pub n_lambda: usize,
+    /// Bootstrap confidence level
+    pub level: f64,
+    /// Bootstrap seed (`None`: [`GSYNTH_DEFAULT_SEED`])
+    pub seed: Option<u64>,
 }
 
 impl Default for GsynthConfig {
@@ -2298,6 +2342,10 @@ impl Default for GsynthConfig {
             min_pre_periods: 5,
             tolerance: 1e-5,
             max_iter: 1000,
+            lambda: Vec::new(),
+            n_lambda: 10,
+            level: 0.95,
+            seed: None,
         }
     }
 }
@@ -2358,8 +2406,70 @@ pub struct GsynthResult {
     pub estimator: GsynthEstimator,
     /// Fixed effects specification
     pub force: GsynthForce,
-    /// Dynamic treatment effects (time relative to treatment -> effect)
+    /// Event-time ATT (gsynth `att`): event time `e = t - T0_j + 1` (first treated period 1,
+    /// pre-treatment periods <= 0) -> mean effect over the treated units observed at `e`
     pub dynamic_effects: Vec<(i64, f64)>,
+    /// Residual variance of the control fit (gsynth `sigma2`; NaN without residual
+    /// degrees of freedom)
+    #[serde(default)]
+    pub sigma2: f64,
+    /// Grand mean of the fixed-effects part (gsynth `mu`)
+    #[serde(default)]
+    pub mu: f64,
+    /// Matrix-completion CV: (lambda, MSPE)
+    #[serde(default)]
+    pub cv_lambda: Vec<(f64, f64)>,
+    /// Matrix-completion penalty used
+    #[serde(default)]
+    pub lambda: Option<f64>,
+    /// Treated units observed at each event time (gsynth `count`)
+    #[serde(default)]
+    pub dynamic_counts: Vec<(i64, usize)>,
+    /// Bootstrap SE per event time (empty without bootstrap)
+    #[serde(default)]
+    pub dynamic_se: Vec<(i64, f64)>,
+    /// Bootstrap settings and outcome
+    #[serde(default)]
+    pub bootstrap: Option<GsynthBootstrap>,
+    /// The main fit's iteration (`None`: closed form)
+    #[serde(default)]
+    pub convergence: Option<Convergence>,
+    /// Warnings
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Which bootstrap produced the standard errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GsynthBootstrapMethod {
+    /// gsynth's parametric bootstrap (estimator "gsynth"; empirical errors).
+    Parametric,
+    /// Unit (nonparametric) bootstrap (gsynth's inference for estimator "mc").
+    Nonparametric,
+}
+
+/// Bootstrap settings and outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GsynthBootstrap {
+    /// Method
+    pub method: GsynthBootstrapMethod,
+    /// Successful replications
+    pub replications: usize,
+    /// Replications dropped (failed fit or failed error draw)
+    pub failed: usize,
+    /// Confidence level
+    pub level: f64,
+    /// Seed
+    pub seed: u64,
+}
+
+impl ResultNotes for GsynthResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
 }
 
 impl fmt::Display for GsynthResult {
@@ -2414,6 +2524,12 @@ impl fmt::Display for GsynthResult {
         writeln!(f, "{:<10} {:>10}", "Period", "Effect")?;
         for (period, effect) in &self.dynamic_effects {
             writeln!(f, "{:<10} {:>10.4}", period, effect)?;
+        }
+
+        let notes = notes_text(self);
+        if !notes.is_empty() {
+            writeln!(f)?;
+            write!(f, "{notes}")?;
         }
 
         Ok(())
@@ -2481,101 +2597,38 @@ pub fn run_gsynth(
     x_cols: &[&str],
     config: GsynthConfig,
 ) -> EconResult<GsynthResult> {
-    // One balanced panel, units in R factor() order (missing values,
-    // missing cells and duplicate cells are refused).
-    let GsynthPanel {
-        units: unique_units,
-        times: unique_times,
-        y: y_mat,
-        d: d_mat,
-        x: x_panels,
-    } = read_gsynth_panel(dataset.df(), y_col, d_col, unit_col, time_col, x_cols)?;
-
-    let n_times = unique_times.len();
-    let time_idx: std::collections::HashMap<i64, usize> = unique_times
-        .iter()
-        .enumerate()
-        .map(|(i, &t)| (t, i))
-        .collect();
-
-    // Identify treated and control units
-    let mut treated_units: Vec<usize> = Vec::new();
-    let mut control_units: Vec<usize> = Vec::new();
-    let mut treatment_times: Vec<i64> = Vec::new();
-
-    for (ui, _unit) in unique_units.iter().enumerate() {
-        let ever_treated = (0..n_times).any(|ti| d_mat[[ui, ti]] > 0.5);
-        if ever_treated {
-            treated_units.push(ui);
-            // Find first treatment time
-            for ti in 0..n_times {
-                if d_mat[[ui, ti]] > 0.5 {
-                    treatment_times.push(unique_times[ti]);
-                    break;
-                }
-            }
-        } else {
-            control_units.push(ui);
-        }
-    }
-
-    let n_treated = treated_units.len();
-    let n_control = control_units.len();
-
-    if n_treated == 0 {
+    let tol = config.tolerance;
+    if !(tol.is_finite() && tol > 0.0) {
         return Err(EconError::InvalidSpecification {
-            message: "No treated units found".to_string(),
+            message: format!("tolerance must be a finite number greater than 0 (got {tol})"),
         });
     }
-    if n_control < 2 {
+    if config.max_iter == 0 {
         return Err(EconError::InvalidSpecification {
-            message: "Need at least 2 control units".to_string(),
+            message: "max_iter must be at least 1 (got 0)".to_string(),
         });
     }
-
-    // Find common pre-treatment period (before any treatment)
-    let first_treatment = treatment_times.iter().min().copied().unwrap();
-    let first_treatment_idx = time_idx[&first_treatment];
-
-    if first_treatment_idx < config.min_pre_periods {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Need at least {} pre-treatment periods, found {}",
-                config.min_pre_periods, first_treatment_idx
-            ),
-        });
-    }
-
-    let n_pre_periods = first_treatment_idx;
-    let n_post_periods = n_times - first_treatment_idx;
-
-    // min_pre_periods = 0 lets a panel treated from its first period through;
-    // the factor model needs at least one pre-treatment period.
-    if n_pre_periods == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Need at least 1 pre-treatment period before the first treated period"
-                .to_string(),
-        });
-    }
-
-    // More factors than min(control units, pre-periods) cannot be estimated.
-    if config.n_factors > 0 {
-        let bound = n_control.min(n_pre_periods);
-        if config.n_factors > bound {
+    if config.bootstrap_se {
+        if config.n_bootstrap < 2 {
             return Err(EconError::InvalidSpecification {
                 message: format!(
-                    "n_factors = {} is more than the data can identify: at most {bound} (the \
-                     smaller of {n_control} control units and {n_pre_periods} pre-treatment \
-                     periods). Use fewer factors.",
-                    config.n_factors
+                    "n_bootstrap must be at least 2 for bootstrap standard errors (got {})",
+                    config.n_bootstrap
                 ),
             });
         }
+        crate::traits::estimator::validate_level(config.level, "level")?;
     }
-
-    // Cross-validation needs two folds; folds beyond the number of control
-    // units were empty, so the fold count is clamped to it.
-    let cv_folds = if config.cross_validate && config.n_factors == 0 {
+    if let Some(l) = config
+        .lambda
+        .iter()
+        .find(|l| !(l.is_finite() && **l >= 0.0))
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!("gsynth lambda values must be finite and non-negative (got {l})"),
+        });
+    }
+    if config.cross_validate {
         if config.cv_folds < 2 {
             return Err(EconError::InvalidSpecification {
                 message: format!(
@@ -2584,203 +2637,248 @@ pub fn run_gsynth(
                 ),
             });
         }
-        config.cv_folds.min(n_control)
+        if config.n_factors > config.max_factors {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "n_factors = {} (the smallest r cross-validated) is above max_factors = {}",
+                    config.n_factors, config.max_factors
+                ),
+            });
+        }
+    }
+
+    // One balanced panel, units in R factor() order (missing values,
+    // missing cells and duplicate cells are refused).
+    let panel = read_gsynth_panel(dataset.df(), y_col, d_col, unit_col, time_col, x_cols)?;
+    let m = gsynth_mats(panel)?;
+    let n_times = m.times.len();
+    let n_treated = m.treated.len();
+    let n_control = m.controls.len();
+    let t0_min = *m.first_treated.iter().min().expect("treated units");
+
+    if t0_min < config.min_pre_periods {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Need at least {} pre-treatment periods, found {}",
+                config.min_pre_periods, t0_min
+            ),
+        });
+    }
+    // min_pre_periods = 0 lets a panel treated from its first period through;
+    // the factor model needs at least one pre-treatment period.
+    if t0_min == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "Need at least 1 pre-treatment period before the first treated period"
+                .to_string(),
+        });
+    }
+    let n_pre_periods = t0_min;
+    let n_post_periods = n_times - t0_min;
+    let covariate_names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
+
+    if matches!(config.estimator, GsynthEstimator::MatrixCompletion) {
+        if !config.cross_validate && config.lambda.len() != 1 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "gsynth estimator 'mc' without cross-validation needs one lambda \
+                     (GsynthConfig::lambda); got {}",
+                    config.lambda.len()
+                ),
+            });
+        }
+        if config.cross_validate && config.lambda.is_empty() && config.n_lambda < 3 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "gsynth n_lambda must be at least 3 for the default lambda grid (got {})",
+                    config.n_lambda
+                ),
+            });
+        }
+    }
+
+    if config.bootstrap_se {
+        return Err(EconError::NotImplemented(
+            "gsynth bootstrap standard errors are not implemented yet; set bootstrap_se = false"
+                .to_string(),
+        ));
+    }
+
+    let mut warnings = Vec::new();
+    let est = if matches!(config.estimator, GsynthEstimator::MatrixCompletion) {
+        mc_estimate(&m, &config, &covariate_names, &mut warnings)?
     } else {
-        config.cv_folds
-    };
-
-    // Covariate panels, read with the outcome
-    let (x_mat, covariate_names) = if !x_cols.is_empty() {
-        (
-            Some(x_panels),
-            x_cols.iter().map(|s| s.to_string()).collect(),
-        )
-    } else {
-        (None, Vec::new())
-    };
-
-    // Select number of factors via cross-validation if requested
-    let (n_factors, cv_mspe) = if config.cross_validate && config.n_factors == 0 {
-        select_factors_cv(
-            &y_mat,
-            &control_units,
-            n_pre_periods,
-            config.max_factors,
-            cv_folds,
-            &config,
-        )?
-    } else if config.n_factors > 0 {
-        (config.n_factors, Vec::new())
-    } else {
-        (2, Vec::new()) // Default to 2 factors
-    };
-
-    // Estimate IFE model using control units in pre-treatment period
-    let (factors_pre, loadings, beta, _residuals) = estimate_ife(
-        &y_mat,
-        x_mat.as_ref(),
-        &control_units,
-        n_pre_periods,
-        n_factors,
-        &config,
-    )?;
-
-    // Downstream code uses the factors actually estimated: the SVD caps the
-    // rank at min(control units, pre-periods), which a CV choice or the
-    // default of 2 can exceed. For an explicit n_factors (checked above) the
-    // two agree.
-    let n_factors = factors_pre.ncols();
-
-    // Extend factors to all time periods using control units
-    // For post-treatment periods, project control outcomes onto factor space
-    let factors = extend_factors_to_all_periods(
-        &y_mat,
-        &factors_pre,
-        &loadings,
-        &control_units,
-        n_pre_periods,
-        n_times,
-        n_factors,
-        &config,
-    )?;
-
-    // Compute counterfactuals and treatment effects for treated units
-    let mut unit_effects: Vec<UnitEffect> = Vec::new();
-    let mut all_effects: Vec<f64> = Vec::new();
-    let mut dynamic_effect_map: std::collections::HashMap<i64, Vec<f64>> =
-        std::collections::HashMap::new();
-
-    for (idx, &ui) in treated_units.iter().enumerate() {
-        let treatment_time = treatment_times[idx];
-        let treatment_idx = time_idx[&treatment_time];
-
-        // Estimate loadings for this treated unit from pre-treatment data
-        let unit_loadings =
-            estimate_unit_loadings(&y_mat.row(ui).to_owned(), &factors, treatment_idx)?;
-
-        // Compute counterfactual and effects
-        let mut effects: Vec<(i64, f64)> = Vec::new();
-        let mut post_effects: Vec<f64> = Vec::new();
-
-        // Compute pre-treatment mean for this unit (for fixed effects)
-        let pre_mean: f64 = (0..treatment_idx)
-            .map(|t| y_mat[[ui, t]])
-            .filter(|v| !v.is_nan())
-            .sum::<f64>()
-            / treatment_idx.max(1) as f64;
-
-        // Compute mean of fitted values in pre-treatment
-        let pre_fitted_mean: f64 = if n_factors > 0 {
-            (0..treatment_idx)
-                .map(|t| {
-                    (0..n_factors)
-                        .map(|r| unit_loadings[r] * factors[[t, r]])
-                        .sum::<f64>()
-                })
-                .sum::<f64>()
-                / treatment_idx.max(1) as f64
-        } else {
-            0.0
+        let r_id = identified_factors(&m, config.force)?;
+        let too_many = |r: usize| EconError::InvalidSpecification {
+            message: format!(
+                "n_factors = {r} is more than the data can identify: at most {r_id} ({n_control} \
+                 control units, {n_times} periods, {t0_min} pre-treatment periods of the earliest \
+                 treated unit, force {:?}). Use fewer factors.",
+                config.force
+            ),
+        };
+        if config.n_factors > r_id {
+            return Err(too_many(config.n_factors));
+        }
+        let spec = |r: usize| IfeSpec {
+            r,
+            force: config.force,
+            tolerance: config.tolerance,
+            max_iter: config.max_iter,
         };
 
-        for ti in 0..n_times {
-            let time = unique_times[ti];
-            let y_actual = y_mat[[ui, ti]];
-
-            // Counterfactual: λ_i' * f_t + intercept adjustment
-            let y_fitted: f64 = (0..n_factors)
-                .map(|r| unit_loadings[r] * factors[[ti, r]])
-                .sum();
-
-            // Adjust for fixed effects
-            let y_counter = if matches!(config.force, GsynthForce::Unit | GsynthForce::TwoWay) {
-                y_fitted + pre_mean - pre_fitted_mean
-            } else {
-                y_fitted
-            };
-
-            if !y_actual.is_nan() {
-                let effect = y_actual - y_counter;
-
-                if ti >= treatment_idx {
-                    // Post-treatment
-                    effects.push((time, effect));
-                    post_effects.push(effect);
-                    all_effects.push(effect);
-
-                    let rel_time = (ti as i64) - (treatment_idx as i64);
-                    dynamic_effect_map.entry(rel_time).or_default().push(effect);
+        let (fit, cv_mspe) = if config.cross_validate {
+            let hi = config.max_factors.min(r_id);
+            if config.max_factors > r_id {
+                warnings.push(format!(
+                    "max_factors = {} exceeds what the data identify; cross-validated r = {}..{r_id}",
+                    config.max_factors, config.n_factors
+                ));
+            }
+            let mut cv_mspe = Vec::with_capacity(hi + 1 - config.n_factors);
+            let mut best: Option<(f64, GsynthFit)> = None;
+            let (mut not_converged, mut singular) = (0usize, Vec::new());
+            for r in config.n_factors..=hi {
+                crate::resource::checkpoint()?;
+                let (cand, parts) = match gsynth_estimate_parts(&m, &spec(r), &covariate_names) {
+                    Ok(v) => v,
+                    Err(EconError::InvalidSpecification { message })
+                        if message.contains("are collinear over unit") =>
+                    {
+                        singular.push(r);
+                        cv_mspe.push((r, f64::INFINITY));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                if cand.ife.convergence.as_ref().is_some_and(|c| !c.converged) {
+                    not_converged += 1;
+                }
+                let mspe = match loo_mspe(&m, &parts)? {
+                    Some(v) => v,
+                    None => {
+                        singular.push(r);
+                        f64::INFINITY
+                    }
+                };
+                cv_mspe.push((r, mspe));
+                if best.as_ref().is_none_or(|(b, _)| mspe < *b) {
+                    best = Some((mspe, cand));
                 }
             }
-        }
-
-        let att_unit = if post_effects.is_empty() {
-            0.0
+            if not_converged > 0 {
+                warnings.push(format!(
+                    "{not_converged} cross-validation fit(s) did not converge within max_iter = {}",
+                    config.max_iter
+                ));
+            }
+            if !singular.is_empty() {
+                warnings.push(format!(
+                    "cross-validation: the treated units' loadings are not identified for r = {:?}; \
+                     their MSPE is infinite",
+                    singular
+                ));
+            }
+            match best {
+                Some((mspe, fit)) if mspe.is_finite() => (fit, cv_mspe),
+                _ => {
+                    return Err(EconError::Computation(
+                        "gsynth cross-validation: no number of factors gave identified treated \
+                         loadings"
+                            .to_string(),
+                    ));
+                }
+            }
         } else {
-            post_effects.iter().sum::<f64>() / post_effects.len() as f64
+            (
+                gsynth_estimate(&m, &spec(config.n_factors), &covariate_names)?,
+                Vec::new(),
+            )
         };
 
+        if let Some(note) = fit
+            .ife
+            .convergence
+            .as_ref()
+            .and_then(|c| c.note("gsynth IFE"))
+        {
+            warnings.push(note);
+        }
+        if fit.ife.sigma2.is_nan() {
+            warnings.push(
+                "the residual variance sigma2 is not identified (no residual degrees of freedom \
+                 on the controls); it is reported as NaN"
+                    .to_string(),
+            );
+        }
+
+        Estimate {
+            n_factors: fit.ife.factors.ncols(),
+            eff: fit.eff,
+            att: fit.att,
+            mu: fit.ife.mu,
+            sigma2: fit.ife.sigma2,
+            beta: fit.ife.beta,
+            factors: Some(fit.ife.factors),
+            loadings: Some(fit.ife.loadings),
+            lambda: None,
+            cv_lambda: Vec::new(),
+            cv_mspe,
+            convergence: fit.ife.convergence,
+        }
+    };
+
+    let (dynamic_effects, dynamic_counts) = event_time_att(&est.eff, &m.first_treated);
+    let mut pre_sum = 0.0;
+    let mut pre_n = 0usize;
+    let mut unit_effects = Vec::with_capacity(n_treated);
+    for (j, &t0) in m.first_treated.iter().enumerate() {
+        for t in 0..t0 {
+            pre_sum += est.eff[[t, j]].powi(2);
+            pre_n += 1;
+        }
+        let effects: Vec<(i64, f64)> = (t0..n_times)
+            .map(|t| (m.times[t], est.eff[[t, j]]))
+            .collect();
+        let att = effects.iter().map(|(_, e)| e).sum::<f64>() / effects.len() as f64;
         unit_effects.push(UnitEffect {
-            unit: unique_units[ui].clone(),
-            treatment_time,
+            unit: m.units[m.treated[j]].clone(),
+            treatment_time: m.times[t0],
             effects,
-            att: att_unit,
+            att,
             se: None,
         });
     }
-
-    // Overall ATT
-    let att = if all_effects.is_empty() {
-        0.0
-    } else {
-        all_effects.iter().sum::<f64>() / all_effects.len() as f64
-    };
-
-    // Dynamic effects (average by relative time)
-    let mut dynamic_effects: Vec<(i64, f64)> = dynamic_effect_map
-        .iter()
-        .map(|(&rel_t, effects)| (rel_t, effects.iter().sum::<f64>() / effects.len() as f64))
-        .collect();
-    dynamic_effects.sort_by_key(|(t, _)| *t);
-
-    // Compute pre-treatment MSPE
-    let pre_mspe = compute_pre_mspe(&y_mat, &factors, &loadings, &control_units, n_pre_periods);
-
-    // Bootstrap for standard errors if requested
-    let (att_se, att_ci, p_value) = if config.bootstrap_se {
-        bootstrap_gsynth(
-            &y_mat,
-            &d_mat,
-            &treated_units,
-            &control_units,
-            n_pre_periods,
-            n_factors,
-            &config,
-        )?
-    } else {
-        (None, None, None)
-    };
+    let pre_mspe = pre_sum / pre_n as f64;
 
     Ok(GsynthResult {
-        att,
-        att_se,
-        att_ci,
-        p_value,
+        att: est.att,
+        att_se: None,
+        att_ci: None,
+        p_value: None,
         n_treated,
         n_control,
         n_pre_periods,
         n_post_periods,
-        n_factors,
-        cv_mspe,
+        n_factors: est.n_factors,
+        cv_mspe: est.cv_mspe,
         unit_effects,
-        factors: Some(factors),
-        loadings: Some(loadings),
-        beta,
+        factors: est.factors,
+        loadings: est.loadings,
+        beta: est.beta,
         covariate_names,
         pre_mspe,
         estimator: config.estimator,
         force: config.force,
         dynamic_effects,
+        sigma2: est.sigma2,
+        mu: est.mu,
+        cv_lambda: est.cv_lambda,
+        lambda: est.lambda,
+        dynamic_counts,
+        dynamic_se: Vec::new(),
+        bootstrap: None,
+        convergence: est.convergence,
+        warnings,
     })
 }
 
@@ -2921,591 +3019,910 @@ fn read_gsynth_panel(
     })
 }
 
-/// Select optimal number of factors via k-fold cross-validation.
-///
-/// Implements the cross-validation procedure from Xu (2017) for selecting
-/// the number of latent factors in the interactive fixed effects model.
-///
-/// # Algorithm
-/// 1. Randomly split control units into k folds
-/// 2. For each candidate number of factors r = 0, 1, ..., max_factors:
-///    - For each fold:
-///      - Estimate factors using training units
-///      - Compute prediction MSPE on test units
-///    - Average MSPE across folds
-/// 3. Select r with minimum average MSPE
-///
-/// # Arguments
-/// * `y_mat` - Outcome matrix (N × T)
-/// * `control_units` - Indices of control units
-/// * `n_pre` - Number of pre-treatment periods
-/// * `max_factors` - Maximum number of factors to consider
-/// * `n_folds` - Number of cross-validation folds (default: 5)
-/// * `config` - GSynth configuration
-///
-/// # Returns
-/// Tuple of (optimal_r, cv_results) where cv_results contains (r, MSPE) pairs
-///
-/// # References
-/// Xu, Y. (2017). "Generalized Synthetic Control Method: Causal Inference with
-/// Interactive Fixed Effects Models." Political Analysis, 25(1), 57-76.
-fn select_factors_cv(
-    y_mat: &Array2<f64>,
-    control_units: &[usize],
-    n_pre: usize,
-    max_factors: usize,
-    n_folds: usize,
-    config: &GsynthConfig,
-) -> EconResult<(usize, Vec<(usize, f64)>)> {
-    use rand::SeedableRng;
-    use rand::seq::SliceRandom;
+// ─── gsynth estimation (S3-S6) ──────────────────────────────────────────────────
 
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-    let mut indices: Vec<usize> = (0..control_units.len()).collect();
-    indices.shuffle(&mut rng);
+/// gsynth panel as T x N matrices: rows = periods in time order, columns = units in factor
+/// order.
+struct GsynthMats {
+    y: Array2<f64>,
+    d: Array2<f64>,
+    x: Vec<Array2<f64>>,
+    units: Vec<String>,
+    times: Vec<i64>,
+    /// Columns of the treated units (any D = 1), in unit order.
+    treated: Vec<usize>,
+    /// Columns of the never-treated units.
+    controls: Vec<usize>,
+    /// Per treated unit: T0_j, the index of its first treated period.
+    first_treated: Vec<usize>,
+}
 
-    let fold_size = control_units.len() / n_folds;
-    let mut cv_results: Vec<(usize, f64)> = Vec::new();
+/// `m` transposed into a `try_zeros2` buffer.
+fn transpose_into(m: &Array2<f64>, what: &str) -> EconResult<Array2<f64>> {
+    let (r, c) = m.dim();
+    let mut out = crate::resource::try_zeros2(c, r, what)?;
+    out.assign(&m.t());
+    Ok(out)
+}
 
-    for r in 0..=max_factors.min(n_pre - 1) {
-        let mut fold_mspe: Vec<f64> = Vec::new();
-
-        for fold in 0..n_folds {
-            crate::resource::checkpoint()?;
-
-            let start = fold * fold_size;
-            let end = if fold == n_folds - 1 {
-                control_units.len()
-            } else {
-                (fold + 1) * fold_size
-            };
-
-            let test_indices: Vec<usize> = indices[start..end].to_vec();
-            let train_indices: Vec<usize> = indices
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| i < start || i >= end)
-                .map(|(_, &idx)| idx)
-                .collect();
-
-            let train_units: Vec<usize> = train_indices.iter().map(|&i| control_units[i]).collect();
-
-            // Estimate on training set
-            let (factors, _, _, _) = match estimate_ife(y_mat, None, &train_units, n_pre, r, config)
-            {
-                Ok(res) => res,
-                Err(e @ EconError::Cancelled(_)) => return Err(e),
-                Err(_) => continue,
-            };
-
-            // Evaluate on test set
-            let mut mspe = 0.0;
-            let mut count = 0;
-
-            // Actual number of factors extracted may be less than requested
-            let actual_r = factors.ncols();
-
-            for &test_idx in &test_indices {
-                let ui = control_units[test_idx];
-                let unit_loadings =
-                    match estimate_unit_loadings(&y_mat.row(ui).to_owned(), &factors, n_pre) {
-                        Ok(l) => l,
-                        Err(_) => continue,
-                    };
-
-                for ti in 0..n_pre {
-                    let y_actual = y_mat[[ui, ti]];
-                    if !y_actual.is_nan() {
-                        let y_pred: f64 = (0..actual_r)
-                            .map(|k| unit_loadings[k] * factors[[ti, k]])
-                            .sum();
-                        mspe += (y_actual - y_pred).powi(2);
-                        count += 1;
-                    }
-                }
-            }
-
-            if count > 0 {
-                fold_mspe.push(mspe / count as f64);
-            }
-        }
-
-        if !fold_mspe.is_empty() {
-            let avg_mspe = fold_mspe.iter().sum::<f64>() / fold_mspe.len() as f64;
-            cv_results.push((r, avg_mspe));
-        }
+/// The columns `cols` of `m`.
+fn select_columns(m: &Array2<f64>, cols: &[usize], what: &str) -> EconResult<Array2<f64>> {
+    let mut out = crate::resource::try_zeros2(m.nrows(), cols.len(), what)?;
+    for (k, &c) in cols.iter().enumerate() {
+        out.column_mut(k).assign(&m.column(c));
     }
+    Ok(out)
+}
 
-    // Select r with minimum MSPE
-    let best_r = cv_results
+/// S3: the panel as T x N matrices; D must be 0/1 and absorbing.
+fn gsynth_mats(panel: GsynthPanel) -> EconResult<GsynthMats> {
+    let GsynthPanel {
+        units,
+        times,
+        y,
+        d,
+        x,
+    } = panel;
+    let y = transpose_into(&y, "gsynth outcome panel (units x periods)")?;
+    let d = transpose_into(&d, "gsynth treatment panel (units x periods)")?;
+    let x = x
         .iter()
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|&(r, _)| r)
-        .unwrap_or(2);
-
-    Ok((best_r, cv_results))
-}
-
-/// Estimate interactive fixed effects (IFE) model on control units.
-///
-/// Implements the factor model: Y_it = λ_i' f_t + ε_it
-/// where λ_i are unit-specific loadings and f_t are time-varying factors.
-///
-/// # Model
-/// The interactive fixed effects model captures unobserved heterogeneity through
-/// latent factors that vary over time and affect units differently:
-/// - f_t ∈ ℝʳ: r-dimensional factor at time t
-/// - λ_i ∈ ℝʳ: unit i's factor loadings (how sensitive it is to each factor)
-///
-/// # Algorithm
-/// 1. Apply fixed effects transformation based on `config.force`:
-///    - None: No demeaning
-///    - Unit: Subtract unit means (within transformation)
-///    - Time: Subtract time means
-///    - TwoWay: Subtract unit means, time means, add grand mean
-/// 2. Extract factors and loadings via SVD/PCA
-/// 3. Compute residuals
-///
-/// # Arguments
-/// * `y_mat` - Outcome matrix (N × T)
-/// * `x_mat` - Optional covariate matrices (reserved for future use)
-/// * `control_units` - Indices of control units to use for estimation
-/// * `n_pre` - Number of pre-treatment periods
-/// * `n_factors` - Number of factors to extract
-/// * `config` - GSynth configuration
-///
-/// # Returns
-/// Tuple of (factors, loadings, beta_coefficients, residuals)
-/// - factors: T × r matrix of time factors
-/// - loadings: N × r matrix of unit loadings
-/// - beta: Covariate coefficients (empty if no covariates)
-/// - residuals: N × T matrix of residuals
-fn estimate_ife(
-    y_mat: &Array2<f64>,
-    _x_mat: Option<&Vec<Array2<f64>>>,
-    control_units: &[usize],
-    n_pre: usize,
-    n_factors: usize,
-    config: &GsynthConfig,
-) -> EconResult<(Array2<f64>, Array2<f64>, Vec<f64>, Array2<f64>)> {
-    // Extract control outcomes for pre-treatment period
-    let n_control = control_units.len();
-    let mut y_control = Array2::<f64>::zeros((n_control, n_pre));
-
-    for (i, &ui) in control_units.iter().enumerate() {
-        for t in 0..n_pre {
-            y_control[[i, t]] = y_mat[[ui, t]];
+        .map(|m| transpose_into(m, "gsynth covariate panel (units x periods)"))
+        .collect::<EconResult<Vec<_>>>()?;
+    let n_t = times.len();
+    let mut treated = Vec::new();
+    let mut controls = Vec::new();
+    let mut first_treated = Vec::new();
+    for (i, unit) in units.iter().enumerate() {
+        let col = d.column(i);
+        if let Some((t, v)) = col
+            .iter()
+            .enumerate()
+            .find(|(_, v)| **v != 0.0 && **v != 1.0)
+        {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "gsynth needs a 0/1 treatment: unit '{unit}' has {v} at time {}",
+                    times[t]
+                ),
+            });
+        }
+        match (0..n_t).find(|&t| col[t] == 1.0) {
+            None => controls.push(i),
+            Some(t0) => {
+                if let Some(t2) = (t0..n_t).find(|&t| col[t] == 0.0) {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "gsynth needs an absorbing treatment: unit '{unit}' is treated at \
+                             time {} and untreated at {} (R: \"Gsynth can't be used when \
+                             treatments have reversals.\")",
+                            times[t0], times[t2]
+                        ),
+                    });
+                }
+                treated.push(i);
+                first_treated.push(t0);
+            }
         }
     }
-
-    // Handle fixed effects
-    let y_demean = match config.force {
-        GsynthForce::None => y_control.clone(),
-        GsynthForce::Unit => {
-            let mut y_dm = y_control.clone();
-            for i in 0..n_control {
-                let row_mean: f64 =
-                    y_dm.row(i).iter().filter(|&&v| !v.is_nan()).sum::<f64>() / n_pre as f64;
-                for t in 0..n_pre {
-                    y_dm[[i, t]] -= row_mean;
-                }
-            }
-            y_dm
-        }
-        GsynthForce::Time => {
-            let mut y_dm = y_control.clone();
-            for t in 0..n_pre {
-                let col_mean: f64 = (0..n_control)
-                    .map(|i| y_dm[[i, t]])
-                    .filter(|&v| !v.is_nan())
-                    .sum::<f64>()
-                    / n_control as f64;
-                for i in 0..n_control {
-                    y_dm[[i, t]] -= col_mean;
-                }
-            }
-            y_dm
-        }
-        GsynthForce::TwoWay => {
-            let mut y_dm = y_control.clone();
-            // Grand mean
-            let grand_mean: f64 =
-                y_dm.iter().filter(|&&v| !v.is_nan()).sum::<f64>() / (n_control * n_pre) as f64;
-            // Row means
-            let row_means: Vec<f64> = (0..n_control)
-                .map(|i| y_dm.row(i).sum() / n_pre as f64)
-                .collect();
-            // Col means
-            let col_means: Vec<f64> = (0..n_pre)
-                .map(|t| (0..n_control).map(|i| y_dm[[i, t]]).sum::<f64>() / n_control as f64)
-                .collect();
-            // Demean
-            for i in 0..n_control {
-                for t in 0..n_pre {
-                    y_dm[[i, t]] -= row_means[i] + col_means[t] - grand_mean;
-                }
-            }
-            y_dm
-        }
-    };
-
-    // SVD for factor extraction
-    let (factors, loadings) = if n_factors > 0 {
-        extract_factors_svd(&y_demean, n_factors)?
-    } else {
-        // No factors - return empty matrices
-        (Array2::zeros((n_pre, 0)), Array2::zeros((n_control, 0)))
-    };
-
-    // Actual number of factors extracted (may be less than requested)
-    let actual_n_factors = factors.ncols();
-
-    // Compute residuals
-    let mut residuals = y_control.clone();
-    for i in 0..n_control {
-        for t in 0..n_pre {
-            let fitted: f64 = (0..actual_n_factors)
-                .map(|r| loadings[[i, r]] * factors[[t, r]])
-                .sum();
-            residuals[[i, t]] -= fitted;
-        }
+    if treated.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "No treated units found".to_string(),
+        });
     }
-
-    Ok((factors, loadings, Vec::new(), residuals))
+    if controls.len() < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: "Need at least 2 control units".to_string(),
+        });
+    }
+    Ok(GsynthMats {
+        y,
+        d,
+        x,
+        units,
+        times,
+        treated,
+        controls,
+        first_treated,
+    })
 }
 
-/// Extract latent factors and loadings using principal components analysis.
-///
-/// Implements factor extraction via eigenvalue decomposition of Y'Y.
-/// This is the core of the interactive fixed effects model.
-///
-/// # Algorithm
-/// 1. Compute Y'Y (T × T covariance matrix of time points)
-/// 2. Use power iteration with deflation to extract top r eigenvectors
-/// 3. These eigenvectors become the time factors f_t
-/// 4. Loadings λ_i are computed as Y × factors / eigenvalue
-///
-/// # Normalization
-/// Uses PC1 normalization: factors have unit variance, loadings capture scale.
-/// This follows the convention in Bai (2009) for factor models.
-///
-/// # Arguments
-/// * `y` - Demeaned outcome matrix (N × T), where N = control units, T = pre-periods
-/// * `n_factors` - Number of factors to extract (actual may be less if rank-deficient)
-///
-/// # Returns
-/// Tuple of (factors, loadings):
-/// - factors: T × r matrix of time-varying factors
-/// - loadings: N × r matrix of unit-specific factor loadings
-///
-/// # References
-/// - Bai, J. (2009). "Panel Data Models with Interactive Fixed Effects."
-///   Econometrica, 77(4), 1229-1279.
-fn extract_factors_svd(
-    y: &Array2<f64>,
-    n_factors: usize,
-) -> EconResult<(Array2<f64>, Array2<f64>)> {
-    let (n_rows, n_cols) = y.dim(); // N x T (control_units x pre_periods)
-    let r = n_factors.min(n_rows.min(n_cols));
+/// IFE options of one fit.
+#[derive(Debug, Clone, Copy)]
+struct IfeSpec {
+    r: usize,
+    force: GsynthForce,
+    tolerance: f64,
+    max_iter: usize,
+}
 
+/// (u, v): unit effects, time effects.
+fn force_dims(force: GsynthForce) -> (usize, usize) {
+    match force {
+        GsynthForce::None => (0, 0),
+        GsynthForce::Unit => (1, 0),
+        GsynthForce::Time => (0, 1),
+        GsynthForce::TwoWay => (1, 1),
+    }
+}
+
+/// Subtract the grand mean and, as `force` asks, the column (unit) and row (time) effects.
+fn gs_demean(m: &Array2<f64>, force: GsynthForce) -> Array2<f64> {
+    let (u, v) = force_dims(force);
+    let (n_t, n) = m.dim();
+    let mu = m.sum() / (n_t * n) as f64;
+    let col = m.mean_axis(ndarray::Axis(0)).expect("non-empty");
+    let row = m.mean_axis(ndarray::Axis(1)).expect("non-empty");
+    Array2::from_shape_fn((n_t, n), |(t, i)| {
+        let mut z = m[[t, i]] - mu;
+        if u == 1 {
+            z -= col[i] - mu;
+        }
+        if v == 1 {
+            z -= row[t] - mu;
+        }
+        z
+    })
+}
+
+/// `vec(m)` in column-major order (R's `c(M)`).
+fn vec_cm(m: &Array2<f64>) -> Array1<f64> {
+    m.t().iter().copied().collect()
+}
+
+/// The inverse of [`vec_cm`].
+fn unvec_cm(v: &Array1<f64>, n_t: usize, n: usize) -> Array2<f64> {
+    Array2::from_shape_fn((n_t, n), |(t, i)| v[t + n_t * i])
+}
+
+/// Factors and loadings of `U` (T x N): `F = sqrt(T) U_svd[:, :r]`, `Lambda = U'F / T`,
+/// `FE = F Lambda'`.
+fn gs_pca(u: &Array2<f64>, r: usize) -> EconResult<(Array2<f64>, Array2<f64>, Array2<f64>)> {
+    crate::resource::checkpoint()?;
+    let (n_t, n) = u.dim();
     if r == 0 {
-        return Ok((Array2::zeros((n_cols, 0)), Array2::zeros((n_rows, 0))));
+        return Ok((
+            Array2::zeros((n_t, 0)),
+            Array2::zeros((n, 0)),
+            Array2::zeros((n_t, n)),
+        ));
     }
+    let mat = crate::linalg::matrix_ops::ndarray_to_faer(&u.view());
+    let svd = mat
+        .thin_svd()
+        .map_err(|e| EconError::Computation(format!("gsynth factor SVD failed: {e:?}")))?;
+    let uu = svd.U();
+    if uu.ncols() < r {
+        return Err(EconError::Computation(format!(
+            "gsynth factor SVD returned {} singular vectors for {r} factors",
+            uu.ncols()
+        )));
+    }
+    let scale = (n_t as f64).sqrt();
+    let f = Array2::from_shape_fn((n_t, r), |(t, k)| scale * uu[(t, k)]);
+    let lambda = u.t().dot(&f) / n_t as f64;
+    let fe = f.dot(&lambda.t());
+    Ok((f, lambda, fe))
+}
 
-    // For the interactive fixed effects model:
-    // Y = Λ F' + ε where Λ is N x r (loadings), F is T x r (factors)
-    //
-    // We perform PCA on Y to extract factors and loadings.
-    // The PC1 normalization convention: factors have unit variance, loadings capture scale.
+/// The IFE fit on the controls (S4).
+#[derive(Debug, Clone)]
+struct IfeFit {
+    beta: Vec<f64>,
+    mu: f64,
+    xi: Array1<f64>,
+    alpha: Array1<f64>,
+    factors: Array2<f64>,
+    loadings: Array2<f64>,
+    fitted: Array2<f64>,
+    residuals: Array2<f64>,
+    sigma2: f64,
+    convergence: Option<Convergence>,
+}
 
-    // Compute Y'Y (T x T) for factor extraction; T can be large next to N, so
-    // the T x T matrix (and its working copy) is checked first.
-    let what = "gsynth factor covariance (pre-treatment periods x pre-treatment periods)";
-    crate::resource::check_alloc::<f64>(
-        crate::resource::checked_len(&[n_cols, n_cols], what)?,
-        what,
+/// The stacked demeaned covariates ((T N) x p, column-major cells) and their QR; aliased
+/// columns are refused, naming them.
+fn stacked_covariates(
+    x: &[Array2<f64>],
+    force: GsynthForce,
+    names: &[String],
+) -> EconResult<Option<(Array2<f64>, crate::linalg::solve::Qr)>> {
+    if x.is_empty() {
+        return Ok(None);
+    }
+    let (n_t, n) = x[0].dim();
+    let cells = crate::resource::checked_len(&[n_t, n], "gsynth stacked covariates")?;
+    let mut xx = crate::resource::try_zeros2(
+        cells,
+        x.len(),
+        "gsynth stacked covariates (control cells x covariates)",
     )?;
-    let yty = y.t().dot(y); // T x T
+    for (j, m) in x.iter().enumerate() {
+        xx.column_mut(j).assign(&vec_cm(&gs_demean(m, force)));
+    }
+    let qr = crate::linalg::solve::Qr::decompose(xx.view(), crate::linalg::solve::LM_QR_TOL)?;
+    let aliased = qr.aliased();
+    if !aliased.is_empty() {
+        let bad: Vec<&str> = aliased
+            .iter()
+            .map(|&j| names.get(j).map(String::as_str).unwrap_or("?"))
+            .collect();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "gsynth: covariate(s) {} are collinear with the other covariates or the fixed \
+                 effects; drop them",
+                bad.join(", ")
+            ),
+        });
+    }
+    Ok(Some((xx, qr)))
+}
 
-    // Simple eigenvalue decomposition via power iteration with deflation
-    let mut factors = Array2::<f64>::zeros((n_cols, r));
-    let mut eigenvalues = Vec::with_capacity(r);
+/// S4: Bai's IFE on the controls `y` (T x N_co) with covariates `x`.
+fn ife_controls(
+    y: &Array2<f64>,
+    x: &[Array2<f64>],
+    spec: &IfeSpec,
+    names: &[String],
+) -> EconResult<IfeFit> {
+    crate::resource::checkpoint()?;
+    let (n_t, n) = y.dim();
+    let (u, v) = force_dims(spec.force);
+    let r = spec.r;
+    let yy = gs_demean(y, spec.force);
+    let p = x.len();
+    let (beta, convergence) = match stacked_covariates(x, spec.force, names)? {
+        None => (Vec::new(), None),
+        Some((xx, qr)) => {
+            let vy = vec_cm(&yy);
+            let norm_y = vy.dot(&vy).sqrt().max(f64::MIN_POSITIVE);
+            let mut beta = qr.coefficients(vy.view())?;
+            let mut step = f64::NAN;
+            let mut converged = false;
+            let mut k = 0;
+            while k < spec.max_iter {
+                crate::resource::checkpoint()?;
+                k += 1;
+                let resid = unvec_cm(&(&vy - &xx.dot(&beta)), n_t, n);
+                let (_, _, fe) = gs_pca(&resid, r)?;
+                let target = &vy - &vec_cm(&fe);
+                let next = qr.coefficients(target.view())?;
+                let change = xx.dot(&(&next - &beta));
+                step = change.dot(&change).sqrt() / norm_y;
+                beta = next;
+                if step < spec.tolerance {
+                    converged = true;
+                    break;
+                }
+            }
+            let conv = Convergence::new(
+                converged,
+                k,
+                spec.max_iter,
+                "relative change of the covariate fit",
+                step,
+                spec.tolerance,
+            );
+            (beta.to_vec(), Some(conv))
+        }
+    };
+    let mut resid = y.clone();
+    for (j, m) in x.iter().enumerate() {
+        resid.scaled_add(-beta[j], m);
+    }
+    let mu = resid.sum() / (n_t * n) as f64;
+    let xi = if v == 1 {
+        resid.mean_axis(ndarray::Axis(1)).expect("non-empty") - mu
+    } else {
+        Array1::zeros(n_t)
+    };
+    let alpha = if u == 1 {
+        resid.mean_axis(ndarray::Axis(0)).expect("non-empty") - mu
+    } else {
+        Array1::zeros(n)
+    };
+    let (factors, loadings, fe) = gs_pca(&gs_demean(&resid, spec.force), r)?;
+    let fitted = Array2::from_shape_fn((n_t, n), |(t, i)| mu + alpha[i] + xi[t] + fe[[t, i]]);
+    let residuals = &resid - &fitted;
+    let (n_fe, n_dim) = match spec.force {
+        GsynthForce::None => (1, 0),
+        GsynthForce::Unit => (n, 1),
+        GsynthForce::Time => (n_t, 1),
+        GsynthForce::TwoWay => (n + n_t - 1, 2),
+    };
+    let df = (n_t * n) as i128
+        - n_fe as i128
+        - p as i128
+        - (r as i128) * ((n + n_t) as i128 - n_dim as i128)
+        + (r * r) as i128;
+    let sse: f64 = residuals.iter().map(|e| e * e).sum();
+    let sigma2 = if df > 0 { sse / df as f64 } else { f64::NAN };
+    Ok(IfeFit {
+        beta,
+        mu,
+        xi,
+        alpha,
+        factors,
+        loadings,
+        fitted,
+        residuals,
+        sigma2,
+        convergence,
+    })
+}
 
-    let mut mat = yty.clone();
+/// S4.11: `min(N_co - v, T - u, T0_min - u - 1)`.
+fn identified_factors(m: &GsynthMats, force: GsynthForce) -> EconResult<usize> {
+    let (u, v) = force_dims(force);
+    let t0_min = *m.first_treated.iter().min().expect("treated units");
+    let n_t = m.times.len();
+    let bound = [
+        m.controls.len().checked_sub(v),
+        n_t.checked_sub(u),
+        t0_min.checked_sub(u + 1),
+    ];
+    match bound.iter().copied().collect::<Option<Vec<usize>>>() {
+        Some(b) => Ok(b.into_iter().min().expect("three bounds")),
+        None => Err(EconError::InsufficientData {
+            required: u + 1,
+            provided: t0_min,
+            context: format!(
+                "gsynth with force {force:?}: pre-treatment periods of the earliest treated unit \
+                 (the fixed effects leave no degrees of freedom for a factor model)"
+            ),
+        }),
+    }
+}
 
-    for k in 0..r {
-        // Each factor costs up to 200 power-iteration steps and a deflation on
-        // the T x T matrix; an explicit n_factors reaches this loop without the
-        // per-fold checkpoints of select_factors_cv.
+/// S5 inputs of the treated units: `U_tr` and `F^`.
+struct TreatedParts {
+    u_tr: Array2<f64>,
+    f_hat: Array2<f64>,
+}
+
+fn treated_parts(m: &GsynthMats, ife: &IfeFit, force: GsynthForce) -> EconResult<TreatedParts> {
+    let (u, v) = force_dims(force);
+    let n_t = m.times.len();
+    let mut u_tr = select_columns(&m.y, &m.treated, "gsynth treated outcomes")?;
+    for (j, x) in m.x.iter().enumerate() {
+        let xt = select_columns(x, &m.treated, "gsynth treated covariates")?;
+        u_tr.scaled_add(-ife.beta[j], &xt);
+    }
+    u_tr -= ife.mu;
+    if v == 1 {
+        for (t, mut row) in u_tr.rows_mut().into_iter().enumerate() {
+            row -= ife.xi[t];
+        }
+    }
+    let r = ife.factors.ncols();
+    let mut f_hat = Array2::<f64>::ones((n_t, r + u));
+    f_hat.slice_mut(ndarray::s![.., ..r]).assign(&ife.factors);
+    Ok(TreatedParts { u_tr, f_hat })
+}
+
+fn loadings_error(m: &GsynthMats, j: usize, r: usize) -> EconError {
+    EconError::InvalidSpecification {
+        message: format!(
+            "gsynth: the {r} factors (and intercept) are collinear over unit '{}''s {} \
+             pre-treatment periods; use fewer factors",
+            m.units[m.treated[j]], m.first_treated[j]
+        ),
+    }
+}
+
+/// The rows `rows` of `a`.
+fn select_rows(a: &Array2<f64>, rows: &[usize]) -> Array2<f64> {
+    Array2::from_shape_fn((rows.len(), a.ncols()), |(i, k)| a[[rows[i], k]])
+}
+
+/// The base fit (S5).
+#[derive(Debug, Clone)]
+struct GsynthFit {
+    /// T x N_tr treatment effects (pre periods: prediction errors).
+    eff: Array2<f64>,
+    att: f64,
+    ife: IfeFit,
+}
+
+/// Effects of the treated units given `U_tr` and `F^`.
+fn treated_effects(m: &GsynthMats, parts: &TreatedParts, r: usize) -> EconResult<Array2<f64>> {
+    let mut eff = parts.u_tr.clone();
+    if parts.f_hat.ncols() == 0 {
+        return Ok(eff);
+    }
+    for (j, &t0) in m.first_treated.iter().enumerate() {
+        let pre: Vec<usize> = (0..t0).collect();
+        let fp = select_rows(&parts.f_hat, &pre);
+        let yp = Array1::from_iter(pre.iter().map(|&t| parts.u_tr[[t, j]]));
+        let ls = crate::linalg::solve::least_squares(fp.view(), yp.view())?;
+        if ls.rank < fp.ncols() {
+            return Err(loadings_error(m, j, r));
+        }
+        let pred = parts.f_hat.dot(&ls.coefficients);
+        let mut col = eff.column_mut(j);
+        col -= &pred;
+    }
+    Ok(eff)
+}
+
+/// Mean effect over the treated post-period cells.
+fn att_of(eff: &Array2<f64>, first_treated: &[usize]) -> f64 {
+    let (mut sum, mut count) = (0.0, 0usize);
+    for (j, &t0) in first_treated.iter().enumerate() {
+        for t in t0..eff.nrows() {
+            sum += eff[[t, j]];
+            count += 1;
+        }
+    }
+    sum / count as f64
+}
+
+/// S5: the IFE fit on the controls and the effects of the treated units.
+fn gsynth_estimate(m: &GsynthMats, spec: &IfeSpec, names: &[String]) -> EconResult<GsynthFit> {
+    gsynth_estimate_parts(m, spec, names).map(|(fit, _)| fit)
+}
+
+fn gsynth_estimate_parts(
+    m: &GsynthMats,
+    spec: &IfeSpec,
+    names: &[String],
+) -> EconResult<(GsynthFit, TreatedParts)> {
+    let y_co = select_columns(&m.y, &m.controls, "gsynth control outcomes")?;
+    let x_co =
+        m.x.iter()
+            .map(|x| select_columns(x, &m.controls, "gsynth control covariates"))
+            .collect::<EconResult<Vec<_>>>()?;
+    let ife = ife_controls(&y_co, &x_co, spec, names)?;
+    let parts = treated_parts(m, &ife, spec.force)?;
+    let eff = treated_effects(m, &parts, spec.r)?;
+    let att = att_of(&eff, &m.first_treated);
+    Ok((GsynthFit { eff, att, ife }, parts))
+}
+
+/// S6: leave-one-pre-period-out MSPE of the treated units, by PRESS (`e / (1 - h)`) from
+/// each unit's pre-period fit; a pre-period whose leverage is 1 is refitted explicitly.
+/// `None` when a regression is rank-deficient.
+fn loo_mspe(m: &GsynthMats, parts: &TreatedParts) -> EconResult<Option<f64>> {
+    let (mut sum, mut count) = (0.0, 0usize);
+    let k = parts.f_hat.ncols();
+    for (j, &t0) in m.first_treated.iter().enumerate() {
         crate::resource::checkpoint()?;
-
-        // Power iteration for dominant eigenvector
-        let mut v = Array1::<f64>::from_elem(n_cols, 1.0 / (n_cols as f64).sqrt());
-
-        for _ in 0..200 {
-            let v_new = mat.dot(&v);
-            let norm = v_new.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm < 1e-15 {
-                break;
-            }
-            let v_normalized = &v_new / norm;
-
-            // Check convergence
-            let diff: f64 = v
-                .iter()
-                .zip(v_normalized.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt();
-
-            v = v_normalized;
-
-            if diff < 1e-10 {
-                break;
-            }
-        }
-
-        // Normalize eigenvector
-        let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if norm > 1e-10 {
-            v = &v / norm;
-        }
-
-        // Get eigenvalue
-        let eigenvalue = v.dot(&mat.dot(&v));
-        eigenvalues.push(eigenvalue.max(0.0));
-
-        factors.column_mut(k).assign(&v);
-
-        // Deflate: subtract the contribution of this eigenvector
-        for i in 0..n_cols {
-            for j in 0..n_cols {
-                mat[[i, j]] -= eigenvalue * v[i] * v[j];
-            }
-        }
-    }
-
-    // Normalize factors to have sqrt(T) norm (standard PCA convention)
-    // F_normalized = F * sqrt(T), so F'F / T = I
-    let t_sqrt = (n_cols as f64).sqrt();
-    for k in 0..r {
-        for t in 0..n_cols {
-            factors[[t, k]] *= t_sqrt;
-        }
-    }
-
-    // Compute loadings: Λ = Y * F / T (N x T) * (T x r) / T = N x r
-    // This gives us Λ such that Y ≈ Λ * F'
-    let loadings = y.dot(&factors) / (n_cols as f64);
-
-    Ok((factors, loadings))
-}
-
-/// Estimate factor loadings for a single unit via OLS.
-///
-/// Given factors f_t and a unit's outcome time series y_it,
-/// estimates the unit's factor loadings λ_i by OLS regression:
-///
-///   y_i = F λ_i + ε_i
-///
-/// where F is the T × r factor matrix and λ_i is the r × 1 loading vector.
-///
-/// # Arguments
-/// * `y_unit` - Unit's outcome time series
-/// * `factors` - T × r matrix of time factors
-/// * `n_pre` - Number of pre-treatment periods (uses only these for estimation)
-///
-/// # Returns
-/// Vector of r factor loadings for this unit
-fn estimate_unit_loadings(
-    y_unit: &Array1<f64>,
-    factors: &Array2<f64>,
-    n_pre: usize,
-) -> EconResult<Vec<f64>> {
-    use crate::linalg::matrix_ops::safe_inverse;
-
-    let n_factors = factors.ncols();
-    if n_factors == 0 {
-        return Ok(Vec::new());
-    }
-
-    // Estimate λ_i by OLS: y = F * λ + ε
-    // Pre-treatment only
-    let f_pre = factors.slice(ndarray::s![0..n_pre, ..]).to_owned();
-    let y_pre: Vec<f64> = (0..n_pre).map(|t| y_unit[t]).collect();
-
-    let ftf = f_pre.t().dot(&f_pre);
-
-    // Add small regularization to avoid numerical issues
-    let mut ftf_reg = ftf.clone();
-    for k in 0..n_factors {
-        ftf_reg[[k, k]] += 1e-8;
-    }
-
-    let (ftf_inv, _) = safe_inverse(&ftf_reg.view())?;
-
-    let y_arr = Array1::from_vec(y_pre);
-    let fty = f_pre.t().dot(&y_arr);
-    let loadings = ftf_inv.dot(&fty);
-
-    Ok(loadings.to_vec())
-}
-
-/// Extend estimated factors from pre-treatment to post-treatment periods.
-///
-/// Factors are initially estimated using only pre-treatment control outcomes.
-/// This function extrapolates factors to post-treatment periods using control
-/// unit outcomes, which are unaffected by treatment.
-///
-/// # Algorithm
-/// For each post-treatment period t:
-/// 1. Extract control unit outcomes y_t = [y_{1t}, ..., y_{Jt}]'
-/// 2. Apply fixed effects adjustment based on config.force
-/// 3. Estimate factor f_t = (Λ'Λ)⁻¹ Λ' y_t
-///
-/// # Arguments
-/// * `y_mat` - Full outcome matrix (N × T)
-/// * `factors_pre` - Pre-treatment factors (T₀ × r)
-/// * `loadings` - Unit loadings estimated from controls (J × r)
-/// * `control_units` - Indices of control units
-/// * `n_pre` - Number of pre-treatment periods
-/// * `n_times` - Total number of time periods
-/// * `n_factors` - Number of factors
-/// * `config` - GSynth configuration
-///
-/// # Returns
-/// Extended factors matrix (T × r) covering all time periods
-fn extend_factors_to_all_periods(
-    y_mat: &Array2<f64>,
-    factors_pre: &Array2<f64>,
-    loadings: &Array2<f64>,
-    control_units: &[usize],
-    n_pre: usize,
-    n_times: usize,
-    n_factors: usize,
-    config: &GsynthConfig,
-) -> EconResult<Array2<f64>> {
-    use crate::linalg::matrix_ops::safe_inverse;
-
-    if n_factors == 0 {
-        return Ok(Array2::zeros((n_times, 0)));
-    }
-
-    // Full factors matrix
-    let mut factors = Array2::<f64>::zeros((n_times, n_factors));
-
-    // Copy pre-treatment factors
-    for t in 0..n_pre {
-        for r in 0..n_factors {
-            factors[[t, r]] = factors_pre[[t, r]];
-        }
-    }
-
-    // For post-treatment periods, estimate factors from control outcomes
-    // f_t = (Λ'Λ)^-1 Λ' y_t for control units
-    let ltl = loadings.t().dot(loadings);
-
-    // Add regularization
-    let mut ltl_reg = ltl.clone();
-    for r in 0..n_factors {
-        ltl_reg[[r, r]] += 1e-8;
-    }
-
-    let (ltl_inv, _) = safe_inverse(&ltl_reg.view())?;
-
-    // Compute pre-treatment means for unit FE adjustment
-    let pre_means: Vec<f64> = control_units
-        .iter()
-        .map(|&ui| (0..n_pre).map(|s| y_mat[[ui, s]]).sum::<f64>() / n_pre as f64)
-        .collect();
-
-    for t in n_pre..n_times {
-        // Extract control outcomes at time t
-        let y_t: Array1<f64> = Array1::from_iter(control_units.iter().map(|&ui| y_mat[[ui, t]]));
-
-        // Handle fixed effects
-        let y_t_adj = match config.force {
-            GsynthForce::Unit | GsynthForce::TwoWay => {
-                // Subtract unit means from pre-treatment
-                let adj: Array1<f64> = Array1::from_iter(
-                    control_units
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &ui)| y_mat[[ui, t]] - pre_means[i]),
-                );
-                adj
-            }
-            _ => y_t.clone(),
-        };
-
-        // f_t = (Λ'Λ)^-1 Λ' y_t
-        let lt_y = loadings.t().dot(&y_t_adj);
-        let f_t = ltl_inv.dot(&lt_y);
-
-        for r in 0..n_factors {
-            factors[[t, r]] = f_t[r];
-        }
-    }
-
-    Ok(factors)
-}
-
-/// Compute pre-treatment MSPE.
-fn compute_pre_mspe(
-    y_mat: &Array2<f64>,
-    factors: &Array2<f64>,
-    loadings: &Array2<f64>,
-    control_units: &[usize],
-    n_pre: usize,
-) -> f64 {
-    let n_factors = factors.ncols();
-    let mut mse = 0.0;
-    let mut count = 0;
-
-    for (i, &ui) in control_units.iter().enumerate() {
-        for t in 0..n_pre {
-            let y_actual = y_mat[[ui, t]];
-            if !y_actual.is_nan() {
-                let y_fitted: f64 = (0..n_factors)
-                    .map(|r| loadings[[i, r]] * factors[[t, r]])
-                    .sum();
-                mse += (y_actual - y_fitted).powi(2);
+        if k == 0 {
+            for t in 0..t0 {
+                sum += parts.u_tr[[t, j]].powi(2);
                 count += 1;
             }
+            continue;
+        }
+        let pre: Vec<usize> = (0..t0).collect();
+        let fp = select_rows(&parts.f_hat, &pre);
+        let yp = Array1::from_iter(pre.iter().map(|&t| parts.u_tr[[t, j]]));
+        let ls = crate::linalg::solve::least_squares(fp.view(), yp.view())?;
+        if ls.rank < k {
+            return Ok(None);
+        }
+        for s in 0..t0 {
+            let row = fp.row(s);
+            let h = row.dot(&ls.unscaled_cov.dot(&row));
+            let err = if 1.0 - h > 1e-10 {
+                ls.residuals[s] / (1.0 - h)
+            } else {
+                let keep: Vec<usize> = (0..t0).filter(|&t| t != s).collect();
+                let fk = select_rows(&parts.f_hat, &keep);
+                let yk = Array1::from_iter(keep.iter().map(|&t| parts.u_tr[[t, j]]));
+                if keep.len() < k {
+                    return Ok(None);
+                }
+                let lk = crate::linalg::solve::least_squares(fk.view(), yk.view())?;
+                if lk.rank < k {
+                    return Ok(None);
+                }
+                yp[s] - row.dot(&lk.coefficients)
+            };
+            sum += err * err;
+            count += 1;
         }
     }
-
-    if count > 0 { mse / count as f64 } else { 0.0 }
+    Ok(Some(sum / count as f64))
 }
 
-/// Bootstrap for uncertainty quantification.
-///
-/// When `config.bootstrap_se == false` this is a no-op and returns `None`
-/// for every output, matching the documented contract. When `bootstrap_se`
-/// is requested but not yet implemented, the function returns
-/// `EconError::NotImplemented` so callers can surface the gap instead of
-/// silently dropping the user's request and handing back `None` SEs.
-fn bootstrap_gsynth(
-    _y_mat: &Array2<f64>,
-    _d_mat: &Array2<f64>,
-    _treated_units: &[usize],
-    _control_units: &[usize],
-    _n_pre: usize,
-    _n_factors: usize,
-    config: &GsynthConfig,
-) -> EconResult<(Option<f64>, Option<(f64, f64)>, Option<f64>)> {
-    if !config.bootstrap_se {
-        return Ok((None, None, None));
-    }
+// ─── Matrix completion (S7, S8) ───────────────────────────────────────────────
 
-    // Bootstrap requested but the resample+re-estimate loop is not yet
-    // wired in. Surface this clearly rather than silently producing `None`
-    // confidence intervals that look like a successful run.
-    Err(EconError::NotImplemented(
-        "gsynth bootstrap standard errors are not yet implemented; \
-         set bootstrap_se=false or use the analytical placeholder"
-            .to_string(),
+/// Relative criterion and iteration cap of the lambda = +inf start fit (fect's `initialFit`).
+const MC_START_TOL: f64 = 1e-14;
+const MC_START_MAX_ITER: usize = 10_000;
+
+/// Options of one matrix-completion fit.
+#[derive(Debug, Clone, Copy)]
+struct McSpec {
+    lambda: f64,
+    force: GsynthForce,
+    tolerance: f64,
+    max_iter: usize,
+}
+
+/// A matrix-completion fit.
+#[derive(Debug, Clone)]
+struct McFit {
+    fitted: Array2<f64>,
+    beta: Vec<f64>,
+    mu: f64,
+    rank: usize,
+    convergence: Convergence,
+}
+
+/// The stacked demeaned covariates of the whole panel, decomposed once.
+struct McPrep {
+    cov: Option<(Array2<f64>, crate::linalg::solve::Qr)>,
+}
+
+fn mc_prep(m: &GsynthMats, force: GsynthForce, names: &[String]) -> EconResult<McPrep> {
+    Ok(McPrep {
+        cov: stacked_covariates(&m.x, force, names)?,
+    })
+}
+
+/// `U diag((d - tau)_+) V'` and the number of positive thresholded values.
+fn svt(e: &Array2<f64>, tau: f64) -> EconResult<(Array2<f64>, usize)> {
+    let (n_t, n) = e.dim();
+    let mat = crate::linalg::matrix_ops::ndarray_to_faer(&e.view());
+    let svd = mat.thin_svd().map_err(|err| {
+        EconError::Computation(format!("gsynth matrix-completion SVD failed: {err:?}"))
+    })?;
+    let d = svd.S().column_vector();
+    let (u, v) = (svd.U(), svd.V());
+    let mut out = Array2::<f64>::zeros((n_t, n));
+    let mut rank = 0;
+    for k in 0..d.nrows() {
+        let s = d[k] - tau;
+        if s > 0.0 {
+            rank += 1;
+            for t in 0..n_t {
+                let a = s * u[(t, k)];
+                for i in 0..n {
+                    out[[t, i]] += a * v[(i, k)];
+                }
+            }
+        }
+    }
+    Ok((out, rank))
+}
+
+/// S7: soft-impute for `min 1/2 sum_O (Y - mu - alpha - xi - X beta - L)^2 + lambda T N ||L||_*`
+/// from `start`.
+fn mc_fit(
+    m: &GsynthMats,
+    prep: &McPrep,
+    observed: &Array2<f64>,
+    spec: &McSpec,
+    start: &Array2<f64>,
+) -> EconResult<McFit> {
+    let (n_t, n) = m.y.dim();
+    let (u, v) = force_dims(spec.force);
+    let tau = spec.lambda * (n_t * n) as f64;
+    let mut fit = start.clone();
+    let mut l = Array2::<f64>::zeros((n_t, n));
+    let mut beta: Vec<f64> = Vec::new();
+    let (mut mu, mut rank, mut change, mut converged, mut it) = (0.0, 0usize, f64::NAN, false, 0);
+    while it < spec.max_iter {
+        crate::resource::checkpoint()?;
+        it += 1;
+        let z = Array2::from_shape_fn((n_t, n), |(t, i)| {
+            if observed[[t, i]] == 1.0 {
+                m.y[[t, i]]
+            } else {
+                fit[[t, i]]
+            }
+        });
+        let r = &z - &l;
+        let mut xb = Array2::<f64>::zeros((n_t, n));
+        if let Some((_, qr)) = &prep.cov {
+            let b = qr.coefficients(vec_cm(&gs_demean(&r, spec.force)).view())?;
+            beta = b.to_vec();
+            for (j, x) in m.x.iter().enumerate() {
+                xb.scaled_add(beta[j], x);
+            }
+        }
+        let rb = &r - &xb;
+        mu = rb.sum() / (n_t * n) as f64;
+        let alpha = if u == 1 {
+            rb.mean_axis(ndarray::Axis(0)).expect("non-empty") - mu
+        } else {
+            Array1::zeros(n)
+        };
+        let xi = if v == 1 {
+            rb.mean_axis(ndarray::Axis(1)).expect("non-empty") - mu
+        } else {
+            Array1::zeros(n_t)
+        };
+        let fe = Array2::from_shape_fn((n_t, n), |(t, i)| mu + alpha[i] + xi[t]);
+        if spec.lambda.is_finite() {
+            let (lk, rk) = svt(&(&z - &fe - &xb), tau)?;
+            l = lk;
+            rank = rk;
+        } else {
+            l.fill(0.0);
+            rank = 0;
+        }
+        let new = &fe + &xb + &l;
+        let diff = &new - &fit;
+        let num = diff.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let den = fit.iter().map(|x| x * x).sum::<f64>().sqrt();
+        change = num / den;
+        fit = new;
+        if change < spec.tolerance {
+            converged = true;
+            break;
+        }
+    }
+    Ok(McFit {
+        fitted: fit,
+        beta,
+        mu,
+        rank,
+        convergence: Convergence::new(
+            converged,
+            it,
+            spec.max_iter,
+            "relative change of the fitted values",
+            change,
+            spec.tolerance,
+        ),
+    })
+}
+
+/// The untreated-cell mask `1 - D`.
+fn mc_observed(m: &GsynthMats) -> Array2<f64> {
+    m.d.mapv(|d| 1.0 - d)
+}
+
+/// The lambda = +inf fit (two-way effects and covariates on the observed cells), from
+/// `from` or from the mean of the observed cells.
+fn mc_start(
+    m: &GsynthMats,
+    prep: &McPrep,
+    observed: &Array2<f64>,
+    force: GsynthForce,
+    from: Option<&Array2<f64>>,
+) -> EconResult<Array2<f64>> {
+    let start = match from {
+        Some(f) => f.clone(),
+        None => {
+            let (mut s, mut c) = (0.0, 0usize);
+            for (y, o) in m.y.iter().zip(observed.iter()) {
+                if *o == 1.0 {
+                    s += y;
+                    c += 1;
+                }
+            }
+            Array2::from_elem(m.y.dim(), s / c as f64)
+        }
+    };
+    let spec = McSpec {
+        lambda: f64::INFINITY,
+        force,
+        tolerance: MC_START_TOL,
+        max_iter: MC_START_MAX_ITER,
+    };
+    Ok(mc_fit(m, prep, observed, &spec, &start)?.fitted)
+}
+
+/// S8: fect's default grid from the largest singular value of `O (Y - start) / (T N)`.
+fn mc_lambda_grid(
+    m: &GsynthMats,
+    prep: &McPrep,
+    start: &Array2<f64>,
+    n_lambda: usize,
+) -> EconResult<(Vec<f64>, f64)> {
+    if n_lambda < 3 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("gsynth n_lambda must be at least 3 (got {n_lambda})"),
+        });
+    }
+    let _ = prep;
+    let (n_t, n) = m.y.dim();
+    let observed = mc_observed(m);
+    let scale = (n_t * n) as f64;
+    let e = Array2::from_shape_fn((n_t, n), |(t, i)| {
+        observed[[t, i]] * (m.y[[t, i]] - start[[t, i]]) / scale
+    });
+    let mat = crate::linalg::matrix_ops::ndarray_to_faer(&e.view());
+    let d = mat
+        .singular_values()
+        .map_err(|err| EconError::Computation(format!("gsynth lambda grid SVD failed: {err:?}")))?;
+    let d_max = d.iter().cloned().fold(0.0_f64, f64::max);
+    let lmax = d_max.log10();
+    let by = 3.0 / (n_lambda - 2) as f64;
+    let mut grid: Vec<f64> = (0..n_lambda - 1)
+        .map(|i| 10f64.powf(lmax - i as f64 * by))
+        .collect();
+    grid.push(0.0);
+    Ok((grid, d_max))
+}
+
+/// S8: k-fold CV MSPE of each lambda over the treated units' pre-period cells (position
+/// `p mod k == f` in fold f), each fold's lambdas fitted in grid order from the previous
+/// lambda's fit. Returns the MSPEs and the number of non-converged fits.
+#[allow(clippy::too_many_arguments)]
+fn mc_cv_mspe(
+    m: &GsynthMats,
+    prep: &McPrep,
+    full_start: &Array2<f64>,
+    grid: &[f64],
+    folds: usize,
+    force: GsynthForce,
+    tolerance: f64,
+    max_iter: usize,
+) -> EconResult<(Vec<f64>, usize)> {
+    let observed = mc_observed(m);
+    let mut sse = vec![0.0; grid.len()];
+    let mut count = 0usize;
+    let mut not_converged = 0usize;
+    for f in 0..folds {
+        let mut o_f = observed.clone();
+        let mut held: Vec<(usize, usize)> = Vec::new();
+        for (j, &t0) in m.first_treated.iter().enumerate() {
+            let col = m.treated[j];
+            for p in (0..t0).filter(|p| p % folds == f) {
+                o_f[[p, col]] = 0.0;
+                held.push((p, col));
+            }
+        }
+        let start = mc_start(m, prep, &o_f, force, Some(full_start))?;
+        let mut warm = start;
+        for (g, &lambda) in grid.iter().enumerate() {
+            crate::resource::checkpoint()?;
+            let spec = McSpec {
+                lambda,
+                force,
+                tolerance,
+                max_iter,
+            };
+            let fit = mc_fit(m, prep, &o_f, &spec, &warm)?;
+            if !fit.convergence.converged {
+                not_converged += 1;
+            }
+            for &(t, i) in &held {
+                sse[g] += (m.y[[t, i]] - fit.fitted[[t, i]]).powi(2);
+            }
+            warm = fit.fitted;
+        }
+        count += held.len();
+    }
+    Ok((
+        sse.into_iter().map(|s| s / count as f64).collect(),
+        not_converged,
     ))
+}
+
+/// One estimator's outputs, before the shared summaries.
+struct Estimate {
+    eff: Array2<f64>,
+    att: f64,
+    mu: f64,
+    sigma2: f64,
+    beta: Vec<f64>,
+    n_factors: usize,
+    factors: Option<Array2<f64>>,
+    loadings: Option<Array2<f64>>,
+    lambda: Option<f64>,
+    cv_lambda: Vec<(f64, f64)>,
+    cv_mspe: Vec<(usize, f64)>,
+    convergence: Option<Convergence>,
+}
+
+/// S7/S8 and S5.11: the matrix-completion estimate, lambda fixed or cross-validated.
+fn mc_estimate(
+    m: &GsynthMats,
+    config: &GsynthConfig,
+    names: &[String],
+    warnings: &mut Vec<String>,
+) -> EconResult<Estimate> {
+    let prep = mc_prep(m, config.force, names)?;
+    let observed = mc_observed(m);
+    let full_start = mc_start(m, &prep, &observed, config.force, None)?;
+    let (lambda, cv_lambda) = if config.cross_validate {
+        let grid = if config.lambda.is_empty() {
+            mc_lambda_grid(m, &prep, &full_start, config.n_lambda)?.0
+        } else {
+            config.lambda.clone()
+        };
+        let t0_min = *m.first_treated.iter().min().expect("treated units");
+        let folds = config.cv_folds.min(t0_min);
+        if folds < 2 {
+            return Err(EconError::InsufficientData {
+                required: 2,
+                provided: t0_min,
+                context: "gsynth matrix-completion CV folds over the earliest treated unit's \
+                          pre-treatment periods"
+                    .to_string(),
+            });
+        }
+        let (mspe, not_converged) = mc_cv_mspe(
+            m,
+            &prep,
+            &full_start,
+            &grid,
+            folds,
+            config.force,
+            config.tolerance,
+            config.max_iter,
+        )?;
+        if not_converged > 0 {
+            warnings.push(format!(
+                "{not_converged} matrix-completion cross-validation fit(s) did not converge \
+                 within max_iter = {}",
+                config.max_iter
+            ));
+        }
+        let mut best = 0;
+        for (g, v) in mspe.iter().enumerate() {
+            if v.total_cmp(&mspe[best]).is_lt() {
+                best = g;
+            }
+        }
+        (grid[best], grid.iter().copied().zip(mspe).collect())
+    } else {
+        (config.lambda[0], Vec::new())
+    };
+    let spec = McSpec {
+        lambda,
+        force: config.force,
+        tolerance: config.tolerance,
+        max_iter: config.max_iter,
+    };
+    let fit = mc_fit(m, &prep, &observed, &spec, &full_start)?;
+    if let Some(note) = fit.convergence.note("gsynth matrix completion") {
+        warnings.push(note);
+    }
+    let (n_t, _) = m.y.dim();
+    let mut eff = crate::resource::try_zeros2(n_t, m.treated.len(), "gsynth treated effects")?;
+    for (j, &c) in m.treated.iter().enumerate() {
+        for t in 0..n_t {
+            eff[[t, j]] = m.y[[t, c]] - fit.fitted[[t, c]];
+        }
+    }
+    let (mut sse, mut n_obs) = (0.0, 0usize);
+    for ((y, f), o) in m.y.iter().zip(fit.fitted.iter()).zip(observed.iter()) {
+        if *o == 1.0 {
+            sse += (y - f).powi(2);
+            n_obs += 1;
+        }
+    }
+    let att = att_of(&eff, &m.first_treated);
+    Ok(Estimate {
+        eff,
+        att,
+        mu: fit.mu,
+        sigma2: sse / n_obs as f64,
+        beta: fit.beta,
+        n_factors: fit.rank,
+        factors: None,
+        loadings: None,
+        lambda: Some(lambda),
+        cv_lambda,
+        cv_mspe: Vec::new(),
+        convergence: Some(fit.convergence),
+    })
+}
+
+/// Event-time ATT (`e = t - T0_j + 1`) over the treated units, and the unit counts.
+fn event_time_att(
+    eff: &Array2<f64>,
+    first_treated: &[usize],
+) -> (Vec<(i64, f64)>, Vec<(i64, usize)>) {
+    let mut acc: std::collections::BTreeMap<i64, (f64, usize)> = std::collections::BTreeMap::new();
+    for (j, &t0) in first_treated.iter().enumerate() {
+        for t in 0..eff.nrows() {
+            let e = t as i64 - t0 as i64 + 1;
+            let a = acc.entry(e).or_insert((0.0, 0));
+            a.0 += eff[[t, j]];
+            a.1 += 1;
+        }
+    }
+    let effects = acc.iter().map(|(&e, &(s, c))| (e, s / c as f64)).collect();
+    let counts = acc.iter().map(|(&e, &(_, c))| (e, c)).collect();
+    (effects, counts)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4808,78 +5225,6 @@ mod gsynth_tests {
         Dataset::new(df)
     }
 
-    #[test]
-    fn test_gsynth_basic() {
-        let dataset = create_gsynth_dataset();
-        let config = GsynthConfig {
-            n_factors: 1,
-            cross_validate: false,
-            min_pre_periods: 3, // Lower for test
-            ..Default::default()
-        };
-
-        let result =
-            run_gsynth(&dataset, "outcome", "treated", "unit", "time", &[], config).unwrap();
-
-        // Should identify 2 treated and 3 control units
-        assert_eq!(result.n_treated, 2);
-        assert_eq!(result.n_control, 3);
-
-        // ATT should be positive (treatment has positive effect)
-        assert!(
-            result.att > 0.0,
-            "ATT should be positive, got {}",
-            result.att
-        );
-    }
-
-    #[test]
-    fn test_gsynth_unit_effects() {
-        let dataset = create_gsynth_dataset();
-        let config = GsynthConfig {
-            n_factors: 1,
-            cross_validate: false,
-            min_pre_periods: 3, // Lower for test
-            ..Default::default()
-        };
-
-        let result =
-            run_gsynth(&dataset, "outcome", "treated", "unit", "time", &[], config).unwrap();
-
-        // Should have 2 unit effects
-        assert_eq!(result.unit_effects.len(), 2);
-
-        // Both should show positive effects
-        for ue in &result.unit_effects {
-            assert!(ue.att > 0.0, "Unit {} ATT should be positive", ue.unit);
-        }
-    }
-
-    #[test]
-    fn test_gsynth_cv() {
-        let dataset = create_gsynth_dataset();
-        let config = GsynthConfig {
-            n_factors: 0, // Auto-select
-            cross_validate: true,
-            max_factors: 3,
-            cv_folds: 2,
-            min_pre_periods: 2,
-            ..Default::default()
-        };
-
-        let result =
-            run_gsynth(&dataset, "outcome", "treated", "unit", "time", &[], config).unwrap();
-
-        // Should select some number of factors
-        assert!(result.n_factors <= 3);
-        // CV results should be present
-        assert!(!result.cv_mspe.is_empty() || result.n_factors == 0);
-    }
-
-    // =========================================================================
-    // Factor count and CV fold bounds (T0-WP11)
-    // =========================================================================
-
     fn gs_cfg() -> GsynthConfig {
         GsynthConfig {
             n_factors: 1,
@@ -4892,9 +5237,9 @@ mod gsynth_tests {
     #[test]
     fn test_gsynth_rejects_more_factors_than_the_data_identify() {
         let ds = create_gsynth_dataset();
-        // 4 > min(3 controls, 6 pre-periods): index panic at extend_factors_to_all_periods
-        // before the fix; usize::MAX: ndarray shape-overflow panic before the fix
-        for r in [4usize, usize::MAX] {
+        // r_id = min(3 controls - 1, 10 periods - 1, 6 pre-periods - 2) = 2 under two-way
+        // effects; usize::MAX was an ndarray shape-overflow panic before T0-WP11
+        for r in [3usize, usize::MAX] {
             let res = run_gsynth(
                 &ds,
                 "outcome",
@@ -4909,7 +5254,7 @@ mod gsynth_tests {
             );
             assert!(
                 matches!(res, Err(EconError::InvalidSpecification { ref message })
-                    if message.contains("n_factors") && message.contains("at most 3")),
+                    if message.contains("n_factors") && message.contains("at most 2")),
                 "r={r}"
             );
         }
@@ -4921,12 +5266,12 @@ mod gsynth_tests {
             "time",
             &[],
             GsynthConfig {
-                n_factors: 3,
+                n_factors: 2,
                 ..gs_cfg()
             },
         )
         .unwrap();
-        assert_eq!(ok.n_factors, 3);
+        assert_eq!(ok.n_factors, 2);
     }
 
     #[test]
@@ -4997,8 +5342,8 @@ mod gsynth_tests {
 
     #[test]
     fn test_gsynth_default_factor_count_capped_by_rank() {
-        // n_factors = 0 without CV defaults to 2 factors; with one pre-period the
-        // SVD returns one, and the requested 2 used to index past it
+        // n_factors = 0 without CV is r = 0; with one pre-period the two-way effects
+        // leave the treated unit's intercept no pre-period to spare (r_id < 0)
         let df = df! {
             "unit" => ["C1", "C1", "C1", "C2", "C2", "C2", "C3", "C3", "C3", "T1", "T1", "T1"],
             "time" => [1i64, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3],
@@ -5021,16 +5366,17 @@ mod gsynth_tests {
                 ..Default::default()
             },
         );
-        // extract_factors_svd caps r at min(2, 3 controls, 1 pre-period) = 1
-        let res = r.unwrap();
-        assert_eq!(res.n_factors, 1);
+        assert!(
+            matches!(r, Err(EconError::InsufficientData { .. })),
+            "ok={}",
+            r.is_ok()
+        );
     }
 
     #[test]
     fn test_gsynth_explicit_factor_count_stops_when_cancelled() {
-        // An explicit n_factors does not go through select_factors_cv, whose
-        // per-fold checkpoints were the only ones on the gsynth path; the factor
-        // extraction checks the budget once per factor
+        // An explicit n_factors does not go through the cross-validation; the IFE
+        // fit checks the budget once per iteration and per factor extraction
         let ds = create_gsynth_dataset();
         let r = cancelled(|| run_gsynth(&ds, "outcome", "treated", "unit", "time", &[], gs_cfg()));
         assert!(
@@ -5074,9 +5420,11 @@ mod gsynth_tests {
             )),
             "{r:?}"
         );
-        // a long panel: the extractor's row buffers and the units-by-periods panels fit
-        // under this ceiling, the pre-period factor covariance does not
+        // a long panel with four covariates: the extractor's buffers (at most 2560
+        // bytes) and every 40 x 4 panel (1280 bytes) fit under this ceiling, the stacked
+        // control covariates (120 x 4, 3840 bytes) do not
         let (mut u, mut t, mut y, mut d) = (vec![], vec![], vec![], vec![]);
+        let (mut x1, mut x2, mut x3, mut x4) = (vec![], vec![], vec![], vec![]);
         for unit in ["C1", "C2", "C3", "T1"] {
             for time in 1..=40i64 {
                 let k = unit.as_bytes()[1] as f64;
@@ -5089,19 +5437,28 @@ mod gsynth_tests {
                         + if treated { 2.0 } else { 0.0 },
                 );
                 d.push(if treated { 1.0 } else { 0.0 });
+                x1.push((0.7 * k + 0.3 * time as f64).sin());
+                x2.push((0.2 * k * time as f64).cos());
+                x3.push((0.37 * k * time as f64 + 0.5).sin());
+                x4.push((0.5 * k + 0.011 * (time * time) as f64).cos());
             }
         }
-        let long =
-            Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "treated" => d }.unwrap());
+        let long = Dataset::new(
+            df! {
+                "unit" => u, "time" => t, "outcome" => y, "treated" => d,
+                "x1" => x1, "x2" => x2, "x3" => x3, "x4" => x4
+            }
+            .unwrap(),
+        );
+        let xs = ["x1", "x2", "x3", "x4"];
         let r = crate::resource::with_alloc_ceiling(Some(3000), || {
-            run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg())
+            run_gsynth(&long, "outcome", "treated", "unit", "time", &xs, gs_cfg())
         });
         assert!(
-            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("pre-treatment periods")),
-            "ok={}",
-            r.is_ok()
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("stacked covariates")),
+            "{r:?}"
         );
-        assert!(run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg()).is_ok());
+        assert!(run_gsynth(&long, "outcome", "treated", "unit", "time", &xs, gs_cfg()).is_ok());
     }
 
     // =========================================================================
@@ -5268,5 +5625,538 @@ mod gsynth_tests {
         let a = gs(&ds, cv()).unwrap();
         let b = gs(&ds, cv()).unwrap();
         assert_eq!(fingerprint(&a), fingerprint(&b));
+    }
+
+    // =========================================================================
+    // gsynth 1.4.0 pins and properties (T3-WP31: CAUS-41, CAUS-43, CAUS-44)
+    // =========================================================================
+
+    use p2a_validation::{Check, Tol};
+
+    const SIM_N: usize = 1500; // 50 x 30 cells (gsynth_simdata)
+    const STAG_N: usize = 720; // 36 x 20 cells (gsynth_staggered)
+
+    fn tight(force: GsynthForce, r: usize) -> GsynthConfig {
+        GsynthConfig {
+            n_factors: r,
+            cross_validate: false,
+            force,
+            tolerance: 1e-12,
+            max_iter: 5000,
+            ..Default::default()
+        }
+    }
+
+    fn event(r: &GsynthResult) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        (
+            r.dynamic_effects.iter().map(|(t, _)| *t as f64).collect(),
+            r.dynamic_effects.iter().map(|(_, e)| *e).collect(),
+            r.dynamic_counts.iter().map(|(_, c)| *c as f64).collect(),
+        )
+    }
+
+    /// Pins `<p>_{att_avg, att, time, count, mu, sigma2, rmse, att_unit}` (+ `_beta`).
+    fn check_fit(chk: &mut Check, p: &str, r: &GsynthResult, tol: Tol, var_tol: Tol) {
+        let (t, att, cnt) = event(r);
+        let ua: Vec<f64> = r.unit_effects.iter().map(|u| u.att).collect();
+        chk.scalar(&format!("{p}_att_avg"), r.att, tol)
+            .vector(&format!("{p}_att"), &att, tol)
+            .vector(&format!("{p}_time"), &t, Tol::exact())
+            .vector(&format!("{p}_count"), &cnt, Tol::exact())
+            .scalar(&format!("{p}_mu"), r.mu, tol)
+            .scalar(&format!("{p}_sigma2"), r.sigma2, var_tol)
+            .scalar(&format!("{p}_rmse"), r.pre_mspe.sqrt(), var_tol)
+            .vector(&format!("{p}_att_unit"), &ua, tol);
+        if !r.beta.is_empty() {
+            chk.vector(&format!("{p}_beta"), &r.beta, tol);
+        }
+    }
+
+    fn sim(ds: &Dataset, x: &[&str], c: GsynthConfig) -> EconResult<GsynthResult> {
+        run_gsynth(ds, "Y", "D", "id", "time", x, c)
+    }
+
+    /// The case's simdata without the case (property tests stay out of the registry).
+    fn simdata() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/gsynth_simdata.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).expect("gsynth_simdata.csv"))
+    }
+
+    fn set_col(ds: &Dataset, name: &str, v: Vec<f64>) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(name.into(), v)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn col(ds: &Dataset, name: &str) -> Vec<f64> {
+        let c = ds
+            .df()
+            .column(name)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap();
+        c.f64().unwrap().into_iter().map(|v| v.unwrap()).collect()
+    }
+
+    #[test]
+    fn test_validate_gsynth_ife_r2() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let r = sim(&ds, &[], tight(GsynthForce::TwoWay, 2)).unwrap();
+        let mut chk = Check::new(&case);
+        check_fit(
+            &mut chk,
+            "ife_r2_nocov",
+            &r,
+            Tol::coef(SIM_N),
+            Tol::stat(SIM_N),
+        );
+        chk.scalar("ife_r2_nocov_r", r.n_factors as f64, Tol::exact())
+            .finish();
+        assert!(r.convergence.is_none() && r.beta.is_empty());
+    }
+
+    #[test]
+    fn test_validate_gsynth_ife_cov() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let r = sim(&ds, &["X1", "X2"], tight(GsynthForce::TwoWay, 2)).unwrap();
+        let it = Tol::iterative(1e-8);
+        let mut chk = Check::new(&case);
+        check_fit(&mut chk, "ife_r2_cov", &r, it, it);
+        let d = sim(
+            &ds,
+            &["X1", "X2"],
+            GsynthConfig {
+                tolerance: GsynthConfig::default().tolerance,
+                ..tight(GsynthForce::TwoWay, 2)
+            },
+        )
+        .unwrap();
+        // gsynth stops on an absolute change of beta at its default 1e-3; this package's
+        // scale-free rule at 1e-5 lands within 5e-4 of both
+        chk.scalar("ife_r2_cov_default_tol_att_avg", d.att, Tol::new(5e-4, 0.0))
+            .scalar("ife_r2_cov_att_avg", d.att, Tol::new(5e-4, 0.0))
+            .finish();
+        assert!(r.convergence.as_ref().unwrap().converged);
+    }
+
+    #[test]
+    fn test_validate_gsynth_ife_unit() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let r = sim(&ds, &[], tight(GsynthForce::Unit, 2)).unwrap();
+        let mut chk = Check::new(&case);
+        check_fit(
+            &mut chk,
+            "ife_r2_unit",
+            &r,
+            Tol::coef(SIM_N),
+            Tol::stat(SIM_N),
+        );
+        chk.finish();
+    }
+
+    #[test]
+    fn test_validate_gsynth_staggered() {
+        let (case, ds) = crate::test_support::load_case("gsynth_staggered");
+        let it = Tol::iterative(1e-8);
+        let tw = sim(&ds, &["X"], tight(GsynthForce::TwoWay, 2)).unwrap();
+        let tw0 = sim(&ds, &[], tight(GsynthForce::TwoWay, 2)).unwrap();
+        let un = sim(&ds, &["X"], tight(GsynthForce::Unit, 2)).unwrap();
+        let mut chk = Check::new(&case);
+        check_fit(&mut chk, "tw_r2_cov", &tw, it, it);
+        check_fit(
+            &mut chk,
+            "tw_r2_nocov",
+            &tw0,
+            Tol::coef(STAG_N),
+            Tol::stat(STAG_N),
+        );
+        check_fit(&mut chk, "unit_r2_cov", &un, it, it);
+        chk.finish();
+    }
+
+    #[test]
+    fn test_validate_gsynth_ife_cv() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let cfg = GsynthConfig {
+            cross_validate: true,
+            max_factors: 5,
+            ..tight(GsynthForce::TwoWay, 0)
+        };
+        let r = sim(&ds, &["X1", "X2"], cfg.clone()).unwrap();
+        let rs: Vec<usize> = r.cv_mspe.iter().map(|(r, _)| *r).collect();
+        assert_eq!(rs, vec![0, 1, 2, 3, 4, 5]);
+        let mspe: Vec<f64> = r.cv_mspe.iter().map(|(_, m)| *m).collect();
+        let r0 = sim(&ds, &[], cfg).unwrap();
+        let mspe0: Vec<f64> = r0.cv_mspe.iter().map(|(_, m)| *m).collect();
+        let it = Tol::iterative(1e-8);
+        Check::new(&case)
+            .vector("ife_loo_cov_mspe", &mspe, it)
+            // fect fits the CV models at 1e-3
+            .vector("ife_loo_cov_mspe_fect", &mspe, Tol::new(1e-3, 0.0))
+            .scalar("ife_loo_cov_r", r.n_factors as f64, Tol::exact())
+            .scalar("ife_loo_cov_att_avg", r.att, it)
+            .vector("ife_loo_nocov_mspe", &mspe0, Tol::coef(SIM_N))
+            .vector("ife_loo_nocov_mspe_fect", &mspe0, Tol::coef(SIM_N))
+            .scalar("ife_loo_nocov_r", r0.n_factors as f64, Tol::exact())
+            .scalar("ife_loo_nocov_att_avg", r0.att, Tol::coef(SIM_N))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_gsynth_staggered_cv() {
+        let (case, ds) = crate::test_support::load_case("gsynth_staggered");
+        let cfg = GsynthConfig {
+            cross_validate: true,
+            max_factors: 5,
+            ..tight(GsynthForce::TwoWay, 0)
+        };
+        let r = sim(&ds, &["X"], cfg).unwrap();
+        let mspe: Vec<f64> = r.cv_mspe.iter().map(|(_, m)| *m).collect();
+        Check::new(&case)
+            .vector("loo_cov_mspe", &mspe, Tol::iterative(1e-8))
+            .vector("loo_cov_mspe_fect", &mspe, Tol::new(1e-3, 0.0))
+            .scalar("loo_cov_r", r.n_factors as f64, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_gsynth_loo_press_equals_refits() {
+        // the PRESS errors e / (1 - h) equal explicit leave-one-out refits
+        let ds = simdata();
+        let panel = read_gsynth_panel(ds.df(), "Y", "D", "id", "time", &["X1", "X2"]).unwrap();
+        let m = gsynth_mats(panel).unwrap();
+        let names = vec!["X1".to_string(), "X2".to_string()];
+        for r in [0usize, 1, 3] {
+            let spec = IfeSpec {
+                r,
+                force: GsynthForce::TwoWay,
+                tolerance: 1e-10,
+                max_iter: 1000,
+            };
+            let (_, parts) = gsynth_estimate_parts(&m, &spec, &names).unwrap();
+            let press = loo_mspe(&m, &parts).unwrap().unwrap();
+            let (mut sum, mut n) = (0.0, 0usize);
+            for (j, &t0) in m.first_treated.iter().enumerate() {
+                for s in 0..t0 {
+                    let keep: Vec<usize> = (0..t0).filter(|&t| t != s).collect();
+                    let fk = select_rows(&parts.f_hat, &keep);
+                    let yk = Array1::from_iter(keep.iter().map(|&t| parts.u_tr[[t, j]]));
+                    let pred = if fk.ncols() == 0 {
+                        0.0
+                    } else {
+                        let ls = crate::linalg::solve::least_squares(fk.view(), yk.view()).unwrap();
+                        parts.f_hat.row(s).dot(&ls.coefficients)
+                    };
+                    sum += (parts.u_tr[[s, j]] - pred).powi(2);
+                    n += 1;
+                }
+            }
+            let refit = sum / n as f64;
+            assert!(
+                (press - refit).abs() <= 1e-10 * refit,
+                "r={r}: {press} vs {refit}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gsynth_options_change_the_estimate() {
+        let ds = simdata();
+        let cov = sim(&ds, &["X1", "X2"], tight(GsynthForce::TwoWay, 2)).unwrap();
+        let tw = sim(&ds, &[], tight(GsynthForce::TwoWay, 2)).unwrap();
+        let unit = sim(&ds, &[], tight(GsynthForce::Unit, 2)).unwrap();
+        assert!((cov.att - tw.att).abs() > 0.5, "{} {}", cov.att, tw.att);
+        assert!((unit.att - tw.att).abs() > 0.1, "{} {}", unit.att, tw.att);
+    }
+
+    #[test]
+    fn test_gsynth_ife_convergence_is_scale_free() {
+        let ds = simdata();
+        let cfg = || GsynthConfig {
+            tolerance: 1e-8,
+            ..tight(GsynthForce::TwoWay, 2)
+        };
+        let base = sim(&ds, &["X1", "X2"], cfg()).unwrap();
+        let k0 = base.convergence.as_ref().unwrap().iterations as i64;
+        let y = col(&ds, "Y");
+        let big = set_col(&ds, "Y", y.iter().map(|v| v * 1e6).collect());
+        let rb = sim(&big, &["X1", "X2"], cfg()).unwrap();
+        let kb = rb.convergence.as_ref().unwrap().iterations as i64;
+        assert!((kb - k0).abs() <= 1, "{kb} vs {k0}");
+        assert!((rb.att / 1e6 - base.att).abs() <= 1e-6 * base.att.abs());
+        let mut small = ds.clone();
+        for c in ["X1", "X2"] {
+            let x = col(&ds, c);
+            small = set_col(&small, c, x.iter().map(|v| v * 1e-6).collect());
+        }
+        let rs = sim(&small, &["X1", "X2"], cfg()).unwrap();
+        let ks = rs.convergence.as_ref().unwrap().iterations as i64;
+        assert!((ks - k0).abs() <= 1, "{ks} vs {k0}");
+        for (a, b) in rs.beta.iter().zip(base.beta.iter()) {
+            assert!((a * 1e-6 - b).abs() <= 1e-6 * b.abs(), "{a} {b}");
+        }
+    }
+
+    #[test]
+    fn test_gsynth_reports_non_convergence() {
+        let ds = simdata();
+        let r = sim(
+            &ds,
+            &["X1", "X2"],
+            GsynthConfig {
+                max_iter: 2,
+                ..tight(GsynthForce::TwoWay, 2)
+            },
+        )
+        .unwrap();
+        let c = r.convergence.as_ref().unwrap();
+        assert!(!c.converged && c.iterations == 2);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("did not converge after 2 iterations")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("did not converge"));
+    }
+
+    #[test]
+    fn test_gsynth_rejects_invalid_inputs() {
+        let ds = simdata();
+        let d = col(&ds, "D");
+        let id = col(&ds, "id");
+        let time = col(&ds, "time");
+        let msg = |r: EconResult<GsynthResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got ok={}", other.is_ok()),
+        };
+        // a 2 in one treated row
+        let first = d.iter().position(|&v| v == 1.0).unwrap();
+        let mut d2 = d.clone();
+        d2[first] = 2.0;
+        let m = msg(sim(
+            &set_col(&ds, "D", d2),
+            &[],
+            tight(GsynthForce::TwoWay, 2),
+        ));
+        assert!(m.contains("0/1"), "{m}");
+        // a treated unit untreated again at its last period
+        let unit = id[first];
+        let tmax = time.iter().cloned().fold(f64::MIN, f64::max);
+        let last = (0..d.len())
+            .find(|&i| id[i] == unit && time[i] == tmax)
+            .unwrap();
+        let mut d3 = d.clone();
+        d3[last] = 0.0;
+        let m = msg(sim(
+            &set_col(&ds, "D", d3),
+            &[],
+            tight(GsynthForce::TwoWay, 2),
+        ));
+        assert!(m.contains("absorbing"), "{m}");
+        // a collinear covariate
+        let x3: Vec<f64> = col(&ds, "X1")
+            .iter()
+            .zip(col(&ds, "X2"))
+            .map(|(a, b)| a + b)
+            .collect();
+        let m = msg(sim(
+            &set_col(&ds, "X3", x3),
+            &["X1", "X2", "X3"],
+            tight(GsynthForce::TwoWay, 2),
+        ));
+        assert!(m.contains("X3") && m.contains("collinear"), "{m}");
+        // a time-invariant covariate under unit effects
+        let m = msg(sim(
+            &set_col(&ds, "Z", id.clone()),
+            &["Z"],
+            tight(GsynthForce::Unit, 2),
+        ));
+        assert!(m.contains("Z"), "{m}");
+        // r_id = min(45 - 1, 30 - 1, 20 - 2) = 18
+        let m = msg(sim(&ds, &[], tight(GsynthForce::TwoWay, 19)));
+        assert!(m.contains("at most 18"), "{m}");
+    }
+
+    #[test]
+    fn test_gsynth_cv_caps_r_at_the_identified_bound() {
+        let ds = create_gsynth_dataset();
+        let r = gs(
+            &ds,
+            GsynthConfig {
+                n_factors: 0,
+                cross_validate: true,
+                max_factors: 3,
+                ..gs_cfg()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.cv_mspe.len(), 3);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("max_factors = 3 exceeds")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_gsynth_estimator_and_force_parse() {
+        assert_eq!(
+            "gsynth".parse::<GsynthEstimator>().unwrap(),
+            GsynthEstimator::Ife
+        );
+        for s in ["mc", "Matrix-Completion", "matrixcompletion"] {
+            assert_eq!(
+                s.parse::<GsynthEstimator>().unwrap(),
+                GsynthEstimator::MatrixCompletion
+            );
+        }
+        assert_eq!(GsynthEstimator::MatrixCompletion.to_string(), "mc");
+        assert!("em".parse::<GsynthEstimator>().is_err());
+        for s in ["two-way", "twoWay", "TWO_WAY"] {
+            assert_eq!(s.parse::<GsynthForce>().unwrap(), GsynthForce::TwoWay);
+        }
+        assert_eq!(
+            "individual".parse::<GsynthForce>().unwrap(),
+            GsynthForce::Unit
+        );
+        assert!("both".parse::<GsynthForce>().is_err());
+        GsynthEstimator::choices().validate().unwrap();
+        GsynthForce::choices().validate().unwrap();
+    }
+
+    fn mc(lambda: Vec<f64>) -> GsynthConfig {
+        GsynthConfig {
+            estimator: GsynthEstimator::MatrixCompletion,
+            lambda,
+            ..tight(GsynthForce::TwoWay, 0)
+        }
+    }
+
+    #[test]
+    fn test_validate_gsynth_mc() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let r = sim(
+            &ds,
+            &["X1", "X2"],
+            GsynthConfig {
+                max_iter: 100_000,
+                ..mc(vec![0.01])
+            },
+        )
+        .unwrap();
+        let r3 = sim(
+            &ds,
+            &["X1", "X2"],
+            GsynthConfig {
+                max_iter: 100_000,
+                ..mc(vec![0.3])
+            },
+        )
+        .unwrap();
+        let mut chk = Check::new(&case);
+        let i7 = Tol::iterative(1e-7);
+        check_fit(&mut chk, "mc_l001_cov", &r, i7, i7);
+        chk.scalar("mc_l001_cov_rank", r.n_factors as f64, Tol::exact());
+        let i8 = Tol::iterative(1e-8);
+        check_fit(&mut chk, "mc_l03_cov", &r3, i8, i8);
+        chk.finish();
+        assert_eq!(r.lambda, Some(0.01));
+        assert!(r.factors.is_none() && r.loadings.is_none());
+        assert_eq!(r3.n_factors, 0);
+        assert!(r.convergence.as_ref().unwrap().converged);
+    }
+
+    #[test]
+    fn test_validate_gsynth_mc_lambda_grid() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let panel = read_gsynth_panel(ds.df(), "Y", "D", "id", "time", &["X1", "X2"]).unwrap();
+        let m = gsynth_mats(panel).unwrap();
+        let names = vec!["X1".to_string(), "X2".to_string()];
+        let prep = mc_prep(&m, GsynthForce::TwoWay, &names).unwrap();
+        let start = mc_start(&m, &prep, &mc_observed(&m), GsynthForce::TwoWay, None).unwrap();
+        let (grid, d_max) = mc_lambda_grid(&m, &prep, &start, 10).unwrap();
+        Check::new(&case)
+            .vector("mc_grid", &grid, Tol::coef(SIM_N))
+            .scalar("mc_eigen_max", d_max, Tol::coef(SIM_N))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_gsynth_mc_cv() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let grid = case.vector("mc_cv_user_grid");
+        let r = sim(
+            &ds,
+            &["X1", "X2"],
+            GsynthConfig {
+                cross_validate: true,
+                cv_folds: 5,
+                tolerance: 1e-8,
+                max_iter: 1000,
+                ..mc(grid.clone())
+            },
+        )
+        .unwrap();
+        let lambdas: Vec<f64> = r.cv_lambda.iter().map(|(l, _)| *l).collect();
+        assert_eq!(lambdas, grid);
+        let mspe: Vec<f64> = r.cv_lambda.iter().map(|(_, v)| *v).collect();
+        // the tolerance-1e-8 fits are this far from the solution (mc_cv_user_gap = 1.15e-6)
+        let gap = case.scalar("mc_cv_user_gap");
+        let tol = Tol::iterative(1e-6_f64.max(10.0 * gap));
+        Check::new(&case)
+            .vector("mc_cv_user_mspe", &mspe, tol)
+            .scalar("mc_cv_user_lambda", r.lambda.unwrap(), Tol::exact())
+            .scalar(
+                "mc_cv_user_att_avg",
+                r.att,
+                Tol::iterative(1e-5_f64.max(10.0 * gap)),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_gsynth_mc_requires_lambda_without_cv() {
+        let ds = simdata();
+        let msg = |c: GsynthConfig| match sim(&ds, &[], c) {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got ok={}", other.is_ok()),
+        };
+        for l in [vec![], vec![-0.1], vec![f64::NAN], vec![0.1, 0.2]] {
+            let m = msg(mc(l.clone()));
+            assert!(m.contains("lambda"), "{l:?}: {m}");
+        }
+        let m = msg(GsynthConfig {
+            cross_validate: true,
+            n_lambda: 2,
+            ..mc(vec![])
+        });
+        assert!(m.contains("n_lambda"), "{m}");
+    }
+
+    #[test]
+    fn test_gsynth_mc_convergence_is_scale_free() {
+        let ds = simdata();
+        let cfg = |l: f64| GsynthConfig {
+            tolerance: 1e-8,
+            max_iter: 100_000,
+            ..mc(vec![l])
+        };
+        let base = sim(&ds, &["X1", "X2"], cfg(0.01)).unwrap();
+        let mut big = ds.clone();
+        for c in ["Y", "X1", "X2"] {
+            let v = col(&ds, c);
+            big = set_col(&big, c, v.iter().map(|x| x * 1e6).collect());
+        }
+        let rb = sim(&big, &["X1", "X2"], cfg(0.01 * 1e6)).unwrap();
+        let (k0, kb) = (
+            base.convergence.as_ref().unwrap().iterations as i64,
+            rb.convergence.as_ref().unwrap().iterations as i64,
+        );
+        assert!((kb - k0).abs() <= 1, "{kb} vs {k0}");
+        assert!((rb.att / 1e6 - base.att).abs() <= 1e-6 * base.att.abs());
     }
 }
