@@ -14,7 +14,7 @@
 //! - Aalen, O.O. & Johansen, S. (1978). "An Empirical Transition Matrix". Scandinavian J. Statistics, 5:141-150.
 //! - R package `survival` (Therneau & Grambsch). https://cran.r-project.org/package=survival
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
@@ -1386,30 +1386,24 @@ pub fn run_cox_ph(
         }
     }
 
-    // Sort by time (descending for efficient risk set computation)
-    let mut sorted_indices: Vec<usize> = (0..n).collect();
-    sorted_indices.sort_by(|&a, &b| obs_data[b].0.total_cmp(&obs_data[a].0));
+    let rs = CoxRiskSets::new(&data.time);
+    let event = &data.event;
 
     // Newton-Raphson optimization
     let mut beta: Array1<f64> = Array1::zeros(p);
     let mut converged = false;
     let mut iterations = 0;
 
-    // Compute null log-likelihood (beta = 0)
-    let log_likelihood_null = cox_log_likelihood(
-        &obs_data,
-        &x,
-        &Array1::zeros(p),
-        &sorted_indices,
-        config.ties,
-    );
+    // Null log-likelihood (beta = 0)
+    checkpoint()?;
+    let at_zero = cox_pass(&rs, x.view(), event, Array1::zeros(p).view(), config.ties);
+    let log_likelihood_null = at_zero.loglik;
 
     for iter in 0..config.max_iter {
+        checkpoint()?;
         iterations = iter + 1;
-
-        // Compute gradient and Hessian
-        let (grad, hess, ll) =
-            cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
+        let pass = cox_pass(&rs, x.view(), event, beta.view(), config.ties);
+        let (grad, hess, ll) = (pass.score, pass.information, pass.loglik);
 
         // Check convergence
         let grad_norm = grad.iter().map(|g| g.abs()).fold(0.0, f64::max);
@@ -1418,27 +1412,27 @@ pub fn run_cox_ph(
             break;
         }
 
-        // Newton-Raphson update: beta_new = beta - H^{-1} * grad
+        // Newton-Raphson update: beta_new = beta + I^{-1} * score
         let (hess_inv, _) = safe_inverse(&hess.view())?;
         let delta = hess_inv.dot(&grad);
 
         // Step halving if needed
         let mut step = 1.0;
         let mut new_beta = &beta + &(&delta * step);
-        let mut new_ll = cox_log_likelihood(&obs_data, &x, &new_beta, &sorted_indices, config.ties);
+        let mut new_ll = cox_pass(&rs, x.view(), event, new_beta.view(), config.ties).loglik;
 
         while new_ll < ll && step > 1e-10 {
             step *= 0.5;
             new_beta = &beta + &(&delta * step);
-            new_ll = cox_log_likelihood(&obs_data, &x, &new_beta, &sorted_indices, config.ties);
+            new_ll = cox_pass(&rs, x.view(), event, new_beta.view(), config.ties).loglik;
         }
 
         beta = new_beta;
     }
 
     // Final likelihood and information matrix
-    let (_grad, hess, log_likelihood) =
-        cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
+    let last = cox_pass(&rs, x.view(), event, beta.view(), config.ties);
+    let (hess, log_likelihood) = (last.information, last.loglik);
     let (info_matrix, _) = safe_inverse(&hess.view())?;
 
     // Standard errors
@@ -1479,15 +1473,8 @@ pub fn run_cox_ph(
     let wald_p_value = chi_squared_p_value(wald_test, p as f64);
 
     // Score test (at beta = 0)
-    let (grad_null, hess_null, _) = cox_gradient_hessian(
-        &obs_data,
-        &x,
-        &Array1::zeros(p),
-        &sorted_indices,
-        config.ties,
-    );
-    let (info_null, _) = safe_inverse(&hess_null.view())?;
-    let score_test = grad_null.dot(&info_null.dot(&grad_null));
+    let (info_null, _) = safe_inverse(&at_zero.information.view())?;
+    let score_test = at_zero.score.dot(&info_null.dot(&at_zero.score));
     let score_p_value = chi_squared_p_value(score_test, p as f64);
 
     // Likelihood ratio test
@@ -1526,247 +1513,144 @@ pub fn run_cox_ph(
     })
 }
 
-/// Compute Cox partial log-likelihood.
-fn cox_log_likelihood(
-    obs: &[(f64, bool, usize)],
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    sorted_indices: &[usize],
-    ties: TiesMethod,
-) -> f64 {
-    let n = obs.len();
-    let mut log_lik = 0.0;
-
-    // Compute exp(beta'x) for all observations
-    let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
-    let exp_eta: Vec<f64> = eta.iter().map(|&e| e.exp()).collect();
-
-    // Cumulative sum of exp(eta) from end (for risk set computation)
-    let mut cum_exp_eta = 0.0;
-
-    match ties {
-        TiesMethod::Breslow => {
-            // Breslow approximation
-            for &idx in sorted_indices.iter() {
-                let (_, event, row_idx) = obs[idx];
-                cum_exp_eta += exp_eta[row_idx];
-
-                if event {
-                    log_lik += eta[row_idx] - cum_exp_eta.ln();
-                }
-            }
-        }
-        TiesMethod::Efron => {
-            // Efron approximation - handle ties properly
-            let mut i = 0;
-            while i < sorted_indices.len() {
-                let idx = sorted_indices[i];
-                let (t, _, _) = obs[idx];
-
-                // Find all observations at this time
-                let mut j = i;
-                let mut tie_indices: Vec<usize> = Vec::new();
-                while j < sorted_indices.len() {
-                    let jdx = sorted_indices[j];
-                    if (obs[jdx].0 - t).abs() < 1e-10 {
-                        tie_indices.push(jdx);
-                        cum_exp_eta += exp_eta[obs[jdx].2];
-                        j += 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                // Get events at this time
-                let event_indices: Vec<usize> = tie_indices
-                    .iter()
-                    .filter(|&&tidx| obs[tidx].1)
-                    .copied()
-                    .collect();
-                let d = event_indices.len();
-
-                if d > 0 {
-                    let sum_exp_events: f64 =
-                        event_indices.iter().map(|&tidx| exp_eta[obs[tidx].2]).sum();
-
-                    for (k, &eidx) in event_indices.iter().enumerate() {
-                        let row_idx = obs[eidx].2;
-                        let fraction = k as f64 / d as f64;
-                        log_lik += eta[row_idx] - (cum_exp_eta - fraction * sum_exp_events).ln();
-                    }
-                }
-
-                i = j;
-            }
-        }
-    }
-
-    log_lik
+/// Rows in descending time order (stable `total_cmp` sort), grouped into blocks of exactly
+/// equal time (coxph compares times exactly; the extractor normalised -0.0 and refused NaN).
+struct CoxRiskSets {
+    order: Vec<usize>,
+    blocks: Vec<std::ops::Range<usize>>,
 }
 
-/// Compute gradient and Hessian for Cox partial likelihood.
-fn cox_gradient_hessian(
-    obs: &[(f64, bool, usize)],
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    sorted_indices: &[usize],
+impl CoxRiskSets {
+    fn new(time: &[f64]) -> CoxRiskSets {
+        let mut order: Vec<usize> = (0..time.len()).collect();
+        order.sort_by(|&a, &b| time[b].total_cmp(&time[a]));
+        let mut blocks = Vec::new();
+        let mut start = 0;
+        while start < order.len() {
+            let t = time[order[start]];
+            let mut end = start + 1;
+            while end < order.len() && time[order[end]] == t {
+                end += 1;
+            }
+            blocks.push(start..end);
+            start = end;
+        }
+        CoxRiskSets { order, blocks }
+    }
+}
+
+/// Log partial likelihood, score and information (minus the Hessian) at `beta`.
+struct CoxPass {
+    loglik: f64,
+    score: Array1<f64>,
+    information: Array2<f64>,
+}
+
+/// `information += w * (m / a - xbar xbar')` on the upper triangle (`m` upper triangle only).
+fn add_information(info: &mut Array2<f64>, m: &Array2<f64>, a: f64, xbar: &[f64], w: f64) {
+    let q = xbar.len();
+    for j in 0..q {
+        for k in j..q {
+            info[[j, k]] += w * (m[[j, k]] / a - xbar[j] * xbar[k]);
+        }
+    }
+}
+
+/// One pass of coxph's partial likelihood (coxfit6): every row of a block of tied times
+/// joins the risk set before the block's deaths are scored. Breslow scores each death
+/// against the full risk set; Efron removes the fraction k/d of the block's deaths for the
+/// k-th of them. `x` is n x q in data row order.
+fn cox_pass(
+    rs: &CoxRiskSets,
+    x: ArrayView2<f64>,
+    event: &[bool],
+    beta: ArrayView1<f64>,
     ties: TiesMethod,
-) -> (Array1<f64>, Array2<f64>, f64) {
-    let n = obs.len();
-    let p = beta.len();
-    let mut grad = Array1::zeros(p);
-    let mut hess = Array2::zeros((p, p));
-    let mut log_lik = 0.0;
-
-    // Compute exp(beta'x) for all observations
-    let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
-    let exp_eta: Vec<f64> = eta.iter().map(|&e| e.exp()).collect();
-
-    // Running sums for risk set computation
-    let mut s0: f64 = 0.0; // sum of exp(eta)
-    let mut s1: Array1<f64> = Array1::zeros(p); // sum of x * exp(eta)
-    let mut s2: Array2<f64> = Array2::zeros((p, p)); // sum of x * x' * exp(eta)
-
-    match ties {
-        TiesMethod::Breslow => {
-            for &idx in sorted_indices.iter() {
-                let (_, event, row_idx) = obs[idx];
-                let xi = x.row(row_idx);
-                let exp_eta_i = exp_eta[row_idx];
-
-                // Update risk set sums (in-place, zero allocations)
-                s0 += exp_eta_i;
-                for j in 0..p {
-                    s1[j] += xi[j] * exp_eta_i;
-                    for k in 0..p {
-                        s2[[j, k]] += xi[j] * xi[k] * exp_eta_i;
-                    }
+) -> CoxPass {
+    let q = beta.len();
+    let eta = x.dot(&beta);
+    let mut loglik = 0.0;
+    let mut score = Array1::<f64>::zeros(q);
+    let mut info = Array2::<f64>::zeros((q, q));
+    let (mut s0, mut s1, mut s2) = (0.0, vec![0.0; q], Array2::<f64>::zeros((q, q)));
+    let (mut e1, mut e2) = (vec![0.0; q], Array2::<f64>::zeros((q, q)));
+    let mut xbar = vec![0.0; q];
+    let mut num = Array2::<f64>::zeros((q, q));
+    for block in &rs.blocks {
+        let rows = &rs.order[block.clone()];
+        let mut d = 0usize;
+        let mut e0 = 0.0;
+        e1.iter_mut().for_each(|v| *v = 0.0);
+        e2.fill(0.0);
+        for &i in rows {
+            let r = eta[i].exp();
+            let xi = x.row(i);
+            s0 += r;
+            for j in 0..q {
+                let rx = r * xi[j];
+                s1[j] += rx;
+                for k in j..q {
+                    s2[[j, k]] += rx * xi[k];
                 }
-
-                if event {
-                    log_lik += eta[row_idx] - s0.ln();
-
-                    // Gradient contribution: x_i - E[X|R_i] (in-place)
-                    let inv_s0 = 1.0 / s0;
-                    for j in 0..p {
-                        let x_bar_j = s1[j] * inv_s0;
-                        grad[j] += xi[j] - x_bar_j;
-                    }
-
-                    // Hessian contribution: -Var[X|R_i]
-                    for j in 0..p {
-                        let x_bar_j = s1[j] * inv_s0;
-                        for k in 0..p {
-                            let x_bar_k = s1[k] * inv_s0;
-                            hess[[j, k]] += s2[[j, k]] * inv_s0 - x_bar_j * x_bar_k;
+            }
+            if event[i] {
+                d += 1;
+                e0 += r;
+                loglik += eta[i];
+                for j in 0..q {
+                    let rx = r * xi[j];
+                    score[j] += xi[j];
+                    e1[j] += rx;
+                    if ties == TiesMethod::Efron {
+                        for k in j..q {
+                            e2[[j, k]] += rx * xi[k];
                         }
                     }
                 }
             }
         }
-        TiesMethod::Efron => {
-            // Efron's method with proper tie handling
-            let mut i = 0;
-            while i < sorted_indices.len() {
-                let idx = sorted_indices[i];
-                let (t, _, _) = obs[idx];
-
-                // Collect all observations at this time
-                let mut tie_indices: Vec<usize> = Vec::new();
-                let mut j = i;
-                while j < sorted_indices.len() {
-                    let jdx = sorted_indices[j];
-                    if (obs[jdx].0 - t).abs() < 1e-10 {
-                        tie_indices.push(jdx);
-                        j += 1;
-                    } else {
-                        break;
-                    }
+        if d == 0 {
+            continue;
+        }
+        match ties {
+            TiesMethod::Breslow => {
+                let df = d as f64;
+                for j in 0..q {
+                    xbar[j] = s1[j] / s0;
+                    score[j] -= df * xbar[j];
                 }
-
-                // Update risk set sums with all tied observations (in-place)
-                for &tidx in &tie_indices {
-                    let row_idx = obs[tidx].2;
-                    let xi = x.row(row_idx);
-                    let exp_eta_i = exp_eta[row_idx];
-
-                    s0 += exp_eta_i;
-                    for jj in 0..p {
-                        s1[jj] += xi[jj] * exp_eta_i;
-                        for kk in 0..p {
-                            s2[[jj, kk]] += xi[jj] * xi[kk] * exp_eta_i;
+                loglik -= df * s0.ln();
+                add_information(&mut info, &s2, s0, &xbar, df);
+            }
+            TiesMethod::Efron => {
+                for k in 0..d {
+                    let f = k as f64 / d as f64;
+                    let a = s0 - f * e0;
+                    for j in 0..q {
+                        xbar[j] = (s1[j] - f * e1[j]) / a;
+                        score[j] -= xbar[j];
+                    }
+                    loglik -= a.ln();
+                    for j in 0..q {
+                        for l in j..q {
+                            num[[j, l]] = s2[[j, l]] - f * e2[[j, l]];
                         }
                     }
+                    add_information(&mut info, &num, a, &xbar, 1.0);
                 }
-
-                // Get event indices at this time
-                let event_indices: Vec<usize> = tie_indices
-                    .iter()
-                    .filter(|&&tidx| obs[tidx].1)
-                    .copied()
-                    .collect();
-                let d = event_indices.len();
-
-                if d > 0 {
-                    // Compute sums over events (in-place)
-                    let mut sum_exp_events: f64 = 0.0;
-                    let mut sum_x_exp_events: Vec<f64> = vec![0.0; p];
-                    let mut sum_xx_exp_events: Array2<f64> = Array2::zeros((p, p));
-
-                    for &eidx in &event_indices {
-                        let row_idx = obs[eidx].2;
-                        let xi = x.row(row_idx);
-                        let exp_eta_i = exp_eta[row_idx];
-
-                        sum_exp_events += exp_eta_i;
-                        for jj in 0..p {
-                            sum_x_exp_events[jj] += xi[jj] * exp_eta_i;
-                            for kk in 0..p {
-                                sum_xx_exp_events[[jj, kk]] += xi[jj] * xi[kk] * exp_eta_i;
-                            }
-                        }
-                    }
-
-                    // Efron contribution for each event
-                    for (k, &eidx) in event_indices.iter().enumerate() {
-                        let row_idx = obs[eidx].2;
-                        let xi = x.row(row_idx);
-                        let fraction = k as f64 / d as f64;
-
-                        let s0_adj = s0 - fraction * sum_exp_events;
-
-                        if s0_adj > 0.0 {
-                            log_lik += eta[row_idx] - s0_adj.ln();
-
-                            let inv_s0_adj = 1.0 / s0_adj;
-                            for jj in 0..p {
-                                let x_bar_jj =
-                                    (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
-                                grad[jj] += xi[jj] - x_bar_jj;
-                            }
-
-                            for jj in 0..p {
-                                let x_bar_jj =
-                                    (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
-                                for kk in 0..p {
-                                    let x_bar_kk =
-                                        (s1[kk] - fraction * sum_x_exp_events[kk]) * inv_s0_adj;
-                                    hess[[jj, kk]] += (s2[[jj, kk]]
-                                        - fraction * sum_xx_exp_events[[jj, kk]])
-                                        * inv_s0_adj
-                                        - x_bar_jj * x_bar_kk;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                i = j;
             }
         }
     }
-
-    (grad, hess, log_lik)
+    for j in 0..q {
+        for k in (j + 1)..q {
+            info[[k, j]] = info[[j, k]];
+        }
+    }
+    CoxPass {
+        loglik,
+        score,
+        information: info,
+    }
 }
 
 /// Fenwick tree (Binary Indexed Tree) for cumulative frequency queries.
@@ -3367,60 +3251,6 @@ mod tests {
         assert!((r.chi_squared - 1.0).abs() < 1e-12, "{}", r.chi_squared);
     }
 
-    /// Create dataset for Cox PH with ties
-    fn create_r_cox_ties_dataset() -> Dataset {
-        // Matches R code:
-        // time <- c(1, 1, 2, 2, 2, 3, 4, 4, 5, 5)
-        // event <- c(1, 1, 1, 0, 1, 1, 1, 0, 1, 1)
-        // x <- c(0, 1, 0, 0, 1, 1, 0, 1, 0, 1)
-        let df = df! {
-            "time" => [1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 4.0, 4.0, 5.0, 5.0],
-            "event" => [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
-            "x" => [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-        }
-        .unwrap();
-        Dataset::new(df).with_name("r_cox_ties_test")
-    }
-
-    #[test]
-    fn test_validate_cox_ties_against_r() {
-        // R's coxph() with heavy ties
-        // Efron: coef ~0.3-0.6, se ~0.6-0.9
-        // Breslow: coef ~0.3-0.6, se ~0.6-0.9
-        let dataset = create_r_cox_ties_dataset();
-
-        // Test Efron method
-        let config_efron = CoxConfig {
-            ties: TiesMethod::Efron,
-            ..Default::default()
-        };
-        let result_efron =
-            run_cox_ph(&dataset, "time", "event", &["x"], Some(config_efron)).unwrap();
-
-        // Coefficient should be positive (x increases hazard)
-        assert!(
-            result_efron.coefficients[0] > -1.5 && result_efron.coefficients[0] < 1.5,
-            "Efron coef should be reasonable, got {}",
-            result_efron.coefficients[0]
-        );
-
-        // Test Breslow method
-        let config_breslow = CoxConfig {
-            ties: TiesMethod::Breslow,
-            ..Default::default()
-        };
-        let result_breslow =
-            run_cox_ph(&dataset, "time", "event", &["x"], Some(config_breslow)).unwrap();
-
-        // Both methods should give similar results
-        assert!(
-            (result_efron.coefficients[0] - result_breslow.coefficients[0]).abs() < 0.5,
-            "Efron ({}) and Breslow ({}) should be similar",
-            result_efron.coefficients[0],
-            result_breslow.coefficients[0]
-        );
-    }
-
     #[test]
     fn test_validate_cox_concordance() {
         // Concordance should match R within ~0.05
@@ -3962,4 +3792,64 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // Cox proportional hazards: R-pinned (validation/r/cases/surv_cox_aft.R;
+    // registry validation/methods/surv_cox_aft.json)
+    // =========================================================================
+
+    const COX_X: [&str; 3] = ["age", "sex", "ph.ecog"];
+
+    /// coxph.control(eps = 1e-12, iter.max = 100), as in the surv_cox_* cases.
+    fn cox_tight(ties: TiesMethod) -> CoxConfig {
+        let mut c = CoxConfig::default();
+        c.ties = ties;
+        c.tolerance = 1e-12;
+        c.max_iter = 100;
+        c
+    }
+
+    fn ties_tag(ties: TiesMethod) -> &'static str {
+        match ties {
+            TiesMethod::Efron => "efron",
+            TiesMethod::Breslow => "breslow",
+        }
+    }
+
+    /// `validation/datasets/generated/<name>.csv`, for property tests that pin no R value.
+    fn generated_dataset(name: &str) -> Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
+    /// Heavy ties (10 rows, 5 distinct times, censored rows tied with deaths), Efron and Breslow,
+    /// rows in file order and reversed. Before: Breslow 0.36576456754379533 / reversed
+    /// -0.47976648482093837 (R -0.050231244457068). Replaces a test whose comment quoted "R"
+    /// ranges R does not produce and whose |Efron - Breslow| < 0.5 could not fail.
+    #[test]
+    fn test_validate_cox_ties_small() {
+        let (case, ds) = load_case("surv_cox_ties_small");
+        let n = case.scalar("n") as usize;
+        let rev = Dataset::new(ds.df().reverse());
+        let mut check = Check::new(&case);
+        for ties in [TiesMethod::Efron, TiesMethod::Breslow] {
+            let tag = ties_tag(ties);
+            for d in [&ds, &rev] {
+                let r = run_cox_ph(d, "time", "event", &["x"], Some(cox_tight(ties))).unwrap();
+                check
+                    .named(&format!("{tag}_coef"), &r.variables, &r.coefficients, Tol::coef(n))
+                    .named(&format!("{tag}_se"), &r.variables, &r.std_errors, Tol::se(n))
+                    .scalar(&format!("{tag}_loglik"), r.log_likelihood, Tol::stat(n))
+                    .scalar(
+                        &format!("{tag}_loglik_null"),
+                        r.log_likelihood_null,
+                        Tol::stat(n),
+                    )
+                    .scalar(&format!("{tag}_score_test"), r.score_test, Tol::stat(n));
+            }
+        }
+        check.finish();
+    }
 }

@@ -11,7 +11,9 @@
         "surv_cox_robust",
         "surv_cox_ties_small"
       ],
-      "tests": [],
+      "tests": [
+        "test_validate_cox_ties_small"
+      ],
       "quantities": [
         "coefficients",
         "model-based SE",
