@@ -4427,8 +4427,8 @@ mod tests {
     /// concordance and its SE are not pinned). Before: up to 100 iterations under the absolute
     /// score rule, HR limits with 1.96 (sex and ph.ecog upper limits off by 6.0e-6 and 4.1e-6
     /// relative), no convergence fields.
-    fn check_cox_model(ties: TiesMethod) {
-        let (case, ds) = load_case("surv_cox_robust");
+    fn check_cox_model(case_id: &str, ties: TiesMethod) {
+        let (case, ds) = load_case(case_id);
         let n = case.scalar("n") as usize;
         let tag = ties_tag(ties);
         let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cox_tight(ties))).unwrap();
@@ -4493,12 +4493,12 @@ mod tests {
 
     #[test]
     fn test_validate_cox_efron_model() {
-        check_cox_model(TiesMethod::Efron)
+        check_cox_model("surv_cox_robust", TiesMethod::Efron)
     }
 
     #[test]
     fn test_validate_cox_breslow_model() {
-        check_cox_model(TiesMethod::Breslow)
+        check_cox_model("surv_cox_robust", TiesMethod::Breslow)
     }
 
     /// X-15: the stopping rule is the relative change in the log partial likelihood, so the
@@ -4647,8 +4647,8 @@ mod tests {
 
     /// ECON-45: coxph(robust = TRUE). Before: robust_se was never read, so std_errors were the
     /// model SEs (efron age 0.0092674110143657 vs robust 0.00988139278005566) and nothing said so.
-    fn check_cox_robust(ties: TiesMethod) {
-        let (case, ds) = load_case("surv_cox_robust");
+    fn check_cox_robust(case_id: &str, ties: TiesMethod) {
+        let (case, ds) = load_case(case_id);
         let n = case.scalar("n") as usize;
         let tag = ties_tag(ties);
         let mut cfg = cox_tight(ties);
@@ -4733,12 +4733,12 @@ mod tests {
 
     #[test]
     fn test_validate_cox_efron_robust() {
-        check_cox_robust(TiesMethod::Efron)
+        check_cox_robust("surv_cox_robust", TiesMethod::Efron)
     }
 
     #[test]
     fn test_validate_cox_breslow_robust() {
-        check_cox_robust(TiesMethod::Breslow)
+        check_cox_robust("surv_cox_robust", TiesMethod::Breslow)
     }
 
     /// coxph(... + cluster(inst)): dfbeta residuals summed within the 18 institutions; the row
@@ -4886,8 +4886,8 @@ mod tests {
     }
 
     /// Everything summary.survreg reports except the Log(scale) row (check_aft_log_scale).
-    fn check_aft(dist: AftDistribution, tag: &str) -> AftResult {
-        let (case, ds) = load_case("surv_aft");
+    fn check_aft(case_id: &str, dist: AftDistribution, tag: &str) -> AftResult {
+        let (case, ds) = load_case(case_id);
         let n = case.scalar("n") as usize;
         let r = run_aft(&ds, "time", "status", &AFT_X, Some(aft_tight(dist))).unwrap();
         assert!(
@@ -4926,8 +4926,8 @@ mod tests {
         r
     }
 
-    fn check_aft_log_scale(r: &AftResult, tag: &str) {
-        let (case, _) = load_case("surv_aft");
+    fn check_aft_log_scale(case_id: &str, r: &AftResult, tag: &str) {
+        let (case, _) = load_case(case_id);
         let n = case.scalar("n") as usize;
         let (z, p) = r.log_scale_test().unwrap();
         assert!(!r.scale_fixed);
@@ -4946,8 +4946,8 @@ mod tests {
     /// Hessian), so 100 steps of beta += 0.01 grad diverged: age 54.48, scale inf, logLik -inf.
     #[test]
     fn test_validate_aft_weibull() {
-        let r = check_aft(AftDistribution::Weibull, "weibull");
-        check_aft_log_scale(&r, "weibull");
+        let r = check_aft("surv_aft", AftDistribution::Weibull, "weibull");
+        check_aft_log_scale("surv_aft", &r, "weibull");
         assert_eq!(r.shape, Some(1.0 / r.scale));
     }
 
@@ -4956,7 +4956,7 @@ mod tests {
     /// relabelled.
     #[test]
     fn test_validate_aft_exponential() {
-        let r = check_aft(AftDistribution::Exponential, "exponential");
+        let r = check_aft("surv_aft", AftDistribution::Exponential, "exponential");
         assert_eq!(r.scale, 1.0);
         assert!(r.scale_fixed && r.log_scale_se.is_none() && r.log_scale_test().is_none());
         assert_eq!(r.shape, Some(1.0));
@@ -4967,15 +4967,15 @@ mod tests {
     /// normal hazard in the tails, ln S(z) without underflow.
     #[test]
     fn test_validate_aft_lognormal() {
-        let r = check_aft(AftDistribution::LogNormal, "lognormal");
-        check_aft_log_scale(&r, "lognormal");
+        let r = check_aft("surv_aft", AftDistribution::LogNormal, "lognormal");
+        check_aft_log_scale("surv_aft", &r, "lognormal");
         assert_eq!(r.shape, None);
     }
 
     #[test]
     fn test_validate_aft_loglogistic() {
-        let r = check_aft(AftDistribution::LogLogistic, "loglogistic");
-        check_aft_log_scale(&r, "loglogistic");
+        let r = check_aft("surv_aft", AftDistribution::LogLogistic, "loglogistic");
+        check_aft_log_scale("surv_aft", &r, "loglogistic");
     }
 
     /// Phantom-option pair: survreg distinguishes exponential from weibull.

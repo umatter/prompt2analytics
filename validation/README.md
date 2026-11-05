@@ -334,12 +334,12 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 ### Survival Analysis
 | Method | File | Status |
 |--------|------|--------|
-| Kaplan-Meier | [survival.md](econometrics/survival.md) | R-pinned |
-| Log-Rank Test | [survival.md](econometrics/survival.md) | R-pinned |
-| Survival columns (Int64, na.omit, Surv() status coding) | [survival.md](econometrics/survival.md) | R-pinned |
-| Cox PH (Breslow/Efron, robust and clustered SEs) | [survival.md](econometrics/survival.md) | R-pinned (concordance not pinned, ECON-89) |
-| AFT Models | [survival.md](econometrics/survival.md) | R-pinned |
-| Competing Risks | [survival.md](econometrics/survival.md) | R-pinned |
+| Kaplan-Meier | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
+| Log-Rank Test | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
+| Survival columns (Int64, na.omit, Surv() status coding) | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
+| Cox PH (Breslow/Efron, robust and clustered SEs) | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
+| AFT Models | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
+| Competing Risks | [survival.md](econometrics/survival.md) | R-pinned, known deviations (ECON-45, ECON-89) |
 
 ### Time Series
 | Method | File | Status |
