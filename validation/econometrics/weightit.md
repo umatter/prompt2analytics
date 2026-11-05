@@ -118,7 +118,7 @@ ess_uniform <- sum(uniform)^2 / sum(uniform^2)
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-92):
 - `econometrics::weightit::tests::test_weightit_logistic_ate` (`crates/p2a-core/src/econometrics/weightit.rs`): n, treated and control counts, the number of weights, and 0 < ESS ≤ n.
 - `econometrics::weightit::tests::test_validate_entropy_exact_mean_balance` (`crates/p2a-core/src/econometrics/weightit.rs`): when entropy balancing converges, weighted control means are within 0.05 of the treated means and the maximum standardized difference is below 0.1 (nothing is checked when it does not converge).
-- `econometrics::weightit::tests::test_validate_ess_properties` (`crates/p2a-core/src/econometrics/weightit.rs`): for each method, 0 < ESS ≤ n and every weight positive and finite.
+- `econometrics::weightit::tests::test_ess_properties` (`crates/p2a-core/src/econometrics/weightit.rs`): on `weighting_sim.csv`, for each method, 0 < ESS ≤ n and every weight non-negative and finite.
 - `econometrics::weightit::tests::test_ess_computation` (`crates/p2a-core/src/econometrics/weightit.rs`): the ESS of hand-made weight vectors (4, 2, 2) within 1e-10.
 
 `validation/expected/ebal_weightit.csv` is not read by any test.

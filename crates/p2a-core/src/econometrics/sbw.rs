@@ -84,16 +84,41 @@
 //!
 //! which the dual solution satisfies on the free units.
 //!
-//! ## Approximate Balance
+//! ## Approximate Balance: Band QP by Proximal Newton
 //!
-//! When exact balance is infeasible, we relax to:
+//! With balance_tol > 0 each covariate mean must lie in a band around its target,
+//! delta_j = balance_tol (`Raw`) or balance_tol sd_j (`StdDev`, sd_j the full-sample standard
+//! deviation, Zubizarreta 2015):
 //!
 //! ```text
-//! minimize:    (1/2) * w'Hw + c'w + ρ * ||A*w - b||²
-//! subject to:  w_i >= l
+//! minimise (1/2) ||w||^2   subject to   (1/m) sum_i w_i = 1,
+//!                                       |(1/m) sum_i w_i x_ij - t_j| <= delta_j,   w_i >= l
 //! ```
 //!
-//! Where ρ is a penalty parameter for balance constraint violation.
+//! (m reweighted units, the n scale). With covariates centred on the band and scaled by
+//! their group standard deviation, a_i = [xs_i, 1] / m and band half-widths r_j, the dual in
+//! mu = (y, nu) (k + 1 variables) is
+//!
+//! ```text
+//! F(mu) = sum_i h(a_i . mu) - sum_j r_j |y_j| + nu,      w_i(mu) = max(l, a_i . mu)
+//! ```
+//!
+//! concave and piecewise quadratic plus an l1 term. -F is minimised by proximal Newton (Lee,
+//! Sun & Saunders 2014): each step minimises the quadratic model plus the l1 term exactly by
+//! the feature-sign method (Lee, Battle, Raina & Ng 2007), with an Armijo search; the
+//! (k+1) x (k+1) Hessian sum_{i in S} a_i a_i' is regularised only when singular. Memory is
+//! O(n k). The solve stops when the KKT residual is below 1e-14 (1 + max r_j), or below
+//! tolerance (1 + max r_j) after an unregularised full step that kept S.
+//!
+//! Infeasibility: a band that misses a covariate's range (l >= 0), or a dual value above the
+//! largest primal objective on {w >= l, sum w = m} (weak duality), is an
+//! `EconError::InvalidSpecification` asking for a larger balance_tol.
+//!
+//! ## Estimands
+//!
+//! ATT reweights the controls to the treated means and ATC the treated to the control means
+//! (the other group keeps weight 1); ATE solves one problem per group, each reweighted to the
+//! pooled means.
 //!
 //! # References
 //!
@@ -118,9 +143,11 @@ use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::linalg::matrix_ops::{eig_symmetric, safe_inverse};
+use crate::linalg::solve::{SingularPolicy, sym_inverse};
 use crate::options::Choices;
 use crate::resource;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Type Definitions
@@ -195,34 +222,32 @@ pub struct SBWConfig {
     /// Target estimand (ATT, ATE, ATC)
     pub estimand: SBWEstimand,
     /// Balance tolerance; must be finite and >= 0. `0` (the default) selects exact balance,
-    /// solved by the dual Newton method of the module docs. A positive value selects the
-    /// penalised approximate solver, which aims for
-    /// |Σw_i X_ij / Σw_i - target_j| <= balance_tol: it reports convergence only when the
-    /// largest such violation is below `balance_tol + 0.001` (and the gradient norm below
-    /// `tolerance`), but it does not enforce the bound.
+    /// solved by the dual Newton method of the module docs. A positive value selects
+    /// approximate balance, |Σw_i X_ij / Σw_i - target_j| <= delta_j with delta_j = balance_tol
+    /// in the unit of `balance_tol_scale`, solved exactly as a quadratic program.
     pub balance_tol: f64,
     /// Lower bound l on each reweighted unit's weight (default 0, non-negative weights);
-    /// must be finite. Exact balance holds w_i >= l exactly in the n scale (the weights
-    /// average 1), so there l must be <= 1, and with l >= 0 a target mean outside the
-    /// reweighted group's range is refused. The approximate solver clips its iterate, whose
-    /// weights sum to 1, at l before renormalising, so there l bounds weights in that scale
-    /// and holds only approximately.
+    /// finite and at most 1. Both solvers hold w_i >= l exactly in the n scale (the weights
+    /// average 1), and with l >= 0 a target mean (exact) or band (approximate) outside the
+    /// reweighted group's range is refused.
     pub min_weight: f64,
     /// Normalize weights to sum to n (true) or 1 (false)
     pub normalize_to_n: bool,
-    /// Iteration cap, at least 1. Approximate balance: projected-gradient steps. Exact
-    /// balance: dual Newton steps, the closed-form first step counting as one; running out
-    /// within `tolerance` stops as converged, otherwise it is an
-    /// `EconError::ConvergenceFailure` with `iterations = max_iter`.
+    /// Iteration cap, at least 1. Approximate balance: proximal Newton steps; running out
+    /// returns an unconverged result with a note. Exact balance: dual Newton steps, the
+    /// closed-form first step counting as one; running out within `tolerance` stops as
+    /// converged, otherwise it is an `EconError::ConvergenceFailure` with
+    /// `iterations = max_iter`.
     pub max_iter: usize,
     /// Convergence tolerance; must be finite and > 0. Exact balance stops once the balance
     /// residual satisfies ||r||_inf <= tolerance (1 + ||b||_inf) after a full Newton step
     /// that kept the set of units off the bound (b = [target means; 1]; see the module docs
-    /// for the other exits). Approximate balance uses it as the threshold on the gradient
-    /// norm.
+    /// for the other exits). Approximate balance stops once the KKT residual is below
+    /// tolerance (1 + max r_j) after an unregularised full step that kept that set.
     pub tolerance: f64,
-    /// Penalty ρ on the balance violation for approximate balance (higher = stricter
-    /// balance); must be finite and > 0 when `balance_tol > 0`, unused for exact balance.
+    /// Not used since T3; only the default 1000 is accepted. Approximate balance is solved
+    /// exactly as a quadratic program, which has no penalty parameter; any other value
+    /// (including a non-finite one) is an `EconError::InvalidSpecification`.
     pub balance_penalty: f64,
     /// Unit of `balance_tol`: `Raw` (the default, the covariates' own units) or `StdDev`
     /// (each covariate's full-sample standard deviation, n - 1 denominator).
@@ -340,6 +365,35 @@ pub struct SBWResult {
     pub lambda: Vec<f64>,
     /// Warnings generated during estimation
     pub warnings: Vec<String>,
+    /// ESS of the treated group
+    #[serde(default)]
+    pub ess_treated: f64,
+    /// ESS of the control group
+    #[serde(default)]
+    pub ess_control: f64,
+    /// Objective `sum (w - 1/m)^2` (weights summing to 1) of the treated group's problem
+    /// (ATC, ATE)
+    #[serde(default)]
+    pub objective_treated: Option<f64>,
+    /// Objective of the control group's problem (ATT, ATE)
+    #[serde(default)]
+    pub objective_control: Option<f64>,
+    /// ATE only: the treated problem's multipliers (`lambda` holds the control problem's)
+    #[serde(default)]
+    pub lambda_treated: Option<Vec<f64>>,
+    /// Convergence record of the solver
+    #[serde(default)]
+    pub convergence: Option<Convergence>,
+}
+
+impl ResultNotes for SBWResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
 }
 
 impl fmt::Display for SBWResult {
@@ -360,12 +414,6 @@ impl fmt::Display for SBWResult {
         writeln!(f, "Optimization:")?;
         writeln!(
             f,
-            "  Converged:  {} ({} iterations)",
-            if self.converged { "Yes" } else { "No" },
-            self.iterations
-        )?;
-        writeln!(
-            f,
             "  Objective:  {:.6} (variance of weights)",
             self.objective_value
         )?;
@@ -380,10 +428,8 @@ impl fmt::Display for SBWResult {
         )?;
         writeln!(
             f,
-            "  ESS:        {:.1} of {} ({:.1}%)",
-            self.ess_reweighted,
-            self.n_reweighted,
-            100.0 * self.ess_reweighted / self.n_reweighted as f64
+            "  ESS:        treated {:.1}, control {:.1}",
+            self.ess_treated, self.ess_control
         )?;
         writeln!(f)?;
 
@@ -412,15 +458,7 @@ impl fmt::Display for SBWResult {
             self.balance_after.mean_std_diff
         )?;
 
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -497,9 +535,9 @@ fn validate_sbw_config(config: &SBWConfig) -> EconResult<()> {
             config.min_weight
         ));
     }
-    if config.balance_tol == 0.0 && config.min_weight > 1.0 {
+    if config.min_weight > 1.0 {
         return invalid(format!(
-            "min_weight must be <= 1 for exact balance (the weights average 1 in the n scale); got {}",
+            "min_weight must be at most 1 (the mean weight in the n scale); got {}",
             config.min_weight
         ));
     }
@@ -512,19 +550,16 @@ fn validate_sbw_config(config: &SBWConfig) -> EconResult<()> {
             config.tolerance
         ));
     }
-    if config.balance_tol > 0.0
-        && !(config.balance_penalty.is_finite() && config.balance_penalty > 0.0)
-    {
-        return invalid(format!(
-            "balance_penalty must be finite and > 0 for approximate balance; got {}",
-            config.balance_penalty
-        ));
+    if config.balance_penalty != 1000.0 {
+        return invalid(
+            "balance_penalty is not used: approximate balance is solved exactly as a quadratic program (Zubizarreta 2015), which has no penalty parameter; omit it".to_string(),
+        );
     }
     Ok(())
 }
 
 /// [`run_sbw`] with the covariate names used in balance tables and error messages.
-fn run_sbw_inner(
+pub(crate) fn run_sbw_inner(
     treatment: &ArrayView1<f64>,
     covariates: &ArrayView2<f64>,
     cov_names: &[String],
@@ -559,134 +594,169 @@ fn run_sbw_inner(
         }
     }
 
-    // Identify target and reweight groups based on estimand
-    let (target_idx, reweight_idx): (Vec<usize>, Vec<usize>) = match config.estimand {
-        SBWEstimand::ATT => {
-            let treated: Vec<usize> = (0..n).filter(|&i| treatment[i] >= 0.5).collect();
-            let control: Vec<usize> = (0..n).filter(|&i| treatment[i] < 0.5).collect();
-            (treated, control)
-        }
-        SBWEstimand::ATC => {
-            let control: Vec<usize> = (0..n).filter(|&i| treatment[i] < 0.5).collect();
-            let treated: Vec<usize> = (0..n).filter(|&i| treatment[i] >= 0.5).collect();
-            (control, treated)
-        }
-        SBWEstimand::ATE => {
-            // For ATE, we reweight both groups to the overall distribution
-            // For now, implement as ATT (reweight control to treated)
-            // Full ATE would require reweighting both groups
-            let treated: Vec<usize> = (0..n).filter(|&i| treatment[i] >= 0.5).collect();
-            let control: Vec<usize> = (0..n).filter(|&i| treatment[i] < 0.5).collect();
-            (treated, control)
-        }
-    };
-
-    let n_target = target_idx.len();
-    let n_reweight = reweight_idx.len();
-
-    if n_target == 0 || n_reweight == 0 {
+    let treated: Vec<usize> = (0..n).filter(|&i| treatment[i] >= 0.5).collect();
+    let control: Vec<usize> = (0..n).filter(|&i| treatment[i] < 0.5).collect();
+    let (nt, nc) = (treated.len(), control.len());
+    if nt == 0 || nc == 0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
-                "Both groups must have observations. Found {} target, {} to reweight.",
-                n_target, n_reweight
+                "Both groups must have observations. Found {nt} treated and {nc} control units."
             ),
         });
     }
+    let x_t = extract_rows(covariates, &treated);
+    let x_c = extract_rows(covariates, &control);
 
-    // Extract covariate matrices for each group
-    let x_target = extract_rows(covariates, &target_idx);
-    let x_reweight = extract_rows(covariates, &reweight_idx);
-
-    // Compute target means (means of target group)
-    let target_means = x_target
-        .mean_axis(Axis(0))
-        .ok_or_else(|| EconError::Computation("Failed to compute target means".to_string()))?;
     // Finite covariates can still overflow when summed; an infinite target would make every
     // relative convergence threshold infinite.
-    for (t, name) in target_means.iter().zip(cov_names) {
-        if !t.is_finite() {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "the target group's mean of covariate {name} is not finite (its values are too large in magnitude to sum in f64); rescale the covariate"
-                ),
-            });
-        }
-    }
-
-    // Exact balance with non-negative weights reweights to a convex combination of the
-    // reweighted units, so every target mean must lie within that group's range.
-    if config.balance_tol == 0.0 && config.min_weight >= 0.0 {
-        for (j, name) in cov_names.iter().enumerate() {
-            let col = x_reweight.column(j);
-            let lo = col.iter().cloned().fold(f64::INFINITY, f64::min);
-            let hi = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let t = target_means[j];
-            if t < lo || t > hi {
+    let means = |x: &ArrayView2<f64>, group: &str| -> EconResult<Array1<f64>> {
+        let m = x
+            .mean_axis(Axis(0))
+            .ok_or_else(|| EconError::Computation("Failed to compute target means".to_string()))?;
+        for (t, name) in m.iter().zip(cov_names) {
+            if !t.is_finite() {
                 return Err(EconError::InvalidSpecification {
                     message: format!(
-                        "Exact balance is infeasible: the target mean of covariate {name} ({t:.4}) lies outside the reweighted group's range [{lo:.4}, {hi:.4}], which weights >= {} cannot reach. Use approximate balance (balance_tol > 0) or another estimand.",
-                        config.min_weight
+                        "the {group} mean of covariate {name} is not finite (its values are too large in magnitude to sum in f64); rescale the covariate"
                     ),
                 });
             }
         }
-    }
+        Ok(m)
+    };
 
-    // Compute balance before weighting
-    let balance_before =
-        compute_balance_stats(&x_target.view(), &x_reweight.view(), cov_names, None);
+    // Problems: (reweighted group is the treated, its indices, its covariates, target means).
+    let problems: Vec<(bool, &[usize], &Array2<f64>, Array1<f64>)> = match config.estimand {
+        SBWEstimand::ATT => vec![(false, &control, &x_c, means(&x_t.view(), "treated")?)],
+        SBWEstimand::ATC => vec![(true, &treated, &x_t, means(&x_c.view(), "control")?)],
+        SBWEstimand::ATE => {
+            let pooled = means(covariates, "pooled")?;
+            vec![
+                (true, &treated, &x_t, pooled.clone()),
+                (false, &control, &x_c, pooled),
+            ]
+        }
+    };
 
-    // Solve the quadratic programming problem
-    let (weights, lambda, converged, iterations, objective, max_violation) =
-        if config.balance_tol == 0.0 {
-            // Exact balance: dual semismooth Newton in the constraint dimension
-            solve_sbw_exact(&x_reweight.view(), &target_means.view(), &config)?
-        } else {
-            // Approximate balance: use penalized QP
-            solve_sbw_approximate(&x_reweight.view(), &target_means.view(), &config)?
-        };
+    let exact = config.balance_tol == 0.0;
+    // Band half-widths in the covariates' units.
+    let delta: Vec<f64> = (0..covariates.ncols())
+        .map(|j| match config.balance_tol_scale {
+            BalanceTolScale::Raw => config.balance_tol,
+            BalanceTolScale::StdDev => {
+                let col = covariates.column(j);
+                let mean = col.sum() / n as f64;
+                let var =
+                    col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0).max(1.0);
+                config.balance_tol * var.sqrt()
+            }
+        })
+        .collect();
 
-    // Scale weights for normalization
-    let mut final_weights = weights.clone();
-    if config.normalize_to_n {
-        let w_sum: f64 = final_weights.iter().sum();
-        if w_sum > 0.0 {
-            for w in &mut final_weights {
-                *w *= n_reweight as f64 / w_sum;
+    let mut full_weights = vec![1.0; n];
+    let mut group_weights: Vec<(bool, Vec<f64>)> = Vec::with_capacity(2);
+    let mut lambda = Vec::new();
+    let mut lambda_treated = None;
+    let mut converged = true;
+    let mut iterations = 0usize;
+    let mut max_violation = 0.0_f64;
+    let (mut objective_treated, mut objective_control) = (None, None);
+    for (is_treated, idx, x_g, target) in &problems {
+        if exact && config.min_weight >= 0.0 {
+            // Exact balance with non-negative weights reweights to a convex combination of
+            // the reweighted units, so every target mean must lie within that group's range.
+            for (j, name) in cov_names.iter().enumerate() {
+                let col = x_g.column(j);
+                let lo = col.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let t = target[j];
+                if t < lo || t > hi {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "Exact balance is infeasible: the target mean of covariate {name} ({t:.4}) lies outside the reweighted group's range [{lo:.4}, {hi:.4}], which weights >= {} cannot reach. Use approximate balance (balance_tol > 0) or another estimand.",
+                            config.min_weight
+                        ),
+                    });
+                }
             }
         }
+        let (w, lam, conv, it, obj, viol) = if exact {
+            solve_sbw_exact(&x_g.view(), &target.view(), &config)?
+        } else {
+            solve_sbw_approximate(&x_g.view(), &target.view(), &delta, cov_names, &config)?
+        };
+        // Solver weights sum to 1; normalize_to_n scales the group to its own size.
+        let scale = if config.normalize_to_n {
+            idx.len() as f64
+        } else {
+            1.0
+        };
+        let w: Vec<f64> = w.iter().map(|v| v * scale).collect();
+        for (&i, &wi) in idx.iter().zip(&w) {
+            full_weights[i] = wi;
+        }
+        converged &= conv;
+        iterations += it;
+        max_violation = max_violation.max(viol);
+        if *is_treated {
+            objective_treated = Some(obj);
+            if config.estimand == SBWEstimand::ATE {
+                lambda_treated = Some(lam);
+            } else {
+                lambda = lam;
+            }
+        } else {
+            objective_control = Some(obj);
+            lambda = lam;
+        }
+        group_weights.push((*is_treated, w));
     }
+    let objective = objective_treated.unwrap_or(0.0) + objective_control.unwrap_or(0.0);
+    let weights_of = |treated_group: bool| -> Option<&[f64]> {
+        group_weights
+            .iter()
+            .find(|(t, _)| *t == treated_group)
+            .map(|(_, w)| w.as_slice())
+    };
 
-    // Create full weight vector
-    let mut full_weights = vec![0.0; n];
-    for &i in &target_idx {
-        full_weights[i] = 1.0;
-    }
-    for (j, &i) in reweight_idx.iter().enumerate() {
-        full_weights[i] = final_weights[j];
-    }
+    // Balance before and after weighting ("target" = the treated for ATT and ATE).
+    let (balance_before, balance_after) = match config.estimand {
+        SBWEstimand::ATT => (
+            compute_balance_stats(&x_t.view(), &x_c.view(), cov_names, None),
+            compute_balance_stats(&x_t.view(), &x_c.view(), cov_names, weights_of(false)),
+        ),
+        SBWEstimand::ATC => (
+            compute_balance_stats(&x_c.view(), &x_t.view(), cov_names, None),
+            compute_balance_stats(&x_c.view(), &x_t.view(), cov_names, weights_of(true)),
+        ),
+        SBWEstimand::ATE => (
+            compute_balance_stats_two(&x_t.view(), None, &x_c.view(), None, cov_names),
+            compute_balance_stats_two(
+                &x_t.view(),
+                weights_of(true),
+                &x_c.view(),
+                weights_of(false),
+                cov_names,
+            ),
+        ),
+    };
 
-    // Compute balance after weighting
-    let balance_after = compute_balance_stats(
-        &x_target.view(),
-        &x_reweight.view(),
-        cov_names,
-        Some(&final_weights),
-    );
+    // Effective sample sizes
+    let (ess_total, ess_treated, ess_control) = compute_ess(&full_weights, treatment);
+    let (ess_target, ess_reweight, n_target, n_reweight) = match config.estimand {
+        SBWEstimand::ATT => (ess_treated, ess_control, nt, nc),
+        SBWEstimand::ATC => (ess_control, ess_treated, nc, nt),
+        SBWEstimand::ATE => (ess_treated, ess_control, n, n),
+    };
+    let ess_reweighted_units = match config.estimand {
+        SBWEstimand::ATE => ess_treated + ess_control,
+        _ => ess_reweight,
+    };
 
-    // Compute effective sample sizes
-    let (ess_total, ess_target, ess_reweight) = compute_ess(&full_weights, treatment);
-
-    // Weight statistics
-    let max_weight = final_weights
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-    let min_weight = final_weights
-        .iter()
-        .filter(|&&w| w > 0.0)
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
+    // Weight statistics over the reweighted units
+    let all_rw = group_weights.iter().flat_map(|(_, w)| w.iter().cloned());
+    let max_weight = all_rw.clone().fold(f64::NEG_INFINITY, f64::max);
+    let min_weight = all_rw.filter(|&w| w > 0.0).fold(f64::INFINITY, f64::min);
 
     // Check for warnings
     if max_weight / min_weight.max(1e-10) > 100.0 {
@@ -696,19 +766,12 @@ fn run_sbw_inner(
         ));
     }
 
-    if ess_reweight < n_reweight as f64 * 0.3 {
+    if ess_reweighted_units < n_reweight as f64 * 0.3 {
         warnings.push(format!(
             "Low effective sample size ({:.1} of {}, {:.0}%). Weights are highly variable.",
-            ess_reweight,
+            ess_reweighted_units,
             n_reweight,
-            100.0 * ess_reweight / n_reweight as f64
-        ));
-    }
-
-    if !converged {
-        warnings.push(format!(
-            "Optimization did not converge after {} iterations. Results may be unreliable.",
-            iterations
+            100.0 * ess_reweighted_units / n_reweight as f64
         ));
     }
 
@@ -717,6 +780,26 @@ fn run_sbw_inner(
             "Balance constraints not fully satisfied (max violation = {:.4}).",
             max_violation
         ));
+    }
+
+    let convergence = Convergence::new(
+        converged,
+        iterations,
+        config.max_iter,
+        if exact {
+            "dual Newton steps (exact QP)"
+        } else {
+            "proximal Newton steps (exact QP)"
+        },
+        max_violation,
+        config.tolerance,
+    );
+    if let Some(note) = convergence.note(if exact {
+        "Exact SBW"
+    } else {
+        "Approximate SBW"
+    }) {
+        warnings.push(note);
     }
 
     Ok(SBWResult {
@@ -738,6 +821,12 @@ fn run_sbw_inner(
         n_reweighted: n_reweight,
         lambda,
         warnings,
+        ess_treated,
+        ess_control,
+        objective_treated,
+        objective_control,
+        lambda_treated,
+        convergence: Some(convergence),
     })
 }
 
@@ -1097,118 +1186,333 @@ fn solve_sbw_exact(
     Ok((weights, lambda, true, iterations, objective, max_violation))
 }
 
-/// Solve SBW with approximate balance using penalized QP.
+/// Solve SBW with approximate balance exactly: the band QP of the module docs through its
+/// (k+1)-dimensional dual, by proximal Newton with an exact feature-sign subproblem.
 ///
-/// Minimizes: (1/2) * w'w + ρ * ||A*w - b||²
-/// Subject to: w >= l
-///
-/// Uses iterative projected gradient descent.
+/// `delta` holds the band half-widths in the covariates' units. Returns weights summing to
+/// 1, `lambda` (length k + 1, the sign and scale of [`solve_sbw_exact`]), convergence, the
+/// number of steps, the objective `sum (w - 1/m)^2` and the largest band violation
+/// `max_j max(|mean_j - t_j| - delta_j, 0)` in the covariates' units.
 fn solve_sbw_approximate(
     x: &ArrayView2<f64>,
-    target_means: &ArrayView1<f64>,
+    target: &ArrayView1<f64>,
+    delta: &[f64],
+    names: &[String],
     config: &SBWConfig,
 ) -> EconResult<(Vec<f64>, Vec<f64>, bool, usize, f64, f64)> {
-    let n = x.nrows();
-    let k = x.ncols();
-    let rho = config.balance_penalty;
+    let (m, k) = x.dim();
+    let l = config.min_weight;
+    let mf = m as f64;
+    if l > 1.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "min_weight must be at most 1 (the mean weight in the n scale); got {l}"
+            ),
+        });
+    }
 
-    // Initialize with uniform weights
-    let mut weights: Vec<f64> = vec![1.0 / n as f64; n];
-
-    // Precompute X'X for gradient (unused in simplified version)
-    let _xtx_mat = xtx(x);
-
-    // Gradient descent with projection
-    let step_size = 0.01 / (1.0 + rho);
-    let mut converged = false;
-    let mut iterations = 0;
-
-    for iter in 0..config.max_iter {
-        resource::checkpoint()?;
-        iterations = iter + 1;
-
-        // Compute gradient
-        // grad = w + ρ * X' * (X*w/n - target) * (1/n)
-        // where the balance constraint is Σw_i X_ij / Σw_i = target_j
-
-        let w_arr = Array1::from(weights.clone());
-        let w_sum: f64 = weights.iter().sum();
-
-        // Weighted mean: X*w / Σw
-        let weighted_mean: Array1<f64> = if w_sum > 0.0 {
-            let xw = x.t().dot(&w_arr);
-            xw / w_sum
+    // 1. Range pre-check; constant columns are fixed by the normalisation and dropped.
+    let mut kept: Vec<usize> = Vec::with_capacity(k);
+    for j in 0..k {
+        let col = x.column(j);
+        let (lo, hi) = (target[j] - delta[j], target[j] + delta[j]);
+        let mn = col.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mx = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let constant = mn == mx;
+        let slack = if constant {
+            1e-12 * mn.abs().max(1.0)
         } else {
-            Array1::zeros(k)
+            0.0
         };
-
-        // Residual from target
-        let residual = &weighted_mean - target_means;
-
-        // Gradient of balance penalty
-        // d/dw_i [ρ * ||X*w/Σw - target||²]
-        // = ρ * 2 * (X*w/Σw - target)' * d/dw_i[X*w/Σw]
-        // = ρ * 2 * residual' * [X_i/Σw - X*w/(Σw)² ]
-        // = ρ * 2/Σw * residual' * [X_i - X*w/Σw]
-        // = ρ * 2/Σw * residual' * [X_i - weighted_mean]
-
-        let mut gradient = Array1::zeros(n);
-        for i in 0..n {
-            // Variance term gradient
-            gradient[i] = 2.0 * (weights[i] - 1.0 / n as f64);
-
-            // Balance penalty gradient
-            if w_sum > 0.0 {
-                let mut balance_grad = 0.0;
-                for j in 0..k {
-                    balance_grad += residual[j] * (x[[i, j]] - weighted_mean[j]);
-                }
-                gradient[i] += 2.0 * rho * balance_grad / w_sum;
-            }
-
-            // Normalization constraint gradient (soft constraint)
-            gradient[i] += 2.0 * rho * (w_sum - 1.0) / n as f64;
+        if (l >= 0.0 || constant) && (hi < mn - slack || lo > mx + slack) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Approximate balance is infeasible: the band [{lo:.6}, {hi:.6}] of covariate {} does not meet the reweighted group's range [{mn:.6}, {mx:.6}]; increase balance_tol",
+                    names[j]
+                ),
+            });
         }
-
-        // Update with gradient descent
-        let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-
-        for i in 0..n {
-            weights[i] -= step_size * gradient[i];
-            weights[i] = weights[i].max(config.min_weight);
-        }
-
-        // Renormalize
-        let w_sum: f64 = weights.iter().sum();
-        if w_sum > 0.0 {
-            for w in &mut weights {
-                *w /= w_sum;
-            }
-        }
-
-        // Check convergence
-        let max_violation = compute_constraint_violation(x, &weights, target_means);
-        if grad_norm < config.tolerance && max_violation < config.balance_tol + 0.001 {
-            converged = true;
-            break;
+        if !constant {
+            kept.push(j);
         }
     }
 
-    // Compute final statistics
-    let max_violation = compute_constraint_violation(x, &weights, target_means);
-    let w_mean = 1.0 / n as f64;
-    let objective: f64 = weights.iter().map(|w| (w - w_mean).powi(2)).sum();
+    // 2. Standardise: centre on the band, scale by the group SD.
+    let kk = kept.len();
+    let kd = kk + 1;
+    let mut cen = Vec::with_capacity(kk);
+    let mut sd = Vec::with_capacity(kk);
+    let mut r = vec![0.0; kd];
+    for (c, &j) in kept.iter().enumerate() {
+        let col = x.column(j);
+        let mean = col.sum() / mf;
+        let s_j =
+            (col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (mf - 1.0).max(1.0)).sqrt();
+        cen.push(target[j]);
+        sd.push(s_j);
+        r[c] = delta[j] / s_j;
+    }
+    let mut a = resource::try_zeros2(m, kd, "SBW constraint rows")?;
+    for i in 0..m {
+        for (c, &j) in kept.iter().enumerate() {
+            a[[i, c]] = (x[[i, j]] - cen[c]) / sd[c] / mf;
+        }
+        a[[i, kk]] = 1.0 / mf;
+    }
 
-    // Lambda not available for approximate solution
-    let lambda = vec![0.0; k + 1];
+    // Phi = -F, the minimised dual objective, from mu and z = A mu.
+    let phi = |mu: &Array1<f64>, z: &Array1<f64>| -> f64 {
+        let smooth: f64 = z
+            .iter()
+            .map(|&zi| {
+                if zi >= l {
+                    0.5 * zi * zi
+                } else {
+                    l * zi - 0.5 * l * l
+                }
+            })
+            .sum();
+        smooth + (0..kk).map(|c| r[c] * mu[c].abs()).sum::<f64>() - mu[kk]
+    };
+    let rho = |v: &Array1<f64>| -> f64 { (0..kk).map(|c| r[c] * v[c].abs()).sum::<f64>() - v[kk] };
 
-    Ok((
-        weights,
-        lambda,
-        converged,
-        iterations,
-        objective,
-        max_violation,
+    // 3. Start at uniform weights.
+    let mut mu = Array1::<f64>::zeros(kd);
+    mu[kk] = mf;
+    let ceiling = ((mf - (mf - 1.0) * l).powi(2) + (mf - 1.0) * l * l) / 2.0;
+    let bscale = 1.0 + r.iter().cloned().fold(0.0, f64::max);
+    let mut it = 0usize;
+    let mut converged = false;
+    let mut last_clean_step = false;
+    let mut prev_free: Option<Vec<bool>> = None;
+
+    // 4. Proximal Newton.
+    loop {
+        resource::checkpoint()?;
+        let z = a.dot(&mu);
+        let w = z.mapv(|zi| zi.max(l));
+        let g = a.t().dot(&w);
+        let free: Vec<bool> = z.iter().map(|&zi| zi > l).collect();
+        let phi_mu = phi(&mu, &z);
+        if !phi_mu.is_finite() || g.iter().any(|v| !v.is_finite()) {
+            return Err(EconError::Computation(
+                "approximate SBW: the dual is not finite (covariate magnitudes too large for f64); rescale the covariates".to_string(),
+            ));
+        }
+        if -phi_mu > ceiling * (1.0 + 1e-12) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Approximate balance is infeasible: no weights >= {l} on the {m} reweighted units keep every covariate mean within balance_tol of its target (dual objective {:.3e} > largest possible primal value {ceiling:.3e}); increase balance_tol",
+                    -phi_mu
+                ),
+            });
+        }
+        // KKT residual (pseudo-gradient of F).
+        let mut res = (1.0 - g[kk]).abs();
+        for c in 0..kk {
+            let gc = g[c];
+            let pg = if mu[c] > 0.0 {
+                -r[c] - gc
+            } else if mu[c] < 0.0 {
+                r[c] - gc
+            } else if gc < -r[c] {
+                -r[c] - gc
+            } else if gc > r[c] {
+                r[c] - gc
+            } else {
+                0.0
+            };
+            res = res.max(pg.abs());
+        }
+        let set_kept = prev_free.as_ref().is_some_and(|p| *p == free);
+        if res <= 1e-14 * bscale
+            || (res <= config.tolerance * bscale && last_clean_step && set_kept)
+        {
+            converged = true;
+            break;
+        }
+        if it == config.max_iter {
+            break;
+        }
+
+        // Hessian of the smooth part on the free units, regularised only when singular.
+        let mut hm = Array2::<f64>::zeros((kd, kd));
+        for i in (0..m).filter(|&i| free[i]) {
+            for p in 0..kd {
+                let ap = a[[i, p]];
+                for q in 0..=p {
+                    hm[[p, q]] += ap * a[[i, q]];
+                }
+            }
+        }
+        for p in 0..kd {
+            for q in 0..p {
+                hm[[q, p]] = hm[[p, q]];
+            }
+        }
+        let (ev, _) = eig_symmetric(&hm.view()).map_err(|e| {
+            EconError::Computation(format!("approximate SBW: eigendecomposition failed: {e}"))
+        })?;
+        let lmax = ev.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let lmin = ev.iter().cloned().fold(f64::INFINITY, f64::min);
+        let regular = lmax > 0.0 && lmin > 1e-12 * lmax;
+        if !regular {
+            let base = if lmax > 0.0 { lmax } else { 1.0 / mf };
+            let ridge = base * res.min(1e-8);
+            for p in 0..kd {
+                hm[[p, p]] += ridge;
+            }
+        }
+
+        let mut b = hm.dot(&mu) - &g;
+        b[kk] += 1.0;
+        let zstar = feature_sign(&hm, &b, &r, &mu)?;
+        let d = &zstar - &mu;
+        let pred = g.dot(&d) + rho(&zstar) - rho(&mu);
+        let mut t = 1.0;
+        if -pred > 1e-12 * (1.0 + phi_mu.abs()) {
+            loop {
+                let cand = &mu + &(&d * t);
+                let zc = a.dot(&cand);
+                if phi(&cand, &zc) <= phi_mu + 1e-4 * t * pred || t <= 1e-12 {
+                    break;
+                }
+                t *= 0.5;
+            }
+            if t <= 1e-12 {
+                if res <= config.tolerance * bscale {
+                    converged = true;
+                    break;
+                }
+                return Err(EconError::Computation(format!(
+                    "approximate SBW: the dual line search made no progress (residual {res:.3e})"
+                )));
+            }
+        }
+        mu = if t == 1.0 { zstar } else { &mu + &(&d * t) };
+        last_clean_step = regular && t == 1.0;
+        prev_free = Some(free);
+        it += 1;
+    }
+
+    // 6. Weights, multipliers and diagnostics.
+    let z = a.dot(&mu);
+    let mut weights: Vec<f64> = z.iter().map(|&zi| zi.max(l)).collect();
+    let w_sum: f64 = weights.iter().sum();
+    if !(w_sum.is_finite() && w_sum > 0.0) {
+        return Err(EconError::Computation(
+            "approximate SBW produced weights that do not sum to a positive number".to_string(),
+        ));
+    }
+    for w in &mut weights {
+        *w /= w_sum;
+    }
+    let mut lambda = vec![0.0; k + 1];
+    let mut shift = 0.0;
+    for (c, &j) in kept.iter().enumerate() {
+        lambda[j] = -mu[c] / sd[c];
+        shift += cen[c] * mu[c] / sd[c];
+    }
+    lambda[k] = -(mu[kk] - shift);
+    let objective: f64 = weights.iter().map(|w| (w - 1.0 / mf).powi(2)).sum();
+    let mut max_violation = 0.0_f64;
+    for j in 0..k {
+        let mean: f64 = (0..m).map(|i| weights[i] * x[[i, j]]).sum();
+        max_violation = max_violation.max((mean - target[j]).abs() - delta[j]);
+    }
+    Ok((weights, lambda, converged, it, objective, max_violation))
+}
+
+/// Sign of `v` with sign(0) = 0.
+fn sign0(v: f64) -> f64 {
+    if v > 0.0 {
+        1.0
+    } else if v < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// Exact minimiser of `1/2 z'Hz - b'z + sum_j r_j |z_j|` (H positive definite) by the
+/// feature-sign method of Lee, Battle, Raina & Ng (2007), started from `z0`. Coordinates with
+/// `r_j = 0` are always active.
+fn feature_sign(
+    h: &Array2<f64>,
+    b: &Array1<f64>,
+    r: &[f64],
+    z0: &Array1<f64>,
+) -> EconResult<Array1<f64>> {
+    let kd = b.len();
+    let kink: Vec<bool> = r.iter().map(|&rj| rj > 0.0).collect();
+    let mut z = z0.clone();
+    let mut active: Vec<bool> = (0..kd).map(|j| !kink[j] || z[j] != 0.0).collect();
+    let mut theta: Vec<f64> = z.iter().map(|&v| sign0(v)).collect();
+    let q = |v: &Array1<f64>| -> f64 {
+        0.5 * v.dot(&h.dot(v)) - b.dot(v) + (0..kd).map(|j| r[j] * v[j].abs()).sum::<f64>()
+    };
+    let b_scale = 1.0 + b.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    for _ in 0..(1000 + 10 * kd) {
+        let idx: Vec<usize> = (0..kd).filter(|&j| active[j]).collect();
+        let h_aa = h.select(Axis(0), &idx).select(Axis(1), &idx);
+        let rhs = Array1::from_shape_fn(idx.len(), |p| {
+            let j = idx[p];
+            b[j] - r[j] * theta[j]
+        });
+        let inv = sym_inverse(h_aa.view(), SingularPolicy::Error, "SBW Newton system")?.inverse;
+        let z_a = inv.dot(&rhs);
+        let mut z_new = Array1::<f64>::zeros(kd);
+        for (p, &j) in idx.iter().enumerate() {
+            z_new[j] = z_a[p];
+        }
+        // Discrete line search between z and z_new at the sign changes.
+        let mut best = z_new.clone();
+        let mut best_q = q(&z_new);
+        let mut chose_new = true;
+        for &j in &idx {
+            if kink[j] && z[j] != 0.0 && sign0(z_new[j]) != sign0(z[j]) {
+                let s = z[j] / (z[j] - z_new[j]);
+                let mut c = &z + &((&z_new - &z) * s);
+                c[j] = 0.0;
+                let qc = q(&c);
+                if qc < best_q {
+                    best = c;
+                    best_q = qc;
+                    chose_new = false;
+                }
+            }
+        }
+        z = best;
+        for j in 0..kd {
+            if kink[j] {
+                active[j] = z[j] != 0.0;
+                theta[j] = sign0(z[j]);
+            }
+        }
+        if !chose_new {
+            continue;
+        }
+        // Optimality of the inactive kink coordinates.
+        let g = h.dot(&z) - b;
+        let mut worst: Option<(usize, f64)> = None;
+        for j in 0..kd {
+            if kink[j] && !active[j] {
+                let viol = g[j].abs() - r[j];
+                if worst.is_none_or(|(_, v)| viol > v) {
+                    worst = Some((j, viol));
+                }
+            }
+        }
+        match worst {
+            Some((j, viol)) if viol > 1e-13 * b_scale => {
+                active[j] = true;
+                theta[j] = -sign0(g[j]);
+            }
+            _ => return Ok(z),
+        }
+    }
+    Err(EconError::Computation(
+        "approximate SBW: the feature-sign subproblem did not terminate".to_string(),
     ))
 }
 
@@ -1255,81 +1559,60 @@ fn compute_constraint_violation(
     max_violation
 }
 
-/// Compute balance statistics.
+/// Compute balance statistics of a reweighted group against an unweighted target group.
 fn compute_balance_stats(
     x_target: &ArrayView2<f64>,
     x_reweight: &ArrayView2<f64>,
     cov_names: &[String],
     weights: Option<&[f64]>,
 ) -> BalanceStats {
-    let k = x_target.ncols();
-    let n_target = x_target.nrows();
-    let n_reweight = x_reweight.nrows();
+    compute_balance_stats_two(x_target, None, x_reweight, weights, cov_names)
+}
 
+/// Mean and variance of a column; weighted (`sum w (x - mean)^2 / sum w`) when weights with
+/// a positive sum are given, otherwise unweighted with the n - 1 denominator.
+fn column_moments(col: ArrayView1<f64>, w: Option<&[f64]>) -> (f64, f64) {
+    let m = col.len();
+    if let Some(w) = w {
+        let w_sum: f64 = w.iter().sum();
+        if w_sum > 0.0 {
+            let mean = col.iter().zip(w).map(|(x, wi)| wi * x).sum::<f64>() / w_sum;
+            let var = col
+                .iter()
+                .zip(w)
+                .map(|(x, wi)| wi * (x - mean).powi(2))
+                .sum::<f64>()
+                / w_sum;
+            return (mean, var);
+        }
+    }
+    let mean = col.sum() / m as f64;
+    let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (m.max(2) - 1) as f64;
+    (mean, var)
+}
+
+/// Balance statistics of group a (reported as "target") against group b, each optionally
+/// weighted.
+fn compute_balance_stats_two(
+    x_a: &ArrayView2<f64>,
+    w_a: Option<&[f64]>,
+    x_b: &ArrayView2<f64>,
+    w_b: Option<&[f64]>,
+    cov_names: &[String],
+) -> BalanceStats {
+    let k = x_a.ncols();
     let mut std_diff = Vec::with_capacity(k);
     let mut var_ratio = Vec::with_capacity(k);
     let mut mean_target = Vec::with_capacity(k);
     let mut mean_reweighted = Vec::with_capacity(k);
 
     for j in 0..k {
-        // Target group mean (unweighted)
-        let target_mean: f64 = x_target.column(j).iter().sum::<f64>() / n_target as f64;
-
-        // Reweight group weighted mean
-        let reweight_mean: f64 = if let Some(w) = weights {
-            let w_sum: f64 = w.iter().sum();
-            if w_sum > 0.0 {
-                (0..n_reweight)
-                    .map(|i| w[i] * x_reweight[[i, j]])
-                    .sum::<f64>()
-                    / w_sum
-            } else {
-                x_reweight.column(j).iter().sum::<f64>() / n_reweight as f64
-            }
-        } else {
-            x_reweight.column(j).iter().sum::<f64>() / n_reweight as f64
-        };
-
-        // Target group variance
-        let target_var: f64 = x_target
-            .column(j)
-            .iter()
-            .map(|&x| (x - target_mean).powi(2))
-            .sum::<f64>()
-            / (n_target - 1).max(1) as f64;
-
-        // Reweight group weighted variance
-        let reweight_var: f64 = if let Some(w) = weights {
-            let w_sum: f64 = w.iter().sum();
-            if w_sum > 0.0 {
-                let weighted_sq_diff: f64 = (0..n_reweight)
-                    .map(|i| w[i] * (x_reweight[[i, j]] - reweight_mean).powi(2))
-                    .sum();
-                weighted_sq_diff / w_sum
-            } else {
-                x_reweight
-                    .column(j)
-                    .iter()
-                    .map(|&x| (x - reweight_mean).powi(2))
-                    .sum::<f64>()
-                    / (n_reweight - 1).max(1) as f64
-            }
-        } else {
-            x_reweight
-                .column(j)
-                .iter()
-                .map(|&x| (x - reweight_mean).powi(2))
-                .sum::<f64>()
-                / (n_reweight - 1).max(1) as f64
-        };
+        let (target_mean, target_var) = column_moments(x_a.column(j), w_a);
+        let (reweight_mean, reweight_var) = column_moments(x_b.column(j), w_b);
 
         // Pooled standard deviation
         let pooled_sd = ((target_var + reweight_var) / 2.0).sqrt().max(1e-10);
-
-        // Standardized difference
         let sd = (target_mean - reweight_mean) / pooled_sd;
-
-        // Variance ratio
         let vr = if reweight_var > 1e-10 {
             target_var / reweight_var
         } else {
@@ -1535,6 +1818,322 @@ mod tests {
         assert_eq!(SBWConfig::default().balance_tol_scale, BalanceTolScale::Raw);
     }
 
+    use p2a_validation::{Check, Tol};
+
+    const COVS: [&str; 3] = ["x1", "x2", "x3"];
+
+    fn col(ds: &Dataset, name: &str) -> Vec<f64> {
+        DesignMatrix::extract_column(ds.df(), name)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// The entries of `v` whose unit is in the treated (true) or control (false) group.
+    fn group(v: &[f64], d: &[f64], treated: bool) -> Vec<f64> {
+        v.iter()
+            .zip(d)
+            .filter(|&(_, &di)| (di >= 0.5) == treated)
+            .map(|(&x, _)| x)
+            .collect()
+    }
+
+    fn scaled(v: &[f64], f: f64) -> Vec<f64> {
+        v.iter().map(|x| x * f).collect()
+    }
+
+    fn wmean(v: &[f64], w: &[f64]) -> f64 {
+        v.iter().zip(w).map(|(a, b)| a * b).sum::<f64>() / w.iter().sum::<f64>()
+    }
+
+    fn effect(y: &[f64], d: &[f64], w: &[f64]) -> f64 {
+        wmean(&group(y, d, true), &group(w, d, true))
+            - wmean(&group(y, d, false), &group(w, d, false))
+    }
+
+    fn n_zero(v: &[f64]) -> f64 {
+        v.iter().filter(|&&x| x == 0.0).count() as f64
+    }
+
+    /// `weighting_sim.csv` for the property tests (they pin no R value).
+    fn weighting_sim() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/weighting_sim.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    /// The case is loaded in each test body.
+    fn sbw_fit(ds: &Dataset, est: SBWEstimand, tol: f64) -> SBWResult {
+        let mut c = SBWConfig::default();
+        c.estimand = est;
+        c.balance_tol = tol;
+        c.balance_tol_scale = BalanceTolScale::StdDev;
+        c.normalize_to_n = false;
+        sbw(ds, "treat", &COVS, c).unwrap()
+    }
+
+    #[test]
+    fn test_validate_sbw_exact() {
+        // R: quadprog::solve.QP on the SBW QP (case weights_sbw). CAUS-79's clipping was
+        // removed by the dual Newton solver; this pins it to R.
+        let (case, ds) = crate::test_support::load_case("weights_sbw");
+        let r = sbw_fit(&ds, SBWEstimand::ATT, 0.0);
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let wc = group(&r.weights, &d, false);
+        let n = d.len();
+        Check::new(&case)
+            .vector("att_exact_weights_head", &wc[..12], Tol::new(1e-8, 1e-12))
+            .vector(
+                "att_exact_weighted_means",
+                &r.balance_after.mean_reweighted,
+                Tol::coef(n),
+            )
+            .scalar("att_exact_objective", r.objective_value, Tol::coef(n))
+            .scalar("att_exact_n_zero", n_zero(&wc), Tol::exact())
+            .scalar("att_exact_effect", effect(&y, &d, &r.weights), Tol::coef(n))
+            .finish();
+        assert!(r.converged && r.max_constraint_violation < 1e-10);
+    }
+
+    #[test]
+    fn test_validate_sbw_approx() {
+        // R: quadprog::solve.QP on the band QP, delta = 0.1 sd (case weights_sbw). Fails
+        // before (CAUS-79): projected gradient with clipping.
+        let (case, ds) = crate::test_support::load_case("weights_sbw");
+        let r = sbw_fit(&ds, SBWEstimand::ATT, 0.1);
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let wc = group(&r.weights, &d, false);
+        let n = d.len();
+        Check::new(&case)
+            .vector("att_approx_weights_head", &wc[..12], Tol::new(1e-8, 1e-12))
+            .vector(
+                "att_approx_weighted_means",
+                &r.balance_after.mean_reweighted,
+                Tol::coef(n),
+            )
+            .scalar("att_approx_objective", r.objective_value, Tol::coef(n))
+            .scalar("att_approx_n_zero", n_zero(&wc), Tol::exact())
+            .scalar(
+                "att_approx_effect",
+                effect(&y, &d, &r.weights),
+                Tol::coef(n),
+            )
+            .finish();
+        assert!(r.converged);
+        let sd = case.vector("sd_all");
+        for (j, c) in COVS.iter().enumerate() {
+            let treated_mean = group(&col(&ds, c), &d, true).iter().sum::<f64>() / 151.0;
+            let gap = (r.balance_after.mean_reweighted[j] - treated_mean).abs();
+            assert!(gap <= 0.1 * sd[j] + 1e-12, "{c}: {gap}");
+        }
+    }
+
+    #[test]
+    fn test_validate_sbw_atc() {
+        // R: quadprog::solve.QP, the treated reweighted to the control means (case weights_sbw)
+        let (case, ds) = crate::test_support::load_case("weights_sbw");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let n = d.len();
+        for (tag, tol) in [("exact", 0.0), ("approx", 0.1)] {
+            let r = sbw_fit(&ds, SBWEstimand::ATC, tol);
+            let wt = group(&r.weights, &d, true);
+            assert!(r.converged, "{tag}");
+            Check::new(&case)
+                .vector(
+                    &format!("atc_{tag}_weights_head"),
+                    &wt[..12],
+                    Tol::new(1e-8, 1e-12),
+                )
+                .scalar(
+                    &format!("atc_{tag}_objective"),
+                    r.objective_value,
+                    Tol::coef(n),
+                )
+                .scalar(&format!("atc_{tag}_n_zero"), n_zero(&wt), Tol::exact())
+                .scalar(
+                    &format!("atc_{tag}_effect"),
+                    effect(&y, &d, &r.weights),
+                    Tol::coef(n),
+                )
+                .finish();
+        }
+    }
+
+    #[test]
+    fn test_validate_sbw_ate() {
+        // R: quadprog::solve.QP once per group with the pooled means as target (case
+        // weights_sbw). Fails before (CAUS-49): ATE ran as ATT.
+        let (case, ds) = crate::test_support::load_case("weights_sbw");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let n = d.len();
+        for (tag, tol) in [("exact", 0.0), ("approx", 0.1)] {
+            let r = sbw_fit(&ds, SBWEstimand::ATE, tol);
+            let (wt, wc) = (group(&r.weights, &d, true), group(&r.weights, &d, false));
+            assert!(r.converged, "{tag}");
+            Check::new(&case)
+                .vector(
+                    &format!("ate_{tag}_weights_t_head"),
+                    &wt[..8],
+                    Tol::new(1e-8, 1e-12),
+                )
+                .vector(
+                    &format!("ate_{tag}_weights_c_head"),
+                    &wc[..8],
+                    Tol::new(1e-8, 1e-12),
+                )
+                .scalar(
+                    &format!("ate_{tag}_objective_t"),
+                    r.objective_treated.unwrap(),
+                    Tol::coef(n),
+                )
+                .scalar(
+                    &format!("ate_{tag}_objective_c"),
+                    r.objective_control.unwrap(),
+                    Tol::coef(n),
+                )
+                .scalar(
+                    &format!("ate_{tag}_effect"),
+                    effect(&y, &d, &r.weights),
+                    Tol::coef(n),
+                )
+                .finish();
+            assert_eq!(
+                r.objective_value,
+                r.objective_treated.unwrap() + r.objective_control.unwrap()
+            );
+            assert!(r.n_target == 300 && r.n_reweighted == 300);
+        }
+    }
+
+    #[test]
+    fn test_sbw_estimands_differ() {
+        // Tier 3 convention 2; fails before: ATE returned the ATT weights
+        let ds = weighting_sim();
+        let att = sbw_fit(&ds, SBWEstimand::ATT, 0.0);
+        let ate = sbw_fit(&ds, SBWEstimand::ATE, 0.0);
+        assert!(
+            att.weights
+                .iter()
+                .zip(&ate.weights)
+                .any(|(a, b)| (a - b).abs() > 1e-6)
+        );
+    }
+
+    #[test]
+    fn test_sbw_approx_matches_quadprog_on_test_data() {
+        // R: quadprog::solve.QP of the band QP on create_test_data(), ATT, balance_tol = 0.05
+        // raw, w >= 0; the x2 lower bound is active.
+        const W: [f64; 20] = [
+            0.89920684430977582,
+            0.95713394528116913,
+            0.92817039479547248,
+            1.18884234916674081,
+            0.89920684430977615,
+            1.13091524819534794,
+            0.87024329382407961,
+            1.24676945013813412,
+            0.92817039479547270,
+            0.95713394528116913,
+            0.89920684430977615,
+            1.01506104625256199,
+            0.94554852508689025,
+            1.15987879868104460,
+            0.88762142411549760,
+            1.10195169770965151,
+            0.85286516353266173,
+            1.21780589965243746,
+            0.92817039479547281,
+            0.98609749576686556,
+        ];
+        let (t, x) = create_test_data();
+        let mut c = SBWConfig::default();
+        c.balance_tol = 0.05;
+        let r = run_sbw(&t.view(), &x.view(), c).unwrap();
+        assert!(r.converged && r.max_constraint_violation <= 1e-12);
+        for (j, w) in W.iter().enumerate() {
+            assert!((r.weights[10 + j] - w).abs() < 1e-10, "control {j}")
+        }
+        assert!((r.objective_value - 0.00075305231262810942).abs() < 1e-14);
+        assert!((r.balance_after.mean_reweighted[1] - 0.5).abs() < 1e-12);
+        let (sw, swy) = (10..30).fold((0.0, 0.0), |(a, b), i| {
+            (a + r.weights[i], b + r.weights[i] * SBW_Y[i])
+        });
+        let att = SBW_Y[..10].iter().sum::<f64>() / 10.0 - swy / sw;
+        assert!((att - 0.54534239372604953).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_sbw_approx_infeasible_is_error() {
+        // (a) the band [t - delta, t + delta] misses the controls' range of x: the range
+        //     pre-check
+        let t = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        let x = array![[3.0], [3.2], [2.9], [0.0], [0.3], [0.6], [1.0]];
+        let mut c = SBWConfig::default();
+        c.balance_tol = 0.1;
+        expect_invalid_spec(
+            run_sbw(&t.view(), &x.view(), c.clone()).unwrap_err(),
+            "balance_tol",
+        );
+        // (b) each band meets its column's range, but not the controls' convex hull
+        //     (x1 + x2 <= 1): the dual certificate (R: solve.QP "constraints are
+        //     inconsistent")
+        let t2 = Array1::from(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        let x2 = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.2, 0.2],
+            [0.3, 0.1],
+            [0.1, 0.3],
+            [0.9, 0.9],
+            [0.8, 1.0],
+            [1.0, 0.8]
+        ];
+        let mut c2 = SBWConfig::default();
+        c2.balance_tol = 0.05;
+        expect_invalid_spec(
+            run_sbw(&t2.view(), &x2.view(), c2).unwrap_err(),
+            "balance_tol",
+        );
+    }
+
+    #[test]
+    fn test_sbw_approx_scale_invariant() {
+        // convention 5: data x 1e-6 and x 1e6 with balance_tol in SD units give the same
+        // weights in similar steps
+        let ds = weighting_sim();
+        let base = sbw_fit(&ds, SBWEstimand::ATT, 0.1);
+        for s in [1e-6, 1e6] {
+            let df = df! { "treat" => col(&ds, "treat"), "x1" => scaled(&col(&ds, "x1"), s),
+            "x2" => scaled(&col(&ds, "x2"), s), "x3" => scaled(&col(&ds, "x3"), s) }
+            .unwrap();
+            let r = sbw_fit(&Dataset::new(df), SBWEstimand::ATT, 0.1);
+            assert!(
+                (r.iterations as i64 - base.iterations as i64).abs() <= 1,
+                "scale {s}"
+            );
+            for (a, b) in r.weights.iter().zip(&base.weights) {
+                assert!((a - b).abs() <= 1e-10 * b.abs().max(1e-3))
+            }
+        }
+    }
+
+    #[test]
+    fn test_sbw_balance_penalty_is_refused() {
+        // The exact band QP has no penalty parameter: a value other than the default is an
+        // error naming the field. Fails before: the penalty steered the projected gradient.
+        let (t, x) = create_test_data();
+        let mut c = SBWConfig::default();
+        c.balance_tol = 0.05;
+        c.balance_penalty = 5.0;
+        expect_invalid_spec(
+            run_sbw(&t.view(), &x.view(), c).unwrap_err(),
+            "balance_penalty",
+        );
+        let mut d = SBWConfig::default();
+        d.balance_tol = 0.05;
+        let r0 = run_sbw(&t.view(), &x.view(), d).unwrap();
+        assert!(!r0.warnings.iter().any(|w| w.contains("balance_penalty")));
+    }
+
     /// Outcome for create_test_data(): y = 1 + 2 x1 - x2 + 0.5 d + e (e fixed, 2 decimals).
     const SBW_Y: [f64; 30] = [
         2.32, 2.22, 2.30, 2.29, 2.29, 2.37, 2.04, 2.55, 2.22, 2.27, 1.21, 1.64, 1.56, 2.15, 1.48,
@@ -1707,9 +2306,10 @@ mod tests {
 
     #[test]
     fn test_sbw_exact_max_iter_exhaustion_is_not_infeasibility() {
-        // create_test_data() is feasible and takes five dual steps (mu_0 counts as one): the
-        // bound binds, so steps 1-4 are line-search steps with ||r||_inf = 0.20, 0.10, 0.029,
-        // 0.0023. Running out of steps is not evidence of infeasibility.
+        // create_test_data() is feasible and takes five dual steps (mu_0 counts as one): mu_0,
+        // three line-search steps (the bound binds, so S changes) and a full step that keeps
+        // S. ||r||_inf at steps 1-4 is 0.20, 0.10, 0.029, 0.0023. Running out of steps is not
+        // evidence of infeasibility.
         // It is a convergence failure, and its message shows both the absolute threshold
         // tolerance (1 + ||b||_inf), here 1e-3 (1 + 1), and the configured tolerance.
         let (t, x) = create_test_data();
@@ -1772,6 +2372,23 @@ mod tests {
             r.max_constraint_violation < 1e-2,
             "violation {}",
             r.max_constraint_violation
+        );
+        // With the default max_iter the same tolerance stops after the full step (five
+        // steps), so the max_iter = 4 run above stopped at the max_iter exit.
+        let r = run_sbw(
+            &t.view(),
+            &x.view(),
+            SBWConfig {
+                tolerance: 1e-2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            r.converged && r.iterations == 5,
+            "converged {}, iterations {}",
+            r.converged,
+            r.iterations
         );
     }
 
@@ -1915,6 +2532,14 @@ mod tests {
                     ..d()
                 },
                 "balance_penalty",
+            ),
+            (
+                SBWConfig {
+                    balance_tol: 0.1,
+                    min_weight: 1.5,
+                    ..d()
+                },
+                "min_weight",
             ),
         ];
         for (cfg, needle) in cases {
@@ -2104,30 +2729,6 @@ mod tests {
             result.balance_before.max_std_diff,
             result.balance_after.max_std_diff
         );
-    }
-
-    #[test]
-    fn test_sbw_approximate_balance() {
-        let (treatment, covariates) = create_test_data();
-
-        let config = SBWConfig {
-            estimand: SBWEstimand::ATT,
-            balance_tol: 0.1, // Approximate balance
-            balance_penalty: 100.0,
-            ..Default::default()
-        };
-
-        let result = run_sbw(&treatment.view(), &covariates.view(), config).unwrap();
-
-        // Should still achieve reasonable balance
-        assert!(
-            result.balance_after.max_std_diff < 0.2,
-            "Approximate SBW should achieve reasonable balance, got {}",
-            result.balance_after.max_std_diff
-        );
-
-        // Weights should be positive
-        assert!(result.weights.iter().all(|&w| w >= 0.0));
     }
 
     #[test]

@@ -51,6 +51,32 @@
       "supersedes_legacy": [
         "validation/expected/ebal_weightit.csv"
       ]
+    },
+    {
+      "id": "sbw",
+      "name": "Stable balancing weights: ATT, ATC, ATE; exact and approximate balance",
+      "category": "econometrics",
+      "reference": "Zubizarreta (2015) QP min sum (w - 1/n)^2, sum w = 1, w >= 0, |sum w x_j - t_j| <= delta sd_j, solved with quadprog::solve.QP",
+      "doc": "validation/econometrics/sbw.md",
+      "cases": [
+        "weights_sbw"
+      ],
+      "tests": [
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_exact",
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_approx",
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_atc",
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_ate"
+      ],
+      "quantities": [
+        "weights",
+        "weighted means",
+        "objective (per group for ATE)",
+        "number of zero weights",
+        "effect"
+      ],
+      "tolerance": "weights 1e-8 relative + 1e-12 absolute; objective, means and effect 1e-8 relative (Tol::coef(300)); zero counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
