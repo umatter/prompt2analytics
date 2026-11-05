@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "general_gmm",
+      "name": "General GMM: linear IV (two-step, iterative, CUE, one-step fixed W; iid / MDS / HAC) and normal-distribution moments",
+      "category": "econometrics",
+      "reference": "gmm::gmm 1.9.1 (type, vcov, wmatrix, weightsMatrix, centeredVcov, kernel, bw, prewhite), gmm::specTest",
+      "doc": "validation/econometrics/general_gmm.md",
+      "cases": [
+        "gmm_linear_iv"
+      ],
+      "tests": [
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_twostep"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE",
+        "J",
+        "J p-value",
+        "HAC lag count"
+      ],
+      "tolerance": "validation/README.md at n = 500 (coefficients 1e-8, SE/J/p 1e-6); iterated, CUE and Gauss-Newton fits use Tol::iterative with the same values, documented per test",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ivmte",
+      "name": "Marginal treatment effects by local IV (probit/logit first stage, polynomial in P): ATE, ATT, ATU, LATE(p_min,p_max), PRTE; delta-method and bootstrap SEs",
+      "category": "econometrics",
+      "reference": "no R package (ivmte computes LP bounds; localIV not installed): glm probit + lm cubic + Heckman & Vytlacil (2005) weights written out in R (validation/r/cases/econ_mte.R); delta-method SEs with sandwich::vcovHC(type = 'HC1')",
+      "doc": "validation/econometrics/ivmte.md",
+      "cases": [
+        "mte_local_iv",
+        "mte_bootstrap"
+      ],
+      "tests": [
+        "p2a-core::econometrics::ivmte::tests::test_validate_mte_local_iv_estimands"
+      ],
+      "quantities": [
+        "first-stage coefficients",
+        "MTE polynomial coefficients",
+        "p_min",
+        "p_max",
+        "ATE/ATT/ATU/LATE/PRTE estimates and delta SEs",
+        "MTE(u) and its SE",
+        "extrapolation shares",
+        "bootstrap SD, percentile CI and mean"
+      ],
+      "tolerance": "validation/README.md: n = 2000 estimates 1e-10, SEs and shares 1e-8; n = 719 and n = 400 estimates 1e-8, SEs and CIs 1e-6 (relative); first-stage coefficients Tol::iterative(1e-10)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

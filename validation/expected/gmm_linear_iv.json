@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "id": "gmm_linear_iv",
+  "area": "econometrics/gmm",
+  "method": "Linear GMM-IV: two-step, iterative, CUE; iid / MDS / HAC weights; identity and fixed weights; normal-distribution moments",
+  "reference": "gmm::gmm(type = 'twoStep' | 'iterative' | 'cue', vcov = 'MDS' | 'iid' | 'HAC', wmatrix = 'optimal' | 'ident', weightsMatrix, centeredVcov); gmm::specTest",
+  "call": "gmm(y ~ x1 + x2 + w, ~ z1 + z2 + z3 + w, data = gmm_iv, ...); gmm(g, w, t0, gradv = Dg, ...) for the normal moments",
+  "dataset": "validation/datasets/generated/gmm_iv.csv",
+  "datasets": ["validation/datasets/generated/gmm_iv.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "gmm": "1.9.1",
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "n": 500,
+    "hac_nw_lags": 5,
+    "twostep_mds_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99852861967521878, 0.94424572239351989, -0.53768291627193099, 0.35033287640940092]
+    },
+    "twostep_mds_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041633553702817898, 0.10083626744760421, 0.066489456971174324, 0.046484729796202544]
+    },
+    "twostep_mds_J": 0.0072890813898426575,
+    "twostep_mds_J_p": 0.9319623795312868,
+    "iter_mds_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99852854022275728, 0.94424604978108229, -0.53768362650309531, 0.35033357764982553]
+    },
+    "iter_mds_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041633550969420834, 0.10083624899999667, 0.066489449780864657, 0.046484725002849198]
+    },
+    "iter_mds_J": 0.0073045973774770786,
+    "iter_mds_J_p": 0.93189017945268438,
+    "cue_mds_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99853307738270913, 0.94420559704932483, -0.53767200675174864, 0.3503290776476507]
+    },
+    "cue_mds_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.04163419293003183, 0.10083767789913896, 0.066490380024441631, 0.046485574588842074]
+    },
+    "cue_mds_J": 0.0073044339313948284,
+    "cue_mds_J_p": 0.93189093960865921,
+    "cue_hac_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99828928674014472, 0.94450032105949977, -0.53767710698231974, 0.35015817805423216]
+    },
+    "cue_hac_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.042283344275779455, 0.097473295503259602, 0.066569132339845752, 0.044426894049957089]
+    },
+    "cue_hac_J": 0.0072327502998467781,
+    "cue_hac_J_p": 0.93222515610884638,
+    "twostep_iid_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99874048781254721, 0.94234052189460882, -0.53721448424228102, 0.35011578608494337]
+    },
+    "twostep_iid_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041061638094216694, 0.076178560935451375, 0.062209645028339873, 0.049032246943961813]
+    },
+    "twostep_iid_J": 0.0069339512887599802,
+    "twostep_iid_J_p": 0.93363657519120813,
+    "twostep_hac_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99828394386081276, 0.94454216405216773, -0.53769112265141616, 0.35016261358440609]
+    },
+    "twostep_hac_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.042282277980604389, 0.097471961970056642, 0.066567804952805232, 0.044426577588256223]
+    },
+    "twostep_hac_J": 0.0072124716743021755,
+    "twostep_hac_J_p": 0.93232000520724356,
+    "twostep_hac_bartlett_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99811618135450386, 0.94429937274381937, -0.53782229595042919, 0.35012710478530906]
+    },
+    "twostep_hac_bartlett_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041548177006162278, 0.10102475470425819, 0.064823323818006484, 0.043457290423464648]
+    },
+    "twostep_hac_bartlett_J": 0.0074282268523061055,
+    "twostep_hac_bartlett_J_p": 0.93131763616194196,
+    "twostep_hac_bartlett_pw_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99811892802804614, 0.9442931076101021, -0.53784979838828018, 0.35007224242441848]
+    },
+    "twostep_hac_bartlett_pw_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041064858656512673, 0.10041352918950849, 0.064256004911715847, 0.042958887424548883]
+    },
+    "twostep_hac_bartlett_pw_J": 0.0074612640644062611,
+    "twostep_hac_bartlett_pw_J_p": 0.9311654510411721,
+    "cue_hac_bartlett_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.9981209026414517, 0.94426762610607939, -0.53781478354881163, 0.35012357035046265]
+    },
+    "cue_hac_bartlett_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041548730716701433, 0.10102585421868229, 0.064824083377091862, 0.043457939299598153]
+    },
+    "cue_hac_bartlett_J": 0.0074425201184014043,
+    "cue_hac_bartlett_J_p": 0.93125175281856631,
+    "twostep_mds_uncentered_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99852862276382393, 0.94424569461960484, -0.53768290944315444, 0.35033287324467027]
+    },
+    "twostep_mds_uncentered_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041633554148204154, 0.10083626842358955, 0.066489457616731459, 0.046484730384608028]
+    },
+    "twostep_mds_uncentered_J": 0.0072889751299766645,
+    "twostep_mds_uncentered_J_p": 0.9319628742538526,
+    "ident_mds_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99858715458828984, 0.94225340497925636, -0.53710163805018962, 0.35015413863125655]
+    },
+    "ident_mds_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041670922154443311, 0.10356994550113463, 0.066882296523748636, 0.046573104922509899]
+    },
+    "ident_mds_J": 0.0076867590930606924,
+    "ident_mds_J_p": 0.93013565439954626,
+    "fixedw_mds_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99874048781255265, 0.94234052189460848, -0.53721448424228058, 0.35011578608494187]
+    },
+    "fixedw_mds_se": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.041738083251456372, 0.10334156822115644, 0.066759771342630544, 0.046594686809735712]
+    },
+    "fixedw_mds_J": 0.0076582716722176664,
+    "fixedw_mds_J_p": 0.93026490376983262,
+    "twostep_hac_bw": 0.88572518290173852,
+    "cue_hac_bw": 0.88526315591304283,
+    "iid_equals_2sls_coef": {
+      "names": ["(Intercept)", "x1", "x2", "w"],
+      "values": [0.99874048781254721, 0.94234052189460882, -0.53721448424228102, 0.35011578608494337]
+    },
+    "normal_twostep_coef": {
+      "names": ["mu", "sigma_sq"],
+      "values": [0.048607398751015045, 0.90938761638908183]
+    },
+    "normal_twostep_se": {
+      "names": ["mu", "sigma_sq"],
+      "values": [0.042248617424813208, 0.053225237568543082]
+    },
+    "normal_twostep_J": 1.4148059570011566,
+    "normal_twostep_J_p": 0.23426021256089782,
+    "normal_iter_coef": {
+      "names": ["mu", "sigma_sq"],
+      "values": [0.048770350254087387, 0.90686710774506352]
+    },
+    "normal_iter_se": {
+      "names": ["mu", "sigma_sq"],
+      "values": [0.042248820118634331, 0.053223616204575691]
+    },
+    "normal_iter_J": 1.4057895866148651,
+    "normal_iter_J_p": 0.2357566052367045
+  }
+}
