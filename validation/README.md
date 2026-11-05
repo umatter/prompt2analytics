@@ -317,7 +317,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | CBPS | [cbps.md](econometrics/cbps.md) | not R-pinned |
 | SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | not R-pinned |
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
-| Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-23) |
+| Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned (`medflex_scales`, `medflex_na`), known deviations (CAUS-22: non-binary exposure refused; CAUS-23: A0:C and contrasts at the confounder means) |
 | Logit | [logit.md](econometrics/logit.md) | R-pinned, known deviations (ECON-60) |
 | Probit | [probit.md](econometrics/probit.md) | R-pinned |
 | Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
