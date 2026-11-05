@@ -2552,8 +2552,8 @@ pub fn run_aft(
     let xi = x.select(ndarray::Axis(1), &id);
     let fixed = config.distribution == AftDistribution::Exponential;
     let rss: f64 = ls.residuals.iter().map(|r| r * r).sum();
-    let df = n.checked_sub(ls.rank).unwrap_or(0).max(1);
-    let tau0 = if fixed || !(rss > 0.0) {
+    let df = n.saturating_sub(ls.rank).max(1);
+    let tau0 = if fixed || rss.is_nan() || rss <= 0.0 {
         0.0
     } else {
         0.5 * (rss / df as f64).ln()
