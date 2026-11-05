@@ -203,6 +203,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
 | `generated/vecm_denmark.csv` | 55 × 4 (LRM, LRY, IBO, IDE) | `vecm_denmark` | `r/cases/ts_vecm.R` | `urca::denmark`, the four model columns |
 | `generated/vecm_sim3.csv` | 250 × 3 (x1, x2, x3) | `vecm_sim3` | `r/cases/ts_vecm.R` | seed 20261101 |
+| `generated/ctmle_sim.csv` | 300 × 7 (yb, yc, a, w1, w2, w3, w4) | `tmle_glm`, `ctmle_cv` | `r/cases/causal_stdreg.R` | seed 20261210; w1 confounder, w2 instrument, w3 precision variable, w4 noise |
 
 ## Adding a dataset
 

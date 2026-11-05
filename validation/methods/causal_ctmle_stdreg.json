@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_tmle",
+      "name": "TMLE of the ATE (bivariate fluctuation as tmle 2.1.1, glm nuisance models; continuous outcomes rescaled for the logistic Q)",
+      "category": "econometrics",
+      "reference": "TMLE with tmle 2.1.1's two clever covariates H1W = A/g, H0W = (1 - A)/(1 - g) (van der Laan & Rose 2011, ch. 4) written out with stats::glm (glm(Y ~ -1 + H0W + H1W, offset = qlogis(Q), quasibinomial)); agrees with tmle::tmle 2.1.1 (cvQinit = FALSE) to 1e-8 on the binary outcome, which is pinned too; a continuous Y with the logistic Q rescaled to [0, 1] by its range as tmle does (Gruber & van der Laan 2010)",
+      "doc": "validation/econometrics/tmle.md",
+      "cases": ["tmle_glm"],
+      "tests": [
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_glm_logit",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_glm_linear",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_glm_default_control",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_aliased_covariate_and_treatment",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_logistic_q_rescales_continuous_outcome",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_scale_free"
+      ],
+      "quantities": ["fluctuation epsilons (H1W, H0W)", "ATE", "IC-based SE", "95% CI", "z", "p", "n truncated", "Q, Q*, g and IC at six rows", "IC mean", "tmle::tmle ATE and SE", "continuous outcome under the logistic Q: rescaling range, ATE, SE and epsilons"],
+      "tolerance": "n = 300: estimates and predictions 1e-8, SE, CI and z 1e-6, p 1e-6 relative / 1e-12 absolute (glm epsilon 1e-14 on both sides); default-control values within Tol::iterative(1e-8) of the tight values; the rescaling range exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

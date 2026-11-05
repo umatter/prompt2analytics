@@ -90,7 +90,7 @@ cat("95% CI:", result$estimates$ATE$CI, "\n")
 ### Rust Test
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-99):
-- `econometrics::tmle::tests::test_validate_tmle_continuous_outcome` (`crates/p2a-core/src/econometrics/tmle.rs`): a finite ATE and SE > 0. The test also passes when the estimator returns `Err`.
+- `econometrics::tmle::tests::test_tmle_linear_q_on_binary_outcome` (`crates/p2a-core/src/econometrics/tmle.rs`): the linear Q on a binary outcome gives a finite ATE and SE > 0. The R-pinned continuous-outcome test is `test_validate_tmle_glm_linear` (case `tmle_glm`).
 
 ## Test Case 2: Binary Outcome
 
@@ -135,7 +135,7 @@ cat("ATE (Risk Difference):", result$estimates$ATE$psi, "\n")
 ### Rust Test
 
 **Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-99):
-- `econometrics::tmle::tests::test_validate_tmle_vs_r` (`crates/p2a-core/src/econometrics/tmle.rs`): abs(ATE) < 0.5, 0.01 < SE < 0.2, the CI contains the estimate and the p-value lies in [0, 1], on an LCG-generated dataset that differs from the R data above. No R value is compared.
+- `econometrics::tmle::tests::test_validate_tmle_glm_logit` and `test_validate_tmle_glm_linear` (`crates/p2a-core/src/econometrics/tmle.rs`): every number of case `tmle_glm` (registry `validation/methods/causal_ctmle_stdreg.json`), including tmle::tmle 2.1.1's ATE and SE.
 
 ## Tolerances
 
