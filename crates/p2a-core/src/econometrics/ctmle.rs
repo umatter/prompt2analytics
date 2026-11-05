@@ -76,7 +76,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
-use crate::econometrics::glm::plogis;
+use crate::econometrics::glm::{bound, plogis};
 use crate::econometrics::tmle::{
     FluctuationForm, GlmControl, NuisanceFit, QModel, QPredictions, ate_and_ic, bound_scores,
     check_binary_treatment, fit_epsilon, fit_outcome, fit_treatment, fluctuate, glm_convergence,
@@ -904,6 +904,11 @@ fn create_cv_folds(n: usize, v: usize) -> Vec<Vec<usize>> {
     folds
 }
 
+/// The clever covariate H = A/g - (1-A)/(1-g).
+fn clever(a: f64, g: f64) -> f64 {
+    a / g - (1.0 - a) / (1.0 - g)
+}
+
 /// Aggregated warnings of the many CV fits: (scope, text) -> count, scope -> number of fits,
 /// scope -> number of fits that did not converge.
 #[derive(Default)]
@@ -941,7 +946,7 @@ impl FitNotes {
 }
 
 /// Validation-fold predictions of one fold: rows, y, Q*(A), Q*(1), Q*(0), H on those rows.
-#[allow(dead_code)]
+#[cfg(test)]
 struct FoldEval {
     rows: Vec<usize>,
     y: Vec<f64>,
@@ -951,24 +956,25 @@ struct FoldEval {
     h: Vec<f64>,
 }
 
-/// The V-fold risk of one candidate g (CAUS-57).
+/// The V-fold risk of one candidate g (CAUS-57). The per-fold values and the standard errors
+/// of both losses exist for the tests only.
 struct CvRisk {
     criterion: f64,
     se: f64,
     rss: f64,
-    #[allow(dead_code)]
-    rss_se: f64,
     var_ic: f64,
-    #[allow(dead_code)]
+    /// g's coefficients in the first fold: the start of the full-data g fit of this set.
+    g_start: Option<Array1<f64>>,
+    #[cfg(test)]
+    rss_se: f64,
+    #[cfg(test)]
     var_ic_se: f64,
-    #[allow(dead_code)]
+    #[cfg(test)]
     fold_rss: Vec<f64>,
-    #[allow(dead_code)]
+    #[cfg(test)]
     fold_var_ic: Vec<f64>,
-    #[allow(dead_code)]
+    #[cfg(test)]
     fold_epsilon: Vec<f64>,
-    #[allow(dead_code)]
-    folds: Vec<FoldEval>,
 }
 
 /// The full-data TMLE with one g.
@@ -1055,9 +1061,26 @@ impl<'a> CvSetup<'a> {
         let pick = |x: ArrayView1<'_, f64>, rows: &[usize]| -> Array1<f64> {
             rows.iter().map(|&i| x[i]).collect()
         };
+        let (q_full_fit, q_full) = fit_outcome(w.view(), a, y, model, None, &qnames, ctl, None)?;
+        // folds after the first start Q from the first fold's fit (their training rows overlap
+        // in 1 - 2/V of the data): the same estimates, fewer IRLS iterations. The first fold
+        // starts from glm.fit's start, so nothing of its validation rows reaches its fit.
+        let mut start: Option<Array1<f64>> = None;
         let mut cache = Vec::with_capacity(v);
         for (t, val) in train.iter().zip(&folds) {
-            let (fit, q) = fit_outcome(w.view(), a, y, model, Some(t.view()), &qnames, ctl)?;
+            let (fit, q) = fit_outcome(
+                w.view(),
+                a,
+                y,
+                model,
+                Some(t.view()),
+                &qnames,
+                ctl,
+                start.as_ref().map(|b| b.view()),
+            )?;
+            if start.is_none() {
+                start = Some(fit.zeroed());
+            }
             notes.record("outcome model (Q), CV folds", &fit.warnings, fit.converged);
             let train_rows: Vec<usize> = (0..n).filter(|&i| t[i] > 0.0).collect();
             cache.push(FoldCache {
@@ -1070,7 +1093,6 @@ impl<'a> CvSetup<'a> {
                 train_rows,
             });
         }
-        let (q_full_fit, q_full) = fit_outcome(w.view(), a, y, model, None, &qnames, ctl)?;
         Ok(CvSetup {
             y,
             a,
@@ -1094,6 +1116,94 @@ impl<'a> CvSetup<'a> {
             .collect()
     }
 
+    /// The intercept column, then `covariates[j]` for `j` in `set` order, on `rows`.
+    fn design_rows(&self, set: &[usize], rows: &[usize]) -> EconResult<Array2<f64>> {
+        let mut x = resource::try_zeros2(rows.len(), set.len() + 1, "C-TMLE g design")?;
+        x.column_mut(0).fill(1.0);
+        for (c, &j) in set.iter().enumerate() {
+            let cov = &self.covariates[j];
+            for (v, &i) in x.column_mut(c + 1).iter_mut().zip(rows) {
+                *v = cov[i];
+            }
+        }
+        Ok(x)
+    }
+
+    /// Fold `f` of the risk of the g-model on `set`: g (from `start`, glm.fit's start when
+    /// `None`) and epsilon fitted on the training rows; returns epsilon, the bounded g on the
+    /// validation rows and g's coefficients (NaN set to 0).
+    fn fold_fit(
+        &self,
+        set: &[usize],
+        gnames: &[String],
+        f: usize,
+        start: Option<ArrayView1<'_, f64>>,
+        notes: &mut FitNotes,
+    ) -> EconResult<(f64, Vec<f64>, Array1<f64>)> {
+        let fc = &self.cache[f];
+        let x_train = self.design_rows(set, &fc.train_rows)?;
+        let (gfit, g_raw) = fit_treatment(
+            x_train.view(),
+            fc.a_train.view(),
+            None,
+            gnames,
+            self.ctl,
+            start,
+        )?;
+        notes.record(
+            "propensity model (g), CV fits",
+            &gfit.warnings,
+            gfit.converged,
+        );
+        let (lo, hi) = self.gbound;
+        let mut h_train = resource::try_zeros2(g_raw.len(), 1, "C-TMLE clever covariate")?;
+        for ((h, &g), &a) in h_train.iter_mut().zip(&g_raw).zip(&fc.a_train) {
+            *h = clever(a, bound(g, lo, hi));
+        }
+        // epsilon from 0 (the maximum-likelihood estimate glm.fit reaches from its start)
+        let fl = fit_epsilon(
+            fc.y_train.view(),
+            h_train.view(),
+            fc.base_train.view(),
+            self.model,
+            None,
+            self.ctl,
+            true,
+        )?;
+        notes.record("fluctuation, CV fits", &fl.warnings, fl.converged);
+        let b = gfit.zeroed();
+        let g_val: Vec<f64> = self.folds[f]
+            .iter()
+            .map(|&i| {
+                let eta = set
+                    .iter()
+                    .enumerate()
+                    .fold(b[0], |acc, (c, &j)| acc + b[c + 1] * self.covariates[j][i]);
+                bound(plogis(eta), lo, hi)
+            })
+            .collect();
+        Ok((fl.coefficients[0], g_val, b))
+    }
+
+    /// `(y, H, Q*(A), Q*(1), Q*(0))` of the validation row `r` of fold `f`.
+    fn fold_row(&self, f: usize, e: f64, g_val: &[f64], r: usize) -> [f64; 5] {
+        let fc = &self.cache[f];
+        let [qa, q1, q0] = &fc.base_val;
+        let link = |x: f64| match self.model {
+            QModel::Logistic => plogis(x),
+            QModel::Linear => x,
+        };
+        let g = g_val[r];
+        let h = clever(fc.a_val[r], g);
+        [
+            fc.y_val[r],
+            h,
+            link(qa[r] + e * h),
+            link(q1[r] + e / g),
+            link(q0[r] - e / (1.0 - g)),
+        ]
+    }
+
     /// The CV risk of the g-model with covariates `set` (CAUS-57). For every fold v, the
     /// initial Q (the Q of the training folds, the honest initial estimate for fold v), g and
     /// epsilon are fitted on the training rows and the loss is evaluated on fold v. Unlike
@@ -1101,65 +1211,33 @@ impl<'a> CvSetup<'a> {
     fn risk(&self, set: &[usize], notes: &mut FitNotes) -> EconResult<CvRisk> {
         let n = self.y.len();
         let v = self.folds.len();
-        let xg = design_with_intercept(self.covariates, set, n);
         let gnames = self.g_names(set);
-        let link = |x: f64| match self.model {
-            QModel::Logistic => plogis(x),
-            QModel::Linear => x,
-        };
-        let clever = |a: f64, g: f64| a / g - (1.0 - a) / (1.0 - g);
         let mut fold_rss = Vec::with_capacity(v);
         let mut fold_var_ic = Vec::with_capacity(v);
+        #[cfg(test)]
         let mut fold_epsilon = Vec::with_capacity(v);
-        let mut evals = Vec::with_capacity(v);
+        let mut ic = Vec::new();
+        let mut g_first: Option<Array1<f64>> = None;
         for (f, rows) in self.folds.iter().enumerate() {
             resource::checkpoint()?;
-            let fc = &self.cache[f];
-            let x_train = xg.select(Axis(0), &fc.train_rows);
-            let (gfit, g_raw) =
-                fit_treatment(x_train.view(), fc.a_train.view(), None, &gnames, self.ctl)?;
-            notes.record(
-                "propensity model (g), CV fits",
-                &gfit.warnings,
-                gfit.converged,
-            );
-            let g_train = bound_scores(&g_raw, self.gbound).0;
-            let h_train: Array1<f64> =
-                Array1::from_iter((0..g_train.len()).map(|r| clever(fc.a_train[r], g_train[r])));
-            let fl = fit_epsilon(
-                fc.y_train.view(),
-                h_train.insert_axis(Axis(1)).view(),
-                fc.base_train.view(),
-                self.model,
-                None,
-                self.ctl,
-            )?;
-            notes.record("fluctuation, CV fits", &fl.warnings, fl.converged);
-            let e = fl.coefficients[0];
-            let g_val = bound_scores(
-                &xg.select(Axis(0), rows).dot(&gfit.zeroed()).mapv(plogis),
-                self.gbound,
-            )
-            .0;
-            let [qa, q1, q0] = &fc.base_val;
-            let m = rows.len();
-            let h: Vec<f64> = (0..m).map(|r| clever(fc.a_val[r], g_val[r])).collect();
-            let ev = FoldEval {
-                rows: rows.clone(),
-                y: fc.y_val.to_vec(),
-                q_star_a: (0..m).map(|r| link(qa[r] + e * h[r])).collect(),
-                q_star_1: (0..m).map(|r| link(q1[r] + e / g_val[r])).collect(),
-                q_star_0: (0..m).map(|r| link(q0[r] - e / (1.0 - g_val[r]))).collect(),
-                h,
-            };
-            let rss: f64 = (0..m).map(|r| (ev.y[r] - ev.q_star_a[r]).powi(2)).sum();
-            let ic: Vec<f64> = (0..m)
-                .map(|r| ev.h[r] * (ev.y[r] - ev.q_star_a[r]) + ev.q_star_1[r] - ev.q_star_0[r])
-                .collect();
+            // folds after the first start g from the first fold's fit (their training rows
+            // overlap in 1 - 2/V of the data): the same estimates, fewer IRLS iterations
+            let (e, g_val, b) =
+                self.fold_fit(set, &gnames, f, g_first.as_ref().map(|b| b.view()), notes)?;
+            if g_first.is_none() {
+                g_first = Some(b);
+            }
+            ic.clear();
+            let mut rss = 0.0;
+            for r in 0..rows.len() {
+                let [y, h, qa, q1, q0] = self.fold_row(f, e, &g_val, r);
+                rss += (y - qa).powi(2);
+                ic.push(h * (y - qa) + q1 - q0);
+            }
             fold_rss.push(rss);
             fold_var_ic.push(sample_variance(&ic));
+            #[cfg(test)]
             fold_epsilon.push(e);
-            evals.push(ev);
         }
         let vf = v as f64;
         let rss: f64 = fold_rss.iter().sum();
@@ -1176,21 +1254,61 @@ impl<'a> CvSetup<'a> {
             criterion,
             se,
             rss,
-            rss_se,
             var_ic,
+            g_start: g_first,
+            #[cfg(test)]
+            rss_se,
+            #[cfg(test)]
             var_ic_se,
+            #[cfg(test)]
             fold_rss,
+            #[cfg(test)]
             fold_var_ic,
+            #[cfg(test)]
             fold_epsilon,
-            folds: evals,
+        })
+    }
+
+    /// The validation-fold predictions of fold `f` for the g-model on `set` (tests).
+    #[cfg(test)]
+    fn fold_eval(&self, set: &[usize], f: usize, notes: &mut FitNotes) -> EconResult<FoldEval> {
+        let names = self.g_names(set);
+        let first = self.fold_fit(set, &names, 0, None, notes)?.2;
+        let start = (f > 0).then_some(first.view());
+        let (e, g_val, _) = self.fold_fit(set, &names, f, start, notes)?;
+        let rows = self.folds[f].clone();
+        let per: Vec<[f64; 5]> = (0..rows.len())
+            .map(|r| self.fold_row(f, e, &g_val, r))
+            .collect();
+        let col = |k: usize| per.iter().map(|p| p[k]).collect::<Vec<f64>>();
+        Ok(FoldEval {
+            rows,
+            y: col(0),
+            h: col(1),
+            q_star_a: col(2),
+            q_star_1: col(3),
+            q_star_0: col(4),
         })
     }
 
     /// The full-data TMLE with g on `set` (path and final estimates); on the fitting scale.
-    fn full_tmle(&self, set: &[usize]) -> EconResult<FullTmle> {
+    /// g starts from `g_start` (a fold's fit of the same set) and epsilon from 0: the
+    /// maximum-likelihood estimates are the same as from glm.fit's start.
+    fn full_tmle(
+        &self,
+        set: &[usize],
+        g_start: Option<ArrayView1<'_, f64>>,
+    ) -> EconResult<FullTmle> {
         let n = self.y.len();
         let xg = design_with_intercept(self.covariates, set, n);
-        let (g_fit, graw) = fit_treatment(xg.view(), self.a, None, &self.g_names(set), self.ctl)?;
+        let (g_fit, graw) = fit_treatment(
+            xg.view(),
+            self.a,
+            None,
+            &self.g_names(set),
+            self.ctl,
+            g_start,
+        )?;
         let g = bound_scores(&graw, self.gbound).0;
         let fl = fluctuate(
             self.y,
@@ -1201,6 +1319,7 @@ impl<'a> CvSetup<'a> {
             None,
             self.ctl,
             FluctuationForm::OneDim,
+            true,
         )?;
         let (ate, ic) = ate_and_ic(self.y, &fl);
         let se = (sample_variance(&ic.to_vec()) / n as f64).sqrt();
@@ -1235,7 +1354,7 @@ impl PathStep {
         risk: CvRisk,
         notes: &mut FitNotes,
     ) -> EconResult<PathStep> {
-        let est = setup.full_tmle(&set)?;
+        let est = setup.full_tmle(&set, risk.g_start.as_ref().map(|b| b.view()))?;
         notes.record(
             "propensity model (g), path fits",
             &est.g_fit.warnings,
@@ -2524,7 +2643,8 @@ mod tests {
         assert!((risk2.fold_rss[0] - risk.fold_rss[0]).abs() > 1.0); // the loss sees the flips
         assert_ne!(risk2.fold_epsilon[1], risk.fold_epsilon[1]); // fold 1 trains on fold 0's rows
         // VarIC recomputed from the validation-fold predictions (two-pass variance)
-        for (v, ev) in risk.folds.iter().enumerate() {
+        for v in 0..setup.folds.len() {
+            let ev = setup.fold_eval(&[0, 2], v, &mut notes).unwrap();
             let ic: Vec<f64> = (0..ev.rows.len())
                 .map(|r| ev.h[r] * (ev.y[r] - ev.q_star_a[r]) + ev.q_star_1[r] - ev.q_star_0[r])
                 .collect();
