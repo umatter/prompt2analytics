@@ -100,7 +100,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::econometrics::glm::{GlmLink, fit_propensity, plogis};
+use crate::econometrics::glm::{GlmLink, bound, fit_propensity, plogis};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
 use crate::options::Choices;
@@ -595,7 +595,8 @@ fn run_plr(
 
 /// Interactive regression model (binary treatment), ATE score:
 /// `psi = g1 - g0 + D (Y - g1) / m - (1 - D)(Y - g0) / (1 - m) - theta`,
-/// `g_d = E[Y|D=d,X]`, `m = P(D=1|X)` bounded to `[trim, 1 - trim]`.
+/// `g_d = E[Y|D=d,X]` by `ml_method` on arm d of the training folds, `m = P(D=1|X)` by
+/// logistic regression, bounded to `[trim, 1 - trim]`. The score's Jacobian is 1.
 fn run_irm(
     y: &ArrayView1<f64>,
     d: &ArrayView1<f64>,
@@ -606,13 +607,12 @@ fn run_irm(
 ) -> EconResult<DoubleMLResult> {
     let nobs = y.len();
     let n = nobs as f64;
-    if !is_binary(d) {
-        warnings.push(
-            "IRM is designed for binary treatment. Consider using PLR for continuous treatment."
-                .to_string(),
-        );
+    if let Some(at) = first_non_binary(d) {
+        return Err(spec(format!(
+            "IRM needs a binary treatment coded 0/1 ({at})"
+        )));
     }
-    let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+    let treated: Vec<bool> = d.iter().map(|&v| v == 1.0).collect();
     let control: Vec<bool> = treated.iter().map(|t| !t).collect();
     let n_treated = treated.iter().filter(|&&t| t).count();
     if n_treated.min(nobs - n_treated) < 5 {
@@ -622,7 +622,7 @@ fn run_irm(
             context: "IRM requires sufficient observations in both treatment groups".to_string(),
         });
     }
-    let ml = Learner::Regression(MLMethod::OLS);
+    let ml = Learner::Regression(config.ml_method);
     let g0 = cross_fit(
         x,
         folds,
@@ -643,42 +643,41 @@ fn run_irm(
         warnings,
     )?
     .remove(0);
-    let ps = Learner::Regression(MLMethod::OLS);
     let m = cross_fit(
         x,
         folds,
         None,
-        ps,
+        Learner::Logistic,
         &[Nuisance::new("m", "P(D=1|X)", d.view())],
         config,
         warnings,
     )?
     .remove(0)
-    .mapv(|v| v.max(config.trim).min(1.0 - config.trim));
+    .mapv(|v| bound(v, config.trim, 1.0 - config.trim));
 
-    let dt = Array1::from_iter(treated.iter().map(|&t| if t { 1.0 } else { 0.0 }));
     let psi_b = Array1::from_shape_fn(nobs, |i| {
-        g1[i] - g0[i] + dt[i] * (y[i] - g1[i]) / m[i]
-            - (1.0 - dt[i]) * (y[i] - g0[i]) / (1.0 - m[i])
+        g1[i] - g0[i] + d[i] * (y[i] - g1[i]) / m[i] - (1.0 - d[i]) * (y[i] - g0[i]) / (1.0 - m[i])
     });
     let theta = psi_b.sum() / n;
     let scores = psi_b.mapv(|v| v - theta);
-    let psi_sq = scores.dot(&scores) / n;
-    let se = (psi_sq / n).sqrt();
+    let se = (scores.dot(&scores) / n / n).sqrt();
 
     let label = ml.label(config.lambda);
     let fit_g0 = nuisance_fit("g0", "E[Y|D=0,X]", &label, y, &g0, Some(&control));
     let fit_g1 = nuisance_fit("g1", "E[Y|D=1,X]", &label, y, &g1, Some(&treated));
-    let fit_m = nuisance_fit("m", "P(D=1|X)", &ps.label(config.lambda), d, &m, None);
+    let logistic = Learner::Logistic.label(config.lambda);
+    let fit_m = nuisance_fit("m", "P(D=1|X)", &logistic, d, &m, None);
+    // the outcome model of the observed arm
     let g_obs = Array1::from_shape_fn(nobs, |i| if treated[i] { g1[i] } else { g0[i] });
-    let fit_out = nuisance_fit("", "", "", y, &g_obs, None);
+    let fit_out = nuisance_fit("g", "E[Y|D,X]", &label, y, &g_obs, None);
+    let rd = d - &m;
     let diagnostics = NuisanceDiagnostics {
         outcome_r2: fit_out.r2,
         treatment_r2: fit_m.r2,
         outcome_rmse: fit_out.rmse,
         treatment_rmse: fit_m.rmse,
-        mean_residual_treatment: (d - &m).sum() / n,
-        var_residual_treatment: psi_sq,
+        mean_residual_treatment: rd.sum() / n,
+        var_residual_treatment: rd.dot(&rd) / n,
     };
     propensity_warning(warnings, &m, config.trim);
     let range = min_max(&m);
@@ -689,7 +688,7 @@ fn run_irm(
         se,
         scores.to_vec(),
         diagnostics,
-        psi_sq,
+        1.0,
         vec![fit_g0, fit_g1, fit_m],
         Some(range),
         warnings,
@@ -2501,6 +2500,121 @@ mod tests {
         let dual = fit.solve_dual(&yc, 0.05 / ys).unwrap();
         for (a, e) in primal.iter().zip(dual.iter()) {
             assert!(Tol::new(1e-10, 1e-14).allows(*a, *e), "{a} vs {e}");
+        }
+    }
+
+    fn irm_case(ml: MLMethod) -> (p2a_validation::Case, DoubleMLResult) {
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let (y, d, x) = (col(&ds, "yb"), col(&ds, "dbin"), covariates(&ds));
+        let r = run_double_ml(
+            &y.view(),
+            &d.view(),
+            &x.view(),
+            with_folds(DMLModelType::IRM, ml, case_folds(&ds)),
+        )
+        .unwrap();
+        (case, r)
+    }
+
+    #[test]
+    fn test_validate_doubleml_irm() {
+        let (case, r) = irm_case(MLMethod::OLS);
+        let n = r.n_obs;
+        let (g0, g1, m) = (nuis(&r, "g0"), nuis(&r, "g1"), nuis(&r, "m"));
+        let nd = &r.nuisance_diagnostics;
+        let range = r.propensity_range.unwrap();
+        let mean_psi_sq = r.scores.iter().map(|s| s * s).sum::<f64>() / n as f64;
+        Check::new(&case)
+            .scalar("irm_theta", r.theta, Tol::coef(n))
+            .scalar("irm_se", r.se, Tol::se(n))
+            .vector("irm_ps_range", &range, Tol::stat(n))
+            .scalar("irm_rmse_g0", g0.rmse, Tol::stat(n))
+            .scalar("irm_rmse_g1", g1.rmse, Tol::stat(n))
+            .scalar("irm_r2_g0", g0.r2, Tol::stat(n))
+            .scalar("irm_r2_g1", g1.r2, Tol::stat(n))
+            .scalar("irm_rmse_m", m.rmse, Tol::stat(n))
+            .scalar("irm_r2_m", m.r2, Tol::stat(n))
+            .scalar("irm_rmse_m", nd.treatment_rmse, Tol::stat(n))
+            .scalar("irm_r2_m", nd.treatment_r2, Tol::stat(n))
+            .scalar("irm_rmse_outcome", nd.outcome_rmse, Tol::stat(n))
+            .scalar("irm_r2_outcome", nd.outcome_r2, Tol::stat(n))
+            .scalar("irm_mean_resid_m", nd.mean_residual_treatment, Tol::stat(n))
+            .vector("irm_ci95", &[r.ci_lower, r.ci_upper], Tol::stat(n))
+            .scalar("irm_p", r.p_value, P_REL)
+            // what the old code printed as the Jacobian is the score variance
+            .scalar("irm_mean_psi_sq", mean_psi_sq, Tol::se(n))
+            .finish();
+        assert_eq!(r.jacobian, 1.0);
+        let rmse_m = case.scalar("irm_rmse_m");
+        assert!(Tol::stat(n).allows(nd.var_residual_treatment, rmse_m * rmse_m));
+        assert_eq!(g0.n_eval, 194);
+        assert_eq!(m.learner, "logistic regression");
+        assert_eq!(r.trim, Some(0.01));
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_validate_doubleml_irm_lasso() {
+        let (case, r) = irm_case(MLMethod::Lasso);
+        let n = r.n_obs;
+        let g0 = nuis(&r, "g0");
+        Check::new(&case)
+            .scalar("irm_lasso_theta_tight", r.theta, TIGHT)
+            .scalar("irm_lasso_se_tight", r.se, TIGHT)
+            .scalar("irm_lasso_rmse_g0_tight", g0.rmse, TIGHT)
+            .scalar("irm_lasso_theta", r.theta, GLMNET)
+            .scalar("irm_lasso_se", r.se, GLMNET)
+            .scalar("irm_lasso_rmse_g0", g0.rmse, GLMNET)
+            // m stays logistic, identical to the OLS run
+            .vector("irm_ps_range", &r.propensity_range.unwrap(), Tol::stat(n))
+            .finish();
+        assert_eq!(nuis(&r, "g1").learner, "lasso (glmnet, lambda = 0.05)");
+        assert_eq!(nuis(&r, "m").learner, "logistic regression");
+    }
+
+    #[test]
+    fn test_doubleml_irm_jacobian_is_not_the_score_variance() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "yb"), col(&ds, "dbin"), covariates(&ds));
+        let r = run_double_ml(
+            &y.view(),
+            &d.view(),
+            &x.view(),
+            seeded(DMLModelType::IRM, MLMethod::OLS, 5, 11),
+        )
+        .unwrap();
+        let nd = &r.nuisance_diagnostics;
+        assert_eq!(r.jacobian, 1.0);
+        assert!(
+            (0.2..0.3).contains(&nd.var_residual_treatment),
+            "{}",
+            nd.var_residual_treatment
+        );
+        assert!((nd.var_residual_treatment - nd.treatment_rmse.powi(2)).abs() < 1e-12);
+        let text = r.to_string();
+        for needle in [
+            "Score Jacobian: 1 (ATE score, psi_a = -1)",
+            "P(D=1|X)",
+            "logistic regression",
+            "Propensity range: [",
+            "Trimming:   propensities bounded to [0.01, 0.99]",
+        ] {
+            assert!(text.contains(needle), "{needle:?} not in\n{text}");
+        }
+        assert!(!text.contains("Var(D-m)"));
+    }
+
+    #[test]
+    fn test_doubleml_irm_rejects_non_binary_treatment() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "yb"), col(&ds, "dcont"), covariates(&ds));
+        let mut c = DoubleMLConfig::default();
+        c.model_type = DMLModelType::IRM;
+        for needle in ["binary", "0/1", "row 1 has 1.3474565949"] {
+            spec_err(
+                run_double_ml(&y.view(), &d.view(), &x.view(), c.clone()),
+                needle,
+            );
         }
     }
 }
