@@ -1333,7 +1333,7 @@ mod tests {
             test.statistic
         );
         // R: pchisq(200, 1, lower.tail = FALSE)
-        let want = 2.0884875837625449e-45;
+        let want = 2.088_487_583_762_545e-45;
         assert!(
             (test.p_value - want).abs() <= 1e-10 * want,
             "{}",
@@ -1397,7 +1397,7 @@ mod tests {
             "{}",
             test.statistic
         );
-        let p = 0.81366371576679186;
+        let p = 0.813_663_715_766_791_9;
         assert!((test.p_value - p).abs() <= 1e-10 * p, "{}", test.p_value);
         assert!(!test.significant);
     }
