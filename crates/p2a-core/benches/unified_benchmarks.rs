@@ -2662,34 +2662,6 @@ fn main() {
     // DoubleML (PLR)
     // R's sizes: 100, 1000, 10000 (doubleml_n<n>.csv)
     //
-    // R's rows (doubleml_n<n>.csv) and R's folds: R puts row r (0-based) in
-    // fold r % 5. p2a-core cannot take folds; it draws them from its seed as
-    // create_fold_assignments does (doubleml.rs:985-1002): StdRng from the
-    // seed, shuffle 0..n, the row at shuffled position i in fold i % k. This
-    // computes that assignment for the seed passed and returns the row order
-    // that puts in each of p2a-core's folds exactly the rows R puts in it
-    // (row order changes nothing else in PLR: OLS fits and the pooled DML2 sums).
-    fn dml_row_order_for_r_folds(n: usize, k: usize, seed: u64) -> Vec<usize> {
-        use rand::seq::SliceRandom;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut shuffled: Vec<usize> = (0..n).collect();
-        shuffled.shuffle(&mut rng);
-        let mut p2a_fold = vec![0usize; n];
-        for (i, &idx) in shuffled.iter().enumerate() {
-            p2a_fold[idx] = i % k;
-        }
-        // Both assignments give fold f the same count (#{i < n : i % k == f}).
-        // Position pos (in p2a-core's fold f) gets R's next row of fold f.
-        let mut next_r_row: Vec<usize> = (0..k).collect();
-        p2a_fold
-            .iter()
-            .map(|&f| {
-                let r = next_r_row[f];
-                next_r_row[f] += k;
-                r
-            })
-            .collect()
-    }
     for n in sizes_for(&["DoubleML"], [100, 1000, 10000]) {
         let dml_x_cols = ["x1", "x2", "x3", "x4", "x5"];
         let (y0, d0, x0) = match load_csv_dataset(&data_dir, "doubleml", n) {
@@ -2708,21 +2680,15 @@ fn main() {
             }
             None => generate_doubleml_data(n, 42),
         };
-        // MLMethod::OLS for both nuisances (R: regr.lm for l and m), 5 folds,
-        // a fixed seed (the default None drew new folds from entropy each call)
-        let dml_seed = 42;
-        let dml_config = DoubleMLConfig {
-            seed: Some(dml_seed),
-            ..DoubleMLConfig::default()
-        };
-        let order = dml_row_order_for_r_folds(n, dml_config.n_folds, dml_seed);
-        let y: Array1<f64> = order.iter().map(|&r| y0[r]).collect();
-        let d: Array1<f64> = order.iter().map(|&r| d0[r]).collect();
-        let x: Array2<f64> = x0.select(ndarray::Axis(0), &order);
+        // MLMethod::OLS for both nuisances (R: regr.lm for l and m) on R's fixed folds: R puts row r
+        // (0-based) in fold r % 5 (unified_benchmark.R), passed as labels; no seed is drawn.
+        let mut dml_config = DoubleMLConfig::default();
+        let k = dml_config.n_folds;
+        dml_config.folds = Some((0..n).map(|r| r % k).collect());
         let mut result = run_benchmark_tracked("DoubleML", "PLR", n, &slow_config, || {
-            run_double_ml(&y.view(), &d.view(), &x.view(), dml_config.clone())
+            run_double_ml(&y0.view(), &d0.view(), &x0.view(), dml_config.clone())
         });
-        if let Ok(ref dml) = run_double_ml(&y.view(), &d.view(), &x.view(), dml_config.clone()) {
+        if let Ok(ref dml) = run_double_ml(&y0.view(), &d0.view(), &x0.view(), dml_config.clone()) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "theta", dml.theta);
             capture(&mut outputs, "se", dml.se);

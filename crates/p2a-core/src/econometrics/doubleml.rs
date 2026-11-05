@@ -95,12 +95,14 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::SeedableRng;
-use rand::prelude::*;
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::options::Choices;
 use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // =============================================================================
@@ -118,6 +120,34 @@ pub enum DMLModelType {
     /// Used for heterogeneous treatment effects with binary D
     IRM,
 }
+
+crate::option_enum!(
+    DMLModelType,
+    Choices {
+        option: "model",
+        values: &[
+            (
+                &[
+                    "plr",
+                    "partially_linear",
+                    "partially_linear_regression",
+                    "doublemlplr",
+                ],
+                DMLModelType::PLR,
+            ),
+            (
+                &[
+                    "irm",
+                    "interactive",
+                    "interactive_regression",
+                    "doublemlirm",
+                ],
+                DMLModelType::IRM,
+            ),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for DMLModelType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -147,19 +177,34 @@ impl fmt::Display for TreatmentType {
     }
 }
 
-/// ML method for nuisance estimation.
-/// Currently only OLS is implemented; this enum provides extensibility
-/// for future ML methods (Ridge, Lasso, Random Forest, etc.)
+/// Learner of the nuisance functions that are regressions (binary nuisances are fitted by
+/// logistic regression whatever the method).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MLMethod {
     /// Ordinary Least Squares (default)
     #[default]
     OLS,
-    /// Ridge regression (not yet implemented)
+    /// Ridge regression at `DoubleMLConfig::lambda` (glmnet's objective, standardized)
     Ridge,
-    /// Lasso regression (not yet implemented)
+    /// Lasso regression at `DoubleMLConfig::lambda` (glmnet, standardized)
     Lasso,
 }
+
+crate::option_enum!(
+    MLMethod,
+    Choices {
+        option: "ml_method",
+        values: &[
+            (
+                &["ols", "lm", "linear", "regr.lm", "least_squares"],
+                MLMethod::OLS,
+            ),
+            (&["lasso", "l1"], MLMethod::Lasso),
+            (&["ridge", "l2"], MLMethod::Ridge),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for MLMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -171,24 +216,40 @@ impl fmt::Display for MLMethod {
     }
 }
 
+/// Seed of the fold assignment when `DoubleMLConfig::seed` is `None`.
+pub const DML_DEFAULT_SEED: u64 = 42;
+/// Default penalty of the lasso and ridge learners (glmnet's lambda).
+pub const DML_DEFAULT_LAMBDA: f64 = 0.05;
+/// glmnet's `thresh` for the lasso nuisance fits (glmnet's own default is 1e-7, which stops
+/// coordinate descent about 3e-4 from the minimiser).
+pub const DML_GLMNET_THRESH: f64 = 1e-14;
+
 /// Configuration for Double Machine Learning estimation.
 #[derive(Debug, Clone)]
 pub struct DoubleMLConfig {
-    /// Number of cross-fitting folds (default: 5)
+    /// Number of cross-fitting folds (default: 5), between 2 and n; ignored when `folds` is
+    /// given
     pub n_folds: usize,
-    /// DML model type (PLR or IRM)
+    /// DML model type
     pub model_type: DMLModelType,
-    /// Treatment variable type (Continuous or Binary)
+    /// Declared treatment type, checked against d (`Binary` with a d that is not coded 0/1 is
+    /// refused); the result reports the type detected from d
     pub treatment_type: TreatmentType,
-    /// ML method for nuisance estimation
+    /// Learner of every nuisance function that is a regression
     pub ml_method: MLMethod,
     /// Whether to include an intercept in nuisance models
     pub intercept: bool,
-    /// Random seed for reproducible cross-fitting splits
+    /// Seed of the random fold assignment (`None`: [`DML_DEFAULT_SEED`]); ignored with `folds`
     pub seed: Option<u64>,
-    /// Trimming threshold for propensity scores in IRM (default: 0.01)
-    /// Observations with P(D=1|X) < trim or > 1-trim are flagged
+    /// Propensity trimming: IRM and IIVM propensities are bounded to `[trim, 1 - trim]`
+    /// (default 0.01, DoubleML's `trimming_threshold`); `0 < trim < 0.5`
     pub trim: f64,
+    /// Penalty of the lasso and ridge learners (glmnet's lambda, default
+    /// [`DML_DEFAULT_LAMBDA`]); finite and >= 0
+    pub lambda: f64,
+    /// User fold labels, one per observation (any values, at least two distinct); the folds
+    /// are taken in label order. `None`: random folds from `seed`
+    pub folds: Option<Vec<usize>>,
 }
 
 impl Default for DoubleMLConfig {
@@ -201,6 +262,8 @@ impl Default for DoubleMLConfig {
             intercept: true,
             seed: None,
             trim: 0.01,
+            lambda: DML_DEFAULT_LAMBDA,
+            folds: None,
         }
     }
 }
@@ -272,6 +335,16 @@ pub struct DoubleMLResult {
 
     /// Warnings generated during estimation
     pub warnings: Vec<String>,
+
+    /// Observations per fold, in label order
+    #[serde(default)]
+    pub fold_sizes: Vec<usize>,
+    /// Whether the folds were supplied by the user
+    #[serde(default)]
+    pub user_folds: bool,
+    /// The seed of the fold assignment (`None` with user folds)
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 impl fmt::Display for DoubleMLResult {
@@ -393,57 +466,22 @@ pub fn run_double_ml(
     x: &ArrayView2<f64>,
     config: DoubleMLConfig,
 ) -> EconResult<DoubleMLResult> {
-    let n = y.len();
-    let _p = x.ncols();
-
-    // Validate inputs
-    if d.len() != n {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Treatment vector length ({}) must match outcome vector length ({})",
-                d.len(),
-                n
-            ),
-        });
-    }
-    if x.nrows() != n {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Covariate matrix rows ({}) must match outcome vector length ({})",
-                x.nrows(),
-                n
-            ),
-        });
-    }
-    if config.n_folds < 2 {
-        return Err(EconError::InvalidSpecification {
-            message: "Number of folds must be at least 2".to_string(),
-        });
-    }
-    if n < config.n_folds * 2 {
-        return Err(EconError::InsufficientData {
-            required: config.n_folds * 2,
-            provided: n,
-            context: format!("Cross-fitting with {} folds", config.n_folds),
-        });
-    }
-
+    let treatment_type = validate_inputs(y, d, None, x, &config)?;
+    let folds = make_folds(y.len(), &config)?;
     let mut warnings = Vec::new();
-
-    // Check treatment variance
-    let d_mean = d.mean().unwrap_or(0.0);
-    let d_var: f64 = d.iter().map(|&di| (di - d_mean).powi(2)).sum::<f64>() / n as f64;
-    if d_var < 1e-10 {
-        return Err(EconError::InvalidSpecification {
-            message: "Treatment variable has near-zero variance".to_string(),
-        });
-    }
 
     // Dispatch to appropriate model
     match config.model_type {
-        DMLModelType::PLR => run_plr(y, d, x, &config, &mut warnings),
-        DMLModelType::IRM => run_irm(y, d, x, &config, &mut warnings),
+        DMLModelType::PLR => run_plr(y, d, x, &config, &folds, &mut warnings),
+        DMLModelType::IRM => run_irm(y, d, x, &config, &folds, &mut warnings),
     }
+    .map(|mut r| {
+        r.treatment_type = treatment_type;
+        r.fold_sizes = folds.sizes.clone();
+        r.user_folds = folds.seed.is_none();
+        r.seed = folds.seed;
+        r
+    })
 }
 
 /// Run Partially Linear Regression Model (PLR) with cross-fitting.
@@ -461,13 +499,13 @@ fn run_plr(
     d: &ArrayView1<f64>,
     x: &ArrayView2<f64>,
     config: &DoubleMLConfig,
+    folds: &Folds,
     warnings: &mut Vec<String>,
 ) -> EconResult<DoubleMLResult> {
     let n = y.len();
-    let k_folds = config.n_folds;
+    let k_folds = folds.labels.len();
 
-    // Create fold assignments
-    let fold_ids = create_fold_assignments(n, k_folds, config.seed);
+    let fold_ids = &folds.index;
 
     // Build design matrix with intercept if requested
     let x_design = if config.intercept {
@@ -691,6 +729,9 @@ fn run_plr(
         ml_method: config.ml_method,
         jacobian,
         warnings: warnings.to_vec(),
+        fold_sizes: Vec::new(),
+        user_folds: false,
+        seed: None,
     })
 }
 
@@ -711,10 +752,11 @@ fn run_irm(
     d: &ArrayView1<f64>,
     x: &ArrayView2<f64>,
     config: &DoubleMLConfig,
+    folds: &Folds,
     warnings: &mut Vec<String>,
 ) -> EconResult<DoubleMLResult> {
     let n = y.len();
-    let k_folds = config.n_folds;
+    let k_folds = folds.labels.len();
 
     // Validate binary treatment
     let is_binary = d
@@ -737,8 +779,7 @@ fn run_irm(
         });
     }
 
-    // Create fold assignments
-    let fold_ids = create_fold_assignments(n, k_folds, config.seed);
+    let fold_ids = &folds.index;
 
     // Build design matrix with intercept
     let x_design = if config.intercept {
@@ -972,6 +1013,9 @@ fn run_irm(
         ml_method: config.ml_method,
         jacobian,
         warnings: warnings.to_vec(),
+        fold_sizes: Vec::new(),
+        user_folds: false,
+        seed: None,
     })
 }
 
@@ -979,14 +1023,200 @@ fn run_irm(
 // Helper Functions
 // =============================================================================
 
-/// Create random fold assignments for cross-fitting.
-///
-/// Returns a vector of fold indices [0, k_folds) for each observation.
-fn create_fold_assignments(n: usize, k_folds: usize, seed: Option<u64>) -> Vec<usize> {
-    let mut rng: rand::rngs::StdRng = match seed {
-        Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-        None => rand::rngs::StdRng::from_entropy(),
+fn spec(message: String) -> EconError {
+    EconError::InvalidSpecification { message }
+}
+
+fn is_binary(v: &ArrayView1<f64>) -> bool {
+    v.iter().all(|&x| x == 0.0 || x == 1.0)
+}
+
+/// The first value of `v` that is not exactly 0 or 1, as "row i has v" (1-based).
+fn first_non_binary(v: &ArrayView1<f64>) -> Option<String> {
+    v.iter()
+        .position(|&x| x != 0.0 && x != 1.0)
+        .map(|i| format!("row {} has {}", i + 1, v[i]))
+}
+
+/// Shared input checks of every model; returns the treatment type detected from `d`.
+fn validate_inputs(
+    y: &ArrayView1<f64>,
+    d: &ArrayView1<f64>,
+    z: Option<&ArrayView1<f64>>,
+    x: &ArrayView2<f64>,
+    config: &DoubleMLConfig,
+) -> EconResult<TreatmentType> {
+    let n = y.len();
+    if d.len() != n {
+        return Err(spec(format!(
+            "Treatment vector length ({}) must match outcome vector length ({n})",
+            d.len()
+        )));
+    }
+    if let Some(z) = z
+        && z.len() != n
+    {
+        return Err(spec(format!(
+            "Instrument vector length ({}) must match outcome vector length ({n})",
+            z.len()
+        )));
+    }
+    if x.nrows() != n {
+        return Err(spec(format!(
+            "Covariate matrix rows ({}) must match outcome vector length ({n})",
+            x.nrows()
+        )));
+    }
+    if !(config.trim.is_finite() && config.trim > 0.0 && config.trim < 0.5) {
+        return Err(spec(format!(
+            "trim must be in (0, 0.5), got {}",
+            config.trim
+        )));
+    }
+    if !(config.lambda.is_finite() && config.lambda >= 0.0) {
+        return Err(spec(format!(
+            "lambda must be finite and >= 0, got {}",
+            config.lambda
+        )));
+    }
+    if x.ncols() == 0 {
+        match config.ml_method {
+            MLMethod::Lasso => {
+                return Err(spec(
+                    "the lasso learner needs at least one covariate".to_string(),
+                ));
+            }
+            MLMethod::Ridge => {
+                return Err(spec(
+                    "the ridge learner needs at least one covariate".to_string(),
+                ));
+            }
+            MLMethod::OLS if !config.intercept => {
+                return Err(spec(
+                    "no covariates and no intercept: the nuisance functions are not defined"
+                        .to_string(),
+                ));
+            }
+            MLMethod::OLS => {}
+        }
+    }
+    let first_bad = |v: &ArrayView1<f64>| v.iter().position(|x| !x.is_finite());
+    let named = [
+        ("y", first_bad(y)),
+        ("d", first_bad(d)),
+        ("z", z.and_then(first_bad)),
+    ];
+    for (name, bad) in named {
+        if let Some(i) = bad {
+            return Err(spec(format!(
+                "{name} contains a non-finite value (row {})",
+                i + 1
+            )));
+        }
+    }
+    for (j, column) in x.columns().into_iter().enumerate() {
+        if let Some(i) = column.iter().position(|v| !v.is_finite()) {
+            return Err(spec(format!(
+                "x column {} contains a non-finite value (row {})",
+                j + 1,
+                i + 1
+            )));
+        }
+    }
+    let (lo, hi) = d
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(v), hi.max(v))
+        });
+    if lo == hi {
+        return Err(spec("treatment d is constant".to_string()));
+    }
+    if config.treatment_type == TreatmentType::Binary
+        && let Some(at) = first_non_binary(d)
+    {
+        return Err(spec(format!(
+            "treatment_type = Binary but d is not coded 0/1 ({at})"
+        )));
+    }
+    Ok(if is_binary(d) {
+        TreatmentType::Binary
+    } else {
+        TreatmentType::Continuous
+    })
+}
+
+/// The cross-fitting folds: `index[i]` is observation i's fold (its label's position in
+/// `labels`) and `sizes[k]` the size of fold k; `seed` is `None` for user folds.
+struct Folds {
+    index: Vec<usize>,
+    labels: Vec<usize>,
+    sizes: Vec<usize>,
+    seed: Option<u64>,
+}
+
+/// User folds (labels sorted, each observation mapped to its label's position) or random
+/// folds from the seed.
+fn make_folds(n: usize, config: &DoubleMLConfig) -> EconResult<Folds> {
+    let (index, labels, seed) = match &config.folds {
+        Some(v) => {
+            if v.len() != n {
+                return Err(spec(format!(
+                    "folds has {} labels for {n} observations",
+                    v.len()
+                )));
+            }
+            let mut labels = v.clone();
+            labels.sort_unstable();
+            labels.dedup();
+            if labels.len() < 2 {
+                return Err(spec(format!(
+                    "folds must contain at least 2 distinct labels, got {}",
+                    labels.len()
+                )));
+            }
+            let index = v
+                .iter()
+                .map(|l| labels.binary_search(l))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| {
+                    spec(format!(
+                        "folds must contain at least 2 distinct labels, got {}",
+                        labels.len()
+                    ))
+                })?;
+            (index, labels, None)
+        }
+        None => {
+            let k = config.n_folds;
+            if k < 2 || k > n {
+                return Err(spec(format!(
+                    "n_folds must be between 2 and the number of observations ({n}), got {k}"
+                )));
+            }
+            let seed = config.seed.unwrap_or(DML_DEFAULT_SEED);
+            (
+                create_fold_assignments(n, k, seed),
+                (1..=k).collect(),
+                Some(seed),
+            )
+        }
     };
+    let mut sizes = vec![0; labels.len()];
+    for &k in &index {
+        sizes[k] += 1;
+    }
+    Ok(Folds {
+        index,
+        labels,
+        sizes,
+        seed,
+    })
+}
+
+/// Random fold assignment: `0..n` shuffled with ChaCha8 from `seed`; the observation at
+/// shuffled position j gets fold `j % k_folds`.
+fn create_fold_assignments(n: usize, k_folds: usize, seed: u64) -> Vec<usize> {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     // Create and shuffle indices
     let mut indices: Vec<usize> = (0..n).collect();
@@ -1188,7 +1418,7 @@ mod tests {
 
     #[test]
     fn test_fold_assignments() {
-        let fold_ids = create_fold_assignments(100, 5, Some(42));
+        let fold_ids = create_fold_assignments(100, 5, 42);
 
         // Check all folds are represented
         let mut counts = vec![0; 5];
@@ -1489,5 +1719,237 @@ mod tests {
             "p-value = {} should be in [0, 1]",
             result.p_value
         );
+    }
+
+    // =========================================================================
+    // The reference case doubleml_models (validation/r/cases/causal_doubleml.R)
+    // =========================================================================
+
+    use crate::data::Dataset;
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use crate::linalg::DesignMatrix;
+    use p2a_validation::{Check, Tol};
+
+    const X6: [&str; 6] = ["X1", "X2", "X3", "X4", "X5", "X6"];
+    /// relative: Tol::p_value's abs 1e-12 would accept 0 or 1 - cdf for these tails
+    const P_REL: Tol = Tol::new(1e-6, 0.0);
+
+    /// The case's dataset for property tests: read without `load_case`, so the registry does
+    /// not count them as R pins (only `test_validate_*` tests load the case).
+    fn sim() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/doubleml_sim.csv");
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+    fn col(ds: &Dataset, name: &str) -> Array1<f64> {
+        Array1::from_vec(numeric_column(ds.df(), name, NaPolicy::Fail).unwrap().0)
+    }
+    fn covariates(ds: &Dataset) -> Array2<f64> {
+        DesignMatrix::from_dataframe(ds.df(), &X6, false)
+            .unwrap()
+            .data
+    }
+    fn case_folds(ds: &Dataset) -> Vec<usize> {
+        col(ds, "fold").iter().map(|&v| v as usize).collect()
+    }
+    fn with_folds(model: DMLModelType, ml: MLMethod, folds: Vec<usize>) -> DoubleMLConfig {
+        let mut c = DoubleMLConfig::default();
+        c.model_type = model;
+        c.ml_method = ml;
+        c.folds = Some(folds);
+        c
+    }
+    /// Uses only fields that existed before the learner rewrite.
+    fn seeded(model: DMLModelType, ml: MLMethod, k: usize, seed: u64) -> DoubleMLConfig {
+        let mut c = DoubleMLConfig::default();
+        c.model_type = model;
+        c.ml_method = ml;
+        c.n_folds = k;
+        c.seed = Some(seed);
+        c
+    }
+    fn spec_err(r: EconResult<DoubleMLResult>, needle: &str) {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains(needle), "{needle:?} not in {message:?}")
+            }
+            other => panic!("expected InvalidSpecification containing {needle:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ml_method_parses_aliases_and_rejects_unknown() {
+        MLMethod::choices().validate().unwrap();
+        for s in ["ols", "OLS", "lm", "regr.lm", "linear"] {
+            assert_eq!(s.parse::<MLMethod>().unwrap(), MLMethod::OLS, "{s}");
+        }
+        for s in ["Lasso", "L1"] {
+            assert_eq!(s.parse::<MLMethod>().unwrap(), MLMethod::Lasso, "{s}");
+        }
+        for s in ["ridge", "l2"] {
+            assert_eq!(s.parse::<MLMethod>().unwrap(), MLMethod::Ridge, "{s}");
+        }
+        match "random forest".parse::<MLMethod>() {
+            Err(EconError::InvalidSpecification { message }) => {
+                for needle in ["ml_method", "ols", "lasso", "ridge"] {
+                    assert!(message.contains(needle), "{needle} not in {message}");
+                }
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_dml_model_type_parses_aliases_and_rejects_unknown() {
+        DMLModelType::choices().validate().unwrap();
+        for s in ["plr", "PLR", "partially-linear", "DoubleMLPLR"] {
+            assert_eq!(s.parse::<DMLModelType>().unwrap(), DMLModelType::PLR, "{s}");
+        }
+        for s in ["irm", "IRM", "interactive"] {
+            assert_eq!(s.parse::<DMLModelType>().unwrap(), DMLModelType::IRM, "{s}");
+        }
+        match "ols".parse::<DMLModelType>() {
+            Err(EconError::InvalidSpecification { message }) => {
+                for needle in ["model", "plr", "irm"] {
+                    assert!(message.contains(needle), "{needle} not in {message}");
+                }
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_doubleml_user_folds() {
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let n = y.len();
+        let folds = case_folds(&ds);
+        let r = run_double_ml(
+            &y.view(),
+            &d.view(),
+            &x.view(),
+            with_folds(DMLModelType::PLR, MLMethod::OLS, folds.clone()),
+        )
+        .unwrap();
+        let sizes: Vec<f64> = r.fold_sizes.iter().map(|&s| s as f64).collect();
+        Check::new(&case)
+            .vector("fold_sizes", &sizes, Tol::exact())
+            .scalar("plr_ols_theta", r.theta, Tol::coef(n))
+            .scalar("plr_ols_se", r.se, Tol::se(n))
+            .finish();
+        assert!(r.user_folds);
+        assert_eq!(r.seed, None);
+        assert_eq!(r.n_folds, 5);
+        // the labels are names, not positions
+        let shifted: Vec<usize> = folds.iter().map(|f| f + 10).collect();
+        let s = run_double_ml(
+            &y.view(),
+            &d.view(),
+            &x.view(),
+            with_folds(DMLModelType::PLR, MLMethod::OLS, shifted),
+        )
+        .unwrap();
+        assert_eq!(s.theta.to_bits(), r.theta.to_bits());
+    }
+
+    #[test]
+    fn test_doubleml_default_seed_is_reproducible() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let run = |seed: Option<u64>| {
+            let mut c = DoubleMLConfig::default();
+            c.seed = seed;
+            run_double_ml(&y.view(), &d.view(), &x.view(), c).unwrap()
+        };
+        let (a, b, c) = (run(None), run(None), run(Some(DML_DEFAULT_SEED)));
+        for r in [&b, &c] {
+            assert_eq!(r.theta.to_bits(), a.theta.to_bits());
+            assert_eq!(r.se.to_bits(), a.se.to_bits());
+        }
+        assert_eq!(a.seed, Some(42));
+        assert!(!a.user_folds);
+    }
+
+    #[test]
+    fn test_doubleml_rejects_invalid_inputs() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let run = |f: &dyn Fn(&mut DoubleMLConfig)| {
+            let mut c = DoubleMLConfig::default();
+            f(&mut c);
+            run_double_ml(&y.view(), &d.view(), &x.view(), c)
+        };
+        spec_err(run(&|c| c.folds = Some(vec![1; 399])), "folds");
+        spec_err(
+            run(&|c| c.folds = Some(vec![1; 400])),
+            "at least 2 distinct labels",
+        );
+        spec_err(run(&|c| c.n_folds = 1), "n_folds");
+        spec_err(run(&|c| c.n_folds = 401), "n_folds");
+        for t in [0.0, 0.5, -0.1, f64::NAN] {
+            spec_err(run(&|c| c.trim = t), "trim");
+        }
+        for l in [-1.0, f64::NAN, f64::INFINITY] {
+            spec_err(run(&|c| c.lambda = l), "lambda");
+        }
+        let mut y_nan = y.clone();
+        y_nan[3] = f64::NAN;
+        spec_err(
+            run_double_ml(
+                &y_nan.view(),
+                &d.view(),
+                &x.view(),
+                DoubleMLConfig::default(),
+            ),
+            "y contains a non-finite value (row 4)",
+        );
+        let d_const = Array1::from_elem(400, 2.0);
+        spec_err(
+            run_double_ml(
+                &y.view(),
+                &d_const.view(),
+                &x.view(),
+                DoubleMLConfig::default(),
+            ),
+            "constant",
+        );
+        let x0 = Array2::<f64>::zeros((400, 0));
+        let mut lasso = DoubleMLConfig::default();
+        lasso.ml_method = MLMethod::Lasso;
+        spec_err(
+            run_double_ml(&y.view(), &d.view(), &x0.view(), lasso),
+            "covariate",
+        );
+        let mut labels = vec![1usize; 400];
+        labels[..5].fill(2);
+        assert!(
+            matches!(
+                run(&|c| c.folds = Some(labels.clone())),
+                Err(EconError::InsufficientData {
+                    required: 8,
+                    provided: 5,
+                    ..
+                })
+            ),
+            "fold 1 trains on 5 rows for 7 coefficients"
+        );
+    }
+
+    #[test]
+    fn test_doubleml_rejects_contradicting_treatment_type() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let mut c = DoubleMLConfig::default();
+        c.treatment_type = TreatmentType::Binary;
+        spec_err(
+            run_double_ml(&y.view(), &d.view(), &x.view(), c),
+            "treatment_type = Binary but d is not coded 0/1 (row 1 has",
+        );
+        // a 0/1 treatment declared continuous is accepted and reported as binary
+        let db = col(&ds, "dbin");
+        let r = run_double_ml(&y.view(), &db.view(), &x.view(), DoubleMLConfig::default()).unwrap();
+        assert_eq!(r.treatment_type, TreatmentType::Binary);
     }
 }
