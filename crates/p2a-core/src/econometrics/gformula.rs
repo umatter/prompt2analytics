@@ -1174,7 +1174,14 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     let seed = config.seed.unwrap_or(42);
 
     // Models and both regimes' simulations (common random numbers).
-    let est = estimate_once(data, &config, config.n_simulations, seed, &mut warnings)?;
+    let est = estimate_once(
+        data,
+        &config,
+        config.n_simulations,
+        seed,
+        &mut warnings,
+        None,
+    )?;
     let risk_natural = est.natural.mean;
     let risk_intervention = est.intervention.mean;
 
@@ -1201,7 +1208,8 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     // Bootstrap for Standard Errors
     // ═══════════════════════════════════════════════════════════════════════
 
-    let (bootstrap_results, dropped) = bootstrap_gformula(data, &config, config.n_bootstrap, seed)?;
+    let (bootstrap_results, dropped) =
+        bootstrap_gformula(data, &config, config.n_bootstrap, seed, &est.models)?;
     if dropped > 0 {
         warnings.push(format!(
             "{dropped} of {} bootstrap replicates failed and were dropped",
@@ -1324,8 +1332,9 @@ fn estimate_once(
     n_sim: usize,
     seed: u64,
     warnings: &mut Vec<String>,
+    starts: Option<&FittedModels>,
 ) -> EconResult<Estimate> {
-    let models = fit_models(data, config, warnings)?;
+    let models = fit_models_from(data, config, warnings, starts)?;
     let natural = simulate(
         data,
         &models,
@@ -1589,6 +1598,10 @@ fn build_design(
 }
 
 /// Fit a linear (`lm`) or logistic (`glm`, binomial) model; warnings are prefixed with `what`.
+/// A logistic fit starts from `start`'s coefficients when `start` is a logistic model of the
+/// same width (bootstrap replicates start from the full-sample fit; the MLE is the same,
+/// IRLS needs fewer iterations).
+#[allow(clippy::too_many_arguments)]
 fn fit_predict_model(
     x: &Array2<f64>,
     y: &Array1<f64>,
@@ -1597,12 +1610,17 @@ fn fit_predict_model(
     what: &str,
     config: &GFormulaConfig,
     warnings: &mut Vec<String>,
+    start: Option<&PredictModel>,
 ) -> EconResult<PredictModel> {
     let rows = x.nrows();
+    let start = start
+        .filter(|m| m.binary && m.coef.len() == x.ncols())
+        .map(|m| Array1::from(m.coef.clone()));
     let (fitted, std_errors, aliased, sigma, converged, iterations) = if binary {
         let mut spec = GlmSpec::logit();
         spec.epsilon = config.tolerance;
         spec.max_iter = config.max_iter;
+        spec.start = start.as_ref().map(|s| s.view());
         let fit = fit_glm(x.view(), y.view(), &spec)?;
         for w in &fit.warnings {
             warnings.push(format!("{what}: {w}"));
@@ -1670,6 +1688,17 @@ fn fit_models(
     data: &GFormulaData,
     config: &GFormulaConfig,
     warnings: &mut Vec<String>,
+) -> EconResult<FittedModels> {
+    fit_models_from(data, config, warnings, None)
+}
+
+/// [`fit_models`], logistic fits starting from the matching models of `starts` (see
+/// [`fit_predict_model`]).
+fn fit_models_from(
+    data: &GFormulaData,
+    config: &GFormulaConfig,
+    warnings: &mut Vec<String>,
+    starts: Option<&FittedModels>,
 ) -> EconResult<FittedModels> {
     let n = data.n_subjects();
     let t_max = data.n_time_points();
@@ -1756,7 +1785,17 @@ fn fit_models(
                     data.time_varying_names[j],
                     t + 1
                 );
-                let m = fit_predict_model(&x, &y, names.clone(), binary, &what, config, warnings)?;
+                let start = starts.and_then(|s| s.covariates.get(t)?.get(j));
+                let m = fit_predict_model(
+                    &x,
+                    &y,
+                    names.clone(),
+                    binary,
+                    &what,
+                    config,
+                    warnings,
+                    start,
+                )?;
                 all_converged &= m.converged;
                 models_t.push(m);
             }
@@ -1784,7 +1823,8 @@ fn fit_models(
             }
             let y: Array1<f64> = rows.iter().map(|&i| data.treatments[t][i]).collect();
             let what = format!("treatment model in period {}", t + 1);
-            let m = fit_predict_model(&x, &y, names, true, &what, config, warnings)?;
+            let start = starts.and_then(|s| s.treatment.get(treatment.len()));
+            let m = fit_predict_model(&x, &y, names, true, &what, config, warnings, start)?;
             all_converged &= m.converged;
             treatment.push(m);
         }
@@ -1792,7 +1832,7 @@ fn fit_models(
 
     let outcome = match &data.survival {
         Some(surv) if config.outcome_type == GFormulaOutcomeType::Survival => {
-            fit_hazard(data, surv, config, warnings)?
+            fit_hazard(data, surv, config, warnings, starts.map(|s| &s.outcome))?
         }
         _ => {
             // End-of-follow-up outcome model on every subject.
@@ -1823,6 +1863,7 @@ fn fit_models(
                 "outcome model",
                 config,
                 warnings,
+                starts.map(|s| &s.outcome),
             )?
         }
     };
@@ -1847,6 +1888,7 @@ fn fit_hazard(
     surv: &SurvivalOutcome,
     config: &GFormulaConfig,
     warnings: &mut Vec<String>,
+    start: Option<&PredictModel>,
 ) -> EconResult<PredictModel> {
     let n = data.n_subjects();
     let n_b = data.n_baseline_covars();
@@ -1885,7 +1927,7 @@ fn fit_hazard(
     ];
     names.extend(data.baseline_names.iter().cloned());
     names.extend(data.time_varying_names.iter().cloned());
-    fit_predict_model(&x, &y, names, true, "hazard model", config, warnings)
+    fit_predict_model(&x, &y, names, true, "hazard model", config, warnings, start)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2054,6 +2096,7 @@ fn bootstrap_gformula(
     config: &GFormulaConfig,
     n_bootstrap: usize,
     seed: u64,
+    start_models: &FittedModels,
 ) -> EconResult<(Vec<(f64, f64, f64)>, usize)> {
     let n = data.n_subjects();
 
@@ -2069,7 +2112,14 @@ fn bootstrap_gformula(
         let boot_indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
         let boot_data = resample_data(data, &boot_indices)?;
         // Replicate warnings are not reported.
-        let est = estimate_once(&boot_data, config, n_sim, boot_seed, &mut Vec::new())?;
+        let est = estimate_once(
+            &boot_data,
+            config,
+            n_sim,
+            boot_seed,
+            &mut Vec::new(),
+            Some(start_models),
+        )?;
         let (risk_int, risk_nat) = (est.intervention.mean, est.natural.mean);
         Ok((risk_int - risk_nat, risk_int, risk_nat))
     };
@@ -2188,7 +2238,7 @@ fn rd_inference(rd: f64, draws: &[f64], level: f64) -> EconResult<RdInference> {
 /// `rr <= 0` or the SE is not finite.
 fn rr_interval(rr: f64, se_log_rr: f64, level: f64) -> EconResult<(f64, f64)> {
     let z = z_critical(level)?;
-    if !(rr > 0.0) || !se_log_rr.is_finite() {
+    if rr.is_nan() || rr <= 0.0 || !se_log_rr.is_finite() {
         return Ok((f64::NAN, f64::NAN));
     }
     let l = rr.ln();
@@ -3239,24 +3289,16 @@ mod tests {
             "{}",
             r.ci_lower
         );
-        assert!(
-            tol.allows(r.ci_upper, 0.14699999999999999),
-            "{}",
-            r.ci_upper
-        );
+        assert!(tol.allows(r.ci_upper, 0.147), "{}", r.ci_upper);
         assert!(tol.allows(r.se, 0.038078865529319536), "{}", r.se);
-        assert!(
-            tol.allows(r.p_value, 0.0086362167603195629),
-            "{}",
-            r.p_value
-        );
+        assert!(tol.allows(r.p_value, 0.008636216760319563), "{}", r.p_value);
     }
 
     #[test]
     fn test_gformula_p_value_uses_the_upper_tail() {
         // X-17: z = 9 -> 2 * pnorm(-9) = 2.2571768119077543e-19 for these draws (R); 1 - cdf
         // gives exactly 0.
-        let d = [0.082928932188134519, 0.097071067811865475];
+        let d = [0.08292893218813452, 0.09707106781186547];
         let r = rd_inference(0.09, &d, 0.95).unwrap();
         assert!(
             p2a_validation::Tol::new(1e-10, 0.0).allows(r.p_value, 2.2571768119077543e-19),
