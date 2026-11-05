@@ -266,9 +266,14 @@ fn demean_map(
     Ok((Array1::from_vec(current), max_iter, final_change, converged))
 }
 
+/// Rows from which [`demean_matrix_map`] demeans the columns of a multi-way design in
+/// parallel; below it they run on the calling thread.
+const PARALLEL_DEMEAN_MIN_ROWS: usize = 2_000;
+
 /// Demean a matrix column-wise using the Method of Alternating Projections.
 ///
 /// Columns are independent under the alternating-projections algorithm, so
+/// from [`PARALLEL_DEMEAN_MIN_ROWS`] rows with two or more factors and columns
 /// we process them in parallel via `rayon` and reduce their per-column
 /// convergence statistics at the end. The caller's budget is installed on each
 /// worker, so every sweep honours it.
@@ -283,25 +288,34 @@ pub(crate) fn demean_matrix_map(
 
     let (n, k) = x.dim();
 
-    // Rayon workers do not see the caller's thread-local budget: capture it
-    // here and install it inside each closure.
-    let budget = resource::current_budget();
-
-    // Fan the columns out, demean each one independently, and collect the
-    // per-column results. Each call to `demean_map` allocates its own scratch
-    // buffers so there is no shared mutable state between workers.
-    let per_column: Vec<(Array1<f64>, usize, f64, bool)> = (0..k)
-        .into_par_iter()
-        .map(|j| {
-            let col = x.column(j).to_owned();
-            match &budget {
-                Some(b) => resource::with_budget(b.clone(), || {
-                    demean_map(&col, factors, tolerance, max_iter, accelerate)
-                }),
-                None => demean_map(&col, factors, tolerance, max_iter, accelerate),
-            }
-        })
-        .collect::<EconResult<Vec<_>>>()?;
+    let demean_column = |j: usize| {
+        demean_map(
+            &x.column(j).to_owned(),
+            factors,
+            tolerance,
+            max_iter,
+            accelerate,
+        )
+    };
+    // Small problems run on the calling thread: handing columns to the pool costs a
+    // wake-up per call, more than the sweeps over short columns, and one factor is a
+    // single pass. Columns are independent, so the result is the same either way.
+    let per_column: Vec<(Array1<f64>, usize, f64, bool)> =
+        if k <= 1 || factors.len() <= 1 || n < PARALLEL_DEMEAN_MIN_ROWS {
+            (0..k).map(demean_column).collect::<EconResult<Vec<_>>>()?
+        } else {
+            // Rayon workers do not see the caller's thread-local budget: capture it
+            // here and install it inside each closure. Each call to `demean_map`
+            // allocates its own scratch buffers, so workers share no mutable state.
+            let budget = resource::current_budget();
+            (0..k)
+                .into_par_iter()
+                .map(|j| match &budget {
+                    Some(b) => resource::with_budget(b.clone(), || demean_column(j)),
+                    None => demean_column(j),
+                })
+                .collect::<EconResult<Vec<_>>>()?
+        };
 
     let mut x_demeaned = Array2::<f64>::zeros((n, k));
     let mut max_iterations: usize = 0;
