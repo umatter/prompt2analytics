@@ -1,6 +1,7 @@
 # Validation: Extended Two-Way Fixed Effects (ETWFE)
 
-**Status: R-pinned** (registry entry `etwfe` in `validation/methods/causal_etwfe.json`; cases
+**Status: R-pinned, known deviations (CAUS-14: default vcov is unit-clustered CR1; fixest/etwfe
+default to iid)** (registry entry `etwfe` in `validation/methods/causal_etwfe.json`; cases
 `etwfe_staggered` and `etwfe_unbalanced`).
 
 ## Method
@@ -39,10 +40,15 @@ y_it = a_i + l_t + sum_(g,s) D_it 1(G_i = g) 1(t = s) b_gs [+ controls] + e_it
   their `(T-1) x (T-1)` normal equations (Frisch-Waugh). No tolerance or iteration is involved.
 - **Fit.** The normal equations of the within-transformed columns are built column by column from
   the sparse design (no `n x K` matrix) and solved when well conditioned (OLS's normal-equations
-  decision, `regression::ols::normal_inverse_from_gram`); otherwise the dense within design goes
-  through the pivoted QR (`lm.fit`'s `dqrdc2`, tolerance 1e-7). A cohort-period cell that is
-  absorbed or aliased is an error ("not identified"); aliased control columns are removed,
-  listed in `collinear_terms` with a warning, and the model is refitted.
+  decision, `regression::ols::normal_inverse_from_gram`). When they are singular or ill
+  conditioned, a column-order Cholesky of the equilibrated normal equations removes the control
+  columns whose pivot is below 1e-10 of their own within sum of squares (fixest's `collin.tol`,
+  made relative to the column; a control's cell interaction in a one-unit cohort is proportional
+  to the cell) and the reduced equations decide again. The dense within design goes through the
+  pivoted QR (`lm.fit`'s `dqrdc2`, tolerance 1e-7) only as the last resort: a cell that is not
+  identified, or equations that stay ill conditioned without collinear controls. A cohort-period
+  cell that is absorbed or aliased is an error ("not identified"); collinear control columns are
+  removed, listed in `collinear_terms` with a warning, and the model is refitted.
 
 ## Standard errors and inference
 
@@ -103,8 +109,9 @@ p2a refuses it, through the QR-aliased and the absorbed path),
 `test_etwfe_rejects_degenerate_inputs`, `test_etwfe_two_way_within_matches_dummy_regression`
 (exact absorption against a dummy regression, and a disconnected panel),
 `test_etwfe_scale_invariant`, `test_etwfe_collinear_controls_are_reported`,
-`test_etwfe_structured_fit_matches_dense_qr` (structured normal equations against the dense
-pivoted QR, 1e-10 relative), `test_etwfe_display_reports_what_was_estimated`, and the option
+`test_etwfe_structured_fit_matches_dense_qr` (structured normal equations, also with collinear
+controls removed at the Gram level, against the dense pivoted QR, 1e-10 relative; asserts which
+path each fit took), `test_etwfe_display_reports_what_was_estimated`, and the option
 parsers.
 
 DGP tests (not R-pinned; 40 units x 7 periods, cohorts 3/5/never, tolerance 0.02, values from

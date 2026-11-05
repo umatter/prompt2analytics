@@ -38,10 +38,9 @@
         "nobs, clusters, residual df",
         "unbalanced panels",
         "all-treated panels (default and user gref, cgroup never with gref)",
-        "absorbed and collinear terms",
-        "non-identified cells refused"
+        "absorbed terms"
       ],
-      "tolerance": "validation/README.md, n = 600-960: coefficients and aggregates 1e-8, SEs, p-values and CIs 1e-6 relative; counts and keys exact; marginaleffects' numerical-Jacobian SEs cross-checked at 1e-6 relative",
+      "tolerance": "validation/README.md, n = 600-960: coefficients and aggregates 1e-8, SEs, p-values and CIs 1e-6 relative; counts and keys exact; marginaleffects' numerical-Jacobian SEs cross-checked at 1e-6 relative; collinear control terms (test_etwfe_collinear_controls_are_reported) and non-identified cells refused (test_etwfe_unidentified_cells_are_an_error) are covered by unregistered property tests, not pinned here",
       "deviations": [
         {
           "finding": "CAUS-14",
