@@ -99,7 +99,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
-use crate::econometrics::glm::{GlmFamily, GlmLink, GlmSpec, fit_glm, plogis};
+use crate::econometrics::glm::{GlmFamily, GlmLink, GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
 use crate::regression::ols::solve_ols;
@@ -1525,7 +1525,7 @@ fn estimate_regime(
         let mut bounded = Vec::with_capacity(n);
         let mut ht = Vec::with_capacity(n);
         for i in 0..n {
-            let p1 = plogis(eta[i]);
+            let p1 = linkinv(eta[i]);
             let prob = if d[t][i] == 1 { p1 } else { 1.0 - p1 };
             cum[i] *= prob;
             let out = cum[i] < lo || cum[i] > hi;
@@ -1577,18 +1577,17 @@ fn estimate_regime(
         let ht = Array1::from(h[t].clone());
         let qs = match config.q_model {
             LtmleQModel::Logistic => {
-                let ones = Array2::<f64>::ones((n, 1));
-                let spec = glm_spec(GlmFamily::QuasiBinomial, config)
-                    .offset(eta.view())
-                    .weights(ht.view());
-                let f = fit_glm(ones.view(), q_next.view(), &spec)?;
-                notes.push_glm(
-                    &format!("fluctuation at {} ({label})", data.treatment_names[t]),
-                    &f,
-                    &["(Intercept)".to_string()],
-                );
-                eps[t] = f.coefficients[0];
-                eta.mapv(|e| plogis(e + eps[t]))
+                let f = fit_fluctuation(q_next.view(), eta.view(), ht.view(), config)?;
+                notes.n_fits += 1;
+                notes.all_converged &= f.converged;
+                if !f.converged {
+                    notes.warnings.push(format!(
+                        "fluctuation at {} ({label}): did not converge in {} iterations",
+                        data.treatment_names[t], f.iterations
+                    ));
+                }
+                eps[t] = f.epsilon;
+                eta.mapv(|e| linkinv(e + eps[t]))
             }
             LtmleQModel::Linear => {
                 let (mut num, mut den) = (0.0, 0.0);
@@ -1638,6 +1637,124 @@ fn estimate_regime(
         n_bounded,
         n_bounded_following,
         q_models,
+    })
+}
+
+/// The logit link's inverse as R's `binomial()$linkinv` (and `predict.glm(type =
+/// "response")`) computes it: `eta` beyond +/-30 gives `eps / (1 + eps)` or
+/// `1 / (1 + eps)`, so a probability is never exactly 0 or 1.
+fn linkinv(eta: f64) -> f64 {
+    const THRESH: f64 = 30.0;
+    let t = if eta < -THRESH {
+        f64::EPSILON
+    } else if eta > THRESH {
+        1.0 / f64::EPSILON
+    } else {
+        eta.exp()
+    };
+    t / (1.0 + t)
+}
+
+/// The fluctuation of one node: epsilon of the intercept-only quasibinomial logit fit of
+/// `y` with offset `offset` and prior weights `h` (`glm(y ~ 1, offset, weights = h,
+/// quasibinomial)` among the followers, zero weights dropping the rest).
+struct Fluctuation {
+    epsilon: f64,
+    converged: bool,
+    iterations: usize,
+}
+
+/// For one coefficient on the canonical link, glm.fit's IRLS step is Newton's step
+/// `score / information`; this solves the same score equation
+/// `sum_i h_i (y_i - plogis(offset_i + eps)) = 0` in O(n) per iteration instead of a
+/// general GLM fit, with glm.fit's stopping rule `|dev - dev_old| / (|dev| + 0.1) <
+/// tolerance`, glm.fit's step halving when the deviance is not finite, and one polishing
+/// Newton step after the rule is met.
+fn fit_fluctuation(
+    y: ArrayView1<f64>,
+    offset: ArrayView1<f64>,
+    h: ArrayView1<f64>,
+    config: &LtmleConfig,
+) -> EconResult<Fluctuation> {
+    let rows: Vec<usize> = (0..h.len()).filter(|&i| h[i] > 0.0).collect();
+    // binomial deviance, quasi-binomial working form: 2 sum h [y log(y/p) + (1-y) log((1-y)/(1-p))]
+    let deviance = |eps: f64| -> f64 {
+        let mut d = 0.0;
+        for &i in &rows {
+            let p = linkinv(offset[i] + eps);
+            let (yi, wi) = (y[i], h[i]);
+            let a = if yi > 0.0 { yi * (yi / p).ln() } else { 0.0 };
+            let b = if yi < 1.0 {
+                (1.0 - yi) * ((1.0 - yi) / (1.0 - p)).ln()
+            } else {
+                0.0
+            };
+            d += 2.0 * wi * (a + b);
+        }
+        d
+    };
+    let mut eps = 0.0;
+    let mut dev = deviance(eps);
+    if !dev.is_finite() {
+        return Err(EconError::Computation(
+            "LTMLE: the fluctuation's starting deviance is not finite".into(),
+        ));
+    }
+    for iter in 1..=config.max_iter {
+        resource::checkpoint()?;
+        let (mut score, mut info) = (0.0, 0.0);
+        for &i in &rows {
+            let p = linkinv(offset[i] + eps);
+            score += h[i] * (y[i] - p);
+            info += h[i] * p * (1.0 - p);
+        }
+        if !(info > 0.0) || score == 0.0 {
+            return Ok(Fluctuation {
+                epsilon: eps,
+                converged: score == 0.0,
+                iterations: iter,
+            });
+        }
+        let mut step = score / info;
+        let mut new_eps = eps + step;
+        let mut new_dev = deviance(new_eps);
+        let mut halvings = 0;
+        // glm.fit halves the step only when the deviance is not finite.
+        while !new_dev.is_finite() && halvings < 30 {
+            step /= 2.0;
+            new_eps = eps + step;
+            new_dev = deviance(new_eps);
+            halvings += 1;
+        }
+        let change = (new_dev - dev).abs() / (new_dev.abs() + 0.1);
+        eps = new_eps;
+        dev = new_dev;
+        if change < config.tolerance {
+            // One more Newton step: the deviance rule leaves an O(sqrt(tolerance)) error in
+            // eps when the weights are large, and Newton's step squares it at O(n) cost.
+            let (mut score, mut info) = (0.0, 0.0);
+            for &i in &rows {
+                let p = linkinv(offset[i] + eps);
+                score += h[i] * (y[i] - p);
+                info += h[i] * p * (1.0 - p);
+            }
+            if info > 0.0 {
+                let polished = eps + score / info;
+                if deviance(polished).is_finite() {
+                    eps = polished;
+                }
+            }
+            return Ok(Fluctuation {
+                epsilon: eps,
+                converged: true,
+                iterations: iter,
+            });
+        }
+    }
+    Ok(Fluctuation {
+        epsilon: eps,
+        converged: false,
+        iterations: config.max_iter,
     })
 }
 
@@ -2400,6 +2517,54 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    #[test]
+    fn test_ltmle_covariate_scale_invariance() {
+        let data = two_period(&sim());
+        let base = ltmle(&data).unwrap();
+        for scale in [1e-6, 1e6] {
+            let scaled = LtmleData::new(
+                data.outcomes.clone(),
+                data.treatments.clone(),
+                data.covariates.iter().map(|l| l * scale).collect(),
+            )
+            .unwrap();
+            let r = ltmle(&scaled).unwrap();
+            let tol = Tol::new(1e-10, 0.0);
+            assert!(
+                tol.allows(r.psi_treated, base.psi_treated),
+                "scale {scale}: {} vs {}",
+                r.psi_treated,
+                base.psi_treated
+            );
+            assert!(
+                tol.allows(r.psi_control, base.psi_control),
+                "scale {scale}: {} vs {}",
+                r.psi_control,
+                base.psi_control
+            );
+            assert!(r.converged, "scale {scale}: {:?}", r.warnings);
+        }
+    }
+
+    #[test]
+    fn test_ltmle_intermediate_outcomes_warn() {
+        let data = two_period(&sim());
+        let base = ltmle(&data).unwrap();
+        let mut d2 = data.clone();
+        d2.outcomes[0] = d2.outcomes[1].clone();
+        let r = ltmle(&d2).unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with(
+                "LTMLE: outcomes at time points 1..1 are not used; p2a's LTMLE has a single \
+                 outcome node (time point 2)"
+            )),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(r.psi_treated.to_bits(), base.psi_treated.to_bits());
+        assert_eq!(r.psi_control.to_bits(), base.psi_control.to_bits());
     }
 
     #[test]

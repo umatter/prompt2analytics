@@ -165,6 +165,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/loess_skewed.csv` | 100 × 2 (x, y) | `loess_skewed_direct` | `r/cases/regression_smoothers_t3.R` | seed 20261128 |
 | `generated/loess_x10.csv` | 10 × 2 (x, y) | `loess_x10_direct` | `r/cases/regression_smoothers_t3.R` | literal values: x = 1:10, near-linear y |
 | `generated/loglin_2x3x4.csv` | 24 × 4 (Var1, Var2, Var3, Freq) | `stat_loglin_nodecomp` | `r/cases/stats_power_loglin.R` | seed 20261116 |
+| `generated/ltmle_sim.csv` | 600 × 13 (L0, A1, L1, A2, Y, Yc, R1, Lr, R2, Yr, L2, A3, Y3) | `ltmle_two_period` | `r/cases/causal_ltmle.R` | seed 20261206; integer treatments and binary outcomes |
 | `generated/matching_sim.csv` | 240 × 6 (id, treat, x1, x2, x3, y) | `matchit_nearest`; read by `matchit_full_cem`, `matchit_subclass` | `r/cases/causal_matching.R` | seed 20261128 |
 | `generated/mauchly_sigma.csv` | 15 × 4 (V1, V2, V3, V4) | `stat_mauchly_sigma` | `r/cases/stats_power_loglin.R` | seed 20261117 |
 | `generated/mcf_networks.csv` | 580 × 6 (network, kind, a, b, cap, cost) | `mcf_networks` | `r/cases/causal_matching.R` | seed 20261023 |
