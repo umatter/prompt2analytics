@@ -1,7 +1,7 @@
 # validation/r/cases/econ_mte.R -- MTE by local IV (T3-WP16: ECON-70; moved in ECON-26, ECON-27,
 # ECON-87). No R package (ivmte computes bounds by LP; localIV is not installed): P(Z) by probit of
 # D on Z; Y on [1, P, P^2, P^3] (Brinch, Mogstad & Wiswall 2017); MTE(u) = d E[Y | P = u] / du;
-# ATE = int_0^1 MTE; ATT/ATU weights w_ATT(u) = Pr(P > u) / E[P], w_ATU(u) = Pr(P <= u) / E[1 - P]
+# probit polished to the MLE by Newton; ATE = int_0^1 MTE; ATT/ATU weights w_ATT(u) = Pr(P > u) / E[P], w_ATU(u) = Pr(P <= u) / E[1 - P]
 # (Heckman & Vytlacil 2005, Table IB) on a 1001-point midpoint grid; delta-method SEs with the
 # full HC1 coefficient covariance (sandwich::vcovHC; Var(Y | P) varies with P by construction). PRTE for the policy P' = min(P + 0.1, 1): w(u) = Pr(P' > u) - Pr(P > u)
 # (Heckman & Vytlacil 2005, Table IB, normalised). Extrapolation shares: weight on grid points
@@ -9,7 +9,17 @@
 # resample-index matrix (units resampled, both stages refitted).
 .mte_fit <- function(dd, ngrid = 1001, deg = 3) {
   fs <- glm(d ~ z1 + z2, data = dd, family = binomial("probit"), control = glm.control(epsilon = 1e-14))
-  P <- fitted(fs)
+  # glm's IRLS stops on the deviance change about 5e-11 short of the probit MLE (score ~3e-8);
+  # three Newton steps on the analytic score and Hessian take it to the MLE (score ~1e-14).
+  X <- model.matrix(fs); yd <- dd$d; b <- coef(fs)
+  for (it in 1:3) {
+    e <- drop(X %*% b)
+    l1 <- exp(dnorm(e, log = TRUE) - pnorm(e, log.p = TRUE)); l0 <- exp(dnorm(e, log = TRUE) - pnorm(-e, log.p = TRUE))
+    s <- yd * l1 - (1 - yd) * l0; h <- -yd * l1 * (l1 + e) - (1 - yd) * l0 * (l0 - e)
+    b <- b - solve(crossprod(X, X * h), crossprod(X, s))[, 1]
+  }
+  fs$coefficients <- b
+  P <- pnorm(drop(X %*% b))
   Xp <- sapply(seq_len(deg), function(j) P^j); colnames(Xp) <- c("P", "I(P^2)", "I(P^3)")[seq_len(deg)]
   ols <- lm(dd$y ~ Xp); b <- coef(ols); names(b) <- c("(Intercept)", colnames(Xp)); V <- sandwich::vcovHC(ols, type = "HC1")
   grid <- (seq_len(ngrid) - 0.5) / ngrid
