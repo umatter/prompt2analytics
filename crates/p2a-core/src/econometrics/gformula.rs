@@ -542,6 +542,70 @@ impl GFormulaData {
         }
     }
 
+    /// Create survival g-formula data (a discrete-time hazard outcome).
+    ///
+    /// `time` is each subject's last observed period, a whole number in `1..=T`; `event`
+    /// is 1 when the event occurred in that period and 0 when the subject was event-free
+    /// through it (lost to follow-up after it, or event-free at the end of follow-up when
+    /// `time == T`). Covariate and treatment cells of periods after a subject's `time` are
+    /// not used and may be `NaN` (wide data are missing after an event or loss to
+    /// follow-up); every other cell must be finite and every used treatment 0 or 1.
+    pub fn new_survival(
+        baseline_covariates: Array2<f64>,
+        time_varying_covariates: Vec<Array2<f64>>,
+        treatments: Vec<Array1<f64>>,
+        time: Array1<f64>,
+        event: Array1<f64>,
+    ) -> EconResult<Self> {
+        let n = baseline_covariates.nrows();
+        if event.len() != n {
+            return Err(spec_err(format!(
+                "Event length ({}) does not match number of subjects ({n})",
+                event.len()
+            )));
+        }
+        check_shapes(
+            &baseline_covariates,
+            &time_varying_covariates,
+            &treatments,
+            time.len(),
+        )?;
+        let t_max = treatments.len();
+        let mut times = Vec::with_capacity(n);
+        for (i, &v) in time.iter().enumerate() {
+            if !(v.is_finite() && v.fract() == 0.0 && v >= 1.0 && v <= t_max as f64) {
+                return Err(spec_err(format!(
+                    "g-formula survival data: time must be a whole number of periods from 1 \
+                     to {t_max}; row {} has {v}",
+                    i + 1
+                )));
+            }
+            times.push(v as usize);
+        }
+        let mut events = Vec::with_capacity(n);
+        for (i, &v) in event.iter().enumerate() {
+            if v != 0.0 && v != 1.0 {
+                return Err(spec_err(format!(
+                    "g-formula survival data: event must be 0 or 1; row {} has {v}",
+                    i + 1
+                )));
+            }
+            events.push(v == 1.0);
+        }
+        let data = Self::assemble(
+            baseline_covariates,
+            time_varying_covariates,
+            treatments,
+            event,
+            Some(SurvivalOutcome {
+                time: times,
+                event: events,
+            }),
+        );
+        check_cells(&data)?;
+        Ok(data)
+    }
+
     /// Names for reports. Lengths must match the data; names must be non-empty and
     /// distinct, and none may be `(Intercept)` or `t` (reserved by the hazard model).
     pub fn with_names(
@@ -1228,6 +1292,35 @@ fn validate_inputs(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<(
             data.n_subjects()
         )));
     }
+    if let Some(s) = &data.survival {
+        let t_max = data.n_time_points();
+        if let Some(i) = s.time.iter().position(|&t| t == 0 || t > t_max) {
+            return Err(spec_err(format!(
+                "g-formula survival data: time must be a whole number of periods from 1 to \
+                 {t_max}; row {} has {}",
+                i + 1,
+                s.time[i]
+            )));
+        }
+    }
+    match (config.outcome_type, data.is_survival()) {
+        (GFormulaOutcomeType::Survival, false) => {
+            return Err(spec_err(
+                "outcome_type survival needs per-subject follow-up times and event \
+                 indicators: build the data with GFormulaData::new_survival (MCP: time_col and \
+                 event_col)"
+                    .into(),
+            ));
+        }
+        (GFormulaOutcomeType::Continuous | GFormulaOutcomeType::Binary, true) => {
+            return Err(spec_err(
+                "the data hold a survival outcome (built with GFormulaData::new_survival); use \
+                 outcome_type survival"
+                    .into(),
+            ));
+        }
+        _ => {}
+    }
     if let GFormulaIntervention::Threshold {
         variable_idx,
         cutoff,
@@ -1338,6 +1431,19 @@ fn eof_row(buf: &mut Vec<f64>, b: &[f64], l_last: &[f64], hist: &[f64], point: b
         buf.extend_from_slice(hist);
     }
 }
+
+/// Pooled logistic hazard row of period `t` (0-based): `[1, t + 1, A_t, baseline, L_t]`.
+fn hazard_row(buf: &mut Vec<f64>, t: usize, a: f64, b: &[f64], l_t: &[f64]) {
+    buf.clear();
+    buf.push(1.0);
+    buf.push((t + 1) as f64);
+    buf.push(a);
+    buf.extend_from_slice(b);
+    buf.extend_from_slice(l_t);
+}
+
+/// Rows of the person-period design between two cancellation checks.
+const PERSON_PERIOD_CHECK_EVERY: usize = 4096;
 
 /// A design matrix of `rows.len()` rows filled by `row(i, buf)` for each subject `i`.
 fn build_design(
@@ -1560,35 +1666,42 @@ fn fit_models(
         }
     }
 
-    // End-of-follow-up outcome model on every subject.
-    let rows: Vec<usize> = (0..n).collect();
-    let k = 1 + n_b + n_tv + if point { 1 } else { t_max };
-    let mut hist = Vec::with_capacity(t_max);
-    let x = build_design(&rows, k, "g-formula design", |i, buf| {
-        fill(&mut b, data.baseline_covariates.row(i));
-        fill(&mut l_cur, data.time_varying_covariates[t_max - 1].row(i));
-        hist.clear();
-        hist.extend(data.treatments.iter().map(|a| a[i]));
-        eof_row(buf, &b, &l_cur, &hist, point);
-    })?;
-    let mut names = vec!["(Intercept)".to_string()];
-    names.extend(data.baseline_names.iter().cloned());
-    names.extend(data.time_varying_names.iter().cloned());
-    if point {
-        names.push(data.treatment_name.clone());
-    } else {
-        names.extend((0..t_max).map(|t| format!("{}_t{t}", data.treatment_name)));
-    }
-    let binary = config.outcome_type != GFormulaOutcomeType::Continuous;
-    let outcome = fit_predict_model(
-        &x,
-        &data.outcome,
-        names,
-        binary,
-        "outcome model",
-        config,
-        warnings,
-    )?;
+    let outcome = match &data.survival {
+        Some(surv) if config.outcome_type == GFormulaOutcomeType::Survival => {
+            fit_hazard(data, surv, config, warnings)?
+        }
+        _ => {
+            // End-of-follow-up outcome model on every subject.
+            let rows: Vec<usize> = (0..n).collect();
+            let k = 1 + n_b + n_tv + if point { 1 } else { t_max };
+            let mut hist = Vec::with_capacity(t_max);
+            let x = build_design(&rows, k, "g-formula design", |i, buf| {
+                fill(&mut b, data.baseline_covariates.row(i));
+                fill(&mut l_cur, data.time_varying_covariates[t_max - 1].row(i));
+                hist.clear();
+                hist.extend(data.treatments.iter().map(|a| a[i]));
+                eof_row(buf, &b, &l_cur, &hist, point);
+            })?;
+            let mut names = vec!["(Intercept)".to_string()];
+            names.extend(data.baseline_names.iter().cloned());
+            names.extend(data.time_varying_names.iter().cloned());
+            if point {
+                names.push(data.treatment_name.clone());
+            } else {
+                names.extend((0..t_max).map(|t| format!("{}_t{t}", data.treatment_name)));
+            }
+            let binary = config.outcome_type != GFormulaOutcomeType::Continuous;
+            fit_predict_model(
+                &x,
+                &data.outcome,
+                names,
+                binary,
+                "outcome model",
+                config,
+                warnings,
+            )?
+        }
+    };
     all_converged &= outcome.converged;
 
     Ok(FittedModels {
@@ -1599,6 +1712,56 @@ fn fit_models(
         n_at_risk: risk.iter().map(|r| r.len()).collect(),
         all_converged,
     })
+}
+
+/// The pooled logistic discrete-time hazard
+/// `logit h = b0 + b1 t + b2 A_t + baseline + L_t`, fitted on the person-periods at risk
+/// (subject `i` contributes periods `1..=time_i`, in subject-major order); the response is
+/// 1 in the period of the event.
+fn fit_hazard(
+    data: &GFormulaData,
+    surv: &SurvivalOutcome,
+    config: &GFormulaConfig,
+    warnings: &mut Vec<String>,
+) -> EconResult<PredictModel> {
+    let n = data.n_subjects();
+    let n_b = data.n_baseline_covars();
+    let n_tv = data.n_time_varying_covars();
+    let n_pp: usize = surv.time.iter().sum();
+    let k = 3 + n_b + n_tv;
+    let mut x = resource::try_zeros2(n_pp, k, "g-formula person-period design")?;
+    let mut y = resource::try_zeros1(n_pp, "g-formula person-period response")?;
+    let (mut b, mut l, mut buf) = (
+        Vec::with_capacity(n_b),
+        Vec::with_capacity(n_tv),
+        Vec::new(),
+    );
+    let mut r = 0;
+    for i in 0..n {
+        b.clear();
+        b.extend(data.baseline_covariates.row(i).iter());
+        for t in 0..surv.time[i] {
+            if r % PERSON_PERIOD_CHECK_EVERY == 0 {
+                resource::checkpoint()?;
+            }
+            l.clear();
+            l.extend(data.time_varying_covariates[t].row(i).iter());
+            hazard_row(&mut buf, t, data.treatments[t][i], &b, &l);
+            for (c, v) in buf.iter().enumerate() {
+                x[[r, c]] = *v;
+            }
+            y[r] = f64::from(u8::from(t + 1 == surv.time[i] && surv.event[i]));
+            r += 1;
+        }
+    }
+    let mut names = vec![
+        "(Intercept)".to_string(),
+        "t".to_string(),
+        data.treatment_name.clone(),
+    ];
+    names.extend(data.baseline_names.iter().cloned());
+    names.extend(data.time_varying_names.iter().cloned());
+    fit_predict_model(&x, &y, names, true, "hazard model", config, warnings)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1643,6 +1806,12 @@ fn simulate(
     let mut per_unit =
         resource::try_with_capacity::<f64>(n_units, "Monte Carlo simulations (n_simulations)")?;
 
+    let survival = outcome_type == GFormulaOutcomeType::Survival;
+    let mut curve_sum = if survival {
+        vec![0.0; t_max]
+    } else {
+        Vec::new()
+    };
     let mut b: Vec<f64> = Vec::with_capacity(data.n_baseline_covars());
     let mut l_prev = vec![0.0; n_tv];
     let mut l_cur = vec![0.0; n_tv];
@@ -1660,6 +1829,7 @@ fn simulate(
         b.extend(data.baseline_covariates.row(i).iter());
         l_prev.iter_mut().for_each(|v| *v = 0.0);
         let mut a_prev = 0.0;
+        let mut surv_prob = 1.0;
         hist.clear();
         for t in 0..t_max {
             for j in 0..n_tv {
@@ -1696,23 +1866,34 @@ fn simulate(
                     }
                 }
             };
+            if survival {
+                // Survival accumulates as a probability along the path (no event draws).
+                hazard_row(&mut buf, t, a, &b, &l_cur);
+                surv_prob *= 1.0 - plogis(models.outcome.eta(&buf));
+                curve_sum[t] += 1.0 - surv_prob;
+            }
             std::mem::swap(&mut l_prev, &mut l_cur);
             a_prev = a;
             hist.push(a);
         }
-        // l_prev now holds L_(T-1)
-        eof_row(&mut buf, &b, &l_prev, &hist, point);
-        let lp = models.outcome.eta(&buf);
-        per_unit.push(match outcome_type {
-            GFormulaOutcomeType::Continuous => lp,
-            GFormulaOutcomeType::Binary | GFormulaOutcomeType::Survival => plogis(lp),
+        per_unit.push(if survival {
+            1.0 - surv_prob
+        } else {
+            // l_prev now holds L_(T-1)
+            eof_row(&mut buf, &b, &l_prev, &hist, point);
+            let lp = models.outcome.eta(&buf);
+            match outcome_type {
+                GFormulaOutcomeType::Continuous => lp,
+                GFormulaOutcomeType::Binary | GFormulaOutcomeType::Survival => plogis(lp),
+            }
         });
     }
     let mean = per_unit.iter().sum::<f64>() / n_units as f64;
+    let curve = curve_sum.iter().map(|v| v / n_units as f64).collect();
     Ok(SimOutput {
         per_unit,
         mean,
-        curve: Vec::new(),
+        curve,
     })
 }
 
@@ -2573,6 +2754,354 @@ mod tests {
             b.se_risk_difference.to_bits()
         );
         assert!(a.se_risk_difference > 0.0 && a.ci_lower_rd < a.ci_upper_rd);
+    }
+
+    fn hazard_case_data(ds: &crate::data::Dataset) -> GFormulaData {
+        let n = ds.df().height();
+        let mut b = Array2::zeros((n, 2));
+        b.column_mut(0).assign(&case_col(ds, "L"));
+        b.column_mut(1).assign(&case_col(ds, "Lb"));
+        let a = case_col(ds, "A");
+        GFormulaData::new_survival(
+            b,
+            vec![Array2::zeros((n, 0)); 5],
+            vec![a; 5],
+            case_col(ds, "time"),
+            case_col(ds, "event"),
+        )
+        .unwrap()
+        .with_names(&["L", "Lb"], &[], "A")
+        .unwrap()
+    }
+
+    /// The `gformula_hazard` dataset for property tests that pin no R value (they load
+    /// the CSV directly, not the case, and stay out of the registry).
+    fn hazard_dataset() -> crate::data::Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/gformula_surv.csv");
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => crate::data::Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
+    fn tv_case_data(ds: &crate::data::Dataset) -> GFormulaData {
+        use ndarray::Axis;
+        let tv = (0..3)
+            .map(|t| case_col(ds, &format!("L_t{t}")).insert_axis(Axis(1)))
+            .collect();
+        let trt = (0..3).map(|t| case_col(ds, &format!("A_t{t}"))).collect();
+        GFormulaData::new_survival(
+            case_col(ds, "B").insert_axis(Axis(1)),
+            tv,
+            trt,
+            case_col(ds, "time"),
+            case_col(ds, "event"),
+        )
+        .unwrap()
+        .with_names(&["B"], &["L"], "A")
+        .unwrap()
+    }
+
+    fn survival_cfg(treat_all: bool, n_sim: usize, tol: f64, seed: u64) -> GFormulaConfig {
+        let mut c = GFormulaConfig::default();
+        c.outcome_type = GFormulaOutcomeType::Survival;
+        c.n_simulations = n_sim;
+        c.n_bootstrap = 0;
+        c.tolerance = tol;
+        c.seed = Some(seed);
+        c.intervention = GFormulaIntervention::Static { treat_all };
+        c
+    }
+
+    #[test]
+    fn test_validate_gformula_hazard_risks() {
+        // CAUS-64. Pooled logistic hazard y ~ t + A + L + Lb on 1658 person-periods; risks
+        // prod (1 - h) standardised exactly over the 400 rows (static regime, no time-varying
+        // covariates). Before: Survival ran the end-of-follow-up logit (exact value
+        // 0.36163164924175173 at T for always-treat, not 0.359537594778087) and had no risk
+        // curve.
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gformula_hazard");
+        let data = hazard_case_data(&ds);
+        let n = data.n_subjects();
+        let r1 = run_gformula(&data, survival_cfg(true, 200_000, 1e-14, 20261207)).unwrap();
+        let r0 = run_gformula(&data, survival_cfg(false, 200_000, 1e-14, 20261207)).unwrap();
+        let hm = r1.outcome_model.as_ref().unwrap();
+        assert_eq!(hm.kind, "pooled logistic hazard");
+        assert_eq!(r1.standardization, GFormulaStandardization::Empirical);
+        assert!(r1.point_treatment && r1.all_models_converged);
+        // MC bound: per-unit risks lie in [0, 1]
+        let mc = 5.0 * 0.5 / (200_000f64).sqrt();
+        Check::new(&case)
+            .named(
+                "hazard_coef",
+                &hm.names,
+                &hm.coefficients,
+                Tol::coef(hm.n_obs),
+            )
+            .named("hazard_se", &hm.names, &hm.std_errors, Tol::se(hm.n_obs))
+            .scalar("n_person_periods", hm.n_obs as f64, Tol::exact())
+            .vector("risk_always", &r1.risk_curve_intervention, Tol::coef(n))
+            .vector("risk_never", &r0.risk_curve_intervention, Tol::coef(n))
+            .scalar(
+                "risk_diff_T",
+                r1.risk_intervention - r0.risk_intervention,
+                Tol::coef(n),
+            )
+            .scalar(
+                "risk_ratio_T",
+                r1.risk_intervention / r0.risk_intervention,
+                Tol::coef(n),
+            )
+            .vector("observed_risk_curve", &r1.observed_risk_curve, Tol::coef(n))
+            .scalar("observed_risk_T", r1.observed_risk, Tol::coef(n))
+            // natural course of the point treatment: Monte Carlo over 200 000 units, MC tolerance
+            .vector(
+                "risk_natural_point",
+                &r1.risk_curve_natural,
+                Tol::new(0.0, mc),
+            )
+            .finish();
+        // common random numbers
+        assert_eq!(r1.risk_curve_natural, r0.risk_curve_natural);
+    }
+
+    #[test]
+    fn test_validate_gformula_hazard_default_tolerance() {
+        // Default tolerance 1e-8 (glm's epsilon): within Tol::iterative(1e-8) of the tight
+        // fit (gap <= 7.8e-10).
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gformula_hazard");
+        let data = hazard_case_data(&ds);
+        let r = run_gformula(
+            &data,
+            survival_cfg(true, 1_000, GFormulaConfig::default().tolerance, 1),
+        )
+        .unwrap();
+        let hm = r.outcome_model.as_ref().unwrap();
+        assert!(r.all_models_converged);
+        Check::new(&case)
+            .vector(
+                "risk_always",
+                &r.risk_curve_intervention,
+                Tol::iterative(1e-8),
+            )
+            .named(
+                "hazard_coef",
+                &hm.names,
+                &hm.coefficients,
+                Tol::iterative(1e-8),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_gformula_binary_eof_vs_survival() {
+        // Phantom-option pair: the end-of-follow-up logit and the hazard g-formula are
+        // different models. Before: identical output for Survival and Binary.
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gformula_hazard");
+        let surv = hazard_case_data(&ds);
+        let n = surv.n_subjects();
+        let eof = GFormulaData::new(
+            surv.baseline_covariates.clone(),
+            surv.time_varying_covariates.clone(),
+            surv.treatments.clone(),
+            surv.outcome.clone(),
+        )
+        .unwrap()
+        .with_names(&["L", "Lb"], &[], "A")
+        .unwrap();
+        let mut c = survival_cfg(true, 1_000, 1e-14, 3);
+        c.outcome_type = GFormulaOutcomeType::Binary;
+        let b1 = run_gformula(&eof, c.clone()).unwrap();
+        c.intervention = GFormulaIntervention::Static { treat_all: false };
+        let b0 = run_gformula(&eof, c).unwrap();
+        let s1 = run_gformula(&surv, survival_cfg(true, 1_000, 1e-14, 3)).unwrap();
+        // rule P: one A column
+        assert_eq!(
+            b1.outcome_model.as_ref().unwrap().names,
+            ["(Intercept)", "L", "Lb", "A"]
+        );
+        Check::new(&case)
+            .scalar("binary_eof_always", b1.risk_intervention, Tol::coef(n))
+            .scalar("binary_eof_never", b0.risk_intervention, Tol::coef(n))
+            .finish();
+        // the hazard g-formula's risk at T (the last element of the case's risk_always curve)
+        let hazard_t = case.vector("risk_always")[4];
+        assert!(
+            Tol::coef(n).allows(s1.risk_intervention, hazard_t),
+            "{} vs {hazard_t}",
+            s1.risk_intervention
+        );
+        // 0.36163 against 0.35954
+        assert!((b1.risk_intervention - s1.risk_intervention).abs() > 1e-3);
+    }
+
+    #[test]
+    fn test_validate_gformula_hazard_tv() {
+        // Survival with a time-varying covariate and treatment, 3 periods, loss to follow-up
+        // after period 2: models on the risk sets (1000, 894, 731), pooled hazard on 2625
+        // person-periods, observed KM curve; the Monte Carlo risk curves within 5 MC SEs
+        // (bound 0.5 / sqrt(n_sim)) of the exact 16^3-point Gauss-Hermite g-formula. Cells
+        // after a subject's last period are missing (NaN) and must be accepted.
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gformula_hazard_tv");
+        let data = tv_case_data(&ds);
+        let mut cfg = survival_cfg(true, 200_000, 1e-14, 20261208);
+        let m = fit_models(&data, &cfg, &mut Vec::new()).unwrap();
+        assert!(!m.point_treatment && m.all_converged);
+        let k = |t: usize| m.n_at_risk[t];
+        let sig: Vec<f64> = (0..3).map(|t| m.covariates[t][0].sigma).collect();
+        let r1 = run_gformula(&data, cfg.clone()).unwrap();
+        cfg.intervention = GFormulaIntervention::Static { treat_all: false };
+        let r0 = run_gformula(&data, cfg).unwrap();
+        let mc = 5.0 * 0.5 / (200_000f64).sqrt();
+        assert_eq!(r1.standardization, GFormulaStandardization::MonteCarlo);
+        let n_at_risk: Vec<f64> = m.n_at_risk.iter().map(|&v| v as f64).collect();
+        Check::new(&case)
+            .vector("n_at_risk", &n_at_risk, Tol::exact())
+            .vector("cov_coef_p1", &m.covariates[0][0].fitted, Tol::coef(k(0)))
+            .vector("cov_coef_p2", &m.covariates[1][0].fitted, Tol::coef(k(1)))
+            .vector("cov_coef_p3", &m.covariates[2][0].fitted, Tol::coef(k(2)))
+            .vector("cov_sigma", &sig, Tol::stat(k(2)))
+            .vector("trt_coef_p1", &m.treatment[0].fitted, Tol::coef(k(0)))
+            .vector("trt_coef_p2", &m.treatment[1].fitted, Tol::coef(k(1)))
+            .vector("trt_coef_p3", &m.treatment[2].fitted, Tol::coef(k(2)))
+            .named(
+                "hazard_coef",
+                &m.outcome.names,
+                &m.outcome.fitted,
+                Tol::coef(m.outcome.n_obs),
+            )
+            .named(
+                "hazard_se",
+                &m.outcome.names,
+                &m.outcome.std_errors,
+                Tol::se(m.outcome.n_obs),
+            )
+            .scalar("n_person_periods", m.outcome.n_obs as f64, Tol::exact())
+            .vector(
+                "observed_risk_curve",
+                &r1.observed_risk_curve,
+                Tol::coef(data.n_subjects()),
+            )
+            .vector(
+                "risk_always",
+                &r1.risk_curve_intervention,
+                Tol::new(0.0, mc),
+            )
+            .vector("risk_never", &r0.risk_curve_intervention, Tol::new(0.0, mc))
+            .vector("risk_natural", &r1.risk_curve_natural, Tol::new(0.0, mc))
+            .finish();
+        // natural course against the observed Kaplan-Meier risk (independent loss to
+        // follow-up): gap 8e-5 + MC
+        assert!((r1.risk_natural - r1.observed_risk).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gformula_survival_requires_event_times() {
+        // Before: outcome_type Survival on end-of-follow-up data silently ran the binary model.
+        let d = create_tv_test_data(200, 3, true);
+        let mut c = GFormulaConfig::default();
+        c.n_simulations = 200;
+        c.n_bootstrap = 0;
+        c.outcome_type = GFormulaOutcomeType::Survival;
+        expect_invalid(
+            run_gformula(&d, c).unwrap_err(),
+            &["survival", "new_survival", "time_col"],
+        );
+        let mut c = GFormulaConfig::default();
+        c.n_simulations = 200;
+        c.n_bootstrap = 0;
+        c.outcome_type = GFormulaOutcomeType::Binary;
+        expect_invalid(
+            run_gformula(&hazard_case_data(&hazard_dataset()), c).unwrap_err(),
+            &["survival outcome", "outcome_type survival"],
+        );
+    }
+
+    #[test]
+    fn test_gformula_survival_data_validation() {
+        let n = 4;
+        let b = || Array2::from_shape_vec((n, 1), vec![0.2, -0.3, 1.1, 0.4]).unwrap();
+        let tv = |v: Vec<f64>| {
+            vec![
+                Array2::from_shape_vec((n, 1), v[..4].to_vec()).unwrap(),
+                Array2::from_shape_vec((n, 1), v[4..].to_vec()).unwrap(),
+            ]
+        };
+        let a = || {
+            vec![
+                Array1::from(vec![1.0, 0.0, 1.0, 0.0]),
+                Array1::from(vec![1.0, 0.0, 1.0, f64::NAN]),
+            ]
+        };
+        // row 4 ends in period 1
+        let ok_tv = || tv(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, f64::NAN]);
+        let t = |v: Vec<f64>| Array1::from(v);
+        let ev = || Array1::from(vec![0.0, 1.0, 1.0, 1.0]);
+        assert!(
+            GFormulaData::new_survival(b(), ok_tv(), a(), t(vec![2.0, 2.0, 1.0, 1.0]), ev())
+                .is_ok()
+        );
+        expect_invalid(
+            GFormulaData::new_survival(b(), ok_tv(), a(), t(vec![0.0, 2.0, 1.0, 1.0]), ev())
+                .unwrap_err(),
+            &["time", "1 to 2", "row 1"],
+        );
+        expect_invalid(
+            GFormulaData::new_survival(b(), ok_tv(), a(), t(vec![3.0, 2.0, 1.0, 1.0]), ev())
+                .unwrap_err(),
+            &["time", "row 1"],
+        );
+        expect_invalid(
+            GFormulaData::new_survival(b(), ok_tv(), a(), t(vec![1.5, 2.0, 1.0, 1.0]), ev())
+                .unwrap_err(),
+            &["whole number"],
+        );
+        expect_invalid(
+            GFormulaData::new_survival(
+                b(),
+                ok_tv(),
+                a(),
+                t(vec![2.0, 2.0, 1.0, 1.0]),
+                t(vec![0.0, 2.0, 1.0, 1.0]),
+            )
+            .unwrap_err(),
+            &["event", "0 or 1", "row 2"],
+        );
+        // a NaN inside the follow-up is an error: row 4 followed through period 2 but L is
+        // missing there
+        expect_invalid(
+            GFormulaData::new_survival(b(), ok_tv(), a(), t(vec![2.0, 2.0, 1.0, 2.0]), ev())
+                .unwrap_err(),
+            &["L1", "row 4", "period 2", "followed through period 2"],
+        );
+    }
+
+    #[test]
+    fn test_gformula_survival_empty_risk_set_is_an_error() {
+        let n = 30;
+        let b = Array2::from_shape_fn((n, 1), |(i, _)| (i as f64 * 0.37).sin());
+        let a = Array1::from_shape_fn(n, |i| (i % 2) as f64);
+        let d = GFormulaData::new_survival(
+            b,
+            vec![Array2::zeros((n, 0)); 2],
+            vec![a.clone(), a],
+            Array1::from_elem(n, 1.0),
+            Array1::from_shape_fn(n, |i| f64::from(u8::from(i % 3 == 0))),
+        )
+        .unwrap();
+        let mut c = GFormulaConfig::default();
+        c.outcome_type = GFormulaOutcomeType::Survival;
+        c.n_simulations = 100;
+        c.n_bootstrap = 0;
+        let e = run_gformula(&d, c).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InsufficientData { provided: 0, context, .. } if context.contains("period 2")),
+            "got {e:?}"
+        );
     }
 
     #[test]

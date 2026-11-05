@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "gformula_hazard_tv",
+  "area": "causal/gformula",
+  "method": "Discrete-time hazard g-formula with a time-varying covariate and treatment (3 periods, loss to follow-up): models on the risk sets, exact g-formula risks",
+  "reference": "parametric g-formula (Hernan & Robins 2020, ch. 17 and 21; Keil et al. 2014): covariate, treatment and pooled logistic hazard models on the risk sets, the g-formula integral by Gauss-Hermite quadrature, written out (gfoRmula not installed)",
+  "call": "lm(L_t ~ B + L_(t-1) + A_(t-1)), glm(A_t ~ B + L_t + A_(t-1), binomial) on time >= t; glm(y ~ t + A + B + L, person-periods, binomial); E[prod (1 - h)] by 16^3-point Gauss-Hermite",
+  "dataset": "validation/datasets/generated/gformula_surv_tv.csv",
+  "datasets": ["validation/datasets/generated/gformula_surv_tv.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "cov_coef_p1": [-0.066009521841105867, 0.49931237387704824],
+    "cov_coef_p2": [0.025349112469531625, 0.33293786004116221, 0.58014364533321849, -0.38729943459289762],
+    "cov_coef_p3": [-0.008636083950968038, 0.31121746358132341, 0.58047745144972485, -0.40094722252636755],
+    "cov_sigma": [0.95223116261462126, 0.97484587857116278, 1.048275256558943],
+    "trt_coef_p1": [-0.26147704081206929, 0.16058801501405615, 0.42854733559666597],
+    "trt_coef_p2": [-0.19515221997809964, 0.1022770292575035, 0.64591692605931506, 1.0153825347835261],
+    "trt_coef_p3": [-0.21588739996245948, -0.043956474638752067, 0.5589721467462081, 0.94127434728067161],
+    "n_at_risk": [1000, 894, 731],
+    "n_person_periods": 2625,
+    "hazard_coef": {
+      "names": ["(Intercept)", "t", "A", "B", "L"],
+      "values": [-2.3535776086349052, 0.17791298297959965, -0.75074431295402155, 0.4596992028799069, 0.69523815667507083]
+    },
+    "hazard_se": {
+      "names": ["(Intercept)", "t", "A", "B", "L"],
+      "values": [0.18401603100766525, 0.084886198770548454, 0.14528431254952479, 0.081537946253238389, 0.06945448431587857]
+    },
+    "observed_risk_curve": [0.10599999999999998, 0.18800000000000006, 0.27797537619699053],
+    "risk_always": [0.072474789334545348, 0.13850138381050475, 0.19962650752121802],
+    "risk_never": [0.13359985072584254, 0.26537698585087816, 0.38351773047382709],
+    "risk_natural": [0.10184859383158332, 0.19277711615495768, 0.27790004920887373]
+  }
+}

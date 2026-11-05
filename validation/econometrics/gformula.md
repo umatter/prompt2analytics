@@ -13,8 +13,11 @@ the fitted treatment model), the intervention (always treat, never treat, or a t
 rule on a time-varying covariate), their difference, ratio and odds ratio, and bootstrap
 inference.
 
-Outcome types: `Continuous` (linear end-of-follow-up outcome model) and `Binary` (logistic
-end-of-follow-up outcome model).
+Outcome types: `Continuous` (linear end-of-follow-up outcome model), `Binary` (logistic
+end-of-follow-up outcome model) and `Survival`, a discrete-time hazard g-formula (Hernan &
+Robins 2020, ch. 17; Keil et al. 2014) on data built with `GFormulaData::new_survival`, which
+carry each subject's last observed period and event indicator. Before CAUS-64 was fixed,
+`Survival` was the binary end-of-follow-up logit under another label.
 
 ## Models
 
@@ -31,6 +34,16 @@ design, `lm.fit`'s pivoted QR otherwise); logistic models with the shared `glm.f
 (`econometrics::glm::fit_glm`, `epsilon` = `tolerance`, `maxit` = `max_iter`). Aliased
 columns are reported as R reports them ("Coefficients not defined because of
 singularities") and predicted with their identified columns.
+
+**Survival: risk sets and the hazard.** For survival data the models of period `t` are
+fitted on the subjects at risk at its start (`time >= t`), and the outcome model is a pooled
+logistic hazard on the person-periods at risk (subject `i` contributes periods `1..time_i`;
+the response is 1 in the period of the event):
+
+    logit h(t) = b0 + b1 t + b2 A_t + baseline + L_t
+
+The form is fixed: a linear period term and the current treatment (no period dummies, no
+treatment history). A period nobody is at risk in is an error (`InsufficientData`).
 
 **Point treatment (rule P).** When the treatment never changes within any subject's
 follow-up, it is a point treatment: one treatment model (period 1), its value carried
@@ -75,7 +88,41 @@ simulation:
   never-treat risks integrate over `Normal(mu_i, sigma)` by 120-point Gauss-Hermite, which
   agrees with `integrate(rel.tol = 1e-12)` to 2.2e-14.
 
+- `gformula_hazard`: n = 400, five periods, time-fixed `L ~ N(0, 1)` and `Lb ~ Bernoulli(0.4)`,
+  a point treatment, events from a logistic hazard. `glm(y ~ t + A + L + Lb, binomial)` on the
+  1658 person-periods; the always- and never-treat risks `1 - mean_i prod_{s <= t} (1 - h)` are
+  standardised exactly over the 400 rows (no Monte Carlo); the natural course of the point
+  treatment mixes the two survival curves with the period-1 treatment model's probabilities;
+  the observed Kaplan-Meier curve; and the end-of-follow-up logit `glm(event ~ L + Lb + A)`,
+  which is what `Survival` computed before.
+- `gformula_hazard_tv`: n = 1000, three periods, a continuous time-varying covariate and a
+  time-varying treatment, 10% loss to follow-up after period 2 (cells after a subject's last
+  period are empty in the CSV). Covariate (`lm`), treatment and hazard (`glm`) models on the
+  risk sets (1000, 894, 731; 2625 person-periods); the g-formula integral over the three
+  Gaussian covariate draws by a 16-point Gauss-Hermite product rule (agrees with 24 points to
+  2.5e-14), summing the eight treatment paths for the natural course.
+
 ## Values (R 4.3.3)
+
+`gformula_hazard`:
+
+| Quantity | Value |
+|---|---|
+| hazard coefficients (Intercept), t, A, L, Lb | -2.8418562733303614, 0.20850004305456832, -0.59981834178666882, 0.62349933389286327, 0.73867243632750212 |
+| risk at period 5, always / never treat | 0.359537594778087 / 0.51852120218356346 |
+| risk difference, ratio at period 5 | -0.15898360740547646, 0.69339034404769795 |
+| natural course (point treatment), period 5 | 0.43697111971018232 |
+| observed Kaplan-Meier risk, period 5 | 0.4375 |
+| end-of-follow-up logit, always / never | 0.36163164924175173 / 0.51695510707905579 |
+
+`gformula_hazard_tv`:
+
+| Quantity | Value |
+|---|---|
+| risk at period 3, always / never / natural | 0.19962650752121802 / 0.38351773047382709 / 0.27790004920887373 |
+| observed Kaplan-Meier risk, period 3 | 0.27797537619699053 |
+| person-periods; at risk by period | 2625; 1000, 894, 731 |
+
 
 `gformula_natural_course`:
 
@@ -96,15 +143,24 @@ simulation:
 | `test_validate_gformula_natural_course_models` | `gformula_natural_course` | coefficients `Tol::coef(2000)` (1e-10), residual SDs `Tol::stat(2000)` (1e-8) |
 | `test_validate_gformula_natural_course_risks` | `gformula_natural_course` | Monte Carlo risks within 5 Monte Carlo SEs of the exact values (200 000 units binary, 1 000 000 continuous, seeded); natural course within 0.01 / 0.02 of the observed mean |
 
+| `test_validate_gformula_hazard_risks` | `gformula_hazard` | hazard coefficients `Tol::coef(1658)` (1e-10), SEs `Tol::se(1658)` (1e-8); exact risks, difference, ratio and Kaplan-Meier `Tol::coef(400)` (1e-8); natural course (Monte Carlo, 200 000 units) within 5 x 0.5 / sqrt(200 000) = 0.0056 |
+| `test_validate_gformula_hazard_default_tolerance` | `gformula_hazard` | the default `tolerance` 1e-8 (glm's epsilon) against the tight fit at `Tol::iterative(1e-8)` (gap <= 7.8e-10) |
+| `test_validate_gformula_binary_eof_vs_survival` | `gformula_hazard` | the end-of-follow-up logit at `Tol::coef(400)`; the hazard g-formula differs from it |
+| `test_validate_gformula_hazard_tv` | `gformula_hazard_tv` | risk sets and person-periods exact; models `Tol::coef` / `Tol::stat` at their risk-set sizes; hazard as above; Kaplan-Meier `Tol::coef(1000)`; Monte Carlo risk curves (200 000 units) within 0.0056 of the Gauss-Hermite values |
+
+The Monte Carlo bound for a survival risk uses `0.5 / sqrt(n_sim)`: each unit's risk lies
+in [0, 1], so its SD is at most 0.5.
+
 Property tests (not registered; they load no case): `test_gformula_natural_vs_natural_is_exactly_zero`,
 `test_gformula_static_contrast_is_exact_under_common_random_numbers`,
 `test_gformula_threshold_extreme_cutoffs_equal_static`, `test_gformula_covariate_scale_invariance`,
-`test_gformula_bootstrap_is_reproducible_and_thread_invariant`.
+`test_gformula_bootstrap_is_reproducible_and_thread_invariant`, `test_gformula_survival_requires_event_times`,
+`test_gformula_survival_data_validation`, `test_gformula_survival_empty_risk_set_is_an_error`.
 
 ## Running
 
 ```bash
-Rscript validation/r/run.R --check gformula_natural_course
+Rscript validation/r/run.R --check gformula_hazard gformula_hazard_tv gformula_natural_course
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::gformula::
 ```
 
@@ -112,6 +168,9 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics
 
 - Robins, J.M. (1986). A new approach to causal inference in mortality studies with a sustained
   exposure period. *Mathematical Modelling*, 7, 1393-1512.
-- Hernan, M.A. & Robins, J.M. (2020). *Causal Inference: What If*. Chapman & Hall/CRC, ch. 21.
+- Hernan, M.A. & Robins, J.M. (2020). *Causal Inference: What If*. Chapman & Hall/CRC, ch. 17
+  and 21.
+- Keil, A.P., et al. (2014). The parametric g-formula for time-to-event data: intuition and a
+  worked example. *Epidemiology*, 25(6), 889-897.
 - McGrath, S., et al. (2020). gfoRmula: An R package for estimating the effects of sustained
   treatment strategies via the parametric g-formula. *Patterns*, 1(3), 100008.
