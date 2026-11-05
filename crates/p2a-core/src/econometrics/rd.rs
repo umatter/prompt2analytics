@@ -664,8 +664,6 @@ pub struct RdResult {
     pub missing: MissingSummary,
 }
 
-/// The warnings (without the missing-value note, printed last on its own line) and the
-/// `Missing values:` line of a result (also `RdMultiResult`'s).
 /// The warnings without the missing-value note (which prints on its own line, last).
 pub(crate) fn without_missing_note(warnings: &[String], missing: &MissingSummary) -> Vec<String> {
     let note = missing.note();
@@ -1616,11 +1614,16 @@ fn resolve_bandwidths(
     })
 }
 
-/// A contiguous slice of a column view (one copy when the view is strided).
-fn as_slice<'a>(v: &'a ArrayView1<'_, f64>) -> std::borrow::Cow<'a, [f64]> {
+/// A contiguous slice of a column view (one copy, under the allocation ceiling, when the
+/// view is strided).
+fn as_slice<'a>(v: &'a ArrayView1<'_, f64>) -> EconResult<std::borrow::Cow<'a, [f64]>> {
     match v.as_slice() {
-        Some(s) => std::borrow::Cow::Borrowed(s),
-        None => std::borrow::Cow::Owned(v.to_vec()),
+        Some(s) => Ok(std::borrow::Cow::Borrowed(s)),
+        None => {
+            let mut owned = crate::resource::try_with_capacity(v.len(), "RD running variable")?;
+            owned.extend(v.iter().copied());
+            Ok(std::borrow::Cow::Owned(owned))
+        }
     }
 }
 
@@ -1679,9 +1682,9 @@ fn fit_rd(
 
     // Bandwidths: given or selected as rdbwselect; b given, h / rho or selected.
     let resolved = {
-        let xs = as_slice(&x);
-        let ys = as_slice(&cols[0]);
-        let ts = cols.get(1).map(as_slice);
+        let xs = as_slice(&x)?;
+        let ys = as_slice(&cols[0])?;
+        let ts = cols.get(1).map(as_slice).transpose()?;
         resolve_bandwidths(&xs, &ys, ts.as_deref(), cutoff, config)?
     };
     let ((h_left, h_right), (b_left, b_right)) = (resolved.h, resolved.b);
@@ -1713,7 +1716,7 @@ fn fit_rd(
                 message: format!(
                     "Too few observations inside the bias bandwidth b for the bias-correction \
                      polynomial of order q = {q}: {} on the {} side, at least {} are \
-                     needed. Use a larger b (or rho).",
+                     needed. Use a larger b (or a smaller rho).",
                     s.n_b,
                     s.side,
                     q + 1

@@ -185,7 +185,7 @@ fn add_bandwidth_note(result: &RdResult, report: &mut IdentificationReport) {
 ///
 /// A caller-side helper: [`rd_diagnostics()`] cannot call it, because it has the result and
 /// not the data. The value is the coefficient of variation `sd / |mean|` of the estimates
-/// (sample sd, n - 1), 0 for fewer than two estimates and infinity for a zero mean.
+/// (sample sd, n - 1), 0 for fewer than two estimates and infinity when |mean| < 1e-10.
 ///
 /// # Arguments
 ///
