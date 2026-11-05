@@ -552,8 +552,8 @@ struct LinearIv<'a> {
     zx: Array2<f64>,
     /// `Z'y / n`.
     zy: Array1<f64>,
-    /// `Z'Z / n`.
-    zz: Array2<f64>,
+    /// `Z'Z / n`, computed on first use (a fixed-W fit with MDS or HAC meat never needs it).
+    zz: std::cell::OnceCell<Array2<f64>>,
 }
 
 impl<'a> LinearIv<'a> {
@@ -565,8 +565,13 @@ impl<'a> LinearIv<'a> {
             z,
             zx: z.t().dot(x) / n,
             zy: z.t().dot(y) / n,
-            zz: symmetrize(&(z.t().dot(z) / n)),
+            zz: std::cell::OnceCell::new(),
         }
+    }
+
+    fn zz(&self) -> &Array2<f64> {
+        self.zz
+            .get_or_init(|| symmetrize(&(self.z.t().dot(self.z) / self.y.len() as f64)))
     }
 
     fn residuals(&self, theta: ArrayView1<f64>) -> Array1<f64> {
@@ -615,7 +620,7 @@ impl MomentModel for LinearIv<'_> {
         &self,
         _config: &GeneralGmmConfig,
     ) -> EconResult<(Array1<f64>, Option<Convergence>)> {
-        let zz_inv = match sym_inverse(self.zz.view(), SingularPolicy::Error, "Z'Z / n") {
+        let zz_inv = match sym_inverse(self.zz().view(), SingularPolicy::Error, "Z'Z / n") {
             Ok(inv) => inv.inverse,
             Err(EconError::SingularMatrix { .. }) => {
                 let qr = Qr::decompose(self.z.view(), LM_QR_TOL)?;
@@ -647,7 +652,7 @@ impl MomentModel for LinearIv<'_> {
         let e = self.residuals(theta);
         let mean = e.mean().unwrap_or(0.0);
         let sigma2 = e.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / e.len() as f64;
-        Some(&self.zz * sigma2)
+        Some(self.zz() * sigma2)
     }
     fn as_linear(&self) -> Option<&LinearIv<'_>> {
         Some(self)
@@ -757,7 +762,7 @@ fn validate_weight_matrix(w: &Array2<f64>, q: usize) -> EconResult<()> {
     })?;
     let min = eig.iter().fold(f64::INFINITY, |a, &v| a.min(v));
     let max = eig.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
-    if !(min > SYM_RANK_TOL * q as f64 * max) {
+    if min.is_nan() || min <= SYM_RANK_TOL * q as f64 * max {
         return invalid(format!(
             "must be positive definite (smallest eigenvalue {min:.3e})"
         ));
@@ -1124,7 +1129,7 @@ fn var1_prewhiten(u: &Array2<f64>) -> EconResult<(Array2<f64>, Array2<f64>)> {
     // B = A' (q x q): current = lagged B + eps
     let b = ll_inv.inverse.dot(&lagged.t().dot(&current));
     let eps = &current - &lagged.dot(&b);
-    let i_minus_a = Array2::<f64>::eye(q) - &b.t();
+    let i_minus_a = Array2::<f64>::eye(q) - b.t();
     let d = matrix_inverse(&i_minus_a.view()).map_err(|_| EconError::InvalidSpecification {
         message: "prewhitening: I - A is singular (the VAR(1) of the moments has a unit root)"
             .to_string(),
@@ -1169,7 +1174,7 @@ fn gauss_newton(
             }
             lambda *= 0.5;
         };
-        if !(q_next <= q_cur) {
+        if q_next.is_nan() || q_next > q_cur {
             // no step decreases the objective: the minimum up to rounding
             change = 0.0;
             converged = true;
@@ -1248,7 +1253,7 @@ impl<'m> CueObjective<'m> {
                 q,
                 bbar,
                 gamma: c,
-                iid_zz: Some(lin.zz.clone()),
+                iid_zz: Some(lin.zz().clone()),
             });
         }
         let width = resource::checked_len(&[q, k + 1], "CUE stacked moments")?;
@@ -1571,7 +1576,8 @@ fn estimate_normal_distribution(
         });
     }
     let model = NormalMoments { x: data.view() };
-    if !(model.start()[1] > 0.0) {
+    let var = model.start()[1];
+    if var.is_nan() || var <= 0.0 {
         return Err(EconError::InvalidSpecification {
             message: "data has no variation (variance 0); the normal moments are not identified"
                 .to_string(),
