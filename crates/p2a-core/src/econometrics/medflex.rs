@@ -74,8 +74,9 @@ use std::fmt;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::{safe_inverse, xtx, xty};
+use crate::options::Choices;
 use crate::resource;
-use crate::traits::estimator::normal_cdf;
+use crate::traits::estimator::{normal_cdf, validate_level, z_critical};
 
 /// Scale for reporting mediation effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -88,6 +89,75 @@ pub enum EffectScale {
     /// Effects as odds ratios - for binary outcomes with logit link
     OddsRatio,
 }
+
+crate::option_enum!(
+    EffectScale,
+    Choices {
+        option: "scale",
+        values: &[
+            (
+                &[
+                    "difference",
+                    "diff",
+                    "additive",
+                    "risk_difference",
+                    "mean_difference",
+                    "rd",
+                ],
+                EffectScale::Difference,
+            ),
+            (
+                &["ratio", "risk_ratio", "rate_ratio", "relative_risk", "rr"],
+                EffectScale::Ratio,
+            ),
+            (&["odds_ratio", "odds", "or"], EffectScale::OddsRatio),
+        ],
+    },
+    no_display
+);
+
+impl EffectScale {
+    /// The outcome working-model family used when none is configured: Difference ->
+    /// Gaussian, Ratio -> Poisson, OddsRatio -> Binomial.
+    pub fn default_family(self) -> MedflexFamily {
+        match self {
+            Self::Difference => MedflexFamily::Gaussian,
+            Self::Ratio => MedflexFamily::Poisson,
+            Self::OddsRatio => MedflexFamily::Binomial,
+        }
+    }
+}
+
+/// Outcome working-model family, each with its canonical link: gaussian (least squares,
+/// identity), poisson (log), binomial (logit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MedflexFamily {
+    /// Least squares (identity link).
+    #[default]
+    Gaussian,
+    /// Poisson (log link); the outcome must be non-negative.
+    Poisson,
+    /// Binomial (logit link); the outcome must lie in [0, 1].
+    Binomial,
+}
+
+crate::option_enum!(
+    MedflexFamily,
+    Choices {
+        option: "family",
+        values: &[
+            (&["gaussian", "normal", "linear"], MedflexFamily::Gaussian),
+            (
+                &["poisson", "quasipoisson", "count"],
+                MedflexFamily::Poisson
+            ),
+            (
+                &["binomial", "quasibinomial", "logistic", "binary"],
+                MedflexFamily::Binomial,
+            ),
+        ],
+    }
+);
 
 impl fmt::Display for EffectScale {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -419,6 +489,7 @@ pub fn run_medflex(
     let n = y.len();
 
     // Validate inputs
+    validate_level(config.confidence_level, "confidence_level")?;
     if config.bootstrap_ci && config.n_bootstrap < MIN_VALID_BOOTSTRAP {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -567,7 +638,7 @@ pub fn run_medflex(
             beta_3_se,
             mediator_mean_control,
             config.confidence_level,
-        )
+        )?
     };
 
     // Compute p-values (two-sided test against zero)
@@ -936,7 +1007,7 @@ fn delta_method_se(
     beta_3_se: Option<f64>,
     mediator_mean_control: f64,
     confidence_level: f64,
-) -> (f64, f64, f64, (f64, f64), (f64, f64), (f64, f64)) {
+) -> EconResult<(f64, f64, f64, (f64, f64), (f64, f64), (f64, f64))> {
     // Using delta method for product of independent estimates
     // Var(ab) approx= a^2 * Var(b) + b^2 * Var(a)
 
@@ -961,19 +1032,19 @@ fn delta_method_se(
             // Ignoring covariance as approximation
             let te_se = (nde_se.powi(2) + nie_se.powi(2)).sqrt();
 
-            let z = z_critical(confidence_level);
+            let z = z_critical(confidence_level)?;
             let nde = beta_1 + b3 * mediator_mean_control;
             let nie = alpha_1 * sum_beta;
             let te = nde + nie;
 
-            (
+            Ok((
                 te_se,
                 nde_se,
                 nie_se,
                 (te - z * te_se, te + z * te_se),
                 (nde - z * nde_se, nde + z * nde_se),
                 (nie - z * nie_se, nie + z * nie_se),
-            )
+            ))
         }
         _ => {
             // Without interaction:
@@ -988,28 +1059,21 @@ fn delta_method_se(
 
             let te_se = (nde_se.powi(2) + nie_se.powi(2)).sqrt();
 
-            let z = z_critical(confidence_level);
+            let z = z_critical(confidence_level)?;
             let nde = beta_1;
             let nie = alpha_1 * beta_2;
             let te = nde + nie;
 
-            (
+            Ok((
                 te_se,
                 nde_se,
                 nie_se,
                 (te - z * te_se, te + z * te_se),
                 (nde - z * nde_se, nde + z * nde_se),
                 (nie - z * nie_se, nie + z * nie_se),
-            )
+            ))
         }
     }
-}
-
-/// Compute z critical value for given confidence level.
-fn z_critical(confidence_level: f64) -> f64 {
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    normal.inverse_cdf(1.0 - (1.0 - confidence_level) / 2.0)
 }
 
 /// Compute two-sided p-value assuming normal distribution.
@@ -1527,6 +1591,76 @@ mod tests {
             }
         }
         assert!(run(14, true).is_ok());
+    }
+
+    #[test]
+    fn test_effect_scale_parses_aliases_and_rejects_unknown() {
+        EffectScale::choices().validate().unwrap();
+        for (s, want) in [
+            ("difference", EffectScale::Difference),
+            ("Risk Difference", EffectScale::Difference),
+            ("ratio", EffectScale::Ratio),
+            ("risk-ratio", EffectScale::Ratio),
+            ("RR", EffectScale::Ratio),
+            ("odds_ratio", EffectScale::OddsRatio),
+            ("Odds Ratio", EffectScale::OddsRatio),
+            ("odds", EffectScale::OddsRatio),
+            ("OR", EffectScale::OddsRatio),
+        ] {
+            assert_eq!(s.parse::<EffectScale>().unwrap(), want, "{s}");
+        }
+        assert_eq!(EffectScale::OddsRatio.to_string(), "Odds Ratio"); // Display kept
+        match "logratio".parse::<EffectScale>() {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("unknown scale 'logratio'")
+                    && message.contains("difference, ratio, odds_ratio"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_medflex_family_parses_aliases_and_rejects_unknown() {
+        MedflexFamily::choices().validate().unwrap();
+        for (s, want) in [
+            ("gaussian", MedflexFamily::Gaussian),
+            ("Normal", MedflexFamily::Gaussian),
+            ("poisson", MedflexFamily::Poisson),
+            ("quasipoisson", MedflexFamily::Poisson),
+            ("binomial", MedflexFamily::Binomial),
+            ("logistic", MedflexFamily::Binomial),
+        ] {
+            assert_eq!(s.parse::<MedflexFamily>().unwrap(), want, "{s}");
+        }
+        assert_eq!(MedflexFamily::Binomial.to_string(), "binomial");
+        assert_eq!(
+            (
+                EffectScale::Difference.default_family(),
+                EffectScale::Ratio.default_family(),
+                EffectScale::OddsRatio.default_family()
+            ),
+            (
+                MedflexFamily::Gaussian,
+                MedflexFamily::Poisson,
+                MedflexFamily::Binomial
+            )
+        );
+        assert!("gamma".parse::<MedflexFamily>().is_err());
+    }
+
+    #[test]
+    fn test_medflex_rejects_bad_confidence_level() {
+        let (y, t, m, c) = create_test_data();
+        for level in [0.0, 1.0, 1.5, -0.2, f64::NAN] {
+            let mut cfg = MedflexConfig::default();
+            cfg.bootstrap_ci = false;
+            cfg.confidence_level = level;
+            expect_invalid_spec(
+                run_medflex(&y.view(), &t.view(), &m.view(), &c.view(), cfg).unwrap_err(),
+                "confidence_level",
+            );
+        }
     }
 
     #[test]
