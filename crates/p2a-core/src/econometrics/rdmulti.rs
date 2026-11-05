@@ -29,11 +29,13 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::traits::convergence::ResultNotes;
-use crate::traits::estimator::SignificanceLevel;
+use crate::traits::estimator::{
+    SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided, z_critical,
+};
 
 use super::rd::{
-    BandwidthMethod, KernelType, RdConfig, RdResult, VceType, default_rd_level, level_percent,
-    run_rd, validate_rd_config, without_missing_note, write_warnings_and_missing,
+    BandwidthMethod, KernelType, RdConfig, RdResult, VceType, default_rd_level, default_scaleregul,
+    level_percent, run_rd, validate_rd_config, without_missing_note, write_warnings_and_missing,
 };
 
 /// Bandwidth selection strategy for multiple cutoffs.
@@ -116,6 +118,10 @@ pub struct RdMultiConfig {
     pub level: f64,
     /// Whether to perform heterogeneity test across cutoffs.
     pub test_heterogeneity: bool,
+    /// Weight of the bandwidth selector's regularisation (rdbwselect `scaleregul`, default
+    /// 1); used when the bandwidths are selected.
+    #[serde(default = "default_scaleregul")]
+    pub scaleregul: f64,
 }
 
 impl Default for RdMultiConfig {
@@ -132,6 +138,7 @@ impl Default for RdMultiConfig {
             vce: VceType::default(),
             level: 0.95,
             test_heterogeneity: true,
+            scaleregul: 1.0,
         }
     }
 }
@@ -165,6 +172,12 @@ pub struct CutoffResult {
     pub h_left: f64,
     /// Bandwidth used (right).
     pub h_right: f64,
+    /// Bias bandwidth left of the cutoff.
+    #[serde(default)]
+    pub b_left: f64,
+    /// Bias bandwidth right of the cutoff.
+    #[serde(default)]
+    pub b_right: f64,
     /// Weight assigned in pooling.
     pub weight: f64,
     /// Full RD result for this cutoff.
@@ -571,6 +584,8 @@ pub fn run_rd_multi(
                     n_eff_right: rd_result.n_eff_right,
                     h_left: rd_result.h_left,
                     h_right: rd_result.h_right,
+                    b_left: rd_result.b_left,
+                    b_right: rd_result.b_right,
                     weight: 0.0, // Will be computed later
                     full_result: Some(rd_result.clone()),
                     level: config.level,
@@ -616,15 +631,14 @@ pub fn run_rd_multi(
         if config.pooled && n_successful > 0 {
             let (effect, se) = compute_pooled_estimate(&cutoff_results, &weights);
 
-            // Compute CI and p-value
-            use statrs::distribution::{ContinuousCDF, Normal};
-            let normal = Normal::new(0.0, 1.0).unwrap();
-            let alpha = 1.0 - config.level;
-            let z_crit = normal.inverse_cdf(1.0 - alpha / 2.0);
-
+            let z_crit = z_critical(config.level)?;
             let ci = (effect - z_crit * se, effect + z_crit * se);
-            let z = if se > 0.0 { effect / se } else { 0.0 };
-            let p_value = 2.0 * (1.0 - normal.cdf(z.abs()));
+            // se = 0: p = 0 for a nonzero effect and 1 for a zero one, as run_rd
+            let p_value = if se == 0.0 {
+                if effect == 0.0 { 1.0 } else { 0.0 }
+            } else {
+                normal_p_value_two_sided(effect / se)
+            };
             let significance = SignificanceLevel::from_p_value(p_value);
 
             (
@@ -758,6 +772,7 @@ fn per_cutoff_rd_config(config: &RdMultiConfig, h: Option<f64>) -> RdConfig {
         bwselect: config.bwselect,
         vce: config.vce,
         level: config.level,
+        scaleregul: config.scaleregul,
         ..RdConfig::default()
     }
 }
@@ -889,10 +904,8 @@ fn compute_heterogeneity_test(results: &[CutoffResult]) -> HeterogeneityTest {
 
     let df = j - 1;
 
-    // Compute p-value from chi-squared distribution
-    use statrs::distribution::{ChiSquared, ContinuousCDF};
-    let chi2 = ChiSquared::new(df as f64).unwrap_or_else(|_| ChiSquared::new(1.0).unwrap());
-    let p_value = 1.0 - chi2.cdf(q_stat);
+    // Upper tail of chi-squared(J - 1), computed directly (1 - cdf is 0 beyond about 1e-16)
+    let p_value = chi_squared_p_value(q_stat, df as f64);
 
     HeterogeneityTest {
         statistic: q_stat,
@@ -1060,6 +1073,8 @@ mod tests {
                 n_eff_right: 40,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1078,6 +1093,8 @@ mod tests {
                 n_eff_right: 20,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1089,8 +1106,8 @@ mod tests {
 
         // First cutoff has 80 eff obs, second has 40
         // Weights should be 80/120 = 0.667 and 40/120 = 0.333
-        assert!((weights[0] - 0.667).abs() < 0.01);
-        assert!((weights[1] - 0.333).abs() < 0.01);
+        assert!((weights[0] - 2.0 / 3.0).abs() <= 1e-15, "{weights:?}");
+        assert!((weights[1] - 1.0 / 3.0).abs() <= 1e-15, "{weights:?}");
 
         // Weights should sum to 1
         assert!((weights.iter().sum::<f64>() - 1.0).abs() < 1e-10);
@@ -1113,6 +1130,8 @@ mod tests {
                 n_eff_right: 40,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1131,6 +1150,8 @@ mod tests {
                 n_eff_right: 20,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1141,8 +1162,8 @@ mod tests {
 
         // 1/0.01 = 100, 1/0.04 = 25, total = 125
         // Weights: 100/125 = 0.8, 25/125 = 0.2
-        assert!((weights[0] - 0.8).abs() < 0.01);
-        assert!((weights[1] - 0.2).abs() < 0.01);
+        assert!((weights[0] - 0.8).abs() <= 1e-15, "{weights:?}");
+        assert!((weights[1] - 0.2).abs() <= 1e-15, "{weights:?}");
     }
 
     #[test]
@@ -1162,6 +1183,8 @@ mod tests {
                 n_eff_right: 40,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1180,6 +1203,8 @@ mod tests {
                 n_eff_right: 20,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1208,6 +1233,8 @@ mod tests {
                 n_eff_right: 40,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1226,6 +1253,8 @@ mod tests {
                 n_eff_right: 20,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1236,13 +1265,13 @@ mod tests {
         let (effect, se) = compute_pooled_estimate(&results, &weights);
 
         // Pooled effect = 0.5 * 1.0 + 0.5 * 2.0 = 1.5
-        assert!((effect - 1.5).abs() < 1e-10);
+        assert_eq!(effect, 1.5);
 
         // Pooled SE = sqrt(0.5^2 * 0.1^2 + 0.5^2 * 0.2^2)
         //           = sqrt(0.25 * 0.01 + 0.25 * 0.04)
         //           = sqrt(0.0025 + 0.01)
         //           = sqrt(0.0125) ≈ 0.1118
-        assert!((se - 0.1118).abs() < 0.001);
+        assert!((se - 0.11180339887498948).abs() <= 1e-15, "{se}");
     }
 
     #[test]
@@ -1263,6 +1292,8 @@ mod tests {
                 n_eff_right: 400,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1281,6 +1312,8 @@ mod tests {
                 n_eff_right: 400,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1294,8 +1327,18 @@ mod tests {
         assert!(test.statistic > 0.0);
         // Chi-squared statistic should be very large (effects differ by 2 with SE of 0.1)
         // Q ≈ (1-2)^2/0.01 + (3-2)^2/0.01 = 100 + 100 = 200 (approximately)
-        assert!(test.statistic > 50.0);
-        assert!(test.p_value < 0.001);
+        assert!(
+            (test.statistic - 200.0).abs() <= 1e-12 * 200.0,
+            "{}",
+            test.statistic
+        );
+        // R: pchisq(200, 1, lower.tail = FALSE)
+        let want = 2.0884875837625449e-45;
+        assert!(
+            (test.p_value - want).abs() <= 1e-10 * want,
+            "{}",
+            test.p_value
+        );
         assert!(test.significant);
     }
 
@@ -1317,6 +1360,8 @@ mod tests {
                 n_eff_right: 40,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1335,6 +1380,8 @@ mod tests {
                 n_eff_right: 40,
                 h_left: 0.5,
                 h_right: 0.5,
+                b_left: 0.5,
+                b_right: 0.5,
                 weight: 0.0,
                 full_result: None,
                 level: 0.95,
@@ -1344,6 +1391,14 @@ mod tests {
         let test = compute_heterogeneity_test(&results);
 
         // With similar effects, heterogeneity should not be significant
+        let q = 0.055555555555555566;
+        assert!(
+            (test.statistic - q).abs() <= 1e-10 * q,
+            "{}",
+            test.statistic
+        );
+        let p = 0.81366371576679186;
+        assert!((test.p_value - p).abs() <= 1e-10 * p, "{}", test.p_value);
         assert!(!test.significant);
     }
 
@@ -1369,66 +1424,36 @@ mod tests {
     }
 
     #[test]
-    fn test_rd_multi_dataset() {
+    fn test_rd_multi_dataset_recovers_dgp() {
         let (dataset, config) = create_multi_cutoff_dataset();
+        let res =
+            run_rd_multi_dataset(&dataset, "outcome", "running", Some("cutoff_group"), config)
+                .unwrap();
+        assert_eq!(res.n_cutoffs, 2);
+        assert!(res.pooled_effect.is_some());
+        assert!(res.heterogeneity_test.is_some());
+        assert_eq!(res.cutoff_results.len(), 2);
 
-        let result =
-            run_rd_multi_dataset(&dataset, "outcome", "running", Some("cutoff_group"), config);
-
-        match result {
-            Ok(res) => {
-                assert_eq!(res.n_cutoffs, 2);
-                assert!(res.pooled_effect.is_some());
-                assert!(res.heterogeneity_test.is_some());
-
-                // Check that cutoff-specific effects are reasonable
-                assert_eq!(res.cutoff_results.len(), 2);
-
-                // First cutoff (c=0) should have effect around 1.5
-                let effect1 = res.cutoff_results[0].effect;
-                assert!(
-                    (effect1 - 1.5).abs() < 1.0,
-                    "Cutoff 1 effect {} too far from 1.5",
-                    effect1
-                );
-
-                // Second cutoff (c=2) should have effect around 2.5
-                let effect2 = res.cutoff_results[1].effect;
-                assert!(
-                    (effect2 - 2.5).abs() < 1.5,
-                    "Cutoff 2 effect {} too far from 2.5",
-                    effect2
-                );
-
-                // Weights should sum to 1
-                let weight_sum: f64 = res.weights.iter().sum();
-                assert!((weight_sum - 1.0).abs() < 1e-10);
-
-                // Display should work
-                let output = format!("{}", res);
-                assert!(output.contains("Multi-Cutoff RD"));
-                assert!(output.contains("Pooled Treatment Effect"));
-            }
-            Err(e) => {
-                // May fail with small synthetic data
-                eprintln!("Test note: RD multi failed with: {:?}", e);
-            }
-        }
-    }
-
-    #[test]
-    fn test_rd_multi_auto_assignment() {
-        let (dataset, mut config) = create_multi_cutoff_dataset();
-        config.cutoffs = vec![0.0, 2.0];
-
-        // Run without specifying cutoff column (auto-assignment)
-        let result = run_rd_multi_dataset(
-            &dataset, "outcome", "running", None, // Auto-assign
-            config,
+        // First cutoff (c=0) should have effect around 1.5 (rdrobust: 1.508427)
+        let effect1 = res.cutoff_results[0].effect;
+        assert!(
+            (effect1 - 1.5).abs() < 1.0,
+            "Cutoff 1 effect {} too far from 1.5",
+            effect1
         );
+        // Second cutoff (c=2) should have effect around 2.5 (rdrobust: 2.536491)
+        let effect2 = res.cutoff_results[1].effect;
+        assert!(
+            (effect2 - 2.5).abs() < 1.5,
+            "Cutoff 2 effect {} too far from 2.5",
+            effect2
+        );
+        let weight_sum: f64 = res.weights.iter().sum();
+        assert!((weight_sum - 1.0).abs() < 1e-10);
 
-        // Should work even with auto-assignment
-        assert!(result.is_ok() || result.is_err()); // Either way, doesn't panic
+        let output = format!("{}", res);
+        assert!(output.contains("Multi-Cutoff RD"));
+        assert!(output.contains("Pooled Treatment Effect"));
     }
 
     #[test]
@@ -1450,22 +1475,6 @@ mod tests {
             run_rd_multi_dataset(&dataset, "outcome", "running", Some("cutoff_group"), config);
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_rd_multi_global_bandwidth() {
-        let (dataset, mut config) = create_multi_cutoff_dataset();
-        config.bandwidth = RdMultiBandwidth::Global(0.5);
-
-        let result =
-            run_rd_multi_dataset(&dataset, "outcome", "running", Some("cutoff_group"), config);
-
-        if let Ok(res) = result {
-            // All cutoffs should use bandwidth 0.5
-            for cr in &res.cutoff_results {
-                assert!((cr.h_left - 0.5).abs() < 0.1 || cr.h_left > 0.0);
-            }
-        }
     }
 
     // =========================================================================
@@ -1767,16 +1776,167 @@ mod tests {
         let result =
             run_rd_multi_dataset(&dataset, "outcome", "running", Some("cutoff_group"), config);
 
-        if let Ok(res) = result {
-            let output = format!("{}", res);
-            assert!(output.contains("Multi-Cutoff RD Estimation Results"));
-            assert!(output.contains("Cutoff-Specific Effects"));
-            assert!(output.contains("Pooled Treatment Effect"));
+        let res = result.unwrap();
+        let output = format!("{}", res);
+        assert!(output.contains("Multi-Cutoff RD Estimation Results"));
+        assert!(output.contains("Cutoff-Specific Effects"));
+        assert!(output.contains("Pooled Treatment Effect"));
 
-            // Cutoff result display
-            let cr_output = format!("{}", res.cutoff_results[0]);
-            assert!(cr_output.contains("Effect:"));
-            assert!(cr_output.contains("95% CI:"));
+        // Cutoff result display
+        let cr_output = format!("{}", res.cutoff_results[0]);
+        assert!(cr_output.contains("Effect:"));
+        assert!(cr_output.contains("95% CI:"));
+    }
+
+    // =========================================================================
+    // Pins: rdrobust with rdbwselect bandwidths per cutoff (causal_rdbw.R, multi_*)
+    // =========================================================================
+
+    fn col(ds: &Dataset, name: &str) -> Vec<f64> {
+        ds.df()
+            .column(name)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+
+    /// rd_sim stacked twice: (y, x) for cutoff 0 and (yf, x + 2) for cutoff 2.
+    fn two_cutoff_dataset(ds: &Dataset) -> Dataset {
+        let (x, y, yf) = (col(ds, "x"), col(ds, "y"), col(ds, "yf"));
+        let xs: Vec<f64> = x.iter().copied().chain(x.iter().map(|v| v + 2.0)).collect();
+        let ys: Vec<f64> = y.iter().copied().chain(yf.iter().copied()).collect();
+        let g: Vec<i64> = std::iter::repeat_n(0, x.len())
+            .chain(std::iter::repeat_n(1, x.len()))
+            .collect();
+        Dataset::new(df! { "y" => ys, "x" => xs, "g" => g }.unwrap())
+    }
+
+    fn two_cutoff_config(f: impl FnOnce(&mut RdMultiConfig)) -> RdMultiConfig {
+        let mut c = RdMultiConfig::default();
+        c.cutoffs = vec![0.0, 2.0];
+        c.bandwidth = RdMultiBandwidth::PerCutoffOptimal;
+        f(&mut c);
+        c
+    }
+
+    fn pooled(r: &RdMultiResult) -> [f64; 7] {
+        let ci = r.pooled_ci.unwrap();
+        [
+            r.pooled_effect.unwrap(),
+            r.pooled_se.unwrap(),
+            ci.0,
+            ci.1,
+            r.pooled_p_value.unwrap(),
+            r.weights[0],
+            r.weights[1],
+        ]
+    }
+
+    fn two_cutoffs(
+        case_id: &str,
+        f: impl FnOnce(&mut RdMultiConfig),
+    ) -> (p2a_validation::Case, RdMultiResult) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let two = two_cutoff_dataset(&ds);
+        let r = run_rd_multi_dataset(&two, "y", "x", Some("g"), two_cutoff_config(f)).unwrap();
+        (case, r)
+    }
+
+    #[test]
+    fn test_validate_rd_multi_two_cutoffs_selected() {
+        use p2a_validation::{Check, Tol};
+        let n = 1000;
+        let (case, ds) = crate::test_support::load_case("rd_bwselect_sharp");
+        let two = two_cutoff_dataset(&ds);
+        let r = run_rd_multi_dataset(&two, "y", "x", Some("g"), two_cutoff_config(|_| {})).unwrap();
+        // nearest-cutoff assignment reproduces the groups
+        let a = run_rd_multi_dataset(&two, "y", "x", None, two_cutoff_config(|_| {})).unwrap();
+        assert_eq!(a.cutoff_results.len(), r.cutoff_results.len());
+        for (cr, ca) in r.cutoff_results.iter().zip(&a.cutoff_results) {
+            assert_eq!(cr.effect, ca.effect);
+            assert_eq!(cr.se, ca.se);
+            assert_eq!(cr.h_left, ca.h_left);
+            assert_eq!(cr.b_left, ca.b_left);
         }
+        let mut check = Check::new(&case);
+        for (cr, prefix) in r.cutoff_results.iter().zip(["auto", "multi_c2"]) {
+            let k = |s: &str| format!("{prefix}_{s}");
+            check
+                .vector(&k("h"), &[cr.h_left, cr.h_right], Tol::coef(n))
+                .vector(&k("b"), &[cr.b_left, cr.b_right], Tol::coef(n))
+                .scalar(&k("coef_bc"), cr.effect, Tol::coef(n))
+                .scalar(&k("se_robust"), cr.se, Tol::se(n))
+                .scalar(&k("p_robust"), cr.p_value, Tol::p_value(n))
+                .vector(&k("ci_robust"), &[cr.ci.0, cr.ci.1], Tol::stat(n))
+                .vector(
+                    &k("n_h"),
+                    &[cr.n_eff_left as f64, cr.n_eff_right as f64],
+                    Tol::exact(),
+                );
+        }
+        check.vector("multi_pool_sample", &pooled(&r), Tol::stat(n));
+        let het = r.heterogeneity_test.as_ref().unwrap();
+        assert_eq!(het.df, 1);
+        check.vector("multi_het", &[het.statistic, het.p_value], Tol::stat(n));
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_rd_multi_pooling_weights() {
+        use p2a_validation::{Check, Tol};
+        let n = 1000;
+        let (case, iv) = two_cutoffs("rd_bwselect_sharp", |c| {
+            c.pooling_weights = PoolingWeights::InverseVariance
+        });
+        let (_, eq) = two_cutoffs("rd_bwselect_sharp", |c| {
+            c.pooling_weights = PoolingWeights::Equal
+        });
+        Check::new(&case)
+            .vector("multi_pool_iv", &pooled(&iv), Tol::stat(n))
+            .vector("multi_pool_equal", &pooled(&eq), Tol::stat(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_rd_multi_global_bandwidth() {
+        use p2a_validation::{Check, Tol};
+        let n = 1000;
+        let (case, r) = two_cutoffs("rd_bwselect_sharp", |c| {
+            c.bandwidth = RdMultiBandwidth::Global(0.3)
+        });
+        for cr in &r.cutoff_results {
+            assert_eq!(
+                [cr.h_left, cr.h_right, cr.b_left, cr.b_right],
+                [0.3, 0.3, 0.3, 0.3]
+            );
+        }
+        let effects: Vec<f64> = r.cutoff_results.iter().map(|c| c.effect).collect();
+        let ses: Vec<f64> = r.cutoff_results.iter().map(|c| c.se).collect();
+        Check::new(&case)
+            .vector("multi_g03_coef_bc", &effects, Tol::coef(n))
+            .vector("multi_g03_se_robust", &ses, Tol::se(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_rd_multi_level_cerrd_scaleregul() {
+        use p2a_validation::{Check, Tol};
+        let n = 1000;
+        let (case, r90) = two_cutoffs("rd_bwselect_sharp", |c| c.level = 0.90);
+        let (_, cer) = two_cutoffs("rd_bwselect_sharp", |c| c.bwselect = BandwidthMethod::CerRd);
+        let (_, noreg) = two_cutoffs("rd_bwselect_sharp", |c| c.scaleregul = 0.0);
+        let c2 = &r90.cutoff_results[1];
+        let k2 = &cer.cutoff_results[1];
+        let z = &noreg.cutoff_results[0];
+        Check::new(&case)
+            .vector("multi_c2_ci90_robust", &[c2.ci.0, c2.ci.1], Tol::stat(n))
+            .vector("multi_c2_cerrd_h", &[k2.h_left, k2.h_right], Tol::coef(n))
+            .scalar("multi_c2_cerrd_coef_bc", k2.effect, Tol::coef(n))
+            .vector("noreg_auto_h", &[z.h_left, z.h_right], Tol::coef(n))
+            .finish();
     }
 }
