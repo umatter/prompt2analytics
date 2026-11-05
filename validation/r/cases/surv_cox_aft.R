@@ -153,3 +153,43 @@ case("surv_aft", "econometrics/survival", "Accelerated failure time (survreg): w
   list(values = v, reference = "survival::survreg(dist, survreg.control(rel.tolerance = 1e-12)); summary.survreg; AIC; BIC",
        call = "survreg(Surv(time, status) ~ age + sex + ph.ecog, data = lung, dist)", packages = "survival")
 })
+
+case("surv_competing_risks", "econometrics/survival", "Aalen-Johansen CIF of two competing causes with survfit's standard errors and log-scale limits; continuous times and integer times with ties", function(ctx) {
+  set.seed(20261101)
+  sim <- function(n, r1, r2, lo, hi) {
+    t1 <- rexp(n, r1); t2 <- rexp(n, r2); cens <- runif(n, lo, hi)
+    tt <- pmin(t1, t2, cens)
+    list(tt = tt, ev = ifelse(tt == cens, 0L, ifelse(tt == t1, 1L, 2L)))
+  }
+  a <- sim(200, 0.10, 0.06, 2, 18)
+  cont <- ctx$gen_dataset("surv_cr_cont", data.frame(id = seq_len(200), time = round(a$tt, 6), event_type = a$ev))
+  b <- sim(40, 0.08, 0.05, 5, 30)
+  ties <- ctx$gen_dataset("surv_cr_ties", data.frame(id = seq_len(40), time = as.integer(ceiling(b$tt)), event_type = b$ev))
+  stopifnot(anyDuplicated(cont$time) == 0, is.integer(ties$time), anyDuplicated(ties$time) > 0,
+            all(c(1L, 2L) %in% ties$event_type), all(c(1L, 2L) %in% cont$event_type))
+  v <- list()
+  for (nm in c("cont", "ties")) {
+    d <- if (nm == "cont") cont else ties
+    for (lev in c(0.95, 0.5)) {
+      f <- survfit(Surv(time, factor(event_type, levels = 0:2)) ~ 1, data = d, conf.int = lev)
+      stopifnot(identical(f$states, c("(s0)", "1", "2")), f$conf.type == "log")
+      tag <- sprintf("%s_ci%d", nm, round(100 * lev))
+      for (k in 1:2) {
+        v[[sprintf("%s_lower_%d", tag, k)]] <- vec(f$lower[, k + 1])
+        v[[sprintf("%s_upper_%d", tag, k)]] <- vec(f$upper[, k + 1])
+      }
+      if (lev == 0.95) {
+        v[[paste0(nm, "_times")]] <- vec(f$time)
+        for (k in 1:2) {
+          v[[sprintf("%s_cif_%d", nm, k)]] <- vec(f$pstate[, k + 1])
+          v[[sprintf("%s_se_%d", nm, k)]] <- vec(f$std.err[, k + 1])
+        }
+        v[[paste0(nm, "_n")]] <- nrow(d)
+      }
+    }
+  }
+  list(values = v, dataset = "validation/datasets/generated/surv_cr_cont.csv",   # analysis dataset (harness default: the last one touched)
+       reference = "survival::survfit(Surv(time, factor(event, levels = 0:2)) ~ 1, conf.int = 0.95 | 0.5): pstate, std.err, lower, upper (multi-state Aalen-Johansen; conf.type 'log')",
+       call = "survfit(Surv(time, factor(event_type, 0:2)) ~ 1, data = surv_cr_cont | surv_cr_ties, conf.int = level)",
+       packages = "survival")
+})

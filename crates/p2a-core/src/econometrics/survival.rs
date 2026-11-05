@@ -5,7 +5,7 @@
 //! - Log-rank test (comparison of survival curves)
 //! - Cox Proportional Hazards model (semi-parametric regression)
 //! - Accelerated Failure Time models (parametric regression)
-//! - Competing risks / Aalen-Johansen estimator
+//! - Competing risks / Aalen-Johansen estimator, with survfit's delta-method standard errors
 //!
 //! # References
 //!
@@ -2998,11 +2998,11 @@ pub struct CumulativeIncidence {
     pub times: Vec<f64>,
     /// Cumulative incidence F(t)
     pub incidence: Vec<f64>,
-    /// Standard errors
+    /// Delta-method SE of F(t), as survfit's multi-state `std.err`.
     pub std_errors: Vec<f64>,
-    /// Lower confidence interval
+    /// Lower limit, log scale as survfit's `conf.type = "log"`; NaN while F(t) = 0.
     pub ci_lower: Vec<f64>,
-    /// Upper confidence interval
+    /// Upper limit, log scale, capped at 1; NaN while F(t) = 0.
     pub ci_upper: Vec<f64>,
 }
 
@@ -3193,9 +3193,12 @@ pub fn run_competing_risks(
         .collect();
 
     let mut current_risk = n_obs;
-    let mut km_surv = 1.0; // Kaplan-Meier for overall survival
-    let mut cum_incidence: Vec<f64> = vec![0.0; event_types_vec.len()];
-    let mut variance: Vec<f64> = vec![0.0; event_types_vec.len()];
+    let mut km_surv = 1.0; // Kaplan-Meier for overall survival, S(t-) before each time
+    let n_types = event_types_vec.len();
+    let mut cum_incidence = crate::resource::try_vec(n_types, 0.0, "competing risks")?;
+    // Running sums of the delta-method variance per cause (CifVarianceSums).
+    let mut sums =
+        crate::resource::try_vec(n_types, CifVarianceSums::default(), "competing risks")?;
 
     for (time, events_at_time) in time_events {
         let t = time.0;
@@ -3209,43 +3212,42 @@ pub fn run_competing_risks(
         let total_censored = *events_at_time.get(&0).unwrap_or(&0);
 
         if current_risk > 0 {
-            // Update cumulative incidence for each event type
+            let n_j = current_risk as f64;
+            let d_j = total_events as f64;
             for (idx, &event_type) in event_types_vec.iter().enumerate() {
-                let d_k = *events_at_time.get(&event_type).unwrap_or(&0);
-                if d_k > 0 {
-                    // Aalen-Johansen increment
-                    let increment = km_surv * (d_k as f64 / current_risk as f64);
-                    cum_incidence[idx] += increment;
-
-                    // Variance (simplified Greenwood-type formula)
-                    variance[idx] += (km_surv.powi(2) * d_k as f64)
-                        / (current_risk as f64 * current_risk as f64);
-                }
+                let d_k = *events_at_time.get(&event_type).unwrap_or(&0) as f64;
+                // Aalen-Johansen increment
+                cum_incidence[idx] += km_surv * d_k / n_j;
+                sums[idx].add(n_j, d_j, d_k, km_surv, cum_incidence[idx]);
             }
-
             // Update Kaplan-Meier for overall survival
             if total_events > 0 {
-                km_surv *= 1.0 - (total_events as f64 / current_risk as f64);
+                km_surv *= 1.0 - d_j / n_j;
             }
         }
 
         // Store results for this time point
         for (idx, cif) in cifs.iter_mut().enumerate() {
+            let f_k = cum_incidence[idx];
+            let se = sums[idx].variance(f_k).max(0.0).sqrt();
             cif.times.push(t);
-            cif.incidence.push(cum_incidence[idx]);
-            let se = variance[idx].sqrt();
+            cif.incidence.push(f_k);
             cif.std_errors.push(se);
 
-            // Confidence intervals using log transformation
-            let (lo, hi) = if cum_incidence[idx] > 0.0 && cum_incidence[idx] < 1.0 {
-                let log_cif = cum_incidence[idx].ln();
-                let se_log = se / cum_incidence[idx];
-                ((log_cif - z * se_log).exp(), (log_cif + z * se_log).exp())
+            // Confidence limits on the log scale, as survfit's conf.type = "log"; undefined
+            // (NaN, R's NA) while the incidence is 0.
+            let (lo, hi) = if f_k > 0.0 {
+                let log_cif = f_k.ln();
+                let se_log = se / f_k;
+                (
+                    (log_cif - z * se_log).exp().clamp(0.0, 1.0),
+                    (log_cif + z * se_log).exp().clamp(0.0, 1.0),
+                )
             } else {
-                (cum_incidence[idx], cum_incidence[idx])
+                (f64::NAN, f64::NAN)
             };
-            cif.ci_lower.push(lo.max(0.0).min(1.0));
-            cif.ci_upper.push(hi.max(0.0).min(1.0));
+            cif.ci_lower.push(lo);
+            cif.ci_upper.push(hi);
         }
 
         current_risk -= total_events + total_censored;
@@ -3260,6 +3262,46 @@ pub fn run_competing_risks(
         conf_level,
         missing: cols.missing().clone(),
     })
+}
+
+/// Running sums of the delta-method variance of one cause's cumulative incidence F_k, as
+/// survfit reports it for the multi-state Aalen-Johansen estimate. At the distinct times t_j
+/// (n_j at risk, d_j events of any cause, d_kj of cause k, S_{j-1} the overall Kaplan-Meier
+/// before t_j and F_j = F_k(t_j)):
+///
+/// ```text
+/// Var F_k(t) = sum_{t_j <= t} [ a_j (F - F_j)^2 + b_j - 2 c_j (F - F_j) ],   F = F_k(t)
+///   a_j = d_j / (n_j (n_j - d_j))   (0 when n_j = d_j)
+///   b_j = S_{j-1}^2 d_kj (n_j - d_kj) / n_j^3
+///   c_j = S_{j-1} d_kj / n_j^2
+/// ```
+///
+/// expanded in F so that each time costs O(1).
+#[derive(Debug, Clone, Copy, Default)]
+struct CifVarianceSums {
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    b: f64,
+    c0: f64,
+    c1: f64,
+}
+
+impl CifVarianceSums {
+    fn add(&mut self, n: f64, d: f64, dk: f64, s_prev: f64, f_j: f64) {
+        let a = if n > d { d / (n * (n - d)) } else { 0.0 };
+        let c = s_prev * dk / (n * n);
+        self.a0 += a;
+        self.a1 += a * f_j;
+        self.a2 += a * f_j * f_j;
+        self.b += s_prev * s_prev * dk * (n - dk) / (n * n * n);
+        self.c0 += c;
+        self.c1 += c * f_j;
+    }
+
+    fn variance(&self, f: f64) -> f64 {
+        f * f * self.a0 - 2.0 * f * self.a1 + self.a2 + self.b - 2.0 * (f * self.c0 - self.c1)
+    }
 }
 
 // =============================================================================
@@ -3396,8 +3438,8 @@ mod tests {
     // =========================================================================
     // Validation Tests: Compare against R's survival package
     // Kaplan-Meier and the log-rank test are R-pinned below (validation/r/cases/
-    // survival.R); the Cox, AFT and competing-risk checks are property checks,
-    // not R-pinned (validation/econometrics/survival_models.md).
+    // survival.R); Cox, AFT and competing risks further down (surv_cox_aft.R,
+    // validation/econometrics/survival.md, Test Cases 5-8).
     // =========================================================================
 
     /// summary(fit, times = t): the row of the last time <= t, and the number at risk at t
@@ -5156,5 +5198,99 @@ mod tests {
                 Tol::iterative(1e-7),
             )
             .finish();
+    }
+
+    // =========================================================================
+    // Competing risks: R-pinned (case surv_competing_risks)
+    // =========================================================================
+
+    /// ECON-78: CIF SEs and log-scale limits as survfit (multi-state Aalen-Johansen), continuous
+    /// and tied times, levels 0.95 and 0.5. Before: SEs from sum S(t-)^2 d_k / n^2, larger than
+    /// survfit's.
+    #[test]
+    fn test_validate_competing_risks_se_survfit() {
+        let (case, cont) = load_case("surv_competing_risks"); // analysis dataset: surv_cr_cont
+        let ties = generated_dataset("surv_cr_ties");
+        let mut check = Check::new(&case);
+        for (tag, ds) in [("cont", &cont), ("ties", &ties)] {
+            let n = case.scalar(&format!("{tag}_n")) as usize;
+            for (lev, pct) in [(0.95, 95), (0.5, 50)] {
+                let r = run_competing_risks(ds, "time", "event_type", lev).unwrap();
+                assert_eq!(r.event_types, vec![1, 2]);
+                for (k, cif) in r.cifs.iter().enumerate() {
+                    let k1 = k + 1;
+                    if pct == 95 {
+                        check
+                            .vector(&format!("{tag}_times"), &cif.times, Tol::exact())
+                            .vector(&format!("{tag}_cif_{k1}"), &cif.incidence, Tol::coef(n))
+                            .vector(&format!("{tag}_se_{k1}"), &cif.std_errors, Tol::se(n));
+                    }
+                    check
+                        .vector(
+                            &format!("{tag}_ci{pct}_lower_{k1}"),
+                            &cif.ci_lower,
+                            Tol::stat(n),
+                        )
+                        .vector(
+                            &format!("{tag}_ci{pct}_upper_{k1}"),
+                            &cif.ci_upper,
+                            Tol::stat(n),
+                        );
+                }
+            }
+        }
+        check.finish();
+    }
+
+    /// The O(m) running-sum variance equals the direct double sum over the event times (tied
+    /// times; no R).
+    #[test]
+    fn test_competing_risks_variance_running_sums_match_direct_sum() {
+        let ds = generated_dataset("surv_cr_ties");
+        let time: Vec<f64> = i64_values(&ds, "time").iter().map(|&t| t as f64).collect();
+        let ev = i64_values(&ds, "event_type");
+        let r = run_competing_risks(&ds, "time", "event_type", 0.95).unwrap();
+        let mut uniq = time.clone();
+        uniq.sort_by(f64::total_cmp);
+        uniq.dedup();
+        for (k, cif) in r.cifs.iter().enumerate() {
+            let cause = k as i64 + 1;
+            let (mut s, mut f) = (1.0, 0.0);
+            // (a_j, b_j, c_j, F_j) per time
+            let mut terms: Vec<(f64, f64, f64, f64)> = Vec::new();
+            for (j, &t) in uniq.iter().enumerate() {
+                let n = time.iter().filter(|&&x| x >= t).count() as f64;
+                let at = |pred: &dyn Fn(i64) -> bool| {
+                    time.iter()
+                        .zip(&ev)
+                        .filter(|&(&x, &e)| x == t && pred(e))
+                        .count() as f64
+                };
+                let d = at(&|e| e > 0);
+                let dk = at(&|e| e == cause);
+                let s_prev = s;
+                f += s_prev * dk / n;
+                s *= 1.0 - d / n;
+                let a = if n > d { d / (n * (n - d)) } else { 0.0 };
+                terms.push((
+                    a,
+                    s_prev * s_prev * dk * (n - dk) / (n * n * n),
+                    s_prev * dk / (n * n),
+                    f,
+                ));
+                let var: f64 = terms
+                    .iter()
+                    .map(|&(a, b, c, fj)| a * (f - fj).powi(2) + b - 2.0 * c * (f - fj))
+                    .sum();
+                let se = var.max(0.0).sqrt();
+                assert_eq!(cif.times[j], t);
+                assert!((cif.incidence[j] - f).abs() <= 1e-14, "cause {cause} t {t}");
+                assert!(
+                    (cif.std_errors[j] - se).abs() <= 1e-12 * se + 1e-15,
+                    "cause {cause} t {t}: {} vs direct {se}",
+                    cif.std_errors[j]
+                );
+            }
+        }
     }
 }

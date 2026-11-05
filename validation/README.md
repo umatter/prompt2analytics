@@ -339,7 +339,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Survival columns (Int64, na.omit, Surv() status coding) | [survival.md](econometrics/survival.md) | R-pinned |
 | Cox PH (Breslow/Efron, robust and clustered SEs) | [survival.md](econometrics/survival.md) | R-pinned (concordance not pinned, ECON-89) |
 | AFT Models | [survival.md](econometrics/survival.md) | R-pinned |
-| Competing Risks | [survival.md](econometrics/survival.md) | not R-pinned |
+| Competing Risks | [survival.md](econometrics/survival.md) | R-pinned |
 
 ### Time Series
 | Method | File | Status |

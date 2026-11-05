@@ -1,4 +1,4 @@
-# Validation: Survival Analysis (Kaplan-Meier, log-rank, Cox PH, AFT, survival columns)
+# Validation: Survival Analysis (Kaplan-Meier, log-rank, Cox PH, AFT, competing risks, survival columns)
 
 ## Method Overview
 
@@ -13,6 +13,8 @@ This document covers what is pinned to R's `survival` package:
   score tests, convergence and aliased covariates.
 - **Accelerated failure time**: `run_aft` (MCP `aft`, CLI `survival aft`), as `survreg` with
   `dist = "weibull"`, `"exponential"`, `"lognormal"`, `"loglogistic"`.
+- **Competing risks**: `run_competing_risks` (MCP `competing_risks`, CLI `survival competing-risks`): the
+  Aalen-Johansen cumulative incidence with survfit's multi-state standard errors and log-scale limits.
 - **Survival columns** of all five survival entry points (Kaplan-Meier, log-rank, Cox PH, AFT,
   competing risks): integer, float and logical columns, rows with missing values dropped and
   reported, status coded as `Surv()` codes it.
@@ -37,6 +39,7 @@ The R reference cases are in `validation/r/cases/survival.R` and (Cox, AFT) `val
 | `surv_data_handling` | `surv_km_lung`, `surv_logrank_lung`, `surv_logrank_small`, `surv_km_small` | `test_validate_na_survival_int64_columns`, `test_validate_surv_status_coding_lung`, `test_validate_surv_status_invalid_codes_are_errors`, `test_validate_na_survival_missing_rows_are_dropped_and_reported`, `test_validate_na_survival_bad_columns_name_the_column`; MCP `test_validate_mcp_survival_tools_accept_integer_columns`; CLI `test_validate_cli_survival_cox_aft_integer_columns` |
 | `surv_cox` | `surv_cox_robust`, `surv_cox_ties_small` | `test_validate_cox_ties_small`, `test_validate_cox_breslow_row_order_invariant`, `test_validate_cox_efron_model`, `test_validate_cox_breslow_model`, `test_validate_cox_converges_at_large_scale`, `test_validate_cox_aliased_covariate`, `test_validate_cox_default_ties_is_efron` |
 | `surv_cox_robust` | `surv_cox_robust` | `test_validate_cox_efron_robust`, `test_validate_cox_breslow_robust`, `test_validate_cox_cluster` |
+| `surv_competing_risks` | `surv_competing_risks` | `test_validate_competing_risks_se_survfit` |
 | `surv_aft` | `surv_aft` | `test_validate_aft_weibull`, `test_validate_aft_exponential`, `test_validate_aft_lognormal`, `test_validate_aft_loglogistic`, `test_validate_aft_converges_at_any_covariate_scale`, `test_validate_aft_aliased_covariate` |
 
 The core tests are in `crates/p2a-core/src/econometrics/survival.rs`, the MCP tests in
@@ -378,6 +381,50 @@ Tests: `test_validate_aft_weibull`, `test_validate_aft_exponential`, `test_valid
 
 ---
 
+## Test Case 8: Competing Risks (`surv_competing_risks`)
+
+### R Code
+```r
+# validation/r/cases/surv_cox_aft.R: two simulated datasets with causes 1 and 2 and censoring (0)
+# surv_cr_cont.csv: 200 rows, continuous times (no ties); surv_cr_ties.csv: 40 rows, integer times with ties
+survfit(Surv(time, factor(event_type, levels = 0:2)) ~ 1, data = d, conf.int = 0.95 | 0.5)
+# multi-state Aalen-Johansen: f$pstate, f$std.err, f$lower, f$upper (conf.type "log")
+```
+
+`run_competing_risks` (MCP `competing_risks`, CLI `survival competing-risks`) estimates each cause's cumulative
+incidence F_k(t) by Aalen-Johansen at every distinct time. Its standard error is survfit's multi-state
+`std.err`, the delta-method variance: at the distinct times t_j (n_j at risk, d_j events of any cause, d_kj of
+cause k, S_{j-1} the overall Kaplan-Meier before t_j, F_j = F_k(t_j)),
+
+```text
+Var F_k(t) = sum_{t_j <= t} [ a_j (F - F_j)^2 + b_j - 2 c_j (F - F_j) ],   F = F_k(t)
+  a_j = d_j / (n_j (n_j - d_j))   (0 when n_j = d_j)
+  b_j = S_{j-1}^2 d_kj (n_j - d_kj) / n_j^3
+  c_j = S_{j-1} d_kj / n_j^2
+```
+
+computed from six running sums per cause (O(1) per time). The limits are log-scale, exp(log F -/+ z se / F),
+capped at 1, and NaN while F = 0 (R's NA). Before ECON-78 was fixed the variance was sum S_{j-1}^2 d_kj / n_j^2,
+which leaves out the overall-survival terms: the SEs were up to 42 % (continuous times) and 50 % (tied times)
+larger than survfit's on these data.
+
+**Selected values** (level 0.95; full vectors in `validation/expected/surv_competing_risks.json`):
+
+| Data | t | F_1 | se_1 | 95% limits | F_2 | se_2 | 95% limits |
+|------|---|-----|------|------------|-----|------|------------|
+| cont | 1.38412 | 0.17 | 0.0265612 | (0.125157, 0.23091) | 0.085 | 0.0197199 | (0.0539437, 0.133936) |
+| cont | 3.10479 | 0.302923 | 0.0327116 | (0.24514, 0.374327) | 0.161857 | 0.0262233 | (0.117821, 0.222351) |
+| cont | 17.1796 | 0.551658 | 0.041043 | (0.476805, 0.638261) | 0.352108 | 0.0383854 | (0.284368, 0.435984) |
+| ties | 5 | 0.275 | 0.0706001 | (0.166267, 0.454841) | 0.15 | 0.0564579 | (0.0717316, 0.313669) |
+| ties | 9 | 0.380625 | 0.0776403 | (0.255193, 0.56771) | 0.281875 | 0.0722212 | (0.170594, 0.465746) |
+| ties | 17 | 0.520125 | 0.0866932 | (0.375173, 0.721081) | 0.479875 | 0.0866932 | (0.336784, 0.683761) |
+
+Tests: `test_validate_competing_risks_se_survfit` (times, CIF, SE and the limits at levels 0.95 and 0.5 at every
+time of both datasets); property: `test_competing_risks_variance_running_sums_match_direct_sum` (the running sums
+equal the direct double sum on the tied data).
+
+---
+
 ## Column Types and Missing Values
 
 Every survival entry point (Kaplan-Meier, log-rank, Cox PH, AFT, competing risks) reads its
@@ -481,6 +528,9 @@ Tolerances follow the table in `validation/README.md`.
 | Cox tie fixture (n = 10) | coefficient; SE and statistics | 1e-6; 1e-5 relative |
 | Cox at the default eps | coefficients against the tight fit | `Tol::iterative(1e-7)` |
 | Cox, AFT | n, events, clusters, aliased columns | exact |
+| Competing risks (n = 40; 200) | CIF | `Tol::coef(n)`: 1e-6; 1e-8 relative |
+| Competing risks | SE, limits | `Tol::se(n)` / `Tol::stat(n)`: 1e-5; 1e-6 relative |
+| Competing risks | times | exact |
 | Survival columns | rows used, events, error types | exact |
 | CLI and MCP text | printed values | print precision |
 
