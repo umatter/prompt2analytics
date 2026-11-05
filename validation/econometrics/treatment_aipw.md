@@ -4,8 +4,9 @@
 
 `run_doubly_robust()` (`crates/p2a-core/src/econometrics/treatment.rs`) combines a logistic
 propensity score (`glm::fit_propensity`) with OLS outcome models fitted per arm on
-(1, covariates) by pivoted QR (`lm.fit`; aliased columns count as 0 in predictions, as
-`predict.lm`, with a warning). Three methods:
+(1, covariates) by OLS's solve decision: the normal equations on a full-rank,
+well-conditioned design, pivoted QR otherwise (`lm.fit`; aliased columns count as 0 in
+predictions, as `predict.lm`, with a warning). Three methods:
 
 | Method | Effect | Standard error |
 |--------|--------|----------------|

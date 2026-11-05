@@ -27,8 +27,11 @@ Three analytic SEs are computed on every call:
 "M-estimation (propensity estimated)". With trimming, the logit score runs over all units and
 the weighted-mean equations over the kept units: the trimmed set is held fixed (Crump et al.
 2009). That trimmed case is not R-pinned. If the propensity information matrix is singular,
-`std_error` falls back to `se_eif` with a warning, and to `se_naive` if no outcome model can be
-fitted either. With `bootstrap >= 2`, `std_error` is the bootstrap SD ("bootstrap (B
+or the M-estimation SE is not finite, `std_error` falls back to `se_eif` with a warning, and to
+`se_naive` if no outcome model can be fitted either. A trim that leaves one arm without units
+is an `InsufficientData` error naming the arm and the trim. The outcome models of `se_eif`
+(the treated arm's for the ATE only; the ATT form uses the control arm) report aliasing as
+"outcome model (treated|control): ...". With `bootstrap >= 2`, `std_error` is the bootstrap SD ("bootstrap (B
 replicates)") and the interval the type-7 percentile interval (normal interval below 20
 successful replicates); an unseeded bootstrap uses `DEFAULT_BOOTSTRAP_SEED` (42), so results
 are reproducible (Tier 3 R13). Analytic intervals use `qnorm(0.975)`; p-values the normal

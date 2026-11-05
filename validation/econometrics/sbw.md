@@ -63,6 +63,13 @@ feasibility. A target mean that overflows is refused up front, and a non-finite 
 or multiplier (covariates too large for f64) is a `Computation` error, never a converged
 result.
 
+The `convergence` record of a result reports the solver's final relative residual
+(||r||_inf / (1 + ||b||_inf) exact, the KKT residual over its scale approximate) as
+`final_change`, the quantity `tolerance` bounds; `max_constraint_violation` keeps the largest
+balance violation in covariate units. The ATE solves the two groups separately, and the record
+and `iterations` report the larger step count and residual of the two solves
+(`test_sbw_ate_convergence_record_is_per_solve`).
+
 Before October 2026 the exact path inverted the dense (n+k+1) x (n+k+1) system of the
 equality-constrained problem, then clipped negative weights at `min_weight` and renormalised.
 That is O(n^3) time and O(n^2) memory, and whenever a bound was active the clipped weights
