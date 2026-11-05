@@ -7,18 +7,71 @@
       "category": "econometrics",
       "reference": "the QP itself on Synth-standardised predictors, solved by quadprog::solve.QP with a KKT polish; Synth 1.1.10's standardisation and SV2 start written out and checked against Synth's source (validation/r/cases/causal_synth_scpi.R)",
       "doc": "validation/econometrics/synth.md",
-      "cases": ["synth_weights_qp"],
+      "cases": [
+        "synth_weights_qp"
+      ],
       "tests": [
         "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp",
         "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp_custom",
         "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp_invariant_to_predictor_units",
         "p2a-core::econometrics::synth::tests::test_validate_synth_regression_start"
       ],
-      "quantities": ["unit weights (equal, custom V; predictors x 1, x 1e4, x2 alone x 1e4)", "predictor loss (standardised)", "pre-treatment MSPE", "post-period effects, average effect", "synthetic outcome path", "synthetic predictor values (raw scale)", "number of positive weights", "regression-based V start (SV2)"],
+      "quantities": [
+        "unit weights (equal, custom V; predictors x 1, x 1e4, x2 alone x 1e4)",
+        "predictor loss (standardised)",
+        "pre-treatment MSPE",
+        "post-period effects, average effect",
+        "synthetic outcome path",
+        "synthetic predictor values (raw scale)",
+        "number of positive weights",
+        "regression-based V start (SV2)"
+      ],
       "tolerance": "n = 14 pre-periods: validation/README.md (weights, effects 1e-6; loss, MSPE 1e-5 relative)",
       "deviations": [
-        {"finding": "CAUS-40", "quantity": "data-driven V", "note": "no R reference for the Nelder-Mead search itself (Synth uses optimx and ipop): property tests only (unit invariance at x 8192, two starts, loss not above the equal-V fit); the SV2 start is pinned"},
-        {"finding": "CAUS-40", "quantity": "unit weights on a face of optima", "note": "the minimum-norm weights of the 1e-10 ridge (SIMPLEX_QP_RIDGE) are reported with a warning; Synth's ipop returns an interior point of the face"}
+        {
+          "finding": "CAUS-40",
+          "quantity": "data-driven V",
+          "note": "no R reference for the Nelder-Mead search itself (Synth uses optimx and ipop): property tests only (unit invariance at x 8192, two starts, loss not above the equal-V fit); the SV2 start is pinned"
+        },
+        {
+          "finding": "CAUS-40",
+          "quantity": "unit weights on a face of optima",
+          "note": "the minimum-norm weights of the 1e-10 ridge (SIMPLEX_QP_RIDGE) are reported with a warning; Synth's ipop returns an interior point of the face"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "causal_scpi",
+      "name": "Synthetic control with prediction intervals (p2a's construction, not CFT 2021): simplex weights, variance components, t intervals",
+      "category": "econometrics",
+      "reference": "p2a's formulas written out in validation/r/cases/causal_synth_scpi.R (quadprog for the weights, stats::qt); scpi not installed",
+      "doc": "validation/econometrics/scpi.md",
+      "cases": [
+        "scpi_quantities"
+      ],
+      "tests": [
+        "p2a-core::econometrics::scpi::tests::test_validate_scpi_simplex_weights",
+        "p2a-core::econometrics::scpi::tests::test_validate_scpi_variances",
+        "p2a-core::econometrics::scpi::tests::test_validate_scpi_critical_value"
+      ],
+      "quantities": [
+        "simplex weights",
+        "synthetic path",
+        "effects",
+        "in-sample variance",
+        "gaussian, subgaussian, LOO and 5-fold out-of-sample variance",
+        "t critical values (df 1-100; alpha 0.10, 0.05, 0.01)",
+        "interval bounds at 95% and 90%",
+        "pre-treatment RMSPE and R2"
+      ],
+      "tolerance": "n = 14: validation/README.md (weights, effects 1e-6; variances, bounds 1e-5 relative); critical values 1e-10 relative (t_quantile)",
+      "deviations": [
+        {
+          "finding": "CAUS-32",
+          "quantity": "prediction intervals",
+          "note": "p2a's sqrt(in + out) interval is pinned to its own formula; it is not the Cattaneo-Feng-Titiunik construction (open, Tier 4)"
+        }
       ],
       "supersedes_legacy": []
     }
