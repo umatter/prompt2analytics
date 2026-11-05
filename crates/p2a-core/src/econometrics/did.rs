@@ -20,9 +20,10 @@
 //!
 //! The coefficient **δ** is the DiD estimator (ATT under parallel trends).
 //!
-//! The regression is solved by pivoted QR as `lm` (`dqrdc2`, tolerance 1e-7):
-//! an aliased control is `NA` (NaN) with R's "Coefficients not defined because
-//! of singularities" warning, an aliased treatment × post interaction is an
+//! The regression is solved as OLS is (normal equations on a full-rank,
+//! well-conditioned design, `lm`'s pivoted QR (`dqrdc2`, tolerance 1e-7)
+//! otherwise): an aliased control is `NA` (NaN) with R's "Coefficients not
+//! defined because of singularities" warning, an aliased treatment × post interaction is an
 //! error, and the residual degrees of freedom are n - rank. HC1 and CR1
 //! standard errors use the identified columns (`sandwich::vcovHC(type = "HC1")`
 //! and `vcovCL(type = "HC1")`); clustering needs at least two clusters.
@@ -64,7 +65,8 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::solve::least_squares;
+use crate::linalg::solve::aliasing_message;
+use crate::regression::ols::solve_ols;
 use crate::resource;
 use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
@@ -337,8 +339,9 @@ pub fn run_did(
         var_names.push(col_name.to_string());
     }
 
-    // OLS by pivoted QR, as lm: aliased regressors are NA
-    let ls = least_squares(x.view(), y.view())?;
+    // OLS's solve: normal equations when well conditioned, lm's pivoted QR
+    // otherwise; aliased regressors are NA
+    let ls = solve_ols(x.view(), y.view())?;
     if ls.aliased.contains(&3) {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -349,7 +352,7 @@ pub fn run_did(
     }
     let aliased: Vec<String> = ls.aliased.iter().map(|&j| var_names[j].clone()).collect();
     let mut warnings = Vec::new();
-    if let Some(w) = ls.aliasing_warning(&var_names) {
+    if let Some(w) = aliasing_message(&ls.aliased, &var_names) {
         warnings.push(w);
     }
     let residuals = &ls.residuals;
@@ -365,8 +368,14 @@ pub fn run_did(
 
     // Sandwich on the identified columns: bread (X_id'X_id)^-1
     let id: Vec<usize> = (0..k).filter(|j| !ls.aliased.contains(j)).collect();
-    let x_id = x.select(Axis(1), &id);
-    let bread = ls.unscaled_cov.select(Axis(0), &id).select(Axis(1), &id);
+    let (x_id, bread) = if ls.aliased.is_empty() {
+        (x, ls.unscaled)
+    } else {
+        (
+            x.select(Axis(1), &id),
+            ls.unscaled.select(Axis(0), &id).select(Axis(1), &id),
+        )
+    };
     let kid = id.len();
     let (vcov_id, n_clust) = if let Some(cvar) = cluster_var {
         // CR1, one cluster per factor level
@@ -393,7 +402,7 @@ pub fn run_did(
         (bread.dot(&meat).dot(&bread) * correction, Some(g))
     } else {
         // HC1
-        let mut xe = x_id.clone();
+        let mut xe = x_id;
         for (mut row, &e) in xe.rows_mut().into_iter().zip(residuals.iter()) {
             row *= e;
         }
@@ -405,7 +414,7 @@ pub fn run_did(
     for (a, &j) in id.iter().enumerate() {
         std_errors[j] = vcov_id[[a, a]].max(0.0).sqrt();
     }
-    let coefficients = ls.coefficients.to_vec();
+    let coefficients = ls.beta.to_vec();
 
     // The ATT is the coefficient on the interaction term (index 3)
     let att = coefficients[3];

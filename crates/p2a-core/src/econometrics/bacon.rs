@@ -452,17 +452,31 @@ pub fn bacon_decomp(
 
     let n_times = times.len();
 
-    // Units not observed in every period (bacondecomp refuses such panels)
-    let unit_periods: BTreeSet<(i64, i64)> = unit
-        .iter()
-        .zip(time.iter())
-        .map(|(&u, &t)| (u as i64, t as i64))
-        .collect();
-    let mut periods_per_unit: BTreeMap<i64, usize> = BTreeMap::new();
-    for &(u, _) in &unit_periods {
-        *periods_per_unit.entry(u).or_insert(0) += 1;
-    }
-    let n_incomplete = periods_per_unit.values().filter(|&&c| c < n_times).count();
+    // Units not observed in every period (bacondecomp refuses such panels): the
+    // distinct (unit, period) pairs per unit. Unit codes are 0..n_levels and time
+    // indices whole numbers, so the pairs are exact integer keys.
+    let n_incomplete = {
+        let mut pairs: Vec<(i64, i64)> = unit
+            .iter()
+            .zip(time.iter())
+            .map(|(&u, &t)| (u as i64, t as i64))
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut incomplete = 0usize;
+        let mut i = 0;
+        while i < pairs.len() {
+            let u = pairs[i].0;
+            let start = i;
+            while i < pairs.len() && pairs[i].0 == u {
+                i += 1;
+            }
+            if i - start < n_times {
+                incomplete += 1;
+            }
+        }
+        incomplete
+    };
 
     // Build unit -> treatment timing map in one pass over the rows.
     // Treatment timing = first period where treatment = 1 (0 means never treated)
