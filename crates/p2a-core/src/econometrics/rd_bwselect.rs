@@ -28,7 +28,7 @@
 //! `weights`, `deriv`, `stdvars`, `sharpbw`, `bwcheck` and `bwrestrict = FALSE` have no
 //! counterpart here.
 
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 
 use super::rd::{
@@ -264,12 +264,30 @@ struct Stage {
 
 /// A weighted local polynomial fit of the rows with positive kernel weight.
 struct LocalFit {
+    win: Window,
+    inv_g: Array2<f64>,
+    beta: Array2<f64>,
+}
+
+/// The pilot window of a side under `c_bw`, shared by the side's variance parts: the
+/// order-`(q + 1)` basis, Gram matrix and moments (lower orders are their leading blocks),
+/// and the nearest-neighbour residuals, which do not depend on the order.
+struct VBase {
+    /// The window at the full order (`G` (q + 2) x (q + 2), `R' W D` (q + 2) x k).
+    win: Window,
+    /// `vce = nn` residuals of the window.
+    nn_res: Option<Array2<f64>>,
+}
+
+/// The rows of a side with positive kernel weight, the order-`o` basis and the weighted
+/// Gram matrix and moments (`G`, `R' W D`).
+struct Window {
     x: Vec<f64>,
     w: Vec<f64>,
     r: Array2<f64>,
     d: Array2<f64>,
-    inv_g: Array2<f64>,
-    beta: Array2<f64>,
+    g: Array2<f64>,
+    u: Array2<f64>,
 }
 
 /// (h, b) of the three families, computed on demand.
@@ -293,6 +311,7 @@ struct Selector {
     n: usize,
     info: BwSelectInfo,
     cache: [Vec<((usize, usize), VPart)>; 2],
+    vbase: [Option<VBase>; 2],
 }
 
 fn spec(message: String) -> EconError {
@@ -339,13 +358,19 @@ fn validate_options(opts: &BwSelectOptions) -> EconResult<usize> {
     Ok(q)
 }
 
-/// `(num / den)^rate`; NaN (R's `min()` would propagate it) is an error.
+/// `(num / den)^rate`; NaN (R's `min()` would propagate it) and a zero bandwidth are errors.
 fn pw(num: f64, den: f64, rate: f64, method: &str, what: &str) -> EconResult<f64> {
     let v = (num / den).powf(rate);
     if v.is_nan() {
         return Err(EconError::Computation(format!(
             "bandwidth selection ({method}) produced a non-finite value ({what}); the pilot fits \
              are degenerate"
+        )));
+    }
+    if v <= 0.0 {
+        return Err(EconError::Computation(format!(
+            "bandwidth selection ({method}) produced a zero bandwidth ({what}); the pilot fits \
+             are degenerate (their variance term is zero)"
         )));
     }
     Ok(v)
@@ -588,6 +613,7 @@ impl Selector {
             n,
             info,
             cache: [Vec::new(), Vec::new()],
+            vbase: [None, None],
         })
     }
 
@@ -607,10 +633,9 @@ impl Selector {
             .count()
     }
 
-    /// The weighted local polynomial of order `o` on the rows of `side` with positive kernel
-    /// weight `K((x - c)/h)/h` (rdbwselect's `qrXXinv` fit: Cholesky, or a generalized
-    /// inverse with a warning when the Gram matrix is singular).
-    fn local_fit(&mut self, side: usize, o: usize, h: f64) -> EconResult<LocalFit> {
+    /// The rows of `side` with positive kernel weight `K((x - c)/h)/h`, their order-`o`
+    /// basis, Gram matrix `G` and moments `R' W D`.
+    fn window(&self, side: usize, o: usize, h: f64) -> EconResult<Window> {
         let (c, kernel) = (self.c, self.opts.kernel);
         let sd = &self.sides[side];
         let (n_side, k) = sd.d.dim();
@@ -669,31 +694,62 @@ impl Selector {
                 g[[l, j]] = g[[j, l]];
             }
         }
-        let what = format!(
-            "rdbwselect pilot fit (order {o}, {} side, bandwidth {h:.6})",
-            sd.name
-        );
-        let inv = sym_inverse(g.view(), SingularPolicy::Generalized, &what)?;
-        if let Some(msg) = inv.warning(&what) {
-            self.warn(msg);
-        }
-        let beta = inv.inverse.dot(&u);
-        Ok(LocalFit {
+        Ok(Window {
             x: xw,
             w,
             r,
             d,
-            inv_g: inv.inverse,
-            beta,
+            g,
+            u,
         })
     }
 
-    /// rdrobust_res: nearest-neighbour or HC0-HC3 residuals of a fit of order `o`.
-    fn residuals(&self, side: usize, fit: &LocalFit, o: usize) -> EconResult<Array2<f64>> {
+    /// `invG` and `beta = invG R' W D` of an order-`o` fit from its Gram matrix and moments
+    /// (rdbwselect's `qrXXinv`: Cholesky, or a generalized inverse with a warning when `G`
+    /// is singular).
+    fn solve(
+        &mut self,
+        side: usize,
+        o: usize,
+        h: f64,
+        g: ArrayView2<f64>,
+        u: ArrayView2<f64>,
+    ) -> EconResult<(Array2<f64>, Array2<f64>)> {
+        let what = format!(
+            "rdbwselect pilot fit (order {o}, {} side, bandwidth {h:.6})",
+            self.sides[side].name
+        );
+        let inv = sym_inverse(g, SingularPolicy::Generalized, &what)?;
+        if let Some(msg) = inv.warning(&what) {
+            self.warn(msg);
+        }
+        let beta = inv.inverse.dot(&u);
+        Ok((inv.inverse, beta))
+    }
+
+    /// The weighted local polynomial of order `o` on the rows of `side` with positive kernel
+    /// weight `K((x - c)/h)/h`.
+    fn local_fit(&mut self, side: usize, o: usize, h: f64) -> EconResult<LocalFit> {
+        let win = self.window(side, o, h)?;
+        let (inv_g, beta) = self.solve(side, o, h, win.g.view(), win.u.view())?;
+        Ok(LocalFit { win, inv_g, beta })
+    }
+
+    /// rdrobust_res: nearest-neighbour or HC0-HC3 residuals of a fit of order `o` (`r` its
+    /// order-`o` basis, `inv_g` and `beta` its solution).
+    fn residuals(
+        &self,
+        side: usize,
+        win: &Window,
+        r: ArrayView2<f64>,
+        inv_g: &Array2<f64>,
+        beta: &Array2<f64>,
+        o: usize,
+    ) -> EconResult<Array2<f64>> {
         match self.opts.vce {
-            VceType::Nn => nn_residuals(&fit.x, &fit.d, self.opts.nnmatch),
+            VceType::Nn => nn_residuals(&win.x, &win.d, self.opts.nnmatch),
             vce => {
-                let m = fit.x.len();
+                let m = win.x.len();
                 if vce == VceType::Hc1 && m <= o + 1 {
                     return Err(EconError::InsufficientData {
                         required: o + 2,
@@ -705,59 +761,117 @@ impl Selector {
                         ),
                     });
                 }
-                hc_residuals(fit.r.view(), &fit.w, &fit.inv_g, &fit.beta, &fit.d, vce)
+                hc_residuals(r, &win.w, inv_g, beta, &win.d, vce)
             }
         }
     }
 
     /// `(invG M invG)[a, a]` with `M = sum_i (res_i . s)^2 (w_i R_i)(w_i R_i)'`
     /// (rdrobust_vce without clusters).
-    fn sandwich_element(fit: &LocalFit, res: &Array2<f64>, s: &[f64], a: usize) -> f64 {
-        let row = fit.inv_g.row(a);
+    fn sandwich_element(
+        w: &[f64],
+        r: ArrayView2<f64>,
+        inv_g: &Array2<f64>,
+        res: &Array2<f64>,
+        s: &[f64],
+        a: usize,
+    ) -> f64 {
+        let row = inv_g.row(a);
         let mut v = 0.0;
-        for i in 0..fit.x.len() {
+        for (i, wi) in w.iter().enumerate() {
             let ri: f64 = s
                 .iter()
                 .enumerate()
                 .map(|(col, sc)| res[[i, col]] * sc)
                 .sum();
-            let g = fit.w[i] * fit.r.row(i).dot(&row);
+            let g = wi * r.row(i).dot(&row);
             let t = ri * g;
             v += t * t;
         }
         v
     }
 
-    /// The variance part of a stage, cached per (side, o, nu) as rdbwselect's `vcache`.
+    /// The shared pilot window of `side` under `c_bw` (built once per side).
+    fn v_base(&mut self, side: usize) -> EconResult<()> {
+        if self.vbase[side].is_some() {
+            return Ok(());
+        }
+        // The highest order of a variance part: q + 1 (the pilot stage d).
+        let top = self.q + 1;
+        let win = self.window(side, top, self.c_bw)?;
+        let nn_res = match self.opts.vce {
+            VceType::Nn => Some(nn_residuals(&win.x, &win.d, self.opts.nnmatch)?),
+            _ => None,
+        };
+        self.vbase[side] = Some(VBase { win, nn_res });
+        Ok(())
+    }
+
+    /// The variance part of a stage, cached per (side, o, nu) as rdbwselect's `vcache`. Every
+    /// order shares the side's pilot window ([`VBase`]): its `G` and `R' W D` are the leading
+    /// blocks of the full order's, and the `nn` residuals are computed once.
     fn v_part(&mut self, side: usize, o: usize, nu: usize) -> EconResult<VPart> {
         if let Some((_, vp)) = self.cache[side].iter().find(|(key, _)| *key == (o, nu)) {
             return Ok(vp.clone());
         }
         let h_v = self.c_bw;
-        let fit = self.local_fit(side, o, h_v)?;
-        let s = if fit.d.ncols() == 1 {
+        self.v_base(side)?;
+        let base = self.vbase[side]
+            .take()
+            .ok_or_else(|| EconError::Computation("rdbwselect: pilot window missing".into()))?;
+        let out = self.v_part_from(side, &base, o, nu, h_v);
+        self.vbase[side] = Some(base);
+        let vp = out?;
+        self.cache[side].push(((o, nu), vp.clone()));
+        Ok(vp)
+    }
+
+    fn v_part_from(
+        &mut self,
+        side: usize,
+        base: &VBase,
+        o: usize,
+        nu: usize,
+        h_v: f64,
+    ) -> EconResult<VPart> {
+        let cols = o + 1;
+        let win = &base.win;
+        let r = win.r.slice(s![.., ..cols]);
+        let (inv_g, beta) = self.solve(
+            side,
+            o,
+            h_v,
+            win.g.slice(s![..cols, ..cols]),
+            win.u.slice(s![..cols, ..]),
+        )?;
+        let s = if win.d.ncols() == 1 {
             vec![1.0]
         } else {
             let f = factorial(nu);
-            let tau_y = f * fit.beta[[nu, 0]];
-            let tau_t = f * fit.beta[[nu, 1]];
+            let tau_y = f * beta[[nu, 0]];
+            let tau_t = f * beta[[nu, 1]];
             vec![1.0 / tau_t, -(tau_y / (tau_t * tau_t))]
         };
-        let res = self.residuals(side, &fit, o)?;
-        let vv = Self::sandwich_element(&fit, &res, &s, nu);
+        let hc;
+        let res = match &base.nn_res {
+            Some(nn) => nn,
+            None => {
+                hc = self.residuals(side, win, r, &inv_g, &beta, o)?;
+                &hc
+            }
+        };
+        let vv = Self::sandwich_element(&win.w, r, &inv_g, res, &s, nu);
         let pow = i32::try_from(o + 1).unwrap_or(i32::MAX);
-        let mut v = vec![0.0; o + 1];
-        for i in 0..fit.x.len() {
-            let t = fit.w[i] * ((fit.x[i] - self.c) / h_v).powi(pow);
+        let mut v = vec![0.0; cols];
+        for i in 0..win.x.len() {
+            let t = win.w[i] * ((win.x[i] - self.c) / h_v).powi(pow);
             for (j, vj) in v.iter_mut().enumerate() {
-                *vj += fit.r[[i, j]] * t;
+                *vj += win.r[[i, j]] * t;
             }
         }
-        let ginv_v: f64 = fit.inv_g.row(nu).iter().zip(&v).map(|(a, b)| a * b).sum();
+        let ginv_v: f64 = inv_g.row(nu).iter().zip(&v).map(|(a, b)| a * b).sum();
         let bconst = h_v.powi(i32::try_from(nu).unwrap_or(i32::MAX)) * ginv_v;
-        let vp = VPart { vv, bconst, s };
-        self.cache[side].push(((o, nu), vp.clone()));
-        Ok(vp)
+        Ok(VPart { vv, bconst, s })
     }
 
     /// rdrobust_bw: the variance, bias and regularisation terms of order `o`, derivative `nu`,
@@ -776,8 +890,16 @@ impl Selector {
         let fit = self.local_fit(side, o_b, h_b)?;
         let mut bwreg = 0.0;
         if scale > 0.0 {
-            let res = self.residuals(side, &fit, o_b)?;
-            let vb = Self::sandwich_element(&fit, &res, &vp.s, o + 1);
+            let res =
+                self.residuals(side, &fit.win, fit.win.r.view(), &fit.inv_g, &fit.beta, o_b)?;
+            let vb = Self::sandwich_element(
+                &fit.win.w,
+                fit.win.r.view(),
+                &fit.inv_g,
+                &res,
+                &vp.s,
+                o + 1,
+            );
             bwreg = 3.0 * vp.bconst * vp.bconst * vb;
         }
         let sb: f64 =
@@ -1267,6 +1389,35 @@ mod tests {
                 ..
             }) => {}
             other => panic!("expected InsufficientData 20/19, got {other:?}"),
+        }
+    }
+
+    /// A variance term of exactly zero is an error naming the stage, not a zero bandwidth:
+    /// x on an integer grid with five rows per value (mass points), y a noiseless integer
+    /// quartic of x, so every nearest-neighbour residual (own tie block) is exactly 0.
+    #[test]
+    fn test_rdbwselect_zero_variance_is_an_error() {
+        let x: Vec<f64> = (-10..10)
+            .flat_map(|v| std::iter::repeat_n(f64::from(v), 5))
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&v| {
+                if v < 0.0 {
+                    v.powi(4)
+                } else {
+                    2.0 * v.powi(4) + 10.0
+                }
+            })
+            .collect();
+        for method in [BandwidthMethod::MseRd, BandwidthMethod::MseTwo] {
+            match rdbwselect(&x, &y, None, 0.0, method, &o()) {
+                Err(EconError::Computation(msg)) => assert!(
+                    msg.contains(&format!("({}) produced a zero bandwidth", method.name())),
+                    "{msg}"
+                ),
+                other => panic!("expected a zero-bandwidth error, got {other:?}"),
+            }
         }
     }
 
