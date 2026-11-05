@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "medflex_scales",
+      "name": "Natural effect models (medflex imputation estimator): difference, ratio and odds-ratio scales",
+      "category": "econometrics",
+      "reference": "Vansteelandt, Bekaert & Lange (2012) imputation estimator as medflex 0.6-11 neImpute + neModel(se = 'robust' | 'bootstrap') + neEffdecomp(covLev = colMeans(C)), written out and cross-checked in the case against medflex 0.6-11 (neImpute + neModel: natural effect model coefficients to 1e-8, robust variance to 1e-6 relative); stats::glm; boot::norm.ci; cross-checks sandwich::vcovHC(HC0), VanderWeele (2015), numDeriv",
+      "doc": "validation/econometrics/medflex.md",
+      "cases": [
+        "medflex_scales"
+      ],
+      "tests": [
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_difference",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_ratio",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_odds_ratio",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_family",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_interaction",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_bootstrap",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_proportion_mediated_unclamped",
+        "p2a-core::econometrics::medflex::tests::test_validate_medflex_collinear_design_warns"
+      ],
+      "quantities": [
+        "outcome working-model coefficients and SEs (gaussian, poisson, binomial)",
+        "natural effect model coefficients",
+        "NDE, NIE, TE on the difference, ratio and odds-ratio scales",
+        "robust (stacked sandwich) SEs, 95% CIs and p-values",
+        "bootstrap draws, SEs and normal-type CIs on fixed resamples",
+        "proportion mediated (unclamped)",
+        "deviance R2",
+        "mediator model coefficient, SE and R2",
+        "confounder means",
+        "aliased coefficients (NA)"
+      ],
+      "tolerance": "validation/README.md, n = 500: gaussian fits coefficients 1e-8 and SEs 1e-6 relative (Tol::coef, Tol::se); poisson and binomial working models and the quasi natural effect models Tol::iterative(1e-8) (fit_glm epsilon 1e-10 against R at 1e-14; measured difference <= 6.4e-13), except the binomial and poisson working-model SEs, Tol::iterative(1e-6): summary.glm SEs from the last IRLS step's working weights converge linearly (1.8e-7 measured)",
+      "deviations": [
+        {
+          "finding": "CAUS-23",
+          "quantity": "natural effect model formula and contrast level",
+          "note": "with A:M the model carries A0:C and the effects are evaluated at the confounder means; medflex's usual formula Y ~ A0 * A1 + C gives the raw-mean NDE CAUS-23 reports as biased, and neEffdecomp's default covLev is 0"
+        },
+        {
+          "finding": "CAUS-22",
+          "quantity": "non-binary exposures",
+          "note": "refused; medflex samples hypothetical levels for a continuous exposure"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

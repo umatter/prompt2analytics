@@ -133,12 +133,12 @@ cargo test -p p2a-core econometrics::medflex
 **Results:**
 - `test_medflex_basic` - Basic effect decomposition
 - `test_medflex_with_interaction` - Treatment-mediator interaction
-- `test_medflex_with_confounders` - Confounder adjustment
-- `test_medflex_delta_method` - Delta method standard errors
+- `test_validate_medflex_collinear_design_warns` - Aliased confounders reported, not pseudo-inverted
+- `test_medflex_robust_se_without_bootstrap` - Robust sandwich standard errors
 - `test_medflex_dataset_interface` - Dataset-based API
 - `test_medflex_display` - Result formatting
 - `test_medflex_insufficient_data` - Error handling
-- `test_proportion_mediated_bounds` - Proportion mediated bounds
+- `test_validate_medflex_proportion_mediated_unclamped` - Proportion mediated never clamped
 
 ### Tolerance Guidelines
 
