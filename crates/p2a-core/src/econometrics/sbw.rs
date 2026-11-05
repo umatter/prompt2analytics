@@ -347,7 +347,7 @@ pub struct SBWResult {
     pub min_weight: f64,
     /// Whether optimization converged
     pub converged: bool,
-    /// Number of iterations
+    /// Number of solver steps (ATE: the larger of the two group solves)
     pub iterations: usize,
     /// Final objective function value (variance of weights)
     pub objective_value: f64,
@@ -659,6 +659,7 @@ pub(crate) fn run_sbw_inner(
     let mut lambda_treated = None;
     let mut converged = true;
     let mut iterations = 0usize;
+    let mut final_residual = 0.0_f64;
     let mut max_violation = 0.0_f64;
     let (mut objective_treated, mut objective_control) = (None, None);
     for (is_treated, idx, x_g, target) in &problems {
@@ -680,7 +681,7 @@ pub(crate) fn run_sbw_inner(
                 }
             }
         }
-        let (w, lam, conv, it, obj, viol) = if exact {
+        let (w, lam, conv, it, obj, viol, resid) = if exact {
             solve_sbw_exact(&x_g.view(), &target.view(), &config)?
         } else {
             solve_sbw_approximate(&x_g.view(), &target.view(), &delta, cov_names, &config)?
@@ -696,7 +697,10 @@ pub(crate) fn run_sbw_inner(
             full_weights[i] = wi;
         }
         converged &= conv;
-        iterations += it;
+        // ATE solves two groups: report the larger step count and residual (as
+        // ebal_convergence does), so neither exceeds what one solve may use.
+        iterations = iterations.max(it);
+        final_residual = final_residual.max(resid);
         max_violation = max_violation.max(viol);
         if *is_treated {
             objective_treated = Some(obj);
@@ -791,7 +795,7 @@ pub(crate) fn run_sbw_inner(
         } else {
             "proximal Newton steps (exact QP)"
         },
-        max_violation,
+        final_residual,
         config.tolerance,
     );
     if let Some(note) = convergence.note(if exact {
@@ -995,6 +999,10 @@ fn inf_norm(v: &Array1<f64>) -> f64 {
     })
 }
 
+/// One group's SBW solve: weights summing to 1, `lambda`, converged, steps, objective,
+/// maximum balance violation (covariate units) and final relative residual.
+type SbwSolve = (Vec<f64>, Vec<f64>, bool, usize, f64, f64, f64);
+
 /// Solve SBW with exact balance constraints through the problem's dual.
 ///
 /// The exact problem in the n scale (weights sum to n) is
@@ -1031,12 +1039,13 @@ fn inf_norm(v: &Array1<f64>) -> f64 {
 ///
 /// Returns weights summing to 1, `lambda = -mu` (the sign convention of the KKT system
 /// `[I A'; A 0][w; lambda] = [0; b]`), convergence, the number of steps (mu_0 counts as
-/// one), the objective and the maximum balance violation.
+/// one), the objective, the maximum balance violation and the final relative residual
+/// ||r||_inf / (1 + ||b||_inf), the quantity `tolerance` bounds.
 fn solve_sbw_exact(
     x: &ArrayView2<f64>,
     target_means: &ArrayView1<f64>,
     config: &SBWConfig,
-) -> EconResult<(Vec<f64>, Vec<f64>, bool, usize, f64, f64)> {
+) -> EconResult<SbwSolve> {
     let n = x.nrows();
     let k = x.ncols();
     let l = config.min_weight;
@@ -1087,6 +1096,7 @@ fn solve_sbw_exact(
     let mu0_scale = 1.0 + inf_norm(&mu);
     let mut iterations = 1;
     let mut full_step_kept_set = false;
+    let mut residual = f64::NAN;
 
     loop {
         resource::checkpoint()?;
@@ -1097,6 +1107,7 @@ fn solve_sbw_exact(
 
         let (r, free) = dual.residual(&mu);
         let r_inf = inf_norm(&r);
+        residual = r_inf / b_scale;
         let close = r_inf <= config.tolerance * b_scale;
         if r_inf <= SBW_EXACT_RESIDUAL * b_scale || (close && full_step_kept_set) {
             break;
@@ -1183,7 +1194,15 @@ fn solve_sbw_exact(
     let w_mean = 1.0 / n as f64;
     let objective: f64 = weights.iter().map(|w| (w - w_mean).powi(2)).sum();
 
-    Ok((weights, lambda, true, iterations, objective, max_violation))
+    Ok((
+        weights,
+        lambda,
+        true,
+        iterations,
+        objective,
+        max_violation,
+        residual,
+    ))
 }
 
 /// Solve SBW with approximate balance exactly: the band QP of the module docs through its
@@ -1192,14 +1211,15 @@ fn solve_sbw_exact(
 /// `delta` holds the band half-widths in the covariates' units. Returns weights summing to
 /// 1, `lambda` (length k + 1, the sign and scale of [`solve_sbw_exact`]), convergence, the
 /// number of steps, the objective `sum (w - 1/m)^2` and the largest band violation
-/// `max_j max(|mean_j - t_j| - delta_j, 0)` in the covariates' units.
+/// `max_j max(|mean_j - t_j| - delta_j, 0)` in the covariates' units, and the final relative
+/// KKT residual (`res / bscale`, the quantity `tolerance` bounds).
 fn solve_sbw_approximate(
     x: &ArrayView2<f64>,
     target: &ArrayView1<f64>,
     delta: &[f64],
     names: &[String],
     config: &SBWConfig,
-) -> EconResult<(Vec<f64>, Vec<f64>, bool, usize, f64, f64)> {
+) -> EconResult<SbwSolve> {
     let (m, k) = x.dim();
     let l = config.min_weight;
     let mf = m as f64;
@@ -1283,6 +1303,7 @@ fn solve_sbw_approximate(
     let bscale = 1.0 + r.iter().cloned().fold(0.0, f64::max);
     let mut it = 0usize;
     let mut converged = false;
+    let mut residual = f64::NAN;
     let mut last_clean_step = false;
     let mut prev_free: Option<Vec<bool>> = None;
 
@@ -1324,6 +1345,7 @@ fn solve_sbw_approximate(
             };
             res = res.max(pg.abs());
         }
+        residual = res / bscale;
         let set_kept = prev_free.as_ref().is_some_and(|p| *p == free);
         if res <= 1e-14 * bscale
             || (res <= config.tolerance * bscale && last_clean_step && set_kept)
@@ -1420,7 +1442,15 @@ fn solve_sbw_approximate(
         let mean: f64 = (0..m).map(|i| weights[i] * x[[i, j]]).sum();
         max_violation = max_violation.max((mean - target[j]).abs() - delta[j]);
     }
-    Ok((weights, lambda, converged, it, objective, max_violation))
+    Ok((
+        weights,
+        lambda,
+        converged,
+        it,
+        objective,
+        max_violation,
+        residual,
+    ))
 }
 
 /// Sign of `v` with sign(0) = 0.
@@ -1958,6 +1988,50 @@ mod tests {
     }
 
     #[test]
+    fn test_sbw_ate_convergence_record_is_per_solve() {
+        // ATE solves the two groups separately: the record reports the larger step count
+        // (it summed them, exceeding max_iter) and the solver's relative residual, the
+        // quantity `tolerance` bounds (it reported the balance violation in covariate units).
+        let (_, ds) = crate::test_support::load_case("weights_sbw");
+        for max_iter in [1, 2, 3] {
+            let mut c = SBWConfig::default();
+            c.estimand = SBWEstimand::ATE;
+            c.balance_tol = 0.1;
+            c.balance_tol_scale = BalanceTolScale::StdDev;
+            c.max_iter = max_iter;
+            let r = sbw(&ds, "treat", &COVS, c).unwrap();
+            let conv = r.convergence.as_ref().unwrap();
+            assert!(
+                r.iterations <= max_iter && conv.iterations <= conv.max_iterations,
+                "max_iter {max_iter}: iterations {} (record {})",
+                r.iterations,
+                conv.iterations
+            );
+            if !r.converged {
+                assert!(
+                    conv.final_change > conv.tolerance,
+                    "max_iter {max_iter}: unconverged residual {} within tolerance {}",
+                    conv.final_change,
+                    conv.tolerance
+                );
+            }
+        }
+        for tol in [0.0, 0.1] {
+            let r = sbw_fit(&ds, SBWEstimand::ATE, tol);
+            let conv = r.convergence.as_ref().unwrap();
+            assert!(r.converged && r.iterations <= conv.max_iterations);
+            assert!(
+                conv.final_change.is_finite()
+                    && conv.final_change >= 0.0
+                    && conv.final_change <= conv.tolerance,
+                "tol {tol}: final relative residual {} vs tolerance {}",
+                conv.final_change,
+                conv.tolerance
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_sbw_ate() {
         // R: quadprog::solve.QP once per group with the pooled means as target (case
         // weights_sbw). Fails before (CAUS-49): ATE ran as ATT.
@@ -2201,7 +2275,7 @@ mod tests {
             w_ref.iter().all(|&w| w > 0.0),
             "precondition: no bound binds"
         );
-        let (w, lambda, converged, iterations, _, viol) =
+        let (w, lambda, converged, iterations, _, viol, _) =
             solve_sbw_exact(&xc.view(), &target.view(), &SBWConfig::default()).unwrap();
         assert!(
             converged && iterations <= 2 && viol < 1e-12,
@@ -2233,7 +2307,7 @@ mod tests {
                 min_weight: l,
                 ..Default::default()
             };
-            let (w, lambda, converged, _, _, viol) =
+            let (w, lambda, converged, _, _, viol, _) =
                 solve_sbw_exact(&xc.view(), &target.view(), &cfg).unwrap();
             let wn: Vec<f64> = w.iter().map(|v| v * 240.0).collect();
             assert!(converged && viol < 1e-10, "l {l}: violation {viol}");
