@@ -57,7 +57,7 @@
 //! - R package WeightIt: Greifer, N. (2024). WeightIt: Weighting for Covariate Balance
 //!   in Observational Studies. https://ngreifer.github.io/WeightIt/
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -67,7 +67,9 @@ use crate::econometrics::glm::{GlmFit, GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::options::Choices;
+use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -349,41 +351,105 @@ impl fmt::Display for WeightItResult {
     }
 }
 
+/// Options of [`entropy_balance_with()`].
+#[derive(Debug, Clone)]
+pub struct EntropyBalanceConfig {
+    /// Target estimand: ATT (the default; the controls are reweighted to the treated means),
+    /// ATC (the treated to the control means) or ATE (both groups to the pooled means, as
+    /// `WeightIt::weightit(method = "ebal", estimand = "ATE")`).
+    pub estimand: WeightEstimand,
+    /// Means every reweighted group is balanced to (one finite value per covariate); `None`
+    /// uses the estimand's target-population means.
+    pub targets: Option<Vec<f64>>,
+    /// Newton iteration cap, at least 1 (default 200).
+    pub max_iter: usize,
+    /// Convergence tolerance on `max_j |weighted mean_j - target_j| / sd_j`, finite and
+    /// positive (default 1e-8).
+    pub tolerance: f64,
+}
+
+impl Default for EntropyBalanceConfig {
+    fn default() -> Self {
+        Self {
+            estimand: WeightEstimand::ATT,
+            targets: None,
+            max_iter: 200,
+            tolerance: 1e-8,
+        }
+    }
+}
+
+fn default_att() -> WeightEstimand {
+    WeightEstimand::ATT
+}
+
 /// Result from entropy balancing.
+///
+/// Weights follow WeightIt's `ebal` scale: target units get weight 1 and each reweighted
+/// group sums to the size of the target population (ATT: the controls sum to n1; ATC: the
+/// treated sum to n0; ATE: each group sums to n).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntropyBalanceResult {
-    /// Estimated weights for each observation (control units only for ATT)
+    /// Weights of all units (in data order).
     pub weights: Vec<f64>,
-    /// Lagrange multipliers from optimization
+    /// Lagrange multipliers (original covariate scale) of the reweighted control group
+    /// (ATT, ATE) or treated group (ATC); 0 for a dropped or constant covariate.
     pub lambda: Vec<f64>,
     /// Balance achieved for each covariate
     pub balance: WeightItBalanceTable,
-    /// Effective sample size
+    /// ESS `(sum w)^2 / sum w^2` of the reweighted group (ATE: the sum of both groups' ESS).
     pub effective_sample_size: f64,
-    /// Maximum weight
+    /// Maximum weight among the reweighted units
     pub max_weight: f64,
-    /// Minimum weight (among non-zero)
+    /// Minimum positive weight among the reweighted units
     pub min_weight: f64,
-    /// Whether convergence was achieved
+    /// Whether every group's fit converged
     pub converged: bool,
-    /// Number of iterations
+    /// Newton iterations (the larger of the two groups' for ATE)
     pub iterations: usize,
-    /// Final constraint violation (max absolute)
+    /// Final `max_j |weighted mean_j - target_j| / sd_j`
     pub constraint_tolerance: f64,
-    /// Number of observations reweighted
+    /// Number of observations reweighted (ATE: n)
     pub n_reweighted: usize,
+    /// Target estimand
+    #[serde(default = "default_att")]
+    pub estimand: WeightEstimand,
+    /// ESS of the treated group
+    #[serde(default)]
+    pub ess_treated: f64,
+    /// ESS of the control group
+    #[serde(default)]
+    pub ess_control: f64,
+    /// ATE only: the treated group's multipliers (original covariate scale)
+    #[serde(default)]
+    pub lambda_treated: Option<Vec<f64>>,
+    /// Covariates dropped as linearly dependent on the others in a reweighted group
+    #[serde(default)]
+    pub dropped_covariates: Vec<String>,
+    /// Convergence record of the Newton iteration
+    #[serde(default)]
+    pub convergence: Option<Convergence>,
+    /// Warnings
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for EntropyBalanceResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
 }
 
 impl fmt::Display for EntropyBalanceResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Entropy Balancing Results")?;
         writeln!(f, "=========================")?;
+        writeln!(f, "Estimand: {}", self.estimand)?;
         writeln!(f, "Observations Reweighted: {}", self.n_reweighted)?;
-        writeln!(
-            f,
-            "Converged: {} ({} iterations)",
-            self.converged, self.iterations
-        )?;
         writeln!(f, "Constraint Tolerance: {:.2e}", self.constraint_tolerance)?;
         writeln!(f)?;
         writeln!(f, "Weight Summary:")?;
@@ -392,12 +458,15 @@ impl fmt::Display for EntropyBalanceResult {
             "  Range: [{:.4}, {:.4}]",
             self.min_weight, self.max_weight
         )?;
-        writeln!(f, "  ESS:   {:.1}", self.effective_sample_size)?;
+        writeln!(
+            f,
+            "  ESS:   treated {:.1}, control {:.1}",
+            self.ess_treated, self.ess_control
+        )?;
         writeln!(f)?;
         writeln!(f, "Balance After Weighting:")?;
         write!(f, "{}", self.balance)?;
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -530,20 +599,27 @@ pub fn weightit(
             (w, Some(ps), fit.converged, fit.iterations)
         }
         WeightMethod::Entropy => {
-            let result = compute_entropy_weights(
-                &x,
+            let x_cov = covariates_only(&x, config.intercept);
+            let names: Vec<String> = covariate_cols.iter().map(|c| c.to_string()).collect();
+            let (w, fits) = ebal_groups(
+                &x_cov,
                 &d,
                 config.estimand,
+                None,
+                &names,
                 config.max_iter,
                 config.tolerance,
             )?;
-            if !result.converged {
-                warnings.push(format!(
-                    "Entropy balancing did not converge after {} iterations",
-                    result.iterations
-                ));
+            let (conv, _) = ebal_convergence(&fits, config.max_iter, config.tolerance);
+            for fit in &fits {
+                warnings.extend(fit.warnings.iter().cloned());
             }
-            (result.weights, None, result.converged, result.iterations)
+            if let Some(note) = conv.note("Entropy balancing") {
+                warnings.push(note);
+            }
+            let (c, it) = (conv.converged, conv.iterations);
+            convergence = Some(conv);
+            (w, None, c, it)
         }
         WeightMethod::Energy => {
             let (w, conv, iters) =
@@ -629,32 +705,17 @@ pub fn weightit(
     })
 }
 
-/// Compute entropy balancing weights specifically.
+/// Entropy balancing (Hainmueller 2012) of the control group to the treated means (ATT).
 ///
-/// Entropy balancing reweights the control (or treated) group to achieve exact
-/// mean balance on specified covariates while minimizing the entropy distance
-/// from uniform weights.
+/// Equivalent to [`entropy_balance_with()`] with the estimand ATT, `targets`, at most 200
+/// Newton iterations and tolerance 1e-8.
 ///
 /// # Arguments
 ///
 /// * `dataset` - Dataset containing treatment and covariates
 /// * `treatment_col` - Name of binary treatment column
 /// * `covariate_cols` - Names of covariate columns to balance
-/// * `targets` - Optional target means (defaults to opposite group means for ATT/ATC)
-///
-/// # Algorithm
-///
-/// Solves the constrained optimization problem:
-/// ```text
-/// min  Σ w_i log(w_i)
-/// s.t. Σ w_i X_i = target_means
-///      Σ w_i = 1, w_i ≥ 0
-/// ```
-///
-/// Uses dual formulation with Newton-Raphson optimization:
-/// ```text
-/// w_i = exp(λ' X_i) / Σ_j exp(λ' X_j)
-/// ```
+/// * `targets` - Optional target means (defaults to the treated group's means)
 ///
 /// # References
 ///
@@ -666,103 +727,147 @@ pub fn entropy_balance(
     covariate_cols: &[&str],
     targets: Option<&[f64]>,
 ) -> EconResult<EntropyBalanceResult> {
+    entropy_balance_with(
+        dataset,
+        treatment_col,
+        covariate_cols,
+        &EntropyBalanceConfig {
+            targets: targets.map(<[f64]>::to_vec),
+            ..Default::default()
+        },
+    )
+}
+
+/// Entropy balancing (Hainmueller 2012) for the ATT, ATC or ATE.
+///
+/// Each reweighted group gets the weights closest to uniform in Kullback-Leibler divergence
+/// that reproduce the target means exactly:
+///
+/// ```text
+/// min sum_i p_i log(m p_i)   s.t.  sum_i p_i x_i = t,  sum_i p_i = 1,  p_i > 0
+/// ```
+///
+/// solved through its convex dual `min_lambda log sum_i exp(lambda'(x_i - t))` by Newton's
+/// method with an Armijo search, on scores in standard-deviation units (scale-free). The
+/// dual minimum is the entropy of the optimal weights, so a negative dual value certifies
+/// that the target lies outside the convex hull of the group's covariates; a target outside
+/// a covariate's range is refused before the solve. Both are `InvalidSpecification` errors
+/// (R's WeightIt returns zero weights with a warning). Covariates that are linearly dependent
+/// on the others within a reweighted group are dropped, as WeightIt's `make_full_rank`
+/// does; their balance is checked after the fit.
+///
+/// Weights follow WeightIt's `ebal` scale (see [`EntropyBalanceResult`]).
+pub fn entropy_balance_with(
+    dataset: &Dataset,
+    treatment_col: &str,
+    covariate_cols: &[&str],
+    config: &EntropyBalanceConfig,
+) -> EconResult<EntropyBalanceResult> {
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1; got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be finite and positive; got {}",
+                config.tolerance
+            ),
+        });
+    }
+    if let Some(t) = &config.targets {
+        if t.len() != covariate_cols.len() {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "targets must have one mean per covariate: got {} targets for {} covariates",
+                    t.len(),
+                    covariate_cols.len()
+                ),
+            });
+        }
+        if let Some(v) = t.iter().find(|v| !v.is_finite()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("targets must be finite; got {v}"),
+            });
+        }
+    }
+
     // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
-    // Extract treatment variable
     let d = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
-    // Build covariate matrix (without intercept for entropy balancing)
     let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
+    let names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
 
-    let n = d.len();
-    let k = x.ncols();
-
-    // Identify treated and control indices
-    let treated_idx: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
-    let control_idx: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
-
-    // For ATT: reweight control to match treated means
-    // Build control covariate matrix
-    let n_ctrl = control_idx.len();
-    let mut x_ctrl = Array2::zeros((n_ctrl, k));
-    for (new_i, &old_i) in control_idx.iter().enumerate() {
-        x_ctrl.row_mut(new_i).assign(&x.row(old_i));
+    let (weights, fits) = ebal_groups(
+        &x,
+        &d,
+        config.estimand,
+        config.targets.as_deref(),
+        &names,
+        config.max_iter,
+        config.tolerance,
+    )?;
+    let (convergence, residual) = ebal_convergence(&fits, config.max_iter, config.tolerance);
+    let mut warnings: Vec<String> = fits.iter().flat_map(|f| f.warnings.clone()).collect();
+    if let Some(note) = convergence.note("Entropy balancing") {
+        warnings.push(note);
     }
-
-    // Compute target means (treated group means if not provided)
-    let target_means = match targets {
-        Some(t) => {
-            if t.len() != k {
-                return Err(EconError::InvalidSpecification {
-                    message: format!(
-                        "Target means length ({}) must match number of covariates ({})",
-                        t.len(),
-                        k
-                    ),
-                });
+    let mut dropped: Vec<String> = Vec::new();
+    for fit in &fits {
+        for &j in &fit.dropped {
+            if !dropped.contains(&names[j]) {
+                dropped.push(names[j].clone());
             }
-            Array1::from_vec(t.to_vec())
         }
-        None => {
-            // Compute treated group means
-            let n_treat = treated_idx.len() as f64;
-            let mut means = Array1::zeros(k);
-            for &i in &treated_idx {
-                for j in 0..k {
-                    means[j] += x[[i, j]];
-                }
-            }
-            means /= n_treat;
-            means
-        }
-    };
-
-    // Run entropy balancing optimization
-    let (weights, lambda, converged, iterations, constraint_tol) =
-        entropy_balance_optimize(&x_ctrl, &target_means, 200, 1e-8)?;
-
-    // Create full weight vector (1.0 for treated, computed weights for control)
-    let mut full_weights = vec![0.0; n];
-    for &i in &treated_idx {
-        full_weights[i] = 1.0;
-    }
-    for (ctrl_i, &orig_i) in control_idx.iter().enumerate() {
-        full_weights[orig_i] = weights[ctrl_i] * n_ctrl as f64; // Scale to sum to n_ctrl
     }
 
-    // Compute balance
-    let var_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
-    let balance = compute_balance_table(&x, &d, &var_names, Some(&full_weights));
-
-    // Compute ESS for control group
-    let w_sum: f64 = weights.iter().sum();
-    let w_sq_sum: f64 = weights.iter().map(|w| w * w).sum();
-    let ess = if w_sq_sum > 0.0 {
-        w_sum * w_sum / w_sq_sum
-    } else {
-        0.0
+    let balance = compute_balance_table(&x, &d, &names, Some(&weights));
+    let (_, ess_treated, ess_control) = compute_ess(&weights, &d);
+    let reweighted = |i: usize| match config.estimand {
+        WeightEstimand::ATT => d[i] < 0.5,
+        WeightEstimand::ATC => d[i] >= 0.5,
+        WeightEstimand::ATE => true,
     };
-
-    let max_w = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_w = weights
+    let rw: Vec<f64> = (0..d.len())
+        .filter(|&i| reweighted(i))
+        .map(|i| weights[i])
+        .collect();
+    let max_weight = rw.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_weight = rw
         .iter()
         .filter(|&&w| w > 0.0)
         .cloned()
         .fold(f64::INFINITY, f64::min);
+    let effective_sample_size = match config.estimand {
+        WeightEstimand::ATT => ess_control,
+        WeightEstimand::ATC => ess_treated,
+        WeightEstimand::ATE => ess_treated + ess_control,
+    };
+    // fits are (control, treated) for ATE, the single reweighted group otherwise
+    let lambda = fits[0].lambda.clone();
+    let lambda_treated = (config.estimand == WeightEstimand::ATE).then(|| fits[1].lambda.clone());
 
     Ok(EntropyBalanceResult {
-        weights: full_weights,
-        lambda: lambda.to_vec(),
+        weights,
+        lambda,
         balance,
-        effective_sample_size: ess * n_ctrl as f64,
-        max_weight: max_w * n_ctrl as f64,
-        min_weight: min_w * n_ctrl as f64,
-        converged,
-        iterations,
-        constraint_tolerance: constraint_tol,
-        n_reweighted: n_ctrl,
+        effective_sample_size,
+        max_weight,
+        min_weight,
+        converged: convergence.converged,
+        iterations: convergence.iterations,
+        constraint_tolerance: residual,
+        n_reweighted: rw.len(),
+        estimand: config.estimand,
+        ess_treated,
+        ess_control,
+        lambda_treated,
+        dropped_covariates: dropped,
+        convergence: Some(convergence),
+        warnings,
     })
 }
 
@@ -837,239 +942,314 @@ fn logistic_weights(
     Ok((weights, ps, fit))
 }
 
-/// Compute entropy balancing weights using Newton's method.
-///
-/// Implements Hainmueller (2012) Algorithm 1.
-fn compute_entropy_weights(
-    x: &Array2<f64>,
-    d: &Array1<f64>,
-    estimand: WeightEstimand,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<WeightItResult> {
-    let n = d.len();
-    let k = x.ncols();
-
-    // Identify groups based on estimand
-    let (reweight_idx, target_idx): (Vec<usize>, Vec<usize>) = match estimand {
-        WeightEstimand::ATT => {
-            let ctrl: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
-            let treat: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
-            (ctrl, treat)
-        }
-        WeightEstimand::ATC => {
-            let treat: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
-            let ctrl: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
-            (treat, ctrl)
-        }
-        WeightEstimand::ATE => {
-            // For ATE, reweight both groups to overall mean
-            // This is more complex - use separate reweighting
-            let ctrl: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
-            let treat: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
-            (ctrl, treat) // For now, default to ATT-like
-        }
-    };
-
-    let n_reweight = reweight_idx.len();
-    let n_target = target_idx.len();
-
-    // Build matrices for reweighted and target groups
-    let mut x_reweight = Array2::zeros((n_reweight, k));
-    let mut x_target = Array2::zeros((n_target, k));
-
-    for (new_i, &old_i) in reweight_idx.iter().enumerate() {
-        x_reweight.row_mut(new_i).assign(&x.row(old_i));
+/// The covariate columns of `x` without the intercept column `weightit()` may have added.
+fn covariates_only(x: &Array2<f64>, intercept: bool) -> Array2<f64> {
+    if intercept {
+        x.slice(ndarray::s![.., 1..]).to_owned()
+    } else {
+        x.clone()
     }
-    for (new_i, &old_i) in target_idx.iter().enumerate() {
-        x_target.row_mut(new_i).assign(&x.row(old_i));
-    }
-
-    // Target means (mean of target group)
-    let target_means: Array1<f64> = x_target
-        .mean_axis(ndarray::Axis(0))
-        .ok_or_else(|| EconError::Computation("Failed to compute target means".to_string()))?;
-
-    // Run entropy balancing optimization
-    let (weights_reweight, _lambda, converged, iterations, _constraint_tol) =
-        entropy_balance_optimize(&x_reweight, &target_means, max_iter, tolerance)?;
-
-    // Create full weight vector
-    let mut weights = vec![1.0; n];
-    for (reweight_i, &orig_i) in reweight_idx.iter().enumerate() {
-        weights[orig_i] = weights_reweight[reweight_i] * n_reweight as f64;
-    }
-
-    // Variable names
-    let var_names: Vec<String> = (0..k).map(|i| format!("X{}", i)).collect();
-
-    // Compute balance
-    let balance_before = compute_balance_table(x, d, &var_names, None);
-    let balance_after = compute_balance_table(x, d, &var_names, Some(&weights));
-
-    // ESS
-    let (ess_total, ess_treated, ess_control) = compute_ess(&weights, d);
-
-    let max_w = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_w = weights
-        .iter()
-        .filter(|&&w| w > 0.0)
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-
-    let n_treated = d.iter().filter(|&&v| v >= 0.5).count();
-    let n_control = n - n_treated;
-
-    Ok(WeightItResult {
-        weights,
-        propensity_scores: None,
-        method: WeightMethod::Entropy,
-        estimand,
-        balance_before,
-        balance_after,
-        effective_sample_size: ess_total,
-        ess_treated,
-        ess_control,
-        max_weight: max_w,
-        min_weight: min_w,
-        n_obs: n,
-        n_treated,
-        n_control,
-        converged,
-        iterations,
-        warnings: Vec::new(),
-        convergence: None,
-    })
 }
 
-/// Core entropy balancing optimization using Newton's method.
-///
-/// Solves: min Σ w_i log(w_i) s.t. Σ w_i X_i = target, Σ w_i = 1
-///
-/// Uses dual formulation where optimal weights are:
-/// w_i ∝ exp(λ' X_i)
-fn entropy_balance_optimize(
-    x: &Array2<f64>,
-    target: &Array1<f64>,
+/// One group's entropy-balancing fit.
+#[derive(Debug, Clone)]
+struct EbalFit {
+    /// Weights of the group's units (sum 1).
+    weights: Vec<f64>,
+    /// Multipliers in the original covariate scale (0 for dropped or constant columns).
+    lambda: Vec<f64>,
+    converged: bool,
+    iterations: usize,
+    /// Final `max_j |weighted mean_j - target_j| / sd_j` over the solved columns.
+    residual: f64,
+    /// Columns dropped as linearly dependent on the others.
+    dropped: Vec<usize>,
+    warnings: Vec<String>,
+}
+
+fn ebal_infeasible(message: String) -> EconError {
+    EconError::InvalidSpecification {
+        message: format!("Entropy balancing is infeasible: {message}"),
+    }
+}
+
+/// Entropy balancing of one group (`x`, m x k) to `target`: the convex dual
+/// `min_lambda f(lambda) = log sum_i exp(C_i . lambda)` with `C_ij = (x_ij - t_j) / sd_j`,
+/// minimised by Newton's method with an Armijo search. `group` names the group in messages.
+fn ebal_solve(
+    x: ArrayView2<f64>,
+    target: &[f64],
+    names: &[String],
+    group: &str,
     max_iter: usize,
-    tolerance: f64,
-) -> EconResult<(Vec<f64>, Array1<f64>, bool, usize, f64)> {
-    let n = x.nrows();
-    let k = x.ncols();
-
-    // Initialize Lagrange multipliers
-    let mut lambda = Array1::zeros(k);
-
-    let mut converged = false;
-    let mut iterations = 0;
-    let mut constraint_tol = f64::INFINITY;
-
-    for iter in 0..max_iter {
-        iterations = iter + 1;
-
-        // Compute weights: w_i ∝ exp(λ' X_i)
-        let mut exp_scores = Array1::zeros(n);
-        for i in 0..n {
-            let score: f64 = (0..k).map(|j| lambda[j] * x[[i, j]]).sum();
-            exp_scores[i] = score.exp().min(1e100); // Prevent overflow
+    tol: f64,
+) -> EconResult<EbalFit> {
+    let (m, k) = x.dim();
+    if m == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("entropy balancing needs at least one {group} unit"),
+        });
+    }
+    // 1. Range checks; constant columns that already match their target are skipped.
+    let mut solved: Vec<usize> = Vec::with_capacity(k);
+    for j in 0..k {
+        let col = x.column(j);
+        if col.iter().any(|v| !v.is_finite()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!("covariate {} must be finite", names[j]),
+            });
         }
+        let lo = col.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let t = target[j];
+        if hi == lo {
+            if (t - lo).abs() <= 1e-12 * lo.abs().max(1.0) {
+                continue;
+            }
+            return Err(ebal_infeasible(format!(
+                "{} is constant ({lo}) in the {group} group but its target mean is {t}",
+                names[j]
+            )));
+        }
+        if t <= lo || t >= hi {
+            return Err(ebal_infeasible(format!(
+                "the target mean of {} ({t:.6}) is outside the {group} group's range [{lo:.6}, {hi:.6}]; positive weights cannot reach it",
+                names[j]
+            )));
+        }
+        solved.push(j);
+    }
 
-        // Normalize
-        let sum_exp: f64 = exp_scores.iter().sum();
-        let weights: Array1<f64> = &exp_scores / sum_exp;
-
-        // Compute weighted means
-        let mut weighted_means = Array1::zeros(k);
-        for i in 0..n {
-            for j in 0..k {
-                weighted_means[j] += weights[i] * x[[i, j]];
+    // 2. Linearly dependent columns (WeightIt's make_full_rank).
+    let mut warnings = Vec::new();
+    let mut dropped = Vec::new();
+    if !solved.is_empty() {
+        let mut centred = Array2::<f64>::zeros((m, solved.len()));
+        for (c, &j) in solved.iter().enumerate() {
+            let mean = x.column(j).sum() / m as f64;
+            for i in 0..m {
+                centred[[i, c]] = x[[i, j]] - mean;
             }
         }
+        let aliased = Qr::decompose(centred.view(), LM_QR_TOL)?.aliased();
+        if !aliased.is_empty() {
+            dropped = aliased.iter().map(|&c| solved[c]).collect();
+            let list: Vec<&str> = dropped.iter().map(|&j| names[j].as_str()).collect();
+            warnings.push(format!(
+                "Entropy balancing: {} dropped as linearly dependent on the other covariates in the {group} group (as WeightIt's make_full_rank); their balance is checked after the fit",
+                list.join(", ")
+            ));
+            solved.retain(|j| !dropped.contains(j));
+        }
+    }
 
-        // Constraint violation: (weighted_means - target)
-        let constraint = &weighted_means - target;
-        constraint_tol = constraint.iter().map(|c: &f64| c.abs()).fold(0.0, f64::max);
+    // 3. Scores in SD units.
+    let kk = solved.len();
+    let sd: Vec<f64> = solved
+        .iter()
+        .map(|&j| {
+            let col = x.column(j);
+            let mean = col.sum() / m as f64;
+            (col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (m as f64 - 1.0).max(1.0)).sqrt()
+        })
+        .collect();
+    let mut c = Array2::<f64>::zeros((m, kk));
+    for (cj, &j) in solved.iter().enumerate() {
+        for i in 0..m {
+            c[[i, cj]] = (x[[i, j]] - target[j]) / sd[cj];
+        }
+    }
 
-        // Check convergence
-        if constraint_tol < tolerance {
+    // f(lambda) and the normalised weights p.
+    let eval = |lam: &Array1<f64>| -> (f64, Array1<f64>) {
+        let z = c.dot(lam);
+        let zmax = z.iter().cloned().max_by(f64::total_cmp).unwrap_or(0.0);
+        let e = z.mapv(|zi| (zi - zmax).exp());
+        let sum = e.sum();
+        (zmax + sum.ln(), e / sum)
+    };
+
+    // 4. Newton with Armijo backtracking.
+    let mut lambda = Array1::<f64>::zeros(kk);
+    let mut iterations = 0usize;
+    let mut converged = false;
+    let mut residual;
+    let (mut f, mut p) = eval(&lambda);
+    loop {
+        resource::checkpoint()?;
+        if f < -1e-10 {
+            return Err(ebal_infeasible(format!(
+                "the {group} group cannot be reweighted to the target means (the target lies outside the convex hull of its covariates)"
+            )));
+        }
+        let g = c.t().dot(&p);
+        residual = g.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        if residual.is_nan() {
+            return Err(EconError::Computation(
+                "entropy balancing produced a non-finite balance residual".to_string(),
+            ));
+        }
+        if residual <= tol {
             converged = true;
             break;
         }
-
-        // Newton step: solve H * delta = -constraint
-        // Hessian H[j,l] = Σ w_i (X_ij - mean_j)(X_il - mean_l)
-        // This is the weighted covariance matrix
-        let mut hessian = Array2::zeros((k, k));
-        for i in 0..n {
-            let wi = weights[i];
-            for j in 0..k {
-                let dev_j = x[[i, j]] - weighted_means[j];
-                for l in 0..k {
-                    let dev_l = x[[i, l]] - weighted_means[l];
-                    hessian[[j, l]] += wi * dev_j * dev_l;
+        if iterations == max_iter {
+            break;
+        }
+        let mut h = Array2::<f64>::zeros((kk, kk));
+        for i in 0..m {
+            let pi = p[i];
+            for a in 0..kk {
+                let ca = c[[i, a]] - g[a];
+                for b in 0..=a {
+                    h[[a, b]] += pi * ca * (c[[i, b]] - g[b]);
                 }
             }
         }
-
-        // Add small regularization for numerical stability
-        for j in 0..k {
-            hessian[[j, j]] += 1e-8;
+        for a in 0..kk {
+            for b in 0..a {
+                h[[b, a]] = h[[a, b]];
+            }
         }
-
-        // Solve for update
-        let (hess_inv, _) =
-            safe_inverse(&hessian.view()).map_err(|_| EconError::SingularMatrix {
-                context: "Entropy balancing Hessian".to_string(),
-                suggestion: "Covariates may be linearly dependent".to_string(),
-            })?;
-
-        let delta = hess_inv.dot(&constraint);
-
-        // Line search with backtracking
-        let mut step = 1.0;
-        for _ in 0..20 {
-            let lambda_new = &lambda - &(&delta * step);
-
-            // Evaluate constraint at new point
-            let mut exp_new = Array1::zeros(n);
-            for i in 0..n {
-                let score: f64 = (0..k).map(|j| lambda_new[j] * x[[i, j]]).sum();
-                exp_new[i] = score.exp().min(1e100);
+        let inv = match sym_inverse(h.view(), SingularPolicy::Error, "entropy-balancing Hessian") {
+            Ok(inv) => inv.inverse,
+            Err(EconError::SingularMatrix { .. }) => {
+                return Err(ebal_infeasible(format!(
+                    "the {group} group's weights collapse onto a lower-dimensional face (the target lies on the boundary of its covariate hull)"
+                )));
             }
-            let sum_new: f64 = exp_new.iter().sum();
-            let w_new: Array1<f64> = &exp_new / sum_new;
-
-            let mut means_new = Array1::zeros(k);
-            for i in 0..n {
-                for j in 0..k {
-                    means_new[j] += w_new[i] * x[[i, j]];
-                }
+            Err(e) => return Err(e),
+        };
+        let delta = -inv.dot(&g);
+        let slope = g.dot(&delta);
+        let mut t = 1.0;
+        let (mut f_new, mut p_new) = eval(&(&lambda + &(&delta * t)));
+        if -slope > 1e-12 * (1.0 + f.abs()) {
+            while !(f_new <= f + 1e-4 * t * slope) && t > 1e-12 {
+                t *= 0.5;
+                (f_new, p_new) = eval(&(&lambda + &(&delta * t)));
             }
-
-            let new_tol = (&means_new - target)
-                .iter()
-                .map(|c: &f64| c.abs())
-                .fold(0.0, f64::max);
-
-            if new_tol < constraint_tol * 1.1 {
-                // Accept step
-                lambda = lambda_new;
+            if t <= 1e-12 {
                 break;
             }
-            step *= 0.5;
+        }
+        lambda = &lambda + &(&delta * t);
+        f = f_new;
+        p = p_new;
+        iterations += 1;
+    }
+
+    // 5. Weights.
+    if p.iter().any(|w| !w.is_finite()) {
+        return Err(EconError::Computation(
+            "entropy balancing produced non-finite weights".to_string(),
+        ));
+    }
+    // 6. Dropped columns must be balanced by the fit too.
+    for &j in &dropped {
+        let col = x.column(j);
+        let mean = col.sum() / m as f64;
+        let sdj = (col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (m as f64 - 1.0).max(1.0))
+            .sqrt();
+        let achieved: f64 = col.iter().zip(p.iter()).map(|(a, b)| a * b).sum();
+        if (achieved - target[j]).abs() / sdj > tol.max(1e-8) {
+            return Err(ebal_infeasible(format!(
+                "{} is linearly dependent on the other covariates in the {group} group but its target mean is not",
+                names[j]
+            )));
         }
     }
-
-    // Compute final weights
-    let mut exp_scores = Array1::zeros(n);
-    for i in 0..n {
-        let score: f64 = (0..k).map(|j| lambda[j] * x[[i, j]]).sum();
-        exp_scores[i] = score.exp().min(1e100);
+    // 7. Multipliers in the original scale.
+    let mut lam_full = vec![0.0; k];
+    for (cj, &j) in solved.iter().enumerate() {
+        lam_full[j] = lambda[cj] / sd[cj];
     }
-    let sum_exp: f64 = exp_scores.iter().sum();
-    let weights: Vec<f64> = exp_scores.iter().map(|&e| e / sum_exp).collect();
+    Ok(EbalFit {
+        weights: p.to_vec(),
+        lambda: lam_full,
+        converged,
+        iterations,
+        residual,
+        dropped,
+        warnings,
+    })
+}
 
-    Ok((weights, lambda, converged, iterations, constraint_tol))
+/// Entropy balancing for `estimand`: the reweighted groups' fits and the weights of all units
+/// in WeightIt's `ebal` scale (target units 1; each reweighted group sums to the target
+/// population size). The fits are (control) for ATT, (treated) for ATC and (control,
+/// treated) for ATE.
+fn ebal_groups(
+    x_cov: &Array2<f64>,
+    d: &Array1<f64>,
+    estimand: WeightEstimand,
+    targets: Option<&[f64]>,
+    names: &[String],
+    max_iter: usize,
+    tol: f64,
+) -> EconResult<(Vec<f64>, Vec<EbalFit>)> {
+    let n = d.len();
+    let treated: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
+    let control: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
+    let (nt, nc) = (treated.len(), control.len());
+    if nt == 0 || nc == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "entropy balancing needs both treated and control units; found {nt} treated and {nc} control"
+            ),
+        });
+    }
+    let rows = |idx: &[usize]| x_cov.select(ndarray::Axis(0), idx);
+    let means = |idx: &[usize]| -> Vec<f64> {
+        (0..x_cov.ncols())
+            .map(|j| idx.iter().map(|&i| x_cov[[i, j]]).sum::<f64>() / idx.len() as f64)
+            .collect()
+    };
+    let target = match targets {
+        Some(t) => t.to_vec(),
+        None => match estimand {
+            WeightEstimand::ATT => means(&treated),
+            WeightEstimand::ATC => means(&control),
+            WeightEstimand::ATE => means(&(0..n).collect::<Vec<_>>()),
+        },
+    };
+    let mut weights = vec![1.0; n];
+    let mut fits = Vec::with_capacity(2);
+    let mut fit_group = |idx: &[usize], label: &str, total: usize| -> EconResult<()> {
+        let fit = ebal_solve(rows(idx).view(), &target, names, label, max_iter, tol)?;
+        for (&i, &p) in idx.iter().zip(&fit.weights) {
+            weights[i] = p * total as f64;
+        }
+        fits.push(fit);
+        Ok(())
+    };
+    match estimand {
+        WeightEstimand::ATT => fit_group(&control, "control", nt)?,
+        WeightEstimand::ATC => fit_group(&treated, "treated", nc)?,
+        WeightEstimand::ATE => {
+            fit_group(&control, "control", n)?;
+            fit_group(&treated, "treated", n)?;
+        }
+    }
+    Ok((weights, fits))
+}
+
+/// The combined convergence record of the group fits and the largest final residual.
+fn ebal_convergence(fits: &[EbalFit], max_iter: usize, tol: f64) -> (Convergence, f64) {
+    let converged = fits.iter().all(|f| f.converged);
+    let iterations = fits.iter().map(|f| f.iterations).max().unwrap_or(0);
+    let residual = fits.iter().map(|f| f.residual).fold(0.0, f64::max);
+    (
+        Convergence::new(
+            converged,
+            iterations,
+            max_iter,
+            "max |weighted mean - target| / sd",
+            residual,
+            tol,
+        ),
+        residual,
+    )
 }
 
 /// Compute energy balancing weights.
@@ -1427,7 +1607,7 @@ fn compute_ess(weights: &[f64], d: &Array1<f64>) -> (f64, f64, f64) {
 /// Trim extreme weights at specified quantile.
 fn trim_weights(weights: &[f64], quantile: f64) -> Vec<f64> {
     let mut sorted: Vec<f64> = weights.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
 
     let n = sorted.len();
     let lower_idx = ((1.0 - quantile) * n as f64).floor() as usize;
@@ -1633,6 +1813,308 @@ mod tests {
         }
     }
 
+    fn ebal(ds: &Dataset, est: WeightEstimand) -> WeightItResult {
+        let mut c = WeightItConfig::default();
+        c.method = WeightMethod::Entropy;
+        c.estimand = est;
+        c.tolerance = 1e-12;
+        weightit(ds, "treat", &COVS, c).unwrap()
+    }
+
+    #[test]
+    fn test_validate_ebal_ate() {
+        // R: WeightIt 2.0.0 ebal ATE (cross-check) and the exact dual, Newton to |grad| < 1e-14
+        // (case weights_ebal). Fails before (CAUS-49): ATE ran as ATT, so every treated
+        // weight was 1.
+        let (case, ds) = crate::test_support::load_case("weights_ebal");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let r = ebal(&ds, WeightEstimand::ATE);
+        let n = r.n_obs;
+        let (wt, wc) = (group(&r.weights, &d, true), group(&r.weights, &d, false));
+        let (nt, nc, nf) = (wt.len() as f64, wc.len() as f64, n as f64);
+        assert!(r.converged && r.estimand == WeightEstimand::ATE);
+        // WP23-B: each reweighted group sums to the target population size
+        assert!((wt.iter().sum::<f64>() - nf).abs() < 1e-9);
+        assert!((wc.iter().sum::<f64>() - nf).abs() < 1e-9);
+        Check::new(&case)
+            .vector(
+                "ate_exact_weights_t_head",
+                &scaled(&wt[..8], nt / nf),
+                Tol::coef(n),
+            )
+            .vector(
+                "ate_exact_weights_c_head",
+                &scaled(&wc[..8], nc / nf),
+                Tol::coef(n),
+            )
+            .scalar("ate_exact_ess_t", r.ess_treated, Tol::stat(n))
+            .scalar("ate_exact_ess_c", r.ess_control, Tol::stat(n))
+            .scalar("ate_exact_effect", effect(&y, &d, &r.weights), Tol::coef(n))
+            .vector("ate_weights_head", &r.weights[..12], Tol::new(1e-4, 0.0))
+            .scalar(
+                "ate_effect",
+                effect(&y, &d, &r.weights),
+                Tol::new(1e-4, 0.0),
+            )
+            .scalar(
+                "ate_wmean_t_x1",
+                wmean(&group(&col(&ds, "x1"), &d, true), &wt),
+                Tol::new(1e-4, 1e-6),
+            )
+            .finish();
+        for c in COVS {
+            // exact balance: both groups reproduce the pooled means
+            let x = col(&ds, c);
+            let pooled = x.iter().sum::<f64>() / nf;
+            assert!(
+                (wmean(&group(&x, &d, true), &wt) - pooled).abs() < 1e-10,
+                "{c}"
+            );
+            assert!(
+                (wmean(&group(&x, &d, false), &wc) - pooled).abs() < 1e-10,
+                "{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_ebal_att() {
+        // R: WeightIt 2.0.0 ebal ATT (cross-check) and the exact dual (case weights_ebal).
+        // Fails before: the controls summed to n0 = 149 instead of n1 = 151 (WP23-B).
+        let (case, ds) = crate::test_support::load_case("weights_ebal");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let r = ebal(&ds, WeightEstimand::ATT);
+        let n = r.n_obs;
+        let (wt, wc) = (group(&r.weights, &d, true), group(&r.weights, &d, false));
+        let (nt, nc) = (wt.len() as f64, wc.len() as f64);
+        assert!(r.converged && wt.iter().all(|&w| w == 1.0));
+        assert!((wc.iter().sum::<f64>() - nt).abs() < 1e-9);
+        Check::new(&case)
+            .vector(
+                "att_exact_weights_c_head",
+                &scaled(&wc[..8], nc / nt),
+                Tol::coef(n),
+            )
+            .scalar("att_exact_ess_c", r.ess_control, Tol::stat(n))
+            .scalar("att_exact_effect", effect(&y, &d, &r.weights), Tol::coef(n))
+            .vector("att_weights_head", &r.weights[..12], Tol::new(1e-4, 0.0))
+            .scalar(
+                "att_effect",
+                effect(&y, &d, &r.weights),
+                Tol::new(1e-4, 0.0),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_ebal_atc() {
+        // R: WeightIt 2.0.0 ebal ATC (cross-check) and the exact dual (case weights_ebal).
+        // Fails before: ATC treated weights summed to n1 instead of n0 (WP23-B).
+        let (case, ds) = crate::test_support::load_case("weights_ebal");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let r = ebal(&ds, WeightEstimand::ATC);
+        let n = r.n_obs;
+        let (wt, wc) = (group(&r.weights, &d, true), group(&r.weights, &d, false));
+        let (nt, nc) = (wt.len() as f64, wc.len() as f64);
+        assert!(r.converged && wc.iter().all(|&w| w == 1.0));
+        assert!((wt.iter().sum::<f64>() - nc).abs() < 1e-9);
+        Check::new(&case)
+            .vector(
+                "atc_exact_weights_t_head",
+                &scaled(&wt[..8], nt / nc),
+                Tol::coef(n),
+            )
+            .scalar("atc_exact_ess_t", r.ess_treated, Tol::stat(n))
+            .scalar("atc_exact_effect", effect(&y, &d, &r.weights), Tol::coef(n))
+            .vector("atc_weights_head", &r.weights[..12], Tol::new(1e-4, 0.0))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_entropy_balance_ess() {
+        // CAUS-94: ESS was multiplied by n_control (86.72 x 149 = 12921.7); R: control ESS
+        // of the exact dual (case weights_ebal).
+        let (case, ds) = crate::test_support::load_case("weights_ebal");
+        let d = col(&ds, "treat");
+        let r = entropy_balance(&ds, "treat", &COVS, None).unwrap();
+        let n = d.len();
+        Check::new(&case)
+            .scalar("att_exact_ess_c", r.effective_sample_size, Tol::stat(n))
+            .scalar("att_exact_ess_c", r.ess_control, Tol::stat(n))
+            .finish();
+        assert_eq!(r.ess_treated, 151.0);
+        assert_eq!(r.estimand, WeightEstimand::ATT);
+        assert!((group(&r.weights, &d, false).iter().sum::<f64>() - 151.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_entropy_balance_with_matches_weightit() {
+        let ds = weighting_sim();
+        for est in [
+            WeightEstimand::ATE,
+            WeightEstimand::ATT,
+            WeightEstimand::ATC,
+        ] {
+            let c = EntropyBalanceConfig {
+                estimand: est,
+                tolerance: 1e-12,
+                ..Default::default()
+            };
+            let a = entropy_balance_with(&ds, "treat", &COVS, &c).unwrap();
+            let b = ebal(&ds, est);
+            assert_eq!(a.estimand, est);
+            for (x, y) in a.weights.iter().zip(&b.weights) {
+                assert!((x - y).abs() <= 1e-12 * y.abs().max(1.0), "{est:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_ebal_infeasible_is_error() {
+        // CAUS-95 repro: treated x = 0, 0.5, 1; controls 2..6. Before: converged = true, NaN
+        // control weights. R WeightIt returns all-zero control weights with a warning; p2a
+        // refuses.
+        let df = df! { "treatment" => [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "x" => [0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0] }
+        .unwrap();
+        let ds = Dataset::new(df);
+        let mut c = WeightItConfig::default();
+        c.method = WeightMethod::Entropy;
+        c.estimand = WeightEstimand::ATT;
+        expect_spec(
+            weightit(&ds, "treatment", &["x"], c).unwrap_err(),
+            &["infeasible", "x"],
+        );
+        expect_spec(
+            entropy_balance(&ds, "treatment", &["x"], None).unwrap_err(),
+            &["infeasible", "x"],
+        );
+        // target inside each coordinate's range but outside the controls' convex hull
+        // (x1 + x2 <= 1):
+        let df2 = df! { "treatment" => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        "x1" => [0.0, 1.0, 0.0, 0.2, 0.3, 0.1, 0.9, 0.8, 1.0],
+        "x2" => [0.0, 0.0, 1.0, 0.2, 0.1, 0.3, 0.9, 1.0, 0.8] }
+        .unwrap();
+        expect_spec(
+            entropy_balance(&Dataset::new(df2), "treatment", &["x1", "x2"], None).unwrap_err(),
+            &["infeasible"],
+        );
+        // an empty group (entropy_balance had no check; weightit had one)
+        let df3 = df! { "treatment" => [1.0, 1.0, 1.0], "x" => [0.1, 0.4, 0.3] }.unwrap();
+        expect_spec(
+            entropy_balance(&Dataset::new(df3), "treatment", &["x"], None).unwrap_err(),
+            &["control"],
+        );
+    }
+
+    #[test]
+    fn test_entropy_on_infeasible_test_data_is_error() {
+        // create_test_dataset(): the treated mean of x2 (0.5585) exceeds every control x2
+        // (max 0.55), so no positive control weights balance it.
+        let ds = create_test_dataset();
+        let mut c = WeightItConfig::default();
+        c.method = WeightMethod::Entropy;
+        c.estimand = WeightEstimand::ATT;
+        expect_spec(
+            weightit(&ds, "treatment", &["x1", "x2"], c).unwrap_err(),
+            &["infeasible", "x2"],
+        );
+        expect_spec(
+            entropy_balance(&ds, "treatment", &["x1", "x2"], None).unwrap_err(),
+            &["infeasible", "x2"],
+        );
+    }
+
+    #[test]
+    fn test_ebal_scale_invariant() {
+        // Tier 3 convention 5: the scaled criterion converges in similar iteration counts at
+        // any data scale.
+        let ds = weighting_sim();
+        let base = ebal(&ds, WeightEstimand::ATT);
+        for s in [1e-6, 1e6] {
+            let df = df! { "treat" => col(&ds, "treat"),
+            "x1" => scaled(&col(&ds, "x1"), s), "x2" => scaled(&col(&ds, "x2"), s),
+            "x3" => scaled(&col(&ds, "x3"), s) }
+            .unwrap();
+            let r = ebal(&Dataset::new(df), WeightEstimand::ATT);
+            assert!(
+                (r.iterations as i64 - base.iterations as i64).abs() <= 1,
+                "scale {s}: {} vs {}",
+                r.iterations,
+                base.iterations
+            );
+            for (a, b) in r.weights.iter().zip(&base.weights) {
+                assert!((a - b).abs() <= 1e-10 * b.abs(), "scale {s}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_ebal_drops_collinear_covariate() {
+        // WeightIt drops linearly dependent covariates (make_full_rank); balance on them
+        // follows
+        let ds = weighting_sim();
+        let x1 = col(&ds, "x1");
+        let df = df! { "treat" => col(&ds, "treat"), "x1" => x1.clone(), "x2" => col(&ds, "x2"),
+        "x3" => col(&ds, "x3"),
+        "x4" => x1.iter().map(|v| 2.0 * v + 1.0).collect::<Vec<_>>() }
+        .unwrap();
+        let c = EntropyBalanceConfig {
+            tolerance: 1e-12,
+            ..Default::default()
+        };
+        let r = entropy_balance_with(&Dataset::new(df), "treat", &["x1", "x2", "x3", "x4"], &c)
+            .unwrap();
+        let b = ebal(&ds, WeightEstimand::ATT);
+        assert_eq!(r.dropped_covariates, vec!["x4".to_string()]);
+        assert!(r.warnings.iter().any(|w| w.contains("x4")));
+        for (a, b) in r.weights.iter().zip(&b.weights) {
+            assert!((a - b).abs() <= 1e-10 * b.abs().max(1.0))
+        }
+    }
+
+    #[test]
+    fn test_entropy_balance_with_rejects_bad_controls() {
+        // R3
+        let ds = weighting_sim();
+        let bad = [
+            (
+                EntropyBalanceConfig {
+                    max_iter: 0,
+                    ..Default::default()
+                },
+                "max_iter",
+            ),
+            (
+                EntropyBalanceConfig {
+                    tolerance: f64::NAN,
+                    ..Default::default()
+                },
+                "tolerance",
+            ),
+            (
+                EntropyBalanceConfig {
+                    targets: Some(vec![0.0, 0.0]),
+                    ..Default::default()
+                },
+                "target",
+            ),
+            (
+                EntropyBalanceConfig {
+                    targets: Some(vec![0.0, f64::INFINITY, 0.5]),
+                    ..Default::default()
+                },
+                "target",
+            ),
+        ];
+        for (c, needle) in bad {
+            expect_spec(
+                entropy_balance_with(&ds, "treat", &COVS, &c).unwrap_err(),
+                &[needle],
+            );
+        }
+    }
+
     #[test]
     fn test_weight_method_parses_aliases_and_rejects_unknown() {
         WeightMethod::choices().validate().unwrap();
@@ -1757,67 +2239,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn test_weightit_entropy() {
-        let dataset = create_test_dataset();
-        let config = WeightItConfig {
-            method: WeightMethod::Entropy,
-            estimand: WeightEstimand::ATT,
-            max_iter: 500, // More iterations for convergence
-            tolerance: 1e-4,
-            ..Default::default()
-        };
-
-        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
-
-        // Entropy balancing should improve balance (though may not achieve exact)
-        assert!(
-            result.balance_after.max_std_diff < 1.0,
-            "Entropy balancing should improve balance, got max std_diff = {}",
-            result.balance_after.max_std_diff
-        );
-
-        // Weights should be valid
-        assert!(
-            result.weights.iter().all(|&w| w > 0.0 && w.is_finite()),
-            "Weights should be positive and finite"
-        );
-    }
-
-    #[test]
-    fn test_entropy_balance_direct() {
-        let dataset = create_test_dataset();
-
-        let result = entropy_balance(&dataset, "treatment", &["x1", "x2"], None).unwrap();
-
-        // Check that algorithm ran (may or may not converge with finite iterations)
-        assert!(result.iterations > 0, "Should run at least one iteration");
-
-        // Balance should be finite and not extremely large
-        assert!(
-            result.balance.max_std_diff.is_finite(),
-            "Balance std_diff should be finite"
-        );
-        assert!(
-            result.balance.max_std_diff < 2.0,
-            "Balance should improve somewhat, got {}",
-            result.balance.max_std_diff
-        );
-
-        // ESS should be positive
-        assert!(
-            result.effective_sample_size > 0.0,
-            "ESS should be positive, got {}",
-            result.effective_sample_size
-        );
-
-        // Weights should be valid
-        assert!(
-            result.weights.iter().all(|&w| w >= 0.0 && w.is_finite()),
-            "Weights should be non-negative and finite"
-        );
     }
 
     #[test]
@@ -2230,12 +2651,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ess_properties() {
-        // Validate: ESS properties across methods.
-        // ESS = (sum w)^2 / (sum w^2), always in (0, n].
-        // More variable weights => lower ESS.
-        let dataset = create_validation_dataset();
-
+    fn test_ess_properties() {
+        // ESS = (sum w)^2 / (sum w^2) is in (0, n] for every method; weights are >= 0 and
+        // finite. On weighting_sim, where every balancing problem is feasible.
+        let dataset = weighting_sim();
         for method in [
             WeightMethod::Logistic,
             WeightMethod::Entropy,
@@ -2245,35 +2664,18 @@ mod tests {
             let config = WeightItConfig {
                 method,
                 estimand: WeightEstimand::ATE,
-                max_iter: 300,
-                tolerance: 1e-4,
                 ..Default::default()
             };
-
-            let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
-
-            // ESS should be positive
+            let result = weightit(&dataset, "treat", &COVS, config).unwrap();
             assert!(
-                result.effective_sample_size > 0.0,
-                "ESS should be positive for {:?}, got {}",
-                method,
+                result.effective_sample_size > 0.0
+                    && result.effective_sample_size <= result.n_obs as f64 * (1.0 + 1e-12),
+                "ESS {} for {method:?}",
                 result.effective_sample_size
             );
-
-            // ESS should not exceed n
             assert!(
-                result.effective_sample_size <= result.n_obs as f64 + 1e-6,
-                "ESS ({}) should not exceed n ({}) for {:?}",
-                result.effective_sample_size,
-                result.n_obs,
-                method
-            );
-
-            // All weights should be positive and finite
-            assert!(
-                result.weights.iter().all(|&w| w > 0.0 && w.is_finite()),
-                "All weights should be positive and finite for {:?}",
-                method
+                result.weights.iter().all(|&w| w >= 0.0 && w.is_finite()),
+                "weights for {method:?}"
             );
         }
     }

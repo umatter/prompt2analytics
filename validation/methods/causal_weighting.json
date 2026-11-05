@@ -23,6 +23,34 @@
       "supersedes_legacy": [
         "validation/expected/ipw_weightit.csv"
       ]
+    },
+    {
+      "id": "weightit_ebal",
+      "name": "Entropy balancing (WeightIt ebal and the exact convex dual): ATE, ATT, ATC; ESS per group",
+      "category": "econometrics",
+      "reference": "WeightIt::weightit(method = 'ebal', estimand); exact dual min log sum exp(lambda'(x_i - t)) by Newton to |grad| < 1e-14",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "weights_ebal"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_ebal_ate",
+        "p2a-core::econometrics::weightit::tests::test_validate_ebal_att",
+        "p2a-core::econometrics::weightit::tests::test_validate_ebal_atc",
+        "p2a-core::econometrics::weightit::tests::test_validate_entropy_balance_ess"
+      ],
+      "quantities": [
+        "weights (exact dual)",
+        "ESS treated/control",
+        "effect",
+        "WeightIt weights and effect (cross-check)",
+        "weighted means"
+      ],
+      "tolerance": "exact dual 1e-8 relative (Tol::coef(300)); ESS 1e-6 (Tol::stat); WeightIt optim values 1e-4 relative (cross-check)",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/ebal_weightit.csv"
+      ]
     }
   ]
 }
