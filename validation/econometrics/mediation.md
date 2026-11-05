@@ -6,6 +6,45 @@ IPW-based causal mediation analysis for decomposing treatment effects into natur
 
 **p2a Function**: `run_mediation_analysis()`
 
+## What is pinned to R
+
+- **Total effect and rows kept after trimming:** the Hajek IPW formula on `glm(binomial)` propensity
+  scores with p2a's trimming rule, written out in R (causalweight is not installed): case
+  `medflex_scales` (outcome `yo`, trim 0.05: total effect -0.10767853082261691, 500 rows kept;
+  registry `validation/methods/causal_medflex.json`, id `mediation_ipw_t3`) and T2's
+  `causal_mediation_na` (below).
+- **Bootstrap percentile rule:** SD (n - 1) and the 95% type-7 percentile interval of a fixed
+  199-draw vector (`medflex_scales`, `pct_ci` [1.8825599511963476, 20.7409494752895], `pct_sd`
+  5.773974522368977; `Tol::coef(199)`).
+- **Not pinned:** the direct and indirect effects (and hence the proportion mediated). The NDE
+  weight is CAUS-26 (Tier 4). Nothing in this page was produced by causalweight or mediation.
+
+Tests (p2a-core, `econometrics::mediation`): `test_validate_mediation_total_effect_medflex_scales`,
+`test_validate_mediation_percentile_rule_medflex_scales` and the T2 tests listed under "R reference
+(T2-WP13)". Property tests with no R value: `test_mediation_recovers_dgp` (total effect near the
+DGP's 0.7), `test_mediation_decomposition_identity`, `test_mediation_proportion_mediated_identity`,
+`test_mediation_bootstrap_ses_positive`, `test_mediation_percentile_cis_ordered`,
+`test_mediation_p_values_in_unit_interval`, `test_mediation_seeded_bootstrap_reproducible`,
+`test_mediation_propensity_separation_warns`, `test_mediation_default_seed_is_fixed`,
+`test_mediation_rejects_bad_trim`.
+
+## Tier 3 changes
+
+- **Propensity models** `p(D = 1 | X)` and `p(D = 1 | X, M)` are logistic GLMs fitted by the
+  shared `glm.fit` IRLS (`econometrics::glm::fit_propensity`, epsilon 1e-10), replacing a local
+  Newton-Raphson with a Gauss-Jordan inverse (CAUS-113 part). Point estimates on complete data
+  move by at most about 1e-9. Non-convergence, fitted probabilities numerically 0 or 1 and
+  aliased covariates are reported in `MediationResult::warnings` (Display `Warning:` lines).
+- **Percentile intervals** follow R's `quantile(type = 7)` (they used a floor rule); p-values are
+  two-sided normal (`normal_p_value_two_sided`), no longer 0 below about 1e-16.
+- **Seed:** `seed = None` means seed 42, so repeated calls give identical SEs (they drew OS
+  entropy before).
+- **Failed bootstrap replicates** (e.g. a resample with one arm) are counted and reported with
+  the first error; fewer than 2 usable replicates is an error.
+- **Proportion mediated** `NIE / ATE` is never clamped (it was clamped to [-1, 1]; on
+  `medflex_scales`' `yo` it is -7.891, shown as -1 before), with a warning outside [0, 1].
+- **`trim`** must lie in [0, 0.5); a treated or control arm emptied by trimming is an error.
+
 **Estimands**:
 - Total Effect (ATE)
 - Natural Direct Effect (NDE)
@@ -78,10 +117,13 @@ cat("Proportion Mediated:", result$indir0 / result$total, "\n")
 
 | Statistic | True Value | R (causalweight) | p2a (Rust) | Tolerance |
 |-----------|------------|------------------|------------|-----------|
-| Total Effect | 0.7 | 0.65-0.75 | 0.65-0.75 | 0.1 |
-| Direct Effect (NDE) | 0.4 | 0.35-0.45 | 0.35-0.45 | 0.1 |
-| Indirect Effect (NIE) | 0.3 | 0.25-0.35 | 0.25-0.35 | 0.1 |
-| Proportion Mediated | 0.43 | 0.35-0.50 | 0.35-0.50 | 0.1 |
+| Total Effect | 0.7 | not computed in this repository | 0.65-0.75 | 0.1 |
+| Direct Effect (NDE) | 0.4 | not computed in this repository | 0.35-0.45 | 0.1 |
+| Indirect Effect (NIE) | 0.3 | not computed in this repository | 0.25-0.35 | 0.1 |
+| Proportion Mediated | 0.43 | not computed in this repository | 0.35-0.50 | 0.1 |
+
+The R code above is a recipe for a comparison that has not been run here; the ranges are
+expectations from the DGP, not R output.
 
 ## Test Case 2: Confounded Setting
 
@@ -217,7 +259,7 @@ cat("NIE should be ~0.48:", result$indir0, "\n")
 
 2. **Bootstrap**: causalweight may use different resampling strategy.
 
-3. **Propensity score model**: Both use logistic regression, but implementation details may differ.
+3. **Propensity score model**: Both use logistic regression; p2a's is `glm.fit`'s IRLS.
 
 4. **Trimming**: Both use symmetric trimming on propensity scores.
 
@@ -284,7 +326,7 @@ missing outcomes, 25 missing mediators and 10 missing `x1` values; 350 rows are 
 |---|---|---|
 | complete rows, rows dropped | 350, 50 | exact |
 | missing cells `y`, `m`, `x1` | 15, 25, 10 | exact |
-| total effect, trim 0.05 (rows kept) | 0.7351820850179664 (280) | `Tol::iterative(1e-8)` (logit Newton-Raphson to a step below 1e-8); rows exact |
+| total effect, trim 0.05 (rows kept) | 0.7351820850179664 (280) | `Tol::iterative(1e-8)` (`glm.fit` IRLS to epsilon 1e-10 against R at 1e-14); rows exact |
 | total effect, trim 0 (rows kept) | 1.0005110336992182 (350) | `Tol::iterative(1e-8)`; rows exact |
 | total effect in the MCP text | 0.7352 | `Tol::printed(4)` |
 
