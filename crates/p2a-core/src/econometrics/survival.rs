@@ -200,7 +200,9 @@ impl Ord for OrderedF64 {
     }
 }
 
-/// Method for handling tied event times in Cox model.
+/// Method for handling tied event times in the Cox model (R `coxph(ties = )`).
+///
+/// Parsed from "efron" or "breslow" (case-insensitive, `FromStr`); other values are refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TiesMethod {
     /// Breslow approximation (default, faster)
@@ -219,7 +221,24 @@ impl fmt::Display for TiesMethod {
     }
 }
 
-/// Distribution for Accelerated Failure Time models.
+crate::option_enum!(
+    TiesMethod,
+    crate::options::Choices {
+        option: "ties",
+        values: &[
+            (&["efron"], TiesMethod::Efron),
+            (&["breslow"], TiesMethod::Breslow),
+        ],
+    },
+    no_display
+);
+
+/// Distribution for Accelerated Failure Time models (R `survreg(dist = )`).
+///
+/// Parsed from "weibull", "exponential", "lognormal" (also "log-normal", "log_normal") or
+/// "loglogistic" (also "log-logistic", "log_logistic"), case-insensitive (`FromStr`). R's
+/// "gaussian" and "logistic" families model T rather than log T and are refused, as are
+/// "rayleigh", "t" and "extreme".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AftDistribution {
     /// Exponential distribution (constant hazard)
@@ -243,6 +262,20 @@ impl fmt::Display for AftDistribution {
         }
     }
 }
+
+crate::option_enum!(
+    AftDistribution,
+    crate::options::Choices {
+        option: "dist",
+        values: &[
+            (&["weibull"], AftDistribution::Weibull),
+            (&["exponential"], AftDistribution::Exponential),
+            (&["lognormal", "log_normal"], AftDistribution::LogNormal),
+            (&["loglogistic", "log_logistic"], AftDistribution::LogLogistic),
+        ],
+    },
+    no_display
+);
 
 // =============================================================================
 // Kaplan-Meier Estimator
@@ -3867,4 +3900,66 @@ mod tests {
             }
         );
     }
+
+    // =========================================================================
+    // Cox and AFT: option parsing
+    // =========================================================================
+
+    #[test]
+    fn test_ties_method_parses_aliases_and_rejects_unknown() {
+        use TiesMethod::*;
+        TiesMethod::choices().validate().unwrap();
+        for (s, t) in [
+            ("efron", Efron),
+            ("Efron", Efron),
+            (" EFRON ", Efron),
+            ("breslow", Breslow),
+            ("Breslow", Breslow),
+        ] {
+            assert_eq!(s.parse::<TiesMethod>().unwrap(), t, "{s}");
+        }
+        for t in [Efron, Breslow] {
+            assert_eq!(t.to_string().parse::<TiesMethod>().unwrap(), t);
+        }
+        let err = "exact".parse::<TiesMethod>().unwrap_err().to_string();
+        assert!(
+            err.contains("unknown ties 'exact'") && err.contains("efron, breslow"),
+            "{err}"
+        );
+        assert!("".parse::<TiesMethod>().is_err());
+    }
+
+    #[test]
+    fn test_aft_distribution_parses_aliases_and_rejects_unknown() {
+        use AftDistribution::*;
+        AftDistribution::choices().validate().unwrap();
+        for (s, d) in [
+            ("weibull", Weibull),
+            ("Weibull", Weibull),
+            ("exponential", Exponential),
+            ("lognormal", LogNormal),
+            ("log-normal", LogNormal),
+            ("Log-Normal", LogNormal),
+            ("log_normal", LogNormal),
+            ("loglogistic", LogLogistic),
+            ("log-logistic", LogLogistic),
+            ("Log-Logistic", LogLogistic),
+        ] {
+            assert_eq!(s.parse::<AftDistribution>().unwrap(), d, "{s}");
+        }
+        for d in [Weibull, Exponential, LogNormal, LogLogistic] {
+            // Display ("Log-Normal") round-trips
+            assert_eq!(d.to_string().parse::<AftDistribution>().unwrap(), d);
+        }
+        for bad in ["gaussian", "logistic", "rayleigh", "t", "extreme", ""] {
+            assert!(bad.parse::<AftDistribution>().is_err(), "{bad}");
+        }
+        let err = "gaussian".parse::<AftDistribution>().unwrap_err().to_string();
+        assert!(
+            err.contains("unknown dist 'gaussian'")
+                && err.contains("weibull, exponential, lognormal, loglogistic"),
+            "{err}"
+        );
+    }
+
 }
