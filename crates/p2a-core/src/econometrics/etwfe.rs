@@ -468,7 +468,12 @@ impl fmt::Display for EtwfeResult {
 /// * `first_treat_col` - First treatment period column (cohort identifier; whole
 ///   numbers or dates; 0 or negative, or a period after the last observed one, for
 ///   never-treated units)
-/// * `x_cols` - Optional control variables (numeric)
+/// * `x_cols` - Optional control variables (numeric), entered as etwfe's formula
+///   controls: each demeaned within cohort and interacted with every cell, plus the control
+///   itself and its cohort and period interactions. Terms the fixed effects absorb (a
+///   time-invariant control's main effect and cohort interactions; the period interactions
+///   of a control that varies only over time) are reported in `dropped_terms`; collinear
+///   control terms are removed (`collinear_terms`, with a warning) and the model refitted
 /// * `config` - ETWFE configuration
 ///
 /// # Missing values
@@ -558,8 +563,17 @@ pub fn run_etwfe(
 
     // emfx: per-row effect gradient (the row's cell coefficient)
     let gradient = |i: usize, out: &mut Vec<(usize, f64)>| {
-        if let Some(j) = spec.cell_of_row[i].and_then(|c| fit.term_of_col[c]) {
+        let Some(c) = spec.cell_of_row[i] else {
+            return;
+        };
+        if let Some(j) = fit.term_of_col[c] {
             out.push((j, 1.0));
+        }
+        for (x, xdm) in spec.xdm.iter().enumerate() {
+            let col = design.n_cells + x * design.per_ctrl + c;
+            if let Some(j) = fit.term_of_col[col] {
+                out.push((j, xdm[i]));
+            }
         }
     };
     let agg = |which| emfx_aggregate(&spec, &fit, which, z_crit, &gradient);
@@ -676,6 +690,10 @@ struct Spec {
     treat: Vec<f64>,
     /// Controls on the estimation sample, in `x_cols` order.
     x: Vec<Vec<f64>>,
+    /// Controls demeaned within cohort (`first_treat` value), the means taken over every
+    /// complete row before the reference cohort's periods are dropped (as etwfe demeans its
+    /// data before feols drops the rows without `.Dtreat`).
+    xdm: Vec<Vec<f64>>,
     /// Cohort-period cells `(first_treat, period)`, sorted.
     cells: Vec<(i64, i64)>,
     /// Rows in each cell.
@@ -940,6 +958,24 @@ impl Spec {
             .iter()
             .map(|c| pick_f(cols.numeric(c)))
             .collect();
+        let mut xdm = Vec::with_capacity(names.controls.len());
+        for c in names.controls {
+            let v = cols.numeric(c);
+            let mut by_g: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+            for i in 0..n_all {
+                let e = by_g.entry(ft[i]).or_insert((0.0, 0.0));
+                e.0 += v[i];
+                e.1 += 1.0;
+            }
+            xdm.push(
+                keep.iter()
+                    .map(|&i| {
+                        let (sum, cnt) = by_g[&ft[i]];
+                        v[i] - sum / cnt
+                    })
+                    .collect::<Vec<f64>>(),
+            );
+        }
 
         Ok(Spec {
             n,
@@ -954,6 +990,7 @@ impl Spec {
             cell_of_row,
             treat: pick_f(treat_all),
             x,
+            xdm,
             cells,
             cell_rows,
             periods,
@@ -973,13 +1010,23 @@ impl Spec {
 enum Col {
     /// Cohort-period cell dummy.
     Cell(usize),
-    /// A control as given.
+    /// Cell dummy times control `j` demeaned within cohort (`cell:x_dm`).
+    CellX(usize, usize),
+    /// Control `j` (`x`).
     X(usize),
+    /// Cohort dummy times control `j` (`first_treat::v:x`).
+    CohortX(i64, usize),
+    /// Period dummy times control `j` (`time::s:x`).
+    PeriodX(i64, usize),
 }
 
 /// The sparse ETWFE design: one column per cell, then the control columns.
 struct Design {
     names: Vec<String>,
+    /// Columns per control (`cell:x_dm` for every cell, `x`, cohort and period
+    /// interactions); control `j`'s columns start at `n_cells + j * per_ctrl`.
+    per_ctrl: usize,
+    n_cells: usize,
     kinds: Vec<Col>,
     /// Row-major nonzeros: row `i` holds `row_col[row_ptr[i]..row_ptr[i + 1]]`.
     row_ptr: Vec<usize>,
@@ -992,38 +1039,90 @@ struct Design {
 }
 
 impl Design {
+    /// etwfe's design: the cells, then per control `x` (in `x_cols` order) its cell
+    /// interactions `cell:x_dm` (x demeaned within cohort), `x`, its cohort interactions
+    /// `first_treat::v:x` (non-reference cohorts) and its period interactions
+    /// `time::s:x` (periods other than `tref`), as `etwfe(y ~ x)` builds them.
     fn build(spec: &Spec, names: &SpecColumns<'_>) -> EconResult<Design> {
         let n_cells = spec.cells.len();
-        let mut col_names: Vec<String> = spec
-            .cells
-            .iter()
-            .map(|&(g, t)| format!(".Dtreat:{}::{g}:{}::{t}", names.first_treat, names.time))
+        let cohorts: Vec<i64> = (0..spec.n)
+            .filter(|&i| !spec.reference[i])
+            .map(|i| spec.g[i])
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
             .collect();
-        let mut kinds: Vec<Col> = (0..n_cells).map(Col::Cell).collect();
+        let periods: Vec<i64> = spec
+            .periods
+            .iter()
+            .copied()
+            .filter(|&s| s != spec.tref)
+            .collect();
+        let per_ctrl = n_cells + 1 + cohorts.len() + periods.len();
+        let k_raw = per_ctrl
+            .checked_mul(spec.x.len())
+            .and_then(|v| v.checked_add(n_cells))
+            .ok_or_else(|| resource::overflow("ETWFE design"))?;
+        let mut col_names: Vec<String> = resource::try_with_capacity(k_raw, "ETWFE design")?;
+        let mut kinds: Vec<Col> = resource::try_with_capacity(k_raw, "ETWFE design")?;
+        let cell_name = |&(g, t): &(i64, i64)| {
+            format!(".Dtreat:{}::{g}:{}::{t}", names.first_treat, names.time)
+        };
+        for (c, cell) in spec.cells.iter().enumerate() {
+            col_names.push(cell_name(cell));
+            kinds.push(Col::Cell(c));
+        }
         for (j, x) in names.controls.iter().enumerate() {
+            for (c, cell) in spec.cells.iter().enumerate() {
+                col_names.push(format!("{}:{x}_dm", cell_name(cell)));
+                kinds.push(Col::CellX(c, j));
+            }
             col_names.push(x.to_string());
             kinds.push(Col::X(j));
+            for &v in &cohorts {
+                col_names.push(format!("{}::{v}:{x}", names.first_treat));
+                kinds.push(Col::CohortX(v, j));
+            }
+            for &s in &periods {
+                col_names.push(format!("{}::{s}:{x}", names.time));
+                kinds.push(Col::PeriodX(s, j));
+            }
         }
-        let per_row = 1 + spec.x.len();
+        let per_row = 1 + 4 * spec.x.len();
         let cap = resource::checked_len(&[spec.n, per_row], "ETWFE design")?;
         let mut row_ptr = resource::try_with_capacity(spec.n + 1, "ETWFE design")?;
         let mut row_col = resource::try_with_capacity(cap, "ETWFE design")?;
         let mut row_val = resource::try_with_capacity(cap, "ETWFE design")?;
         row_ptr.push(0);
         for i in 0..spec.n {
-            if let Some(c) = spec.cell_of_row[i] {
+            let cell = spec.cell_of_row[i];
+            if let Some(c) = cell {
                 row_col.push(c);
                 row_val.push(1.0);
             }
             for (j, x) in spec.x.iter().enumerate() {
-                if x[i] != 0.0 {
-                    row_col.push(n_cells + j);
-                    row_val.push(x[i]);
+                let base = n_cells + j * per_ctrl;
+                let mut push = |col: usize, v: f64| {
+                    if v != 0.0 {
+                        row_col.push(col);
+                        row_val.push(v);
+                    }
+                };
+                if let Some(c) = cell {
+                    push(base + c, spec.xdm[j][i]);
+                }
+                push(base + n_cells, x[i]);
+                if !spec.reference[i] {
+                    if let Ok(v) = cohorts.binary_search(&spec.g[i]) {
+                        push(base + n_cells + 1 + v, x[i]);
+                    }
+                }
+                if let Ok(s) = periods.binary_search(&spec.t[i]) {
+                    push(base + n_cells + 1 + cohorts.len() + s, x[i]);
                 }
             }
             row_ptr.push(row_col.len());
         }
-        Design::from_rows(col_names, kinds, row_ptr, row_col, row_val)
+        Design::from_rows(col_names, kinds, row_ptr, row_col, row_val, per_ctrl)
     }
 
     fn from_rows(
@@ -1032,7 +1131,9 @@ impl Design {
         row_ptr: Vec<usize>,
         row_col: Vec<usize>,
         row_val: Vec<f64>,
+        per_ctrl: usize,
     ) -> EconResult<Design> {
+        let n_cells = kinds.iter().filter(|k| matches!(k, Col::Cell(_))).count();
         let k = names.len();
         let nnz = row_col.len();
         let mut col_ptr = resource::try_vec(k + 1, 0usize, "ETWFE design")?;
@@ -1055,6 +1156,8 @@ impl Design {
         }
         Ok(Design {
             names,
+            per_ctrl,
+            n_cells,
             kinds,
             row_ptr,
             row_col,
@@ -2294,6 +2397,7 @@ mod tests {
     // T3-WP22: etwfe(ivar = unit) + emfx (validation/r/cases/causal_etwfe.R)
     // ═══════════════════════════════════════════════════════════════════════
 
+    use crate::traits::convergence::notes_text;
     use crate::traits::estimator::z_critical;
     use p2a_validation::{Check, Tol};
 
@@ -2924,6 +3028,212 @@ mod tests {
                 "unknown aggregation 'weekly'; expected one of: simple, event, group, calendar"
             ),
             other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    fn with_f64(ds: &Dataset, col: &str, f: impl Fn(f64) -> f64) -> Dataset {
+        let v: Vec<f64> = ds
+            .df()
+            .column(col)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|x| f(x.unwrap()))
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(col.into(), v)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn with_new_f64(ds: &Dataset, from: &str, to: &str, f: impl Fn(f64) -> f64) -> Dataset {
+        let v: Vec<f64> = ds
+            .df()
+            .column(from)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|x| f(x.unwrap()))
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(to.into(), v)).unwrap();
+        Dataset::new(df)
+    }
+
+    const XC_ABSORBED: [&str; 4] = [
+        "xc",
+        "first_treat::4:xc",
+        "first_treat::6:xc",
+        "first_treat::8:xc",
+    ];
+
+    #[test]
+    fn test_validate_etwfe_control() {
+        let all = [
+            EtwfeAggregation::Simple,
+            EtwfeAggregation::Event,
+            EtwfeAggregation::Group,
+            EtwfeAggregation::Calendar,
+        ];
+        for (id, prefix) in [
+            ("etwfe_staggered", "notyet_xc"),
+            ("etwfe_unbalanced", "unbal_xc"),
+        ] {
+            let (case, ds) = crate::test_support::load_case(id);
+            let r = fit(&ds, Some(&["xc"]), EtwfeConfig::default());
+            let mut ck = Check::new(&case);
+            check_terms(&mut ck, prefix, &r);
+            for ty in all {
+                check_agg(&mut ck, prefix, &r, ty, 0);
+            }
+            ck.finish();
+            assert_eq!(r.dropped_terms, XC_ABSORBED);
+            assert_eq!(r.controls, ["xc"]);
+        }
+    }
+
+    #[test]
+    fn test_etwfe_scale_invariant() {
+        let ds = panel_csv("etwfe_panel");
+        let x = Some(&["xc"][..]);
+        let base = fit(&ds, x, EtwfeConfig::default());
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1e-300);
+        let y_big = fit(&with_f64(&ds, "y", |v| v * 1e6), x, EtwfeConfig::default());
+        assert_eq!(y_big.dropped_terms, base.dropped_terms);
+        for (a, b) in y_big.terms.iter().zip(&base.terms) {
+            assert_eq!(a.name, b.name);
+            assert!(
+                close(a.estimate, b.estimate * 1e6),
+                "{}: {} vs {}",
+                a.name,
+                a.estimate,
+                b.estimate
+            );
+            assert!(close(a.std_error, b.std_error * 1e6), "{}", a.name);
+        }
+        let x_small = fit(
+            &with_f64(&ds, "xc", |v| v * 1e-6),
+            x,
+            EtwfeConfig::default(),
+        );
+        assert_eq!(x_small.dropped_terms, base.dropped_terms);
+        for (a, b) in x_small.terms.iter().zip(&base.terms) {
+            assert_eq!(a.name, b.name);
+            let scale = if a.name.starts_with(".Dtreat") && !a.name.ends_with("_dm") {
+                1.0
+            } else {
+                1e6
+            };
+            assert!(
+                close(a.estimate, b.estimate * scale),
+                "{}: {} vs {}",
+                a.name,
+                a.estimate,
+                b.estimate
+            );
+        }
+    }
+
+    #[test]
+    fn test_etwfe_collinear_controls_are_reported() {
+        // evidence: fixest removes the xc2 = 2 xc terms as collinear and refits
+        let ds = with_new_f64(&panel_csv("etwfe_panel"), "xc", "xc2", |v| 2.0 * v);
+        let r1 = fit(&ds, Some(&["xc"]), EtwfeConfig::default());
+        let r2 = fit(&ds, Some(&["xc", "xc2"]), EtwfeConfig::default());
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-10 * b.abs().max(1e-300);
+        for t in &r1.terms {
+            let u = r2.terms.iter().find(|u| u.name == t.name).unwrap();
+            assert!(
+                close(u.estimate, t.estimate),
+                "{}: {} vs {}",
+                t.name,
+                u.estimate,
+                t.estimate
+            );
+        }
+        assert!(close(r2.att_simple, r1.att_simple));
+        assert_eq!(
+            r2.dropped_terms,
+            [
+                "xc",
+                "first_treat::4:xc",
+                "first_treat::6:xc",
+                "first_treat::8:xc",
+                "xc2",
+                "first_treat::4:xc2",
+                "first_treat::6:xc2",
+                "first_treat::8:xc2"
+            ]
+        );
+        let mut want: Vec<String> = [
+            (4, 4),
+            (4, 5),
+            (4, 6),
+            (4, 7),
+            (4, 8),
+            (6, 6),
+            (6, 7),
+            (6, 8),
+            (8, 8),
+        ]
+        .iter()
+        .map(|(g, t)| format!(".Dtreat:first_treat::{g}:year::{t}:xc2_dm"))
+        .collect();
+        want.extend((2..=8).map(|s| format!("year::{s}:xc2")));
+        assert_eq!(r2.collinear_terms, want);
+        assert_eq!(
+            r2.warnings,
+            vec![format!(
+                "Removed because collinear with other terms: {}",
+                r2.collinear_terms.join(", ")
+            )]
+        );
+        assert!(notes_text(&r2).contains("Warning: Removed because collinear"));
+    }
+
+    #[test]
+    fn test_etwfe_structured_fit_matches_dense_qr() {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-10 * b.abs().max(1e-300);
+        let runs: [(&str, Option<&[&str]>, EtwfeConfig); 2] = [
+            (
+                "etwfe_panel_unbalanced",
+                Some(&["xc"]),
+                EtwfeConfig::default(),
+            ),
+            ("etwfe_panel", None, spec(ControlGroup::Never)),
+        ];
+        for (name, x, cfg) in runs {
+            let ds = panel_csv(name);
+            for vcov in [EtwfeVcov::Cluster, EtwfeVcov::Iid] {
+                let mut c = cfg.clone();
+                c.vcov = vcov;
+                let structured = fit(&ds, x, c.clone());
+                FORCE_DENSE_FIT.with(|f| f.set(true));
+                let dense = fit(&ds, x, c);
+                FORCE_DENSE_FIT.with(|f| f.set(false));
+                assert_eq!(structured.terms.len(), dense.terms.len());
+                for (a, b) in structured.terms.iter().zip(&dense.terms) {
+                    assert_eq!(a.name, b.name);
+                    assert!(
+                        close(a.estimate, b.estimate),
+                        "{name} {}: {} vs {}",
+                        a.name,
+                        a.estimate,
+                        b.estimate
+                    );
+                    assert!(
+                        close(a.std_error, b.std_error),
+                        "{name} {}: {} vs {}",
+                        a.name,
+                        a.std_error,
+                        b.std_error
+                    );
+                }
+                assert!(close(structured.overall.std_error, dense.overall.std_error));
+            }
         }
     }
 }
