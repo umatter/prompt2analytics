@@ -15,7 +15,15 @@
         "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_randomized_known_effect",
         "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_logistic_rescaled_outcome",
         "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_gbounds_cumulative",
-        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_three_period"
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_three_period",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_intervention_changes_estimate",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_always",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_never",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_dynamic",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_static_mixed",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_three_period_regimes",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_nuisance_models",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_duplicated_history_column_is_aliased"
       ],
       "quantities": ["counterfactual means (always, never) at two and three time points", "EIC standard errors", "fluctuation epsilons", "ATE: estimate, SE, z, p, 95% CI", "EIC values", "cumulative gbounds", "rescaled-outcome estimates", "linear-Q estimates", "randomized design with a known effect"],
       "tolerance": "validation/README.md, n = 600: coefficients, means and epsilons 1e-8 relative; SEs, z and CI bounds 1e-6; p-values 1e-6 relative / 1e-12 absolute; counts exact. p2a runs at tolerance = 1e-14, the case's glm.control(epsilon = 1e-14); the default tolerance 1e-8 is checked against the same tight values at Tol::iterative(1e-8)",

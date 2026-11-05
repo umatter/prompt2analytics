@@ -2831,36 +2831,28 @@ fn main() {
                 (x1, x2, a1, a2, y2)
             }
         };
-        // ltmle's default formulas condition on the full history: g_2 and Q_2
-        // on L1, A1 and L2. p2a-core uses covariates[t] alone (CAUS-18), so the
-        // history goes into the time-2 covariates: (L2_1, L2_2, L1_1, L1_2, A1).
-        let mut l2_hist: Array2<f64> = Array2::zeros((n, 5));
-        l2_hist.column_mut(0).assign(&l2.column(0));
-        l2_hist.column_mut(1).assign(&l2.column(1));
-        l2_hist.column_mut(2).assign(&l1.column(0));
-        l2_hist.column_mut(3).assign(&l1.column(1));
-        l2_hist.column_mut(4).assign(&a1);
-        // ltmle fits Q by logistic regression on Y mapped to [0, 1] by its
-        // range and reports the estimates back on Y's scale; the default
-        // LtmleQModel::Logistic on the raw Y (outside [0, 1]) diverged and
-        // returned ATE = SE = 0. The default gbounds (0.01, 0.99) are R's. The
-        // mapping is inside the timed call, as it is inside ltmle().
+        // ltmle maps Y to [0, 1] by its range (Yrange) and reports the
+        // estimates back on Y's scale; run_ltmle conditions g and Q on the full
+        // history and targets with the regime indicator, so both sides run the
+        // same estimator. The mapping is inside the timed call, as it is inside
+        // ltmle(); with Y in [0, 1] run_ltmle does not rescale again. gbounds
+        // are the R call's c(0.01, 0.99).
+        let mut cfg = LtmleConfig::default();
+        cfg.gbounds = (0.01, 0.99);
         let ltmle_fit = || {
             let lo = y.iter().copied().fold(f64::INFINITY, f64::min);
             let range = y.iter().copied().fold(f64::NEG_INFINITY, f64::max) - lo;
             LtmleData::new(
                 vec![Array1::zeros(n), y.mapv(|v| (v - lo) / range)],
                 vec![a1.clone(), a2.clone()],
-                vec![l1.clone(), l2_hist.clone()],
+                vec![l1.clone(), l2.clone()],
             )
-            .and_then(|data| run_ltmle(&data, LtmleConfig::default()))
+            .and_then(|data| run_ltmle(&data, cfg.clone()))
             .map(|lt| (lt, lo, range))
         };
         let mut result = run_benchmark_tracked("LTMLE", "2-period", n, &slow_config, &ltmle_fit);
         if let Ok((lt, lo, range)) = ltmle_fit() {
-            // On Y's scale, as ltmle reports them. They differ from R's: the
-            // targeting omits the regime indicator (CAUS-17) and the influence
-            // curve its residual terms (CAUS-19).
+            // On Y's scale, as ltmle reports them.
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "ate", lt.ate * range);
             capture(&mut outputs, "se", lt.se * range);

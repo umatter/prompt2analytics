@@ -163,10 +163,11 @@ summary(result)
 
 - `test_ltmle_data_validation` - Tests data structure validation
 - `test_ltmle_data_validation_errors` - Tests error handling for invalid data
-- `test_ltmle_display` - Tests result formatting
 - `test_intervention_type_display` - Tests intervention type formatting
 - `test_ltmle_single_time_point_error` - Tests error for insufficient time points
 - R-pinned to case `ltmle_two_period`: `test_validate_ltmle_ate_se`, `test_validate_ltmle_default_control`, `test_validate_ltmle_linear_q`, `test_validate_ltmle_randomized_known_effect`, `test_validate_ltmle_logistic_rescaled_outcome`, `test_validate_ltmle_gbounds_cumulative`, `test_validate_ltmle_three_period`
+- Regimes and contrasts, R-pinned: `test_validate_ltmle_intervention_changes_estimate`, `test_validate_ltmle_always`, `test_validate_ltmle_never`, `test_validate_ltmle_dynamic`, `test_validate_ltmle_static_mixed`, `test_validate_ltmle_three_period_regimes`, `test_validate_ltmle_nuisance_models`, `test_validate_ltmle_duplicated_history_column_is_aliased`
+- Regime errors, option parsing and output: `test_ltmle_regime_validation_errors`, `test_regime_kind_parses_aliases_and_rejects_unknown`, `test_ltmle_q_model_parses_aliases_and_rejects_unknown`, `test_ltmle_display_reports_regimes_and_notes`
 - Input and configuration errors: `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_an_error`, `test_ltmle_too_few_observations`, `test_ltmle_data_rejects_non_finite`
 
 ## Status

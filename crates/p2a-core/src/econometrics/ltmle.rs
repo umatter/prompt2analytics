@@ -31,10 +31,48 @@
 //! estimates are scaled back (ltmle's `Yrange`). The linear Q model is p2a's Gaussian
 //! variant: least-squares Q fits and a weighted-intercept fluctuation on the identity scale.
 //!
-//! # Intervention Types
+//! # Regimes and contrasts
 //!
-//! - **Static "Always Treat"**: Set all A_t = 1
-//! - **Static "Never Treat"**: Set all A_t = 0
+//! [`LtmleConfig::intervention`] is the [`Regime`] whose mean `E[Y^d]` is estimated:
+//!
+//! - **Static** ([`Regime::Static`]): a fixed treatment per time point, one value for every
+//!   node (`Static(vec![1])`, always treat; `Static(vec![0])`, never treat) or one value per
+//!   node (`Static(vec![1, 0])`, treat at the first node only).
+//! - **Dynamic** ([`Regime::Dynamic`]): one threshold rule per node,
+//!   `d_t = above if L > threshold else 1 - above`, on a covariate observed at or before the
+//!   node (ltmle's `rule`; [`Regime::threshold_rules`] builds `A_t = 1{L_t > c}`).
+//!
+//! [`LtmleConfig::contrast`] is the reference regime (default never treat): the result then
+//! reports `psi(intervention) - psi(contrast)` with the differenced EIC; `None` estimates
+//! the single mean.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use ndarray::{Array1, Array2};
+//! use p2a_core::econometrics::ltmle::{DynamicRule, Regime};
+//! use p2a_core::econometrics::{LtmleConfig, LtmleData, run_ltmle};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let n = 8;
+//! let l0 = Array2::from_shape_vec((n, 1), vec![-1.2, 0.4, 0.9, -0.3, 1.5, -0.8, 0.2, 0.7])?;
+//! let l1 = Array2::from_shape_vec((n, 1), vec![-0.5, 0.8, 1.1, 0.1, 1.9, -1.0, 0.6, 0.3])?;
+//! let a1 = Array1::from(vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+//! let a2 = Array1::from(vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]);
+//! let y = Array1::from(vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+//! let data = LtmleData::new(vec![Array1::zeros(n), y], vec![a1, a2], vec![l0, l1])?;
+//!
+//! let mut config = LtmleConfig::default();
+//! config.intervention = Regime::Dynamic(vec![
+//!     DynamicRule { node: 0, column: "L1_1".into(), threshold: 0.0, above: 1 },
+//!     DynamicRule { node: 1, column: "L2_1".into(), threshold: 0.0, above: 1 },
+//! ]);
+//! config.contrast = Some(Regime::never());
+//! let result = run_ltmle(&data, config)?;
+//! println!("{result}");
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # References
 //!
@@ -59,11 +97,14 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::econometrics::glm::{GlmFamily, GlmLink, GlmSpec, fit_glm, plogis};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
 use crate::regression::ols::solve_ols;
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, normal_p_value_two_sided, z_critical};
 
 /// Variance estimator of every standard error.
@@ -119,11 +160,210 @@ impl fmt::Display for LtmleQModel {
     }
 }
 
+crate::option_enum!(
+    LtmleQModel,
+    crate::options::Choices {
+        option: "LTMLE outcome model",
+        values: &[
+            (
+                &["logistic", "logit", "binomial", "quasibinomial", "binary"],
+                LtmleQModel::Logistic
+            ),
+            (
+                &["linear", "gaussian", "ols", "continuous"],
+                LtmleQModel::Linear
+            ),
+        ],
+    },
+    no_display
+);
+
+/// A treatment regime d = (d_1, ..., d_T): the treatment each subject is assigned at each
+/// node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Regime {
+    /// d_t = values[t] for every subject, each 0 or 1; one value is used at every node
+    /// (`Static(vec![1])` = always treat, `Static(vec![1, 0])` = treat at the first node only).
+    Static(Vec<u8>),
+    /// One rule per node: d_t = `above` if the rule's covariate > threshold, else 1 - `above`.
+    Dynamic(Vec<DynamicRule>),
+}
+
+impl Default for Regime {
+    fn default() -> Self {
+        Regime::always()
+    }
+}
+
+/// d_node = above if column > threshold else 1 - above (ltmle `rule`; A_t = 1{L > c} with
+/// above = 1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DynamicRule {
+    /// 0-based time point whose treatment the rule assigns.
+    pub node: usize,
+    /// A covariate observed at or before `node` (a name in `LtmleData::covariate_names[s]`,
+    /// s <= node).
+    pub column: String,
+    /// Finite threshold c.
+    pub threshold: f64,
+    /// Treatment when the covariate exceeds the threshold: 0 or 1.
+    pub above: u8,
+}
+
+/// Regime keyword for MCP/CLI parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegimeKind {
+    /// Always treat.
+    Always,
+    /// Never treat.
+    Never,
+    /// Threshold rules on covariates.
+    Dynamic,
+}
+
+crate::option_enum!(
+    RegimeKind,
+    crate::options::Choices {
+        option: "LTMLE regime",
+        values: &[
+            (
+                &["always", "always_treat", "treat", "treated"],
+                RegimeKind::Always
+            ),
+            (
+                &["never", "never_treat", "control", "untreated"],
+                RegimeKind::Never
+            ),
+            (&["dynamic", "rule", "threshold_rule"], RegimeKind::Dynamic),
+        ],
+    }
+);
+
+impl Regime {
+    /// Always treat: `Static(vec![1])`.
+    pub fn always() -> Self {
+        Regime::Static(vec![1])
+    }
+
+    /// Never treat: `Static(vec![0])`.
+    pub fn never() -> Self {
+        Regime::Static(vec![0])
+    }
+
+    /// d_t = 1{columns[t] > threshold}, t = 0..columns.len().
+    pub fn threshold_rules(columns: &[String], threshold: f64) -> Self {
+        Regime::Dynamic(
+            columns
+                .iter()
+                .enumerate()
+                .map(|(node, c)| DynamicRule {
+                    node,
+                    column: c.clone(),
+                    threshold,
+                    above: 1,
+                })
+                .collect(),
+        )
+    }
+
+    /// Regime from an option keyword: Always and Never refuse `dynamic_columns`; Dynamic
+    /// needs both the columns (one per time point) and the threshold.
+    pub fn from_kind(
+        kind: RegimeKind,
+        dynamic_columns: Option<&[String]>,
+        threshold: Option<f64>,
+    ) -> EconResult<Self> {
+        match kind {
+            RegimeKind::Always | RegimeKind::Never => {
+                if dynamic_columns.is_some() {
+                    return Err(spec_err(
+                        "dynamic_columns is only used with regime 'dynamic'".into(),
+                    ));
+                }
+                Ok(if kind == RegimeKind::Always {
+                    Regime::always()
+                } else {
+                    Regime::never()
+                })
+            }
+            RegimeKind::Dynamic => {
+                let cols = dynamic_columns.ok_or_else(|| {
+                    spec_err(
+                        "regime 'dynamic' needs dynamic_columns (one covariate per time point)"
+                            .into(),
+                    )
+                })?;
+                let c = threshold
+                    .ok_or_else(|| spec_err("regime 'dynamic' needs dynamic_threshold".into()))?;
+                Ok(Regime::threshold_rules(cols, c))
+            }
+        }
+    }
+
+    /// "always treat" | "never treat" | "static (A1 = 1, A2 = 0)" |
+    /// "dynamic (A1 = 1{L0 > 0}, A2 = 1{L1 > 0})" ("1{L0 <= 0}" when above = 0).
+    pub fn label(&self, treatment_names: &[String]) -> String {
+        let name = |t: usize| {
+            treatment_names
+                .get(t)
+                .cloned()
+                .unwrap_or_else(|| format!("A{}", t + 1))
+        };
+        match self {
+            Regime::Static(v) if v.len() == 1 && v[0] == 1 => "always treat".into(),
+            Regime::Static(v) if v.len() == 1 && v[0] == 0 => "never treat".into(),
+            Regime::Static(v) if !v.is_empty() && v.iter().all(|x| *x == v[0]) => {
+                if v[0] == 1 {
+                    "always treat".into()
+                } else if v[0] == 0 {
+                    "never treat".into()
+                } else {
+                    format!("static ({v:?})")
+                }
+            }
+            Regime::Static(v) => {
+                let parts: Vec<String> = v
+                    .iter()
+                    .enumerate()
+                    .map(|(t, x)| format!("{} = {x}", name(t)))
+                    .collect();
+                format!("static ({})", parts.join(", "))
+            }
+            Regime::Dynamic(rules) => {
+                let mut rules: Vec<&DynamicRule> = rules.iter().collect();
+                rules.sort_by_key(|r| r.node);
+                let parts: Vec<String> = rules
+                    .iter()
+                    .map(|r| {
+                        let op = if r.above == 0 { "<=" } else { ">" };
+                        format!("{} = 1{{{} {op} {}}}", name(r.node), r.column, r.threshold)
+                    })
+                    .collect();
+                format!("dynamic ({})", parts.join(", "))
+            }
+        }
+    }
+}
+
+impl From<InterventionType> for Regime {
+    fn from(i: InterventionType) -> Self {
+        match i {
+            InterventionType::AlwaysTreat => Regime::always(),
+            InterventionType::NeverTreat => Regime::never(),
+            InterventionType::Static(b) => Regime::Static(vec![u8::from(b)]),
+        }
+    }
+}
+
 /// Configuration for LTMLE estimation.
 #[derive(Debug, Clone)]
 pub struct LtmleConfig {
-    /// Type of intervention to estimate
-    pub intervention: InterventionType,
+    /// Regime whose counterfactual mean E[Y^d] is estimated (default: always treat).
+    pub intervention: Regime,
+    /// Reference regime of the contrast psi(intervention) - psi(contrast) (default: never
+    /// treat); `None` estimates E[Y^intervention] only (the contrast fields of the result
+    /// are NaN).
+    pub contrast: Option<Regime>,
     /// Logistic (default, ltmle; a Y outside [0, 1] is rescaled by its range) or Linear
     /// (p2a's Gaussian variant).
     pub q_model: LtmleQModel,
@@ -140,7 +380,8 @@ pub struct LtmleConfig {
 impl Default for LtmleConfig {
     fn default() -> Self {
         Self {
-            intervention: InterventionType::AlwaysTreat,
+            intervention: Regime::always(),
+            contrast: Some(Regime::never()),
             q_model: LtmleQModel::Logistic,
             gbounds: (0.01, 1.0),
             max_iter: 100,
@@ -275,6 +516,96 @@ impl LtmleData {
         })
     }
 
+    /// Replace the names: one treatment name per time point and one covariate name per
+    /// covariate column of each time point, all non-empty.
+    pub fn with_names(
+        mut self,
+        treatment_names: Vec<String>,
+        covariate_names: Vec<Vec<String>>,
+    ) -> EconResult<Self> {
+        let t_max = self.time_points();
+        if treatment_names.len() != t_max || covariate_names.len() != t_max {
+            return Err(spec_err(format!(
+                "LTMLE: names for {} treatments and {} covariate sets given; the data have {t_max} \
+                 time points",
+                treatment_names.len(),
+                covariate_names.len()
+            )));
+        }
+        for (t, names) in covariate_names.iter().enumerate() {
+            if names.len() != self.covariates[t].ncols() {
+                return Err(spec_err(format!(
+                    "LTMLE: {} covariate names given for time point {}, which has {} covariates",
+                    names.len(),
+                    t + 1,
+                    self.covariates[t].ncols()
+                )));
+            }
+        }
+        if treatment_names
+            .iter()
+            .chain(covariate_names.iter().flatten())
+            .any(|s| s.trim().is_empty())
+        {
+            return Err(spec_err("LTMLE: names must not be empty".into()));
+        }
+        self.treatment_names = treatment_names;
+        self.covariate_names = covariate_names;
+        Ok(self)
+    }
+
+    /// Columns of a dataset: `outcome` is the final outcome, `treatments[t]` is A_t and
+    /// `covariates[t]` are observed before A_t. Missing values are refused
+    /// (`NaPolicy::Fail`: there is no censoring node). Integer columns are accepted.
+    pub fn from_dataset(
+        dataset: &Dataset,
+        outcome: &str,
+        treatments: &[&str],
+        covariates: &[&[&str]],
+    ) -> EconResult<Self> {
+        if treatments.len() != covariates.len() {
+            return Err(spec_err(format!(
+                "LTMLE: {} treatment columns and {} covariate sets given; one covariate set per \
+                 time point",
+                treatments.len(),
+                covariates.len()
+            )));
+        }
+        let mut names: Vec<&str> = vec![outcome];
+        names.extend_from_slice(treatments);
+        for cs in covariates {
+            names.extend_from_slice(cs);
+        }
+        names.sort_unstable();
+        names.dedup();
+        let cols = ColumnRequest::new(dataset.df())
+            .numerics(&names)
+            .na(NaPolicy::Fail)
+            .extract()?;
+        let n = cols.n();
+        let t_max = treatments.len();
+        let mut outcomes = vec![Array1::<f64>::zeros(n); t_max.saturating_sub(1)];
+        outcomes.push(cols.numeric_array(outcome));
+        let a = treatments.iter().map(|c| cols.numeric_array(c)).collect();
+        let l = covariates
+            .iter()
+            .map(|cs| {
+                if cs.is_empty() {
+                    resource::try_zeros2(n, 0, "LTMLE covariates")
+                } else {
+                    cols.matrix(cs, false).map(|m| m.data)
+                }
+            })
+            .collect::<EconResult<Vec<_>>>()?;
+        LtmleData::new(outcomes, a, l)?.with_names(
+            treatments.iter().map(|s| s.to_string()).collect(),
+            covariates
+                .iter()
+                .map(|cs| cs.iter().map(|s| s.to_string()).collect())
+                .collect(),
+        )
+    }
+
     /// Number of time points T.
     pub fn time_points(&self) -> usize {
         self.outcomes.len()
@@ -315,44 +646,79 @@ fn check_finite<'a>(values: impl Iterator<Item = &'a f64>, column: &str) -> Econ
 // Result Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Estimate of one counterfactual mean.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegimeEstimate {
+    /// The regime.
+    pub regime: Regime,
+    /// Its label ([`Regime::label`]).
+    pub label: String,
+    /// E[Y^d] on the outcome scale.
+    pub psi: f64,
+    /// sd(EIC) / sqrt(n).
+    pub se: f64,
+    /// psi - z_{0.975} se.
+    pub ci_lower: f64,
+    /// psi + z_{0.975} se.
+    pub ci_upper: f64,
+    /// EIC per subject, outcome scale.
+    pub influence_curve: Vec<f64>,
+    /// `[t][i]` bounded cumulative probability of following the regime through node t
+    /// (ltmle's `cum.g`).
+    pub cumulative_g: Vec<Vec<f64>>,
+    /// `[t][i]` H_t = I(follows through t) / cumulative_g.
+    pub clever_covariates: Vec<Vec<f64>>,
+    /// `[t][i]` Q*_t on the outcome scale.
+    pub targeted_predictions: Vec<Vec<f64>>,
+    /// Fluctuation coefficient eps_t per node.
+    pub fluctuation_coefs: Vec<f64>,
+    /// Subjects with Abar_t = dbar_t.
+    pub n_following: Vec<usize>,
+    /// Subjects whose cumulative g was outside gbounds.
+    pub n_bounded: Vec<usize>,
+    /// ... among the followers (these change H_t).
+    pub n_bounded_following: Vec<usize>,
+    /// Q models in node order.
+    pub q_models: Vec<NodeModel>,
+}
+
 /// Result from LTMLE estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LtmleResult {
-    /// Average treatment effect (ATE) estimate: E[Y^{always treat}] - E[Y^{never treat}]
+    /// Contrast psi(intervention) - psi(contrast); NaN without a contrast.
     pub ate: f64,
-    /// Standard error of the ATE: sd of the differenced efficient influence curves / sqrt(n)
+    /// Standard error of the contrast: sd of the differenced EICs / sqrt(n)
     pub se: f64,
     /// 95% confidence interval lower bound
     pub ci_lower: f64,
     /// 95% confidence interval upper bound
     pub ci_upper: f64,
-    /// Two-sided p-value for H0: ATE = 0
+    /// Two-sided p-value for H0: contrast = 0
     pub p_value: f64,
     /// Significance level
     pub significance: SignificanceLevel,
-    /// Z-statistic (ATE / SE)
+    /// Z-statistic (contrast / SE)
     pub z_stat: f64,
 
-    /// Counterfactual mean under treatment: E[Y^{always treat}]
+    /// E[Y^intervention] (= `regime_estimate.psi`)
     pub psi_treated: f64,
-    /// Standard error for psi_treated
+    /// Standard error of psi_treated
     pub psi_treated_se: f64,
-    /// Counterfactual mean under control: E[Y^{never treat}]
+    /// E[Y^contrast]; NaN without a contrast
     pub psi_control: f64,
-    /// Standard error for psi_control
+    /// Standard error of psi_control
     pub psi_control_se: f64,
 
-    /// Efficient influence curve of the ATE (one value per observation)
+    /// EIC of the contrast (of E[Y^intervention] without one), one value per observation
     pub influence_curve: Vec<f64>,
 
     /// Fitted P(A_t = 1 | observed history) at each time point (unbounded)
     pub propensity_scores: Vec<Vec<f64>>,
-    /// Clever covariates H_t = I(follows the regime through t) / bounded cumulative g
-    /// (always-treat regime)
+    /// The intervention's clever covariates H_t
     pub clever_covariates: Vec<Vec<f64>>,
-    /// Targeted predictions Q*_t on the outcome scale (always-treat regime)
+    /// The intervention's targeted predictions Q*_t on the outcome scale
     pub targeted_predictions: Vec<Vec<f64>>,
-    /// Fluctuation coefficients (epsilon) at each time point (always-treat regime)
+    /// The intervention's fluctuation coefficients eps_t
     pub fluctuation_coefs: Vec<f64>,
 
     /// Number of observations
@@ -361,13 +727,9 @@ pub struct LtmleResult {
     pub time_points: usize,
     /// Number of treated at each time point
     pub n_treated_by_time: Vec<usize>,
-    /// Regime followers whose cumulative g was outside `gbounds`, summed over the regimes
+    /// Followers with bounded cumulative g, summed over the estimated regimes
     pub n_truncated_by_time: Vec<usize>,
 
-    /// Intervention type used for treated counterfactual
-    pub intervention_treated: InterventionType,
-    /// Intervention type used for control counterfactual
-    pub intervention_control: InterventionType,
     /// Outcome model type used
     pub q_model_type: LtmleQModel,
     /// Bounds on the cumulative probability of following the regime
@@ -377,6 +739,31 @@ pub struct LtmleResult {
     pub converged: bool,
     /// Warnings generated during estimation
     pub warnings: Vec<String>,
+
+    /// The intervention's estimate.
+    #[serde(default)]
+    pub regime_estimate: RegimeEstimate,
+    /// The reference regime's estimate.
+    #[serde(default)]
+    pub contrast_estimate: Option<RegimeEstimate>,
+    /// "intervention label - contrast label".
+    #[serde(default)]
+    pub contrast_label: Option<String>,
+    /// The g models in node order.
+    #[serde(default)]
+    pub g_models: Vec<NodeModel>,
+    /// (min, max) of the outcome when it was rescaled to [0, 1].
+    #[serde(default)]
+    pub outcome_range: Option<(f64, f64)>,
+    /// Iterative fits (g, logistic Q, logistic fluctuations).
+    #[serde(default)]
+    pub n_model_fits: usize,
+}
+
+impl ResultNotes for LtmleResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for LtmleResult {
@@ -390,79 +777,120 @@ impl fmt::Display for LtmleResult {
             "============================================================"
         )?;
         writeln!(f)?;
-        writeln!(f, "Time Points: {}", self.time_points)?;
+        writeln!(f, "Time points: {}", self.time_points)?;
         writeln!(f, "Observations: {}", self.n_obs)?;
+        writeln!(
+            f,
+            "Outcome model (Q): {}, on the full history",
+            self.q_model_type
+        )?;
+        writeln!(f, "Treatment model (g): logistic, on the full history")?;
+        writeln!(
+            f,
+            "Cumulative g bounds: [{:.4}, {:.4}]",
+            self.gbounds.0, self.gbounds.1
+        )?;
         writeln!(f, "Standard errors: {VARIANCE_METHOD}")?;
         writeln!(f)?;
-        writeln!(f, "Counterfactual Means:")?;
-        writeln!(
-            f,
-            "  E[Y^{{always treat}}]: {:>10.4} (SE: {:.4})",
-            self.psi_treated, self.psi_treated_se
-        )?;
-        writeln!(
-            f,
-            "  E[Y^{{never treat}}]:  {:>10.4} (SE: {:.4})",
-            self.psi_control, self.psi_control_se
-        )?;
-        writeln!(f)?;
-        writeln!(f, "Average Treatment Effect (ATE):")?;
-        writeln!(f, "  Estimate:   {:>12.4}", self.ate)?;
-        writeln!(f, "  Std. Error: {:>12.4}", self.se)?;
-        writeln!(f, "  z-stat:     {:>12.2}", self.z_stat)?;
-        writeln!(
-            f,
-            "  p-value:    {:>12.4}{}",
-            self.p_value,
-            self.significance.stars()
-        )?;
-        writeln!(
-            f,
-            "  95% CI:     [{:.4}, {:.4}]",
-            self.ci_lower, self.ci_upper
-        )?;
-        writeln!(f)?;
-        writeln!(f, "Treatment Summary by Time:")?;
-        for (t, &n) in self.n_treated_by_time.iter().enumerate() {
+        let estimates: Vec<&RegimeEstimate> = std::iter::once(&self.regime_estimate)
+            .chain(self.contrast_estimate.iter())
+            .collect();
+        writeln!(f, "Counterfactual means:")?;
+        for e in &estimates {
             writeln!(
                 f,
-                "  Time {}: {} treated, {} followers with bounded cumulative g",
-                t + 1,
-                n,
-                self.n_truncated_by_time[t]
+                "  E[Y^{{{}}}]: {:>10.4} (SE {:.4}; 95% CI [{:.4}, {:.4}])",
+                e.label, e.psi, e.se, e.ci_lower, e.ci_upper
             )?;
         }
         writeln!(f)?;
-        writeln!(f, "Model Specification:")?;
-        writeln!(f, "  Outcome Model (Q): {}", self.q_model_type)?;
+        if let Some(label) = &self.contrast_label {
+            writeln!(f, "Contrast: {label}")?;
+            writeln!(f, "  Estimate:   {:>12.4}", self.ate)?;
+            writeln!(f, "  Std. Error: {:>12.4}", self.se)?;
+            writeln!(f, "  z-stat:     {:>12.2}", self.z_stat)?;
+            writeln!(
+                f,
+                "  p-value:    {:>12.4}{}",
+                self.p_value,
+                self.significance.stars()
+            )?;
+            writeln!(
+                f,
+                "  95% CI:     [{:.4}, {:.4}]",
+                self.ci_lower, self.ci_upper
+            )?;
+            writeln!(f)?;
+        }
         writeln!(
             f,
-            "  Cumulative g bounds: [{:.4}, {:.4}]",
-            self.gbounds.0, self.gbounds.1
+            "Regime followers by time (bounded cumulative g among them):"
         )?;
-        writeln!(f)?;
-        writeln!(f, "Targeting Step:")?;
-        for (t, &eps) in self.fluctuation_coefs.iter().enumerate() {
-            writeln!(f, "  Time {}: epsilon = {:.6}", t + 1, eps)?;
+        for t in 0..self.time_points {
+            let parts: Vec<String> = estimates
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} {} ({})",
+                        e.label,
+                        e.n_following.get(t).copied().unwrap_or(0),
+                        e.n_bounded_following.get(t).copied().unwrap_or(0)
+                    )
+                })
+                .collect();
+            let a_name = self
+                .regime_estimate
+                .q_models
+                .get(t)
+                .and_then(|m| m.names.last().cloned())
+                .unwrap_or_else(|| format!("A{}", t + 1));
+            writeln!(
+                f,
+                "  Time {} ({a_name}): {}; treated {}",
+                t + 1,
+                parts.join(", "),
+                self.n_treated_by_time.get(t).copied().unwrap_or(0)
+            )?;
         }
         writeln!(f)?;
-        writeln!(
-            f,
-            "Convergence: {}",
-            if self.converged { "Yes" } else { "No" }
-        )?;
+        writeln!(f, "Targeting step (epsilon by time):")?;
+        for e in &estimates {
+            let eps: Vec<String> = e
+                .fluctuation_coefs
+                .iter()
+                .map(|v| format!("{v:.6}"))
+                .collect();
+            writeln!(f, "  {}: {}", e.label, eps.join(", "))?;
+        }
+        writeln!(f)?;
+        let failed = self
+            .g_models
+            .iter()
+            .chain(estimates.iter().flat_map(|e| e.q_models.iter()))
+            .filter(|m| !m.converged)
+            .count();
+        if self.converged {
+            writeln!(
+                f,
+                "Model fits: {} iterative fits, all converged",
+                self.n_model_fits
+            )?;
+        } else if failed > 0 {
+            writeln!(
+                f,
+                "Model fits: {} iterative fits, {failed} did not converge (see warnings)",
+                self.n_model_fits
+            )?;
+        } else {
+            writeln!(
+                f,
+                "Model fits: {} iterative fits, some did not converge (see warnings)",
+                self.n_model_fits
+            )?;
+        }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
-
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -472,15 +900,16 @@ impl fmt::Display for LtmleResult {
 
 /// Run Longitudinal TMLE with full configuration.
 ///
-/// Estimates E[Y^{always treat}], E[Y^{never treat}] and their difference with the
-/// algorithm of the module documentation (ltmle 1.x with its defaults and
-/// `variance.method = "ic"`).
+/// Estimates `E[Y^intervention]` and, when `config.contrast` is set, `E[Y^contrast]` and
+/// their difference, with the algorithm of the module documentation (ltmle 1.x with its
+/// defaults and `variance.method = "ic"`).
 ///
 /// # Errors
 ///
 /// - `InvalidSpecification`: `tolerance` not finite and > 0, `max_iter` 0, `gbounds` not
-///   `0 < lower < upper <= 1`, fewer than 2 time points, or a constant outcome with the
-///   logistic Q model.
+///   `0 < lower < upper <= 1`, fewer than 2 time points, an invalid regime (lengths, values
+///   other than 0/1, not one rule per node, an unknown or later covariate, a non-finite
+///   threshold), or a constant outcome with the logistic Q model.
 /// - `InsufficientData`: no more observations than coefficients of the last outcome
 ///   regression, or no subject following a regime through some time point (positivity).
 ///
@@ -531,13 +960,14 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
         ));
     }
 
-    let regimes = [
-        (vec![vec![1u8; n]; t_max], "always treat"),
-        (vec![vec![0u8; n]; t_max], "never treat"),
-    ];
+    let mut regimes: Vec<(Regime, Vec<Vec<u8>>, String)> = Vec::with_capacity(2);
+    for r in std::iter::once(&config.intervention).chain(config.contrast.iter()) {
+        let d = regime_matrix(data, r)?;
+        regimes.push((r.clone(), d, r.label(&data.treatment_names)));
+    }
     let follow: Vec<Vec<Vec<bool>>> = regimes
         .iter()
-        .map(|(d, label)| followers(data, d, label))
+        .map(|(_, d, label)| followers(data, d, label))
         .collect::<EconResult<_>>()?;
 
     let y = &data.outcomes[t_max - 1];
@@ -546,8 +976,7 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
         notes.warnings.push(format!(
             "LTMLE: outcome rescaled from [{:.4}, {:.4}] to [0, 1] for the logistic Q model \
              (ltmle's Yrange); estimates are on the original scale",
-            scale.lower,
-            scale.lower + scale.width
+            scale.lower, scale.upper
         ));
     }
     let y_scaled = y.mapv(|v| (v - scale.lower) / scale.width);
@@ -564,13 +993,13 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
         &mut notes,
     )?;
 
-    let mut runs = Vec::with_capacity(regimes.len());
-    for ((d, label), follow) in regimes.iter().zip(&follow) {
-        runs.push(estimate_regime(
-            data, d, label, follow, &designs, &g, &last_q, &y_scaled, &scale, &config, &mut notes,
+    let mut estimates = Vec::with_capacity(regimes.len());
+    for ((regime, d, label), follow) in regimes.into_iter().zip(&follow) {
+        estimates.push(estimate_regime(
+            data, regime, &d, label, follow, &designs, &g, &last_q, &y_scaled, &scale, &config,
+            &mut notes,
         )?);
     }
-    let contrast = contrast_inference(&runs[0], &runs[1], &mut notes)?;
 
     let n_treated_by_time = data
         .treatments
@@ -578,10 +1007,33 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
         .map(|a| a.iter().filter(|v| **v > 0.5).count())
         .collect();
     let n_truncated_by_time = (0..t_max)
-        .map(|t| runs.iter().map(|r| r.n_bounded_following[t]).sum())
+        .map(|t| estimates.iter().map(|r| r.n_bounded_following[t]).sum())
         .collect();
-    let control = runs.pop().expect("two regimes");
-    let treated = runs.pop().expect("two regimes");
+    let contrast_estimate = if estimates.len() > 1 {
+        estimates.pop()
+    } else {
+        None
+    };
+    let regime_estimate = estimates.pop().expect("the intervention's estimate");
+
+    let (contrast, contrast_label) = match &contrast_estimate {
+        Some(b) => (
+            contrast_inference(&regime_estimate, b, &mut notes)?,
+            Some(format!("{} - {}", regime_estimate.label, b.label)),
+        ),
+        None => (
+            Contrast {
+                estimate: f64::NAN,
+                se: f64::NAN,
+                z: f64::NAN,
+                p_value: f64::NAN,
+                ci_lower: f64::NAN,
+                ci_upper: f64::NAN,
+                influence_curve: regime_estimate.influence_curve.clone(),
+            },
+            None,
+        ),
+    };
 
     Ok(LtmleResult {
         ate: contrast.estimate,
@@ -591,25 +1043,29 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
         p_value: contrast.p_value,
         significance: SignificanceLevel::from_p_value(contrast.p_value),
         z_stat: contrast.z,
-        psi_treated: treated.psi,
-        psi_treated_se: treated.se,
-        psi_control: control.psi,
-        psi_control_se: control.se,
+        psi_treated: regime_estimate.psi,
+        psi_treated_se: regime_estimate.se,
+        psi_control: contrast_estimate.as_ref().map_or(f64::NAN, |b| b.psi),
+        psi_control_se: contrast_estimate.as_ref().map_or(f64::NAN, |b| b.se),
         influence_curve: contrast.influence_curve,
         propensity_scores: g.fitted.iter().map(|p| p.to_vec()).collect(),
-        clever_covariates: treated.clever_covariates,
-        targeted_predictions: treated.targeted_predictions,
-        fluctuation_coefs: treated.fluctuation_coefs,
+        clever_covariates: regime_estimate.clever_covariates.clone(),
+        targeted_predictions: regime_estimate.targeted_predictions.clone(),
+        fluctuation_coefs: regime_estimate.fluctuation_coefs.clone(),
         n_obs: n,
         time_points: t_max,
         n_treated_by_time,
         n_truncated_by_time,
-        intervention_treated: InterventionType::AlwaysTreat,
-        intervention_control: InterventionType::NeverTreat,
         q_model_type: config.q_model,
         gbounds: config.gbounds,
         converged: notes.all_converged,
         warnings: notes.warnings,
+        regime_estimate,
+        contrast_estimate,
+        contrast_label,
+        g_models: g.models,
+        outcome_range: scale.rescaled.then_some((scale.lower, scale.upper)),
+        n_model_fits: notes.n_fits,
     })
 }
 
@@ -651,6 +1107,97 @@ fn validate_config(config: &LtmleConfig) -> EconResult<()> {
         )));
     }
     Ok(())
+}
+
+/// `d[t][i]` in {0, 1}: the treatment the regime assigns to subject i at node t.
+fn regime_matrix(data: &LtmleData, regime: &Regime) -> EconResult<Vec<Vec<u8>>> {
+    let n = data.n_obs();
+    let t_max = data.time_points();
+    match regime {
+        Regime::Static(v) => {
+            if v.len() != 1 && v.len() != t_max {
+                return Err(spec_err(format!(
+                    "LTMLE: a static regime needs 1 or {t_max} values (one per time point), got {}",
+                    v.len()
+                )));
+            }
+            if let Some((t, x)) = v.iter().enumerate().find(|(_, x)| **x > 1) {
+                return Err(spec_err(format!(
+                    "LTMLE: static regime values must be 0 or 1, got {x} at time point {}",
+                    t + 1
+                )));
+            }
+            Ok((0..t_max)
+                .map(|t| vec![if v.len() == 1 { v[0] } else { v[t] }; n])
+                .collect())
+        }
+        Regime::Dynamic(rules) => {
+            if let Some(r) = rules.iter().find(|r| r.node >= t_max) {
+                return Err(spec_err(format!(
+                    "LTMLE: dynamic rule for node {} is outside time points 1..={t_max}",
+                    r.node
+                )));
+            }
+            for t in 0..t_max {
+                let k = rules.iter().filter(|r| r.node == t).count();
+                if k != 1 {
+                    return Err(spec_err(format!(
+                        "LTMLE: dynamic regime needs exactly one rule per time point; time point {} \
+                         has {k}",
+                        t + 1
+                    )));
+                }
+            }
+            let mut d = vec![Vec::new(); t_max];
+            for r in rules {
+                let a_name = &data.treatment_names[r.node];
+                if !r.threshold.is_finite() {
+                    return Err(spec_err(format!(
+                        "LTMLE: dynamic rule for {a_name}: threshold must be finite, got {}",
+                        r.threshold
+                    )));
+                }
+                if r.above > 1 {
+                    return Err(spec_err(format!(
+                        "LTMLE: dynamic rule for {a_name}: above must be 0 or 1, got {}",
+                        r.above
+                    )));
+                }
+                let found = (0..=r.node).rev().find_map(|s| {
+                    data.covariate_names[s]
+                        .iter()
+                        .position(|c| *c == r.column)
+                        .map(|j| (s, j))
+                });
+                let Some((s, j)) = found else {
+                    let available: Vec<&str> = data.covariate_names[..=r.node]
+                        .iter()
+                        .flatten()
+                        .map(String::as_str)
+                        .collect();
+                    return Err(spec_err(format!(
+                        "LTMLE: dynamic rule for {a_name}: column '{}' is not a covariate observed \
+                         at or before time point {}; available: {}",
+                        r.column,
+                        r.node + 1,
+                        available.join(", ")
+                    )));
+                };
+                d[r.node] = data.covariates[s]
+                    .column(j)
+                    .iter()
+                    .map(|x| {
+                        if *x > r.threshold {
+                            r.above
+                        } else {
+                            1 - r.above
+                        }
+                    })
+                    .collect();
+            }
+            Ok(d)
+        }
+    }
 }
 
 /// `follow[t][i]`: subject i follows the regime `d` through node t. Errors when nobody does.
@@ -772,6 +1319,7 @@ fn identified_linear_predictor(
 /// The outcome's scale: fits use `(y - lower) / width`.
 struct OutcomeScale {
     lower: f64,
+    upper: f64,
     width: f64,
     rescaled: bool,
 }
@@ -791,12 +1339,14 @@ fn outcome_scale(y: &Array1<f64>, q_model: LtmleQModel) -> EconResult<OutcomeSca
         }
         return Ok(OutcomeScale {
             lower: min,
+            upper: max,
             width,
             rescaled: true,
         });
     }
     Ok(OutcomeScale {
         lower: 0.0,
+        upper: 1.0,
         width: 1.0,
         rescaled: false,
     })
@@ -938,26 +1488,12 @@ fn fit_q(
     }
 }
 
-/// The estimate of one counterfactual mean.
-struct RegimeRun {
-    psi: f64,
-    se: f64,
-    influence_curve: Vec<f64>,
-    cumulative_g: Vec<Vec<f64>>,
-    clever_covariates: Vec<Vec<f64>>,
-    targeted_predictions: Vec<Vec<f64>>,
-    fluctuation_coefs: Vec<f64>,
-    n_following: Vec<usize>,
-    n_bounded: Vec<usize>,
-    n_bounded_following: Vec<usize>,
-    q_models: Vec<NodeModel>,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn estimate_regime(
     data: &LtmleData,
+    regime: Regime,
     d: &[Vec<u8>],
-    label: &str,
+    label: String,
     follow: &[Vec<bool>],
     designs: &HistoryDesigns,
     g: &TreatmentModels,
@@ -966,7 +1502,7 @@ fn estimate_regime(
     scale: &OutcomeScale,
     config: &LtmleConfig,
     notes: &mut FitNotes,
-) -> EconResult<RegimeRun> {
+) -> EconResult<RegimeEstimate> {
     let n = data.n_obs();
     let t_max = data.time_points();
     let (lo, hi) = config.gbounds;
@@ -1079,9 +1615,14 @@ fn estimate_regime(
     let psi = scale.lower + scale.width * psi_s;
     let influence_curve = ic.to_vec();
     let se = ic_se(&influence_curve)?;
-    Ok(RegimeRun {
+    let zc = z_critical(0.95)?;
+    Ok(RegimeEstimate {
+        regime,
+        label,
         psi,
         se,
+        ci_lower: psi - zc * se,
+        ci_upper: psi + zc * se,
         influence_curve,
         cumulative_g,
         clever_covariates: h,
@@ -1127,7 +1668,11 @@ struct Contrast {
     influence_curve: Vec<f64>,
 }
 
-fn contrast_inference(a: &RegimeRun, b: &RegimeRun, notes: &mut FitNotes) -> EconResult<Contrast> {
+fn contrast_inference(
+    a: &RegimeEstimate,
+    b: &RegimeEstimate,
+    notes: &mut FitNotes,
+) -> EconResult<Contrast> {
     let estimate = a.psi - b.psi;
     let influence_curve: Vec<f64> = a
         .influence_curve
@@ -1164,32 +1709,13 @@ fn contrast_inference(a: &RegimeRun, b: &RegimeRun, notes: &mut FitNotes) -> Eco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::columns::{ColumnRequest, NaPolicy};
     use ndarray::s;
     use p2a_validation::{Check, Tol};
 
     /// The case dataset as LtmleData: `y` is the final outcome, `a[t]` the treatment at node t,
     /// `l[t]` the covariates observed before it (missing values refused).
     fn case_data(ds: &crate::data::Dataset, y: &str, a: &[&str], l: &[&[&str]]) -> LtmleData {
-        let mut names = vec![y];
-        names.extend_from_slice(a);
-        for cs in l {
-            names.extend_from_slice(cs);
-        }
-        let cols = ColumnRequest::new(ds.df())
-            .numerics(&names)
-            .na(NaPolicy::Fail)
-            .extract()
-            .unwrap();
-        let n = cols.n();
-        let mut outcomes = vec![Array1::<f64>::zeros(n); a.len() - 1];
-        outcomes.push(cols.numeric_array(y));
-        let treatments = a.iter().map(|c| cols.numeric_array(c)).collect();
-        let covariates = l
-            .iter()
-            .map(|cs| cols.matrix(cs, false).unwrap().data)
-            .collect();
-        LtmleData::new(outcomes, treatments, covariates).unwrap()
+        LtmleData::from_dataset(ds, y, a, l).unwrap()
     }
 
     fn two_period(ds: &crate::data::Dataset) -> LtmleData {
@@ -1236,6 +1762,18 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_ltmle_intervention_changes_estimate() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let mut c = tight();
+        c.intervention = InterventionType::NeverTreat.into();
+        let r = run_ltmle(&two_period(&ds), c).unwrap();
+        Check::new(&case)
+            .scalar("psi_never", r.psi_treated, Tol::coef(r.n_obs))
+            .finish();
+        assert!((r.psi_treated - case.scalar("psi_always")).abs() > 0.2);
+    }
+
+    #[test]
     fn test_validate_ltmle_default_control() {
         // The default glm control (epsilon 1e-8) against the tight (1e-14) reference values:
         // measured gaps 2.8e-13 (psi_always), 1.1e-11 (psi_never), 6.0e-15 (ATE SE).
@@ -1245,6 +1783,14 @@ mod tests {
             .scalar("psi_always", r.psi_treated, Tol::iterative(1e-8))
             .scalar("psi_never", r.psi_control, Tol::iterative(1e-8))
             .scalar("ate_se", r.se, Tol::iterative(1e-8))
+            .finish();
+        // the tight eps_never at the default control: measured gap 4.1e-10 relative
+        Check::new(&case)
+            .vector(
+                "eps_never",
+                &r.contrast_estimate.as_ref().unwrap().fluctuation_coefs,
+                Tol::iterative(1e-8),
+            )
             .finish();
         assert!(r.converged, "{:?}", r.warnings);
         assert_eq!(r.gbounds, (0.01, 1.0));
@@ -1310,6 +1856,10 @@ mod tests {
             "{:?}",
             r.warnings
         );
+        let (lo, hi) = r.outcome_range.unwrap();
+        Check::new(&case)
+            .vector("yc_range", &[lo, hi], Tol::exact())
+            .finish();
     }
 
     #[test]
@@ -1327,6 +1877,23 @@ mod tests {
             .finish();
         // n_bounded_follow_always_gb + n_bounded_follow_never_gb
         assert_eq!(r.n_truncated_by_time, vec![192 + 130, 19 + 3]);
+        let a = &r.regime_estimate;
+        let b = r.contrast_estimate.as_ref().unwrap();
+        let f = |v: &[usize]| v.iter().map(|x| *x as f64).collect::<Vec<_>>();
+        Check::new(&case)
+            .vector("n_bounded_always_gb", &f(&a.n_bounded), Tol::exact())
+            .vector("n_bounded_never_gb", &f(&b.n_bounded), Tol::exact())
+            .vector(
+                "n_bounded_follow_always_gb",
+                &f(&a.n_bounded_following),
+                Tol::exact(),
+            )
+            .vector(
+                "n_bounded_follow_never_gb",
+                &f(&b.n_bounded_following),
+                Tol::exact(),
+            )
+            .finish();
     }
 
     #[test]
@@ -1443,6 +2010,398 @@ mod tests {
         assert!(e.contains("outcome"), "{e}");
     }
 
+    fn regime_run(data: &LtmleData, regime: Regime) -> LtmleResult {
+        let mut c = tight();
+        c.intervention = regime;
+        c.contrast = None;
+        run_ltmle(data, c).unwrap()
+    }
+
+    fn counts(v: &[usize]) -> Vec<f64> {
+        v.iter().map(|x| *x as f64).collect()
+    }
+
+    #[test]
+    fn test_validate_ltmle_always() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let data = two_period(&ds);
+        let r = regime_run(&data, Regime::Static(vec![1, 1]));
+        let e = &r.regime_estimate;
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("psi_always", e.psi, Tol::coef(n))
+            .scalar("se_always", e.se, Tol::se(n))
+            .vector("eps_always", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("n_follow_always", &counts(&e.n_following), Tol::exact())
+            .vector(
+                "h_always_2_head",
+                &e.clever_covariates[1][..8],
+                Tol::coef(n),
+            )
+            .named(
+                "q2_coef",
+                &e.q_models[1].names,
+                &e.q_models[1].coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                "q1_coef_always",
+                &e.q_models[0].names,
+                &e.q_models[0].coefficients,
+                Tol::coef(n),
+            )
+            .finish();
+        assert!(r.ate.is_nan() && r.contrast_estimate.is_none());
+        let r1 = regime_run(&data, Regime::always());
+        assert_eq!(r1.psi_treated.to_bits(), r.psi_treated.to_bits());
+    }
+
+    #[test]
+    fn test_validate_ltmle_never() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let r = regime_run(&two_period(&ds), Regime::never());
+        let e = &r.regime_estimate;
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("psi_never", e.psi, Tol::coef(n))
+            .scalar("se_never", e.se, Tol::se(n))
+            .vector("eps_never", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("n_follow_never", &counts(&e.n_following), Tol::exact())
+            .named(
+                "q1_coef_never",
+                &e.q_models[0].names,
+                &e.q_models[0].coefficients,
+                Tol::coef(n),
+            )
+            .vector("cumg_never_2_head", &e.cumulative_g[1][..8], Tol::coef(n))
+            .finish();
+    }
+
+    fn dynamic_two() -> Regime {
+        Regime::Dynamic(vec![
+            DynamicRule {
+                node: 0,
+                column: "L0".into(),
+                threshold: 0.0,
+                above: 1,
+            },
+            DynamicRule {
+                node: 1,
+                column: "L1".into(),
+                threshold: 0.0,
+                above: 1,
+            },
+        ])
+    }
+
+    #[test]
+    fn test_validate_ltmle_dynamic() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let data = two_period(&ds);
+        let mut c = tight();
+        c.intervention = dynamic_two();
+        c.contrast = Some(Regime::never());
+        let r = run_ltmle(&data, c).unwrap();
+        let e = &r.regime_estimate;
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("psi_dynamic", e.psi, Tol::coef(n))
+            .scalar("se_dynamic", e.se, Tol::se(n))
+            .vector("eps_dynamic", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("n_follow_dynamic", &counts(&e.n_following), Tol::exact())
+            .vector(
+                "h_dynamic_1_head",
+                &e.clever_covariates[0][..8],
+                Tol::coef(n),
+            )
+            .scalar("ate_dynamic_vs_never", r.ate, Tol::coef(n))
+            .scalar("ate_dynamic_vs_never_se", r.se, Tol::se(n))
+            .finish();
+        assert_eq!(e.label, "dynamic (A1 = 1{L0 > 0}, A2 = 1{L1 > 0})");
+        assert_eq!(
+            r.contrast_label,
+            Some("dynamic (A1 = 1{L0 > 0}, A2 = 1{L1 > 0}) - never treat".into())
+        );
+        let r2 = regime_run(
+            &data,
+            Regime::threshold_rules(&["L0".into(), "L1".into()], 0.0),
+        );
+        assert_eq!(r2.psi_treated.to_bits(), e.psi.to_bits());
+    }
+
+    #[test]
+    fn test_validate_ltmle_static_mixed() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let r = regime_run(&two_period(&ds), Regime::Static(vec![1, 0]));
+        let e = &r.regime_estimate;
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("psi_10", e.psi, Tol::coef(n))
+            .scalar("se_10", e.se, Tol::se(n))
+            .vector("eps_10", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("n_follow_10", &counts(&e.n_following), Tol::exact())
+            .finish();
+        assert_eq!(e.label, "static (A1 = 1, A2 = 0)");
+        assert!((e.psi - case.scalar("psi_always")).abs() > 0.02);
+    }
+
+    #[test]
+    fn test_validate_ltmle_three_period_regimes() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let data = three_period(&ds);
+        let n = data.n_obs();
+        let r = regime_run(&data, Regime::always());
+        let e = &r.regime_estimate;
+        Check::new(&case)
+            .scalar("t3_psi_always", e.psi, Tol::coef(n))
+            .scalar("t3_se_always", e.se, Tol::se(n))
+            .vector("t3_eps_always", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("t3_n_follow_always", &counts(&e.n_following), Tol::exact())
+            .named(
+                "t3_q2_coef_always",
+                &e.q_models[1].names,
+                &e.q_models[1].coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                "t3_g3_coef",
+                &r.g_models[2].names,
+                &r.g_models[2].coefficients,
+                Tol::coef(n),
+            )
+            .finish();
+        assert_eq!(
+            r.g_models[2].names,
+            vec!["(Intercept)", "L0", "A1", "L1", "A2", "L2"]
+        );
+        let r = regime_run(&data, Regime::never());
+        let e = &r.regime_estimate;
+        Check::new(&case)
+            .scalar("t3_psi_never", e.psi, Tol::coef(n))
+            .scalar("t3_se_never", e.se, Tol::se(n))
+            .vector("t3_eps_never", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("t3_n_follow_never", &counts(&e.n_following), Tol::exact())
+            .vector("t3_n_bounded_never", &counts(&e.n_bounded), Tol::exact())
+            .vector(
+                "t3_n_bounded_follow_never",
+                &counts(&e.n_bounded_following),
+                Tol::exact(),
+            )
+            .finish();
+        let r = regime_run(
+            &data,
+            Regime::threshold_rules(&["L0".to_string(), "L1".to_string(), "L2".to_string()], 0.0),
+        );
+        let e = &r.regime_estimate;
+        Check::new(&case)
+            .scalar("t3_psi_dynamic", e.psi, Tol::coef(n))
+            .scalar("t3_se_dynamic", e.se, Tol::se(n))
+            .vector("t3_eps_dynamic", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("t3_n_follow_dynamic", &counts(&e.n_following), Tol::exact())
+            .finish();
+        let r = regime_run(&data, Regime::Static(vec![1, 0, 1]));
+        let e = &r.regime_estimate;
+        Check::new(&case)
+            .scalar("t3_psi_101", e.psi, Tol::coef(n))
+            .scalar("t3_se_101", e.se, Tol::se(n))
+            .vector("t3_eps_101", &e.fluctuation_coefs, Tol::coef(n))
+            .vector("t3_n_follow_101", &counts(&e.n_following), Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_ltmle_nuisance_models() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let r = run_ltmle(&two_period(&ds), tight()).unwrap();
+        let n = r.n_obs;
+        let never = r.contrast_estimate.as_ref().unwrap();
+        Check::new(&case)
+            .named(
+                "g1_coef",
+                &r.g_models[0].names,
+                &r.g_models[0].coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                "g2_coef",
+                &r.g_models[1].names,
+                &r.g_models[1].coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                "q1_coef_never",
+                &never.q_models[0].names,
+                &never.q_models[0].coefficients,
+                Tol::coef(n),
+            )
+            .finish();
+        // 2 g fits, the shared last-node Q fit, and per regime one Q fit and two fluctuations
+        assert_eq!(r.n_model_fits, 9);
+    }
+
+    #[test]
+    fn test_ltmle_regime_validation_errors() {
+        let data = two_period(&sim());
+        let rule = |node: usize, column: &str, threshold: f64, above: u8| DynamicRule {
+            node,
+            column: column.into(),
+            threshold,
+            above,
+        };
+        let cases: Vec<(Regime, &str)> = vec![
+            (Regime::Static(vec![1, 1, 1]), "1 or 2 values"),
+            (Regime::Static(vec![2]), "must be 0 or 1"),
+            (
+                Regime::Dynamic(vec![rule(0, "L0", 0.0, 1)]),
+                "time point 2 has 0",
+            ),
+            (
+                Regime::Dynamic(vec![
+                    rule(0, "L0", 0.0, 1),
+                    rule(0, "L0", 1.0, 1),
+                    rule(1, "L1", 0.0, 1),
+                ]),
+                "time point 1 has 2",
+            ),
+            (
+                Regime::Dynamic(vec![
+                    rule(0, "L0", 0.0, 1),
+                    rule(1, "L1", 0.0, 1),
+                    rule(5, "L1", 0.0, 1),
+                ]),
+                "outside time points",
+            ),
+            (
+                Regime::Dynamic(vec![rule(0, "Lx", 0.0, 1), rule(1, "L1", 0.0, 1)]),
+                "available: L0",
+            ),
+            (
+                Regime::Dynamic(vec![rule(0, "L1", 0.0, 1), rule(1, "L1", 0.0, 1)]),
+                "not a covariate observed at or before time point 1",
+            ),
+            (
+                Regime::Dynamic(vec![rule(0, "L0", f64::NAN, 1), rule(1, "L1", 0.0, 1)]),
+                "threshold must be finite",
+            ),
+            (
+                Regime::Dynamic(vec![rule(0, "L0", 0.0, 2), rule(1, "L1", 0.0, 1)]),
+                "above must be 0 or 1",
+            ),
+        ];
+        for (regime, fragment) in cases {
+            let mut c = LtmleConfig::default();
+            c.intervention = regime.clone();
+            let e = run_ltmle(&data, c).unwrap_err().to_string();
+            assert!(e.contains(fragment), "{regime:?}: {e}");
+        }
+        let e = Regime::from_kind(RegimeKind::Dynamic, None, Some(0.0))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs dynamic_columns"), "{e}");
+        let e = Regime::from_kind(RegimeKind::Always, Some(&["L0".to_string()][..]), None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("only used with regime 'dynamic'"), "{e}");
+        assert_eq!(
+            Regime::from_kind(RegimeKind::Never, None, None).unwrap(),
+            Regime::never()
+        );
+    }
+
+    #[test]
+    fn test_regime_kind_parses_aliases_and_rejects_unknown() {
+        assert!(RegimeKind::choices().validate().is_ok());
+        assert_eq!(
+            "Always-Treat".parse::<RegimeKind>().unwrap(),
+            RegimeKind::Always
+        );
+        assert_eq!("never".parse::<RegimeKind>().unwrap(), RegimeKind::Never);
+        assert_eq!("CONTROL".parse::<RegimeKind>().unwrap(), RegimeKind::Never);
+        assert_eq!(
+            "dynamic".parse::<RegimeKind>().unwrap(),
+            RegimeKind::Dynamic
+        );
+        assert_eq!(RegimeKind::Dynamic.to_string(), "dynamic");
+        let e = "sometimes".parse::<RegimeKind>().unwrap_err().to_string();
+        assert!(e.contains("always") && e.contains("dynamic"), "{e}");
+    }
+
+    #[test]
+    fn test_ltmle_q_model_parses_aliases_and_rejects_unknown() {
+        assert!(LtmleQModel::choices().validate().is_ok());
+        assert_eq!(
+            "Logit".parse::<LtmleQModel>().unwrap(),
+            LtmleQModel::Logistic
+        );
+        assert_eq!(
+            "quasibinomial".parse::<LtmleQModel>().unwrap(),
+            LtmleQModel::Logistic
+        );
+        assert_eq!(
+            "Gaussian".parse::<LtmleQModel>().unwrap(),
+            LtmleQModel::Linear
+        );
+        assert_eq!(
+            "linear".parse::<LtmleQModel>().unwrap(),
+            LtmleQModel::Linear
+        );
+        assert_eq!(LtmleQModel::Logistic.to_string(), "Logistic");
+        let e = "probit".parse::<LtmleQModel>().unwrap_err().to_string();
+        assert!(e.contains("logistic") && e.contains("linear"), "{e}");
+    }
+
+    #[test]
+    fn test_ltmle_display_reports_regimes_and_notes() {
+        let data = two_period(&sim());
+        let out = ltmle(&data).unwrap().to_string();
+        for s in [
+            "E[Y^{always treat}]",
+            "E[Y^{never treat}]",
+            "Contrast: always treat - never treat",
+            "Cumulative g bounds: [0.0100, 1.0000]",
+            "Standard errors: influence curve (ltmle variance.method = \"ic\")",
+            "Model fits: 9 iterative fits, all converged",
+        ] {
+            assert!(out.contains(s), "missing {s:?} in\n{out}");
+        }
+        let mut c = LtmleConfig::default();
+        c.intervention = dynamic_two();
+        let out = run_ltmle(&data, c).unwrap().to_string();
+        assert!(
+            out.contains("E[Y^{dynamic (A1 = 1{L0 > 0}, A2 = 1{L1 > 0})}]"),
+            "{out}"
+        );
+        let mut c = LtmleConfig::default();
+        c.contrast = None;
+        let out = run_ltmle(&data, c).unwrap().to_string();
+        assert!(!out.contains("Contrast:"), "{out}");
+        let mut d2 = data.clone();
+        d2.outcomes[0] = d2.outcomes[1].clone();
+        let out = ltmle(&d2).unwrap().to_string();
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("Warning: LTMLE: outcomes at time points 1..1 are not used")),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_validate_ltmle_duplicated_history_column_is_aliased() {
+        let (case, ds) = crate::test_support::load_case("ltmle_two_period");
+        let data =
+            LtmleData::from_dataset(&ds, "Y", &["A1", "A2"], &[&["L0"], &["L0", "L1"]]).unwrap();
+        let r = run_ltmle(&data, tight()).unwrap();
+        Check::new(&case)
+            .scalar("psi_always", r.psi_treated, Tol::coef(r.n_obs))
+            .finish();
+        assert!(
+            r.warnings.iter().any(|w| w.starts_with("g model for A2")
+                && w.contains("not defined because of singularities: L0")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
     #[test]
     fn test_ltmle_data_validation() {
         let n = 10;
@@ -1479,17 +2438,6 @@ mod tests {
 
         let result = LtmleData::new(outcomes, treatments, covariates);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ltmle_display() {
-        let ds = sim();
-        let result = ltmle(&two_period(&ds)).unwrap();
-
-        let output = format!("{}", result);
-        assert!(output.contains("Longitudinal Targeted Maximum Likelihood"));
-        assert!(output.contains("E[Y^{always treat}]"));
-        assert!(output.contains("E[Y^{never treat}]"));
     }
 
     #[test]
