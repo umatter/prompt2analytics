@@ -76,8 +76,11 @@ use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 /// Energy balancing refuses more reweighted units than this (decision WP23-A): the QP is
-/// dense (two m x m buffers, O(m^3) factorisation, O(m^2) per active-set step).
-pub const ENERGY_MAX_UNITS: usize = 3_000;
+/// dense (two m x m buffers, O(m^3) factorisation, O(m^2) per active-set step). Measured on
+/// one core (release build, medians of 3): 6-12 s for 2,000 reweighted units with ATT, 2-4 s
+/// with ATE; 34-37 s for 3,000 with ATT. The cap keeps an at-cap solve well inside half of
+/// the hosted 60 s deadline.
+pub const ENERGY_MAX_UNITS: usize = 2_000;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Type Definitions
@@ -3609,7 +3612,7 @@ mod tests {
         };
         expect_spec(
             weightit(&Dataset::new(df), "treat", &["x"], c).unwrap_err(),
-            &["energy", "3000"],
+            &["energy", "at most 2000 units"],
         );
     }
 

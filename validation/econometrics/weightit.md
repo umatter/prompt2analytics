@@ -87,7 +87,8 @@ reference), `test_energy_refuses_too_many_units`, `test_energy_honours_cancellat
 3. **Stable balancing** is the SBW QP with exact balance (`validation/econometrics/sbw.md`); an
    infeasible exact problem is an error that points to `sbw()` with `balance_tol > 0`.
 4. **Trimming** at a quantile is applied after the weights are computed (sort by
-   `f64::total_cmp`).
+   `f64::total_cmp`). `trim_quantile` must be in (0.5, 1] (1 = no trimming); anything else,
+   NaN included, is an `InvalidSpecification` (`test_weightit_rejects_bad_trim_quantile`).
 
 ## Known Differences
 
@@ -96,9 +97,10 @@ reference), `test_energy_refuses_too_many_units`, `test_energy_honours_cancellat
   1.3e-5 from WeightIt's default).
 - Infeasible balancing targets (entropy, stable) are errors; WeightIt returns zero or
   degenerate weights with a warning.
-- Energy balancing reweights at most 3000 units (`ENERGY_MAX_UNITS`, decision WP23-A): the QP
-  is dense (two m x m buffers, O(m^3) factorisation). Larger samples get an
-  `InvalidSpecification` suggesting entropy or stable weights.
+- Energy balancing reweights at most 2000 units (`ENERGY_MAX_UNITS`, decision WP23-A): the QP
+  is dense (two m x m buffers, O(m^3) factorisation); a 2000-unit ATT solve takes about 6-12 s
+  on one core, a 3000-unit one 34-37 s. Larger samples get an `InvalidSpecification`
+  suggesting entropy or stable weights.
 - Entropy balancing's WeightIt cross-check holds to 1e-4: WeightIt stops at its own
   tolerance, the exact dual at `|grad| < 1e-14`.
 
