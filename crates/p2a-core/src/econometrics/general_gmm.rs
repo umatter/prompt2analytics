@@ -112,7 +112,8 @@ pub enum GmmVcov {
     /// HAC (heteroskedasticity and autocorrelation consistent), lag-count kernel weights
     #[default]
     HAC,
-    /// i.i.d. errors: `sigma^2 Z'Z / n` for linear IV (two-step = 2SLS)
+    /// i.i.d. errors: `sigma^2 Z'Z / n` for linear IV (two-step = 2SLS); refused for the
+    /// normal-distribution moments, which have no such form (use `MDS`)
     IID,
     /// The identity weighting matrix (one-step GMM) with the MDS moment covariance in the
     /// sandwich variance
@@ -887,10 +888,7 @@ fn estimate(model: &dyn MomentModel, config: &GeneralGmmConfig) -> EconResult<Es
                 if let Some(note) = conv.as_ref().and_then(|c| c.note("Gauss-Newton step")) {
                     warnings.push(note);
                 }
-                change = relative_change_vec(
-                    next.as_slice().unwrap_or(&next.to_vec()),
-                    theta.as_slice().unwrap_or(&theta.to_vec()),
-                );
+                change = relative_change_vec(&next.to_vec(), &theta.to_vec());
                 theta = next;
                 if change < config.tolerance {
                     converged = true;
@@ -918,6 +916,16 @@ fn estimate(model: &dyn MomentModel, config: &GeneralGmmConfig) -> EconResult<Es
                 warnings,
             })
         }
+    }
+}
+
+/// `b / se`, or NaN when the SE is zero or not finite (a degenerate sandwich), so that a zero
+/// variance is not reported as infinite significance.
+fn wald_z(b: f64, se: f64) -> f64 {
+    if se.is_finite() && se > 0.0 {
+        b / se
+    } else {
+        f64::NAN
     }
 }
 
@@ -972,7 +980,7 @@ fn finish_fit(
     let t_stats: Vec<f64> = coefficients
         .iter()
         .zip(&std_errors)
-        .map(|(&b, &se)| b / se)
+        .map(|(&b, &se)| wald_z(b, se))
         .collect();
     let p_values = t_stats
         .iter()
@@ -1583,6 +1591,11 @@ fn estimate_normal_distribution(
                 .to_string(),
         });
     }
+    if config.vcov == GmmVcov::IID {
+        return Err(EconError::InvalidSpecification {
+            message: "vcov = iid is defined for linear IV moments only; use mds".to_string(),
+        });
+    }
     validate_config(&config, n, 3)?;
     let est = estimate(&model, &config)?;
     finish_fit(
@@ -2107,6 +2120,34 @@ mod tests {
     /// moments (mu 0.056278592574600002 against 0.048607398751015045), and J used the identity
     /// weight (4.0346296518810849 against 1.4148059570011566), so it scaled with the units
     /// (x 10: 4034629.65).
+    /// Fails before: an iid fit of the normal moments silently used the MDS covariance while
+    /// Display printed "iid (sigma^2 Z'Z / n)".
+    #[test]
+    fn test_gmm_normal_moments_refuse_iid() {
+        let data =
+            Array1::from_iter((0..40).map(|i| ((i * 37) % 11) as f64 * 0.3 + 0.01 * i as f64));
+        expect_invalid(
+            run_general_gmm(
+                MomentCondition::NormalDistribution { data },
+                cfg(GmmMethod::TwoStep, GmmVcov::IID),
+            ),
+            "vcov = iid",
+        );
+    }
+
+    /// A zero or non-finite SE gives NaN z (and NaN p), not z = inf with p = 0.
+    #[test]
+    fn test_gmm_wald_z_degenerate_se() {
+        assert_eq!(wald_z(1.0, 0.5), 2.0);
+        for se in [0.0, f64::NAN, f64::INFINITY] {
+            let z = wald_z(1.0, se);
+            assert!(
+                z.is_nan() && normal_p_value_two_sided(z).is_nan(),
+                "se = {se}"
+            );
+        }
+    }
+
     #[test]
     fn test_validate_gmm_normal_moments() {
         let (case, ds) = crate::test_support::load_case("gmm_linear_iv");

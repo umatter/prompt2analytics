@@ -528,6 +528,8 @@ pub fn run_bp_bounds(
         compute_bounds_without_monotonicity(&cell_probs)
     };
 
+    warnings.extend(crossing_warning(ace_lower, ace_upper));
+
     // Compute Wald estimate
     let marginals = cell_probs.marginals();
     let (wald_estimate, wald_se) = compute_wald_estimate(&cell_probs, &marginals);
@@ -757,14 +759,20 @@ fn validate_bootstrap_config(config: &BPBoundsConfig) -> EconResult<()> {
 /// The type-7 percentile interval at level `1 - alpha` (R's `quantile(type = 7)`) of
 /// bootstrap draws; NaN is refused.
 fn bootstrap_interval(draws: &[f64], alpha: f64) -> EconResult<(f64, f64)> {
-    if draws.iter().any(|v| v.is_nan()) {
-        return Err(EconError::Computation(
-            "bootstrap draws contain NaN".to_string(),
-        ));
-    }
-    let mut sorted = draws.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    percentile_interval(&sorted, 1.0 - alpha)
+    // percentile_interval sorts its own copy and refuses NaN draws
+    percentile_interval(draws, 1.0 - alpha)
+}
+
+/// The warning for crossing bounds (`ace_lower > ace_upper`), which happens exactly when the
+/// observed distribution violates the instrumental inequality.
+fn crossing_warning(ace_lower: f64, ace_upper: f64) -> Option<String> {
+    (ace_lower > ace_upper).then(|| {
+        format!(
+            "the Balke-Pearl bounds cross ([{ace_lower:.4}, {ace_upper:.4}]): the instrumental \
+             inequality fails, so the exclusion restriction (or randomization of Z) is \
+             violated in these data"
+        )
+    })
 }
 
 /// Compute bootstrap confidence intervals for the bounds (seeded; `seed = None` uses
@@ -858,6 +866,7 @@ pub fn bp_bounds_from_probs(probs: CellProbabilities, monotonicity: bool) -> BPB
     if monotonicity && !monotonicity_satisfied {
         warnings.push("Monotonicity assumed but may not hold in data.".to_string());
     }
+    warnings.extend(crossing_warning(ace_lower, ace_upper));
 
     BPBoundsResult {
         ace_lower,
@@ -1209,13 +1218,59 @@ mod tests {
     /// checked during planning against the exact response-type LP, lpSolve 5.6.23, to
     /// 5.5e-17). Derivation of Table 2 in validation/econometrics/bpbounds.md. Replaces
     /// test_validate_against_r, which compared with no R value.
+    /// A table that violates the instrumental inequality (P(Y=0, D=0 | Z=0) = 0.9 and
+    /// P(Y=1, D=0 | Z=1) = 0.9 sum to 1.8 > 1) gives crossing bounds, and the result says why.
+    /// Fails before: no warning named the cause.
+    #[test]
+    fn test_bpbounds_crossing_bounds_warn() {
+        let counts = [18, 1, 0, 1, 1, 18, 1, 0];
+        let free = bp_bounds_from_probs(probs(counts), false);
+        assert!(free.ace_lower > free.ace_upper && free.bounds_width < 0.0);
+        assert!(
+            free.warnings
+                .iter()
+                .any(|w| w.contains("instrumental inequality"))
+        );
+        // the raw-data path: expand the table to rows (z, d, y)
+        let mut rows = Vec::new();
+        for (cell, &c) in counts.iter().enumerate() {
+            let (zv, dv, yv) = (
+                (cell / 4) as f64,
+                ((cell / 2) % 2) as f64,
+                (cell % 2) as f64,
+            );
+            rows.extend(std::iter::repeat_n([zv, dv, yv], c));
+        }
+        let col = |j: usize| Array1::from_iter(rows.iter().map(|r| r[j]));
+        let (z, d, y) = (col(0), col(1), col(2));
+        let cfg = BPBoundsConfig {
+            monotonicity: false,
+            bootstrap_ci: false,
+            ..Default::default()
+        };
+        let r = run_bp_bounds(&z.view(), &d.view(), &y.view(), cfg).unwrap();
+        assert!(r.ace_lower > r.ace_upper);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("instrumental inequality"))
+        );
+        // a table satisfying it (vitamin A) carries no such warning
+        let ok = bp_bounds_from_probs(probs([74, 11514, 0, 0, 34, 2385, 12, 9663]), false);
+        assert!(
+            !ok.warnings
+                .iter()
+                .any(|w| w.contains("instrumental inequality"))
+        );
+    }
+
     #[test]
     fn test_bpbounds_closed_form_tables() {
         for (label, counts, wald, mono_lower) in [
             (
                 "vitamin A",
                 [74, 11514, 0, 0, 34, 2385, 12, 9663],
-                0.0032280386285733001,
+                0.0032280386285733,
                 -0.1946228482113902,
             ),
             ("table 2", [12, 10, 8, 10, 6, 4, 10, 20], 1.0 / 3.0, -0.2),
@@ -1227,11 +1282,11 @@ mod tests {
             let (lower, upper, mono_upper, wald_se) = match label {
                 "vitamin A" => (
                     -0.1946228482113902,
-                    0.0053936889144572397,
-                    0.0053936889144572397,
+                    0.00539368891445724,
+                    0.00539368891445724,
                     0.0011591629284325984,
                 ),
-                _ => (-0.2, 0.5, 0.5, 0.36830442319927159),
+                _ => (-0.2, 0.5, 0.5, 0.3683044231992716),
             };
             let free = bp_bounds_from_probs(probs(counts), false);
             close(free.ace_lower, lower, label);

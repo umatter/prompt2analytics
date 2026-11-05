@@ -649,14 +649,11 @@ fn estimate_mte(
         let seed = config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED);
         let n = y.len();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let mut indices = resource::try_with_capacity(config.n_bootstrap, "bootstrap indices")?;
-        for _ in 0..config.n_bootstrap {
-            resource::checkpoint()?;
-            let mut idx = resource::try_with_capacity(n, "bootstrap indices")?;
+        // one resample at a time from the single stream: replicate b reads draws
+        // b*n .. (b+1)*n, so no index matrix is ever materialised
+        let boot = bootstrap_from_indices(y, d, z, x, config, config.n_bootstrap, |idx| {
             idx.extend((0..n).map(|_| rng.gen_range(0..n)));
-            indices.push(idx);
-        }
-        let boot = bootstrap_from_indices(y, d, z, x, config, &indices)?;
+        })?;
         apply_bootstrap(&mut result, &boot, config.n_bootstrap, seed)?;
     }
     Ok(result)
@@ -753,7 +750,9 @@ fn is_resource_stop(e: &EconError) -> bool {
     matches!(e, EconError::Cancelled(_) | EconError::ResourceLimit(_))
 }
 
-/// Refit both stages on each resample (row indices) and keep the estimands and the curve.
+/// Refit both stages on each of `reps` resamples and keep the estimands and the curve.
+/// `next` fills an empty, reused buffer with one replicate's row indices just before that
+/// replicate is fitted, so the resamples are never held all at once.
 /// A resource stop propagates; any other error counts the replicate as failed.
 pub(crate) fn bootstrap_from_indices(
     y: ArrayView1<f64>,
@@ -761,22 +760,25 @@ pub(crate) fn bootstrap_from_indices(
     z: ArrayView2<f64>,
     x: Option<ArrayView2<f64>>,
     config: &IVMTEConfig,
-    indices: &[Vec<usize>],
+    reps: usize,
+    mut next: impl FnMut(&mut Vec<usize>),
 ) -> EconResult<MteBootstrap> {
     let n_est = 4 + usize::from(config.prte_weights.is_some());
-    let reps = indices.len();
     let mut estimands = resource::try_zeros2(reps, n_est, "bootstrap estimands")?;
     let mut curve = resource::try_zeros2(reps, config.n_grid, "bootstrap MTE curves")?;
     let mut ok = 0;
     let mut failed = 0;
     let mut first_error = None;
     let names: Vec<String> = (1..=z.ncols()).map(|j| format!("z{j}")).collect();
-    for idx in indices {
+    let mut idx = resource::try_with_capacity(y.len(), "bootstrap indices")?;
+    for _ in 0..reps {
         resource::checkpoint()?;
-        let yb = y.select(Axis(0), idx);
-        let db = d.select(Axis(0), idx);
-        let zb = z.select(Axis(0), idx);
-        let xb = x.map(|m| m.select(Axis(0), idx));
+        idx.clear();
+        next(&mut idx);
+        let yb = y.select(Axis(0), &idx);
+        let db = d.select(Axis(0), &idx);
+        let zb = z.select(Axis(0), &idx);
+        let xb = x.map(|m| m.select(Axis(0), &idx));
         match fit_mte(
             yb.view(),
             db.view(),
@@ -1347,8 +1349,18 @@ fn quad(g: &[f64], v: &Array2<f64>) -> f64 {
 }
 
 /// An estimate with its delta-method inference (normal reference).
+/// `estimate / se`, or NaN when the SE is zero or not finite: a degenerate variance is not
+/// evidence of infinite significance.
+fn wald_z(estimate: f64, se: f64) -> f64 {
+    if se.is_finite() && se > 0.0 {
+        estimate / se
+    } else {
+        f64::NAN
+    }
+}
+
 fn te_estimate(name: &str, estimate: f64, se: f64, z: f64) -> TreatmentEffectEstimate {
-    let t_stat = estimate / se;
+    let t_stat = wald_z(estimate, se);
     let p_value = normal_p_value_two_sided(t_stat);
     TreatmentEffectEstimate {
         name: name.to_string(),
@@ -2001,7 +2013,10 @@ mod tests {
             .map(|b| (0..200).map(|i| (i * 7 + b) % 200).collect())
             .collect();
         expect_cancelled(with_budget(cancelled(), || {
-            bootstrap_from_indices(y.view(), d.view(), z2.view(), None, &config, &idx)
+            bootstrap_from_indices(y.view(), d.view(), z2.view(), None, &config, idx.len(), {
+                let mut it = idx.iter();
+                move |buf| buf.extend_from_slice(it.next().unwrap())
+            })
         }));
         expect_cancelled(with_budget(cancelled(), || {
             run_ivmte(&y.view(), &d.view(), &z.view(), None, config.clone())
@@ -2370,7 +2385,11 @@ mod tests {
             .collect();
         let cfg = case_config();
         let full = run_ivmte_multi_z(&y.view(), &d.view(), &z.view(), None, cfg.clone()).unwrap();
-        let boot = bootstrap_from_indices(y.view(), d.view(), z.view(), None, &cfg, &cols).unwrap();
+        let mut it = cols.iter();
+        let boot = bootstrap_from_indices(y.view(), d.view(), z.view(), None, &cfg, reps, |buf| {
+            buf.extend_from_slice(it.next().unwrap())
+        })
+        .unwrap();
         assert_eq!((boot.failed, boot.estimands.nrows()), (0, reps));
         let names = ["ate", "att", "atu", "late_support", "mte_mid"];
         let est = [
@@ -2477,6 +2496,97 @@ mod tests {
             a.se_method
                 .starts_with("bootstrap (50 replications, seed 11")
         );
+    }
+
+    /// A zero (or non-finite) SE gives NaN z and p, not z = inf and p = 0.
+    /// Fails before: `estimate / se` reported infinite significance.
+    #[test]
+    fn test_te_estimate_zero_se_is_not_significant() {
+        for se in [0.0, f64::NAN, f64::INFINITY] {
+            let te = te_estimate("ATE", 1.5, se, 1.96);
+            assert!(
+                te.t_stat.is_nan() && te.p_value.is_nan(),
+                "se = {se}: {te:?}"
+            );
+            assert_eq!(te.significance, SignificanceLevel::NotSignificant);
+        }
+        let te = te_estimate("ATE", 1.5, 0.5, 1.96);
+        assert_eq!(te.t_stat, 3.0);
+    }
+
+    /// The public path draws each replicate's resample from the ChaCha8 stream as it is
+    /// fitted; the result equals the one from a fully materialised index matrix drawn from the
+    /// same stream in the same order.
+    #[test]
+    fn test_mte_bootstrap_lazy_draws_match_materialised() {
+        let ds = mte_sim();
+        let (y, d, z) = mte_data(&ds, |_, _| true);
+        let (n, reps, seed) = (y.len(), 8, 11);
+        let cfg = IVMTEConfig {
+            bootstrap_se: true,
+            n_bootstrap: reps,
+            seed: Some(seed),
+            n_grid: 21,
+            ..case_config()
+        };
+        let public = run_ivmte_multi_z(&y.view(), &d.view(), &z.view(), None, cfg.clone()).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let all: Vec<Vec<usize>> = (0..reps)
+            .map(|_| (0..n).map(|_| rng.gen_range(0..n)).collect())
+            .collect();
+        let mut it = all.iter();
+        let boot = bootstrap_from_indices(y.view(), d.view(), z.view(), None, &cfg, reps, |buf| {
+            buf.extend_from_slice(it.next().unwrap())
+        })
+        .unwrap();
+        let mut manual = run_ivmte_multi_z(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            None,
+            IVMTEConfig {
+                bootstrap_se: false,
+                ..cfg.clone()
+            },
+        )
+        .unwrap();
+        apply_bootstrap(&mut manual, &boot, reps, seed).unwrap();
+        for (a, b) in [
+            (public.ate.se, manual.ate.se),
+            (public.att.ci_lower, manual.att.ci_lower),
+            (public.late.ci_upper, manual.late.ci_upper),
+        ] {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    /// Replicates draw their indices one at a time, interleaved with the fits: a budget
+    /// cancelled while drawing the third resample stops the run after three draws, however
+    /// many replications were asked for. Fails before: estimate_mte drew every replicate's
+    /// n indices (n_bootstrap x n usizes) before fitting the first.
+    #[test]
+    fn test_mte_bootstrap_draws_one_replicate_at_a_time() {
+        let ds = mte_sim();
+        let (y, d, z) = mte_data(&ds, |_, _| true);
+        let n = y.len();
+        let cfg = case_config();
+        let token = CancelToken::new();
+        let mut calls = 0usize;
+        let res = with_budget(Budget::new(None, token.clone()), || {
+            bootstrap_from_indices(y.view(), d.view(), z.view(), None, &cfg, 1_000_000, |buf| {
+                calls += 1;
+                assert!(
+                    buf.is_empty() && buf.capacity() >= n,
+                    "one reused buffer of length n"
+                );
+                buf.extend((0..n).map(|i| (i * 7 + calls) % n));
+                if calls == 3 {
+                    token.cancel();
+                }
+            })
+        });
+        expect_cancelled(res);
+        assert_eq!(calls, 3);
     }
 
     #[test]
