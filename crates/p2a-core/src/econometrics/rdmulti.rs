@@ -1,7 +1,13 @@
 //! Multi-cutoff Regression Discontinuity Design (rdmulti).
 //!
 //! Extends standard RD designs to handle multiple cutoffs with the same running variable.
-//! Pools information across cutoffs for efficiency while allowing heterogeneous effects.
+//! Each cutoff is estimated by [`run_rd`] on the observations assigned to it (rdrobust with
+//! rdbwselect bandwidths unless a bandwidth is given), as rdmulti::rdmc does for its
+//! cutoff-specific estimates.
+//!
+//! Pooling: a weighted average of the cutoff-specific robust estimates with SE
+//! sqrt(sum w^2 se^2) (independent cutoffs). This is not rdmulti::rdmc's pooled estimate,
+//! which runs rdrobust on the normalised score x - c.
 //!
 //! # References
 //!
@@ -22,11 +28,12 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::traits::convergence::ResultNotes;
 use crate::traits::estimator::SignificanceLevel;
 
 use super::rd::{
-    BandwidthMethod, KernelType, RdConfig, RdResult, VceType, run_rd, validate_rd_config,
-    write_warnings_and_missing,
+    BandwidthMethod, KernelType, RdConfig, RdResult, VceType, default_rd_level, level_percent,
+    run_rd, validate_rd_config, without_missing_note, write_warnings_and_missing,
 };
 
 /// Bandwidth selection strategy for multiple cutoffs.
@@ -34,13 +41,14 @@ use super::rd::{
 /// Determines how bandwidths are chosen across different cutoffs.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum RdMultiBandwidth {
-    /// Use the same bandwidth for all cutoffs.
-    /// The global bandwidth is either specified or computed as the average of optimal bandwidths.
+    /// The same user-supplied main bandwidth h at every cutoff (b = h, rdrobust's default
+    /// when h is given).
     Global(f64),
-    /// Use different optimal bandwidth for each cutoff (computed automatically).
+    /// h and b selected at each cutoff by `bwselect` on that cutoff's observations
+    /// (rdrobust::rdbwselect), as rdmulti::rdmc does for its cutoff-specific estimates.
     #[default]
     PerCutoffOptimal,
-    /// Use specified bandwidths for each cutoff.
+    /// User-supplied h per cutoff (b = h).
     PerCutoff(Vec<f64>),
 }
 
@@ -162,6 +170,9 @@ pub struct CutoffResult {
     /// Full RD result for this cutoff.
     #[serde(skip)]
     pub full_result: Option<RdResult>,
+    /// Confidence level of `ci`.
+    #[serde(default = "default_rd_level")]
+    pub level: f64,
 }
 
 impl fmt::Display for CutoffResult {
@@ -179,7 +190,13 @@ impl fmt::Display for CutoffResult {
             self.se,
             self.significance.stars()
         )?;
-        writeln!(f, "  95% CI: [{:.4}, {:.4}]", self.ci.0, self.ci.1)?;
+        writeln!(
+            f,
+            "  {}% CI: [{:.4}, {:.4}]",
+            level_percent(self.level),
+            self.ci.0,
+            self.ci.1
+        )?;
         writeln!(
             f,
             "  N: {} left, {} right (eff: {}, {})",
@@ -284,6 +301,12 @@ pub struct RdMultiResult {
     pub missing: MissingSummary,
 }
 
+impl ResultNotes for RdMultiResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        without_missing_note(&self.warnings, &self.missing)
+    }
+}
+
 impl fmt::Display for RdMultiResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Multi-Cutoff RD Estimation Results")?;
@@ -306,7 +329,13 @@ impl fmt::Display for RdMultiResult {
             writeln!(f, "Pooled Treatment Effect")?;
             writeln!(f, "-----------------------")?;
             writeln!(f, "Estimate: {:.4} (SE: {:.4}){}", effect, se, sig.stars())?;
-            writeln!(f, "95% CI: [{:.4}, {:.4}]", ci.0, ci.1)?;
+            writeln!(
+                f,
+                "{}% CI: [{:.4}, {:.4}]",
+                level_percent(self.level),
+                ci.0,
+                ci.1
+            )?;
             writeln!(f, "P-value: {:.4}", p)?;
             writeln!(f, "Weighting: {}", self.pooling_weights)?;
             writeln!(f)?;
@@ -318,7 +347,13 @@ impl fmt::Display for RdMultiResult {
         writeln!(
             f,
             "{:<8} {:>10} {:>10} {:>10} {:>14} {:>10} {:>8}",
-            "Cutoff", "Estimate", "Std.Err.", "p-value", "95% CI", "N(eff)", "Weight"
+            "Cutoff",
+            "Estimate",
+            "Std.Err.",
+            "p-value",
+            format!("{}% CI", level_percent(self.level)),
+            "N(eff)",
+            "Weight"
         )?;
         writeln!(f, "{}", "-".repeat(80))?;
 
@@ -538,7 +573,11 @@ pub fn run_rd_multi(
                     h_right: rd_result.h_right,
                     weight: 0.0, // Will be computed later
                     full_result: Some(rd_result.clone()),
+                    level: config.level,
                 };
+                for w in without_missing_note(&rd_result.warnings, &rd_result.missing) {
+                    warnings.push(format!("Cutoff {} (c = {cutoff:.4}): {w}", cutoff_idx + 1));
+                }
                 cutoff_results.push(cr);
                 full_rd_results.push(rd_result);
             }
@@ -1023,6 +1062,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
             CutoffResult {
                 cutoff: 1.0,
@@ -1040,6 +1080,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
         ];
 
@@ -1074,6 +1115,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
             CutoffResult {
                 cutoff: 1.0,
@@ -1091,6 +1133,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
         ];
 
@@ -1121,6 +1164,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
             CutoffResult {
                 cutoff: 1.0,
@@ -1138,6 +1182,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
         ];
 
@@ -1165,6 +1210,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
             CutoffResult {
                 cutoff: 1.0,
@@ -1182,6 +1228,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
         ];
 
@@ -1218,6 +1265,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
             CutoffResult {
                 cutoff: 1.0,
@@ -1235,6 +1283,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
         ];
 
@@ -1270,6 +1319,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
             CutoffResult {
                 cutoff: 1.0,
@@ -1287,6 +1337,7 @@ mod tests {
                 h_right: 0.5,
                 weight: 0.0,
                 full_result: None,
+                level: 0.95,
             },
         ];
 
@@ -1685,6 +1736,28 @@ mod tests {
             run_rd_multi_dataset(&ds, "outcome", "running", Some("cutoff_group"), config)
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_rd_multi_interval_label_follows_level() {
+        let (ds, mut config) = create_multi_cutoff_dataset();
+        config.bandwidth = RdMultiBandwidth::Global(0.5);
+        for (level, want, other) in [(0.90, "90% CI", "95% CI"), (0.95, "95% CI", "90% CI")] {
+            config.level = level;
+            let r = run_rd_multi_dataset(
+                &ds,
+                "outcome",
+                "running",
+                Some("cutoff_group"),
+                config.clone(),
+            )
+            .unwrap();
+            let text = r.to_string();
+            let c0 = r.cutoff_results[0].to_string();
+            assert!(text.contains(want) && !text.contains(other), "{text}");
+            assert!(c0.contains(want) && !c0.contains(other), "{c0}");
+            assert_eq!(r.cutoff_results[0].level, level);
+        }
     }
 
     #[test]

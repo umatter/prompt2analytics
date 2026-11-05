@@ -34,6 +34,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::SignificanceLevel;
 
 /// Kernel function types for local polynomial regression.
@@ -414,7 +415,7 @@ pub enum BandwidthOrigin {
 }
 
 /// The confidence level of a result deserialized without one.
-fn default_rd_level() -> f64 {
+pub(crate) fn default_rd_level() -> f64 {
     0.95
 }
 
@@ -665,22 +666,55 @@ pub struct RdResult {
 
 /// The warnings (without the missing-value note, printed last on its own line) and the
 /// `Missing values:` line of a result (also `RdMultiResult`'s).
+/// The warnings without the missing-value note (which prints on its own line, last).
+pub(crate) fn without_missing_note(warnings: &[String], missing: &MissingSummary) -> Vec<String> {
+    let note = missing.note();
+    warnings
+        .iter()
+        .filter(|w| Some(w.as_str()) != note.as_deref())
+        .cloned()
+        .collect()
+}
+
+/// Warnings already filtered, for `notes_text`.
+struct Shown(Vec<String>);
+
+impl ResultNotes for Shown {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.0.clone()
+    }
+}
+
+impl ResultNotes for RdResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        without_missing_note(&self.warnings, &self.missing)
+    }
+}
+
+impl ResultNotes for FuzzyRdResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        without_missing_note(&self.warnings, &self.missing)
+    }
+}
+
+impl ResultNotes for RdBandwidth {
+    fn notes_warnings(&self) -> Vec<String> {
+        without_missing_note(&self.warnings, &self.missing)
+    }
+}
+
+/// The notes block of an RD Display: `Warning: <text>` per warning (as `notes_text`), then
+/// `Missing values: <note>` last.
 pub(crate) fn write_warnings_and_missing(
     f: &mut fmt::Formatter<'_>,
     warnings: &[String],
     missing: &MissingSummary,
 ) -> fmt::Result {
     let note = missing.note();
-    let shown: Vec<&String> = warnings
-        .iter()
-        .filter(|w| Some(w.as_str()) != note.as_deref())
-        .collect();
+    let shown = without_missing_note(warnings, missing);
     if !shown.is_empty() {
         writeln!(f)?;
-        writeln!(f, "Warnings:")?;
-        for w in shown {
-            writeln!(f, "  - {}", w)?;
-        }
+        write!(f, "{}", notes_text(&Shown(shown)))?;
     }
     if let Some(note) = note {
         writeln!(f)?;
@@ -689,14 +723,19 @@ pub(crate) fn write_warnings_and_missing(
     Ok(())
 }
 
-/// "95% CI", "90% CI", "97.5% CI": the interval label for a confidence level.
-fn ci_label(level: f64) -> String {
+/// "95", "90", "97.5": a confidence level in percent, for interval labels.
+pub(crate) fn level_percent(level: f64) -> String {
     let pct = (level * 100.0 * 1e9).round() / 1e9;
     if pct.fract() == 0.0 {
-        format!("[{pct:.0}% CI]")
+        format!("{pct:.0}")
     } else {
-        format!("[{pct}% CI]")
+        format!("{pct}")
     }
+}
+
+/// "[95% CI]", "[90% CI]", "[97.5% CI]": the interval label for a confidence level.
+fn ci_label(level: f64) -> String {
+    format!("[{}% CI]", level_percent(level))
 }
 
 /// The estimate table's header, `level` labelling the interval column.
@@ -739,6 +778,23 @@ fn write_rd_row(
     )
 }
 
+impl RdResult {
+    /// Where h and b came from, for output: "h and b selected by mserd (...), as
+    /// rdrobust::rdbwselect", "h user-supplied; b = 1.0000 h (rho)", "h and b user-supplied".
+    pub fn bandwidth_label(&self) -> String {
+        use BandwidthOrigin::*;
+        let ratio = format!("{:.4}", self.b_left / self.h_left);
+        let by = format!("selected by {}, as rdrobust::rdbwselect", self.bwselect);
+        match (self.h_origin, self.b_origin) {
+            (Selected, Selected) => format!("h and b {by}"),
+            (Selected, UserSupplied) => format!("h {by}; b user-supplied"),
+            (Selected, RhoTimesH) => format!("h {by}; b = {ratio} h (rho)"),
+            (_, RhoTimesH) => format!("h user-supplied; b = {ratio} h (rho)"),
+            _ => "h and b user-supplied".to_string(),
+        }
+    }
+}
+
 impl fmt::Display for RdResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Sharp RD Estimation Results")?;
@@ -779,11 +835,7 @@ impl fmt::Display for RdResult {
             "Bandwidth (b): {:.4} (left), {:.4} (right)",
             self.b_left, self.b_right
         )?;
-        if self.bandwidth_given {
-            writeln!(f, "Bandwidth Method: Manual (h given by the caller)")?;
-        } else {
-            writeln!(f, "Bandwidth Method: {}", self.bwselect)?;
-        }
+        writeln!(f, "Bandwidth source: {}", self.bandwidth_label())?;
         writeln!(f)?;
 
         writeln!(
@@ -908,6 +960,7 @@ impl fmt::Display for FuzzyRdResult {
              one bandwidth for both stages",
             rd.h_left, rd.h_right, rd.b_left, rd.b_right
         )?;
+        writeln!(f, "Bandwidth source: {}", rd.bandwidth_label())?;
         writeln!(f, "Kernel: {}, VCE: {}", rd.kernel, rd.vce)?;
         writeln!(f)?;
 
@@ -3673,6 +3726,58 @@ mod tests {
     }
 
     #[test]
+    fn test_rd_bandwidth_label_names_the_source() {
+        let ds = rd_sim();
+        let sel_by = |m: &str| format!("selected by {m}, as rdrobust::rdbwselect");
+        let mserd = "mserd (MSE-optimal, one common bandwidth)";
+        let cases: Vec<(RdConfig, String)> = vec![
+            (RdConfig::default(), format!("h and b {}", sel_by(mserd))),
+            (
+                sel(|c| c.bwselect = BandwidthMethod::CerTwo),
+                format!(
+                    "h and b {}",
+                    sel_by("certwo (CER-optimal, separate left and right)")
+                ),
+            ),
+            (
+                sel(|c| c.b = Some(0.5)),
+                format!("h {}; b user-supplied", sel_by(mserd)),
+            ),
+            (
+                sel(|c| c.rho_with_selected_h = true),
+                format!("h {}; b = 1.0000 h (rho)", sel_by(mserd)),
+            ),
+            (
+                sel(|c| c.h = Some(0.3)),
+                "h user-supplied; b = 1.0000 h (rho)".to_string(),
+            ),
+            (
+                sel(|c| {
+                    c.h = Some(0.3);
+                    c.b = Some(0.5)
+                }),
+                "h and b user-supplied".to_string(),
+            ),
+        ];
+        for (config, label) in cases {
+            let r = run_rd(&ds, "y", "x", 0.0, config).unwrap();
+            assert_eq!(r.bandwidth_label(), label);
+            let text = r.to_string();
+            assert!(
+                text.contains(&format!("Bandwidth source: {label}")),
+                "{text}"
+            );
+            assert!(!text.contains("Bandwidth Method"), "{text}");
+        }
+        let f = run_fuzzy_rd(&ds, "yf", "x", "d", 0.0, RdConfig::default()).unwrap();
+        assert!(
+            f.to_string()
+                .contains("Bandwidth source: h and b selected by mserd"),
+            "{f}"
+        );
+    }
+
+    #[test]
     fn test_rd_cer_differs_from_mse() {
         use BandwidthMethod::*;
         let ds = rd_sim();
@@ -3831,7 +3936,7 @@ mod tests {
         assert!(
             given
                 .to_string()
-                .contains("Bandwidth Method: Manual (h given by the caller)"),
+                .contains("Bandwidth source: h user-supplied; b = 1.0000 h (rho)"),
             "{given}"
         );
         let selected = run_rd(&ds, "outcome", "running", 0.0, RdConfig::default()).unwrap();
@@ -3839,14 +3944,20 @@ mod tests {
         assert!(
             selected
                 .to_string()
-                .contains("Bandwidth Method: mserd (MSE-optimal, one common bandwidth)"),
+                .contains("Bandwidth source: h and b selected by mserd"),
             "{selected}"
         );
         // a result serialised before the field existed reads as selected
         let mut json = serde_json::to_value(&given).unwrap();
-        json.as_object_mut().unwrap().remove("bandwidth_given");
+        for key in ["bandwidth_given", "h_origin", "b_origin"] {
+            json.as_object_mut().unwrap().remove(key);
+        }
         let old: RdResult = serde_json::from_value(json).unwrap();
         assert!(!old.bandwidth_given);
+        assert_eq!(
+            (old.h_origin, old.b_origin),
+            (BandwidthOrigin::Selected, BandwidthOrigin::Selected)
+        );
     }
 
     #[test]

@@ -2733,21 +2733,26 @@ mod tests {
                 "epa",
                 "CERTWO",
                 "Kernel: Epanechnikov",
-                "CER-optimal (separate)",
+                "certwo (CER-optimal, separate left and right)",
             ),
             (
                 "uni",
                 "mse_two",
                 "Kernel: Uniform",
-                "MSE-optimal (separate)",
+                "msetwo (MSE-optimal, separate left and right)",
             ),
             (
                 "Uniform",
                 "CerRd",
                 "Kernel: Uniform",
-                "CER-optimal (common)",
+                "cerrd (CER-optimal, one common bandwidth)",
             ),
-            ("tri", "mserd", "Kernel: Triangular", "MSE-optimal (common)"),
+            (
+                "tri",
+                "mserd",
+                "Kernel: Triangular",
+                "mserd (MSE-optimal, one common bandwidth)",
+            ),
         ] {
             let args = merged(
                 base.clone(),
@@ -2768,7 +2773,9 @@ mod tests {
             assert_ne!(r.is_error, Some(true), "{out}");
             assert!(out.contains(kernel_shown), "{kernel}: {out}");
             assert!(
-                out.contains(&format!("Bandwidth Method: {method_shown}")),
+                out.contains(&format!(
+                    "Bandwidth source: h and b selected by {method_shown}"
+                )),
                 "{bwselect}: {out}"
             );
             let req: FuzzyRdRequest =
