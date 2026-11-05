@@ -40,7 +40,8 @@ DGP's 0.7), `test_mediation_decomposition_identity`, `test_mediation_proportion_
 - **Seed:** `seed = None` means seed 42, so repeated calls give identical SEs (they drew OS
   entropy before).
 - **Failed bootstrap replicates** (e.g. a resample with one arm) are counted and reported with
-  the first error; fewer than 2 usable replicates is an error.
+  the first error; fewer than 50 usable replicates (or, when fewer than 50 are
+  requested, any failed one) is an error, as in medflex.
 - **Proportion mediated** `NIE / ATE` is never clamped (it was clamped to [-1, 1]; on
   `medflex_scales`' `yo` it is -7.891, shown as -1 before), with a warning outside [0, 1].
 - **`trim`** must lie in [0, 0.5); a treated or control arm emptied by trimming is an error.

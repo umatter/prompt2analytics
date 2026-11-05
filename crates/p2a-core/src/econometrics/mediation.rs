@@ -58,8 +58,16 @@ use crate::traits::estimator::normal_p_value_two_sided;
 /// give identical results.
 pub const DEFAULT_BOOTSTRAP_SEED: u64 = 42;
 
-/// Fewest usable bootstrap replicates from which SEs and intervals are reported.
-const MIN_VALID_BOOTSTRAP: usize = 2;
+/// Usable bootstrap replicates needed before SEs and intervals are reported: 50, or every
+/// requested replicate when fewer than 50 are requested (as in medflex, a handful of draws
+/// left over from many failures gives an unreliable SE and a percentile interval that is
+/// just their range).
+const MIN_VALID_BOOTSTRAP: usize = 50;
+
+/// The usable replicates `requested` needs (see [`MIN_VALID_BOOTSTRAP`]).
+fn min_valid_bootstrap(requested: usize) -> usize {
+    requested.min(MIN_VALID_BOOTSTRAP)
+}
 
 /// Configuration for mediation analysis.
 #[derive(Debug, Clone)]
@@ -269,7 +277,8 @@ impl fmt::Display for MediationResult {
 /// The propensity models are logistic GLMs (`glm.fit` IRLS, [`fit_propensity`]); the
 /// treatment must be coded 0/1. `trim` must lie in [0, 0.5). The bootstrap resamples the
 /// kept units (no further trimming), uses seed [`DEFAULT_BOOTSTRAP_SEED`] when `seed` is
-/// `None`, reports failed replicates in `warnings` and needs at least 2 usable ones; the
+/// `None`, reports failed replicates in `warnings` and needs at least 50 usable ones (all of
+/// them when fewer than 50 are requested); the
 /// intervals are type-7 percentile intervals and the p-values two-sided normal ones. The
 /// proportion mediated is `NIE / ATE`, unclamped.
 pub fn run_mediation_analysis(
@@ -318,8 +327,13 @@ pub fn run_mediation_analysis(
     names.push(mediator.to_string());
 
     // Compute point estimates
-    let (total, direct, indirect, keep_idx, fit_notes) =
-        compute_mediation_effects(y, d, m, &x, config.trim, &names)?;
+    let Effects {
+        total,
+        direct,
+        indirect,
+        keep_idx,
+        notes: fit_notes,
+    } = compute_mediation_effects(y, d, m, &x, config.trim, &names)?;
 
     let n_obs = keep_idx.len();
     let n_trimmed = n - n_obs;
@@ -334,64 +348,28 @@ pub fn run_mediation_analysis(
 
     // Bootstrap for standard errors
     let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
-
-    let what = "bootstrap replications";
-    let mut boot_total = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
-    let mut boot_direct = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
-    let mut boot_indirect = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
-    let (mut failed, mut warned) = (0usize, 0usize);
-    let (mut first_error, mut first_warning): (Option<String>, Option<String>) = (None, None);
-    let mut boot_indices = resource::try_vec(n_obs, 0usize, "bootstrap resample rows")?;
-    let mut y_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
-    let mut d_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
-    let mut m_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
-    let mut x_boot = resource::try_zeros2(n_obs, k, "bootstrap resample")?;
-
-    for _ in 0..config.bootstrap {
-        resource::checkpoint()?;
-
-        // Resample with replacement from kept observations
-        for i in boot_indices.iter_mut() {
-            *i = keep_idx[rng.gen_range(0..n_obs)];
+    let mut next_rows = |rows: &mut [usize]| {
+        for r in rows.iter_mut() {
+            *r = rng.gen_range(0..n_obs);
         }
-        for (r, &i) in boot_indices.iter().enumerate() {
-            y_boot[r] = y[i];
-            d_boot[r] = d[i];
-            m_boot[r] = m[i];
-            x_boot.row_mut(r).assign(&x.row(i));
-        }
-
-        // Compute effects on bootstrap sample (no further trimming)
-        match compute_mediation_effects(&y_boot, &d_boot, &m_boot, &x_boot, 0.0, &names) {
-            Ok((t, de, ie, _, notes)) if t.is_finite() && de.is_finite() && ie.is_finite() => {
-                boot_total.push(t);
-                boot_direct.push(de);
-                boot_indirect.push(ie);
-                if let Some(first) = notes.into_iter().next() {
-                    warned += 1;
-                    first_warning.get_or_insert(first);
-                }
-            }
-            Ok(_) => {
-                failed += 1;
-                first_error.get_or_insert_with(|| "non-finite effect".to_string());
-            }
-            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
-            Err(e) => {
-                failed += 1;
-                first_error.get_or_insert_with(|| e.to_string());
-            }
-        }
-    }
-    if boot_total.len() < MIN_VALID_BOOTSTRAP {
-        return Err(EconError::Computation(format!(
-            "only {} of {} bootstrap replicates could be fitted (first error: {}); the bootstrap needs at least {MIN_VALID_BOOTSTRAP}",
-            boot_total.len(),
-            config.bootstrap,
-            first_error.as_deref().unwrap_or("none")
-        )));
-    }
-
+    };
+    let draws = bootstrap_draws(
+        (y, d, m, &x),
+        &keep_idx,
+        &names,
+        config.bootstrap,
+        &mut next_rows,
+    )?;
+    require_usable(&draws, config.bootstrap)?;
+    let BootDraws {
+        total: boot_total,
+        direct: boot_direct,
+        indirect: boot_indirect,
+        failed,
+        first_error,
+        warned,
+        first_warning,
+    } = draws;
     // Compute standard errors and CIs from bootstrap
     let (se_total, ci_total) = bootstrap_stats(&boot_total)?;
     let (se_direct, ci_direct) = bootstrap_stats(&boot_direct)?;
@@ -440,12 +418,110 @@ pub fn run_mediation_analysis(
     })
 }
 
+/// Bootstrap draws of the three effects and the replicate accounting.
+struct BootDraws {
+    total: Vec<f64>,
+    direct: Vec<f64>,
+    indirect: Vec<f64>,
+    failed: usize,
+    first_error: Option<String>,
+    warned: usize,
+    first_warning: Option<String>,
+}
+
+/// `n_boot` replicates over the kept units: `next_rows` fills positions in `0..keep_idx.len()`
+/// (no further trimming). A replicate that fails, or gives a non-finite effect, is counted
+/// and dropped; cancellation and the allocation ceiling stop the bootstrap.
+fn bootstrap_draws(
+    (y, d, m, x): (&[f64], &[f64], &[f64], &Array2<f64>),
+    keep_idx: &[usize],
+    names: &[String],
+    n_boot: usize,
+    next_rows: &mut dyn FnMut(&mut [usize]),
+) -> EconResult<BootDraws> {
+    let n_obs = keep_idx.len();
+    let k = x.ncols();
+    let what = "bootstrap replications";
+    let mut out = BootDraws {
+        total: resource::try_with_capacity::<f64>(n_boot, what)?,
+        direct: resource::try_with_capacity::<f64>(n_boot, what)?,
+        indirect: resource::try_with_capacity::<f64>(n_boot, what)?,
+        failed: 0,
+        first_error: None,
+        warned: 0,
+        first_warning: None,
+    };
+    let mut boot_rows = resource::try_vec(n_obs, 0usize, "bootstrap resample rows")?;
+    let mut y_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
+    let mut d_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
+    let mut m_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
+    let mut x_boot = resource::try_zeros2(n_obs, k, "bootstrap resample")?;
+
+    for _ in 0..n_boot {
+        resource::checkpoint()?;
+
+        // Resample with replacement from kept observations
+        next_rows(&mut boot_rows);
+        for (r, &pos) in boot_rows.iter().enumerate() {
+            let i = keep_idx[pos];
+            y_boot[r] = y[i];
+            d_boot[r] = d[i];
+            m_boot[r] = m[i];
+            x_boot.row_mut(r).assign(&x.row(i));
+        }
+
+        // Compute effects on bootstrap sample (no further trimming)
+        match compute_mediation_effects(&y_boot, &d_boot, &m_boot, &x_boot, 0.0, names) {
+            Ok(e) if e.total.is_finite() && e.direct.is_finite() && e.indirect.is_finite() => {
+                out.total.push(e.total);
+                out.direct.push(e.direct);
+                out.indirect.push(e.indirect);
+                if let Some(first) = e.notes.into_iter().next() {
+                    out.warned += 1;
+                    out.first_warning.get_or_insert(first);
+                }
+            }
+            Ok(_) => {
+                out.failed += 1;
+                out.first_error
+                    .get_or_insert_with(|| "non-finite effect".to_string());
+            }
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+            Err(e) => {
+                out.failed += 1;
+                out.first_error.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Refuses a bootstrap with fewer usable replicates than [`min_valid_bootstrap`].
+fn require_usable(d: &BootDraws, requested: usize) -> EconResult<()> {
+    let needed = min_valid_bootstrap(requested);
+    if d.total.len() < needed {
+        return Err(EconError::Computation(format!(
+            "only {} of {requested} bootstrap replicates could be fitted (first error: {}); the bootstrap needs at least {needed}",
+            d.total.len(),
+            d.first_error.as_deref().unwrap_or("none")
+        )));
+    }
+    Ok(())
+}
+
+/// The IPW effects of one sample, the rows kept after trimming and the propensity-model
+/// notes.
+struct Effects {
+    total: f64,
+    direct: f64,
+    indirect: f64,
+    keep_idx: Vec<usize>,
+    notes: Vec<String>,
+}
+
 /// Compute mediation effects using IPW.
 ///
 /// `names` names the columns of `x` and then the mediator (for the propensity-model notes).
-///
-/// Returns (total_effect, direct_effect, indirect_effect, kept_indices, notes)
-#[allow(clippy::type_complexity)]
 fn compute_mediation_effects(
     y: &[f64],
     d: &[f64],
@@ -453,7 +529,7 @@ fn compute_mediation_effects(
     x: &Array2<f64>,
     trim: f64,
     names: &[String],
-) -> EconResult<(f64, f64, f64, Vec<usize>, Vec<String>)> {
+) -> EconResult<Effects> {
     let n = y.len();
 
     // Step 1: Estimate propensity score p(D=1|X)
@@ -561,7 +637,13 @@ fn compute_mediation_effects(
     // Natural indirect effect (NIE) = Total - Direct
     let indirect = total - direct;
 
-    Ok((total, direct, indirect, keep_idx, notes))
+    Ok(Effects {
+        total,
+        direct,
+        indirect,
+        keep_idx,
+        notes,
+    })
 }
 
 /// Logistic propensity scores of `d` on `x` (the shared GLM, `glm.fit`'s IRLS) and the
@@ -664,6 +746,84 @@ mod tests {
                 "bootstrap",
             );
         }
+    }
+
+    #[test]
+    fn test_mediation_bootstrap_needs_fifty_usable_replicates() {
+        // failed replicates are counted; fewer than 50 usable (or, below 50 requested, any
+        // failure) is an error rather than an SE from a handful of draws
+        let ds = create_mediation_validation_dataset();
+        let cols = ColumnRequest::new(ds.df())
+            .numeric("y")
+            .numeric("treatment")
+            .numeric("mediator")
+            .numeric("x")
+            .extract()
+            .unwrap();
+        let (y, d, m) = (
+            cols.numeric("y"),
+            cols.numeric("treatment"),
+            cols.numeric("mediator"),
+        );
+        let x = cols.matrix(&["x"], true).unwrap().data;
+        let names: Vec<String> = ["(Intercept)", "x", "mediator"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let keep = compute_mediation_effects(y, d, m, &x, 0.01, &names)
+            .unwrap()
+            .keep_idx;
+        // positions in keep_idx of the kept controls
+        let controls: Vec<usize> = (0..keep.len()).filter(|&p| d[keep[p]] == 0.0).collect();
+        let failing = |every: usize| {
+            let (n, mut s, mut b) = (keep.len(), 7u64, 0usize);
+            let controls = controls.clone();
+            move |rows: &mut [usize]| {
+                b += 1;
+                for (k, r) in rows.iter_mut().enumerate() {
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    *r = if b % every == 0 {
+                        controls[k % controls.len()]
+                    } else {
+                        ((s >> 33) as usize) % n
+                    };
+                }
+            }
+        };
+        let run = |n_boot: usize, every: usize| {
+            let draws =
+                bootstrap_draws((y, d, m, &x), &keep, &names, n_boot, &mut failing(every)).unwrap();
+            let r = require_usable(&draws, n_boot);
+            (draws.failed, draws.total.len(), r)
+        };
+        let (failed, usable, r) = run(60, 6);
+        assert_eq!((failed, usable), (10, 50));
+        assert!(r.is_ok(), "{r:?}");
+        let (failed, usable, r) = run(59, 5); // 11 fail, 48 usable
+        assert_eq!((failed, usable), (11, 48));
+        match r {
+            Err(EconError::Computation(msg)) => {
+                assert!(
+                    msg.starts_with(
+                        "only 48 of 59 bootstrap replicates could be fitted (first error: "
+                    ) && msg.ends_with("the bootstrap needs at least 50"),
+                    "{msg}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        // fewer than 50 requested: every replicate is needed
+        let (_, usable, r) = run(20, 10);
+        assert_eq!(usable, 18);
+        assert!(
+            matches!(&r, Err(EconError::Computation(msg)) if msg.contains("needs at least 20")),
+            "{r:?}"
+        );
+        let (_, usable, r) = run(20, 21);
+        assert_eq!(usable, 20);
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]
