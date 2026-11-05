@@ -6,8 +6,9 @@
 Hainmueller (2010) and R's `Synth::synth()`:
 
 - **Predictors** (`k`, aggregated over their time windows) are divided by their standard deviation
-  across the treated unit and the donors (n - 1 denominator), as `synth()` does; a predictor whose
-  donor values do not vary is refused ("no variation"). V, the predictor loss and the reported
+  across the treated unit and the donors (n - 1 denominator), as `synth()` does; a predictor with
+  one value for the treated unit and every donor is refused ("no variation"); one on which only
+  the donors agree is kept (it cannot be matched, but the QP is defined). V, the predictor loss and the reported
   predictor weights are on this standardised scale; the predictor balance is on the raw scale.
 - **Unit weights for a given V** are the exact solution of the simplex QP
   `min (X1 - X0 w)' V (X1 - X0 w)`, `w >= 0`, `sum w = 1`: a primal active-set method on the problem
