@@ -61,7 +61,7 @@ use crate::econometrics::glm::{GlmLink, GlmSpec, fit_glm, fit_propensity, plogis
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{faer_ref_to_ndarray, ndarray_to_faer};
-use crate::linalg::solve::{SingularPolicy, sym_inverse};
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided};
 
@@ -547,11 +547,20 @@ pub fn run_cbps(
     config: Option<CbpsConfig>,
 ) -> EconResult<CbpsResult> {
     let config = config.unwrap_or_default();
+    validate_config(&config)?;
 
     // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     let t = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let n = t.len();
+    if let Some((i, v)) = t.iter().enumerate().find(|(_, v)| **v != 0.0 && **v != 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "CBPS: treatment column '{treatment_col}' must be coded 0/1; row {} has {v}",
+                i + 1
+            ),
+        });
+    }
 
     let n_treated: usize = t.iter().filter(|&&v| v == 1.0).count();
     let n_control = n - n_treated;
@@ -569,6 +578,24 @@ pub fn run_cbps(
     let x = design.data;
     let names = design.column_names;
     let k = x.ncols();
+    if n <= k {
+        return Err(EconError::InsufficientData {
+            required: k + 1,
+            provided: n,
+            context: "CBPS: more observations than coefficients are needed".into(),
+        });
+    }
+    let qr = Qr::decompose(x.view(), LM_QR_TOL)?;
+    if qr.rank() < k {
+        let aliased: Vec<&str> = qr.aliased().iter().map(|&j| names[j].as_str()).collect();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "CBPS: the covariates are collinear (rank {} of {k}); remove: {}",
+                qr.rank(),
+                aliased.join(", ")
+            ),
+        });
+    }
 
     let balance_before = compute_balance_table(&x, &t, &names, None, config.balance_threshold);
 
@@ -639,6 +666,27 @@ pub fn run_cbps(
         convergence: fit.convergence,
         warnings,
     })
+}
+
+/// Refuse settings no fit can honour.
+fn validate_config(config: &CbpsConfig) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return spec(format!(
+            "CBPS: tolerance must be finite and > 0, got {}",
+            config.tolerance
+        ));
+    }
+    if config.max_iter < 1 {
+        return spec("CBPS: max_iter must be at least 1, got 0".to_string());
+    }
+    if !(config.balance_threshold.is_finite() && config.balance_threshold > 0.0) {
+        return spec(format!(
+            "CBPS: balance_threshold must be finite and > 0, got {}",
+            config.balance_threshold
+        ));
+    }
+    Ok(())
 }
 
 /// [`run_cbps`] with the default configuration and `method` replaced.
@@ -814,6 +862,14 @@ fn whiten(x: &Array2<f64>) -> EconResult<Whitened> {
     let v = faer_ref_to_ndarray(svd.V());
     let s = svd.S().column_vector();
     let d: Array1<f64> = (0..k).map(|j| s[j]).collect();
+    let d_min = d.iter().copied().fold(f64::INFINITY, f64::min);
+    if d_min.is_nan() || d_min <= SINGULAR_VALUE_MIN {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "CBPS: the standardised covariates are numerically collinear (smallest singular value {d_min:.3e} <= 1e-5, CBPS.fit's threshold)"
+            ),
+        });
+    }
     let mut vd = v;
     for j in 0..k {
         let inv = 1.0 / d[j];
@@ -2005,6 +2061,98 @@ mod tests {
 
         let result = run_cbps(&dataset, "treatment", &["x1"], None);
         assert!(result.is_err());
+    }
+
+    fn is_spec(e: &EconError) -> bool {
+        matches!(e, EconError::InvalidSpecification { .. })
+    }
+
+    #[test]
+    fn test_cbps_rejects_invalid_parameters() {
+        let ds = sim();
+        let err = |f: &dyn Fn(&mut CbpsConfig)| {
+            let mut c = CbpsConfig::default();
+            f(&mut c);
+            let e = run_cbps(&ds, "treat", &COVS, Some(c)).unwrap_err();
+            assert!(is_spec(&e), "{e:?}");
+            e.to_string()
+        };
+        for v in [0.0, f64::NAN, -1.0, f64::INFINITY] {
+            assert!(err(&|c| c.tolerance = v).contains("tolerance"));
+        }
+        assert!(err(&|c| c.max_iter = 0).contains("max_iter"));
+        for v in [0.0, f64::NAN] {
+            assert!(err(&|c| c.balance_threshold = v).contains("balance_threshold"));
+        }
+    }
+
+    #[test]
+    fn test_cbps_rejects_non_binary_treatment() {
+        let ds = sim();
+        let mut treat = column(&ds, "treat");
+        treat[0] = 2.0;
+        let bad = Dataset::new(
+            df! {
+                "treat" => treat,
+                "x1" => column(&ds, "x1"),
+                "x2" => column(&ds, "x2"),
+                "x3" => column(&ds, "x3"),
+            }
+            .unwrap(),
+        );
+        let e = run_cbps(&bad, "treat", &COVS, None).unwrap_err();
+        let msg = e.to_string();
+        assert!(is_spec(&e), "{e:?}");
+        assert!(
+            msg.contains("treat") && msg.contains("0/1") && msg.contains("row 1 has 2"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_cbps_rejects_collinear_covariates() {
+        let ds = sim();
+        let x1 = column(&ds, "x1");
+        let x2 = column(&ds, "x2");
+        let x4: Vec<f64> = x1.iter().zip(&x2).map(|(a, b)| a + b).collect();
+        let n = x1.len();
+        let wide = Dataset::new(
+            df! {
+                "treat" => column(&ds, "treat"),
+                "x1" => x1,
+                "x2" => x2,
+                "x3" => column(&ds, "x3"),
+                "x4" => x4,
+                "k" => vec![1.0; n],
+            }
+            .unwrap(),
+        );
+        let e = run_cbps(&wide, "treat", &["x1", "x2", "x3", "x4"], None).unwrap_err();
+        let msg = e.to_string();
+        assert!(is_spec(&e), "{e:?}");
+        assert!(msg.contains("collinear") && msg.contains("x4"), "{msg}");
+        let e = run_cbps(&wide, "treat", &["x1", "k"], None).unwrap_err();
+        let msg = e.to_string();
+        assert!(is_spec(&e), "{e:?}");
+        assert!(
+            msg.contains("collinear") && msg.contains("remove: k"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_cbps_rejects_too_few_observations() {
+        let ds = sim();
+        let head = Dataset::new(ds.df().head(Some(4)));
+        assert_eq!(column(&head, "treat"), vec![1.0, 1.0, 0.0, 0.0]);
+        match run_cbps(&head, "treat", &COVS, None) {
+            Err(EconError::InsufficientData {
+                required: 5,
+                provided: 4,
+                ..
+            }) => {}
+            other => panic!("expected InsufficientData {{ 5, 4 }}, got {other:?}"),
+        }
     }
 
     #[test]
