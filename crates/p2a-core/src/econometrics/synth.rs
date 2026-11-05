@@ -1451,7 +1451,7 @@ fn standardized_predictors(data: &SynthData) -> EconResult<(Array1<f64>, Array2<
         if j >= 2 {
             let mean = row.sum() / j as f64;
             let var = row.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
-            if !(var > 0.0) {
+            if var.is_nan() || var <= 0.0 {
                 return Err(EconError::InvalidSpecification {
                     message: format!(
                         "synthetic control: predictor '{}' has no variation across the donor \
