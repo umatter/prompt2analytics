@@ -136,6 +136,114 @@ impl fmt::Display for GFormulaOutcomeType {
     }
 }
 
+crate::option_enum!(
+    GFormulaOutcomeType,
+    crate::options::Choices {
+        option: "outcome_type",
+        values: &[
+            (
+                &["continuous", "linear", "gaussian"],
+                GFormulaOutcomeType::Continuous
+            ),
+            (
+                &["binary", "logistic", "binomial"],
+                GFormulaOutcomeType::Binary
+            ),
+            (
+                &["survival", "hazard", "discrete_hazard", "pooled_logistic"],
+                GFormulaOutcomeType::Survival
+            ),
+        ],
+    },
+    no_display
+);
+
+/// Intervention kinds as option strings (MCP, CLI); turned into a
+/// [`GFormulaIntervention`] by [`GFormulaIntervention::from_regime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GFormulaRegime {
+    /// Treat every subject in every period.
+    AlwaysTreat,
+    /// Treat no subject in any period.
+    NeverTreat,
+    /// Treatment drawn from the fitted treatment model.
+    NaturalCourse,
+    /// Treat when a time-varying covariate crosses a cutoff.
+    Threshold,
+}
+
+crate::option_enum!(
+    GFormulaRegime,
+    crate::options::Choices {
+        option: "intervention",
+        values: &[
+            (
+                &["always_treat", "always", "treat_all"],
+                GFormulaRegime::AlwaysTreat
+            ),
+            (
+                &["never_treat", "never", "treat_none", "control"],
+                GFormulaRegime::NeverTreat
+            ),
+            (
+                &["natural_course", "natural", "observed"],
+                GFormulaRegime::NaturalCourse
+            ),
+            (&["threshold", "dynamic"], GFormulaRegime::Threshold),
+        ],
+    }
+);
+
+impl GFormulaIntervention {
+    /// The intervention of `regime`. `Threshold` needs `threshold_variable` (0-based index
+    /// into the time-varying covariates) and a finite `threshold_cutoff`;
+    /// `threshold_above` defaults to true. Threshold fields with another regime are an
+    /// error.
+    pub fn from_regime(
+        regime: GFormulaRegime,
+        threshold_variable: Option<usize>,
+        threshold_cutoff: Option<f64>,
+        threshold_above: Option<bool>,
+    ) -> EconResult<Self> {
+        let any_threshold_field =
+            threshold_variable.is_some() || threshold_cutoff.is_some() || threshold_above.is_some();
+        match regime {
+            GFormulaRegime::Threshold => {
+                let variable_idx = threshold_variable.ok_or_else(|| {
+                    spec_err("threshold_variable is required for intervention 'threshold'".into())
+                })?;
+                let cutoff = threshold_cutoff.ok_or_else(|| {
+                    spec_err("threshold_cutoff is required for intervention 'threshold'".into())
+                })?;
+                check_cutoff(cutoff)?;
+                Ok(Self::Threshold {
+                    variable_idx,
+                    cutoff,
+                    above: threshold_above.unwrap_or(true),
+                })
+            }
+            _ if any_threshold_field => Err(spec_err(
+                "threshold_variable, threshold_cutoff and threshold_above apply only to \
+                 intervention 'threshold'"
+                    .into(),
+            )),
+            GFormulaRegime::AlwaysTreat => Ok(Self::Static { treat_all: true }),
+            GFormulaRegime::NeverTreat => Ok(Self::Static { treat_all: false }),
+            GFormulaRegime::NaturalCourse => Ok(Self::NaturalCourse),
+        }
+    }
+}
+
+fn check_cutoff(cutoff: f64) -> EconResult<()> {
+    if cutoff.is_finite() {
+        Ok(())
+    } else {
+        Err(spec_err(format!(
+            "threshold cutoff must be finite, got {cutoff}"
+        )))
+    }
+}
+
 /// Configuration for the parametric g-formula.
 #[derive(Debug, Clone)]
 pub struct GFormulaConfig {
@@ -887,30 +995,7 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     let p_value_rd = 2.0 * (1.0 - normal_cdf(z_stat.abs()));
     let significance_rd = SignificanceLevel::from_p_value(p_value_rd);
 
-    // Intervention description
-    let intervention_description = match &config.intervention {
-        GFormulaIntervention::NaturalCourse => {
-            "Natural course (observed treatment patterns)".to_string()
-        }
-        GFormulaIntervention::Static { treat_all: true } => {
-            "Always treat (A=1 at all time points)".to_string()
-        }
-        GFormulaIntervention::Static { treat_all: false } => {
-            "Never treat (A=0 at all time points)".to_string()
-        }
-        GFormulaIntervention::Threshold {
-            variable_idx,
-            cutoff,
-            above,
-        } => {
-            format!(
-                "Treat if L[{}] {} {:.2}",
-                variable_idx,
-                if *above { ">" } else { "<=" },
-                cutoff
-            )
-        }
-    };
+    let intervention_description = describe(&config.intervention, data);
 
     Ok(GFormulaResult {
         risk_natural,
@@ -996,7 +1081,61 @@ fn validate_inputs(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<(
             data.n_subjects()
         )));
     }
+    if let GFormulaIntervention::Threshold {
+        variable_idx,
+        cutoff,
+        ..
+    } = &config.intervention
+    {
+        let n_tv = data.n_time_varying_covars();
+        if n_tv == 0 {
+            return Err(spec_err(
+                "threshold intervention needs a time-varying covariate; the data have no \
+                 time-varying covariate"
+                    .into(),
+            ));
+        }
+        if *variable_idx >= n_tv {
+            let names: Vec<String> = data
+                .time_varying_names
+                .iter()
+                .enumerate()
+                .map(|(j, name)| format!("{name} = index {j}"))
+                .collect();
+            return Err(spec_err(format!(
+                "threshold intervention: covariate index {variable_idx} is out of range; the \
+                 data have {n_tv} time-varying covariate(s): {}",
+                names.join(", ")
+            )));
+        }
+        check_cutoff(*cutoff)?;
+    }
     Ok(())
+}
+
+/// The text of `intervention` in the result, naming the threshold covariate.
+fn describe(intervention: &GFormulaIntervention, data: &GFormulaData) -> String {
+    match intervention {
+        GFormulaIntervention::NaturalCourse => {
+            "Natural course (observed treatment patterns)".to_string()
+        }
+        GFormulaIntervention::Static { treat_all: true } => {
+            "Always treat (A=1 at all time points)".to_string()
+        }
+        GFormulaIntervention::Static { treat_all: false } => {
+            "Never treat (A=0 at all time points)".to_string()
+        }
+        GFormulaIntervention::Threshold {
+            variable_idx,
+            cutoff,
+            above,
+        } => format!(
+            "Treat if {} {} {}",
+            data.time_varying_names[*variable_idx],
+            if *above { ">" } else { "<=" },
+            cutoff
+        ),
+    }
 }
 
 /// Convenience function with default configuration.
@@ -1334,11 +1473,8 @@ fn simulate_gformula<R: Rng>(
                     cutoff,
                     above,
                 } => {
-                    let var_val = if *variable_idx < n_tv {
-                        l_current[*variable_idx]
-                    } else {
-                        0.0 // Fallback
-                    };
+                    // validate_inputs checked the index
+                    let var_val = l_current[*variable_idx];
                     if *above {
                         if var_val > *cutoff { 1.0 } else { 0.0 }
                     } else if var_val <= *cutoff {
@@ -2037,6 +2173,170 @@ mod tests {
             &["period 2", "2 columns", "period 1 has 1"],
         );
         assert!(GFormulaData::new(ok_b(), vec![ok_l()], vec![ok_a()], ok_y()).is_ok());
+    }
+
+    /// Noisy two-period DGP: one baseline and one time-varying covariate; the treatment
+    /// varies within subjects (no point treatment).
+    fn create_tv_test_data(n: usize, seed: u64, binary: bool) -> GFormulaData {
+        use rand_distr::{Distribution, StandardNormal};
+        let plogis = |x: f64| 1.0 / (1.0 + (-x).exp());
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let (mut b, mut l0, mut l1) = (
+            Array2::zeros((n, 1)),
+            Array2::zeros((n, 1)),
+            Array2::zeros((n, 1)),
+        );
+        let (mut a0, mut a1, mut y) = (Array1::zeros(n), Array1::zeros(n), Array1::zeros(n));
+        for i in 0..n {
+            // seven draws per row, always in this order
+            let z0: f64 = StandardNormal.sample(&mut rng);
+            let z1: f64 = StandardNormal.sample(&mut rng);
+            let u0: f64 = rng.gen_range(0.0..1.0);
+            let z2: f64 = StandardNormal.sample(&mut rng);
+            let u1: f64 = rng.gen_range(0.0..1.0);
+            let e: f64 = StandardNormal.sample(&mut rng);
+            let u2: f64 = rng.gen_range(0.0..1.0);
+            b[[i, 0]] = z0;
+            l0[[i, 0]] = 0.5 * z0 + z1;
+            a0[i] = f64::from(u0 < plogis(0.4 * l0[[i, 0]]));
+            l1[[i, 0]] = 0.3 * z0 + 0.6 * l0[[i, 0]] - 0.4 * a0[i] + z2;
+            a1[i] = f64::from(u1 < plogis(0.4 * l1[[i, 0]] + 0.8 * a0[i]));
+            let eta = -0.5 + 0.5 * z0 + 0.8 * l1[[i, 0]] + 0.7 * a0[i] + 0.4 * a1[i];
+            y[i] = if binary {
+                f64::from(u2 < plogis(eta))
+            } else {
+                eta + e
+            };
+        }
+        GFormulaData::new(b, vec![l0, l1], vec![a0, a1], y).unwrap()
+    }
+
+    fn small_tv_data() -> GFormulaData {
+        create_tv_test_data(200, 11, false)
+    }
+
+    #[test]
+    fn test_gformula_rejects_unknown_threshold_covariate() {
+        // CAUS-105: before, index 5 with one covariate silently used L = 0.0 (always/never treat).
+        let mut cfg = GFormulaConfig::default();
+        cfg.n_simulations = 200;
+        cfg.n_bootstrap = 0;
+        cfg.outcome_type = GFormulaOutcomeType::Continuous;
+        cfg.intervention = GFormulaIntervention::Threshold {
+            variable_idx: 5,
+            cutoff: -1.0,
+            above: true,
+        };
+        expect_invalid(
+            run_gformula(&small_tv_data(), cfg.clone()).unwrap_err(),
+            &["threshold", "index 5", "1 time-varying covariate", "L1"],
+        );
+        // no time-varying covariate at all
+        let n = 40;
+        let data = GFormulaData::new(
+            Array2::from_shape_fn((n, 1), |(i, _)| (i as f64 * 0.7).cos()),
+            vec![Array2::zeros((n, 0))],
+            vec![Array1::from_shape_fn(n, |i| (i % 2) as f64)],
+            Array1::from_shape_fn(n, |i| (i as f64 * 0.3).sin()),
+        )
+        .unwrap();
+        cfg.intervention = GFormulaIntervention::Threshold {
+            variable_idx: 0,
+            cutoff: 0.5,
+            above: true,
+        };
+        expect_invalid(
+            run_gformula(&data, cfg.clone()).unwrap_err(),
+            &["threshold", "no time-varying covariate"],
+        );
+        cfg.intervention = GFormulaIntervention::Threshold {
+            variable_idx: 0,
+            cutoff: f64::NAN,
+            above: true,
+        };
+        expect_invalid(
+            run_gformula(&small_tv_data(), cfg.clone()).unwrap_err(),
+            &["cutoff", "finite"],
+        );
+        // a valid index works and the description names the covariate
+        cfg.intervention = GFormulaIntervention::Threshold {
+            variable_idx: 0,
+            cutoff: -1.0,
+            above: true,
+        };
+        let r = run_gformula(&small_tv_data(), cfg).unwrap();
+        assert_eq!(r.intervention_description, "Treat if L1 > -1");
+    }
+
+    #[test]
+    fn test_gformula_outcome_type_parses_aliases_and_rejects_unknown() {
+        GFormulaOutcomeType::choices().validate().unwrap();
+        for (s, v) in [
+            ("continuous", GFormulaOutcomeType::Continuous),
+            ("Linear", GFormulaOutcomeType::Continuous),
+            ("gaussian", GFormulaOutcomeType::Continuous),
+            ("binary", GFormulaOutcomeType::Binary),
+            ("logistic", GFormulaOutcomeType::Binary),
+            ("Survival", GFormulaOutcomeType::Survival),
+            ("hazard", GFormulaOutcomeType::Survival),
+            ("discrete-hazard", GFormulaOutcomeType::Survival),
+        ] {
+            assert_eq!(s.parse::<GFormulaOutcomeType>().unwrap(), v, "{s}");
+        }
+        expect_invalid(
+            "cox".parse::<GFormulaOutcomeType>().unwrap_err(),
+            &["outcome_type", "continuous", "binary", "survival"],
+        );
+    }
+
+    #[test]
+    fn test_gformula_regime_parses_aliases_and_rejects_unknown() {
+        GFormulaRegime::choices().validate().unwrap();
+        for (s, v) in [
+            ("always_treat", GFormulaRegime::AlwaysTreat),
+            ("always", GFormulaRegime::AlwaysTreat),
+            ("never-treat", GFormulaRegime::NeverTreat),
+            ("control", GFormulaRegime::NeverTreat),
+            ("natural", GFormulaRegime::NaturalCourse),
+            ("observed", GFormulaRegime::NaturalCourse),
+            ("Threshold", GFormulaRegime::Threshold),
+            ("dynamic", GFormulaRegime::Threshold),
+        ] {
+            assert_eq!(s.parse::<GFormulaRegime>().unwrap(), v, "{s}");
+        }
+        expect_invalid(
+            "sometimes".parse::<GFormulaRegime>().unwrap_err(),
+            &["intervention", "always_treat", "threshold"],
+        );
+    }
+
+    #[test]
+    fn test_gformula_intervention_from_regime() {
+        use GFormulaRegime::*;
+        assert!(matches!(
+            GFormulaIntervention::from_regime(AlwaysTreat, None, None, None).unwrap(),
+            GFormulaIntervention::Static { treat_all: true }
+        ));
+        assert!(matches!(
+            GFormulaIntervention::from_regime(Threshold, Some(1), Some(0.25), None).unwrap(),
+            GFormulaIntervention::Threshold {
+                variable_idx: 1,
+                above: true,
+                ..
+            }
+        ));
+        expect_invalid(
+            GFormulaIntervention::from_regime(Threshold, None, Some(0.2), None).unwrap_err(),
+            &["threshold_variable", "required"],
+        );
+        expect_invalid(
+            GFormulaIntervention::from_regime(Threshold, Some(0), None, None).unwrap_err(),
+            &["threshold_cutoff", "required"],
+        );
+        expect_invalid(
+            GFormulaIntervention::from_regime(NeverTreat, Some(0), None, None).unwrap_err(),
+            &["apply only to intervention 'threshold'"],
+        );
     }
 
     #[test]
