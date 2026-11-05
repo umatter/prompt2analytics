@@ -993,6 +993,81 @@ fn check_finite_1d(values: &ArrayView1<f64>, name: &str) -> EconResult<()> {
     }
 }
 
+/// AIPW (doubly robust) scores of a binary treatment, as grf's `get_scores.causal_forest`:
+/// `Gamma_i = tau_i + (W_i - W.hat_i) / (W.hat_i (1 - W.hat_i)) * (Y_i - Y.hat_i - tau_i (W_i -
+/// W.hat_i))`.
+///
+/// All five arrays must have the same length and finite values, `w` must be 0/1 and every
+/// `w_hat` strictly between 0 and 1 (the scores divide by `W.hat (1 - W.hat)`).
+pub fn aipw_scores(
+    y: ArrayView1<f64>,
+    w: ArrayView1<f64>,
+    y_hat: ArrayView1<f64>,
+    w_hat: ArrayView1<f64>,
+    tau_hat: ArrayView1<f64>,
+) -> EconResult<Vec<f64>> {
+    let n = y.len();
+    for (name, len) in [
+        ("w", w.len()),
+        ("y_hat", y_hat.len()),
+        ("w_hat", w_hat.len()),
+        ("tau_hat", tau_hat.len()),
+    ] {
+        if len != n {
+            return Err(EconError::InvalidSpecification {
+                message: format!("{name} has {len} values for {n} observations"),
+            });
+        }
+    }
+    check_finite_1d(&y, "y")?;
+    check_finite_1d(&w, "w")?;
+    check_finite_1d(&y_hat, "y_hat")?;
+    check_finite_1d(&w_hat, "w_hat")?;
+    check_finite_1d(&tau_hat, "tau_hat")?;
+    if let Some(i) = w.iter().position(|&v| v != 0.0 && v != 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("w must be binary (0/1); row {i} is {}", w[i]),
+        });
+    }
+    if let Some(i) = w_hat.iter().position(|&e| !(e > 0.0 && e < 1.0)) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "w_hat must be strictly between 0 and 1 for the AIPW scores (overlap); row {i} is {}",
+                w_hat[i]
+            ),
+        });
+    }
+    Ok((0..n)
+        .map(|i| {
+            let (e, d) = (w_hat[i], w[i] - w_hat[i]);
+            tau_hat[i] + d / (e * (1.0 - e)) * (y[i] - y_hat[i] - tau_hat[i] * d)
+        })
+        .collect())
+}
+
+/// grf `average_treatment_effect` (AIPW, `target.sample = "all"`, no clusters) from the scores:
+/// their mean and `sqrt(sum((s - mean)^2) / (m (m - 1)))` (`.sigma2.hat` with its `m / (m - 1)`
+/// correction). At least two scores, all finite.
+pub fn aipw_ate(scores: &[f64]) -> EconResult<(f64, f64)> {
+    let m = scores.len();
+    if m < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: m,
+            context: "an AIPW standard error needs at least 2 scores".to_string(),
+        });
+    }
+    if let Some(i) = scores.iter().position(|s| !s.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("AIPW score {i} is not finite ({})", scores[i]),
+        });
+    }
+    let mf = m as f64;
+    let mean = scores.iter().sum::<f64>() / mf;
+    let ss: f64 = scores.iter().map(|s| (s - mean) * (s - mean)).sum();
+    Ok((mean, (ss / (mf * (mf - 1.0))).sqrt()))
+}
+
 /// Core causal forest algorithm working with arrays.
 ///
 /// This is the main implementation, separate from data loading for testability.
@@ -2928,6 +3003,79 @@ mod tests {
         assert!((at(0.1, 0.1).y - 1.5).abs() < 1e-15);
         let empty = populate(nodes, &data, &[]);
         assert_eq!(empty.leaf(array![0.1, 0.1].view()).n, 0);
+    }
+
+    /// grf get_scores.causal_forest and average_treatment_effect (AIPW, .sigma2.hat), written out
+    /// (cf_aipw_formula).
+    #[test]
+    fn test_validate_cf_aipw_formula() {
+        let (case, ds) = crate::test_support::load_case("cf_aipw_formula");
+        let c = case_columns(&ds, &["y", "w", "y_hat", "w_hat", "tau_hat"], 40);
+        let v = |k: usize| Array1::from(c[k].clone());
+        let scores = aipw_scores(
+            v(0).view(),
+            v(1).view(),
+            v(2).view(),
+            v(3).view(),
+            v(4).view(),
+        )
+        .unwrap();
+        let (est, se) = aipw_ate(&scores).unwrap();
+        let (sub_est, sub_se) = aipw_ate(&scores[..15]).unwrap();
+        Check::new(&case)
+            .vector("scores", &scores, Tol::coef(40))
+            .scalar("estimate", est, Tol::coef(40))
+            .scalar("std_err", se, Tol::se(40))
+            .scalar("subset_estimate", sub_est, Tol::coef(40))
+            .scalar("subset_std_err", sub_se, Tol::se(40))
+            .finish();
+    }
+
+    #[test]
+    fn test_aipw_scores_refuse_invalid_inputs() {
+        let a = |v: &[f64]| Array1::from(v.to_vec());
+        let (y, w, yh, th) = (
+            a(&[1.0, 2.0, 3.0]),
+            a(&[0.0, 1.0, 1.0]),
+            a(&[1.5, 2.0, 2.5]),
+            a(&[1.0, 1.0, 1.0]),
+        );
+        let err = |wh: &[f64]| {
+            aipw_scores(y.view(), w.view(), yh.view(), a(wh).view(), th.view())
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            err(&[0.5, 1.0, 0.5]).contains("w_hat"),
+            "W.hat = 1 divides by zero"
+        );
+        assert!(err(&[0.0, 0.5, 0.5]).contains("w_hat"));
+        assert!(err(&[0.5, f64::NAN, 0.5]).contains("finite"));
+        assert!(
+            aipw_scores(
+                y.view(),
+                a(&[0.0, 0.5, 1.0]).view(),
+                yh.view(),
+                a(&[0.5; 3]).view(),
+                th.view()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("binary")
+        );
+        // length
+        assert!(
+            aipw_scores(
+                y.view(),
+                w.view(),
+                yh.view(),
+                a(&[0.5; 2]).view(),
+                th.view()
+            )
+            .is_err()
+        );
+        assert!(aipw_ate(&[1.0]).is_err()); // one score: no SE
+        assert!(aipw_ate(&[1.0, f64::INFINITY]).is_err());
     }
 
     /// grf sample_poisson(mtry) clamped to [1, p] (create_split_variable_subset).
