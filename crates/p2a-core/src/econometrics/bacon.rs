@@ -1232,7 +1232,7 @@ mod tests {
             "{} vs {twfe}",
             result.overall_estimate
         );
-        assert!((result.overall_estimate - 1.9787499999999989).abs() < 1e-12);
+        assert!((result.overall_estimate - 1.978749999999999).abs() < 1e-12);
         for (tg, cg, w) in [
             (2002, 2004, 0.05),
             (2002, 2006, 0.10),
@@ -1542,7 +1542,7 @@ mod tests {
         // R's fixest::feols 3.2335937499999998), with bacondecomp's weights
         let twfe = within_twfe(&dataset, "outcome", "unit", "year", "treated");
         assert!((result.overall_estimate - twfe).abs() < 1e-12);
-        assert!((result.overall_estimate - 3.2335937499999998).abs() < 1e-12);
+        assert!((result.overall_estimate - 3.23359375).abs() < 1e-12);
         for (tg, cg, w) in [
             (2002, 2004, 0.125),
             (2002, 0, 0.3125),
@@ -1685,7 +1685,7 @@ mod tests {
         }
         for (tg, cg, w) in [
             (3, 6, 0.14285714285714285),
-            (3, 0, 0.28571428571428570),
+            (3, 0, 0.2857142857142857),
             (6, 3, 0.21428571428571427),
             (6, 0, 0.35714285714285715),
         ] {

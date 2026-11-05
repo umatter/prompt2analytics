@@ -871,7 +871,7 @@ mod tests {
             (result.att, -0.028054724238937286),
             (result.std_error, 0.21315963502411217),
             (result.t_stat, -0.1316136811538629),
-            (result.p_value, 0.89535670480011142),
+            (result.p_value, 0.8953567048001114),
         ] {
             assert!((got - want).abs() <= 1e-8 * want.abs(), "{got} vs {want}");
         }
