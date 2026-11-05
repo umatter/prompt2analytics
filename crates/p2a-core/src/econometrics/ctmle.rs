@@ -374,7 +374,10 @@ pub struct CTmleConfig {
     pub max_iter: usize,
 
     /// `glm.fit`'s `epsilon` for the logistic fits (finite and > 0; default 1e-8, R's
-    /// `glm.control` default).
+    /// `glm.control` default). The C-TMLE fluctuation fits (cross-validation and full data)
+    /// start from epsilon = 0 and use `tolerance` as a bound on the Newton step relative to
+    /// `max(1, |epsilon|)` instead (glm.fit's deviance rule only when such a fit falls back
+    /// to the shared GLM).
     pub tolerance: f64,
 
     /// Used by PenRSS: RSS + penalty_factor * ln(n) * k (finite and >= 0).
@@ -2570,9 +2573,10 @@ mod tests {
         let ds = ctmle_sim();
         let (y, x) = (col(&ds, "yb"), w_matrix(&ds));
         let a2 = col(&ds, "a").mapv(|v| 2.0 * v);
+        let first = a2.iter().position(|&v| v == 2.0).unwrap();
         expect_invalid_spec(
             ctmle_arrays(&y.view(), &a2.view(), &x.view(), CTmleConfig::default()).unwrap_err(),
-            "must be coded 0/1",
+            &format!("must be coded 0/1 (0-based row {first} is 2)"),
         );
     }
 
@@ -2603,6 +2607,11 @@ mod tests {
             "{:?}",
             r.warnings
         );
+        // the fractional outcome's fold fits (zero weights outside the training rows) report
+        // no dispersion note, whichever numerical path a fold took
+        for w in r.warnings.iter().chain(&s.warnings) {
+            assert!(!w.contains("zero weight"), "{w}");
+        }
     }
 
     #[test]

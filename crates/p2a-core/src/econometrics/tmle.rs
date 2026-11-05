@@ -793,6 +793,7 @@ pub(crate) fn lean_logit(
     let mut inverse = Array2::<f64>::zeros((k, k));
     let mut chol = vec![0.0; k * k];
     let mut rhs = vec![0.0; k];
+    let (mut solve_scratch, mut scale_scratch) = (vec![0.0; k], vec![0.0; k]);
     let mut b = Array1::<f64>::zeros(k);
     let mut b_old = Array1::<f64>::zeros(k);
     let mut prev_step = f64::INFINITY;
@@ -816,7 +817,14 @@ pub(crate) fn lean_logit(
                 }
             }
         }
-        if !well_conditioned_inverse(&g, k, &mut chol, &mut inverse) {
+        if !well_conditioned_inverse(
+            &g,
+            k,
+            &mut chol,
+            &mut solve_scratch,
+            &mut scale_scratch,
+            &mut inverse,
+        ) {
             return Ok(None);
         }
         b_old.assign(&b);
@@ -874,12 +882,14 @@ const LEAN_MAX_CONDITION: f64 = 100.0;
 
 /// The inverse of the symmetric `k x k` matrix whose upper triangle is `g` (row-major), into
 /// `inverse`, when its Cholesky factorisation exists and the 1-norm condition number of its
-/// equilibrated form is at most [`LEAN_MAX_CONDITION`]; `false` otherwise. `chol` is `k x k`
-/// scratch.
+/// equilibrated form is at most [`LEAN_MAX_CONDITION`]; `false` otherwise. `chol` (`k x k`),
+/// `y` and `r` (length `k`) are scratch, allocated once by the caller.
 fn well_conditioned_inverse(
     g: &[f64],
     k: usize,
     chol: &mut [f64],
+    y: &mut [f64],
+    r: &mut [f64],
     inverse: &mut Array2<f64>,
 ) -> bool {
     let at = |a: usize, c: usize| if c >= a { g[a * k + c] } else { g[c * k + a] };
@@ -902,7 +912,6 @@ fn well_conditioned_inverse(
         }
     }
     // G^-1 = L^-T L^-1, column by column: solve L y = e_c, then L' x = y
-    let mut y = vec![0.0; k];
     for c in 0..k {
         for i in 0..k {
             let mut v = if i == c { 1.0 } else { 0.0 };
@@ -920,7 +929,9 @@ fn well_conditioned_inverse(
         }
     }
     // kappa_1(E) = ||E||_1 ||E^-1||_1, E = S G S, E^-1 = S^-1 G^-1 S^-1
-    let r: Vec<f64> = (0..k).map(|i| at(i, i).sqrt()).collect();
+    for (i, ri) in r.iter_mut().enumerate().take(k) {
+        *ri = at(i, i).sqrt();
+    }
     let (mut e_norm, mut einv_norm) = (0.0f64, 0.0f64);
     for c in 0..k {
         let (mut ce, mut ci) = (0.0, 0.0);
@@ -976,11 +987,18 @@ pub(crate) struct NuisanceFit {
 }
 
 impl NuisanceFit {
+    /// The shared GLM's fit with its warnings as [`lean_logit`]'s path would report them:
+    /// non-convergence is carried by `converged`, and the dispersion warning about
+    /// zero-weight rows (the training rows of a fold fit) concerns a dispersion that no
+    /// nuisance fit reads, so a fold fit reports the same notes on either path.
     fn from_glm(fit: GlmFit, names: &[String]) -> NuisanceFit {
         let mut warnings: Vec<String> = fit
             .warnings
             .into_iter()
-            .filter(|w| w != "glm.fit: algorithm did not converge")
+            .filter(|w| {
+                w != "glm.fit: algorithm did not converge"
+                    && w != "observations with zero weight not used for calculating dispersion"
+            })
             .collect();
         warnings.extend(aliasing_message(&fit.aliased, names));
         NuisanceFit {
@@ -1412,14 +1430,16 @@ pub(crate) fn wald95(est: f64, se: f64) -> EconResult<(f64, f64, f64, f64)> {
     Ok((z, normal_p_value_two_sided(z), est - zc * se, est + zc * se))
 }
 
-/// Every value exactly 0 or 1 and both present: `Ok((n_treated, n_control))`.
+/// Every value exactly 0 or 1 and both present: `Ok((n_treated, n_control))`. A value that is
+/// not 0 or 1 is reported by its 0-based position in `a`. TMLE, C-TMLE and stdreg pass the
+/// whole column (they refuse missing values), so that position is the dataset row.
 pub(crate) fn check_binary_treatment(
     a: ArrayView1<'_, f64>,
     name: &str,
 ) -> EconResult<(usize, usize)> {
     if let Some((i, v)) = a.iter().enumerate().find(|(_, v)| **v != 0.0 && **v != 1.0) {
         return Err(spec(format!(
-            "treatment '{name}' must be coded 0/1 for the propensity model (row {i} is {v})"
+            "treatment '{name}' must be coded 0/1 (0-based row {i} is {v})"
         )));
     }
     let n_treated = a.iter().filter(|&&v| v == 1.0).count();
@@ -2327,10 +2347,13 @@ mod tests {
         use crate::linalg::solve::{SingularPolicy, sym_inverse};
         let k = 3;
         let mut chol = vec![0.0; k * k];
+        let (mut ys, mut rs) = (vec![0.0; k], vec![0.0; k]);
         let mut inv = Array2::<f64>::zeros((k, k));
         // well conditioned: the inverse of sym_inverse
         let g = [4.1, 0.7, -0.3, 0.0, 2.9, 0.45, 0.0, 0.0, 1.7];
-        assert!(well_conditioned_inverse(&g, k, &mut chol, &mut inv));
+        assert!(well_conditioned_inverse(
+            &g, k, &mut chol, &mut ys, &mut rs, &mut inv
+        ));
         let full = Array2::from_shape_fn(
             (k, k),
             |(a, c)| {
@@ -2346,7 +2369,9 @@ mod tests {
         let singular = [1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         let indefinite = [1.0, 2.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         for g in [near, singular, indefinite] {
-            assert!(!well_conditioned_inverse(&g, k, &mut chol, &mut inv));
+            assert!(!well_conditioned_inverse(
+                &g, k, &mut chol, &mut ys, &mut rs, &mut inv
+            ));
         }
     }
 
@@ -2394,6 +2419,53 @@ mod tests {
     }
 
     #[test]
+    fn test_logit_nuisance_fold_fit_notes_do_not_depend_on_the_path() {
+        // A fractional outcome fitted on a fold's training rows (zero weights elsewhere): the
+        // lean path reports nothing, and the shared GLM's fallback (here forced by a design
+        // too ill conditioned for the lean Cholesky) must not add summary.glm's dispersion
+        // warning about the zero-weight rows.
+        let (x, _, yf, _) = lean_case(300);
+        let mut xn = Array2::<f64>::ones((300, 4));
+        xn.slice_mut(s![.., ..3]).assign(&x);
+        let mut seed = 7_u64;
+        for i in 0..300 {
+            xn[[i, 3]] = x[[i, 1]] + 0.02 * (lcg_rand(&mut seed) - 0.5);
+        }
+        let train = Array1::from_shape_fn(300, |i| if i % 5 == 0 { 0.0 } else { 1.0 });
+        let names: Vec<String> = ["(Intercept)", "x1", "x2", "x1b"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let ctl = GlmControl {
+            epsilon: 1e-8,
+            max_iter: 100,
+        };
+        let rows: Vec<usize> = (0..300).filter(|i| i % 5 != 0).collect();
+        let (xs, ys) = (xn.select(Axis(0), &rows), yf.select(Axis(0), &rows));
+        assert!(
+            lean_logit(xs.view(), ys.view(), None, LeanStart::Mustart, ctl)
+                .unwrap()
+                .is_none(),
+            "the design must leave the lean path"
+        );
+        let spec = ctl.spec(GlmFamily::QuasiBinomial, GlmLink::Logit, Some(train.view()));
+        let glm = fit_glm(xn.view(), yf.view(), &spec).unwrap();
+        assert!(glm.warnings.iter().any(|w| w.contains("zero weight")));
+        let fit = logit_nuisance(
+            xn.view(),
+            yf.view(),
+            GlmFamily::QuasiBinomial,
+            Some(train.view()),
+            &names,
+            ctl,
+            None,
+        )
+        .unwrap();
+        assert!(fit.converged && fit.aliased.is_empty());
+        assert!(fit.warnings.is_empty(), "{:?}", fit.warnings);
+    }
+
+    #[test]
     fn test_outcome_scale_names_constant_and_non_finite_outcomes() {
         let msg = |y: &[f64]| match outcome_scale(ArrayView1::from(y), QModel::Logistic, "y") {
             Err(EconError::InvalidSpecification { message }) => message,
@@ -2417,6 +2489,7 @@ mod tests {
     fn test_tmle_refuses_non_binary_treatment() {
         let ds = ctmle_sim();
         let a2: Vec<f64> = col(&ds, "a").iter().map(|v| 2.0 * v).collect();
+        let first = a2.iter().position(|&v| v == 2.0).unwrap();
         let e = tmle(
             &with_col(&ds, "a2", a2),
             "yb",
@@ -2426,7 +2499,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(&e, EconError::InvalidSpecification { message } if message.contains("must be coded 0/1")),
+            matches!(&e, EconError::InvalidSpecification { message }
+                if message.contains(&format!("treatment 'a2' must be coded 0/1 (0-based row {first} is 2)"))),
             "{e:?}"
         );
     }
