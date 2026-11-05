@@ -1825,12 +1825,12 @@ fn main() {
             run_placebos: false,
             ..Default::default()
         };
-        // The outputs agree, but the timings do not compare the same search:
-        // R's synth() divides each predictor by its SD across units and runs
-        // two Nelder-Mead V searches (from equal V and from a regression-based
-        // V) and keeps the better; p2a-core runs one from equal V on the raw
-        // predictors (CAUS-40), which stops after 2 iterations here. The
-        // merge keeps this pair out of the exhibits (exhibit_timing_exclusions).
+        // Both sides now run the same search: each predictor divided by its SD
+        // across units, two Nelder-Mead V searches (from equal V and from
+        // Synth's regression-based V), the better kept. The inner weight solver
+        // differs (R: ipop; p2a-core: an exact active-set simplex QP). The merge
+        // kept this pair out of the exhibits (exhibit_timing_exclusions) while
+        // the searches differed; lifting that is a paper-side step.
         let mut result = run_benchmark_tracked("SynthControl", "Nelder-Mead", n, &config, || {
             run_synthetic_control(
                 &dataset,
@@ -1852,9 +1852,9 @@ fn main() {
             let mut outputs = BTreeMap::new();
             // R's loss.v: the pre-period (0..6) MSPE of the reported weights
             capture(&mut outputs, "loss", sc.pre_treatment_mspe);
-            // Donor weights by unit index (unit_1, unit_2, ...): p2a-core lists
-            // donors in HashSet order, R in its factor's alphabetical order, and R
-            // reorders by index too
+            // Donor weights by unit index (unit_1, unit_2, ...): both sides list
+            // donors in factor (label) order, where unit_10 precedes unit_2, so
+            // both are reordered by index
             let mut by_index: Vec<(i64, f64)> = sc
                 .all_unit_weights
                 .iter()

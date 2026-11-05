@@ -59,7 +59,8 @@ case("synth_weights_qp", "econometrics/synth", "Synthetic-control unit weights a
   d <- ctx$gen_dataset("synth_qp_panel", d0)
   pre <- d$time < 15
   pm <- function(col) { m <- tapply(d[[col]][pre], d$unit[pre], mean); m[units] }
-  # Synth's standardisation: each predictor divided by its SD across all units (n - 1 denominator)
+  # Synth's standardisation: each predictor divided by its SD across all units (n - 1 denominator);
+  # the predictor balance (equal_balance_synthetic) is on the predictors' own scale
   stdz <- function(X) { stopifnot(all(apply(X[, donors], 1, sd) > 0)); X / sqrt(apply(X, 1, var)) }
   Xraw <- rbind(pm("x1"), pm("x2"), pm("x3")); rownames(Xraw) <- c("x1", "x2", "x3")
   Xall <- stdz(Xraw)
@@ -73,7 +74,7 @@ case("synth_weights_qp", "econometrics/synth", "Synthetic-control unit weights a
     syn <- c(Ymat[, donors] %*% w)
     gap <- Ymat[, "TR"] - syn
     list(w = w, loss = sum(v * (X1 - X0 %*% w)^2), pre_mspe = mean(gap[1:T0]^2), effects = gap[(T0 + 1):TT],
-         synthetic = syn, balance = c(X0 %*% w), free = q$free)
+         synthetic = syn, free = q$free)
   }
   ve <- rep(1 / 3, 3); vc <- c(0.6, 0.3, 0.1)
   e <- fit(Xall, ve); c2 <- fit(Xall, vc); eb <- fit(Xall_big, ve); ex <- fit(Xall_x2, ve)
@@ -87,7 +88,7 @@ case("synth_weights_qp", "econometrics/synth", "Synthetic-control unit weights a
   Bs <- (solve(t(XA) %*% XA) %*% t(XA) %*% t(Z))[-1, ]; Vs <- diag(Bs %*% t(Bs)); stopifnot(max(abs(Vs / sum(Vs) - sv2)) < 1e-10)
   list(values = list(
     equal_w = named(e$w), equal_predictor_loss = e$loss, equal_pre_mspe = e$pre_mspe, equal_effects = vec(e$effects),
-    equal_average_effect = mean(e$effects), equal_synthetic = vec(e$synthetic), equal_balance_synthetic = vec(e$balance),
+    equal_average_effect = mean(e$effects), equal_synthetic = vec(e$synthetic), equal_balance_synthetic = vec(c(Xraw[, donors] %*% e$w)),
     equal_n_positive = e$free,
     custom_w = named(c2$w), custom_predictor_loss = c2$loss, custom_pre_mspe = c2$pre_mspe, custom_average_effect = mean(c2$effects),
     equal_big_w = named(eb$w), equal_big_predictor_loss = eb$loss,

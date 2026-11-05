@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_synth",
+      "name": "Synthetic control (Abadie, Diamond and Hainmueller 2010): unit weights as the exact simplex QP for a given V on predictors standardised as Synth; Synth's regression-based V start",
+      "category": "econometrics",
+      "reference": "the QP itself on Synth-standardised predictors, solved by quadprog::solve.QP with a KKT polish; Synth 1.1.10's standardisation and SV2 start written out and checked against Synth's source (validation/r/cases/causal_synth_scpi.R)",
+      "doc": "validation/econometrics/synth.md",
+      "cases": ["synth_weights_qp"],
+      "tests": [
+        "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp",
+        "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp_custom",
+        "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp_invariant_to_predictor_units",
+        "p2a-core::econometrics::synth::tests::test_validate_synth_regression_start"
+      ],
+      "quantities": ["unit weights (equal, custom V; predictors x 1, x 1e4, x2 alone x 1e4)", "predictor loss (standardised)", "pre-treatment MSPE", "post-period effects, average effect", "synthetic outcome path", "synthetic predictor values (raw scale)", "number of positive weights", "regression-based V start (SV2)"],
+      "tolerance": "n = 14 pre-periods: validation/README.md (weights, effects 1e-6; loss, MSPE 1e-5 relative)",
+      "deviations": [
+        {"finding": "CAUS-40", "quantity": "data-driven V", "note": "no R reference for the Nelder-Mead search itself (Synth uses optimx and ipop): property tests only (unit invariance at x 8192, two starts, loss not above the equal-V fit); the SV2 start is pinned"},
+        {"finding": "CAUS-40", "quantity": "unit weights on a face of optima", "note": "the minimum-norm weights of the 1e-10 ridge (SIMPLEX_QP_RIDGE) are reported with a warning; Synth's ipop returns an interior point of the face"}
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
