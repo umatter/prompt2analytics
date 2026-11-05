@@ -758,16 +758,31 @@ pub fn run_medflex_with_names(
     names: &MedflexNames,
     config: MedflexConfig,
 ) -> EconResult<MedflexResult> {
+    run_medflex_rows(y, treatment, mediator, confounders, names, config, None)
+}
+
+/// [`run_medflex_with_names`] with `rows[i]`, the caller's row of observation `i`, used in
+/// messages that name a row (the dataset wrapper passes the complete-case rows' original
+/// indices).
+fn run_medflex_rows(
+    y: &ArrayView1<f64>,
+    treatment: &ArrayView1<f64>,
+    mediator: &ArrayView1<f64>,
+    confounders: &ArrayView2<f64>,
+    names: &MedflexNames,
+    config: MedflexConfig,
+    rows: Option<&[usize]>,
+) -> EconResult<MedflexResult> {
     let inp = Inputs {
         y: y.to_owned(),
         a: treatment.to_owned(),
         m: mediator.to_owned(),
         c: confounders.to_owned(),
     };
-    let plan = validate_and_plan(&inp, names, &config)?;
+    let plan = validate_and_plan(&inp, names, &config, rows)?;
     let n = inp.n();
     let est = estimate(&inp, &plan)?;
-    let med = mediator_report(&inp, &plan)?;
+    let med = &est.mediator;
 
     let n_treated = inp.a.iter().filter(|&&v| v == 1.0).count();
     let n_control = n - n_treated;
@@ -843,7 +858,6 @@ pub fn run_medflex_with_names(
     };
 
     let mut warnings = est.notes.clone();
-    warnings.extend(med.notes.iter().cloned());
     warnings.extend(boot_notes);
     warnings.extend(proportion_note(proportion_mediated));
 
@@ -988,8 +1002,11 @@ fn validate_and_plan(
     inp: &Inputs,
     names: &MedflexNames,
     config: &MedflexConfig,
+    rows: Option<&[usize]>,
 ) -> EconResult<Plan> {
     let n = inp.n();
+    // the caller's row of observation i
+    let row = |i: usize| rows.and_then(|r| r.get(i).copied()).unwrap_or(i);
     if inp.a.len() != n {
         return Err(spec_err(format!(
             "Treatment length ({}) must match outcome length ({n})",
@@ -1029,15 +1046,17 @@ fn validate_and_plan(
     ] {
         if let Some(i) = v.iter().position(|x| !x.is_finite()) {
             return Err(spec_err(format!(
-                "{role} has a non-finite value at row {i}"
+                "{role} has a non-finite value at row {}",
+                row(i)
             )));
         }
     }
     for (j, col) in inp.c.columns().into_iter().enumerate() {
         if let Some(i) = col.iter().position(|x| !x.is_finite()) {
             return Err(spec_err(format!(
-                "confounder '{}' has a non-finite value at row {i}",
-                names.confounders[j]
+                "confounder '{}' has a non-finite value at row {}",
+                names.confounders[j],
+                row(i)
             )));
         }
     }
@@ -1048,7 +1067,8 @@ fn validate_and_plan(
         .find(|(_, v)| **v != 0.0 && **v != 1.0)
     {
         return Err(spec_err(format!(
-            "natural effect models need a binary 0/1 treatment; row {i} has treatment {v}"
+            "natural effect models need a binary 0/1 treatment; row {} has treatment {v}",
+            row(i)
         )));
     }
     let min_obs = if config.allow_interaction { 10 } else { 8 };
@@ -1319,32 +1339,60 @@ fn check_arms(a: &Array1<f64>) -> EconResult<()> {
     Ok(())
 }
 
+/// The mediator model `M ~ C + A`.
+struct MediatorFit {
+    /// Coefficients in the order `[1, C, A]`, aliased ones set to 0.
+    alpha: Array1<f64>,
+    /// Coefficient of A, its standard error and the model's R-squared (the reported
+    /// mediator model `M ~ A + C`: A is never aliased, so neither depends on the column
+    /// order).
+    coef_a: f64,
+    se_a: f64,
+    r2: f64,
+    /// The aliasing note.
+    notes: Vec<String>,
+}
+
 /// The mediator model `M ~ C + A` (A last): refuses a treatment in the span of 1 and C
-/// (no overlap) and returns the coefficients with aliased ones set to 0, and the
-/// aliasing note.
-fn identification(inp: &Inputs, plan: &Plan) -> EconResult<(Array1<f64>, Vec<String>)> {
+/// (no overlap). Since A is then not aliased, any aliasing is among 1 and C and is the
+/// same as in the reported order `[1, A, C]`.
+fn identification(inp: &Inputs, plan: &Plan) -> EconResult<MediatorFit> {
     let x = identification_design(inp)?;
     let fit = solve_ols(x.view(), inp.m.view())?;
-    if fit.aliased.contains(&(x.ncols() - 1)) {
+    let ja = x.ncols() - 1;
+    if fit.aliased.contains(&ja) {
         return Err(spec_err(
             "treatment is a linear function of the confounders (no overlap); natural effects are not identified"
                 .into(),
         ));
     }
+    let n = inp.n();
+    let rss: f64 = fit.residuals.iter().map(|e| e * e).sum();
+    let df = n.saturating_sub(fit.rank);
+    let sigma2 = if df > 0 { rss / df as f64 } else { f64::NAN };
+    let mean = inp.m.sum() / n as f64;
+    let tss: f64 = inp.m.iter().map(|v| (v - mean).powi(2)).sum();
     let notes = aliasing_message(&fit.aliased, &plan.id_names)
         .map(|m| format!("Mediator model: {m}"))
         .into_iter()
         .collect();
-    Ok((zero_nan(&fit.beta), notes))
+    Ok(MediatorFit {
+        coef_a: fit.beta[ja],
+        se_a: (fit.unscaled[[ja, ja]] * sigma2).sqrt(),
+        r2: if tss > 0.0 { 1.0 - rss / tss } else { 0.0 },
+        alpha: zero_nan(&fit.beta),
+        notes,
+    })
 }
 
 /// One fit of the estimator on `inp`.
 struct Estimate {
     /// NDE, NIE, TE on the link scale.
     link: [f64; 3],
-    /// Working-model and natural effect model notes.
+    /// Working-model, natural effect model and mediator-model notes.
     notes: Vec<String>,
     working: WorkingFit,
+    mediator: MediatorFit,
     /// Working design (n x k_w).
     x: Array2<f64>,
     /// Counterfactual working design (2n x k_w) and its linear predictor.
@@ -1378,7 +1426,7 @@ fn contrasts(plan: &Plan, k_n: usize) -> [Array1<f64>; 3] {
 
 fn estimate(inp: &Inputs, plan: &Plan) -> EconResult<Estimate> {
     check_arms(&inp.a)?;
-    identification(inp, plan)?;
+    let mediator = identification(inp, plan)?;
     let x = working_design(inp, plan)?;
     let working = fit_working(&x, &inp.y, plan)?;
     let beta_z = zero_nan(&working.coef);
@@ -1450,10 +1498,12 @@ fn estimate(inp: &Inputs, plan: &Plan) -> EconResult<Estimate> {
     let theta_z = zero_nan(&ne_coef);
     let k = contrasts(plan, theta_z.len());
     let link = [k[0].dot(&theta_z), k[1].dot(&theta_z), k[2].dot(&theta_z)];
+    notes.extend(mediator.notes.iter().cloned());
     Ok(Estimate {
         link,
         notes,
         working,
+        mediator,
         x,
         xcf,
         eta_cf,
@@ -1471,7 +1521,11 @@ fn estimate(inp: &Inputs, plan: &Plan) -> EconResult<Estimate> {
 /// Used by the bootstrap replicates.
 fn closed_form(inp: &Inputs, plan: &Plan) -> EconResult<([f64; 3], Vec<String>)> {
     check_arms(&inp.a)?;
-    let (alpha, med_notes) = identification(inp, plan)?;
+    let MediatorFit {
+        alpha,
+        notes: med_notes,
+        ..
+    } = identification(inp, plan)?;
     let x = working_design(inp, plan)?;
     let working = fit_working(&x, &inp.y, plan)?;
     let b = zero_nan(&working.coef);
@@ -1574,41 +1628,6 @@ fn robust_se(inp: &Inputs, est: &Estimate, plan: &Plan) -> EconResult<[f64; 3]> 
 }
 
 /// The reported mediator model `M ~ A + C` (least squares, R's column order; descriptive).
-struct MediatorReport {
-    coef_a: f64,
-    se_a: f64,
-    r2: f64,
-    notes: Vec<String>,
-}
-
-fn mediator_report(inp: &Inputs, plan: &Plan) -> EconResult<MediatorReport> {
-    let (n, p) = inp.c.dim();
-    let mut x = resource::try_zeros2(n, p + 2, "natural effect models: mediator design")?;
-    for i in 0..n {
-        let mut row = x.row_mut(i);
-        row[0] = 1.0;
-        row[1] = inp.a[i];
-        for j in 0..p {
-            row[2 + j] = inp.c[[i, j]];
-        }
-    }
-    let fit = solve_ols(x.view(), inp.m.view())?;
-    let rss: f64 = fit.residuals.iter().map(|e| e * e).sum();
-    let df = n.saturating_sub(fit.rank);
-    let sigma2 = if df > 0 { rss / df as f64 } else { f64::NAN };
-    let mean = inp.m.sum() / n as f64;
-    let tss: f64 = inp.m.iter().map(|v| (v - mean).powi(2)).sum();
-    Ok(MediatorReport {
-        coef_a: fit.beta[1],
-        se_a: (fit.unscaled[[1, 1]] * sigma2).sqrt(),
-        r2: if tss > 0.0 { 1.0 - rss / tss } else { 0.0 },
-        notes: aliasing_message(&fit.aliased, &plan.med_names)
-            .map(|m| format!("Mediator model: {m}"))
-            .into_iter()
-            .collect(),
-    })
-}
-
 // ============================================================================
 // Bootstrap
 // ============================================================================
@@ -1875,13 +1894,14 @@ pub fn run_medflex_dataset(
         mediator: mediator.to_string(),
         confounders: confounders.iter().map(|s| s.to_string()).collect(),
     };
-    let mut result = run_medflex_with_names(
+    let mut result = run_medflex_rows(
         &ArrayView1::from(cols.numeric(outcome)),
         &ArrayView1::from(cols.numeric(treatment)),
         &ArrayView1::from(cols.numeric(mediator)),
         &c.view(),
         &names,
         config,
+        Some(cols.rows()),
     )?;
     result.missing = cols.missing().clone();
     Ok(result)
@@ -2673,7 +2693,7 @@ mod tests {
             mediator: m.into(),
             confounders: conf.iter().map(|s| s.to_string()).collect(),
         };
-        validate_and_plan(inp, &names, c).unwrap()
+        validate_and_plan(inp, &names, c, None).unwrap()
     }
 
     /// The case's 32-bit LCG: s <- (69069 s + 1) mod 2^32, row = floor(s n / 2^32).
@@ -3167,6 +3187,61 @@ mod tests {
             .unwrap_err(),
             "outcome has a non-finite value at row 7",
         );
+    }
+
+    #[test]
+    fn test_medflex_dataset_errors_name_the_original_row() {
+        // complete-case index 3 is the dataset's row 5 once rows 1 and 2 are dropped
+        let (y, t, m, _) = create_test_data();
+        let n = y.len();
+        let c0: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 * 0.3 - 1.4).collect();
+        let mut yv: Vec<Option<f64>> = y.iter().map(|&v| Some(v)).collect();
+        yv[1] = None;
+        let mut mv: Vec<Option<f64>> = m.iter().map(|&v| Some(v)).collect();
+        mv[2] = None;
+        let mut tv = t.to_vec();
+        tv[5] = 2.0;
+        let df = DataFrame::new(vec![
+            Column::new("y".into(), yv),
+            Column::new("t".into(), tv),
+            Column::new("m".into(), mv),
+            Column::new("c0".into(), c0),
+        ])
+        .unwrap();
+        assert_eq!(df.height(), n);
+        let err = run_medflex_dataset(
+            &Dataset::new(df),
+            "y",
+            "t",
+            "m",
+            &["c0"],
+            cfg(EffectScale::Difference, None, false),
+        )
+        .unwrap_err();
+        expect_invalid_spec(err, "row 5 has treatment 2");
+    }
+
+    #[test]
+    fn test_medflex_replicate_notes_do_not_depend_on_the_scale() {
+        // the mediator model's aliasing note is a replicate warning on every scale
+        let ds = medflex_sim();
+        let conf = ["c1", "c2", "c1dup"];
+        let note = "Mediator model: Coefficients not defined because of singularities: c1dup";
+        for (y, scale) in [
+            ("yc", EffectScale::Difference),
+            ("yp", EffectScale::Ratio),
+            ("yb", EffectScale::OddsRatio),
+        ] {
+            let inp = case_inputs(&ds, y, "m", &conf);
+            let c = cfg(scale, None, false);
+            let plan = case_plan(&inp, y, "m", &conf, &c);
+            let (_, notes) = replicate_link(&inp, &plan).unwrap();
+            assert_eq!(
+                notes.last().map(String::as_str),
+                Some(note),
+                "{scale}: {notes:?}"
+            );
+        }
     }
 
     #[test]
