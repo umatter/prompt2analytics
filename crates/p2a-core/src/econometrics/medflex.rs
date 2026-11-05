@@ -476,6 +476,24 @@ pub fn run_medflex(
         });
     }
 
+    let p = confounders.ncols();
+    let k_out = 3 + p + usize::from(config.allow_interaction);
+    if n <= k_out {
+        return Err(EconError::InsufficientData {
+            required: k_out + 1,
+            provided: n,
+            context: format!(
+                "natural effect models: the outcome working model has {k_out} coefficients ({p} confounders{}); \
+                 it needs more observations than coefficients",
+                if config.allow_interaction {
+                    ", A:M"
+                } else {
+                    ""
+                }
+            ),
+        });
+    }
+
     // Compute mediator means by treatment group
     let mut sum_m_treated = 0.0;
     let mut sum_m_control = 0.0;
@@ -639,7 +657,14 @@ fn fit_mediator_model(
     let m_hat = x.dot(&alpha);
     let residuals: Array1<f64> = &m - &m_hat;
     let ssr: f64 = residuals.iter().map(|&e| e * e).sum();
-    let df_resid = n - k;
+    let df_resid =
+        n.checked_sub(k)
+            .filter(|&d| d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: k + 1,
+                provided: n,
+                context: "natural effect models: no residual degrees of freedom".to_string(),
+            })?;
     let sigma2 = ssr / (df_resid as f64);
 
     // Standard errors
@@ -710,7 +735,14 @@ fn fit_outcome_model(
     let y_hat = x.dot(&beta);
     let residuals: Array1<f64> = &y_arr - &y_hat;
     let ssr: f64 = residuals.iter().map(|&e| e * e).sum();
-    let df_resid = n - k;
+    let df_resid =
+        n.checked_sub(k)
+            .filter(|&d| d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: k + 1,
+                provided: n,
+                context: "natural effect models: no residual degrees of freedom".to_string(),
+            })?;
     let sigma2 = ssr / (df_resid as f64);
 
     // Standard errors
@@ -1439,6 +1471,62 @@ mod tests {
         } else {
             panic!("Expected InsufficientData error");
         }
+    }
+
+    /// The first `n` rows of the case (y = yc, a, m) and nine confounders: c1, c2 and seven LCG columns.
+    /// Rows 0..14 hold exactly 3 treated units.
+    fn small_design(n: usize) -> (Array1<f64>, Array1<f64>, Array1<f64>, Array2<f64>) {
+        let (_case, ds) = crate::test_support::load_case("medflex_scales");
+        let cols = ColumnRequest::new(ds.df())
+            .numerics(&["yc", "a", "m", "c1", "c2"])
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        let take = |name: &str| cols.numeric_array(name).slice(ndarray::s![..n]).to_owned();
+        let (c1, c2) = (take("c1"), take("c2"));
+        let mut s: u64 = 12345;
+        let mut u = || {
+            s = (69069 * s + 1) % (1u64 << 32);
+            s as f64 / 4294967296.0 - 0.5
+        };
+        let mut c = Array2::zeros((n, 9));
+        for i in 0..n {
+            c[[i, 0]] = c1[i];
+            c[[i, 1]] = c2[i];
+            for j in 2..9 {
+                c[[i, j]] = u();
+            }
+        }
+        (take("yc"), take("a"), take("m"), c)
+    }
+
+    #[test]
+    fn test_medflex_rejects_n_le_k() {
+        let run = |n: usize, interaction: bool| {
+            let (y, a, m, c) = small_design(n);
+            let mut cfg = MedflexConfig::default();
+            cfg.allow_interaction = interaction;
+            cfg.bootstrap_ci = false;
+            run_medflex(&y.view(), &a.view(), &m.view(), &c.view(), cfg)
+        };
+        // k = 4 + 9 with A:M, 3 + 9 without; n must exceed k
+        for (n, inter, required) in [(12, true, 14), (13, true, 14), (12, false, 13)] {
+            match run(n, inter) {
+                Err(EconError::InsufficientData {
+                    required: r,
+                    provided,
+                    context,
+                }) => {
+                    assert_eq!((r, provided), (required, n));
+                    assert!(
+                        context.contains("more observations than coefficients"),
+                        "{context}"
+                    );
+                }
+                other => panic!("n = {n}, A:M = {inter}: expected InsufficientData, got {other:?}"),
+            }
+        }
+        assert!(run(14, true).is_ok());
     }
 
     #[test]
