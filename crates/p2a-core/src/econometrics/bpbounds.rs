@@ -27,38 +27,34 @@
 //!
 //! ## Bounds Without Monotonicity
 //!
-//! The Balke-Pearl bounds use linear programming to derive the tightest possible
-//! bounds compatible with the observed data:
+//! The Balke-Pearl bounds are the optimum of the linear program over the 16 response
+//! types; in closed form (Balke & Pearl 1997; Pearl 2009, eq. 8.14-8.15), with
+//! `p_{dy|z}` written `pdy|z`:
 //!
 //! ```text
-//! ACE_lower = max(
-//!     p00|1 - p00|0 - p01|0 - p10|0,
-//!     p00|0 - p00|1 - p01|1 - p10|1,
-//!     p11|1 - p11|0 - p01|0 - p10|0,
-//!     p11|0 - p11|1 - p01|1 - p10|1,
-//!     -1
-//! )
-//!
-//! ACE_upper = min(
-//!     p11|1 - p11|0 + p01|0 + p10|0,
-//!     p11|0 - p11|1 + p01|1 + p10|1,
-//!     p00|0 - p00|1 + p01|1 + p10|1,
-//!     p00|1 - p00|0 + p01|0 + p10|0,
-//!     1
-//! )
+//! ACE_lower = max(p11|1 + p00|0 - 1, p11|0 + p00|1 - 1,
+//!                 p11|0 - p11|1 - p01|1 - p10|0 - p01|0, p11|1 - p11|0 - p01|0 - p10|1 - p01|1,
+//!                 -p10|1 - p01|1, -p10|0 - p01|0,
+//!                 p00|1 - p10|1 - p01|1 - p10|0 - p00|0, p00|0 - p10|0 - p01|0 - p10|1 - p00|1)
+//! ACE_upper = min(1 - p10|1 - p01|0, 1 - p10|0 - p01|1,
+//!                 -p10|0 + p10|1 + p00|1 + p11|0 + p00|0, -p10|1 + p11|1 + p00|1 + p10|0 + p00|0,
+//!                 p11|1 + p00|1, p11|0 + p00|0,
+//!                 -p01|1 + p11|1 + p00|1 + p11|0 + p01|0, -p01|0 + p11|0 + p00|0 + p11|1 + p01|1)
 //! ```
 //!
 //! ## Bounds With Monotonicity
 //!
-//! When monotonicity holds (P(D=1|Z=1,U=u) >= P(D=1|Z=0,U=u) for all u),
-//! the bounds tighten to:
+//! When monotonicity holds (no defiers), the bounds are
 //!
 //! ```text
-//! ACE_lower = p00|0 - p00|1 - p01|1 - p10|1
-//! ACE_upper = p00|0 + p01|0 + p11|0 - p01|1
+//! ACE_lower = p11|1 + p00|0 - 1
+//! ACE_upper = 1 - p10|1 - p01|0
 //! ```
 //!
 //! These correspond to the bounds derived by Robins (1989) and Manski (1990).
+//!
+//! The Wald SE is the delta method with the within-arm covariance of P(Y=1|Z=z) and
+//! P(D=1|Z=z) (equal to 2SLS with HC0 on the expanded data).
 //!
 //! # References
 //!
@@ -81,7 +77,9 @@
 //!   Nonparametric bounds for the causal effect in a binary instrumental-variable
 //!   model. *Stata Journal*, 11(3), 345-367.
 //!
-//! R equivalent: `bpbounds::bpbounds()`
+//! R equivalent: `bpbounds::bpbounds()` (not installed on the reference machine; validated
+//! against a hand-computed table checked with the response-type LP,
+//! `validation/econometrics/bpbounds.md`)
 
 use ndarray::{Array1, ArrayView1};
 use rand::prelude::*;
@@ -598,63 +596,54 @@ pub fn run_bp_bounds(
 /// # Formula
 ///
 /// ```text
-/// ACE_lower = max(
-///     p00|1 - p00|0 - p01|0 - p10|0,
-///     p00|0 - p00|1 - p01|1 - p10|1,
-///     p11|1 - p11|0 - p01|0 - p10|0,
-///     p11|0 - p11|1 - p01|1 - p10|1,
-///     -1
-/// )
-///
-/// ACE_upper = min(
-///     p11|1 - p11|0 + p01|0 + p10|0,
-///     p11|0 - p11|1 + p01|1 + p10|1,
-///     p00|0 - p00|1 + p01|1 + p10|1,
-///     p00|1 - p00|0 + p01|0 + p10|0,
-///     1
-/// )
+/// ACE_lower = max(p11|1 + p00|0 - 1, p11|0 + p00|1 - 1,
+///                 p11|0 - p11|1 - p01|1 - p10|0 - p01|0, p11|1 - p11|0 - p01|0 - p10|1 - p01|1,
+///                 -p10|1 - p01|1, -p10|0 - p01|0,
+///                 p00|1 - p10|1 - p01|1 - p10|0 - p00|0, p00|0 - p10|0 - p01|0 - p10|1 - p00|1)
+/// ACE_upper = min(1 - p10|1 - p01|0, 1 - p10|0 - p01|1,
+///                 -p10|0 + p10|1 + p00|1 + p11|0 + p00|0, -p10|1 + p11|1 + p00|1 + p10|0 + p00|0,
+///                 p11|1 + p00|1, p11|0 + p00|0,
+///                 -p01|1 + p11|1 + p00|1 + p11|0 + p01|0, -p01|0 + p11|0 + p00|0 + p11|1 + p01|1)
 /// ```
+///
+/// (Balke & Pearl 1997; Pearl 2009, eq. 8.14-8.15), equal to the response-type LP.
 fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
-    // Extract probabilities for clarity
-    let p00_z0 = probs.p00_z0;
-    let p01_z0 = probs.p01_z0;
-    let p10_z0 = probs.p10_z0;
-    let p11_z0 = probs.p11_z0;
-    let p00_z1 = probs.p00_z1;
-    let p01_z1 = probs.p01_z1;
-    let p10_z1 = probs.p10_z1;
-    let p11_z1 = probs.p11_z1;
-
-    // Lower bound: max of 5 terms
-    // These come from linear programming constraints on response types
-    let lower_candidates = [
-        p00_z1 - p00_z0 - p01_z0 - p10_z0, // From LP constraint 1
-        p00_z0 - p00_z1 - p01_z1 - p10_z1, // From LP constraint 2
-        p11_z1 - p11_z0 - p01_z0 - p10_z0, // From LP constraint 3
-        p11_z0 - p11_z1 - p01_z1 - p10_z1, // From LP constraint 4
-        -1.0,                              // Trivial bound
+    let CellProbabilities {
+        p00_z0,
+        p01_z0,
+        p10_z0,
+        p11_z0,
+        p00_z1,
+        p01_z1,
+        p10_z1,
+        p11_z1,
+        ..
+    } = *probs;
+    let lower_terms = [
+        p11_z1 + p00_z0 - 1.0,
+        p11_z0 + p00_z1 - 1.0,
+        p11_z0 - p11_z1 - p01_z1 - p10_z0 - p01_z0,
+        p11_z1 - p11_z0 - p01_z0 - p10_z1 - p01_z1,
+        -p10_z1 - p01_z1,
+        -p10_z0 - p01_z0,
+        p00_z1 - p10_z1 - p01_z1 - p10_z0 - p00_z0,
+        p00_z0 - p10_z0 - p01_z0 - p10_z1 - p00_z1,
     ];
-
-    // Upper bound: min of 5 terms
-    let upper_candidates = [
-        p11_z1 - p11_z0 + p01_z0 + p10_z0, // From LP constraint 1
-        p11_z0 - p11_z1 + p01_z1 + p10_z1, // From LP constraint 2
-        p00_z0 - p00_z1 + p01_z1 + p10_z1, // From LP constraint 3
-        p00_z1 - p00_z0 + p01_z0 + p10_z0, // From LP constraint 4
-        1.0,                               // Trivial bound
+    let upper_terms = [
+        1.0 - p10_z1 - p01_z0,
+        1.0 - p10_z0 - p01_z1,
+        -p10_z0 + p10_z1 + p00_z1 + p11_z0 + p00_z0,
+        -p10_z1 + p11_z1 + p00_z1 + p10_z0 + p00_z0,
+        p11_z1 + p00_z1,
+        p11_z0 + p00_z0,
+        -p01_z1 + p11_z1 + p00_z1 + p11_z0 + p01_z0,
+        -p01_z0 + p11_z0 + p00_z0 + p11_z1 + p01_z1,
     ];
-
-    let lower = lower_candidates
+    let lower = lower_terms
         .iter()
-        .cloned()
+        .copied()
         .fold(f64::NEG_INFINITY, f64::max);
-    let upper = upper_candidates
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-
-    // Ensure bounds are valid (lower <= upper)
-    // This should always hold for valid probability distributions
+    let upper = upper_terms.iter().copied().fold(f64::INFINITY, f64::min);
     (lower.max(-1.0), upper.min(1.0))
 }
 
@@ -664,7 +653,7 @@ fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) 
 ///
 /// ```text
 /// ACE_lower = p00|0 - p00|1 - p01|1 - p10|1
-/// ACE_upper = p00|0 + p01|0 + p11|0 - p01|1
+/// ACE_upper = p00|1 + p01|1 + p11|1 - p01|0 = 1 - p10|1 - p01|0
 /// ```
 ///
 /// # Reference
@@ -674,16 +663,16 @@ fn compute_bounds_with_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
     let p00_z0 = probs.p00_z0;
     let p01_z0 = probs.p01_z0;
     let _p10_z0 = probs.p10_z0;
-    let p11_z0 = probs.p11_z0;
+    let _p11_z0 = probs.p11_z0;
     let p00_z1 = probs.p00_z1;
     let p01_z1 = probs.p01_z1;
     let p10_z1 = probs.p10_z1;
-    let _p11_z1 = probs.p11_z1;
+    let p11_z1 = probs.p11_z1;
 
     // Under monotonicity, bounds simplify
     // These are the Manski-Robins bounds
-    let lower = p00_z0 - p00_z1 - p01_z1 - p10_z1;
-    let upper = p00_z0 + p01_z0 + p11_z0 - p01_z1;
+    let lower = p00_z0 - p00_z1 - p01_z1 - p10_z1; // = p11|1 + p00|0 - 1
+    let upper = p00_z1 + p01_z1 + p11_z1 - p01_z0; // = 1 - p10|1 - p01|0
 
     // Alternative formulation (equivalent):
     // lower = P(Y=1|Z=0) - P(Y=1|Z=1) - P(D=0|Z=1)
@@ -716,9 +705,8 @@ fn compute_wald_estimate(
         f64::NAN
     };
 
-    // Standard error using delta method
-    // SE(Wald) = sqrt[ Var(num) / denom^2 + num^2 * Var(denom) / denom^4 ]
-    //          ≈ SE(ITT_Y) / |ITT_D|  (simplified)
+    // Standard error by the delta method:
+    // Var = Var(num) / den^2 + num^2 Var(den) / den^4 - 2 num Cov(num, den) / den^3
 
     let n_z0 = probs.n_z0 as f64;
     let n_z1 = probs.n_z1 as f64;
@@ -735,7 +723,12 @@ fn compute_wald_estimate(
     let se = if denominator.abs() > 1e-10 {
         let denom2 = denominator * denominator;
         let denom4 = denom2 * denom2;
-        (var_numerator / denom2 + numerator * numerator * var_denominator / denom4).sqrt()
+        // within-arm covariance of P(Y=1|Z=z) and P(D=1|Z=z): (p11|z - p_y p_d) / n_z
+        let cov = (probs.p11_z0 - marginals.p_y1_z0 * marginals.p_d1_z0) / n_z0
+            + (probs.p11_z1 - marginals.p_y1_z1 * marginals.p_d1_z1) / n_z1;
+        let var = var_numerator / denom2 + numerator * numerator * var_denominator / denom4
+            - 2.0 * numerator * cov / (denom2 * denominator);
+        var.max(0.0).sqrt()
     } else {
         f64::NAN
     };
@@ -1231,8 +1224,22 @@ mod tests {
             close(mono.wald_estimate, wald, label);
             close(mono.ace_lower, mono_lower, label);
             assert!(mono.monotonicity_satisfied, "{label}");
-            // deviation ECON-11 (no-monotonicity bounds), ECON-56 (monotone upper bound),
-            // ECON-57 (Wald SE): pinned in the next commit.
+            let (lower, upper, mono_upper, wald_se) = match label {
+                "vitamin A" => (
+                    -0.1946228482113902,
+                    0.0053936889144572397,
+                    0.0053936889144572397,
+                    0.0011591629284325984,
+                ),
+                _ => (-0.2, 0.5, 0.5, 0.36830442319927159),
+            };
+            let free = bp_bounds_from_probs(probs(counts), false);
+            close(free.ace_lower, lower, label);
+            close(free.ace_upper, upper, label);
+            close(mono.ace_upper, mono_upper, label);
+            close(mono.wald_se.unwrap(), wald_se, label);
+            // never inverted on data the IV model can generate
+            assert!(free.bounds_width >= 0.0, "{label}");
         }
     }
 
