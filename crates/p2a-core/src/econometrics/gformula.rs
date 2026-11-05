@@ -64,7 +64,11 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
 use crate::regression::ols::solve_ols;
 use crate::resource::{self, Budget};
-use crate::traits::estimator::{SignificanceLevel, normal_cdf};
+use crate::stats::robust::percentile_interval;
+use crate::traits::convergence::{ResultNotes, notes_text};
+use crate::traits::estimator::{
+    SignificanceLevel, normal_p_value_two_sided, validate_level, z_critical,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -826,18 +830,84 @@ pub struct GFormulaResult {
     /// The fitted outcome model (end of follow-up) or pooled logistic hazard.
     #[serde(default)]
     pub outcome_model: Option<GFormulaModelSummary>,
+    /// Survival data: the number of subjects with an event.
+    #[serde(default)]
+    pub n_events: Option<usize>,
+}
+
+impl GFormulaResult {
+    /// A bootstrap quantity for Display: "not computed" without a bootstrap, "NA" when
+    /// it could not be computed, the value otherwise.
+    fn fmt_inference(&self, v: f64) -> String {
+        if v.is_finite() {
+            format!("{v:.4}")
+        } else if v.is_nan() && self.n_bootstrap == 0 {
+            "not computed (n_bootstrap = 0)".to_string()
+        } else if v.is_nan() {
+            "NA".to_string()
+        } else {
+            format!("{v}")
+        }
+    }
+
+    fn fmt_interval(&self, lo: f64, hi: f64) -> String {
+        if lo.is_nan() && hi.is_nan() {
+            self.fmt_inference(f64::NAN)
+        } else {
+            format!("[{}, {}]", self.fmt_inference(lo), self.fmt_inference(hi))
+        }
+    }
+}
+
+impl ResultNotes for GFormulaResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for GFormulaResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let survival = self.outcome_type == GFormulaOutcomeType::Survival;
         writeln!(f, "Parametric G-Formula Results")?;
         writeln!(f, "============================")?;
         writeln!(f)?;
         writeln!(f, "Intervention: {}", self.intervention_description)?;
         writeln!(f, "Outcome Type: {}", self.outcome_type)?;
+        if let Some(m) = &self.outcome_model {
+            let unit = if survival {
+                "person-periods"
+            } else {
+                "subjects"
+            };
+            writeln!(f, "Outcome model: {} on {} {unit}", m.kind, m.n_obs)?;
+        }
+        if self.point_treatment {
+            writeln!(
+                f,
+                "Treatment: point treatment (constant within subjects; modelled in period 1)"
+            )?;
+        }
+        let intervention = match self.standardization {
+            GFormulaStandardization::Empirical => {
+                format!("exact over the {} observed baseline rows", self.n_subjects)
+            }
+            GFormulaStandardization::MonteCarlo => format!(
+                "by Monte Carlo ({} simulated subjects, common random numbers)",
+                self.n_simulations
+            ),
+        };
+        writeln!(
+            f,
+            "Standardisation: natural course by Monte Carlo ({} simulated subjects); \
+             intervention {intervention}",
+            self.n_simulations
+        )?;
         writeln!(f)?;
         writeln!(f, "Sample:")?;
         writeln!(f, "  Subjects:      {}", self.n_subjects)?;
+        if let Some(k) = self.n_events {
+            writeln!(f, "  Events:        {k}")?;
+        }
         writeln!(f, "  Time Points:   {}", self.n_time_points)?;
         writeln!(f, "  Simulations:   {}", self.n_simulations)?;
         writeln!(f, "  Bootstrap:     {}", self.n_bootstrap)?;
@@ -845,34 +915,59 @@ impl fmt::Display for GFormulaResult {
         writeln!(f, "Risks:")?;
         writeln!(f, "  Natural Course:  {:.4}", self.risk_natural)?;
         writeln!(f, "  Intervention:    {:.4}", self.risk_intervention)?;
+        writeln!(
+            f,
+            "  Observed:        {:.4} ({})",
+            self.observed_risk,
+            if survival {
+                "Kaplan-Meier"
+            } else {
+                "mean outcome"
+            }
+        )?;
+        if survival && !self.risk_curve_intervention.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Cumulative risk by period:")?;
+            writeln!(f, "  Period  Natural  Intervention  Observed")?;
+            for t in 0..self.risk_curve_intervention.len() {
+                let get = |v: &[f64]| v.get(t).copied().unwrap_or(f64::NAN);
+                writeln!(
+                    f,
+                    "  {:>6}  {:>7.4}  {:>12.4}  {:>8.4}",
+                    t + 1,
+                    get(&self.risk_curve_natural),
+                    get(&self.risk_curve_intervention),
+                    get(&self.observed_risk_curve)
+                )?;
+            }
+        }
         writeln!(f)?;
         writeln!(f, "Causal Effects:")?;
         writeln!(
             f,
-            "  Risk Difference: {:.4} (SE: {:.4})",
-            self.risk_difference, self.se_risk_difference
+            "  Risk Difference: {:.4} (SE: {})",
+            self.risk_difference,
+            self.fmt_inference(self.se_risk_difference)
         )?;
         writeln!(
             f,
-            "    {:.0}% CI: [{:.4}, {:.4}]",
+            "    {:.0}% CI: {}",
             self.confidence_level * 100.0,
-            self.ci_lower_rd,
-            self.ci_upper_rd
+            self.fmt_interval(self.ci_lower_rd, self.ci_upper_rd)
         )?;
         writeln!(
             f,
-            "    p-value: {:.4}{}",
-            self.p_value_rd,
+            "    p-value: {}{}",
+            self.fmt_inference(self.p_value_rd),
             self.significance_rd.stars()
         )?;
         writeln!(f)?;
         writeln!(f, "  Risk Ratio:      {:.4}", self.risk_ratio)?;
         writeln!(
             f,
-            "    {:.0}% CI: [{:.4}, {:.4}]",
+            "    {:.0}% CI: {}",
             self.confidence_level * 100.0,
-            self.ci_lower_rr,
-            self.ci_upper_rr
+            self.fmt_interval(self.ci_lower_rr, self.ci_upper_rr)
         )?;
 
         if self.odds_ratio.is_finite() && self.odds_ratio > 0.0 {
@@ -880,23 +975,21 @@ impl fmt::Display for GFormulaResult {
             writeln!(f, "  Odds Ratio:      {:.4}", self.odds_ratio)?;
         }
 
-        if !self.all_models_converged {
+        if let Some(m) = &self.outcome_model {
             writeln!(f)?;
-            writeln!(f, "Warning: Some models did not converge")?;
-        }
-
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
+            writeln!(f, "Outcome model coefficients:")?;
+            for ((name, c), se) in m.names.iter().zip(&m.coefficients).zip(&m.std_errors) {
+                if c.is_nan() {
+                    writeln!(f, "  {name:<14} {:>12}", "NA")?;
+                } else {
+                    writeln!(f, "  {name:<14} {c:>12.6}  (SE {se:.6})")?;
+                }
             }
         }
 
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -1051,54 +1144,26 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     // Bootstrap for Standard Errors
     // ═══════════════════════════════════════════════════════════════════════
 
-    let bootstrap_results = bootstrap_gformula(data, &config, config.n_bootstrap, seed)?;
+    let (bootstrap_results, dropped) = bootstrap_gformula(data, &config, config.n_bootstrap, seed)?;
+    if dropped > 0 {
+        warnings.push(format!(
+            "{dropped} of {} bootstrap replicates failed and were dropped",
+            config.n_bootstrap
+        ));
+    }
+    let bootstrap_rd: Vec<f64> = bootstrap_results.iter().map(|(rd, _, _)| *rd).collect();
+    let rd_inf = rd_inference(risk_difference, &bootstrap_rd, config.confidence_level)?;
 
-    let (se_rd, ci_lower_rd, ci_upper_rd) =
-        compute_bootstrap_ci(&bootstrap_results, config.confidence_level);
-
-    // SE for log(RR)
+    // SE of log(RR) over the replicates with a finite log ratio
     let bootstrap_log_rr: Vec<f64> = bootstrap_results
         .iter()
-        .map(|(_, int, nat)| {
-            if *nat > 0.0 && *int > 0.0 {
-                (int / nat).ln()
-            } else {
-                f64::NAN
-            }
-        })
+        .filter(|(_, int, nat)| *nat > 0.0 && *int > 0.0)
+        .map(|(_, int, nat)| (int / nat).ln())
         .filter(|x| x.is_finite())
         .collect();
-
-    let se_log_rr = if bootstrap_log_rr.len() > 1 {
-        let mean: f64 = bootstrap_log_rr.iter().sum::<f64>() / bootstrap_log_rr.len() as f64;
-        let var: f64 = bootstrap_log_rr
-            .iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>()
-            / (bootstrap_log_rr.len() - 1) as f64;
-        var.sqrt()
-    } else {
-        f64::NAN
-    };
-
-    // CI for RR (on log scale, then exponentiate)
-    let z_crit = compute_z_critical(config.confidence_level);
-    let log_rr = if risk_ratio > 0.0 {
-        risk_ratio.ln()
-    } else {
-        f64::NAN
-    };
-    let ci_lower_rr = (log_rr - z_crit * se_log_rr).exp();
-    let ci_upper_rr = (log_rr + z_crit * se_log_rr).exp();
-
-    // P-value for RD (two-sided, normal approximation)
-    let z_stat = if se_rd > 0.0 && se_rd.is_finite() {
-        risk_difference / se_rd
-    } else {
-        0.0
-    };
-    let p_value_rd = 2.0 * (1.0 - normal_cdf(z_stat.abs()));
-    let significance_rd = SignificanceLevel::from_p_value(p_value_rd);
+    let se_log_rr = sample_sd(&bootstrap_log_rr);
+    let (ci_lower_rr, ci_upper_rr) = rr_interval(risk_ratio, se_log_rr, config.confidence_level)?;
+    let significance_rd = SignificanceLevel::from_p_value(rd_inf.p_value);
 
     let intervention_description = describe(&config.intervention, data);
     let (observed_risk, observed_risk_curve) = observed_risk(data);
@@ -1109,13 +1174,13 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
         risk_difference,
         risk_ratio,
         odds_ratio,
-        se_risk_difference: se_rd,
+        se_risk_difference: rd_inf.se,
         se_log_risk_ratio: se_log_rr,
-        ci_lower_rd,
-        ci_upper_rd,
+        ci_lower_rd: rd_inf.ci_lower,
+        ci_upper_rd: rd_inf.ci_upper,
         ci_lower_rr,
         ci_upper_rr,
-        p_value_rd,
+        p_value_rd: rd_inf.p_value,
         significance_rd,
         n_simulations: config.n_simulations,
         n_bootstrap: config.n_bootstrap,
@@ -1128,7 +1193,7 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
         warnings,
         simulated_natural: est.natural.per_unit,
         simulated_intervention: est.intervention.per_unit,
-        bootstrap_rd: bootstrap_results.iter().map(|(rd, _, _)| *rd).collect(),
+        bootstrap_rd,
         risk_curve_natural: est.natural.curve,
         risk_curve_intervention: est.intervention.curve,
         observed_risk,
@@ -1140,6 +1205,7 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
                 .outcome
                 .summary(outcome_kind(config.outcome_type)),
         ),
+        n_events: data.survival.as_ref().map(SurvivalOutcome::n_events),
     })
 }
 
@@ -1259,6 +1325,7 @@ fn validate_inputs(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<(
             message: format!("tolerance must be finite and > 0; got {}", config.tolerance),
         });
     }
+    validate_level(config.confidence_level, "confidence_level")?;
     if data.n_time_points() == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Data must have at least one time point".to_string(),
@@ -1922,19 +1989,22 @@ fn with_optional_budget<R>(budget: &Option<Budget>, f: impl FnOnce() -> R) -> R 
 /// `boot_seed = seed + 1000 b` (wrapping): subjects are resampled from stream 0 of that
 /// seed and simulated from stream 1 ([`sim_rng`]) with `n_simulations / 2` (at least 100)
 /// units, so results do not depend on the chunking or the thread count. A failed replicate
-/// is dropped; a cancellation or resource-limit error stops the bootstrap.
+/// or one with a non-finite risk difference is dropped and counted; a cancellation or
+/// resource-limit error stops the bootstrap. Returns the kept replicates in replicate order
+/// and the number dropped.
 fn bootstrap_gformula(
     data: &GFormulaData,
     config: &GFormulaConfig,
     n_bootstrap: usize,
     seed: u64,
-) -> EconResult<Vec<(f64, f64, f64)>> {
+) -> EconResult<(Vec<(f64, f64, f64)>, usize)> {
     let n = data.n_subjects();
 
     let mut successful_results =
         resource::try_with_capacity::<(f64, f64, f64)>(n_bootstrap, "bootstrap replications")?;
     let budget = resource::current_budget();
     let n_sim = (config.n_simulations / 2).max(100);
+    let mut dropped = 0usize;
 
     let replicate = |b: usize| -> EconResult<(f64, f64, f64)> {
         let boot_seed = seed.wrapping_add((b as u64).wrapping_mul(1000));
@@ -1959,9 +2029,9 @@ fn bootstrap_gformula(
         // Collect successful results in replicate order
         for res in results {
             match res {
-                Ok(r) => successful_results.push(r),
+                Ok(r) if r.0.is_finite() => successful_results.push(r),
                 Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
-                Err(_) => {}
+                Ok(_) | Err(_) => dropped += 1,
             }
         }
     }
@@ -1975,7 +2045,7 @@ fn bootstrap_gformula(
         });
     }
 
-    Ok(successful_results)
+    Ok((successful_results, dropped))
 }
 
 /// Resample data by indices. The source data are valid, so the copy is assembled directly
@@ -2013,63 +2083,59 @@ fn resample_data(data: &GFormulaData, indices: &[usize]) -> EconResult<GFormulaD
     })
 }
 
-/// Compute bootstrap confidence interval using percentile method.
-fn compute_bootstrap_ci(
-    bootstrap_results: &[(f64, f64, f64)],
-    confidence_level: f64,
-) -> (f64, f64, f64) {
-    if bootstrap_results.is_empty() {
-        return (f64::NAN, f64::NAN, f64::NAN);
+/// Sample SD (`n - 1`); `NaN` with fewer than 2 values.
+fn sample_sd(v: &[f64]) -> f64 {
+    if v.len() < 2 {
+        return f64::NAN;
     }
-
-    let mut rd_values: Vec<f64> = bootstrap_results.iter().map(|(rd, _, _)| *rd).collect();
-    rd_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let n = rd_values.len();
-    let alpha = 1.0 - confidence_level;
-
-    let lower_idx = ((alpha / 2.0) * n as f64).floor() as usize;
-    let upper_idx = ((1.0 - alpha / 2.0) * n as f64).ceil() as usize;
-
-    let ci_lower = rd_values.get(lower_idx).copied().unwrap_or(rd_values[0]);
-    let ci_upper_idx = upper_idx.min(n - 1);
-    let ci_upper = rd_values
-        .get(ci_upper_idx)
-        .copied()
-        .unwrap_or(rd_values[n - 1]);
-
-    // Standard error from bootstrap SD
-    let mean: f64 = rd_values.iter().sum::<f64>() / n as f64;
-    let denominator = (n - 1).max(1) as f64;
-    let var: f64 = rd_values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / denominator;
-    let se = var.sqrt();
-
-    (se, ci_lower, ci_upper)
+    let mean = v.iter().sum::<f64>() / v.len() as f64;
+    (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
 }
 
-/// Compute z critical value for given confidence level.
-fn compute_z_critical(confidence_level: f64) -> f64 {
-    // Common values
-    if (confidence_level - 0.95).abs() < 1e-10 {
-        1.96
-    } else if (confidence_level - 0.99).abs() < 1e-10 {
-        2.576
-    } else if (confidence_level - 0.90).abs() < 1e-10 {
-        1.645
-    } else {
-        // General case using approximation
-        let alpha = 1.0 - confidence_level;
-        // Rational approximation to inverse normal
-        let p = 1.0 - alpha / 2.0;
-        let t = (-2.0 * (1.0 - p).ln()).sqrt();
-        let c0 = 2.515517;
-        let c1 = 0.802853;
-        let c2 = 0.010328;
-        let d1 = 1.432788;
-        let d2 = 0.189269;
-        let d3 = 0.001308;
-        t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
+/// Bootstrap inference for the risk difference.
+#[derive(Debug, Clone, Copy)]
+struct RdInference {
+    se: f64,
+    ci_lower: f64,
+    ci_upper: f64,
+    p_value: f64,
+}
+
+/// SE (the SD of the draws), type-7 percentile interval and two-sided normal p-value of
+/// `rd`; all `NaN` with fewer than 2 draws, the p-value `NaN` when the SE is 0.
+fn rd_inference(rd: f64, draws: &[f64], level: f64) -> EconResult<RdInference> {
+    if draws.len() < 2 {
+        return Ok(RdInference {
+            se: f64::NAN,
+            ci_lower: f64::NAN,
+            ci_upper: f64::NAN,
+            p_value: f64::NAN,
+        });
     }
+    let se = sample_sd(draws);
+    let (ci_lower, ci_upper) = percentile_interval(draws, level)?;
+    let p_value = if se.is_finite() && se > 0.0 {
+        normal_p_value_two_sided(rd / se)
+    } else {
+        f64::NAN
+    };
+    Ok(RdInference {
+        se,
+        ci_lower,
+        ci_upper,
+        p_value,
+    })
+}
+
+/// Log-normal interval `exp(ln rr -/+ z se)` with the exact normal quantile; `NaN`s when
+/// `rr <= 0` or the SE is not finite.
+fn rr_interval(rr: f64, se_log_rr: f64, level: f64) -> EconResult<(f64, f64)> {
+    let z = z_critical(level)?;
+    if !(rr > 0.0) || !se_log_rr.is_finite() {
+        return Ok((f64::NAN, f64::NAN));
+    }
+    let l = rr.ln();
+    Ok(((l - z * se_log_rr).exp(), (l + z * se_log_rr).exp()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3105,6 +3171,111 @@ mod tests {
     }
 
     #[test]
+    fn test_gformula_rd_inference_percentile_type7() {
+        // X-18: R quantile(c(0.1, 0.15, 0.05, 0.12, 0.08), c(0.025, 0.975), type = 7) = 0.053,
+        // 0.147; sd 0.038078865529319536; 2 * pnorm(-0.1 / sd) = 0.0086362167603195629.
+        // Before: floor/ceil indices gave 0.05 and 0.15.
+        let r = rd_inference(0.1, &[0.1, 0.15, 0.05, 0.12, 0.08], 0.95).unwrap();
+        let tol = p2a_validation::Tol::new(1e-12, 1e-15);
+        assert!(
+            tol.allows(r.ci_lower, 0.053000000000000005),
+            "{}",
+            r.ci_lower
+        );
+        assert!(
+            tol.allows(r.ci_upper, 0.14699999999999999),
+            "{}",
+            r.ci_upper
+        );
+        assert!(tol.allows(r.se, 0.038078865529319536), "{}", r.se);
+        assert!(
+            tol.allows(r.p_value, 0.0086362167603195629),
+            "{}",
+            r.p_value
+        );
+    }
+
+    #[test]
+    fn test_gformula_p_value_uses_the_upper_tail() {
+        // X-17: z = 9 -> 2 * pnorm(-9) = 2.2571768119077543e-19 for these draws (R); 1 - cdf
+        // gives exactly 0.
+        let d = [0.082928932188134519, 0.097071067811865475];
+        let r = rd_inference(0.09, &d, 0.95).unwrap();
+        assert!(
+            p2a_validation::Tol::new(1e-10, 0.0).allows(r.p_value, 2.2571768119077543e-19),
+            "{}",
+            r.p_value
+        );
+    }
+
+    #[test]
+    fn test_gformula_rr_interval_uses_exact_z() {
+        // X-14: qnorm(0.9) = 1.2815515655446008 (R); the A&S 26.2.23 copy gave
+        // 1.2817287565027089, and 0.95 used 1.96.
+        let (lo, hi) = rr_interval(1.0, 1.0, 0.8).unwrap();
+        assert!(
+            (hi.ln() - 1.2815515655446008).abs() < 1e-12
+                && (lo.ln() + 1.2815515655446008).abs() < 1e-12
+        );
+        let (_, hi95) = rr_interval(1.0, 1.0, 0.95).unwrap();
+        assert!((hi95.ln() - 1.9599639845400536).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_gformula_without_bootstrap_reports_nan_inference() {
+        // R2: before, n_bootstrap = 0 printed SE NaN but p-value 1.0000.
+        let mut c = GFormulaConfig::default();
+        c.n_simulations = 300;
+        c.n_bootstrap = 0;
+        c.outcome_type = GFormulaOutcomeType::Continuous;
+        let r = run_gformula(&create_tv_test_data(200, 2, false), c).unwrap();
+        assert!(r.se_risk_difference.is_nan() && r.ci_lower_rd.is_nan() && r.ci_upper_rd.is_nan());
+        assert!(r.p_value_rd.is_nan() && r.ci_lower_rr.is_nan());
+        assert!(r.to_string().contains("not computed (n_bootstrap = 0)"));
+    }
+
+    #[test]
+    fn test_gformula_confidence_level_validated() {
+        for level in [0.0, 1.0, -0.5, f64::NAN] {
+            let mut c = GFormulaConfig::default();
+            c.n_simulations = 100;
+            c.n_bootstrap = 0;
+            c.confidence_level = level;
+            expect_invalid(
+                run_gformula(&create_tv_test_data(100, 2, true), c).unwrap_err(),
+                &["confidence_level"],
+            );
+        }
+    }
+
+    #[test]
+    fn test_gformula_display_survival_and_notes() {
+        let r = run_gformula(
+            &hazard_case_data(&hazard_dataset()),
+            survival_cfg(true, 1_000, 1e-8, 7),
+        )
+        .unwrap();
+        let s = r.to_string();
+        for needle in [
+            "Outcome Type: Survival (Discrete Hazard)",
+            "Outcome model: pooled logistic hazard on 1658 person-periods",
+            "Standardisation:",
+            "exact over the 400 observed baseline rows",
+            "Cumulative risk by period:",
+            "Observed:",
+            "Kaplan-Meier",
+            "Treatment: point treatment",
+            "Outcome model coefficients:",
+            "(Intercept)",
+            "Events:        175",
+        ] {
+            assert!(s.contains(needle), "Display lacks {needle:?}:\n{s}");
+        }
+        assert!(s.ends_with(&crate::traits::convergence::notes_text(&r)));
+        assert!(s.contains("Warning: the treatment never changes within a subject's follow-up"));
+    }
+
+    #[test]
     fn test_gformula_data_validation() {
         let baseline = Array2::zeros((10, 2));
         let l0 = Array2::zeros((10, 1));
@@ -3115,30 +3286,5 @@ mod tests {
 
         let result = GFormulaData::new(baseline, vec![l0, l1], vec![a0, a1], y);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_bootstrap_ci() {
-        let bootstrap_results = vec![
-            (0.1, 0.6, 0.5),
-            (0.15, 0.65, 0.5),
-            (0.05, 0.55, 0.5),
-            (0.12, 0.62, 0.5),
-            (0.08, 0.58, 0.5),
-        ];
-
-        let (se, ci_lower, ci_upper) = compute_bootstrap_ci(&bootstrap_results, 0.95);
-
-        assert!(se > 0.0 && se.is_finite());
-        assert!(ci_lower < ci_upper);
-    }
-
-    #[test]
-    fn test_z_critical() {
-        let z_95 = compute_z_critical(0.95);
-        assert!((z_95 - 1.96).abs() < 0.01);
-
-        let z_99 = compute_z_critical(0.99);
-        assert!((z_99 - 2.576).abs() < 0.01);
     }
 }
