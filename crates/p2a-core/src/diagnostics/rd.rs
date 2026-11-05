@@ -247,6 +247,8 @@ mod tests {
             b_right: 0.75,
             bwselect: BandwidthMethod::MseTwo,
             bandwidth_given: false,
+            h_origin: crate::econometrics::rd::BandwidthOrigin::Selected,
+            b_origin: crate::econometrics::rd::BandwidthOrigin::Selected,
             p: 1,
             q: 2,
             kernel: KernelType::Triangular,

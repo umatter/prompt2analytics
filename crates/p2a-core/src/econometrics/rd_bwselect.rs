@@ -233,15 +233,6 @@ pub fn rdbwselect_all(
 // The selector
 // ============================================================================
 
-/// rdbwselect's rule-of-thumb constant `C_c` of the pilot bandwidth.
-fn pilot_constant(kernel: KernelType) -> f64 {
-    match kernel {
-        KernelType::Triangular => 2.576,
-        KernelType::Epanechnikov => 2.34,
-        KernelType::Uniform => 1.843,
-    }
-}
-
 /// One side of the cutoff, sorted by the running variable (ascending).
 struct SideData {
     name: &'static str,
@@ -532,7 +523,7 @@ impl Selector {
 
         // Step 4: pilot bandwidth.
         let m_total = (m_l + m_r) as f64;
-        let mut c_bw = (pilot_constant(opts.kernel) * bw_p * m_total.powf(-1.0 / 5.0)).min(bw_max);
+        let mut c_bw = (opts.kernel.constant() * bw_p * m_total.powf(-1.0 / 5.0)).min(bw_max);
         if mass_points {
             c_bw = c_bw.max(bw_min_l).max(bw_min_r);
         }

@@ -8,9 +8,10 @@
 //! CCT (2014) bias-corrected estimate built from the `Q_q` weights, and the conventional
 //! and robust sandwich variances with nearest-neighbour residuals (whole tie groups,
 //! `nnmatch`) or HC0-HC3 residuals. [`run_fuzzy_rd`] fits the outcome and the treatment
-//! on one bandwidth, as `rdrobust(fuzzy = )`. When no bandwidth is given, p2a's own
-//! MSE-type selector chooses one; it is not `rdbwselect` (finding CAUS-28). Covariates,
-//! clustering, weights and derivatives (`deriv`) are not supported.
+//! on one bandwidth, as `rdrobust(fuzzy = )`. When h is not given, h and b are selected as
+//! `rdrobust::rdbwselect` 4.0.0 selects them ([`crate::econometrics::rd_bwselect`]), with b
+//! selected separately from h. Covariates, clustering, weights and derivatives (`deriv`)
+//! are not supported.
 //!
 //! # References
 //!
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
+use super::rd_bwselect::{BwSelectOptions, BwSelection, rdbwselect};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
@@ -65,13 +67,12 @@ impl KernelType {
         }
     }
 
-    /// Get the kernel constant C_k used in bandwidth formulas.
-    /// This is the integral of K(u)^2 / integral of u^2 K(u).
+    /// rdbwselect's rule-of-thumb constant `C_c` of the pilot bandwidth.
     pub fn constant(&self) -> f64 {
         match self {
-            KernelType::Triangular => 3.438, // From CCT (2014)
-            KernelType::Epanechnikov => 3.348,
-            KernelType::Uniform => 2.702,
+            KernelType::Triangular => 2.576,
+            KernelType::Epanechnikov => 2.34,
+            KernelType::Uniform => 1.843,
         }
     }
 
@@ -343,15 +344,18 @@ pub struct RdConfig {
     pub p: usize,
     /// Polynomial order for bias correction (default: p + 1).
     pub q: Option<usize>,
-    /// Main bandwidth h (auto-computed if None).
+    /// Main bandwidth h; `None` selects h with `bwselect` (rdrobust::rdbwselect).
     pub h: Option<f64>,
-    /// Bias bandwidth b (auto-computed if None).
+    /// Bias bandwidth b. `None`: with a given h, `b = h / rho`; with a selected h, b is
+    /// selected too (or `h / rho`, see `rho` and `rho_with_selected_h`). A b given with a
+    /// selected h is used (rdrobust ignores it).
     pub b: Option<f64>,
-    /// Ratio b/h (default: 1.0, used when b not specified).
+    /// rho = h / b, as rdrobust: when b is not given, `b = h / rho` for a given h, and for a
+    /// selected h when `rho` is not 1 or `rho_with_selected_h` is set (default 1).
     pub rho: f64,
     /// Kernel function type.
     pub kernel: KernelType,
-    /// Bandwidth selection method.
+    /// Bandwidth selection method when h is not given (rdrobust::rdbwselect's `bwselect`).
     pub bwselect: BandwidthMethod,
     /// Variance estimation method.
     pub vce: VceType,
@@ -359,7 +363,8 @@ pub struct RdConfig {
     pub nnmatch: usize,
     /// Confidence level (default: 0.95).
     pub level: f64,
-    /// Regularization scale for bandwidth selection (default: 1.0).
+    /// Weight of the regularisation term of the bandwidth selector (rdbwselect
+    /// `scaleregul`, default 1; 0 switches it off). Used only when h is selected.
     pub scaleregul: f64,
     /// Main bandwidth right of the cutoff when it differs from the left one (rdrobust
     /// `h = c(h_l, h_r)`); requires `h`, which is then the left-side bandwidth.
@@ -368,6 +373,11 @@ pub struct RdConfig {
     /// Bias bandwidth right of the cutoff (rdrobust `b = c(b_l, b_r)`); requires `b`.
     #[serde(default)]
     pub b_right: Option<f64>,
+    /// With a selected h and no b: false = b selected by `bwselect` (rdrobust without
+    /// rho) when `rho == 1`; true = `b = h / rho` (rdrobust's rho). A `rho` other than 1
+    /// always gives `b = h / rho`, whatever this flag says. Ignored when h is given.
+    #[serde(default)]
+    pub rho_with_selected_h: bool,
 }
 
 impl Default for RdConfig {
@@ -386,8 +396,21 @@ impl Default for RdConfig {
             scaleregul: 1.0,
             h_right: None,
             b_right: None,
+            rho_with_selected_h: false,
         }
     }
+}
+
+/// Where a bandwidth came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BandwidthOrigin {
+    /// Selected by `RdConfig::bwselect`, as rdrobust::rdbwselect.
+    #[default]
+    Selected,
+    /// Given by the user (h / h_right, b / b_right).
+    UserSupplied,
+    /// b only: `h / rho` (rdrobust's rho; rho = 1 gives b = h).
+    RhoTimesH,
 }
 
 /// The confidence level of a result deserialized without one.
@@ -442,15 +465,63 @@ pub struct RdBandwidth {
     /// Rows dropped because the outcome or the running variable is missing.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Bias-correction order.
+    #[serde(default)]
+    pub q: usize,
+    /// Residuals of the selector's variance terms.
+    #[serde(default)]
+    pub vce: VceType,
+    /// Nearest neighbours of the `nn` residuals.
+    #[serde(default = "default_nnmatch")]
+    pub nnmatch: usize,
+    /// Regularisation weight of the selector.
+    #[serde(default = "default_scaleregul")]
+    pub scaleregul: f64,
+    /// Observations left of the cutoff with positive kernel weight under h (rdbwselect `N_h`).
+    #[serde(default)]
+    pub n_h_left: usize,
+    /// The same right of the cutoff.
+    #[serde(default)]
+    pub n_h_right: usize,
+    /// Distinct running-variable values left of the cutoff (rdbwselect `M`).
+    #[serde(default)]
+    pub m_left: usize,
+    /// Distinct running-variable values right of the cutoff.
+    #[serde(default)]
+    pub m_right: usize,
+    /// Mass points in the running variable (`1 - M / N >= 0.2` on a side).
+    #[serde(default)]
+    pub mass_points: bool,
+    /// `Some(10)` when the mass-point adjustment applied.
+    #[serde(default)]
+    pub bwcheck: Option<usize>,
+    /// The pilot bandwidth of the selector's variance terms.
+    #[serde(default)]
+    pub pilot_bandwidth: f64,
+    /// Where b came from.
+    #[serde(default)]
+    pub b_origin: BandwidthOrigin,
+    /// The treatment of a fuzzy selection.
+    #[serde(default)]
+    pub treatment: Option<String>,
+    /// Warnings of the selection (and the missing-value note).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 impl fmt::Display for RdBandwidth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "RD Bandwidth Selection")?;
-        writeln!(f, "======================")?;
+        writeln!(f, "RD Bandwidth Selection (rdrobust::rdbwselect)")?;
+        writeln!(f, "{}", "=".repeat(45))?;
         writeln!(f, "Method: {}", self.bwselect)?;
-        writeln!(f, "Kernel: {}", self.kernel)?;
-        writeln!(f, "Polynomial order: {}", self.p)?;
+        writeln!(
+            f,
+            "Kernel: {}, p = {}, q = {}, VCE: {} (nnmatch = {}), scaleregul = {}",
+            self.kernel, self.p, self.q, self.vce, self.nnmatch, self.scaleregul
+        )?;
+        if let Some(t) = &self.treatment {
+            writeln!(f, "Fuzzy: treatment {t}")?;
+        }
         writeln!(f)?;
         writeln!(f, "Main bandwidth (h):")?;
         writeln!(f, "  Left:  {:.4}", self.h_left)?;
@@ -465,11 +536,17 @@ impl fmt::Display for RdBandwidth {
             "Sample sizes: {} (left), {} (right)",
             self.n_left, self.n_right
         )?;
-        if let Some(note) = self.missing.note() {
-            writeln!(f)?;
-            writeln!(f, "Missing values: {note}")?;
-        }
-        Ok(())
+        writeln!(
+            f,
+            "Within h: {} (left), {} (right)",
+            self.n_h_left, self.n_h_right
+        )?;
+        writeln!(
+            f,
+            "Distinct running-variable values: {} (left), {} (right)",
+            self.m_left, self.m_right
+        )?;
+        write_warnings_and_missing(f, &self.warnings, &self.missing)
     }
 }
 
@@ -547,9 +624,16 @@ pub struct RdResult {
     pub b_right: f64,
     /// Bandwidth selection method (not run when `bandwidth_given`).
     pub bwselect: BandwidthMethod,
-    /// The caller gave h (rdrobust's "Manual" bandwidth), so no selector ran.
+    /// The caller gave h (rdrobust's "Manual" bandwidth), so no selector ran
+    /// (`h_origin == UserSupplied`).
     #[serde(default)]
     pub bandwidth_given: bool,
+    /// Where h came from (never `RhoTimesH`).
+    #[serde(default)]
+    pub h_origin: BandwidthOrigin,
+    /// Where b came from.
+    #[serde(default)]
+    pub b_origin: BandwidthOrigin,
 
     // Specification
     /// Polynomial order for estimation.
@@ -936,7 +1020,8 @@ pub(crate) fn validate_rd_config(config: &RdConfig) -> EconResult<()> {
     let rho = config.rho;
     if !(rho.is_finite() && rho > 0.0) {
         return spec(format!(
-            "rho (the ratio b/h) must be a finite number greater than 0 (got {rho})."
+            "rho (the ratio h/b, as rdrobust: b = h / rho) must be a finite number greater \
+             than 0 (got {rho})."
         ));
     }
     let level = config.level;
@@ -951,6 +1036,7 @@ pub(crate) fn validate_rd_config(config: &RdConfig) -> EconResult<()> {
             "nnmatch (nearest neighbours for the variance) must be at least 1 (got 0).".to_string(),
         );
     }
+    validate_scaleregul(config.scaleregul)?;
     for (name, value) in [("h_right", config.h_right), ("b_right", config.b_right)] {
         if let Some(v) = value
             && !(v.is_finite() && v > 0.0)
@@ -979,14 +1065,6 @@ pub(crate) fn validate_rd_config(config: &RdConfig) -> EconResult<()> {
 // Helper Functions
 // ============================================================================
 
-/// Compute kernel weights for observations given bandwidth.
-fn compute_kernel_weights(x: &Array1<f64>, cutoff: f64, h: f64, kernel: KernelType) -> Array1<f64> {
-    x.mapv(|xi| {
-        let u = (xi - cutoff) / h;
-        kernel.evaluate(u)
-    })
-}
-
 /// Build polynomial design matrix of order p centered at cutoff.
 /// Returns matrix with columns [1, (x-c), (x-c)^2, ..., (x-c)^p].
 ///
@@ -1008,197 +1086,6 @@ fn build_polynomial_matrix(x: ArrayView1<f64>, cutoff: f64, p: usize) -> EconRes
     }
 
     Ok(matrix)
-}
-
-/// Perform weighted least squares regression.
-/// Returns coefficients and residuals.
-fn weighted_least_squares(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
-    w: &Array1<f64>,
-) -> EconResult<(Array1<f64>, Array1<f64>)> {
-    let n = x.nrows();
-    let k = x.ncols();
-
-    // X'WX
-    let mut xwx = Array2::zeros((k, k));
-    for i in 0..n {
-        let wi = w[i];
-        if wi <= 0.0 {
-            continue;
-        }
-        for j in 0..k {
-            for l in 0..k {
-                xwx[[j, l]] += wi * x[[i, j]] * x[[i, l]];
-            }
-        }
-    }
-
-    // X'Wy
-    let mut xwy = Array1::zeros(k);
-    for i in 0..n {
-        let wi = w[i];
-        if wi <= 0.0 {
-            continue;
-        }
-        for j in 0..k {
-            xwy[j] += wi * x[[i, j]] * y[i];
-        }
-    }
-
-    // Invert X'WX
-    let (xwx_inv, warning) = safe_inverse(&xwx.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'WX in weighted least squares".to_string(),
-        suggestion: format!("Check for collinearity or insufficient data: {:?}", e),
-    })?;
-
-    if let Some(w) = warning {
-        // Log warning but continue
-        eprintln!("Warning in WLS: {}", w);
-    }
-
-    // Coefficients: (X'WX)^{-1} X'Wy
-    let beta = xwx_inv.dot(&xwy);
-
-    // Residuals
-    let y_hat = x.dot(&beta);
-    let residuals = y - &y_hat;
-
-    Ok((beta, residuals))
-}
-
-/// Compute MSE-optimal bandwidth using Imbens-Kalyanaraman (2012) method.
-///
-/// Allocation errors of the pilot design matrices propagate; a failed pilot
-/// *fit* still falls back to the rule-of-thumb bandwidth.
-fn compute_mse_bandwidth(
-    y: &Array1<f64>,
-    x: &Array1<f64>,
-    cutoff: f64,
-    p: usize,
-    kernel: KernelType,
-    separate: bool,
-) -> EconResult<(f64, f64)> {
-    let n = y.len();
-
-    // Split data at cutoff
-    let (_y_left, x_left): (Vec<f64>, Vec<f64>) = y
-        .iter()
-        .zip(x.iter())
-        .filter(|(_, xi)| **xi < cutoff)
-        .map(|(yi, xi)| (*yi, *xi))
-        .unzip();
-
-    let (_y_right, x_right): (Vec<f64>, Vec<f64>) = y
-        .iter()
-        .zip(x.iter())
-        .filter(|(_, xi)| **xi >= cutoff)
-        .map(|(yi, xi)| (*yi, *xi))
-        .unzip();
-
-    let n_left = x_left.len();
-    let n_right = x_right.len();
-
-    if n_left < 10 || n_right < 10 {
-        // Not enough data; use rule of thumb
-        let x_range = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-            - x.iter().cloned().fold(f64::INFINITY, f64::min);
-        let h_rot = x_range / ((n as f64).powf(0.2));
-        return Ok((h_rot, h_rot));
-    }
-
-    // Estimate second derivative (curvature) using global polynomial
-    // Fit order-4 polynomial to estimate m''(c).
-    // With p <= MAX_RD_ORDER (validated by the callers) the pilot order is at
-    // most 12, and the pilot only runs with at least 10 points on each side
-    // (n >= 20), so the pilot order stays below n without a separate check.
-    let pilot_order = 4.max(p + 2);
-    let x_arr = Array1::from_vec(x.to_vec());
-    let y_arr = y.clone();
-    let x_design = build_polynomial_matrix(x_arr.view(), cutoff, pilot_order)?;
-
-    // Equal weights for pilot
-    let pilot_weights = Array1::from_elem(n, 1.0 / n as f64);
-
-    let pilot_coef = match weighted_least_squares(&x_design, &y_arr, &pilot_weights) {
-        Ok((coef, _)) => coef,
-        Err(_) => {
-            // Fallback
-            let x_range = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-                - x.iter().cloned().fold(f64::INFINITY, f64::min);
-            let h_rot = x_range / ((n as f64).powf(0.2));
-            return Ok((h_rot, h_rot));
-        }
-    };
-
-    // Second derivative at cutoff: 2 * coef[2] (for centered polynomial)
-    let m_second = if pilot_coef.len() > 2 {
-        2.0 * pilot_coef[2]
-    } else {
-        0.01 // Small default if not estimable
-    };
-
-    // Estimate conditional variance
-    // Use residuals from a local linear fit with pilot bandwidth
-    let x_range = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-        - x.iter().cloned().fold(f64::INFINITY, f64::min);
-    let h_pilot = x_range / 2.0;
-
-    let pilot_kernel_weights = compute_kernel_weights(&x_arr, cutoff, h_pilot, kernel);
-    let x_linear = build_polynomial_matrix(x_arr.view(), cutoff, 1)?;
-
-    let sigma2_est = match weighted_least_squares(&x_linear, &y_arr, &pilot_kernel_weights) {
-        Ok((_, resid)) => {
-            let n_eff: f64 = pilot_kernel_weights.iter().filter(|w| **w > 0.0).count() as f64;
-            if n_eff > 2.0 {
-                resid
-                    .iter()
-                    .zip(pilot_kernel_weights.iter())
-                    .filter(|(_, w)| **w > 0.0)
-                    .map(|(r, _)| r * r)
-                    .sum::<f64>()
-                    / (n_eff - 2.0)
-            } else {
-                y.iter().map(|yi| yi * yi).sum::<f64>() / (n as f64)
-            }
-        }
-        Err(_) => y.iter().map(|yi| yi * yi).sum::<f64>() / (n as f64),
-    };
-
-    // Estimate density at cutoff (using histogram-like approach)
-    let h_density = x_range / 10.0;
-    let count_near = x
-        .iter()
-        .filter(|xi| (*xi - cutoff).abs() < h_density)
-        .count();
-    let f_c = (count_near as f64) / (n as f64 * 2.0 * h_density);
-    let f_c = f_c.max(0.01); // Ensure positive
-
-    // Kernel constant
-    let c_k = kernel.constant();
-
-    // MSE-optimal bandwidth formula (Imbens-Kalyanaraman 2012, simplified):
-    // h_opt = C_k * [σ² / (f(c) * (m''(c))²)]^(1/5) * n^(-1/5)
-    let m_second_sq = m_second * m_second;
-    let m_second_sq = m_second_sq.max(0.0001); // Avoid division by very small numbers
-
-    let h_opt = c_k * (sigma2_est / (f_c * m_second_sq)).powf(0.2) * (n as f64).powf(-0.2);
-
-    // Regularization: bound bandwidth to reasonable range
-    // For RD, we want local estimation near the cutoff, so cap at 1/4 of data range
-    let h_min = x_range / (n as f64);
-    let h_max = x_range / 4.0;
-    let h_opt = h_opt.clamp(h_min, h_max);
-
-    if separate {
-        // Compute separate bandwidths for left and right
-        // Using asymmetric pilot estimates (simplified version)
-        let h_left = h_opt * ((n_right as f64) / (n_left as f64)).powf(0.1);
-        let h_right = h_opt * ((n_left as f64) / (n_right as f64)).powf(0.1);
-        Ok((h_left.clamp(h_min, h_max), h_right.clamp(h_min, h_max)))
-    } else {
-        Ok((h_opt, h_opt))
-    }
 }
 
 // ============================================================================
@@ -1610,7 +1497,78 @@ struct RdFit {
     b: (f64, f64),
     p: usize,
     q: usize,
+    /// Where h and b came from (and the selection, when it ran).
+    resolved: Resolved,
     warnings: Vec<String>,
+}
+
+/// The bandwidths of one fit and where they came from.
+struct Resolved {
+    h: (f64, f64),
+    b: (f64, f64),
+    h_origin: BandwidthOrigin,
+    b_origin: BandwidthOrigin,
+    selection: Option<BwSelection>,
+}
+
+/// The bandwidths of a fit: h given or selected by `config.bwselect` (rdbwselect, with the
+/// treatment `t` of a fuzzy design); b given, `h / rho`, or selected.
+fn resolve_bandwidths(
+    x: &[f64],
+    y: &[f64],
+    t: Option<&[f64]>,
+    cutoff: f64,
+    config: &RdConfig,
+) -> EconResult<Resolved> {
+    let given_b = config.b.map(|b| (b, config.b_right.unwrap_or(b)));
+    let rho = config.rho;
+    if let Some(h) = config.h {
+        let h = (h, config.h_right.unwrap_or(h));
+        let (b, b_origin) = match given_b {
+            Some(b) => (b, BandwidthOrigin::UserSupplied),
+            None => ((h.0 / rho, h.1 / rho), BandwidthOrigin::RhoTimesH),
+        };
+        return Ok(Resolved {
+            h,
+            b,
+            h_origin: BandwidthOrigin::UserSupplied,
+            b_origin,
+            selection: None,
+        });
+    }
+    let sel = rdbwselect(
+        x,
+        y,
+        t,
+        cutoff,
+        config.bwselect,
+        &BwSelectOptions::from_config(config),
+    )?;
+    let bw = sel.bandwidths;
+    let h = (bw.h_left, bw.h_right);
+    let (b, b_origin) = match given_b {
+        Some(b) => (b, BandwidthOrigin::UserSupplied),
+        // A rho other than its default can only mean the caller asked for that ratio.
+        None if config.rho_with_selected_h || rho != 1.0 => {
+            ((h.0 / rho, h.1 / rho), BandwidthOrigin::RhoTimesH)
+        }
+        None => ((bw.b_left, bw.b_right), BandwidthOrigin::Selected),
+    };
+    Ok(Resolved {
+        h,
+        b,
+        h_origin: BandwidthOrigin::Selected,
+        b_origin,
+        selection: Some(sel),
+    })
+}
+
+/// A contiguous slice of a column view (one copy when the view is strided).
+fn as_slice<'a>(v: &'a ArrayView1<'_, f64>) -> std::borrow::Cow<'a, [f64]> {
+    match v.as_slice() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(v.to_vec()),
+    }
 }
 
 impl RdFit {
@@ -1634,8 +1592,8 @@ impl RdFit {
 }
 
 /// Fit the local polynomials of every column in `cols` (row-aligned with `x`) on both
-/// sides of `cutoff`. When `config.h` is not given, the bandwidth selector runs on
-/// `cols[0]` (the outcome).
+/// sides of `cutoff`. When `config.h` is not given, rdbwselect runs on `cols[0]` (the
+/// outcome), with `cols[1]` as the treatment of a fuzzy design.
 fn fit_rd(
     x: ArrayView1<f64>,
     cols: &[ArrayView1<f64>],
@@ -1666,22 +1624,14 @@ fn fit_rd(
     let p = config.p;
     let q = config.q.unwrap_or(p + 1);
 
-    // Bandwidths: given h (and h_right) or p2a's selector; b given or rho * h.
-    let (h_left, h_right) = match config.h {
-        Some(h) => (h, config.h_right.unwrap_or(h)),
-        None => compute_mse_bandwidth(
-            &cols[0].to_owned(),
-            &x.to_owned(),
-            cutoff,
-            p,
-            config.kernel,
-            config.bwselect.is_separate(),
-        )?,
+    // Bandwidths: given or selected as rdbwselect; b given, h / rho or selected.
+    let resolved = {
+        let xs = as_slice(&x);
+        let ys = as_slice(&cols[0]);
+        let ts = cols.get(1).map(as_slice);
+        resolve_bandwidths(&xs, &ys, ts.as_deref(), cutoff, config)?
     };
-    let (b_left, b_right) = match config.b {
-        Some(b) => (b, config.b_right.unwrap_or(b)),
-        None => (h_left * config.rho, h_right * config.rho),
-    };
+    let ((h_left, h_right), (b_left, b_right)) = (resolved.h, resolved.b);
 
     let left = select_side(x, cols, cutoff, true, h_left, b_left, config.kernel)?;
     let right = select_side(x, cols, cutoff, false, h_right, b_right, config.kernel)?;
@@ -1740,7 +1690,12 @@ fn fit_rd(
     let left = fit_side(&left, cutoff, h_left, p, q, config.vce, config.nnmatch)?;
     crate::resource::checkpoint()?;
     let right = fit_side(&right, cutoff, h_right, p, q, config.vce, config.nnmatch)?;
-    let mut warnings = left.warnings.clone();
+    let mut warnings: Vec<String> = resolved
+        .selection
+        .as_ref()
+        .map(|s| s.info.warnings.clone())
+        .unwrap_or_default();
+    warnings.extend(left.warnings.iter().cloned());
     warnings.extend(right.warnings.iter().cloned());
 
     Ok(RdFit {
@@ -1752,6 +1707,7 @@ fn fit_rd(
         b: (b_left, b_right),
         p,
         q,
+        resolved,
         warnings,
     })
 }
@@ -1820,7 +1776,9 @@ fn rd_result_from(
         b_left: fit.b.0,
         b_right: fit.b.1,
         bwselect: config.bwselect,
-        bandwidth_given: config.h.is_some(),
+        bandwidth_given: fit.resolved.h_origin == BandwidthOrigin::UserSupplied,
+        h_origin: fit.resolved.h_origin,
+        b_origin: fit.resolved.b_origin,
         p: fit.p,
         q: fit.q,
         kernel: config.kernel,
@@ -1845,8 +1803,9 @@ fn rd_result_from(
 /// by weighted local polynomials of order p (bandwidth h) and q (bandwidth b); the
 /// bias-corrected estimate uses the CCT (2014) `Q_q` weights; the conventional and robust
 /// variances are sandwiches of the intercepts with nearest-neighbour residuals (whole tie
-/// groups, `nnmatch` neighbours) or HC0-HC3 residuals. When `h` is not given, p2a's own
-/// MSE-type selector chooses it (not `rdbwselect`; CAUS-28), and `b = rho * h`.
+/// groups, `nnmatch` neighbours) or HC0-HC3 residuals. When `h` is not given, h and b are
+/// `rdrobust::rdbwselect`'s ([`crate::econometrics::rd_bwselect`]), b selected separately;
+/// a given h without b gives `b = h / rho`.
 /// Covariates, clustering, weights and derivatives are not supported.
 ///
 /// # Arguments
@@ -1898,9 +1857,9 @@ fn attach_missing(warnings: &mut Vec<String>, slot: &mut MissingSummary, missing
     }
 }
 
-/// Compute optimal bandwidth for RD estimation.
-///
-/// Returns bandwidth estimates without running the full RD estimation.
+/// Select the RD bandwidths h and b as `rdrobust::rdbwselect` (sharp design), without
+/// running the estimation: `rd_bandwidth_with` with the default configuration and `p`,
+/// `kernel` and `bwselect`.
 pub fn rd_bandwidth(
     dataset: &Dataset,
     outcome: &str,
@@ -1910,42 +1869,81 @@ pub fn rd_bandwidth(
     kernel: KernelType,
     bwselect: BandwidthMethod,
 ) -> EconResult<RdBandwidth> {
-    validate_rd_config(&RdConfig {
-        p,
-        ..Default::default()
-    })?;
+    let mut config = RdConfig::default();
+    config.p = p;
+    config.kernel = kernel;
+    config.bwselect = bwselect;
+    rd_bandwidth_with(dataset, outcome, running_var, None, cutoff, &config)
+}
 
-    // The same rows as run_rd: complete cases of the outcome and the running variable.
-    let cols = ColumnRequest::new(dataset.df())
+/// Bandwidth selection only, with every selection option of `config` (`bwselect`, p, q,
+/// kernel, vce, nnmatch, scaleregul), as `rdrobust::rdbwselect`. `treatment` selects for a
+/// fuzzy design, as `rdbwselect(fuzzy = )`. `h`, `h_right`, `b` and `b_right` must be
+/// `None`. Rows with a missing outcome, running variable or treatment are dropped.
+pub fn rd_bandwidth_with(
+    dataset: &Dataset,
+    outcome: &str,
+    running_var: &str,
+    treatment: Option<&str>,
+    cutoff: f64,
+    config: &RdConfig,
+) -> EconResult<RdBandwidth> {
+    validate_rd_config(config)?;
+    if config.h.is_some()
+        || config.h_right.is_some()
+        || config.b.is_some()
+        || config.b_right.is_some()
+    {
+        return Err(EconError::InvalidSpecification {
+            message: "rd_bandwidth_with selects h and b; remove h, b, h_right and b_right from \
+                      the configuration, or call run_rd"
+                .to_string(),
+        });
+    }
+    let mut request = ColumnRequest::new(dataset.df())
         .numeric(outcome)
-        .numeric(running_var)
-        .na(NaPolicy::Omit)
-        .extract()?;
-    let y = cols.numeric_array(outcome);
-    let x = cols.numeric_array(running_var);
+        .numeric(running_var);
+    if let Some(t) = treatment {
+        request = request.numeric(t);
+    }
+    let cols = request.na(NaPolicy::Omit).extract()?;
+    let y = cols.numeric(outcome);
+    let x = cols.numeric(running_var);
+    let t = treatment.map(|t| cols.numeric(t));
 
-    let n_left = x.iter().filter(|&&xi| xi < cutoff).count();
-    let n_right = x.iter().filter(|&&xi| xi >= cutoff).count();
-
-    // Compute MSE-optimal bandwidth
-    let (h_left, h_right) =
-        compute_mse_bandwidth(&y, &x, cutoff, p, kernel, bwselect.is_separate())?;
-
-    // Bias bandwidth (default: same as h)
-    let b_left = h_left;
-    let b_right = h_right;
-
+    let resolved = resolve_bandwidths(x, y, t, cutoff, config)?;
+    let sel = resolved.selection.ok_or_else(|| {
+        EconError::Internal("rd_bandwidth_with: the bandwidths were not selected".to_string())
+    })?;
+    let info = sel.info;
+    let mut warnings = info.warnings;
+    let mut missing = MissingSummary::default();
+    attach_missing(&mut warnings, &mut missing, cols.missing());
     Ok(RdBandwidth {
-        h_left,
-        h_right,
-        b_left,
-        b_right,
-        bwselect,
-        kernel,
-        p,
-        n_left,
-        n_right,
-        missing: cols.missing().clone(),
+        h_left: resolved.h.0,
+        h_right: resolved.h.1,
+        b_left: resolved.b.0,
+        b_right: resolved.b.1,
+        bwselect: config.bwselect,
+        kernel: config.kernel,
+        p: config.p,
+        n_left: info.n_left,
+        n_right: info.n_right,
+        missing,
+        q: info.q,
+        vce: info.vce,
+        nnmatch: info.nnmatch,
+        scaleregul: info.scaleregul,
+        n_h_left: sel.n_h_left,
+        n_h_right: sel.n_h_right,
+        m_left: info.m_left,
+        m_right: info.m_right,
+        mass_points: info.mass_points,
+        bwcheck: info.bwcheck,
+        pilot_bandwidth: info.pilot_bandwidth,
+        b_origin: resolved.b_origin,
+        treatment: treatment.map(str::to_string),
+        warnings,
     })
 }
 
@@ -1956,7 +1954,8 @@ pub fn rd_bandwidth(
 /// at the cutoff.
 ///
 /// As `rdrobust(y, x, fuzzy = t)`: the outcome and the treatment are fitted once, on one
-/// bandwidth (when `h` is not given p2a's selector runs on the outcome), with the same
+/// bandwidth (when `h` is not given, rdbwselect selects h and b for the fuzzy design, with
+/// the treatment, as `rdbwselect(fuzzy = )`), with the same
 /// local-polynomial matrices. The conventional estimate is the Wald ratio
 /// `tau_Y / tau_T` of the conventional jumps; the bias-corrected one is
 /// `tau - s'(tau_Y - tau_Y,bc, tau_T - tau_T,bc)` with `s = (1/tau_T, -tau_Y/tau_T²)`; both
@@ -3366,6 +3365,15 @@ mod tests {
         let sharp_t = run_rd(&ds, "treatment", "running", 0.0, RdConfig::default()).unwrap();
         assert_ne!(sharp_t.h_left, sharp.h_left);
         assert_ne!(sharp_t.h_right, sharp.h_right);
+        let fuzzy_bw = rd_bandwidth_with(
+            &ds,
+            "outcome",
+            "running",
+            Some("treatment"),
+            0.0,
+            &RdConfig::default(),
+        )
+        .unwrap();
 
         let f = run_fuzzy_rd(
             &ds,
@@ -3378,8 +3386,359 @@ mod tests {
         .unwrap();
         let bw = |r: &RdResult| (r.h_left, r.h_right, r.b_left, r.b_right);
         assert_eq!(bw(&f.outcome_rd), bw(&f.first_stage));
-        // the selector runs on the outcome, as rdrobust's fuzzy bandwidth would start from it
-        assert_eq!(bw(&f.outcome_rd), bw(&sharp));
+        // the selection is rdbwselect(fuzzy = ): on the ratio, with the treatment, not on the
+        // outcome alone (rdrobust: 0.64194 fuzzy, 0.53810 sharp on this dataset)
+        assert_eq!(
+            bw(&f.outcome_rd),
+            (
+                fuzzy_bw.h_left,
+                fuzzy_bw.h_right,
+                fuzzy_bw.b_left,
+                fuzzy_bw.b_right
+            )
+        );
+        assert_ne!(f.outcome_rd.h_left, sharp.h_left);
+    }
+
+    /// `validation/datasets/generated/rd_sim.csv` as data only (no R value is compared).
+    fn rd_sim() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/rd_sim.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    /// Pins one rdrobust run at selected bandwidths: the `.rd_sel` keys `<prefix>_*` of
+    /// causal_rdbw.R.
+    fn check_selected(check: &mut Check<'_>, prefix: &str, r: &RdResult, n: usize) {
+        let k = |s: &str| format!("{prefix}_{s}");
+        check
+            .vector(&k("h"), &[r.h_left, r.h_right], Tol::coef(n))
+            .vector(&k("b"), &[r.b_left, r.b_right], Tol::coef(n))
+            .scalar(&k("coef_conv"), r.tau_conventional, Tol::coef(n))
+            .scalar(&k("coef_bc"), r.tau_bc, Tol::coef(n))
+            .scalar(&k("se_conv"), r.se_conventional, Tol::se(n))
+            .scalar(&k("se_robust"), r.se_robust, Tol::se(n))
+            .scalar(&k("p_robust"), r.p_robust, Tol::p_value(n))
+            .vector(
+                &k("ci_robust"),
+                &[r.ci_robust.0, r.ci_robust.1],
+                Tol::stat(n),
+            )
+            .vector(
+                &k("n_h"),
+                &[r.n_eff_left as f64, r.n_eff_right as f64],
+                Tol::exact(),
+            )
+            .vector(
+                &k("n_b"),
+                &[r.n_b_left as f64, r.n_b_right as f64],
+                Tol::exact(),
+            );
+    }
+
+    fn sel(f: impl FnOnce(&mut RdConfig)) -> RdConfig {
+        let mut c = RdConfig::default();
+        f(&mut c);
+        c
+    }
+
+    #[test]
+    fn test_validate_rd_auto_bandwidth() {
+        use BandwidthOrigin::*;
+        let (case, ds) = load_case("rd_bwselect_sharp");
+        let n = 1000;
+        let run = |y: &str, x: &str, c: RdConfig| run_rd(&ds, y, x, 0.0, c).unwrap();
+        let mut check = Check::new(&case);
+
+        let auto = run("y", "x", RdConfig::default());
+        check_selected(&mut check, "auto", &auto, n);
+        assert_eq!((auto.h_origin, auto.b_origin), (Selected, Selected));
+        assert!(!auto.bandwidth_given);
+        let r = run("y", "x", sel(|c| c.bwselect = BandwidthMethod::MseTwo));
+        check_selected(&mut check, "msetwo_auto", &r, n);
+        let rho1 = run("y", "x", sel(|c| c.rho_with_selected_h = true));
+        check_selected(&mut check, "rho1_auto", &rho1, n);
+        assert_eq!((rho1.h_origin, rho1.b_origin), (Selected, RhoTimesH));
+        let r = run("y", "x", sel(|c| c.scaleregul = 0.0));
+        check_selected(&mut check, "noreg_auto", &r, n);
+        let r = run("y", "x", sel(|c| c.vce = VceType::Hc1));
+        check_selected(&mut check, "hc1_auto", &r, n);
+        let b05 = run("y", "x", sel(|c| c.b = Some(0.5)));
+        check_selected(&mut check, "hsel_b05", &b05, n);
+        assert_eq!((b05.h_origin, b05.b_origin), (Selected, UserSupplied));
+        let r = run("ym", "xm", RdConfig::default());
+        check_selected(&mut check, "mass_auto", &r, n);
+
+        let cer = run("y", "x", sel(|c| c.bwselect = BandwidthMethod::CerRd));
+        check
+            .vector("cerrd_h", &[cer.h_left, cer.h_right], Tol::coef(n))
+            .vector("cerrd_b", &[cer.b_left, cer.b_right], Tol::coef(n))
+            .scalar("cerrd_coef_conv", cer.tau_conventional, Tol::coef(n))
+            .scalar("cerrd_coef_bc", cer.tau_bc, Tol::coef(n))
+            .scalar("cerrd_se_conv", cer.se_conventional, Tol::se(n))
+            .scalar("cerrd_se_robust", cer.se_robust, Tol::se(n))
+            .vector(
+                "cerrd_n_h",
+                &[cer.n_eff_left as f64, cer.n_eff_right as f64],
+                Tol::exact(),
+            );
+
+        // origins of given bandwidths
+        let r = run("y", "x", sel(|c| c.h = Some(0.3)));
+        assert_eq!((r.h_origin, r.b_origin), (UserSupplied, RhoTimesH));
+        assert!(r.bandwidth_given);
+        let r = run(
+            "y",
+            "x",
+            sel(|c| {
+                c.h = Some(0.3);
+                c.b = Some(0.3)
+            }),
+        );
+        assert_eq!((r.h_origin, r.b_origin), (UserSupplied, UserSupplied));
+        // a rho other than 1 with a selected h is honoured: b = h / rho (rdrobust's rho)
+        let r = run("y", "x", sel(|c| c.rho = 2.0));
+        assert_eq!((r.h_origin, r.b_origin), (Selected, RhoTimesH));
+        assert_eq!(r.b_left, r.h_left / 2.0);
+        assert_eq!(r.b_right, r.h_right / 2.0);
+        assert_eq!((r.h_left, r.h_right), (auto.h_left, auto.h_right));
+
+        // selection only
+        let bw = rd_bandwidth(
+            &ds,
+            "y",
+            "x",
+            0.0,
+            1,
+            KernelType::Triangular,
+            BandwidthMethod::MseRd,
+        )
+        .unwrap();
+        check
+            .vector("auto_h", &[bw.h_left, bw.h_right], Tol::coef(n))
+            .vector("auto_b", &[bw.b_left, bw.b_right], Tol::coef(n))
+            .vector(
+                "auto_n_h",
+                &[bw.n_h_left as f64, bw.n_h_right as f64],
+                Tol::exact(),
+            )
+            .vector(
+                "tri_p1_nn_counts_n",
+                &[bw.n_left as f64, bw.n_right as f64],
+                Tol::exact(),
+            )
+            .vector(
+                "tri_p1_nn_counts_m",
+                &[bw.m_left as f64, bw.m_right as f64],
+                Tol::exact(),
+            );
+        assert!(!bw.mass_points);
+        // CAUS-28: rd_bandwidth returned b = h
+        assert_ne!(bw.b_left, bw.h_left);
+        assert_eq!(bw.b_origin, Selected);
+        let bw = rd_bandwidth_with(
+            &ds,
+            "y",
+            "x",
+            None,
+            0.0,
+            &sel(|c| c.bwselect = BandwidthMethod::CerRd),
+        )
+        .unwrap();
+        check
+            .vector("cerrd_h", &[bw.h_left, bw.h_right], Tol::coef(n))
+            .vector("cerrd_b", &[bw.b_left, bw.b_right], Tol::coef(n));
+        let bw = rd_bandwidth(
+            &ds,
+            "ym",
+            "xm",
+            0.0,
+            1,
+            KernelType::Triangular,
+            BandwidthMethod::MseRd,
+        )
+        .unwrap();
+        assert!(bw.mass_points);
+        assert_eq!(bw.bwcheck, Some(10));
+        check.vector(
+            "mass_counts_m",
+            &[bw.m_left as f64, bw.m_right as f64],
+            Tol::exact(),
+        );
+        assert!(
+            bw.warnings
+                .iter()
+                .any(|w| w.starts_with("Mass points detected")),
+            "{:?}",
+            bw.warnings
+        );
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_rd_fuzzy_auto_bandwidth() {
+        let (case, ds) = load_case("rd_bwselect_fuzzy");
+        let n = 1000;
+        let mut check = Check::new(&case);
+        let f = run_fuzzy_rd(&ds, "yf", "x", "d", 0.0, RdConfig::default()).unwrap();
+        let o = &f.outcome_rd;
+        check
+            .vector("fuzzy_auto_h", &[o.h_left, o.h_right], Tol::coef(n))
+            .vector("fuzzy_auto_b", &[o.b_left, o.b_right], Tol::coef(n))
+            .scalar("fuzzy_auto_coef_conv", f.tau_fuzzy, Tol::coef(n))
+            .scalar("fuzzy_auto_coef_bc", f.tau_fuzzy_bc, Tol::coef(n))
+            .scalar("fuzzy_auto_se_conv", f.se_fuzzy, Tol::se(n))
+            .scalar("fuzzy_auto_se_robust", f.se_fuzzy_robust, Tol::se(n))
+            .scalar("fuzzy_auto_p_robust", f.p_fuzzy_robust, Tol::p_value(n))
+            .vector(
+                "fuzzy_auto_ci_robust",
+                &[f.ci_fuzzy_robust.0, f.ci_fuzzy_robust.1],
+                Tol::stat(n),
+            )
+            .vector(
+                "fuzzy_auto_n_h",
+                &[o.n_eff_left as f64, o.n_eff_right as f64],
+                Tol::exact(),
+            )
+            .scalar(
+                "fuzzy_auto_first_stage_conv",
+                f.first_stage_tau,
+                Tol::coef(n),
+            );
+        assert_eq!(f.first_stage.h_left, f.outcome_rd.h_left);
+        assert_eq!(f.first_stage.b_origin, BandwidthOrigin::Selected);
+
+        let c = run_fuzzy_rd(
+            &ds,
+            "yf",
+            "x",
+            "d",
+            0.0,
+            sel(|c| c.bwselect = BandwidthMethod::CerRd),
+        )
+        .unwrap();
+        let o = &c.outcome_rd;
+        check
+            .vector("fuzzy_cerrd_h", &[o.h_left, o.h_right], Tol::coef(n))
+            .vector("fuzzy_cerrd_b", &[o.b_left, o.b_right], Tol::coef(n))
+            .scalar("fuzzy_cerrd_coef_bc", c.tau_fuzzy_bc, Tol::coef(n))
+            .scalar("fuzzy_cerrd_se_robust", c.se_fuzzy_robust, Tol::se(n));
+
+        let bw = rd_bandwidth_with(&ds, "yf", "x", Some("d"), 0.0, &RdConfig::default()).unwrap();
+        check.vector(
+            "fuzzy_tri_p1_nn_mserd",
+            &[bw.h_left, bw.h_right, bw.b_left, bw.b_right],
+            Tol::coef(n),
+        );
+        assert_eq!(bw.treatment.as_deref(), Some("d"));
+
+        // one-sided compliance: no take-up left of the cutoff
+        let x = ds.df().column("x").unwrap().f64().unwrap().clone();
+        let d = ds
+            .df()
+            .column("d")
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap();
+        let d = d.f64().unwrap().clone();
+        let d1: Vec<f64> = x
+            .into_iter()
+            .zip(d.into_iter())
+            .map(|(x, d)| match (x, d) {
+                (Some(x), Some(d)) => d * if x >= 0.0 { 1.0 } else { 0.0 },
+                _ => f64::NAN,
+            })
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Series::new("d1".into(), d1)).unwrap();
+        let ds1 = Dataset::new(df);
+        let f1 = run_fuzzy_rd(&ds1, "yf", "x", "d1", 0.0, RdConfig::default()).unwrap();
+        let o = &f1.outcome_rd;
+        check
+            .vector(
+                "fuzzy_onesided_mserd",
+                &[o.h_left, o.h_right, o.b_left, o.b_right],
+                Tol::coef(n),
+            )
+            .scalar("fuzzy_onesided_coef_conv", f1.tau_fuzzy, Tol::coef(n))
+            .scalar("fuzzy_onesided_coef_bc", f1.tau_fuzzy_bc, Tol::coef(n))
+            .scalar("fuzzy_onesided_se_robust", f1.se_fuzzy_robust, Tol::se(n));
+        assert!(
+            f1.warnings
+                .iter()
+                .any(|w| w.contains("one-sided compliance")),
+            "{:?}",
+            f1.warnings
+        );
+        check.finish();
+    }
+
+    #[test]
+    fn test_rd_cer_differs_from_mse() {
+        use BandwidthMethod::*;
+        let ds = rd_sim();
+        let run = |p: usize, m: BandwidthMethod| {
+            run_rd(
+                &ds,
+                "y",
+                "x",
+                0.0,
+                sel(|c| {
+                    c.p = p;
+                    c.bwselect = m
+                }),
+            )
+            .unwrap()
+        };
+        let pairs = [
+            (MseRd, CerRd),
+            (MseTwo, CerTwo),
+            (MseSum, CerSum),
+            (MseComb1, CerComb1),
+            (MseComb2, CerComb2),
+        ];
+        for (p, list) in [(1usize, &pairs[..]), (2, &pairs[..1]), (0, &pairs[..1])] {
+            let f = 1000f64.powf(-(p as f64) / ((3 + p) * (3 + 2 * p)) as f64);
+            for &(m, c) in list {
+                let (mse, cer) = (run(p, m), run(p, c));
+                for (cs, ms) in [(cer.h_left, mse.h_left), (cer.h_right, mse.h_right)] {
+                    assert!((cs - ms * f).abs() <= 1e-12 * ms, "{m:?} p={p}: {cs} {ms}");
+                }
+                assert_eq!((cer.b_left, cer.b_right), (mse.b_left, mse.b_right));
+                if p > 0 {
+                    assert!(cer.h_left < 0.75 * mse.h_left, "{m:?} p={p}");
+                    assert_ne!(cer.tau_bc, mse.tau_bc);
+                } else {
+                    assert_eq!(cer.tau_bc, mse.tau_bc);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_rd_rejects_invalid_scaleregul() {
+        let ds = create_sharp_rd_dataset();
+        let fz = create_fuzzy_rd_dataset();
+        for v in [-1.0, f64::NAN] {
+            let c = sel(|c| c.scaleregul = v);
+            let m = spec_msg(run_rd(&ds, "outcome", "running", 0.0, c.clone()));
+            assert!(m.contains("scaleregul"), "{m}");
+            let m = match run_fuzzy_rd(&fz, "outcome", "running", "treatment", 0.0, c.clone()) {
+                Err(EconError::InvalidSpecification { message }) => message,
+                other => panic!("expected InvalidSpecification, got {:?}", other.is_ok()),
+            };
+            assert!(m.contains("scaleregul"), "{m}");
+            let m = spec_message(rd_bandwidth_with(&ds, "outcome", "running", None, 0.0, &c));
+            assert!(m.contains("scaleregul"), "{m}");
+        }
+        let m = spec_message(rd_bandwidth_with(
+            &ds,
+            "outcome",
+            "running",
+            None,
+            0.0,
+            &sel(|c| c.h = Some(0.5)),
+        ));
+        assert!(m.contains("rd_bandwidth_with selects h and b"), "{m}");
     }
 
     /// `create_sharp_rd_dataset` plus `t`: 0 left of the cutoff, 1 right of it.
