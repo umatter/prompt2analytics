@@ -58,7 +58,11 @@ ATC = E[Y(1) - Y(0) | A=0]
   treatment effect is not identified.
 - **Standard errors.** The bootstrap (`n_bootstrap` replicates, each refitting the outcome
   model; non-converged, separated and failed replicates are counted in warnings) is the
-  reference; its percentile intervals for the effect, risk ratio and odds ratio use R's type-7
+  reference. A replicate computes coefficients only: the linear model by the normal
+  equations without OLS's refinement step (the pivoted QR when the design is rank-deficient
+  or ill conditioned), the logistic model by TMLE's lean logit IRLS from the full-sample fit
+  (the shared GLM when a replicate separates, is aliased or does not converge, so those
+  counts are unchanged), the Poisson model by the shared GLM; its percentile intervals for the effect, risk ratio and odds ratio use R's type-7
   quantiles of the finite draws (`stats::robust::percentile_interval`). The delta-method and
   sandwich SEs are approximations on the treatment coefficient (CAUS-39, Tier 4), computed on
   the identified columns with a rank-checked inverse and a checked residual df. Normal

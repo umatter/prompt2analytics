@@ -31,7 +31,7 @@
 //! the treatment effect unidentified and is an error.
 //!
 //! Standard errors: the bootstrap (percentile intervals with R's type-7 quantiles) is the
-//! reference; the delta-method and sandwich SEs are approximations on the treatment
+//! reference (each replicate refits coefficients only; see `fit_replicate`); the delta-method and sandwich SEs are approximations on the treatment
 //! coefficient (CAUS-39, Tier 4), not stdReg's stacked estimating equations.
 //!
 //! # Estimands
@@ -117,13 +117,13 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmSpec, fit_glm, plogis};
-use crate::econometrics::tmle::check_binary_treatment;
+use crate::econometrics::tmle::{GlmControl, LeanStart, check_binary_treatment, lean_logit};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::xtx;
+use crate::linalg::matrix_ops::{xtx, xty};
 use crate::linalg::solve::{SingularPolicy, aliasing_message, sym_inverse};
 use crate::options::Choices;
-use crate::regression::ols::solve_ols;
+use crate::regression::ols::{normal_equations_inverse, solve_ols};
 use crate::resource;
 use crate::stats::robust::percentile_interval;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
@@ -1133,16 +1133,21 @@ fn check_treatment_identified(
     Ok(())
 }
 
+/// The outcome model's inverse link at the linear predictor `z`.
+fn inverse_link(z: f64, model_type: StdRegModel) -> f64 {
+    match model_type {
+        StdRegModel::Linear => z,
+        StdRegModel::Logistic => plogis(z),
+        // R's poisson()$linkinv: pmax(exp(eta), .Machine$double.eps)
+        StdRegModel::Poisson => z.exp().max(f64::EPSILON),
+    }
+}
+
 /// Predicted means; aliased (`NaN`) coefficients count as 0.
 fn predict(x: &Array2<f64>, beta: &Array1<f64>, model_type: StdRegModel) -> Array1<f64> {
     let b = beta.mapv(|v| if v.is_nan() { 0.0 } else { v });
     let z: Array1<f64> = x.dot(&b);
-    match model_type {
-        StdRegModel::Linear => z,
-        StdRegModel::Logistic => z.mapv(plogis),
-        // R's poisson()$linkinv: pmax(exp(eta), .Machine$double.eps)
-        StdRegModel::Poisson => z.mapv(|zi| zi.exp().max(f64::EPSILON)),
-    }
+    z.mapv(|zi| inverse_link(zi, model_type))
 }
 
 /// Compute the target estimand from counterfactual predictions.
@@ -1240,8 +1245,10 @@ fn draw_sd(draws: &[f64]) -> f64 {
     (ss / (draws.len() - 1).max(1) as f64).sqrt()
 }
 
-/// Compute bootstrap standard errors: every replicate refits the outcome model (a GLM from
-/// `start`, the full-sample coefficients with aliased ones set to 0).
+/// Compute bootstrap standard errors: every replicate refits the outcome model
+/// ([`fit_replicate`]; a GLM from `start`, the full-sample coefficients with aliased ones set
+/// to 0) on a design buffer that the replicates share, and standardises over the resample
+/// ([`resample_estimand`]).
 #[allow(clippy::too_many_arguments)]
 fn compute_bootstrap_se(
     y: &Array1<f64>,
@@ -1269,7 +1276,6 @@ fn compute_bootstrap_se(
     let mut boot_ey1s = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
     let mut boot_ey0s = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
     let (mut not_converged, mut separated, mut failed) = (0usize, 0usize, 0usize);
-    let dummy_names: Vec<&str> = (0..k_w - 1).map(|_| "x").collect();
     let names: Vec<String> = {
         let mut v = vec!["(Intercept)".to_string()];
         v.extend((1..k_w).map(|j| format!("x{j}")));
@@ -1277,12 +1283,29 @@ fn compute_bootstrap_se(
         v.extend((1..k_w).map(|j| format!("a:x{j}")));
         v
     };
+    // One resample's design `[w | a | a w]` and outcome, rewritten by every replicate.
+    let k = if include_interactions {
+        2 * k_w
+    } else {
+        k_w + 1
+    };
+    let what = "stdreg bootstrap design";
+    let mut x_boot = resource::try_zeros2(n, k, what)?;
+    let mut y_boot = Array1::from(resource::try_vec(n, 0.0, what)?);
+    let mut a_boot = resource::try_vec(n, 0.0, what)?;
+    let mut indices = resource::try_vec(n, 0usize, what)?;
+    let ctl = GlmControl {
+        epsilon: tolerance,
+        max_iter,
+    };
 
     for _ in 0..n_bootstrap {
         resource::checkpoint()?;
 
         // Resample with replacement
-        let indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
+        for i in indices.iter_mut() {
+            *i = rng.gen_range(0..n);
+        }
 
         // Check that bootstrap sample has both treated and control
         let n_t_boot = indices.iter().filter(|&&i| a[i] >= 0.5).count();
@@ -1290,34 +1313,36 @@ fn compute_bootstrap_se(
             continue;
         }
 
-        // Create bootstrap arrays
-        let y_boot: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
-        let a_boot: Array1<f64> = indices.iter().map(|&i| a[i]).collect();
-        let w_boot = w.select(Axis(0), &indices);
-
-        let (x_boot, _) =
-            build_design_matrix(&w_boot, &a_boot, &dummy_names, "a", include_interactions);
-
-        // Fit model
-        let fit = match fit_outcome_model(
-            &x_boot,
-            &y_boot,
-            model_type,
-            max_iter,
-            tolerance,
-            start.as_ref(),
-        )
-        .and_then(|f| {
-            check_treatment_identified(&f.aliased, &names, k_w, include_interactions, "a")
-                .map(|_| f)
-        }) {
-            Ok(f) => f,
-            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
-            Err(_) => {
-                failed += 1;
-                continue;
+        // The resample's design, as build_design_matrix lays it out
+        for (r, &i) in indices.iter().enumerate() {
+            let ai = a[i];
+            let wi = w.row(i);
+            let mut xr = x_boot.row_mut(r);
+            for j in 0..k_w {
+                xr[j] = wi[j];
             }
-        };
+            xr[k_w] = ai;
+            if include_interactions {
+                for j in 1..k_w {
+                    xr[k_w + j] = ai * wi[j];
+                }
+            }
+            y_boot[r] = y[i];
+            a_boot[r] = ai;
+        }
+
+        let fit =
+            match fit_replicate(&x_boot, &y_boot, model_type, ctl, start.as_ref()).and_then(|f| {
+                check_treatment_identified(&f.aliased, &names, k_w, include_interactions, "a")
+                    .map(|_| f)
+            }) {
+                Ok(f) => f,
+                Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
         if !fit.converged {
             not_converged += 1;
         }
@@ -1325,15 +1350,16 @@ fn compute_bootstrap_se(
             separated += 1;
         }
 
-        // Counterfactual predictions
-        let (x_1_boot, x_0_boot) =
-            create_counterfactual_matrices(&w_boot, n, k_w, include_interactions);
-        let y_hat_1_boot = predict(&x_1_boot, &fit.coefficients, model_type);
-        let y_hat_0_boot = predict(&x_0_boot, &fit.coefficients, model_type);
-
-        // Compute estimand
-        let (ate_boot, ey1_boot, ey0_boot) =
-            compute_estimand(&y_hat_1_boot, &y_hat_0_boot, &a_boot, estimand);
+        let (ate_boot, ey1_boot, ey0_boot) = resample_estimand(
+            w,
+            &indices,
+            &a_boot,
+            &fit.coefficients,
+            k_w,
+            include_interactions,
+            model_type,
+            estimand,
+        );
 
         if ate_boot.is_finite() {
             boot_ates.push(ate_boot);
@@ -1359,6 +1385,124 @@ fn compute_bootstrap_se(
         separated,
         failed,
     })
+}
+
+/// The coefficients of one bootstrap replicate and what the replicate counts.
+struct ReplicateFit {
+    /// `NaN` for aliased columns.
+    coefficients: Array1<f64>,
+    aliased: Vec<usize>,
+    converged: bool,
+    separation: bool,
+}
+
+/// One bootstrap replicate's outcome model, coefficients only (the replicate needs no
+/// fitted values, R-squared or warnings):
+///
+/// - Linear: the normal equations on a full-rank, well-conditioned design (OLS's decision,
+///   `normal_equations_inverse`) without OLS's refinement step, as the fixed-design
+///   bootstrap of `regression::ols` does: a replicate's coefficients then carry a relative
+///   error of order `eps / rcond` (at most about 1e-8 at the decision's threshold), far below
+///   the Monte Carlo error of the standard error. `solve_ols` (the pivoted QR) otherwise.
+/// - Logistic: `tmle::lean_logit` from `start` (glm.fit's deviance rule and iterates, without
+///   the shared GLM's covariance, deviances and warnings), and the shared GLM when the fit
+///   leaves that path (separation, aliasing, ill conditioning, no convergence), so those
+///   replicates are counted as before.
+/// - Poisson: the shared GLM.
+fn fit_replicate(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    model_type: StdRegModel,
+    ctl: GlmControl,
+    start: Option<&Array1<f64>>,
+) -> EconResult<ReplicateFit> {
+    let full = |fit: OutcomeFit| ReplicateFit {
+        coefficients: fit.coefficients,
+        aliased: fit.aliased,
+        converged: fit.converged,
+        separation: fit.separation,
+    };
+    match model_type {
+        StdRegModel::Linear => {
+            resource::checkpoint()?;
+            if let Some(normal) = normal_equations_inverse(x.view())? {
+                return Ok(ReplicateFit {
+                    coefficients: normal.inverse.dot(&xty(&x.view(), y)),
+                    aliased: Vec::new(),
+                    converged: true,
+                    separation: false,
+                });
+            }
+            let s = solve_ols(x.view(), y.view())?;
+            Ok(ReplicateFit {
+                coefficients: s.beta,
+                aliased: s.aliased,
+                converged: true,
+                separation: false,
+            })
+        }
+        StdRegModel::Logistic => {
+            let from = start.map_or(LeanStart::Mustart, |b| LeanStart::Coef(b.view()));
+            if let Some(fit) = lean_logit(x.view(), y.view(), None, from, ctl)? {
+                return Ok(ReplicateFit {
+                    coefficients: fit.coefficients,
+                    aliased: Vec::new(),
+                    converged: true,
+                    separation: false,
+                });
+            }
+            fit_outcome_model(x, y, model_type, ctl.max_iter, ctl.epsilon, start).map(full)
+        }
+        StdRegModel::Poisson => {
+            fit_outcome_model(x, y, model_type, ctl.max_iter, ctl.epsilon, start).map(full)
+        }
+    }
+}
+
+/// [`compute_estimand`] for one resample, from `w`'s rows `indices` and the treatment
+/// `a_boot` of the resample, without building the counterfactual designs: the linear
+/// predictor under A = 0 is `w_i b_w`, under A = 1 it adds `b_a` and the interaction terms.
+/// Aliased (`NaN`) coefficients count as 0, as in [`predict`].
+#[allow(clippy::too_many_arguments)]
+fn resample_estimand(
+    w: &Array2<f64>,
+    indices: &[usize],
+    a_boot: &[f64],
+    beta: &Array1<f64>,
+    k_w: usize,
+    include_interactions: bool,
+    model_type: StdRegModel,
+    estimand: StdRegEstimand,
+) -> (f64, f64, f64) {
+    let b = |j: usize| if beta[j].is_nan() { 0.0 } else { beta[j] };
+    let b_a = b(k_w);
+    let (mut s1, mut s0, mut m) = (0.0, 0.0, 0usize);
+    for (&i, &ai) in indices.iter().zip(a_boot) {
+        let keep = match estimand {
+            StdRegEstimand::ATE | StdRegEstimand::Levels => true,
+            StdRegEstimand::ATT => ai >= 0.5,
+            StdRegEstimand::ATC => ai < 0.5,
+        };
+        if !keep {
+            continue;
+        }
+        let wi = w.row(i);
+        let mut z0 = 0.0;
+        for j in 0..k_w {
+            z0 += wi[j] * b(j);
+        }
+        let mut z1 = z0 + b_a;
+        if include_interactions {
+            for j in 1..k_w {
+                z1 += wi[j] * b(k_w + j);
+            }
+        }
+        s1 += inverse_link(z1, model_type);
+        s0 += inverse_link(z0, model_type);
+        m += 1;
+    }
+    let (ey1, ey0) = (s1 / m as f64, s0 / m as f64);
+    (ey1 - ey0, ey1, ey0)
 }
 
 /// The percentile interval of the finite bootstrap draws (R's type-7 quantiles).
@@ -2299,6 +2443,84 @@ mod tests {
     }
 
     #[test]
+    fn test_stdreg_replicate_fit_matches_the_outcome_model() {
+        // A bootstrap replicate's coefficients-only fit (fit_replicate) and its standardisation
+        // without counterfactual designs (resample_estimand) against the full fit and
+        // compute_estimand on the counterfactual designs, on a resample of stdreg_sim.
+        let ds = stdreg_sim();
+        let (a, x1, x2) = (col(&ds, "a"), col(&ds, "x1"), col(&ds, "x2"));
+        let n = a.len();
+        let w = Array2::from_shape_fn((n, 3), |(i, j)| [1.0, x1[i], x2[i]][j]);
+        let a = Array1::from(a);
+        let idx: Vec<usize> = (0..n).map(|i| (i * 7 + i / 3) % n).collect();
+        let w_b = w.select(Axis(0), &idx);
+        let a_b = a.select(Axis(0), &idx);
+        let ctl = GlmControl {
+            epsilon: 1e-10,
+            max_iter: 100,
+        };
+        for (yname, model) in [
+            ("yc", StdRegModel::Linear),
+            ("yb", StdRegModel::Logistic),
+            ("yp", StdRegModel::Poisson),
+        ] {
+            let y = Array1::from(col(&ds, yname)).select(Axis(0), &idx);
+            for inter in [false, true] {
+                let (x, _) = build_design_matrix(&w_b, &a_b, &["x1", "x2"], "a", inter);
+                let full = fit_outcome_model(&x, &y, model, 100, 1e-10, None).unwrap();
+                let start = full.coefficients.mapv(|v| v * 0.9);
+                let rep = fit_replicate(&x, &y, model, ctl, Some(&start)).unwrap();
+                assert!(rep.converged && !rep.separation && rep.aliased.is_empty());
+                for (u, v) in rep.coefficients.iter().zip(&full.coefficients) {
+                    assert!(Tol::new(1e-8, 1e-10).allows(*u, *v), "{model:?} {u} vs {v}");
+                }
+                let (x1c, x0c) = create_counterfactual_matrices(&w_b, n, 3, inter);
+                let (p1, p0) = (
+                    predict(&x1c, &rep.coefficients, model),
+                    predict(&x0c, &rep.coefficients, model),
+                );
+                for est in [
+                    StdRegEstimand::ATE,
+                    StdRegEstimand::ATT,
+                    StdRegEstimand::ATC,
+                ] {
+                    let want = compute_estimand(&p1, &p0, &a_b, est);
+                    let got = resample_estimand(
+                        &w,
+                        &idx,
+                        a_b.as_slice().unwrap(),
+                        &rep.coefficients,
+                        3,
+                        inter,
+                        model,
+                        est,
+                    );
+                    let t = Tol::new(1e-12, 1e-14);
+                    assert!(
+                        t.allows(got.0, want.0)
+                            && t.allows(got.1, want.1)
+                            && t.allows(got.2, want.2),
+                        "{model:?} {est:?} {got:?} vs {want:?}"
+                    );
+                }
+            }
+        }
+        // a separated replicate leaves the lean logit and is counted as before
+        let ys = Array1::from(col(&ds, "ys")).select(Axis(0), &idx);
+        let (x, _) = build_design_matrix(&w_b, &a_b, &["x1", "x2"], "a", false);
+        let rep = fit_replicate(&x, &ys, StdRegModel::Logistic, ctl, None).unwrap();
+        assert!(rep.separation);
+        // an aliased covariate takes the QR and reports the column
+        let mut xa = Array2::<f64>::zeros((n, 5));
+        xa.slice_mut(ndarray::s![.., ..4]).assign(&x);
+        xa.column_mut(4)
+            .assign(&x.column(1).mapv(|v| 2.0 * v + 1.0));
+        let yc = Array1::from(col(&ds, "yc")).select(Axis(0), &idx);
+        let rep = fit_replicate(&xa, &yc, StdRegModel::Linear, ctl, None).unwrap();
+        assert_eq!(rep.aliased, vec![4]);
+    }
+
+    #[test]
     fn test_stdreg_aliased_treatment_is_an_error() {
         let ds = stdreg_sim();
         let a = col(&ds, "a");
@@ -2457,9 +2679,13 @@ mod tests {
             se_method: SEMethod::Sandwich,
             ..Default::default()
         };
+        // the message names the dataset row (0-based) and fits no propensity model
+        let first = a2.iter().position(|&v| v == 2.0).unwrap();
+        let e = run_stdreg(&with_col(&ds, "a2", a2), "yc", "a2", &["x1", "x2"], c).unwrap_err();
+        assert!(!e.to_string().contains("propensity"), "{e}");
         expect_invalid_spec(
-            run_stdreg(&with_col(&ds, "a2", a2), "yc", "a2", &["x1", "x2"], c).unwrap_err(),
-            "treatment 'a2' must be coded 0/1",
+            e,
+            &format!("treatment 'a2' must be coded 0/1 (0-based row {first} is 2)"),
         );
     }
 
