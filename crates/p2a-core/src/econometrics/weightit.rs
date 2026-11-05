@@ -5,8 +5,10 @@
 //!
 //! - **Logistic (PS)**: Standard propensity score weights from logistic regression
 //! - **Entropy Balancing (ebal)**: Exact mean balance via entropy minimization
-//! - **Energy Balancing**: Minimize energy distance between weighted distributions
-//! - **Stable Balancing**: Target stable weights with approximate balance
+//! - **Energy Balancing**: Minimize energy distance between weighted distributions, solved
+//!   exactly as a dense quadratic program for up to [`ENERGY_MAX_UNITS`] reweighted units
+//! - **Stable Balancing**: minimum-variance weights with exact mean balance (Zubizarreta 2015;
+//!   WeightIt optweight with tols = 0); approximate balance is `sbw()` with `balance_tol > 0`
 //!
 //! # Mathematical Background
 //!
@@ -176,8 +178,8 @@ pub struct WeightItConfig {
     /// for the balancing methods, as in WeightIt). Multiplies weights by P(D=1) for treated
     /// and P(D=0) for control
     pub stabilize: bool,
-    /// Trim extreme weights at this quantile (e.g., 0.99 trims at 1st and 99th percentile)
-    /// Set to 1.0 for no trimming (default: 1.0)
+    /// Trim extreme weights at this quantile (e.g., 0.99 trims at 1st and 99th percentile);
+    /// must be in (0.5, 1]. Set to 1.0 for no trimming (default: 1.0)
     pub trim_quantile: f64,
     /// Maximum iterations for iterative methods (default: 200)
     pub max_iter: usize,
@@ -534,6 +536,17 @@ pub fn weightit(
             message: format!(
                 "tolerance must be finite and positive; got {}",
                 config.tolerance
+            ),
+        });
+    }
+    if !(config.trim_quantile.is_finite()
+        && config.trim_quantile > 0.5
+        && config.trim_quantile <= 1.0)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "trim_quantile must be in (0.5, 1] (1 = no trimming; 0.99 trims at the 1st and 99th percentiles); got {}",
+                config.trim_quantile
             ),
         });
     }
@@ -1766,12 +1779,17 @@ pub(crate) mod dense_qp {
         if h == 0.0 { (1.0, 0.0) } else { (a / h, b / h) }
     }
 
-    /// Rotates columns `i` and `j` of `m`: (m_i, m_j) <- (c m_i + s m_j, -s m_i + c m_j).
-    fn rotate_cols(m: &mut Array2<f64>, i: usize, j: usize, c: f64, s: f64) {
-        for r in 0..m.nrows() {
-            let (a, b) = (m[[r, i]], m[[r, j]]);
-            m[[r, i]] = c * a + s * b;
-            m[[r, j]] = -s * a + c * b;
+    /// Rotates rows `i < j` of the row-major n x n buffer `m` (columns `i` and `j` of J, which
+    /// is stored transposed): (m_i, m_j) <- (c m_i + s m_j, -s m_i + c m_j).
+    fn rotate_rows(m: &mut [f64], n: usize, i: usize, j: usize, c: f64, s: f64) {
+        debug_assert!(i < j);
+        let (head, tail) = m.split_at_mut(j * n);
+        let ri = &mut head[i * n..(i + 1) * n];
+        let rj = &mut tail[..n];
+        for (a, b) in ri.iter_mut().zip(rj.iter_mut()) {
+            let (va, vb) = (*a, *b);
+            *a = c * va + s * vb;
+            *b = -s * va + c * vb;
         }
     }
 
@@ -1795,28 +1813,48 @@ pub(crate) mod dense_qp {
         if l.diag().iter().any(|v| !(v.is_finite() && *v > 0.0)) {
             return Ok(QpOutcome::NotPositiveDefinite);
         }
-        let mut j = resource::try_zeros2(n, n, "QP inverse factor")?;
-        for col in 0..n {
-            if col % 64 == 0 {
+        // J is stored transposed (`jt` = J' = L^{-1}, row-major), so every column of J the
+        // solver reads or rotates is a contiguous row of `jt`. Row i of L^{-1} is
+        // (e_i - sum_{k<i} L[i,k] row_k(L^{-1})) / L[i,i], nonzero in 0..=i.
+        let mut jt_arr = resource::try_zeros2(n, n, "QP inverse factor")?;
+        let jt = jt_arr
+            .as_slice_mut()
+            .expect("try_zeros2 returns a standard-layout array");
+        for i in 0..n {
+            if i % 64 == 0 {
                 resource::checkpoint()?;
             }
-            j[[col, col]] = 1.0 / l[[col, col]];
-            for i in (0..col).rev() {
-                let mut sum = 0.0;
-                for k in (i + 1)..=col {
-                    sum += l[[k, i]] * j[[k, col]];
+            let (done, rest) = jt.split_at_mut(i * n);
+            let row_i = &mut rest[..n];
+            let l_row = l.row(i);
+            for k in 0..i {
+                let lik = l_row[k];
+                if lik != 0.0 {
+                    let row_k = &done[k * n..k * n + k + 1];
+                    for (o, v) in row_i[..=k].iter_mut().zip(row_k) {
+                        *o -= lik * v;
+                    }
                 }
-                j[[i, col]] = -sum / l[[i, i]];
+            }
+            row_i[i] += 1.0;
+            let inv = 1.0 / l_row[i];
+            for o in row_i[..=i].iter_mut() {
+                *o *= inv;
             }
         }
         drop(l);
+        let row = |c2: usize| c2 * n..(c2 + 1) * n;
+        let dot =
+            |a2: &[f64], b2: &[f64]| -> f64 { a2.iter().zip(b2).map(|(u2, v2)| u2 * v2).sum() };
         // x = -J (J' a)
-        let jta: Vec<f64> = (0..n)
-            .map(|c2| (0..n).map(|r| j[[r, c2]] * a[r]).sum())
-            .collect();
-        let mut x: Vec<f64> = (0..n)
-            .map(|r| -(0..n).map(|c2| j[[r, c2]] * jta[c2]).sum::<f64>())
-            .collect();
+        let mut x = vec![0.0; n];
+        for c2 in 0..n {
+            let jc = &jt[row(c2)];
+            let jta = dot(jc, a);
+            for (xi, v) in x.iter_mut().zip(jc) {
+                *xi -= jta * v;
+            }
+        }
 
         let mut r_mat = resource::try_zeros2(n, n, "QP active-set factor")?;
         let mut active: Vec<usize> = Vec::new();
@@ -1879,12 +1917,14 @@ pub(crate) mod dense_qp {
             // Inner loop: steps towards satisfying constraint pc.
             loop {
                 // d = J' n_p; z = J[:, q..] d[q..]; r = R^{-1} d[..q]
-                let d: Vec<f64> = (0..n)
-                    .map(|c2| (0..n).map(|rr| j[[rr, c2]] * np[rr]).sum())
-                    .collect();
-                let z: Vec<f64> = (0..n)
-                    .map(|rr| (q..n).map(|c2| j[[rr, c2]] * d[c2]).sum())
-                    .collect();
+                let d: Vec<f64> = (0..n).map(|c2| dot(&jt[row(c2)], &np)).collect();
+                let mut z = vec![0.0; n];
+                for c2 in q..n {
+                    let dc = d[c2];
+                    for (zi, v) in z.iter_mut().zip(&jt[row(c2)]) {
+                        *zi += dc * v;
+                    }
+                }
                 let mut r = vec![0.0; q];
                 for i in (0..q).rev() {
                     let mut sum = d[i];
@@ -1935,7 +1975,7 @@ pub(crate) mod dense_qp {
                         let (cc, ss) = givens(dv[jj - 1], dv[jj]);
                         dv[jj - 1] = cc * dv[jj - 1] + ss * dv[jj];
                         dv[jj] = 0.0;
-                        rotate_cols(&mut j, jj - 1, jj, cc, ss);
+                        rotate_rows(jt, n, jj - 1, jj, cc, ss);
                     }
                     for i in 0..=q {
                         r_mat[[i, q]] = dv[i];
@@ -1970,7 +2010,7 @@ pub(crate) mod dense_qp {
                         r_mat[[jj + 1, col]] = -ss * a2 + cc * b2;
                     }
                     r_mat[[jj + 1, jj]] = 0.0;
-                    rotate_cols(&mut j, jj, jj + 1, cc, ss);
+                    rotate_rows(jt, n, jj, jj + 1, cc, ss);
                 }
                 for col in 0..n {
                     r_mat[[q - 1, col]] = 0.0;
@@ -2354,6 +2394,27 @@ mod tests {
             expect_spec(
                 weightit(&ds, "treat", &COVS, c).unwrap_err(),
                 &["tolerance"],
+            );
+        }
+    }
+
+    #[test]
+    fn test_weightit_rejects_bad_trim_quantile() {
+        // A trim_quantile at or below 0.5 inverted the bounds (every weight collapsed to one
+        // value), NaN skipped trimming silently, 0 clamped every weight to the maximum.
+        let ds = weighting_sim();
+        for q in [f64::NAN, f64::INFINITY, 0.5, 0.3, 0.0, -0.1, 1.01] {
+            let mut c = WeightItConfig::default();
+            c.trim_quantile = q;
+            let err = weightit(&ds, "treat", &COVS, c).unwrap_err();
+            expect_spec(err, &["trim_quantile", "(0.5, 1]"]);
+        }
+        for q in [0.99, 1.0] {
+            let mut c = WeightItConfig::default();
+            c.trim_quantile = q;
+            assert!(
+                weightit(&ds, "treat", &COVS, c).is_ok(),
+                "trim_quantile {q}"
             );
         }
     }
