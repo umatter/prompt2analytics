@@ -678,9 +678,10 @@ const OLS_REFINE_BELOW_RCOND: f64 = 1e-2;
 /// `(X'X)^{-1}` of a full-rank, well-conditioned design and whether solves with it take a
 /// refinement step (see [`OLS_REFINE_BELOW_RCOND`]).
 ///
-/// Built by [`normal_equations_inverse`]; the OLS fit ([`solve_ols`]) and the other
-/// least-squares fits that take OLS's solve decision (VAR, Granger) use it, so the
-/// thresholds and the refinement live here only.
+/// Built by [`normal_equations_inverse`]; the OLS fit ([`solve_ols`]) and every other
+/// least-squares fit that takes OLS's solve decision use it (panel FE and RE, HDFE, FEGLM,
+/// LLC, the GLM's IRLS, conditional and multinomial logit, GLS, sensemakr, VAR, Granger), so
+/// the thresholds and the refinement live here only.
 #[derive(Debug, Clone)]
 pub(crate) struct NormalInverse {
     /// `(X'X)^{-1}` (k x k), the unscaled covariance of the coefficients.
@@ -741,8 +742,9 @@ pub(crate) fn normal_equations_inverse(
 }
 
 /// [`normal_equations_inverse`] from a cross-product `X'X` the caller has accumulated
-/// (the GLM's IRLS builds `X'WX` in the pass that weights the rows). The caller ensures
-/// that the design has more rows than columns and at least one column.
+/// (the GLM's IRLS builds `X'WX` in the pass that weights the rows; `fit_ols` reuses the
+/// X'X it formed to certify that X is finite). The caller ensures that the design has more
+/// rows than columns and at least one column.
 pub(crate) fn normal_inverse_from_gram(
     gram: ndarray::ArrayView2<'_, f64>,
 ) -> EconResult<Option<NormalInverse>> {
