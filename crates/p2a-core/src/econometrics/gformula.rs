@@ -182,12 +182,30 @@ impl Default for GFormulaConfig {
 // Data Structures
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Discrete-time survival outcome, one entry per subject.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurvivalOutcome {
+    /// Last period the subject is observed in, 1-based (1..=T).
+    pub time: Vec<usize>,
+    /// true: the event occurred in period `time`; false: event-free through `time` (lost to
+    /// follow-up after `time`, or event-free at the end of follow-up when `time == T`).
+    pub event: Vec<bool>,
+}
+
+impl SurvivalOutcome {
+    /// Number of subjects with an event.
+    pub fn n_events(&self) -> usize {
+        self.event.iter().filter(|&&e| e).count()
+    }
+}
+
 /// Input data for the parametric g-formula.
 ///
-/// The data structure assumes:
-/// - All subjects are observed at all time points (balanced panel)
-/// - Time-varying covariates and treatments are indexed by time point
-/// - Outcome is observed at the final time point (end of follow-up)
+/// Subjects are rows; covariates and treatments are given per period (wide layout).
+/// End-of-follow-up data ([`GFormulaData::new`]) observe every subject in every period and
+/// the outcome at the end of follow-up. Survival data ([`GFormulaData::new_survival`]) carry
+/// each subject's last observed period and event indicator; cells of later periods are
+/// not used.
 #[derive(Debug, Clone)]
 pub struct GFormulaData {
     /// Baseline (time-invariant) covariates: n_subjects x n_baseline_vars
@@ -197,81 +215,271 @@ pub struct GFormulaData {
     /// Each matrix is n_subjects x n_time_varying_vars
     pub time_varying_covariates: Vec<Array2<f64>>,
 
-    /// Treatment at each time point: one vector per time point
-    /// Each vector is n_subjects x 1, values typically 0/1
+    /// Treatment at each time point: one vector per time point, coded 0/1
     pub treatments: Vec<Array1<f64>>,
 
-    /// Final outcome variable: n_subjects x 1
-    /// For binary: 0/1
-    /// For continuous: any real value
-    /// For survival: event indicator (1 = event occurred)
+    /// End-of-follow-up outcome: n_subjects x 1 (binary: 0/1; continuous: any finite
+    /// value); for survival data the event indicator (0/1).
     pub outcome: Array1<f64>,
+
+    /// Follow-up times and event indicators; `Some` for data built with
+    /// [`GFormulaData::new_survival`].
+    pub survival: Option<SurvivalOutcome>,
+
+    /// Names of the baseline covariates (model tables, warnings); default `B1`, `B2`, ...
+    pub baseline_names: Vec<String>,
+    /// Names of the time-varying covariates; default `L1`, `L2`, ...
+    pub time_varying_names: Vec<String>,
+    /// Name of the treatment; default `A`.
+    pub treatment_name: String,
+}
+
+fn spec_err(message: String) -> EconError {
+    EconError::InvalidSpecification { message }
+}
+
+fn no_subjects() -> EconError {
+    EconError::InsufficientData {
+        required: 1,
+        provided: 0,
+        context: "g-formula data have no subjects (rows)".into(),
+    }
+}
+
+/// Row and period counts of every input agree (also run on data built by literal).
+fn check_shapes(
+    baseline_covariates: &Array2<f64>,
+    time_varying_covariates: &[Array2<f64>],
+    treatments: &[Array1<f64>],
+    outcome_len: usize,
+) -> EconResult<()> {
+    let n = baseline_covariates.nrows();
+    if outcome_len != n {
+        return Err(spec_err(format!(
+            "Outcome length ({outcome_len}) does not match number of subjects ({n})"
+        )));
+    }
+    for (t, tvs) in time_varying_covariates.iter().enumerate() {
+        if tvs.nrows() != n {
+            return Err(spec_err(format!(
+                "Time-varying covariates at t={} have {} rows, expected {}",
+                t,
+                tvs.nrows(),
+                n
+            )));
+        }
+    }
+    for (t, a) in treatments.iter().enumerate() {
+        if a.len() != n {
+            return Err(spec_err(format!(
+                "Treatment at t={} has length {}, expected {}",
+                t,
+                a.len(),
+                n
+            )));
+        }
+    }
+    if treatments.len() != time_varying_covariates.len() {
+        return Err(spec_err(format!(
+            "Number of treatment time points ({}) does not match \
+             number of time-varying covariate time points ({})",
+            treatments.len(),
+            time_varying_covariates.len()
+        )));
+    }
+    if n == 0 {
+        return Err(no_subjects());
+    }
+    if let Some(first) = time_varying_covariates.first() {
+        let k0 = first.ncols();
+        for (t, tvs) in time_varying_covariates.iter().enumerate().skip(1) {
+            if tvs.ncols() != k0 {
+                return Err(spec_err(format!(
+                    "g-formula data: time-varying covariates in period {} have {} columns, \
+                     period 1 has {k0}",
+                    t + 1,
+                    tvs.ncols()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn default_names(prefix: &str, k: usize) -> Vec<String> {
+    (1..=k).map(|j| format!("{prefix}{j}")).collect()
+}
+
+/// Number of periods a subject is followed through: `time` for survival data, every
+/// period otherwise.
+fn followed_through(survival: Option<&SurvivalOutcome>, i: usize, t_max: usize) -> usize {
+    survival.map_or(t_max, |s| s.time[i])
+}
+
+/// Finite covariate and outcome cells and 0/1 treatments. For survival data only the
+/// periods a subject is followed through are read (`survival` gives them).
+fn check_cells(data: &GFormulaData) -> EconResult<()> {
+    let survival = data.survival.as_ref();
+    let n = data.n_subjects();
+    let t_max = data.n_time_points();
+    let surv_note = |i: usize| match survival {
+        Some(s) => format!(" (the subject is followed through period {})", s.time[i]),
+        None => String::new(),
+    };
+    let prefix = if survival.is_some() {
+        "g-formula survival data"
+    } else {
+        "g-formula data"
+    };
+    for (j, col) in data.baseline_covariates.columns().into_iter().enumerate() {
+        if let Some(i) = col.iter().position(|v| !v.is_finite()) {
+            return Err(spec_err(format!(
+                "g-formula data: baseline covariate {} ({}) is not finite in row {}",
+                j + 1,
+                data.baseline_names[j],
+                i + 1
+            )));
+        }
+    }
+    for t in 0..t_max {
+        let l = &data.time_varying_covariates[t];
+        for i in 0..n {
+            if t >= followed_through(survival, i, t_max) {
+                continue;
+            }
+            for j in 0..l.ncols() {
+                if !l[[i, j]].is_finite() {
+                    return Err(spec_err(format!(
+                        "{prefix}: time-varying covariate {} ({}) is not finite in row {}, \
+                         period {}{}",
+                        j + 1,
+                        data.time_varying_names[j],
+                        i + 1,
+                        t + 1,
+                        surv_note(i)
+                    )));
+                }
+            }
+            let a = data.treatments[t][i];
+            if a != 0.0 && a != 1.0 {
+                return Err(spec_err(format!(
+                    "{prefix}: the treatment in period {} must be 0 or 1; row {} has {a}{}",
+                    t + 1,
+                    i + 1,
+                    surv_note(i)
+                )));
+            }
+        }
+    }
+    if survival.is_none()
+        && let Some(i) = data.outcome.iter().position(|v| !v.is_finite())
+    {
+        return Err(spec_err(format!(
+            "g-formula data: the outcome is not finite in row {}",
+            i + 1
+        )));
+    }
+    Ok(())
 }
 
 impl GFormulaData {
-    /// Create new g-formula data.
+    /// Create end-of-follow-up g-formula data.
+    ///
+    /// Refuses mismatched dimensions, zero subjects (`InsufficientData`), time-varying
+    /// matrices of unequal width, non-finite covariate or outcome cells and treatments
+    /// other than 0/1 (`InvalidSpecification` naming the column, row and period, 1-based).
     pub fn new(
         baseline_covariates: Array2<f64>,
         time_varying_covariates: Vec<Array2<f64>>,
         treatments: Vec<Array1<f64>>,
         outcome: Array1<f64>,
     ) -> EconResult<Self> {
-        let n = baseline_covariates.nrows();
-
-        // Validate dimensions
-        if outcome.len() != n {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Outcome length ({}) does not match number of subjects ({})",
-                    outcome.len(),
-                    n
-                ),
-            });
-        }
-
-        for (t, tvs) in time_varying_covariates.iter().enumerate() {
-            if tvs.nrows() != n {
-                return Err(EconError::InvalidSpecification {
-                    message: format!(
-                        "Time-varying covariates at t={} have {} rows, expected {}",
-                        t,
-                        tvs.nrows(),
-                        n
-                    ),
-                });
-            }
-        }
-
-        for (t, a) in treatments.iter().enumerate() {
-            if a.len() != n {
-                return Err(EconError::InvalidSpecification {
-                    message: format!(
-                        "Treatment at t={} has length {}, expected {}",
-                        t,
-                        a.len(),
-                        n
-                    ),
-                });
-            }
-        }
-
-        if treatments.len() != time_varying_covariates.len() {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Number of treatment time points ({}) does not match \
-                     number of time-varying covariate time points ({})",
-                    treatments.len(),
-                    time_varying_covariates.len()
-                ),
-            });
-        }
-
-        Ok(Self {
+        check_shapes(
+            &baseline_covariates,
+            &time_varying_covariates,
+            &treatments,
+            outcome.len(),
+        )?;
+        let data = Self::assemble(
             baseline_covariates,
             time_varying_covariates,
             treatments,
             outcome,
-        })
+            None,
+        );
+        check_cells(&data)?;
+        Ok(data)
+    }
+
+    fn assemble(
+        baseline_covariates: Array2<f64>,
+        time_varying_covariates: Vec<Array2<f64>>,
+        treatments: Vec<Array1<f64>>,
+        outcome: Array1<f64>,
+        survival: Option<SurvivalOutcome>,
+    ) -> Self {
+        let n_tv = time_varying_covariates.first().map_or(0, |m| m.ncols());
+        Self {
+            baseline_names: default_names("B", baseline_covariates.ncols()),
+            time_varying_names: default_names("L", n_tv),
+            treatment_name: "A".to_string(),
+            baseline_covariates,
+            time_varying_covariates,
+            treatments,
+            outcome,
+            survival,
+        }
+    }
+
+    /// Names for reports. Lengths must match the data; names must be non-empty and
+    /// distinct, and none may be `(Intercept)` or `t` (reserved by the hazard model).
+    pub fn with_names(
+        mut self,
+        baseline: &[&str],
+        time_varying: &[&str],
+        treatment: &str,
+    ) -> EconResult<Self> {
+        if baseline.len() != self.n_baseline_covars() {
+            return Err(spec_err(format!(
+                "g-formula data: expected {} baseline names, got {}",
+                self.n_baseline_covars(),
+                baseline.len()
+            )));
+        }
+        if time_varying.len() != self.n_time_varying_covars() {
+            return Err(spec_err(format!(
+                "g-formula data: expected {} time-varying names, got {}",
+                self.n_time_varying_covars(),
+                time_varying.len()
+            )));
+        }
+        let all: Vec<&str> = baseline
+            .iter()
+            .chain(time_varying.iter())
+            .copied()
+            .chain(std::iter::once(treatment))
+            .collect();
+        if all.iter().any(|s| s.trim().is_empty()) {
+            return Err(spec_err("g-formula data: names must not be empty".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for s in &all {
+            if *s == "(Intercept)" || *s == "t" || !seen.insert(*s) {
+                return Err(spec_err(format!(
+                    "g-formula data: duplicate or reserved name '{s}' \
+                     ('(Intercept)' and 't' are reserved)"
+                )));
+            }
+        }
+        self.baseline_names = baseline.iter().map(|s| s.to_string()).collect();
+        self.time_varying_names = time_varying.iter().map(|s| s.to_string()).collect();
+        self.treatment_name = treatment.to_string();
+        Ok(self)
+    }
+
+    /// Whether the data hold a survival outcome (built with [`GFormulaData::new_survival`]).
+    pub fn is_survival(&self) -> bool {
+        self.survival.is_some()
     }
 
     /// Get the number of subjects.
@@ -540,37 +748,10 @@ struct OutcomeModel {
 /// - Hernan & Robins (2020), Causal Inference: What If, Chapter 21
 /// - McGrath et al. (2020), Patterns 1(3), 100008
 pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<GFormulaResult> {
+    validate_inputs(data, &config)?;
     let n = data.n_subjects();
     let t_max = data.n_time_points();
     let mut warnings = Vec::new();
-
-    // Validate configuration
-    if config.n_simulations == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Number of simulations must be at least 1".to_string(),
-        });
-    }
-    if config.n_bootstrap == 1 {
-        return Err(EconError::InvalidSpecification {
-            message: "n_bootstrap must be 0 (no bootstrap) or at least 2; got 1".to_string(),
-        });
-    }
-    if config.max_iter == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "max_iter must be at least 1; got 0".to_string(),
-        });
-    }
-    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
-        return Err(EconError::InvalidSpecification {
-            message: format!("tolerance must be finite and > 0; got {}", config.tolerance),
-        });
-    }
-
-    if t_max == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Data must have at least one time point".to_string(),
-        });
-    }
 
     if n < 10 {
         warnings.push(format!(
@@ -758,6 +939,64 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
         simulated_intervention: outcomes_intervention,
         bootstrap_rd: bootstrap_results.iter().map(|(rd, _, _)| *rd).collect(),
     })
+}
+
+/// Configuration and data checks run before any model is fitted.
+fn validate_inputs(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<()> {
+    if config.n_simulations == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "Number of simulations must be at least 1".to_string(),
+        });
+    }
+    if config.n_bootstrap == 1 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_bootstrap must be 0 (no bootstrap) or at least 2; got 1".to_string(),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1; got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tolerance must be finite and > 0; got {}", config.tolerance),
+        });
+    }
+    if data.n_time_points() == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "Data must have at least one time point".to_string(),
+        });
+    }
+    // A literal bypasses the constructors: re-check the shapes (cheap) and the subject count.
+    check_shapes(
+        &data.baseline_covariates,
+        &data.time_varying_covariates,
+        &data.treatments,
+        data.outcome.len(),
+    )?;
+    if data.baseline_names.len() != data.n_baseline_covars()
+        || data.time_varying_names.len() != data.n_time_varying_covars()
+    {
+        return Err(spec_err(format!(
+            "g-formula data: {} baseline and {} time-varying names for {} and {} covariates",
+            data.baseline_names.len(),
+            data.time_varying_names.len(),
+            data.n_baseline_covars(),
+            data.n_time_varying_covars()
+        )));
+    }
+    if let Some(s) = &data.survival
+        && (s.time.len() != data.n_subjects() || s.event.len() != data.n_subjects())
+    {
+        return Err(spec_err(format!(
+            "g-formula survival data: {} times and {} events for {} subjects",
+            s.time.len(),
+            s.event.len(),
+            data.n_subjects()
+        )));
+    }
+    Ok(())
 }
 
 /// Convenience function with default configuration.
@@ -1271,53 +1510,39 @@ fn bootstrap_gformula(
     Ok(successful_results)
 }
 
-/// Resample data by indices.
+/// Resample data by indices. The source data are valid, so the copy is assembled directly
+/// (names and survival times carried along) instead of being re-validated.
 fn resample_data(data: &GFormulaData, indices: &[usize]) -> EconResult<GFormulaData> {
     let n = indices.len();
-
-    // Resample baseline
-    let mut baseline = Array2::zeros((n, data.n_baseline_covars()));
-    for (new_i, &old_i) in indices.iter().enumerate() {
-        for j in 0..data.n_baseline_covars() {
-            baseline[[new_i, j]] = data.baseline_covariates[[old_i, j]];
+    let take_rows = |m: &Array2<f64>| -> EconResult<Array2<f64>> {
+        let mut out = resource::try_zeros2(n, m.ncols(), "g-formula bootstrap sample")?;
+        for (new_i, &old_i) in indices.iter().enumerate() {
+            out.row_mut(new_i).assign(&m.row(old_i));
         }
-    }
-
-    // Resample time-varying covariates
-    let time_varying: Vec<Array2<f64>> = data
+        Ok(out)
+    };
+    let take = |v: &Array1<f64>| -> Array1<f64> { indices.iter().map(|&i| v[i]).collect() };
+    let baseline_covariates = take_rows(&data.baseline_covariates)?;
+    let time_varying_covariates = data
         .time_varying_covariates
         .iter()
-        .map(|tvs| {
-            let mut new_tvs = Array2::zeros((n, tvs.ncols()));
-            for (new_i, &old_i) in indices.iter().enumerate() {
-                for j in 0..tvs.ncols() {
-                    new_tvs[[new_i, j]] = tvs[[old_i, j]];
-                }
-            }
-            new_tvs
-        })
-        .collect();
-
-    // Resample treatments
-    let treatments: Vec<Array1<f64>> = data
-        .treatments
-        .iter()
-        .map(|a| {
-            let mut new_a = Array1::zeros(n);
-            for (new_i, &old_i) in indices.iter().enumerate() {
-                new_a[new_i] = a[old_i];
-            }
-            new_a
-        })
-        .collect();
-
-    // Resample outcome
-    let mut outcome = Array1::zeros(n);
-    for (new_i, &old_i) in indices.iter().enumerate() {
-        outcome[new_i] = data.outcome[old_i];
-    }
-
-    GFormulaData::new(baseline, time_varying, treatments, outcome)
+        .map(take_rows)
+        .collect::<EconResult<Vec<_>>>()?;
+    let treatments = data.treatments.iter().map(take).collect();
+    let survival = data.survival.as_ref().map(|s| SurvivalOutcome {
+        time: indices.iter().map(|&i| s.time[i]).collect(),
+        event: indices.iter().map(|&i| s.event[i]).collect(),
+    });
+    Ok(GFormulaData {
+        baseline_covariates,
+        time_varying_covariates,
+        treatments,
+        outcome: take(&data.outcome),
+        survival,
+        baseline_names: data.baseline_names.clone(),
+        time_varying_names: data.time_varying_names.clone(),
+        treatment_name: data.treatment_name.clone(),
+    })
 }
 
 /// Compute bootstrap confidence interval using percentile method.
@@ -1725,6 +1950,93 @@ mod tests {
         println!("Always treat risk: {}", result_always.risk_intervention);
         println!("Never treat risk: {}", result_never.risk_intervention);
         assert!(diff > 0.0 || diff < 1.0); // Just check it doesn't crash
+    }
+
+    fn expect_insufficient(err: EconError, provided: usize) {
+        assert!(
+            matches!(err, EconError::InsufficientData { provided: p, .. } if p == provided),
+            "got {err:?}"
+        );
+    }
+
+    fn expect_invalid(err: EconError, needles: &[&str]) {
+        let msg = err.to_string();
+        assert!(
+            matches!(err, EconError::InvalidSpecification { .. }),
+            "got {err:?}"
+        );
+        for n in needles {
+            assert!(msg.contains(n), "message {msg:?} lacks {n:?}");
+        }
+    }
+
+    #[test]
+    fn test_gformula_rejects_zero_rows() {
+        // CAUS-65: before, new() accepted 0 rows and run_gformula panicked in gen_range(0..0).
+        let r = GFormulaData::new(
+            Array2::zeros((0, 1)),
+            vec![Array2::zeros((0, 1))],
+            vec![Array1::zeros(0)],
+            Array1::zeros(0),
+        );
+        expect_insufficient(r.unwrap_err(), 0);
+    }
+
+    #[test]
+    fn test_run_gformula_guards_zero_rows() {
+        // A literal bypasses new(); run_gformula must still refuse it (no panic).
+        let data = GFormulaData {
+            baseline_covariates: Array2::zeros((0, 1)),
+            time_varying_covariates: vec![Array2::zeros((0, 1))],
+            treatments: vec![Array1::zeros(0)],
+            outcome: Array1::zeros(0),
+            survival: None,
+            baseline_names: vec!["B1".into()],
+            time_varying_names: vec!["L1".into()],
+            treatment_name: "A".into(),
+        };
+        let mut cfg = GFormulaConfig::default();
+        cfg.n_simulations = 10;
+        cfg.n_bootstrap = 0;
+        expect_insufficient(run_gformula(&data, cfg).unwrap_err(), 0);
+    }
+
+    #[test]
+    fn test_gformula_data_rejects_malformed_cells() {
+        let n = 6;
+        let ok_b = || Array2::from_shape_fn((n, 2), |(i, j)| (i * 3 + j) as f64 * 0.37 - 1.1);
+        let ok_l = || Array2::from_shape_fn((n, 1), |(i, _)| (i as f64 * 0.61).sin());
+        let ok_a = || Array1::from(vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0]);
+        let ok_y = || Array1::from(vec![0.3, 1.2, 0.8, -0.4, 1.9, 0.1]);
+        let mut b = ok_b();
+        b[[3, 1]] = f64::NAN;
+        expect_invalid(
+            GFormulaData::new(b, vec![ok_l()], vec![ok_a()], ok_y()).unwrap_err(),
+            &["B2", "row 4", "not finite"],
+        );
+        let mut a = ok_a();
+        a[4] = 0.5;
+        expect_invalid(
+            GFormulaData::new(ok_b(), vec![ok_l()], vec![a], ok_y()).unwrap_err(),
+            &["treatment", "period 1", "0 or 1", "row 5"],
+        );
+        let mut y = ok_y();
+        y[0] = f64::INFINITY;
+        expect_invalid(
+            GFormulaData::new(ok_b(), vec![ok_l()], vec![ok_a()], y).unwrap_err(),
+            &["outcome", "row 1"],
+        );
+        expect_invalid(
+            GFormulaData::new(
+                ok_b(),
+                vec![ok_l(), Array2::zeros((n, 2))],
+                vec![ok_a(), ok_a()],
+                ok_y(),
+            )
+            .unwrap_err(),
+            &["period 2", "2 columns", "period 1 has 1"],
+        );
+        assert!(GFormulaData::new(ok_b(), vec![ok_l()], vec![ok_a()], ok_y()).is_ok());
     }
 
     #[test]
