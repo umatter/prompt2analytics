@@ -3327,6 +3327,11 @@ fn unvec_cm(v: &Array1<f64>, n_t: usize, n: usize) -> Array2<f64> {
 
 /// Factors and loadings of `U` (T x N): `F = sqrt(T) U_svd[:, :r]`, `Lambda = U'F / T`,
 /// `FE = F Lambda'`.
+///
+/// The leading left singular vectors come from the symmetric eigendecomposition of the
+/// smaller Gram matrix (`U U'` when T <= N, else `U'U` with `u_k = U v_k / s_k`), as
+/// gsynth's `panel_factor` does; an SVD of `U` is the fallback when a needed singular value
+/// of `U'U` is numerically zero.
 fn gs_pca(u: &Array2<f64>, r: usize) -> EconResult<(Array2<f64>, Array2<f64>, Array2<f64>)> {
     crate::resource::checkpoint()?;
     let (n_t, n) = u.dim();
@@ -3337,19 +3342,49 @@ fn gs_pca(u: &Array2<f64>, r: usize) -> EconResult<(Array2<f64>, Array2<f64>, Ar
             Array2::zeros((n_t, n)),
         ));
     }
-    let mat = crate::linalg::matrix_ops::ndarray_to_faer(&u.view());
-    let svd = mat
-        .thin_svd()
-        .map_err(|e| EconError::Computation(format!("gsynth factor SVD failed: {e:?}")))?;
-    let uu = svd.U();
-    if uu.ncols() < r {
+    if r > n_t.min(n) {
         return Err(EconError::Computation(format!(
             "gsynth factor SVD returned {} singular vectors for {r} factors",
-            uu.ncols()
+            n_t.min(n)
         )));
     }
+    fn eig_err<E: std::fmt::Debug>(e: E) -> EconError {
+        EconError::Computation(format!("gsynth factor SVD failed: {e:?}"))
+    }
     let scale = (n_t as f64).sqrt();
-    let f = Array2::from_shape_fn((n_t, r), |(t, k)| scale * uu[(t, k)]);
+    let f = if n_t <= n {
+        let gram = u.dot(&u.t());
+        let eig = crate::linalg::matrix_ops::ndarray_to_faer(&gram.view())
+            .self_adjoint_eigen(faer::Side::Lower)
+            .map_err(eig_err)?;
+        let vecs = eig.U();
+        // eigenvalues ascending: the largest r are the last columns
+        Array2::from_shape_fn((n_t, r), |(t, k)| scale * vecs[(t, n_t - 1 - k)])
+    } else {
+        let gram = u.t().dot(u);
+        let eig = crate::linalg::matrix_ops::ndarray_to_faer(&gram.view())
+            .self_adjoint_eigen(faer::Side::Lower)
+            .map_err(eig_err)?;
+        let lam = eig.S().column_vector();
+        let lmax = lam[n - 1];
+        if lmax > 0.0 && lam[n - r] > f64::EPSILON * n as f64 * lmax {
+            let vecs = eig.U();
+            let mut f = Array2::<f64>::zeros((n_t, r));
+            for k in 0..r {
+                let c = n - 1 - k;
+                let v = Array1::from_shape_fn(n, |i| vecs[(i, c)]);
+                let s = lam[c].sqrt();
+                f.column_mut(k).assign(&(u.dot(&v) * (scale / s)));
+            }
+            f
+        } else {
+            let svd = crate::linalg::matrix_ops::ndarray_to_faer(&u.view())
+                .thin_svd()
+                .map_err(eig_err)?;
+            let uu = svd.U();
+            Array2::from_shape_fn((n_t, r), |(t, k)| scale * uu[(t, k)])
+        }
+    };
     let lambda = u.t().dot(&f) / n_t as f64;
     let fe = f.dot(&lambda.t());
     Ok((f, lambda, fe))
