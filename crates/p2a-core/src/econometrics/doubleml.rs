@@ -1,96 +1,84 @@
 //! Double/Debiased Machine Learning (DML) for causal effect estimation.
 //!
-//! DML uses Neyman-orthogonal moment conditions combined with sample splitting
-//! (cross-fitting) to achieve root-n consistent and asymptotically normal
-//! estimates of treatment effects, even when using flexible ML methods for
-//! nuisance parameter estimation.
+//! DML combines Neyman-orthogonal scores with cross-fitting: each nuisance function is
+//! predicted for the observations of one fold by a learner trained on the other folds, and
+//! the target parameter solves the empirical score built from those out-of-fold
+//! predictions (Chernozhukov et al. 2018). The models and scores are DoubleML's
+//! (Bach et al. 2022, 2024).
 //!
-//! # Partially Linear Regression Model (PLR)
+//! # Models and scores
 //!
-//! The primary model implemented is the Partially Linear Model (PLR):
+//! `psi = psi_a theta + psi_b`; theta solves `mean(psi) = 0` and `J = mean(psi_a)`.
 //!
-//! ```text
-//! Y = theta_0 * D + g_0(X) + zeta    (outcome equation)
-//! D = m_0(X) + V                      (treatment equation)
+//! | Model | Nuisances | Score | Estimand |
+//! |---|---|---|---|
+//! | PLR ([`run_double_ml()`]) | `l = E[Y\|X]`, `m = E[D\|X]` | `(Y - l - theta (D - m)) (D - m)` | theta (partialling out) |
+//! | IRM ([`run_double_ml()`]) | `g0 = E[Y\|D=0,X]`, `g1 = E[Y\|D=1,X]`, `m = P(D=1\|X)` | `g1 - g0 + D (Y - g1)/m - (1 - D)(Y - g0)/(1 - m) - theta` | ATE |
+//! | PLIV ([`run_double_ml_iv()`]) | `l = E[Y\|X]`, `r = E[D\|X]`, `m = E[Z\|X]` | `(Y - l - theta (D - r)) (Z - m)` | theta (IV, partialling out) |
+//! | IIVM ([`run_double_ml_iv()`]) | `g0`, `g1` = `E[Y\|Z=z,X]`, `r0`, `r1` = `P(D=1\|Z=z,X)`, `m = P(Z=1\|X)` | `psi_b = g1 - g0 + Z (Y - g1)/m - (1 - Z)(Y - g0)/(1 - m)`, `psi_a = -(r1 - r0 + Z (D - r1)/m - (1 - Z)(D - r0)/(1 - m))` | LATE |
 //!
-//! where:
-//!   E[zeta|D,X] = 0  (mean independence)
-//!   E[V|X] = 0       (mean independence)
-//! ```
+//! IRM's and IIVM's propensity `m` is bounded to `[trim, 1 - trim]` (DoubleML's
+//! `trimming_threshold`, default 0.01). IRM and IIVM need a treatment (and IIVM an
+//! instrument) coded exactly 0/1.
 //!
-//! # Orthogonal Score Function
+//! # Learners
 //!
-//! The orthogonal (Neyman-orthogonal) score for the PLR model is:
+//! Regression nuisances use `MLMethod`: OLS (OLS's solve decision: the normal equations on a
+//! well-conditioned design, R's pivoted QR otherwise; aliased covariates are reported and
+//! predict as 0, as `predict.lm`), lasso (glmnet coordinate descent at `lambda`,
+//! standardized, `thresh` [`DML_GLMNET_THRESH`]) or ridge (the closed form of glmnet's ridge
+//! objective at `lambda`, standardized; no iteration). At `lambda = 0` both are OLS. Binary
+//! nuisances (IRM's `m`; IIVM's `r0`, `r1`, `m`) are logistic regressions; a binary nuisance
+//! whose training outcome has no variation (IIVM's `r0` under one-sided noncompliance) is
+//! predicted as that constant, with a note.
 //!
-//! ```text
-//! psi(W; theta, eta) = (Y - l_0(X) - theta*(D - m_0(X))) * (D - m_0(X))
+//! # Folds, inference, diagnostics
 //!
-//! where:
-//!   l_0(X) = E[Y|X] = theta_0 * m_0(X) + g_0(X)
-//!   m_0(X) = E[D|X]
-//! ```
+//! Folds are the user's labels (`DoubleMLConfig::folds`) or a ChaCha8 shuffle seeded by
+//! `seed` ([`DML_DEFAULT_SEED`] when `None`). Scores are pooled over folds (`dml2`):
+//! `se = sqrt(mean(psi^2) / J^2 / n)`, the p-value is `2 Phi(-|theta / se|)` and the 95% CI
+//! `theta -/+ qnorm(0.975) se`. Every nuisance reports its RMSE and R² over its out-of-fold
+//! predictions ([`NuisanceFit`]; g0, g1, r0, r1 over their own arm). `jacobian` is `-J`:
+//! `E[(D - m)^2]` for PLR, 1 for IRM, `E[(D - r)(Z - m)]` for PLIV and the first stage
+//! `-E[psi_a]` for IIVM.
 //!
-//! The orthogonality condition is E[psi(W; theta_0, eta_0)] = 0.
-//! The key property is that the derivative of E[psi] with respect to eta
-//! evaluated at the true values is zero (Neyman-orthogonality).
+//! # Differences from DoubleML
 //!
-//! # Cross-Fitting Procedure
-//!
-//! To avoid overfitting bias from using the same data for both nuisance
-//! estimation and treatment effect estimation:
-//!
-//! 1. Split data into K folds (default K=5)
-//! 2. For each fold k:
-//!    a. Train nuisance models (l_0, m_0) on data NOT in fold k
-//!    b. Predict nuisance values for observations IN fold k
-//! 3. Compute orthogonal scores using cross-fitted predictions
-//! 4. Estimate theta by solving the empirical moment condition
-//!
-//! # Variance Estimation
-//!
-//! The influence function for the PLR model is:
-//!
-//! ```text
-//! IF(W) = psi(W; theta_0, eta_0) / J
-//!
-//! where J = E[(D - m_0(X))^2] (the Jacobian)
-//! ```
-//!
-//! Variance is estimated as:
-//! ```text
-//! Var(theta_hat) = (1/n) * E[IF(W)^2] = (1/n) * E[psi^2] / J^2
-//! ```
+//! One repetition (`n_rep = 1`) and `dml2` only; the ATE and LATE scores only (no ATTE);
+//! a fixed `lambda` with no learner tuning; PLR's `m` (and PLIV's `r`, `m`) always by the
+//! regression learner, also for a 0/1 treatment; the constant-target rule above instead of
+//! DoubleML's `subgroups` option; glmnet always standardized.
 //!
 //! # References
 //!
-//! - Chernozhukov, V., Chetverikov, D., Demirer, M., Duflo, E., Hansen, C.,
-//!   Newey, W., & Robins, J. (2018). "Double/debiased machine learning for
-//!   treatment and structural parameters." *The Econometrics Journal*, 21(1),
-//!   C1-C68. https://doi.org/10.1111/ectj.12097
-//!
-//! - Chernozhukov, V., Chetverikov, D., Demirer, M., Duflo, E., Hansen, C., &
-//!   Newey, W. (2017). "Double/Debiased/Neyman Machine Learning of Treatment
-//!   Effects." *American Economic Review*, 107(5), 261-265.
-//!
-//! - Bach, P., Chernozhukov, V., Kurz, M. S., & Spindler, M. (2022).
-//!   "DoubleML - An Object-Oriented Implementation of Double Machine Learning
-//!   in Python." *Journal of Machine Learning Research*, 23(53), 1-6.
-//!   https://jmlr.org/papers/v23/21-0862.html
-//!
-//! - R package `DoubleML`: https://docs.doubleml.org/
-//! - Python package `doubleml`: https://docs.doubleml.org/stable/
+//! - Chernozhukov, V., Chetverikov, D., Demirer, M., Duflo, E., Hansen, C., Newey, W., &
+//!   Robins, J. (2018). "Double/debiased machine learning for treatment and structural
+//!   parameters." *The Econometrics Journal*, 21(1), C1-C68.
+//!   https://doi.org/10.1111/ectj.12097
+//! - Bach, P., Chernozhukov, V., Kurz, M. S., & Spindler, M. (2022). "DoubleML - An
+//!   Object-Oriented Implementation of Double Machine Learning in Python." *Journal of
+//!   Machine Learning Research*, 23(53), 1-6.
+//! - Bach, P., Chernozhukov, V., Kurz, M. S., Spindler, M., & Klaassen, S. (2024).
+//!   "DoubleML: An Object-Oriented Implementation of Double Machine Learning in R."
+//!   *Journal of Statistical Software*, 108(3).
+//! - Friedman, J., Hastie, T., & Tibshirani, R. (2010). "Regularization paths for
+//!   generalized linear models via coordinate descent." *Journal of Statistical Software*,
+//!   33(1), 1-22.
 //!
 //! # Example
 //!
-//! ```ignore
-//! use p2a_core::econometrics::{run_double_ml, DoubleMLConfig, DMLModelType};
-//!
-//! // Estimate treatment effect using PLR model with 5-fold cross-fitting
-//! let config = DoubleMLConfig::default();
-//! let result = run_double_ml(&y, &d, &x, config)?;
-//!
-//! println!("Treatment effect: {:.4} (SE: {:.4})", result.theta, result.se);
-//! println!("95% CI: [{:.4}, {:.4}]", result.ci_lower, result.ci_upper);
+//! ```
+//! use ndarray::{Array1, Array2};
+//! use p2a_core::econometrics::{DoubleMLConfig, MLMethod, run_double_ml};
+//! let n = 40;
+//! let x = Array2::from_shape_fn((n, 2), |(i, j)| (((i * (7 + 2 * j) + 3 * j) % 11) as f64) / 11.0);
+//! let d = Array1::from_shape_fn(n, |i| x[[i, 0]] + (((i * 5) % 7) as f64) / 7.0);
+//! let y = Array1::from_shape_fn(n, |i| 0.5 * d[i] + x[[i, 1]] + (((i * 3) % 5) as f64) / 5.0);
+//! let mut config = DoubleMLConfig::default();
+//! config.ml_method = MLMethod::Lasso;
+//! let result = run_double_ml(&y.view(), &d.view(), &x.view(), config).unwrap();
+//! assert!(result.theta.is_finite() && result.se > 0.0);
+//! assert_eq!(result.nuisance.len(), 2);
 //! ```
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
@@ -2025,10 +2013,11 @@ mod tests {
     }
 
     // =========================================================================
-    // Validation tests (test_validate_* prefix)
+    // DGP recovery (property tests, not R pins)
     // =========================================================================
 
-    /// Validate PLR model recovers known treatment effect from a linear DGP.
+    /// DGP recovery (property test, not an R pin): PLR recovers a known treatment effect
+    /// from a linear DGP.
     ///
     /// DGP (linear, so OLS nuisance models are correctly specified):
     ///   X1, X2 ~ Uniform(0,1)
@@ -2038,7 +2027,7 @@ mod tests {
     /// True theta = 0.5. With n=1000 and linear nuisance, cross-fitted OLS
     /// should recover theta to within ~0.1 of the true value.
     #[test]
-    fn test_validate_doubleml_plr_parameter_recovery() {
+    fn test_doubleml_plr_recovers_dgp() {
         let (y, d, x) = create_plr_test_data(1000, 99);
         let true_theta = 0.5;
 
@@ -2092,9 +2081,10 @@ mod tests {
         );
     }
 
-    /// Validate that cross-fitting actually uses K folds and scores are computed.
+    /// DGP recovery (property test, not an R pin): cross-fitting uses K folds and computes
+    /// one score per observation.
     #[test]
-    fn test_validate_doubleml_crossfitting_structure() {
+    fn test_doubleml_crossfitting_structure() {
         let (y, d, x) = create_plr_test_data(500, 77);
 
         for n_folds in [2, 3, 5] {
@@ -2142,12 +2132,13 @@ mod tests {
         }
     }
 
-    /// Validate IRM model recovers known ATE from a binary treatment DGP.
+    /// DGP recovery (property test, not an R pin): IRM recovers a known ATE from a binary
+    /// treatment DGP.
     ///
     /// True ATE = 0.5. With n=1000 and linear nuisance models, should be
     /// recovered within ~0.3 (wider tolerance for binary treatment).
     #[test]
-    fn test_validate_doubleml_irm_parameter_recovery() {
+    fn test_doubleml_irm_recovers_dgp() {
         let (y, d, x) = create_irm_test_data(1000, 55);
         let true_ate = 0.5;
 
@@ -2191,10 +2182,9 @@ mod tests {
         );
     }
 
-    /// Validate DML with zero treatment effect correctly produces theta near 0
-    /// and a non-significant p-value.
+    /// DGP recovery (property test, not an R pin): with no treatment effect theta is near 0.
     #[test]
-    fn test_validate_doubleml_null_effect() {
+    fn test_doubleml_null_effect_recovers_dgp() {
         use rand::Rng;
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -2500,17 +2490,16 @@ mod tests {
             .unwrap_or_else(|| panic!("no nuisance {name}"))
     }
 
-    fn plr_case(ml: MLMethod) -> (p2a_validation::Case, DoubleMLResult) {
-        let (case, ds) = crate::test_support::load_case("doubleml_models");
-        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
-        let r = run_double_ml(
+    /// PLR on the case data with the case folds.
+    fn plr_case(ds: &Dataset, ml: MLMethod) -> DoubleMLResult {
+        let (y, d, x) = (col(ds, "y"), col(ds, "dcont"), covariates(ds));
+        run_double_ml(
             &y.view(),
             &d.view(),
             &x.view(),
-            with_folds(DMLModelType::PLR, ml, case_folds(&ds)),
+            with_folds(DMLModelType::PLR, ml, case_folds(ds)),
         )
-        .unwrap();
-        (case, r)
+        .unwrap()
     }
 
     /// The PLR keys every learner reports, at the given tolerances.
@@ -2537,7 +2526,8 @@ mod tests {
 
     #[test]
     fn test_validate_doubleml_plr_ols() {
-        let (case, r) = plr_case(MLMethod::OLS);
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let r = plr_case(&ds, MLMethod::OLS);
         let n = r.n_obs;
         check_plr(
             &case,
@@ -2555,7 +2545,8 @@ mod tests {
 
     #[test]
     fn test_validate_doubleml_plr_lasso() {
-        let (case, r) = plr_case(MLMethod::Lasso);
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let r = plr_case(&ds, MLMethod::Lasso);
         let nd = &r.nuisance_diagnostics;
         Check::new(&case)
             .scalar("plr_lasso_theta_tight", r.theta, TIGHT)
@@ -2571,7 +2562,8 @@ mod tests {
 
     #[test]
     fn test_validate_doubleml_plr_ridge() {
-        let (case, r) = plr_case(MLMethod::Ridge);
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let r = plr_case(&ds, MLMethod::Ridge);
         let n = r.n_obs;
         let nd = &r.nuisance_diagnostics;
         // the closed form is the exact minimiser: README tolerances against *_tight
@@ -2783,22 +2775,22 @@ mod tests {
         }
     }
 
-    fn irm_case(ml: MLMethod) -> (p2a_validation::Case, DoubleMLResult) {
-        let (case, ds) = crate::test_support::load_case("doubleml_models");
-        let (y, d, x) = (col(&ds, "yb"), col(&ds, "dbin"), covariates(&ds));
-        let r = run_double_ml(
+    /// IRM on the case data with the case folds.
+    fn irm_case(ds: &Dataset, ml: MLMethod) -> DoubleMLResult {
+        let (y, d, x) = (col(ds, "yb"), col(ds, "dbin"), covariates(ds));
+        run_double_ml(
             &y.view(),
             &d.view(),
             &x.view(),
-            with_folds(DMLModelType::IRM, ml, case_folds(&ds)),
+            with_folds(DMLModelType::IRM, ml, case_folds(ds)),
         )
-        .unwrap();
-        (case, r)
+        .unwrap()
     }
 
     #[test]
     fn test_validate_doubleml_irm() {
-        let (case, r) = irm_case(MLMethod::OLS);
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let r = irm_case(&ds, MLMethod::OLS);
         let n = r.n_obs;
         let (g0, g1, m) = (nuis(&r, "g0"), nuis(&r, "g1"), nuis(&r, "m"));
         let nd = &r.nuisance_diagnostics;
@@ -2835,7 +2827,8 @@ mod tests {
 
     #[test]
     fn test_validate_doubleml_irm_lasso() {
-        let (case, r) = irm_case(MLMethod::Lasso);
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let r = irm_case(&ds, MLMethod::Lasso);
         let n = r.n_obs;
         let g0 = nuis(&r, "g0");
         Check::new(&case)
