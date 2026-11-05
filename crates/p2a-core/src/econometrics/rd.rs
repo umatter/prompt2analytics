@@ -1563,11 +1563,12 @@ struct Resolved {
 }
 
 /// The bandwidths of a fit: h given or selected by `config.bwselect` (rdbwselect, with the
-/// treatment `t` of a fuzzy design); b given, `h / rho`, or selected.
+/// treatment `t` of a fuzzy design); b given, `h / rho`, or selected. The columns are
+/// made contiguous only when the selector runs.
 fn resolve_bandwidths(
-    x: &[f64],
-    y: &[f64],
-    t: Option<&[f64]>,
+    x: &ArrayView1<f64>,
+    y: &ArrayView1<f64>,
+    t: Option<&ArrayView1<f64>>,
     cutoff: f64,
     config: &RdConfig,
 ) -> EconResult<Resolved> {
@@ -1587,10 +1588,13 @@ fn resolve_bandwidths(
             selection: None,
         });
     }
+    let xs = as_slice(x, "RD running variable")?;
+    let ys = as_slice(y, "RD outcome")?;
+    let ts = t.map(|t| as_slice(t, "RD treatment")).transpose()?;
     let sel = rdbwselect(
-        x,
-        y,
-        t,
+        &xs,
+        &ys,
+        ts.as_deref(),
         cutoff,
         config.bwselect,
         &BwSelectOptions::from_config(config),
@@ -1616,11 +1620,11 @@ fn resolve_bandwidths(
 
 /// A contiguous slice of a column view (one copy, under the allocation ceiling, when the
 /// view is strided).
-fn as_slice<'a>(v: &'a ArrayView1<'_, f64>) -> EconResult<std::borrow::Cow<'a, [f64]>> {
+fn as_slice<'a>(v: &'a ArrayView1<'_, f64>, what: &str) -> EconResult<std::borrow::Cow<'a, [f64]>> {
     match v.as_slice() {
         Some(s) => Ok(std::borrow::Cow::Borrowed(s)),
         None => {
-            let mut owned = crate::resource::try_with_capacity(v.len(), "RD running variable")?;
+            let mut owned = crate::resource::try_with_capacity(v.len(), what)?;
             owned.extend(v.iter().copied());
             Ok(std::borrow::Cow::Owned(owned))
         }
@@ -1681,12 +1685,7 @@ fn fit_rd(
     let q = config.q.unwrap_or(p + 1);
 
     // Bandwidths: given or selected as rdbwselect; b given, h / rho or selected.
-    let resolved = {
-        let xs = as_slice(&x)?;
-        let ys = as_slice(&cols[0])?;
-        let ts = cols.get(1).map(as_slice).transpose()?;
-        resolve_bandwidths(&xs, &ys, ts.as_deref(), cutoff, config)?
-    };
+    let resolved = resolve_bandwidths(&x, &cols[0], cols.get(1), cutoff, config)?;
     let ((h_left, h_right), (b_left, b_right)) = (resolved.h, resolved.b);
 
     let left = select_side(x, cols, cutoff, true, h_left, b_left, config.kernel)?;
@@ -1963,11 +1962,11 @@ pub fn rd_bandwidth_with(
         request = request.numeric(t);
     }
     let cols = request.na(NaPolicy::Omit).extract()?;
-    let y = cols.numeric(outcome);
-    let x = cols.numeric(running_var);
-    let t = treatment.map(|t| cols.numeric(t));
+    let y = ArrayView1::from(cols.numeric(outcome));
+    let x = ArrayView1::from(cols.numeric(running_var));
+    let t = treatment.map(|t| ArrayView1::from(cols.numeric(t)));
 
-    let resolved = resolve_bandwidths(x, y, t, cutoff, config)?;
+    let resolved = resolve_bandwidths(&x, &y, t.as_ref(), cutoff, config)?;
     let sel = resolved.selection.ok_or_else(|| {
         EconError::Internal("rd_bandwidth_with: the bandwidths were not selected".to_string())
     })?;
@@ -2865,6 +2864,48 @@ mod tests {
             "{:?}",
             r.map(|r| r.tau_conventional)
         );
+    }
+
+    /// A strided outcome is copied (and named) only when the selector needs a slice.
+    #[test]
+    fn test_rd_strided_columns_copied_only_for_selection() {
+        let mut s = 7u64;
+        let n = 200;
+        let x: Vec<f64> = (0..n).map(|i| -1.0 + 2.0 * i as f64 / n as f64).collect();
+        // Row-major n x 2: column 0 is a strided view.
+        let mut m = Array2::<f64>::zeros((n, 2));
+        for (i, &xi) in x.iter().enumerate() {
+            m[[i, 0]] = 1.0 + 0.5 * xi + if xi >= 0.0 { 0.8 } else { 0.0 } + lcg(&mut s) - 0.5;
+            m[[i, 1]] = lcg(&mut s);
+        }
+        let xv = ArrayView1::from(&x[..]);
+        let y = m.column(0);
+        assert!(y.as_slice().is_none());
+
+        // Selection: the outcome copy is the first allocation and names its column.
+        let r = crate::resource::with_alloc_ceiling(Some(64), || {
+            fit_rd(xv, &[y], 0.0, &RdConfig::default()).map(|f| f.h)
+        });
+        match r {
+            Err(EconError::ResourceLimit(m)) => assert!(m.contains("RD outcome"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // A given h never copies the columns: the fit is the same as on a contiguous copy.
+        let config = RdConfig {
+            h: Some(0.5),
+            ..Default::default()
+        };
+        let yc = y.to_owned();
+        let a = fit_rd(xv, &[y], 0.0, &config).unwrap();
+        let b = fit_rd(xv, &[yc.view()], 0.0, &config).unwrap();
+        assert_eq!(a.jumps(0), b.jumps(0));
+        let r = crate::resource::with_alloc_ceiling(Some(64), || {
+            fit_rd(xv, &[y], 0.0, &config).map(|f| f.h)
+        });
+        match r {
+            Err(EconError::ResourceLimit(m)) => assert!(!m.contains("RD outcome"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     fn lcg(s: &mut u64) -> f64 {

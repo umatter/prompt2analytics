@@ -360,6 +360,12 @@ fn validate_options(opts: &BwSelectOptions) -> EconResult<usize> {
 
 /// `(num / den)^rate`; NaN (R's `min()` would propagate it) and a zero bandwidth are errors.
 fn pw(num: f64, den: f64, rate: f64, method: &str, what: &str) -> EconResult<f64> {
+    nonzero(pw_finite(num, den, rate, method, what)?, method, what)
+}
+
+/// `(num / den)^rate` with only the NaN check: the pilot stage d is checked for zero after
+/// rdbwselect's bwcheck has raised it to the minimum bandwidth.
+fn pw_finite(num: f64, den: f64, rate: f64, method: &str, what: &str) -> EconResult<f64> {
     let v = (num / den).powf(rate);
     if v.is_nan() {
         return Err(EconError::Computation(format!(
@@ -367,6 +373,11 @@ fn pw(num: f64, den: f64, rate: f64, method: &str, what: &str) -> EconResult<f64
              are degenerate"
         )));
     }
+    Ok(v)
+}
+
+/// A zero bandwidth is an error naming the stage.
+fn nonzero(v: f64, method: &str, what: &str) -> EconResult<f64> {
     if v <= 0.0 {
         return Err(EconError::Computation(format!(
             "bandwidth selection ({method}) produced a zero bandwidth ({what}); the pilot fits \
@@ -816,6 +827,8 @@ impl Selector {
         }
         let h_v = self.c_bw;
         self.v_base(side)?;
+        // Taken out so v_part_from can borrow self mutably (warnings); v_base() has just
+        // filled it, so the error branch is unreachable, and the base is put back either way.
         let base = self.vbase[side]
             .take()
             .ok_or_else(|| EconError::Computation("rdbwselect: pilot window missing".into()))?;
@@ -929,10 +942,12 @@ impl Selector {
         for side in 0..2 {
             let range = self.sides[side].range;
             let cd = self.stage(side, q + 1, q + 1, q + 2, range, 0.0)?;
-            let mut d = pw(cd.v, cd.b * cd.b, cd.rate, method, "pilot bandwidth d")?.min(range);
+            let mut d =
+                pw_finite(cd.v, cd.b * cd.b, cd.rate, method, "pilot bandwidth d")?.min(range);
             if self.bwcheck {
                 d = d.max(self.sides[side].bw_min);
             }
+            let d = nonzero(d, method, "pilot bandwidth d")?;
             let cb = self.stage(side, q, p + 1, q + 1, d, sr)?;
             let b = pw(cb.v, cb.b * cb.b + sr * cb.r, cb.rate, method, "b")?.min(range);
             let ch = self.stage(side, p, 0, q, b, sr)?;
@@ -955,7 +970,7 @@ impl Selector {
         let cdl = self.stage(0, q + 1, q + 1, q + 2, range_l, 0.0)?;
         let cdr = self.stage(1, q + 1, q + 1, q + 2, range_r, 0.0)?;
         let bd = op(cdl.b, cdr.b);
-        let mut d = pw(
+        let mut d = pw_finite(
             cdl.v + cdr.v,
             bd * bd,
             cdl.rate,
@@ -966,6 +981,7 @@ impl Selector {
         if self.bwcheck {
             d = d.max(self.sides[0].bw_min).max(self.sides[1].bw_min);
         }
+        let d = nonzero(d, method, "pilot bandwidth d")?;
         let cbl = self.stage(0, q, p + 1, q + 1, d, sr)?;
         let cbr = self.stage(1, q, p + 1, q + 1, d, sr)?;
         let bb = op(cbl.b, cbr.b);
@@ -1412,8 +1428,13 @@ mod tests {
             .collect();
         for method in [BandwidthMethod::MseRd, BandwidthMethod::MseTwo] {
             match rdbwselect(&x, &y, None, 0.0, method, &o()) {
+                // The zero pilot d is raised to the minimum bandwidth (bwcheck), as in
+                // rdbwselect; the next stage, b, has a zero variance term too.
                 Err(EconError::Computation(msg)) => assert!(
-                    msg.contains(&format!("({}) produced a zero bandwidth", method.name())),
+                    msg.contains(&format!(
+                        "({}) produced a zero bandwidth (b)",
+                        method.name()
+                    )),
                     "{msg}"
                 ),
                 other => panic!("expected a zero-bandwidth error, got {other:?}"),
