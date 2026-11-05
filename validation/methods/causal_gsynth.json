@@ -3,9 +3,9 @@
   "methods": [
     {
       "id": "causal_gsynth",
-      "name": "Generalized synthetic control: interactive fixed effects (Xu 2017), LOO cross-validation, matrix completion",
+      "name": "Generalized synthetic control: interactive fixed effects (Xu 2017), LOO cross-validation, matrix completion, bootstrap",
       "category": "econometrics",
-      "reference": "gsynth::gsynth 1.4.0 (estimator 'gsynth' | 'mc') = fect::fect 2.4.5 (method 'gsynth' | 'mc', cv.method 'loo'); written-out IFE, MC, LOO and deterministic-fold MC CV checked against them in validation/r/cases/causal_gsynth.R",
+      "reference": "gsynth::gsynth 1.4.0 (estimator 'gsynth' | 'mc') = fect::fect 2.4.5 (method 'gsynth' | 'mc', cv.method 'loo'); written-out IFE, MC, LOO and deterministic-fold MC CV and both bootstraps (gsynth's own draws replayed) checked against them in validation/r/cases/causal_gsynth.R",
       "doc": "validation/econometrics/gsynth.md",
       "cases": [
         "gsynth_simdata",
@@ -20,7 +20,9 @@
         "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_staggered_cv",
         "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_mc",
         "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_mc_lambda_grid",
-        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_mc_cv"
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_mc_cv",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_bootstrap_parametric_replay",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_bootstrap_unit_replay"
       ],
       "quantities": [
         "ATT",
@@ -31,7 +33,8 @@
         "sigma2",
         "pre-treatment RMSE",
         "LOO CV MSPE by r and selected r",
-        "MC: ATT, beta, rank, lambda grid, CV MSPE by lambda, selected lambda"
+        "MC: ATT, beta, rank, lambda grid, CV MSPE by lambda, selected lambda",
+        "bootstrap replicates, SE, normal CI, p, event-time SEs (replayed draws)"
       ],
       "tolerance": "n = 1500 / 720 cells: closed-form fits (no covariates) at validation/README.md (coefficients 1e-10 / 1e-8, statistics 1e-8 / 1e-6 relative); iterative fits pinned at tolerance 1e-12 to the tight references at Tol::iterative(1e-8) (IFE, MC at lambda 0.3) and 1e-7 (MC at lambda 0.01); MC CV at tolerance 1e-8 against the solution at Tol::iterative(max(1e-6, 10 x gap)) (MSPE) and max(1e-5, 10 x gap) (ATT); fect's LOO MSPEs (fitted at 1e-3) and gsynth's default-tolerance ATT as cross-checks at 1e-3 and 5e-4",
       "deviations": [
@@ -54,6 +57,11 @@
           "finding": "CAUS-44",
           "quantity": "inputs",
           "note": "collinear or FE-absorbed covariates, r beyond the identification bound, singular treated-loading regressions and non-0/1 or reversing treatments are errors (fect: beta = 0 with a warning, r reset, NA)"
+        },
+        {
+          "finding": "CAUS-44",
+          "quantity": "bootstrap draws",
+          "note": "seeded ChaCha8 streams per (seed, phase, replication) instead of R's RNG; pinned by replaying gsynth's own draws"
         }
       ],
       "supersedes_legacy": []

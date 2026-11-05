@@ -2476,22 +2476,55 @@ impl fmt::Display for GsynthResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Generalized Synthetic Control (gsynth)")?;
         writeln!(f, "=======================================")?;
+        match self.lambda {
+            Some(l) => writeln!(
+                f,
+                "Estimator: {} (matrix completion, lambda = {l:.4})",
+                self.estimator
+            )?,
+            None => writeln!(
+                f,
+                "Estimator: {} (Xu 2017; factors from the never-treated units)",
+                self.estimator
+            )?,
+        }
+        writeln!(f, "Fixed effects: {}", self.force)?;
         writeln!(
             f,
-            "Treated units: {}, Control units: {}",
-            self.n_treated, self.n_control
+            "Treated units: {}, Control units: {}; Pre-treatment periods: {}, Post-treatment \
+             periods: {}",
+            self.n_treated, self.n_control, self.n_pre_periods, self.n_post_periods
         )?;
-        writeln!(
-            f,
-            "Pre-treatment periods: {}, Post-treatment periods: {}",
-            self.n_pre_periods, self.n_post_periods
-        )?;
-        writeln!(f, "Factors: {}", self.n_factors)?;
-        writeln!(
-            f,
-            "Estimator: {:?}, Fixed Effects: {:?}",
-            self.estimator, self.force
-        )?;
+        if self.lambda.is_some() {
+            write!(f, "Rank of the low-rank component: {}", self.n_factors)?;
+            if let (Some(lo), Some(hi)) = (self.cv_lambda.first(), self.cv_lambda.last()) {
+                write!(
+                    f,
+                    " [lambda selected by k-fold cross-validation over {} values, {:.4}..{:.4}]",
+                    self.cv_lambda.len(),
+                    lo.0,
+                    hi.0
+                )?;
+            }
+        } else {
+            write!(f, "Factors: {}", self.n_factors)?;
+            if let (Some(lo), Some(hi)) = (self.cv_mspe.first(), self.cv_mspe.last()) {
+                write!(
+                    f,
+                    " [selected by leave-one-out cross-validation over r = {}..{}]",
+                    lo.0, hi.0
+                )?;
+            }
+        }
+        writeln!(f)?;
+        if let Some(c) = &self.convergence {
+            writeln!(
+                f,
+                "Converged: {} ({} iterations)",
+                if c.converged { "yes" } else { "no" },
+                c.iterations
+            )?;
+        }
         writeln!(f)?;
 
         writeln!(f, "AVERAGE TREATMENT EFFECT ON TREATED (ATT)")?;
@@ -2501,10 +2534,17 @@ impl fmt::Display for GsynthResult {
             write!(f, " (SE: {:.4})", se)?;
         }
         if let Some((lo, hi)) = self.att_ci {
-            write!(f, " [95% CI: {:.4}, {:.4}]", lo, hi)?;
+            let level = self.bootstrap.as_ref().map_or(0.95, |b| b.level);
+            write!(f, " [{}% CI: {:.4}, {:.4}]", level * 100.0, lo, hi)?;
+        }
+        if let Some(b) = &self.bootstrap {
+            let kind = match b.method {
+                GsynthBootstrapMethod::Parametric => "parametric",
+                GsynthBootstrapMethod::Nonparametric => "unit",
+            };
+            write!(f, " ({kind} bootstrap, {} replications)", b.replications)?;
         }
         writeln!(f)?;
-
         if let Some(p) = self.p_value {
             writeln!(f, "P-value: {:.4}", p)?;
         }
@@ -2513,17 +2553,66 @@ impl fmt::Display for GsynthResult {
         if !self.beta.is_empty() {
             writeln!(f, "COVARIATE COEFFICIENTS")?;
             writeln!(f, "----------------------")?;
-            for (i, name) in self.covariate_names.iter().enumerate() {
-                writeln!(f, "{:<15} {:>10.4}", name, self.beta[i])?;
+            for (name, b) in self.covariate_names.iter().zip(&self.beta) {
+                writeln!(f, "{:<15} {:>10.4}", name, b)?;
             }
             writeln!(f)?;
         }
 
-        writeln!(f, "DYNAMIC EFFECTS (relative to treatment)")?;
-        writeln!(f, "---------------------------------------")?;
-        writeln!(f, "{:<10} {:>10}", "Period", "Effect")?;
+        if !self.cv_mspe.is_empty() {
+            writeln!(f, "CROSS-VALIDATION (MSPE by r)")?;
+            for (r, m) in &self.cv_mspe {
+                writeln!(f, "  r = {:<4} {:>12.6}", r, m)?;
+            }
+            writeln!(f)?;
+        }
+        if !self.cv_lambda.is_empty() {
+            writeln!(f, "CROSS-VALIDATION (MSPE by lambda)")?;
+            for (l, m) in &self.cv_lambda {
+                writeln!(f, "  lambda = {:<12.6} {:>12.6}", l, m)?;
+            }
+            writeln!(f)?;
+        }
+
+        writeln!(f, "FIT")?;
+        writeln!(f, "  sigma2: {:.6}", self.sigma2)?;
+        writeln!(f, "  Pre-treatment MSPE (treated): {:.6}", self.pre_mspe)?;
+        writeln!(f)?;
+
+        writeln!(
+            f,
+            "DYNAMIC EFFECTS (period relative to treatment; 1 = first treated period)"
+        )?;
+        writeln!(
+            f,
+            "-----------------------------------------------------------------------"
+        )?;
+        let with_se = !self.dynamic_se.is_empty();
+        if with_se {
+            writeln!(
+                f,
+                "{:<10} {:>10} {:>10} {:>5}",
+                "Period", "Effect", "SE", "N"
+            )?;
+        } else {
+            writeln!(f, "{:<10} {:>10} {:>5}", "Period", "Effect", "N")?;
+        }
         for (period, effect) in &self.dynamic_effects {
-            writeln!(f, "{:<10} {:>10.4}", period, effect)?;
+            let n = self
+                .dynamic_counts
+                .iter()
+                .find(|(e, _)| e == period)
+                .map_or(0, |(_, c)| *c);
+            if with_se {
+                let se = self
+                    .dynamic_se
+                    .iter()
+                    .find(|(e, _)| e == period)
+                    .map_or(f64::NAN, |(_, s)| *s);
+                writeln!(f, "{:<10} {:>10.4} {:>10.4} {:>5}", period, effect, se, n)?;
+            } else {
+                writeln!(f, "{:<10} {:>10.4} {:>5}", period, effect, n)?;
+            }
         }
 
         let notes = notes_text(self);
@@ -2696,13 +2785,6 @@ pub fn run_gsynth(
         }
     }
 
-    if config.bootstrap_se {
-        return Err(EconError::NotImplemented(
-            "gsynth bootstrap standard errors are not implemented yet; set bootstrap_se = false"
-                .to_string(),
-        ));
-    }
-
     let mut warnings = Vec::new();
     let est = if matches!(config.estimator, GsynthEstimator::MatrixCompletion) {
         mc_estimate(&m, &config, &covariate_names, &mut warnings)?
@@ -2850,11 +2932,68 @@ pub fn run_gsynth(
     }
     let pre_mspe = pre_sum / pre_n as f64;
 
+    let (mut att_se, mut att_ci, mut p_value) = (None, None, None);
+    let (mut dynamic_se, mut bootstrap) = (Vec::new(), None);
+    if config.bootstrap_se {
+        let seed = config.seed.unwrap_or(GSYNTH_DEFAULT_SEED);
+        let b = config.n_bootstrap;
+        let draws = SeededDraws {
+            seed,
+            m: &m,
+            replications: b,
+        };
+        let (reps, method) = match est.lambda {
+            Some(lambda) => {
+                let spec = McSpec {
+                    lambda,
+                    force: config.force,
+                    tolerance: config.tolerance,
+                    max_iter: config.max_iter,
+                };
+                (
+                    nonparametric_bootstrap(&m, &spec, &covariate_names, &draws, b)?,
+                    GsynthBootstrapMethod::Nonparametric,
+                )
+            }
+            None => {
+                let spec = IfeSpec {
+                    r: est.n_factors,
+                    force: config.force,
+                    tolerance: config.tolerance,
+                    max_iter: config.max_iter,
+                };
+                let base = gsynth_estimate(&m, &spec, &covariate_names)?;
+                (
+                    parametric_bootstrap(&m, &spec, &covariate_names, &base, &draws, b)?,
+                    GsynthBootstrapMethod::Parametric,
+                )
+            }
+        };
+        let summary = bootstrap_summary(est.att, &dynamic_effects, &reps, config.level)?;
+        if reps.failed > 0 {
+            warnings.push(format!(
+                "{} of {b} bootstrap replications failed and were dropped",
+                reps.failed
+            ));
+        }
+        att_se = Some(summary.se);
+        att_ci = Some(summary.ci);
+        p_value = Some(summary.p_value);
+        dynamic_se = summary.dynamic_se;
+        bootstrap = Some(GsynthBootstrap {
+            method,
+            replications: reps.att.len(),
+            failed: reps.failed,
+            level: config.level,
+            seed,
+        });
+    }
+
     Ok(GsynthResult {
         att: est.att,
-        att_se: None,
-        att_ci: None,
-        p_value: None,
+        att_se,
+        att_ci,
+        p_value,
         n_treated,
         n_control,
         n_pre_periods,
@@ -2875,8 +3014,8 @@ pub fn run_gsynth(
         cv_lambda: est.cv_lambda,
         lambda: est.lambda,
         dynamic_counts,
-        dynamic_se: Vec::new(),
-        bootstrap: None,
+        dynamic_se,
+        bootstrap,
         convergence: est.convergence,
         warnings,
     })
@@ -3069,6 +3208,17 @@ fn gsynth_mats(panel: GsynthPanel) -> EconResult<GsynthMats> {
         .iter()
         .map(|m| transpose_into(m, "gsynth covariate panel (units x periods)"))
         .collect::<EconResult<Vec<_>>>()?;
+    mats_from(y, d, x, units, times)
+}
+
+/// Classify the columns of T x N panels into treated and control units (S3 checks).
+fn mats_from(
+    y: Array2<f64>,
+    d: Array2<f64>,
+    x: Vec<Array2<f64>>,
+    units: Vec<String>,
+    times: Vec<i64>,
+) -> EconResult<GsynthMats> {
     let n_t = times.len();
     let mut treated = Vec::new();
     let mut controls = Vec::new();
@@ -3903,6 +4053,272 @@ fn mc_estimate(
         cv_lambda,
         cv_mspe: Vec::new(),
         convergence: Some(fit.convergence),
+    })
+}
+
+// ─── Bootstrap (S9, S10) ───────────────────────────────────────────────────────
+
+/// The random draws of the two bootstraps, by replication; unit draws are column indices
+/// of the panel.
+trait GsynthDraws {
+    /// Parametric error draw b: the fake treated control and the N_co pseudo controls
+    /// (drawn with replacement from the other controls).
+    fn error_draw(&self, b: usize) -> (usize, Vec<usize>);
+    /// Parametric replication b: the N_co resampled controls, for each treated unit the
+    /// error draw to add, and the N_co resampled control residual columns (0..N_co).
+    fn replication_draw(&self, b: usize) -> (Vec<usize>, Vec<usize>, Vec<usize>);
+    /// Unit bootstrap b: N_tr treated then N_co control columns, with replacement.
+    fn unit_draw(&self, b: usize) -> Vec<usize>;
+}
+
+/// ChaCha8 draws, one stream per (phase, replication) of the seed.
+struct SeededDraws<'a> {
+    seed: u64,
+    m: &'a GsynthMats,
+    replications: usize,
+}
+
+impl SeededDraws<'_> {
+    fn rng(&self, phase: u64, b: usize) -> rand_chacha::ChaCha8Rng {
+        use rand::SeedableRng;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(self.seed);
+        rng.set_stream((phase << 40) | b as u64);
+        rng
+    }
+}
+
+impl GsynthDraws for SeededDraws<'_> {
+    fn error_draw(&self, b: usize) -> (usize, Vec<usize>) {
+        use rand::Rng;
+        let mut rng = self.rng(1, b);
+        let co = &self.m.controls;
+        let fake = co[rng.gen_range(0..co.len())];
+        let others: Vec<usize> = co.iter().copied().filter(|&c| c != fake).collect();
+        let pseudo = (0..co.len())
+            .map(|_| others[rng.gen_range(0..others.len())])
+            .collect();
+        (fake, pseudo)
+    }
+    fn replication_draw(&self, b: usize) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+        use rand::Rng;
+        let mut rng = self.rng(2, b);
+        let co = &self.m.controls;
+        let bco = (0..co.len())
+            .map(|_| co[rng.gen_range(0..co.len())])
+            .collect();
+        let pick = (0..self.m.treated.len())
+            .map(|_| rng.gen_range(0..self.replications))
+            .collect();
+        let res = (0..co.len()).map(|_| rng.gen_range(0..co.len())).collect();
+        (bco, pick, res)
+    }
+    fn unit_draw(&self, b: usize) -> Vec<usize> {
+        use rand::Rng;
+        let mut rng = self.rng(3, b);
+        let (co, tr) = (&self.m.controls, &self.m.treated);
+        let mut id: Vec<usize> = Vec::with_capacity(co.len() + tr.len());
+        let fco: Vec<usize> = (0..co.len())
+            .map(|_| co[rng.gen_range(0..co.len())])
+            .collect();
+        id.extend((0..tr.len()).map(|_| tr[rng.gen_range(0..tr.len())]));
+        id.extend(fco);
+        id
+    }
+}
+
+/// A panel of the columns `y_cols` of the outcome (and covariates) with the treatment
+/// columns `d_cols`, outcome columns optionally replaced by `y`.
+fn resampled_mats(
+    m: &GsynthMats,
+    y_cols: &[usize],
+    d_cols: &[usize],
+    y: Option<Array2<f64>>,
+) -> EconResult<GsynthMats> {
+    let y = match y {
+        Some(y) => y,
+        None => select_columns(&m.y, y_cols, "gsynth bootstrap outcomes")?,
+    };
+    let d = select_columns(&m.d, d_cols, "gsynth bootstrap treatment")?;
+    let x =
+        m.x.iter()
+            .map(|x| select_columns(x, y_cols, "gsynth bootstrap covariates"))
+            .collect::<EconResult<Vec<_>>>()?;
+    let units = y_cols.iter().map(|&c| m.units[c].clone()).collect();
+    mats_from(y, d, x, units, m.times.clone())
+}
+
+/// The replicate ATTs and event-time ATTs, and the failed replications.
+#[derive(Debug, Clone, Default)]
+struct BootstrapReplicates {
+    att: Vec<f64>,
+    event_att: Vec<Vec<(i64, f64)>>,
+    failed: usize,
+}
+
+impl BootstrapReplicates {
+    fn record(&mut self, r: EconResult<(f64, Vec<(i64, f64)>)>) -> EconResult<()> {
+        match r {
+            Ok((att, ev)) if att.is_finite() => {
+                self.att.push(att);
+                self.event_att.push(ev);
+            }
+            Ok(_) => self.failed += 1,
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+            Err(_) => self.failed += 1,
+        }
+        Ok(())
+    }
+}
+
+/// S9: gsynth's parametric bootstrap (empirical errors) around the base IFE fit.
+fn parametric_bootstrap(
+    m: &GsynthMats,
+    spec: &IfeSpec,
+    names: &[String],
+    base: &GsynthFit,
+    draws: &dyn GsynthDraws,
+    replications: usize,
+) -> EconResult<BootstrapReplicates> {
+    let n_t = m.times.len();
+    let n_tr = m.treated.len();
+    // error draws: each drawn control plays all treated units
+    let mut errors: Vec<Option<Array2<f64>>> = Vec::with_capacity(replications);
+    for b in 0..replications {
+        crate::resource::checkpoint()?;
+        let (fake, pseudo) = draws.error_draw(b);
+        let mut y_cols = vec![fake; n_tr];
+        y_cols.extend(&pseudo);
+        let mut d_cols = m.treated.clone();
+        d_cols.extend(&pseudo);
+        let fit = resampled_mats(m, &y_cols, &d_cols, None)
+            .and_then(|pm| gsynth_estimate(&pm, spec, names));
+        match fit {
+            Ok(f) => errors.push(Some(f.eff)),
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+            Err(_) => errors.push(None),
+        }
+    }
+    // the fitted counterfactual: treated Y - eff, controls the fit plus X beta
+    let mut xb_co = base.ife.fitted.clone();
+    for (j, x) in m.x.iter().enumerate() {
+        let xc = select_columns(x, &m.controls, "gsynth bootstrap covariates")?;
+        xb_co.scaled_add(base.ife.beta[j], &xc);
+    }
+    let mut reps = BootstrapReplicates::default();
+    for b in 0..replications {
+        crate::resource::checkpoint()?;
+        let (bco, pick, res) = draws.replication_draw(b);
+        let attempt = (|| -> EconResult<(f64, Vec<(i64, f64)>)> {
+            let mut y_cols = m.treated.clone();
+            y_cols.extend(&bco);
+            let mut y =
+                crate::resource::try_zeros2(n_t, y_cols.len(), "gsynth bootstrap outcomes")?;
+            for (w, &c) in m.treated.iter().enumerate() {
+                let err = errors[pick[w]].as_ref().ok_or_else(|| {
+                    EconError::Computation("the picked error draw failed".to_string())
+                })?;
+                for t in 0..n_t {
+                    y[[t, w]] = m.y[[t, c]] - base.eff[[t, w]] + err[[t, w]];
+                }
+            }
+            for (k, (&c, &rr)) in bco.iter().zip(res.iter()).enumerate() {
+                let pos = m.controls.iter().position(|&x| x == c).ok_or_else(|| {
+                    EconError::Computation("bootstrap control draw is not a control".to_string())
+                })?;
+                for t in 0..n_t {
+                    y[[t, n_tr + k]] = xb_co[[t, pos]] + base.ife.residuals[[t, rr]];
+                }
+            }
+            let pm = resampled_mats(m, &y_cols, &y_cols, Some(y))?;
+            let fit = gsynth_estimate(&pm, spec, names)?;
+            let (ev, _) = event_time_att(&fit.eff, &pm.first_treated);
+            Ok((fit.att, ev))
+        })();
+        reps.record(attempt)?;
+    }
+    Ok(reps)
+}
+
+/// S10: the unit bootstrap of matrix completion at a fixed lambda.
+fn nonparametric_bootstrap(
+    m: &GsynthMats,
+    spec: &McSpec,
+    names: &[String],
+    draws: &dyn GsynthDraws,
+    replications: usize,
+) -> EconResult<BootstrapReplicates> {
+    let mut reps = BootstrapReplicates::default();
+    for b in 0..replications {
+        crate::resource::checkpoint()?;
+        let id = draws.unit_draw(b);
+        let attempt = (|| -> EconResult<(f64, Vec<(i64, f64)>)> {
+            let pm = resampled_mats(m, &id, &id, None)?;
+            let prep = mc_prep(&pm, spec.force, names)?;
+            let observed = mc_observed(&pm);
+            let start = mc_start(&pm, &prep, &observed, spec.force, None)?;
+            let fit = mc_fit(&pm, &prep, &observed, spec, &start)?;
+            let n_t = pm.times.len();
+            let mut eff = Array2::<f64>::zeros((n_t, pm.treated.len()));
+            for (j, &c) in pm.treated.iter().enumerate() {
+                for t in 0..n_t {
+                    eff[[t, j]] = pm.y[[t, c]] - fit.fitted[[t, c]];
+                }
+            }
+            let (ev, _) = event_time_att(&eff, &pm.first_treated);
+            Ok((att_of(&eff, &pm.first_treated), ev))
+        })();
+        reps.record(attempt)?;
+    }
+    Ok(reps)
+}
+
+/// SE, normal CI and p-value of the ATT, and the SE per event time.
+#[derive(Debug, Clone)]
+struct BootstrapSummary {
+    se: f64,
+    ci: (f64, f64),
+    p_value: f64,
+    dynamic_se: Vec<(i64, f64)>,
+}
+
+fn sd(v: &[f64]) -> f64 {
+    let n = v.len() as f64;
+    let mean = v.iter().sum::<f64>() / n;
+    (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+}
+
+fn bootstrap_summary(
+    att: f64,
+    dynamic: &[(i64, f64)],
+    reps: &BootstrapReplicates,
+    level: f64,
+) -> EconResult<BootstrapSummary> {
+    if reps.att.len() < 2 {
+        return Err(EconError::Computation(format!(
+            "gsynth bootstrap: {} of {} replications succeeded; at least 2 are needed",
+            reps.att.len(),
+            reps.att.len() + reps.failed
+        )));
+    }
+    let se = sd(&reps.att);
+    let z = crate::traits::estimator::z_critical(level)?;
+    let p_value = crate::traits::estimator::normal_p_value_two_sided(att / se);
+    let dynamic_se = dynamic
+        .iter()
+        .filter_map(|&(e, _)| {
+            let v: Vec<f64> = reps
+                .event_att
+                .iter()
+                .filter_map(|ev| ev.iter().find(|(k, _)| *k == e).map(|(_, a)| *a))
+                .collect();
+            (v.len() >= 2).then(|| (e, sd(&v)))
+        })
+        .collect();
+    Ok(BootstrapSummary {
+        se,
+        ci: (att - z * se, att + z * se),
+        p_value,
+        dynamic_se,
     })
 }
 
@@ -6158,5 +6574,266 @@ mod gsynth_tests {
         );
         assert!((kb - k0).abs() <= 1, "{kb} vs {k0}");
         assert!((rb.att / 1e6 - base.att).abs() <= 1e-6 * base.att.abs());
+    }
+
+    fn idx(case: &p2a_validation::Case, key: &str) -> Vec<usize> {
+        case.vector(key).iter().map(|v| *v as usize - 1).collect()
+    }
+
+    fn rows(case: &p2a_validation::Case, key: &str, w: usize) -> Vec<Vec<usize>> {
+        idx(case, key).chunks(w).map(|c| c.to_vec()).collect()
+    }
+
+    /// R's draws, replayed.
+    struct ReplayDraws {
+        fake: Vec<usize>,
+        pseudo: Vec<Vec<usize>>,
+        bco: Vec<Vec<usize>>,
+        pick: Vec<Vec<usize>>,
+        res: Vec<Vec<usize>>,
+        units: Vec<Vec<usize>>,
+    }
+
+    impl GsynthDraws for ReplayDraws {
+        fn error_draw(&self, b: usize) -> (usize, Vec<usize>) {
+            (self.fake[b], self.pseudo[b].clone())
+        }
+        fn replication_draw(&self, b: usize) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+            (
+                self.bco[b].clone(),
+                self.pick[b].clone(),
+                self.res[b].clone(),
+            )
+        }
+        fn unit_draw(&self, b: usize) -> Vec<usize> {
+            self.units[b].clone()
+        }
+    }
+
+    #[test]
+    fn test_validate_gsynth_bootstrap_parametric_replay() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let m =
+            gsynth_mats(read_gsynth_panel(ds.df(), "Y", "D", "id", "time", &[]).unwrap()).unwrap();
+        let spec = IfeSpec {
+            r: 2,
+            force: GsynthForce::TwoWay,
+            tolerance: 1e-12,
+            max_iter: 5000,
+        };
+        let base = gsynth_estimate(&m, &spec, &[]).unwrap();
+        let draws = ReplayDraws {
+            fake: idx(&case, "boot_ife_fake"),
+            pseudo: rows(&case, "boot_ife_pseudo", 45),
+            bco: rows(&case, "boot_ife_bco", 45),
+            pick: rows(&case, "boot_ife_pick", 5),
+            res: rows(&case, "boot_ife_res", 45),
+            units: Vec::new(),
+        };
+        let reps = parametric_bootstrap(&m, &spec, &[], &base, &draws, 50).unwrap();
+        assert_eq!(reps.failed, 0);
+        let (dynamic, _) = event_time_att(&base.eff, &m.first_treated);
+        let s = bootstrap_summary(base.att, &dynamic, &reps, 0.95).unwrap();
+        let dse: Vec<f64> = s.dynamic_se.iter().map(|(_, v)| *v).collect();
+        Check::new(&case)
+            .vector("boot_ife_att_b", &reps.att, Tol::coef(SIM_N))
+            .scalar("boot_ife_nocov_r2_se", s.se, Tol::se(SIM_N))
+            .vector("boot_ife_nocov_r2_ci", &[s.ci.0, s.ci.1], Tol::stat(SIM_N))
+            .scalar("boot_ife_nocov_r2_p", s.p_value, Tol::p_value(SIM_N))
+            .vector("boot_ife_att_se", &dse, Tol::se(SIM_N))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_gsynth_bootstrap_unit_replay() {
+        let (case, ds) = crate::test_support::load_case("gsynth_simdata");
+        let m =
+            gsynth_mats(read_gsynth_panel(ds.df(), "Y", "D", "id", "time", &["X1", "X2"]).unwrap())
+                .unwrap();
+        let names = vec!["X1".to_string(), "X2".to_string()];
+        let spec = McSpec {
+            lambda: 0.01,
+            force: GsynthForce::TwoWay,
+            tolerance: 1e-12,
+            max_iter: 100_000,
+        };
+        let draws = ReplayDraws {
+            fake: Vec::new(),
+            pseudo: Vec::new(),
+            bco: Vec::new(),
+            pick: Vec::new(),
+            res: Vec::new(),
+            units: rows(&case, "boot_mc_units", 50),
+        };
+        let reps = nonparametric_bootstrap(&m, &spec, &names, &draws, 20).unwrap();
+        assert_eq!(reps.failed, 0);
+        let base = sim(
+            &ds,
+            &["X1", "X2"],
+            GsynthConfig {
+                max_iter: 100_000,
+                ..mc(vec![0.01])
+            },
+        )
+        .unwrap();
+        let s = bootstrap_summary(base.att, &base.dynamic_effects, &reps, 0.95).unwrap();
+        Check::new(&case)
+            .vector("boot_mc_att_b", &reps.att, Tol::iterative(1e-7))
+            .scalar("boot_mc_l001_se", s.se, Tol::iterative(1e-6))
+            .vector("boot_mc_l001_ci", &[s.ci.0, s.ci.1], Tol::iterative(1e-7))
+            .scalar("boot_mc_l001_p", s.p_value, Tol::p_value(SIM_N))
+            .finish();
+    }
+
+    #[test]
+    fn test_gsynth_bootstrap_is_seeded() {
+        let ds = simdata();
+        let cfg = |seed: Option<u64>| GsynthConfig {
+            bootstrap_se: true,
+            n_bootstrap: 20,
+            seed,
+            ..tight(GsynthForce::TwoWay, 2)
+        };
+        let a = sim(&ds, &[], cfg(Some(7))).unwrap();
+        let b = sim(&ds, &[], cfg(Some(7))).unwrap();
+        let c = sim(&ds, &[], cfg(Some(8))).unwrap();
+        let se = a.att_se.unwrap();
+        assert_eq!(se.to_bits(), b.att_se.unwrap().to_bits());
+        let bits = |r: &GsynthResult| {
+            r.dynamic_se
+                .iter()
+                .map(|(e, v)| (*e, v.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&a), bits(&b));
+        assert!(!a.dynamic_se.is_empty());
+        assert_ne!(se.to_bits(), c.att_se.unwrap().to_bits());
+        let z = crate::traits::estimator::z_critical(0.95).unwrap();
+        let (lo, hi) = a.att_ci.unwrap();
+        assert!((lo - (a.att - z * se)).abs() <= 1e-12 * a.att.abs());
+        assert!((hi - (a.att + z * se)).abs() <= 1e-12 * a.att.abs());
+        assert_eq!(
+            a.p_value.unwrap(),
+            crate::traits::estimator::normal_p_value_two_sided(a.att / se)
+        );
+        let bs = a.bootstrap.as_ref().unwrap();
+        assert_eq!(bs.method, GsynthBootstrapMethod::Parametric);
+        assert_eq!(bs.replications + bs.failed, 20);
+        let d = sim(&ds, &[], cfg(None)).unwrap();
+        assert_eq!(d.bootstrap.unwrap().seed, GSYNTH_DEFAULT_SEED);
+        let r = sim(
+            &ds,
+            &[],
+            GsynthConfig {
+                bootstrap_se: true,
+                n_bootstrap: 10,
+                ..mc(vec![0.3])
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            r.bootstrap.as_ref().unwrap().method,
+            GsynthBootstrapMethod::Nonparametric
+        );
+        assert!(r.att_se.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_gsynth_bootstrap_rejects_invalid_parameters() {
+        let ds = simdata();
+        let msg = |c: GsynthConfig| match sim(&ds, &[], c) {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got ok={}", other.is_ok()),
+        };
+        let m = msg(GsynthConfig {
+            bootstrap_se: true,
+            n_bootstrap: 1,
+            ..tight(GsynthForce::TwoWay, 2)
+        });
+        assert!(m.contains("n_bootstrap"), "{m}");
+        let m = msg(GsynthConfig {
+            bootstrap_se: true,
+            level: 1.0,
+            ..tight(GsynthForce::TwoWay, 2)
+        });
+        assert!(m.contains("level"), "{m}");
+    }
+
+    #[test]
+    fn test_gsynth_bootstrap_stops_when_cancelled() {
+        let ds = simdata();
+        let r = cancelled(|| {
+            sim(
+                &ds,
+                &[],
+                GsynthConfig {
+                    bootstrap_se: true,
+                    n_bootstrap: 5,
+                    ..tight(GsynthForce::TwoWay, 2)
+                },
+            )
+        });
+        assert!(
+            matches!(r, Err(EconError::Cancelled(_))),
+            "ok={}",
+            r.is_ok()
+        );
+    }
+
+    #[test]
+    fn test_gsynth_display_reports_what_was_estimated() {
+        let ds = simdata();
+        let r = sim(&ds, &["X1", "X2"], tight(GsynthForce::TwoWay, 2)).unwrap();
+        let t = r.to_string();
+        for want in [
+            "Estimator: ife",
+            "Fixed effects: two_way",
+            "Factors: 2",
+            "X1",
+            "Converged: yes",
+        ] {
+            assert!(t.contains(want), "{want}: {t}");
+        }
+        assert!(t.ends_with(&notes_text(&r)) || notes_text(&r).is_empty());
+        let m = sim(
+            &ds,
+            &["X1", "X2"],
+            GsynthConfig {
+                max_iter: 100_000,
+                ..mc(vec![0.01])
+            },
+        )
+        .unwrap();
+        let t = m.to_string();
+        assert!(
+            t.contains("Estimator: mc") && t.contains("lambda = 0.0100"),
+            "{t}"
+        );
+        let cv = sim(
+            &ds,
+            &[],
+            GsynthConfig {
+                cross_validate: true,
+                max_factors: 2,
+                ..tight(GsynthForce::TwoWay, 0)
+            },
+        )
+        .unwrap();
+        assert!(cv.to_string().contains("leave-one-out"));
+        let b = sim(
+            &ds,
+            &[],
+            GsynthConfig {
+                bootstrap_se: true,
+                n_bootstrap: 20,
+                ..tight(GsynthForce::TwoWay, 2)
+            },
+        )
+        .unwrap();
+        assert!(
+            b.to_string()
+                .contains("parametric bootstrap, 20 replications"),
+            "{b}"
+        );
     }
 }
