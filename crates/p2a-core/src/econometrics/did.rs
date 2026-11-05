@@ -1048,12 +1048,14 @@ mod tests {
         );
     }
 
-    /// One cluster: sandwich::vcovCL fails; before, the CR1 factor fell back to 1.
     /// employee_training, for the tests that are not R-pinned (not registered).
     fn training() -> Dataset {
-        crate::test_support::load_case("did_2x2_training").1
+        crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/employee_training.csv",
+        )
     }
 
+    /// One cluster: sandwich::vcovCL fails; before, the CR1 factor fell back to 1.
     #[test]
     fn test_run_did_rejects_single_cluster() {
         let ds = training();

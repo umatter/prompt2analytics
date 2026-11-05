@@ -154,6 +154,20 @@ fn did_se(se: f64) -> f64 {
     if se <= SE_NA_LIMIT { f64::NAN } else { se }
 }
 
+/// The base period `g + offset` as text: `g - 3`, `g + 1`, or `g` for 0.
+pub(crate) fn base_period_label(offset: i64) -> String {
+    match offset {
+        0 => "g".to_string(),
+        o if o < 0 => format!("g - {}", o.unsigned_abs()),
+        o => format!("g + {o}"),
+    }
+}
+
+/// The base period `g + base_period - anticipation` the estimator uses.
+pub(crate) fn base_period_offset(base_period: i32, anticipation: usize) -> i64 {
+    i64::from(base_period).saturating_sub(i64::try_from(anticipation).unwrap_or(i64::MAX))
+}
+
 /// A number at 4 decimals, or `NA` for NaN (R's print of a missing SE).
 fn num4(v: f64) -> String {
     if v.is_nan() {
@@ -505,8 +519,8 @@ impl fmt::Display for StaggeredDidResult {
         if d > 0 {
             writeln!(
                 f,
-                "  Anticipation:       {d} period(s) (base period g - {}; not-yet-treated comparisons first treated after max(t, base) + {d})",
-                1 + d
+                "  Anticipation:       {d} period(s) (base period {}; not-yet-treated comparisons first treated after max(t, base) + {d})",
+                base_period_label(base_period_offset(self.config.base_period, d))
             )?;
         } else {
             writeln!(f, "  Anticipation:       none")?;
@@ -1082,6 +1096,7 @@ pub fn run_staggered_did(
             n_cohort: &n_cohort,
             joint: &joint,
             z,
+            base_offset,
         };
         inference(
             &mut group_time_atts,
@@ -1107,6 +1122,7 @@ pub fn run_staggered_did(
             n_cohort: &n_cohort,
             joint: &joint,
             z,
+            base_offset,
         };
         let (aggregates, pretrend) = inference(
             &mut group_time_atts,
@@ -1371,12 +1387,24 @@ impl Linearised {
 /// Fit DRDID's estimator `method` in every cell of `table` (cells `(g, t, base)`
 /// in table order), with the covariates `x` (no intercept column) of each entry's
 /// earlier period. The reference cell `t == base` has ATT 0 and a zero influence
-/// function without a fit, as did. A cell whose fit fails is an `Err` in its slot.
+/// function without a fit, as did. A cell whose fit fails on its data is an `Err`
+/// in its slot (the caller drops the cell with a warning); a resource limit or a
+/// cancellation is the call's error, not a cell's.
 fn covariate_fits(
     table: &BootTable,
     cells: &[(i64, i64, i64)],
     x: &Array2<f64>,
     method: AttEstimationMethod,
+) -> EconResult<Vec<EconResult<drdid::CellFit>>> {
+    covariate_fits_with(table, cells, x, |cell| drdid::estimate(method, cell))
+}
+
+/// [`covariate_fits`] with the cell estimator `fit` (a test seam).
+fn covariate_fits_with(
+    table: &BootTable,
+    cells: &[(i64, i64, i64)],
+    x: &Array2<f64>,
+    fit: impl Fn(&drdid::CellInput<'_>) -> EconResult<drdid::CellFit>,
 ) -> EconResult<Vec<EconResult<drdid::CellFit>>> {
     let p = x.ncols() + 1;
     let mut out = Vec::with_capacity(cells.len());
@@ -1407,15 +1435,18 @@ fn covariate_fits(
             d: d.view(),
             x: xm.view(),
         };
-        out.push(drdid::estimate(method, &cell).and_then(|fit| {
-            if fit.att.is_finite() && fit.influence.iter().all(|v| v.is_finite()) {
-                Ok(fit)
-            } else {
-                Err(EconError::Computation(
-                    "the cell estimate is not finite".to_string(),
-                ))
-            }
-        }));
+        match fit(&cell) {
+            Err(e @ (EconError::ResourceLimit(_) | EconError::Cancelled(_))) => return Err(e),
+            r => out.push(r.and_then(|fit| {
+                if fit.att.is_finite() && fit.influence.iter().all(|v| v.is_finite()) {
+                    Ok(fit)
+                } else {
+                    Err(EconError::Computation(
+                        "the cell estimate is not finite".to_string(),
+                    ))
+                }
+            })),
+        }
     }
     Ok(out)
 }
@@ -2068,6 +2099,8 @@ struct Aggregator<'a> {
     n_cohort: &'a [usize],
     joint: &'a Joint<'a>,
     z: f64,
+    /// The reference cells' event time (`base_period - anticipation`).
+    base_offset: i64,
 }
 
 /// The aggregates of one result, and the statistic whose SE used the fewest
@@ -2077,6 +2110,9 @@ struct Aggregates {
     group_effects: Vec<AggregatedEffect>,
     overall: AggregatedEffect,
     fewest: Fewest,
+    /// Aggregates over at least one non-reference cell whose SE was at or below
+    /// [`SE_NA_LIMIT`] and is reported as NaN.
+    na_se: usize,
 }
 
 /// The fewest replicates (or units) any SE used, and that statistic's label;
@@ -2111,10 +2147,18 @@ impl Aggregator<'_> {
         keep: &[usize],
         w: Weighting,
         fewest: &mut Fewest,
+        na_se: &mut usize,
         label: impl FnOnce() -> String,
     ) -> EconResult<AggregatedEffect> {
         let mut stat = self.stat(atts, keep, w)?;
         fewest.note(stat.used, label);
+        if stat.se <= SE_NA_LIMIT
+            && keep
+                .iter()
+                .any(|&k| atts[k].relative_time != self.base_offset)
+        {
+            *na_se += 1;
+        }
         stat.se = did_se(stat.se);
         Ok(AggregatedEffect {
             key,
@@ -2132,6 +2176,7 @@ impl Aggregator<'_> {
     /// `did::aggte`.
     fn aggregates(&self, atts: &[GroupTimeATT]) -> EconResult<Aggregates> {
         let mut fewest = Fewest::default();
+        let mut na_se = 0;
         let mut by_e: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
         let mut by_g: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
         let mut post = Vec::new();
@@ -2151,13 +2196,22 @@ impl Aggregator<'_> {
                 keep,
                 Weighting::CohortShare,
                 &mut fewest,
+                &mut na_se,
                 label,
             )?);
         }
         let mut group_effects = Vec::with_capacity(by_g.len());
         for (&g, keep) in &by_g {
             let label = || format!("group {g}");
-            group_effects.push(self.effect(atts, g, keep, Weighting::Equal, &mut fewest, label)?);
+            group_effects.push(self.effect(
+                atts,
+                g,
+                keep,
+                Weighting::Equal,
+                &mut fewest,
+                &mut na_se,
+                label,
+            )?);
         }
         if post.is_empty() {
             // run_staggered_did refuses this before aggregating (CAUS-109)
@@ -2167,14 +2221,21 @@ impl Aggregator<'_> {
                 context: "no post-treatment ATT(g,t) to aggregate".to_string(),
             });
         }
-        let overall = self.effect(atts, 0, &post, Weighting::CohortShare, &mut fewest, || {
-            "the overall ATT".to_string()
-        })?;
+        let overall = self.effect(
+            atts,
+            0,
+            &post,
+            Weighting::CohortShare,
+            &mut fewest,
+            &mut na_se,
+            || "the overall ATT".to_string(),
+        )?;
         Ok(Aggregates {
             event_study,
             group_effects,
             overall,
             fewest,
+            na_se,
         })
     }
 }
@@ -2191,9 +2252,14 @@ fn inference(
     let z = aggregator.z;
     let cell_stats = aggregator.cells(atts)?;
     let mut fewest = Fewest::default();
+    let mut na_se = 0usize;
     for (gta, stat) in atts.iter_mut().zip(&cell_stats) {
         // the reference cell's SE is 0 (zero influence function, constant
-        // replicates) and is reported as NaN, as did reports NA
+        // replicates) and is reported as NaN, as did reports NA; any other cell's
+        // SE at or below the limit is NaN too (did's rule) and is counted
+        if stat.se <= SE_NA_LIMIT && gta.time != gta.group + base_offset {
+            na_se += 1;
+        }
         let se = did_se(stat.se);
         gta.std_error = se;
         gta.ci_lower = gta.att - z * se;
@@ -2205,6 +2271,14 @@ fn inference(
         fewest.note(used, || label);
     }
     aggregates.fewest = fewest;
+    na_se += aggregates.na_se;
+    if na_se > 0 {
+        warnings.push(format!(
+            "{na_se} standard error(s) of cells or aggregates other than the base-period \
+             reference cells are at or below {SE_NA_LIMIT:.2e} and are reported as NA \
+             (did's rule); rescale the outcome if these are real standard errors"
+        ));
+    }
     let pre = pretrend_cells(atts, base_offset);
     let pretrend = pretrend_wald(atts, &pre, aggregator.joint, warnings)?;
     Ok((aggregates, pretrend))
@@ -4735,7 +4809,9 @@ mod tests {
     /// The case panel `cs_cov_panel` for the tests that are not R-pinned (not
     /// registered).
     fn cov_panel() -> Dataset {
-        crate::test_support::load_case("did_cs_covariates").1
+        crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/cs_cov_panel.csv",
+        )
     }
 
     /// `ds` with column `name` set to `f(row)`.
@@ -5084,6 +5160,107 @@ mod tests {
         }
     }
 
+    /// did's absolute NA rule (SE <= 1.49e-7) applies to every cell and aggregate;
+    /// outside the reference cells it is announced. Before, an outcome in very small
+    /// units got NaN SEs with no note.
+    #[test]
+    fn test_cs_tiny_standard_errors_are_announced() {
+        let ds = cov_panel();
+        let y = f64s(&ds, "y");
+        let small = with_column(&ds, "y", |i| y[i] * 1e-9);
+        let m = AttEstimationMethod::OutcomeRegression;
+        let note = |r: &StaggeredDidResult| {
+            r.warnings
+                .iter()
+                .find(|w| w.contains("reported as NA (did's rule)"))
+                .cloned()
+        };
+        let base = run_cov(&ds, None, cfg(ComparisonGroup::NeverTreated, m, 0));
+        assert!(note(&base).is_none(), "{:?}", base.warnings);
+        let r = run_cov(&small, None, cfg(ComparisonGroup::NeverTreated, m, 0));
+        assert!(r.overall_att.std_error.is_nan());
+        let w = note(&r).unwrap_or_else(|| panic!("{:?}", r.warnings));
+        assert!(w.contains("1.49e-7"), "{w}");
+        // every non-reference cell and every aggregate except the reference event time
+        let cells = r
+            .group_time_atts
+            .iter()
+            .filter(|c| c.relative_time != -1)
+            .count();
+        let aggs = r.event_study.iter().filter(|e| e.key != -1).count() + r.group_effects.len() + 1;
+        assert!(
+            w.starts_with(&format!("{} standard error(s)", cells + aggs)),
+            "{w}"
+        );
+    }
+
+    /// A resource limit or a cancellation inside a cell fit is the call's error;
+    /// before, it was stored in the cell's slot and the cell was dropped with a
+    /// "Could not compute ATT(g,t)" warning, as if the cell's data were the problem.
+    /// A data failure stays a per-cell `Err`.
+    #[test]
+    fn test_cs_covariate_fits_propagate_resource_errors() {
+        let ds = cov_panel();
+        let col = |c: &str| Array1::from(f64s(&ds, c));
+        let (y, g, t, u) = (col("y"), col("first_treat"), col("time"), col("unit"));
+        let x = ndarray::stack(ndarray::Axis(1), &[col("x1").view(), col("x2").view()]).unwrap();
+        let panel_map = build_panel_map(&t, &u);
+        let cells: Vec<(i64, i64, i64)> = vec![(3, 3, 2), (3, 4, 2), (4, 4, 3)];
+        let table = build_boot_table(
+            &y,
+            &g,
+            &t,
+            &u,
+            &panel_map,
+            &cells,
+            ComparisonGroup::NeverTreated,
+            0,
+        )
+        .unwrap();
+        let data_err = |_: &drdid::CellInput<'_>| -> EconResult<drdid::CellFit> {
+            Err(EconError::InsufficientData {
+                required: 2,
+                provided: 1,
+                context: "test cell".to_string(),
+            })
+        };
+        let slots = covariate_fits_with(&table, &cells, &x, data_err).unwrap();
+        assert_eq!(slots.len(), 3);
+        assert!(
+            slots
+                .iter()
+                .all(|r| matches!(r, Err(EconError::InsufficientData { .. })))
+        );
+        let limit = |_: &drdid::CellInput<'_>| -> EconResult<drdid::CellFit> {
+            Err(EconError::ResourceLimit("glm IRLS workspace".to_string()))
+        };
+        assert!(matches!(
+            covariate_fits_with(&table, &cells, &x, limit),
+            Err(EconError::ResourceLimit(_))
+        ));
+        let cancelled = |_: &drdid::CellInput<'_>| -> EconResult<drdid::CellFit> {
+            Err(EconError::Cancelled("deadline".to_string()))
+        };
+        assert!(matches!(
+            covariate_fits_with(&table, &cells, &x, cancelled),
+            Err(EconError::Cancelled(_))
+        ));
+        // End to end under a tiny allocation ceiling: the resource error, not a
+        // partial result or an InsufficientData "no cell left".
+        let r = crate::resource::with_alloc_ceiling(Some(64), || {
+            run_staggered_did(
+                &ds,
+                "y",
+                "first_treat",
+                "time",
+                "unit",
+                Some(X12),
+                cfg(ComparisonGroup::NeverTreated, AttEstimationMethod::IPW, 0),
+            )
+        });
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+    }
+
     /// CAUS-36: with covariates every bootstrap replicate is the multiplier draw
     /// of the cell's own influence function (T0's random stream), not the
     /// unconditional estimator's.
@@ -5211,26 +5388,29 @@ mod tests {
 
     /// The multiplier bootstrap estimates the analytic SE up to Monte Carlo error
     /// (about 1/sqrt(2B) = 2.2% at B = 999). Before: the replicates were the
-    /// unconditional estimator, simple SE about 0.256 (ratio 1.507).
+    /// unconditional estimator, simple SE about 0.256 (ratio 1.507). A Monte Carlo
+    /// band against the analytic SEs (R-pinned by the tests above), not an R pin:
+    /// did's own bootstrap draws (Mammen multipliers) are not reproduced.
     #[test]
-    fn test_validate_cs_covariates_bootstrap_close_to_analytic() {
-        let (case, ds) = crate::test_support::load_case("did_cs_covariates");
+    fn test_cs_covariates_bootstrap_close_to_analytic() {
+        let ds = cov_panel();
+        let c0 = cfg(
+            ComparisonGroup::NeverTreated,
+            AttEstimationMethod::DoublyRobust,
+            0,
+        );
+        let analytic = run_cov(&ds, Some(X12), c0.clone());
         let c = StaggeredDidConfig {
             bootstrap: 999,
             seed: Some(42),
-            ..cfg(
-                ComparisonGroup::NeverTreated,
-                AttEstimationMethod::DoublyRobust,
-                0,
-            )
+            ..c0
         };
         let r = run_cov(&ds, Some(X12), c);
-        let ratio = r.overall_att.std_error / case.scalar("never_ant0_simple_se_dr");
+        let ratio = r.overall_att.std_error / analytic.overall_att.std_error;
         assert!((ratio - 1.0).abs() < 0.10, "overall ratio {ratio}");
-        let want = case.vector("never_ant0_group_se_dr");
-        assert_eq!(r.group_effects.len(), want.len());
-        for (e, w) in r.group_effects.iter().zip(&want) {
-            let ratio = e.std_error / w;
+        assert_eq!(r.group_effects.len(), analytic.group_effects.len());
+        for (e, w) in r.group_effects.iter().zip(&analytic.group_effects) {
+            let ratio = e.std_error / w.std_error;
             assert!((ratio - 1.0).abs() < 0.10, "group {} ratio {ratio}", e.key);
         }
     }
@@ -5269,6 +5449,24 @@ mod tests {
         );
         pin_block(&mut ck, "never_ant1", "dr", &r, true);
         ck.finish();
+    }
+
+    /// The Anticipation line prints the base period the estimator uses,
+    /// g + base_period - anticipation, not g - 1 - anticipation.
+    #[test]
+    fn test_cs_anticipation_display_follows_base_period() {
+        let mut c = cfg(
+            ComparisonGroup::NeverTreated,
+            AttEstimationMethod::OutcomeRegression,
+            1,
+        );
+        c.base_period = -2;
+        let r = run_cov(&cov_panel(), Some(X12), c);
+        let shown = format!("{r}");
+        assert!(shown.contains("Base Period:        -2"), "{shown}");
+        assert!(shown.contains("1 period(s) (base period g - 3;"), "{shown}");
+        assert_eq!(base_period_label(0), "g");
+        assert_eq!(base_period_label(2), "g + 2");
     }
 
     #[test]

@@ -18,7 +18,6 @@
         "p2a-core::econometrics::staggered_did::tests::test_validate_cs_covariates_ipw_dr_cells",
         "p2a-core::econometrics::staggered_did::tests::test_validate_cs_covariates_ipw_dr_time_varying",
         "p2a-core::econometrics::staggered_did::tests::test_validate_cs_covariates_match_did",
-        "p2a-core::econometrics::staggered_did::tests::test_validate_cs_covariates_bootstrap_close_to_analytic",
         "p2a-core::econometrics::staggered_did::tests::test_validate_cs_anticipation"
       ],
       "quantities": [
@@ -27,8 +26,7 @@
         "pre-trend Wald statistic, df and p-value (including the anticipation cells)",
         "ATT(g,t) and SE with a time-varying covariate (covariates of the earlier period)",
         "without covariates OR, IPW and DR equal the unconditional estimator",
-        "cells, aggregates and SEs against did 2.5.1 / DRDID 1.4.0 (cross-check)",
-        "multiplier-bootstrap SEs (DR, B = 999) within 10% of the analytic SE"
+        "cells, aggregates and SEs against did 2.5.1 / DRDID 1.4.0 (cross-check)"
       ],
       "tolerance": "validation/README.md, n = 1200 rows (150 units): OR ATT 1e-10, OR SEs and statistics 1e-8 relative; IPW/DR Tol::iterative(1e-8) (propensity score by IRLS at epsilon 1e-10 against R at 1e-14; measured 8.8e-13); against did 2.5.1 itself Tol::iterative(1e-6)",
       "deviations": [],

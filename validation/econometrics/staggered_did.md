@@ -206,15 +206,15 @@ measured gap 8.8e-13 relative); counts, event times and df exact.
 - `test_validate_cs_covariates_ipw_dr_cells`, `test_validate_cs_covariates_ipw_dr_time_varying`;
 - `test_validate_cs_covariates_match_did`: the same blocks (anticipation 0 and 1) against did
   2.5.1 itself at `Tol::iterative(1e-6)`;
-- `test_validate_cs_covariates_bootstrap_close_to_analytic`: the multiplier bootstrap (DR,
-  B = 999, seed 42) overall and group SEs within 10% of the analytic SEs;
 - `test_validate_cs_anticipation` (below).
 
 Property tests (not registered): `test_cs_dr_invariant_to_common_trend` (adding 10 t to the
 outcome changes no DR cell), `test_cs_ipw_dr_refuse_collinear_covariates`,
 `test_cs_overlap_guard_skips_cell`, `test_staggered_did_covariate_bootstrap_draws_are_linearised`
 (every replicate equals the multiplier draw recomputed from independent fits on T0's stream; the
-point estimates do not depend on `bootstrap`).
+point estimates do not depend on `bootstrap`), `test_cs_covariates_bootstrap_close_to_analytic`
+(the multiplier bootstrap, DR, B = 999, seed 42: overall and group SEs within 10% of the analytic
+SEs; a Monte Carlo band, not an R pin, since did's bootstrap draws are not reproduced).
 
 ## Anticipation (CAUS-83)
 

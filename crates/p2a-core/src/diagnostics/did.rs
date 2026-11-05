@@ -318,8 +318,14 @@ fn check_anticipation(result: &StaggeredDidResult, report: &mut IdentificationRe
             "Consider an earlier effective treatment date".to_string(),
             format!(
                 "Re-estimate with anticipation = {} (did's `anticipation`): the base period \
-                 becomes g - 1 - {} and those periods are treated as anticipation effects",
-                -earliest, -earliest
+                 becomes {} and those periods are treated as anticipation effects",
+                -earliest,
+                crate::econometrics::staggered_did::base_period_label(
+                    crate::econometrics::staggered_did::base_period_offset(
+                        result.config.base_period,
+                        usize::try_from(-earliest).unwrap_or(usize::MAX),
+                    )
+                )
             ),
             "Discuss why anticipation may or may not be present".to_string(),
         ]);
@@ -512,6 +518,28 @@ mod tests {
             w.message.contains("configured anticipation window of 1"),
             "{}",
             w.message
+        );
+        assert!(
+            w.remediation
+                .iter()
+                .any(|r| r.contains("base period becomes g - 3 ")),
+            "{:?}",
+            w.remediation
+        );
+        // The base period follows the configured base_period, not a literal -1.
+        result.config.base_period = -2;
+        let report = staggered_did_diagnostics(&result);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "ANTICIPATION_DETECTED")
+            .expect("ANTICIPATION_DETECTED");
+        assert!(
+            w.remediation
+                .iter()
+                .any(|r| r.contains("base period becomes g - 4 ")),
+            "{:?}",
+            w.remediation
         );
     }
 
