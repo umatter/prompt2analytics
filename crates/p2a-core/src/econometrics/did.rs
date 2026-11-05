@@ -20,6 +20,13 @@
 //!
 //! The coefficient **δ** is the DiD estimator (ATT under parallel trends).
 //!
+//! The regression is solved by pivoted QR as `lm` (`dqrdc2`, tolerance 1e-7):
+//! an aliased control is `NA` (NaN) with R's "Coefficients not defined because
+//! of singularities" warning, an aliased treatment × post interaction is an
+//! error, and the residual degrees of freedom are n - rank. HC1 and CR1
+//! standard errors use the identified columns (`sandwich::vcovHC(type = "HC1")`
+//! and `vcovCL(type = "HC1")`); clustering needs at least two clusters.
+//!
 //! ## Key Assumptions
 //!
 //! 1. **Parallel trends**: Absent treatment, treated and control groups would
@@ -50,15 +57,16 @@
 //!
 //! R equivalent: Manual implementation or packages like `did`, `fixest::feols()`
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::least_squares;
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 /// Result from a Difference-in-Differences estimation.
@@ -113,6 +121,28 @@ pub struct DiDResult {
     /// Rows dropped because of missing values (empty when none were).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Regressors not identified (aliased, as `lm`'s `NA` coefficients); their
+    /// coefficients and standard errors are NaN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliased: Vec<String>,
+    /// Warnings (R's aliasing message).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for DiDResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+/// `{v:>width.prec}`, or `NA` right-aligned for a NaN.
+fn num_or_na(v: f64, width: usize, prec: usize) -> String {
+    if v.is_nan() {
+        format!("{:>width$}", "NA")
+    } else {
+        format!("{v:>width$.prec$}")
+    }
 }
 
 impl fmt::Display for DiDResult {
@@ -167,30 +197,37 @@ impl fmt::Display for DiDResult {
         writeln!(f, "{}", "-".repeat(75))?;
 
         for i in 0..self.variables.len() {
-            let sig = SignificanceLevel::from_p_value(t_test_p_value(
-                self.coefficients[i] / self.std_errors[i],
-                self.df as f64,
-            ));
-            let t = if self.std_errors[i] > 0.0 {
-                self.coefficients[i] / self.std_errors[i]
+            let (b, se) = (self.coefficients[i], self.std_errors[i]);
+            let (t, p) = if b.is_nan() || se.is_nan() {
+                (f64::NAN, f64::NAN)
             } else {
-                0.0
+                let t = if se > 0.0 { b / se } else { 0.0 };
+                (t, t_test_p_value(t, self.df as f64))
             };
-            let p = t_test_p_value(t, self.df as f64);
+            let stars = if p.is_nan() {
+                ""
+            } else {
+                SignificanceLevel::from_p_value(p).stars()
+            };
             writeln!(
                 f,
-                "{:<25} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}",
+                "{:<25} {} {} {} {}{}",
                 self.variables[i],
-                self.coefficients[i],
-                self.std_errors[i],
-                t,
-                p,
-                sig.stars()
+                num_or_na(b, 12, 4),
+                num_or_na(se, 12, 4),
+                num_or_na(t, 10, 2),
+                num_or_na(p, 10, 3),
+                stars
             )?;
         }
 
         writeln!(f, "{}", "-".repeat(75))?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
+        let notes = notes_text(self);
+        if !notes.is_empty() {
+            writeln!(f)?;
+            write!(f, "{notes}")?;
+        }
         if let Some(note) = self.missing.note() {
             writeln!(f)?;
             writeln!(f, "Missing values: {note}")?;
@@ -300,89 +337,75 @@ pub fn run_did(
         var_names.push(col_name.to_string());
     }
 
-    // OLS estimation: β = (X'X)^{-1} X'y
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'X in DiD estimation".to_string(),
-        suggestion: format!("Check for perfect collinearity: {:?}", e),
-    })?;
-
-    let xty_vec = xty(&x.view(), &y);
-    let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-
-    // Residuals
-    let y_hat = x.dot(&beta);
-    let residuals = &y - &y_hat;
-
-    let df = n.saturating_sub(k);
+    // OLS by pivoted QR, as lm: aliased regressors are NA
+    let ls = least_squares(x.view(), y.view())?;
+    if ls.aliased.contains(&3) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the treatment × post interaction '{treatment_var}*{post_var}' is not \
+                 identified (aliased): both groups must be observed before and after treatment"
+            ),
+        });
+    }
+    let aliased: Vec<String> = ls.aliased.iter().map(|&j| var_names[j].clone()).collect();
+    let mut warnings = Vec::new();
+    if let Some(w) = ls.aliasing_warning(&var_names) {
+        warnings.push(w);
+    }
+    let residuals = &ls.residuals;
+    let df =
+        n.checked_sub(ls.rank)
+            .filter(|d| *d > 0)
+            .ok_or_else(|| EconError::InsufficientData {
+                required: ls.rank + 1,
+                provided: n,
+                context: "difference-in-differences residual degrees of freedom".to_string(),
+            })?;
     let ssr: f64 = residuals.iter().map(|r| r * r).sum();
-    let _sigma2 = if df > 0 {
-        ssr / df as f64
-    } else {
-        ssr / n as f64
-    };
 
-    // Variance-covariance estimation: clustered or HC1
-    let (vcov, n_clust) = if let Some(cvar) = cluster_var {
-        // Clustered standard errors (CR1), one cluster per factor level
+    // Sandwich on the identified columns: bread (X_id'X_id)^-1
+    let id: Vec<usize> = (0..k).filter(|j| !ls.aliased.contains(j)).collect();
+    let x_id = x.select(Axis(1), &id);
+    let bread = ls.unscaled_cov.select(Axis(0), &id).select(Axis(1), &id);
+    let kid = id.len();
+    let (vcov_id, n_clust) = if let Some(cvar) = cluster_var {
+        // CR1, one cluster per factor level
         let factor = cols.factor(cvar);
-        let mut clusters: Vec<Vec<usize>> =
-            resource::try_vec(factor.n_levels(), Vec::new(), "DiD clusters")?;
+        let g = factor.n_levels();
+        if g < 2 {
+            return Err(EconError::InsufficientData {
+                required: 2,
+                provided: g,
+                context: format!(
+                    "clustered standard errors need at least 2 clusters (cluster_var '{cvar}')"
+                ),
+            });
+        }
+        let mut scores = resource::try_zeros2(g, kid, "DiD cluster scores")?;
         for (i, &code) in factor.codes.iter().enumerate() {
-            clusters[code as usize].push(i);
+            let e = residuals[i];
+            let mut row = scores.row_mut(code as usize);
+            row.scaled_add(e, &x_id.row(i));
         }
-        let g = clusters.len();
-
-        // Small-sample correction: (G/(G-1)) * ((N-1)/(N-K))
-        let correction = if g > 1 {
-            (g as f64 / (g - 1) as f64) * ((n - 1) as f64 / (n - k) as f64)
-        } else {
-            1.0
-        };
-
-        // Compute meat: sum over clusters of (X_g' e_g)(X_g' e_g)'
-        let mut meat = Array2::<f64>::zeros((k, k));
-        for indices in &clusters {
-            let mut xe = vec![0.0; k];
-            for &i in indices {
-                let e = residuals[i];
-                for j in 0..k {
-                    xe[j] += x[[i, j]] * e;
-                }
-            }
-            for j in 0..k {
-                for l in 0..k {
-                    meat[[j, l]] += xe[j] * xe[l];
-                }
-            }
-        }
-
-        // Sandwich: (X'X)^{-1} * meat * (X'X)^{-1} * correction
-        let temp = xtx_inv.dot(&meat);
-        let vcov = temp.dot(&xtx_inv) * correction;
-        (vcov, Some(g))
+        let meat = scores.t().dot(&scores);
+        let gf = g as f64;
+        let correction = (gf / (gf - 1.0)) * ((n as f64 - 1.0) / df as f64);
+        (bread.dot(&meat).dot(&bread) * correction, Some(g))
     } else {
-        // HC1 robust standard errors
-        let scale = (n as f64) / (df as f64);
-        let mut meat = Array2::<f64>::zeros((k, k));
-        for i in 0..n {
-            let xi = x.row(i);
-            let e2 = residuals[i] * residuals[i];
-            for j in 0..k {
-                for l in 0..k {
-                    meat[[j, l]] += e2 * xi[j] * xi[l];
-                }
-            }
+        // HC1
+        let mut xe = x_id.clone();
+        for (mut row, &e) in xe.rows_mut().into_iter().zip(residuals.iter()) {
+            row *= e;
         }
-        let meat = &meat * scale;
-
-        let temp = xtx_inv.dot(&meat);
-        let vcov = temp.dot(&xtx_inv);
-        (vcov, None)
+        let meat = xe.t().dot(&xe);
+        (bread.dot(&meat).dot(&bread) * (n as f64 / df as f64), None)
     };
 
-    let std_errors: Vec<f64> = vcov.diag().mapv(|v: f64| v.max(0.0).sqrt()).to_vec();
-    let coefficients = beta.to_vec();
+    let mut std_errors = vec![f64::NAN; k];
+    for (a, &j) in id.iter().enumerate() {
+        std_errors[j] = vcov_id[[a, a]].max(0.0).sqrt();
+    }
+    let coefficients = ls.coefficients.to_vec();
 
     // The ATT is the coefficient on the interaction term (index 3)
     let att = coefficients[3];
@@ -395,7 +418,7 @@ pub fn run_did(
     let y_mean = y.mean().unwrap_or(0.0);
     let sst: f64 = y.iter().map(|yi| (yi - y_mean).powi(2)).sum();
     let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-    let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
+    let adj_r_squared = 1.0 - (1.0 - r_squared) * (n as f64 - 1.0) / (df as f64);
 
     Ok(DiDResult {
         dep_var: dep_var.to_string(),
@@ -421,6 +444,8 @@ pub fn run_did(
         cluster_var: cluster_var.map(|s| s.to_string()),
         n_clusters: n_clust,
         missing: cols.missing().clone(),
+        aliased,
+        warnings,
     })
 }
 
@@ -644,7 +669,7 @@ mod tests {
     /// # ATT = coefficient on treat:post ≈ 5.0
     /// ```
     #[test]
-    fn test_validate_did_classic_2x2() {
+    fn test_did_classic_2x2_recovers_dgp() {
         let dataset = create_validation_did_dataset();
         let result = run_did(&dataset, "y", "treat", "post", None, None).unwrap();
 
@@ -716,7 +741,7 @@ mod tests {
 
     /// Validation test: DiD with covariates
     #[test]
-    fn test_validate_did_with_covariates() {
+    fn test_did_with_covariates_recovers_dgp() {
         // Add covariate to the dataset
         let mut y_vec = Vec::new();
         let mut treat_vec = Vec::new();
@@ -783,7 +808,7 @@ mod tests {
 
     /// Validation test: Null case (no treatment effect)
     #[test]
-    fn test_validate_did_null_effect() {
+    fn test_did_null_effect_recovers_dgp() {
         // Create data with NO treatment effect (ATT = 0)
         let mut y_vec = Vec::new();
         let mut treat_vec = Vec::new();
@@ -828,12 +853,252 @@ mod tests {
             result.att
         );
 
-        // p-value should be > 0.05 (not significant)
-        // Note: due to randomness, this isn't guaranteed but likely with n=400
-        println!(
-            "Null case: ATT = {:.3}, p-value = {:.3}",
-            result.att, result.p_value
+        // Not significant. The data are deterministic: lm + vcovHC(type = "HC1")
+        // (df 396) gives ATT -0.028054724238937286, SE 0.21315963502411217,
+        // t -0.1316136811538629, p 0.89535670480011142 (quoted, not a registered case).
+        assert!(result.p_value > 0.05, "p = {}", result.p_value);
+        assert_eq!(result.df, 396);
+        for (got, want) in [
+            (result.att, -0.028054724238937286),
+            (result.std_error, 0.21315963502411217),
+            (result.t_stat, -0.1316136811538629),
+            (result.p_value, 0.89535670480011142),
+        ] {
+            assert!((got - want).abs() <= 1e-8 * want.abs(), "{got} vs {want}");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // T3-WP21: lm's pivoted QR, checked df, clusters (CAUS-102); the R case
+    // did_2x2_training (validation/r/cases/causal_did_cov.R)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /// CAUS-102: coefficients, HC1 and CR1 SEs, t, p, df, R2 and the group means
+    /// against lm + sandwich on employee_training, including an aliased control
+    /// (years_since_hire = tenure + 0.5), NA as in lm.
+    #[test]
+    fn test_validate_did_2x2_training() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("did_2x2_training");
+        let rn = |ctrl: &[&str]| -> Vec<String> {
+            [
+                "(Intercept)",
+                "training_group",
+                "post_training",
+                "training_group:post_training",
+            ]
+            .iter()
+            .chain(ctrl.iter())
+            .map(|s| s.to_string())
+            .collect()
+        };
+        for (spec, ctrl) in [
+            ("base", &[][..]),
+            ("tenure", &["tenure"][..]),
+            ("aliased", &["tenure", "years_since_hire"][..]),
+        ] {
+            let c = if ctrl.is_empty() { None } else { Some(ctrl) };
+            let hc1 = run_did(
+                &ds,
+                "performance",
+                "training_group",
+                "post_training",
+                c,
+                None,
+            )
+            .unwrap();
+            let cl = run_did(
+                &ds,
+                "performance",
+                "training_group",
+                "post_training",
+                c,
+                Some("employee_id"),
+            )
+            .unwrap();
+            let (names, n) = (rn(ctrl), hc1.n_obs);
+            let t = |r: &DiDResult| {
+                r.coefficients
+                    .iter()
+                    .zip(&r.std_errors)
+                    .map(|(b, s)| b / s)
+                    .collect::<Vec<_>>()
+            };
+            let p = |r: &DiDResult| {
+                t(r).iter()
+                    .map(|&x| t_test_p_value(x, r.df as f64))
+                    .collect::<Vec<_>>()
+            };
+            Check::new(&case)
+                .named(
+                    &format!("{spec}_coef"),
+                    &names,
+                    &hc1.coefficients,
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("{spec}_coef"),
+                    &names,
+                    &cl.coefficients,
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("{spec}_se_hc1"),
+                    &names,
+                    &hc1.std_errors,
+                    Tol::se(n),
+                )
+                .named(&format!("{spec}_se_cl"), &names, &cl.std_errors, Tol::se(n))
+                .named(&format!("{spec}_t_hc1"), &names, &t(&hc1), Tol::stat(n))
+                .named(&format!("{spec}_t_cl"), &names, &t(&cl), Tol::stat(n))
+                .named(&format!("{spec}_p_hc1"), &names, &p(&hc1), Tol::p_value(n))
+                .named(&format!("{spec}_p_cl"), &names, &p(&cl), Tol::p_value(n))
+                .scalar(&format!("{spec}_df_resid"), hc1.df as f64, Tol::exact())
+                .scalar(&format!("{spec}_r2"), hc1.r_squared, Tol::stat(n))
+                .scalar(&format!("{spec}_adj_r2"), hc1.adj_r_squared, Tol::stat(n))
+                .finish();
+            let ix = names
+                .iter()
+                .position(|s| s == "training_group:post_training")
+                .unwrap();
+            assert_eq!(
+                (cl.att, cl.std_error, cl.t_stat),
+                (cl.coefficients[ix], cl.std_errors[ix], t(&cl)[ix])
+            );
+            let want_p = case.named(&format!("{spec}_p_cl"), "training_group:post_training");
+            assert!((cl.p_value - want_p).abs() <= 1e-12 + 1e-8 * cl.p_value);
+            assert_eq!(cl.n_clusters, Some(case.scalar("n_clusters") as usize));
+            if spec == "aliased" {
+                assert_eq!(hc1.aliased, vec!["years_since_hire".to_string()]);
+                assert!(
+                    hc1.warnings.iter().any(|w| w
+                        == "Coefficients not defined because of singularities: years_since_hire")
+                );
+                let shown = format!("{hc1}");
+                assert!(
+                    shown.contains("years_since_hire") && shown.contains("NA"),
+                    "{shown}"
+                );
+                assert!(
+                    shown.contains("Warning: Coefficients not defined"),
+                    "{shown}"
+                );
+            } else {
+                assert!(hc1.aliased.is_empty() && hc1.warnings.is_empty());
+            }
+        }
+        let r = run_did(
+            &ds,
+            "performance",
+            "training_group",
+            "post_training",
+            None,
+            None,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector(
+                "group_means",
+                &[
+                    r.control_pre_mean,
+                    r.control_post_mean,
+                    r.treated_pre_mean,
+                    r.treated_post_mean,
+                ],
+                Tol::coef(r.n_obs),
+            )
+            .finish();
+    }
+
+    /// n <= k is refused (before T2-WP12's row check: a usize overflow panic, or
+    /// se 0 and p NaN with 4 rows).
+    #[test]
+    fn test_run_did_rejects_n_le_k() {
+        let df = df! {
+            "y" => [1.0, 2.1, 2.9],
+            "treat" => [0.0, 1.0, 1.0],
+            "post" => [0.0, 0.0, 1.0],
+            "cl" => [1i64, 2, 3],
+        }
+        .unwrap();
+        let r = run_did(&Dataset::new(df), "y", "treat", "post", None, Some("cl"));
+        assert!(
+            matches!(r, Err(EconError::InsufficientData { .. })),
+            "{r:?}"
         );
+        let df = df! {
+            "y" => [1.0, 2.1, 2.9, 4.2],
+            "treat" => [0.0, 0.0, 1.0, 1.0],
+            "post" => [0.0, 1.0, 0.0, 1.0],
+        }
+        .unwrap();
+        let r = run_did(&Dataset::new(df), "y", "treat", "post", None, None);
+        assert!(
+            matches!(r, Err(EconError::InsufficientData { .. })),
+            "{r:?}"
+        );
+    }
+
+    /// One cluster: sandwich::vcovCL fails; before, the CR1 factor fell back to 1.
+    /// employee_training, for the tests that are not R-pinned (not registered).
+    fn training() -> Dataset {
+        crate::test_support::load_case("did_2x2_training").1
+    }
+
+    #[test]
+    fn test_run_did_rejects_single_cluster() {
+        let ds = training();
+        let mut df = ds.df().clone();
+        let h = df.height();
+        df.with_column(Column::new("one".into(), vec![1i64; h]))
+            .unwrap();
+        let r = run_did(
+            &Dataset::new(df),
+            "performance",
+            "training_group",
+            "post_training",
+            None,
+            Some("one"),
+        );
+        match r {
+            Err(EconError::InsufficientData { context, .. }) => {
+                assert!(context.contains("at least 2 clusters"), "{context}")
+            }
+            other => panic!("expected InsufficientData, got {other:?}"),
+        }
+    }
+
+    /// Only treated units: the interaction is aliased with post, so the ATT is
+    /// not identified (before: a generalized-inverse number).
+    #[test]
+    fn test_run_did_rejects_unidentified_att() {
+        let ds = training();
+        let mask = ds
+            .df()
+            .column("training_group")
+            .unwrap()
+            .as_materialized_series()
+            .equal(1)
+            .unwrap();
+        let df = ds.df().filter(&mask).unwrap();
+        let r = run_did(
+            &Dataset::new(df),
+            "performance",
+            "training_group",
+            "post_training",
+            None,
+            None,
+        );
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains("training_group*post_training"),
+                    "{message}"
+                );
+                assert!(message.contains("not identified"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════════════

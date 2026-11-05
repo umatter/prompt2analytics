@@ -732,6 +732,8 @@ mod tests {
             cluster_var: None,
             n_clusters: None,
             missing: Default::default(),
+            aliased: vec![],
+            warnings: vec![],
         };
 
         let report = did_diagnostics(&result);
