@@ -50,9 +50,9 @@ See [timeseries/](timeseries/) subdirectory.
 |--------|------|--------------|-----------|
 | Kaplan-Meier | [survival.md](survival.md) | `run_kaplan_meier()` | R `survival::survfit()` |
 | Log-Rank Test | [survival.md](survival.md) | `log_rank_test()` | R `survival::survdiff()` |
-| Cox PH | [survival_models.md](survival_models.md) | `run_cox_ph()` | R `survival::coxph()` |
-| AFT Models | [survival_models.md](survival_models.md) | `run_aft()` | R `survival::survreg()` |
-| Competing Risks | [survival_models.md](survival_models.md) | `run_competing_risks()` | R `cmprsk::cuminc()` |
+| Cox PH | [survival.md](survival.md) | `run_cox_ph()` | R `survival::coxph()` |
+| AFT Models | [survival.md](survival.md) | `run_aft()` | R `survival::survreg()` |
+| Competing Risks | [survival.md](survival.md) | `run_competing_risks()` | R `survival::survfit()` (multi-state) |
 
 ## Key Test Datasets
 

@@ -1,4 +1,4 @@
-# Validation: Survival Analysis (Kaplan-Meier, log-rank test, survival columns)
+# Validation: Survival Analysis (Kaplan-Meier, log-rank, Cox PH, AFT, survival columns)
 
 ## Method Overview
 
@@ -8,28 +8,36 @@ This document covers what is pinned to R's `survival` package:
   `conf_type` "log" (default, as R), "log-log" and "plain", the median and its limits.
 - **Log-rank test**: `log_rank_test` (MCP `log_rank`, CLI `survival log-rank`), as
   `survdiff(rho = 0)`.
+- **Cox proportional hazards**: `run_cox_ph` (MCP `cox_ph`, CLI `survival cox`), as `coxph`: Efron
+  (default) and Breslow ties, model-based, robust (Lin-Wei) and clustered SEs, the LR, Wald, score and robust
+  score tests, convergence and aliased covariates.
+- **Accelerated failure time**: `run_aft` (MCP `aft`, CLI `survival aft`), as `survreg` with
+  `dist = "weibull"`, `"exponential"`, `"lognormal"`, `"loglogistic"`.
 - **Survival columns** of all five survival entry points (Kaplan-Meier, log-rank, Cox PH, AFT,
   competing risks): integer, float and logical columns, rows with missing values dropped and
   reported, status coded as `Surv()` codes it.
 
-Cox proportional hazards, AFT models and competing risks are documented in
-[survival_models.md](survival_models.md); their estimates are not R-pinned.
+The Cox model's concordance is not R-pinned (ECON-89).
 
 ## Reference Implementation
 
 | Package | Language | Functions | Version |
 |---------|----------|-----------|---------|
-| survival | R | `Surv()`, `survfit()`, `quantile.survfit()`, `survdiff()` | 3.5.8 on R 4.3.3 |
+| survival | R | `Surv()`, `survfit()`, `quantile.survfit()`, `survdiff()`, `coxph()`, `survreg()` | 3.5.8 on R 4.3.3 |
 
-The R reference cases are in `validation/r/cases/survival.R`; `Rscript validation/r/run.R --check`
-recomputes them and compares with the committed `validation/expected/<case>.json`. The registry
-(`validation/methods/survival.json`) lists the tests that load them:
+The R reference cases are in `validation/r/cases/survival.R` and (Cox, AFT) `validation/r/cases/surv_cox_aft.R`;
+`Rscript validation/r/run.R --check` recomputes them and compares with the committed
+`validation/expected/<case>.json`. The registries (`validation/methods/survival.json`,
+`validation/methods/surv_cox_aft.json`) list the tests that load them:
 
 | Registry id | Cases | Tests |
 |-------------|-------|-------|
 | `surv_km` | `surv_km_lung`, `surv_km_lung_by_sex`, `surv_km_small`, `surv_km_median_rules` | `test_validate_km_lung`, `test_validate_km_lung_by_sex`, `test_validate_km_small`, `test_validate_km_median_rules`, `test_validate_km_conf_level_and_type_validation`; MCP `test_validate_mcp_kaplan_meier_lung`, `test_validate_mcp_kaplan_meier_rejects_unknown_conf_type`; CLI `test_validate_cli_survival_km_lung`, `test_validate_cli_survival_km_rejects_unknown_conf_type` |
 | `surv_logrank` | `surv_logrank_lung`, `surv_logrank_small`, `surv_km_median_rules` | `test_validate_logrank_lung`, `test_validate_logrank_small`, `test_validate_logrank_zero_expected_group`; MCP `test_validate_mcp_log_rank_lung`; CLI `test_validate_cli_survival_log_rank_lung`, `test_validate_cli_survival_km_groups_missing_note` |
 | `surv_data_handling` | `surv_km_lung`, `surv_logrank_lung`, `surv_logrank_small`, `surv_km_small` | `test_validate_na_survival_int64_columns`, `test_validate_surv_status_coding_lung`, `test_validate_surv_status_invalid_codes_are_errors`, `test_validate_na_survival_missing_rows_are_dropped_and_reported`, `test_validate_na_survival_bad_columns_name_the_column`; MCP `test_validate_mcp_survival_tools_accept_integer_columns`; CLI `test_validate_cli_survival_cox_aft_integer_columns` |
+| `surv_cox` | `surv_cox_robust`, `surv_cox_ties_small` | `test_validate_cox_ties_small`, `test_validate_cox_breslow_row_order_invariant`, `test_validate_cox_efron_model`, `test_validate_cox_breslow_model`, `test_validate_cox_converges_at_large_scale`, `test_validate_cox_aliased_covariate`, `test_validate_cox_default_ties_is_efron` |
+| `surv_cox_robust` | `surv_cox_robust` | `test_validate_cox_efron_robust`, `test_validate_cox_breslow_robust`, `test_validate_cox_cluster` |
+| `surv_aft` | `surv_aft` | `test_validate_aft_weibull`, `test_validate_aft_exponential`, `test_validate_aft_lognormal`, `test_validate_aft_loglogistic`, `test_validate_aft_converges_at_any_covariate_scale`, `test_validate_aft_aliased_covariate` |
 
 The core tests are in `crates/p2a-core/src/econometrics/survival.rs`, the MCP tests in
 `crates/p2a-mcp/src/tools/handlers/survival.rs`, the CLI tests in
@@ -197,7 +205,176 @@ SE on the log scale and both limits at all 186 times under the default type),
 `test_validate_km_lung_by_sex`, `test_validate_logrank_lung` (statistic, df, p, observed,
 expected, n per group and the variance matrix for both groupings).
 
-The Cox model on lung is in [survival_models.md](survival_models.md).
+The Cox and AFT models on lung are Test Cases 5 to 7.
+
+## Test Case 5: Cox Proportional Hazards (`surv_cox_robust`, `surv_cox_ties_small`)
+
+### R Code
+```r
+library(survival)
+# validation/r/cases/surv_cox_aft.R; lung as in Test Case 4 (227 rows once ph.ecog's NA is dropped)
+ctl <- coxph.control(eps = 1e-12, toler.chol = 1e-13, iter.max = 100)
+coxph(Surv(time, status) ~ age + sex + ph.ecog, data = lung, ties = "efron",   control = ctl)
+coxph(Surv(time, status) ~ age + sex + ph.ecog, data = lung, ties = "breslow", control = ctl)
+coxph(Surv(time, event) ~ x, data = cox_ties_small, ties = "efron" | "breslow", control = ctl)
+coxph(Surv(time, status) ~ I(age * s) + sex, data = lung)        # s = 1e-6, 1, 1/365.25, 1e6; default eps
+coxph(Surv(time, status) ~ age + sex + age2, data = lung)        # age2 = 2 age + sex: NA
+```
+
+### Expected Results (R, 6 significant digits; full digits in `validation/expected/surv_cox_robust.json`)
+
+Model-based standard errors, n = 227, 164 events:
+
+| Ties | Variable | coef | se(coef) | z | p | HR lower | HR upper |
+|------|----------|------|----------|---|---|----------|----------|
+| Efron | age | 0.0110668 | 0.00926741 | 1.19416 | 0.232416 | 0.992928 | 1.02966 |
+| Efron | sex | -0.552612 | 0.167739 | -3.29448 | 0.000986051 | 0.414213 | 0.799435 |
+| Efron | ph.ecog | 0.463728 | 0.113577 | 4.08293 | 4.44707e-05 | 1.27268 | 1.98642 |
+| Breslow | age | 0.0110411 | 0.00926677 | 1.19148 | 0.233467 | 0.992904 | 1.02963 |
+| Breslow | sex | -0.55189 | 0.167742 | -3.2901 | 0.00100151 | 0.41451 | 0.800019 |
+| Breslow | ph.ecog | 0.462947 | 0.113574 | 4.07617 | 4.57837e-05 | 1.27169 | 1.98486 |
+
+| Ties | logLik | null logLik | LR test | Wald test | Score test (df 3) |
+|------|--------|-------------|---------|-----------|-------------------|
+| Efron | -729.23 | -744.48 | 30.5007 (p 1.08282e-06) | 29.9293 (p 1.42817e-06) | 30.4999 (p 1.08321e-06) |
+| Breslow | -729.489 | -744.693 | 30.4082 (p 1.13242e-06) | 29.839 (p 1.49197e-06) | 30.4064 (p 1.13342e-06) |
+
+**Tie fixture** (`validation/datasets/generated/cox_ties_small.csv`: 10 rows, 5 distinct times, censored rows
+tied with deaths), in file order and reversed:
+
+| Ties | coef | se | logLik | null logLik | score test |
+|------|------|----|--------|-------------|------------|
+| Efron | -0.0502312 | 0.708672 | -12.2115 | -12.214 | 0.00502513 |
+| Breslow | -0.0502312 | 0.708672 | -13.1436 | -13.1461 | 0.00502513 |
+
+Before ECON-46 was fixed, Breslow let rows enter the risk set one at a time, so tied deaths saw different
+denominators: the fixture gave 0.366 in file order and -0.480 reversed, lung's age 0.011071 and 0.011049.
+
+**Ties.** Rows are grouped in blocks of exactly equal times, processed in descending time. Breslow scores every
+death of a block against the full risk set {t_j >= t} (one d-weighted term); Efron removes the fraction (r - 1)/d of
+the block's deaths' risk from the r-th death's denominator. Efron is the default, as in coxph.
+
+**Convergence** (coxph.fit / coxfit6). Covariates are centred and scaled by their mean absolute deviation; Newton
+starts at beta = 0, halves the step while the log partial likelihood falls, and stops when
+|1 - loglik_old / loglik| <= `tolerance` (coxph.control `eps`, default 1e-9; `max_iter` defaults to 25,
+coxph's `iter.max` is 20). Coefficients and the information are mapped back to the original units. Lung's age multiplied by
+1e-6, 1, 1/365.25 and 1e6 converges in 3 iterations at every scale with the default eps (coxph: 3; before X-15 was
+fixed the absolute max |score| < 1e-9 rule ran 25 iterations and reported no convergence at the large scales). At the
+limit the result carries a non-convergence warning; a monotone likelihood gives coxph's "Loglik converged before
+variable ...; coefficient may be infinite".
+
+**Aliasing.** A covariate that is constant or collinear with earlier ones (pivoted QR on [1 | X], the later column
+dropped as R does) has NaN in every per-variable vector, is listed in `aliased`, and the warning "Coefficients not
+defined because of singularities: ..." is added; the tests have df = the identified coefficients. Lung with
+age2 = 2 age + sex: logLik -742.848, LR test 14.1231 on 2 df.
+
+Tests: `test_validate_cox_efron_model`, `test_validate_cox_breslow_model` (every quantity above),
+`test_validate_cox_ties_small`, `test_validate_cox_breslow_row_order_invariant`,
+`test_validate_cox_converges_at_large_scale`, `test_validate_cox_aliased_covariate`,
+`test_validate_cox_default_ties_is_efron`; properties: `test_cox_iteration_limit_reports_non_convergence`,
+`test_cox_monotone_likelihood_warns`, `test_cox_rejects_bad_iteration_settings`.
+
+---
+
+## Test Case 6: Robust and Clustered Cox Standard Errors (`surv_cox_robust`)
+
+### R Code
+```r
+coxph(Surv(time, status) ~ age + sex + ph.ecog, data = lung, ties, robust = TRUE, control = ctl)
+coxph(Surv(time, status) ~ age + sex + ph.ecog + cluster(inst), data = lung, ties, control = ctl)
+fit$rscore                                                       # robust score test
+```
+
+`CoxConfig { robust_se: true, .. }` is `robust = TRUE`; `cluster: Some("inst")` is `cluster(inst)` and implies
+robust. With V the inverse information (scaled space) and U the n x q score residuals (Efron weights within tie
+blocks), dfbeta = U V, summed within clusters when there are clusters, and V_r = dfbeta' dfbeta. The SEs are
+sqrt(diag(V_r)); z, p, the HR interval and the Wald test b' V_r^-1 b use them; `naive_std_errors` keeps the
+model-based SEs. The robust score test is u0' (U0' U0)^-1 u0 with the score residuals at beta = 0, summed within
+clusters. A cluster column with a single level is refused; with no more clusters than coefficients the robust Wald
+and score tests are NaN with a warning.
+
+**Robust** (n = 227):
+
+| Ties | Variable | robust se | z | p | HR lower | HR upper |
+|------|----------|-----------|---|---|----------|----------|
+| Efron | age | 0.00988139 | 1.11996 | 0.262731 | 0.991734 | 1.0309 |
+| Efron | sex | 0.164748 | -3.35428 | 0.000795717 | 0.416648 | 0.794763 |
+| Efron | ph.ecog | 0.124159 | 3.73496 | 0.000187744 | 1.24655 | 2.02805 |
+| Breslow | age | 0.00986141 | 1.11963 | 0.262871 | 0.991747 | 1.03083 |
+| Breslow | sex | 0.164484 | -3.35529 | 0.000792826 | 0.417166 | 0.794925 |
+| Breslow | ph.ecog | 0.123963 | 3.73454 | 0.000188055 | 1.24606 | 2.02569 |
+
+| Ties | robust Wald (df 3) | robust score (df 3) |
+|------|--------------------|---------------------|
+| Efron | 23.8023 (p 2.74702e-05) | 27.4263 (p 4.79211e-06) |
+| Breslow | 23.7919 (p 2.76075e-05) | 27.4252 (p 4.79458e-06) |
+
+**Clustered by `inst`** (226 rows, 163 events, 18 clusters; the row with a missing `inst` is dropped and reported):
+
+| Ties | Variable | coef | model se | clustered se | z | p |
+|------|----------|------|----------|--------------|---|---|
+| Efron | age | 0.0112322 | 0.00926211 | 0.00688873 | 1.63051 | 0.102993 |
+| Efron | sex | -0.556593 | 0.168071 | 0.112287 | -4.9569 | 7.16282e-07 |
+| Efron | ph.ecog | 0.469216 | 0.11429 | 0.117616 | 3.98939 | 6.62423e-05 |
+| Breslow | age | 0.0112049 | 0.00926152 | 0.00686751 | 1.63158 | 0.102767 |
+| Breslow | sex | -0.555825 | 0.168074 | 0.111998 | -4.96281 | 6.94816e-07 |
+| Breslow | ph.ecog | 0.468379 | 0.114286 | 0.117123 | 3.99902 | 6.36045e-05 |
+
+| Ties | robust Wald (df 3) | robust score (df 3) |
+|------|--------------------|---------------------|
+| Efron | 33.8617 (p 2.11894e-07) | 7.26863 (p 0.0638112) |
+| Breslow | 34.0614 (p 1.92295e-07) | 7.28292 (p 0.0634064) |
+
+Before ECON-45 was fixed, `robust_se` was never read: the "robust" fit printed the model-based SEs.
+
+Tests: `test_validate_cox_efron_robust`, `test_validate_cox_breslow_robust`, `test_validate_cox_cluster`;
+properties: `test_cox_cluster_needs_two_levels`, `test_cox_robust_tests_need_more_clusters_than_coefficients`.
+
+---
+
+## Test Case 7: Accelerated Failure Time Models (`surv_aft`)
+
+### R Code
+```r
+ctl <- survreg.control(rel.tolerance = 1e-12, maxiter = 100)
+survreg(Surv(time, status) ~ age + sex + ph.ecog, data = lung, dist = d, control = ctl)
+# d = "weibull", "exponential", "lognormal", "loglogistic"; AIC(fit), BIC(fit)
+```
+
+The model is ln T = x'beta + sigma eps with eps extreme-value (Weibull, exponential), standard normal (log-normal)
+or logistic (log-logistic); the exponential fixes sigma = 1. The log-likelihood is reported on the time scale, as
+survreg's: the log-density of ln T minus the sum of ln t over the events. AIC and BIC count p + 1 parameters (p for
+the exponential). Newton starts from least squares on ln t, works on (beta, ln sigma) with the information
+equilibrated and damped (Levenberg) when it is not positive definite, halves the step while the log-likelihood falls,
+and stops when the relative change is at most `tolerance` (survreg.control `rel.tolerance`, default 1e-9). Normal
+tails use a log survival function that does not underflow.
+
+| Distribution | (Intercept) | age | sex | ph.ecog | scale | Log(scale) se | logLik | AIC | BIC |
+|--------------|-------------|-----|-----|---------|-------|---------------|--------|-----|-----|
+| weibull | 6.27344 | -0.00747544 | 0.401091 | -0.339638 | 0.731109 | 0.0613465 | -1132.44 | 2274.88 | 2292 |
+| exponential | 6.37342 | -0.0102174 | 0.509061 | -0.405017 | 1 | fixed | -1143.56 | 2295.13 | 2308.83 |
+| lognormal | 6.49479 | -0.0191819 | 0.521953 | -0.355567 | 1.02863 | 0.0559606 | -1146.88 | 2303.76 | 2320.89 |
+| loglogistic | 5.93669 | -0.00807992 | 0.486624 | -0.404616 | 0.536142 | 0.0658134 | -1137.49 | 2284.98 | 2302.1 |
+
+Standard errors (same order):
+
+| Distribution | (Intercept) | age | sex | ph.ecog |
+|--------------|-------------|-----|-----|---------|
+| weibull | 0.453578 | 0.00676351 | 0.123733 | 0.0834784 |
+| exponential | 0.620755 | 0.00917689 | 0.167161 | 0.112697 |
+| lognormal | 0.582756 | 0.00832786 | 0.152775 | 0.103308 |
+| loglogistic | 0.512073 | 0.00747791 | 0.134894 | 0.0930137 |
+
+Before ECON-47 and ECON-48 were fixed, no Newton step was ever taken (the Cholesky of the negative-definite Hessian
+failed), 100 gradient steps diverged (Weibull age 54.48, scale inf), and the exponential was the Weibull fit
+relabelled. Lung's age multiplied by 1e-6 and 1e6 gives survreg's rescaled coefficients in the same number of
+iterations (within one); age2 = 2 age + sex is aliased (NA), as in survreg.
+
+Tests: `test_validate_aft_weibull`, `test_validate_aft_exponential`, `test_validate_aft_lognormal`,
+`test_validate_aft_loglogistic`, `test_validate_aft_converges_at_any_covariate_scale`,
+`test_validate_aft_aliased_covariate`; properties: `test_aft_exponential_differs_from_weibull`,
+`test_aft_iteration_limit_is_a_warning`, `test_aft_rejects_bad_iteration_settings`,
+`test_aft_tail_helpers_match_r`, `test_aft_non_finite_result_is_an_error`.
 
 ---
 
@@ -268,6 +445,18 @@ rows, R's n and observed events per group; Cox on age + sex + ph.karno: 227 rows
    sqrt(machine epsilon); this matters only for times produced by arithmetic.
 4. **A log-rank test with fewer than two groups with expected events is an error.** R reports a
    chi-square of 0 on 0 df.
+5. **Cox aliasing** is detected by pivoted QR on [1 | X] (tolerance 1e-7, as `lm`), where coxph uses `cholesky2`
+   on the information (`toler.chol`). Both drop the later of exactly collinear columns; near-singular designs may
+   differ.
+6. **Robust Cox tests with too few clusters.** With no more clusters than coefficients the robust Wald and robust
+   score tests are NaN with a warning; coxph reports generalized-inverse statistics. A single-level cluster column
+   is refused (coxph returns a variance of about 0).
+7. **`cluster` implies robust SEs.** coxph ignores the cluster with a warning when `robust = FALSE` is given
+   explicitly, which the core cannot see; the CLI and MCP surfaces decide.
+8. **AFT start values** (least squares on ln t) differ from survreg's, so iteration counts can differ; the
+   estimates agree to the tolerances below.
+9. **Cox concordance** and its SE are not R-pinned (ECON-89: the SE formula and the pairing of tied times differ
+   from `survival::concordance`).
 
 The confidence interval type is `conf_type` "log" (default, as R), "log-log" or "plain"; before
 ECON-7 was fixed p2a used an undisclosed, broken log-log band.
@@ -286,6 +475,12 @@ Tolerances follow the table in `validation/README.md`.
 | Log-rank | chi-squared, expected, variance | `Tol::stat(n)` |
 | Log-rank | p-value | `Tol::p_value(n)` |
 | Log-rank | observed, n per group, df | exact |
+| Cox, AFT (lung, n = 226-228) | coefficients | `Tol::coef(n)`: 1e-8 relative |
+| Cox, AFT | SE, z, HR limits, tests, log-likelihood, scale, AIC, BIC | `Tol::se(n)` / `Tol::stat(n)`: 1e-6 relative |
+| Cox, AFT | p-values | `Tol::p_value(n)`: 1e-6 relative + 1e-12 absolute |
+| Cox tie fixture (n = 10) | coefficient; SE and statistics | 1e-6; 1e-5 relative |
+| Cox at the default eps | coefficients against the tight fit | `Tol::iterative(1e-7)` |
+| Cox, AFT | n, events, clusters, aliased columns | exact |
 | Survival columns | rows used, events, error types | exact |
 | CLI and MCP text | printed values | print precision |
 
@@ -299,3 +494,9 @@ Tolerances follow the table in `validation/README.md`.
 3. Mantel, N. (1966). "Evaluation of survival data and two new rank order statistics arising in
    its consideration". Cancer Chemotherapy Reports, 50:163-170.
 4. Klein, J.P. & Moeschberger, M.L. (2003). *Survival Analysis*. Springer.
+5. Cox, D.R. (1972). "Regression Models and Life-Tables". JRSS B, 34:187-220.
+6. Efron, B. (1977). "The Efficiency of Cox's Likelihood Function for Censored Data". JASA, 72:557-565.
+7. Lin, D.Y. & Wei, L.J. (1989). "The Robust Inference for the Cox Proportional Hazards Model". JASA,
+   84:1074-1078.
+8. Therneau, T.M. & Grambsch, P.M. (2000). *Modeling Survival Data: Extending the Cox Model*. Springer.
+9. Kalbfleisch, J.D. & Prentice, R.L. (2002). *The Statistical Analysis of Failure Time Data*, 2nd ed. Wiley.
