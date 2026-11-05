@@ -7,8 +7,10 @@ varies across units. The Callaway and Sant'Anna (2021) estimator avoids the bias
 effects under heterogeneous treatment effects. p2a's `run_staggered_did` (MCP `staggered_did`,
 CLI `causal staggered-did`) computes:
 
-- every cell ATT(g,t) with the universal base period g - 1 (`base_period = -1`), as the
-  difference in mean outcome changes Y_t - Y_{g-1} of cohort g and its comparison units;
+- every cell ATT(g,t) with the universal base period g - 1 - anticipation (`base_period = -1`):
+  without covariates the difference in mean outcome changes Y_t - Y_base of cohort g and its
+  comparison units, with covariates DRDID's outcome-regression, IPW or doubly robust estimator
+  (below);
 - the aggregates of `did::aggte`: overall (`type = "simple"`: post-treatment cells weighted by
   P(G = g)), group (`type = "group"`: each cohort's mean over its post-treatment cells) and
   event study (`type = "dynamic"`: for each e = t - g, the cells at e weighted by P(G = g));
@@ -16,7 +18,7 @@ CLI `causal staggered-did`) computes:
 
 **Key parameters**: `outcome`, `treatment_time` (first treatment period, 0 or negative for
 never treated), `time_col`, `unit_col`, `comparison_group` (never treated or not yet treated),
-`estimation_method`, `bootstrap`, `confidence_level`.
+`estimation_method`, `anticipation`, `bootstrap`, `confidence_level`, covariates.
 
 ## R reference
 
@@ -60,8 +62,10 @@ independence SE that p2a reported before the fix (`never_simple_se_independent` 
 | Pre-trend p | 0.6104942099687757 | 0.6125070065378957 |
 
 Event-study ATTs and SEs for e = -6 .. 5 and the 24 cell ATTs and SEs are in
-`validation/expected/did_cs_analytic.json` (`*_event_*`, `*_cell_*`). The SEs of the four
-base-period cells and of e = -1 are exactly 0.
+`validation/expected/did_cs_analytic.json` (`*_event_*`, `*_cell_*`). The SEs of the base-period
+cells and of e = -1 are NA, as did reports them (`se <= sqrt(.Machine$double.eps) * 10` is set to
+NA in `att_gt` and `aggte`; CAUS-117); p2a reports NaN, and Display prints `NA`
+(`test_validate_staggered_did_reference_cells_have_no_se`).
 
 ### Tests and tolerances
 
@@ -85,6 +89,8 @@ R-pinned (`validation/methods/causal_did.json`, method `staggered_did_cs`):
 - `test_validate_staggered_did_bootstrap_close_to_analytic`: with `bootstrap = 999` (seed 42)
   the overall and group SEs are within 15% of the analytic SEs (observed ratios: 1.019 overall,
   1.063, 0.959 and 1.022 for the groups);
+- `test_validate_staggered_did_reference_cells_have_no_se`: the reference cells and e = -1 have
+  NaN SEs, analytic and bootstrap, and are left out of the pre-trend test;
 - `test_validate_mcp_staggered_did_analytic`, `test_validate_mcp_staggered_did_string_unit_ids`
   (`crates/p2a-mcp/tests/tier2/wp12_did.rs`): the MCP text at print precision
   (`Tol::printed(4)`, the Wald statistic `Tol::printed(2)`).
@@ -95,9 +101,9 @@ R-pinned (`validation/methods/causal_did.json`, method `staggered_did_cs`):
   `did::att_gt` with `bstrap = FALSE`. The overall and event-study influence functions include
   the term for the estimated weights; the pre-trend test is `a' V^+ a` with the
   influence-function covariance of the pre-treatment cells (base-period cells and cells with a
-  zero SE excluded; a singular V uses a generalized inverse with df = rank and a warning). This
-  path is the unconditional estimator: with covariates it is refused (`NotImplemented`, for every
-  `estimation_method`; without covariates the three methods coincide, as in did).
+  zero SE excluded; a singular V uses a generalized inverse with df = rank and a warning). With
+  covariates the cell influence functions are DRDID's (below); without covariates the three
+  methods coincide, as in did.
 - The analytic pre-trend test is did's asymptotic chi-squared test, and it over-rejects on small
   panels: in a null simulation with nine pre-treatment cells it rejected about 19% of panels at
   the 5% level with 90 units (cohorts as small as 15 units) and about 6% with 900, so a
@@ -109,7 +115,14 @@ R-pinned (`validation/methods/causal_did.json`, method `staggered_did_cs`):
   cannot compute a needed cell (no treated or comparison unit drawn, or a drawn unit without its
   base period on an unbalanced panel) is dropped for that statistic; one warning gives the number
   of affected replicates and the fewest any SE used, and recommends `bootstrap = 0` when that is
-  below 50. The replicate cell estimator ignores covariates (CAUS-36).
+  below 50.
+- With covariates (CAUS-36) the bootstrap is a multiplier bootstrap of the cells' influence
+  functions: each cell is fitted once, and a replicate with unit draw counts c_u is
+  `att_c + sum_e (c_e - 1) IF_e / n_units` with did's rescaled IF (n_units / n_cell). It uses the
+  same random stream as the unit bootstrap and estimates the analytic SE up to Monte Carlo error
+  (about 1/sqrt(2B)), as did's default multiplier bootstrap does; re-fitting every cell in every
+  replicate would cost B times the fits for the same target. Before, the replicates were the
+  unconditional estimator (DR simple SE 0.256 against the analytic 0.170).
 - The bootstrap pre-trend test (CAUS-86) uses the covariance V of the m replicates that computed
   every pre-treatment cell, so `W = a' V^+ a` is Hotelling's T^2: with r = rank V it reports
   `F = (m - r) W / (r (m - 1))` on F(r, m - r) (method text "Hotelling T^2, bootstrap covariance
@@ -127,11 +140,115 @@ R-pinned (`validation/methods/causal_did.json`, method `staggered_did_cs`):
   budget check per block, then eigendecomposed. It is computed for at most 2000 pre-treatment
   cells (`PreTrendTest::MAX_CELLS`); above that it is reported as not computed.
 
+## Covariates (CAUS-34, CAUS-35, CAUS-37)
+
+Each cell (g, t) is a two-period panel of its treated and comparison units with the outcome
+change dY = Y_t - Y_base and the covariates of the earlier period min(t, base) (did's rule; a
+time-varying covariate therefore enters at its base-period value in post cells). X = [1,
+covariates]. The three DRDID 1.3.0 panel estimators, as `did::att_gt` calls them:
+
+- **Outcome regression** (`reg_did_panel`, `est_method = "reg"`): OLS of dY on X over the
+  comparison units, ATT = mean(dY | D = 1) - mean(X b | D = 1), with the influence function of
+  the treated mean and the OLS step (A = X0'X0 / n).
+- **IPW** (`std_ipw_did_panel`, `"ipw"`): a logit propensity score p(X) (IRLS, `fit_glm`),
+  capped at `PS_CAP` = 1 - 1e-6, normalised (Hajek) weights D and p(X)(1 - D)/(1 - p(X)), with the
+  propensity-score estimation term in the influence function.
+- **Doubly robust** (`drdid_panel`, `"dr"`): the outcome-regression residual dY - X b weighted
+  as IPW, one intercept (the old code added a second one and moved with a common trend: CAUS-37).
+
+For IPW and DR, comparison units with p(X) >= `TRIM_LEVEL` = 0.995 get weight 0 (DRDID's
+`trim.level`; a warning names the cell).
+
+Guards, as did: a largest propensity score >= 0.999 makes the cell NA ("overlap condition
+violated"); collinear covariates (among the comparison units for OR, in the logit for IPW/DR)
+make the cell NA ("singular"), not a generalized-inverse fit. A cell that cannot be computed is
+dropped with a warning "Could not compute ATT(g,t): ..."; with none left, `InsufficientData`
+names the first reason. The base cell (t = base) is ATT 0 with a zero influence function, without
+a fit. The point estimate, the analytic SEs and the bootstrap use the same fit of each cell.
+
+### R reference: case `did_cs_covariates`
+
+`validation/r/cases/causal_did_cov.R` writes the three DRDID estimators out from the package
+source (the tight reference) and also calls `did::att_gt` / `aggte` 2.5.1 with DRDID 1.4.0
+(the `did_*` keys; the script stops when they differ from the transcription by more than 1e-6
+relative; measured at most 1.55e-9, not-yet-treated IPW). Panel
+`validation/datasets/generated/cs_cov_panel.csv`: 150 units x 8 periods (1200 rows), cohorts 3, 5,
+7 and never treated, covariates x1 (continuous), x2 (binary) and x3 (time-varying, shifted by treatment),
+cohort membership depending on x1 and x2, covariate-specific trends, and a treatment effect that
+starts one period before treatment (anticipation). Blocks: never / not yet
+treated, anticipation 0 / 1, OR / IPW / DR, xformla `~ x1 + x2`; `~ x1 + x3` (time-varying,
+never treated, anticipation 0) with the period-t covariate rule that the code used before
+(`tv_period_t_*`, recorded only); no covariates.
+
+| Quantity (never treated, anticipation 0) | OR | IPW | DR |
+|---|---|---|---|
+| Overall (simple) ATT | 0.7918185490524854 | 0.7749956313303182 | 0.7918711051051803 |
+| Overall SE | 0.16886011892819114 | 0.1697464325298633 | 0.1698903988687777 |
+
+Not yet treated, DR: 0.7333318566434703 (SE 0.1726272959266929). Never treated, anticipation 1,
+OR: 2.0000828909247 (SE 0.1632040674478228). ATT(3,3), OR: 0.38619089139987833. Every cell,
+aggregate and pre-test value is in `validation/expected/did_cs_covariates.json`.
+
+### Tests and tolerances
+
+R-pinned (`validation/methods/causal_did_cov.json`, method `staggered_did_cs_covariates`), all in
+`crates/p2a-core/src/econometrics/staggered_did.rs`; n = 1200 rows: OR ATTs `Tol::coef(1200)`
+(1e-10 relative), OR SEs and statistics `Tol::se/stat(1200)` (1e-8); IPW and DR
+`Tol::iterative(1e-8)` (the propensity score stops at IRLS epsilon 1e-10 against R's 1e-14;
+measured gap 8.8e-13 relative); counts, event times and df exact.
+
+- `test_validate_cs_covariates_or_never`, `test_validate_cs_covariates_or_notyet`: every cell
+  ATT, SE and count, the simple, group and event ATT and SE, and the pre-trend W, df and p;
+- `test_validate_cs_covariates_or_time_varying`: x3 enters at its earlier-period value (the
+  period-t rule differs by more than 0.05 at (3,3));
+- `test_validate_cs_methods_coincide_without_covariates`: OR, IPW and DR without covariates are
+  the unconditional estimator;
+- `test_validate_cs_covariates_ipw_dr_cells`, `test_validate_cs_covariates_ipw_dr_time_varying`;
+- `test_validate_cs_covariates_match_did`: the same blocks (anticipation 0 and 1) against did
+  2.5.1 itself at `Tol::iterative(1e-6)`;
+- `test_validate_cs_covariates_bootstrap_close_to_analytic`: the multiplier bootstrap (DR,
+  B = 999, seed 42) overall and group SEs within 10% of the analytic SEs;
+- `test_validate_cs_anticipation` (below).
+
+Property tests (not registered): `test_cs_dr_invariant_to_common_trend` (adding 10 t to the
+outcome changes no DR cell), `test_cs_ipw_dr_refuse_collinear_covariates`,
+`test_cs_overlap_guard_skips_cell`, `test_staggered_did_covariate_bootstrap_draws_are_linearised`
+(every replicate equals the multiplier draw recomputed from independent fits on T0's stream; the
+point estimates do not depend on `bootstrap`).
+
+## Anticipation (CAUS-83)
+
+As did 2.5.1 (`pre_process_did`, `compute.att_gt`): with `anticipation = d` the base period is
+g + base_period - d (g - 1 - d by default); not-yet-treated comparison units are first treated
+after max(t, base) + d; post-treatment cells are t >= g, so the d anticipation cells before
+treatment are pre-treatment cells and enter the pre-trend test (method text "(including the d
+anticipation period(s) before each cohort's treatment, as did::att_gt)"). A cohort whose base
+period is not observed is not computed, with a warning (did drops it). `anticipation` must be
+smaller than the number of periods (`InvalidSpecification`). Display prints the anticipation
+line. On integer periods the pre-trend W is the same for anticipation 0 and 1
+(69.50033372533454 both times, OR, never treated): with the universal base the pre-test is a
+re-parametrisation of the same pre-period contrasts. The identification diagnostics do not flag
+significant cells inside the configured window (`test_anticipation_window_cells_not_flagged`,
+`crates/p2a-core/src/diagnostics/did.rs`).
+
+Tests: `test_validate_cs_anticipation` (never and not yet treated, OR, and never treated DR,
+anticipation 1, every cell, aggregate and pre-test value), `test_cs_anticipation_zero_and_one_differ`,
+`test_cs_anticipation_out_of_range_is_error`, `test_cs_anticipation_skips_cohort_without_base`.
+
+## No post-treatment cell (CAUS-109)
+
+When no post-treatment ATT(g,t) can be computed (for example every cohort is first treated after
+the last observed period), `run_staggered_did` returns `InsufficientData` naming the late cohorts
+(did::att_gt treats them as never treated) instead of an overall ATT of 0 with SE 0 and p 1. A
+cohort with only pre-treatment cells is left out of the group aggregation with a warning, as
+`did::aggte` drops it (`test_cs_no_post_cells_is_error`,
+`test_cs_cohort_without_post_cells_left_out_of_groups`).
+
 ## Comparison sets
 
 - Never treated: units with `treatment_time <= 0`.
 - Not yet treated (`did::compute.att_gt`): never-treated units and units first treated after
-  max(t, g - 1), excluding cohort g. Before the fix, cohort g's own units entered the comparison
+  max(t, base) + anticipation, excluding cohort g. Before the fix, cohort g's own units entered the comparison
   of its pre-treatment cells and cohorts treated by the base period were comparisons; the
   diagonal pre-trend statistic on the case panel was 68.3 (p 3e-11).
 
@@ -161,16 +278,15 @@ under parallel trends, analytic and with B = 50), `test_pretrend_hotelling_f_mat
 p against R's `pf`), `test_pretrend_blocked_gram_matches_naive_and_checks_every_block`,
 `test_staggered_did_bootstrap_reports_dropped_replicates`, `test_staggered_did_bootstrap_ses_pinned`,
 `test_bootstrap_draws_match_reference`; argument checks: `test_staggered_did_bootstrap_below_50_is_error`,
-`test_staggered_did_analytic_with_covariates_not_implemented`,
 `test_staggered_did_rejects_bad_confidence_level`; MCP: `test_mcp_staggered_did_rejects_small_bootstrap`.
 
 ## Not covered
 
-- Covariates: the outcome regression ignores them (CAUS-34), IPW/DR covariate rows and the DR
-  intercept (CAUS-35, CAUS-37), and the bootstrap replicates are unadjusted (CAUS-36).
 - Varying base periods and the `group`-type overall aggregation (CAUS-84).
 - Unbalanced panels and duplicate (unit, time) rows (CAUS-85): did balances the panel first.
-- Anticipation (CAUS-83).
+- did's recoding of cohorts first treated after the last period as never treated (here: an
+  error when no post cell is left, otherwise the cohort has only pre-treatment cells).
+- Repeated cross-sections, sampling weights and factor covariates.
 
 ## DGP property tests (not R-pinned)
 
@@ -188,7 +304,7 @@ These check properties of known data-generating processes, not R values:
 ```bash
 cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::staggered_did
 cargo test -p p2a-mcp --no-default-features --features "http,llm,auth,websocket" --test tier2 -- wp12_did
-Rscript validation/r/run.R --check          # did_cs_analytic still reproduces
+Rscript validation/r/run.R --check          # did_cs_analytic and did_cs_covariates still reproduce
 ```
 
 ## References
@@ -197,4 +313,5 @@ Rscript validation/r/run.R --check          # did_cs_analytic still reproduces
   periods." *Journal of Econometrics*, 225(2), 200-230.
 - Sant'Anna, P.H.C. & Zhao, J. (2020). "Doubly robust difference-in-differences estimators."
   *Journal of Econometrics*, 219(1), 101-122.
-- R package `did` 2.1 (https://bcallaway11.github.io/did/).
+- R package `did` 2.1 (https://bcallaway11.github.io/did/); covariates and anticipation against
+  did 2.5.1 and DRDID 1.3.0 / 1.4.0.
