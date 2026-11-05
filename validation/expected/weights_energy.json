@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "weights_energy",
+  "area": "econometrics/weighting",
+  "method": "Energy balancing weights (ATT, ATC, improved ATE), Huling & Mak (2022), quadprog QP on standardised covariates",
+  "reference": "Huling & Mak (2022) energy balancing (ATT, ATC, improved ATE as WeightIt weightit2energy with lambda = 0, min.w = 0), solved with quadprog (WeightIt 'energy' needs osqp, not installed)",
+  "call": "solve.QP on the energy-distance quadratic form in w = 1 + Z u",
+  "dataset": "validation/datasets/generated/weighting_sim.csv",
+  "datasets": ["validation/datasets/generated/weighting_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "quadprog": "1.5.8"
+  },
+  "values": {
+    "att_weights_head": [0.5616595358585148, 2.4592351310957787, 0.014540816996129968, 0, 1.7592502241837749, 1.2936980567806278, 0.30984418759317478, 1.212772610387044, 0.61942196647490899, 1.8706547905123923, 0.052180972669891301, 0.28616697332876628],
+    "att_energy": 0.0071184419595597959,
+    "att_energy_unweighted": 0.23030878301451674,
+    "att_weighted_means": [0.32207608762806778, -0.19929119538403126, 0.47836922779816765],
+    "att_effect": 1.5225448615582375,
+    "att_n_zero": 23,
+    "atc_weights_head": [0, 1.2672780065033757, 0.27372657482463236, 0, 1.4590135331608143, 0.83839358029746713, 0.47149286633147902, 1.0552399705118696, 0.22095731544548192, 0.77663564419424458, 0.32666573220854145, 4.9877268114168292],
+    "atc_energy": 0.0071500068197578592,
+    "atc_weighted_means": [-0.24305268588312059, 0.12966409011727487, 0.40888925522426151],
+    "atc_effect": 1.2854853751038673,
+    "atc_n_zero": 34,
+    "ate_weights_head": [0.22275883459538204, 1.1987305411749676, 1.0902115199983158, 1.4214256814146964, 0.29055600532009462, 0.28115980714792033, 0.57854344799672297, 1.4021033296719101, 0.30546752833425928, 1.6911724557074326, 0.72706343801485807, 1.1483694227316703],
+    "ate_energy": 0.0077163026850959326,
+    "ate_weighted_means_t": [0.043524561905444355, -0.03587252483407502, 0.44328729690108987],
+    "ate_weighted_means_c": [0.038350015995144572, -0.034167889424692843, 0.44372651662825469],
+    "ate_effect": 1.3755492901548088,
+    "ate_n_zero": 1
+  }
+}
