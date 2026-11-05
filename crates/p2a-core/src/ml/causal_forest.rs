@@ -65,8 +65,9 @@ use super::{default_mtry, heap_chunk_bytes, mul, partition_exact, pow2};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::resource::{checkpoint, try_with_capacity};
+use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_with_capacity};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
+use statrs::function::erf::erfc;
 
 /// Configuration for causal forest estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -828,7 +829,7 @@ fn subsample(n_samples: usize, fraction: f64, rng_state: &mut u64) -> (Vec<usize
 }
 
 /// Split sample into structure and estimation parts for honest estimation.
-fn honest_split(
+fn legacy_honest_split(
     indices: &[usize],
     honesty_fraction: f64,
     rng_state: &mut u64,
@@ -1075,7 +1076,7 @@ pub fn causal_forest_arrays(
             // Split sample for honest estimation
             let sample_idx_local: Vec<usize> = (0..sample_indices.len()).collect();
             let (structure_idx, estimation_idx) =
-                honest_split(&sample_idx_local, config.honesty_fraction, &mut rng_state);
+                legacy_honest_split(&sample_idx_local, config.honesty_fraction, &mut rng_state);
 
             let x_struct = select_rows_view(&x_sample.view(), &structure_idx);
             let y_struct: Array1<f64> = structure_idx.iter().map(|&i| y_sample[i]).collect();
@@ -1393,6 +1394,705 @@ pub fn run_causal_forest_config(
         seed,
         ..defaults
     }
+}
+
+// ---- grf-style honest forests (private) ----
+
+/// grf `alpha` (default 0.05): minimum child share. Regression: of the node's count; causal: of the
+/// node's sum of squared centred treatment residuals (InstrumentalSplittingRule `size`).
+const GRF_ALPHA: f64 = 0.05;
+/// grf `equal_doubles(denominator, 0, 1e-10)` in InstrumentalRelabelingStrategy::relabel, and the
+/// same guard on a unit's pooled first stage. W - W.hat lies in [-1, 1], so the absolute threshold
+/// is on a fixed scale.
+const RELABEL_EPS: f64 = 1e-10;
+/// causal_forest's `args.orthog`: min.node.size = 5 and honesty.fraction = 0.5 for the nuisance
+/// forests.
+const NUISANCE_MIN_NODE_SIZE: usize = 5;
+const NUISANCE_HONESTY_FRACTION: f64 = 0.5;
+
+/// Uniform in [0, 1) from the module LCG: 32 bits, identical on 32- and 64-bit targets.
+fn unit_uniform(rng: &mut u64) -> f64 {
+    ((lcg_random(rng) as u64) & 0xFFFF_FFFF) as f64 / 4_294_967_296.0
+}
+
+/// Fisher-Yates shuffle with the module LCG.
+fn shuffle(v: &mut [usize], rng: &mut u64) {
+    for i in (1..v.len()).rev() {
+        let j = lcg_random(rng) % (i + 1);
+        v.swap(i, j);
+    }
+}
+
+/// grf create_split_variable_subset: Poisson(lambda) candidate variables, clamped to [1, cap].
+/// Counts unit-rate exponential arrivals in [0, lambda], so it cannot underflow for large lambda.
+fn poisson_count(lambda: f64, cap: usize, rng: &mut u64) -> usize {
+    let (mut k, mut t) = (0usize, 0.0f64);
+    while k < cap {
+        t -= (1.0 - unit_uniform(rng)).ln();
+        if t > lambda {
+            break;
+        }
+        k += 1;
+    }
+    k.clamp(1, cap.max(1))
+}
+
+/// Means over a leaf's estimation units (grf's precomputed prediction values, unit weights): `y`
+/// the response, `z` the centred treatment (= instrument), `yz`, `zz` the means of the products.
+/// Regression leaves use `n` and `y`. `n == 0` is an empty leaf.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct LeafStats {
+    n: usize,
+    y: f64,
+    z: f64,
+    yz: f64,
+    zz: f64,
+}
+
+/// A node of an [`HonestTree`]: children are later in the node vector than their parent.
+#[derive(Debug, Clone)]
+enum Node {
+    Split {
+        feature: usize,
+        threshold: f64,
+        left: usize,
+        right: usize,
+    },
+    Leaf(LeafStats),
+}
+
+/// One honest tree after repopulation and pruning; `root` may differ from 0 after pruning.
+#[derive(Debug, Clone)]
+struct HonestTree {
+    nodes: Vec<Node>,
+    root: usize,
+}
+
+impl HonestTree {
+    /// The leaf `x` falls into (`x[feature] <= threshold` goes left).
+    fn leaf(&self, x: ArrayView1<f64>) -> &LeafStats {
+        let mut v = self.root;
+        loop {
+            match &self.nodes[v] {
+                Node::Leaf(s) => return s,
+                Node::Split {
+                    feature,
+                    threshold,
+                    left,
+                    right,
+                } => {
+                    v = if x[*feature] <= *threshold {
+                        *left
+                    } else {
+                        *right
+                    };
+                }
+            }
+        }
+    }
+
+    /// Each split reachable from the root adds 2^-depth (root depth 0) to its feature; normalised
+    /// to sum 1 (zeros without splits).
+    fn split_importance(&self, p: usize) -> Array1<f64> {
+        let mut imp = Array1::zeros(p);
+        let mut stack = vec![(self.root, 0i32)];
+        while let Some((v, d)) = stack.pop() {
+            if let Node::Split {
+                feature,
+                left,
+                right,
+                ..
+            } = &self.nodes[v]
+            {
+                imp[*feature] += 0.5f64.powi(d);
+                stack.push((*left, d + 1));
+                stack.push((*right, d + 1));
+            }
+        }
+        let s = imp.sum();
+        if s > 0.0 {
+            imp /= s;
+        }
+        imp
+    }
+}
+
+/// What a forest is grown on. `y`: Y (Y.hat forest), W (W.hat forest) or Y - Y.hat (causal
+/// forest); `z`: W - W.hat for a causal forest (grf: treatment = instrument), None for a
+/// regression forest.
+#[derive(Clone, Copy)]
+struct ForestData<'a> {
+    x: ArrayView2<'a, f64>,
+    y: &'a [f64],
+    z: Option<&'a [f64]>,
+}
+
+/// How the trees of one forest are grown.
+#[derive(Debug, Clone, Copy)]
+struct TreeSpec {
+    min_node_size: usize,
+    max_depth: usize,
+    mtry: usize,
+    honesty: bool,
+    honesty_fraction: f64,
+}
+
+/// The split [`best_split`] chooses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SplitChoice {
+    feature: usize,
+    threshold: f64,
+    decrease: f64,
+}
+
+/// grf InstrumentalRelabelingStrategy::relabel with instrument = treatment and unit weights:
+/// returns the node's tau = sum (z - zbar)(y - ybar) / sum (z - zbar)^2 and writes
+/// rho_i = (z_i - zbar)((y_i - ybar) - tau (z_i - zbar)) to `out` in `samples` order. None (the
+/// node becomes a leaf) when sum (z - zbar)^2 < RELABEL_EPS.
+fn relabel(samples: &[usize], y: &[f64], z: &[f64], out: &mut Vec<f64>) -> Option<f64> {
+    let m = samples.len() as f64;
+    let (mut sy, mut sz) = (0.0, 0.0);
+    for &i in samples {
+        sy += y[i];
+        sz += z[i];
+    }
+    let (yb, zb) = (sy / m, sz / m);
+    let (mut num, mut den) = (0.0, 0.0);
+    for &i in samples {
+        let dz = z[i] - zb;
+        num += dz * (y[i] - yb);
+        den += dz * dz;
+    }
+    if !(den.abs() >= RELABEL_EPS) {
+        return None;
+    }
+    let tau = num / den;
+    out.clear();
+    out.extend(samples.iter().map(|&i| {
+        let dz = z[i] - zb;
+        dz * ((y[i] - yb) - tau * dz)
+    }));
+    Some(tau)
+}
+
+/// grf's split search on one node. `responses[k]` belongs to `samples[k]` (rho for a causal node,
+/// the response for a regression node). Per feature (in the given order) the node's units are
+/// sorted stably by x (`total_cmp`) and every midpoint between consecutive distinct values is a
+/// candidate, scanned in ascending order (left: x <= threshold).
+/// decrease = sum_l^2 / n_l + sum_r^2 / n_r; the first strictly largest positive decrease wins.
+///
+/// Regression (RegressionSplittingRule): each child needs max(ceil(alpha m), 1) units; a short
+/// left child skips the candidate, a short right child ends the feature. Causal
+/// (InstrumentalSplittingRule, stabilize.splits): each child needs `min_node_size` units with z
+/// below the node mean of z and `min_node_size` with z at or above it (left short: skip; right
+/// short: end the feature), and each child's sum z^2 - (sum z)^2 / n must be at least alpha times
+/// the node's (else skip).
+fn best_split(
+    data: &ForestData,
+    samples: &[usize],
+    responses: &[f64],
+    features: &[usize],
+    min_node_size: usize,
+    order: &mut Vec<usize>,
+) -> Option<SplitChoice> {
+    let m = samples.len();
+    if m < 2 {
+        return None;
+    }
+    let total: f64 = responses.iter().sum();
+    // causal node constants: (z, mean z, sum z, sum z^2, alpha * size, #(z < mean))
+    let node = data.z.map(|z| {
+        let (mut s, mut ss) = (0.0, 0.0);
+        for &i in samples {
+            s += z[i];
+            ss += z[i] * z[i];
+        }
+        let mean = s / m as f64;
+        let n_small = samples.iter().filter(|&&i| z[i] < mean).count();
+        (z, mean, s, ss, (ss - s * s / m as f64) * GRF_ALPHA, n_small)
+    });
+    let min_child = ((m as f64 * GRF_ALPHA).ceil() as usize).max(1);
+    let (mut best, mut best_dec) = (None, 0.0);
+    for &f in features {
+        order.clear();
+        order.extend(0..m);
+        order.sort_by(|&a, &b| data.x[[samples[a], f]].total_cmp(&data.x[[samples[b], f]]));
+        let (mut nl, mut sl, mut small_l, mut zl, mut zzl) = (0usize, 0.0, 0usize, 0.0, 0.0);
+        for k in 0..m - 1 {
+            let pos = order[k];
+            let i = samples[pos];
+            nl += 1;
+            sl += responses[pos];
+            if let Some((z, mean, ..)) = node {
+                if z[i] < mean {
+                    small_l += 1;
+                }
+                zl += z[i];
+                zzl += z[i] * z[i];
+            }
+            let (xv, xn) = (data.x[[i, f]], data.x[[samples[order[k + 1]], f]]);
+            if xv == xn {
+                continue;
+            }
+            let nr = m - nl;
+            match node {
+                Some((_, _, s, ss, min_size, n_small)) => {
+                    if small_l < min_node_size || nl - small_l < min_node_size {
+                        continue;
+                    }
+                    let small_r = n_small - small_l;
+                    if small_r < min_node_size || nr - small_r < min_node_size {
+                        break;
+                    }
+                    let size_l = zzl - zl * zl / nl as f64;
+                    let size_r = (ss - zzl) - (s - zl) * (s - zl) / nr as f64;
+                    if size_l < min_size || size_r < min_size {
+                        continue;
+                    }
+                }
+                None => {
+                    if nl < min_child {
+                        continue;
+                    }
+                    if nr < min_child {
+                        break;
+                    }
+                }
+            }
+            let sr = total - sl;
+            let dec = sl * sl / nl as f64 + sr * sr / nr as f64;
+            if dec > best_dec {
+                best_dec = dec;
+                best = Some(SplitChoice {
+                    feature: f,
+                    threshold: (xv + xn) / 2.0,
+                    decrease: dec,
+                });
+            }
+        }
+    }
+    best
+}
+
+/// grf TreeTrainer: grow on `growing` with an explicit stack (no recursion), children after their
+/// parent in the node vector (pruning relies on it). A node is a leaf when it has at most
+/// `min_node_size` units, reaches `max_depth`, its relabeling stops, or no candidate is
+/// admissible.
+fn grow_tree(data: &ForestData, growing: &[usize], spec: &TreeSpec, rng: &mut u64) -> Vec<Node> {
+    let p = data.x.ncols();
+    let mut nodes = vec![Node::Leaf(LeafStats::default())];
+    let mut stack: Vec<(usize, Vec<usize>, usize)> = vec![(0, growing.to_vec(), 0)];
+    let (mut resp, mut order) = (Vec::new(), Vec::new());
+    let mut features: Vec<usize> = (0..p).collect();
+    while let Some((v, samples, depth)) = stack.pop() {
+        if samples.len() <= spec.min_node_size || depth >= spec.max_depth {
+            continue;
+        }
+        match data.z {
+            Some(z) => {
+                if relabel(&samples, data.y, z, &mut resp).is_none() {
+                    continue;
+                }
+            }
+            None => {
+                resp.clear();
+                resp.extend(samples.iter().map(|&i| data.y[i]));
+            }
+        }
+        let k = poisson_count(spec.mtry as f64, p, rng);
+        // partial Fisher-Yates: features[..k] is a uniform k-subset
+        for j in 0..k {
+            let r = j + lcg_random(rng) % (p - j);
+            features.swap(j, r);
+        }
+        let Some(choice) = best_split(
+            data,
+            &samples,
+            &resp,
+            &features[..k],
+            spec.min_node_size,
+            &mut order,
+        ) else {
+            continue;
+        };
+        let (l, r) = partition_exact(samples.iter().copied(), |i| {
+            data.x[[i, choice.feature]] <= choice.threshold
+        });
+        drop(samples);
+        let (li, ri) = (nodes.len(), nodes.len() + 1);
+        nodes.push(Node::Leaf(LeafStats::default()));
+        nodes.push(Node::Leaf(LeafStats::default()));
+        nodes[v] = Node::Split {
+            feature: choice.feature,
+            threshold: choice.threshold,
+            left: li,
+            right: ri,
+        };
+        stack.push((ri, r, depth + 1));
+        stack.push((li, l, depth + 1));
+    }
+    nodes
+}
+
+/// grf repopulate_leaf_nodes + Tree::honesty_prune_leaves: fill the leaves with the means over
+/// `estimation`, then, bottom-up (children have larger indices than their parent), replace a
+/// split that has an empty-leaf child by its other child, or by an empty leaf when both are
+/// empty.
+fn populate(mut nodes: Vec<Node>, data: &ForestData, estimation: &[usize]) -> HonestTree {
+    let mut acc = vec![(0usize, 0.0f64, 0.0f64, 0.0f64, 0.0f64); nodes.len()];
+    for &i in estimation {
+        let mut v = 0;
+        while let Node::Split {
+            feature,
+            threshold,
+            left,
+            right,
+        } = &nodes[v]
+        {
+            v = if data.x[[i, *feature]] <= *threshold {
+                *left
+            } else {
+                *right
+            };
+        }
+        let z = data.z.map_or(0.0, |z| z[i]);
+        let y = data.y[i];
+        let a = &mut acc[v];
+        a.0 += 1;
+        a.1 += y;
+        a.2 += z;
+        a.3 += y * z;
+        a.4 += z * z;
+    }
+    for (v, a) in acc.iter().enumerate() {
+        if let Node::Leaf(s) = &mut nodes[v] {
+            if a.0 > 0 {
+                let n = a.0 as f64;
+                *s = LeafStats {
+                    n: a.0,
+                    y: a.1 / n,
+                    z: a.2 / n,
+                    yz: a.3 / n,
+                    zz: a.4 / n,
+                };
+            }
+        }
+    }
+    let empty = |n: &Node| matches!(n, Node::Leaf(s) if s.n == 0);
+    let mut redirect: Vec<usize> = (0..nodes.len()).collect();
+    for v in (0..nodes.len()).rev() {
+        if let Node::Split { left, right, .. } = nodes[v] {
+            let (l, r) = (redirect[left], redirect[right]);
+            if let Node::Split {
+                left: lv,
+                right: rv,
+                ..
+            } = &mut nodes[v]
+            {
+                *lv = l;
+                *rv = r;
+            }
+            match (empty(&nodes[l]), empty(&nodes[r])) {
+                (true, true) => nodes[v] = Node::Leaf(LeafStats::default()),
+                (true, false) => redirect[v] = r,
+                (false, true) => redirect[v] = l,
+                (false, false) => {}
+            }
+        }
+    }
+    HonestTree {
+        root: redirect[0],
+        nodes,
+    }
+}
+
+/// Honest halves of a tree's subsample: shuffled, the first ceil(m (1 - honesty_fraction)) units
+/// grow the tree and the rest estimate the leaves; both parts are non-empty when m >= 2.
+fn honest_split(
+    indices: &[usize],
+    honesty_fraction: f64,
+    rng: &mut u64,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut s = indices.to_vec();
+    shuffle(&mut s, rng);
+    let m = s.len();
+    let g = ((m as f64) * (1.0 - honesty_fraction)).ceil() as usize;
+    let g = if m >= 2 { g.clamp(1, m - 1) } else { m };
+    let est = s.split_off(g);
+    s.shrink_to_fit();
+    (s, est)
+}
+
+/// A fitted honest forest with each tree's in-bag set (bitset over the n units) for out-of-bag
+/// prediction.
+struct HonestForest {
+    trees: Vec<HonestTree>,
+    drawn: Vec<Vec<u64>>,
+}
+
+fn in_bag(bits: &[u64], i: usize) -> bool {
+    (bits[i / 64] >> (i % 64)) & 1 == 1
+}
+
+/// grf ForestTrainer: `n_trees / group_size` groups. group_size > 1 (train_ci_group): a
+/// half-sample of ceil(n / 2) units per group, each tree subsamples ceil(|half| * 2 *
+/// sample_fraction) of it. group_size = 1 (train_tree): each tree draws ceil(n * sample_fraction)
+/// units. Honest halves by [`honest_split`]; without honesty the subsample both grows and
+/// estimates. `on_tree(tree, subsample)` receives each tree as it is grown, in order. A
+/// checkpoint per tree.
+fn grow_forest(
+    data: &ForestData,
+    n_trees: usize,
+    group_size: usize,
+    sample_fraction: f64,
+    spec: &TreeSpec,
+    rng: &mut u64,
+    mut on_tree: impl FnMut(HonestTree, &[usize]) -> EconResult<()>,
+) -> EconResult<()> {
+    let n = data.x.nrows();
+    let mut all: Vec<usize> = (0..n).collect();
+    for _ in 0..n_trees / group_size {
+        let half: Vec<usize> = if group_size > 1 {
+            shuffle(&mut all, rng);
+            all[..n.div_ceil(2)].to_vec()
+        } else {
+            Vec::new()
+        };
+        for _ in 0..group_size {
+            checkpoint()?;
+            let sample: Vec<usize> = if group_size > 1 {
+                let mut h = half.clone();
+                shuffle(&mut h, rng);
+                let k = ((h.len() as f64) * 2.0 * sample_fraction).ceil() as usize;
+                h.truncate(k.clamp(1, h.len()));
+                h.shrink_to_fit();
+                h
+            } else {
+                shuffle(&mut all, rng);
+                let k = ((n as f64) * sample_fraction).ceil() as usize;
+                all[..k.clamp(1, n)].to_vec()
+            };
+            let tree = if spec.honesty {
+                let (growing, estimation) = honest_split(&sample, spec.honesty_fraction, rng);
+                let nodes = grow_tree(data, &growing, spec, rng);
+                drop(growing);
+                populate(nodes, data, &estimation)
+            } else {
+                let nodes = grow_tree(data, &sample, spec, rng);
+                populate(nodes, data, &sample)
+            };
+            on_tree(tree, &sample)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`grow_forest`], keeping every tree and its in-bag bitset (`trees x ceil(n / 64)` words,
+/// checked before any work).
+fn fit_honest_forest(
+    data: &ForestData,
+    n_trees: usize,
+    group_size: usize,
+    sample_fraction: f64,
+    spec: &TreeSpec,
+    rng: &mut u64,
+    what: &str,
+) -> EconResult<HonestForest> {
+    let n = data.x.nrows();
+    let grown = (n_trees / group_size) * group_size;
+    let words = n.div_ceil(64);
+    check_alloc::<u64>(checked_len(&[grown, words], what)?, what)?;
+    let mut trees = try_with_capacity::<HonestTree>(grown, what)?;
+    let mut drawn = try_with_capacity::<Vec<u64>>(grown, what)?;
+    grow_forest(
+        data,
+        n_trees,
+        group_size,
+        sample_fraction,
+        spec,
+        rng,
+        |tree, sample| {
+            let mut bits = vec![0u64; words];
+            for &i in sample {
+                bits[i / 64] |= 1 << (i % 64);
+            }
+            trees.push(tree);
+            drawn.push(bits);
+            Ok(())
+        },
+    )?;
+    Ok(HonestForest { trees, drawn })
+}
+
+/// grf RegressionPredictionStrategy, out of bag, without keeping the forest: the mean, over the
+/// trees not drawing unit i whose leaf is not empty, of the leaf means (summed in tree order as
+/// each tree is grown, then the tree is dropped). NaN when no such tree exists.
+fn oob_regression_forest(
+    data: &ForestData,
+    n_trees: usize,
+    sample_fraction: f64,
+    spec: &TreeSpec,
+    rng: &mut u64,
+) -> EconResult<Vec<f64>> {
+    let n = data.x.nrows();
+    let mut sum = try_vec(n, 0.0f64, "nuisance forest out-of-bag sums")?;
+    let mut count = try_vec(n, 0usize, "nuisance forest out-of-bag counts")?;
+    let mut drawn = try_vec(n, false, "nuisance forest subsample flags")?;
+    grow_forest(
+        data,
+        n_trees,
+        1,
+        sample_fraction,
+        spec,
+        rng,
+        |tree, sample| {
+            for &i in sample {
+                drawn[i] = true;
+            }
+            for i in 0..n {
+                if drawn[i] {
+                    continue;
+                }
+                let l = tree.leaf(data.x.row(i));
+                if l.n > 0 {
+                    sum[i] += l.y;
+                    count[i] += 1;
+                }
+            }
+            for &i in sample {
+                drawn[i] = false;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(sum
+        .iter()
+        .zip(&count)
+        .map(|(&s, &k)| if k > 0 { s / k as f64 } else { f64::NAN })
+        .collect())
+}
+
+/// One unit's causal estimate from its leaves (grf InstrumentalPredictionStrategy).
+#[derive(Debug, Clone, Copy)]
+struct Pooled {
+    tau: f64,
+    mean_y: f64,
+    mean_z: f64,
+    first_stage: f64,
+    var_between: f64,
+    var_total: f64,
+    group_noise: f64,
+    variance: f64,
+}
+
+/// `leaves[k] = (tree index, stats)` of every tree that may predict the unit and whose leaf is
+/// not empty, in tree order. tau = (avg(yz) - avg(y) avg(z)) / first, first = avg(zz) - avg(z)^2
+/// (NaN when there is no leaf or |first| < RELABEL_EPS).
+///
+/// Variance (group_size >= 2; grf compute_variance): over the groups (tree / group_size) whose
+/// every tree is present, rho_b = (psi1_b - avg(z) psi2_b) / first with psi1 = yz - zz tau - z mu,
+/// psi2 = y - z tau - mu, mu = avg(y) - avg(z) tau; var_between = sum_g mean_g(rho)^2 / G,
+/// var_total = sum rho^2 / (G g), group_noise = (var_total - var_between) / (g - 1),
+/// variance = bayes_debias(var_between, group_noise, G). NaN when no group is complete or
+/// group_size = 1.
+fn pooled_causal(leaves: &[(usize, LeafStats)], group_size: usize) -> Pooled {
+    let nan = Pooled {
+        tau: f64::NAN,
+        mean_y: f64::NAN,
+        mean_z: f64::NAN,
+        first_stage: f64::NAN,
+        var_between: f64::NAN,
+        var_total: f64::NAN,
+        group_noise: f64::NAN,
+        variance: f64::NAN,
+    };
+    let k = leaves.len();
+    if k == 0 {
+        return nan;
+    }
+    let kf = k as f64;
+    let (mut ay, mut az, mut ayz, mut azz) = (0.0, 0.0, 0.0, 0.0);
+    for (_, l) in leaves {
+        ay += l.y;
+        az += l.z;
+        ayz += l.yz;
+        azz += l.zz;
+    }
+    let (ay, az, ayz, azz) = (ay / kf, az / kf, ayz / kf, azz / kf);
+    let first = azz - az * az;
+    let mut out = Pooled {
+        mean_y: ay,
+        mean_z: az,
+        first_stage: first,
+        ..nan
+    };
+    if !(first.abs() >= RELABEL_EPS) {
+        return out;
+    }
+    let tau = (ayz - ay * az) / first;
+    out.tau = tau;
+    if group_size < 2 {
+        return out;
+    }
+    let mu = ay - az * tau;
+    let (mut sum_group_sq, mut sum_sq, mut good) = (0.0, 0.0, 0usize);
+    let mut j = 0;
+    while j < k {
+        let g = leaves[j].0 / group_size;
+        let mut e = j;
+        while e < k && leaves[e].0 / group_size == g {
+            e += 1;
+        }
+        if e - j == group_size {
+            let mut gs = 0.0;
+            for (_, l) in &leaves[j..e] {
+                let psi1 = l.yz - l.zz * tau - l.z * mu;
+                let psi2 = l.y - l.z * tau - mu;
+                let rho = (psi1 - az * psi2) / first;
+                gs += rho;
+                sum_sq += rho * rho;
+            }
+            let gm = gs / group_size as f64;
+            sum_group_sq += gm * gm;
+            good += 1;
+        }
+        j = e;
+    }
+    if good == 0 {
+        return out;
+    }
+    let gf = good as f64;
+    out.var_between = sum_group_sq / gf;
+    out.var_total = sum_sq / (gf * group_size as f64);
+    out.group_noise = (out.var_total - out.var_between) / (group_size as f64 - 1.0);
+    out.variance = bayes_debias(out.var_between, out.group_noise, gf);
+    out
+}
+
+/// grf ObjectiveBayesDebiaser::debias: e + s phi(e/s) / Phi(e/s) with e = var_between -
+/// group_noise and s = max(var_between, group_noise) sqrt(2 / groups) (the posterior mean of a
+/// non-negative variance). 0 when s is not positive (grf: |s| < 1e-10, which is not scale-free).
+/// Below a ratio of -30, phi/Phi is the Mills continued fraction x + 1/(x + 2/(x + 3/(...))) at
+/// x = -ratio (40 terms; exp and erfc underflow near -37).
+fn bayes_debias(var_between: f64, group_noise: f64, groups: f64) -> f64 {
+    let e = var_between - group_noise;
+    let s = var_between.max(group_noise) * (2.0 / groups).sqrt();
+    if !(s > 0.0 && s.is_finite()) {
+        return 0.0;
+    }
+    let r = e / s;
+    let ratio = if r >= -30.0 {
+        let phi = (-0.5 * r * r).exp() / (2.0 * std::f64::consts::PI).sqrt();
+        phi / (0.5 * erfc(-r / std::f64::consts::SQRT_2))
+    } else {
+        let x = -r;
+        let mut t = x;
+        for k in (1..=40).rev() {
+            t = x + k as f64 / t;
+        }
+        t
+    };
+    e + s * ratio
 }
 
 #[cfg(test)]
@@ -1934,38 +2634,324 @@ mod tests {
         }
     }
 
-    /// Reference guard on continuous outcomes (no exact ties in the
-    /// criterion): the sorted sweep must choose the same split as the
-    /// re-partitioning search it replaced.
+    // ---- Task 1: grf machinery (formula pins against cases written out in R) ----
+
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    /// Columns of a case dataset read through the T2 extractor, truncated to `rows`.
+    fn case_columns(ds: &Dataset, names: &[&str], rows: usize) -> Vec<Vec<f64>> {
+        names
+            .iter()
+            .map(|c| {
+                let mut v = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+                v.truncate(rows);
+                v
+            })
+            .collect()
+    }
+
+    fn matrix(cols: &[Vec<f64>]) -> Array2<f64> {
+        Array2::from_shape_fn((cols[0].len(), cols.len()), |(i, j)| cols[j][i])
+    }
+
+    /// grf InstrumentalRelabelingStrategy, InstrumentalSplittingRule (stabilised) and
+    /// RegressionSplittingRule on one node, written out in R (cf_split_node).
     #[test]
-    fn causal_split_sweep_matches_naive_reference() {
-        let (x, y, w) = generate_test_data(400, 77); // x on a 0.01 grid: many tied values
-        let mut s = 1234u64;
-        for min_node_size in [1usize, 5, 20] {
-            let tree = CausalTree {
-                n_features: 3,
-                ..CausalTree::new(10, min_node_size, 3)
-            };
-            for rep in 0..30 {
-                let mut idx: Vec<usize> = (0..400).collect();
-                for i in (1..idx.len()).rev() {
-                    let j = lcg_random(&mut s) % (i + 1);
-                    idx.swap(i, j);
+    fn test_validate_cf_split_node_causal() {
+        let (case, ds) = crate::test_support::load_case("cf_split_node");
+        let c = case_columns(&ds, &["x", "x2", "y", "z"], 30);
+        let x = matrix(&c[..2]);
+        let (y, z) = (c[2].as_slice(), c[3].as_slice());
+        let samples: Vec<usize> = (0..30).collect();
+        let data = ForestData {
+            x: x.view(),
+            y,
+            z: Some(z),
+        };
+        let mut rho = Vec::new();
+        let tau = relabel(&samples, y, z, &mut rho).unwrap();
+        let mut order = Vec::new();
+        let s3 = best_split(&data, &samples, &rho, &[0, 1], 3, &mut order).unwrap();
+        let s5 = best_split(&data, &samples, &rho, &[0, 1], 5, &mut order).unwrap();
+        let s3x2 = best_split(&data, &samples, &rho, &[1], 3, &mut order).unwrap();
+        Check::new(&case)
+            .scalar("node_tau", tau, Tol::coef(30))
+            .vector("rho", &rho, Tol::coef(30))
+            .scalar("causal3_feature", s3.feature as f64, Tol::exact())
+            .scalar("causal3_threshold", s3.threshold, Tol::exact())
+            .scalar("causal3_decrease", s3.decrease, Tol::stat(30))
+            .scalar("causal5_feature", s5.feature as f64, Tol::exact())
+            // 0.485: the stabilisation moved the split
+            .scalar("causal5_threshold", s5.threshold, Tol::exact())
+            .scalar("causal5_decrease", s5.decrease, Tol::stat(30))
+            .scalar("causal3_x2_threshold", s3x2.threshold, Tol::exact())
+            .scalar("causal3_x2_decrease", s3x2.decrease, Tol::stat(30))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cf_split_node_regression() {
+        let (case, ds) = crate::test_support::load_case("cf_split_node");
+        let c = case_columns(&ds, &["x", "x2", "r"], 30);
+        let x = matrix(&c[..2]);
+        let samples: Vec<usize> = (0..30).collect();
+        let data = ForestData {
+            x: x.view(),
+            y: &c[2],
+            z: None,
+        };
+        let mut order = Vec::new();
+        let s = best_split(&data, &samples, &c[2], &[0, 1], 5, &mut order).unwrap();
+        Check::new(&case)
+            .scalar("reg_feature", s.feature as f64, Tol::exact())
+            .scalar("reg_threshold", s.threshold, Tol::exact())
+            .scalar("reg_decrease", s.decrease, Tol::stat(30))
+            .finish();
+    }
+
+    /// grf InstrumentalPredictionStrategy::predict / compute_variance and ObjectiveBayesDebiaser
+    /// (cf_little_bags): the 12 leaves are trees 0..12 in groups of 2; the "part" values drop
+    /// tree 1, leaving group 0 incomplete.
+    #[test]
+    fn test_validate_cf_little_bags() {
+        let (case, ds) = crate::test_support::load_case("cf_little_bags");
+        let c = case_columns(&ds, &["n", "y", "w", "yw", "ww"], 12);
+        let leaves: Vec<(usize, LeafStats)> = (0..12)
+            .map(|t| {
+                (
+                    t,
+                    LeafStats {
+                        n: c[0][t] as usize,
+                        y: c[1][t],
+                        z: c[2][t],
+                        yz: c[3][t],
+                        zz: c[4][t],
+                    },
+                )
+            })
+            .collect();
+        let full = pooled_causal(&leaves, 2);
+        let part_leaves: Vec<(usize, LeafStats)> =
+            leaves.iter().copied().filter(|(t, _)| *t != 1).collect();
+        let part = pooled_causal(&part_leaves, 2);
+        let mu = full.mean_y - full.mean_z * full.tau;
+        Check::new(&case)
+            .scalar("tau", full.tau, Tol::coef(12))
+            .scalar("mu", mu, Tol::coef(12))
+            .scalar("first_stage", full.first_stage, Tol::coef(12))
+            .scalar("var_between", full.var_between, Tol::stat(12))
+            .scalar("var_total", full.var_total, Tol::stat(12))
+            .scalar("group_noise", full.group_noise, Tol::stat(12))
+            .scalar("variance", full.variance, Tol::stat(12))
+            .scalar("part_tau", part.tau, Tol::coef(12))
+            .scalar("part_first_stage", part.first_stage, Tol::coef(12))
+            .scalar("part_var_between", part.var_between, Tol::stat(12))
+            .scalar("part_group_noise", part.group_noise, Tol::stat(12))
+            .scalar("part_variance", part.variance, Tol::stat(12))
+            .finish();
+        assert!(pooled_causal(&leaves, 1).variance.is_nan()); // ci_group_size 1: no variance
+        assert!(pooled_causal(&[], 2).tau.is_nan());
+    }
+
+    #[test]
+    fn test_validate_cf_bayes_debiaser() {
+        let (case, _) = crate::test_support::load_case("cf_little_bags");
+        let (vb, gn, g) = (
+            case.vector("debias_var_between"),
+            case.vector("debias_group_noise"),
+            case.vector("debias_groups"),
+        );
+        let out: Vec<f64> = (0..vb.len())
+            .map(|k| bayes_debias(vb[k], gn[k], g[k]))
+            .collect();
+        // out[2] has ratio -38.69: exp/erfc underflow there; the continued fraction must be used
+        Check::new(&case)
+            .vector("debias_out", &out, Tol::stat(12))
+            .finish();
+        assert!(out.iter().all(|v| v.is_finite() && *v >= 0.0));
+    }
+
+    /// Guard for the sorted sweep: same choice as recomputing every quantity per candidate
+    /// threshold from an explicit partition (grf's rules, written naively).
+    fn naive_best_split(
+        x: &ArrayView2<f64>,
+        y: &[f64],
+        z: Option<&[f64]>,
+        samples: &[usize],
+        features: &[usize],
+        min_node_size: usize,
+    ) -> Option<(usize, f64)> {
+        let m = samples.len();
+        let responses: Vec<f64> = match z {
+            Some(z) => {
+                let mut r = Vec::new();
+                relabel(samples, y, z, &mut r)?;
+                r
+            }
+            None => samples.iter().map(|&i| y[i]).collect(),
+        };
+        let pos: std::collections::HashMap<usize, usize> =
+            samples.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        let zmean = z.map(|z| samples.iter().map(|&i| z[i]).sum::<f64>() / m as f64);
+        let size = |idx: &[usize], z: &[f64]| {
+            let s: f64 = idx.iter().map(|&i| z[i]).sum();
+            idx.iter().map(|&i| z[i] * z[i]).sum::<f64>() - s * s / idx.len() as f64
+        };
+        let (mut best, mut best_dec) = (None, 0.0);
+        for &f in features {
+            let mut vals: Vec<f64> = samples.iter().map(|&i| x[[i, f]]).collect();
+            vals.sort_by(|a, b| a.total_cmp(b));
+            vals.dedup();
+            'thresholds: for win in vals.windows(2) {
+                let t = (win[0] + win[1]) / 2.0;
+                let (l, r): (Vec<usize>, Vec<usize>) =
+                    samples.iter().partition(|&&i| x[[i, f]] <= t);
+                match (z, zmean) {
+                    (Some(z), Some(zm)) => {
+                        let small = |v: &[usize]| v.iter().filter(|&&i| z[i] < zm).count();
+                        let (sl, sr) = (small(&l), small(&r));
+                        if sl < min_node_size || l.len() - sl < min_node_size {
+                            continue 'thresholds;
+                        }
+                        if sr < min_node_size || r.len() - sr < min_node_size {
+                            break 'thresholds;
+                        }
+                        let min_size = size(samples, z) * GRF_ALPHA;
+                        if size(&l, z) < min_size || size(&r, z) < min_size {
+                            continue 'thresholds;
+                        }
+                    }
+                    _ => {
+                        let mcc = ((m as f64 * GRF_ALPHA).ceil() as usize).max(1);
+                        if l.len() < mcc {
+                            continue 'thresholds;
+                        }
+                        if r.len() < mcc {
+                            break 'thresholds;
+                        }
+                    }
                 }
-                idx.truncate(20 + lcg_random(&mut s) % 380);
-                let got =
-                    tree.find_best_causal_split(&x.view(), &y.view(), &w.view(), &idx, &[0, 1, 2]);
-                let want = naive_find_best_causal_split(
-                    min_node_size,
-                    &x.view(),
-                    &y.view(),
-                    &w.view(),
-                    &idx,
-                    &[0, 1, 2],
-                );
-                assert_eq!(got, want, "min_node_size={min_node_size} rep={rep}");
+                let sum = |v: &[usize]| v.iter().map(|i| responses[pos[i]]).sum::<f64>();
+                let dec = sum(&l).powi(2) / l.len() as f64 + sum(&r).powi(2) / r.len() as f64;
+                if dec > best_dec {
+                    best_dec = dec;
+                    best = Some((f, t));
+                }
             }
         }
+        best
+    }
+
+    /// The sorted sweep chooses the split the naive search chooses, causal and regression, on
+    /// `generate_test_data` (x on a 0.01 grid: many ties).
+    #[test]
+    fn causal_split_sweep_matches_naive_reference() {
+        let (x, y, w) = generate_test_data(400, 77);
+        let z: Vec<f64> = (0..400).map(|i| w[i] - (0.3 + 0.4 * x[[i, 0]])).collect();
+        let y: Vec<f64> = y.to_vec();
+        let mut s = 1234u64;
+        let mut order = Vec::new();
+        let mut checked = 0;
+        for min_node_size in [1usize, 3, 5] {
+            for causal in [true, false] {
+                for rep in 0..30 {
+                    let mut idx: Vec<usize> = (0..400).collect();
+                    shuffle(&mut idx, &mut s);
+                    idx.truncate(20 + lcg_random(&mut s) % 380);
+                    let data = ForestData {
+                        x: x.view(),
+                        y: &y,
+                        z: causal.then_some(z.as_slice()),
+                    };
+                    let mut resp = Vec::new();
+                    if causal {
+                        if relabel(&idx, &y, &z, &mut resp).is_none() {
+                            continue;
+                        }
+                    } else {
+                        resp = idx.iter().map(|&i| y[i]).collect();
+                    }
+                    let got = best_split(&data, &idx, &resp, &[0, 1, 2], min_node_size, &mut order)
+                        .map(|c| (c.feature, c.threshold));
+                    let want =
+                        naive_best_split(&x.view(), &y, data.z, &idx, &[0, 1, 2], min_node_size);
+                    assert_eq!(
+                        got, want,
+                        "min_node_size={min_node_size} causal={causal} rep={rep}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 170, "{checked}");
+    }
+
+    /// grf Tree::honesty_prune_leaves: a split with an empty child is replaced by the other child.
+    #[test]
+    fn test_honest_tree_prune_promotes_the_non_empty_sibling() {
+        // root: x0 <= 0.5 ? leaf 1 : (x1 <= 0.5 ? leaf 3 : leaf 4)
+        let nodes = vec![
+            Node::Split {
+                feature: 0,
+                threshold: 0.5,
+                left: 1,
+                right: 2,
+            },
+            Node::Leaf(LeafStats::default()),
+            Node::Split {
+                feature: 1,
+                threshold: 0.5,
+                left: 3,
+                right: 4,
+            },
+            Node::Leaf(LeafStats::default()),
+            Node::Leaf(LeafStats::default()),
+        ];
+        let x = array![[0.1, 0.9], [0.2, 0.1], [0.8, 0.2], [0.9, 0.3]];
+        let y = [1.0, 2.0, 3.0, 5.0];
+        let data = ForestData {
+            x: x.view(),
+            y: &y,
+            z: None,
+        };
+        // leaf 4 (x0 > 0.5, x1 > 0.5) stays empty
+        let tree = populate(nodes.clone(), &data, &[0, 1, 2, 3]);
+        let at = |a: f64, b: f64| *tree.leaf(array![a, b].view());
+        assert_eq!(
+            at(0.9, 0.9).n,
+            2,
+            "the point of the empty leaf now reaches leaf 3"
+        );
+        assert!((at(0.9, 0.9).y - 4.0).abs() < 1e-15);
+        assert_eq!(at(0.1, 0.1).n, 2);
+        assert!((at(0.1, 0.1).y - 1.5).abs() < 1e-15);
+        let empty = populate(nodes, &data, &[]);
+        assert_eq!(empty.leaf(array![0.1, 0.1].view()).n, 0);
+    }
+
+    /// grf sample_poisson(mtry) clamped to [1, p] (create_split_variable_subset).
+    #[test]
+    fn test_poisson_count_matches_clamped_poisson_mean() {
+        let mut rng = 99u64;
+        let draws = |lambda: f64, cap: usize, k: usize, rng: &mut u64| -> Vec<usize> {
+            (0..k).map(|_| poisson_count(lambda, cap, rng)).collect()
+        };
+        for (lambda, cap, k, mean, sd) in [
+            (3.0, 10, 20_000, 3.04940297348399, 1.65608812440467),
+            (1.0, 3, 20_000, 1.34454251472851, 0.621639577581618),
+            // a product-of-uniforms sampler underflows here
+            (800.0, 1000, 2_000, 800.0, 28.2842712473095),
+        ] {
+            let d = draws(lambda, cap, k, &mut rng);
+            assert!(d.iter().all(|&v| (1..=cap).contains(&v)));
+            let m = d.iter().sum::<usize>() as f64 / k as f64;
+            assert!(
+                (m - mean).abs() <= 5.0 * sd / (k as f64).sqrt(),
+                "lambda {lambda}: mean {m}, expected {mean}"
+            );
+        }
+        assert!(draws(23.0, 3, 100, &mut rng).iter().all(|&v| v == 3));
     }
 
     /// Golden (characterization) test: captured on the code before the
