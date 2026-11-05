@@ -128,6 +128,9 @@ fn num4(v: f64) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Comparison group strategy for Callaway-Sant'Anna estimator.
+///
+/// Parsed from strings by `FromStr` (case- and separator-insensitive; unknown
+/// values are an error listing the accepted ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ComparisonGroup {
     /// Use never-treated units only (G_i = ∞)
@@ -149,7 +152,30 @@ impl fmt::Display for ComparisonGroup {
     }
 }
 
-/// Estimation method for group-time ATTs.
+crate::option_enum!(
+    ComparisonGroup,
+    crate::options::Choices {
+        option: "comparison_group",
+        values: &[
+            (
+                &["never_treated", "nevertreated", "never"],
+                ComparisonGroup::NeverTreated
+            ),
+            (
+                &["not_yet_treated", "notyettreated", "notyet", "nyt"],
+                ComparisonGroup::NotYetTreated
+            ),
+        ],
+    },
+    no_display
+);
+
+/// Estimation method for group-time ATTs (DRDID's panel estimators, as
+/// `did::att_gt`'s `est_method`; with no covariates all three are the difference in
+/// mean outcome changes).
+///
+/// Parsed from strings by `FromStr` (case- and separator-insensitive; unknown
+/// values are an error listing the accepted ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AttEstimationMethod {
     /// Outcome regression (OLS within comparison periods)
@@ -170,6 +196,28 @@ impl fmt::Display for AttEstimationMethod {
         }
     }
 }
+
+crate::option_enum!(
+    AttEstimationMethod,
+    crate::options::Choices {
+        option: "estimation_method",
+        values: &[
+            (
+                &["outcome_regression", "or", "reg", "regression"],
+                AttEstimationMethod::OutcomeRegression
+            ),
+            (
+                &["ipw", "std_ipw", "inverse_probability_weighting"],
+                AttEstimationMethod::IPW
+            ),
+            (
+                &["doubly_robust", "dr", "aipw", "doublyrobust", "drdid"],
+                AttEstimationMethod::DoublyRobust
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for Callaway-Sant'Anna staggered DiD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4364,6 +4412,65 @@ mod tests {
                 Ok(_) => panic!("{method}: expected NotImplemented, got Ok"),
             }
         }
+    }
+
+    #[test]
+    fn test_comparison_group_parses_aliases_and_rejects_unknown() {
+        ComparisonGroup::choices().validate().unwrap();
+        for s in ["never_treated", "nevertreated", "Never", "NEVER-TREATED"] {
+            assert_eq!(
+                s.parse::<ComparisonGroup>().unwrap(),
+                ComparisonGroup::NeverTreated
+            );
+        }
+        for s in [
+            "not_yet_treated",
+            "notyettreated",
+            "notyet",
+            "nyt",
+            "Not Yet Treated",
+        ] {
+            assert_eq!(
+                s.parse::<ComparisonGroup>().unwrap(),
+                ComparisonGroup::NotYetTreated
+            );
+        }
+        let e = "always".parse::<ComparisonGroup>().unwrap_err().to_string();
+        assert!(
+            e.contains("comparison_group")
+                && e.contains("never_treated")
+                && e.contains("not_yet_treated"),
+            "{e}"
+        );
+        // Display is unchanged
+        assert_eq!(ComparisonGroup::NeverTreated.to_string(), "Never-Treated");
+    }
+
+    #[test]
+    fn test_att_estimation_method_parses_aliases_and_rejects_unknown() {
+        use AttEstimationMethod::{DoublyRobust, IPW, OutcomeRegression};
+        AttEstimationMethod::choices().validate().unwrap();
+        for (s, m) in [
+            ("or", OutcomeRegression),
+            ("reg", OutcomeRegression),
+            ("outcome_regression", OutcomeRegression),
+            ("IPW", IPW),
+            ("std_ipw", IPW),
+            ("dr", DoublyRobust),
+            ("doubly-robust", DoublyRobust),
+            ("aipw", DoublyRobust),
+            ("doublyrobust", DoublyRobust),
+        ] {
+            assert_eq!(s.parse::<AttEstimationMethod>().unwrap(), m, "{s}");
+        }
+        let e = "tmle"
+            .parse::<AttEstimationMethod>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("estimation_method") && e.contains("doubly_robust"),
+            "{e}"
+        );
     }
 
     /// CAUS-117: did reports NA for the SE of a reference cell (t = g - 1 - anticipation)
