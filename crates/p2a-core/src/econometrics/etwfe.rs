@@ -58,7 +58,9 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
-use crate::traits::estimator::t_test_p_value;
+use crate::traits::estimator::{
+    normal_p_value_two_sided, t_test_p_value, validate_level, z_critical,
+};
 
 /// Configuration for ETWFE estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +76,13 @@ pub struct EtwfeConfig {
     /// Variance of the coefficients.
     #[serde(default)]
     pub vcov: EtwfeVcov,
+    /// Level of the aggregate confidence intervals, in (0, 1).
+    #[serde(default = "default_confidence_level")]
+    pub confidence_level: f64,
+}
+
+fn default_confidence_level() -> f64 {
+    0.95
 }
 
 impl Default for EtwfeConfig {
@@ -84,6 +93,7 @@ impl Default for EtwfeConfig {
             cgroup: ControlGroup::NotYet,
             anticipation: 0,
             vcov: EtwfeVcov::Cluster,
+            confidence_level: 0.95,
         }
     }
 }
@@ -142,6 +152,35 @@ crate::option_enum!(
     }
 );
 
+/// emfx aggregation type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EtwfeAggregation {
+    /// One overall ATT.
+    Simple,
+    /// By time since first treatment.
+    Event,
+    /// By cohort.
+    Group,
+    /// By period.
+    Calendar,
+}
+
+crate::option_enum!(
+    EtwfeAggregation,
+    crate::options::Choices {
+        option: "aggregation",
+        values: &[
+            (&["simple", "overall", "att"], EtwfeAggregation::Simple),
+            (
+                &["event", "dynamic", "event_study"],
+                EtwfeAggregation::Event
+            ),
+            (&["group", "cohort"], EtwfeAggregation::Group),
+            (&["calendar", "period", "time"], EtwfeAggregation::Calendar),
+        ],
+    }
+);
+
 /// One estimated coefficient, named as fixest names it
 /// (`.Dtreat:first_treat::4:year::5`, `.Dtreat:first_treat::4:year::5:xc_dm`, `year::2:xc`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +228,7 @@ pub struct CohortTimeEffect {
 }
 
 /// Aggregated treatment effect (event study or cohort average).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AggregatedEffect {
     /// Aggregation key (relative time for event study, cohort for group average)
     pub key: i64,
@@ -205,6 +244,15 @@ pub struct AggregatedEffect {
     pub ci_upper: f64,
     /// Number of underlying cohort-time effects
     pub n_effects: usize,
+    /// z statistic.
+    #[serde(default)]
+    pub z_stat: f64,
+    /// Two-sided normal p-value.
+    #[serde(default)]
+    pub p_value: f64,
+    /// Rows averaged.
+    #[serde(default)]
+    pub n_obs: usize,
 }
 
 /// Result from ETWFE estimation.
@@ -278,6 +326,33 @@ pub struct EtwfeResult {
     /// Warnings about the fit.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// emfx simple: the overall ATT.
+    #[serde(default)]
+    pub overall: AggregatedEffect,
+    /// emfx calendar: effects by period.
+    #[serde(default)]
+    pub calendar: Vec<AggregatedEffect>,
+    /// Level of the aggregate confidence intervals.
+    #[serde(default = "default_confidence_level")]
+    pub confidence_level: f64,
+}
+
+impl crate::traits::convergence::ResultNotes for EtwfeResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+impl EtwfeResult {
+    /// The emfx table of one type (`Simple` is the single overall row).
+    pub fn aggregation(&self, which: EtwfeAggregation) -> &[AggregatedEffect] {
+        match which {
+            EtwfeAggregation::Simple => std::slice::from_ref(&self.overall),
+            EtwfeAggregation::Event => &self.event_study,
+            EtwfeAggregation::Group => &self.cohort_avg,
+            EtwfeAggregation::Calendar => &self.calendar,
+        }
+    }
 }
 
 impl fmt::Display for EtwfeResult {
@@ -425,6 +500,8 @@ pub fn run_etwfe(
 
     // An infinite first_treat is refused with the never-treated code in the message.
     crate::econometrics::staggered_did::refuse_infinite_first_treat(dataset, first_treat_col, "0")?;
+    validate_level(config.confidence_level, "confidence_level")?;
+    let z_crit = z_critical(config.confidence_level)?;
     // One request over every column the model uses: rows with a missing value in
     // any of them are dropped jointly (reported in `missing`), never imputed.
     let cols = ColumnRequest::new(dataset.df())
@@ -479,15 +556,27 @@ pub fn run_etwfe(
         })
         .collect();
 
-    // Aggregate to event study (by relative time)
-    let event_study = aggregate_by_relative_time(&cohort_time_effects);
-
-    // Aggregate to cohort averages
-    let cohort_avg = aggregate_by_cohort(&cohort_time_effects);
-
-    // Overall ATT (simple and weighted)
-    let (att_simple, att_se, att_weighted, att_weighted_se) =
-        compute_overall_att(&cohort_time_effects);
+    // emfx: per-row effect gradient (the row's cell coefficient)
+    let gradient = |i: usize, out: &mut Vec<(usize, f64)>| {
+        if let Some(j) = spec.cell_of_row[i].and_then(|c| fit.term_of_col[c]) {
+            out.push((j, 1.0));
+        }
+    };
+    let agg = |which| emfx_aggregate(&spec, &fit, which, z_crit, &gradient);
+    let overall = agg(EtwfeAggregation::Simple)?
+        .into_iter()
+        .next()
+        .filter(|o| o.n_effects > 0)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: 1,
+            provided: 0,
+            context: "ETWFE: no post-treatment cohort-period effect to aggregate (emfx simple)"
+                .to_string(),
+        })?;
+    let event_study = agg(EtwfeAggregation::Event)?;
+    let cohort_avg = agg(EtwfeAggregation::Group)?;
+    let calendar = agg(EtwfeAggregation::Calendar)?;
+    let (att_simple, att_se) = (overall.estimate, overall.std_error);
 
     let n = spec.n;
     let n_treated: usize = spec.treat.iter().filter(|&&d| d == 1.0).count();
@@ -516,8 +605,8 @@ pub fn run_etwfe(
         cohort_avg,
         att_simple,
         att_se,
-        att_weighted,
-        att_weighted_se,
+        att_weighted: att_simple,
+        att_weighted_se: att_se,
         n_obs: n,
         n_treated,
         n_control: n - n_treated,
@@ -544,6 +633,9 @@ pub fn run_etwfe(
         df_t: fit.df_t,
         anticipation: config.anticipation,
         warnings,
+        overall,
+        calendar,
+        confidence_level: config.confidence_level,
     })
 }
 
@@ -1226,6 +1318,12 @@ impl Fit {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test switch: fit through the dense pivoted QR even when the normal equations qualify.
+    static FORCE_DENSE_FIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The "not identified" error for the cells among the raw columns `cols`.
 fn unidentified_cells(spec: &Spec, design: &Design, cols: &[usize]) -> Option<EconError> {
     let cells: Vec<String> = cols
@@ -1316,7 +1414,11 @@ fn fit_design(
         }
     }
     drop(gram_cols);
-    let normal = if k > 0 && k < n {
+    #[cfg(test)]
+    let force_dense = FORCE_DENSE_FIT.with(|f| f.get());
+    #[cfg(not(test))]
+    let force_dense = false;
+    let normal = if k > 0 && k < n && !force_dense {
         normal_inverse_from_gram(gram.view())?
     } else {
         None
@@ -1457,111 +1559,93 @@ fn fit_design(
     })
 }
 
-/// Aggregate cohort-time effects by relative time (event study).
-fn aggregate_by_relative_time(effects: &[CohortTimeEffect]) -> Vec<AggregatedEffect> {
-    let mut by_rel_time: BTreeMap<i64, Vec<&CohortTimeEffect>> = BTreeMap::new();
-
-    for eff in effects {
-        by_rel_time.entry(eff.rel_time).or_default().push(eff);
-    }
-
-    by_rel_time
-        .into_iter()
-        .map(|(rel_time, effs)| {
-            let n = effs.len();
-            let estimate: f64 = effs.iter().map(|e| e.estimate).sum::<f64>() / n as f64;
-
-            // Pooled standard error (simplified)
-            let var_sum: f64 = effs.iter().map(|e| e.std_error.powi(2)).sum();
-            let std_error = (var_sum / (n * n) as f64).sqrt();
-
-            let ci_lower = estimate - 1.96 * std_error;
-            let ci_upper = estimate + 1.96 * std_error;
-
-            AggregatedEffect {
-                key: rel_time,
-                agg_type: "Event Study".to_string(),
-                estimate,
-                std_error,
-                ci_lower,
-                ci_upper,
-                n_effects: n,
+/// The rows etwfe's `emfx(type)` averages over (etwfe 0.6.2, `post_only = TRUE`,
+/// `compress = FALSE`): with `cgroup = notyet` the treated cohort-period rows; with
+/// `cgroup = never` every row of a treated cohort for the event study (placebo leads and the
+/// reference period included) and its rows from the onset on otherwise.
+fn emfx_rows(spec: &Spec, which: EtwfeAggregation) -> Vec<usize> {
+    (0..spec.n)
+        .filter(|&i| match spec.cgroup {
+            ControlGroup::NotYet => spec.treated_cell[i],
+            ControlGroup::Never => {
+                !spec.reference[i]
+                    && (which == EtwfeAggregation::Event
+                        || (spec.treated_cell[i] && spec.t[i] >= spec.onset[i]))
             }
         })
         .collect()
 }
 
-/// Aggregate cohort-time effects by cohort.
-fn aggregate_by_cohort(effects: &[CohortTimeEffect]) -> Vec<AggregatedEffect> {
-    let mut by_cohort: BTreeMap<i64, Vec<&CohortTimeEffect>> = BTreeMap::new();
-
-    for eff in effects {
-        // Only include post-treatment effects (rel_time >= 0)
-        if eff.rel_time >= 0 {
-            by_cohort.entry(eff.cohort).or_default().push(eff);
+/// One emfx table: per key (ascending) the mean over its rows of the per-row effect
+/// gradient `w`, the estimate `w'beta`, its delta-method SE `sqrt(w'Vw)` (NaN when no row
+/// carries a coefficient), z p-value and CI at `z_crit`.
+fn emfx_aggregate(
+    spec: &Spec,
+    fit: &Fit,
+    which: EtwfeAggregation,
+    z_crit: f64,
+    gradient: &dyn Fn(usize, &mut Vec<(usize, f64)>),
+) -> EconResult<Vec<AggregatedEffect>> {
+    struct Acc {
+        rows: usize,
+        w: BTreeMap<usize, f64>,
+        cells: BTreeSet<usize>,
+    }
+    let mut by_key: BTreeMap<i64, Acc> = BTreeMap::new();
+    let mut g = Vec::new();
+    for (count, i) in emfx_rows(spec, which).into_iter().enumerate() {
+        if count % 4096 == 0 {
+            resource::checkpoint()?;
+        }
+        let key = match which {
+            EtwfeAggregation::Simple => 0,
+            EtwfeAggregation::Event => spec.t[i] - spec.g[i],
+            EtwfeAggregation::Group => spec.g[i],
+            EtwfeAggregation::Calendar => spec.t[i],
+        };
+        let acc = by_key.entry(key).or_insert_with(|| Acc {
+            rows: 0,
+            w: BTreeMap::new(),
+            cells: BTreeSet::new(),
+        });
+        acc.rows += 1;
+        g.clear();
+        gradient(i, &mut g);
+        if !g.is_empty() {
+            if let Some(c) = spec.cell_of_row[i] {
+                acc.cells.insert(c);
+            }
+        }
+        for &(j, v) in &g {
+            *acc.w.entry(j).or_insert(0.0) += v;
         }
     }
-
-    by_cohort
+    Ok(by_key
         .into_iter()
-        .map(|(cohort, effs)| {
-            let n = effs.len();
-            let estimate: f64 = effs.iter().map(|e| e.estimate).sum::<f64>() / n as f64;
-
-            let var_sum: f64 = effs.iter().map(|e| e.std_error.powi(2)).sum();
-            let std_error = (var_sum / (n * n) as f64).sqrt();
-
-            let ci_lower = estimate - 1.96 * std_error;
-            let ci_upper = estimate + 1.96 * std_error;
-
+        .map(|(key, acc)| {
+            let m = acc.rows as f64;
+            let w: Vec<(usize, f64)> = acc.w.into_iter().map(|(j, v)| (j, v / m)).collect();
+            let estimate: f64 = w.iter().map(|&(j, v)| v * fit.beta[j]).sum();
+            let std_error = if w.is_empty() {
+                f64::NAN
+            } else {
+                fit.variance(&w).sqrt()
+            };
+            let z_stat = estimate / std_error;
             AggregatedEffect {
-                key: cohort,
-                agg_type: "Cohort Average".to_string(),
+                key,
+                agg_type: which.to_string(),
                 estimate,
                 std_error,
-                ci_lower,
-                ci_upper,
-                n_effects: n,
+                ci_lower: estimate - z_crit * std_error,
+                ci_upper: estimate + z_crit * std_error,
+                n_effects: acc.cells.len(),
+                z_stat,
+                p_value: normal_p_value_two_sided(z_stat),
+                n_obs: acc.rows,
             }
         })
-        .collect()
-}
-
-/// Compute overall ATT (simple and weighted averages).
-fn compute_overall_att(effects: &[CohortTimeEffect]) -> (f64, f64, f64, f64) {
-    // Only post-treatment effects
-    let post_effects: Vec<&CohortTimeEffect> = effects.iter().filter(|e| e.rel_time >= 0).collect();
-
-    if post_effects.is_empty() {
-        return (0.0, 0.0, 0.0, 0.0);
-    }
-
-    // Simple average
-    let n = post_effects.len();
-    let att_simple: f64 = post_effects.iter().map(|e| e.estimate).sum::<f64>() / n as f64;
-    let var_sum: f64 = post_effects.iter().map(|e| e.std_error.powi(2)).sum();
-    let att_se = (var_sum / (n * n) as f64).sqrt();
-
-    // Weighted by number of treated observations
-    let total_weight: f64 = post_effects.iter().map(|e| e.n_treated as f64).sum();
-    if total_weight > 0.0 {
-        let att_weighted: f64 = post_effects
-            .iter()
-            .map(|e| e.estimate * e.n_treated as f64)
-            .sum::<f64>()
-            / total_weight;
-
-        let weighted_var: f64 = post_effects
-            .iter()
-            .map(|e| (e.n_treated as f64).powi(2) * e.std_error.powi(2))
-            .sum::<f64>()
-            / (total_weight * total_weight);
-        let att_weighted_se = weighted_var.sqrt();
-
-        (att_simple, att_se, att_weighted, att_weighted_se)
-    } else {
-        (att_simple, att_se, att_simple, att_se)
-    }
+        .collect())
 }
 
 #[cfg(test)]
@@ -2210,6 +2294,7 @@ mod tests {
     // T3-WP22: etwfe(ivar = unit) + emfx (validation/r/cases/causal_etwfe.R)
     // ═══════════════════════════════════════════════════════════════════════
 
+    use crate::traits::estimator::z_critical;
     use p2a_validation::{Check, Tol};
 
     fn fit(ds: &Dataset, x: Option<&[&str]>, cfg: EtwfeConfig) -> EtwfeResult {
@@ -2592,6 +2677,252 @@ mod tests {
             Err(EconError::InvalidSpecification { message }) => {
                 assert_eq!(message, "unknown vcov 'hc1'; expected one of: cluster, iid")
             }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    /// One emfx table against `<prefix>_emfx_<type>_*` / `<prefix>_delta_<type>_*`.
+    /// `key_shift`: p2a event keys are t - first_treat; R's anticipation case uses
+    /// t - (first_treat - d).
+    fn check_agg(
+        ck: &mut Check<'_>,
+        prefix: &str,
+        r: &EtwfeResult,
+        ty: EtwfeAggregation,
+        key_shift: i64,
+    ) {
+        let a = r.aggregation(ty);
+        let v = |f: fn(&AggregatedEffect) -> f64| a.iter().map(f).collect::<Vec<f64>>();
+        let (n, t) = (r.n_obs, ty.to_string());
+        ck.vector(
+            &format!("{prefix}_emfx_{t}_estimate"),
+            &v(|e| e.estimate),
+            Tol::coef(n),
+        )
+        .vector(
+            &format!("{prefix}_delta_{t}_se"),
+            &v(|e| e.std_error),
+            Tol::se(n),
+        )
+        // marginaleffects' numerical Jacobian: <= 4.7e-7 from the exact delta method here
+        .vector(
+            &format!("{prefix}_emfx_{t}_se"),
+            &v(|e| e.std_error),
+            Tol::iterative(1e-6),
+        )
+        .vector(
+            &format!("{prefix}_delta_{t}_p"),
+            &v(|e| e.p_value),
+            Tol::p_value(n),
+        )
+        .vector(
+            &format!("{prefix}_delta_{t}_n"),
+            &v(|e| e.n_obs as f64),
+            Tol::exact(),
+        );
+        if ty == EtwfeAggregation::Simple {
+            ck.vector(
+                &format!("{prefix}_delta_simple_ci95"),
+                &[a[0].ci_lower, a[0].ci_upper],
+                Tol::stat(n),
+            );
+        } else {
+            let keys: Vec<f64> = a.iter().map(|e| (e.key + key_shift) as f64).collect();
+            ck.vector(&format!("{prefix}_emfx_{t}_key"), &keys, Tol::exact());
+        }
+    }
+
+    /// The staggered-case fits by prefix.
+    fn staggered_fits(ds: &Dataset) -> Vec<(&'static str, EtwfeResult, i64)> {
+        let mut iid = EtwfeConfig::default();
+        iid.vcov = EtwfeVcov::Iid;
+        let mut tref4 = EtwfeConfig::default();
+        tref4.tref = Some(4);
+        let mut ant1 = EtwfeConfig::default();
+        ant1.anticipation = 1;
+        vec![
+            ("notyet", fit(ds, None, EtwfeConfig::default()), 0),
+            ("notyet_iid", fit(ds, None, iid), 0),
+            ("never", fit(ds, None, spec(ControlGroup::Never)), 0),
+            ("tref4", fit(ds, None, tref4), 0),
+            ("ant1", fit(ds, None, ant1), 1),
+        ]
+    }
+
+    /// The unbalanced and all-treated fits by prefix.
+    fn unbalanced_fits(ds: &Dataset) -> Vec<(&'static str, EtwfeResult, i64)> {
+        let at = all_treated_panel();
+        let mut gref6 = EtwfeConfig::default();
+        gref6.gref = Some(6);
+        let mut never8 = spec(ControlGroup::Never);
+        never8.gref = Some(8);
+        vec![
+            ("unbal", fit(ds, None, EtwfeConfig::default()), 0),
+            ("unbal_never", fit(ds, None, spec(ControlGroup::Never)), 0),
+            ("alltreated", fit(&at, None, EtwfeConfig::default()), 0),
+            ("alltreated_gref6", fit(&at, None, gref6), 0),
+            ("alltreated_never_gref8", fit(&at, None, never8), 0),
+        ]
+    }
+
+    fn check_agg_fits(
+        case: &p2a_validation::Case,
+        fits: &[(&'static str, EtwfeResult, i64)],
+        prefixes: &[&str],
+        ty: EtwfeAggregation,
+    ) {
+        let mut ck = Check::new(case);
+        for (p, r, shift) in fits {
+            if prefixes.contains(p) {
+                check_agg(&mut ck, p, r, ty, *shift);
+            }
+        }
+        ck.finish();
+    }
+
+    #[test]
+    fn test_validate_etwfe_emfx_simple() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let fits = staggered_fits(&ds);
+        let all = ["notyet", "notyet_iid", "never", "tref4", "ant1"];
+        check_agg_fits(&case, &fits, &all, EtwfeAggregation::Simple);
+        let (case_u, ds_u) = crate::test_support::load_case("etwfe_unbalanced");
+        let fits_u = unbalanced_fits(&ds_u);
+        let all_u = [
+            "unbal",
+            "unbal_never",
+            "alltreated",
+            "alltreated_gref6",
+            "alltreated_never_gref8",
+        ];
+        check_agg_fits(&case_u, &fits_u, &all_u, EtwfeAggregation::Simple);
+        for (_, r, _) in fits.iter().chain(&fits_u) {
+            assert_eq!(r.att_simple, r.overall.estimate);
+            assert_eq!(r.att_se, r.overall.std_error);
+            assert_eq!(r.att_weighted, r.att_simple);
+        }
+    }
+
+    #[test]
+    fn test_validate_etwfe_emfx_event() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let fits = staggered_fits(&ds);
+        let ty = EtwfeAggregation::Event;
+        check_agg_fits(&case, &fits, &["notyet", "never", "tref4", "ant1"], ty);
+        let (case_u, ds_u) = crate::test_support::load_case("etwfe_unbalanced");
+        let fits_u = unbalanced_fits(&ds_u);
+        let pu = [
+            "unbal",
+            "unbal_never",
+            "alltreated",
+            "alltreated_never_gref8",
+        ];
+        check_agg_fits(&case_u, &fits_u, &pu, ty);
+        let never = &fits[2].1;
+        let e = never.event_study.iter().find(|e| e.key == -1).unwrap();
+        assert_eq!((e.estimate, e.n_effects, e.n_obs), (0.0, 0, 85));
+        assert!(e.std_error.is_nan() && e.p_value.is_nan());
+    }
+
+    #[test]
+    fn test_validate_etwfe_emfx_group() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let ty = EtwfeAggregation::Group;
+        check_agg_fits(&case, &staggered_fits(&ds), &["notyet", "never"], ty);
+        let (case_u, ds_u) = crate::test_support::load_case("etwfe_unbalanced");
+        check_agg_fits(
+            &case_u,
+            &unbalanced_fits(&ds_u),
+            &["unbal", "alltreated"],
+            ty,
+        );
+    }
+
+    #[test]
+    fn test_validate_etwfe_emfx_calendar() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let ty = EtwfeAggregation::Calendar;
+        check_agg_fits(&case, &staggered_fits(&ds), &["notyet", "never"], ty);
+        let (case_u, ds_u) = crate::test_support::load_case("etwfe_unbalanced");
+        check_agg_fits(
+            &case_u,
+            &unbalanced_fits(&ds_u),
+            &["unbal", "alltreated"],
+            ty,
+        );
+    }
+
+    #[test]
+    fn test_validate_etwfe_cgroup_changes_estimate() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let notyet = fit(&ds, None, EtwfeConfig::default());
+        let never = fit(&ds, None, spec(ControlGroup::Never));
+        Check::new(&case)
+            .vector(
+                "notyet_emfx_simple_estimate",
+                &[notyet.att_simple],
+                Tol::coef(960),
+            )
+            .vector(
+                "never_emfx_simple_estimate",
+                &[never.att_simple],
+                Tol::coef(960),
+            )
+            .finish();
+        assert!((never.att_simple - notyet.att_simple).abs() > 0.04);
+    }
+
+    #[test]
+    fn test_validate_etwfe_confidence_level() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let mut c = EtwfeConfig::default();
+        c.confidence_level = 0.90;
+        let r = fit(&ds, None, c);
+        Check::new(&case)
+            .vector(
+                "notyet_delta_simple_ci90",
+                &[r.overall.ci_lower, r.overall.ci_upper],
+                Tol::stat(960),
+            )
+            .finish();
+        let z = z_critical(0.90).unwrap();
+        for e in &r.event_study {
+            assert!((e.ci_upper - (e.estimate + z * e.std_error)).abs() < 1e-12);
+        }
+        for level in [1.5, 0.0] {
+            let mut c = EtwfeConfig::default();
+            c.confidence_level = level;
+            let e = run_etwfe(
+                &ds,
+                "y",
+                "id",
+                "year",
+                "treat",
+                "first_treat",
+                None,
+                Some(c),
+            )
+            .expect_err("level outside (0, 1)")
+            .to_string();
+            assert!(e.contains("confidence_level"), "{e}");
+        }
+    }
+
+    #[test]
+    fn test_etwfe_aggregation_parses_aliases_and_rejects_unknown() {
+        assert_eq!(EtwfeAggregation::choices().validate(), Ok(()));
+        let p = |s: &str| s.parse::<EtwfeAggregation>().unwrap();
+        assert_eq!(p("Event-Study"), EtwfeAggregation::Event);
+        assert_eq!(p("dynamic"), EtwfeAggregation::Event);
+        assert_eq!(p("cohort"), EtwfeAggregation::Group);
+        assert_eq!(p("overall"), EtwfeAggregation::Simple);
+        assert_eq!(p("period"), EtwfeAggregation::Calendar);
+        assert_eq!(EtwfeAggregation::Calendar.to_string(), "calendar");
+        match "weekly".parse::<EtwfeAggregation>() {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown aggregation 'weekly'; expected one of: simple, event, group, calendar"
+            ),
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
     }

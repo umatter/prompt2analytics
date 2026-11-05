@@ -18,7 +18,13 @@
         "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_tref",
         "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_anticipation",
         "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_unbalanced",
-        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_all_treated"
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_all_treated",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_emfx_simple",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_emfx_event",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_emfx_group",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_emfx_calendar",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_cgroup_changes_estimate",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_confidence_level"
       ],
       "quantities": [
         "cohort x period coefficients (notyet, never, tref, anticipation)",
