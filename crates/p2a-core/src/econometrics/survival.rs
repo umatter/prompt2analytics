@@ -1165,8 +1165,39 @@ pub struct CoxConfig {
     pub max_iter: usize,
     /// Convergence tolerance
     pub tolerance: f64,
-    /// Use robust (sandwich) standard errors
+    /// Lin-Wei (1989) robust (sandwich) standard errors from the score residuals, as
+    /// `coxph(robust = TRUE)`. Implied by `cluster`.
     pub robust_se: bool,
+    /// Column whose levels define clusters for the clustered sandwich (coxph `cluster`): the
+    /// score residuals are summed within clusters first. Implies `robust_se`. Rows with a
+    /// missing cluster label are dropped and reported in `missing`.
+    #[serde(default)]
+    pub cluster: Option<String>,
+}
+
+/// How the reported Cox standard errors were computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CoxSeType {
+    /// sqrt(diag(I^-1)), the inverse information at the estimate (coxph's default).
+    #[default]
+    Model,
+    /// Lin-Wei (1989) sandwich I^-1 (sum_i U_i U_i') I^-1 from the score residuals
+    /// (`coxph(robust = TRUE)`).
+    Robust,
+    /// The same with the score residuals summed within clusters first
+    /// (`coxph(..., cluster = <col>)`).
+    Cluster,
+}
+
+impl fmt::Display for CoxSeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            CoxSeType::Model => "model-based",
+            CoxSeType::Robust => "robust (Lin-Wei sandwich)",
+            CoxSeType::Cluster => "robust, clustered (Lin-Wei sandwich)",
+        })
+    }
 }
 
 impl Default for CoxConfig {
@@ -1176,6 +1207,7 @@ impl Default for CoxConfig {
             max_iter: 25,
             tolerance: 1e-9,
             robust_se: false,
+            cluster: None,
         }
     }
 }
@@ -1252,6 +1284,26 @@ pub struct CoxResult {
     /// The Newton iteration's convergence record.
     #[serde(default)]
     pub convergence: Convergence,
+    /// What `std_errors` are; z, p, the hazard-ratio interval and the Wald test use them.
+    #[serde(default)]
+    pub se_type: CoxSeType,
+    /// The cluster column of a clustered sandwich.
+    #[serde(default)]
+    pub cluster: Option<String>,
+    /// The number of clusters of a clustered sandwich.
+    #[serde(default)]
+    pub n_clusters: Option<usize>,
+    /// Model-based SEs sqrt(diag(I^-1)) (R: sqrt(diag(fit$naive.var)) when robust); equal to
+    /// `std_errors` when `se_type` is `Model`.
+    #[serde(default)]
+    pub naive_std_errors: Vec<f64>,
+    /// Robust score test (R `fit$rscore`) from the score residuals at beta = 0; `None` unless
+    /// `se_type` is robust, `Some(NaN)` when it cannot be computed (see `warnings`).
+    #[serde(default)]
+    pub robust_score_test: Option<f64>,
+    /// p-value of `robust_score_test`.
+    #[serde(default)]
+    pub robust_score_p_value: Option<f64>,
 }
 
 impl CoxResult {
@@ -1270,28 +1322,70 @@ impl ResultNotes for CoxResult {
     }
 }
 
+/// One overall-test line, or "not reported" when the statistic is NaN.
+fn write_test_line(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
+    stat: f64,
+    df: usize,
+    p: f64,
+) -> fmt::Result {
+    if stat.is_nan() {
+        writeln!(f, "{name}: not reported")
+    } else {
+        writeln!(f, "{name} = {stat:.2}, df = {df}, p = {p:.4}")
+    }
+}
+
 impl fmt::Display for CoxResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Cox Proportional Hazards Regression")?;
         writeln!(f, "====================================")?;
         writeln!(f, "n = {}, events = {}", self.n_obs, self.n_events)?;
         writeln!(f, "Ties method: {}", self.ties_method)?;
+        match (self.se_type, &self.cluster, self.n_clusters) {
+            (CoxSeType::Cluster, Some(c), Some(g)) => writeln!(
+                f,
+                "Standard errors: robust, clustered by {c} ({g} clusters; Lin-Wei sandwich)"
+            )?,
+            (t, _, _) => writeln!(f, "Standard errors: {t}")?,
+        }
         writeln!(f)?;
 
-        writeln!(
-            f,
-            "{:<20} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
-            "Variable", "coef", "se(coef)", "z", "p", "HR", "95% CI HR"
-        )?;
-        writeln!(f, "{}", "-".repeat(90))?;
-
-        for i in 0..self.variables.len() {
+        let robust = self.se_type != CoxSeType::Model;
+        let width = if robust { 101 } else { 90 };
+        if robust {
             writeln!(
                 f,
-                "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{} {:>10.4} [{:.3}, {:.3}]",
+                "{:<20} {:>10} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
+                "Variable", "coef", "se(coef)", "robust se", "z", "p", "HR", "95% CI HR"
+            )?;
+        } else {
+            writeln!(
+                f,
+                "{:<20} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
+                "Variable", "coef", "se(coef)", "z", "p", "HR", "95% CI HR"
+            )?;
+        }
+        writeln!(f, "{}", "-".repeat(width))?;
+
+        for i in 0..self.variables.len() {
+            write!(
+                f,
+                "{:<20} {:>10.4} {:>10.4}",
                 self.variables[i],
                 self.coefficients[i],
-                self.std_errors[i],
+                self.naive_std_errors
+                    .get(i)
+                    .copied()
+                    .unwrap_or(self.std_errors[i]),
+            )?;
+            if robust {
+                write!(f, " {:>10.4}", self.std_errors[i])?;
+            }
+            writeln!(
+                f,
+                " {:>8.2} {:>8.4}{} {:>10.4} [{:.3}, {:.3}]",
                 self.z_stats[i],
                 self.p_values[i],
                 self.significance[i].stars(),
@@ -1301,34 +1395,43 @@ impl fmt::Display for CoxResult {
             )?;
         }
 
-        writeln!(f, "{}", "-".repeat(90))?;
+        writeln!(f, "{}", "-".repeat(width))?;
         writeln!(f)?;
         writeln!(
             f,
             "Concordance = {:.3} (se = {:.3})",
             self.concordance, self.concordance_se
         )?;
-        writeln!(
+        let df = self.df();
+        write_test_line(
             f,
-            "Likelihood ratio test = {:.2}, df = {}, p = {:.4}",
+            "Likelihood ratio test",
             self.lr_test,
-            self.df(),
-            self.lr_p_value
+            df,
+            self.lr_p_value,
         )?;
-        writeln!(
+        write_test_line(f, "Wald test", self.wald_test, df, self.wald_p_value)?;
+        write_test_line(
             f,
-            "Wald test = {:.2}, df = {}, p = {:.4}",
-            self.wald_test,
-            self.df(),
-            self.wald_p_value
-        )?;
-        writeln!(
-            f,
-            "Score (logrank) test = {:.2}, df = {}, p = {:.4}",
+            "Score (logrank) test",
             self.score_test,
-            self.df(),
-            self.score_p_value
+            df,
+            self.score_p_value,
         )?;
+        if let Some(rs) = self.robust_score_test {
+            write_test_line(
+                f,
+                "Robust score test",
+                rs,
+                df,
+                self.robust_score_p_value.unwrap_or(f64::NAN),
+            )?;
+            writeln!(
+                f,
+                "Note: the likelihood ratio and score tests assume independent observations \
+                 within a cluster; the Wald and robust score tests do not."
+            )?;
+        }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
         write!(f, "{}", notes_text(self))?;
@@ -1394,11 +1497,25 @@ pub fn run_cox_ph(
         dataset.df(),
         time_col,
         event_col,
-        None,
+        config.cluster.as_deref(),
         x_cols,
         TimeRule::NonNegative,
         "Cox regression",
     )?;
+    let clusters = data
+        .group
+        .as_ref()
+        .map(|g| (g.codes.as_slice(), g.levels.len()));
+    if let (Some(c), Some((_, g))) = (config.cluster.as_deref(), clusters)
+        && g < 2
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Cox regression: cluster column '{c}' has a single level; clustered standard \
+                 errors need at least 2 clusters"
+            ),
+        });
+    }
     let p = x_cols.len();
     let n = data.time.len();
     if n < p + 1 {
@@ -1501,8 +1618,59 @@ pub fn run_cox_ph(
     }
 
     let se_model: Vec<f64> = (0..q).map(|j| v_model[[j, j]].sqrt()).collect();
-    let se_id = se_model;
-    let wald_test = fit.beta.dot(&fit.last.information.dot(&fit.beta));
+    let robust = config.robust_se || config.cluster.is_some();
+    let (se_id, wald_test, se_type, n_clusters, robust_score_test) = if robust {
+        // Lin-Wei: dfbeta = U V (scaled space), summed within clusters; V_r = dfbeta' dfbeta.
+        let u = cox_score_residuals(&rs, xs.view(), &data.event, fit.beta.view(), config.ties)?;
+        let dfb = collapse_clusters(u.dot(&v_s), clusters)?;
+        checkpoint()?;
+        let v_r_s = dfb.t().dot(&dfb);
+        let se: Vec<f64> = (0..q).map(|j| v_r_s[[j, j]].sqrt() * scale[j]).collect();
+        let g_text = clusters.map_or(String::new(), |(_, g)| format!(" ({g} clusters)"));
+        // Both tests are scale-free, so they are computed in the scaled space.
+        let wald = match quadratic_form_full_rank(&v_r_s, &fit.beta, "Cox robust variance")? {
+            Ok(w) => w,
+            Err(rank) => {
+                warnings.push(format!(
+                    "robust Wald test not reported: the robust variance matrix has rank {rank} \
+                     of {q}{g_text}"
+                ));
+                f64::NAN
+            }
+        };
+        let u0 = cox_score_residuals(
+            &rs,
+            xs.view(),
+            &data.event,
+            Array1::zeros(q).view(),
+            config.ties,
+        )?;
+        let u0 = collapse_clusters(u0, clusters)?;
+        let score0 = u0.sum_axis(ndarray::Axis(0));
+        let rscore = match quadratic_form_full_rank(
+            &u0.t().dot(&u0),
+            &score0,
+            "Cox score residual cross-product",
+        )? {
+            Ok(v) => v,
+            Err(rank) => {
+                warnings.push(format!(
+                    "robust score test not reported: the score residual cross-product has rank \
+                     {rank} of {q}{g_text}"
+                ));
+                f64::NAN
+            }
+        };
+        let kind = if clusters.is_some() {
+            CoxSeType::Cluster
+        } else {
+            CoxSeType::Robust
+        };
+        (se, wald, kind, clusters.map(|(_, g)| g), Some(rscore))
+    } else {
+        let wald = fit.beta.dot(&fit.last.information.dot(&fit.beta));
+        (se_model.clone(), wald, CoxSeType::Model, None, None)
+    };
 
     // Per-variable vectors over every covariate, NaN for the aliased ones.
     let spread = |v: &[f64]| -> Vec<f64> {
@@ -1574,6 +1742,12 @@ pub fn run_cox_ph(
     Ok(CoxResult {
         variables: names,
         coefficients,
+        naive_std_errors: spread(&se_model),
+        se_type,
+        cluster: config.cluster.clone(),
+        n_clusters,
+        robust_score_p_value: robust_score_test.map(|t| chi_squared_p_value(t, df)),
+        robust_score_test,
         std_errors,
         z_stats,
         p_values,
@@ -1846,6 +2020,129 @@ fn cox_pass(
         score,
         information: info,
     }
+}
+
+/// Score residuals (R `residuals(fit, type = "score")`, Lin & Wei 1989): one row per
+/// observation in data row order (n x q), summing to the score at `beta`. With Efron ties a
+/// death's share of the k-th tied term is (1 - k/d), as coxph weights it.
+fn cox_score_residuals(
+    rs: &CoxRiskSets,
+    x: ArrayView2<f64>,
+    event: &[bool],
+    beta: ArrayView1<f64>,
+    ties: TiesMethod,
+) -> EconResult<Array2<f64>> {
+    let (n, q) = x.dim();
+    let nb = rs.blocks.len();
+    let len = crate::resource::checked_len(&[nb, q], "Cox score residuals")?;
+    let risk: Vec<f64> = x.dot(&beta).iter().map(|e| e.exp()).collect();
+    // Per block: h, hd (scalars) and hx, hxd, xbm (q each).
+    let mut h = crate::resource::try_vec(nb, 0.0, "Cox score residuals")?;
+    let mut hd = crate::resource::try_vec(nb, 0.0, "Cox score residuals")?;
+    let mut hx = crate::resource::try_vec(len, 0.0, "Cox score residuals")?;
+    let mut hxd = crate::resource::try_vec(len, 0.0, "Cox score residuals")?;
+    let mut xbm = crate::resource::try_vec(len, 0.0, "Cox score residuals")?;
+    let mut ndeath = crate::resource::try_vec(nb, 0usize, "Cox score residuals")?;
+    let (mut s0, mut s1) = (0.0, vec![0.0; q]);
+    let mut e1 = vec![0.0; q];
+    let mut xbar = vec![0.0; q];
+    for (b, block) in rs.blocks.iter().enumerate() {
+        let rows = &rs.order[block.clone()];
+        let (mut d, mut e0) = (0usize, 0.0);
+        e1.iter_mut().for_each(|v| *v = 0.0);
+        for &i in rows {
+            let r = risk[i];
+            s0 += r;
+            for j in 0..q {
+                s1[j] += r * x[[i, j]];
+            }
+            if event[i] {
+                d += 1;
+                e0 += r;
+                for j in 0..q {
+                    e1[j] += r * x[[i, j]];
+                }
+            }
+        }
+        ndeath[b] = d;
+        if d == 0 {
+            continue;
+        }
+        let df = d as f64;
+        let off = b * q;
+        for k in 0..d {
+            let f = match ties {
+                TiesMethod::Efron => k as f64 / df,
+                TiesMethod::Breslow => 0.0,
+            };
+            let a = s0 - f * e0;
+            for j in 0..q {
+                xbar[j] = (s1[j] - f * e1[j]) / a;
+            }
+            let c = 1.0 - f;
+            h[b] += 1.0 / a;
+            hd[b] += c / a;
+            for j in 0..q {
+                hx[off + j] += xbar[j] / a;
+                hxd[off + j] += c * xbar[j] / a;
+                xbm[off + j] += xbar[j] / df;
+            }
+        }
+    }
+    checkpoint()?;
+    let mut u = try_zeros2(n, q, "Cox score residuals")?;
+    let (mut cum_h, mut cum_a) = (0.0, vec![0.0; q]);
+    for (b, block) in rs.blocks.iter().enumerate().rev() {
+        let off = b * q;
+        for &i in &rs.order[block.clone()] {
+            let r = risk[i];
+            for j in 0..q {
+                let xij = x[[i, j]];
+                let mut v = -r * (xij * cum_h - cum_a[j]);
+                if ndeath[b] > 0 {
+                    if event[i] {
+                        v += (xij - xbm[off + j]) - r * (xij * hd[b] - hxd[off + j]);
+                    } else {
+                        v -= r * (xij * h[b] - hx[off + j]);
+                    }
+                }
+                u[[i, j]] = v;
+            }
+        }
+        cum_h += h[b];
+        for j in 0..q {
+            cum_a[j] += hx[off + j];
+        }
+    }
+    Ok(u)
+}
+
+/// `rows` summed within the clusters `codes` (G x q), or `rows` itself without clusters.
+fn collapse_clusters(rows: Array2<f64>, codes: Option<(&[u32], usize)>) -> EconResult<Array2<f64>> {
+    let Some((codes, g)) = codes else {
+        return Ok(rows);
+    };
+    let q = rows.ncols();
+    let mut out = try_zeros2(g, q, "Cox cluster sums")?;
+    for (row, &c) in rows.rows().into_iter().zip(codes) {
+        let mut o = out.row_mut(c as usize);
+        o += &row;
+    }
+    Ok(out)
+}
+
+/// `b' M^-1 b` through a generalized inverse of the symmetric `m`; `Err(rank)` when `m` is
+/// rank-deficient (the test is then not reported).
+fn quadratic_form_full_rank(
+    m: &Array2<f64>,
+    b: &Array1<f64>,
+    what: &str,
+) -> EconResult<Result<f64, usize>> {
+    let inv = sym_inverse(m.view(), SingularPolicy::Generalized, what)?;
+    if !inv.is_full_rank() {
+        return Ok(Err(inv.rank));
+    }
+    Ok(Ok(b.dot(&inv.inverse.dot(b))))
 }
 
 /// Fenwick tree (Binary Indexed Tree) for cumulative frequency queries.
@@ -4109,6 +4406,8 @@ mod tests {
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         assert_eq!(r.df(), 3);
         assert!(r.to_string().contains("Converged: yes ("), "{r}");
+        assert_eq!(r.se_type, CoxSeType::Model);
+        assert_eq!(r.naive_std_errors, r.std_errors);
         Check::new(&case)
             .scalar("n", r.n_obs as f64, Tol::exact())
             .scalar("n_event", r.n_events as f64, Tol::exact())
@@ -4310,5 +4609,230 @@ mod tests {
                 other => panic!("max_iter {max_iter}, tolerance {tol}: {other:?}"),
             }
         }
+    }
+
+    /// ECON-45: coxph(robust = TRUE). Before: robust_se was never read, so std_errors were the
+    /// model SEs (efron age 0.0092674110143657 vs robust 0.00988139278005566) and nothing said so.
+    fn check_cox_robust(ties: TiesMethod) {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("n") as usize;
+        let tag = ties_tag(ties);
+        let mut cfg = cox_tight(ties);
+        cfg.robust_se = true;
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg)).unwrap();
+        assert_eq!(r.se_type, CoxSeType::Robust);
+        assert_eq!((r.cluster.as_deref(), r.n_clusters), (None, None));
+        let text = r.to_string();
+        assert!(
+            text.contains("robust se")
+                && text.contains("Standard errors: robust (Lin-Wei sandwich)")
+                && text.contains("Robust score test"),
+            "{text}"
+        );
+        Check::new(&case)
+            .named(
+                &format!("{tag}_coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                &format!("{tag}_se"),
+                &r.variables,
+                &r.naive_std_errors,
+                Tol::se(n),
+            )
+            .named(
+                &format!("{tag}_se_robust"),
+                &r.variables,
+                &r.std_errors,
+                Tol::se(n),
+            )
+            .named(
+                &format!("{tag}_z_robust"),
+                &r.variables,
+                &r.z_stats,
+                Tol::stat(n),
+            )
+            .named(
+                &format!("{tag}_p_robust"),
+                &r.variables,
+                &r.p_values,
+                Tol::p_value(n),
+            )
+            .named(
+                &format!("{tag}_hr_lower_robust"),
+                &r.variables,
+                &r.hr_ci_lower,
+                Tol::stat(n),
+            )
+            .named(
+                &format!("{tag}_hr_upper_robust"),
+                &r.variables,
+                &r.hr_ci_upper,
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("{tag}_wald_test_robust"),
+                r.wald_test,
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("{tag}_wald_p_robust"),
+                r.wald_p_value,
+                Tol::p_value(n),
+            )
+            .scalar(
+                &format!("{tag}_rscore_robust"),
+                r.robust_score_test.unwrap_or(f64::NAN),
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("{tag}_rscore_p_robust"),
+                r.robust_score_p_value.unwrap_or(f64::NAN),
+                Tol::p_value(n),
+            )
+            .scalar(&format!("{tag}_score_test"), r.score_test, Tol::stat(n)) // model-based
+            .scalar(&format!("{tag}_lr_test"), r.lr_test, Tol::stat(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cox_efron_robust() {
+        check_cox_robust(TiesMethod::Efron)
+    }
+
+    #[test]
+    fn test_validate_cox_breslow_robust() {
+        check_cox_robust(TiesMethod::Breslow)
+    }
+
+    /// coxph(... + cluster(inst)): dfbeta residuals summed within the 18 institutions; the row
+    /// with a missing inst is dropped (226 rows) and reported; robust_se stays false (cluster
+    /// implies it, as in coxph).
+    #[test]
+    fn test_validate_cox_cluster() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("n_cluster_obs") as usize;
+        let mut check = Check::new(&case);
+        for ties in [TiesMethod::Efron, TiesMethod::Breslow] {
+            let tag = ties_tag(ties);
+            let mut cfg = cox_tight(ties);
+            cfg.cluster = Some("inst".to_string());
+            let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg)).unwrap();
+            assert_eq!(r.se_type, CoxSeType::Cluster);
+            assert_eq!(r.cluster.as_deref(), Some("inst"));
+            assert_eq!(r.missing.n_dropped, 2, "{:?}", r.missing); // ph.ecog 1, inst 1
+            assert!(
+                r.to_string().contains("clustered by inst (18 clusters"),
+                "{r}"
+            );
+            check
+                .scalar("n_cluster_obs", r.n_obs as f64, Tol::exact())
+                .scalar("n_cluster_event", r.n_events as f64, Tol::exact())
+                .scalar(
+                    "n_clusters",
+                    r.n_clusters.map_or(f64::NAN, |g| g as f64),
+                    Tol::exact(),
+                )
+                .named(
+                    &format!("{tag}_coef_cluster"),
+                    &r.variables,
+                    &r.coefficients,
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("{tag}_se_model_cluster"),
+                    &r.variables,
+                    &r.naive_std_errors,
+                    Tol::se(n),
+                )
+                .named(
+                    &format!("{tag}_se_cluster"),
+                    &r.variables,
+                    &r.std_errors,
+                    Tol::se(n),
+                )
+                .named(
+                    &format!("{tag}_z_cluster"),
+                    &r.variables,
+                    &r.z_stats,
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("{tag}_p_cluster"),
+                    &r.variables,
+                    &r.p_values,
+                    Tol::p_value(n),
+                )
+                .scalar(
+                    &format!("{tag}_wald_test_cluster"),
+                    r.wald_test,
+                    Tol::stat(n),
+                )
+                .scalar(
+                    &format!("{tag}_wald_p_cluster"),
+                    r.wald_p_value,
+                    Tol::p_value(n),
+                )
+                .scalar(
+                    &format!("{tag}_rscore_cluster"),
+                    r.robust_score_test.unwrap_or(f64::NAN),
+                    Tol::stat(n),
+                )
+                .scalar(
+                    &format!("{tag}_rscore_p_cluster"),
+                    r.robust_score_p_value.unwrap_or(f64::NAN),
+                    Tol::p_value(n),
+                );
+        }
+        check.finish();
+    }
+
+    /// A clustered variance needs at least two clusters (coxph returns a variance of about 0
+    /// with one).
+    #[test]
+    fn test_cox_cluster_needs_two_levels() {
+        let ds = generated_dataset("lung");
+        let d = derive_i64(&ds, "sex", "one", |_| 1);
+        let mut cfg = cox_tight(TiesMethod::Efron);
+        cfg.cluster = Some("one".into());
+        match run_cox_ph(&d, "time", "status", &COX_X, Some(cfg)) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("'one'") && message.contains("at least 2 clusters"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// With no more clusters than coefficients the clustered matrices are rank-deficient: SEs
+    /// are reported, the robust Wald and score tests are NaN with a warning (coxph prints
+    /// generalized-inverse statistics).
+    #[test]
+    fn test_cox_robust_tests_need_more_clusters_than_coefficients() {
+        let ds = generated_dataset("lung");
+        let d = derive_f64(&ds, "age", "half", |i, _| if i < 114 { 1.0 } else { 2.0 });
+        let mut cfg = cox_tight(TiesMethod::Efron);
+        cfg.cluster = Some("half".into());
+        let r = run_cox_ph(&d, "time", "status", &COX_X, Some(cfg)).unwrap();
+        assert_eq!(r.n_clusters, Some(2));
+        assert!(r.std_errors.iter().all(|s| s.is_finite()));
+        assert!(r.wald_test.is_nan() && r.robust_score_test.is_some_and(f64::is_nan));
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("robust Wald test not reported")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("robust score test not reported")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("not reported"), "{r}");
     }
 }
