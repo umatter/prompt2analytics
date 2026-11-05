@@ -45,6 +45,7 @@
   }
   cells <- do.call(rbind, cells)
   cells$se <- sqrt(colMeans(inf^2) / n)
+  cells$se[cells$se <= sqrt(.Machine$double.eps) * 10] <- NA   # did::att_gt: NA for the reference cells (CAUS-117)
   list(cells = cells, inf = inf, G = G, n = n)
 }
 
@@ -85,6 +86,7 @@
     IFe <- inf[, we, drop = FALSE] %*% ww + .wif(we, pg, G, cl$group) %*% as.matrix(cl$att[we])
     se_e[i] <- .agg_se(IFe, n)
   }
+  se_e[se_e <= sqrt(.Machine$double.eps) * 10] <- NA          # did::aggte: NA at the reference event time (CAUS-117)
   # pre-trend Wald on the pre-period cells (structural zeros at t = g - 1 dropped)
   pre <- which(cl$time < cl$group & cl$time != cl$group - 1)
   V <- crossprod(inf[, pre]) / n

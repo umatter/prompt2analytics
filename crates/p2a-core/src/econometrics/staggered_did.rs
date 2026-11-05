@@ -104,6 +104,25 @@ use statrs::distribution::{ContinuousCDF, FisherSnedecor, Normal};
 /// Fewest bootstrap replicates accepted (`bootstrap = 0` is the analytic path).
 const MIN_BOOTSTRAP: usize = 50;
 
+/// A standard error at or below this is reported as NaN (R `NA`), as `did::att_gt`
+/// and `did::aggte` do (`se <= sqrt(.Machine$double.eps) * 10`): the reference
+/// cell ATT(g, base) and its event time have a zero influence function.
+const SE_NA_LIMIT: f64 = 1.4901161193847656e-7;
+
+/// `se`, or NaN when it is at or below [`SE_NA_LIMIT`] (did's rule).
+fn did_se(se: f64) -> f64 {
+    if se <= SE_NA_LIMIT { f64::NAN } else { se }
+}
+
+/// A number at 4 decimals, or `NA` for NaN (R's print of a missing SE).
+fn num4(v: f64) -> String {
+    if v.is_nan() {
+        "NA".to_string()
+    } else {
+        format!("{v:.4}")
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -230,11 +249,13 @@ pub struct GroupTimeATT {
     pub time: i64,
     /// ATT estimate
     pub att: f64,
-    /// Standard error
+    /// Standard error; NaN (JSON `null`) for the reference cell (t = g - 1 -
+    /// anticipation), whose ATT is 0 by construction, as did reports NA (did's
+    /// rule: an SE at or below `sqrt(.Machine$double.eps) * 10` is NA)
     pub std_error: f64,
-    /// Confidence interval lower bound
+    /// Confidence interval lower bound (NaN when the SE is)
     pub ci_lower: f64,
-    /// Confidence interval upper bound
+    /// Confidence interval upper bound (NaN when the SE is)
     pub ci_upper: f64,
     /// Number of treated observations in this cell
     pub n_treated: usize,
@@ -253,7 +274,8 @@ pub struct AggregatedEffect {
     pub key: i64,
     /// Aggregated ATT
     pub att: f64,
-    /// Standard error
+    /// Standard error; NaN at the reference event time (did reports NA for an SE at
+    /// or below `sqrt(.Machine$double.eps) * 10`)
     pub std_error: f64,
     /// Confidence interval lower bound
     pub ci_lower: f64,
@@ -380,11 +402,11 @@ impl fmt::Display for StaggeredDidResult {
         writeln!(f, "OVERALL ATT:")?;
         writeln!(
             f,
-            "  ATT = {:.4} (SE = {:.4}, {level}% CI [{:.4}, {:.4}])",
+            "  ATT = {:.4} (SE = {}, {level}% CI [{}, {}])",
             self.overall_att.att,
-            self.overall_att.std_error,
-            self.overall_att.ci_lower,
-            self.overall_att.ci_upper
+            num4(self.overall_att.std_error),
+            num4(self.overall_att.ci_lower),
+            num4(self.overall_att.ci_upper)
         )?;
         let sig = SignificanceLevel::from_p_value(self.overall_att.p_value);
         writeln!(
@@ -410,12 +432,12 @@ impl fmt::Display for StaggeredDidResult {
             let sig = SignificanceLevel::from_p_value(eff.p_value);
             writeln!(
                 f,
-                "{:>8} {:>12.4} {:>12.4} [{:>8.4}, {:>8.4}]{}",
+                "{:>8} {:>12.4} {:>12} [{:>8}, {:>8}]{}",
                 eff.key,
                 eff.att,
-                eff.std_error,
-                eff.ci_lower,
-                eff.ci_upper,
+                num4(eff.std_error),
+                num4(eff.ci_lower),
+                num4(eff.ci_upper),
                 sig.stars()
             )?;
         }
@@ -1535,7 +1557,8 @@ fn estimate_propensity_logit(x: &Array2<f64>, d: &Array1<f64>) -> EconResult<Arr
 /// unit's influence function and a comparison entry adds `-n (dy - mu0) / n0`,
 /// with `n` the number of units. The cell's SE is then `sqrt(sum_u IF_u^2) / n`,
 /// which is did's `sqrt(mean(IF^2) / n)`. A base-period cell `(g, g - 1)` has
-/// `dy = 0` and an influence function of exactly zero.
+/// `dy = 0` and an influence function of exactly zero; its SE is reported as NaN,
+/// as did reports NA.
 fn cell_influence(table: &BootTable) -> EconResult<Array2<f64>> {
     let n_units = table.n_units;
     let n_cells = table.n_cells();
@@ -1766,8 +1789,9 @@ impl Aggregator<'_> {
         fewest: &mut Fewest,
         label: impl FnOnce() -> String,
     ) -> EconResult<AggregatedEffect> {
-        let stat = self.stat(atts, keep, w)?;
+        let mut stat = self.stat(atts, keep, w)?;
         fewest.note(stat.used, label);
+        stat.se = did_se(stat.se);
         Ok(AggregatedEffect {
             key,
             att: stat.att,
@@ -1849,9 +1873,12 @@ fn inference(
     let cell_stats = aggregator.cells(atts)?;
     let mut fewest = Fewest::default();
     for (gta, stat) in atts.iter_mut().zip(&cell_stats) {
-        gta.std_error = stat.se;
-        gta.ci_lower = gta.att - z * stat.se;
-        gta.ci_upper = gta.att + z * stat.se;
+        // the reference cell's SE is 0 (zero influence function, constant
+        // replicates) and is reported as NaN, as did reports NA
+        let se = did_se(stat.se);
+        gta.std_error = se;
+        gta.ci_lower = gta.att - z * se;
+        gta.ci_upper = gta.att + z * se;
         fewest.note(stat.used, || format!("ATT({},{})", gta.group, gta.time));
     }
     let mut aggregates = aggregator.aggregates(atts)?;
@@ -2299,7 +2326,7 @@ mod tests {
     fn test_staggered_did_bootstrap_ses_pinned() {
         let balanced: [f64; 27] = [
             0.18490145985527776,
-            0.0,
+            f64::NAN, // the reference cell: SE NA as did
             0.1808923855953215,
             0.2120487328975394,
             0.23072744644304863,
@@ -2310,7 +2337,7 @@ mod tests {
             0.23320011561681045,
             0.19070322569314244,
             0.21563141541771244,
-            0.0,
+            f64::NAN, // the reference cell: SE NA as did
             0.2663685066745486,
             0.2820728319220123,
             0.16984345547733584,
@@ -2321,14 +2348,14 @@ mod tests {
             0.23298033218340553,
             0.26624152070207663,
             0.24366619071737705,
-            0.0,
+            f64::NAN, // the reference cell: SE NA as did
             0.2664967811861835,
             0.24702693059618694,
             0.2644702388339487,
         ];
         let unbalanced: [f64; 27] = [
             0.21337412146962192,
-            0.0,
+            f64::NAN, // the reference cell: SE NA as did
             0.232739771272861,
             0.21241129431089897,
             0.2817675615414031,
@@ -2339,7 +2366,7 @@ mod tests {
             0.26805398079298853,
             0.1934452831682178,
             0.24658069499501026,
-            0.0,
+            f64::NAN, // the reference cell: SE NA as did
             0.1959086120946041,
             0.26577482181776185,
             0.20143567711747046,
@@ -2355,7 +2382,9 @@ mod tests {
             0.2280247643824537,
             0.2594670200444654,
         ];
-        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs().max(1.0);
+        let close = |a: f64, b: f64| {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12 * b.abs().max(1.0)
+        };
         // The overall SE is the SD of the replicate aggregates now; the test
         // test_staggered_did_bootstrap_aggregates_are_replicate_sds recomputes it.
         for (ds, want) in [
@@ -3426,6 +3455,11 @@ mod tests {
 
             for (k, c) in atts.iter().enumerate() {
                 let (sd, _) = reference_sd(&reps, &[k], equal_w);
+                if sd <= SE_NA_LIMIT {
+                    // the reference cell: constant 0 replicates, SE NaN as did's NA
+                    assert!(c.std_error.is_nan(), "{what}: {c:?}");
+                    continue;
+                }
                 assert!(
                     rel_close(c.std_error, sd, 1e-10),
                     "{what}: cell ({}, {}) {} vs {sd}",
@@ -3462,6 +3496,11 @@ mod tests {
                     .filter(|&k| atts[k].relative_time == e.key)
                     .collect();
                 let (sd, _) = reference_sd(&reps, &keep, cohort_w);
+                if sd <= SE_NA_LIMIT {
+                    // the reference event time: SE NaN as did's NA
+                    assert!(e.std_error.is_nan(), "{what}: event {}", e.key);
+                    continue;
+                }
                 assert!(
                     rel_close(e.std_error, sd, 1e-10),
                     "{what}: event {} {} vs {sd}",
@@ -3978,7 +4017,7 @@ mod tests {
     /// CI bounds and p-values computed in R from the case (z95 <- qnorm(0.975)):
     ///   c(ag$simple_att - z95 * ag$simple_se, ag$simple_att + z95 * ag$simple_se)
     ///   2 * pnorm(-abs(ag$simple_att / ag$simple_se)); 2 * pnorm(-abs(ag$group_att / ag$group_se))
-    ///   ifelse(ag$event_se > 0, 2 * pnorm(-abs(ag$event_att / ag$event_se)), 1)
+    ///   2 * pnorm(-abs(ag$event_att / ag$event_se))   (NA at the reference event time)
     struct RInference {
         overall: [f64; 3],
         group_lo: [f64; 3],
@@ -4106,7 +4145,7 @@ mod tests {
                     -0.574033871318034,
                     -0.6220950272841064,
                     -0.3723490114988929,
-                    0.0,
+                    f64::NAN,
                     1.433280378525943,
                     2.1643359105209194,
                     1.9318514813537235,
@@ -4120,7 +4159,7 @@ mod tests {
                     0.6181163690505591,
                     0.41965228093764173,
                     0.33033273091841153,
-                    0.0,
+                    f64::NAN,
                     2.082068412290233,
                     2.909839780934294,
                     3.0977159129852097,
@@ -4134,7 +4173,7 @@ mod tests {
                     0.9422245549355032,
                     0.7032924524534246,
                     0.9067059689605106,
-                    1.0,
+                    f64::NAN,
                     2.4124486336216627e-26,
                     1.3502157488096779e-40,
                     2.782941440768191e-17,
@@ -4170,7 +4209,7 @@ mod tests {
                     -0.56155407646327,
                     -0.7322408807428932,
                     -0.38378642476540636,
-                    0.0,
+                    f64::NAN,
                     1.441287662531535,
                     2.1617069452922903,
                     2.0834596279422626,
@@ -4184,7 +4223,7 @@ mod tests {
                     0.59284280522428,
                     0.3453813101544084,
                     0.35047894447195616,
-                    0.0,
+                    f64::NAN,
                     2.0840620928181175,
                     2.9877518627678716,
                     3.1735181568830337,
@@ -4198,7 +4237,7 @@ mod tests {
                     0.9576340744181483,
                     0.48167274802730536,
                     0.9291556790255424,
-                    1.0,
+                    f64::NAN,
                     5.952866395633425e-27,
                     2.486309632503913e-34,
                     3.3167833283499864e-21,
@@ -4323,6 +4362,66 @@ mod tests {
                 ),
                 Err(e) => panic!("{method}: expected NotImplemented, got {e}"),
                 Ok(_) => panic!("{method}: expected NotImplemented, got Ok"),
+            }
+        }
+    }
+
+    /// CAUS-117: did reports NA for the SE of a reference cell (t = g - 1 - anticipation)
+    /// and of the reference event time; the cell's ATT is 0 by construction. Before: SE 0
+    /// and CI [0, 0] (zero influence function, zero bootstrap spread). The case's
+    /// `never_cell_se` and `never_event_se` hold R's NA (did's rule) at those positions.
+    #[test]
+    fn test_validate_staggered_did_reference_cells_have_no_se() {
+        let (case, ds) = crate::test_support::load_case("did_cs_analytic");
+        for bootstrap in [0, 199] {
+            let config = StaggeredDidConfig {
+                bootstrap,
+                seed: Some(7),
+                ..Default::default()
+            };
+            let r = run(&ds, "unit", config).unwrap();
+            let mut seen = 0;
+            for c in &r.group_time_atts {
+                if c.time == c.group - 1 {
+                    seen += 1;
+                    assert_eq!(c.att, 0.0);
+                    assert!(
+                        c.std_error.is_nan() && c.ci_lower.is_nan() && c.ci_upper.is_nan(),
+                        "{c:?}"
+                    );
+                } else {
+                    assert!(c.std_error.is_finite() && c.std_error > 0.0, "{c:?}");
+                }
+            }
+            assert_eq!(seen, 3);
+            let e = r.event_study.iter().find(|e| e.key == -1).unwrap();
+            assert_eq!(e.att, 0.0);
+            assert!(e.std_error.is_nan() && e.ci_lower.is_nan() && e.p_value.is_nan());
+            // the pre-test still runs on the other pre-treatment cells
+            assert_eq!(r.pretrend_test.as_ref().unwrap().df, 9);
+            let shown = format!("{r}");
+            assert!(
+                shown.contains("          NA [      NA,       NA]"),
+                "{shown}"
+            );
+            if bootstrap == 0 {
+                let n = r.n_obs;
+                let se = |c: &GroupTimeATT| c.std_error;
+                Check::new(&case)
+                    .vector(
+                        "never_cell_se",
+                        &r.group_time_atts.iter().map(se).collect::<Vec<_>>(),
+                        Tol::se(n),
+                    )
+                    .vector(
+                        "never_event_se",
+                        &r.event_study
+                            .iter()
+                            .map(|e| e.std_error)
+                            .collect::<Vec<_>>(),
+                        Tol::se(n),
+                    )
+                    .finish();
             }
         }
     }
