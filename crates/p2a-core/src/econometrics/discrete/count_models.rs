@@ -24,13 +24,12 @@ use crate::econometrics::glm::{GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::cholesky_inverse;
 use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
+use crate::regression::ols::certainly_full_rank;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes};
 use crate::traits::estimator::{logistic_cdf, normal_p_value_two_sided};
 
-use super::conditional_logit::{
-    certainly_full_rank, covariance_from_information, equilibrated_newton_step,
-};
+use super::conditional_logit::{covariance_from_information, equilibrated_newton_step};
 use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits, newton_step};
 
 /// QR tolerance of glm.nb's `glm.fitter`: `min(1e-7, control$epsilon / 1000)` at its

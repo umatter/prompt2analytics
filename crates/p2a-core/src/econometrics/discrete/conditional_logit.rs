@@ -29,7 +29,7 @@
 //! R equivalent: `mlogit::mlogit()`
 
 use faer::linalg::solvers::Solve;
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -38,7 +38,7 @@ use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::ndarray_to_faer;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
-use crate::regression::ols::normal_equations_inverse;
+use crate::regression::ols::certainly_full_rank;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
@@ -590,17 +590,6 @@ pub(super) fn covariance_from_information(
         }
         Err(err) => Err(err),
     }
-}
-
-/// Whether `x` certainly has full column rank, by OLS's normal-equations test
-/// ([`normal_equations_inverse`]): the reciprocal condition of the equilibrated `X'X` is
-/// at least 1e-8, a lower bound. A pivoted QR at a column tolerance `tol <= 1e-7` (such as
-/// [`LM_QR_TOL`]) aliases a column only when its residual norm is below `tol` times its
-/// norm, which makes that reciprocal condition below `tol^2 = 1e-14`; so `true` is the
-/// QR's verdict, at a fraction of its cost. `false` (rank-deficient, ill-conditioned, not
-/// finite, or fewer rows than columns) means: decide by the QR.
-pub(super) fn certainly_full_rank(x: ArrayView2<f64>) -> EconResult<bool> {
-    Ok(normal_equations_inverse(x)?.is_some())
 }
 
 /// Validate a Newton control: `max_iter >= 1` and a positive, finite `tolerance`.

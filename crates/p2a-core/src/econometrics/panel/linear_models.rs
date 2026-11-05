@@ -52,7 +52,7 @@ use crate::econometrics::hdfe::screen_regressors;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::eig_symmetric;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, least_squares, sym_inverse};
-use crate::regression::ols::normal_equations_inverse;
+use crate::regression::ols::{certainly_full_rank, normal_equations_inverse};
 use crate::resource;
 use crate::traits::estimator::{
     SignificanceLevel, chi_squared_p_value, f_test_p_value, normal_cdf, t_test_p_value,
@@ -407,10 +407,9 @@ pub fn run_random_effects_with(
 
     // Step 0: raw collinearity. The later of exactly collinear columns of [1, X] is
     // dropped from every step (plm's aliased coefficients); the intercept is column 0,
-    // so it is never the aliased one. OLS's decision: a full-rank, well-conditioned
-    // design has no aliased column (see `screen_regressors`), so the QR runs only when
-    // the normal equations decline it.
-    let aliased = if normal_equations_inverse(x_all.view())?.is_some() {
+    // so it is never the aliased one. The QR runs only when the design is not certainly
+    // of full rank (`ols::certainly_full_rank`).
+    let aliased = if certainly_full_rank(x_all.view())? {
         Vec::new()
     } else {
         Qr::decompose(x_all.view(), LM_QR_TOL)?.aliased()

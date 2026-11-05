@@ -663,6 +663,22 @@ pub(crate) enum OlsPath {
 /// `eps * sqrt(1 / rcond)` plus a residual term) decides rank and coefficients.
 const OLS_NORMAL_EQUATIONS_MIN_RCOND: f64 = 1e-8;
 
+/// Whether `x` certainly has full column rank, by OLS's normal-equations test
+/// ([`normal_equations_inverse`]). `false` (rank-deficient, ill-conditioned, not finite, or
+/// fewer rows than columns) means: decide by the pivoted QR.
+///
+/// `true` is the pivoted QR's verdict, at a fraction of its cost. The test passes only when
+/// the reciprocal condition of the diagonally equilibrated `X'X` is at least
+/// [`OLS_NORMAL_EQUATIONS_MIN_RCOND`] = 1e-8, so each unit-scaled column lies at a distance of
+/// at least 1e-4 from the span of the others. A pivoted QR at a column tolerance
+/// `tol <= 1e-7` (such as [`LM_QR_TOL`](crate::linalg::solve::LM_QR_TOL), `lm.fit`'s) aliases
+/// a column only when its residual norm is below `tol` times its norm, which would make that
+/// reciprocal condition below `tol^2 = 1e-14`. So the QR keeps every column, and callers
+/// that certify a design here can skip it.
+pub(crate) fn certainly_full_rank(x: ndarray::ArrayView2<'_, f64>) -> EconResult<bool> {
+    Ok(normal_equations_inverse(x)?.is_some())
+}
+
 /// The coefficients of a normal-equations solve have a relative error of order
 /// `eps / rcond` (measured: up to about 50 `eps / rcond` on uncentred calendar-year
 /// designs). Below this reciprocal condition one step of iterative refinement

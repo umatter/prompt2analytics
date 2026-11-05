@@ -22,13 +22,13 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{LM_QR_TOL, Qr};
+use crate::regression::ols::certainly_full_rank;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, notes_text};
 use crate::traits::estimator::normal_p_value_two_sided;
 
 use super::conditional_logit::{
-    certainly_full_rank, check_newton_control, covariance_from_information,
-    equilibrated_newton_step,
+    check_newton_control, covariance_from_information, equilibrated_newton_step,
 };
 use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
 

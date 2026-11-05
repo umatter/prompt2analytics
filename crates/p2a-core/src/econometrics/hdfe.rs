@@ -508,10 +508,8 @@ pub(crate) fn screen_regressors<'a>(
     } else {
         demeaned.select(Axis(1), &screened)
     };
-    // OLS's solve decision: a full-rank, well-conditioned design has no aliased column
-    // (its equilibrated reciprocal condition of at least 1e-8 keeps each unit-scaled
-    // column at distance >= 1e-4 from the span of the others, far above LM_QR_TOL), so
-    // the QR would keep every column and the normal equations solve it.
+    // OLS's solve decision: a design the normal equations accept has no aliased column
+    // (see `ols::certainly_full_rank`), so the normal equations solve it.
     if let Some(normal) = normal_equations_inverse(sub.view())? {
         return Ok(RegressorScreen {
             kept: screened,
