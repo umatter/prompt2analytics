@@ -27,7 +27,8 @@ use crate::traits::convergence::{Convergence, ResultNotes, deviance_change, note
 use crate::traits::estimator::normal_p_value_two_sided;
 
 use super::conditional_logit::{
-    check_newton_control, covariance_from_information, equilibrated_newton_step,
+    certainly_full_rank, check_newton_control, covariance_from_information,
+    equilibrated_newton_step,
 };
 use super::newton::{MAX_HALVINGS, ensure_dense_inverse_fits};
 
@@ -311,24 +312,27 @@ pub fn run_multinom(
     let mut var_names = vec!["(Intercept)".to_string()];
     var_names.extend(x_cols.iter().map(|s| s.to_string()));
 
-    // Aliased regressors are refused (no finite, identified MLE).
-    let qr = Qr::decompose(x, LM_QR_TOL)?;
-    let aliased = qr.aliased();
-    if !aliased.is_empty() {
-        let list: Vec<&str> = aliased.iter().map(|&a| var_names[a].as_str()).collect();
-        return Err(EconError::SingularMatrix {
-            context: format!(
-                "multinomial logit: regressors {} are linear combinations of the other columns \
-                 (rank {} of {k})",
-                list.join(", "),
-                qr.rank()
-            ),
-            suggestion: "drop the listed regressors (nnet::multinom returns an arbitrary split \
-                         of their coefficients)"
-                .to_string(),
-        });
+    // Aliased regressors are refused (no finite, identified MLE). A design the
+    // normal-equations test certifies is of full rank needs no QR.
+    if !certainly_full_rank(x)? {
+        let qr = Qr::decompose(x, LM_QR_TOL)?;
+        let aliased = qr.aliased();
+        if !aliased.is_empty() {
+            let list: Vec<&str> = aliased.iter().map(|&a| var_names[a].as_str()).collect();
+            return Err(EconError::SingularMatrix {
+                context: format!(
+                    "multinomial logit: regressors {} are linear combinations of the other columns \
+                     (rank {} of {k})",
+                    list.join(", "),
+                    qr.rank()
+                ),
+                suggestion:
+                    "drop the listed regressors (nnet::multinom returns an arbitrary split \
+                             of their coefficients)"
+                        .to_string(),
+            });
+        }
     }
-    drop(qr);
 
     let n_cats = j - 1; // Non-reference categories
     let n_params = n_cats * k;
@@ -347,9 +351,16 @@ pub fn run_multinom(
     let mut converged = false;
     let mut iterations = 0;
     let mut final_change = f64::NAN;
+    // The derivatives at the current `beta` when a trial step already computed them (the
+    // full step of the line search is evaluated with its derivatives, which the next
+    // iteration then reuses; the values are the ones a fresh pass gives, bit for bit).
+    let mut at_beta: Option<MultinomDerivatives> = None;
     while iterations < MAX_ITER {
         resource::checkpoint()?;
-        let (ll, grad, info) = model.derivatives(&beta)?;
+        let MultinomDerivatives { ll, grad, info, .. } = match at_beta.take() {
+            Some(known) => known,
+            None => model.derivatives(&beta)?,
+        };
         let (d, lambda2) = equilibrated_newton_step(&info, &grad, what, &mut warnings)?;
         drop(info);
         let dev = -2.0 * ll;
@@ -359,14 +370,18 @@ pub fn run_multinom(
             // The last full step, then one more from the new point: with 35 parameters
             // (disc_multinom_mn8) one step leaves the iterate 5e-10 off the optimum.
             let full = trial(1.0);
-            if model.log_likelihood(&full)? >= ll - 1e-12 * ll.abs() {
+            let at_full = model.derivatives(&full)?;
+            if at_full.ll >= ll - 1e-12 * ll.abs() {
                 beta = full;
-                let (ll2, g2, i2) = model.derivatives(&beta)?;
-                let (d2, _) = equilibrated_newton_step(&i2, &g2, what, &mut warnings)?;
-                drop(i2);
+                let (d2, _) =
+                    equilibrated_newton_step(&at_full.info, &at_full.grad, what, &mut warnings)?;
                 let polish: Vec<f64> = beta.iter().zip(&d2).map(|(b, s)| b + s).collect();
-                if model.log_likelihood(&polish)? >= ll2 - 1e-12 * ll2.abs() {
+                let at_polish = model.derivatives(&polish)?;
+                if at_polish.ll >= at_full.ll - 1e-12 * at_full.ll.abs() {
                     beta = polish;
+                    at_beta = Some(at_polish);
+                } else {
+                    at_beta = Some(at_full);
                 }
             }
             converged = true;
@@ -374,15 +389,22 @@ pub fn run_multinom(
         }
         let mut t = 1.0;
         let mut accepted = None;
-        for _ in 0..=MAX_HALVINGS {
+        for h in 0..=MAX_HALVINGS {
             let cand = trial(t);
-            if model.log_likelihood(&cand)? > ll {
-                accepted = Some(cand);
+            if h == 0 {
+                // The full step, usually accepted: its derivatives serve the next iteration.
+                let at_cand = model.derivatives(&cand)?;
+                if at_cand.ll > ll {
+                    accepted = Some((cand, Some(at_cand)));
+                    break;
+                }
+            } else if model.log_likelihood(&cand)? > ll {
+                accepted = Some((cand, None));
                 break;
             }
             t *= 0.5;
         }
-        let Some(cand) = accepted else {
+        let Some((cand, at_cand)) = accepted else {
             warnings.push(format!(
                 "line search failed at iteration {}: no step along the Newton direction \
                  increases the log-likelihood; the estimates are not at the optimum",
@@ -391,17 +413,26 @@ pub fn run_multinom(
             break;
         };
         beta = cand;
+        at_beta = at_cand;
         iterations += 1;
     }
 
-    let (log_likelihood, _, info_final) = model.derivatives(&beta)?;
+    let MultinomDerivatives {
+        ll: log_likelihood,
+        info: info_final,
+        n_extreme,
+        ..
+    } = match at_beta.take() {
+        Some(known) => known,
+        None => model.derivatives(&beta)?,
+    };
 
     // Separation: the fitted probability of some observation's own category numerically
     // 0 or 1 (glm.fit's rule; in the binary case the two probabilities are each other's
     // complement). A small probability of a category the observation did not choose is
     // an ordinary tail (disc_multinom_sep5). No MLE exists under separation, so the fit
-    // is reported as not converged even when the decrement rule was met.
-    let n_extreme = model.extreme_probabilities(&beta)?;
+    // is reported as not converged even when the decrement rule was met. The count comes
+    // from the pass of the final derivatives.
     let separation = n_extreme > 0;
     if separation {
         warnings.push(format!(
@@ -557,8 +588,12 @@ impl MultinomModel<'_> {
     }
 
     /// Log-likelihood, score `X'(Y - P)` and information
-    /// `sum_i (diag(p_i) - p_i p_i') (x) x_i x_i'` (non-reference categories).
-    fn derivatives(&self, beta: &[f64]) -> EconResult<(f64, Array1<f64>, Array2<f64>)> {
+    /// `sum_i (diag(p_i) - p_i p_i') (x) x_i x_i'` (non-reference categories), and the
+    /// observations whose fitted probability of their own category is within `10 eps` of
+    /// 0 or 1, in one pass.
+    fn derivatives(&self, beta: &[f64]) -> EconResult<MultinomDerivatives> {
+        let eps10 = 10.0 * f64::EPSILON;
+        let mut n_extreme = 0;
         let k = self.x.ncols();
         let m = self.n_cats * k;
         let mut xb = vec![0.0; self.n_cats];
@@ -566,12 +601,21 @@ impl MultinomModel<'_> {
         let mut ll = 0.0;
         let mut grad = Array1::<f64>::zeros(m);
         let mut info = resource::try_zeros2(m, m, "multinomial logit Hessian")?;
+        // The information row by row: the same sums in the same order as indexing it,
+        // without the per-element index checks.
+        let Some(inf) = info.as_slice_mut() else {
+            return Err(EconError::Computation(
+                "multinomial logit: information matrix not in standard layout".into(),
+            ));
+        };
         for (i, &y) in self.y_idx.iter().enumerate() {
             if i % 256 == 0 {
                 resource::checkpoint()?;
             }
             let lse = self.row_probs(beta, i, &mut xb, &mut probs);
             ll += if y == 0 { 0.0 } else { xb[y - 1] } - lse;
+            let p_own = probs[y];
+            n_extreme += usize::from(p_own < eps10 || p_own > 1.0 - eps10);
             let row = self.x.row(i);
             for c in 0..self.n_cats {
                 let pc = probs[c + 1];
@@ -591,8 +635,10 @@ impl MultinomModel<'_> {
                     for kk in 0..k {
                         let wx = w * row[kk];
                         let l0 = if c == c2 { kk } else { 0 };
-                        for ll_ in l0..k {
-                            info[[c * k + kk, c2 * k + ll_]] += wx * row[ll_];
+                        let at = (c * k + kk) * m + c2 * k;
+                        for (cell, &xl) in inf[at + l0..at + k].iter_mut().zip(row.iter().skip(l0))
+                        {
+                            *cell += wx * xl;
                         }
                     }
                 }
@@ -604,26 +650,23 @@ impl MultinomModel<'_> {
                 info[[b, a]] = info[[a, b]];
             }
         }
-        Ok((ll, grad, info))
+        Ok(MultinomDerivatives {
+            ll,
+            grad,
+            info,
+            n_extreme,
+        })
     }
+}
 
+/// What [`MultinomModel::derivatives`] computes at one `beta`.
+struct MultinomDerivatives {
+    ll: f64,
+    grad: Array1<f64>,
+    info: Array2<f64>,
     /// Observations whose fitted probability of their own category is within `10 eps` of
     /// 0 or 1.
-    fn extreme_probabilities(&self, beta: &[f64]) -> EconResult<usize> {
-        let eps10 = 10.0 * f64::EPSILON;
-        let mut xb = vec![0.0; self.n_cats];
-        let mut probs = vec![0.0; self.n_cats + 1];
-        let mut count = 0;
-        for (i, &y) in self.y_idx.iter().enumerate() {
-            if i % 256 == 0 {
-                resource::checkpoint()?;
-            }
-            self.row_probs(beta, i, &mut xb, &mut probs);
-            let p = probs[y];
-            count += usize::from(p < eps10 || p > 1.0 - eps10);
-        }
-        Ok(count)
-    }
+    n_extreme: usize,
 }
 
 #[cfg(test)]

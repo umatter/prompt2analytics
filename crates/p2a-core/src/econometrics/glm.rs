@@ -7,8 +7,11 @@
 //! weights, offsets and start values, by Fisher scoring as R's `stats::glm.fit` (R 4.3.3):
 //! the same family and link functions (including R's clamps of the logit, probit,
 //! cloglog and log inverse links), `mustart`, step halving on a non-finite deviance or
-//! invalid fitted values, and R's warning texts. Each IRLS step is solved by the pivoted
-//! QR of [`crate::linalg::solve::Qr`]; aliased columns get `NaN` coefficients and SEs.
+//! invalid fitted values, and R's warning texts. Each IRLS step takes OLS's solve decision
+//! on the weighted design: the normal equations when it is of full rank and well
+//! conditioned (reciprocal condition of the equilibrated `X'WX` at least 1e-8, refined
+//! once below 1e-2), otherwise the pivoted QR of [`crate::linalg::solve::Qr`], which
+//! decides the rank; aliased columns get `NaN` coefficients and SEs.
 //! Standard errors and dispersion follow `summary.glm`, AIC and the log-likelihood
 //! `family$aic` and `logLik.glm`, and the null deviance `glm()` (refitted when the model
 //! has an offset and an intercept).
@@ -55,9 +58,10 @@
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::Qr;
+use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, relative_change_vec};
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
@@ -307,14 +311,15 @@ impl GlmFamily {
     }
 
     fn valid_mu(self, mu: &Array1<f64>) -> bool {
+        mu.iter().all(|&m| self.valid_mu_one(m))
+    }
+
+    /// `family$validmu` for one fitted value.
+    fn valid_mu_one(self, m: f64) -> bool {
         match self {
             GlmFamily::Gaussian => true,
-            GlmFamily::Binomial | GlmFamily::QuasiBinomial => {
-                mu.iter().all(|&m| m.is_finite() && m > 0.0 && m < 1.0)
-            }
-            GlmFamily::Poisson | GlmFamily::QuasiPoisson => {
-                mu.iter().all(|&m| m.is_finite() && m > 0.0)
-            }
+            GlmFamily::Binomial | GlmFamily::QuasiBinomial => m.is_finite() && m > 0.0 && m < 1.0,
+            GlmFamily::Poisson | GlmFamily::QuasiPoisson => m.is_finite() && m > 0.0,
         }
     }
 }
@@ -349,6 +354,28 @@ impl GlmLink {
         }
     }
 
+    /// `(linkinv(eta), mu_eta(eta))`, sharing `exp(eta)` for the logit and log links.
+    fn inv_and_deriv(self, eta: f64) -> (f64, f64) {
+        match self {
+            GlmLink::Logit => {
+                if eta < -LOGIT_THRESH {
+                    (EPS / (1.0 + EPS), EPS)
+                } else if eta > LOGIT_THRESH {
+                    let t = 1.0 / EPS;
+                    (t / (1.0 + t), EPS)
+                } else {
+                    let t = eta.exp();
+                    (t / (1.0 + t), t / ((1.0 + t) * (1.0 + t)))
+                }
+            }
+            GlmLink::Log => {
+                let m = eta.exp().max(EPS);
+                (m, m)
+            }
+            link => (link.linkinv(eta), link.mu_eta(eta)),
+        }
+    }
+
     fn mu_eta(self, eta: f64) -> f64 {
         match self {
             GlmLink::Identity => 1.0,
@@ -370,10 +397,63 @@ impl GlmLink {
     }
 }
 
+/// Values of a pure function of a few `f64` arguments (keyed by their bits), for loops
+/// over rows that take few distinct argument values: up to [`MEMO_SLOTS`] are kept, the
+/// rest are computed each time.
+struct Memo<V: Copy> {
+    keys: [[u64; 3]; MEMO_SLOTS],
+    values: [Option<V>; MEMO_SLOTS],
+    len: usize,
+}
+
+/// Entries of a [`Memo`].
+const MEMO_SLOTS: usize = 8;
+
+impl<V: Copy> Default for Memo<V> {
+    fn default() -> Self {
+        Self {
+            keys: [[0; 3]; MEMO_SLOTS],
+            values: [None; MEMO_SLOTS],
+            len: 0,
+        }
+    }
+}
+
+impl<V: Copy> Memo<V> {
+    fn get_or(&mut self, key: [u64; 3], f: impl FnOnce() -> V) -> V {
+        for k in 0..self.len {
+            if self.keys[k] == key
+                && let Some(v) = self.values[k]
+            {
+                return v;
+            }
+        }
+        let v = f();
+        if self.len < MEMO_SLOTS {
+            self.keys[self.len] = key;
+            self.values[self.len] = Some(v);
+            self.len += 1;
+        }
+        v
+    }
+}
+
 /// How IRLS starts: from `start` coefficients, or from `mustart`.
 enum Init<'a> {
     Start(ArrayView1<'a, f64>),
     Mustart(Array1<f64>),
+}
+
+/// How one IRLS step was solved: OLS's decision
+/// ([`crate::regression::ols::normal_equations_inverse`], from the `X'WX` the step
+/// accumulates) on the weighted design.
+enum StepSolve {
+    /// `(X'WX)^{-1}` of a full-rank, well-conditioned weighted design (the normal
+    /// equations, refined once when the conditioning asks for it).
+    Normal(Array2<f64>),
+    /// The pivoted QR (`lm.fit`'s `dqrdc2` at [`GLM_QR_TOL`]): rank-deficient or
+    /// ill-conditioned weighted designs.
+    Qr(Qr),
 }
 
 /// The state IRLS leaves behind.
@@ -382,8 +462,8 @@ struct Irls {
     eta: Array1<f64>,
     mu: Array1<f64>,
     dev: f64,
-    /// QR of the last step; `None` for the empty model.
-    qr: Option<Qr>,
+    /// Solve of the last step; `None` for the empty model.
+    solve: Option<StepSolve>,
     /// Working weights `w^2` of the last step (0 for rows not used).
     working_weights: Array1<f64>,
     converged: bool,
@@ -405,11 +485,68 @@ struct Problem<'a> {
     /// Floor of the convergence denominator: 0.1 * D0 / n_ok (0.1 when that is 0 or not
     /// finite).
     floor: f64,
+    /// Solve every step by the pivoted QR (the equivalence tests of the two paths).
+    force_qr: bool,
 }
 
 impl Problem<'_> {
     fn linkinv(&self, eta: &Array1<f64>) -> Array1<f64> {
         eta.mapv(|e| self.link.linkinv(e))
+    }
+
+    /// The fit at coefficients `b`, in place: `eta = X b + offset`, `mu = linkinv(eta)`,
+    /// `mu.eta(eta)`, and the deviance and whether every `mu` is valid. The values are, bit
+    /// for bit, those of `x.dot(b) + offset` (the same matrix-vector product, written into
+    /// `eta`), `linkinv`, `mu_eta`, [`Self::deviance`] and [`Self::valid`], without
+    /// allocating.
+    fn update(
+        &self,
+        x: &ArrayView2<f64>,
+        b: &Array1<f64>,
+        eta: &mut Array1<f64>,
+        mu: &mut Array1<f64>,
+        mu_eta: &mut Array1<f64>,
+    ) -> (f64, bool) {
+        ndarray::linalg::general_mat_vec_mul(1.0, x, b, 0.0, eta);
+        for (e, o) in eta.iter_mut().zip(self.offset) {
+            *e += o;
+        }
+        let link = self.link;
+        for ((m, d), &e) in mu.iter_mut().zip(mu_eta.iter_mut()).zip(eta.iter()) {
+            (*m, *d) = link.inv_and_deriv(e);
+        }
+        let dev = self.deviance(mu);
+        (dev, self.valid(mu))
+    }
+
+    /// The IRLS start from `mustart`: `eta = linkfun(mustart)`, `mu`, `mu.eta` and the
+    /// deviance. Each row's values depend only on its (`mustart`, `y`, weight); a binary
+    /// or count response takes few such triples, so they are computed once per triple
+    /// (a small cache; the values and the deviance sum are the ones the row-by-row
+    /// computation gives, bit for bit).
+    fn start_from_mustart(
+        &self,
+        mustart: &Array1<f64>,
+    ) -> (Array1<f64>, Array1<f64>, Array1<f64>, f64) {
+        let n = mustart.len();
+        let mut eta = Array1::zeros(n);
+        let mut mu = Array1::zeros(n);
+        let mut mu_eta = Array1::zeros(n);
+        let mut memo: Memo<[f64; 4]> = Memo::default();
+        let mut dev = Vec::with_capacity(n);
+        for i in 0..n {
+            let (m, y, w) = (mustart[i], self.y[i], self.w[i]);
+            let [e, mi, d, r] = memo.get_or([m.to_bits(), y.to_bits(), w.to_bits()], || {
+                let e = self.link.linkfun(m);
+                let (mi, d) = self.link.inv_and_deriv(e);
+                [e, mi, d, self.family.dev_resid(y, mi, w)]
+            });
+            eta[i] = e;
+            mu[i] = mi;
+            mu_eta[i] = d;
+            dev.push(r);
+        }
+        (eta, mu, mu_eta, dev.into_iter().sum())
     }
 
     fn deviance(&self, mu: &Array1<f64>) -> f64 {
@@ -441,14 +578,6 @@ impl Problem<'_> {
     }
 
     /// `x b + offset`.
-    fn eta(&self, x: &ArrayView2<f64>, b: &Array1<f64>) -> Array1<f64> {
-        let mut eta = x.dot(b);
-        for (e, o) in eta.iter_mut().zip(self.offset) {
-            *e += o;
-        }
-        eta
-    }
-
     fn no_valid_coefficients(iteration: usize) -> EconError {
         EconError::DivergenceError {
             iteration,
@@ -483,54 +612,96 @@ impl Problem<'_> {
                 eta,
                 mu,
                 dev,
-                qr: None,
+                solve: None,
                 working_weights,
                 converged: true,
                 boundary: false,
                 iterations: 0,
             });
         }
-        let (mut eta, mut coefold) = match init {
+        let (mut eta, mut mu, mut mu_eta, mut coefold, start_dev, start_valid) = match init {
             Init::Start(s) => {
                 let s = s.to_owned();
-                (self.eta(&x, &s), Some(s))
+                let (mut eta, mut mu, mut mu_eta) =
+                    (Array1::zeros(n), Array1::zeros(n), Array1::zeros(n));
+                let (dev, valid) = self.update(&x, &s, &mut eta, &mut mu, &mut mu_eta);
+                (eta, mu, mu_eta, Some(s), dev, valid)
             }
-            Init::Mustart(m) => (m.mapv(|v| self.link.linkfun(v)), None),
+            Init::Mustart(m) => {
+                let (eta, mu, mu_eta, dev) = self.start_from_mustart(&m);
+                let valid = self.valid(&mu);
+                (eta, mu, mu_eta, None, dev, valid)
+            }
         };
-        let mut mu = self.linkinv(&eta);
-        if !self.valid(&mu) {
+        if !start_valid {
             return Err(spec_err(
                 "cannot find valid starting values: please specify some".into(),
             ));
         }
-        let mut devold = self.deviance(&mu);
+        let mut devold = start_dev;
         let mut start = coefold.clone().unwrap_or_else(|| Array1::zeros(p));
         let mut converged = false;
         let mut boundary = false;
         let mut prev_change = f64::INFINITY;
-        let mut last_qr = None;
+        let mut last_solve = None;
         let mut working_weights = Array1::zeros(n);
         let mut iterations = 0;
+        // Workspaces of every iteration, sized for all rows: the informative rows, their
+        // square-root working weights and their weighted working response. The weighted
+        // design itself is formed only when a step needs its rows (the refinement or the
+        // QR), from these (the same products, bit for bit).
+        let mut zw = resource::try_zeros1(n, "glm IRLS workspace")?;
+        let mut wt = resource::try_vec(n, 0.0, "glm IRLS workspace")?;
+        let mut good = resource::try_vec(n, 0usize, "glm IRLS workspace")?;
+        let gram_len = resource::checked_len(&[p, p], "glm IRLS workspace")?;
+        let mut gram = resource::try_vec(gram_len, 0.0, "glm IRLS workspace")?;
+        let mut xtwz = Array1::<f64>::zeros(p);
+        let mut row = vec![0.0; p];
+        // Informative rows of the last step (its working weights are those of the fit).
+        let mut ng_last = 0;
         for iter in 1..=self.max_iter {
             resource::checkpoint()?;
             iterations = iter;
-            let mut mu_eta = Array1::zeros(n);
+            // V(mu) of the rows with positive weight, checked in row order, and the working
+            // response and weights of the informative rows (positive weight, mu.eta != 0).
+            let mut ng = 0;
+            // X'WX (upper triangle, row-major) and X'Wz of the informative rows,
+            // accumulated in the same pass.
+            gram.fill(0.0);
+            xtwz.fill(0.0);
             for i in 0..n {
-                if self.w[i] > 0.0 {
-                    let v = self.family.variance(mu[i]);
-                    if !v.is_finite() {
-                        return Err(EconError::Computation("glm.fit: NAs in V(mu)".into()));
-                    }
-                    if v == 0.0 {
-                        return Err(EconError::Computation("glm.fit: 0s in V(mu)".into()));
+                let wi = self.w[i];
+                if wi <= 0.0 {
+                    continue;
+                }
+                let v = self.family.variance(mu[i]);
+                if !v.is_finite() {
+                    return Err(EconError::Computation("glm.fit: NAs in V(mu)".into()));
+                }
+                if v == 0.0 {
+                    return Err(EconError::Computation("glm.fit: 0s in V(mu)".into()));
+                }
+                let d = mu_eta[i];
+                if d == 0.0 {
+                    continue;
+                }
+                let z = eta[i] - self.offset[i] + (self.y[i] - mu[i]) / d;
+                let wk = (wi * d * d / v).sqrt();
+                good[ng] = i;
+                wt[ng] = wk;
+                let zk = z * wk;
+                zw[ng] = zk;
+                for (j, c) in row.iter_mut().enumerate() {
+                    *c = x[[i, j]] * wk;
+                }
+                for (a, &ra) in row.iter().enumerate() {
+                    xtwz[a] += ra * zk;
+                    for (g, &rb) in gram[a * p + a..(a + 1) * p].iter_mut().zip(&row[a..]) {
+                        *g += ra * rb;
                     }
                 }
-                mu_eta[i] = self.link.mu_eta(eta[i]);
+                ng += 1;
             }
-            let good: Vec<usize> = (0..n)
-                .filter(|&i| self.w[i] > 0.0 && mu_eta[i] != 0.0)
-                .collect();
-            let ng = good.len();
             if ng == 0 {
                 return Err(EconError::InsufficientData {
                     required: 1,
@@ -538,30 +709,73 @@ impl Problem<'_> {
                     context: format!("glm: no observations informative at iteration {iter}"),
                 });
             }
-            let len = resource::checked_len(&[p, ng], "glm IRLS workspace")?;
-            let mut cols = resource::try_vec(len, 0.0, "glm IRLS workspace")?;
-            let mut zw = resource::try_zeros1(ng, "glm IRLS workspace")?;
-            let mut wt = resource::try_zeros1(ng, "glm IRLS workspace")?;
-            for (k, &i) in good.iter().enumerate() {
-                let d = mu_eta[i];
-                let z = eta[i] - self.offset[i] + (self.y[i] - mu[i]) / d;
-                let wk = (self.w[i] * d * d / self.family.variance(mu[i])).sqrt();
-                wt[k] = wk;
-                zw[k] = z * wk;
-                for j in 0..p {
-                    cols[j * ng + k] = x[[i, j]] * wk;
+            ng_last = ng;
+            // The weighted design of the informative rows (`ng x p`, row-major).
+            let weighted_rows = || -> EconResult<Vec<f64>> {
+                let len = resource::checked_len(&[p, ng], "glm IRLS workspace")?;
+                let mut xw = resource::try_vec(len, 0.0, "glm IRLS workspace")?;
+                for ((r, &i), &wk) in xw.chunks_exact_mut(p).zip(&good[..ng]).zip(&wt[..ng]) {
+                    for (c, &xv) in r.iter_mut().zip(x.row(i)) {
+                        *c = xv * wk;
+                    }
+                }
+                Ok(xw)
+            };
+            let zw_good = zw.slice(ndarray::s![..ng]);
+            // OLS's solve decision on the weighted design: the normal equations when it is
+            // of full rank and well conditioned, the pivoted QR otherwise.
+            for a in 0..p {
+                for b in (a + 1)..p {
+                    gram[b * p + a] = gram[a * p + b];
                 }
             }
-            let qr = Qr::from_columns(cols, ng, p, GLM_QR_TOL).map_err(|e| match e {
-                EconError::InvalidSpecification { .. } => EconError::DivergenceError {
-                    iteration: iter,
-                    suggestion: "glm.fit: non-finite working weights or responses; supply \
-                                 starting values or check for separation"
-                        .into(),
-                },
-                other => other,
-            })?;
-            let b = qr.coefficients_zeroed(zw.view())?;
+            let normal = if self.force_qr || ng <= p || gram.iter().any(|v| !v.is_finite()) {
+                None
+            } else {
+                let g = ArrayView2::from_shape((p, p), &gram[..])
+                    .map_err(|e| EconError::Computation(format!("glm IRLS workspace: {e}")))?;
+                match normal_inverse_from_gram(g)? {
+                    Some(ni) => {
+                        let mut b = ni.inverse.dot(&xtwz);
+                        if ni.refine {
+                            // OLS's refinement step: b += (X'WX)^{-1} X'W (z - X b)
+                            let xw_rows = weighted_rows()?;
+                            let xw =
+                                ArrayView2::from_shape((ng, p), &xw_rows[..]).map_err(|e| {
+                                    EconError::Computation(format!("glm IRLS workspace: {e}"))
+                                })?;
+                            let r = &zw_good - &xw.dot(&b);
+                            b += &ni.inverse.dot(&xw.t().dot(&r));
+                        }
+                        Some((b, ni.inverse))
+                    }
+                    None => None,
+                }
+            };
+            let (b, solve) = match normal {
+                Some((b, inverse)) => (b, StepSolve::Normal(inverse)),
+                None => {
+                    let len = resource::checked_len(&[p, ng], "glm IRLS workspace")?;
+                    let mut by_column = resource::try_vec(len, 0.0, "glm IRLS workspace")?;
+                    for (k, r) in weighted_rows()?.chunks_exact(p).enumerate() {
+                        for (j, &v) in r.iter().enumerate() {
+                            by_column[j * ng + k] = v;
+                        }
+                    }
+                    let qr =
+                        Qr::from_columns(by_column, ng, p, GLM_QR_TOL).map_err(|e| match e {
+                            EconError::InvalidSpecification { .. } => EconError::DivergenceError {
+                                iteration: iter,
+                                suggestion: "glm.fit: non-finite working weights or \
+                                             responses; supply starting values or check for \
+                                             separation"
+                                    .into(),
+                            },
+                            other => other,
+                        })?;
+                    (qr.coefficients_zeroed(zw_good)?, StepSolve::Qr(qr))
+                }
+            };
             if !b.iter().all(|v| v.is_finite()) {
                 return Err(EconError::DivergenceError {
                     iteration: iter,
@@ -570,15 +784,9 @@ impl Problem<'_> {
                         .into(),
                 });
             }
-            working_weights.fill(0.0);
-            for (k, &i) in good.iter().enumerate() {
-                working_weights[i] = wt[k] * wt[k];
-            }
-            last_qr = Some(qr);
+            last_solve = Some(solve);
             start = b;
-            eta = self.eta(&x, &start);
-            mu = self.linkinv(&eta);
-            let mut dev = self.deviance(&mu);
+            let (mut dev, mut valid) = self.update(&x, &start, &mut eta, &mut mu, &mut mu_eta);
             boundary = false;
             if !dev.is_finite() {
                 let Some(old) = &coefold else {
@@ -595,19 +803,17 @@ impl Problem<'_> {
                     }
                     ii += 1;
                     start = (&start + old) / 2.0;
-                    eta = self.eta(&x, &start);
-                    mu = self.linkinv(&eta);
-                    dev = self.deviance(&mu);
+                    (dev, valid) = self.update(&x, &start, &mut eta, &mut mu, &mut mu_eta);
                 }
                 boundary = true;
             }
-            if !self.valid(&mu) {
+            if !valid {
                 let Some(old) = &coefold else {
                     return Err(Self::no_valid_coefficients(iter));
                 };
                 warnings.push("step size truncated: out of bounds".into());
                 let mut ii = 1;
-                while !self.valid(&mu) {
+                while !valid {
                     if ii > self.max_iter {
                         return Err(EconError::DivergenceError {
                             iteration: iter,
@@ -616,11 +822,9 @@ impl Problem<'_> {
                     }
                     ii += 1;
                     start = (&start + old) / 2.0;
-                    eta = self.eta(&x, &start);
-                    mu = self.linkinv(&eta);
+                    (dev, valid) = self.update(&x, &start, &mut eta, &mut mu, &mut mu_eta);
                 }
                 boundary = true;
-                dev = self.deviance(&mu);
             }
             if (dev - devold).abs() / (dev.abs() + self.floor) < self.epsilon {
                 converged = true;
@@ -648,12 +852,15 @@ impl Problem<'_> {
             devold = dev;
             coefold = Some(start.clone());
         }
+        for (&i, &wk) in good[..ng_last].iter().zip(&wt[..ng_last]) {
+            working_weights[i] = wk * wk;
+        }
         Ok(Irls {
             coef: start,
             eta,
             mu,
             dev: devold,
-            qr: last_qr,
+            solve: last_solve,
             working_weights,
             converged,
             boundary,
@@ -705,6 +912,17 @@ fn ldbinom(k: f64, s: f64, p: f64) -> f64 {
 /// coefficients, or a divergence that step halving cannot correct, are
 /// [`EconError::DivergenceError`]. See the module documentation for the conventions.
 pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> EconResult<GlmFit> {
+    fit_glm_solved(x, y, spec, false).map(|(fit, _)| fit)
+}
+
+/// [`fit_glm`], and whether its last IRLS step took the normal equations (`true`) or the
+/// pivoted QR; `force_qr` solves every step by the QR.
+fn fit_glm_solved(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    spec: &GlmSpec<'_>,
+    force_qr: bool,
+) -> EconResult<(GlmFit, bool)> {
     let (n, p) = x.dim();
     check_len("y", y.len(), n)?;
     if let Some(o) = &spec.offset {
@@ -721,11 +939,14 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
             s.len()
         )));
     }
-    for (j, col) in x.columns().into_iter().enumerate() {
-        if let Some(i) = col.iter().position(|v| !v.is_finite()) {
-            return Err(spec_err(format!(
-                "x contains a non-finite value (row {i}, column {j})"
-            )));
+    // One pass in memory order; the column scan only names the first offending cell.
+    if !x.iter().all(|v| v.is_finite()) {
+        for (j, col) in x.columns().into_iter().enumerate() {
+            if let Some(i) = col.iter().position(|v| !v.is_finite()) {
+                return Err(spec_err(format!(
+                    "x contains a non-finite value (row {i}, column {j})"
+                )));
+            }
         }
     }
     check_finite("y", &y)?;
@@ -819,9 +1040,15 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
     // Convergence floor: 0.1 * (deviance of the weighted mean) per informative row.
     let sw: f64 = w.iter().sum();
     let ybar = (0..n).map(|i| w[i] * yv[i]).sum::<f64>() / sw;
+    // dev_resid(y, ybar, w) depends on (y, w) only: computed once per distinct pair.
+    let mut memo: Memo<f64> = Memo::default();
     let d0: f64 = (0..n)
         .filter(|&i| w[i] > 0.0)
-        .map(|i| family.dev_resid(yv[i], ybar, w[i]))
+        .map(|i| {
+            memo.get_or([yv[i].to_bits(), w[i].to_bits(), 0], || {
+                family.dev_resid(yv[i], ybar, w[i])
+            })
+        })
         .sum();
     let per = d0 / n_ok as f64;
     let floor = if per.is_finite() && per > 0.0 {
@@ -840,6 +1067,7 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
         max_iter: spec.max_iter,
         coef_tol: spec.coef_tol,
         floor,
+        force_qr,
     };
     let init = match &spec.start {
         Some(s) => Init::Start(*s),
@@ -863,8 +1091,9 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
         warnings.push("glm.fit: fitted rates numerically 0 occurred".into());
     }
 
-    let (rank, aliased, unscaled) = match &fit.qr {
-        Some(qr) => (qr.rank(), qr.aliased(), qr.unscaled_covariance()?),
+    let (rank, aliased, unscaled) = match &fit.solve {
+        Some(StepSolve::Qr(qr)) => (qr.rank(), qr.aliased(), qr.unscaled_covariance()?),
+        Some(StepSolve::Normal(inverse)) => (p, Vec::new(), inverse.clone()),
         None => (0, Vec::new(), Array2::zeros((0, 0))),
     };
     let mut coefficients = fit.coef.clone();
@@ -913,6 +1142,9 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
             }
             refit.dev
         }
+        // Every weight positive: the deviance of the weighted mean is `d0`, the same sum
+        // over the same rows.
+        Some(_) if n_ok == n => d0,
         Some(_) => {
             let wtdmu = (0..n).map(|i| w[i] * yv[i]).sum::<f64>() / sw;
             (0..n).map(|i| family.dev_resid(yv[i], wtdmu, w[i])).sum()
@@ -980,7 +1212,8 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
 
     let mut seen = std::collections::HashSet::new();
     warnings.retain(|m| seen.insert(m.clone()));
-    Ok(GlmFit {
+    let normal_path = matches!(fit.solve, Some(StepSolve::Normal(_)));
+    let fit_out = GlmFit {
         coefficients,
         std_errors,
         vcov,
@@ -1002,7 +1235,8 @@ pub fn fit_glm(x: ArrayView2<f64>, y: ArrayView1<f64>, spec: &GlmSpec<'_>) -> Ec
         boundary: fit.boundary,
         separation,
         warnings,
-    })
+    };
+    Ok((fit_out, normal_path))
 }
 
 impl ResultNotes for GlmFit {
@@ -1815,5 +2049,221 @@ mod tests {
             (back.rank, back.aliased.clone(), back.iterations),
             (fit.rank, fit.aliased.clone(), fit.iterations)
         );
+    }
+
+    /// The fused inverse link and derivative of the logit and log links are, bit for bit,
+    /// `linkinv` and `mu_eta`, at the clamps and between them.
+    #[test]
+    fn test_glm_inv_and_deriv_match_separate_link_functions() {
+        let mut etas = vec![-LOGIT_THRESH, LOGIT_THRESH, -800.0, 800.0, 0.0, -0.0];
+        etas.extend((0..4001).map(|i| -40.0 + 0.02 * i as f64 + 1e-3 * ((i * 37 % 11) as f64)));
+        for link in [
+            GlmLink::Logit,
+            GlmLink::Log,
+            GlmLink::Probit,
+            GlmLink::Cloglog,
+        ] {
+            for &e in &etas {
+                let (m, d) = link.inv_and_deriv(e);
+                assert_eq!(
+                    (m.to_bits(), d.to_bits()),
+                    (link.linkinv(e).to_bits(), link.mu_eta(e).to_bits()),
+                    "{link:?} at {e}"
+                );
+            }
+        }
+    }
+
+    /// The relative gap of `a` from `b` (absolute below 1).
+    fn rel_gap(a: f64, b: f64) -> f64 {
+        if a == b {
+            return 0.0;
+        }
+        (a - b).abs() / b.abs().max(1.0)
+    }
+
+    fn assert_fits_agree(key: &str, a: &GlmFit, b: &GlmFit, tol: f64) {
+        assert_eq!(
+            (a.rank, &a.aliased, a.iterations, a.converged),
+            (b.rank, &b.aliased, b.iterations, b.converged),
+            "{key}"
+        );
+        let pairs = a
+            .coefficients
+            .iter()
+            .zip(&b.coefficients)
+            .chain(a.std_errors.iter().zip(&b.std_errors))
+            .chain(a.vcov.iter().zip(&b.vcov))
+            .chain(a.fitted.iter().zip(&b.fitted))
+            .chain(a.working_weights.iter().zip(&b.working_weights));
+        for (x, y) in pairs {
+            if x.is_nan() && y.is_nan() {
+                continue;
+            }
+            assert!(rel_gap(*x, *y) <= tol, "{key}: {x} vs {y}");
+        }
+        for (x, y) in [
+            (a.deviance, b.deviance),
+            (a.null_deviance, b.null_deviance),
+            (a.dispersion, b.dispersion),
+            (a.aic, b.aic),
+            (a.log_likelihood, b.log_likelihood),
+        ] {
+            if x.is_nan() && y.is_nan() {
+                continue;
+            }
+            assert!(rel_gap(x, y) <= tol, "{key}: {x} vs {y}");
+        }
+    }
+
+    /// A deterministic noisy design (intercept and three regressors) with binary, count
+    /// and positive responses, an offset and weights (every 13th weight 0).
+    struct SimData {
+        x: Array2<f64>,
+        yb: Array1<f64>,
+        yc: Array1<f64>,
+        yg: Array1<f64>,
+        offset: Array1<f64>,
+        weights: Array1<f64>,
+    }
+
+    fn sim_data(n: usize, seed: u64) -> SimData {
+        let mut state = seed;
+        let mut u = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut x = Array2::<f64>::zeros((n, 4));
+        for i in 0..n {
+            x[[i, 0]] = 1.0;
+            for j in 1..4 {
+                x[[i, j]] = 2.0 * u() - 1.0 + 0.3 * j as f64;
+            }
+        }
+        let eta: Vec<f64> = (0..n)
+            .map(|i| 0.2 + 0.8 * x[[i, 1]] - 0.5 * x[[i, 2]] + 0.3 * x[[i, 3]])
+            .collect();
+        let yb = eta
+            .iter()
+            .map(|&e| f64::from(u() < 1.0 / (1.0 + (-e).exp())))
+            .collect();
+        let yc = eta.iter().map(|&e| (e.exp() * 2.0 * u()).floor()).collect();
+        let yg = eta.iter().map(|&e| e.exp() + 0.3 * u()).collect();
+        let offset = (0..n).map(|_| 0.1 * u()).collect();
+        let weights = (0..n)
+            .map(|i| if i % 13 == 0 { 0.0 } else { 0.5 + u() })
+            .collect();
+        SimData {
+            x,
+            yb,
+            yc,
+            yg,
+            offset,
+            weights,
+        }
+    }
+
+    /// The IRLS step takes OLS's solve decision: on every family and link (noisy data,
+    /// offsets and weights included) the last step is a normal-equations solve, and the
+    /// fit equals the one whose every step is the pivoted QR to 1e-10 relative.
+    #[test]
+    fn test_glm_normal_equations_match_qr() {
+        use GlmFamily as F;
+        use GlmLink as L;
+        for (n, seed) in [(60, 3), (500, 11), (3000, 29)] {
+            let d = sim_data(n, seed);
+            let cases: [(&str, F, L, &Array1<f64>, bool, bool); 12] = [
+                ("logit", F::Binomial, L::Logit, &d.yb, false, false),
+                ("probit", F::Binomial, L::Probit, &d.yb, false, false),
+                ("cloglog", F::Binomial, L::Cloglog, &d.yb, false, false),
+                (
+                    "logit offset weights",
+                    F::Binomial,
+                    L::Logit,
+                    &d.yb,
+                    true,
+                    true,
+                ),
+                (
+                    "quasibinomial",
+                    F::QuasiBinomial,
+                    L::Logit,
+                    &d.yb,
+                    false,
+                    true,
+                ),
+                ("poisson", F::Poisson, L::Log, &d.yc, false, false),
+                ("poisson offset", F::Poisson, L::Log, &d.yc, true, false),
+                ("poisson weights", F::Poisson, L::Log, &d.yc, false, true),
+                ("quasipoisson", F::QuasiPoisson, L::Log, &d.yc, false, false),
+                ("gaussian", F::Gaussian, L::Identity, &d.yg, false, false),
+                ("gaussian log", F::Gaussian, L::Log, &d.yg, true, false),
+                (
+                    "gaussian weights",
+                    F::Gaussian,
+                    L::Identity,
+                    &d.yg,
+                    false,
+                    true,
+                ),
+            ];
+            for (key, family, link, y, off, wts) in cases {
+                let mut spec = GlmSpec::new(family, link);
+                if off {
+                    spec = spec.offset(d.offset.view());
+                }
+                if wts {
+                    spec = spec.weights(d.weights.view());
+                }
+                let key = format!("{key}, n {n}");
+                let (normal, used_normal) =
+                    fit_glm_solved(d.x.view(), y.view(), &spec, false).unwrap();
+                let (qr, used_normal_qr) =
+                    fit_glm_solved(d.x.view(), y.view(), &spec, true).unwrap();
+                assert!(used_normal, "{key}: the normal equations were not used");
+                assert!(!used_normal_qr, "{key}");
+                assert_fits_agree(&key, &normal, &qr, 1e-10);
+            }
+        }
+    }
+
+    /// A full-rank but nearly collinear design (reciprocal condition of the equilibrated
+    /// X'WX far below 1e-8) still takes the pivoted QR, bit for bit the all-QR fit; an
+    /// exactly duplicated column is aliased as before.
+    #[test]
+    fn test_glm_near_collinear_design_takes_qr() {
+        let d = sim_data(400, 7);
+        let mut x = d.x.slice(ndarray::s![.., ..3]).to_owned();
+        let n = x.nrows();
+        let mut near = x.column(1).to_owned();
+        for (i, v) in near.iter_mut().enumerate() {
+            // x1 plus a deterministic perturbation of relative size 1e-7
+            *v += 1e-7 * ((i * 7919 % 101) as f64 / 101.0 - 0.5);
+        }
+        let mut xn = Array2::zeros((n, 4));
+        xn.slice_mut(ndarray::s![.., ..3]).assign(&x);
+        xn.column_mut(3).assign(&near);
+        for spec in [GlmSpec::logit(), GlmSpec::poisson()] {
+            let y = if spec.family == GlmFamily::Poisson {
+                &d.yc
+            } else {
+                &d.yb
+            };
+            let (fit, used_normal) = fit_glm_solved(xn.view(), y.view(), &spec, false).unwrap();
+            let (qr, _) = fit_glm_solved(xn.view(), y.view(), &spec, true).unwrap();
+            assert!(!used_normal, "a near-collinear design must take the QR");
+            assert_eq!(fit.rank, 4);
+            assert_fits_agree("near-collinear", &fit, &qr, 0.0);
+        }
+
+        let x1 = x.column(1).to_owned();
+        x.column_mut(2).assign(&x1);
+        let spec = GlmSpec::logit();
+        let (dup, used_normal) = fit_glm_solved(x.view(), d.yb.view(), &spec, false).unwrap();
+        assert!(!used_normal);
+        assert_eq!((dup.rank, dup.aliased.clone()), (2, vec![2]));
+        assert!(dup.coefficients[2].is_nan() && dup.std_errors[2].is_nan());
     }
 }
