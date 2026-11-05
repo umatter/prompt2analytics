@@ -1,8 +1,13 @@
 # Validation: Regression Standardization (G-computation) - stdReg
 
+Status: R-pinned (registry `validation/methods/causal_ctmle_stdreg.json`, method `causal_stdreg`).
+
 ## Method Overview
 
-Regression standardization (also called G-computation or the parametric g-formula for single time point) estimates causal effects by fitting an outcome model and averaging predictions under different treatment values over the covariate distribution.
+Regression standardization (G-computation, the parametric g-formula for a single time point)
+estimates causal effects by fitting an outcome model and averaging its predictions under
+A = 1 and A = 0 over the covariate distribution (all rows for the ATE, the treated for the
+ATT, the controls for the ATC).
 
 ## Mathematical Framework
 
@@ -31,142 +36,126 @@ ATC = E[Y(1) - Y(0) | A=0]
     = (1/n0) * sum_{i:A_i=0} [Y_hat_i(1) - Y_hat_i(0)]
 ```
 
-## Reference Implementation
+## Implementation
 
-**R package**: `stdReg` (Sjolander, 2016)
-- CRAN: https://cran.r-project.org/package=stdReg
-- Documentation: https://cran.r-project.org/web/packages/stdReg/stdReg.pdf
+`crates/p2a-core/src/econometrics/stdreg.rs`.
 
-**Alternative R packages**:
-- `margins` (Leeper, 2021): https://cran.r-project.org/package=margins
-- `Zelig` (Imai et al.): https://cran.r-project.org/package=Zelig
+- **Outcome models.** Linear: least squares (`regression::ols::solve_ols`; the pivoted QR of
+  `lm` when X'X is ill-conditioned). Logistic and Poisson: `econometrics::glm` (R's `glm.fit`)
+  with `StdRegConfig::tolerance` as `epsilon` and `max_iter` as `maxit` (defaults 1e-8 and
+  100). The logistic model refuses an outcome outside [0, 1]. Optional A x W interactions.
+- **Convergence.** Logistic and Poisson results carry `convergence` (the "Converged:" line of
+  Display and the `ResultNotes` block); a fit stopped by `max_iter` adds a "did not converge"
+  warning.
+- **Separation.** When fitted probabilities are numerically 0 or 1 (within 10 eps), glm's
+  warning "glm.fit: fitted probabilities numerically 0 or 1 occurred" is reported with a
+  sentence that counts the observations and says the maximum likelihood estimates do not
+  exist.
+- **Aliasing.** An aliased covariate gets a `NaN` coefficient (`null` in JSON) and the
+  warning "outcome model: Coefficients not defined because of singularities: <names>"; the
+  predictions use the identified columns (as `predict.lm` on estimable rows). An aliased
+  treatment, or an interaction `A:W_j` aliased while `W_j` is not, is an error: the
+  treatment effect is not identified.
+- **Standard errors.** The bootstrap (`n_bootstrap` replicates, each refitting the outcome
+  model; non-converged, separated and failed replicates are counted in warnings) is the
+  reference; its percentile intervals for the effect, risk ratio and odds ratio use R's type-7
+  quantiles of the finite draws (`stats::robust::percentile_interval`). The delta-method and
+  sandwich SEs are approximations on the treatment coefficient (CAUS-39, Tier 4), computed on
+  the identified columns with a rank-checked inverse and a checked residual df. Normal
+  intervals and p-values use `z_critical` and `normal_p_value_two_sided`.
 
-## Implementation Details
+## R reference
 
-### Location
-`crates/p2a-core/src/econometrics/stdreg.rs`
+stdReg is not installed. The cases in `validation/r/cases/causal_stdreg.R` fit `stats::glm`
+(epsilon 1e-14) or `stats::lm` and standardise the predictions as `stdReg::stdGlm` does, on
+`validation/datasets/generated/stdreg_sim.csv` (n = 300; `yc` continuous with an A x x1
+interaction, `yb` binary, `yp` Poisson with mean 222.4, `ys` = 1{x1 > 0.3}, `x1dup` =
+2 x1 + 1).
 
-### Features Implemented
-1. **Outcome Models**:
-   - Linear (OLS) for continuous outcomes
-   - Logistic (MLE) for binary outcomes
-   - Poisson (MLE) for count outcomes
+| Key | R value |
+|---|---|
+| `logit_coef` (1, x1, x2, a) | -0.6557248048371712, 0.7907472864446148, -0.34401877351902155, 0.7574552632300408 |
+| `logit_ey1`, `logit_ey0`, `logit_ate` | 0.5073753169514722, 0.34583038938994765, 0.16154492756152455 |
+| `logit_att`, `logit_atc` | 0.16489988073060807, 0.15856978041158248 |
+| `logit_int_ate`, `logit_int_att`, `logit_int_atc` | 0.1635170827729261, 0.16485284794792382, 0.16233253629698485 |
+| `pois_coef` | 5.302379996194625, 0.098190581111931, 0.05251967624740585, 0.19888933354127217 |
+| `pois_ey1`, `pois_ey0`, `pois_ate` | 245.7233703364667, 201.4048494768568, 44.31852085960989 |
+| `pois_att`, `pois_atc` | 44.7201784180356, 43.962333968175784 |
+| `logit_r2`, `pois_r2` (1 - deviance / null deviance) | 0.11559061465461717, 0.8278262458731582 |
+| `int_coef` (lm, interactions) | 1.0453148804393335, 0.47034163451602723, -0.18182901285405184, 0.7229240607743814, 0.19629512882936156, -0.3982527111947572 |
+| `int_ate`, `int_att`, `int_atc`, `int_r2` | 0.6873326323708036, 0.7090998207865995, 0.6680296539643431, 0.35741255922400317 |
+| `alias_coef` (1, x1, x2, x1dup, a) | 1.0720912063931451, 0.5573733596703365, -0.39657179117390473, NA, 0.6906491233525095 |
+| `alias_ate` | 0.6906491233525096 (R 4.3.3 `predict.lm` does not warn: the rows are estimable) |
+| `sep_ey1`, `sep_ey0`, `sep_ate` | 0.3500000000000552, 0.3499999999783898, 2.17e-11 |
+| `sep_fitted_extreme`, `sep_converged`, `sep_warn_fitted01`, `sep_warn_noconv` | 294, 1, 1, 0 |
 
-2. **Estimands**:
-   - ATE (Average Treatment Effect)
-   - ATT (Average Treatment Effect on Treated)
-   - ATC (Average Treatment Effect on Controls)
-   - Levels (E[Y(1)] and E[Y(0)] separately)
+Before the fix, the Poisson model (mean 222) returned E[Y(1)] = E[Y(0)] = 1e10 and ATE 0 (the
+clipped mean), and the separated logistic fit returned ATE 0 and SE 0 without a warning.
 
-3. **Standard Error Methods**:
-   - Bootstrap (default, recommended)
-   - Delta method (analytical)
-   - Sandwich (robust)
+**Delta-method SEs (recorded, not asserted).** stdReg's stacked estimating equations, written
+out in the case: `logit_stdreg_ate_se` 0.05312617119409766, `logit_int_stdreg_ate_se`
+0.053540593969082506, `pois_stdreg_ate_se` 1.7444188478832212. p2a's delta and sandwich SEs
+are approximations until CAUS-39 (Tier 4).
 
-4. **Additional Effect Measures (Binary Outcomes)**:
-   - Risk Ratio with CI
-   - Odds Ratio with CI
-   - Number Needed to Treat (NNT)
+**Default control.** At `StdRegConfig::default()` (R's `glm.control()` epsilon 1e-8) the logit
+and Poisson coefficients and ATEs are within about 6e-10 of the tight values above, and the
+fits converge.
 
-5. **Optional Features**:
-   - Treatment-covariate interactions in outcome model
-   - Individual treatment effects (CATE)
+## Tests and tolerances
 
-## Test Cases
+R-pinned: `test_validate_stdreg_glm` (logit with and without interactions and Poisson;
+coefficients, E[Y(1)], E[Y(0)], ATE, ATT, ATC, R2), `test_validate_stdreg_glm_default_control`,
+`test_validate_stdreg_linear` (interactions; the aliased covariate with its NA coefficient and
+warning), `test_validate_stdreg_separation_warns` and `test_validate_stdreg_poisson_scale_free`
+(covariates scaled by 1e-6 and 1e6).
 
-### Test Case 1: Linear Outcome, ATE
+| Quantity | Tolerance |
+|---|---|
+| coefficients and effects | `Tol::coef(300)` = 1e-8 (glm epsilon 1e-14 on both sides) |
+| R2 | `Tol::stat(300)` = 1e-6 |
+| default-control coefficients and ATEs | `Tol::iterative(1e-8)` of the tight values |
+| scaled Poisson ATE | 1e-9 of the unscaled run, `Tol::iterative(1e-8)` of `pois_ate` |
+| separation count, convergence, warning flags | exact |
 
-**Data Generating Process**:
-```
-X ~ Uniform(0, 1)
-A | X ~ Bernoulli(P(A=1) depending on X)
-Y = 0.5 + 0.3*X + 0.4*A + noise
+Property tests on `stdreg_sim.csv` read directly: an aliased treatment (or treatment
+interaction) is an error (`test_stdreg_aliased_treatment_is_an_error`), an aliased covariate
+leaves the sandwich and delta SEs unchanged (`test_stdreg_aliased_covariate_keeps_sandwich_se`),
+`confidence_level` is validated (`test_stdreg_rejects_bad_level`), the logistic model refuses an
+outcome outside [0, 1] (`test_stdreg_logistic_needs_unit_outcome`), and Display ends with the
+notes (`test_stdreg_notes_follow_display`). `test_stdreg_bootstrap_ci_is_type_7` checks the
+percentile rule against R's `quantile(1:10, c(.05, .95))`;
+`test_stdreg_options_parse_aliases_and_reject_unknown` the option strings.
 
-True ATE = 0.4
-```
+## Options
 
-**Rust test**: `test_stdreg_linear_ate`
-
-**Expected Results**:
-- ATE should be approximately 0.4
-- SE should be positive and finite
-- E[Y(1)] > E[Y(0)]
-- R-squared > 0.5
-
-### Test Case 2: Binary Outcome, Logistic Model
-
-**Data**: 40 observations with binary outcome
-
-**Expected Results**:
-- ATE should be positive (treatment increases P(Y=1))
-- Risk Ratio > 1
-- Odds Ratio > 1
-- Risk Ratio and Odds Ratio CIs should bracket point estimates
-
-### Test Case 3: ATT and ATC Estimands
-
-**Expected**:
-- ATT averages effect over treated only
-- ATC averages effect over controls only
-- Both should be positive for the test DGP
-
-## R Validation Script
-
-```r
-# Validation script for stdReg comparison
-library(stdReg)
-
-# Generate test data
-set.seed(42)
-n <- 1000
-x1 <- runif(n)
-x2 <- runif(n)
-# Treatment assignment depends on covariates
-ps <- plogis(0.5 * x1 + 0.3 * x2)
-treatment <- rbinom(n, 1, ps)
-# Outcome: Y = 0.5 + 0.3*x1 + 0.2*x2 + 0.4*treatment + noise
-y <- 0.5 + 0.3 * x1 + 0.2 * x2 + 0.4 * treatment + rnorm(n, 0, 0.3)
-
-df <- data.frame(y = y, treatment = treatment, x1 = x1, x2 = x2)
-
-# Fit outcome model
-model <- glm(y ~ treatment + x1 + x2, data = df)
-
-# Standardize
-std_fit <- stdGlm(model, data = df, X = "treatment")
-summary(std_fit)
-
-# Results should show:
-# - E[Y(1)] - E[Y(0)] approximately 0.4
-# - SE via delta method
-```
-
-## Tolerance Guidelines
-
-| Metric | Tolerance |
-|--------|-----------|
-| Coefficients | < 1e-6 |
-| Standard Errors | < 1e-4 |
-| p-values | < 0.01 |
-| Effect Estimates | < 0.05 (bootstrap variability) |
+| Option | Strings |
+|---|---|
+| `model_type` | `linear` (`ols`, `gaussian`, `continuous`), `logistic` (`logit`, `binomial`, `binary`), `poisson` (`count`, `counts`, `log_linear`) |
+| `estimand` | `ate`, `att`, `atc`, `levels` (`potential_outcomes`) |
+| `se_method` | `bootstrap` (`boot`), `delta` (`delta_method`), `sandwich` (`robust`) |
 
 ## MCP Tool
 
 **Tool name**: `regression_standardization`
 
-**Description**: Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution.
-
 **Parameters**:
-- `dataset`: Name of loaded dataset
+- `dataset`: Name or ID of a loaded dataset
 - `outcome`: Outcome variable column
-- `treatment`: Binary treatment indicator column
+- `treatment`: Binary treatment indicator column (0/1)
 - `covariates`: Covariate column names
-- `model_type`: 'linear' (default), 'logistic', or 'poisson'
-- `estimand`: 'ate' (default), 'att', 'atc', or 'levels'
-- `se_method`: 'bootstrap' (default), 'delta', or 'sandwich'
-- `n_bootstrap`: Number of bootstrap replications (default: 999)
-- `interactions`: Include treatment-covariate interactions (default: false)
-- `confidence_level`: Confidence level for intervals (default: 0.95)
+- `model_type`: `linear` (default), `logistic` or `poisson`
+- `estimand`: `ate` (default), `att`, `atc` or `levels`
+- `se_method`: `bootstrap` (default), `delta` or `sandwich`
+- `n_bootstrap`: Number of bootstrap replications (default 999)
+- `interactions`: Include treatment-covariate interactions (default false)
+- `confidence_level`: Confidence level for intervals (default 0.95)
+
+## Running the Tests
+
+```bash
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::stdreg
+Rscript validation/r/run.R --check
+```
 
 ## Missing values and column types
 
@@ -180,8 +169,8 @@ unchanged.
 
 R: stdReg is not installed here; not verified.
 
-Tests: `test_validate_na_stdreg_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
-`weighting_na_refusal`).
+Tests: `test_validate_na_stdreg_columns` (case `causal_mediation_na`, registry
+`validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
 ## References
 
@@ -192,25 +181,3 @@ Tests: `test_validate_na_stdreg_columns` (case `causal_mediation_na`, registry `
 3. Hernan, M.A. & Robins, J.M. (2020). *Causal Inference: What If*. Chapman & Hall/CRC. Chapter 13.
 
 4. Sjolander, A. (2016). "Regression standardization with the R package stdReg." *European Journal of Epidemiology*, 31(6), 563-574.
-
-## Status
-
-- [x] Core implementation
-- [x] Linear outcome model
-- [x] Logistic outcome model
-- [x] Poisson outcome model
-- [x] ATE/ATT/ATC estimands
-- [x] Bootstrap standard errors
-- [x] Delta method standard errors
-- [x] Sandwich standard errors
-- [x] Risk ratio and odds ratio for binary outcomes
-- [x] Unit tests (12 tests passing)
-- [x] MCP tool integration
-- [x] Documentation
-
-## Notes
-
-- Bootstrap SE is recommended as it accounts for the uncertainty in the outcome model estimation
-- Delta method SE is faster but assumes asymptotic normality
-- For binary outcomes, logistic model is recommended over linear to ensure predictions stay in [0,1]
-- Treatment-covariate interactions allow for heterogeneous treatment effects

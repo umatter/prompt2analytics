@@ -1,163 +1,111 @@
 # Targeted Maximum Likelihood Estimation (TMLE) Validation
 
+Status: R-pinned (registry `validation/methods/causal_ctmle_stdreg.json`, method `causal_tmle`).
+
 ## Method Summary
 
-TMLE is a doubly robust, semiparametric efficient estimator for causal effects. It differs from standard AIPW by including a "targeting step" that fluctuates the initial outcome model to optimize for the specific target parameter (ATE).
+TMLE is a doubly robust, semiparametric efficient estimator of the average treatment effect.
+It differs from AIPW by a targeting step that fluctuates the initial outcome model along the
+efficient influence curve of the ATE.
 
-### Key Features
-- Doubly robust: consistent if either Q or g model is correct
-- Locally efficient: achieves the semiparametric efficiency bound
-- Targeting step minimizes bias for the ATE specifically
-- Influence curve-based variance estimation
+## Algorithm (as implemented)
 
-## Algorithm
+1. **Initial outcome model Q(A, W).** A logistic glm (`QModel::Logistic`, the default:
+   binomial for a 0/1 outcome, quasibinomial for a proportion) or least squares
+   (`QModel::Linear`) of Y on W and A (`econometrics::glm`, R's `glm.fit`; `solve_ols`).
+2. **Propensity score g(W).** A logistic glm of A on W, bounded to `truncate_ps` (default
+   (0.01, 0.99)). A must be coded 0/1.
+3. **Targeting step.** Two clever covariates, as tmle 2.1.1: H1 = A/g and
+   H0 = (1 - A)/(1 - g), fitted as `glm(Y ~ -1 + H0W + H1W, offset = qlogis(Q),
+   quasibinomial)` for the logistic Q (an offset regression on the identity scale for the
+   linear Q). Q*(1, W) moves by epsilon1 / g, Q*(0, W) by epsilon0 / (1 - g); both scores are
+   solved (`fluctuation_coef`, `fluctuation_coef_control`).
+4. **Estimate.** ATE = mean(Q*(1, W) - Q*(0, W)).
+5. **Variance.** IC = (H1 - H0)(Y - Q*(A, W)) + Q*(1, W) - Q*(0, W) - ATE;
+   SE = sqrt(var(IC) / n); Wald 95% CI and two-sided normal p-value.
 
-1. **Initial Estimates**
-   - Fit outcome model Q(A,W) = E[Y|A,W]
-   - Fit propensity score g(W) = P(A=1|W)
+**Continuous outcome under the logistic Q.** Y is rescaled to [0, 1] by its range, as R's
+tmle does (Gruber & van der Laan 2010); the estimates are reported on the original scale and
+a warning names the range (`outcome_range`). A constant outcome is refused.
 
-2. **Clever Covariate**
-   - H(A,W) = A/g(W) - (1-A)/(1-g(W))
+Every glm reports its convergence and warnings; aliased covariates get the warning
+"Coefficients not defined because of singularities: ..." and an aliased treatment in Q is an
+error (the effect is not identified).
 
-3. **Targeting Step (Fluctuation)**
-   - Fit epsilon: logit(Q*) = logit(Q) + epsilon * H
-   - This fluctuates Q towards the optimal for ATE
+## R reference
 
-4. **Compute Estimate**
-   - ATE = mean(Q*(1,W) - Q*(0,W))
+Case `tmle_glm` in `validation/r/cases/causal_stdreg.R` writes the algorithm out with
+`stats::glm` (epsilon 1e-14) on `validation/datasets/generated/ctmle_sim.csv` (n = 300;
+outcomes `yb` binary and `yc` continuous; covariates w1..w4), `truncate_ps` (0.01, 0.99).
 
-5. **Variance from Influence Curve**
-   - IC = H*(Y - Q*) + Q*(1,W) - Q*(0,W) - ATE
-   - Var(ATE) = Var(IC)/n
+| Key | logistic Q (`yb`) | linear Q (`yc`) |
+|---|---|---|
+| `*_epsilon1`, `*_epsilon0` | 0.0170969311147531, -0.023075260087028083 | -0.03449000836874782, -0.002787455439970942 |
+| `*_ate` | 0.24817356846720856 | 1.9492378228097935 |
+| `*_se` | 0.05557509884796119 | 0.1521457919515258 |
+| `*_ci_lower`, `*_ci_upper` | 0.1392483762879512, 0.35709876064646595 | 1.651037550185479, 2.247438095434108 |
+| `*_z`, `*_p` | 4.465553343344399, 7.986207006467184e-06 | 12.811644658768003, 1.4111159641175093e-37 |
+| `*_n_truncated`, `*_ic_mean` | 0, -4.2e-17 | 0, -2.1e-17 |
 
-## Reference Implementation
+The case also records the Q and g coefficients and Q, Q*, Q*(1), Q*(0), g and IC at six rows.
 
-R package `tmle` (Gruber & van der Laan, 2012)
-- CRAN: https://cran.r-project.org/package=tmle
-- JSS: https://doi.org/10.18637/jss.v051.i13
+**Cross-check with tmle 2.1.1.** `tmle::tmle(cvQinit = FALSE)` with glm libraries gives
+`tmle_pkg_ate` 0.2481735684652222 and `tmle_pkg_se` 0.055575098846510025 on `yb`: the
+written-out algorithm agrees to 8e-12 (ATE) and 2.6e-11 (SE), so these are pinned too (the
+case stops if they differ).
 
-## Test Case 1: Binary Treatment, Continuous Outcome
+**Rescaled continuous outcome.** The logistic Q on `yc` rescaled from [-5.3358358029,
+8.6007654538]: `rescaled_ate` 1.951299785179432, `rescaled_se` 0.15249104635598437, pinned.
+tmle 2.1.1 gives 1.9521579422711284 (SE 0.15168759637679835), 4.4e-4 relative away, because
+it also bounds Q to 1% beyond the observed range and to alpha = 0.9995 before the
+fluctuation; p2a rescales only. The tmle values are recorded, not asserted.
 
-### Data Generating Process
+## Differences from R tmle
 
-```r
-set.seed(42)
-n <- 1000
+1. **SuperLearner.** R's tmle fits Q and g by SuperLearner; p2a uses parametric glm / least
+   squares only (with glm libraries the two agree, see above).
+2. **Q bounding.** tmle bounds Q to 1% beyond the observed range and with alpha = 0.9995;
+   p2a bounds Q only to (1e-10, 1 - 1e-10) before taking logits.
+3. **Variance.** IC-based only.
 
-# Covariates
-W1 <- runif(n, 0, 1)
-W2 <- runif(n, 0, 1)
+## Tests and tolerances
 
-# Treatment assignment (propensity score model)
-ps <- plogis(0.5 + 0.3*W1 + 0.2*W2)
-A <- rbinom(n, 1, ps)
+R-pinned (`load_case("tmle_glm")`): `test_validate_tmle_glm_logit`,
+`test_validate_tmle_glm_linear`, `test_validate_tmle_glm_default_control` (R's
+`glm.control()` defaults: within `Tol::iterative(1e-8)` of the tight values, all fits
+converged), `test_validate_tmle_aliased_covariate_and_treatment`,
+`test_validate_tmle_logistic_q_rescales_continuous_outcome` and `test_validate_tmle_scale_free`
+(covariates scaled by 1e-6 and 1e6).
 
-# Outcome (outcome model)
-# True ATE = 0.5
-Y <- 0.3*W1 + 0.2*W2 + 0.5*A + rnorm(n, 0, 0.3)
+| Quantity | Tolerance |
+|---|---|
+| epsilons, ATE, Q, Q*, g and IC at six rows | `Tol::iterative(1e-8)` (glm epsilon 1e-14 on both sides) |
+| SE, CI, z | 1e-6 relative |
+| p-value | 1e-6 relative / 1e-12 absolute |
+| tmle 2.1.1 ATE and SE | 1e-8 |
+| rescaling range, `n_truncated` | exact |
 
-data <- data.frame(Y=Y, A=A, W1=W1, W2=W2)
+Property tests on `ctmle_sim.csv` read directly: separation in Q warns
+(`test_tmle_q_separation_warns`), a fit stopped by `max_iter` is reported
+(`test_tmle_nonconvergence_is_reported`), a non-0/1 treatment is refused
+(`test_tmle_refuses_non_binary_treatment`), bad controls are refused
+(`test_tmle_rejects_bad_config`), the bivariate fluctuation solves both scores
+(`test_tmle_bivariate_fluctuation_solves_both_scores`), and the option strings parse
+(`test_q_model_parses_aliases_and_rejects_unknown`).
+
+## Options
+
+| Option | Strings |
+|---|---|
+| `q_model` | `logistic` (`logit`, `binomial`, `binary`), `linear` (`gaussian`, `continuous`, `ols`) |
+| `g_model` | `logistic` (`logit`, `glm`) |
+
+## Running the Tests
+
+```bash
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::tmle
+Rscript validation/r/run.R --check
 ```
-
-### R Code
-
-```r
-library(tmle)
-
-# Run TMLE
-result <- tmle(
-  Y = data$Y,
-  A = data$A,
-  W = data[, c("W1", "W2")],
-  Q.SL.library = "SL.glm",  # Use logistic regression
-  g.SL.library = "SL.glm"   # Use logistic regression
-)
-
-# Results
-cat("ATE:", result$estimates$ATE$psi, "\n")
-cat("SE:", sqrt(result$estimates$ATE$var.psi), "\n")
-cat("95% CI:", result$estimates$ATE$CI, "\n")
-```
-
-### Expected Results (n=1000, seed=42)
-
-| Statistic | R tmle | Rust (tolerance) |
-|-----------|--------|------------------|
-| ATE | 0.502 | +/- 0.05 |
-| SE | 0.021 | +/- 0.005 |
-| Epsilon | ~0.01 | +/- 0.05 |
-
-### Rust Test
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-99):
-- `econometrics::tmle::tests::test_tmle_linear_q_on_binary_outcome` (`crates/p2a-core/src/econometrics/tmle.rs`): the linear Q on a binary outcome gives a finite ATE and SE > 0. The R-pinned continuous-outcome test is `test_validate_tmle_glm_linear` (case `tmle_glm`).
-
-## Test Case 2: Binary Outcome
-
-### Data Generating Process
-
-```r
-set.seed(123)
-n <- 1000
-
-W1 <- runif(n, 0, 1)
-W2 <- runif(n, 0, 1)
-
-# Propensity score
-ps <- plogis(-0.5 + 1.0*W1 + 0.5*W2)
-A <- rbinom(n, 1, ps)
-
-# Outcome probability (binary)
-# True ATE approx 0.15 (risk difference)
-p_Y <- plogis(-1 + 0.5*W1 + 0.3*W2 + 0.8*A)
-Y <- rbinom(n, 1, p_Y)
-
-data <- data.frame(Y=Y, A=A, W1=W1, W2=W2)
-```
-
-### R Code
-
-```r
-library(tmle)
-
-result <- tmle(
-  Y = data$Y,
-  A = data$A,
-  W = data[, c("W1", "W2")],
-  family = "binomial",  # Binary outcome
-  Q.SL.library = "SL.glm",
-  g.SL.library = "SL.glm"
-)
-
-cat("ATE (Risk Difference):", result$estimates$ATE$psi, "\n")
-```
-
-### Rust Test
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with CAUS-99):
-- `econometrics::tmle::tests::test_validate_tmle_glm_logit` and `test_validate_tmle_glm_linear` (`crates/p2a-core/src/econometrics/tmle.rs`): every number of case `tmle_glm` (registry `validation/methods/causal_ctmle_stdreg.json`), including tmle::tmle 2.1.1's ATE and SE.
-
-## Tolerances
-
-| Sample Size | ATE | SE | p-value |
-|-------------|-----|-----|---------|
-| n < 500 | 0.1 | 0.02 | 0.05 |
-| n = 500-2000 | 0.05 | 0.01 | 0.01 |
-| n > 2000 | 0.02 | 0.005 | 0.005 |
-
-## Implementation Notes
-
-### Differences from R tmle
-
-1. **SuperLearner**: R's tmle supports ensemble learning via SuperLearner. Our implementation uses parametric models (logistic/linear regression) only.
-
-2. **Bounded outcomes**: R's tmle automatically scales bounded outcomes. Our implementation expects user to handle this.
-
-3. **Variance estimation**: R's tmle supports both IC-based and delta method variance. We use IC-based only.
-
-### Propensity Score Truncation
-
-Default truncation at [0.01, 0.99] to avoid extreme weights. This matches R tmle defaults.
 
 ## Missing values and column types
 
@@ -169,10 +117,12 @@ column that exists is never reported as not found. Int64 and Boolean 0/1 treatme
 read as numbers and give the same result as Float64. Results on complete data are
 unchanged.
 
-R: tmle 2.1.1 refuses a missing treatment or covariate ("No missing values allowed in 'A' or 'W'") and treats a missing outcome as censored (`Delta`); p2a refuses a missing outcome as well (checked for T2-WP13).
+R: tmle 2.1.1 refuses a missing treatment or covariate ("No missing values allowed in 'A' or
+'W'") and treats a missing outcome as censored (`Delta`); p2a refuses a missing outcome as well
+(checked for T2-WP13).
 
-Tests: `test_validate_na_tmle_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
-`weighting_na_refusal`).
+Tests: `test_validate_na_tmle_columns` (case `causal_mediation_na`, registry
+`validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
 ## References
 
@@ -184,17 +134,8 @@ Tests: `test_validate_na_tmle_columns` (case `causal_mediation_na`, registry `va
 
 4. R package `tmle`: https://cran.r-project.org/package=tmle
 
-## Status
-
-- [x] Core implementation complete
-- [x] Unit tests passing
-- [ ] Validated against R tmle (pending real data comparison)
-- [x] MCP tool added
-- [ ] Performance benchmarks
-
 ## File Locations
 
 - Implementation: `crates/p2a-core/src/econometrics/tmle.rs`
-- Module exports: `crates/p2a-core/src/econometrics/mod.rs`
-- MCP tool: `crates/p2a-mcp/src/server.rs` (treatment_tmle)
+- R case: `validation/r/cases/causal_stdreg.R` (`tmle_glm`)
 - This document: `validation/econometrics/tmle.md`
