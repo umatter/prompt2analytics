@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_cbps",
+      "name": "Covariate balancing propensity score: exact and over-identified, ATE and ATT; logit baseline",
+      "category": "econometrics",
+      "reference": "CBPS::CBPS(method = 'exact' | 'over', ATT = 0 | 1, standardize = TRUE, twostep = TRUE), CBPS 0.24, and a tight refit of CBPS.2Treat (validation/r/cases/causal_cbps.R); stats::glm(binomial)",
+      "doc": "validation/econometrics/cbps.md",
+      "cases": ["cbps_sim_methods"],
+      "tests": [
+        "p2a-core::econometrics::cbps::tests::test_validate_cbps_over_ate",
+        "p2a-core::econometrics::cbps::tests::test_validate_cbps_over_att",
+        "p2a-core::econometrics::cbps::tests::test_validate_cbps_exact_ate",
+        "p2a-core::econometrics::cbps::tests::test_validate_cbps_exact_att",
+        "p2a-core::econometrics::cbps::tests::test_validate_cbps_logit",
+        "p2a-core::econometrics::cbps::tests::test_validate_cbps_package_cross_check"
+      ],
+      "quantities": ["coefficients (exact, over x ATE, ATT; logit)", "SE (delta method from the whitened sandwich; glm SE for logit)",
+                     "J (CBPS g'Wg)", "Hansen p of n*J (over)", "propensity scores", "standardised weights", "deviance",
+                     "start scale alpha", "package values as a cross-check (exact ATE/ATT, over ATE)"],
+      "tolerance": "n = 400: exact and logit at validation/README.md (coefficients, scores, weights 1e-8; SE and deviance 1e-6 relative); over (GMM) Tol::iterative(1e-6); alpha Tol::iterative(1e-6) and J Tol::iterative(5e-6): CBPS's start objective carries about 1e-12 relative rounding noise, so alpha agrees to about 1e-7; package cross-check Tol::iterative: over ATE 1e-4, exact ATE/ATT 1e-3 (J 2e-3), deviance 1e-6, because CBPS() stops its optimisers at optimize tol eps^0.25 and BFGS reltol 1e-8",
+      "deviations": [
+        {"finding": "CAUS-11", "quantity": "over-identified ATT (method = 'over', ATT = 1): coefficients, SE, J, scores, weights, deviance",
+         "note": "CBPS 0.24's gmm.gradient writes the ATT balance block as 1/n.t * t(X * dw) %*% X, n/n_t times the derivative of its own moment (1/n) X'w, so BFGS stops where its objective's gradient is (3.6e-4, 2.4e-4, -4.2e-5, -3.8e-5); the minimiser has J 0.0017281 against CBPS's 0.0024947. p2a minimises CBPS's objective and is pinned to CBPS.2Treat with that line corrected (over_att_tight_*); CBPS's own over_att_* values are recorded, not compared"},
+        {"finding": "CAUS-55", "quantity": "coefficient SEs (exact, over)",
+         "note": "CBPS.fit maps CBPS.2Treat's whitened-scale sandwich back with Dx.inv ginv(X'X) X' U V ginv(D) ..., which is not the Jacobian of its coefficient map and not scale-equivariant (x3 * 10 leaves CBPS's x3 SE at 0.109412; bootstrap SE 0.219845, delta method 0.218720). p2a reports T V_u T' / n, T = M V D^-1; CBPS's transform is recorded as *_se_reported, not pinned"},
+        {"finding": "CAUS-55", "quantity": "start scale alpha (and through W the over-identified estimates, about 1e-7)",
+         "note": "CBPS takes alpha = optimize(f, c(0.8, 1.1)) with tol eps^0.25; the computed f has about 1e-12 relative rounding noise, so optimize places alpha only to about 1e-7. The reference refines alpha by bisection on f'(alpha); p2a takes Brent's minimiser at tol 1e-12, within about 1e-7"},
+        {"finding": "CAUS-55", "quantity": "collinear covariates, non-0/1 treatment",
+         "note": "refused (R9, R3); CBPS returns a minimum-norm split for collinear covariates and treats a numeric two-valued treatment as continuous"}
+      ],
+      "supersedes_legacy": ["validation/expected/cbps_weightit.csv"]
+    }
+  ]
+}
