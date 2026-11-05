@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "cf_confounded",
+  "area": "ml/causal_forest",
+  "method": "Causal forest DGP: confounded by x0 (P(W=1|X) = 0.1 + 0.8 x0), Y = 10 x0 + tau(X) W + N(0,1), tau = 0, 1, 1 + 2 x1",
+  "reference": "written out: oracle AIPW scores tau + (W - e)/(e(1 - e)) (Y - m - tau (W - e)) with the true e(x), m(x), tau(x) (grf get_scores.causal_forest with the true nuisances); stats::t.test (Welch); stats::lm",
+  "call": "set.seed(4794); x ~ U(0,1)^3; W ~ Bernoulli(0.1 + 0.8 x0); Y = 10 x0 + tau W + N(0,1)",
+  "dataset": "validation/datasets/generated/cf_confounded.csv",
+  "datasets": ["validation/datasets/generated/cf_confounded.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3"
+  },
+  "values": {
+    "n": 1000,
+    "n_treated": 508,
+    "oracle_y0_est": 0.00098440874520166707,
+    "oracle_y0_se": 0.073809363254337707,
+    "oracle_y1_est": 1.0009844087452018,
+    "oracle_y1_se": 0.073809363254337707,
+    "oracle_yh_est": 1.9864644825464435,
+    "oracle_yh_se": 0.075967631833252364,
+    "sate_yh": 1.9854800738012419,
+    "naive_y0": 2.536097700229202,
+    "naive_y0_se": 0.17183544184540919,
+    "naive_y0_p": 1.0248803408860011e-44,
+    "naive_y1": 3.536097700229202,
+    "naive_yh": 4.5076079896851855,
+    "ols_y0_w": 0.0051256907739398363,
+    "ols_y0_w_se": 0.069522485605144943,
+    "ols_y1_w": 1.0051256907739412,
+    "ols_y1_w_se": 0.069522485605144929,
+    "e_min": 0.1012862989678979,
+    "e_max": 0.8964020254090429
+  }
+}

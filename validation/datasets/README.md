@@ -205,6 +205,12 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/vecm_sim3.csv` | 250 × 3 (x1, x2, x3) | `vecm_sim3` | `r/cases/ts_vecm.R` | seed 20261101 |
 | `generated/ctmle_sim.csv` | 300 × 7 (yb, yc, a, w1, w2, w3, w4) | `tmle_glm`, `ctmle_cv` | `r/cases/causal_stdreg.R` | seed 20261210; w1 confounder, w2 instrument, w3 precision variable, w4 noise |
 | `generated/stdreg_sim.csv` | 300 × 8 (yc, yb, yp, ys, a, x1, x2, x1dup) | `stdreg_glm`, `stdreg_linear`, `stdreg_separation` | `r/cases/causal_stdreg.R` | seed 20261209; yp Poisson with mean about 220; ys = 1{x1 > 0.3} (complete separation); x1dup = 2 x1 + 1 (aliased) |
+| `generated/cf_confounded.csv` | 1000 × 7 (x0, x1, x2, w, y0, y1, yh) | `cf_confounded` | `r/cases/ml_causal_forest.R` | seed 4794; P(W = 1) = 0.1 + 0.8 x0; tau = 0 (y0), 1 (y1), 1 + 2 x1 (yh) |
+| `generated/cf_rct.csv` | 2000 × 4 (x0, x1, w, y) | `cf_rct` | `r/cases/ml_causal_forest.R` | seed 4702; randomised W, tau = 0.2 |
+| `generated/cf_rare.csv` | 200 × 4 (x0, x1, w, y) | `cf_rare` | `r/cases/ml_causal_forest.R` | seed 4703; 10 treated units, tau = 5 |
+| `generated/cf_aipw_formula.csv` | 40 × 5 (y, w, y_hat, w_hat, tau_hat) | `cf_aipw_formula` | `r/cases/ml_causal_forest.R` | seed 4704 |
+| `generated/cf_little_bags.csv` | 12 × 6 (group, n, y, w, yw, ww) | `cf_little_bags` | `r/cases/ml_causal_forest.R` | seed 4705; leaf means of 12 trees in 6 groups of 2 |
+| `generated/cf_split_node.csv` | 30 × 5 (x, x2, y, z, r) | `cf_split_node` | `r/cases/ml_causal_forest.R` | seed 4710; x2 has ties |
 
 ## Adding a dataset
 

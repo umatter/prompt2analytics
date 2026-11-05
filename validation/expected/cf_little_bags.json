@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "cf_little_bags",
+  "area": "ml/causal_forest",
+  "method": "grf instrumental (causal) prediction from pooled leaf averages and the little-bags variance with the objective-Bayes debiaser",
+  "reference": "written out from grf core/src/prediction/InstrumentalPredictionStrategy.cpp (predict, compute_variance; instrument = treatment, unit weights) and ObjectiveBayesDebiaser.cpp (debias), the latter with dnorm/pnorm on the log scale",
+  "call": "tau = (avg(YZ) - avg(Y) avg(Z)) / (avg(ZZ) - avg(Z)^2); rho_b = (psi1_b - avg(Z) psi2_b) / first; var_between = mean over groups of mean(rho)^2; var_total = mean(rho^2); group_noise = (var_total - var_between) / (g - 1); debias()",
+  "dataset": "validation/datasets/generated/cf_little_bags.csv",
+  "datasets": ["validation/datasets/generated/cf_little_bags.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3"
+  },
+  "values": {
+    "tau": 0.78009162085758654,
+    "mu": 0.13214300971873169,
+    "first_stage": 0.17064544830360812,
+    "rho": [0.72182488667896494, -0.19512097400325967, 0.73144220321103959, -0.67051833742635625, -0.14655316524772491, -0.34936379521393929, 0.22405606421534119, -0.22100108601078713, 0.036614473361162442, -0.335812140228954, 0.82633741585607035, -0.62190554519155761],
+    "var_between": 0.027432638634080634,
+    "var_total": 0.24749931964472494,
+    "group_noise": 0.2200666810106443,
+    "variance": 0.055431066951040303,
+    "debias_var_between": [0.5, 0.20000000000000001, 0.001, 2, 0, 1.1999999999999999e-06],
+    "debias_group_noise": [0.10000000000000001, 0.29999999999999999, 1, 2, 0, 3.3999999999999997e-07],
+    "debias_groups": [10, 50, 3000, 7, 5, 400],
+    "debias_out": [0.41869889964768103, 0.024891909009010255, 0.0006664454029650102, 0.85297447449169228, 0, 8.6000000000000002e-07],
+    "debias_ratio": [1.7888543819998319, -1.6666666666666663, -38.691103628612098, 0, 0, 10.135197197007182],
+    "part_tau": 0.7973513441446286,
+    "part_first_stage": 0.16900047603241911,
+    "part_var_between": 0.022049154189281748,
+    "part_group_noise": 0.2300921682584737,
+    "part_variance": 0.065399691874961752
+  }
+}

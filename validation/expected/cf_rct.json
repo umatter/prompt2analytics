@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "cf_rct",
+  "area": "ml/causal_forest",
+  "method": "Causal forest DGP: randomised W (P = 0.5), Y = 0.5 x0 + 0.2 W + N(0,1), n = 2000 (and the first 500 rows)",
+  "reference": "stats::t.test (Welch); written-out oracle AIPW with e = 0.5, m(x) = 0.5 x0 + 0.1, tau = 0.2",
+  "call": "set.seed(4702); x ~ U(0,1)^2; W ~ Bernoulli(0.5); Y = 0.5 x0 + 0.2 W + N(0,1)",
+  "dataset": "validation/datasets/generated/cf_rct.csv",
+  "datasets": ["validation/datasets/generated/cf_rct.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3"
+  },
+  "values": {
+    "n": 2000,
+    "n_treated": 1012,
+    "n_treated_500": 258,
+    "dim_2000": 0.125012905591254,
+    "dim_se_2000": 0.044327077385573441,
+    "dim_p_2000": 0.0048461723030092455,
+    "dim_500": 0.25105640694190412,
+    "dim_se_500": 0.088390830568978729,
+    "oracle_se_2000": 0.043877277498855047,
+    "oracle_se_500": 0.086287880790312133,
+    "oracle_est_2000": 0.12434495404563156,
+    "oracle_est_500": 0.2627943261128165
+  }
+}

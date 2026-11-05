@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "cf_rare",
+  "area": "ml/causal_forest",
+  "method": "Causal forest DGP: rare treatment (10 of 200 treated at random), Y = x0 + 5 W + N(0, 0.1^2) (ML-74)",
+  "reference": "stats::t.test (Welch); written-out oracle AIPW with e = 0.05, m(x) = x0 + 0.25, tau = 5; the ML-74 shrinkage 5 (1 - 0.75^10) of a per-tree estimator that scores tau = 0 when an n/4 estimation sample has no treated unit",
+  "call": "set.seed(4703); x ~ U(0,1)^2; 10 of 200 units treated; Y = x0 + 5 W + 0.1 N(0,1)",
+  "dataset": "validation/datasets/generated/cf_rare.csv",
+  "datasets": ["validation/datasets/generated/cf_rare.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3"
+  },
+  "values": {
+    "n": 200,
+    "n_treated": 10,
+    "naive": 4.8759737789541351,
+    "naive_se": 0.087236814548114217,
+    "oracle_est": 4.9995943163762915,
+    "oracle_se": 0.034390855873515855,
+    "shrunk_by_empty_arm": 4.7184324264526367
+  }
+}
