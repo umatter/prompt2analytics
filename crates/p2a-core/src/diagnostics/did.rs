@@ -250,8 +250,7 @@ fn pretrend_unavailable_remediation(
         ));
     } else if result.config.bootstrap > 0 {
         steps.push(
-            "Use bootstrap = 0 for analytic standard errors (without covariates), or more \
-             bootstrap replicates"
+            "Use bootstrap = 0 for analytic standard errors, or more bootstrap replicates"
                 .to_string(),
         );
     }
@@ -259,13 +258,20 @@ fn pretrend_unavailable_remediation(
     steps
 }
 
-/// Check for anticipation effects in pre-treatment periods.
+/// Check for anticipation effects in pre-treatment periods. The configured
+/// anticipation window (`-anticipation <= t - g < 0`) holds effects the estimator
+/// allows for, so those cells are not flagged.
 fn check_anticipation(result: &StaggeredDidResult, report: &mut IdentificationReport) {
-    // Count significant pre-treatment effects (CI excludes 0)
+    let window = i64::try_from(result.config.anticipation).unwrap_or(i64::MAX);
+    // Count significant pre-treatment effects (CI excludes 0) before the window
     let significant_pre: Vec<_> = result
         .group_time_atts
         .iter()
-        .filter(|att| !att.post_treatment && (att.ci_lower > 0.0 || att.ci_upper < 0.0))
+        .filter(|att| {
+            !att.post_treatment
+                && att.relative_time < -window
+                && (att.ci_lower > 0.0 || att.ci_upper < 0.0)
+        })
         .collect();
 
     if significant_pre.is_empty() {
@@ -288,12 +294,17 @@ fn check_anticipation(result: &StaggeredDidResult, report: &mut IdentificationRe
             .min()
             .unwrap_or(0);
 
+        let before_window = if window > 0 {
+            format!(", before the configured anticipation window of {window} period(s)")
+        } else {
+            String::new()
+        };
         let warning = IdentificationWarning::new(
             "ANTICIPATION_DETECTED",
             WarningSeverity::Caution,
             "Possible Anticipation Effects",
             format!(
-                "{} pre-treatment period(s) show significant effects (p < 0.05). \
+                "{} pre-treatment period(s) show significant effects (p < 0.05){before_window}. \
                  Effects begin {} period(s) before treatment. This may indicate \
                  that units anticipated treatment and changed behavior, or that \
                  the treatment timing is misspecified.",
@@ -305,7 +316,11 @@ fn check_anticipation(result: &StaggeredDidResult, report: &mut IdentificationRe
         .with_remediation(vec![
             "Verify treatment timing is correctly coded".to_string(),
             "Consider an earlier effective treatment date".to_string(),
-            "Allow for anticipation in the estimator configuration".to_string(),
+            format!(
+                "Re-estimate with anticipation = {} (did's `anticipation`): the base period \
+                 becomes g - 1 - {} and those periods are treated as anticipation effects",
+                -earliest, -earliest
+            ),
             "Discuss why anticipation may or may not be present".to_string(),
         ]);
 
@@ -414,6 +429,7 @@ mod tests {
             n_never_treated: 700,
             warnings: vec![],
             missing: Default::default(),
+            covariates: vec![],
         }
     }
 
@@ -465,6 +481,40 @@ mod tests {
         assert!(antic_warning.is_some());
     }
 
+    /// CAUS-83: cells inside the configured anticipation window are not flagged;
+    /// an effect before the window is, with a remediation naming the option.
+    #[test]
+    fn test_anticipation_window_cells_not_flagged() {
+        let mut result = create_mock_staggered_result(Some(0.5), true); // significant at -1
+        result.config.anticipation = 1;
+        let report = staggered_did_diagnostics(&result);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.code == "ANTICIPATION_DETECTED")
+        );
+        let c = result.group_time_atts.last_mut().unwrap();
+        c.time = 2018;
+        c.relative_time = -2;
+        let report = staggered_did_diagnostics(&result);
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.code == "ANTICIPATION_DETECTED")
+            .expect("ANTICIPATION_DETECTED");
+        assert!(
+            w.remediation.iter().any(|r| r.contains("anticipation = 2")),
+            "{:?}",
+            w.remediation
+        );
+        assert!(
+            w.message.contains("configured anticipation window of 1"),
+            "{}",
+            w.message
+        );
+    }
+
     #[test]
     fn test_no_pretrend_periods() {
         // Create result with no pre-treatment periods
@@ -502,6 +552,7 @@ mod tests {
             n_never_treated: 200,
             warnings: vec![],
             missing: Default::default(),
+            covariates: vec![],
         };
 
         let report = staggered_did_diagnostics(&result);

@@ -423,8 +423,9 @@ EXAMPLES:
         #[arg(long, default_value = "or")]
         method: String,
 
-        /// Unit-bootstrap replications for SEs, at least 50; 0 gives analytic
-        /// influence-function SEs, without covariates only (default: 999)
+        /// Bootstrap replications for SEs, at least 50 (a multiplier bootstrap of the
+        /// influence functions with covariates); 0 gives analytic influence-function SEs
+        /// (default: 999)
         #[arg(long, default_value = "999")]
         bootstrap: usize,
     },

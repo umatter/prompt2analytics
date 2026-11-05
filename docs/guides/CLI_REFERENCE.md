@@ -307,8 +307,9 @@ effective observations on each side.
 `first_stage` object (`f_type`, `f_stats`, `df`, `p_values`, `strong_instruments`).
 
 **`causal staggered-did`:** `--bootstrap 0` gives analytic influence-function standard errors
-(did's `bstrap = FALSE`; without covariates only); otherwise at least 50 unit-bootstrap
-replicates (default 999). The JSON's `pretrend_test` holds `chi2`, `df`, `p_value`, `f_stat`
+(did's `bstrap = FALSE`), with or without covariates; otherwise at least 50 bootstrap
+replicates (default 999): a unit bootstrap, or with covariates a multiplier bootstrap of the
+influence functions. The JSON's `pretrend_test` holds `chi2`, `df`, `p_value`, `f_stat`
 and `df2` (the F form of a bootstrap covariance; `null` with the analytic one) and `method`.
 
 `causal iv`, `mediation`, `rd`, `fuzzy-rd` and `staggered-did` drop the rows with a missing value
