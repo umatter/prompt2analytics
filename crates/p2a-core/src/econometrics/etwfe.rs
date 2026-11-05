@@ -47,15 +47,16 @@
 //!
 //! R equivalent: `etwfe::etwfe()` (Grant McDermott)
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::data::columns::{ColumnRequest, Columns, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
+use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
 use crate::traits::estimator::t_test_p_value;
 
@@ -70,6 +71,9 @@ pub struct EtwfeConfig {
     pub cgroup: ControlGroup,
     /// Include anticipation effects (periods before treatment)
     pub anticipation: usize,
+    /// Variance of the coefficients.
+    #[serde(default)]
+    pub vcov: EtwfeVcov,
 }
 
 impl Default for EtwfeConfig {
@@ -79,6 +83,7 @@ impl Default for EtwfeConfig {
             gref: None,
             cgroup: ControlGroup::NotYet,
             anticipation: 0,
+            vcov: EtwfeVcov::Cluster,
         }
     }
 }
@@ -91,6 +96,66 @@ pub enum ControlGroup {
     /// Use not-yet-treated units as controls (default)
     #[default]
     NotYet,
+}
+
+crate::option_enum!(
+    ControlGroup,
+    crate::options::Choices {
+        option: "cgroup",
+        values: &[
+            (
+                &["notyet", "not_yet", "not_yet_treated", "notyettreated"],
+                ControlGroup::NotYet
+            ),
+            (
+                &["never", "never_treated", "nevertreated"],
+                ControlGroup::Never
+            ),
+        ],
+    },
+    no_display
+);
+
+/// Variance of the ETWFE coefficients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EtwfeVcov {
+    /// Clustered by unit with fixest's CR1 small-sample factor
+    /// `G/(G-1) * (n-1)/(n-K)`, `K` = coefficients + periods; t tests with `G - 1` df.
+    #[default]
+    Cluster,
+    /// Homoskedastic: `SSR / (n - k - rank of the unit and period effects)`; t tests with
+    /// that df.
+    Iid,
+}
+
+crate::option_enum!(
+    EtwfeVcov,
+    crate::options::Choices {
+        option: "vcov",
+        values: &[
+            (&["cluster", "clustered", "cr1"], EtwfeVcov::Cluster),
+            (
+                &["iid", "classical", "standard", "homoskedastic"],
+                EtwfeVcov::Iid
+            ),
+        ],
+    }
+);
+
+/// One estimated coefficient, named as fixest names it
+/// (`.Dtreat:first_treat::4:year::5`, `.Dtreat:first_treat::4:year::5:xc_dm`, `year::2:xc`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EtwfeTerm {
+    /// fixest's coefficient name.
+    pub name: String,
+    /// Estimate.
+    pub estimate: f64,
+    /// Standard error (as `EtwfeResult::vcov`).
+    pub std_error: f64,
+    /// t statistic.
+    pub t_stat: f64,
+    /// Two-sided p-value of the t test with `EtwfeResult::df_t` df.
+    pub p_value: f64,
 }
 
 impl fmt::Display for ControlGroup {
@@ -186,6 +251,33 @@ pub struct EtwfeResult {
     /// Rows dropped because of missing values (empty when none were).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Every estimated coefficient (cells, then control terms), named as fixest names it.
+    #[serde(default)]
+    pub terms: Vec<EtwfeTerm>,
+    /// Terms the unit and period effects absorb (zero after the within transformation).
+    #[serde(default)]
+    pub dropped_terms: Vec<String>,
+    /// Control terms the pivoted QR aliased; removed and the model refitted, as fixest does.
+    #[serde(default)]
+    pub collinear_terms: Vec<String>,
+    /// Variance of the coefficients.
+    #[serde(default)]
+    pub vcov: EtwfeVcov,
+    /// Units in the estimation sample (the clusters under `EtwfeVcov::Cluster`).
+    #[serde(default)]
+    pub n_units: usize,
+    /// Never-treated units in the estimation sample.
+    #[serde(default)]
+    pub n_never_units: usize,
+    /// Degrees of freedom of the coefficient t tests.
+    #[serde(default)]
+    pub df_t: usize,
+    /// Anticipation periods: cohort g is treated from g - anticipation.
+    #[serde(default)]
+    pub anticipation: usize,
+    /// Warnings about the fit.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 impl fmt::Display for EtwfeResult {
@@ -278,7 +370,16 @@ impl fmt::Display for EtwfeResult {
     }
 }
 
-/// Run Extended Two-Way Fixed Effects estimation.
+/// Run Extended Two-Way Fixed Effects estimation, as `etwfe::etwfe(ivar = unit)`.
+///
+/// The model is `y_it = a_i + l_t + sum_(g,s) b_gs 1(G_i = g) 1(t = s) + e_it` over the
+/// cohort-period cells etwfe estimates: with `cgroup = notyet` one cell per treated
+/// cohort-period (`t >= onset`, none at `tref`), with `cgroup = never` every period of a
+/// treated cohort except its reference period `onset - 1`. The onset of cohort g is
+/// `g - anticipation`. Without never-treated units the last cohort is the reference group
+/// and the periods from its onset on are dropped (`cgroup = notyet`, as etwfe). Unit and
+/// period effects are absorbed exactly (balanced or not); a cell they leave unidentified is
+/// an error.
 ///
 /// # Arguments
 ///
@@ -287,9 +388,11 @@ impl fmt::Display for EtwfeResult {
 /// * `unit_col` - Unit/entity identifier column (any type: integers, fractional
 ///   numbers, strings, categoricals, dates)
 /// * `time_col` - Time period column (whole numbers or dates)
-/// * `treat_col` - Treatment indicator column (1 if treated, 0 otherwise)
+/// * `treat_col` - Treatment indicator column: 1 exactly when `0 < first_treat <= period`,
+///   else 0 (checked)
 /// * `first_treat_col` - First treatment period column (cohort identifier; whole
-///   numbers or dates, 0 for never-treated units)
+///   numbers or dates; 0 or negative, or a period after the last observed one, for
+///   never-treated units)
 /// * `x_cols` - Optional control variables (numeric)
 /// * `config` - ETWFE configuration
 ///
@@ -306,6 +409,7 @@ impl fmt::Display for EtwfeResult {
 /// # Returns
 ///
 /// `EtwfeResult` with cohort-time effects, event study, and aggregated ATTs.
+#[allow(clippy::too_many_arguments)]
 pub fn run_etwfe(
     dataset: &Dataset,
     y_col: &str,
@@ -332,139 +436,48 @@ pub fn run_etwfe(
         .numerics(control_cols)
         .na(NaPolicy::Omit)
         .extract()?;
-    let n = cols.n();
-    let y = cols.numeric_array(y_col);
-    let units: &[u32] = &cols.factor(unit_col).codes;
-    let times: &[i64] = cols.time_index(time_col);
-    let treat: &[f64] = cols.numeric(treat_col);
-    let first_treat: &[i64] = cols.time_index(first_treat_col);
-
-    // Identify unique cohorts and time periods
-    let unique_times: BTreeSet<i64> = times.iter().copied().collect();
-    let unique_cohorts: BTreeSet<i64> = first_treat
-        .iter()
-        .filter(|&&g| g > 0) // never treated: 0
-        .copied()
-        .collect();
-
-    let all_periods: Vec<i64> = unique_times.iter().copied().collect();
-    let n_periods = all_periods.len();
-
-    // Determine reference time (first period by default)
-    let ref_time = config
-        .tref
-        .unwrap_or_else(|| *all_periods.first().unwrap_or(&0));
-
-    // Build cohort-time interaction terms
-    // For each (cohort g, time t) combination where t >= g, create an indicator
-    let mut cohort_time_pairs: Vec<(i64, i64)> = Vec::new();
-    for &g in &unique_cohorts {
-        for &t in &all_periods {
-            // Include post-treatment periods
-            let rel_time = t - g;
-            if rel_time >= -(config.anticipation as i64) {
-                cohort_time_pairs.push((g, t));
-            }
-        }
-    }
-
-    // Count observations per cohort-time
-    let mut cohort_time_counts: HashMap<(i64, i64), usize> = HashMap::new();
-    for i in 0..n {
-        let g = first_treat[i];
-        let t = times[i];
-        if unique_cohorts.contains(&g) && treat[i] > 0.5 {
-            *cohort_time_counts.entry((g, t)).or_insert(0) += 1;
-        }
-    }
-
-    // Build design matrix with cohort-time interactions
-    let n_gt = cohort_time_pairs.len();
-    let n_controls = x_cols.map_or(0, |x| x.len());
-    let n_params = n_gt + n_controls;
-
-    if n_params == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "No cohort-time effects to estimate (no treated units?)".to_string(),
-        });
-    }
-
-    // Create X matrix: cohort-time dummies + controls
-    let mut x_data = Array2::<f64>::zeros((n, n_params));
-
-    for i in 0..n {
-        let g = first_treat[i];
-        let t = times[i];
-        let d = treat[i];
-
-        // Cohort-time interactions: D_it × 1(G=g) × 1(t=t)
-        for (j, &(cg, ct)) in cohort_time_pairs.iter().enumerate() {
-            if g == cg && t == ct && d > 0.5 {
-                x_data[[i, j]] = 1.0;
-            }
-        }
-    }
-
-    // Add control variables
-    for (c_idx, &ctrl) in control_cols.iter().enumerate() {
-        for (i, &v) in cols.numeric(ctrl).iter().enumerate() {
-            x_data[[i, n_gt + c_idx]] = v;
-        }
-    }
-
-    // Demean for unit and time fixed effects (within transformation)
-    let (y_demeaned, x_demeaned) = demean_panel(&y, &x_data, units, times)?;
-
-    // Run OLS on demeaned data
-    let xtx_mat = xtx(&x_demeaned.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
-        context: "ETWFE design matrix".to_string(),
-        suggestion: "Check for multicollinearity or empty cohort-time cells".to_string(),
-    })?;
-
-    let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
-    let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
-
-    // Compute residuals and standard errors
-    let fitted = x_demeaned.dot(&beta);
-    let residuals = &y_demeaned - &fitted;
-    let ssr: f64 = residuals.iter().map(|r| r * r).sum();
-    let df_resid = n.saturating_sub(n_params);
-    let sigma2 = if df_resid > 0 {
-        ssr / df_resid as f64
-    } else {
-        ssr
+    let names = SpecColumns {
+        y: y_col,
+        unit: unit_col,
+        time: time_col,
+        treat: treat_col,
+        first_treat: first_treat_col,
+        controls: control_cols,
     };
+    let spec = Spec::build(&cols, &names, &config)?;
+    let design = Design::build(&spec, &names)?;
+    let within = TwoWayWithin::new(&spec.unit, &spec.period, spec.n_units, spec.periods.len())?;
+    let fit = fit_design(&spec, &design, &within, config.vcov)?;
 
-    // Variance-covariance matrix
-    let vcov = &xtx_inv * sigma2;
+    let mut warnings = spec.warnings.clone();
+    warnings.extend(within.warning.clone());
+    warnings.extend(fit.warning(&design));
 
-    // R-squared
-    // n >= 1: the extraction keeps at least one row (ndarray's mean is sum / n)
-    let y_mean = y_demeaned.sum() / n as f64;
-    let tss: f64 = y_demeaned.iter().map(|yi| (yi - y_mean).powi(2)).sum();
-    let r_squared = if tss > 0.0 { 1.0 - ssr / tss } else { 0.0 };
-
-    // Extract cohort-time effects
-    let mut cohort_time_effects = Vec::new();
-    for (j, &(g, t)) in cohort_time_pairs.iter().enumerate() {
-        let estimate = beta[j];
-        let se = vcov[[j, j]].max(0.0).sqrt();
-        let t_stat = if se > 1e-10 { estimate / se } else { 0.0 };
-        let p_value = t_test_p_value(t_stat, df_resid as f64);
-        let n_treated = cohort_time_counts.get(&(g, t)).copied().unwrap_or_default();
-
-        cohort_time_effects.push(CohortTimeEffect {
-            cohort: g,
-            time: t,
-            rel_time: t - g,
-            estimate,
-            std_error: se,
-            t_stat,
-            p_value,
-            n_treated,
-        });
-    }
+    let terms: Vec<EtwfeTerm> = fit
+        .kept
+        .iter()
+        .enumerate()
+        .map(|(j, &c)| fit.term(j, design.names[c].clone()))
+        .collect();
+    let cohort_time_effects: Vec<CohortTimeEffect> = spec
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(c, &(g, t))| {
+            // every cell is a kept column: an absorbed or aliased cell is an error
+            let term = &terms[fit.term_of_col[c].unwrap_or_default()];
+            CohortTimeEffect {
+                cohort: g,
+                time: t,
+                rel_time: t - g,
+                estimate: term.estimate,
+                std_error: term.std_error,
+                t_stat: term.t_stat,
+                p_value: term.p_value,
+                n_treated: spec.cell_rows[c],
+            }
+        })
+        .collect();
 
     // Aggregate to event study (by relative time)
     let event_study = aggregate_by_relative_time(&cohort_time_effects);
@@ -476,20 +489,27 @@ pub fn run_etwfe(
     let (att_simple, att_se, att_weighted, att_weighted_se) =
         compute_overall_att(&cohort_time_effects);
 
-    // Count treated/control observations
-    let n_treated: usize = treat.iter().filter(|&&d| d > 0.5).count();
-    let n_control = n - n_treated;
-
-    let controls_vec: Vec<String> = control_cols.iter().map(|s| s.to_string()).collect();
+    let n = spec.n;
+    let n_treated: usize = spec.treat.iter().filter(|&&d| d == 1.0).count();
+    let n_cohorts = spec
+        .cells
+        .iter()
+        .map(|&(g, _)| g)
+        .collect::<BTreeSet<i64>>()
+        .len();
+    let n_periods = spec.periods.len();
+    let r_squared = if fit.tss_within > 0.0 {
+        1.0 - fit.ssr / fit.tss_within
+    } else {
+        f64::NAN
+    };
 
     Ok(EtwfeResult {
         model: format!(
-            "ETWFE ({} cohorts × {} periods)",
-            unique_cohorts.len(),
-            n_periods
+            "ETWFE ({n_cohorts} cohorts × {n_periods} periods), unit and period fixed effects"
         ),
         dep_var: y_col.to_string(),
-        controls: controls_vec,
+        controls: control_cols.iter().map(|s| s.to_string()).collect(),
         control_group: config.cgroup,
         cohort_time_effects,
         event_study,
@@ -500,90 +520,941 @@ pub fn run_etwfe(
         att_weighted_se,
         n_obs: n,
         n_treated,
-        n_control,
-        n_cohorts: unique_cohorts.len(),
+        n_control: n - n_treated,
+        n_cohorts,
         n_periods,
         r_squared,
-        ref_time,
-        ref_cohort: None,
+        ref_time: spec.tref,
+        ref_cohort: spec.gref_cohort,
         missing: cols.missing().clone(),
+        terms,
+        dropped_terms: fit
+            .absorbed
+            .iter()
+            .map(|&c| design.names[c].clone())
+            .collect(),
+        collinear_terms: fit
+            .collinear
+            .iter()
+            .map(|&c| design.names[c].clone())
+            .collect(),
+        vcov: config.vcov,
+        n_units: spec.n_units,
+        n_never_units: spec.n_never_units,
+        df_t: fit.df_t,
+        anticipation: config.anticipation,
+        warnings,
     })
 }
 
-/// Demean data by unit and time for two-way fixed effects. `units` are factor
-/// codes (0..n_units), one per row.
-fn demean_panel(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    units: &[u32],
-    times: &[i64],
-) -> EconResult<(Array1<f64>, Array2<f64>)> {
-    let n = y.len();
-    let k = x.ncols();
-    let n_units = units.iter().max().map_or(0, |&u| u as usize + 1);
+/// A column counts as absorbed by the unit and period effects when its within sum of
+/// squares is at most this fraction of its centred raw sum of squares (or the raw column is
+/// constant). Relative, so the rule does not depend on the scale of a control.
+const ABSORBED_TOL: f64 = 1e-12;
 
-    // Compute unit means (sums in row order)
-    let mut unit_counts = resource::try_vec(n_units, 0usize, "ETWFE unit counts")?;
-    let mut unit_y_sums = resource::try_vec(n_units, 0.0f64, "ETWFE unit sums")?;
-    let mut unit_x_sums = resource::try_zeros2(n_units, k, "ETWFE unit sums")?;
+/// The column names `run_etwfe` was called with.
+struct SpecColumns<'a> {
+    y: &'a str,
+    unit: &'a str,
+    time: &'a str,
+    treat: &'a str,
+    first_treat: &'a str,
+    controls: &'a [&'a str],
+}
 
-    for i in 0..n {
-        let u = units[i] as usize;
-        unit_counts[u] += 1;
-        unit_y_sums[u] += y[i];
-        for j in 0..k {
-            unit_x_sums[[u, j]] += x[[i, j]];
+/// The estimation sample and etwfe's specification on it.
+struct Spec {
+    /// Rows of the estimation sample.
+    n: usize,
+    y: Vec<f64>,
+    /// Dense unit code (0..n_units) of each row.
+    unit: Vec<usize>,
+    /// Index into `periods` of each row.
+    period: Vec<usize>,
+    t: Vec<i64>,
+    g: Vec<i64>,
+    /// First treated period, `g - anticipation` (`g` for never-treated units).
+    onset: Vec<i64>,
+    /// The row's unit is in the reference group (never treated, or the `gref` cohort).
+    reference: Vec<bool>,
+    /// etwfe's `.Dtreat`: the row belongs to a treated cohort-period of etwfe's design.
+    treated_cell: Vec<bool>,
+    /// Index into `cells` of the rows with a cell coefficient.
+    cell_of_row: Vec<Option<usize>>,
+    treat: Vec<f64>,
+    /// Controls on the estimation sample, in `x_cols` order.
+    x: Vec<Vec<f64>>,
+    /// Cohort-period cells `(first_treat, period)`, sorted.
+    cells: Vec<(i64, i64)>,
+    /// Rows in each cell.
+    cell_rows: Vec<usize>,
+    /// Periods of the estimation sample, sorted.
+    periods: Vec<i64>,
+    n_units: usize,
+    n_never_units: usize,
+    tref: i64,
+    /// The cohort that is the reference group (`gref`, or the last cohort without
+    /// never-treated units).
+    gref_cohort: Option<i64>,
+    /// First period dropped because the reference cohort is treated from it on.
+    dropped_from: Option<i64>,
+    cgroup: ControlGroup,
+    warnings: Vec<String>,
+}
+
+impl Spec {
+    fn build(cols: &Columns, names: &SpecColumns<'_>, config: &EtwfeConfig) -> EconResult<Spec> {
+        let a = config.anticipation;
+        let too_large = || EconError::InvalidSpecification {
+            message: format!("anticipation {a} is too large"),
+        };
+        let d = i64::try_from(a).map_err(|_| too_large())?;
+        let y_all = cols.numeric(names.y);
+        let factor = cols.factor(names.unit);
+        let times = cols.time_index(names.time);
+        let treat_all = cols.numeric(names.treat);
+        let ft = cols.time_index(names.first_treat);
+        let n_all = cols.n();
+
+        let all_periods: Vec<i64> = times
+            .iter()
+            .copied()
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
+            .collect();
+        if all_periods.len() < 2 {
+            return Err(EconError::InsufficientData {
+                required: 2,
+                provided: all_periods.len(),
+                context: "ETWFE needs at least two periods".to_string(),
+            });
+        }
+        let (lo, hi) = (all_periods[0], all_periods[all_periods.len() - 1]);
+        let is_never = |g: i64| g <= 0 || g > hi;
+
+        for i in 0..n_all {
+            let v = treat_all[i];
+            if v != 0.0 && v != 1.0 {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "treat column '{}' must be 0 or 1; unit '{}', period {} has {v}",
+                        names.treat,
+                        factor.label(i),
+                        times[i]
+                    ),
+                });
+            }
+        }
+        let mut unit_g: Vec<Option<i64>> =
+            resource::try_vec(factor.n_levels(), None, "ETWFE unit cohorts")?;
+        for i in 0..n_all {
+            let slot = &mut unit_g[factor.codes[i] as usize];
+            match *slot {
+                None => *slot = Some(ft[i]),
+                Some(g0) if g0 != ft[i] => {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "{} must be constant within each unit; unit '{}' has {g0} and {}",
+                            names.first_treat,
+                            factor.label(i),
+                            ft[i]
+                        ),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        for i in 0..n_all {
+            let treated = !is_never(ft[i]) && times[i] >= ft[i];
+            if (treat_all[i] == 1.0) != treated {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "treat column '{}' is {} for unit '{}' in period {}, but {} is {}: \
+                         ETWFE needs an absorbing treatment that starts at {} (treat = 1 \
+                         exactly when 0 < {} <= period)",
+                        names.treat,
+                        treat_all[i],
+                        factor.label(i),
+                        times[i],
+                        names.first_treat,
+                        ft[i],
+                        names.first_treat,
+                        names.first_treat
+                    ),
+                });
+            }
+        }
+        let tref = config.tref.unwrap_or(lo);
+        if all_periods.binary_search(&tref).is_err() {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "tref {tref} is not a period of '{}' ({lo}..{hi})",
+                    names.time
+                ),
+            });
+        }
+        let observed_g: BTreeSet<i64> = ft.iter().copied().collect();
+        if let Some(v) = config.gref {
+            if !observed_g.contains(&v) {
+                let values: Vec<String> = observed_g.iter().map(|g| g.to_string()).collect();
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "gref {v} is not a value of '{}' (values: {})",
+                        names.first_treat,
+                        values.join(", ")
+                    ),
+                });
+            }
+        }
+        let any_never = ft.iter().any(|&g| is_never(g));
+        let mut gref_cohort = config.gref.filter(|&v| !is_never(v));
+        if !any_never && gref_cohort.is_none() {
+            match config.cgroup {
+                ControlGroup::NotYet => gref_cohort = observed_g.iter().next_back().copied(),
+                ControlGroup::Never => {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "cgroup = never needs never-treated units ({} <= 0 or after the \
+                             last period {hi}); none found. Use cgroup = notyet, or name the \
+                             reference cohort with gref",
+                            names.first_treat
+                        ),
+                    });
+                }
+            }
+        }
+        let is_reference = |g: i64| is_never(g) || Some(g) == gref_cohort;
+        if ft.iter().all(|&g| is_reference(g)) {
+            return Err(EconError::InvalidSpecification {
+                message: "no treated cohort: every unit is in the reference group".to_string(),
+            });
+        }
+        let mut warnings = Vec::new();
+        if let (ControlGroup::Never, Some(c)) = (config.cgroup, gref_cohort) {
+            warnings.push(format!(
+                "gref = {c} is a cohort first treated in period {c}; with cgroup = never it is \
+                 the reference group in every period, as in etwfe"
+            ));
+        }
+        // Rows from the reference cohort's onset on are dropped (etwfe's `.Dtreat = NA`).
+        let dropped_from = match (config.cgroup, gref_cohort) {
+            (ControlGroup::NotYet, Some(c)) => {
+                let s = c.checked_sub(d).ok_or_else(too_large)?;
+                (s >= lo).then_some(s)
+            }
+            _ => None,
+        };
+
+        let keep: Vec<usize> = (0..n_all)
+            .filter(|&i| dropped_from.is_none_or(|s| times[i] < s))
+            .collect();
+        let n = keep.len();
+        let periods: Vec<i64> = keep
+            .iter()
+            .map(|&i| times[i])
+            .collect::<BTreeSet<i64>>()
+            .into_iter()
+            .collect();
+        if periods.len() < 2 {
+            return Err(EconError::InsufficientData {
+                required: 2,
+                provided: periods.len(),
+                context: "ETWFE needs at least two periods before the reference cohort's onset"
+                    .to_string(),
+            });
+        }
+        let mut dense: Vec<Option<usize>> =
+            resource::try_vec(factor.n_levels(), None, "ETWFE unit codes")?;
+        let mut n_units = 0usize;
+        let mut n_never_units = 0usize;
+        let mut unit = resource::try_with_capacity(n, "ETWFE units")?;
+        for &i in &keep {
+            let slot = &mut dense[factor.codes[i] as usize];
+            let u = match *slot {
+                Some(u) => u,
+                None => {
+                    *slot = Some(n_units);
+                    n_units += 1;
+                    if is_never(ft[i]) {
+                        n_never_units += 1;
+                    }
+                    n_units - 1
+                }
+            };
+            unit.push(u);
+        }
+        if n_units < 2 {
+            return Err(EconError::InsufficientData {
+                required: 2,
+                provided: n_units,
+                context: "ETWFE units".to_string(),
+            });
+        }
+
+        let pick_f = |v: &[f64]| keep.iter().map(|&i| v[i]).collect::<Vec<f64>>();
+        let pick_i = |v: &[i64]| keep.iter().map(|&i| v[i]).collect::<Vec<i64>>();
+        let t = pick_i(times);
+        let g = pick_i(ft);
+        let mut onset = Vec::with_capacity(n);
+        for &gi in &g {
+            onset.push(if is_never(gi) {
+                gi
+            } else {
+                gi.checked_sub(d).ok_or_else(too_large)?
+            });
+        }
+        let reference: Vec<bool> = g.iter().map(|&gi| is_reference(gi)).collect();
+        let treated_cell: Vec<bool> = (0..n)
+            .map(|i| {
+                !reference[i]
+                    && match config.cgroup {
+                        ControlGroup::NotYet => t[i] >= onset[i],
+                        ControlGroup::Never => onset[i].checked_sub(1) != Some(t[i]),
+                    }
+            })
+            .collect();
+        let has_cell =
+            |i: usize| treated_cell[i] && !(config.cgroup == ControlGroup::NotYet && t[i] == tref);
+        let cells: Vec<(i64, i64)> = (0..n)
+            .filter(|&i| has_cell(i))
+            .map(|i| (g[i], t[i]))
+            .collect::<BTreeSet<(i64, i64)>>()
+            .into_iter()
+            .collect();
+        if cells.is_empty() {
+            return Err(EconError::InvalidSpecification {
+                message: "no cohort-period cell to estimate: every treated cohort-period is \
+                          in the reference period"
+                    .to_string(),
+            });
+        }
+        let mut cell_rows = vec![0usize; cells.len()];
+        let cell_of_row: Vec<Option<usize>> = (0..n)
+            .map(|i| {
+                has_cell(i).then(|| {
+                    // cells holds every (g, t) of a cell row
+                    let c = cells.binary_search(&(g[i], t[i])).unwrap_or_default();
+                    cell_rows[c] += 1;
+                    c
+                })
+            })
+            .collect();
+        let period: Vec<usize> = t
+            .iter()
+            .map(|ti| periods.binary_search(ti).unwrap_or_default())
+            .collect();
+        let x: Vec<Vec<f64>> = names
+            .controls
+            .iter()
+            .map(|c| pick_f(cols.numeric(c)))
+            .collect();
+
+        Ok(Spec {
+            n,
+            y: pick_f(y_all),
+            unit,
+            period,
+            t,
+            g,
+            onset,
+            reference,
+            treated_cell,
+            cell_of_row,
+            treat: pick_f(treat_all),
+            x,
+            cells,
+            cell_rows,
+            periods,
+            n_units,
+            n_never_units,
+            tref,
+            gref_cohort,
+            dropped_from,
+            cgroup: config.cgroup,
+            warnings,
+        })
+    }
+}
+
+/// A column of the ETWFE design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Col {
+    /// Cohort-period cell dummy.
+    Cell(usize),
+    /// A control as given.
+    X(usize),
+}
+
+/// The sparse ETWFE design: one column per cell, then the control columns.
+struct Design {
+    names: Vec<String>,
+    kinds: Vec<Col>,
+    /// Row-major nonzeros: row `i` holds `row_col[row_ptr[i]..row_ptr[i + 1]]`.
+    row_ptr: Vec<usize>,
+    row_col: Vec<usize>,
+    row_val: Vec<f64>,
+    /// Column-major nonzeros.
+    col_ptr: Vec<usize>,
+    col_row: Vec<usize>,
+    col_val: Vec<f64>,
+}
+
+impl Design {
+    fn build(spec: &Spec, names: &SpecColumns<'_>) -> EconResult<Design> {
+        let n_cells = spec.cells.len();
+        let mut col_names: Vec<String> = spec
+            .cells
+            .iter()
+            .map(|&(g, t)| format!(".Dtreat:{}::{g}:{}::{t}", names.first_treat, names.time))
+            .collect();
+        let mut kinds: Vec<Col> = (0..n_cells).map(Col::Cell).collect();
+        for (j, x) in names.controls.iter().enumerate() {
+            col_names.push(x.to_string());
+            kinds.push(Col::X(j));
+        }
+        let per_row = 1 + spec.x.len();
+        let cap = resource::checked_len(&[spec.n, per_row], "ETWFE design")?;
+        let mut row_ptr = resource::try_with_capacity(spec.n + 1, "ETWFE design")?;
+        let mut row_col = resource::try_with_capacity(cap, "ETWFE design")?;
+        let mut row_val = resource::try_with_capacity(cap, "ETWFE design")?;
+        row_ptr.push(0);
+        for i in 0..spec.n {
+            if let Some(c) = spec.cell_of_row[i] {
+                row_col.push(c);
+                row_val.push(1.0);
+            }
+            for (j, x) in spec.x.iter().enumerate() {
+                if x[i] != 0.0 {
+                    row_col.push(n_cells + j);
+                    row_val.push(x[i]);
+                }
+            }
+            row_ptr.push(row_col.len());
+        }
+        Design::from_rows(col_names, kinds, row_ptr, row_col, row_val)
+    }
+
+    fn from_rows(
+        names: Vec<String>,
+        kinds: Vec<Col>,
+        row_ptr: Vec<usize>,
+        row_col: Vec<usize>,
+        row_val: Vec<f64>,
+    ) -> EconResult<Design> {
+        let k = names.len();
+        let nnz = row_col.len();
+        let mut col_ptr = resource::try_vec(k + 1, 0usize, "ETWFE design")?;
+        for &c in &row_col {
+            col_ptr[c + 1] += 1;
+        }
+        for c in 0..k {
+            col_ptr[c + 1] += col_ptr[c];
+        }
+        let mut next = col_ptr.clone();
+        let mut col_row = resource::try_vec(nnz, 0usize, "ETWFE design")?;
+        let mut col_val = resource::try_vec(nnz, 0.0f64, "ETWFE design")?;
+        for i in 0..row_ptr.len() - 1 {
+            for e in row_ptr[i]..row_ptr[i + 1] {
+                let c = row_col[e];
+                col_row[next[c]] = i;
+                col_val[next[c]] = row_val[e];
+                next[c] += 1;
+            }
+        }
+        Ok(Design {
+            names,
+            kinds,
+            row_ptr,
+            row_col,
+            row_val,
+            col_ptr,
+            col_row,
+            col_val,
+        })
+    }
+
+    fn ncols(&self) -> usize {
+        self.names.len()
+    }
+
+    /// The nonzeros `(row, value)` of column `c`.
+    fn column(&self, c: usize) -> impl Iterator<Item = (usize, f64)> + '_ {
+        let r = self.col_ptr[c]..self.col_ptr[c + 1];
+        self.col_row[r.clone()]
+            .iter()
+            .copied()
+            .zip(self.col_val[r].iter().copied())
+    }
+
+    /// Column `c` written densely into `out` (length n).
+    fn scatter(&self, c: usize, out: &mut [f64]) {
+        out.fill(0.0);
+        for (i, v) in self.column(c) {
+            out[i] = v;
         }
     }
 
-    // Compute time means
-    let mut time_counts: HashMap<i64, usize> = HashMap::new();
-    let mut time_y_sums: HashMap<i64, f64> = HashMap::new();
-    let mut time_x_sums: HashMap<i64, Vec<f64>> = HashMap::new();
+    /// Centred sum of squares of raw column `c` over `n` rows.
+    fn centred_ss(&self, c: usize, n: usize) -> f64 {
+        let nnz = self.col_ptr[c + 1] - self.col_ptr[c];
+        let mean = self.column(c).map(|(_, v)| v).sum::<f64>() / n as f64;
+        self.column(c)
+            .map(|(_, v)| (v - mean) * (v - mean))
+            .sum::<f64>()
+            + (n - nnz) as f64 * mean * mean
+    }
+}
 
-    for i in 0..n {
-        let t = times[i];
-        *time_counts.entry(t).or_insert(0) += 1;
-        *time_y_sums.entry(t).or_insert(0.0) += y[i];
+/// Exact absorption of unit and period effects on a balanced or unbalanced panel:
+/// sweep the unit means, then project off the unit-demeaned period dummies (periods
+/// `1..T`) through their `(T-1) x (T-1)` normal equations `M` (Frisch-Waugh). With
+/// `D~_is = 1[p_i = s] - n_{u_i s} / n_{u_i}`, `D~'D~ = M` and the residual of the
+/// unit-demeaned `x` on `D~` is the residual of `x` on unit and period dummies.
+struct TwoWayWithin {
+    unit: Vec<usize>,
+    period: Vec<usize>,
+    n_units: usize,
+    n_periods: usize,
+    unit_n: Vec<f64>,
+    /// Per unit, its periods `>= 1` with their row shares `n_up / n_u`.
+    share_ptr: Vec<usize>,
+    share_period: Vec<usize>,
+    share_val: Vec<f64>,
+    /// (Generalized) inverse of `M`.
+    m_inv: Array2<f64>,
+    /// Rank of the unit and period effects together.
+    fe_rank: usize,
+    /// Set when `M` is singular (the unit-period graph is disconnected).
+    warning: Option<String>,
+}
 
-        let x_sum = time_x_sums.entry(t).or_insert_with(|| vec![0.0; k]);
-        for j in 0..k {
-            x_sum[j] += x[[i, j]];
+impl TwoWayWithin {
+    fn new(unit: &[usize], period: &[usize], n_units: usize, n_periods: usize) -> EconResult<Self> {
+        let n = unit.len();
+        let mut pairs: Vec<(usize, usize)> = resource::try_with_capacity(n, "ETWFE panel cells")?;
+        pairs.extend(unit.iter().copied().zip(period.iter().copied()));
+        pairs.sort_unstable();
+        let mut unit_n = resource::try_vec(n_units, 0.0f64, "ETWFE unit counts")?;
+        for &u in unit {
+            unit_n[u] += 1.0;
+        }
+        // Run lengths: (unit, period, rows) in unit order.
+        let mut runs: Vec<(usize, usize, f64)> = Vec::new();
+        for &(u, p) in &pairs {
+            match runs.last_mut() {
+                Some(last) if last.0 == u && last.1 == p => last.2 += 1.0,
+                _ => runs.push((u, p, 1.0)),
+            }
+        }
+        let dim = n_periods.saturating_sub(1);
+        let mut m = resource::try_zeros2(dim, dim, "ETWFE period normal equations")?;
+        let mut share_ptr = resource::try_vec(n_units + 1, 0usize, "ETWFE period shares")?;
+        let mut share_period = Vec::new();
+        let mut share_val = Vec::new();
+        let mut start = 0;
+        while start < runs.len() {
+            let u = runs[start].0;
+            let mut end = start;
+            while end < runs.len() && runs[end].0 == u {
+                end += 1;
+            }
+            let nu = unit_n[u];
+            let own: Vec<(usize, f64)> = runs[start..end]
+                .iter()
+                .filter(|r| r.1 >= 1)
+                .map(|r| (r.1, r.2))
+                .collect();
+            for &(a, na) in &own {
+                m[[a - 1, a - 1]] += na;
+                for &(b, nb) in &own {
+                    m[[a - 1, b - 1]] -= na * nb / nu;
+                }
+                share_period.push(a);
+                share_val.push(na / nu);
+            }
+            share_ptr[u + 1] = share_period.len();
+            start = end;
+        }
+        for u in 0..n_units {
+            share_ptr[u + 1] = share_ptr[u + 1].max(share_ptr[u]);
+        }
+        let (m_inv, m_rank, warning) = if dim == 0 {
+            (Array2::zeros((0, 0)), 0, None)
+        } else {
+            let inv = sym_inverse(
+                m.view(),
+                SingularPolicy::Generalized,
+                "ETWFE period-effect normal equations",
+            )?;
+            let warning = inv.warning(
+                "the period-effect normal equations (the unit-period graph is disconnected)",
+            );
+            (inv.inverse, inv.rank, warning)
+        };
+        Ok(Self {
+            unit: unit.to_vec(),
+            period: period.to_vec(),
+            n_units,
+            n_periods,
+            unit_n,
+            share_ptr,
+            share_period,
+            share_val,
+            m_inv,
+            fe_rank: n_units + m_rank,
+            warning,
+        })
+    }
+
+    /// Replace `x` by its residual on unit and period dummies. O(n + T^2 + sum_u T_u).
+    fn residualize_in_place(&self, x: &mut [f64]) {
+        let mut means = vec![0.0; self.n_units];
+        for (i, &v) in x.iter().enumerate() {
+            means[self.unit[i]] += v;
+        }
+        for (m, &nu) in means.iter_mut().zip(&self.unit_n) {
+            *m /= nu;
+        }
+        for (i, v) in x.iter_mut().enumerate() {
+            *v -= means[self.unit[i]];
+        }
+        if self.n_periods < 2 {
+            return;
+        }
+        let mut rhs = Array1::<f64>::zeros(self.n_periods - 1);
+        for (i, &v) in x.iter().enumerate() {
+            let p = self.period[i];
+            if p > 0 {
+                rhs[p - 1] += v;
+            }
+        }
+        let lambda = self.m_inv.dot(&rhs);
+        // sum_a share_{u,a} lambda_a, once per unit
+        for (u, m) in means.iter_mut().enumerate() {
+            *m = (self.share_ptr[u]..self.share_ptr[u + 1])
+                .map(|e| self.share_val[e] * lambda[self.share_period[e] - 1])
+                .sum();
+        }
+        for (i, v) in x.iter_mut().enumerate() {
+            let p = self.period[i];
+            let lp = if p > 0 { lambda[p - 1] } else { 0.0 };
+            *v -= lp - means[self.unit[i]];
         }
     }
 
-    // Grand means
-    // n >= 1 (ndarray's mean is sum / n)
-    let grand_y_mean = y.sum() / n as f64;
-    let mut grand_x_mean = vec![0.0; k];
-    for j in 0..k {
-        grand_x_mean[j] = x.column(j).sum() / n as f64;
+    /// The residual of `x` on unit and period dummies.
+    fn residualize(&self, x: &Array1<f64>) -> EconResult<Array1<f64>> {
+        let mut out = resource::try_zeros1(x.len(), "ETWFE within transformation")?;
+        out.assign(x);
+        if let Some(s) = out.as_slice_mut() {
+            self.residualize_in_place(s);
+        }
+        Ok(out)
     }
+}
 
-    // Apply two-way demeaning: x_it - x_i. - x_.t + x_..
-    let mut y_demeaned = Array1::zeros(n);
-    let mut x_demeaned = Array2::zeros((n, k));
+/// The fitted ETWFE regression on the within-transformed design.
+struct Fit {
+    /// Raw design column of each term, ascending.
+    kept: Vec<usize>,
+    /// Term index of each raw design column.
+    term_of_col: Vec<Option<usize>>,
+    /// Raw columns absorbed by the unit and period effects.
+    absorbed: Vec<usize>,
+    /// Raw control columns the pivoted QR aliased (removed, then refitted).
+    collinear: Vec<usize>,
+    beta: Array1<f64>,
+    /// `(X_w'X_w)^{-1}` of the kept columns.
+    unscaled: Array2<f64>,
+    /// Cluster: `sqrt(c) B S'` (k x G), so that `w'Vw = ||Z'w||^2`.
+    z: Option<Array2<f64>>,
+    /// Iid residual variance.
+    s2: f64,
+    df_t: usize,
+    ssr: f64,
+    tss_within: f64,
+}
 
-    for i in 0..n {
-        let u = units[i] as usize;
-        let t = times[i];
-
-        let unit_n = unit_counts[u] as f64;
-        let time_n = time_counts[&t] as f64;
-
-        let unit_y_mean = unit_y_sums[u] / unit_n;
-        let time_y_mean = time_y_sums[&t] / time_n;
-
-        y_demeaned[i] = y[i] - unit_y_mean - time_y_mean + grand_y_mean;
-
-        for j in 0..k {
-            let unit_x_mean = unit_x_sums[[u, j]] / unit_n;
-            let time_x_mean = time_x_sums[&t][j] / time_n;
-            x_demeaned[[i, j]] = x[[i, j]] - unit_x_mean - time_x_mean + grand_x_mean[j];
+impl Fit {
+    /// `w'Vw` for a gradient given on its support `(term, weight)`.
+    fn variance(&self, w: &[(usize, f64)]) -> f64 {
+        match &self.z {
+            Some(z) => (0..z.ncols())
+                .map(|g| {
+                    let s: f64 = w.iter().map(|&(j, wj)| z[[j, g]] * wj).sum();
+                    s * s
+                })
+                .sum(),
+            None => {
+                let mut q = 0.0;
+                for &(j, wj) in w {
+                    for &(l, wl) in w {
+                        q += wj * wl * self.unscaled[[j, l]];
+                    }
+                }
+                self.s2 * q
+            }
         }
     }
 
-    Ok((y_demeaned, x_demeaned))
+    fn term(&self, j: usize, name: String) -> EtwfeTerm {
+        let estimate = self.beta[j];
+        let std_error = self.variance(&[(j, 1.0)]).sqrt();
+        let t_stat = estimate / std_error;
+        EtwfeTerm {
+            name,
+            estimate,
+            std_error,
+            t_stat,
+            p_value: t_test_p_value(t_stat, self.df_t as f64),
+        }
+    }
+
+    /// The collinearity warning, when control columns were removed.
+    fn warning(&self, design: &Design) -> Option<String> {
+        (!self.collinear.is_empty()).then(|| {
+            let names: Vec<&str> = self
+                .collinear
+                .iter()
+                .map(|&c| design.names[c].as_str())
+                .collect();
+            format!(
+                "Removed because collinear with other terms: {}",
+                names.join(", ")
+            )
+        })
+    }
+}
+
+/// The "not identified" error for the cells among the raw columns `cols`.
+fn unidentified_cells(spec: &Spec, design: &Design, cols: &[usize]) -> Option<EconError> {
+    let cells: Vec<String> = cols
+        .iter()
+        .filter_map(|&c| match design.kinds[c] {
+            Col::Cell(k) => Some(format!("({},{})", spec.cells[k].0, spec.cells[k].1)),
+            _ => None,
+        })
+        .collect();
+    (!cells.is_empty()).then(|| EconError::SingularMatrix {
+        context: format!(
+            "ETWFE cohort-period effects {} are not identified",
+            cells.join(", ")
+        ),
+        suggestion: "they are collinear with the unit and period effects: no comparison unit \
+                     is observed in those periods; use cgroup = notyet, drop those periods, or \
+                     set gref"
+            .to_string(),
+    })
+}
+
+/// Fit the ETWFE design: structured normal equations of the within-transformed columns
+/// (built column by column from the sparse design, solved through OLS's normal-equations
+/// decision), the pivoted QR on the dense within-transformed design when those are
+/// ill-conditioned or singular.
+fn fit_design(
+    spec: &Spec,
+    design: &Design,
+    within: &TwoWayWithin,
+    vcov: EtwfeVcov,
+) -> EconResult<Fit> {
+    let n = spec.n;
+    let k_raw = design.ncols();
+    let mut y_w = resource::try_zeros1(n, "ETWFE within outcome")?;
+    for (yw, &y) in y_w.iter_mut().zip(&spec.y) {
+        *yw = y;
+    }
+    let mut col = resource::try_vec(n, 0.0f64, "ETWFE within column")?;
+    if let Some(s) = y_w.as_slice_mut() {
+        within.residualize_in_place(s);
+    }
+
+    // Pass over the columns: absorbed check, upper Gram columns, X'y_w.
+    let mut term_of_col: Vec<Option<usize>> = vec![None; k_raw];
+    let mut kept: Vec<usize> = Vec::new();
+    let mut absorbed: Vec<usize> = Vec::new();
+    let mut gram_cols: Vec<Vec<f64>> = Vec::new();
+    let mut xty: Vec<f64> = Vec::new();
+    for c in 0..k_raw {
+        resource::checkpoint()?;
+        let css = design.centred_ss(c, n);
+        design.scatter(c, &mut col);
+        within.residualize_in_place(&mut col);
+        let ss: f64 = col.iter().map(|v| v * v).sum();
+        if css == 0.0 || ss <= ABSORBED_TOL * css {
+            absorbed.push(c);
+            continue;
+        }
+        let kk = kept.len();
+        term_of_col[c] = Some(kk);
+        kept.push(c);
+        let mut gc = resource::try_vec(kk + 1, 0.0f64, "ETWFE cross-products")?;
+        for (i, &r) in col.iter().enumerate() {
+            if r == 0.0 {
+                continue;
+            }
+            for e in design.row_ptr[i]..design.row_ptr[i + 1] {
+                let k = design.row_col[e];
+                if k <= c {
+                    if let Some(kj) = term_of_col[k] {
+                        gc[kj] += design.row_val[e] * r;
+                    }
+                }
+            }
+        }
+        gram_cols.push(gc);
+        xty.push(design.column(c).map(|(i, v)| v * y_w[i]).sum());
+    }
+    if let Some(e) = unidentified_cells(spec, design, &absorbed) {
+        return Err(e);
+    }
+    let k = kept.len();
+    let mut gram = resource::try_zeros2(k, k, "ETWFE cross-products")?;
+    for (c, gc) in gram_cols.iter().enumerate() {
+        for (r, &v) in gc.iter().enumerate() {
+            gram[[r, c]] = v;
+            gram[[c, r]] = v;
+        }
+    }
+    drop(gram_cols);
+    let normal = if k > 0 && k < n {
+        normal_inverse_from_gram(gram.view())?
+    } else {
+        None
+    };
+    drop(gram);
+
+    // y - X beta over the kept columns, within-transformed
+    let within_residual = |beta: &Array1<f64>, kept: &[usize]| -> EconResult<Array1<f64>> {
+        let mut u = resource::try_zeros1(n, "ETWFE residuals")?;
+        for (ui, &y) in u.iter_mut().zip(&spec.y) {
+            *ui = y;
+        }
+        for (j, &c) in kept.iter().enumerate() {
+            for (i, v) in design.column(c) {
+                u[i] -= v * beta[j];
+            }
+        }
+        if let Some(s) = u.as_slice_mut() {
+            within.residualize_in_place(s);
+        }
+        Ok(u)
+    };
+
+    let mut collinear: Vec<usize> = Vec::new();
+    let (beta, unscaled, resid, dense) = match normal {
+        Some(inv) => {
+            let xty = Array1::from(xty);
+            let mut beta = inv.inverse.dot(&xty);
+            if inv.refine {
+                let u = within_residual(&beta, &kept)?;
+                let g: Array1<f64> = kept
+                    .iter()
+                    .map(|&c| design.column(c).map(|(i, v)| v * u[i]).sum())
+                    .collect();
+                beta += &inv.inverse.dot(&g);
+            }
+            let u = within_residual(&beta, &kept)?;
+            (beta, inv.inverse, u, None)
+        }
+        None => {
+            let mut x_w = resource::try_zeros2(n, k, "ETWFE within design")?;
+            for (j, &c) in kept.iter().enumerate() {
+                resource::checkpoint()?;
+                design.scatter(c, &mut col);
+                within.residualize_in_place(&mut col);
+                x_w.column_mut(j).assign(&ArrayView1::from(&col[..]));
+            }
+            let mut ls = least_squares(x_w.view(), y_w.view())?;
+            let aliased: Vec<usize> = ls.aliased.iter().map(|&j| kept[j]).collect();
+            if let Some(e) = unidentified_cells(spec, design, &aliased) {
+                return Err(e);
+            }
+            if !aliased.is_empty() {
+                let keep_j: Vec<usize> = (0..k).filter(|j| !ls.aliased.contains(j)).collect();
+                let mut reduced = resource::try_zeros2(n, keep_j.len(), "ETWFE within design")?;
+                for (jj, &j) in keep_j.iter().enumerate() {
+                    reduced.column_mut(jj).assign(&x_w.column(j));
+                }
+                x_w = reduced;
+                ls = least_squares(x_w.view(), y_w.view())?;
+                debug_assert!(ls.aliased.is_empty());
+                collinear = aliased;
+                kept.retain(|c| !collinear.contains(c));
+                term_of_col = vec![None; k_raw];
+                for (j, &c) in kept.iter().enumerate() {
+                    term_of_col[c] = Some(j);
+                }
+            }
+            (ls.coefficients, ls.unscaled_cov, ls.residuals, Some(x_w))
+        }
+    };
+    let k = kept.len();
+    let ssr: f64 = resid.iter().map(|u| u * u).sum();
+    let tss_within: f64 = y_w.iter().map(|v| v * v).sum();
+
+    let (z, s2, df_t) = match vcov {
+        EtwfeVcov::Cluster => {
+            let g = spec.n_units;
+            let big_k = k + spec.periods.len();
+            let dof = n.checked_sub(big_k).filter(|&v| v > 0).ok_or_else(|| {
+                EconError::InsufficientData {
+                    required: big_k + 1,
+                    provided: n,
+                    context: "ETWFE clustered variance".to_string(),
+                }
+            })?;
+            // S (G x k): per-unit scores of the within design
+            let mut scores = resource::try_zeros2(g, k, "ETWFE cluster scores")?;
+            match &dense {
+                Some(x_w) => {
+                    for i in 0..n {
+                        let u = spec.unit[i];
+                        for j in 0..k {
+                            scores[[u, j]] += x_w[[i, j]] * resid[i];
+                        }
+                    }
+                }
+                None => {
+                    for (j, &c) in kept.iter().enumerate() {
+                        resource::checkpoint()?;
+                        design.scatter(c, &mut col);
+                        within.residualize_in_place(&mut col);
+                        for (i, &r) in col.iter().enumerate() {
+                            scores[[spec.unit[i], j]] += r * resid[i];
+                        }
+                    }
+                }
+            }
+            let gf = g as f64;
+            let factor = gf / (gf - 1.0) * (n as f64 - 1.0) / dof as f64;
+            let z = unscaled.dot(&scores.t()) * factor.sqrt();
+            (Some(z), f64::NAN, g - 1)
+        }
+        EtwfeVcov::Iid => {
+            let df = n
+                .checked_sub(k + within.fe_rank)
+                .filter(|&v| v > 0)
+                .ok_or_else(|| EconError::InsufficientData {
+                    required: k + within.fe_rank + 1,
+                    provided: n,
+                    context: "ETWFE residual degrees of freedom".to_string(),
+                })?;
+            (None, ssr / df as f64, df)
+        }
+    };
+    Ok(Fit {
+        kept,
+        term_of_col,
+        absorbed,
+        collinear,
+        beta,
+        unscaled,
+        z,
+        s2,
+        df_t,
+        ssr,
+        tss_within,
+    })
 }
 
 /// Aggregate cohort-time effects by relative time (event study).
@@ -1332,6 +2203,396 @@ mod tests {
                 ),
                 other => panic!("expected InvalidSpecification, got {other:?}"),
             }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // T3-WP22: etwfe(ivar = unit) + emfx (validation/r/cases/causal_etwfe.R)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    use p2a_validation::{Check, Tol};
+
+    fn fit(ds: &Dataset, x: Option<&[&str]>, cfg: EtwfeConfig) -> EtwfeResult {
+        run_etwfe(ds, "y", "id", "year", "treat", "first_treat", x, Some(cfg)).unwrap()
+    }
+
+    fn spec(cgroup: ControlGroup) -> EtwfeConfig {
+        EtwfeConfig {
+            cgroup,
+            ..EtwfeConfig::default()
+        }
+    }
+
+    /// A generated CSV of the ETWFE cases, read without loading a case (property tests).
+    fn panel_csv(name: &str) -> Dataset {
+        let p = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        Dataset::new(crate::data::DataLoader::load_csv(&p).unwrap())
+    }
+
+    fn all_treated_panel() -> Dataset {
+        panel_csv("etwfe_panel_all_treated")
+    }
+
+    fn with_i64(ds: &Dataset, col: &str, f: impl Fn(usize, i64) -> i64) -> Dataset {
+        let v: Vec<i64> = i64_col(ds, col)
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| f(i, x))
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(col.into(), v)).unwrap();
+        Dataset::new(df)
+    }
+
+    /// `ds` without the rows where `pred(first_treat, year)` holds.
+    fn drop_rows(ds: &Dataset, pred: impl Fn(i64, i64) -> bool) -> Dataset {
+        let (g, t) = (i64_col(ds, "first_treat"), i64_col(ds, "year"));
+        without_rows(ds, |i| pred(g[i], t[i]))
+    }
+
+    /// `<prefix>_coef|_se|_pvalue` (named as fixest) and `<prefix>_nobs`.
+    fn check_terms(ck: &mut Check<'_>, prefix: &str, r: &EtwfeResult) {
+        let names: Vec<&str> = r.terms.iter().map(|t| t.name.as_str()).collect();
+        let col = |f: fn(&EtwfeTerm) -> f64| r.terms.iter().map(f).collect::<Vec<f64>>();
+        let n = r.n_obs;
+        ck.named(
+            &format!("{prefix}_coef"),
+            &names,
+            &col(|t| t.estimate),
+            Tol::coef(n),
+        )
+        .named(
+            &format!("{prefix}_se"),
+            &names,
+            &col(|t| t.std_error),
+            Tol::se(n),
+        )
+        .named(
+            &format!("{prefix}_pvalue"),
+            &names,
+            &col(|t| t.p_value),
+            Tol::p_value(n),
+        )
+        .scalar(&format!("{prefix}_nobs"), n as f64, Tol::exact());
+    }
+
+    #[test]
+    fn test_validate_etwfe_notyet() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let r = fit(&ds, None, EtwfeConfig::default());
+        let mut ck = Check::new(&case);
+        check_terms(&mut ck, "notyet", &r);
+        ck.scalar("n_clusters", r.n_units as f64, Tol::exact());
+        ck.finish();
+        assert_eq!(
+            (r.vcov, r.df_t, r.ref_time, r.ref_cohort, r.n_never_units),
+            (EtwfeVcov::Cluster, 119, 1, None, 35)
+        );
+        assert_eq!(r.cohort_time_effects.len(), 9);
+        assert!(r.dropped_terms.is_empty() && r.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validate_etwfe_iid() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let mut c = EtwfeConfig::default();
+        c.vcov = EtwfeVcov::Iid;
+        let r = fit(&ds, None, c);
+        let mut ck = Check::new(&case);
+        check_terms(&mut ck, "notyet_iid", &r);
+        ck.scalar("notyet_iid_df", r.df_t as f64, Tol::exact());
+        ck.finish();
+    }
+
+    #[test]
+    fn test_validate_etwfe_never() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let r = fit(&ds, None, spec(ControlGroup::Never));
+        let mut ck = Check::new(&case);
+        check_terms(&mut ck, "never", &r);
+        ck.finish();
+        assert_eq!(r.cohort_time_effects.len(), 21);
+        assert!(r.cohort_time_effects.iter().all(|c| c.rel_time != -1));
+    }
+
+    #[test]
+    fn test_validate_etwfe_tref() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let mut c = EtwfeConfig::default();
+        c.tref = Some(4);
+        let r = fit(&ds, None, c);
+        let mut ck = Check::new(&case);
+        check_terms(&mut ck, "tref4", &r);
+        ck.finish();
+        assert_eq!(r.ref_time, 4);
+        assert!(!r.cohort_time_effects.iter().any(|c| c.time == 4));
+    }
+
+    #[test]
+    fn test_validate_etwfe_anticipation() {
+        let (case, ds) = crate::test_support::load_case("etwfe_staggered");
+        let mut c = EtwfeConfig::default();
+        c.anticipation = 1;
+        let r = fit(&ds, None, c);
+        let cells = &r.cohort_time_effects;
+        // R fits etwfe on the onset first_treat - 1 (column first_treat_ant)
+        let names: Vec<String> = cells
+            .iter()
+            .map(|e| format!(".Dtreat:first_treat_ant::{}:year::{}", e.cohort - 1, e.time))
+            .collect();
+        let v = |f: fn(&CohortTimeEffect) -> f64| cells.iter().map(f).collect::<Vec<f64>>();
+        let n = r.n_obs;
+        Check::new(&case)
+            .named("ant1_coef", &names, &v(|e| e.estimate), Tol::coef(n))
+            .named("ant1_se", &names, &v(|e| e.std_error), Tol::se(n))
+            .named("ant1_pvalue", &names, &v(|e| e.p_value), Tol::p_value(n))
+            .scalar("ant1_nobs", n as f64, Tol::exact())
+            .finish();
+        let leads: Vec<(i64, i64)> = cells
+            .iter()
+            .filter(|e| e.rel_time == -1)
+            .map(|e| (e.cohort, e.time))
+            .collect();
+        assert_eq!(leads, vec![(4, 3), (6, 5), (8, 7)]);
+        assert_eq!(r.anticipation, 1);
+    }
+
+    #[test]
+    fn test_validate_etwfe_unbalanced() {
+        let (case, ds) = crate::test_support::load_case("etwfe_unbalanced");
+        let mut ck = Check::new(&case);
+        check_terms(&mut ck, "unbal", &fit(&ds, None, EtwfeConfig::default()));
+        check_terms(
+            &mut ck,
+            "unbal_never",
+            &fit(&ds, None, spec(ControlGroup::Never)),
+        );
+        ck.finish();
+    }
+
+    #[test]
+    fn test_validate_etwfe_all_treated() {
+        let (case, _) = crate::test_support::load_case("etwfe_unbalanced");
+        let ds = all_treated_panel();
+        let r = fit(&ds, None, EtwfeConfig::default());
+        let mut gref6 = EtwfeConfig::default();
+        gref6.gref = Some(6);
+        let mut never8 = spec(ControlGroup::Never);
+        never8.gref = Some(8);
+        let mut ck = Check::new(&case);
+        check_terms(&mut ck, "alltreated", &r);
+        check_terms(&mut ck, "alltreated_gref6", &fit(&ds, None, gref6));
+        check_terms(&mut ck, "alltreated_never_gref8", &fit(&ds, None, never8));
+        ck.finish();
+        assert_eq!(
+            (r.ref_cohort, r.n_periods, r.n_never_units, r.n_obs),
+            (Some(8), 7, 0, 840)
+        );
+        let never = run_etwfe(
+            &ds,
+            "y",
+            "id",
+            "year",
+            "treat",
+            "first_treat",
+            None,
+            Some(spec(ControlGroup::Never)),
+        );
+        match never {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("cgroup = never"), "{message}")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_etwfe_unidentified_cells_are_an_error() {
+        // evidence: on the all-treated panel with cgroup = never and gref = 8, fixest
+        // drops .Dtreat:first_treat::6:year::2 as collinear; p2a refuses it
+        let ds = all_treated_panel();
+        let mut c = spec(ControlGroup::Never);
+        c.gref = Some(8);
+        // QR-aliased: year 2 holds cohorts 4 and 6 only
+        let aliased = drop_rows(&ds, |g, t| g == 8 && t == 2);
+        // absorbed: year 2 holds cohort 6 only
+        let absorbed = drop_rows(&ds, |g, t| (g == 4 || g == 8) && t == 2);
+        for (d, rows) in [(aliased, 927), (absorbed, 885)] {
+            assert_eq!(d.nrows(), rows);
+            let r = run_etwfe(
+                &d,
+                "y",
+                "id",
+                "year",
+                "treat",
+                "first_treat",
+                None,
+                Some(c.clone()),
+            );
+            match r {
+                Err(EconError::SingularMatrix { context, .. }) => {
+                    assert!(
+                        context.contains("(6,2)") && context.contains("not identified"),
+                        "{context}"
+                    )
+                }
+                other => panic!("expected SingularMatrix, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_etwfe_rejects_degenerate_inputs() {
+        let ds = panel_csv("etwfe_panel");
+        let err = |d: &Dataset, c: EtwfeConfig| {
+            run_etwfe(d, "y", "id", "year", "treat", "first_treat", None, Some(c))
+                .expect_err("expected an error")
+        };
+        let mut c = EtwfeConfig::default();
+        c.tref = Some(99);
+        let e = err(&ds, c).to_string();
+        assert!(e.contains("tref 99"), "{e}");
+        let mut c = EtwfeConfig::default();
+        c.gref = Some(5);
+        let e = err(&ds, c).to_string();
+        assert!(e.contains("gref 5"), "{e}");
+        // row 0 is id 1, year 1, first_treat 4, treat 0
+        let d = with_i64(&ds, "treat", |i, v| if i == 0 { 1 } else { v });
+        let e = err(&d, EtwfeConfig::default()).to_string();
+        assert!(e.contains("treat") && e.contains("first_treat is 4"), "{e}");
+        let d = with_i64(&ds, "first_treat", |i, v| if i == 0 { 6 } else { v });
+        let e = err(&d, EtwfeConfig::default()).to_string();
+        assert!(e.contains("constant within each unit"), "{e}");
+        let d = with_i64(&with_i64(&ds, "first_treat", |_, _| 0), "treat", |_, _| 0);
+        let e = err(&d, EtwfeConfig::default()).to_string();
+        assert!(e.contains("no treated cohort"), "{e}");
+        let year1 = ds.df().column("year").unwrap().i64().unwrap().equal(1);
+        let d = Dataset::new(ds.df().filter(&year1).unwrap());
+        match err(&d, EtwfeConfig::default()) {
+            EconError::InsufficientData {
+                required: 2,
+                provided: 1,
+                ..
+            } => {}
+            other => panic!("expected InsufficientData, got {other:?}"),
+        }
+        let mut c = EtwfeConfig::default();
+        c.anticipation = usize::MAX;
+        let e = err(&ds, c).to_string();
+        assert!(e.contains("anticipation"), "{e}");
+        // nothing post-treatment to estimate: cohort 8's only treated period is tref
+        let d = drop_rows(&ds, |g, _| g == 4 || g == 6);
+        let mut c = EtwfeConfig::default();
+        c.tref = Some(8);
+        let e = err(&d, c).to_string();
+        assert!(e.contains("no cohort-period cell to estimate"), "{e}");
+    }
+
+    #[test]
+    fn test_etwfe_two_way_within_matches_dummy_regression() {
+        let ds = panel_csv("etwfe_panel_unbalanced");
+        let u: Vec<usize> = i64_col(&ds, "id").iter().map(|&v| v as usize - 1).collect();
+        let p: Vec<usize> = i64_col(&ds, "year")
+            .iter()
+            .map(|&v| v as usize - 1)
+            .collect();
+        let y: Array1<f64> = ds
+            .df()
+            .column("y")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .iter()
+            .map(|v| v.unwrap())
+            .collect();
+        let n = y.len();
+        let mut d = Array2::<f64>::zeros((n, 1 + 119 + 7));
+        for i in 0..n {
+            d[[i, 0]] = 1.0;
+            if u[i] > 0 {
+                d[[i, u[i]]] = 1.0;
+            }
+            if p[i] > 0 {
+                d[[i, 119 + p[i]]] = 1.0;
+            }
+        }
+        let want = crate::linalg::solve::least_squares(d.view(), y.view())
+            .unwrap()
+            .residuals;
+        let tw = TwoWayWithin::new(&u, &p, 120, 8).unwrap();
+        let got = tw.residualize(&y).unwrap();
+        for i in 0..n {
+            assert!(
+                (got[i] - want[i]).abs() < 1e-10,
+                "row {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+        assert_eq!(tw.fe_rank, 127);
+        assert!(tw.warning.is_none());
+        // two disconnected balanced 2 x 2 blocks
+        let u = [0, 0, 1, 1, 2, 2, 3, 3];
+        let p = [0, 1, 0, 1, 2, 3, 2, 3];
+        let x = Array1::from(vec![1.3, 2.9, 0.4, 2.2, 5.1, 3.3, 4.6, 6.0]);
+        let tw = TwoWayWithin::new(&u, &p, 4, 4).unwrap();
+        let got = tw.residualize(&x).unwrap();
+        let want = [0.05, -0.05, -0.05, 0.05, 0.8, -0.8, -0.8, 0.8];
+        for i in 0..8 {
+            assert!(
+                (got[i] - want[i]).abs() < 1e-12,
+                "row {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+        assert_eq!(tw.fe_rank, 6);
+        assert!(tw.warning.is_some());
+    }
+
+    #[test]
+    fn test_control_group_parses_aliases_and_rejects_unknown() {
+        assert_eq!(ControlGroup::choices().validate(), Ok(()));
+        for s in ["Not-Yet-Treated", "notyet", " not yet "] {
+            assert_eq!(
+                s.parse::<ControlGroup>().unwrap(),
+                ControlGroup::NotYet,
+                "{s}"
+            );
+        }
+        for s in ["NEVER", "never_treated"] {
+            assert_eq!(
+                s.parse::<ControlGroup>().unwrap(),
+                ControlGroup::Never,
+                "{s}"
+            );
+        }
+        match "nevr".parse::<ControlGroup>() {
+            Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                message,
+                "unknown cgroup 'nevr'; expected one of: notyet, never"
+            ),
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+        assert_eq!(ControlGroup::NotYet.to_string(), "Not-Yet-Treated");
+    }
+
+    #[test]
+    fn test_etwfe_vcov_parses_aliases_and_rejects_unknown() {
+        assert_eq!(EtwfeVcov::choices().validate(), Ok(()));
+        for s in ["CR1", "Clustered"] {
+            assert_eq!(s.parse::<EtwfeVcov>().unwrap(), EtwfeVcov::Cluster, "{s}");
+        }
+        for s in ["IID", "classical"] {
+            assert_eq!(s.parse::<EtwfeVcov>().unwrap(), EtwfeVcov::Iid, "{s}");
+        }
+        assert_eq!(EtwfeVcov::Cluster.to_string(), "cluster");
+        assert_eq!(EtwfeVcov::Iid.to_string(), "iid");
+        match "hc1".parse::<EtwfeVcov>() {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert_eq!(message, "unknown vcov 'hc1'; expected one of: cluster, iid")
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
         }
     }
 }

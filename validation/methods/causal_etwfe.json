@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "etwfe",
+      "name": "Extended two-way fixed effects (Wooldridge) with emfx aggregations",
+      "category": "econometrics",
+      "reference": "etwfe::etwfe(fml, tvar, gvar, ivar = unit, cgroup = 'notyet' | 'never', tref, gref, vcov = ~unit | 'iid') via fixest::feols; etwfe::emfx(type = 'simple' | 'event' | 'group' | 'calendar'); exact delta method written out in validation/r/cases/causal_etwfe.R; anticipation as etwfe on first_treat - anticipation",
+      "doc": "validation/econometrics/etwfe.md",
+      "cases": [
+        "etwfe_staggered",
+        "etwfe_unbalanced"
+      ],
+      "tests": [
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_notyet",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_iid",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_never",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_tref",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_anticipation",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_unbalanced",
+        "p2a-core::econometrics::etwfe::tests::test_validate_etwfe_all_treated"
+      ],
+      "quantities": [
+        "cohort x period coefficients (notyet, never, tref, anticipation)",
+        "control and control-interaction coefficients",
+        "unit-clustered (fixest CR1) and iid SEs",
+        "cell t p-values (G - 1 and n - k - rank(FE) df)",
+        "emfx simple, event, group and calendar estimates",
+        "delta-method SEs, z p-values, 95% and 90% CIs",
+        "rows per aggregate",
+        "nobs, clusters, residual df",
+        "unbalanced panels",
+        "all-treated panels (default and user gref, cgroup never with gref)",
+        "absorbed and collinear terms",
+        "non-identified cells refused"
+      ],
+      "tolerance": "validation/README.md, n = 600-960: coefficients and aggregates 1e-8, SEs, p-values and CIs 1e-6 relative; counts and keys exact; marginaleffects' numerical-Jacobian SEs cross-checked at 1e-6 relative",
+      "deviations": [
+        {
+          "finding": "CAUS-14",
+          "quantity": "default vcov",
+          "note": "default vcov is clustered by unit (CR1, fixest's small-sample factor); fixest 0.14 / etwfe 0.6.2 default to iid; vcov = Iid reproduces it (the cases request both explicitly)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
