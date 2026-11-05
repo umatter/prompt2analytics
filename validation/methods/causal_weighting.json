@@ -122,6 +122,59 @@
       "tolerance": "weights 1e-8 relative + 1e-12 absolute; objective, means and effect 1e-8 relative (Tol::coef(300)); zero counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "treatment_ipw",
+      "name": "IPW (Hajek, Horvitz-Thompson, ATT) with EIF, M-estimation and propensity-known standard errors",
+      "category": "econometrics",
+      "reference": "glm(binomial) propensity; sandwich::vcovHC(type = 'HC0') of lm(y ~ treat, weights); stacked M-estimation sandwich = WeightIt::lm_weightit(vcov = 'asympt')",
+      "doc": "validation/econometrics/treatment_ipw.md",
+      "cases": [
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_ipw_hajek_se",
+        "p2a-core::econometrics::treatment::tests::test_validate_ipw_ht_se",
+        "p2a-core::econometrics::treatment::tests::test_validate_ipw_att_se"
+      ],
+      "quantities": [
+        "effect",
+        "SE (M-estimation; std_error, WP23-14 (a))",
+        "SE (efficient influence function; se_eif)",
+        "SE (propensity known)",
+        "95% CI",
+        "z",
+        "p"
+      ],
+      "tolerance": "validation/README.md, n = 300: effects 1e-8, SEs 1e-6 relative; WeightIt cross-check 1e-6",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/ipw_aipw_manual.csv"
+      ]
+    },
+    {
+      "id": "treatment_aipw",
+      "name": "Doubly robust AIPW (ATE, ATT) and regression adjustment",
+      "category": "econometrics",
+      "reference": "AIPW with OLS outcome models per arm (lm), glm(binomial) propensity; SE sd(psi)/sqrt(n)",
+      "doc": "validation/econometrics/treatment_aipw.md",
+      "cases": [
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_aipw",
+        "p2a-core::econometrics::treatment::tests::test_validate_aipw_att",
+        "p2a-core::econometrics::treatment::tests::test_validate_dr_regression"
+      ],
+      "quantities": [
+        "AIPW ATE and SE",
+        "AIPW ATT and SE",
+        "regression-adjustment ATE",
+        "outcome-model R2"
+      ],
+      "tolerance": "validation/README.md, n = 300: effects 1e-8, SEs and R2 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

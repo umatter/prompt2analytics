@@ -485,6 +485,10 @@ mod tests {
             trim: 0.01,
             bootstrap_reps: 100,
             warnings: vec![],
+            se_method: "M-estimation (propensity estimated)".to_string(),
+            se_mest: None,
+            se_naive: None,
+            se_eif: None,
         }
     }
 

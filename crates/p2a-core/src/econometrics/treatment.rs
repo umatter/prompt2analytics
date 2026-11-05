@@ -15,7 +15,7 @@
 //! - Implementation inspired by R package `causalweight` (Bodory & Huber, 2018).
 //!   Source: <https://cran.r-project.org/package=causalweight>
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 use rand::SeedableRng;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -27,10 +27,12 @@ use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmLink, fit_propensity};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::options::Choices;
 use crate::resource;
-use crate::traits::estimator::{SignificanceLevel, normal_cdf};
+use crate::stats::robust::{QuantileType, percentile_interval, quantile_sorted};
+use crate::traits::convergence::{ResultNotes, notes_text};
+use crate::traits::estimator::{SignificanceLevel, normal_p_value_two_sided, z_critical};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -109,20 +111,24 @@ crate::option_enum!(
 pub struct IpwConfig {
     /// Target estimand (ATE or ATT)
     pub estimand: Estimand,
-    /// Trimming threshold for propensity scores (default: 0.05)
+    /// Trimming threshold for propensity scores (default: 0.05), in [0, 0.5).
     /// Observations with p(X) < trim or p(X) > 1-trim are excluded
     pub trim: f64,
     /// Number of bootstrap replications for standard errors (default: 0 = analytic).
-    /// When 0, uses the influence-function variance estimator (Lunceford & Davidian 2004).
-    /// Set to e.g. 999 to use bootstrap instead. Must be 0 or at least 2; a count whose
+    /// When 0, `std_error` is the M-estimation SE that accounts for the estimated logit
+    /// propensity (`se_mest`). Set to e.g. 999 to use the bootstrap instead. Must be 0 or at least 2; a count whose
     /// result buffer cannot be allocated is refused with `EconError::ResourceLimit`.
     pub bootstrap: usize,
     /// Use normalized (Hajek) weights (default: true)
     /// If false, uses Horvitz-Thompson weights
     pub normalized: bool,
-    /// Random seed for bootstrap (optional, for reproducibility)
+    /// Random seed for the bootstrap; `None` uses [`DEFAULT_BOOTSTRAP_SEED`] (42), so
+    /// results are reproducible.
     pub seed: Option<u64>,
 }
+
+/// Seed used by the IPW and doubly-robust bootstraps when `seed` is `None`.
+pub const DEFAULT_BOOTSTRAP_SEED: u64 = 42;
 
 impl Default for IpwConfig {
     fn default() -> Self {
@@ -143,14 +149,15 @@ pub struct DoublyRobustConfig {
     pub method: DRMethod,
     /// Target estimand (ATE or ATT)
     pub estimand: Estimand,
-    /// Trimming threshold for propensity scores
+    /// Trimming threshold for propensity scores, in [0, 0.5)
     pub trim: f64,
     /// Number of bootstrap replications. Methods `IPW` and `Regression` take their
     /// standard errors from the bootstrap and need at least 2; `AIPW` uses the analytic
     /// influence function and ignores this field. A count whose result buffer cannot be
     /// allocated is refused with `EconError::ResourceLimit`.
     pub bootstrap: usize,
-    /// Random seed for bootstrap
+    /// Random seed for the bootstrap; `None` uses [`DEFAULT_BOOTSTRAP_SEED`] (42), so
+    /// results are reproducible.
     pub seed: Option<u64>,
 }
 
@@ -196,7 +203,8 @@ pub struct IpwResult {
     pub estimand: Estimand,
     /// Estimated treatment effect
     pub effect: f64,
-    /// Standard error (via bootstrap)
+    /// Standard error: the M-estimation SE (`se_mest`) when `bootstrap_reps = 0`, else the
+    /// bootstrap SD; `se_method` names it
     pub std_error: f64,
     /// 95% confidence interval lower bound
     pub ci_lower: f64,
@@ -226,10 +234,40 @@ pub struct IpwResult {
     pub normalized: bool,
     /// Trimming threshold used
     pub trim: f64,
-    /// Number of bootstrap replications
+    /// Number of bootstrap replications (0 when the SE is analytic)
     pub bootstrap_reps: usize,
     /// Warnings generated during estimation
     pub warnings: Vec<String>,
+    /// How `std_error` was computed: "M-estimation (propensity estimated)", "efficient
+    /// influence function", "propensity treated as known (outcome models unavailable)" or
+    /// "bootstrap (B replicates)"
+    #[serde(default)]
+    pub se_method: String,
+    /// M-estimation SE of the stacked logit-score and weighted-mean equations (the
+    /// propensity estimation is accounted for; with trimming, the trimmed set is held
+    /// fixed); `None` when the propensity information matrix is singular
+    #[serde(default)]
+    pub se_mest: Option<f64>,
+    /// SE with the propensity treated as known (Hajek and ATT: HC0 of the weighted lm; HT:
+    /// its influence function)
+    #[serde(default)]
+    pub se_naive: Option<f64>,
+    /// Efficient-influence-function SE (outcome models per arm); `None` when an outcome
+    /// model cannot be fitted
+    #[serde(default)]
+    pub se_eif: Option<f64>,
+}
+
+impl ResultNotes for IpwResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+impl ResultNotes for DoublyRobustResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for IpwResult {
@@ -240,7 +278,11 @@ impl fmt::Display for IpwResult {
         writeln!(f)?;
         writeln!(f, "Treatment Effect:")?;
         writeln!(f, "  Effect:     {:>12.4}", self.effect)?;
-        writeln!(f, "  Std. Error: {:>12.4}", self.std_error)?;
+        writeln!(
+            f,
+            "  Std. Error: {:>12.4} ({})",
+            self.std_error, self.se_method
+        )?;
         writeln!(f, "  t-stat:     {:>12.2}", self.t_stat)?;
         writeln!(
             f,
@@ -252,6 +294,13 @@ impl fmt::Display for IpwResult {
             f,
             "  95% CI:     [{:.4}, {:.4}]",
             self.ci_lower, self.ci_upper
+        )?;
+        let fmt_se = |v: Option<f64>| v.map_or("not computed".to_string(), |v| format!("{v:.4}"));
+        writeln!(
+            f,
+            "  Other SEs: efficient influence function {}; propensity treated as known {}",
+            fmt_se(self.se_eif),
+            fmt_se(self.se_naive)
         )?;
         writeln!(f)?;
         writeln!(f, "Sample:")?;
@@ -296,16 +345,7 @@ impl fmt::Display for IpwResult {
         )?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -318,7 +358,8 @@ pub struct DoublyRobustResult {
     pub estimand: Estimand,
     /// Estimated treatment effect
     pub effect: f64,
-    /// Standard error (via bootstrap)
+    /// Standard error: AIPW the analytic influence-function SE sd(IF)/sqrt(n); IPW and
+    /// Regression the bootstrap SD; `se_method` names it
     pub std_error: f64,
     /// 95% confidence interval lower bound
     pub ci_lower: f64,
@@ -346,10 +387,14 @@ pub struct DoublyRobustResult {
     pub outcome_r2_control: f64,
     /// Trimming threshold
     pub trim: f64,
-    /// Bootstrap replications
+    /// Bootstrap replications (0 when the SE is analytic)
     pub bootstrap_reps: usize,
     /// Warnings
     pub warnings: Vec<String>,
+    /// How `std_error` was computed: "analytic influence function" or "bootstrap (B
+    /// replicates)"
+    #[serde(default)]
+    pub se_method: String,
 }
 
 impl fmt::Display for DoublyRobustResult {
@@ -361,7 +406,11 @@ impl fmt::Display for DoublyRobustResult {
         writeln!(f)?;
         writeln!(f, "Treatment Effect:")?;
         writeln!(f, "  Effect:     {:>12.4}", self.effect)?;
-        writeln!(f, "  Std. Error: {:>12.4}", self.std_error)?;
+        writeln!(
+            f,
+            "  Std. Error: {:>12.4} ({})",
+            self.std_error, self.se_method
+        )?;
         writeln!(f, "  t-stat:     {:>12.2}", self.t_stat)?;
         writeln!(
             f,
@@ -395,16 +444,7 @@ impl fmt::Display for DoublyRobustResult {
         )?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -415,7 +455,12 @@ impl fmt::Display for DoublyRobustResult {
 /// Run IPW (Inverse Probability Weighting) treatment effect estimation.
 ///
 /// Estimates ATE or ATT using propensity score weighting with optional trimming.
-/// Standard errors are computed via bootstrap.
+///
+/// With `bootstrap = 0` (the default) `std_error` is the M-estimation SE of the stacked
+/// logit-score and weighted-mean equations (`se_mest`; the propensity estimation is
+/// accounted for, and a trimmed set is held fixed); the result also carries the
+/// efficient-influence-function SE (`se_eif`) and the SE with the propensity treated as known
+/// (`se_naive`). With `bootstrap >= 2` it is the bootstrap SD.
 ///
 /// # Arguments
 /// * `dataset` - The dataset containing outcome, treatment, and covariates
@@ -456,6 +501,7 @@ pub fn run_ipw_treatment(
 ) -> EconResult<IpwResult> {
     let mut warnings = Vec::new();
 
+    validate_trim(config.trim)?;
     if config.bootstrap == 1 {
         return Err(EconError::InvalidSpecification {
             message: "bootstrap must be 0 (analytic influence-function SE) or at least 2; got 1"
@@ -572,106 +618,101 @@ pub fn run_ipw_treatment(
         ));
     }
 
-    // Standard errors: analytic EIF (default) or bootstrap
-    let (std_error, ci_lower, ci_upper) = if config.bootstrap == 0 {
-        // Efficient influence function variance (Lunceford & Davidian 2004, Theorem 1).
-        //
-        // When propensity scores are estimated via MLE, the asymptotic variance of the
-        // IPW estimator equals the semiparametric efficiency bound.  The correct variance
-        // estimator uses the *augmented* (efficient) influence function, which includes
-        // outcome model projections.  This accounts for the negative covariance between
-        // PS estimation error and the IPW estimator, producing smaller (correct) SEs
-        // compared to the naive IF that treats propensity scores as known.
-        //
-        // For ATE:
-        //   EIF_i = D_i(Y_i - mu1(X_i))/e_i - (1-D_i)(Y_i - mu0(X_i))/(1-e_i)
-        //           + mu1(X_i) - mu0(X_i) - tau
-        //
-        // For ATT:
-        //   EIF_i = (1/p1) * [D_i(Y_i - mu0(X_i) - tau)
-        //           - (1-D_i) e_i/(1-e_i) (Y_i - mu0(X_i))]
-        //
-        // where mu_d(X) = E[Y | D=d, X] estimated by OLS within each treatment group.
-        let n_f = n_trim as f64;
-
-        // Fit outcome regression models for EIF correction
-        let mu1_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, true);
-        let mu0_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, false);
-
-        let se = match config.estimand {
-            Estimand::ATE => {
-                match (mu1_fit, mu0_fit) {
-                    (Ok((mu1, _)), Ok((mu0, _))) => {
-                        // EIF-based variance (Lunceford & Davidian 2004, eq. 3.5)
-                        let mut sum_eif_sq = 0.0;
-                        for i in 0..n_trim {
-                            let di = d_trim[i];
-                            let yi = y_trim[i];
-                            let ei = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-
-                            let ipw_term = if di >= 0.5 {
-                                (yi - mu1[i]) / ei
-                            } else {
-                                -(yi - mu0[i]) / (1.0 - ei)
-                            };
-                            let eif_i = ipw_term + mu1[i] - mu0[i] - effect;
-
-                            sum_eif_sq += eif_i * eif_i;
-                        }
-                        (sum_eif_sq / (n_f * n_f)).sqrt()
-                    }
-                    _ => {
-                        // Fallback: naive IF (treats PS as known) if outcome model fails
-                        naive_if_se_ate(&y_trim, &d_trim, &ps_trim, effect, config.normalized)
-                    }
+    // Standard errors. All three analytic SEs are computed on every path.
+    let keep_mask: Vec<bool> = {
+        let mut m = vec![false; n];
+        for &i in &keep_idx {
+            m[i] = true;
+        }
+        m
+    };
+    let ps_cols: Vec<usize> = (0..x.ncols())
+        .filter(|j| !ps_fit.fit.aliased.contains(j))
+        .collect();
+    let x_ps = x.select(ndarray::Axis(1), &ps_cols);
+    let kind = IpwKind::of(config.estimand, config.normalized);
+    let se_naive = ipw_naive_se(&y, &d, &ps, &keep_mask, kind, effect);
+    let se_mest = match ipw_mest_se(x_ps.view(), &y, &d, &ps, &keep_mask, kind, effect) {
+        Ok(v) => Some(v),
+        Err(e @ EconError::SingularMatrix { .. }) => {
+            warnings.push(format!(
+                "M-estimation SE not computed: {e}; the efficient-influence-function SE is reported"
+            ));
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    // Efficient influence function (Lunceford & Davidian 2004; Hahn 1998): the
+    // efficiency-bound form, with mu_d(X) = E[Y | D = d, X] by OLS within each arm. With a
+    // parametric logit the M-estimation SE is se_mest.
+    let n_f = n_trim as f64;
+    let x_names = design_names(covariates);
+    let se_eif = {
+        let mu1_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names);
+        let mu0_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, false, &x_names);
+        match (config.estimand, mu1_fit, mu0_fit) {
+            (Estimand::ATE, Ok((mu1, _, _)), Ok((mu0, _, _))) => {
+                let mut sum_eif_sq = 0.0;
+                for i in 0..n_trim {
+                    let ei = ps_trim[i];
+                    let ipw_term = if d_trim[i] >= 0.5 {
+                        (y_trim[i] - mu1[i]) / ei
+                    } else {
+                        -(y_trim[i] - mu0[i]) / (1.0 - ei)
+                    };
+                    let eif_i = ipw_term + mu1[i] - mu0[i] - effect;
+                    sum_eif_sq += eif_i * eif_i;
                 }
+                Some((sum_eif_sq / (n_f * n_f)).sqrt())
             }
-            Estimand::ATT => {
-                match mu0_fit {
-                    Ok((mu0, _)) => {
-                        // EIF for ATT (Hahn 1998; Hirano, Imbens & Ridder 2003)
-                        let p1 = n_treated as f64 / n_f;
-                        let mut sum_eif_sq = 0.0;
-                        for i in 0..n_trim {
-                            let di = d_trim[i];
-                            let yi = y_trim[i];
-                            let ei = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-                            let resid0 = yi - mu0[i];
-
-                            let eif_i = if di >= 0.5 {
-                                (resid0 - effect) / p1
-                            } else {
-                                -(ei / (1.0 - ei)) * resid0 / p1
-                            };
-
-                            sum_eif_sq += eif_i * eif_i;
-                        }
-                        (sum_eif_sq / (n_f * n_f)).sqrt()
-                    }
-                    _ => {
-                        // Fallback: naive IF if outcome model fails
-                        naive_if_se_att(
-                            &y_trim,
-                            &d_trim,
-                            &ps_trim,
-                            effect,
-                            n_treated,
-                            config.normalized,
-                        )
-                    }
+            (Estimand::ATT, _, Ok((mu0, _, _))) => {
+                let p1 = n_treated as f64 / n_f;
+                let mut sum_eif_sq = 0.0;
+                for i in 0..n_trim {
+                    let ei = ps_trim[i];
+                    let resid0 = y_trim[i] - mu0[i];
+                    let eif_i = if d_trim[i] >= 0.5 {
+                        (resid0 - effect) / p1
+                    } else {
+                        -(ei / (1.0 - ei)) * resid0 / p1
+                    };
+                    sum_eif_sq += eif_i * eif_i;
                 }
+                Some((sum_eif_sq / (n_f * n_f)).sqrt())
+            }
+            (_, r1, r0) => {
+                let e = r1
+                    .err()
+                    .or(r0.err())
+                    .map(|e| e.to_string())
+                    .unwrap_or_default();
+                warnings.push(format!(
+                    "efficient-influence-function SE not computed: an outcome model could not be fitted ({e})"
+                ));
+                None
+            }
+        }
+    };
+
+    let (std_error, ci_lower, ci_upper, se_method) = if config.bootstrap == 0 {
+        let (se, method) = match (se_mest, se_eif) {
+            (Some(v), _) => (v, "M-estimation (propensity estimated)".to_string()),
+            (None, Some(v)) => (v, "efficient influence function".to_string()),
+            (None, None) => {
+                warnings.push(
+                    "the standard error treats the propensity scores as known (neither the M-estimation nor the efficient-influence-function SE could be computed)".to_string(),
+                );
+                (
+                    se_naive,
+                    "propensity treated as known (outcome models unavailable)".to_string(),
+                )
             }
         };
-
-        let ci_lo = effect - 1.96 * se;
-        let ci_hi = effect + 1.96 * se;
-        (se, ci_lo, ci_hi)
+        let z = z_critical(0.95)?;
+        (se, effect - z * se, effect + z * se, method)
     } else {
         // Bootstrap for standard errors using cached propensity scores (parallel via rayon)
-        let mut rng: StdRng = match config.seed {
-            Some(s) => StdRng::seed_from_u64(s),
-            None => StdRng::from_entropy(),
-        };
+        let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
 
         let estimand = config.estimand;
         let normalized = config.normalized;
@@ -701,37 +742,13 @@ pub fn run_ipw_treatment(
                 "Many bootstrap iterations failed; standard errors may be unreliable".to_string(),
             );
         }
-
-        let se = if !boot_effects.is_empty() {
-            let mean_boot: f64 = boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
-            let var_boot: f64 = boot_effects
-                .iter()
-                .map(|&e| (e - mean_boot).powi(2))
-                .sum::<f64>()
-                / (boot_effects.len() - 1).max(1) as f64;
-            var_boot.sqrt()
-        } else {
-            f64::NAN
-        };
-
-        let mut boot_effects_sorted = boot_effects;
-        boot_effects_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        let ci_lo = if boot_effects_sorted.len() >= 20 {
-            let idx = (boot_effects_sorted.len() as f64 * 0.025).floor() as usize;
-            boot_effects_sorted[idx]
-        } else {
-            effect - 1.96 * se
-        };
-
-        let ci_hi = if boot_effects_sorted.len() >= 20 {
-            let idx = (boot_effects_sorted.len() as f64 * 0.975).floor() as usize;
-            boot_effects_sorted[idx.min(boot_effects_sorted.len() - 1)]
-        } else {
-            effect + 1.96 * se
-        };
-
-        (se, ci_lo, ci_hi)
+        let (se, lo, hi) = bootstrap_summary(&boot_effects, effect)?;
+        (
+            se,
+            lo,
+            hi,
+            format!("bootstrap ({} replicates)", config.bootstrap),
+        )
     };
 
     let t_stat = if std_error > 0.0 && std_error.is_finite() {
@@ -740,7 +757,7 @@ pub fn run_ipw_treatment(
         0.0
     };
 
-    let p_value = 2.0 * (1.0 - normal_cdf(t_stat.abs()));
+    let p_value = normal_p_value_two_sided(t_stat);
     let significance = SignificanceLevel::from_p_value(p_value);
 
     // Compute group means
@@ -784,7 +801,266 @@ pub fn run_ipw_treatment(
         trim: config.trim,
         bootstrap_reps: config.bootstrap,
         warnings,
+        se_method,
+        se_mest,
+        se_naive: Some(se_naive),
+        se_eif,
     })
+}
+
+/// Refuses a trim outside [0, 0.5).
+fn validate_trim(trim: f64) -> EconResult<()> {
+    if trim.is_finite() && (0.0..0.5).contains(&trim) {
+        Ok(())
+    } else {
+        Err(EconError::InvalidSpecification {
+            message: format!(
+                "trim must be in [0, 0.5) (the share trimmed from each tail of the propensity score); got {trim}"
+            ),
+        })
+    }
+}
+
+/// Names of the propensity and outcome design columns (intercept first).
+fn design_names(covariates: &[&str]) -> Vec<String> {
+    std::iter::once("(Intercept)".to_string())
+        .chain(covariates.iter().map(|c| c.to_string()))
+        .collect()
+}
+
+/// Bootstrap SD and 95% interval: R's type-7 percentile interval when at least 20
+/// replicates succeeded, else the normal interval.
+fn bootstrap_summary(boot: &[f64], effect: f64) -> EconResult<(f64, f64, f64)> {
+    let se = if boot.len() >= 2 {
+        let mean = boot.iter().sum::<f64>() / boot.len() as f64;
+        (boot.iter().map(|&e| (e - mean).powi(2)).sum::<f64>() / (boot.len() - 1) as f64).sqrt()
+    } else {
+        f64::NAN
+    };
+    let (lo, hi) = if boot.len() >= 20 {
+        percentile_interval(boot, 0.95)?
+    } else {
+        let z = z_critical(0.95)?;
+        (effect - z * se, effect + z * se)
+    };
+    Ok((se, lo, hi))
+}
+
+/// The IPW estimator: Hajek ATE, Horvitz-Thompson ATE, or ATT (control weights e/(1-e)).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IpwKind {
+    Hajek,
+    HorvitzThompson,
+    Att,
+}
+
+impl IpwKind {
+    fn of(estimand: Estimand, normalized: bool) -> Self {
+        match (estimand, normalized) {
+            (Estimand::ATT, _) => IpwKind::Att,
+            (Estimand::ATE, true) => IpwKind::Hajek,
+            (Estimand::ATE, false) => IpwKind::HorvitzThompson,
+        }
+    }
+
+    /// Unit weight of the weighted-mean estimators.
+    fn weight(self, d: f64, e: f64) -> f64 {
+        let treated = d >= 0.5;
+        match self {
+            IpwKind::Att => {
+                if treated {
+                    1.0
+                } else {
+                    e / (1.0 - e)
+                }
+            }
+            _ => {
+                if treated {
+                    1.0 / e
+                } else {
+                    1.0 / (1.0 - e)
+                }
+            }
+        }
+    }
+}
+
+/// Weighted arm means over the kept units: (mu1, mu0, sum of treated weights, of control
+/// weights).
+fn weighted_arm_means(
+    y: &Array1<f64>,
+    d: &Array1<f64>,
+    e: &Array1<f64>,
+    keep: &[bool],
+    kind: IpwKind,
+) -> (f64, f64, f64, f64) {
+    let (mut s1, mut sy1, mut s0, mut sy0) = (0.0, 0.0, 0.0, 0.0);
+    for i in (0..y.len()).filter(|&i| keep[i]) {
+        let w = kind.weight(d[i], e[i]);
+        if d[i] >= 0.5 {
+            s1 += w;
+            sy1 += w * y[i];
+        } else {
+            s0 += w;
+            sy0 += w * y[i];
+        }
+    }
+    (sy1 / s1, sy0 / s0, s1, s0)
+}
+
+/// SE with the propensity treated as known, over the kept units. Hajek and ATT: HC0 of the
+/// weighted regression of y on (1, D); HT: sqrt(sum IF^2) / n_kept.
+fn ipw_naive_se(
+    y: &Array1<f64>,
+    d: &Array1<f64>,
+    e: &Array1<f64>,
+    keep: &[bool],
+    kind: IpwKind,
+    effect: f64,
+) -> f64 {
+    let idx = (0..y.len()).filter(|&i| keep[i]);
+    if kind == IpwKind::HorvitzThompson {
+        let n_kept = keep.iter().filter(|&&k| k).count() as f64;
+        let ss: f64 = idx
+            .map(|i| {
+                let h = if d[i] >= 0.5 {
+                    y[i] / e[i]
+                } else {
+                    -y[i] / (1.0 - e[i])
+                };
+                (h - effect).powi(2)
+            })
+            .sum();
+        return ss.sqrt() / n_kept;
+    }
+    let (mu1, mu0, s1, s0) = weighted_arm_means(y, d, e, keep, kind);
+    let (mut v1, mut v0) = (0.0, 0.0);
+    for i in idx {
+        let w = kind.weight(d[i], e[i]);
+        if d[i] >= 0.5 {
+            v1 += (w * (y[i] - mu1)).powi(2);
+        } else {
+            v0 += (w * (y[i] - mu0)).powi(2);
+        }
+    }
+    (v1 / (s1 * s1) + v0 / (s0 * s0)).sqrt()
+}
+
+/// M-estimation SE of the stacked logit-score and IPW estimating equations (the exact
+/// sandwich; WeightIt::lm_weightit(vcov = "asympt") for Hajek and ATT). The logit score runs
+/// over all n units, the IPW equations over the kept units (the trimmed set is held fixed).
+/// `x` is the propensity design without its aliased columns and `e` the clipped scores.
+fn ipw_mest_se(
+    x: ArrayView2<f64>,
+    y: &Array1<f64>,
+    d: &Array1<f64>,
+    e: &Array1<f64>,
+    keep: &[bool],
+    kind: IpwKind,
+    effect: f64,
+) -> EconResult<f64> {
+    let (n, p) = x.dim();
+    let nf = n as f64;
+    // I_bb = (1/n) sum e(1-e) x x'
+    let mut info = Array2::<f64>::zeros((p, p));
+    for i in 0..n {
+        let v = e[i] * (1.0 - e[i]) / nf;
+        for a in 0..p {
+            let xa = x[[i, a]] * v;
+            for b in 0..=a {
+                info[[a, b]] += xa * x[[i, b]];
+            }
+        }
+    }
+    for a in 0..p {
+        for b in 0..a {
+            info[[b, a]] = info[[a, b]];
+        }
+    }
+    let inv = sym_inverse(
+        info.view(),
+        SingularPolicy::Error,
+        "propensity information matrix",
+    )?
+    .inverse;
+    // a . U_i with U_i = I_bb^-1 x_i (D_i - e_i), from ia = I_bb^-1 a (I_bb is symmetric).
+    let u_dot = |i: usize, ia: &Array1<f64>| -> f64 { ia.dot(&x.row(i)) * (d[i] - e[i]) };
+    let sum_if_sq = match kind {
+        IpwKind::HorvitzThompson => {
+            let n_kept = keep.iter().filter(|&&k| k).count() as f64;
+            let mut a = Array1::<f64>::zeros(p);
+            for i in (0..n).filter(|&i| keep[i]) {
+                let c = if d[i] >= 0.5 {
+                    -y[i] * (1.0 - e[i]) / e[i]
+                } else {
+                    -y[i] * e[i] / (1.0 - e[i])
+                };
+                a.scaled_add(c / nf, &x.row(i));
+            }
+            let s = n_kept / nf;
+            let ia = inv.dot(&a);
+            (0..n)
+                .map(|i| {
+                    let h = if keep[i] {
+                        let hi = if d[i] >= 0.5 {
+                            y[i] / e[i]
+                        } else {
+                            -y[i] / (1.0 - e[i])
+                        };
+                        hi - effect
+                    } else {
+                        0.0
+                    };
+                    ((h + u_dot(i, &ia)) / s).powi(2)
+                })
+                .sum::<f64>()
+        }
+        _ => {
+            let (mu1, mu0, sw1, sw0) = weighted_arm_means(y, d, e, keep, kind);
+            let (s1, s0) = (sw1 / nf, sw0 / nf);
+            let mut a1 = Array1::<f64>::zeros(p);
+            let mut a0 = Array1::<f64>::zeros(p);
+            for i in (0..n).filter(|&i| keep[i]) {
+                // d w_i / d beta = x_i * c
+                if d[i] >= 0.5 {
+                    let c = match kind {
+                        IpwKind::Att => 0.0,
+                        _ => -(1.0 - e[i]) / e[i],
+                    };
+                    a1.scaled_add(c * (y[i] - mu1) / nf, &x.row(i));
+                } else {
+                    let c = e[i] / (1.0 - e[i]);
+                    a0.scaled_add(c * (y[i] - mu0) / nf, &x.row(i));
+                }
+            }
+            let ia1 = inv.dot(&a1);
+            let ia0 = inv.dot(&a0);
+            (0..n)
+                .map(|i| {
+                    let (m1, m0) = if keep[i] {
+                        let w = kind.weight(d[i], e[i]);
+                        if d[i] >= 0.5 {
+                            (w * (y[i] - mu1), 0.0)
+                        } else {
+                            (0.0, w * (y[i] - mu0))
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let f = (m1 + u_dot(i, &ia1)) / s1 - (m0 + u_dot(i, &ia0)) / s0;
+                    f * f
+                })
+                .sum::<f64>()
+        }
+    };
+    let se = sum_if_sq.sqrt() / nf;
+    if se.is_finite() {
+        Ok(se)
+    } else {
+        Err(EconError::Computation(
+            "the M-estimation standard error is not finite".to_string(),
+        ))
+    }
 }
 
 /// At most this many bootstrap indices (8 MiB) exist at once.
@@ -839,102 +1115,6 @@ where
         done += m;
     }
     Ok(out)
-}
-
-/// Naive influence function SE for ATE (treats propensity scores as known).
-///
-/// Used as fallback when outcome model fitting fails.
-fn naive_if_se_ate(
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    ps: &Array1<f64>,
-    effect: f64,
-    normalized: bool,
-) -> f64 {
-    let n = y.len();
-    let n_f = n as f64;
-
-    let (sum_w1, sum_w0) = if normalized {
-        let mut sw1 = 0.0_f64;
-        let mut sw0 = 0.0_f64;
-        for i in 0..n {
-            let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
-            if d[i] >= 0.5 {
-                sw1 += 1.0 / ps_i;
-            } else {
-                sw0 += 1.0 / (1.0 - ps_i);
-            }
-        }
-        (sw1, sw0)
-    } else {
-        (n_f, n_f)
-    };
-
-    let norm1 = sum_w1 / n_f;
-    let norm0 = sum_w0 / n_f;
-
-    let mut sum_if_sq = 0.0;
-    for i in 0..n {
-        let di = d[i];
-        let yi = y[i];
-        let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
-
-        let term1 = if di >= 0.5 { yi / ps_i / norm1 } else { 0.0 };
-        let term0 = if di < 0.5 {
-            yi / (1.0 - ps_i) / norm0
-        } else {
-            0.0
-        };
-        let if_i = term1 - term0 - effect;
-
-        sum_if_sq += if_i * if_i;
-    }
-    (sum_if_sq / (n_f * n_f)).sqrt()
-}
-
-/// Naive influence function SE for ATT (treats propensity scores as known).
-///
-/// Used as fallback when outcome model fitting fails.
-fn naive_if_se_att(
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    ps: &Array1<f64>,
-    effect: f64,
-    n_treated: usize,
-    normalized: bool,
-) -> f64 {
-    let n = y.len();
-    let n_f = n as f64;
-    let n_treated_f = n_treated as f64;
-
-    let sum_w0 = if normalized {
-        let mut sw = 0.0_f64;
-        for i in 0..n {
-            if d[i] < 0.5 {
-                let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
-                sw += ps_i / (1.0 - ps_i);
-            }
-        }
-        sw
-    } else {
-        n_treated_f
-    };
-
-    let mut sum_if_sq = 0.0;
-    for i in 0..n {
-        let di = d[i];
-        let yi = y[i];
-        let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
-
-        let if_i = if di >= 0.5 {
-            (yi - effect) / n_treated_f
-        } else {
-            -(ps_i / (1.0 - ps_i)) * yi / sum_w0 * (n_treated_f / n_f)
-        };
-
-        sum_if_sq += if_i * if_i;
-    }
-    (sum_if_sq / (n_f * n_f)).sqrt()
 }
 
 /// Compute IPW treatment effect estimate.
@@ -1078,6 +1258,7 @@ pub fn run_doubly_robust(
 ) -> EconResult<DoublyRobustResult> {
     let mut warnings = Vec::new();
 
+    validate_trim(config.trim)?;
     if matches!(config.method, DRMethod::IPW | DRMethod::Regression) && config.bootstrap < 2 {
         let method = if config.method == DRMethod::IPW {
             "ipw"
@@ -1166,8 +1347,14 @@ pub fn run_doubly_robust(
     let n_control = n_trim - n_treated;
 
     // Fit outcome models for treated and control separately
-    let (mu_1, r2_treated) = fit_outcome_model(&x_trim, &y_trim, &d_trim, true)?;
-    let (mu_0, r2_control) = fit_outcome_model(&x_trim, &y_trim, &d_trim, false)?;
+    let x_names = design_names(covariates);
+    let (mu_1, r2_treated, alias1) = fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names)?;
+    let (mu_0, r2_control, alias0) = fit_outcome_model(&x_trim, &y_trim, &d_trim, false, &x_names)?;
+    for (group, a) in [("treated", alias1), ("control", alias0)] {
+        if let Some(text) = a {
+            warnings.push(format!("outcome model ({group}): {text}"));
+        }
+    }
 
     // Compute point estimate based on method
     let effect = match config.method {
@@ -1189,78 +1376,54 @@ pub fn run_doubly_robust(
     // Compute standard error, CI, and inference.
     // For AIPW: use analytic influence function variance (no bootstrap needed).
     // For IPW/Regression: use parallel bootstrap with cached propensity scores.
-    let (std_error, ci_lower, ci_upper) = match config.method {
+    let (std_error, ci_lower, ci_upper, se_method, bootstrap_reps) = match config.method {
         DRMethod::AIPW => {
-            // Analytic influence function variance for AIPW
-            // (Robins, Rotnitzky & Zhao 1994; Lunceford & Davidian 2004, Eq. 6)
-            //
-            // For ATE, the influence function for unit i is:
-            //   IF(i) = [D_i*(Y_i - mu_1(X_i))/e(X_i)]
-            //         - [(1-D_i)*(Y_i - mu_0(X_i))/(1-e(X_i))]
-            //         + [mu_1(X_i) - mu_0(X_i)]
-            //         - ATE
-            // Then Var(ATE) = (1/n^2) * sum(IF_i^2)
-            //
-            // For ATT, the influence function is analogous but normalized by n_treated.
+            // Analytic influence-function SE sd(IF) / sqrt(n) (n - 1 denominator, as the R
+            // AIPW and tmle packages; Robins, Rotnitzky & Zhao 1994). ATE: IF = psi; ATT:
+            // IF_i = (phi_i - D_i tau) n / n1 with phi = D (Y - m0) - (1-D) e/(1-e) (Y - m0).
             let n_f = n_trim as f64;
-            let if_var = match config.estimand {
-                Estimand::ATE => {
-                    let mut sum_if_sq = 0.0;
-                    for i in 0..n_trim {
-                        let di = d_trim[i];
-                        let yi = y_trim[i];
-                        let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-                        let mu1_i = mu_1[i];
-                        let mu0_i = mu_0[i];
-
-                        // AIPW influence function (Lunceford & Davidian 2004, Eq. 6)
-                        let if_i = if di >= 0.5 { (yi - mu1_i) / ps_i } else { 0.0 }
-                            - if di < 0.5 {
-                                (yi - mu0_i) / (1.0 - ps_i)
+            let n1 = n_treated as f64;
+            let infl: Vec<f64> = (0..n_trim)
+                .map(|i| {
+                    let (di, yi, ei) = (d_trim[i], y_trim[i], ps_trim[i]);
+                    match config.estimand {
+                        Estimand::ATE => {
+                            let t = if di >= 0.5 {
+                                (yi - mu_1[i]) / ei
                             } else {
-                                0.0
-                            }
-                            + (mu1_i - mu0_i)
-                            - effect;
-
-                        sum_if_sq += if_i * if_i;
+                                -(yi - mu_0[i]) / (1.0 - ei)
+                            };
+                            mu_1[i] - mu_0[i] + t
+                        }
+                        Estimand::ATT => {
+                            let phi = if di >= 0.5 {
+                                yi - mu_0[i]
+                            } else {
+                                -ei / (1.0 - ei) * (yi - mu_0[i])
+                            };
+                            let dt = if di >= 0.5 { effect } else { 0.0 };
+                            (phi - dt) * n_f / n1
+                        }
                     }
-                    sum_if_sq / (n_f * n_f)
-                }
-                Estimand::ATT => {
-                    let n_treated_f = n_treated as f64;
-                    let mut sum_if_sq = 0.0;
-                    for i in 0..n_trim {
-                        let di = d_trim[i];
-                        let yi = y_trim[i];
-                        let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-                        let mu0_i = mu_0[i];
-
-                        let if_i = if di >= 0.5 {
-                            (yi - mu0_i) / n_treated_f - effect / n_treated_f
-                        } else {
-                            -(ps_i * (yi - mu0_i)) / ((1.0 - ps_i) * n_treated_f)
-                        };
-
-                        sum_if_sq += if_i * if_i;
-                    }
-                    sum_if_sq
-                }
-            };
-
-            let se = if_var.sqrt();
-            let ci_lo = effect - 1.96 * se;
-            let ci_hi = effect + 1.96 * se;
-            (se, ci_lo, ci_hi)
+                })
+                .collect();
+            let mean = infl.iter().sum::<f64>() / n_f;
+            let var = infl.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n_f - 1.0);
+            let se = (var / n_f).sqrt();
+            let z = z_critical(0.95)?;
+            (
+                se,
+                effect - z * se,
+                effect + z * se,
+                "analytic influence function".to_string(),
+                0,
+            )
         }
         DRMethod::IPW | DRMethod::Regression => {
             // Parallel bootstrap with cached propensity scores for IPW/Regression.
             // Index sets are drawn sequentially (one bounded chunk at a time) for
             // reproducibility, then evaluated in parallel reusing cached ps/outcome models.
-            let mut rng: StdRng = match config.seed {
-                Some(s) => StdRng::seed_from_u64(s),
-                None => StdRng::from_entropy(),
-            };
+            let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
 
             let method = config.method;
             let estimand = config.estimand;
@@ -1311,36 +1474,14 @@ pub fn run_doubly_robust(
                 );
             }
 
-            let se = if !boot_effects.is_empty() {
-                let mean_boot: f64 = boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
-                let var_boot: f64 = boot_effects
-                    .iter()
-                    .map(|&e| (e - mean_boot).powi(2))
-                    .sum::<f64>()
-                    / (boot_effects.len() - 1).max(1) as f64;
-                var_boot.sqrt()
-            } else {
-                f64::NAN
-            };
-
-            let mut boot_sorted = boot_effects;
-            boot_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-            let ci_lo = if boot_sorted.len() >= 20 {
-                let idx = (boot_sorted.len() as f64 * 0.025).floor() as usize;
-                boot_sorted[idx]
-            } else {
-                effect - 1.96 * se
-            };
-
-            let ci_hi = if boot_sorted.len() >= 20 {
-                let idx = (boot_sorted.len() as f64 * 0.975).floor() as usize;
-                boot_sorted[idx.min(boot_sorted.len() - 1)]
-            } else {
-                effect + 1.96 * se
-            };
-
-            (se, ci_lo, ci_hi)
+            let (se, lo, hi) = bootstrap_summary(&boot_effects, effect)?;
+            (
+                se,
+                lo,
+                hi,
+                format!("bootstrap ({} replicates)", config.bootstrap),
+                config.bootstrap,
+            )
         }
     };
 
@@ -1350,7 +1491,7 @@ pub fn run_doubly_robust(
         0.0
     };
 
-    let p_value = 2.0 * (1.0 - normal_cdf(t_stat.abs()));
+    let p_value = normal_p_value_two_sided(t_stat);
     let significance = SignificanceLevel::from_p_value(p_value);
 
     Ok(DoublyRobustResult {
@@ -1371,8 +1512,9 @@ pub fn run_doubly_robust(
         outcome_r2_treated: r2_treated,
         outcome_r2_control: r2_control,
         trim: config.trim,
-        bootstrap_reps: config.bootstrap,
+        bootstrap_reps,
         warnings,
+        se_method,
     })
 }
 
@@ -1451,18 +1593,18 @@ fn compute_aipw_effect(
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Fit outcome model for a treatment group (OLS regression).
+/// Fit outcome model for a treatment group (OLS regression by pivoted QR, `lm.fit`).
 ///
-/// Returns predicted outcomes and R².
+/// Returns predicted outcomes for every row (aliased columns count as 0, as
+/// `stats::predict.lm`), the group's R² and the aliasing warning, if any.
 fn fit_outcome_model(
     x: &Array2<f64>,
     y: &Array1<f64>,
     d: &Array1<f64>,
     treated: bool,
-) -> EconResult<(Array1<f64>, f64)> {
+    names: &[String],
+) -> EconResult<(Array1<f64>, f64, Option<String>)> {
     let n = y.len();
-
-    // Filter to the relevant treatment group
     let indices: Vec<usize> = (0..n)
         .filter(|&i| if treated { d[i] >= 0.5 } else { d[i] < 0.5 })
         .collect();
@@ -1478,47 +1620,19 @@ fn fit_outcome_model(
         });
     }
 
-    let n_group = indices.len();
-    let k = x.ncols();
-
-    // Build group-specific arrays
-    let mut x_group = Array2::zeros((n_group, k));
-    let mut y_group = Array1::zeros(n_group);
-
-    for (new_i, &old_i) in indices.iter().enumerate() {
-        x_group.row_mut(new_i).assign(&x.row(old_i));
-        y_group[new_i] = y[old_i];
-    }
-
-    // OLS: β = (X'X)^{-1} X'y
-    let xtx_mat = xtx(&x_group.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: format!(
-            "Outcome model for {} group",
-            if treated { "treated" } else { "control" }
-        ),
-        suggestion: format!("Check for multicollinearity: {:?}", e),
-    })?;
-
-    let xty_vec = xty(&x_group.view(), &y_group);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // Predictions for entire sample
+    let x_group = x.select(ndarray::Axis(0), &indices);
+    let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
+    let fit = least_squares(x_group.view(), y_group.view())?;
+    let beta = fit.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
     let mu: Array1<f64> = x.dot(&beta);
 
     // R² for the group
     let y_group_mean = y_group.mean().unwrap_or(0.0);
     let sst: f64 = y_group.iter().map(|&yi| (yi - y_group_mean).powi(2)).sum();
-
-    let mut ssr = 0.0;
-    for (new_i, &old_i) in indices.iter().enumerate() {
-        let residual = y_group[new_i] - mu[old_i];
-        ssr += residual * residual;
-    }
-
+    let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
     let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
-    Ok((mu, r2))
+    Ok((mu, r2, fit.aliasing_warning(names)))
 }
 
 /// Compute propensity score summary statistics.
@@ -1542,16 +1656,14 @@ fn compute_ps_summary(ps: &Array1<f64>) -> PropensityScoreSummary {
     let std_dev = var.sqrt();
 
     let mut sorted: Vec<f64> = ps.iter().copied().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
 
     let min = sorted[0];
     let max = sorted[n - 1];
-    let median = sorted[n / 2];
-
-    let p10_idx = (n as f64 * 0.10).floor() as usize;
-    let p90_idx = (n as f64 * 0.90).floor() as usize;
-    let p10 = sorted[p10_idx.min(n - 1)];
-    let p90 = sorted[p90_idx.min(n - 1)];
+    // R quantile() / median(), type 7
+    let median = quantile_sorted(&sorted, 0.5, QuantileType::T7);
+    let p10 = quantile_sorted(&sorted, 0.1, QuantileType::T7);
+    let p90 = quantile_sorted(&sorted, 0.9, QuantileType::T7);
 
     PropensityScoreSummary {
         mean,
@@ -1993,9 +2105,11 @@ mod tests {
     fn test_seeded_bootstrap_unchanged() {
         // Pinned from the pre-streaming implementation at 1fdb22f, seed 42. The propensity
         // scores from glm::fit_propensity since T3-WP23 differ at 1e-13 from that fit's, so
-        // the standard errors are compared at 1e-9 relative.
+        // the standard errors are compared at 1e-9 relative. The interval is the type-7
+        // percentile interval of the same draws since T3-WP23 (CAUS-111; it was effect
+        // +- qnorm(0.975) SE).
         const IPW_SE: f64 = 0.11590718872111475;
-        const IPW_CI: (f64, f64) = (0.25552711023373686, 0.677351661847506);
+        const IPW_CI: (f64, f64) = (0.25515833348085837, 0.6746370453016588);
         const DR_IPW_SE: f64 = 0.11590718872111475;
         const DR_REG_SE: f64 = 0.011033127368161828;
         let ds = create_treatment_dataset();
@@ -2155,81 +2269,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ipw_ate_vs_r() {
-        // Validates IPW ATE against R manual calculation
-        // R reference:
-        // ps_model <- glm(treatment ~ x1 + x2, family = binomial)
-        // ps_hat <- predict(ps_model, type = "response")
-        // w1 <- treatment / ps_hat; w0 <- (1 - treatment) / (1 - ps_hat)
-        // ipw_ate_hajek <- sum(w1 * y) / sum(w1) - sum(w0 * y) / sum(w0)
-
-        let dataset = create_ipw_validation_dataset();
-        let config = IpwConfig {
-            estimand: Estimand::ATE,
-            normalized: true, // Hajek estimator
-            bootstrap: 200,
-            seed: Some(42),
-            trim: 0.01,
-        };
-
-        let result = run_ipw_treatment(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
-
-        // True ATE is 0.75 in the data generating process
-        let true_ate = 0.75;
-        let tol = 0.3; // Allow estimation error
-
-        assert!(
-            (result.effect - true_ate).abs() < tol,
-            "IPW ATE {:.4} should be close to true {:.4}",
-            result.effect,
-            true_ate
-        );
-
-        // Standard error should be reasonable
-        assert!(result.std_error > 0.01, "SE too small");
-        assert!(result.std_error < 0.3, "SE too large");
-
-        // CI should contain point estimate
-        assert!(result.ci_lower <= result.effect);
-        assert!(result.ci_upper >= result.effect);
-
-        // CI should ideally contain true effect
-        // (this is a stochastic test, so just check CI is reasonable)
-        let ci_width = result.ci_upper - result.ci_lower;
-        assert!(
-            ci_width > 0.1 && ci_width < 1.5,
-            "CI width {:.4} seems unreasonable",
-            ci_width
-        );
-    }
-
-    #[test]
-    fn test_validate_ipw_att_vs_r() {
-        // Validates IPW ATT
-        let dataset = create_ipw_validation_dataset();
-        let config = IpwConfig {
-            estimand: Estimand::ATT,
-            normalized: true,
-            bootstrap: 200,
-            seed: Some(42),
-            trim: 0.01,
-        };
-
-        let result = run_ipw_treatment(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
-
-        // ATT should also be close to true effect (0.75) when effect is homogeneous
-        assert!(
-            (result.effect - 0.75).abs() < 0.4,
-            "IPW ATT {:.4} should be close to 0.75",
-            result.effect
-        );
-
-        // Verify estimand is recorded correctly
-        assert_eq!(result.estimand, Estimand::ATT);
-    }
-
-    #[test]
-    fn test_validate_ipw_propensity_scores() {
+    fn test_ipw_propensity_summary_in_range() {
         // Validate propensity score estimation
         let dataset = create_ipw_validation_dataset();
         let config = IpwConfig {
@@ -2259,40 +2299,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_doubly_robust_aipw_vs_r() {
-        // Validates AIPW against R manual calculation
-        let dataset = create_ipw_validation_dataset();
-        let config = DoublyRobustConfig {
-            method: DRMethod::AIPW,
-            estimand: Estimand::ATE,
-            bootstrap: 200,
-            seed: Some(42),
-            trim: 0.01,
-        };
-
-        let result = run_doubly_robust(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
-
-        // AIPW should be close to true ATE (0.75)
-        let true_ate = 0.75;
-        let tol = 0.3;
-
-        assert!(
-            (result.effect - true_ate).abs() < tol,
-            "AIPW ATE {:.4} should be close to true {:.4}",
-            result.effect,
-            true_ate
-        );
-
-        // DR estimator should have reasonable efficiency
-        assert!(result.std_error > 0.01 && result.std_error < 0.25);
-
-        // Method should be recorded
-        assert_eq!(result.method, DRMethod::AIPW);
-    }
-
-    #[test]
-    fn test_validate_dr_ipw_vs_ipw() {
-        // Validate that DR with IPW-only gives similar results to pure IPW
+    fn test_dr_ipw_matches_ipw() {
+        // With equal trims, the DR IPW (Hajek) effect is the IPW effect
         let dataset = create_ipw_validation_dataset();
 
         let ipw_config = IpwConfig {
@@ -2315,9 +2323,8 @@ mod tests {
         let dr_result =
             run_doubly_robust(&dataset, "y", "treatment", &["x1", "x2"], dr_config).unwrap();
 
-        // Results should be similar (not identical due to implementation differences)
         assert!(
-            (ipw_result.effect - dr_result.effect).abs() < 0.2,
+            (ipw_result.effect - dr_result.effect).abs() <= 1e-12,
             "IPW {:.4} and DR-IPW {:.4} should be similar",
             ipw_result.effect,
             dr_result.effect
@@ -2325,7 +2332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_dr_regression_only() {
+    fn test_dr_regression_recovers_dgp() {
         // Validate regression-only approach
         let dataset = create_ipw_validation_dataset();
 
@@ -2350,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ipw_trimming_effect() {
+    fn test_ipw_trimming_reduces_sample() {
         // Test that trimming affects results appropriately
         let dataset = create_ipw_validation_dataset();
 
@@ -2384,8 +2391,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_treatment_effect_significance() {
-        // Test significance determination
+    fn test_ipw_t_stat_and_p_value_consistent() {
+        // t = effect / se and p = 2 Phi(-|t|), unconditionally.
         let dataset = create_ipw_validation_dataset();
         let config = IpwConfig {
             bootstrap: 300,
@@ -2395,29 +2402,18 @@ mod tests {
 
         let result = run_ipw_treatment(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
-        // P-value should be in valid range
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
-
-        // t-stat should match effect / SE
-        if result.std_error > 0.0 {
-            let expected_t = result.effect / result.std_error;
-            assert!(
-                (result.t_stat - expected_t).abs() < 0.01,
-                "t-stat {:.4} should equal effect/SE {:.4}",
-                result.t_stat,
-                expected_t
-            );
-        }
-
-        // With true effect of 0.75, we expect significant result
-        // (but allow for occasional false negatives)
-        if result.effect.abs() > 0.4 && result.std_error < 0.15 {
-            assert!(
-                result.p_value < 0.1,
-                "With strong effect, p-value {:.4} should be small",
-                result.p_value
-            );
-        }
+        assert!(result.std_error > 0.0 && result.std_error.is_finite());
+        let expected_t = result.effect / result.std_error;
+        assert!((result.t_stat - expected_t).abs() <= 1e-12 * expected_t.abs().max(1.0));
+        let want = 2.0
+            * statrs::distribution::Normal::new(0.0, 1.0)
+                .unwrap()
+                .sf(expected_t.abs());
+        assert!(
+            (result.p_value - want).abs() <= 1e-12,
+            "p {} want {want}",
+            result.p_value
+        );
     }
 
     // ── T2-WP13: the R case causal_mediation_na and the shared fixtures ──
@@ -2468,7 +2464,8 @@ mod tests {
             run_ipw_treatment(ds, y, d, x, IpwConfig::default())
         };
         na_fixtures::assert_refusals(&case, &ds, true, run);
-        // deviation CAUS-92: the effect and SE are compared across treatment dtypes, not with R
+        // the effect and SE are compared across treatment dtypes here; the R pins are the
+        // test_validate_ipw_* tests
         na_fixtures::assert_treatment_dtypes_agree(&case, &ds, run, |r| {
             vec![r.effect, r.std_error]
         });
@@ -2496,6 +2493,341 @@ mod tests {
                 assert_eq!((column.as_str(), count), ("y", 1));
             }
             other => panic!("NaN outcome: expected NullValues {{ y, 1 }}, got {other:?}"),
+        }
+    }
+
+    // ── T3-WP23 Task 6: IPW and AIPW standard errors ─────────────────────────────────
+
+    use p2a_validation::{Check, Tol};
+    use statrs::distribution::ContinuousCDF;
+
+    const COVS: [&str; 3] = ["x1", "x2", "x3"];
+    const Z975: f64 = 1.9599639845400536; // R qnorm(0.975)
+
+    /// The case is loaded in each test body.
+    fn ipw_fit(ds: &Dataset, est: Estimand, normalized: bool) -> IpwResult {
+        let c = IpwConfig {
+            estimand: est,
+            normalized,
+            trim: 0.0, // R uses every unit; bootstrap 0 (analytic)
+            ..Default::default()
+        };
+        run_ipw_treatment(ds, "y", "treat", &COVS, c).unwrap()
+    }
+
+    fn assert_inference(effect: f64, se: f64, lo: f64, hi: f64, t: f64, p: f64) {
+        assert!(
+            (lo - (effect - Z975 * se)).abs() < 1e-12 && (hi - (effect + Z975 * se)).abs() < 1e-12
+        );
+        assert!((t - effect / se).abs() < 1e-12);
+        let want = 2.0
+            * statrs::distribution::Normal::new(0.0, 1.0)
+                .unwrap()
+                .sf(t.abs());
+        // the crate's normal tail (chi-square form) and statrs agree to ~5e-11 relative far
+        // in the tail (p ~ 1e-31)
+        assert!(
+            (p - want).abs() <= 1e-9 * want.max(1e-300),
+            "p {p} want {want}"
+        );
+    }
+
+    #[test]
+    fn test_validate_ipw_hajek_se() {
+        // R: glm propensity; Hajek IPW; HC0 of the weighted lm; exact M-estimation sandwich =
+        // WeightIt::lm_weightit(vcov = "asympt") (case ipw_aipw_sim). std_error is the
+        // M-estimation SE; the EIF value is se_eif.
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let r = ipw_fit(&ds, Estimand::ATE, true);
+        let n = r.n_obs;
+        assert_eq!(r.se_method, "M-estimation (propensity estimated)");
+        assert_eq!(r.se_mest, Some(r.std_error));
+        Check::new(&case)
+            .scalar("ipw_ate_hajek", r.effect, Tol::coef(n))
+            .scalar("ipw_ate_se_mest", r.std_error, Tol::se(n))
+            .scalar("ipw_ate_se_eif", r.se_eif.unwrap(), Tol::se(n))
+            .scalar("ipw_ate_se_naive", r.se_naive.unwrap(), Tol::se(n))
+            .scalar("ipw_ate_se_mest_weightit", r.std_error, Tol::new(1e-6, 0.0))
+            .finish();
+        assert_inference(
+            r.effect,
+            r.std_error,
+            r.ci_lower,
+            r.ci_upper,
+            r.t_stat,
+            r.p_value,
+        );
+    }
+
+    #[test]
+    fn test_validate_ipw_ht_se() {
+        // R: Horvitz-Thompson IPW, its stacked M-estimation sandwich, the EIF and naive SEs
+        // (case ipw_aipw_sim). Fails before: std_error was the EIF value.
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let r = ipw_fit(&ds, Estimand::ATE, false);
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("ipw_ate_ht", r.effect, Tol::coef(n))
+            .scalar("ipw_ate_ht_se_mest", r.std_error, Tol::se(n))
+            .scalar("ipw_ate_ht_se_eif", r.se_eif.unwrap(), Tol::se(n))
+            .scalar("ipw_ate_ht_se_naive", r.se_naive.unwrap(), Tol::se(n))
+            .finish();
+        assert_inference(
+            r.effect,
+            r.std_error,
+            r.ci_lower,
+            r.ci_upper,
+            r.t_stat,
+            r.p_value,
+        );
+    }
+
+    #[test]
+    fn test_validate_ipw_att_se() {
+        // R: ATT IPW (control weights e/(1-e)); M-estimation = lm_weightit(vcov = "asympt")
+        // (case ipw_aipw_sim). Fails before: std_error was the EIF value.
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let r = ipw_fit(&ds, Estimand::ATT, true);
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("ipw_att", r.effect, Tol::coef(n))
+            .scalar("ipw_att_se_mest", r.std_error, Tol::se(n))
+            .scalar("ipw_att_se_eif", r.se_eif.unwrap(), Tol::se(n))
+            .scalar("ipw_att_se_naive", r.se_naive.unwrap(), Tol::se(n))
+            .scalar("ipw_att_se_mest_weightit", r.std_error, Tol::new(1e-6, 0.0))
+            .finish();
+        assert_inference(
+            r.effect,
+            r.std_error,
+            r.ci_lower,
+            r.ci_upper,
+            r.t_stat,
+            r.p_value,
+        );
+    }
+
+    #[test]
+    fn test_ipw_mest_se_with_a_fixed_trimmed_set() {
+        // The M-estimation SE holds the trimmed set fixed (Crump et al. 2009): a trim that
+        // drops nothing changes nothing; a trim that drops units still gives se_mest.
+        let ds = create_treatment_dataset();
+        let fit = |trim: f64| {
+            run_ipw_treatment(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                IpwConfig {
+                    trim,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let (r0, r1) = (fit(0.0), fit(1e-9));
+        assert_eq!(r1.n_trimmed, 0);
+        assert!(((r1.std_error - r0.std_error) / r0.std_error).abs() < 1e-15);
+        let r = fit(0.1);
+        assert!(r.n_trimmed > 0);
+        assert_eq!(r.se_mest, Some(r.std_error));
+        assert!(r.std_error.is_finite() && r.std_error > 0.0);
+        assert!(r.se_eif.is_some());
+    }
+
+    #[test]
+    fn test_validate_aipw() {
+        // AIPW with OLS outcome models per arm; SE = sd(psi)/sqrt(n). Fails before: the SE
+        // lacked the sqrt(n/(n-1)) factor and bootstrap_reps reported the configured 999.
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let c = DoublyRobustConfig {
+            trim: 0.0, // AIPW; bootstrap 999 is ignored
+            ..Default::default()
+        };
+        let r = run_doubly_robust(&ds, "y", "treat", &COVS, c).unwrap();
+        let n = r.n_obs;
+        assert_eq!(
+            (r.bootstrap_reps, r.se_method.as_str()),
+            (0, "analytic influence function")
+        );
+        Check::new(&case)
+            .scalar("aipw_ate", r.effect, Tol::coef(n))
+            .scalar("aipw_ate_se", r.std_error, Tol::se(n))
+            .scalar("outcome_r2_treated", r.outcome_r2_treated, Tol::stat(n))
+            .scalar("outcome_r2_control", r.outcome_r2_control, Tol::stat(n))
+            .finish();
+        assert_inference(
+            r.effect,
+            r.std_error,
+            r.ci_lower,
+            r.ci_upper,
+            r.t_stat,
+            r.p_value,
+        );
+    }
+
+    #[test]
+    fn test_validate_aipw_att() {
+        // AIPW ATT, SE = sd(IF)/sqrt(n) with IF_i = (phi_i - D_i tau) n/n1 (case ipw_aipw_sim)
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let c = DoublyRobustConfig {
+            estimand: Estimand::ATT,
+            trim: 0.0,
+            ..Default::default()
+        };
+        let r = run_doubly_robust(&ds, "y", "treat", &COVS, c).unwrap();
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("aipw_att", r.effect, Tol::coef(n))
+            .scalar("aipw_att_se", r.std_error, Tol::se(n))
+            .finish();
+        assert_inference(
+            r.effect,
+            r.std_error,
+            r.ci_lower,
+            r.ci_upper,
+            r.t_stat,
+            r.p_value,
+        );
+    }
+
+    #[test]
+    fn test_validate_dr_regression() {
+        // Regression adjustment mean(m1 - m0) (case ipw_aipw_sim); bootstrap SE, not pinned
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let c = DoublyRobustConfig {
+            method: DRMethod::Regression,
+            bootstrap: 200,
+            seed: Some(42),
+            trim: 0.0,
+            ..Default::default()
+        };
+        let r = run_doubly_robust(&ds, "y", "treat", &COVS, c).unwrap();
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("ra_ate", r.effect, Tol::coef(n))
+            .finish();
+        assert_eq!(r.se_method, "bootstrap (200 replicates)");
+        assert_eq!(r.bootstrap_reps, 200);
+        assert!(r.std_error.is_finite());
+    }
+
+    #[test]
+    fn test_dr_reports_se_method() {
+        let ds = create_treatment_dataset();
+        let dr = |method, bootstrap| {
+            run_doubly_robust(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                DoublyRobustConfig {
+                    method,
+                    bootstrap,
+                    seed: Some(42),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let a = dr(DRMethod::AIPW, 999);
+        assert_eq!(
+            (a.bootstrap_reps, a.se_method.as_str()),
+            (0, "analytic influence function")
+        );
+        let b = dr(DRMethod::IPW, 50);
+        assert_eq!(b.se_method, "bootstrap (50 replicates)");
+        let ipw = |trim| {
+            run_ipw_treatment(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                IpwConfig {
+                    trim,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let i = ipw(0.05);
+        assert_eq!(i.se_method, "M-estimation (propensity estimated)");
+        assert!(i.se_mest.is_some() && i.se_eif.is_some() && i.se_naive.is_some());
+        let t = ipw(0.4);
+        assert!(t.n_trimmed > 0);
+        assert_eq!(t.se_mest, Some(t.std_error));
+        assert!(t.se_eif.is_some() && t.se_naive.is_some());
+    }
+
+    #[test]
+    fn test_unseeded_bootstrap_is_reproducible() {
+        // R13: seed None uses DEFAULT_BOOTSTRAP_SEED. Fails before (OS entropy).
+        let ds = create_treatment_dataset();
+        let ipw = |seed| {
+            run_ipw_treatment(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                IpwConfig {
+                    bootstrap: 100,
+                    seed,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let (a, b, c) = (ipw(None), ipw(None), ipw(Some(DEFAULT_BOOTSTRAP_SEED)));
+        for r in [&b, &c] {
+            assert_eq!(
+                (r.std_error, r.ci_lower, r.ci_upper),
+                (a.std_error, a.ci_lower, a.ci_upper)
+            );
+        }
+        let dr = |seed| {
+            run_doubly_robust(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                DoublyRobustConfig {
+                    method: DRMethod::Regression,
+                    bootstrap: 100,
+                    seed,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let (a, b, c) = (dr(None), dr(None), dr(Some(DEFAULT_BOOTSTRAP_SEED)));
+        for r in [&b, &c] {
+            assert_eq!(
+                (r.std_error, r.ci_lower, r.ci_upper),
+                (a.std_error, a.ci_lower, a.ci_upper)
+            );
+        }
+    }
+
+    #[test]
+    fn test_ipw_rejects_bad_trim() {
+        // R3
+        let ds = create_treatment_dataset();
+        for trim in [-0.1, 0.5, f64::NAN] {
+            let c = IpwConfig {
+                trim,
+                ..Default::default()
+            };
+            expect_invalid_spec(
+                run_ipw_treatment(&ds, "y", "treatment", &["x1", "x2"], c).unwrap_err(),
+                "trim",
+            );
+            let c = DoublyRobustConfig {
+                trim,
+                ..Default::default()
+            };
+            expect_invalid_spec(
+                run_doubly_robust(&ds, "y", "treatment", &["x1", "x2"], c).unwrap_err(),
+                "trim",
+            );
         }
     }
 }
