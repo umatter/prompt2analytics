@@ -204,6 +204,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
 | `generated/vecm_denmark.csv` | 55 × 4 (LRM, LRY, IBO, IDE) | `vecm_denmark` | `r/cases/ts_vecm.R` | `urca::denmark`, the four model columns |
 | `generated/vecm_sim3.csv` | 250 × 3 (x1, x2, x3) | `vecm_sim3` | `r/cases/ts_vecm.R` | seed 20261101 |
+| `generated/gsynth_simdata.csv` | 1500 × 6 (id, time, Y, D, X1, X2) | `gsynth_simdata` | `r/cases/causal_gsynth.R` | `gsynth::simdata` (50 units × 30 periods, 5 treated from t = 21), the model columns |
+| `generated/gsynth_staggered.csv` | 720 × 5 (id, time, Y, D, X) | `gsynth_staggered` | `r/cases/causal_gsynth.R` | seed 4231; 30 controls and 6 treated units (adoption at t = 11, 13, 15) × 20 periods, two factors |
+| `generated/synth_qp_panel.csv` | 180 × 9 (unit, time, y, x1, x2, x3, x1_big, x2_big, x3_big) | `synth_weights_qp`; read by `scpi_quantities` | `r/cases/causal_synth_scpi.R` | seed 3101; 8 donors and the treated unit TR × 20 periods (treatment at 15); `*_big` = predictors × 1e4 |
 
 ## Adding a dataset
 

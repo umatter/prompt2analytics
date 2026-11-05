@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "synth_weights_qp",
+  "area": "econometrics/synth",
+  "method": "Synthetic-control unit weights as the exact simplex QP on standardised predictors (equal and custom V; predictors in units and x 1e4); Synth's regression-based V start",
+  "reference": "exact simplex QP (quadprog::solve.QP + KKT polish) on predictors standardised as Synth 1.1-10, Abadie et al. (2010) weights for a given V; Synth's regression-based V start",
+  "call": "solve.QP(Dmat = X0'VX0 + delta I, dvec = X0'VX1, Amat = cbind(1, I), bvec = c(1, 0, ..), meq = 1)",
+  "dataset": "validation/datasets/generated/synth_qp_panel.csv",
+  "datasets": ["validation/datasets/generated/synth_qp_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "quadprog": "1.5.8"
+  },
+  "values": {
+    "equal_w": {
+      "names": ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08"],
+      "values": [0, 0, 0.081864070109433432, 0, 0.004018020882501549, 0, 0.914117909008065, 0]
+    },
+    "equal_predictor_loss": 0.00032774476945548434,
+    "equal_pre_mspe": 0.10218491826187345,
+    "equal_effects": [2.5322186212256597, 1.7632899279576453, 0.77289440856117331, 1.836473499463807, 2.2408414456439001, 2.844272089983809],
+    "equal_average_effect": 1.9983316654726657,
+    "equal_synthetic": [11.63405311937616, 11.8023688807566, 12.173582639466195, 11.889997743661958, 12.215885261350309, 11.973898209887709, 12.37113651251053, 12.513959332645893, 13.02268757511605, 13.04563323246515, 13.359579100838795, 13.756647425038592, 14.269047540370284, 14.251396133370102, 13.942332005036512, 14.47065999517825, 15.297521049742807, 14.89756796853688, 14.838081852886182, 14.787288053933922],
+    "equal_balance_synthetic": [7.1706650444035693, 4.0776061985980041, 3.0489491818790446],
+    "equal_n_positive": 3,
+    "custom_w": {
+      "names": ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08"],
+      "values": [0, 0, 0.080975472850589245, 0, 0.018724229078543392, 0, 0.90030029807086731, 0]
+    },
+    "custom_predictor_loss": 0.00022540004121439862,
+    "custom_pre_mspe": 0.10066501401133668,
+    "custom_average_effect": 2.0145616050542836,
+    "equal_big_w": {
+      "names": ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08"],
+      "values": [0, 0, 0.081864070109420387, 0, 0.004018020882468349, 0, 0.91411790900811118, 0]
+    },
+    "equal_big_predictor_loss": 0.00032774476945546374,
+    "sv2_start": {
+      "names": ["x1", "x2", "x3"],
+      "values": [0.2166341027675921, 0.54250596341030999, 0.240859933822098]
+    }
+  }
+}
