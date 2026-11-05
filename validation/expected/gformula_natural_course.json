@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "gformula_natural_course",
+  "area": "causal/gformula",
+  "method": "Parametric g-formula, one period, continuous covariate: exact natural-course and static risks (CAUS-16 natural-course check)",
+  "reference": "parametric g-formula (Hernan & Robins 2020, ch. 21): Normal covariate model, logistic treatment and outcome models; the natural-course integral by Gauss-Hermite quadrature, written out (gfoRmula not installed)",
+  "call": "lm(L_t0 ~ B); glm(A_t0 ~ B + L_t0, binomial); glm(Y ~ B + L_t0 + A_t0, binomial); lm(Yc ~ B + L_t0 + A_t0); integral over Normal(mu_i, sigma)",
+  "dataset": "validation/datasets/generated/gformula_nc.csv",
+  "datasets": ["validation/datasets/generated/gformula_nc.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "cov_coef": [-0.065986028090357057, 0.382239645122603],
+    "cov_sigma": 1.9416412040713367,
+    "trt_coef": [-0.29416322475090917, -0.01939582724716787, 0.51084942864291372],
+    "outcome_coef_binary": [-2.1607677932738101, 0.31039703823283821, 1.4998114806201022, 0.49077965469862839],
+    "outcome_coef_cont": [0.97983935579993831, 0.49860062554693874, 0.78420955076991716, 0.98690605719686653],
+    "outcome_sigma_cont": 0.98529462561773662,
+    "natural_binary": 0.28396647520206436,
+    "always_binary": 0.30555298865151798,
+    "never_binary": 0.25845981012735386,
+    "natural_cont": 1.3403405178404333,
+    "always_cont": 1.9007848832287226,
+    "never_cont": 0.91387882603185611,
+    "observed_mean_binary": 0.28449999999999998,
+    "observed_mean_cont": 1.3407156957694999
+  }
+}

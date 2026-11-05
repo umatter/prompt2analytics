@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "gformula_natural_course",
+      "name": "Parametric g-formula, end-of-follow-up outcome: Normal covariate simulation, natural course and static regimes",
+      "category": "econometrics",
+      "reference": "parametric g-formula (Hernan & Robins 2020, ch. 21) written out in validation/r/cases/causal_gformula.R: stats::lm and stats::glm(binomial, epsilon 1e-14) models, the natural-course integral over Normal(mu_i, sigma) by 120-point Gauss-Hermite (agrees with integrate to 2.2e-14); gfoRmula is not installed",
+      "doc": "validation/econometrics/gformula.md",
+      "cases": ["gformula_natural_course"],
+      "tests": [
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_natural_course_models",
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_natural_course_risks"
+      ],
+      "quantities": ["covariate model coefficients and residual SD", "treatment model coefficients", "binary and continuous outcome model coefficients, residual SD",
+                     "natural-course, always- and never-treat risks (Monte Carlo, against the exact integral)", "natural course against the observed mean"],
+      "tolerance": "n = 2000: models at validation/README.md (coefficients 1e-10, residual SD 1e-8 relative); Monte Carlo risks within 5 Monte Carlo SEs of the exact values (200 000 simulated subjects for the binary outcome, 1 000 000 for the continuous one, seeded); natural course within 0.01 (binary) and 0.02 (continuous) of the observed mean",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

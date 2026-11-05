@@ -56,12 +56,15 @@ use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
 
+use rand_distr::{Distribution, StandardNormal};
+
+use crate::econometrics::glm::{GlmSpec, fit_glm, plogis};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::aliasing_message;
+use crate::regression::ols::solve_ols;
 use crate::resource::{self, Budget};
-use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
+use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -619,6 +622,40 @@ impl GFormulaData {
 // Result Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// How a regime's risk was standardised over the baseline covariates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GFormulaStandardization {
+    /// `n_simulations` simulated subjects, baseline rows drawn with replacement.
+    #[default]
+    MonteCarlo,
+    /// Each observed baseline row once (a static regime without time-varying covariates:
+    /// nothing in the simulation is random).
+    Empirical,
+}
+
+/// The fitted end-of-follow-up outcome model or discrete-time hazard, as reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GFormulaModelSummary {
+    /// "linear", "logistic" or "pooled logistic hazard".
+    pub kind: String,
+    /// Column names, starting with "(Intercept)".
+    pub names: Vec<String>,
+    /// Coefficients; `NaN` for aliased columns.
+    pub coefficients: Vec<f64>,
+    /// Standard errors; `NaN` for aliased columns.
+    pub std_errors: Vec<f64>,
+    /// Observations: subjects, or person-periods for the hazard.
+    pub n_obs: usize,
+    /// The fit converged (always true for "linear").
+    pub converged: bool,
+    /// IRLS iterations (0 for "linear").
+    pub iterations: usize,
+}
+
+fn nan() -> f64 {
+    f64::NAN
+}
+
 /// Result from the parametric g-formula.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GFormulaResult {
@@ -696,6 +733,35 @@ pub struct GFormulaResult {
     /// Bootstrap estimates of risk difference
     #[serde(skip)]
     pub bootstrap_rd: Vec<f64>,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Survival curves, observed risk, models
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Survival outcome: risk `1 - S(t)` by period `t = 1..T` under the natural course;
+    /// empty for end-of-follow-up outcomes.
+    #[serde(default)]
+    pub risk_curve_natural: Vec<f64>,
+    /// Survival outcome: risk by period under the intervention; empty otherwise.
+    #[serde(default)]
+    pub risk_curve_intervention: Vec<f64>,
+    /// Observed risk: the mean outcome, or for survival data the discrete-time
+    /// Kaplan-Meier risk at the last period.
+    #[serde(default = "nan")]
+    pub observed_risk: f64,
+    /// Survival data: discrete-time Kaplan-Meier risk `1 - S(t)` by period; empty otherwise.
+    #[serde(default)]
+    pub observed_risk_curve: Vec<f64>,
+    /// How the intervention's risk was standardised (the natural course is always
+    /// Monte Carlo).
+    #[serde(default)]
+    pub standardization: GFormulaStandardization,
+    /// The treatment never changes within a subject's follow-up and was modelled as a
+    /// point treatment (decided in period 1, carried forward).
+    #[serde(default)]
+    pub point_treatment: bool,
+    /// The fitted outcome model (end of follow-up) or pooled logistic hazard.
+    #[serde(default)]
+    pub outcome_model: Option<GFormulaModelSummary>,
 }
 
 impl fmt::Display for GFormulaResult {
@@ -774,35 +840,86 @@ impl fmt::Display for GFormulaResult {
 // Internal Model Structures
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Fitted model for time-varying covariates.
+/// A fitted covariate, treatment, outcome or hazard model, ready for prediction.
 #[derive(Debug, Clone)]
-struct TimeVaryingCovariateModel {
-    /// Coefficients for each covariate (one row per covariate, columns are predictors)
-    coefficients: Vec<Array1<f64>>,
-    /// Residual standard deviation for each covariate
-    residual_sd: Vec<f64>,
-    /// Whether each covariate is binary (use logistic) or continuous (use linear)
-    is_binary: Vec<bool>,
+struct PredictModel {
+    /// Coefficients as fitted, `NaN` for aliased columns (reports, tests).
+    fitted: Vec<f64>,
+    /// `fitted` with `NaN` replaced by 0: R's `predict` on a rank-deficient fit uses the
+    /// identified columns only.
+    coef: Vec<f64>,
+    std_errors: Vec<f64>,
+    names: Vec<String>,
+    /// Residual SD `sqrt(RSS / df_residual)` of a linear model (`sigma(lm)`); 1 for logistic.
+    sigma: f64,
+    /// Logistic (Bernoulli draws) or linear (Normal draws).
+    binary: bool,
+    n_obs: usize,
+    converged: bool,
+    iterations: usize,
 }
 
-/// Fitted treatment model.
-#[derive(Debug, Clone)]
-struct TreatmentModel {
-    /// Logistic regression coefficients
-    coefficients: Array1<f64>,
-    /// Whether the model converged
-    converged: bool,
+impl PredictModel {
+    /// Linear predictor of a design row.
+    fn eta(&self, x: &[f64]) -> f64 {
+        x.iter().zip(&self.coef).map(|(a, b)| a * b).sum()
+    }
+
+    fn summary(&self, kind: &str) -> GFormulaModelSummary {
+        GFormulaModelSummary {
+            kind: kind.to_string(),
+            names: self.names.clone(),
+            coefficients: self.fitted.clone(),
+            std_errors: self.std_errors.clone(),
+            n_obs: self.n_obs,
+            converged: self.converged,
+            iterations: self.iterations,
+        }
+    }
 }
 
-/// Fitted outcome model.
+/// Every model of one g-formula fit.
 #[derive(Debug, Clone)]
-struct OutcomeModel {
-    /// Coefficients
-    coefficients: Array1<f64>,
-    /// Residual standard deviation (for continuous outcomes)
-    residual_sd: f64,
-    /// Whether the model converged
-    converged: bool,
+struct FittedModels {
+    /// `[period][covariate]`.
+    covariates: Vec<Vec<PredictModel>>,
+    /// One per period, or one (period 1) under a point treatment.
+    treatment: Vec<PredictModel>,
+    /// End-of-follow-up outcome model, or the pooled logistic hazard for survival.
+    outcome: PredictModel,
+    point_treatment: bool,
+    /// Subjects at risk at the start of each period.
+    n_at_risk: Vec<usize>,
+    /// Every logistic fit converged.
+    all_converged: bool,
+}
+
+/// One regime's simulation.
+#[derive(Debug, Clone)]
+struct SimOutput {
+    /// Per simulated (or empirical) unit: the outcome's expectation, or the risk by the
+    /// end of follow-up for survival.
+    per_unit: Vec<f64>,
+    mean: f64,
+    /// Survival: mean risk by period; empty otherwise.
+    curve: Vec<f64>,
+}
+
+/// The units a regime is standardised over.
+#[derive(Debug, Clone, Copy)]
+enum Units {
+    /// Each observed baseline row once, in order.
+    Empirical,
+    /// This many units, baseline rows drawn with replacement.
+    MonteCarlo(usize),
+}
+
+/// The fitted models and both regimes' simulations.
+struct Estimate {
+    models: FittedModels,
+    natural: SimOutput,
+    intervention: SimOutput,
+    standardization: GFormulaStandardization,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -811,49 +928,21 @@ struct OutcomeModel {
 
 /// Run the parametric g-formula.
 ///
-/// Estimates causal effects of time-varying treatments using Monte Carlo simulation.
+/// Fits the covariate, treatment and outcome (or hazard) models, simulates the natural
+/// course and the intervention from them (see the module documentation for the model
+/// specification and the simulation), and bootstraps subjects for standard errors and
+/// confidence intervals.
 ///
-/// # Arguments
-/// * `data` - Input data containing baseline covariates, time-varying covariates,
-///            treatments, and outcomes
-/// * `config` - Configuration options including intervention type, number of
-///              simulations, etc.
-///
-/// # Returns
-/// `GFormulaResult` containing risk estimates, causal effects, and confidence intervals.
-///
-/// # Algorithm
-///
-/// 1. **Fit models** for each time-varying covariate, treatment, and outcome
-/// 2. **Natural course simulation**: For each MC sample:
-///    - Sample baseline from observed data
-///    - At each time t: simulate L_t, sample A_t from treatment model
-///    - Compute outcome probability
-/// 3. **Intervention simulation**: Same as above but assign A_t per intervention
-/// 4. **Bootstrap** for standard errors
-///
-/// # Example
-///
-/// ```ignore
-/// use p2a_core::econometrics::{run_gformula, GFormulaData, GFormulaConfig, GFormulaIntervention};
-///
-/// let data = GFormulaData::new(baseline, time_varying, treatments, outcome)?;
-/// let config = GFormulaConfig {
-///     n_simulations: 1000,
-///     time_points: 2,
-///     intervention: GFormulaIntervention::Static { treat_all: true },
-///     ..Default::default()
-/// };
-///
-/// let result = run_gformula(&data, config)?;
-/// println!("Risk Difference: {:.4} (95% CI: [{:.4}, {:.4}])",
-///          result.risk_difference, result.ci_lower_rd, result.ci_upper_rd);
-/// ```
+/// # Errors
+/// `InvalidSpecification` for invalid controls, a threshold on a covariate the data do not
+/// have, or an outcome type that does not match the data; `InsufficientData` for data
+/// without subjects or a period nobody is at risk in; `ResourceLimit` and `Cancelled` from
+/// the resource guards.
 ///
 /// # References
 ///
 /// - Robins (1986), Mathematical Modelling
-/// - Hernan & Robins (2020), Causal Inference: What If, Chapter 21
+/// - Hernan & Robins (2020), Causal Inference: What If, Chapters 17 and 21
 /// - McGrath et al. (2020), Patterns 1(3), 100008
 pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<GFormulaResult> {
     validate_inputs(data, &config)?;
@@ -868,60 +957,12 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
         ));
     }
 
-    // Initialize RNG
     let seed = config.seed.unwrap_or(42);
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Stage 1: Fit Models
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Fit time-varying covariate models: L_t ~ f(L_{t-1}, A_{t-1}, baseline)
-    let covariate_models = fit_covariate_models(data, &config)?;
-
-    // Fit treatment models: A_t ~ g(L_t, A_{t-1}, baseline) for each time point
-    let treatment_models = fit_treatment_models(data, &config)?;
-
-    // Fit outcome model: Y ~ h(L_T, A, baseline) where T is last time point
-    let outcome_model = fit_outcome_model(data, &config)?;
-
-    let all_converged = treatment_models.iter().all(|m| m.converged) && outcome_model.converged;
-    if !all_converged {
-        warnings.push("Some models did not converge. Consider increasing max_iter.".to_string());
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Stage 2: Monte Carlo Simulation
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Simulate under natural course
-    let outcomes_natural = simulate_gformula(
-        data,
-        &covariate_models,
-        &treatment_models,
-        &outcome_model,
-        &GFormulaIntervention::NaturalCourse,
-        config.n_simulations,
-        &config,
-        &mut rng,
-    )?;
-
-    // Simulate under intervention
-    let outcomes_intervention = simulate_gformula(
-        data,
-        &covariate_models,
-        &treatment_models,
-        &outcome_model,
-        &config.intervention,
-        config.n_simulations,
-        &config,
-        &mut rng,
-    )?;
-
-    // Compute risks
-    let risk_natural: f64 = outcomes_natural.iter().sum::<f64>() / config.n_simulations as f64;
-    let risk_intervention: f64 =
-        outcomes_intervention.iter().sum::<f64>() / config.n_simulations as f64;
+    // Models and both regimes' simulations (common random numbers).
+    let est = estimate_once(data, &config, config.n_simulations, seed, &mut warnings)?;
+    let risk_natural = est.natural.mean;
+    let risk_intervention = est.intervention.mean;
 
     let risk_difference = risk_intervention - risk_natural;
     let risk_ratio = if risk_natural > 0.0 {
@@ -943,7 +984,7 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     };
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Stage 3: Bootstrap for Standard Errors
+    // Bootstrap for Standard Errors
     // ═══════════════════════════════════════════════════════════════════════
 
     let bootstrap_results = bootstrap_gformula(data, &config, config.n_bootstrap, seed)?;
@@ -996,6 +1037,7 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     let significance_rd = SignificanceLevel::from_p_value(p_value_rd);
 
     let intervention_description = describe(&config.intervention, data);
+    let (observed_risk, observed_risk_curve) = observed_risk(data);
 
     Ok(GFormulaResult {
         risk_natural,
@@ -1018,11 +1060,116 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
         confidence_level: config.confidence_level,
         outcome_type: config.outcome_type,
         intervention_description,
-        all_models_converged: all_converged,
+        all_models_converged: est.models.all_converged,
         warnings,
-        simulated_natural: outcomes_natural,
-        simulated_intervention: outcomes_intervention,
+        simulated_natural: est.natural.per_unit,
+        simulated_intervention: est.intervention.per_unit,
         bootstrap_rd: bootstrap_results.iter().map(|(rd, _, _)| *rd).collect(),
+        risk_curve_natural: est.natural.curve,
+        risk_curve_intervention: est.intervention.curve,
+        observed_risk,
+        observed_risk_curve,
+        standardization: est.standardization,
+        point_treatment: est.models.point_treatment,
+        outcome_model: Some(
+            est.models
+                .outcome
+                .summary(outcome_kind(config.outcome_type)),
+        ),
+    })
+}
+
+/// The reported kind of the outcome model.
+fn outcome_kind(outcome_type: GFormulaOutcomeType) -> &'static str {
+    match outcome_type {
+        GFormulaOutcomeType::Continuous => "linear",
+        GFormulaOutcomeType::Binary => "logistic",
+        GFormulaOutcomeType::Survival => "pooled logistic hazard",
+    }
+}
+
+/// The observed risk: the mean outcome, or for survival data the Kaplan-Meier risk at
+/// the last period with its curve.
+fn observed_risk(data: &GFormulaData) -> (f64, Vec<f64>) {
+    match &data.survival {
+        Some(s) => {
+            let curve = kaplan_meier_risk(s, data.n_time_points());
+            (curve.last().copied().unwrap_or(f64::NAN), curve)
+        }
+        None => (
+            data.outcome.iter().sum::<f64>() / data.n_subjects() as f64,
+            Vec::new(),
+        ),
+    }
+}
+
+/// Discrete-time Kaplan-Meier risk `1 - prod_{s <= t} (1 - d_s / n_s)` at `t = 1..t_max`,
+/// with `n_s = #{time >= s}` and `d_s = #{time == s, event}`.
+fn kaplan_meier_risk(s: &SurvivalOutcome, t_max: usize) -> Vec<f64> {
+    let mut at_risk = vec![0usize; t_max + 1];
+    let mut events = vec![0usize; t_max + 1];
+    for (&t, &e) in s.time.iter().zip(&s.event) {
+        at_risk[t] += 1;
+        if e {
+            events[t] += 1;
+        }
+    }
+    // n_s = subjects whose time is >= s
+    let mut n_s = s.time.len();
+    let mut surv = 1.0;
+    let mut out = Vec::with_capacity(t_max);
+    for t in 1..=t_max {
+        if n_s > 0 {
+            surv *= 1.0 - events[t] as f64 / n_s as f64;
+        }
+        out.push(1.0 - surv);
+        n_s -= at_risk[t];
+    }
+    out
+}
+
+/// Fit the models and simulate the natural course and the intervention from one seeded
+/// stream (common random numbers). The intervention is standardised exactly over the
+/// observed baseline rows when it is static and there is no time-varying covariate.
+fn estimate_once(
+    data: &GFormulaData,
+    config: &GFormulaConfig,
+    n_sim: usize,
+    seed: u64,
+    warnings: &mut Vec<String>,
+) -> EconResult<Estimate> {
+    let models = fit_models(data, config, warnings)?;
+    let natural = simulate(
+        data,
+        &models,
+        &GFormulaIntervention::NaturalCourse,
+        Units::MonteCarlo(n_sim),
+        config.outcome_type,
+        seed,
+    )?;
+    let exact = data.n_time_varying_covars() == 0
+        && matches!(config.intervention, GFormulaIntervention::Static { .. });
+    let (units, standardization) = if exact {
+        (Units::Empirical, GFormulaStandardization::Empirical)
+    } else {
+        (
+            Units::MonteCarlo(n_sim),
+            GFormulaStandardization::MonteCarlo,
+        )
+    };
+    let intervention = simulate(
+        data,
+        &models,
+        &config.intervention,
+        units,
+        config.outcome_type,
+        seed,
+    )?;
+    Ok(Estimate {
+        models,
+        natural,
+        intervention,
+        standardization,
     })
 }
 
@@ -1146,208 +1293,312 @@ pub fn gformula(data: &GFormulaData) -> EconResult<GFormulaResult> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Model Fitting Functions
+// Model Fitting
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Fit models for time-varying covariates.
-/// For each covariate at time t, we fit: L_t[j] ~ f(L_{t-1}, A_{t-1}, baseline)
-fn fit_covariate_models(
-    data: &GFormulaData,
-    config: &GFormulaConfig,
-) -> EconResult<Vec<TimeVaryingCovariateModel>> {
-    let n = data.n_subjects();
-    let t_max = data.n_time_points();
-    let n_baseline = data.n_baseline_covars();
-    let n_tv = data.n_time_varying_covars();
+/// The note pushed when rule P applies to data with more than one period.
+const POINT_TREATMENT_NOTE: &str = "the treatment never changes within a subject's follow-up: \
+     it is modelled as a point treatment decided in period 1 and carried forward under every \
+     regime";
 
-    let mut models = Vec::with_capacity(t_max);
-
-    for t in 0..t_max {
-        let mut coef_list = Vec::with_capacity(n_tv);
-        let mut sd_list = Vec::with_capacity(n_tv);
-        let mut is_binary_list = Vec::with_capacity(n_tv);
-
-        // Get outcome for this time's covariates
-        let l_t = &data.time_varying_covariates[t];
-
-        // Build design matrix: [1, baseline, L_{t-1} (if t>0), A_{t-1} (if t>0)]
-        let n_predictors = 1 + n_baseline + (if t > 0 { n_tv + 1 } else { 0 });
-        let mut x = Array2::zeros((n, n_predictors));
-
-        // Intercept
-        for i in 0..n {
-            x[[i, 0]] = 1.0;
-        }
-
-        // Baseline covariates
-        for i in 0..n {
-            for j in 0..n_baseline {
-                x[[i, 1 + j]] = data.baseline_covariates[[i, j]];
-            }
-        }
-
-        // Lagged values if t > 0
-        if t > 0 {
-            let l_prev = &data.time_varying_covariates[t - 1];
-            let a_prev = &data.treatments[t - 1];
-
-            for i in 0..n {
-                for j in 0..n_tv {
-                    x[[i, 1 + n_baseline + j]] = l_prev[[i, j]];
-                }
-                x[[i, 1 + n_baseline + n_tv]] = a_prev[i];
-            }
-        }
-
-        // Fit model for each covariate
-        for j in 0..n_tv {
-            let y: Array1<f64> = l_t.column(j).to_owned();
-
-            // Determine if binary (all values 0 or 1)
-            let is_binary = y.iter().all(|&v| (v == 0.0) || (v == 1.0));
-            is_binary_list.push(is_binary);
-
-            if is_binary {
-                // Logistic regression
-                let (_, beta, _, _) = fit_logistic(&x, &y, config.max_iter, config.tolerance)?;
-                coef_list.push(beta);
-                sd_list.push(1.0); // Not used for binary
-            } else {
-                // Linear regression
-                let (beta, resid_sd) = fit_linear(&x, &y)?;
-                coef_list.push(beta);
-                sd_list.push(resid_sd);
-            }
-        }
-
-        models.push(TimeVaryingCovariateModel {
-            coefficients: coef_list,
-            residual_sd: sd_list,
-            is_binary: is_binary_list,
-        });
+/// Covariate model row of period `t` (0-based): `[1, baseline, L_(t-1), A_(t-1)]`, the lags
+/// only for `t > 0`.
+fn cov_row(buf: &mut Vec<f64>, t: usize, b: &[f64], l_prev: &[f64], a_prev: f64) {
+    buf.clear();
+    buf.push(1.0);
+    buf.extend_from_slice(b);
+    if t > 0 {
+        buf.extend_from_slice(l_prev);
+        buf.push(a_prev);
     }
-
-    Ok(models)
 }
 
-/// Fit treatment models for each time point.
-/// A_t ~ g(L_t, A_{t-1}, baseline) using logistic regression
-fn fit_treatment_models(
+/// Treatment model row of period `t`: `[1, baseline, L_t, A_(t-1)]`, the lag only for
+/// `t > 0` and not under a point treatment.
+fn trt_row(buf: &mut Vec<f64>, t: usize, b: &[f64], l_t: &[f64], a_prev: f64, point: bool) {
+    buf.clear();
+    buf.push(1.0);
+    buf.extend_from_slice(b);
+    buf.extend_from_slice(l_t);
+    if t > 0 && !point {
+        buf.push(a_prev);
+    }
+}
+
+/// End-of-follow-up outcome row: `[1, baseline, L_(T-1), A_0, ..., A_(T-1)]`, or one
+/// treatment column under a point treatment.
+fn eof_row(buf: &mut Vec<f64>, b: &[f64], l_last: &[f64], hist: &[f64], point: bool) {
+    buf.clear();
+    buf.push(1.0);
+    buf.extend_from_slice(b);
+    buf.extend_from_slice(l_last);
+    if point {
+        buf.push(hist[0]);
+    } else {
+        buf.extend_from_slice(hist);
+    }
+}
+
+/// A design matrix of `rows.len()` rows filled by `row(i, buf)` for each subject `i`.
+fn build_design(
+    rows: &[usize],
+    k: usize,
+    what: &str,
+    mut row: impl FnMut(usize, &mut Vec<f64>),
+) -> EconResult<Array2<f64>> {
+    let mut x = resource::try_zeros2(rows.len(), k, what)?;
+    let mut buf = Vec::with_capacity(k);
+    for (r, &i) in rows.iter().enumerate() {
+        row(i, &mut buf);
+        debug_assert_eq!(buf.len(), k);
+        for (c, v) in buf.iter().enumerate() {
+            x[[r, c]] = *v;
+        }
+    }
+    Ok(x)
+}
+
+/// Fit a linear (`lm`) or logistic (`glm`, binomial) model; warnings are prefixed with `what`.
+fn fit_predict_model(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    names: Vec<String>,
+    binary: bool,
+    what: &str,
+    config: &GFormulaConfig,
+    warnings: &mut Vec<String>,
+) -> EconResult<PredictModel> {
+    let rows = x.nrows();
+    let (fitted, std_errors, aliased, sigma, converged, iterations) = if binary {
+        let mut spec = GlmSpec::logit();
+        spec.epsilon = config.tolerance;
+        spec.max_iter = config.max_iter;
+        let fit = fit_glm(x.view(), y.view(), &spec)?;
+        for w in &fit.warnings {
+            warnings.push(format!("{what}: {w}"));
+        }
+        (
+            fit.coefficients.to_vec(),
+            fit.std_errors.to_vec(),
+            fit.aliased,
+            1.0,
+            fit.converged,
+            fit.iterations,
+        )
+    } else {
+        let fit = solve_ols(x.view(), y.view())?;
+        let df = rows.saturating_sub(fit.rank);
+        if df == 0 {
+            return Err(EconError::InsufficientData {
+                required: fit.rank + 1,
+                provided: rows,
+                context: format!(
+                    "{what}: the residual SD needs at least one residual degree of freedom"
+                ),
+            });
+        }
+        let sigma = (fit.residuals.iter().map(|r| r * r).sum::<f64>() / df as f64).sqrt();
+        let se = fit
+            .unscaled
+            .diag()
+            .iter()
+            .map(|v| sigma * v.sqrt())
+            .collect();
+        (fit.beta.to_vec(), se, fit.aliased, sigma, true, 0)
+    };
+    if let Some(m) = aliasing_message(&aliased, &names) {
+        warnings.push(format!("{what}: {m}"));
+    }
+    let coef = fitted
+        .iter()
+        .map(|v| if v.is_nan() { 0.0 } else { *v })
+        .collect();
+    Ok(PredictModel {
+        fitted,
+        coef,
+        std_errors,
+        names,
+        sigma,
+        binary,
+        n_obs: rows,
+        converged,
+        iterations,
+    })
+}
+
+/// Fit every model of the g-formula.
+///
+/// Rows of period `t` are the subjects at risk at its start (`R_t`): every subject for
+/// end-of-follow-up data, those with `time > t` (0-based `t`) for survival data. In period
+/// `t` each time-varying covariate is regressed on `[1, baseline, L_(t-1), A_(t-1)]`
+/// (logistic when its values on `R_t` are all 0 or 1, linear otherwise) and the treatment
+/// on `[1, baseline, L_t, A_(t-1)]` (logistic). The outcome model is fitted on
+/// `[1, baseline, L_(T-1), A_0, ..., A_(T-1)]` (linear or logistic). A treatment that never
+/// changes within any subject's follow-up is a point treatment: one treatment model
+/// (period 1) and one treatment column in the outcome model.
+fn fit_models(
     data: &GFormulaData,
     config: &GFormulaConfig,
-) -> EconResult<Vec<TreatmentModel>> {
+    warnings: &mut Vec<String>,
+) -> EconResult<FittedModels> {
     let n = data.n_subjects();
     let t_max = data.n_time_points();
-    let n_baseline = data.n_baseline_covars();
+    let n_b = data.n_baseline_covars();
     let n_tv = data.n_time_varying_covars();
 
-    let mut models = Vec::with_capacity(t_max);
-
+    // Risk sets, all checked before any model is fitted.
+    let mut risk: Vec<Vec<usize>> = Vec::with_capacity(t_max);
     for t in 0..t_max {
-        // Design: [1, baseline, L_t, A_{t-1} (if t>0)]
-        let n_predictors = 1 + n_baseline + n_tv + (if t > 0 { 1 } else { 0 });
-        let mut x = Array2::zeros((n, n_predictors));
-
-        // Intercept
-        for i in 0..n {
-            x[[i, 0]] = 1.0;
+        let rows: Vec<usize> = match &data.survival {
+            Some(s) => (0..n).filter(|&i| s.time[i] > t).collect(),
+            None => (0..n).collect(),
+        };
+        if rows.is_empty() {
+            return Err(EconError::InsufficientData {
+                required: 1,
+                provided: 0,
+                context: format!(
+                    "no subject is at risk at the start of period {} (every follow-up ended \
+                     earlier); use fewer periods",
+                    t + 1
+                ),
+            });
         }
+        risk.push(rows);
+    }
 
-        // Baseline
-        for i in 0..n {
-            for j in 0..n_baseline {
-                x[[i, 1 + j]] = data.baseline_covariates[[i, j]];
-            }
-        }
+    // Rule P: the treatment never changes within a subject's follow-up.
+    let point = t_max == 1
+        || (1..t_max).all(|t| {
+            risk[t]
+                .iter()
+                .all(|&i| data.treatments[t][i] == data.treatments[0][i])
+        });
+    if point && t_max > 1 {
+        warnings.push(POINT_TREATMENT_NOTE.to_string());
+    }
 
-        // Current time-varying covariates
+    let mut b = Vec::with_capacity(n_b);
+    let mut l_prev = Vec::with_capacity(n_tv);
+    let mut l_cur = Vec::with_capacity(n_tv);
+    let fill = |dst: &mut Vec<f64>, row: ndarray::ArrayView1<'_, f64>| {
+        dst.clear();
+        dst.extend(row.iter());
+    };
+
+    let mut covariates = Vec::with_capacity(t_max);
+    let mut treatment = Vec::with_capacity(if point { 1 } else { t_max });
+    let mut all_converged = true;
+    for t in 0..t_max {
+        resource::checkpoint()?;
+        let rows = &risk[t];
         let l_t = &data.time_varying_covariates[t];
-        for i in 0..n {
+
+        // Covariate models
+        let mut models_t = Vec::with_capacity(n_tv);
+        if n_tv > 0 {
+            let k = 1 + n_b + if t > 0 { n_tv + 1 } else { 0 };
+            let x = build_design(rows, k, "g-formula design", |i, buf| {
+                fill(&mut b, data.baseline_covariates.row(i));
+                let a_prev = if t > 0 {
+                    fill(&mut l_prev, data.time_varying_covariates[t - 1].row(i));
+                    data.treatments[t - 1][i]
+                } else {
+                    0.0
+                };
+                cov_row(buf, t, &b, &l_prev, a_prev);
+            })?;
+            let mut names = vec!["(Intercept)".to_string()];
+            names.extend(data.baseline_names.iter().cloned());
+            if t > 0 {
+                names.extend(
+                    data.time_varying_names
+                        .iter()
+                        .map(|s| format!("{s}_t{}", t - 1)),
+                );
+                names.push(format!("{}_t{}", data.treatment_name, t - 1));
+            }
             for j in 0..n_tv {
-                x[[i, 1 + n_baseline + j]] = l_t[[i, j]];
+                let y: Array1<f64> = rows.iter().map(|&i| l_t[[i, j]]).collect();
+                let binary = y.iter().all(|&v| v == 0.0 || v == 1.0);
+                let what = format!(
+                    "covariate model for {} in period {}",
+                    data.time_varying_names[j],
+                    t + 1
+                );
+                let m = fit_predict_model(&x, &y, names.clone(), binary, &what, config, warnings)?;
+                all_converged &= m.converged;
+                models_t.push(m);
             }
         }
+        covariates.push(models_t);
 
-        // Lagged treatment if t > 0
-        if t > 0 {
-            let a_prev = &data.treatments[t - 1];
-            for i in 0..n {
-                x[[i, 1 + n_baseline + n_tv]] = a_prev[i];
+        // Treatment model
+        if t == 0 || !point {
+            let k = 1 + n_b + n_tv + usize::from(t > 0 && !point);
+            let x = build_design(rows, k, "g-formula design", |i, buf| {
+                fill(&mut b, data.baseline_covariates.row(i));
+                fill(&mut l_cur, l_t.row(i));
+                let a_prev = if t > 0 {
+                    data.treatments[t - 1][i]
+                } else {
+                    0.0
+                };
+                trt_row(buf, t, &b, &l_cur, a_prev, point);
+            })?;
+            let mut names = vec!["(Intercept)".to_string()];
+            names.extend(data.baseline_names.iter().cloned());
+            names.extend(data.time_varying_names.iter().map(|s| format!("{s}_t{t}")));
+            if t > 0 && !point {
+                names.push(format!("{}_t{}", data.treatment_name, t - 1));
             }
-        }
-
-        let y = &data.treatments[t];
-        let (_, beta, converged, _) = fit_logistic(&x, y, config.max_iter, config.tolerance)?;
-
-        models.push(TreatmentModel {
-            coefficients: beta,
-            converged,
-        });
-    }
-
-    Ok(models)
-}
-
-/// Fit outcome model.
-/// Y ~ h(L_T, cumulative A, baseline)
-fn fit_outcome_model(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<OutcomeModel> {
-    let n = data.n_subjects();
-    let t_max = data.n_time_points();
-    let n_baseline = data.n_baseline_covars();
-    let n_tv = data.n_time_varying_covars();
-
-    // Design: [1, baseline, L_T (last time-varying), cumulative treatment]
-    // Cumulative treatment = sum of all A_t for each subject
-    let n_predictors = 1 + n_baseline + n_tv + t_max;
-    let mut x = Array2::zeros((n, n_predictors));
-
-    // Intercept
-    for i in 0..n {
-        x[[i, 0]] = 1.0;
-    }
-
-    // Baseline
-    for i in 0..n {
-        for j in 0..n_baseline {
-            x[[i, 1 + j]] = data.baseline_covariates[[i, j]];
+            let y: Array1<f64> = rows.iter().map(|&i| data.treatments[t][i]).collect();
+            let what = format!("treatment model in period {}", t + 1);
+            let m = fit_predict_model(&x, &y, names, true, &what, config, warnings)?;
+            all_converged &= m.converged;
+            treatment.push(m);
         }
     }
 
-    // Last time-varying covariates
-    let l_last = &data.time_varying_covariates[t_max - 1];
-    for i in 0..n {
-        for j in 0..n_tv {
-            x[[i, 1 + n_baseline + j]] = l_last[[i, j]];
-        }
+    // End-of-follow-up outcome model on every subject.
+    let rows: Vec<usize> = (0..n).collect();
+    let k = 1 + n_b + n_tv + if point { 1 } else { t_max };
+    let mut hist = Vec::with_capacity(t_max);
+    let x = build_design(&rows, k, "g-formula design", |i, buf| {
+        fill(&mut b, data.baseline_covariates.row(i));
+        fill(&mut l_cur, data.time_varying_covariates[t_max - 1].row(i));
+        hist.clear();
+        hist.extend(data.treatments.iter().map(|a| a[i]));
+        eof_row(buf, &b, &l_cur, &hist, point);
+    })?;
+    let mut names = vec!["(Intercept)".to_string()];
+    names.extend(data.baseline_names.iter().cloned());
+    names.extend(data.time_varying_names.iter().cloned());
+    if point {
+        names.push(data.treatment_name.clone());
+    } else {
+        names.extend((0..t_max).map(|t| format!("{}_t{t}", data.treatment_name)));
     }
+    let binary = config.outcome_type != GFormulaOutcomeType::Continuous;
+    let outcome = fit_predict_model(
+        &x,
+        &data.outcome,
+        names,
+        binary,
+        "outcome model",
+        config,
+        warnings,
+    )?;
+    all_converged &= outcome.converged;
 
-    // Treatment at each time point (allows flexible effect over time)
-    for t in 0..t_max {
-        for i in 0..n {
-            x[[i, 1 + n_baseline + n_tv + t]] = data.treatments[t][i];
-        }
-    }
-
-    let y = &data.outcome;
-
-    match config.outcome_type {
-        GFormulaOutcomeType::Continuous => {
-            let (beta, resid_sd) = fit_linear(&x, y)?;
-            Ok(OutcomeModel {
-                coefficients: beta,
-                residual_sd: resid_sd,
-                converged: true,
-            })
-        }
-        GFormulaOutcomeType::Binary | GFormulaOutcomeType::Survival => {
-            let (_, beta, converged, _) = fit_logistic(&x, y, config.max_iter, config.tolerance)?;
-            Ok(OutcomeModel {
-                coefficients: beta,
-                residual_sd: 1.0,
-                converged,
-            })
-        }
-    }
+    Ok(FittedModels {
+        covariates,
+        treatment,
+        outcome,
+        point_treatment: point,
+        n_at_risk: risk.iter().map(|r| r.len()).collect(),
+        all_converged,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1357,170 +1608,112 @@ fn fit_outcome_model(data: &GFormulaData, config: &GFormulaConfig) -> EconResult
 /// Simulated subjects between two cancellation checks.
 const SIMULATION_CHECK_EVERY: usize = 256;
 
-/// Simulate outcomes under a given intervention.
-#[allow(clippy::too_many_arguments)]
-fn simulate_gformula<R: Rng>(
+/// The simulation stream of `seed`: stream 1 of ChaCha8, so it never overlaps the bootstrap
+/// resampling stream (stream 0) of the same seed.
+fn sim_rng(seed: u64) -> ChaCha8Rng {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    rng.set_stream(1);
+    rng
+}
+
+/// Simulate one regime.
+///
+/// Every regime starts from `sim_rng(seed)` and consumes the same draws (a row per Monte
+/// Carlo unit, one draw per time-varying covariate and one treatment draw per period,
+/// whether the regime uses it or not), so regimes are compared under common random numbers.
+/// Continuous covariates are drawn from `Normal(eta, sigma)`, binary ones from
+/// `Bernoulli(plogis(eta))`.
+fn simulate(
     data: &GFormulaData,
-    covariate_models: &[TimeVaryingCovariateModel],
-    treatment_models: &[TreatmentModel],
-    outcome_model: &OutcomeModel,
-    intervention: &GFormulaIntervention,
-    n_sim: usize,
-    config: &GFormulaConfig,
-    rng: &mut R,
-) -> EconResult<Vec<f64>> {
+    models: &FittedModels,
+    regime: &GFormulaIntervention,
+    units: Units,
+    outcome_type: GFormulaOutcomeType,
+    seed: u64,
+) -> EconResult<SimOutput> {
     let n = data.n_subjects();
     let t_max = data.n_time_points();
-    let n_baseline = data.n_baseline_covars();
     let n_tv = data.n_time_varying_covars();
+    let point = models.point_treatment;
+    let mut rng = sim_rng(seed);
+    let n_units = match units {
+        Units::Empirical => n,
+        Units::MonteCarlo(m) => m,
+    };
+    let mut per_unit =
+        resource::try_with_capacity::<f64>(n_units, "Monte Carlo simulations (n_simulations)")?;
 
-    let mut outcomes =
-        resource::try_with_capacity::<f64>(n_sim, "Monte Carlo simulations (n_simulations)")?;
-
-    for s in 0..n_sim {
-        if s % SIMULATION_CHECK_EVERY == 0 {
+    let mut b: Vec<f64> = Vec::with_capacity(data.n_baseline_covars());
+    let mut l_prev = vec![0.0; n_tv];
+    let mut l_cur = vec![0.0; n_tv];
+    let mut hist = Vec::with_capacity(t_max);
+    let mut buf = Vec::new();
+    for k in 0..n_units {
+        if k % SIMULATION_CHECK_EVERY == 0 {
             resource::checkpoint()?;
         }
-
-        // Sample a subject with replacement
-        let subject_idx = rng.gen_range(0..n);
-
-        // Get baseline for this subject
-        let baseline: Array1<f64> = data.baseline_covariates.row(subject_idx).to_owned();
-
-        // Track simulated values
-        let mut l_current = Array1::zeros(n_tv);
-        let mut a_current = 0.0;
-        let mut a_history = Vec::with_capacity(t_max);
-
-        // Simulate forward through time
+        let i = match units {
+            Units::Empirical => k,
+            Units::MonteCarlo(_) => rng.gen_range(0..n),
+        };
+        b.clear();
+        b.extend(data.baseline_covariates.row(i).iter());
+        l_prev.iter_mut().for_each(|v| *v = 0.0);
+        let mut a_prev = 0.0;
+        hist.clear();
         for t in 0..t_max {
-            // Simulate time-varying covariates L_t
-            let cov_model = &covariate_models[t];
-            let mut l_new = Array1::zeros(n_tv);
-
             for j in 0..n_tv {
-                // Build predictor vector
-                let n_pred = 1 + n_baseline + (if t > 0 { n_tv + 1 } else { 0 });
-                let mut x_pred = Array1::zeros(n_pred);
-                x_pred[0] = 1.0;
-                for k in 0..n_baseline {
-                    x_pred[1 + k] = baseline[k];
-                }
-                if t > 0 {
-                    for k in 0..n_tv {
-                        x_pred[1 + n_baseline + k] = l_current[k];
-                    }
-                    x_pred[1 + n_baseline + n_tv] = a_current;
-                }
-
-                // Predict
-                let linear_pred: f64 = x_pred
-                    .iter()
-                    .zip(cov_model.coefficients[j].iter())
-                    .map(|(x, b)| x * b)
-                    .sum();
-
-                if cov_model.is_binary[j] {
-                    // Sample from Bernoulli with probability expit(linear_pred)
-                    let p = logistic_cdf(linear_pred);
+                let m = &models.covariates[t][j];
+                cov_row(&mut buf, t, &b, &l_prev, a_prev);
+                let lp = m.eta(&buf);
+                l_cur[j] = if m.binary {
                     let u: f64 = rng.gen_range(0.0..1.0);
-                    l_new[j] = if u < p { 1.0 } else { 0.0 };
+                    f64::from(u8::from(u < plogis(lp)))
                 } else {
-                    // Sample from Normal(linear_pred, residual_sd)
-                    let u: f64 = rng.gen_range(-1.0..1.0);
-                    l_new[j] = linear_pred + cov_model.residual_sd[j] * u * 0.5;
-                }
+                    let z: f64 = StandardNormal.sample(&mut rng);
+                    lp + m.sigma * z
+                };
             }
-            l_current = l_new;
-
-            // Assign treatment according to intervention
-            let a_t = match intervention {
-                GFormulaIntervention::NaturalCourse => {
-                    // Sample from treatment model
-                    let trt_model = &treatment_models[t];
-                    let n_pred = 1 + n_baseline + n_tv + (if t > 0 { 1 } else { 0 });
-                    let mut x_pred = Array1::zeros(n_pred);
-                    x_pred[0] = 1.0;
-                    for k in 0..n_baseline {
-                        x_pred[1 + k] = baseline[k];
+            // Always consumed, so the regimes' streams stay aligned.
+            let u_a: f64 = rng.gen_range(0.0..1.0);
+            let a = if point && t > 0 {
+                a_prev
+            } else {
+                match regime {
+                    GFormulaIntervention::NaturalCourse => {
+                        trt_row(&mut buf, t, &b, &l_cur, a_prev, point);
+                        f64::from(u8::from(u_a < plogis(models.treatment[t].eta(&buf))))
                     }
-                    for k in 0..n_tv {
-                        x_pred[1 + n_baseline + k] = l_current[k];
-                    }
-                    if t > 0 {
-                        x_pred[1 + n_baseline + n_tv] = a_current;
-                    }
-
-                    let linear_pred: f64 = x_pred
-                        .iter()
-                        .zip(trt_model.coefficients.iter())
-                        .map(|(x, b)| x * b)
-                        .sum();
-                    let p = logistic_cdf(linear_pred);
-                    let u: f64 = rng.gen_range(0.0..1.0);
-                    if u < p { 1.0 } else { 0.0 }
-                }
-                GFormulaIntervention::Static { treat_all } => {
-                    if *treat_all {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                GFormulaIntervention::Threshold {
-                    variable_idx,
-                    cutoff,
-                    above,
-                } => {
-                    // validate_inputs checked the index
-                    let var_val = l_current[*variable_idx];
-                    if *above {
-                        if var_val > *cutoff { 1.0 } else { 0.0 }
-                    } else if var_val <= *cutoff {
-                        1.0
-                    } else {
-                        0.0
+                    GFormulaIntervention::Static { treat_all } => f64::from(u8::from(*treat_all)),
+                    GFormulaIntervention::Threshold {
+                        variable_idx,
+                        cutoff,
+                        above,
+                    } => {
+                        // validate_inputs checked the index
+                        let v = l_cur[*variable_idx];
+                        f64::from(u8::from(if *above { v > *cutoff } else { v <= *cutoff }))
                     }
                 }
             };
-
-            a_current = a_t;
-            a_history.push(a_t);
+            std::mem::swap(&mut l_prev, &mut l_cur);
+            a_prev = a;
+            hist.push(a);
         }
-
-        // Compute outcome probability
-        // Design: [1, baseline, L_T, A_0, ..., A_{T-1}]
-        let n_out_pred = 1 + n_baseline + n_tv + t_max;
-        let mut x_out = Array1::zeros(n_out_pred);
-        x_out[0] = 1.0;
-        for k in 0..n_baseline {
-            x_out[1 + k] = baseline[k];
-        }
-        for k in 0..n_tv {
-            x_out[1 + n_baseline + k] = l_current[k];
-        }
-        for (t_idx, &a_t) in a_history.iter().enumerate() {
-            x_out[1 + n_baseline + n_tv + t_idx] = a_t;
-        }
-
-        let linear_pred: f64 = x_out
-            .iter()
-            .zip(outcome_model.coefficients.iter())
-            .map(|(x, b)| x * b)
-            .sum();
-
-        let outcome_value = match config.outcome_type {
-            GFormulaOutcomeType::Continuous => linear_pred,
-            GFormulaOutcomeType::Binary | GFormulaOutcomeType::Survival => {
-                logistic_cdf(linear_pred)
-            }
-        };
-
-        outcomes.push(outcome_value);
+        // l_prev now holds L_(T-1)
+        eof_row(&mut buf, &b, &l_prev, &hist, point);
+        let lp = models.outcome.eta(&buf);
+        per_unit.push(match outcome_type {
+            GFormulaOutcomeType::Continuous => lp,
+            GFormulaOutcomeType::Binary | GFormulaOutcomeType::Survival => plogis(lp),
+        });
     }
-
-    Ok(outcomes)
+    let mean = per_unit.iter().sum::<f64>() / n_units as f64;
+    Ok(SimOutput {
+        per_unit,
+        mean,
+        curve: Vec::new(),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1544,8 +1737,10 @@ fn with_optional_budget<R>(budget: &Option<Budget>, f: impl FnOnce() -> R) -> R 
 /// Returns Vec of (risk_difference, risk_intervention, risk_natural) tuples.
 ///
 /// Replicates run in parallel in chunks of [`BOOTSTRAP_CHUNK`], each worker running under
-/// the caller's cooperative-cancellation budget. Replicate `b` is seeded with
-/// `seed + 1000 b` (wrapping), so results do not depend on the chunking. A failed replicate
+/// the caller's cooperative-cancellation budget. Replicate `b` has the seed
+/// `boot_seed = seed + 1000 b` (wrapping): subjects are resampled from stream 0 of that
+/// seed and simulated from stream 1 ([`sim_rng`]) with `n_simulations / 2` (at least 100)
+/// units, so results do not depend on the chunking or the thread count. A failed replicate
 /// is dropped; a cancellation or resource-limit error stops the bootstrap.
 fn bootstrap_gformula(
     data: &GFormulaData,
@@ -1558,61 +1753,17 @@ fn bootstrap_gformula(
     let mut successful_results =
         resource::try_with_capacity::<(f64, f64, f64)>(n_bootstrap, "bootstrap replications")?;
     let budget = resource::current_budget();
-
-    // Wrap data and config in Arc for sharing across threads
-    let data_arc = Arc::new(data.clone());
-    let config_arc = Arc::new(config.clone());
+    let n_sim = (config.n_simulations / 2).max(100);
 
     let replicate = |b: usize| -> EconResult<(f64, f64, f64)> {
-        let data = Arc::clone(&data_arc);
-        let config = Arc::clone(&config_arc);
-
-        // Seed for this bootstrap sample
         let boot_seed = seed.wrapping_add((b as u64).wrapping_mul(1000));
         let mut rng = ChaCha8Rng::seed_from_u64(boot_seed);
-
-        // Resample subjects with replacement
         let boot_indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
-
-        // Create bootstrap sample
-        let boot_data = resample_data(&data, &boot_indices)?;
-
-        // Fit models on bootstrap sample
-        let cov_models = fit_covariate_models(&boot_data, &config)?;
-        let trt_models = fit_treatment_models(&boot_data, &config)?;
-        let out_model = fit_outcome_model(&boot_data, &config)?;
-
-        // Number of simulations for bootstrap (fewer for speed)
-        let n_sim = (config.n_simulations / 2).max(100);
-
-        // Simulate
-        let out_nat = simulate_gformula(
-            &boot_data,
-            &cov_models,
-            &trt_models,
-            &out_model,
-            &GFormulaIntervention::NaturalCourse,
-            n_sim,
-            &config,
-            &mut rng,
-        )?;
-
-        let out_int = simulate_gformula(
-            &boot_data,
-            &cov_models,
-            &trt_models,
-            &out_model,
-            &config.intervention,
-            n_sim,
-            &config,
-            &mut rng,
-        )?;
-
-        let risk_nat: f64 = out_nat.iter().sum::<f64>() / out_nat.len() as f64;
-        let risk_int: f64 = out_int.iter().sum::<f64>() / out_int.len() as f64;
-        let rd = risk_int - risk_nat;
-
-        Ok((rd, risk_int, risk_nat))
+        let boot_data = resample_data(data, &boot_indices)?;
+        // Replicate warnings are not reported.
+        let est = estimate_once(&boot_data, config, n_sim, boot_seed, &mut Vec::new())?;
+        let (risk_int, risk_nat) = (est.intervention.mean, est.natural.mean);
+        Ok((risk_int - risk_nat, risk_int, risk_nat))
     };
 
     // Run bootstrap in parallel, one bounded chunk at a time
@@ -1738,113 +1889,6 @@ fn compute_z_critical(confidence_level: f64) -> f64 {
         let d3 = 0.001308;
         t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Helper Functions: Linear and Logistic Regression
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Fit linear regression using OLS.
-/// Returns (coefficients, residual_sd).
-fn fit_linear(x: &Array2<f64>, y: &Array1<f64>) -> EconResult<(Array1<f64>, f64)> {
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Linear regression in g-formula".to_string(),
-        suggestion: format!("Check for multicollinearity: {:?}", e),
-    })?;
-
-    let xty_vec = xty(&x.view(), y);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // Compute residual SD
-    let y_hat = x.dot(&beta);
-    let residuals = y - &y_hat;
-    let n = y.len() as f64;
-    let k = beta.len() as f64;
-    let df = (n - k).max(1.0);
-    let ssr: f64 = residuals.iter().map(|r| r * r).sum();
-    let resid_sd = (ssr / df).sqrt();
-
-    Ok((beta, resid_sd))
-}
-
-/// Fit logistic regression using Newton-Raphson (IRLS).
-/// Returns (predictions, coefficients, converged, iterations).
-fn fit_logistic(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<(Array1<f64>, Array1<f64>, bool, usize)> {
-    let n = y.len();
-    let k = x.ncols();
-
-    // Initialize coefficients
-    let mut beta = Array1::zeros(k);
-    let mut converged = false;
-    let mut iterations = 0;
-
-    for iter in 0..max_iter {
-        resource::checkpoint()?;
-        iterations = iter + 1;
-
-        // Linear predictor
-        let z: Array1<f64> = x.dot(&beta);
-
-        // Probabilities
-        let p: Array1<f64> = z.mapv(logistic_cdf);
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        // Gradient
-        let residuals = y - &p_clipped;
-        let mut gradient = Array1::zeros(k);
-        for i in 0..n {
-            for j in 0..k {
-                gradient[j] += residuals[i] * x[[i, j]];
-            }
-        }
-
-        // Check convergence
-        let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-        if grad_norm < tolerance {
-            converged = true;
-            break;
-        }
-
-        // Weights
-        let weights: Array1<f64> = p_clipped.mapv(|pi| pi * (1.0 - pi));
-
-        // Hessian
-        let mut hessian = Array2::zeros((k, k));
-        for i in 0..n {
-            let wi = weights[i];
-            for j in 0..k {
-                for l in 0..k {
-                    hessian[[j, l]] -= wi * x[[i, j]] * x[[i, l]];
-                }
-            }
-        }
-
-        // Newton-Raphson update
-        let neg_hessian = &hessian * -1.0;
-        match safe_inverse(&neg_hessian.view()) {
-            Ok((hess_inv, _)) => {
-                let delta = hess_inv.dot(&gradient);
-                beta = &beta + &delta;
-            }
-            Err(_) => {
-                // Use gradient descent with small step if Hessian is singular
-                let step_size = 0.01 / grad_norm.max(1.0);
-                beta = &beta + &(gradient * step_size);
-            }
-        }
-    }
-
-    // Final predictions
-    let z_final: Array1<f64> = x.dot(&beta);
-    let p_final: Array1<f64> = z_final.mapv(logistic_cdf);
-
-    Ok((p_final, beta, converged, iterations))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2028,64 +2072,6 @@ mod tests {
         assert!(result.risk_intervention >= 0.0 && result.risk_intervention <= 1.0);
         assert!(result.risk_ratio > 0.0);
         assert!(result.se_risk_difference > 0.0 && result.se_risk_difference.is_finite());
-    }
-
-    #[test]
-    fn test_gformula_bootstrap_unchanged_by_chunking() {
-        // Pinned at 1fdb22f, re-pinned at T3-WP01. In create_test_data a1 equals a0 row for
-        // row, so the outcome model's X'X in fit_linear ([1, x, l1, a0, a1]) has rank 4 of 5
-        // in the main fit and in every replicate (equilibrated reciprocal condition 1e-34 to
-        // 1e-18). The old safe_inverse took faer's Cholesky of that singular matrix whenever
-        // it did not fail (about half the replicates), so those replicates' coefficients
-        // were noise and the SE was 36.45 and 46.57 on a risk difference of 0.386; the
-        // symmetric generalized inverse gives 0.050 and 0.051. Per-replicate seeds are
-        // seed + 1000 b, unchanged. 130 replicates cross the 64-replicate chunk boundary
-        // twice.
-        const SE_RD: [(usize, f64); 2] = [(20, 0.05016316903989167), (130, 0.051370887581548556)];
-        for (b, se_rd) in SE_RD {
-            let cfg = GFormulaConfig {
-                n_simulations: 200,
-                time_points: 2,
-                intervention: GFormulaIntervention::Static { treat_all: true },
-                outcome_type: GFormulaOutcomeType::Continuous,
-                n_bootstrap: b,
-                seed: Some(42),
-                ..Default::default()
-            };
-            let r = run_gformula(&create_test_data(), cfg).unwrap();
-            assert_eq!(r.se_risk_difference, se_rd, "n_bootstrap {b}");
-        }
-    }
-
-    #[test]
-    fn test_gformula_static_interventions() {
-        let data = create_test_data();
-
-        let config_always = GFormulaConfig {
-            n_simulations: 200,
-            intervention: GFormulaIntervention::Static { treat_all: true },
-            outcome_type: GFormulaOutcomeType::Continuous,
-            n_bootstrap: 20,
-            seed: Some(42),
-            ..Default::default()
-        };
-        let result_always = run_gformula(&data, config_always).unwrap();
-
-        let config_never = GFormulaConfig {
-            n_simulations: 200,
-            intervention: GFormulaIntervention::Static { treat_all: false },
-            outcome_type: GFormulaOutcomeType::Continuous,
-            n_bootstrap: 20,
-            seed: Some(42),
-            ..Default::default()
-        };
-        let result_never = run_gformula(&data, config_never).unwrap();
-
-        // The two interventions should give different risks
-        let diff = (result_always.risk_intervention - result_never.risk_intervention).abs();
-        println!("Always treat risk: {}", result_always.risk_intervention);
-        println!("Never treat risk: {}", result_never.risk_intervention);
-        assert!(diff > 0.0 || diff < 1.0); // Just check it doesn't crash
     }
 
     fn expect_insufficient(err: EconError, provided: usize) {
@@ -2337,6 +2323,256 @@ mod tests {
             GFormulaIntervention::from_regime(NeverTreat, Some(0), None, None).unwrap_err(),
             &["apply only to intervention 'threshold'"],
         );
+    }
+
+    fn case_col(ds: &crate::data::Dataset, name: &str) -> Array1<f64> {
+        crate::data::columns::numeric_options(ds.df(), name)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap_or(f64::NAN))
+            .collect()
+    }
+
+    fn nc_data(ds: &crate::data::Dataset, outcome: &str) -> GFormulaData {
+        use ndarray::Axis;
+        GFormulaData::new(
+            case_col(ds, "B").insert_axis(Axis(1)),
+            vec![case_col(ds, "L_t0").insert_axis(Axis(1))],
+            vec![case_col(ds, "A_t0")],
+            case_col(ds, outcome),
+        )
+        .unwrap()
+        .with_names(&["B"], &["L"], "A")
+        .unwrap()
+    }
+
+    fn mc_se(v: &[f64]) -> f64 {
+        let m = v.iter().sum::<f64>() / v.len() as f64;
+        (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64 / v.len() as f64)
+            .sqrt()
+    }
+
+    #[test]
+    fn test_validate_gformula_natural_course_risks() {
+        // CAUS-16. Exact model-implied risks from validation/r/cases/causal_gformula.R
+        // (120-point Gauss-Hermite over Normal(mu_i, sigma)); the Monte Carlo estimate must be
+        // within 5 Monte Carlo SEs of them (MC tolerance, seeded). Before: covariates drawn
+        // from Uniform(-sigma/2, sigma/2) gave natural 0.166 / always 0.197 against
+        // 0.28397 / 0.30555 (> 100 SEs).
+        let (case, ds) = crate::test_support::load_case("gformula_natural_course");
+        let run = |outcome: &str, ty: GFormulaOutcomeType, treat_all: bool, n_sim: usize| {
+            let mut c = GFormulaConfig::default();
+            c.outcome_type = ty;
+            c.n_simulations = n_sim;
+            c.n_bootstrap = 0;
+            c.seed = Some(20261209);
+            c.intervention = GFormulaIntervention::Static { treat_all };
+            run_gformula(&nc_data(&ds, outcome), c).unwrap()
+        };
+        let near = |key: &str, est: f64, se: f64| {
+            let r = case.scalar(key);
+            assert!(
+                (est - r).abs() <= 5.0 * se,
+                "{key}: p2a {est} R {r} |diff| {} > 5 MC SE {}",
+                (est - r).abs(),
+                5.0 * se
+            );
+        };
+        let b1 = run("Y", GFormulaOutcomeType::Binary, true, 200_000);
+        near(
+            "natural_binary",
+            b1.risk_natural,
+            mc_se(&b1.simulated_natural),
+        );
+        near(
+            "always_binary",
+            b1.risk_intervention,
+            mc_se(&b1.simulated_intervention),
+        );
+        let b0 = run("Y", GFormulaOutcomeType::Binary, false, 200_000);
+        near(
+            "never_binary",
+            b0.risk_intervention,
+            mc_se(&b0.simulated_intervention),
+        );
+        // natural course reproduces the observed mean (sampling gap 0.0005 + 5 MC SE 0.004)
+        assert!((b1.risk_natural - case.scalar("observed_mean_binary")).abs() < 0.01);
+        let c1 = run("Yc", GFormulaOutcomeType::Continuous, true, 1_000_000);
+        near(
+            "natural_cont",
+            c1.risk_natural,
+            mc_se(&c1.simulated_natural),
+        );
+        near(
+            "always_cont",
+            c1.risk_intervention,
+            mc_se(&c1.simulated_intervention),
+        );
+        let c0 = run("Yc", GFormulaOutcomeType::Continuous, false, 1_000_000);
+        near(
+            "never_cont",
+            c0.risk_intervention,
+            mc_se(&c0.simulated_intervention),
+        );
+        assert!((c1.risk_natural - case.scalar("observed_mean_cont")).abs() < 0.02);
+    }
+
+    #[test]
+    fn test_validate_gformula_natural_course_models() {
+        // The covariate, treatment and outcome models against lm / glm (epsilon 1e-14) on the
+        // same CSV.
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("gformula_natural_course");
+        let n = ds.df().height();
+        let mut cfg = GFormulaConfig::default();
+        cfg.tolerance = 1e-14;
+        cfg.outcome_type = GFormulaOutcomeType::Binary;
+        let mut w = Vec::new();
+        let mb = fit_models(&nc_data(&ds, "Y"), &cfg, &mut w).unwrap();
+        cfg.outcome_type = GFormulaOutcomeType::Continuous;
+        let mc = fit_models(&nc_data(&ds, "Yc"), &cfg, &mut w).unwrap();
+        assert!(mb.point_treatment && !mb.covariates[0][0].binary);
+        Check::new(&case)
+            .vector("cov_coef", &mb.covariates[0][0].fitted, Tol::coef(n))
+            .scalar("cov_sigma", mb.covariates[0][0].sigma, Tol::stat(n))
+            .vector("trt_coef", &mb.treatment[0].fitted, Tol::coef(n))
+            .vector("outcome_coef_binary", &mb.outcome.fitted, Tol::coef(n))
+            .vector("outcome_coef_cont", &mc.outcome.fitted, Tol::coef(n))
+            .scalar("outcome_sigma_cont", mc.outcome.sigma, Tol::stat(n))
+            .finish();
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn test_gformula_natural_vs_natural_is_exactly_zero() {
+        // Common random numbers: both regimes replay one stream. Before, the intervention
+        // continued the natural course's stream, so RD was Monte Carlo noise.
+        let mut c = GFormulaConfig::default();
+        c.outcome_type = GFormulaOutcomeType::Continuous;
+        c.n_simulations = 500;
+        c.n_bootstrap = 0;
+        c.intervention = GFormulaIntervention::NaturalCourse;
+        let r = run_gformula(&create_tv_test_data(300, 5, false), c).unwrap();
+        assert_eq!(r.risk_difference, 0.0);
+        assert_eq!(r.risk_natural.to_bits(), r.risk_intervention.to_bits());
+    }
+
+    #[test]
+    fn test_gformula_static_contrast_is_exact_under_common_random_numbers() {
+        // CAUS-66 part: replaces the tautology `diff > 0.0 || diff < 1.0`. Linear outcome and
+        // covariate models with shared draws: E[Y^1] - E[Y^0] = b_A0 + b_A1 + b_L * g_A
+        // exactly (b: outcome [1, B, L_t1, A_t0, A_t1]; g: covariate model of L_t1
+        // [1, B, L_t0, A_t0]).
+        let data = create_tv_test_data(2_000, 5, false);
+        let cfg = |treat_all| {
+            let mut c = GFormulaConfig::default();
+            c.outcome_type = GFormulaOutcomeType::Continuous;
+            c.n_simulations = 2_000;
+            c.n_bootstrap = 0;
+            c.intervention = GFormulaIntervention::Static { treat_all };
+            c
+        };
+        let r1 = run_gformula(&data, cfg(true)).unwrap();
+        let r0 = run_gformula(&data, cfg(false)).unwrap();
+        let m = fit_models(&data, &cfg(true), &mut Vec::new()).unwrap();
+        assert!(!m.point_treatment);
+        let (b, g) = (&m.outcome.fitted, &m.covariates[1][0].fitted);
+        let formula = b[3] + b[4] + b[2] * g[3];
+        assert!(
+            (r1.risk_intervention - r0.risk_intervention - formula).abs() < 1e-12,
+            "{} vs {formula}",
+            r1.risk_intervention - r0.risk_intervention
+        );
+        // the DGP's total effect is 0.7 + 0.4 - 0.8 * 0.4 = 0.78 (SE about 0.06 at n = 2000)
+        assert!(formula > 0.3);
+    }
+
+    #[test]
+    fn test_gformula_threshold_extreme_cutoffs_equal_static() {
+        let data = create_tv_test_data(300, 5, true);
+        let run = |iv| {
+            let mut c = GFormulaConfig::default();
+            c.n_simulations = 1_000;
+            c.n_bootstrap = 0;
+            c.intervention = iv;
+            run_gformula(&data, c).unwrap()
+        };
+        let always = run(GFormulaIntervention::Static { treat_all: true });
+        let never = run(GFormulaIntervention::Static { treat_all: false });
+        let lo = run(GFormulaIntervention::Threshold {
+            variable_idx: 0,
+            cutoff: -1e300,
+            above: true,
+        });
+        let hi = run(GFormulaIntervention::Threshold {
+            variable_idx: 0,
+            cutoff: 1e300,
+            above: true,
+        });
+        assert_eq!(
+            lo.risk_intervention.to_bits(),
+            always.risk_intervention.to_bits()
+        );
+        assert_eq!(
+            hi.risk_intervention.to_bits(),
+            never.risk_intervention.to_bits()
+        );
+    }
+
+    #[test]
+    fn test_gformula_covariate_scale_invariance() {
+        // R10 scale test: glm.fit's relative deviance criterion and the least-squares solves
+        // are scale-free, so rescaling a baseline covariate by 1e6 or 1e-6 leaves the
+        // predictions unchanged. The old absolute gradient-norm criterion was not scale-free.
+        let base = create_tv_test_data(300, 9, true);
+        let mut c = GFormulaConfig::default();
+        c.n_simulations = 2_000;
+        c.n_bootstrap = 0;
+        let r = run_gformula(&base, c.clone()).unwrap();
+        for s in [1e6, 1e-6] {
+            let mut d = base.clone();
+            d.baseline_covariates.mapv_inplace(|v| v * s);
+            let rs = run_gformula(&d, c.clone()).unwrap();
+            assert!(rs.all_models_converged);
+            assert!(
+                (rs.risk_natural - r.risk_natural).abs() <= 1e-9 * r.risk_natural.abs(),
+                "scale {s}"
+            );
+            assert!(
+                (rs.risk_intervention - r.risk_intervention).abs()
+                    <= 1e-9 * r.risk_intervention.abs(),
+                "scale {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gformula_bootstrap_is_reproducible_and_thread_invariant() {
+        // Replaces T0-WP12's captured-constant pin (CAUS-16 changes the simulated values by
+        // design): the chunked parallel bootstrap (70 replicates > one chunk of 64) gives
+        // bit-identical draws with one thread and many.
+        let cfg = || {
+            let mut c = GFormulaConfig::default();
+            c.n_simulations = 200;
+            c.n_bootstrap = 70;
+            c.seed = Some(42);
+            c.outcome_type = GFormulaOutcomeType::Continuous;
+            c
+        };
+        let data = create_tv_test_data(150, 4, false);
+        let a = run_gformula(&data, cfg()).unwrap();
+        let b = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| run_gformula(&data, cfg()).unwrap());
+        assert_eq!(a.bootstrap_rd.len(), 70);
+        assert_eq!(a.bootstrap_rd, b.bootstrap_rd);
+        assert_eq!(
+            a.se_risk_difference.to_bits(),
+            b.se_risk_difference.to_bits()
+        );
+        assert!(a.se_risk_difference > 0.0 && a.ci_lower_rd < a.ci_upper_rd);
     }
 
     #[test]
