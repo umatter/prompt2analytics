@@ -29,6 +29,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::options::Choices;
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource;
 use crate::stats::robust::{QuantileType, percentile_interval, quantile_sorted};
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -504,7 +505,7 @@ pub fn run_ipw_treatment(
     validate_trim(config.trim)?;
     if config.bootstrap == 1 {
         return Err(EconError::InvalidSpecification {
-            message: "bootstrap must be 0 (analytic influence-function SE) or at least 2; got 1"
+            message: "bootstrap must be 0 (analytic M-estimation SE) or at least 2; got 1"
                 .to_string(),
         });
     }
@@ -589,6 +590,17 @@ pub fn run_ipw_treatment(
     let n_trim = y_trim.len();
     let n_treated = d_trim.iter().filter(|&&v| v >= 0.5).count();
     let n_control = n_trim - n_treated;
+    if n_treated == 0 || n_control == 0 {
+        let arm = if n_treated == 0 { "treated" } else { "control" };
+        return Err(EconError::InsufficientData {
+            required: 1,
+            provided: 0,
+            context: format!(
+                "no {arm} unit is left after trimming the propensity scores at trim = {}",
+                config.trim
+            ),
+        });
+    }
 
     // Check for sufficient overlap
     if n_treated < 5 || n_control < 5 {
@@ -648,10 +660,19 @@ pub fn run_ipw_treatment(
     let n_f = n_trim as f64;
     let x_names = design_names(covariates);
     let se_eif = {
-        let mu1_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names);
+        // The ATT influence function uses the control-arm model only.
+        let mu1_fit = match config.estimand {
+            Estimand::ATE => Some(fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names)),
+            Estimand::ATT => None,
+        };
         let mu0_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, false, &x_names);
+        for (group, fit) in [("treated", mu1_fit.as_ref()), ("control", Some(&mu0_fit))] {
+            if let Some(Ok((_, _, Some(text)))) = fit {
+                warnings.push(format!("outcome model ({group}): {text}"));
+            }
+        }
         match (config.estimand, mu1_fit, mu0_fit) {
-            (Estimand::ATE, Ok((mu1, _, _)), Ok((mu0, _, _))) => {
+            (Estimand::ATE, Some(Ok((mu1, _, _))), Ok((mu0, _, _))) => {
                 let mut sum_eif_sq = 0.0;
                 for i in 0..n_trim {
                     let ei = ps_trim[i];
@@ -682,7 +703,7 @@ pub fn run_ipw_treatment(
             }
             (_, r1, r0) => {
                 let e = r1
-                    .err()
+                    .and_then(|r| r.err())
                     .or(r0.err())
                     .map(|e| e.to_string())
                     .unwrap_or_default();
@@ -1057,9 +1078,15 @@ fn ipw_mest_se(
     if se.is_finite() {
         Ok(se)
     } else {
-        Err(EconError::Computation(
-            "the M-estimation standard error is not finite".to_string(),
-        ))
+        // A finite but numerically singular propensity information matrix (quasi-separation
+        // with clamped scores) is treated like a singular one: the caller falls back.
+        Err(EconError::SingularMatrix {
+            context:
+                "propensity information matrix (the M-estimation standard error is not finite)"
+                    .to_string(),
+            suggestion: "check the propensity model for (quasi-)separation or trim the scores"
+                .to_string(),
+        })
     }
 }
 
@@ -1593,7 +1620,8 @@ fn compute_aipw_effect(
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Fit outcome model for a treatment group (OLS regression by pivoted QR, `lm.fit`).
+/// Fit outcome model for a treatment group (OLS: the normal equations on a full-rank,
+/// well-conditioned design, `lm.fit`'s pivoted QR otherwise).
 ///
 /// Returns predicted outcomes for every row (aliased columns count as 0, as
 /// `stats::predict.lm`), the group's R² and the aliasing warning, if any.
@@ -1622,17 +1650,29 @@ fn fit_outcome_model(
 
     let x_group = x.select(ndarray::Axis(0), &indices);
     let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
-    let fit = least_squares(x_group.view(), y_group.view())?;
-    let beta = fit.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
+    // OLS's solve decision: the normal equations on a full-rank, well-conditioned design,
+    // `lm.fit`'s pivoted QR (with its aliasing) otherwise.
+    let (beta, ssr, alias) = match normal_equations_inverse(x_group.view())? {
+        Some(ni) => {
+            let beta = ni.coefficients(x_group.view(), &y_group);
+            let resid = &y_group - &x_group.dot(&beta);
+            (beta, resid.dot(&resid), None)
+        }
+        None => {
+            let fit = least_squares(x_group.view(), y_group.view())?;
+            let beta = fit.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
+            let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
+            (beta, ssr, fit.aliasing_warning(names))
+        }
+    };
     let mu: Array1<f64> = x.dot(&beta);
 
     // R² for the group
     let y_group_mean = y_group.mean().unwrap_or(0.0);
     let sst: f64 = y_group.iter().map(|&yi| (yi - y_group_mean).powi(2)).sum();
-    let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
     let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
-    Ok((mu, r2, fit.aliasing_warning(names)))
+    Ok((mu, r2, alias))
 }
 
 /// Compute propensity score summary statistics.
@@ -1825,6 +1865,10 @@ mod tests {
             },
         )
         .unwrap_err();
+        assert!(
+            err.to_string().contains("analytic M-estimation SE"),
+            "the message names the analytic SE IPW reports: {err}"
+        );
         expect_invalid_spec(err, "bootstrap");
         for method in [DRMethod::IPW, DRMethod::Regression] {
             for b in [0, 1] {
@@ -2388,6 +2432,153 @@ mod tests {
         // Both should give reasonable estimates
         assert!((result_no_trim.effect - 0.75).abs() < 0.5);
         assert!((result_trim.effect - 0.75).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_ipw_trim_that_empties_an_arm_is_an_error() {
+        // Treated units sit only at the two ends of x (scores ~0.006 and ~0.93), controls
+        // at the middle have scores ~0.22: trimming at 0.1 for the ATE keeps 15 controls and
+        // no treated unit, which must be refused rather than estimated with a 0 mean.
+        let (a0, c0, c1, c2, t2) = (2usize, 40usize, 15usize, 5usize, 100usize);
+        let total = a0 + c0 + c1 + c2 + t2;
+        let mut x = Vec::with_capacity(total);
+        let mut d = Vec::with_capacity(total);
+        x.extend(std::iter::repeat_n(0.0, a0 + c0));
+        x.extend(std::iter::repeat_n(1.5, c1));
+        x.extend(std::iter::repeat_n(3.0, c2 + t2));
+        d.extend(std::iter::repeat_n(1.0, a0));
+        d.extend(std::iter::repeat_n(0.0, c0 + c1 + c2));
+        d.extend(std::iter::repeat_n(1.0, t2));
+        let x: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v - 0.05 + 0.1 * i as f64 / (total - 1) as f64)
+            .collect();
+        let y: Vec<f64> = (0..total)
+            .map(|i| 1.0 + 0.5 * x[i] + d[i] + 0.3 * ((i * 7919 % 101) as f64 / 101.0 - 0.5))
+            .collect();
+        let dataset = Dataset::new(df! { "y" => y, "treatment" => d, "x" => x }.unwrap());
+        let err = run_ipw_treatment(
+            &dataset,
+            "y",
+            "treatment",
+            &["x"],
+            IpwConfig {
+                estimand: Estimand::ATE,
+                trim: 0.1,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            EconError::InsufficientData {
+                required: 1,
+                provided: 0,
+                context,
+            } => {
+                assert!(context.contains("treated"), "{context}");
+                assert!(context.contains("0.1"), "{context}");
+            }
+            other => panic!("expected InsufficientData for the empty treated arm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ipw_mest_se_not_finite_is_a_singular_fallback() {
+        // An outcome scale whose squared influence terms overflow gives a non-finite
+        // M-estimation SE; that must be the fallback error (SingularMatrix), not a
+        // Computation error that aborts the IPW call.
+        let n = 40;
+        let x = Array2::from_shape_fn(
+            (n, 2),
+            |(i, j)| {
+                if j == 0 { 1.0 } else { (i as f64 * 0.37).sin() }
+            },
+        );
+        let d: Array1<f64> = (0..n).map(|i| if i % 3 == 0 { 1.0 } else { 0.0 }).collect();
+        let e: Array1<f64> = (0..n).map(|i| 0.3 + 0.01 * (i % 7) as f64).collect();
+        let y: Array1<f64> = (0..n)
+            .map(|i| 1e160 * (1.0 + 0.1 * (i % 5) as f64))
+            .collect();
+        let keep = vec![true; n];
+        let kind = IpwKind::of(Estimand::ATE, true);
+        let err = ipw_mest_se(x.view(), &y, &d, &e, &keep, kind, 1e159).unwrap_err();
+        assert!(
+            matches!(err, EconError::SingularMatrix { .. }),
+            "expected the SingularMatrix fallback, got {err:?}"
+        );
+
+        let ds = create_treatment_dataset();
+        let df = ds.df().clone();
+        let big: Vec<f64> = df
+            .column("y")
+            .unwrap()
+            .as_materialized_series()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.unwrap() * 1e160)
+            .collect();
+        let mut df = df;
+        df.with_column(Column::new("y".into(), big)).unwrap();
+        let r = run_ipw_treatment(
+            &Dataset::new(df),
+            "y",
+            "treatment",
+            &["x1", "x2"],
+            IpwConfig::default(),
+        )
+        .expect("a non-finite M-estimation SE falls back instead of aborting");
+        assert_eq!(r.se_mest, None);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("M-estimation SE not computed")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_ipw_reports_outcome_model_aliasing() {
+        // x3 = x1 + x2 is aliased in both outcome models; IPW says so, as the DR path does.
+        let ds = create_treatment_dataset();
+        let mut df = ds.df().clone();
+        let x3 = (df.column("x1").unwrap().as_materialized_series()
+            + df.column("x2").unwrap().as_materialized_series())
+        .unwrap();
+        df.with_column(x3.with_name("x3".into())).unwrap();
+        let ds = Dataset::new(df);
+        for estimand in [Estimand::ATE, Estimand::ATT] {
+            let r = run_ipw_treatment(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2", "x3"],
+                IpwConfig {
+                    estimand,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("outcome model (control):")),
+                "{estimand:?}: {:?}",
+                r.warnings
+            );
+            assert_eq!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.starts_with("outcome model (treated):")),
+                estimand == Estimand::ATE,
+                "{estimand:?}: the treated-arm model is fitted for the ATE only: {:?}",
+                r.warnings
+            );
+        }
     }
 
     #[test]
