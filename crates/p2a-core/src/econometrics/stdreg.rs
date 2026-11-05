@@ -117,6 +117,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmSpec, fit_glm, plogis};
+use crate::econometrics::tmle::check_binary_treatment;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::xtx;
@@ -631,19 +632,8 @@ pub fn run_stdreg(
 
     let n = y.len();
 
-    // Validate treatment is binary
-    let n_treated: usize = a.iter().filter(|&&v| v >= 0.5).count();
-    let n_control = n - n_treated;
-
-    if n_treated == 0 || n_control == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Treatment variable '{}' must have both treated (1) and control (0) observations. \
-                 Found {} treated, {} control.",
-                treatment_col, n_treated, n_control
-            ),
-        });
-    }
+    // The treatment must be coded 0/1: the counterfactual designs set it to 1 and 0.
+    let (n_treated, n_control) = check_binary_treatment(a.view(), treatment_col)?;
 
     // A logistic outcome model needs Y in [0, 1] (glm's binomial family).
     if config.model_type == StdRegModel::Logistic {
@@ -653,6 +643,17 @@ pub fn run_stdreg(
             return Err(EconError::InvalidSpecification {
                 message: format!(
                     "model_type logistic needs an outcome in [0, 1]; '{outcome_col}' ranges from {lo} to {hi}"
+                ),
+            });
+        }
+    }
+    // A Poisson outcome model needs a non-negative Y (glm's poisson family).
+    if config.model_type == StdRegModel::Poisson {
+        let lo = y.iter().copied().fold(f64::INFINITY, f64::min);
+        if lo < 0.0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "model_type poisson needs a non-negative outcome; '{outcome_col}' has minimum {lo}"
                 ),
             });
         }
@@ -1029,8 +1030,11 @@ struct OutcomeFit {
 
 /// The outcome model: least squares (`solve_ols`) or `econometrics::glm` with `tolerance`
 /// as glm.fit's `epsilon` and `max_iter` as its `maxit`. A GLM starts IRLS from `start` when
-/// given (bootstrap replicates start from the full-sample fit: the maximum likelihood
-/// estimates are the same, IRLS needs fewer iterations), from glm.fit's `mustart` otherwise.
+/// given, from glm.fit's `mustart` otherwise. Bootstrap replicates start from the full-sample
+/// fit: a replicate that converges reaches the same maximum-likelihood estimates as from
+/// `mustart`, in fewer iterations; a separated or non-converged replicate (counted in the
+/// warnings) can stop at a different point along the diverging direction than a cold start
+/// would.
 fn fit_outcome_model(
     x: &Array2<f64>,
     y: &Array1<f64>,
@@ -2424,6 +2428,38 @@ mod tests {
         expect_invalid_spec(
             run_stdreg(&ds, "yp", "a", &["x1", "x2"], c).unwrap_err(),
             "model_type logistic needs an outcome in [0, 1]; 'yp' ranges from",
+        );
+    }
+
+    #[test]
+    fn test_stdreg_poisson_needs_nonnegative_outcome() {
+        let ds = stdreg_sim();
+        let mut yneg = col(&ds, "yp");
+        yneg[3] = -1.5;
+        let c = StdRegConfig {
+            model_type: StdRegModel::Poisson,
+            se_method: SEMethod::Sandwich,
+            ..Default::default()
+        };
+        expect_invalid_spec(
+            run_stdreg(&with_col(&ds, "yneg", yneg), "yneg", "a", &["x1", "x2"], c).unwrap_err(),
+            "model_type poisson needs a non-negative outcome; 'yneg' has minimum -1.5",
+        );
+    }
+
+    #[test]
+    fn test_stdreg_refuses_non_binary_treatment() {
+        // a 0/2 treatment would be fitted on its raw values while the counterfactual designs
+        // set it to 1 and 0
+        let ds = stdreg_sim();
+        let a2: Vec<f64> = col(&ds, "a").iter().map(|v| 2.0 * v).collect();
+        let c = StdRegConfig {
+            se_method: SEMethod::Sandwich,
+            ..Default::default()
+        };
+        expect_invalid_spec(
+            run_stdreg(&with_col(&ds, "a2", a2), "yc", "a2", &["x1", "x2"], c).unwrap_err(),
+            "treatment 'a2' must be coded 0/1",
         );
     }
 
