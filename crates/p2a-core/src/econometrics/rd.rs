@@ -75,28 +75,37 @@ impl KernelType {
         }
     }
 
-    /// Parse kernel type from string.
+    /// Parse kernel type from string (the spellings of [`KernelType::choices()`]).
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "triangular" | "tri" => Some(KernelType::Triangular),
-            "epanechnikov" | "epa" => Some(KernelType::Epanechnikov),
-            "uniform" | "uni" => Some(KernelType::Uniform),
-            _ => None,
-        }
+        Self::choices().parse(s).ok()
     }
 
     /// rdrobust's `kernel` names, case-insensitive: "triangular" (also "tri"),
     /// "epanechnikov" ("epa"), "uniform" ("uni"). An unknown name is an
     /// `InvalidSpecification` listing the valid ones.
     pub fn parse(s: &str) -> EconResult<KernelType> {
-        Self::from_str(s).ok_or_else(|| EconError::InvalidSpecification {
-            message: format!(
-                "Unknown kernel '{s}'; use \"triangular\" (the default, also \"tri\"), \
-                 \"epanechnikov\" (\"epa\") or \"uniform\" (\"uni\")"
-            ),
-        })
+        s.parse::<KernelType>()
+            .map_err(|_| EconError::InvalidSpecification {
+                message: format!(
+                    "Unknown kernel '{s}'; use \"triangular\" (the default, also \"tri\"), \
+                     \"epanechnikov\" (\"epa\") or \"uniform\" (\"uni\")"
+                ),
+            })
     }
 }
+
+crate::option_enum!(
+    KernelType,
+    crate::options::Choices {
+        option: "kernel",
+        values: &[
+            (&["triangular", "tri"], KernelType::Triangular),
+            (&["epanechnikov", "epa"], KernelType::Epanechnikov),
+            (&["uniform", "uni"], KernelType::Uniform),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for KernelType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -108,63 +117,159 @@ impl fmt::Display for KernelType {
     }
 }
 
-/// Bandwidth selection methods.
-///
-/// Different methods optimize for different criteria.
+/// Bandwidth selection methods: rdrobust::rdbwselect's ten `bwselect` choices, in its row
+/// order ([`BandwidthMethod::ALL`]). The MSE methods minimise the asymptotic MSE of the point
+/// estimator; each CER method is its MSE counterpart with h scaled by the coverage-error
+/// rate `N^(-p / ((3 + p)(3 + 2p)))` (b unchanged). The selector is
+/// [`crate::econometrics::rd_bwselect`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BandwidthMethod {
-    /// MSE-optimal bandwidth, one common bandwidth for both sides (default).
-    /// Minimizes the asymptotic MSE of the RD point estimator.
+    /// `mserd`: MSE-optimal, one common bandwidth for both sides (default).
     #[default]
     MseRd,
-    /// MSE-optimal bandwidth, separate for left and right of cutoff.
+    /// `msetwo`: MSE-optimal, separate bandwidths left and right of the cutoff.
     MseTwo,
-    /// Coverage Error Rate optimal bandwidth, one common.
-    /// Minimizes the coverage error of robust bias-corrected confidence intervals.
+    /// `msesum`: MSE-optimal for the sum of the two regression estimates, one common bandwidth.
+    MseSum,
+    /// `msecomb1`: the smaller of mserd and msesum.
+    MseComb1,
+    /// `msecomb2`: the median of mserd, msesum and msetwo, per side.
+    MseComb2,
+    /// `cerrd`: CER-optimal, one common bandwidth.
     CerRd,
-    /// Coverage Error Rate optimal, separate for left and right.
+    /// `certwo`: CER-optimal, separate left and right.
     CerTwo,
+    /// `cersum`: CER-optimal for the sum of the two regression estimates, one common bandwidth.
+    CerSum,
+    /// `cercomb1`: the smaller of cerrd and cersum.
+    CerComb1,
+    /// `cercomb2`: the median of cerrd, cersum and certwo, per side.
+    CerComb2,
 }
 
 impl BandwidthMethod {
-    /// Parse bandwidth method from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "mserd" | "mse" => Some(BandwidthMethod::MseRd),
-            "msetwo" | "mse_two" => Some(BandwidthMethod::MseTwo),
-            "cerrd" | "cer" => Some(BandwidthMethod::CerRd),
-            "certwo" | "cer_two" => Some(BandwidthMethod::CerTwo),
-            _ => None,
+    /// The ten methods in rdbwselect's row order (`all = TRUE`).
+    pub const ALL: [BandwidthMethod; 10] = [
+        BandwidthMethod::MseRd,
+        BandwidthMethod::MseTwo,
+        BandwidthMethod::MseSum,
+        BandwidthMethod::MseComb1,
+        BandwidthMethod::MseComb2,
+        BandwidthMethod::CerRd,
+        BandwidthMethod::CerTwo,
+        BandwidthMethod::CerSum,
+        BandwidthMethod::CerComb1,
+        BandwidthMethod::CerComb2,
+    ];
+
+    /// rdrobust's name: "mserd", ..., "cercomb2".
+    pub fn name(&self) -> &'static str {
+        Self::choices().canonical(*self)
+    }
+
+    /// What the method selects, in words.
+    pub fn description(&self) -> &'static str {
+        match self {
+            BandwidthMethod::MseRd => "MSE-optimal, one common bandwidth",
+            BandwidthMethod::MseTwo => "MSE-optimal, separate left and right",
+            BandwidthMethod::MseSum => {
+                "MSE-optimal for the sum of the two regression estimates, one common bandwidth"
+            }
+            BandwidthMethod::MseComb1 => "smaller of mserd and msesum",
+            BandwidthMethod::MseComb2 => "median of mserd, msesum and msetwo, per side",
+            BandwidthMethod::CerRd => "CER-optimal, one common bandwidth",
+            BandwidthMethod::CerTwo => "CER-optimal, separate left and right",
+            BandwidthMethod::CerSum => {
+                "CER-optimal for the sum of the two regression estimates, one common bandwidth"
+            }
+            BandwidthMethod::CerComb1 => "smaller of cerrd and cersum",
+            BandwidthMethod::CerComb2 => "median of cerrd, cersum and certwo, per side",
         }
     }
 
-    /// rdrobust's `bwselect` names, case-insensitive: "mserd" (also "mse"), "msetwo"
-    /// ("mse_two"), "cerrd" ("cer"), "certwo" ("cer_two"). An unknown name is an
-    /// `InvalidSpecification` listing the valid ones.
+    /// A coverage-error-rate (CER) method.
+    pub fn is_cer(&self) -> bool {
+        matches!(
+            self,
+            BandwidthMethod::CerRd
+                | BandwidthMethod::CerTwo
+                | BandwidthMethod::CerSum
+                | BandwidthMethod::CerComb1
+                | BandwidthMethod::CerComb2
+        )
+    }
+
+    /// The MSE method a CER method scales (CerRd -> MseRd, ...); an MSE method itself.
+    pub fn mse_counterpart(&self) -> BandwidthMethod {
+        match self {
+            BandwidthMethod::CerRd => BandwidthMethod::MseRd,
+            BandwidthMethod::CerTwo => BandwidthMethod::MseTwo,
+            BandwidthMethod::CerSum => BandwidthMethod::MseSum,
+            BandwidthMethod::CerComb1 => BandwidthMethod::MseComb1,
+            BandwidthMethod::CerComb2 => BandwidthMethod::MseComb2,
+            other => *other,
+        }
+    }
+
+    /// Parse bandwidth method from string (the spellings of [`BandwidthMethod::choices()`]).
+    pub fn from_str(s: &str) -> Option<Self> {
+        Self::choices().parse(s).ok()
+    }
+
+    /// rdrobust's `bwselect` names, case-insensitive (also "mse", "mse_two", "cer",
+    /// "cer_two"). An unknown name is an `InvalidSpecification` listing the ten valid ones.
     pub fn parse(s: &str) -> EconResult<BandwidthMethod> {
-        Self::from_str(s).ok_or_else(|| EconError::InvalidSpecification {
-            message: format!(
-                "Unknown bwselect '{s}'; use \"mserd\" (one MSE-optimal bandwidth, the \
-                 default), \"msetwo\" (one per side), \"cerrd\" (one CER-optimal bandwidth) \
-                 or \"certwo\" (one per side)"
-            ),
+        s.parse::<BandwidthMethod>().map_err(|_| {
+            let others: Vec<String> = Self::ALL[1..]
+                .iter()
+                .map(|m| format!("\"{}\" ({})", m.name(), m.description()))
+                .collect();
+            EconError::InvalidSpecification {
+                message: format!(
+                    "Unknown bwselect '{s}'; use \"mserd\" ({}, the default), {}",
+                    BandwidthMethod::MseRd.description(),
+                    others.join(", ")
+                ),
+            }
         })
     }
 
-    /// Check if this method uses separate bandwidths for left/right.
+    /// Check if this method can give different bandwidths left and right of the cutoff
+    /// (msetwo, certwo, msecomb2, cercomb2).
     pub fn is_separate(&self) -> bool {
-        matches!(self, BandwidthMethod::MseTwo | BandwidthMethod::CerTwo)
+        matches!(
+            self,
+            BandwidthMethod::MseTwo
+                | BandwidthMethod::CerTwo
+                | BandwidthMethod::MseComb2
+                | BandwidthMethod::CerComb2
+        )
     }
 }
 
+crate::option_enum!(
+    BandwidthMethod,
+    crate::options::Choices {
+        option: "bwselect",
+        values: &[
+            (&["mserd", "mse"], BandwidthMethod::MseRd),
+            (&["msetwo", "mse_two"], BandwidthMethod::MseTwo),
+            (&["msesum"], BandwidthMethod::MseSum),
+            (&["msecomb1"], BandwidthMethod::MseComb1),
+            (&["msecomb2"], BandwidthMethod::MseComb2),
+            (&["cerrd", "cer"], BandwidthMethod::CerRd),
+            (&["certwo", "cer_two"], BandwidthMethod::CerTwo),
+            (&["cersum"], BandwidthMethod::CerSum),
+            (&["cercomb1"], BandwidthMethod::CerComb1),
+            (&["cercomb2"], BandwidthMethod::CerComb2),
+        ],
+    },
+    no_display
+);
+
 impl fmt::Display for BandwidthMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BandwidthMethod::MseRd => write!(f, "MSE-optimal (common)"),
-            BandwidthMethod::MseTwo => write!(f, "MSE-optimal (separate)"),
-            BandwidthMethod::CerRd => write!(f, "CER-optimal (common)"),
-            BandwidthMethod::CerTwo => write!(f, "CER-optimal (separate)"),
-        }
+        write!(f, "{} ({})", self.name(), self.description())
     }
 }
 
@@ -186,29 +291,38 @@ pub enum VceType {
 }
 
 impl VceType {
-    /// Parse VCE type from string.
+    /// Parse VCE type from string (the spellings of [`VceType::choices()`]).
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "nn" | "nearest" => Some(VceType::Nn),
-            "hc0" => Some(VceType::Hc0),
-            "hc1" => Some(VceType::Hc1),
-            "hc2" => Some(VceType::Hc2),
-            "hc3" => Some(VceType::Hc3),
-            _ => None,
-        }
+        Self::choices().parse(s).ok()
     }
 
     /// rdrobust's `vce` names, case-insensitive: "nn" (also "nearest"), "hc0", "hc1",
     /// "hc2", "hc3". An unknown name is an `InvalidSpecification` listing the valid ones.
     pub fn parse(s: &str) -> EconResult<VceType> {
-        Self::from_str(s).ok_or_else(|| EconError::InvalidSpecification {
-            message: format!(
-                "Unknown vce '{s}'; use \"nn\" (nearest-neighbour residuals, the default, as \
-                 rdrobust), \"hc0\", \"hc1\", \"hc2\" or \"hc3\""
-            ),
-        })
+        s.parse::<VceType>()
+            .map_err(|_| EconError::InvalidSpecification {
+                message: format!(
+                    "Unknown vce '{s}'; use \"nn\" (nearest-neighbour residuals, the default, as \
+                     rdrobust), \"hc0\", \"hc1\", \"hc2\" or \"hc3\""
+                ),
+            })
     }
 }
+
+crate::option_enum!(
+    VceType,
+    crate::options::Choices {
+        option: "vce",
+        values: &[
+            (&["nn", "nearest"], VceType::Nn),
+            (&["hc0"], VceType::Hc0),
+            (&["hc1"], VceType::Hc1),
+            (&["hc2"], VceType::Hc2),
+            (&["hc3"], VceType::Hc3),
+        ],
+    },
+    no_display
+);
 
 impl fmt::Display for VceType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -279,6 +393,29 @@ impl Default for RdConfig {
 /// The confidence level of a result deserialized without one.
 fn default_rd_level() -> f64 {
     0.95
+}
+
+/// rdrobust's default `scaleregul` (the weight of the bandwidth selector's regularisation).
+pub(crate) fn default_scaleregul() -> f64 {
+    1.0
+}
+
+/// rdrobust's default `nnmatch`.
+pub(crate) fn default_nnmatch() -> usize {
+    3
+}
+
+/// `scaleregul` must be finite and >= 0.
+pub(crate) fn validate_scaleregul(v: f64) -> EconResult<()> {
+    if v.is_finite() && v >= 0.0 {
+        return Ok(());
+    }
+    Err(EconError::InvalidSpecification {
+        message: format!(
+            "scaleregul (the regularisation scale of the bandwidth selector) must be a finite \
+             number >= 0 (got {v}); rdrobust's default is 1 and 0 switches the regularisation off"
+        ),
+    })
 }
 
 /// Bandwidth estimation result.
@@ -1216,7 +1353,7 @@ fn weighted_gram_inverse(
 /// Residuals `w_i (D_i - R_i beta)` for the HC0-HC3 variances: HC1 scales by
 /// sqrt(m / (m - dim)) with m the rows in the window, HC2/HC3 by the leverage
 /// h_ii = w_i R_i' invG R_i (floored at 1 - 1e-8, as rdrobust).
-fn hc_residuals(
+pub(crate) fn hc_residuals(
     r: ArrayView2<f64>,
     w: &[f64],
     inv_g: &Array2<f64>,
@@ -1269,7 +1406,7 @@ fn hc_residuals(
 /// `min(nnmatch, m - 1)` other rows. With `J_i` those rows and `S` their sum (own block
 /// included), `res_i = sqrt(J_i / (J_i + 1)) (d_i - (S - d_i) / J_i)`. Block sums are
 /// formed once, so the cost is O(m k) plus O(B min(nnmatch, m) k) for B blocks.
-fn nn_residuals(x: &[f64], d: &Array2<f64>, nnmatch: usize) -> EconResult<Array2<f64>> {
+pub(crate) fn nn_residuals(x: &[f64], d: &Array2<f64>, nnmatch: usize) -> EconResult<Array2<f64>> {
     let (m, k) = d.dim();
     let mut res = crate::resource::try_zeros2(m, k, "RD nearest-neighbour residuals")?;
     if m == 0 {
@@ -1964,6 +2101,117 @@ mod tests {
             ),
             other => panic!("expected InvalidSpecification, got {other:?}"),
         }
+        assert_eq!(
+            BandwidthMethod::parse("msesum").unwrap(),
+            BandwidthMethod::MseSum
+        );
+        assert_eq!(
+            BandwidthMethod::parse("cercomb2").unwrap(),
+            BandwidthMethod::CerComb2
+        );
+    }
+
+    fn spec_message<T: std::fmt::Debug>(r: EconResult<T>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bandwidth_method_parses_aliases_and_rejects_unknown() {
+        use BandwidthMethod::*;
+        BandwidthMethod::choices().validate().unwrap();
+        for (name, m) in [
+            ("mserd", MseRd),
+            ("MSERD", MseRd),
+            ("mse", MseRd),
+            ("msetwo", MseTwo),
+            ("mse_two", MseTwo),
+            ("mse-two", MseTwo),
+            ("msesum", MseSum),
+            ("msecomb1", MseComb1),
+            ("MSEcomb2", MseComb2),
+            ("cerrd", CerRd),
+            ("cer", CerRd),
+            ("certwo", CerTwo),
+            ("cer_two", CerTwo),
+            ("cersum", CerSum),
+            ("cercomb1", CerComb1),
+            ("cercomb2", CerComb2),
+        ] {
+            assert_eq!(name.parse::<BandwidthMethod>().unwrap(), m, "{name}");
+        }
+        for bad in ["ik", "cct", "cv", "manual", ""] {
+            let msg = spec_message(bad.parse::<BandwidthMethod>());
+            assert!(
+                msg.contains("bwselect")
+                    && msg.contains(
+                        "mserd, msetwo, msesum, msecomb1, msecomb2, cerrd, certwo, cersum, \
+                         cercomb1, cercomb2"
+                    ),
+                "{msg}"
+            );
+            let msg = spec_message(BandwidthMethod::parse(bad));
+            assert!(
+                msg.starts_with(&format!("Unknown bwselect '{bad}'; use \"mserd\""))
+                    && msg.contains("\"cercomb2\""),
+                "{msg}"
+            );
+        }
+        assert!(
+            BandwidthMethod::ALL
+                .iter()
+                .all(|m| m.name().parse::<BandwidthMethod>().unwrap() == *m)
+        );
+        assert_eq!(BandwidthMethod::from_str("certwo"), Some(CerTwo));
+        assert_eq!(BandwidthMethod::from_str("ik"), None);
+    }
+
+    #[test]
+    fn test_kernel_type_parses_aliases_and_rejects_unknown() {
+        KernelType::choices().validate().unwrap();
+        for (name, k) in [
+            ("tri", KernelType::Triangular),
+            ("Triangular", KernelType::Triangular),
+            ("epa", KernelType::Epanechnikov),
+            ("EPANECHNIKOV", KernelType::Epanechnikov),
+            ("uni", KernelType::Uniform),
+            ("uniform", KernelType::Uniform),
+        ] {
+            assert_eq!(name.parse::<KernelType>().unwrap(), k, "{name}");
+        }
+        let msg = spec_message("gaussian".parse::<KernelType>());
+        assert!(
+            msg.contains("kernel") && msg.contains("triangular, epanechnikov, uniform"),
+            "{msg}"
+        );
+        let msg = spec_message(KernelType::parse("gaussian"));
+        assert!(
+            msg.starts_with("Unknown kernel 'gaussian'; use \"triangular\""),
+            "{msg}"
+        );
+        assert_eq!(KernelType::from_str("epa"), Some(KernelType::Epanechnikov));
+        assert_eq!(KernelType::from_str("gaussian"), None);
+    }
+
+    #[test]
+    fn test_vce_type_parses_aliases_and_rejects_unknown() {
+        VceType::choices().validate().unwrap();
+        for (name, v) in [
+            ("nn", VceType::Nn),
+            ("Nearest", VceType::Nn),
+            ("HC0", VceType::Hc0),
+            ("hc1", VceType::Hc1),
+            ("Hc2", VceType::Hc2),
+            ("hc3", VceType::Hc3),
+        ] {
+            assert_eq!(name.parse::<VceType>().unwrap(), v, "{name}");
+        }
+        let msg = spec_message("robust".parse::<VceType>());
+        assert!(msg.contains("vce") && msg.contains("hc1"), "{msg}");
+        let msg = spec_message(VceType::parse("robust"));
+        assert!(msg.starts_with("Unknown vce 'robust'; use \"nn\""), "{msg}");
     }
 
     fn create_sharp_rd_dataset() -> Dataset {
@@ -3232,7 +3480,7 @@ mod tests {
         assert!(
             selected
                 .to_string()
-                .contains("Bandwidth Method: MSE-optimal (common)"),
+                .contains("Bandwidth Method: mserd (MSE-optimal, one common bandwidth)"),
             "{selected}"
         );
         // a result serialised before the field existed reads as selected
