@@ -2,7 +2,7 @@
 //!
 //! A non-parametric test for comparing the medians of two or more independent samples.
 //! This is the non-parametric alternative to one-way ANOVA.
-//! Ranks with `stats::ranks::midranks` (exact ties, as R).
+//! Ranks as `stats::ranks::midranks` (exact ties, as R), summed per group without storing them.
 //!
 //! # References
 //!
@@ -17,7 +17,7 @@ use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::resource::try_with_capacity;
 use crate::stats::anova::values_by_level;
-use crate::stats::ranks::{midranks, tie_cube_sum};
+use crate::stats::ranks::{rank_sums_by_group, tie_cube_sum};
 use crate::traits::estimator::chi_squared_p_value;
 use serde::{Deserialize, Serialize};
 
@@ -111,14 +111,15 @@ pub fn kruskal_test(groups: &[(String, Vec<f64>)]) -> EconResult<KruskalWallisRe
     let group_names: Vec<String> = clean_groups.iter().map(|(n, _)| n.clone()).collect();
     let n_total: usize = group_sizes.iter().sum();
 
-    // Pool the observations in group order and rank them (exact ties, as R's rank()).
+    // Pool the observations in group order; the midrank sums per group (exact ties, as R's
+    // rank()).
     let mut values: Vec<f64> = try_with_capacity(n_total, "Kruskal-Wallis values")?;
     let mut group_of: Vec<usize> = try_with_capacity(n_total, "Kruskal-Wallis groups")?;
     for (group_idx, (_, vals)) in clean_groups.iter().enumerate() {
         values.extend_from_slice(vals);
         group_of.extend(std::iter::repeat_n(group_idx, vals.len()));
     }
-    let (ranks, tie_sizes) = midranks(&values)?;
+    let (rank_sums, tie_sizes) = rank_sums_by_group(&values, &group_of, k)?;
     if tie_sizes.len() == 1 {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -131,12 +132,6 @@ pub fn kruskal_test(groups: &[(String, Vec<f64>)]) -> EconResult<KruskalWallisRe
     let n = n_total as f64;
     let tie_correction = 1.0 - tie_cube_sum(&tie_sizes) / (n * n * n - n);
     let has_ties = tie_sizes.iter().any(|&t| t > 1);
-
-    // Rank sums per group
-    let mut rank_sums = vec![0.0; k];
-    for (&rank, &group_idx) in ranks.iter().zip(&group_of) {
-        rank_sums[group_idx] += rank;
-    }
 
     // Compute mean ranks
     let mean_ranks: Vec<f64> = rank_sums
