@@ -22,7 +22,8 @@
 //! `g' V^+ g` over `alpha` in `[0.8, 1.1]` (Brent's method, as `optimize`). Exact balance is
 //! solved by damped Newton, the over-identified problem by Gauss-Newton from the scaled logit
 //! start and from the exact-balance solution (the smaller `g'Wg` wins); both stop on the
-//! relative Newton step. Probabilities are clipped to `[1e-6, 1 - 1e-6]` (CBPS's `probs.min`).
+//! relative Newton step, Gauss-Newton also when `g'Wg` is at its minimum to rounding (a slowly
+//! converging over-identified fit can reach that floor first). Probabilities are clipped to `[1e-6, 1 - 1e-6]` (CBPS's `probs.min`).
 //!
 //! Reported: CBPS's `J = g'Wg` at the estimate ([`CbpsResult::cbps_j`], no factor n) and, for
 //! `Over`, Hansen's test of the over-identifying restrictions on `n J` with k degrees of freedom
@@ -1189,6 +1190,14 @@ struct Run {
     warnings: Vec<String>,
 }
 
+/// Gauss-Newton stops once its predicted decrease of `g'Wg` is below this fraction of `g'Wg`
+/// (the objective is then at its minimum to rounding).
+const DECREMENT_RTOL: f64 = 1e-14;
+/// When no step lowers `g'Wg` (its rounding noise exceeds the predicted decrease), the
+/// Gauss-Newton run counts as converged if the predicted decrease is below this fraction of
+/// `g'Wg` (R's `optim` stops at a relative objective change of 1e-8).
+const FLOOR_RTOL: f64 = 1e-10;
+
 const STEP_CRITERION: &str = "relative change in coefficients (whitened scale)";
 
 /// `max|s| / max|beta|`.
@@ -1250,7 +1259,7 @@ fn solve_exact(
         for _ in 0..=MAX_HALVINGS {
             let cand = &beta - &(&s * step);
             let l = balance_loss(u, t, &cand, e);
-            if l.is_finite() && l <= (1.0 - 2.0 * ARMIJO_C * step) * l0 {
+            if l.is_finite() && l < l0 && l <= (1.0 - 2.0 * ARMIJO_C * step) * l0 {
                 beta = cand;
                 accepted = true;
                 break;
@@ -1315,19 +1324,19 @@ fn solve_over(
         }
         let s = inv.inverse.dot(&r);
         change = step_change(&s, &beta);
-        if change <= tol {
+        let q0 = m.gbar.dot(&wg);
+        let slope = r.dot(&s);
+        if change <= tol || slope <= DECREMENT_RTOL * q0 {
             beta = &beta - &s;
             converged = true;
             break;
         }
-        let q0 = m.gbar.dot(&wg);
-        let slope = r.dot(&s);
         let mut step = 1.0;
         let mut accepted = false;
         for _ in 0..=MAX_HALVINGS {
             let cand = &beta - &(&s * step);
             let q = objective(&cand);
-            if q.is_finite() && q <= q0 - 2.0 * ARMIJO_C * step * slope {
+            if q.is_finite() && q < q0 && q <= q0 - 2.0 * ARMIJO_C * step * slope {
                 beta = cand;
                 accepted = true;
                 break;
@@ -1335,6 +1344,12 @@ fn solve_over(
             step *= 0.5;
         }
         if !accepted {
+            if slope <= FLOOR_RTOL * q0 {
+                // g'Wg cannot be lowered in floating point and its predicted decrease is
+                // negligible: the minimum to the precision g'Wg can be evaluated.
+                converged = true;
+                break;
+            }
             warnings.push(format!(
                 "CBPS (over): the line search found no decrease of g'Wg at iteration {it}"
             ));
@@ -1916,6 +1931,41 @@ mod tests {
                 );
             }
             assert!(a.iterations.abs_diff(b.iterations) <= 1);
+        }
+    }
+
+    /// A slowly converging over-identified fit (linear Gauss-Newton rate about 0.6) reaches
+    /// the point where g'Wg can no longer be lowered in floating point before the relative
+    /// step falls below 1e-8; it must still report convergence. Data: the comprehensive
+    /// benchmark's design (x1, x2 ~ U(-2, 2), logit 0.3 x1 + 0.2 x2), n = 1000.
+    #[test]
+    fn test_cbps_over_converges_at_the_rounding_floor() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (1000 * 31 + 2);
+        let mut unif = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut t, mut x1, mut x2) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..1000 {
+            let (a, b) = (unif() * 4.0 - 2.0, unif() * 4.0 - 2.0);
+            let p = 1.0 / (1.0 + (-(0.3 * a + 0.2 * b)).exp());
+            t.push(if unif() < p { 1.0 } else { 0.0 });
+            x1.push(a);
+            x2.push(b);
+        }
+        let ds = Dataset::new(df! { "treatment" => t, "x1" => x1, "x2" => x2 }.unwrap());
+        for e in [Ate, Att] {
+            let mut config = CbpsConfig::default();
+            config.estimand = e;
+            let r = run_cbps(&ds, "treatment", &["x1", "x2"], Some(config)).unwrap();
+            assert!(r.converged, "{e}: {:?}", r.warnings);
+            assert!(
+                r.warnings.iter().all(|w| !w.contains("line search")),
+                "{e}: {:?}",
+                r.warnings
+            );
         }
     }
 

@@ -54,6 +54,12 @@ serde reads the old variant names. User strings are parsed with `FromStr`: `over
    and from the exact-balance solution, Armijo line search on Q; the run with the smaller Q is
    kept (ties: the exact-balance start, as R). Both solvers stop when the relative Newton step is
    below `tolerance` (default 1e-8) and report a convergence record and a warning otherwise.
+   Gauss-Newton converges only linearly when the over-identified model does not fit exactly,
+   and on some samples `g'Wg` stops decreasing in floating point before the step reaches 1e-8
+   (measured: a relative step of about 2e-8 to 6e-8 on simulated n = 100 to 10,000). It
+   therefore also stops, converged, when its predicted decrease `r's` is below 1e-14 of
+   `g'Wg`, or when no step lowers `g'Wg` and the predicted decrease is below 1e-10 of it
+   (R's `optim` stops at a relative objective change of 1e-8).
 7. **Reported.** `cbps_j` is CBPS's `J = gbar' W gbar` at the estimate (no factor n; for
    `Exact` too). For `Over`, `j_statistic = n J`, `j_df = k` and `j_p_value` is Hansen's test
    `P(chi2_k > n J)`, which CBPS does not print; a rejection at 5% adds a warning. Weights are
@@ -154,6 +160,7 @@ Unit tests (not R pins; they read `cbps_sim.csv` directly or build their own dat
 coefficients; exact balance holds to 1e-8 in the balance table; ATT treated weights are
 `1 / n_t`), `test_cbps_moment_jacobian_matches_finite_differences`,
 `test_brent_fmin_finds_the_minimum`, `test_cbps_scale_equivariance` (`x1 * 1e-6`, `x2 * 1e6`),
+`test_cbps_over_converges_at_the_rounding_floor`,
 `test_cbps_reports_non_convergence`, `test_cbps_logit_reports_glm_warnings` (separation),
 `test_cbps_method_parses_aliases_and_rejects_unknown`,
 `test_cbps_estimand_parses_aliases_and_rejects_unknown`, `test_cbps_weights_sum_to_one_per_group`,
