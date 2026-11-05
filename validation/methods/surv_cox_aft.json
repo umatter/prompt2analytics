@@ -12,7 +12,12 @@
         "surv_cox_ties_small"
       ],
       "tests": [
-        "test_validate_cox_ties_small"
+        "test_validate_cox_ties_small",
+        "test_validate_cox_breslow_row_order_invariant",
+        "test_validate_cox_efron_model",
+        "test_validate_cox_breslow_model",
+        "test_validate_cox_converges_at_large_scale",
+        "test_validate_cox_aliased_covariate"
       ],
       "quantities": [
         "coefficients",

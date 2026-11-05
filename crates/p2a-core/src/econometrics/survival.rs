@@ -25,8 +25,13 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy, column};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{pseudoinverse, safe_inverse};
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, aliasing_message, sym_inverse};
+use crate::regression::ols::normal_equations_inverse;
 use crate::resource::{checkpoint, try_zeros2};
-use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_cdf};
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text, relative_change};
+use crate::traits::estimator::{
+    SignificanceLevel, chi_squared_p_value, normal_cdf, normal_p_value_two_sided, z_critical,
+};
 
 // =============================================================================
 // Column extraction shared by every survival entry point
@@ -271,7 +276,10 @@ crate::option_enum!(
             (&["weibull"], AftDistribution::Weibull),
             (&["exponential"], AftDistribution::Exponential),
             (&["lognormal", "log_normal"], AftDistribution::LogNormal),
-            (&["loglogistic", "log_logistic"], AftDistribution::LogLogistic),
+            (
+                &["loglogistic", "log_logistic"],
+                AftDistribution::LogLogistic
+            ),
         ],
     },
     no_display
@@ -1234,6 +1242,32 @@ pub struct CoxResult {
     /// Rows dropped because of a missing time, status or covariate.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Covariates not estimated because they are constant or collinear with earlier ones
+    /// (coefficient NA in coxph); their entries in every per-variable vector are NaN.
+    #[serde(default)]
+    pub aliased: Vec<String>,
+    /// Warnings (aliasing, non-convergence, "coefficient may be infinite").
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The Newton iteration's convergence record.
+    #[serde(default)]
+    pub convergence: Convergence,
+}
+
+impl CoxResult {
+    /// Degrees of freedom of the overall tests: the identified coefficients.
+    pub fn df(&self) -> usize {
+        self.variables.len() - self.aliased.len()
+    }
+}
+
+impl ResultNotes for CoxResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 impl fmt::Display for CoxResult {
@@ -1278,26 +1312,26 @@ impl fmt::Display for CoxResult {
             f,
             "Likelihood ratio test = {:.2}, df = {}, p = {:.4}",
             self.lr_test,
-            self.variables.len(),
+            self.df(),
             self.lr_p_value
         )?;
         writeln!(
             f,
             "Wald test = {:.2}, df = {}, p = {:.4}",
             self.wald_test,
-            self.variables.len(),
+            self.df(),
             self.wald_p_value
         )?;
         writeln!(
             f,
             "Score (logrank) test = {:.2}, df = {}, p = {:.4}",
             self.score_test,
-            self.variables.len(),
+            self.df(),
             self.score_p_value
         )?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-
+        write!(f, "{}", notes_text(self))?;
         write_missing(f, &self.missing)
     }
 }
@@ -1337,7 +1371,19 @@ pub fn run_cox_ph(
     config: Option<CoxConfig>,
 ) -> EconResult<CoxResult> {
     let config = config.unwrap_or_default();
-
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "Cox regression: max_iter must be at least 1, got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Cox regression: tolerance must be finite and > 0, got {}",
+                config.tolerance
+            ),
+        });
+    }
     if x_cols.is_empty() {
         return Err(EconError::InvalidSpecification {
             message: "Cox model requires at least one covariate".to_string(),
@@ -1355,15 +1401,6 @@ pub fn run_cox_ph(
     )?;
     let p = x_cols.len();
     let n = data.time.len();
-    // (time, event, row index), kept rows in their original order
-    let obs_data: Vec<(f64, bool, usize)> = data
-        .time
-        .iter()
-        .zip(&data.event)
-        .enumerate()
-        .map(|(i, (&t, &e))| (t, e, i))
-        .collect();
-
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -1371,122 +1408,172 @@ pub fn run_cox_ph(
             context: format!("Cox regression with {} covariates", p),
         });
     }
-
-    let n_events = obs_data.iter().filter(|(_, e, _)| *e).count();
+    let n_events = data.event.iter().filter(|&&e| e).count();
     if n_events == 0 {
         return Err(EconError::InvalidSpecification {
             message: "No events observed in the data".to_string(),
         });
     }
+    let names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
-    let mut x = try_zeros2(n, p, "Cox covariate matrix")?;
-    for (mut col, values) in x.columns_mut().into_iter().zip(&data.x) {
-        for (cell, &v) in col.iter_mut().zip(values) {
-            *cell = v;
+    // Aliasing: a column of [1 | x] that the pivoted QR drops. The intercept stands in for the
+    // baseline hazard, so a constant covariate is aliased with it; of two collinear covariates
+    // the later one is aliased, as coxph decides.
+    let aliased_idx = cox_aliased(&data.x, n)?;
+    let id: Vec<usize> = (0..p).filter(|j| !aliased_idx.contains(j)).collect();
+    let aliased: Vec<String> = aliased_idx.iter().map(|&j| names[j].clone()).collect();
+    if id.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Cox regression: every covariate is constant or collinear with earlier ones \
+                 (aliased: {})",
+                aliased.join(", ")
+            ),
+        });
+    }
+    let q = id.len();
+    let mut warnings: Vec<String> = aliasing_message(&aliased_idx, &names).into_iter().collect();
+
+    // Identified columns, centred and scaled as coxph does: the partial likelihood does not
+    // change under centring, and scaling makes the iteration independent of the units.
+    let mut xs = try_zeros2(n, q, "Cox design")?;
+    let mut scale = Array1::<f64>::zeros(q);
+    for (c, &j) in id.iter().enumerate() {
+        let col = &data.x[j];
+        let centre = col.iter().sum::<f64>() / n as f64;
+        let mad = col.iter().map(|v| (v - centre).abs()).sum::<f64>() / n as f64;
+        let s = 1.0 / mad;
+        scale[c] = s;
+        for (cell, &v) in xs.column_mut(c).iter_mut().zip(col) {
+            *cell = (v - centre) * s;
         }
     }
 
     let rs = CoxRiskSets::new(&data.time);
-    let event = &data.event;
+    let fit = cox_newton(
+        &rs,
+        xs.view(),
+        &data.event,
+        config.ties,
+        config.max_iter,
+        config.tolerance,
+    )?;
+    let tol = config.tolerance;
 
-    // Newton-Raphson optimization
-    let mut beta: Array1<f64> = Array1::zeros(p);
-    let mut converged = false;
-    let mut iterations = 0;
-
-    // Null log-likelihood (beta = 0)
-    checkpoint()?;
-    let at_zero = cox_pass(&rs, x.view(), event, Array1::zeros(p).view(), config.ties);
-    let log_likelihood_null = at_zero.loglik;
-
-    for iter in 0..config.max_iter {
-        checkpoint()?;
-        iterations = iter + 1;
-        let pass = cox_pass(&rs, x.view(), event, beta.view(), config.ties);
-        let (grad, hess, ll) = (pass.score, pass.information, pass.loglik);
-
-        // Check convergence
-        let grad_norm = grad.iter().map(|g| g.abs()).fold(0.0, f64::max);
-        if grad_norm < config.tolerance {
-            converged = true;
-            break;
+    let v_s = sym_inverse(
+        fit.last.information.view(),
+        SingularPolicy::Error,
+        "Cox information matrix",
+    )?
+    .inverse;
+    let beta_id: Array1<f64> = &fit.beta * &scale;
+    let mut v_model = v_s.clone();
+    for j in 0..q {
+        for k in 0..q {
+            v_model[[j, k]] *= scale[j] * scale[k];
         }
-
-        // Newton-Raphson update: beta_new = beta + I^{-1} * score
-        let (hess_inv, _) = safe_inverse(&hess.view())?;
-        let delta = hess_inv.dot(&grad);
-
-        // Step halving if needed
-        let mut step = 1.0;
-        let mut new_beta = &beta + &(&delta * step);
-        let mut new_ll = cox_pass(&rs, x.view(), event, new_beta.view(), config.ties).loglik;
-
-        while new_ll < ll && step > 1e-10 {
-            step *= 0.5;
-            new_beta = &beta + &(&delta * step);
-            new_ll = cox_pass(&rs, x.view(), event, new_beta.view(), config.ties).loglik;
-        }
-
-        beta = new_beta;
     }
 
-    // Final likelihood and information matrix
-    let last = cox_pass(&rs, x.view(), event, beta.view(), config.ties);
-    let (hess, log_likelihood) = (last.information, last.loglik);
-    let (info_matrix, _) = safe_inverse(&hess.view())?;
+    // coxph.fit's warnings
+    if fit.convergence.converged {
+        let step = v_s.dot(&fit.last.score) * &scale;
+        let flagged: Vec<String> = (0..q)
+            .filter(|&c| {
+                !fit.last.score[c].is_finite()
+                    || (step[c].abs() > tol && step[c].abs() > tol.sqrt() * beta_id[c].abs())
+            })
+            .map(|c| format!("{} ({})", id[c] + 1, names[id[c]]))
+            .collect();
+        if !flagged.is_empty() {
+            warnings.push(format!(
+                "Loglik converged before variable {}; coefficient may be infinite",
+                flagged.join(", ")
+            ));
+        }
+    } else {
+        if let Some(note) = fit.convergence.note("Cox regression") {
+            warnings.push(note);
+        }
+        let eta = xs.dot(&fit.beta);
+        if eta.iter().any(|e| !e.is_finite() || e.abs() > 500.0) || !fit.last.loglik.is_finite() {
+            warnings.push("one or more coefficients may be infinite".to_string());
+        }
+    }
 
-    // Standard errors
-    let std_errors: Vec<f64> = (0..p).map(|i| info_matrix[[i, i]].sqrt()).collect();
+    let se_model: Vec<f64> = (0..q).map(|j| v_model[[j, j]].sqrt()).collect();
+    let se_id = se_model;
+    let wald_test = fit.beta.dot(&fit.last.information.dot(&fit.beta));
 
-    // z-statistics and p-values
-    let z_stats: Vec<f64> = beta
+    // Per-variable vectors over every covariate, NaN for the aliased ones.
+    let spread = |v: &[f64]| -> Vec<f64> {
+        let mut out = vec![f64::NAN; p];
+        for (c, &j) in id.iter().enumerate() {
+            out[j] = v[c];
+        }
+        out
+    };
+    let coefficients = spread(&beta_id.to_vec());
+    let std_errors = spread(&se_id);
+    let zc = z_critical(0.95)?;
+    let z_stats: Vec<f64> = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
+        .zip(&std_errors)
+        .map(|(b, s)| b / s)
         .collect();
-
     let p_values: Vec<f64> = z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
-
-    let significance: Vec<SignificanceLevel> = p_values
+    let significance = p_values
         .iter()
         .map(|&pv| SignificanceLevel::from_p_value(pv))
         .collect();
-
-    // Hazard ratios and CIs
-    let hazard_ratios: Vec<f64> = beta.iter().map(|&b| b.exp()).collect();
-    let hr_ci_lower: Vec<f64> = beta
+    let hazard_ratios = coefficients.iter().map(|b| b.exp()).collect();
+    let hr_ci_lower = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| (b - 1.96 * se).exp())
+        .zip(&std_errors)
+        .map(|(b, s)| (b - zc * s).exp())
         .collect();
-    let hr_ci_upper: Vec<f64> = beta
+    let hr_ci_upper = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| (b + 1.96 * se).exp())
+        .zip(&std_errors)
+        .map(|(b, s)| (b + zc * s).exp())
         .collect();
 
-    // Wald test (overall)
-    let wald_test = beta.dot(&hess.dot(&beta));
-    let wald_p_value = chi_squared_p_value(wald_test, p as f64);
-
-    // Score test (at beta = 0)
-    let (info_null, _) = safe_inverse(&at_zero.information.view())?;
-    let score_test = at_zero.score.dot(&info_null.dot(&at_zero.score));
-    let score_p_value = chi_squared_p_value(score_test, p as f64);
-
-    // Likelihood ratio test
+    let df = q as f64;
+    let wald_p_value = chi_squared_p_value(wald_test, df);
+    let info0 = sym_inverse(
+        fit.at_zero.information.view(),
+        SingularPolicy::Error,
+        "Cox information matrix at beta = 0",
+    )?
+    .inverse;
+    let score_test = fit.at_zero.score.dot(&info0.dot(&fit.at_zero.score));
+    let score_p_value = chi_squared_p_value(score_test, df);
+    let log_likelihood = fit.last.loglik;
+    let log_likelihood_null = fit.at_zero.loglik;
     let lr_test = 2.0 * (log_likelihood - log_likelihood_null);
-    let lr_p_value = chi_squared_p_value(lr_test, p as f64);
+    let lr_p_value = chi_squared_p_value(lr_test, df);
 
-    // Concordance (C-index)
-    let (concordance, concordance_se) = compute_concordance(&obs_data, &x, &beta);
+    // Concordance on the identified original-scale columns.
+    let mut x_id = try_zeros2(n, q, "Cox covariate matrix")?;
+    for (c, &j) in id.iter().enumerate() {
+        for (cell, &v) in x_id.column_mut(c).iter_mut().zip(&data.x[j]) {
+            *cell = v;
+        }
+    }
+    let obs_data: Vec<(f64, bool, usize)> = data
+        .time
+        .iter()
+        .zip(&data.event)
+        .enumerate()
+        .map(|(i, (&t, &e))| (t, e, i))
+        .collect();
+    let (concordance, concordance_se) = compute_concordance(&obs_data, &x_id, &beta_id);
 
     Ok(CoxResult {
-        variables: x_cols.iter().map(|s| s.to_string()).collect(),
-        coefficients: beta.to_vec(),
+        variables: names,
+        coefficients,
         std_errors,
         z_stats,
         p_values,
@@ -1507,9 +1594,117 @@ pub fn run_cox_ph(
         n_obs: n,
         n_events,
         ties_method: config.ties,
-        converged,
-        iterations,
+        converged: fit.convergence.converged,
+        iterations: fit.convergence.iterations,
         missing: data.missing,
+        aliased,
+        warnings,
+        convergence: fit.convergence,
+    })
+}
+
+/// The covariates (0-based) that the pivoted QR of `[1 | x]` drops (R's `dqrdc2`, tolerance
+/// `LM_QR_TOL`). A well-conditioned full-rank design is certified by its cross-product first.
+fn cox_aliased(cols: &[Vec<f64>], n: usize) -> EconResult<Vec<usize>> {
+    let p = cols.len();
+    let mut xa = try_zeros2(n, p + 1, "Cox design")?;
+    xa.column_mut(0).fill(1.0);
+    for (j, col) in cols.iter().enumerate() {
+        for (cell, &v) in xa.column_mut(j + 1).iter_mut().zip(col) {
+            *cell = v;
+        }
+    }
+    if normal_equations_inverse(xa.view())?.is_some() {
+        return Ok(Vec::new());
+    }
+    Ok(Qr::decompose(xa.view(), LM_QR_TOL)?
+        .aliased()
+        .into_iter()
+        .filter(|&j| j >= 1)
+        .map(|j| j - 1)
+        .collect())
+}
+
+/// The Newton fit of [`cox_newton`]: the estimate (scaled space), the pass at it, the pass at
+/// beta = 0 and the convergence record.
+struct CoxFit {
+    beta: Array1<f64>,
+    last: CoxPass,
+    at_zero: CoxPass,
+    convergence: Convergence,
+}
+
+/// coxph's iteration (coxfit6): Newton steps from beta = 0, step halving when the log partial
+/// likelihood falls (or is not finite), convergence on its relative change.
+fn cox_newton(
+    rs: &CoxRiskSets,
+    x: ArrayView2<f64>,
+    event: &[bool],
+    ties: TiesMethod,
+    max_iter: usize,
+    tol: f64,
+) -> EconResult<CoxFit> {
+    let q = x.ncols();
+    let solve = |pass: &CoxPass| -> EconResult<Array1<f64>> {
+        Ok(sym_inverse(
+            pass.information.view(),
+            SingularPolicy::Error,
+            "Cox information matrix",
+        )?
+        .inverse
+        .dot(&pass.score))
+    };
+    checkpoint()?;
+    let at_zero = cox_pass(rs, x, event, Array1::zeros(q).view(), ties);
+    let mut beta = Array1::<f64>::zeros(q);
+    let mut newbeta = solve(&at_zero)?;
+    let mut ll_old = at_zero.loglik;
+    let mut halving = false;
+    let mut converged = false;
+    let mut change = f64::NAN;
+    let mut it = 0;
+    let mut last = None;
+    while it < max_iter {
+        it += 1;
+        checkpoint()?;
+        let pass = cox_pass(rs, x, event, newbeta.view(), ties);
+        change = relative_change(pass.loglik, ll_old);
+        if pass.loglik.is_finite() && change <= tol && !halving {
+            converged = true;
+            last = Some(pass);
+            break;
+        }
+        if it == max_iter {
+            last = Some(pass);
+            break;
+        }
+        if !pass.loglik.is_finite() || pass.loglik < ll_old {
+            halving = true;
+            newbeta = (&newbeta + &beta) / 2.0;
+        } else {
+            halving = false;
+            ll_old = pass.loglik;
+            let step = solve(&pass)?;
+            beta = newbeta.clone();
+            newbeta = &newbeta + &step;
+        }
+    }
+    let last = match last {
+        Some(pass) => pass,
+        None => cox_pass(rs, x, event, newbeta.view(), ties),
+    };
+    Ok(CoxFit {
+        beta: newbeta,
+        last,
+        at_zero,
+        convergence: Convergence::new(
+            converged,
+            it,
+            max_iter,
+            "relative change in the log partial likelihood",
+            change,
+            tol,
+        ),
     })
 }
 
@@ -3784,7 +3979,10 @@ mod tests {
         for bad in ["gaussian", "logistic", "rayleigh", "t", "extreme", ""] {
             assert!(bad.parse::<AftDistribution>().is_err(), "{bad}");
         }
-        let err = "gaussian".parse::<AftDistribution>().unwrap_err().to_string();
+        let err = "gaussian"
+            .parse::<AftDistribution>()
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("unknown dist 'gaussian'")
                 && err.contains("weibull, exponential, lognormal, loglogistic"),
@@ -3824,6 +4022,37 @@ mod tests {
         }
     }
 
+    /// ECON-46: Breslow scores every death at t against the full risk set {t_j >= t} whatever the
+    /// row order (coxph(ties = "breslow")). Before: rows entered the risk set one at a time; lung
+    /// gave age 0.011070584319508605 in file order and 0.011048660708497025 reversed (R
+    /// 0.011041136385707521).
+    #[test]
+    fn test_validate_cox_breslow_row_order_invariant() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("n") as usize;
+        let rev = Dataset::new(ds.df().reverse());
+        let cfg = cox_tight(TiesMethod::Breslow);
+        let a = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg.clone())).unwrap();
+        let b = run_cox_ph(&rev, "time", "status", &COX_X, Some(cfg)).unwrap();
+        for (x, y) in a.coefficients.iter().zip(&b.coefficients) {
+            assert!(
+                (x - y).abs() <= 1e-12 * y.abs(),
+                "row order changed the Breslow fit: {x} vs {y}"
+            );
+        }
+        let mut check = Check::new(&case);
+        for r in [&a, &b] {
+            check
+                .scalar("n", r.n_obs as f64, Tol::exact())
+                .named("breslow_coef", &r.variables, &r.coefficients, Tol::coef(n))
+                .named("breslow_se", &r.variables, &r.std_errors, Tol::se(n))
+                .scalar("breslow_loglik", r.log_likelihood, Tol::stat(n))
+                .scalar("breslow_loglik_null", r.log_likelihood_null, Tol::stat(n))
+                .scalar("breslow_score_test", r.score_test, Tol::stat(n));
+        }
+        check.finish();
+    }
+
     /// Heavy ties (10 rows, 5 distinct times, censored rows tied with deaths), Efron and Breslow,
     /// rows in file order and reversed. Before: Breslow 0.36576456754379533 / reversed
     /// -0.47976648482093837 (R -0.050231244457068). Replaces a test whose comment quoted "R"
@@ -3839,8 +4068,18 @@ mod tests {
             for d in [&ds, &rev] {
                 let r = run_cox_ph(d, "time", "event", &["x"], Some(cox_tight(ties))).unwrap();
                 check
-                    .named(&format!("{tag}_coef"), &r.variables, &r.coefficients, Tol::coef(n))
-                    .named(&format!("{tag}_se"), &r.variables, &r.std_errors, Tol::se(n))
+                    .named(
+                        &format!("{tag}_coef"),
+                        &r.variables,
+                        &r.coefficients,
+                        Tol::coef(n),
+                    )
+                    .named(
+                        &format!("{tag}_se"),
+                        &r.variables,
+                        &r.std_errors,
+                        Tol::se(n),
+                    )
                     .scalar(&format!("{tag}_loglik"), r.log_likelihood, Tol::stat(n))
                     .scalar(
                         &format!("{tag}_loglik_null"),
@@ -3851,5 +4090,225 @@ mod tests {
             }
         }
         check.finish();
+    }
+
+    /// Every number summary.coxph reports for the model-based fit (deviation ECON-89: the
+    /// concordance and its SE are not pinned). Before: up to 100 iterations under the absolute
+    /// score rule, HR limits with 1.96 (sex and ph.ecog upper limits off by 6.0e-6 and 4.1e-6
+    /// relative), no convergence fields.
+    fn check_cox_model(ties: TiesMethod) {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("n") as usize;
+        let tag = ties_tag(ties);
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cox_tight(ties))).unwrap();
+        assert!(
+            r.converged && r.convergence.converged,
+            "{:?}",
+            r.convergence
+        );
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(r.df(), 3);
+        assert!(r.to_string().contains("Converged: yes ("), "{r}");
+        Check::new(&case)
+            .scalar("n", r.n_obs as f64, Tol::exact())
+            .scalar("n_event", r.n_events as f64, Tol::exact())
+            .named(
+                &format!("{tag}_coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                &format!("{tag}_se"),
+                &r.variables,
+                &r.std_errors,
+                Tol::se(n),
+            )
+            .named(&format!("{tag}_z"), &r.variables, &r.z_stats, Tol::stat(n))
+            .named(
+                &format!("{tag}_p"),
+                &r.variables,
+                &r.p_values,
+                Tol::p_value(n),
+            )
+            .named(
+                &format!("{tag}_hr_lower"),
+                &r.variables,
+                &r.hr_ci_lower,
+                Tol::stat(n),
+            )
+            .named(
+                &format!("{tag}_hr_upper"),
+                &r.variables,
+                &r.hr_ci_upper,
+                Tol::stat(n),
+            )
+            .scalar(&format!("{tag}_loglik"), r.log_likelihood, Tol::stat(n))
+            .scalar(
+                &format!("{tag}_loglik_null"),
+                r.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(&format!("{tag}_lr_test"), r.lr_test, Tol::stat(n))
+            .scalar(&format!("{tag}_lr_p"), r.lr_p_value, Tol::p_value(n))
+            .scalar(&format!("{tag}_score_test"), r.score_test, Tol::stat(n))
+            .scalar(&format!("{tag}_score_p"), r.score_p_value, Tol::p_value(n))
+            .scalar(&format!("{tag}_wald_test"), r.wald_test, Tol::stat(n))
+            .scalar(&format!("{tag}_wald_p"), r.wald_p_value, Tol::p_value(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cox_efron_model() {
+        check_cox_model(TiesMethod::Efron)
+    }
+
+    #[test]
+    fn test_validate_cox_breslow_model() {
+        check_cox_model(TiesMethod::Breslow)
+    }
+
+    /// X-15: the stopping rule is the relative change in the log partial likelihood, so the
+    /// iteration does not depend on a covariate's units. Before: the absolute max |score| < 1e-9
+    /// rule ran to max_iter (25), converged = false, at age x 365250 and x 1e6. Coefficients
+    /// (mapped back to age units) are pinned to coxph's tight fit; coxph's default-eps fits are
+    /// a cross-check. Iteration counts are p2a's own property (within one of each other).
+    #[test]
+    fn test_validate_cox_converges_at_large_scale() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let mut check = Check::new(&case);
+        let mut iter_e0 = None;
+        for (tag, s) in [("e0", 1.0), ("em6", 1e-6), ("days", 365250.0), ("e6", 1e6)] {
+            let d = derive_f64(&ds, "age", "age_s", |_, a| a as f64 * s);
+            let mut cfg = CoxConfig::default(); // tolerance 1e-9 = coxph's eps, max_iter 25
+            cfg.ties = TiesMethod::Efron;
+            let r = run_cox_ph(&d, "time", "status", &["age_s", "sex"], Some(cfg)).unwrap();
+            assert!(r.converged, "age x {s}: {:?}", r.convergence);
+            assert!(r.iterations <= 10, "age x {s}: {} iterations", r.iterations);
+            let base = *iter_e0.get_or_insert(r.iterations);
+            assert!(
+                r.iterations.abs_diff(base) <= 1,
+                "age x {s}: {} vs {base}",
+                r.iterations
+            );
+            let back = [r.coefficients[0] * s, r.coefficients[1]];
+            check
+                .named(
+                    "scale_tight_coef",
+                    &["age", "sex"],
+                    &back,
+                    Tol::iterative(1e-7),
+                )
+                .named(
+                    &format!("scale_{tag}_coef"),
+                    &["age", "sex"],
+                    &[r.coefficients[0], r.coefficients[1]],
+                    Tol::iterative(1e-6),
+                );
+        }
+        check.finish();
+    }
+
+    /// R10: stopping at max_iter is reported, not hidden (coxph: "Ran out of iterations and did
+    /// not converge").
+    #[test]
+    fn test_cox_iteration_limit_reports_non_convergence() {
+        let ds = generated_dataset("lung");
+        let mut cfg = cox_tight(TiesMethod::Efron);
+        cfg.max_iter = 2;
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg)).unwrap();
+        assert!(!r.converged && !r.convergence.converged);
+        assert_eq!(r.iterations, 2);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("Cox regression did not converge after 2 iterations")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Converged: no (2 iterations"), "{r}");
+    }
+
+    /// Monotone likelihood (every death has x = 1): coxph 3.5.8 converges at iteration 20 with
+    /// coef 20.794537153866514 and warns "Loglik converged before variable 1; coefficient may
+    /// be infinite". Hand-built fixture, not a reference dataset.
+    #[test]
+    fn test_cox_monotone_likelihood_warns() {
+        let df = df! {
+            "time" => [2.3, 1.1, 4.7, 3.2, 5.9, 0.8, 7.4, 6.1, 8.8, 9.5, 10.2, 3.9],
+            "status" => [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            "x" => [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            "z" => [0.3, -1.2, 0.8, 0.1, -0.5, 1.4, -0.9, 0.6, 2.1, -0.3, 0.4, -1.7],
+        }
+        .unwrap();
+        let mut cfg = CoxConfig::default();
+        cfg.ties = TiesMethod::Efron;
+        cfg.max_iter = 100;
+        let r = run_cox_ph(&Dataset::new(df), "time", "status", &["x", "z"], Some(cfg)).unwrap();
+        assert!(r.converged, "{:?}", r.convergence);
+        assert!(r.coefficients[0] > 15.0, "{:?}", r.coefficients);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Loglik converged before variable 1 (x); coefficient may be infinite"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// ECON-61 (survival part): age2 = 2 age + sex is aliased; coxph reports NA for it and fits
+    /// age and sex. Before: a pseudo-inverse gave three finite coefficients without a warning.
+    #[test]
+    fn test_validate_cox_aliased_covariate() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("scale_n") as usize;
+        let sex = i64_values(&ds, "sex");
+        let d = derive_f64(&ds, "age", "age2", |i, a| 2.0 * a as f64 + sex[i] as f64);
+        let r = run_cox_ph(
+            &d,
+            "time",
+            "status",
+            &["age", "sex", "age2"],
+            Some(cox_tight(TiesMethod::Efron)),
+        )
+        .unwrap();
+        assert_eq!(r.aliased, vec!["age2".to_string()]);
+        assert_eq!(r.df(), 2);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Coefficients not defined because of singularities: age2"),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .named("aliased_coef", &r.variables, &r.coefficients, Tol::coef(n)) // age2: NaN == NA
+            .named("aliased_se", &r.variables, &r.std_errors, Tol::se(n))
+            .scalar("aliased_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("aliased_lr_test", r.lr_test, Tol::stat(n))
+            .finish();
+    }
+
+    /// R3: iteration settings are validated in core.
+    #[test]
+    fn test_cox_rejects_bad_iteration_settings() {
+        let ds = generated_dataset("cox_ties_small");
+        for (max_iter, tol, what) in [
+            (0, 1e-9, "max_iter"),
+            (25, 0.0, "tolerance"),
+            (25, -1.0, "tolerance"),
+            (25, f64::NAN, "tolerance"),
+            (25, f64::INFINITY, "tolerance"),
+        ] {
+            let mut cfg = CoxConfig::default();
+            cfg.max_iter = max_iter;
+            cfg.tolerance = tol;
+            match run_cox_ph(&ds, "time", "event", &["x"], Some(cfg)) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains(what), "{message}")
+                }
+                other => panic!("max_iter {max_iter}, tolerance {tol}: {other:?}"),
+            }
+        }
     }
 }
