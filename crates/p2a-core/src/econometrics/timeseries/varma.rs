@@ -69,8 +69,16 @@ pub struct VarmaConfig {
     /// MA order q.
     pub q: usize,
     /// Order m of the step-1 long VAR. `None`: 0 when q = 0; otherwise max(floor(2 ln n),
-    /// 2 max(p, q)), reduced to floor((n - 2) / (2K + 1)) with a warning. Must be at least 1 when q > 0. With q = 0 a given m only moves the sample
-    /// start to m + p + 1, so the criteria compare with VARMA(p, q) fits at that m.
+    /// 2 max(p, q)), reduced to floor((n - 2) / (2K + 1)) with a warning. Must be at least 1
+    /// when q > 0. With q = 0 a given m only moves the sample start to m + p + 1, so the
+    /// criteria compare with VARMA(p, q) fits at that m.
+    ///
+    /// An order growing like ln n is justified (Hannan & Kavalieris 1984) when the MA roots are
+    /// bounded away from the unit circle: the long VAR's truncation bias decays like rho^m, with
+    /// rho the largest modulus of an inverse MA root, and for m = c ln n it falls below the
+    /// sampling error only when rho < exp(-1/(2c)), about 0.78 for the default c = 2. With an MA
+    /// root nearer the unit circle the default long VAR is too short: set this larger, for
+    /// example to the earlier default floor(ln(n)^2).
     pub long_var_order: Option<usize>,
 }
 

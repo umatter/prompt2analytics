@@ -2,6 +2,7 @@
 
 Registry: [`validation/methods/ts_varma.json`](../../methods/ts_varma.json) (method `ts_varma`).
 R case: `varma_hr` in [`validation/r/cases/ts_varma.R`](../../r/cases/ts_varma.R).
+Monte Carlo of the default long-VAR order: [`validation/r/mc/varma_long_var_order.R`](../../r/mc/varma_long_var_order.R).
 
 `run_varma(dataset, columns, p, q)` and `run_varma_with(dataset, columns, &VarmaConfig)` in
 `crates/p2a-core/src/econometrics/timeseries/varma.rs`. MCP `ts_varma`; CLI `p2a ts varma`.
@@ -62,40 +63,51 @@ Reported quantities:
 |---|---|
 | `long_var_order` given | that value. It must be >= 1 when q > 0, and the long VAR must keep a residual degree of freedom. With q = 0 it only moves the sample start, so the criteria compare with VARMA(p, q) fits at the same m. |
 | default, q = 0 | 0. The fit is the OLS VAR(p), equal to `vars::VAR(type = "const")`. |
-| default, q > 0 | max(floor(2 ln n), 2 max(p, q)): 9 at n = 100, 11 at n = 400, 13 at n = 1,000, 18 at n = 10,000. It is reduced to floor((n - 2) / (2K + 1)) with a warning, so that the long VAR keeps at least as many residual degrees of freedom as regressors. |
+| default, q > 0 | max(floor(2 ln n), 2 max(p, q)): 9 at n = 100, 11 at n = 400, 13 at n = 1,000, 18 at n = 10,000. It is reduced to floor((n - 2) / (2K + 1)) with a warning, so that the long VAR keeps at least as many residual degrees of freedom as regressors. Too short when an MA root is near the unit circle (see below): set `long_var_order` larger there. |
 
 **Why 2 ln n.** Hannan & Rissanen need a long-VAR order that grows with n; Hannan &
-Kavalieris (1984) analyse orders growing like ln n, and AIC itself picks an order of that rate. The
-earlier default was floor(ln(n)^2) (Gómez & Maravall 2001, statsmodels' `hannan_rissanen` default):
-47 at n = 1,000 and 84 at n = 10,000, which made the long VAR 28-78 times the cost of the old
-(incorrect) estimator. A proposed max(p + q, floor(1.5 ln(n)^2)) was rejected by an earlier
-Monte Carlo of the case DGP (coefficient RMSE 1.35 at n = 100 against 0.77 for
-floor(ln(n)^2), at 2.25 times the cost). The order chosen by AIC (`vars::VARselect(lag.max = 10,
-type = "const")`, the convention of R's VAR packages) was the third candidate. A Monte Carlo in R
-(`hr()` as in the case, 200 replications per cell, seed 20261104) compared the three on the case DGP,
-a bivariate VARMA(1,1) with MA roots of modulus 0.8 and 0.7 ("strong MA"), and a trivariate
-VARMA(1,1); entries are the root mean squared error of the 1 + 2K step-2 coefficients per equation
-(all K equations together):
+Kavalieris (1984) justify orders growing like ln n, and AIC itself picks an order of that rate.
+That justification needs the MA roots bounded away from the unit circle: the truncation bias of a
+long VAR(m) decays like rho^m, with rho the largest modulus of an inverse MA root (an eigenvalue of
+M_1 for q = 1), and m = c ln n makes it n^(c ln rho), below the n^(-1/2) of the sampling error
+only when rho < exp(-1/(2c)). For c = 2 that is rho below about 0.78. With an MA root nearer the
+unit circle the default long VAR is too short and `long_var_order` should be set larger, for
+example to the earlier default floor(ln(n)^2).
+
+The earlier default was floor(ln(n)^2) (Gómez & Maravall 2001, statsmodels' `hannan_rissanen`
+default): 47 at n = 1,000 and 84 at n = 10,000, which made the long VAR 28-78 times the cost of
+the old (incorrect) estimator, which fitted no long VAR. A proposed max(p + q, floor(1.5 ln(n)^2))
+was rejected by an earlier Monte Carlo of the case DGP (coefficient RMSE 1.35 at n = 100 against
+0.77 for floor(ln(n)^2), at 2.25 times the cost). The order chosen by AIC
+(`vars::VARselect(lag.max = 10, type = "const")`, the convention of R's VAR packages) was the
+third candidate. The Monte Carlo
+[`validation/r/mc/varma_long_var_order.R`](../../r/mc/varma_long_var_order.R) (`Rscript`, about
+20 s; not an R reference case) compares the three with the case's estimator, 200 replications per
+cell and seed 20261104, on three VARMA(1,1) designs: the case DGP (inverse MA roots 0.3 and
+-0.25), "strong MA" (the case's A_1 and Sigma, inverse MA roots 0.8 and -0.7) and a trivariate
+design (inverse MA roots of modulus 0.42 and less). Every order is reduced to
+floor((n - 2) / (2K + 1)) as the default is. Entries are the root mean squared error of the
+K (1 + 2K) step-2 coefficients (all K equations together):
 
 | DGP | n | floor(ln(n)^2) | floor(2 ln n) | AIC |
 |---|---|---|---|---|
 | case | 100 | 0.716 | 0.800 | 2.719 |
 | case | 400 | 0.507 | 0.527 | 0.627 |
 | case | 2,000 | 0.330 | 0.275 | 0.294 |
-| strong MA | 100 | 0.827 | 0.701 | 0.671 |
-| strong MA | 400 | 0.549 | 0.365 | 0.342 |
-| strong MA | 2,000 | 0.252 | 0.151 | 0.143 |
-| K = 3 | 100 | 0.808 | 0.762 | 0.817 |
-| K = 3 | 400 | 0.416 | 0.366 | 0.369 |
-| K = 3 | 2,000 | 0.178 | 0.158 | 0.157 |
+| strong MA | 100 | 1.054 | 0.897 | 0.859 |
+| strong MA | 400 | 0.725 | 0.455 | 0.417 |
+| strong MA | 2,000 | 0.400 | 0.225 | 0.208 |
+| K = 3 | 100 | 0.911 | 0.909 | 8.071 |
+| K = 3 | 400 | 0.562 | 0.599 | 0.762 |
+| K = 3 | 2,000 | 0.384 | 0.332 | 0.339 |
 
-floor(2 ln n) loses to floor(ln(n)^2) only on the case DGP at small n (12% at n = 100, 4% at
-n = 400) and wins everywhere else, by up to 40% (the long VAR of floor(ln(n)^2) adds estimation
-noise faster than it removes truncation bias). AIC is within 10% of floor(2 ln n) in seven of the
-nine cells,
-slightly better with a strong MA part, but erratic in small samples: on the case DGP at n = 100 a
-few replications with very large errors put its RMSE at 2.7. A data-independent order also keeps
-the default reproducible from n alone.
+floor(2 ln n) loses to floor(ln(n)^2) on the case DGP at small n (12% at n = 100, 4% at
+n = 400) and on the trivariate design at n = 400 (7%), and wins in the other cells, by up to 44%
+(the long VAR of floor(ln(n)^2) adds estimation noise faster than it removes truncation bias at
+these sample sizes, even for the strong MA's root of 0.8). AIC is within 10% of floor(2 ln n) in
+five of the nine cells, slightly better with a strong MA part, but erratic in small samples: a few
+replications with very large errors put its RMSE at 2.7 on the case DGP and 8.1 on the trivariate
+design at n = 100. A data-independent order also keeps the default reproducible from n alone.
 
 **Errors.**
 
