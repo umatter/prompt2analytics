@@ -8,5 +8,6 @@
 mod common;
 mod t3perf4_vecm;
 mod wp06_flags;
+mod wp21_did;
 mod wp60_models;
 mod wp61_other;
