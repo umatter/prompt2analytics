@@ -255,11 +255,22 @@ interleaved rounds against `fe13b889`; new / base as the ratio of medians.
 | clustered by entity (unified) | 100 / 1,000 / 10,000 | 0.98 / 0.99 / 0.99 |
 | HAC, Newey-West (unified) | 100 / 1,000 / 10,000 | 0.73 / 0.66 / 0.63 |
 | HAC, Bartlett (criterion `vcovHAC`) | 100 / 500 / 1,000 / 5,000 | 0.80 / 1.04 / 1.12 / 1.21 |
+| HAC, Bartlett (criterion `vcovHAC` data), T3-PERF5, cycles | 100 / 500 / 1,000 / 5,000 | 0.73 / 0.75 / 0.73 / 0.52 |
 | Driscoll-Kraay (unified) | 100 / 500 / 1,000 | 0.87 / 0.89 / 0.92 |
 | pairs bootstrap, B = 199 (unified) | 100 / 1,000 | 0.98 / 0.93 |
 
-The criterion `vcovHAC` bench is above 1.1x of base at n = 1,000 and 5,000 (1.12 / 1.21); it is
-under further work. Every other row is within 1.1x.
+The criterion `vcovHAC` bench was above 1.1x of base at n = 1,000 and 5,000 (1.12 / 1.21): it
+times `vcov_hac` alone, where the unified row includes the fit, and the meat summed each lag's
+k² cross-products in a pass of its own, every sum a chain of dependent additions through
+memory. T3-PERF5 accumulates a block of up to 256 lags in one pass: with the score columns
+also stored in reverse, the lagged scores of consecutive lags are consecutive, so a row adds
+`s_ij` times a contiguous slice to the block's sums, independent sums the compiler
+vectorises. Every sum still runs over the rows in ascending order and the lags add in lag
+order, so the meat is bit for bit the old one (`test_hac_meat_matches_indexed_reference_exactly`,
+now also over 60 and 300 lags, the latter across two blocks). The T3-PERF5 row was measured on
+a shared, loaded machine as user-space CPU cycles per call from the hardware counter
+(`perf_event_open`; median of 11 batches, one P core, three interleaved rounds) against
+`fe13b889`. Every row is within 1.1x.
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 
