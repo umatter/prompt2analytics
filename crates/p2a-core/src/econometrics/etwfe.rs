@@ -32,10 +32,13 @@
 //!
 //! # Aggregation
 //!
-//! The cohort-time effects can be aggregated into:
-//! - **Event Study**: Effects by relative time since treatment
-//! - **Cohort Average**: Average effect for each treatment cohort
-//! - **Overall ATT**: Single weighted average across all effects
+//! The cohort-time effects are aggregated as `etwfe::emfx` does: the mean
+//! per-observation effect over emfx's rows, with delta-method standard errors
+//! from the full covariance matrix:
+//! - **simple**: the overall ATT (cohorts weighted by treated observations)
+//! - **event**: by time since first treatment
+//! - **group**: by cohort
+//! - **calendar**: by period
 //!
 //! # References
 //!
@@ -58,6 +61,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{
     normal_p_value_two_sided, t_test_p_value, validate_level, z_critical,
 };
@@ -335,12 +339,16 @@ pub struct EtwfeResult {
     /// Level of the aggregate confidence intervals.
     #[serde(default = "default_confidence_level")]
     pub confidence_level: f64,
+    /// First period dropped because the reference cohort is treated from it on
+    /// (`cgroup = notyet` with a reference cohort).
+    #[serde(default)]
+    pub dropped_from: Option<i64>,
 }
 
-impl crate::traits::convergence::ResultNotes for EtwfeResult {
-    fn notes_warnings(&self) -> Vec<String> {
-        self.warnings.clone()
-    }
+/// A confidence level as a percentage without trailing zeros ("95", "90", "97.5").
+fn level_percent(level: f64) -> String {
+    let s = format!("{:.4}", level * 100.0);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 impl EtwfeResult {
@@ -353,7 +361,64 @@ impl EtwfeResult {
             EtwfeAggregation::Calendar => &self.calendar,
         }
     }
+
+    /// That table as Display prints it.
+    pub fn aggregation_text(&self, which: EtwfeAggregation) -> String {
+        let level = level_percent(self.confidence_level);
+        if which == EtwfeAggregation::Simple {
+            let o = &self.overall;
+            return format!(
+                "ATT (emfx simple; mean over {} treated observations): {:.4} (SE {:.4}), z = {:.2}, \
+                 p = {:.4}, {level}% CI [{:.4}, {:.4}]\n",
+                o.n_obs, o.estimate, o.std_error, o.z_stat, o.p_value, o.ci_lower, o.ci_upper
+            );
+        }
+        let (title, key) = match which {
+            EtwfeAggregation::Event => (
+                "Event Study (emfx event; by time since first_treat)",
+                "Rel.Time",
+            ),
+            EtwfeAggregation::Group => ("Cohort Averages (emfx group)", "Cohort"),
+            _ => ("Period Averages (emfx calendar)", "Period"),
+        };
+        let mut out = String::new();
+        out.push_str(&format!("{:-<70}\n{title}\n{:-<70}\n", "", ""));
+        out.push_str(&format!(
+            "{key:>8} {:>10} {:>9} {:>7} {:>8} {:>9} {:>9} {:>6}\n",
+            "Estimate", "SE", "z", "P>|z|", "CI lo", "CI hi", "N"
+        ));
+        for e in self.aggregation(which) {
+            if e.n_effects == 0 {
+                out.push_str(&format!(
+                    "{:>8} {:>10.4} (reference) {:>40}\n",
+                    e.key, e.estimate, e.n_obs
+                ));
+            } else {
+                out.push_str(&format!(
+                    "{:>8} {:>10.4} {:>9.4} {:>7.2} {:>8.4} {:>9.4} {:>9.4} {:>6}\n",
+                    e.key,
+                    e.estimate,
+                    e.std_error,
+                    e.z_stat,
+                    e.p_value,
+                    e.ci_lower,
+                    e.ci_upper,
+                    e.n_obs
+                ));
+            }
+        }
+        out
+    }
 }
+
+impl ResultNotes for EtwfeResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+/// Cells printed one per line up to this many; beyond it the table is summarised.
+const MAX_CELL_ROWS: usize = 60;
 
 impl fmt::Display for EtwfeResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -363,84 +428,122 @@ impl fmt::Display for EtwfeResult {
 
         writeln!(f, "\nModel: {}", self.model)?;
         writeln!(f, "Outcome: {}", self.dep_var)?;
-        writeln!(f, "Control Group: {}", self.control_group)?;
+        let mut reference = Vec::new();
+        if self.n_never_units > 0 {
+            reference.push(format!("never treated ({} units)", self.n_never_units));
+        }
+        if let Some(c) = self.ref_cohort {
+            let mut part = format!("cohort {c}");
+            if let Some(s) = self.dropped_from {
+                part.push_str(&format!(" (periods from {s} dropped)"));
+            }
+            reference.push(part);
+        }
+        let cgroup = match self.control_group {
+            ControlGroup::NotYet => "notyet",
+            ControlGroup::Never => "never",
+        };
+        writeln!(
+            f,
+            "Control group: {} (cgroup = {cgroup}); reference group: {}",
+            self.control_group,
+            reference.join(" and ")
+        )?;
+        writeln!(f, "Reference period (tref): {}", self.ref_time)?;
         if !self.controls.is_empty() {
             writeln!(f, "Controls: {}", self.controls.join(", "))?;
         }
+        if !self.dropped_terms.is_empty() {
+            writeln!(
+                f,
+                "Absorbed by the unit and period effects: {}",
+                self.dropped_terms.join(", ")
+            )?;
+        }
+        if !self.collinear_terms.is_empty() {
+            writeln!(
+                f,
+                "Removed as collinear: {}",
+                self.collinear_terms.join(", ")
+            )?;
+        }
+        if self.anticipation > 0 {
+            writeln!(
+                f,
+                "Anticipation: {a} period(s); cohort g is treated from g - {a}",
+                a = self.anticipation
+            )?;
+        }
 
         writeln!(f, "\n{:-<70}", "")?;
         writeln!(
             f,
-            "Sample: {} obs ({} treated, {} control)",
-            self.n_obs, self.n_treated, self.n_control
+            "Sample: {} obs ({} treated, {} not treated), {} units, {} periods",
+            self.n_obs, self.n_treated, self.n_control, self.n_units, self.n_periods
         )?;
-        writeln!(
-            f,
-            "Cohorts: {}, Periods: {}",
-            self.n_cohorts, self.n_periods
-        )?;
+        match self.vcov {
+            EtwfeVcov::Cluster => writeln!(
+                f,
+                "Standard errors: clustered by unit ({} clusters; CR1 as fixest), t with {} df",
+                self.n_units, self.df_t
+            )?,
+            EtwfeVcov::Iid => writeln!(f, "Standard errors: iid, t with {} df", self.df_t)?,
+        }
+        writeln!(f, "Within R-squared: {:.4}", self.r_squared)?;
 
-        // Overall ATT
         writeln!(f, "\n{:-<70}", "")?;
-        writeln!(f, "Overall Average Treatment Effect on the Treated (ATT)")?;
+        writeln!(f, "Cohort x Period Effects (etwfe coefficients)")?;
         writeln!(f, "{:-<70}", "")?;
-        writeln!(
-            f,
-            "  Simple Average:   {:>10.4} (SE: {:.4})",
-            self.att_simple, self.att_se
-        )?;
-        writeln!(
-            f,
-            "  Weighted Average: {:>10.4} (SE: {:.4})",
-            self.att_weighted, self.att_weighted_se
-        )?;
-
-        // Event Study
-        if !self.event_study.is_empty() {
-            writeln!(f, "\n{:-<70}", "")?;
-            writeln!(f, "Event Study (Effects by Time Relative to Treatment)")?;
-            writeln!(f, "{:-<70}", "")?;
+        if self.cohort_time_effects.len() <= MAX_CELL_ROWS {
             writeln!(
                 f,
-                "{:>8} {:>12} {:>10} {:>12} {:>12}",
-                "Rel.Time", "Estimate", "SE", "95% CI Lo", "95% CI Hi"
+                "{:>7} {:>7} {:>9} {:>10} {:>9} {:>7} {:>8} {:>6}",
+                "Cohort", "Period", "Rel.Time", "Estimate", "SE", "t", "P>|t|", "N"
             )?;
-            for eff in &self.event_study {
-                let marker = if eff.key == 0 { " *" } else { "" };
+            for c in &self.cohort_time_effects {
                 writeln!(
                     f,
-                    "{:>8}{} {:>12.4} {:>10.4} {:>12.4} {:>12.4}",
-                    eff.key, marker, eff.estimate, eff.std_error, eff.ci_lower, eff.ci_upper
+                    "{:>7} {:>7} {:>9} {:>10.4} {:>9.4} {:>7.2} {:>8.4} {:>6}",
+                    c.cohort,
+                    c.time,
+                    c.rel_time,
+                    c.estimate,
+                    c.std_error,
+                    c.t_stat,
+                    c.p_value,
+                    c.n_treated
                 )?;
             }
-            writeln!(f, "\n  * Treatment onset (relative time = 0)")?;
-        }
-
-        // Cohort effects
-        if !self.cohort_avg.is_empty() && self.cohort_avg.len() <= 10 {
-            writeln!(f, "\n{:-<70}", "")?;
-            writeln!(f, "Cohort Average Effects")?;
-            writeln!(f, "{:-<70}", "")?;
+        } else {
             writeln!(
                 f,
-                "{:>10} {:>12} {:>10} {:>12} {:>12}",
-                "Cohort", "Estimate", "SE", "95% CI Lo", "95% CI Hi"
+                "{} cohort-period effects (see cohort_time_effects in the JSON output)",
+                self.cohort_time_effects.len()
             )?;
-            for eff in &self.cohort_avg {
-                writeln!(
-                    f,
-                    "{:>10} {:>12.4} {:>10.4} {:>12.4} {:>12.4}",
-                    eff.key, eff.estimate, eff.std_error, eff.ci_lower, eff.ci_upper
-                )?;
+        }
+
+        writeln!(f, "\n{:-<70}", "")?;
+        write!(f, "{}", self.aggregation_text(EtwfeAggregation::Simple))?;
+        for which in [
+            EtwfeAggregation::Event,
+            EtwfeAggregation::Group,
+            EtwfeAggregation::Calendar,
+        ] {
+            if !self.aggregation(which).is_empty() {
+                writeln!(f)?;
+                write!(f, "{}", self.aggregation_text(which))?;
             }
         }
 
-        writeln!(f, "\nR-squared: {:.4}", self.r_squared)?;
+        let notes = notes_text(self);
+        if !notes.is_empty() {
+            writeln!(f)?;
+            write!(f, "{notes}")?;
+        }
         if let Some(note) = self.missing.note() {
             writeln!(f)?;
             writeln!(f, "Missing values: {note}")?;
         }
-
         Ok(())
     }
 }
@@ -650,6 +753,7 @@ pub fn run_etwfe(
         overall,
         calendar,
         confidence_level: config.confidence_level,
+        dropped_from: spec.dropped_from,
     })
 }
 
@@ -1974,12 +2078,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_etwfe_recovers_cohort_specific_effects() {
-        // Validate that ETWFE correctly recovers cohort-specific treatment effects.
-        // This is the key advantage of ETWFE over naive TWFE: it allows
-        // heterogeneous effects across cohorts without bias.
+    fn test_etwfe_cohort_average_recovers_dgp() {
+        // etwfe(ivar = uid, vcov = ~uid) on this fixture: 1.99372 and 5.00763 (truth 2, 5)
         let (dataset, true_atts) = create_validation_etwfe_panel();
-
         let result = run_etwfe(
             &dataset,
             "y",
@@ -1991,99 +2092,50 @@ mod tests {
             None,
         )
         .unwrap();
-
         assert_eq!(result.n_cohorts, 2, "Should have 2 treatment cohorts");
         assert_eq!(result.n_periods, 7, "Should have 7 periods");
-
-        // Check cohort average effects
+        assert_eq!(result.cohort_avg.len(), 2);
         for avg in &result.cohort_avg {
-            if let Some(&true_att) = true_atts.get(&avg.key) {
-                assert!(
-                    (avg.estimate - true_att).abs() < 1.0,
-                    "Cohort {} avg effect should be ~{:.1}, got {:.4}",
-                    avg.key,
-                    true_att,
-                    avg.estimate
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_validate_etwfe_att_positive_with_positive_treatment() {
-        // Validate that the overall ATT is positive when the DGP has
-        // strictly positive treatment effects.
-        let (dataset, _true_atts) = create_validation_etwfe_panel();
-
-        let result = run_etwfe(
-            &dataset,
-            "y",
-            "unit",
-            "time",
-            "treat",
-            "first_treat",
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert!(
-            result.att_simple > 0.0,
-            "Simple ATT should be positive, got {:.4}",
-            result.att_simple
-        );
-        assert!(
-            result.att_weighted > 0.0,
-            "Weighted ATT should be positive, got {:.4}",
-            result.att_weighted
-        );
-    }
-
-    #[test]
-    fn test_validate_etwfe_event_study_pattern() {
-        // Validate that the event study shows the expected pattern:
-        // - Pre-treatment (rel_time < 0): effects near 0
-        // - Post-treatment (rel_time >= 0): positive effects
-        let (dataset, _true_atts) = create_validation_etwfe_panel();
-
-        let result = run_etwfe(
-            &dataset,
-            "y",
-            "unit",
-            "time",
-            "treat",
-            "first_treat",
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert!(
-            !result.event_study.is_empty(),
-            "Event study should have entries"
-        );
-
-        // Post-treatment effects should be meaningfully positive
-        let post_effects: Vec<&AggregatedEffect> =
-            result.event_study.iter().filter(|e| e.key >= 0).collect();
-
-        assert!(
-            !post_effects.is_empty(),
-            "Should have post-treatment event study effects"
-        );
-
-        for e in &post_effects {
+            let truth = true_atts[&avg.key];
             assert!(
-                e.estimate > -1.0,
-                "Post-treatment event study at e={} should not be strongly negative, got {:.4}",
-                e.key,
-                e.estimate
+                (avg.estimate - truth).abs() < 0.02,
+                "cohort {}: {} vs {truth}",
+                avg.key,
+                avg.estimate
             );
         }
     }
 
     #[test]
-    fn test_validate_etwfe_heterogeneous_vs_homogeneous() {
+    fn test_etwfe_event_study_recovers_dgp() {
+        // event e = 0..2: cohorts 3 and 5 (2 and 5, equal sizes); e = 3, 4: cohort 3 only
+        let (dataset, _) = create_validation_etwfe_panel();
+        let result = run_etwfe(
+            &dataset,
+            "y",
+            "unit",
+            "time",
+            "treat",
+            "first_treat",
+            None,
+            None,
+        )
+        .unwrap();
+        let got: Vec<(i64, f64)> = result
+            .event_study
+            .iter()
+            .map(|e| (e.key, e.estimate))
+            .collect();
+        let truth = [(0, 3.5), (1, 3.5), (2, 3.5), (3, 2.0), (4, 2.0)];
+        assert_eq!(got.len(), truth.len());
+        for ((k, e), (tk, t)) in got.iter().zip(truth) {
+            assert_eq!(*k, tk);
+            assert!((e - t).abs() < 0.02, "e = {k}: {e} vs {t}");
+        }
+    }
+
+    #[test]
+    fn test_etwfe_heterogeneous_vs_homogeneous_recovers_dgp() {
         // Validate that ETWFE produces unbiased estimates under treatment
         // effect heterogeneity. Compare results from a heterogeneous DGP
         // (cohort 3 -> ATT=2, cohort 5 -> ATT=5) against a homogeneous
@@ -2159,9 +2211,9 @@ mod tests {
         )
         .unwrap();
 
-        // Homogeneous ATT should be close to 3.5
+        // etwfe on the fixtures: 3.49894 (truth 3.5) and 3.12394 (truth 3.125)
         assert!(
-            (result_hom.att_simple - homogeneous_att).abs() < 1.5,
+            (result_hom.att_simple - homogeneous_att).abs() < 0.02,
             "Homogeneous ATT should be ~{}, got {:.4}",
             homogeneous_att,
             result_hom.att_simple
@@ -2169,14 +2221,14 @@ mod tests {
 
         // Heterogeneous ATT should be between the min and max true ATTs (2 and 5)
         assert!(
-            result_het.att_simple > 0.5 && result_het.att_simple < 7.0,
-            "Heterogeneous ATT should be in (0.5, 7.0), got {:.4}",
+            (result_het.att_simple - 3.125).abs() < 0.02,
+            "Heterogeneous ATT should be ~3.125, got {:.4}",
             result_het.att_simple
         );
     }
 
     #[test]
-    fn test_validate_etwfe_structural_counts() {
+    fn test_etwfe_structural_counts() {
         // Validate structural properties of the ETWFE result.
         let (dataset, _) = create_validation_etwfe_panel();
 
@@ -3235,5 +3287,44 @@ mod tests {
                 assert!(close(structured.overall.std_error, dense.overall.std_error));
             }
         }
+    }
+
+    #[test]
+    fn test_etwfe_display_reports_what_was_estimated() {
+        let ds = panel_csv("etwfe_panel");
+        let text = fit(&ds, Some(&["xc"]), spec(ControlGroup::Never)).to_string();
+        for line in [
+            "Control group: Never-Treated (cgroup = never); reference group: never treated (35 units)",
+            "Reference period (tref): 1",
+            "Standard errors: clustered by unit (120 clusters; CR1 as fixest), t with 119 df",
+            "Absorbed by the unit and period effects: xc, first_treat::4:xc, first_treat::6:xc, first_treat::8:xc",
+            "ATT (emfx simple",
+            "Event Study (emfx event",
+            "(reference)",
+            "Cohort Averages (emfx group)",
+            "Period Averages (emfx calendar)",
+        ] {
+            assert!(text.contains(line), "missing {line:?} in\n{text}");
+        }
+        assert!(!text.contains("Simple Average") && !text.contains("Weighted Average"));
+        let mut iid = EtwfeConfig::default();
+        iid.vcov = EtwfeVcov::Iid;
+        let text = fit(&ds, None, iid).to_string();
+        assert!(
+            text.contains("Standard errors: iid, t with 824 df"),
+            "{text}"
+        );
+        let text = fit(&all_treated_panel(), None, EtwfeConfig::default()).to_string();
+        assert!(
+            text.contains("reference group: cohort 8 (periods from 8 dropped)"),
+            "{text}"
+        );
+        let mut ant = EtwfeConfig::default();
+        ant.anticipation = 1;
+        let text = fit(&ds, None, ant).to_string();
+        assert!(
+            text.contains("Anticipation: 1 period(s); cohort g is treated from g - 1"),
+            "{text}"
+        );
     }
 }

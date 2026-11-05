@@ -204,6 +204,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
 | `generated/vecm_denmark.csv` | 55 × 4 (LRM, LRY, IBO, IDE) | `vecm_denmark` | `r/cases/ts_vecm.R` | `urca::denmark`, the four model columns |
 | `generated/vecm_sim3.csv` | 250 × 3 (x1, x2, x3) | `vecm_sim3` | `r/cases/ts_vecm.R` | seed 20261101 |
+| `generated/etwfe_panel.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_staggered` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8/never (0), time-invariant control xc, treat the absorbing treatment indicator |
+| `generated/etwfe_panel_unbalanced.csv` | 923 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, `etwfe_panel` without year 3 of every 7th unit and years 1-2 of every 11th |
+| `generated/etwfe_panel_all_treated.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8, no never-treated unit |
 
 ## Adding a dataset
 
