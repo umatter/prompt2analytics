@@ -506,7 +506,7 @@ impl fmt::Display for MedflexResult {
             "Effect",
             "Estimate",
             "Std.Err",
-            &format!("{:.0}% CI", self.confidence_level * 100.0),
+            format!("{:.0}% CI", self.confidence_level * 100.0),
             "p-value"
         )?;
         writeln!(f, "{}", "─".repeat(70))?;
