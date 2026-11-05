@@ -1,8 +1,9 @@
 # Regression Discontinuity (rdrobust): sharp RD with CCT bias correction
 
 **Status:** R-pinned at fixed bandwidths (registry `validation/methods/causal_rd.json`, id
-`rd_sharp`), with one known deviation: the bandwidths p2a selects when none are given are
-its own (finding CAUS-28).
+`rd_sharp`) and at selected bandwidths: when h is not given, h and b are `rdrobust::rdbwselect`'s
+(registry `validation/methods/causal_rdbw.json`, ids `rd_bwselect` and `rd_bwselect_fuzzy`;
+section "Bandwidth selection (rdbwselect)" below).
 
 ## Method and reference
 
@@ -13,15 +14,17 @@ its own (finding CAUS-28).
 Calonico, Cattaneo & Titiunik (2014), "Robust Nonparametric Confidence Intervals for
 Regression-Discontinuity Designs", *Econometrica* 82(6), 2295-2326.
 
-p2a functions: `run_rd` (sharp), `rd_bandwidth` (bandwidths only), and the per-cutoff fits of
-`run_rd_multi` (`validation/econometrics/rdmulti.md`).
+p2a functions: `run_rd` (sharp), `rd_bandwidth` and `rd_bandwidth_with` (bandwidths only),
+`econometrics::rd_bwselect::{rdbwselect, rdbwselect_all}` (the selector on slices), and the
+per-cutoff fits of `run_rd_multi` (`validation/econometrics/rdmulti.md`).
 
 ## What p2a computes
 
 For given bandwidths, `run_rd` computes what `rdrobust()` 4.0.0 computes. Bandwidths are given
 as `RdConfig.h` and `RdConfig.b`, and `h_right`/`b_right` when the right side differs (rdrobust
-`h = c(h_l, h_r)`). Without `b`, `b = rho * h` with `rho = 1`, as rdrobust does when only `h`
-is given. The order is `p` (default 1), and the bias-correction order `q` (default `p + 1`)
+`h = c(h_l, h_r)`). Without `b`, `b = h / rho` with `rho = 1` by default, as rdrobust does when
+only `h` is given (`rho` is rdrobust's h/b; before WP20 p2a documented it as b/h). Without `h`,
+both are selected (next section). The order is `p` (default 1), and the bias-correction order `q` (default `p + 1`)
 must exceed `p`, as rdrobust requires.
 
 Per side s (left: x < c; right: x >= c), with bandwidths (h, b):
@@ -66,8 +69,12 @@ p-values are `2 Φ(-|est / se|)` (upper tail); a zero SE gives p = 0 for a nonze
 as R's `2 * pnorm(-Inf)`, and p = 1 for a zero one, and the printed z is `est / se` (`inf`).
 `bias = tau_cl - tau_bc`. `n_eff_left/right` are `N_h`, `n_b_left/right` are `N_b`, and
 `coef_left/right` are `beta_p` on each side. `significance` follows the robust p-value.
-`bandwidth_given` is true when `h` was given, and the printed `Bandwidth Method:` line then
-reads `Manual (h given by the caller)` (rdrobust's "Manual") instead of the selector's name.
+`h_origin` and `b_origin` record where the bandwidths came from (`Selected`, `UserSupplied`, or
+`RhoTimesH` for b = h / rho), `bandwidth_given` is true when `h` was given, and the printed
+`Bandwidth source:` line says so (`RdResult::bandwidth_label()`), for example
+`h and b selected by mserd (MSE-optimal, one common bandwidth), as rdrobust::rdbwselect` or
+`h user-supplied; b = 1.0000 h (rho)`. Warnings print as `Warning: <text>` lines, and the
+`Missing values:` line stays last.
 
 The cost per side is O(m log m) for the sort, O(m (q + 1)²) for the fits and O(m + B · nnmatch)
 for the nearest-neighbour residuals (B distinct values of x).
@@ -136,8 +143,9 @@ on continuous, tied, signed-zero and tiny inputs, and
 right-side bandwidth checks. `test_rd_zero_se_gives_p_zero_for_a_nonzero_jump` fits a column
 that is 0 left and 1 right of the cutoff (nearest-neighbour residuals and SEs 0, every p-value
 0, `inf` printed as z, and the same for the first stage of a fuzzy fit).
-`test_rd_display_names_a_given_bandwidth` checks the `Bandwidth Method:` line and
-`bandwidth_given` with and without `h`.
+`test_rd_display_names_a_given_bandwidth` checks the `Bandwidth source:` line and
+`bandwidth_given` with and without `h`, and that a result serialised without the origin fields
+reads as selected.
 
 Tolerances (`validation/README.md`, n = 1000): coefficients 1e-8 relative, SEs, statistics
 and CI bounds 1e-6 relative, p-values 1e-6 relative plus 1e-12 absolute, counts exact. The
@@ -174,12 +182,13 @@ and two `x` cells inside h = 0.3 set to NA (0-based rows `na_rows_y` = [10, 32] 
 
 ## Fuzzy RD
 
-**Status:** R-pinned at fixed bandwidths (registry id `rd_fuzzy`, deviation CAUS-28 for the
-bandwidths p2a selects itself).
+**Status:** R-pinned at fixed bandwidths (registry id `rd_fuzzy`) and at rdbwselect's fuzzy
+bandwidths (registry id `rd_bwselect_fuzzy`).
 
 `run_fuzzy_rd(dataset, y, x, t, c, config)` computes what `rdrobust(y, x, c, fuzzy = t)`
-computes. The bandwidths are resolved once (when `h` is not given p2a's selector runs on the
-outcome), and the outcome and the treatment are fitted together: `D = [y, t]` goes through the
+computes. The bandwidths are resolved once (when `h` is not given, rdbwselect selects them for
+the fuzzy design, with the treatment, as `rdbwselect(fuzzy = )`), and the outcome and the
+treatment are fitted together: `D = [y, t]` goes through the
 steps above with the same matrices, so both stages share every bandwidth and window. With the
 conventional jumps `tau_Y`, `tau_T` and the bias-corrected ones `tau_Y,bc`, `tau_T,bc`:
 
@@ -229,13 +238,137 @@ Tests (registered under `rd_fuzzy`):
   at h = b = 0.4 it does not.
 
 Not registered (no R value): `test_fuzzy_rd_one_bandwidth_for_both_stages` checks that the
-selector runs once, on the outcome, and that both stages use its bandwidths, on a curved design
-(n = 2000, x uniform on [-1, 1], take-up 0.2 / 0.8, `y = 0.5 + 10 x² + d + N(0, 0.3²)`) where
-the selector run on each column alone picks h = 0.4241 for the outcome and 0.4996 (the cap, a
-quarter of the range) for the treatment; the test first asserts that the two differ, so two
-separate selector runs fail it. `test_fuzzy_rd_degenerate_first_stage_names_the_jump`: a
+selection runs once, with the treatment, and that both stages use its bandwidths, on a curved
+design (n = 2000, x uniform on [-1, 1], take-up 0.2 / 0.8, `y = 0.5 + 10 x² + d + N(0, 0.3²)`).
+The selector run on each column alone picks different bandwidths (the test asserts that first,
+so two separate selector runs fail it), and the fuzzy bandwidths equal
+`rd_bandwidth_with(.., Some("treatment"), ..)`'s and differ from the sharp outcome's (rdrobust:
+h 0.64194 fuzzy, 0.53810 sharp on this design). `test_fuzzy_rd_degenerate_first_stage_names_the_jump`: a
 treatment without a jump (|tau_T| < 1e-10) is an `InvalidSpecification` that names the jump,
 the bound and the column.
+
+## Bandwidth selection (rdbwselect)
+
+When `h` is not given, `run_rd`, `run_fuzzy_rd`, `rd_bandwidth`, `rd_bandwidth_with` and the
+per-cutoff fits of `run_rd_multi` select h and b as `rdrobust::rdbwselect` 4.0.0
+(`econometrics::rd_bwselect`). The selector is a port of rdbwselect, because the plug-in MSE and
+CER bandwidths (Calonico, Cattaneo & Titiunik 2014; Calonico, Cattaneo & Farrell 2020) are
+estimators defined by their algorithm: a different plug-in gives a different h. It is a port for
+that reason, not for exactness (rule 4).
+
+All ten `bwselect` choices are available: `mserd` (the default), `msetwo`, `msesum`, `msecomb1`,
+`msecomb2`, `cerrd`, `certwo`, `cersum`, `cercomb1`, `cercomb2`, with the options `p`, `q`,
+`kernel`, `vce` (`nn` with `nnmatch`, `hc0`-`hc3`) and `scaleregul`.
+
+### Algorithm
+
+The data are sorted by x (ties keep their row order, as R's `order()`); at least 20
+observations, at least 2 on each side and a cutoff strictly inside the range of x are required.
+
+1. Pilot bandwidth `c_bw = min(C_c · min(sd(x), IQR(x)/1.349) · M^(-1/5), bw_max)` with
+   `C_c` = 2.576 (triangular), 2.34 (Epanechnikov), 1.843 (uniform) (`KernelType::constant()`),
+   the IQR from type-2 quantiles, M the number of distinct values of x and
+   `bw_max = max(|c - x_min|, |c - x_max|)`.
+2. Mass points: when `1 - M_s / N_s >= 0.2` on a side, a warning, and every pilot and `d`
+   bandwidth is at least the distance to the 10th distinct value on each side plus 1e-8
+   (rdrobust's `masspoints = "adjust"`, `bwcheck = 10`).
+3. Each stage `(o, nu, o_B, h_B)` per side fits a local polynomial of order o under `c_bw` (the
+   V-part: residuals, `V = (2 nu + 1) c_bw^(2 nu + 1) [invG M invG]_{nu,nu}` and the bias
+   constant `BConst = c_bw^nu [invG v]_nu` with `v = sum w R ((x - c)/c_bw)^(o+1)`) and one of
+   order `o_B` under `h_B` (the B-part: `B = sqrt(2 (o + 1 - nu)) BConst beta_B[o+1]`, and,
+   when `scaleregul > 0`, the regularisation
+   `R = scaleregul · 2 (o + 1 - nu) · 3 BConst² V_B[o+1]`). The rate is `1 / (2 o + 3)`.
+4. `d` from the order-(q+1) stage, `b` from the order-q stage under d, `h` from the order-p
+   stage under b: `(V / (B² + R))^rate`. The `rd` family uses the difference of the two sides'
+   B (`B_r - B_l`) and the sum of their V and R, `sum` the sum of the B, and `two` each side on
+   its own (limited by that side's range); `rd` and `sum` are limited by `bw_max`.
+5. `comb1` = the smaller of `rd` and `sum`; `comb2` = per side the median of `rd`, `sum` and
+   `two`. The CER variants multiply h by `N^(-p/((3+p)(3+2p)))` and keep b.
+6. Fuzzy: the residuals and B combine outcome and treatment with
+   `s = (1/tau_T, -tau_Y/tau_T²)`. A treatment constant on one side (one-sided compliance) is
+   selected as sharp, with a warning; constant on both sides with no jump is an error.
+7. A singular pilot Gram matrix gets a generalized inverse with a warning (rdrobust's `ginv`
+   fallback).
+
+`rdbwselect(method)` computes only the families the method needs and equals the
+`rdbwselect_all` row bit for bit.
+
+With a selected h, b is the selected b, unless `b` is given (used as given), `rho` is not 1
+(`b = h / rho`) or `RdConfig.rho_with_selected_h` is set (`b = h / rho`, rdrobust's `rho`).
+
+### Reference cases
+
+`validation/r/cases/causal_rdbw.R`, on `rd_sim.csv`:
+
+| Case | Calls |
+|---|---|
+| `rd_bwselect_sharp` | `rdbwselect(y, x, c = 0, all = TRUE)` for three kernels, p = 0, 1, 2, q = 3, nn (nnmatch 3, 1), hc0-hc3, scaleregul 0; `rdbwselect(ym, xm, all = TRUE)` (mass points); `rdrobust(y, x)` at selected bandwidths (`auto`, `cerrd`, `msetwo_auto`, `rho1_auto`, `noreg_auto`, `hc1_auto`, `mass_auto`, `hsel_b05`: h selected, b = 0.5); the two-cutoff `rd_multi` references (`multi_*`, `validation/econometrics/rdmulti.md`) |
+| `rd_bwselect_fuzzy` | `rdbwselect(yf, x, fuzzy = d, all = TRUE)` with nn and hc1; `rdrobust(yf, x, fuzzy = d)` with mserd and cerrd; one-sided compliance (`d · 1{x >= 0}`) |
+
+### Decisive values
+
+R 4.3.3, rdrobust 4.0.0 (h left, h right, b left, b right):
+
+| key | values |
+|---|---|
+| `tri_p1_nn_mserd` | 0.2641578906068817, 0.2641578906068817, 0.44316662165001586, 0.44316662165001586 |
+| `tri_p1_nn_msetwo` | 0.32800888370570924, 0.2595067490465846, 0.49801815158674556, 0.4463008301189936 |
+| `tri_p1_nn_msesum` | 0.33622915139350157, 0.33622915139350157, 0.5550546979278196, 0.5550546979278196 |
+| `tri_p1_nn_cerrd` | 0.18700946506694818, 0.18700946506694818, 0.44316662165001586, 0.44316662165001586 |
+| `tri_p1_noreg_mserd` | 0.5485103365852835, 0.5485103365852835, 0.7795037760203216, 0.7795037760203216 |
+| `mass_tri_p1_nn_mserd` | 0.3481967168319954, 0.3481967168319954, 0.5255227559816472, 0.5255227559816472 |
+| `fuzzy_tri_p1_nn_mserd` | 0.3093162573254204, 0.3093162573254204, 0.4670403075294596, 0.4670403075294596 |
+| `fuzzy_onesided_mserd` | 0.39295794749321916, 0.39295794749321916, 0.595187674349167, 0.595187674349167 |
+
+rdrobust at the selected bandwidths:
+
+| prefix | coef_conv | coef_bc | se_conv | se_robust | N_h |
+|---|---|---|---|---|---|
+| `auto` (mserd) | 0.5961729802101011 | 0.63490809474914 | 0.13221211158258625 | 0.15747387694470696 | [145, 124] |
+| `cerrd` | 0.5928564790312151 | 0.6145521635455264 | 0.16124396900089982 | 0.1759124765014058 | [100, 93] |
+| `noreg_auto` | 0.5033576237242512 | 0.5469294917626308 | 0.09039351460471937 | 0.11129578643674495 | [280, 252] |
+| `mass_auto` | 0.2162245289635426 | 0.1969659600101431 | 0.1208497993290264 | 0.14607825008938477 | [183, 158] |
+| `fuzzy_auto` | 0.6361431457715485 | 0.6472894814075842 | 0.25990692599904947 | 0.3138183211206268 | [166, 142] |
+
+Before WP20 every method returned h = b = 0.49912596890000005 on `rd_sim` (a quarter of the
+range: an ad-hoc formula whose cap bound on ordinary data).
+
+### Tests and tolerances
+
+Registered (`causal_rdbw.json`):
+
+- `test_validate_rdbwselect_all_methods` (`econometrics::rd_bwselect::tests`): ten rows for each
+  of 13 option blocks, single method = all row, counts, the mass-point and range-limit warnings.
+- `test_validate_rdbwselect_fuzzy`: ten rows with nn and hc1, one-sided compliance.
+- `test_validate_rd_auto_bandwidth` (`econometrics::rd::tests`): `run_rd` at selected bandwidths
+  for every prefix above, the origins, `rho = 2` (b = h / 2), `rd_bandwidth` and
+  `rd_bandwidth_with`.
+- `test_validate_rd_fuzzy_auto_bandwidth`: `run_fuzzy_rd` with mserd and cerrd, the first
+  stage, `rd_bandwidth_with` with a treatment, one-sided compliance.
+
+Not registered (no R value): `test_rdbwselect_scale_equivariant` (x · 1000 and y · 1e6 within
+1e-9 relative), `test_rd_cer_differs_from_mse` (CER h = MSE h · N^(-p/((3+p)(3+2p))), b equal,
+for every pair and p = 0, 1, 2), `test_rd_bandwidth_label_names_the_source`,
+`test_rdbwselect_rejects_degenerate_inputs`, `test_rdbwselect_respects_budget_and_allocation_ceiling`,
+`test_rd_rejects_invalid_scaleregul` and the option-parsing tests.
+
+Tolerances: bandwidths and coefficients 1e-8 relative (n = 1000), SEs, statistics and CI 1e-6,
+p-values 1e-6 relative plus 1e-12 absolute, counts exact. A line-by-line R transcription of the
+selector agrees with rdbwselect to at most 2.0e-13 relative over all ten methods and every
+option block.
+
+### Options of rdbwselect not available in p2a
+
+`covs`, `cluster`, `weights`, `deriv`, `stdvars`, `sharpbw`, `masspoints` other than
+`"adjust"`, a user `bwcheck`, and `bwrestrict = FALSE`. rdbwselect's defaults for these are
+built in.
+
+### p2a additions
+
+- Warnings where rdrobust is silent: a bandwidth that reached the data-range limit, one-sided
+  compliance, and a generalized inverse in a pilot fit. rdrobust's mass-point warning is kept.
+- `RdConfig.rho_with_selected_h` gives rdrobust's `rho` behaviour with a selected h.
+- A b given with a selected h is used (rdrobust ignores it).
 
 ## MCP and CLI
 
@@ -276,10 +409,14 @@ rows with missing values ends the text output with a `Note:` line.
   `test_cli_causal_rd_missing_value_note` (one blank `y` field gives
   `Note: 1 of 1000 rows dropped because of missing values (y: 1)` and `missing.n_dropped = 1`).
 
+Bandwidth selection options: MCP `rd_estimate`, `rd_fuzzy` and `rd_bw` take `bwselect` (the
+ten names), and the `scaleregul` request fields and flags arrive with WP55/WP61. Until then MCP
+`rd_multi` and CLI `fuzzy-rd` select with `mserd`, and every selection uses `scaleregul = 1`
+outside the library.
+
 ## Limits
 
-- Bandwidth selection is p2a's own MSE-type selector, not `rdbwselect` (CAUS-28, a registry
-  deviation); every reference case passes h and b.
-- No covariates, clusters, weights or derivatives (`deriv`).
-- p2a's `rho` is b/h, rdrobust's is h/b; both default to b = h.
+- No covariates, clusters, weights or derivatives (`deriv`), in the estimator or the selector.
+- `rho` is rdrobust's h/b (b = h / rho); the default rho = 1 gives b = h for a given h.
 - `q > p` is required, as in rdrobust.
+- A b given with a selected h is used; rdrobust ignores it (registry deviation, CAUS-28).
