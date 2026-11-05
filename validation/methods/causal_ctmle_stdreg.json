@@ -20,6 +20,27 @@
       "tolerance": "n = 300: estimates and predictions 1e-8, SE, CI and z 1e-6, p 1e-6 relative / 1e-12 absolute (glm epsilon 1e-14 on both sides); default-control values within Tol::iterative(1e-8) of the tight values; the rescaling range exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "causal_ctmle",
+      "name": "C-TMLE: greedy selection of the propensity covariates on a V-fold risk (RSS, VarIC, penalised RSS)",
+      "category": "econometrics",
+      "reference": "Gruber & van der Laan (2010) criteria as ctmle::ctmleDiscrete names them (CV likelihood, varIC.cv); p2a's fixed-initial-Q forward / backward / prespecified algorithm written out in R; ctmle 0.1.2 (installed) is not used as a pin because it updates Q between clever covariates (WP29-9)",
+      "doc": "validation/econometrics/ctmle.md",
+      "cases": ["ctmle_cv"],
+      "tests": [
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_risk_uses_training_fluctuation",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_logit_rss",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_linear_rss",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_backward_and_prespecified",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_prespecified_order_in_arrays_path",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_criteria_varic",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_criteria_penrss"
+      ],
+      "quantities": ["fold RSS, fold var(IC), fold epsilon of one candidate", "criterion and its SE per step (RSS, VarIC, PenRSS)", "CV RSS and CV var(IC) per step", "selection order, selected step and covariates (CV minimum, one-SE)", "ATE, SE, epsilon, CI, p of the selected model", "ATE and SE per step"],
+      "tolerance": "n = 300: criteria, estimates and fold values 1e-8 relative (glm epsilon 1e-14 on both sides; smallest selection gap 2.4e-5), selections exact, p 1e-6 relative / 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

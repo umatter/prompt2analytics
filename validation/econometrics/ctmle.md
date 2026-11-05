@@ -55,10 +55,14 @@ result
 ```
 
 **Rust Tests**:
-- `test_validate_ctmle_ate_recovery`
-- `test_validate_ctmle_selection_path_properties`
-- `test_validate_ctmle_influence_curve`
-- `test_validate_ctmle_propensity_bounds`
+- `test_ctmle_ate_recovers_dgp`
+- `test_ctmle_selection_path_properties`
+- `test_ctmle_se_is_ic_variance`
+- `test_ctmle_propensity_bounds`
+- R-pinned (case `ctmle_cv`): `test_validate_ctmle_cv_logit_rss`, `test_validate_ctmle_cv_linear_rss`,
+  `test_validate_ctmle_cv_backward_and_prespecified`, `test_validate_ctmle_criteria_varic`,
+  `test_validate_ctmle_criteria_penrss`, `test_validate_ctmle_cv_risk_uses_training_fluctuation`,
+  `test_validate_ctmle_prespecified_order_in_arrays_path`
 
 ## Tolerance Levels
 

@@ -8,17 +8,33 @@
 //! outcome model, meaning covariates are selected based on how well they improve the
 //! targeting step, not just how well they predict treatment.
 //!
-//! # Algorithm (Discrete C-TMLE with Forward Selection)
+//! # Algorithm (greedy selection of g with a fixed initial Q)
 //!
-//! 1. **Fit initial outcome model Q(A,W)** using all covariates
-//! 2. **Start with empty propensity model** g() (intercept only)
-//! 3. **For each candidate covariate** W_j not yet in g:
-//!    - Fit g with current covariates + W_j
-//!    - Compute TMLE with this g
-//!    - Use V-fold CV to evaluate the targeting step
-//! 4. **Add covariate** that minimizes CV criterion (RSS or variance of IC)
-//! 5. **Stop when** CV criterion no longer improves (or max covariates reached)
-//! 6. **Return final TMLE estimate** with selected covariates
+//! 1. **Fit the initial outcome model Q(A,W)** on all candidate covariates (a logistic glm,
+//!    or least squares for `CTmleQModel::Linear`), on the full data and on the training rows
+//!    of every fold (folds: observation `i` is in fold `i mod V`).
+//! 2. **Build a path of propensity models g.** Forward: start from the intercept-only g and
+//!    add, at every step, the candidate with the smallest CV criterion. Backward: start from
+//!    all candidates and remove one per step. Prespecified: add the covariates in exactly the
+//!    given order (an empty list means the listed order).
+//! 3. **CV criterion of a candidate g** (the honest V-fold risk): for every fold v, Q, g and
+//!    the fluctuation epsilon (one clever covariate H = A/g - (1-A)/(1-g)) are fitted on the
+//!    training folds and the loss is evaluated on fold v.
+//!    - `RSS`: the sum over folds of the validation-fold RSS (ctmle's likelihood), SE
+//!      sqrt(V) sd(fold RSS);
+//!    - `VarIC`: the mean over folds of the validation-fold variance of the influence curve
+//!      (ctmle's varIC.cv), SE sd(fold varIC) / sqrt(V);
+//!    - `PenRSS`: RSS + penalty_factor * ln(n) * k for a g with k covariates, SE as RSS.
+//! 4. **Select a step** (CV minimum, the one-SE rule, or a fixed number of covariates) and
+//!    report the full-data TMLE with that g.
+//!
+//! Deviations from `ctmle::ctmleDiscrete` 0.1.2: the initial Q is fixed (ctmle updates Q
+//! between clever covariates); the initial Q is a parametric glm / lm on all candidates, not
+//! SuperLearner; the folds are deterministic (`i mod V`); g is fitted on the training folds
+//! (ctmle fits g on all rows); a continuous outcome is fitted with the linear fluctuation
+//! (`CTmleQModel::Linear`) or, under the logistic Q, rescaled once to [0, 1] by its range
+//! (the criteria are then on that scale, the estimates on the original scale); the
+//! propensity bounds are symmetric.
 //!
 //! # References
 //!
@@ -38,7 +54,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use p2a_core::econometrics::{run_ctmle, CTmleConfig, StoppingRule, SelectionOrder};
+//! use p2a_core::econometrics::{ctmle, CTmleConfig, StoppingRule, SelectionOrder};
 //!
 //! let config = CTmleConfig {
 //!     n_folds: 5,
@@ -48,22 +64,29 @@
 //!     ..Default::default()
 //! };
 //!
-//! let result = run_ctmle(&dataset, "outcome", "treatment", &["x1", "x2", "x3", "x4"], config)?;
+//! let result = ctmle(&dataset, "outcome", "treatment", &["x1", "x2", "x3", "x4"], config)?;
 //! println!("ATE: {:.4} (SE: {:.4})", result.ate, result.se);
-//! println!("Selected covariates: {:?}", result.selected_covariates);
+//! println!("Selected covariates: {:?}", result.selected_covariate_names);
 //! ```
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::tmle::{
+    FluctuationForm, GlmControl, NuisanceFit, QModel, QPredictions, ate_and_ic, bound_scores,
+    check_binary_treatment, fit_outcome, fit_treatment, fluctuate, glm_convergence, outcome_scale,
+    prefixed, sample_variance, wald95,
+};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::options::Choices;
 use crate::resource;
-use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
+use crate::traits::convergence::{ResultNotes, notes_text};
+use crate::traits::estimator::SignificanceLevel;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -71,19 +94,20 @@ use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 /// Stopping rule for covariate selection in C-TMLE.
 ///
-/// Controls when to stop adding covariates to the propensity score model.
+/// Controls which step of the selection path is reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StoppingRule {
-    /// Stop at the model with minimum CV criterion.
+    /// The step with the minimum CV criterion (the first one on ties).
     /// This is the default and most commonly used approach.
     #[default]
     CVMinimum,
 
-    /// One-standard-error rule: Select the simplest model within one SE of the minimum.
-    /// This provides more regularization than CVMinimum, often preferred in practice.
+    /// One-standard-error rule: the step with the fewest covariates whose criterion is
+    /// within one SE of the minimum.
     OneSE,
 
-    /// Stop after adding exactly k covariates.
+    /// Forward and prespecified selection stop after k additions, backward elimination after
+    /// reaching k covariates; the last step is selected.
     MaxCovariates(usize),
 }
 
@@ -97,20 +121,79 @@ impl fmt::Display for StoppingRule {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RuleKind {
+    CvMinimum,
+    OneSe,
+    MaxCovariates,
+}
+
+const RULE_CHOICES: Choices<RuleKind> = Choices {
+    option: "stopping_rule",
+    values: &[
+        (
+            &["cv_minimum", "cvmin", "cv_min", "minimum", "min"],
+            RuleKind::CvMinimum,
+        ),
+        (
+            &["one_se", "onese", "1se", "one_standard_error"],
+            RuleKind::OneSe,
+        ),
+        (
+            &["max_covariates", "maxcovariates", "max"],
+            RuleKind::MaxCovariates,
+        ),
+    ],
+};
+
+impl StoppingRule {
+    /// Parse a user string; `max_covariates` needs the number of covariates to keep.
+    pub fn parse_with(s: &str, max_covariates: Option<usize>) -> EconResult<StoppingRule> {
+        Ok(match RULE_CHOICES.parse(s)? {
+            RuleKind::CvMinimum => StoppingRule::CVMinimum,
+            RuleKind::OneSe => StoppingRule::OneSE,
+            RuleKind::MaxCovariates => match max_covariates {
+                Some(k) => StoppingRule::MaxCovariates(k),
+                None => {
+                    return Err(EconError::InvalidSpecification {
+                        message: "stopping_rule 'max_covariates' needs max_covariates (the \
+                                  number of covariates to keep)"
+                            .to_string(),
+                    });
+                }
+            },
+        })
+    }
+
+    /// "cv_minimum | one_se | max_covariates", for CLI help and tool descriptions.
+    pub fn help() -> String {
+        RULE_CHOICES.help()
+    }
+}
+
+impl std::str::FromStr for StoppingRule {
+    type Err = EconError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        StoppingRule::parse_with(s, None)
+    }
+}
+
 /// Order for covariate selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SelectionOrder {
-    /// Forward selection: Start with empty model, add covariates greedily.
-    /// This is the default and most commonly used approach.
+    /// Forward selection: start from the intercept-only g and add, per step, the candidate
+    /// with the best criterion. This is the default.
     #[default]
     Forward,
 
-    /// Backward elimination: Start with full model, remove covariates greedily.
-    /// Can be computationally expensive but may find different solutions.
+    /// Backward elimination: start from all candidates and remove, per step, the candidate
+    /// whose removal gives the best criterion.
     Backward,
 
-    /// Prespecified order: Add covariates in the user-specified order.
-    /// Useful when domain knowledge suggests a preferred ordering.
+    /// Prespecified order: covariates are added in exactly this order, one per step; the path
+    /// ends when the list is used up. An empty list means the order in which the covariates
+    /// are listed (ctmle's preOrder default). Indices must be below the number of candidates
+    /// and distinct.
     Prespecified(Vec<usize>),
 }
 
@@ -119,27 +202,70 @@ impl fmt::Display for SelectionOrder {
         match self {
             SelectionOrder::Forward => write!(f, "Forward"),
             SelectionOrder::Backward => write!(f, "Backward"),
+            SelectionOrder::Prespecified(order) if order.is_empty() => {
+                write!(f, "Prespecified (listed order)")
+            }
             SelectionOrder::Prespecified(order) => write!(f, "Prespecified({:?})", order),
         }
     }
 }
 
-/// Cross-validation criterion for model selection.
-///
-/// Determines how candidate propensity score models are evaluated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OrderKind {
+    Forward,
+    Backward,
+    Prespecified,
+}
+
+const ORDER_CHOICES: Choices<OrderKind> = Choices {
+    option: "order",
+    values: &[
+        (&["forward", "fwd"], OrderKind::Forward),
+        (
+            &["backward", "bwd", "backward_elimination"],
+            OrderKind::Backward,
+        ),
+        (
+            &["prespecified", "preorder", "listed", "pre_ordered"],
+            OrderKind::Prespecified,
+        ),
+    ],
+};
+
+impl SelectionOrder {
+    /// "forward | backward | prespecified", for CLI help and tool descriptions.
+    pub fn help() -> String {
+        ORDER_CHOICES.help()
+    }
+}
+
+impl std::str::FromStr for SelectionOrder {
+    type Err = EconError;
+    /// "prespecified" gives the listed order (`Prespecified(vec![])`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match ORDER_CHOICES.parse(s)? {
+            OrderKind::Forward => SelectionOrder::Forward,
+            OrderKind::Backward => SelectionOrder::Backward,
+            OrderKind::Prespecified => SelectionOrder::Prespecified(Vec::new()),
+        })
+    }
+}
+
+/// Cross-validation criterion for model selection. Every criterion is computed on the
+/// validation folds of a V-fold split in which Q, g and the fluctuation are fitted on the
+/// training folds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CVCriterion {
-    /// Residual sum of squares from the targeting step.
-    /// CV-RSS = sum((Y - Q*)^2) evaluated on held-out folds.
+    /// The sum over folds of the validation-fold RSS of Q* (ctmle's likelihood); SE
+    /// sqrt(V) sd(fold RSS).
     #[default]
     RSS,
 
-    /// Variance of the influence curve.
-    /// CV-VarIC = Var(IC) evaluated on held-out folds.
+    /// The mean over folds of the validation-fold variance of the influence curve (ctmle's
+    /// varIC.cv); SE sd(fold varIC) / sqrt(V).
     VarIC,
 
-    /// Penalized RSS: RSS + penalty * number of covariates.
-    /// Adds explicit complexity penalty.
+    /// Penalized RSS: RSS + penalty_factor * ln(n) * k for a g with k covariates; SE as RSS.
     PenRSS,
 }
 
@@ -153,12 +279,38 @@ impl fmt::Display for CVCriterion {
     }
 }
 
+crate::option_enum!(
+    CVCriterion,
+    Choices {
+        option: "cv_criterion",
+        values: &[
+            (&["rss", "cv_rss", "likelihood"], CVCriterion::RSS),
+            (
+                &["varic", "var_ic", "cv_varic", "variance_ic"],
+                CVCriterion::VarIC
+            ),
+            (
+                &[
+                    "penrss",
+                    "pen_rss",
+                    "cv_penrss",
+                    "penalized_rss",
+                    "penalised_rss"
+                ],
+                CVCriterion::PenRSS
+            ),
+        ],
+    },
+    no_display
+);
+
 /// Outcome model specification for C-TMLE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CTmleQModel {
     /// Linear regression for continuous Y
     Linear,
-    /// Logistic regression for binary Y (default)
+    /// Logistic regression (default): a 0/1 outcome, a proportion in [0, 1], or a continuous
+    /// outcome rescaled to [0, 1] by its range
     #[default]
     Logistic,
 }
@@ -172,6 +324,24 @@ impl fmt::Display for CTmleQModel {
     }
 }
 
+crate::option_enum!(
+    CTmleQModel,
+    Choices {
+        option: "q_model",
+        values: &[
+            (
+                &["logistic", "logit", "binomial", "binary"],
+                CTmleQModel::Logistic
+            ),
+            (
+                &["linear", "gaussian", "continuous", "ols"],
+                CTmleQModel::Linear
+            ),
+        ],
+    },
+    no_display
+);
+
 /// Configuration for C-TMLE estimation.
 #[derive(Debug, Clone)]
 pub struct CTmleConfig {
@@ -179,8 +349,8 @@ pub struct CTmleConfig {
     /// that every fold holds at least 2 observations.
     pub n_folds: usize,
 
-    /// Maximum number of covariates to include in propensity model.
-    /// None means no limit (can include all covariates).
+    /// Only path steps with at most this many covariates can be selected; forward and
+    /// prespecified selection stop there. None means no limit.
     pub max_covariates: Option<usize>,
 
     /// Stopping rule for covariate selection.
@@ -199,18 +369,18 @@ pub struct CTmleConfig {
     /// Default: (0.025, 0.975) as recommended in ctmle package.
     pub gbound: (f64, f64),
 
-    /// Maximum iterations for logistic regression (at least 1).
+    /// `glm.fit`'s `maxit` for the logistic fits (at least 1; default 100).
     pub max_iter: usize,
 
-    /// Convergence tolerance (finite and > 0).
+    /// `glm.fit`'s `epsilon` for the logistic fits (finite and > 0; default 1e-8, R's
+    /// `glm.control` default).
     pub tolerance: f64,
 
-    /// Penalty factor for PenRSS criterion (multiplied by log(n)).
-    /// Only used when cv_criterion = PenRSS.
+    /// Used by PenRSS: RSS + penalty_factor * ln(n) * k (finite and >= 0).
     pub penalty_factor: f64,
 
-    /// Factor for early stopping.
-    /// If CV criterion is stopFactor times larger than best, stop.
+    /// Factor for early stopping (finite and > 0): the path stops when the best criterion of
+    /// a step exceeds stop_factor times the best so far (ctmle's stopFactor).
     /// Default: 1e6 (effectively disables early stopping).
     pub stop_factor: f64,
 
@@ -241,23 +411,27 @@ impl Default for CTmleConfig {
 // Result Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
+fn nan() -> f64 {
+    f64::NAN
+}
+
 /// Information about a single step in the selection path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectionStep {
     /// Index of the covariate added (or removed for backward selection).
-    /// None for the initial (intercept-only) model.
+    /// None for the initial model.
     pub covariate_index: Option<usize>,
 
     /// Name of the covariate added (if available).
     pub covariate_name: Option<String>,
 
-    /// Cross-validation criterion value at this step.
+    /// Cross-validation criterion value at this step (on the fitting scale).
     pub cv_criterion: f64,
 
     /// Standard error of CV criterion (across folds).
     pub cv_criterion_se: f64,
 
-    /// ATE estimate at this step.
+    /// ATE estimate at this step (full-data TMLE with this step's g).
     pub ate_estimate: f64,
 
     /// Standard error of ATE at this step.
@@ -265,6 +439,14 @@ pub struct SelectionStep {
 
     /// Number of covariates in the model at this step.
     pub n_covariates: usize,
+
+    /// Total validation RSS of this step's g (whatever the criterion).
+    #[serde(default = "nan")]
+    pub cv_rss: f64,
+
+    /// CV variance of the influence curve of this step's g.
+    #[serde(default = "nan")]
+    pub cv_var_ic: f64,
 }
 
 /// Result from C-TMLE estimation.
@@ -291,7 +473,8 @@ pub struct CTmleResult {
     /// Z-statistic (ATE / SE).
     pub z_stat: f64,
 
-    /// Indices of covariates selected for the propensity score model.
+    /// Indices of covariates selected for the propensity score model (in addition order;
+    /// ascending for backward elimination).
     pub selected_covariates: Vec<usize>,
 
     /// Names of covariates selected (if available).
@@ -309,7 +492,7 @@ pub struct CTmleResult {
     /// Influence curve values for each observation.
     pub influence_curve: Vec<f64>,
 
-    /// Index of the selected step (0 = intercept only).
+    /// Index of the selected step (0 = the first model of the path).
     pub selected_step: usize,
 
     /// Final propensity scores g(W) for each observation.
@@ -332,6 +515,24 @@ pub struct CTmleResult {
 
     /// Warnings generated during estimation.
     pub warnings: Vec<String>,
+
+    /// Number of candidate covariates.
+    #[serde(default)]
+    pub n_candidates: usize,
+
+    /// Epsilon of the final full-data targeting step (logit scale for the logistic Q).
+    #[serde(default)]
+    pub fluctuation_coef: f64,
+
+    /// `(min, max)` of the outcome when the logistic Q rescaled it to [0, 1]; `None` otherwise.
+    #[serde(default)]
+    pub outcome_range: Option<(f64, f64)>,
+}
+
+impl ResultNotes for CTmleResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 /// Summary of C-TMLE configuration (serializable).
@@ -344,6 +545,11 @@ pub struct CTmleConfigSummary {
     pub cv_criterion: String,
     pub q_model: String,
     pub gbound: (f64, f64),
+    #[serde(default)]
+    pub penalty_factor: f64,
+    /// The algorithm actually run.
+    #[serde(default)]
+    pub algorithm: String,
 }
 
 impl fmt::Display for CTmleResult {
@@ -377,8 +583,7 @@ impl fmt::Display for CTmleResult {
         writeln!(
             f,
             "  Selected: {} of {} candidates",
-            self.n_selected,
-            self.selection_path.len().saturating_sub(1)
+            self.n_selected, self.n_candidates
         )?;
         if !self.selected_covariate_names.is_empty() {
             writeln!(
@@ -396,11 +601,26 @@ impl fmt::Display for CTmleResult {
         )?;
         writeln!(f)?;
         writeln!(f, "Configuration:")?;
+        writeln!(f, "  Algorithm:      {}", self.config.algorithm)?;
         writeln!(f, "  CV Folds:       {}", self.config.n_folds)?;
         writeln!(f, "  Stopping Rule:  {}", self.config.stopping_rule)?;
         writeln!(f, "  Selection:      {}", self.config.order)?;
-        writeln!(f, "  CV Criterion:   {}", self.config.cv_criterion)?;
+        if self.config.cv_criterion == CVCriterion::PenRSS.to_string() {
+            writeln!(
+                f,
+                "  CV Criterion:   {} (penalty factor {})",
+                self.config.cv_criterion, self.config.penalty_factor
+            )?;
+        } else {
+            writeln!(f, "  CV Criterion:   {}", self.config.cv_criterion)?;
+        }
         writeln!(f, "  Outcome Model:  {}", self.config.q_model)?;
+        if let Some((lo, hi)) = self.outcome_range {
+            writeln!(
+                f,
+                "  Outcome:        rescaled from [{lo:.4}, {hi:.4}] to [0, 1]; criteria on that scale"
+            )?;
+        }
         writeln!(
             f,
             "  PS Bounds:      [{:.3}, {:.3}]",
@@ -409,26 +629,36 @@ impl fmt::Display for CTmleResult {
         writeln!(f)?;
 
         writeln!(f, "Selection Path:")?;
-        writeln!(f, "  Step | Covariates |   CV Risk   |    ATE    |   SE")?;
-        writeln!(f, "  -----|------------|-------------|-----------|--------")?;
+        writeln!(
+            f,
+            "  Step | Covariates |  Criterion  |  Crit. SE  |    ATE    |   SE"
+        )?;
+        writeln!(
+            f,
+            "  -----|------------|-------------|------------|-----------|--------"
+        )?;
         for (i, step) in self.selection_path.iter().enumerate() {
             let marker = if i == self.selected_step { " *" } else { "  " };
             writeln!(
                 f,
-                "  {:>4} | {:>10} | {:>11.4} | {:>9.4} | {:>6.4}{}",
-                i, step.n_covariates, step.cv_criterion, step.ate_estimate, step.ate_se, marker
+                "  {:>4} | {:>10} | {:>11.4} | {:>10.4} | {:>9.4} | {:>6.4}{}",
+                i,
+                step.n_covariates,
+                step.cv_criterion,
+                step.cv_criterion_se,
+                step.ate_estimate,
+                step.ate_se,
+                marker
             )?;
         }
         writeln!(f, "  (* = selected model)")?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
 
-        if !self.warnings.is_empty() {
+        let notes = notes_text(self);
+        if !notes.is_empty() {
             writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
+            write!(f, "{notes}")?;
         }
 
         Ok(())
@@ -444,34 +674,17 @@ impl fmt::Display for CTmleResult {
 /// Estimates the Average Treatment Effect (ATE) using Collaborative Targeted Maximum
 /// Likelihood Estimation. C-TMLE uses cross-validation to select covariates for the
 /// propensity score model in a "collaborative" way that minimizes finite-sample bias.
+/// See the module documentation for the algorithm and the criteria.
 ///
 /// # Arguments
 /// * `dataset` - Dataset containing outcome, treatment, and covariates
 /// * `outcome_col` - Name of the outcome variable column
-/// * `treatment_col` - Name of the binary treatment variable (0/1)
+/// * `treatment_col` - Name of the binary treatment variable (coded 0/1)
 /// * `covariate_cols` - Names of candidate covariate columns for propensity score selection
 /// * `config` - C-TMLE configuration options
 ///
 /// # Returns
 /// `CTmleResult` containing ATE estimate, selected covariates, selection path, and diagnostics.
-///
-/// # Algorithm
-///
-/// The forward selection C-TMLE algorithm:
-///
-/// 1. Fit outcome model Q(A,W) = E[Y|A,W] using all covariates
-/// 2. Start with g0 = intercept-only propensity model (g = mean(A))
-/// 3. For k = 1 to K (number of candidate covariates):
-///    a. For each covariate W_j not yet selected:
-///       - Fit gk with current covariates + W_j
-///       - Compute TMLE with this gk
-///       - Compute V-fold CV criterion (RSS or VarIC)
-///    b. Add covariate that minimizes CV criterion
-///    c. Record (CV criterion, ATE estimate, SE) for step k
-/// 4. Select step k* according to stopping rule:
-///    - CVMinimum: k* = argmin(CV criterion)
-///    - OneSE: smallest k with CV within 1 SE of minimum
-/// 5. Return TMLE estimate using gk* model
 ///
 /// # References
 ///
@@ -484,502 +697,31 @@ pub fn ctmle(
     covariate_cols: &[&str],
     config: CTmleConfig,
 ) -> EconResult<CTmleResult> {
-    let mut warnings = Vec::new();
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Extract Data
-    // ═══════════════════════════════════════════════════════════════════════
-
     // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
-    // Extract outcome variable Y
     let y = DesignMatrix::extract_column(dataset.df(), outcome_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
-    // Extract treatment variable A
     let a = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
-    let n = y.len();
-    validate_ctmle_config(&config, n)?;
-
-    // Validate treatment is binary
-    let n_treated: usize = a.iter().filter(|&&v| v >= 0.5).count();
-    let n_control = n - n_treated;
-
-    if n_treated == 0 || n_control == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Treatment variable '{}' must have both treated (1) and control (0) observations. \
-                 Found {} treated, {} control.",
-                treatment_col, n_treated, n_control
-            ),
-        });
-    }
-
-    // Need at least 2*n_folds observations per group for CV
-    let min_per_fold = 2;
-    if n_treated < config.n_folds * min_per_fold || n_control < config.n_folds * min_per_fold {
-        warnings.push(format!(
-            "Small sample size for {}-fold CV. Consider reducing n_folds.",
-            config.n_folds
-        ));
-    }
-
-    // Extract covariates individually (need separate columns for selection)
-    let n_covariates = covariate_cols.len();
-    let mut covariate_data: Vec<Array1<f64>> = Vec::with_capacity(n_covariates);
-    let covariate_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
-
+    let mut covariate_data: Vec<Array1<f64>> = Vec::with_capacity(covariate_cols.len());
     for col in covariate_cols {
         let col_data = DesignMatrix::extract_column(dataset.df(), col)
             .map_err(|e| econ_error_from_design(e, dataset.df()))?;
         covariate_data.push(col_data);
     }
-
-    // Build full design matrix W for covariates (with intercept)
-    let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, true)
-        .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-    let w_full = design.data;
-    let k_full = w_full.ncols();
-
-    // Build design matrix for outcome model: [intercept, W, A]
-    // Include all covariates in Q(A,W) - this remains fixed
-    let mut x_q = Array2::zeros((n, k_full + 1));
-    for i in 0..n {
-        for j in 0..k_full {
-            x_q[[i, j]] = w_full[[i, j]];
-        }
-        x_q[[i, k_full]] = a[i];
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Step 1: Fit Initial Outcome Model Q(A,W) Using All Covariates
-    // ═══════════════════════════════════════════════════════════════════════
-
-    let (q_init, q_beta, q_converged, _q_iterations) = match config.q_model {
-        CTmleQModel::Logistic => fit_logistic_model(&x_q, &y, config.max_iter, config.tolerance)?,
-        CTmleQModel::Linear => fit_linear_model(&x_q, &y)?,
-    };
-
-    if !q_converged {
-        warnings.push("Outcome model did not converge".to_string());
-    }
-
-    // Compute counterfactual Q predictions (needed throughout)
-    let mut x_q_1 = x_q.clone();
-    let mut x_q_0 = x_q.clone();
-    for i in 0..n {
-        x_q_1[[i, k_full]] = 1.0; // Set A = 1
-        x_q_0[[i, k_full]] = 0.0; // Set A = 0
-    }
-
-    let (q_1_init, q_0_init) = match config.q_model {
-        CTmleQModel::Logistic => {
-            let z_1: Array1<f64> = x_q_1.dot(&q_beta);
-            let z_0: Array1<f64> = x_q_0.dot(&q_beta);
-            (z_1.mapv(logistic_cdf), z_0.mapv(logistic_cdf))
-        }
-        CTmleQModel::Linear => (x_q_1.dot(&q_beta), x_q_0.dot(&q_beta)),
-    };
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Step 2: Generate CV Folds
-    // ═══════════════════════════════════════════════════════════════════════
-
-    let folds = create_cv_folds(n, config.n_folds);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Step 3: Forward Selection of Covariates for Propensity Score
-    // ═══════════════════════════════════════════════════════════════════════
-
-    let max_to_select = config.max_covariates.unwrap_or(n_covariates);
-    let max_to_select = max_to_select.min(n_covariates);
-
-    // Selection state
-    let mut selected: Vec<usize> = Vec::new(); // Indices of selected covariates
-    let mut available: Vec<usize> = (0..n_covariates).collect(); // Indices not yet selected
-    let mut selection_path: Vec<SelectionStep> = Vec::new();
-    let mut cv_risks: Vec<f64> = Vec::new();
-    let mut best_cv = f64::INFINITY;
-
-    // Determine selection order
-    let selection_indices: Vec<usize> = match &config.order {
-        SelectionOrder::Forward => Vec::new(), // Will be built dynamically
-        SelectionOrder::Backward => {
-            // Start with all covariates, remove greedily (not implemented yet)
-            warnings.push("Backward selection not yet implemented, using forward".to_string());
-            Vec::new()
-        }
-        SelectionOrder::Prespecified(order) => order.clone(),
-    };
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Step 0: Evaluate intercept-only model
-    // ═══════════════════════════════════════════════════════════════════════
-
-    let (cv_rss_0, cv_rss_se_0, ate_0, ate_se_0) = evaluate_propensity_model_cv(
-        &y,
-        &a,
-        &q_init,
-        &q_1_init,
-        &q_0_init,
+    let covariate_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
+    ctmle_core(
+        y.view(),
+        a.view(),
         &covariate_data,
-        &selected,
-        &folds,
-        config.q_model,
-        config.gbound,
-        config.max_iter,
-        config.tolerance,
-    )?;
-
-    selection_path.push(SelectionStep {
-        covariate_index: None,
-        covariate_name: Some("(intercept)".to_string()),
-        cv_criterion: cv_rss_0,
-        cv_criterion_se: cv_rss_se_0,
-        ate_estimate: ate_0,
-        ate_se: ate_se_0,
-        n_covariates: 0,
-    });
-    cv_risks.push(cv_rss_0);
-    best_cv = cv_rss_0;
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Steps 1 to K: Greedy forward selection
-    // ═══════════════════════════════════════════════════════════════════════
-
-    for step in 0..max_to_select {
-        resource::checkpoint()?;
-        if available.is_empty() {
-            break;
-        }
-
-        let mut best_idx: Option<usize> = None;
-        let mut best_cv_this_step = f64::INFINITY;
-        let mut best_cv_se_this_step = 0.0;
-        let mut best_ate_this_step = 0.0;
-        let mut best_ate_se_this_step = 0.0;
-
-        // Determine which covariate to try based on selection order
-        let candidates: Vec<usize> =
-            if !selection_indices.is_empty() && step < selection_indices.len() {
-                // Prespecified order: use the next one in sequence
-                let next_idx = selection_indices[step];
-                if available.contains(&next_idx) {
-                    vec![next_idx]
-                } else {
-                    // Skip if already selected (shouldn't happen with proper input)
-                    continue;
-                }
-            } else {
-                // Forward selection: try all available
-                available.clone()
-            };
-
-        // Try adding each candidate covariate
-        for &cov_idx in &candidates {
-            resource::checkpoint()?;
-
-            // Temporarily add this covariate
-            let mut test_selected = selected.clone();
-            test_selected.push(cov_idx);
-
-            // Evaluate this propensity model via CV
-            let (cv_rss, cv_rss_se, ate, ate_se) = evaluate_propensity_model_cv(
-                &y,
-                &a,
-                &q_init,
-                &q_1_init,
-                &q_0_init,
-                &covariate_data,
-                &test_selected,
-                &folds,
-                config.q_model,
-                config.gbound,
-                config.max_iter,
-                config.tolerance,
-            )?;
-
-            if cv_rss < best_cv_this_step {
-                best_cv_this_step = cv_rss;
-                best_cv_se_this_step = cv_rss_se;
-                best_ate_this_step = ate;
-                best_ate_se_this_step = ate_se;
-                best_idx = Some(cov_idx);
-            }
-        }
-
-        // Check stopping condition based on stop_factor
-        if best_cv_this_step > config.stop_factor * best_cv {
-            if config.verbose {
-                eprintln!(
-                    "C-TMLE: Early stopping at step {} (CV risk {} > {} * {})",
-                    step, best_cv_this_step, config.stop_factor, best_cv
-                );
-            }
-            break;
-        }
-
-        // Add the best covariate for this step
-        if let Some(idx) = best_idx {
-            // Update tracking
-            if best_cv_this_step < best_cv {
-                best_cv = best_cv_this_step;
-            }
-
-            // Move from available to selected
-            available.retain(|&x| x != idx);
-            selected.push(idx);
-
-            // Record this step
-            selection_path.push(SelectionStep {
-                covariate_index: Some(idx),
-                covariate_name: Some(covariate_names[idx].clone()),
-                cv_criterion: best_cv_this_step,
-                cv_criterion_se: best_cv_se_this_step,
-                ate_estimate: best_ate_this_step,
-                ate_se: best_ate_se_this_step,
-                n_covariates: selected.len(),
-            });
-            cv_risks.push(best_cv_this_step);
-
-            if config.verbose {
-                eprintln!(
-                    "C-TMLE: Step {} added {} (CV: {:.4}, ATE: {:.4})",
-                    step + 1,
-                    covariate_names[idx],
-                    best_cv_this_step,
-                    best_ate_this_step
-                );
-            }
-        }
-
-        // Check for MaxCovariates stopping rule
-        if let StoppingRule::MaxCovariates(k) = config.stopping_rule {
-            if selected.len() >= k {
-                break;
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Step 4: Select Final Model Based on Stopping Rule
-    // ═══════════════════════════════════════════════════════════════════════
-
-    let selected_step = match config.stopping_rule {
-        StoppingRule::CVMinimum => {
-            // Find step with minimum CV criterion
-            cv_risks
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        }
-        StoppingRule::OneSE => {
-            // Find minimum CV and its SE
-            let (min_idx, min_cv) = cv_risks
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, v)| (i, *v))
-                .unwrap_or((0, f64::INFINITY));
-
-            // Get SE at minimum
-            let min_se = selection_path
-                .get(min_idx)
-                .map(|s| s.cv_criterion_se)
-                .unwrap_or(0.0);
-
-            // Find smallest model within 1 SE of minimum
-            let threshold = min_cv + min_se;
-            cv_risks
-                .iter()
-                .enumerate()
-                .find(|(_, cv)| **cv <= threshold)
-                .map(|(i, _)| i)
-                .unwrap_or(min_idx)
-        }
-        StoppingRule::MaxCovariates(_) => {
-            // Use all covariates that were added (already enforced in loop)
-            selection_path.len() - 1
-        }
-    };
-
-    // Get the selected covariates
-    let selected_covariates: Vec<usize> = if selected_step == 0 {
-        Vec::new()
-    } else {
-        selection_path[1..=selected_step]
-            .iter()
-            .filter_map(|s| s.covariate_index)
-            .collect()
-    };
-
-    let selected_covariate_names: Vec<String> = selected_covariates
-        .iter()
-        .map(|&idx| covariate_names[idx].clone())
-        .collect();
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Step 5: Compute Final TMLE Estimate with Selected Model
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Build propensity score model design matrix with selected covariates
-    let w_g = build_design_matrix_subset(&covariate_data, &selected_covariates, n);
-
-    // Fit final propensity score model on full data
-    let (g_raw, _g_beta, g_converged, _g_iterations) =
-        fit_logistic_model(&w_g, &a, config.max_iter, config.tolerance)?;
-
-    if !g_converged {
-        warnings.push("Final propensity score model did not converge".to_string());
-    }
-
-    // Truncate propensity scores
-    let (ps_min, ps_max) = config.gbound;
-    let g: Array1<f64> = g_raw.mapv(|gi| gi.max(ps_min).min(ps_max));
-
-    // Compute clever covariate H(A,W)
-    let h: Array1<f64> = (0..n)
-        .map(|i| {
-            let ai = a[i];
-            let gi = g[i];
-            if ai >= 0.5 {
-                1.0 / gi
-            } else {
-                -1.0 / (1.0 - gi)
-            }
-        })
-        .collect();
-
-    // Targeting step
-    let (epsilon, targeting_converged) = fit_targeting_model(&y, &q_init, &h, config.q_model)?;
-
-    if !targeting_converged {
-        warnings.push("Targeting step did not converge".to_string());
-    }
-
-    // Compute targeted predictions Q*(A,W)
-    let q_star: Array1<f64> = match config.q_model {
-        CTmleQModel::Logistic => (0..n)
-            .map(|i| {
-                let logit_q = logit(q_init[i]);
-                logistic_cdf(logit_q + epsilon * h[i])
-            })
-            .collect(),
-        CTmleQModel::Linear => (0..n).map(|i| q_init[i] + epsilon * h[i]).collect(),
-    };
-
-    // Compute counterfactual clever covariates
-    let h_1: Array1<f64> = g.mapv(|gi| 1.0 / gi);
-    let h_0: Array1<f64> = g.mapv(|gi| -1.0 / (1.0 - gi));
-
-    // Apply targeting to counterfactuals
-    let (q_star_1, q_star_0): (Array1<f64>, Array1<f64>) = match config.q_model {
-        CTmleQModel::Logistic => {
-            let q1 = (0..n)
-                .map(|i| {
-                    let logit_q = logit(q_1_init[i]);
-                    logistic_cdf(logit_q + epsilon * h_1[i])
-                })
-                .collect();
-            let q0 = (0..n)
-                .map(|i| {
-                    let logit_q = logit(q_0_init[i]);
-                    logistic_cdf(logit_q + epsilon * h_0[i])
-                })
-                .collect();
-            (q1, q0)
-        }
-        CTmleQModel::Linear => {
-            let q1 = (0..n).map(|i| q_1_init[i] + epsilon * h_1[i]).collect();
-            let q0 = (0..n).map(|i| q_0_init[i] + epsilon * h_0[i]).collect();
-            (q1, q0)
-        }
-    };
-
-    // Compute ATE
-    let ate: f64 = (0..n).map(|i| q_star_1[i] - q_star_0[i]).sum::<f64>() / n as f64;
-
-    // Compute influence curve for variance
-    let ic: Array1<f64> = (0..n)
-        .map(|i| {
-            let ipw_term = h[i] * (y[i] - q_star[i]);
-            let outcome_term = q_star_1[i] - q_star_0[i];
-            ipw_term + outcome_term - ate
-        })
-        .collect();
-
-    // Variance from influence curve
-    let ic_mean: f64 = ic.iter().sum::<f64>() / n as f64;
-    let ic_var: f64 =
-        ic.iter().map(|&ic_i| (ic_i - ic_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
-    let ate_var = ic_var / n as f64;
-    let se = ate_var.sqrt();
-
-    // Z-statistic and confidence interval
-    let z_stat = if se > 0.0 && se.is_finite() {
-        ate / se
-    } else {
-        0.0
-    };
-
-    let z_crit = 1.96;
-    let ci_lower = ate - z_crit * se;
-    let ci_upper = ate + z_crit * se;
-
-    // P-value
-    let p_value = 2.0 * (1.0 - normal_cdf(z_stat.abs()));
-    let significance = SignificanceLevel::from_p_value(p_value);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Construct Result
-    // ═══════════════════════════════════════════════════════════════════════
-
-    Ok(CTmleResult {
-        ate,
-        se,
-        ci_lower,
-        ci_upper,
-        p_value,
-        significance,
-        z_stat,
-        selected_covariates,
-        selected_covariate_names,
-        n_selected: selected_step,
-        selection_path,
-        cv_risk: cv_risks,
-        influence_curve: ic.to_vec(),
-        selected_step,
-        propensity_scores: g.to_vec(),
-        targeted_outcome: q_star.to_vec(),
-        n_obs: n,
-        n_treated,
-        n_control,
-        config: CTmleConfigSummary {
-            n_folds: config.n_folds,
-            max_covariates: config.max_covariates,
-            stopping_rule: format!("{}", config.stopping_rule),
-            order: format!("{}", config.order),
-            cv_criterion: format!("{}", config.cv_criterion),
-            q_model: format!("{}", config.q_model),
-            gbound: config.gbound,
-        },
-        warnings,
-    })
+        &covariate_names,
+        (outcome_col, treatment_col),
+        config,
+    )
 }
 
 /// Run C-TMLE with default configuration.
 ///
-/// Convenience function that uses 5-fold CV, forward selection, CV-RSS criterion,
-/// and CVMinimum stopping rule.
-///
-/// # Arguments
-/// * `dataset` - Dataset containing outcome, treatment, and covariates
-/// * `outcome_col` - Name of the outcome variable column
-/// * `treatment_col` - Name of the binary treatment variable (0/1)
-/// * `covariate_cols` - Names of candidate covariate columns
+/// Uses forward selection with CV minimum stopping rule.
 ///
 /// # Example
 /// ```ignore
@@ -1002,13 +744,12 @@ pub fn run_ctmle(
     )
 }
 
-/// Run C-TMLE on array data directly.
-///
-/// Lower-level function that works with array data rather than Dataset.
+/// Run C-TMLE on array data directly (the same engine as [`ctmle()`]; covariates are named
+/// X1, X2, ...).
 ///
 /// # Arguments
 /// * `y` - Outcome vector (n,)
-/// * `treatment` - Binary treatment indicator (n,)
+/// * `treatment` - Binary treatment indicator (n,), coded 0/1
 /// * `covariates` - Covariate matrix (n, p)
 /// * `config` - C-TMLE configuration
 ///
@@ -1033,23 +774,28 @@ pub fn ctmle_arrays(
             ),
         });
     }
+    for (what, ok) in [
+        ("y", y.iter().all(|v| v.is_finite())),
+        ("treatment", treatment.iter().all(|v| v.is_finite())),
+        ("covariates", covariates.iter().all(|v| v.is_finite())),
+    ] {
+        if !ok {
+            return Err(EconError::InvalidSpecification {
+                message: format!("{what} contains a missing or non-finite value"),
+            });
+        }
+    }
 
-    // Convert to owned arrays
-    let y_owned = y.to_owned();
-    let a_owned = treatment.to_owned();
-
-    // Split covariates into individual vectors
     let covariate_data: Vec<Array1<f64>> =
         (0..p).map(|j| covariates.column(j).to_owned()).collect();
-
     let covariate_names: Vec<String> = (0..p).map(|j| format!("X{}", j + 1)).collect();
 
-    // Run the core algorithm with array data
     ctmle_core(
-        &y_owned,
-        &a_owned,
+        y.view(),
+        treatment.view(),
         &covariate_data,
         &covariate_names,
+        ("outcome", "treatment"),
         config,
     )
 }
@@ -1058,8 +804,8 @@ pub fn ctmle_arrays(
 // Internal Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Checks the fold count, the iteration controls and the propensity bounds against the
-/// sample size before any work.
+/// Checks the fold count, the iteration controls, the propensity bounds, the penalty and the
+/// stop factor against the sample size before any work.
 fn validate_ctmle_config(config: &CTmleConfig, n: usize) -> EconResult<()> {
     let max_folds = n / 2;
     if config.n_folds < 2 || config.n_folds > max_folds {
@@ -1088,317 +834,645 @@ fn validate_ctmle_config(config: &CTmleConfig, n: usize) -> EconResult<()> {
             ),
         });
     }
+    if !(config.penalty_factor.is_finite() && config.penalty_factor >= 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "penalty_factor must be finite and non-negative; got {}",
+                config.penalty_factor
+            ),
+        });
+    }
+    if !(config.stop_factor.is_finite() && config.stop_factor > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "stop_factor must be finite and positive; got {}",
+                config.stop_factor
+            ),
+        });
+    }
     Ok(())
 }
 
-/// Core C-TMLE implementation operating on array data.
+/// The effective prespecified list (empty means `0..p`); empty for Forward and Backward.
+fn validate_order(order: &SelectionOrder, p: usize) -> EconResult<Vec<usize>> {
+    let SelectionOrder::Prespecified(list) = order else {
+        return Ok(Vec::new());
+    };
+    if list.is_empty() {
+        return Ok((0..p).collect());
+    }
+    let mut seen = vec![false; p];
+    for &j in list {
+        if j >= p {
+            return Err(EconError::InvalidSpecification {
+                message: format!("order index {j} is out of range for {p} covariates"),
+            });
+        }
+        if seen[j] {
+            return Err(EconError::InvalidSpecification {
+                message: format!("order lists covariate {j} twice"),
+            });
+        }
+        seen[j] = true;
+    }
+    Ok(list.clone())
+}
+
+fn qmodel(m: CTmleQModel) -> QModel {
+    match m {
+        CTmleQModel::Linear => QModel::Linear,
+        CTmleQModel::Logistic => QModel::Logistic,
+    }
+}
+
+/// The intercept column, then `covariates[j]` for `j` in `set` order.
+fn design_with_intercept(covariates: &[Array1<f64>], set: &[usize], n: usize) -> Array2<f64> {
+    let mut x = Array2::ones((n, set.len() + 1));
+    for (c, &j) in set.iter().enumerate() {
+        x.column_mut(c + 1).assign(&covariates[j]);
+    }
+    x
+}
+
+/// Create V-fold cross-validation indices: observation `i` is in fold `i mod v`.
+fn create_cv_folds(n: usize, v: usize) -> Vec<Vec<usize>> {
+    let mut folds: Vec<Vec<usize>> = (0..v).map(|_| Vec::new()).collect();
+    for i in 0..n {
+        folds[i % v].push(i);
+    }
+    folds
+}
+
+/// Aggregated warnings of the many CV fits: (scope, text) -> count, scope -> number of fits,
+/// scope -> number of fits that did not converge.
+#[derive(Default)]
+struct FitNotes {
+    counts: BTreeMap<(&'static str, String), usize>,
+    fits: BTreeMap<&'static str, usize>,
+    not_converged: BTreeMap<&'static str, usize>,
+}
+
+impl FitNotes {
+    fn record(&mut self, scope: &'static str, warnings: &[String], converged: bool) {
+        *self.fits.entry(scope).or_default() += 1;
+        for w in warnings {
+            *self.counts.entry((scope, w.clone())).or_default() += 1;
+        }
+        if !converged {
+            *self.not_converged.entry(scope).or_default() += 1;
+        }
+    }
+
+    fn lines(&self, max_iter: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for ((scope, text), k) in &self.counts {
+            let m = self.fits.get(scope).copied().unwrap_or(0);
+            out.push(format!("{scope}: {text} ({k} of {m} fits)"));
+        }
+        for (scope, k) in &self.not_converged {
+            let m = self.fits.get(scope).copied().unwrap_or(0);
+            out.push(format!(
+                "{scope}: did not converge within max_iter = {max_iter} ({k} of {m} fits)"
+            ));
+        }
+        out
+    }
+}
+
+/// Validation-fold predictions of one fold: rows, y, Q*(A), Q*(1), Q*(0), H on those rows.
+#[allow(dead_code)]
+struct FoldEval {
+    rows: Vec<usize>,
+    y: Vec<f64>,
+    q_star_a: Vec<f64>,
+    q_star_1: Vec<f64>,
+    q_star_0: Vec<f64>,
+    h: Vec<f64>,
+}
+
+/// The V-fold risk of one candidate g (CAUS-57).
+struct CvRisk {
+    criterion: f64,
+    se: f64,
+    rss: f64,
+    #[allow(dead_code)]
+    rss_se: f64,
+    var_ic: f64,
+    #[allow(dead_code)]
+    var_ic_se: f64,
+    #[allow(dead_code)]
+    fold_rss: Vec<f64>,
+    #[allow(dead_code)]
+    fold_var_ic: Vec<f64>,
+    #[allow(dead_code)]
+    fold_epsilon: Vec<f64>,
+    #[allow(dead_code)]
+    folds: Vec<FoldEval>,
+}
+
+/// The full-data TMLE with one g.
+struct FullTmle {
+    ate: f64,
+    se: f64,
+    epsilon: f64,
+    g: Array1<f64>,
+    q_star_a: Array1<f64>,
+    ic: Array1<f64>,
+    g_fit: NuisanceFit,
+    fl_warnings: Vec<String>,
+    fl_converged: bool,
+    fl_iterations: usize,
+}
+
+/// Shared state of the V-fold risk: data, folds (i % V), 0/1 training weights per fold, Q per
+/// fold (fitted on its training rows, predicted for all rows), the full-data Q, the criterion,
+/// the penalty and the glm control.
+struct CvSetup<'a> {
+    y: ArrayView1<'a, f64>,
+    a: ArrayView1<'a, f64>,
+    covariates: &'a [Array1<f64>],
+    names: &'a [String],
+    folds: Vec<Vec<usize>>,
+    train: Vec<Array1<f64>>,
+    q_folds: Vec<QPredictions>,
+    q_full: QPredictions,
+    q_full_fit: NuisanceFit,
+    model: QModel,
+    gbound: (f64, f64),
+    criterion: CVCriterion,
+    penalty: f64,
+    ctl: GlmControl,
+}
+
+impl<'a> CvSetup<'a> {
+    fn new(
+        y: ArrayView1<'a, f64>,
+        a: ArrayView1<'a, f64>,
+        covariates: &'a [Array1<f64>],
+        names: &'a [String],
+        treatment: &str,
+        config: &CTmleConfig,
+        notes: &mut FitNotes,
+    ) -> EconResult<CvSetup<'a>> {
+        let n = y.len();
+        let p = covariates.len();
+        let v = config.n_folds;
+        let model = qmodel(config.q_model);
+        let ctl = GlmControl {
+            epsilon: config.tolerance,
+            max_iter: config.max_iter,
+        };
+        let folds = create_cv_folds(n, v);
+        let train: Vec<Array1<f64>> = (0..v)
+            .map(|f| Array1::from_iter((0..n).map(|i| if i % v != f { 1.0 } else { 0.0 })))
+            .collect();
+        let all: Vec<usize> = (0..p).collect();
+        let w = design_with_intercept(covariates, &all, n);
+        let mut qnames = Vec::with_capacity(p + 2);
+        qnames.push("(Intercept)".to_string());
+        qnames.extend(names.iter().cloned());
+        qnames.push(treatment.to_string());
+        let mut q_folds = Vec::with_capacity(v);
+        for t in &train {
+            let (fit, q) = fit_outcome(w.view(), a, y, model, Some(t.view()), &qnames, ctl)?;
+            notes.record("outcome model (Q), CV folds", &fit.warnings, fit.converged);
+            q_folds.push(q);
+        }
+        let (q_full_fit, q_full) = fit_outcome(w.view(), a, y, model, None, &qnames, ctl)?;
+        Ok(CvSetup {
+            y,
+            a,
+            covariates,
+            names,
+            folds,
+            train,
+            q_folds,
+            q_full,
+            q_full_fit,
+            model,
+            gbound: config.gbound,
+            criterion: config.cv_criterion,
+            penalty: config.penalty_factor,
+            ctl,
+        })
+    }
+
+    fn g_names(&self, set: &[usize]) -> Vec<String> {
+        std::iter::once("(Intercept)".to_string())
+            .chain(set.iter().map(|&j| self.names[j].clone()))
+            .collect()
+    }
+
+    /// The CV risk of the g-model with covariates `set` (CAUS-57). For every fold v, the
+    /// initial Q (the Q of the training folds, the honest initial estimate for fold v), g and
+    /// epsilon are fitted on the training rows and the loss is evaluated on fold v. Unlike
+    /// ctmle::ctmleDiscrete, which fits g on all rows, g is fitted on the training rows too.
+    fn risk(&self, set: &[usize], notes: &mut FitNotes) -> EconResult<CvRisk> {
+        let n = self.y.len();
+        let v = self.folds.len();
+        let xg = design_with_intercept(self.covariates, set, n);
+        let gnames = self.g_names(set);
+        let mut fold_rss = Vec::with_capacity(v);
+        let mut fold_var_ic = Vec::with_capacity(v);
+        let mut fold_epsilon = Vec::with_capacity(v);
+        let mut evals = Vec::with_capacity(v);
+        for (f, rows) in self.folds.iter().enumerate() {
+            resource::checkpoint()?;
+            let t = self.train[f].view();
+            let (gfit, graw) = fit_treatment(xg.view(), self.a, Some(t), &gnames, self.ctl)?;
+            notes.record(
+                "propensity model (g), CV fits",
+                &gfit.warnings,
+                gfit.converged,
+            );
+            let g = bound_scores(&graw, self.gbound).0;
+            let fl = fluctuate(
+                self.y,
+                self.a,
+                &self.q_folds[f],
+                g.view(),
+                self.model,
+                Some(t),
+                self.ctl,
+                FluctuationForm::OneDim,
+            )?;
+            notes.record("fluctuation, CV fits", &fl.warnings, fl.converged);
+            let qs = &fl.q_star;
+            let ev = FoldEval {
+                rows: rows.clone(),
+                y: rows.iter().map(|&i| self.y[i]).collect(),
+                q_star_a: rows.iter().map(|&i| qs.qa[i]).collect(),
+                q_star_1: rows.iter().map(|&i| qs.q1[i]).collect(),
+                q_star_0: rows.iter().map(|&i| qs.q0[i]).collect(),
+                h: rows.iter().map(|&i| fl.h[i]).collect(),
+            };
+            let rss: f64 = (0..ev.rows.len())
+                .map(|r| (ev.y[r] - ev.q_star_a[r]).powi(2))
+                .sum();
+            let ic: Vec<f64> = (0..ev.rows.len())
+                .map(|r| ev.h[r] * (ev.y[r] - ev.q_star_a[r]) + ev.q_star_1[r] - ev.q_star_0[r])
+                .collect();
+            fold_rss.push(rss);
+            fold_var_ic.push(sample_variance(&ic));
+            fold_epsilon.push(fl.epsilon);
+            evals.push(ev);
+        }
+        let vf = v as f64;
+        let rss: f64 = fold_rss.iter().sum();
+        let rss_se = vf.sqrt() * sample_variance(&fold_rss).sqrt();
+        let var_ic = fold_var_ic.iter().sum::<f64>() / vf;
+        let var_ic_se = (sample_variance(&fold_var_ic) / vf).sqrt();
+        let k = set.len() as f64;
+        let (criterion, se) = match self.criterion {
+            CVCriterion::RSS => (rss, rss_se),
+            CVCriterion::VarIC => (var_ic, var_ic_se),
+            CVCriterion::PenRSS => (rss + self.penalty * (n as f64).ln() * k, rss_se),
+        };
+        Ok(CvRisk {
+            criterion,
+            se,
+            rss,
+            rss_se,
+            var_ic,
+            var_ic_se,
+            fold_rss,
+            fold_var_ic,
+            fold_epsilon,
+            folds: evals,
+        })
+    }
+
+    /// The full-data TMLE with g on `set` (path and final estimates); on the fitting scale.
+    fn full_tmle(&self, set: &[usize]) -> EconResult<FullTmle> {
+        let n = self.y.len();
+        let xg = design_with_intercept(self.covariates, set, n);
+        let (g_fit, graw) = fit_treatment(xg.view(), self.a, None, &self.g_names(set), self.ctl)?;
+        let g = bound_scores(&graw, self.gbound).0;
+        let fl = fluctuate(
+            self.y,
+            self.a,
+            &self.q_full,
+            g.view(),
+            self.model,
+            None,
+            self.ctl,
+            FluctuationForm::OneDim,
+        )?;
+        let (ate, ic) = ate_and_ic(self.y, &fl);
+        let se = (sample_variance(&ic.to_vec()) / n as f64).sqrt();
+        Ok(FullTmle {
+            ate,
+            se,
+            epsilon: fl.epsilon,
+            g,
+            q_star_a: fl.q_star.qa,
+            ic,
+            g_fit,
+            fl_warnings: fl.warnings,
+            fl_converged: fl.converged,
+            fl_iterations: fl.iterations,
+        })
+    }
+}
+
+/// One recorded step of the selection path.
+struct PathStep {
+    moved: Option<usize>,
+    set: Vec<usize>,
+    risk: CvRisk,
+    est: FullTmle,
+}
+
+impl PathStep {
+    fn new(
+        setup: &CvSetup<'_>,
+        moved: Option<usize>,
+        set: Vec<usize>,
+        risk: CvRisk,
+        notes: &mut FitNotes,
+    ) -> EconResult<PathStep> {
+        let est = setup.full_tmle(&set)?;
+        notes.record(
+            "propensity model (g), path fits",
+            &est.g_fit.warnings,
+            est.g_fit.converged,
+        );
+        notes.record("fluctuation, path fits", &est.fl_warnings, est.fl_converged);
+        Ok(PathStep {
+            moved,
+            set,
+            risk,
+            est,
+        })
+    }
+}
+
+/// The selection path, one loop for every order.
+fn select_path(
+    setup: &CvSetup<'_>,
+    config: &CTmleConfig,
+    order: &[usize],
+    p: usize,
+    notes: &mut FitNotes,
+) -> EconResult<Vec<PathStep>> {
+    let backward = config.order == SelectionOrder::Backward;
+    let prespecified = matches!(config.order, SelectionOrder::Prespecified(_));
+    let cap = config.max_covariates.unwrap_or(p).min(p);
+    let max_k = match config.stopping_rule {
+        StoppingRule::MaxCovariates(k) => Some(k),
+        _ => None,
+    };
+    let mut current: Vec<usize> = if backward {
+        (0..p).collect()
+    } else {
+        Vec::new()
+    };
+    let risk0 = setup.risk(&current, notes)?;
+    let mut best = risk0.criterion;
+    let mut path = vec![PathStep::new(setup, None, current.clone(), risk0, notes)?];
+    loop {
+        resource::checkpoint()?;
+        let stop = if backward {
+            current.is_empty() || max_k.is_some_and(|k| current.len() <= k)
+        } else {
+            current.len() >= cap || max_k.is_some_and(|k| current.len() >= k)
+        };
+        if stop {
+            break;
+        }
+        let candidates: Vec<usize> = if backward {
+            current.clone()
+        } else if prespecified {
+            match order.get(path.len() - 1) {
+                Some(&j) => vec![j],
+                None => break,
+            }
+        } else {
+            (0..p).filter(|j| !current.contains(j)).collect()
+        };
+        if candidates.is_empty() {
+            break;
+        }
+        let mut chosen: Option<(usize, Vec<usize>, CvRisk)> = None;
+        for &j in &candidates {
+            resource::checkpoint()?;
+            let set: Vec<usize> = if backward {
+                current.iter().copied().filter(|&c| c != j).collect()
+            } else {
+                let mut s = current.clone();
+                s.push(j);
+                s
+            };
+            let risk = setup.risk(&set, notes)?;
+            let better = match &chosen {
+                None => true,
+                Some((_, _, r)) => risk.criterion < r.criterion,
+            };
+            if better {
+                chosen = Some((j, set, risk));
+            }
+        }
+        let Some((j, set, risk)) = chosen else {
+            break;
+        };
+        if risk.criterion > config.stop_factor * best {
+            if config.verbose {
+                eprintln!(
+                    "C-TMLE: Early stopping at step {} (CV criterion {} > {} * {})",
+                    path.len(),
+                    risk.criterion,
+                    config.stop_factor,
+                    best
+                );
+            }
+            break;
+        }
+        best = best.min(risk.criterion);
+        current = set;
+        let step = PathStep::new(setup, Some(j), current.clone(), risk, notes)?;
+        if config.verbose {
+            eprintln!(
+                "C-TMLE: Step {} {} {} (CV: {:.4}, ATE: {:.4})",
+                path.len(),
+                if backward { "removed" } else { "added" },
+                setup.names[j],
+                step.risk.criterion,
+                step.est.ate
+            );
+        }
+        path.push(step);
+    }
+    Ok(path)
+}
+
+/// The selected step: among the steps with at most `cap` covariates, the first minimum of the
+/// criterion (CVMinimum), the step with the fewest covariates within one SE of it (OneSE), or
+/// the last step (MaxCovariates).
+fn choose_step(path: &[PathStep], rule: StoppingRule, cap: usize) -> EconResult<usize> {
+    for (i, s) in path.iter().enumerate() {
+        if !s.risk.criterion.is_finite() {
+            return Err(EconError::Computation(format!(
+                "C-TMLE criterion is not finite at step {i}"
+            )));
+        }
+    }
+    let eligible: Vec<usize> = (0..path.len())
+        .filter(|&i| path[i].set.len() <= cap)
+        .collect();
+    let Some(&first) = eligible.first() else {
+        let k = path.last().map(|s| s.set.len()).unwrap_or(0);
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "max_covariates {cap} cannot be honoured: backward elimination stopped early \
+                 (stop_factor) at {k} covariates"
+            ),
+        });
+    };
+    let crit = |i: usize| path[i].risk.criterion;
+    let min_idx = eligible
+        .iter()
+        .copied()
+        .fold(first, |b, i| if crit(i) < crit(b) { i } else { b });
+    Ok(match rule {
+        StoppingRule::CVMinimum => min_idx,
+        StoppingRule::OneSE => {
+            let thr = crit(min_idx) + path[min_idx].risk.se;
+            eligible
+                .iter()
+                .copied()
+                .filter(|&i| crit(i) <= thr)
+                .fold(None::<usize>, |b, i| match b {
+                    Some(b) if path[b].set.len() <= path[i].set.len() => Some(b),
+                    _ => Some(i),
+                })
+                .unwrap_or(min_idx)
+        }
+        StoppingRule::MaxCovariates(_) => {
+            let last = path.len() - 1;
+            if path[last].set.len() <= cap {
+                last
+            } else {
+                *eligible.last().unwrap_or(&first)
+            }
+        }
+    })
+}
+
+/// The C-TMLE engine of [`ctmle()`] and [`ctmle_arrays`]; `labels` names the outcome and
+/// the treatment in messages.
 fn ctmle_core(
-    y: &Array1<f64>,
-    a: &Array1<f64>,
+    y: ArrayView1<'_, f64>,
+    a: ArrayView1<'_, f64>,
     covariate_data: &[Array1<f64>],
     covariate_names: &[String],
+    labels: (&str, &str),
     config: CTmleConfig,
 ) -> EconResult<CTmleResult> {
     let mut warnings = Vec::new();
     let n = y.len();
+    let p = covariate_data.len();
     validate_ctmle_config(&config, n)?;
-    let n_covariates = covariate_data.len();
+    let order = validate_order(&config.order, p)?;
+    let (n_treated, n_control) = check_binary_treatment(a, labels.1)?;
+    let model = qmodel(config.q_model);
+    let scale = outcome_scale(y, model, labels.0)?;
+    let ys = scale.apply(&y.to_owned());
+    warnings.extend(scale.note("C-TMLE", labels.0));
 
-    // Validate treatment is binary
-    let n_treated: usize = a.iter().filter(|&&v| v >= 0.5).count();
-    let n_control = n - n_treated;
-
-    if n_treated == 0 || n_control == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Treatment must have both treated and control. Found {} treated, {} control.",
-                n_treated, n_control
-            ),
-        });
+    // Need at least 2*n_folds observations per group for CV
+    let min_per_fold = 2;
+    if n_treated < config.n_folds * min_per_fold || n_control < config.n_folds * min_per_fold {
+        warnings.push(format!(
+            "Small sample size for {}-fold CV. Consider reducing n_folds.",
+            config.n_folds
+        ));
     }
 
-    // Build full design matrix with all covariates (for Q model)
-    let w_full =
-        build_design_matrix_subset(covariate_data, &(0..n_covariates).collect::<Vec<_>>(), n);
-    let k_full = w_full.ncols();
-
-    // Build outcome model design: [intercept + covariates, A]
-    let mut x_q = Array2::zeros((n, k_full + 1));
-    for i in 0..n {
-        for j in 0..k_full {
-            x_q[[i, j]] = w_full[[i, j]];
-        }
-        x_q[[i, k_full]] = a[i];
-    }
-
-    // Fit outcome model
-    let (q_init, q_beta, q_converged, _) = match config.q_model {
-        CTmleQModel::Logistic => fit_logistic_model(&x_q, y, config.max_iter, config.tolerance)?,
-        CTmleQModel::Linear => fit_linear_model(&x_q, y)?,
-    };
-
-    if !q_converged {
-        warnings.push("Outcome model did not converge".to_string());
-    }
-
-    // Compute counterfactual predictions
-    let mut x_q_1 = x_q.clone();
-    let mut x_q_0 = x_q.clone();
-    for i in 0..n {
-        x_q_1[[i, k_full]] = 1.0;
-        x_q_0[[i, k_full]] = 0.0;
-    }
-
-    let (q_1_init, q_0_init) = match config.q_model {
-        CTmleQModel::Logistic => {
-            let z_1: Array1<f64> = x_q_1.dot(&q_beta);
-            let z_0: Array1<f64> = x_q_0.dot(&q_beta);
-            (z_1.mapv(logistic_cdf), z_0.mapv(logistic_cdf))
-        }
-        CTmleQModel::Linear => (x_q_1.dot(&q_beta), x_q_0.dot(&q_beta)),
-    };
-
-    // Generate CV folds
-    let folds = create_cv_folds(n, config.n_folds);
-
-    // Forward selection
-    let max_to_select = config
-        .max_covariates
-        .unwrap_or(n_covariates)
-        .min(n_covariates);
-    let mut selected: Vec<usize> = Vec::new();
-    let mut available: Vec<usize> = (0..n_covariates).collect();
-    let mut selection_path: Vec<SelectionStep> = Vec::new();
-    let mut cv_risks: Vec<f64> = Vec::new();
-    let mut best_cv = f64::INFINITY;
-
-    // Step 0: Intercept-only model
-    let (cv_rss_0, cv_rss_se_0, ate_0, ate_se_0) = evaluate_propensity_model_cv(
-        y,
-        a,
-        &q_init,
-        &q_1_init,
-        &q_0_init,
+    let mut notes = FitNotes::default();
+    let setup = CvSetup::new(
+        ys.view(),
+        a.view(),
         covariate_data,
-        &selected,
-        &folds,
-        config.q_model,
-        config.gbound,
-        config.max_iter,
-        config.tolerance,
+        covariate_names,
+        labels.1,
+        &config,
+        &mut notes,
     )?;
+    let path = select_path(&setup, &config, &order, p, &mut notes)?;
+    let cap = config.max_covariates.unwrap_or(p).min(p);
+    let selected_step = choose_step(&path, config.stopping_rule, cap)?;
 
-    selection_path.push(SelectionStep {
-        covariate_index: None,
-        covariate_name: Some("(intercept)".to_string()),
-        cv_criterion: cv_rss_0,
-        cv_criterion_se: cv_rss_se_0,
-        ate_estimate: ate_0,
-        ate_se: ate_se_0,
-        n_covariates: 0,
-    });
-    cv_risks.push(cv_rss_0);
-    best_cv = cv_rss_0;
-
-    // Forward selection steps
-    for _step in 0..max_to_select {
-        resource::checkpoint()?;
-        if available.is_empty() {
-            break;
-        }
-
-        let mut best_idx: Option<usize> = None;
-        let mut best_cv_this_step = f64::INFINITY;
-        let mut best_cv_se_this_step = 0.0;
-        let mut best_ate_this_step = 0.0;
-        let mut best_ate_se_this_step = 0.0;
-
-        for &cov_idx in &available {
-            resource::checkpoint()?;
-
-            let mut test_selected = selected.clone();
-            test_selected.push(cov_idx);
-
-            let (cv_rss, cv_rss_se, ate, ate_se) = evaluate_propensity_model_cv(
-                y,
-                a,
-                &q_init,
-                &q_1_init,
-                &q_0_init,
-                covariate_data,
-                &test_selected,
-                &folds,
-                config.q_model,
-                config.gbound,
-                config.max_iter,
-                config.tolerance,
-            )?;
-
-            if cv_rss < best_cv_this_step {
-                best_cv_this_step = cv_rss;
-                best_cv_se_this_step = cv_rss_se;
-                best_ate_this_step = ate;
-                best_ate_se_this_step = ate_se;
-                best_idx = Some(cov_idx);
-            }
-        }
-
-        // Early stopping check
-        if best_cv_this_step > config.stop_factor * best_cv {
-            break;
-        }
-
-        if let Some(idx) = best_idx {
-            if best_cv_this_step < best_cv {
-                best_cv = best_cv_this_step;
-            }
-
-            available.retain(|&x| x != idx);
-            selected.push(idx);
-
-            selection_path.push(SelectionStep {
-                covariate_index: Some(idx),
-                covariate_name: Some(covariate_names[idx].clone()),
-                cv_criterion: best_cv_this_step,
-                cv_criterion_se: best_cv_se_this_step,
-                ate_estimate: best_ate_this_step,
-                ate_se: best_ate_se_this_step,
-                n_covariates: selected.len(),
-            });
-            cv_risks.push(best_cv_this_step);
-        }
-
-        if let StoppingRule::MaxCovariates(k) = config.stopping_rule {
-            if selected.len() >= k {
-                break;
-            }
-        }
-    }
-
-    // Select final model
-    let selected_step = match config.stopping_rule {
-        StoppingRule::CVMinimum => cv_risks
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0),
-        StoppingRule::OneSE => {
-            let (min_idx, min_cv) = cv_risks
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, v)| (i, *v))
-                .unwrap_or((0, f64::INFINITY));
-
-            let min_se = selection_path
-                .get(min_idx)
-                .map(|s| s.cv_criterion_se)
-                .unwrap_or(0.0);
-            let threshold = min_cv + min_se;
-
-            cv_risks
-                .iter()
-                .enumerate()
-                .find(|(_, cv)| **cv <= threshold)
-                .map(|(i, _)| i)
-                .unwrap_or(min_idx)
-        }
-        StoppingRule::MaxCovariates(_) => selection_path.len() - 1,
-    };
-
-    let selected_covariates: Vec<usize> = if selected_step == 0 {
-        Vec::new()
+    let backward = config.order == SelectionOrder::Backward;
+    let selected_covariates: Vec<usize> = if backward {
+        path[selected_step].set.clone()
     } else {
-        selection_path[1..=selected_step]
+        path[1..=selected_step]
             .iter()
-            .filter_map(|s| s.covariate_index)
+            .filter_map(|s| s.moved)
             .collect()
     };
-
     let selected_covariate_names: Vec<String> = selected_covariates
         .iter()
         .map(|&idx| covariate_names[idx].clone())
         .collect();
 
-    // Fit final model on full data
-    let w_g = build_design_matrix_subset(covariate_data, &selected_covariates, n);
-    let (g_raw, _, g_converged, _) =
-        fit_logistic_model(&w_g, a, config.max_iter, config.tolerance)?;
-
-    if !g_converged {
-        warnings.push("Final propensity score model did not converge".to_string());
+    let fin = &path[selected_step].est;
+    let ctl = setup.ctl;
+    warnings.extend(prefixed("outcome model (Q)", &setup.q_full_fit.warnings));
+    warnings.extend(prefixed("final propensity model (g)", &fin.g_fit.warnings));
+    warnings.extend(prefixed("final targeting step", &fin.fl_warnings));
+    for (converged, iterations, method) in [
+        (
+            setup.q_full_fit.converged,
+            setup.q_full_fit.iterations,
+            "C-TMLE outcome model (Q)",
+        ),
+        (
+            fin.g_fit.converged,
+            fin.g_fit.iterations,
+            "C-TMLE final propensity model (g)",
+        ),
+        (
+            fin.fl_converged,
+            fin.fl_iterations,
+            "C-TMLE final targeting step",
+        ),
+    ] {
+        warnings.extend(glm_convergence(converged, iterations, ctl).note(method));
     }
+    warnings.extend(notes.lines(config.max_iter));
 
-    let (ps_min, ps_max) = config.gbound;
-    let g: Array1<f64> = g_raw.mapv(|gi| gi.max(ps_min).min(ps_max));
-
-    let h: Array1<f64> = (0..n)
-        .map(|i| {
-            if a[i] >= 0.5 {
-                1.0 / g[i]
-            } else {
-                -1.0 / (1.0 - g[i])
-            }
-        })
-        .collect();
-
-    let (epsilon, targeting_converged) = fit_targeting_model(y, &q_init, &h, config.q_model)?;
-
-    if !targeting_converged {
-        warnings.push("Targeting step did not converge".to_string());
-    }
-
-    let q_star: Array1<f64> = match config.q_model {
-        CTmleQModel::Logistic => (0..n)
-            .map(|i| logistic_cdf(logit(q_init[i]) + epsilon * h[i]))
-            .collect(),
-        CTmleQModel::Linear => (0..n).map(|i| q_init[i] + epsilon * h[i]).collect(),
-    };
-
-    let h_1: Array1<f64> = g.mapv(|gi| 1.0 / gi);
-    let h_0: Array1<f64> = g.mapv(|gi| -1.0 / (1.0 - gi));
-
-    let (q_star_1, q_star_0): (Array1<f64>, Array1<f64>) = match config.q_model {
-        CTmleQModel::Logistic => {
-            let q1 = (0..n)
-                .map(|i| logistic_cdf(logit(q_1_init[i]) + epsilon * h_1[i]))
-                .collect();
-            let q0 = (0..n)
-                .map(|i| logistic_cdf(logit(q_0_init[i]) + epsilon * h_0[i]))
-                .collect();
-            (q1, q0)
-        }
-        CTmleQModel::Linear => {
-            let q1 = (0..n).map(|i| q_1_init[i] + epsilon * h_1[i]).collect();
-            let q0 = (0..n).map(|i| q_0_init[i] + epsilon * h_0[i]).collect();
-            (q1, q0)
-        }
-    };
-
-    let ate: f64 = (0..n).map(|i| q_star_1[i] - q_star_0[i]).sum::<f64>() / n as f64;
-
-    let ic: Array1<f64> = (0..n)
-        .map(|i| h[i] * (y[i] - q_star[i]) + q_star_1[i] - q_star_0[i] - ate)
-        .collect();
-
-    let ic_mean: f64 = ic.iter().sum::<f64>() / n as f64;
-    let ic_var: f64 =
-        ic.iter().map(|&ic_i| (ic_i - ic_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
-    let ate_var = ic_var / n as f64;
-    let se = ate_var.sqrt();
-
-    let z_stat = if se > 0.0 && se.is_finite() {
-        ate / se
-    } else {
-        0.0
-    };
-    let z_crit = 1.96;
-    let ci_lower = ate - z_crit * se;
-    let ci_upper = ate + z_crit * se;
-    let p_value = 2.0 * (1.0 - normal_cdf(z_stat.abs()));
+    let width = scale.width;
+    let ate = width * fin.ate;
+    let se = width * fin.se;
+    let (z_stat, p_value, ci_lower, ci_upper) = wald95(ate, se)?;
     let significance = SignificanceLevel::from_p_value(p_value);
 
+    let selection_path: Vec<SelectionStep> = path
+        .iter()
+        .map(|s| SelectionStep {
+            covariate_index: s.moved,
+            covariate_name: Some(match s.moved {
+                Some(j) => covariate_names[j].clone(),
+                None if backward => "(all candidates)".to_string(),
+                None => "(intercept)".to_string(),
+            }),
+            cv_criterion: s.risk.criterion,
+            cv_criterion_se: s.risk.se,
+            ate_estimate: width * s.est.ate,
+            ate_se: width * s.est.se,
+            n_covariates: s.set.len(),
+            cv_rss: s.risk.rss,
+            cv_var_ic: s.risk.var_ic,
+        })
+        .collect();
+    let cv_risk: Vec<f64> = path.iter().map(|s| s.risk.criterion).collect();
+
+    let order_word = match config.order {
+        SelectionOrder::Forward => "forward",
+        SelectionOrder::Backward => "backward",
+        SelectionOrder::Prespecified(_) => "prespecified",
+    };
     Ok(CTmleResult {
         ate,
         se,
@@ -1407,15 +1481,15 @@ fn ctmle_core(
         p_value,
         significance,
         z_stat,
+        n_selected: selected_covariates.len(),
         selected_covariates,
         selected_covariate_names,
-        n_selected: selected_step,
         selection_path,
-        cv_risk: cv_risks,
-        influence_curve: ic.to_vec(),
+        cv_risk,
+        influence_curve: fin.ic.iter().map(|v| width * v).collect(),
         selected_step,
-        propensity_scores: g.to_vec(),
-        targeted_outcome: q_star.to_vec(),
+        propensity_scores: fin.g.to_vec(),
+        targeted_outcome: fin.q_star_a.iter().map(|&v| scale.unscale(v)).collect(),
         n_obs: n,
         n_treated,
         n_control,
@@ -1427,420 +1501,18 @@ fn ctmle_core(
             cv_criterion: format!("{}", config.cv_criterion),
             q_model: format!("{}", config.q_model),
             gbound: config.gbound,
+            penalty_factor: config.penalty_factor,
+            algorithm: format!(
+                "greedy {order_word} selection of g, fixed initial Q, {}-fold CV (Q, g and \
+                 epsilon fitted on the training folds)",
+                config.n_folds
+            ),
         },
         warnings,
+        n_candidates: p,
+        fluctuation_coef: fin.epsilon,
+        outcome_range: scale.range(),
     })
-}
-
-/// Evaluate a propensity model using V-fold cross-validation.
-///
-/// For each fold, fit propensity model on training data, compute TMLE on test data,
-/// and return CV-RSS criterion.
-///
-/// Returns (cv_rss, cv_rss_se, ate_full, ate_se_full).
-fn evaluate_propensity_model_cv(
-    y: &Array1<f64>,
-    a: &Array1<f64>,
-    q_init: &Array1<f64>,
-    q_1_init: &Array1<f64>,
-    q_0_init: &Array1<f64>,
-    covariate_data: &[Array1<f64>],
-    selected_covariates: &[usize],
-    folds: &[Vec<usize>],
-    q_model: CTmleQModel,
-    gbound: (f64, f64),
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<(f64, f64, f64, f64)> {
-    let n = y.len();
-    let n_folds = folds.len();
-
-    // First, compute full-data estimate for reporting
-    let w_g = build_design_matrix_subset(covariate_data, selected_covariates, n);
-    let (g_raw_full, _, _, _) = fit_logistic_model(&w_g, a, max_iter, tolerance)?;
-
-    let (ps_min, ps_max) = gbound;
-    let g_full: Array1<f64> = g_raw_full.mapv(|gi| gi.max(ps_min).min(ps_max));
-
-    let h_full: Array1<f64> = (0..n)
-        .map(|i| {
-            if a[i] >= 0.5 {
-                1.0 / g_full[i]
-            } else {
-                -1.0 / (1.0 - g_full[i])
-            }
-        })
-        .collect();
-
-    let (epsilon_full, _) = fit_targeting_model(y, q_init, &h_full, q_model)?;
-
-    let q_star_full: Array1<f64> = match q_model {
-        CTmleQModel::Logistic => (0..n)
-            .map(|i| logistic_cdf(logit(q_init[i]) + epsilon_full * h_full[i]))
-            .collect(),
-        CTmleQModel::Linear => (0..n)
-            .map(|i| q_init[i] + epsilon_full * h_full[i])
-            .collect(),
-    };
-
-    let h_1_full: Array1<f64> = g_full.mapv(|gi| 1.0 / gi);
-    let h_0_full: Array1<f64> = g_full.mapv(|gi| -1.0 / (1.0 - gi));
-
-    let (q_star_1_full, q_star_0_full): (Array1<f64>, Array1<f64>) = match q_model {
-        CTmleQModel::Logistic => {
-            let q1 = (0..n)
-                .map(|i| logistic_cdf(logit(q_1_init[i]) + epsilon_full * h_1_full[i]))
-                .collect();
-            let q0 = (0..n)
-                .map(|i| logistic_cdf(logit(q_0_init[i]) + epsilon_full * h_0_full[i]))
-                .collect();
-            (q1, q0)
-        }
-        CTmleQModel::Linear => {
-            let q1 = (0..n)
-                .map(|i| q_1_init[i] + epsilon_full * h_1_full[i])
-                .collect();
-            let q0 = (0..n)
-                .map(|i| q_0_init[i] + epsilon_full * h_0_full[i])
-                .collect();
-            (q1, q0)
-        }
-    };
-
-    let ate_full: f64 = (0..n)
-        .map(|i| q_star_1_full[i] - q_star_0_full[i])
-        .sum::<f64>()
-        / n as f64;
-
-    let ic_full: Array1<f64> = (0..n)
-        .map(|i| {
-            h_full[i] * (y[i] - q_star_full[i]) + q_star_1_full[i] - q_star_0_full[i] - ate_full
-        })
-        .collect();
-
-    let ic_mean_full = ic_full.iter().sum::<f64>() / n as f64;
-    let ic_var_full = ic_full
-        .iter()
-        .map(|&ic_i| (ic_i - ic_mean_full).powi(2))
-        .sum::<f64>()
-        / (n - 1).max(1) as f64;
-    let ate_se_full = (ic_var_full / n as f64).sqrt();
-
-    // Now compute CV criterion
-    let mut fold_rss: Vec<f64> = Vec::with_capacity(n_folds);
-
-    for fold_idx in 0..n_folds {
-        resource::checkpoint()?;
-
-        let test_indices = &folds[fold_idx];
-        let train_indices: Vec<usize> = (0..n_folds)
-            .filter(|&i| i != fold_idx)
-            .flat_map(|i| folds[i].iter().copied())
-            .collect();
-
-        let _n_train = train_indices.len();
-        let n_test = test_indices.len();
-
-        // Extract training data
-        let _y_train: Array1<f64> = train_indices.iter().map(|&i| y[i]).collect();
-        let a_train: Array1<f64> = train_indices.iter().map(|&i| a[i]).collect();
-
-        // Build training design matrix for propensity
-        let w_train =
-            build_design_matrix_subset_indexed(covariate_data, selected_covariates, &train_indices);
-
-        // Fit propensity model on training data
-        let (_g_train_raw, g_beta, _, _) =
-            match fit_logistic_model(&w_train, &a_train, max_iter, tolerance) {
-                Ok(result) => result,
-                Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
-                Err(_) => continue, // Skip this fold if fitting fails
-            };
-
-        // Predict propensity scores on test data
-        let w_test =
-            build_design_matrix_subset_indexed(covariate_data, selected_covariates, test_indices);
-        let g_test_raw: Array1<f64> = w_test.dot(&g_beta).mapv(logistic_cdf);
-        let g_test: Array1<f64> = g_test_raw.mapv(|gi| gi.max(ps_min).min(ps_max));
-
-        // Extract test data
-        let y_test: Array1<f64> = test_indices.iter().map(|&i| y[i]).collect();
-        let a_test: Array1<f64> = test_indices.iter().map(|&i| a[i]).collect();
-        let q_init_test: Array1<f64> = test_indices.iter().map(|&i| q_init[i]).collect();
-
-        // Compute clever covariate on test set using test propensity scores
-        let h_test: Array1<f64> = (0..n_test)
-            .map(|i| {
-                if a_test[i] >= 0.5 {
-                    1.0 / g_test[i]
-                } else {
-                    -1.0 / (1.0 - g_test[i])
-                }
-            })
-            .collect();
-
-        // Targeting step on test set
-        let (epsilon_test, _) = match fit_targeting_model(&y_test, &q_init_test, &h_test, q_model) {
-            Ok(result) => result,
-            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
-            Err(_) => continue,
-        };
-
-        // Compute Q* on test set
-        let q_star_test: Array1<f64> = match q_model {
-            CTmleQModel::Logistic => (0..n_test)
-                .map(|i| logistic_cdf(logit(q_init_test[i]) + epsilon_test * h_test[i]))
-                .collect(),
-            CTmleQModel::Linear => (0..n_test)
-                .map(|i| q_init_test[i] + epsilon_test * h_test[i])
-                .collect(),
-        };
-
-        // Compute RSS on test set: sum((Y - Q*)^2)
-        // This is the targeting residual (Ju et al. 2019, Section 3.1)
-        let rss: f64 = (0..n_test)
-            .map(|i| (y_test[i] - q_star_test[i]).powi(2))
-            .sum();
-
-        fold_rss.push(rss);
-    }
-
-    // Compute mean and SE of CV-RSS
-    if fold_rss.is_empty() {
-        return Ok((f64::INFINITY, 0.0, ate_full, ate_se_full));
-    }
-
-    let cv_rss_mean: f64 = fold_rss.iter().sum::<f64>() / fold_rss.len() as f64;
-    let cv_rss_se = if fold_rss.len() > 1 {
-        let variance: f64 = fold_rss
-            .iter()
-            .map(|&x| (x - cv_rss_mean).powi(2))
-            .sum::<f64>()
-            / (fold_rss.len() - 1) as f64;
-        (variance / fold_rss.len() as f64).sqrt()
-    } else {
-        0.0
-    };
-
-    Ok((cv_rss_mean, cv_rss_se, ate_full, ate_se_full))
-}
-
-/// Build design matrix with intercept and subset of covariates.
-fn build_design_matrix_subset(
-    covariate_data: &[Array1<f64>],
-    selected_indices: &[usize],
-    n: usize,
-) -> Array2<f64> {
-    let k = selected_indices.len() + 1; // +1 for intercept
-    let mut x = Array2::zeros((n, k));
-
-    // Intercept column
-    for i in 0..n {
-        x[[i, 0]] = 1.0;
-    }
-
-    // Selected covariates
-    for (j, &cov_idx) in selected_indices.iter().enumerate() {
-        for i in 0..n {
-            x[[i, j + 1]] = covariate_data[cov_idx][i];
-        }
-    }
-
-    x
-}
-
-/// Build design matrix from subset of observations and covariates.
-fn build_design_matrix_subset_indexed(
-    covariate_data: &[Array1<f64>],
-    selected_indices: &[usize],
-    obs_indices: &[usize],
-) -> Array2<f64> {
-    let n = obs_indices.len();
-    let k = selected_indices.len() + 1;
-    let mut x = Array2::zeros((n, k));
-
-    // Intercept
-    for i in 0..n {
-        x[[i, 0]] = 1.0;
-    }
-
-    // Selected covariates
-    for (j, &cov_idx) in selected_indices.iter().enumerate() {
-        for (i, &obs_idx) in obs_indices.iter().enumerate() {
-            x[[i, j + 1]] = covariate_data[cov_idx][obs_idx];
-        }
-    }
-
-    x
-}
-
-/// Create V-fold cross-validation indices.
-///
-/// Returns a vector of V vectors, each containing indices for one fold.
-fn create_cv_folds(n: usize, v: usize) -> Vec<Vec<usize>> {
-    let mut folds: Vec<Vec<usize>> = (0..v).map(|_| Vec::new()).collect();
-
-    // Simple sequential assignment (deterministic for reproducibility)
-    for i in 0..n {
-        folds[i % v].push(i);
-    }
-
-    folds
-}
-
-/// Logit function: logit(p) = log(p / (1-p))
-#[inline]
-fn logit(p: f64) -> f64 {
-    let p_clipped = p.max(1e-10).min(1.0 - 1e-10);
-    (p_clipped / (1.0 - p_clipped)).ln()
-}
-
-/// Fit logistic regression using Newton-Raphson (IRLS).
-fn fit_logistic_model(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<(Array1<f64>, Array1<f64>, bool, usize)> {
-    let n = y.len();
-    let k = x.ncols();
-
-    let mut beta = Array1::zeros(k);
-    let mut converged = false;
-    let mut iterations = 0;
-
-    for iter in 0..max_iter {
-        resource::checkpoint()?;
-        iterations = iter + 1;
-
-        let z: Array1<f64> = x.dot(&beta);
-        let p: Array1<f64> = z.mapv(logistic_cdf);
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        let residuals = y - &p_clipped;
-        let mut gradient = Array1::zeros(k);
-        for i in 0..n {
-            for j in 0..k {
-                gradient[j] += residuals[i] * x[[i, j]];
-            }
-        }
-
-        let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-        if grad_norm < tolerance {
-            converged = true;
-            break;
-        }
-
-        let weights: Array1<f64> = p_clipped.mapv(|pi| pi * (1.0 - pi));
-
-        let mut hessian = Array2::zeros((k, k));
-        for i in 0..n {
-            let wi = weights[i];
-            for j in 0..k {
-                for l in 0..k {
-                    hessian[[j, l]] -= wi * x[[i, j]] * x[[i, l]];
-                }
-            }
-        }
-
-        let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) =
-            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
-                context: "Logistic regression Hessian".to_string(),
-                suggestion: format!("Check for multicollinearity: {:?}", e),
-            })?;
-
-        let delta = hess_inv.dot(&gradient);
-        beta = &beta + &delta;
-    }
-
-    let z_final: Array1<f64> = x.dot(&beta);
-    let p_final: Array1<f64> = z_final.mapv(logistic_cdf);
-
-    Ok((p_final, beta, converged, iterations))
-}
-
-/// Fit linear regression using OLS.
-fn fit_linear_model(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
-) -> EconResult<(Array1<f64>, Array1<f64>, bool, usize)> {
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Linear regression X'X matrix".to_string(),
-        suggestion: format!("Check for multicollinearity: {:?}", e),
-    })?;
-
-    let xty_vec = xty(&x.view(), y);
-    let beta = xtx_inv.dot(&xty_vec);
-    let y_hat = x.dot(&beta);
-
-    Ok((y_hat, beta, true, 1))
-}
-
-/// Fit targeting model to estimate fluctuation parameter epsilon.
-fn fit_targeting_model(
-    y: &Array1<f64>,
-    q_init: &Array1<f64>,
-    h: &Array1<f64>,
-    q_model: CTmleQModel,
-) -> EconResult<(f64, bool)> {
-    let n = y.len();
-
-    match q_model {
-        CTmleQModel::Logistic => {
-            let mut epsilon = 0.0;
-            let mut converged = false;
-            let max_iter = 50;
-            let tolerance = 1e-8;
-
-            for _ in 0..max_iter {
-                let p: Array1<f64> = (0..n)
-                    .map(|i| {
-                        let logit_q = logit(q_init[i]);
-                        logistic_cdf(logit_q + epsilon * h[i])
-                    })
-                    .collect();
-                let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-                let score: f64 = (0..n).map(|i| h[i] * (y[i] - p_clipped[i])).sum();
-
-                if score.abs() < tolerance {
-                    converged = true;
-                    break;
-                }
-
-                let info: f64 = (0..n)
-                    .map(|i| {
-                        let pi = p_clipped[i];
-                        h[i] * h[i] * pi * (1.0 - pi)
-                    })
-                    .sum();
-
-                if info.abs() > 1e-10 {
-                    epsilon += score / info;
-                } else {
-                    epsilon += 0.1 * score.signum();
-                }
-            }
-
-            Ok((epsilon, converged))
-        }
-        CTmleQModel::Linear => {
-            let numerator: f64 = (0..n).map(|i| h[i] * (y[i] - q_init[i])).sum();
-            let denominator: f64 = h.iter().map(|&hi| hi * hi).sum::<f64>();
-
-            if denominator.abs() < 1e-10 {
-                return Err(EconError::SingularMatrix {
-                    context: "Targeting step".to_string(),
-                    suggestion: "Clever covariate has near-zero variance".to_string(),
-                });
-            }
-
-            let epsilon = numerator / denominator;
-            Ok((epsilon, true))
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1851,6 +1523,7 @@ fn fit_targeting_model(
 mod tests {
     use super::*;
     use crate::resource::{self, Budget, CancelToken};
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
     fn expect_invalid_spec(err: EconError, needle: &str) {
@@ -2141,12 +1814,15 @@ mod tests {
             result.n_selected
         );
 
-        // ATE should still be reasonable
-        assert!(
-            result.ate > 0.1 && result.ate < 1.0,
-            "ATE should be reasonable, got {}",
-            result.ate
-        );
+        // The path stops at 2 covariates and selects them. On these 40 rows w1 and w2
+        // (almost) separate the treatment, so g sits at its bounds and the TMLE moves far
+        // from the Q estimate: R's lm(y ~ w1 + w2 + w3 + w4 + a), glm(a ~ w1 + w2, binomial),
+        // g bounded to [0.05, 0.95], lm(y ~ -1 + H, offset = Q(A,W)) gives 0.04024225 (quoted
+        // value, not an R case). The old range 0.1..1 matched the in-sample risk of CAUS-57.
+        let mut selected = result.selected_covariates.clone();
+        selected.sort_unstable();
+        assert_eq!(selected, vec![0, 1]);
+        assert!((result.ate - 0.04024225).abs() < 1e-7, "ATE {}", result.ate);
     }
 
     #[test]
@@ -2274,16 +1950,14 @@ mod tests {
     #[test]
     fn test_ctmle_prespecified_order() {
         let dataset = create_ctmle_test_dataset();
-
-        // Specify order: first w3, then w1, then w2
+        // w3, then w1, then w2
         let config = CTmleConfig {
             n_folds: 3,
-            order: SelectionOrder::Prespecified(vec![2, 0, 1]), // w3, w1, w2
+            order: SelectionOrder::Prespecified(vec![2, 0, 1]),
             max_covariates: Some(3),
             stopping_rule: StoppingRule::MaxCovariates(3),
             ..Default::default()
         };
-
         let result = ctmle(
             &dataset,
             "y",
@@ -2292,13 +1966,13 @@ mod tests {
             config,
         )
         .unwrap();
-
-        // Should have followed the specified order (at least partially)
-        // Check that we got some covariates selected
-        assert!(
-            !result.selection_path.is_empty(),
-            "Should have at least intercept step"
-        );
+        let moved: Vec<usize> = result.selection_path[1..]
+            .iter()
+            .map(|s| s.covariate_index.unwrap())
+            .collect();
+        assert_eq!(moved, vec![2, 0, 1]);
+        assert_eq!(result.selection_path.len(), 4);
+        assert_eq!(result.selected_covariates, vec![2, 0, 1]);
     }
 
     /// Test that C-TMLE with array inputs works.
@@ -2327,6 +2001,7 @@ mod tests {
         let config = CTmleConfig {
             n_folds: 2, // Small folds for small data
             max_covariates: Some(2),
+            q_model: CTmleQModel::Linear, // y is continuous
             ..Default::default()
         };
 
@@ -2388,192 +2063,693 @@ mod tests {
         (Dataset::new(df), true_ate)
     }
 
-    /// Validate C-TMLE ATE estimate is in a reasonable range for the DGP.
-    #[test]
-    fn test_validate_ctmle_ate_recovery() {
-        let (dataset, true_ate) = create_validate_ctmle_dataset();
-
-        let config = CTmleConfig {
+    fn dgp_config() -> CTmleConfig {
+        CTmleConfig {
             n_folds: 3,
             max_covariates: Some(2),
             stopping_rule: StoppingRule::MaxCovariates(2),
             q_model: CTmleQModel::Linear,
             ..Default::default()
-        };
-
-        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
-
-        // ATE should be positive and in the general range of the true ATE
-        assert!(
-            result.ate > 0.5,
-            "ATE = {:.4} should be positive (true = {})",
-            result.ate,
-            true_ate
-        );
-        assert!(
-            result.ate < 4.0,
-            "ATE = {:.4} should not be too large (true = {})",
-            result.ate,
-            true_ate
-        );
-
-        // SE should be positive and finite
-        assert!(
-            result.se > 0.0 && result.se.is_finite(),
-            "SE should be positive and finite, got {:.4}",
-            result.se
-        );
-
-        // CI should bracket the estimate
-        assert!(
-            result.ci_lower < result.ate && result.ate < result.ci_upper,
-            "CI [{:.4}, {:.4}] should bracket ATE = {:.4}",
-            result.ci_lower,
-            result.ci_upper,
-            result.ate
-        );
+        }
     }
 
-    /// Validate that the collaborative selection path is computed.
+    /// The C-TMLE ATE is in the range of the DGP's effect (not an R comparison).
     #[test]
-    fn test_validate_ctmle_selection_path_properties() {
+    fn test_ctmle_ate_recovers_dgp() {
+        let (dataset, true_ate) = create_validate_ctmle_dataset();
+        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], dgp_config()).unwrap();
+        assert!(
+            result.ate > 0.5 && result.ate < 4.0,
+            "ATE = {:.4} (true = {true_ate})",
+            result.ate
+        );
+        assert!(result.se > 0.0 && result.se.is_finite());
+        assert!(result.ci_lower < result.ate && result.ate < result.ci_upper);
+    }
+
+    #[test]
+    fn test_ctmle_selection_path_properties() {
         let (dataset, _) = create_validate_ctmle_dataset();
-
-        let config = CTmleConfig {
-            n_folds: 3,
-            max_covariates: Some(2),
-            stopping_rule: StoppingRule::MaxCovariates(2),
-            q_model: CTmleQModel::Linear,
-            ..Default::default()
-        };
-
-        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
-
-        // Selection path should start with intercept-only model
-        assert!(
-            !result.selection_path.is_empty(),
-            "Selection path must not be empty"
-        );
-        assert!(
-            result.selection_path[0].covariate_index.is_none(),
-            "First step should be intercept-only"
-        );
+        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], dgp_config()).unwrap();
+        assert!(result.selection_path[0].covariate_index.is_none());
         assert_eq!(result.selection_path[0].n_covariates, 0);
-
-        // Each subsequent step should add one covariate
         for i in 1..result.selection_path.len() {
             assert_eq!(result.selection_path[i].n_covariates, i);
-            assert!(
-                result.selection_path[i].covariate_index.is_some(),
-                "Step {} should have a covariate index",
-                i
-            );
+            assert!(result.selection_path[i].covariate_index.is_some());
         }
-
-        // CV criterion values should all be non-negative
-        for (i, step) in result.selection_path.iter().enumerate() {
-            assert!(
-                step.cv_criterion >= 0.0,
-                "CV criterion at step {} = {:.6} should be non-negative",
-                i,
-                step.cv_criterion
-            );
+        for step in &result.selection_path {
+            assert!(step.cv_criterion >= 0.0 && step.cv_rss >= 0.0 && step.cv_var_ic >= 0.0);
         }
-
-        // CV risk vector should match selection path length
         assert_eq!(result.cv_risk.len(), result.selection_path.len());
     }
 
-    /// Validate influence curve and standard error computation.
     #[test]
-    fn test_validate_ctmle_influence_curve() {
+    fn test_ctmle_se_is_ic_variance() {
         let (dataset, _) = create_validate_ctmle_dataset();
-
-        let config = CTmleConfig {
-            n_folds: 3,
-            max_covariates: Some(2),
-            stopping_rule: StoppingRule::MaxCovariates(2),
-            q_model: CTmleQModel::Linear,
-            ..Default::default()
-        };
-
-        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
-
-        // IC should have one value per observation
-        assert_eq!(result.influence_curve.len(), result.n_obs);
-
-        // All IC values should be finite
-        assert!(
-            result.influence_curve.iter().all(|ic| ic.is_finite()),
-            "All influence curve values must be finite"
-        );
-
-        // IC variance should be positive
-        let n = result.n_obs as f64;
-        let ic_mean: f64 = result.influence_curve.iter().sum::<f64>() / n;
-        let ic_var: f64 = result
+        let r = ctmle(&dataset, "y", "treatment", &["w1", "w2"], dgp_config()).unwrap();
+        assert_eq!(r.influence_curve.len(), r.n_obs);
+        let n = r.n_obs as f64;
+        let mean: f64 = r.influence_curve.iter().sum::<f64>() / n;
+        let var: f64 = r
             .influence_curve
             .iter()
-            .map(|ic| (ic - ic_mean).powi(2))
+            .map(|ic| (ic - mean).powi(2))
             .sum::<f64>()
             / (n - 1.0);
-        assert!(
-            ic_var > 0.0,
-            "IC variance should be positive, got {:.6}",
-            ic_var
-        );
+        assert!((r.se - (var / n).sqrt()).abs() <= 1e-12 * r.se);
+    }
 
-        // SE should be derived from IC variance:
-        // SE = sqrt(Var(IC) / n) approximately
-        let se_from_ic = (ic_var / n).sqrt();
-        // Allow some tolerance because the exact computation may differ
+    #[test]
+    fn test_ctmle_propensity_bounds() {
+        let (dataset, _) = create_validate_ctmle_dataset();
+        let gbound = (0.05, 0.95);
+        let config = CTmleConfig {
+            gbound,
+            ..dgp_config()
+        };
+        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
+        for &ps in &result.propensity_scores {
+            assert!((gbound.0..=gbound.1).contains(&ps), "{ps}");
+        }
+        assert_eq!(result.n_treated + result.n_control, result.n_obs);
+    }
+
+    // ── T3-WP29: the R reference case ctmle_cv (validation/r/cases/causal_stdreg.R) ──
+
+    const W: [&str; 4] = ["w1", "w2", "w3", "w4"];
+
+    /// The case's dataset read directly, for the property tests that compare no R value.
+    fn ctmle_sim() -> Dataset {
+        crate::regression::ols::na_fixtures::repo_dataset(
+            "validation/datasets/generated/ctmle_sim.csv",
+        )
+    }
+
+    fn col(ds: &Dataset, name: &str) -> Array1<f64> {
+        ds.df()
+            .column(name)
+            .unwrap()
+            .cast(&DataType::Float64)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+
+    fn with_col(ds: &Dataset, name: &str, values: Vec<f64>) -> Dataset {
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(name.into(), values)).unwrap();
+        Dataset::new(df)
+    }
+
+    fn w_matrix(ds: &Dataset) -> Array2<f64> {
+        let cols: Vec<Array1<f64>> = W.iter().map(|w| col(ds, w)).collect();
+        Array2::from_shape_fn((cols[0].len(), 4), |(i, j)| cols[j][i])
+    }
+
+    fn tight() -> CTmleConfig {
+        // the case's glm.control(epsilon = 1e-14)
+        CTmleConfig {
+            tolerance: 1e-14,
+            ..Default::default()
+        }
+    }
+
+    fn mask(s: &[usize]) -> Vec<f64> {
+        (0..4)
+            .map(|j| if s.contains(&j) { 1.0 } else { 0.0 })
+            .collect()
+    }
+
+    /// Every number the case records for one run (`prefix`), and its one-SE selection.
+    fn check_run(
+        case: &p2a_validation::Case,
+        prefix: &str,
+        r: &CTmleResult,
+        onese: Option<&CTmleResult>,
+    ) {
+        let t = Tol::iterative(1e-8); // both sides at glm epsilon 1e-14
+        let k = |s: &str| format!("{prefix}_{s}");
+        let st =
+            |f: fn(&SelectionStep) -> f64| r.selection_path.iter().map(f).collect::<Vec<f64>>();
+        let moved: Vec<f64> = r.selection_path[1..]
+            .iter()
+            .map(|s| s.covariate_index.unwrap() as f64)
+            .collect();
+        let mut c = Check::new(case);
+        c.vector(&k("path_crit"), &st(|s| s.cv_criterion), t)
+            .vector(&k("path_se"), &st(|s| s.cv_criterion_se), t)
+            .vector(&k("path_rss"), &st(|s| s.cv_rss), t)
+            .vector(&k("path_varic"), &st(|s| s.cv_var_ic), t)
+            .vector(
+                &k("path_ncov"),
+                &st(|s| s.n_covariates as f64),
+                Tol::exact(),
+            )
+            .vector(&k("moved"), &moved, Tol::exact())
+            .scalar(&k("selected_step"), r.selected_step as f64, Tol::exact())
+            .vector(
+                &k("selected_mask"),
+                &mask(&r.selected_covariates),
+                Tol::exact(),
+            )
+            .scalar(&k("ate"), r.ate, t)
+            .scalar(&k("se"), r.se, t)
+            .scalar(&k("epsilon"), r.fluctuation_coef, t)
+            .scalar(&k("ci_lower"), r.ci_lower, t)
+            .scalar(&k("ci_upper"), r.ci_upper, t)
+            .scalar(&k("p"), r.p_value, Tol::p_value(300))
+            .vector(&k("path_ate"), &st(|s| s.ate_estimate), t)
+            .vector(&k("path_ate_se"), &st(|s| s.ate_se), t);
+        if let Some(o) = onese {
+            c.scalar(&k("onese_step"), o.selected_step as f64, Tol::exact())
+                .vector(
+                    &k("onese_selected_mask"),
+                    &mask(&o.selected_covariates),
+                    Tol::exact(),
+                )
+                .scalar(&k("onese_ate"), o.ate, t);
+        }
+        c.finish();
+    }
+
+    fn run(ds: &Dataset, y: &str, c: CTmleConfig) -> (CTmleResult, CTmleResult) {
+        let r = ctmle(ds, y, "a", &W, c.clone()).unwrap();
+        let o = ctmle(
+            ds,
+            y,
+            "a",
+            &W,
+            CTmleConfig {
+                stopping_rule: StoppingRule::OneSE,
+                ..c
+            },
+        )
+        .unwrap();
+        (r, o)
+    }
+
+    #[test]
+    fn test_validate_ctmle_prespecified_order_in_arrays_path() {
+        let (case, ds) = crate::test_support::load_case("ctmle_cv");
+        let (y, a, x) = (col(&ds, "yb"), col(&ds, "a"), w_matrix(&ds));
+        let mut c = tight();
+        c.order = SelectionOrder::Prespecified(vec![2, 0]);
+        let r = ctmle_arrays(&y.view(), &a.view(), &x.view(), c.clone()).unwrap();
+        let moved: Vec<usize> = r.selection_path[1..]
+            .iter()
+            .map(|s| s.covariate_index.unwrap())
+            .collect();
+        assert_eq!(moved, vec![2, 0]);
+        assert_eq!(r.selection_path.len(), 3); // no fallback to forward once the list is used up
+        assert_eq!(r.config.order, "Prespecified([2, 0])");
         assert!(
-            (result.se - se_from_ic).abs() / result.se < 0.5,
-            "SE = {:.4} should be roughly sqrt(Var(IC)/n) = {:.4}",
-            result.se,
-            se_from_ic
+            r.warnings
+                .iter()
+                .all(|w| !w.contains("not yet implemented"))
+        );
+        let o = ctmle_arrays(
+            &y.view(),
+            &a.view(),
+            &x.view(),
+            CTmleConfig {
+                stopping_rule: StoppingRule::OneSE,
+                ..c.clone()
+            },
+        )
+        .unwrap();
+        check_run(&case, "logit_pre31", &r, Some(&o));
+        // the dataset entry point: same engine, same numbers
+        let d = ctmle(&ds, "yb", "a", &W, c.clone()).unwrap();
+        assert_eq!(
+            (
+                d.ate,
+                d.se,
+                d.cv_risk.clone(),
+                d.selected_covariates.clone()
+            ),
+            (
+                r.ate,
+                r.se,
+                r.cv_risk.clone(),
+                r.selected_covariates.clone()
+            )
+        );
+        c.order = SelectionOrder::Backward;
+        let b = ctmle_arrays(&y.view(), &a.view(), &x.view(), c.clone()).unwrap();
+        assert_eq!(
+            b.selection_path
+                .iter()
+                .map(|s| s.n_covariates)
+                .collect::<Vec<_>>(),
+            vec![4, 3, 2, 1, 0]
+        );
+        assert_eq!(b.selection_path[0].covariate_index, None);
+        let bo = ctmle_arrays(
+            &y.view(),
+            &a.view(),
+            &x.view(),
+            CTmleConfig {
+                stopping_rule: StoppingRule::OneSE,
+                ..c.clone()
+            },
+        )
+        .unwrap();
+        check_run(&case, "logit_backward", &b, Some(&bo));
+        c.order = SelectionOrder::Prespecified(vec![]); // the listed order (ctmle's preOrder default)
+        let l = ctmle_arrays(&y.view(), &a.view(), &x.view(), c).unwrap();
+        assert_eq!(
+            l.selection_path[1..]
+                .iter()
+                .map(|s| s.covariate_index.unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(l.config.order, "Prespecified (listed order)");
+    }
+
+    #[test]
+    fn test_ctmle_prespecified_order_is_validated() {
+        let ds = ctmle_sim();
+        for (list, needle) in [
+            (vec![4], "order index 4 is out of range for 4 covariates"),
+            (vec![1, 1], "order lists covariate 1 twice"),
+        ] {
+            let c = CTmleConfig {
+                order: SelectionOrder::Prespecified(list),
+                ..Default::default()
+            };
+            expect_invalid_spec(ctmle(&ds, "yb", "a", &W, c).unwrap_err(), needle);
+        }
+    }
+
+    #[test]
+    fn test_ctmle_max_covariates_caps_every_order() {
+        let ds = ctmle_sim();
+        let base = CTmleConfig {
+            max_covariates: Some(2),
+            ..Default::default()
+        };
+        let f = ctmle(&ds, "yb", "a", &W, base.clone()).unwrap();
+        assert_eq!(f.selection_path.len(), 3);
+        assert!(f.n_selected <= 2);
+        let b = ctmle(
+            &ds,
+            "yb",
+            "a",
+            &W,
+            CTmleConfig {
+                order: SelectionOrder::Backward,
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(b.selection_path.len(), 5);
+        assert!(b.n_selected <= 2, "{}", b.n_selected);
+        assert_eq!(b.n_selected, b.selected_covariates.len());
+        let m = ctmle(
+            &ds,
+            "yb",
+            "a",
+            &W,
+            CTmleConfig {
+                order: SelectionOrder::Backward,
+                stopping_rule: StoppingRule::MaxCovariates(2),
+                ..base
+            },
+        )
+        .unwrap();
+        assert_eq!(m.selected_step, m.selection_path.len() - 1);
+        assert_eq!(m.selection_path[m.selected_step].n_covariates, 2);
+        assert_eq!(m.n_selected, 2);
+    }
+
+    #[test]
+    fn test_ctmle_n_folds_checked_in_core() {
+        let ds = ctmle_sim();
+        let (y, a, x) = (col(&ds, "yb"), col(&ds, "a"), w_matrix(&ds));
+        for v in [0, 1, 151] {
+            let c = CTmleConfig {
+                n_folds: v,
+                ..Default::default()
+            };
+            expect_invalid_spec(ctmle(&ds, "yb", "a", &W, c.clone()).unwrap_err(), "n_folds");
+            expect_invalid_spec(
+                ctmle_arrays(&y.view(), &a.view(), &x.view(), c).unwrap_err(),
+                "n_folds",
+            );
+        }
+    }
+
+    #[test]
+    fn test_ctmle_refuses_non_binary_treatment() {
+        let ds = ctmle_sim();
+        let (y, x) = (col(&ds, "yb"), w_matrix(&ds));
+        let a2 = col(&ds, "a").mapv(|v| 2.0 * v);
+        expect_invalid_spec(
+            ctmle_arrays(&y.view(), &a2.view(), &x.view(), CTmleConfig::default()).unwrap_err(),
+            "must be coded 0/1",
         );
     }
 
-    /// Validate propensity scores are within truncation bounds.
     #[test]
-    fn test_validate_ctmle_propensity_bounds() {
-        let (dataset, _) = create_validate_ctmle_dataset();
+    fn test_ctmle_logistic_q_rescales_continuous_outcome() {
+        // CAUS-45 (ctmle() and ctmle_core). Before: the logistic Q on yc diverged (ATE +-1).
+        // Now Y is rescaled once on the full data (the same lower/width in every fold);
+        // criteria on the fitting scale; estimates scaled back.
+        let ds = ctmle_sim();
+        let r = ctmle(&ds, "yc", "a", &W, tight()).unwrap();
+        let y = col(&ds, "yc");
+        let lo = y.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(r.outcome_range, Some((lo, hi)));
+        let ys: Vec<f64> = y.iter().map(|v| (v - lo) / (hi - lo)).collect();
+        let s = ctmle(&with_col(&ds, "ycs", ys), "ycs", "a", &W, tight()).unwrap();
+        assert!(s.outcome_range.is_none());
+        assert_eq!(r.selected_step, s.selected_step);
+        assert_eq!(r.selected_covariates, s.selected_covariates);
+        let t = Tol::new(1e-12, 1e-15);
+        assert!(t.allows(r.ate, (hi - lo) * s.ate) && t.allows(r.se, (hi - lo) * s.se));
+        for (a, b) in r.selection_path.iter().zip(&s.selection_path) {
+            assert!(t.allows(a.cv_criterion, b.cv_criterion)); // on the fitting scale
+            assert!(t.allows(a.ate_estimate, (hi - lo) * b.ate_estimate));
+        }
+        assert!(
+            r.warnings.iter().any(|w| w.contains("rescaled from [")),
+            "{:?}",
+            r.warnings
+        );
+    }
 
-        let gbound = (0.05, 0.95);
-        let config = CTmleConfig {
-            n_folds: 3,
-            max_covariates: Some(2),
-            stopping_rule: StoppingRule::MaxCovariates(2),
-            q_model: CTmleQModel::Linear,
-            gbound,
-            ..Default::default()
+    #[test]
+    fn test_validate_ctmle_cv_risk_uses_training_fluctuation() {
+        let (case, ds) = crate::test_support::load_case("ctmle_cv");
+        let (y, a) = (col(&ds, "yb"), col(&ds, "a"));
+        let covs: Vec<Array1<f64>> = W.iter().map(|w| col(&ds, w)).collect();
+        let names: Vec<String> = W.iter().map(|s| s.to_string()).collect();
+        let cfg = CTmleConfig {
+            cv_criterion: CVCriterion::PenRSS,
+            penalty_factor: 2.0,
+            ..tight()
         };
+        let mut notes = FitNotes::default();
+        let setup = CvSetup::new(y.view(), a.view(), &covs, &names, "a", &cfg, &mut notes).unwrap();
+        let risk = setup.risk(&[0, 2], &mut notes).unwrap();
+        let t = Tol::iterative(1e-8); // both sides at glm epsilon 1e-14
+        Check::new(&case)
+            .vector("cv13_fold_rss", &risk.fold_rss, t)
+            .vector("cv13_fold_varic", &risk.fold_var_ic, t)
+            .vector("cv13_fold_epsilon", &risk.fold_epsilon, t)
+            .scalar("cv13_rss", risk.rss, t)
+            .scalar("cv13_rss_se", risk.rss_se, t)
+            .scalar("cv13_varic", risk.var_ic, t)
+            .scalar("cv13_varic_se", risk.var_ic_se, t)
+            .scalar("cv13_penrss2", risk.criterion, t)
+            .finish();
+        // fold 0's Q, g and epsilon use only its training rows: flipping fold 0's outcomes
+        // leaves them unchanged
+        let mut y2 = y.clone();
+        for i in (0..y2.len()).step_by(5) {
+            y2[i] = 1.0 - y2[i];
+        }
+        let setup2 =
+            CvSetup::new(y2.view(), a.view(), &covs, &names, "a", &cfg, &mut notes).unwrap();
+        let risk2 = setup2.risk(&[0, 2], &mut notes).unwrap();
+        assert_eq!(risk2.fold_epsilon[0], risk.fold_epsilon[0]); // bit-identical
+        assert!((risk2.fold_rss[0] - risk.fold_rss[0]).abs() > 1.0); // the loss sees the flips
+        assert_ne!(risk2.fold_epsilon[1], risk.fold_epsilon[1]); // fold 1 trains on fold 0's rows
+        // VarIC recomputed from the validation-fold predictions (two-pass variance)
+        for (v, ev) in risk.folds.iter().enumerate() {
+            let ic: Vec<f64> = (0..ev.rows.len())
+                .map(|r| ev.h[r] * (ev.y[r] - ev.q_star_a[r]) + ev.q_star_1[r] - ev.q_star_0[r])
+                .collect();
+            let m = ic.iter().sum::<f64>() / ic.len() as f64;
+            let var = ic.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (ic.len() - 1) as f64;
+            assert!(Tol::new(1e-12, 0.0).allows(risk.fold_var_ic[v], var));
+        }
+    }
 
-        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
+    #[test]
+    fn test_validate_ctmle_cv_logit_rss() {
+        let (case, ds) = crate::test_support::load_case("ctmle_cv");
+        let (r, o) = run(&ds, "yb", tight());
+        check_run(&case, "logit_rss", &r, Some(&o));
+    }
 
-        // All propensity scores should be within bounds
-        for (i, &ps) in result.propensity_scores.iter().enumerate() {
-            assert!(
-                ps >= gbound.0 - 1e-10 && ps <= gbound.1 + 1e-10,
-                "Propensity score {} = {:.4} should be within [{}, {}]",
-                i,
-                ps,
-                gbound.0,
-                gbound.1
+    #[test]
+    fn test_validate_ctmle_cv_linear_rss() {
+        let (case, ds) = crate::test_support::load_case("ctmle_cv");
+        let c = CTmleConfig {
+            q_model: CTmleQModel::Linear,
+            ..tight()
+        };
+        let (r, o) = run(&ds, "yc", c);
+        check_run(&case, "linear_rss", &r, Some(&o));
+    }
+
+    #[test]
+    fn test_validate_ctmle_cv_backward_and_prespecified() {
+        let (case, ds) = crate::test_support::load_case("ctmle_cv");
+        let c = CTmleConfig {
+            order: SelectionOrder::Backward,
+            ..tight()
+        };
+        let (b, bo) = run(&ds, "yb", c);
+        check_run(&case, "logit_backward", &b, Some(&bo));
+        let c = CTmleConfig {
+            order: SelectionOrder::Prespecified(vec![2, 0]),
+            ..tight()
+        };
+        let (p, po) = run(&ds, "yb", c);
+        check_run(&case, "logit_pre31", &p, Some(&po));
+    }
+
+    #[test]
+    fn test_validate_ctmle_criteria_varic() {
+        let (case, ds) = crate::test_support::load_case("ctmle_cv");
+        let c = CTmleConfig {
+            cv_criterion: CVCriterion::VarIC,
+            ..tight()
+        };
+        let (r, o) = run(&ds, "yb", c.clone());
+        check_run(&case, "logit_varic", &r, Some(&o));
+        for s in &r.selection_path {
+            assert_eq!(s.cv_criterion, s.cv_var_ic);
+        }
+        let lc = CTmleConfig {
+            q_model: CTmleQModel::Linear,
+            ..c
+        };
+        let (l, lo) = run(&ds, "yc", lc);
+        check_run(&case, "linear_varic", &l, Some(&lo));
+        // the phantom pair: RSS and VarIC select different steps and estimates
+        let rss = ctmle(&ds, "yb", "a", &W, tight()).unwrap();
+        assert_ne!(rss.selected_step, r.selected_step);
+        assert!((rss.ate - r.ate).abs() > 1e-3);
+    }
+
+    #[test]
+    fn test_validate_ctmle_criteria_penrss() {
+        let (case, ds) = crate::test_support::load_case("ctmle_cv");
+        let c = CTmleConfig {
+            cv_criterion: CVCriterion::PenRSS,
+            penalty_factor: 2.0,
+            ..tight()
+        };
+        let (r, o) = run(&ds, "yb", c.clone());
+        check_run(&case, "logit_penrss", &r, Some(&o));
+        for s in &r.selection_path {
+            let want = s.cv_rss + 2.0 * 300f64.ln() * s.n_covariates as f64;
+            assert!((s.cv_criterion - want).abs() <= 1e-12 * s.cv_criterion);
+        }
+        // penalty 0 is the RSS run
+        let z = ctmle(
+            &ds,
+            "yb",
+            "a",
+            &W,
+            CTmleConfig {
+                penalty_factor: 0.0,
+                ..c
+            },
+        )
+        .unwrap();
+        let rss = ctmle(&ds, "yb", "a", &W, tight()).unwrap();
+        assert_eq!(z.selected_step, rss.selected_step);
+        assert_eq!(z.cv_risk, rss.cv_risk);
+    }
+
+    #[test]
+    fn test_ctmle_penalty_and_stop_factor_are_validated() {
+        let ds = ctmle_sim();
+        for pf in [-1.0, f64::NAN] {
+            let c = CTmleConfig {
+                cv_criterion: CVCriterion::PenRSS,
+                penalty_factor: pf,
+                ..Default::default()
+            };
+            expect_invalid_spec(ctmle(&ds, "yb", "a", &W, c).unwrap_err(), "penalty_factor");
+        }
+        for sf in [0.0, f64::NAN] {
+            let c = CTmleConfig {
+                stop_factor: sf,
+                ..Default::default()
+            };
+            expect_invalid_spec(ctmle(&ds, "yb", "a", &W, c).unwrap_err(), "stop_factor");
+        }
+    }
+
+    #[test]
+    fn test_cv_criterion_parses_aliases_and_rejects_unknown() {
+        CVCriterion::choices().validate().unwrap();
+        for s in ["RSS", "cv-rss", "likelihood"] {
+            assert_eq!(s.parse::<CVCriterion>().unwrap(), CVCriterion::RSS);
+        }
+        for s in ["VarIC", "var_ic", "CV-VarIC"] {
+            assert_eq!(s.parse::<CVCriterion>().unwrap(), CVCriterion::VarIC);
+        }
+        for s in ["penrss", "penalised RSS", "CV-PenRSS"] {
+            assert_eq!(s.parse::<CVCriterion>().unwrap(), CVCriterion::PenRSS);
+        }
+        expect_invalid_spec(
+            "aic".parse::<CVCriterion>().unwrap_err(),
+            "unknown cv_criterion 'aic'",
+        );
+        expect_invalid_spec(
+            "aic".parse::<CVCriterion>().unwrap_err(),
+            "rss, varic, penrss",
+        );
+        for c in [CVCriterion::RSS, CVCriterion::VarIC, CVCriterion::PenRSS] {
+            assert_eq!(c.to_string().parse::<CVCriterion>().unwrap(), c);
+        }
+    }
+
+    #[test]
+    fn test_selection_order_parses_aliases_and_rejects_unknown() {
+        ORDER_CHOICES.validate().unwrap();
+        for s in ["forward", "FWD"] {
+            assert_eq!(
+                s.parse::<SelectionOrder>().unwrap(),
+                SelectionOrder::Forward
             );
         }
+        for s in ["Backward", "backward-elimination"] {
+            assert_eq!(
+                s.parse::<SelectionOrder>().unwrap(),
+                SelectionOrder::Backward
+            );
+        }
+        for s in ["prespecified", "listed"] {
+            assert_eq!(
+                s.parse::<SelectionOrder>().unwrap(),
+                SelectionOrder::Prespecified(vec![])
+            );
+        }
+        expect_invalid_spec(
+            "random".parse::<SelectionOrder>().unwrap_err(),
+            "forward, backward, prespecified",
+        );
+        assert_eq!(SelectionOrder::help(), "forward | backward | prespecified");
+    }
 
-        // Should have correct count of treated and control
-        assert!(
-            result.n_treated > 0,
-            "Should have some treated observations"
+    #[test]
+    fn test_stopping_rule_parses_aliases_and_rejects_unknown() {
+        RULE_CHOICES.validate().unwrap();
+        for s in ["cv_minimum", "min"] {
+            assert_eq!(s.parse::<StoppingRule>().unwrap(), StoppingRule::CVMinimum);
+        }
+        for s in ["1se", "one-SE"] {
+            assert_eq!(s.parse::<StoppingRule>().unwrap(), StoppingRule::OneSE);
+        }
+        assert_eq!(
+            StoppingRule::parse_with("max_covariates", Some(3)).unwrap(),
+            StoppingRule::MaxCovariates(3)
         );
-        assert!(
-            result.n_control > 0,
-            "Should have some control observations"
+        expect_invalid_spec(
+            "max_covariates".parse::<StoppingRule>().unwrap_err(),
+            "needs max_covariates",
         );
-        assert_eq!(result.n_treated + result.n_control, result.n_obs);
+        expect_invalid_spec(
+            "aic".parse::<StoppingRule>().unwrap_err(),
+            "cv_minimum, one_se, max_covariates",
+        );
+        assert_eq!(StoppingRule::help(), "cv_minimum | one_se | max_covariates");
+    }
+
+    #[test]
+    fn test_ctmle_q_model_parses_aliases_and_rejects_unknown() {
+        CTmleQModel::choices().validate().unwrap();
+        for s in ["Linear", "gaussian", "continuous"] {
+            assert_eq!(s.parse::<CTmleQModel>().unwrap(), CTmleQModel::Linear);
+        }
+        for s in ["LOGIT", "binary", "binomial"] {
+            assert_eq!(s.parse::<CTmleQModel>().unwrap(), CTmleQModel::Logistic);
+        }
+        expect_invalid_spec(
+            "probit".parse::<CTmleQModel>().unwrap_err(),
+            "unknown q_model 'probit'",
+        );
+    }
+
+    #[test]
+    fn test_ctmle_display_reports_algorithm_and_criterion() {
+        let ds = ctmle_sim();
+        let r = ctmle(
+            &ds,
+            "yb",
+            "a",
+            &W,
+            CTmleConfig {
+                cv_criterion: CVCriterion::VarIC,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = r.to_string();
+        assert!(text.contains("CV Criterion:   CV-VarIC\n"), "{text}");
+        assert!(text.contains(&format!("Algorithm:      {}", r.config.algorithm)));
+        assert!(r.config.algorithm.contains("forward selection of g"));
+        assert!(text.contains("Criterion"));
+        assert!(text.contains("Crit. SE"));
+        assert!(
+            text.contains(&format!("Selected: {} of 4 candidates", r.n_selected)),
+            "{text}"
+        );
+        let p = ctmle(
+            &ds,
+            "yb",
+            "a",
+            &W,
+            CTmleConfig {
+                cv_criterion: CVCriterion::PenRSS,
+                penalty_factor: 2.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(p.to_string().contains("CV-PenRSS (penalty factor 2)"));
+        // warnings: the small-sample note on n = 40 with 5 folds
+        let small = create_ctmle_test_dataset();
+        let s = ctmle(
+            &small,
+            "y",
+            "treatment",
+            &["w1", "w2"],
+            CTmleConfig {
+                n_folds: 15, // 20 treated < 2 * 15: the small-sample warning
+                q_model: CTmleQModel::Linear,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!s.warnings.is_empty());
+        let notes = crate::traits::convergence::notes_text(&s);
+        assert!(s.to_string().ends_with(&notes));
+        assert_eq!(
+            crate::traits::convergence::notes_json(&s)["warnings"],
+            serde_json::Value::from(s.warnings.clone())
+        );
     }
 
     // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
@@ -2594,7 +2770,7 @@ mod tests {
                 },
             )
         };
-        // step 3 reaches the per-covariate extraction as well as the W matrix
+        // step 3 reaches the per-covariate extraction
         nf::assert_refusals(&case, &ds, true, run);
         nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| vec![r.ate, r.se]);
     }

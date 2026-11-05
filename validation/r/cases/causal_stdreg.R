@@ -146,3 +146,84 @@ case("tmle_glm", "causal/tmle",
        packages = c("tmle"))
 })
 
+# ---------------------------------------------------------------- C-TMLE (written out)
+# V-fold risk of the g-model with covariates S: Q (Qv[[v]]), g and epsilon fitted on the training folds,
+# loss on the validation fold
+.sr_cv_risk <- function(d, y, S, logistic, gb, V, pen, Qv) {
+  n <- nrow(d); fold <- (seq_len(n) - 1) %% V + 1
+  r <- s <- e <- numeric(V)
+  for (v in seq_len(V)) {
+    tr <- which(fold != v); te <- which(fold == v)
+    g <- .sr_fitg(d, S, tr, gb)$g
+    f <- .sr_fluct(d[[y]], d$a, Qv[[v]], g, logistic, tr)
+    r[v] <- sum((d[[y]][te] - f$QsA[te])^2)
+    s[v] <- var(f$H[te] * (d[[y]][te] - f$QsA[te]) + f$Qs1[te] - f$Qs0[te])
+    e[v] <- f$eps
+  }
+  list(rss = sum(r), rss_se = sqrt(V) * sd(r), varic = mean(s), varic_se = sd(s) / sqrt(V),
+       penrss = sum(r) + pen * log(n) * length(S), r = r, s = s, e = e)
+}
+.sr_ctmle <- function(d, y, logistic, crit, order = "forward", pre = NULL, V = 5, gb = c(0.025, 0.975), pen = 1) {
+  n <- nrow(d); fold <- (seq_len(n) - 1) %% V + 1
+  Qv <- lapply(seq_len(V), function(v) .sr_fitQ(d, y, logistic, which(fold != v)))
+  Qfull <- .sr_fitQ(d, y, logistic)
+  val <- function(S) {
+    cr <- .sr_cv_risk(d, y, S, logistic, gb, V, pen, Qv)
+    c(crit = cr[[crit]], se = if (crit == "varic") cr$varic_se else cr$rss_se, rss = cr$rss, varic = cr$varic)
+  }
+  p <- length(.sr_W)
+  cur <- if (order == "backward") 1:p else integer(0)
+  path <- list(val(cur)); moved <- integer(0); first_step <- NULL
+  repeat {
+    cand <- if (order == "forward") setdiff(1:p, cur) else if (order == "backward") cur else
+      { k <- length(moved) + 1; if (k > length(pre)) integer(0) else pre[k] }
+    if (!length(cand)) break
+    sets <- lapply(cand, function(j) if (order == "backward") setdiff(cur, j) else sort(c(cur, j)))
+    vals <- t(sapply(sets, val))
+    if (is.null(first_step)) first_step <- vals[, "crit"]
+    b <- which.min(vals[, "crit"])                                   # first minimum, as p2a's strict `<`
+    cur <- sets[[b]]; moved <- c(moved, cand[b]); path[[length(path) + 1]] <- vals[b, ]
+  }
+  get <- function(nm) sapply(path, `[[`, nm)
+  crits <- get("crit"); ses <- get("se")
+  ncov <- if (order == "backward") p - (seq_along(crits) - 1) else seq_along(crits) - 1
+  sel <- which.min(crits)
+  thr <- crits[sel] + ses[sel]; ok <- which(crits <= thr)
+  onese <- ok[which.min(ncov[ok])]
+  covs_at <- function(k) if (order == "backward") setdiff(1:p, moved[seq_len(k - 1)]) else sort(moved[seq_len(k - 1)])
+  fin <- .sr_tmle_full(d, y, covs_at(sel), logistic, gb, Qfull)
+  fin1 <- .sr_tmle_full(d, y, covs_at(onese), logistic, gb, Qfull)
+  steps <- lapply(seq_along(crits), function(k) .sr_tmle_full(d, y, covs_at(k), logistic, gb, Qfull))
+  list(first_step = vec(first_step), path_crit = vec(crits), path_se = vec(ses),
+       path_rss = vec(get("rss")), path_varic = vec(get("varic")), path_ncov = vec(ncov),
+       moved = vec(moved - 1), selected_step = sel - 1, selected_mask = vec(as.numeric(1:p %in% covs_at(sel))),
+       ate = fin$ate, se = fin$se, epsilon = fin$eps, ci_lower = fin$ate - qnorm(0.975) * fin$se,
+       ci_upper = fin$ate + qnorm(0.975) * fin$se, p = 2 * pnorm(-abs(fin$ate / fin$se)),
+       onese_step = onese - 1, onese_selected_mask = vec(as.numeric(1:p %in% covs_at(onese))), onese_ate = fin1$ate,
+       path_ate = vec(sapply(steps, `[[`, "ate")), path_ate_se = vec(sapply(steps, `[[`, "se")))
+}
+.sr_prefix <- function(l, p) { names(l) <- paste0(p, "_", names(l)); l }
+
+case("ctmle_cv", "causal/ctmle",
+     "C-TMLE forward / backward / prespecified selection of g with a real 5-fold CV risk (Q, g and epsilon fitted on the training folds); RSS, VarIC and PenRSS criteria",
+     function(ctx) {
+  d <- .sr_ct_data(ctx); n <- nrow(d); V <- 5
+  fold <- (seq_len(n) - 1) %% V + 1
+  # fold-level values of one candidate g = {w1, w3} (logistic Q), for the recompute-from-folds tests
+  Qv <- lapply(seq_len(V), function(v) .sr_fitQ(d, "yb", TRUE, which(fold != v)))
+  c13 <- .sr_cv_risk(d, "yb", c(1, 3), TRUE, c(0.025, 0.975), V, 2, Qv)
+  v <- c(list(cv13_fold_rss = vec(c13$r), cv13_fold_varic = vec(c13$s), cv13_fold_epsilon = vec(c13$e),
+              cv13_rss = c13$rss, cv13_rss_se = c13$rss_se, cv13_varic = c13$varic, cv13_varic_se = c13$varic_se,
+              cv13_penrss2 = c13$penrss),
+         .sr_prefix(.sr_ctmle(d, "yb", TRUE, "rss"), "logit_rss"),
+         .sr_prefix(.sr_ctmle(d, "yb", TRUE, "varic"), "logit_varic"),
+         .sr_prefix(.sr_ctmle(d, "yb", TRUE, "penrss", pen = 2), "logit_penrss"),
+         .sr_prefix(.sr_ctmle(d, "yc", FALSE, "rss"), "linear_rss"),
+         .sr_prefix(.sr_ctmle(d, "yc", FALSE, "varic"), "linear_varic"),
+         .sr_prefix(.sr_ctmle(d, "yb", TRUE, "rss", order = "backward"), "logit_backward"),
+         .sr_prefix(.sr_ctmle(d, "yb", TRUE, "rss", order = "pre", pre = c(3, 1)), "logit_pre31"))
+  list(values = v, dataset = "validation/datasets/generated/ctmle_sim.csv",
+       reference = "C-TMLE greedy selection of g with a fixed initial Q, criteria of Gruber & van der Laan (2010) as ctmle::ctmleDiscrete names them (CV likelihood, varIC.cv), written out; ctmle 0.1.2 (installed) is not used as a pin because it updates Q between clever covariates; glm epsilon 1e-14",
+       call = "for each candidate g and fold v (i %% 5): Q, g, epsilon on the training folds; RSS and var(IC) on fold v",
+       packages = character(0))
+})
