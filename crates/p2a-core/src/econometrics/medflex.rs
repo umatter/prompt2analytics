@@ -781,7 +781,7 @@ fn run_medflex_rows(
     };
     let plan = validate_and_plan(&inp, names, &config, rows)?;
     let n = inp.n();
-    let est = estimate(&inp, &plan)?;
+    let est = estimate(&inp, &plan, None)?;
     let med = &est.mediator;
 
     let n_treated = inp.a.iter().filter(|&&v| v == 1.0).count();
@@ -806,7 +806,8 @@ fn run_medflex_rows(
                 *r = rng.gen_range(0..n);
             }
         };
-        let draws = bootstrap_link_draws(&inp, &plan, config.n_bootstrap, &mut next_rows)?;
+        let warm = WarmStart::from_sample(&est, &plan);
+        let draws = bootstrap_link_draws(&inp, &plan, &warm, config.n_bootstrap, &mut next_rows)?;
         let (se, ci, notes) = summarize_bootstrap(&draws, &plan, &link, level)?;
         let w = match scale {
             EffectScale::Difference => "difference",
@@ -1255,7 +1256,15 @@ struct WorkingFit {
     notes: Vec<String>,
 }
 
-fn fit_working(x: &Array2<f64>, y: &Array1<f64>, plan: &Plan) -> EconResult<WorkingFit> {
+/// `start`: IRLS start values of a non-gaussian working model (a bootstrap replicate
+/// starts from the sample fit; the canonical-link likelihoods are concave, so the
+/// converged fit is the same).
+fn fit_working(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    plan: &Plan,
+    start: Option<&Array1<f64>>,
+) -> EconResult<WorkingFit> {
     const MODEL: &str = "Outcome working model";
     let wf = match plan.family {
         MedflexFamily::Gaussian => {
@@ -1282,11 +1291,12 @@ fn fit_working(x: &Array2<f64>, y: &Array1<f64>, plan: &Plan) -> EconResult<Work
             }
         }
         MedflexFamily::Poisson | MedflexFamily::Binomial => {
-            let spec = if plan.family == MedflexFamily::Poisson {
+            let mut spec = if plan.family == MedflexFamily::Poisson {
                 GlmSpec::poisson()
             } else {
                 GlmSpec::logit()
             };
+            spec.start = start.map(|s| s.view());
             let fit = fit_glm(x.view(), y.view(), &spec)
                 .map_err(|e| prefixed(e, "outcome working model: "))?;
             let notes = glm_fit_notes(MODEL, &fit, &spec, &plan.working_names);
@@ -1424,11 +1434,14 @@ fn contrasts(plan: &Plan, k_n: usize) -> [Array1<f64>; 3] {
     [nde, nie, te]
 }
 
-fn estimate(inp: &Inputs, plan: &Plan) -> EconResult<Estimate> {
-    check_arms(&inp.a)?;
-    let mediator = identification(inp, plan)?;
-    let x = working_design(inp, plan)?;
-    let working = fit_working(&x, &inp.y, plan)?;
+/// The imputed outcomes of the expanded data (row `2i + j` sets A = j): the counterfactual
+/// working design, its linear predictor and `yhat`, checked against the natural effect
+/// model's range.
+fn impute(
+    inp: &Inputs,
+    plan: &Plan,
+    working: &WorkingFit,
+) -> EconResult<(Array2<f64>, Array1<f64>, Array1<f64>)> {
     let beta_z = zero_nan(&working.coef);
     let xcf = counterfactual_design(inp, plan)?;
     let eta_cf = xcf.dot(&beta_z);
@@ -1458,6 +1471,29 @@ fn estimate(inp: &Inputs, plan: &Plan) -> EconResult<Estimate> {
             }
         }
     }
+    Ok((xcf, eta_cf, yhat))
+}
+
+/// The quasi-GLM of the natural effect model on the ratio or odds-ratio scale.
+fn ne_glm_spec<'a>(scale: EffectScale) -> GlmSpec<'a> {
+    if scale == EffectScale::Ratio {
+        GlmSpec::new(GlmFamily::QuasiPoisson, GlmLink::Log)
+    } else {
+        GlmSpec::new(GlmFamily::QuasiBinomial, GlmLink::Logit)
+    }
+}
+
+/// `working_start`: see [`fit_working`] (`None` for the sample fit).
+fn estimate(
+    inp: &Inputs,
+    plan: &Plan,
+    working_start: Option<&Array1<f64>>,
+) -> EconResult<Estimate> {
+    check_arms(&inp.a)?;
+    let mediator = identification(inp, plan)?;
+    let x = working_design(inp, plan)?;
+    let working = fit_working(&x, &inp.y, plan, working_start)?;
+    let (xcf, eta_cf, yhat) = impute(inp, plan, &working)?;
 
     const MODEL: &str = "Natural effect model";
     let z = ne_design(inp, plan)?;
@@ -1471,11 +1507,7 @@ fn estimate(inp: &Inputs, plan: &Plan) -> EconResult<Estimate> {
             (fit.beta, fit.aliased, &yhat - &fit.residuals)
         }
         EffectScale::Ratio | EffectScale::OddsRatio => {
-            let spec = if plan.scale == EffectScale::Ratio {
-                GlmSpec::new(GlmFamily::QuasiPoisson, GlmLink::Log)
-            } else {
-                GlmSpec::new(GlmFamily::QuasiBinomial, GlmLink::Logit)
-            };
+            let spec = ne_glm_spec(plan.scale);
             let fit = fit_glm(z.view(), yhat.view(), &spec)
                 .map_err(|e| prefixed(e, "natural effect model: "))?;
             notes.extend(glm_fit_notes(MODEL, &fit, &spec, &plan.ne_names));
@@ -1527,7 +1559,7 @@ fn closed_form(inp: &Inputs, plan: &Plan) -> EconResult<([f64; 3], Vec<String>)>
         ..
     } = identification(inp, plan)?;
     let x = working_design(inp, plan)?;
-    let working = fit_working(&x, &inp.y, plan)?;
+    let working = fit_working(&x, &inp.y, plan, None)?;
     let b = zero_nan(&working.coef);
     let p = plan.cbar.len();
     let b_am = if plan.interaction {
@@ -1642,15 +1674,124 @@ struct BootDraws {
     first_warning: Option<String>,
 }
 
-/// One replicate's link-scale effects and notes: the closed form for a gaussian working
-/// model on the difference scale, the full estimator otherwise.
-fn replicate_link(inp: &Inputs, plan: &Plan) -> EconResult<([f64; 3], Vec<String>)> {
-    if plan.family == MedflexFamily::Gaussian && plan.scale == EffectScale::Difference {
-        closed_form(inp, plan)
-    } else {
-        let e = estimate(inp, plan)?;
-        Ok((e.link, e.notes))
+/// IRLS start values of the bootstrap replicates: the sample fit's coefficients, when it
+/// has no aliased column.
+#[derive(Default)]
+struct WarmStart {
+    /// Non-gaussian outcome working model.
+    working: Option<Array1<f64>>,
+    /// The two halves of a natural effect model saturated in A0 (see [`split_ne_link`]):
+    /// the coefficients on `W = [1, A1, C]` at A0 = 0 and at A0 = 1.
+    ne_halves: Option<[Array1<f64>; 2]>,
+}
+
+impl WarmStart {
+    fn from_sample(est: &Estimate, plan: &Plan) -> WarmStart {
+        let finite = |v: &Array1<f64>| v.iter().all(|x| x.is_finite());
+        let working = (plan.family != MedflexFamily::Gaussian && finite(&est.working.coef))
+            .then(|| est.working.coef.clone());
+        let ne_halves = (split_applies(plan) && finite(&est.ne_coef)).then(|| {
+            let p = plan.cbar.len();
+            let t = &est.ne_coef;
+            let mut g = Array1::zeros(2 + p);
+            let mut h = Array1::zeros(2 + p);
+            g[0] = t[0];
+            g[1] = t[2];
+            h[0] = t[0] + t[1];
+            h[1] = t[2] + t[3 + p];
+            for l in 0..p {
+                g[2 + l] = t[3 + l];
+                h[2 + l] = t[3 + l] + t[4 + p + l];
+            }
+            [g, h]
+        });
+        WarmStart { working, ne_halves }
     }
+}
+
+/// With A:M the natural effect model `[1, A0, A1, C, A0:A1, A0:C]` is saturated in A0,
+/// so its quasi-score equations (canonical links) split exactly into two n-row fits on
+/// `W = [1, A1, C]`; used by the ratio and odds-ratio replicates.
+fn split_applies(plan: &Plan) -> bool {
+    plan.interaction && plan.scale != EffectScale::Difference
+}
+
+/// One replicate's link-scale effects by the split natural effect model: `gamma` from the
+/// A0 = 0 rows and `gamma + delta` from the A0 = 1 rows, mapped back to the natural
+/// effect model's columns. `None` when either half reports a note (aliasing,
+/// non-convergence, fitted values at the bounds): the caller then fits the full model, so
+/// the replicate's notes are the full fit's.
+fn split_ne_link(
+    inp: &Inputs,
+    plan: &Plan,
+    warm: &WarmStart,
+) -> EconResult<Option<([f64; 3], Vec<String>)>> {
+    check_arms(&inp.a)?;
+    let mediator = identification(inp, plan)?;
+    let x = working_design(inp, plan)?;
+    let working = fit_working(&x, &inp.y, plan, warm.working.as_ref())?;
+    let (_, _, yhat) = impute(inp, plan, &working)?;
+    let (n, p) = inp.c.dim();
+    let what = "natural effect models: natural effect design";
+    let mut w = resource::try_zeros2(n, 2 + p, what)?;
+    let mut y0 = resource::try_zeros1(n, what)?;
+    let mut y1 = resource::try_zeros1(n, what)?;
+    for i in 0..n {
+        let mut row = w.row_mut(i);
+        row[0] = 1.0;
+        row[1] = inp.a[i];
+        for l in 0..p {
+            row[2 + l] = inp.c[[i, l]];
+        }
+        y0[i] = yhat[2 * i];
+        y1[i] = yhat[2 * i + 1];
+    }
+    let mut halves = Vec::with_capacity(2);
+    for (h, y) in [&y0, &y1].into_iter().enumerate() {
+        let mut spec = ne_glm_spec(plan.scale);
+        spec.start = warm.ne_halves.as_ref().map(|s| s[h].view());
+        let fit = fit_glm(w.view(), y.view(), &spec)
+            .map_err(|e| prefixed(e, "natural effect model: "))?;
+        if !fit.converged || !fit.warnings.is_empty() || !fit.aliased.is_empty() {
+            return Ok(None);
+        }
+        halves.push(fit.coefficients);
+    }
+    let (g, d) = (&halves[0], &halves[1]);
+    let mut theta = Array1::zeros(plan.ne_names.len());
+    theta[0] = g[0];
+    theta[1] = d[0] - g[0];
+    theta[2] = g[1];
+    theta[3 + p] = d[1] - g[1];
+    for l in 0..p {
+        theta[3 + l] = g[2 + l];
+        theta[4 + p + l] = d[2 + l] - g[2 + l];
+    }
+    let k = contrasts(plan, theta.len());
+    let link = [k[0].dot(&theta), k[1].dot(&theta), k[2].dot(&theta)];
+    let mut notes = working.notes;
+    notes.extend(mediator.notes);
+    Ok(Some((link, notes)))
+}
+
+/// One replicate's link-scale effects and notes: the closed form for a gaussian working
+/// model on the difference scale, the split natural effect model with A:M on the ratio and
+/// odds-ratio scales, the full estimator otherwise (non-gaussian fits warm-started).
+fn replicate_link(
+    inp: &Inputs,
+    plan: &Plan,
+    warm: &WarmStart,
+) -> EconResult<([f64; 3], Vec<String>)> {
+    if plan.family == MedflexFamily::Gaussian && plan.scale == EffectScale::Difference {
+        return closed_form(inp, plan);
+    }
+    if split_applies(plan)
+        && let Some(r) = split_ne_link(inp, plan, warm)?
+    {
+        return Ok(r);
+    }
+    let e = estimate(inp, plan, warm.working.as_ref())?;
+    Ok((e.link, e.notes))
 }
 
 /// `n_boot` replicates on the units `next_rows` draws (medflex `se = "bootstrap"`: units
@@ -1660,6 +1801,7 @@ fn replicate_link(inp: &Inputs, plan: &Plan) -> EconResult<([f64; 3], Vec<String
 fn bootstrap_link_draws(
     inp: &Inputs,
     plan: &Plan,
+    warm: &WarmStart,
     n_boot: usize,
     next_rows: &mut dyn FnMut(&mut [usize]),
 ) -> EconResult<BootDraws> {
@@ -1676,7 +1818,7 @@ fn bootstrap_link_draws(
         resource::checkpoint()?;
         next_rows(&mut rows);
         let sample = inp.resample(&rows)?;
-        match replicate_link(&sample, plan) {
+        match replicate_link(&sample, plan, warm) {
             Ok((l, notes)) if l.iter().all(|v| v.is_finite()) => {
                 for (draws, v) in link.iter_mut().zip(l) {
                     draws.push(v);
@@ -2918,9 +3060,13 @@ mod tests {
             rows[495..].iter().map(|&v| v as f64).collect::<Vec<_>>(),
             case.vector("boot_rows_tail")
         );
-        let draws = bootstrap_link_draws(&inp, &plan, 50, &mut lcg_rows(20261130, 500)).unwrap();
+        // the path run_medflex takes: split natural effect model, warm-started replicates
+        let est = estimate(&inp, &plan, None).unwrap();
+        let warm = WarmStart::from_sample(&est, &plan);
+        let draws =
+            bootstrap_link_draws(&inp, &plan, &warm, 50, &mut lcg_rows(20261130, 500)).unwrap();
         assert_eq!((draws.failed, draws.warned), (0, 0));
-        let link_hat = estimate(&inp, &plan).unwrap().link;
+        let link_hat = est.link;
         let (se, ci, notes) = summarize_bootstrap(&draws, &plan, &link_hat, 0.95).unwrap();
         assert!(notes.is_empty(), "{notes:?}");
         let t = Tol::iterative(1e-8);
@@ -3052,6 +3198,52 @@ mod tests {
     }
 
     #[test]
+    fn test_medflex_split_replicates_match_the_full_fit() {
+        // with A:M the ratio and odds-ratio replicates fit the natural effect model as two
+        // n-row halves, warm-started from the sample fit: the same effects as the full
+        // 2n-row fit, on the sample and on resamples
+        let ds = medflex_sim();
+        let conf = ["c1", "c2"];
+        let t = Tol::iterative(1e-8);
+        for (y, scale, family) in [
+            ("yp", EffectScale::Ratio, None),
+            ("yb", EffectScale::OddsRatio, None),
+            ("yb", EffectScale::Ratio, Some(MedflexFamily::Binomial)),
+        ] {
+            let inp = case_inputs(&ds, y, "m", &conf);
+            let c = cfg(scale, family, true);
+            let plan = case_plan(&inp, y, "m", &conf, &c);
+            let est = estimate(&inp, &plan, None).unwrap();
+            let warm = WarmStart::from_sample(&est, &plan);
+            assert!(warm.working.is_some() && warm.ne_halves.is_some());
+            let mut rows_of = lcg_rows(7, inp.n());
+            let mut rows = vec![0usize; inp.n()];
+            let mut samples = vec![inp.resample(&(0..inp.n()).collect::<Vec<_>>()).unwrap()];
+            for _ in 0..5 {
+                rows_of(&mut rows);
+                samples.push(inp.resample(&rows).unwrap());
+            }
+            for (b, sample) in samples.iter().enumerate() {
+                let full = estimate(sample, &plan, None).unwrap();
+                for w in [&WarmStart::default(), &warm] {
+                    let (link, notes) = split_ne_link(sample, &plan, w)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("{y} {scale} sample {b}: fell back"));
+                    for e in 0..3 {
+                        assert!(
+                            t.allows(link[e], full.link[e]),
+                            "{y} {scale} sample {b} effect {e}: {} vs {}",
+                            link[e],
+                            full.link[e]
+                        );
+                    }
+                    assert_eq!(notes, full.notes, "{y} {scale} sample {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_medflex_closed_form_matches_imputation() {
         // the bootstrap's closed form (gaussian working model, difference scale) gives the
         // estimator's link-scale effects
@@ -3068,7 +3260,7 @@ mod tests {
             let inp = case_inputs(&ds, y, m, conf);
             let c = cfg(EffectScale::Difference, None, inter);
             let plan = case_plan(&inp, y, m, conf, &c);
-            let generic = estimate(&inp, &plan).unwrap().link;
+            let generic = estimate(&inp, &plan, None).unwrap().link;
             let (closed, _) = closed_form(&inp, &plan).unwrap();
             for e in 0..3 {
                 assert!(
@@ -3094,7 +3286,7 @@ mod tests {
         for b in 0..5 {
             g(&mut rows);
             let sample = inp.resample(&rows).unwrap();
-            let generic = estimate(&sample, &plan).unwrap().link;
+            let generic = estimate(&sample, &plan, None).unwrap().link;
             let (closed, _) = closed_form(&sample, &plan).unwrap();
             for e in 0..3 {
                 assert!(
@@ -3235,7 +3427,7 @@ mod tests {
             let inp = case_inputs(&ds, y, "m", &conf);
             let c = cfg(scale, None, false);
             let plan = case_plan(&inp, y, "m", &conf, &c);
-            let (_, notes) = replicate_link(&inp, &plan).unwrap();
+            let (_, notes) = replicate_link(&inp, &plan, &WarmStart::default()).unwrap();
             assert_eq!(
                 notes.last().map(String::as_str),
                 Some(note),
@@ -3269,7 +3461,8 @@ mod tests {
             }
         };
         let first = "Invalid model specification: natural effects need treated and control units (treated: 0, control: 500)";
-        let d = bootstrap_link_draws(&inp, &plan, 60, &mut failing(6)).unwrap();
+        let d =
+            bootstrap_link_draws(&inp, &plan, &WarmStart::default(), 60, &mut failing(6)).unwrap();
         assert_eq!((d.failed, d.link[0].len()), (10, 50));
         let (_, _, notes) = summarize_bootstrap(&d, &plan, &[0.0; 3], 0.95).unwrap();
         assert_eq!(
@@ -3278,7 +3471,8 @@ mod tests {
                 "10 of 60 bootstrap replicates failed and were dropped (first error: {first})"
             )]
         );
-        let d = bootstrap_link_draws(&inp, &plan, 59, &mut failing(5)).unwrap(); // 11 fail, 48 usable
+        let d =
+            bootstrap_link_draws(&inp, &plan, &WarmStart::default(), 59, &mut failing(5)).unwrap(); // 11 fail, 48 usable
         match summarize_bootstrap(&d, &plan, &[0.0; 3], 0.95) {
             Err(EconError::Computation(m)) => assert_eq!(
                 m,
