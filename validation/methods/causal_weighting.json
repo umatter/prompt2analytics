@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "weightit_glm",
+      "name": "WeightIt logistic (glm) propensity weights: ATE, ATT, ATC, stabilised ATE",
+      "category": "econometrics",
+      "reference": "WeightIt::weightit(method = 'glm', estimand = 'ATE' | 'ATT' | 'ATC', stabilize); stats::glm(family = binomial)",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_weightit_logistic"
+      ],
+      "quantities": [
+        "propensity scores",
+        "ATE/ATT/ATC weights",
+        "stabilised ATE weights"
+      ],
+      "tolerance": "validation/README.md, n = 300: 1e-8 relative (Tol::coef)",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/ipw_weightit.csv"
+      ]
+    }
+  ]
+}

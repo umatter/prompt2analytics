@@ -63,11 +63,12 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::glm::{GlmFit, GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::options::Choices;
-use crate::traits::estimator::logistic_cdf;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Type Definitions
@@ -280,6 +281,19 @@ pub struct WeightItResult {
     pub iterations: usize,
     /// Warnings generated during estimation
     pub warnings: Vec<String>,
+    /// Convergence record of the fit (the propensity GLM for `Logistic`).
+    #[serde(default)]
+    pub convergence: Option<Convergence>,
+}
+
+impl ResultNotes for WeightItResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+
+    fn notes_convergence(&self) -> Option<Convergence> {
+        self.convergence.clone()
+    }
 }
 
 impl fmt::Display for WeightItResult {
@@ -308,16 +322,6 @@ impl fmt::Display for WeightItResult {
             self.effective_sample_size, self.ess_treated, self.ess_control
         )?;
         writeln!(f)?;
-
-        if !self.converged {
-            writeln!(
-                f,
-                "WARNING: Algorithm did not converge after {} iterations",
-                self.iterations
-            )?;
-            writeln!(f)?;
-        }
-
         writeln!(f, "Balance Before Weighting:")?;
         writeln!(
             f,
@@ -341,16 +345,7 @@ impl fmt::Display for WeightItResult {
             "  Mean |Std.Diff|: {:.4}",
             self.balance_after.mean_std_diff
         )?;
-
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -452,7 +447,30 @@ pub fn weightit(
     covariate_cols: &[&str],
     config: WeightItConfig,
 ) -> EconResult<WeightItResult> {
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1; got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be finite and positive; got {}",
+                config.tolerance
+            ),
+        });
+    }
     let mut warnings = Vec::new();
+    if config.stabilize && config.method != WeightMethod::Logistic {
+        let label = match config.method {
+            WeightMethod::Entropy => "entropy balancing",
+            WeightMethod::Energy => "energy balancing",
+            _ => "stable balancing",
+        };
+        warnings.push(format!(
+            "stabilize cannot be used with {label} weights and was ignored (it applies to the logistic propensity-score weights only, as in WeightIt)"
+        ));
+    }
 
     // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
     // Extract treatment variable
@@ -489,10 +507,27 @@ pub fn weightit(
     let balance_before = compute_balance_table(&x, &d, &var_names, None);
 
     // Compute weights based on method
+    let mut convergence = None;
     let (weights, propensity_scores, converged, iterations) = match config.method {
         WeightMethod::Logistic => {
-            let (w, ps) = compute_logistic_weights(&x, &d, config.estimand, config.stabilize)?;
-            (w, Some(ps), true, 0)
+            let (w, ps, fit) =
+                logistic_weights(&x, &d, config.estimand, config.stabilize, config.max_iter)?;
+            let conv = Convergence::new(
+                fit.converged,
+                fit.iterations,
+                config.max_iter,
+                "relative change in deviance",
+                f64::NAN,
+                fit.epsilon,
+            );
+            for w in &fit.warnings {
+                warnings.push(format!("propensity model: {w}"));
+            }
+            if let Some(note) = conv.note("Propensity model") {
+                warnings.push(note);
+            }
+            convergence = Some(conv);
+            (w, Some(ps), fit.converged, fit.iterations)
         }
         WeightMethod::Entropy => {
             let result = compute_entropy_weights(
@@ -590,6 +625,7 @@ pub fn weightit(
         converged,
         iterations,
         warnings,
+        convergence,
     })
 }
 
@@ -734,125 +770,71 @@ pub fn entropy_balance(
 // Weighting Method Implementations
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute logistic propensity score weights.
-fn compute_logistic_weights(
+/// Logistic propensity-score weights: the shared binomial GLM (`glm.fit`'s IRLS) of the
+/// treatment on `x`, then the weights of `estimand`. Returns (weights, scores, the GLM fit).
+fn logistic_weights(
     x: &Array2<f64>,
     d: &Array1<f64>,
     estimand: WeightEstimand,
     stabilize: bool,
-) -> EconResult<(Vec<f64>, Vec<f64>)> {
-    let n = d.len();
-    let k = x.ncols();
-
-    // Newton-Raphson for logistic regression
-    let mut beta = Array1::zeros(k);
-    let max_iter = 50;
-    let tolerance = 1e-8;
-
-    for _ in 0..max_iter {
-        // Linear predictor
-        let z: Array1<f64> = x.dot(&beta);
-
-        // Probabilities
-        let p: Array1<f64> = z.mapv(logistic_cdf);
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        // Gradient: X'(d - p)
-        let residuals = d - &p_clipped;
-        let mut gradient = Array1::zeros(k);
-        for i in 0..n {
-            for j in 0..k {
-                gradient[j] += residuals[i] * x[[i, j]];
-            }
-        }
-
-        // Check convergence
-        let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-        if grad_norm < tolerance {
-            break;
-        }
-
-        // Weights: p(1-p)
-        let weights: Array1<f64> = p_clipped.mapv(|pi| pi * (1.0 - pi));
-
-        // Hessian: -X'WX
-        let mut hessian = Array2::zeros((k, k));
-        for i in 0..n {
-            let wi = weights[i];
-            for j in 0..k {
-                for l in 0..k {
-                    hessian[[j, l]] -= wi * x[[i, j]] * x[[i, l]];
-                }
-            }
-        }
-
-        // Invert -H
-        let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) =
-            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
-                context: "Propensity score estimation".to_string(),
-                suggestion: format!("Check for multicollinearity in covariates: {:?}", e),
-            })?;
-
-        // Update
-        let delta = hess_inv.dot(&gradient);
-        beta = &beta + &delta;
+    max_iter: usize,
+) -> EconResult<(Vec<f64>, Vec<f64>, GlmFit)> {
+    if let Some((i, v)) = d.iter().enumerate().find(|(_, v)| **v != 0.0 && **v != 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("propensity treatment must be coded 0/1 (row {i} is {v})"),
+        });
     }
-
-    // Final propensity scores
-    let z_final: Array1<f64> = x.dot(&beta);
-    let ps: Vec<f64> = z_final
+    let n = d.len();
+    let mut spec = GlmSpec::logit();
+    spec.max_iter = max_iter;
+    let fit = fit_glm(x.view(), d.view(), &spec)?;
+    // Clipped only to keep the weights finite.
+    let ps: Vec<f64> = fit
+        .fitted
         .iter()
-        .map(|&z| logistic_cdf(z).max(1e-10).min(1.0 - 1e-10))
+        .map(|&p| p.clamp(1e-10, 1.0 - 1e-10))
         .collect();
+    let p_treat = d.iter().filter(|&&di| di == 1.0).count() as f64 / n as f64;
 
-    // Compute stabilization factor
-    let p_treat = d.iter().filter(|&&di| di >= 0.5).count() as f64 / n as f64;
-
-    // Compute weights based on estimand
     let weights: Vec<f64> = (0..n)
         .map(|i| {
-            let di = d[i];
-            let psi = ps[i];
-
-            let raw_weight = match estimand {
-                WeightEstimand::ATE => {
-                    // ATE: T/ps + (1-T)/(1-ps)
-                    if di >= 0.5 {
-                        1.0 / psi
+            let treated = d[i] == 1.0;
+            let e = ps[i];
+            match estimand {
+                WeightEstimand::ATE if stabilize => {
+                    if treated {
+                        p_treat / e
                     } else {
-                        1.0 / (1.0 - psi)
+                        (1.0 - p_treat) / (1.0 - e)
                     }
                 }
+                WeightEstimand::ATE => {
+                    if treated {
+                        1.0 / e
+                    } else {
+                        1.0 / (1.0 - e)
+                    }
+                }
+                // ATT and ATC weights are already stable (WeightIt leaves them unchanged).
                 WeightEstimand::ATT => {
-                    // ATT: T + (1-T) * ps / (1-ps)
-                    if di >= 0.5 { 1.0 } else { psi / (1.0 - psi) }
+                    if treated {
+                        1.0
+                    } else {
+                        e / (1.0 - e)
+                    }
                 }
                 WeightEstimand::ATC => {
-                    // ATC: T * (1-ps) / ps + (1-T)
-                    if di >= 0.5 { (1.0 - psi) / psi } else { 1.0 }
-                }
-            };
-
-            if stabilize {
-                match estimand {
-                    WeightEstimand::ATE => {
-                        if di >= 0.5 {
-                            p_treat / psi
-                        } else {
-                            (1.0 - p_treat) / (1.0 - psi)
-                        }
+                    if treated {
+                        (1.0 - e) / e
+                    } else {
+                        1.0
                     }
-                    WeightEstimand::ATT => raw_weight, // ATT weights are already stable
-                    WeightEstimand::ATC => raw_weight, // ATC weights are already stable
                 }
-            } else {
-                raw_weight
             }
         })
         .collect();
 
-    Ok((weights, ps))
+    Ok((weights, ps, fit))
 }
 
 /// Compute entropy balancing weights using Newton's method.
@@ -956,6 +938,7 @@ fn compute_entropy_weights(
         converged,
         iterations,
         warnings: Vec::new(),
+        convergence: None,
     })
 }
 
@@ -1482,6 +1465,174 @@ mod tests {
         }
     }
 
+    use p2a_validation::{Check, Tol};
+
+    const COVS: [&str; 3] = ["x1", "x2", "x3"];
+
+    fn col(ds: &Dataset, name: &str) -> Vec<f64> {
+        DesignMatrix::extract_column(ds.df(), name)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// The entries of `v` whose unit is in the treated (true) or control (false) group, in row order.
+    fn group(v: &[f64], d: &[f64], treated: bool) -> Vec<f64> {
+        v.iter()
+            .zip(d)
+            .filter(|&(_, &di)| (di >= 0.5) == treated)
+            .map(|(&x, _)| x)
+            .collect()
+    }
+
+    fn scaled(v: &[f64], f: f64) -> Vec<f64> {
+        v.iter().map(|x| x * f).collect()
+    }
+
+    fn wmean(v: &[f64], w: &[f64]) -> f64 {
+        v.iter().zip(w).map(|(a, b)| a * b).sum::<f64>() / w.iter().sum::<f64>()
+    }
+
+    fn effect(y: &[f64], d: &[f64], w: &[f64]) -> f64 {
+        wmean(&group(y, d, true), &group(w, d, true))
+            - wmean(&group(y, d, false), &group(w, d, false))
+    }
+
+    fn n_zero(v: &[f64]) -> f64 {
+        v.iter().filter(|&&x| x == 0.0).count() as f64
+    }
+
+    /// `validation/datasets/generated/weighting_sim.csv` (the data of the weighting cases) for
+    /// the property tests, which pin no R value and so do not load a case.
+    fn weighting_sim() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/weighting_sim.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    #[test]
+    fn test_validate_weightit_logistic() {
+        // R: WeightIt 2.0.0 weightit(method = "glm", estimand = ATE | ATT | ATC, stabilize)
+        // (case ipw_aipw_sim)
+        let (case, ds) = crate::test_support::load_case("ipw_aipw_sim");
+        let run = |est: WeightEstimand, stab: bool| {
+            let mut c = WeightItConfig::default();
+            c.estimand = est;
+            c.stabilize = stab;
+            weightit(&ds, "treat", &COVS, c).unwrap()
+        };
+        let (ate, att, atc, stab) = (
+            run(WeightEstimand::ATE, false),
+            run(WeightEstimand::ATT, false),
+            run(WeightEstimand::ATC, false),
+            run(WeightEstimand::ATE, true),
+        );
+        let n = ate.n_obs;
+        Check::new(&case)
+            .vector(
+                "ps_head",
+                &ate.propensity_scores.as_ref().unwrap()[..10],
+                Tol::coef(n),
+            )
+            .vector("glm_ate_weights_head", &ate.weights[..12], Tol::coef(n))
+            .vector("glm_att_weights_head", &att.weights[..12], Tol::coef(n))
+            .vector("glm_atc_weights_head", &atc.weights[..12], Tol::coef(n))
+            .vector(
+                "glm_ate_stab_weights_head",
+                &stab.weights[..12],
+                Tol::coef(n),
+            )
+            .finish();
+        assert!(ate.converged && ate.iterations >= 1);
+        assert!(ate.convergence.as_ref().unwrap().converged);
+    }
+
+    #[test]
+    fn test_weightit_logistic_reports_nonconvergence() {
+        // CAUS-113: the logistic path used to hard-code converged = true, iterations = 0.
+        // R: glm(maxit = 1) on this data reports converged FALSE after 1 iteration.
+        let ds = weighting_sim();
+        let mut c = WeightItConfig::default();
+        c.max_iter = 1;
+        let r = weightit(&ds, "treat", &COVS, c).unwrap();
+        assert!(
+            !r.converged && r.iterations == 1,
+            "converged {} iterations {}",
+            r.converged,
+            r.iterations
+        );
+        assert!(
+            r.warnings.iter().any(|w| w.contains("did not converge")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().ends_with(&notes_text(&r)));
+    }
+
+    #[test]
+    fn test_weightit_logistic_reports_separation() {
+        // R glm(epsilon = 1e-10, maxit = 100) warns "glm.fit: fitted probabilities
+        // numerically 0 or 1 occurred"
+        let df = df! { "treatment" => [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        "x" => [-2.1, -1.2, -0.7, -0.3, 0.4, 0.9, 1.6, 2.2] }
+        .unwrap();
+        let r = weightit(
+            &Dataset::new(df),
+            "treatment",
+            &["x"],
+            WeightItConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("fitted probabilities numerically 0 or 1")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_weightit_stabilize_ignored_outside_logistic_is_reported() {
+        // R2; R WeightIt 2.0.0 ebal with stabilize = TRUE warns and returns the
+        // unstabilised weights.
+        let ds = weighting_sim();
+        let run = |stab: bool| {
+            let mut c = WeightItConfig::default();
+            c.method = WeightMethod::Entropy;
+            c.stabilize = stab;
+            weightit(&ds, "treat", &COVS, c).unwrap()
+        };
+        let (a, b) = (run(true), run(false));
+        assert_eq!(a.weights, b.weights);
+        let tag = "stabilize cannot be used with entropy balancing weights";
+        assert!(
+            a.warnings.iter().any(|w| w.starts_with(tag)),
+            "{:?}",
+            a.warnings
+        );
+        assert!(
+            !b.warnings.iter().any(|w| w.starts_with(tag)),
+            "{:?}",
+            b.warnings
+        );
+    }
+
+    #[test]
+    fn test_weightit_rejects_bad_iteration_controls() {
+        // R3
+        let ds = weighting_sim();
+        let mut c = WeightItConfig::default();
+        c.max_iter = 0;
+        expect_spec(weightit(&ds, "treat", &COVS, c).unwrap_err(), &["max_iter"]);
+        for t in [0.0, -1.0, f64::NAN] {
+            let mut c = WeightItConfig::default();
+            c.tolerance = t;
+            expect_spec(
+                weightit(&ds, "treat", &COVS, c).unwrap_err(),
+                &["tolerance"],
+            );
+        }
+    }
+
     #[test]
     fn test_weight_method_parses_aliases_and_rejects_unknown() {
         WeightMethod::choices().validate().unwrap();
@@ -1549,30 +1700,39 @@ mod tests {
 
     #[test]
     fn test_weightit_logistic_ate() {
-        let dataset = create_test_dataset();
+        // create_test_dataset() is completely separated in (x1, x2): glm.fit drives the
+        // propensity scores to 0/1 and reports it (all ATE weights 1). The properties are
+        // checked on weighting_sim instead.
+        let separated = weightit(
+            &create_test_dataset(),
+            "treatment",
+            &["x1", "x2"],
+            WeightItConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            separated
+                .warnings
+                .iter()
+                .any(|w| w.contains("fitted probabilities numerically 0 or 1"))
+        );
+
+        let dataset = weighting_sim();
         let config = WeightItConfig {
             method: WeightMethod::Logistic,
             estimand: WeightEstimand::ATE,
             ..Default::default()
         };
+        let result = weightit(&dataset, "treat", &COVS, config).unwrap();
 
-        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
-
-        // Check structure
-        assert_eq!(result.n_obs, 40);
-        assert_eq!(result.n_treated, 20);
-        assert_eq!(result.n_control, 20);
-        assert_eq!(result.weights.len(), 40);
-
-        // ESS should be less than n (weights add variability)
+        assert_eq!(result.n_obs, 300);
+        assert_eq!(result.n_treated, 151);
+        assert_eq!(result.n_control, 149);
+        assert_eq!(result.weights.len(), 300);
+        // ESS = (sum w)^2 / sum w^2 is at most n
         assert!(result.effective_sample_size > 0.0);
-        assert!(result.effective_sample_size <= 40.0);
-
-        // Balance should improve after weighting
-        assert!(
-            result.balance_after.max_std_diff < result.balance_before.max_std_diff
-                || result.balance_after.max_std_diff < 0.5
-        );
+        assert!(result.effective_sample_size <= 300.0 * (1.0 + 1e-12));
+        assert!(result.balance_after.max_std_diff < result.balance_before.max_std_diff);
     }
 
     #[test]

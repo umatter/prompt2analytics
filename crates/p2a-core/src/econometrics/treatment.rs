@@ -24,12 +24,13 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::glm::{GlmLink, fit_propensity};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::options::Choices;
 use crate::resource;
-use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
+use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -491,7 +492,11 @@ pub fn run_ipw_treatment(
     let x = design.data;
 
     // Estimate propensity scores using logit
-    let ps = estimate_propensity_scores(&x, &d)?;
+    let ps_fit = fit_propensity(x.view(), d.view(), GlmLink::Logit)?;
+    let ps = ps_fit.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
+    for w in &ps_fit.fit.warnings {
+        warnings.push(format!("propensity model: {w}"));
+    }
 
     // Apply trimming
     let trim_lower = config.trim;
@@ -1115,7 +1120,11 @@ pub fn run_doubly_robust(
     let x = design.data;
 
     // Estimate propensity scores
-    let ps = estimate_propensity_scores(&x, &d)?;
+    let ps_fit = fit_propensity(x.view(), d.view(), GlmLink::Logit)?;
+    let ps = ps_fit.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
+    for w in &ps_fit.fit.warnings {
+        warnings.push(format!("propensity model: {w}"));
+    }
 
     // Apply trimming
     let trim_lower = config.trim;
@@ -1441,76 +1450,6 @@ fn compute_aipw_effect(
 // ═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/// Estimate propensity scores using logistic regression.
-///
-/// Uses Newton-Raphson MLE to estimate P(D=1|X).
-fn estimate_propensity_scores(x: &Array2<f64>, d: &Array1<f64>) -> EconResult<Array1<f64>> {
-    let n = d.len();
-    let k = x.ncols();
-
-    // Newton-Raphson for logistic regression
-    let mut beta = Array1::zeros(k);
-    let max_iter = 50;
-    let tolerance = 1e-8;
-
-    for _ in 0..max_iter {
-        // Linear predictor
-        let z: Array1<f64> = x.dot(&beta);
-
-        // Probabilities
-        let p: Array1<f64> = z.mapv(logistic_cdf);
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        // Gradient: X'(d - p)
-        let residuals = d - &p_clipped;
-        let mut gradient = Array1::zeros(k);
-        for i in 0..n {
-            for j in 0..k {
-                gradient[j] += residuals[i] * x[[i, j]];
-            }
-        }
-
-        // Check convergence
-        let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-        if grad_norm < tolerance {
-            break;
-        }
-
-        // Weights: p(1-p)
-        let weights: Array1<f64> = p_clipped.mapv(|pi| pi * (1.0 - pi));
-
-        // Hessian: -X'WX
-        let mut hessian = Array2::zeros((k, k));
-        for i in 0..n {
-            let wi = weights[i];
-            for j in 0..k {
-                for l in 0..k {
-                    hessian[[j, l]] -= wi * x[[i, j]] * x[[i, l]];
-                }
-            }
-        }
-
-        // Invert -H
-        let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) =
-            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
-                context: "Propensity score estimation".to_string(),
-                suggestion: format!("Check for multicollinearity in covariates: {:?}", e),
-            })?;
-
-        // Update
-        let delta = hess_inv.dot(&gradient);
-        beta = &beta + &delta;
-    }
-
-    // Final propensity scores
-    let z_final: Array1<f64> = x.dot(&beta);
-    let ps: Array1<f64> = z_final.mapv(logistic_cdf);
-
-    // Clip to avoid extreme values
-    Ok(ps.mapv(|p| p.max(1e-10).min(1.0 - 1e-10)))
-}
 
 /// Fit outcome model for a treatment group (OLS regression).
 ///
@@ -2022,8 +1961,39 @@ mod tests {
     }
 
     #[test]
+    fn test_ipw_refuses_non_binary_treatment() {
+        // the shared propensity fit refuses a treatment not coded 0/1 (0.7 counted as treated)
+        let ds = create_treatment_dataset();
+        let mut df = ds.df().clone();
+        let mut t = DesignMatrix::extract_column(&df, "treatment")
+            .unwrap()
+            .to_vec();
+        t[3] = 0.7;
+        df.with_column(Series::new("treatment".into(), t)).unwrap();
+        let ds = Dataset::new(df);
+        expect_invalid_spec(
+            run_ipw_treatment(&ds, "y", "treatment", &["x1", "x2"], IpwConfig::default())
+                .unwrap_err(),
+            "0/1",
+        );
+        expect_invalid_spec(
+            run_doubly_robust(
+                &ds,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                DoublyRobustConfig::default(),
+            )
+            .unwrap_err(),
+            "0/1",
+        );
+    }
+
+    #[test]
     fn test_seeded_bootstrap_unchanged() {
-        // Pinned from the pre-streaming implementation at 1fdb22f, seed 42.
+        // Pinned from the pre-streaming implementation at 1fdb22f, seed 42. The propensity
+        // scores from glm::fit_propensity since T3-WP23 differ at 1e-13 from that fit's, so
+        // the standard errors are compared at 1e-9 relative.
         const IPW_SE: f64 = 0.11590718872111475;
         const IPW_CI: (f64, f64) = (0.25552711023373686, 0.677351661847506);
         const DR_IPW_SE: f64 = 0.11590718872111475;
@@ -2043,8 +2013,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(ipw.std_error, IPW_SE);
-        assert_eq!((ipw.ci_lower, ipw.ci_upper), IPW_CI);
+        assert!(((ipw.std_error - IPW_SE) / IPW_SE).abs() < 1e-9);
+        assert!(((ipw.ci_lower - IPW_CI.0) / IPW_CI.0).abs() < 1e-9);
+        assert!(((ipw.ci_upper - IPW_CI.1) / IPW_CI.1).abs() < 1e-9);
         for (method, se) in [
             (DRMethod::IPW, DR_IPW_SE),
             (DRMethod::Regression, DR_REG_SE),
@@ -2063,7 +2034,7 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(dr.std_error, se, "{method:?}");
+            assert!(((dr.std_error - se) / se).abs() < 1e-9, "{method:?}");
         }
     }
 
