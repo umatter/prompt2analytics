@@ -683,6 +683,7 @@ pub fn run_stdreg(
         config.model_type,
         config.max_iter,
         config.tolerance,
+        None,
     )?;
     check_treatment_identified(
         &fit.aliased,
@@ -770,6 +771,8 @@ pub fn run_stdreg(
                 config.include_interactions,
                 config.max_iter,
                 config.tolerance,
+                fit.glm
+                    .then(|| beta.mapv(|v| if v.is_nan() { 0.0 } else { v })),
             )?;
             let b = config.n_bootstrap;
             if boot.not_converged > 0 {
@@ -1025,13 +1028,16 @@ struct OutcomeFit {
 }
 
 /// The outcome model: least squares (`solve_ols`) or `econometrics::glm` with `tolerance`
-/// as glm.fit's `epsilon` and `max_iter` as its `maxit`.
+/// as glm.fit's `epsilon` and `max_iter` as its `maxit`. A GLM starts IRLS from `start` when
+/// given (bootstrap replicates start from the full-sample fit: the maximum likelihood
+/// estimates are the same, IRLS needs fewer iterations), from glm.fit's `mustart` otherwise.
 fn fit_outcome_model(
     x: &Array2<f64>,
     y: &Array1<f64>,
     model_type: StdRegModel,
     max_iter: usize,
     tolerance: f64,
+    start: Option<&Array1<f64>>,
 ) -> EconResult<OutcomeFit> {
     resource::checkpoint()?;
     match model_type {
@@ -1063,6 +1069,7 @@ fn fit_outcome_model(
             };
             spec.epsilon = tolerance;
             spec.max_iter = max_iter;
+            spec.start = start.map(|b| b.view());
             let fit = fit_glm(x.view(), y.view(), &spec)?;
             let eps10 = 10.0 * f64::EPSILON;
             let n_extreme = if logistic {
@@ -1229,7 +1236,8 @@ fn draw_sd(draws: &[f64]) -> f64 {
     (ss / (draws.len() - 1).max(1) as f64).sqrt()
 }
 
-/// Compute bootstrap standard errors: every replicate refits the outcome model.
+/// Compute bootstrap standard errors: every replicate refits the outcome model (a GLM from
+/// `start`, the full-sample coefficients with aliased ones set to 0).
 #[allow(clippy::too_many_arguments)]
 fn compute_bootstrap_se(
     y: &Array1<f64>,
@@ -1243,6 +1251,7 @@ fn compute_bootstrap_se(
     include_interactions: bool,
     max_iter: usize,
     tolerance: f64,
+    start: Option<Array1<f64>>,
 ) -> EconResult<BootDraws> {
     let n = y.len();
 
@@ -1286,11 +1295,18 @@ fn compute_bootstrap_se(
             build_design_matrix(&w_boot, &a_boot, &dummy_names, "a", include_interactions);
 
         // Fit model
-        let fit = match fit_outcome_model(&x_boot, &y_boot, model_type, max_iter, tolerance)
-            .and_then(|f| {
-                check_treatment_identified(&f.aliased, &names, k_w, include_interactions, "a")
-                    .map(|_| f)
-            }) {
+        let fit = match fit_outcome_model(
+            &x_boot,
+            &y_boot,
+            model_type,
+            max_iter,
+            tolerance,
+            start.as_ref(),
+        )
+        .and_then(|f| {
+            check_treatment_identified(&f.aliased, &names, k_w, include_interactions, "a")
+                .map(|_| f)
+        }) {
             Ok(f) => f,
             Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
             Err(_) => {

@@ -693,7 +693,7 @@ impl NuisanceFit {
     }
 
     /// Coefficients with NaN set to 0 (R's `predict` on a rank-deficient fit).
-    fn zeroed(&self) -> Array1<f64> {
+    pub(crate) fn zeroed(&self) -> Array1<f64> {
         self.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b })
     }
 }
@@ -854,6 +854,86 @@ pub(crate) struct Fluctuation {
     pub warnings: Vec<String>,
 }
 
+/// `qlogis` of a Q prediction bounded to `[Q_BOUND, 1 - Q_BOUND]`: the offset of the logistic
+/// fluctuation.
+pub(crate) fn logit_q(v: f64) -> f64 {
+    qlogis(bound(v, Q_BOUND, 1.0 - Q_BOUND))
+}
+
+/// The fitted fluctuation coefficients (one per column of the clever-covariate design).
+pub(crate) struct EpsilonFit {
+    pub coefficients: Vec<f64>,
+    pub converged: bool,
+    pub iterations: usize,
+    /// glm's warnings except "glm.fit: algorithm did not converge"; unprefixed.
+    pub warnings: Vec<String>,
+}
+
+/// The targeting regression on the clever-covariate columns `hx` (no intercept), over the rows
+/// with positive weight of `train` (all rows when `None`). Logistic: the quasibinomial logit glm
+/// of `y` with offset `base` (= `logit_q(Q(A,W))`). Linear: per column `sum c (y - base) / sum
+/// c^2` with `base` = Q(A,W) (the columns of the bivariate design have disjoint supports, so
+/// this is the joint least-squares fit).
+pub(crate) fn fit_epsilon(
+    y: ArrayView1<'_, f64>,
+    hx: ArrayView2<'_, f64>,
+    base: ArrayView1<'_, f64>,
+    model: QModel,
+    train: Option<ArrayView1<'_, f64>>,
+    ctl: GlmControl,
+) -> EconResult<EpsilonFit> {
+    match model {
+        QModel::Logistic => {
+            let spec = ctl
+                .spec(
+                    GlmFamily::QuasiBinomial,
+                    GlmLink::Logit,
+                    train.as_ref().map(|t| t.view()),
+                )
+                .offset(base.view());
+            let fit = NuisanceFit::from_glm(fit_glm(hx, y, &spec)?, &[]);
+            if fit.coefficients.iter().any(|c| !c.is_finite()) {
+                return Err(EconError::Computation(
+                    "TMLE targeting step: the clever covariate is degenerate".into(),
+                ));
+            }
+            Ok(EpsilonFit {
+                coefficients: fit.coefficients.to_vec(),
+                converged: fit.converged,
+                iterations: fit.iterations,
+                warnings: fit.warnings,
+            })
+        }
+        QModel::Linear => {
+            let n = y.len();
+            let in_fit = |i: usize| train.as_ref().is_none_or(|t| t[i] > 0.0);
+            let mut coefficients = Vec::with_capacity(hx.ncols());
+            for c in hx.columns() {
+                let (mut num, mut den) = (0.0, 0.0);
+                for i in (0..n).filter(|&i| in_fit(i)) {
+                    num += c[i] * (y[i] - base[i]);
+                    den += c[i] * c[i];
+                }
+                if den.abs() < 1e-10 {
+                    return Err(EconError::SingularMatrix {
+                        context: "TMLE targeting step".to_string(),
+                        suggestion: "the clever covariate is zero on the fitting rows (no \
+                                     treated or no control observation)"
+                            .to_string(),
+                    });
+                }
+                coefficients.push(num / den);
+            }
+            Ok(EpsilonFit {
+                coefficients,
+                converged: true,
+                iterations: 1,
+                warnings: Vec::new(),
+            })
+        }
+    }
+}
+
 /// The targeting step, fitted on the rows with positive weight of `train`:
 ///
 /// - Logistic: `glm(y ~ -1 + H, offset = qlogis(Q), quasibinomial)` (OneDim) or
@@ -878,94 +958,38 @@ pub(crate) fn fluctuate(
     let h1: Array1<f64> = Array1::from_iter((0..n).map(|i| a[i] / g[i]));
     let h0: Array1<f64> = Array1::from_iter((0..n).map(|i| (1.0 - a[i]) / (1.0 - g[i])));
     let h = &h1 - &h0;
-    let degenerate =
-        || EconError::Computation("TMLE targeting step: the clever covariate is degenerate".into());
     // (e1, e0): the coefficients applied to Q(1) / g and Q(0) / (1 - g)
-    let (eps, eps_control, e1, e0, converged, iterations, warnings) = match model {
-        QModel::Logistic => {
-            let off = q.qa.mapv(|v| qlogis(bound(v, Q_BOUND, 1.0 - Q_BOUND)));
-            let spec = ctl
-                .spec(
-                    GlmFamily::QuasiBinomial,
-                    GlmLink::Logit,
-                    train.as_ref().map(|t| t.view()),
-                )
-                .offset(off.view());
-            let hx: Array2<f64> = match form {
-                FluctuationForm::OneDim => h.clone().insert_axis(Axis(1)),
-                FluctuationForm::Bivariate => {
-                    let mut m = crate::resource::try_zeros2(n, 2, "fluctuation design")?;
-                    m.column_mut(0).assign(&h0);
-                    m.column_mut(1).assign(&h1);
-                    m
-                }
-            };
-            let fit = NuisanceFit::from_glm(fit_glm(hx.view(), y, &spec)?, &[]);
-            if fit.coefficients.iter().any(|c| !c.is_finite()) {
-                return Err(degenerate());
-            }
-            let (eps, eps_control, e1, e0) = match form {
-                FluctuationForm::OneDim => {
-                    let e = fit.coefficients[0];
-                    (e, f64::NAN, e, -e)
-                }
-                FluctuationForm::Bivariate => {
-                    let (e0, e1) = (fit.coefficients[0], fit.coefficients[1]);
-                    (e1, e0, e1, e0)
-                }
-            };
-            (
-                eps,
-                eps_control,
-                e1,
-                e0,
-                fit.converged,
-                fit.iterations,
-                fit.warnings,
-            )
-        }
-        QModel::Linear => {
-            let in_fit = |i: usize| train.is_none_or(|t| t[i] > 0.0);
-            let ratio = |c: &Array1<f64>| -> EconResult<f64> {
-                let (mut num, mut den) = (0.0, 0.0);
-                for i in (0..n).filter(|&i| in_fit(i)) {
-                    num += c[i] * (y[i] - q.qa[i]);
-                    den += c[i] * c[i];
-                }
-                if den.abs() < 1e-10 {
-                    return Err(EconError::SingularMatrix {
-                        context: "TMLE targeting step".to_string(),
-                        suggestion: "the clever covariate is zero on the fitting rows (no \
-                                     treated or no control observation)"
-                            .to_string(),
-                    });
-                }
-                Ok(num / den)
-            };
-            match form {
-                FluctuationForm::OneDim => {
-                    let e = ratio(&h)?;
-                    (e, f64::NAN, e, -e, true, 1, Vec::new())
-                }
-                FluctuationForm::Bivariate => {
-                    let e1 = ratio(&h1)?;
-                    let e0 = ratio(&h0)?;
-                    (e1, e0, e1, e0, true, 1, Vec::new())
-                }
-            }
+    let base = match model {
+        QModel::Logistic => q.qa.mapv(logit_q),
+        QModel::Linear => q.qa.clone(),
+    };
+    let hx: Array2<f64> = match form {
+        FluctuationForm::OneDim => h.clone().insert_axis(Axis(1)),
+        FluctuationForm::Bivariate => {
+            let mut m = crate::resource::try_zeros2(n, 2, "fluctuation design")?;
+            m.column_mut(0).assign(&h0);
+            m.column_mut(1).assign(&h1);
+            m
         }
     };
-    let q_star = match model {
-        QModel::Logistic => {
-            let lq = |v: f64| qlogis(bound(v, Q_BOUND, 1.0 - Q_BOUND));
-            QPredictions {
-                qa: Array1::from_iter(
-                    (0..n).map(|i| plogis(lq(q.qa[i]) + e0 * h0[i] + e1 * h1[i])),
-                ),
-                q1: Array1::from_iter((0..n).map(|i| plogis(lq(q.q1[i]) + e1 / g[i]))),
-                q0: Array1::from_iter((0..n).map(|i| plogis(lq(q.q0[i]) + e0 / (1.0 - g[i])))),
-            }
+    let fit = fit_epsilon(y, hx.view(), base.view(), model, train, ctl)?;
+    let (eps, eps_control, e1, e0) = match form {
+        FluctuationForm::OneDim => {
+            let e = fit.coefficients[0];
+            (e, f64::NAN, e, -e)
         }
+        FluctuationForm::Bivariate => {
+            let (e0, e1) = (fit.coefficients[0], fit.coefficients[1]);
+            (e1, e0, e1, e0)
+        }
+    };
+    let (converged, iterations, warnings) = (fit.converged, fit.iterations, fit.warnings);
+    let q_star = match model {
+        QModel::Logistic => QPredictions {
+            qa: Array1::from_iter((0..n).map(|i| plogis(base[i] + e0 * h0[i] + e1 * h1[i]))),
+            q1: Array1::from_iter((0..n).map(|i| plogis(logit_q(q.q1[i]) + e1 / g[i]))),
+            q0: Array1::from_iter((0..n).map(|i| plogis(logit_q(q.q0[i]) + e0 / (1.0 - g[i])))),
+        },
         QModel::Linear => QPredictions {
             qa: Array1::from_iter((0..n).map(|i| q.qa[i] + e0 * h0[i] + e1 * h1[i])),
             q1: Array1::from_iter((0..n).map(|i| q.q1[i] + e1 / g[i])),

@@ -69,17 +69,18 @@
 //! println!("Selected covariates: {:?}", result.selected_covariate_names);
 //! ```
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::glm::plogis;
 use crate::econometrics::tmle::{
     FluctuationForm, GlmControl, NuisanceFit, QModel, QPredictions, ate_and_ic, bound_scores,
-    check_binary_treatment, fit_outcome, fit_treatment, fluctuate, glm_convergence, outcome_scale,
-    prefixed, sample_variance, wald95,
+    check_binary_treatment, fit_epsilon, fit_outcome, fit_treatment, fluctuate, glm_convergence,
+    logit_q, outcome_scale, prefixed, sample_variance, wald95,
 };
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -984,17 +985,30 @@ struct FullTmle {
     fl_iterations: usize,
 }
 
-/// Shared state of the V-fold risk: data, folds (i % V), 0/1 training weights per fold, Q per
-/// fold (fitted on its training rows, predicted for all rows), the full-data Q, the criterion,
-/// the penalty and the glm control.
+/// One fold of the V-fold risk: its training and validation rows, and the fold's Q (fitted on
+/// the training rows) on the fitting scale of the fluctuation (`logit_q` for the logistic Q,
+/// Q itself for the linear Q), computed once for all candidate g.
+struct FoldCache {
+    train_rows: Vec<usize>,
+    y_train: Array1<f64>,
+    a_train: Array1<f64>,
+    /// Q(A,W) on the training rows (the fluctuation's offset).
+    base_train: Array1<f64>,
+    y_val: Array1<f64>,
+    a_val: Array1<f64>,
+    /// Q(A,W), Q(1,W), Q(0,W) on the validation rows.
+    base_val: [Array1<f64>; 3],
+}
+
+/// Shared state of the V-fold risk: data, folds (i % V), the per-fold cache, the full-data Q,
+/// the criterion, the penalty and the glm control.
 struct CvSetup<'a> {
     y: ArrayView1<'a, f64>,
     a: ArrayView1<'a, f64>,
     covariates: &'a [Array1<f64>],
     names: &'a [String],
     folds: Vec<Vec<usize>>,
-    train: Vec<Array1<f64>>,
-    q_folds: Vec<QPredictions>,
+    cache: Vec<FoldCache>,
     q_full: QPredictions,
     q_full_fit: NuisanceFit,
     model: QModel,
@@ -1032,11 +1046,29 @@ impl<'a> CvSetup<'a> {
         qnames.push("(Intercept)".to_string());
         qnames.extend(names.iter().cloned());
         qnames.push(treatment.to_string());
-        let mut q_folds = Vec::with_capacity(v);
-        for t in &train {
+        let scale = |q: &Array1<f64>, rows: &[usize]| -> Array1<f64> {
+            match model {
+                QModel::Logistic => rows.iter().map(|&i| logit_q(q[i])).collect(),
+                QModel::Linear => rows.iter().map(|&i| q[i]).collect(),
+            }
+        };
+        let pick = |x: ArrayView1<'_, f64>, rows: &[usize]| -> Array1<f64> {
+            rows.iter().map(|&i| x[i]).collect()
+        };
+        let mut cache = Vec::with_capacity(v);
+        for (t, val) in train.iter().zip(&folds) {
             let (fit, q) = fit_outcome(w.view(), a, y, model, Some(t.view()), &qnames, ctl)?;
             notes.record("outcome model (Q), CV folds", &fit.warnings, fit.converged);
-            q_folds.push(q);
+            let train_rows: Vec<usize> = (0..n).filter(|&i| t[i] > 0.0).collect();
+            cache.push(FoldCache {
+                y_train: pick(y, &train_rows),
+                a_train: pick(a, &train_rows),
+                base_train: scale(&q.qa, &train_rows),
+                y_val: pick(y, val),
+                a_val: pick(a, val),
+                base_val: [scale(&q.qa, val), scale(&q.q1, val), scale(&q.q0, val)],
+                train_rows,
+            });
         }
         let (q_full_fit, q_full) = fit_outcome(w.view(), a, y, model, None, &qnames, ctl)?;
         Ok(CvSetup {
@@ -1045,8 +1077,7 @@ impl<'a> CvSetup<'a> {
             covariates,
             names,
             folds,
-            train,
-            q_folds,
+            cache,
             q_full,
             q_full_fit,
             model,
@@ -1072,49 +1103,62 @@ impl<'a> CvSetup<'a> {
         let v = self.folds.len();
         let xg = design_with_intercept(self.covariates, set, n);
         let gnames = self.g_names(set);
+        let link = |x: f64| match self.model {
+            QModel::Logistic => plogis(x),
+            QModel::Linear => x,
+        };
+        let clever = |a: f64, g: f64| a / g - (1.0 - a) / (1.0 - g);
         let mut fold_rss = Vec::with_capacity(v);
         let mut fold_var_ic = Vec::with_capacity(v);
         let mut fold_epsilon = Vec::with_capacity(v);
         let mut evals = Vec::with_capacity(v);
         for (f, rows) in self.folds.iter().enumerate() {
             resource::checkpoint()?;
-            let t = self.train[f].view();
-            let (gfit, graw) = fit_treatment(xg.view(), self.a, Some(t), &gnames, self.ctl)?;
+            let fc = &self.cache[f];
+            let x_train = xg.select(Axis(0), &fc.train_rows);
+            let (gfit, g_raw) =
+                fit_treatment(x_train.view(), fc.a_train.view(), None, &gnames, self.ctl)?;
             notes.record(
                 "propensity model (g), CV fits",
                 &gfit.warnings,
                 gfit.converged,
             );
-            let g = bound_scores(&graw, self.gbound).0;
-            let fl = fluctuate(
-                self.y,
-                self.a,
-                &self.q_folds[f],
-                g.view(),
+            let g_train = bound_scores(&g_raw, self.gbound).0;
+            let h_train: Array1<f64> =
+                Array1::from_iter((0..g_train.len()).map(|r| clever(fc.a_train[r], g_train[r])));
+            let fl = fit_epsilon(
+                fc.y_train.view(),
+                h_train.insert_axis(Axis(1)).view(),
+                fc.base_train.view(),
                 self.model,
-                Some(t),
+                None,
                 self.ctl,
-                FluctuationForm::OneDim,
             )?;
             notes.record("fluctuation, CV fits", &fl.warnings, fl.converged);
-            let qs = &fl.q_star;
+            let e = fl.coefficients[0];
+            let g_val = bound_scores(
+                &xg.select(Axis(0), rows).dot(&gfit.zeroed()).mapv(plogis),
+                self.gbound,
+            )
+            .0;
+            let [qa, q1, q0] = &fc.base_val;
+            let m = rows.len();
+            let h: Vec<f64> = (0..m).map(|r| clever(fc.a_val[r], g_val[r])).collect();
             let ev = FoldEval {
                 rows: rows.clone(),
-                y: rows.iter().map(|&i| self.y[i]).collect(),
-                q_star_a: rows.iter().map(|&i| qs.qa[i]).collect(),
-                q_star_1: rows.iter().map(|&i| qs.q1[i]).collect(),
-                q_star_0: rows.iter().map(|&i| qs.q0[i]).collect(),
-                h: rows.iter().map(|&i| fl.h[i]).collect(),
+                y: fc.y_val.to_vec(),
+                q_star_a: (0..m).map(|r| link(qa[r] + e * h[r])).collect(),
+                q_star_1: (0..m).map(|r| link(q1[r] + e / g_val[r])).collect(),
+                q_star_0: (0..m).map(|r| link(q0[r] - e / (1.0 - g_val[r]))).collect(),
+                h,
             };
-            let rss: f64 = (0..ev.rows.len())
-                .map(|r| (ev.y[r] - ev.q_star_a[r]).powi(2))
-                .sum();
-            let ic: Vec<f64> = (0..ev.rows.len())
+            let rss: f64 = (0..m).map(|r| (ev.y[r] - ev.q_star_a[r]).powi(2)).sum();
+            let ic: Vec<f64> = (0..m)
                 .map(|r| ev.h[r] * (ev.y[r] - ev.q_star_a[r]) + ev.q_star_1[r] - ev.q_star_0[r])
                 .collect();
             fold_rss.push(rss);
             fold_var_ic.push(sample_variance(&ic));
-            fold_epsilon.push(fl.epsilon);
+            fold_epsilon.push(e);
             evals.push(ev);
         }
         let vf = v as f64;
