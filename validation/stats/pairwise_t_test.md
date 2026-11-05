@@ -111,6 +111,18 @@ old code counted the NA and gave 0.16, 1, 1, 1.
 `test_validate_p_adjust_hommel_against_r`, `test_validate_p_adjust_nan_kept_and_excluded_from_n`,
 `test_validate_p_adjust_holm`, `test_p_adjust_method_parses_aliases_and_rejects_unknown` (not R-pinned).
 
+**Timing (T3-PERF3).** The R-conforming version (WP38) sorted an index vector by comparing the
+p-values it pointed to, gathered the p-values into a copy and scattered the adjusted values
+back through a second index; at n = 100 / 1,000 it took 1.40 / 1.50 times the old BH. It now
+sorts (key, position) pairs by an integer key that orders as `f64::total_cmp` (a stable sort,
+so ties keep input order), reads the value back from the key and writes each adjusted value
+straight into the output; `test_p_adjust_matches_index_sort_reference_exactly` holds every
+method to the index-sort version bit for bit (ties, NaN, 0 and 1). Release build, one P core
+(`taskset -c 2`), against `fe13b889`, BH on uniform p-values, on a loaded machine (other lanes
+compiling): head / base 0.99-1.02 (n = 100), 0.86 (1,000), 0.94 (10,000) in-process A/B (the old
+BH copied into a timing binary, 15-21 alternations); `unified_benchmarks` `P_Adjust` five
+interleaved runs, ratio of the fastest runs 0.94 / 0.98 / 0.96 (medians 1.03 / 0.96 / 0.98).
+
 ### Test 2c: Pairwise Wilcoxon (R-pinned)
 
 Case `stat_pairwise_legacy`: set `a` with `exact = FALSE` (0.012185780355344811 for each pair),

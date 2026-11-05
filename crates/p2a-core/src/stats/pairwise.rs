@@ -312,77 +312,74 @@ impl std::fmt::Display for PairwiseTTestResult {
 /// - Wright, S. P. (1992). Adjusted p-values for simultaneous inference. Biometrics 48, 1005-1013.
 pub fn p_adjust(p_values: &[f64], method: PValueAdjustMethod) -> Vec<f64> {
     let mut out = p_values.to_vec();
-    let keep: Vec<usize> = (0..p_values.len())
-        .filter(|&i| !p_values[i].is_nan())
-        .collect();
-    let n = keep.len();
+    // (key, position in p_values) of the non-NaN values, in input order. The keys are
+    // integers that order as `f64::total_cmp` orders the values (`total_order_key`), so
+    // the stable sorts below compare one integer per step (ties stay in input order).
+    let mut pairs: Vec<(i64, usize)> = Vec::with_capacity(p_values.len());
+    pairs.extend(
+        p_values
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.is_nan())
+            .map(|(i, &v)| (total_order_key(v), i)),
+    );
+    let n = pairs.len();
     if n <= 1 {
         return out;
     }
-    let p: Vec<f64> = keep.iter().map(|&i| p_values[i]).collect();
     let method = if n == 2 && method == PValueAdjustMethod::Hommel {
         PValueAdjustMethod::Hochberg
     } else {
         method
     };
     let nf = n as f64;
-    let ascending = || {
-        let mut o: Vec<usize> = (0..n).collect();
-        o.sort_by(|&a, &b| p[a].total_cmp(&p[b]));
-        o
+    // Ascending by value; ties in input order
+    let ascending = |pairs: &mut Vec<(i64, usize)>| pairs.sort_by_key(|p| p.0);
+    // Descending by value, ties in input order: the keys are complemented (`!key` reverses
+    // their order), so the values are read back with `value(!key)`
+    let descending = |pairs: &mut Vec<(i64, usize)>| {
+        pairs.iter_mut().for_each(|p| p.0 = !p.0);
+        pairs.sort_by_key(|p| p.0);
     };
-    let descending = || {
-        let mut o: Vec<usize> = (0..n).collect();
-        o.sort_by(|&a, &b| p[b].total_cmp(&p[a]));
-        o
-    };
-    // adjusted[k] belongs to p[o[k]]
-    let (o, adjusted): (Vec<usize>, Vec<f64>) = match method {
-        PValueAdjustMethod::None => return out,
-        PValueAdjustMethod::Bonferroni => (
-            (0..n).collect(),
-            p.iter().map(|&v| (nf * v).min(1.0)).collect(),
-        ),
+    let value = |key: i64| from_total_order_key(key);
+    match method {
+        PValueAdjustMethod::None => {}
+        PValueAdjustMethod::Bonferroni => {
+            for &(_, i) in &pairs {
+                out[i] = (nf * p_values[i]).min(1.0);
+            }
+        }
         PValueAdjustMethod::Holm => {
-            let o = ascending();
+            ascending(&mut pairs);
             let mut run = f64::NEG_INFINITY;
-            let adj = o
-                .iter()
-                .enumerate()
-                .map(|(k, &j)| {
-                    run = run.max((nf - k as f64) * p[j]);
-                    run.min(1.0)
-                })
-                .collect();
-            (o, adj)
+            for (k, &(key, i)) in pairs.iter().enumerate() {
+                run = run.max((nf - k as f64) * value(key));
+                out[i] = run.min(1.0);
+            }
         }
         PValueAdjustMethod::Hochberg | PValueAdjustMethod::BH | PValueAdjustMethod::BY => {
-            let o = descending();
+            descending(&mut pairs);
             let q = if method == PValueAdjustMethod::BY {
                 (1..=n).map(|k| 1.0 / k as f64).sum::<f64>()
             } else {
                 1.0
             };
             let mut run = f64::INFINITY;
-            let adj = o
-                .iter()
-                .enumerate()
-                .map(|(k, &j)| {
-                    // i runs n..1 along the descending order
-                    let i = (n - k) as f64;
-                    let v = match method {
-                        PValueAdjustMethod::Hochberg => (nf + 1.0 - i) * p[j],
-                        _ => q * nf / i * p[j],
-                    };
-                    run = run.min(v);
-                    run.min(1.0)
-                })
-                .collect();
-            (o, adj)
+            for (k, &(key, i)) in pairs.iter().enumerate() {
+                // r runs n..1 along the descending order
+                let r = (n - k) as f64;
+                let v = value(!key);
+                let adj = match method {
+                    PValueAdjustMethod::Hochberg => (nf + 1.0 - r) * v,
+                    _ => q * nf / r * v,
+                };
+                run = run.min(adj);
+                out[i] = run.min(1.0);
+            }
         }
         PValueAdjustMethod::Hommel => {
-            let o = ascending();
-            let ps: Vec<f64> = o.iter().map(|&j| p[j]).collect();
+            ascending(&mut pairs);
+            let ps: Vec<f64> = pairs.iter().map(|&(key, _)| value(key)).collect();
             let start = ps
                 .iter()
                 .enumerate()
@@ -409,14 +406,24 @@ pub fn p_adjust(p_values: &[f64], method: PValueAdjustMethod) -> Vec<f64> {
                     *a = a.max(b);
                 }
             }
-            let adj = pa.iter().zip(&ps).map(|(&a, &b)| a.max(b)).collect();
-            (o, adj)
+            for ((&a, &b), &(_, i)) in pa.iter().zip(&ps).zip(&pairs) {
+                out[i] = a.max(b);
+            }
         }
-    };
-    for (k, &j) in o.iter().enumerate() {
-        out[keep[j]] = adjusted[k];
     }
     out
+}
+
+/// An integer that orders as `f64::total_cmp` orders `v` (the transform `total_cmp` applies
+/// to each operand).
+fn total_order_key(v: f64) -> i64 {
+    let b = v.to_bits() as i64;
+    b ^ ((((b >> 63) as u64) >> 1) as i64)
+}
+
+/// The inverse of [`total_order_key`] (the transform is an involution).
+fn from_total_order_key(k: i64) -> f64 {
+    f64::from_bits((k ^ ((((k >> 63) as u64) >> 1) as i64)) as u64)
 }
 
 /// Perform pairwise t-tests between all groups.
@@ -1690,5 +1697,158 @@ mod tests {
         assert!(
             matches!(wt("nope"), Err(EconError::ColumnNotFound { column, .. }) if column == "nope")
         );
+    }
+
+    /// p_adjust over sorted (value, index) pairs equals, bit for bit, the stable index sort
+    /// it replaced, for every method, with ties, NaNs, zeros and ones.
+    #[test]
+    fn test_p_adjust_matches_index_sort_reference_exactly() {
+        fn reference(p_values: &[f64], method: PValueAdjustMethod) -> Vec<f64> {
+            let mut out = p_values.to_vec();
+            let keep: Vec<usize> = (0..p_values.len())
+                .filter(|&i| !p_values[i].is_nan())
+                .collect();
+            let n = keep.len();
+            if n <= 1 {
+                return out;
+            }
+            let p: Vec<f64> = keep.iter().map(|&i| p_values[i]).collect();
+            let method = if n == 2 && method == PValueAdjustMethod::Hommel {
+                PValueAdjustMethod::Hochberg
+            } else {
+                method
+            };
+            let nf = n as f64;
+            let mut asc: Vec<usize> = (0..n).collect();
+            asc.sort_by(|&a, &b| p[a].total_cmp(&p[b]));
+            let mut desc: Vec<usize> = (0..n).collect();
+            desc.sort_by(|&a, &b| p[b].total_cmp(&p[a]));
+            let (o, adj): (Vec<usize>, Vec<f64>) = match method {
+                PValueAdjustMethod::None => return out,
+                PValueAdjustMethod::Bonferroni => (
+                    (0..n).collect(),
+                    p.iter().map(|&v| (nf * v).min(1.0)).collect(),
+                ),
+                PValueAdjustMethod::Holm => {
+                    let mut run = f64::NEG_INFINITY;
+                    let a = asc
+                        .iter()
+                        .enumerate()
+                        .map(|(k, &j)| {
+                            run = run.max((nf - k as f64) * p[j]);
+                            run.min(1.0)
+                        })
+                        .collect();
+                    (asc, a)
+                }
+                PValueAdjustMethod::Hommel => {
+                    let ps: Vec<f64> = asc.iter().map(|&j| p[j]).collect();
+                    let start = ps
+                        .iter()
+                        .enumerate()
+                        .map(|(k, &v)| nf * v / (k + 1) as f64)
+                        .fold(f64::INFINITY, f64::min);
+                    let mut q = vec![start; n];
+                    let mut pa = vec![start; n];
+                    for m in (2..n).rev() {
+                        let mf = m as f64;
+                        let split = n - m + 1;
+                        let q1 = (split..n)
+                            .enumerate()
+                            .map(|(k, i)| mf * ps[i] / (k + 2) as f64)
+                            .fold(f64::INFINITY, f64::min);
+                        for i in 0..split {
+                            q[i] = (mf * ps[i]).min(q1);
+                        }
+                        let fill = q[n - m];
+                        for qi in q.iter_mut().skip(split) {
+                            *qi = fill;
+                        }
+                        for (a, &b) in pa.iter_mut().zip(&q) {
+                            *a = a.max(b);
+                        }
+                    }
+                    let a = pa.iter().zip(&ps).map(|(&a, &b)| a.max(b)).collect();
+                    (asc, a)
+                }
+                _ => {
+                    let q = if method == PValueAdjustMethod::BY {
+                        (1..=n).map(|k| 1.0 / k as f64).sum::<f64>()
+                    } else {
+                        1.0
+                    };
+                    let mut run = f64::INFINITY;
+                    let a = desc
+                        .iter()
+                        .enumerate()
+                        .map(|(k, &j)| {
+                            let i = (n - k) as f64;
+                            let v = match method {
+                                PValueAdjustMethod::Hochberg => (nf + 1.0 - i) * p[j],
+                                _ => q * nf / i * p[j],
+                            };
+                            run = run.min(v);
+                            run.min(1.0)
+                        })
+                        .collect();
+                    (desc, a)
+                }
+            };
+            for (k, &j) in o.iter().enumerate() {
+                out[keep[j]] = adj[k];
+            }
+            out
+        }
+        let mut s = 99u64;
+        let mut u = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut cases: Vec<Vec<f64>> = vec![
+            vec![],
+            vec![0.2],
+            vec![0.3, f64::NAN],
+            vec![0.04, 0.01],
+            vec![0.0, 1.0, 0.5, 0.5, f64::NAN, 0.5, 0.0, 1.0],
+        ];
+        for n in [17usize, 250, 1001] {
+            // rounded to three digits: many ties
+            cases.push(
+                (0..n)
+                    .map(|i| {
+                        if i % 37 == 5 {
+                            f64::NAN
+                        } else {
+                            (u() * 1000.0).round() / 1000.0
+                        }
+                    })
+                    .collect(),
+            );
+            cases.push((0..n).map(|_| u().powi(3)).collect());
+        }
+        for p in &cases {
+            for method in [
+                PValueAdjustMethod::None,
+                PValueAdjustMethod::Bonferroni,
+                PValueAdjustMethod::Holm,
+                PValueAdjustMethod::Hochberg,
+                PValueAdjustMethod::Hommel,
+                PValueAdjustMethod::BH,
+                PValueAdjustMethod::BY,
+            ] {
+                let (got, want) = (p_adjust(p, method), reference(p, method));
+                assert_eq!(got.len(), want.len());
+                for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "{method:?} n {} [{i}]: {a} vs {b}",
+                        p.len()
+                    );
+                }
+            }
+        }
     }
 }

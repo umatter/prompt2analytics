@@ -96,3 +96,31 @@ REML on `gls_cs` 12.3x the old fixed-rho, ungrouped fit (a new estimator; WP11-9
 Re-measured on the merged tree against `fe13b889` (one P core, three interleaved runs each,
 `unified_benchmarks`): AR(1) with fixed rho 1.14 (n = 100), 1.30 (n = 1,000); smoothing spline
 (GCV) 0.93 / 0.97; sensemakr 1.06 (n = 100), 1.20 (n = 1,000), 1.20 (n = 10,000).
+
+**T3-PERF3.** A fit at a given rho now takes OLS's solve decision on the whitened design
+(`ols::normal_equations_inverse`: the normal equations, refined when less well conditioned, on
+a full-rank design with reciprocal condition at least 1e-8; `lm.fit`'s pivoted QR otherwise,
+which decides rank and names the aliased columns; a non-finite SSE* also goes to the QR, which
+refuses such data as before). The rho search (REML/ML by Brent) keeps the QR on every fit: its
+path is scale-free with the QR's rounding (`test_gls_rho_estimate_is_scale_invariant`), which the
+normal equations do not reproduce. X* is built column-major and each column
+whitened in place, without the copy in and out of a scratch column. Tests:
+`test_gls_normal_equations_match_pivoted_qr` (coefficients, (X*'X*)^-1 and SSE* within 1e-10
+relative of the QR on noisy designs, n = 40 / 300 / 1,000, rho 0.5 and -0.3),
+`test_gls_nearly_collinear_and_non_finite_reach_the_qr` (a regressor equal to another up to
+1e-13 noise is still refused as rank 2 of 3; an infinite response is still refused).
+Sensemakr's benchmark partial R² solves both auxiliary regressions with one such decision on
+X_{-j} (`test_partial_r2_normal_equations_match_pivoted_qr`, 1e-10 relative;
+`test_sensemakr_nearly_aliased_controls_reach_the_qr`), and builds X_{-j} without an
+intermediate copy of each column.
+
+Lane timing against `fe13b889` (one P core, `RAYON_NUM_THREADS=1`, `unified_benchmarks`
+interleaved, on a machine loaded by other builds; head / base, median of the per-run medians,
+fastest-run ratio in brackets): AR(1) with fixed rho 1.05 (1.02) at n = 100 and 0.93 (0.89) at
+n = 1,000 over five rounds, 1.04 (1.02) and 1.01 (1.00) over six more; sensemakr 0.76 (0.65),
+0.98 (0.98), 1.03 (1.06) at n = 100 / 1,000 / 10,000, and the criterion `sensemakr` n = 1,000
+1.04. The n = 10,000 sensemakr row moves with glibc's heap trimming: in a run before the
+column-copy change it read 1.13, and 1.04 with `MALLOC_MMAP_THRESHOLD_` and
+`MALLOC_TRIM_THRESHOLD_` raised, while a timing binary that calls `run_sensemakr` in a loop
+measured 1.00-1.02 at every size against the base built the same way, with the same number of
+allocations of 128 KiB or more per call (three).
