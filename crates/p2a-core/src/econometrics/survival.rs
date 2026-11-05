@@ -26,11 +26,11 @@ use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy, colu
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{pseudoinverse, safe_inverse};
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, aliasing_message, sym_inverse};
-use crate::regression::ols::normal_equations_inverse;
+use crate::regression::ols::{normal_equations_inverse, solve_ols};
 use crate::resource::{checkpoint, try_zeros2};
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text, relative_change};
 use crate::traits::estimator::{
-    SignificanceLevel, chi_squared_p_value, normal_cdf, normal_p_value_two_sided, z_critical,
+    SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided, z_critical,
 };
 
 // =============================================================================
@@ -2286,9 +2286,10 @@ fn compute_concordance(
 pub struct AftConfig {
     /// Distribution family
     pub distribution: AftDistribution,
-    /// Maximum iterations
+    /// Maximum Newton iterations (at least 1).
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence: relative change in the log-likelihood (survreg.control `rel.tolerance`);
+    /// finite and > 0.
     pub tolerance: f64,
 }
 
@@ -2297,7 +2298,7 @@ impl Default for AftConfig {
         Self {
             distribution: AftDistribution::Weibull,
             max_iter: 100,
-            tolerance: 1e-8,
+            tolerance: 1e-9,
         }
     }
 }
@@ -2349,6 +2350,41 @@ pub struct AftResult {
     /// Rows dropped because of a missing time, status or covariate.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// SE of log(scale) (survreg's "Log(scale)" row); `None` when the scale is fixed.
+    #[serde(default)]
+    pub log_scale_se: Option<f64>,
+    /// True when the scale is fixed at 1 (exponential), not estimated.
+    #[serde(default)]
+    pub scale_fixed: bool,
+    /// Covariates not estimated because they are constant or collinear with earlier ones
+    /// (coefficient NA in survreg); their entries in every per-variable vector are NaN.
+    #[serde(default)]
+    pub aliased: Vec<String>,
+    /// Warnings (aliasing, non-convergence).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The Newton iteration's convergence record.
+    #[serde(default)]
+    pub convergence: Convergence,
+}
+
+impl AftResult {
+    /// (z, p) of survreg's Log(scale) row: ln(scale) / log_scale_se and its two-sided normal
+    /// p-value; `None` when the scale is fixed.
+    pub fn log_scale_test(&self) -> Option<(f64, f64)> {
+        let se = self.log_scale_se?;
+        let z = self.scale.ln() / se;
+        Some((z, normal_p_value_two_sided(z)))
+    }
+}
+
+impl ResultNotes for AftResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 impl fmt::Display for AftResult {
@@ -2379,19 +2415,39 @@ impl fmt::Display for AftResult {
                 self.acceleration_factors[i]
             )?;
         }
+        if let (Some(se), Some((z, p))) = (self.log_scale_se, self.log_scale_test()) {
+            writeln!(
+                f,
+                "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{}",
+                "Log(scale)",
+                self.scale.ln(),
+                se,
+                z,
+                p,
+                SignificanceLevel::from_p_value(p).stars()
+            )?;
+        }
 
         writeln!(f, "{}", "-".repeat(75))?;
-        writeln!(f, "Scale = {:.4}", self.scale)?;
+        if self.scale_fixed {
+            writeln!(f, "Scale fixed at 1 (exponential)")?;
+        } else {
+            writeln!(f, "Scale = {:.4}", self.scale)?;
+        }
         if let Some(shape) = self.shape {
             writeln!(f, "Shape = {:.4}", shape)?;
         }
         writeln!(f)?;
-        writeln!(f, "Log-Likelihood: {:.4}", self.log_likelihood)?;
+        writeln!(
+            f,
+            "Log-Likelihood: {:.4} (time scale, as survreg)",
+            self.log_likelihood
+        )?;
         writeln!(f, "AIC: {:.4}", self.aic)?;
         writeln!(f, "BIC: {:.4}", self.bic)?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-
+        write!(f, "{}", notes_text(self))?;
         write_missing(f, &self.missing)
     }
 }
@@ -2422,6 +2478,19 @@ pub fn run_aft(
     config: Option<AftConfig>,
 ) -> EconResult<AftResult> {
     let config = config.unwrap_or_default();
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "AFT model: max_iter must be at least 1, got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "AFT model: tolerance must be finite and > 0, got {}",
+                config.tolerance
+            ),
+        });
+    }
     let data = extract_survival(
         dataset.df(),
         time_col,
@@ -2435,9 +2504,6 @@ pub fn run_aft(
     // Design matrix with intercept, kept rows in their original order
     let p = x_cols.len() + 1; // +1 for intercept
     let n = data.time.len();
-    let log_times: Vec<f64> = data.time.iter().map(|t| t.ln()).collect();
-    let deltas = data.event;
-
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -2445,207 +2511,179 @@ pub fn run_aft(
             context: format!("AFT model with {} parameters", p),
         });
     }
-
-    let n_events = deltas.iter().filter(|&&d| d).count();
+    let event = data.event;
+    let n_events = event.iter().filter(|&&d| d).count();
     if n_events == 0 {
         return Err(EconError::InvalidSpecification {
             message: "No events observed in the data".to_string(),
         });
     }
+    let mut variables = vec!["(Intercept)".to_string()];
+    variables.extend(x_cols.iter().map(|s| s.to_string()));
 
-    let mut x = try_zeros2(n, p, "AFT design matrix")?;
+    let mut x = try_zeros2(n, p, "AFT design")?;
     x.column_mut(0).fill(1.0);
     for (j, values) in data.x.iter().enumerate() {
         for (cell, &v) in x.column_mut(j + 1).iter_mut().zip(values) {
             *cell = v;
         }
     }
-    let y: Array1<f64> = Array1::from_vec(log_times);
+    let y: Array1<f64> = data.time.iter().map(|t| t.ln()).collect();
 
-    // Initialize parameters: OLS estimates for location, reasonable scale
-    let xtx = x.t().dot(&x);
-    let xty = x.t().dot(&y);
-    let (xtx_inv, _) = safe_inverse(&xtx.view())?;
-    let mut beta: Array1<f64> = xtx_inv.dot(&xty);
+    // Start: least squares on log t; its pivoted QR decides the aliased covariates (survreg's
+    // NA coefficients).
+    let ls = solve_ols(x.view(), y.view())?;
+    let mut warnings: Vec<String> = aliasing_message(&ls.aliased, &variables)
+        .into_iter()
+        .collect();
+    let id: Vec<usize> = (0..p).filter(|j| !ls.aliased.contains(j)).collect();
+    let q = id.len();
+    let xi = x.select(ndarray::Axis(1), &id);
+    let fixed = config.distribution == AftDistribution::Exponential;
+    let rss: f64 = ls.residuals.iter().map(|r| r * r).sum();
+    let df = n.checked_sub(ls.rank).unwrap_or(0).max(1);
+    let tau0 = if fixed || !(rss > 0.0) {
+        0.0
+    } else {
+        0.5 * (rss / df as f64).ln()
+    };
+    let m = q + usize::from(!fixed);
+    let mut theta = Array1::<f64>::zeros(m);
+    for (c, &j) in id.iter().enumerate() {
+        theta[c] = ls.beta[j];
+    }
+    if !fixed {
+        theta[q] = tau0;
+    }
+    let mut param_names: Vec<String> = id.iter().map(|&j| variables[j].clone()).collect();
+    if !fixed {
+        param_names.push("Log(scale)".to_string());
+    }
 
-    // Initial scale estimate
-    let residuals: Array1<f64> = &y - &x.dot(&beta);
-    let mut log_sigma = (residuals.mapv(|r| r.powi(2)).sum() / (n - p) as f64)
-        .sqrt()
-        .ln();
-
+    let dist = config.distribution;
+    let tol = config.tolerance;
+    let eval = |th: &Array1<f64>| aft_eval(y.view(), xi.view(), &event, th.view(), dist, fixed);
+    checkpoint()?;
+    let e0 = eval(&theta);
+    let mut ll_old = e0.loglik;
+    let mut theta_new = &theta + &damped_newton_step(&e0.neg_hessian, &e0.grad, &param_names)?;
+    let mut halving = false;
     let mut converged = false;
-    let mut iterations = 0;
-    let mut final_ll = 0.0;
-
-    // Pre-allocate buffers for Newton updates
-    let mut delta_beta = Array1::zeros(p);
-    let mut full_hess = Array2::zeros((p + 1, p + 1));
-    let mut full_grad = Array1::zeros(p + 1);
-
-    // Newton-Raphson iteration
-    for iter in 0..config.max_iter {
-        iterations = iter + 1;
-
-        let sigma = log_sigma.exp();
-        let (grad_beta, grad_sigma, hess_bb, hess_bs, hess_ss, ll) =
-            aft_gradient_hessian(&y, &x, &beta, sigma, &deltas, config.distribution);
-        final_ll = ll;
-
-        // Check convergence using relative gradient norm
-        let grad_norm = grad_beta
-            .iter()
-            .map(|g| g.abs())
-            .fold(0.0, f64::max)
-            .max(grad_sigma.abs());
-        if grad_norm < config.tolerance {
+    let mut change = f64::NAN;
+    let mut it = 0;
+    let mut at_new = None;
+    while it < config.max_iter {
+        it += 1;
+        checkpoint()?;
+        let e = eval(&theta_new);
+        change = relative_change(e.loglik, ll_old);
+        if e.loglik.is_finite() && change <= tol && !halving {
             converged = true;
+            theta = theta_new.clone();
+            at_new = Some(e);
             break;
         }
-
-        // Construct full Hessian and gradient (reuse allocated buffers)
-        full_hess
-            .slice_mut(ndarray::s![0..p, 0..p])
-            .assign(&hess_bb);
-        for j in 0..p {
-            full_hess[[j, p]] = hess_bs[j];
-            full_hess[[p, j]] = hess_bs[j];
+        if it == config.max_iter {
+            break;
         }
-        full_hess[[p, p]] = hess_ss;
-
-        full_grad.slice_mut(ndarray::s![0..p]).assign(&grad_beta);
-        full_grad[p] = grad_sigma;
-
-        // Newton step using Cholesky solver
-        match solve_symmetric_system(&full_hess, &full_grad) {
-            Some(delta) => {
-                // Extract delta components
-                for j in 0..p {
-                    delta_beta[j] = delta[j];
-                }
-                let delta_sigma = delta[p];
-
-                // Step halving with early termination
-                let mut step = 1.0;
-                let mut new_ll = ll - 1.0; // Force at least one evaluation
-                let mut halving_count = 0;
-
-                while halving_count < 10 {
-                    // Compute new parameters
-                    let new_log_sigma = log_sigma + delta_sigma * step;
-
-                    // Compute new likelihood
-                    new_ll = aft_log_likelihood_fast(
-                        &y,
-                        &x,
-                        &beta,
-                        &delta_beta,
-                        step,
-                        new_log_sigma.exp(),
-                        &deltas,
-                        config.distribution,
-                    );
-
-                    if new_ll >= ll - 1e-10 || step < 1e-10 {
-                        // Accept step
-                        for j in 0..p {
-                            beta[j] += delta_beta[j] * step;
-                        }
-                        log_sigma = new_log_sigma;
-                        break;
-                    }
-                    step *= 0.5;
-                    halving_count += 1;
-                }
-
-                if halving_count >= 10 {
-                    // Fallback: small gradient step
-                    for j in 0..p {
-                        beta[j] += grad_beta[j] * 0.001;
-                    }
-                    log_sigma += grad_sigma * 0.001;
-                }
-            }
-            None => {
-                // Fall back to gradient descent
-                for j in 0..p {
-                    beta[j] += grad_beta[j] * 0.01;
-                }
-                log_sigma += grad_sigma * 0.01;
-            }
+        if !e.loglik.is_finite() || e.loglik < ll_old {
+            halving = true;
+            theta_new = (&theta_new + &theta) / 2.0;
+        } else {
+            halving = false;
+            ll_old = e.loglik;
+            theta = theta_new.clone();
+            theta_new = &theta + &damped_newton_step(&e.neg_hessian, &e.grad, &param_names)?;
         }
     }
-
-    let sigma = log_sigma.exp();
-    let log_likelihood = final_ll;
-
-    // Compute final Hessian for standard errors (only if we need to)
-    let (_, _, hess_bb, hess_bs, hess_ss, _) = if converged {
-        aft_gradient_hessian(&y, &x, &beta, sigma, &deltas, config.distribution)
-    } else {
-        // Use last computed values by recomputing
-        aft_gradient_hessian(&y, &x, &beta, sigma, &deltas, config.distribution)
+    let convergence = Convergence::new(
+        converged,
+        it,
+        config.max_iter,
+        "relative change in the log-likelihood",
+        change,
+        tol,
+    );
+    let e = match at_new {
+        Some(e) => e,
+        None => eval(&theta),
     };
-
-    full_hess
-        .slice_mut(ndarray::s![0..p, 0..p])
-        .assign(&hess_bb);
-    for j in 0..p {
-        full_hess[[j, p]] = hess_bs[j];
-        full_hess[[p, j]] = hess_bs[j];
+    let var_diag_ok = |v: &Array2<f64>| (0..m).map(|j| v[[j, j]]).collect::<Vec<f64>>();
+    let v = match sym_inverse(
+        e.neg_hessian.view(),
+        SingularPolicy::Error,
+        "AFT information matrix",
+    ) {
+        Ok(inv) => inv.inverse,
+        Err(_) => {
+            return Err(aft_failure(it, change));
+        }
+    };
+    let var_diag = var_diag_ok(&v);
+    aft_check_finite(
+        e.loglik,
+        theta.as_slice().unwrap_or(&[]),
+        &var_diag,
+        it,
+        change,
+    )?;
+    if let Some(note) = convergence.note("AFT model") {
+        warnings.push(note);
     }
-    full_hess[[p, p]] = hess_ss;
 
-    let info_matrix = safe_inverse(&full_hess.view())
-        .map(|(m, _)| m)
-        .unwrap_or_else(|_| Array2::eye(p + 1));
-
-    let std_errors: Vec<f64> = (0..p).map(|i| info_matrix[[i, i]].abs().sqrt()).collect();
-
-    let z_stats: Vec<f64> = beta
+    let mut coefficients = vec![f64::NAN; p];
+    let mut std_errors = vec![f64::NAN; p];
+    for (c, &j) in id.iter().enumerate() {
+        coefficients[j] = theta[c];
+        std_errors[j] = var_diag[c].sqrt();
+    }
+    let z_stats: Vec<f64> = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
+        .zip(&std_errors)
+        .map(|(b, s)| b / s)
         .collect();
-
     let p_values: Vec<f64> = z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
-
-    let significance: Vec<SignificanceLevel> = p_values
+    let significance = p_values
         .iter()
         .map(|&pv| SignificanceLevel::from_p_value(pv))
         .collect();
-
-    let acceleration_factors: Vec<f64> = beta.iter().map(|&b| b.exp()).collect();
-
-    // Variable names
-    let mut variables = vec!["(Intercept)".to_string()];
-    variables.extend(x_cols.iter().map(|s| s.to_string()));
-
-    // Shape parameter (for Weibull: shape = 1/sigma)
-    let shape = match config.distribution {
-        AftDistribution::Weibull => Some(1.0 / sigma),
+    let acceleration_factors = coefficients.iter().map(|b| b.exp()).collect();
+    let (scale, log_scale_se) = if fixed {
+        (1.0, None)
+    } else {
+        (theta[q].exp(), Some(var_diag[q].sqrt()))
+    };
+    let shape = match dist {
+        AftDistribution::Weibull => Some(1.0 / scale),
         AftDistribution::Exponential => Some(1.0),
         _ => None,
     };
-
-    // AIC and BIC
-    let k = (p + 1) as f64;
+    // survreg's log-likelihood is on the time scale: the log-T density carries the Jacobian 1/t.
+    let jacobian: f64 = y
+        .iter()
+        .zip(&event)
+        .filter(|(_, e)| **e)
+        .map(|(v, _)| *v)
+        .sum();
+    let log_likelihood = e.loglik - jacobian;
+    let k = m as f64;
     let aic = -2.0 * log_likelihood + 2.0 * k;
     let bic = -2.0 * log_likelihood + k * (n as f64).ln();
+    let aliased = ls.aliased.iter().map(|&j| variables[j].clone()).collect();
 
     Ok(AftResult {
-        distribution: config.distribution,
+        distribution: dist,
         variables,
-        coefficients: beta.to_vec(),
+        coefficients,
         std_errors,
         z_stats,
         p_values,
         significance,
         acceleration_factors,
-        scale: sigma,
+        scale,
         shape,
         log_likelihood,
         aic,
@@ -2653,52 +2691,244 @@ pub fn run_aft(
         n_obs: n,
         n_events,
         converged,
-        iterations,
+        iterations: it,
         missing: data.missing,
+        log_scale_se,
+        scale_fixed: fixed,
+        aliased,
+        warnings,
+        convergence,
     })
 }
 
-/// Log-likelihood computation with step adjustment.
-/// Computes likelihood at beta + step * delta_beta.
-fn aft_log_likelihood_fast(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    delta_beta: &Array1<f64>,
-    step: f64,
-    sigma: f64,
-    deltas: &[bool],
-    dist: AftDistribution,
-) -> f64 {
-    let n = y.len();
-    let p = beta.len();
-    let sigma_inv = 1.0 / sigma;
-    let log_sigma = sigma.ln();
-    let mut ll = 0.0;
-
-    for i in 0..n {
-        // Compute eta[i] = sum_j x[i,j] * (beta[j] + step * delta_beta[j])
-        let mut eta_i = 0.0;
-        for j in 0..p {
-            eta_i += x[[i, j]] * (beta[j] + step * delta_beta[j]);
-        }
-
-        let z = (y[i] - eta_i) * sigma_inv;
-        let (log_f, log_s) = aft_distribution_functions(z, dist);
-
-        if deltas[i] {
-            ll += log_f - log_sigma;
-        } else {
-            ll += log_s;
-        }
+fn aft_failure(iterations: usize, last_change: f64) -> EconError {
+    EconError::ConvergenceFailure {
+        iterations,
+        last_change,
+        suggestion: "the AFT log-likelihood or its information is not finite or not positive \
+                     definite at the last iterate; if the fit stopped at max_iter, raise \
+                     max_iter; otherwise check for a covariate that separates events from \
+                     censorings, or rescale extreme times"
+            .to_string(),
     }
-
-    ll
 }
 
-/// Solve symmetric positive definite system Hx = b using Cholesky decomposition.
-/// Returns None if the matrix is not positive definite.
-fn solve_symmetric_system(h: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
+/// R2: a fit whose log-likelihood, parameters or variances are not finite (or a variance is
+/// negative) is an error, not a returned result.
+fn aft_check_finite(
+    loglik: f64,
+    theta: &[f64],
+    var_diag: &[f64],
+    iterations: usize,
+    last_change: f64,
+) -> EconResult<()> {
+    let ok = loglik.is_finite()
+        && theta.iter().all(|v| v.is_finite())
+        && var_diag.iter().all(|v| v.is_finite() && *v >= 0.0);
+    if ok {
+        Ok(())
+    } else {
+        Err(aft_failure(iterations, last_change))
+    }
+}
+
+/// Log-likelihood on the log-time scale, its gradient and the negative Hessian over the free
+/// parameters (beta, then tau = ln sigma unless the scale is fixed at 1).
+struct AftEval {
+    loglik: f64,
+    grad: Array1<f64>,
+    neg_hessian: Array2<f64>,
+}
+
+fn aft_eval(
+    y: ArrayView1<f64>,
+    x: ArrayView2<f64>,
+    event: &[bool],
+    theta: ArrayView1<f64>,
+    dist: AftDistribution,
+    fixed_scale: bool,
+) -> AftEval {
+    let q = x.ncols();
+    let m = q + usize::from(!fixed_scale);
+    let tau = if fixed_scale { 0.0 } else { theta[q] };
+    let sigma = tau.exp();
+    let inv_s = 1.0 / sigma;
+    let eta = x.dot(&theta.slice(ndarray::s![..q]));
+    let mut loglik = 0.0;
+    let mut grad = Array1::<f64>::zeros(m);
+    // Hessian (not negated) accumulated on the upper triangle
+    let mut h = Array2::<f64>::zeros((m, m));
+    for i in 0..y.len() {
+        let z = (y[i] - eta[i]) * inv_s;
+        let (l0, l1, l2) = if event[i] {
+            let (g, g1, g2) = aft_log_density(z, dist);
+            (g - tau, g1, g2)
+        } else {
+            aft_log_survival(z, dist)
+        };
+        loglik += l0;
+        let xi = x.row(i);
+        let wb = -l1 * inv_s;
+        let wbb = l2 * inv_s * inv_s;
+        for j in 0..q {
+            grad[j] += wb * xi[j];
+            let a = wbb * xi[j];
+            for k in j..q {
+                h[[j, k]] += a * xi[k];
+            }
+        }
+        if !fixed_scale {
+            grad[q] += -l1 * z - if event[i] { 1.0 } else { 0.0 };
+            let wbt = (l2 * z + l1) * inv_s;
+            for j in 0..q {
+                h[[j, q]] += wbt * xi[j];
+            }
+            h[[q, q]] += l2 * z * z + l1 * z;
+        }
+    }
+    let mut neg_hessian = Array2::<f64>::zeros((m, m));
+    for j in 0..m {
+        for k in j..m {
+            neg_hessian[[j, k]] = -h[[j, k]];
+            neg_hessian[[k, j]] = -h[[j, k]];
+        }
+    }
+    AftEval {
+        loglik,
+        grad,
+        neg_hessian,
+    }
+}
+
+const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_8;
+
+/// `(g, g', g'')` with `g = ln f` of the error distribution at `z`.
+fn aft_log_density(z: f64, dist: AftDistribution) -> (f64, f64, f64) {
+    match dist {
+        AftDistribution::Exponential | AftDistribution::Weibull => {
+            let ez = z.exp();
+            (z - ez, 1.0 - ez, -ez)
+        }
+        AftDistribution::LogNormal => (-0.5 * z * z - LN_SQRT_2PI, -z, -1.0),
+        AftDistribution::LogLogistic => {
+            let pz = logistic(z);
+            (
+                z - 2.0 * softplus(z),
+                1.0 - 2.0 * pz,
+                -2.0 * pz * (1.0 - pz),
+            )
+        }
+    }
+}
+
+/// `(G, G', G'')` with `G = ln S` of the error distribution at `z`.
+fn aft_log_survival(z: f64, dist: AftDistribution) -> (f64, f64, f64) {
+    match dist {
+        AftDistribution::Exponential | AftDistribution::Weibull => {
+            let ez = z.exp();
+            (-ez, -ez, -ez)
+        }
+        AftDistribution::LogNormal => {
+            let m = normal_hazard(z);
+            (ln_normal_sf(z), -m, -m * (m - z))
+        }
+        AftDistribution::LogLogistic => {
+            let pz = logistic(z);
+            (-softplus(z), -pz, -pz * (1.0 - pz))
+        }
+    }
+}
+
+/// `ln(1 - Phi(z))` without underflow (R `pnorm(z, lower.tail = FALSE, log.p = TRUE)`).
+fn ln_normal_sf(z: f64) -> f64 {
+    // Upper tails from the chi-square(1) tail (about 1e-13 relative); statrs `erfc` is off by
+    // 2.5e-11 relative at z = 5.
+    if z < 0.0 {
+        (-0.5 * normal_p_value_two_sided(z)).ln_1p()
+    } else if z < 30.0 {
+        (0.5 * normal_p_value_two_sided(z)).ln()
+    } else {
+        let z2 = 1.0 / (z * z);
+        let series = 1.0 - z2 * (1.0 - z2 * (3.0 - z2 * (15.0 - z2 * (105.0 - z2 * 945.0))));
+        -0.5 * z * z - z.ln() - LN_SQRT_2PI + series.ln()
+    }
+}
+
+/// The normal hazard `phi(z) / (1 - Phi(z))`, exact in both tails.
+fn normal_hazard(z: f64) -> f64 {
+    (-0.5 * z * z - LN_SQRT_2PI - ln_normal_sf(z)).exp()
+}
+
+/// `ln(1 + e^z)` without overflow.
+fn softplus(z: f64) -> f64 {
+    z.max(0.0) + (-z.abs()).exp().ln_1p()
+}
+
+/// `1 / (1 + e^-z)`, exact in both tails.
+fn logistic(z: f64) -> f64 {
+    if z >= 0.0 {
+        1.0 / (1.0 + (-z).exp())
+    } else {
+        let e = z.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// Newton step `d` solving `a d = g` (`a` = the negative Hessian) on the diagonally
+/// equilibrated system; when that is not positive definite, Levenberg damping `mu I` with
+/// `mu` = 1e-8, 1e-7, ..., 1e8.
+fn damped_newton_step(
+    a: &Array2<f64>,
+    g: &Array1<f64>,
+    names: &[String],
+) -> EconResult<Array1<f64>> {
+    let m = g.len();
+    let mut d = Array1::<f64>::zeros(m);
+    for j in 0..m {
+        let v = a[[j, j]].abs();
+        if !(v.is_finite() && v > 0.0) {
+            return Err(EconError::SingularMatrix {
+                context: format!(
+                    "AFT information matrix: no information on {}",
+                    names.get(j).map_or("a parameter", |s| s.as_str())
+                ),
+                suggestion: "check for a constant covariate or non-finite values".to_string(),
+            });
+        }
+        d[j] = 1.0 / v.sqrt();
+    }
+    let mut b = Array2::<f64>::zeros((m, m));
+    for j in 0..m {
+        for k in 0..m {
+            b[[j, k]] = d[j] * a[[j, k]] * d[k];
+        }
+    }
+    let rhs = &d * g;
+    let mut mu = 0.0;
+    loop {
+        let mut bm = b.clone();
+        for j in 0..m {
+            bm[[j, j]] += mu;
+        }
+        if let Some(sol) = cholesky_solve_spd(&bm, &rhs) {
+            return Ok(&d * &sol);
+        }
+        mu = if mu == 0.0 { 1e-8 } else { mu * 10.0 };
+        if mu > 1e8 * 1.000_001 {
+            return Err(EconError::SingularMatrix {
+                context: "AFT information matrix is not positive definite even with damping 1e8"
+                    .to_string(),
+                suggestion: "check for a covariate that separates events from censorings, or \
+                             rescale extreme times"
+                    .to_string(),
+            });
+        }
+    }
+}
+
+/// Solve the symmetric positive definite system Hx = b by Cholesky decomposition; `None`
+/// when the matrix is not positive definite.
+fn cholesky_solve_spd(h: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
     let n = h.nrows();
 
     // Cholesky decomposition: H = L * L'
@@ -2742,195 +2972,6 @@ fn solve_symmetric_system(h: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64
     }
 
     Some(x)
-}
-
-/// Compute gradient and Hessian for AFT model.
-/// Optimized single-pass computation with efficient memory access.
-fn aft_gradient_hessian(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    sigma: f64,
-    deltas: &[bool],
-    dist: AftDistribution,
-) -> (Array1<f64>, f64, Array2<f64>, Array1<f64>, f64, f64) {
-    let n = y.len();
-    let p = beta.len();
-
-    // Pre-compute constants
-    let sigma_inv = 1.0 / sigma;
-    let sigma_inv_sq = sigma_inv * sigma_inv;
-    let log_sigma = sigma.ln();
-
-    // Pre-compute eta = X * beta (vectorized)
-    let eta = x.dot(beta);
-
-    // Initialize accumulators
-    let mut ll = 0.0;
-    let mut grad_beta = Array1::zeros(p);
-    let mut grad_sigma = 0.0;
-    let mut hess_bb = Array2::zeros((p, p));
-    let mut hess_bs = Array1::zeros(p);
-    let mut hess_ss = 0.0;
-
-    // Single pass through all observations
-    for i in 0..n {
-        let z = (y[i] - eta[i]) * sigma_inv;
-        let (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s) =
-            aft_distribution_derivatives(z, dist);
-
-        // Get row slice for efficient access
-        let xi = x.row(i);
-
-        if deltas[i] {
-            // Event observed
-            ll += log_f - log_sigma;
-
-            // Gradient contributions
-            let grad_beta_w = -dlog_f * sigma_inv;
-            grad_sigma += -dlog_f * z - 1.0;
-
-            // Hessian weights
-            let hess_bb_w = d2log_f * sigma_inv_sq;
-            let hess_bs_w = (d2log_f * z + dlog_f) * sigma_inv;
-            hess_ss += d2log_f * z * z + 2.0 * dlog_f * z;
-
-            // Accumulate grad_beta and hess_bs using row view
-            accumulate_weighted_row(&mut grad_beta, xi, grad_beta_w);
-            accumulate_weighted_row(&mut hess_bs, xi, hess_bs_w);
-
-            // Accumulate hess_bb using rank-1 update (only upper triangle)
-            accumulate_rank1_symmetric(&mut hess_bb, xi, hess_bb_w);
-        } else {
-            // Censored observation
-            ll += log_s;
-
-            // Gradient contributions
-            let grad_beta_w = -dlog_s * sigma_inv;
-            grad_sigma += -dlog_s * z;
-
-            // Hessian weights
-            let hess_bb_w = d2log_s * sigma_inv_sq;
-            let hess_bs_w = (d2log_s * z + dlog_s) * sigma_inv;
-            hess_ss += d2log_s * z * z + dlog_s * z;
-
-            // Accumulate grad_beta and hess_bs using row view
-            accumulate_weighted_row(&mut grad_beta, xi, grad_beta_w);
-            accumulate_weighted_row(&mut hess_bs, xi, hess_bs_w);
-
-            // Accumulate hess_bb using rank-1 update
-            accumulate_rank1_symmetric(&mut hess_bb, xi, hess_bb_w);
-        }
-    }
-
-    (grad_beta, grad_sigma, hess_bb, hess_bs, hess_ss, ll)
-}
-
-/// Accumulate weighted row: result += weight * row
-#[inline]
-fn accumulate_weighted_row(result: &mut Array1<f64>, row: ArrayView1<f64>, weight: f64) {
-    for (r, &x) in result.iter_mut().zip(row.iter()) {
-        *r += weight * x;
-    }
-}
-
-/// Accumulate symmetric rank-1 update: result += weight * row * row'
-/// Only updates upper triangle then copies to lower.
-#[inline]
-fn accumulate_rank1_symmetric(result: &mut Array2<f64>, row: ArrayView1<f64>, weight: f64) {
-    let p = row.len();
-    for j in 0..p {
-        let wj = weight * row[j];
-        for k in j..p {
-            result[[j, k]] += wj * row[k];
-        }
-    }
-    // Copy upper to lower triangle
-    for j in 0..p {
-        for k in (j + 1)..p {
-            result[[k, j]] = result[[j, k]];
-        }
-    }
-}
-
-/// Distribution functions for AFT models.
-/// Returns (log_f, log_S) where f is the PDF and S is the survival function.
-fn aft_distribution_functions(z: f64, dist: AftDistribution) -> (f64, f64) {
-    match dist {
-        AftDistribution::Exponential | AftDistribution::Weibull => {
-            // Extreme value (Gumbel) distribution
-            // f(z) = exp(z - exp(z))
-            // S(z) = exp(-exp(z))
-            let exp_z = z.exp();
-            let log_f = z - exp_z;
-            let log_s = -exp_z;
-            (log_f, log_s)
-        }
-        AftDistribution::LogNormal => {
-            // Standard normal distribution
-            let log_f = -0.5 * (z * z + (2.0 * std::f64::consts::PI).ln());
-            let log_s = (1.0 - normal_cdf(z)).ln();
-            (log_f, log_s)
-        }
-        AftDistribution::LogLogistic => {
-            // Logistic distribution
-            // f(z) = exp(z) / (1 + exp(z))^2
-            // S(z) = 1 / (1 + exp(z))
-            let exp_z = z.exp();
-            let denom = 1.0 + exp_z;
-            let log_f = z - 2.0 * denom.ln();
-            let log_s = -denom.ln();
-            (log_f, log_s)
-        }
-    }
-}
-
-/// Distribution derivatives for AFT models.
-/// Returns (log_f, log_S, dlog_f/dz, dlog_S/dz, d²log_f/dz², d²log_S/dz²)
-fn aft_distribution_derivatives(z: f64, dist: AftDistribution) -> (f64, f64, f64, f64, f64, f64) {
-    match dist {
-        AftDistribution::Exponential | AftDistribution::Weibull => {
-            let exp_z = z.exp();
-            let log_f = z - exp_z;
-            let log_s = -exp_z;
-            let dlog_f = 1.0 - exp_z;
-            let dlog_s = -exp_z;
-            let d2log_f = -exp_z;
-            let d2log_s = -exp_z;
-            (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s)
-        }
-        AftDistribution::LogNormal => {
-            let log_f = -0.5 * (z * z + (2.0 * std::f64::consts::PI).ln());
-            let phi = normal_cdf(z);
-            let log_s = (1.0 - phi).ln();
-            let dlog_f = -z;
-            // Mills ratio approximation for numerical stability
-            let mills = if z < -6.0 {
-                -z
-            } else if z > 6.0 {
-                1.0 / z
-            } else {
-                let pdf = (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt();
-                pdf / (1.0 - phi).max(1e-15)
-            };
-            let dlog_s = -mills;
-            let d2log_f = -1.0;
-            let d2log_s = -mills * (mills + z);
-            (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s)
-        }
-        AftDistribution::LogLogistic => {
-            let exp_z = z.exp();
-            let denom = 1.0 + exp_z;
-            let log_f = z - 2.0 * denom.ln();
-            let log_s = -denom.ln();
-            let p = exp_z / denom; // logistic CDF
-            let dlog_f = 1.0 - 2.0 * p;
-            let dlog_s = -p;
-            let d2log_f = -2.0 * p * (1.0 - p);
-            let d2log_s = -p * (1.0 - p);
-            (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s)
-        }
-    }
 }
 
 // =============================================================================
@@ -3759,66 +3800,6 @@ mod tests {
         // For reasonable data, concordance shouldn't be exactly 0.5
         // (which would indicate no predictive power)
         // But we accept anything reasonable
-    }
-
-    #[test]
-    fn test_validate_aft_scale_parameter() {
-        // R's survreg with Weibull:
-        // Scale parameter should be positive
-        let dataset = create_test_dataset();
-        let config = AftConfig {
-            distribution: AftDistribution::Weibull,
-            ..Default::default()
-        };
-        let result = run_aft(&dataset, "time", "event", &["x1"], Some(config)).unwrap();
-
-        assert!(
-            result.scale > 0.0,
-            "AFT scale must be positive, got {}",
-            result.scale
-        );
-        assert!(
-            result.shape.unwrap() > 0.0,
-            "Weibull shape must be positive, got {:?}",
-            result.shape
-        );
-
-        // AIC should be finite and reasonable
-        assert!(
-            result.aic.is_finite(),
-            "AIC should be finite, got {}",
-            result.aic
-        );
-    }
-
-    #[test]
-    fn test_validate_aft_distributions() {
-        // Test all supported AFT distributions
-        let dataset = create_test_dataset();
-
-        for dist in [
-            AftDistribution::Weibull,
-            AftDistribution::Exponential,
-            AftDistribution::LogNormal,
-            AftDistribution::LogLogistic,
-        ] {
-            let config = AftConfig {
-                distribution: dist,
-                ..Default::default()
-            };
-            let result = run_aft(&dataset, "time", "event", &["x1"], Some(config));
-
-            assert!(
-                result.is_ok(),
-                "AFT {:?} should succeed, got {:?}",
-                dist,
-                result.err()
-            );
-
-            let r = result.unwrap();
-            assert!(r.scale > 0.0, "Scale must be positive for {:?}", dist);
-            assert!(r.aic.is_finite(), "AIC must be finite for {:?}", dist);
-        }
     }
 
     #[test]
@@ -4834,5 +4815,316 @@ mod tests {
             r.warnings
         );
         assert!(r.to_string().contains("not reported"), "{r}");
+    }
+
+    // =========================================================================
+    // Accelerated failure time: R-pinned (case surv_aft)
+    // =========================================================================
+
+    const AFT_X: [&str; 3] = ["age", "sex", "ph.ecog"];
+
+    /// survreg.control(rel.tolerance = 1e-12, maxiter = 100), as in the surv_aft case.
+    fn aft_tight(dist: AftDistribution) -> AftConfig {
+        let mut c = AftConfig::default();
+        c.distribution = dist;
+        c.tolerance = 1e-12;
+        c.max_iter = 100;
+        c
+    }
+
+    /// Everything summary.survreg reports except the Log(scale) row (check_aft_log_scale).
+    fn check_aft(dist: AftDistribution, tag: &str) -> AftResult {
+        let (case, ds) = load_case("surv_aft");
+        let n = case.scalar("n") as usize;
+        let r = run_aft(&ds, "time", "status", &AFT_X, Some(aft_tight(dist))).unwrap();
+        assert!(
+            r.converged && r.warnings.is_empty(),
+            "{dist}: {:?} {:?}",
+            r.convergence,
+            r.warnings
+        );
+        Check::new(&case)
+            .scalar("n", r.n_obs as f64, Tol::exact())
+            .scalar("n_event", r.n_events as f64, Tol::exact())
+            .named(
+                &format!("{tag}_coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                &format!("{tag}_se"),
+                &r.variables,
+                &r.std_errors,
+                Tol::se(n),
+            )
+            .named(&format!("{tag}_z"), &r.variables, &r.z_stats, Tol::stat(n))
+            .named(
+                &format!("{tag}_p"),
+                &r.variables,
+                &r.p_values,
+                Tol::p_value(n),
+            )
+            .scalar(&format!("{tag}_scale"), r.scale, Tol::stat(n))
+            .scalar(&format!("{tag}_loglik"), r.log_likelihood, Tol::stat(n))
+            .scalar(&format!("{tag}_aic"), r.aic, Tol::stat(n))
+            .scalar(&format!("{tag}_bic"), r.bic, Tol::stat(n))
+            .finish();
+        r
+    }
+
+    fn check_aft_log_scale(r: &AftResult, tag: &str) {
+        let (case, _) = load_case("surv_aft");
+        let n = case.scalar("n") as usize;
+        let (z, p) = r.log_scale_test().unwrap();
+        assert!(!r.scale_fixed);
+        Check::new(&case)
+            .scalar(
+                &format!("{tag}_se_log_scale"),
+                r.log_scale_se.unwrap(),
+                Tol::se(n),
+            )
+            .scalar(&format!("{tag}_z_log_scale"), z, Tol::stat(n))
+            .scalar(&format!("{tag}_p_log_scale"), p, Tol::p_value(n))
+            .finish();
+    }
+
+    /// ECON-47. Before: no Newton step was ever taken (Cholesky of the negative-definite
+    /// Hessian), so 100 steps of beta += 0.01 grad diverged: age 54.48, scale inf, logLik -inf.
+    #[test]
+    fn test_validate_aft_weibull() {
+        let r = check_aft(AftDistribution::Weibull, "weibull");
+        check_aft_log_scale(&r, "weibull");
+        assert_eq!(r.shape, Some(1.0 / r.scale));
+    }
+
+    /// ECON-48: exponential = extreme-value errors with the scale fixed at 1; AIC counts 4
+    /// parameters (R 2295.1263026263628 = 2 x 1143.5631513131814 + 8). Before: the Weibull fit
+    /// relabelled.
+    #[test]
+    fn test_validate_aft_exponential() {
+        let r = check_aft(AftDistribution::Exponential, "exponential");
+        assert_eq!(r.scale, 1.0);
+        assert!(r.scale_fixed && r.log_scale_se.is_none() && r.log_scale_test().is_none());
+        assert_eq!(r.shape, Some(1.0));
+        assert!(r.to_string().contains("Scale fixed at 1"), "{r}");
+    }
+
+    /// ECON-47 also: the normal censored second derivative -m (m - z) (was -m (m + z)), the
+    /// normal hazard in the tails, ln S(z) without underflow.
+    #[test]
+    fn test_validate_aft_lognormal() {
+        let r = check_aft(AftDistribution::LogNormal, "lognormal");
+        check_aft_log_scale(&r, "lognormal");
+        assert_eq!(r.shape, None);
+    }
+
+    #[test]
+    fn test_validate_aft_loglogistic() {
+        let r = check_aft(AftDistribution::LogLogistic, "loglogistic");
+        check_aft_log_scale(&r, "loglogistic");
+    }
+
+    /// Phantom-option pair: survreg distinguishes exponential from weibull.
+    #[test]
+    fn test_aft_exponential_differs_from_weibull() {
+        let ds = generated_dataset("lung");
+        let w = run_aft(
+            &ds,
+            "time",
+            "status",
+            &AFT_X,
+            Some(aft_tight(AftDistribution::Weibull)),
+        )
+        .unwrap();
+        let e = run_aft(
+            &ds,
+            "time",
+            "status",
+            &AFT_X,
+            Some(aft_tight(AftDistribution::Exponential)),
+        )
+        .unwrap();
+        assert!(
+            (w.coefficients[1] / e.coefficients[1] - 1.0).abs() > 0.1,
+            "{:?} {:?}",
+            w.coefficients,
+            e.coefficients
+        );
+        assert!((w.scale - e.scale).abs() > 0.1 && (w.aic - e.aic).abs() > 1.0);
+    }
+
+    /// Newton on the equilibrated information does not depend on a covariate's units: age x
+    /// 1e-6 and x 1e6 give survreg's rescaled coefficients in (about) the same number of
+    /// iterations.
+    #[test]
+    fn test_validate_aft_converges_at_any_covariate_scale() {
+        let (case, ds) = load_case("surv_aft");
+        let n = case.scalar("n") as usize;
+        let base = run_aft(
+            &ds,
+            "time",
+            "status",
+            &AFT_X,
+            Some(aft_tight(AftDistribution::Weibull)),
+        )
+        .unwrap();
+        let mut check = Check::new(&case);
+        for (tag, s) in [("em6", 1e-6), ("e6", 1e6)] {
+            let d = derive_f64(&ds, "age", "age_s", |_, a| a as f64 * s);
+            let r = run_aft(
+                &d,
+                "time",
+                "status",
+                &["age_s", "sex", "ph.ecog"],
+                Some(aft_tight(AftDistribution::Weibull)),
+            )
+            .unwrap();
+            assert!(r.converged, "age x {s}: {:?}", r.convergence);
+            assert!(
+                r.iterations.abs_diff(base.iterations) <= 1,
+                "age x {s}: {} vs {}",
+                r.iterations,
+                base.iterations
+            );
+            check.named(
+                &format!("weibull_scale_{tag}_coef"),
+                &["(Intercept)", "age", "sex", "ph.ecog"],
+                &r.coefficients,
+                Tol::coef(n),
+            );
+        }
+        check.finish();
+    }
+
+    /// ECON-61 (survival part): survreg reports NA for age2 = 2 age + sex. Before: an
+    /// identity-matrix SE fallback and a pseudo-inverse start.
+    #[test]
+    fn test_validate_aft_aliased_covariate() {
+        let (case, ds) = load_case("surv_aft");
+        let n = case.scalar("aliased_n") as usize;
+        let sex = i64_values(&ds, "sex");
+        let d = derive_f64(&ds, "age", "age2", |i, a| 2.0 * a as f64 + sex[i] as f64);
+        let r = run_aft(
+            &d,
+            "time",
+            "status",
+            &["age", "sex", "age2"],
+            Some(aft_tight(AftDistribution::Weibull)),
+        )
+        .unwrap();
+        assert_eq!(r.aliased, vec!["age2".to_string()]);
+        assert!(r.std_errors[3].is_nan());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Coefficients not defined because of singularities: age2"),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .named("aliased_coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .scalar("aliased_scale", r.scale, Tol::stat(n))
+            .scalar("aliased_loglik", r.log_likelihood, Tol::stat(n))
+            .finish();
+    }
+
+    /// R10/R2: the iteration limit is a warning with finite results (survreg: "Ran out of
+    /// iterations").
+    #[test]
+    fn test_aft_iteration_limit_is_a_warning() {
+        let ds = generated_dataset("lung");
+        let mut cfg = aft_tight(AftDistribution::Weibull);
+        cfg.max_iter = 1;
+        let r = run_aft(&ds, "time", "status", &AFT_X, Some(cfg)).unwrap();
+        assert!(!r.converged && r.coefficients.iter().all(|b| b.is_finite()));
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("AFT model did not converge after 1 iteration")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Converged: no"), "{r}");
+    }
+
+    #[test]
+    fn test_aft_rejects_bad_iteration_settings() {
+        let ds = generated_dataset("lung");
+        for (max_iter, tol, what) in [
+            (0, 1e-9, "max_iter"),
+            (100, 0.0, "tolerance"),
+            (100, f64::NAN, "tolerance"),
+        ] {
+            let mut cfg = AftConfig::default();
+            cfg.max_iter = max_iter;
+            cfg.tolerance = tol;
+            match run_aft(&ds, "time", "status", &AFT_X, Some(cfg)) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains(what), "{message}")
+                }
+                other => panic!("max_iter {max_iter}, tolerance {tol}: {other:?}"),
+            }
+        }
+    }
+
+    /// The tail helpers against R 4.3.3: pnorm(z, lower.tail = FALSE, log.p = TRUE),
+    /// exp(dnorm(z, log = TRUE) - that), and pmax(z, 0) + log1p(exp(-abs(z))).
+    #[test]
+    fn test_aft_tail_helpers_match_r() {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs() + 1e-300;
+        for (z, ls, h) in [
+            (-40.0, -0.0, 0.0),
+            (-5.0, -2.8665161296376358e-07, 1.4867199409049061e-06),
+            (-1.0, -0.17275377902344988, 0.28759997093917838),
+            (0.0, -0.69314718055994529, 0.79788456080286529),
+            (1.5, -2.7059444008238898, 1.9386771666225433),
+            (8.0, -35.013437159914552, 8.121368112236123),
+            (29.9, -451.32291245852861, 29.933370411296476),
+            (30.0, -454.32124395634321, 30.033259667434663),
+            (40.0, -804.6084420137538, 40.024968847206338),
+        ] {
+            assert!(
+                close(ln_normal_sf(z), ls),
+                "ln S({z}) = {} vs R {ls}",
+                ln_normal_sf(z)
+            );
+            assert!(
+                close(normal_hazard(z), h),
+                "hazard({z}) = {} vs R {h}",
+                normal_hazard(z)
+            );
+        }
+        for (z, sp) in [
+            (-800.0, 0.0),
+            (-30.0, 9.3576229688397368e-14),
+            (0.0, 0.69314718055994529),
+            (2.0, 2.1269280110429727),
+            (30.0, 30.000000000000092),
+            (800.0, 800.0),
+        ] {
+            assert!(
+                close(softplus(z), sp),
+                "softplus({z}) = {} vs R {sp}",
+                softplus(z)
+            );
+        }
+    }
+
+    /// R2: non-finite results are an error, not a returned fit.
+    #[test]
+    fn test_aft_non_finite_result_is_an_error() {
+        assert!(aft_check_finite(-1.0, &[0.1, 0.2], &[0.01, 0.02], 5, 1e-13).is_ok());
+        for (ll, theta, var) in [
+            (f64::NEG_INFINITY, [0.1, 0.2], [0.01, 0.02]),
+            (-1.0, [f64::NAN, 0.2], [0.01, 0.02]),
+            (-1.0, [0.1, 0.2], [0.01, f64::INFINITY]),
+            (-1.0, [0.1, 0.2], [-1e-3, 0.02]),
+        ] {
+            assert!(matches!(
+                aft_check_finite(ll, &theta, &var, 7, 1e-3),
+                Err(EconError::ConvergenceFailure { iterations: 7, .. })
+            ));
+        }
     }
 }

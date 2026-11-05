@@ -89,7 +89,14 @@
       "cases": [
         "surv_aft"
       ],
-      "tests": [],
+      "tests": [
+        "p2a-core::econometrics::survival::tests::test_validate_aft_weibull",
+        "p2a-core::econometrics::survival::tests::test_validate_aft_exponential",
+        "p2a-core::econometrics::survival::tests::test_validate_aft_lognormal",
+        "p2a-core::econometrics::survival::tests::test_validate_aft_loglogistic",
+        "p2a-core::econometrics::survival::tests::test_validate_aft_converges_at_any_covariate_scale",
+        "p2a-core::econometrics::survival::tests::test_validate_aft_aliased_covariate"
+      ],
       "quantities": [
         "coefficients",
         "SE",
