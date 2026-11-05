@@ -119,6 +119,7 @@ use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::options::Choices;
 use crate::resource;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -149,6 +150,44 @@ impl fmt::Display for SBWEstimand {
         }
     }
 }
+
+crate::option_enum!(
+    SBWEstimand,
+    Choices {
+        option: "estimand",
+        values: &[
+            (&["att"], SBWEstimand::ATT),
+            (&["ate"], SBWEstimand::ATE),
+            (&["atc"], SBWEstimand::ATC),
+        ],
+    },
+    no_display
+);
+
+/// The unit in which [`SBWConfig::balance_tol`] is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BalanceTolScale {
+    /// `balance_tol` in the covariates' own units.
+    #[default]
+    Raw,
+    /// `balance_tol` in full-sample standard deviations of each covariate (Zubizarreta 2015;
+    /// sd with the n - 1 denominator).
+    StdDev,
+}
+
+crate::option_enum!(
+    BalanceTolScale,
+    Choices {
+        option: "balance_tol_scale",
+        values: &[
+            (&["raw", "absolute"], BalanceTolScale::Raw),
+            (
+                &["sd", "std", "std_dev", "standardized", "standardised"],
+                BalanceTolScale::StdDev,
+            ),
+        ],
+    }
+);
 
 /// Configuration for stable balancing weights estimation.
 #[derive(Debug, Clone)]
@@ -185,6 +224,9 @@ pub struct SBWConfig {
     /// Penalty ρ on the balance violation for approximate balance (higher = stricter
     /// balance); must be finite and > 0 when `balance_tol > 0`, unused for exact balance.
     pub balance_penalty: f64,
+    /// Unit of `balance_tol`: `Raw` (the default, the covariates' own units) or `StdDev`
+    /// (each covariate's full-sample standard deviation, n - 1 denominator).
+    pub balance_tol_scale: BalanceTolScale,
 }
 
 impl Default for SBWConfig {
@@ -197,6 +239,7 @@ impl Default for SBWConfig {
             max_iter: 1000,
             tolerance: 1e-8,
             balance_penalty: 1000.0,
+            balance_tol_scale: BalanceTolScale::Raw,
         }
     }
 }
@@ -1448,6 +1491,48 @@ mod tests {
             vec![1.0 / n as f64; n]
         };
         (weights, lambda)
+    }
+
+    fn spec_message(err: EconError) -> String {
+        match err {
+            EconError::InvalidSpecification { message } => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sbw_estimand_parses_aliases_and_rejects_unknown() {
+        SBWEstimand::choices().validate().unwrap();
+        for (s, e) in [
+            ("ATE", SBWEstimand::ATE),
+            ("att", SBWEstimand::ATT),
+            ("Atc", SBWEstimand::ATC),
+        ] {
+            assert_eq!(s.parse::<SBWEstimand>().unwrap(), e, "{s}");
+        }
+        let m = spec_message("late".parse::<SBWEstimand>().unwrap_err());
+        assert!(m.contains("estimand") && m.contains("att, ate, atc"), "{m}");
+    }
+
+    #[test]
+    fn test_balance_tol_scale_parses_aliases_and_rejects_unknown() {
+        BalanceTolScale::choices().validate().unwrap();
+        for (s, e) in [
+            ("raw", BalanceTolScale::Raw),
+            ("absolute", BalanceTolScale::Raw),
+            ("sd", BalanceTolScale::StdDev),
+            ("Standardized", BalanceTolScale::StdDev),
+            ("std-dev", BalanceTolScale::StdDev),
+        ] {
+            assert_eq!(s.parse::<BalanceTolScale>().unwrap(), e, "{s}");
+        }
+        let m = spec_message("percent".parse::<BalanceTolScale>().unwrap_err());
+        assert!(
+            m.contains("balance_tol_scale") && m.contains("raw, sd"),
+            "{m}"
+        );
+        assert_eq!(BalanceTolScale::StdDev.to_string(), "sd");
+        assert_eq!(SBWConfig::default().balance_tol_scale, BalanceTolScale::Raw);
     }
 
     /// Outcome for create_test_data(): y = 1 + 2 x1 - x2 + 0.5 d + e (e fixed, 2 decimals).

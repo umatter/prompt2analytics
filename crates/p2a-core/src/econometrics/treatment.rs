@@ -27,6 +27,7 @@ use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::options::Choices;
 use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
@@ -55,6 +56,15 @@ impl fmt::Display for Estimand {
     }
 }
 
+crate::option_enum!(
+    Estimand,
+    Choices {
+        option: "estimand",
+        values: &[(&["ate"], Estimand::ATE), (&["att"], Estimand::ATT)],
+    },
+    no_display
+);
+
 /// Doubly robust estimation method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DRMethod {
@@ -76,6 +86,22 @@ impl fmt::Display for DRMethod {
         }
     }
 }
+
+crate::option_enum!(
+    DRMethod,
+    Choices {
+        option: "method",
+        values: &[
+            (&["aipw", "dr", "doubly_robust"], DRMethod::AIPW),
+            (&["ipw"], DRMethod::IPW),
+            (
+                &["regression", "reg", "ra", "outcome_regression"],
+                DRMethod::Regression,
+            ),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for IPW treatment effect estimation.
 #[derive(Debug, Clone)]
@@ -1625,6 +1651,43 @@ mod tests {
         let t = CancelToken::new();
         t.cancel();
         Budget::new(None, t)
+    }
+
+    fn spec_message(err: EconError) -> String {
+        match err {
+            EconError::InvalidSpecification { message } => message,
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_estimand_parses_aliases_and_rejects_unknown() {
+        Estimand::choices().validate().unwrap();
+        assert_eq!("ATE".parse::<Estimand>().unwrap(), Estimand::ATE);
+        assert_eq!("att".parse::<Estimand>().unwrap(), Estimand::ATT);
+        let m = spec_message("atc".parse::<Estimand>().unwrap_err());
+        assert!(m.contains("estimand") && m.contains("ate, att"), "{m}");
+    }
+
+    #[test]
+    fn test_dr_method_parses_aliases_and_rejects_unknown() {
+        DRMethod::choices().validate().unwrap();
+        for (s, m) in [
+            ("AIPW", DRMethod::AIPW),
+            ("dr", DRMethod::AIPW),
+            ("doubly-robust", DRMethod::AIPW),
+            ("ipw", DRMethod::IPW),
+            ("reg", DRMethod::Regression),
+            ("Regression", DRMethod::Regression),
+            ("outcome_regression", DRMethod::Regression),
+        ] {
+            assert_eq!(s.parse::<DRMethod>().unwrap(), m, "{s}");
+        }
+        let m = spec_message("tmle".parse::<DRMethod>().unwrap_err());
+        assert!(
+            m.contains("method") && m.contains("aipw, ipw, regression"),
+            "{m}"
+        );
     }
 
     #[test]

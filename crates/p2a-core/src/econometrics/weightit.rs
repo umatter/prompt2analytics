@@ -66,6 +66,7 @@ use crate::data::columns::econ_error_from_design;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::options::Choices;
 use crate::traits::estimator::logistic_cdf;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -97,6 +98,26 @@ impl fmt::Display for WeightMethod {
     }
 }
 
+crate::option_enum!(
+    WeightMethod,
+    Choices {
+        option: "method",
+        values: &[
+            (&["logistic", "glm", "ps", "logit"], WeightMethod::Logistic),
+            (
+                &["entropy", "ebal", "entropy_balancing"],
+                WeightMethod::Entropy
+            ),
+            (&["energy"], WeightMethod::Energy),
+            (
+                &["stable", "optweight", "sbw", "stable_balancing"],
+                WeightMethod::Stable,
+            ),
+        ],
+    },
+    no_display
+);
+
 /// Target estimand for treatment effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WeightEstimand {
@@ -118,6 +139,19 @@ impl fmt::Display for WeightEstimand {
         }
     }
 }
+
+crate::option_enum!(
+    WeightEstimand,
+    Choices {
+        option: "estimand",
+        values: &[
+            (&["ate"], WeightEstimand::ATE),
+            (&["att"], WeightEstimand::ATT),
+            (&["atc"], WeightEstimand::ATC),
+        ],
+    },
+    no_display
+);
 
 /// Configuration for WeightIt estimation.
 #[derive(Debug, Clone)]
@@ -1433,6 +1467,55 @@ fn trim_weights(weights: &[f64], quantile: f64) -> Vec<f64> {
 mod tests {
     use super::*;
     use polars::prelude::*;
+
+    fn expect_spec(err: EconError, needles: &[&str]) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                for n in needles {
+                    assert!(
+                        message.contains(n),
+                        "message `{message}` does not mention `{n}`"
+                    )
+                }
+            }
+            other => panic!("expected InvalidSpecification mentioning {needles:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_weight_method_parses_aliases_and_rejects_unknown() {
+        WeightMethod::choices().validate().unwrap();
+        for (s, m) in [
+            ("logistic", WeightMethod::Logistic),
+            ("GLM", WeightMethod::Logistic),
+            ("ps", WeightMethod::Logistic),
+            ("ebal", WeightMethod::Entropy),
+            ("Entropy-Balancing", WeightMethod::Entropy),
+            ("energy", WeightMethod::Energy),
+            ("optweight", WeightMethod::Stable),
+            ("SBW", WeightMethod::Stable),
+        ] {
+            assert_eq!(s.parse::<WeightMethod>().unwrap(), m, "{s}");
+        }
+        let err = "kernel".parse::<WeightMethod>().unwrap_err();
+        expect_spec(err, &["method", "logistic", "entropy", "energy", "stable"]);
+    }
+
+    #[test]
+    fn test_weight_estimand_parses_aliases_and_rejects_unknown() {
+        WeightEstimand::choices().validate().unwrap();
+        for (s, e) in [
+            ("ATE", WeightEstimand::ATE),
+            ("att", WeightEstimand::ATT),
+            (" Atc ", WeightEstimand::ATC),
+        ] {
+            assert_eq!(s.parse::<WeightEstimand>().unwrap(), e);
+        }
+        expect_spec(
+            "atu".parse::<WeightEstimand>().unwrap_err(),
+            &["estimand", "ate", "att", "atc"],
+        );
+    }
 
     /// Create test dataset with imbalance but overlapping support.
     /// Overlap is required for propensity score methods to work correctly.
