@@ -1992,7 +1992,7 @@ mod tests {
         // ATE solves the two groups separately: the record reports the larger step count
         // (it summed them, exceeding max_iter) and the solver's relative residual, the
         // quantity `tolerance` bounds (it reported the balance violation in covariate units).
-        let (_, ds) = crate::test_support::load_case("weights_sbw");
+        let ds = weighting_sim();
         for max_iter in [1, 2, 3] {
             let mut c = SBWConfig::default();
             c.estimand = SBWEstimand::ATE;
