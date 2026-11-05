@@ -11,7 +11,10 @@
         "doubleml_models"
       ],
       "tests": [
-        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_user_folds"
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_user_folds",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_plr_ols",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_plr_lasso",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_plr_ridge"
       ],
       "quantities": [
         "theta, SE, 95% CI, p-value for PLR (OLS, lasso, ridge), IRM (OLS, lasso outcome learners), PLIV, IIVM, IIVM under one-sided noncompliance",

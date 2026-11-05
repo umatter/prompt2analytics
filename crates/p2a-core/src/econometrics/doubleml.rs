@@ -93,17 +93,22 @@
 //! println!("95% CI: [{:.4}, {:.4}]", result.ci_lower, result.ci_upper);
 //! ```
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::econometrics::glm::{GlmLink, fit_propensity, plogis};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message};
 use crate::options::Choices;
-use crate::traits::estimator::{SignificanceLevel, normal_cdf};
+use crate::regression::glmnet::{GlmnetConfig, glmnet, glmnet_predict};
+use crate::regression::ols::normal_equations_inverse;
+use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
+use crate::traits::estimator::{SignificanceLevel, normal_p_value_two_sided, z_critical};
 
 // =============================================================================
 // Configuration Types
@@ -216,6 +221,28 @@ impl fmt::Display for MLMethod {
     }
 }
 
+impl MLMethod {
+    /// The learner as the result prints it: "OLS", or "Lasso (glmnet, lambda = 0.05,
+    /// standardized)" and the same for ridge.
+    pub fn description(self, lambda: f64) -> String {
+        match self {
+            MLMethod::OLS => "OLS".to_string(),
+            MLMethod::Lasso => format!("Lasso (glmnet, lambda = {lambda}, standardized)"),
+            MLMethod::Ridge => format!("Ridge (glmnet, lambda = {lambda}, standardized)"),
+        }
+    }
+}
+
+impl DMLModelType {
+    /// The parameter the model estimates.
+    pub fn estimand(self) -> &'static str {
+        match self {
+            DMLModelType::PLR => "theta (partialling out)",
+            DMLModelType::IRM => "ATE",
+        }
+    }
+}
+
 /// Seed of the fold assignment when `DoubleMLConfig::seed` is `None`.
 pub const DML_DEFAULT_SEED: u64 = 42;
 /// Default penalty of the lasso and ridge learners (glmnet's lambda).
@@ -293,6 +320,24 @@ pub struct NuisanceDiagnostics {
 // Result Types
 // =============================================================================
 
+/// One cross-fitted nuisance function and its out-of-fold accuracy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NuisanceFit {
+    /// DoubleML's learner name without "ml_": "l", "m", "r", "g0", "g1", "r0", "r1"
+    pub name: String,
+    /// The function estimated: "E[Y|X]", "E[D|X]", "P(D=1|X)", "E[Y|D=0,X]", ...
+    pub target: String,
+    /// "OLS", "lasso (glmnet, lambda = 0.05)", "ridge (glmnet, lambda = 0.05)" or
+    /// "logistic regression"
+    pub learner: String,
+    /// Observations evaluated: all n, or the own arm (g0, g1, r0, r1)
+    pub n_eval: usize,
+    /// sqrt(mean((target - prediction)^2)) over the out-of-fold predictions evaluated
+    pub rmse: f64,
+    /// 1 - SSR / SST over the same observations (NaN when SST = 0)
+    pub r2: f64,
+}
+
 /// Result from Double Machine Learning estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoubleMLResult {
@@ -336,6 +381,18 @@ pub struct DoubleMLResult {
     /// Warnings generated during estimation
     pub warnings: Vec<String>,
 
+    /// The cross-fitted nuisance functions, in model order (PLR: l, m; IRM: g0, g1, m)
+    #[serde(default)]
+    pub nuisance: Vec<NuisanceFit>,
+    /// The penalty of the lasso and ridge learners (`None` for OLS)
+    #[serde(default)]
+    pub lambda: Option<f64>,
+    /// The propensity trimming threshold (IRM)
+    #[serde(default)]
+    pub trim: Option<f64>,
+    /// Range of the trimmed propensity scores (IRM: P(D=1|X))
+    #[serde(default)]
+    pub propensity_range: Option<[f64; 2]>,
     /// Observations per fold, in label order
     #[serde(default)]
     pub fold_sizes: Vec<usize>,
@@ -347,13 +404,38 @@ pub struct DoubleMLResult {
     pub seed: Option<u64>,
 }
 
+impl ResultNotes for DoubleMLResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
 impl fmt::Display for DoubleMLResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Double/Debiased Machine Learning Results")?;
         writeln!(f, "==========================================")?;
         writeln!(f, "Model Type: {}", self.model_type)?;
-        writeln!(f, "ML Method:  {}", self.ml_method)?;
+        writeln!(f, "Estimand:   {}", self.model_type.estimand())?;
+        writeln!(
+            f,
+            "ML Method:  {}",
+            self.ml_method
+                .description(self.lambda.unwrap_or(DML_DEFAULT_LAMBDA))
+        )?;
         writeln!(f, "Treatment:  {}", self.treatment_type)?;
+        match self.seed {
+            Some(seed) if !self.user_folds => {
+                writeln!(f, "Folds:      {} (random, seed {seed})", self.n_folds)?
+            }
+            _ => writeln!(f, "Folds:      {} (user-supplied)", self.n_folds)?,
+        }
+        if let Some(trim) = self.trim {
+            writeln!(
+                f,
+                "Trimming:   propensities bounded to [{trim}, {}]",
+                1.0 - trim
+            )?;
+        }
         writeln!(f)?;
         writeln!(f, "Treatment Effect:")?;
         writeln!(f, "  theta:      {:>12.4}", self.theta)?;
@@ -373,42 +455,27 @@ impl fmt::Display for DoubleMLResult {
         writeln!(f)?;
         writeln!(f, "Sample:")?;
         writeln!(f, "  Observations: {}", self.n_obs)?;
-        writeln!(f, "  Folds:        {}", self.n_folds)?;
         writeln!(f)?;
-        writeln!(f, "Nuisance Model Diagnostics:")?;
-        writeln!(
-            f,
-            "  Outcome model R²:    {:.4}",
-            self.nuisance_diagnostics.outcome_r2
-        )?;
-        writeln!(
-            f,
-            "  Treatment model R²:  {:.4}",
-            self.nuisance_diagnostics.treatment_r2
-        )?;
-        writeln!(
-            f,
-            "  Outcome RMSE:        {:.4}",
-            self.nuisance_diagnostics.outcome_rmse
-        )?;
-        writeln!(
-            f,
-            "  Treatment RMSE:      {:.4}",
-            self.nuisance_diagnostics.treatment_rmse
-        )?;
-        writeln!(f, "  Jacobian (Var(D-m)): {:.4}", self.jacobian)?;
+        writeln!(f, "Nuisance models (out-of-fold predictions):")?;
+        for nf in &self.nuisance {
+            writeln!(
+                f,
+                "  {:<3} {:<14} {:<32} n = {:<5} RMSE {:.4}  R² {:.4}",
+                nf.name, nf.target, nf.learner, nf.n_eval, nf.rmse, nf.r2
+            )?;
+        }
+        if let Some([lo, hi]) = self.propensity_range {
+            writeln!(f, "  Propensity range: [{lo:.4}, {hi:.4}]")?;
+        }
+        match self.model_type {
+            DMLModelType::PLR => {
+                writeln!(f, "  Score Jacobian E[(D - m)^2]: {:.4}", self.jacobian)?
+            }
+            DMLModelType::IRM => writeln!(f, "  Score Jacobian: 1 (ATE score, psi_a = -1)")?,
+        }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
-
-        if !self.warnings.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Warnings:")?;
-            for w in &self.warnings {
-                writeln!(f, "  - {}", w)?;
-            }
-        }
-
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -416,50 +483,24 @@ impl fmt::Display for DoubleMLResult {
 // Main DML Functions
 // =============================================================================
 
-/// Run Double Machine Learning estimation.
+/// Run Double Machine Learning estimation: PLR or IRM.
 ///
-/// Estimates the treatment effect theta in the partially linear model:
-/// Y = theta * D + g(X) + epsilon
-///
-/// Uses K-fold cross-fitting with Neyman-orthogonal score functions
-/// to achieve root-n consistency even with slower-converging ML estimators.
+/// Cross-fits the model's nuisance functions on K folds (each predicted for the
+/// observations of one fold by a learner trained on the others), then solves the
+/// Neyman-orthogonal score for theta and estimates its standard error from the scores
+/// (`dml2`). See the module documentation for the models, scores and learners.
 ///
 /// # Arguments
 /// * `y` - Outcome variable (n x 1)
-/// * `d` - Treatment variable (n x 1), can be continuous or binary
-/// * `x` - Covariate/confounding variables (n x p)
+/// * `d` - Treatment variable (n x 1), continuous or 0/1 (IRM: 0/1)
+/// * `x` - Covariates (n x p)
 /// * `config` - DML configuration options
 ///
-/// # Returns
-/// `DoubleMLResult` containing the treatment effect estimate, standard error,
-/// confidence intervals, and diagnostic information.
-///
-/// # Algorithm (PLR Model)
-///
-/// 1. **Cross-fitting**: Partition data into K folds
-/// 2. For each fold k:
-///    a. Estimate l(X) = E[Y|X] on data NOT in fold k
-///    b. Estimate m(X) = E[D|X] on data NOT in fold k
-///    c. Compute predictions for fold k
-/// 3. **Compute residuals**:
-///    - Y_tilde = Y - l_hat(X)  (residualized outcome)
-///    - D_tilde = D - m_hat(X)  (residualized treatment)
-/// 4. **Estimate theta**: theta_hat = sum(Y_tilde * D_tilde) / sum(D_tilde^2)
-/// 5. **Compute scores**: psi_i = (Y_tilde_i - theta_hat * D_tilde_i) * D_tilde_i
-/// 6. **Variance estimation**: Var(theta) = mean(psi^2) / J^2 / n
-///    where J = mean(D_tilde^2)
-///
-/// # References
-///
-/// - Chernozhukov et al. (2018), "Double/debiased machine learning",
-///   Econometrics Journal, Eq. (4.1) for PLR, Eq. (3.3) for orthogonal score
-///
-/// # Example
-/// ```ignore
-/// let config = DoubleMLConfig { n_folds: 5, ..Default::default() };
-/// let result = run_double_ml(&y.view(), &d.view(), &x.view(), config)?;
-/// println!("theta = {:.4} (SE: {:.4})", result.theta, result.se);
-/// ```
+/// # Errors
+/// `InvalidSpecification` for inconsistent lengths, non-finite data, a constant
+/// treatment, out-of-range `trim`, `lambda` or folds; `InsufficientData` when a training
+/// set is too small for its learner; `SingularMatrix` when the score's Jacobian is
+/// (numerically) zero.
 pub fn run_double_ml(
     y: &ArrayView1<f64>,
     d: &ArrayView1<f64>,
@@ -469,8 +510,6 @@ pub fn run_double_ml(
     let treatment_type = validate_inputs(y, d, None, x, &config)?;
     let folds = make_folds(y.len(), &config)?;
     let mut warnings = Vec::new();
-
-    // Dispatch to appropriate model
     match config.model_type {
         DMLModelType::PLR => run_plr(y, d, x, &config, &folds, &mut warnings),
         DMLModelType::IRM => run_irm(y, d, x, &config, &folds, &mut warnings),
@@ -480,20 +519,13 @@ pub fn run_double_ml(
         r.fold_sizes = folds.sizes.clone();
         r.user_folds = folds.seed.is_none();
         r.seed = folds.seed;
+        r.n_folds = folds.labels.len();
         r
     })
 }
 
-/// Run Partially Linear Regression Model (PLR) with cross-fitting.
-///
-/// PLR Model:
-///   Y = theta * D + g(X) + zeta,  E[zeta|D,X] = 0
-///   D = m(X) + V,                  E[V|X] = 0
-///
-/// Orthogonal score (partialling out):
-///   psi = (Y - l(X) - theta*(D - m(X))) * (D - m(X))
-///
-/// where l(X) = E[Y|X] = theta * m(X) + g(X)
+/// Partially linear regression, partialling-out score:
+/// `psi = (Y - l(X) - theta (D - m(X))) (D - m(X))`, `l = E[Y|X]`, `m = E[D|X]`.
 fn run_plr(
     y: &ArrayView1<f64>,
     d: &ArrayView1<f64>,
@@ -502,251 +534,68 @@ fn run_plr(
     folds: &Folds,
     warnings: &mut Vec<String>,
 ) -> EconResult<DoubleMLResult> {
-    let n = y.len();
-    let k_folds = folds.labels.len();
-
-    let fold_ids = &folds.index;
-
-    // Build design matrix with intercept if requested
-    let x_design = if config.intercept {
-        add_intercept(x)
-    } else {
-        x.to_owned()
-    };
-
-    // Initialize storage for cross-fitted predictions
-    let mut l_hat = Array1::zeros(n); // E[Y|X] predictions
-    let mut m_hat = Array1::zeros(n); // E[D|X] predictions
-
-    // Cumulative diagnostics
-    let mut total_outcome_ss = 0.0;
-    let mut total_outcome_rss = 0.0;
-    let mut total_treatment_ss = 0.0;
-    let mut total_treatment_rss = 0.0;
-
-    // Cross-fitting loop
-    // For each fold k, train on data NOT in k, predict for data IN k
-    // (Chernozhukov et al. 2018, Algorithm 1)
-    for k in 0..k_folds {
-        // Indices for this fold (test) and other folds (train)
-        let test_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] == k).collect();
-        let train_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] != k).collect();
-
-        let n_train = train_idx.len();
-        let n_test = test_idx.len();
-
-        if n_train < x_design.ncols() + 1 {
-            return Err(EconError::InsufficientData {
-                required: x_design.ncols() + 1,
-                provided: n_train,
-                context: format!("Training data for fold {}", k),
-            });
-        }
-
-        // Extract training data
-        let y_train: Array1<f64> = train_idx.iter().map(|&i| y[i]).collect();
-        let d_train: Array1<f64> = train_idx.iter().map(|&i| d[i]).collect();
-        let mut x_train = Array2::zeros((n_train, x_design.ncols()));
-        for (new_i, &old_i) in train_idx.iter().enumerate() {
-            x_train.row_mut(new_i).assign(&x_design.row(old_i));
-        }
-
-        // Extract test data design matrix
-        // (y_test and d_test not needed since we use the full arrays at the end)
-        let mut x_test = Array2::zeros((n_test, x_design.ncols()));
-        for (new_i, &old_i) in test_idx.iter().enumerate() {
-            x_test.row_mut(new_i).assign(&x_design.row(old_i));
-        }
-
-        // Fit nuisance model for l(X) = E[Y|X]
-        let l_beta = fit_ols(&x_train.view(), &y_train)?;
-        let l_pred_test = x_test.dot(&l_beta);
-        let l_pred_train = x_train.dot(&l_beta);
-
-        // Fit nuisance model for m(X) = E[D|X]
-        let m_beta = fit_ols(&x_train.view(), &d_train)?;
-        let m_pred_test = x_test.dot(&m_beta);
-        let m_pred_train = x_train.dot(&m_beta);
-
-        // Store cross-fitted predictions
-        for (new_i, &old_i) in test_idx.iter().enumerate() {
-            l_hat[old_i] = l_pred_test[new_i];
-            m_hat[old_i] = m_pred_test[new_i];
-        }
-
-        // Accumulate diagnostics from training data
-        let y_train_mean = y_train.mean().unwrap_or(0.0);
-        let d_train_mean = d_train.mean().unwrap_or(0.0);
-
-        total_outcome_ss += y_train
-            .iter()
-            .map(|&yi| (yi - y_train_mean).powi(2))
-            .sum::<f64>();
-        total_outcome_rss += y_train
-            .iter()
-            .zip(l_pred_train.iter())
-            .map(|(&yi, &li)| (yi - li).powi(2))
-            .sum::<f64>();
-
-        total_treatment_ss += d_train
-            .iter()
-            .map(|&di| (di - d_train_mean).powi(2))
-            .sum::<f64>();
-        total_treatment_rss += d_train
-            .iter()
-            .zip(m_pred_train.iter())
-            .map(|(&di, &mi)| (di - mi).powi(2))
-            .sum::<f64>();
-    }
-
-    // Compute residualized variables
-    // Y_tilde = Y - l_hat(X)
-    // D_tilde = D - m_hat(X)
-    let y_tilde: Array1<f64> = y
-        .iter()
-        .zip(l_hat.iter())
-        .map(|(&yi, &li)| yi - li)
-        .collect();
-    let d_tilde: Array1<f64> = d
-        .iter()
-        .zip(m_hat.iter())
-        .map(|(&di, &mi)| di - mi)
-        .collect();
-
-    // Estimate theta using the orthogonal moment condition:
-    // theta_hat = sum(Y_tilde * D_tilde) / sum(D_tilde^2)
-    // (Chernozhukov et al. 2018, Eq. 4.1)
-    let numerator: f64 = y_tilde
-        .iter()
-        .zip(d_tilde.iter())
-        .map(|(&yt, &dt)| yt * dt)
-        .sum();
-    let denominator: f64 = d_tilde.iter().map(|&dt| dt * dt).sum();
-
-    if denominator.abs() < 1e-10 {
+    let n = y.len() as f64;
+    let ml = Learner::Regression(config.ml_method);
+    let preds = cross_fit(
+        x,
+        folds,
+        None,
+        ml,
+        &[
+            Nuisance::new("l", "E[Y|X]", y.view()),
+            Nuisance::new("m", "E[D|X]", d.view()),
+        ],
+        config,
+        warnings,
+    )?;
+    let (l, m) = (&preds[0], &preds[1]);
+    let ry = y - l;
+    let rd = d - m;
+    let ssd = rd.dot(&rd);
+    let jacobian = ssd / n;
+    let var_d = var_pop(d);
+    if jacobian.is_nan() || jacobian <= 1e-12 * var_d {
         return Err(EconError::SingularMatrix {
-            context: "DML theta estimation".to_string(),
-            suggestion: "Residualized treatment has near-zero variance. Check that treatment is not fully determined by covariates.".to_string(),
+            context: format!("DoubleML PLR: E[(D - m)^2] = {jacobian:e} out of fold"),
+            suggestion: "D is (almost) a linear function of the covariates; theta is not \
+                         identified"
+                .to_string(),
         });
     }
+    let theta = rd.dot(&ry) / ssd;
+    let scores: Array1<f64> = (&ry - &(&rd * theta)) * &rd;
+    let se = (scores.dot(&scores) / n / (jacobian * jacobian) / n).sqrt();
 
-    let theta = numerator / denominator;
-
-    // Compute orthogonal scores
-    // psi_i = (Y_tilde_i - theta * D_tilde_i) * D_tilde_i
-    // (Chernozhukov et al. 2018, Eq. 3.3)
-    let scores: Vec<f64> = y_tilde
-        .iter()
-        .zip(d_tilde.iter())
-        .map(|(&yt, &dt)| (yt - theta * dt) * dt)
-        .collect();
-
-    // Variance estimation using influence function
-    // J = E[D_tilde^2] = mean(D_tilde^2) (the Jacobian)
-    // Var(psi) = mean(psi^2)
-    // Var(theta_hat) = Var(psi) / J^2 / n
-    // (Chernozhukov et al. 2018, Theorem 3.1)
-    let jacobian = denominator / n as f64;
-    let psi_squared_mean: f64 = scores.iter().map(|&s| s * s).sum::<f64>() / n as f64;
-    let variance = psi_squared_mean / (jacobian * jacobian) / n as f64;
-    let se = variance.sqrt();
-
-    // Inference
-    let t_stat = if se > 0.0 && se.is_finite() {
-        theta / se
-    } else {
-        0.0
+    let label = ml.label(config.lambda);
+    let fit_l = nuisance_fit("l", "E[Y|X]", &label, y, l, None);
+    let fit_m = nuisance_fit("m", "E[D|X]", &label, d, m, None);
+    let mean_rd = rd.sum() / n;
+    let diagnostics = NuisanceDiagnostics {
+        outcome_r2: fit_l.r2,
+        treatment_r2: fit_m.r2,
+        outcome_rmse: fit_l.rmse,
+        treatment_rmse: fit_m.rmse,
+        mean_residual_treatment: mean_rd,
+        var_residual_treatment: jacobian,
     };
-    let p_value = 2.0 * (1.0 - normal_cdf(t_stat.abs()));
-    let significance = SignificanceLevel::from_p_value(p_value);
-
-    // 95% confidence interval (normal approximation, valid asymptotically)
-    let z_crit = 1.96;
-    let ci_lower = theta - z_crit * se;
-    let ci_upper = theta + z_crit * se;
-
-    // Compute nuisance diagnostics
-    let outcome_r2 = if total_outcome_ss > 0.0 {
-        1.0 - total_outcome_rss / total_outcome_ss
-    } else {
-        0.0
-    };
-    let treatment_r2 = if total_treatment_ss > 0.0 {
-        1.0 - total_treatment_rss / total_treatment_ss
-    } else {
-        0.0
-    };
-
-    let outcome_rmse = (total_outcome_rss / n as f64).sqrt();
-    let treatment_rmse = (total_treatment_rss / n as f64).sqrt();
-
-    let mean_residual_treatment = d_tilde.mean().unwrap_or(0.0);
-    let var_residual_treatment = jacobian;
-
-    // Warnings
-    if outcome_r2 < 0.0 {
-        warnings.push("Outcome model R² is negative; model may be misspecified".to_string());
-    }
-    if treatment_r2 < 0.0 {
-        warnings.push("Treatment model R² is negative; model may be misspecified".to_string());
-    }
-    if jacobian < 0.01 {
-        warnings.push(format!(
-            "Jacobian (Var(D-m(X))) is small ({:.4}). Standard errors may be large.",
-            jacobian
-        ));
-    }
-    if mean_residual_treatment.abs() > 0.1 {
-        warnings.push(format!(
-            "Mean of residualized treatment is {:.4}; should be near 0.",
-            mean_residual_treatment
-        ));
-    }
-
-    let nuisance_diagnostics = NuisanceDiagnostics {
-        outcome_r2,
-        treatment_r2,
-        outcome_rmse,
-        treatment_rmse,
-        mean_residual_treatment,
-        var_residual_treatment,
-    };
-
-    Ok(DoubleMLResult {
+    residual_warnings(warnings, "m", jacobian, d, mean_rd);
+    assemble(
+        DMLModelType::PLR,
+        config,
         theta,
         se,
-        t_stat,
-        p_value,
-        significance,
-        ci_lower,
-        ci_upper,
-        scores,
-        nuisance_diagnostics,
-        n_obs: n,
-        n_folds: k_folds,
-        model_type: DMLModelType::PLR,
-        treatment_type: config.treatment_type,
-        ml_method: config.ml_method,
+        scores.to_vec(),
+        diagnostics,
         jacobian,
-        warnings: warnings.to_vec(),
-        fold_sizes: Vec::new(),
-        user_folds: false,
-        seed: None,
-    })
+        vec![fit_l, fit_m],
+        None,
+        warnings,
+    )
 }
 
-/// Run Interactive Regression Model (IRM) with cross-fitting.
-///
-/// IRM Model (for binary treatment):
-///   Y(1) = g_1(X) + U_1,  E[U_1|X] = 0
-///   Y(0) = g_0(X) + U_0,  E[U_0|X] = 0
-///   D = m(X) + V,          where m(X) = P(D=1|X)
-///
-/// The Average Treatment Effect (ATE) is:
-///   theta = E[g_1(X) - g_0(X)]
-///
-/// Orthogonal score:
-///   psi = g_1(X) - g_0(X) + D*(Y - g_1(X))/m(X) - (1-D)*(Y - g_0(X))/(1-m(X)) - theta
+/// Interactive regression model (binary treatment), ATE score:
+/// `psi = g1 - g0 + D (Y - g1) / m - (1 - D)(Y - g0) / (1 - m) - theta`,
+/// `g_d = E[Y|D=d,X]`, `m = P(D=1|X)` bounded to `[trim, 1 - trim]`.
 fn run_irm(
     y: &ArrayView1<f64>,
     d: &ArrayView1<f64>,
@@ -755,268 +604,229 @@ fn run_irm(
     folds: &Folds,
     warnings: &mut Vec<String>,
 ) -> EconResult<DoubleMLResult> {
-    let n = y.len();
-    let k_folds = folds.labels.len();
-
-    // Validate binary treatment
-    let is_binary = d
-        .iter()
-        .all(|&di| (di - 0.0).abs() < 1e-10 || (di - 1.0).abs() < 1e-10);
-    if !is_binary {
+    let nobs = y.len();
+    let n = nobs as f64;
+    if !is_binary(d) {
         warnings.push(
             "IRM is designed for binary treatment. Consider using PLR for continuous treatment."
                 .to_string(),
         );
     }
-
-    let n_treated: usize = d.iter().filter(|&&di| di >= 0.5).count();
-    let n_control = n - n_treated;
-    if n_treated < 5 || n_control < 5 {
+    let treated: Vec<bool> = d.iter().map(|&v| v >= 0.5).collect();
+    let control: Vec<bool> = treated.iter().map(|t| !t).collect();
+    let n_treated = treated.iter().filter(|&&t| t).count();
+    if n_treated.min(nobs - n_treated) < 5 {
         return Err(EconError::InsufficientData {
             required: 5,
-            provided: n_treated.min(n_control),
+            provided: n_treated.min(nobs - n_treated),
             context: "IRM requires sufficient observations in both treatment groups".to_string(),
         });
     }
+    let ml = Learner::Regression(MLMethod::OLS);
+    let g0 = cross_fit(
+        x,
+        folds,
+        Some(&control),
+        ml,
+        &[Nuisance::new("g0", "E[Y|D=0,X]", y.view())],
+        config,
+        warnings,
+    )?
+    .remove(0);
+    let g1 = cross_fit(
+        x,
+        folds,
+        Some(&treated),
+        ml,
+        &[Nuisance::new("g1", "E[Y|D=1,X]", y.view())],
+        config,
+        warnings,
+    )?
+    .remove(0);
+    let ps = Learner::Regression(MLMethod::OLS);
+    let m = cross_fit(
+        x,
+        folds,
+        None,
+        ps,
+        &[Nuisance::new("m", "P(D=1|X)", d.view())],
+        config,
+        warnings,
+    )?
+    .remove(0)
+    .mapv(|v| v.max(config.trim).min(1.0 - config.trim));
 
-    let fold_ids = &folds.index;
+    let dt = Array1::from_iter(treated.iter().map(|&t| if t { 1.0 } else { 0.0 }));
+    let psi_b = Array1::from_shape_fn(nobs, |i| {
+        g1[i] - g0[i] + dt[i] * (y[i] - g1[i]) / m[i]
+            - (1.0 - dt[i]) * (y[i] - g0[i]) / (1.0 - m[i])
+    });
+    let theta = psi_b.sum() / n;
+    let scores = psi_b.mapv(|v| v - theta);
+    let psi_sq = scores.dot(&scores) / n;
+    let se = (psi_sq / n).sqrt();
 
-    // Build design matrix with intercept
-    let x_design = if config.intercept {
-        add_intercept(x)
-    } else {
-        x.to_owned()
+    let label = ml.label(config.lambda);
+    let fit_g0 = nuisance_fit("g0", "E[Y|D=0,X]", &label, y, &g0, Some(&control));
+    let fit_g1 = nuisance_fit("g1", "E[Y|D=1,X]", &label, y, &g1, Some(&treated));
+    let fit_m = nuisance_fit("m", "P(D=1|X)", &ps.label(config.lambda), d, &m, None);
+    let g_obs = Array1::from_shape_fn(nobs, |i| if treated[i] { g1[i] } else { g0[i] });
+    let fit_out = nuisance_fit("", "", "", y, &g_obs, None);
+    let diagnostics = NuisanceDiagnostics {
+        outcome_r2: fit_out.r2,
+        treatment_r2: fit_m.r2,
+        outcome_rmse: fit_out.rmse,
+        treatment_rmse: fit_m.rmse,
+        mean_residual_treatment: (d - &m).sum() / n,
+        var_residual_treatment: psi_sq,
     };
+    propensity_warning(warnings, &m, config.trim);
+    let range = min_max(&m);
+    assemble(
+        DMLModelType::IRM,
+        config,
+        theta,
+        se,
+        scores.to_vec(),
+        diagnostics,
+        psi_sq,
+        vec![fit_g0, fit_g1, fit_m],
+        Some(range),
+        warnings,
+    )
+}
 
-    // Initialize storage for cross-fitted predictions
-    let mut g1_hat = Array1::zeros(n); // E[Y|X,D=1] predictions
-    let mut g0_hat = Array1::zeros(n); // E[Y|X,D=0] predictions
-    let mut m_hat = Array1::zeros(n); // P(D=1|X) predictions
-
-    // Diagnostics accumulators
-    let mut total_g1_ss = 0.0;
-    let mut total_g1_rss = 0.0;
-    let mut total_g0_ss = 0.0;
-    let mut total_g0_rss = 0.0;
-    let mut total_m_ss = 0.0;
-    let mut total_m_rss = 0.0;
-
-    // Cross-fitting loop
-    for k in 0..k_folds {
-        let test_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] == k).collect();
-        let train_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] != k).collect();
-
-        // Split training data by treatment status
-        let train_treated: Vec<usize> = train_idx
-            .iter()
-            .filter(|&&i| d[i] >= 0.5)
-            .copied()
-            .collect();
-        let train_control: Vec<usize> =
-            train_idx.iter().filter(|&&i| d[i] < 0.5).copied().collect();
-
-        if train_treated.len() < x_design.ncols() + 1 || train_control.len() < x_design.ncols() + 1
-        {
-            return Err(EconError::InsufficientData {
-                required: x_design.ncols() + 1,
-                provided: train_treated.len().min(train_control.len()),
-                context: format!(
-                    "Training data for fold {} (need enough in each treatment group)",
-                    k
-                ),
-            });
-        }
-
-        // Fit g_1(X) = E[Y|X, D=1]
-        let y_treated: Array1<f64> = train_treated.iter().map(|&i| y[i]).collect();
-        let mut x_treated = Array2::zeros((train_treated.len(), x_design.ncols()));
-        for (new_i, &old_i) in train_treated.iter().enumerate() {
-            x_treated.row_mut(new_i).assign(&x_design.row(old_i));
-        }
-        let g1_beta = fit_ols(&x_treated.view(), &y_treated)?;
-
-        // Fit g_0(X) = E[Y|X, D=0]
-        let y_control: Array1<f64> = train_control.iter().map(|&i| y[i]).collect();
-        let mut x_control = Array2::zeros((train_control.len(), x_design.ncols()));
-        for (new_i, &old_i) in train_control.iter().enumerate() {
-            x_control.row_mut(new_i).assign(&x_design.row(old_i));
-        }
-        let g0_beta = fit_ols(&x_control.view(), &y_control)?;
-
-        // Fit m(X) = P(D=1|X) using linear probability model
-        // (could be replaced with logistic regression for better propensity estimation)
-        let d_train: Array1<f64> = train_idx.iter().map(|&i| d[i]).collect();
-        let mut x_train = Array2::zeros((train_idx.len(), x_design.ncols()));
-        for (new_i, &old_i) in train_idx.iter().enumerate() {
-            x_train.row_mut(new_i).assign(&x_design.row(old_i));
-        }
-        let m_beta = fit_ols(&x_train.view(), &d_train)?;
-
-        // Predict for test fold
-        let mut x_test = Array2::zeros((test_idx.len(), x_design.ncols()));
-        for (new_i, &old_i) in test_idx.iter().enumerate() {
-            x_test.row_mut(new_i).assign(&x_design.row(old_i));
-        }
-
-        let g1_pred = x_test.dot(&g1_beta);
-        let g0_pred = x_test.dot(&g0_beta);
-        let m_pred = x_test.dot(&m_beta);
-
-        // Store predictions and clip propensity scores
-        for (new_i, &old_i) in test_idx.iter().enumerate() {
-            g1_hat[old_i] = g1_pred[new_i];
-            g0_hat[old_i] = g0_pred[new_i];
-            m_hat[old_i] = m_pred[new_i].max(config.trim).min(1.0 - config.trim);
-        }
-
-        // Accumulate diagnostics
-        let y_treated_mean = y_treated.mean().unwrap_or(0.0);
-        let g1_pred_train = x_treated.dot(&g1_beta);
-        total_g1_ss += y_treated
-            .iter()
-            .map(|&yi| (yi - y_treated_mean).powi(2))
-            .sum::<f64>();
-        total_g1_rss += y_treated
-            .iter()
-            .zip(g1_pred_train.iter())
-            .map(|(&yi, &gi)| (yi - gi).powi(2))
-            .sum::<f64>();
-
-        let y_control_mean = y_control.mean().unwrap_or(0.0);
-        let g0_pred_train = x_control.dot(&g0_beta);
-        total_g0_ss += y_control
-            .iter()
-            .map(|&yi| (yi - y_control_mean).powi(2))
-            .sum::<f64>();
-        total_g0_rss += y_control
-            .iter()
-            .zip(g0_pred_train.iter())
-            .map(|(&yi, &gi)| (yi - gi).powi(2))
-            .sum::<f64>();
-
-        let d_train_mean = d_train.mean().unwrap_or(0.0);
-        let m_pred_train = x_train.dot(&m_beta);
-        total_m_ss += d_train
-            .iter()
-            .map(|&di| (di - d_train_mean).powi(2))
-            .sum::<f64>();
-        total_m_rss += d_train
-            .iter()
-            .zip(m_pred_train.iter())
-            .map(|(&di, &mi)| (di - mi).powi(2))
-            .sum::<f64>();
-    }
-
-    // Compute theta using the AIPW/doubly-robust estimator
-    // theta = mean(g1(X) - g0(X) + D*(Y - g1(X))/m(X) - (1-D)*(Y - g0(X))/(1-m(X)))
-    let mut psi_values = Vec::with_capacity(n);
-    let mut theta_components = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let di = d[i];
-        let yi = y[i];
-        let g1i = g1_hat[i];
-        let g0i = g0_hat[i];
-        let mi = m_hat[i];
-
-        let outcome_diff = g1i - g0i;
-        let ipw_treated = if di >= 0.5 { (yi - g1i) / mi } else { 0.0 };
-        let ipw_control = if di < 0.5 {
-            (yi - g0i) / (1.0 - mi)
-        } else {
-            0.0
-        };
-
-        let component = outcome_diff + ipw_treated - ipw_control;
-        theta_components.push(component);
-    }
-
-    let theta: f64 = theta_components.iter().sum::<f64>() / n as f64;
-
-    // Compute scores (influence function values)
-    // psi_i = theta_component_i - theta
-    for &comp in &theta_components {
-        psi_values.push(comp - theta);
-    }
-
-    // Variance estimation
-    let psi_squared_mean: f64 = psi_values.iter().map(|&p| p * p).sum::<f64>() / n as f64;
-    let variance = psi_squared_mean / n as f64;
-    let se = variance.sqrt();
-
-    // Inference
+/// The result of one model: inference from theta and its SE, the nuisance fits and the
+/// fields every model shares (folds are filled in by the entry point).
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    model_type: DMLModelType,
+    config: &DoubleMLConfig,
+    theta: f64,
+    se: f64,
+    scores: Vec<f64>,
+    nuisance_diagnostics: NuisanceDiagnostics,
+    jacobian: f64,
+    nuisance: Vec<NuisanceFit>,
+    propensity_range: Option<[f64; 2]>,
+    warnings: &[String],
+) -> EconResult<DoubleMLResult> {
     let t_stat = if se > 0.0 && se.is_finite() {
         theta / se
     } else {
-        0.0
+        f64::NAN
     };
-    let p_value = 2.0 * (1.0 - normal_cdf(t_stat.abs()));
-    let significance = SignificanceLevel::from_p_value(p_value);
-
-    let z_crit = 1.96;
-    let ci_lower = theta - z_crit * se;
-    let ci_upper = theta + z_crit * se;
-
-    // Compute nuisance diagnostics (average of g1 and g0)
-    let outcome_r2 = if total_g1_ss + total_g0_ss > 0.0 {
-        1.0 - (total_g1_rss + total_g0_rss) / (total_g1_ss + total_g0_ss)
-    } else {
-        0.0
-    };
-    let treatment_r2 = if total_m_ss > 0.0 {
-        1.0 - total_m_rss / total_m_ss
-    } else {
-        0.0
-    };
-
-    let outcome_rmse = ((total_g1_rss + total_g0_rss) / n as f64).sqrt();
-    let treatment_rmse = (total_m_rss / n as f64).sqrt();
-
-    // For IRM, jacobian is not directly applicable; we use variance of scores
-    let jacobian = psi_squared_mean;
-
-    // Check for extreme propensity scores
-    let n_extreme = m_hat
-        .iter()
-        .filter(|&&mi| mi < 2.0 * config.trim || mi > 1.0 - 2.0 * config.trim)
-        .count();
-    if n_extreme > n / 10 {
-        warnings.push(format!(
-            "Many observations ({}/{}) have extreme propensity scores. Consider stronger trimming.",
-            n_extreme, n
-        ));
-    }
-
-    let nuisance_diagnostics = NuisanceDiagnostics {
-        outcome_r2,
-        treatment_r2,
-        outcome_rmse,
-        treatment_rmse,
-        mean_residual_treatment: 0.0, // Not applicable for IRM
-        var_residual_treatment: jacobian,
-    };
-
+    let p_value = normal_p_value_two_sided(t_stat);
+    let z = z_critical(0.95)?;
+    let n_obs = scores.len();
     Ok(DoubleMLResult {
         theta,
         se,
         t_stat,
         p_value,
-        significance,
-        ci_lower,
-        ci_upper,
-        scores: psi_values,
+        significance: SignificanceLevel::from_p_value(p_value),
+        ci_lower: theta - z * se,
+        ci_upper: theta + z * se,
+        scores,
         nuisance_diagnostics,
-        n_obs: n,
-        n_folds: k_folds,
-        model_type: DMLModelType::IRM,
-        treatment_type: TreatmentType::Binary,
+        n_obs,
+        n_folds: 0,
+        model_type,
+        treatment_type: TreatmentType::Continuous,
         ml_method: config.ml_method,
         jacobian,
         warnings: warnings.to_vec(),
+        nuisance,
+        lambda: matches!(config.ml_method, MLMethod::Lasso | MLMethod::Ridge)
+            .then_some(config.lambda),
+        trim: propensity_range.map(|_| config.trim),
+        propensity_range,
         fold_sizes: Vec::new(),
         user_folds: false,
         seed: None,
     })
+}
+
+/// PLR and PLIV: the residualized treatment's out-of-fold variance and mean, relative to D.
+fn residual_warnings(
+    warnings: &mut Vec<String>,
+    name: &str,
+    w: f64,
+    d: &ArrayView1<f64>,
+    mean_rd: f64,
+) {
+    let var_d = var_pop(d);
+    let ratio = w / var_d;
+    if ratio < 0.01 {
+        warnings.push(format!(
+            "E[(D - {name})^2] / Var(D) = {ratio:.4} out of fold: the covariates explain more \
+             than 99% of the variance of D, so theta is weakly identified and its standard \
+             error is large"
+        ));
+    }
+    let sd_d = var_d.sqrt();
+    if mean_rd.abs() > 0.1 * sd_d {
+        warnings.push(format!(
+            "the mean of the residualized treatment is {mean_rd:.4} ({:.2} standard deviations \
+             of D); the treatment learner is biased out of fold",
+            mean_rd.abs() / sd_d
+        ));
+    }
+}
+
+/// IRM and IIVM: many trimmed propensities near the bounds.
+fn propensity_warning(warnings: &mut Vec<String>, m: &Array1<f64>, trim: f64) {
+    let n = m.len();
+    let n_extreme = m
+        .iter()
+        .filter(|&&v| v < 2.0 * trim || v > 1.0 - 2.0 * trim)
+        .count();
+    if n_extreme > n / 10 {
+        warnings.push(format!(
+            "Many observations ({n_extreme}/{n}) have extreme propensity scores. Consider \
+             stronger trimming."
+        ));
+    }
+}
+
+fn min_max(v: &Array1<f64>) -> [f64; 2] {
+    v.iter()
+        .fold([f64::INFINITY, f64::NEG_INFINITY], |[lo, hi], &x| {
+            [lo.min(x), hi.max(x)]
+        })
+}
+
+/// Population variance.
+fn var_pop(v: &ArrayView1<f64>) -> f64 {
+    let n = v.len() as f64;
+    let mean = v.sum() / n;
+    v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n
+}
+
+/// RMSE and R² of the out-of-fold predictions `pred` of `target`, over `subset` (or all).
+fn nuisance_fit(
+    name: &str,
+    target_label: &str,
+    learner: &str,
+    target: &ArrayView1<f64>,
+    pred: &Array1<f64>,
+    subset: Option<&[bool]>,
+) -> NuisanceFit {
+    let rows: Vec<usize> = (0..target.len())
+        .filter(|&i| subset.is_none_or(|s| s[i]))
+        .collect();
+    let k = rows.len() as f64;
+    let mean = rows.iter().map(|&i| target[i]).sum::<f64>() / k;
+    let ssr: f64 = rows.iter().map(|&i| (target[i] - pred[i]).powi(2)).sum();
+    let sst: f64 = rows.iter().map(|&i| (target[i] - mean).powi(2)).sum();
+    NuisanceFit {
+        name: name.to_string(),
+        target: target_label.to_string(),
+        learner: learner.to_string(),
+        n_eval: rows.len(),
+        rmse: (ssr / k).sqrt(),
+        r2: if sst > 0.0 { 1.0 - ssr / sst } else { f64::NAN },
+    }
 }
 
 // =============================================================================
@@ -1253,21 +1063,466 @@ fn add_intercept(x: &ArrayView2<f64>) -> Array2<f64> {
     x_with_intercept
 }
 
-/// Fit OLS regression: beta = (X'X)^{-1} X'y
+// =============================================================================
+// Cross-fitting
+// =============================================================================
+
+/// The learner of one nuisance function.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Learner {
+    /// `config.ml_method` (a regression nuisance)
+    Regression(MLMethod),
+    /// Logistic regression (a binary nuisance)
+    Logistic,
+}
+
+impl Learner {
+    fn label(self, lambda: f64) -> String {
+        match self {
+            Learner::Regression(MLMethod::OLS) => "OLS".to_string(),
+            Learner::Regression(MLMethod::Lasso) => format!("lasso (glmnet, lambda = {lambda})"),
+            Learner::Regression(MLMethod::Ridge) => format!("ridge (glmnet, lambda = {lambda})"),
+            Learner::Logistic => "logistic regression".to_string(),
+        }
+    }
+}
+
+/// One nuisance function `name = target_label`: the regression of `target` on X.
+struct Nuisance<'a> {
+    name: &'static str,
+    target_label: &'static str,
+    target: ArrayView1<'a, f64>,
+}
+
+impl<'a> Nuisance<'a> {
+    fn new(name: &'static str, target_label: &'static str, target: ArrayView1<'a, f64>) -> Self {
+        Self {
+            name,
+            target_label,
+            target,
+        }
+    }
+}
+
+/// The notes of one nuisance, merged over folds in first-occurrence order.
+#[derive(Default)]
+struct FoldNotes(Vec<(String, Vec<usize>)>);
+
+impl FoldNotes {
+    fn add(&mut self, text: String, label: usize) {
+        match self.0.iter_mut().find(|(t, _)| *t == text) {
+            Some((_, labels)) => labels.push(label),
+            None => self.0.push((text, vec![label])),
+        }
+    }
+
+    /// "`prefix`, folds 1, 2, 3: `note`" ("fold 3" for one fold) per distinct note.
+    fn emit(self, prefix: &str, warnings: &mut Vec<String>) {
+        for (text, labels) in self.0 {
+            let list: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+            let folds = if list.len() == 1 {
+                format!("fold {}", list[0])
+            } else {
+                format!("folds {}", list.join(", "))
+            };
+            warnings.push(format!("{prefix}, {folds}: {text}"));
+        }
+    }
+}
+
+/// Cross-fit the nuisances that share a training subset and a learner: for each fold k,
+/// train on the observations outside fold k (and in `subset`, when given) and predict
+/// every observation of fold k. Returns one length-n prediction vector per nuisance; the
+/// learners' notes go to `warnings`, merged over folds.
+fn cross_fit(
+    x: &ArrayView2<f64>,
+    folds: &Folds,
+    subset: Option<&[bool]>,
+    learner: Learner,
+    nuisances: &[Nuisance<'_>],
+    config: &DoubleMLConfig,
+    warnings: &mut Vec<String>,
+) -> EconResult<Vec<Array1<f64>>> {
+    let (n, p) = x.dim();
+    let q = p + usize::from(config.intercept);
+    // At lambda = 0 the lasso and ridge objectives are least squares.
+    let fitted_by = match learner {
+        Learner::Regression(MLMethod::Lasso | MLMethod::Ridge) if config.lambda == 0.0 => {
+            Learner::Regression(MLMethod::OLS)
+        }
+        other => other,
+    };
+    let min_train = match fitted_by {
+        Learner::Regression(MLMethod::OLS) | Learner::Logistic => q + 1,
+        Learner::Regression(_) => 2,
+    };
+    let mut preds = nuisances
+        .iter()
+        .map(|_| resource::try_zeros1(n, "DoubleML cross-fitted predictions"))
+        .collect::<EconResult<Vec<_>>>()?;
+    let mut notes: Vec<FoldNotes> = nuisances.iter().map(|_| FoldNotes::default()).collect();
+    let names = design_names(p, config.intercept);
+    for (k, &label) in folds.labels.iter().enumerate() {
+        resource::checkpoint()?;
+        let train: Vec<usize> = (0..n)
+            .filter(|&i| folds.index[i] != k && subset.is_none_or(|s| s[i]))
+            .collect();
+        let test: Vec<usize> = (0..n).filter(|&i| folds.index[i] == k).collect();
+        if train.len() < min_train {
+            let first = &nuisances[0];
+            return Err(EconError::InsufficientData {
+                required: min_train,
+                provided: train.len(),
+                context: format!(
+                    "training rows of fold {label} for {} = {}",
+                    first.name, first.target_label
+                ),
+            });
+        }
+        let fold = fit_predict(
+            fitted_by, x, &train, &test, nuisances, config, &names, &mut notes, label,
+        )?;
+        for (pred, f) in preds.iter_mut().zip(fold) {
+            for (t, &i) in test.iter().enumerate() {
+                pred[i] = f[t];
+            }
+        }
+    }
+    let learner_label = learner.label(config.lambda);
+    for (nu, nn) in nuisances.iter().zip(notes) {
+        nn.emit(
+            &format!("{} = {} by {learner_label}", nu.name, nu.target_label),
+            warnings,
+        );
+    }
+    Ok(preds)
+}
+
+/// One fold: fit every nuisance on the `train` rows and predict the `test` rows.
+#[allow(clippy::too_many_arguments)]
+fn fit_predict(
+    learner: Learner,
+    x: &ArrayView2<f64>,
+    train: &[usize],
+    test: &[usize],
+    nuisances: &[Nuisance<'_>],
+    config: &DoubleMLConfig,
+    names: &[String],
+    notes: &mut [FoldNotes],
+    label: usize,
+) -> EconResult<Vec<Array1<f64>>> {
+    let targets: Vec<Array1<f64>> = nuisances
+        .iter()
+        .map(|nu| train.iter().map(|&i| nu.target[i]).collect())
+        .collect();
+    match learner {
+        Learner::Regression(MLMethod::OLS) => {
+            let a_train = design_rows(x, train, config.intercept)?;
+            let a_test = design_rows(x, test, config.intercept)?;
+            // OLS's solve decision: the normal equations on a well-conditioned design (one
+            // inverse for every target), lm.fit's pivoted QR otherwise.
+            if let Some(inv) = normal_equations_inverse(a_train.view())? {
+                let mut t = resource::try_zeros2(train.len(), targets.len(), "DoubleML targets")?;
+                for (j, tj) in targets.iter().enumerate() {
+                    t.column_mut(j).assign(tj);
+                }
+                let beta = inv.coefficients_multi(a_train.view(), t.view());
+                let fitted = a_test.dot(&beta);
+                return Ok(fitted.columns().into_iter().map(|c| c.to_owned()).collect());
+            }
+            let qr = Qr::decompose(a_train.view(), LM_QR_TOL)?;
+            let note = aliasing_message(&qr.aliased(), names);
+            let mut out = Vec::with_capacity(targets.len());
+            for (j, tj) in targets.iter().enumerate() {
+                // aliased coefficients predict as 0 (predict.lm on a rank-deficient fit)
+                let beta = qr
+                    .coefficients(tj.view())?
+                    .mapv(|v| if v.is_nan() { 0.0 } else { v });
+                if let Some(text) = &note {
+                    notes[j].add(text.clone(), label);
+                }
+                out.push(a_test.dot(&beta));
+            }
+            Ok(out)
+        }
+        Learner::Regression(MLMethod::Lasso) => {
+            let x_train = design_rows(x, train, false)?;
+            let x_test = design_rows(x, test, false)?;
+            let mut c = GlmnetConfig::default();
+            c.alpha = 1.0;
+            c.lambda = Some(vec![config.lambda]);
+            c.standardize = true;
+            c.intercept = config.intercept;
+            c.thresh = DML_GLMNET_THRESH;
+            let mut out = Vec::with_capacity(targets.len());
+            for (j, tj) in targets.iter().enumerate() {
+                let fit = glmnet(x_train.view(), tj.view(), &c)?;
+                for w in &fit.warnings {
+                    notes[j].add(w.clone(), label);
+                }
+                out.push(glmnet_predict(&fit, x_test.view(), config.lambda)?);
+            }
+            Ok(out)
+        }
+        Learner::Regression(MLMethod::Ridge) => {
+            let x_train = design_rows(x, train, false)?;
+            let x_test = design_rows(x, test, false)?;
+            let fit = RidgeFit::new(x_train.view(), config.intercept)?;
+            targets
+                .iter()
+                .map(|tj| {
+                    let (b0, beta) = fit.coefficients(tj.view(), config.lambda)?;
+                    Ok(x_test.dot(&beta) + b0)
+                })
+                .collect()
+        }
+        Learner::Logistic => {
+            let a_train = design_rows(x, train, config.intercept)?;
+            let a_test = design_rows(x, test, config.intercept)?;
+            let mut out = Vec::with_capacity(targets.len());
+            for (j, tj) in targets.iter().enumerate() {
+                let c = tj[0];
+                if tj.iter().all(|&v| v == c) {
+                    notes[j].add(
+                        format!(
+                            "the training outcome has no variation (all {c}); predicted as the \
+                             constant {c}"
+                        ),
+                        label,
+                    );
+                    out.push(Array1::from_elem(test.len(), c));
+                    continue;
+                }
+                let pf = fit_propensity(a_train.view(), tj.view(), GlmLink::Logit)?;
+                if let Some(text) = aliasing_message(&pf.fit.aliased, names) {
+                    notes[j].add(text, label);
+                }
+                for w in &pf.fit.warnings {
+                    notes[j].add(w.clone(), label);
+                }
+                let beta = pf
+                    .fit
+                    .coefficients
+                    .mapv(|v| if v.is_nan() { 0.0 } else { v });
+                out.push(a_test.dot(&beta).mapv(plogis));
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// The rows `rows` of `x`, with a leading column of ones when `intercept`.
+fn design_rows(x: &ArrayView2<f64>, rows: &[usize], intercept: bool) -> EconResult<Array2<f64>> {
+    let off = usize::from(intercept);
+    let mut a = resource::try_zeros2(rows.len(), x.ncols() + off, "DoubleML design")?;
+    for (r, &i) in rows.iter().enumerate() {
+        if intercept {
+            a[[r, 0]] = 1.0;
+        }
+        for (j, &v) in x.row(i).iter().enumerate() {
+            a[[r, j + off]] = v;
+        }
+    }
+    Ok(a)
+}
+
+/// Column names of the design for the aliasing note: "(Intercept)", "x1", .., "xp".
+fn design_names(p: usize, intercept: bool) -> Vec<String> {
+    intercept
+        .then(|| "(Intercept)".to_string())
+        .into_iter()
+        .chain((1..=p).map(|j| format!("x{j}")))
+        .collect()
+}
+
+/// The ridge learner: the exact minimiser of glmnet's gaussian ridge objective
+/// (alpha = 0, standardize = TRUE) at one lambda, by its closed form instead of coordinate
+/// descent.
 ///
-/// Returns coefficient vector.
-fn fit_ols(x: &ArrayView2<f64>, y: &Array1<f64>) -> EconResult<Array1<f64>> {
-    let xtx_mat = xtx(x);
-    let (xtx_inv, _cond_warning) =
-        safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
-            context: "OLS in nuisance estimation".to_string(),
-            suggestion: "Check for multicollinearity in covariates".to_string(),
-        })?;
+/// glmnet centres x by its column means when it fits an intercept, divides every
+/// non-constant column by its population sd (a constant column keeps coefficient 0),
+/// and solves on y / ys (ys the population sd of y with an intercept, sqrt(mean(y²))
+/// without), so its ridge penalty in y units is `lambda / ys`:
+/// `(Z'Z / n + (lambda / ys) I) b = Z'yc / n`, `coef = b / scale`. With more columns than
+/// rows the dual `b = Z' (Z Z' / n + (lambda / ys) I)^-1 yc / n` is solved instead. All
+/// targets on one training set share Z and its Gram (or kernel) matrix.
+struct RidgeFit {
+    /// Standardised usable columns (n x u).
+    z: Array2<f64>,
+    /// Indices of the usable (non-constant) columns of x.
+    usable: Vec<usize>,
+    center: Vec<f64>,
+    scale: Vec<f64>,
+    p: usize,
+    intercept: bool,
+    /// Z'Z / n (u <= n) or Z Z' / n (u > n).
+    gram: Array2<f64>,
+}
 
-    let xty_vec = xty(x, y);
-    let beta = xtx_inv.dot(&xty_vec);
+impl RidgeFit {
+    fn new(x: ArrayView2<f64>, intercept: bool) -> EconResult<Self> {
+        let (n, p) = x.dim();
+        let nf = n as f64;
+        let mut usable = Vec::new();
+        let mut center = vec![0.0; p];
+        let mut scale = vec![1.0; p];
+        for (j, col) in x.columns().into_iter().enumerate() {
+            let mean = col.sum() / nf;
+            let (lo, hi) = col
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                    (lo.min(v), hi.max(v))
+                });
+            if intercept {
+                center[j] = mean;
+            }
+            if hi > lo {
+                scale[j] = (col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nf).sqrt();
+                usable.push(j);
+            }
+        }
+        if usable.is_empty() {
+            return Err(spec(
+                "ridge learner: every covariate is constant on a training set".to_string(),
+            ));
+        }
+        let mut z = resource::try_zeros2(n, usable.len(), "ridge standardised design")?;
+        for (u, &j) in usable.iter().enumerate() {
+            for i in 0..n {
+                z[[i, u]] = (x[[i, j]] - center[j]) / scale[j];
+            }
+        }
+        let gram = if usable.len() <= n {
+            z.t().dot(&z) / nf
+        } else {
+            resource::check_alloc::<f64>(
+                resource::checked_len(&[n, n], "ridge kernel matrix")?,
+                "ridge kernel matrix",
+            )?;
+            z.dot(&z.t()) / nf
+        };
+        Ok(Self {
+            z,
+            usable,
+            center,
+            scale,
+            p,
+            intercept,
+            gram,
+        })
+    }
 
-    Ok(beta)
+    /// The response as glmnet standardises it: `(y - ym, ym, ys)`.
+    fn response(&self, y: ArrayView1<f64>) -> EconResult<(Array1<f64>, f64, f64)> {
+        let nf = y.len() as f64;
+        let ym = if self.intercept { y.sum() / nf } else { 0.0 };
+        let yc = y.mapv(|v| v - ym);
+        let ys = (yc.dot(&yc) / nf).sqrt();
+        if ys.is_nan() || ys <= 0.0 {
+            return Err(spec(
+                "ridge learner: the training outcome is constant (glmnet's gaussian fit is not \
+                 defined)"
+                    .to_string(),
+            ));
+        }
+        Ok((yc, ym, ys))
+    }
+
+    fn primal(&self) -> bool {
+        self.usable.len() <= self.z.nrows()
+    }
+
+    /// `(Z'Z / n + l2 I)^-1 Z'yc / n`.
+    fn solve_primal(&self, yc: &Array1<f64>, l2: f64) -> EconResult<Array1<f64>> {
+        let nf = yc.len() as f64;
+        let mut a = if self.primal() {
+            self.gram.clone()
+        } else {
+            self.z.t().dot(&self.z) / nf
+        };
+        a.diag_mut().mapv_inplace(|v| v + l2);
+        spd_solve(a, self.z.t().dot(yc) / nf)
+    }
+
+    /// `Z' (Z Z' / n + l2 I)^-1 yc / n`.
+    fn solve_dual(&self, yc: &Array1<f64>, l2: f64) -> EconResult<Array1<f64>> {
+        let nf = yc.len() as f64;
+        let mut a = if self.primal() {
+            self.z.dot(&self.z.t()) / nf
+        } else {
+            self.gram.clone()
+        };
+        a.diag_mut().mapv_inplace(|v| v + l2);
+        let w = spd_solve(a, yc / nf)?;
+        Ok(self.z.t().dot(&w))
+    }
+
+    /// Intercept and coefficients (original scale, one per column of x) at `lambda` > 0.
+    fn coefficients(&self, y: ArrayView1<f64>, lambda: f64) -> EconResult<(f64, Array1<f64>)> {
+        let (yc, ym, ys) = self.response(y)?;
+        let l2 = lambda / ys;
+        let b = if self.primal() {
+            self.solve_primal(&yc, l2)?
+        } else {
+            self.solve_dual(&yc, l2)?
+        };
+        let mut coef = Array1::zeros(self.p);
+        for (u, &j) in self.usable.iter().enumerate() {
+            coef[j] = b[u] / self.scale[j];
+        }
+        let b0 = if self.intercept {
+            ym - coef
+                .iter()
+                .zip(&self.center)
+                .map(|(c, m)| c * m)
+                .sum::<f64>()
+        } else {
+            0.0
+        };
+        Ok((b0, coef))
+    }
+}
+
+/// Solve `a x = b` for a symmetric positive definite `a` by Cholesky.
+fn spd_solve(mut a: Array2<f64>, mut b: Array1<f64>) -> EconResult<Array1<f64>> {
+    let m = a.nrows();
+    for j in 0..m {
+        let mut d = a[[j, j]];
+        for k in 0..j {
+            d -= a[[j, k]] * a[[j, k]];
+        }
+        if d.is_nan() || d <= 0.0 {
+            return Err(EconError::SingularMatrix {
+                context: "ridge learner: the penalised Gram matrix is not positive definite"
+                    .to_string(),
+                suggestion: "use a larger lambda or rescale the covariates".to_string(),
+            });
+        }
+        let d = d.sqrt();
+        a[[j, j]] = d;
+        for i in j + 1..m {
+            let mut s = a[[i, j]];
+            for k in 0..j {
+                s -= a[[i, k]] * a[[j, k]];
+            }
+            a[[i, j]] = s / d;
+        }
+    }
+    for i in 0..m {
+        let mut s = b[i];
+        for k in 0..i {
+            s -= a[[i, k]] * b[k];
+        }
+        b[i] = s / a[[i, i]];
+    }
+    for i in (0..m).rev() {
+        let mut s = b[i];
+        for k in i + 1..m {
+            s -= a[[k, i]] * b[k];
+        }
+        b[i] = s / a[[i, i]];
+    }
+    Ok(b)
 }
 
 // =============================================================================
@@ -1951,5 +2206,301 @@ mod tests {
         let db = col(&ds, "dbin");
         let r = run_double_ml(&y.view(), &db.view(), &x.view(), DoubleMLConfig::default()).unwrap();
         assert_eq!(r.treatment_type, TreatmentType::Binary);
+    }
+
+    /// coordinate descent at DML_GLMNET_THRESH: within 3e-11 (relative) of the exact
+    /// minimiser's estimates
+    const TIGHT: Tol = Tol::new(1e-9, 1e-12);
+    /// glmnet 5.1's own output at thresh 1e-14 (cross-check)
+    const GLMNET: Tol = Tol::new(1e-8, 1e-12);
+
+    fn nuis<'a>(r: &'a DoubleMLResult, name: &str) -> &'a NuisanceFit {
+        r.nuisance
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no nuisance {name}"))
+    }
+
+    fn plr_case(ml: MLMethod) -> (p2a_validation::Case, DoubleMLResult) {
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let r = run_double_ml(
+            &y.view(),
+            &d.view(),
+            &x.view(),
+            with_folds(DMLModelType::PLR, ml, case_folds(&ds)),
+        )
+        .unwrap();
+        (case, r)
+    }
+
+    /// The PLR keys every learner reports, at the given tolerances.
+    fn check_plr(case: &p2a_validation::Case, r: &DoubleMLResult, prefix: &str, est: [Tol; 3]) {
+        let [t_theta, t_se, t_stat] = est;
+        let nd = &r.nuisance_diagnostics;
+        Check::new(case)
+            .scalar(&format!("{prefix}_theta"), r.theta, t_theta)
+            .scalar(&format!("{prefix}_se"), r.se, t_se)
+            .scalar(&format!("{prefix}_rmse_l"), nd.outcome_rmse, t_stat)
+            .scalar(&format!("{prefix}_rmse_m"), nd.treatment_rmse, t_stat)
+            .scalar(&format!("{prefix}_r2_l"), nd.outcome_r2, t_stat)
+            .scalar(&format!("{prefix}_r2_m"), nd.treatment_r2, t_stat)
+            .scalar(&format!("{prefix}_jacobian"), r.jacobian, t_stat)
+            .scalar(
+                &format!("{prefix}_mean_resid_m"),
+                nd.mean_residual_treatment,
+                t_stat,
+            )
+            .vector(&format!("{prefix}_ci95"), &[r.ci_lower, r.ci_upper], t_stat)
+            .scalar(&format!("{prefix}_p"), r.p_value, P_REL)
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_doubleml_plr_ols() {
+        let (case, r) = plr_case(MLMethod::OLS);
+        let n = r.n_obs;
+        check_plr(
+            &case,
+            &r,
+            "plr_ols",
+            [Tol::coef(n), Tol::se(n), Tol::stat(n)],
+        );
+        let nd = &r.nuisance_diagnostics;
+        assert_eq!(nuis(&r, "l").rmse, nd.outcome_rmse);
+        assert_eq!(nuis(&r, "m").n_eval, 400);
+        assert!((nd.var_residual_treatment - r.jacobian).abs() <= 1e-15 * r.jacobian);
+        assert_eq!(r.lambda, None);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_validate_doubleml_plr_lasso() {
+        let (case, r) = plr_case(MLMethod::Lasso);
+        let nd = &r.nuisance_diagnostics;
+        Check::new(&case)
+            .scalar("plr_lasso_theta_tight", r.theta, TIGHT)
+            .scalar("plr_lasso_se_tight", r.se, TIGHT)
+            .scalar("plr_lasso_rmse_l_tight", nd.outcome_rmse, TIGHT)
+            .scalar("plr_lasso_rmse_m_tight", nd.treatment_rmse, TIGHT)
+            .finish();
+        check_plr(&case, &r, "plr_lasso", [GLMNET, GLMNET, GLMNET]);
+        assert!((r.theta - case.scalar("plr_ols_theta")).abs() > 1e-3);
+        assert_eq!(r.lambda, Some(0.05));
+        assert_eq!(nuis(&r, "m").learner, "lasso (glmnet, lambda = 0.05)");
+    }
+
+    #[test]
+    fn test_validate_doubleml_plr_ridge() {
+        let (case, r) = plr_case(MLMethod::Ridge);
+        let n = r.n_obs;
+        let nd = &r.nuisance_diagnostics;
+        // the closed form is the exact minimiser: README tolerances against *_tight
+        Check::new(&case)
+            .scalar("plr_ridge_theta_tight", r.theta, Tol::coef(n))
+            .scalar("plr_ridge_se_tight", r.se, Tol::se(n))
+            .scalar("plr_ridge_rmse_l_tight", nd.outcome_rmse, Tol::stat(n))
+            .scalar("plr_ridge_rmse_m_tight", nd.treatment_rmse, Tol::stat(n))
+            .finish();
+        check_plr(&case, &r, "plr_ridge", [GLMNET, GLMNET, GLMNET]);
+        assert!((r.theta - case.scalar("plr_ols_theta")).abs() > 1e-4);
+        assert_eq!(nuis(&r, "l").learner, "ridge (glmnet, lambda = 0.05)");
+    }
+
+    #[test]
+    fn test_doubleml_learners_are_not_ols() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let fit = |ml| {
+            run_double_ml(
+                &y.view(),
+                &d.view(),
+                &x.view(),
+                seeded(DMLModelType::PLR, ml, 5, 11),
+            )
+            .unwrap()
+        };
+        let (ols, lasso, ridge) = (
+            fit(MLMethod::OLS),
+            fit(MLMethod::Lasso),
+            fit(MLMethod::Ridge),
+        );
+        for (a, b) in [(&ols, &lasso), (&ols, &ridge), (&lasso, &ridge)] {
+            assert!((a.theta - b.theta).abs() > 1e-8, "{} {}", a.theta, b.theta);
+        }
+        assert!(
+            (lasso.nuisance_diagnostics.outcome_rmse - ols.nuisance_diagnostics.outcome_rmse).abs()
+                > 1e-8
+        );
+    }
+
+    #[test]
+    fn test_doubleml_nuisance_rmse_is_out_of_fold() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let n = y.len() as f64;
+        let ym = y.sum() / n;
+        let var_y = y.iter().map(|v| (v - ym).powi(2)).sum::<f64>() / n;
+        for k in [5, 10] {
+            let r = run_double_ml(
+                &y.view(),
+                &d.view(),
+                &x.view(),
+                seeded(DMLModelType::PLR, MLMethod::OLS, k, 11),
+            )
+            .unwrap();
+            let nd = &r.nuisance_diagnostics;
+            assert!(
+                (1.20..1.32).contains(&nd.outcome_rmse),
+                "K = {k}: {}",
+                nd.outcome_rmse
+            );
+            assert!(
+                (0.96..1.04).contains(&nd.treatment_rmse),
+                "K = {k}: {}",
+                nd.treatment_rmse
+            );
+            assert!((nd.outcome_r2 - (1.0 - nd.outcome_rmse.powi(2) / var_y)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_doubleml_aliased_covariate_is_reported() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let x7 = ndarray::concatenate(
+            ndarray::Axis(1),
+            &[x.view(), x.slice(ndarray::s![.., 0..1])],
+        )
+        .unwrap();
+        let config = || seeded(DMLModelType::PLR, MLMethod::OLS, 5, 11);
+        let a = run_double_ml(&y.view(), &d.view(), &x.view(), config()).unwrap();
+        let b = run_double_ml(&y.view(), &d.view(), &x7.view(), config()).unwrap();
+        assert!(
+            Tol::coef(400).allows(b.theta, a.theta),
+            "{} {}",
+            b.theta,
+            a.theta
+        );
+        assert!(Tol::se(400).allows(b.se, a.se));
+        let aliased: Vec<&String> = b
+            .warnings
+            .iter()
+            .filter(|w| w.contains("Coefficients not defined because of singularities: x7"))
+            .collect();
+        assert_eq!(aliased.len(), 2, "{:?}", b.warnings);
+        assert!(aliased[0].starts_with("l = E[Y|X] by OLS, folds 1, 2, 3, 4, 5: "));
+        assert!(aliased[1].starts_with("m = E[D|X] by OLS, folds 1, 2, 3, 4, 5: "));
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
+    }
+
+    #[test]
+    fn test_doubleml_is_scale_equivariant() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let config = || seeded(DMLModelType::PLR, MLMethod::OLS, 5, 11);
+        let a = run_double_ml(&y.view(), &d.view(), &x.view(), config()).unwrap();
+        let (ys, dsc) = (&y * 1e6, &d * 1e-6);
+        let b = run_double_ml(&ys.view(), &dsc.view(), &x.view(), config()).unwrap();
+        let tol = Tol::new(1e-9, 0.0);
+        let (na, nb) = (&a.nuisance_diagnostics, &b.nuisance_diagnostics);
+        assert!(tol.allows(b.theta, a.theta * 1e12));
+        assert!(tol.allows(b.se, a.se * 1e12));
+        assert!(tol.allows(nb.outcome_rmse, na.outcome_rmse * 1e6));
+        assert!(tol.allows(nb.treatment_rmse, na.treatment_rmse * 1e-6));
+        assert!(tol.allows(b.jacobian, a.jacobian * 1e-12));
+        assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+    }
+
+    #[test]
+    fn test_doubleml_display_names_learners_and_jacobian() {
+        let ds = sim();
+        let (y, d, x) = (col(&ds, "y"), col(&ds, "dcont"), covariates(&ds));
+        let r = run_double_ml(
+            &y.view(),
+            &d.view(),
+            &x.view(),
+            seeded(DMLModelType::PLR, MLMethod::Lasso, 5, 11),
+        )
+        .unwrap();
+        let text = r.to_string();
+        for needle in [
+            "ML Method:  Lasso (glmnet, lambda = 0.05, standardized)",
+            "Folds:      5 (random, seed 11)",
+            "Nuisance models (out-of-fold predictions):",
+            "lasso (glmnet, lambda = 0.05)",
+            "Score Jacobian E[(D - m)^2]: ",
+        ] {
+            assert!(text.contains(needle), "{needle:?} not in\n{text}");
+        }
+        assert!(!text.contains("Var(D-m)"));
+    }
+
+    #[test]
+    fn test_doubleml_ridge_closed_form_matches_glmnet() {
+        use crate::regression::glmnet::{GlmnetConfig, glmnet, glmnet_predict};
+        let ds = sim();
+        let (y, x) = (col(&ds, "y"), covariates(&ds));
+        // one fold of the case: train on folds 2..5, predict fold 1
+        let folds = case_folds(&ds);
+        let train: Vec<usize> = (0..400).filter(|&i| folds[i] != 1).collect();
+        let test: Vec<usize> = (0..400).filter(|&i| folds[i] == 1).collect();
+        let xtr = x.select(ndarray::Axis(0), &train);
+        let xte = x.select(ndarray::Axis(0), &test);
+        let ytr = y.select(ndarray::Axis(0), &train);
+        for intercept in [true, false] {
+            let fit = RidgeFit::new(xtr.view(), intercept).unwrap();
+            let (b0, b) = fit.coefficients(ytr.view(), 0.05).unwrap();
+            let ours = xte.dot(&b) + b0;
+            let mut c = GlmnetConfig::default();
+            c.alpha = 0.0;
+            c.lambda = Some(vec![0.05]);
+            c.intercept = intercept;
+            c.thresh = 1e-14;
+            let g = glmnet(xtr.view(), ytr.view(), &c).unwrap();
+            let theirs = glmnet_predict(&g, xte.view(), 0.05).unwrap();
+            let tol = Tol::new(1e-8, 1e-12);
+            for (a, e) in ours.iter().zip(theirs.iter()) {
+                assert!(tol.allows(*a, *e), "intercept = {intercept}: {a} vs {e}");
+            }
+        }
+        // the dual (n x n) equals the primal (p x p) where p > n
+        let sub = x.slice(ndarray::s![..30, ..]).to_owned();
+        let wide = ndarray::concatenate(
+            ndarray::Axis(1),
+            &[
+                sub.view(),
+                sub.mapv(|v| v * v).view(),
+                sub.mapv(f64::sin).view(),
+            ],
+        )
+        .unwrap();
+        let wide = ndarray::concatenate(
+            ndarray::Axis(1),
+            &[
+                wide.view(),
+                sub.mapv(f64::cos).view(),
+                sub.mapv(|v| v.powi(3)).view(),
+            ],
+        )
+        .unwrap();
+        let wide = ndarray::concatenate(
+            ndarray::Axis(1),
+            &[
+                wide.view(),
+                sub.mapv(|v| (0.5 * v).exp()).view(),
+                sub.mapv(f64::tanh).view(),
+            ],
+        )
+        .unwrap();
+        assert!(wide.ncols() > 30);
+        let yw = y.slice(ndarray::s![..30]).to_owned();
+        let fit = RidgeFit::new(wide.view(), true).unwrap();
+        let (yc, _, ys) = fit.response(yw.view()).unwrap();
+        let primal = fit.solve_primal(&yc, 0.05 / ys).unwrap();
+        let dual = fit.solve_dual(&yc, 0.05 / ys).unwrap();
+        for (a, e) in primal.iter().zip(dual.iter()) {
+            assert!(Tol::new(1e-10, 1e-14).allows(*a, *e), "{a} vs {e}");
+        }
     }
 }
