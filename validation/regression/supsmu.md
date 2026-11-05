@@ -135,3 +135,44 @@ fixed span 0.1: 1.35 / 1.36 / 1.55.
 Re-measured on the merged tree against `fe13b889` (one P core, three interleaved runs each,
 criterion `supsmu`): automatic span 2.73 / 3.53 / 3.75 at n = 50 / 200 / 1,000, fixed span 0.1
 1.13 / 1.33 / 1.39.
+
+**T3-PERF4.** Two changes, in `smooth` and in the shared-window smoother:
+
+- The three residual smooths of the cross-validation have the same span, x and weights, so the
+  x part of Friedman's updating formulas (the window's weighted mean and variance of x and the
+  update factors) is computed once for the three of them (`smooth_many`);
+  `test_supsmu_shared_residual_smooths_are_bit_identical` holds it bit for bit to three
+  separate `smooth` calls (noisy data with ties, zero and unequal weights, periodic and not,
+  three bass values, two fixed spans).
+- The Fortran updates a window mean as `m = (W_old m + w v) / W`, a division on the chain of
+  the running mean at every point it enters or leaves. `smooth` uses the same update in
+  increment form, `m += w (v - m) / W`, and the update factors multiply by 1 / W, which
+  depends only on the weight sum and is computed off the chains. The rounding then differs from
+  the Fortran's, but not its accuracy: the error of a step is relative to `v - m` instead of to
+  `m`. `test_supsmu_reciprocal_updates_match_divisions` holds the smooths and leave-one-out
+  residuals to the division form within 1e-10 of the response's scale for x in [0, 1]; for x
+  shifted by 1000, where both forms lose digits to cancellation, it compares both with the
+  unshifted smooth, and the new form's total error is 0.92 times the division form's (1.03e-9
+  against 1.11e-9; at most 1.5 times is asserted). Against the R pins the largest relative
+  difference is 6.6e-12 (weighted and periodic CV smooths), far inside `Tol::coef`.
+  Multiplying by 1 / W in the Fortran's form `(W_old m + w v) * (1 / W)` was tried first and
+  rejected: with constant W the error of 1 / W has one sign at every step, and with x shifted
+  by 1000 the error grew to up to 15 times that of the division form.
+
+Release, one P core (`taskset -c 3`), `RAYON_NUM_THREADS=1`, criterion `supsmu`, five
+interleaved rounds of base (`fe13b889`), the wave-2A head and this lane, medians of the
+per-round ratios. The machine was loaded by other lanes' builds (load 7-17, absolute times up to
+twice the quiet ones, single rounds up to 1.5 times off); the authoritative re-time is at
+integration.
+
+| Variant | n | head/base | lane/base |
+|---|---|---|---|
+| automatic span | 50 | 4.29 | 1.91 |
+| automatic span | 200 | 3.50 | 1.98 |
+| automatic span | 1,000 | 3.95 | 2.13 |
+| fixed span 0.1 | 50 | 1.06 | 0.81 |
+| fixed span 0.1 | 200 | 1.48 | 1.02 |
+| fixed span 0.1 | 1,000 | 1.45 | 1.02 |
+
+The plan's targets (automatic span at most 2.5, fixed span at most 1.1 times `fe13b889`) are
+met.

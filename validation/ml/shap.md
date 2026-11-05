@@ -36,7 +36,11 @@ coalition `S` of features:
   method computes its own game: TreeSHAP with `interventional` is an error that names the Kernel
   path, Kernel SHAP with `tree_path_dependent` or `compute_interactions` is an error, and
   `observational` (true conditional expectations) is not implemented and is an error. A Kernel
-  setting (`n_samples`) given to TreeSHAP is reported as a warning.
+  setting (`n_samples`) given to TreeSHAP is reported as a warning; `n_samples = 0` is an error
+  on both paths.
+- **Rows.** TreeSHAP explains rows in parallel (rayon), each worker with its own path buffer and
+  scratch, so the values do not depend on the number of threads. Kernel SHAP refuses a coalition
+  value that is not finite (predictions that overflow when averaged or differenced).
 
 ## References
 
@@ -104,7 +108,9 @@ Property tests against exact enumeration in Rust (not registered: they load no c
   `p2a-core::ml::shap::tests::test_treeshap_interactions_match_bruteforce`,
   `p2a-core::ml::shap::tests::test_tree_interactions_sum_to_shap_values`,
   `p2a-core::ml::shap::tests::test_treeshap_additivity_new_rows` (more rows than the training
-  set), and through the public tree API
+  set), `p2a-core::ml::shap::tests::test_leaf_weights_match_unwound_path_sum` (the batched leaf
+  step against the per-element UNWIND sum),
+  `p2a-core::ml::shap::tests::test_treeshap_rows_do_not_depend_on_the_thread_count`, and through the public tree API
   `p2a-core::validation_ml_advanced::test_shap_forest_matches_bruteforce_shapley`;
 - `p2a-core::ml::shap::tests::test_kernel_shap_exact_coalitions_match_bruteforce` (the
   `x0 x1 x2 + x3` example: `(1/3, 1/3, 1/3, 1)`),

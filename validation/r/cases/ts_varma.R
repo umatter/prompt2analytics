@@ -13,16 +13,17 @@
 # standard errors treat the estimated innovations as data (a generated-regressor problem), are not
 # valid for inference, and p2a does not report them.
 # Default long-VAR order (p2a's rule, pinned here): q = 0 -> m = 0 (no innovations needed; the fit is
-# vars::VAR); q > 0 -> m = max(floor(log(n)^2), 2 max(p, q)) (Gomez & Maravall 2001, the default of
-# statsmodels' hannan_rissanen), reduced to floor((n - 2) / (2K + 1)) when larger, so that the long VAR
-# keeps at least as many residual degrees of freedom as it has regressors.
+# vars::VAR); q > 0 -> m = max(floor(2 log(n)), 2 max(p, q)) (an order growing like log n, the rate of
+# Hannan & Kavalieris 1984; T3-PERF4 replaced floor(log(n)^2), Gomez & Maravall 2001), reduced to
+# floor((n - 2) / (2K + 1)) when larger, so that the long VAR keeps at least as many residual degrees of
+# freedom as it has regressors.
 # The design keys (long_var_order, step2_coef, sigma_ml, loglik, n_eff) are computed exactly as in T3
 # design Appendix A.8, so their values are unchanged; every other key is new.
 suppressPackageStartupMessages(library(vars))
 
 .hr_default_order <- function(n, K, p, q) {
   if (q == 0) return(0)
-  m0 <- max(floor(log(n)^2), 2 * max(p, q))
+  m0 <- max(floor(2 * log(n)), 2 * max(p, q))
   min(m0, floor((n - 2) / (2 * K + 1)))
 }
 
@@ -96,12 +97,12 @@ case("varma_hr", "econometrics/timeseries", "VARMA(p, q) by Hannan-Rissanen (lon
   h01 <- .hr_varma(Y, 0, 1, 8, "p0q1_lv8_")              # pure VMA(1): not intercept-only
   h21 <- .hr_varma(Y, 2, 1, 8, "p2q1_lv8_")              # p > q: sample t = m + max(p, q) + 1..n
   h22 <- .hr_varma(Y, 2, 2, 10, "p2q2_lv10_")
-  mdef <- .hr_default_order(n, 2, 1, 1)                  # 35 = floor(log(400)^2), cap floor(398 / 5) = 79
+  mdef <- .hr_default_order(n, 2, 1, 1)                  # 11 = floor(2 log(400)), cap floor(398 / 5) = 79
   hdef <- .hr_varma(Y, 1, 1, mdef, "default_")
-  Ys <- Y[1:60, ]
-  m0s <- max(floor(log(60)^2), 2); mshort <- .hr_default_order(60, 2, 1, 1)   # 16 -> 11 (cap)
-  stopifnot(m0s == 16, mshort == 11)
-  hshort <- .hr_varma(Ys, 1, 1, mshort, "short60_")
+  Ys <- Y[1:30, ]
+  m0s <- max(floor(2 * log(30)), 2); mshort <- .hr_default_order(30, 2, 1, 1)   # 6 -> 5 (cap floor(28 / 5))
+  stopifnot(m0s == 6, mshort == 5)
+  hshort <- .hr_varma(Ys, 1, 1, mshort, "short30_")
   # q = 0 with the default order: m = 0, an OLS VAR(p) identical to vars::VAR(type = 'const')
   hq0 <- .hr_varma(Y, 2, 0, .hr_default_order(n, 2, 2, 0), "p2q0_")
   vm <- VAR(Y, p = 2, type = "const")
@@ -133,8 +134,8 @@ case("varma_hr", "econometrics/timeseries", "VARMA(p, q) by Hannan-Rissanen (lon
   SA <- crossprod(UA) / length(tA)
   va$alias_loglik <- -length(tA) / 2 * (2 * log(2 * pi) + as.numeric(determinant(SA)$modulus) + 2)
   va$alias_n_params <- 4; va$alias_aic <- -2 * va$alias_loglik + 2 * 4; va$alias_df_residual <- length(tA) - 2
-  v <- c(v, h10, h01, h21, h22, hdef, list(default_long_var_order = mdef, short60_long_var_order = mshort,
-         short60_unreduced_order = m0s), hshort, vq0, va)
+  v <- c(v, h10, h01, h21, h22, hdef, list(default_long_var_order = mdef, short30_long_var_order = mshort,
+         short30_unreduced_order = m0s), hshort, vq0, va)
   list(values = v, reference = "Hannan & Rissanen (1982) two-step VARMA estimator written out (MTS/marima not installed); each OLS step stats::lm.fit / stats::lm (summary.lm SEs and p-values for q = 0 only); logLik = -T/2 (K log 2pi + log det Sigma_ML + K); q = 0 against vars::VAR(type = 'const') and logLik.varest",
        call = "long VAR(m) by lm.fit; lm(y_t ~ 0 + [1, y_{t-1..p}, ehat_{t-1..q}]), t = m + max(p, q) + 1..n; VAR(Y, p = 2, type = 'const')", packages = "vars")
 })
