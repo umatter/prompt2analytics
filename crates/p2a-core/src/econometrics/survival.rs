@@ -191,17 +191,28 @@ fn write_missing(f: &mut fmt::Formatter<'_>, missing: &MissingSummary) -> fmt::R
 // Core Types
 // =============================================================================
 
-/// Wrapper for f64 to use as BTreeMap key.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+/// Wrapper for f64 to use as BTreeMap key, ordered by `f64::total_cmp` (equality, order and
+/// `Ord` agree on -0.0 and NaN).
+#[derive(Debug, Clone, Copy)]
 struct OrderedF64(f64);
+
+impl PartialEq for OrderedF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
 
 impl Eq for OrderedF64 {}
 
+impl PartialOrd for OrderedF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Ord for OrderedF64 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        self.0.total_cmp(&other.0)
     }
 }
 
