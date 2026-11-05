@@ -2,6 +2,29 @@
   "schema": 1,
   "methods": [
     {
+      "id": "causal_stdreg",
+      "name": "Regression standardisation (g-computation) with lm / glm outcome models",
+      "category": "econometrics",
+      "reference": "stats::lm and stats::glm + standardisation of the predictions as stdReg::stdGlm (stdReg not installed: written out); separation and aliasing as glm / lm",
+      "doc": "validation/econometrics/stdreg.md",
+      "cases": ["stdreg_glm", "stdreg_linear", "stdreg_separation"],
+      "tests": [
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_glm",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_glm_default_control",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_linear",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_separation_warns",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_poisson_scale_free"
+      ],
+      "quantities": ["outcome coefficients (NA for aliased)", "E[Y(1)], E[Y(0)]",
+        "ATE, ATT, ATC",
+        "R2 (lm) / 1 - deviance / null deviance (glm)",
+        "separation warning and count"
+      ],
+      "tolerance": "validation/README.md, n = 300: coefficients and effects 1e-8, R2 1e-6 (glm epsilon 1e-14 on both sides); default-control fits within Tol::iterative(1e-8) of the tight fits",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "causal_tmle",
       "name": "TMLE of the ATE (bivariate fluctuation as tmle 2.1.1, glm nuisance models; continuous outcomes rescaled for the logistic Q)",
       "category": "econometrics",

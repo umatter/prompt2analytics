@@ -25,6 +25,120 @@
 
 .sr_ctl <- glm.control(epsilon = 1e-14, maxit = 100)    # tight refit: p2a tests use tolerance 1e-14
 
+# ---------------------------------------------------------------- stdreg
+.sr_std_data <- function(ctx) {
+  set.seed(20261209)
+  n <- 300
+  x1 <- rnorm(n); x2 <- runif(n, -1, 1)
+  a <- rbinom(n, 1, plogis(0.4 * x1 - 0.3 * x2))
+  yc <- 1 + 0.8 * a + 0.5 * x1 - 0.4 * x2 + 0.3 * a * x1 + rnorm(n)
+  yb <- rbinom(n, 1, plogis(-0.5 + 0.9 * a + 0.6 * x1 - 0.5 * x2))
+  yp <- rpois(n, exp(5.3 + 0.2 * a + 0.1 * x1 + 0.05 * x2))     # mean about 220: CAUS-38's large counts
+  x1 <- round(x1, 10); x2 <- round(x2, 10)
+  ys <- as.integer(x1 > 0.3)                                    # x1 separates ys completely
+  ctx$gen_dataset("stdreg_sim", data.frame(yc = round(yc, 10), yb = yb, yp = yp, ys = ys, a = a,
+                                           x1 = x1, x2 = x2, x1dup = 2 * x1 + 1))
+}
+# standardised means and the three contrasts of a fitted model
+.sr_standardise <- function(fit, d) {
+  p1 <- predict(fit, newdata = transform(d, a = 1), type = "response")
+  p0 <- predict(fit, newdata = transform(d, a = 0), type = "response")
+  t <- d$a == 1
+  list(ey1 = mean(p1), ey0 = mean(p0), ate = mean(p1) - mean(p0),
+       att = mean(p1[t]) - mean(p0[t]), atc = mean(p1[!t]) - mean(p0[!t]),
+       att_ey1 = mean(p1[t]), att_ey0 = mean(p0[t]), p1 = p1, p0 = p0)
+}
+# stdReg::stdGlm delta method: stacked estimating equations (score_i(beta), m_i(a) - mu_a), a in (1, 0)
+.sr_stdreg_sandwich <- function(fit, d, s) {
+  X <- model.matrix(fit); n <- nrow(X); k <- ncol(X)
+  mu <- fitted(fit); y <- fit$y
+  eta <- fit$linear.predictors
+  fam <- family(fit)
+  w <- fam$mu.eta(eta)^2 / fam$variance(mu)
+  r <- (y - mu) / fam$mu.eta(eta)
+  disp <- if (fam$family == "gaussian") sum(r^2 * w) / n else 1
+  score <- X * as.vector(w * r) / disp
+  X1 <- model.matrix(delete.response(terms(fit)), transform(d, a = 1))
+  X0 <- model.matrix(delete.response(terms(fit)), transform(d, a = 0))
+  d1 <- fam$mu.eta(as.vector(X1 %*% coef(fit))); d0 <- fam$mu.eta(as.vector(X0 %*% coef(fit)))
+  U <- cbind(score, s$p1 - s$ey1, s$p0 - s$ey0)
+  J <- matrix(0, k + 2, k + 2)
+  J[1:k, 1:k] <- crossprod(X * as.vector(w), X) / n / disp
+  J[k + 1, 1:k] <- -colMeans(X1 * d1); J[k + 2, 1:k] <- -colMeans(X0 * d0)
+  J[k + 1, k + 1] <- 1; J[k + 2, k + 2] <- 1
+  Ji <- solve(J)
+  V <- Ji %*% (crossprod(U) / n) %*% t(Ji) / n
+  g <- c(rep(0, k), 1, -1)
+  c(ey1_se = sqrt(V[k + 1, k + 1]), ey0_se = sqrt(V[k + 2, k + 2]), ate_se = sqrt(drop(t(g) %*% V %*% g)))
+}
+.sr_std_values <- function(fit, d, prefix) {
+  s <- .sr_standardise(fit, d)
+  se <- .sr_stdreg_sandwich(fit, d, s)
+  v <- list(vec(coef(fit)), s$ey1, s$ey0, s$ate, s$att, s$atc, s$att_ey1, s$att_ey0,
+            se[["ey1_se"]], se[["ey0_se"]], se[["ate_se"]])
+  names(v) <- paste0(prefix, c("_coef", "_ey1", "_ey0", "_ate", "_att", "_atc", "_att_ey1", "_att_ey0",
+                               "_stdreg_ey1_se", "_stdreg_ey0_se", "_stdreg_ate_se"))
+  v
+}
+
+case("stdreg_glm", "causal/stdreg",
+     "Regression standardisation with glm outcome models: logistic (with and without A x W interactions) and Poisson with large counts; ATE/ATT/ATC; stdReg delta-method SEs recorded",
+     function(ctx) {
+  d <- .sr_std_data(ctx)
+  fl <- glm(yb ~ x1 + x2 + a, data = d, family = binomial, control = .sr_ctl)
+  fli <- glm(yb ~ x1 + x2 + a + a:x1 + a:x2, data = d, family = binomial, control = .sr_ctl)
+  fp <- glm(yp ~ x1 + x2 + a, data = d, family = poisson, control = .sr_ctl)
+  stopifnot(fl$converged, fp$converged, fli$converged, mean(d$yp) > 150)
+  v <- c(.sr_std_values(fl, d, "logit"), .sr_std_values(fli, d, "logit_int"), .sr_std_values(fp, d, "pois"),
+         list(logit_r2 = 1 - fl$deviance / fl$null.deviance, pois_r2 = 1 - fp$deviance / fp$null.deviance,
+              pois_mean_y = mean(d$yp)))
+  list(values = v, dataset = "validation/datasets/generated/stdreg_sim.csv",
+       reference = "stats::glm (epsilon 1e-14) + standardisation as stdReg::stdGlm (stdReg not installed: point estimates and the stacked-equation delta method written out)",
+       call = "glm(yb ~ x1 + x2 + a, binomial); glm(yb ~ x1 + x2 + a + a:x1 + a:x2, binomial); glm(yp ~ x1 + x2 + a, poisson); mean(predict(fit, a = 1)) - mean(predict(fit, a = 0))",
+       packages = character(0))
+})
+
+case("stdreg_linear", "causal/stdreg",
+     "Regression standardisation with a linear outcome model: with A x W interactions, and with an aliased covariate (lm: NA coefficient, estimable predictions)",
+     function(ctx) {
+  d <- .sr_std_data(ctx)
+  fi <- lm(yc ~ x1 + x2 + a + a:x1 + a:x2, data = d)
+  fa <- lm(yc ~ x1 + x2 + x1dup + a, data = d)
+  stopifnot(is.na(coef(fa)[["x1dup"]]))
+  si <- .sr_standardise(fi, d)
+  fa_w <- tryCatch({ predict(fa, newdata = transform(d, a = 1)); "" }, warning = function(w) conditionMessage(w))
+  sa <- .sr_standardise(fa, d)
+  v <- list(int_coef = vec(coef(fi)), int_ey1 = si$ey1, int_ey0 = si$ey0, int_ate = si$ate,
+            int_att = si$att, int_atc = si$atc, int_r2 = summary(fi)$r.squared,
+            alias_coef = vec(coef(fa)), alias_ey1 = sa$ey1, alias_ey0 = sa$ey0, alias_ate = sa$ate,
+            alias_rank = fa$rank, alias_df_residual = fa$df.residual,
+            alias_predict_warns = as.numeric(nzchar(fa_w)))
+  list(values = v, dataset = "validation/datasets/generated/stdreg_sim.csv",
+       reference = "stats::lm + standardisation as stdReg::stdGlm (gaussian); aliased column as lm (dqrdc2, NA coefficient; R 4.3.3 predict.lm does not warn because the counterfactual rows are estimable)",
+       call = "lm(yc ~ x1 + x2 + a + a:x1 + a:x2); lm(yc ~ x1 + x2 + x1dup + a)", packages = character(0))
+})
+
+case("stdreg_separation", "causal/stdreg",
+     "Regression standardisation with a logistic outcome model under complete separation (glm(maxit = 100) warns; the standardised contrast is numerically 0)",
+     function(ctx) {
+  d <- .sr_std_data(ctx)
+  msgs <- character(0)
+  fit <- withCallingHandlers(glm(ys ~ x1 + x2 + a, data = d, family = binomial, control = glm.control(maxit = 100)),
+                             warning = function(w) { msgs <<- c(msgs, conditionMessage(w)); invokeRestart("muffleWarning") })
+  stopifnot(any(msgs == "glm.fit: fitted probabilities numerically 0 or 1 occurred"))
+  s <- .sr_standardise(fit, d)
+  eps10 <- 10 * .Machine$double.eps
+  v <- list(sep_ate = s$ate, sep_ey1 = s$ey1, sep_ey0 = s$ey0,
+            sep_fitted_extreme = sum(fitted(fit) < eps10 | fitted(fit) > 1 - eps10),
+            sep_converged = as.numeric(fit$converged),
+            sep_warn_fitted01 = as.numeric(any(msgs == "glm.fit: fitted probabilities numerically 0 or 1 occurred")),
+            sep_warn_noconv = as.numeric(any(msgs == "glm.fit: algorithm did not converge")),
+            sep_mean_ys = mean(d$ys))
+  list(values = v, dataset = "validation/datasets/generated/stdreg_sim.csv",
+       reference = "stats::glm(binomial, epsilon 1e-8, maxit = 100) warnings under complete separation; standardisation as stdReg",
+       call = "glm(ys ~ x1 + x2 + a, binomial, control = glm.control(maxit = 100)) with ys = 1{x1 > 0.3}", packages = character(0))
+})
+
 # ---------------------------------------------------------------- TMLE and C-TMLE data and helpers
 .sr_ct_data <- function(ctx) {
   set.seed(20261210)

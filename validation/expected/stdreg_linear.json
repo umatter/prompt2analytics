@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "stdreg_linear",
+  "area": "causal/stdreg",
+  "method": "Regression standardisation with a linear outcome model: with A x W interactions, and with an aliased covariate (lm: NA coefficient, estimable predictions)",
+  "reference": "stats::lm + standardisation as stdReg::stdGlm (gaussian); aliased column as lm (dqrdc2, NA coefficient; R 4.3.3 predict.lm does not warn because the counterfactual rows are estimable)",
+  "call": "lm(yc ~ x1 + x2 + a + a:x1 + a:x2); lm(yc ~ x1 + x2 + x1dup + a)",
+  "dataset": "validation/datasets/generated/stdreg_sim.csv",
+  "datasets": ["validation/datasets/generated/stdreg_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "int_coef": [1.0453148804393335, 0.47034163451602723, -0.18182901285405184, 0.72292406077438143, 0.19629512882936156, -0.39825271119475719],
+    "int_ey1": 1.6944032487067693,
+    "int_ey0": 1.0070706163359657,
+    "int_ate": 0.68733263237080355,
+    "int_att": 0.7090998207865995,
+    "int_atc": 0.66802965396434311,
+    "int_r2": 0.35741255922400317,
+    "alias_coef": [1.0720912063931451, 0.55737335967033652, -0.39657179117390473, null, 0.6906491233525095],
+    "alias_ey1": 1.7063915674824972,
+    "alias_ey0": 1.0157424441299876,
+    "alias_ate": 0.69064912335250961,
+    "alias_rank": 4,
+    "alias_df_residual": 296,
+    "alias_predict_warns": 0
+  }
+}
