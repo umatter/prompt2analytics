@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_ltmle",
+      "name": "Longitudinal TMLE (ltmle algorithm): static, mixed static and dynamic regimes, contrasts, EIC standard errors",
+      "category": "econometrics",
+      "reference": "ltmle 1.x algorithm (Lendle et al. 2017) with ltmle's defaults (stratify = FALSE, gbounds = c(0.01, 1) on the cumulative g, SetA predictions, weighted-intercept fluctuation) and variance.method = 'ic', written out in R with glm and cross-checked in the case against ltmle::ltmle 1.3-0 (logistic-Q regime means and SEs to 1e-8); the linear Q model is p2a's Gaussian variant written out with lm",
+      "doc": "validation/econometrics/ltmle.md",
+      "cases": ["ltmle_two_period"],
+      "tests": [
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_ate_se",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_default_control",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_linear_q",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_randomized_known_effect",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_logistic_rescaled_outcome",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_gbounds_cumulative",
+        "p2a-core::econometrics::ltmle::tests::test_validate_ltmle_three_period"
+      ],
+      "quantities": ["counterfactual means (always, never) at two and three time points", "EIC standard errors", "fluctuation epsilons", "ATE: estimate, SE, z, p, 95% CI", "EIC values", "cumulative gbounds", "rescaled-outcome estimates", "linear-Q estimates", "randomized design with a known effect"],
+      "tolerance": "validation/README.md, n = 600: coefficients, means and epsilons 1e-8 relative; SEs, z and CI bounds 1e-6; p-values 1e-6 relative / 1e-12 absolute; counts exact. p2a runs at tolerance = 1e-14, the case's glm.control(epsilon = 1e-14); the default tolerance 1e-8 is checked against the same tight values at Tol::iterative(1e-8)",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

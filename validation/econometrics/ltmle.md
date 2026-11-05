@@ -163,16 +163,11 @@ summary(result)
 
 - `test_ltmle_data_validation` - Tests data structure validation
 - `test_ltmle_data_validation_errors` - Tests error handling for invalid data
-- `test_ltmle_basic` - Tests basic LTMLE functionality with linear outcome
-- `test_ltmle_with_linear_outcome` - Tests linear outcome model explicitly
-- `test_ltmle_propensity_truncation` - Tests propensity score truncation
-- `test_ltmle_influence_curve` - Tests influence curve computation
-- `test_ltmle_fluctuation_coefs` - Tests targeting step coefficients
 - `test_ltmle_display` - Tests result formatting
 - `test_intervention_type_display` - Tests intervention type formatting
-- `test_add_intercept` - Tests design matrix construction
-- `test_logit` - Tests logit function
 - `test_ltmle_single_time_point_error` - Tests error for insufficient time points
+- R-pinned to case `ltmle_two_period`: `test_validate_ltmle_ate_se`, `test_validate_ltmle_default_control`, `test_validate_ltmle_linear_q`, `test_validate_ltmle_randomized_known_effect`, `test_validate_ltmle_logistic_rescaled_outcome`, `test_validate_ltmle_gbounds_cumulative`, `test_validate_ltmle_three_period`
+- Input and configuration errors: `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_an_error`, `test_ltmle_too_few_observations`, `test_ltmle_data_rejects_non_finite`
 
 ## Status
 
