@@ -124,6 +124,12 @@ pub enum DMLModelType {
     /// Interactive Regression Model (IRM) for binary treatment
     /// Used for heterogeneous treatment effects with binary D
     IRM,
+    /// Partially Linear IV Regression (PLIV): Y = theta * D + g(X) + zeta, E[zeta|Z,X] = 0,
+    /// with one instrument Z ([`run_double_ml_iv()`])
+    PLIV,
+    /// Interactive IV Model (IIVM): the LATE of a binary D with a binary instrument Z
+    /// ([`run_double_ml_iv()`])
+    IIVM,
 }
 
 crate::option_enum!(
@@ -149,6 +155,14 @@ crate::option_enum!(
                 ],
                 DMLModelType::IRM,
             ),
+            (
+                &["pliv", "partially_linear_iv", "doublemlpliv"],
+                DMLModelType::PLIV,
+            ),
+            (
+                &["iivm", "interactive_iv", "doublemliivm"],
+                DMLModelType::IIVM,
+            ),
         ],
     },
     no_display
@@ -159,6 +173,8 @@ impl fmt::Display for DMLModelType {
         match self {
             DMLModelType::PLR => write!(f, "Partially Linear Regression (PLR)"),
             DMLModelType::IRM => write!(f, "Interactive Regression Model (IRM)"),
+            DMLModelType::PLIV => write!(f, "Partially Linear IV Regression (PLIV)"),
+            DMLModelType::IIVM => write!(f, "Interactive IV Model (IIVM)"),
         }
     }
 }
@@ -239,7 +255,14 @@ impl DMLModelType {
         match self {
             DMLModelType::PLR => "theta (partialling out)",
             DMLModelType::IRM => "ATE",
+            DMLModelType::PLIV => "theta (IV, partialling out)",
+            DMLModelType::IIVM => "LATE",
         }
+    }
+
+    /// Whether the model takes an instrument (PLIV, IIVM: [`run_double_ml_iv()`]).
+    pub fn needs_instrument(self) -> bool {
+        matches!(self, DMLModelType::PLIV | DMLModelType::IIVM)
     }
 }
 
@@ -381,16 +404,17 @@ pub struct DoubleMLResult {
     /// Warnings generated during estimation
     pub warnings: Vec<String>,
 
-    /// The cross-fitted nuisance functions, in model order (PLR: l, m; IRM: g0, g1, m)
+    /// The cross-fitted nuisance functions, in model order (PLR: l, m; IRM: g0, g1, m;
+    /// PLIV: l, r, m; IIVM: g0, g1, r0, r1, m)
     #[serde(default)]
     pub nuisance: Vec<NuisanceFit>,
     /// The penalty of the lasso and ridge learners (`None` for OLS)
     #[serde(default)]
     pub lambda: Option<f64>,
-    /// The propensity trimming threshold (IRM)
+    /// The propensity trimming threshold (IRM, IIVM)
     #[serde(default)]
     pub trim: Option<f64>,
-    /// Range of the trimmed propensity scores (IRM: P(D=1|X))
+    /// Range of the trimmed propensity scores (IRM: P(D=1|X); IIVM: P(Z=1|X))
     #[serde(default)]
     pub propensity_range: Option<[f64; 2]>,
     /// Observations per fold, in label order
@@ -472,6 +496,16 @@ impl fmt::Display for DoubleMLResult {
                 writeln!(f, "  Score Jacobian E[(D - m)^2]: {:.4}", self.jacobian)?
             }
             DMLModelType::IRM => writeln!(f, "  Score Jacobian: 1 (ATE score, psi_a = -1)")?,
+            DMLModelType::PLIV => writeln!(
+                f,
+                "  Score Jacobian E[(D - r)(Z - m)]: {:.4}",
+                self.jacobian
+            )?,
+            DMLModelType::IIVM => writeln!(
+                f,
+                "  Score Jacobian -E[psi_a] (first stage): {:.4}",
+                self.jacobian
+            )?,
         }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
@@ -507,21 +541,253 @@ pub fn run_double_ml(
     x: &ArrayView2<f64>,
     config: DoubleMLConfig,
 ) -> EconResult<DoubleMLResult> {
+    if config.model_type.needs_instrument() {
+        return Err(spec(format!(
+            "model {:?} needs an instrument: call run_double_ml_iv",
+            config.model_type
+        )));
+    }
     let treatment_type = validate_inputs(y, d, None, x, &config)?;
     let folds = make_folds(y.len(), &config)?;
     let mut warnings = Vec::new();
     match config.model_type {
-        DMLModelType::PLR => run_plr(y, d, x, &config, &folds, &mut warnings),
         DMLModelType::IRM => run_irm(y, d, x, &config, &folds, &mut warnings),
+        _ => run_plr(y, d, x, &config, &folds, &mut warnings),
     }
-    .map(|mut r| {
-        r.treatment_type = treatment_type;
-        r.fold_sizes = folds.sizes.clone();
-        r.user_folds = folds.seed.is_none();
-        r.seed = folds.seed;
-        r.n_folds = folds.labels.len();
-        r
-    })
+    .map(|r| with_folds_info(r, treatment_type, &folds))
+}
+
+/// Run Double Machine Learning estimation with an instrument: PLIV or IIVM.
+///
+/// PLIV (partially linear IV, partialling-out score with one instrument) estimates theta in
+/// `Y = theta D + g(X) + zeta`, `E[zeta | Z, X] = 0`; IIVM (interactive IV, binary D and Z)
+/// estimates the local average treatment effect with DoubleML's LATE score. Same learners,
+/// folds and inference as [`run_double_ml`]; see the module documentation.
+///
+/// # Errors
+/// As [`run_double_ml`]; in addition PLR and IRM are refused (they take no instrument), a
+/// constant PLIV instrument, and IIVM data whose treatment or instrument is not coded 0/1.
+pub fn run_double_ml_iv(
+    y: &ArrayView1<f64>,
+    d: &ArrayView1<f64>,
+    z: &ArrayView1<f64>,
+    x: &ArrayView2<f64>,
+    config: DoubleMLConfig,
+) -> EconResult<DoubleMLResult> {
+    if !config.model_type.needs_instrument() {
+        return Err(spec(format!(
+            "model {:?} does not use an instrument: call run_double_ml",
+            config.model_type
+        )));
+    }
+    let treatment_type = validate_inputs(y, d, Some(z), x, &config)?;
+    let folds = make_folds(y.len(), &config)?;
+    let mut warnings = Vec::new();
+    match config.model_type {
+        DMLModelType::PLIV => run_pliv(y, d, z, x, &config, &folds, &mut warnings),
+        _ => run_iivm(y, d, z, x, &config, &folds, &mut warnings),
+    }
+    .map(|r| with_folds_info(r, treatment_type, &folds))
+}
+
+/// The fold fields and the detected treatment type, which the entry points fill in.
+fn with_folds_info(
+    mut r: DoubleMLResult,
+    treatment_type: TreatmentType,
+    folds: &Folds,
+) -> DoubleMLResult {
+    r.treatment_type = treatment_type;
+    r.fold_sizes = folds.sizes.clone();
+    r.user_folds = folds.seed.is_none();
+    r.seed = folds.seed;
+    r.n_folds = folds.labels.len();
+    r
+}
+
+/// Partially linear IV, partialling-out score with one instrument:
+/// `psi = (Y - l - theta (D - r)) (Z - m)`, `l = E[Y|X]`, `r = E[D|X]`, `m = E[Z|X]`.
+fn run_pliv(
+    y: &ArrayView1<f64>,
+    d: &ArrayView1<f64>,
+    z: &ArrayView1<f64>,
+    x: &ArrayView2<f64>,
+    config: &DoubleMLConfig,
+    folds: &Folds,
+    warnings: &mut Vec<String>,
+) -> EconResult<DoubleMLResult> {
+    let n = y.len() as f64;
+    let (zlo, zhi) = z
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(v), hi.max(v))
+        });
+    if zlo == zhi {
+        return Err(spec("instrument z is constant".to_string()));
+    }
+    let ml = Learner::Regression(config.ml_method);
+    let preds = cross_fit(
+        x,
+        folds,
+        None,
+        ml,
+        &[
+            Nuisance::new("l", "E[Y|X]", y.view()),
+            Nuisance::new("r", "E[D|X]", d.view()),
+            Nuisance::new("m", "E[Z|X]", z.view()),
+        ],
+        config,
+        warnings,
+    )?;
+    let (l, r, m) = (&preds[0], &preds[1], &preds[2]);
+    let ry = y - l;
+    let rd = d - r;
+    let rz = z - m;
+    let jacobian = rd.dot(&rz) / n;
+    if jacobian.is_nan() || jacobian.abs() <= 1e-12 * (var_pop(d) * var_pop(z)).sqrt() {
+        return Err(EconError::SingularMatrix {
+            context: format!("DoubleML PLIV: E[(D - r)(Z - m)] = {jacobian:e} out of fold"),
+            suggestion: "the residualized instrument is uncorrelated with the residualized \
+                         treatment; theta is not identified"
+                .to_string(),
+        });
+    }
+    let theta = rz.dot(&ry) / rz.dot(&rd);
+    let scores: Array1<f64> = (&ry - &(&rd * theta)) * &rz;
+    let se = (scores.dot(&scores) / n / (jacobian * jacobian) / n).sqrt();
+
+    let label = ml.label(config.lambda);
+    let fit_l = nuisance_fit("l", "E[Y|X]", &label, y, l, None);
+    let fit_r = nuisance_fit("r", "E[D|X]", &label, d, r, None);
+    let fit_m = nuisance_fit("m", "E[Z|X]", &label, z, m, None);
+    let mean_rd = rd.sum() / n;
+    let var_rd = rd.dot(&rd) / n;
+    let diagnostics = NuisanceDiagnostics {
+        outcome_r2: fit_l.r2,
+        treatment_r2: fit_r.r2,
+        outcome_rmse: fit_l.rmse,
+        treatment_rmse: fit_r.rmse,
+        mean_residual_treatment: mean_rd,
+        var_residual_treatment: var_rd,
+    };
+    residual_warnings(warnings, "r", var_rd, d, mean_rd);
+    assemble(
+        DMLModelType::PLIV,
+        config,
+        theta,
+        se,
+        scores.to_vec(),
+        diagnostics,
+        jacobian,
+        vec![fit_l, fit_r, fit_m],
+        None,
+        warnings,
+    )
+}
+
+/// Interactive IV model (binary D and Z), DoubleML's LATE score:
+/// `psi_b = g1 - g0 + Z (Y - g1) / m - (1 - Z)(Y - g0) / (1 - m)`,
+/// `psi_a = -(r1 - r0 + Z (D - r1) / m - (1 - Z)(D - r0) / (1 - m))`,
+/// `theta = -mean(psi_b) / mean(psi_a)`, `psi = psi_a theta + psi_b`; `g_z = E[Y|Z=z,X]` by
+/// `ml_method`, `r_z = P(D=1|Z=z,X)` and `m = P(Z=1|X)` by logistic regression, `m`
+/// bounded to `[trim, 1 - trim]`.
+fn run_iivm(
+    y: &ArrayView1<f64>,
+    d: &ArrayView1<f64>,
+    z: &ArrayView1<f64>,
+    x: &ArrayView2<f64>,
+    config: &DoubleMLConfig,
+    folds: &Folds,
+    warnings: &mut Vec<String>,
+) -> EconResult<DoubleMLResult> {
+    let nobs = y.len();
+    let n = nobs as f64;
+    if let Some(at) = first_non_binary(d) {
+        return Err(spec(format!(
+            "IIVM needs a binary treatment coded 0/1 ({at})"
+        )));
+    }
+    if let Some(at) = first_non_binary(z) {
+        return Err(spec(format!(
+            "IIVM needs a binary instrument coded 0/1 ({at})"
+        )));
+    }
+    let z1: Vec<bool> = z.iter().map(|&v| v == 1.0).collect();
+    let z0: Vec<bool> = z1.iter().map(|t| !t).collect();
+    let n1 = z1.iter().filter(|&&t| t).count();
+    if n1.min(nobs - n1) < 5 {
+        return Err(EconError::InsufficientData {
+            required: 5,
+            provided: n1.min(nobs - n1),
+            context: "IIVM requires sufficient observations with each instrument value".to_string(),
+        });
+    }
+    let ml = Learner::Regression(config.ml_method);
+    let mut one = |subset: Option<&[bool]>, learner, nu: Nuisance<'_>| {
+        cross_fit(x, folds, subset, learner, &[nu], config, warnings).map(|mut v| v.remove(0))
+    };
+    let g0 = one(Some(&z0), ml, Nuisance::new("g0", "E[Y|Z=0,X]", y.view()))?;
+    let g1 = one(Some(&z1), ml, Nuisance::new("g1", "E[Y|Z=1,X]", y.view()))?;
+    let lg = Learner::Logistic;
+    let r0 = one(Some(&z0), lg, Nuisance::new("r0", "P(D=1|Z=0,X)", d.view()))?;
+    let r1 = one(Some(&z1), lg, Nuisance::new("r1", "P(D=1|Z=1,X)", d.view()))?;
+    let m = one(None, lg, Nuisance::new("m", "P(Z=1|X)", z.view()))?
+        .mapv(|v| bound(v, config.trim, 1.0 - config.trim));
+
+    let psi_b = Array1::from_shape_fn(nobs, |i| {
+        g1[i] - g0[i] + z[i] * (y[i] - g1[i]) / m[i] - (1.0 - z[i]) * (y[i] - g0[i]) / (1.0 - m[i])
+    });
+    let psi_a = Array1::from_shape_fn(nobs, |i| {
+        -(r1[i] - r0[i] + z[i] * (d[i] - r1[i]) / m[i]
+            - (1.0 - z[i]) * (d[i] - r0[i]) / (1.0 - m[i]))
+    });
+    let j = psi_a.sum() / n;
+    if j.is_nan() || j.abs() <= 1e-12 {
+        return Err(EconError::SingularMatrix {
+            context: format!("DoubleML IIVM: E[psi_a] = {j:e}"),
+            suggestion: "the instrument does not move the treatment out of fold; the LATE is \
+                         not identified"
+                .to_string(),
+        });
+    }
+    let theta = -(psi_b.sum() / n) / j;
+    let scores = &psi_a * theta + &psi_b;
+    let se = (scores.dot(&scores) / n / (j * j) / n).sqrt();
+
+    let label = ml.label(config.lambda);
+    let logistic = lg.label(config.lambda);
+    let fit_g0 = nuisance_fit("g0", "E[Y|Z=0,X]", &label, y, &g0, Some(&z0));
+    let fit_g1 = nuisance_fit("g1", "E[Y|Z=1,X]", &label, y, &g1, Some(&z1));
+    let fit_r0 = nuisance_fit("r0", "P(D=1|Z=0,X)", &logistic, d, &r0, Some(&z0));
+    let fit_r1 = nuisance_fit("r1", "P(D=1|Z=1,X)", &logistic, d, &r1, Some(&z1));
+    let fit_m = nuisance_fit("m", "P(Z=1|X)", &logistic, z, &m, None);
+    // the models of the observed instrument arm
+    let g_obs = Array1::from_shape_fn(nobs, |i| if z1[i] { g1[i] } else { g0[i] });
+    let r_obs = Array1::from_shape_fn(nobs, |i| if z1[i] { r1[i] } else { r0[i] });
+    let fit_out = nuisance_fit("g", "E[Y|Z,X]", &label, y, &g_obs, None);
+    let fit_tr = nuisance_fit("r", "P(D=1|Z,X)", &logistic, d, &r_obs, None);
+    let rd = d - &r_obs;
+    let diagnostics = NuisanceDiagnostics {
+        outcome_r2: fit_out.r2,
+        treatment_r2: fit_tr.r2,
+        outcome_rmse: fit_out.rmse,
+        treatment_rmse: fit_tr.rmse,
+        mean_residual_treatment: rd.sum() / n,
+        var_residual_treatment: rd.dot(&rd) / n,
+    };
+    propensity_warning(warnings, &m, config.trim);
+    let range = min_max(&m);
+    assemble(
+        DMLModelType::IIVM,
+        config,
+        theta,
+        se,
+        scores.to_vec(),
+        diagnostics,
+        -j,
+        vec![fit_g0, fit_g1, fit_r0, fit_r1, fit_m],
+        Some(range),
+        warnings,
+    )
 }
 
 /// Partially linear regression, partialling-out score:
@@ -2064,9 +2330,23 @@ mod tests {
         for s in ["irm", "IRM", "interactive"] {
             assert_eq!(s.parse::<DMLModelType>().unwrap(), DMLModelType::IRM, "{s}");
         }
+        for s in ["pliv", "partially linear iv", "DoubleMLPLIV"] {
+            assert_eq!(
+                s.parse::<DMLModelType>().unwrap(),
+                DMLModelType::PLIV,
+                "{s}"
+            );
+        }
+        for s in ["iivm", "interactive_iv", "DoubleMLIIVM"] {
+            assert_eq!(
+                s.parse::<DMLModelType>().unwrap(),
+                DMLModelType::IIVM,
+                "{s}"
+            );
+        }
         match "ols".parse::<DMLModelType>() {
             Err(EconError::InvalidSpecification { message }) => {
-                for needle in ["model", "plr", "irm"] {
+                for needle in ["model", "plr", "irm", "iivm"] {
                     assert!(message.contains(needle), "{needle} not in {message}");
                 }
             }
@@ -2616,5 +2896,202 @@ mod tests {
                 needle,
             );
         }
+    }
+
+    fn iv_data(ds: &Dataset, y: &str, d: &str, z: &str) -> [Array1<f64>; 3] {
+        [col(ds, y), col(ds, d), col(ds, z)]
+    }
+
+    #[test]
+    fn test_validate_doubleml_pliv() {
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let [y, d, z] = iv_data(&ds, "yz", "dz", "z");
+        let x = covariates(&ds);
+        let r = run_double_ml_iv(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            &x.view(),
+            with_folds(DMLModelType::PLIV, MLMethod::OLS, case_folds(&ds)),
+        )
+        .unwrap();
+        let n = r.n_obs;
+        let s = Tol::stat(n);
+        let nd = &r.nuisance_diagnostics;
+        let (l, rr, m) = (nuis(&r, "l"), nuis(&r, "r"), nuis(&r, "m"));
+        Check::new(&case)
+            .scalar("pliv_theta", r.theta, Tol::coef(n))
+            .scalar("pliv_se", r.se, Tol::se(n))
+            .scalar("pliv_rmse_l", l.rmse, s)
+            .scalar("pliv_rmse_r", rr.rmse, s)
+            .scalar("pliv_rmse_m", m.rmse, s)
+            .scalar("pliv_r2_l", l.r2, s)
+            .scalar("pliv_r2_r", rr.r2, s)
+            .scalar("pliv_r2_m", m.r2, s)
+            .scalar("pliv_rmse_l", nd.outcome_rmse, s)
+            .scalar("pliv_rmse_r", nd.treatment_rmse, s)
+            .scalar("pliv_mean_resid_r", nd.mean_residual_treatment, s)
+            .scalar("pliv_jacobian", r.jacobian, s)
+            .vector("pliv_ci95", &[r.ci_lower, r.ci_upper], s)
+            .scalar("pliv_p", r.p_value, P_REL)
+            .finish();
+        let text = r.to_string();
+        assert!(
+            text.contains("Score Jacobian E[(D - r)(Z - m)]: 0.8263"),
+            "{text}"
+        );
+        assert!(text.contains("Model Type: Partially Linear IV Regression (PLIV)"));
+        assert_eq!(r.propensity_range, None);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_validate_doubleml_iivm() {
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let [y, d, z] = iv_data(&ds, "yzb", "db", "zb");
+        let x = covariates(&ds);
+        let r = run_double_ml_iv(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            &x.view(),
+            with_folds(DMLModelType::IIVM, MLMethod::OLS, case_folds(&ds)),
+        )
+        .unwrap();
+        let n = r.n_obs;
+        let s = Tol::stat(n);
+        let nd = &r.nuisance_diagnostics;
+        let mut check = Check::new(&case);
+        check
+            .scalar("iivm_theta", r.theta, Tol::coef(n))
+            .scalar("iivm_se", r.se, Tol::se(n))
+            .scalar("iivm_jacobian", r.jacobian, s)
+            .vector("iivm_ps_range", &r.propensity_range.unwrap(), s);
+        for name in ["g0", "g1", "r0", "r1", "m"] {
+            let f = nuis(&r, name);
+            check
+                .scalar(&format!("iivm_rmse_{name}"), f.rmse, s)
+                .scalar(&format!("iivm_r2_{name}"), f.r2, s);
+        }
+        check
+            .scalar("iivm_rmse_outcome", nd.outcome_rmse, s)
+            .scalar("iivm_r2_outcome", nd.outcome_r2, s)
+            .scalar("iivm_rmse_treatment", nd.treatment_rmse, s)
+            .scalar("iivm_r2_treatment", nd.treatment_r2, s)
+            .scalar("iivm_mean_resid_treatment", nd.mean_residual_treatment, s)
+            .vector("iivm_ci95", &[r.ci_lower, r.ci_upper], s)
+            .scalar("iivm_p", r.p_value, P_REL)
+            .finish();
+        assert_eq!(nuis(&r, "r0").n_eval, 199);
+        assert_eq!(nuis(&r, "r1").learner, "logistic regression");
+        let text = r.to_string();
+        assert!(
+            text.contains("Score Jacobian -E[psi_a] (first stage): 0.5485"),
+            "{text}"
+        );
+        assert!(text.contains("Estimand:   LATE"));
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_validate_doubleml_iivm_one_sided() {
+        let (case, ds) = crate::test_support::load_case("doubleml_models");
+        let [y, d, z] = iv_data(&ds, "yzb", "db", "zb");
+        let d1 = &d * &z;
+        let x = covariates(&ds);
+        let r = run_double_ml_iv(
+            &y.view(),
+            &d1.view(),
+            &z.view(),
+            &x.view(),
+            with_folds(DMLModelType::IIVM, MLMethod::OLS, case_folds(&ds)),
+        )
+        .unwrap();
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("iivm_onesided_theta", r.theta, Tol::coef(n))
+            .scalar("iivm_onesided_se", r.se, Tol::se(n))
+            .scalar("iivm_onesided_jacobian", r.jacobian, Tol::stat(n))
+            .finish();
+        let constant: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("no variation"))
+            .collect();
+        assert_eq!(constant.len(), 1, "{:?}", r.warnings);
+        assert!(constant[0].starts_with(
+            "r0 = P(D=1|Z=0,X) by logistic regression, folds 1, 2, 3, 4, 5: the training \
+             outcome has no variation (all 0); predicted as the constant 0"
+        ));
+        assert_eq!(nuis(&r, "r0").rmse, 0.0);
+    }
+
+    #[test]
+    fn test_doubleml_iv_models_need_an_instrument() {
+        let ds = sim();
+        let x = covariates(&ds);
+        let [yz, dz, z] = iv_data(&ds, "yz", "dz", "z");
+        let [_, db, zb] = iv_data(&ds, "yzb", "db", "zb");
+        let cfg = |m| {
+            let mut c = DoubleMLConfig::default();
+            c.model_type = m;
+            c
+        };
+        spec_err(
+            run_double_ml(&yz.view(), &dz.view(), &x.view(), cfg(DMLModelType::PLIV)),
+            "run_double_ml_iv",
+        );
+        spec_err(
+            run_double_ml_iv(
+                &yz.view(),
+                &dz.view(),
+                &z.view(),
+                &x.view(),
+                cfg(DMLModelType::PLR),
+            ),
+            "run_double_ml",
+        );
+        spec_err(
+            run_double_ml_iv(
+                &yz.view(),
+                &db.view(),
+                &z.view(),
+                &x.view(),
+                cfg(DMLModelType::IIVM),
+            ),
+            "binary instrument",
+        );
+        spec_err(
+            run_double_ml_iv(
+                &yz.view(),
+                &dz.view(),
+                &zb.view(),
+                &x.view(),
+                cfg(DMLModelType::IIVM),
+            ),
+            "binary treatment",
+        );
+        let ones = Array1::from_elem(400, 1.0);
+        spec_err(
+            run_double_ml_iv(
+                &yz.view(),
+                &dz.view(),
+                &ones.view(),
+                &x.view(),
+                cfg(DMLModelType::PLIV),
+            ),
+            "instrument z is constant",
+        );
+        let short = z.slice(ndarray::s![..399]);
+        spec_err(
+            run_double_ml_iv(
+                &yz.view(),
+                &dz.view(),
+                &short,
+                &x.view(),
+                cfg(DMLModelType::PLIV),
+            ),
+            "Instrument vector length (399)",
+        );
     }
 }
