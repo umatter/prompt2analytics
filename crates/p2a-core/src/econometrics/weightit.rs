@@ -64,6 +64,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmFit, GlmSpec, fit_glm};
+use crate::econometrics::sbw::{SBWConfig, SBWEstimand, run_sbw_inner};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
@@ -72,6 +73,10 @@ use crate::options::Choices;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
+/// Energy balancing refuses more reweighted units than this (decision WP23-A): the QP is
+/// dense (two m x m buffers, O(m^3) factorisation, O(m^2) per active-set step).
+pub const ENERGY_MAX_UNITS: usize = 3_000;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Type Definitions
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -79,14 +84,16 @@ use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 /// Weighting method for propensity score estimation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WeightMethod {
-    /// Standard propensity score weights from logistic regression
+    /// Inverse propensity weights from a logistic regression (WeightIt `method = "glm"`).
     #[default]
     Logistic,
-    /// Entropy balancing (Hainmueller 2012)
+    /// Entropy balancing (Hainmueller 2012; WeightIt `method = "ebal"`).
     Entropy,
-    /// Energy balancing weights
+    /// Energy balancing (Huling & Mak 2022; WeightIt `method = "energy"` at lambda = 0),
+    /// solved exactly as a quadratic program; at most [`ENERGY_MAX_UNITS`] reweighted units.
     Energy,
-    /// Stable balancing weights (Zubizarreta 2015)
+    /// Stable balancing weights with exact balance (Zubizarreta 2015; WeightIt
+    /// `method = "optweight"` with `tols = 0`), through [`crate::econometrics::sbw`].
     Stable,
 }
 
@@ -165,8 +172,9 @@ pub struct WeightItConfig {
     pub estimand: WeightEstimand,
     /// Include intercept in covariate matrix (default: true)
     pub intercept: bool,
-    /// Stabilize weights (default: false)
-    /// Multiplies weights by P(D=1) for treated and P(D=0) for control
+    /// Stabilize weights (default: false); logistic weights only (ignored with a warning
+    /// for the balancing methods, as in WeightIt). Multiplies weights by P(D=1) for treated
+    /// and P(D=0) for control
     pub stabilize: bool,
     /// Trim extreme weights at this quantile (e.g., 0.99 trims at 1st and 99th percentile)
     /// Set to 1.0 for no trimming (default: 1.0)
@@ -622,26 +630,82 @@ pub fn weightit(
             (w, None, c, it)
         }
         WeightMethod::Energy => {
-            let (w, conv, iters) =
-                compute_energy_weights(&x, &d, config.estimand, config.max_iter, config.tolerance)?;
-            if !conv {
-                warnings.push(format!(
-                    "Energy balancing did not converge after {} iterations",
-                    iters
-                ));
-            }
-            (w, None, conv, iters)
+            let x_cov = covariates_only(&x, config.intercept);
+            let fit = energy_weights(
+                x_cov.view(),
+                d.as_slice().unwrap_or(&d.to_vec()),
+                config.estimand,
+            )?;
+            warnings.extend(fit.warnings.iter().cloned());
+            // WP23-B: each reweighted group sums to the target population size.
+            let nf = n as f64;
+            let (n1, n0) = (n_treated as f64, n_control as f64);
+            let w: Vec<f64> = fit
+                .weights
+                .iter()
+                .zip(d.iter())
+                .map(|(&w, &di)| {
+                    let treated = di >= 0.5;
+                    match config.estimand {
+                        WeightEstimand::ATT if !treated => w * n1 / n0,
+                        WeightEstimand::ATC if treated => w * n0 / n1,
+                        WeightEstimand::ATE => w * nf / if treated { n1 } else { n0 },
+                        _ => w,
+                    }
+                })
+                .collect();
+            let conv = Convergence::new(
+                true,
+                fit.steps,
+                fit.max_steps,
+                "active-set steps (exact QP)",
+                fit.max_violation,
+                1e-12,
+            );
+            convergence = Some(conv);
+            (w, None, true, fit.steps)
         }
         WeightMethod::Stable => {
-            let (w, conv, iters) =
-                compute_stable_weights(&x, &d, config.estimand, config.max_iter, config.tolerance)?;
-            if !conv {
-                warnings.push(format!(
-                    "Stable balancing did not converge after {} iterations",
-                    iters
-                ));
-            }
-            (w, None, conv, iters)
+            let x_cov = covariates_only(&x, config.intercept);
+            let names: Vec<String> = covariate_cols.iter().map(|c| c.to_string()).collect();
+            let mut cfg = SBWConfig::default();
+            cfg.estimand = match config.estimand {
+                WeightEstimand::ATT => SBWEstimand::ATT,
+                WeightEstimand::ATC => SBWEstimand::ATC,
+                WeightEstimand::ATE => SBWEstimand::ATE,
+            };
+            cfg.balance_tol = 0.0;
+            cfg.normalize_to_n = false;
+            cfg.max_iter = config.max_iter;
+            cfg.tolerance = config.tolerance;
+            let r = run_sbw_inner(&d.view(), &x_cov.view(), &names, cfg).map_err(|e| match e {
+                EconError::InvalidSpecification { message } => EconError::InvalidSpecification {
+                    message: format!(
+                        "stable balancing weights with exact balance are infeasible: {message}; use treatment_sbw (sbw()) with balance_tol > 0 for approximate balance"
+                    ),
+                },
+                other => other,
+            })?;
+            // WP23-B: the SBW groups sum to 1; scale each to the target population size.
+            let nf = n as f64;
+            let (n1, n0) = (n_treated as f64, n_control as f64);
+            let w: Vec<f64> = r
+                .weights
+                .iter()
+                .zip(d.iter())
+                .map(|(&w, &di)| {
+                    let treated = di >= 0.5;
+                    match config.estimand {
+                        WeightEstimand::ATT if !treated => w * n1,
+                        WeightEstimand::ATC if treated => w * n0,
+                        WeightEstimand::ATE => w * nf,
+                        _ => w,
+                    }
+                })
+                .collect();
+            warnings.extend(r.warnings.iter().cloned());
+            convergence = r.convergence.clone();
+            (w, None, r.converged, r.iterations)
         }
     };
 
@@ -1252,210 +1316,691 @@ fn ebal_convergence(fits: &[EbalFit], max_iter: usize, tol: f64) -> (Convergence
     )
 }
 
-/// Compute energy balancing weights.
-///
-/// Minimizes the energy distance between the weighted control distribution
-/// and the treated distribution.
-fn compute_energy_weights(
-    x: &Array2<f64>,
-    d: &Array1<f64>,
-    _estimand: WeightEstimand,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<(Vec<f64>, bool, usize)> {
-    // Energy balancing is similar to entropy but uses a different objective
-    // For simplicity, we use an iterative reweighting approach
-
-    let n = d.len();
-
-    // Start with uniform weights
-    let mut weights = vec![1.0; n];
-
-    // Identify groups
-    let treated_idx: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
-    let control_idx: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
-
-    let n_treat = treated_idx.len() as f64;
-    let n_ctrl = control_idx.len() as f64;
-
-    // Compute pairwise distances for energy
-    let k = x.ncols();
-
-    // Target: treated group mean
-    let mut target_mean = Array1::zeros(k);
-    for &i in &treated_idx {
-        for j in 0..k {
-            target_mean[j] += x[[i, j]];
-        }
-    }
-    target_mean /= n_treat;
-
-    let mut converged = false;
-    let mut iterations = 0;
-
-    // Iteratively reweight to minimize energy distance
-    for iter in 0..max_iter {
-        iterations = iter + 1;
-
-        // Compute weighted control mean
-        let mut w_sum = 0.0;
-        let mut weighted_mean = Array1::zeros(k);
-        for &i in &control_idx {
-            w_sum += weights[i];
-            for j in 0..k {
-                weighted_mean[j] += weights[i] * x[[i, j]];
-            }
-        }
-        if w_sum > 0.0 {
-            weighted_mean /= w_sum;
-        }
-
-        // Check convergence: distance to target
-        let diff: f64 = (&weighted_mean - &target_mean)
-            .iter()
-            .map(|d| d * d)
-            .sum::<f64>()
-            .sqrt();
-        if diff < tolerance {
-            converged = true;
-            break;
-        }
-
-        // Update weights using gradient of energy distance
-        // Simplified: increase weight for control units closer to target
-        for &i in &control_idx {
-            let dist: f64 = (0..k)
-                .map(|j| (x[[i, j]] - target_mean[j]).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            // Inverse distance weighting
-            weights[i] = 1.0 / (dist + 0.1);
-        }
-
-        // Normalize control weights
-        let ctrl_sum: f64 = control_idx.iter().map(|&i| weights[i]).sum();
-        for &i in &control_idx {
-            weights[i] = weights[i] / ctrl_sum * n_ctrl;
-        }
-    }
-
-    // For ATT, treated get weight 1
-    for &i in &treated_idx {
-        weights[i] = 1.0;
-    }
-
-    Ok((weights, converged, iterations))
+/// Result of [`energy_weights`].
+struct EnergyFit {
+    /// Mean 1 within each reweighted group; target units 1.
+    weights: Vec<f64>,
+    /// Active-set steps (constraints added plus dropped).
+    steps: usize,
+    max_steps: usize,
+    max_violation: f64,
+    warnings: Vec<String>,
 }
 
-/// Compute stable balancing weights (Zubizarreta 2015).
-///
-/// Minimizes weight dispersion while achieving approximate balance.
-fn compute_stable_weights(
-    x: &Array2<f64>,
-    d: &Array1<f64>,
-    _estimand: WeightEstimand,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<(Vec<f64>, bool, usize)> {
-    // Stable weights minimize variance of weights subject to approximate balance
-    // We use a penalty-based approach
+/// Constraints `W_g >= 0` of the energy QP in the Householder basis of each block's sum
+/// constraint: `W = c + Z u`, with only the reflectors stored.
+struct EnergyConstraints<'a> {
+    blocks: &'a [EnergyBlock],
+    n_vars: usize,
+}
 
-    let n = d.len();
-    let k = x.ncols();
+/// One reweighted group's unique rows `offset .. offset + k` (in the merged order) and its
+/// reflector `I - beta v v'`, `v = e_1 - 1/sqrt(k)`; variables `var_offset .. + k - 1`.
+struct EnergyBlock {
+    offset: usize,
+    k: usize,
+    var_offset: usize,
+    v: Vec<f64>,
+    beta: f64,
+    c: f64,
+}
 
-    let treated_idx: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
-    let control_idx: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
-
-    let n_treat = treated_idx.len() as f64;
-    let n_ctrl = control_idx.len() as f64;
-
-    // Target means (treated group)
-    let mut target_mean = Array1::zeros(k);
-    for &i in &treated_idx {
-        for j in 0..k {
-            target_mean[j] += x[[i, j]];
+impl EnergyBlock {
+    /// `H y` for `y` of length k (in place).
+    fn reflect(&self, y: &mut [f64]) {
+        if self.k < 2 {
+            return;
+        }
+        let vy: f64 = self.v.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
+        for (yi, vi) in y.iter_mut().zip(&self.v) {
+            *yi -= self.beta * vi * vy;
         }
     }
-    target_mean /= n_treat;
+}
 
-    // Start with uniform weights
-    let mut weights = vec![1.0; n];
-    for &i in &control_idx {
-        weights[i] = n_ctrl.recip();
-    }
-
-    let balance_penalty = 100.0; // Penalty for balance constraint violation
-    let mut converged = false;
-    let mut iterations = 0;
-
-    for iter in 0..max_iter {
-        iterations = iter + 1;
-
-        // Compute current weighted mean of control
-        let mut ctrl_w_sum = 0.0;
-        let mut weighted_mean = Array1::zeros(k);
-        for &i in &control_idx {
-            ctrl_w_sum += weights[i];
-            for j in 0..k {
-                weighted_mean[j] += weights[i] * x[[i, j]];
-            }
-        }
-        if ctrl_w_sum > 0.0 {
-            weighted_mean /= ctrl_w_sum;
-        }
-
-        // Balance violation
-        let balance_viol: f64 = (&weighted_mean - &target_mean)
+impl EnergyConstraints<'_> {
+    fn locate(&self, i: usize) -> (&EnergyBlock, usize) {
+        let b = self
+            .blocks
             .iter()
-            .map(|d| d * d)
-            .sum::<f64>()
-            .sqrt();
+            .find(|b| i >= b.offset && i < b.offset + b.k)
+            .expect("constraint index within the blocks");
+        (b, i - b.offset)
+    }
 
-        if balance_viol < tolerance {
-            converged = true;
-            break;
-        }
-
-        // Update weights: gradient descent on objective
-        // Objective = variance(w) + penalty * balance_violation^2
-        let w_mean = 1.0 / n_ctrl;
-
-        for &i in &control_idx {
-            // Gradient of variance term
-            let var_grad = 2.0 * (weights[i] - w_mean);
-
-            // Gradient of balance penalty
-            let mut balance_grad = 0.0;
-            for j in 0..k {
-                let diff = weighted_mean[j] - target_mean[j];
-                balance_grad +=
-                    2.0 * balance_penalty * diff * (x[[i, j]] - weighted_mean[j]) / ctrl_w_sum;
+    /// W = c + Z u for every unique row.
+    fn totals(&self, x: &[f64]) -> Vec<f64> {
+        let k: usize = self.blocks.iter().map(|b| b.k).sum();
+        let mut w = vec![0.0; k];
+        for b in self.blocks {
+            let mut y = vec![0.0; b.k];
+            y[1..].copy_from_slice(&x[b.var_offset..b.var_offset + b.k - 1]);
+            b.reflect(&mut y);
+            for (g, yg) in y.iter().enumerate() {
+                w[b.offset + g] = b.c + yg;
             }
+        }
+        w
+    }
+}
 
-            // Update
-            let grad = var_grad + balance_grad;
-            weights[i] -= 0.01 * grad;
-            weights[i] = weights[i].max(0.001); // Keep positive
+impl dense_qp::Constraints for EnergyConstraints<'_> {
+    fn len(&self) -> usize {
+        self.blocks.iter().map(|b| b.k).sum()
+    }
+
+    fn n_eq(&self) -> usize {
+        0
+    }
+
+    fn normal(&self, i: usize, out: &mut [f64]) {
+        out.iter_mut().for_each(|o| *o = 0.0);
+        let (b, g) = self.locate(i);
+        if b.k < 2 {
+            return;
+        }
+        // Row g of Z: (e_g - beta v_g v) restricted to the block's columns 2..k.
+        for col in 1..b.k {
+            let delta = if col == g { 1.0 } else { 0.0 };
+            out[b.var_offset + col - 1] = delta - b.beta * b.v[g] * b.v[col];
+        }
+        debug_assert!(out.len() == self.n_vars);
+    }
+
+    fn rhs(&self, i: usize) -> f64 {
+        -self.locate(i).0.c
+    }
+
+    fn normal_norm(&self, i: usize) -> f64 {
+        let k = self.locate(i).0.k as f64;
+        (1.0 - 1.0 / k).max(0.0).sqrt()
+    }
+
+    fn slacks(&self, x: &[f64], out: &mut [f64]) {
+        out.copy_from_slice(&self.totals(x));
+    }
+}
+
+/// Energy balancing weights (Huling & Mak 2022) by an exact QP: ATT reweights the controls
+/// towards the treated sample, ATC the treated towards the controls, ATE both groups
+/// (WeightIt `weightit2energy`, improved, lambda = 0), on covariates standardised over all
+/// units. Identical standardised rows within a group are merged and share their weight.
+fn energy_weights(
+    x_cov: ArrayView2<f64>,
+    d: &[f64],
+    estimand: WeightEstimand,
+) -> EconResult<EnergyFit> {
+    let (n, p) = x_cov.dim();
+    let nf = n as f64;
+    // 1. Standardise over all units; drop constant columns.
+    let mut cols: Vec<Vec<f64>> = Vec::with_capacity(p);
+    for j in 0..p {
+        let col = x_cov.column(j);
+        let mean = col.sum() / nf;
+        let sd = (col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (nf - 1.0).max(1.0)).sqrt();
+        if sd > 0.0 && sd.is_finite() {
+            cols.push(col.iter().map(|v| (v - mean) / sd).collect());
+        }
+    }
+    let rows: Vec<Vec<f64>> = (0..n)
+        .map(|i| cols.iter().map(|c| c[i]).collect())
+        .collect();
+    let dist = |a: &[f64], b: &[f64]| -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let treated: Vec<usize> = (0..n).filter(|&i| d[i] >= 0.5).collect();
+    let control: Vec<usize> = (0..n).filter(|&i| d[i] < 0.5).collect();
+    let (n1, n0) = (treated.len() as f64, control.len() as f64);
+
+    // 2. Blocks: (is_treated, units).
+    let groups: Vec<(bool, &[usize])> = match estimand {
+        WeightEstimand::ATT => vec![(false, &control)],
+        WeightEstimand::ATC => vec![(true, &treated)],
+        WeightEstimand::ATE => vec![(false, &control), (true, &treated)],
+    };
+    let m: usize = groups.iter().map(|(_, u)| u.len()).sum();
+    if m > ENERGY_MAX_UNITS {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "energy balancing reweights at most {ENERGY_MAX_UNITS} units (it solves a dense {m} x {m} quadratic program); use method entropy or stable for larger samples"
+            ),
+        });
+    }
+
+    // 3. Merge identical rows within each block.
+    struct Unique {
+        row: Vec<f64>,
+        units: Vec<usize>,
+        treated: bool,
+    }
+    let mut uniq: Vec<Unique> = Vec::new();
+    let mut blocks: Vec<EnergyBlock> = Vec::new();
+    let mut var_offset = 0usize;
+    for &(is_t, units) in &groups {
+        resource::checkpoint()?;
+        let mut idx: Vec<usize> = units.to_vec();
+        idx.sort_by(|&a, &b| {
+            rows[a]
+                .iter()
+                .zip(&rows[b])
+                .map(|(x, y)| x.total_cmp(y))
+                .find(|o| o.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let offset = uniq.len();
+        for &i in &idx {
+            let in_block = uniq.len() > offset;
+            match uniq.last_mut() {
+                Some(u) if in_block && u.row == rows[i] => u.units.push(i),
+                _ => uniq.push(Unique {
+                    row: rows[i].clone(),
+                    units: vec![i],
+                    treated: is_t,
+                }),
+            }
+        }
+        let k = uniq.len() - offset;
+        let ub = 1.0 / (k as f64).sqrt();
+        let mut v = vec![-ub; k];
+        v[0] += 1.0;
+        let vv: f64 = v.iter().map(|x| x * x).sum();
+        let beta = if k >= 2 { 2.0 / vv } else { 0.0 };
+        blocks.push(EnergyBlock {
+            offset,
+            k,
+            var_offset,
+            v,
+            beta,
+            c: units.len() as f64 / k as f64,
+        });
+        var_offset += k.saturating_sub(1);
+    }
+    let k = uniq.len();
+    let n_vars = var_offset;
+    let group_n = |t: bool| if t { n1 } else { n0 };
+
+    // 4-6. Build the reduced QP and solve it; one ridge retry when not positive definite.
+    let mut warnings = Vec::new();
+    let mut solution: Option<dense_qp::QpSolution> = None;
+    let max_steps = 10 * (k + n_vars);
+    let cons = EnergyConstraints {
+        blocks: &blocks,
+        n_vars,
+    };
+    if n_vars > 0 {
+        for ridge in [false, true] {
+            // G~ = 2P and q over the unique rows.
+            let mut gt = resource::try_zeros2(k, k, "energy-distance matrix")?;
+            let mut q = vec![0.0; k];
+            for g in 0..k {
+                resource::checkpoint()?;
+                let ug = &uniq[g];
+                for h in 0..=g {
+                    let uh = &uniq[h];
+                    let dgh = dist(&ug.row, &uh.row);
+                    let pgh = match estimand {
+                        WeightEstimand::ATT => -dgh / (n0 * n0),
+                        WeightEstimand::ATC => -dgh / (n1 * n1),
+                        WeightEstimand::ATE => match (ug.treated, uh.treated) {
+                            (false, false) => -2.0 * dgh / (n0 * n0),
+                            (true, true) => -2.0 * dgh / (n1 * n1),
+                            _ => dgh / (n0 * n1),
+                        },
+                    };
+                    gt[[g, h]] = 2.0 * pgh;
+                    gt[[h, g]] = 2.0 * pgh;
+                }
+                q[g] = match estimand {
+                    WeightEstimand::ATT => {
+                        2.0 / (n0 * n1)
+                            * treated
+                                .iter()
+                                .map(|&j| dist(&ug.row, &rows[j]))
+                                .sum::<f64>()
+                    }
+                    WeightEstimand::ATC => {
+                        2.0 / (n0 * n1)
+                            * control
+                                .iter()
+                                .map(|&j| dist(&ug.row, &rows[j]))
+                                .sum::<f64>()
+                    }
+                    WeightEstimand::ATE => {
+                        let s: f64 = uniq
+                            .iter()
+                            .map(|u| u.units.len() as f64 * dist(&ug.row, &u.row))
+                            .sum();
+                        2.0 / nf * s / group_n(ug.treated)
+                    }
+                };
+                if ridge {
+                    let ng = group_n(ug.treated);
+                    gt[[g, g]] += 1e-4 / (ng * ng * ug.units.len() as f64);
+                }
+            }
+            // Linear term H (G~ c + q), before G~ is transformed.
+            let mut c_full = vec![0.0; k];
+            for b in &blocks {
+                for g in 0..b.k {
+                    c_full[b.offset + g] = b.c;
+                }
+            }
+            let mut lin: Vec<f64> = (0..k)
+                .map(|g| (0..k).map(|h| gt[[g, h]] * c_full[h]).sum::<f64>() + q[g])
+                .collect();
+            for b in &blocks {
+                b.reflect(&mut lin[b.offset..b.offset + b.k]);
+            }
+            // B = H G~ H by rank-one updates per block (rows, then columns).
+            for b in &blocks {
+                resource::checkpoint()?;
+                if b.k < 2 {
+                    continue;
+                }
+                let rows = b.offset..b.offset + b.k;
+                let mut vm = vec![0.0; k];
+                for (r, vr) in rows.clone().zip(&b.v) {
+                    for (c, acc) in vm.iter_mut().enumerate() {
+                        *acc += vr * gt[[r, c]];
+                    }
+                }
+                for (r, vr) in rows.clone().zip(&b.v) {
+                    for (c, val) in vm.iter().enumerate() {
+                        gt[[r, c]] -= b.beta * vr * val;
+                    }
+                }
+                for r in 0..k {
+                    let mv: f64 = rows.clone().zip(&b.v).map(|(c, vc)| gt[[r, c]] * vc).sum();
+                    for (c, vc) in rows.clone().zip(&b.v) {
+                        gt[[r, c]] -= b.beta * mv * vc;
+                    }
+                }
+            }
+            // Keep the rows and columns that are not a block's first.
+            let keep: Vec<usize> = blocks
+                .iter()
+                .flat_map(|b| (b.offset + 1)..(b.offset + b.k))
+                .collect();
+            let mut bmat = resource::try_zeros2(n_vars, n_vars, "energy QP Hessian")?;
+            for (i, &r) in keep.iter().enumerate() {
+                for (j, &c) in keep.iter().enumerate() {
+                    bmat[[i, j]] = gt[[r, c]];
+                }
+            }
+            drop(gt);
+            let a: Vec<f64> = keep.iter().map(|&g| lin[g]).collect();
+            match dense_qp::solve_dense_qp(bmat, &a, &cons, max_steps)? {
+                dense_qp::QpOutcome::Solved(sol) => {
+                    if ridge {
+                        warnings.push("energy balancing: the energy-distance form is numerically singular (near-duplicate covariate rows); WeightIt's ridge lambda = 1e-4 was added".to_string());
+                    }
+                    solution = Some(sol);
+                    break;
+                }
+                dense_qp::QpOutcome::Infeasible => {
+                    return Err(EconError::Computation(
+                        "energy balancing: the quadratic program was reported infeasible, which uniform weights rule out".to_string(),
+                    ));
+                }
+                dense_qp::QpOutcome::NotPositiveDefinite => continue,
+            }
+        }
+        if solution.is_none() {
+            return Err(EconError::Computation(
+                "energy balancing: the energy-distance form is not positive definite even with WeightIt's ridge lambda = 1e-4".to_string(),
+            ));
+        }
+    }
+
+    // 7. Unit weights, mean 1 within each group.
+    let (u, steps, max_violation) = match &solution {
+        Some(s) => (s.x.clone(), s.added + s.dropped, s.max_violation),
+        None => (Vec::new(), 0, 0.0),
+    };
+    let totals = cons.totals(&u);
+    let mut weights = vec![1.0; n];
+    for (g, ug) in uniq.iter().enumerate() {
+        let mut w = totals[g] / ug.units.len() as f64;
+        if w.abs() < 1e-10 {
+            w = 0.0;
+        }
+        for &i in &ug.units {
+            weights[i] = w;
+        }
+    }
+    Ok(EnergyFit {
+        weights,
+        steps,
+        max_steps,
+        max_violation,
+        warnings,
+    })
+}
+
+/// Dense strictly convex quadratic programs by the dual active-set method of Goldfarb &
+/// Idnani (1983), "A numerically stable dual method for solving strictly convex quadratic
+/// programs", *Mathematical Programming* 27, 1-33. Written from the published algorithm; no
+/// code from the GPL quadprog packages.
+pub(crate) mod dense_qp {
+    use ndarray::Array2;
+
+    use crate::errors::{EconError, EconResult};
+    use crate::linalg::matrix_ops::cholesky;
+    use crate::resource;
+
+    /// The constraints `n_i'x >= b_i`, `i < len()`; the first `n_eq()` are equalities.
+    /// Normals are produced on demand so a structured family needs no p x n matrix.
+    pub(crate) trait Constraints {
+        fn len(&self) -> usize;
+        fn n_eq(&self) -> usize;
+        fn normal(&self, i: usize, out: &mut [f64]);
+        fn rhs(&self, i: usize) -> f64;
+        /// `||n_i||`
+        fn normal_norm(&self, i: usize) -> f64;
+        /// `n_i'x - b_i` for every i
+        fn slacks(&self, x: &[f64], out: &mut [f64]);
+    }
+
+    /// Explicit constraints: rows of `normals` (p x n), `rhs` (p), the first `meq`
+    /// equalities.
+    pub(crate) struct DenseConstraints {
+        pub normals: Array2<f64>,
+        pub rhs: Vec<f64>,
+        pub meq: usize,
+    }
+
+    impl Constraints for DenseConstraints {
+        fn len(&self) -> usize {
+            self.rhs.len()
+        }
+        fn n_eq(&self) -> usize {
+            self.meq
+        }
+        fn normal(&self, i: usize, out: &mut [f64]) {
+            for (o, v) in out.iter_mut().zip(self.normals.row(i)) {
+                *o = *v;
+            }
+        }
+        fn rhs(&self, i: usize) -> f64 {
+            self.rhs[i]
+        }
+        fn normal_norm(&self, i: usize) -> f64 {
+            self.normals
+                .row(i)
+                .iter()
+                .map(|v| v * v)
+                .sum::<f64>()
+                .sqrt()
+        }
+        fn slacks(&self, x: &[f64], out: &mut [f64]) {
+            for (i, o) in out.iter_mut().enumerate() {
+                let nx: f64 = self.normals.row(i).iter().zip(x).map(|(a, b)| a * b).sum();
+                *o = nx - self.rhs[i];
+            }
+        }
+    }
+
+    pub(crate) struct QpSolution {
+        pub x: Vec<f64>,
+        /// Per constraint, 0 if inactive.
+        pub multipliers: Vec<f64>,
+        pub active: Vec<usize>,
+        pub added: usize,
+        pub dropped: usize,
+        pub max_violation: f64,
+    }
+
+    pub(crate) enum QpOutcome {
+        Solved(QpSolution),
+        Infeasible,
+        NotPositiveDefinite,
+    }
+
+    /// Givens rotation (c, s) taking (a, b) to (hypot(a, b), 0).
+    fn givens(a: f64, b: f64) -> (f64, f64) {
+        let h = a.hypot(b);
+        if h == 0.0 { (1.0, 0.0) } else { (a / h, b / h) }
+    }
+
+    /// Rotates columns `i` and `j` of `m`: (m_i, m_j) <- (c m_i + s m_j, -s m_i + c m_j).
+    fn rotate_cols(m: &mut Array2<f64>, i: usize, j: usize, c: f64, s: f64) {
+        for r in 0..m.nrows() {
+            let (a, b) = (m[[r, i]], m[[r, j]]);
+            m[[r, i]] = c * a + s * b;
+            m[[r, j]] = -s * a + c * b;
+        }
+    }
+
+    /// Minimise `a'x + 1/2 x'Gx` subject to `c`; `g` (n x n, symmetric) is consumed.
+    pub(crate) fn solve_dense_qp(
+        g: Array2<f64>,
+        a: &[f64],
+        c: &dyn Constraints,
+        max_steps: usize,
+    ) -> EconResult<QpOutcome> {
+        let n = a.len();
+        let p = c.len();
+        let meq = c.n_eq();
+        resource::checkpoint()?;
+        // 1. G = L L', J = L^{-T}.
+        let l = match cholesky(&g.view()) {
+            Ok(l) => l,
+            Err(_) => return Ok(QpOutcome::NotPositiveDefinite),
+        };
+        drop(g);
+        if l.diag().iter().any(|v| !(v.is_finite() && *v > 0.0)) {
+            return Ok(QpOutcome::NotPositiveDefinite);
+        }
+        let mut j = resource::try_zeros2(n, n, "QP inverse factor")?;
+        for col in 0..n {
+            if col % 64 == 0 {
+                resource::checkpoint()?;
+            }
+            j[[col, col]] = 1.0 / l[[col, col]];
+            for i in (0..col).rev() {
+                let mut sum = 0.0;
+                for k in (i + 1)..=col {
+                    sum += l[[k, i]] * j[[k, col]];
+                }
+                j[[i, col]] = -sum / l[[i, i]];
+            }
+        }
+        drop(l);
+        // x = -J (J' a)
+        let jta: Vec<f64> = (0..n)
+            .map(|c2| (0..n).map(|r| j[[r, c2]] * a[r]).sum())
+            .collect();
+        let mut x: Vec<f64> = (0..n)
+            .map(|r| -(0..n).map(|c2| j[[r, c2]] * jta[c2]).sum::<f64>())
+            .collect();
+
+        let mut r_mat = resource::try_zeros2(n, n, "QP active-set factor")?;
+        let mut active: Vec<usize> = Vec::new();
+        let mut is_active = vec![false; p];
+        let mut sign: Vec<f64> = Vec::new(); // orientation of each active constraint
+        let mut u: Vec<f64> = Vec::new();
+        let mut q = 0usize;
+        let b_max = (0..p).fold(0.0_f64, |m, i| m.max(c.rhs(i).abs()));
+        let tol = 1e-12 * (1.0 + b_max);
+        let mut slack = vec![0.0; p];
+        let mut np = vec![0.0; n];
+        let (mut added, mut dropped, mut steps) = (0usize, 0usize, 0usize);
+        let bump = |steps: &mut usize| -> EconResult<()> {
+            *steps += 1;
+            if *steps > max_steps {
+                return Err(EconError::Computation(format!(
+                    "dense QP: the active-set method did not terminate in {max_steps} steps"
+                )));
+            }
+            resource::checkpoint()
+        };
+
+        loop {
+            bump(&mut steps)?;
+            c.slacks(&x, &mut slack);
+            // 2. Choose the constraint to add.
+            let (pc, orient) = if q < meq {
+                let e = q;
+                (e, if slack[e] > 0.0 { -1.0 } else { 1.0 })
+            } else {
+                let mut best: Option<(usize, f64)> = None;
+                for i in meq..p {
+                    if is_active[i] {
+                        continue;
+                    }
+                    let nn = c.normal_norm(i);
+                    let v = if nn > 0.0 {
+                        slack[i] / nn
+                    } else if slack[i] >= -tol {
+                        continue;
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    if best.is_none_or(|(_, bv)| v < bv) {
+                        best = Some((i, v));
+                    }
+                }
+                match best {
+                    Some((i, v)) if v < -tol => (i, 1.0),
+                    _ => break,
+                }
+            };
+            c.normal(pc, &mut np);
+            for v in np.iter_mut() {
+                *v *= orient;
+            }
+            let rhs_p = orient * c.rhs(pc);
+            let mut u_plus = u.clone();
+            u_plus.push(0.0);
+            // Inner loop: steps towards satisfying constraint pc.
+            loop {
+                // d = J' n_p; z = J[:, q..] d[q..]; r = R^{-1} d[..q]
+                let d: Vec<f64> = (0..n)
+                    .map(|c2| (0..n).map(|rr| j[[rr, c2]] * np[rr]).sum())
+                    .collect();
+                let z: Vec<f64> = (0..n)
+                    .map(|rr| (q..n).map(|c2| j[[rr, c2]] * d[c2]).sum())
+                    .collect();
+                let mut r = vec![0.0; q];
+                for i in (0..q).rev() {
+                    let mut sum = d[i];
+                    for k in (i + 1)..q {
+                        sum -= r_mat[[i, k]] * r[k];
+                    }
+                    r[i] = sum / r_mat[[i, i]];
+                }
+                // Partial step length.
+                let mut t1 = f64::INFINITY;
+                let mut kd = None;
+                for (pos, &ci) in active.iter().enumerate() {
+                    if ci >= meq && r[pos] > 0.0 {
+                        let v = u_plus[pos] / r[pos];
+                        if v < t1 {
+                            t1 = v;
+                            kd = Some(pos);
+                        }
+                    }
+                }
+                // Full step length.
+                let z_norm = z.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let np_norm = np.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let t2 = if z_norm <= 1e-12 * (1.0 + np_norm) {
+                    f64::INFINITY
+                } else {
+                    let s_p: f64 = np.iter().zip(&x).map(|(a2, b2)| a2 * b2).sum::<f64>() - rhs_p;
+                    let zn: f64 = z.iter().zip(&np).map(|(a2, b2)| a2 * b2).sum();
+                    -s_p / zn
+                };
+                let t = t1.min(t2);
+                if !t.is_finite() {
+                    return Ok(QpOutcome::Infeasible);
+                }
+                if t2.is_finite() {
+                    for (xi, zi) in x.iter_mut().zip(&z) {
+                        *xi += t * zi;
+                    }
+                }
+                for (pos, rv) in r.iter().enumerate() {
+                    u_plus[pos] -= t * rv;
+                }
+                u_plus[q] += t;
+                if t2 <= t1 {
+                    // Full step: add pc.
+                    let mut dv = d;
+                    for jj in ((q + 1)..n).rev() {
+                        let (cc, ss) = givens(dv[jj - 1], dv[jj]);
+                        dv[jj - 1] = cc * dv[jj - 1] + ss * dv[jj];
+                        dv[jj] = 0.0;
+                        rotate_cols(&mut j, jj - 1, jj, cc, ss);
+                    }
+                    for i in 0..=q {
+                        r_mat[[i, q]] = dv[i];
+                    }
+                    active.push(pc);
+                    is_active[pc] = true;
+                    sign.push(orient);
+                    u = u_plus;
+                    q += 1;
+                    added += 1;
+                    break;
+                }
+                // Partial step: drop active constraint kd.
+                let kd = kd.expect("t1 finite has an index");
+                is_active[active[kd]] = false;
+                active.remove(kd);
+                sign.remove(kd);
+                u_plus.remove(kd);
+                for col in kd..(q - 1) {
+                    for i in 0..q {
+                        r_mat[[i, col]] = r_mat[[i, col + 1]];
+                    }
+                }
+                for i in 0..q {
+                    r_mat[[i, q - 1]] = 0.0;
+                }
+                for jj in kd..q.saturating_sub(1) {
+                    let (cc, ss) = givens(r_mat[[jj, jj]], r_mat[[jj + 1, jj]]);
+                    for col in jj..(q - 1) {
+                        let (a2, b2) = (r_mat[[jj, col]], r_mat[[jj + 1, col]]);
+                        r_mat[[jj, col]] = cc * a2 + ss * b2;
+                        r_mat[[jj + 1, col]] = -ss * a2 + cc * b2;
+                    }
+                    r_mat[[jj + 1, jj]] = 0.0;
+                    rotate_cols(&mut j, jj, jj + 1, cc, ss);
+                }
+                for col in 0..n {
+                    r_mat[[q - 1, col]] = 0.0;
+                }
+                q -= 1;
+                dropped += 1;
+                bump(&mut steps)?;
+            }
         }
 
-        // Renormalize
-        let w_sum: f64 = control_idx.iter().map(|&i| weights[i]).sum();
-        for &i in &control_idx {
-            weights[i] /= w_sum;
+        // 3. Solution.
+        c.slacks(&x, &mut slack);
+        let mut max_violation = 0.0_f64;
+        for (i, s) in slack.iter().enumerate() {
+            let v = if i < meq { s.abs() } else { -s };
+            max_violation = max_violation.max(v);
         }
+        let mut multipliers = vec![0.0; p];
+        for (pos, &ci) in active.iter().enumerate() {
+            multipliers[ci] = sign[pos] * u[pos];
+        }
+        Ok(QpOutcome::Solved(QpSolution {
+            x,
+            multipliers,
+            active,
+            added,
+            dropped,
+            max_violation,
+        }))
     }
-
-    // Scale to n_ctrl
-    for &i in &control_idx {
-        weights[i] *= n_ctrl;
-    }
-
-    // Treated get weight 1
-    for &i in &treated_idx {
-        weights[i] = 1.0;
-    }
-
-    Ok((weights, converged, iterations))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2247,32 +2792,30 @@ mod tests {
         let config = WeightItConfig {
             method: WeightMethod::Energy,
             estimand: WeightEstimand::ATT,
-            max_iter: 100,
             ..Default::default()
         };
-
         let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
-
-        // Should produce valid weights
+        // Energy weights can be exactly 0; treated units keep weight 1.
         assert_eq!(result.weights.len(), 40);
-        assert!(result.weights.iter().all(|&w| w > 0.0));
+        assert!(result.weights.iter().all(|&w| w >= 0.0 && w.is_finite()));
+        let d = col(&dataset, "treatment");
+        assert!(group(&result.weights, &d, true).iter().all(|&w| w == 1.0));
     }
 
     #[test]
-    fn test_weightit_stable() {
+    fn test_weightit_stable_on_infeasible_test_data_is_error() {
+        // create_test_dataset's treated mean of x2 exceeds every control x2: exact balance is
+        // infeasible, and the error names the column.
         let dataset = create_test_dataset();
         let config = WeightItConfig {
             method: WeightMethod::Stable,
             estimand: WeightEstimand::ATT,
-            max_iter: 100,
             ..Default::default()
         };
-
-        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
-
-        // Stable weights should have lower variance than logistic
-        assert_eq!(result.weights.len(), 40);
-        assert!(result.weights.iter().all(|&w| w > 0.0));
+        expect_spec(
+            weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap_err(),
+            &["balance", "x2"],
+        );
     }
 
     #[test]
@@ -2770,5 +3313,426 @@ mod tests {
         let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| entropy_balance(ds, d, x, None);
         nf::assert_refusals(&case, &ds, false, run);
         nf::assert_treatment_dtypes_agree(&case, &ds, run, |r| r.weights.clone());
+    }
+
+    // ── Task 5: dense QP, energy and stable ─────────────────────────────────────────────
+
+    fn cancelled_budget() -> resource::Budget {
+        let t = resource::CancelToken::new();
+        t.cancel();
+        resource::Budget::new(None, t)
+    }
+
+    fn small_qp(last: ([f64; 3], f64)) -> (Array2<f64>, Vec<f64>, dense_qp::DenseConstraints) {
+        let g = ndarray::array![[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+        let normals = ndarray::array![
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            last.0
+        ];
+        (
+            g,
+            vec![-1.0, -2.0, 0.5],
+            dense_qp::DenseConstraints {
+                normals,
+                rhs: vec![1.0, 0.0, 0.0, 0.0, last.1],
+                meq: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn test_dense_qp_matches_quadprog() {
+        // R: quadprog::solve.QP(G, -a, N, b, meq = 1): x = (0.2, 0.8, 0), value -0.6, active
+        // {equality, x3 >= 0}, multipliers 0.6 and 0.7
+        let (g, a, c) = small_qp(([1.0, 0.0, -1.0], 0.1));
+        let dense_qp::QpOutcome::Solved(s) = dense_qp::solve_dense_qp(g, &a, &c, 100).unwrap()
+        else {
+            panic!("not solved")
+        };
+        for (got, want) in s.x.iter().zip([0.2, 0.8, 0.0]) {
+            assert!((got - want).abs() < 1e-12)
+        }
+        let mut act = s.active.clone();
+        act.sort();
+        assert_eq!(act, vec![0, 3]);
+        assert!((s.multipliers[0] - 0.6).abs() < 1e-12 && (s.multipliers[3] - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_dense_qp_detects_infeasibility() {
+        // x1 + x2 + x3 = 1, x >= 0, x1 >= 1.5: R solve.QP "constraints are inconsistent"
+        let (g, a, c) = small_qp(([1.0, 0.0, 0.0], 1.5));
+        assert!(matches!(
+            dense_qp::solve_dense_qp(g, &a, &c, 100).unwrap(),
+            dense_qp::QpOutcome::Infeasible
+        ));
+    }
+
+    #[test]
+    fn test_dense_qp_kkt_on_seeded_problems() {
+        // Property test (no R values): 60 seeded strictly convex QPs that are feasible by
+        // construction (x0 satisfies every constraint), so every outcome must be Solved and
+        // satisfy the KKT conditions.
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(2026);
+        for case in 0..60 {
+            let n = rng.gen_range(2..=12);
+            let p = rng.gen_range(1..=20);
+            let meq = rng.gen_range(0..=2usize.min(n - 1).min(p));
+            let m = Array2::from_shape_fn((n, n), |_| rng.gen_range(-1.0..1.0));
+            let g = m.t().dot(&m) + Array2::<f64>::eye(n) * 0.1;
+            let a: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+            let normals = Array2::from_shape_fn((p, n), |_| rng.gen_range(-1.0..1.0));
+            let x0 = Array1::from_shape_fn(n, |_| rng.gen_range(-1.0..1.0));
+            let at_x0 = normals.dot(&x0);
+            let rhs: Vec<f64> = (0..p)
+                .map(|i| {
+                    if i < meq {
+                        at_x0[i]
+                    } else {
+                        at_x0[i] - rng.gen_range(0.0..1.0)
+                    }
+                })
+                .collect();
+            let c = dense_qp::DenseConstraints {
+                normals: normals.clone(),
+                rhs: rhs.clone(),
+                meq,
+            };
+            let dense_qp::QpOutcome::Solved(s) =
+                dense_qp::solve_dense_qp(g.clone(), &a, &c, 1000).unwrap()
+            else {
+                panic!("case {case}: a feasible problem was not solved")
+            };
+            let (x, u) = (
+                Array1::from(s.x.clone()),
+                Array1::from(s.multipliers.clone()),
+            );
+            let stat = g.dot(&x) + Array1::from(a.clone()) - normals.t().dot(&u);
+            assert!(
+                stat.iter().all(|v| v.abs() < 1e-10),
+                "case {case}: stationarity {stat:?}"
+            );
+            let slack = normals.dot(&x) - Array1::from(rhs);
+            for i in 0..p {
+                if i < meq {
+                    assert!(slack[i].abs() < 1e-10, "case {case}: equality {i}")
+                } else {
+                    assert!(
+                        slack[i] > -1e-10 && u[i] > -1e-12,
+                        "case {case}: inequality {i}"
+                    )
+                }
+                assert!(
+                    (u[i] * slack[i]).abs() < 1e-10,
+                    "case {case}: complementarity {i}"
+                );
+            }
+        }
+    }
+
+    fn wfit(ds: &Dataset, m: WeightMethod, est: WeightEstimand) -> WeightItResult {
+        let c = WeightItConfig {
+            method: m,
+            estimand: est,
+            ..Default::default()
+        };
+        weightit(ds, "treat", &COVS, c).unwrap()
+    }
+
+    type Rows = Vec<Vec<f64>>;
+
+    /// Rows of the covariates standardised over all n units ((x - mean)/sd, sd with n - 1,
+    /// R's scale()): (treated rows, control rows, all rows), each in data order.
+    fn standardised_rows(ds: &Dataset, d: &[f64]) -> (Rows, Rows, Rows) {
+        let cols: Vec<Vec<f64>> = COVS
+            .iter()
+            .map(|c| {
+                let x = col(ds, c);
+                let n = x.len() as f64;
+                let m = x.iter().sum::<f64>() / n;
+                let sd = (x.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+                x.iter().map(|v| (v - m) / sd).collect()
+            })
+            .collect();
+        let all: Rows = (0..d.len())
+            .map(|i| cols.iter().map(|c| c[i]).collect())
+            .collect();
+        let pick = |t: bool| -> Rows {
+            all.iter()
+                .zip(d)
+                .filter(|&(_, &di)| (di >= 0.5) == t)
+                .map(|(r, _)| r.clone())
+                .collect()
+        };
+        (pick(true), pick(false), all.clone())
+    }
+
+    fn euclid(a: &[f64], b: &[f64]) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    /// Energy distance between samples a and b with mean-1 weights (the case's .edist).
+    fn edist(xa: &[Vec<f64>], wa: &[f64], xb: &[Vec<f64>], wb: &[f64]) -> f64 {
+        let quad = |x: &[Vec<f64>], w: &[f64], y: &[Vec<f64>], v: &[f64]| -> f64 {
+            x.iter()
+                .zip(w)
+                .map(|(r, &wi)| {
+                    y.iter()
+                        .zip(v)
+                        .map(|(s, &vj)| wi * vj * euclid(r, s))
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        let (na, nb) = (xa.len() as f64, xb.len() as f64);
+        2.0 / (na * nb) * quad(xa, wa, xb, wb)
+            - quad(xa, wa, xa, wa) / (na * na)
+            - quad(xb, wb, xb, wb) / (nb * nb)
+    }
+
+    #[test]
+    fn test_validate_energy_att() {
+        // R: Huling & Mak (2022) energy QP solved with quadprog (case weights_energy).
+        // Fails before (CAUS-50): weights were 1/(||x - treated mean|| + 0.1).
+        let (case, ds) = crate::test_support::load_case("weights_energy");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let r = wfit(&ds, WeightMethod::Energy, WeightEstimand::ATT);
+        let (wt, wc) = (group(&r.weights, &d, true), group(&r.weights, &d, false));
+        let (nt, nc, n) = (wt.len() as f64, wc.len() as f64, d.len());
+        let wc1 = scaled(&wc, nc / nt); // R: mean-1 weights; p2a: controls sum to n1
+        let means: Vec<f64> = COVS
+            .iter()
+            .map(|c| wmean(&group(&col(&ds, c), &d, false), &wc))
+            .collect();
+        let (xs_t, xs_c, _xs_all) = standardised_rows(&ds, &d);
+        Check::new(&case)
+            .vector("att_weights_head", &wc1[..12], Tol::new(1e-8, 1e-10))
+            .vector("att_weighted_means", &means, Tol::new(1e-8, 1e-12))
+            .scalar("att_effect", effect(&y, &d, &r.weights), Tol::coef(n))
+            .scalar("att_n_zero", n_zero(&wc), Tol::exact())
+            .scalar(
+                "att_energy",
+                edist(&xs_c, &wc1, &xs_t, &vec![1.0; wt.len()]),
+                Tol::coef(n),
+            )
+            .finish();
+        assert!(wt.iter().all(|&w| w == 1.0) && r.converged);
+    }
+
+    #[test]
+    fn test_validate_energy_atc() {
+        // R: the treated reweighted towards the controls (case weights_energy)
+        let (case, ds) = crate::test_support::load_case("weights_energy");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let r = wfit(&ds, WeightMethod::Energy, WeightEstimand::ATC);
+        let (wt, wc) = (group(&r.weights, &d, true), group(&r.weights, &d, false));
+        let (nt, nc, n) = (wt.len() as f64, wc.len() as f64, d.len());
+        let wt1 = scaled(&wt, nt / nc);
+        let means: Vec<f64> = COVS
+            .iter()
+            .map(|c| wmean(&group(&col(&ds, c), &d, true), &wt))
+            .collect();
+        let (xs_t, xs_c, _xs_all) = standardised_rows(&ds, &d);
+        Check::new(&case)
+            .vector("atc_weights_head", &wt1[..12], Tol::new(1e-8, 1e-10))
+            .vector("atc_weighted_means", &means, Tol::new(1e-8, 1e-12))
+            .scalar("atc_effect", effect(&y, &d, &r.weights), Tol::coef(n))
+            .scalar("atc_n_zero", n_zero(&wt), Tol::exact())
+            .scalar(
+                "atc_energy",
+                edist(&xs_t, &wt1, &xs_c, &vec![1.0; wc.len()]),
+                Tol::coef(n),
+            )
+            .finish();
+        assert!(wc.iter().all(|&w| w == 1.0) && r.converged);
+    }
+
+    #[test]
+    fn test_validate_energy_ate() {
+        // R: WeightIt weightit2energy's improved ATE at lambda 0, solved with quadprog (case
+        // weights_energy)
+        let (case, ds) = crate::test_support::load_case("weights_energy");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let r = wfit(&ds, WeightMethod::Energy, WeightEstimand::ATE);
+        let (wt, wc) = (group(&r.weights, &d, true), group(&r.weights, &d, false));
+        let (nt, nc, n) = (wt.len() as f64, wc.len() as f64, d.len());
+        let nf = n as f64;
+        let head: Vec<f64> = (0..12)
+            .map(|i| {
+                let ng = if d[i] >= 0.5 { nt } else { nc };
+                r.weights[i] * ng / nf
+            })
+            .collect();
+        let means_t: Vec<f64> = COVS
+            .iter()
+            .map(|c| wmean(&group(&col(&ds, c), &d, true), &wt))
+            .collect();
+        let means_c: Vec<f64> = COVS
+            .iter()
+            .map(|c| wmean(&group(&col(&ds, c), &d, false), &wc))
+            .collect();
+        let (xs_t, xs_c, xs_all) = standardised_rows(&ds, &d);
+        let (wt1, wc1) = (scaled(&wt, nt / nf), scaled(&wc, nc / nf));
+        let ones = vec![1.0; n];
+        let energy = edist(&xs_t, &wt1, &xs_all, &ones)
+            + edist(&xs_c, &wc1, &xs_all, &ones)
+            + edist(&xs_t, &wt1, &xs_c, &wc1);
+        Check::new(&case)
+            .vector("ate_weights_head", &head, Tol::new(1e-8, 1e-10))
+            .vector("ate_weighted_means_t", &means_t, Tol::new(1e-8, 1e-12))
+            .vector("ate_weighted_means_c", &means_c, Tol::new(1e-8, 1e-12))
+            .scalar("ate_effect", effect(&y, &d, &r.weights), Tol::coef(n))
+            .scalar("ate_n_zero", n_zero(&r.weights), Tol::exact())
+            .scalar("ate_energy", energy, Tol::coef(n))
+            .finish();
+        assert!((wt.iter().sum::<f64>() - nf).abs() < 1e-9);
+        assert!((wc.iter().sum::<f64>() - nf).abs() < 1e-9);
+        assert!(r.converged);
+    }
+
+    #[test]
+    fn test_energy_estimands_differ() {
+        // convention 2; fails before: ATE and ATC returned the ATT weights
+        let ds = weighting_sim();
+        let att = wfit(&ds, WeightMethod::Energy, WeightEstimand::ATT);
+        for est in [WeightEstimand::ATE, WeightEstimand::ATC] {
+            let r = wfit(&ds, WeightMethod::Energy, est);
+            assert!(
+                r.weights
+                    .iter()
+                    .zip(&att.weights)
+                    .any(|(a, b)| (a - b).abs() > 1e-6),
+                "{est:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_energy_merges_duplicate_rows() {
+        // Two identical control rows (x = 1.1) share one merged weight; hand-sized R reference
+        // (merged QP with quadprog): control weights in the p2a scale (sum n1 = 3) are 2/9,
+        // 13/18, 8/9, 4/9, 13/18. The unmerged Hessian is singular.
+        let df = df! { "treat" => [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "x" => [0.9, 1.3, 2.1, 0.2, 1.1, 1.7, 2.6, 1.1] }
+        .unwrap();
+        let c = WeightItConfig {
+            method: WeightMethod::Energy,
+            estimand: WeightEstimand::ATT,
+            ..Default::default()
+        };
+        let r = weightit(&Dataset::new(df), "treat", &["x"], c).unwrap();
+        let want = [
+            1.0,
+            1.0,
+            1.0,
+            2.0 / 9.0,
+            13.0 / 18.0,
+            8.0 / 9.0,
+            4.0 / 9.0,
+            13.0 / 18.0,
+        ];
+        for (i, (got, w)) in r.weights.iter().zip(want).enumerate() {
+            assert!((got - w).abs() < 1e-12, "unit {i}: {got}")
+        }
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("ridge")),
+            "exact duplicates are merged, not ridged: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_energy_refuses_too_many_units() {
+        // decision WP23-A: one control more than the cap
+        let n = ENERGY_MAX_UNITS + 3;
+        let df =
+            df! { "treat" => (0..n).map(|i| if i < 2 { 1.0 } else { 0.0 }).collect::<Vec<f64>>(),
+            "x" => (0..n).map(|i| (i as f64 * 0.37).sin()).collect::<Vec<f64>>() }
+            .unwrap();
+        let c = WeightItConfig {
+            method: WeightMethod::Energy,
+            estimand: WeightEstimand::ATT,
+            ..Default::default()
+        };
+        expect_spec(
+            weightit(&Dataset::new(df), "treat", &["x"], c).unwrap_err(),
+            &["energy", "3000"],
+        );
+    }
+
+    #[test]
+    fn test_energy_honours_cancellation() {
+        let ds = weighting_sim();
+        let c = WeightItConfig {
+            method: WeightMethod::Energy,
+            estimand: WeightEstimand::ATT,
+            ..Default::default()
+        };
+        let r = resource::with_budget(cancelled_budget(), || {
+            weightit(&ds, "treat", &COVS, c.clone())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn test_validate_stable_weights() {
+        // WeightIt 'stable' = the SBW QP with exact balance (optweight, tols = 0); case
+        // weights_sbw. Fails before (CAUS-50): penalised gradient descent.
+        let (case, ds) = crate::test_support::load_case("weights_sbw");
+        let (d, y) = (col(&ds, "treat"), col(&ds, "y"));
+        let n = d.len();
+        let nf = n as f64;
+        let att = wfit(&ds, WeightMethod::Stable, WeightEstimand::ATT);
+        let atc = wfit(&ds, WeightMethod::Stable, WeightEstimand::ATC);
+        let ate = wfit(&ds, WeightMethod::Stable, WeightEstimand::ATE);
+        let (nt, nc) = (
+            group(&d, &d, true).len() as f64,
+            group(&d, &d, false).len() as f64,
+        );
+        Check::new(&case)
+            .vector(
+                "att_exact_weights_head",
+                &scaled(&group(&att.weights, &d, false)[..12], 1.0 / nt),
+                Tol::new(1e-8, 1e-12),
+            )
+            .scalar(
+                "att_exact_effect",
+                effect(&y, &d, &att.weights),
+                Tol::coef(n),
+            )
+            .vector(
+                "atc_exact_weights_head",
+                &scaled(&group(&atc.weights, &d, true)[..12], 1.0 / nc),
+                Tol::new(1e-8, 1e-12),
+            )
+            .scalar(
+                "atc_exact_effect",
+                effect(&y, &d, &atc.weights),
+                Tol::coef(n),
+            )
+            .vector(
+                "ate_exact_weights_t_head",
+                &scaled(&group(&ate.weights, &d, true)[..8], 1.0 / nf),
+                Tol::new(1e-8, 1e-12),
+            )
+            .vector(
+                "ate_exact_weights_c_head",
+                &scaled(&group(&ate.weights, &d, false)[..8], 1.0 / nf),
+                Tol::new(1e-8, 1e-12),
+            )
+            .scalar(
+                "ate_exact_effect",
+                effect(&y, &d, &ate.weights),
+                Tol::coef(n),
+            )
+            .finish();
     }
 }

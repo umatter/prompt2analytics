@@ -53,6 +53,51 @@
       ]
     },
     {
+      "id": "weightit_energy",
+      "name": "Energy balancing (Huling & Mak 2022): ATT, ATC, improved ATE",
+      "category": "econometrics",
+      "reference": "energy-distance QP on standardised covariates (WeightIt weightit2energy's P and q at lambda = 0, min.w = 0) solved with quadprog::solve.QP; WeightIt 'energy' needs osqp (not installed)",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "weights_energy"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_energy_att",
+        "p2a-core::econometrics::weightit::tests::test_validate_energy_atc",
+        "p2a-core::econometrics::weightit::tests::test_validate_energy_ate"
+      ],
+      "quantities": [
+        "weights",
+        "weighted means",
+        "effect",
+        "number of zero weights",
+        "energy distance"
+      ],
+      "tolerance": "weights 1e-8 relative + 1e-10 absolute; effects and energy 1e-8 relative (Tol::coef(300)); zero counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "weightit_stable",
+      "name": "WeightIt 'stable': stable balancing weights with exact balance (optweight, tols = 0)",
+      "category": "econometrics",
+      "reference": "Zubizarreta (2015) SBW QP with exact balance, solved with quadprog::solve.QP (optweight not installed)",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "weights_sbw"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_stable_weights"
+      ],
+      "quantities": [
+        "ATT/ATC/ATE weights",
+        "effects"
+      ],
+      "tolerance": "weights 1e-8 relative + 1e-12 absolute; effects 1e-8 relative (Tol::coef(300))",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "sbw",
       "name": "Stable balancing weights: ATT, ATC, ATE; exact and approximate balance",
       "category": "econometrics",
