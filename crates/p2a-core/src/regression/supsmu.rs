@@ -253,6 +253,78 @@ fn recip(f: f64) -> f64 {
     if f > 0.0 { 1.0 / f } else { 0.0 }
 }
 
+/// The window of [`smooth`]: the weighted means of x and y, the weighted sums of squares
+/// and cross-products about them, the weight sum and its reciprocal (0 while the sum is not
+/// positive), updated with Friedman's formulas (R `ppr.f` `smooth`).
+///
+/// The Fortran updates a mean as (fbo m + w v) / fbw, a division on the mean's chain;
+/// m += (v - m) * (w / fbw) is the same update with the division depending on the weight sum
+/// only, so it is computed off the chain (T3-PERF4), and with the factor w / fbw formed first
+/// a mean's chain is one subtraction, one multiplication and one addition per update
+/// (T3-PERF5). The rounding error is relative to the step v - m instead of to m.
+#[derive(Default)]
+struct Running {
+    xm: f64,
+    ym: f64,
+    var: f64,
+    cvar: f64,
+    fbw: f64,
+    rbw: f64,
+}
+
+impl Running {
+    /// Point (`xti`, `yti`) with weight `wt` enters the window.
+    #[inline(always)]
+    fn add(&mut self, xti: f64, yti: f64, wt: f64) {
+        let fbo = self.fbw;
+        let rbo = self.rbw;
+        self.fbw += wt;
+        self.rbw = recip(self.fbw);
+        if self.fbw > 0.0 {
+            self.xm += (xti - self.xm) * (wt * self.rbw);
+            self.ym += (yti - self.ym) * (wt * self.rbw);
+        }
+        let tmp = if fbo > 0.0 {
+            self.fbw * wt * (xti - self.xm) * rbo
+        } else {
+            0.0
+        };
+        self.var += tmp * (xti - self.xm);
+        self.cvar += tmp * (yti - self.ym);
+    }
+
+    /// Point (`xto`, `yto`) with weight `wt` leaves the window.
+    #[inline(always)]
+    fn remove(&mut self, xto: f64, yto: f64, wt: f64) {
+        let fbo = self.fbw;
+        self.fbw -= wt;
+        self.rbw = recip(self.fbw);
+        let tmp = if self.fbw > 0.0 {
+            fbo * wt * (xto - self.xm) * self.rbw
+        } else {
+            0.0
+        };
+        self.var -= tmp * (xto - self.xm);
+        self.cvar -= tmp * (yto - self.ym);
+        if self.fbw > 0.0 {
+            self.xm += (self.xm - xto) * (wt * self.rbw);
+            self.ym += (self.ym - yto) * (wt * self.rbw);
+        }
+    }
+
+    /// The window's least-squares line at `xj` (slope 0 when the window's x variance is at
+    /// most `vsmlsq`).
+    #[inline(always)]
+    fn fit(&self, xj: f64, vsmlsq: f64) -> f64 {
+        let a = if self.var > vsmlsq {
+            self.cvar / self.var
+        } else {
+            0.0
+        };
+        a * (xj - self.xm) + self.ym
+    }
+}
+
 /// Running-lines smooth of `y` on sorted `x` with windows of `2 ibw + 1` points (R `ppr.f`
 /// `smooth`). `|iper| == 2` wraps the windows around [0, 1]; `iper > 0` also writes the
 /// exact leave-one-out absolute residuals into `acvr`. Tied x are averaged at the end.
@@ -274,12 +346,7 @@ fn smooth(
     let xa = |j: i64| x[(j - 1) as usize];
     let ya = |j: i64| y[(j - 1) as usize];
     let wa = |j: i64| w[(j - 1) as usize];
-    let (mut xm, mut ym, mut var, mut cvar, mut fbw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    // 1 / fbw (0 while fbw <= 0). The Fortran updates the means as (fbo m + w v) / fbw, a
-    // division on the chain of each mean; m += w (v - m) / fbw is the same update with the
-    // division depending on the weight sum only, so it is computed off the chain (T3-PERF4).
-    // The rounding error is relative to the step v - m instead of to m.
-    let mut rbw = 0.0f64;
+    let mut st = Running::default();
     let jper = iper.abs();
     let ibw = half_window(span, x.len()) as i64;
     let it = (2 * ibw + 1).min(n);
@@ -294,24 +361,30 @@ fn smooth(
             j += n;
             xa(j) - 1.0
         };
-        let wt = wa(j);
-        let fbo = fbw;
-        let rbo = rbw;
-        fbw += wt;
-        rbw = recip(fbw);
-        if fbw > 0.0 {
-            xm += wt * (xti - xm) * rbw;
-            ym += wt * (ya(j) - ym) * rbw;
-        }
-        let tmp = if fbo > 0.0 {
-            fbw * wt * (xti - xm) * rbo
-        } else {
-            0.0
-        };
-        var += tmp * (xti - xm);
-        cvar += tmp * (ya(j) - ym);
+        st.add(xti, ya(j), wa(j));
     }
-    for j in 1..=n {
+    // Without residuals and wrapping, the windows of j = ibw + 2 ..= n - ibw move by one
+    // point inside the data: that run takes its points from slices (no 1-based index
+    // arithmetic or bounds checks per point) with the same arithmetic in the same order.
+    let interior = (ibw + 2)..=(n - ibw);
+    let fast = jper != 2 && acvr.is_none() && !interior.is_empty();
+    let mut j = 1;
+    while j <= n {
+        if fast && j == *interior.start() {
+            let (lo, hi, b) = ((j - 1) as usize, *interior.end() as usize, ibw as usize);
+            let (outs, ins) = ((lo - b - 1)..(hi - b - 1), (lo + b)..(hi + b));
+            let leaving = x[outs.clone()].iter().zip(&y[outs.clone()]).zip(&w[outs]);
+            let entering = x[ins.clone()].iter().zip(&y[ins.clone()]).zip(&w[ins]);
+            for (((((&xto, &yto), &wto), ((&xti, &yti), &wti)), &xj), s) in
+                leaving.zip(entering).zip(&x[lo..hi]).zip(&mut smo[lo..hi])
+            {
+                st.remove(xto, yto, wto);
+                st.add(xti, yti, wti);
+                *s = st.fit(xj, vsmlsq);
+            }
+            j = *interior.end() + 1;
+            continue;
+        }
         let mut out = j - ibw - 1;
         let mut inn = j + ibw;
         if !(jper != 2 && (out < 1 || inn > n)) {
@@ -328,49 +401,18 @@ fn smooth(
                 xto = xa(out);
                 xti = xa(inn);
             }
-            // remove the point leaving the window
-            let wt = wa(out);
-            let fbo = fbw;
-            fbw -= wt;
-            rbw = recip(fbw);
-            let tmp = if fbw > 0.0 {
-                fbo * wt * (xto - xm) * rbw
-            } else {
-                0.0
-            };
-            var -= tmp * (xto - xm);
-            cvar -= tmp * (ya(out) - ym);
-            if fbw > 0.0 {
-                xm += wt * (xm - xto) * rbw;
-                ym += wt * (ym - ya(out)) * rbw;
-            }
-            // add the point entering it
-            let wt = wa(inn);
-            let fbo = fbw;
-            let rbo = rbw;
-            fbw += wt;
-            rbw = recip(fbw);
-            if fbw > 0.0 {
-                xm += wt * (xti - xm) * rbw;
-                ym += wt * (ya(inn) - ym) * rbw;
-            }
-            let tmp = if fbo > 0.0 {
-                fbw * wt * (xti - xm) * rbo
-            } else {
-                0.0
-            };
-            var += tmp * (xti - xm);
-            cvar += tmp * (ya(inn) - ym);
+            // remove the point leaving the window, add the one entering it
+            st.remove(xto, ya(out), wa(out));
+            st.add(xti, ya(inn), wa(inn));
         }
-        let a = if var > vsmlsq { cvar / var } else { 0.0 };
         let ju = (j - 1) as usize;
-        smo[ju] = a * (xa(j) - xm) + ym;
+        smo[ju] = st.fit(xa(j), vsmlsq);
         if iper > 0
             && let Some(acvr) = acvr.as_deref_mut()
         {
-            let mut h = rbw;
-            if var > vsmlsq {
-                h += (xa(j) - xm).powi(2) / var;
+            let mut h = st.rbw;
+            if st.var > vsmlsq {
+                h += (xa(j) - st.xm).powi(2) / st.var;
             }
             acvr[ju] = 0.0;
             let a = 1.0 - wa(j) * h;
@@ -380,6 +422,7 @@ fn smooth(
                 acvr[ju] = acvr[ju - 1];
             }
         }
+        j += 1;
     }
     // tied x: replace the fits by their weighted mean
     let nu = x.len();
@@ -501,7 +544,7 @@ impl<'a> XWindow<'a> {
         self.fbw += wt;
         self.rbw = recip(self.fbw);
         if self.fbw > 0.0 {
-            self.xm += wt * (xti - self.xm) * self.rbw;
+            self.xm += (xti - self.xm) * (wt * self.rbw);
         }
         let tmp = if fbo > 0.0 {
             self.fbw * wt * (xti - self.xm) * rbo
@@ -527,7 +570,7 @@ impl<'a> XWindow<'a> {
         };
         self.var -= tmp * (xto - self.xm);
         if self.fbw > 0.0 {
-            self.xm += wt * (self.xm - xto) * self.rbw;
+            self.xm += (self.xm - xto) * (wt * self.rbw);
         }
         (self.fbw, self.rbw, tmp)
     }
@@ -558,7 +601,7 @@ impl<'a, const N: usize> YState<'a, N> {
         for k in 0..N {
             let y = self.ys[k][ju];
             if fbw > 0.0 {
-                self.ym[k] += wt * (y - self.ym[k]) * rbw;
+                self.ym[k] += (y - self.ym[k]) * (wt * rbw);
             }
             self.cvar[k] += tmp * (y - self.ym[k]);
         }
@@ -573,7 +616,7 @@ impl<'a, const N: usize> YState<'a, N> {
             let y = self.ys[k][ju];
             self.cvar[k] -= tmp * (y - self.ym[k]);
             if fbw > 0.0 {
-                self.ym[k] += wt * (self.ym[k] - y) * rbw;
+                self.ym[k] += (self.ym[k] - y) * (wt * rbw);
             }
         }
     }
@@ -1039,6 +1082,50 @@ mod tests {
             j += 1;
         }
         Ok(())
+    }
+
+    /// T3-PERF5: without residuals, `smooth` runs the windows that move inside the data from
+    /// slices; the fits are bit-identical to the indexed loop (which runs when residuals are
+    /// asked for, and writes them only for `iper > 0`), on noisy data with ties and zero and
+    /// unequal weights, for spans whose window covers all the data too.
+    #[test]
+    fn test_supsmu_interior_run_matches_indexed_loop() {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut u = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for &n in &[4usize, 9, 50, 200, 1003] {
+            let mut x: Vec<f64> = (0..n).map(|_| u()).collect();
+            for v in x.iter_mut().step_by(3) {
+                *v = (*v * 50.0).round() / 50.0;
+            }
+            x.sort_by(f64::total_cmp);
+            let y: Vec<f64> = x
+                .iter()
+                .map(|&v| 3.0 + (5.0 * v).cos() + 0.3 * (u() - 0.5))
+                .collect();
+            let w: Vec<f64> = (0..n)
+                .map(|i| if i % 7 == 0 { 0.0 } else { 0.5 + u() })
+                .collect();
+            let ones = vec![1.0; n];
+            for wt in [&ones, &w] {
+                for span in [0.05, 0.1, 0.2, 0.5, 1.0] {
+                    for iper in [1, -1] {
+                        let (mut fast, mut indexed, mut res) =
+                            (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+                        smooth(&x, &y, wt, span, iper, 1e-20, &mut fast, None).unwrap();
+                        smooth(&x, &y, wt, span, iper, 1e-20, &mut indexed, Some(&mut res))
+                            .unwrap();
+                        for (a, b) in fast.iter().zip(&indexed) {
+                            assert_eq!(a.to_bits(), b.to_bits(), "n {n} span {span} iper {iper}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// T3-PERF4: `smooth` updates the window's means as `m += w (v - m) / W` with the
