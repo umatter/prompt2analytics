@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "surv_cox_ties_small",
+  "area": "econometrics/survival",
+  "method": "Cox PH with heavy ties (10 rows, 5 distinct times), Efron and Breslow",
+  "reference": "survival::coxph(ties = 'efron' | 'breslow', coxph.control(eps = 1e-12, toler.chol = 1e-13))",
+  "call": "coxph(Surv(time, event) ~ x, data = cox_ties_small, ties)",
+  "dataset": "validation/datasets/generated/cox_ties_small.csv",
+  "datasets": ["validation/datasets/generated/cox_ties_small.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "efron_coef": {
+      "names": ["x"],
+      "values": [-0.050231244457068058]
+    },
+    "efron_se": {
+      "names": ["x"],
+      "values": [0.70867244630552639]
+    },
+    "efron_loglik": -12.211529006383518,
+    "efron_loglik_null": -12.214040815179352,
+    "efron_score_test": 0.005025125628140701,
+    "breslow_coef": {
+      "names": ["x"],
+      "values": [-0.050231244457068003]
+    },
+    "breslow_se": {
+      "names": ["x"],
+      "values": [0.70867244630552628]
+    },
+    "breslow_loglik": -13.143568095225811,
+    "breslow_loglik_null": -13.146079904021645,
+    "breslow_score_test": 0.005025125628140701,
+    "n": 10
+  }
+}

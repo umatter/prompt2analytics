@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "surv_cox",
+      "name": "Cox proportional hazards: Breslow and Efron ties, model-based SEs, LR/Wald/score tests, convergence, aliased covariates",
+      "category": "econometrics",
+      "reference": "survival::coxph(ties = 'efron' | 'breslow', coxph.control(eps = 1e-12, toler.chol = 1e-13)); summary.coxph",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_cox_robust",
+        "surv_cox_ties_small"
+      ],
+      "tests": [],
+      "quantities": [
+        "coefficients",
+        "model-based SE",
+        "z",
+        "p",
+        "95% HR interval",
+        "log partial likelihood (model, null)",
+        "LR, Wald and score tests with p-values",
+        "convergence at age x 1e-6 ... 1e6 (iteration counts within one; coefficients 1e-7 from the tight fit)",
+        "n, events",
+        "aliased covariate (NA), its LR test",
+        "row-order invariance"
+      ],
+      "tolerance": "validation/README.md: n = 227/228 coefficients 1e-8, SE/z/CI/tests/logLik 1e-6, p 1e-6 relative + 1e-12 absolute; n = 10 coefficients 1e-6, SE/statistics 1e-5; counts exact; default-eps fits 1e-7 (Tol::iterative)",
+      "deviations": [
+        {
+          "finding": "ECON-89",
+          "quantity": "concordance and its SE",
+          "note": "Tier 4: ad hoc SE formula and tied-time pairing differ from survival::concordance; not pinned"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "surv_cox_robust",
+      "name": "Cox proportional hazards: Lin-Wei robust and clustered SEs, robust Wald and robust score tests",
+      "category": "econometrics",
+      "reference": "survival::coxph(robust = TRUE); coxph(... + cluster(inst)); fit$rscore",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_cox_robust"
+      ],
+      "tests": [],
+      "quantities": [
+        "robust SE (Efron, Breslow)",
+        "clustered SE (18 institutions)",
+        "model SE alongside",
+        "z, p, 95% HR interval on the robust SE",
+        "robust Wald test",
+        "robust score test",
+        "n, events, clusters after dropping the missing inst row"
+      ],
+      "tolerance": "validation/README.md, n = 226/227: coefficients 1e-8, SE and statistics 1e-6 relative, p 1e-6 + 1e-12 absolute; counts exact",
+      "deviations": [
+        {
+          "finding": "ECON-45",
+          "quantity": "robust Wald and score tests with G <= q clusters",
+          "note": "NaN with a warning; coxph reports generalized-inverse statistics"
+        },
+        {
+          "finding": "ECON-45",
+          "quantity": "single-level cluster",
+          "note": "refused (InvalidSpecification); coxph returns a variance of about 0"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "surv_aft",
+      "name": "Accelerated failure time (Weibull, exponential, log-normal, log-logistic)",
+      "category": "econometrics",
+      "reference": "survival::survreg(dist, survreg.control(rel.tolerance = 1e-12)); summary.survreg; AIC; BIC",
+      "doc": "validation/econometrics/survival.md",
+      "cases": [
+        "surv_aft"
+      ],
+      "tests": [],
+      "quantities": [
+        "coefficients",
+        "SE",
+        "z",
+        "p",
+        "scale (fixed at 1 for exponential)",
+        "Log(scale) SE, z, p",
+        "time-scale log-likelihood",
+        "AIC (k = p + 1; exponential k = p)",
+        "BIC",
+        "n, events",
+        "rescaled covariate (1e-6, 1e6)",
+        "aliased covariate (NA)"
+      ],
+      "tolerance": "validation/README.md, n = 227/228: coefficients 1e-8, SE/z/scale/logLik/AIC/BIC 1e-6, p 1e-6 + 1e-12 absolute; counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

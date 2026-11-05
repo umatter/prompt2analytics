@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "id": "surv_aft",
+  "area": "econometrics/survival",
+  "method": "Accelerated failure time (survreg): weibull, exponential, lognormal, loglogistic on lung; scale invariance; aliased covariate",
+  "reference": "survival::survreg(dist, survreg.control(rel.tolerance = 1e-12)); summary.survreg; AIC; BIC",
+  "call": "survreg(Surv(time, status) ~ age + sex + ph.ecog, data = lung, dist)",
+  "dataset": "validation/datasets/generated/lung.csv",
+  "datasets": ["validation/datasets/generated/lung.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "weibull_coef": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [6.2734352519984498, -0.0074754394091445051, 0.40109054119345022, -0.3396380983087734]
+    },
+    "weibull_se": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [0.45357771081090181, 0.0067635076675349364, 0.12373256651534331, 0.08347841503007189]
+    },
+    "weibull_z": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [13.831004263377192, -1.1052607281022042, 3.2415923510623492, -4.068573872496545]
+    },
+    "weibull_p": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [1.6569102232104549e-43, 0.26904662953276176, 0.0011886391460374096, 4.7301764729510321e-05]
+    },
+    "weibull_scale": 0.73110899216463054,
+    "weibull_se_log_scale": 0.061346455261420491,
+    "weibull_z_log_scale": -5.1053109576360232,
+    "weibull_p_log_scale": 3.3025099350351856e-07,
+    "weibull_loglik": -1132.4387458823192,
+    "weibull_loglik_null": -1147.4280568732961,
+    "weibull_aic": 2274.8774917646383,
+    "weibull_bic": 2292.0022418520452,
+    "exponential_coef": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [6.373423198231162, -0.010217360593667606, 0.50906139978442644, -0.40501698997972413]
+    },
+    "exponential_se": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [0.62075510130864142, 0.0091768947820721602, 0.16716118927668469, 0.1126974550957606]
+    },
+    "exponential_z": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [10.267210345585667, -1.113378853773946, 3.0453324840961113, -3.5938432650105145]
+    },
+    "exponential_p": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [9.9026789087203654e-25, 0.26554575298208111, 0.0023242321324062889, 0.00032583588806288404]
+    },
+    "exponential_scale": 1,
+    "exponential_loglik": -1143.5631513131814,
+    "exponential_loglik_null": -1156.1232644657507,
+    "exponential_aic": 2295.1263026263628,
+    "exponential_bic": 2308.8261026962882,
+    "lognormal_coef": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [6.4947867265472388, -0.019181868086814782, 0.52195287852141414, -0.3555666703323539]
+    },
+    "lognormal_se": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [0.58275627614691561, 0.0083278574630716896, 0.15277538244847716, 0.10330825301947107]
+    },
+    "lognormal_z": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [11.144945138111, -2.3033377038299649, 3.4164724064588121, -3.4418031467954289]
+    },
+    "lognormal_p": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [7.5790987296351829e-29, 0.021259849826725807, 0.00063438092505278506, 0.00057785059607499555]
+    },
+    "lognormal_scale": 1.0286345818857596,
+    "lognormal_se_log_scale": 0.055960624549204266,
+    "lognormal_z_log_scale": 0.50450248482533322,
+    "lognormal_p_log_scale": 0.61390831648580968,
+    "lognormal_loglik": -1146.8818310860297,
+    "lognormal_loglik_null": -1163.1759844168816,
+    "lognormal_aic": 2303.7636621720594,
+    "lognormal_bic": 2320.8884122594663,
+    "loglogistic_coef": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [5.9366869206380457, -0.0080799194308523795, 0.48662357089902064, -0.40461551157199888]
+    },
+    "loglogistic_se": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [0.51207266015164832, 0.0074779070575495803, 0.13489414783418996, 0.093013719402092243]
+    },
+    "loglogistic_z": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [11.593446365365256, -1.0805054634498321, 3.6074476077136546, -4.3500627022866638]
+    },
+    "loglogistic_p": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [4.4486504150189756e-31, 0.27991715520214333, 0.00030922395212852085, 1.3609860995096098e-05]
+    },
+    "loglogistic_scale": 0.53614150427629303,
+    "loglogistic_se_log_scale": 0.065813365378030383,
+    "loglogistic_z_log_scale": -9.4715890709633008,
+    "loglogistic_p_log_scale": 2.756183756095344e-21,
+    "loglogistic_loglik": -1137.4896122694945,
+    "loglogistic_loglik_null": -1154.5491793185236,
+    "loglogistic_aic": 2284.979224538989,
+    "loglogistic_bic": 2302.1039746263959,
+    "n": 227,
+    "n_event": 164,
+    "weibull_scale_em6_coef": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [6.2734352519984515, -7475.4394091444965, 0.40109054119344989, -0.33963809830877378]
+    },
+    "weibull_scale_e6_coef": {
+      "names": ["(Intercept)", "age", "sex", "ph.ecog"],
+      "values": [6.2734352519984489, -7.4754394091444935e-09, 0.40109054119345061, -0.33963809830877362]
+    },
+    "aliased_coef": {
+      "names": ["(Intercept)", "age", "sex", "age2"],
+      "values": [6.274853058415907, -0.012257025589665805, 0.38208513967664809, null]
+    },
+    "aliased_scale": 0.75405094766272296,
+    "aliased_loglik": -1147.0544314319498,
+    "aliased_n": 228
+  }
+}
