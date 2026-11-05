@@ -18,7 +18,7 @@
         "p2a-mcp::tier2::wp13_causal::test_validate_mcp_mediation_analysis_causal_na"
       ],
       "quantities": ["complete rows and missing counts", "rows kept after trimming", "total effect (trim 0 and 0.05)"],
-      "tolerance": "counts exact; total effect Tol::iterative(1e-8) (logit Newton-Raphson to |step| < 1e-8); MCP text Tol::printed(4)",
+      "tolerance": "counts exact; total effect Tol::iterative(1e-8) (glm.fit IRLS to epsilon 1e-10 against R at 1e-14); MCP text Tol::printed(4)",
       "deviations": [
         {"finding": "CAUS-26", "quantity": "direct and indirect effects", "note": "NDE weight and labelling are Tier 4; not pinned"}
       ],

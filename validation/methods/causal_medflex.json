@@ -46,6 +46,34 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mediation_ipw_t3",
+      "name": "Causal mediation (Huber IPW): glm propensity total effect, type-7 percentile rule",
+      "category": "econometrics",
+      "reference": "stats::glm(binomial) propensity scores and the Hajek total effect with p2a's trimming rule, written out (causalweight not installed); stats::quantile(type = 7), sd",
+      "doc": "validation/econometrics/mediation.md",
+      "cases": [
+        "medflex_scales"
+      ],
+      "tests": [
+        "p2a-core::econometrics::mediation::tests::test_validate_mediation_total_effect_medflex_scales",
+        "p2a-core::econometrics::mediation::tests::test_validate_mediation_percentile_rule_medflex_scales"
+      ],
+      "quantities": [
+        "total effect (Hajek IPW)",
+        "observations kept after trimming",
+        "bootstrap SD and 95% percentile interval"
+      ],
+      "tolerance": "total effect Tol::iterative(1e-8) (glm.fit epsilon 1e-10 against R 1e-14); percentile and SD Tol::coef(199) (exact arithmetic)",
+      "deviations": [
+        {
+          "finding": "CAUS-26",
+          "quantity": "direct and indirect effects",
+          "note": "the NDE weight is Tier 4; not pinned"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
