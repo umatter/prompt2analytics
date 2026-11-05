@@ -572,6 +572,7 @@ pub use econometrics::{
     CovariateBalance,
     CoxConfig,
     CoxResult,
+    CoxSeType,
     CumulativeIncidence,
     CutoffResult,
     DRMethod,
