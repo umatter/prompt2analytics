@@ -50,8 +50,10 @@
 //!
 //! R equivalent: `etwfe::etwfe()` (Grant McDermott)
 
+use ndarray::linalg::general_mat_vec_mul;
 use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -65,6 +67,7 @@ use crate::traits::convergence::{ResultNotes, notes_text};
 use crate::traits::estimator::{
     normal_p_value_two_sided, t_test_p_value, validate_level, z_critical,
 };
+use faer::Mat;
 
 /// Configuration for ETWFE estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +78,9 @@ pub struct EtwfeConfig {
     pub gref: Option<i64>,
     /// Control group: "never" (never-treated only) or "notyet" (not-yet-treated)
     pub cgroup: ControlGroup,
-    /// Include anticipation effects (periods before treatment)
+    /// Anticipation periods: cohort `g` is treated from period `g - anticipation` on (its
+    /// cells and onset shift that many periods earlier). Must be below the first treated
+    /// cohort minus the first period.
     pub anticipation: usize,
     /// Variance of the coefficients.
     #[serde(default)]
@@ -242,9 +247,9 @@ pub struct AggregatedEffect {
     pub estimate: f64,
     /// Standard error
     pub std_error: f64,
-    /// 95% CI lower bound
+    /// Lower confidence bound at [`EtwfeResult::confidence_level`]
     pub ci_lower: f64,
-    /// 95% CI upper bound
+    /// Upper confidence bound at [`EtwfeResult::confidence_level`]
     pub ci_upper: f64,
     /// Number of underlying cohort-time effects
     pub n_effects: usize,
@@ -276,13 +281,14 @@ pub struct EtwfeResult {
     pub event_study: Vec<AggregatedEffect>,
     /// Cohort average effects
     pub cohort_avg: Vec<AggregatedEffect>,
-    /// Overall ATT (simple average)
+    /// Overall ATT: emfx's simple ATT, the average effect over the treated cohort-period
+    /// rows (weighted by treated observations)
     pub att_simple: f64,
-    /// Overall ATT standard error
+    /// Delta-method standard error of `att_simple`
     pub att_se: f64,
-    /// Overall ATT (weighted by cohort size)
+    /// Same as `att_simple` (kept for compatibility)
     pub att_weighted: f64,
-    /// Overall ATT weighted standard error
+    /// Same as `att_se` (kept for compatibility)
     pub att_weighted_se: f64,
     /// Number of observations
     pub n_obs: usize,
@@ -679,8 +685,8 @@ pub fn run_etwfe(
             }
         }
     };
-    let agg = |which| emfx_aggregate(&spec, &fit, which, z_crit, &gradient);
-    let overall = agg(EtwfeAggregation::Simple)?
+    let [simple, event_study, cohort_avg, calendar] = emfx_tables(&spec, &fit, z_crit, &gradient)?;
+    let overall = simple
         .into_iter()
         .next()
         .filter(|o| o.n_effects > 0)
@@ -690,9 +696,6 @@ pub fn run_etwfe(
             context: "ETWFE: no post-treatment cohort-period effect to aggregate (emfx simple)"
                 .to_string(),
         })?;
-    let event_study = agg(EtwfeAggregation::Event)?;
-    let cohort_avg = agg(EtwfeAggregation::Group)?;
-    let calendar = agg(EtwfeAggregation::Calendar)?;
     let (att_simple, att_se) = (overall.estimate, overall.std_error);
 
     let n = spec.n;
@@ -819,10 +822,6 @@ struct Spec {
 impl Spec {
     fn build(cols: &Columns, names: &SpecColumns<'_>, config: &EtwfeConfig) -> EconResult<Spec> {
         let a = config.anticipation;
-        let too_large = || EconError::InvalidSpecification {
-            message: format!("anticipation {a} is too large"),
-        };
-        let d = i64::try_from(a).map_err(|_| too_large())?;
         let y_all = cols.numeric(names.y);
         let factor = cols.factor(names.unit);
         let times = cols.time_index(names.time);
@@ -938,11 +937,23 @@ impl Spec {
             }
         }
         let is_reference = |g: i64| is_never(g) || Some(g) == gref_cohort;
-        if ft.iter().all(|&g| is_reference(g)) {
+        let Some(g_first) = ft.iter().copied().filter(|&g| !is_reference(g)).min() else {
             return Err(EconError::InvalidSpecification {
                 message: "no treated cohort: every unit is in the reference group".to_string(),
             });
-        }
+        };
+        // Every treated cohort needs a period before its onset g - anticipation.
+        let bound = g_first.saturating_sub(lo);
+        let d = i64::try_from(a)
+            .ok()
+            .filter(|&d| a == 0 || d < bound)
+            .ok_or_else(|| EconError::InvalidSpecification {
+                message: format!(
+                    "anticipation must be below {} (first treated cohort {g_first} minus first \
+                     period {lo}), got {a}",
+                    bound.max(0)
+                ),
+            })?;
         let mut warnings = Vec::new();
         if let (ControlGroup::Never, Some(c)) = (config.cgroup, gref_cohort) {
             warnings.push(format!(
@@ -953,7 +964,7 @@ impl Spec {
         // Rows from the reference cohort's onset on are dropped (etwfe's `.Dtreat = NA`).
         let dropped_from = match (config.cgroup, gref_cohort) {
             (ControlGroup::NotYet, Some(c)) => {
-                let s = c.checked_sub(d).ok_or_else(too_large)?;
+                let s = c.saturating_sub(d);
                 (s >= lo).then_some(s)
             }
             _ => None,
@@ -1014,7 +1025,7 @@ impl Spec {
             onset.push(if is_never(gi) {
                 gi
             } else {
-                gi.checked_sub(d).ok_or_else(too_large)?
+                gi.saturating_sub(d)
             });
         }
         let reference: Vec<bool> = g.iter().map(|&gi| is_reference(gi)).collect();
@@ -1325,6 +1336,9 @@ struct TwoWayWithin {
     fe_rank: usize,
     /// Set when `M` is singular (the unit-period graph is disconnected).
     warning: Option<String>,
+    /// Scratch reused by every [`Self::residualize_in_place`] call: per-unit means
+    /// (`n_units`), the period right-hand side and its solution (`T - 1` each).
+    scratch: RefCell<(Vec<f64>, Array1<f64>, Array1<f64>)>,
 }
 
 impl TwoWayWithin {
@@ -1352,6 +1366,7 @@ impl TwoWayWithin {
         let mut share_val = Vec::new();
         let mut start = 0;
         while start < runs.len() {
+            resource::checkpoint()?;
             let u = runs[start].0;
             let mut end = start;
             while end < runs.len() && runs[end].0 == u {
@@ -1402,12 +1417,19 @@ impl TwoWayWithin {
             m_inv,
             fe_rank: n_units + m_rank,
             warning,
+            scratch: RefCell::new((
+                resource::try_vec(n_units, 0.0f64, "ETWFE unit means")?,
+                resource::try_zeros1(dim, "ETWFE period right-hand side")?,
+                resource::try_zeros1(dim, "ETWFE period effects")?,
+            )),
         })
     }
 
     /// Replace `x` by its residual on unit and period dummies. O(n + T^2 + sum_u T_u).
     fn residualize_in_place(&self, x: &mut [f64]) {
-        let mut means = vec![0.0; self.n_units];
+        let mut scratch = self.scratch.borrow_mut();
+        let (means, rhs, lambda) = &mut *scratch;
+        means.fill(0.0);
         for (i, &v) in x.iter().enumerate() {
             means[self.unit[i]] += v;
         }
@@ -1420,14 +1442,14 @@ impl TwoWayWithin {
         if self.n_periods < 2 {
             return;
         }
-        let mut rhs = Array1::<f64>::zeros(self.n_periods - 1);
+        rhs.fill(0.0);
         for (i, &v) in x.iter().enumerate() {
             let p = self.period[i];
             if p > 0 {
                 rhs[p - 1] += v;
             }
         }
-        let lambda = self.m_inv.dot(&rhs);
+        general_mat_vec_mul(1.0, &self.m_inv, &*rhs, 0.0, lambda);
         // sum_a share_{u,a} lambda_a, once per unit
         for (u, m) in means.iter_mut().enumerate() {
             *m = (self.share_ptr[u]..self.share_ptr[u + 1])
@@ -1460,7 +1482,8 @@ struct Fit {
     term_of_col: Vec<Option<usize>>,
     /// Raw columns absorbed by the unit and period effects.
     absorbed: Vec<usize>,
-    /// Raw control columns the pivoted QR aliased (removed, then refitted).
+    /// Raw control columns removed as collinear with the columns before them (by the
+    /// Cholesky of the Gram, or by the pivoted QR when that fits), then refitted.
     collinear: Vec<usize>,
     beta: Array1<f64>,
     /// `(X_w'X_w)^{-1}` of the kept columns.
@@ -1529,6 +1552,105 @@ impl Fit {
 thread_local! {
     /// Test switch: fit through the dense pivoted QR even when the normal equations qualify.
     static FORCE_DENSE_FIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test probe: the path the last `fit_design` on this thread took (`Some(true)`: the
+    /// structured normal equations; `Some(false)`: the dense pivoted QR).
+    static LAST_FIT_STRUCTURED: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// A control column counts as collinear with the columns before it when the squared norm
+/// of its within residual on them is below this fraction of its own within sum of squares
+/// (a pivot of the column-order Cholesky of the equilibrated Gram). fixest's `collin.tol`
+/// (1e-10, on its Cholesky of X'X), applied relative to the column so that the rule does not
+/// depend on the scale of a control.
+const GRAM_COLLIN_TOL: f64 = 1e-10;
+
+/// The Gram positions that a column-order Cholesky of the equilibrated Gram `E = S G S`
+/// (`S = diag(1 / sqrt G_jj)`) skips because their pivot is below [`GRAM_COLLIN_TOL`]: the
+/// columns `lm.fit`'s limited pivoting and fixest's Cholesky would remove as collinear with
+/// the columns before them. The first `n_lead` positions (the cells) are factored as one
+/// block; `None` when one of them is skipped (a cell that is not identified is an error,
+/// which the pivoted QR then names). Every Gram column has a positive diagonal (absorbed
+/// columns are already out). The cell block and its Schur complement by faer, the controls
+/// one by one: O(k1^3 / 3 + k1^2 k2 + k2^3 / 6) for `k1` cells and `k2` control columns.
+fn gram_aliased(gram: &Array2<f64>, n_lead: usize) -> EconResult<Option<Vec<usize>>> {
+    let k = gram.nrows();
+    let (k1, k2) = (n_lead, k - n_lead);
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[k, k, 3], "ETWFE collinearity check")?,
+        "ETWFE collinearity check",
+    )?;
+    let sc: Vec<f64> = gram.diag().iter().map(|&d| 1.0 / d.sqrt()).collect();
+    let e = |i: usize, j: usize| gram[[i, j]] * sc[i] * sc[j];
+    let schur = if k1 == 0 {
+        Mat::from_fn(k2, k2, &e)
+    } else {
+        let e11 = Mat::from_fn(k1, k1, &e);
+        let Ok(llt) = e11.llt(faer::Side::Lower) else {
+            return Ok(None);
+        };
+        let l = llt.L();
+        if (0..k1).any(|j| l[(j, j)] * l[(j, j)] < GRAM_COLLIN_TOL) {
+            return Ok(None);
+        }
+        resource::checkpoint()?;
+        // W = L11^{-1} E12; the Schur complement E22 - W'W
+        let mut w = Mat::from_fn(k1, k2, |i, j| e(i, k1 + j));
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            l,
+            w.as_mut(),
+            faer::get_global_parallelism(),
+        );
+        resource::checkpoint()?;
+        // upper triangle only: the factorisation below reads nothing else
+        let mut schur = Mat::from_fn(k2, k2, |i, j| if i <= j { e(k1 + i, k1 + j) } else { 0.0 });
+        faer::linalg::matmul::triangular::matmul(
+            schur.as_mut(),
+            faer::linalg::matmul::triangular::BlockStructure::TriangularUpper,
+            faer::Accum::Add,
+            w.transpose(),
+            faer::linalg::matmul::triangular::BlockStructure::Rectangular,
+            &w,
+            faer::linalg::matmul::triangular::BlockStructure::Rectangular,
+            -1.0,
+            faer::get_global_parallelism(),
+        );
+        schur
+    };
+    // Up-looking Cholesky of the Schur complement (its upper triangle): row j of R from the
+    // rows above it, a skipped column leaving its row zero. Column l of `r` holds R[0..l, l],
+    // contiguous.
+    let mut r = Mat::<f64>::zeros(k2, k2);
+    let mut aliased = Vec::new();
+    for j in 0..k2 {
+        resource::checkpoint()?;
+        let d = schur[(j, j)] - dot(&r.col_as_slice(j)[..j], &r.col_as_slice(j)[..j]);
+        if d < GRAM_COLLIN_TOL {
+            aliased.push(k1 + j);
+            continue;
+        }
+        let rjj = d.sqrt();
+        r[(j, j)] = rjj;
+        for l in j + 1..k2 {
+            let v = (schur[(j, l)] - dot(&r.col_as_slice(j)[..j], &r.col_as_slice(l)[..j])) / rjj;
+            r[(j, l)] = v;
+        }
+    }
+    Ok(Some(aliased))
+}
+
+/// `sum a_i b_i` in four lanes (no single dependency chain).
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let mut acc = [0.0f64; 4];
+    let (ac, ar) = a.as_chunks::<4>();
+    let (bc, br) = b.as_chunks::<4>();
+    for (a4, b4) in ac.iter().zip(bc) {
+        for l in 0..4 {
+            acc[l] += a4[l] * b4[l];
+        }
+    }
+    let rest: f64 = ar.iter().zip(br).map(|(x, y)| x * y).sum();
+    (acc[0] + acc[1]) + (acc[2] + acc[3]) + rest
 }
 
 /// The "not identified" error for the cells among the raw columns `cols`.
@@ -1545,17 +1667,27 @@ fn unidentified_cells(spec: &Spec, design: &Design, cols: &[usize]) -> Option<Ec
             "ETWFE cohort-period effects {} are not identified",
             cells.join(", ")
         ),
-        suggestion: "they are collinear with the unit and period effects: no comparison unit \
-                     is observed in those periods; use cgroup = notyet, drop those periods, or \
-                     set gref"
-            .to_string(),
+        suggestion: match spec.cgroup {
+            ControlGroup::Never => {
+                "they are collinear with the unit and period effects: no comparison unit is \
+                 observed in those periods; use cgroup = notyet, drop those periods, or set gref"
+            }
+            ControlGroup::NotYet => {
+                "they are collinear with the unit and period effects: no comparison unit is \
+                 observed in those periods; drop those periods, or set gref"
+            }
+        }
+        .to_string(),
     })
 }
 
 /// Fit the ETWFE design: structured normal equations of the within-transformed columns
 /// (built column by column from the sparse design, solved through OLS's normal-equations
-/// decision), the pivoted QR on the dense within-transformed design when those are
-/// ill-conditioned or singular.
+/// decision). When those are singular or ill-conditioned, the control columns that a
+/// column-order Cholesky of the Gram finds collinear ([`gram_aliased`]) are removed and the
+/// reduced normal equations decide again; the pivoted QR on the dense within-transformed
+/// design is the last resort (a cell that is not identified, or a Gram that stays
+/// ill-conditioned without collinear controls).
 fn fit_design(
     spec: &Spec,
     design: &Design,
@@ -1625,12 +1757,41 @@ fn fit_design(
     let force_dense = FORCE_DENSE_FIT.with(|f| f.get());
     #[cfg(not(test))]
     let force_dense = false;
-    let normal = if k > 0 && k < n && !force_dense {
-        normal_inverse_from_gram(gram.view())?
-    } else {
-        None
-    };
+    let mut collinear: Vec<usize> = Vec::new();
+    let mut normal = None;
+    if k > 0 && k < n && !force_dense {
+        // Collinear controls (a control's cell interaction in a one-unit cohort is
+        // proportional to the cell) leave at the Gram level before the solve decision, so
+        // the structured path survives them.
+        let n_lead = kept.iter().filter(|&&c| c < design.n_cells).count();
+        if n_lead < k {
+            if let Some(drop) =
+                gram_aliased(&gram, n_lead)?.filter(|d| !d.is_empty() && d.len() < k)
+            {
+                let keep_j: Vec<usize> =
+                    (0..k).filter(|j| drop.binary_search(j).is_err()).collect();
+                let kr = keep_j.len();
+                let mut reduced = resource::try_zeros2(kr, kr, "ETWFE cross-products")?;
+                for (a, &ja) in keep_j.iter().enumerate() {
+                    for (b, &jb) in keep_j.iter().enumerate() {
+                        reduced[[a, b]] = gram[[ja, jb]];
+                    }
+                }
+                gram = reduced;
+                collinear = drop.iter().map(|&j| kept[j]).collect();
+                xty = keep_j.iter().map(|&j| xty[j]).collect();
+                kept = keep_j.iter().map(|&j| kept[j]).collect();
+                term_of_col = vec![None; k_raw];
+                for (j, &c) in kept.iter().enumerate() {
+                    term_of_col[c] = Some(j);
+                }
+            }
+        }
+        normal = normal_inverse_from_gram(gram.view())?;
+    }
     drop(gram);
+    #[cfg(test)]
+    LAST_FIT_STRUCTURED.with(|p| p.set(Some(normal.is_some())));
 
     // y - X beta over the kept columns, within-transformed
     let within_residual = |beta: &Array1<f64>, kept: &[usize]| -> EconResult<Array1<f64>> {
@@ -1649,7 +1810,6 @@ fn fit_design(
         Ok(u)
     };
 
-    let mut collinear: Vec<usize> = Vec::new();
     let (beta, unscaled, resid, dense) = match normal {
         Some(inv) => {
             let xty = Array1::from(xty);
@@ -1666,29 +1826,35 @@ fn fit_design(
             (beta, inv.inverse, u, None)
         }
         None => {
-            let mut x_w = resource::try_zeros2(n, k, "ETWFE within design")?;
+            let mut x_w = resource::try_zeros2(n, kept.len(), "ETWFE within design")?;
             for (j, &c) in kept.iter().enumerate() {
                 resource::checkpoint()?;
                 design.scatter(c, &mut col);
                 within.residualize_in_place(&mut col);
                 x_w.column_mut(j).assign(&ArrayView1::from(&col[..]));
             }
+            // Remove the aliased columns and refit until the QR aliases none (a refit
+            // normally aliases nothing; the loop keeps a second round from leaving NaN
+            // coefficients behind).
             let mut ls = least_squares(x_w.view(), y_w.view())?;
-            let aliased: Vec<usize> = ls.aliased.iter().map(|&j| kept[j]).collect();
-            if let Some(e) = unidentified_cells(spec, design, &aliased) {
-                return Err(e);
-            }
-            if !aliased.is_empty() {
-                let keep_j: Vec<usize> = (0..k).filter(|j| !ls.aliased.contains(j)).collect();
+            while !ls.aliased.is_empty() {
+                resource::checkpoint()?;
+                let aliased: Vec<usize> = ls.aliased.iter().map(|&j| kept[j]).collect();
+                if let Some(e) = unidentified_cells(spec, design, &aliased) {
+                    return Err(e);
+                }
+                let keep_j: Vec<usize> = (0..kept.len())
+                    .filter(|j| !ls.aliased.contains(j))
+                    .collect();
                 let mut reduced = resource::try_zeros2(n, keep_j.len(), "ETWFE within design")?;
                 for (jj, &j) in keep_j.iter().enumerate() {
                     reduced.column_mut(jj).assign(&x_w.column(j));
                 }
                 x_w = reduced;
                 ls = least_squares(x_w.view(), y_w.view())?;
-                debug_assert!(ls.aliased.is_empty());
-                collinear = aliased;
-                kept.retain(|c| !collinear.contains(c));
+                collinear.extend(aliased);
+                collinear.sort_unstable();
+                kept = keep_j.iter().map(|&j| kept[j]).collect();
                 term_of_col = vec![None; k_raw];
                 for (j, &c) in kept.iter().enumerate() {
                     term_of_col[c] = Some(j);
@@ -1712,31 +1878,35 @@ fn fit_design(
                     context: "ETWFE clustered variance".to_string(),
                 }
             })?;
-            // S (G x k): per-unit scores of the within design
-            let mut scores = resource::try_zeros2(g, k, "ETWFE cluster scores")?;
+            // S' (k x G): per-unit scores of the within design, one row per term
+            let mut scores_t = resource::try_zeros2(k, g, "ETWFE cluster scores")?;
             match &dense {
                 Some(x_w) => {
                     for i in 0..n {
                         let u = spec.unit[i];
                         for j in 0..k {
-                            scores[[u, j]] += x_w[[i, j]] * resid[i];
+                            scores_t[[j, u]] += x_w[[i, j]] * resid[i];
                         }
                     }
                 }
                 None => {
+                    let mut acc = resource::try_vec(g, 0.0f64, "ETWFE cluster scores")?;
+                    let units = &spec.unit[..n];
                     for (j, &c) in kept.iter().enumerate() {
                         resource::checkpoint()?;
                         design.scatter(c, &mut col);
                         within.residualize_in_place(&mut col);
-                        for (i, &r) in col.iter().enumerate() {
-                            scores[[spec.unit[i], j]] += r * resid[i];
+                        acc.fill(0.0);
+                        for ((&r, &e), &u) in col.iter().zip(resid.iter()).zip(units) {
+                            acc[u] += r * e;
                         }
+                        scores_t.row_mut(j).assign(&ArrayView1::from(&acc[..]));
                     }
                 }
             }
             let gf = g as f64;
             let factor = gf / (gf - 1.0) * (n as f64 - 1.0) / dof as f64;
-            let z = unscaled.dot(&scores.t()) * factor.sqrt();
+            let z = unscaled.dot(&scores_t) * factor.sqrt();
             (Some(z), f64::NAN, g - 1)
         }
         EtwfeVcov::Iid => {
@@ -1766,93 +1936,108 @@ fn fit_design(
     })
 }
 
-/// The rows etwfe's `emfx(type)` averages over (etwfe 0.6.2, `post_only = TRUE`,
-/// `compress = FALSE`): with `cgroup = notyet` the treated cohort-period rows; with
-/// `cgroup = never` every row of a treated cohort for the event study (placebo leads and the
-/// reference period included) and its rows from the onset on otherwise.
-fn emfx_rows(spec: &Spec, which: EtwfeAggregation) -> Vec<usize> {
-    (0..spec.n)
-        .filter(|&i| match spec.cgroup {
-            ControlGroup::NotYet => spec.treated_cell[i],
-            ControlGroup::Never => {
-                !spec.reference[i]
-                    && (which == EtwfeAggregation::Event
-                        || (spec.treated_cell[i] && spec.t[i] >= spec.onset[i]))
-            }
-        })
-        .collect()
+/// Whether row `i` is among the rows etwfe's `emfx(type)` averages over (etwfe 0.6.2,
+/// `post_only = TRUE`, `compress = FALSE`): with `cgroup = notyet` the treated cohort-period
+/// rows; with `cgroup = never` every row of a treated cohort for the event study (placebo
+/// leads and the reference period included) and its rows from the onset on otherwise. The
+/// event-study rows include the others.
+fn emfx_row(spec: &Spec, i: usize, event: bool) -> bool {
+    match spec.cgroup {
+        ControlGroup::NotYet => spec.treated_cell[i],
+        ControlGroup::Never => {
+            !spec.reference[i] && (event || (spec.treated_cell[i] && spec.t[i] >= spec.onset[i]))
+        }
+    }
 }
 
-/// One emfx table: per key (ascending) the mean over its rows of the per-row effect
-/// gradient `w`, the estimate `w'beta`, its delta-method SE `sqrt(w'Vw)` (NaN when no row
-/// carries a coefficient), z p-value and CI at `z_crit`.
-fn emfx_aggregate(
+/// The four emfx tables (simple, event, group, calendar) in one pass over the rows, each
+/// row's effect gradient computed once. Per table and key (ascending): the mean over its rows
+/// of the per-row effect gradient `w`, the estimate `w'beta`, its delta-method SE
+/// `sqrt(w'Vw)` (NaN when no row carries a coefficient), z p-value and CI at `z_crit`.
+fn emfx_tables(
     spec: &Spec,
     fit: &Fit,
-    which: EtwfeAggregation,
     z_crit: f64,
     gradient: &dyn Fn(usize, &mut Vec<(usize, f64)>),
-) -> EconResult<Vec<AggregatedEffect>> {
+) -> EconResult<[Vec<AggregatedEffect>; 4]> {
+    #[derive(Default)]
     struct Acc {
         rows: usize,
         w: BTreeMap<usize, f64>,
         cells: BTreeSet<usize>,
     }
-    let mut by_key: BTreeMap<i64, Acc> = BTreeMap::new();
+    const WHICH: [EtwfeAggregation; 4] = [
+        EtwfeAggregation::Simple,
+        EtwfeAggregation::Event,
+        EtwfeAggregation::Group,
+        EtwfeAggregation::Calendar,
+    ];
+    let mut tables: [BTreeMap<i64, Acc>; 4] = Default::default();
     let mut g = Vec::new();
-    for (count, i) in emfx_rows(spec, which).into_iter().enumerate() {
-        if count % 4096 == 0 {
+    for i in 0..spec.n {
+        if i % 4096 == 0 {
             resource::checkpoint()?;
         }
-        let key = match which {
-            EtwfeAggregation::Simple => 0,
-            EtwfeAggregation::Event => spec.t[i] - spec.g[i],
-            EtwfeAggregation::Group => spec.g[i],
-            EtwfeAggregation::Calendar => spec.t[i],
-        };
-        let acc = by_key.entry(key).or_insert_with(|| Acc {
-            rows: 0,
-            w: BTreeMap::new(),
-            cells: BTreeSet::new(),
-        });
-        acc.rows += 1;
+        if !emfx_row(spec, i, true) {
+            continue;
+        }
+        let post = emfx_row(spec, i, false);
         g.clear();
         gradient(i, &mut g);
-        if !g.is_empty() {
-            if let Some(c) = spec.cell_of_row[i] {
+        let cell = spec.cell_of_row[i].filter(|_| !g.is_empty());
+        for (which, table) in WHICH.iter().zip(tables.iter_mut()) {
+            let key = match which {
+                EtwfeAggregation::Event => spec.t[i] - spec.g[i],
+                _ if !post => continue,
+                EtwfeAggregation::Simple => 0,
+                EtwfeAggregation::Group => spec.g[i],
+                EtwfeAggregation::Calendar => spec.t[i],
+            };
+            let acc = table.entry(key).or_default();
+            acc.rows += 1;
+            if let Some(c) = cell {
                 acc.cells.insert(c);
             }
-        }
-        for &(j, v) in &g {
-            *acc.w.entry(j).or_insert(0.0) += v;
+            for &(j, v) in &g {
+                *acc.w.entry(j).or_insert(0.0) += v;
+            }
         }
     }
-    Ok(by_key
-        .into_iter()
-        .map(|(key, acc)| {
-            let m = acc.rows as f64;
-            let w: Vec<(usize, f64)> = acc.w.into_iter().map(|(j, v)| (j, v / m)).collect();
-            let estimate: f64 = w.iter().map(|&(j, v)| v * fit.beta[j]).sum();
-            let std_error = if w.is_empty() {
-                f64::NAN
-            } else {
-                fit.variance(&w).sqrt()
-            };
-            let z_stat = estimate / std_error;
-            AggregatedEffect {
-                key,
-                agg_type: which.to_string(),
-                estimate,
-                std_error,
-                ci_lower: estimate - z_crit * std_error,
-                ci_upper: estimate + z_crit * std_error,
-                n_effects: acc.cells.len(),
-                z_stat,
-                p_value: normal_p_value_two_sided(z_stat),
-                n_obs: acc.rows,
-            }
-        })
-        .collect())
+    let finish = |which: EtwfeAggregation, table: BTreeMap<i64, Acc>| -> Vec<AggregatedEffect> {
+        table
+            .into_iter()
+            .map(|(key, acc)| {
+                let m = acc.rows as f64;
+                let w: Vec<(usize, f64)> = acc.w.into_iter().map(|(j, v)| (j, v / m)).collect();
+                let estimate: f64 = w.iter().map(|&(j, v)| v * fit.beta[j]).sum();
+                let std_error = if w.is_empty() {
+                    f64::NAN
+                } else {
+                    fit.variance(&w).sqrt()
+                };
+                let z_stat = estimate / std_error;
+                AggregatedEffect {
+                    key,
+                    agg_type: which.to_string(),
+                    estimate,
+                    std_error,
+                    ci_lower: estimate - z_crit * std_error,
+                    ci_upper: estimate + z_crit * std_error,
+                    n_effects: acc.cells.len(),
+                    z_stat,
+                    p_value: normal_p_value_two_sided(z_stat),
+                    n_obs: acc.rows,
+                }
+            })
+            .collect()
+    };
+    let [s0, s1, s2, s3] = tables;
+    Ok([
+        finish(WHICH[0], s0),
+        finish(WHICH[1], s1),
+        finish(WHICH[2], s2),
+        finish(WHICH[3], s3),
+    ])
 }
 
 #[cfg(test)]
@@ -2457,6 +2642,14 @@ mod tests {
         run_etwfe(ds, "y", "id", "year", "treat", "first_treat", x, Some(cfg)).unwrap()
     }
 
+    /// The path the last fit on this thread took: `true` for the structured normal
+    /// equations, `false` for the dense pivoted QR.
+    fn last_fit_structured() -> bool {
+        LAST_FIT_STRUCTURED
+            .with(|p| p.take())
+            .expect("fit_design ran on this thread")
+    }
+
     fn spec(cgroup: ControlGroup) -> EtwfeConfig {
         EtwfeConfig {
             cgroup,
@@ -2521,6 +2714,10 @@ mod tests {
     fn test_validate_etwfe_notyet() {
         let (case, ds) = crate::test_support::load_case("etwfe_staggered");
         let r = fit(&ds, None, EtwfeConfig::default());
+        assert!(
+            last_fit_structured(),
+            "R-pinned case fitted through the dense QR"
+        );
         let mut ck = Check::new(&case);
         check_terms(&mut ck, "notyet", &r);
         ck.scalar("n_clusters", r.n_units as f64, Tol::exact());
@@ -3136,6 +3333,7 @@ mod tests {
         ] {
             let (case, ds) = crate::test_support::load_case(id);
             let r = fit(&ds, Some(&["xc"]), EtwfeConfig::default());
+            assert!(last_fit_structured(), "{id}: fitted through the dense QR");
             let mut ck = Check::new(&case);
             check_terms(&mut ck, prefix, &r);
             for ty in all {
@@ -3249,23 +3447,30 @@ mod tests {
     #[test]
     fn test_etwfe_structured_fit_matches_dense_qr() {
         let close = |a: f64, b: f64| (a - b).abs() <= 1e-10 * b.abs().max(1e-300);
-        let runs: [(&str, Option<&[&str]>, EtwfeConfig); 2] = [
+        let collinear = with_new_f64(&panel_csv("etwfe_panel"), "xc", "xc2", |v| 2.0 * v);
+        let runs: [(Dataset, Option<&[&str]>, EtwfeConfig); 3] = [
             (
-                "etwfe_panel_unbalanced",
+                panel_csv("etwfe_panel_unbalanced"),
                 Some(&["xc"]),
                 EtwfeConfig::default(),
             ),
-            ("etwfe_panel", None, spec(ControlGroup::Never)),
+            (panel_csv("etwfe_panel"), None, spec(ControlGroup::Never)),
+            // singular normal equations: the xc2 columns leave at the Gram level
+            (collinear, Some(&["xc", "xc2"]), EtwfeConfig::default()),
         ];
-        for (name, x, cfg) in runs {
-            let ds = panel_csv(name);
+        for (k, (ds, x, cfg)) in runs.into_iter().enumerate() {
+            let name = format!("run {k}");
             for vcov in [EtwfeVcov::Cluster, EtwfeVcov::Iid] {
                 let mut c = cfg.clone();
                 c.vcov = vcov;
                 let structured = fit(&ds, x, c.clone());
+                assert!(last_fit_structured(), "{name}: not the structured path");
                 FORCE_DENSE_FIT.with(|f| f.set(true));
                 let dense = fit(&ds, x, c);
                 FORCE_DENSE_FIT.with(|f| f.set(false));
+                assert!(!last_fit_structured(), "{name}: not the dense path");
+                assert_eq!(structured.collinear_terms, dense.collinear_terms, "{name}");
+                assert_eq!(structured.dropped_terms, dense.dropped_terms, "{name}");
                 assert_eq!(structured.terms.len(), dense.terms.len());
                 for (a, b) in structured.terms.iter().zip(&dense.terms) {
                     assert_eq!(a.name, b.name);
@@ -3326,5 +3531,151 @@ mod tests {
             text.contains("Anticipation: 1 period(s); cohort g is treated from g - 1"),
             "{text}"
         );
+    }
+
+    /// The comprehensive benchmark's staggered panel (cohorts of one or two units) with one
+    /// noisy control `x`.
+    fn small_cohort_panel(n_units: usize, n_periods: usize) -> Dataset {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let (mut id, mut year, mut y, mut ft, mut treat, mut x) =
+            (vec![], vec![], vec![], vec![], vec![], vec![]);
+        let half = n_periods as i64 / 2;
+        for u in 0..n_units {
+            let g = if u < n_units / 3 {
+                0
+            } else {
+                n_periods as i64 / 3 + u as i64 % half + 1
+            };
+            for t in 0..n_periods as i64 {
+                let d = g > 0 && t >= g;
+                let xv: f64 = rng.gen_range(-1.0..1.0);
+                id.push(u as i64);
+                year.push(t);
+                ft.push(g);
+                treat.push(i64::from(d));
+                x.push(xv);
+                let e: f64 = rng.gen_range(-0.5..0.5);
+                y.push(0.1 * u as f64 + 0.05 * t as f64 + if d { 2.0 } else { 0.0 } + 0.3 * xv + e);
+            }
+        }
+        Dataset::new(
+            df! {"id" => id, "year" => year, "y" => y, "first_treat" => ft, "treat" => treat,
+            "x" => x}
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_etwfe_one_unit_cohort_controls_leave_at_the_gram_level() {
+        // A one-unit cohort's cell:x_dm column is proportional to its cell dummy: the
+        // normal equations are singular, the Gram-level check removes those columns and the
+        // structured path fits; the dense QR removes the same columns.
+        let ds = small_cohort_panel(24, 24);
+        let x = Some(&["x"][..]);
+        let r = fit(&ds, x, EtwfeConfig::default());
+        assert!(last_fit_structured(), "fitted through the dense QR");
+        assert!(!r.collinear_terms.is_empty());
+        assert!(
+            r.collinear_terms.iter().all(|t| t.ends_with(":x_dm")),
+            "{:?}",
+            r.collinear_terms
+        );
+        FORCE_DENSE_FIT.with(|f| f.set(true));
+        let dense = fit(&ds, x, EtwfeConfig::default());
+        FORCE_DENSE_FIT.with(|f| f.set(false));
+        assert!(!last_fit_structured());
+        assert_eq!(r.collinear_terms, dense.collinear_terms);
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1e-12);
+        for (a, b) in r.terms.iter().zip(&dense.terms) {
+            assert_eq!(a.name, b.name);
+            assert!(
+                close(a.estimate, b.estimate),
+                "{}: {} vs {}",
+                a.name,
+                a.estimate,
+                b.estimate
+            );
+            assert!(
+                close(a.std_error, b.std_error),
+                "{}: {} vs {}",
+                a.name,
+                a.std_error,
+                b.std_error
+            );
+        }
+        assert!(close(r.att_simple, dense.att_simple) && close(r.att_se, dense.att_se));
+    }
+
+    #[test]
+    fn test_etwfe_anticipation_bound_is_named() {
+        // etwfe_panel: periods 1..8, first treated cohort 4
+        let ds = panel_csv("etwfe_panel");
+        let err = |a: usize| {
+            let mut c = EtwfeConfig::default();
+            c.anticipation = a;
+            run_etwfe(
+                &ds,
+                "y",
+                "id",
+                "year",
+                "treat",
+                "first_treat",
+                None,
+                Some(c),
+            )
+        };
+        assert!(err(2).is_ok());
+        for a in [3, 7, usize::MAX] {
+            match err(a) {
+                Err(EconError::InvalidSpecification { message }) => assert_eq!(
+                    message,
+                    format!(
+                        "anticipation must be below 3 (first treated cohort 4 minus first \
+                         period 1), got {a}"
+                    )
+                ),
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_etwfe_unidentified_suggestion_follows_cgroup() {
+        let ds = all_treated_panel();
+        // cgroup = never, gref = 8, year 2 holds cohort 6 only
+        let mut never = spec(ControlGroup::Never);
+        never.gref = Some(8);
+        let d = drop_rows(&ds, |g, t| (g == 4 || g == 8) && t == 2);
+        // cgroup = notyet, gref = 6: year 5 holds cohort 4 only
+        let mut notyet = EtwfeConfig::default();
+        notyet.gref = Some(6);
+        let d2 = drop_rows(&ds, |g, t| (g == 6 || g == 8) && t == 5);
+        for (data, c, suggests_notyet) in [(d, never, true), (d2, notyet, false)] {
+            match run_etwfe(
+                &data,
+                "y",
+                "id",
+                "year",
+                "treat",
+                "first_treat",
+                None,
+                Some(c),
+            ) {
+                Err(EconError::SingularMatrix {
+                    context,
+                    suggestion,
+                }) => {
+                    assert!(context.contains("not identified"), "{context}");
+                    assert_eq!(
+                        suggestion.contains("cgroup = notyet"),
+                        suggests_notyet,
+                        "{suggestion}"
+                    );
+                    assert!(suggestion.contains("set gref"), "{suggestion}");
+                }
+                other => panic!("expected SingularMatrix, got {other:?}"),
+            }
+        }
     }
 }
