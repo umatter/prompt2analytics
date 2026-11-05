@@ -1189,7 +1189,7 @@ fn ebal_solve(
         let mut t = 1.0;
         let (mut f_new, mut p_new) = eval(&(&lambda + &(&delta * t)));
         if -slope > 1e-12 * (1.0 + f.abs()) {
-            while !(f_new <= f + 1e-4 * t * slope) && t > 1e-12 {
+            while (f_new.is_nan() || f_new > f + 1e-4 * t * slope) && t > 1e-12 {
                 t *= 0.5;
                 (f_new, p_new) = eval(&(&lambda + &(&delta * t)));
             }
