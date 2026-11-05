@@ -1149,7 +1149,7 @@ pub fn run_feglm(
         // demeaned X and z give the last iteration's beta again
         if !z_repeats {
             beta = match normal_equations_inverse(x_demeaned.view())? {
-                Some(normal) => normal.coefficients(x_demeaned.view(), &z_demeaned),
+                Some(normal) => normal.coefficients(x_demeaned.view(), z_demeaned),
                 None => {
                     let ls = least_squares(x_demeaned.view(), z_demeaned.view())?;
                     if ls.rank < k {
