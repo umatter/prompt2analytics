@@ -112,8 +112,10 @@ pub enum GmmVcov {
     /// HAC (heteroskedasticity and autocorrelation consistent), lag-count kernel weights
     #[default]
     HAC,
-    /// i.i.d. errors: `sigma^2 Z'Z / n` for linear IV (two-step = 2SLS); refused for the
-    /// normal-distribution moments, which have no such form (use `MDS`)
+    /// i.i.d. errors: `sigma^2 Z'Z / n` for linear IV (two-step = 2SLS). Refused
+    /// (`InvalidSpecification`) for the normal-distribution moments, which have no such form;
+    /// this deviates from gmm::gmm, which uses the MDS covariance `crossprod(gt)/n` there.
+    /// Use `MDS` for the same fit.
     IID,
     /// The identity weighting matrix (one-step GMM) with the MDS moment covariance in the
     /// sandwich variance
@@ -2113,13 +2115,8 @@ mod tests {
         assert!(old.centered && old.weight_matrix.is_none());
     }
 
-    /// Case `gmm_linear_iv`, normal moments on x = w: gmm(g, w, t0 = method of moments, gradv,
-    /// type = "twoStep" | "iterative", vcov = "MDS") with BFGS at reltol 1e-15 (the tight optimum).
-    /// Gauss-Newton against R's BFGS at reltol 1e-15; planning gap 1.8e-11 / 6.9e-10, so
-    /// Tol::iterative with the README values. Fails before: the estimates were the method of
-    /// moments (mu 0.056278592574600002 against 0.048607398751015045), and J used the identity
-    /// weight (4.0346296518810849 against 1.4148059570011566), so it scaled with the units
-    /// (x 10: 4034629.65).
+    /// `vcov = IID` is refused for the normal-distribution moments (gmm::gmm would use the
+    /// MDS covariance crossprod(gt)/n there; a recorded deviation).
     /// Fails before: an iid fit of the normal moments silently used the MDS covariance while
     /// Display printed "iid (sigma^2 Z'Z / n)".
     #[test]
@@ -2148,6 +2145,13 @@ mod tests {
         }
     }
 
+    /// Case `gmm_linear_iv`, normal moments on x = w: gmm(g, w, t0 = method of moments, gradv,
+    /// type = "twoStep" | "iterative", vcov = "MDS") with BFGS at reltol 1e-15 (the tight optimum).
+    /// Gauss-Newton against R's BFGS at reltol 1e-15; planning gap 1.8e-11 / 6.9e-10, so
+    /// Tol::iterative with the README values. Fails before: the estimates were the method of
+    /// moments (mu 0.056278592574600002 against 0.048607398751015045), and J used the identity
+    /// weight (4.0346296518810849 against 1.4148059570011566), so it scaled with the units
+    /// (x 10: 4034629.65).
     #[test]
     fn test_validate_gmm_normal_moments() {
         let (case, ds) = crate::test_support::load_case("gmm_linear_iv");

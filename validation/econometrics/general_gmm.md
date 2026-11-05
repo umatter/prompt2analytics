@@ -41,6 +41,8 @@ Moments `gbar(theta) = mean_i g_i(theta)`; linear IV `g_i = z_i (y_i - x_i' thet
 | `weight_matrix = W` | `weightsMatrix = W` |
 | `centered = false` | `centeredVcov = FALSE` |
 
+`vcov = IID` with the normal-distribution moments is refused (InvalidSpecification); gmm::gmm uses the MDS covariance crossprod(gt)/n there; use `vcov = MDS`.
+
 **p2a's HAC default against gmm's.** p2a's default HAC weight is the Bartlett kernel with
 `floor(4 (n/100)^(2/9))` lags (5 at n = 500) and no prewhitening, pinned as `twostep_hac_bartlett`. gmm's default
 (Quadratic Spectral kernel, `bwAndrews` bandwidth, `prewhite = 1`) is not implemented: `twostep_hac`,

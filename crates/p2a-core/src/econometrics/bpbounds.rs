@@ -528,7 +528,7 @@ pub fn run_bp_bounds(
         compute_bounds_without_monotonicity(&cell_probs)
     };
 
-    warnings.extend(crossing_warning(ace_lower, ace_upper));
+    warnings.extend(instrumental_inequality_warnings(&cell_probs));
 
     // Compute Wald estimate
     let marginals = cell_probs.marginals();
@@ -664,8 +664,6 @@ fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) 
 fn compute_bounds_with_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
     let p00_z0 = probs.p00_z0;
     let p01_z0 = probs.p01_z0;
-    let _p10_z0 = probs.p10_z0;
-    let _p11_z0 = probs.p11_z0;
     let p00_z1 = probs.p00_z1;
     let p01_z1 = probs.p01_z1;
     let p10_z1 = probs.p10_z1;
@@ -675,10 +673,6 @@ fn compute_bounds_with_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
     // These are the Manski-Robins bounds
     let lower = p00_z0 - p00_z1 - p01_z1 - p10_z1; // = p11|1 + p00|0 - 1
     let upper = p00_z1 + p01_z1 + p11_z1 - p01_z0; // = 1 - p10|1 - p01|0
-
-    // Alternative formulation (equivalent):
-    // lower = P(Y=1|Z=0) - P(Y=1|Z=1) - P(D=0|Z=1)
-    // upper = P(Y=1|Z=0) - P(Y=1|Z=1) + P(D=0|Z=0)
 
     // Clamp to [-1, 1] for safety
     (lower.max(-1.0).min(1.0), upper.max(-1.0).min(1.0))
@@ -763,16 +757,32 @@ fn bootstrap_interval(draws: &[f64], alpha: f64) -> EconResult<(f64, f64)> {
     percentile_interval(draws, 1.0 - alpha)
 }
 
-/// The warning for crossing bounds (`ace_lower > ace_upper`), which happens exactly when the
-/// observed distribution violates the instrumental inequality.
-fn crossing_warning(ace_lower: f64, ace_upper: f64) -> Option<String> {
-    (ace_lower > ace_upper).then(|| {
-        format!(
-            "the Balke-Pearl bounds cross ([{ace_lower:.4}, {ace_upper:.4}]): the instrumental \
-             inequality fails, so the exclusion restriction (or randomization of Z) is \
-             violated in these data"
-        )
-    })
+/// Pearl's instrumental inequality for binary Z, D and Y: for each `d`,
+/// `sum_y max_z P(Y = y, D = d | Z = z) <= 1`. Returns one warning per failing `d` (with
+/// a `1e-12` tolerance). A violation means the exclusion restriction or the randomization
+/// of Z fails; the Balke-Pearl bounds may then cross, but they need not, so the
+/// inequality is tested directly rather than inferred from the bounds.
+fn instrumental_inequality_warnings(probs: &CellProbabilities) -> Vec<String> {
+    let sums = [
+        (
+            0,
+            probs.p00_z0.max(probs.p00_z1) + probs.p01_z0.max(probs.p01_z1),
+        ),
+        (
+            1,
+            probs.p10_z0.max(probs.p10_z1) + probs.p11_z0.max(probs.p11_z1),
+        ),
+    ];
+    sums.iter()
+        .filter(|&&(_, sum)| sum > 1.0 + 1e-12)
+        .map(|&(d, sum)| {
+            format!(
+                "the instrumental inequality fails (d = {d}: {sum:.4} > 1): the exclusion \
+                 restriction or randomization of Z is violated; the Balke-Pearl bounds are \
+                 not valid"
+            )
+        })
+        .collect()
 }
 
 /// Compute bootstrap confidence intervals for the bounds (seeded; `seed = None` uses
@@ -866,7 +876,7 @@ pub fn bp_bounds_from_probs(probs: CellProbabilities, monotonicity: bool) -> BPB
     if monotonicity && !monotonicity_satisfied {
         warnings.push("Monotonicity assumed but may not hold in data.".to_string());
     }
-    warnings.extend(crossing_warning(ace_lower, ace_upper));
+    warnings.extend(instrumental_inequality_warnings(&probs));
 
     BPBoundsResult {
         ace_lower,
@@ -1214,24 +1224,8 @@ mod tests {
         );
     }
 
-    /// Balke-Pearl closed form on two hand-computed tables (bpbounds is not installed;
-    /// checked during planning against the exact response-type LP, lpSolve 5.6.23, to
-    /// 5.5e-17). Derivation of Table 2 in validation/econometrics/bpbounds.md. Replaces
-    /// test_validate_against_r, which compared with no R value.
-    /// A table that violates the instrumental inequality (P(Y=0, D=0 | Z=0) = 0.9 and
-    /// P(Y=1, D=0 | Z=1) = 0.9 sum to 1.8 > 1) gives crossing bounds, and the result says why.
-    /// Fails before: no warning named the cause.
-    #[test]
-    fn test_bpbounds_crossing_bounds_warn() {
-        let counts = [18, 1, 0, 1, 1, 18, 1, 0];
-        let free = bp_bounds_from_probs(probs(counts), false);
-        assert!(free.ace_lower > free.ace_upper && free.bounds_width < 0.0);
-        assert!(
-            free.warnings
-                .iter()
-                .any(|w| w.contains("instrumental inequality"))
-        );
-        // the raw-data path: expand the table to rows (z, d, y)
+    /// Expand a 2x2x2 count table (order as in `probs`) to raw rows and run the raw-data path.
+    fn bounds_from_rows(counts: [usize; 8], monotonicity: bool) -> BPBoundsResult {
         let mut rows = Vec::new();
         for (cell, &c) in counts.iter().enumerate() {
             let (zv, dv, yv) = (
@@ -1244,26 +1238,65 @@ mod tests {
         let col = |j: usize| Array1::from_iter(rows.iter().map(|r| r[j]));
         let (z, d, y) = (col(0), col(1), col(2));
         let cfg = BPBoundsConfig {
-            monotonicity: false,
+            monotonicity,
             bootstrap_ci: false,
             ..Default::default()
         };
-        let r = run_bp_bounds(&z.view(), &d.view(), &y.view(), cfg).unwrap();
-        assert!(r.ace_lower > r.ace_upper);
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("instrumental inequality"))
-        );
-        // a table satisfying it (vitamin A) carries no such warning
-        let ok = bp_bounds_from_probs(probs([74, 11514, 0, 0, 34, 2385, 12, 9663]), false);
-        assert!(
-            !ok.warnings
-                .iter()
-                .any(|w| w.contains("instrumental inequality"))
-        );
+        run_bp_bounds(&z.view(), &d.view(), &y.view(), cfg).unwrap()
     }
 
+    fn warns_inequality(r: &BPBoundsResult) -> bool {
+        r.warnings
+            .iter()
+            .any(|w| w.contains("instrumental inequality fails"))
+    }
+
+    /// A table that violates the instrumental inequality (P(Y=0, D=0 | Z=0) = 0.9 and
+    /// P(Y=1, D=0 | Z=1) = 0.9 sum to 1.8 > 1) gives crossing bounds, and the result says why.
+    /// Fails before: no warning named the cause.
+    #[test]
+    fn test_bpbounds_crossing_bounds_warn() {
+        let counts = [18, 1, 0, 1, 1, 18, 1, 0];
+        let free = bp_bounds_from_probs(probs(counts), false);
+        assert!(free.ace_lower > free.ace_upper && free.bounds_width < 0.0);
+        assert!(warns_inequality(&free), "{:?}", free.warnings);
+        let r = bounds_from_rows(counts, false);
+        assert!(r.ace_lower > r.ace_upper);
+        assert!(warns_inequality(&r), "{:?}", r.warnings);
+        // a table satisfying it (vitamin A) carries no such warning
+        let ok = bp_bounds_from_probs(probs([74, 11514, 0, 0, 34, 2385, 12, 9663]), false);
+        assert!(!warns_inequality(&ok), "{:?}", ok.warnings);
+    }
+
+    /// The inequality can fail while the bounds do not cross: z0 = (0, 0, 0, 5),
+    /// z1 = (0, 0, 1, 4) gives, for d = 1, max_z P(y=0, d=1 | z) + max_z P(y=1, d=1 | z)
+    /// = 0.2 + 1.0 = 1.2 > 1, yet bounds [0.2, 0.6]. The warning must still appear, on both
+    /// paths and in both monotonicity modes. Fails before: only crossing bounds warned.
+    #[test]
+    fn test_bpbounds_inequality_fails_without_crossing() {
+        let counts = [0, 0, 0, 5, 0, 0, 1, 4];
+        for monotonicity in [false, true] {
+            let from_probs = bp_bounds_from_probs(probs(counts), monotonicity);
+            let from_rows = bounds_from_rows(counts, monotonicity);
+            for r in [&from_probs, &from_rows] {
+                assert!(r.ace_lower <= r.ace_upper, "mono {monotonicity}");
+                assert!(warns_inequality(r), "mono {monotonicity}: {:?}", r.warnings);
+                assert!(
+                    r.warnings.iter().any(|w| w.contains("d = 1: 1.2000 > 1")),
+                    "{:?}",
+                    r.warnings
+                );
+            }
+        }
+        let free = bp_bounds_from_probs(probs(counts), false);
+        close(free.ace_lower, 0.2, "lower");
+        close(free.ace_upper, 0.6, "upper");
+    }
+
+    /// Balke-Pearl closed form on two hand-computed tables (bpbounds is not installed;
+    /// checked during planning against the exact response-type LP, lpSolve 5.6.23, to
+    /// 5.5e-17). Derivation of Table 2 in validation/econometrics/bpbounds.md. Replaces
+    /// test_validate_against_r, which compared with no R value.
     #[test]
     fn test_bpbounds_closed_form_tables() {
         for (label, counts, wald, mono_lower) in [

@@ -684,7 +684,7 @@ fn apply_bootstrap(
     let set = |te: &mut TreatmentEffectEstimate, col: ArrayView1<f64>| -> EconResult<()> {
         let s = boot_summary(col, 0.95)?;
         te.se = s.sd;
-        te.t_stat = te.estimate / s.sd;
+        te.t_stat = wald_z(te.estimate, s.sd);
         te.p_value = normal_p_value_two_sided(te.t_stat);
         te.ci_lower = s.ci_lower;
         te.ci_upper = s.ci_upper;
@@ -754,6 +754,8 @@ fn is_resource_stop(e: &EconError) -> bool {
 /// `next` fills an empty, reused buffer with one replicate's row indices just before that
 /// replicate is fitted, so the resamples are never held all at once.
 /// A resource stop propagates; any other error counts the replicate as failed.
+/// The estimand and curve stores (`reps x (4|5)` and `reps x n_grid`) are still allocated
+/// up front, through `resource::try_zeros2`; the request limits bound both.
 pub(crate) fn bootstrap_from_indices(
     y: ArrayView1<f64>,
     d: ArrayView1<f64>,
@@ -822,7 +824,12 @@ pub(crate) fn boot_summary(draws: ArrayView1<f64>, level: f64) -> EconResult<Boo
     let (ci_lower, ci_upper) = percentile_interval(&v, level)?;
     let n = v.len() as f64;
     let mean = v.iter().sum::<f64>() / n;
-    let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+    // identical draws have SD exactly 0 (the rounded mean would leave ~1e-17)
+    let sd = if v.iter().all(|&x| x == v[0]) {
+        0.0
+    } else {
+        (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+    };
     Ok(BootSummary {
         mean,
         sd,
@@ -1348,7 +1355,6 @@ fn quad(g: &[f64], v: &Array2<f64>) -> f64 {
     s
 }
 
-/// An estimate with its delta-method inference (normal reference).
 /// `estimate / se`, or NaN when the SE is zero or not finite: a degenerate variance is not
 /// evidence of infinite significance.
 fn wald_z(estimate: f64, se: f64) -> f64 {
@@ -1359,6 +1365,7 @@ fn wald_z(estimate: f64, se: f64) -> f64 {
     }
 }
 
+/// An estimate with its delta-method inference (normal reference).
 fn te_estimate(name: &str, estimate: f64, se: f64, z: f64) -> TreatmentEffectEstimate {
     let t_stat = wald_z(estimate, se);
     let p_value = normal_p_value_two_sided(t_stat);
@@ -2569,11 +2576,16 @@ mod tests {
         let ds = mte_sim();
         let (y, d, z) = mte_data(&ds, |_, _| true);
         let n = y.len();
-        let cfg = case_config();
+        // a small grid and a moderate replicate count: the estimand and curve stores are
+        // still allocated up front (reps x 4 and reps x n_grid), only the indices are lazy
+        let cfg = IVMTEConfig {
+            n_grid: 11,
+            ..case_config()
+        };
         let token = CancelToken::new();
         let mut calls = 0usize;
         let res = with_budget(Budget::new(None, token.clone()), || {
-            bootstrap_from_indices(y.view(), d.view(), z.view(), None, &cfg, 1_000_000, |buf| {
+            bootstrap_from_indices(y.view(), d.view(), z.view(), None, &cfg, 10_000, |buf| {
                 calls += 1;
                 assert!(
                     buf.is_empty() && buf.capacity() >= n,
@@ -2587,6 +2599,41 @@ mod tests {
         });
         expect_cancelled(res);
         assert_eq!(calls, 3);
+    }
+
+    /// A degenerate bootstrap (every replicate gives the same draw) has SD exactly 0 and
+    /// reports a NaN z and p and no significance, as the delta path does for a zero SE.
+    /// Fails before: the rounded mean left an SD of ~1e-17 (0.1 x 10 draws), and
+    /// t = estimate / sd was huge or +-inf with p = 0, highly significant.
+    #[test]
+    fn test_mte_bootstrap_zero_sd_is_not_significant() {
+        let ds = mte_sim();
+        let (y, d, z) = mte_data(&ds, |_, _| true);
+        let cfg = IVMTEConfig {
+            n_grid: 11,
+            ..case_config()
+        };
+        let mut result = run_ivmte_multi_z(&y.view(), &d.view(), &z.view(), None, cfg).unwrap();
+        assert!(result.ate.estimate != 0.0);
+        let reps = 10;
+        let boot = MteBootstrap {
+            estimands: Array2::from_shape_fn((reps, 4), |(_, j)| 0.1 * (j + 1) as f64),
+            curve: Array2::from_elem((reps, result.mte_curve.len()), 0.25),
+            failed: 0,
+            first_error: None,
+        };
+        apply_bootstrap(&mut result, &boot, reps, 7).unwrap();
+        for te in [&result.ate, &result.att, &result.atu, &result.late] {
+            assert_eq!(te.se, 0.0, "{}", te.name);
+            assert!(te.t_stat.is_nan(), "{}: t = {}", te.name, te.t_stat);
+            assert!(te.p_value.is_nan(), "{}: p = {}", te.name, te.p_value);
+            assert_eq!(
+                te.significance,
+                SignificanceLevel::NotSignificant,
+                "{}",
+                te.name
+            );
+        }
     }
 
     #[test]
