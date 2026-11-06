@@ -149,6 +149,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/anova_twoway_legacy.csv` | 12 × 3 (yield, fertilizer, water) | `stat_anova_twoway_legacy` | `r/cases/stats_power_loglin.R` | literal values: the two-way fertilizer × water data of `anova.rs`'s legacy test |
 | `generated/binary_glm.csv` | 400 × 10 (y, x1, x2, d, x1b, nd, xnc, ysep, yq, y012) | `disc_binary_glm` | `r/cases/discrete_mlogit_asc.R` | seed 20261021 |
 | `generated/blobs_noise.csv` | 115 × 2 (x, y) | `hdbscan_blobs`; read by `optics_blobs`, `silhouette_singletons` | `r/cases/ml_density_clustering.R` | seed 20261109 |
+| `generated/ctmle_sim.csv` | 300 × 7 (yb, yc, a, w1, w2, w3, w4) | `tmle_glm`, `ctmle_cv` | `r/cases/causal_stdreg.R` | seed 20261210; w1 confounder, w2 instrument, w3 precision variable, w4 noise |
 | `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
 | `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |
 | `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax` | `r/cases/stats_power_loglin.R` | seed 20261118 |
@@ -201,6 +202,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/shap_kernel_sim.csv` | 20 × 12 (x0-x11) | `shap_kernel_sim` | `r/cases/ml_shap.R` | seed 4802 |
 | `generated/shap_tree_sim.csv` | 80 × 5 (x0, x1, x2, x3, y) | `shap_tree_rpart` | `r/cases/ml_shap.R` | seed 4801 |
 | `generated/smoothers_t3.csv` | 100 × 4 (x, y, xm, ym) | `smoothers_gcv_periodic_loess` | `r/cases/regression_smoothers_t3.R` | seed 20261127 |
+| `generated/stdreg_sim.csv` | 300 × 8 (yc, yb, yp, ys, a, x1, x2, x1dup) | `stdreg_glm`, `stdreg_linear`, `stdreg_separation` | `r/cases/causal_stdreg.R` | seed 20261209; yp Poisson with mean about 220; ys = 1{x1 > 0.3} (complete separation); x1dup = 2 x1 + 1 (aliased) |
 | `generated/supsmu_sine.csv` | 100 × 4 (x, y, w, xr) | `supsmu_sine` | `r/cases/regression_smoothers_t3.R` | seed 42 |
 | `generated/synth_qp_panel.csv` | 180 × 9 (unit, time, y, x1, x2, x3, x1_big, x2_big, x3_big) | `synth_weights_qp`; read by `scpi_quantities` | `r/cases/causal_synth_scpi.R` | seed 3101; 8 donors and the treated unit TR × 20 periods (treatment at 15); `*_big` = predictors × 1e4 |
 | `generated/sysgmm_empluk.csv` | 1031 × 5 (firm, year, lemp, lwage, lcap) | `dpd_sys_empluk` | `r/cases/econ_sysgmm.R` | `plm::EmplUK`, logs of emp, wage and capital |

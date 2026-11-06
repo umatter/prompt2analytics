@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "stdreg_separation",
+  "area": "causal/stdreg",
+  "method": "Regression standardisation with a logistic outcome model under complete separation (glm(maxit = 100) warns; the standardised contrast is numerically 0)",
+  "reference": "stats::glm(binomial, epsilon 1e-8, maxit = 100) warnings under complete separation; standardisation as stdReg",
+  "call": "glm(ys ~ x1 + x2 + a, binomial, control = glm.control(maxit = 100)) with ys = 1{x1 > 0.3}",
+  "dataset": "validation/datasets/generated/stdreg_sim.csv",
+  "datasets": ["validation/datasets/generated/stdreg_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "sep_ate": 2.1665391702896386e-11,
+    "sep_ey1": 0.35000000000005521,
+    "sep_ey0": 0.34999999997838982,
+    "sep_fitted_extreme": 294,
+    "sep_converged": 1,
+    "sep_warn_fitted01": 1,
+    "sep_warn_noconv": 0,
+    "sep_mean_ys": 0.34999999999999998
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_stdreg",
+      "name": "Regression standardisation (g-computation) with lm / glm outcome models",
+      "category": "econometrics",
+      "reference": "stats::lm and stats::glm + standardisation of the predictions as stdReg::stdGlm (stdReg not installed: written out); separation and aliasing as glm / lm",
+      "doc": "validation/econometrics/stdreg.md",
+      "cases": ["stdreg_glm", "stdreg_linear", "stdreg_separation"],
+      "tests": [
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_glm",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_glm_default_control",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_linear",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_separation_warns",
+        "p2a-core::econometrics::stdreg::tests::test_validate_stdreg_poisson_scale_free"
+      ],
+      "quantities": ["outcome coefficients (NA for aliased)", "E[Y(1)], E[Y(0)]",
+        "ATE, ATT, ATC",
+        "R2 (lm) / 1 - deviance / null deviance (glm)",
+        "separation warning and count"
+      ],
+      "tolerance": "validation/README.md, n = 300: coefficients and effects 1e-8, R2 1e-6 (glm epsilon 1e-14 on both sides); default-control fits within Tol::iterative(1e-8) of the tight fits",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "causal_tmle",
+      "name": "TMLE of the ATE (bivariate fluctuation as tmle 2.1.1, glm nuisance models; continuous outcomes rescaled for the logistic Q)",
+      "category": "econometrics",
+      "reference": "TMLE with tmle 2.1.1's two clever covariates H1W = A/g, H0W = (1 - A)/(1 - g) (van der Laan & Rose 2011, ch. 4) written out with stats::glm (glm(Y ~ -1 + H0W + H1W, offset = qlogis(Q), quasibinomial)); agrees with tmle::tmle 2.1.1 (cvQinit = FALSE) to 1e-8 on the binary outcome, which is pinned too; a continuous Y with the logistic Q rescaled to [0, 1] by its range as tmle does (Gruber & van der Laan 2010)",
+      "doc": "validation/econometrics/tmle.md",
+      "cases": ["tmle_glm"],
+      "tests": [
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_glm_logit",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_glm_linear",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_glm_default_control",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_aliased_covariate_and_treatment",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_logistic_q_rescales_continuous_outcome",
+        "p2a-core::econometrics::tmle::tests::test_validate_tmle_scale_free"
+      ],
+      "quantities": ["fluctuation epsilons (H1W, H0W)", "ATE", "IC-based SE", "95% CI", "z", "p", "n truncated", "Q, Q*, g and IC at six rows", "IC mean", "tmle::tmle ATE and SE", "continuous outcome under the logistic Q: rescaling range, ATE, SE and epsilons"],
+      "tolerance": "n = 300: estimates and predictions 1e-8, SE, CI and z 1e-6, p 1e-6 relative / 1e-12 absolute (glm epsilon 1e-14 on both sides); default-control values within Tol::iterative(1e-8) of the tight values; the rescaling range exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "causal_ctmle",
+      "name": "C-TMLE: greedy selection of the propensity covariates on a V-fold risk (RSS, VarIC, penalised RSS)",
+      "category": "econometrics",
+      "reference": "Gruber & van der Laan (2010) criteria as ctmle::ctmleDiscrete names them (CV likelihood, varIC.cv); p2a's fixed-initial-Q forward / backward / prespecified algorithm written out in R; ctmle 0.1.2 (installed) is not used as a pin because it updates Q between clever covariates (WP29-9)",
+      "doc": "validation/econometrics/ctmle.md",
+      "cases": ["ctmle_cv"],
+      "tests": [
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_risk_uses_training_fluctuation",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_logit_rss",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_linear_rss",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_cv_backward_and_prespecified",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_prespecified_order_in_arrays_path",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_criteria_varic",
+        "p2a-core::econometrics::ctmle::tests::test_validate_ctmle_criteria_penrss"
+      ],
+      "quantities": ["fold RSS, fold var(IC), fold epsilon of one candidate", "criterion and its SE per step (RSS, VarIC, PenRSS)", "CV RSS and CV var(IC) per step", "selection order, selected step and covariates (CV minimum, one-SE)", "ATE, SE, epsilon, CI, p of the selected model", "ATE and SE per step"],
+      "tolerance": "n = 300: criteria, estimates and fold values 1e-8 relative (glm epsilon 1e-14 on both sides; smallest selection gap 2.4e-5), selections exact, p 1e-6 relative / 1e-12 absolute",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
