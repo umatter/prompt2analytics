@@ -379,6 +379,22 @@ Tests: `test_validate_aft_weibull`, `test_validate_aft_exponential`, `test_valid
 `test_aft_iteration_limit_is_a_warning`, `test_aft_rejects_bad_iteration_settings`,
 `test_aft_tail_helpers_match_r`, `test_aft_non_finite_result_is_an_error`.
 
+Normal tails: ln S(z) and the hazard phi(z) / S(z) come from one evaluation of Cody's rational approximations, as
+R's `pnorm_both` (within about 1e-13 relative of R 4.3.3 over z in [-38, 38]).
+
+Wall clock on a quiet machine (2026-11-06, load average 1.0-1.8; release build, one P core, `RAYON_NUM_THREADS=1`,
+three interleaved rounds against `fe13b889`, medians; criterion `AFT` group, 30% censoring, two covariates):
+
+| Fit | n | new / base (wall clock) |
+|---|---|---|
+| Weibull | 100 / 500 / 1,000 / 2,000 | 0.15 / 0.12 / 0.14 / 0.12 |
+| log-normal | 100 / 500 / 1,000 / 2,000 | 1.36 / 2.32 / 1.61 / 0.89 |
+
+The log-normal rows are not like for like: on these data the `fe13b889` fit diverged (coefficients up to 1e95,
+log-likelihood NaN) and still reported convergence, after 11 / 7 / 9 / 20 Newton steps; the current fit converges in
+11 / 13 / 11 / 13. Per Newton step the current fit costs 1.25-1.37x the diverging one. The log-normal slowdown
+against `fe13b889` has not been signed off by the maintainer.
+
 ---
 
 ## Test Case 8: Competing Risks (`surv_competing_risks`)
