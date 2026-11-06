@@ -68,10 +68,12 @@ use crate::linalg::solve::Qr;
 use crate::regression::ols::normal_inverse_from_gram;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, relative_change_vec};
+use faer::linalg::matmul::triangular;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
+use std::borrow::Cow;
 
 /// GLM family (`stats::family`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -654,9 +656,9 @@ impl Problem<'_> {
         let mut working_weights = Array1::zeros(n);
         let mut iterations = 0;
         // Workspaces of every iteration, sized for all rows: the informative rows, their
-        // square-root working weights and their weighted working response. The weighted
-        // design itself is formed only when a step needs its rows (the refinement or the
-        // QR), from these (the same products, bit for bit).
+        // square-root working weights and their weighted working response. Below
+        // LEAN_BLOCKED_MIN_COLUMNS the weighted design itself is formed only when a step needs
+        // its rows (the refinement or the QR), from these (the same products, bit for bit).
         let mut zw = resource::try_zeros1(n, "glm IRLS workspace")?;
         let mut wt = resource::try_vec(n, 0.0, "glm IRLS workspace")?;
         let mut good = resource::try_vec(n, 0usize, "glm IRLS workspace")?;
@@ -664,6 +666,15 @@ impl Problem<'_> {
         let mut gram = resource::try_vec(gram_len, 0.0, "glm IRLS workspace")?;
         let mut xtwz = Array1::<f64>::zeros(p);
         let mut row = vec![0.0; p];
+        // From LEAN_BLOCKED_MIN_COLUMNS columns on, X'WX is the blocked symmetric product of the
+        // weighted rows, which stay here for the refinement and the QR.
+        let blocked = p >= LEAN_BLOCKED_MIN_COLUMNS;
+        let mut xw_rows = if blocked {
+            let len = resource::checked_len(&[n, p], "glm IRLS workspace")?;
+            resource::try_vec(len, 0.0, "glm IRLS workspace")?
+        } else {
+            Vec::new()
+        };
         // Informative rows of the last step (its working weights are those of the fit).
         let mut ng_last = 0;
         for iter in 1..=self.max_iter {
@@ -698,13 +709,21 @@ impl Problem<'_> {
                 wt[ng] = wk;
                 let zk = z * wk;
                 zw[ng] = zk;
-                for (j, c) in row.iter_mut().enumerate() {
-                    *c = x[[i, j]] * wk;
-                }
-                for (a, &ra) in row.iter().enumerate() {
-                    xtwz[a] += ra * zk;
-                    for (g, &rb) in gram[a * p + a..(a + 1) * p].iter_mut().zip(&row[a..]) {
-                        *g += ra * rb;
+                if blocked {
+                    let out = &mut xw_rows[ng * p..(ng + 1) * p];
+                    for ((c, &xv), xz) in out.iter_mut().zip(x.row(i)).zip(xtwz.iter_mut()) {
+                        *c = xv * wk;
+                        *xz += *c * zk;
+                    }
+                } else {
+                    for (j, c) in row.iter_mut().enumerate() {
+                        *c = x[[i, j]] * wk;
+                    }
+                    for (a, &ra) in row.iter().enumerate() {
+                        xtwz[a] += ra * zk;
+                        for (g, &rb) in gram[a * p + a..(a + 1) * p].iter_mut().zip(&row[a..]) {
+                            *g += ra * rb;
+                        }
                     }
                 }
                 ng += 1;
@@ -717,8 +736,27 @@ impl Problem<'_> {
                 });
             }
             ng_last = ng;
+            if blocked {
+                let a = faer::MatRef::from_row_major_slice(&xw_rows[..ng * p], ng, p);
+                // The upper triangle of the row-major `gram` is the lower triangle of its
+                // column-major view.
+                triangular::matmul(
+                    faer::MatMut::from_column_major_slice_mut(&mut gram, p, p),
+                    triangular::BlockStructure::TriangularLower,
+                    faer::Accum::Replace,
+                    a.transpose(),
+                    triangular::BlockStructure::Rectangular,
+                    a,
+                    triangular::BlockStructure::Rectangular,
+                    1.0,
+                    faer::Par::Seq,
+                );
+            }
             // The weighted design of the informative rows (`ng x p`, row-major).
-            let weighted_rows = || -> EconResult<Vec<f64>> {
+            let weighted_rows = || -> EconResult<Cow<'_, [f64]>> {
+                if blocked {
+                    return Ok(Cow::Borrowed(&xw_rows[..ng * p]));
+                }
                 let len = resource::checked_len(&[p, ng], "glm IRLS workspace")?;
                 let mut xw = resource::try_vec(len, 0.0, "glm IRLS workspace")?;
                 for ((r, &i), &wk) in xw.chunks_exact_mut(p).zip(&good[..ng]).zip(&wt[..ng]) {
@@ -726,7 +764,7 @@ impl Problem<'_> {
                         *c = xv * wk;
                     }
                 }
-                Ok(xw)
+                Ok(Cow::Owned(xw))
             };
             let zw_good = zw.slice(ndarray::s![..ng]);
             // OLS's solve decision on the weighted design: the normal equations when it is
@@ -747,10 +785,9 @@ impl Problem<'_> {
                         if ni.refine {
                             // OLS's refinement step: b += (X'WX)^{-1} X'W (z - X b)
                             let xw_rows = weighted_rows()?;
-                            let xw =
-                                ArrayView2::from_shape((ng, p), &xw_rows[..]).map_err(|e| {
-                                    EconError::Computation(format!("glm IRLS workspace: {e}"))
-                                })?;
+                            let xw = ArrayView2::from_shape((ng, p), &xw_rows).map_err(|e| {
+                                EconError::Computation(format!("glm IRLS workspace: {e}"))
+                            })?;
                             let r = &zw_good - &xw.dot(&b);
                             b += &ni.inverse.dot(&xw.t().dot(&r));
                         }
@@ -1359,6 +1396,33 @@ pub(crate) fn lean_logit(
     start: LeanStart<'_>,
     ctl: GlmControl,
 ) -> EconResult<Option<LeanLogit>> {
+    lean_logit_within(x, y, offset, start, ctl, LEAN_MAX_CONDITION)
+}
+
+/// [`lean_logit`] for a design whose columns are correlated by construction (long treatment
+/// histories): when the condition number of the equilibrated `X'WX` is above
+/// [`LEAN_MAX_CONDITION`] and at most [`LEAN_REFINED_MAX_CONDITION`], each step takes the
+/// refinement the shared GLM's normal equations take there
+/// (`b += (X'WX)^{-1} X'W (z - X b)`) instead of leaving the path. Further out it leaves the
+/// path, and the shared GLM takes OLS's decision.
+pub(crate) fn lean_logit_refined(
+    x: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    offset: Option<ArrayView1<'_, f64>>,
+    start: LeanStart<'_>,
+    ctl: GlmControl,
+) -> EconResult<Option<LeanLogit>> {
+    lean_logit_within(x, y, offset, start, ctl, LEAN_REFINED_MAX_CONDITION)
+}
+
+fn lean_logit_within(
+    x: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    offset: Option<ArrayView1<'_, f64>>,
+    start: LeanStart<'_>,
+    ctl: GlmControl,
+    max_condition: f64,
+) -> EconResult<Option<LeanLogit>> {
     let (n, k) = x.dim();
     if n <= k || k == 0 || ctl.max_iter == 0 {
         return Ok(None);
@@ -1490,37 +1554,79 @@ pub(crate) fn lean_logit(
     let mut b = Array1::<f64>::zeros(k);
     let mut b_old = Array1::<f64>::zeros(k);
     let mut prev_step = f64::INFINITY;
+    // the weighted rows of the blocked cross-product
+    let blocked = k >= LEAN_BLOCKED_MIN_COLUMNS;
+    let mut sqrt_w_rows = if blocked {
+        let len = resource::checked_len(&[n, k], "logit IRLS workspace")?;
+        resource::try_vec(len, 0.0, "logit IRLS workspace")?
+    } else {
+        Vec::new()
+    };
     for iter in 1..=ctl.max_iter {
         resource::checkpoint()?;
         // X'WX (upper triangle) and X'Wz, z = eta - offset + (y - mu) / W, W = mu (1 - mu)
-        g.fill(0.0);
         rhs.fill(0.0);
-        for (i, ((row, &m), (&e, &yi))) in xrows
-            .chunks_exact(k)
-            .zip(&mu)
-            .zip(eta.iter().zip(y))
-            .enumerate()
-        {
-            let wi = m * (1.0 - m);
-            let eo = e - off.map_or(0.0, |o| o[i]);
-            let wz = wi * eo + (yi - m);
-            for (a, (ga, rh)) in g.chunks_exact_mut(k).zip(rhs.iter_mut()).enumerate() {
-                let xa = row[a];
-                *rh += xa * wz;
-                let wxa = wi * xa;
-                for (gc, xc) in ga[a..].iter_mut().zip(&row[a..]) {
-                    *gc += wxa * xc;
+        if blocked {
+            for (i, ((row, out), (&m, (&e, &yi)))) in xrows
+                .chunks_exact(k)
+                .zip(sqrt_w_rows.chunks_exact_mut(k))
+                .zip(mu.iter().zip(eta.iter().zip(y)))
+                .enumerate()
+            {
+                let wi = m * (1.0 - m);
+                let wz = wi * (e - off.map_or(0.0, |o| o[i])) + (yi - m);
+                let sw = wi.sqrt();
+                for ((rh, o), &xa) in rhs.iter_mut().zip(out.iter_mut()).zip(row) {
+                    *rh += xa * wz;
+                    *o = sw * xa;
+                }
+            }
+            let a = faer::MatRef::from_row_major_slice(&sqrt_w_rows, n, k);
+            // The upper triangle of the row-major `g` is the lower triangle of its column-major
+            // view.
+            triangular::matmul(
+                faer::MatMut::from_column_major_slice_mut(&mut g, k, k),
+                triangular::BlockStructure::TriangularLower,
+                faer::Accum::Replace,
+                a.transpose(),
+                triangular::BlockStructure::Rectangular,
+                a,
+                triangular::BlockStructure::Rectangular,
+                1.0,
+                faer::Par::Seq,
+            );
+        } else {
+            g.fill(0.0);
+            for (i, ((row, &m), (&e, &yi))) in xrows
+                .chunks_exact(k)
+                .zip(&mu)
+                .zip(eta.iter().zip(y))
+                .enumerate()
+            {
+                let wi = m * (1.0 - m);
+                let eo = e - off.map_or(0.0, |o| o[i]);
+                let wz = wi * eo + (yi - m);
+                for (a, (ga, rh)) in g.chunks_exact_mut(k).zip(rhs.iter_mut()).enumerate() {
+                    let xa = row[a];
+                    *rh += xa * wz;
+                    let wxa = wi * xa;
+                    for (gc, xc) in ga[a..].iter_mut().zip(&row[a..]) {
+                        *gc += wxa * xc;
+                    }
                 }
             }
         }
-        if !well_conditioned_inverse(
+        let Some(kappa) = inverse_and_condition(
             &g,
             k,
             &mut chol,
             &mut solve_scratch,
             &mut scale_scratch,
             &mut inverse,
-        ) {
+        ) else {
+            return Ok(None);
+        };
+        if kappa > max_condition {
             return Ok(None);
         }
         b_old.assign(&b);
@@ -1531,6 +1637,29 @@ pub(crate) fn lean_logit(
             0.0,
             &mut b,
         );
+        if kappa > LEAN_MAX_CONDITION {
+            // OLS's refinement step: b += (X'WX)^{-1} X'W (z - X b)
+            rhs.fill(0.0);
+            for (i, (row, (&m, (&e, &yi)))) in xrows
+                .chunks_exact(k)
+                .zip(mu.iter().zip(eta.iter().zip(y)))
+                .enumerate()
+            {
+                let wi = m * (1.0 - m);
+                let wz = wi * (e - off.map_or(0.0, |o| o[i])) + (yi - m);
+                let r = wz - wi * ArrayView1::from(row).dot(&b);
+                for (rh, &xa) in rhs.iter_mut().zip(row) {
+                    *rh += xa * r;
+                }
+            }
+            ndarray::linalg::general_mat_vec_mul(
+                1.0,
+                &inverse,
+                &ArrayView1::from(&rhs[..]),
+                1.0,
+                &mut b,
+            );
+        }
         if !b.iter().all(|v| v.is_finite()) {
             return Ok(None);
         }
@@ -1587,6 +1716,18 @@ pub(crate) fn lean_logit(
 /// GLM's IRLS); anything else leaves the lean path.
 const LEAN_MAX_CONDITION: f64 = 100.0;
 
+/// Largest such condition number on the path of [`lean_logit_refined`], well inside what OLS's
+/// normal equations take with a refinement step (`1 / kappa_1(E)` at or above
+/// `OLS_NORMAL_EQUATIONS_MIN_RCOND`, 1e-8).
+const LEAN_REFINED_MAX_CONDITION: f64 = 1e4;
+
+/// From this many columns both IRLS loops, [`lean_logit`]'s and [`fit_glm`]'s, form `X'WX` by the
+/// blocked symmetric product of the square-root-weighted rows, which beats the row-by-row
+/// accumulation once the rows outgrow the vector registers; below it the row pass stays. So every
+/// [`fit_glm`] caller at or above this width gets it. [`fit_glm`] keeps the weighted rows of the
+/// step for its refinement and QR solves.
+const LEAN_BLOCKED_MIN_COLUMNS: usize = 12;
+
 /// The inverse of the symmetric `k x k` matrix whose upper triangle is `g` (row-major), into
 /// `inverse`, when its Cholesky factorisation exists and the 1-norm condition number of its
 /// equilibrated form is at most [`LEAN_MAX_CONDITION`]; `false` otherwise. `chol` (`k x k`),
@@ -1599,6 +1740,19 @@ pub(crate) fn well_conditioned_inverse(
     r: &mut [f64],
     inverse: &mut Array2<f64>,
 ) -> bool {
+    inverse_and_condition(g, k, chol, y, r, inverse).is_some_and(|c| c <= LEAN_MAX_CONDITION)
+}
+
+/// [`well_conditioned_inverse`]'s inverse and the condition number it decides on: `None` when
+/// the Cholesky factorisation does not exist or the condition number is not finite.
+fn inverse_and_condition(
+    g: &[f64],
+    k: usize,
+    chol: &mut [f64],
+    y: &mut [f64],
+    r: &mut [f64],
+    inverse: &mut Array2<f64>,
+) -> Option<f64> {
     let at = |a: usize, c: usize| if c >= a { g[a * k + c] } else { g[c * k + a] };
     // lower-triangular L with L L' = G, row-major in `chol`
     chol.fill(0.0);
@@ -1610,7 +1764,7 @@ pub(crate) fn well_conditioned_inverse(
             }
             if i == j {
                 if !(v > 0.0 && v.is_finite()) {
-                    return false;
+                    return None;
                 }
                 chol[i * k + i] = v.sqrt();
             } else {
@@ -1650,7 +1804,7 @@ pub(crate) fn well_conditioned_inverse(
         einv_norm = einv_norm.max(ci);
     }
     let kappa = e_norm * einv_norm;
-    kappa.is_finite() && kappa <= LEAN_MAX_CONDITION
+    kappa.is_finite().then_some(kappa)
 }
 
 /// [`fit_glm`] for a binomial logit fit of a 0/1 response with no prior weights, offset or
@@ -1888,6 +2042,204 @@ mod tests {
     use crate::linalg::solve::case_data::{columns, design};
     use ndarray::Array1;
     use p2a_validation::{Check, Tol};
+
+    /// Intercept, `binary` columns of mean 1/2 and noise columns: the binary columns correlate
+    /// with the intercept, so `X'WX` is less well conditioned the more of them there are.
+    fn history_design(
+        n: usize,
+        binary: usize,
+        noise: usize,
+    ) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(17);
+        let x = Array2::from_shape_fn((n, 1 + binary + noise), |(_, j)| {
+            if j == 0 {
+                1.0
+            } else if j <= binary {
+                f64::from(u8::from(rng.gen_range(0.0..1.0) < 0.5))
+            } else {
+                rng.gen_range(-1.0..1.0)
+            }
+        });
+        let eta = x.dot(&Array1::from_shape_fn(x.ncols(), |j| {
+            if j == 0 { -0.8 } else { 0.25 - 0.03 * j as f64 }
+        }));
+        let yb = eta.mapv(|e| f64::from(u8::from(rng.gen_range(0.0..1.0) < plogis(e))));
+        let yf =
+            eta.mapv(|e| (0.8 * plogis(e) + 0.2 * rng.gen_range(0.0..1.0_f64)).clamp(0.0, 1.0));
+        (x, yb, yf)
+    }
+
+    #[test]
+    fn test_lean_logit_refined_matches_the_shared_glm_on_long_histories() {
+        let ctl = GlmControl {
+            epsilon: 1e-12,
+            max_iter: 100,
+        };
+        // 3 and 11 columns take the row pass, 16 and 31 the blocked cross-product
+        for (binary, noise, refined) in
+            [(1, 1, false), (3, 7, false), (5, 10, false), (10, 20, true)]
+        {
+            let (x, yb, yf) = history_design(3000, binary, noise);
+            for (y, family) in [(&yb, GlmFamily::Binomial), (&yf, GlmFamily::QuasiBinomial)] {
+                let glm =
+                    fit_glm(x.view(), y.view(), &ctl.spec(family, GlmLink::Logit, None)).unwrap();
+                let plain = lean_logit(x.view(), y.view(), None, LeanStart::Mustart, ctl).unwrap();
+                assert_eq!(plain.is_none(), refined, "{binary} binary columns");
+                let lean = lean_logit_refined(x.view(), y.view(), None, LeanStart::Mustart, ctl)
+                    .unwrap()
+                    .expect("lean path");
+                assert_eq!(lean.iterations, glm.iterations);
+                for (a, b) in lean.coefficients.iter().zip(&glm.coefficients) {
+                    assert!((a - b).abs() <= 1e-10 * b.abs().max(1e-2), "{a} vs {b}");
+                }
+                for (a, b) in lean.fitted.iter().zip(&glm.fitted) {
+                    assert!((a - b).abs() <= 1e-10, "{a} vs {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_lean_logit_refined_leaves_the_path_on_near_collinear_designs() {
+        use rand::{Rng, SeedableRng};
+        let (mut x, yb, _) = history_design(2000, 4, 12);
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(5);
+        let ctl = GlmControl {
+            epsilon: 1e-10,
+            max_iter: 100,
+        };
+        for i in 0..2000 {
+            x[[i, 16]] = x[[i, 15]] + 1e-5 * rng.gen_range(-1.0..1.0);
+        }
+        let lean = lean_logit_refined(x.view(), yb.view(), None, LeanStart::Mustart, ctl).unwrap();
+        assert!(lean.is_none());
+    }
+
+    /// `glm.fit` for a logit with X'WX accumulated row by row: every step takes the same solve
+    /// decision as the shared GLM (the refinement), on the gram of this accumulation. Returns
+    /// the coefficients, `(X'WX)^{-1}` of the last step, the step count and whether a step
+    /// refined.
+    fn naive_row_by_row_logit(
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+        eps: f64,
+    ) -> (Array1<f64>, Array2<f64>, usize, bool) {
+        let (n, p) = x.dim();
+        let xlogy = |a: f64, b: f64| if a > 0.0 { a * (a / b).ln() } else { 0.0 };
+        let deviance = |mu: &Array1<f64>| -> f64 {
+            (0..n)
+                .map(|i| 2.0 * w[i] * (xlogy(y[i], mu[i]) + xlogy(1.0 - y[i], 1.0 - mu[i])))
+                .sum()
+        };
+        let mut mu = Array1::from_shape_fn(n, |i| (w[i] * y[i] + 0.5) / (w[i] + 1.0));
+        let mut eta = mu.mapv(|m: f64| (m / (1.0 - m)).ln());
+        let mut devold = deviance(&mu);
+        let mut refined = false;
+        for iter in 1..=100 {
+            let mut gram = Array2::<f64>::zeros((p, p));
+            let mut rhs = Array1::<f64>::zeros(p);
+            let mut rows = Vec::new();
+            for i in 0..n {
+                if w[i] == 0.0 {
+                    continue;
+                }
+                let wk = w[i] * mu[i] * (1.0 - mu[i]);
+                let z = eta[i] + (y[i] - mu[i]) / (mu[i] * (1.0 - mu[i]));
+                for a in 0..p {
+                    rhs[a] += x[[i, a]] * wk * z;
+                    for c in 0..p {
+                        gram[[a, c]] += x[[i, a]] * wk * x[[i, c]];
+                    }
+                }
+                rows.push((i, wk, z));
+            }
+            let ni = normal_inverse_from_gram(gram.view())
+                .unwrap()
+                .expect("a design the normal equations take");
+            let mut b = ni.inverse.dot(&rhs);
+            if ni.refine {
+                refined = true;
+                let mut r = Array1::<f64>::zeros(p);
+                for &(i, wk, z) in &rows {
+                    let res = wk * (z - x.row(i).dot(&b));
+                    for a in 0..p {
+                        r[a] += x[[i, a]] * res;
+                    }
+                }
+                b = b + ni.inverse.dot(&r);
+            }
+            eta = x.dot(&b);
+            mu = eta.mapv(plogis);
+            let dev = deviance(&mu);
+            if (dev - devold).abs() / (dev.abs() + 0.1) < eps {
+                return (b, ni.inverse, iter, refined);
+            }
+            devold = dev;
+        }
+        panic!("the naive reference did not converge");
+    }
+
+    #[test]
+    fn test_fit_glm_blocked_gram_matches_a_row_by_row_accumulation() {
+        use rand::{Rng, SeedableRng};
+        const EPS: f64 = 1e-12;
+        // 16 columns; a second design whose near-duplicate column makes the normal equations
+        // refine each step.
+        let (plain, y, _) = history_design(1500, 5, 10);
+        let mut near_duplicate = plain.clone();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(9);
+        for i in 0..1500 {
+            near_duplicate[[i, 15]] = near_duplicate[[i, 14]] + 1e-3 * rng.gen_range(-1.0..1.0);
+        }
+        assert!(plain.ncols() >= LEAN_BLOCKED_MIN_COLUMNS);
+        // every prior weight 1 (all rows informative), and every seventh row with weight 0
+        let all = Array1::<f64>::ones(1500);
+        let some = Array1::from_shape_fn(1500, |i| if i % 7 == 0 { 0.0 } else { 1.0 });
+        let close = |what: &str, a: &[f64], b: &[f64], tol: f64| {
+            let scale = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            for (u, v) in a.iter().zip(b) {
+                assert!((u - v).abs() <= tol * scale, "{what}: {u} vs {v}");
+            }
+        };
+        for (design, must_refine) in [(&plain, false), (&near_duplicate, true)] {
+            for w in [&all, &some] {
+                let wv: ArrayView1<'_, f64> = w.view();
+                let mut s = GlmSpec::logit();
+                s.epsilon = EPS;
+                s.weights = Some(wv);
+                let fit = fit_glm(design.view(), y.view(), &s).unwrap();
+                let (b, inverse, iterations, refined) = naive_row_by_row_logit(design, &y, w, EPS);
+                assert_eq!(refined, must_refine);
+                assert_eq!(fit.iterations, iterations);
+                close(
+                    "coefficients",
+                    fit.coefficients.as_slice().unwrap(),
+                    b.as_slice().unwrap(),
+                    1e-10,
+                );
+                // (X'WX)^{-1} of the last step, the dispersion of a binomial being 1. An inverse
+                // holds the rounding of the gram times its condition number, about 1e7 with the
+                // near-duplicate.
+                close(
+                    "vcov",
+                    fit.vcov.as_slice().unwrap(),
+                    inverse.as_standard_layout().as_slice().unwrap(),
+                    if must_refine { 1e-8 } else { 1e-10 },
+                );
+                // The QR, from the weighted rows the blocked product kept.
+                let (qr, _) = fit_glm_solved(design.view(), y.view(), &s, true).unwrap();
+                assert_eq!(qr.iterations, iterations);
+                close(
+                    "QR coefficients",
+                    qr.coefficients.as_slice().unwrap(),
+                    b.as_slice().unwrap(),
+                    1e-10,
+                );
+            }
+        }
+    }
 
     /// Fits at the default epsilon (1e-10) against R at 1e-14, for quantities that
     /// converge only linearly under the deviance-change rule (non-canonical links; SEs and

@@ -99,7 +99,9 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
-use crate::econometrics::glm::{GlmFamily, GlmLink, GlmSpec, fit_glm};
+use crate::econometrics::glm::{
+    GlmControl, GlmFamily, GlmLink, GlmSpec, LeanStart, fit_glm, lean_logit_refined,
+};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
 use crate::regression::ols::solve_ols;
@@ -918,6 +920,36 @@ impl fmt::Display for LtmleResult {
 /// - van der Laan & Gruber (2012), Int J Biostat 8(1), Article 9
 /// - Lendle et al. (2017), JSS 81(1)
 pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResult> {
+    run_ltmle_with(
+        data,
+        config,
+        FitPaths {
+            lean: true,
+            warm: true,
+        },
+    )
+}
+
+/// How the iterative nuisance fits run. With either switch on the fits reach the same maximum-
+/// likelihood estimates to the convergence rule, with iteration counts and rule-slack differences
+/// as described in validation/econometrics/ltmle.md, "Nuisance fits". Tests turn them off to
+/// compare with the shared GLM from glm.fit's start.
+#[derive(Debug, Clone, Copy)]
+struct FitPaths {
+    /// Through [`lean_logit_refined`], falling back to [`fit_glm`] whenever a fit leaves its
+    /// path (separation, a rank-deficient or ill-conditioned design, no convergence), so that
+    /// the shared GLM reports those cases.
+    lean: bool,
+    /// Each earlier Q regression starts from the later node's coefficients ([`warm_start`]),
+    /// when `max_iter` is at least [`WARM_MIN_MAX_ITER`].
+    warm: bool,
+}
+
+fn run_ltmle_with(
+    data: &LtmleData,
+    config: LtmleConfig,
+    paths: FitPaths,
+) -> EconResult<LtmleResult> {
     validate_config(&config)?;
     let n = data.n_obs();
     let t_max = data.time_points();
@@ -982,7 +1014,7 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
     let y_scaled = y.mapv(|v| (v - scale.lower) / scale.width);
 
     let designs = HistoryDesigns::new(data)?;
-    let g = fit_treatment_models(data, &designs, &config, &mut notes)?;
+    let g = fit_treatment_models(data, &designs, &config, paths, &mut notes)?;
     // The last node's Q regression has the same response and design for every regime.
     let last_q = fit_q(
         &designs,
@@ -990,6 +1022,8 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
         y_scaled.view(),
         &config,
         &data.treatment_names,
+        None,
+        paths,
         &mut notes,
     )?;
 
@@ -997,7 +1031,7 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
     for ((regime, d, label), follow) in regimes.into_iter().zip(&follow) {
         estimates.push(estimate_regime(
             data, regime, &d, label, follow, &designs, &g, &last_q, &y_scaled, &scale, &config,
-            &mut notes,
+            paths, &mut notes,
         )?);
     }
 
@@ -1225,52 +1259,69 @@ fn followers(data: &LtmleData, d: &[Vec<u8>], label: &str) -> EconResult<Vec<Vec
     Ok(out)
 }
 
-/// The observed-history designs: `q[t]` has the columns "(Intercept)", L_1.., A_1, ...,
-/// L_t.., A_t (R's `reformulate` order); the g design of node t is `q[t]` without its last
-/// column. `a_cols[t][s]` is the column of A_s in `q[t]` (s <= t).
+/// The observed-history designs, built once and shared by every regime: `q[t]` has the
+/// columns "(Intercept)", L_1.., A_1, ..., L_t.., A_t (R's `reformulate` order); the g design
+/// of node t is `q[t]` without its last column. `a_cols[t][s]` is the column of A_s in `q[t]`
+/// (s <= t), and `l_means[t]` the means of the covariates L_t.
 struct HistoryDesigns {
     q: Vec<Array2<f64>>,
     names: Vec<Vec<String>>,
     a_cols: Vec<Vec<usize>>,
+    l_means: Vec<Vec<f64>>,
 }
 
 impl HistoryDesigns {
     fn new(data: &LtmleData) -> EconResult<Self> {
         let n = data.n_obs();
         let t_max = data.time_points();
-        let (mut q, mut names, mut a_cols) = (
-            Vec::with_capacity(t_max),
-            Vec::with_capacity(t_max),
-            Vec::with_capacity(t_max),
-        );
+        let mut q: Vec<Array2<f64>> = Vec::with_capacity(t_max);
+        let mut names: Vec<Vec<String>> = Vec::with_capacity(t_max);
+        let mut a_cols: Vec<Vec<usize>> = Vec::with_capacity(t_max);
+        let mut l_means = Vec::with_capacity(t_max);
         for node in 0..t_max {
             resource::checkpoint()?;
-            let mut p = 1usize;
-            for s in 0..=node {
-                p = checked_add(p, checked_add(data.covariates[s].ncols(), 1)?)?;
-            }
+            let l = &data.covariates[node];
+            // Each design extends the previous one: its rows are that row, L_node and A_node.
+            let prev = node.checked_sub(1).map(|s| &q[s]);
+            let p0 = prev.map_or(1, |x| x.ncols());
+            let p = checked_add(p0, checked_add(l.ncols(), 1)?)?;
             let mut x = resource::try_zeros2(n, p, "LTMLE history design")?;
-            let mut nm = Vec::with_capacity(p);
-            let mut ac = Vec::with_capacity(node + 1);
-            x.column_mut(0).fill(1.0);
-            nm.push("(Intercept)".to_string());
-            let mut j = 1;
-            for s in 0..=node {
-                for (c, col) in data.covariates[s].columns().into_iter().enumerate() {
-                    x.column_mut(j).assign(&col);
-                    nm.push(data.covariate_names[s][c].clone());
-                    j += 1;
+            for (i, mut row) in x.rows_mut().into_iter().enumerate() {
+                let (mut head, mut tail) = row.view_mut().split_at(ndarray::Axis(0), p0);
+                match prev {
+                    Some(px) => head.assign(&px.row(i)),
+                    None => head.fill(1.0),
                 }
-                x.column_mut(j).assign(&data.treatments[s]);
-                nm.push(data.treatment_names[s].clone());
-                ac.push(j);
-                j += 1;
+                let last = l.ncols();
+                for (v, c) in tail.iter_mut().zip(l.row(i)) {
+                    *v = *c;
+                }
+                tail[last] = data.treatments[node][i];
             }
+            let mut nm = names
+                .last()
+                .cloned()
+                .unwrap_or_else(|| vec!["(Intercept)".to_string()]);
+            nm.extend(data.covariate_names[node].iter().cloned());
+            nm.push(data.treatment_names[node].clone());
+            let mut ac = a_cols.last().cloned().unwrap_or_default();
+            ac.push(p - 1);
+            l_means.push(
+                l.columns()
+                    .into_iter()
+                    .map(|c| c.sum() / n as f64)
+                    .collect::<Vec<f64>>(),
+            );
             q.push(x);
             names.push(nm);
             a_cols.push(ac);
         }
-        Ok(Self { q, names, a_cols })
+        Ok(Self {
+            q,
+            names,
+            a_cols,
+            l_means,
+        })
     }
 
     /// The g design of node t (the Q design without A_t) and its names.
@@ -1289,28 +1340,27 @@ fn identified_linear_predictor(
     a_cols: &[usize],
     d: Option<&[Vec<u8>]>,
 ) -> Array1<f64> {
-    let p = x.ncols();
-    // column -> node whose regime value replaces it
-    let mut set: Vec<Option<usize>> = vec![None; p];
+    // Identified coefficients off the A_s columns, row by row in the design's memory order;
+    // each A_s column's coefficient applied to the regime's values afterwards.
+    let mut fixed = coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
+    let mut set: Vec<(usize, f64)> = Vec::new();
     if d.is_some() {
         for (s, &c) in a_cols.iter().enumerate() {
-            if c < p {
-                set[c] = Some(s);
+            if c < fixed.len() {
+                set.push((s, fixed[c]));
+                fixed[c] = 0.0;
             }
         }
     }
     let mut eta = Array1::<f64>::zeros(x.nrows());
-    for (j, (&b, col)) in coefficients.iter().zip(x.columns()).enumerate() {
-        if b.is_nan() {
-            continue;
-        }
-        match (set[j], d) {
-            (Some(s), Some(d)) => {
-                for (e, &v) in eta.iter_mut().zip(&d[s]) {
-                    *e += f64::from(v) * b;
-                }
+    for (e, row) in eta.iter_mut().zip(x.rows()) {
+        *e = row.dot(&fixed);
+    }
+    if let Some(d) = d {
+        for (s, b) in set {
+            for (e, &v) in eta.iter_mut().zip(&d[s]) {
+                *e += f64::from(v) * b;
             }
-            _ => eta.scaled_add(b, &col),
         }
     }
     eta
@@ -1391,7 +1441,9 @@ pub struct NodeModel {
     pub coefficients: Vec<f64>,
     /// The fit converged (true for least-squares fits).
     pub converged: bool,
-    /// IRLS iterations (0 for least-squares fits).
+    /// IRLS iterations (0 for least-squares fits). A logistic Q node before the last normally
+    /// starts from the later node's coefficients, so its count is not comparable with
+    /// glm.fit's from glm.fit's own start.
     pub iterations: usize,
 }
 
@@ -1409,10 +1461,80 @@ fn glm_spec<'a>(family: GlmFamily, config: &LtmleConfig) -> GlmSpec<'a> {
     spec
 }
 
+/// A response whose mean is this close to 0 or 1 goes straight to the shared GLM.
+const SATURATED_MEAN: f64 = 1e-6;
+
+/// Below this `max_iter` the Q regressions keep glm.fit's start. The limit decides whether a fit
+/// is reported as not converged, on the step count from that start, which a warm start would
+/// undercut. Fits that can take the warm path (a response mean off [`SATURATED_MEAN`]) need well
+/// under this many steps from glm.fit's start: Fisher scoring gains about one unit of logit per
+/// step, and the most measured at the default tolerance, counting all 11,292 such fits of a
+/// sweep, is 42 (validation/econometrics/ltmle.md, "Nuisance fits").
+const WARM_MIN_MAX_ITER: usize = 50;
+
+/// One logistic nuisance fit: the coefficients (NaN for aliased columns), the fitted values
+/// and the convergence record.
+struct LogitNode {
+    coefficients: Array1<f64>,
+    fitted: Array1<f64>,
+    converged: bool,
+    iterations: usize,
+}
+
+/// `glm(y ~ x - 1, family)` with logit link: the lean IRLS when the fit stays on its path, on
+/// which the shared GLM reports nothing, from `start` or glm.fit's start; otherwise the shared
+/// GLM from glm.fit's start, with its warnings and rank handling.
+#[allow(clippy::too_many_arguments)]
+fn fit_logit_node(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    family: GlmFamily,
+    start: Option<ArrayView1<f64>>,
+    config: &LtmleConfig,
+    what: &str,
+    names: &[String],
+    paths: FitPaths,
+    notes: &mut FitNotes,
+) -> EconResult<LogitNode> {
+    // The binomial family warns about a response that is not 0/1; the lean path does not. A
+    // response saturated at 0 or 1 (an extreme fluctuation at the later node) drives the linear
+    // predictor to the link's clamp, where the shared GLM reports on the fit.
+    let mean = y.sum() / y.len() as f64;
+    let saturated = !(SATURATED_MEAN..=1.0 - SATURATED_MEAN).contains(&mean);
+    let lean_ok = paths.lean
+        && !saturated
+        && (family != GlmFamily::Binomial || y.iter().all(|v| *v == 0.0 || *v == 1.0));
+    if lean_ok {
+        let ctl = GlmControl {
+            epsilon: config.tolerance,
+            max_iter: config.max_iter,
+        };
+        let from = start.map_or(LeanStart::Mustart, LeanStart::Coef);
+        if let Some(fit) = lean_logit_refined(x, y, None, from, ctl)? {
+            notes.n_fits += 1;
+            return Ok(LogitNode {
+                coefficients: fit.coefficients,
+                fitted: Array1::from_vec(fit.fitted),
+                converged: true,
+                iterations: fit.iterations,
+            });
+        }
+    }
+    let fit = fit_glm(x, y, &glm_spec(family, config))?;
+    notes.push_glm(what, &fit, names);
+    Ok(LogitNode {
+        coefficients: fit.coefficients,
+        fitted: fit.fitted,
+        converged: fit.converged,
+        iterations: fit.iterations,
+    })
+}
+
 fn fit_treatment_models(
     data: &LtmleData,
     designs: &HistoryDesigns,
     config: &LtmleConfig,
+    paths: FitPaths,
     notes: &mut FitNotes,
 ) -> EconResult<TreatmentModels> {
     let t_max = data.time_points();
@@ -1421,16 +1543,20 @@ fn fit_treatment_models(
         models: Vec::with_capacity(t_max),
         fitted: Vec::with_capacity(t_max),
     };
-    let spec = glm_spec(GlmFamily::Binomial, config);
     for t in 0..t_max {
         resource::checkpoint()?;
         let (x, names) = designs.g(t);
-        let fit = fit_glm(x, data.treatments[t].view(), &spec)?;
-        notes.push_glm(
+        let fit = fit_logit_node(
+            x,
+            data.treatments[t].view(),
+            GlmFamily::Binomial,
+            None,
+            config,
             &format!("g model for {}", data.treatment_names[t]),
-            &fit,
             names,
-        );
+            paths,
+            notes,
+        )?;
         out.models.push(NodeModel {
             node: t,
             names: names.to_vec(),
@@ -1444,13 +1570,17 @@ fn fit_treatment_models(
     Ok(out)
 }
 
-/// The Q regression of node t: `q_next` on the observed history through A_t.
+/// The Q regression of node t: `q_next` on the observed history through A_t, from `start`
+/// when given (logistic model).
+#[allow(clippy::too_many_arguments)]
 fn fit_q(
     designs: &HistoryDesigns,
     t: usize,
     q_next: ArrayView1<f64>,
     config: &LtmleConfig,
     treatment_names: &[String],
+    start: Option<ArrayView1<f64>>,
+    paths: FitPaths,
     notes: &mut FitNotes,
 ) -> EconResult<(Array1<f64>, NodeModel)> {
     let x = designs.q[t].view();
@@ -1458,8 +1588,17 @@ fn fit_q(
     let what = format!("Q model at {}", treatment_names[t]);
     match config.q_model {
         LtmleQModel::Logistic => {
-            let fit = fit_glm(x, q_next, &glm_spec(GlmFamily::QuasiBinomial, config))?;
-            notes.push_glm(&what, &fit, names);
+            let fit = fit_logit_node(
+                x,
+                q_next,
+                GlmFamily::QuasiBinomial,
+                start,
+                config,
+                &what,
+                names,
+                paths,
+                notes,
+            )?;
             let model = NodeModel {
                 node: t,
                 names: names.clone(),
@@ -1488,6 +1627,34 @@ fn fit_q(
     }
 }
 
+/// The start of the logistic Q regression of node `t - 1`, whose response is the targeted
+/// prediction of node t: on the logit scale, node t's linear predictor with every `A_s, s <= t`,
+/// at the regime's value, plus eps. The start is beta on the shared history, with the columns
+/// node `t - 1` does not have (L_t and A_t) and eps moved into the intercept at their means. The
+/// coefficients of the earlier `A_s` stay on the observed columns, although the response has
+/// those treatments at the regime's values, so this is an approximate start, which IRLS then
+/// corrects. `None` when a coefficient is aliased (glm.fit's start then).
+fn warm_start(
+    designs: &HistoryDesigns,
+    coefficients: ArrayView1<f64>,
+    t: usize,
+    eps: f64,
+    d_t: &[u8],
+) -> Option<Array1<f64>> {
+    let p0 = designs.q[t - 1].ncols();
+    let p = coefficients.len();
+    let d_mean = d_t.iter().map(|v| f64::from(*v)).sum::<f64>() / d_t.len() as f64;
+    let l: f64 = coefficients
+        .slice(ndarray::s![p0..p - 1])
+        .iter()
+        .zip(&designs.l_means[t])
+        .map(|(b, m)| b * m)
+        .sum();
+    let mut start = coefficients.slice(ndarray::s![..p0]).to_owned();
+    start[0] += l + coefficients[p - 1] * d_mean + eps;
+    start.iter().all(|v| v.is_finite()).then_some(start)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn estimate_regime(
     data: &LtmleData,
@@ -1501,6 +1668,7 @@ fn estimate_regime(
     y: &Array1<f64>,
     scale: &OutcomeScale,
     config: &LtmleConfig,
+    paths: FitPaths,
     notes: &mut FitNotes,
 ) -> EconResult<RegimeEstimate> {
     let n = data.n_obs();
@@ -1551,6 +1719,7 @@ fn estimate_regime(
     let mut eps = vec![0.0; t_max];
     let mut q_star: Vec<Array1<f64>> = vec![Array1::zeros(0); t_max];
     let mut q_models = vec![NodeModel::default(); t_max];
+    let mut start: Option<Array1<f64>> = None;
     for t in (0..t_max).rev() {
         resource::checkpoint()?;
         let fitted;
@@ -1563,6 +1732,8 @@ fn estimate_regime(
                 q_next.view(),
                 config,
                 &data.treatment_names,
+                start.as_ref().map(|s| s.view()),
+                paths,
                 notes,
             )?;
             (&fitted.0, &fitted.1)
@@ -1574,10 +1745,10 @@ fn estimate_regime(
             &designs.a_cols[t],
             Some(d),
         );
-        let ht = Array1::from(h[t].clone());
+        let ht = ArrayView1::from(&h[t][..]);
         let qs = match config.q_model {
             LtmleQModel::Logistic => {
-                let f = fit_fluctuation(q_next.view(), eta.view(), ht.view(), config)?;
+                let f = fit_fluctuation(q_next.view(), eta.view(), ht, config)?;
                 notes.n_fits += 1;
                 notes.all_converged &= f.converged;
                 if !f.converged {
@@ -1587,6 +1758,9 @@ fn estimate_regime(
                     ));
                 }
                 eps[t] = f.epsilon;
+                if paths.warm && config.max_iter >= WARM_MIN_MAX_ITER && t > 0 {
+                    start = warm_start(designs, coef.view(), t, eps[t], &d[t]);
+                }
                 eta.mapv(|e| linkinv(e + eps[t]))
             }
             LtmleQModel::Linear => {
@@ -1604,7 +1778,7 @@ fn estimate_regime(
         for i in 0..n {
             ic[i] += ht[i] * (q_next[i] - qs[i]);
         }
-        q_next = qs.clone();
+        q_next.assign(&qs);
         q_star[t] = qs;
     }
     let psi_s = q_next.mean().unwrap_or(f64::NAN);
@@ -1669,20 +1843,27 @@ struct Fluctuation {
 /// `sum_i h_i (y_i - plogis(offset_i + eps)) = 0` in O(n) per iteration instead of a
 /// general GLM fit, with glm.fit's stopping rule `|dev - dev_old| / (|dev| + 0.1) <
 /// tolerance`, glm.fit's step halving when the deviance is not finite, and one polishing
-/// Newton step after the rule is met.
+/// Newton step after the rule is met. One pass over the followers per trial value gives its
+/// deviance, score and information.
 fn fit_fluctuation(
     y: ArrayView1<f64>,
     offset: ArrayView1<f64>,
     h: ArrayView1<f64>,
     config: &LtmleConfig,
 ) -> EconResult<Fluctuation> {
-    let rows: Vec<usize> = (0..h.len()).filter(|&i| h[i] > 0.0).collect();
-    // binomial deviance, quasi-binomial working form: 2 sum h [y log(y/p) + (1-y) log((1-y)/(1-p))]
-    let deviance = |eps: f64| -> f64 {
-        let mut d = 0.0;
-        for &i in &rows {
-            let p = linkinv(offset[i] + eps);
-            let (yi, wi) = (y[i], h[i]);
+    // (y, offset, h) of the followers
+    let mut rows: Vec<[f64; 3]> = resource::try_with_capacity(h.len(), "LTMLE fluctuation")?;
+    for (&hi, (&yi, &oi)) in h.iter().zip(y.iter().zip(offset.iter())) {
+        if hi > 0.0 {
+            rows.push([yi, oi, hi]);
+        }
+    }
+    // (deviance, score, information) at eps; the deviance is the binomial deviance in its
+    // quasi-binomial working form, 2 sum h [y log(y/p) + (1-y) log((1-y)/(1-p))]
+    let eval = |eps: f64| -> (f64, f64, f64) {
+        let (mut d, mut score, mut info) = (0.0, 0.0, 0.0);
+        for &[yi, oi, wi] in &rows {
+            let p = linkinv(oi + eps);
             let a = if yi > 0.0 { yi * (yi / p).ln() } else { 0.0 };
             let b = if yi < 1.0 {
                 (1.0 - yi) * ((1.0 - yi) / (1.0 - p)).ln()
@@ -1690,11 +1871,13 @@ fn fit_fluctuation(
                 0.0
             };
             d += 2.0 * wi * (a + b);
+            score += wi * (yi - p);
+            info += wi * p * (1.0 - p);
         }
-        d
+        (d, score, info)
     };
     let mut eps = 0.0;
-    let mut dev = deviance(eps);
+    let (mut dev, mut score, mut info) = eval(eps);
     if !dev.is_finite() {
         return Err(EconError::Computation(
             "LTMLE: the fluctuation's starting deviance is not finite".into(),
@@ -1702,12 +1885,6 @@ fn fit_fluctuation(
     }
     for iter in 1..=config.max_iter {
         resource::checkpoint()?;
-        let (mut score, mut info) = (0.0, 0.0);
-        for &i in &rows {
-            let p = linkinv(offset[i] + eps);
-            score += h[i] * (y[i] - p);
-            info += h[i] * p * (1.0 - p);
-        }
         if info.is_nan() || info <= 0.0 || score == 0.0 {
             return Ok(Fluctuation {
                 epsilon: eps,
@@ -1717,30 +1894,24 @@ fn fit_fluctuation(
         }
         let mut step = score / info;
         let mut new_eps = eps + step;
-        let mut new_dev = deviance(new_eps);
+        let mut new = eval(new_eps);
         let mut halvings = 0;
         // glm.fit halves the step only when the deviance is not finite.
-        while !new_dev.is_finite() && halvings < 30 {
+        while !new.0.is_finite() && halvings < 30 {
             step /= 2.0;
             new_eps = eps + step;
-            new_dev = deviance(new_eps);
+            new = eval(new_eps);
             halvings += 1;
         }
-        let change = (new_dev - dev).abs() / (new_dev.abs() + 0.1);
+        let change = (new.0 - dev).abs() / (new.0.abs() + 0.1);
         eps = new_eps;
-        dev = new_dev;
+        (dev, score, info) = new;
         if change < config.tolerance {
             // One more Newton step: the deviance rule leaves an O(sqrt(tolerance)) error in
             // eps when the weights are large, and Newton's step squares it at O(n) cost.
-            let (mut score, mut info) = (0.0, 0.0);
-            for &i in &rows {
-                let p = linkinv(offset[i] + eps);
-                score += h[i] * (y[i] - p);
-                info += h[i] * p * (1.0 - p);
-            }
             if info > 0.0 {
                 let polished = eps + score / info;
-                if deviance(polished).is_finite() {
+                if eval(polished).0.is_finite() {
                     eps = polished;
                 }
             }
@@ -2623,6 +2794,519 @@ mod tests {
             format!("{}", InterventionType::Static(false)),
             "Static (A=0)"
         );
+    }
+
+    /// `t_max` nodes with two noisy covariates each; the treatments follow the covariates and
+    /// the previous treatment, the outcome is Bernoulli in the covariates and treatments.
+    fn long_horizon(n: usize, t_max: usize, seed: u64) -> LtmleData {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let (mut ls, mut az) = (Vec::new(), Vec::new());
+        let mut prev = Array1::<f64>::zeros(n);
+        for _ in 0..t_max {
+            let x = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+            let a: Array1<f64> = (0..n)
+                .map(|i| {
+                    let p = crate::econometrics::glm::plogis(
+                        0.3 * x[[i, 0]] + 0.2 * prev[i] - 0.1 * x[[i, 1]],
+                    );
+                    if rng.gen_range(0.0..1.0) < p {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            prev = a.clone();
+            ls.push(x);
+            az.push(a);
+        }
+        let y: Array1<f64> = (0..n)
+            .map(|i| {
+                let mut v = 0.2 * ls[0][[i, 0]] - 0.3 * ls[t_max - 1][[i, 1]];
+                for a in &az {
+                    v += 0.4 * (a[i] - 0.5);
+                }
+                let p = crate::econometrics::glm::plogis(v);
+                if rng.gen_range(0.0..1.0) < p {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut outcomes = vec![Array1::zeros(n); t_max - 1];
+        outcomes.push(y);
+        LtmleData::new(outcomes, az, ls).unwrap()
+    }
+
+    #[test]
+    fn test_ltmle_earlier_q_fits_start_from_the_later_node() {
+        // A Q regression at node t has as its response the targeted prediction of node t + 1,
+        // whose coefficients on the shared history are a close start: IRLS needs far fewer
+        // steps there than from glm.fit's start.
+        let data = long_horizon(2000, 6, 3);
+        let q_steps = |warm: bool| -> usize {
+            let r = run_ltmle_with(&data, LtmleConfig::default(), FitPaths { lean: true, warm })
+                .unwrap();
+            assert!(r.converged, "{:?}", r.warnings);
+            std::iter::once(&r.regime_estimate)
+                .chain(r.contrast_estimate.iter())
+                .flat_map(|e| e.q_models[..5].iter().map(|m| m.iterations))
+                .sum()
+        };
+        let (cold, warm) = (q_steps(false), q_steps(true));
+        assert!(3 * warm <= 2 * cold, "warm {warm} steps, cold {cold} steps");
+    }
+
+    /// The wave-2B harness's T-node design with its Bernoulli outcome: a few followers of each
+    /// regime at the last node, so that some seeds saturate one regime's targeted predictions.
+    fn sparse_followers(n: usize, t_max: usize, seed: u64) -> LtmleData {
+        use rand::{Rng, SeedableRng};
+        let plogis = crate::econometrics::glm::plogis;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let (mut ls, mut az) = (Vec::new(), Vec::new());
+        let mut prev = Array1::<f64>::zeros(n);
+        for _ in 0..t_max {
+            let x = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+            let a: Array1<f64> = (0..n)
+                .map(|i| {
+                    let p = plogis(0.3 * x[[i, 0]] + 0.2 * prev[i]);
+                    f64::from(u8::from(rng.gen_range(0.0..1.0) < p))
+                })
+                .collect();
+            prev = a.clone();
+            ls.push(x);
+            az.push(a);
+        }
+        let latent: Array1<f64> = (0..n)
+            .map(|i| {
+                let mut v = 1.0 + 0.2 * ls[0][[i, 0]] + rng.gen_range(-0.5..0.5);
+                for (t, a) in az.iter().enumerate() {
+                    v += (0.5 - 0.2 * t as f64 / t_max as f64) * a[i];
+                }
+                v
+            })
+            .collect();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let mean = latent.mean().unwrap();
+        let y = latent.mapv(|v| f64::from(u8::from(rng.gen_range(0.0..1.0) < plogis(v - mean))));
+        let mut outcomes = vec![Array1::zeros(n); t_max - 1];
+        outcomes.push(y);
+        LtmleData::new(outcomes, az, ls).unwrap()
+    }
+
+    /// Each number within `tol` of its reference, relative to the largest entry of the reference
+    /// (a coefficient vector, one fit's EIC): `a` and `b` of length 1 are held relative to `b`.
+    fn assert_relative(what: &str, a: &[f64], b: &[f64], tol: f64) {
+        assert_eq!(a.len(), b.len(), "{what}");
+        let scale = b
+            .iter()
+            .filter(|v| v.is_finite())
+            .fold(0.0f64, |m, v| m.max(v.abs()));
+        for (x, y) in a.iter().zip(b) {
+            assert!(
+                x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() <= tol * scale,
+                "{what}: fast {x} vs reference {y}, {:e} relative to {scale}",
+                (x - y).abs() / scale
+            );
+        }
+    }
+
+    /// Every number the fast paths could move, against the shared GLM from glm.fit's start:
+    /// `estimand_tol` for the estimates and their standard errors, `nuisance_tol` for the
+    /// coefficients, predictions, fluctuations and the EIC. The bounds passed in hold on each
+    /// test's own data sets and are not general bounds; the gaps measured on a wider grid are in
+    /// validation/econometrics/ltmle.md, "Nuisance fits".
+    fn assert_same_as_shared_glm(
+        data: &LtmleData,
+        config: &LtmleConfig,
+        estimand_tol: f64,
+        nuisance_tol: f64,
+    ) {
+        let fast = run_ltmle(data, config.clone()).unwrap();
+        let reference = run_ltmle_with(
+            data,
+            config.clone(),
+            FitPaths {
+                lean: false,
+                warm: false,
+            },
+        )
+        .unwrap();
+        let estimand = |what: &str, a: f64, b: f64| assert_relative(what, &[a], &[b], estimand_tol);
+        let nuisance = |what: &str, a: &[f64], b: &[f64]| assert_relative(what, a, b, nuisance_tol);
+        estimand("ate", fast.ate, reference.ate);
+        estimand("se", fast.se, reference.se);
+        estimand("z", fast.z_stat, reference.z_stat);
+        nuisance("p", &[fast.p_value], &[reference.p_value]);
+        nuisance("eic", &fast.influence_curve, &reference.influence_curve);
+        assert_eq!(fast.n_model_fits, reference.n_model_fits);
+        // At a tolerance of rounding size the deviance rule itself is decided by rounding.
+        if config.tolerance >= 1e-10 {
+            assert_eq!(
+                (fast.converged, &fast.warnings),
+                (reference.converged, &reference.warnings)
+            );
+        }
+        for (a, b) in fast.g_models.iter().zip(&reference.g_models) {
+            nuisance("g coefficients", &a.coefficients, &b.coefficients);
+        }
+        for (a, b) in fast
+            .propensity_scores
+            .iter()
+            .zip(&reference.propensity_scores)
+        {
+            nuisance("propensities", a, b);
+        }
+        let estimates = |r: &LtmleResult| {
+            std::iter::once(r.regime_estimate.clone())
+                .chain(r.contrast_estimate.clone())
+                .collect::<Vec<_>>()
+        };
+        for (a, b) in estimates(&fast).iter().zip(&estimates(&reference)) {
+            estimand("psi", a.psi, b.psi);
+            estimand("psi se", a.se, b.se);
+            nuisance("eps", &a.fluctuation_coefs, &b.fluctuation_coefs);
+            assert_eq!(a.n_following, b.n_following);
+            assert_eq!(a.n_bounded, b.n_bounded);
+            assert_eq!(a.n_bounded_following, b.n_bounded_following);
+            for t in 0..a.q_models.len() {
+                nuisance(
+                    "Q coefficients",
+                    &a.q_models[t].coefficients,
+                    &b.q_models[t].coefficients,
+                );
+                nuisance("Q*", &a.targeted_predictions[t], &b.targeted_predictions[t]);
+                nuisance("cum g", &a.cumulative_g[t], &b.cumulative_g[t]);
+                nuisance("H", &a.clever_covariates[t], &b.clever_covariates[t]);
+            }
+        }
+    }
+
+    /// The default deviance rule stops each fit a little short of the maximum-likelihood
+    /// estimate, at a point that depends on its start. This bound holds on the data sets of the
+    /// tests that use it; test_ltmle_fast_paths_hold_the_gaps_measured_off_the_fixtures has the
+    /// data sets where it does not.
+    const DEFAULT_CONTROL_NUISANCE: f64 = 1e-9;
+
+    #[test]
+    fn test_ltmle_fast_paths_match_the_shared_glm() {
+        // Long histories (T = 10: the treatment columns correlate with the intercept and the
+        // normal equations refine), short ones, default and tight control.
+        for (t_max, n) in [(2, 400), (3, 500), (5, 800), (8, 1500), (10, 2500)] {
+            let data = long_horizon(n, t_max, 11 + t_max as u64);
+            assert_same_as_shared_glm(
+                &data,
+                &LtmleConfig::default(),
+                1e-10,
+                DEFAULT_CONTROL_NUISANCE,
+            );
+            assert_same_as_shared_glm(&data, &tight(), 1e-10, 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_ltmle_fast_paths_match_on_other_regimes() {
+        let data = long_horizon(1200, 4, 5);
+        let names: Vec<String> = (1..=4).map(|t| format!("L{t}_1")).collect();
+        let mut c = tight();
+        c.intervention = Regime::threshold_rules(&names, 0.0);
+        c.contrast = Some(Regime::Static(vec![1, 0, 1, 0]));
+        assert_same_as_shared_glm(&data, &c, 1e-10, 1e-10);
+        c.contrast = None;
+        c.intervention = Regime::Static(vec![0, 1, 1, 0]);
+        let fast = run_ltmle(&data, c.clone()).unwrap();
+        let reference = run_ltmle_with(
+            &data,
+            c,
+            FitPaths {
+                lean: false,
+                warm: false,
+            },
+        )
+        .unwrap();
+        assert_relative(
+            "psi",
+            &[fast.regime_estimate.psi],
+            &[reference.regime_estimate.psi],
+            1e-10,
+        );
+    }
+
+    #[test]
+    fn test_ltmle_fast_paths_keep_the_outcome_at_a_low_max_iter() {
+        // max_iter decides what is reported as not converged, on the step count from glm.fit's
+        // start, which a warm start would undercut: below WARM_MIN_MAX_ITER the fits keep it.
+        let data = long_horizon(1500, 6, 8);
+        let mut reported = Vec::new();
+        for max_iter in [2, 3, 4, 5, 6, WARM_MIN_MAX_ITER - 1] {
+            let mut c = LtmleConfig::default();
+            c.max_iter = max_iter;
+            assert_same_as_shared_glm(&data, &c, 1e-10, 1e-10);
+            let fast = run_ltmle(&data, c).unwrap();
+            let steps = |e: &RegimeEstimate| e.q_models.iter().map(|m| m.iterations).sum::<usize>();
+            let most = fast
+                .regime_estimate
+                .q_models
+                .iter()
+                .map(|m| m.iterations)
+                .max()
+                .unwrap();
+            reported.push((max_iter, fast.converged, steps(&fast.regime_estimate), most));
+        }
+        // the low limits do report non-convergence, and a fit then uses up to the limit
+        assert!(
+            reported[0..2].iter().all(|r| !r.1 && r.3 == r.0),
+            "{reported:?}"
+        );
+        assert!(reported[reported.len() - 1].1, "{reported:?}");
+        let mut c = LtmleConfig::default();
+        c.max_iter = WARM_MIN_MAX_ITER;
+        assert_same_as_shared_glm(&data, &c, 1e-10, DEFAULT_CONTROL_NUISANCE);
+        let warm = run_ltmle(&data, c).unwrap();
+        let cold = reported[reported.len() - 1].2;
+        let at_limit: usize = warm
+            .regime_estimate
+            .q_models
+            .iter()
+            .map(|m| m.iterations)
+            .sum();
+        assert!(at_limit < cold, "warm {at_limit} steps, cold {cold} steps");
+    }
+
+    #[test]
+    fn test_ltmle_fast_paths_report_a_saturated_regime_through_the_shared_glm() {
+        // An extreme fluctuation at a later node leaves an earlier Q response with its mean
+        // within SATURATED_MEAN of 0 or 1 and a flat likelihood, where the coefficients and the
+        // standard error depend on the start. long_horizon(2500, 10, 21) depends on that guard:
+        // from a warm start its numbers differ. sparse_followers(4000, 10, 3) is the harness's
+        // saturating case; it has the same warnings, leaves the lean path at the link's clamp as
+        // well, and passes without the guard.
+        for data in [long_horizon(2500, 10, 21), sparse_followers(4000, 10, 3)] {
+            assert_same_as_shared_glm(
+                &data,
+                &LtmleConfig::default(),
+                1e-10,
+                DEFAULT_CONTROL_NUISANCE,
+            );
+            assert_same_as_shared_glm(&data, &tight(), 1e-10, 1e-10);
+            let r = run_ltmle(&data, LtmleConfig::default()).unwrap();
+            assert!(
+                r.warnings.iter().any(|w| w.starts_with("Q model at")),
+                "{:?}",
+                r.warnings
+            );
+        }
+    }
+
+    /// `t_max` nodes where `strong` sets the confounding and `shift` the outcome's level;
+    /// `frac` keeps the outcome's probability as a fractional outcome instead of drawing from it.
+    fn shifted_outcome(
+        (n, t_max, seed): (usize, usize, u64),
+        shift: f64,
+        frac: bool,
+        strong: f64,
+    ) -> LtmleData {
+        use rand::{Rng, SeedableRng};
+        let plogis = crate::econometrics::glm::plogis;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let (mut ls, mut az) = (Vec::new(), Vec::new());
+        let mut prev = Array1::<f64>::zeros(n);
+        for _ in 0..t_max {
+            let x = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+            let a: Array1<f64> = (0..n)
+                .map(|i| {
+                    let p = plogis(strong * x[[i, 0]] + 0.2 * prev[i]);
+                    f64::from(u8::from(rng.gen_range(0.0..1.0) < p))
+                })
+                .collect();
+            prev = a.clone();
+            ls.push(x);
+            az.push(a);
+        }
+        let y: Array1<f64> = (0..n)
+            .map(|i| {
+                let mut v = shift + 0.3 * ls[0][[i, 0]] + rng.gen_range(-0.5..0.5);
+                for a in &az {
+                    v += 0.4 * a[i];
+                }
+                let p = plogis(v);
+                if frac {
+                    p
+                } else {
+                    f64::from(u8::from(rng.gen_range(0.0..1.0) < p))
+                }
+            })
+            .collect();
+        let mut outcomes = vec![Array1::zeros(n); t_max - 1];
+        outcomes.push(y);
+        LtmleData::new(outcomes, az, ls).unwrap()
+    }
+
+    #[test]
+    fn test_ltmle_fast_paths_hold_the_gaps_measured_off_the_fixtures() {
+        // The largest gaps of the sweep in validation/econometrics/ltmle.md, "Nuisance fits", at
+        // the default tolerance. Each data set has the bounds it meets, above the tests' usual
+        // 1e-10 and 1e-9, and its warnings and convergence status stay equal.
+        let shifted = |s, shift, strong| shifted_outcome(s, shift, false, strong);
+        for (data, estimand_tol, nuisance_tol) in [
+            (shifted((300, 3, 1), 1.5, 1.2), 1e-9, 2e-8),
+            (shifted((800, 8, 3), 3.0, 2.0), 1e-9, 1e-8),
+            (shifted((300, 3, 2), -5.0, 0.3), 1e-10, 2e-8),
+            (shifted((150, 4, 3), 1.5, 1.2), 1e-9, 2e-8),
+            (shifted((150, 4, 2), 3.0, 2.0), 1e-9, 1e-8),
+            (shifted((300, 3, 4), -5.0, 0.3), 1e-9, 2e-7),
+            (long_horizon(300, 6, 17), 5e-10, 1e-9),
+        ] {
+            assert_same_as_shared_glm(&data, &LtmleConfig::default(), estimand_tol, nuisance_tol);
+        }
+
+        // There the warm start causes the gap: without it the numbers keep the shared GLM's.
+        let lean = FitPaths {
+            lean: true,
+            warm: false,
+        };
+        let cold = FitPaths {
+            lean: false,
+            warm: false,
+        };
+        let warm_case = shifted((300, 3, 1), 1.5, 1.2);
+        let long_case = long_horizon(300, 6, 17);
+        for data in [&warm_case, &long_case] {
+            let a = run_ltmle_with(data, LtmleConfig::default(), lean).unwrap();
+            let b = run_ltmle_with(data, LtmleConfig::default(), cold).unwrap();
+            assert_relative("ate", &[a.ate], &[b.ate], 1e-13);
+            assert_relative("se", &[a.se], &[b.se], 1e-13);
+            let (x, y) = (&a.regime_estimate, &b.regime_estimate);
+            assert_relative("eps", &x.fluctuation_coefs, &y.fluctuation_coefs, 1e-12);
+
+            // and the warm numbers are the closer to the tight reference, the gap being the
+            // deviance rule's slack
+            let fast = run_ltmle(data, LtmleConfig::default()).unwrap();
+            let tight_reference = run_ltmle_with(data, tight(), cold).unwrap();
+            let distance = |r: &LtmleResult| (r.ate - tight_reference.ate).abs();
+            assert!(distance(&fast) < distance(&b));
+        }
+
+        // An always-near-0 regime: most of its fits run out of steps on both paths, psi is about
+        // 1e-13, and the lean path alone moves its relative numbers, with the warm start bit for
+        // bit the same. The ATE's gap stays at rounding.
+        let near_zero = long_horizon(1200, 8, 21);
+        assert_same_as_shared_glm(&near_zero, &LtmleConfig::default(), 1e-6, 1e-6);
+        let a = run_ltmle(&near_zero, LtmleConfig::default()).unwrap();
+        let b = run_ltmle_with(&near_zero, LtmleConfig::default(), lean).unwrap();
+        let c = run_ltmle_with(&near_zero, LtmleConfig::default(), cold).unwrap();
+        let near = |r: &LtmleResult| r.contrast_estimate.clone().unwrap();
+        assert!(near(&c).psi < 1e-12, "{}", near(&c).psi);
+        assert_eq!(near(&a).psi.to_bits(), near(&b).psi.to_bits());
+        assert_eq!(near(&a).fluctuation_coefs, near(&b).fluctuation_coefs);
+        assert_ne!(near(&a).psi.to_bits(), near(&c).psi.to_bits());
+        assert_relative("ate", &[a.ate], &[c.ate], 1e-13);
+    }
+
+    /// `base` with one more column in the third node's covariates: the first column of the
+    /// second node's, plus uniform noise of half-width `jitter`.
+    fn with_near_duplicate(base: &LtmleData, jitter: f64, seed: u64) -> LtmleData {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let n = base.n_obs();
+        let mut ls = base.covariates.clone();
+        let (a, b) = (ls[1].column(0).to_owned(), ls[2].ncols());
+        let mut extra = Array2::<f64>::zeros((n, b + 1));
+        for i in 0..n {
+            for j in 0..b {
+                extra[[i, j]] = ls[2][[i, j]];
+            }
+            extra[[i, b]] = a[i] + jitter * rng.gen_range(-1.0..1.0);
+        }
+        ls[2] = extra;
+        LtmleData::new(base.outcomes.clone(), base.treatments.clone(), ls).unwrap()
+    }
+
+    #[test]
+    fn test_ltmle_fast_paths_leave_for_collinear_and_separated_nodes() {
+        let base = long_horizon(800, 4, 9);
+        let cold = FitPaths {
+            lean: false,
+            warm: false,
+        };
+
+        // An exact duplicate reaches the shared GLM's aliasing report at each node that has it.
+        let data = with_near_duplicate(&base, 0.0, 21);
+        assert_same_as_shared_glm(&data, &tight(), 1e-10, 1e-10);
+        let r = run_ltmle(&data, LtmleConfig::default()).unwrap();
+        for node in [
+            "g model for A3",
+            "g model for A4",
+            "Q model at A3",
+            "Q model at A4",
+        ] {
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.starts_with(node) && w.contains("singularities")),
+                "{node}: {:?}",
+                r.warnings
+            );
+        }
+
+        // A near-duplicate reaches the shared GLM's QR: nodes 2 and 3 have the column, leave the
+        // lean path and count the steps from glm.fit's start, node 0 stays on the warm path.
+        let data = with_near_duplicate(&base, 1e-5, 21);
+        assert_same_as_shared_glm(&data, &tight(), 1e-10, 1e-10);
+        let data = with_near_duplicate(&base, 1e-7, 21);
+        // The g fits' rounding reaches the clever covariate, and these nodes' condition number,
+        // about 1e7, amplifies it in the near-duplicate's coefficient and the predictions; with
+        // the warm start off the gap is the same.
+        assert_same_as_shared_glm(&data, &tight(), 1e-10, 1e-8);
+        let fast = run_ltmle(&data, LtmleConfig::default()).unwrap();
+        let reference = run_ltmle_with(&data, LtmleConfig::default(), cold).unwrap();
+        assert!(fast.warnings.is_empty(), "{:?}", fast.warnings);
+        let steps = |r: &RegimeEstimate| -> Vec<usize> {
+            r.q_models.iter().map(|m| m.iterations).collect()
+        };
+        let (a, b) = (
+            steps(&fast.regime_estimate),
+            steps(&reference.regime_estimate),
+        );
+        assert_eq!(a[2..], b[2..], "{a:?} vs {b:?}");
+        assert!(a[0] < b[0], "{a:?} vs {b:?}");
+        // The last node's response is the outcome itself: the same fit, bit for bit.
+        assert_eq!(
+            fast.regime_estimate.q_models[3].coefficients,
+            reference.regime_estimate.q_models[3].coefficients
+        );
+
+        // An outcome separated by a covariate reaches its separation warnings.
+        let mut outcomes = base.outcomes.clone();
+        outcomes[3] = base.covariates[0]
+            .column(0)
+            .mapv(|v| if v > 0.0 { 1.0 } else { 0.0 });
+        let data =
+            LtmleData::new(outcomes, base.treatments.clone(), base.covariates.clone()).unwrap();
+        assert_same_as_shared_glm(
+            &data,
+            &LtmleConfig::default(),
+            1e-10,
+            DEFAULT_CONTROL_NUISANCE,
+        );
+        let r = run_ltmle(&data, LtmleConfig::default()).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("fitted probabilities numerically 0 or 1")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_ltmle_linear_q_matches_after_the_row_predictions() {
+        let data = long_horizon(1000, 5, 13);
+        let mut c = LtmleConfig::default();
+        c.q_model = LtmleQModel::Linear;
+        assert_same_as_shared_glm(&data, &c, 1e-10, 1e-10);
     }
 
     #[test]
