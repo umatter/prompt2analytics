@@ -2840,8 +2840,8 @@ fn aft_log_survival(z: f64, dist: AftDistribution) -> (f64, f64, f64) {
             (-ez, -ez, -ez)
         }
         AftDistribution::LogNormal => {
-            let m = normal_hazard(z);
-            (ln_normal_sf(z), -m, -m * (m - z))
+            let (ls, m) = normal_ln_sf_hazard(z);
+            (ls, -m, -m * (m - z))
         }
         AftDistribution::LogLogistic => {
             let pz = logistic(z);
@@ -2851,23 +2851,128 @@ fn aft_log_survival(z: f64, dist: AftDistribution) -> (f64, f64, f64) {
 }
 
 /// `ln(1 - Phi(z))` without underflow (R `pnorm(z, lower.tail = FALSE, log.p = TRUE)`).
+#[cfg(test)]
 fn ln_normal_sf(z: f64) -> f64 {
-    // Upper tails from the chi-square(1) tail (about 1e-13 relative); statrs `erfc` is off by
-    // 2.5e-11 relative at z = 5.
-    if z < 0.0 {
-        (-0.5 * normal_p_value_two_sided(z)).ln_1p()
-    } else if z < 30.0 {
-        (0.5 * normal_p_value_two_sided(z)).ln()
-    } else {
-        let z2 = 1.0 / (z * z);
-        let series = 1.0 - z2 * (1.0 - z2 * (3.0 - z2 * (15.0 - z2 * (105.0 - z2 * 945.0))));
-        -0.5 * z * z - z.ln() - LN_SQRT_2PI + series.ln()
-    }
+    normal_ln_sf_hazard(z).0
 }
 
 /// The normal hazard `phi(z) / (1 - Phi(z))`, exact in both tails.
+#[cfg(test)]
 fn normal_hazard(z: f64) -> f64 {
-    (-0.5 * z * z - LN_SQRT_2PI - ln_normal_sf(z)).exp()
+    normal_ln_sf_hazard(z).1
+}
+
+/// `(ln(1 - Phi(z)), phi(z) / (1 - Phi(z)))` in one evaluation.
+///
+/// Cody's rational approximations as in R's `pnorm_both` (about 1e-16 relative in the tail
+/// it evaluates). Above 0.674 the tail is `exp(-z^2 / 2) r(z)` with `r` rational, so the
+/// hazard is `1 / (sqrt(2 pi) r(z))` without evaluating the exponential; `exp(-z^2 / 2)` is
+/// formed as R does, splitting `z^2` so the log keeps full precision.
+#[allow(clippy::excessive_precision)] // Cody's coefficients as R's pnorm.c gives them
+fn normal_ln_sf_hazard(z: f64) -> (f64, f64) {
+    const A: [f64; 5] = [
+        2.235_252_035_460_683_928_7,
+        161.028_231_068_555_878_81,
+        1_067.689_485_460_370_958_2,
+        18_154.981_253_343_561_249,
+        0.065_682_337_918_207_449_113,
+    ];
+    const B: [f64; 4] = [
+        47.202_581_904_688_241_87,
+        976.098_551_737_776_693_22,
+        10_260.932_208_618_978_205,
+        45_507.789_335_026_729_956,
+    ];
+    const C: [f64; 9] = [
+        0.398_941_512_088_134_667_64,
+        8.883_149_794_388_375_941_2,
+        93.506_656_132_177_855_979,
+        597.270_276_394_800_262_26,
+        2_494.537_585_290_372_671_1,
+        6_848.190_450_536_282_332_6,
+        11_602.651_437_647_350_124,
+        9_842.714_838_383_978_021_8,
+        1.076_557_677_372_019_231_7e-8,
+    ];
+    const D: [f64; 8] = [
+        22.266_688_044_328_115_691,
+        235.387_901_782_624_998_61,
+        1_519.377_599_407_554_805,
+        6_485.558_298_266_760_755,
+        18_615.571_640_885_098_091,
+        34_900.952_721_145_977_266,
+        38_912.003_286_093_271_411,
+        19_685.429_676_859_990_727,
+    ];
+    const P: [f64; 6] = [
+        0.215_898_534_057_956_99,
+        0.127_401_161_160_247_363_9,
+        0.022_235_277_870_649_807,
+        0.001_421_619_193_227_893_466,
+        2.911_287_495_116_879_2e-5,
+        0.023_073_441_764_940_173_03,
+    ];
+    const Q: [f64; 5] = [
+        1.284_260_096_144_911_21,
+        0.468_238_212_480_865_118,
+        0.065_988_137_868_928_551_5,
+        0.003_782_396_332_027_582_44,
+        7.297_515_550_839_662_05e-5,
+    ];
+    const FRAC_1_SQRT_2PI: f64 = 0.398_942_280_401_432_677_94;
+    if z.is_nan() {
+        return (f64::NAN, f64::NAN);
+    }
+    let y = z.abs();
+    if y <= 0.674_489_75 {
+        let (xnum, xden) = if y > 0.5 * f64::EPSILON {
+            let xsq = z * z;
+            let (mut xnum, mut xden) = (A[4] * xsq, xsq);
+            for (a, b) in A.iter().zip(&B).take(3) {
+                xnum = (xnum + a) * xsq;
+                xden = (xden + b) * xsq;
+            }
+            (xnum, xden)
+        } else {
+            (0.0, 0.0)
+        };
+        let ls = (0.5 - z * (xnum + A[3]) / (xden + B[3])).ln();
+        return (ls, (-0.5 * z * z - LN_SQRT_2PI - ls).exp());
+    }
+    if y >= 1e170 {
+        // z^2 overflows: ln S is -inf above and 0 below, the hazard z^+ to working precision.
+        return if z > 0.0 {
+            (f64::NEG_INFINITY, z)
+        } else {
+            (0.0, 0.0)
+        };
+    }
+    // r(y) with Phi(-y) = exp(-y^2 / 2) r(y)
+    let r = if y <= 32f64.sqrt() {
+        let (mut xnum, mut xden) = (C[8] * y, y);
+        for (c, d) in C.iter().zip(&D).take(7) {
+            xnum = (xnum + c) * y;
+            xden = (xden + d) * y;
+        }
+        (xnum + C[7]) / (xden + D[7])
+    } else {
+        let xsq = 1.0 / (y * y);
+        let (mut xnum, mut xden) = (P[5] * xsq, xsq);
+        for (p, q) in P.iter().zip(&Q).take(4) {
+            xnum = (xnum + p) * xsq;
+            xden = (xden + q) * xsq;
+        }
+        (FRAC_1_SQRT_2PI - xsq * (xnum + P[4]) / (xden + Q[4])) / y
+    };
+    let ysq = (y * 16.0).trunc() / 16.0;
+    let del = (y - ysq) * (y + ysq);
+    let ln_small = -0.5 * ysq * ysq - 0.5 * del + r.ln();
+    if z > 0.0 {
+        (ln_small, FRAC_1_SQRT_2PI / r)
+    } else {
+        let ls = (-ln_small.exp()).ln_1p();
+        (ls, (-0.5 * z * z - LN_SQRT_2PI - ls).exp())
+    }
 }
 
 /// `ln(1 + e^z)` without overflow.
@@ -5136,6 +5241,26 @@ mod tests {
             (29.9, -451.32291245852861, 29.933370411296476),
             (30.0, -454.32124395634321, 30.033259667434663),
             (40.0, -804.6084420137538, 40.024968847206338),
+            // both sides of each branch boundary of the rational approximations
+            (-37.5, -4.6053530095819552e-308, 1.7282337322840418e-306),
+            (-8.3, -5.2055697448902552e-17, 4.3816394355093207e-16),
+            (-5.66, -7.5686497806399427e-09, 4.410297812317309e-08),
+            (-5.65, -8.0223918828428826e-09, 4.6668868350338607e-08),
+            (-2.2, -0.01400100575938458, 0.035974766118774183),
+            (-0.6745, -0.28767772961281002, 0.42369732762989082),
+            (-0.674, -0.28788963644545978, 0.42393001482066067),
+            (-0.3, -0.48141016158848116, 0.61722085361273438),
+            (-1e-17, -0.69314718055994529, 0.79788456080286529),
+            (1e-17, -0.69314718055994529, 0.79788456080286529),
+            (0.2, -0.86573952268159537, 0.92941584808564293),
+            (0.674, -1.3856719275105964, 1.2707348997179717),
+            (0.6745, -1.386307389749966, 1.2711140638164968),
+            (2.2, -4.2756184470441436, 2.5514961531512093),
+            (5.65, -18.641029223787847, 5.8173259103620936),
+            (5.66, -18.699251153702779, 5.8270602068397075),
+            (12.25, -78.462270827375932, 12.330579239953863),
+            (37.6, -711.42664867077633, 37.626558252922429),
+            (100.0, -5005.5242086942053, 100.00999800101664),
         ] {
             assert!(
                 close(ln_normal_sf(z), ls),
@@ -5148,6 +5273,12 @@ mod tests {
                 normal_hazard(z)
             );
         }
+        // Far tail: R's ln S; its hazard loses digits to cancellation there, so the hazard is
+        // checked against Mills' ratio z + 1/z - 2/z^3.
+        let z = 1e5;
+        assert!(close(ln_normal_sf(z), -5000000012.4318638));
+        assert!(close(normal_hazard(z), z + 1.0 / z - 2.0 / (z * z * z)));
+        assert!(ln_normal_sf(f64::NAN).is_nan() && normal_hazard(f64::NAN).is_nan());
         for (z, sp) in [
             (-800.0, 0.0),
             (-30.0, 9.3576229688397368e-14),
