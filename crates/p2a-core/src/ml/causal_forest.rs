@@ -1066,42 +1066,89 @@ pub fn causal_forest_predict_arrays(
     Ok(predictions)
 }
 
-/// Get average treatment effect for a subset of observations.
+/// An average treatment effect with its standard error and two-sided normal interval.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AteEstimate {
+    /// The mean of the AIPW scores.
+    pub estimate: f64,
+    /// grf's standard error: `sqrt(sum((s - mean)^2) / (m (m - 1)))` over the `m` scores.
+    pub std_err: f64,
+    /// `estimate - z * std_err`, with `z` the normal quantile of `level`.
+    pub ci_lower: f64,
+    /// `estimate + z * std_err`.
+    pub ci_upper: f64,
+    /// Confidence level of the interval.
+    pub level: f64,
+    /// Units averaged.
+    pub n: usize,
+}
+
+/// AIPW average treatment effect over `subset` (all units when None), grf
+/// `average_treatment_effect(forest, target.sample = "all", method = "AIPW", subset = )`: the
+/// mean of the stored AIPW scores with SE `sqrt(sum((s - mean)^2) / (m (m - 1)))` and a
+/// two-sided normal interval at `level`.
 ///
-/// # Arguments
-/// * `forest` - A fitted causal forest result
-/// * `subset_indices` - Optional indices of observations to include
-///
-/// # Returns
-/// (ATE, CI lower, CI upper)
+/// Subset indices must be below `n_obs` and distinct, and at least two units are needed; a
+/// result without stored scores (deserialized from a version before the AIPW estimator) is an
+/// error.
+pub fn average_treatment_effect_with(
+    forest: &CausalForestResult,
+    subset: Option<&[usize]>,
+    level: f64,
+) -> EconResult<AteEstimate> {
+    validate_level(level, "level")?;
+    let scores = &forest.aipw_scores;
+    if scores.len() != forest.n_obs {
+        return Err(EconError::InvalidSpecification {
+            message: "the causal forest result has no AIPW scores (deserialized from a version \
+                      before the AIPW estimator); refit it"
+                .to_string(),
+        });
+    }
+    let picked: Vec<f64> = match subset {
+        None => scores.clone(),
+        Some(idx) => {
+            let mut seen = try_vec(forest.n_obs, false, "average treatment effect subset")?;
+            let mut v = try_with_capacity::<f64>(idx.len(), "average treatment effect subset")?;
+            for &i in idx {
+                if i >= forest.n_obs {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!(
+                            "subset index {i} is out of range for {} observations",
+                            forest.n_obs
+                        ),
+                    });
+                }
+                if std::mem::replace(&mut seen[i], true) {
+                    return Err(EconError::InvalidSpecification {
+                        message: format!("subset lists observation {i} more than once"),
+                    });
+                }
+                v.push(scores[i]);
+            }
+            v
+        }
+    };
+    let (estimate, std_err) = aipw_ate(&picked)?;
+    let crit = z_critical(level)?;
+    Ok(AteEstimate {
+        estimate,
+        std_err,
+        ci_lower: estimate - crit * std_err,
+        ci_upper: estimate + crit * std_err,
+        level,
+        n: picked.len(),
+    })
+}
+
+/// AIPW average treatment effect over `subset` (all units when None): `(estimate, 95% lower,
+/// 95% upper)` of [`average_treatment_effect_with`] at level 0.95.
 pub fn average_treatment_effect(
     forest: &CausalForestResult,
     subset_indices: Option<&[usize]>,
 ) -> EconResult<(f64, f64, f64)> {
-    let predictions: Vec<f64> = match subset_indices {
-        Some(indices) => indices.iter().map(|&i| forest.predictions[i]).collect(),
-        None => forest.predictions.clone(),
-    };
-
-    if predictions.is_empty() {
-        return Err(EconError::InvalidSpecification {
-            message: "No observations in subset".to_string(),
-        });
-    }
-
-    let n = predictions.len();
-    let ate: f64 = predictions.iter().sum::<f64>() / n as f64;
-
-    // Estimate standard error
-    let variance: f64 = predictions.iter().map(|&p| (p - ate).powi(2)).sum::<f64>() / n as f64;
-    let se = (variance / n as f64).sqrt();
-
-    // 95% CI
-    let z = 1.96;
-    let ci_lower = ate - z * se;
-    let ci_upper = ate + z * se;
-
-    Ok((ate, ci_lower, ci_upper))
+    let a = average_treatment_effect_with(forest, subset_indices, 0.95)?;
+    Ok((a.estimate, a.ci_lower, a.ci_upper))
 }
 
 /// Run causal forest from dataset with string arguments (for MCP integration).
@@ -3408,5 +3455,58 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    // ---- Task 4: average_treatment_effect on the AIPW scores ----
+
+    /// ML-22: the helper reported sd(CATE)/sqrt(n): a 95% half-width of about 3% of the valid
+    /// one. Now the AIPW scores. Emulation: SE / Welch SE 1.02-1.06 at n = 500.
+    #[test]
+    fn test_validate_cf_rct_average_treatment_effect_uses_the_aipw_scores() {
+        let (case, ds) = crate::test_support::load_case("cf_rct");
+        let c = case_columns(&ds, &["x0", "x1", "w", "y"], 500);
+        let x = matrix(&c[..2]);
+        let (w, y) = (Array1::from(c[2].clone()), Array1::from(c[3].clone()));
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(2), cfg(200, 4708, 2))
+            .unwrap();
+        let (ate, lo, hi) = average_treatment_effect(&r, None).unwrap();
+        assert!((ate - r.ate).abs() <= 1e-12 * r.ate.abs().max(1.0));
+        let half = (hi - lo) / 2.0;
+        let valid = 1.9599639845400536 * case.scalar("dim_se_500"); // 0.1732...
+        assert!(
+            (0.85..=1.3).contains(&(half / valid)),
+            "half-width {half} vs {valid}"
+        );
+        let sub: Vec<usize> = (0..250).collect();
+        let est = average_treatment_effect_with(&r, Some(&sub), 0.9).unwrap();
+        let (m, se) = aipw_ate(&r.aipw_scores[..250]).unwrap();
+        assert_eq!((est.estimate, est.std_err, est.n), (m, se, 250));
+        assert!((est.ci_upper - (m + 1.6448536269514715 * se)).abs() <= 1e-12);
+        assert!((est.ci_lower - (m - 1.6448536269514715 * se)).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn test_average_treatment_effect_rejects_bad_subsets() {
+        let (x, y, w, _) = overlap_test_data(120, 13);
+        let r =
+            causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(60, 13, 3)).unwrap();
+        let e = |s: &[usize]| {
+            average_treatment_effect(&r, Some(s))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(e(&[0, 120]).contains("out of range")); // panicked: index out of bounds
+        assert!(e(&[3, 3]).contains("more than once"));
+        assert!(average_treatment_effect(&r, Some(&[5])).is_err()); // one unit: no SE
+        assert!(average_treatment_effect(&r, Some(&[])).is_err());
+        assert!(average_treatment_effect_with(&r, None, 1.2).is_err());
+        let mut stale = r.clone();
+        stale.aipw_scores.clear(); // deserialized from JSON written before the AIPW scores
+        assert!(
+            average_treatment_effect(&stale, None)
+                .unwrap_err()
+                .to_string()
+                .contains("AIPW scores")
+        );
     }
 }
