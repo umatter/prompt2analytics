@@ -72,6 +72,7 @@ use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::options::Choices;
+use crate::regression::ols::certainly_full_rank;
 use crate::resource;
 use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 
@@ -1111,7 +1112,12 @@ fn ebal_solve(
                 centred[[i, c]] = x[[i, j]] - mean;
             }
         }
-        let aliased = Qr::decompose(centred.view(), LM_QR_TOL)?.aliased();
+        // The normal equations' certificate of full rank; only a design without it needs the QR.
+        let aliased = if certainly_full_rank(centred.view())? {
+            Vec::new()
+        } else {
+            Qr::decompose(centred.view(), LM_QR_TOL)?.aliased()
+        };
         if !aliased.is_empty() {
             dropped = aliased.iter().map(|&c| solved[c]).collect();
             let list: Vec<&str> = dropped.iter().map(|&j| names[j].as_str()).collect();
@@ -1133,28 +1139,44 @@ fn ebal_solve(
             (col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (m as f64 - 1.0).max(1.0)).sqrt()
         })
         .collect();
-    let mut c = Array2::<f64>::zeros((m, kk));
+    // row-major m x kk
+    let mut c = resource::try_vec(m * kk, 0.0, "entropy-balancing scores")?;
     for (cj, &j) in solved.iter().enumerate() {
         for i in 0..m {
-            c[[i, cj]] = (x[[i, j]] - target[j]) / sd[cj];
+            c[i * kk + cj] = (x[[i, j]] - target[j]) / sd[cj];
         }
     }
+    let row = |i: usize| &c[i * kk..(i + 1) * kk];
 
-    // f(lambda) and the normalised weights p.
-    let eval = |lam: &Array1<f64>| -> (f64, Array1<f64>) {
-        let z = c.dot(lam);
-        let zmax = z.iter().cloned().max_by(f64::total_cmp).unwrap_or(0.0);
-        let e = z.mapv(|zi| (zi - zmax).exp());
-        let sum = e.sum();
-        (zmax + sum.ln(), e / sum)
+    // f(lambda), with the normalised weights written into p.
+    let eval = |lam: &[f64], p: &mut [f64]| -> f64 {
+        for (i, zi) in p.iter_mut().enumerate() {
+            *zi = row(i).iter().zip(lam).map(|(u, v)| u * v).sum();
+        }
+        let zmax = p.iter().cloned().max_by(f64::total_cmp).unwrap_or(0.0);
+        let mut sum = 0.0;
+        for pi in p.iter_mut() {
+            *pi = (*pi - zmax).exp();
+            sum += *pi;
+        }
+        for pi in p.iter_mut() {
+            *pi /= sum;
+        }
+        zmax + sum.ln()
     };
 
-    // 4. Newton with Armijo backtracking.
-    let mut lambda = Array1::<f64>::zeros(kk);
+    // 4. Newton with Armijo backtracking. The weights live in two buffers, swapped on a step.
+    let mut lambda = vec![0.0; kk];
+    let mut trial = vec![0.0; kk];
+    let mut g = vec![0.0; kk];
+    let mut dev = vec![0.0; kk];
+    let mut h = Array2::<f64>::zeros((kk, kk));
+    let mut p = resource::try_vec(m, 0.0, "entropy-balancing weights")?;
+    let mut p_new = resource::try_vec(m, 0.0, "entropy-balancing weights")?;
     let mut iterations = 0usize;
     let mut converged = false;
     let mut residual;
-    let (mut f, mut p) = eval(&lambda);
+    let mut f = eval(&lambda, &mut p);
     loop {
         resource::checkpoint()?;
         if f < -1e-10 {
@@ -1162,7 +1184,12 @@ fn ebal_solve(
                 "the {group} group cannot be reweighted to the target means (the target lies outside the convex hull of its covariates)"
             )));
         }
-        let g = c.t().dot(&p);
+        g.fill(0.0);
+        for (i, &pi) in p.iter().enumerate() {
+            for (ga, ca) in g.iter_mut().zip(row(i)) {
+                *ga += pi * ca;
+            }
+        }
         residual = g.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
         if residual.is_nan() {
             return Err(EconError::Computation(
@@ -1176,13 +1203,15 @@ fn ebal_solve(
         if iterations == max_iter {
             break;
         }
-        let mut h = Array2::<f64>::zeros((kk, kk));
-        for i in 0..m {
-            let pi = p[i];
+        h.fill(0.0);
+        for (i, &pi) in p.iter().enumerate() {
+            for ((d, ca), ga) in dev.iter_mut().zip(row(i)).zip(&g) {
+                *d = ca - ga;
+            }
             for a in 0..kk {
-                let ca = c[[i, a]] - g[a];
+                let wa = pi * dev[a];
                 for b in 0..=a {
-                    h[[a, b]] += pi * ca * (c[[i, b]] - g[b]);
+                    h[[a, b]] += wa * dev[b];
                 }
             }
         }
@@ -1200,22 +1229,28 @@ fn ebal_solve(
             }
             Err(e) => return Err(e),
         };
-        let delta = -inv.dot(&g);
-        let slope = g.dot(&delta);
+        let delta = -inv.dot(&ndarray::ArrayView1::from(&g[..]));
+        let slope: f64 = g.iter().zip(delta.iter()).map(|(u, v)| u * v).sum();
         let mut t = 1.0;
-        let (mut f_new, mut p_new) = eval(&(&lambda + &(&delta * t)));
+        let mut step_to = |t: f64, p_new: &mut [f64]| -> f64 {
+            for ((v, l), d) in trial.iter_mut().zip(&lambda).zip(delta.iter()) {
+                *v = l + d * t;
+            }
+            eval(&trial, p_new)
+        };
+        let mut f_new = step_to(t, &mut p_new);
         if -slope > 1e-12 * (1.0 + f.abs()) {
             while (f_new.is_nan() || f_new > f + 1e-4 * t * slope) && t > 1e-12 {
                 t *= 0.5;
-                (f_new, p_new) = eval(&(&lambda + &(&delta * t)));
+                f_new = step_to(t, &mut p_new);
             }
             if t <= 1e-12 {
                 break;
             }
         }
-        lambda = &lambda + &(&delta * t);
+        lambda.copy_from_slice(&trial);
         f = f_new;
-        p = p_new;
+        std::mem::swap(&mut p, &mut p_new);
         iterations += 1;
     }
 
@@ -1245,7 +1280,7 @@ fn ebal_solve(
         lam_full[j] = lambda[cj] / sd[cj];
     }
     Ok(EbalFit {
-        weights: p.to_vec(),
+        weights: p,
         lambda: lam_full,
         converged,
         iterations,

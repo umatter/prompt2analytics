@@ -1388,12 +1388,14 @@ pub(crate) fn lean_logit(
     let xlogx = |v: f64| if v > 0.0 { v * v.ln() } else { 0.0 };
     // dev = 2 (sum_i c_i - sum_i (y_i eta_i - ln(1 + exp(eta_i)))), c_i = y ln y + (1-y) ln(1-y)
     let (mut sum_y, mut sum_c) = (0.0, 0.0);
+    let mut binary = true;
     for &v in y {
         if !(0.0..=1.0).contains(&v) {
             return Ok(None);
         }
         sum_y += v;
         if v != 0.0 && v != 1.0 {
+            binary = false;
             sum_c += xlogx(v) + xlogx(1.0 - v);
         }
     }
@@ -1439,23 +1441,45 @@ pub(crate) fn lean_logit(
         let dev = 2.0 * (sum_c - ye + logs + prod.ln());
         dev.is_finite().then_some(dev)
     };
-    for (i, (row, e)) in xrows.chunks_exact(k).zip(eta.iter_mut()).enumerate() {
-        *e = match start {
-            LeanStart::Zero => off.map_or(0.0, |o| o[i]),
-            LeanStart::Mustart => {
-                let m = (y[i] + 0.5) / 2.0;
-                (m / (1.0 - m)).ln()
+    match start {
+        LeanStart::Zero => {
+            if let Some(o) = off {
+                eta.copy_from_slice(o);
             }
-            LeanStart::Coef(c) => {
+        }
+        LeanStart::Mustart => {
+            if !binary {
+                for (e, &v) in eta.iter_mut().zip(y) {
+                    let m = (v + 0.5) / 2.0;
+                    *e = (m / (1.0 - m)).ln();
+                }
+            }
+        }
+        LeanStart::Coef(c) => {
+            for (i, (row, e)) in xrows.chunks_exact(k).zip(eta.iter_mut()).enumerate() {
                 let mut v = off.map_or(0.0, |o| o[i]);
                 for (xa, ba) in row.iter().zip(c.iter()) {
                     v += xa * ba;
                 }
-                v
+                *e = v;
             }
-        };
+        }
     }
-    let Some(mut devold) = eval(&eta, &mut mu, !from_zero) else {
+    // glm.fit's start on a 0/1 response needs no logarithm per row: mu is 1/4 or 3/4, eta is
+    // -+ln(3), and each unit's deviance is 2 ln(4/3).
+    let mustart_binary = binary && matches!(start, LeanStart::Mustart);
+    if mustart_binary {
+        let ln3 = 3.0_f64.ln();
+        for ((e, m), &v) in eta.iter_mut().zip(mu.iter_mut()).zip(y) {
+            (*e, *m) = if v == 1.0 { (ln3, 0.75) } else { (-ln3, 0.25) };
+        }
+    }
+    let first_dev = if mustart_binary {
+        Some(2.0 * nf * (4.0_f64 / 3.0).ln())
+    } else {
+        eval(&eta, &mut mu, !from_zero)
+    };
+    let Some(mut devold) = first_dev else {
         return Ok(None);
     };
     let mut g = vec![0.0; k * k];
