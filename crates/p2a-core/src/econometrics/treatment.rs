@@ -1714,66 +1714,18 @@ fn fit_outcome_model(
         });
     }
 
-    // X'X and X'y in one pass over the arm's rows: OLS's solve decision on the cross-product,
-    // no copy of the arm's design. Only a design that needs the QR is copied below.
-    let (m, k) = (indices.len(), x.ncols());
-    if m > k && k > 0 {
-        let xs = x.as_standard_layout();
-        let rows = xs
-            .as_slice()
-            .ok_or_else(|| EconError::Internal("outcome design is not contiguous".into()))?;
-        let mut gram = Array2::<f64>::zeros((k, k));
-        let g = gram
-            .as_slice_mut()
-            .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
-        let mut xy = Array1::<f64>::zeros(k);
-        let xys = xy
-            .as_slice_mut()
-            .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
-        let arm = ArmRows {
-            rows,
-            indices: &indices,
-            y,
-        };
-        let sum_y = match k {
-            1 => arm.cross_fixed::<1>(g, xys),
-            2 => arm.cross_fixed::<2>(g, xys),
-            3 => arm.cross_fixed::<3>(g, xys),
-            4 => arm.cross_fixed::<4>(g, xys),
-            5 => arm.cross_fixed::<5>(g, xys),
-            6 => arm.cross_fixed::<6>(g, xys),
-            _ => arm.cross(k, g, xys),
-        };
-        for a in 1..k {
-            for c in 0..a {
-                gram[[a, c]] = gram[[c, a]];
-            }
+    let m = indices.len();
+    if let Some((beta, sum_y)) = outcome_normal_coefficients(x, y, &indices)? {
+        let mu: Array1<f64> = x.dot(&beta);
+        let ybar = sum_y / m as f64;
+        let (mut ssr, mut sst) = (0.0, 0.0);
+        for &i in &indices {
+            let (r, t) = (y[i] - mu[i], y[i] - ybar);
+            ssr += r * r;
+            sst += t * t;
         }
-        if let Some(ni) = normal_inverse_from_gram(gram.view())? {
-            let mut beta = ni.inverse.dot(&xy);
-            if ni.refine {
-                // OLS's refinement step: b += (X'X)^{-1} X'(y - X b)
-                let mut xr = Array1::<f64>::zeros(k);
-                for &i in &indices {
-                    let r = &rows[i * k..(i + 1) * k];
-                    let resid = y[i] - r.iter().zip(beta.iter()).map(|(a, b)| a * b).sum::<f64>();
-                    for (s, &a) in xr.iter_mut().zip(r) {
-                        *s += a * resid;
-                    }
-                }
-                beta += &ni.inverse.dot(&xr);
-            }
-            let mu: Array1<f64> = x.dot(&beta);
-            let ybar = sum_y / m as f64;
-            let (mut ssr, mut sst) = (0.0, 0.0);
-            for &i in &indices {
-                let (r, t) = (y[i] - mu[i], y[i] - ybar);
-                ssr += r * r;
-                sst += t * t;
-            }
-            let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-            return Ok((mu, r2, None));
-        }
+        let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+        return Ok((mu, r2, None));
     }
 
     let x_group = select_rows(x, &indices)?;
@@ -1791,6 +1743,64 @@ fn fit_outcome_model(
     let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
     Ok((mu, r2, alias))
+}
+
+/// The OLS coefficients of one arm and the sum of its `y`, from X'X and X'y in one pass over the
+/// arm's rows: OLS's solve decision on the cross-product (refined once when the conditioning asks
+/// for it), no copy of the arm's design. `None` when the design needs the QR.
+fn outcome_normal_coefficients(
+    x: ArrayView2<f64>,
+    y: &Array1<f64>,
+    indices: &[usize],
+) -> EconResult<Option<(Array1<f64>, f64)>> {
+    let (m, k) = (indices.len(), x.ncols());
+    if m <= k || k == 0 {
+        return Ok(None);
+    }
+    let xs = x.as_standard_layout();
+    let rows = xs
+        .as_slice()
+        .ok_or_else(|| EconError::Internal("outcome design is not contiguous".into()))?;
+    let mut gram = Array2::<f64>::zeros((k, k));
+    let g = gram
+        .as_slice_mut()
+        .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
+    let mut xy = Array1::<f64>::zeros(k);
+    let xys = xy
+        .as_slice_mut()
+        .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
+    let arm = ArmRows { rows, indices, y };
+    let sum_y = match k {
+        1 => arm.cross_fixed::<1>(g, xys),
+        2 => arm.cross_fixed::<2>(g, xys),
+        3 => arm.cross_fixed::<3>(g, xys),
+        4 => arm.cross_fixed::<4>(g, xys),
+        5 => arm.cross_fixed::<5>(g, xys),
+        6 => arm.cross_fixed::<6>(g, xys),
+        _ => arm.cross(k, g, xys),
+    };
+    for a in 1..k {
+        for c in 0..a {
+            gram[[a, c]] = gram[[c, a]];
+        }
+    }
+    let Some(ni) = normal_inverse_from_gram(gram.view())? else {
+        return Ok(None);
+    };
+    let mut beta = ni.inverse.dot(&xy);
+    if ni.refine {
+        // OLS's refinement step: b += (X'X)^{-1} X'(y - X b)
+        let mut xr = Array1::<f64>::zeros(k);
+        for &i in indices {
+            let r = &rows[i * k..(i + 1) * k];
+            let resid = y[i] - r.iter().zip(beta.iter()).map(|(a, b)| a * b).sum::<f64>();
+            for (s, &a) in xr.iter_mut().zip(r) {
+                *s += a * resid;
+            }
+        }
+        beta += &ni.inverse.dot(&xr);
+    }
+    Ok(Some((beta, sum_y)))
 }
 
 /// One arm's rows of the outcome design (row-major, all rows) and the outcome.
@@ -2730,14 +2740,14 @@ mod tests {
 
     #[test]
     fn test_outcome_model_refined_cross_product_matches_the_qr() {
-        // Covariates on natural scales: the one-pass path's refinement against the QR.
+        // Natural scales and two close covariates (reciprocal condition about 4e-8): the one-pass
+        // path's coefficients against the QR. An unrefined solve is 1.8e-9 from it, outside 1e-10.
         let (x, y, d) = outcome_design(300, false);
-        let x = Array2::from_shape_fn(
-            x.dim(),
-            |(i, j)| {
-                if j == 0 { 1.0 } else { 40.0 + 10.0 * x[[i, j]] }
-            },
-        );
+        let x = Array2::from_shape_fn(x.dim(), |(i, j)| match j {
+            0 => 1.0,
+            1 => 40.0 + 10.0 * x[[i, 1]],
+            _ => 40.0 + 10.0 * x[[i, 1]] + 3e-2 * x[[i, 2]],
+        });
         let names: Vec<String> = ["(Intercept)", "x1", "x2"].map(String::from).to_vec();
         for treated in [true, false] {
             let idx: Vec<usize> = (0..300).filter(|&i| (d[i] >= 0.5) == treated).collect();
@@ -2746,14 +2756,18 @@ mod tests {
                 .unwrap()
                 .expect("the normal equations take this design");
             assert!(normal.refine, "the design must need the refinement");
-            let (mu, r2, alias) = fit_outcome_model(x.view(), &y, &d, treated, &names).unwrap();
-            assert!(alias.is_none());
+            // the one-pass path, not a fall to the QR
+            let (beta, _) = outcome_normal_coefficients(x.view(), &y, &idx)
+                .unwrap()
+                .expect("the one-pass path");
             let yg: Array1<f64> = idx.iter().map(|&i| y[i]).collect();
             let fit = least_squares(xg.view(), yg.view()).unwrap();
-            let want = x.dot(&fit.coefficients);
-            for (a, b) in mu.iter().zip(want.iter()) {
+            for (a, b) in beta.iter().zip(fit.coefficients.iter()) {
                 assert!((a - b).abs() <= 1e-10 * b.abs(), "{a} vs {b}");
             }
+            let (mu, r2, alias) = fit_outcome_model(x.view(), &y, &d, treated, &names).unwrap();
+            assert!(alias.is_none());
+            assert_eq!(mu, x.dot(&beta));
             let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
             let ybar = yg.sum() / yg.len() as f64;
             let sst: f64 = yg.iter().map(|v| (v - ybar).powi(2)).sum();

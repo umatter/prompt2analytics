@@ -120,7 +120,9 @@ pub struct GlmSpec<'a> {
     /// Start values of the coefficients (one per column of `x`).
     pub start: Option<ArrayView1<'a, f64>>,
     /// Convergence tolerance on the relative deviance change; default 1e-10 (R's
-    /// `glm.control` default is 1e-8).
+    /// `glm.control` default is 1e-8). At a tolerance of rounding size the rule is decided by
+    /// rounding: at 1e-14 the lean refits ([`fit_logit_lean`]) and [`fit_glm`] can stop one or two
+    /// iterations apart (23 of 61,704 fits measured; coefficient gap at most 7.6e-13).
     pub epsilon: f64,
     /// Maximum IRLS iterations; default 100 (R's default `maxit` is 25).
     pub max_iter: usize,
@@ -1388,8 +1390,8 @@ const LEAN_LOG_CHUNK: usize = 16;
 /// them. `None` whenever the fit leaves the path on which the shared GLM would report nothing:
 /// a linear predictor at the link's clamp (separation), a design that is not of full rank or
 /// is ill conditioned for the normal equations, a non-finite step, no convergence within
-/// `max_iter`, or a constant `y`. The caller then refits with [`fit_glm`], which reports the
-/// case. A converged fit is the maximum-likelihood estimate the shared GLM reaches.
+/// `max_iter`, a constant `y`, or a converged fit with a row beyond [`LEAN_MISFIT_ETA`]. The caller
+/// then refits with [`fit_glm`], which reports the case. A converged fit is the maximum-likelihood estimate the shared GLM reaches.
 pub(crate) fn lean_logit(
     x: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
@@ -1700,6 +1702,11 @@ fn lean_logit_within(
                 // a last step taken without its refinement
                 return Ok(None);
             }
+            if eta.iter().zip(y).any(|(&e, &v)| {
+                (v < 1.0 && e > LEAN_MISFIT_ETA) || (v > 0.0 && e < -LEAN_MISFIT_ETA)
+            }) {
+                return Ok(None);
+            }
             for m in mu_step.iter_mut() {
                 *m *= 1.0 - *m;
             }
@@ -1813,6 +1820,19 @@ const LEAN_REFINED_MAX_CONDITION: f64 = 1e4;
 /// step that came without it leaves the path.
 const LEAN_REFINE_WITHIN: f64 = 1e-3;
 
+/// Linear predictor beyond which a row that its fitted probability does not explain (`y < 1` at a
+/// large `eta`, `y > 0` at a very negative one) sends a converged fit from [`lean_logit_within`] to
+/// [`fit_glm`]. On such a row `fit_glm`'s `1 - mu` has lost most of its digits, and they reach its
+/// working weights and deviance, so its iterations, convergence status and coefficients are no
+/// longer those of the lean path, which works from `ln(1 + exp(eta))`. The lean numbers are the more
+/// accurate there (score 6e-15 against 2.3e-5 on the data of
+/// `test_fit_logit_lean_keeps_fit_glm_past_the_misfit_bound`), but `fit_glm`, like R's `glm`, reports
+/// such a fit as not converged, and this path does not change what is reported. Measured on 1,535
+/// heavy-tailed designs at kappa between 100 and 1e4: 15 keeps 1,491 on the path with no iteration
+/// or status difference (12: 1,462, 17: 1,507, 20: 1,522, with the coefficient gap growing from
+/// 7.6e-12 through 8.2e-11 at 15 to 8.1e-9 at 20).
+const LEAN_MISFIT_ETA: f64 = 15.0;
+
 /// From this many columns both IRLS loops, [`lean_logit`]'s and [`fit_glm`]'s, form `X'WX` by the
 /// blocked symmetric product of the square-root-weighted rows, which beats the row-by-row
 /// accumulation once the rows outgrow the vector registers; below it the row pass stays. So every
@@ -1905,10 +1925,14 @@ fn inverse_and_condition(
 /// coefficients, fitted values, covariance and warnings but not the AIC or a refitted null
 /// deviance. The IRLS is the same (glm.fit's start or `spec.start`, Fisher scoring through the
 /// normal equations, the deviance rule at `spec.epsilon` within `spec.max_iter`), so the fit
-/// is the shared GLM's up to rounding. On the lean path the shared GLM would report nothing:
-/// the result is converged, of full rank, with no warning. Any other case (separation, a
-/// rank-deficient or ill-conditioned weighted design, no convergence, a last step without its
-/// refinement, invalid input, another
+/// is the shared GLM's up to rounding. A lean fit is converged, of full rank, with no warning. This
+/// is what [`fit_glm`] reports on the designs measured, not a proof. On the default spec over
+/// 3,276 designs of 13 kinds (1,790 fits on the path) no iteration, status or warning differs.
+/// The largest gaps are 4.5e-9 on a coefficient, 9.1e-8 on an SE and 2.1e-6 on a covariance entry,
+/// on quasi-separated fits of n = 15 to 80 with a rare binary covariate; on 1,491 heavy-tailed fits
+/// that stay on the path they are 8.2e-11 and 2.7e-11.
+/// Any other case (separation, a rank-deficient or ill-conditioned weighted design, no convergence,
+/// a last step without its refinement, a row beyond [`LEAN_MISFIT_ETA`], invalid input, another
 /// family, link or spec) is [`fit_glm`]'s own fit, errors and warnings included.
 ///
 /// The fields of a lean fit: `vcov` is the inverse of the last step's `X'WX` (dispersion 1),
@@ -3211,12 +3235,6 @@ mod tests {
         assert!(dup.coefficients[2].is_nan() && dup.std_errors[2].is_nan());
     }
 
-    /// The lean logit refit (`fit_logit_lean`) is the shared GLM's fit: on noisy designs, from
-    /// glm.fit's start and from a warm start, at several sizes, every reported number agrees
-    /// with `fit_glm` to 1e-12 relative (the coefficients to 1e-12, the covariance and SEs, the
-    /// deviance, AIC and log-likelihood to 1e-12), with the same iterations, convergence and
-    /// (no) warnings. A near-separated design that stays below the logit clamp agrees too;
-    /// separated, rank-deficient, weighted, offset and non-logit fits are fit_glm's own.
     /// A noisy logit design whose equilibrated `X'WX` is off [`LEAN_MAX_CONDITION`] from the first
     /// step. `natural`: two covariates on natural scales (mean 40, sd 10, uncentred). Otherwise
     /// a mediator that trimming to the overlap of its propensity leaves nearly a function of the
@@ -3260,7 +3278,8 @@ mod tests {
             ]);
         for (u, v) in pairs {
             if u != v {
-                worst = worst.max((u - v).abs() / v.abs());
+                let gap = (u - v).abs() / v.abs();
+                worst = worst.max(if gap.is_nan() { f64::INFINITY } else { gap });
             }
         }
         worst
@@ -3311,6 +3330,137 @@ mod tests {
             assert_eq!(lean_s.iterations, glm_s.iterations, "n {n}");
             let gap = largest_relative_gap(&lean_s, &glm_s);
             assert!(gap <= 1e-10, "n {n}: warm start, relative gap {gap:e}");
+        }
+    }
+
+    /// A heavy-tailed logit design: `x1 = shift + exp(hk a)`, `x2 = shift + exp(1.5 b)`, `d` drawn
+    /// from `plogis(alpha + sig (a + b) / 1.414)`, and a noisy outcome for IPW. The covariates reach
+    /// far beyond the index that generated `d`, so a few rows with `d = 0` get a large `eta`.
+    fn heavy_tailed_design(
+        n: usize,
+        seed: u64,
+        (shift, hk, sig, alpha): (f64, f64, f64, f64),
+    ) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        use rand::{Rng, SeedableRng};
+        fn normal(r: &mut rand_chacha::ChaCha8Rng) -> f64 {
+            let (u, v): (f64, f64) = (r.gen_range(1e-12..1.0), r.gen_range(0.0..1.0));
+            (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
+        }
+        let mut r = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let mut x = Array2::<f64>::ones((n, 3));
+        let (mut d, mut y) = (Array1::<f64>::zeros(n), Array1::<f64>::zeros(n));
+        for i in 0..n {
+            let (a, b) = (normal(&mut r), normal(&mut r));
+            x[[i, 1]] = shift + (hk * a).exp();
+            x[[i, 2]] = shift + (1.5 * b).exp();
+            let eta = alpha + sig * (a + b) / 1.414;
+            d[i] = f64::from(u8::from(r.gen_range(0.0..1.0_f64) < plogis(eta)));
+            y[i] = a + 0.5 * b + ((i + 1) as f64 * 0.73).sin();
+        }
+        (x, d, y)
+    }
+
+    /// Rows with `d = 0` at `eta` around 20-30 make `fit_glm` run out its 100 steps and warn on the
+    /// default spec, as R's `glm` does at this epsilon, where the lean IRLS converges in 6. The lean
+    /// path keeps what `fit_glm` reports. Without the bound the fit differs in iterations, status
+    /// and warning, and by 1.1e-4 in a coefficient and 1.3e-5 in the IPW effect.
+    #[test]
+    fn test_fit_logit_lean_keeps_fit_glm_past_the_misfit_bound() {
+        let spec = GlmSpec::logit();
+        let (x, d, y) = heavy_tailed_design(3000, 183 * 7 + 3000, (100.0, 2.5, 2.0, -3.0));
+        let glm = fit_glm(x.view(), d.view(), &spec).unwrap();
+        assert_eq!((glm.iterations, glm.converged), (100, false));
+        assert_eq!(glm.warnings, ["glm.fit: algorithm did not converge"]);
+        assert!(
+            logit_lean_path(x.view(), d.view(), &spec)
+                .unwrap()
+                .is_none()
+        );
+        let lean = fit_logit_lean(x.view(), d.view(), &spec).unwrap();
+        assert_eq!(
+            (lean.iterations, lean.converged, &lean.warnings),
+            (glm.iterations, glm.converged, &glm.warnings)
+        );
+        assert_eq!(largest_relative_gap(&lean, &glm), 0.0);
+
+        // The method that reads it: IPW keeps the warning and fit_glm's numbers.
+        use crate::data::Dataset;
+        use crate::econometrics::treatment::{Estimand, IpwConfig, run_ipw_treatment};
+        use polars::prelude::*;
+        let ds = Dataset::new(
+            df! {
+                "y" => y.to_vec(),
+                "d" => d.to_vec(),
+                "x1" => x.column(1).to_vec(),
+                "x2" => x.column(2).to_vec(),
+            }
+            .unwrap(),
+        );
+        let config = IpwConfig {
+            estimand: Estimand::ATE,
+            trim: 0.01,
+            ..Default::default()
+        };
+        let ipw = run_ipw_treatment(&ds, "y", "d", &["x1", "x2"], config).unwrap();
+        assert!(
+            ipw.warnings
+                .iter()
+                .any(|w| w == "propensity model: glm.fit: algorithm did not converge"),
+            "{:?}",
+            ipw.warnings
+        );
+        assert!(
+            (ipw.effect - 1.294919769371).abs() <= 1e-10,
+            "{}",
+            ipw.effect
+        );
+        assert!(
+            (ipw.std_error - 0.130460621285).abs() <= 1e-10,
+            "{}",
+            ipw.std_error
+        );
+
+        // The same kind of data at kappa below 100, where the unrefined path takes 7 steps to
+        // fit_glm's 9 without the bound.
+        let (x, d, _) = heavy_tailed_design(600, 2600, (0.0, 2.0, 4.0, -3.0));
+        let glm = fit_glm(x.view(), d.view(), &spec).unwrap();
+        assert!(
+            logit_lean_path(x.view(), d.view(), &spec)
+                .unwrap()
+                .is_none()
+        );
+        let lean = fit_logit_lean(x.view(), d.view(), &spec).unwrap();
+        assert_eq!(lean.iterations, glm.iterations);
+        assert_eq!(largest_relative_gap(&lean, &glm), 0.0);
+    }
+
+    /// The bound takes only misfit rows: a row beyond it with the outcome its probability predicts
+    /// stays on the path. This is the largest coefficient gap of the 1,535-design search at the
+    /// bound, 8.2e-11 (SE 2.7e-11).
+    #[test]
+    fn test_logit_lean_stays_on_the_path_when_far_rows_fit() {
+        let spec = GlmSpec::logit();
+        let (x, d, _) = heavy_tailed_design(3000, 56 * 7 + 3000, (100.0, 2.5, 2.0, -3.0));
+        let glm = fit_glm(x.view(), d.view(), &spec).unwrap();
+        let lean = logit_lean_path(x.view(), d.view(), &spec)
+            .unwrap()
+            .expect("on the lean path");
+        assert!(
+            lean.linear_predictor
+                .iter()
+                .any(|e| e.abs() > LEAN_MISFIT_ETA)
+        );
+        assert_eq!(
+            (lean.iterations, lean.converged, &lean.warnings),
+            (glm.iterations, glm.converged, &glm.warnings)
+        );
+        for (a, b) in lean
+            .coefficients
+            .iter()
+            .zip(&glm.coefficients)
+            .chain(lean.std_errors.iter().zip(&glm.std_errors))
+        {
+            assert!((a - b).abs() <= 1e-10 * b.abs(), "{a} vs {b}");
         }
     }
 
@@ -3407,6 +3557,12 @@ mod tests {
         }
     }
 
+    /// The lean logit refit (`fit_logit_lean`) is the shared GLM's fit: on noisy designs, from
+    /// glm.fit's start and from a warm start, at several sizes, every reported number agrees
+    /// with `fit_glm` to 1e-12 relative (the coefficients to 1e-12, the covariance and SEs, the
+    /// deviance, AIC and log-likelihood to 1e-12), with the same iterations, convergence and
+    /// (no) warnings. A near-separated design that stays below the logit clamp agrees too;
+    /// separated, rank-deficient, weighted, offset and non-logit fits are fit_glm's own.
     #[test]
     fn test_fit_logit_lean_matches_fit_glm() {
         for (n, seed) in [(40, 5), (300, 17), (2500, 41)] {
