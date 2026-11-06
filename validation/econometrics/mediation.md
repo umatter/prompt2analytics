@@ -343,6 +343,19 @@ Until T2-WP13 the covariate matrix was scrambled (CAUS-25): it was filled column
 and reshaped row-major, so the estimates depended on the row and covariate order (total
 effect 1.3683 on this case). The direct and indirect effects are not pinned (CAUS-26).
 
+## Wall-clock against fe13b889 (T3-PERF6A)
+
+Medians over interleaved rounds of the wave-2B timing harness (`wp26`, one core,
+one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+
+| Row | n | fe13b889 | this tree | ratio |
+|---|---|---:|---:|---:|
+| IPW mediation, 199 replicates (ms) | 100 | 15.29 | 7.13 | 0.47 |
+| IPW mediation, 199 replicates (ms) | 1,000 | 69.51 | 55.45 | 0.80 |
+| IPW mediation, 199 replicates (ms) | 10,000 | 741.86 | 554.37 | 0.75 |
+
+The n = 100 base value carries a noisy round. Three rounds; values in ms.
+
 ## References
 
 - Huber, M. (2014). "Identifying Causal Mechanisms (Primarily) Based on Inverse Probability Weighting." *Journal of Applied Econometrics*, 29, 920-943.

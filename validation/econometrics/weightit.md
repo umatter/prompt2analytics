@@ -123,6 +123,22 @@ Tests: `test_validate_na_weightit_columns`, `test_validate_na_entropy_balance_co
 `causal_mediation_na`, registry `validation/methods/causal_na.json`,
 id `weighting_na_refusal`).
 
+## Wall-clock against fe13b889 (T3-PERF6A)
+
+Medians in µs over five interleaved rounds of the wave-2B timing harness (`wp23`, one core,
+one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+
+| Row | n | fe13b889 | this tree | ratio |
+|---|---|---:|---:|---:|
+| logistic | 100 | 38.80 | 28.60 | 0.74 |
+| logistic | 1,000 | 258.60 | 238.00 | 0.92 |
+| logistic | 10,000 | 3,652.30 | 3,703.00 | 1.01 |
+| logistic, 3 covariates | 1,000 | 327.70 | 285.10 | 0.87 |
+| entropy, 3 covariates | 1,000 | 300.20 | 314.40 | 1.05 |
+
+The entropy row is not like for like: fe13b889 solved one group for every estimand, this tree
+solves both groups for the default ATE.
+
 ## References
 
 - Horvitz, D.G. & Thompson, D.J. (1952). "A Generalization of Sampling Without Replacement from a Finite Universe". *JASA*, 47(260), 663-685.
