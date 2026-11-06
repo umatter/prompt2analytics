@@ -157,6 +157,8 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/garch_returns.csv` | 1500 × 5 (t, r_norm, r_t, r_g21, r_norm_dm) | `garch_normal_t` | `r/cases/ts_garch.R` | seed 20261105 |
 | `generated/gls_cs.csv` | 150 × 4 (g, y, x, z) | `gls_compsymm` | `r/cases/regression_smoothers_t3.R` | seed 20261120 |
 | `generated/granger_short.csv` | 20 × 2 (x, y) | `granger_short` | `r/cases/ts_var.R` | seed 20261113 |
+| `generated/gsynth_simdata.csv` | 1500 × 6 (id, time, Y, D, X1, X2) | `gsynth_simdata` | `r/cases/causal_gsynth.R` | `gsynth::simdata` (50 units × 30 periods, 5 treated from t = 21), the model columns |
+| `generated/gsynth_staggered.csv` | 720 × 5 (id, time, Y, D, X) | `gsynth_staggered` | `r/cases/causal_gsynth.R` | seed 4231; 30 controls and 6 treated units (adoption at t = 11, 13, 15) × 20 periods, two factors |
 | `generated/hclust_60.csv` | 60 × 3 (a, b, c) | `hclust_methods`; read by `kmeans_lloyd_pca_mds`, `dynamic_tree_cut` | `r/cases/ml_hierarchical.R` | seed 20261110 |
 | `generated/hclust_ties.csv` | 40 × 2 (u, v) | `hclust_methods` | `r/cases/ml_hierarchical.R` | seed 7 |
 | `generated/hdfe_disconnected.csv` | 80 × 5 (firm, year, x, z, y) | `hdfe_disconnected` | `r/cases/econ_panel_t3.R` | seed 20261105 |
@@ -200,6 +202,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/shap_tree_sim.csv` | 80 × 5 (x0, x1, x2, x3, y) | `shap_tree_rpart` | `r/cases/ml_shap.R` | seed 4801 |
 | `generated/smoothers_t3.csv` | 100 × 4 (x, y, xm, ym) | `smoothers_gcv_periodic_loess` | `r/cases/regression_smoothers_t3.R` | seed 20261127 |
 | `generated/supsmu_sine.csv` | 100 × 4 (x, y, w, xr) | `supsmu_sine` | `r/cases/regression_smoothers_t3.R` | seed 42 |
+| `generated/synth_qp_panel.csv` | 180 × 9 (unit, time, y, x1, x2, x3, x1_big, x2_big, x3_big) | `synth_weights_qp`; read by `scpi_quantities` | `r/cases/causal_synth_scpi.R` | seed 3101; 8 donors and the treated unit TR × 20 periods (treatment at 15); `*_big` = predictors × 1e4 |
 | `generated/sysgmm_empluk.csv` | 1031 × 5 (firm, year, lemp, lwage, lcap) | `dpd_sys_empluk` | `r/cases/econ_sysgmm.R` | `plm::EmplUK`, logs of emp, wage and capital |
 | `generated/var_canada.csv` | 84 × 4 (e, prod, rw, U) | `var_canada` | `r/cases/ts_var.R` | `vars::Canada` |
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |

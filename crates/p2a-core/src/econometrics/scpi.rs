@@ -17,14 +17,23 @@
 //! - **Ridge**: Add λ||w||₂² penalty
 //! - **Lasso-Simplex**: Lasso penalty with simplex constraints
 //!
+//! The simplex weights are the exact solution of the constrained least-squares problem (the
+//! simplex QP shared with the synthetic control, `synth::simplex_qp`); when several weight vectors
+//! fit equally well the minimum-norm one is reported with a warning.
+//!
 //! Prediction intervals are constructed as:
 //! ```text
-//! PI = prediction ± t_{α/2,df} × √(σ²_in + σ²_out)
+//! PI = effect ± t_{1-α/2, T0-1} × √(σ²_in + σ²_out)
 //! ```
 //!
 //! Where:
-//! - σ²_in: In-sample variance from pre-treatment fit
-//! - σ²_out: Out-of-sample variance estimated via cross-validation or plug-in formula
+//! - σ²_in: In-sample variance from pre-treatment fit, SSE / T0
+//! - σ²_out: Out-of-sample variance: SSE / (T0 - J) (gaussian), 1.5 (median|e| / Φ⁻¹(0.75))²
+//!   (subgaussian), or the mean squared leave-one-out or k-fold prediction error of refitted
+//!   simplex weights
+//!
+//! This is not the Cattaneo-Feng-Titiunik (2021) simulation-based construction (CAUS-32); the
+//! interval width is constant over post periods.
 //!
 //! # References
 //!
@@ -35,10 +44,8 @@
 //! - Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for
 //!   Comparative Case Studies." *Journal of the American Statistical Association*, 105(490), 493-505.
 //!
-//! - Implementation inspired by:
-//!   - R/Python package `scpi` (Cattaneo, Feng, Palomba, Titiunik)
-//!     Source: <https://nppackages.github.io/scpi/>
-//!     CRAN: <https://cran.r-project.org/package=scpi>
+//! - The R/Python package `scpi` (Cattaneo, Feng, Palomba, Titiunik) implements the CFT
+//!   construction: <https://nppackages.github.io/scpi/>. This module does not reproduce it.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use serde::{Deserialize, Serialize};
@@ -46,7 +53,9 @@ use std::fmt;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{cholesky_inverse, xtx, xty};
-use crate::traits::estimator::SignificanceLevel;
+use crate::stats::robust::{QuantileType, quantile_sorted};
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
+use crate::traits::estimator::{SignificanceLevel, normal_quantile, t_quantile, validate_level};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -86,6 +95,74 @@ pub enum SCPIConstraint {
         /// L1 regularization parameter
         lambda: f64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstraintName {
+    Simplex,
+    Lasso,
+    Ridge,
+    LassoSimplex,
+}
+
+crate::option_enum!(
+    ConstraintName,
+    crate::options::Choices {
+        option: "SCPI constraint",
+        values: &[
+            (&["simplex"], ConstraintName::Simplex),
+            (&["lasso", "l1"], ConstraintName::Lasso),
+            (&["ridge", "l2"], ConstraintName::Ridge),
+            (
+                &["lasso_simplex", "lassosimplex"],
+                ConstraintName::LassoSimplex
+            ),
+        ],
+    },
+    no_display
+);
+
+impl SCPIConstraint {
+    /// "simplex" (default when `None`), "lasso", "ridge", "lasso_simplex"; `lambda` defaults to
+    /// 0.1 for the penalised ones (the MCP default) and is validated by [`run_scpi`]. Unknown
+    /// names are `InvalidSpecification` listing the accepted names.
+    pub fn from_options(name: Option<&str>, lambda: Option<f64>) -> EconResult<SCPIConstraint> {
+        let lambda = lambda.unwrap_or(0.1);
+        Ok(
+            match crate::options::parse_or(name, ConstraintName::Simplex)? {
+                ConstraintName::Simplex => SCPIConstraint::Simplex,
+                ConstraintName::Lasso => SCPIConstraint::Lasso { lambda },
+                ConstraintName::Ridge => SCPIConstraint::Ridge { lambda },
+                ConstraintName::LassoSimplex => SCPIConstraint::LassoSimplex { lambda },
+            },
+        )
+    }
+
+    /// Penalties: ridge `lambda > 0`, lasso and lasso-simplex `lambda >= 0`, all finite.
+    fn validate(&self) -> EconResult<()> {
+        let (name, lambda, positive) = match self {
+            SCPIConstraint::Simplex => return Ok(()),
+            SCPIConstraint::Lasso { lambda } => ("lasso", *lambda, false),
+            SCPIConstraint::LassoSimplex { lambda } => ("lasso-simplex", *lambda, false),
+            SCPIConstraint::Ridge { lambda } => ("ridge", *lambda, true),
+        };
+        let ok = lambda.is_finite()
+            && if positive {
+                lambda > 0.0
+            } else {
+                lambda >= 0.0
+            };
+        if ok {
+            Ok(())
+        } else {
+            Err(EconError::InvalidSpecification {
+                message: format!(
+                    "the {name} penalty lambda must be finite and {} (got {lambda})",
+                    if positive { "positive" } else { "non-negative" }
+                ),
+            })
+        }
+    }
 }
 
 /// Configuration for SCPI estimation.
@@ -128,7 +205,7 @@ impl Default for SCPIConfig {
 }
 
 /// Method for estimating out-of-sample variance.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum VarianceMethod {
     /// Gaussian assumption: uses standard regression variance
     Gaussian,
@@ -144,6 +221,25 @@ pub enum VarianceMethod {
     /// K-fold cross-validation
     KFoldCv,
 }
+
+crate::option_enum!(
+    VarianceMethod,
+    crate::options::Choices {
+        option: "SCPI variance method",
+        values: &[
+            (
+                &["subgaussian", "sub_gaussian"],
+                VarianceMethod::Subgaussian
+            ),
+            (&["gaussian", "normal"], VarianceMethod::Gaussian),
+            (&["loo_cv", "loo", "leave_one_out"], VarianceMethod::LooCv),
+            (
+                &["kfold_cv", "kfold", "k_fold", "k_fold_cv"],
+                VarianceMethod::KFoldCv,
+            ),
+        ],
+    }
+);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Result Types
@@ -252,6 +348,19 @@ pub struct SCPIResult {
 
     /// Constraint type used
     pub constraint_type: String,
+
+    /// Warnings (a non-unique simplex solution)
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for SCPIResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        None
+    }
 }
 
 impl fmt::Display for SCPIResult {
@@ -282,6 +391,12 @@ impl fmt::Display for SCPIResult {
         writeln!(f, "  In-sample variance: {:.6}", self.in_sample_var)?;
         writeln!(f, "  Out-of-sample variance: {:.6}", self.out_sample_var)?;
         writeln!(f, "  Total variance: {:.6}", self.total_var)?;
+        writeln!(
+            f,
+            "  Critical value: t({}) = {:.4}",
+            self.n_pre_periods.saturating_sub(1),
+            self.critical_value
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Donor Weights (non-zero):")?;
@@ -319,6 +434,12 @@ impl fmt::Display for SCPIResult {
                 "{:>8} {:>12.4} {:>12.4} {:>12.4} {:>12.4}{}",
                 pi.period, effect, se, pi.lower, pi.upper, star
             )?;
+        }
+
+        let notes = notes_text(self);
+        if !notes.is_empty() {
+            writeln!(f)?;
+            write!(f, "{notes}")?;
         }
 
         Ok(())
@@ -450,6 +571,28 @@ pub fn run_scpi(
             message: "max_iter must be at least 1 (got 0)".to_string(),
         });
     }
+    validate_level(config.alpha, "alpha")?;
+    config.constraint.validate()?;
+    if let Some((t, v)) = treated.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("treated outcome at period {t} is {v}; SCPI needs finite outcomes"),
+        });
+    }
+    if let Some(((t, j), v)) = donors.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "donors outcome at period {t}, donor {j} is {v}; SCPI needs finite outcomes"
+            ),
+        });
+    }
+    if matches!(config.variance_method, VarianceMethod::Gaussian) && n_pre <= n_donors {
+        return Err(EconError::InsufficientData {
+            required: n_donors + 1,
+            provided: n_pre,
+            context: "SCPI gaussian variance needs more pre-treatment periods than donors"
+                .to_string(),
+        });
+    }
     // The fold count only matters (and is only checked) for K-fold CV.
     if matches!(config.variance_method, VarianceMethod::KFoldCv)
         && !(2..=n_pre).contains(&config.cv_folds)
@@ -470,12 +613,14 @@ pub fn run_scpi(
     let x_post = donors.slice(s![treatment_period.., ..]).to_owned();
 
     // Estimate weights
+    let mut warnings = Vec::new();
     let weights = estimate_weights(
         &y_pre.view(),
         &x_pre.view(),
         &config.constraint,
         config.max_iter,
         config.tolerance,
+        &mut warnings,
     )?;
 
     // Compute synthetic control predictions
@@ -510,16 +655,8 @@ pub fn run_scpi(
     // Total variance for prediction intervals
     let total_var = in_sample_var + out_sample_var;
 
-    // Compute critical value
-    // For small samples, use t-distribution; for large samples, z
-    let df = (n_pre - 1).max(1);
-    let critical_value = if df < 30 {
-        // Use t-distribution critical value
-        compute_t_critical(config.alpha / 2.0, df)
-    } else {
-        // Use z critical value for large samples
-        compute_z_critical(config.alpha / 2.0)
-    };
+    // Critical value: t quantile with T0 - 1 degrees of freedom
+    let critical_value = critical_value(config.alpha, n_pre)?;
 
     // Standard error for each post-treatment period
     // SE varies by period due to potential heteroskedasticity
@@ -592,6 +729,7 @@ pub fn run_scpi(
         alpha: config.alpha,
         critical_value,
         constraint_type,
+        warnings,
     })
 }
 
@@ -613,11 +751,20 @@ fn estimate_weights(
     constraint: &SCPIConstraint,
     max_iter: usize,
     tolerance: f64,
+    warnings: &mut Vec<String>,
 ) -> EconResult<Array1<f64>> {
-    let _n = x.ncols();
-
     match constraint {
-        SCPIConstraint::Simplex => solve_simplex_weights(y, x, max_iter, tolerance),
+        SCPIConstraint::Simplex => {
+            let qp = solve_simplex_weights(y, x)?;
+            if !qp.unique {
+                warnings.push(format!(
+                    "the simplex weights are not unique ({} donors fit the pre-treatment \
+                     outcomes equally well); the minimum-norm weights are reported",
+                    qp.free.len()
+                ));
+            }
+            Ok(qp.weights)
+        }
 
         SCPIConstraint::Lasso { lambda } => solve_lasso_weights(y, x, *lambda, max_iter, tolerance),
 
@@ -629,94 +776,13 @@ fn estimate_weights(
     }
 }
 
-/// Solve for weights under simplex constraints using projected gradient descent.
-///
-/// Minimizes ||y - Xw||² subject to Σwⱼ = 1, wⱼ ≥ 0
-///
-/// Uses Frank-Wolfe algorithm (Cattaneo et al. 2021, Algorithm 1).
+/// Simplex weights: `min ||y - X w||^2` subject to `w >= 0`, `sum(w) = 1`, solved exactly by
+/// the simplex QP shared with the synthetic control.
 fn solve_simplex_weights(
     y: &ArrayView1<f64>,
     x: &ArrayView2<f64>,
-    max_iter: usize,
-    tolerance: f64,
-) -> EconResult<Array1<f64>> {
-    let n = x.ncols();
-
-    // QP: min 0.5 * w' * H * w + c' * w
-    // H = X'X, c = -X'y
-    let h = xtx(x);
-    let c = -xty(x, &y.to_owned());
-
-    // Add small regularization for numerical stability
-    let mut h_reg = h.clone();
-    for i in 0..n {
-        h_reg[[i, i]] += 1e-8;
-    }
-
-    // Initialize with uniform weights
-    let mut w = Array1::from_elem(n, 1.0 / n as f64);
-
-    // Frank-Wolfe / projected gradient descent
-    for _ in 0..max_iter {
-        crate::resource::checkpoint()?;
-
-        // Gradient: H * w + c
-        let grad = h_reg.dot(&w) + &c;
-
-        // Find vertex that minimizes gradient (Frank-Wolfe direction)
-        let min_idx = grad
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-
-        // Direction: e_min - w
-        let mut direction = Array1::zeros(n);
-        direction[min_idx] = 1.0;
-        let direction = &direction - &w;
-
-        // Optimal step size via line search
-        // d'Hd and d'(Hw + c)
-        let hd = h_reg.dot(&direction);
-        let d_h_d: f64 = direction.iter().zip(hd.iter()).map(|(&d, &h)| d * h).sum();
-        let hw_c = h_reg.dot(&w) + &c;
-        let d_hw_c: f64 = direction
-            .iter()
-            .zip(hw_c.iter())
-            .map(|(&d, &h)| d * h)
-            .sum();
-
-        let alpha = if d_h_d.abs() > 1e-12 {
-            (-d_hw_c / d_h_d).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-
-        // Update
-        let w_new = &w + &(&direction * alpha);
-
-        // Check convergence
-        let change: f64 = w_new
-            .iter()
-            .zip(w.iter())
-            .map(|(&a, &b)| (a - b).abs())
-            .sum();
-        w = w_new;
-
-        if change < tolerance {
-            break;
-        }
-    }
-
-    // Ensure constraints are satisfied
-    w.mapv_inplace(|x| x.max(0.0));
-    let sum: f64 = w.sum();
-    if sum > 0.0 {
-        w.mapv_inplace(|x| x / sum);
-    }
-
-    Ok(w)
+) -> EconResult<crate::econometrics::synth::SimplexQp> {
+    crate::econometrics::synth::simplex_qp(x.view(), y.view())
 }
 
 /// Solve for weights with Lasso (L1) penalty using coordinate descent.
@@ -906,7 +972,7 @@ fn project_to_simplex(v: &Array1<f64>) -> Array1<f64> {
 
     // Sort in descending order
     let mut sorted: Vec<(usize, f64)> = v.iter().cloned().enumerate().collect();
-    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // Find threshold
     let mut cumsum = 0.0;
@@ -960,8 +1026,15 @@ fn compute_out_sample_variance(
             let synthetic = x.dot(w);
             let residuals = y.to_owned() - &synthetic;
             let sse: f64 = residuals.iter().map(|r| r * r).sum();
-            let df = (t as i64 - j as i64).max(1) as f64;
-            Ok(sse / df)
+            if t <= j {
+                return Err(EconError::InsufficientData {
+                    required: j + 1,
+                    provided: t,
+                    context: "SCPI gaussian variance needs more pre-treatment periods than donors"
+                        .to_string(),
+                });
+            }
+            Ok(sse / (t - j) as f64)
         }
 
         VarianceMethod::Subgaussian => {
@@ -970,23 +1043,11 @@ fn compute_out_sample_variance(
             let synthetic = x.dot(w);
             let residuals = y.to_owned() - &synthetic;
 
-            // Estimate subgaussian parameter using median absolute deviation
+            // Robust scale: median |e| / qnorm(0.75), inflated by 1.5 for subgaussian tails
             let mut abs_resid: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
-            abs_resid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-            let median_abs = if abs_resid.len().is_multiple_of(2) {
-                let mid = abs_resid.len() / 2;
-                (abs_resid[mid - 1] + abs_resid[mid]) / 2.0
-            } else {
-                abs_resid[abs_resid.len() / 2]
-            };
-
-            // MAD-based variance estimate (robust)
-            // σ ≈ MAD / 0.6745 for normal data
-            let sigma_mad = median_abs / 0.6745;
-
-            // Inflate for subgaussian tail behavior
-            // Factor of 1.5-2 is common in practice
+            abs_resid.sort_by(f64::total_cmp);
+            let median_abs = quantile_sorted(&abs_resid, 0.5, QuantileType::T7);
+            let sigma_mad = median_abs / normal_quantile(0.75)?;
             let inflation = 1.5;
 
             Ok(sigma_mad * sigma_mad * inflation)
@@ -1017,11 +1078,10 @@ fn compute_out_sample_variance(
                 }
 
                 // Re-estimate weights (using simplex by default for LOO)
-                if let Some(w_loo) = cv_fit_weights(&y_train.view(), &x_train.view())? {
-                    let pred = x.row(i).dot(&w_loo);
-                    let error = y[i] - pred;
-                    cv_errors.push(error * error);
-                }
+                let w_loo = cv_fit_weights(&y_train.view(), &x_train.view())?;
+                let pred = x.row(i).dot(&w_loo);
+                let error = y[i] - pred;
+                cv_errors.push(error * error);
             }
 
             if cv_errors.is_empty() {
@@ -1073,12 +1133,11 @@ fn compute_out_sample_variance(
                 }
 
                 // Re-estimate weights, then compute the test errors
-                if let Some(w_fold) = cv_fit_weights(&y_train.view(), &x_train.view())? {
-                    for &test_idx in &test_indices {
-                        let pred = x.row(test_idx).dot(&w_fold);
-                        let error = y[test_idx] - pred;
-                        cv_errors.push(error * error);
-                    }
+                let w_fold = cv_fit_weights(&y_train.view(), &x_train.view())?;
+                for &test_idx in &test_indices {
+                    let pred = x.row(test_idx).dot(&w_fold);
+                    let error = y[test_idx] - pred;
+                    cv_errors.push(error * error);
                 }
             }
 
@@ -1094,64 +1153,20 @@ fn compute_out_sample_variance(
     }
 }
 
-/// Simplex weights for one cross-validation fit. A fit that fails gives `None`,
-/// and the fold is skipped; a stopped budget (`Cancelled`) is passed on and ends
-/// the variance estimation.
-fn cv_fit_weights(
-    y_train: &ArrayView1<f64>,
-    x_train: &ArrayView2<f64>,
-) -> EconResult<Option<Array1<f64>>> {
-    match solve_simplex_weights(y_train, x_train, 1000, 1e-8) {
-        Ok(w) => Ok(Some(w)),
-        Err(e @ EconError::Cancelled(_)) => Err(e),
-        Err(_) => Ok(None),
-    }
+/// Simplex weights for one cross-validation fit; an error of the fit (including a stopped
+/// budget) ends the variance estimation.
+fn cv_fit_weights(y_train: &ArrayView1<f64>, x_train: &ArrayView2<f64>) -> EconResult<Array1<f64>> {
+    Ok(solve_simplex_weights(y_train, x_train)?.weights)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Statistical Utilities
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute t-distribution critical value using approximation.
-///
-/// For df > 30, essentially equal to z.
-fn compute_t_critical(alpha: f64, df: usize) -> f64 {
-    // For small df, use approximation based on student-t quantile
-    // This is the absolute value for two-tailed test
-    if df >= 120 {
-        return compute_z_critical(alpha);
-    }
-
-    // Simple approximation for common df values
-    // More accurate would require special functions
-    let z = compute_z_critical(alpha);
-
-    // Cornish-Fisher expansion approximation
-    let _g1 = 0.0; // Skewness = 0 for t
-    let g2 = 6.0 / df as f64; // Excess kurtosis ≈ 6/df
-
-    z + g2 * (z * z - 1.0) / 24.0
-}
-
-/// Compute z critical value (standard normal quantile).
-fn compute_z_critical(alpha: f64) -> f64 {
-    // Approximate inverse normal using rational approximation
-    // Abramowitz and Stegun 26.2.23
-    if alpha <= 0.0 || alpha >= 0.5 {
-        return 1.96; // Default for 95% CI
-    }
-
-    let p = alpha;
-    let t = (-2.0 * p.ln()).sqrt();
-
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
+/// `qt(1 - alpha / 2, n_pre - 1)`.
+fn critical_value(alpha: f64, n_pre: usize) -> EconResult<f64> {
+    validate_level(alpha, "alpha")?;
+    t_quantile(1.0 - alpha / 2.0, n_pre.saturating_sub(1) as f64)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1286,31 +1301,6 @@ mod tests {
         assert_relative_eq!(soft_threshold(-1.5, 0.5), -1.0, epsilon = 1e-10);
         assert_relative_eq!(soft_threshold(0.3, 0.5), 0.0, epsilon = 1e-10);
         assert_relative_eq!(soft_threshold(-0.3, 0.5), 0.0, epsilon = 1e-10);
-    }
-
-    #[test]
-    fn test_variance_methods() {
-        let (treated, donors) = generate_test_data();
-
-        let methods = [
-            VarianceMethod::Gaussian,
-            VarianceMethod::Subgaussian,
-            // Skip CV methods in unit tests (slow)
-        ];
-
-        for method in methods {
-            let config = SCPIConfig {
-                variance_method: method,
-                ..Default::default()
-            };
-
-            let result = run_scpi(&treated.view(), &donors.view(), 7, config).unwrap();
-
-            // Variance should be positive
-            assert!(result.in_sample_var > 0.0);
-            assert!(result.out_sample_var > 0.0);
-            assert!(result.total_var > 0.0);
-        }
     }
 
     // =========================================================================
@@ -1480,9 +1470,7 @@ mod tests {
         let x = d.slice(s![..6, ..]).to_owned();
         let r = cancelled(|| cv_fit_weights(&y.view(), &x.view()));
         assert!(matches!(r, Err(EconError::Cancelled(_))));
-        let w = cv_fit_weights(&y.view(), &x.view())
-            .unwrap()
-            .expect("weights");
+        let w = cv_fit_weights(&y.view(), &x.view()).unwrap();
         assert_eq!(w.len(), 5);
         assert!((w.sum() - 1.0).abs() < 1e-9 && w.iter().all(|&v| v >= 0.0));
     }
@@ -1497,37 +1485,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_critical_values() {
-        // Check approximate critical values
-        // Note: These are approximations; exact values require special functions
-        let z_95 = compute_z_critical(0.025);
-        assert!(
-            z_95 > 1.9 && z_95 < 2.1,
-            "z_0.025 should be ~1.96, got {}",
-            z_95
-        );
-
-        // The t-distribution approximation is less accurate for small df
-        // True t_10,0.025 ≈ 2.228, our approximation is simpler
-        let t_10_95 = compute_t_critical(0.025, 10);
-        assert!(
-            t_10_95 > 1.9 && t_10_95 < 2.5,
-            "t_10,0.025 should be ~2.23, got {}",
-            t_10_95
-        );
-
-        // For large df, should approach z
-        let t_100_95 = compute_t_critical(0.025, 100);
-        assert!(
-            (t_100_95 - z_95).abs() < 0.1,
-            "t_100 should be close to z, got {}",
-            t_100_95
-        );
-    }
-
     // =========================================================================
-    // Validation tests (test_validate_* prefix)
+    // Property tests on a known DGP
     // =========================================================================
 
     /// Create a dataset with a known treatment effect for validation.
@@ -1558,147 +1517,9 @@ mod tests {
         (treated, donors)
     }
 
-    /// Validate SCPI point estimates capture the known treatment effect.
+    /// Wider intervals at a higher level (property test).
     #[test]
-    fn test_validate_scpi_point_estimates() {
-        let (treated, donors) = generate_validate_data();
-        let n_pre = 10;
-        let true_effect = 5.0;
-
-        let config = SCPIConfig {
-            constraint: SCPIConstraint::Simplex,
-            ..Default::default()
-        };
-
-        let result = run_scpi(&treated.view(), &donors.view(), n_pre, config).unwrap();
-
-        // Point estimates (effects) should be close to the true effect
-        for (i, &eff) in result.effect.iter().enumerate() {
-            assert!(
-                (eff - true_effect).abs() < 3.0,
-                "Effect at post-period {} = {:.4} should be close to true effect {}",
-                i,
-                eff,
-                true_effect
-            );
-        }
-
-        // Pre-treatment fit should be good
-        assert!(
-            result.pre_treatment_rmspe < 1.0,
-            "Pre-treatment RMSPE = {:.4} should be small for well-specified DGP",
-            result.pre_treatment_rmspe
-        );
-
-        // R-squared in pre-treatment should be high
-        assert!(
-            result.pre_treatment_r2 > 0.9,
-            "Pre-treatment R2 = {:.4} should be high",
-            result.pre_treatment_r2
-        );
-    }
-
-    /// Validate prediction intervals have positive width and bracket the effect.
-    #[test]
-    fn test_validate_scpi_prediction_intervals() {
-        let (treated, donors) = generate_validate_data();
-        let n_pre = 10;
-
-        let config = SCPIConfig {
-            constraint: SCPIConstraint::Simplex,
-            alpha: 0.05,
-            ..Default::default()
-        };
-
-        let result = run_scpi(&treated.view(), &donors.view(), n_pre, config).unwrap();
-
-        // Should have one PI per post-treatment period
-        assert_eq!(result.prediction_intervals.len(), 4);
-
-        for (i, pi) in result.prediction_intervals.iter().enumerate() {
-            // Interval width must be positive
-            let width = pi.upper - pi.lower;
-            assert!(
-                width > 0.0,
-                "PI width at period {} = {:.4} should be positive",
-                i,
-                width
-            );
-
-            // Standard error should be positive
-            assert!(
-                pi.std_error > 0.0,
-                "PI std_error at period {} = {:.4} should be positive",
-                i,
-                pi.std_error
-            );
-
-            // Lower bound should be below upper bound
-            assert!(
-                pi.lower < pi.upper,
-                "PI bounds at period {}: lower={:.4} should be < upper={:.4}",
-                i,
-                pi.lower,
-                pi.upper
-            );
-        }
-
-        // Variance components should be positive
-        assert!(
-            result.in_sample_var > 0.0,
-            "In-sample variance should be positive"
-        );
-        assert!(
-            result.out_sample_var > 0.0,
-            "Out-sample variance should be positive"
-        );
-        assert!(result.total_var > 0.0, "Total variance should be positive");
-
-        // Total variance = in + out
-        assert!(
-            (result.total_var - (result.in_sample_var + result.out_sample_var)).abs() < 1e-10,
-            "Total variance should equal in_sample + out_sample"
-        );
-    }
-
-    /// Validate simplex weights are proper (non-negative, sum to 1).
-    #[test]
-    fn test_validate_scpi_simplex_weights() {
-        let (treated, donors) = generate_validate_data();
-        let n_pre = 10;
-
-        let config = SCPIConfig {
-            constraint: SCPIConstraint::Simplex,
-            ..Default::default()
-        };
-
-        let result = run_scpi(&treated.view(), &donors.view(), n_pre, config).unwrap();
-
-        // All weights non-negative
-        for (j, &w) in result.weights.iter().enumerate() {
-            assert!(
-                w >= -1e-8,
-                "Simplex weight {} = {:.6} should be non-negative",
-                j,
-                w
-            );
-        }
-
-        // Weights sum to 1
-        let wsum: f64 = result.weights.sum();
-        assert!(
-            (wsum - 1.0).abs() < 1e-5,
-            "Simplex weights should sum to 1, got {:.6}",
-            wsum
-        );
-
-        // Number of effective donors <= total donors
-        assert!(result.n_effective_donors <= result.n_donors);
-    }
-
-    /// Validate SCPI critical value is consistent with alpha.
-    #[test]
-    fn test_validate_scpi_critical_value() {
+    fn test_scpi_interval_width_increases_with_level() {
         let (treated, donors) = generate_validate_data();
         let n_pre = 10;
 
@@ -1738,5 +1559,236 @@ mod tests {
             result_95.critical_value,
             result_90.critical_value
         );
+    }
+
+    // =========================================================================
+    // R pins (scpi_quantities) and validation (T3-WP31)
+    // =========================================================================
+
+    use p2a_validation::{Check, Tol};
+
+    /// Treated (TR) and donor (D01..D08) outcome series of the planner case, times 1..20.
+    fn scpi_case(id: &str) -> (p2a_validation::Case, Array1<f64>, Array2<f64>) {
+        let (case, ds) = crate::test_support::load_case(id);
+        let df = ds.df();
+        let unit = df.column("unit").unwrap().str().unwrap().clone();
+        let time = df
+            .column("time")
+            .unwrap()
+            .cast(&polars::prelude::DataType::Int64)
+            .unwrap();
+        let time = time.i64().unwrap().clone();
+        let y = df
+            .column("y")
+            .unwrap()
+            .cast(&polars::prelude::DataType::Float64)
+            .unwrap();
+        let y = y.f64().unwrap().clone();
+        let donors: Vec<String> = (1..=8).map(|j| format!("D{j:02}")).collect();
+        let mut treated = Array1::<f64>::zeros(20);
+        let mut x = Array2::<f64>::zeros((20, 8));
+        for i in 0..df.height() {
+            let (u, t, v) = (
+                unit.get(i).unwrap(),
+                time.get(i).unwrap() as usize - 1,
+                y.get(i).unwrap(),
+            );
+            if u == "TR" {
+                treated[t] = v
+            } else {
+                x[[t, donors.iter().position(|d| d == u).unwrap()]] = v
+            }
+        }
+        (case, treated, x)
+    }
+
+    fn scpi_run(t: &Array1<f64>, x: &Array2<f64>, vm: VarianceMethod, alpha: f64) -> SCPIResult {
+        let c = SCPIConfig {
+            variance_method: vm,
+            alpha,
+            cv_folds: 5,
+            ..Default::default()
+        };
+        run_scpi(&t.view(), &x.view(), 14, c).unwrap()
+    }
+
+    const DONORS: [&str; 8] = ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08"];
+
+    #[test]
+    fn test_validate_scpi_simplex_weights() {
+        let (case, t, x) = scpi_case("scpi_quantities");
+        let r = scpi_run(&t, &x, VarianceMethod::Subgaussian, 0.05);
+        Check::new(&case)
+            .named("w", &DONORS, r.weights.as_slice().unwrap(), Tol::coef(14))
+            .vector("synthetic", r.synthetic.as_slice().unwrap(), Tol::coef(14))
+            .vector("effect", r.effect.as_slice().unwrap(), Tol::coef(14))
+            .scalar("in_sample_var", r.in_sample_var, Tol::stat(14))
+            .scalar("pre_rmspe", r.pre_treatment_rmspe, Tol::stat(14))
+            .scalar("pre_r2", r.pre_treatment_r2, Tol::stat(14))
+            .finish();
+        assert_eq!(r.n_effective_donors, 4);
+    }
+
+    #[test]
+    fn test_validate_scpi_variances() {
+        let (case, t, x) = scpi_case("scpi_quantities");
+        let mut check = Check::new(&case);
+        for (vm, key) in [
+            (VarianceMethod::Gaussian, "var_gaussian"),
+            (VarianceMethod::Subgaussian, "var_subgaussian"),
+            (VarianceMethod::LooCv, "var_loo"),
+            (VarianceMethod::KFoldCv, "var_kfold5"),
+        ] {
+            let r = scpi_run(&t, &x, vm, 0.05);
+            check.scalar(key, r.out_sample_var, Tol::stat(14));
+            assert_eq!(r.total_var, r.in_sample_var + r.out_sample_var);
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_validate_scpi_critical_value() {
+        let (case, t, x) = scpi_case("scpi_quantities");
+        let dfs = case.vector("qt_df");
+        let at = |alpha: f64| -> Vec<f64> {
+            dfs.iter()
+                .map(|&df| critical_value(alpha, df as usize + 1).unwrap())
+                .collect()
+        };
+        let tight = Tol::new(1e-10, 1e-12);
+        let r95 = scpi_run(&t, &x, VarianceMethod::Subgaussian, 0.05);
+        let r90 = scpi_run(&t, &x, VarianceMethod::Subgaussian, 0.10);
+        let lower: Vec<f64> = r95.prediction_intervals.iter().map(|p| p.lower).collect();
+        let upper: Vec<f64> = r95.prediction_intervals.iter().map(|p| p.upper).collect();
+        let lower90: Vec<f64> = r90.prediction_intervals.iter().map(|p| p.lower).collect();
+        assert_eq!(lower.len(), 6);
+        Check::new(&case)
+            .vector("qt_975", &at(0.05), tight)
+            .vector("qt_95", &at(0.10), tight)
+            .vector("qt_995", &at(0.01), tight)
+            .scalar("crit_95", r95.critical_value, Tol::stat(14))
+            .vector("pi_lower_subgaussian", &lower, Tol::stat(14))
+            .vector("pi_upper_subgaussian", &upper, Tol::stat(14))
+            .scalar("crit_90", r90.critical_value, Tol::stat(14))
+            .vector("pi_lower_subgaussian_90", &lower90, Tol::stat(14))
+            .finish();
+        assert!(r95.to_string().contains("Critical value: t(13) = 2.1604"));
+    }
+
+    #[test]
+    fn test_scpi_rejects_invalid_alpha() {
+        let (_, t, x) = scpi_case("scpi_quantities");
+        for alpha in [0.0, 1.0, 1.5, -0.3, f64::NAN] {
+            let cfg = SCPIConfig {
+                alpha,
+                ..Default::default()
+            };
+            let m = spec_msg(run_scpi(&t.view(), &x.view(), 14, cfg));
+            assert!(m.contains("alpha"), "{alpha}: {m}");
+        }
+    }
+
+    #[test]
+    fn test_scpi_gaussian_needs_more_periods_than_donors() {
+        let (_, t, x) = scpi_case("scpi_quantities");
+        let cfg = SCPIConfig {
+            variance_method: VarianceMethod::Gaussian,
+            ..Default::default()
+        };
+        let r = run_scpi(&t.view(), &x.view(), 8, cfg);
+        assert!(
+            matches!(
+                r,
+                Err(EconError::InsufficientData {
+                    required: 9,
+                    provided: 8,
+                    ..
+                })
+            ),
+            "ok={}",
+            r.is_ok()
+        );
+    }
+
+    #[test]
+    fn test_scpi_rejects_invalid_lambda() {
+        let (_, t, x) = scpi_case("scpi_quantities");
+        for c in [
+            SCPIConstraint::Ridge { lambda: 0.0 },
+            SCPIConstraint::Ridge { lambda: -1.0 },
+            SCPIConstraint::Lasso { lambda: -0.1 },
+            SCPIConstraint::LassoSimplex { lambda: f64::NAN },
+        ] {
+            let cfg = SCPIConfig {
+                constraint: c.clone(),
+                ..Default::default()
+            };
+            let m = spec_msg(run_scpi(&t.view(), &x.view(), 14, cfg));
+            assert!(m.contains("lambda"), "{c:?}: {m}");
+        }
+    }
+
+    #[test]
+    fn test_scpi_rejects_non_finite_outcomes() {
+        let (_, mut t, mut x) = scpi_case("scpi_quantities");
+        x[[3, 2]] = f64::NAN;
+        let m = spec_msg(run_scpi(&t.view(), &x.view(), 14, SCPIConfig::default()));
+        assert!(
+            m.contains("donors") && m.contains("period 3, donor 2"),
+            "{m}"
+        );
+        x[[3, 2]] = 1.0;
+        t[5] = f64::INFINITY;
+        let m = spec_msg(run_scpi(&t.view(), &x.view(), 14, SCPIConfig::default()));
+        assert!(m.contains("treated") && m.contains("period 5"), "{m}");
+    }
+
+    #[test]
+    fn test_variance_method_parses_aliases_and_rejects_unknown() {
+        for (s, v) in [
+            ("subgaussian", VarianceMethod::Subgaussian),
+            ("Sub-Gaussian", VarianceMethod::Subgaussian),
+            ("gaussian", VarianceMethod::Gaussian),
+            ("loo", VarianceMethod::LooCv),
+            ("LOO_CV", VarianceMethod::LooCv),
+            ("k-fold", VarianceMethod::KFoldCv),
+            ("kfold_cv", VarianceMethod::KFoldCv),
+        ] {
+            assert_eq!(s.parse::<VarianceMethod>().unwrap(), v, "{s}");
+        }
+        VarianceMethod::choices().validate().unwrap();
+        let m = "bootstrap"
+            .parse::<VarianceMethod>()
+            .unwrap_err()
+            .to_string();
+        for name in ["subgaussian", "gaussian", "loo_cv", "kfold_cv"] {
+            assert!(m.contains(name), "{m}");
+        }
+        assert_eq!(VarianceMethod::KFoldCv.to_string(), "kfold_cv");
+    }
+
+    #[test]
+    fn test_scpi_constraint_from_options() {
+        assert!(matches!(
+            SCPIConstraint::from_options(None, None),
+            Ok(SCPIConstraint::Simplex)
+        ));
+        assert!(matches!(
+            SCPIConstraint::from_options(Some("ridge"), Some(0.5)),
+            Ok(SCPIConstraint::Ridge { lambda }) if lambda == 0.5
+        ));
+        assert!(matches!(
+            SCPIConstraint::from_options(Some("lasso"), None),
+            Ok(SCPIConstraint::Lasso { lambda }) if lambda == 0.1
+        ));
+        assert!(matches!(
+            SCPIConstraint::from_options(Some("Lasso-Simplex"), Some(0.2)),
+            Ok(SCPIConstraint::LassoSimplex { lambda }) if lambda == 0.2
+        ));
+        assert!(matches!(
+            SCPIConstraint::from_options(Some("elastic"), None),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        ConstraintName::choices().validate().unwrap();
     }
 }

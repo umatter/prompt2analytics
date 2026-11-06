@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_gsynth",
+      "name": "Generalized synthetic control: interactive fixed effects (Xu 2017), LOO cross-validation, matrix completion, bootstrap",
+      "category": "econometrics",
+      "reference": "gsynth::gsynth 1.4.0 (estimator 'gsynth' | 'mc') = fect::fect 2.4.5 (method 'gsynth' | 'mc', cv.method 'loo'); written-out IFE, MC, LOO and deterministic-fold MC CV and both bootstraps (gsynth's own draws replayed) checked against them in validation/r/cases/causal_gsynth.R",
+      "doc": "validation/econometrics/gsynth.md",
+      "cases": [
+        "gsynth_simdata",
+        "gsynth_staggered"
+      ],
+      "tests": [
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_ife_r2",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_ife_cov",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_ife_unit",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_staggered",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_ife_cv",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_staggered_cv",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_mc",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_mc_lambda_grid",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_mc_cv",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_bootstrap_parametric_replay",
+        "p2a-core::econometrics::synth::gsynth_tests::test_validate_gsynth_bootstrap_unit_replay"
+      ],
+      "quantities": [
+        "ATT",
+        "event-time ATT, counts",
+        "unit ATTs",
+        "beta",
+        "mu",
+        "sigma2",
+        "pre-treatment RMSE",
+        "LOO CV MSPE by r and selected r",
+        "MC: ATT, beta, rank, lambda grid, CV MSPE by lambda, selected lambda",
+        "bootstrap replicates, SE, normal CI, p, event-time SEs (replayed draws)"
+      ],
+      "tolerance": "n = 1500 / 720 cells: closed-form fits (no covariates) at validation/README.md (coefficients 1e-10 / 1e-8, statistics 1e-8 / 1e-6 relative); iterative fits pinned at tolerance 1e-12 to the tight references at Tol::iterative(1e-8) (IFE, MC at lambda 0.3) and 1e-7 (MC at lambda 0.01); MC CV at tolerance 1e-8 against the solution at Tol::iterative(max(1e-6, 10 x gap)) (MSPE) and max(1e-5, 10 x gap) (ATT); fect's LOO MSPEs (fitted at 1e-3) and gsynth's default-tolerance ATT as cross-checks at 1e-3 and 5e-4",
+      "deviations": [
+        {
+          "finding": "CAUS-43",
+          "quantity": "cross-validated r",
+          "note": "LOO over treated pre-periods (Xu 2017; fect cv.method = 'loo'); gsynth 1.4's default random folds (ife_cv_cov_r = 1 with set.seed(7)) are recorded, not pinned"
+        },
+        {
+          "finding": "CAUS-44",
+          "quantity": "MC cross-validation",
+          "note": "deterministic folds over treated pre-period positions, warm starts along the grid and the minimum-MSPE rule; fect uses random folds and cv.rule = '1se' with time-weighted scores; the default grid is fect's and is pinned"
+        },
+        {
+          "finding": "CAUS-41",
+          "quantity": "IFE stopping rule",
+          "note": "scale-free ||X~ dbeta|| / ||Y~|| instead of gsynth's absolute ||dbeta||; pins at tolerance 1e-12"
+        },
+        {
+          "finding": "CAUS-44",
+          "quantity": "inputs",
+          "note": "collinear or FE-absorbed covariates, r beyond the identification bound, singular treated-loading regressions and non-0/1 or reversing treatments are errors (fect: beta = 0 with a warning, r reset, NA)"
+        },
+        {
+          "finding": "CAUS-44",
+          "quantity": "bootstrap draws",
+          "note": "seeded ChaCha8 streams per (seed, phase, replication) instead of R's RNG; pinned by replaying gsynth's own draws"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "causal_synth",
+      "name": "Synthetic control (Abadie, Diamond and Hainmueller 2010): unit weights as the exact simplex QP for a given V on predictors standardised as Synth; Synth's regression-based V start",
+      "category": "econometrics",
+      "reference": "the QP itself on Synth-standardised predictors, solved by quadprog::solve.QP with a KKT polish; Synth 1.1.10's standardisation and SV2 start written out and checked against Synth's source (validation/r/cases/causal_synth_scpi.R)",
+      "doc": "validation/econometrics/synth.md",
+      "cases": [
+        "synth_weights_qp"
+      ],
+      "tests": [
+        "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp",
+        "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp_custom",
+        "p2a-core::econometrics::synth::tests::test_validate_synth_weights_qp_invariant_to_predictor_units",
+        "p2a-core::econometrics::synth::tests::test_validate_synth_regression_start"
+      ],
+      "quantities": [
+        "unit weights (equal, custom V; predictors x 1, x 1e4, x2 alone x 1e4)",
+        "predictor loss (standardised)",
+        "pre-treatment MSPE",
+        "post-period effects, average effect",
+        "synthetic outcome path",
+        "synthetic predictor values (raw scale)",
+        "number of positive weights",
+        "regression-based V start (SV2)"
+      ],
+      "tolerance": "n = 14 pre-periods: validation/README.md (weights, effects 1e-6; loss, MSPE 1e-5 relative)",
+      "deviations": [
+        {
+          "finding": "CAUS-40",
+          "quantity": "data-driven V",
+          "note": "no R reference for the Nelder-Mead search itself (Synth uses optimx and ipop): property tests only (unit invariance at x 8192, two starts, loss not above the equal-V fit); the SV2 start is pinned"
+        },
+        {
+          "finding": "CAUS-40",
+          "quantity": "unit weights on a face of optima",
+          "note": "the minimum-norm weights of the 1e-10 ridge (SIMPLEX_QP_RIDGE) are reported with a warning; Synth's ipop returns an interior point of the face"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "causal_scpi",
+      "name": "Synthetic control with prediction intervals (p2a's construction, not CFT 2021): simplex weights, variance components, t intervals",
+      "category": "econometrics",
+      "reference": "p2a's formulas written out in validation/r/cases/causal_synth_scpi.R (quadprog for the weights, stats::qt); scpi not installed",
+      "doc": "validation/econometrics/scpi.md",
+      "cases": [
+        "scpi_quantities"
+      ],
+      "tests": [
+        "p2a-core::econometrics::scpi::tests::test_validate_scpi_simplex_weights",
+        "p2a-core::econometrics::scpi::tests::test_validate_scpi_variances",
+        "p2a-core::econometrics::scpi::tests::test_validate_scpi_critical_value"
+      ],
+      "quantities": [
+        "simplex weights",
+        "synthetic path",
+        "effects",
+        "in-sample variance",
+        "gaussian, subgaussian, LOO and 5-fold out-of-sample variance",
+        "t critical values (df 1-100; alpha 0.10, 0.05, 0.01)",
+        "interval bounds at 95% and 90%",
+        "pre-treatment RMSPE and R2"
+      ],
+      "tolerance": "n = 14: validation/README.md (weights, effects 1e-6; variances, bounds 1e-5 relative); critical values 1e-10 relative (t_quantile)",
+      "deviations": [
+        {
+          "finding": "CAUS-32",
+          "quantity": "prediction intervals",
+          "note": "p2a's sqrt(in + out) interval is pinned to its own formula; it is not the Cattaneo-Feng-Titiunik construction (open, Tier 4)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}

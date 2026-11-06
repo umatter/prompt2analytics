@@ -1,208 +1,52 @@
 # Synthetic Control with Prediction Intervals (SCPI) Validation
 
-## Method Description
+## What p2a computes
 
-SCPI extends the classic synthetic control method (Abadie et al., 2010) with proper uncertainty quantification through prediction intervals. Developed by Cattaneo, Feng, and Titiunik (2021), SCPI provides:
+`run_scpi` (`crates/p2a-core/src/econometrics/scpi.rs`) fits donor weights on the pre-treatment
+outcomes and reports a heuristic interval. **This is not the Cattaneo-Feng-Titiunik (2021)
+simulation-based construction (CAUS-32, open); the interval width is constant over post periods.**
 
-1. **Multiple constraint types**: Simplex (classic SC), Lasso, Ridge, Lasso-Simplex
-2. **Prediction intervals**: Account for both in-sample and out-of-sample variance
-3. **Variance decomposition**: Separate estimation of in-sample and out-of-sample components
+- Weights: simplex (`min ||y - X w||^2`, `w >= 0`, `sum w = 1`, the exact simplex QP shared with the
+  synthetic control; non-unique optima give the minimum-norm weights and a warning), lasso, ridge or
+  lasso-simplex. Penalties must be finite, ridge lambda > 0, lasso lambda >= 0.
+- In-sample variance: `SSE / T0`.
+- Out-of-sample variance: gaussian `SSE / (T0 - J)` (needs T0 > J), subgaussian
+  `1.5 (median|e| / qnorm(0.75))^2`, or the mean squared leave-one-out or k-fold prediction error of
+  refitted simplex weights (a failing fold is an error).
+- Interval: `effect +/- qt(1 - alpha/2, T0 - 1) sqrt(in + out)`; `alpha` must lie in (0, 1).
 
-## Mathematical Framework
+## Reference and pins
 
-### Weight Estimation
+Case `scpi_quantities` in `validation/r/cases/causal_synth_scpi.R` writes p2a's formulas out in R
+(weights by `quadprog` with a KKT polish, `stats::qt`) on `synth_qp_panel.csv` (T0 = 14, J = 8). The
+R package `scpi` is not installed and not compared.
 
-The synthetic control weights W are estimated by minimizing:
+| Test | Pins | Tolerance |
+|---|---|---|
+| `test_validate_scpi_simplex_weights` | weights (D01, D04, D05, D07 positive), synthetic path, effects, in-sample variance, pre-RMSPE, pre-R2 | weights 1e-6; statistics 1e-5 |
+| `test_validate_scpi_variances` | gaussian, subgaussian, LOO and 5-fold variances | 1e-5 |
+| `test_validate_scpi_critical_value` | `qt` at df 1-100 for alpha 0.10, 0.05, 0.01; crit_95 = 2.160369 at df 13; interval bounds at 95% and 90% | 1e-10 relative; 1e-5 |
 
-```
-min_W ||Y1_pre - Y0_pre * W||^2 + penalty(W)
-```
+Before: Frank-Wolfe weights left 0.0004-0.0006 on four donors whose optimal weight is 0 (CAUS-80),
+and the critical value was 2.015 at df 13 (a wrong Cornish-Fisher term, z beyond df 30; CAUS-82).
 
-Subject to constraints depending on type:
-- **Simplex**: sum(W) = 1, W >= 0
-- **Lasso**: add lambda * ||W||_1
-- **Ridge**: add lambda * ||W||_2^2
-- **Lasso-Simplex**: Lasso + simplex
+Property tests (not registered): `test_scpi_interval_width_increases_with_level`,
+`test_scpi_rejects_invalid_alpha`, `test_scpi_gaussian_needs_more_periods_than_donors`,
+`test_scpi_rejects_invalid_lambda`, `test_scpi_rejects_non_finite_outcomes`,
+`test_variance_method_parses_aliases_and_rejects_unknown`, `test_scpi_constraint_from_options`, and
+the lasso, ridge and lasso-simplex smoke tests.
 
-### Prediction Intervals
+## Deviations
 
-Intervals are constructed as (Cattaneo et al. 2021, Eq. 3.5):
-
-```
-[effect - c_alpha * sigma_hat, effect + c_alpha * sigma_hat]
-```
-
-Where:
-- sigma_hat^2 = sigma_in^2 + sigma_out^2
-- sigma_in^2: In-sample variance from pre-treatment fit residuals
-- sigma_out^2: Out-of-sample variance (estimated via subgaussian bounds or CV)
-- c_alpha: Critical value (t or z distribution)
-
-## Implementation Location
-
-- **Core**: `crates/p2a-core/src/econometrics/scpi.rs`
-- **MCP Tool**: `scpi` in `crates/p2a-mcp/src/server.rs`
-- **Exports**: `p2a_core::{run_scpi, SCPIConfig, SCPIConstraint, VarianceMethod, SCPIResult}`
-
-## Reference Implementation
-
-### R Package: scpi (Cattaneo, Feng, Palomba, Titiunik)
-
-- **CRAN**: https://cran.r-project.org/package=scpi
-- **Documentation**: https://nppackages.github.io/scpi/
-- **Version**: 2.2.5 (at time of validation)
-
-## Test Cases
-
-### Test Case 1: Basic Simplex Constraint
-
-**Setup**:
-- 10 time periods (7 pre-treatment, 3 post-treatment)
-- 1 treated unit with trend + treatment effect
-- 5 donor units with similar trends
-
-**Rust Test**: `test_scpi_basic`
-
-```rust
-let treated = array![
-    10.0, 11.5, 12.8, 14.1, 15.5, 16.9, 18.2,  // Pre-treatment
-    22.0, 23.5, 25.0                            // Post-treatment (effect ~3)
-];
-let donors = Array2::from_shape_fn((10, 5), |(t, j)| {
-    10.0 + 1.4 * t as f64 + 0.3 * j as f64 + 0.1 * ((t * j) as f64).sin()
-});
-
-let config = SCPIConfig::default();  // Simplex, alpha=0.05
-let result = run_scpi(&treated.view(), &donors.view(), 7, config)?;
-```
-
-**Validation Criteria**:
-- Weights sum to 1.0 (tolerance: 1e-6)
-- All weights non-negative
-- Prediction intervals properly ordered: lower < effect < upper
-- Pre-treatment fit: RMSPE > 0
-
-### Test Case 2: Lasso Constraint
-
-**Rust Test**: `test_scpi_lasso`
-
-```rust
-let config = SCPIConfig {
-    constraint: SCPIConstraint::Lasso { lambda: 0.1 },
-    ..Default::default()
-};
-```
-
-**Validation Criteria**:
-- Produces sparse weights (n_effective_donors <= n_donors)
-- Some weights may be exactly zero
-
-### Test Case 3: Ridge Constraint
-
-**Rust Test**: `test_scpi_ridge`
-
-```rust
-let config = SCPIConfig {
-    constraint: SCPIConstraint::Ridge { lambda: 0.1 },
-    ..Default::default()
-};
-```
-
-**Validation Criteria**:
-- All weights typically non-zero (shrinkage, not selection)
-- Smaller magnitude weights than unconstrained OLS
-
-### Test Case 4: Lasso-Simplex Constraint
-
-**Rust Test**: `test_scpi_lasso_simplex`
-
-```rust
-let config = SCPIConfig {
-    constraint: SCPIConstraint::LassoSimplex { lambda: 0.05 },
-    ..Default::default()
-};
-```
-
-**Validation Criteria**:
-- Weights sum to 1.0 (tolerance: 1e-4)
-- All weights non-negative
-- Some sparsity induced by L1 penalty
-
-### Test Case 5: Variance Methods
-
-**Rust Test**: `test_variance_methods`
-
-Tests Gaussian and Subgaussian variance estimation:
-
-**Validation Criteria**:
-- All variance components > 0
-- total_var = in_sample_var + out_sample_var
-
-## Algorithm Details
-
-### Simplex Weight Optimization
-
-Uses Frank-Wolfe algorithm:
-1. Initialize with uniform weights: W = 1/J
-2. Compute gradient: grad = H * W + c where H = X0'X0, c = -X0'Y1
-3. Find minimizing vertex: argmin_j grad_j
-4. Line search for optimal step size
-5. Update: W_new = W + alpha * (e_j - W)
-6. Repeat until convergence
-
-### Lasso Weight Optimization
-
-Uses coordinate descent with soft-thresholding:
-1. For each coordinate j:
-   - Compute partial residual
-   - Apply soft-thresholding: W_j = sign(r_j) * max(0, |r_j| - lambda)
-2. Repeat until convergence
-
-### ADMM for Lasso-Simplex
-
-Uses Alternating Direction Method of Multipliers:
-1. W-update: Minimize augmented Lagrangian (closed form)
-2. Z-update: Apply soft-thresholding then project to simplex
-3. U-update: Dual variable update
-4. Repeat until primal and dual residuals converge
-
-### Simplex Projection
-
-Uses Duchi et al. (2008) algorithm:
-1. Sort vector in descending order
-2. Find threshold rho via cumulative sum
-3. Project: x_proj = max(0, x - theta)
-
-## Tolerances
-
-| Quantity | Tolerance |
-|----------|-----------|
-| Weight sum (simplex) | 1e-4 |
-| Weight non-negativity | 1e-6 |
-| Optimization convergence | 1e-8 |
-| Variance positivity | > 0 |
-
-## Known Limitations
-
-1. **Critical value approximation**: Uses simplified t-distribution approximation; exact values require special functions
-2. **Small sample variance**: Out-of-sample variance estimation less reliable with few pre-treatment periods
-3. **Lasso path**: Does not compute full regularization path; single lambda value
+1. CAUS-32: the interval is p2a's own formula, pinned to itself; not the CFT construction.
 
 ## References
 
-### Primary
-- Cattaneo, M. D., Feng, Y., & Titiunik, R. (2021). "Prediction Intervals for Synthetic Control Methods." *Journal of the American Statistical Association*, 116(536), 1865-1880. DOI: 10.1080/01621459.2021.1979561
-
-### Background
-- Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program." *Journal of the American Statistical Association*, 105(490), 493-505.
-
-- Abadie, A. (2021). "Using Synthetic Controls: Feasibility, Data Requirements, and Methodological Aspects." *Journal of Economic Literature*, 59(2), 391-425.
-
-### Algorithms
-- Duchi, J., Shalev-Shwartz, S., Singer, Y., & Chandra, T. (2008). "Efficient Projections onto the l1-Ball for Learning in High Dimensions." *ICML 2008*.
-
-### Software
-- R package `scpi`: Cattaneo, M. D., Feng, Y., Palomba, F., & Titiunik, R. https://cran.r-project.org/package=scpi
+- Cattaneo, M. D., Feng, Y., & Titiunik, R. (2021). "Prediction Intervals for Synthetic Control
+  Methods." *Journal of the American Statistical Association*, 116(536), 1865-1880.
+- Abadie, A., Diamond, A., & Hainmueller, J. (2010). *JASA*, 105(490), 493-505.
+- Duchi, J., Shalev-Shwartz, S., Singer, Y., & Chandra, T. (2008). "Efficient Projections onto the
+  l1-Ball for Learning in High Dimensions." *ICML 2008*.
 
 ## MCP extraction (T2-WP11)
 
