@@ -135,6 +135,9 @@ fn ensemble_refusal(
 
 /// The fewest trees both tree-ensemble fits accept (they refuse 0).
 const FEWEST_TREES: usize = 1;
+/// The fewest trees the causal forest accepts: one group of `ci_group_size` trees (2, the
+/// default, which the tool does not expose).
+const FEWEST_FOREST_TREES: usize = 2;
 /// The shallowest trees both fits accept: at depth 0 each tree is a single leaf.
 const SHALLOWEST_TREES: usize = 0;
 /// The fewest bootstrap replications `bart_causal` accepts. Two give a standard error only
@@ -212,7 +215,7 @@ fn forest_change(
     n_covariates: usize,
 ) -> EnsembleChange {
     let knobs: [Knob<CausalForestConfig>; 3] = [
-        ("lower", "n_trees", |c, _| c.n_trees = FEWEST_TREES),
+        ("lower", "n_trees", |c, _| c.n_trees = FEWEST_FOREST_TREES),
         ("lower", "max_depth", |c, _| c.max_depth = SHALLOWEST_TREES),
         ("raise", "min_node_size", |c, n| {
             c.min_node_size = c.min_node_size.max(n)
@@ -1898,9 +1901,9 @@ mod tests {
     /// honesty or the propensity score off as required only when the least memory with it
     /// does not fit and the least memory without it does;
     /// `ensemble_changes_reach_the_least_memory_the_fits_accept` checks the tiers over a grid
-    /// of inputs. On 1.5 million rows with four covariates, no BART setting fits and the
-    /// causal forest fits only without honest splitting; with eight covariates no forest
-    /// setting fits either.
+    /// of inputs. On 1.5 million rows with four covariates no BART setting fits, and no causal
+    /// forest setting either: the out-of-bag nuisance forests and the per-row vectors of the
+    /// orthogonalised fit take more than the limit at any trees, with or without honesty.
     #[test]
     fn ensemble_refusals_offer_other_settings_only_when_they_fit() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1932,8 +1935,10 @@ mod tests {
         );
         let (f, b) = (refusal(&f), refusal(&b));
         assert!(
-            f.ends_with("or lower n_trees or max_depth, or raise min_node_size.")
-                && f.contains("Use a sample of at most "),
+            f.contains(
+                "No values of n_trees, max_depth or min_node_size bring it within this limit on \
+                 1500000 rows. Use a sample of at most "
+            ) && !f.contains("lower"),
             "{f}"
         );
         assert!(
@@ -1945,10 +1950,9 @@ mod tests {
             "{b}"
         );
 
-        // The forest's smallest honest trees do not fit, but without honesty they do. One tree
-        // of depth 0 is the least the fit accepts, and its leaves do not depend on
-        // min_node_size, so turning honesty off is the only change left. BART with the
-        // propensity score names it among the settings that cannot help.
+        // The forest's smallest honest trees do not fit, and turning honesty off does not help
+        // (it raises the bound). BART with the propensity score names it among the settings
+        // that cannot help.
         let with_propensity = |n_trees, max_depth, n_bootstrap| BartCausalRequest {
             include_propensity: Some(true),
             ..bart(n_trees, max_depth, n_bootstrap)
@@ -1959,15 +1963,17 @@ mod tests {
             &hosted,
             true,
             (
-                forest(FEWEST_TREES, SHALLOWEST_TREES, true, 1_500_000),
+                forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 1_500_000),
                 with_propensity(200, 4, 100),
             ),
         );
         let (f, b) = (refusal(&f), refusal(&b));
         assert!(
-            f.ends_with("for example with munge_sample, or set honesty = false.")
-                && !f.contains("lower")
-                && !f.contains("raise"),
+            f.contains(
+                "No values of n_trees, max_depth, min_node_size or honesty bring it within this \
+                 limit on 1500000 rows. Use a sample of at most "
+            ) && !f.contains("lower")
+                && !f.contains("set honesty = false"),
             "{f}"
         );
         assert!(
@@ -1979,7 +1985,7 @@ mod tests {
         );
 
         // Eight covariates: no forest setting fits 1.5 million rows.
-        let mut wide = forest(FEWEST_TREES, SHALLOWEST_TREES, true, 1_500_000);
+        let mut wide = forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 1_500_000);
         wide.covariates = (0..8).map(|k| format!("c{k}")).collect();
         let [(_, f), _] = calls(&rt, &server, &hosted, true, (wide, bart(1, 0, 2)));
         let f = refusal(&f);
@@ -2052,7 +2058,7 @@ mod tests {
             &hosted,
             true,
             (
-                forest(FEWEST_TREES, SHALLOWEST_TREES, false, 1),
+                forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, false, 1),
                 with_propensity(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS),
             ),
         );
@@ -2159,7 +2165,7 @@ mod tests {
                             let bound = |c: &CausalForestConfig| c.memory_bound(rows, p);
                             let least =
                                 |c: &mut CausalForestConfig, parameter: &str| match parameter {
-                                    "n_trees" => c.n_trees = FEWEST_TREES,
+                                    "n_trees" => c.n_trees = FEWEST_FOREST_TREES,
                                     "max_depth" => c.max_depth = SHALLOWEST_TREES,
                                     _ => c.min_node_size = rows.max(min_node),
                                 };
@@ -2268,7 +2274,8 @@ mod tests {
     }
 
     /// The least-memory settings the refusals compute from are the smallest the fits accept:
-    /// each tool fits at them, and one tree fewer (for either tool) or one replication fewer
+    /// each tool accepts them (the causal forest's one group of trees leaves half of the units
+    /// without an out-of-bag tree, which the fit reports), and one tree fewer (for either tool) or one replication fewer
     /// (for BART) is an error.
     #[test]
     fn ensemble_least_memory_settings_are_the_smallest_the_fits_accept() {
@@ -2278,19 +2285,28 @@ mod tests {
             .unwrap();
         let server = rt.block_on(server_with_causal_data(300));
         let least = (
-            forest(FEWEST_TREES, SHALLOWEST_TREES, true, 300),
+            forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 300),
             bart(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS),
         );
         for (tool, r) in calls(&rt, &server, &Limits::hosted(), false, least) {
-            assert_ne!(r.is_error, Some(true), "{tool}: {}", text_of(&r));
+            // One group of causal trees shares one half-sample, so the units in it have no
+            // out-of-bag tree and the fit says so: the settings are accepted, the data decide.
+            let no_oob = tool == "ml_causal_forest"
+                && text_of(&r).contains("is in the subsample of every causal tree");
+            assert!(
+                r.is_error != Some(true) || no_oob,
+                "{tool}: {}",
+                text_of(&r)
+            );
         }
         let fewer = (
-            forest(FEWEST_TREES - 1, SHALLOWEST_TREES, true, 300),
+            forest(FEWEST_FOREST_TREES - 1, SHALLOWEST_TREES, true, 300),
             bart(FEWEST_TREES, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS - 1),
         );
         let [(_, f), (_, b)] = calls(&rt, &server, &Limits::hosted(), false, fewer);
         assert!(
-            f.is_error == Some(true) && text_of(&f).contains("n_trees must be at least 1"),
+            f.is_error == Some(true)
+                && text_of(&f).contains("n_trees must be at least ci_group_size (2)"),
             "{}",
             text_of(&f)
         );
@@ -2300,7 +2316,7 @@ mod tests {
             text_of(&b)
         );
         let fewer_trees = (
-            forest(FEWEST_TREES, SHALLOWEST_TREES, true, 300),
+            forest(FEWEST_FOREST_TREES, SHALLOWEST_TREES, true, 300),
             bart(FEWEST_TREES - 1, SHALLOWEST_TREES, FEWEST_BART_REPLICATIONS),
         );
         let [_, (_, b)] = calls(&rt, &server, &Limits::hosted(), false, fewer_trees);

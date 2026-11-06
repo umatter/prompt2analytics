@@ -149,6 +149,12 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/anova_twoway_legacy.csv` | 12 × 3 (yield, fertilizer, water) | `stat_anova_twoway_legacy` | `r/cases/stats_power_loglin.R` | literal values: the two-way fertilizer × water data of `anova.rs`'s legacy test |
 | `generated/binary_glm.csv` | 400 × 10 (y, x1, x2, d, x1b, nd, xnc, ysep, yq, y012) | `disc_binary_glm` | `r/cases/discrete_mlogit_asc.R` | seed 20261021 |
 | `generated/blobs_noise.csv` | 115 × 2 (x, y) | `hdbscan_blobs`; read by `optics_blobs`, `silhouette_singletons` | `r/cases/ml_density_clustering.R` | seed 20261109 |
+| `generated/cf_aipw_formula.csv` | 40 × 5 (y, w, y_hat, w_hat, tau_hat) | `cf_aipw_formula` | `r/cases/ml_causal_forest.R` | seed 4704 |
+| `generated/cf_confounded.csv` | 1000 × 7 (x0, x1, x2, w, y0, y1, yh) | `cf_confounded` | `r/cases/ml_causal_forest.R` | seed 4794; P(W = 1) = 0.1 + 0.8 x0; tau = 0 (y0), 1 (y1), 1 + 2 x1 (yh) |
+| `generated/cf_little_bags.csv` | 12 × 6 (group, n, y, w, yw, ww) | `cf_little_bags` | `r/cases/ml_causal_forest.R` | seed 4705; leaf means of 12 trees in 6 groups of 2 |
+| `generated/cf_rare.csv` | 200 × 4 (x0, x1, w, y) | `cf_rare` | `r/cases/ml_causal_forest.R` | seed 4703; 10 treated units, tau = 5 |
+| `generated/cf_rct.csv` | 2000 × 4 (x0, x1, w, y) | `cf_rct` | `r/cases/ml_causal_forest.R` | seed 4702; randomised W, tau = 0.2 |
+| `generated/cf_split_node.csv` | 30 × 5 (x, x2, y, z, r) | `cf_split_node` | `r/cases/ml_causal_forest.R` | seed 4710; x2 has ties |
 | `generated/ctmle_sim.csv` | 300 × 7 (yb, yc, a, w1, w2, w3, w4) | `tmle_glm`, `ctmle_cv` | `r/cases/causal_stdreg.R` | seed 20261210; w1 confounder, w2 instrument, w3 precision variable, w4 noise |
 | `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
 | `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |

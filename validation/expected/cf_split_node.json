@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "cf_split_node",
+  "area": "ml/causal_forest",
+  "method": "grf causal (instrumental, stabilised) and regression split search on one node of 30 samples, alpha = 0.05",
+  "reference": "written out from grf core/src/relabeling/InstrumentalRelabelingStrategy.cpp (relabel), splitting/InstrumentalSplittingRule.cpp (stabilised: min_node_size samples with z below and above the node mean of z on each side; size = sum z^2 - (sum z)^2 / n >= alpha * size_node) and splitting/RegressionSplittingRule.cpp (n_child >= max(ceil(alpha n), 1)); decrease = sum_l^2 / n_l + sum_r^2 / n_r; thresholds are midpoints (p2a)",
+  "call": ".cf_best_split(X, y, z, min_node_size, features, kind); features 0-based in the JSON",
+  "dataset": "validation/datasets/generated/cf_split_node.csv",
+  "datasets": ["validation/datasets/generated/cf_split_node.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3"
+  },
+  "values": {
+    "node_tau": 0.74834503870302171,
+    "rho": [0.47908206241531637, -0.21839466815127756, -0.29181538059382506, -0.20775456480632407, -0.29580136803837681, -0.15981002942489766, -0.015826317472717566, -0.17949720116565243, 0.14535244103495917, -0.26413565529471211, 0.18064389636492939, 0.30303527941100727, -0.33776614180072195, -0.4074542460914824, 0.44868891456563997, -0.12347327687785499, -0.14800338807823815, -0.13370366285729235, -0.036865705270862463, 0.058469927695639939, 0.2883225245097113, -0.11744713018802409, 0.073075115351387263, 0.49269175167999979, 0.24260955572170548, 0.09475709816527518, 0.30543868132803936, -0.1784999430356195, -0.13094941415774158, 0.13503084506201041],
+    "causal3_feature": 0,
+    "causal3_threshold": 0.54149999999999998,
+    "causal3_decrease": 1.2856676822142568,
+    "causal3_candidates": 22,
+    "causal5_feature": 0,
+    "causal5_threshold": 0.48499999999999999,
+    "causal5_decrease": 1.1280410596313275,
+    "causal5_candidates": 5,
+    "causal3_x2_threshold": 0.45000000000000001,
+    "causal3_x2_decrease": 0.10702418809721084,
+    "reg_feature": 1,
+    "reg_threshold": 0.34999999999999998,
+    "reg_decrease": 177.20196551311298,
+    "reg_candidates": 32
+  }
+}

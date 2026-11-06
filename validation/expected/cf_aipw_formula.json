@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "cf_aipw_formula",
+  "area": "ml/causal_forest",
+  "method": "grf AIPW scores and average_treatment_effect (target.sample = 'all') on given Y, W, Y.hat, W.hat, tau.hat (n = 40)",
+  "reference": "written out from grf 2.x R/get_scores.R (get_scores.causal_forest) and R/average_treatment_effect.R (.sigma2.hat: colSums(correction^2) / sum(weights)^2 * n / (n - 1))",
+  "call": "scores <- tau.hat + (W - W.hat) / (W.hat (1 - W.hat)) * (Y - Y.hat - tau.hat (W - W.hat)); estimate = mean(scores); std.err = sqrt(sum((scores - estimate)^2) / (n (n - 1)))",
+  "dataset": "validation/datasets/generated/cf_aipw_formula.csv",
+  "datasets": ["validation/datasets/generated/cf_aipw_formula.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "stats": "4.3.3"
+  },
+  "values": {
+    "scores": [1.7631685333197988, -1.9409119007750659, 4.1990917097815803, 5.7424103150701189, 2.9538319829580315, 3.6293979301670563, -0.034371556944245985, -2.0705801460840672, 5.9305400732847939, -6.3039235230127808, 3.5039466027981909, 1.7186170681627431, -6.0227154676949146, -2.0834218336726145, 3.4622753429913522, 3.6627324411553044, 4.2244853166687948, 0.085836191483547708, 2.6788283369842638, 0.23774544580674251, 2.5990189029389343, -2.2159869123079083, 1.0167644542327152, 1.3356736974058203, 1.8186974220299834, 2.9963389437902284, 2.6763869598150598, 3.3373663454934501, 3.0477723949658673, 0.48097092534096508, 3.0283631399447328, 2.0714278061736038, 5.7536047545776174, -11.181415928822997, 1.4405665122089097, 1.3720556389462439, -0.081710839799266521, 0.78826116407543179, 4.5861726504387992, 0.35521956628464313],
+    "estimate": 1.2640632615045366,
+    "std_err": 0.53882923047363396,
+    "subset_estimate": 0.96315700868999843,
+    "subset_std_err": 1.0059294613874787,
+    "ci95_lower": 0.20797737595878218,
+    "ci95_upper": 2.3201491470502908,
+    "ci90_lower": 0.37776804745250947,
+    "ci90_upper": 2.1503584755565637
+  }
+}

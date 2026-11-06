@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_causal_forest",
+      "name": "Causal forest with local centering, little-bags variances and the AIPW ATE (grf::causal_forest)",
+      "category": "ml",
+      "reference": "grf 2.x (not installed; not a case dependency): formulas written out in R from grf's sources (InstrumentalRelabelingStrategy, InstrumentalSplittingRule, RegressionSplittingRule, InstrumentalPredictionStrategy, ObjectiveBayesDebiaser, get_scores.causal_forest, average_treatment_effect) and property tests on R-generated designs (oracle AIPW with the true nuisances, naive differences, Welch SEs); thresholds calibrated by an R emulation of the algorithm. The forest outputs (ATE, CATEs, variances) are not R-pinned: the cf_confounded, cf_rct and cf_rare tests hold them to properties of those R values",
+      "doc": "validation/ml/causal_forest.md",
+      "cases": [
+        "cf_aipw_formula",
+        "cf_little_bags",
+        "cf_split_node",
+        "cf_confounded",
+        "cf_rct",
+        "cf_rare"
+      ],
+      "tests": [
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_split_node_causal",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_split_node_regression",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_little_bags",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_bayes_debiaser",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_aipw_formula",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_confounded_zero_effect_covers_zero",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_confounded_constant_effect_recovered",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_confounded_heterogeneous_effect_tracks_tau",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_confounded_supplied_nuisance_matches_oracle_aipw",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_rct_ate_se_shrinks_with_n",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_rare_treatment_is_not_shrunk",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_confounded_oob_error_is_the_r_loss",
+        "p2a-core::ml::causal_forest::tests::test_validate_cf_rct_average_treatment_effect_uses_the_aipw_scores"
+      ],
+      "quantities": [
+        "AIPW scores, ATE and SE (formula, also on a subset)",
+        "relabeling pseudo-outcomes and node tau",
+        "stabilised causal split and regression split (feature, threshold, decrease)",
+        "pooled CATE, first stage, little-bags variance components, debiased variance (complete and incomplete groups)",
+        "objective-Bayes debiaser (including ratio -38.7)",
+        "ATE on confounded designs with tau = 0, 1, 1 + 2 x1 (coverage, bias, SE vs oracle)",
+        "CATE correlation with tau, importance, new-data predictions",
+        "ATE SE vs Welch SE and its 1/sqrt(n) scaling",
+        "rare-treatment CATE level (ML-74)",
+        "out-of-bag R-loss ordering"
+      ],
+      "tolerance": "formula pins: validation/README.md (Tol::coef for scores, estimates, tau and first stage; Tol::se for SEs; Tol::stat for decreases and variances; features and thresholds exact); property tests: |ATE - truth| <= 0.15 (n = 1000), CI coverage of the truth, SE within [0.8, 1.25] of the oracle AIPW SE and [0.85, 1.3] of the Welch SE, SE(2000)/SE(500) in [0.4, 0.6], rare-treatment mean CATE within 0.1 of 5; all from seeded fits, thresholds at least twice the emulated deviations",
+      "deviations": [
+        {
+          "finding": "ML-20",
+          "quantity": "mtry default",
+          "note": "ceil(sqrt(p)) (p2a default_mtry) as the mean of the Poisson candidate count, not grf's min(ceil(sqrt(p) + 20), p)"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
