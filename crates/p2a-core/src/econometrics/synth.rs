@@ -2832,9 +2832,13 @@ pub fn run_gsynth(
             let mut cv_mspe = Vec::with_capacity(hi + 1 - config.n_factors);
             let mut best: Option<(f64, GsynthFit)> = None;
             let (mut not_converged, mut singular) = (0usize, Vec::new());
+            // one set of control panels (and, without covariates, one eigendecomposition)
+            // for every r
+            let mut controls = IfeControls::new(&m, config.force)?;
             for r in config.n_factors..=hi {
                 crate::resource::checkpoint()?;
-                let (cand, parts) = match gsynth_estimate_parts(&m, &spec(r), &covariate_names)? {
+                let fit = gsynth_estimate_parts(&m, &mut controls, &spec(r), &covariate_names)?;
+                let (cand, parts) = match fit {
                     Ok(v) => v,
                     Err(_unit) => {
                         singular.push(r);
@@ -3049,11 +3053,11 @@ struct GsynthPanel {
     units: Vec<String>,
     /// The distinct time periods, ascending.
     times: Vec<i64>,
-    /// Outcome panel (units x periods).
+    /// Outcome panel (periods x units).
     y: Array2<f64>,
-    /// Treatment panel (units x periods).
+    /// Treatment panel (periods x units).
     d: Array2<f64>,
-    /// One panel (units x periods) per covariate, in `x_cols` order.
+    /// One panel (periods x units) per covariate, in `x_cols` order.
     x: Vec<Array2<f64>>,
 }
 
@@ -3082,10 +3086,16 @@ fn read_gsynth_panel(
     let time = cols.time_index(time_col);
     let units = unit.levels.clone();
 
-    let mut times: Vec<i64> = crate::resource::try_with_capacity(n, "gsynth time periods")?;
-    times.extend_from_slice(time);
-    times.sort_unstable();
-    times.dedup();
+    let times = distinct_times(time)?;
+    let n_units = units.len();
+    let n_times = times.len();
+
+    // A balanced panel has exactly one row per cell: place each row at its cell directly.
+    if n_units as u128 * n_times as u128 == n as u128
+        && let Some(order) = cell_order(&unit.codes, time, &times)?
+    {
+        return gsynth_panel_from(&cols, &order, units, times, y_col, d_col, x_cols);
+    }
 
     // The rows in (unit level, time) order; equal neighbours are duplicates.
     let key = |r: usize| (unit.codes[r], time[r]);
@@ -3111,8 +3121,6 @@ fn read_gsynth_panel(
         });
     }
 
-    let n_units = units.len();
-    let n_times = times.len();
     // Without duplicates every row is its own cell, so n <= units x periods.
     let missing = (n_units as u128 * n_times as u128).saturating_sub(n as u128);
     if missing > 0 {
@@ -3148,27 +3156,107 @@ fn read_gsynth_panel(
         });
     }
 
-    // Balanced: order[u * n_times + j] is the row of (units[u], times[j]).
+    gsynth_panel_from(&cols, &order, units, times, y_col, d_col, x_cols)
+}
+
+/// The distinct values of `time`, ascending. Times that fill their range (years, quarters,
+/// period numbers) are marked in a table over that range; others are sorted.
+fn distinct_times(time: &[i64]) -> EconResult<Vec<i64>> {
+    let (Some(&lo), Some(&hi)) = (time.iter().min(), time.iter().max()) else {
+        return Ok(Vec::new());
+    };
+    let span = hi.abs_diff(lo);
+    if span / 4 < time.len() as u64 {
+        let mut seen = crate::resource::try_vec(span as usize + 1, false, "gsynth time periods")?;
+        for &t in time {
+            seen[t.abs_diff(lo) as usize] = true;
+        }
+        let k = seen.iter().filter(|s| **s).count();
+        let mut times: Vec<i64> = crate::resource::try_with_capacity(k, "gsynth time periods")?;
+        times.extend(
+            seen.iter()
+                .enumerate()
+                .filter(|(_, s)| **s)
+                .map(|(d, _)| lo.wrapping_add_unsigned(d as u64)),
+        );
+        return Ok(times);
+    }
+    let mut times: Vec<i64> =
+        crate::resource::try_with_capacity(time.len(), "gsynth time periods")?;
+    times.extend_from_slice(time);
+    times.sort_unstable();
+    times.dedup();
+    Ok(times)
+}
+
+/// The row of each (unit, period) cell, `order[u * n_times + j]` for `(units[u], times[j])`,
+/// when every cell holds exactly one of the `codes.len()` rows (the caller checked that
+/// units x periods equals the row count); `None` when a cell holds two rows, which leaves
+/// the duplicate (and the cell it empties) to the sorted path's messages.
+fn cell_order(codes: &[u32], time: &[i64], times: &[i64]) -> EconResult<Option<Vec<usize>>> {
+    let n = codes.len();
+    let n_times = times.len();
+    let mut order = crate::resource::try_vec(n, usize::MAX, "gsynth panel order")?;
+    // rows are usually in time order within a unit: try the period after the last one first
+    let mut next = 0usize;
+    for (r, (&c, t)) in codes.iter().zip(time).enumerate() {
+        let j = if times.get(next) == Some(t) {
+            next
+        } else {
+            times
+                .binary_search(t)
+                .map_err(|_| EconError::Internal("gsynth panel: time not in its periods".into()))?
+        };
+        next = j + 1;
+        if next == n_times {
+            next = 0;
+        }
+        let slot = &mut order[c as usize * n_times + j];
+        if *slot != usize::MAX {
+            return Ok(None);
+        }
+        *slot = r;
+    }
+    Ok(Some(order))
+}
+
+/// The T x N panels of a balanced panel whose rows `order` lists cell by cell (see
+/// [`cell_order`]).
+fn gsynth_panel_from(
+    cols: &crate::data::columns::Columns,
+    order: &[usize],
+    units: Vec<String>,
+    times: Vec<i64>,
+    y_col: &str,
+    d_col: &str,
+    x_cols: &[&str],
+) -> EconResult<GsynthPanel> {
+    let (n_units, n_times) = (units.len(), times.len());
+    // Balanced: order[u * n_times + j] is the row of (units[u], times[j]). The panels are
+    // filled as T x N (periods x units), the layout the estimators use.
     let panel = |values: &[f64], what: &str| -> EconResult<Array2<f64>> {
-        let mut m = crate::resource::try_zeros2(n_units, n_times, what)?;
-        for (cell, &r) in m.iter_mut().zip(&order) {
-            *cell = values[r];
+        let mut m = crate::resource::try_zeros2(n_times, n_units, what)?;
+        // `max(1)`: a panel with no rows has no periods, and so no chunk to take
+        for (u, rows) in order.chunks_exact(n_times.max(1)).enumerate() {
+            for (cell, &r) in m.column_mut(u).iter_mut().zip(rows) {
+                *cell = values[r];
+            }
         }
         Ok(m)
     };
     let y = panel(
         cols.numeric(y_col),
-        "gsynth outcome panel (units x periods)",
+        "gsynth outcome panel (periods x units)",
     )?;
     let d = panel(
         cols.numeric(d_col),
-        "gsynth treatment panel (units x periods)",
+        "gsynth treatment panel (periods x units)",
     )?;
     let mut x = Vec::with_capacity(x_cols.len());
     for col in x_cols {
         x.push(panel(
             cols.numeric(col),
-            "gsynth covariate panel (units x periods)",
+            "gsynth covariate panel (periods x units)",
         )?);
     }
     Ok(GsynthPanel {
@@ -3198,14 +3286,6 @@ struct GsynthMats {
     first_treated: Vec<usize>,
 }
 
-/// `m` transposed into a `try_zeros2` buffer.
-fn transpose_into(m: &Array2<f64>, what: &str) -> EconResult<Array2<f64>> {
-    let (r, c) = m.dim();
-    let mut out = crate::resource::try_zeros2(c, r, what)?;
-    out.assign(&m.t());
-    Ok(out)
-}
-
 /// The columns `cols` of `m`.
 fn select_columns(m: &Array2<f64>, cols: &[usize], what: &str) -> EconResult<Array2<f64>> {
     let mut out = crate::resource::try_zeros2(m.nrows(), cols.len(), what)?;
@@ -3215,7 +3295,7 @@ fn select_columns(m: &Array2<f64>, cols: &[usize], what: &str) -> EconResult<Arr
     Ok(out)
 }
 
-/// S3: the panel as T x N matrices; D must be 0/1 and absorbing.
+/// S3: the panel as T x N matrices (read in that layout); D must be 0/1 and absorbing.
 fn gsynth_mats(panel: GsynthPanel) -> EconResult<GsynthMats> {
     let GsynthPanel {
         units,
@@ -3224,12 +3304,6 @@ fn gsynth_mats(panel: GsynthPanel) -> EconResult<GsynthMats> {
         d,
         x,
     } = panel;
-    let y = transpose_into(&y, "gsynth outcome panel (units x periods)")?;
-    let d = transpose_into(&d, "gsynth treatment panel (units x periods)")?;
-    let x = x
-        .iter()
-        .map(|m| transpose_into(m, "gsynth covariate panel (units x periods)"))
-        .collect::<EconResult<Vec<_>>>()?;
     mats_from(y, d, x, units, times)
 }
 
@@ -3241,37 +3315,41 @@ fn mats_from(
     units: Vec<String>,
     times: Vec<i64>,
 ) -> EconResult<GsynthMats> {
-    let n_t = times.len();
     let mut treated = Vec::new();
     let mut controls = Vec::new();
     let mut first_treated = Vec::new();
     for (i, unit) in units.iter().enumerate() {
-        let col = d.column(i);
-        if let Some((t, v)) = col
-            .iter()
-            .enumerate()
-            .find(|(_, v)| **v != 0.0 && **v != 1.0)
-        {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "gsynth needs a 0/1 treatment: unit '{unit}' has {v} at time {}",
-                    times[t]
-                ),
-            });
-        }
-        match (0..n_t).find(|&t| col[t] == 1.0) {
-            None => controls.push(i),
-            Some(t0) => {
-                if let Some(t2) = (t0..n_t).find(|&t| col[t] == 0.0) {
-                    return Err(EconError::InvalidSpecification {
-                        message: format!(
-                            "gsynth needs an absorbing treatment: unit '{unit}' is treated at \
-                             time {} and untreated at {} (R: \"Gsynth can't be used when \
-                             treatments have reversals.\")",
-                            times[t0], times[t2]
-                        ),
-                    });
+        // one pass: a value other than 0/1 anywhere in the unit is refused first, then a reversal
+        let (mut start, mut reversal) = (None, None);
+        for (t, &v) in d.column(i).iter().enumerate() {
+            if v == 1.0 {
+                start = start.or(Some(t));
+            } else if v == 0.0 {
+                if start.is_some() {
+                    reversal = reversal.or(Some(t));
                 }
+            } else {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "gsynth needs a 0/1 treatment: unit '{unit}' has {v} at time {}",
+                        times[t]
+                    ),
+                });
+            }
+        }
+        match (start, reversal) {
+            (None, _) => controls.push(i),
+            (Some(t0), Some(t2)) => {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "gsynth needs an absorbing treatment: unit '{unit}' is treated at \
+                         time {} and untreated at {} (R: \"Gsynth can't be used when \
+                         treatments have reversals.\")",
+                        times[t0], times[t2]
+                    ),
+                });
+            }
+            (Some(t0), None) => {
                 treated.push(i);
                 first_treated.push(t0);
             }
@@ -3337,6 +3415,37 @@ fn gs_demean(m: &Array2<f64>, force: GsynthForce) -> Array2<f64> {
     })
 }
 
+/// The grand mean `mu`, the period effects `xi` and the unit effects `alpha` of the T x N panel
+/// `m`; an effect `force` leaves out is zero.
+fn gs_effects(m: &Array2<f64>, force: GsynthForce) -> (f64, Array1<f64>, Array1<f64>) {
+    let (u, v) = force_dims(force);
+    let (n_t, n) = m.dim();
+    let mu = m.sum() / (n_t * n) as f64;
+    let xi = if v == 1 {
+        m.mean_axis(ndarray::Axis(1)).expect("non-empty") - mu
+    } else {
+        Array1::zeros(n_t)
+    };
+    let alpha = if u == 1 {
+        m.mean_axis(ndarray::Axis(0)).expect("non-empty") - mu
+    } else {
+        Array1::zeros(n)
+    };
+    (mu, xi, alpha)
+}
+
+/// [`gs_demean`] with the grand mean and the effects `col - mu`, `row - mu` already computed;
+/// an effect the force leaves out is all zeros.
+fn demeaned_with(m: &Array2<f64>, mu: f64, alpha: &Array1<f64>, xi: &Array1<f64>) -> Array2<f64> {
+    let mut out = m.clone();
+    for (mut row, &x) in out.rows_mut().into_iter().zip(xi) {
+        for (z, &a) in row.iter_mut().zip(alpha) {
+            *z = *z - mu - a - x;
+        }
+    }
+    out
+}
+
 /// `vec(m)` in column-major order (R's `c(M)`).
 fn vec_cm(m: &Array2<f64>) -> Array1<f64> {
     m.t().iter().copied().collect()
@@ -3355,6 +3464,43 @@ fn unvec_cm(v: &Array1<f64>, n_t: usize, n: usize) -> Array2<f64> {
 /// gsynth's `panel_factor` does; an SVD of `U` is the fallback when a needed singular value
 /// of `U'U` is numerically zero.
 fn gs_pca(u: &Array2<f64>, r: usize) -> EconResult<(Array2<f64>, Array2<f64>, Array2<f64>)> {
+    let mut basis = None;
+    gs_pca_with(u, r, &mut basis)
+}
+
+/// The eigendecomposition of `U`'s smaller Gram matrix, which [`gs_pca`] takes the factors
+/// of every number of factors from.
+struct PcaBasis {
+    eig: faer::linalg::solvers::SelfAdjointEigen<f64>,
+}
+
+fn gs_eig_err<E: std::fmt::Debug>(e: E) -> EconError {
+    EconError::Computation(format!("gsynth factor SVD failed: {e:?}"))
+}
+
+impl PcaBasis {
+    fn new(u: &Array2<f64>) -> EconResult<PcaBasis> {
+        let (n_t, n) = u.dim();
+        let gram = if n_t <= n {
+            u.dot(&u.t())
+        } else {
+            u.t().dot(u)
+        };
+        let eig = crate::linalg::matrix_ops::ndarray_to_faer(&gram.view())
+            .self_adjoint_eigen(faer::Side::Lower)
+            .map_err(gs_eig_err)?;
+        Ok(PcaBasis { eig })
+    }
+}
+
+/// [`gs_pca`] with the eigendecomposition kept in `basis` (filled on first use), so fits of
+/// the same `U` at several numbers of factors decompose it once. `basis` must only ever
+/// have seen this `U`.
+fn gs_pca_with(
+    u: &Array2<f64>,
+    r: usize,
+    basis: &mut Option<PcaBasis>,
+) -> EconResult<(Array2<f64>, Array2<f64>, Array2<f64>)> {
     crate::resource::checkpoint()?;
     let (n_t, n) = u.dim();
     if r == 0 {
@@ -3370,23 +3516,20 @@ fn gs_pca(u: &Array2<f64>, r: usize) -> EconResult<(Array2<f64>, Array2<f64>, Ar
             n_t.min(n)
         )));
     }
-    fn eig_err<E: std::fmt::Debug>(e: E) -> EconError {
-        EconError::Computation(format!("gsynth factor SVD failed: {e:?}"))
+    if basis.is_none() {
+        *basis = Some(PcaBasis::new(u)?);
     }
+    let Some(PcaBasis { eig }) = basis.as_ref() else {
+        return Err(EconError::Internal(
+            "gsynth factor basis missing".to_string(),
+        ));
+    };
     let scale = (n_t as f64).sqrt();
     let f = if n_t <= n {
-        let gram = u.dot(&u.t());
-        let eig = crate::linalg::matrix_ops::ndarray_to_faer(&gram.view())
-            .self_adjoint_eigen(faer::Side::Lower)
-            .map_err(eig_err)?;
         let vecs = eig.U();
         // eigenvalues ascending: the largest r are the last columns
         Array2::from_shape_fn((n_t, r), |(t, k)| scale * vecs[(t, n_t - 1 - k)])
     } else {
-        let gram = u.t().dot(u);
-        let eig = crate::linalg::matrix_ops::ndarray_to_faer(&gram.view())
-            .self_adjoint_eigen(faer::Side::Lower)
-            .map_err(eig_err)?;
         let lam = eig.S().column_vector();
         let lmax = lam[n - 1];
         if lmax > 0.0 && lam[n - r] > f64::EPSILON * n as f64 * lmax {
@@ -3402,7 +3545,7 @@ fn gs_pca(u: &Array2<f64>, r: usize) -> EconResult<(Array2<f64>, Array2<f64>, Ar
         } else {
             let svd = crate::linalg::matrix_ops::ndarray_to_faer(&u.view())
                 .thin_svd()
-                .map_err(eig_err)?;
+                .map_err(gs_eig_err)?;
             let uu = svd.U();
             Array2::from_shape_fn((n_t, r), |(t, k)| scale * uu[(t, k)])
         }
@@ -3465,23 +3608,100 @@ fn stacked_covariates(
     Ok(Some((xx, qr)))
 }
 
-/// S4: Bai's IFE on the controls `y` (T x N_co) with covariates `x`.
-fn ife_controls(
-    y: &Array2<f64>,
-    x: &[Array2<f64>],
-    spec: &IfeSpec,
-    names: &[String],
-) -> EconResult<IfeFit> {
+/// The control units' panels of one IFE problem and, without covariates, what its fits at
+/// every number of factors share: the fixed effects, the demeaned outcomes and the
+/// eigendecomposition the factors come from.
+struct IfeControls {
+    y: Array2<f64>,
+    x: Vec<Array2<f64>>,
+    force: GsynthForce,
+    plain: Option<PlainControls>,
+}
+
+/// The parts of an IFE fit without covariates that do not depend on the number of factors.
+struct PlainControls {
+    mu: f64,
+    xi: Array1<f64>,
+    alpha: Array1<f64>,
+    demeaned: Array2<f64>,
+    basis: Option<PcaBasis>,
+}
+
+impl IfeControls {
+    fn new(m: &GsynthMats, force: GsynthForce) -> EconResult<IfeControls> {
+        let y = select_columns(&m.y, &m.controls, "gsynth control outcomes")?;
+        let x =
+            m.x.iter()
+                .map(|x| select_columns(x, &m.controls, "gsynth control covariates"))
+                .collect::<EconResult<Vec<_>>>()?;
+        let plain = if x.is_empty() {
+            let (mu, xi, alpha) = gs_effects(&y, force);
+            let demeaned = demeaned_with(&y, mu, &alpha, &xi);
+            Some(PlainControls {
+                mu,
+                xi,
+                alpha,
+                demeaned,
+                basis: None,
+            })
+        } else {
+            None
+        };
+        Ok(IfeControls { y, x, force, plain })
+    }
+}
+
+/// What the two arms of [`ife_controls`] leave for the fitted values and the residuals.
+struct ControlsFit<'a> {
+    beta: Vec<f64>,
+    convergence: Option<Convergence>,
+    mu: f64,
+    xi: Array1<f64>,
+    alpha: Array1<f64>,
+    factors: Array2<f64>,
+    loadings: Array2<f64>,
+    fe: Array2<f64>,
+    /// The outcomes net of the covariates.
+    resid: std::borrow::Cow<'a, Array2<f64>>,
+}
+
+/// S4: Bai's IFE on the controls in `c`: the outcomes `c.y` (T x N_co) with covariates `c.x`.
+fn ife_controls(c: &mut IfeControls, spec: &IfeSpec, names: &[String]) -> EconResult<IfeFit> {
     crate::resource::checkpoint()?;
+    debug_assert!(c.force == spec.force, "IfeControls built for another force");
+    let IfeControls { y, x, plain, .. } = c;
     let (n_t, n) = y.dim();
-    let (u, v) = force_dims(spec.force);
     let r = spec.r;
-    let yy = gs_demean(y, spec.force);
     let p = x.len();
-    let (beta, convergence) = match stacked_covariates(x, spec.force, names)? {
-        None => (Vec::new(), None),
-        Some((xx, qr)) => {
-            let vy = vec_cm(&yy);
+    let ControlsFit {
+        beta,
+        convergence,
+        mu,
+        xi,
+        alpha,
+        factors,
+        loadings,
+        fe,
+        resid,
+    } = match plain {
+        Some(pl) => {
+            let (factors, loadings, fe) = gs_pca_with(&pl.demeaned, r, &mut pl.basis)?;
+            ControlsFit {
+                beta: Vec::new(),
+                convergence: None,
+                mu: pl.mu,
+                xi: pl.xi.clone(),
+                alpha: pl.alpha.clone(),
+                factors,
+                loadings,
+                fe,
+                resid: std::borrow::Cow::Borrowed(&*y),
+            }
+        }
+        None => {
+            let (xx, qr) = stacked_covariates(x, spec.force, names)?
+                .ok_or_else(|| EconError::Internal("gsynth: no covariates".to_string()))?;
+            let vy = vec_cm(&gs_demean(y, spec.force));
             let norm_y = vy.dot(&vy).sqrt().max(f64::MIN_POSITIVE);
             let mut beta = qr.coefficients(vy.view())?;
             let mut step = f64::NAN;
@@ -3510,27 +3730,34 @@ fn ife_controls(
                 step,
                 spec.tolerance,
             );
-            (beta.to_vec(), Some(conv))
+            let beta = beta.to_vec();
+            let mut resid = y.clone();
+            for (j, m) in x.iter().enumerate() {
+                resid.scaled_add(-beta[j], m);
+            }
+            let (mu, xi, alpha) = gs_effects(&resid, spec.force);
+            let (factors, loadings, fe) = gs_pca(&gs_demean(&resid, spec.force), r)?;
+            ControlsFit {
+                beta,
+                convergence: Some(conv),
+                mu,
+                xi,
+                alpha,
+                factors,
+                loadings,
+                fe,
+                resid: std::borrow::Cow::Owned(resid),
+            }
         }
     };
-    let mut resid = y.clone();
-    for (j, m) in x.iter().enumerate() {
-        resid.scaled_add(-beta[j], m);
+    // fitted = mu + alpha_i + xi_t + FE_ti, in FE's buffer
+    let mut fitted = fe;
+    for (mut row, &xi_t) in fitted.rows_mut().into_iter().zip(&xi) {
+        for (cell, &a) in row.iter_mut().zip(&alpha) {
+            *cell += mu + a + xi_t;
+        }
     }
-    let mu = resid.sum() / (n_t * n) as f64;
-    let xi = if v == 1 {
-        resid.mean_axis(ndarray::Axis(1)).expect("non-empty") - mu
-    } else {
-        Array1::zeros(n_t)
-    };
-    let alpha = if u == 1 {
-        resid.mean_axis(ndarray::Axis(0)).expect("non-empty") - mu
-    } else {
-        Array1::zeros(n)
-    };
-    let (factors, loadings, fe) = gs_pca(&gs_demean(&resid, spec.force), r)?;
-    let fitted = Array2::from_shape_fn((n_t, n), |(t, i)| mu + alpha[i] + xi[t] + fe[[t, i]]);
-    let residuals = &resid - &fitted;
+    let residuals = &*resid - &fitted;
     let (n_fe, n_dim) = match spec.force {
         GsynthForce::None => (1, 0),
         GsynthForce::Unit => (n, 1),
@@ -3638,6 +3865,83 @@ enum TreatedEffects {
     LoadingsSingular { unit: usize },
 }
 
+/// Treated unit `j`'s pre-period outcomes `U_tr[0..t0, j]`; refuses a non-finite value as
+/// `least_squares` does.
+fn pre_outcomes(parts: &TreatedParts, j: usize, t0: usize) -> EconResult<Array1<f64>> {
+    let yp = parts.u_tr.slice(ndarray::s![..t0, j]).to_owned();
+    if let Some(i) = yp.iter().position(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("y contains a non-finite value (row {i})"),
+        });
+    }
+    Ok(yp)
+}
+
+/// Run `fit(j, t0, qr, yp)` on each treated unit's pre-period regression, where `qr` is the
+/// pivoted QR of `F^[0..t0, ..]` (`lm.fit`'s, as `least_squares` takes it) and `yp` the unit's
+/// pre-period outcomes. Treated units that start together share their design, so the units are
+/// taken grouped by first treated period and each group's QR is dropped before the next one is
+/// computed: one QR is held at a time, however many periods the units start in.
+///
+/// The answer is the one a pass in unit order gives, whatever order the groups run in: an error
+/// of the lowest unit that fails, or `Some(j)` for the lowest unit `j` whose regression is not
+/// identified (its design is rank-deficient, or `fit` returned `false`). The checks of one unit
+/// run in that pass's order too: its outcomes, its design, then `fit`.
+fn for_each_pre_fit(
+    first_treated: &[usize],
+    parts: &TreatedParts,
+    mut fit: impl FnMut(usize, usize, &crate::linalg::solve::Qr, &Array1<f64>) -> EconResult<bool>,
+) -> EconResult<Option<usize>> {
+    let k = parts.f_hat.ncols();
+    let mut by_start: Vec<usize> =
+        crate::resource::try_with_capacity(first_treated.len(), "gsynth treated units")?;
+    by_start.extend(0..first_treated.len());
+    // stable: in unit order within a first treated period
+    by_start.sort_by_key(|&j| first_treated[j]);
+    // the lowest unit stopped so far, and its error if it was not an unidentified regression
+    let mut stop: Option<(usize, Option<EconError>)> = None;
+    for group in by_start.chunk_by(|&a, &b| first_treated[a] == first_treated[b]) {
+        let mut design = None;
+        for &j in group {
+            if stop.as_ref().is_some_and(|(s, _)| *s <= j) {
+                break;
+            }
+            let t0 = first_treated[j];
+            let mut unit = || -> EconResult<bool> {
+                crate::resource::checkpoint()?;
+                let yp = pre_outcomes(parts, j, t0)?;
+                let qr = match &design {
+                    Some(qr) => qr,
+                    None => design.insert(crate::linalg::solve::Qr::decompose(
+                        parts.f_hat.slice(ndarray::s![..t0, ..]),
+                        crate::linalg::solve::LM_QR_TOL,
+                    )?),
+                };
+                if qr.rank() < k {
+                    return Ok(false);
+                }
+                fit(j, t0, qr, &yp)
+            };
+            match unit() {
+                Ok(true) => {}
+                Ok(false) => {
+                    stop = Some((j, None));
+                    break;
+                }
+                Err(e) => {
+                    stop = Some((j, Some(e)));
+                    break;
+                }
+            }
+        }
+    }
+    match stop {
+        Some((_, Some(e))) => Err(e),
+        Some((j, None)) => Ok(Some(j)),
+        None => Ok(None),
+    }
+}
+
 /// Effects of the treated units given `U_tr` and `F^`.
 fn treated_effects(m: &GsynthMats, parts: &TreatedParts) -> EconResult<TreatedEffects> {
     let (n_t, n_tr) = parts.u_tr.dim();
@@ -3646,19 +3950,16 @@ fn treated_effects(m: &GsynthMats, parts: &TreatedParts) -> EconResult<TreatedEf
     if parts.f_hat.ncols() == 0 {
         return Ok(TreatedEffects::Ok(eff));
     }
-    for (j, &t0) in m.first_treated.iter().enumerate() {
-        let pre: Vec<usize> = (0..t0).collect();
-        let fp = select_rows(&parts.f_hat, &pre);
-        let yp = Array1::from_iter(pre.iter().map(|&t| parts.u_tr[[t, j]]));
-        let ls = crate::linalg::solve::least_squares(fp.view(), yp.view())?;
-        if ls.rank < fp.ncols() {
-            return Ok(TreatedEffects::LoadingsSingular { unit: j });
-        }
-        let pred = parts.f_hat.dot(&ls.coefficients);
+    let singular = for_each_pre_fit(&m.first_treated, parts, |j, _, qr, yp| {
+        let pred = parts.f_hat.dot(&qr.coefficients(yp.view())?);
         let mut col = eff.column_mut(j);
         col -= &pred;
-    }
-    Ok(TreatedEffects::Ok(eff))
+        Ok(true)
+    })?;
+    Ok(match singular {
+        Some(unit) => TreatedEffects::LoadingsSingular { unit },
+        None => TreatedEffects::Ok(eff),
+    })
 }
 
 /// Mean effect over the treated post-period cells.
@@ -3675,25 +3976,23 @@ fn att_of(eff: &Array2<f64>, first_treated: &[usize]) -> f64 {
 
 /// S5: the IFE fit on the controls and the effects of the treated units.
 fn gsynth_estimate(m: &GsynthMats, spec: &IfeSpec, names: &[String]) -> EconResult<GsynthFit> {
-    match gsynth_estimate_parts(m, spec, names)? {
+    let mut controls = IfeControls::new(m, spec.force)?;
+    match gsynth_estimate_parts(m, &mut controls, spec, names)? {
         Ok((fit, _)) => Ok(fit),
         Err(unit) => Err(loadings_error(m, unit, spec.r)),
     }
 }
 
 /// [`gsynth_estimate`] with the treated units' S5 inputs; `Ok(Err(j))` when treated unit
-/// `j`'s loadings are not identified at this number of factors.
+/// `j`'s loadings are not identified at this number of factors. `controls` holds the
+/// control panels of `m` and is reused across numbers of factors.
 fn gsynth_estimate_parts(
     m: &GsynthMats,
+    controls: &mut IfeControls,
     spec: &IfeSpec,
     names: &[String],
 ) -> EconResult<Result<(GsynthFit, TreatedParts), usize>> {
-    let y_co = select_columns(&m.y, &m.controls, "gsynth control outcomes")?;
-    let x_co =
-        m.x.iter()
-            .map(|x| select_columns(x, &m.controls, "gsynth control covariates"))
-            .collect::<EconResult<Vec<_>>>()?;
-    let ife = ife_controls(&y_co, &x_co, spec, names)?;
+    let ife = ife_controls(controls, spec, names)?;
     let parts = treated_parts(m, &ife, spec.force)?;
     let eff = match treated_effects(m, &parts)? {
         TreatedEffects::Ok(eff) => eff,
@@ -3705,44 +4004,67 @@ fn gsynth_estimate_parts(
 
 /// S6: leave-one-pre-period-out MSPE of the treated units, by PRESS (`e / (1 - h)`) from
 /// each unit's pre-period fit; a pre-period whose leverage is 1 is refitted explicitly.
-/// `None` when a regression is rank-deficient.
+/// `None` when a regression is rank-deficient. The leverages depend on the pre-period
+/// design only, so units with the same first treated period share them. The fits run in
+/// [`for_each_pre_fit`]'s order and the errors are kept to be summed in unit order, cell by
+/// cell, since a sum of floats depends on its order.
 fn loo_mspe(m: &GsynthMats, parts: &TreatedParts) -> EconResult<Option<f64>> {
     let (mut sum, mut count) = (0.0, 0usize);
     let k = parts.f_hat.ncols();
-    for (j, &t0) in m.first_treated.iter().enumerate() {
-        crate::resource::checkpoint()?;
-        if k == 0 {
+    if k == 0 {
+        for (j, &t0) in m.first_treated.iter().enumerate() {
+            crate::resource::checkpoint()?;
             for t in 0..t0 {
                 sum += parts.u_tr[[t, j]].powi(2);
                 count += 1;
             }
-            continue;
         }
-        let pre: Vec<usize> = (0..t0).collect();
-        let fp = select_rows(&parts.f_hat, &pre);
-        let yp = Array1::from_iter(pre.iter().map(|&t| parts.u_tr[[t, j]]));
-        let ls = crate::linalg::solve::least_squares(fp.view(), yp.view())?;
-        if ls.rank < k {
-            return Ok(None);
+        return Ok(Some(sum / count as f64));
+    }
+    let (n_t, n_tr) = parts.u_tr.dim();
+    let mut errors = crate::resource::try_zeros2(n_t, n_tr, "gsynth leave-one-out errors")?;
+    let mut leverages: (Option<usize>, Vec<f64>) = (None, Vec::new());
+    let unidentified = for_each_pre_fit(&m.first_treated, parts, |j, t0, qr, yp| {
+        if leverages.0 != Some(t0) {
+            let cov = qr.unscaled_covariance()?;
+            let fp = parts.f_hat.slice(ndarray::s![..t0, ..]);
+            let h = fp
+                .rows()
+                .into_iter()
+                .map(|row| row.dot(&cov.dot(&row)))
+                .collect();
+            leverages = (Some(t0), h);
         }
+        let h = &leverages.1;
+        // lm.fit's residuals: Q (Q'y with its first rank entries zeroed)
+        let mut effects = qr.qty(yp.view())?;
+        effects.iter_mut().take(qr.rank()).for_each(|v| *v = 0.0);
+        let residuals = qr.q_times(effects.view())?;
         for s in 0..t0 {
-            let row = fp.row(s);
-            let h = row.dot(&ls.unscaled_cov.dot(&row));
-            let err = if 1.0 - h > 1e-10 {
-                ls.residuals[s] / (1.0 - h)
+            errors[[s, j]] = if 1.0 - h[s] > 1e-10 {
+                residuals[s] / (1.0 - h[s])
             } else {
                 let keep: Vec<usize> = (0..t0).filter(|&t| t != s).collect();
                 let fk = select_rows(&parts.f_hat, &keep);
                 let yk = Array1::from_iter(keep.iter().map(|&t| parts.u_tr[[t, j]]));
                 if keep.len() < k {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 let lk = crate::linalg::solve::least_squares(fk.view(), yk.view())?;
                 if lk.rank < k {
-                    return Ok(None);
+                    return Ok(false);
                 }
-                yp[s] - row.dot(&lk.coefficients)
+                yp[s] - parts.f_hat.row(s).dot(&lk.coefficients)
             };
+        }
+        Ok(true)
+    })?;
+    if unidentified.is_some() {
+        return Ok(None);
+    }
+    for (j, &t0) in m.first_treated.iter().enumerate() {
+        for s in 0..t0 {
+            let err = errors[[s, j]];
             sum += err * err;
             count += 1;
         }
@@ -4456,17 +4778,24 @@ fn event_time_att(
     eff: &Array2<f64>,
     first_treated: &[usize],
 ) -> (Vec<(i64, f64)>, Vec<(i64, usize)>) {
-    let mut acc: std::collections::BTreeMap<i64, (f64, usize)> = std::collections::BTreeMap::new();
+    let (Some(&lo), Some(&hi)) = (first_treated.iter().min(), first_treated.iter().max()) else {
+        return (Vec::new(), Vec::new());
+    };
+    // event time e = t - t0 + 1 runs over 1 - hi ..= T - lo; slot s = e - (1 - hi)
+    let mut acc = vec![(0.0, 0usize); eff.nrows() + hi - lo];
     for (j, &t0) in first_treated.iter().enumerate() {
         for t in 0..eff.nrows() {
-            let e = t as i64 - t0 as i64 + 1;
-            let a = acc.entry(e).or_insert((0.0, 0));
+            let a = &mut acc[t + hi - t0];
             a.0 += eff[[t, j]];
             a.1 += 1;
         }
     }
-    let effects = acc.iter().map(|(&e, &(s, c))| (e, s / c as f64)).collect();
-    let counts = acc.iter().map(|(&e, &(_, c))| (e, c)).collect();
+    let event = |s: usize| s as i64 + 1 - hi as i64;
+    let seen = || acc.iter().enumerate().filter(|(_, a)| a.1 > 0);
+    let effects = seen()
+        .map(|(s, &(v, c))| (event(s), v / c as f64))
+        .collect();
+    let counts = seen().map(|(s, &(_, c))| (event(s), c)).collect();
     (effects, counts)
 }
 
@@ -6085,6 +6414,64 @@ mod gsynth_tests {
         run_gsynth(ds, "outcome", "treated", "unit", "time", &[], config)
     }
 
+    fn zero_row_gsynth_frame() -> DataFrame {
+        df! {
+            "outcome" => Vec::<f64>::new(),
+            "treated" => Vec::<f64>::new(),
+            "unit" => Vec::<f64>::new(),
+            "time" => Vec::<f64>::new(),
+        }
+        .unwrap()
+    }
+
+    #[test]
+    fn test_gsynth_zero_rows_is_refused() {
+        // run_gsynth reads its columns with the default minimum of one row
+        let err = gs(&Dataset::new(zero_row_gsynth_frame()), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EconError::InsufficientData {
+                    required: 1,
+                    provided: 0,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_gsynth_panel_without_rows_reaches_the_refusal() {
+        // the fill of a panel with no periods has no chunk to take, whatever stops such a
+        // frame earlier; asked for one, it hands an empty panel to the treatment check
+        let df = zero_row_gsynth_frame();
+        let cols = ColumnRequest::new(&df)
+            .numeric("outcome")
+            .numeric("treated")
+            .min_rows(0, "gsynth test")
+            .extract()
+            .unwrap();
+        let panel = gsynth_panel_from(
+            &cols,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            "outcome",
+            "treated",
+            &[],
+        )
+        .unwrap();
+        let Err(err) = gsynth_mats(panel) else {
+            panic!("an empty panel has no treated units");
+        };
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message }
+                if message == "No treated units found"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn test_na_gsynth_missing_cell() {
         // (C2, 5) is row 14
@@ -6108,6 +6495,140 @@ mod gsynth_tests {
             )),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn test_gsynth_row_count_of_a_balanced_panel_with_a_duplicate_is_refused() {
+        // C2's time 6 relabelled 5: as many rows as cells, one cell twice, one empty
+        let ds = create_gsynth_dataset();
+        let times: Vec<i32> = (0..ds.df().height())
+            .map(|r| {
+                let t = (r % 10) as i32 + 1;
+                if r == 15 { 5 } else { t }
+            })
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new("time".into(), times)).unwrap();
+        let err = gs(&Dataset::new(df), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.starts_with(
+                "gsynth needs one row per (unit, time): 1 duplicate row(s) \
+                 (first: unit 'C2', time 5)."
+            )),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_gsynth_distinct_times_equal_sort_and_dedup() {
+        let reference = |v: &[i64]| {
+            let mut s = v.to_vec();
+            s.sort_unstable();
+            s.dedup();
+            s
+        };
+        let cases: [&[i64]; 7] = [
+            &[],
+            &[7],
+            &[3, 1, 2, 3, 1, 2],
+            &[2000, 2005, 2010, 2000, 2005, 2010],
+            &[-5, 5, 0, -5, 5, 0],
+            &[1_000_000, 0, 1_000_000, 0],
+            &[i64::MIN, i64::MAX, 0, i64::MIN],
+        ];
+        for v in cases {
+            assert_eq!(distinct_times(v).unwrap(), reference(v), "{v:?}");
+        }
+        // the two sides of the table/sort boundary at 3 rows (span / 4 < rows): span 11 is the
+        // largest span the table takes, span 12 falls through to the sort
+        let table: [&[i64]; 2] = [&[-3, 8, 0], &[0, 11, 5]];
+        let sort: [&[i64]; 2] = [&[-3, 9, 0], &[0, 12, 5]];
+        for v in table.into_iter().chain(sort) {
+            assert_eq!(distinct_times(v).unwrap(), reference(v), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn test_gsynth_event_time_att_matches_a_map_over_event_times() {
+        // staggered first treated periods, noisy cells, in the order the map version summed
+        let (n_t, n_tr) = (9usize, 4usize);
+        let eff = Array2::from_shape_fn((n_t, n_tr), |(t, j)| {
+            ((t * 7 + j * 13) as f64 * 0.37).sin() * (1.0 + j as f64 / 3.0)
+        });
+        for first in [vec![3, 5, 3, 8], vec![4, 4, 4, 4], vec![8, 1, 6, 2]] {
+            let mut acc: std::collections::BTreeMap<i64, (f64, usize)> =
+                std::collections::BTreeMap::new();
+            for (j, &t0) in first.iter().enumerate() {
+                for t in 0..n_t {
+                    let a = acc.entry(t as i64 - t0 as i64 + 1).or_insert((0.0, 0));
+                    a.0 += eff[[t, j]];
+                    a.1 += 1;
+                }
+            }
+            let (effects, counts) = event_time_att(&eff, &first);
+            let want_e: Vec<(i64, u64)> = acc
+                .iter()
+                .map(|(&e, &(s, c))| (e, (s / c as f64).to_bits()))
+                .collect();
+            let got_e: Vec<(i64, u64)> = effects.iter().map(|&(e, v)| (e, v.to_bits())).collect();
+            assert_eq!(got_e, want_e, "{first:?}");
+            let want_c: Vec<(i64, usize)> = acc.iter().map(|(&e, &(_, c))| (e, c)).collect();
+            assert_eq!(counts, want_c, "{first:?}");
+        }
+    }
+
+    #[test]
+    fn test_gsynth_treatment_check_refuses_a_bad_value_before_a_reversal() {
+        let message = |d_b: [f64; 4]| {
+            let d = Array2::from_shape_fn((4, 2), |(t, i)| if i == 1 { d_b[t] } else { 0.0 });
+            let y = Array2::from_shape_fn((4, 2), |(t, i)| (t + i) as f64 + 0.3 * (t * i) as f64);
+            let units = vec!["a".to_string(), "b".to_string()];
+            match mats_from(y, d, vec![], units, vec![1, 2, 3, 4]) {
+                Err(EconError::InvalidSpecification { message }) => message,
+                other => panic!("{:?}", other.err()),
+            }
+        };
+        assert_eq!(
+            message([0.0, 1.0, 0.0, 2.0]),
+            "gsynth needs a 0/1 treatment: unit 'b' has 2 at time 4"
+        );
+        let m = message([0.0, 1.0, 0.0, 1.0]);
+        assert!(
+            m.contains("unit 'b' is treated at time 2 and untreated at 3"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_gsynth_row_order_does_not_change_the_fit() {
+        let ds = create_gsynth_dataset();
+        let n = ds.df().height() as u32;
+        let rev = ds
+            .df()
+            .take(&IdxCa::from_vec("i".into(), (0..n).rev().collect()))
+            .unwrap();
+        let cfg = || GsynthConfig {
+            n_factors: 1,
+            ..gs_cfg()
+        };
+        let a = gs(&ds, cfg()).unwrap();
+        let b = gs(&Dataset::new(rev), cfg()).unwrap();
+        assert_eq!(a.att.to_bits(), b.att.to_bits());
+        assert_eq!(
+            bits(a.factors.as_ref().unwrap()),
+            bits(b.factors.as_ref().unwrap())
+        );
+        let ua: Vec<(String, u64)> = a
+            .unit_effects
+            .iter()
+            .map(|u| (u.unit.clone(), u.att.to_bits()))
+            .collect();
+        let ub: Vec<(String, u64)> = b
+            .unit_effects
+            .iter()
+            .map(|u| (u.unit.clone(), u.att.to_bits()))
+            .collect();
+        assert_eq!(ua, ub);
     }
 
     #[test]
@@ -6373,6 +6894,313 @@ mod gsynth_tests {
             .finish();
     }
 
+    /// The IFE fit without covariates, the treated effects and the LOO MSPE as they were
+    /// computed before the shared parts (T3-PERF6D): a fresh demeaning and
+    /// eigendecomposition per fit, `least_squares` per treated unit.
+    fn reference_plain_fit(
+        m: &GsynthMats,
+        spec: &IfeSpec,
+    ) -> (IfeFit, Result<Array2<f64>, usize>, Option<f64>) {
+        let y = select_columns(&m.y, &m.controls, "test").unwrap();
+        let (n_t, n) = y.dim();
+        let (u, v) = force_dims(spec.force);
+        let r = spec.r;
+        let resid = y.clone();
+        let mu = resid.sum() / (n_t * n) as f64;
+        let xi = if v == 1 {
+            resid.mean_axis(ndarray::Axis(1)).unwrap() - mu
+        } else {
+            Array1::zeros(n_t)
+        };
+        let alpha = if u == 1 {
+            resid.mean_axis(ndarray::Axis(0)).unwrap() - mu
+        } else {
+            Array1::zeros(n)
+        };
+        let (factors, loadings, fe) = gs_pca(&gs_demean(&resid, spec.force), r).unwrap();
+        let fitted = Array2::from_shape_fn((n_t, n), |(t, i)| mu + alpha[i] + xi[t] + fe[[t, i]]);
+        let residuals = &resid - &fitted;
+        let (n_fe, n_dim) = match spec.force {
+            GsynthForce::None => (1, 0),
+            GsynthForce::Unit => (n, 1),
+            GsynthForce::Time => (n_t, 1),
+            GsynthForce::TwoWay => (n + n_t - 1, 2),
+        };
+        let df =
+            (n_t * n) as i128 - n_fe as i128 - (r as i128) * ((n + n_t) as i128 - n_dim as i128)
+                + (r * r) as i128;
+        let sse: f64 = residuals.iter().map(|e| e * e).sum();
+        let sigma2 = if df > 0 { sse / df as f64 } else { f64::NAN };
+        let ife = IfeFit {
+            beta: Vec::new(),
+            mu,
+            xi,
+            alpha,
+            factors,
+            loadings,
+            fitted,
+            residuals,
+            sigma2,
+            convergence: None,
+        };
+        let parts = treated_parts(m, &ife, spec.force).unwrap();
+        let k = parts.f_hat.ncols();
+        let mut eff = Ok(parts.u_tr.clone());
+        let mut loo = Some((0.0, 0usize));
+        for (j, &t0) in m.first_treated.iter().enumerate() {
+            let pre: Vec<usize> = (0..t0).collect();
+            let fp = select_rows(&parts.f_hat, &pre);
+            let yp = Array1::from_iter(pre.iter().map(|&t| parts.u_tr[[t, j]]));
+            if k == 0 {
+                if let Some((s, c)) = loo.as_mut() {
+                    for e in &yp {
+                        *s += e.powi(2);
+                        *c += 1;
+                    }
+                }
+                continue;
+            }
+            let ls = crate::linalg::solve::least_squares(fp.view(), yp.view()).unwrap();
+            if ls.rank < k {
+                if eff.is_ok() {
+                    eff = Err(j);
+                }
+                loo = None;
+                continue;
+            }
+            if let Ok(e) = eff.as_mut() {
+                let pred = parts.f_hat.dot(&ls.coefficients);
+                let mut col = e.column_mut(j);
+                col -= &pred;
+            }
+            for s in 0..t0 {
+                let row = fp.row(s);
+                let h = row.dot(&ls.unscaled_cov.dot(&row));
+                let err = if 1.0 - h > 1e-10 {
+                    ls.residuals[s] / (1.0 - h)
+                } else {
+                    let keep: Vec<usize> = (0..t0).filter(|&t| t != s).collect();
+                    let fk = select_rows(&parts.f_hat, &keep);
+                    let yk = Array1::from_iter(keep.iter().map(|&t| parts.u_tr[[t, j]]));
+                    if keep.len() < k {
+                        loo = None;
+                        continue;
+                    }
+                    let lk = crate::linalg::solve::least_squares(fk.view(), yk.view()).unwrap();
+                    if lk.rank < k {
+                        loo = None;
+                        continue;
+                    }
+                    yp[s] - row.dot(&lk.coefficients)
+                };
+                if let Some((sum, c)) = loo.as_mut() {
+                    *sum += err * err;
+                    *c += 1;
+                }
+            }
+        }
+        (ife, eff, loo.map(|(s, c)| s / c as f64))
+    }
+
+    fn bits(a: &Array2<f64>) -> Vec<u64> {
+        a.iter().map(|v| v.to_bits()).collect()
+    }
+
+    #[test]
+    fn test_gsynth_shared_fits_equal_fresh_fits_bit_for_bit() {
+        // simdata (T <= N_co: the T x T Gram), gsynth_staggered (several first treated
+        // periods, in and against unit order), a short-wide panel cut to fewer controls than periods (the N x N Gram),
+        // and the small panel whose loadings become unidentified at large r
+        let sim = simdata();
+        let stag = Dataset::new(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+                "validation/datasets/generated/gsynth_staggered.csv",
+            ))
+            .unwrap(),
+        );
+        let ids = col(&sim, "id");
+        // the ids run 101..150, treated 101-105: 18 units stay, 13 of them controls, over T = 30
+        let keep: Vec<bool> = ids.iter().map(|&i| !(109.0..=140.0).contains(&i)).collect();
+        let narrow = Dataset::new(
+            sim.df()
+                .filter(&BooleanChunked::from_slice("k".into(), &keep))
+                .unwrap(),
+        );
+        let narrow_m =
+            gsynth_mats(read_gsynth_panel(narrow.df(), "Y", "D", "id", "time", &[]).unwrap())
+                .unwrap();
+        assert!(
+            narrow_m.controls.len() < narrow_m.times.len(),
+            "the narrow panel must reach the N x N Gram: {} controls, {} periods",
+            narrow_m.controls.len(),
+            narrow_m.times.len()
+        );
+        // the same panel with its ids reversed: the units start latest first, so the visit by
+        // first treated period runs against unit order
+        let mut late_first = stag.df().clone();
+        let reversed: Vec<f64> = col(&stag, "id").iter().map(|&i| 1000.0 - i).collect();
+        late_first
+            .with_column(Series::new("id".into(), reversed))
+            .unwrap();
+        let late_first = Dataset::new(late_first);
+        let late_first_m =
+            gsynth_mats(read_gsynth_panel(late_first.df(), "Y", "D", "id", "time", &[]).unwrap())
+                .unwrap();
+        assert!(
+            !late_first_m.first_treated.is_sorted(),
+            "the units must not start in unit order: {:?}",
+            late_first_m.first_treated
+        );
+        let small = create_gsynth_dataset();
+        let panels = [
+            (&sim, "Y", "D", "id"),
+            (&stag, "Y", "D", "id"),
+            (&late_first, "Y", "D", "id"),
+            (&narrow, "Y", "D", "id"),
+            (&small, "outcome", "treated", "unit"),
+        ];
+        let mut cases = 0;
+        for (ds, y, d, unit) in panels {
+            let m =
+                gsynth_mats(read_gsynth_panel(ds.df(), y, d, unit, "time", &[]).unwrap()).unwrap();
+            for force in [
+                GsynthForce::None,
+                GsynthForce::Unit,
+                GsynthForce::Time,
+                GsynthForce::TwoWay,
+            ] {
+                let Ok(r_max) = identified_factors(&m, force) else {
+                    continue;
+                };
+                // one IfeControls across every r, as cross-validation uses it
+                let mut controls = IfeControls::new(&m, force).unwrap();
+                for r in 0..=r_max {
+                    let spec = IfeSpec {
+                        r,
+                        force,
+                        tolerance: 1e-5,
+                        max_iter: 1000,
+                    };
+                    let (want, want_eff, want_loo) = reference_plain_fit(&m, &spec);
+                    let got = ife_controls(&mut controls, &spec, &[]).unwrap();
+                    let ctx = format!("{} force {force:?} r {r}", m.units.len());
+                    assert_eq!(bits(&got.factors), bits(&want.factors), "factors {ctx}");
+                    assert_eq!(bits(&got.loadings), bits(&want.loadings), "loadings {ctx}");
+                    assert_eq!(bits(&got.fitted), bits(&want.fitted), "fitted {ctx}");
+                    assert_eq!(
+                        bits(&got.residuals),
+                        bits(&want.residuals),
+                        "residuals {ctx}"
+                    );
+                    assert_eq!(got.mu.to_bits(), want.mu.to_bits(), "mu {ctx}");
+                    assert_eq!(got.sigma2.to_bits(), want.sigma2.to_bits(), "sigma2 {ctx}");
+                    let parts = treated_parts(&m, &got, force).unwrap();
+                    match (treated_effects(&m, &parts).unwrap(), &want_eff) {
+                        (TreatedEffects::Ok(e), Ok(w)) => {
+                            assert_eq!(bits(&e), bits(w), "effects {ctx}")
+                        }
+                        (TreatedEffects::LoadingsSingular { unit }, Err(w)) => {
+                            assert_eq!(unit, *w, "{ctx}")
+                        }
+                        _ => panic!("identified loadings differ: {ctx}"),
+                    }
+                    let loo = loo_mspe(&m, &parts).unwrap();
+                    assert_eq!(
+                        loo.map(f64::to_bits),
+                        want_loo.map(f64::to_bits),
+                        "loo {ctx}"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        assert!(cases > 40, "{cases}");
+    }
+
+    #[test]
+    fn test_gsynth_pre_fits_answer_for_the_lowest_unit() {
+        // rows 0..2 of F^ are collinear, so a design with t0 <= 2 is rank-deficient and the
+        // units are visited by first treated period, not in unit order
+        let f_hat = ndarray::array![
+            [1.0, 2.0],
+            [2.0, 4.0],
+            [3.0, 1.1],
+            [-1.0, 2.3],
+            [0.5, 1.2],
+            [2.2, -0.9]
+        ];
+        let u_tr = Array2::from_shape_fn((6, 4), |(t, j)| {
+            ((t * 7 + j * 3) as f64).sin() + 0.1 * j as f64
+        });
+        let mats = |first_treated: &[usize]| GsynthMats {
+            y: Array2::zeros((6, 4)),
+            d: Array2::zeros((6, 4)),
+            x: Vec::new(),
+            units: (0..4).map(|j| j.to_string()).collect(),
+            times: (0..6).collect(),
+            treated: (0..4).collect(),
+            controls: Vec::new(),
+            first_treated: first_treated.to_vec(),
+        };
+        let singular_unit = |first_treated: &[usize], u_tr: &Array2<f64>| {
+            let parts = TreatedParts {
+                u_tr: u_tr.clone(),
+                f_hat: f_hat.clone(),
+            };
+            let m = mats(first_treated);
+            let loo = loo_mspe(&m, &parts);
+            let eff = treated_effects(&m, &parts);
+            match (eff, loo) {
+                (Ok(TreatedEffects::LoadingsSingular { unit }), Ok(None)) => Ok(unit),
+                (Err(e), Err(l)) => {
+                    assert_eq!(e.to_string(), l.to_string());
+                    Err(e.to_string())
+                }
+                (_, l) => panic!("{first_treated:?}: effects and LOO disagree: {l:?}"),
+            }
+        };
+        // unit 2 starts first and is singular, but so is unit 1, which is the lower unit
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &u_tr), Ok(1));
+        assert_eq!(singular_unit(&[4, 4, 1, 2], &u_tr), Ok(2));
+
+        // a non-finite outcome counts where its unit does, and before that unit's design
+        let with_nan = |j: usize| {
+            let mut u = u_tr.clone();
+            u[[0, j]] = f64::NAN;
+            u
+        };
+        let refused = || {
+            Err::<usize, String>(
+                "Invalid model specification: y contains a non-finite value (row 0)".to_string(),
+            )
+        };
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &with_nan(0)), refused());
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &with_nan(1)), refused());
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &with_nan(3)), Ok(1));
+
+        // identified at every start: the units, not the visit, order the effects and the sum
+        let parts = TreatedParts {
+            u_tr: u_tr.clone(),
+            f_hat: f_hat.clone(),
+        };
+        let m = mats(&[6, 4, 5, 4]);
+        let TreatedEffects::Ok(eff) = treated_effects(&m, &parts).unwrap() else {
+            panic!("identified designs");
+        };
+        for (j, &t0) in m.first_treated.iter().enumerate() {
+            let ls = crate::linalg::solve::least_squares(
+                f_hat.slice(ndarray::s![..t0, ..]),
+                u_tr.slice(ndarray::s![..t0, j]),
+            )
+            .unwrap();
+            let want = u_tr.column(j).to_owned() - f_hat.dot(&ls.coefficients);
+            assert_eq!(eff.column(j).to_vec(), want.to_vec(), "unit {j}");
+        }
+        assert!(loo_mspe(&m, &parts).unwrap().is_some_and(f64::is_finite));
+        // t0 = 3: row 2 alone breaks the collinearity, and its explicit refit is rank-deficient
+        assert_eq!(loo_mspe(&mats(&[6, 4, 3, 4]), &parts).unwrap(), None);
+    }
+
     #[test]
     fn test_gsynth_loo_press_equals_refits() {
         // the PRESS errors e / (1 - h) equal explicit leave-one-out refits
@@ -6387,7 +7215,10 @@ mod gsynth_tests {
                 tolerance: 1e-10,
                 max_iter: 1000,
             };
-            let (_, parts) = gsynth_estimate_parts(&m, &spec, &names).unwrap().unwrap();
+            let mut controls = IfeControls::new(&m, spec.force).unwrap();
+            let (_, parts) = gsynth_estimate_parts(&m, &mut controls, &spec, &names)
+                .unwrap()
+                .unwrap();
             let press = loo_mspe(&m, &parts).unwrap().unwrap();
             let (mut sum, mut n) = (0.0, 0usize);
             for (j, &t0) in m.first_treated.iter().enumerate() {
