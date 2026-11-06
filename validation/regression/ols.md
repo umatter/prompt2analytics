@@ -270,7 +270,9 @@ order, so the meat is bit for bit the old one (`test_hac_meat_matches_indexed_re
 now also over 60 and 300 lags, the latter across two blocks). The T3-PERF5 row was measured on
 a shared, loaded machine as user-space CPU cycles per call from the hardware counter
 (`perf_event_open`; median of 11 batches, one P core, three interleaved rounds) against
-`fe13b889`. Every row is within 1.1x.
+`fe13b889`. Every row is within 1.1x. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians): the criterion
+`vcovHAC` bench at n = 100 / 500 / 1,000 / 5,000 is 0.75 / 0.76 / 0.76 / 0.57 of base, and the
+unified OLS_HAC row at n = 100 / 1,000 / 10,000 0.96 / 0.88 / 0.67.
 
 ## Stepwise selection (`step`, `add1`, `drop1`)
 

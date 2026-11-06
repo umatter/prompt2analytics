@@ -542,6 +542,15 @@ logit are 10 / 12 / 11 (base 13 / 17 / 11), and the fits equal the pre-PERF5 one
 Wall-clock on the unified runner (six interleaved rounds, load average about 25): Gaussian
 0.99 / 0.95 / 1.01.
 
+Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians):
+
+| Fit | n | new / base (wall clock) |
+|---|---|---|
+| Gaussian, entity (unified) | 100 / 1,000 / 10,000 | 0.96 / 0.95 / 0.94 |
+| Logit, entity (criterion) | 100 / 400 / 1,000 | 0.90 / 0.91 / 0.97 |
+| Logit, two-way (criterion) | 100 / 400 / 1,000 | 0.53 / 0.59 / 0.90 |
+| Poisson, two-way (criterion) | 100 / 400 / 1,000 | 0.59 / 0.72 / 0.78 |
+
 ## Missing values
 
 `run_feglm` reads y, the regressors and every fixed-effect column with one NA-aware request

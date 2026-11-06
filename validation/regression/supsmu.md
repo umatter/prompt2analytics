@@ -197,4 +197,9 @@ criterion bench's data, against `fe13b889`:
 | fixed span 0.1, before T3-PERF5 (criterion, above) | 0.96 | 1.13 | 1.18 |
 | fixed span 0.1, T3-PERF5 (cycles) | 0.80 | 0.92-0.94 | 0.88 |
 
-The fixed span is within 1.1x of base.
+The fixed span is within 1.1x of base. Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians):
+
+| Variant | n = 50 | n = 200 | n = 1,000 |
+|---|---|---|---|
+| fixed span 0.1 (criterion, wall clock) | 0.92 | 1.03 | 1.05 |
+| automatic span (criterion, wall clock) | 1.95 | 2.20 | 2.30 |

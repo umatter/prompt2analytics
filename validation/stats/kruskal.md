@@ -147,6 +147,10 @@ three groups as the criterion bench, against `fe13b889`:
 |---|---|---|---|---|
 | new / base | 0.85 | 0.78 | 0.74 | 0.74 |
 
+Wall clock on a quiet machine (2026-11-06, load average 1.2-1.6; release build, one P core, `RAYON_NUM_THREADS=1`, three interleaved rounds against `fe13b889`, medians): the criterion bench gives
+0.88 / 0.73 / 0.68 / 0.82 at the same sizes (base 2.5 / 21.3 / 292 / 4,391 µs), the unified
+runner 0.89 / 0.73 / 0.66 at n = 100 / 1,000 / 10,000.
+
 ## Missing values, labels and the R case
 
 `run_kruskal_test(dataset, value, group)` reads the value and the group in one request through
