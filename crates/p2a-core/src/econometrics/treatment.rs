@@ -15,7 +15,7 @@
 //! - Implementation inspired by R package `causalweight` (Bodory & Huber, 2018).
 //!   Source: <https://cran.r-project.org/package=causalweight>
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2, CowArray};
 use rand::SeedableRng;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -638,10 +638,15 @@ pub fn run_ipw_treatment(
         }
         m
     };
-    let ps_cols: Vec<usize> = (0..x.ncols())
-        .filter(|j| !ps_fit.fit.aliased.contains(j))
-        .collect();
-    let x_ps = x.select(ndarray::Axis(1), &ps_cols);
+    // The propensity design without its aliased columns (a copy only when some are).
+    let x_ps = if ps_fit.fit.aliased.is_empty() {
+        CowArray::from(x.view())
+    } else {
+        let ps_cols: Vec<usize> = (0..x.ncols())
+            .filter(|j| !ps_fit.fit.aliased.contains(j))
+            .collect();
+        CowArray::from(x.select(ndarray::Axis(1), &ps_cols))
+    };
     let kind = IpwKind::of(config.estimand, config.normalized);
     let se_naive = ipw_naive_se(&y, &d, &ps, &keep_mask, kind, effect);
     let se_mest = match ipw_mest_se(x_ps.view(), &y, &d, &ps, &keep_mask, kind, effect) {
@@ -906,27 +911,33 @@ impl IpwKind {
     }
 }
 
-/// Weighted arm means over the kept units: (mu1, mu0, sum of treated weights, of control
-/// weights).
+/// The unit weights of `kind` over the kept units (0 for the others), and the weighted arm
+/// means: (weights, mu1, mu0, sum of treated weights, of control weights).
 fn weighted_arm_means(
     y: &Array1<f64>,
     d: &Array1<f64>,
     e: &Array1<f64>,
     keep: &[bool],
     kind: IpwKind,
-) -> (f64, f64, f64, f64) {
+) -> (Vec<f64>, f64, f64, f64, f64) {
+    let n = y.len();
+    let mut w = vec![0.0; n];
     let (mut s1, mut sy1, mut s0, mut sy0) = (0.0, 0.0, 0.0, 0.0);
-    for i in (0..y.len()).filter(|&i| keep[i]) {
-        let w = kind.weight(d[i], e[i]);
+    for i in 0..n {
+        if !keep[i] {
+            continue;
+        }
+        let wi = kind.weight(d[i], e[i]);
+        w[i] = wi;
         if d[i] >= 0.5 {
-            s1 += w;
-            sy1 += w * y[i];
+            s1 += wi;
+            sy1 += wi * y[i];
         } else {
-            s0 += w;
-            sy0 += w * y[i];
+            s0 += wi;
+            sy0 += wi * y[i];
         }
     }
-    (sy1 / s1, sy0 / s0, s1, s0)
+    (w, sy1 / s1, sy0 / s0, s1, s0)
 }
 
 /// SE with the propensity treated as known, over the kept units. Hajek and ATT: HC0 of the
@@ -939,10 +950,11 @@ fn ipw_naive_se(
     kind: IpwKind,
     effect: f64,
 ) -> f64 {
-    let idx = (0..y.len()).filter(|&i| keep[i]);
+    let n = y.len();
     if kind == IpwKind::HorvitzThompson {
         let n_kept = keep.iter().filter(|&&k| k).count() as f64;
-        let ss: f64 = idx
+        let ss: f64 = (0..n)
+            .filter(|&i| keep[i])
             .map(|i| {
                 let h = if d[i] >= 0.5 {
                     y[i] / e[i]
@@ -954,14 +966,13 @@ fn ipw_naive_se(
             .sum();
         return ss.sqrt() / n_kept;
     }
-    let (mu1, mu0, s1, s0) = weighted_arm_means(y, d, e, keep, kind);
+    let (w, mu1, mu0, s1, s0) = weighted_arm_means(y, d, e, keep, kind);
     let (mut v1, mut v0) = (0.0, 0.0);
-    for i in idx {
-        let w = kind.weight(d[i], e[i]);
+    for i in (0..n).filter(|&i| keep[i]) {
         if d[i] >= 0.5 {
-            v1 += (w * (y[i] - mu1)).powi(2);
+            v1 += (w[i] * (y[i] - mu1)).powi(2);
         } else {
-            v0 += (w * (y[i] - mu0)).powi(2);
+            v0 += (w[i] * (y[i] - mu0)).powi(2);
         }
     }
     (v1 / (s1 * s1) + v0 / (s0 * s0)).sqrt()
@@ -971,6 +982,7 @@ fn ipw_naive_se(
 /// sandwich; WeightIt::lm_weightit(vcov = "asympt") for Hajek and ATT). The logit score runs
 /// over all n units, the IPW equations over the kept units (the trimmed set is held fixed).
 /// `x` is the propensity design without its aliased columns and `e` the clipped scores.
+/// Every sum runs over the rows of `x` in one pass each, on the row slices.
 fn ipw_mest_se(
     x: ArrayView2<f64>,
     y: &Array1<f64>,
@@ -982,14 +994,26 @@ fn ipw_mest_se(
 ) -> EconResult<f64> {
     let (n, p) = x.dim();
     let nf = n as f64;
-    // I_bb = (1/n) sum e(1-e) x x'
+    let inv_n = 1.0 / nf;
+    let xs = x.as_standard_layout();
+    let xr = xs
+        .as_slice()
+        .ok_or_else(|| EconError::Internal("propensity design is not contiguous".into()))?;
+    let row = |i: usize| &xr[i * p..(i + 1) * p];
+    // I_bb = (1/n) sum e(1-e) x x' (lower triangle, then mirrored)
     let mut info = Array2::<f64>::zeros((p, p));
-    for i in 0..n {
-        let v = e[i] * (1.0 - e[i]) / nf;
-        for a in 0..p {
-            let xa = x[[i, a]] * v;
-            for b in 0..=a {
-                info[[a, b]] += xa * x[[i, b]];
+    {
+        let g = info
+            .as_slice_mut()
+            .ok_or_else(|| EconError::Internal("information matrix layout".into()))?;
+        for i in 0..n {
+            let v = e[i] * (1.0 - e[i]) * inv_n;
+            let r = row(i);
+            for a in 0..p {
+                let xa = r[a] * v;
+                for (gb, &rb) in g[a * p..a * p + a + 1].iter_mut().zip(r) {
+                    *gb += xa * rb;
+                }
             }
         }
     }
@@ -1005,7 +1029,15 @@ fn ipw_mest_se(
     )?
     .inverse;
     // a . U_i with U_i = I_bb^-1 x_i (D_i - e_i), from ia = I_bb^-1 a (I_bb is symmetric).
-    let u_dot = |i: usize, ia: &Array1<f64>| -> f64 { ia.dot(&x.row(i)) * (d[i] - e[i]) };
+    let dot = |ia: &Array1<f64>, r: &[f64]| -> f64 {
+        ia.iter().zip(r).map(|(u, v)| u * v).sum::<f64>()
+    };
+    // a += c * x_i
+    let axpy = |a: &mut Array1<f64>, c: f64, r: &[f64]| {
+        for (aj, &xj) in a.iter_mut().zip(r) {
+            *aj += c * xj;
+        }
+    };
     let sum_if_sq = match kind {
         IpwKind::HorvitzThompson => {
             let n_kept = keep.iter().filter(|&&k| k).count() as f64;
@@ -1016,7 +1048,7 @@ fn ipw_mest_se(
                 } else {
                     -y[i] * e[i] / (1.0 - e[i])
                 };
-                a.scaled_add(c / nf, &x.row(i));
+                axpy(&mut a, c / nf, row(i));
             }
             let s = n_kept / nf;
             let ia = inv.dot(&a);
@@ -1032,26 +1064,32 @@ fn ipw_mest_se(
                     } else {
                         0.0
                     };
-                    ((h + u_dot(i, &ia)) / s).powi(2)
+                    ((h + dot(&ia, row(i)) * (d[i] - e[i])) / s).powi(2)
                 })
                 .sum::<f64>()
         }
         _ => {
-            let (mu1, mu0, sw1, sw0) = weighted_arm_means(y, d, e, keep, kind);
-            let (s1, s0) = (sw1 / nf, sw0 / nf);
+            let (w, mu1, mu0, sw1, sw0) = weighted_arm_means(y, d, e, keep, kind);
+            // 1 / s1 and 1 / s0 with s = (sum of the arm's weights) / n
+            let (r1, r0) = (nf / sw1, nf / sw0);
             let mut a1 = Array1::<f64>::zeros(p);
             let mut a0 = Array1::<f64>::zeros(p);
             for i in (0..n).filter(|&i| keep[i]) {
-                // d w_i / d beta = x_i * c
+                // d w_i / d beta = x_i * c, from the unit weight w_i: a treated unit's
+                // -(1-e)/e is -(1-e) w_i (Hajek; 0 for ATT), a control's e/(1-e) is e w_i
+                // (Hajek) or w_i itself (ATT)
                 if d[i] >= 0.5 {
                     let c = match kind {
                         IpwKind::Att => 0.0,
-                        _ => -(1.0 - e[i]) / e[i],
+                        _ => -(1.0 - e[i]) * w[i],
                     };
-                    a1.scaled_add(c * (y[i] - mu1) / nf, &x.row(i));
+                    axpy(&mut a1, c * (y[i] - mu1) * inv_n, row(i));
                 } else {
-                    let c = e[i] / (1.0 - e[i]);
-                    a0.scaled_add(c * (y[i] - mu0) / nf, &x.row(i));
+                    let c = match kind {
+                        IpwKind::Att => w[i],
+                        _ => e[i] * w[i],
+                    };
+                    axpy(&mut a0, c * (y[i] - mu0) * inv_n, row(i));
                 }
             }
             let ia1 = inv.dot(&a1);
@@ -1059,16 +1097,17 @@ fn ipw_mest_se(
             (0..n)
                 .map(|i| {
                     let (m1, m0) = if keep[i] {
-                        let w = kind.weight(d[i], e[i]);
                         if d[i] >= 0.5 {
-                            (w * (y[i] - mu1), 0.0)
+                            (w[i] * (y[i] - mu1), 0.0)
                         } else {
-                            (0.0, w * (y[i] - mu0))
+                            (0.0, w[i] * (y[i] - mu0))
                         }
                     } else {
                         (0.0, 0.0)
                     };
-                    let f = (m1 + u_dot(i, &ia1)) / s1 - (m0 + u_dot(i, &ia0)) / s0;
+                    let r = row(i);
+                    let u = d[i] - e[i];
+                    let f = (m1 + dot(&ia1, r) * u) * r1 - (m0 + dot(&ia0, r) * u) * r0;
                     f * f
                 })
                 .sum::<f64>()
