@@ -3094,7 +3094,7 @@ fn read_gsynth_panel(
     if n_units as u128 * n_times as u128 == n as u128
         && let Some(order) = cell_order(&unit.codes, time, &times)?
     {
-        return gsynth_panel_from(&cols, order, units, times, y_col, d_col, x_cols);
+        return gsynth_panel_from(&cols, &order, units, times, y_col, d_col, x_cols);
     }
 
     // The rows in (unit level, time) order; equal neighbours are duplicates.
@@ -3156,7 +3156,7 @@ fn read_gsynth_panel(
         });
     }
 
-    gsynth_panel_from(&cols, order, units, times, y_col, d_col, x_cols)
+    gsynth_panel_from(&cols, &order, units, times, y_col, d_col, x_cols)
 }
 
 /// The distinct values of `time`, ascending. Times that fill their range (years, quarters,
@@ -3224,7 +3224,7 @@ fn cell_order(codes: &[u32], time: &[i64], times: &[i64]) -> EconResult<Option<V
 /// [`cell_order`]).
 fn gsynth_panel_from(
     cols: &crate::data::columns::Columns,
-    order: Vec<usize>,
+    order: &[usize],
     units: Vec<String>,
     times: Vec<i64>,
     y_col: &str,
@@ -3245,17 +3245,17 @@ fn gsynth_panel_from(
     };
     let y = panel(
         cols.numeric(y_col),
-        "gsynth outcome panel (units x periods)",
+        "gsynth outcome panel (periods x units)",
     )?;
     let d = panel(
         cols.numeric(d_col),
-        "gsynth treatment panel (units x periods)",
+        "gsynth treatment panel (periods x units)",
     )?;
     let mut x = Vec::with_capacity(x_cols.len());
     for col in x_cols {
         x.push(panel(
             cols.numeric(col),
-            "gsynth covariate panel (units x periods)",
+            "gsynth covariate panel (periods x units)",
         )?);
     }
     Ok(GsynthPanel {
@@ -3416,6 +3416,25 @@ fn gs_demean(m: &Array2<f64>, force: GsynthForce) -> Array2<f64> {
 
 /// [`gs_demean`] with the grand mean and the effects `col - mu`, `row - mu` already computed;
 /// an effect the force leaves out is all zeros.
+/// The grand mean `mu`, the period effects `xi` and the unit effects `alpha` of the T x N panel
+/// `m`; an effect `force` leaves out is zero.
+fn gs_effects(m: &Array2<f64>, force: GsynthForce) -> (f64, Array1<f64>, Array1<f64>) {
+    let (u, v) = force_dims(force);
+    let (n_t, n) = m.dim();
+    let mu = m.sum() / (n_t * n) as f64;
+    let xi = if v == 1 {
+        m.mean_axis(ndarray::Axis(1)).expect("non-empty") - mu
+    } else {
+        Array1::zeros(n_t)
+    };
+    let alpha = if u == 1 {
+        m.mean_axis(ndarray::Axis(0)).expect("non-empty") - mu
+    } else {
+        Array1::zeros(n)
+    };
+    (mu, xi, alpha)
+}
+
 fn demeaned_with(m: &Array2<f64>, mu: f64, alpha: &Array1<f64>, xi: &Array1<f64>) -> Array2<f64> {
     let mut out = m.clone();
     for (mut row, &x) in out.rows_mut().into_iter().zip(xi) {
@@ -3615,19 +3634,7 @@ impl IfeControls {
                 .map(|x| select_columns(x, &m.controls, "gsynth control covariates"))
                 .collect::<EconResult<Vec<_>>>()?;
         let plain = if x.is_empty() {
-            let (n_t, n) = y.dim();
-            let (u, v) = force_dims(force);
-            let mu = y.sum() / (n_t * n) as f64;
-            let xi = if v == 1 {
-                y.mean_axis(ndarray::Axis(1)).expect("non-empty") - mu
-            } else {
-                Array1::zeros(n_t)
-            };
-            let alpha = if u == 1 {
-                y.mean_axis(ndarray::Axis(0)).expect("non-empty") - mu
-            } else {
-                Array1::zeros(n)
-            };
+            let (mu, xi, alpha) = gs_effects(&y, force);
             let demeaned = demeaned_with(&y, mu, &alpha, &xi);
             Some(PlainControls {
                 mu,
@@ -3643,7 +3650,21 @@ impl IfeControls {
     }
 }
 
-/// S4: Bai's IFE on the controls `y` (T x N_co) with covariates `x`.
+/// What the two arms of [`ife_controls`] leave for the fitted values and the residuals.
+struct ControlsFit<'a> {
+    beta: Vec<f64>,
+    convergence: Option<Convergence>,
+    mu: f64,
+    xi: Array1<f64>,
+    alpha: Array1<f64>,
+    factors: Array2<f64>,
+    loadings: Array2<f64>,
+    fe: Array2<f64>,
+    /// The outcomes net of the covariates.
+    resid: std::borrow::Cow<'a, Array2<f64>>,
+}
+
+/// S4: Bai's IFE on the controls in `c`: the outcomes `c.y` (T x N_co) with covariates `c.x`.
 fn ife_controls(c: &mut IfeControls, spec: &IfeSpec, names: &[String]) -> EconResult<IfeFit> {
     crate::resource::checkpoint()?;
     debug_assert!(c.force == spec.force, "IfeControls built for another force");
@@ -3651,25 +3672,32 @@ fn ife_controls(c: &mut IfeControls, spec: &IfeSpec, names: &[String]) -> EconRe
     let (n_t, n) = y.dim();
     let r = spec.r;
     let p = x.len();
-    let (beta, convergence, mu, xi, alpha, factors, loadings, fe, resid) = match plain {
+    let ControlsFit {
+        beta,
+        convergence,
+        mu,
+        xi,
+        alpha,
+        factors,
+        loadings,
+        fe,
+        resid,
+    } = match plain {
         Some(pl) => {
             let (factors, loadings, fe) = gs_pca_with(&pl.demeaned, r, &mut pl.basis)?;
-            let (xi, alpha) = (pl.xi.clone(), pl.alpha.clone());
-            let resid = std::borrow::Cow::Borrowed(&*y);
-            (
-                Vec::new(),
-                None,
-                pl.mu,
-                xi,
-                alpha,
+            ControlsFit {
+                beta: Vec::new(),
+                convergence: None,
+                mu: pl.mu,
+                xi: pl.xi.clone(),
+                alpha: pl.alpha.clone(),
                 factors,
                 loadings,
                 fe,
-                resid,
-            )
+                resid: std::borrow::Cow::Borrowed(&*y),
+            }
         }
         None => {
-            let (u, v) = force_dims(spec.force);
             let (xx, qr) = stacked_covariates(x, spec.force, names)?
                 .ok_or_else(|| EconError::Internal("gsynth: no covariates".to_string()))?;
             let vy = vec_cm(&gs_demean(y, spec.force));
@@ -3706,37 +3734,26 @@ fn ife_controls(c: &mut IfeControls, spec: &IfeSpec, names: &[String]) -> EconRe
             for (j, m) in x.iter().enumerate() {
                 resid.scaled_add(-beta[j], m);
             }
-            let mu = resid.sum() / (n_t * n) as f64;
-            let xi = if v == 1 {
-                resid.mean_axis(ndarray::Axis(1)).expect("non-empty") - mu
-            } else {
-                Array1::zeros(n_t)
-            };
-            let alpha = if u == 1 {
-                resid.mean_axis(ndarray::Axis(0)).expect("non-empty") - mu
-            } else {
-                Array1::zeros(n)
-            };
+            let (mu, xi, alpha) = gs_effects(&resid, spec.force);
             let (factors, loadings, fe) = gs_pca(&gs_demean(&resid, spec.force), r)?;
-            let resid = std::borrow::Cow::Owned(resid);
-            (
+            ControlsFit {
                 beta,
-                Some(conv),
+                convergence: Some(conv),
                 mu,
                 xi,
                 alpha,
                 factors,
                 loadings,
                 fe,
-                resid,
-            )
+                resid: std::borrow::Cow::Owned(resid),
+            }
         }
     };
     // fitted = mu + alpha_i + xi_t + FE_ti, in FE's buffer
     let mut fitted = fe;
-    for (mut row, &x) in fitted.rows_mut().into_iter().zip(&xi) {
-        for (c, &a) in row.iter_mut().zip(&alpha) {
-            *c += mu + a + x;
+    for (mut row, &xi_t) in fitted.rows_mut().into_iter().zip(&xi) {
+        for (cell, &a) in row.iter_mut().zip(&alpha) {
+            *cell += mu + a + xi_t;
         }
     }
     let residuals = &*resid - &fitted;
@@ -6418,9 +6435,13 @@ mod gsynth_tests {
         for v in cases {
             assert_eq!(distinct_times(v).unwrap(), reference(v), "{v:?}");
         }
-        // the largest span the table takes: just under 4 x rows, both ends included
-        let edge: Vec<i64> = vec![-3, 4, 0];
-        assert_eq!(distinct_times(&edge).unwrap(), reference(&edge));
+        // the two sides of the table/sort boundary at 3 rows (span / 4 < rows): span 11 is the
+        // largest span the table takes, span 12 falls through to the sort
+        let table: [&[i64]; 2] = [&[-3, 8, 0], &[0, 11, 5]];
+        let sort: [&[i64]; 2] = [&[-3, 9, 0], &[0, 12, 5]];
+        for v in table.into_iter().chain(sort) {
+            assert_eq!(distinct_times(v).unwrap(), reference(v), "{v:?}");
+        }
     }
 
     #[test]
@@ -6888,17 +6909,27 @@ mod gsynth_tests {
         // and the small panel whose loadings become unidentified at large r
         let sim = simdata();
         let stag = Dataset::new(
-            crate::data::DataLoader::load_csv(&p2a_validation::repo_path(
+            crate::data::DataLoader::load_csv(p2a_validation::repo_path(
                 "validation/datasets/generated/gsynth_staggered.csv",
             ))
             .unwrap(),
         );
         let ids = col(&sim, "id");
-        let keep: Vec<bool> = ids.iter().map(|&i| !(9.0..=40.0).contains(&i)).collect();
+        // the ids run 101..150, treated 101-105: 18 units stay, 13 of them controls, over T = 30
+        let keep: Vec<bool> = ids.iter().map(|&i| !(109.0..=140.0).contains(&i)).collect();
         let narrow = Dataset::new(
             sim.df()
                 .filter(&BooleanChunked::from_slice("k".into(), &keep))
                 .unwrap(),
+        );
+        let narrow_m =
+            gsynth_mats(read_gsynth_panel(narrow.df(), "Y", "D", "id", "time", &[]).unwrap())
+                .unwrap();
+        assert!(
+            narrow_m.controls.len() < narrow_m.times.len(),
+            "the narrow panel must reach the N x N Gram: {} controls, {} periods",
+            narrow_m.controls.len(),
+            narrow_m.times.len()
         );
         let small = create_gsynth_dataset();
         let panels = [
