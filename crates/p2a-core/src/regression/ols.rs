@@ -1898,6 +1898,11 @@ impl HacKernel {
     }
 }
 
+/// Most lags whose cross-product sums the HAC meat accumulates in one pass over the rows.
+const HAC_LAG_BLOCK: usize = 256;
+/// Most lag cross-product sums held at once (a block has at most `HAC_LAG_SUMS / k^2` lags).
+const HAC_LAG_SUMS: usize = 65_536;
+
 /// Compute HAC (Heteroskedasticity and Autocorrelation Consistent) covariance matrix.
 ///
 /// Implements the Newey-West (1987) estimator with various kernel options.
@@ -2050,32 +2055,70 @@ pub fn vcov_hac(
         }
     }
 
-    // Lags 1 to bw: add cross-products with kernel weights
-    let mut gamma_lag = vec![0.0; k * k];
-    for lag in 1..=bw.min(n.saturating_sub(1)) {
-        resource::checkpoint()?;
-        let w = kernel.weight(lag, bw);
-        if w.abs() < 1e-15 {
-            continue;
+    // Lags 1 to bw: add cross-products with kernel weights. For each pair of columns
+    // (j, l), the sums Γ̂_lag[j, l] = Σᵢ s_ij s_(i-lag)l of a block of consecutive lags are
+    // accumulated together: with the columns stored reversed, the lagged scores of
+    // consecutive lags are consecutive, so each row adds s_ij times a contiguous slice to
+    // the block's sums (independent sums the compiler vectorises, where one sum per lag
+    // was a chain of dependent additions). Every sum still runs over the rows in
+    // ascending order, and the lags add to omega in lag order, so the meat is the same
+    // bit for bit as with one pass per lag.
+    let kk = k * k;
+    let max_lag = bw.min(n.saturating_sub(1));
+    // rev[l * n + t] = s_(n-1-t)l, so s_(i-lag)l = rev[l * n + n - 1 - i + lag]
+    let mut rev = resource::try_vec(
+        resource::checked_len(&[n, k], "HAC scores")?,
+        0.0,
+        "HAC lagged scores",
+    )?;
+    for (i, si) in scores.chunks_exact(k.max(1)).take(n).enumerate() {
+        for (l, &sil) in si.iter().enumerate() {
+            rev[l * n + n - 1 - i] = sil;
         }
-
-        gamma_lag.fill(0.0);
-        for i in lag..n {
-            let si = &scores[i * k..(i + 1) * k];
-            let sl = &scores[(i - lag) * k..(i - lag + 1) * k];
-            for (j, &sij) in si.iter().enumerate() {
-                for (g, &sll) in gamma_lag[j * k..(j + 1) * k].iter_mut().zip(sl) {
-                    *g += sij * sll;
+    }
+    let block = (HAC_LAG_SUMS / kk.max(1))
+        .clamp(1, HAC_LAG_BLOCK)
+        .min(max_lag.max(1));
+    let mut acc = vec![0.0; block];
+    let mut gammas = vec![0.0; block * kk];
+    let mut lag0 = 1;
+    while lag0 <= max_lag {
+        resource::checkpoint()?;
+        let lag1 = (lag0 + block - 1).min(max_lag);
+        let nl = lag1 - lag0 + 1;
+        for j in 0..k {
+            for l in 0..k {
+                let acc = &mut acc[..nl];
+                acc.fill(0.0);
+                let rl = &rev[l * n..(l + 1) * n];
+                for i in lag0..n {
+                    let sij = scores[i * k + j];
+                    // the lags of the block with a row i - lag >= 0
+                    let m = (i + 1 - lag0).min(nl);
+                    let start = n - 1 - i + lag0;
+                    for (g, &sll) in acc[..m].iter_mut().zip(&rl[start..start + m]) {
+                        *g += sij * sll;
+                    }
+                }
+                for (t, &g) in acc.iter().enumerate() {
+                    gammas[t * kk + j * k + l] = g;
                 }
             }
         }
 
         // Add symmetrically (Γ̂ⱼ + Γ̂ⱼ')
-        for j in 0..k {
-            for l in 0..k {
-                omega[j * k + l] += w * (gamma_lag[j * k + l] + gamma_lag[l * k + j]);
+        for (lag, gamma_lag) in (lag0..=lag1).zip(gammas.chunks_exact(kk.max(1))) {
+            let w = kernel.weight(lag, bw);
+            if w.abs() < 1e-15 {
+                continue;
+            }
+            for j in 0..k {
+                for l in 0..k {
+                    omega[j * k + l] += w * (gamma_lag[j * k + l] + gamma_lag[l * k + j]);
+                }
             }
         }
+        lag0 = lag1 + 1;
     }
 
     // Scale by 1/n
@@ -5773,11 +5816,12 @@ mod tests {
         }
     }
 
-    /// The HAC meat over flat score rows equals, bit for bit, the indexed triple loop it
-    /// replaced (same terms, same summation order), with and without an aliased column.
+    /// The HAC meat over flat score rows, its lag sums accumulated a block of lags at a time,
+    /// equals, bit for bit, the indexed one-pass-per-lag loop it replaced (same terms, same
+    /// summation order), with and without an aliased column.
     #[test]
     fn test_hac_meat_matches_indexed_reference_exactly() {
-        let n = 157;
+        let n = 600;
         let e = perf3_noise(3 * n, 5);
         let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).sin() + e[i]).collect();
         let x2: Vec<f64> = (0..n)
@@ -5795,7 +5839,14 @@ mod tests {
         for cols in [vec!["x1", "x2"], vec!["x1", "dup", "x2"]] {
             let ols = run_ols(&ds, "y", &cols, true, CovarianceType::Standard).unwrap();
             let design = DesignMatrix::from_dataframe(ds.df(), &cols, true).unwrap();
-            for (bw, kernel) in [(None, HacKernel::Bartlett), (Some(7), HacKernel::Parzen)] {
+            // 300 lags span two blocks of lag sums (HAC_LAG_BLOCK); positive semi-definite
+            // kernels, so the reference's variances are not negative
+            for (bw, kernel) in [
+                (None, HacKernel::Bartlett),
+                (Some(7), HacKernel::Parzen),
+                (Some(60), HacKernel::Parzen),
+                (Some(300), HacKernel::Bartlett),
+            ] {
                 let hac = vcov_hac(&ols, &design.data, bw, kernel, false).unwrap();
                 // reference: the indexed loops on the identified columns
                 let keep: Vec<usize> = (0..ols.n_params)
@@ -5849,7 +5900,7 @@ mod tests {
                     assert_eq!(
                         hac.std_errors[ca].to_bits(),
                         v[[a, a]].sqrt().to_bits(),
-                        "{cols:?} {a}"
+                        "{cols:?} {bw:?} {kernel:?} {a}"
                     );
                     for (b, &cb) in keep.iter().enumerate() {
                         assert_eq!(hac.vcov[ca][cb].to_bits(), v[[a, b]].to_bits());

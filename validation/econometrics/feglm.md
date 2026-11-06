@@ -495,6 +495,19 @@ No SE, deviance or non-Gaussian coefficient is pinned (ECON-20, ECON-66, ECON-67
   and is reused, as is the final information matrix's when the final weights repeat.
 - The weighted alternating projections compute the change and the norm of a sweep in one
   pass, and the acceleration terms in another, each sum accumulating in row order as before.
+- (T3-PERF5) The group weight sums of a weighted demeaning do not change between sweeps,
+  columns, or the z and X demeanings of one IRLS step: `WeightedProjector` computes them once
+  per set of weights and demeans in place, with the same arithmetic in the same order
+  (`test_weighted_projector_matches_reference_exactly`: sweeps, change, convergence and every
+  value bit for bit equal to the per-pass reference, one and two unbalanced factors, zero
+  weights, with and without acceleration, and a sweep limit).
+- (T3-PERF5) The working response's demeaning is memoized like X's: when an iteration's
+  weights and z repeat bit for bit (Gaussian: all 1 and y), the demeaned z and the solve
+  repeat, and the step reuses them.
+- (T3-PERF5) The regressor screen's unit-weight demeaning (`hdfe::demean_matrix_map`) handed
+  the columns to the rayon pool on every call, a wake-up that cost more than the work on a
+  small design; one factor, one column or fewer than 2,000 rows now run on the calling thread
+  (columns are independent, so the result is the same; this applies to `panel_hdfe` too).
 
 These change no result: the R pins and the convergence tests pass at their tolerances.
 
@@ -502,8 +515,6 @@ Timing: release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interl
 against `fe13b889` (before these changes); new / base as the ratio of medians.
 Gaussian: the unified runner on R's `panel_n<n>.csv` (entity effects); logit and Poisson:
 criterion's simulated panels.
-Two rows are above 1.1x of base: Gaussian at n = 100 (1.51) and the two-way logit at
-n = 1,000 (1.14); both are under further work.
 The outputs the unified runner captures (coefficients, SEs, R², test statistics) equal
 base's bit for bit; a pivoted-QR solve differs from them in the last one or two digits (1e-9
 relative for the Hausman statistic).
@@ -514,6 +525,22 @@ relative for the Hausman statistic).
 | Logit, entity | 100 / 400 / 1,000 | 1.07 / 0.93 / 0.97 |
 | Logit, two-way | 100 / 400 / 1,000 | 0.80 / 0.76 / 1.14 |
 | Poisson, two-way | 100 / 400 / 1,000 | 0.93 / 0.95 / 0.99 |
+
+After T3-PERF5 (the last three bullets above), the two rows above 1.1x are within it. The
+machine was shared and loaded (load average 15-70), where criterion's wall-clock rounds
+scattered by up to 2x, so the lane measured user-space CPU cycles per call from the hardware
+counter (`perf_event_open`; median of 11 batches, one P core, `RAYON_NUM_THREADS=1`, three
+interleaved rounds) on the criterion bench's data and a generated entity panel of the same
+shapes for the Gaussian rows, against `fe13b889`. The IRLS iteration counts of the two-way
+logit are 10 / 12 / 11 (base 13 / 17 / 11), and the fits equal the pre-PERF5 ones bit for bit.
+
+| Fit | n | new / base (cycles) |
+|---|---|---|
+| Gaussian, entity | 100 / 1,000 / 10,000 | 0.97 / 1.02 / 0.99 |
+| Logit, two-way | 100 / 400 / 1,000 | 0.50 / 0.57 / 0.90 |
+
+Wall-clock on the unified runner (six interleaved rounds, load average about 25): Gaussian
+0.99 / 0.95 / 1.01.
 
 ## Missing values
 

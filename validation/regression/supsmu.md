@@ -168,5 +168,33 @@ interleaved rounds against `fe13b889`; new / base as the ratio of medians.
 | fixed span 0.1 | 0.96 | 1.13 | 1.18 |
 
 The automatic span's 1.9-2.5x (three running-line passes and the CV smoothing of R's
-algorithm) is accepted; the target was at most 2.5. The fixed span is above the 1.1x target at
-n = 200 and 1,000 (1.13 / 1.18) and is under further work.
+algorithm) is accepted; the target was at most 2.5.
+
+**Interior run and mean factor (T3-PERF5).** The fixed span's cost per point was instructions,
+not divisions (about 280 per point, three per cycle): 1-based index arithmetic, the periodic
+wrap tests and bounds checks on every read of the leaving and entering point.
+
+- The window's state and Friedman's updates are one `Running` type (add, remove, fit), used by
+  the indexed loop and by an interior run: without leave-one-out residuals and without
+  wrapping, the windows of j = ibw + 2 ..= n − ibw take their points from slices. The
+  arithmetic and its order are unchanged; `test_supsmu_interior_run_matches_indexed_loop`
+  holds the run bit for bit to the indexed loop (noisy data with ties, zero and unequal
+  weights, spans whose window covers all the data). The residual and final smooths of the
+  automatic span take the same path.
+- A mean is updated as `m += (v - m) * (w / W)` with the factor formed first (it was
+  `w (v - m) / W` evaluated left to right), so a mean's chain is one subtraction,
+  multiplication and addition. The rounding moves: the largest relative difference against
+  the R pins is now 6.5e-12 (6.6e-12 before), and
+  `test_supsmu_reciprocal_updates_match_divisions` passes unchanged.
+
+The machine was shared and loaded (load average 15-70; criterion's wall-clock rounds
+scattered by up to 2x), so the lane measured user-space CPU cycles per call from the hardware
+counter (`perf_event_open`; median of 11 batches, one P core, three interleaved rounds) on the
+criterion bench's data, against `fe13b889`:
+
+| Variant | n = 50 | n = 200 | n = 1,000 |
+|---|---|---|---|
+| fixed span 0.1, before T3-PERF5 (criterion, above) | 0.96 | 1.13 | 1.18 |
+| fixed span 0.1, T3-PERF5 (cycles) | 0.80 | 0.92-0.94 | 0.88 |
+
+The fixed span is within 1.1x of base.

@@ -101,7 +101,8 @@ below 1e-10 are not ties: `kruskal.test(list(c(1e-300, 2e-300), 3e-300))` = 1.5 
 ### One midrank helper
 
 Kruskal-Wallis, Friedman, Quade, Fligner-Killeen, Mood, Ansari-Bradley and both Wilcoxon tests
-rank through `stats::ranks::midranks`, R's `rank()` (`f64::total_cmp` order, ties by exact
+rank through `stats::ranks::midranks` (Kruskal-Wallis through `rank_sums_by_group`, the same
+ranks summed per group), R's `rank()` (`f64::total_cmp` order, ties by exact
 equality, so `-0.0` and `0.0` tie and two distinct doubles never do). The Fligner-Killeen pins
 (Fligner's own document is [bartlett.md](bartlett.md)):
 
@@ -129,6 +130,22 @@ normal groups with different spreads; base = fe13b889, before the Tier 3 rank ch
 | 100 | 3.06 | 3.42 (1.12) | 3.10 (1.01) |
 | 1,000 | 33.8 | 35.6 (1.05) | 32.6 (0.97) |
 | 10,000 | 556 | 533 (0.96) | 490 (0.88) |
+
+**Timing (T3-PERF5).** `kruskal_test` needs only the rank sum of each group. It ranked the pooled
+sample with `midranks`, which scatters every midrank back to its input position, and then
+summed the stored ranks; at n = 100,000 it was 1.19x of base. `rank_sums_by_group` sorts
+(key, group) pairs on an integer key with `total_cmp`'s order (`-0.0` and `0.0` share a key)
+and lets each tie run add its midrank to its members' groups. Midranks are multiples of 1/2,
+so every partial sum is exact below 2^52 and the rank sums, tie sizes, statistic and p-value
+are bit-identical (`stats::ranks::tests::test_rank_sums_by_group_equals_midranks`, on noisy
+and heavily tied data, signed zeros, infinities and tiny distinct values). User-space CPU
+cycles per call from the hardware counter (`perf_event_open`; median of 11 batches, one P core,
+three interleaved rounds; the machine was shared and loaded, so wall clock was not usable),
+three groups as the criterion bench, against `fe13b889`:
+
+| n | 100 | 1,000 | 10,000 | 100,000 |
+|---|---|---|---|---|
+| new / base | 0.85 | 0.78 | 0.74 | 0.74 |
 
 ## Missing values, labels and the R case
 

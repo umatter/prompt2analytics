@@ -74,6 +74,75 @@ pub(crate) fn midranks_into(
     Ok(())
 }
 
+/// An integer key whose order is `f64::total_cmp`'s for every non-NaN value, with `-0.0`
+/// mapped to `0.0`, so two values get equal keys exactly when they compare equal (`==`).
+#[inline(always)]
+fn rank_key(v: f64) -> u64 {
+    // -0.0 == 0.0: one key for both (adding 0.0 turns -0.0 into 0.0 and changes nothing else)
+    let bits = (v + 0.0).to_bits();
+    if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | (1 << 63)
+    }
+}
+
+/// The midrank sum of every group and the tie-group sizes: `rank_sums[g]` is the sum of the
+/// [`midranks()`] of the values `x[i]` with `group[i] == g` (R: `tapply(rank(x), g, sum)`),
+/// and `sizes` is [`midranks()`]'s second vector. The ranks are never stored: the values are
+/// sorted with their group (on an integer key with `total_cmp`'s order) and each tie run adds
+/// its midrank to its members' groups. Midranks are multiples of 1/2, so every partial sum is
+/// exact below 2^52 and the sums equal those of [`midranks()`] bit for bit, whatever the order
+/// of addition. NaN is refused as in [`midranks()`]; a group index of `n_groups` or more is
+/// `InvalidSpecification`.
+pub(crate) fn rank_sums_by_group(
+    x: &[f64],
+    group: &[usize],
+    n_groups: usize,
+) -> EconResult<(Vec<f64>, Vec<usize>)> {
+    if x.len() != group.len() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "rank sums: {} values but {} group labels",
+                x.len(),
+                group.len()
+            ),
+        });
+    }
+    if let Some(i) = x.iter().position(|v| v.is_nan()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "midranks: value {i} (0-based) is NaN; remove missing values before ranking"
+            ),
+        });
+    }
+    if let Some(&g) = group.iter().find(|&&g| g >= n_groups) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("rank sums: group index {g} is not below {n_groups}"),
+        });
+    }
+    let n = x.len();
+    let mut pairs: Vec<(u64, usize)> = try_with_capacity(n, "rank sums order")?;
+    pairs.extend(x.iter().zip(group).map(|(&v, &g)| (rank_key(v), g)));
+    pairs.sort_unstable_by_key(|p| p.0);
+    let mut sums = try_vec(n_groups, 0.0, "rank sums")?;
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && pairs[j].0 == pairs[i].0 {
+            j += 1;
+        }
+        let rank = (i + 1 + j) as f64 / 2.0;
+        for &(_, g) in &pairs[i..j] {
+            sums[g] += rank;
+        }
+        sizes.push(j - i);
+        i = j;
+    }
+    Ok((sums, sizes))
+}
+
 /// Σ (t³ − t) over tie-group sizes: the tie term of Kruskal-Wallis, Friedman and Wilcoxon (0
 /// without ties).
 ///
@@ -216,6 +285,76 @@ mod tests {
         assert_eq!((ranks.clone(), sizes.clone()), midranks(&long).unwrap());
         midranks_into(&short, &mut pairs, &mut ranks, &mut sizes).unwrap();
         assert_eq!((ranks, sizes), midranks(&short).unwrap());
+    }
+
+    /// `rank_sums_by_group` against midranks summed per group in input order.
+    fn rank_sums_reference(x: &[f64], group: &[usize], k: usize) -> (Vec<f64>, Vec<usize>) {
+        let (ranks, sizes) = midranks(x).unwrap();
+        let mut sums = vec![0.0; k];
+        for (&r, &g) in ranks.iter().zip(group) {
+            sums[g] += r;
+        }
+        (sums, sizes)
+    }
+
+    #[test]
+    fn test_rank_sums_by_group_equals_midranks() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(61);
+        for &(n, k, levels) in &[
+            (1usize, 1usize, 0usize),
+            (7, 2, 3),
+            (500, 3, 0),
+            (5000, 5, 40),
+        ] {
+            // levels > 0: values from a few levels (many ties), else continuous noise
+            let x: Vec<f64> = (0..n)
+                .map(|_| {
+                    if levels > 0 {
+                        (rng.gen_range(0..levels) as f64 - 2.0) * 0.25
+                    } else {
+                        rng.r#gen::<f64>() * 10.0 - 5.0
+                    }
+                })
+                .collect();
+            let g: Vec<usize> = (0..n).map(|_| rng.gen_range(0..k)).collect();
+            let (sums, sizes) = rank_sums_by_group(&x, &g, k).unwrap();
+            let (rs, rz) = rank_sums_reference(&x, &g, k);
+            assert_eq!(sizes, rz, "n = {n}");
+            for (a, b) in sums.iter().zip(&rs) {
+                assert_eq!(a.to_bits(), b.to_bits(), "n = {n}: {sums:?} vs {rs:?}");
+            }
+        }
+        // signed zeros tie, infinities rank as the extremes, tiny distinct values do not tie
+        let x = [
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            3e-12,
+            1e-12,
+            3e-12,
+            2.0,
+        ];
+        let g = [0, 1, 1, 0, 2, 2, 0, 1];
+        assert_eq!(
+            rank_sums_by_group(&x, &g, 3).unwrap(),
+            rank_sums_reference(&x, &g, 3)
+        );
+        assert_eq!(
+            rank_sums_by_group(&[], &[], 2).unwrap(),
+            (vec![0.0, 0.0], vec![])
+        );
+        for (x, g) in [
+            (&[1.0, f64::NAN][..], &[0, 1][..]),
+            (&[1.0, 2.0], &[0, 2]),
+            (&[1.0], &[0, 0]),
+        ] {
+            assert!(matches!(
+                rank_sums_by_group(x, g, 2),
+                Err(EconError::InvalidSpecification { .. })
+            ));
+        }
     }
 
     #[test]
