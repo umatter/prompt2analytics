@@ -3236,7 +3236,8 @@ fn gsynth_panel_from(
     // filled as T x N (periods x units), the layout the estimators use.
     let panel = |values: &[f64], what: &str| -> EconResult<Array2<f64>> {
         let mut m = crate::resource::try_zeros2(n_times, n_units, what)?;
-        for (u, rows) in order.chunks_exact(n_times).enumerate() {
+        // `max(1)`: a panel with no rows has no periods, and so no chunk to take
+        for (u, rows) in order.chunks_exact(n_times.max(1)).enumerate() {
             for (cell, &r) in m.column_mut(u).iter_mut().zip(rows) {
                 *cell = values[r];
             }
@@ -3414,8 +3415,6 @@ fn gs_demean(m: &Array2<f64>, force: GsynthForce) -> Array2<f64> {
     })
 }
 
-/// [`gs_demean`] with the grand mean and the effects `col - mu`, `row - mu` already computed;
-/// an effect the force leaves out is all zeros.
 /// The grand mean `mu`, the period effects `xi` and the unit effects `alpha` of the T x N panel
 /// `m`; an effect `force` leaves out is zero.
 fn gs_effects(m: &Array2<f64>, force: GsynthForce) -> (f64, Array1<f64>, Array1<f64>) {
@@ -3435,6 +3434,8 @@ fn gs_effects(m: &Array2<f64>, force: GsynthForce) -> (f64, Array1<f64>, Array1<
     (mu, xi, alpha)
 }
 
+/// [`gs_demean`] with the grand mean and the effects `col - mu`, `row - mu` already computed;
+/// an effect the force leaves out is all zeros.
 fn demeaned_with(m: &Array2<f64>, mu: f64, alpha: &Array1<f64>, xi: &Array1<f64>) -> Array2<f64> {
     let mut out = m.clone();
     for (mut row, &x) in out.rows_mut().into_iter().zip(xi) {
@@ -3864,32 +3865,6 @@ enum TreatedEffects {
     LoadingsSingular { unit: usize },
 }
 
-/// The rows `0..t0` of `F^` decomposed once per distinct first treated period: treated
-/// units that start together share their pre-period design.
-struct PreDesigns<'a> {
-    f_hat: &'a Array2<f64>,
-    qr: std::collections::BTreeMap<usize, crate::linalg::solve::Qr>,
-}
-
-impl<'a> PreDesigns<'a> {
-    fn new(f_hat: &'a Array2<f64>) -> Self {
-        PreDesigns {
-            f_hat,
-            qr: std::collections::BTreeMap::new(),
-        }
-    }
-
-    /// The pivoted QR of `F^[0..t0, ..]` (`lm.fit`'s, as `least_squares` takes it).
-    fn qr(&mut self, t0: usize) -> EconResult<&crate::linalg::solve::Qr> {
-        if !self.qr.contains_key(&t0) {
-            let fp = self.f_hat.slice(ndarray::s![..t0, ..]);
-            let qr = crate::linalg::solve::Qr::decompose(fp, crate::linalg::solve::LM_QR_TOL)?;
-            self.qr.insert(t0, qr);
-        }
-        Ok(&self.qr[&t0])
-    }
-}
-
 /// Treated unit `j`'s pre-period outcomes `U_tr[0..t0, j]`; refuses a non-finite value as
 /// `least_squares` does.
 fn pre_outcomes(parts: &TreatedParts, j: usize, t0: usize) -> EconResult<Array1<f64>> {
@@ -3902,6 +3877,71 @@ fn pre_outcomes(parts: &TreatedParts, j: usize, t0: usize) -> EconResult<Array1<
     Ok(yp)
 }
 
+/// Run `fit(j, t0, qr, yp)` on each treated unit's pre-period regression, where `qr` is the
+/// pivoted QR of `F^[0..t0, ..]` (`lm.fit`'s, as `least_squares` takes it) and `yp` the unit's
+/// pre-period outcomes. Treated units that start together share their design, so the units are
+/// taken grouped by first treated period and each group's QR is dropped before the next one is
+/// computed: one QR is held at a time, however many periods the units start in.
+///
+/// The answer is the one a pass in unit order gives, whatever order the groups run in: an error
+/// of the lowest unit that fails, or `Some(j)` for the lowest unit `j` whose regression is not
+/// identified (its design is rank-deficient, or `fit` returned `false`). The checks of one unit
+/// run in that pass's order too: its outcomes, its design, then `fit`.
+fn for_each_pre_fit(
+    first_treated: &[usize],
+    parts: &TreatedParts,
+    mut fit: impl FnMut(usize, usize, &crate::linalg::solve::Qr, &Array1<f64>) -> EconResult<bool>,
+) -> EconResult<Option<usize>> {
+    let k = parts.f_hat.ncols();
+    let mut by_start: Vec<usize> =
+        crate::resource::try_with_capacity(first_treated.len(), "gsynth treated units")?;
+    by_start.extend(0..first_treated.len());
+    // stable: in unit order within a first treated period
+    by_start.sort_by_key(|&j| first_treated[j]);
+    // the lowest unit stopped so far, and its error if it was not an unidentified regression
+    let mut stop: Option<(usize, Option<EconError>)> = None;
+    for group in by_start.chunk_by(|&a, &b| first_treated[a] == first_treated[b]) {
+        let mut design = None;
+        for &j in group {
+            if stop.as_ref().is_some_and(|(s, _)| *s <= j) {
+                break;
+            }
+            let t0 = first_treated[j];
+            let mut unit = || -> EconResult<bool> {
+                crate::resource::checkpoint()?;
+                let yp = pre_outcomes(parts, j, t0)?;
+                let qr = match &design {
+                    Some(qr) => qr,
+                    None => design.insert(crate::linalg::solve::Qr::decompose(
+                        parts.f_hat.slice(ndarray::s![..t0, ..]),
+                        crate::linalg::solve::LM_QR_TOL,
+                    )?),
+                };
+                if qr.rank() < k {
+                    return Ok(false);
+                }
+                fit(j, t0, qr, &yp)
+            };
+            match unit() {
+                Ok(true) => {}
+                Ok(false) => {
+                    stop = Some((j, None));
+                    break;
+                }
+                Err(e) => {
+                    stop = Some((j, Some(e)));
+                    break;
+                }
+            }
+        }
+    }
+    match stop {
+        Some((_, Some(e))) => Err(e),
+        Some((j, None)) => Ok(Some(j)),
+        None => Ok(None),
+    }
+}
+
 /// Effects of the treated units given `U_tr` and `F^`.
 fn treated_effects(m: &GsynthMats, parts: &TreatedParts) -> EconResult<TreatedEffects> {
     let (n_t, n_tr) = parts.u_tr.dim();
@@ -3910,18 +3950,16 @@ fn treated_effects(m: &GsynthMats, parts: &TreatedParts) -> EconResult<TreatedEf
     if parts.f_hat.ncols() == 0 {
         return Ok(TreatedEffects::Ok(eff));
     }
-    let mut designs = PreDesigns::new(&parts.f_hat);
-    for (j, &t0) in m.first_treated.iter().enumerate() {
-        let yp = pre_outcomes(parts, j, t0)?;
-        let qr = designs.qr(t0)?;
-        if qr.rank() < parts.f_hat.ncols() {
-            return Ok(TreatedEffects::LoadingsSingular { unit: j });
-        }
+    let singular = for_each_pre_fit(&m.first_treated, parts, |j, _, qr, yp| {
         let pred = parts.f_hat.dot(&qr.coefficients(yp.view())?);
         let mut col = eff.column_mut(j);
         col -= &pred;
-    }
-    Ok(TreatedEffects::Ok(eff))
+        Ok(true)
+    })?;
+    Ok(match singular {
+        Some(unit) => TreatedEffects::LoadingsSingular { unit },
+        None => TreatedEffects::Ok(eff),
+    })
 }
 
 /// Mean effect over the treated post-period cells.
@@ -3967,28 +4005,27 @@ fn gsynth_estimate_parts(
 /// S6: leave-one-pre-period-out MSPE of the treated units, by PRESS (`e / (1 - h)`) from
 /// each unit's pre-period fit; a pre-period whose leverage is 1 is refitted explicitly.
 /// `None` when a regression is rank-deficient. The leverages depend on the pre-period
-/// design only, so units with the same first treated period share them.
+/// design only, so units with the same first treated period share them. The fits run in
+/// [`for_each_pre_fit`]'s order and the errors are kept to be summed in unit order, cell by
+/// cell, since a sum of floats depends on its order.
 fn loo_mspe(m: &GsynthMats, parts: &TreatedParts) -> EconResult<Option<f64>> {
     let (mut sum, mut count) = (0.0, 0usize);
     let k = parts.f_hat.ncols();
-    let mut designs = PreDesigns::new(&parts.f_hat);
-    let mut leverages: std::collections::BTreeMap<usize, Vec<f64>> =
-        std::collections::BTreeMap::new();
-    for (j, &t0) in m.first_treated.iter().enumerate() {
-        crate::resource::checkpoint()?;
-        if k == 0 {
+    if k == 0 {
+        for (j, &t0) in m.first_treated.iter().enumerate() {
+            crate::resource::checkpoint()?;
             for t in 0..t0 {
                 sum += parts.u_tr[[t, j]].powi(2);
                 count += 1;
             }
-            continue;
         }
-        let yp = pre_outcomes(parts, j, t0)?;
-        let qr = designs.qr(t0)?;
-        if qr.rank() < k {
-            return Ok(None);
-        }
-        if let std::collections::btree_map::Entry::Vacant(slot) = leverages.entry(t0) {
+        return Ok(Some(sum / count as f64));
+    }
+    let (n_t, n_tr) = parts.u_tr.dim();
+    let mut errors = crate::resource::try_zeros2(n_t, n_tr, "gsynth leave-one-out errors")?;
+    let mut leverages: (Option<usize>, Vec<f64>) = (None, Vec::new());
+    let unidentified = for_each_pre_fit(&m.first_treated, parts, |j, t0, qr, yp| {
+        if leverages.0 != Some(t0) {
             let cov = qr.unscaled_covariance()?;
             let fp = parts.f_hat.slice(ndarray::s![..t0, ..]);
             let h = fp
@@ -3996,29 +4033,38 @@ fn loo_mspe(m: &GsynthMats, parts: &TreatedParts) -> EconResult<Option<f64>> {
                 .into_iter()
                 .map(|row| row.dot(&cov.dot(&row)))
                 .collect();
-            slot.insert(h);
+            leverages = (Some(t0), h);
         }
-        let h = &leverages[&t0];
+        let h = &leverages.1;
         // lm.fit's residuals: Q (Q'y with its first rank entries zeroed)
         let mut effects = qr.qty(yp.view())?;
         effects.iter_mut().take(qr.rank()).for_each(|v| *v = 0.0);
         let residuals = qr.q_times(effects.view())?;
         for s in 0..t0 {
-            let err = if 1.0 - h[s] > 1e-10 {
+            errors[[s, j]] = if 1.0 - h[s] > 1e-10 {
                 residuals[s] / (1.0 - h[s])
             } else {
                 let keep: Vec<usize> = (0..t0).filter(|&t| t != s).collect();
                 let fk = select_rows(&parts.f_hat, &keep);
                 let yk = Array1::from_iter(keep.iter().map(|&t| parts.u_tr[[t, j]]));
                 if keep.len() < k {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 let lk = crate::linalg::solve::least_squares(fk.view(), yk.view())?;
                 if lk.rank < k {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 yp[s] - parts.f_hat.row(s).dot(&lk.coefficients)
             };
+        }
+        Ok(true)
+    })?;
+    if unidentified.is_some() {
+        return Ok(None);
+    }
+    for (j, &t0) in m.first_treated.iter().enumerate() {
+        for s in 0..t0 {
+            let err = errors[[s, j]];
             sum += err * err;
             count += 1;
         }
@@ -6368,6 +6414,64 @@ mod gsynth_tests {
         run_gsynth(ds, "outcome", "treated", "unit", "time", &[], config)
     }
 
+    fn zero_row_gsynth_frame() -> DataFrame {
+        df! {
+            "outcome" => Vec::<f64>::new(),
+            "treated" => Vec::<f64>::new(),
+            "unit" => Vec::<f64>::new(),
+            "time" => Vec::<f64>::new(),
+        }
+        .unwrap()
+    }
+
+    #[test]
+    fn test_gsynth_zero_rows_is_refused() {
+        // run_gsynth reads its columns with the default minimum of one row
+        let err = gs(&Dataset::new(zero_row_gsynth_frame()), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EconError::InsufficientData {
+                    required: 1,
+                    provided: 0,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_gsynth_panel_without_rows_reaches_the_refusal() {
+        // the fill of a panel with no periods has no chunk to take, whatever stops such a
+        // frame earlier; asked for one, it hands an empty panel to the treatment check
+        let df = zero_row_gsynth_frame();
+        let cols = ColumnRequest::new(&df)
+            .numeric("outcome")
+            .numeric("treated")
+            .min_rows(0, "gsynth test")
+            .extract()
+            .unwrap();
+        let panel = gsynth_panel_from(
+            &cols,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            "outcome",
+            "treated",
+            &[],
+        )
+        .unwrap();
+        let Err(err) = gsynth_mats(panel) else {
+            panic!("an empty panel has no treated units");
+        };
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message }
+                if message == "No treated units found"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn test_na_gsynth_missing_cell() {
         // (C2, 5) is row 14
@@ -6905,7 +7009,7 @@ mod gsynth_tests {
     #[test]
     fn test_gsynth_shared_fits_equal_fresh_fits_bit_for_bit() {
         // simdata (T <= N_co: the T x T Gram), gsynth_staggered (several first treated
-        // periods), a short-wide panel cut to fewer controls than periods (the N x N Gram),
+        // periods, in and against unit order), a short-wide panel cut to fewer controls than periods (the N x N Gram),
         // and the small panel whose loadings become unidentified at large r
         let sim = simdata();
         let stag = Dataset::new(
@@ -6931,10 +7035,27 @@ mod gsynth_tests {
             narrow_m.controls.len(),
             narrow_m.times.len()
         );
+        // the same panel with its ids reversed: the units start latest first, so the visit by
+        // first treated period runs against unit order
+        let mut late_first = stag.df().clone();
+        let reversed: Vec<f64> = col(&stag, "id").iter().map(|&i| 1000.0 - i).collect();
+        late_first
+            .with_column(Series::new("id".into(), reversed))
+            .unwrap();
+        let late_first = Dataset::new(late_first);
+        let late_first_m =
+            gsynth_mats(read_gsynth_panel(late_first.df(), "Y", "D", "id", "time", &[]).unwrap())
+                .unwrap();
+        assert!(
+            !late_first_m.first_treated.is_sorted(),
+            "the units must not start in unit order: {:?}",
+            late_first_m.first_treated
+        );
         let small = create_gsynth_dataset();
         let panels = [
             (&sim, "Y", "D", "id"),
             (&stag, "Y", "D", "id"),
+            (&late_first, "Y", "D", "id"),
             (&narrow, "Y", "D", "id"),
             (&small, "outcome", "treated", "unit"),
         ];
@@ -6994,6 +7115,90 @@ mod gsynth_tests {
             }
         }
         assert!(cases > 40, "{cases}");
+    }
+
+    #[test]
+    fn test_gsynth_pre_fits_answer_for_the_lowest_unit() {
+        // rows 0..2 of F^ are collinear, so a design with t0 <= 2 is rank-deficient and the
+        // units are visited by first treated period, not in unit order
+        let f_hat = ndarray::array![
+            [1.0, 2.0],
+            [2.0, 4.0],
+            [3.0, 1.1],
+            [-1.0, 2.3],
+            [0.5, 1.2],
+            [2.2, -0.9]
+        ];
+        let u_tr = Array2::from_shape_fn((6, 4), |(t, j)| {
+            ((t * 7 + j * 3) as f64).sin() + 0.1 * j as f64
+        });
+        let mats = |first_treated: &[usize]| GsynthMats {
+            y: Array2::zeros((6, 4)),
+            d: Array2::zeros((6, 4)),
+            x: Vec::new(),
+            units: (0..4).map(|j| j.to_string()).collect(),
+            times: (0..6).collect(),
+            treated: (0..4).collect(),
+            controls: Vec::new(),
+            first_treated: first_treated.to_vec(),
+        };
+        let singular_unit = |first_treated: &[usize], u_tr: &Array2<f64>| {
+            let parts = TreatedParts {
+                u_tr: u_tr.clone(),
+                f_hat: f_hat.clone(),
+            };
+            let m = mats(first_treated);
+            let loo = loo_mspe(&m, &parts);
+            let eff = treated_effects(&m, &parts);
+            match (eff, loo) {
+                (Ok(TreatedEffects::LoadingsSingular { unit }), Ok(None)) => Ok(unit),
+                (Err(e), Err(l)) => {
+                    assert_eq!(e.to_string(), l.to_string());
+                    Err(e.to_string())
+                }
+                (_, l) => panic!("{first_treated:?}: effects and LOO disagree: {l:?}"),
+            }
+        };
+        // unit 2 starts first and is singular, but so is unit 1, which is the lower unit
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &u_tr), Ok(1));
+        assert_eq!(singular_unit(&[4, 4, 1, 2], &u_tr), Ok(2));
+
+        // a non-finite outcome counts where its unit does, and before that unit's design
+        let with_nan = |j: usize| {
+            let mut u = u_tr.clone();
+            u[[0, j]] = f64::NAN;
+            u
+        };
+        let refused = || {
+            Err::<usize, String>(
+                "Invalid model specification: y contains a non-finite value (row 0)".to_string(),
+            )
+        };
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &with_nan(0)), refused());
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &with_nan(1)), refused());
+        assert_eq!(singular_unit(&[4, 2, 1, 2], &with_nan(3)), Ok(1));
+
+        // identified at every start: the units, not the visit, order the effects and the sum
+        let parts = TreatedParts {
+            u_tr: u_tr.clone(),
+            f_hat: f_hat.clone(),
+        };
+        let m = mats(&[6, 4, 5, 4]);
+        let TreatedEffects::Ok(eff) = treated_effects(&m, &parts).unwrap() else {
+            panic!("identified designs");
+        };
+        for (j, &t0) in m.first_treated.iter().enumerate() {
+            let ls = crate::linalg::solve::least_squares(
+                f_hat.slice(ndarray::s![..t0, ..]),
+                u_tr.slice(ndarray::s![..t0, j]),
+            )
+            .unwrap();
+            let want = u_tr.column(j).to_owned() - f_hat.dot(&ls.coefficients);
+            assert_eq!(eff.column(j).to_vec(), want.to_vec(), "unit {j}");
+        }
+        assert!(loo_mspe(&m, &parts).unwrap().is_some_and(f64::is_finite));
+        // t0 = 3: row 2 alone breaks the collinearity, and its explicit refit is rank-deficient
+        assert_eq!(loo_mspe(&mats(&[6, 4, 3, 4]), &parts).unwrap(), None);
     }
 
     #[test]
