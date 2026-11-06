@@ -63,12 +63,47 @@ is within 1e-6 of 0 or 1 goes to `fit_glm` directly.
 
 The Q regression of node `t - 1` starts from node t's coefficients on the shared history, with
 `L_t`, `A_t` and `eps_t` moved into the intercept at their means (`warm_start`); its response is
-node t's targeted prediction. The estimate is the same maximum-likelihood estimate to the
-deviance rule, but `NodeModel::iterations` of those nodes counts fewer steps (2 where glm.fit's
-start takes 4 or 5). `test_ltmle_fast_paths_match_the_shared_glm` and its neighbours hold every
-reported quantity to `fit_glm` from glm.fit's start: on the default control the warnings and
-convergence status are equal, and at the 1e-14 control, where rounding decides the deviance
-rule, the numbers only.
+node t's targeted prediction. It takes glm.fit's start instead when `max_iter` is below 50: the
+limit decides what is reported as not converged, on the step count from glm.fit's start, which a
+warm start would undercut. Fits that can take the warm path needed at most 33 steps from
+glm.fit's start (T = 10, n = 1,500 to 10,000, 12 data seeds each), and a response mean within
+1e-6 of 0 or 1 never takes it.
+
+Two reported things change. `NodeModel::iterations` of a warm-started node counts the steps from
+its warm start (2 where glm.fit's start takes 4 or 5), so it is not comparable with glm.fit's.
+And each fit stops at the deviance rule on a path that depends on its start, so at the default
+tolerance the numbers move by the rule's slack. The tests hold every reported quantity to
+`fit_glm` from glm.fit's start. Largest measured gaps over 64 data sets at the default tolerance
+and 18 at 1e-14 (T = 2 to 10, saturated, separated, exact-duplicate and near-duplicate designs,
+dynamic regimes), each relative to the largest entry of the same vector:
+
+| Quantity | default tolerance (1e-10) | tolerance 1e-14 | near-duplicate at 1e-7 |
+|---|---:|---:|---:|
+| ATE, regime means | 2e-12 | 3e-13 | 2e-11 |
+| SE, z | 5e-12 | 3e-13 | 3e-11 |
+| p-value | 1e-9 | 1e-11 | 1e-9 |
+| EIC | 1e-11 | 2e-12 | 2e-10 |
+| Q* | 4e-11 | 1e-11 | 1e-9 |
+| Q coefficients | 1e-10 | 2e-11 | 4e-9 |
+| fluctuation `eps` | 4e-10 | 2e-11 | 7e-10 |
+| g coefficients, propensities, cumulative g, H | 5e-15 | 2e-15 | 1e-15 |
+
+The tests assert 1e-10 on ATE, SE, z and regime means everywhere, 1e-10 on the rest at 1e-14,
+and 1e-9 on the rest at the default tolerance. The last column has its own bound of 1e-8: there
+the condition number of about 1e7 amplifies the rounding that reaches the clever covariate from
+the g fits, on the near-duplicate's coefficient and the predictions, and the gap is the same with
+the warm start off. On a saturated node the likelihood is flat, and those fits run `fit_glm` from
+glm.fit's start; relative to the coefficient vector their gap stays in the table.
+
+On the default tolerance the warnings and convergence status were equal on all 64 data sets. At
+`max_iter` 2 to 6 and 49 they are equal by construction. At 1e-14, where rounding decides the
+deviance rule, they differed on 7 of 18 data sets: on most of them the fast path converges where
+`fit_glm` from glm.fit's start runs out of steps, with the numbers within the 1e-14 column.
+
+There is no warm start across regimes. The last node's Q regression is fitted once for all
+regimes, and every earlier one already starts from its own regime's later node and takes about
+two steps, so a start from the other regime has few steps left to save. The fits that stay
+expensive are the saturated ones, which keep glm.fit's start ("Wall-clock against fe13b889").
 
 ## 4. Regimes and contrasts
 
