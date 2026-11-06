@@ -212,41 +212,42 @@ not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_re
 ## Wall-clock against fe13b889 (T3-PERF6B)
 
 Medians in ms over five interleaved rounds of the wave-2B timing harness (`wp27`, one core, one
-rayon thread, `release`), on a shared machine. "Before" is this tree before T3-PERF6B; ratios
+rayon thread, `release`), on a shared machine. "Before ratio" is this tree before T3-PERF6B; ratios
 are against fe13b889, whose estimator is not comparable: it fitted shorter histories (its T = 2
 growth ATE is -0.0029, this tree's 0.2397). The n = 100 rows are near the clock's resolution.
 
-| Row | n | fe13b889 | before | this tree | before ratio | ratio |
-|---|---|---:|---:|---:|---:|---:|
-| bench | 100 | 0.5 | 0.4 | 0.4 | 0.91 | 0.87 |
-| bench | 1,000 | 3.6 | 3.4 | 2.0 | 0.96 | 0.55 |
-| bench | 10,000 | 35.4 | 33.8 | 19.8 | 0.96 | 0.56 |
-| linear Q | 100 | 0.1 | 0.2 | 0.1 | 1.32 | 0.87 |
-| linear Q | 1,000 | 1.0 | 1.4 | 0.9 | 1.33 | 0.92 |
-| linear Q | 10,000 | 10.0 | 14.0 | 9.8 | 1.40 | 0.98 |
-| binary Y | 100 | 0.3 | 0.8 | 0.6 | 2.53 | 2.03 |
-| binary Y | 1,000 | 2.6 | 4.0 | 2.3 | 1.55 | 0.88 |
-| binary Y | 10,000 | 25.1 | 38.5 | 22.3 | 1.53 | 0.89 |
-| growth T = 2 | 10,000 | 21.5 | 32.6 | 19.3 | 1.51 | 0.90 |
-| growth T = 3 | 10,000 | 30.1 | 56.4 | 33.2 | 1.87 | 1.10 |
-| growth T = 5 | 10,000 | 49.8 | 119.9 | 54.7 | 2.41 | 1.10 |
-| growth T = 10 | 10,000 | 96.8 | 1,049.0 | 620.9 | 10.84 | 6.41 |
+| Row | n | fe13b889 | this tree | before ratio | ratio |
+|---|---|---:|---:|---:|---:|
+| bench | 100 | 0.22 | 0.11 | 0.91 | 0.50 |
+| bench | 1,000 | 1.69 | 0.94 | 0.96 | 0.56 |
+| bench | 10,000 | 16.4 | 9.2 | 0.96 | 0.56 |
+| linear Q | 100 | 0.06 | 0.06 | 1.32 | 0.89 |
+| linear Q | 1,000 | 0.48 | 0.44 | 1.33 | 0.93 |
+| linear Q | 10,000 | 4.7 | 4.5 | 1.40 | 0.97 |
+| binary Y | 100 | 0.15 | 0.30 | 2.53 | 2.05 |
+| binary Y | 1,000 | 1.20 | 1.08 | 1.55 | 0.90 |
+| binary Y | 10,000 | 11.6 | 10.5 | 1.53 | 0.91 |
+| growth T = 2 | 10,000 | 9.9 | 9.0 | 1.51 | 0.91 |
+| growth T = 3 | 10,000 | 13.7 | 15.3 | 1.87 | 1.11 |
+| growth T = 5 | 10,000 | 23.0 | 24.7 | 2.41 | 1.07 |
+| growth T = 10 | 10,000 | 45.1 | 258.7 | 10.84 | 5.74 |
 
 **Growth T = 10 is above 1.1x and not signed off.** Its dataset has about 20 followers of each
 regime at the last node, and the always-treat fluctuation there reaches `eps = 29.2`. Every
 earlier Q response of that regime is then within about `exp(-29)` of 1, and each of those nine
 fits takes 30 IRLS steps in `fit_glm` as its linear predictor climbs to the clamp, where the
 other regime's take 2. Of six data seeds at T = 10, n = 10,000, two saturate this way. Single
-runs, medians of five rounds, with fe13b889's row at 62.5 ms in the same session:
+runs, medians of five rounds, against fe13b889's row above (45.1 ms, its seed 42):
 
 | Data seed | this tree | ratio |
 |---|---:|---:|
-| 42 (the row above), saturates | 437 | 7.0 |
-| 3, saturates | 445 | 7.1 |
-| 1, 2, 4, 5, no saturation | 89-124 | 1.4-2.0 |
+| 42 (the row above), saturates | 269 | 5.96 |
+| 3, saturates | 259 | 5.75 |
+| 1, 2, 4, 5, no saturation | 65-67 | 1.44-1.49 |
 
-Starting `fit_glm` from `warm_start` on those fits (not done) brings seed 42 to 122 ms (1.95x) and
-seed 3 to 110 ms. On seeds 42 and 3 and a saturated fixture, the ATE, SE, regime means, EIC, Q*
+Starting `fit_glm` from `warm_start` on those fits (not done; measured in an earlier, busier
+session, with fe13b889's row at 62.5 ms) brings seed 42 from 437 ms to 122 ms (1.95x) and seed 3
+from 445 ms to 110 ms. On seeds 42 and 3 and a saturated fixture, the ATE, SE, regime means, EIC, Q*
 and fluctuation coefficients stay within 5e-11, and the warnings and convergence status are
 equal. The reported Q coefficients of the saturated nodes move, by up to 2.7, because their
 likelihood is flat, so that start changes a reported number and awaits a decision.
