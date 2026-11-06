@@ -1,20 +1,43 @@
-//! Covariate Balancing Propensity Score (CBPS) Estimation.
+//! Covariate Balancing Propensity Score (CBPS), as `CBPS::CBPS()` (CBPS 0.24).
 //!
-//! Implements the CBPS method of Imai & Ratkovic (2014), which uses Generalized
-//! Method of Moments (GMM) to simultaneously estimate propensity scores and
-//! achieve covariate balance.
+//! CBPS (Imai & Ratkovic 2014) estimates a logistic propensity score whose inverse-probability
+//! weights balance the covariates. With `x` the design (intercept first), `t` the 0/1 treatment
+//! and `p = plogis(x beta)`:
 //!
-//! # Overview
+//! - [`CbpsMethod::Over`] (R `method = "over"`, the default): the k score conditions
+//!   `x'(t - p) / n = 0` and the k balance conditions, an over-identified two-step GMM problem
+//!   `min g' W g` with CBPS's weight matrix `W = V^+` fixed at the start value
+//!   (`twostep = TRUE`).
+//! - [`CbpsMethod::Exact`] (R `method = "exact"`): the k balance conditions alone (just
+//!   identified), so the weighted covariate means of the two groups coincide.
+//! - [`CbpsMethod::Logit`]: plain logistic regression (`glm(binomial)`), no balance conditions.
 //!
-//! Unlike standard logistic regression for propensity scores, CBPS explicitly
-//! targets covariate balance as part of the estimation by incorporating balance
-//! conditions into the GMM moment conditions:
+//! The balance target is [`CbpsEstimand::Ate`] (R `ATT = 0`: `t/p - (1-t)/(1-p)`, both groups
+//! weighted to the full sample) or [`CbpsEstimand::Att`] (R `ATT = 1`: controls weighted to the
+//! treated by `p/(1-p)`). The library default is ATE; `CBPS::CBPS` defaults to `ATT = 1`.
 //!
-//! 1. **Score conditions**: E[X_i * (T_i - p(X_i; beta))] = 0
-//! 2. **Balance conditions**: E[T_i * X_i / p(X_i; beta) - (1-T_i) * X_i / (1-p(X_i; beta))] = 0
+//! As CBPS does, the non-intercept covariates are standardised and the design whitened by its
+//! thin SVD (`U`, left singular vectors); the estimator runs on `U` and the coefficients are
+//! mapped back. Start values are the logit fit scaled by `alpha`, the minimiser of
+//! `g' V^+ g` over `alpha` in `[0.8, 1.1]` (Brent's method, as `optimize`). Exact balance is
+//! solved by damped Newton, the over-identified problem by Gauss-Newton from the scaled logit
+//! start and from the exact-balance solution (the smaller `g'Wg` wins); both stop on the
+//! relative Newton step, Gauss-Newton also when `g'Wg` is at its minimum to rounding (a slowly
+//! converging over-identified fit can reach that floor first). Probabilities are clipped to `[1e-6, 1 - 1e-6]` (CBPS's `probs.min`).
 //!
-//! The combined moment conditions are solved using GMM, resulting in propensity
-//! scores that achieve better covariate balance than standard logit.
+//! Reported: CBPS's `J = g'Wg` at the estimate ([`CbpsResult::cbps_j`], no factor n) and, for
+//! `Over`, Hansen's test of the over-identifying restrictions on `n J` with k degrees of freedom
+//! ([`CbpsResult::j_statistic`], [`CbpsResult::j_p_value`]); CBPS's standardised weights (each
+//! group sums to 1); the deviance; coefficient SEs from the GMM sandwich.
+//!
+//! Deviations from CBPS 0.24 (details and numbers in `validation/econometrics/cbps.md`):
+//! - over-identified ATT: CBPS's analytic gradient of the ATT balance block is n/n_t too large,
+//!   so its BFGS stops where its objective's gradient is not zero; p2a minimises the objective.
+//! - SEs: the delta method maps the whitened-scale sandwich back (CBPS.fit's transform is not
+//!   scale-equivariant).
+//! - alpha is Brent's minimiser at tolerance 1e-12 (CBPS: `optimize`'s default tolerance).
+//!
+//! Collinear covariates and treatments not coded 0/1 are refused.
 //!
 //! # References
 //!
@@ -26,7 +49,8 @@
 //!   CBPS: Covariate Balancing Propensity Score.
 //!   <https://cran.r-project.org/package=CBPS>
 //!
-//! R equivalent: `CBPS::CBPS()`
+//! R equivalent: `CBPS::CBPS(method = "over" | "exact", ATT = 0 | 1, standardize = TRUE,
+//! twostep = TRUE)`
 
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -34,58 +58,122 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
+use crate::econometrics::glm::{GlmLink, GlmSpec, fit_glm, fit_propensity, plogis};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::linalg::matrix_ops::safe_inverse;
-use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, logistic_cdf, normal_cdf};
+use crate::linalg::matrix_ops::{faer_ref_to_ndarray, ndarray_to_faer};
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// CBPS estimation method.
-///
-/// Controls the balance between propensity score accuracy and covariate balance.
+/// CBPS estimation method, with the R CBPS package's meanings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CbpsMethod {
-    /// Exact balance (overidentified GMM).
-    ///
-    /// Uses both score and balance conditions. The model is overidentified,
-    /// allowing for a J-test of model specification.
+    /// R `method = "over"` (R's default): the k score and k balance conditions, over-identified
+    /// two-step GMM with `W = V^+` fixed at the start value (`twostep = TRUE`).
     #[default]
-    ExactBalance,
-
-    /// Over-identified estimation with additional moment conditions.
-    ///
-    /// Uses more moment conditions than parameters, providing a stronger
-    /// test of specification but may be more sensitive to misspecification.
-    OverBalance,
-
-    /// Just-identified estimation (score conditions only).
-    ///
-    /// Equivalent to standard logistic regression. Uses only score conditions,
-    /// providing baseline comparison for balance improvement.
-    JustIdentified,
+    #[serde(alias = "ExactBalance", alias = "OverBalance")]
+    Over,
+    /// R `method = "exact"`: the k balance conditions alone (just identified).
+    Exact,
+    /// Logistic regression (`glm(binomial)`), no balance conditions.
+    #[serde(alias = "JustIdentified")]
+    Logit,
 }
 
-impl fmt::Display for CbpsMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+#[allow(non_upper_case_globals)]
+impl CbpsMethod {
+    /// Legacy name: it always ran the score + balance GMM, R's `"over"`.
+    pub const ExactBalance: CbpsMethod = CbpsMethod::Over;
+    /// Legacy name of [`CbpsMethod::Over`].
+    pub const OverBalance: CbpsMethod = CbpsMethod::Over;
+    /// Legacy name of [`CbpsMethod::Logit`].
+    pub const JustIdentified: CbpsMethod = CbpsMethod::Logit;
+}
+
+impl CbpsMethod {
+    /// What the method estimates, for display.
+    pub fn description(self) -> &'static str {
         match self {
-            CbpsMethod::ExactBalance => write!(f, "Exact Balance (Overidentified GMM)"),
-            CbpsMethod::OverBalance => write!(f, "Over-Balanced GMM"),
-            CbpsMethod::JustIdentified => write!(f, "Just-Identified (Score Only)"),
+            CbpsMethod::Over => "score and balance conditions, two-step GMM",
+            CbpsMethod::Exact => "balance conditions only",
+            CbpsMethod::Logit => "logistic regression, no balance conditions",
         }
     }
 }
 
+crate::option_enum!(
+    CbpsMethod,
+    crate::options::Choices {
+        option: "CBPS method",
+        values: &[
+            (
+                &[
+                    "over",
+                    "overidentified",
+                    "over_identified",
+                    "overbalance",
+                    "over_balance",
+                ],
+                CbpsMethod::Over,
+            ),
+            (&["exact", "balance_only"], CbpsMethod::Exact),
+            (
+                &[
+                    "logit",
+                    "glm",
+                    "just",
+                    "justified",
+                    "just_identified",
+                    "justidentified",
+                ],
+                CbpsMethod::Logit,
+            ),
+        ],
+    }
+);
+
+/// Balance target (R `ATT = 0 | 1`). The library default is ATE; `CBPS::CBPS` defaults to
+/// `ATT = 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CbpsEstimand {
+    /// R `ATT = 0`: both groups weighted to the full sample.
+    #[default]
+    Ate,
+    /// R `ATT = 1`: controls weighted to the treated.
+    Att,
+}
+
+crate::option_enum!(
+    CbpsEstimand,
+    crate::options::Choices {
+        option: "CBPS estimand",
+        values: &[
+            (&["ATE", "average_treatment_effect"], CbpsEstimand::Ate),
+            (
+                &["ATT", "average_treatment_effect_on_the_treated", "treated",],
+                CbpsEstimand::Att,
+            ),
+        ],
+    }
+);
+
 /// Configuration for CBPS estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CbpsConfig {
-    /// CBPS estimation method
+    /// CBPS method (default [`CbpsMethod::Over`], R's default).
     pub method: CbpsMethod,
-    /// Convergence tolerance for GMM optimization
+    /// Balance target (default [`CbpsEstimand::Ate`]; R's default is ATT).
+    #[serde(default)]
+    pub estimand: CbpsEstimand,
+    /// Convergence tolerance: relative Newton / Gauss-Newton step on the whitened scale
+    /// (default 1e-8).
     pub tolerance: f64,
-    /// Maximum iterations for Newton-Raphson
+    /// Maximum iterations of each Newton / Gauss-Newton run (default 100).
     pub max_iter: usize,
     /// Standardized difference threshold for balance (default: 0.1)
     pub balance_threshold: f64,
@@ -94,7 +182,8 @@ pub struct CbpsConfig {
 impl Default for CbpsConfig {
     fn default() -> Self {
         Self {
-            method: CbpsMethod::ExactBalance,
+            method: CbpsMethod::Over,
+            estimand: CbpsEstimand::Ate,
             tolerance: 1e-8,
             max_iter: 100,
             balance_threshold: 0.1,
@@ -212,35 +301,38 @@ impl fmt::Display for BalanceTable {
 /// Result from CBPS estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CbpsResult {
-    /// Logistic regression coefficients (beta)
+    /// Logistic regression coefficients (beta), on the scale of the original covariates
     pub coefficients: Vec<f64>,
     /// Coefficient names (intercept + covariates)
     pub names: Vec<String>,
-    /// Standard errors of coefficients
+    /// Standard errors: the GMM sandwich mapped from the whitened scale by the delta method
+    /// (`Over`, `Exact`), or glm's model-based SEs (`Logit`)
     pub std_errors: Vec<f64>,
     /// Z-statistics
     pub z_stats: Vec<f64>,
-    /// P-values
+    /// Two-sided normal p-values
     pub p_values: Vec<f64>,
-    /// Estimated propensity scores P(T=1|X)
+    /// Estimated propensity scores P(T=1|X), clipped to `[1e-6, 1 - 1e-6]` for `Over` and
+    /// `Exact` (R's `fitted.values`), glm's fitted values for `Logit`
     pub propensity_scores: Vec<f64>,
-    /// IPW weights for treatment effect estimation
+    /// CBPS's standardised weights: within each group they sum to 1 (ATE: `1/p` treated,
+    /// `1/(1-p)` controls; ATT: `1/n_t` treated, `p/(1-p)` controls, normalised)
     pub weights: Vec<f64>,
     /// Covariate balance before weighting
     pub balance_before: BalanceTable,
     /// Covariate balance after CBPS weighting
     pub balance_after: BalanceTable,
-    /// Whether GMM optimization converged
+    /// Whether the optimisation converged
     pub converged: bool,
-    /// Number of iterations to convergence
+    /// Iterations of the reported Newton / Gauss-Newton run (IRLS for `Logit`)
     pub iterations: usize,
-    /// Final GMM criterion (objective function value)
+    /// Final objective: `g'Wg` (`Over`), the balance loss `g_b'g_b` (`Exact`), 0 (`Logit`)
     pub gmm_criterion: f64,
-    /// J-statistic for overidentification test (if overidentified)
+    /// Hansen's statistic of the over-identifying restrictions, `n J` (`Over` only)
     pub j_statistic: Option<f64>,
-    /// P-value for J-test
+    /// P-value of Hansen's test, chi-squared with `j_df` degrees of freedom (`Over` only)
     pub j_p_value: Option<f64>,
-    /// Degrees of freedom for J-test
+    /// Degrees of freedom of Hansen's test (k, `Over` only)
     pub j_df: Option<usize>,
     /// CBPS method used
     pub method: CbpsMethod,
@@ -254,6 +346,34 @@ pub struct CbpsResult {
     pub n_params: usize,
     /// Number of moment conditions
     pub n_moments: usize,
+    /// Balance target
+    #[serde(default)]
+    pub estimand: CbpsEstimand,
+    /// CBPS's `J = g'Wg` at the estimate with W fixed at the start value, no factor n
+    /// (`Over` and `Exact`; R's `J`)
+    #[serde(default)]
+    pub cbps_j: Option<f64>,
+    /// `-2 sum[t ln p + (1 - t) ln(1 - p)]` (R's `deviance`)
+    #[serde(default)]
+    pub deviance: f64,
+    /// CBPS's start scale alpha (`Over` and `Exact`)
+    #[serde(default)]
+    pub start_scale: Option<f64>,
+    /// Convergence record of the reported run
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// Warnings (start values, singular matrices, non-convergence, Hansen rejection)
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for CbpsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 impl fmt::Display for CbpsResult {
@@ -261,7 +381,11 @@ impl fmt::Display for CbpsResult {
         writeln!(f, "Covariate Balancing Propensity Score (CBPS)")?;
         writeln!(f, "============================================")?;
         writeln!(f)?;
-        writeln!(f, "Method: {}", self.method)?;
+        writeln!(f, "Method: {} ({})", self.method, self.method.description())?;
+        match self.estimand {
+            CbpsEstimand::Ate => writeln!(f, "Estimand: ATE")?,
+            CbpsEstimand::Att => writeln!(f, "Estimand: ATT (controls weighted to the treated)")?,
+        }
         writeln!(
             f,
             "Observations: {} (Treated: {}, Control: {})",
@@ -296,19 +420,33 @@ impl fmt::Display for CbpsResult {
             )?;
         }
         writeln!(f, "{}", "-".repeat(65))?;
+        writeln!(f)?;
 
-        // J-test for overidentification
-        if let (Some(j), Some(p), Some(df)) = (self.j_statistic, self.j_p_value, self.j_df) {
-            writeln!(f)?;
-            writeln!(f, "J-Test for Overidentifying Restrictions:")?;
-            writeln!(f, "  J-statistic: {:.4} (df = {})", j, df)?;
-            writeln!(f, "  p-value: {:.4}", p)?;
-            if p < 0.05 {
-                writeln!(f, "  WARNING: Model may be misspecified (p < 0.05)")?;
-            } else {
-                writeln!(f, "  Cannot reject model specification")?;
+        if let Some(j) = self.cbps_j {
+            match self.method {
+                CbpsMethod::Over => {
+                    writeln!(f, "J-statistic (CBPS, g'Wg): {j:.8}")?;
+                    if let (Some(nj), Some(p), Some(df)) =
+                        (self.j_statistic, self.j_p_value, self.j_df)
+                    {
+                        writeln!(
+                            f,
+                            "Hansen test of the over-identifying restrictions: n*J = {nj:.4} (df = {df}), p-value = {p:.4}"
+                        )?;
+                    }
+                }
+                _ => writeln!(
+                    f,
+                    "J-statistic (CBPS, g'Wg at the exact-balance estimate; no test): {j:.8}"
+                )?,
             }
         }
+        writeln!(
+            f,
+            "Residual deviance: {:.4}  Log-likelihood: {:.4}",
+            self.deviance,
+            -self.deviance / 2.0
+        )?;
 
         writeln!(f)?;
         writeln!(f, "Propensity Score Summary:")?;
@@ -350,17 +488,9 @@ impl fmt::Display for CbpsResult {
             self.balance_after.covariates.len()
         )?;
 
-        if !self.converged {
-            writeln!(f)?;
-            writeln!(
-                f,
-                "WARNING: GMM optimization did not converge after {} iterations",
-                self.iterations
-            )?;
-        }
-
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
+        write!(f, "{}", notes_text(self))?;
 
         Ok(())
     }
@@ -370,27 +500,38 @@ impl fmt::Display for CbpsResult {
 // Main Estimation Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// CBPS's `probs.min`: fitted probabilities are clipped to `[PROBS_MIN, 1 - PROBS_MIN]`.
+const PROBS_MIN: f64 = 1e-6;
+/// CBPS.fit's threshold on the singular values of the standardised design.
+const SINGULAR_VALUE_MIN: f64 = 1e-5;
+/// Tolerance of the Brent search for the start scale alpha.
+const ALPHA_TOL: f64 = 1e-12;
+/// Armijo sufficient-decrease constant of the line searches.
+const ARMIJO_C: f64 = 1e-4;
+/// Maximum step halvings of a line search.
+const MAX_HALVINGS: usize = 30;
+
 /// Run CBPS estimation on a dataset.
 ///
-/// This is the main entry point for CBPS estimation. It uses GMM to simultaneously
-/// estimate propensity scores and achieve covariate balance.
+/// `CBPS::CBPS(treat ~ covariates, method, ATT, standardize = TRUE, twostep = TRUE)` with
+/// `method` and `ATT` from [`CbpsConfig::method`] and [`CbpsConfig::estimand`] (see the module
+/// documentation for the estimator and its deviations from CBPS 0.24).
 ///
 /// # Arguments
 ///
 /// * `dataset` - The dataset containing treatment and covariates
-/// * `treatment_col` - Name of the binary treatment variable (0/1)
-/// * `covariate_cols` - Names of covariate columns
+/// * `treatment_col` - Name of the binary treatment variable (coded 0/1)
+/// * `covariate_cols` - Names of covariate columns (an intercept is added)
 /// * `config` - Configuration options (optional, uses defaults if None)
 ///
 /// # Example
 ///
 /// ```ignore
-/// use p2a_core::econometrics::cbps::{run_cbps, CbpsConfig, CbpsMethod};
+/// use p2a_core::econometrics::cbps::{run_cbps, CbpsConfig, CbpsEstimand, CbpsMethod};
 ///
-/// let config = CbpsConfig {
-///     method: CbpsMethod::ExactBalance,
-///     ..Default::default()
-/// };
+/// let mut config = CbpsConfig::default();
+/// config.method = CbpsMethod::Exact;
+/// config.estimand = CbpsEstimand::Att;
 ///
 /// let result = run_cbps(&dataset, "treatment", &["x1", "x2", "x3"], Some(config))?;
 /// println!("{}", result);
@@ -407,18 +548,23 @@ pub fn run_cbps(
     config: Option<CbpsConfig>,
 ) -> EconResult<CbpsResult> {
     let config = config.unwrap_or_default();
+    validate_config(&config)?;
 
     // Missing values are refused (MatchIt, WeightIt and tmle refuse them).
-    // Extract treatment variable
     let t = DesignMatrix::extract_column(dataset.df(), treatment_col)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
-
     let n = t.len();
+    if let Some((i, v)) = t.iter().enumerate().find(|(_, v)| **v != 0.0 && **v != 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "CBPS: treatment column '{treatment_col}' must be coded 0/1; row {} has {v}",
+                i + 1
+            ),
+        });
+    }
 
-    // Validate treatment is binary
-    let n_treated: usize = t.iter().filter(|&&v| v >= 0.5).count();
+    let n_treated: usize = t.iter().filter(|&&v| v == 1.0).count();
     let n_control = n - n_treated;
-
     if n_treated == 0 || n_control == 0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -428,90 +574,83 @@ pub fn run_cbps(
         });
     }
 
-    // Build design matrix with intercept
     let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, true)
         .map_err(|e| econ_error_from_design(e, dataset.df()))?;
     let x = design.data;
-    let k = x.ncols(); // Number of parameters (including intercept)
+    let names = design.column_names;
+    let k = x.ncols();
+    if n <= k {
+        return Err(EconError::InsufficientData {
+            required: k + 1,
+            provided: n,
+            context: "CBPS: more observations than coefficients are needed".into(),
+        });
+    }
+    let qr = Qr::decompose(x.view(), LM_QR_TOL)?;
+    if qr.rank() < k {
+        let aliased: Vec<&str> = qr.aliased().iter().map(|&j| names[j].as_str()).collect();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "CBPS: the covariates are collinear (rank {} of {k}); remove: {}",
+                qr.rank(),
+                aliased.join(", ")
+            ),
+        });
+    }
 
-    // Compute balance before CBPS (unweighted)
-    let balance_before =
-        compute_balance_table(&x, &t, &design.column_names, None, config.balance_threshold);
+    let balance_before = compute_balance_table(&x, &t, &names, None, config.balance_threshold);
 
-    // Run CBPS GMM estimation
-    let (beta, converged, iterations, gmm_criterion) =
-        estimate_cbps_gmm(&x, &t, config.method, config.tolerance, config.max_iter)?;
-
-    // Compute propensity scores
-    let linear_pred: Array1<f64> = x.dot(&beta);
-    let propensity_scores: Vec<f64> = linear_pred.iter().map(|&z| logistic_cdf(z)).collect();
-
-    // Compute IPW weights (normalized)
-    let weights = compute_ipw_weights(&propensity_scores, &t);
-
-    // Compute balance after CBPS weighting
-    let balance_after = compute_balance_table(
-        &x,
-        &t,
-        &design.column_names,
-        Some(&weights),
-        config.balance_threshold,
-    );
-
-    // Compute standard errors using GMM variance formula
-    let (std_errors, _vcov) =
-        compute_cbps_std_errors(&x, &t, &beta, &propensity_scores, config.method)?;
-
-    // Compute z-statistics and p-values
-    let z_stats: Vec<f64> = beta
-        .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
-        .collect();
-
-    let p_values: Vec<f64> = z_stats
-        .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
-        .collect();
-
-    // Compute J-test for overidentification
-    let (j_statistic, j_p_value, j_df) = if config.method != CbpsMethod::JustIdentified {
-        let n_moments = match config.method {
-            CbpsMethod::ExactBalance => 2 * k, // Score + balance conditions
-            CbpsMethod::OverBalance => 2 * k,
-            CbpsMethod::JustIdentified => k,
-        };
-        let df = n_moments - k;
-        if df > 0 {
-            let j = n as f64 * gmm_criterion;
-            let p = chi_squared_p_value(j, df as f64);
-            (Some(j), Some(p), Some(df))
-        } else {
-            (None, None, None)
-        }
-    } else {
-        (None, None, None)
+    let fit = match config.method {
+        CbpsMethod::Logit => fit_logit(&x, &t, config.estimand)?,
+        CbpsMethod::Over | CbpsMethod::Exact => fit_gmm(&x, &t, &config)?,
     };
 
+    let balance_after =
+        compute_balance_table(&x, &t, &names, Some(&fit.weights), config.balance_threshold);
+
+    let z_stats: Vec<f64> = fit
+        .coefficients
+        .iter()
+        .zip(&fit.std_errors)
+        .map(|(&b, &se)| b / se)
+        .collect();
+    let p_values: Vec<f64> = z_stats
+        .iter()
+        .map(|&z| normal_p_value_two_sided(z))
+        .collect();
+
+    let mut warnings = fit.warnings;
+    let (j_statistic, j_p_value, j_df) = match (config.method, fit.cbps_j) {
+        (CbpsMethod::Over, Some(j)) => {
+            let nj = n as f64 * j;
+            let p = chi_squared_p_value(nj, k as f64);
+            if p < 0.05 {
+                warnings.push(format!(
+                    "the over-identifying restrictions are rejected at 5% (Hansen p = {p:.4})"
+                ));
+            }
+            (Some(nj), Some(p), Some(k))
+        }
+        _ => (None, None, None),
+    };
     let n_moments = match config.method {
-        CbpsMethod::ExactBalance => 2 * k,
-        CbpsMethod::OverBalance => 2 * k,
-        CbpsMethod::JustIdentified => k,
+        CbpsMethod::Over => 2 * k,
+        CbpsMethod::Exact | CbpsMethod::Logit => k,
     };
 
     Ok(CbpsResult {
-        coefficients: beta.to_vec(),
-        names: design.column_names.clone(),
-        std_errors,
+        coefficients: fit.coefficients,
+        names,
+        std_errors: fit.std_errors,
         z_stats,
         p_values,
-        propensity_scores,
-        weights,
+        propensity_scores: fit.propensity_scores,
+        weights: fit.weights,
         balance_before,
         balance_after,
-        converged,
-        iterations,
-        gmm_criterion,
+        converged: fit.convergence.converged,
+        iterations: fit.convergence.iterations,
+        gmm_criterion: fit.criterion,
         j_statistic,
         j_p_value,
         j_df,
@@ -521,415 +660,807 @@ pub fn run_cbps(
         n_control,
         n_params: k,
         n_moments,
+        estimand: config.estimand,
+        cbps_j: fit.cbps_j,
+        deviance: fit.deviance,
+        start_scale: fit.start_scale,
+        convergence: fit.convergence,
+        warnings,
     })
 }
 
-/// Simplified CBPS function with default configuration.
-///
-/// Convenience wrapper that uses default settings (ExactBalance method).
+/// Refuse settings no fit can honour.
+fn validate_config(config: &CbpsConfig) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return spec(format!(
+            "CBPS: tolerance must be finite and > 0, got {}",
+            config.tolerance
+        ));
+    }
+    if config.max_iter < 1 {
+        return spec("CBPS: max_iter must be at least 1, got 0".to_string());
+    }
+    if !(config.balance_threshold.is_finite() && config.balance_threshold > 0.0) {
+        return spec(format!(
+            "CBPS: balance_threshold must be finite and > 0, got {}",
+            config.balance_threshold
+        ));
+    }
+    Ok(())
+}
+
+/// [`run_cbps`] with the default configuration and `method` replaced.
 pub fn cbps(
     dataset: &Dataset,
     treatment_col: &str,
     covariate_cols: &[&str],
     method: CbpsMethod,
 ) -> EconResult<CbpsResult> {
-    run_cbps(
-        dataset,
-        treatment_col,
-        covariate_cols,
-        Some(CbpsConfig {
-            method,
-            ..Default::default()
-        }),
-    )
+    let mut config = CbpsConfig::default();
+    config.method = method;
+    run_cbps(dataset, treatment_col, covariate_cols, Some(config))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// GMM Estimation
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Estimate CBPS using GMM.
-///
-/// Solves the combined moment conditions using Newton-Raphson optimization.
-///
-/// # Moment Conditions (Imai & Ratkovic 2014, Eq. 7-8)
-///
-/// Score conditions:
-/// ```text
-/// g_score(beta) = (1/n) * sum_i [X_i * (T_i - p_i)]
-/// ```
-///
-/// Balance conditions:
-/// ```text
-/// g_balance(beta) = (1/n) * sum_i [T_i * X_i / p_i - (1-T_i) * X_i / (1-p_i)]
-/// ```
-fn estimate_cbps_gmm(
-    x: &Array2<f64>,
-    t: &Array1<f64>,
-    method: CbpsMethod,
-    tolerance: f64,
-    max_iter: usize,
-) -> EconResult<(Array1<f64>, bool, usize, f64)> {
-    let n = t.len();
-    let k = x.ncols();
-
-    // Initialize beta to zeros (standard logit starting point)
-    let mut beta = Array1::zeros(k);
-
-    // For just-identified, use standard logit (equivalent to score conditions only)
-    if method == CbpsMethod::JustIdentified {
-        return estimate_logit_newton(&x.view(), t, tolerance, max_iter);
-    }
-
-    // Two-step GMM for overidentified models
-    // Step 1: Use identity weighting matrix
-    let mut converged = false;
-    let mut iterations = 0;
-
-    // First step: Solve with identity weighting
-    for iter in 0..max_iter {
-        iterations = iter + 1;
-
-        // Compute propensity scores
-        let z: Array1<f64> = x.dot(&beta);
-        let p: Array1<f64> = z.mapv(logistic_cdf);
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        // Compute combined moment conditions
-        let g_bar = compute_moment_conditions(x, t, &p_clipped, method);
-
-        // Check convergence
-        let g_norm: f64 = g_bar.iter().map(|&g| g * g).sum::<f64>().sqrt();
-        if g_norm < tolerance {
-            converged = true;
-            break;
-        }
-
-        // Compute Jacobian of moment conditions
-        let jacobian = compute_moment_jacobian(x, t, &p_clipped, method);
-
-        // Compute weighting matrix (identity for first step)
-        let n_moments = g_bar.len();
-        let w = Array2::<f64>::eye(n_moments);
-
-        // GMM update: beta_new = beta - (G'WG)^{-1} G'W g
-        // G is jacobian, W is weighting matrix, g is moment conditions
-        let gwg = jacobian.t().dot(&w).dot(&jacobian);
-        let (gwg_inv, _) = safe_inverse(&gwg.view()).map_err(|e| EconError::SingularMatrix {
-            context: "CBPS GMM optimization".to_string(),
-            suggestion: format!("Jacobian may be singular: {:?}", e),
-        })?;
-
-        let direction = gwg_inv.dot(&jacobian.t()).dot(&w).dot(&g_bar);
-        beta = &beta - &direction;
-    }
-
-    // Step 2: Update with optimal weighting matrix
-    let z: Array1<f64> = x.dot(&beta);
-    let p: Array1<f64> = z.mapv(logistic_cdf);
-    let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-    // Compute optimal weighting matrix (inverse of variance of moment conditions)
-    let w_opt = compute_optimal_weight_cbps(x, t, &p_clipped, method, n)?;
-
-    // Second step iterations
-    for iter in 0..max_iter {
-        iterations = max_iter + iter + 1;
-
-        let z: Array1<f64> = x.dot(&beta);
-        let p: Array1<f64> = z.mapv(logistic_cdf);
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        let g_bar = compute_moment_conditions(x, t, &p_clipped, method);
-
-        let g_norm: f64 = g_bar.iter().map(|&g| g * g).sum::<f64>().sqrt();
-        if g_norm < tolerance {
-            converged = true;
-            break;
-        }
-
-        let jacobian = compute_moment_jacobian(x, t, &p_clipped, method);
-
-        let gwg = jacobian.t().dot(&w_opt).dot(&jacobian);
-        let (gwg_inv, _) = safe_inverse(&gwg.view()).map_err(|e| EconError::SingularMatrix {
-            context: "CBPS GMM step 2".to_string(),
-            suggestion: format!("Jacobian may be singular: {:?}", e),
-        })?;
-
-        let direction = gwg_inv.dot(&jacobian.t()).dot(&w_opt).dot(&g_bar);
-
-        // Line search for stability
-        let mut step_size = 1.0;
-        let mut beta_new = &beta - &(&direction * step_size);
-        let mut g_new = compute_moment_conditions(x, t, &p_clipped, method);
-        let mut g_new_norm: f64 = g_new.iter().map(|&g| g * g).sum::<f64>().sqrt();
-
-        for _ in 0..10 {
-            if g_new_norm < g_norm {
-                break;
-            }
-            step_size *= 0.5;
-            beta_new = &beta - &(&direction * step_size);
-            let z_new: Array1<f64> = x.dot(&beta_new);
-            let p_new: Array1<f64> = z_new.mapv(logistic_cdf);
-            let p_new_clipped: Array1<f64> = p_new.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-            g_new = compute_moment_conditions(x, t, &p_new_clipped, method);
-            g_new_norm = g_new.iter().map(|&g| g * g).sum::<f64>().sqrt();
-        }
-
-        beta = beta_new;
-    }
-
-    // Compute final GMM criterion
-    let z_final: Array1<f64> = x.dot(&beta);
-    let p_final: Array1<f64> = z_final.mapv(logistic_cdf);
-    let p_clipped_final: Array1<f64> = p_final.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-    let g_final = compute_moment_conditions(x, t, &p_clipped_final, method);
-
-    let wg = w_opt.dot(&g_final);
-    let gmm_criterion = g_final.dot(&wg);
-
-    Ok((beta, converged, iterations, gmm_criterion))
+/// What one method's fit hands to [`run_cbps`].
+struct Fit {
+    coefficients: Vec<f64>,
+    std_errors: Vec<f64>,
+    propensity_scores: Vec<f64>,
+    weights: Vec<f64>,
+    criterion: f64,
+    cbps_j: Option<f64>,
+    deviance: f64,
+    start_scale: Option<f64>,
+    convergence: Convergence,
+    warnings: Vec<String>,
 }
 
-/// Compute the combined moment conditions for CBPS.
-///
-/// Returns the sample average of moment conditions.
-fn compute_moment_conditions(
-    x: &Array2<f64>,
-    t: &Array1<f64>,
-    p: &Array1<f64>,
-    method: CbpsMethod,
-) -> Array1<f64> {
-    let n = t.len();
-    let k = x.ncols();
+/// `CbpsMethod::Logit`: `glm(t ~ x, binomial)`.
+fn fit_logit(x: &Array2<f64>, t: &Array1<f64>, e: CbpsEstimand) -> EconResult<Fit> {
+    let pf = fit_propensity(x.view(), t.view(), GlmLink::Logit)?;
+    let spec = GlmSpec::logit();
+    let clipped: Vec<f64> = pf
+        .scores
+        .iter()
+        .map(|&p| p.clamp(PROBS_MIN, 1.0 - PROBS_MIN))
+        .collect();
+    let estimand_weights = cbps_weights(&clipped, t, e);
+    let convergence = Convergence::new(
+        pf.fit.converged,
+        pf.fit.iterations,
+        spec.max_iter,
+        "relative change in deviance",
+        f64::NAN,
+        spec.epsilon,
+    );
+    Ok(Fit {
+        coefficients: pf.fit.coefficients.to_vec(),
+        std_errors: pf.fit.std_errors.to_vec(),
+        propensity_scores: pf.scores.to_vec(),
+        weights: estimand_weights,
+        criterion: 0.0,
+        cbps_j: None,
+        deviance: pf.fit.deviance,
+        start_scale: None,
+        convergence,
+        warnings: pf.fit.warnings,
+    })
+}
 
-    let n_moments = match method {
-        CbpsMethod::JustIdentified => k,
-        CbpsMethod::ExactBalance | CbpsMethod::OverBalance => 2 * k,
+/// `CbpsMethod::Over` and `CbpsMethod::Exact` (CBPS.fit + CBPS.2Treat).
+fn fit_gmm(x: &Array2<f64>, t: &Array1<f64>, config: &CbpsConfig) -> EconResult<Fit> {
+    let e = config.estimand;
+    let (tol, max_iter) = (config.tolerance, config.max_iter);
+    let wh = whiten(x)?;
+    let u = &wh.u;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let (b0, start_warnings) = logit_start(u, t)?;
+    warnings.extend(start_warnings);
+    let alpha = start_scale(u, t, &b0, e)?;
+    let gmm_init = &b0 * alpha;
+
+    let v = moment_covariance(u, t, &gmm_init, e);
+    let w_inv = sym_inverse(
+        v.view(),
+        SingularPolicy::Generalized,
+        "CBPS moment covariance V",
+    )?;
+    if let Some(msg) = w_inv.warning("CBPS moment covariance V") {
+        warnings.push(msg);
+    }
+    let w = w_inv.inverse;
+
+    let exact = solve_exact(u, t, e, &gmm_init, tol, max_iter)?;
+    let (run, criterion) = match config.method {
+        CbpsMethod::Exact => {
+            let l = exact.objective;
+            (exact, l)
+        }
+        _ => {
+            let from_glm = solve_over(u, t, e, &w, &gmm_init, tol, max_iter)?;
+            let from_bal = solve_over(u, t, e, &w, &exact.beta, tol, max_iter)?;
+            let run = if from_glm.objective < from_bal.objective {
+                from_glm
+            } else {
+                from_bal
+            };
+            let q = run.objective;
+            (run, q)
+        }
     };
+    warnings.extend(run.warnings.iter().cloned());
 
-    let mut g = Array1::zeros(n_moments);
+    let m = moments(u, t, &run.beta, e);
+    let cbps_j = quad_form(&m.gbar, &w);
+    let vu = whitened_vcov(u, t, &run.beta, e, config.method, &w)?;
+    let tm = &wh.to_original;
+    let beta = tm.dot(&run.beta);
+    let var = tm.dot(&vu).dot(&tm.t()) / t.len() as f64;
+    let std_errors: Vec<f64> = (0..beta.len()).map(|j| var[[j, j]].sqrt()).collect();
 
-    // Score conditions: (1/n) * X'(T - p)
-    // These are the standard logistic regression score equations
-    for i in 0..n {
-        let residual = t[i] - p[i];
-        for j in 0..k {
-            g[j] += x[[i, j]] * residual / n as f64;
+    let p = m.p.to_vec();
+    let mut deduped: Vec<String> = Vec::new();
+    for msg in warnings {
+        if !deduped.contains(&msg) {
+            deduped.push(msg);
         }
     }
+    Ok(Fit {
+        coefficients: beta.to_vec(),
+        std_errors,
+        weights: cbps_weights(&p, t, e),
+        deviance: cbps_deviance(&p, t),
+        propensity_scores: p,
+        criterion,
+        cbps_j: Some(cbps_j),
+        start_scale: Some(alpha),
+        convergence: run.convergence,
+        warnings: deduped,
+    })
+}
 
-    // Balance conditions: (1/n) * [T*X/p - (1-T)*X/(1-p)]
-    // These ensure covariate balance between weighted treated and control groups
-    if method != CbpsMethod::JustIdentified {
+// ═══════════════════════════════════════════════════════════════════════════════
+// Whitening, moments and start values
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The whitened design of CBPS.fit and the map back to the original coefficients.
+struct Whitened {
+    /// Left singular vectors of the standardised design (n x k).
+    u: Array2<f64>,
+    /// `T = M V diag(1/d)`: original coefficients `beta = T beta_u`.
+    to_original: Array2<f64>,
+}
+
+/// CBPS.fit's whitening: standardise the non-intercept columns of `x` (intercept first), take
+/// the thin SVD `Xs = U diag(d) V'`.
+fn whiten(x: &Array2<f64>) -> EconResult<Whitened> {
+    let (n, k) = x.dim();
+    let mut xs = crate::resource::try_zeros2(n, k, "CBPS standardised design")?;
+    let mut m = Array2::<f64>::zeros((k, k));
+    m[[0, 0]] = 1.0;
+    for i in 0..n {
+        xs[[i, 0]] = 1.0;
+    }
+    for j in 1..k {
+        let col = x.column(j);
+        let mean = col.sum() / n as f64;
+        let ss: f64 = col.iter().map(|v| (v - mean) * (v - mean)).sum();
+        let sd = (ss / (n as f64 - 1.0)).sqrt();
         for i in 0..n {
-            let ti = t[i];
-            let pi = p[i];
-            for j in 0..k {
-                let balance_term = if ti >= 0.5 {
-                    x[[i, j]] / pi
-                } else {
-                    -x[[i, j]] / (1.0 - pi)
-                };
-                g[k + j] += balance_term / n as f64;
+            xs[[i, j]] = (x[[i, j]] - mean) / sd;
+        }
+        m[[0, j]] = -mean / sd;
+        m[[j, j]] = 1.0 / sd;
+    }
+    let svd = ndarray_to_faer(&xs.view()).thin_svd().map_err(|e| {
+        EconError::Computation(format!(
+            "CBPS: SVD of the standardised design failed: {e:?}"
+        ))
+    })?;
+    let u = faer_ref_to_ndarray(svd.U());
+    let v = faer_ref_to_ndarray(svd.V());
+    let s = svd.S().column_vector();
+    let d: Array1<f64> = (0..k).map(|j| s[j]).collect();
+    let d_min = d.iter().copied().fold(f64::INFINITY, f64::min);
+    if d_min.is_nan() || d_min <= SINGULAR_VALUE_MIN {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "CBPS: the standardised covariates are numerically collinear (smallest singular value {d_min:.3e} <= 1e-5, CBPS.fit's threshold)"
+            ),
+        });
+    }
+    let mut vd = v;
+    for j in 0..k {
+        let inv = 1.0 / d[j];
+        vd.column_mut(j).mapv_inplace(|a| a * inv);
+    }
+    Ok(Whitened {
+        u,
+        to_original: m.dot(&vd),
+    })
+}
+
+/// The CBPS moments at `beta` (whitened scale) and their Jacobian.
+struct Moments {
+    /// Clipped probabilities.
+    p: Array1<f64>,
+    /// `[g_score; g_balance]`, length 2k.
+    gbar: Array1<f64>,
+    /// d gbar / d beta, 2k x k.
+    jacobian: Array2<f64>,
+}
+
+/// Probabilities, their derivatives and the balance weights at `beta`.
+struct Pointwise {
+    p: Array1<f64>,
+    /// d p / d theta of the clipped probability (0 where clipped).
+    dp: Array1<f64>,
+    /// Balance weights `w_i`.
+    w: Array1<f64>,
+}
+
+fn pointwise(u: &Array2<f64>, t: &Array1<f64>, beta: &Array1<f64>, e: CbpsEstimand) -> Pointwise {
+    let n = t.len();
+    let theta = u.dot(beta);
+    let mut p = Array1::<f64>::zeros(n);
+    let mut dp = Array1::<f64>::zeros(n);
+    let mut w = Array1::<f64>::zeros(n);
+    let s = att_scale(t);
+    for i in 0..n {
+        let q = plogis(theta[i]);
+        let inside = q > PROBS_MIN && q < 1.0 - PROBS_MIN;
+        let pi = q.clamp(PROBS_MIN, 1.0 - PROBS_MIN);
+        p[i] = pi;
+        dp[i] = if inside { pi * (1.0 - pi) } else { 0.0 };
+        w[i] = match e {
+            CbpsEstimand::Ate => 1.0 / (pi - 1.0 + t[i]),
+            CbpsEstimand::Att => s * (t[i] - pi) / (1.0 - pi),
+        };
+    }
+    Pointwise { p, dp, w }
+}
+
+/// `n / n_t`, the ATT balance scale.
+fn att_scale(t: &Array1<f64>) -> f64 {
+    let n_t = t.iter().filter(|&&v| v == 1.0).count();
+    t.len() as f64 / n_t as f64
+}
+
+/// `U' diag(h) U / n` (k x k, symmetric).
+fn weighted_gram(u: &Array2<f64>, h: &Array1<f64>) -> Array2<f64> {
+    let (n, k) = u.dim();
+    let mut g = Array2::<f64>::zeros((k, k));
+    for i in 0..n {
+        let hi = h[i];
+        if hi == 0.0 {
+            continue;
+        }
+        let row = u.row(i);
+        for a in 0..k {
+            let ua = hi * row[a];
+            for b in a..k {
+                g[[a, b]] += ua * row[b];
             }
         }
     }
-
+    for a in 0..k {
+        for b in a..k {
+            let v = g[[a, b]] / n as f64;
+            g[[a, b]] = v;
+            g[[b, a]] = v;
+        }
+    }
     g
 }
 
-/// Compute the Jacobian of moment conditions with respect to beta.
-///
-/// G = d g_bar / d beta
-fn compute_moment_jacobian(
-    x: &Array2<f64>,
-    t: &Array1<f64>,
-    p: &Array1<f64>,
-    method: CbpsMethod,
-) -> Array2<f64> {
-    let n = t.len();
-    let k = x.ncols();
+/// `[U'(t - p); U'w] / n`.
+fn moment_vector(u: &Array2<f64>, t: &Array1<f64>, pw: &Pointwise) -> Array1<f64> {
+    let (n, k) = u.dim();
+    let resid = t - &pw.p;
+    let gs = u.t().dot(&resid) / n as f64;
+    let gb = u.t().dot(&pw.w) / n as f64;
+    let mut g = Array1::<f64>::zeros(2 * k);
+    g.slice_mut(ndarray::s![..k]).assign(&gs);
+    g.slice_mut(ndarray::s![k..]).assign(&gb);
+    g
+}
 
-    let n_moments = match method {
-        CbpsMethod::JustIdentified => k,
-        CbpsMethod::ExactBalance | CbpsMethod::OverBalance => 2 * k,
-    };
-
-    let mut jacobian = Array2::zeros((n_moments, k));
-
-    // Jacobian of score conditions
-    // d/d_beta [X'(T - p)] = -X' * diag(p*(1-p)) * X
-    for i in 0..n {
-        let pi = p[i];
-        let weight = -pi * (1.0 - pi);
-        for j in 0..k {
-            for l in 0..k {
-                jacobian[[j, l]] += weight * x[[i, j]] * x[[i, l]] / n as f64;
+/// The 2k CBPS moments and their exact Jacobian (CAUS-11).
+fn moments(u: &Array2<f64>, t: &Array1<f64>, beta: &Array1<f64>, e: CbpsEstimand) -> Moments {
+    let k = u.ncols();
+    let pw = pointwise(u, t, beta, e);
+    let gbar = moment_vector(u, t, &pw);
+    let s = att_scale(t);
+    let dw: Array1<f64> = (0..t.len())
+        .map(|i| {
+            let (p, dp) = (pw.p[i], pw.dp[i]);
+            match e {
+                CbpsEstimand::Ate => -dp / ((p - 1.0 + t[i]) * (p - 1.0 + t[i])),
+                CbpsEstimand::Att => {
+                    if t[i] == 1.0 {
+                        0.0
+                    } else {
+                        -s * dp / ((1.0 - p) * (1.0 - p))
+                    }
+                }
             }
-        }
+        })
+        .collect();
+    let js = weighted_gram(u, &pw.dp);
+    let jb = weighted_gram(u, &dw);
+    let mut jacobian = Array2::<f64>::zeros((2 * k, k));
+    jacobian
+        .slice_mut(ndarray::s![..k, ..])
+        .assign(&js.mapv(|v| -v));
+    jacobian.slice_mut(ndarray::s![k.., ..]).assign(&jb);
+    Moments {
+        p: pw.p,
+        gbar,
+        jacobian,
     }
+}
 
-    // Jacobian of balance conditions
-    // d/d_beta [T*X/p - (1-T)*X/(1-p)]
-    if method != CbpsMethod::JustIdentified {
-        for i in 0..n {
-            let ti = t[i];
-            let pi = p[i];
-            let dpdb = pi * (1.0 - pi); // dp/d_z = p(1-p), and z = X*beta
+/// CBPS's model-based covariance of the moments (`gmm.func` with `invV = NULL`), 2k x 2k.
+fn moment_covariance(
+    u: &Array2<f64>,
+    t: &Array1<f64>,
+    beta: &Array1<f64>,
+    e: CbpsEstimand,
+) -> Array2<f64> {
+    let k = u.ncols();
+    let pw = pointwise(u, t, beta, e);
+    let p = &pw.p;
+    let a = p.mapv(|pi| pi * (1.0 - pi));
+    let (c, ee, s) = match e {
+        CbpsEstimand::Ate => (
+            Array1::<f64>::ones(p.len()),
+            p.mapv(|pi| 1.0 / (pi * (1.0 - pi))),
+            1.0,
+        ),
+        CbpsEstimand::Att => (p.clone(), p.mapv(|pi| pi / (1.0 - pi)), att_scale(t)),
+    };
+    let ba = weighted_gram(u, &a);
+    let bc = weighted_gram(u, &c) * s;
+    let be = weighted_gram(u, &ee) * (s * s);
+    let mut v = Array2::<f64>::zeros((2 * k, 2 * k));
+    v.slice_mut(ndarray::s![..k, ..k]).assign(&ba);
+    v.slice_mut(ndarray::s![..k, k..]).assign(&bc);
+    v.slice_mut(ndarray::s![k.., ..k]).assign(&bc);
+    v.slice_mut(ndarray::s![k.., k..]).assign(&be);
+    v
+}
 
-            for j in 0..k {
-                let d_balance: f64 = if ti >= 0.5 {
-                    // d/d_beta [X/p] = -X * (1/p^2) * dp/d_beta = -X * (1-p) / p
-                    -x[[i, j]] * (1.0 - pi) / pi
-                } else {
-                    // d/d_beta [-X/(1-p)] = X * (1/(1-p)^2) * dp/d_beta = X * p / (1-p)
-                    x[[i, j]] * pi / (1.0 - pi)
-                };
+/// `g' W g`.
+fn quad_form(g: &Array1<f64>, w: &Array2<f64>) -> f64 {
+    g.dot(&w.dot(g))
+}
 
-                for l in 0..k {
-                    jacobian[[k + j, l]] += d_balance * x[[i, l]] * dpdb / n as f64;
+/// CBPS's start-scale objective `f(alpha) = g(b)' V(b)^+ g(b)`, `b = alpha b0`.
+fn start_objective(
+    u: &Array2<f64>,
+    t: &Array1<f64>,
+    b0: &Array1<f64>,
+    alpha: f64,
+    e: CbpsEstimand,
+) -> EconResult<f64> {
+    let b = b0 * alpha;
+    let pw = pointwise(u, t, &b, e);
+    let g = moment_vector(u, t, &pw);
+    let v = moment_covariance(u, t, &b, e);
+    let vi = sym_inverse(
+        v.view(),
+        SingularPolicy::Generalized,
+        "CBPS moment covariance V",
+    )?;
+    Ok(quad_form(&g, &vi.inverse))
+}
+
+/// Brent's minimiser on `[ax, bx]` (R's `Brent_fmin`, the algorithm of `stats::optimize`).
+fn brent_fmin<F: FnMut(f64) -> EconResult<f64>>(
+    ax: f64,
+    bx: f64,
+    tol: f64,
+    mut f: F,
+) -> EconResult<f64> {
+    let c = (3.0 - 5.0_f64.sqrt()) * 0.5;
+    let eps = f64::EPSILON.sqrt();
+    let (mut a, mut b) = (ax, bx);
+    let mut v = a + c * (b - a);
+    let (mut w, mut x) = (v, v);
+    let (mut d, mut e) = (0.0_f64, 0.0_f64);
+    let mut fx = f(x)?;
+    let (mut fv, mut fw) = (fx, fx);
+    let tol3 = tol / 3.0;
+    // R has no cap; Brent ends long before.
+    for _ in 0..1000 {
+        crate::resource::checkpoint()?;
+        let xm = (a + b) * 0.5;
+        let tol1 = eps * x.abs() + tol3;
+        let t2 = tol1 * 2.0;
+        if (x - xm).abs() <= t2 - (b - a) * 0.5 {
+            break;
+        }
+        let (mut p, mut q, mut r) = (0.0_f64, 0.0_f64, 0.0_f64);
+        if e.abs() > tol1 {
+            // fit parabola
+            r = (x - w) * (fx - fv);
+            q = (x - v) * (fx - fw);
+            p = (x - v) * q - (x - w) * r;
+            q = (q - r) * 2.0;
+            if q > 0.0 {
+                p = -p;
+            } else {
+                q = -q;
+            }
+            r = e;
+            e = d;
+        }
+        if p.abs() >= (q * 0.5 * r).abs() || p <= q * (a - x) || p >= q * (b - x) {
+            // golden-section step
+            e = if x < xm { b - x } else { a - x };
+            d = c * e;
+        } else {
+            // parabolic-interpolation step
+            d = p / q;
+            let u = x + d;
+            if u - a < t2 || b - u < t2 {
+                d = tol1;
+                if x >= xm {
+                    d = -d;
                 }
             }
         }
-    }
-
-    jacobian
-}
-
-/// Compute optimal weighting matrix for GMM.
-///
-/// W = [Var(g)]^{-1} where g are the moment conditions
-fn compute_optimal_weight_cbps(
-    x: &Array2<f64>,
-    t: &Array1<f64>,
-    p: &Array1<f64>,
-    method: CbpsMethod,
-    n: usize,
-) -> EconResult<Array2<f64>> {
-    let k = x.ncols();
-    let n_moments = match method {
-        CbpsMethod::JustIdentified => k,
-        CbpsMethod::ExactBalance | CbpsMethod::OverBalance => 2 * k,
-    };
-
-    // Compute variance of moment conditions
-    // Omega = (1/n) * sum_i [g_i * g_i']
-    let mut omega = Array2::<f64>::zeros((n_moments, n_moments));
-
-    for i in 0..n {
-        let mut gi = Array1::zeros(n_moments);
-
-        // Score component
-        let residual = t[i] - p[i];
-        for j in 0..k {
-            gi[j] = x[[i, j]] * residual;
-        }
-
-        // Balance component
-        if method != CbpsMethod::JustIdentified {
-            let ti = t[i];
-            let pi = p[i];
-            for j in 0..k {
-                gi[k + j] = if ti >= 0.5 {
-                    x[[i, j]] / pi
-                } else {
-                    -x[[i, j]] / (1.0 - pi)
-                };
+        let u = if d.abs() >= tol1 {
+            x + d
+        } else if d > 0.0 {
+            x + tol1
+        } else {
+            x - tol1
+        };
+        let fu = f(u)?;
+        if fu <= fx {
+            if u < x {
+                b = x;
+            } else {
+                a = x;
             }
-        }
-
-        // Outer product
-        for j in 0..n_moments {
-            for l in 0..n_moments {
-                omega[[j, l]] += gi[j] * gi[l];
+            v = w;
+            w = x;
+            x = u;
+            fv = fw;
+            fw = fx;
+            fx = fu;
+        } else {
+            if u < x {
+                a = u;
+            } else {
+                b = u;
+            }
+            if fu <= fw || w == x {
+                v = w;
+                fv = fw;
+                w = u;
+                fw = fu;
+            } else if fu <= fv || v == x || v == w {
+                v = u;
+                fv = fu;
             }
         }
     }
-
-    omega /= n as f64;
-
-    // Invert to get weighting matrix
-    let (w, _) = safe_inverse(&omega.view()).map_err(|e| EconError::SingularMatrix {
-        context: "CBPS optimal weighting matrix".to_string(),
-        suggestion: format!("Omega matrix is singular: {:?}", e),
-    })?;
-
-    Ok(w)
+    Ok(x)
 }
 
-/// Estimate standard logistic regression using Newton-Raphson.
-///
-/// Used as baseline for just-identified CBPS.
-fn estimate_logit_newton(
-    x: &ndarray::ArrayView2<f64>,
+/// CBPS's start scale: the minimiser of [`start_objective`] over `alpha` in `[0.8, 1.1]`.
+fn start_scale(
+    u: &Array2<f64>,
     t: &Array1<f64>,
-    tolerance: f64,
+    b0: &Array1<f64>,
+    e: CbpsEstimand,
+) -> EconResult<f64> {
+    brent_fmin(0.8, 1.1, ALPHA_TOL, |a| start_objective(u, t, b0, a, e))
+}
+
+/// CBPS's glm start `glm(treat ~ U - 1, binomial)` at `glm.control`'s defaults; aliased
+/// (NaN) coefficients become 0, as in CBPS.
+fn logit_start(u: &Array2<f64>, t: &Array1<f64>) -> EconResult<(Array1<f64>, Vec<String>)> {
+    let mut spec = GlmSpec::logit();
+    spec.epsilon = 1e-8;
+    spec.max_iter = 25;
+    let fit = fit_glm(u.view(), t.view(), &spec)?;
+    let b0 = fit.coefficients.mapv(|b| if b.is_nan() { 0.0 } else { b });
+    let warnings = fit
+        .warnings
+        .iter()
+        .map(|w| format!("CBPS start values: {w}"))
+        .collect();
+    Ok((b0, warnings))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Solvers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// One Newton / Gauss-Newton run.
+struct Run {
+    beta: Array1<f64>,
+    objective: f64,
+    convergence: Convergence,
+    warnings: Vec<String>,
+}
+
+/// Gauss-Newton stops once its predicted decrease of `g'Wg` is below this fraction of `g'Wg`
+/// (the objective is then at its minimum to rounding).
+const DECREMENT_RTOL: f64 = 1e-14;
+/// When no step lowers `g'Wg` (its rounding noise exceeds the predicted decrease), the
+/// Gauss-Newton run counts as converged if the predicted decrease is below this fraction of
+/// `g'Wg` (R's `optim` stops at a relative objective change of 1e-8).
+const FLOOR_RTOL: f64 = 1e-10;
+
+const STEP_CRITERION: &str = "relative change in coefficients (whitened scale)";
+
+/// `max|s| / max|beta|`.
+fn step_change(s: &Array1<f64>, beta: &Array1<f64>) -> f64 {
+    let num = s.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let den = beta.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    num / den.max(1e-300)
+}
+
+/// Balance loss `g_b' g_b` (CBPS's `bal.loss` on the whitened design, `(U'U)^+ = I`).
+fn balance_loss(u: &Array2<f64>, t: &Array1<f64>, beta: &Array1<f64>, e: CbpsEstimand) -> f64 {
+    let n = t.len() as f64;
+    let pw = pointwise(u, t, beta, e);
+    let gb = u.t().dot(&pw.w) / n;
+    gb.dot(&gb)
+}
+
+/// Exact balance (CBPS `opt.bal`): damped Newton on the k balance conditions.
+fn solve_exact(
+    u: &Array2<f64>,
+    t: &Array1<f64>,
+    e: CbpsEstimand,
+    start: &Array1<f64>,
+    tol: f64,
     max_iter: usize,
-) -> EconResult<(Array1<f64>, bool, usize, f64)> {
-    let n = t.len();
-    let k = x.ncols();
-
-    let mut beta = Array1::zeros(k);
+) -> EconResult<Run> {
+    let k = u.ncols();
+    let mut beta = start.clone();
+    let mut warnings: Vec<String> = Vec::new();
     let mut converged = false;
-    let mut iterations = 0;
-
-    for iter in 0..max_iter {
-        iterations = iter + 1;
-
-        // Linear predictor
-        let z: Array1<f64> = x.dot(&beta);
-
-        // Probabilities
-        let p: Array1<f64> = z.mapv(logistic_cdf);
-        let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-        // Gradient: X'(t - p)
-        let residuals = t - &p_clipped;
-        let mut gradient = Array1::zeros(k);
-        for i in 0..n {
-            for j in 0..k {
-                gradient[j] += residuals[i] * x[[i, j]];
-            }
+    let mut change = f64::NAN;
+    let mut it = 0;
+    while it < max_iter {
+        it += 1;
+        crate::resource::checkpoint()?;
+        let m = moments(u, t, &beta, e);
+        let gb = m.gbar.slice(ndarray::s![k..]).to_owned();
+        let neg_jb = m.jacobian.slice(ndarray::s![k.., ..]).mapv(|v| -v);
+        let inv = sym_inverse(
+            neg_jb.view(),
+            SingularPolicy::Generalized,
+            "CBPS balance Jacobian",
+        )?;
+        if let Some(msg) = inv.warning("CBPS balance Jacobian")
+            && !warnings.contains(&msg)
+        {
+            warnings.push(msg);
         }
-
-        // Check convergence
-        let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-        if grad_norm < tolerance {
+        let s = inv.inverse.dot(&gb).mapv(|v| -v);
+        change = step_change(&s, &beta);
+        if change <= tol {
+            beta = &beta - &s;
             converged = true;
             break;
         }
+        let l0 = gb.dot(&gb);
+        let mut step = 1.0;
+        let mut accepted = false;
+        for _ in 0..=MAX_HALVINGS {
+            let cand = &beta - &(&s * step);
+            let l = balance_loss(u, t, &cand, e);
+            if l.is_finite() && l < l0 && l <= (1.0 - 2.0 * ARMIJO_C * step) * l0 {
+                beta = cand;
+                accepted = true;
+                break;
+            }
+            step *= 0.5;
+        }
+        if !accepted {
+            warnings.push(format!(
+                "CBPS (exact): the line search found no decrease of the balance loss at iteration {it}"
+            ));
+            break;
+        }
+    }
+    let convergence = Convergence::new(converged, it, max_iter, STEP_CRITERION, change, tol);
+    if let Some(msg) = convergence.note("CBPS (exact)") {
+        warnings.push(msg);
+    }
+    Ok(Run {
+        objective: balance_loss(u, t, &beta, e),
+        beta,
+        convergence,
+        warnings,
+    })
+}
 
-        // Weights: p(1-p)
-        let weights: Array1<f64> = p_clipped.mapv(|pi| pi * (1.0 - pi));
+/// Over-identified CBPS (`gmm.loss` with W fixed): Gauss-Newton on `g' W g`.
+fn solve_over(
+    u: &Array2<f64>,
+    t: &Array1<f64>,
+    e: CbpsEstimand,
+    w: &Array2<f64>,
+    start: &Array1<f64>,
+    tol: f64,
+    max_iter: usize,
+) -> EconResult<Run> {
+    let mut beta = start.clone();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut converged = false;
+    let mut change = f64::NAN;
+    let mut it = 0;
+    let objective = |b: &Array1<f64>| {
+        let pw = pointwise(u, t, b, e);
+        quad_form(&moment_vector(u, t, &pw), w)
+    };
+    while it < max_iter {
+        it += 1;
+        crate::resource::checkpoint()?;
+        let m = moments(u, t, &beta, e);
+        let wg = w.dot(&m.gbar);
+        let r = m.jacobian.t().dot(&wg);
+        let h = m.jacobian.t().dot(&w.dot(&m.jacobian));
+        let h = symmetrize(h);
+        let inv = sym_inverse(
+            h.view(),
+            SingularPolicy::Generalized,
+            "CBPS Gauss-Newton matrix J'WJ",
+        )?;
+        if let Some(msg) = inv.warning("CBPS Gauss-Newton matrix J'WJ")
+            && !warnings.contains(&msg)
+        {
+            warnings.push(msg);
+        }
+        let s = inv.inverse.dot(&r);
+        change = step_change(&s, &beta);
+        let q0 = m.gbar.dot(&wg);
+        let slope = r.dot(&s);
+        if change <= tol || slope <= DECREMENT_RTOL * q0 {
+            beta = &beta - &s;
+            converged = true;
+            break;
+        }
+        let mut step = 1.0;
+        let mut accepted = false;
+        for _ in 0..=MAX_HALVINGS {
+            let cand = &beta - &(&s * step);
+            let q = objective(&cand);
+            if q.is_finite() && q < q0 && q <= q0 - 2.0 * ARMIJO_C * step * slope {
+                beta = cand;
+                accepted = true;
+                break;
+            }
+            step *= 0.5;
+        }
+        if !accepted {
+            if slope <= FLOOR_RTOL * q0 {
+                // g'Wg cannot be lowered in floating point and its predicted decrease is
+                // negligible: the minimum to the precision g'Wg can be evaluated.
+                converged = true;
+                break;
+            }
+            warnings.push(format!(
+                "CBPS (over): the line search found no decrease of g'Wg at iteration {it}"
+            ));
+            break;
+        }
+    }
+    let convergence = Convergence::new(converged, it, max_iter, STEP_CRITERION, change, tol);
+    if let Some(msg) = convergence.note("CBPS (over)") {
+        warnings.push(msg);
+    }
+    Ok(Run {
+        objective: objective(&beta),
+        beta,
+        convergence,
+        warnings,
+    })
+}
 
-        // Hessian: -X'WX
-        let mut hessian = Array2::zeros((k, k));
-        for i in 0..n {
-            let wi = weights[i];
-            for j in 0..k {
-                for l in 0..k {
-                    hessian[[j, l]] -= wi * x[[i, j]] * x[[i, l]];
+/// `(m + m') / 2`.
+fn symmetrize(m: Array2<f64>) -> Array2<f64> {
+    let mt = m.t().to_owned();
+    (m + mt) * 0.5
+}
+
+/// CBPS.2Treat's sandwich on the whitened scale (n times the covariance of `beta_u`).
+fn whitened_vcov(
+    u: &Array2<f64>,
+    t: &Array1<f64>,
+    beta: &Array1<f64>,
+    e: CbpsEstimand,
+    method: CbpsMethod,
+    w: &Array2<f64>,
+) -> EconResult<Array2<f64>> {
+    let k = u.ncols();
+    let m = moments(u, t, beta, e);
+    let pw = pointwise(u, t, beta, e);
+    match method {
+        CbpsMethod::Exact => {
+            let neg_jb = m.jacobian.slice(ndarray::s![k.., ..]).mapv(|v| -v);
+            let inv = sym_inverse(
+                neg_jb.view(),
+                SingularPolicy::Error,
+                "CBPS balance Jacobian",
+            )?;
+            let a = inv.inverse.mapv(|v| -v);
+            let omega = weighted_gram(u, &pw.w.mapv(|v| v * v));
+            Ok(symmetrize(a.dot(&omega).dot(&a.t())))
+        }
+        _ => {
+            let h = symmetrize(m.jacobian.t().dot(&w.dot(&m.jacobian)));
+            let inv = sym_inverse(h.view(), SingularPolicy::Error, "CBPS sandwich J'WJ")?;
+            let a = inv.inverse.dot(&m.jacobian.t()).dot(w);
+            // Omega = sum_i m_i m_i' / n with m_i = [u_i (t_i - p_i); u_i w_i].
+            let r = t - &pw.p;
+            let oss = weighted_gram(u, &r.mapv(|v| v * v));
+            let osb = weighted_gram(u, &(&r * &pw.w));
+            let obb = weighted_gram(u, &pw.w.mapv(|v| v * v));
+            let mut omega = Array2::<f64>::zeros((2 * k, 2 * k));
+            omega.slice_mut(ndarray::s![..k, ..k]).assign(&oss);
+            omega.slice_mut(ndarray::s![..k, k..]).assign(&osb);
+            omega.slice_mut(ndarray::s![k.., ..k]).assign(&osb);
+            omega.slice_mut(ndarray::s![k.., k..]).assign(&obb);
+            Ok(symmetrize(a.dot(&omega).dot(&a.t())))
+        }
+    }
+}
+
+/// CBPS's standardised weights (`standardize = TRUE`) from fitted probabilities; within each
+/// group they sum to 1.
+fn cbps_weights(p: &[f64], t: &Array1<f64>, e: CbpsEstimand) -> Vec<f64> {
+    let raw: Vec<f64> = p
+        .iter()
+        .zip(t.iter())
+        .map(|(&pi, &ti)| match e {
+            CbpsEstimand::Ate => {
+                if ti == 1.0 {
+                    1.0 / pi
+                } else {
+                    1.0 / (1.0 - pi)
                 }
             }
+            CbpsEstimand::Att => {
+                if ti == 1.0 {
+                    1.0
+                } else {
+                    pi / (1.0 - pi)
+                }
+            }
+        })
+        .collect();
+    let (mut st, mut sc) = (0.0, 0.0);
+    for (r, &ti) in raw.iter().zip(t.iter()) {
+        if ti == 1.0 {
+            st += r;
+        } else {
+            sc += r;
         }
-
-        // Invert -H
-        let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) =
-            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
-                context: "Logit Newton-Raphson".to_string(),
-                suggestion: format!("Hessian singular: {:?}", e),
-            })?;
-
-        // Newton update
-        let delta = hess_inv.dot(&gradient);
-        beta = &beta + &delta;
     }
+    raw.iter()
+        .zip(t.iter())
+        .map(|(r, &ti)| if ti == 1.0 { r / st } else { r / sc })
+        .collect()
+}
 
-    // GMM criterion is 0 for just-identified
-    Ok((beta, converged, iterations, 0.0))
+/// `-2 sum[t ln p + (1 - t) ln(1 - p)]`.
+fn cbps_deviance(p: &[f64], t: &Array1<f64>) -> f64 {
+    -2.0 * p
+        .iter()
+        .zip(t.iter())
+        .map(|(&pi, &ti)| ti * pi.ln() + (1.0 - ti) * (1.0 - pi).ln())
+        .sum::<f64>()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1051,80 +1582,6 @@ fn weighted_variance(values: &[f64], weights: &[f64], mean: f64) -> f64 {
     weighted_sq_diff / total_weight
 }
 
-/// Compute IPW weights for ATE estimation.
-///
-/// For treated: w = 1/p
-/// For control: w = 1/(1-p)
-/// Weights are normalized to sum to n.
-fn compute_ipw_weights(propensity_scores: &[f64], t: &Array1<f64>) -> Vec<f64> {
-    let n = t.len();
-    let mut weights = vec![0.0; n];
-    let mut sum_treated = 0.0;
-    let mut sum_control = 0.0;
-
-    for i in 0..n {
-        let ps = propensity_scores[i].max(1e-10).min(1.0 - 1e-10);
-        if t[i] >= 0.5 {
-            weights[i] = 1.0 / ps;
-            sum_treated += weights[i];
-        } else {
-            weights[i] = 1.0 / (1.0 - ps);
-            sum_control += weights[i];
-        }
-    }
-
-    // Normalize weights
-    let n_treated: usize = t.iter().filter(|&&v| v >= 0.5).count();
-    let n_control = n - n_treated;
-
-    for i in 0..n {
-        if t[i] >= 0.5 {
-            weights[i] = weights[i] * (n_treated as f64) / sum_treated;
-        } else {
-            weights[i] = weights[i] * (n_control as f64) / sum_control;
-        }
-    }
-
-    weights
-}
-
-/// Compute standard errors for CBPS coefficients.
-///
-/// Uses the sandwich formula for GMM variance estimation.
-fn compute_cbps_std_errors(
-    x: &Array2<f64>,
-    t: &Array1<f64>,
-    beta: &Array1<f64>,
-    propensity_scores: &[f64],
-    method: CbpsMethod,
-) -> EconResult<(Vec<f64>, Array2<f64>)> {
-    let n = t.len();
-    let k = beta.len();
-
-    // Convert propensity scores to Array1
-    let p = Array1::from_vec(propensity_scores.to_vec());
-    let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
-
-    // Compute Jacobian
-    let g = compute_moment_jacobian(x, t, &p_clipped, method);
-
-    // Compute optimal weighting matrix
-    let w = compute_optimal_weight_cbps(x, t, &p_clipped, method, n)?;
-
-    // Variance: (G'WG)^{-1} / n
-    let gwg = g.t().dot(&w).dot(&g);
-    let (gwg_inv, _) = safe_inverse(&gwg.view()).map_err(|e| EconError::SingularMatrix {
-        context: "CBPS variance estimation".to_string(),
-        suggestion: format!("G'WG singular: {:?}", e),
-    })?;
-
-    let vcov = &gwg_inv / n as f64;
-
-    let std_errors: Vec<f64> = (0..k).map(|i| vcov[[i, i]].max(0.0).sqrt()).collect();
-
-    Ok((std_errors, vcov))
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1132,126 +1589,514 @@ fn compute_cbps_std_errors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::DataLoader;
+    use CbpsEstimand::{Ate, Att};
+    use CbpsMethod::{Exact, Logit, Over};
+    use p2a_validation::{Case, Check, Tol};
     use polars::prelude::*;
 
-    /// Create test dataset with overlapping covariate distributions.
-    ///
-    /// Treatment assignment is correlated with covariates to create imbalance,
-    /// but both groups have overlapping support (required for CBPS/IPW).
-    fn create_test_dataset() -> Dataset {
-        // Create data with imbalance but overlapping support
-        let df = df! {
-            "treatment" => [
-                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-            ],
-            // x1: treated mean ~0.65, control mean ~0.45, OVERLAPPING range 0.2-0.9
-            "x1" => [
-                0.5, 0.6, 0.7, 0.75, 0.8, 0.55, 0.65, 0.7, 0.75, 0.85,
-                0.6, 0.65, 0.7, 0.8, 0.55, 0.52, 0.62, 0.68, 0.72, 0.78,
-                0.2, 0.3, 0.4, 0.5, 0.6, 0.25, 0.35, 0.45, 0.55, 0.65,
-                0.3, 0.4, 0.5, 0.6, 0.35, 0.28, 0.42, 0.48, 0.58, 0.68
-            ],
-            // x2: treated mean ~0.55, control mean ~0.35, OVERLAPPING range 0.15-0.75
-            "x2" => [
-                0.4, 0.5, 0.6, 0.65, 0.7, 0.45, 0.55, 0.6, 0.65, 0.75,
-                0.5, 0.55, 0.6, 0.7, 0.48, 0.42, 0.52, 0.58, 0.62, 0.68,
-                0.15, 0.25, 0.35, 0.45, 0.55, 0.2, 0.3, 0.4, 0.5, 0.6,
-                0.25, 0.35, 0.45, 0.55, 0.28, 0.22, 0.38, 0.42, 0.52, 0.58
-            ]
+    const COVS: [&str; 3] = ["x1", "x2", "x3"];
+
+    /// `cbps_sim` read directly (for the property tests, which pin no R value and so do not
+    /// load the case).
+    fn sim() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/cbps_sim.csv");
+        Dataset::new(DataLoader::load_csv(&path).unwrap())
+    }
+
+    fn fit_with(ds: &Dataset, method: CbpsMethod, estimand: CbpsEstimand) -> CbpsResult {
+        let mut config = CbpsConfig::default();
+        config.method = method;
+        config.estimand = estimand;
+        run_cbps(ds, "treat", &COVS, Some(config)).unwrap()
+    }
+    fn column(ds: &Dataset, name: &str) -> Vec<f64> {
+        DesignMatrix::extract_column(ds.df(), name)
+            .unwrap()
+            .to_vec()
+    }
+    fn treated_weight_sum(ds: &Dataset, r: &CbpsResult) -> f64 {
+        column(ds, "treat")
+            .iter()
+            .zip(&r.weights)
+            .filter(|(t, _)| **t == 1.0)
+            .map(|(_, w)| *w)
+            .sum()
+    }
+    struct Tols {
+        coef: Tol,
+        se: Tol,
+        stat: Tol,
+    }
+    /// `<prefix>_tight_*` of cbps_sim_methods (patched CBPS.2Treat, validation/r/cases/causal_cbps.R).
+    fn check_tight(
+        case: &Case,
+        ds: &Dataset,
+        r: &CbpsResult,
+        prefix: &str,
+        alpha_key: &str,
+        tol: Tols,
+    ) {
+        let key = |q: &str| format!("{prefix}_tight_{q}");
+        let mut check = Check::new(case);
+        check
+            .named(&key("coef"), &r.names, &r.coefficients, tol.coef)
+            .named(&key("se"), &r.names, &r.std_errors, tol.se)
+            // Tol: J depends on alpha through W; CBPS's start objective carries about 1e-12
+            // relative rounding noise, so Brent's alpha is within about 1e-7 of the reference's
+            // refined alpha, and J moves by about 3 times that.
+            .scalar(&key("J"), r.cbps_j.unwrap(), Tol::iterative(5e-6))
+            .vector(&key("ps_head"), &r.propensity_scores[..10], tol.coef)
+            .vector(&key("weights_head"), &r.weights[..10], tol.coef)
+            .scalar(
+                &key("weights_sum_treated"),
+                treated_weight_sum(ds, r),
+                Tol::coef(r.n_obs),
+            )
+            .scalar(&key("deviance"), r.deviance, tol.stat)
+            // Tol: the reference refines alpha by bisection on f'(alpha); p2a takes Brent's
+            // minimiser at tol 1e-12, within about 1e-7 (rounding noise of the objective).
+            .scalar(alpha_key, r.start_scale.unwrap(), Tol::iterative(1e-6));
+        if r.method == Over {
+            check.scalar(&key("hansen_p"), r.j_p_value.unwrap(), tol.stat);
+            assert_eq!(r.j_statistic, Some(r.n_obs as f64 * r.cbps_j.unwrap()));
         }
-        .unwrap();
-        Dataset::new(df)
+        check.finish();
+    }
+    /// GMM: p2a's Gauss-Newton (relative step 1e-8) and R's BFGS (reltol 1e-15) agree to 2e-8
+    /// (coef) and 9e-8 (SE).
+    fn over_tols() -> Tols {
+        Tols {
+            coef: Tol::iterative(1e-6),
+            se: Tol::iterative(1e-6),
+            stat: Tol::iterative(1e-6),
+        }
+    }
+    fn exact_tols(n: usize) -> Tols {
+        Tols {
+            coef: Tol::coef(n),
+            se: Tol::se(n),
+            stat: Tol::stat(n),
+        }
+    }
+    fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// CAUS-11: before, the score + balance GMM diverged (intercept 9.7e11 after step 1 on
+    /// this sample).
+    #[test]
+    fn test_validate_cbps_over_ate() {
+        let (case, ds) = crate::test_support::load_case("cbps_sim_methods");
+        let r = fit_with(&ds, Over, Ate);
+        assert!(r.converged, "{r}");
+        assert_eq!((r.n_moments, r.j_df), (8, Some(4)));
+        check_tight(&case, &ds, &r, "over_ate", "ate_tight_alpha", over_tols());
     }
 
     #[test]
-    fn test_cbps_exact_balance() {
-        let dataset = create_test_dataset();
-        let result = run_cbps(&dataset, "treatment", &["x1", "x2"], None).unwrap();
+    fn test_validate_cbps_over_att() {
+        let (case, ds) = crate::test_support::load_case("cbps_sim_methods");
+        let r = fit_with(&ds, Over, Att);
+        assert!(r.converged, "{r}");
+        check_tight(&case, &ds, &r, "over_att", "att_tight_alpha", over_tols());
+        // deviation CAUS-11: CBPS 0.24 stops at a non-stationary point (J 0.0024947)
+        assert!(r.cbps_j.unwrap() < 0.75 * case.scalar("over_att_J"));
+    }
 
-        // Check basic structure
-        assert_eq!(result.n_obs, 40);
-        assert_eq!(result.n_treated, 20);
-        assert_eq!(result.n_control, 20);
-        assert_eq!(result.n_params, 3); // intercept + 2 covariates
-
-        // CBPS should improve or maintain balance (allow small increase due to estimation noise)
-        assert!(
-            result.balance_after.max_std_diff <= result.balance_before.max_std_diff + 0.2,
-            "Balance after ({}) should not be much worse than before ({})",
-            result.balance_after.max_std_diff,
-            result.balance_before.max_std_diff
+    /// CAUS-55: exact balance could not be requested before.
+    #[test]
+    fn test_validate_cbps_exact_ate() {
+        let (case, ds) = crate::test_support::load_case("cbps_sim_methods");
+        let r = fit_with(&ds, Exact, Ate);
+        let n = r.n_obs;
+        assert!(r.converged, "{r}");
+        assert_eq!(
+            (r.n_moments, r.j_df, r.j_p_value, r.j_statistic),
+            (4, None, None, None)
         );
+        check_tight(
+            &case,
+            &ds,
+            &r,
+            "exact_ate",
+            "ate_tight_alpha",
+            exact_tols(n),
+        );
+    }
 
-        // Propensity scores should be in [0, 1] (allow boundary values after clipping)
+    #[test]
+    fn test_validate_cbps_exact_att() {
+        let (case, ds) = crate::test_support::load_case("cbps_sim_methods");
+        let r = fit_with(&ds, Exact, Att);
+        let n = r.n_obs;
+        assert!(r.converged, "{r}");
+        assert_eq!(
+            (r.n_moments, r.j_df, r.j_p_value, r.j_statistic),
+            (4, None, None, None)
+        );
+        check_tight(
+            &case,
+            &ds,
+            &r,
+            "exact_att",
+            "att_tight_alpha",
+            exact_tols(n),
+        );
+    }
+
+    /// Logit: glm(binomial) coefficients, model-based SEs (the old code reported a score
+    /// sandwich), deviance and the weights of both estimands.
+    #[test]
+    fn test_validate_cbps_logit() {
+        let (case, ds) = crate::test_support::load_case("cbps_sim_methods");
+        let r = fit_with(&ds, Logit, Ate);
+        let ra = fit_with(&ds, Logit, Att);
+        let n = r.n_obs;
+        Check::new(&case)
+            .named("logit_coef", &r.names, &r.coefficients, Tol::coef(n))
+            .named("logit_se", &r.names, &r.std_errors, Tol::se(n))
+            .scalar("logit_deviance", r.deviance, Tol::stat(n))
+            .vector("logit_ate_weights_head", &r.weights[..10], Tol::coef(n))
+            .vector("logit_att_weights_head", &ra.weights[..10], Tol::coef(n))
+            .finish();
         assert!(
-            result
-                .propensity_scores
+            r.j_statistic.is_none()
+                && r.cbps_j.is_none()
+                && r.start_scale.is_none()
+                && r.n_moments == 4
+        );
+    }
+
+    /// CBPS() as shipped (optimize tol eps^0.25, BFGS reltol 1e-8) is at most 1.14e-4 (exact
+    /// coef/ps), 5.95e-4 (exact J), 7.5e-6 / 1.6e-5 (over ATE coef / J) and 1.9e-7 (deviance)
+    /// from the tight refit.
+    #[test]
+    fn test_validate_cbps_package_cross_check() {
+        let (case, ds) = crate::test_support::load_case("cbps_sim_methods");
+        // deviation CAUS-11: over_att_* not compared (CBPS 0.24 stops at a non-stationary point)
+        for (method, estimand, p, rel, rel_j) in [
+            (Exact, Ate, "exact_ate", 1e-3, 2e-3),
+            (Exact, Att, "exact_att", 1e-3, 2e-3),
+            (Over, Ate, "over_ate", 1e-4, 1e-4),
+        ] {
+            let r = fit_with(&ds, method, estimand);
+            Check::new(&case)
+                .named(
+                    &format!("{p}_coef"),
+                    &r.names,
+                    &r.coefficients,
+                    Tol::iterative(rel),
+                )
+                .scalar(&format!("{p}_J"), r.cbps_j.unwrap(), Tol::iterative(rel_j))
+                .vector(
+                    &format!("{p}_ps_head"),
+                    &r.propensity_scores[..10],
+                    Tol::iterative(rel),
+                )
+                .vector(
+                    &format!("{p}_weights_head"),
+                    &r.weights[..10],
+                    Tol::iterative(rel),
+                )
+                .scalar(&format!("{p}_deviance"), r.deviance, Tol::iterative(1e-6))
+                .finish();
+        }
+    }
+
+    /// CAUS-55: before, ExactBalance and OverBalance ran the same GMM bit for bit, and no
+    /// ATT existed.
+    #[test]
+    fn test_cbps_methods_and_estimands_differ() {
+        let ds = sim();
+        let over = fit_with(&ds, Over, Ate);
+        let exact = fit_with(&ds, Exact, Ate);
+        let logit = fit_with(&ds, Logit, Ate);
+        let att = fit_with(&ds, Over, Att);
+        // R: x2 -0.43756 (over) vs -0.42588 (exact)
+        assert!(max_abs_diff(&over.coefficients, &exact.coefficients) > 1e-3);
+        // R: x1 0.54499 (over) vs 0.55140 (glm)
+        assert!(max_abs_diff(&over.coefficients, &logit.coefficients) > 1e-3);
+        // R: x2 -0.43756 (ATE) vs -0.39838 (ATT)
+        assert!(max_abs_diff(&over.coefficients, &att.coefficients) > 1e-2);
+        for e in [Ate, Att] {
+            let r = fit_with(&ds, Exact, e);
+            assert!(
+                r.balance_after.std_diff.iter().all(|d| d.abs() < 1e-8),
+                "{e}: {:?}",
+                r.balance_after.std_diff
+            );
+        }
+        let t = column(&ds, "treat");
+        for (ti, w) in t.iter().zip(&att.weights) {
+            if *ti == 1.0 {
+                assert!((w - 1.0 / 178.0).abs() < 1e-15);
+            }
+        }
+    }
+
+    /// CAUS-11: the old balance rows carried an extra p(1-p) and the wrong control sign.
+    #[test]
+    fn test_cbps_moment_jacobian_matches_finite_differences() {
+        let ds = sim();
+        let design = DesignMatrix::from_dataframe(ds.df(), &COVS, true).unwrap();
+        let wh = whiten(&design.data).unwrap();
+        let t = Array1::from(column(&ds, "treat"));
+        let b0 = logit_start(&wh.u, &t).unwrap().0;
+        let h = 1e-5;
+        for e in [Ate, Att] {
+            let beta = &b0 * 0.9;
+            let jac = moments(&wh.u, &t, &beta, e).jacobian;
+            let scale = jac.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            for j in 0..beta.len() {
+                let mut up = beta.clone();
+                let mut dn = beta.clone();
+                up[j] += h;
+                dn[j] -= h;
+                let fd =
+                    (moments(&wh.u, &t, &up, e).gbar - moments(&wh.u, &t, &dn, e).gbar) / (2.0 * h);
+                for i in 0..fd.len() {
+                    assert!(
+                        (fd[i] - jac[[i, j]]).abs() <= 1e-6 * scale,
+                        "{e} J[{i},{j}]: fd {} vs {}",
+                        fd[i],
+                        jac[[i, j]]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Brent's termination rule leaves the minimiser of a unimodal function inside a bracket
+    /// of width at most 4 tol1 (R's optimize satisfies the bound on these functions).
+    #[test]
+    fn test_brent_fmin_finds_the_minimum() {
+        let fs: [(fn(f64) -> f64, f64); 4] = [
+            (|x| (x - 0.93) * (x - 0.93) + 0.1, 0.93),
+            (
+                |x| {
+                    let d = x - 1.0001994863243313;
+                    (d * d) * (d * d)
+                },
+                1.0001994863243313,
+            ),
+            (|x| (x - 0.93) * (x - 0.93) * (x + 0.5), 0.93),
+            (|x| -x, 1.1),
+        ];
+        for tol in [0.0001220703125, 1e-12] {
+            for (i, (f, xstar)) in fs.iter().enumerate() {
+                let x = brent_fmin(0.8, 1.1, tol, |x| Ok(f(x))).unwrap();
+                let bound = 4.0 * (f64::EPSILON.sqrt() * xstar.abs() + tol / 3.0);
+                assert!((0.8..=1.1).contains(&x), "f{i}: {x}");
+                assert!(
+                    (x - xstar).abs() <= bound,
+                    "f{i} tol {tol}: {x} vs {xstar} (bound {bound})"
+                );
+            }
+        }
+    }
+
+    /// The whitening makes the fit equivariant to the units of a covariate (R10).
+    #[test]
+    fn test_cbps_scale_equivariance() {
+        let ds = sim();
+        let scale = |c: &str, s: f64| column(&ds, c).iter().map(|v| v * s).collect::<Vec<f64>>();
+        let scaled = Dataset::new(
+            df! {
+                "treat" => column(&ds, "treat"),
+                "x1" => scale("x1", 1e-6),
+                "x2" => scale("x2", 1e6),
+                "x3" => column(&ds, "x3"),
+            }
+            .unwrap(),
+        );
+        let factor = [1.0, 1e6, 1e-6, 1.0];
+        for (method, rel) in [(Exact, 1e-9), (Over, 1e-6)] {
+            let a = fit_with(&ds, method, Ate);
+            let b = fit_with(&scaled, method, Ate);
+            assert!(a.converged && b.converged);
+            for j in 0..4 {
+                let (ca, cb) = (a.coefficients[j], b.coefficients[j] / factor[j]);
+                assert!(
+                    (cb - ca).abs() <= rel * ca.abs(),
+                    "{method} coef {j}: {ca} vs {cb}"
+                );
+                let (sa, sb) = (a.std_errors[j], b.std_errors[j] / factor[j]);
+                assert!(
+                    (sb - sa).abs() <= rel * sa.abs(),
+                    "{method} se {j}: {sa} vs {sb}"
+                );
+            }
+            assert!(a.iterations.abs_diff(b.iterations) <= 1);
+        }
+    }
+
+    /// A slowly converging over-identified fit (linear Gauss-Newton rate about 0.6) reaches
+    /// the point where g'Wg can no longer be lowered in floating point before the relative
+    /// step falls below 1e-8; it must still report convergence. Data: the comprehensive
+    /// benchmark's design (x1, x2 ~ U(-2, 2), logit 0.3 x1 + 0.2 x2), n = 1000.
+    #[test]
+    fn test_cbps_over_converges_at_the_rounding_floor() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (1000 * 31 + 2);
+        let mut unif = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (mut t, mut x1, mut x2) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..1000 {
+            let (a, b) = (unif() * 4.0 - 2.0, unif() * 4.0 - 2.0);
+            let p = 1.0 / (1.0 + (-(0.3 * a + 0.2 * b)).exp());
+            t.push(if unif() < p { 1.0 } else { 0.0 });
+            x1.push(a);
+            x2.push(b);
+        }
+        let ds = Dataset::new(df! { "treatment" => t, "x1" => x1, "x2" => x2 }.unwrap());
+        for e in [Ate, Att] {
+            let mut config = CbpsConfig::default();
+            config.estimand = e;
+            let r = run_cbps(&ds, "treatment", &["x1", "x2"], Some(config)).unwrap();
+            assert!(r.converged, "{e}: {:?}", r.warnings);
+            assert!(
+                r.warnings.iter().all(|w| !w.contains("line search")),
+                "{e}: {:?}",
+                r.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_cbps_reports_non_convergence() {
+        let ds = sim();
+        let mut config = CbpsConfig::default();
+        config.max_iter = 1;
+        let r = run_cbps(&ds, "treat", &COVS, Some(config)).unwrap();
+        assert!(!r.converged);
+        assert_eq!(r.iterations, 1);
+        assert!(
+            r.warnings
                 .iter()
-                .all(|&p| (0.0..=1.0).contains(&p)),
-            "Propensity scores should be in [0,1]"
+                .any(|w| w.starts_with("CBPS (over) did not converge after 1 iteration")),
+            "{:?}",
+            r.warnings
         );
+        assert!(r.to_string().contains("Converged: no (1 iteration"));
+    }
 
-        // Weights should be non-negative
-        assert!(
-            result.weights.iter().all(|&w| w >= 0.0),
-            "Weights should be non-negative"
+    /// CAUS-113: the old local Newton logit reported nothing on separated data.
+    #[test]
+    fn test_cbps_logit_reports_glm_warnings() {
+        let ds = Dataset::new(
+            df! {
+                "treat" => [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                "x1" => [-3.0, -2.1, -1.3, -0.4, 0.6, 1.2, 2.2, 3.1],
+            }
+            .unwrap(),
         );
+        let r = cbps(&ds, "treat", &["x1"], Logit).unwrap();
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("fitted probabilities numerically 0 or 1 occurred")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Warning: "));
     }
 
     #[test]
-    fn test_cbps_just_identified() {
-        let dataset = create_test_dataset();
-        let result = cbps(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            CbpsMethod::JustIdentified,
-        )
-        .unwrap();
-
-        // Just-identified should be equivalent to logit
-        assert!(result.converged);
-        assert!(result.j_statistic.is_none()); // No overidentification test
-
-        // Should still produce valid propensity scores
-        assert!(result.propensity_scores.iter().all(|&p| p > 0.0 && p < 1.0));
+    fn test_cbps_method_parses_aliases_and_rejects_unknown() {
+        CbpsMethod::choices().validate().unwrap();
+        for s in ["over", "Over-Identified", "overbalance"] {
+            assert_eq!(s.parse::<CbpsMethod>().unwrap(), Over, "{s}");
+        }
+        for s in ["exact", "EXACT", "balance only"] {
+            assert_eq!(s.parse::<CbpsMethod>().unwrap(), Exact, "{s}");
+        }
+        for s in ["logit", "glm", "just", "Just_Identified"] {
+            assert_eq!(s.parse::<CbpsMethod>().unwrap(), Logit, "{s}");
+        }
+        let msg = "exact_balance"
+            .parse::<CbpsMethod>()
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("unknown CBPS method 'exact_balance'"), "{msg}");
+        assert!(msg.contains("over, exact, logit"), "{msg}");
+        assert_eq!(Exact.to_string(), "exact");
+        assert_eq!(CbpsMethod::default(), Over);
+        assert_eq!(CbpsMethod::ExactBalance, Over);
+        assert_eq!(CbpsMethod::OverBalance, Over);
+        assert_eq!(CbpsMethod::JustIdentified, Logit);
+        assert_eq!(
+            serde_json::from_str::<CbpsMethod>("\"ExactBalance\"").unwrap(),
+            Over
+        );
+        assert_eq!(
+            serde_json::from_str::<CbpsMethod>("\"JustIdentified\"").unwrap(),
+            Logit
+        );
+        assert_eq!(serde_json::to_string(&Exact).unwrap(), "\"Exact\"");
     }
 
     #[test]
-    fn test_balance_table() {
-        let dataset = create_test_dataset();
-        let result = run_cbps(&dataset, "treatment", &["x1", "x2"], None).unwrap();
+    fn test_cbps_estimand_parses_aliases_and_rejects_unknown() {
+        CbpsEstimand::choices().validate().unwrap();
+        for s in ["ATE", "ate", "average treatment effect"] {
+            assert_eq!(s.parse::<CbpsEstimand>().unwrap(), Ate, "{s}");
+        }
+        for s in ["ATT", "att", "treated"] {
+            assert_eq!(s.parse::<CbpsEstimand>().unwrap(), Att, "{s}");
+        }
+        let msg = "ATC".parse::<CbpsEstimand>().unwrap_err().to_string();
+        assert!(msg.contains("unknown CBPS estimand 'ATC'"), "{msg}");
+        assert!(msg.contains("ATE, ATT"), "{msg}");
+        assert_eq!(Att.to_string(), "ATT");
+        assert_eq!(CbpsEstimand::default(), Ate);
+    }
 
-        // Balance table should have 2 covariates (excluding intercept)
-        assert_eq!(result.balance_before.covariates.len(), 2);
-        assert_eq!(result.balance_after.covariates.len(), 2);
-
-        // Before balance should show some imbalance (std_diff > 0 indicates imbalance)
-        assert!(
-            result.balance_before.max_std_diff > 0.0,
-            "There should be some initial imbalance"
-        );
+    #[test]
+    fn test_cbps_weights_sum_to_one_per_group() {
+        let p = [0.3, 0.4, 0.5, 0.6, 0.7, 0.3, 0.4, 0.5, 0.6, 0.7];
+        let t = Array1::from(vec![1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        for e in [Ate, Att] {
+            let w = cbps_weights(&p, &t, e);
+            let st: f64 = w[..5].iter().sum();
+            let sc: f64 = w[5..].iter().sum();
+            assert!((st - 1.0).abs() < 1e-12 && (sc - 1.0).abs() < 1e-12, "{e}");
+            if e == Att {
+                assert!(w[..5].iter().all(|wi| (wi - 0.2).abs() < 1e-15));
+            }
+        }
     }
 
     #[test]
     fn test_cbps_display() {
-        let dataset = create_test_dataset();
-        let result = run_cbps(&dataset, "treatment", &["x1", "x2"], None).unwrap();
-
-        let output = format!("{}", result);
-        assert!(output.contains("CBPS"));
-        assert!(output.contains("Coefficients"));
-        assert!(output.contains("Balance Improvement"));
+        let ds = sim();
+        let s = fit_with(&ds, Over, Ate).to_string();
+        for needle in [
+            "Method: over (score and balance conditions, two-step GMM)",
+            "Estimand: ATE",
+            "J-statistic (CBPS, g'Wg): 0.00047848",
+            "n*J = 0.1914 (df = 4)",
+            "Balance Improvement",
+            "Converged: yes",
+        ] {
+            assert!(s.contains(needle), "missing {needle:?} in\n{s}");
+        }
+        let s = fit_with(&ds, Exact, Att).to_string();
+        assert!(s.contains("Method: exact (balance conditions only)"), "{s}");
+        assert!(s.contains("Estimand: ATT"), "{s}");
+        assert!(!s.contains("Hansen"), "{s}");
     }
 
     #[test]
     fn test_cbps_missing_column() {
-        let dataset = create_test_dataset();
-        let result = run_cbps(&dataset, "nonexistent", &["x1"], None);
-        assert!(result.is_err());
+        let ds = sim();
+        assert!(run_cbps(&ds, "nonexistent", &["x1"], None).is_err());
     }
 
     #[test]
@@ -1268,31 +2113,96 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn is_spec(e: &EconError) -> bool {
+        matches!(e, EconError::InvalidSpecification { .. })
+    }
+
     #[test]
-    fn test_ipw_weights_normalization() {
-        // Test that weights are properly normalized
-        let ps = vec![0.3, 0.4, 0.5, 0.6, 0.7, 0.3, 0.4, 0.5, 0.6, 0.7];
-        let t = Array1::from(vec![1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    fn test_cbps_rejects_invalid_parameters() {
+        let ds = sim();
+        let err = |f: &dyn Fn(&mut CbpsConfig)| {
+            let mut c = CbpsConfig::default();
+            f(&mut c);
+            let e = run_cbps(&ds, "treat", &COVS, Some(c)).unwrap_err();
+            assert!(is_spec(&e), "{e:?}");
+            e.to_string()
+        };
+        for v in [0.0, f64::NAN, -1.0, f64::INFINITY] {
+            assert!(err(&|c| c.tolerance = v).contains("tolerance"));
+        }
+        assert!(err(&|c| c.max_iter = 0).contains("max_iter"));
+        for v in [0.0, f64::NAN] {
+            assert!(err(&|c| c.balance_threshold = v).contains("balance_threshold"));
+        }
+    }
 
-        let weights = compute_ipw_weights(&ps, &t);
+    #[test]
+    fn test_cbps_rejects_non_binary_treatment() {
+        let ds = sim();
+        let mut treat = column(&ds, "treat");
+        treat[0] = 2.0;
+        let bad = Dataset::new(
+            df! {
+                "treat" => treat,
+                "x1" => column(&ds, "x1"),
+                "x2" => column(&ds, "x2"),
+                "x3" => column(&ds, "x3"),
+            }
+            .unwrap(),
+        );
+        let e = run_cbps(&bad, "treat", &COVS, None).unwrap_err();
+        let msg = e.to_string();
+        assert!(is_spec(&e), "{e:?}");
+        assert!(
+            msg.contains("treat") && msg.contains("0/1") && msg.contains("row 1 has 2"),
+            "{msg}"
+        );
+    }
 
-        // Sum of weights for treated should equal n_treated
-        let sum_treated: f64 = weights
-            .iter()
-            .zip(t.iter())
-            .filter(|&(_, ti)| *ti >= 0.5)
-            .map(|(&w, _)| w)
-            .sum();
-        assert!((sum_treated - 5.0).abs() < 1e-6);
+    #[test]
+    fn test_cbps_rejects_collinear_covariates() {
+        let ds = sim();
+        let x1 = column(&ds, "x1");
+        let x2 = column(&ds, "x2");
+        let x4: Vec<f64> = x1.iter().zip(&x2).map(|(a, b)| a + b).collect();
+        let n = x1.len();
+        let wide = Dataset::new(
+            df! {
+                "treat" => column(&ds, "treat"),
+                "x1" => x1,
+                "x2" => x2,
+                "x3" => column(&ds, "x3"),
+                "x4" => x4,
+                "k" => vec![1.0; n],
+            }
+            .unwrap(),
+        );
+        let e = run_cbps(&wide, "treat", &["x1", "x2", "x3", "x4"], None).unwrap_err();
+        let msg = e.to_string();
+        assert!(is_spec(&e), "{e:?}");
+        assert!(msg.contains("collinear") && msg.contains("x4"), "{msg}");
+        let e = run_cbps(&wide, "treat", &["x1", "k"], None).unwrap_err();
+        let msg = e.to_string();
+        assert!(is_spec(&e), "{e:?}");
+        assert!(
+            msg.contains("collinear") && msg.contains("remove: k"),
+            "{msg}"
+        );
+    }
 
-        // Sum of weights for control should equal n_control
-        let sum_control: f64 = weights
-            .iter()
-            .zip(t.iter())
-            .filter(|&(_, ti)| *ti < 0.5)
-            .map(|(&w, _)| w)
-            .sum();
-        assert!((sum_control - 5.0).abs() < 1e-6);
+    #[test]
+    fn test_cbps_rejects_too_few_observations() {
+        let ds = sim();
+        let head = Dataset::new(ds.df().head(Some(4)));
+        assert_eq!(column(&head, "treat"), vec![1.0, 1.0, 0.0, 0.0]);
+        match run_cbps(&head, "treat", &COVS, None) {
+            Err(EconError::InsufficientData {
+                required: 5,
+                provided: 4,
+                ..
+            }) => {}
+            other => panic!("expected InsufficientData {{ 5, 4 }}, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1312,221 +2222,13 @@ mod tests {
         assert!(output.contains("x2"));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Validation tests against DGP-implied properties
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /// Create a larger dataset with known DGP for validation.
-    ///
-    /// DGP:
-    ///   x1 ~ Uniform(0, 1), x2 ~ Uniform(0, 1)
-    ///   P(T=1|X) = logistic(-0.5 + 1.0*x1 + 0.8*x2)
-    ///   Treatment assigned based on this propensity with a deterministic
-    ///   threshold that creates imbalance.
-    ///   Y = 2.0 + 0.75*T + 1.5*x1 + 1.0*x2 + noise
-    ///
-    /// True ATE = 0.75
-    fn create_validation_dataset() -> Dataset {
-        // Seeded pseudo-random data generated from the DGP above.
-        // n = 100, with treatment assignment creating imbalance on x1, x2.
-        // We use a deterministic construction so tests are reproducible.
-        let n = 100;
-        let mut x1 = Vec::with_capacity(n);
-        let mut x2 = Vec::with_capacity(n);
-        let mut treatment = Vec::with_capacity(n);
-        let mut outcome = Vec::with_capacity(n);
-
-        // Simple LCG-like deterministic sequence for reproducibility
-        let mut seed: u64 = 42;
-        let lcg = |s: &mut u64| -> f64 {
-            *s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            // Map to [0, 1)
-            ((*s >> 33) as f64) / (u32::MAX as f64)
-        };
-
-        for _ in 0..n {
-            let v1 = lcg(&mut seed);
-            let v2 = lcg(&mut seed);
-            let noise = (lcg(&mut seed) - 0.5) * 0.4; // noise in [-0.2, 0.2]
-
-            // True propensity: logistic(-0.5 + 1.0*x1 + 0.8*x2)
-            let lp = -0.5 + 1.0 * v1 + 0.8 * v2;
-            let ps = 1.0 / (1.0 + (-lp).exp());
-
-            // Deterministic treatment assignment based on propensity + noise
-            let t = if ps + (lcg(&mut seed) - 0.5) * 0.3 > 0.5 {
-                1.0
-            } else {
-                0.0
-            };
-
-            // Outcome: Y = 2.0 + 0.75*T + 1.5*x1 + 1.0*x2 + noise
-            let y = 2.0 + 0.75 * t + 1.5 * v1 + 1.0 * v2 + noise;
-
-            x1.push(v1);
-            x2.push(v2);
-            treatment.push(t);
-            outcome.push(y);
-        }
-
-        let df = df! {
-            "treatment" => treatment,
-            "x1" => x1,
-            "x2" => x2,
-            "outcome" => outcome
-        }
-        .unwrap();
-        Dataset::new(df)
-    }
-
-    #[test]
-    fn test_validate_cbps_propensity_scores_bounded() {
-        // Validate: JustIdentified (logistic) propensity scores are in (0, 1).
-        // (ExactBalance GMM may produce boundary scores on small datasets.)
-        let dataset = create_test_dataset();
-        let result = cbps(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            CbpsMethod::JustIdentified,
-        )
-        .unwrap();
-
-        for (i, &ps) in result.propensity_scores.iter().enumerate() {
-            assert!(
-                ps > 0.0 && ps < 1.0,
-                "Propensity score at index {} = {} is outside (0,1)",
-                i,
-                ps
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_cbps_weights_positive() {
-        // Validate: JustIdentified IPW weights are positive.
-        let dataset = create_test_dataset();
-        let result = cbps(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            CbpsMethod::JustIdentified,
-        )
-        .unwrap();
-
-        assert!(
-            result.weights.iter().all(|&w| w > 0.0),
-            "All CBPS weights should be positive"
-        );
-    }
-
-    #[test]
-    fn test_validate_cbps_balance_improvement() {
-        // Validate: JustIdentified CBPS should improve or maintain balance.
-        let dataset = create_test_dataset();
-        let result = cbps(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            CbpsMethod::JustIdentified,
-        )
-        .unwrap();
-
-        // Balance after should not be much worse than before
-        assert!(
-            result.balance_after.max_std_diff <= result.balance_before.max_std_diff + 0.2,
-            "CBPS should not greatly worsen balance: before={:.4}, after={:.4}",
-            result.balance_before.max_std_diff,
-            result.balance_after.max_std_diff
-        );
-    }
-
-    #[test]
-    fn test_validate_cbps_convergence() {
-        // Validate: JustIdentified CBPS should converge.
-        let dataset = create_test_dataset();
-        let result = cbps(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            CbpsMethod::JustIdentified,
-        )
-        .unwrap();
-
-        assert!(
-            result.converged,
-            "JustIdentified CBPS should converge (iterations: {})",
-            result.iterations
-        );
-    }
-
-    #[test]
-    fn test_validate_cbps_overidentification_test() {
-        // Validate: ExactBalance (overidentified) should produce a J-statistic
-        // and associated p-value, while JustIdentified should not.
-        let dataset = create_test_dataset();
-
-        let over_result = cbps(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            CbpsMethod::ExactBalance,
-        )
-        .unwrap();
-
-        // Overidentified model should have J-test
-        assert!(
-            over_result.j_statistic.is_some(),
-            "ExactBalance should produce a J-statistic"
-        );
-        assert!(
-            over_result.j_p_value.is_some(),
-            "ExactBalance should produce a J-test p-value"
-        );
-
-        // J-statistic should be non-negative
-        let j = over_result.j_statistic.unwrap();
-        assert!(j >= 0.0, "J-statistic should be non-negative, got {}", j);
-
-        // P-value should be in [0, 1]
-        let jp = over_result.j_p_value.unwrap();
-        assert!(
-            (0.0..=1.0).contains(&jp),
-            "J-test p-value should be in [0,1], got {}",
-            jp
-        );
-
-        // Number of moments should exceed number of parameters (overidentified)
-        assert!(
-            over_result.n_moments > over_result.n_params,
-            "ExactBalance should be overidentified: n_moments={} > n_params={}",
-            over_result.n_moments,
-            over_result.n_params
-        );
-
-        // JustIdentified should NOT have J-test
-        let ji_result = cbps(
-            &dataset,
-            "treatment",
-            &["x1", "x2"],
-            CbpsMethod::JustIdentified,
-        )
-        .unwrap();
-        assert!(
-            ji_result.j_statistic.is_none(),
-            "JustIdentified should not have a J-statistic"
-        );
-    }
-
     // ── T2-WP13: missing values and column types (R case causal_mediation_na) ──
 
     #[test]
     fn test_validate_na_cbps_columns() {
         use crate::econometrics::treatment::na_fixtures as nf;
         let (case, ds) = crate::test_support::load_case("causal_mediation_na");
-        // the over-identified default diverges on this data (CAUS-11)
+        // the dtype check runs the Logit path
         let run = |ds: &Dataset, _y: &str, d: &str, x: &[&str]| {
             run_cbps(
                 ds,
