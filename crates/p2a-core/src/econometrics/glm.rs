@@ -785,7 +785,7 @@ impl Problem<'_> {
                         if ni.refine {
                             // OLS's refinement step: b += (X'WX)^{-1} X'W (z - X b)
                             let xw_rows = weighted_rows()?;
-                            let xw = ArrayView2::from_shape((ng, p), &*xw_rows).map_err(|e| {
+                            let xw = ArrayView2::from_shape((ng, p), &xw_rows).map_err(|e| {
                                 EconError::Computation(format!("glm IRLS workspace: {e}"))
                             })?;
                             let r = &zw_good - &xw.dot(&b);
