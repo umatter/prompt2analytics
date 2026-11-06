@@ -15,7 +15,7 @@
 //! - Implementation inspired by R package `causalweight` (Bodory & Huber, 2018).
 //!   Source: <https://cran.r-project.org/package=causalweight>
 
-use ndarray::{Array1, Array2, ArrayView2, CowArray};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix2};
 use rand::SeedableRng;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -585,7 +585,7 @@ pub fn run_ipw_treatment(
     let y_trim: Array1<f64> = keep_idx.iter().map(|&i| y[i]).collect();
     let d_trim: Array1<f64> = keep_idx.iter().map(|&i| d[i]).collect();
     let ps_trim: Array1<f64> = keep_idx.iter().map(|&i| ps[i]).collect();
-    let x_trim = Array2::from_shape_fn((keep_idx.len(), x.ncols()), |(i, j)| x[[keep_idx[i], j]]);
+    let x_trim = kept_rows(&x, &keep_idx)?;
 
     let n_trim = y_trim.len();
     let n_treated = d_trim.iter().filter(|&&v| v >= 0.5).count();
@@ -648,8 +648,13 @@ pub fn run_ipw_treatment(
         CowArray::from(x.select(ndarray::Axis(1), &ps_cols))
     };
     let kind = IpwKind::of(config.estimand, config.normalized);
-    let se_naive = ipw_naive_se(&y, &d, &ps, &keep_mask, kind, effect);
-    let se_mest = match ipw_mest_se(x_ps.view(), &y, &d, &ps, &keep_mask, kind, effect) {
+    let not_contiguous = || EconError::Internal("IPW columns are not contiguous".into());
+    let ys = y.as_slice().ok_or_else(not_contiguous)?;
+    let ds = d.as_slice().ok_or_else(not_contiguous)?;
+    let es = ps.as_slice().ok_or_else(not_contiguous)?;
+    let arms = weighted_arm_means(ys, ds, es, &keep_mask, kind);
+    let se_naive = ipw_naive_se(ys, ds, es, &keep_mask, kind, effect, &arms);
+    let se_mest = match ipw_mest_se(x_ps.view(), ys, ds, es, &keep_mask, kind, effect, &arms) {
         Ok(v) => Some(v),
         Err(e @ EconError::SingularMatrix { .. }) => {
             warnings.push(format!(
@@ -667,10 +672,16 @@ pub fn run_ipw_treatment(
     let se_eif = {
         // The ATT influence function uses the control-arm model only.
         let mu1_fit = match config.estimand {
-            Estimand::ATE => Some(fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names)),
+            Estimand::ATE => Some(fit_outcome_model(
+                x_trim.view(),
+                &y_trim,
+                &d_trim,
+                true,
+                &x_names,
+            )),
             Estimand::ATT => None,
         };
-        let mu0_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, false, &x_names);
+        let mu0_fit = fit_outcome_model(x_trim.view(), &y_trim, &d_trim, false, &x_names);
         for (group, fit) in [("treated", mu1_fit.as_ref()), ("control", Some(&mu0_fit))] {
             if let Some(Ok((_, _, Some(text)))) = fit {
                 warnings.push(format!("outcome model ({group}): {text}"));
@@ -911,15 +922,20 @@ impl IpwKind {
     }
 }
 
-/// The unit weights of `kind` over the kept units (0 for the others), and the weighted arm
-/// means: (weights, mu1, mu0, sum of treated weights, of control weights).
-fn weighted_arm_means(
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    e: &Array1<f64>,
-    keep: &[bool],
-    kind: IpwKind,
-) -> (Vec<f64>, f64, f64, f64, f64) {
+/// The unit weights of `kind` over the kept units and the weighted arm means, for the
+/// analytic SEs of one fit (Hajek and ATT).
+struct ArmWeights {
+    /// Unit weights; 0 for the units not kept.
+    w: Vec<f64>,
+    mu1: f64,
+    mu0: f64,
+    /// Sum of the treated units' weights.
+    s1: f64,
+    /// Sum of the control units' weights.
+    s0: f64,
+}
+
+fn weighted_arm_means(y: &[f64], d: &[f64], e: &[f64], keep: &[bool], kind: IpwKind) -> ArmWeights {
     let n = y.len();
     let mut w = vec![0.0; n];
     let (mut s1, mut sy1, mut s0, mut sy0) = (0.0, 0.0, 0.0, 0.0);
@@ -937,18 +953,25 @@ fn weighted_arm_means(
             sy0 += wi * y[i];
         }
     }
-    (w, sy1 / s1, sy0 / s0, s1, s0)
+    ArmWeights {
+        w,
+        mu1: sy1 / s1,
+        mu0: sy0 / s0,
+        s1,
+        s0,
+    }
 }
 
 /// SE with the propensity treated as known, over the kept units. Hajek and ATT: HC0 of the
 /// weighted regression of y on (1, D); HT: sqrt(sum IF^2) / n_kept.
 fn ipw_naive_se(
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    e: &Array1<f64>,
+    y: &[f64],
+    d: &[f64],
+    e: &[f64],
     keep: &[bool],
     kind: IpwKind,
     effect: f64,
+    arms: &ArmWeights,
 ) -> f64 {
     let n = y.len();
     if kind == IpwKind::HorvitzThompson {
@@ -966,7 +989,13 @@ fn ipw_naive_se(
             .sum();
         return ss.sqrt() / n_kept;
     }
-    let (w, mu1, mu0, s1, s0) = weighted_arm_means(y, d, e, keep, kind);
+    let ArmWeights {
+        w,
+        mu1,
+        mu0,
+        s1,
+        s0,
+    } = arms;
     let (mut v1, mut v0) = (0.0, 0.0);
     for i in (0..n).filter(|&i| keep[i]) {
         if d[i] >= 0.5 {
@@ -985,12 +1014,13 @@ fn ipw_naive_se(
 /// Every sum runs over the rows of `x` in one pass each, on the row slices.
 fn ipw_mest_se(
     x: ArrayView2<f64>,
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    e: &Array1<f64>,
+    y: &[f64],
+    d: &[f64],
+    e: &[f64],
     keep: &[bool],
     kind: IpwKind,
     effect: f64,
+    arms: &ArmWeights,
 ) -> EconResult<f64> {
     let (n, p) = x.dim();
     let nf = n as f64;
@@ -1029,11 +1059,9 @@ fn ipw_mest_se(
     )?
     .inverse;
     // a . U_i with U_i = I_bb^-1 x_i (D_i - e_i), from ia = I_bb^-1 a (I_bb is symmetric).
-    let dot = |ia: &Array1<f64>, r: &[f64]| -> f64 {
-        ia.iter().zip(r).map(|(u, v)| u * v).sum::<f64>()
-    };
+    let dot = |ia: &[f64], r: &[f64]| -> f64 { ia.iter().zip(r).map(|(u, v)| u * v).sum::<f64>() };
     // a += c * x_i
-    let axpy = |a: &mut Array1<f64>, c: f64, r: &[f64]| {
+    let axpy = |a: &mut [f64], c: f64, r: &[f64]| {
         for (aj, &xj) in a.iter_mut().zip(r) {
             *aj += c * xj;
         }
@@ -1041,7 +1069,7 @@ fn ipw_mest_se(
     let sum_if_sq = match kind {
         IpwKind::HorvitzThompson => {
             let n_kept = keep.iter().filter(|&&k| k).count() as f64;
-            let mut a = Array1::<f64>::zeros(p);
+            let mut a = vec![0.0; p];
             for i in (0..n).filter(|&i| keep[i]) {
                 let c = if d[i] >= 0.5 {
                     -y[i] * (1.0 - e[i]) / e[i]
@@ -1051,7 +1079,10 @@ fn ipw_mest_se(
                 axpy(&mut a, c / nf, row(i));
             }
             let s = n_kept / nf;
-            let ia = inv.dot(&a);
+            let ia = inv.dot(&ArrayView1::from(&a[..]));
+            let ia = ia
+                .as_slice()
+                .ok_or_else(|| EconError::Internal("score adjustment layout".into()))?;
             (0..n)
                 .map(|i| {
                     let h = if keep[i] {
@@ -1064,16 +1095,16 @@ fn ipw_mest_se(
                     } else {
                         0.0
                     };
-                    ((h + dot(&ia, row(i)) * (d[i] - e[i])) / s).powi(2)
+                    ((h + dot(ia, row(i)) * (d[i] - e[i])) / s).powi(2)
                 })
                 .sum::<f64>()
         }
         _ => {
-            let (w, mu1, mu0, sw1, sw0) = weighted_arm_means(y, d, e, keep, kind);
+            let (w, mu1, mu0) = (&arms.w, arms.mu1, arms.mu0);
             // 1 / s1 and 1 / s0 with s = (sum of the arm's weights) / n
-            let (r1, r0) = (nf / sw1, nf / sw0);
-            let mut a1 = Array1::<f64>::zeros(p);
-            let mut a0 = Array1::<f64>::zeros(p);
+            let (r1, r0) = (nf / arms.s1, nf / arms.s0);
+            let mut a1 = vec![0.0; p];
+            let mut a0 = vec![0.0; p];
             for i in (0..n).filter(|&i| keep[i]) {
                 // d w_i / d beta = x_i * c, from the unit weight w_i: a treated unit's
                 // -(1-e)/e is -(1-e) w_i (Hajek; 0 for ATT), a control's e/(1-e) is e w_i
@@ -1092,22 +1123,23 @@ fn ipw_mest_se(
                     axpy(&mut a0, c * (y[i] - mu0) * inv_n, row(i));
                 }
             }
-            let ia1 = inv.dot(&a1);
-            let ia0 = inv.dot(&a0);
+            // f_i = (m1_i + a1' U_i) / s1 - (m0_i + a0' U_i) / s0: one dot per row, with
+            // v = I_bb^-1 (a1 / s1 - a0 / s0)
+            let v =
+                inv.dot(&ArrayView1::from(&a1[..])) * r1 - inv.dot(&ArrayView1::from(&a0[..])) * r0;
+            let v = v
+                .as_slice()
+                .ok_or_else(|| EconError::Internal("score adjustment layout".into()))?;
             (0..n)
                 .map(|i| {
-                    let (m1, m0) = if keep[i] {
-                        if d[i] >= 0.5 {
-                            (w[i] * (y[i] - mu1), 0.0)
-                        } else {
-                            (0.0, w[i] * (y[i] - mu0))
-                        }
+                    let m = if !keep[i] {
+                        0.0
+                    } else if d[i] >= 0.5 {
+                        w[i] * (y[i] - mu1) * r1
                     } else {
-                        (0.0, 0.0)
+                        -w[i] * (y[i] - mu0) * r0
                     };
-                    let r = row(i);
-                    let u = d[i] - e[i];
-                    let f = (m1 + dot(&ia1, r) * u) * r1 - (m0 + dot(&ia0, r) * u) * r0;
+                    let f = m + dot(v, row(i)) * (d[i] - e[i]);
                     f * f
                 })
                 .sum::<f64>()
@@ -1404,18 +1436,17 @@ pub fn run_doubly_robust(
     let n_trim = y_trim.len();
 
     // Build trimmed design matrix
-    let mut x_trim = Array2::zeros((n_trim, x.ncols()));
-    for (new_i, &old_i) in keep_idx.iter().enumerate() {
-        x_trim.row_mut(new_i).assign(&x.row(old_i));
-    }
+    let x_trim = kept_rows(&x, &keep_idx)?;
 
     let n_treated = d_trim.iter().filter(|&&v| v >= 0.5).count();
     let n_control = n_trim - n_treated;
 
     // Fit outcome models for treated and control separately
     let x_names = design_names(covariates);
-    let (mu_1, r2_treated, alias1) = fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names)?;
-    let (mu_0, r2_control, alias0) = fit_outcome_model(&x_trim, &y_trim, &d_trim, false, &x_names)?;
+    let (mu_1, r2_treated, alias1) =
+        fit_outcome_model(x_trim.view(), &y_trim, &d_trim, true, &x_names)?;
+    let (mu_0, r2_control, alias0) =
+        fit_outcome_model(x_trim.view(), &y_trim, &d_trim, false, &x_names)?;
     for (group, a) in [("treated", alias1), ("control", alias0)] {
         if let Some(text) = a {
             warnings.push(format!("outcome model ({group}): {text}"));
@@ -1665,7 +1696,7 @@ fn compute_aipw_effect(
 /// Returns predicted outcomes for every row (aliased columns count as 0, as
 /// `stats::predict.lm`), the group's R² and the aliasing warning, if any.
 fn fit_outcome_model(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     y: &Array1<f64>,
     d: &Array1<f64>,
     treated: bool,
@@ -1687,7 +1718,7 @@ fn fit_outcome_model(
         });
     }
 
-    let x_group = x.select(ndarray::Axis(0), &indices);
+    let x_group = select_rows(x, &indices)?;
     let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
     // OLS's solve decision: the normal equations on a full-rank, well-conditioned design,
     // `lm.fit`'s pivoted QR (with its aliasing) otherwise.
@@ -1714,6 +1745,31 @@ fn fit_outcome_model(
     Ok((mu, r2, alias))
 }
 
+/// The rows `idx` of `x`, copied row slice by row slice.
+fn select_rows(x: ArrayView2<f64>, idx: &[usize]) -> EconResult<Array2<f64>> {
+    let p = x.ncols();
+    let xs = x.as_standard_layout();
+    let src = xs
+        .as_slice()
+        .ok_or_else(|| EconError::Internal("treatment design is not contiguous".into()))?;
+    let len = resource::checked_len(&[idx.len(), p], "treatment design")?;
+    let mut out = resource::try_with_capacity(len, "treatment design")?;
+    for &i in idx {
+        out.extend_from_slice(&src[i * p..(i + 1) * p]);
+    }
+    Array2::from_shape_vec((idx.len(), p), out)
+        .map_err(|e| EconError::Internal(format!("treatment design shape: {e}")))
+}
+
+/// The rows of `x` kept by trimming: `x` itself when no row was dropped.
+fn kept_rows<'a>(x: &'a Array2<f64>, keep: &[usize]) -> EconResult<CowArray<'a, f64, Ix2>> {
+    if keep.len() == x.nrows() {
+        Ok(CowArray::from(x.view()))
+    } else {
+        Ok(CowArray::from(select_rows(x.view(), keep)?))
+    }
+}
+
 /// Compute propensity score summary statistics.
 fn compute_ps_summary(ps: &Array1<f64>) -> PropensityScoreSummary {
     let n = ps.len();
@@ -1735,7 +1791,7 @@ fn compute_ps_summary(ps: &Array1<f64>) -> PropensityScoreSummary {
     let std_dev = var.sqrt();
 
     let mut sorted: Vec<f64> = ps.iter().copied().collect();
-    sorted.sort_by(f64::total_cmp);
+    sorted.sort_unstable_by(f64::total_cmp);
 
     let min = sorted[0];
     let max = sorted[n - 1];
@@ -2541,7 +2597,13 @@ mod tests {
             .collect();
         let keep = vec![true; n];
         let kind = IpwKind::of(Estimand::ATE, true);
-        let err = ipw_mest_se(x.view(), &y, &d, &e, &keep, kind, 1e159).unwrap_err();
+        let (ys, ds, es) = (
+            y.as_slice().unwrap(),
+            d.as_slice().unwrap(),
+            e.as_slice().unwrap(),
+        );
+        let arms = weighted_arm_means(ys, ds, es, &keep, kind);
+        let err = ipw_mest_se(x.view(), ys, ds, es, &keep, kind, 1e159, &arms).unwrap_err();
         assert!(
             matches!(err, EconError::SingularMatrix { .. }),
             "expected the SingularMatrix fallback, got {err:?}"

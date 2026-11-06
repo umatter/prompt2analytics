@@ -1495,18 +1495,21 @@ pub(crate) fn lean_logit(
         // X'WX (upper triangle) and X'Wz, z = eta - offset + (y - mu) / W, W = mu (1 - mu)
         g.fill(0.0);
         rhs.fill(0.0);
-        for (i, row) in xrows.chunks_exact(k).enumerate() {
-            let m = mu[i];
+        for (i, ((row, &m), (&e, &yi))) in xrows
+            .chunks_exact(k)
+            .zip(&mu)
+            .zip(eta.iter().zip(y))
+            .enumerate()
+        {
             let wi = m * (1.0 - m);
-            let eo = eta[i] - off.map_or(0.0, |o| o[i]);
-            let wz = wi * eo + (y[i] - m);
-            for a in 0..k {
+            let eo = e - off.map_or(0.0, |o| o[i]);
+            let wz = wi * eo + (yi - m);
+            for (a, (ga, rh)) in g.chunks_exact_mut(k).zip(rhs.iter_mut()).enumerate() {
                 let xa = row[a];
-                rhs[a] += xa * wz;
+                *rh += xa * wz;
                 let wxa = wi * xa;
-                let ga = &mut g[a * k..(a + 1) * k];
-                for c in a..k {
-                    ga[c] += wxa * row[c];
+                for (gc, xc) in ga[a..].iter_mut().zip(&row[a..]) {
+                    *gc += wxa * xc;
                 }
             }
         }
@@ -1531,9 +1534,10 @@ pub(crate) fn lean_logit(
         if !b.iter().all(|v| v.is_finite()) {
             return Ok(None);
         }
+        let bs = b.as_slice().unwrap_or(&[]);
         for (i, (row, e)) in xrows.chunks_exact(k).zip(eta.iter_mut()).enumerate() {
             let mut v = off.map_or(0.0, |o| o[i]);
-            for (xa, ba) in row.iter().zip(b.iter()) {
+            for (xa, ba) in row.iter().zip(bs) {
                 v += xa * ba;
             }
             *e = v;
