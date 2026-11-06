@@ -1,48 +1,48 @@
-//! Natural Effect Models for Causal Mediation Analysis (medflex approach).
+//! Natural effect models for causal mediation analysis (medflex's imputation estimator).
 //!
-//! Implements natural effect models that allow for exposure-mediator interactions,
-//! following the methodology of Lange, Vansteelandt, and Bekaert (2012) and the
-//! R package `medflex` by Steen et al. (2017).
+//! Implements the imputation-based natural effect model estimator of Vansteelandt, Bekaert
+//! and Lange (2012) as the R package `medflex` 0.6-11 implements it (`neImpute`, `neModel`,
+//! `neEffdecomp`) for a binary 0/1 exposure.
 //!
-//! # Overview
+//! # Estimator
 //!
-//! Natural effect models decompose the total effect of a treatment on an outcome
-//! into Natural Direct Effects (NDE) and Natural Indirect Effects (NIE) while
-//! allowing for treatment-mediator interactions.
+//! For treatment A, mediator M, outcome Y and confounders C:
 //!
-//! # Key Concepts
+//! 1. **Outcome working model** `Y ~ A + M + C [+ A:M]`, fitted by least squares
+//!    ([`MedflexFamily::Gaussian`]), a Poisson GLM (log link) or a binomial GLM (logit
+//!    link). The family defaults from the scale ([`EffectScale::default_family`]).
+//! 2. **Expanded data**: two rows per unit, the direct exposure `A0` in {0, 1} and the
+//!    observed exposure `A1 = A` (which determines the mediator). Every row is imputed with
+//!    the working model's prediction `Yhat = E[Y | A = A0, M, C]`.
+//! 3. **Natural effect model** `Yhat ~ A0 + A1 + C [+ A0:A1 + A0:C]` with the identity link
+//!    (difference scale), the log link (quasi-Poisson, ratio scale) or the logit link
+//!    (quasi-binomial, odds-ratio scale). With A:M in the working model the conditional
+//!    natural direct effect varies with C through the mediator model, so the model carries
+//!    `A0:C` (with medflex's usual `Yhat ~ A0 * A1 + C` the difference-scale NDE would use
+//!    the raw control-group mean of M).
+//! 4. **Effects** on the link scale at the confounder means `cbar` (medflex's `covLev`;
+//!    its default is 0): NDE (pure direct) `= a0 + a0:C cbar`, NIE (total indirect)
+//!    `= a1 + a0:a1`, TE `= NDE + NIE`; `exp()` gives the ratios and odds ratios. At the
+//!    means, the difference-scale NDE equals VanderWeele's (2015) regression formula
+//!    `b_A + b_AM (alpha_0 + alpha_C' cbar)` with the mediator model `M ~ A + C`.
 //!
-//! - **Natural Direct Effect (NDE)**: Effect of treatment on outcome holding the
-//!   mediator at the level it would naturally attain under the control condition
-//!   NDE = E[Y(1, M(0))] - E[Y(0, M(0))]
+//! The proportion mediated is `NIE / TE` on the difference scale and VanderWeele's
+//! `NDE (NIE - 1) / (NDE NIE - 1)` on the ratio scales. It is never clamped; a value
+//! outside [0, 1] comes with a warning.
 //!
-//! - **Natural Indirect Effect (NIE)**: Effect of changing the mediator from its
-//!   natural level under control to its natural level under treatment, while
-//!   holding treatment at the treatment level
-//!   NIE = E[Y(1, M(1))] - E[Y(1, M(0))]
+//! # Standard errors
 //!
-//! - **Total Effect (TE) = NDE + NIE** (on the difference scale)
+//! - `bootstrap_ci = false`: the robust sandwich of medflex's `se = "robust"`, from the
+//!   stacked estimating equations of the working model and the natural effect model (HC0).
+//! - `bootstrap_ci = true` (default): units are resampled and everything is refitted
+//!   (medflex's `se = "bootstrap"`), with the effects at the full-sample `cbar`; the SE is
+//!   the standard deviation of the link-scale draws and the interval is medflex's default
+//!   normal type (`confint(type = "norm")`, `boot::norm.ci`). Failed replicates are counted
+//!   and reported; with no seed the bootstrap uses [`DEFAULT_BOOTSTRAP_SEED`].
 //!
-//! # Mathematical Framework
+//! On the ratio scales the SEs and p-values are on the log or logit scale.
 //!
-//! For treatment A, mediator M, outcome Y, and confounders C:
-//!
-//! 1. Fit mediator model:
-//!    M = alpha_0 + alpha_1*A + alpha_2'*C + epsilon_M
-//!
-//! 2. Fit outcome model with interaction:
-//!    Y = beta_0 + beta_1*A + beta_2*M + beta_3*A*M + beta_4'*C + epsilon_Y
-//!
-//! 3. Compute effects:
-//!    - Without interaction (beta_3 = 0):
-//!      NDE = beta_1
-//!      NIE = alpha_1 * beta_2
-//!
-//!    - With interaction:
-//!      NDE = beta_1 + beta_3 * E[M|A=0]
-//!      NIE = alpha_1 * (beta_2 + beta_3)
-//!
-//! # Identification Assumptions
+//! # Identification assumptions
 //!
 //! 1. No unmeasured confounding of treatment-outcome relationship given C
 //! 2. No unmeasured confounding of mediator-outcome relationship given (A, C)
@@ -51,9 +51,13 @@
 //!
 //! # References
 //!
-//! - Lange, T., Vansteelandt, S., & Bekaert, M. (2012). "Choice of effect measure
-//!   for mediation analysis." *Epidemiology*, 23(6), 889-897.
-//!   https://doi.org/10.1097/EDE.0b013e31826c2107
+//! - Vansteelandt, S., Bekaert, M., & Lange, T. (2012). "Imputation strategies for the
+//!   estimation of natural direct and indirect effects." *Epidemiologic Methods*, 1(1),
+//!   131-158.
+//!
+//! - Lange, T., Vansteelandt, S., & Bekaert, M. (2012). "A simple unified approach for
+//!   estimating natural direct and indirect effects." *American Journal of Epidemiology*,
+//!   176(3), 190-195.
 //!
 //! - VanderWeele, T. J. (2015). *Explanation in Causal Inference: Methods for
 //!   Mediation and Interaction*. Oxford University Press.
@@ -62,8 +66,6 @@
 //!   An R Package for Flexible Mediation Analysis using Natural Effect Models."
 //!   *Journal of Statistical Software*, 76(11), 1-46.
 //!   https://doi.org/10.18637/jss.v076.i11
-//!
-//! - R package medflex: https://CRAN.R-project.org/package=medflex
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::SeedableRng;
@@ -71,22 +73,98 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::econometrics::glm::{GlmFamily, GlmFit, GlmLink, GlmSpec, fit_glm};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::{safe_inverse, xtx, xty};
+use crate::linalg::solve::{SingularPolicy, aliasing_message, sym_inverse};
+use crate::options::Choices;
+use crate::regression::ols::solve_ols;
 use crate::resource;
-use crate::traits::estimator::normal_cdf;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
+use crate::traits::estimator::{normal_p_value_two_sided, validate_level, z_critical};
 
-/// Scale for reporting mediation effects.
+/// Seed of the bootstrap when `MedflexConfig::seed` is `None`, so that repeated calls give
+/// identical results.
+pub const DEFAULT_BOOTSTRAP_SEED: u64 = 42;
+
+/// Fewest valid bootstrap replicates from which bootstrap SEs and intervals are reported.
+const MIN_VALID_BOOTSTRAP: usize = 50;
+
+/// Scale of the natural effects: it selects the natural effect model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EffectScale {
-    /// Effects as differences (additive scale) - default for continuous outcomes
+    /// Differences: gaussian natural effect model (identity link).
     #[default]
     Difference,
-    /// Effects as ratios (multiplicative scale) - for binary outcomes with log link
+    /// Ratios (risk or rate ratios): quasi-Poisson natural effect model (log link).
     Ratio,
-    /// Effects as odds ratios - for binary outcomes with logit link
+    /// Odds ratios: quasi-binomial natural effect model (logit link).
     OddsRatio,
+}
+
+crate::option_enum!(
+    EffectScale,
+    Choices {
+        option: "scale",
+        values: &[
+            (
+                &[
+                    "difference",
+                    "diff",
+                    "additive",
+                    "risk_difference",
+                    "mean_difference",
+                    "rd",
+                ],
+                EffectScale::Difference,
+            ),
+            (
+                &["ratio", "risk_ratio", "rate_ratio", "relative_risk", "rr"],
+                EffectScale::Ratio,
+            ),
+            (&["odds_ratio", "odds", "or"], EffectScale::OddsRatio),
+        ],
+    },
+    no_display
+);
+
+impl EffectScale {
+    /// The outcome working-model family used when none is configured: Difference ->
+    /// Gaussian, Ratio -> Poisson, OddsRatio -> Binomial.
+    pub fn default_family(self) -> MedflexFamily {
+        match self {
+            Self::Difference => MedflexFamily::Gaussian,
+            Self::Ratio => MedflexFamily::Poisson,
+            Self::OddsRatio => MedflexFamily::Binomial,
+        }
+    }
+
+    /// Link of the natural effect model.
+    fn link_name(self) -> &'static str {
+        match self {
+            Self::Difference => "identity",
+            Self::Ratio => "log",
+            Self::OddsRatio => "logit",
+        }
+    }
+
+    /// Family of the natural effect model, as R names it.
+    fn ne_family_name(self) -> &'static str {
+        match self {
+            Self::Difference => "gaussian",
+            Self::Ratio => "quasipoisson",
+            Self::OddsRatio => "quasibinomial",
+        }
+    }
+
+    /// Link-scale value to the reported scale (identity or `exp`).
+    fn to_scale(self, v: f64) -> f64 {
+        match self {
+            Self::Difference => v,
+            Self::Ratio | Self::OddsRatio => v.exp(),
+        }
+    }
 }
 
 impl fmt::Display for EffectScale {
@@ -99,23 +177,113 @@ impl fmt::Display for EffectScale {
     }
 }
 
+/// Outcome working-model family, each with its canonical link: gaussian (least squares,
+/// identity), poisson (log), binomial (logit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MedflexFamily {
+    /// Least squares (identity link).
+    #[default]
+    Gaussian,
+    /// Poisson (log link); the outcome must be non-negative.
+    Poisson,
+    /// Binomial (logit link); the outcome must lie in [0, 1].
+    Binomial,
+}
+
+crate::option_enum!(
+    MedflexFamily,
+    Choices {
+        option: "family",
+        values: &[
+            (&["gaussian", "normal", "linear"], MedflexFamily::Gaussian),
+            (
+                &["poisson", "quasipoisson", "count"],
+                MedflexFamily::Poisson
+            ),
+            (
+                &["binomial", "quasibinomial", "logistic", "binary"],
+                MedflexFamily::Binomial,
+            ),
+        ],
+    }
+);
+
+impl MedflexFamily {
+    fn link_name(self) -> &'static str {
+        match self {
+            Self::Gaussian => "identity",
+            Self::Poisson => "log",
+            Self::Binomial => "logit",
+        }
+    }
+
+    /// R's `linkinv` of the canonical link.
+    fn linkinv(self, eta: f64) -> f64 {
+        match self {
+            Self::Gaussian => eta,
+            Self::Poisson => eta.exp().max(f64::EPSILON),
+            Self::Binomial => {
+                if eta < -LOGIT_THRESH {
+                    f64::EPSILON
+                } else if eta > LOGIT_THRESH {
+                    1.0 - f64::EPSILON
+                } else {
+                    let e = eta.exp();
+                    e / (1.0 + e)
+                }
+            }
+        }
+    }
+
+    /// R's `mu.eta` of the canonical link.
+    fn mu_eta(self, eta: f64) -> f64 {
+        match self {
+            Self::Gaussian => 1.0,
+            Self::Poisson => eta.exp().max(f64::EPSILON),
+            Self::Binomial => {
+                if eta.abs() > LOGIT_THRESH {
+                    f64::EPSILON
+                } else {
+                    let e = eta.exp();
+                    e / ((1.0 + e) * (1.0 + e))
+                }
+            }
+        }
+    }
+
+    /// Variance function at the mean.
+    fn variance(self, mu: f64) -> f64 {
+        match self {
+            Self::Gaussian => 1.0,
+            Self::Poisson => mu,
+            Self::Binomial => mu * (1.0 - mu),
+        }
+    }
+}
+
+/// R's logit-link clamp (`family.c`, THRESH).
+const LOGIT_THRESH: f64 = 30.0;
+
 /// Configuration for Natural Effect Models (medflex).
 #[derive(Debug, Clone)]
 pub struct MedflexConfig {
-    /// Allow treatment-mediator interaction in outcome model (default: true)
+    /// Include the treatment-mediator interaction A:M in the outcome working model, and
+    /// A0:A1 and A0:C in the natural effect model (default: true)
     pub allow_interaction: bool,
-    /// Use bootstrap for confidence intervals (default: true)
+    /// Bootstrap SEs and intervals (default: true); `false` gives the robust sandwich
     pub bootstrap_ci: bool,
     /// Number of bootstrap samples (default: 1000). Must be at least 50 when
     /// `bootstrap_ci` is true (unused otherwise); a count whose result buffers cannot
     /// be allocated is refused with `EconError::ResourceLimit`.
     pub n_bootstrap: usize,
-    /// Confidence level for intervals (default: 0.95)
+    /// Confidence level for intervals, strictly between 0 and 1 (default: 0.95)
     pub confidence_level: f64,
-    /// Effect scale for reporting (default: Difference)
+    /// Effect scale: selects the natural effect model (default: Difference)
     pub scale: EffectScale,
-    /// Random seed for reproducibility (optional)
+    /// Bootstrap seed; `None` uses [`DEFAULT_BOOTSTRAP_SEED`]
     pub seed: Option<u64>,
+    /// Outcome working-model family; `None` uses `scale.default_family()`
+    pub family: Option<MedflexFamily>,
 }
 
 impl Default for MedflexConfig {
@@ -127,7 +295,52 @@ impl Default for MedflexConfig {
             confidence_level: 0.95,
             scale: EffectScale::Difference,
             seed: None,
+            family: None,
         }
+    }
+}
+
+/// Names used in coefficient labels, model formulas and warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MedflexNames {
+    /// Outcome name.
+    pub outcome: String,
+    /// Treatment name.
+    pub treatment: String,
+    /// Mediator name.
+    pub mediator: String,
+    /// One name per confounder column.
+    pub confounders: Vec<String>,
+}
+
+impl MedflexNames {
+    /// "Y", "A", "M", "C1", ..., "Cp" (what [`run_medflex`] uses).
+    pub fn generic(n_confounders: usize) -> Self {
+        Self {
+            outcome: "Y".into(),
+            treatment: "A".into(),
+            mediator: "M".into(),
+            confounders: (1..=n_confounders).map(|j| format!("C{j}")).collect(),
+        }
+    }
+}
+
+/// `Vec<f64>` with `NaN` (an aliased coefficient) as JSON `null`.
+mod nan_vec {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[f64], s: S) -> Result<S::Ok, S::Error> {
+        v.iter()
+            .map(|x| x.is_finite().then_some(*x))
+            .collect::<Vec<Option<f64>>>()
+            .serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+        Ok(Vec::<Option<f64>>::deserialize(d)?
+            .into_iter()
+            .map(|x| x.unwrap_or(f64::NAN))
+            .collect())
     }
 }
 
@@ -135,29 +348,30 @@ impl Default for MedflexConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MedflexResult {
     // ═══════════════════════════════════════════════════════════════════
-    // Core Effect Estimates
+    // Core Effect Estimates (on the reported scale: differences, ratios or odds ratios)
     // ═══════════════════════════════════════════════════════════════════
-    /// Total Effect (TE = NDE + NIE)
+    /// Total Effect (TE = NDE + NIE on the link scale)
     pub total_effect: f64,
-    /// Natural Direct Effect (NDE)
+    /// Natural Direct Effect (pure direct effect, at the confounder means)
     pub natural_direct_effect: f64,
-    /// Natural Indirect Effect (NIE)
+    /// Natural Indirect Effect (total indirect effect)
     pub natural_indirect_effect: f64,
-    /// Proportion of total effect mediated (NIE / TE)
+    /// Proportion mediated: NIE / TE (difference scale) or NDE (NIE - 1) / (NDE NIE - 1)
+    /// (ratio scales); never clamped, `NaN` when undefined
     pub proportion_mediated: f64,
 
     // ═══════════════════════════════════════════════════════════════════
-    // Standard Errors
+    // Standard Errors (link scale: difference, log or logit)
     // ═══════════════════════════════════════════════════════════════════
-    /// Standard error of total effect
+    /// Standard error of total effect (link scale)
     pub te_se: f64,
-    /// Standard error of NDE
+    /// Standard error of NDE (link scale)
     pub nde_se: f64,
-    /// Standard error of NIE
+    /// Standard error of NIE (link scale)
     pub nie_se: f64,
 
     // ═══════════════════════════════════════════════════════════════════
-    // Confidence Intervals
+    // Confidence Intervals (reported scale)
     // ═══════════════════════════════════════════════════════════════════
     /// Confidence interval for total effect
     pub te_ci: (f64, f64),
@@ -167,33 +381,33 @@ pub struct MedflexResult {
     pub nie_ci: (f64, f64),
 
     // ═══════════════════════════════════════════════════════════════════
-    // p-values
+    // p-values (two-sided, null of no effect, from the link-scale z)
     // ═══════════════════════════════════════════════════════════════════
-    /// p-value for TE (two-sided test H0: TE = 0)
+    /// p-value for TE
     pub te_p_value: f64,
-    /// p-value for NDE (two-sided test H0: NDE = 0)
+    /// p-value for NDE
     pub nde_p_value: f64,
-    /// p-value for NIE (two-sided test H0: NIE = 0)
+    /// p-value for NIE
     pub nie_p_value: f64,
 
     // ═══════════════════════════════════════════════════════════════════
     // Model Coefficients
     // ═══════════════════════════════════════════════════════════════════
-    /// Treatment effect on mediator (alpha_1 from mediator model)
+    /// Treatment coefficient of the mediator model `M ~ A + C` (least squares; descriptive)
     pub mediator_coef: f64,
-    /// Treatment effect on mediator SE
+    /// Its standard error
     pub mediator_coef_se: f64,
-    /// Direct treatment effect in outcome model (beta_1)
+    /// Treatment coefficient of the outcome working model
     pub direct_coef: f64,
-    /// Direct treatment effect SE
+    /// Its standard error
     pub direct_coef_se: f64,
-    /// Mediator effect on outcome (beta_2)
+    /// Mediator coefficient of the outcome working model
     pub mediator_outcome_coef: f64,
-    /// Mediator effect on outcome SE
+    /// Its standard error
     pub mediator_outcome_coef_se: f64,
-    /// Interaction coefficient (beta_3, None if no interaction)
+    /// A:M coefficient of the outcome working model (None without interaction)
     pub interaction_coef: Option<f64>,
-    /// Interaction coefficient SE
+    /// Its standard error
     pub interaction_coef_se: Option<f64>,
 
     // ═══════════════════════════════════════════════════════════════════
@@ -201,7 +415,8 @@ pub struct MedflexResult {
     // ═══════════════════════════════════════════════════════════════════
     /// R-squared for mediator model
     pub mediator_r_squared: f64,
-    /// R-squared for outcome model
+    /// Deviance R-squared of the outcome working model (`1 - deviance / null deviance`;
+    /// R-squared for the gaussian family)
     pub outcome_r_squared: f64,
 
     // ═══════════════════════════════════════════════════════════════════
@@ -213,9 +428,9 @@ pub struct MedflexResult {
     pub n_treated: usize,
     /// Number of control observations
     pub n_control: usize,
-    /// Mean of mediator in control group (E[M|A=0])
+    /// Raw sample mean of the mediator among controls
     pub mediator_mean_control: f64,
-    /// Mean of mediator in treated group (E[M|A=1])
+    /// Raw sample mean of the mediator among the treated
     pub mediator_mean_treated: f64,
 
     // ═══════════════════════════════════════════════════════════════════
@@ -232,13 +447,58 @@ pub struct MedflexResult {
     /// `run_medflex`, whose arrays are used as given.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+
+    /// Outcome working-model family actually fitted.
+    #[serde(default)]
+    pub family: MedflexFamily,
+    /// How the standard errors were computed.
+    #[serde(default)]
+    pub se_method: String,
+    /// The natural effect model, e.g. `yhat ~ a0 + a1 + c1 + c2 (gaussian, identity link)`.
+    #[serde(default)]
+    pub ne_model: String,
+    /// The outcome working model's formula, e.g. `y ~ a + m + c1 + c2 + a:m`.
+    #[serde(default)]
+    pub outcome_model: String,
+    /// Names of the outcome working-model coefficients: `(Intercept)`, A, M, C..., `A:M`.
+    #[serde(default)]
+    pub outcome_coef_names: Vec<String>,
+    /// Outcome working-model coefficients (`NaN`, JSON `null`, when aliased).
+    #[serde(default, with = "nan_vec")]
+    pub outcome_coefficients: Vec<f64>,
+    /// Their standard errors (`NaN` when aliased).
+    #[serde(default, with = "nan_vec")]
+    pub outcome_std_errors: Vec<f64>,
+    /// Names of the natural effect model coefficients: `(Intercept)`, `A0`, `A1`, C...,
+    /// `A0:A1`, `A0:C`... (with the treatment's name).
+    #[serde(default)]
+    pub ne_coef_names: Vec<String>,
+    /// Natural effect model coefficients (`NaN` when aliased).
+    #[serde(default, with = "nan_vec")]
+    pub ne_coefficients: Vec<f64>,
+    /// Confounder levels at which the NDE and TE are evaluated (their sample means).
+    #[serde(default)]
+    pub confounder_means: Vec<f64>,
+    /// Warnings: aliased coefficients, fit problems, bootstrap failures, the proportion
+    /// mediated.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for MedflexResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for MedflexResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Natural Effect Models (medflex) ===")?;
+        writeln!(
+            f,
+            "=== Natural Effect Models (medflex, imputation estimator) ==="
+        )?;
         writeln!(f)?;
-        writeln!(f, "Effect Decomposition ({}):", self.scale)?;
+        writeln!(f, "Effect Decomposition ({} scale):", self.scale)?;
         writeln!(f, "{}", "─".repeat(70))?;
         writeln!(
             f,
@@ -246,7 +506,7 @@ impl fmt::Display for MedflexResult {
             "Effect",
             "Estimate",
             "Std.Err",
-            &format!("{:.0}% CI", self.confidence_level * 100.0),
+            format!("{:.0}% CI", self.confidence_level * 100.0),
             "p-value"
         )?;
         writeln!(f, "{}", "─".repeat(70))?;
@@ -265,67 +525,107 @@ impl fmt::Display for MedflexResult {
             }
         };
 
-        writeln!(
-            f,
-            "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
-            "Total Effect (TE)",
-            self.total_effect,
-            self.te_se,
-            self.te_ci.0,
-            self.te_ci.1,
-            self.te_p_value,
-            stars(self.te_p_value)
-        )?;
-
-        writeln!(
-            f,
-            "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
-            "Natural Direct Effect",
-            self.natural_direct_effect,
-            self.nde_se,
-            self.nde_ci.0,
-            self.nde_ci.1,
-            self.nde_p_value,
-            stars(self.nde_p_value)
-        )?;
-
-        writeln!(
-            f,
-            "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
-            "Natural Indirect Effect",
-            self.natural_indirect_effect,
-            self.nie_se,
-            self.nie_ci.0,
-            self.nie_ci.1,
-            self.nie_p_value,
-            stars(self.nie_p_value)
-        )?;
+        for (label, est, se, ci, p) in [
+            (
+                "Total Effect (TE)",
+                self.total_effect,
+                self.te_se,
+                self.te_ci,
+                self.te_p_value,
+            ),
+            (
+                "Natural Direct Effect",
+                self.natural_direct_effect,
+                self.nde_se,
+                self.nde_ci,
+                self.nde_p_value,
+            ),
+            (
+                "Natural Indirect Effect",
+                self.natural_indirect_effect,
+                self.nie_se,
+                self.nie_ci,
+                self.nie_p_value,
+            ),
+        ] {
+            writeln!(
+                f,
+                "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
+                label,
+                est,
+                se,
+                ci.0,
+                ci.1,
+                p,
+                stars(p)
+            )?;
+        }
 
         writeln!(f, "{}", "─".repeat(70))?;
+        match self.scale {
+            EffectScale::Difference => {}
+            EffectScale::Ratio => writeln!(
+                f,
+                "Std. errors and p-values are on the log scale; estimates and intervals are ratios."
+            )?,
+            EffectScale::OddsRatio => writeln!(
+                f,
+                "Std. errors and p-values are on the logit scale; estimates and intervals are odds ratios."
+            )?,
+        }
         writeln!(f)?;
 
-        writeln!(
-            f,
-            "Proportion Mediated (NIE/TE): {:.1}%",
-            self.proportion_mediated * 100.0
-        )?;
+        match self.scale {
+            EffectScale::Difference => writeln!(
+                f,
+                "Proportion Mediated (NIE/TE): {:.1}%",
+                self.proportion_mediated * 100.0
+            )?,
+            _ => writeln!(
+                f,
+                "Proportion Mediated (NDE(NIE - 1)/(NDE NIE - 1), VanderWeele 2015): {:.1}%",
+                self.proportion_mediated * 100.0
+            )?,
+        }
+        writeln!(f, "Standard errors: {}", self.se_method)?;
+        writeln!(f, "Natural effect model: {}", self.ne_model)?;
+        // the confounder names are the working-model names between the mediator and A:M
+        let k = self.outcome_coef_names.len();
+        let conf_end = if self.interaction_included {
+            k.saturating_sub(1)
+        } else {
+            k
+        };
+        let conf_names: &[String] = self.outcome_coef_names.get(3..conf_end).unwrap_or(&[]);
+        if self.interaction_included && !conf_names.is_empty() {
+            let levels: Vec<String> = conf_names
+                .iter()
+                .zip(&self.confounder_means)
+                .map(|(n, v)| format!("{n} = {v:.4}"))
+                .collect();
+            writeln!(
+                f,
+                "NDE and TE evaluated at the confounder means: {}",
+                levels.join(", ")
+            )?;
+        }
         writeln!(f)?;
 
         writeln!(f, "Model Components:")?;
-        writeln!(f, "  Mediator Model (M ~ A + C):")?;
+        let name = |j: usize| -> &str {
+            self.outcome_coef_names
+                .get(j)
+                .map(String::as_str)
+                .unwrap_or("?")
+        };
+        let (t, m) = (name(1), name(2));
         writeln!(
             f,
-            "    Treatment -> Mediator: {:.4} (SE = {:.4})",
-            self.mediator_coef, self.mediator_coef_se
+            "  Outcome working model ({}, {} link): {}",
+            self.family,
+            self.family.link_name(),
+            self.outcome_model
         )?;
-        writeln!(f, "    R-squared: {:.4}", self.mediator_r_squared)?;
-        writeln!(f)?;
-
-        if self.interaction_included {
-            writeln!(f, "  Outcome Model (Y ~ A + M + A*M + C):")?;
-        } else {
-            writeln!(f, "  Outcome Model (Y ~ A + M + C):")?;
-        }
         writeln!(
             f,
             "    Treatment -> Outcome: {:.4} (SE = {:.4})",
@@ -343,7 +643,21 @@ impl fmt::Display for MedflexResult {
                 int_coef, int_se
             )?;
         }
-        writeln!(f, "    R-squared: {:.4}", self.outcome_r_squared)?;
+        writeln!(f, "    Deviance R-squared: {:.4}", self.outcome_r_squared)?;
+        writeln!(f)?;
+        let mut med_rhs: Vec<&str> = vec![t];
+        med_rhs.extend(conf_names.iter().map(String::as_str));
+        writeln!(
+            f,
+            "  Mediator model ({m} ~ {}, least squares; descriptive):",
+            med_rhs.join(" + ")
+        )?;
+        writeln!(
+            f,
+            "    Treatment -> Mediator: {:.4} (SE = {:.4})",
+            self.mediator_coef, self.mediator_coef_se
+        )?;
+        writeln!(f, "    R-squared: {:.4}", self.mediator_r_squared)?;
         writeln!(f)?;
 
         writeln!(f, "Sample:")?;
@@ -354,7 +668,7 @@ impl fmt::Display for MedflexResult {
         )?;
         writeln!(
             f,
-            "  E[M|A=0] = {:.4}, E[M|A=1] = {:.4}",
+            "  E[M|A=0] = {:.4}, E[M|A=1] = {:.4} (raw sample means)",
             self.mediator_mean_control, self.mediator_mean_treated
         )?;
         writeln!(f)?;
@@ -362,6 +676,7 @@ impl fmt::Display for MedflexResult {
             f,
             "Signif. codes: *** p<0.001, ** p<0.01, * p<0.05, . p<0.10"
         )?;
+        f.write_str(&notes_text(self))?;
         if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
@@ -372,33 +687,44 @@ impl fmt::Display for MedflexResult {
 
 /// Run Natural Effect Models for causal mediation analysis.
 ///
-/// Implements the regression-based approach to mediation analysis with
-/// exposure-mediator interactions, following the medflex methodology.
+/// The imputation estimator of the module documentation, with generic names ("Y", "A",
+/// "M", "C1", ...) in coefficient labels and warnings; [`run_medflex_with_names`] takes the
+/// names, [`run_medflex_dataset`] reads columns by name.
 ///
 /// # Arguments
 ///
-/// * `y` - Outcome variable (n x 1)
-/// * `treatment` - Treatment/exposure variable (n x 1), typically binary
-/// * `mediator` - Mediator variable (n x 1)
+/// * `y` - Outcome (n): any real value for the gaussian working model, non-negative for
+///   poisson, in [0, 1] for binomial
+/// * `treatment` - Treatment (n), coded 0/1
+/// * `mediator` - Mediator (n)
 /// * `confounders` - Confounder matrix (n x p), can be empty (n x 0)
-/// * `config` - Configuration options
+/// * `config` - Configuration: scale (natural effect model), working-model family,
+///   A:M interaction, robust or bootstrap SEs, confidence level, seed
 ///
-/// # Returns
+/// # Errors
 ///
-/// `MedflexResult` containing effect estimates, standard errors, CIs, and model statistics
+/// `InvalidSpecification` for a treatment not coded 0/1, non-finite input, a confidence
+/// level outside (0, 1), a treatment in the span of the confounders (no overlap), an
+/// aliased treatment, mediator or A:M column, imputed outcomes outside the natural effect
+/// model's domain (ratio: non-negative; odds ratio: [0, 1]) and working-model data the
+/// family refuses; `InsufficientData` when there are no more observations than
+/// working-model coefficients or fewer than 3 units per arm; `Computation` when fewer than
+/// 50 bootstrap replicates could be fitted.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use p2a_core::econometrics::medflex::{run_medflex, MedflexConfig};
-/// use ndarray::array;
+/// use p2a_core::econometrics::medflex::{run_medflex, EffectScale, MedflexConfig};
+/// use ndarray::{array, Array2};
 ///
-/// let y = array![1.2, 2.1, 1.5, 3.0, 2.8, 1.1, 2.5, 3.2];
-/// let treatment = array![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
-/// let mediator = array![0.5, 1.2, 0.6, 1.5, 1.3, 0.4, 1.4, 1.6];
-/// let confounders = Array2::zeros((8, 0));  // No confounders
+/// let y = array![1.2, 2.1, 1.5, 3.0, 2.8, 1.1, 2.5, 3.2, 1.4, 2.9];
+/// let treatment = array![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+/// let mediator = array![0.5, 1.2, 0.6, 1.5, 1.3, 0.4, 1.4, 1.6, 0.7, 0.9];
+/// let confounders = Array2::zeros((10, 0)); // no confounders
 ///
-/// let config = MedflexConfig::default();
+/// let mut config = MedflexConfig::default();
+/// config.allow_interaction = false;
+/// config.bootstrap_ci = false; // robust sandwich SEs
 /// let result = run_medflex(&y.view(), &treatment.view(), &mediator.view(),
 ///                          &confounders.view(), config)?;
 /// println!("{}", result);
@@ -406,6 +732,8 @@ impl fmt::Display for MedflexResult {
 ///
 /// # References
 ///
+/// - Vansteelandt, S., Bekaert, M., & Lange, T. (2012). Imputation strategies for the
+///   estimation of natural direct and indirect effects. Epidemiologic Methods.
 /// - Steen, J., et al. (2017). "medflex: An R Package for Flexible Mediation
 ///   Analysis using Natural Effect Models." Journal of Statistical Software.
 /// - VanderWeele, T. J. (2015). Explanation in Causal Inference. Oxford Univ. Press.
@@ -416,45 +744,334 @@ pub fn run_medflex(
     confounders: &ArrayView2<f64>,
     config: MedflexConfig,
 ) -> EconResult<MedflexResult> {
-    let n = y.len();
+    let names = MedflexNames::generic(confounders.ncols());
+    run_medflex_with_names(y, treatment, mediator, confounders, &names, config)
+}
 
-    // Validate inputs
+/// [`run_medflex`] with the names used in coefficient labels, model formulas and
+/// warnings (`names.confounders` has one name per confounder column).
+pub fn run_medflex_with_names(
+    y: &ArrayView1<f64>,
+    treatment: &ArrayView1<f64>,
+    mediator: &ArrayView1<f64>,
+    confounders: &ArrayView2<f64>,
+    names: &MedflexNames,
+    config: MedflexConfig,
+) -> EconResult<MedflexResult> {
+    run_medflex_rows(y, treatment, mediator, confounders, names, config, None)
+}
+
+/// [`run_medflex_with_names`] with `rows[i]`, the caller's row of observation `i`, used in
+/// messages that name a row (the dataset wrapper passes the complete-case rows' original
+/// indices).
+fn run_medflex_rows(
+    y: &ArrayView1<f64>,
+    treatment: &ArrayView1<f64>,
+    mediator: &ArrayView1<f64>,
+    confounders: &ArrayView2<f64>,
+    names: &MedflexNames,
+    config: MedflexConfig,
+    rows: Option<&[usize]>,
+) -> EconResult<MedflexResult> {
+    let inp = Inputs {
+        y: y.to_owned(),
+        a: treatment.to_owned(),
+        m: mediator.to_owned(),
+        c: confounders.to_owned(),
+    };
+    let plan = validate_and_plan(&inp, names, &config, rows)?;
+    let n = inp.n();
+    let est = estimate(&inp, &plan, None)?;
+    let med = &est.mediator;
+
+    let n_treated = inp.a.iter().filter(|&&v| v == 1.0).count();
+    let n_control = n - n_treated;
+    let (mut sum_t, mut sum_c) = (0.0, 0.0);
+    for i in 0..n {
+        if inp.a[i] == 1.0 {
+            sum_t += inp.m[i];
+        } else {
+            sum_c += inp.m[i];
+        }
+    }
+
+    let level = config.confidence_level;
+    let scale = plan.scale;
+    let link = est.link;
+    let (se, ci, se_method, boot_notes) = if config.bootstrap_ci {
+        let mut rng =
+            rand::rngs::StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
+        let mut next_rows = |rows: &mut [usize]| {
+            for r in rows.iter_mut() {
+                *r = rng.gen_range(0..n);
+            }
+        };
+        let warm = WarmStart::from_sample(&est, &plan);
+        let draws = bootstrap_link_draws(&inp, &plan, &warm, config.n_bootstrap, &mut next_rows)?;
+        let (se, ci, notes) = summarize_bootstrap(&draws, &plan, &link, level)?;
+        let w = match scale {
+            EffectScale::Difference => "difference",
+            EffectScale::Ratio => "log",
+            EffectScale::OddsRatio => "logit",
+        };
+        let method = format!(
+            "bootstrap ({} of {} replicates; SE = SD of the {w}-scale draws, normal intervals as medflex confint(type = \"norm\"))",
+            draws.link[0].len(),
+            draws.total
+        );
+        (se, ci, method, notes)
+    } else {
+        let se = robust_se(&inp, &est, &plan)?;
+        let z = z_critical(level)?;
+        let ci: [(f64, f64); 3] = std::array::from_fn(|e| {
+            (
+                scale.to_scale(link[e] - z * se[e]),
+                scale.to_scale(link[e] + z * se[e]),
+            )
+        });
+        let method = "robust sandwich (stacked estimating equations of the outcome working model and the natural effect model, as medflex se = \"robust\")".to_string();
+        (se, ci, method, Vec::new())
+    };
+    let p: [f64; 3] = std::array::from_fn(|e| {
+        if se[e].is_finite() && se[e] > 0.0 {
+            normal_p_value_two_sided(link[e] / se[e])
+        } else {
+            f64::NAN
+        }
+    });
+    let [nde, nie, te] = link.map(|v| scale.to_scale(v));
+    let proportion_mediated = match scale {
+        EffectScale::Difference => {
+            if te == 0.0 {
+                f64::NAN
+            } else {
+                nie / te
+            }
+        }
+        EffectScale::Ratio | EffectScale::OddsRatio => {
+            let den = nde * nie - 1.0;
+            if den == 0.0 {
+                f64::NAN
+            } else {
+                nde * (nie - 1.0) / den
+            }
+        }
+    };
+
+    let mut warnings = est.notes.clone();
+    warnings.extend(boot_notes);
+    warnings.extend(proportion_note(proportion_mediated));
+
+    let w = &est.working;
+    let k_w = w.coef.len();
+    let (interaction_coef, interaction_coef_se) = if plan.interaction {
+        (Some(w.coef[k_w - 1]), Some(w.se[k_w - 1]))
+    } else {
+        (None, None)
+    };
+    let ne_terms = plan.ne_names[1..].join(" + ");
+    let ne_model = format!(
+        "yhat ~ {ne_terms} ({}, {} link)",
+        scale.ne_family_name(),
+        scale.link_name()
+    );
+    let outcome_model = format!(
+        "{} ~ {}",
+        plan.names.outcome,
+        plan.working_names[1..].join(" + ")
+    );
+
+    Ok(MedflexResult {
+        total_effect: te,
+        natural_direct_effect: nde,
+        natural_indirect_effect: nie,
+        proportion_mediated,
+        te_se: se[2],
+        nde_se: se[0],
+        nie_se: se[1],
+        te_ci: ci[2],
+        nde_ci: ci[0],
+        nie_ci: ci[1],
+        te_p_value: p[2],
+        nde_p_value: p[0],
+        nie_p_value: p[1],
+        mediator_coef: med.coef_a,
+        mediator_coef_se: med.se_a,
+        direct_coef: w.coef[1],
+        direct_coef_se: w.se[1],
+        mediator_outcome_coef: w.coef[2],
+        mediator_outcome_coef_se: w.se[2],
+        interaction_coef,
+        interaction_coef_se,
+        mediator_r_squared: med.r2,
+        outcome_r_squared: w.r2,
+        n_obs: n,
+        n_treated,
+        n_control,
+        mediator_mean_control: sum_c / n_control as f64,
+        mediator_mean_treated: sum_t / n_treated as f64,
+        interaction_included: plan.interaction,
+        scale,
+        confidence_level: level,
+        missing: MissingSummary::none(n),
+        family: plan.family,
+        se_method,
+        ne_model,
+        outcome_model,
+        outcome_coef_names: plan.working_names.clone(),
+        outcome_coefficients: w.coef.to_vec(),
+        outcome_std_errors: w.se.to_vec(),
+        ne_coef_names: plan.ne_names.clone(),
+        ne_coefficients: est.ne_coef.to_vec(),
+        confounder_means: plan.cbar.clone(),
+        warnings,
+    })
+}
+
+// ============================================================================
+// Inputs, validation and the plan of one analysis
+// ============================================================================
+
+/// The analysis variables (the sample or one bootstrap resample).
+struct Inputs {
+    y: Array1<f64>,
+    a: Array1<f64>,
+    m: Array1<f64>,
+    c: Array2<f64>,
+}
+
+impl Inputs {
+    fn n(&self) -> usize {
+        self.y.len()
+    }
+
+    /// The units `rows` (with repetition), through the allocation ceiling.
+    fn resample(&self, rows: &[usize]) -> EconResult<Inputs> {
+        let n = rows.len();
+        let what = "bootstrap resample";
+        let pick = |v: &Array1<f64>| -> EconResult<Array1<f64>> {
+            let mut out = resource::try_zeros1(n, what)?;
+            for (o, &r) in out.iter_mut().zip(rows) {
+                *o = v[r];
+            }
+            Ok(out)
+        };
+        let mut c = resource::try_zeros2(n, self.c.ncols(), what)?;
+        for (i, &r) in rows.iter().enumerate() {
+            c.row_mut(i).assign(&self.c.row(r));
+        }
+        Ok(Inputs {
+            y: pick(&self.y)?,
+            a: pick(&self.a)?,
+            m: pick(&self.m)?,
+            c,
+        })
+    }
+}
+
+/// What one analysis fits, fixed for the sample and every bootstrap replicate.
+struct Plan {
+    family: MedflexFamily,
+    scale: EffectScale,
+    interaction: bool,
+    /// Confounder levels of the NDE and TE contrasts (the sample means).
+    cbar: Vec<f64>,
+    names: MedflexNames,
+    /// "(Intercept)", A, M, C..., "A:M"
+    working_names: Vec<String>,
+    /// "(Intercept)", "A0", "A1", C..., "A0:A1", "A0:C"...
+    ne_names: Vec<String>,
+    /// "(Intercept)", C..., A: the identification design `[1, C, A]`
+    id_names: Vec<String>,
+    /// "(Intercept)", A, C...: the reported mediator model
+    med_names: Vec<String>,
+}
+
+fn spec_err(message: String) -> EconError {
+    EconError::InvalidSpecification { message }
+}
+
+/// Prefix an `InvalidSpecification` message; other errors pass through.
+fn prefixed(e: EconError, prefix: &str) -> EconError {
+    match e {
+        EconError::InvalidSpecification { message } => spec_err(format!("{prefix}{message}")),
+        other => other,
+    }
+}
+
+fn validate_and_plan(
+    inp: &Inputs,
+    names: &MedflexNames,
+    config: &MedflexConfig,
+    rows: Option<&[usize]>,
+) -> EconResult<Plan> {
+    let n = inp.n();
+    // the caller's row of observation i
+    let row = |i: usize| rows.and_then(|r| r.get(i).copied()).unwrap_or(i);
+    if inp.a.len() != n {
+        return Err(spec_err(format!(
+            "Treatment length ({}) must match outcome length ({n})",
+            inp.a.len()
+        )));
+    }
+    if inp.m.len() != n {
+        return Err(spec_err(format!(
+            "Mediator length ({}) must match outcome length ({n})",
+            inp.m.len()
+        )));
+    }
+    if inp.c.nrows() != n {
+        return Err(spec_err(format!(
+            "Confounders rows ({}) must match outcome length ({n})",
+            inp.c.nrows()
+        )));
+    }
+    let p = inp.c.ncols();
+    if names.confounders.len() != p {
+        return Err(spec_err(format!(
+            "names.confounders has {} names but confounders has {p} columns",
+            names.confounders.len()
+        )));
+    }
+    validate_level(config.confidence_level, "confidence_level")?;
     if config.bootstrap_ci && config.n_bootstrap < MIN_VALID_BOOTSTRAP {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "n_bootstrap must be at least {MIN_VALID_BOOTSTRAP} when bootstrap_ci is true (fewer cannot give percentile intervals); got {}",
-                config.n_bootstrap
-            ),
-        });
+        return Err(spec_err(format!(
+            "n_bootstrap must be at least {MIN_VALID_BOOTSTRAP} when bootstrap_ci is true (fewer give an unreliable bootstrap standard error); got {}",
+            config.n_bootstrap
+        )));
     }
-    if treatment.len() != n {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Treatment length ({}) must match outcome length ({})",
-                treatment.len(),
-                n
-            ),
-        });
+    for (role, v) in [
+        ("outcome", &inp.y),
+        ("treatment", &inp.a),
+        ("mediator", &inp.m),
+    ] {
+        if let Some(i) = v.iter().position(|x| !x.is_finite()) {
+            return Err(spec_err(format!(
+                "{role} has a non-finite value at row {}",
+                row(i)
+            )));
+        }
     }
-    if mediator.len() != n {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Mediator length ({}) must match outcome length ({})",
-                mediator.len(),
-                n
-            ),
-        });
+    for (j, col) in inp.c.columns().into_iter().enumerate() {
+        if let Some(i) = col.iter().position(|x| !x.is_finite()) {
+            return Err(spec_err(format!(
+                "confounder '{}' has a non-finite value at row {}",
+                names.confounders[j],
+                row(i)
+            )));
+        }
     }
-    if confounders.nrows() != n {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "Confounders rows ({}) must match outcome length ({})",
-                confounders.nrows(),
-                n
-            ),
-        });
+    if let Some((i, v)) = inp
+        .a
+        .iter()
+        .enumerate()
+        .find(|(_, v)| **v != 0.0 && **v != 1.0)
+    {
+        return Err(spec_err(format!(
+            "natural effect models need a binary 0/1 treatment; row {} has treatment {v}",
+            row(i)
+        )));
     }
-
     let min_obs = if config.allow_interaction { 10 } else { 8 };
     if n < min_obs {
         return Err(EconError::InsufficientData {
@@ -463,11 +1080,8 @@ pub fn run_medflex(
             context: "Natural effect models require sufficient observations".to_string(),
         });
     }
-
-    // Count treated and control observations
-    let n_treated = treatment.iter().filter(|&&a| a >= 0.5).count();
+    let n_treated = inp.a.iter().filter(|&&v| v == 1.0).count();
     let n_control = n - n_treated;
-
     if n_treated < 3 || n_control < 3 {
         return Err(EconError::InsufficientData {
             required: 3,
@@ -475,536 +1089,896 @@ pub fn run_medflex(
             context: "Need at least 3 observations in each treatment group".to_string(),
         });
     }
-
-    // Compute mediator means by treatment group
-    let mut sum_m_treated = 0.0;
-    let mut sum_m_control = 0.0;
-    for i in 0..n {
-        if treatment[i] >= 0.5 {
-            sum_m_treated += mediator[i];
-        } else {
-            sum_m_control += mediator[i];
-        }
+    let k_out = 3 + p + usize::from(config.allow_interaction);
+    if n <= k_out {
+        return Err(EconError::InsufficientData {
+            required: k_out + 1,
+            provided: n,
+            context: format!(
+                "natural effect models: the outcome working model has {k_out} coefficients ({p} confounders{}); \
+                 it needs more observations than coefficients",
+                if config.allow_interaction {
+                    ", A:M"
+                } else {
+                    ""
+                }
+            ),
+        });
     }
-    let mediator_mean_treated = sum_m_treated / (n_treated as f64);
-    let mediator_mean_control = sum_m_control / (n_control as f64);
 
-    // Step 1: Fit mediator model: M = alpha_0 + alpha_1*A + alpha_2'*C + epsilon
-    let (alpha, alpha_se, mediator_r2) = fit_mediator_model(mediator, treatment, confounders)?;
-
-    // alpha[0] = intercept, alpha[1] = treatment effect, alpha[2..] = confounders
-    let alpha_1 = alpha[1];
-    let alpha_1_se = alpha_se[1];
-
-    // Step 2: Fit outcome model with or without interaction
-    let (beta, beta_se, outcome_r2) = fit_outcome_model(
-        y,
-        treatment,
-        mediator,
-        confounders,
-        config.allow_interaction,
-    )?;
-
-    // Extract coefficients
-    // Without interaction: Y = beta_0 + beta_1*A + beta_2*M + beta_3'*C
-    // With interaction:    Y = beta_0 + beta_1*A + beta_2*M + beta_3*A*M + beta_4'*C
-    let beta_1 = beta[1]; // Treatment coefficient
-    let beta_1_se = beta_se[1];
-    let beta_2 = beta[2]; // Mediator coefficient
-    let beta_2_se = beta_se[2];
-
-    let (beta_3, beta_3_se) = if config.allow_interaction {
-        (Some(beta[3]), Some(beta_se[3]))
-    } else {
-        (None, None)
-    };
-
-    // Step 3: Compute Natural Direct and Indirect Effects
-    // Using formulas from VanderWeele (2015) and medflex documentation
-    let (nde, nie, te) =
-        compute_natural_effects(alpha_1, beta_1, beta_2, beta_3, mediator_mean_control);
-
-    // Step 4: Bootstrap for standard errors and confidence intervals
-    let (te_se, nde_se, nie_se, te_ci, nde_ci, nie_ci) = if config.bootstrap_ci {
-        bootstrap_effects(
-            y,
-            treatment,
-            mediator,
-            confounders,
-            config.allow_interaction,
-            config.n_bootstrap,
-            config.confidence_level,
-            config.seed,
-        )?
-    } else {
-        // Delta method approximation for standard errors
-        delta_method_se(
-            alpha_1,
-            alpha_1_se,
-            beta_1,
-            beta_1_se,
-            beta_2,
-            beta_2_se,
-            beta_3,
-            beta_3_se,
-            mediator_mean_control,
-            config.confidence_level,
-        )
-    };
-
-    // Compute p-values (two-sided test against zero)
-    let te_p = compute_p_value(te, te_se);
-    let nde_p = compute_p_value(nde, nde_se);
-    let nie_p = compute_p_value(nie, nie_se);
-
-    // Proportion mediated
-    let proportion_mediated = if te.abs() > 1e-10 {
-        (nie / te).clamp(-2.0, 2.0) // Clamp to reasonable range
-    } else {
-        f64::NAN
-    };
-
-    Ok(MedflexResult {
-        total_effect: te,
-        natural_direct_effect: nde,
-        natural_indirect_effect: nie,
-        proportion_mediated,
-        te_se,
-        nde_se,
-        nie_se,
-        te_ci,
-        nde_ci,
-        nie_ci,
-        te_p_value: te_p,
-        nde_p_value: nde_p,
-        nie_p_value: nie_p,
-        mediator_coef: alpha_1,
-        mediator_coef_se: alpha_1_se,
-        direct_coef: beta_1,
-        direct_coef_se: beta_1_se,
-        mediator_outcome_coef: beta_2,
-        mediator_outcome_coef_se: beta_2_se,
-        interaction_coef: beta_3,
-        interaction_coef_se: beta_3_se,
-        mediator_r_squared: mediator_r2,
-        outcome_r_squared: outcome_r2,
-        n_obs: n,
-        n_treated,
-        n_control,
-        mediator_mean_control,
-        mediator_mean_treated,
-        interaction_included: config.allow_interaction,
+    let family = config.family.unwrap_or(config.scale.default_family());
+    let cbar: Vec<f64> = inp
+        .c
+        .columns()
+        .into_iter()
+        .map(|col| col.sum() / n as f64)
+        .collect();
+    let (t, m) = (&names.treatment, &names.mediator);
+    let conf = &names.confounders;
+    let intercept = "(Intercept)".to_string();
+    let mut working_names = vec![intercept.clone(), t.clone(), m.clone()];
+    working_names.extend(conf.iter().cloned());
+    let mut ne_names = vec![intercept.clone(), format!("{t}0"), format!("{t}1")];
+    ne_names.extend(conf.iter().cloned());
+    if config.allow_interaction {
+        working_names.push(format!("{t}:{m}"));
+        ne_names.push(format!("{t}0:{t}1"));
+        ne_names.extend(conf.iter().map(|c| format!("{t}0:{c}")));
+    }
+    let mut id_names = vec![intercept.clone()];
+    id_names.extend(conf.iter().cloned());
+    id_names.push(t.clone());
+    let mut med_names = vec![intercept, t.clone()];
+    med_names.extend(conf.iter().cloned());
+    Ok(Plan {
+        family,
         scale: config.scale,
-        confidence_level: config.confidence_level,
-        missing: MissingSummary::none(n),
+        interaction: config.allow_interaction,
+        cbar,
+        names: names.clone(),
+        working_names,
+        ne_names,
+        id_names,
+        med_names,
     })
 }
 
-/// Fit the mediator model: M = alpha_0 + alpha_1*A + alpha_2'*C + epsilon
-///
-/// Returns (coefficients, standard_errors, r_squared)
-fn fit_mediator_model(
-    mediator: &ArrayView1<f64>,
-    treatment: &ArrayView1<f64>,
-    confounders: &ArrayView2<f64>,
-) -> EconResult<(Array1<f64>, Array1<f64>, f64)> {
-    let n = mediator.len();
-    let p_conf = confounders.ncols();
-    let k = 2 + p_conf; // intercept + treatment + confounders
+// ============================================================================
+// Designs
+// ============================================================================
 
-    // Build design matrix X = [1, A, C]
-    let mut x = Array2::zeros((n, k));
+/// Working model `[1, A, M, C, (A M)]` (n x k_w), R's column order.
+fn working_design(inp: &Inputs, plan: &Plan) -> EconResult<Array2<f64>> {
+    let (n, p) = inp.c.dim();
+    let k = 3 + p + usize::from(plan.interaction);
+    let mut x = resource::try_zeros2(n, k, "natural effect models: working-model design")?;
     for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
-        x[[i, 1]] = treatment[i];
-        for j in 0..p_conf {
-            x[[i, 2 + j]] = confounders[[i, j]];
+        let mut row = x.row_mut(i);
+        row[0] = 1.0;
+        row[1] = inp.a[i];
+        row[2] = inp.m[i];
+        for j in 0..p {
+            row[3 + j] = inp.c[[i, j]];
+        }
+        if plan.interaction {
+            row[k - 1] = inp.a[i] * inp.m[i];
         }
     }
-
-    // Convert mediator to Array1
-    let m: Array1<f64> = mediator.iter().cloned().collect();
-
-    // OLS: beta = (X'X)^{-1} X'y
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
-        context: "X'X in mediator model".to_string(),
-        suggestion: "Check for collinearity among treatment and confounders".to_string(),
-    })?;
-
-    let xty_vec = xty(&x.view(), &m);
-    let alpha = xtx_inv.dot(&xty_vec);
-
-    // Compute residuals and sigma^2
-    let m_hat = x.dot(&alpha);
-    let residuals: Array1<f64> = &m - &m_hat;
-    let ssr: f64 = residuals.iter().map(|&e| e * e).sum();
-    let df_resid = n - k;
-    let sigma2 = ssr / (df_resid as f64);
-
-    // Standard errors
-    let vcov = &xtx_inv * sigma2;
-    let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
-
-    // R-squared
-    let m_mean = m.mean().unwrap_or(0.0);
-    let sst: f64 = m.iter().map(|&mi| (mi - m_mean).powi(2)).sum();
-    let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-
-    Ok((alpha, se, r2))
+    Ok(x)
 }
 
-/// Fit the outcome model with or without treatment-mediator interaction.
-///
-/// Without interaction: Y = beta_0 + beta_1*A + beta_2*M + beta_3'*C
-/// With interaction:    Y = beta_0 + beta_1*A + beta_2*M + beta_3*A*M + beta_4'*C
-///
-/// Returns (coefficients, standard_errors, r_squared)
-fn fit_outcome_model(
-    y: &ArrayView1<f64>,
-    treatment: &ArrayView1<f64>,
-    mediator: &ArrayView1<f64>,
-    confounders: &ArrayView2<f64>,
-    include_interaction: bool,
-) -> EconResult<(Array1<f64>, Array1<f64>, f64)> {
-    let n = y.len();
-    let p_conf = confounders.ncols();
-    let k = if include_interaction {
-        4 + p_conf // intercept + A + M + A*M + confounders
-    } else {
-        3 + p_conf // intercept + A + M + confounders
-    };
-
-    // Build design matrix
-    let mut x = Array2::zeros((n, k));
+/// Working-model rows of the expanded data (2n x k_w): row `2i + j` sets A = j.
+fn counterfactual_design(inp: &Inputs, plan: &Plan) -> EconResult<Array2<f64>> {
+    let (n, p) = inp.c.dim();
+    let k = 3 + p + usize::from(plan.interaction);
+    let rows = resource::checked_len(&[n, 2], "natural effect models: expanded data")?;
+    let mut x = resource::try_zeros2(rows, k, "natural effect models: expanded data")?;
     for i in 0..n {
-        x[[i, 0]] = 1.0; // Intercept
-        x[[i, 1]] = treatment[i];
-        x[[i, 2]] = mediator[i];
-
-        let mut col_idx = 3;
-        if include_interaction {
-            x[[i, 3]] = treatment[i] * mediator[i]; // A*M interaction
-            col_idx = 4;
-        }
-
-        for j in 0..p_conf {
-            x[[i, col_idx + j]] = confounders[[i, j]];
-        }
-    }
-
-    // Convert y to Array1
-    let y_arr: Array1<f64> = y.iter().cloned().collect();
-
-    // OLS: beta = (X'X)^{-1} X'y
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
-        context: "X'X in outcome model".to_string(),
-        suggestion: "Check for collinearity in treatment, mediator, and confounders".to_string(),
-    })?;
-
-    let xty_vec = xty(&x.view(), &y_arr);
-    let beta = xtx_inv.dot(&xty_vec);
-
-    // Compute residuals and sigma^2
-    let y_hat = x.dot(&beta);
-    let residuals: Array1<f64> = &y_arr - &y_hat;
-    let ssr: f64 = residuals.iter().map(|&e| e * e).sum();
-    let df_resid = n - k;
-    let sigma2 = ssr / (df_resid as f64);
-
-    // Standard errors
-    let vcov = &xtx_inv * sigma2;
-    let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
-
-    // R-squared
-    let y_mean = y_arr.mean().unwrap_or(0.0);
-    let sst: f64 = y_arr.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
-    let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
-
-    Ok((beta, se, r2))
-}
-
-/// Compute Natural Direct and Indirect Effects.
-///
-/// Formulas from VanderWeele (2015), Chapter 2:
-/// - Without interaction (beta_3 = 0):
-///   NDE = beta_1
-///   NIE = alpha_1 * beta_2
-///
-/// - With interaction:
-///   NDE = beta_1 + beta_3 * E[M|A=0]
-///   NIE = alpha_1 * (beta_2 + beta_3)
-///
-/// Total Effect = NDE + NIE
-fn compute_natural_effects(
-    alpha_1: f64,               // Treatment effect on mediator
-    beta_1: f64,                // Direct treatment effect on outcome
-    beta_2: f64,                // Mediator effect on outcome
-    beta_3: Option<f64>,        // Interaction coefficient (if included)
-    mediator_mean_control: f64, // E[M|A=0]
-) -> (f64, f64, f64) {
-    match beta_3 {
-        Some(interaction) => {
-            // With interaction (VanderWeele 2015, Eq. 2.6-2.7)
-            // NDE = beta_1 + beta_3 * E[M|A=0]
-            let nde = beta_1 + interaction * mediator_mean_control;
-            // NIE = alpha_1 * (beta_2 + beta_3)
-            let nie = alpha_1 * (beta_2 + interaction);
-            let te = nde + nie;
-            (nde, nie, te)
-        }
-        None => {
-            // Without interaction (product of coefficients method)
-            // NDE = beta_1
-            let nde = beta_1;
-            // NIE = alpha_1 * beta_2
-            let nie = alpha_1 * beta_2;
-            let te = nde + nie;
-            (nde, nie, te)
-        }
-    }
-}
-
-/// Fewest valid bootstrap replicates from which percentile intervals are reported.
-const MIN_VALID_BOOTSTRAP: usize = 50;
-
-/// Bootstrap confidence intervals for natural effects.
-fn bootstrap_effects(
-    y: &ArrayView1<f64>,
-    treatment: &ArrayView1<f64>,
-    mediator: &ArrayView1<f64>,
-    confounders: &ArrayView2<f64>,
-    include_interaction: bool,
-    n_bootstrap: usize,
-    confidence_level: f64,
-    seed: Option<u64>,
-) -> EconResult<(f64, f64, f64, (f64, f64), (f64, f64), (f64, f64))> {
-    let n = y.len();
-
-    let mut rng: Box<dyn RngCore> = match seed {
-        Some(s) => Box::new(rand::rngs::StdRng::seed_from_u64(s)),
-        None => Box::new(rand::thread_rng()),
-    };
-
-    let what = "bootstrap replications (n_bootstrap)";
-    let mut boot_te = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
-    let mut boot_nde = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
-    let mut boot_nie = resource::try_with_capacity::<f64>(n_bootstrap, what)?;
-
-    for _ in 0..n_bootstrap {
-        resource::checkpoint()?;
-
-        // Resample with replacement
-        let indices: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
-
-        // Create bootstrap sample
-        let y_boot: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
-        let t_boot: Array1<f64> = indices.iter().map(|&i| treatment[i]).collect();
-        let m_boot: Array1<f64> = indices.iter().map(|&i| mediator[i]).collect();
-        let c_boot: Array2<f64> = Array2::from_shape_fn((n, confounders.ncols()), |(row, col)| {
-            confounders[[indices[row], col]]
-        });
-
-        // Compute mediator mean in control group for bootstrap sample
-        let mut sum_m_ctrl = 0.0;
-        let mut n_ctrl = 0;
-        for i in 0..n {
-            if t_boot[i] < 0.5 {
-                sum_m_ctrl += m_boot[i];
-                n_ctrl += 1;
+        for j in 0..2 {
+            let a0 = j as f64;
+            let mut row = x.row_mut(2 * i + j);
+            row[0] = 1.0;
+            row[1] = a0;
+            row[2] = inp.m[i];
+            for l in 0..p {
+                row[3 + l] = inp.c[[i, l]];
+            }
+            if plan.interaction {
+                row[k - 1] = a0 * inp.m[i];
             }
         }
-        let m_mean_ctrl = if n_ctrl > 0 {
-            sum_m_ctrl / (n_ctrl as f64)
-        } else {
-            0.0
-        };
+    }
+    Ok(x)
+}
 
-        // Fit models on bootstrap sample
-        if let (Ok((alpha, _, _)), Ok((beta, _, _))) = (
-            fit_mediator_model(&m_boot.view(), &t_boot.view(), &c_boot.view()),
-            fit_outcome_model(
-                &y_boot.view(),
-                &t_boot.view(),
-                &m_boot.view(),
-                &c_boot.view(),
-                include_interaction,
-            ),
-        ) {
-            let alpha_1 = alpha[1];
-            let beta_1 = beta[1];
-            let beta_2 = beta[2];
-            let beta_3 = if include_interaction {
-                Some(beta[3])
+/// Natural effect model design (2n x k_n): row `2i + j` is
+/// `[1, A0 = j, A1 = A_i, C_i, (j A_i, j C_i)]`.
+fn ne_design(inp: &Inputs, plan: &Plan) -> EconResult<Array2<f64>> {
+    let (n, p) = inp.c.dim();
+    let k = 3 + p + if plan.interaction { 1 + p } else { 0 };
+    let rows = resource::checked_len(&[n, 2], "natural effect models: expanded data")?;
+    let mut z = resource::try_zeros2(rows, k, "natural effect models: natural effect design")?;
+    for i in 0..n {
+        for j in 0..2 {
+            let a0 = j as f64;
+            let mut row = z.row_mut(2 * i + j);
+            row[0] = 1.0;
+            row[1] = a0;
+            row[2] = inp.a[i];
+            for l in 0..p {
+                row[3 + l] = inp.c[[i, l]];
+            }
+            if plan.interaction {
+                row[3 + p] = a0 * inp.a[i];
+                for l in 0..p {
+                    row[4 + p + l] = a0 * inp.c[[i, l]];
+                }
+            }
+        }
+    }
+    Ok(z)
+}
+
+/// `[1, C, A]` (A last, so that pivoting aliases A when it lies in the span of 1 and C).
+fn identification_design(inp: &Inputs) -> EconResult<Array2<f64>> {
+    let (n, p) = inp.c.dim();
+    let mut x = resource::try_zeros2(n, p + 2, "natural effect models: mediator design")?;
+    for i in 0..n {
+        let mut row = x.row_mut(i);
+        row[0] = 1.0;
+        for j in 0..p {
+            row[1 + j] = inp.c[[i, j]];
+        }
+        row[p + 1] = inp.a[i];
+    }
+    Ok(x)
+}
+
+fn zero_nan(v: &Array1<f64>) -> Array1<f64> {
+    v.mapv(|x| if x.is_nan() { 0.0 } else { x })
+}
+
+// ============================================================================
+// One fit: working model, imputation, natural effect model, contrasts
+// ============================================================================
+
+/// The outcome working model.
+struct WorkingFit {
+    /// Coefficients, `NaN` for aliased columns.
+    coef: Array1<f64>,
+    /// Standard errors, `NaN` for aliased columns.
+    se: Array1<f64>,
+    /// Fitted means.
+    mu: Array1<f64>,
+    aliased: Vec<usize>,
+    /// Deviance R-squared.
+    r2: f64,
+    notes: Vec<String>,
+}
+
+/// `start`: IRLS start values of a non-gaussian working model (a bootstrap replicate
+/// starts from the sample fit; the canonical-link likelihoods are concave, so the
+/// converged fit is the same).
+fn fit_working(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    plan: &Plan,
+    start: Option<&Array1<f64>>,
+) -> EconResult<WorkingFit> {
+    const MODEL: &str = "Outcome working model";
+    let wf = match plan.family {
+        MedflexFamily::Gaussian => {
+            let fit = solve_ols(x.view(), y.view())?;
+            let n = y.len();
+            let rss: f64 = fit.residuals.iter().map(|e| e * e).sum();
+            let df = n.saturating_sub(fit.rank);
+            let sigma2 = if df > 0 { rss / df as f64 } else { f64::NAN };
+            let se = fit.unscaled.diag().mapv(|u| (u * sigma2).sqrt());
+            let mean = y.sum() / n as f64;
+            let tss: f64 = y.iter().map(|v| (v - mean).powi(2)).sum();
+            let r2 = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
+            let notes = aliasing_message(&fit.aliased, &plan.working_names)
+                .map(|m| format!("{MODEL}: {m}"))
+                .into_iter()
+                .collect();
+            WorkingFit {
+                mu: y - &fit.residuals,
+                coef: fit.beta,
+                se,
+                aliased: fit.aliased,
+                r2,
+                notes,
+            }
+        }
+        MedflexFamily::Poisson | MedflexFamily::Binomial => {
+            let mut spec = if plan.family == MedflexFamily::Poisson {
+                GlmSpec::poisson()
             } else {
-                None
+                GlmSpec::logit()
             };
+            spec.start = start.map(|s| s.view());
+            let fit = fit_glm(x.view(), y.view(), &spec)
+                .map_err(|e| prefixed(e, "outcome working model: "))?;
+            let notes = glm_fit_notes(MODEL, &fit, &spec, &plan.working_names);
+            let r2 = if fit.null_deviance > 0.0 {
+                1.0 - fit.deviance / fit.null_deviance
+            } else {
+                0.0
+            };
+            WorkingFit {
+                r2,
+                notes,
+                mu: fit.fitted,
+                se: fit.std_errors,
+                aliased: fit.aliased,
+                coef: fit.coefficients,
+            }
+        }
+    };
+    // the natural effects need A, M and A:M
+    let k = wf.coef.len();
+    let mut needed = vec![(1, "treatment"), (2, "mediator")];
+    if plan.interaction {
+        needed.push((k - 1, "treatment-mediator interaction"));
+    }
+    for (j, role) in needed {
+        if wf.aliased.contains(&j) {
+            let refit = if j == k - 1 && plan.interaction {
+                "; refit with allow_interaction = false"
+            } else {
+                ""
+            };
+            return Err(spec_err(format!(
+                "the {role} column '{}' is aliased in the outcome working model; natural effects are not identified{refit}",
+                plan.working_names[j]
+            )));
+        }
+    }
+    Ok(wf)
+}
 
-            let (nde, nie, te) =
-                compute_natural_effects(alpha_1, beta_1, beta_2, beta_3, m_mean_ctrl);
+/// Both arms present (a bootstrap resample can lose one).
+fn check_arms(a: &Array1<f64>) -> EconResult<()> {
+    let treated = a.iter().filter(|&&v| v == 1.0).count();
+    let control = a.len() - treated;
+    if treated == 0 || control == 0 {
+        return Err(spec_err(format!(
+            "natural effects need treated and control units (treated: {treated}, control: {control})"
+        )));
+    }
+    Ok(())
+}
 
-            if te.is_finite() && nde.is_finite() && nie.is_finite() {
-                boot_te.push(te);
-                boot_nde.push(nde);
-                boot_nie.push(nie);
+/// The mediator model `M ~ C + A`.
+struct MediatorFit {
+    /// Coefficients in the order `[1, C, A]`, aliased ones set to 0.
+    alpha: Array1<f64>,
+    /// Coefficient of A, its standard error and the model's R-squared (the reported
+    /// mediator model `M ~ A + C`: A is never aliased, so neither depends on the column
+    /// order).
+    coef_a: f64,
+    se_a: f64,
+    r2: f64,
+    /// The aliasing note.
+    notes: Vec<String>,
+}
+
+/// The mediator model `M ~ C + A` (A last): refuses a treatment in the span of 1 and C
+/// (no overlap). Since A is then not aliased, any aliasing is among 1 and C and is the
+/// same as in the reported order `[1, A, C]`.
+fn identification(inp: &Inputs, plan: &Plan) -> EconResult<MediatorFit> {
+    let x = identification_design(inp)?;
+    let fit = solve_ols(x.view(), inp.m.view())?;
+    let ja = x.ncols() - 1;
+    if fit.aliased.contains(&ja) {
+        return Err(spec_err(
+            "treatment is a linear function of the confounders (no overlap); natural effects are not identified"
+                .into(),
+        ));
+    }
+    let n = inp.n();
+    let rss: f64 = fit.residuals.iter().map(|e| e * e).sum();
+    let df = n.saturating_sub(fit.rank);
+    let sigma2 = if df > 0 { rss / df as f64 } else { f64::NAN };
+    let mean = inp.m.sum() / n as f64;
+    let tss: f64 = inp.m.iter().map(|v| (v - mean).powi(2)).sum();
+    let notes = aliasing_message(&fit.aliased, &plan.id_names)
+        .map(|m| format!("Mediator model: {m}"))
+        .into_iter()
+        .collect();
+    Ok(MediatorFit {
+        coef_a: fit.beta[ja],
+        se_a: (fit.unscaled[[ja, ja]] * sigma2).sqrt(),
+        r2: if tss > 0.0 { 1.0 - rss / tss } else { 0.0 },
+        alpha: zero_nan(&fit.beta),
+        notes,
+    })
+}
+
+/// One fit of the estimator on `inp`.
+struct Estimate {
+    /// NDE, NIE, TE on the link scale.
+    link: [f64; 3],
+    /// Working-model, natural effect model and mediator-model notes.
+    notes: Vec<String>,
+    working: WorkingFit,
+    mediator: MediatorFit,
+    /// Working design (n x k_w).
+    x: Array2<f64>,
+    /// Counterfactual working design (2n x k_w) and its linear predictor.
+    xcf: Array2<f64>,
+    eta_cf: Array1<f64>,
+    /// Imputed outcomes (2n).
+    yhat: Array1<f64>,
+    /// Natural effect design (2n x k_n), coefficients (`NaN` aliased), fitted values.
+    z: Array2<f64>,
+    ne_coef: Array1<f64>,
+    ne_aliased: Vec<usize>,
+    nu: Array1<f64>,
+}
+
+/// The three contrasts over the natural effect model's columns: NDE, NIE, TE.
+fn contrasts(plan: &Plan, k_n: usize) -> [Array1<f64>; 3] {
+    let p = plan.cbar.len();
+    let mut nde = Array1::zeros(k_n);
+    let mut nie = Array1::zeros(k_n);
+    nde[1] = 1.0;
+    nie[2] = 1.0;
+    if plan.interaction {
+        nie[3 + p] = 1.0;
+        for (j, &c) in plan.cbar.iter().enumerate() {
+            nde[4 + p + j] = c;
+        }
+    }
+    let te = &nde + &nie;
+    [nde, nie, te]
+}
+
+/// The imputed outcomes of the expanded data (row `2i + j` sets A = j): the counterfactual
+/// working design, its linear predictor and `yhat`, checked against the natural effect
+/// model's range.
+fn impute(
+    inp: &Inputs,
+    plan: &Plan,
+    working: &WorkingFit,
+) -> EconResult<(Array2<f64>, Array1<f64>, Array1<f64>)> {
+    let beta_z = zero_nan(&working.coef);
+    let xcf = counterfactual_design(inp, plan)?;
+    let eta_cf = xcf.dot(&beta_z);
+    let yhat = eta_cf.mapv(|e| plan.family.linkinv(e));
+    match plan.scale {
+        EffectScale::Difference => {}
+        EffectScale::Ratio => {
+            if let Some((r, v)) = yhat.iter().enumerate().find(|(_, v)| **v < 0.0) {
+                return Err(spec_err(format!(
+                    "scale 'ratio' fits a log-linear natural effect model and needs non-negative imputed outcomes, but the {} working model imputes {v} for row {}; use family 'poisson' or 'binomial'",
+                    plan.family,
+                    r / 2
+                )));
+            }
+        }
+        EffectScale::OddsRatio => {
+            if let Some((r, v)) = yhat
+                .iter()
+                .enumerate()
+                .find(|(_, v)| !(0.0..=1.0).contains(*v))
+            {
+                return Err(spec_err(format!(
+                    "scale 'odds_ratio' fits a logistic natural effect model and needs imputed outcomes in [0, 1], but the {} working model imputes {v} for row {}; use family 'binomial'",
+                    plan.family,
+                    r / 2
+                )));
             }
         }
     }
+    Ok((xcf, eta_cf, yhat))
+}
 
-    if boot_te.len() < MIN_VALID_BOOTSTRAP {
-        return Err(EconError::ConvergenceFailure {
-            iterations: n_bootstrap,
-            last_change: 0.0,
-            suggestion: "Too few valid bootstrap samples. Check data for issues.".to_string(),
+/// The quasi-GLM of the natural effect model on the ratio or odds-ratio scale.
+fn ne_glm_spec<'a>(scale: EffectScale) -> GlmSpec<'a> {
+    if scale == EffectScale::Ratio {
+        GlmSpec::new(GlmFamily::QuasiPoisson, GlmLink::Log)
+    } else {
+        GlmSpec::new(GlmFamily::QuasiBinomial, GlmLink::Logit)
+    }
+}
+
+/// `working_start`: see [`fit_working`] (`None` for the sample fit).
+fn estimate(
+    inp: &Inputs,
+    plan: &Plan,
+    working_start: Option<&Array1<f64>>,
+) -> EconResult<Estimate> {
+    check_arms(&inp.a)?;
+    let mediator = identification(inp, plan)?;
+    let x = working_design(inp, plan)?;
+    let working = fit_working(&x, &inp.y, plan, working_start)?;
+    let (xcf, eta_cf, yhat) = impute(inp, plan, &working)?;
+
+    const MODEL: &str = "Natural effect model";
+    let z = ne_design(inp, plan)?;
+    let mut notes = working.notes.clone();
+    let (ne_coef, ne_aliased, nu) = match plan.scale {
+        EffectScale::Difference => {
+            let fit = solve_ols(z.view(), yhat.view())?;
+            notes.extend(
+                aliasing_message(&fit.aliased, &plan.ne_names).map(|m| format!("{MODEL}: {m}")),
+            );
+            (fit.beta, fit.aliased, &yhat - &fit.residuals)
+        }
+        EffectScale::Ratio | EffectScale::OddsRatio => {
+            let spec = ne_glm_spec(plan.scale);
+            let fit = fit_glm(z.view(), yhat.view(), &spec)
+                .map_err(|e| prefixed(e, "natural effect model: "))?;
+            notes.extend(glm_fit_notes(MODEL, &fit, &spec, &plan.ne_names));
+            (fit.coefficients, fit.aliased, fit.fitted)
+        }
+    };
+    let p = plan.cbar.len();
+    let mut needed = vec![1, 2];
+    if plan.interaction {
+        needed.push(3 + p);
+    }
+    for j in needed {
+        if ne_aliased.contains(&j) {
+            return Err(spec_err(format!(
+                "the natural effect model term '{}' is aliased; natural effects are not identified",
+                plan.ne_names[j]
+            )));
+        }
+    }
+    let theta_z = zero_nan(&ne_coef);
+    let k = contrasts(plan, theta_z.len());
+    let link = [k[0].dot(&theta_z), k[1].dot(&theta_z), k[2].dot(&theta_z)];
+    notes.extend(mediator.notes.iter().cloned());
+    Ok(Estimate {
+        link,
+        notes,
+        working,
+        mediator,
+        x,
+        xcf,
+        eta_cf,
+        yhat,
+        z,
+        ne_coef,
+        ne_aliased,
+        nu,
+    })
+}
+
+/// The difference-scale effects of a gaussian working model in closed form (the same
+/// numbers as [`estimate`], without the expanded data): `NDE = b_A + b_AM (alpha_0 +
+/// alpha_C' cbar)`, `NIE = alpha_A (b_M + b_AM)` with the mediator model `M ~ C + A`.
+/// Used by the bootstrap replicates.
+fn closed_form(inp: &Inputs, plan: &Plan) -> EconResult<([f64; 3], Vec<String>)> {
+    check_arms(&inp.a)?;
+    let MediatorFit {
+        alpha,
+        notes: med_notes,
+        ..
+    } = identification(inp, plan)?;
+    let x = working_design(inp, plan)?;
+    let working = fit_working(&x, &inp.y, plan, None)?;
+    let b = zero_nan(&working.coef);
+    let p = plan.cbar.len();
+    let b_am = if plan.interaction {
+        b[b.len() - 1]
+    } else {
+        0.0
+    };
+    let level = alpha[0]
+        + plan
+            .cbar
+            .iter()
+            .enumerate()
+            .map(|(j, c)| alpha[1 + j] * c)
+            .sum::<f64>();
+    let nde = b[1] + b_am * level;
+    let nie = alpha[p + 1] * (b[2] + b_am);
+    let mut notes = working.notes;
+    notes.extend(med_notes);
+    Ok(([nde, nie, nde + nie], notes))
+}
+
+/// The columns of `m` listed in `cols`.
+fn columns(m: &Array2<f64>, cols: &[usize], what: &str) -> EconResult<Array2<f64>> {
+    let mut out = resource::try_zeros2(m.nrows(), cols.len(), what)?;
+    for (j, &c) in cols.iter().enumerate() {
+        out.column_mut(j).assign(&m.column(c));
+    }
+    Ok(out)
+}
+
+/// `X' diag(w) X`.
+fn weighted_gram(x: &Array2<f64>, w: &Array1<f64>) -> Array2<f64> {
+    let xw = x * &w.view().insert_axis(ndarray::Axis(1));
+    x.t().dot(&xw)
+}
+
+/// Robust (stacked sandwich, HC0) link-scale SEs of NDE, NIE and TE, as medflex
+/// `neModel(se = "robust")`: with the working model's scores `U_i = x_i (y_i - mu_i)` and
+/// information `A_b`, the natural effect model's unit scores `S_i` and information `A_t`,
+/// and `G = d S / d beta'`, each unit's influence is `A_t^{-1} (S_i + G A_b^{-1} U_i)`.
+/// Computed on the non-aliased columns of both models.
+fn robust_se(inp: &Inputs, est: &Estimate, plan: &Plan) -> EconResult<[f64; 3]> {
+    let n = est.x.nrows();
+    let okw: Vec<usize> = (0..est.working.coef.len())
+        .filter(|j| !est.working.aliased.contains(j))
+        .collect();
+    let okn: Vec<usize> = (0..est.ne_coef.len())
+        .filter(|j| !est.ne_aliased.contains(j))
+        .collect();
+    let what = "natural effect models: robust variance";
+    let x = columns(&est.x, &okw, what)?;
+    let xcf = columns(&est.xcf, &okw, what)?;
+    let z = columns(&est.z, &okn, what)?;
+
+    // working model: information and scores
+    let v = est.working.mu.mapv(|mu| plan.family.variance(mu));
+    let a_b = weighted_gram(&x, &v);
+    let resid = &inp.y - &est.working.mu;
+    let u = &x * &resid.view().insert_axis(ndarray::Axis(1));
+
+    // natural effect model: information, unit scores, cross derivative
+    let w = est.nu.mapv(|nu| match plan.scale {
+        EffectScale::Difference => 1.0,
+        EffectScale::Ratio => nu,
+        EffectScale::OddsRatio => nu * (1.0 - nu),
+    });
+    let a_t = weighted_gram(&z, &w);
+    let d = est.eta_cf.mapv(|e| plan.family.mu_eta(e));
+    let xcf_d = &xcf * &d.view().insert_axis(ndarray::Axis(1));
+    let g = z.t().dot(&xcf_d);
+    let mut s = resource::try_zeros2(n, okn.len(), what)?;
+    for i in 0..n {
+        for r in [2 * i, 2 * i + 1] {
+            let e = est.yhat[r] - est.nu[r];
+            s.row_mut(i).scaled_add(e, &z.row(r));
+        }
+    }
+
+    let a_b_inv = sym_inverse(
+        a_b.view(),
+        SingularPolicy::Error,
+        "outcome working-model information",
+    )?
+    .inverse;
+    let a_t_inv = sym_inverse(
+        a_t.view(),
+        SingularPolicy::Error,
+        "natural effect model information",
+    )?
+    .inverse;
+    let phi = (s + u.dot(&a_b_inv).dot(&g.t())).dot(&a_t_inv);
+    let vcov = phi.t().dot(&phi);
+    let k = contrasts(plan, est.ne_coef.len());
+    Ok(std::array::from_fn(|e| {
+        let ko = Array1::from_iter(okn.iter().map(|&j| k[e][j]));
+        ko.dot(&vcov.dot(&ko)).sqrt()
+    }))
+}
+
+/// The reported mediator model `M ~ A + C` (least squares, R's column order; descriptive).
+// ============================================================================
+// Bootstrap
+// ============================================================================
+
+/// Link-scale draws of NDE, NIE and TE and the replicate accounting.
+struct BootDraws {
+    link: [Vec<f64>; 3],
+    total: usize,
+    failed: usize,
+    first_error: Option<String>,
+    warned: usize,
+    first_warning: Option<String>,
+}
+
+/// IRLS start values of the bootstrap replicates: the sample fit's coefficients, when it
+/// has no aliased column.
+#[derive(Default)]
+struct WarmStart {
+    /// Non-gaussian outcome working model.
+    working: Option<Array1<f64>>,
+    /// The two halves of a natural effect model saturated in A0 (see [`split_ne_link`]):
+    /// the coefficients on `W = [1, A1, C]` at A0 = 0 and at A0 = 1.
+    ne_halves: Option<[Array1<f64>; 2]>,
+}
+
+impl WarmStart {
+    fn from_sample(est: &Estimate, plan: &Plan) -> WarmStart {
+        let finite = |v: &Array1<f64>| v.iter().all(|x| x.is_finite());
+        let working = (plan.family != MedflexFamily::Gaussian && finite(&est.working.coef))
+            .then(|| est.working.coef.clone());
+        let ne_halves = (split_applies(plan) && finite(&est.ne_coef)).then(|| {
+            let p = plan.cbar.len();
+            let t = &est.ne_coef;
+            let mut g = Array1::zeros(2 + p);
+            let mut h = Array1::zeros(2 + p);
+            g[0] = t[0];
+            g[1] = t[2];
+            h[0] = t[0] + t[1];
+            h[1] = t[2] + t[3 + p];
+            for l in 0..p {
+                g[2 + l] = t[3 + l];
+                h[2 + l] = t[3 + l] + t[4 + p + l];
+            }
+            [g, h]
         });
+        WarmStart { working, ne_halves }
     }
-
-    // Compute standard errors and percentile CIs
-    let (te_se, te_ci) = bootstrap_stats(&boot_te, confidence_level);
-    let (nde_se, nde_ci) = bootstrap_stats(&boot_nde, confidence_level);
-    let (nie_se, nie_ci) = bootstrap_stats(&boot_nie, confidence_level);
-
-    Ok((te_se, nde_se, nie_se, te_ci, nde_ci, nie_ci))
 }
 
-/// Compute bootstrap standard error and percentile confidence interval.
-fn bootstrap_stats(samples: &[f64], confidence_level: f64) -> (f64, (f64, f64)) {
-    if samples.is_empty() {
-        return (f64::NAN, (f64::NAN, f64::NAN));
-    }
-
-    let n = samples.len() as f64;
-    let mean: f64 = samples.iter().sum::<f64>() / n;
-    let variance: f64 = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    let se = variance.sqrt();
-
-    // Percentile CI
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let alpha = 1.0 - confidence_level;
-    let lower_idx = ((alpha / 2.0 * n) as usize).max(0).min(samples.len() - 1);
-    let upper_idx = (((1.0 - alpha / 2.0) * n) as usize)
-        .max(0)
-        .min(samples.len() - 1);
-
-    (se, (sorted[lower_idx], sorted[upper_idx]))
+/// With A:M the natural effect model `[1, A0, A1, C, A0:A1, A0:C]` is saturated in A0,
+/// so its quasi-score equations (canonical links) split exactly into two n-row fits on
+/// `W = [1, A1, C]`; used by the ratio and odds-ratio replicates.
+fn split_applies(plan: &Plan) -> bool {
+    plan.interaction && plan.scale != EffectScale::Difference
 }
 
-/// Delta method approximation for standard errors (when bootstrap is disabled).
-fn delta_method_se(
-    alpha_1: f64,
-    alpha_1_se: f64,
-    beta_1: f64,
-    beta_1_se: f64,
-    beta_2: f64,
-    beta_2_se: f64,
-    beta_3: Option<f64>,
-    beta_3_se: Option<f64>,
-    mediator_mean_control: f64,
-    confidence_level: f64,
-) -> (f64, f64, f64, (f64, f64), (f64, f64), (f64, f64)) {
-    // Using delta method for product of independent estimates
-    // Var(ab) approx= a^2 * Var(b) + b^2 * Var(a)
-
-    match (beta_3, beta_3_se) {
-        (Some(b3), Some(b3_se)) => {
-            // With interaction:
-            // NDE = beta_1 + beta_3 * E[M|A=0]
-            // NIE = alpha_1 * (beta_2 + beta_3)
-
-            // SE(NDE) using delta method (ignoring uncertainty in E[M|A=0])
-            let nde_var = beta_1_se.powi(2) + (mediator_mean_control * b3_se).powi(2);
-            let nde_se = nde_var.sqrt();
-
-            // SE(NIE) = SE(alpha_1 * (beta_2 + beta_3))
-            // Using delta method: approximately alpha_1^2 * (Var(beta_2) + Var(beta_3)) + (beta_2+beta_3)^2 * Var(alpha_1)
-            let sum_beta = beta_2 + b3;
-            let nie_var = alpha_1.powi(2) * (beta_2_se.powi(2) + b3_se.powi(2))
-                + sum_beta.powi(2) * alpha_1_se.powi(2);
-            let nie_se = nie_var.sqrt();
-
-            // SE(TE) = sqrt(Var(NDE) + Var(NIE) + 2*Cov(NDE,NIE))
-            // Ignoring covariance as approximation
-            let te_se = (nde_se.powi(2) + nie_se.powi(2)).sqrt();
-
-            let z = z_critical(confidence_level);
-            let nde = beta_1 + b3 * mediator_mean_control;
-            let nie = alpha_1 * sum_beta;
-            let te = nde + nie;
-
-            (
-                te_se,
-                nde_se,
-                nie_se,
-                (te - z * te_se, te + z * te_se),
-                (nde - z * nde_se, nde + z * nde_se),
-                (nie - z * nie_se, nie + z * nie_se),
-            )
+/// One replicate's link-scale effects by the split natural effect model: `gamma` from the
+/// A0 = 0 rows and `gamma + delta` from the A0 = 1 rows, mapped back to the natural
+/// effect model's columns. `None` when either half reports a note (aliasing,
+/// non-convergence, fitted values at the bounds): the caller then fits the full model, so
+/// the replicate's notes are the full fit's.
+fn split_ne_link(
+    inp: &Inputs,
+    plan: &Plan,
+    warm: &WarmStart,
+) -> EconResult<Option<([f64; 3], Vec<String>)>> {
+    check_arms(&inp.a)?;
+    let mediator = identification(inp, plan)?;
+    let x = working_design(inp, plan)?;
+    let working = fit_working(&x, &inp.y, plan, warm.working.as_ref())?;
+    let (_, _, yhat) = impute(inp, plan, &working)?;
+    let (n, p) = inp.c.dim();
+    let what = "natural effect models: natural effect design";
+    let mut w = resource::try_zeros2(n, 2 + p, what)?;
+    let mut y0 = resource::try_zeros1(n, what)?;
+    let mut y1 = resource::try_zeros1(n, what)?;
+    for i in 0..n {
+        let mut row = w.row_mut(i);
+        row[0] = 1.0;
+        row[1] = inp.a[i];
+        for l in 0..p {
+            row[2 + l] = inp.c[[i, l]];
         }
-        _ => {
-            // Without interaction:
-            // NDE = beta_1
-            // NIE = alpha_1 * beta_2
+        y0[i] = yhat[2 * i];
+        y1[i] = yhat[2 * i + 1];
+    }
+    let mut halves = Vec::with_capacity(2);
+    for (h, y) in [&y0, &y1].into_iter().enumerate() {
+        let mut spec = ne_glm_spec(plan.scale);
+        spec.start = warm.ne_halves.as_ref().map(|s| s[h].view());
+        let fit = fit_glm(w.view(), y.view(), &spec)
+            .map_err(|e| prefixed(e, "natural effect model: "))?;
+        if !fit.converged || !fit.warnings.is_empty() || !fit.aliased.is_empty() {
+            return Ok(None);
+        }
+        halves.push(fit.coefficients);
+    }
+    let (g, d) = (&halves[0], &halves[1]);
+    let mut theta = Array1::zeros(plan.ne_names.len());
+    theta[0] = g[0];
+    theta[1] = d[0] - g[0];
+    theta[2] = g[1];
+    theta[3 + p] = d[1] - g[1];
+    for l in 0..p {
+        theta[3 + l] = g[2 + l];
+        theta[4 + p + l] = d[2 + l] - g[2 + l];
+    }
+    let k = contrasts(plan, theta.len());
+    let link = [k[0].dot(&theta), k[1].dot(&theta), k[2].dot(&theta)];
+    let mut notes = working.notes;
+    notes.extend(mediator.notes);
+    Ok(Some((link, notes)))
+}
 
-            let nde_se = beta_1_se;
+/// One replicate's link-scale effects and notes: the closed form for a gaussian working
+/// model on the difference scale, the split natural effect model with A:M on the ratio and
+/// odds-ratio scales, the full estimator otherwise (non-gaussian fits warm-started).
+fn replicate_link(
+    inp: &Inputs,
+    plan: &Plan,
+    warm: &WarmStart,
+) -> EconResult<([f64; 3], Vec<String>)> {
+    if plan.family == MedflexFamily::Gaussian && plan.scale == EffectScale::Difference {
+        return closed_form(inp, plan);
+    }
+    if split_applies(plan)
+        && let Some(r) = split_ne_link(inp, plan, warm)?
+    {
+        return Ok(r);
+    }
+    let e = estimate(inp, plan, warm.working.as_ref())?;
+    Ok((e.link, e.notes))
+}
 
-            // SE(NIE) = SE(alpha_1 * beta_2) using delta method
-            let nie_var = alpha_1.powi(2) * beta_2_se.powi(2) + beta_2.powi(2) * alpha_1_se.powi(2);
-            let nie_se = nie_var.sqrt();
-
-            let te_se = (nde_se.powi(2) + nie_se.powi(2)).sqrt();
-
-            let z = z_critical(confidence_level);
-            let nde = beta_1;
-            let nie = alpha_1 * beta_2;
-            let te = nde + nie;
-
-            (
-                te_se,
-                nde_se,
-                nie_se,
-                (te - z * te_se, te + z * te_se),
-                (nde - z * nde_se, nde + z * nde_se),
-                (nie - z * nie_se, nie + z * nie_se),
-            )
+/// `n_boot` replicates on the units `next_rows` draws (medflex `se = "bootstrap"`: units
+/// resampled, everything refitted, the effects at the sample's `cbar`). A replicate that
+/// fails, or gives a non-finite effect, is counted and dropped; cancellation and the
+/// allocation ceiling stop the bootstrap.
+fn bootstrap_link_draws(
+    inp: &Inputs,
+    plan: &Plan,
+    warm: &WarmStart,
+    n_boot: usize,
+    next_rows: &mut dyn FnMut(&mut [usize]),
+) -> EconResult<BootDraws> {
+    let what = "bootstrap replications (n_bootstrap)";
+    let mut link = [
+        resource::try_with_capacity::<f64>(n_boot, what)?,
+        resource::try_with_capacity::<f64>(n_boot, what)?,
+        resource::try_with_capacity::<f64>(n_boot, what)?,
+    ];
+    let mut rows = resource::try_vec(inp.n(), 0usize, "bootstrap resample rows")?;
+    let (mut failed, mut warned) = (0usize, 0usize);
+    let (mut first_error, mut first_warning): (Option<String>, Option<String>) = (None, None);
+    for _ in 0..n_boot {
+        resource::checkpoint()?;
+        next_rows(&mut rows);
+        let sample = inp.resample(&rows)?;
+        match replicate_link(&sample, plan, warm) {
+            Ok((l, notes)) if l.iter().all(|v| v.is_finite()) => {
+                for (draws, v) in link.iter_mut().zip(l) {
+                    draws.push(v);
+                }
+                if let Some(first) = notes.into_iter().next() {
+                    warned += 1;
+                    first_warning.get_or_insert(first);
+                }
+            }
+            Ok(_) => {
+                failed += 1;
+                first_error.get_or_insert_with(|| "non-finite effect".to_string());
+            }
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+            Err(e) => {
+                failed += 1;
+                first_error.get_or_insert_with(|| e.to_string());
+            }
         }
     }
+    Ok(BootDraws {
+        link,
+        total: n_boot,
+        failed,
+        first_error,
+        warned,
+        first_warning,
+    })
 }
 
-/// Compute z critical value for given confidence level.
-fn z_critical(confidence_level: f64) -> f64 {
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    normal.inverse_cdf(1.0 - (1.0 - confidence_level) / 2.0)
-}
-
-/// Compute two-sided p-value assuming normal distribution.
-fn compute_p_value(estimate: f64, se: f64) -> f64 {
-    if se <= 0.0 || !se.is_finite() || !estimate.is_finite() {
-        return f64::NAN;
+/// Bootstrap SEs (SD of the link-scale draws) and medflex's default normal-type intervals
+/// (`boot::norm.ci`: `2 theta_hat - mean(draws) -/+ z sd(draws)` on the link scale, mapped to
+/// the reported scale), and the bootstrap notes. Fewer than 50 usable replicates is an
+/// error.
+fn summarize_bootstrap(
+    d: &BootDraws,
+    plan: &Plan,
+    link_hat: &[f64; 3],
+    level: f64,
+) -> EconResult<([f64; 3], [(f64, f64); 3], Vec<String>)> {
+    let valid = d.link[0].len();
+    if valid < MIN_VALID_BOOTSTRAP {
+        return Err(EconError::Computation(format!(
+            "only {valid} of {} bootstrap replicates could be fitted (first error: {}); the bootstrap needs at least {MIN_VALID_BOOTSTRAP}",
+            d.total,
+            d.first_error.as_deref().unwrap_or("none")
+        )));
     }
-    let z = estimate.abs() / se;
-    2.0 * (1.0 - normal_cdf(z))
+    let z = z_critical(level)?;
+    let mut se = [f64::NAN; 3];
+    let mut ci = [(f64::NAN, f64::NAN); 3];
+    for e in 0..3 {
+        let draws = &d.link[e];
+        let b = draws.len() as f64;
+        let mean = draws.iter().sum::<f64>() / b;
+        let sd = (draws.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (b - 1.0)).sqrt();
+        let centre = 2.0 * link_hat[e] - mean;
+        se[e] = sd;
+        ci[e] = (
+            plan.scale.to_scale(centre - z * sd),
+            plan.scale.to_scale(centre + z * sd),
+        );
+    }
+    let notes = bootstrap_notes(
+        d.total,
+        d.failed,
+        d.first_error.as_deref(),
+        d.warned,
+        d.first_warning.as_deref(),
+    );
+    Ok((se, ci, notes))
+}
+
+// ============================================================================
+// Notes shared with mediation.rs
+// ============================================================================
+
+/// The notes of one GLM fit under `model`: the convergence warning, the fit's other
+/// warnings and the aliasing message.
+pub(crate) fn glm_fit_notes(
+    model: &str,
+    fit: &GlmFit,
+    spec: &GlmSpec<'_>,
+    names: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if !fit.converged {
+        out.extend(
+            Convergence::new(
+                false,
+                fit.iterations,
+                spec.max_iter,
+                "relative change in deviance",
+                f64::NAN,
+                spec.epsilon,
+            )
+            .note(&format!("{model} (glm)")),
+        );
+    }
+    out.extend(
+        fit.warnings
+            .iter()
+            .filter(|w| w.as_str() != "glm.fit: algorithm did not converge")
+            .map(|w| format!("{model}: {w}")),
+    );
+    out.extend(aliasing_message(&fit.aliased, names).map(|m| format!("{model}: {m}")));
+    out
+}
+
+/// Failed and warned bootstrap replicates.
+pub(crate) fn bootstrap_notes(
+    total: usize,
+    failed: usize,
+    first_error: Option<&str>,
+    warned: usize,
+    first_warning: Option<&str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if failed > 0 {
+        out.push(format!(
+            "{failed} of {total} bootstrap replicates failed and were dropped (first error: {})",
+            first_error.unwrap_or("unknown")
+        ));
+    }
+    if warned > 0 {
+        out.push(format!(
+            "{warned} of {total} bootstrap replicates reported fit warnings (first: {})",
+            first_warning.unwrap_or("unknown")
+        ));
+    }
+    out
+}
+
+/// A note for a proportion mediated outside [0, 1] (beyond rounding) or undefined.
+pub(crate) fn proportion_note(pm: f64) -> Option<String> {
+    if pm.is_nan() {
+        Some("proportion mediated is undefined: the total effect is exactly at the null".into())
+    } else if !(-1e-8..=1.0 + 1e-8).contains(&pm) {
+        Some(format!(
+            "proportion mediated {pm:.4} lies outside [0, 1]: the direct and indirect effects have opposite signs or the total effect is close to the null"
+        ))
+    } else {
+        None
+    }
 }
 
 // ============================================================================
 // Dataset-based interface
 // ============================================================================
 
-use crate::data::Dataset;
-
 /// Run Natural Effect Models on a dataset.
 ///
-/// This is a convenience wrapper around `run_medflex` that extracts data
-/// from a Dataset using column names.
+/// [`run_medflex_with_names`] on the named columns; coefficient labels and warnings use
+/// the column names.
 ///
 /// # Arguments
 ///
 /// * `dataset` - The dataset containing all variables
 /// * `outcome` - Name of the outcome variable column
-/// * `treatment` - Name of the treatment variable column
+/// * `treatment` - Name of the treatment variable column (coded 0/1)
 /// * `mediator` - Name of the mediator variable column
 /// * `confounders` - Names of confounder columns (can be empty)
 /// * `config` - Configuration options
@@ -1018,10 +1992,11 @@ use crate::data::Dataset;
 /// # Example
 ///
 /// ```ignore
-/// use p2a_core::econometrics::medflex::{run_medflex_dataset, MedflexConfig};
+/// use p2a_core::econometrics::medflex::{run_medflex_dataset, EffectScale, MedflexConfig};
 ///
 /// let config = MedflexConfig {
 ///     allow_interaction: true,
+///     scale: EffectScale::OddsRatio, // binomial working model, logistic natural effect model
 ///     n_bootstrap: 500,
 ///     ..Default::default()
 /// };
@@ -1040,27 +2015,36 @@ pub fn run_medflex_dataset(
     confounders: &[&str],
     config: MedflexConfig,
 ) -> EconResult<MedflexResult> {
-    // One request over every model variable, so the mediator and outcome models are
-    // fitted on the same complete rows (R lm na.omit). Integer and boolean columns are
-    // read as numbers.
+    // One request over every model variable, so every model is fitted on the same
+    // complete rows (R lm/glm na.omit). Integer and boolean columns are read as numbers.
     let cols = ColumnRequest::new(dataset.df())
         .numeric(outcome)
         .numeric(treatment)
         .numeric(mediator)
         .numerics(confounders)
         .na(NaPolicy::Omit)
+        .min_rows(1, "natural effect models")
         .extract()?;
-    let (y, t, m) = (
-        cols.numeric_array(outcome),
-        cols.numeric_array(treatment),
-        cols.numeric_array(mediator),
-    );
     let c = if confounders.is_empty() {
         Array2::zeros((cols.n(), 0))
     } else {
         cols.matrix(confounders, false)?.data
     };
-    let mut result = run_medflex(&y.view(), &t.view(), &m.view(), &c.view(), config)?;
+    let names = MedflexNames {
+        outcome: outcome.to_string(),
+        treatment: treatment.to_string(),
+        mediator: mediator.to_string(),
+        confounders: confounders.iter().map(|s| s.to_string()).collect(),
+    };
+    let mut result = run_medflex_rows(
+        &ArrayView1::from(cols.numeric(outcome)),
+        &ArrayView1::from(cols.numeric(treatment)),
+        &ArrayView1::from(cols.numeric(mediator)),
+        &c.view(),
+        &names,
+        config,
+        Some(cols.rows()),
+    )?;
     result.missing = cols.missing().clone();
     Ok(result)
 }
@@ -1125,7 +2109,7 @@ mod tests {
         })
         .unwrap_err();
         expect_invalid_spec(err, "n_bootstrap");
-        // delta method: the count is unused
+        // robust sandwich: the count is unused
         assert!(
             run_test_medflex(MedflexConfig {
                 bootstrap_ci: false,
@@ -1288,54 +2272,12 @@ mod tests {
     }
 
     #[test]
-    fn test_medflex_with_confounders() {
-        // Create data with a confounder
-        let n = 80;
-        let y = Array1::from_iter((0..n).map(|i| {
-            if i < 40 {
-                2.0 + 0.1 * (i as f64 % 10.0)
-            } else {
-                1.3 + 0.1 * (i as f64 % 10.0)
-            }
-        }));
-        let treatment = Array1::from_iter((0..n).map(|i| if i < 40 { 1.0 } else { 0.0 }));
-        let mediator = Array1::from_iter((0..n).map(|i| {
-            if i < 40 {
-                1.1 + 0.05 * (i as f64 % 10.0)
-            } else {
-                0.5 + 0.05 * (i as f64 % 10.0)
-            }
-        }));
-        let confounders = Array2::from_shape_fn((n, 1), |(i, _)| 0.5 + 0.1 * (i as f64 % 10.0));
-
-        let config = MedflexConfig {
-            allow_interaction: false,
-            bootstrap_ci: false, // Use delta method for speed
-            ..Default::default()
-        };
-
-        let result = run_medflex(
-            &y.view(),
-            &treatment.view(),
-            &mediator.view(),
-            &confounders.view(),
-            config,
-        )
-        .unwrap();
-
-        // Should complete without error
-        assert!(result.total_effect.is_finite());
-        assert!(result.natural_direct_effect.is_finite());
-        assert!(result.natural_indirect_effect.is_finite());
-    }
-
-    #[test]
-    fn test_medflex_delta_method() {
+    fn test_medflex_robust_se_without_bootstrap() {
         let (y, treatment, mediator, confounders) = create_test_data();
 
         let config = MedflexConfig {
             allow_interaction: false,
-            bootstrap_ci: false, // Use delta method
+            bootstrap_ci: false, // robust sandwich
             confidence_level: 0.95,
             ..Default::default()
         };
@@ -1349,6 +2291,11 @@ mod tests {
         )
         .unwrap();
 
+        assert!(
+            result.se_method.starts_with("robust sandwich"),
+            "{}",
+            result.se_method
+        );
         // Standard errors should be computed
         assert!(result.te_se > 0.0, "TE SE should be positive");
         assert!(result.nde_se > 0.0, "NDE SE should be positive");
@@ -1441,38 +2388,137 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_proportion_mediated_bounds() {
-        let (y, treatment, mediator, confounders) = create_test_data();
-
-        let config = MedflexConfig {
-            n_bootstrap: 100,
-            seed: Some(42),
-            ..Default::default()
+    /// The first `n` rows of the case (y = yc, a, m) and nine confounders: c1, c2 and seven LCG columns.
+    /// Rows 0..14 hold exactly 3 treated units.
+    fn small_design(n: usize) -> (Array1<f64>, Array1<f64>, Array1<f64>, Array2<f64>) {
+        let ds = medflex_sim();
+        let cols = ColumnRequest::new(ds.df())
+            .numerics(&["yc", "a", "m", "c1", "c2"])
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        let take = |name: &str| cols.numeric_array(name).slice(ndarray::s![..n]).to_owned();
+        let (c1, c2) = (take("c1"), take("c2"));
+        let mut s: u64 = 12345;
+        let mut u = || {
+            s = (69069 * s + 1) % (1u64 << 32);
+            s as f64 / 4294967296.0 - 0.5
         };
+        let mut c = Array2::zeros((n, 9));
+        for i in 0..n {
+            c[[i, 0]] = c1[i];
+            c[[i, 1]] = c2[i];
+            for j in 2..9 {
+                c[[i, j]] = u();
+            }
+        }
+        (take("yc"), take("a"), take("m"), c)
+    }
 
-        let result = run_medflex(
-            &y.view(),
-            &treatment.view(),
-            &mediator.view(),
-            &confounders.view(),
-            config,
-        )
-        .unwrap();
+    #[test]
+    fn test_medflex_rejects_n_le_k() {
+        let run = |n: usize, interaction: bool| {
+            let (y, a, m, c) = small_design(n);
+            let mut cfg = MedflexConfig::default();
+            cfg.allow_interaction = interaction;
+            cfg.bootstrap_ci = false;
+            run_medflex(&y.view(), &a.view(), &m.view(), &c.view(), cfg)
+        };
+        // k = 4 + 9 with A:M, 3 + 9 without; n must exceed k
+        for (n, inter, required) in [(12, true, 14), (13, true, 14), (12, false, 13)] {
+            match run(n, inter) {
+                Err(EconError::InsufficientData {
+                    required: r,
+                    provided,
+                    context,
+                }) => {
+                    assert_eq!((r, provided), (required, n));
+                    assert!(
+                        context.contains("more observations than coefficients"),
+                        "{context}"
+                    );
+                }
+                other => panic!("n = {n}, A:M = {inter}: expected InsufficientData, got {other:?}"),
+            }
+        }
+        assert!(run(14, true).is_ok());
+    }
 
-        // Proportion mediated should be between -2 and 2 (clamped)
-        assert!(
-            result.proportion_mediated >= -2.0 && result.proportion_mediated <= 2.0,
-            "Proportion mediated {} out of bounds",
-            result.proportion_mediated
+    #[test]
+    fn test_effect_scale_parses_aliases_and_rejects_unknown() {
+        EffectScale::choices().validate().unwrap();
+        for (s, want) in [
+            ("difference", EffectScale::Difference),
+            ("Risk Difference", EffectScale::Difference),
+            ("ratio", EffectScale::Ratio),
+            ("risk-ratio", EffectScale::Ratio),
+            ("RR", EffectScale::Ratio),
+            ("odds_ratio", EffectScale::OddsRatio),
+            ("Odds Ratio", EffectScale::OddsRatio),
+            ("odds", EffectScale::OddsRatio),
+            ("OR", EffectScale::OddsRatio),
+        ] {
+            assert_eq!(s.parse::<EffectScale>().unwrap(), want, "{s}");
+        }
+        assert_eq!(EffectScale::OddsRatio.to_string(), "Odds Ratio"); // Display kept
+        match "logratio".parse::<EffectScale>() {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("unknown scale 'logratio'")
+                    && message.contains("difference, ratio, odds_ratio"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_medflex_family_parses_aliases_and_rejects_unknown() {
+        MedflexFamily::choices().validate().unwrap();
+        for (s, want) in [
+            ("gaussian", MedflexFamily::Gaussian),
+            ("Normal", MedflexFamily::Gaussian),
+            ("poisson", MedflexFamily::Poisson),
+            ("quasipoisson", MedflexFamily::Poisson),
+            ("binomial", MedflexFamily::Binomial),
+            ("logistic", MedflexFamily::Binomial),
+        ] {
+            assert_eq!(s.parse::<MedflexFamily>().unwrap(), want, "{s}");
+        }
+        assert_eq!(MedflexFamily::Binomial.to_string(), "binomial");
+        assert_eq!(
+            (
+                EffectScale::Difference.default_family(),
+                EffectScale::Ratio.default_family(),
+                EffectScale::OddsRatio.default_family()
+            ),
+            (
+                MedflexFamily::Gaussian,
+                MedflexFamily::Poisson,
+                MedflexFamily::Binomial
+            )
         );
+        assert!("gamma".parse::<MedflexFamily>().is_err());
+    }
+
+    #[test]
+    fn test_medflex_rejects_bad_confidence_level() {
+        let (y, t, m, c) = create_test_data();
+        for level in [0.0, 1.0, 1.5, -0.2, f64::NAN] {
+            let mut cfg = MedflexConfig::default();
+            cfg.bootstrap_ci = false;
+            cfg.confidence_level = level;
+            expect_invalid_spec(
+                run_medflex(&y.view(), &t.view(), &m.view(), &c.view(), cfg).unwrap_err(),
+                "confidence_level",
+            );
+        }
     }
 
     // =========================================================================
     // T2-WP13: missing values and column types (R case causal_mediation_na)
     // =========================================================================
 
-    /// Delta-method SEs, so the bootstrap count rule does not apply.
+    /// Robust sandwich SEs, so the bootstrap count rule does not apply.
     fn na_cfg(allow_interaction: bool) -> MedflexConfig {
         MedflexConfig {
             allow_interaction,
@@ -1643,5 +2689,929 @@ mod tests {
         .unwrap();
         assert_eq!(r.missing.by_column, [("m".to_string(), 1)]);
         assert_eq!((r.missing.n_dropped, r.n_obs), (1, 349));
+        // an all-missing mediator: the error names the method
+        let mut df = ds.df().clone();
+        df.with_column(Series::full_null("m".into(), 400, &DataType::Float64))
+            .unwrap();
+        match run_medflex_dataset(
+            &Dataset::new(df),
+            "y",
+            "d",
+            "m",
+            &["x1", "x2"],
+            na_cfg(false),
+        ) {
+            Err(EconError::InsufficientData {
+                required: 1,
+                provided: 0,
+                context,
+            }) => assert!(context.contains("natural effect models"), "{context}"),
+            other => panic!("all-missing mediator: {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // T3-WP26: the imputation estimator on medflex_scales
+    // =========================================================================
+
+    const EFF: [&str; 3] = ["nde", "nie", "te"];
+
+    /// `validation/datasets/generated/medflex_sim.csv` (the data of case `medflex_scales`),
+    /// for tests that pin no R value.
+    fn medflex_sim() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/medflex_sim.csv");
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
+    fn cfg(scale: EffectScale, family: Option<MedflexFamily>, interaction: bool) -> MedflexConfig {
+        let mut c = MedflexConfig::default();
+        c.scale = scale;
+        c.family = family;
+        c.allow_interaction = interaction;
+        c.bootstrap_ci = false; // robust sandwich SEs (medflex se = "robust")
+        c
+    }
+
+    fn fit(ds: &Dataset, y: &str, m: &str, conf: &[&str], c: MedflexConfig) -> MedflexResult {
+        run_medflex_dataset(ds, y, "a", m, conf, c).unwrap()
+    }
+
+    /// Every number the robust path reports for one configuration of medflex_scales.
+    fn pin(case: &Case, key: &str, r: &MedflexResult, iterative: bool) {
+        let n = r.n_obs;
+        // poisson/binomial: fit_glm epsilon 1e-10 against R at 1e-14 (6.4e-13 measured);
+        // the working model's summary.glm SEs come from the last IRLS step's working
+        // weights and converge only linearly under the deviance-change rule (1.8e-7
+        // measured, binomial), as in glm.rs; gaussian: README tolerances
+        let (tc, ts, tp, tw) = if iterative {
+            (
+                Tol::iterative(1e-8),
+                Tol::iterative(1e-8),
+                Tol::iterative(1e-8),
+                Tol::iterative(1e-6),
+            )
+        } else {
+            (Tol::coef(n), Tol::se(n), Tol::p_value(n), Tol::se(n))
+        };
+        Check::new(case)
+            .named(
+                &format!("{key}_outcome_coef"),
+                &r.outcome_coef_names,
+                &r.outcome_coefficients,
+                tc,
+            )
+            .named(
+                &format!("{key}_outcome_se"),
+                &r.outcome_coef_names,
+                &r.outcome_std_errors,
+                tw,
+            )
+            .named(
+                &format!("{key}_ne_coef"),
+                &r.ne_coef_names,
+                &r.ne_coefficients,
+                tc,
+            )
+            .scalar(&format!("{key}_nde"), r.natural_direct_effect, tc)
+            .scalar(&format!("{key}_nie"), r.natural_indirect_effect, tc)
+            .scalar(&format!("{key}_te"), r.total_effect, tc)
+            .named(
+                &format!("{key}_robust_se"),
+                &EFF[..],
+                &[r.nde_se, r.nie_se, r.te_se],
+                ts,
+            )
+            .named(
+                &format!("{key}_robust_ci_lower"),
+                &EFF[..],
+                &[r.nde_ci.0, r.nie_ci.0, r.te_ci.0],
+                ts,
+            )
+            .named(
+                &format!("{key}_robust_ci_upper"),
+                &EFF[..],
+                &[r.nde_ci.1, r.nie_ci.1, r.te_ci.1],
+                ts,
+            )
+            .named(
+                &format!("{key}_robust_p"),
+                &EFF[..],
+                &[r.nde_p_value, r.nie_p_value, r.te_p_value],
+                tp,
+            )
+            .scalar(&format!("{key}_pm"), r.proportion_mediated, tc)
+            .scalar(
+                &format!("{key}_deviance_r2"),
+                r.outcome_r_squared,
+                Tol::stat(n),
+            )
+            .finish();
+    }
+
+    fn case_inputs(ds: &Dataset, y: &str, m: &str, conf: &[&str]) -> Inputs {
+        let cols = ColumnRequest::new(ds.df())
+            .numeric(y)
+            .numeric("a")
+            .numeric(m)
+            .numerics(conf)
+            .na(NaPolicy::Fail)
+            .extract()
+            .unwrap();
+        Inputs {
+            y: cols.numeric_array(y),
+            a: cols.numeric_array("a"),
+            m: cols.numeric_array(m),
+            c: cols.matrix(conf, false).unwrap().data,
+        }
+    }
+
+    fn case_plan(inp: &Inputs, y: &str, m: &str, conf: &[&str], c: &MedflexConfig) -> Plan {
+        let names = MedflexNames {
+            outcome: y.into(),
+            treatment: "a".into(),
+            mediator: m.into(),
+            confounders: conf.iter().map(|s| s.to_string()).collect(),
+        };
+        validate_and_plan(inp, &names, c, None).unwrap()
+    }
+
+    /// The case's 32-bit LCG: s <- (69069 s + 1) mod 2^32, row = floor(s n / 2^32).
+    fn lcg_rows(seed: u64, n: usize) -> impl FnMut(&mut [usize]) {
+        let mut s = seed;
+        move |rows: &mut [usize]| {
+            for r in rows.iter_mut() {
+                s = (69069 * s + 1) % (1u64 << 32);
+                *r = ((s * n as u64) >> 32) as usize;
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_medflex_difference() {
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let r = fit(
+            &ds,
+            "yc",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Difference, None, false),
+        );
+        pin(&case, "diff", &r, false);
+        let n = r.n_obs;
+        Check::new(&case)
+            .scalar("n", n as f64, Tol::exact())
+            .scalar("n_treated", r.n_treated as f64, Tol::exact())
+            .named("cbar", &["c1", "c2"], &r.confounder_means, Tol::coef(n))
+            .named_subset("med_coef", &["a"], &["a"], &[r.mediator_coef], Tol::coef(n))
+            .named_subset("med_se", &["a"], &["a"], &[r.mediator_coef_se], Tol::se(n))
+            .scalar("med_r2", r.mediator_r_squared, Tol::stat(n))
+            .scalar("mean_m_control", r.mediator_mean_control, Tol::coef(n))
+            .scalar("mean_m_treated", r.mediator_mean_treated, Tol::coef(n))
+            .finish();
+        assert_eq!(r.family, MedflexFamily::Gaussian);
+        assert_eq!(
+            r.ne_model,
+            "yhat ~ a0 + a1 + c1 + c2 (gaussian, identity link)"
+        );
+        assert!(
+            r.se_method.starts_with("robust sandwich"),
+            "{}",
+            r.se_method
+        );
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_validate_medflex_ratio() {
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let r = fit(
+            &ds,
+            "yp",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Ratio, None, false),
+        );
+        pin(&case, "ratio", &r, true);
+        assert_eq!(r.family, MedflexFamily::Poisson);
+        assert_eq!(
+            r.ne_model,
+            "yhat ~ a0 + a1 + c1 + c2 (quasipoisson, log link)"
+        );
+        // log-linear working model without A:M: the NDE is exp(b_A) exactly
+        assert!(
+            (r.natural_direct_effect.ln() - case.named("ratio_outcome_coef", "a")).abs() < 1e-10
+        );
+        // the difference scale on the same outcome is another estimand
+        let d = fit(
+            &ds,
+            "yp",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Difference, None, false),
+        );
+        assert!((r.natural_direct_effect - d.natural_direct_effect).abs() > 1.0);
+    }
+
+    #[test]
+    fn test_validate_medflex_odds_ratio() {
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let r = fit(
+            &ds,
+            "yb",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::OddsRatio, None, false),
+        );
+        pin(&case, "odds", &r, true);
+        assert_eq!(r.family, MedflexFamily::Binomial);
+        // odds ratio 1.643 vs risk ratio 1.311 on the same binary outcome
+        let rr = fit(
+            &ds,
+            "yb",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Ratio, Some(MedflexFamily::Binomial), false),
+        );
+        assert!((r.natural_direct_effect - rr.natural_direct_effect).abs() > 0.2);
+    }
+
+    #[test]
+    fn test_validate_medflex_family() {
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let rr = fit(
+            &ds,
+            "yb",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Ratio, Some(MedflexFamily::Binomial), false),
+        );
+        pin(&case, "rr_bin", &rr, true);
+        let rd = fit(
+            &ds,
+            "yb",
+            "m",
+            &["c1", "c2"],
+            cfg(
+                EffectScale::Difference,
+                Some(MedflexFamily::Binomial),
+                false,
+            ),
+        );
+        pin(&case, "rd_bin", &rd, true);
+        // the linear-probability working model gives another risk difference
+        let lpm = fit(
+            &ds,
+            "yb",
+            "m",
+            &["c1", "c2"],
+            cfg(
+                EffectScale::Difference,
+                Some(MedflexFamily::Gaussian),
+                false,
+            ),
+        );
+        assert!((rd.natural_direct_effect - lpm.natural_direct_effect).abs() > 1e-3);
+        assert_eq!(
+            (rr.family, rd.family, lpm.family),
+            (
+                MedflexFamily::Binomial,
+                MedflexFamily::Binomial,
+                MedflexFamily::Gaussian
+            )
+        );
+    }
+
+    #[test]
+    fn test_validate_medflex_interaction() {
+        // CAUS-23: the NDE uses the confounder-adjusted mediator distribution
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let d = fit(
+            &ds,
+            "yi",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Difference, None, true),
+        );
+        pin(&case, "diff_int", &d, false);
+        Check::new(&case)
+            .named(
+                "diff_int_vanderweele",
+                &EFF[..2],
+                &[d.natural_direct_effect, d.natural_indirect_effect],
+                Tol::coef(d.n_obs),
+            )
+            .named(
+                "cbar",
+                &["c1", "c2"],
+                &d.confounder_means,
+                Tol::coef(d.n_obs),
+            )
+            .finish();
+        // the pre-fix formula plugged in the raw control-group mediator mean: 0.70020 vs 0.76811
+        assert!(
+            (d.natural_direct_effect - case.scalar("diff_int_nde_raw_control_mean")).abs() > 0.05
+        );
+        assert_eq!(d.interaction_coef, Some(d.outcome_coefficients[5]));
+        let r = fit(
+            &ds,
+            "yp",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Ratio, None, true),
+        );
+        pin(&case, "ratio_int", &r, true);
+        let o = fit(
+            &ds,
+            "yb",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::OddsRatio, None, true),
+        );
+        pin(&case, "odds_int", &o, true);
+        assert_eq!(
+            o.ne_model,
+            "yhat ~ a0 + a1 + c1 + c2 + a0:a1 + a0:c1 + a0:c2 (quasibinomial, logit link)"
+        );
+    }
+
+    #[test]
+    fn test_validate_medflex_bootstrap() {
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let conf = ["c1", "c2"];
+        let inp = case_inputs(&ds, "yb", "m", &conf);
+        let mut c = cfg(EffectScale::OddsRatio, None, true);
+        c.bootstrap_ci = true;
+        c.n_bootstrap = 50;
+        let plan = case_plan(&inp, "yb", "m", &conf, &c);
+        // the LCG reproduces R's resample rows
+        let (mut g, mut rows) = (lcg_rows(20261130, 500), vec![0usize; 500]);
+        g(&mut rows);
+        assert_eq!(
+            rows[..5].iter().map(|&v| v as f64).collect::<Vec<_>>(),
+            case.vector("boot_rows_head")
+        );
+        for _ in 1..50 {
+            g(&mut rows);
+        }
+        assert_eq!(
+            rows[495..].iter().map(|&v| v as f64).collect::<Vec<_>>(),
+            case.vector("boot_rows_tail")
+        );
+        // the path run_medflex takes: split natural effect model, warm-started replicates
+        let est = estimate(&inp, &plan, None).unwrap();
+        let warm = WarmStart::from_sample(&est, &plan);
+        let draws =
+            bootstrap_link_draws(&inp, &plan, &warm, 50, &mut lcg_rows(20261130, 500)).unwrap();
+        assert_eq!((draws.failed, draws.warned), (0, 0));
+        let link_hat = est.link;
+        let (se, ci, notes) = summarize_bootstrap(&draws, &plan, &link_hat, 0.95).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        let t = Tol::iterative(1e-8);
+        Check::new(&case)
+            .vector("odds_int_boot_draws_nde", &draws.link[0], t)
+            .named("odds_int_boot_se", &EFF[..], &se, t)
+            .named(
+                "odds_int_boot_ci_lower",
+                &EFF[..],
+                &[ci[0].0, ci[1].0, ci[2].0],
+                t,
+            )
+            .named(
+                "odds_int_boot_ci_upper",
+                &EFF[..],
+                &[ci[0].1, ci[1].1, ci[2].1],
+                t,
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_medflex_proportion_mediated_unclamped() {
+        // CAUS-75 (medflex): -4.198, which the old code clamped to -2
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let r = fit(
+            &ds,
+            "yo",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::Difference, None, false),
+        );
+        pin(&case, "diff_opp", &r, false);
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "proportion mediated -4.1977 lies outside [0, 1]: the direct and \
+                    indirect effects have opposite signs or the total effect is close to the null"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_medflex_collinear_design_warns() {
+        // CAUS-73: aliased columns are NaN with R's warning, not a silent pseudo-inverse
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        for (key, inter) in [("alias", false), ("alias_int", true)] {
+            let r = fit(
+                &ds,
+                "y_lin",
+                "m_lin",
+                &["c1", "c2", "c1dup"],
+                cfg(EffectScale::Difference, None, inter),
+            );
+            let n = r.n_obs;
+            Check::new(&case)
+                .named(
+                    &format!("{key}_outcome_coef"),
+                    &r.outcome_coef_names,
+                    &r.outcome_coefficients,
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("{key}_ne_coef"),
+                    &r.ne_coef_names,
+                    &r.ne_coefficients,
+                    Tol::coef(n),
+                )
+                .scalar(&format!("{key}_nde"), r.natural_direct_effect, Tol::coef(n))
+                // ~1e-16: the absolute floor 1e-12 applies
+                .scalar(
+                    &format!("{key}_nie"),
+                    r.natural_indirect_effect,
+                    Tol::coef(n),
+                )
+                .scalar(&format!("{key}_te"), r.total_effect, Tol::coef(n))
+                .named(
+                    &format!("{key}_robust_se"),
+                    &EFF[..],
+                    &[r.nde_se, r.nie_se, r.te_se],
+                    Tol::se(n),
+                )
+                .finish();
+            let ne_alias = if inter { "c1dup, a0:c1dup" } else { "c1dup" };
+            assert_eq!(
+                r.warnings,
+                vec![
+                    "Outcome working model: Coefficients not defined because of singularities: c1, c1dup"
+                        .to_string(),
+                    format!(
+                        "Natural effect model: Coefficients not defined because of singularities: {ne_alias}"
+                    ),
+                    "Mediator model: Coefficients not defined because of singularities: c1dup"
+                        .to_string(),
+                ]
+            );
+            assert!(r.to_string().contains(
+                "Warning: Outcome working model: Coefficients not defined because of singularities: c1, c1dup"
+            ));
+            // the duplicate changes nothing estimable
+            let s = fit(
+                &ds,
+                "y_lin",
+                "m_lin",
+                &["c1", "c2"],
+                cfg(EffectScale::Difference, None, inter),
+            );
+            let t = Tol::new(1e-10, 1e-12);
+            for (u, v) in [
+                (s.natural_direct_effect, r.natural_direct_effect),
+                (s.total_effect, r.total_effect),
+                (s.nde_se, r.nde_se),
+                (s.te_se, r.te_se),
+            ] {
+                assert!(t.allows(u, v), "{key}: {u} vs {v}");
+            }
+            if !inter {
+                Check::new(&case)
+                    .named_subset(
+                        "alias_med_coef",
+                        &["a"],
+                        &["a"],
+                        &[r.mediator_coef],
+                        Tol::coef(n),
+                    )
+                    .finish();
+            }
+        }
+    }
+
+    #[test]
+    fn test_medflex_split_replicates_match_the_full_fit() {
+        // with A:M the ratio and odds-ratio replicates fit the natural effect model as two
+        // n-row halves, warm-started from the sample fit: the same effects as the full
+        // 2n-row fit, on the sample and on resamples
+        let ds = medflex_sim();
+        let conf = ["c1", "c2"];
+        let t = Tol::iterative(1e-8);
+        for (y, scale, family) in [
+            ("yp", EffectScale::Ratio, None),
+            ("yb", EffectScale::OddsRatio, None),
+            ("yb", EffectScale::Ratio, Some(MedflexFamily::Binomial)),
+        ] {
+            let inp = case_inputs(&ds, y, "m", &conf);
+            let c = cfg(scale, family, true);
+            let plan = case_plan(&inp, y, "m", &conf, &c);
+            let est = estimate(&inp, &plan, None).unwrap();
+            let warm = WarmStart::from_sample(&est, &plan);
+            assert!(warm.working.is_some() && warm.ne_halves.is_some());
+            let mut rows_of = lcg_rows(7, inp.n());
+            let mut rows = vec![0usize; inp.n()];
+            let mut samples = vec![inp.resample(&(0..inp.n()).collect::<Vec<_>>()).unwrap()];
+            for _ in 0..5 {
+                rows_of(&mut rows);
+                samples.push(inp.resample(&rows).unwrap());
+            }
+            for (b, sample) in samples.iter().enumerate() {
+                let full = estimate(sample, &plan, None).unwrap();
+                for w in [&WarmStart::default(), &warm] {
+                    let (link, notes) = split_ne_link(sample, &plan, w)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("{y} {scale} sample {b}: fell back"));
+                    for e in 0..3 {
+                        assert!(
+                            t.allows(link[e], full.link[e]),
+                            "{y} {scale} sample {b} effect {e}: {} vs {}",
+                            link[e],
+                            full.link[e]
+                        );
+                    }
+                    assert_eq!(notes, full.notes, "{y} {scale} sample {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_medflex_closed_form_matches_imputation() {
+        // the bootstrap's closed form (gaussian working model, difference scale) gives the
+        // estimator's link-scale effects
+        let ds = medflex_sim();
+        let t = Tol::new(1e-10, 1e-12);
+        let configs: [(&str, &str, &[&str], bool); 5] = [
+            ("yc", "m", &["c1", "c2"], false),
+            ("yi", "m", &["c1", "c2"], true),
+            ("yo", "m", &["c1", "c2"], false),
+            ("y_lin", "m_lin", &["c1", "c2", "c1dup"], false),
+            ("y_lin", "m_lin", &["c1", "c2", "c1dup"], true),
+        ];
+        for (y, m, conf, inter) in configs {
+            let inp = case_inputs(&ds, y, m, conf);
+            let c = cfg(EffectScale::Difference, None, inter);
+            let plan = case_plan(&inp, y, m, conf, &c);
+            let generic = estimate(&inp, &plan, None).unwrap().link;
+            let (closed, _) = closed_form(&inp, &plan).unwrap();
+            for e in 0..3 {
+                assert!(
+                    t.allows(closed[e], generic[e]),
+                    "{y} A:M={inter} {}: {} vs {}",
+                    EFF[e],
+                    closed[e],
+                    generic[e]
+                );
+            }
+        }
+        // and on resamples
+        let conf = ["c1", "c2"];
+        let inp = case_inputs(&ds, "yi", "m", &conf);
+        let plan = case_plan(
+            &inp,
+            "yi",
+            "m",
+            &conf,
+            &cfg(EffectScale::Difference, None, true),
+        );
+        let (mut g, mut rows) = (lcg_rows(7, 500), vec![0usize; 500]);
+        for b in 0..5 {
+            g(&mut rows);
+            let sample = inp.resample(&rows).unwrap();
+            let generic = estimate(&sample, &plan, None).unwrap().link;
+            let (closed, _) = closed_form(&sample, &plan).unwrap();
+            for e in 0..3 {
+                assert!(
+                    t.allows(closed[e], generic[e]),
+                    "resample {b} {}: {} vs {}",
+                    EFF[e],
+                    closed[e],
+                    generic[e]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_medflex_rejects_degenerate_inputs() {
+        let ds = medflex_sim();
+        let conf = ["c1", "c2"];
+        let run = |y: &str, c: MedflexConfig| run_medflex_dataset(&ds, y, "a", "m", &conf, c);
+        use EffectScale::*;
+        expect_invalid_spec(
+            run("yc", cfg(OddsRatio, Some(MedflexFamily::Gaussian), false)).unwrap_err(),
+            "needs imputed outcomes in [0, 1]",
+        );
+        expect_invalid_spec(
+            run("yo", cfg(Ratio, Some(MedflexFamily::Gaussian), false)).unwrap_err(),
+            "needs non-negative imputed outcomes",
+        );
+        expect_invalid_spec(
+            run("yc", cfg(OddsRatio, None, false)).unwrap_err(),
+            "outcome working model: y values must be 0 <= y <= 1",
+        );
+        expect_invalid_spec(
+            run("yo", cfg(Ratio, None, false)).unwrap_err(),
+            "outcome working model: negative values not allowed",
+        );
+        expect_invalid_spec(
+            run_medflex_dataset(&ds, "yc", "yp", "m", &conf, cfg(Difference, None, false))
+                .unwrap_err(),
+            "binary 0/1 treatment",
+        );
+        let inp = case_inputs(&ds, "yc", "m", &conf);
+        let mut c3 = Array2::zeros((inp.n(), 3));
+        c3.slice_mut(ndarray::s![.., 0..2]).assign(&inp.c);
+        c3.column_mut(2).assign(&inp.a); // a confounder equal to the treatment
+        expect_invalid_spec(
+            run_medflex(
+                &inp.y.view(),
+                &inp.a.view(),
+                &inp.m.view(),
+                &c3.view(),
+                cfg(Difference, None, true),
+            )
+            .unwrap_err(),
+            "no overlap",
+        );
+        expect_invalid_spec(
+            run_medflex(
+                &inp.y.view(),
+                &inp.a.view(),
+                &inp.a.view(),
+                &inp.c.view(),
+                cfg(Difference, None, true),
+            )
+            .unwrap_err(),
+            "the mediator column 'M' is aliased in the outcome working model",
+        );
+        let names = MedflexNames::generic(3);
+        expect_invalid_spec(
+            run_medflex_with_names(
+                &inp.y.view(),
+                &inp.a.view(),
+                &inp.m.view(),
+                &inp.c.view(),
+                &names,
+                cfg(Difference, None, false),
+            )
+            .unwrap_err(),
+            "names.confounders has 3 names but confounders has 2 columns",
+        );
+        let mut y_inf = inp.y.clone();
+        y_inf[7] = f64::INFINITY;
+        expect_invalid_spec(
+            run_medflex(
+                &y_inf.view(),
+                &inp.a.view(),
+                &inp.m.view(),
+                &inp.c.view(),
+                cfg(Difference, None, false),
+            )
+            .unwrap_err(),
+            "outcome has a non-finite value at row 7",
+        );
+    }
+
+    #[test]
+    fn test_medflex_dataset_errors_name_the_original_row() {
+        // complete-case index 3 is the dataset's row 5 once rows 1 and 2 are dropped
+        let (y, t, m, _) = create_test_data();
+        let n = y.len();
+        let c0: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 * 0.3 - 1.4).collect();
+        let mut yv: Vec<Option<f64>> = y.iter().map(|&v| Some(v)).collect();
+        yv[1] = None;
+        let mut mv: Vec<Option<f64>> = m.iter().map(|&v| Some(v)).collect();
+        mv[2] = None;
+        let mut tv = t.to_vec();
+        tv[5] = 2.0;
+        let df = DataFrame::new(vec![
+            Column::new("y".into(), yv),
+            Column::new("t".into(), tv),
+            Column::new("m".into(), mv),
+            Column::new("c0".into(), c0),
+        ])
+        .unwrap();
+        assert_eq!(df.height(), n);
+        let err = run_medflex_dataset(
+            &Dataset::new(df),
+            "y",
+            "t",
+            "m",
+            &["c0"],
+            cfg(EffectScale::Difference, None, false),
+        )
+        .unwrap_err();
+        expect_invalid_spec(err, "row 5 has treatment 2");
+    }
+
+    #[test]
+    fn test_medflex_replicate_notes_do_not_depend_on_the_scale() {
+        // the mediator model's aliasing note is a replicate warning on every scale
+        let ds = medflex_sim();
+        let conf = ["c1", "c2", "c1dup"];
+        let note = "Mediator model: Coefficients not defined because of singularities: c1dup";
+        for (y, scale) in [
+            ("yc", EffectScale::Difference),
+            ("yp", EffectScale::Ratio),
+            ("yb", EffectScale::OddsRatio),
+        ] {
+            let inp = case_inputs(&ds, y, "m", &conf);
+            let c = cfg(scale, None, false);
+            let plan = case_plan(&inp, y, "m", &conf, &c);
+            let (_, notes) = replicate_link(&inp, &plan, &WarmStart::default()).unwrap();
+            assert_eq!(
+                notes.last().map(String::as_str),
+                Some(note),
+                "{scale}: {notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_medflex_bootstrap_failures_are_reported() {
+        // CAUS-75 (medflex bootstrap): failed replicates are counted and named
+        let ds = medflex_sim();
+        let conf = ["c1", "c2"];
+        let inp = case_inputs(&ds, "yc", "m", &conf);
+        let mut c = cfg(EffectScale::Difference, None, false);
+        c.bootstrap_ci = true;
+        let plan = case_plan(&inp, "yc", "m", &conf, &c);
+        let controls: Vec<usize> = (0..inp.n()).filter(|&i| inp.a[i] == 0.0).collect();
+        let failing = |every: usize| {
+            let (mut lcg, mut b) = (lcg_rows(7, 500), 0usize);
+            let controls = controls.clone();
+            move |rows: &mut [usize]| {
+                b += 1;
+                if b % every == 0 {
+                    for (k, r) in rows.iter_mut().enumerate() {
+                        *r = controls[k % controls.len()];
+                    }
+                } else {
+                    lcg(rows)
+                }
+            }
+        };
+        let first = "Invalid model specification: natural effects need treated and control units (treated: 0, control: 500)";
+        let d =
+            bootstrap_link_draws(&inp, &plan, &WarmStart::default(), 60, &mut failing(6)).unwrap();
+        assert_eq!((d.failed, d.link[0].len()), (10, 50));
+        let (_, _, notes) = summarize_bootstrap(&d, &plan, &[0.0; 3], 0.95).unwrap();
+        assert_eq!(
+            notes,
+            vec![format!(
+                "10 of 60 bootstrap replicates failed and were dropped (first error: {first})"
+            )]
+        );
+        let d =
+            bootstrap_link_draws(&inp, &plan, &WarmStart::default(), 59, &mut failing(5)).unwrap(); // 11 fail, 48 usable
+        match summarize_bootstrap(&d, &plan, &[0.0; 3], 0.95) {
+            Err(EconError::Computation(m)) => assert_eq!(
+                m,
+                format!(
+                    "only 48 of 59 bootstrap replicates could be fitted (first error: {first}); the bootstrap needs at least 50"
+                )
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_medflex_default_seed_is_fixed() {
+        // no seed means seed 42: repeated calls are identical
+        let (y, t, m, c) = create_test_data();
+        let run = |seed: Option<u64>| {
+            let mut k = MedflexConfig::default();
+            k.allow_interaction = false;
+            k.n_bootstrap = 60;
+            k.seed = seed;
+            run_medflex(&y.view(), &t.view(), &m.view(), &c.view(), k).unwrap()
+        };
+        let (a, b, d) = (run(None), run(None), run(Some(DEFAULT_BOOTSTRAP_SEED)));
+        assert_eq!(
+            (a.te_se.to_bits(), a.nde_ci.0.to_bits()),
+            (b.te_se.to_bits(), b.nde_ci.0.to_bits())
+        );
+        assert_eq!(a.nie_se.to_bits(), d.nie_se.to_bits());
+        assert!(
+            a.se_method.starts_with("bootstrap (60 of 60 replicates"),
+            "{}",
+            a.se_method
+        );
+    }
+
+    #[test]
+    fn test_medflex_mediator_scale_invariance() {
+        // every fit is scale-free in M
+        let ds = medflex_sim();
+        for (y, scale) in [
+            ("yc", EffectScale::Difference),
+            ("yp", EffectScale::Ratio),
+            ("yb", EffectScale::OddsRatio),
+        ] {
+            for inter in [false, true] {
+                let inp = case_inputs(&ds, y, "m", &["c1", "c2"]);
+                let base = run_medflex(
+                    &inp.y.view(),
+                    &inp.a.view(),
+                    &inp.m.view(),
+                    &inp.c.view(),
+                    cfg(scale, None, inter),
+                )
+                .unwrap();
+                for s in [1e-6, 1e6] {
+                    let ms = inp.m.mapv(|v| v * s);
+                    let r = run_medflex(
+                        &inp.y.view(),
+                        &inp.a.view(),
+                        &ms.view(),
+                        &inp.c.view(),
+                        cfg(scale, None, inter),
+                    )
+                    .unwrap();
+                    let t = Tol::new(1e-9, 1e-12);
+                    for (u, v) in [
+                        (r.natural_direct_effect, base.natural_direct_effect),
+                        (r.natural_indirect_effect, base.natural_indirect_effect),
+                        (r.total_effect, base.total_effect),
+                        (r.nde_se, base.nde_se),
+                        (r.nie_se, base.nie_se),
+                        (r.te_se, base.te_se),
+                    ] {
+                        assert!(t.allows(u, v), "{y} A:M={inter} M x {s}: {u} vs {v}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_medflex_display_reports_scale_and_method() {
+        // CAUS-22: the label is the estimator
+        let ds = medflex_sim();
+        let s = fit(
+            &ds,
+            "yb",
+            "m",
+            &["c1", "c2"],
+            cfg(EffectScale::OddsRatio, None, true),
+        )
+        .to_string();
+        for needle in [
+            "Effect Decomposition (Odds Ratio scale):",
+            "Std. errors and p-values are on the logit scale; estimates and intervals are odds ratios.",
+            "Natural effect model: yhat ~ a0 + a1 + c1 + c2 + a0:a1 + a0:c1 + a0:c2 (quasibinomial, logit link)",
+            "Standard errors: robust sandwich",
+            "NDE and TE evaluated at the confounder means: c1 = -0.0076, c2 = 0.4960",
+            "Outcome working model (binomial, logit link): yb ~ a + m + c1 + c2 + a:m",
+            "N = 500 (treated: 201, control: 299)",
+        ] {
+            assert!(s.contains(needle), "missing {needle:?} in\n{s}");
+        }
+        let mut c = cfg(EffectScale::OddsRatio, None, true);
+        c.bootstrap_ci = true;
+        c.n_bootstrap = 50;
+        c.seed = Some(3);
+        let b = fit(&ds, "yb", "m", &["c1", "c2"], c).to_string();
+        assert!(
+            b.contains(
+                "Standard errors: bootstrap (50 of 50 replicates; SE = SD of the logit-scale draws, \
+                 normal intervals as medflex confint(type = \"norm\"))"
+            ),
+            "{b}"
+        );
+    }
+
+    #[test]
+    fn test_medflex_result_serde_round_trip() {
+        let ds = medflex_sim();
+        let r = fit(
+            &ds,
+            "y_lin",
+            "m_lin",
+            &["c1", "c2", "c1dup"],
+            cfg(EffectScale::Difference, None, false),
+        );
+        let v = serde_json::to_value(&r).unwrap();
+        // c1, c1dup
+        assert!(v["outcome_coefficients"][3].is_null() && v["outcome_coefficients"][5].is_null());
+        let back: MedflexResult = serde_json::from_value(v).unwrap();
+        assert!(back.outcome_coefficients[3].is_nan() && back.ne_coefficients[5].is_nan());
+        assert_eq!(
+            back.outcome_coefficients[1].to_bits(),
+            r.outcome_coefficients[1].to_bits()
+        );
+        assert_eq!(
+            (back.family, back.warnings.clone(), back.ne_model.clone()),
+            (r.family, r.warnings.clone(), r.ne_model.clone())
+        );
     }
 }

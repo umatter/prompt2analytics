@@ -18,7 +18,7 @@
         "p2a-mcp::tier2::wp13_causal::test_validate_mcp_mediation_analysis_causal_na"
       ],
       "quantities": ["complete rows and missing counts", "rows kept after trimming", "total effect (trim 0 and 0.05)"],
-      "tolerance": "counts exact; total effect Tol::iterative(1e-8) (logit Newton-Raphson to |step| < 1e-8); MCP text Tol::printed(4)",
+      "tolerance": "counts exact; total effect Tol::iterative(1e-8) (glm.fit IRLS to epsilon 1e-10 against R at 1e-14); MCP text Tol::printed(4)",
       "deviations": [
         {"finding": "CAUS-26", "quantity": "direct and indirect effects", "note": "NDE weight and labelling are Tier 4; not pinned"}
       ],
@@ -28,7 +28,7 @@
       "id": "medflex_na",
       "name": "Natural effect models (medflex): complete cases and the lm component models",
       "category": "econometrics",
-      "reference": "stats::complete.cases; stats::lm (the component models; medflex 0.6-11's NDE/NIE are not compared, CAUS-23)",
+      "reference": "stats::complete.cases; stats::lm (the component models; the natural effects are pinned on medflex_scales, validation/methods/causal_medflex.json)",
       "doc": "validation/econometrics/medflex.md",
       "cases": ["causal_mediation_na"],
       "tests": [
@@ -40,9 +40,7 @@
       ],
       "quantities": ["complete rows and missing counts", "group counts", "E[M|A=0], E[M|A=1]", "mediator model: coefficient and SE of d, R2", "outcome model with and without d:m: coefficients and SEs of d, m, d:m, R2"],
       "tolerance": "validation/README.md, n = 350: coefficients 1e-8, SE and R2 1e-6 relative; MCP text Tol::printed(4)",
-      "deviations": [
-        {"finding": "CAUS-23", "quantity": "NDE and NIE with interaction", "note": "NDE uses the raw control mean of M; Tier 4; not pinned"}
-      ],
+      "deviations": [],
       "supersedes_legacy": []
     },
     {

@@ -15,6 +15,17 @@
 //! - **Natural Indirect Effect (NIE)**: Effect through the mediator
 //! - **Decomposition**: ATE = NDE + NIE
 //!
+//! # Estimation
+//!
+//! Both propensity models, `p(D = 1 | X)` and `p(D = 1 | X, M)`, are logistic regressions
+//! fitted by the shared GLM (`glm.fit`'s IRLS); their warnings (non-convergence, fitted
+//! probabilities numerically 0 or 1, aliased covariates) are reported in
+//! `MediationResult::warnings`. Units whose scores lie outside `(trim, 1 - trim)` are
+//! dropped; the effects are Hajek-normalised IPW means. Standard errors come from a
+//! bootstrap over the kept units (seed [`DEFAULT_BOOTSTRAP_SEED`] when none is given),
+//! with type-7 percentile intervals; failed replicates are counted and reported. The
+//! proportion mediated is `NIE / ATE`, never clamped, with a warning outside [0, 1].
+//!
 //! # Missing values and column types
 //!
 //! Rows with a missing value (null or NaN) in the outcome, treatment, mediator or a
@@ -28,16 +39,35 @@
 //! - Imai, K., Keele, L., & Tingley, D. (2010). "A General Approach to Causal
 //!   Mediation Analysis." Psychological Methods, 15(4), 309-334.
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array2, ArrayView1};
 use rand::SeedableRng;
 use rand::prelude::*;
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
+use crate::econometrics::glm::{GlmLink, GlmSpec, fit_propensity};
+use crate::econometrics::medflex::{bootstrap_notes, glm_fit_notes, proportion_note};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
-use crate::traits::estimator::{logistic_cdf, normal_cdf};
+use crate::stats::robust::percentile_interval;
+use crate::traits::convergence::{ResultNotes, notes_text};
+use crate::traits::estimator::normal_p_value_two_sided;
+
+/// Seed of the bootstrap when `MediationConfig::seed` is `None`, so that repeated calls
+/// give identical results.
+pub const DEFAULT_BOOTSTRAP_SEED: u64 = 42;
+
+/// Usable bootstrap replicates needed before SEs and intervals are reported: 50, or every
+/// requested replicate when fewer than 50 are requested (as in medflex, a handful of draws
+/// left over from many failures gives an unreliable SE and a percentile interval that is
+/// just their range).
+const MIN_VALID_BOOTSTRAP: usize = 50;
+
+/// The usable replicates `requested` needs (see [`MIN_VALID_BOOTSTRAP`]).
+fn min_valid_bootstrap(requested: usize) -> usize {
+    requested.min(MIN_VALID_BOOTSTRAP)
+}
 
 /// Configuration for mediation analysis.
 #[derive(Debug, Clone)]
@@ -46,9 +76,9 @@ pub struct MediationConfig {
     /// least 2; a count whose result buffers cannot be allocated is refused with
     /// `EconError::ResourceLimit`.
     pub bootstrap: usize,
-    /// Trimming threshold for propensity scores (default: 0.05)
+    /// Trimming threshold for propensity scores, in [0, 0.5) (default: 0.05)
     pub trim: f64,
-    /// Random seed for bootstrap (optional, for reproducibility)
+    /// Bootstrap seed; `None` uses [`DEFAULT_BOOTSTRAP_SEED`]
     pub seed: Option<u64>,
 }
 
@@ -71,7 +101,8 @@ pub struct MediationResult {
     pub direct_effect: f64,
     /// Natural indirect effect (NIE)
     pub indirect_effect: f64,
-    /// Proportion of total effect mediated (NIE / ATE)
+    /// Proportion of total effect mediated (NIE / ATE); never clamped, `NaN` at a zero
+    /// total effect
     pub proportion_mediated: f64,
     /// Standard error of total effect
     pub se_total: f64,
@@ -79,7 +110,7 @@ pub struct MediationResult {
     pub se_direct: f64,
     /// Standard error of indirect effect
     pub se_indirect: f64,
-    /// 95% CI for total effect
+    /// 95% CI for total effect (type-7 bootstrap percentiles)
     pub ci_total: (f64, f64),
     /// 95% CI for direct effect
     pub ci_direct: (f64, f64),
@@ -97,6 +128,15 @@ pub struct MediationResult {
     pub n_trimmed: usize,
     /// Rows dropped because of missing values before the propensity models were fitted.
     pub missing: MissingSummary,
+    /// Warnings: propensity-model fit problems, failed or warned bootstrap replicates, a
+    /// proportion mediated outside [0, 1].
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for MediationResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for MediationResult {
@@ -181,6 +221,7 @@ impl fmt::Display for MediationResult {
         writeln!(f, "N = {} (trimmed: {})", self.n_obs, self.n_trimmed)?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: *** p<0.01, ** p<0.05, * p<0.10")?;
+        f.write_str(&notes_text(self))?;
         if let Some(note) = self.missing.note() {
             writeln!(f, "Missing values: {note}")?;
         }
@@ -230,6 +271,16 @@ impl fmt::Display for MediationResult {
 /// Rows with a missing value (null or NaN) in the outcome, treatment, mediator or a
 /// covariate are dropped before estimation and reported in `missing`; integer and boolean
 /// columns are read as numbers. `n_obs + n_trimmed` is the number of complete rows.
+///
+/// # Estimation details
+///
+/// The propensity models are logistic GLMs (`glm.fit` IRLS, [`fit_propensity`]); the
+/// treatment must be coded 0/1. `trim` must lie in [0, 0.5). The bootstrap resamples the
+/// kept units (no further trimming), uses seed [`DEFAULT_BOOTSTRAP_SEED`] when `seed` is
+/// `None`, reports failed replicates in `warnings` and needs at least 50 usable ones (all of
+/// them when fewer than 50 are requested); the
+/// intervals are type-7 percentile intervals and the p-values two-sided normal ones. The
+/// proportion mediated is `NIE / ATE`, unclamped.
 pub fn run_mediation_analysis(
     dataset: &Dataset,
     outcome: &str,
@@ -238,6 +289,11 @@ pub fn run_mediation_analysis(
     covariates: &[&str],
     config: MediationConfig,
 ) -> EconResult<MediationResult> {
+    if !(config.trim.is_finite() && (0.0..0.5).contains(&config.trim)) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("trim must be in [0, 0.5); got {}", config.trim),
+        });
+    }
     if config.bootstrap < 2 {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -256,18 +312,28 @@ pub fn run_mediation_analysis(
         .numeric(mediator)
         .numerics(covariates)
         .na(NaPolicy::Omit)
+        .min_rows(1, "mediation analysis")
         .extract()?;
     let n = cols.n();
-    let y = cols.numeric(outcome).to_vec();
-    let d = cols.numeric(treatment).to_vec();
-    let m = cols.numeric(mediator).to_vec();
+    let y = cols.numeric(outcome);
+    let d = cols.numeric(treatment);
+    let m = cols.numeric(mediator);
     // "(Intercept)" then the covariates, built row by row (CAUS-25)
     let x = cols.matrix(covariates, true)?.data;
     let k = x.ncols();
+    let mut names: Vec<String> = Vec::with_capacity(k + 1);
+    names.push("(Intercept)".to_string());
+    names.extend(covariates.iter().map(|c| c.to_string()));
+    names.push(mediator.to_string());
 
     // Compute point estimates
-    let (total, direct, indirect, keep_idx) =
-        compute_mediation_effects(&y, &d, &m, &x, config.trim)?;
+    let Effects {
+        total,
+        direct,
+        indirect,
+        keep_idx,
+        notes: fit_notes,
+    } = compute_mediation_effects(y, d, m, &x, config.trim, &names)?;
 
     let n_obs = keep_idx.len();
     let n_trimmed = n - n_obs;
@@ -281,57 +347,55 @@ pub fn run_mediation_analysis(
     }
 
     // Bootstrap for standard errors
-    let mut rng: Box<dyn RngCore> = match config.seed {
-        Some(s) => Box::new(rand::rngs::StdRng::seed_from_u64(s)),
-        None => Box::new(rand::thread_rng()),
-    };
-
-    let what = "bootstrap replications";
-    let mut boot_total = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
-    let mut boot_direct = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
-    let mut boot_indirect = resource::try_with_capacity::<f64>(config.bootstrap, what)?;
-
-    for _ in 0..config.bootstrap {
-        resource::checkpoint()?;
-
-        // Resample with replacement from kept observations
-        let boot_indices: Vec<usize> = (0..n_obs).map(|_| rng.gen_range(0..n_obs)).collect();
-
-        // Create bootstrap sample
-        let y_boot: Vec<f64> = boot_indices.iter().map(|&i| y[keep_idx[i]]).collect();
-        let d_boot: Vec<f64> = boot_indices.iter().map(|&i| d[keep_idx[i]]).collect();
-        let m_boot: Vec<f64> = boot_indices.iter().map(|&i| m[keep_idx[i]]).collect();
-        let x_boot: Array2<f64> =
-            Array2::from_shape_fn((n_obs, k), |(i, j)| x[[keep_idx[boot_indices[i]], j]]);
-
-        // Compute effects on bootstrap sample (no further trimming)
-        if let Ok((t, de, ie, _)) =
-            compute_mediation_effects(&y_boot, &d_boot, &m_boot, &x_boot, 0.0)
-        {
-            if t.is_finite() && de.is_finite() && ie.is_finite() {
-                boot_total.push(t);
-                boot_direct.push(de);
-                boot_indirect.push(ie);
-            }
+    let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
+    let mut next_rows = |rows: &mut [usize]| {
+        for r in rows.iter_mut() {
+            *r = rng.gen_range(0..n_obs);
         }
-    }
-
+    };
+    let draws = bootstrap_draws(
+        (y, d, m, &x),
+        &keep_idx,
+        &names,
+        config.bootstrap,
+        &mut next_rows,
+    )?;
+    require_usable(&draws, config.bootstrap)?;
+    let BootDraws {
+        total: boot_total,
+        direct: boot_direct,
+        indirect: boot_indirect,
+        failed,
+        first_error,
+        warned,
+        first_warning,
+    } = draws;
     // Compute standard errors and CIs from bootstrap
-    let (se_total, ci_total) = bootstrap_stats(&boot_total, total);
-    let (se_direct, ci_direct) = bootstrap_stats(&boot_direct, direct);
-    let (se_indirect, ci_indirect) = bootstrap_stats(&boot_indirect, indirect);
+    let (se_total, ci_total) = bootstrap_stats(&boot_total)?;
+    let (se_direct, ci_direct) = bootstrap_stats(&boot_direct)?;
+    let (se_indirect, ci_indirect) = bootstrap_stats(&boot_indirect)?;
 
     // Compute p-values (two-sided test of H0: effect = 0)
     let p_total = compute_p_value(total, se_total);
     let p_direct = compute_p_value(direct, se_direct);
     let p_indirect = compute_p_value(indirect, se_indirect);
 
-    // Proportion mediated
-    let proportion_mediated = if total.abs() > 1e-10 {
-        (indirect / total).clamp(-1.0, 1.0)
+    // Proportion mediated (never clamped)
+    let proportion_mediated = if total == 0.0 {
+        f64::NAN
     } else {
-        0.0
+        indirect / total
     };
+
+    let mut warnings = fit_notes;
+    warnings.extend(bootstrap_notes(
+        config.bootstrap,
+        failed,
+        first_error.as_deref(),
+        warned,
+        first_warning.as_deref(),
+    ));
+    warnings.extend(proportion_note(proportion_mediated));
 
     Ok(MediationResult {
         total_effect: total,
@@ -350,23 +414,126 @@ pub fn run_mediation_analysis(
         n_obs,
         n_trimmed,
         missing: cols.missing().clone(),
+        warnings,
     })
+}
+
+/// Bootstrap draws of the three effects and the replicate accounting.
+struct BootDraws {
+    total: Vec<f64>,
+    direct: Vec<f64>,
+    indirect: Vec<f64>,
+    failed: usize,
+    first_error: Option<String>,
+    warned: usize,
+    first_warning: Option<String>,
+}
+
+/// `n_boot` replicates over the kept units: `next_rows` fills positions in `0..keep_idx.len()`
+/// (no further trimming). A replicate that fails, or gives a non-finite effect, is counted
+/// and dropped; cancellation and the allocation ceiling stop the bootstrap.
+fn bootstrap_draws(
+    (y, d, m, x): (&[f64], &[f64], &[f64], &Array2<f64>),
+    keep_idx: &[usize],
+    names: &[String],
+    n_boot: usize,
+    next_rows: &mut dyn FnMut(&mut [usize]),
+) -> EconResult<BootDraws> {
+    let n_obs = keep_idx.len();
+    let k = x.ncols();
+    let what = "bootstrap replications";
+    let mut out = BootDraws {
+        total: resource::try_with_capacity::<f64>(n_boot, what)?,
+        direct: resource::try_with_capacity::<f64>(n_boot, what)?,
+        indirect: resource::try_with_capacity::<f64>(n_boot, what)?,
+        failed: 0,
+        first_error: None,
+        warned: 0,
+        first_warning: None,
+    };
+    let mut boot_rows = resource::try_vec(n_obs, 0usize, "bootstrap resample rows")?;
+    let mut y_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
+    let mut d_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
+    let mut m_boot = resource::try_vec(n_obs, 0.0, "bootstrap resample")?;
+    let mut x_boot = resource::try_zeros2(n_obs, k, "bootstrap resample")?;
+
+    for _ in 0..n_boot {
+        resource::checkpoint()?;
+
+        // Resample with replacement from kept observations
+        next_rows(&mut boot_rows);
+        for (r, &pos) in boot_rows.iter().enumerate() {
+            let i = keep_idx[pos];
+            y_boot[r] = y[i];
+            d_boot[r] = d[i];
+            m_boot[r] = m[i];
+            x_boot.row_mut(r).assign(&x.row(i));
+        }
+
+        // Compute effects on bootstrap sample (no further trimming)
+        match compute_mediation_effects(&y_boot, &d_boot, &m_boot, &x_boot, 0.0, names) {
+            Ok(e) if e.total.is_finite() && e.direct.is_finite() && e.indirect.is_finite() => {
+                out.total.push(e.total);
+                out.direct.push(e.direct);
+                out.indirect.push(e.indirect);
+                if let Some(first) = e.notes.into_iter().next() {
+                    out.warned += 1;
+                    out.first_warning.get_or_insert(first);
+                }
+            }
+            Ok(_) => {
+                out.failed += 1;
+                out.first_error
+                    .get_or_insert_with(|| "non-finite effect".to_string());
+            }
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+            Err(e) => {
+                out.failed += 1;
+                out.first_error.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Refuses a bootstrap with fewer usable replicates than [`min_valid_bootstrap`].
+fn require_usable(d: &BootDraws, requested: usize) -> EconResult<()> {
+    let needed = min_valid_bootstrap(requested);
+    if d.total.len() < needed {
+        return Err(EconError::Computation(format!(
+            "only {} of {requested} bootstrap replicates could be fitted (first error: {}); the bootstrap needs at least {needed}",
+            d.total.len(),
+            d.first_error.as_deref().unwrap_or("none")
+        )));
+    }
+    Ok(())
+}
+
+/// The IPW effects of one sample, the rows kept after trimming and the propensity-model
+/// notes.
+struct Effects {
+    total: f64,
+    direct: f64,
+    indirect: f64,
+    keep_idx: Vec<usize>,
+    notes: Vec<String>,
 }
 
 /// Compute mediation effects using IPW.
 ///
-/// Returns (total_effect, direct_effect, indirect_effect, kept_indices)
+/// `names` names the columns of `x` and then the mediator (for the propensity-model notes).
 fn compute_mediation_effects(
     y: &[f64],
     d: &[f64],
     m: &[f64],
     x: &Array2<f64>,
     trim: f64,
-) -> EconResult<(f64, f64, f64, Vec<usize>)> {
+    names: &[String],
+) -> EconResult<Effects> {
     let n = y.len();
 
     // Step 1: Estimate propensity score p(D=1|X)
-    let ps_x = estimate_propensity_scores(d, x)?;
+    let (ps_x, mut notes) = propensity_scores(d, x, "p(D = 1 | X)", &names[..x.ncols()])?;
 
     // Step 2: Estimate propensity score p(D=1|M,X)
     // Add mediator to covariates
@@ -380,7 +547,8 @@ fn compute_mediation_effects(
     let xm = Array2::from_shape_vec((n, x.ncols() + 1), xm_data)
         .map_err(|e| EconError::Internal(format!("Failed to create XM matrix: {}", e)))?;
 
-    let ps_mx = estimate_propensity_scores(d, &xm)?;
+    let (ps_mx, notes_m) = propensity_scores(d, &xm, "p(D = 1 | X, M)", names)?;
+    notes.extend(notes_m);
 
     // Step 3: Apply trimming
     let mut keep_idx: Vec<usize> = Vec::new();
@@ -446,14 +614,18 @@ fn compute_mediation_effects(
         }
     }
 
+    if !(sum_w1 > 0.0 && sum_w0 > 0.0 && sum_w0_nde > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "mediation needs treated and control units after trimming (treated weight {sum_w1}, control weight {sum_w0})"
+            ),
+        });
+    }
+
     // Normalized (Hajek) estimates
-    let mu1 = if sum_w1 > 0.0 { sum_w1_y / sum_w1 } else { 0.0 };
-    let mu0 = if sum_w0 > 0.0 { sum_w0_y / sum_w0 } else { 0.0 };
-    let mu0_nde = if sum_w0_nde > 0.0 {
-        sum_w0_nde_y / sum_w0_nde
-    } else {
-        0.0
-    };
+    let mu1 = sum_w1_y / sum_w1;
+    let mu0 = sum_w0_y / sum_w0;
+    let mu0_nde = sum_w0_nde_y / sum_w0_nde;
 
     // Total effect (ATE)
     let total = mu1 - mu0;
@@ -465,173 +637,48 @@ fn compute_mediation_effects(
     // Natural indirect effect (NIE) = Total - Direct
     let indirect = total - direct;
 
-    Ok((total, direct, indirect, keep_idx))
+    Ok(Effects {
+        total,
+        direct,
+        indirect,
+        keep_idx,
+        notes,
+    })
 }
 
-/// Estimate propensity scores using logistic regression via Newton-Raphson.
-fn estimate_propensity_scores(d: &[f64], x: &Array2<f64>) -> EconResult<Vec<f64>> {
-    let n = d.len();
-    let k = x.ncols();
-
-    let d_arr = Array1::from_vec(d.to_vec());
-
-    // Initialize coefficients to zero
-    let mut beta = Array1::zeros(k);
-
-    // Newton-Raphson iteration
-    let max_iter = 50;
-    let tol = 1e-8;
-
-    for _ in 0..max_iter {
-        // Compute probabilities
-        let xb = x.dot(&beta);
-        let p: Array1<f64> = xb.mapv(logistic_cdf);
-
-        // Compute weights for IRLS
-        let w: Array1<f64> = p.mapv(|pi| {
-            let pi_clamped = pi.clamp(1e-10, 1.0 - 1e-10);
-            pi_clamped * (1.0 - pi_clamped)
-        });
-
-        // Score vector: X'(y - p)
-        let residuals = &d_arr - &p;
-        let score = x.t().dot(&residuals);
-
-        // Hessian: -X'WX
-        let mut hessian = Array2::zeros((k, k));
-        for i in 0..n {
-            let xi = x.row(i);
-            for j in 0..k {
-                for l in 0..k {
-                    hessian[[j, l]] -= w[i] * xi[j] * xi[l];
-                }
-            }
-        }
-
-        // Invert Hessian
-        let hessian_inv = invert_matrix(&hessian)?;
-
-        // Newton step
-        let delta = hessian_inv.dot(&score);
-        beta = &beta - &delta;
-
-        // Check convergence
-        let delta_norm: f64 = delta.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if delta_norm < tol {
-            break;
-        }
-    }
-
-    // Compute final propensity scores
-    let xb = x.dot(&beta);
-    let ps: Vec<f64> = xb.iter().map(|&v| logistic_cdf(v)).collect();
-
-    Ok(ps)
+/// Logistic propensity scores of `d` on `x` (the shared GLM, `glm.fit`'s IRLS) and the
+/// fit's notes under "Propensity model {what}"; `names` names the columns of `x`.
+fn propensity_scores(
+    d: &[f64],
+    x: &Array2<f64>,
+    what: &str,
+    names: &[String],
+) -> EconResult<(Vec<f64>, Vec<String>)> {
+    let pf = fit_propensity(x.view(), ArrayView1::from(d), GlmLink::Logit)?;
+    let notes = glm_fit_notes(
+        &format!("Propensity model {what}"),
+        &pf.fit,
+        &GlmSpec::logit(),
+        names,
+    );
+    Ok((pf.scores.to_vec(), notes))
 }
 
-/// Simple matrix inversion using Gaussian elimination.
-fn invert_matrix(a: &Array2<f64>) -> EconResult<Array2<f64>> {
-    let n = a.nrows();
-    if n != a.ncols() {
-        return Err(EconError::SingularMatrix {
-            context: "Matrix must be square".to_string(),
-            suggestion: "Check covariate matrix dimensions".to_string(),
-        });
-    }
-
-    // Augmented matrix [A | I]
-    let mut aug = Array2::zeros((n, 2 * n));
-    for i in 0..n {
-        for j in 0..n {
-            aug[[i, j]] = a[[i, j]];
-        }
-        aug[[i, n + i]] = 1.0;
-    }
-
-    // Forward elimination with partial pivoting
-    for col in 0..n {
-        // Find pivot
-        let mut max_row = col;
-        let mut max_val = aug[[col, col]].abs();
-        for row in (col + 1)..n {
-            if aug[[row, col]].abs() > max_val {
-                max_val = aug[[row, col]].abs();
-                max_row = row;
-            }
-        }
-
-        if max_val < 1e-12 {
-            return Err(EconError::SingularMatrix {
-                context: "Hessian matrix is singular in mediation analysis".to_string(),
-                suggestion: "Check for collinear covariates or lack of variation".to_string(),
-            });
-        }
-
-        // Swap rows
-        if max_row != col {
-            for j in 0..(2 * n) {
-                let tmp = aug[[col, j]];
-                aug[[col, j]] = aug[[max_row, j]];
-                aug[[max_row, j]] = tmp;
-            }
-        }
-
-        // Scale pivot row
-        let pivot = aug[[col, col]];
-        for j in 0..(2 * n) {
-            aug[[col, j]] /= pivot;
-        }
-
-        // Eliminate column
-        for row in 0..n {
-            if row != col {
-                let factor = aug[[row, col]];
-                for j in 0..(2 * n) {
-                    aug[[row, j]] -= factor * aug[[col, j]];
-                }
-            }
-        }
-    }
-
-    // Extract inverse from right half
-    let mut inv = Array2::zeros((n, n));
-    for i in 0..n {
-        for j in 0..n {
-            inv[[i, j]] = aug[[i, n + j]];
-        }
-    }
-
-    Ok(inv)
-}
-
-/// Compute bootstrap standard error and confidence interval.
-fn bootstrap_stats(samples: &[f64], _point_estimate: f64) -> (f64, (f64, f64)) {
-    if samples.is_empty() {
-        return (f64::NAN, (f64::NAN, f64::NAN));
-    }
-
+/// Bootstrap standard error (SD, n - 1) and the 95% type-7 percentile interval.
+fn bootstrap_stats(samples: &[f64]) -> EconResult<(f64, (f64, f64))> {
     let n = samples.len() as f64;
     let mean: f64 = samples.iter().sum::<f64>() / n;
     let variance: f64 = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    let se = variance.sqrt();
-
-    // Percentile CI
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let lower_idx = ((0.025 * n) as usize).max(0).min(samples.len() - 1);
-    let upper_idx = ((0.975 * n) as usize).max(0).min(samples.len() - 1);
-
-    (se, (sorted[lower_idx], sorted[upper_idx]))
+    Ok((variance.sqrt(), percentile_interval(samples, 0.95)?))
 }
 
-/// Compute two-sided p-value assuming normal distribution.
+/// Two-sided normal p-value; `NaN` when the SE is not finite or not positive.
 fn compute_p_value(estimate: f64, se: f64) -> f64 {
-    if se <= 0.0 || !se.is_finite() {
-        return f64::NAN;
+    if se.is_finite() && se > 0.0 {
+        normal_p_value_two_sided(estimate / se)
+    } else {
+        f64::NAN
     }
-    let z = estimate.abs() / se;
-    2.0 * (1.0 - normal_cdf(z))
 }
 
 #[cfg(test)]
@@ -702,6 +749,84 @@ mod tests {
     }
 
     #[test]
+    fn test_mediation_bootstrap_needs_fifty_usable_replicates() {
+        // failed replicates are counted; fewer than 50 usable (or, below 50 requested, any
+        // failure) is an error rather than an SE from a handful of draws
+        let ds = create_mediation_validation_dataset();
+        let cols = ColumnRequest::new(ds.df())
+            .numeric("y")
+            .numeric("treatment")
+            .numeric("mediator")
+            .numeric("x")
+            .extract()
+            .unwrap();
+        let (y, d, m) = (
+            cols.numeric("y"),
+            cols.numeric("treatment"),
+            cols.numeric("mediator"),
+        );
+        let x = cols.matrix(&["x"], true).unwrap().data;
+        let names: Vec<String> = ["(Intercept)", "x", "mediator"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let keep = compute_mediation_effects(y, d, m, &x, 0.01, &names)
+            .unwrap()
+            .keep_idx;
+        // positions in keep_idx of the kept controls
+        let controls: Vec<usize> = (0..keep.len()).filter(|&p| d[keep[p]] == 0.0).collect();
+        let failing = |every: usize| {
+            let (n, mut s, mut b) = (keep.len(), 7u64, 0usize);
+            let controls = controls.clone();
+            move |rows: &mut [usize]| {
+                b += 1;
+                for (k, r) in rows.iter_mut().enumerate() {
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    *r = if b % every == 0 {
+                        controls[k % controls.len()]
+                    } else {
+                        ((s >> 33) as usize) % n
+                    };
+                }
+            }
+        };
+        let run = |n_boot: usize, every: usize| {
+            let draws =
+                bootstrap_draws((y, d, m, &x), &keep, &names, n_boot, &mut failing(every)).unwrap();
+            let r = require_usable(&draws, n_boot);
+            (draws.failed, draws.total.len(), r)
+        };
+        let (failed, usable, r) = run(60, 6);
+        assert_eq!((failed, usable), (10, 50));
+        assert!(r.is_ok(), "{r:?}");
+        let (failed, usable, r) = run(59, 5); // 11 fail, 48 usable
+        assert_eq!((failed, usable), (11, 48));
+        match r {
+            Err(EconError::Computation(msg)) => {
+                assert!(
+                    msg.starts_with(
+                        "only 48 of 59 bootstrap replicates could be fitted (first error: "
+                    ) && msg.ends_with("the bootstrap needs at least 50"),
+                    "{msg}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        // fewer than 50 requested: every replicate is needed
+        let (_, usable, r) = run(20, 10);
+        assert_eq!(usable, 18);
+        assert!(
+            matches!(&r, Err(EconError::Computation(msg)) if msg.contains("needs at least 20")),
+            "{r:?}"
+        );
+        let (_, usable, r) = run(20, 21);
+        assert_eq!(usable, 20);
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    #[test]
     fn test_mediation_honours_cancellation() {
         // the LCG data reach the bootstrap loop's checkpoint (296 rows kept at trim 0.01)
         let r = resource::with_budget(cancelled_budget(), || {
@@ -721,9 +846,9 @@ mod tests {
         assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
     }
 
-    /// Used for column errors and the bootstrap-count check only: its mediator separates
-    /// the treatment (treated m in [0.9, 1.3], control m in [0.3, 0.7]), so p(D | M, X)
-    /// goes to 0 or 1 and every row is trimmed once the covariate matrix is correct.
+    /// Used for column errors and the separation warning: its mediator separates the
+    /// treatment (treated m in [0.9, 1.3], control m in [0.3, 0.7]), so p(D | M, X) goes to
+    /// 0 or 1 and every row is trimmed at any positive `trim`.
     fn create_mediation_dataset() -> Dataset {
         // Create synthetic data with known mediation structure.
         // Key: Treatment assignment must NOT be perfectly predictable by X.
@@ -946,13 +1071,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mediation_vs_r() {
-        // Validates against R mediation package
-        // R reference:
-        // library(mediation)
-        // med_fit <- lm(mediator ~ treatment + x, data = med_data)
-        // out_fit <- lm(y ~ treatment + mediator + x, data = med_data)
-        // med_result <- mediate(med_fit, out_fit, treat = "treatment", mediator = "mediator", sims = 500)
+    fn test_mediation_recovers_dgp() {
+        // No R value: the direct and indirect effects are not checked against the DGP
+        // because the NDE weight is CAUS-26 (Tier 4); the emulated total effect is 0.590.
 
         let dataset = create_mediation_validation_dataset();
         let config = MediationConfig {
@@ -964,37 +1085,16 @@ mod tests {
         let result =
             run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
 
-        // True effects from DGP:
-        // - Direct effect: 0.4
-        // - Indirect effect: 0.6 * 0.5 = 0.3
-        // - Total effect: 0.7
-        let true_total = 0.7;
-        let true_direct = 0.4;
-        let true_indirect = 0.3;
-        let tol = 0.4; // Allow estimation error
-
+        // True total effect 0.7 = 0.4 + 0.6 * 0.5
         assert!(
-            (result.total_effect - true_total).abs() < tol,
-            "Total effect {:.4} should be close to {:.4}",
-            result.total_effect,
-            true_total
-        );
-        assert!(
-            (result.direct_effect - true_direct).abs() < tol,
-            "Direct effect {:.4} should be close to {:.4}",
-            result.direct_effect,
-            true_direct
-        );
-        assert!(
-            (result.indirect_effect - true_indirect).abs() < tol,
-            "Indirect effect {:.4} should be close to {:.4}",
-            result.indirect_effect,
-            true_indirect
+            (result.total_effect - 0.7).abs() < 0.3,
+            "Total effect {:.4} should be close to 0.7",
+            result.total_effect
         );
     }
 
     #[test]
-    fn test_validate_mediation_decomposition() {
+    fn test_mediation_decomposition_identity() {
         // Validate that Total = Direct + Indirect
         let dataset = create_mediation_validation_dataset();
         let config = MediationConfig {
@@ -1018,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mediation_proportion_mediated() {
+    fn test_mediation_proportion_mediated_identity() {
         // Validate proportion mediated calculation
         let dataset = create_mediation_validation_dataset();
         let config = MediationConfig {
@@ -1030,24 +1130,15 @@ mod tests {
         let result =
             run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
 
-        // Proportion mediated = indirect / total
-        if result.total_effect.abs() > 0.01 {
-            let expected_prop = result.indirect_effect / result.total_effect;
-            assert!(
-                (result.proportion_mediated - expected_prop).abs() < 1e-8,
-                "Proportion mediated {:.4} should equal NIE/ATE {:.4}",
-                result.proportion_mediated,
-                expected_prop
-            );
-        }
-
-        // Proportion should be between 0 and 1 for most reasonable cases
-        // (can be negative or > 1 in edge cases)
-        assert!(result.proportion_mediated.is_finite());
+        // Proportion mediated = indirect / total, exactly
+        assert_eq!(
+            result.proportion_mediated.to_bits(),
+            (result.indirect_effect / result.total_effect).to_bits()
+        );
     }
 
     #[test]
-    fn test_validate_mediation_standard_errors() {
+    fn test_mediation_bootstrap_ses_positive() {
         // Validate standard error properties
         let dataset = create_mediation_validation_dataset();
         let config = MediationConfig {
@@ -1083,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mediation_confidence_intervals() {
+    fn test_mediation_percentile_cis_ordered() {
         // Validate CI properties
         let dataset = create_mediation_validation_dataset();
         let config = MediationConfig {
@@ -1115,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mediation_p_values() {
+    fn test_mediation_p_values_in_unit_interval() {
         // Validate p-value properties
         let dataset = create_mediation_validation_dataset();
         let config = MediationConfig {
@@ -1134,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mediation_reproducibility() {
+    fn test_mediation_seeded_bootstrap_reproducible() {
         // Validate that seed produces reproducible results
         let dataset = create_mediation_validation_dataset();
 
@@ -1201,7 +1292,7 @@ mod tests {
         Check::new(&case)
             .scalar("n_complete", (a.n_obs + a.n_trimmed) as f64, Tol::exact())
             .scalar("ipw_kept_trim05", a.n_obs as f64, Tol::exact())
-            // logit Newton-Raphson to |step| < 1e-8
+            // glm.fit IRLS (fit_propensity, epsilon 1e-10) against R at 1e-14
             .scalar("ipw_total_trim05", a.total_effect, Tol::iterative(1e-8))
             .finish();
     }
@@ -1335,9 +1426,114 @@ mod tests {
             Err(EconError::InsufficientData {
                 required: 1,
                 provided: 0,
-                ..
-            }) => {}
+                context,
+            }) => assert!(context.contains("mediation analysis"), "{context}"),
             other => panic!("all-missing mediator: {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // T3-WP26: shared GLM, percentile rule, seeds, unclamped proportion
+    // =========================================================================
+
+    #[test]
+    fn test_validate_mediation_total_effect_medflex_scales() {
+        // CAUS-113 part, CAUS-75 (mediation)
+        let (case, ds) = crate::test_support::load_case("medflex_scales");
+        let mut c = MediationConfig::default();
+        c.bootstrap = 20;
+        c.trim = 0.05;
+        c.seed = Some(11);
+        let r = run_mediation_analysis(&ds, "yo", "a", "m", &["c1", "c2"], c).unwrap();
+        Check::new(&case)
+            // glm.fit to epsilon 1e-10 vs R 1e-14
+            .scalar("ipw_yo_total", r.total_effect, Tol::iterative(1e-8))
+            .scalar("ipw_yo_kept", r.n_obs as f64, Tol::exact())
+            .finish();
+        // never clamped: with today's NDE weight (CAUS-26, Tier 4) NIE/TE is -7.891 (R
+        // emulation); it was shown as -1
+        assert_eq!(
+            r.proportion_mediated.to_bits(),
+            (r.indirect_effect / r.total_effect).to_bits()
+        );
+        let outside = r.proportion_mediated < 0.0 || r.proportion_mediated > 1.0;
+        assert_eq!(
+            outside,
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("proportion mediated") && w.contains("outside [0, 1]")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_mediation_percentile_rule_medflex_scales() {
+        // X-18 (mediation): type-7 percentiles
+        let (case, _ds) = crate::test_support::load_case("medflex_scales");
+        let draws = case.vector("pct_draws");
+        let (se, (lo, hi)) = bootstrap_stats(&draws).unwrap();
+        Check::new(&case)
+            .scalar("pct_sd", se, Tol::coef(draws.len()))
+            .vector("pct_ci", &[lo, hi], Tol::coef(draws.len()))
+            .finish();
+    }
+
+    #[test]
+    fn test_mediation_propensity_separation_warns() {
+        // CAUS-113: the shared GLM reports separation
+        let mut c = MediationConfig::default();
+        c.bootstrap = 20;
+        c.trim = 0.0; // keep the separated rows (scores in (0, 1), never 0 or 1)
+        c.seed = Some(11);
+        let r =
+            run_mediation_analysis(&create_mediation_dataset(), "y", "d", "m", &["x"], c).unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "Propensity model p(D = 1 | X, M): glm.fit: fitted probabilities numerically 0 or 1 occurred"),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.total_effect.is_finite() && r.direct_effect.is_finite());
+    }
+
+    #[test]
+    fn test_mediation_default_seed_is_fixed() {
+        // no seed means seed 42: repeated calls are identical
+        let ds = create_mediation_validation_dataset();
+        let run = |seed: Option<u64>| {
+            let mut c = MediationConfig::default();
+            c.bootstrap = 30;
+            c.trim = 0.05;
+            c.seed = seed;
+            run_mediation_analysis(&ds, "y", "treatment", "mediator", &["x"], c).unwrap()
+        };
+        let (a, b, d) = (run(None), run(None), run(Some(DEFAULT_BOOTSTRAP_SEED)));
+        assert_eq!(
+            (a.se_total.to_bits(), a.ci_direct),
+            (b.se_total.to_bits(), b.ci_direct)
+        );
+        assert_eq!(a.se_indirect.to_bits(), d.se_indirect.to_bits());
+    }
+
+    #[test]
+    fn test_mediation_rejects_bad_trim() {
+        for trim in [-0.1, 0.5, 0.7, f64::NAN] {
+            let mut c = MediationConfig::default();
+            c.bootstrap = 20;
+            c.trim = trim;
+            expect_invalid_spec(
+                run_mediation_analysis(
+                    &create_mediation_validation_dataset(),
+                    "y",
+                    "treatment",
+                    "mediator",
+                    &["x"],
+                    c,
+                )
+                .unwrap_err(),
+                "trim",
+            );
         }
     }
 }

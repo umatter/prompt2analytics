@@ -168,6 +168,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/matching_sim.csv` | 240 × 6 (id, treat, x1, x2, x3, y) | `matchit_nearest`; read by `matchit_full_cem`, `matchit_subclass` | `r/cases/causal_matching.R` | seed 20261128 |
 | `generated/mauchly_sigma.csv` | 15 × 4 (V1, V2, V3, V4) | `stat_mauchly_sigma` | `r/cases/stats_power_loglin.R` | seed 20261117 |
 | `generated/mcf_networks.csv` | 580 × 6 (network, kind, a, b, cap, cost) | `mcf_networks` | `r/cases/causal_matching.R` | seed 20261023 |
+| `generated/medflex_sim.csv` | 500 × 12 (a, m, c1, c2, yc, yb, yp, yi, yo, m_lin, y_lin, c1dup; a, c2, yb and yp Int64) | `medflex_scales`; read by `mediation_ipw_t3` | `r/cases/causal_medflex.R` | seed 20261130; binary a, gaussian m, yc (gaussian), yb (binary), yp (Poisson), yi (A:M interaction), yo (NDE and NIE of opposite sign), m_lin = 0.1 + 0.3 c1 exactly, c1dup a copy of c1 |
 | `generated/mlogit_fishing.csv` | 4728 × 6 (id, alt, chosen, price, catch, income) | `disc_mlogit_fishing` | `r/cases/discrete_mlogit_asc.R` | `mlogit::Fishing` in long form (`dfidx`), 1182 choice situations × 4 modes |
 | `generated/multinom_overlap.csv` | 300 × 3 (y, x1, x2) | `disc_multinom_overlap` | `r/cases/discrete_mlogit_asc.R` | seed 20261022 |
 | `generated/nls_expdecay.csv` | 11 × 2 (x, y) | `nls_expdecay` | `r/cases/regression_smoothers_t3.R` | literal values: the old nls test's exponential-decay data, x = 0, 0.5, ..., 5 |
