@@ -1,153 +1,104 @@
-# Multi-Cutoff Regression Discontinuity (rdmulti) Validation
+# Multi-cutoff regression discontinuity (`run_rd_multi`)
 
-## Method Overview
+**Status:** R-pinned (registry `validation/methods/causal_rdbw.json`, id `rd_multi_selected`;
+one cutoff at a given bandwidth: `validation/methods/causal_rd.json`, id `rd_multi`). The
+per-cutoff estimates are pinned to rdrobust with rdbwselect bandwidths; the pooling is p2a's own
+estimator, pinned to its formula written out in R (a registry deviation, see "Relation to
+rdmulti::rdmc").
 
-Multi-cutoff RD extends standard regression discontinuity designs to handle multiple cutoffs sharing the same running variable. It estimates treatment effects at each cutoff and optionally pools them into a single weighted estimate.
+## Method
 
-### Key Features
+J cutoffs `c_1 < ... < c_J` share one running variable. Each observation belongs to one cutoff
+(`cutoff_col`, or the nearest cutoff, the lowest index on a tie). p2a estimates the effect at
+each cutoff, pools the cutoff-specific estimates into one weighted average, and tests whether
+they differ.
 
-1. **Multiple cutoffs**: Different thresholds c1, c2, ..., cJ with same running variable
-2. **Pooled estimation**: Combine estimates across cutoffs using inverse-variance or sample-size weighting
-3. **Cutoff-specific effects**: Allow heterogeneous effects at each cutoff
-4. **Heterogeneity test**: Chi-squared test for whether effects differ across cutoffs
-5. **Flexible bandwidth**: Global, per-cutoff optimal, or user-specified bandwidths
+## What p2a computes
 
-## Reference Implementation
+- **Per cutoff:** `run_rd` on the observations of that cutoff (`validation/econometrics/rd.md`):
+  rdrobust's bias-corrected estimate with its robust SE, interval at `level` and p-value. With
+  `RdMultiBandwidth::PerCutoffOptimal` (the default) h and b are selected by `bwselect` on that
+  cutoff's observations (`rdrobust::rdbwselect`, with `kernel`, `p`, `q`, `vce` and
+  `scaleregul`), as `rdmulti::rdmc` computes its cutoff-specific estimates. `Global(h)` uses the
+  same h at every cutoff and `PerCutoff(hs)` one h per cutoff, with b = h (rdrobust's default
+  when h is given). `CutoffResult` reports `h_left/h_right`, `b_left/b_right`, `N_h` and `level`;
+  each cutoff's selection warnings are copied into the result as `Cutoff j (c = ...): <text>`.
+- **Pooling:** weights `w_j` by effective sample size (`N_h,left + N_h,right`, the default),
+  inverse variance (`1/se_j²`) or equal (`1/J`), normalised to sum to 1;
+  `tau_pooled = sum_j w_j tau_j` and `se_pooled = sqrt(sum_j w_j² se_j²)` (independent cutoffs).
+  The interval is `tau_pooled ∓ z se_pooled` with `z` from `level`, and the p-value is
+  `2 Φ(-|tau_pooled / se_pooled|)` (upper tail; a zero SE gives 0 for a nonzero estimate and 1
+  for zero, as `run_rd`).
+- **Heterogeneity:** `Q = sum_j (tau_j - tau_IV)² / se_j²` with `tau_IV` the inverse-variance
+  pooled estimate, and `p = P(chi²(J - 1) > Q)` from the upper tail (a Q of 200 gives
+  2.09e-45, not 0).
 
-- **R Package**: `rdmulti` (Cattaneo, Titiunik, Vazquez-Bare)
-- **CRAN**: https://cran.r-project.org/package=rdmulti
-- **Documentation**: https://rdpackages.github.io/rdmulti/
-- **Version Used**: 1.1 (2023)
+The printed intervals carry the requested level (`90% CI` at `level = 0.9`).
 
-## Mathematical Framework
+## Relation to rdmulti::rdmc
 
-For multiple cutoffs c1, ..., cJ with running variable X:
+`rdmc`'s cutoff-specific estimates are `rdrobust` runs per cutoff with rdbwselect bandwidths,
+which p2a reproduces. `rdmc`'s pooled estimate runs rdrobust on the normalised score `x - c` of
+all observations; p2a does not implement it. p2a's pooled estimate is the weighted average above,
+a different estimator. `rdmulti` is not installed in the validation environment, so the pooling
+and the heterogeneity test are pinned to their formulas written out in R in
+`validation/r/cases/causal_rdbw.R` (registry deviation CAUS-77; see also CAUS-78).
 
-**Cutoff-specific effects:**
-```
-tau_j = E[Y(1) - Y(0) | X = c_j] for each cutoff j
-```
+## Reference cases
 
-**Pooled estimate (inverse-variance weighted):**
-```
-tau_pooled = sum_j(w_j * tau_j) where w_j = (1/se_j^2) / sum_k(1/se_k^2)
-```
+Case `rd_bwselect_sharp` (`validation/r/cases/causal_rdbw.R`), keys `multi_*`. The two-cutoff
+data are built from `rd_sim.csv`: group 0 is `(y, x)` at c = 0 and group 1 is `(yf, x + 2)` at
+c = 2, stacked in that order. `max(x) < 1 < min(x + 2)`, so nearest-cutoff assignment reproduces
+the groups (asserted in R). Cutoff 0's values are the `auto_*` keys of `validation/econometrics/rd.md`.
 
-**Pooled standard error (assuming independence):**
-```
-se_pooled = sqrt(sum_j(w_j^2 * se_j^2))
-```
+## Decisive values
 
-**Heterogeneity test statistic:**
-```
-Q = sum_j((tau_j - tau_pooled)^2 / se_j^2) ~ chi^2(J-1)
-```
+R 4.3.3, rdrobust 4.0.0.
 
-## Test Cases
+| key | value |
+|---|---|
+| cutoff 0 (`auto_*`) | h 0.2641578906068817, b 0.44316662165001586, coef_bc 0.63490809474914, se_robust 0.15747387694470696, p_robust 5.534392633219122e-05, ci_robust [0.3262649674316221, 0.943551222066658], n_h [145, 124] |
+| `multi_c2_*` | h 0.39295794749323004, b 0.5951876743491831, coef_bc 0.2451211066131631, se_robust 0.15723791378993096, p_robust 0.11901565015226376, ci_robust [-0.06305954141931541, 0.5533017546456416], n_h [215, 177] |
+| `multi_pool_sample` | effect 0.40374848907697214, se 0.11314692592964143, ci [0.18198458929345382, 0.6255123888604904], p 0.0003592284737867214, weights [0.4069591527987897, 0.5930408472012103] |
+| `multi_pool_iv` | 0.43972234815546335, 0.1112673268482804, [0.2216423948767872, 0.6578023014341395], 7.751858230792967e-05, [0.49925022503422745, 0.5007497749657726] |
+| `multi_pool_equal` | 0.44001460068115156, 0.11126745194912849, [0.22193440220931873, 0.6580947991529844], 7.667336371775572e-05, [0.5, 0.5] |
+| `multi_het` | Q 3.068021495314145, p 0.0798465944698513 (df 1) |
+| `multi_g03_coef_bc` / `_se_robust` | [0.5919701612168791, 0.4076019486029241] / [0.19836524289095045, 0.21450816491328709] |
+| `multi_c2_ci90_robust` | [-0.013512246178487786, 0.503754459404814] |
+| `multi_c2_cerrd_h` / `_coef_bc` | 0.27819292236807563 / 0.28786871441346973 |
+| `noreg_auto_h` (cutoff 0, scaleregul 0) | 0.5485103365852835 |
 
-### Test Case 1: Two Cutoffs with Different Effects
+Before WP20 every per-cutoff h was 0.49912596890000005 (p2a's former selector, capped at a
+quarter of the range).
 
-**Synthetic Data Generation:**
-```r
-set.seed(42)
-n <- 120
+## Tests and tolerances
 
-# Cutoff 1: c = 0, true effect = 1.5
-x1_left <- runif(30, -1.5, 0)
-y1_left <- 1.0 + 0.3 * x1_left + rnorm(30, 0, 0.2)
-x1_right <- runif(30, 0, 1.5)
-y1_right <- 1.0 + 0.3 * x1_right + 1.5 + rnorm(30, 0, 0.2)
+Registered:
 
-# Cutoff 2: c = 2, true effect = 2.5
-x2_left <- runif(30, 0.5, 2)
-y2_left <- 2.0 + 0.3 * x2_left + rnorm(30, 0, 0.2)
-x2_right <- runif(30, 2, 3.5)
-y2_right <- 2.0 + 0.3 * x2_right + 2.5 + rnorm(30, 0, 0.2)
+- `test_validate_rd_multi_single_cutoff` (`rd_multi`, `causal_rd.json`): one cutoff at 0, a
+  global bandwidth of 0.3 and HC1 against `rdrobust(y, x, c = 0, h = 0.3, b = 0.3, vce = "hc1")`.
+- `test_validate_rd_multi_two_cutoffs_selected` (`rd_multi_selected`): both cutoffs' h, b,
+  estimate, SE, p, CI and N_h, the sample-size pooling and the heterogeneity test; the run
+  without `cutoff_col` equals the run with the group column.
+- `test_validate_rd_multi_pooling_weights`: inverse-variance and equal weights.
+- `test_validate_rd_multi_global_bandwidth`: `Global(0.3)` gives h = b = 0.3 at both cutoffs and
+  rdrobust's estimates and SEs at that bandwidth.
+- `test_validate_rd_multi_level_cerrd_scaleregul`: the 90% interval, `cerrd` and
+  `scaleregul = 0`.
 
-# Combine data
-y <- c(y1_left, y1_right, y2_left, y2_right)
-x <- c(x1_left, x1_right, x2_left, x2_right)
-cutoff_group <- c(rep(0, 60), rep(1, 60))
-```
+Not registered (exact or property tests): `test_pooling_weights_sample_size`,
+`test_pooling_weights_inverse_variance`, `test_pooling_weights_equal`, `test_pooled_estimate`,
+`test_heterogeneity_test` and `test_heterogeneity_test_homogeneous` (hand-computed values within
+1e-15, or 1e-10 relative for the chi-squared tail), `test_assign_to_nearest_cutoff`,
+`test_rd_multi_dataset_recovers_dgp` (the DGP effects 1.5 and 2.5 on a simulated two-cutoff
+design), `test_rd_multi_interval_label_follows_level`, `test_display_formatting`,
+`test_rd_multi_insufficient_data` and `test_rd_multi_validates_parameters_up_front`.
 
-**Expected Results (approximate, due to noise):**
-- Cutoff 1 effect: ~1.5 (tolerance: +/- 0.5)
-- Cutoff 2 effect: ~2.5 (tolerance: +/- 0.5)
-- Heterogeneity test: Likely significant if effects differ substantially
+Tolerances (`validation/README.md`, n = 1000): bandwidths and coefficients 1e-8 relative, SEs,
+statistics and CI bounds 1e-6 relative, p-values 1e-6 relative plus 1e-12 absolute, counts
+exact.
 
-### Test Case 2: Pooling Weights Verification
-
-**Unit Test for Weighting:**
-
-Sample size weighting (n_eff = [80, 40]):
-```
-w1 = 80 / 120 = 0.667
-w2 = 40 / 120 = 0.333
-```
-
-Inverse variance weighting (se = [0.1, 0.2]):
-```
-1/var1 = 1/0.01 = 100
-1/var2 = 1/0.04 = 25
-total = 125
-
-w1 = 100 / 125 = 0.8
-w2 = 25 / 125 = 0.2
-```
-
-### Test Case 3: Heterogeneity Test
-
-**Setup:**
-- Effect 1: 1.0 with SE 0.1
-- Effect 2: 3.0 with SE 0.1
-
-**Expected:**
-- Q statistic should be very large (> 50)
-- p-value should be very small (< 0.001)
-- Test should indicate significant heterogeneity
-
-## Rust Implementation Validation
-
-### Test Results Summary
-
-| Test Name | Status | Notes |
-|-----------|--------|-------|
-| `test_pooling_weights_sample_size` | PASS | Weights computed correctly |
-| `test_pooling_weights_inverse_variance` | PASS | Weights computed correctly |
-| `test_pooling_weights_equal` | PASS | Equal weights = 1/J |
-| `test_pooled_estimate` | PASS | Weighted average correct |
-| `test_heterogeneity_test` | PASS | Detects significant heterogeneity |
-| `test_heterogeneity_test_homogeneous` | PASS | No false positive |
-| `test_assign_to_nearest_cutoff` | PASS | Correct assignment |
-| `test_rd_multi_dataset` | PASS | Full pipeline works |
-| `test_rd_multi_auto_assignment` | PASS | Auto-assign by nearest cutoff |
-| `test_rd_multi_insufficient_data` | PASS | Proper error handling |
-| `test_rd_multi_global_bandwidth` | PASS | Global bandwidth applied |
-| `test_display_formatting` | PASS | Output formatting correct |
-
-### Tolerance Guidelines
-
-| Parameter | Tolerance |
-|-----------|-----------|
-| Weights | < 0.01 |
-| Pooled effect (synthetic data) | +/- 1.0 |
-| Cutoff-specific effects (noisy) | +/- 0.5 |
-| Heterogeneity p-value (significant) | < 0.05 |
-
-## Inference per cutoff and missing values (T2-WP11)
-
-**Status:** R-pinned for a single cutoff (registry `validation/methods/causal_rd.json`, id
-`rd_multi`), with a known deviation: the pooling and the heterogeneity test are not pinned to
-`rdmulti::rdmc` (CAUS-77, Tier 3).
-
-Each cutoff's effect, SE, interval and p-value are the robust row of `run_rd` on the rows
-assigned to that cutoff: rdrobust's bias-corrected estimate with its robust standard error
-(`validation/econometrics/rd.md`). `vce` selects the variance estimator (`nn` by default).
-`test_validate_rd_multi_single_cutoff` runs one cutoff at 0 with a global bandwidth of 0.3 and
-HC1 on `rd_sim.csv` (case `rd_sharp_fixed_bw`) and pins the per-cutoff effect, SE, CI and p,
-and the pooled effect and SE (equal to them with one cutoff), to `rdrobust(y, x, c = 0,
-h = 0.3, b = 0.3, vce = "hc1")` (keys `tri_hc1_hb_coef_bc`, `_se_robust`, `_ci_robust`,
-`_p_robust`) at the n = 1000 tolerances of `validation/README.md`.
+## Missing values and cutoff_col
 
 `run_rd_multi_dataset` reads the outcome, the running variable and `cutoff_col` (when given)
 through the shared extractor with the `Omit` policy: a row with a missing value in any of them
@@ -157,16 +108,7 @@ is dropped, as rdrobust drops incomplete rows, and reported in `RdMultiResult.mi
 error naming the column, the original row and the value (before T2-WP11, 1.7 was read as 1 and
 -1 as 0). `run_rd_multi` takes arrays and refuses non-finite values, pointing to
 `run_rd_multi_dataset` to drop them. `test_na_rd_multi_dataset_drops_rows_and_checks_cutoff_col`
-(not registered; no R value) covers these rules. The pooling and the heterogeneity test are not
-pinned to `rdmulti` (CAUS-77, Tier 3).
-
-## Known Differences from R Implementation
-
-1. **Bandwidth selection**: without given bandwidths each cutoff uses p2a's own MSE-type selector from `run_rd`, not `rdbwselect` (CAUS-28). The R `rdmulti` package calls `rdrobust`'s selectors. The MCP tool `rd_multi`'s description says so.
-
-2. **Bias correction**: We use the robust bias-corrected estimate from the base RD estimator for pooling, consistent with CCT recommendations.
-
-3. **Standard errors**: The pooled SE assumes independence across cutoffs, which is appropriate when cutoffs define non-overlapping populations.
+(not registered; no R value) covers these rules.
 
 ## References
 

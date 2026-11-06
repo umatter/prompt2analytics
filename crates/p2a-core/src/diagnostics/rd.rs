@@ -145,7 +145,7 @@ fn check_effective_sample_size(result: &RdResult, report: &mut IdentificationRep
     }
 }
 
-/// Add note about bandwidth selection and sensitivity.
+/// Add a note naming where the bandwidths came from, and their sensitivity.
 fn add_bandwidth_note(result: &RdResult, report: &mut IdentificationReport) {
     // Always add informational note about bandwidth choice
     let h_symmetric = (result.h_left - result.h_right).abs() < 0.001;
@@ -165,10 +165,11 @@ fn add_bandwidth_note(result: &RdResult, report: &mut IdentificationReport) {
             WarningSeverity::Info,
             "Bandwidth Selection",
             format!(
-                "RD estimates use MSE-optimal bandwidth ({}). Results may be sensitive \
-                 to bandwidth choice. Consider reporting estimates for a range of \
-                 bandwidths (e.g., 0.5h, 0.75h, 1.25h, 1.5h) as robustness checks.",
-                bandwidth_desc
+                "Bandwidths ({}): {}. Results may be sensitive to bandwidth choice. Consider \
+                 reporting estimates for a range of bandwidths (e.g., 0.5h, 0.75h, 1.25h, 1.5h) \
+                 as robustness checks.",
+                bandwidth_desc,
+                result.bandwidth_label()
             ),
             "Bandwidth choice",
         )
@@ -180,10 +181,11 @@ fn add_bandwidth_note(result: &RdResult, report: &mut IdentificationReport) {
     );
 }
 
-/// Run bandwidth sensitivity analysis.
+/// Bandwidth sensitivity of RD estimates the caller computed at several bandwidths.
 ///
-/// Computes RD estimates at multiple bandwidths to assess sensitivity.
-/// Returns a summary of how estimates vary with bandwidth choice.
+/// A caller-side helper: [`rd_diagnostics()`] cannot call it, because it has the result and
+/// not the data. The value is the coefficient of variation `sd / |mean|` of the estimates
+/// (sample sd, n - 1), 0 for fewer than two estimates and infinity when |mean| < 1e-10.
 ///
 /// # Arguments
 ///
@@ -247,6 +249,8 @@ mod tests {
             b_right: 0.75,
             bwselect: BandwidthMethod::MseTwo,
             bandwidth_given: false,
+            h_origin: crate::econometrics::rd::BandwidthOrigin::Selected,
+            b_origin: crate::econometrics::rd::BandwidthOrigin::Selected,
             p: 1,
             q: 2,
             kernel: KernelType::Triangular,
@@ -291,8 +295,55 @@ mod tests {
         ];
 
         let cv = bandwidth_sensitivity_cv(&estimates);
-        assert!(cv > 0.0);
-        assert!(cv < 1.0); // Reasonable variation
+        // R: sd(c(2, 2.2, 2.5, 2.3, 2.1)) / 2.22
+        let want = 0.0866458741516727;
+        assert!((cv - want).abs() <= 1e-12 * want, "{cv}");
+        assert_eq!(bandwidth_sensitivity_cv(&[]), 0.0);
+        assert_eq!(
+            bandwidth_sensitivity_cv(&[(1.0, 1.0, 0.1), (1.0, -1.0, 0.1)]),
+            f64::INFINITY
+        );
+    }
+
+    fn bandwidth_note(result: &RdResult) -> String {
+        let report = rd_diagnostics(result);
+        report
+            .warnings
+            .iter()
+            .find(|w| w.code == "BANDWIDTH_SENSITIVITY")
+            .unwrap()
+            .message
+            .clone()
+    }
+
+    #[test]
+    fn test_bandwidth_note_names_the_bandwidth_source() {
+        use crate::econometrics::rd::BandwidthOrigin;
+        let mut r = create_mock_rd_result(150, 200);
+        r.h_origin = BandwidthOrigin::UserSupplied;
+        r.b_origin = BandwidthOrigin::RhoTimesH;
+        let m = bandwidth_note(&r);
+        assert!(
+            m.starts_with(
+                "Bandwidths (h = 0.5000): h user-supplied; b = 1.5000 h (rho). Results may be \
+                 sensitive to bandwidth choice."
+            ),
+            "{m}"
+        );
+        assert!(!m.contains("MSE-optimal"), "{m}");
+        r.h_origin = BandwidthOrigin::Selected;
+        r.b_origin = BandwidthOrigin::Selected;
+        r.bwselect = BandwidthMethod::CerRd;
+        let m = bandwidth_note(&r);
+        assert!(
+            m.starts_with(
+                "Bandwidths (h = 0.5000): h and b selected by cerrd (CER-optimal, one common \
+                 bandwidth), as rdrobust::rdbwselect."
+            ),
+            "{m}"
+        );
+        r.bwselect = BandwidthMethod::MseRd;
+        assert!(bandwidth_note(&r).contains("MSE-optimal"));
     }
 
     #[test]
