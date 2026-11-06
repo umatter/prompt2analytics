@@ -156,6 +156,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/anova_twoway_legacy.csv` | 12 × 3 (yield, fertilizer, water) | `stat_anova_twoway_legacy` | `r/cases/stats_power_loglin.R` | literal values: the two-way fertilizer × water data of `anova.rs`'s legacy test |
 | `generated/binary_glm.csv` | 400 × 10 (y, x1, x2, d, x1b, nd, xnc, ysep, yq, y012) | `disc_binary_glm` | `r/cases/discrete_mlogit_asc.R` | seed 20261021 |
 | `generated/blobs_noise.csv` | 115 × 2 (x, y) | `hdbscan_blobs`; read by `optics_blobs`, `silhouette_singletons` | `r/cases/ml_density_clustering.R` | seed 20261109 |
+| `generated/cbps_sim.csv` | 400 × 5 (treat, x1, x2, x3, y; treat and x3 Int64) | `cbps_sim_methods` | `r/cases/causal_cbps.R` | seed 20261102; 178 treated, 222 controls; logit propensity in x1, x2, x3; y = 1 + 2 treat + x1 + 0.5 x2 + N(0, 1) |
 | `generated/cf_aipw_formula.csv` | 40 × 5 (y, w, y_hat, w_hat, tau_hat) | `cf_aipw_formula` | `r/cases/ml_causal_forest.R` | seed 4704 |
 | `generated/cf_confounded.csv` | 1000 × 7 (x0, x1, x2, w, y0, y1, yh) | `cf_confounded` | `r/cases/ml_causal_forest.R` | seed 4794; P(W = 1) = 0.1 + 0.8 x0; tau = 0 (y0), 1 (y1), 1 + 2 x1 (yh) |
 | `generated/cf_little_bags.csv` | 12 × 6 (group, n, y, w, yw, ww) | `cf_little_bags` | `r/cases/ml_causal_forest.R` | seed 4705; leaf means of 12 trees in 6 groups of 2 |
@@ -163,6 +164,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/cf_rct.csv` | 2000 × 4 (x0, x1, w, y) | `cf_rct` | `r/cases/ml_causal_forest.R` | seed 4702; randomised W, tau = 0.2 |
 | `generated/cf_split_node.csv` | 30 × 5 (x, x2, y, z, r) | `cf_split_node` | `r/cases/ml_causal_forest.R` | seed 4710; x2 has ties |
 | `generated/ctmle_sim.csv` | 300 × 7 (yb, yc, a, w1, w2, w3, w4) | `tmle_glm`, `ctmle_cv` | `r/cases/causal_stdreg.R` | seed 20261210; w1 confounder, w2 instrument, w3 precision variable, w4 noise |
+| `generated/doubleml_sim.csv` | 400 × 17 (X1-X6, dcont, y, dbin, yb, z, dz, yz, zb, db, yzb, fold) | `doubleml_models` | `r/cases/causal_doubleml.R` | seed 20261201; continuous (PLR), binary (IRM) and instrumented (PLIV, IIVM) treatments with their outcomes; `fold` the fixed 5-fold labels |
 | `generated/etwfe_panel.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_staggered` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8/never (0), time-invariant control xc, treat the absorbing treatment indicator |
 | `generated/etwfe_panel_all_treated.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8, no never-treated unit |
 | `generated/etwfe_panel_unbalanced.csv` | 923 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, `etwfe_panel` without year 3 of every 7th unit and years 1-2 of every 11th |
@@ -172,6 +174,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/feglm_panel.csv` | 480 × 7 (id, time, x, x2, y_gauss, y_bin, y_cnt) | `feglm_families` | `r/cases/econ_panel_t3.R` | seed 20261106 |
 | `generated/fisher_legacy.csv` | 4 × 5 (table, a, b, c, d) | `stat_fisher_legacy` | `r/cases/stats_power_loglin.R` | literal values: the four 2 × 2 tables of `fisher.rs`'s legacy tests |
 | `generated/garch_returns.csv` | 1500 × 5 (t, r_norm, r_t, r_g21, r_norm_dm) | `garch_normal_t` | `r/cases/ts_garch.R` | seed 20261105 |
+| `generated/gformula_nc.csv` | 2000 × 5 (B, L_t0, A_t0, Y, Yc) | `gformula_natural_course` | `r/cases/causal_gformula.R` | seed 20261209; one period; binary Y and continuous Yc |
+| `generated/gformula_surv.csv` | 400 × 6 (id, L, Lb, A, time, event) | `gformula_hazard` | `r/cases/causal_gformula.R` | seed 20261207; 5 periods, time-fixed L and A; 175 events |
+| `generated/gformula_surv_tv.csv` | 1000 × 10 (id, B, L_t0-L_t2, A_t0-A_t2, time, event) | `gformula_hazard_tv` | `r/cases/causal_gformula.R` | seed 20261208; 3 periods, time-varying L and A, loss to follow-up after period 2; cells after a subject's last period are empty (NA) |
 | `generated/gls_cs.csv` | 150 × 4 (g, y, x, z) | `gls_compsymm` | `r/cases/regression_smoothers_t3.R` | seed 20261120 |
 | `generated/granger_short.csv` | 20 × 2 (x, y) | `granger_short` | `r/cases/ts_var.R` | seed 20261113 |
 | `generated/gsynth_simdata.csv` | 1500 × 6 (id, time, Y, D, X1, X2) | `gsynth_simdata` | `r/cases/causal_gsynth.R` | `gsynth::simdata` (50 units × 30 periods, 5 treated from t = 21), the model columns |

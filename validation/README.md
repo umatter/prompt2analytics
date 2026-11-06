@@ -102,7 +102,8 @@ looks like a validation failure but is not one.
   the versions they were written with): jsonlite, plm, fixest, sandwich, lmtest, car, tseries,
   quantreg, nlme, aod, strucchange, nnet, MASS, AER, rdrobust, forecast, numDeriv, pscl,
   survival, mlogit, urca, glmnet, cluster, dbscan, dfidx, dynamicTreeCut, EValue, lpSolve,
-  MatchIt, optmatch, rlemon, rpart, sensemakr, vars.
+  MatchIt, optmatch, rlemon, rpart, sensemakr, vars, WeightIt, quadprog, medflex, ltmle, fect,
+  gsynth, tmle, gmm, bacondecomp, did, DRDID, CBPS, etwfe, marginaleffects.
 
   ```r
   install.packages(c("jsonlite", "plm", "fixest", "sandwich", "lmtest", "car", "tseries",
@@ -110,7 +111,9 @@ looks like a validation failure but is not one.
                      "rdrobust", "forecast", "numDeriv", "pscl", "survival", "mlogit",
                      "urca", "glmnet", "cluster", "dbscan", "dfidx", "dynamicTreeCut",
                      "EValue", "lpSolve", "MatchIt", "optmatch", "rlemon", "rpart",
-                     "sensemakr", "vars"))
+                     "sensemakr", "vars", "WeightIt", "quadprog", "medflex", "ltmle",
+                     "fect", "gsynth", "tmle", "gmm", "bacondecomp", "did", "DRDID",
+                     "CBPS", "etwfe", "marginaleffects"))
   ```
 
 - **Legacy scripts** (`validation/scripts/*.R`, run only with `--legacy-r`): AER, aod, BART,
@@ -306,19 +309,30 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Negative binomial, zero-inflated Poisson and NB (MASS::glm.nb, pscl::zeroinfl) | [count_models.md](econometrics/count_models.md) | R-pinned, known deviations (ECON-64) |
 | Hurdle models (rows used) | [hurdle.md](econometrics/hurdle.md) | R-pinned, known deviations (ECON-16) |
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | R-pinned |
-| Diff-in-Diff | [did.md](econometrics/did.md) | not R-pinned |
+| General GMM (gmm::gmm: linear IV and normal-distribution moments; two-step, iterated, CUE, fixed W) | [general_gmm.md](econometrics/general_gmm.md) | R-pinned, known deviations (ECON-68) |
+| Marginal treatment effects by local IV | [ivmte.md](econometrics/ivmte.md) | R-pinned |
+| Diff-in-Diff (2x2, lm with HC1 and cluster-robust SEs) | [did.md](econometrics/did.md) | R-pinned |
+| Goodman-Bacon decomposition (bacondecomp) | [bacon.md](econometrics/bacon.md) | R-pinned |
 | Staggered DiD (Callaway-Sant'Anna) | [staggered_did.md](econometrics/staggered_did.md) | R-pinned, known deviations (CAUS-84) |
 | Extended TWFE (etwfe::etwfe + emfx) | [etwfe.md](econometrics/etwfe.md) | R-pinned, known deviations (CAUS-14) |
 | Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
 | Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
 | IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned, known deviations (CAUS-92) |
-| Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | not R-pinned |
-| TMLE | [tmle.md](econometrics/tmle.md) | not R-pinned |
+| Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | R-pinned |
+| TMLE | [tmle.md](econometrics/tmle.md) | R-pinned |
+| C-TMLE (greedy g selection, V-fold risk) | [ctmle.md](econometrics/ctmle.md) | R-pinned |
+| Regression standardization (stdReg-style g-computation) | [stdreg.md](econometrics/stdreg.md) | R-pinned |
 | LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | R-pinned |
-| CBPS | [cbps.md](econometrics/cbps.md) | not R-pinned |
-| SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | not R-pinned |
+| Parametric g-formula (natural course, discrete-time hazard) | [gformula.md](econometrics/gformula.md) | R-pinned |
+| CBPS | [cbps.md](econometrics/cbps.md) | R-pinned, known deviations (CAUS-11, CAUS-55) |
+| WeightIt (logistic, entropy balancing, energy, stable balancing) | [weightit.md](econometrics/weightit.md) | R-pinned |
+| SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | R-pinned |
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |
-| Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned (`medflex_scales`, `medflex_na`), known deviations (CAUS-22: non-binary exposure refused; CAUS-23: A0:C and contrasts at the confounder means) |
+| Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | R-pinned, known deviations (CAUS-22, CAUS-23) |
+| Double/debiased ML (PLR, IRM, PLIV, IIVM) | [doubleml.md](econometrics/doubleml.md) | R-pinned |
+| Synthetic control (Synth: simplex QP, V search) | [synth.md](econometrics/synth.md) | R-pinned, known deviations (CAUS-40) |
+| Synthetic control with prediction intervals (SCPI quantities) | [scpi.md](econometrics/scpi.md) | R-pinned, known deviations (CAUS-32) |
+| Generalized synthetic control (gsynth / fect: IFE, matrix completion, bootstrap) | [gsynth.md](econometrics/gsynth.md) | R-pinned, known deviations (CAUS-41, CAUS-43, CAUS-44) |
 | Logit | [logit.md](econometrics/logit.md) | R-pinned, known deviations (ECON-60) |
 | Probit | [probit.md](econometrics/probit.md) | R-pinned |
 | Conditional logit (mlogit) | [mlogit.md](econometrics/mlogit.md) | R-pinned |
@@ -376,7 +390,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Projection Pursuit Regression | [ppr.md](ml/ppr.md) | not R-pinned |
 | Random Forest | no validation document yet | not R-pinned |
 | SVM | no validation document yet | not R-pinned |
-| Causal Forest | [causal_forest.md](ml/causal_forest.md) | not R-pinned |
+| Causal Forest | [causal_forest.md](ml/causal_forest.md) | R-pinned, known deviations (ML-20) |
 | BART Causal (bartCause) | [bart_causal.md](ml/bart_causal.md) | not R-pinned |
 | HDBSCAN (dbscan::hdbscan) | [hdbscan.md](ml/hdbscan.md) | R-pinned, known deviations (ML-49) |
 | OPTICS (dbscan::optics, extractDBSCAN, extractXi) | [optics.md](ml/optics.md) | R-pinned |
