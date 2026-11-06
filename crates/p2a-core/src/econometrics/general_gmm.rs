@@ -46,7 +46,7 @@
 //!
 //! R equivalent: `gmm::gmm()` (validated against it: `validation/econometrics/general_gmm.md`).
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, Zip, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -581,6 +581,40 @@ impl<'a> LinearIv<'a> {
         self.y - &self.x.dot(&theta)
     }
 
+    /// The MDS moment covariance `sum_i (g_i - c)(g_i - c)' / n` with `g_i = z_i e_i` and `c`
+    /// the column means of the moments (`centered`) or zero, formed column by column: moment
+    /// `j` is the contiguous vector `z_j * e`, centred by its own mean as
+    /// [`centre_columns`] does, and `Omega_jl` is one dot product. For `q` up to
+    /// [`MDS_COLUMNWISE_MAX_Q`] this is faster than the n x q moment matrix and its matrix
+    /// product (no broadcasting passes, no packing of a transposed operand).
+    fn mds_omega(&self, theta: ArrayView1<f64>, centered: bool) -> EconResult<Array2<f64>> {
+        let (n, q) = self.z.dim();
+        // e = y - X theta in the buffer of X theta (the same operations as `residuals`)
+        let mut e = self.x.dot(&theta);
+        e.zip_mut_with(self.y, |e, &y| *e = y - *e);
+        let mut ut = resource::try_zeros2(q, n, "GMM moment columns")?;
+        for (mut u, zj) in ut.outer_iter_mut().zip(self.z.columns()) {
+            Zip::from(&mut u)
+                .and(&zj)
+                .and(&e)
+                .for_each(|u, &z, &e| *u = z * e);
+            if centered && n > 0 {
+                let mean = u.sum() / n as f64;
+                u -= mean;
+            }
+        }
+        let nf = n as f64;
+        let mut omega = Array2::<f64>::zeros((q, q));
+        for j in 0..q {
+            for l in j..q {
+                let v = ut.row(j).dot(&ut.row(l)) / nf;
+                omega[[j, l]] = v;
+                omega[[l, j]] = v;
+            }
+        }
+        Ok(omega)
+    }
+
     /// `argmin gbar' W gbar = (A' W A)^-1 A' W Z'y / n` with `A = Z'X / n`.
     fn weighted_solve(&self, w: &Array2<f64>) -> EconResult<Array1<f64>> {
         let aw = self.zx.t().dot(w);
@@ -662,6 +696,11 @@ impl MomentModel for LinearIv<'_> {
     }
 }
 
+/// Up to this many moment conditions the MDS covariance of linear IV is formed column by
+/// column ([`LinearIv::mds_omega`]); above it the n x q moment matrix and one matrix product
+/// are as fast or faster.
+const MDS_COLUMNWISE_MAX_Q: usize = 8;
+
 /// An estimated moment covariance `Omega` and the HAC lags it used.
 struct MomentCov {
     omega: Array2<f64>,
@@ -689,6 +728,15 @@ fn moment_covariance(
         && let Some(omega) = model.iid_omega(theta)
     {
         return Ok(MomentCov { omega, lags: None });
+    }
+    if config.vcov != GmmVcov::HAC
+        && let Some(lin) = model.as_linear()
+        && lin.q() <= MDS_COLUMNWISE_MAX_Q
+    {
+        return Ok(MomentCov {
+            omega: lin.mds_omega(theta, config.centered)?,
+            lags: None,
+        });
     }
     let mut u = model.moments(theta)?;
     if config.centered {
@@ -802,6 +850,9 @@ struct Estimate {
     theta: Array1<f64>,
     /// The weighting matrix of the last estimation step (J and the objective use it).
     w: Array2<f64>,
+    /// The moment covariance at `theta` when the estimation already formed it and `w` is
+    /// its inverse (CUE), so that the variance does not form it again.
+    final_cov: Option<MomentCov>,
     method: GmmMethod,
     weighting: GmmWeighting,
     convergence: Option<Convergence>,
@@ -824,6 +875,7 @@ fn estimate(model: &dyn MomentModel, config: &GeneralGmmConfig) -> EconResult<Es
         return Ok(Estimate {
             theta,
             w,
+            final_cov: None,
             method: GmmMethod::OneStep,
             weighting,
             iterations: conv.as_ref().map_or(1, |c| c.iterations),
@@ -848,6 +900,7 @@ fn estimate(model: &dyn MomentModel, config: &GeneralGmmConfig) -> EconResult<Es
             Ok(Estimate {
                 theta,
                 w,
+                final_cov: None,
                 method: GmmMethod::TwoStep,
                 weighting: GmmWeighting::Optimal,
                 iterations: 2,
@@ -865,10 +918,12 @@ fn estimate(model: &dyn MomentModel, config: &GeneralGmmConfig) -> EconResult<Es
             if let Some(note) = c.note("CUE (BFGS)") {
                 warnings.push(note);
             }
-            let w = weight_from(&moment_covariance(model, theta.view(), config)?.omega)?;
+            let cov = moment_covariance(model, theta.view(), config)?;
+            let w = weight_from(&cov.omega)?;
             Ok(Estimate {
                 theta,
                 w,
+                final_cov: Some(cov),
                 method: GmmMethod::CUE,
                 weighting: GmmWeighting::Optimal,
                 iterations: c.iterations,
@@ -911,6 +966,7 @@ fn estimate(model: &dyn MomentModel, config: &GeneralGmmConfig) -> EconResult<Es
             Ok(Estimate {
                 theta,
                 w,
+                final_cov: None,
                 method: GmmMethod::Iterative,
                 weighting: GmmWeighting::Optimal,
                 iterations,
@@ -941,7 +997,11 @@ fn finish_fit(
     let (n, k, q) = (model.n(), model.k(), model.q());
     let nf = n as f64;
     let theta = est.theta;
-    let cov = moment_covariance(model, theta.view(), config)?;
+    // CUE formed Omega(theta) and its inverse already; every other path forms it here
+    let (cov, oinv) = match est.final_cov {
+        Some(cov) => (cov, Some(&est.w)),
+        None => (moment_covariance(model, theta.view(), config)?, None),
+    };
     let g = model.jacobian(theta.view());
     let fixed = est.method == GmmMethod::OneStep;
     let vcov_mat = if fixed {
@@ -956,7 +1016,10 @@ fn finish_fit(
         let t1 = bread.dot(&gw);
         symmetrize(&(t1.dot(&cov.omega).dot(&t1.t()) / nf))
     } else {
-        let oinv = weight_from(&cov.omega)?;
+        let oinv = match oinv {
+            Some(w) => w.clone(),
+            None => weight_from(&cov.omega)?,
+        };
         let m = symmetrize(&g.t().dot(&oinv).dot(&g));
         sym_inverse(m.view(), SingularPolicy::Error, "G' Omega^-1 G")?.inverse / nf
     };
@@ -1046,10 +1109,12 @@ fn estimate_linear_iv(
             message: format!("Underidentified: {} instruments < {} parameters", q, k),
         });
     }
+    // `ArrayBase::fold` with `&` instead of `all`: memory order and no early exit, so the
+    // pass over a contiguous array vectorises (the data is finite in every fit that goes on)
     for (what, finite) in [
-        ("y", y.iter().all(|v| v.is_finite())),
-        ("x", x.iter().all(|v| v.is_finite())),
-        ("z", z.iter().all(|v| v.is_finite())),
+        ("y", y.fold(true, |ok, v| ok & v.is_finite())),
+        ("x", x.fold(true, |ok, v| ok & v.is_finite())),
+        ("z", z.fold(true, |ok, v| ok & v.is_finite())),
     ] {
         if !finite {
             return Err(EconError::InvalidSpecification {
@@ -2369,6 +2434,122 @@ mod tests {
         expect_cancelled(with_budget(cancelled(), || {
             moment_covariance(&model, theta.view(), &config).map(|m| m.omega)
         }));
+    }
+
+    /// The column-wise MDS moment covariance of linear IV (q <= MDS_COLUMNWISE_MAX_Q) equals
+    /// the row-wise reference `sum_i (g_i - gbar)(g_i - gbar)' / n` (centred) and
+    /// `sum_i g_i g_i' / n` (uncentred) to 1e-12 relative, for row- and column-major Z, and
+    /// `moment_covariance` takes it for MDS and Fixed. Noisy data, q = 1..=8 and 12 (the
+    /// row-wise path). Fails before: `LinearIv::mds_omega` did not exist.
+    #[test]
+    fn test_gmm_mds_omega_columnwise_matches_rowwise() {
+        let n = 73;
+        let noise = |i: usize, j: usize| ((i * 7919 + j * 104_729) % 1000) as f64 / 1000.0 - 0.5;
+        let reference = |u: &Array2<f64>, centered: bool| {
+            let (n, q) = u.dim();
+            let mean: Vec<f64> = (0..q)
+                .map(|j| {
+                    if centered {
+                        u.column(j).sum() / n as f64
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            Array2::from_shape_fn((q, q), |(j, l)| {
+                (0..n)
+                    .map(|i| (u[[i, j]] - mean[j]) * (u[[i, l]] - mean[l]))
+                    .sum::<f64>()
+                    / n as f64
+            })
+        };
+        for q in [1usize, 2, 3, 5, 8, 12] {
+            let k = q.min(3);
+            let x = Array2::from_shape_fn((n, k), |(i, j)| {
+                if j == 0 {
+                    1.0
+                } else {
+                    (i as f64) / 10.0 + noise(i, j)
+                }
+            });
+            let z_c = Array2::from_shape_fn((n, q), |(i, j)| {
+                if j == 0 {
+                    1.0
+                } else {
+                    (j as f64) + noise(i, j + 17) * (1.0 + j as f64)
+                }
+            });
+            let z_f = z_c.t().as_standard_layout().reversed_axes().into_owned();
+            assert!(q == 1 || !z_f.is_standard_layout());
+            let y = Array1::from_shape_fn(n, |i| 1.0 + 0.3 * i as f64 + 2.0 * noise(i, 99));
+            let theta = Array1::from_shape_fn(k, |j| 0.5 - 0.2 * j as f64);
+            for z in [&z_c, &z_f] {
+                let model = LinearIv::new(&y, &x, z);
+                let u = model.moments(theta.view()).unwrap();
+                for centered in [true, false] {
+                    let want = reference(&u, centered);
+                    let scale = want.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+                    let close = |got: &Array2<f64>, what: &str| {
+                        let diff = (got - &want).iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+                        assert!(
+                            diff <= 1e-12 * scale,
+                            "{what} q = {q}, centered = {centered}: max diff {diff:e}"
+                        );
+                        assert_eq!(got, &got.t(), "{what} not symmetric");
+                    };
+                    if q <= MDS_COLUMNWISE_MAX_Q {
+                        close(
+                            &model.mds_omega(theta.view(), centered).unwrap(),
+                            "mds_omega",
+                        );
+                    }
+                    for vcov in [GmmVcov::MDS, GmmVcov::Fixed] {
+                        let config = GeneralGmmConfig {
+                            vcov,
+                            centered,
+                            ..Default::default()
+                        };
+                        let cov = moment_covariance(&model, theta.view(), &config).unwrap();
+                        assert_eq!(cov.lags, None);
+                        close(&cov.omega, "moment_covariance");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The finite-value check of linear IV (a fold without early exit) still refuses NaN and
+    /// +-Inf in y, X or Z, in row- and column-major arrays. A guard on the rewritten check;
+    /// it passes before as well.
+    #[test]
+    fn test_gmm_linear_iv_refuses_non_finite_data() {
+        let (y, x, z) = iv_data();
+        let fit = |y: &Array1<f64>, x: &Array2<f64>, z: &Array2<f64>| {
+            run_general_gmm(
+                MomentCondition::LinearIV {
+                    y: y.clone(),
+                    x: x.clone(),
+                    z: z.clone(),
+                },
+                GeneralGmmConfig {
+                    vcov: GmmVcov::MDS,
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(fit(&y, &x, &z).is_ok());
+        let last = y.len() - 1;
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut y2 = y.clone();
+            y2[last] = bad;
+            expect_invalid(fit(&y2, &x, &z), "y contains non-finite values");
+            let mut x2 = x.clone();
+            x2[[last, 1]] = bad;
+            expect_invalid(fit(&y, &x2, &z), "x contains non-finite values");
+            let mut z2 = z.t().as_standard_layout().reversed_axes().into_owned();
+            z2[[last, z.ncols() - 1]] = bad;
+            expect_invalid(fit(&y, &x, &z2), "z contains non-finite values");
+        }
     }
 
     #[test]
