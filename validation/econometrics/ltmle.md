@@ -55,10 +55,12 @@ fit are reported with the model they come from.
 
 Every logistic g and Q regression first runs `econometrics::glm::lean_logit_refined`: the same
 Fisher scoring and deviance rule as `fit_glm`, through the normal equations, with the refinement
-step the shared GLM takes when `kappa_1` of the equilibrated `X'WX` is above 100. It computes
-only what LTMLE reads. A fit leaves for `fit_glm` from glm.fit's start, which then reports it,
-when it would report anything: a linear predictor at the link's clamp, a rank-deficient design
-or `kappa_1` above 1e4, no convergence, a binomial response that is not 0/1. A response whose mean
+step the shared GLM takes when `kappa_1` of the equilibrated `X'WX` is above 100, on the steps
+that may be the last (the previous step moved the deviance by less than 1e-3 relative, or the fit
+started from coefficients). It computes only what LTMLE reads. A fit leaves for `fit_glm` from
+glm.fit's start, which then reports it, when it would report anything: a linear predictor at the
+link's clamp, a rank-deficient design or `kappa_1` above 1e4, no convergence, a binomial response
+that is not 0/1. A last step that came without its refinement also leaves. A response whose mean
 is within 1e-6 of 0 or 1 goes to `fit_glm` directly.
 
 The Q regression of node `t - 1` starts from node t's coefficients on the shared history, with

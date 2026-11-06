@@ -123,21 +123,26 @@ Tests: `test_validate_na_weightit_columns`, `test_validate_na_entropy_balance_co
 `causal_mediation_na`, registry `validation/methods/causal_na.json`,
 id `weighting_na_refusal`).
 
-## Wall-clock against fe13b889 (T3-PERF6A)
+## Wall-clock against fe13b889
 
-Medians in µs over five interleaved rounds of the wave-2B timing harness (`wp23`, one core,
-one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+Medians in µs over five interleaved rounds of the timing harness (`wp23`, one core, one rayon
+thread, `release`), on a machine with a load average of about 2 (not idle); ratio is this tree over fe13b889.
+Rounds at n = 1,000 and below scatter by about 0.2 either way; those at n = 10,000 by less.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| logistic | 100 | 38.80 | 28.60 | 0.74 |
-| logistic | 1,000 | 258.60 | 238.00 | 0.92 |
-| logistic | 10,000 | 3,652.30 | 3,703.00 | 1.01 |
-| logistic, 3 covariates | 1,000 | 327.70 | 285.10 | 0.87 |
-| entropy, 3 covariates | 1,000 | 300.20 | 314.40 | 1.05 |
+| logistic, covariates on U(-2, 2) | 100 | 34.30 | 15.90 | 0.46 |
+| logistic, covariates on U(-2, 2) | 1,000 | 140.51 | 76.50 | 0.54 |
+| logistic, covariates on U(-2, 2) | 10,000 | 1,759.93 | 1,393.37 | 0.79 |
+| logistic, covariates at mean 40, sd 10 | 1,000 | 149.50 | 90.37 | 0.60 |
+| logistic, covariates at mean 40, sd 10 | 10,000 | 1,687.97 | 1,487.39 | 0.88 |
+| logistic, 3 covariates | 1,000 | 159.36 | 82.67 | 0.52 |
 
-The entropy row is not like for like: fe13b889 solved one group for every estimand, this tree
-solves both groups for the default ATE.
+The gains depend on the design's conditioning: uncentred covariates take the refinement on the
+propensity fit's last steps, and past a condition number of 1e4 the fit is `fit_glm`'s and pays
+for both loops. The entropy method does not use this fit. An earlier run measured it at 1.05x
+(300.20 and 314.40 µs, 3 covariates, n = 1,000); that row is not like for like, because
+fe13b889 solved one group for every estimand and this tree solves both groups for the default ATE.
 
 ## References
 

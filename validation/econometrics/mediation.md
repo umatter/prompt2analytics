@@ -343,18 +343,27 @@ Until T2-WP13 the covariate matrix was scrambled (CAUS-25): it was filled column
 and reshaped row-major, so the estimates depended on the row and covariate order (total
 effect 1.3683 on this case). The direct and indirect effects are not pinned (CAUS-26).
 
-## Wall-clock against fe13b889 (T3-PERF6A)
+## Wall-clock against fe13b889
 
-Medians over interleaved rounds of the wave-2B timing harness (`wp26`, one core,
-one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+Medians over interleaved rounds, one core, one rayon thread, `release`, on a machine with a load average of about 2 (not idle); ratio is this tree over fe13b889.
+The first rows are the timing harness (`wp26`, five rounds), the last the Criterion group
+`MediationAnalysis` (three rounds, 99 replicates, trim 0.05).
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| IPW mediation, 199 replicates (ms) | 100 | 15.29 | 7.13 | 0.47 |
-| IPW mediation, 199 replicates (ms) | 1,000 | 69.51 | 55.45 | 0.80 |
-| IPW mediation, 199 replicates (ms) | 10,000 | 741.86 | 554.37 | 0.75 |
+| harness, 199 replicates (ms) | 100 | 4.05 | 2.41 | 0.59 |
+| harness, 199 replicates (ms) | 1,000 | 35.27 | 18.54 | 0.53 |
+| harness, 199 replicates (ms) | 10,000 | 358.01 | 180.39 | 0.50 |
+| Criterion, 99 replicates (ms) | 200 | 1.65 | 1.00 | 0.60 |
+| Criterion, 99 replicates (ms) | 500 | 3.01 | 1.80 | 0.60 |
+| Criterion, 99 replicates (ms) | 1,000 | 5.58 | 3.16 | 0.57 |
 
-The n = 100 base value carries a noisy round. Three rounds; values in ms.
+The gains depend on the design's conditioning, and the two data sets differ there. In the
+Criterion data the mediator nearly separates the arms, so trimming at 0.05 drops 77% of the rows
+and leaves a mediator that is close to a function of the covariate: the bootstrap resamples of
+those rows give the p(D = 1 | X, M) design a median condition number of 273 at its first step.
+The harness data drop 26% and stay at 11. Those fits take the refinement on their last steps;
+past a condition number of 1e4 a fit is `fit_glm`'s and pays for both loops.
 
 ## References
 
