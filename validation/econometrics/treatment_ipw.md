@@ -96,6 +96,27 @@ Tests: `test_validate_na_ipw_columns`, `test_validate_na_ipw_nan_outcome_is_miss
 `validation/methods/causal_na.json`, id `weighting_na_refusal`). They pin the refused column
 and the missing count; the IPW estimates are pinned by the tests above.
 
+## Wall-clock against fe13b889 (T3-PERF6A)
+
+Medians in µs over five interleaved rounds of the wave-2B timing harness (`wp23`, one core,
+one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+
+| Row | n | fe13b889 | this tree | ratio |
+|---|---|---:|---:|---:|
+| IPW ATE | 100 | 51.80 | 49.10 | 0.95 |
+| IPW ATE | 1,000 | 324.50 | 338.50 | 1.04 |
+| IPW ATE | 10,000 | 4,029.70 | 4,471.20 | 1.11 |
+| IPW ATT | 100 | 51.80 | 44.20 | 0.85 |
+| IPW ATT | 1,000 | 328.00 | 320.30 | 0.98 |
+| IPW ATT | 10,000 | 4,165.80 | 4,192.50 | 1.01 |
+
+IPW ATE at n = 10,000 stays above 1.1x. The excess is the two standard errors fe13b889 did not
+compute. In a timed run of the pieces at n = 10,000 the naive SE takes 213 µs and the
+M-estimation SE 438 µs of 4,396 µs; everything else is 3,745 µs, below the earlier tree. Both are
+already one pass over the rows each (three for the M-estimation SE: information, score
+adjustment, influence), and the efficient-influence-function SE is the one the earlier tree had.
+Not signed off; reported in the T3-PERF6 results.
+
 ## References
 
 - Horvitz, D.G. & Thompson, D.J. (1952). "A Generalization of Sampling Without Replacement from a Finite Universe."

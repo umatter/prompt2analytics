@@ -70,6 +70,17 @@ missing values in every column the doubly robust estimator reads (checked for T2
 Tests: `test_validate_na_doubly_robust_columns` (case `causal_mediation_na`, registry
 `validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
+## Wall-clock against fe13b889 (T3-PERF6A)
+
+Medians in µs over five interleaved rounds of the wave-2B timing harness (`wp23`, one core,
+one rayon thread, `release`), on a shared machine; ratio is this tree over fe13b889.
+
+| Row | n | fe13b889 | this tree | ratio |
+|---|---|---:|---:|---:|
+| AIPW | 100 | 53.30 | 42.80 | 0.80 |
+| AIPW | 1,000 | 345.30 | 298.90 | 0.87 |
+| AIPW | 10,000 | 3,926.00 | 3,797.00 | 0.97 |
+
 ## References
 
 - Robins, J.M., Rotnitzky, A. & Zhao, L.P. (1994). "Estimation of Regression Coefficients When Some Regressors Are Not Always Observed."

@@ -15,7 +15,7 @@
 //! - Implementation inspired by R package `causalweight` (Bodory & Huber, 2018).
 //!   Source: <https://cran.r-project.org/package=causalweight>
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix2};
 use rand::SeedableRng;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -24,12 +24,12 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
-use crate::econometrics::glm::{GlmLink, fit_propensity};
+use crate::econometrics::glm::fit_propensity_lean;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::options::Choices;
-use crate::regression::ols::normal_equations_inverse;
+use crate::regression::ols::{normal_equations_inverse, normal_inverse_from_gram};
 use crate::resource;
 use crate::stats::robust::{QuantileType, percentile_interval, quantile_sorted};
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -539,7 +539,7 @@ pub fn run_ipw_treatment(
     let x = design.data;
 
     // Estimate propensity scores using logit
-    let ps_fit = fit_propensity(x.view(), d.view(), GlmLink::Logit)?;
+    let ps_fit = fit_propensity_lean(x.view(), d.view())?;
     let ps = ps_fit.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
     for w in &ps_fit.fit.warnings {
         warnings.push(format!("propensity model: {w}"));
@@ -585,7 +585,7 @@ pub fn run_ipw_treatment(
     let y_trim: Array1<f64> = keep_idx.iter().map(|&i| y[i]).collect();
     let d_trim: Array1<f64> = keep_idx.iter().map(|&i| d[i]).collect();
     let ps_trim: Array1<f64> = keep_idx.iter().map(|&i| ps[i]).collect();
-    let x_trim = Array2::from_shape_fn((keep_idx.len(), x.ncols()), |(i, j)| x[[keep_idx[i], j]]);
+    let x_trim = kept_rows(&x, &keep_idx)?;
 
     let n_trim = y_trim.len();
     let n_treated = d_trim.iter().filter(|&&v| v >= 0.5).count();
@@ -638,13 +638,23 @@ pub fn run_ipw_treatment(
         }
         m
     };
-    let ps_cols: Vec<usize> = (0..x.ncols())
-        .filter(|j| !ps_fit.fit.aliased.contains(j))
-        .collect();
-    let x_ps = x.select(ndarray::Axis(1), &ps_cols);
+    // The propensity design without its aliased columns (a copy only when some are).
+    let x_ps = if ps_fit.fit.aliased.is_empty() {
+        CowArray::from(x.view())
+    } else {
+        let ps_cols: Vec<usize> = (0..x.ncols())
+            .filter(|j| !ps_fit.fit.aliased.contains(j))
+            .collect();
+        CowArray::from(x.select(ndarray::Axis(1), &ps_cols))
+    };
     let kind = IpwKind::of(config.estimand, config.normalized);
-    let se_naive = ipw_naive_se(&y, &d, &ps, &keep_mask, kind, effect);
-    let se_mest = match ipw_mest_se(x_ps.view(), &y, &d, &ps, &keep_mask, kind, effect) {
+    let not_contiguous = || EconError::Internal("IPW columns are not contiguous".into());
+    let ys = y.as_slice().ok_or_else(not_contiguous)?;
+    let ds = d.as_slice().ok_or_else(not_contiguous)?;
+    let es = ps.as_slice().ok_or_else(not_contiguous)?;
+    let arms = weighted_arm_means(ys, ds, es, &keep_mask, kind);
+    let se_naive = ipw_naive_se(ys, ds, es, &keep_mask, kind, effect, &arms);
+    let se_mest = match ipw_mest_se(x_ps.view(), ys, ds, es, &keep_mask, kind, effect, &arms) {
         Ok(v) => Some(v),
         Err(e @ EconError::SingularMatrix { .. }) => {
             warnings.push(format!(
@@ -662,10 +672,16 @@ pub fn run_ipw_treatment(
     let se_eif = {
         // The ATT influence function uses the control-arm model only.
         let mu1_fit = match config.estimand {
-            Estimand::ATE => Some(fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names)),
+            Estimand::ATE => Some(fit_outcome_model(
+                x_trim.view(),
+                &y_trim,
+                &d_trim,
+                true,
+                &x_names,
+            )),
             Estimand::ATT => None,
         };
-        let mu0_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, false, &x_names);
+        let mu0_fit = fit_outcome_model(x_trim.view(), &y_trim, &d_trim, false, &x_names);
         for (group, fit) in [("treated", mu1_fit.as_ref()), ("control", Some(&mu0_fit))] {
             if let Some(Ok((_, _, Some(text)))) = fit {
                 warnings.push(format!("outcome model ({group}): {text}"));
@@ -906,43 +922,62 @@ impl IpwKind {
     }
 }
 
-/// Weighted arm means over the kept units: (mu1, mu0, sum of treated weights, of control
-/// weights).
-fn weighted_arm_means(
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    e: &Array1<f64>,
-    keep: &[bool],
-    kind: IpwKind,
-) -> (f64, f64, f64, f64) {
+/// The unit weights of `kind` over the kept units and the weighted arm means, for the
+/// analytic SEs of one fit (Hajek and ATT).
+struct ArmWeights {
+    /// Unit weights; 0 for the units not kept.
+    w: Vec<f64>,
+    mu1: f64,
+    mu0: f64,
+    /// Sum of the treated units' weights.
+    s1: f64,
+    /// Sum of the control units' weights.
+    s0: f64,
+}
+
+fn weighted_arm_means(y: &[f64], d: &[f64], e: &[f64], keep: &[bool], kind: IpwKind) -> ArmWeights {
+    let n = y.len();
+    let mut w = vec![0.0; n];
     let (mut s1, mut sy1, mut s0, mut sy0) = (0.0, 0.0, 0.0, 0.0);
-    for i in (0..y.len()).filter(|&i| keep[i]) {
-        let w = kind.weight(d[i], e[i]);
+    for i in 0..n {
+        if !keep[i] {
+            continue;
+        }
+        let wi = kind.weight(d[i], e[i]);
+        w[i] = wi;
         if d[i] >= 0.5 {
-            s1 += w;
-            sy1 += w * y[i];
+            s1 += wi;
+            sy1 += wi * y[i];
         } else {
-            s0 += w;
-            sy0 += w * y[i];
+            s0 += wi;
+            sy0 += wi * y[i];
         }
     }
-    (sy1 / s1, sy0 / s0, s1, s0)
+    ArmWeights {
+        w,
+        mu1: sy1 / s1,
+        mu0: sy0 / s0,
+        s1,
+        s0,
+    }
 }
 
 /// SE with the propensity treated as known, over the kept units. Hajek and ATT: HC0 of the
 /// weighted regression of y on (1, D); HT: sqrt(sum IF^2) / n_kept.
 fn ipw_naive_se(
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    e: &Array1<f64>,
+    y: &[f64],
+    d: &[f64],
+    e: &[f64],
     keep: &[bool],
     kind: IpwKind,
     effect: f64,
+    arms: &ArmWeights,
 ) -> f64 {
-    let idx = (0..y.len()).filter(|&i| keep[i]);
+    let n = y.len();
     if kind == IpwKind::HorvitzThompson {
         let n_kept = keep.iter().filter(|&&k| k).count() as f64;
-        let ss: f64 = idx
+        let ss: f64 = (0..n)
+            .filter(|&i| keep[i])
             .map(|i| {
                 let h = if d[i] >= 0.5 {
                     y[i] / e[i]
@@ -954,16 +989,22 @@ fn ipw_naive_se(
             .sum();
         return ss.sqrt() / n_kept;
     }
-    let (mu1, mu0, s1, s0) = weighted_arm_means(y, d, e, keep, kind);
-    let (mut v1, mut v0) = (0.0, 0.0);
-    for i in idx {
-        let w = kind.weight(d[i], e[i]);
-        if d[i] >= 0.5 {
-            v1 += (w * (y[i] - mu1)).powi(2);
-        } else {
-            v0 += (w * (y[i] - mu0)).powi(2);
-        }
+    let ArmWeights {
+        w,
+        mu1,
+        mu0,
+        s1,
+        s0,
+    } = arms;
+    // Indexed by arm, not branched on: the arms of consecutive units are unpredictable. A unit
+    // not kept has weight 0.
+    let means = [*mu0, *mu1];
+    let mut v = [0.0, 0.0];
+    for ((&wi, &yi), &di) in w.iter().zip(y).zip(d) {
+        let t = usize::from(di >= 0.5);
+        v[t] += (wi * (yi - means[t])).powi(2);
     }
+    let [v0, v1] = v;
     (v1 / (s1 * s1) + v0 / (s0 * s0)).sqrt()
 }
 
@@ -971,25 +1012,39 @@ fn ipw_naive_se(
 /// sandwich; WeightIt::lm_weightit(vcov = "asympt") for Hajek and ATT). The logit score runs
 /// over all n units, the IPW equations over the kept units (the trimmed set is held fixed).
 /// `x` is the propensity design without its aliased columns and `e` the clipped scores.
+/// Every sum runs over the rows of `x` in one pass each, on the row slices.
 fn ipw_mest_se(
     x: ArrayView2<f64>,
-    y: &Array1<f64>,
-    d: &Array1<f64>,
-    e: &Array1<f64>,
+    y: &[f64],
+    d: &[f64],
+    e: &[f64],
     keep: &[bool],
     kind: IpwKind,
     effect: f64,
+    arms: &ArmWeights,
 ) -> EconResult<f64> {
     let (n, p) = x.dim();
     let nf = n as f64;
-    // I_bb = (1/n) sum e(1-e) x x'
+    let inv_n = 1.0 / nf;
+    let xs = x.as_standard_layout();
+    let xr = xs
+        .as_slice()
+        .ok_or_else(|| EconError::Internal("propensity design is not contiguous".into()))?;
+    let row = |i: usize| &xr[i * p..(i + 1) * p];
+    // I_bb = (1/n) sum e(1-e) x x' (lower triangle, then mirrored)
     let mut info = Array2::<f64>::zeros((p, p));
-    for i in 0..n {
-        let v = e[i] * (1.0 - e[i]) / nf;
-        for a in 0..p {
-            let xa = x[[i, a]] * v;
-            for b in 0..=a {
-                info[[a, b]] += xa * x[[i, b]];
+    {
+        let g = info
+            .as_slice_mut()
+            .ok_or_else(|| EconError::Internal("information matrix layout".into()))?;
+        for i in 0..n {
+            let v = e[i] * (1.0 - e[i]) * inv_n;
+            let r = row(i);
+            for a in 0..p {
+                let xa = r[a] * v;
+                for (gb, &rb) in g[a * p..a * p + a + 1].iter_mut().zip(r) {
+                    *gb += xa * rb;
+                }
             }
         }
     }
@@ -1005,21 +1060,30 @@ fn ipw_mest_se(
     )?
     .inverse;
     // a . U_i with U_i = I_bb^-1 x_i (D_i - e_i), from ia = I_bb^-1 a (I_bb is symmetric).
-    let u_dot = |i: usize, ia: &Array1<f64>| -> f64 { ia.dot(&x.row(i)) * (d[i] - e[i]) };
+    let dot = |ia: &[f64], r: &[f64]| -> f64 { ia.iter().zip(r).map(|(u, v)| u * v).sum::<f64>() };
+    // a += c * x_i
+    let axpy = |a: &mut [f64], c: f64, r: &[f64]| {
+        for (aj, &xj) in a.iter_mut().zip(r) {
+            *aj += c * xj;
+        }
+    };
     let sum_if_sq = match kind {
         IpwKind::HorvitzThompson => {
             let n_kept = keep.iter().filter(|&&k| k).count() as f64;
-            let mut a = Array1::<f64>::zeros(p);
+            let mut a = vec![0.0; p];
             for i in (0..n).filter(|&i| keep[i]) {
                 let c = if d[i] >= 0.5 {
                     -y[i] * (1.0 - e[i]) / e[i]
                 } else {
                     -y[i] * e[i] / (1.0 - e[i])
                 };
-                a.scaled_add(c / nf, &x.row(i));
+                axpy(&mut a, c / nf, row(i));
             }
             let s = n_kept / nf;
-            let ia = inv.dot(&a);
+            let ia = inv.dot(&ArrayView1::from(&a[..]));
+            let ia = ia
+                .as_slice()
+                .ok_or_else(|| EconError::Internal("score adjustment layout".into()))?;
             (0..n)
                 .map(|i| {
                     let h = if keep[i] {
@@ -1032,43 +1096,46 @@ fn ipw_mest_se(
                     } else {
                         0.0
                     };
-                    ((h + u_dot(i, &ia)) / s).powi(2)
+                    ((h + dot(ia, row(i)) * (d[i] - e[i])) / s).powi(2)
                 })
                 .sum::<f64>()
         }
         _ => {
-            let (mu1, mu0, sw1, sw0) = weighted_arm_means(y, d, e, keep, kind);
-            let (s1, s0) = (sw1 / nf, sw0 / nf);
-            let mut a1 = Array1::<f64>::zeros(p);
-            let mut a0 = Array1::<f64>::zeros(p);
-            for i in (0..n).filter(|&i| keep[i]) {
-                // d w_i / d beta = x_i * c
-                if d[i] >= 0.5 {
-                    let c = match kind {
-                        IpwKind::Att => 0.0,
-                        _ => -(1.0 - e[i]) / e[i],
-                    };
-                    a1.scaled_add(c * (y[i] - mu1) / nf, &x.row(i));
+            let (w, mu1, mu0) = (&arms.w, arms.mu1, arms.mu0);
+            // 1 / s1 and 1 / s0 with s = (sum of the arm's weights) / n
+            let (r1, r0) = (nf / arms.s1, nf / arms.s0);
+            // Indexed by arm, not branched on: the arms of consecutive units are unpredictable.
+            // A unit not kept has weight 0, so its terms vanish.
+            let att = kind == IpwKind::Att;
+            let means = [mu0, mu1];
+            // a[t * p..(t + 1) * p] is the score adjustment of arm t
+            let mut a = vec![0.0; 2 * p];
+            for i in 0..n {
+                let t = usize::from(d[i] >= 0.5);
+                // d w_i / d beta = x_i * c, from the unit weight w_i: a treated unit's
+                // -(1-e)/e is -(1-e) w_i (Hajek; 0 for ATT), a control's e/(1-e) is e w_i
+                // (Hajek) or w_i itself (ATT)
+                let cs = if att {
+                    [w[i], 0.0]
                 } else {
-                    let c = e[i] / (1.0 - e[i]);
-                    a0.scaled_add(c * (y[i] - mu0) / nf, &x.row(i));
-                }
+                    [e[i] * w[i], -(1.0 - e[i]) * w[i]]
+                };
+                let at = &mut a[t * p..(t + 1) * p];
+                axpy(at, cs[t] * (y[i] - means[t]) * inv_n, row(i));
             }
-            let ia1 = inv.dot(&a1);
-            let ia0 = inv.dot(&a0);
+            // f_i = (m1_i + a1' U_i) / s1 - (m0_i + a0' U_i) / s0: one dot per row, with
+            // v = I_bb^-1 (a1 / s1 - a0 / s0)
+            let v =
+                inv.dot(&ArrayView1::from(&a[p..])) * r1 - inv.dot(&ArrayView1::from(&a[..p])) * r0;
+            let v = v
+                .as_slice()
+                .ok_or_else(|| EconError::Internal("score adjustment layout".into()))?;
+            let scale = [-r0, r1];
             (0..n)
                 .map(|i| {
-                    let (m1, m0) = if keep[i] {
-                        let w = kind.weight(d[i], e[i]);
-                        if d[i] >= 0.5 {
-                            (w * (y[i] - mu1), 0.0)
-                        } else {
-                            (0.0, w * (y[i] - mu0))
-                        }
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    let f = (m1 + u_dot(i, &ia1)) / s1 - (m0 + u_dot(i, &ia0)) / s0;
+                    let t = usize::from(d[i] >= 0.5);
+                    let m = w[i] * (y[i] - means[t]) * scale[t];
+                    let f = m + dot(v, row(i)) * (d[i] - e[i]);
                     f * f
                 })
                 .sum::<f64>()
@@ -1328,7 +1395,7 @@ pub fn run_doubly_robust(
     let x = design.data;
 
     // Estimate propensity scores
-    let ps_fit = fit_propensity(x.view(), d.view(), GlmLink::Logit)?;
+    let ps_fit = fit_propensity_lean(x.view(), d.view())?;
     let ps = ps_fit.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
     for w in &ps_fit.fit.warnings {
         warnings.push(format!("propensity model: {w}"));
@@ -1365,18 +1432,17 @@ pub fn run_doubly_robust(
     let n_trim = y_trim.len();
 
     // Build trimmed design matrix
-    let mut x_trim = Array2::zeros((n_trim, x.ncols()));
-    for (new_i, &old_i) in keep_idx.iter().enumerate() {
-        x_trim.row_mut(new_i).assign(&x.row(old_i));
-    }
+    let x_trim = kept_rows(&x, &keep_idx)?;
 
     let n_treated = d_trim.iter().filter(|&&v| v >= 0.5).count();
     let n_control = n_trim - n_treated;
 
     // Fit outcome models for treated and control separately
     let x_names = design_names(covariates);
-    let (mu_1, r2_treated, alias1) = fit_outcome_model(&x_trim, &y_trim, &d_trim, true, &x_names)?;
-    let (mu_0, r2_control, alias0) = fit_outcome_model(&x_trim, &y_trim, &d_trim, false, &x_names)?;
+    let (mu_1, r2_treated, alias1) =
+        fit_outcome_model(x_trim.view(), &y_trim, &d_trim, true, &x_names)?;
+    let (mu_0, r2_control, alias0) =
+        fit_outcome_model(x_trim.view(), &y_trim, &d_trim, false, &x_names)?;
     for (group, a) in [("treated", alias1), ("control", alias0)] {
         if let Some(text) = a {
             warnings.push(format!("outcome model ({group}): {text}"));
@@ -1626,7 +1692,7 @@ fn compute_aipw_effect(
 /// Returns predicted outcomes for every row (aliased columns count as 0, as
 /// `stats::predict.lm`), the group's R² and the aliasing warning, if any.
 fn fit_outcome_model(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     y: &Array1<f64>,
     d: &Array1<f64>,
     treated: bool,
@@ -1648,7 +1714,54 @@ fn fit_outcome_model(
         });
     }
 
-    let x_group = x.select(ndarray::Axis(0), &indices);
+    // X'X and X'y in one pass over the arm's rows: OLS's solve decision on the cross-product,
+    // no copy of the arm's design. A design that needs the refinement or the QR is copied below.
+    let (m, k) = (indices.len(), x.ncols());
+    if m > k && k > 0 {
+        let xs = x.as_standard_layout();
+        let rows = xs
+            .as_slice()
+            .ok_or_else(|| EconError::Internal("outcome design is not contiguous".into()))?;
+        let mut gram = Array2::<f64>::zeros((k, k));
+        let g = gram
+            .as_slice_mut()
+            .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
+        let mut xy = Array1::<f64>::zeros(k);
+        let mut sum_y = 0.0;
+        for &i in &indices {
+            let (r, yi) = (&rows[i * k..(i + 1) * k], y[i]);
+            sum_y += yi;
+            for (a, ga) in g.chunks_exact_mut(k).enumerate() {
+                let xa = r[a];
+                xy[a] += xa * yi;
+                for (gc, xc) in ga[a..].iter_mut().zip(&r[a..]) {
+                    *gc += xa * xc;
+                }
+            }
+        }
+        for a in 1..k {
+            for c in 0..a {
+                gram[[a, c]] = gram[[c, a]];
+            }
+        }
+        if let Some(ni) = normal_inverse_from_gram(gram.view())?
+            && !ni.refine
+        {
+            let beta = ni.inverse.dot(&xy);
+            let mu: Array1<f64> = x.dot(&beta);
+            let ybar = sum_y / m as f64;
+            let (mut ssr, mut sst) = (0.0, 0.0);
+            for &i in &indices {
+                let (r, t) = (y[i] - mu[i], y[i] - ybar);
+                ssr += r * r;
+                sst += t * t;
+            }
+            let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+            return Ok((mu, r2, None));
+        }
+    }
+
+    let x_group = select_rows(x, &indices)?;
     let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
     // OLS's solve decision: the normal equations on a full-rank, well-conditioned design,
     // `lm.fit`'s pivoted QR (with its aliasing) otherwise.
@@ -1675,6 +1788,31 @@ fn fit_outcome_model(
     Ok((mu, r2, alias))
 }
 
+/// The rows `idx` of `x`, copied row slice by row slice.
+pub(crate) fn select_rows(x: ArrayView2<f64>, idx: &[usize]) -> EconResult<Array2<f64>> {
+    let p = x.ncols();
+    let xs = x.as_standard_layout();
+    let src = xs
+        .as_slice()
+        .ok_or_else(|| EconError::Internal("treatment design is not contiguous".into()))?;
+    let len = resource::checked_len(&[idx.len(), p], "treatment design")?;
+    let mut out = resource::try_with_capacity(len, "treatment design")?;
+    for &i in idx {
+        out.extend_from_slice(&src[i * p..(i + 1) * p]);
+    }
+    Array2::from_shape_vec((idx.len(), p), out)
+        .map_err(|e| EconError::Internal(format!("treatment design shape: {e}")))
+}
+
+/// The rows of `x` kept by trimming: `x` itself when no row was dropped.
+fn kept_rows<'a>(x: &'a Array2<f64>, keep: &[usize]) -> EconResult<CowArray<'a, f64, Ix2>> {
+    if keep.len() == x.nrows() {
+        Ok(CowArray::from(x.view()))
+    } else {
+        Ok(CowArray::from(select_rows(x.view(), keep)?))
+    }
+}
+
 /// Compute propensity score summary statistics.
 fn compute_ps_summary(ps: &Array1<f64>) -> PropensityScoreSummary {
     let n = ps.len();
@@ -1695,15 +1833,33 @@ fn compute_ps_summary(ps: &Array1<f64>) -> PropensityScoreSummary {
     let var: f64 = ps.iter().map(|&p| (p - mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
     let std_dev = var.sqrt();
 
-    let mut sorted: Vec<f64> = ps.iter().copied().collect();
-    sorted.sort_by(f64::total_cmp);
-
-    let min = sorted[0];
-    let max = sorted[n - 1];
-    // R quantile() / median(), type 7
-    let median = quantile_sorted(&sorted, 0.5, QuantileType::T7);
-    let p10 = quantile_sorted(&sorted, 0.1, QuantileType::T7);
-    let p90 = quantile_sorted(&sorted, 0.9, QuantileType::T7);
+    let mut placed: Vec<f64> = ps.iter().copied().collect();
+    let (mut min, mut max) = (placed[0], placed[0]);
+    for &v in &placed {
+        if v.total_cmp(&min).is_lt() {
+            min = v;
+        }
+        if v.total_cmp(&max).is_gt() {
+            max = v;
+        }
+    }
+    // R quantile() / median(), type 7, reads the order statistics at floor and ceiling of
+    // 1 + (n - 1) p: put only those in place (linear time) instead of sorting.
+    let nf = n as f64;
+    let probs = [0.1, 0.5, 0.9];
+    let mut from = 0;
+    for &p in &probs {
+        let index = 1.0 + (nf - 1.0) * p;
+        for pos in [index.floor() as usize - 1, index.ceil() as usize - 1] {
+            if pos >= from {
+                placed[from..].select_nth_unstable_by(pos - from, f64::total_cmp);
+                from = pos + 1;
+            }
+        }
+    }
+    let p10 = quantile_sorted(&placed, probs[0], QuantileType::T7);
+    let median = quantile_sorted(&placed, probs[1], QuantileType::T7);
+    let p90 = quantile_sorted(&placed, probs[2], QuantileType::T7);
 
     PropensityScoreSummary {
         mean,
@@ -2483,6 +2639,91 @@ mod tests {
         }
     }
 
+    /// A noisy design for the outcome-model tests; `collinear` makes the last column nearly
+    /// a copy of the second.
+    fn outcome_design(n: usize, collinear: bool) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| {
+            let a = (i as f64 * 0.73).sin() * 2.0;
+            match j {
+                0 => 1.0,
+                1 => a,
+                _ if collinear => a + 1e-9 * (i as f64 * 1.9).cos(),
+                _ => (i as f64 * 1.31).cos(),
+            }
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            1.0 + 0.5 * x[[i, 1]] - 0.3 * x[[i, 2]] + 0.4 * (i as f64 * 2.17).sin()
+        });
+        let d = Array1::from_shape_fn(n, |i| if (i * 7) % 5 < 2 { 1.0 } else { 0.0 });
+        (x, y, d)
+    }
+
+    #[test]
+    fn test_outcome_model_cross_product_matches_the_qr() {
+        // The one-pass cross-product path against a pivoted QR on the arm's copied rows.
+        let (x, y, d) = outcome_design(200, false);
+        for treated in [true, false] {
+            let names: Vec<String> = ["(Intercept)", "x1", "x2"].map(String::from).to_vec();
+            let (mu, r2, alias) = fit_outcome_model(x.view(), &y, &d, treated, &names).unwrap();
+            assert!(alias.is_none());
+            let idx: Vec<usize> = (0..200).filter(|&i| (d[i] >= 0.5) == treated).collect();
+            let xg = select_rows(x.view(), &idx).unwrap();
+            let yg: Array1<f64> = idx.iter().map(|&i| y[i]).collect();
+            let fit = least_squares(xg.view(), yg.view()).unwrap();
+            let want = x.dot(&fit.coefficients);
+            for (a, b) in mu.iter().zip(want.iter()) {
+                assert!((a - b).abs() <= 1e-10 * b.abs().max(1.0), "{a} vs {b}");
+            }
+            let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
+            let ybar = yg.sum() / yg.len() as f64;
+            let sst: f64 = yg.iter().map(|v| (v - ybar).powi(2)).sum();
+            assert!((r2 - (1.0 - ssr / sst)).abs() <= 1e-10, "r2 {r2}");
+        }
+    }
+
+    #[test]
+    fn test_outcome_model_near_collinear_reaches_the_qr() {
+        // A design the normal equations refuse still gets the QR's aliasing report.
+        let (x, y, d) = outcome_design(200, true);
+        let names: Vec<String> = ["(Intercept)", "x1", "x2"].map(String::from).to_vec();
+        let (mu, _, alias) = fit_outcome_model(x.view(), &y, &d, true, &names).unwrap();
+        assert!(alias.is_some(), "expected the QR's aliasing warning");
+        assert!(mu.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_ps_summary_matches_a_full_sort() {
+        // The partial selection against quantile_sorted on fully sorted data, with ties.
+        for n in [1usize, 2, 3, 5, 10, 11, 37, 100, 999, 1000] {
+            let ps: Array1<f64> = (0..n)
+                .map(|i| {
+                    let v = (0.5 + 0.45 * (i as f64 * 2.399).sin()).clamp(0.01, 0.99);
+                    if i % 7 == 0 { 0.5 } else { v }
+                })
+                .collect();
+            let mut sorted = ps.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let s = compute_ps_summary(&ps);
+            assert_eq!(s.min.to_bits(), sorted[0].to_bits(), "n = {n}");
+            assert_eq!(s.max.to_bits(), sorted[n - 1].to_bits(), "n = {n}");
+            for (got, p) in [(s.p10, 0.1), (s.median, 0.5), (s.p90, 0.9)] {
+                let want = quantile_sorted(&sorted, p, QuantileType::T7);
+                assert_eq!(got.to_bits(), want.to_bits(), "n = {n}, p = {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_kept_rows_borrows_when_nothing_is_trimmed() {
+        let (x, _, _) = outcome_design(20, false);
+        let all: Vec<usize> = (0..20).collect();
+        assert!(kept_rows(&x, &all).unwrap().is_view());
+        let some = [1usize, 4, 19];
+        let k = kept_rows(&x, &some).unwrap();
+        assert!(k.is_owned());
+        assert_eq!(k.row(2), x.row(19));
+    }
+
     #[test]
     fn test_ipw_mest_se_not_finite_is_a_singular_fallback() {
         // An outcome scale whose squared influence terms overflow gives a non-finite
@@ -2502,7 +2743,13 @@ mod tests {
             .collect();
         let keep = vec![true; n];
         let kind = IpwKind::of(Estimand::ATE, true);
-        let err = ipw_mest_se(x.view(), &y, &d, &e, &keep, kind, 1e159).unwrap_err();
+        let (ys, ds, es) = (
+            y.as_slice().unwrap(),
+            d.as_slice().unwrap(),
+            e.as_slice().unwrap(),
+        );
+        let arms = weighted_arm_means(ys, ds, es, &keep, kind);
+        let err = ipw_mest_se(x.view(), ys, ds, es, &keep, kind, 1e159, &arms).unwrap_err();
         assert!(
             matches!(err, EconError::SingularMatrix { .. }),
             "expected the SingularMatrix fallback, got {err:?}"
