@@ -313,7 +313,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned, known deviations (CAUS-92) |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | not R-pinned |
 | TMLE | [tmle.md](econometrics/tmle.md) | not R-pinned |
-| LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | not R-pinned |
+| LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | R-pinned |
 | CBPS | [cbps.md](econometrics/cbps.md) | not R-pinned |
 | SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | not R-pinned |
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | R-pinned, known deviations (CAUS-26) |

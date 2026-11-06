@@ -1,149 +1,160 @@
 # LTMLE (Longitudinal Targeted Maximum Likelihood Estimation) Validation
 
-## Method Overview
+## 1. Method
 
-LTMLE extends standard TMLE to longitudinal settings with time-varying treatments and
-confounders. It estimates causal effects under dynamic treatment regimes using sequential
-regression combined with targeting steps for double robustness.
+`run_ltmle` / `ltmle` (`crates/p2a-core/src/econometrics/ltmle.rs`) estimate the mean outcome
+`E[Y^d]` under a treatment regime `d = (d_1, ..., d_T)` over `T >= 2` time points with
+time-varying confounding (nodes `L_1, A_1, ..., L_T, A_T, Y`), and the contrast between two
+regimes, by the longitudinal TMLE of the R package `ltmle` 1.x (Lendle et al. 2017) with its
+defaults: `stratify = FALSE`, main-term `glm` models on the full history, `gbounds` on the
+cumulative probability of following the regime, and the influence-curve variance.
 
-### Key Features
+## 2. Reference implementation
 
-- Sequential g-computation iterating backward through time points
-- Targeting step at each time point using cumulative IPW weights (clever covariate)
-- Double robustness: consistent if either outcome models OR propensity score models are correct
-- Influence curve-based standard errors for valid inference
+The reference is the estimator written out in R with `glm` and `lm`
+(`validation/r/cases/causal_ltmle.R`), so that every intermediate (H, cumulative g, epsilons, Q
+and g coefficients) can be pinned. The case cross-checks it against `ltmle::ltmle` 1.3-0
+itself: the logistic-Q regime means and EIC standard errors of the two-period binary case
+(always, never, dynamic), of `gbounds = c(0.1, 0.5)`, of the rescaled continuous outcome and of
+the three-period case (always, never, dynamic, (1, 0, 1)) must agree to 1e-8 relative, or the
+case stops (`ltmle(.., SL.library = "glm", stratify = FALSE, variance.method = "ic")`; ltmle
+fits at glm's default control, about 1e-11 from the tight fits). R 4.3.3; `packages = {ltmle}`.
+The linear Q model is p2a's own variant and has no ltmle counterpart: it is pinned to the
+written-out reference only.
 
-### Mathematical Framework
+## 3. Algorithm as implemented
 
-For T time points with:
-- L_t: time-varying covariates at time t
-- A_t: treatment at time t (binary: 0 or 1)
-- Y_T: final outcome
+Nodes are ordered `L_1, A_1, L_2, A_2, ..., L_T, A_T, Y`; time points are 1-based in messages.
 
-Target parameter: E[Y^{a_1,...,a_T}] under intervention regime (e.g., always treat: a_t = 1 for all t)
+1. **History designs.** The g design of node t has the columns `(Intercept)`, then for every
+   earlier node its covariates and its treatment, then the covariates of node t (R's
+   `reformulate` order: `A2 ~ L0 + A1 + L1`). The Q design appends `A_t`
+   (`Y ~ L0 + A1 + L1 + A2`). The designs are built once per call.
+2. **g.** For each node a binomial logit GLM (`econometrics::glm::fit_glm`, glm.fit's IRLS) of
+   `A_t` on its g design, on all subjects. Its fitted values are reported as
+   `propensity_scores` (unbounded).
+3. **Cumulative g (`CalcCumG`, `SetA`).** g is predicted with every earlier `A_s` set to the
+   regime; the probability of the regime's treatment is `p` or `1 - p`; the cumulative product
+   `c_t` is bounded to `gbounds` (default `(0.01, 1)`), not each factor. `n_bounded` counts the
+   subjects outside the bounds, `n_bounded_following` those among the regime's followers.
+4. **Clever covariate.** `H_t = I(Abar_t = dbar_t) / c_t` (0 for non-followers).
+5. **Backward pass (`UpdateQ`).** From `t = T` to 1, starting from `Q*_{T+1} = Y`: a
+   quasibinomial logit GLM of `Q*_{t+1}` on the Q design (pooled over all subjects), predicted
+   on the link scale with every `A_s, s <= t`, set to the regime; the fluctuation is the
+   intercept-only quasibinomial fit with offset `logit Q_t(d)` and weights `H_t` (zero weights
+   drop the non-followers); `Q*_t = plogis(logit Q_t(d) + eps_t)` for every subject. The last
+   node's Q regression has the same response and design for every regime and is fitted once.
+6. **Estimate and EIC (`CalcIC`).** `psi = mean(Q*_1)`,
+   `EIC = sum_t H_t (Q*_{t+1} - Q*_t) + Q*_1 - psi`.
 
-**Algorithm:**
-1. Estimate propensity scores: g_t(L_t) = P(A_t = 1 | L_t) for each t
-2. Backward iteration from t = T to t = 1:
-   - Fit outcome model Q_t(A_t, L_t) using pseudo-outcome from t+1
-   - Predict under counterfactual treatment: Q_t^d where A_t = d
-   - Target: Q_t^* = Q_t + epsilon * H_t where H_t = cumulative 1/g weights
-3. Final estimate: psi = mean(Q_1^*)
+Aliased columns (a duplicated history column, say) get NaN coefficients and predictions use the
+identified columns, as `predict.glm`; the aliasing, convergence and separation warnings of every
+fit are reported with the model they come from.
 
-## Reference Implementation
+## 4. Regimes and contrasts
 
-**R Package:** `ltmle` (Schwab, Lendle, Petersen, van der Laan)
-- CRAN: https://cran.r-project.org/package=ltmle
-- GitHub: https://github.com/joshuaschwab/ltmle
+- `Regime::Static(v)`: one value for every node (`Regime::always()`, `Regime::never()`) or one
+  value per node (`Static(vec![1, 0])`).
+- `Regime::Dynamic(rules)`: exactly one `DynamicRule` per node,
+  `d_t = above if L > threshold else 1 - above`, on a covariate observed at or before the node
+  (`Regime::threshold_rules(columns, c)` gives `A_t = 1{L_t > c}`; ltmle's `rule`).
+- `LtmleConfig.contrast`: the reference regime (default never treat). The result's `ate`, `se`,
+  `z_stat`, `p_value` and CI are `psi(intervention) - psi(contrast)` with the differenced EIC;
+  `None` estimates the single mean and leaves the contrast fields NaN.
+- `RegimeKind` and `LtmleQModel` parse option strings (`"always"`, `"never"`, `"dynamic"`;
+  `"logistic"`, `"linear"` and aliases).
 
-**R Version:** 4.3.x
-**Package Version:** 1.3-0
+## 5. Continuous outcomes
 
-## Test Cases
+With the logistic Q model an outcome outside [0, 1] is mapped to [0, 1] by its range before the
+fits, and psi, the EIC and `targeted_predictions` are scaled back (ltmle's behaviour with
+`Yrange = NULL`); the result reports `outcome_range`. `LtmleQModel::Linear` is p2a's Gaussian
+variant: least-squares Q fits (OLS's normal equations, the pivoted QR when ill-conditioned) and
+`eps_t` the `H_t`-weighted mean residual among the followers, `Q*_t = Q_t(d) + eps_t`.
 
-### Test Case 1: Two Time Points with Linear Outcome
+## 6. Inference
 
-**Data Generating Process:**
-```
-L_1 ~ Uniform(0, 1)
-A_1 | L_1 ~ Bernoulli(expit(0.5 * L_1))
-L_2 | A_1, L_1 = L_1 + 0.3 * A_1 + noise
-A_2 | L_2 ~ Bernoulli(expit(0.5 * L_2))
-Y | A_1, A_2, L_1, L_2 = 0.2*L_1 + 0.3*L_2 + 0.4*A_1 + 0.5*A_2 + noise
-```
+`SE = sd(EIC) / sqrt(n)` (ltmle `variance.method = "ic"`), CIs `psi -/+ qnorm(0.975) SE`, the
+p-value `2 Phi(-|z|)`. ltmle's default `variance.method = "tmle"` is a substitution variance
+estimator that needs extra targeted fits per node ("takes significantly more time", ltmle NEWS)
+and is unavailable for non-binary outcomes; p2a keeps the influence-curve variance as a
+documented convention, and the output says so.
 
-True ATE (always treat vs never treat): approximately 0.4 + 0.5 = 0.9
+## 7. R case
 
-**Rust Implementation:**
-```rust
-use p2a_core::econometrics::{run_ltmle, LtmleConfig, LtmleData, LtmleQModel};
+`validation/r/cases/causal_ltmle.R`, case `ltmle_two_period`, dataset
+`validation/datasets/generated/ltmle_sim.csv` (600 rows; `L0, A1, L1, A2, Y` the two-period
+binary design, `Yc` a continuous outcome, `R1, Lr, R2, Yr` a randomized design with a known
+effect of 5.5, `L2, A3, Y3` the third time point). Key values:
 
-let data = LtmleData::new(outcomes, treatments, covariates)?;
-let config = LtmleConfig {
-    q_model: LtmleQModel::Linear,
-    gbounds: (0.01, 0.99),
-    ..Default::default()
-};
-let result = run_ltmle(&data, config)?;
-```
+| Quantity | Value |
+|---|---|
+| psi always / never (binary, two periods) | 0.5736132092515959 / 0.3255881665399437 |
+| ATE (SE), z, p | 0.24802504271165215 (0.05306179615051192), 4.674267753924484, 2.950042547809292e-06 |
+| psi dynamic `A_t = 1{L_{t-1} > 0}` (SE) | 0.45392016719826284 (0.032384516421308296) |
+| psi (1, 0) | 0.5956272044613323 |
+| gbounds (0.1, 0.5): psi never | 0.32392409968247965 (per-factor bounds would give 0.32635506045819096) |
+| rescaled Yc: ATE (SE) | 2.808160267792386 (0.13487370329062567) |
+| linear Yc: ATE (SE) | 2.804806711524769 (0.13571364292968557) |
+| randomized: ATE (SE), truth 5.5 | 5.647189491841183 (0.14222217207100085) |
+| three periods: ATE (SE) | 0.3953563630362491 (0.07074698162059881) |
 
-**R Reproduction:**
-```r
-library(ltmle)
+## 8. Tests and tolerances
 
-# Generate data
-set.seed(123)
-n <- 1000
+The registry entry is `validation/methods/causal_ltmle.json` (method `causal_ltmle`). At
+n = 600: coefficients, means, epsilons, H and cumulative g 1e-8 relative; SEs, z and CI bounds
+1e-6; p-values 1e-6 relative / 1e-12 absolute; counts exact. p2a runs at `tolerance = 1e-14`,
+the case's `glm.control(epsilon = 1e-14)`; the default tolerance 1e-8 is checked against the
+same tight values at `Tol::iterative(1e-8)` (measured gaps: 2.8e-13, 1.1e-11, 6.0e-15 and
+4.1e-10 for psi always, psi never, the ATE SE and the never epsilons).
 
-# Time 1
-L1 <- runif(n)
-g1 <- plogis(0.5 * L1)
-A1 <- rbinom(n, 1, g1)
+## 9. Planning checks (plan T3-WP27)
 
-# Time 2
-L2 <- L1 + 0.3 * A1 + rnorm(n, 0, 0.1)
-g2 <- plogis(0.5 * L2)
-A2 <- rbinom(n, 1, g2)
+- Saturated models (n = 2000, discrete L0 and L1, fully interacted g and Q): the TMLE equals the
+  hand-computed g-formula to 1.1e-16 for (1, 1), (0, 0) and (1, 0); every epsilon is below 4e-15.
+- Monte Carlo (400 replications of the case DGP at n = 600): ATE bias -0.0057 (truth 0.34616),
+  mean EIC SE 0.0507 against the Monte Carlo SD 0.0489, 95% coverage 0.948 (always 0.958, never
+  0.955, dynamic 0.970).
+- Nonparametric bootstrap on the case data (B = 400): ATE SE 0.05278 against the EIC SE 0.05306.
 
-# Outcome
-Y <- 0.2*L1 + 0.3*L2 + 0.4*A1 + 0.5*A2 + rnorm(n, 0, 0.1)
+## 10. Deviations from design A.24
 
-# Create data frame
-data <- data.frame(L1 = L1, A1 = A1, L2 = L2, A2 = A2, Y = Y)
+1. `Q_t` is predicted with every `A_s, s <= t`, set to the regime (ltmle's `SetA`); A.24 set
+   only `A_t`. The design values move (psi always 0.5736124939592598 -> 0.5736132092515959,
+   ATE SE 0.0530591757778956 -> 0.05306179615051192).
+2. `gbounds` bound the cumulative probability (ltmle's `CalcCumG` + `Bound`), default
+   `(0.01, 1)`; A.24 bounded each factor at 0.01. The default bounds bind for no follower on
+   the case data; the case pins `(0.1, 0.5)`, which binds.
+3. The case keeps its id but also pins a continuous outcome, a randomized design with a known
+   effect, three time points and the mixed static regimes (1, 0) and (1, 0, 1).
 
-# Run LTMLE
-result <- ltmle(
-  data = data,
-  Anodes = c("A1", "A2"),
-  Lnodes = c("L1", "L2"),
-  Ynodes = "Y",
-  abar = list(treatment = c(1, 1), control = c(0, 0)),
-  SL.library = "glm"
-)
+## MCP extraction (T2-WP11)
 
-summary(result)
-```
+The MCP tool `ltmle` reads every node (the outcomes, the treatments and each time point's
+comma-separated covariates) in one request to the shared extractor with the `Fail` policy. p2a's
+LTMLE has no censoring node, and dropping a row would change the sample of every time point, so
+a missing (null or NaN) value is a tool error naming the column. Integer and boolean columns are
+numeric; no data problem raises a protocol error. Before T2-WP11 outcomes and treatments were read
+with `into_no_null_iter`, so a missing final outcome counted as Y = 0 and a missing treatment as
+untreated, with the full row count reported, and missing covariates became NaN and failed as a
+singular matrix (finding TOOL-7, the handler part of CAUS-24).
 
-### Results Comparison
+Tests (`crates/p2a-mcp/src/tools/handlers/causal.rs`, on `rd_sim.csv` with arbitrary node roles;
+not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_refuses_missing_values`.
 
-| Metric | Rust Implementation | R ltmle | Tolerance |
-|--------|---------------------|---------|-----------|
-| ATE | (varies with data) | ~ 0.9 | 0.2 (due to noise) |
-| SE | > 0 | > 0 | qualitative |
-| CI includes true value | Yes | Yes | qualitative |
+## 12. Limitations
 
-## Validation Tests
+- No censoring (C) nodes: missing values are refused.
+- A single outcome node at the last time point; non-zero earlier `outcomes` entries are ignored
+  with a warning (no intermediate or survival outcomes).
+- No marginal structural models (`ltmleMSM`).
+- No SuperLearner: main-term logistic (or linear) models only, no `Qform`/`gform` override.
+- No `stratify = TRUE`.
+- No `variance.method = "tmle"` (section 6).
+- The full-history designs grow with the number of time points: node t has
+  `1 + sum_{s <= t} k_s + t` columns, so the cost per regime grows as `T^3` (as in ltmle).
 
-### Test: Data Validation
-- Validates number of time points >= 2
-- Validates treatment is binary (0 or 1)
-- Validates consistent sample sizes across time points
-
-### Test: Basic Functionality
-- ATE estimate is finite and in reasonable range
-- Standard error is positive and finite
-- Confidence intervals are finite
-- Counterfactual means satisfy E[Y^1] > E[Y^0] when treatment effect is positive
-
-### Test: Propensity Score Truncation
-- All propensity scores are within specified bounds
-- Truncation counts are recorded
-
-### Test: Influence Curve
-- Influence curve has approximately zero mean
-- Standard errors computed from influence curve variance
-
-## Limitations
-
-1. **Static interventions only:** Current implementation supports only "always treat" vs "never treat" regimes. Dynamic treatment regimes (where A_t depends on history) are not yet implemented.
-
-2. **No censoring:** The implementation does not handle censoring nodes (C_t). All observations must be observed at all time points.
-
-3. **Logistic outcome model:** For binary outcomes, the logistic model targeting may have numerical issues with extreme probabilities.
-
-4. **Single outcome:** Only final outcome Y_T is supported, not intermediate outcomes at each time point.
-
-## References
+## 13. References
 
 - van der Laan, M.J. & Gruber, S. (2012). "Targeted Minimum Loss Based Estimation of
   Causal Effects of Multiple Time Point Interventions." *The International Journal
@@ -159,39 +170,30 @@ summary(result)
 - Bang, H. & Robins, J.M. (2005). "Doubly Robust Estimation in Missing Data and
   Causal Inference Models." *Biometrics*, 61(4), 962-973.
 
-## Rust Test Functions
+- R package `ltmle`: https://cran.r-project.org/package=ltmle (1.3-0 for the cross-check).
 
-- `test_ltmle_data_validation` - Tests data structure validation
-- `test_ltmle_data_validation_errors` - Tests error handling for invalid data
-- `test_ltmle_basic` - Tests basic LTMLE functionality with linear outcome
-- `test_ltmle_with_linear_outcome` - Tests linear outcome model explicitly
-- `test_ltmle_propensity_truncation` - Tests propensity score truncation
-- `test_ltmle_influence_curve` - Tests influence curve computation
-- `test_ltmle_fluctuation_coefs` - Tests targeting step coefficients
-- `test_ltmle_display` - Tests result formatting
-- `test_intervention_type_display` - Tests intervention type formatting
-- `test_add_intercept` - Tests design matrix construction
-- `test_logit` - Tests logit function
-- `test_ltmle_single_time_point_error` - Tests error for insufficient time points
+## 14. Rust Test Functions
 
-## Status
+R-pinned (registered under `causal_ltmle`; case `ltmle_two_period`):
+`test_validate_ltmle_ate_se`, `test_validate_ltmle_default_control`, `test_validate_ltmle_linear_q`,
+`test_validate_ltmle_randomized_known_effect`, `test_validate_ltmle_logistic_rescaled_outcome`,
+`test_validate_ltmle_gbounds_cumulative`, `test_validate_ltmle_three_period`,
+`test_validate_ltmle_intervention_changes_estimate`, `test_validate_ltmle_always`,
+`test_validate_ltmle_never`, `test_validate_ltmle_dynamic`, `test_validate_ltmle_static_mixed`,
+`test_validate_ltmle_three_period_regimes`, `test_validate_ltmle_nuisance_models`,
+`test_validate_ltmle_duplicated_history_column_is_aliased`.
 
-**Implementation Status:** Complete (core algorithm with static interventions)
+Property and error tests (on `ltmle_sim.csv` without loading the case, or on inline data; not
+registered): `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_an_error`,
+`test_ltmle_too_few_observations`, `test_ltmle_data_rejects_non_finite`,
+`test_ltmle_regime_validation_errors`, `test_regime_kind_parses_aliases_and_rejects_unknown`,
+`test_ltmle_q_model_parses_aliases_and_rejects_unknown`,
+`test_ltmle_display_reports_regimes_and_notes`, `test_ltmle_covariate_scale_invariance`,
+`test_ltmle_intermediate_outcomes_warn`, `test_ltmle_data_validation`,
+`test_ltmle_data_validation_errors`, `test_intervention_type_display`,
+`test_ltmle_single_time_point_error`.
 
-**Validation Status:** Partial (tests pass, R comparison pending full run)
+## 15. Status
 
-**Last Updated:** 2026-01-25
-
-## MCP extraction (T2-WP11)
-
-The MCP tool `ltmle` reads every node (the outcomes, the treatments and each time point's
-comma-separated covariates) in one request to the shared extractor with the `Fail` policy. p2a's
-LTMLE has no censoring node, and dropping a row would change the sample of every time point, so
-a missing (null or NaN) value is a tool error naming the column. Integer and boolean columns are
-numeric; no data problem raises a protocol error. Before T2-WP11 outcomes and treatments were read
-with `into_no_null_iter`, so a missing final outcome counted as Y = 0 and a missing treatment as
-untreated, with the full row count reported, and missing covariates became NaN and failed as a
-singular matrix (finding TOOL-7, the handler part of CAUS-24).
-
-Tests (`crates/p2a-mcp/src/tools/handlers/causal.rs`, on `rd_sim.csv` with arbitrary node roles;
-not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_refuses_missing_values`.
+R-pinned: the logistic-Q quantities to the written-out ltmle algorithm, cross-checked against
+ltmle 1.3-0; the linear-Q quantities to a written-out reference.
