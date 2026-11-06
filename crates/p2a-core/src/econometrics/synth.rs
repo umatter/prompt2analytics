@@ -3049,11 +3049,11 @@ struct GsynthPanel {
     units: Vec<String>,
     /// The distinct time periods, ascending.
     times: Vec<i64>,
-    /// Outcome panel (units x periods).
+    /// Outcome panel (periods x units).
     y: Array2<f64>,
-    /// Treatment panel (units x periods).
+    /// Treatment panel (periods x units).
     d: Array2<f64>,
-    /// One panel (units x periods) per covariate, in `x_cols` order.
+    /// One panel (periods x units) per covariate, in `x_cols` order.
     x: Vec<Array2<f64>>,
 }
 
@@ -3082,10 +3082,16 @@ fn read_gsynth_panel(
     let time = cols.time_index(time_col);
     let units = unit.levels.clone();
 
-    let mut times: Vec<i64> = crate::resource::try_with_capacity(n, "gsynth time periods")?;
-    times.extend_from_slice(time);
-    times.sort_unstable();
-    times.dedup();
+    let times = distinct_times(time)?;
+    let n_units = units.len();
+    let n_times = times.len();
+
+    // A balanced panel has exactly one row per cell: place each row at its cell directly.
+    if n_units as u128 * n_times as u128 == n as u128
+        && let Some(order) = cell_order(&unit.codes, time, &times)?
+    {
+        return gsynth_panel_from(&cols, order, units, times, y_col, d_col, x_cols);
+    }
 
     // The rows in (unit level, time) order; equal neighbours are duplicates.
     let key = |r: usize| (unit.codes[r], time[r]);
@@ -3111,8 +3117,6 @@ fn read_gsynth_panel(
         });
     }
 
-    let n_units = units.len();
-    let n_times = times.len();
     // Without duplicates every row is its own cell, so n <= units x periods.
     let missing = (n_units as u128 * n_times as u128).saturating_sub(n as u128);
     if missing > 0 {
@@ -3148,11 +3152,90 @@ fn read_gsynth_panel(
         });
     }
 
-    // Balanced: order[u * n_times + j] is the row of (units[u], times[j]).
+    gsynth_panel_from(&cols, order, units, times, y_col, d_col, x_cols)
+}
+
+/// The distinct values of `time`, ascending. Times that fill their range (years, quarters,
+/// period numbers) are marked in a table over that range; others are sorted.
+fn distinct_times(time: &[i64]) -> EconResult<Vec<i64>> {
+    let (Some(&lo), Some(&hi)) = (time.iter().min(), time.iter().max()) else {
+        return Ok(Vec::new());
+    };
+    let span = hi.abs_diff(lo);
+    if span / 4 < time.len() as u64 {
+        let mut seen = crate::resource::try_vec(span as usize + 1, false, "gsynth time periods")?;
+        for &t in time {
+            seen[t.abs_diff(lo) as usize] = true;
+        }
+        let k = seen.iter().filter(|s| **s).count();
+        let mut times: Vec<i64> = crate::resource::try_with_capacity(k, "gsynth time periods")?;
+        times.extend(
+            seen.iter()
+                .enumerate()
+                .filter(|(_, s)| **s)
+                .map(|(d, _)| lo.wrapping_add_unsigned(d as u64)),
+        );
+        return Ok(times);
+    }
+    let mut times: Vec<i64> =
+        crate::resource::try_with_capacity(time.len(), "gsynth time periods")?;
+    times.extend_from_slice(time);
+    times.sort_unstable();
+    times.dedup();
+    Ok(times)
+}
+
+/// The row of each (unit, period) cell, `order[u * n_times + j]` for `(units[u], times[j])`,
+/// when every cell holds exactly one of the `codes.len()` rows (the caller checked that
+/// units x periods equals the row count); `None` when a cell holds two rows, which leaves
+/// the duplicate (and the cell it empties) to the sorted path's messages.
+fn cell_order(codes: &[u32], time: &[i64], times: &[i64]) -> EconResult<Option<Vec<usize>>> {
+    let n = codes.len();
+    let n_times = times.len();
+    let mut order = crate::resource::try_vec(n, usize::MAX, "gsynth panel order")?;
+    // rows are usually in time order within a unit: try the period after the last one first
+    let mut next = 0usize;
+    for (r, (&c, t)) in codes.iter().zip(time).enumerate() {
+        let j = if times.get(next) == Some(t) {
+            next
+        } else {
+            times
+                .binary_search(t)
+                .map_err(|_| EconError::Internal("gsynth panel: time not in its periods".into()))?
+        };
+        next = j + 1;
+        if next == n_times {
+            next = 0;
+        }
+        let slot = &mut order[c as usize * n_times + j];
+        if *slot != usize::MAX {
+            return Ok(None);
+        }
+        *slot = r;
+    }
+    Ok(Some(order))
+}
+
+/// The T x N panels of a balanced panel whose rows `order` lists cell by cell (see
+/// [`cell_order`]).
+fn gsynth_panel_from(
+    cols: &crate::data::columns::Columns,
+    order: Vec<usize>,
+    units: Vec<String>,
+    times: Vec<i64>,
+    y_col: &str,
+    d_col: &str,
+    x_cols: &[&str],
+) -> EconResult<GsynthPanel> {
+    let (n_units, n_times) = (units.len(), times.len());
+    // Balanced: order[u * n_times + j] is the row of (units[u], times[j]). The panels are
+    // filled as T x N (periods x units), the layout the estimators use.
     let panel = |values: &[f64], what: &str| -> EconResult<Array2<f64>> {
-        let mut m = crate::resource::try_zeros2(n_units, n_times, what)?;
-        for (cell, &r) in m.iter_mut().zip(&order) {
-            *cell = values[r];
+        let mut m = crate::resource::try_zeros2(n_times, n_units, what)?;
+        for (u, rows) in order.chunks_exact(n_times).enumerate() {
+            for (cell, &r) in m.column_mut(u).iter_mut().zip(rows) {
+                *cell = values[r];
+            }
         }
         Ok(m)
     };
@@ -3198,14 +3281,6 @@ struct GsynthMats {
     first_treated: Vec<usize>,
 }
 
-/// `m` transposed into a `try_zeros2` buffer.
-fn transpose_into(m: &Array2<f64>, what: &str) -> EconResult<Array2<f64>> {
-    let (r, c) = m.dim();
-    let mut out = crate::resource::try_zeros2(c, r, what)?;
-    out.assign(&m.t());
-    Ok(out)
-}
-
 /// The columns `cols` of `m`.
 fn select_columns(m: &Array2<f64>, cols: &[usize], what: &str) -> EconResult<Array2<f64>> {
     let mut out = crate::resource::try_zeros2(m.nrows(), cols.len(), what)?;
@@ -3215,7 +3290,7 @@ fn select_columns(m: &Array2<f64>, cols: &[usize], what: &str) -> EconResult<Arr
     Ok(out)
 }
 
-/// S3: the panel as T x N matrices; D must be 0/1 and absorbing.
+/// S3: the panel as T x N matrices (read in that layout); D must be 0/1 and absorbing.
 fn gsynth_mats(panel: GsynthPanel) -> EconResult<GsynthMats> {
     let GsynthPanel {
         units,
@@ -3224,12 +3299,6 @@ fn gsynth_mats(panel: GsynthPanel) -> EconResult<GsynthMats> {
         d,
         x,
     } = panel;
-    let y = transpose_into(&y, "gsynth outcome panel (units x periods)")?;
-    let d = transpose_into(&d, "gsynth treatment panel (units x periods)")?;
-    let x = x
-        .iter()
-        .map(|m| transpose_into(m, "gsynth covariate panel (units x periods)"))
-        .collect::<EconResult<Vec<_>>>()?;
     mats_from(y, d, x, units, times)
 }
 
@@ -6041,6 +6110,53 @@ mod gsynth_tests {
                 .enumerate()
                 .map(|(r, s)| if r == i { None } else { s.map(str::to_string) })
                 .collect();
+    #[test]
+    fn test_gsynth_row_count_of_a_balanced_panel_with_a_duplicate_is_refused() {
+        // C2's time 6 relabelled 5: as many rows as cells, one cell twice, one empty
+        let ds = create_gsynth_dataset();
+        let times: Vec<i32> = (0..ds.df().height())
+            .map(|r| {
+                let t = (r % 10) as i32 + 1;
+                if r == 15 { 5 } else { t }
+            })
+            .collect();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new("time".into(), times)).unwrap();
+        let err = gs(&Dataset::new(df), gs_cfg()).unwrap_err();
+        assert!(
+            matches!(&err, EconError::InvalidSpecification { message } if message.starts_with(
+                "gsynth needs one row per (unit, time): 1 duplicate row(s) \
+                 (first: unit 'C2', time 5)."
+            )),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_gsynth_distinct_times_equal_sort_and_dedup() {
+        let reference = |v: &[i64]| {
+            let mut s = v.to_vec();
+            s.sort_unstable();
+            s.dedup();
+            s
+        };
+        let cases: [&[i64]; 7] = [
+            &[],
+            &[7],
+            &[3, 1, 2, 3, 1, 2],
+            &[2000, 2005, 2010, 2000, 2005, 2010],
+            &[-5, 5, 0, -5, 5, 0],
+            &[1_000_000, 0, 1_000_000, 0],
+            &[i64::MIN, i64::MAX, 0, i64::MIN],
+        ];
+        for v in cases {
+            assert_eq!(distinct_times(v).unwrap(), reference(v), "{v:?}");
+        }
+        // the largest span the table takes: just under 4 x rows, both ends included
+        let edge: Vec<i64> = vec![-3, 4, 0];
+        assert_eq!(distinct_times(&edge).unwrap(), reference(&edge));
+    }
+
             Column::new(col.into(), v)
         } else {
             let v: Vec<Option<f64>> = c
