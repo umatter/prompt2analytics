@@ -75,7 +75,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
-use crate::econometrics::glm::{GlmFamily, GlmFit, GlmLink, GlmSpec, fit_glm};
+use crate::econometrics::glm::{GlmFamily, GlmFit, GlmLink, GlmSpec, fit_glm, fit_logit_lean};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::{SingularPolicy, aliasing_message, sym_inverse};
 use crate::options::Choices;
@@ -1297,7 +1297,8 @@ fn fit_working(
                 GlmSpec::logit()
             };
             spec.start = start.map(|s| s.view());
-            let fit = fit_glm(x.view(), y.view(), &spec)
+            // fit_glm's own fit for the Poisson family and whenever it would report anything
+            let fit = fit_logit_lean(x.view(), y.view(), &spec)
                 .map_err(|e| prefixed(e, "outcome working model: "))?;
             let notes = glm_fit_notes(MODEL, &fit, &spec, &plan.working_names);
             let r2 = if fit.null_deviance > 0.0 {

@@ -2625,6 +2625,69 @@ mod tests {
         }
     }
 
+    /// A noisy design for the outcome-model tests; `collinear` makes the last column nearly
+    /// a copy of the second.
+    fn outcome_design(n: usize, collinear: bool) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| {
+            let a = (i as f64 * 0.73).sin() * 2.0;
+            match j {
+                0 => 1.0,
+                1 => a,
+                _ if collinear => a + 1e-9 * (i as f64 * 1.9).cos(),
+                _ => (i as f64 * 1.31).cos(),
+            }
+        });
+        let y = Array1::from_shape_fn(n, |i| {
+            1.0 + 0.5 * x[[i, 1]] - 0.3 * x[[i, 2]] + 0.4 * (i as f64 * 2.17).sin()
+        });
+        let d = Array1::from_shape_fn(n, |i| if (i * 7) % 5 < 2 { 1.0 } else { 0.0 });
+        (x, y, d)
+    }
+
+    #[test]
+    fn test_outcome_model_cross_product_matches_the_qr() {
+        // The one-pass cross-product path against a pivoted QR on the arm's copied rows.
+        let (x, y, d) = outcome_design(200, false);
+        for treated in [true, false] {
+            let names: Vec<String> = ["(Intercept)", "x1", "x2"].map(String::from).to_vec();
+            let (mu, r2, alias) = fit_outcome_model(x.view(), &y, &d, treated, &names).unwrap();
+            assert!(alias.is_none());
+            let idx: Vec<usize> = (0..200).filter(|&i| (d[i] >= 0.5) == treated).collect();
+            let xg = select_rows(x.view(), &idx).unwrap();
+            let yg: Array1<f64> = idx.iter().map(|&i| y[i]).collect();
+            let fit = least_squares(xg.view(), yg.view()).unwrap();
+            let want = x.dot(&fit.coefficients);
+            for (a, b) in mu.iter().zip(want.iter()) {
+                assert!((a - b).abs() <= 1e-10 * b.abs().max(1.0), "{a} vs {b}");
+            }
+            let ssr: f64 = fit.residuals.iter().map(|r| r * r).sum();
+            let ybar = yg.sum() / yg.len() as f64;
+            let sst: f64 = yg.iter().map(|v| (v - ybar).powi(2)).sum();
+            assert!((r2 - (1.0 - ssr / sst)).abs() <= 1e-10, "r2 {r2}");
+        }
+    }
+
+    #[test]
+    fn test_outcome_model_near_collinear_reaches_the_qr() {
+        // A design the normal equations refuse still gets the QR's aliasing report.
+        let (x, y, d) = outcome_design(200, true);
+        let names: Vec<String> = ["(Intercept)", "x1", "x2"].map(String::from).to_vec();
+        let (mu, _, alias) = fit_outcome_model(x.view(), &y, &d, true, &names).unwrap();
+        assert!(alias.is_some(), "expected the QR's aliasing warning");
+        assert!(mu.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_kept_rows_borrows_when_nothing_is_trimmed() {
+        let (x, _, _) = outcome_design(20, false);
+        let all: Vec<usize> = (0..20).collect();
+        assert!(kept_rows(&x, &all).unwrap().is_view());
+        let some = [1usize, 4, 19];
+        let k = kept_rows(&x, &some).unwrap();
+        assert!(k.is_owned());
+        assert_eq!(k.row(2), x.row(19));
+    }
+
     #[test]
     fn test_ipw_mest_se_not_finite_is_a_singular_fallback() {
         // An outcome scale whose squared influence terms overflow gives a non-finite
