@@ -1,43 +1,32 @@
-//! Causal Forests for heterogeneous treatment effects.
+//! Causal forests for heterogeneous treatment effects, as `grf::causal_forest` (grf 2.x).
 //!
-//! Pure Rust implementation of causal forests based on the methodology from
-//! Wager & Athey (2018). Estimates conditional average treatment effects (CATE)
-//! using random forests adapted for causal inference.
+//! 1. **Local centering.** `Y.hat = E[Y | X]` and `W.hat = P(W = 1 | X)` are out-of-bag
+//!    predictions of two honest regression forests (`max(50, n_trees / 4)` trees each, min.node.size
+//!    5, honesty fraction 0.5), unless supplied ([`causal_forest_arrays_with_nuisance`]).
+//! 2. **Causal trees on the residuals** `Y - Y.hat`, `W - W.hat` (the R-learner moment), grown in
+//!    groups of `ci_group_size` on shared half-samples, honest, with grf's gradient split:
+//!    pseudo-outcomes `rho_i = (W~_i - mean W~)((Y~_i - mean Y~) - tau_node (W~_i - mean W~))`,
+//!    criterion `sum_l^2 / n_l + sum_r^2 / n_r`, stabilised children (`min_node_size` units with
+//!    W~ below and at or above the node mean; at least 5% of the node's variation in W~). Empty
+//!    honest leaves are pruned.
+//! 3. **Prediction** pools the leaves a unit falls into (grf's forest weights):
+//!    `tau(x) = (avg(YW) - avg(Y) avg(W)) / (avg(WW) - avg(W)^2)` over leaf means of the
+//!    residuals; training units are predicted out of bag. No per-leaf effect is formed, so a leaf
+//!    without treated or control units cannot contribute tau = 0.
+//! 4. **Variance** of each prediction by little bags with objective-Bayes debiasing (grf
+//!    `variance.estimates`).
+//! 5. **ATE** from AIPW scores `Gamma_i = tau_i + (W_i - W.hat_i) / (W.hat_i (1 - W.hat_i)) (Y_i -
+//!    Y.hat_i - tau_i (W_i - W.hat_i))`: `mean(Gamma)` with SE `sd(Gamma) / sqrt(n)` (grf
+//!    `average_treatment_effect`).
 //!
-//! # Key Features
+//! R equivalent: `grf::causal_forest(X, Y, W)`, `predict(cf)`, `average_treatment_effect(cf)`.
 //!
-//! - **Honest splitting**: Uses separate data for determining tree structure vs. estimation
-//! - **Local centering**: Removes confounding by centering outcomes within leaves
-//! - **Variance estimation**: Bootstrap-based uncertainty quantification
-//!
-//! # Mathematical Background
-//!
-//! ## Causal Setup
-//!
-//! For unit i with covariates Xᵢ, treatment Wᵢ ∈ {0,1}, and potential outcomes Y(0), Y(1):
-//!
-//! - **CATE (Conditional Average Treatment Effect)**: τ(x) = E[Y(1) - Y(0) | X = x]
-//! - **ATE (Average Treatment Effect)**: τ = E[τ(X)]
-//!
-//! ## Causal Tree Algorithm
-//!
-//! 1. Split sample into "structure" sample I₁ and "estimation" sample I₂
-//! 2. Use I₁ to determine tree structure by maximizing treatment effect heterogeneity
-//! 3. Use I₂ to estimate treatment effects within each leaf
-//!
-//! The splitting criterion maximizes:
-//!
-//! Δ = Var(τ̂(Xₗₑft)) + Var(τ̂(Xᵣᵢght)) - Var(τ̂(Xparent))
-//!
-//! where τ̂ is the estimated treatment effect.
-//!
-//! ## Honest Estimation
-//!
-//! Within leaf L, the treatment effect is estimated as:
-//!
-//! τ̂(L) = Ȳ(L, W=1) - Ȳ(L, W=0)
-//!
-//! using only data from the estimation sample I₂.
+//! Differences from grf: split thresholds are midpoints between consecutive distinct values;
+//! `honesty_fraction` is the estimation share (1 - grf's `honesty.fraction`); `max_depth` caps the
+//! causal trees; the default `mtry` is `ceil(sqrt(p))` as the mean of grf's Poisson candidate
+//! count (grf: `min(ceil(sqrt(p) + 20), p)`); no sample weights, clusters, tuning or target
+//! samples other than "all"; W must be binary; undefined estimates (a unit without an out-of-bag
+//! tree, a propensity of 0 or 1, no treatment variation around a unit) are errors instead of NaN.
 //!
 //! # References
 //!
@@ -48,55 +37,74 @@
 //! - Athey, S., Tibshirani, J., & Wager, S. (2019). Generalized random forests.
 //!   *Annals of Statistics*, 47(2), 1148-1178. https://doi.org/10.1214/18-AOS1709
 //!
-//! - Athey, S., & Imbens, G. (2016). Recursive partitioning for heterogeneous
-//!   causal effects. *Proceedings of the National Academy of Sciences*, 113(27),
-//!   7353-7360. https://doi.org/10.1073/pnas.1510489113
+//! - Nie, X., & Wager, S. (2021). Quasi-oracle estimation of heterogeneous treatment effects.
+//!   *Biometrika*, 108(2), 299-319. https://doi.org/10.1093/biomet/asaa076
+//!
+//! - Sexton, J., & Laake, P. (2009). Standard errors for bagged and random forest estimators.
+//!   *Computational Statistics & Data Analysis*, 53(3), 801-811.
+//!
+//! - Crump, R. K., Hotz, V. J., Imbens, G. W., & Mitnik, O. A. (2009). Dealing with limited
+//!   overlap in estimation of average treatment effects. *Biometrika*, 96(1), 187-199.
 //!
 //! - R package `grf`: Tibshirani, J., Athey, S., & Wager, S. (2024).
 //!   *grf: Generalized Random Forests*. https://grf-labs.github.io/grf/
-//!
-//! R equivalent: `grf::causal_forest()`
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use super::{default_mtry, heap_chunk_bytes, mul, partition_exact, pow2};
+use super::{default_mtry, lcg_random, mul, partition_exact, pow2};
 use crate::data::Dataset;
+use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
 use crate::resource::{check_alloc, checked_len, checkpoint, try_vec, try_with_capacity};
-use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
+use crate::stats::robust::{QuantileType, quantile_sorted};
+use crate::traits::convergence::{ResultNotes, notes_text};
+use crate::traits::estimator::{
+    SignificanceLevel, normal_p_value_two_sided, validate_level, z_critical,
+};
 use statrs::function::erf::erfc;
 
-/// Configuration for causal forest estimation.
+/// Configuration for causal forest estimation (`grf::causal_forest` arguments).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalForestConfig {
-    /// Number of trees (default: 2000)
+    /// Trees in the causal forest (default 2000), grown in groups of `ci_group_size` on shared
+    /// half-samples; rounded down to a multiple of `ci_group_size`.
     pub n_trees: usize,
-    /// Fewest rows each child of a split keeps (default: 5), in the structure part
-    /// and in the estimation part of the tree's subsample (with `honesty` off both
-    /// parts are the whole subsample).
-    ///
-    /// A node is split only when each part has at least twice this many rows and
-    /// its estimation part at least this many treated and this many control units,
-    /// and only into two children that keep, in each part, at least this many rows
-    /// and two treated and two control units. Any other node is a leaf.
+    /// grf `min.node.size` (default 5, at least 1): a node with at most this many growing units
+    /// is not split, and a causal split keeps this many units with `W - W.hat` below and this
+    /// many at or above the node's mean on each side.
     pub min_node_size: usize,
-    /// Number of variables to consider at each split (default: sqrt(p))
+    /// The mean of the Poisson number of candidate covariates per node (clamped to [1, p]), as
+    /// grf's `mtry`; at most p. Default `ceil(sqrt(p))` (grf's default is
+    /// `min(ceil(sqrt(p) + 20), p)`). The fitted result stores the value used.
     pub mtry: Option<usize>,
-    /// Use honest splitting (default: true)
+    /// Honest trees (default true): one part of each tree's subsample grows it, the other
+    /// estimates its leaves.
     pub honesty: bool,
-    /// Fraction of data used for estimation in honest splitting (default: 0.5)
+    /// Share of each tree's subsample that estimates the leaves (default 0.5; grf's
+    /// `honesty.fraction` is the share that grows the tree, 1 minus this).
     pub honesty_fraction: f64,
-    /// Maximum tree depth (default: 10)
+    /// Depth cap of the causal trees (default 10; grf has none; the nuisance forests are not
+    /// capped).
     pub max_depth: usize,
-    /// Random seed for reproducibility
+    /// Seed of the one random stream (nuisance forests, then causal trees); None = 42.
     pub seed: Option<u64>,
-    /// Compute variable importance (default: true)
+    /// Compute the split-frequency variable importance (default true).
     pub compute_importance: bool,
-    /// Sample fraction for each tree (default: 0.5)
+    /// Subsample per tree as a share of n (default 0.5; at most 0.5 when `ci_group_size > 1`).
     pub sample_fraction: f64,
+    /// grf `ci.group.size` (default 2): trees per half-sample group for the little-bags variance;
+    /// 1 = no variance estimates.
+    #[serde(default = "default_ci_group_size")]
+    pub ci_group_size: usize,
+    /// Trees in each nuisance forest (Y.hat, W.hat); None = `max(50, n_trees / 4)`, as grf.
+    #[serde(default)]
+    pub nuisance_trees: Option<usize>,
+}
+
+fn default_ci_group_size() -> usize {
+    2
 }
 
 impl Default for CausalForestConfig {
@@ -111,156 +119,255 @@ impl Default for CausalForestConfig {
             seed: None,
             compute_importance: true,
             sample_fraction: 0.5,
+            ci_group_size: 2,
+            nuisance_trees: None,
         }
     }
 }
 
 impl CausalForestConfig {
-    /// An upper bound, in bytes, of what [`causal_forest`] holds at once for a
-    /// dataset of `n_obs` rows and `n_covariates` covariates under this
-    /// configuration: the trees it keeps and the buffers that are alive
-    /// together while it runs. Every buffer it counts is allocated at its
-    /// exact length, the index vectors of the subsample and of the recursion
-    /// included, so no vector holds unused capacity. The allocator's own
-    /// overhead (chunk headers and free lists) and the dataset itself come on
-    /// top. Saturates at `u64::MAX`.
+    /// An upper bound, in bytes, of what [`causal_forest()`] holds at once for a dataset of
+    /// `n_obs` rows and `n_covariates` covariates under this configuration. The allocator's own
+    /// overhead and the dataset itself come on top. Saturates at `u64::MAX`; monotone in
+    /// `n_trees`, `nuisance_trees`, `max_depth` and the rows, and falling in `min_node_size`.
     ///
-    /// The bound holds whatever the data are, because each term counts the
-    /// most the code can allocate:
+    /// The bound holds whatever the data are, because each term counts the most the code can
+    /// allocate:
     ///
-    /// - **Trees.** Each tree has at most `2 L - 1` nodes for `L` leaves.
-    ///   `L` is at most `2^max_depth`, and at most each part of the tree's
-    ///   subsample (structure and estimation; with honesty off, both are the
-    ///   whole subsample) divided by `max(min_node_size, 4)`: a split is kept
-    ///   only when each child has `min_node_size` rows and two treated and two
-    ///   control units in both parts, and the leaves partition both parts.
-    ///   Every node is counted at its heap size, and each tree with its slot
-    ///   in the per-row prediction buffer.
-    /// - **Data and results.** The outcome, treatment and covariates
-    ///   [`causal_forest`] extracts, and the column it is extracting (cast to
-    ///   `f64` and copied); the out-of-bag counts, means and sums of squares;
-    ///   the predictions, the variances and the sorted copy the result's
-    ///   summary makes.
-    /// - **One tree's working copies.** The subsample's flags and indices and
-    ///   its rows; with honesty, the shuffled indices, the two parts and their
-    ///   rows; and what the recursion holds. Every level on the path to the
-    ///   node being split holds its children's index vectors, which together
-    ///   are at most the two parts, and the covariates its split drew (`mtry`,
-    ///   at most `n_covariates`). The path is at most `max_depth` levels deep
-    ///   and at most the structure part divided by `max(min_node_size, 4)`,
-    ///   since each split leaves the child on the path at least that many rows
-    ///   fewer. The split search's sort order adds one structure part, and the
-    ///   list the covariates are drawn from one covariate list.
+    /// - **Causal trees**, kept in the result: `n_trees` rounded down to a multiple of
+    ///   `ci_group_size` (at least one group), each with its in-bag bitset of `ceil(n / 64)` words. A tree has at most
+    ///   `2 L - 1` nodes for `L` leaves; `L` is at most `2^max_depth`, and at most the growing
+    ///   part of its subsample divided by `2 min_node_size` (each child of a causal split keeps
+    ///   `min_node_size` units on each side of the node's mean of `W - W.hat`).
+    /// - **Nuisance trees**: the two regression forests are grown one tree at a time and each
+    ///   tree is dropped after its out-of-bag predictions are added, so one tree is counted,
+    ///   with its leaves bounded by the growing part of its subsample (no depth cap; a split may
+    ///   leave a single unit in a child), and the out-of-bag sums, counts and flags.
+    /// - **Data and results.** The outcome, treatment and covariates [`causal_forest()`]
+    ///   extracts, and the column it is extracting; `Y.hat`, `W.hat`, the residuals, the AIPW
+    ///   scores, the predictions, the variances and the sorted copy the result's summary makes;
+    ///   the leaf list of one unit's out-of-bag prediction; the importances.
+    /// - **One tree's working copies**: the permutation the subsamples are drawn from, the
+    ///   group's half-sample, the subsample and its two parts, the growth stack (at most twice
+    ///   the growing part), the relabelled responses and the sort order, and the node vector
+    ///   while it grows (up to twice its length), with the repopulation sums.
     pub fn memory_bound(&self, n_obs: usize, n_covariates: usize) -> u64 {
         let n = n_obs as u128;
         let p = n_covariates as u128;
-        let (s, t, e) = self.subsample_parts(n_obs);
-        let leaf = self.min_node_size.max(4) as u128;
-        let levels = (t / leaf).min(self.max_depth as u128) + 1;
-        // The covariates one split draws, as `select_features` keeps them.
-        let drawn = self
-            .mtry
-            .unwrap_or_else(|| default_mtry(n_covariates))
-            .min(n_covariates) as u128;
-        let tree = mul(
-            self.max_nodes_per_tree(n_obs),
-            heap_chunk_bytes(size_of::<CausalTreeNode>()),
+        let node = size_of::<Node>() as u128;
+        // node vector with growth slack, its exact-length copy, repopulation sums and redirects,
+        // and growth-stack entries (two per split, with slack)
+        let node_work = 3 * node + (size_of::<(usize, f64, f64, f64, f64)>() as u128) + 8 + 2 * 40;
+        let words = n_obs.div_ceil(64) as u128;
+        // at least one group: fewer trees are refused, and the fewest the fit accepts must not
+        // have a larger bound than a refused count
+        let grown = self.grown_trees().max(self.group_size()) as u128;
+        let causal_tree = mul(self.max_nodes_per_tree(n_obs), node)
+            .saturating_add(size_of::<HonestTree>() as u128 + 24)
+            .saturating_add(mul(8, words));
+        let causal = mul(grown, causal_tree)
+            .saturating_add(mul(grown, size_of::<(usize, LeafStats)>() as u128));
+        // y, w, x and the column being extracted (2); Y.hat, W.hat, the two residuals, scores,
+        // predictions, variances and the summary's sorted copy (8); importances (3 per covariate)
+        let data = mul(mul(8, n), p.saturating_add(4 + 8)).saturating_add(mul(24, p));
+        // nuisance out-of-bag sums, counts and flags
+        let nuisance =
+            mul(17, n).saturating_add(mul(self.max_nodes_per_nuisance_tree(n_obs), node_work));
+        let (s_c, g_c) = self.causal_parts(n_obs);
+        let (s_n, g_n) = self.nuisance_parts(n_obs);
+        let (s, g) = (s_c.max(s_n) as u128, g_c.max(g_n) as u128);
+        // permutation and half-sample; subsample, its copy and its two parts; growth stack and
+        // children (2), responses, sort order; the drawn covariates
+        let work = mul(8, n.saturating_add(n.div_ceil(2)))
+            .saturating_add(mul(24, s))
+            .saturating_add(mul(32, g))
+            .saturating_add(mul(8, p))
+            .saturating_add(mul(self.max_nodes_per_tree(n_obs), node_work));
+        u64::try_from(
+            causal
+                .saturating_add(data)
+                .saturating_add(nuisance)
+                .saturating_add(work),
         )
-        .saturating_add(size_of::<CausalTree>() as u128 + 8);
-        let trees = mul(self.n_trees as u128, tree);
-        // Extracted y, w and x, and the column being extracted (its cast and its values) (2);
-        // out-of-bag counts, means and sums of squares (3); predictions, variances and the
-        // summary's sorted copy (3); the importance sums, and the list the covariates are drawn
-        // from or one tree's importances.
-        let data = mul(mul(8, n), p.saturating_add(2 + 2 + 3 + 3)).saturating_add(mul(16, p));
-        // Subsample flags, indices and rows.
-        let mut work = mul(n, 9).saturating_add(mul(mul(8, s), p.saturating_add(2)));
-        if self.honesty {
-            work = work
-                .saturating_add(mul(24, s))
-                .saturating_add(mul(mul(8, t + e), p.saturating_add(2)));
-        }
-        // Recursion path (each level's child index vectors and drawn covariates) and split
-        // search.
-        work = work
-            .saturating_add(mul(mul(8, t + e + drawn), levels))
-            .saturating_add(mul(8, t));
-        u64::try_from(trees.saturating_add(data).saturating_add(work)).unwrap_or(u64::MAX)
+        .unwrap_or(u64::MAX)
     }
 
-    /// The sizes `(s, t, e)` of a tree's subsample and of its structure and
-    /// estimation parts, as the fit draws them for `n_obs` rows; without
-    /// honesty both parts are the whole subsample.
-    fn subsample_parts(&self, n_obs: usize) -> (u128, u128, u128) {
-        let s = ((n_obs as f64) * self.sample_fraction) as usize;
-        if self.honesty {
-            let e = ((s as f64) * self.honesty_fraction) as usize;
-            (s as u128, (s - e.min(s)) as u128, e as u128)
+    /// `ci_group_size`, at least 1 (as the bound reads an unvalidated configuration).
+    fn group_size(&self) -> usize {
+        self.ci_group_size.max(1)
+    }
+
+    /// The causal trees the fit grows: `n_trees` rounded down to a multiple of `ci_group_size`.
+    fn grown_trees(&self) -> usize {
+        (self.n_trees / self.group_size()) * self.group_size()
+    }
+
+    /// Trees in each nuisance forest: `nuisance_trees`, or `max(50, n_trees / 4)`.
+    fn nuisance_tree_count(&self) -> usize {
+        self.nuisance_trees.unwrap_or((self.n_trees / 4).max(50))
+    }
+
+    /// The sizes `(subsample, growing part)` of a causal tree for `n_obs` rows, as
+    /// [`draw_subsample`] and [`honest_split`] draw them.
+    fn causal_parts(&self, n_obs: usize) -> (usize, usize) {
+        let s = subsample_size(n_obs, self.sample_fraction, self.group_size());
+        let g = if self.honesty {
+            growing_size(s, self.honesty_fraction)
         } else {
-            (s as u128, s as u128, s as u128)
-        }
+            s
+        };
+        (s, g)
     }
 
-    /// The most nodes one tree can have for `n_obs` rows ([`Self::memory_bound`]).
+    /// The sizes `(subsample, growing part)` of a nuisance tree for `n_obs` rows.
+    fn nuisance_parts(&self, n_obs: usize) -> (usize, usize) {
+        let s = subsample_size(n_obs, self.sample_fraction, 1);
+        (s, growing_size(s, NUISANCE_HONESTY_FRACTION))
+    }
+
+    /// The most nodes one causal tree can have for `n_obs` rows ([`Self::memory_bound`]).
     fn max_nodes_per_tree(&self, n_obs: usize) -> u128 {
-        let (_, t, e) = self.subsample_parts(n_obs);
-        let leaf = self.min_node_size.max(4) as u128;
-        let leaves = (t / leaf).min(e / leaf).min(pow2(self.max_depth)).max(1);
+        let (_, g) = self.causal_parts(n_obs);
+        let per_leaf = self.min_node_size.max(1).saturating_mul(2) as u128;
+        let leaves = (g as u128 / per_leaf).min(pow2(self.max_depth)).max(1);
         2 * leaves - 1
     }
+
+    /// The most nodes one nuisance tree can have for `n_obs` rows ([`Self::memory_bound`]).
+    fn max_nodes_per_nuisance_tree(&self, n_obs: usize) -> u128 {
+        let (_, g) = self.nuisance_parts(n_obs);
+        2 * (g as u128).max(1) - 1
+    }
+}
+
+/// The subsample one tree draws from `n` units: `ceil(n * fraction)` of them (at least 1), or,
+/// in groups of `group_size > 1`, `ceil(h * 2 * fraction)` of a half-sample of `h = ceil(n / 2)`.
+fn subsample_size(n: usize, fraction: f64, group_size: usize) -> usize {
+    let (pool, share) = if group_size > 1 {
+        (n.div_ceil(2), 2.0 * fraction)
+    } else {
+        (n, fraction)
+    };
+    let k = ((pool as f64) * share).ceil();
+    let k = if k.is_finite() && k > 0.0 {
+        k as usize
+    } else {
+        1
+    };
+    k.max(1).min(pool)
+}
+
+/// The growing part of an honest subsample of `m` units: `ceil(m (1 - honesty_fraction))`,
+/// clamped so that both parts are non-empty when `m >= 2`.
+fn growing_size(m: usize, honesty_fraction: f64) -> usize {
+    let g = ((m as f64) * (1.0 - honesty_fraction)).ceil();
+    let g = if g.is_finite() && g > 0.0 {
+        g as usize
+    } else {
+        0
+    };
+    if m >= 2 { g.clamp(1, m - 1) } else { m }
 }
 
 /// Result from causal forest estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalForestResult {
-    /// CATE estimates for each observation
+    /// Out-of-bag CATE estimates of the training units (grf `predict(cf)$predictions`).
     pub predictions: Vec<f64>,
-    /// Variance estimates for each CATE prediction
+    /// Little-bags variances of `predictions` (grf `variance.estimates`); NaN when
+    /// `ci_group_size = 1` or a unit has no complete out-of-bag tree group.
     pub variance_estimates: Vec<f64>,
-    /// Average treatment effect (ATE)
+    /// AIPW average treatment effect: the mean of `aipw_scores` (grf
+    /// `average_treatment_effect`).
     pub ate: f64,
-    /// Standard error of ATE
+    /// `sqrt(sum((Gamma - ate)^2) / (n (n - 1)))`.
     pub ate_se: f64,
-    /// T-statistic for ATE
+    /// z = ate / ate_se (normal reference).
     pub ate_t_stat: f64,
-    /// P-value for ATE
+    /// 2 Phi(-|z|).
     pub ate_p_value: f64,
-    /// 95% CI lower bound for ATE
+    /// ate - qnorm(0.975) ate_se.
     pub ate_ci_lower: f64,
-    /// 95% CI upper bound for ATE
+    /// ate + qnorm(0.975) ate_se.
     pub ate_ci_upper: f64,
-    /// Significance level for ATE
+    /// Significance level of the ATE.
     pub ate_significance: SignificanceLevel,
-    /// Variable importance scores (covariate name, importance)
+    /// Split-frequency importance of the causal trees (each split adds 2^-depth, normalised per
+    /// tree, then over the forest), sorted in decreasing order.
     pub variable_importance: Vec<(String, f64)>,
-    /// Number of trees
+    /// Trees grown in the causal forest (`n_trees` rounded down to a multiple of
+    /// `ci_group_size`).
     pub n_trees: usize,
-    /// Number of observations
+    /// Number of observations.
     pub n_obs: usize,
-    /// Out-of-bag prediction error
+    /// Mean out-of-bag R-loss (Nie & Wager 2021; grf's debiased.error + excess.error).
     pub oob_error: f64,
-    /// Covariate names
+    /// Covariate names.
     pub covariate_names: Vec<String>,
-    /// Configuration used
+    /// Configuration used (`mtry` is the value used).
     pub config: CausalForestConfig,
-    /// Internal: tree structures for prediction (not serialized)
+    /// Out-of-bag E[Y | X] (grf `Y.hat`), or the supplied values.
+    #[serde(default)]
+    pub y_hat: Vec<f64>,
+    /// Out-of-bag P(W = 1 | X) (grf `W.hat`), or the supplied values.
+    #[serde(default)]
+    pub w_hat: Vec<f64>,
+    /// Doubly robust scores Gamma_i (grf `get_scores`).
+    #[serde(default)]
+    pub aipw_scores: Vec<f64>,
+    /// Trees of the Y.hat forest (0: supplied).
+    #[serde(default)]
+    pub y_hat_trees: usize,
+    /// Trees of the W.hat forest (0: supplied).
+    #[serde(default)]
+    pub w_hat_trees: usize,
+    /// Overlap, tree-count and variance notes.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The causal trees, for prediction (not serialized).
     #[serde(skip)]
-    trees: Vec<CausalTree>,
+    trees: Vec<HonestTree>,
+}
+
+impl ResultNotes for CausalForestResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl fmt::Display for CausalForestResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Causal Forest Results")?;
-        writeln!(f, "===========================================")?;
-        writeln!(f, "No. Observations: {}", self.n_obs)?;
-        writeln!(f, "No. Trees: {}", self.n_trees)?;
-        writeln!(f, "Out-of-bag Error: {:.4}", self.oob_error)?;
-        writeln!(f)?;
-
-        writeln!(f, "AVERAGE TREATMENT EFFECT (ATE):")?;
         writeln!(
             f,
-            "  ATE = {:.4} (SE: {:.4}, t = {:.2}, p = {:.3}){}",
+            "Causal Forest Results (grf: local centering, honest trees, AIPW average treatment \
+             effect)"
+        )?;
+        writeln!(f, "===========================================")?;
+        writeln!(f, "No. Observations: {}", self.n_obs)?;
+        writeln!(
+            f,
+            "No. Trees: {} (groups of {})",
+            self.n_trees, self.config.ci_group_size
+        )?;
+        for (name, trees) in [("Y.hat", self.y_hat_trees), ("W.hat", self.w_hat_trees)] {
+            if trees == 0 {
+                writeln!(f, "{name}: supplied")?;
+            } else {
+                writeln!(f, "{name}: out-of-bag regression forest ({trees} trees)")?;
+            }
+        }
+        if !self.w_hat.is_empty() {
+            let lo = self.w_hat.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = self.w_hat.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            writeln!(f, "W.hat range: [{lo:.4}, {hi:.4}]")?;
+        }
+        writeln!(f, "Out-of-bag R-loss: {:.4}", self.oob_error)?;
+        writeln!(f)?;
+
+        writeln!(f, "AVERAGE TREATMENT EFFECT (AIPW, all units):")?;
+        writeln!(
+            f,
+            "  ATE = {:.4} (SE: {:.4}, z = {:.2}, p = {:.3}){}",
             self.ate,
             self.ate_se,
             self.ate_t_stat,
@@ -274,27 +381,22 @@ impl fmt::Display for CausalForestResult {
         )?;
         writeln!(f)?;
 
-        writeln!(f, "CATE DISTRIBUTION:")?;
+        writeln!(f, "CATE DISTRIBUTION (out of bag):")?;
         if !self.predictions.is_empty() {
             let mut sorted = self.predictions.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = sorted.len();
-            let p10 = sorted[n / 10];
-            let p25 = sorted[n / 4];
-            let p50 = sorted[n / 2];
-            let p75 = sorted[3 * n / 4];
-            let p90 = sorted[9 * n / 10];
-            writeln!(f, "  Min:    {:.4}", sorted.first().unwrap_or(&0.0))?;
-            writeln!(f, "  10%:    {:.4}", p10)?;
-            writeln!(f, "  25%:    {:.4}", p25)?;
-            writeln!(f, "  Median: {:.4}", p50)?;
-            writeln!(f, "  75%:    {:.4}", p75)?;
-            writeln!(f, "  90%:    {:.4}", p90)?;
-            writeln!(f, "  Max:    {:.4}", sorted.last().unwrap_or(&0.0))?;
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let q = |p: f64| quantile_sorted(&sorted, p, QuantileType::T7);
+            writeln!(f, "  Min:    {:.4}", sorted[0])?;
+            writeln!(f, "  10%:    {:.4}", q(0.1))?;
+            writeln!(f, "  25%:    {:.4}", q(0.25))?;
+            writeln!(f, "  Median: {:.4}", q(0.5))?;
+            writeln!(f, "  75%:    {:.4}", q(0.75))?;
+            writeln!(f, "  90%:    {:.4}", q(0.9))?;
+            writeln!(f, "  Max:    {:.4}", sorted[sorted.len() - 1])?;
         }
         writeln!(f)?;
 
-        writeln!(f, "VARIABLE IMPORTANCE:")?;
+        writeln!(f, "VARIABLE IMPORTANCE (split frequency):")?;
         for (i, (name, importance)) in self.variable_importance.iter().enumerate() {
             if i >= 10 {
                 writeln!(
@@ -309,568 +411,36 @@ impl fmt::Display for CausalForestResult {
         writeln!(f)?;
 
         writeln!(f, "Configuration:")?;
-        writeln!(f, "  Honest splitting: {}", self.config.honesty)?;
+        if self.config.honesty {
+            writeln!(
+                f,
+                "  Honest splitting: true (estimation share {})",
+                self.config.honesty_fraction
+            )?;
+        } else {
+            writeln!(f, "  Honest splitting: false")?;
+        }
         writeln!(f, "  Min node size: {}", self.config.min_node_size)?;
-        writeln!(f, "  Max depth: {}", self.config.max_depth)?;
-
-        Ok(())
+        writeln!(f, "  Max depth (causal trees): {}", self.config.max_depth)?;
+        match self.config.mtry {
+            Some(m) => writeln!(f, "  mtry: {m}")?,
+            None => writeln!(f, "  mtry: default")?,
+        }
+        write!(f, "{}", notes_text(self))
     }
 }
 
-/// A single causal tree node.
-#[derive(Debug, Clone)]
-enum CausalTreeNode {
-    /// Internal node with a split
-    Split {
-        feature_index: usize,
-        threshold: f64,
-        left: Box<CausalTreeNode>,
-        right: Box<CausalTreeNode>,
-    },
-    /// Leaf node with treatment effect estimate
-    Leaf {
-        treatment_effect: f64,
-        variance: f64,
-        n_treated: usize,
-        n_control: usize,
-    },
-}
-
-/// A single causal tree.
-#[derive(Debug, Clone)]
-struct CausalTree {
-    root: Option<CausalTreeNode>,
-    n_features: usize,
-    max_depth: usize,
-    min_node_size: usize,
-    mtry: usize,
-}
-
-impl CausalTree {
-    /// Create a new causal tree.
-    fn new(max_depth: usize, min_node_size: usize, mtry: usize) -> Self {
-        Self {
-            root: None,
-            n_features: 0,
-            max_depth,
-            min_node_size,
-            mtry,
-        }
-    }
-
-    /// The fewest rows a node needs in each part (structure and estimation) to be split:
-    /// two children of `min_node_size` rows. It saturates at `usize::MAX`, more rows than
-    /// any node can hold, so a `min_node_size` above `usize::MAX / 2` stops every split
-    /// instead of overflowing; below that it is exactly `2 * min_node_size`.
-    fn min_rows_to_split(&self) -> usize {
-        self.min_node_size.saturating_mul(2)
-    }
-
-    /// Fit the tree using honest splitting.
-    ///
-    /// The splitting sample is used to determine tree structure,
-    /// and the estimation sample is used to estimate treatment effects in leaves.
-    fn fit_honest(
-        &mut self,
-        x_split: ArrayView2<f64>,
-        y_split: ArrayView1<f64>,
-        w_split: ArrayView1<f64>,
-        x_est: ArrayView2<f64>,
-        y_est: ArrayView1<f64>,
-        w_est: ArrayView1<f64>,
-        rng_state: &mut u64,
-    ) {
-        self.n_features = x_split.ncols();
-
-        // Build tree structure using splitting sample
-        let split_indices: Vec<usize> = (0..x_split.nrows()).collect();
-        let est_indices: Vec<usize> = (0..x_est.nrows()).collect();
-
-        self.root = Some(self.build_tree_honest(
-            &x_split,
-            &y_split,
-            &w_split,
-            &x_est,
-            &y_est,
-            &w_est,
-            &split_indices,
-            &est_indices,
-            0,
-            rng_state,
-        ));
-    }
-
-    /// Build tree recursively with honest splitting.
-    fn build_tree_honest(
-        &self,
-        x_split: &ArrayView2<f64>,
-        y_split: &ArrayView1<f64>,
-        w_split: &ArrayView1<f64>,
-        x_est: &ArrayView2<f64>,
-        y_est: &ArrayView1<f64>,
-        w_est: &ArrayView1<f64>,
-        split_indices: &[usize],
-        est_indices: &[usize],
-        depth: usize,
-        rng_state: &mut u64,
-    ) -> CausalTreeNode {
-        // Check stopping conditions
-        let n_split = split_indices.len();
-        let n_est = est_indices.len();
-
-        // Count treated and control in estimation sample
-        let (n_treated, n_control) = count_treated_control(w_est, est_indices);
-
-        // Stop if: max depth reached, too few samples, or no variation in treatment
-        let min_rows = self.min_rows_to_split();
-        if depth >= self.max_depth
-            || n_split < min_rows
-            || n_est < min_rows
-            || n_treated < self.min_node_size
-            || n_control < self.min_node_size
-        {
-            return self.create_leaf(y_est, w_est, est_indices);
-        }
-
-        // Select random subset of features
-        let features_to_try = self.select_features(rng_state);
-
-        // Find best split using splitting sample
-        if let Some((best_feature, best_threshold)) =
-            self.find_best_causal_split(x_split, y_split, w_split, split_indices, &features_to_try)
-        {
-            // Split both samples based on the threshold
-            let (split_left, split_right) =
-                partition_indices(x_split, split_indices, best_feature, best_threshold);
-            let (est_left, est_right) =
-                partition_indices(x_est, est_indices, best_feature, best_threshold);
-
-            // Check minimum node sizes
-            if split_left.len() < self.min_node_size
-                || split_right.len() < self.min_node_size
-                || est_left.len() < self.min_node_size
-                || est_right.len() < self.min_node_size
-            {
-                return self.create_leaf(y_est, w_est, est_indices);
-            }
-
-            // Check for treatment variation in children
-            let (left_treated, left_control) = count_treated_control(w_est, &est_left);
-            let (right_treated, right_control) = count_treated_control(w_est, &est_right);
-
-            if left_treated < 2 || left_control < 2 || right_treated < 2 || right_control < 2 {
-                return self.create_leaf(y_est, w_est, est_indices);
-            }
-
-            let left = self.build_tree_honest(
-                x_split,
-                y_split,
-                w_split,
-                x_est,
-                y_est,
-                w_est,
-                &split_left,
-                &est_left,
-                depth + 1,
-                rng_state,
-            );
-            let right = self.build_tree_honest(
-                x_split,
-                y_split,
-                w_split,
-                x_est,
-                y_est,
-                w_est,
-                &split_right,
-                &est_right,
-                depth + 1,
-                rng_state,
-            );
-
-            CausalTreeNode::Split {
-                feature_index: best_feature,
-                threshold: best_threshold,
-                left: Box::new(left),
-                right: Box::new(right),
-            }
-        } else {
-            self.create_leaf(y_est, w_est, est_indices)
-        }
-    }
-
-    /// Create a leaf node with treatment effect estimate.
-    fn create_leaf(
-        &self,
-        y: &ArrayView1<f64>,
-        w: &ArrayView1<f64>,
-        indices: &[usize],
-    ) -> CausalTreeNode {
-        let (treatment_effect, variance, n_treated, n_control) =
-            estimate_treatment_effect(y, w, indices);
-
-        CausalTreeNode::Leaf {
-            treatment_effect,
-            variance,
-            n_treated,
-            n_control,
-        }
-    }
-
-    /// Select random features for splitting.
-    fn select_features(&self, rng_state: &mut u64) -> Vec<usize> {
-        let mut selected = Vec::with_capacity(self.mtry.min(self.n_features));
-        let mut available: Vec<usize> = (0..self.n_features).collect();
-
-        for _ in 0..self.mtry.min(self.n_features) {
-            if available.is_empty() {
-                break;
-            }
-            let idx = lcg_random(rng_state) % available.len();
-            selected.push(available.swap_remove(idx));
-        }
-
-        selected
-    }
-
-    /// Find the best split for causal effect heterogeneity.
-    ///
-    /// The splitting criterion maximizes the variance of treatment effects
-    /// across child nodes, following Athey & Imbens (2016): it maximises
-    /// `w_L * tau_L^2 + w_R * tau_R^2`, where `w` is the harmonic mean of the
-    /// treated and control counts of a child.
-    ///
-    /// Each feature's node values are sorted once and the candidate
-    /// thresholds (midpoints of consecutive distinct values, ascending) are
-    /// swept with running treated/control counts and sums. The left child of a
-    /// threshold is every observation with `x <= threshold`, exactly as a
-    /// partition of the node would give, so the candidate children are those
-    /// of the re-partitioning search this replaces. `x` must be finite.
-    ///
-    /// The child means now come from sums accumulated in sorted-x order (the
-    /// right child's by subtraction from the node totals) rather than in
-    /// index order. With integer outcomes whose sums stay below 2^53 (about
-    /// 9e15) in magnitude, as 0/1 outcomes, counts and other moderate
-    /// integers do, those sums are exact and both searches choose the same
-    /// split. Otherwise the chosen split is the same except where two
-    /// candidates' criteria are equal, exactly or to within rounding: the two
-    /// searches may break those ties either way, so decimal outcomes (say, in
-    /// tenths) can take the other, equally good split where two candidates
-    /// tie, as they do when two covariate groups mirror each other, and the
-    /// tree then grows differently below it.
-    fn find_best_causal_split(
-        &self,
-        x: &ArrayView2<f64>,
-        y: &ArrayView1<f64>,
-        w: &ArrayView1<f64>,
-        indices: &[usize],
-        features: &[usize],
-    ) -> Option<(usize, f64)> {
-        let mut best_criterion = f64::NEG_INFINITY;
-        let mut best_split = None;
-
-        let n = indices.len();
-        if n < 2 {
-            return None;
-        }
-
-        // Node totals (treated means w > 0.5)
-        let (mut tot_nt, mut tot_nc, mut tot_st, mut tot_sc) = (0usize, 0usize, 0.0, 0.0);
-        for &i in indices {
-            if w[i] > 0.5 {
-                tot_nt += 1;
-                tot_st += y[i];
-            } else {
-                tot_nc += 1;
-                tot_sc += y[i];
-            }
-        }
-
-        let harmonic = |nt: usize, nc: usize| {
-            if nt > 0 && nc > 0 {
-                2.0 * (nt as f64) * (nc as f64) / ((nt + nc) as f64)
-            } else {
-                0.0
-            }
-        };
-
-        let mut order: Vec<usize> = indices.to_vec();
-        for &feature in features {
-            order.sort_by(|&a, &b| x[[a, feature]].total_cmp(&x[[b, feature]]));
-
-            // Left-child accumulators, advanced by a pointer into `order`
-            let (mut l_nt, mut l_nc, mut l_st, mut l_sc) = (0usize, 0usize, 0.0, 0.0);
-            let mut ptr = 0usize;
-            let mut lower = x[[order[0], feature]];
-
-            for pos in 1..n {
-                let upper = x[[order[pos], feature]];
-                if upper == lower {
-                    continue;
-                }
-                let threshold = (lower + upper) / 2.0;
-                lower = upper;
-
-                while ptr < n && x[[order[ptr], feature]] <= threshold {
-                    let i = order[ptr];
-                    if w[i] > 0.5 {
-                        l_nt += 1;
-                        l_st += y[i];
-                    } else {
-                        l_nc += 1;
-                        l_sc += y[i];
-                    }
-                    ptr += 1;
-                }
-
-                if ptr < self.min_node_size || n - ptr < self.min_node_size {
-                    continue;
-                }
-
-                // Check for treatment variation in both children
-                let (r_nt, r_nc) = (tot_nt - l_nt, tot_nc - l_nc);
-                if l_nt < 2 || l_nc < 2 || r_nt < 2 || r_nc < 2 {
-                    continue;
-                }
-
-                let tau_left = l_st / l_nt as f64 - l_sc / l_nc as f64;
-                let tau_right = (tot_st - l_st) / r_nt as f64 - (tot_sc - l_sc) / r_nc as f64;
-                let criterion = harmonic(l_nt, l_nc) * tau_left.powi(2)
-                    + harmonic(r_nt, r_nc) * tau_right.powi(2);
-
-                if criterion > best_criterion {
-                    best_criterion = criterion;
-                    best_split = Some((feature, threshold));
-                }
-            }
-        }
-
-        best_split
-    }
-
-    /// Predict treatment effect for a single observation.
-    fn predict_one(&self, x: &ArrayView1<f64>) -> (f64, f64) {
-        match &self.root {
-            Some(node) => self.traverse(node, x),
-            None => (0.0, f64::INFINITY),
-        }
-    }
-
-    /// Traverse tree to get prediction.
-    fn traverse(&self, node: &CausalTreeNode, x: &ArrayView1<f64>) -> (f64, f64) {
-        match node {
-            CausalTreeNode::Leaf {
-                treatment_effect,
-                variance,
-                ..
-            } => (*treatment_effect, *variance),
-            CausalTreeNode::Split {
-                feature_index,
-                threshold,
-                left,
-                right,
-            } => {
-                if x[*feature_index] <= *threshold {
-                    self.traverse(left, x)
-                } else {
-                    self.traverse(right, x)
-                }
-            }
-        }
-    }
-
-    /// Get feature importances based on split frequency.
-    fn feature_importances(&self) -> Array1<f64> {
-        let mut importances = Array1::zeros(self.n_features);
-        if let Some(ref root) = self.root {
-            self.accumulate_importances(root, &mut importances, 1.0);
-        }
-
-        // Normalize
-        let sum: f64 = importances.sum();
-        if sum > 0.0 {
-            importances /= sum;
-        }
-
-        importances
-    }
-
-    fn accumulate_importances(
-        &self,
-        node: &CausalTreeNode,
-        importances: &mut Array1<f64>,
-        weight: f64,
-    ) {
-        if let CausalTreeNode::Split {
-            feature_index,
-            left,
-            right,
-            ..
-        } = node
-        {
-            importances[*feature_index] += weight;
-            self.accumulate_importances(left, importances, weight * 0.5);
-            self.accumulate_importances(right, importances, weight * 0.5);
-        }
-    }
-}
-
-/// Estimate treatment effect within a set of indices.
+/// Run causal forest estimation (`grf::causal_forest` on the dataset's columns).
 ///
-/// Returns (treatment_effect, variance, n_treated, n_control)
-fn estimate_treatment_effect(
-    y: &ArrayView1<f64>,
-    w: &ArrayView1<f64>,
-    indices: &[usize],
-) -> (f64, f64, usize, usize) {
-    let mut sum_treated = 0.0;
-    let mut sum_control = 0.0;
-    let mut n_treated = 0;
-    let mut n_control = 0;
-
-    for &i in indices {
-        if w[i] > 0.5 {
-            sum_treated += y[i];
-            n_treated += 1;
-        } else {
-            sum_control += y[i];
-            n_control += 1;
-        }
-    }
-
-    if n_treated == 0 || n_control == 0 {
-        return (0.0, f64::INFINITY, n_treated, n_control);
-    }
-
-    let mean_treated = sum_treated / n_treated as f64;
-    let mean_control = sum_control / n_control as f64;
-    let treatment_effect = mean_treated - mean_control;
-
-    // Compute variance using formula: Var(tau) = Var(Y|W=1)/n1 + Var(Y|W=0)/n0
-    let mut var_treated = 0.0;
-    let mut var_control = 0.0;
-
-    for &i in indices {
-        if w[i] > 0.5 {
-            var_treated += (y[i] - mean_treated).powi(2);
-        } else {
-            var_control += (y[i] - mean_control).powi(2);
-        }
-    }
-
-    let var_treated = if n_treated > 1 {
-        var_treated / (n_treated - 1) as f64
-    } else {
-        0.0
-    };
-    let var_control = if n_control > 1 {
-        var_control / (n_control - 1) as f64
-    } else {
-        0.0
-    };
-
-    let variance = var_treated / n_treated as f64 + var_control / n_control as f64;
-
-    (treatment_effect, variance, n_treated, n_control)
-}
-
-/// Count treated and control units in indices.
-fn count_treated_control(w: &ArrayView1<f64>, indices: &[usize]) -> (usize, usize) {
-    let mut n_treated = 0;
-    let mut n_control = 0;
-
-    for &i in indices {
-        if w[i] > 0.5 {
-            n_treated += 1;
-        } else {
-            n_control += 1;
-        }
-    }
-
-    (n_treated, n_control)
-}
-
-/// Partition indices based on a split, each child's vector at its exact length (the
-/// recursion holds them on every level, and [`CausalForestConfig::memory_bound`] counts them
-/// by their lengths).
-fn partition_indices(
-    x: &ArrayView2<f64>,
-    indices: &[usize],
-    feature: usize,
-    threshold: f64,
-) -> (Vec<usize>, Vec<usize>) {
-    partition_exact(indices.iter().copied(), |i| x[[i, feature]] <= threshold)
-}
-
-use super::lcg_random;
-
-/// Generate subsample indices without replacement and the out-of-bag rest, both vectors at
-/// their exact lengths.
-fn subsample(n_samples: usize, fraction: f64, rng_state: &mut u64) -> (Vec<usize>, Vec<usize>) {
-    let subsample_size = ((n_samples as f64) * fraction) as usize;
-    let mut selected = vec![false; n_samples];
-    let mut sample = Vec::with_capacity(subsample_size);
-
-    while sample.len() < subsample_size {
-        let idx = lcg_random(rng_state) % n_samples;
-        if !selected[idx] {
-            selected[idx] = true;
-            sample.push(idx);
-        }
-    }
-
-    // `sample` holds distinct indices, so exactly the others are out of bag.
-    let mut oob = Vec::with_capacity(n_samples - sample.len());
-    for (i, &in_sample) in selected.iter().enumerate() {
-        if !in_sample {
-            oob.push(i);
-        }
-    }
-    (sample, oob)
-}
-
-/// Split sample into structure and estimation parts for honest estimation.
-fn legacy_honest_split(
-    indices: &[usize],
-    honesty_fraction: f64,
-    rng_state: &mut u64,
-) -> (Vec<usize>, Vec<usize>) {
-    let n = indices.len();
-    let est_size = ((n as f64) * honesty_fraction) as usize;
-
-    let mut shuffled = indices.to_vec();
-    // Fisher-Yates shuffle
-    for i in (1..n).rev() {
-        let j = lcg_random(rng_state) % (i + 1);
-        shuffled.swap(i, j);
-    }
-
-    let estimation = shuffled[..est_size].to_vec();
-    let structure = shuffled[est_size..].to_vec();
-
-    (structure, estimation)
-}
-
-/// Run causal forest estimation.
-///
-/// # Arguments
-/// * `dataset` - The dataset containing outcome, treatment, and covariates
-/// * `outcome_col` - Name of the outcome variable
-/// * `treatment_col` - Name of the binary treatment variable (0/1)
-/// * `covariate_cols` - Names of covariate columns
-/// * `config` - Configuration for the causal forest
-///
-/// # Returns
-/// `CausalForestResult` containing CATE estimates, ATE, and diagnostics
+/// Outcome, treatment and covariates are read with [`NaPolicy::Fail`]: a missing value is an
+/// error naming its column, as forests refuse missing values. The treatment must be 0/1.
 ///
 /// # Example
 /// ```ignore
 /// use p2a_core::ml::{causal_forest, CausalForestConfig};
 ///
-/// let config = CausalForestConfig {
-///     n_trees: 1000,
-///     honesty: true,
-///     ..Default::default()
-/// };
+/// let mut config = CausalForestConfig::default();
+/// config.n_trees = 1000;
 ///
 /// let result = causal_forest(
 ///     &dataset,
@@ -885,8 +455,7 @@ fn legacy_honest_split(
 ///
 /// # References
 ///
-/// - Wager & Athey (2018), JASA. Algorithm 1.
-/// - R `grf::causal_forest()` for reference implementation.
+/// - Athey, Tibshirani & Wager (2019), Annals of Statistics; R `grf::causal_forest()`.
 pub fn causal_forest(
     dataset: &Dataset,
     outcome_col: &str,
@@ -894,58 +463,28 @@ pub fn causal_forest(
     covariate_cols: &[&str],
     config: CausalForestConfig,
 ) -> EconResult<CausalForestResult> {
-    // Extract outcome
-    let y = DesignMatrix::extract_column(dataset.df(), outcome_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: outcome_col.to_string(),
-            available: vec![format!("{:?}", e)],
-        }
-    })?;
-
-    // Extract treatment
-    let w = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
-        EconError::ColumnNotFound {
-            column: treatment_col.to_string(),
-            available: vec![format!("{:?}", e)],
-        }
-    })?;
-
-    // Validate treatment is binary
-    for &val in w.iter() {
-        if val != 0.0 && val != 1.0 {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Treatment variable '{}' must be binary (0/1), found value: {}",
-                    treatment_col, val
-                ),
-            });
-        }
-    }
-
-    // Extract covariates
-    let n = dataset.nrows();
-    let p = covariate_cols.len();
-
-    if p == 0 {
+    if covariate_cols.is_empty() {
         return Err(EconError::InvalidSpecification {
             message: "At least one covariate is required".to_string(),
         });
     }
-
-    let mut x = Array2::zeros((n, p));
-    for (j, &col_name) in covariate_cols.iter().enumerate() {
-        let col_data = DesignMatrix::extract_column(dataset.df(), col_name).map_err(|e| {
-            EconError::ColumnNotFound {
-                column: col_name.to_string(),
-                available: vec![format!("{:?}", e)],
-            }
-        })?;
-        for i in 0..n {
-            x[[i, j]] = col_data[i];
-        }
+    let cols = ColumnRequest::new(dataset.df())
+        .numeric(outcome_col)
+        .numeric(treatment_col)
+        .numerics(covariate_cols)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let y = cols.numeric_array(outcome_col);
+    let w = cols.numeric_array(treatment_col);
+    if let Some(&val) = w.iter().find(|&&v| v != 0.0 && v != 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Treatment variable '{}' must be binary (0/1), found value: {}",
+                treatment_col, val
+            ),
+        });
     }
-
-    // Run the core algorithm
+    let x = cols.matrix(covariate_cols, false)?.data;
     causal_forest_arrays(
         x.view(),
         y.view(),
@@ -957,25 +496,50 @@ pub fn causal_forest(
 
 /// Check the counts and fractions of a causal-forest configuration.
 ///
-/// `n_trees >= 1`; `sample_fraction` finite and in (0, 1]; with honesty,
-/// `honesty_fraction` in the open interval (0, 1), as `grf` requires.
+/// `n_trees >= 1`; `sample_fraction` finite and in (0, 1]; with honesty, `honesty_fraction` in
+/// the open interval (0, 1), as `grf` requires; `ci_group_size >= 1`, and with
+/// `ci_group_size > 1` `sample_fraction <= 0.5` and `n_trees >= ci_group_size`;
+/// `min_node_size >= 1`; `nuisance_trees` and `mtry` at least 1 when given.
 fn validate_causal_forest_config(config: &CausalForestConfig) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
     if config.n_trees == 0 {
-        return Err(EconError::InvalidSpecification {
-            message: "n_trees must be at least 1 (got 0)".to_string(),
-        });
+        return invalid("n_trees must be at least 1 (got 0)".to_string());
     }
     let sf = config.sample_fraction;
     if !(sf.is_finite() && sf > 0.0 && sf <= 1.0) {
-        return Err(EconError::InvalidSpecification {
-            message: format!("sample_fraction must be in (0, 1] (got {sf})"),
-        });
+        return invalid(format!("sample_fraction must be in (0, 1] (got {sf})"));
     }
     let hf = config.honesty_fraction;
     if config.honesty && !(hf.is_finite() && hf > 0.0 && hf < 1.0) {
-        return Err(EconError::InvalidSpecification {
-            message: format!("honesty_fraction must be in (0, 1) when honesty is on (got {hf})"),
-        });
+        return invalid(format!(
+            "honesty_fraction must be in (0, 1) when honesty is on (got {hf})"
+        ));
+    }
+    let g = config.ci_group_size;
+    if g == 0 {
+        return invalid("ci_group_size must be at least 1 (got 0)".to_string());
+    }
+    if g > 1 && sf > 0.5 {
+        return invalid(format!(
+            "sample_fraction must be at most 0.5 when ci_group_size > 1 (got {sf}); grf: \"When \
+             confidence intervals are enabled, the sampling fraction must be less than 0.5\". Set \
+             ci_group_size = 1 to fit without variance estimates"
+        ));
+    }
+    if config.n_trees < g {
+        return invalid(format!(
+            "n_trees must be at least ci_group_size ({g}) to grow one group of trees (got {})",
+            config.n_trees
+        ));
+    }
+    if config.min_node_size == 0 {
+        return invalid("min_node_size must be at least 1 (got 0)".to_string());
+    }
+    if config.nuisance_trees == Some(0) {
+        return invalid("nuisance_trees must be at least 1 (got 0)".to_string());
+    }
+    if config.mtry == Some(0) {
+        return invalid("mtry must be at least 1 (got 0)".to_string());
     }
     Ok(())
 }
@@ -1068,9 +632,8 @@ pub fn aipw_ate(scores: &[f64]) -> EconResult<(f64, f64)> {
     Ok((mean, (ss / (mf * (mf - 1.0))).sqrt()))
 }
 
-/// Core causal forest algorithm working with arrays.
-///
-/// This is the main implementation, separate from data loading for testability.
+/// Core causal forest algorithm on arrays: [`causal_forest_arrays_with_nuisance`] with both
+/// nuisance functions estimated by out-of-bag regression forests.
 pub fn causal_forest_arrays(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
@@ -1078,12 +641,32 @@ pub fn causal_forest_arrays(
     covariate_names: Vec<String>,
     config: CausalForestConfig,
 ) -> EconResult<CausalForestResult> {
+    causal_forest_arrays_with_nuisance(x, y, w, None, None, covariate_names, config)
+}
+
+/// The causal forest of `grf::causal_forest(X, Y, W, Y.hat = , W.hat = )`: either nuisance may be
+/// supplied (finite, length n; `W.hat` strictly in (0, 1)), the other is estimated out of bag by
+/// an honest regression forest (`nuisance_trees` trees, min.node.size 5, honesty fraction 0.5,
+/// the forest's `sample_fraction` and `mtry`, no depth cap).
+///
+/// `w` must be 0/1 with at least 5 treated and 5 control units; `x` needs at least one column
+/// and as many names; every value must be finite. A unit that is in the subsample of every tree
+/// of a forest, an estimated propensity of 0 or 1, and a unit without treatment variation around
+/// it are errors (grf returns NaN there).
+pub fn causal_forest_arrays_with_nuisance(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    w: ArrayView1<f64>,
+    y_hat: Option<ArrayView1<f64>>,
+    w_hat: Option<ArrayView1<f64>>,
+    covariate_names: Vec<String>,
+    mut config: CausalForestConfig,
+) -> EconResult<CausalForestResult> {
     validate_causal_forest_config(&config)?;
+    let invalid = |message: String| EconError::InvalidSpecification { message };
 
     let n = x.nrows();
     let p = x.ncols();
-
-    // Validate inputs
     if n < 10 {
         return Err(EconError::InsufficientData {
             required: 10,
@@ -1091,24 +674,37 @@ pub fn causal_forest_arrays(
             context: "Causal forest requires at least 10 observations".to_string(),
         });
     }
-
     if y.len() != n || w.len() != n {
-        return Err(EconError::InvalidSpecification {
-            message: "Outcome, treatment, and covariates must have same number of observations"
-                .to_string(),
-        });
+        return Err(invalid(
+            "Outcome, treatment, and covariates must have same number of observations".to_string(),
+        ));
     }
-
+    if p == 0 {
+        return Err(invalid(
+            "x must have at least one covariate column".to_string(),
+        ));
+    }
+    if covariate_names.len() != p {
+        return Err(invalid(format!(
+            "covariate_names has {} names for {p} columns of x",
+            covariate_names.len()
+        )));
+    }
     if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
-        return Err(EconError::InvalidSpecification {
-            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
-        });
+        return Err(invalid(format!(
+            "x must contain only finite values (row {i}, column {j} is {v})"
+        )));
     }
     check_finite_1d(&y, "y")?;
     check_finite_1d(&w, "w")?;
-
-    // Count treated/control
-    let (n_treated, n_control) = count_treated_control(&w, &(0..n).collect::<Vec<_>>());
+    if let Some(i) = w.iter().position(|&v| v != 0.0 && v != 1.0) {
+        return Err(invalid(format!(
+            "w must be binary (0/1); row {i} is {}",
+            w[i]
+        )));
+    }
+    let n_treated = w.iter().filter(|&&v| v == 1.0).count();
+    let n_control = n - n_treated;
     if n_treated < 5 || n_control < 5 {
         return Err(EconError::InsufficientData {
             required: 5,
@@ -1116,147 +712,209 @@ pub fn causal_forest_arrays(
             context: "Need at least 5 treated and 5 control units".to_string(),
         });
     }
-
-    // Initialize RNG
-    let mut rng_state = config.seed.unwrap_or(42);
-
-    // Determine mtry
     let mtry = config.mtry.unwrap_or_else(|| default_mtry(p));
+    if mtry > p {
+        return Err(invalid(format!(
+            "mtry must be at most the number of covariates ({p}), got {mtry}"
+        )));
+    }
+    let g = config.ci_group_size;
+    let grown = config.grown_trees();
+    let nt = config.nuisance_tree_count();
+    check_alloc::<HonestTree>(grown, "causal forest trees")?;
+    check_alloc::<HonestTree>(nt, "nuisance forest trees")?;
+    check_alloc::<f64>(
+        checked_len(&[n, 8], "causal forest vectors")?,
+        "causal forest vectors",
+    )?;
 
-    // Build forest
-    let mut trees = try_with_capacity::<CausalTree>(config.n_trees, "causal forest trees")?;
-    // Per-row prediction buffer, reused for every observation below
-    let mut preds = try_with_capacity::<f64>(config.n_trees, "causal forest per-row predictions")?;
-    // Out-of-bag statistics per observation, accumulated with Welford's algorithm
-    let mut oob_count = vec![0usize; n];
-    let mut oob_mean = vec![0.0f64; n];
-    let mut oob_m2 = vec![0.0f64; n];
-    let mut feature_importance_sum = Array1::zeros(p);
-
-    for _tree_idx in 0..config.n_trees {
-        checkpoint()?;
-
-        // Subsample
-        let (sample_indices, oob_indices) = subsample(n, config.sample_fraction, &mut rng_state);
-
-        // Extract subsample data
-        let x_sample = select_rows_view(&x, &sample_indices);
-        let y_sample: Array1<f64> = sample_indices.iter().map(|&i| y[i]).collect();
-        let w_sample: Array1<f64> = sample_indices.iter().map(|&i| w[i]).collect();
-
-        // Build tree
-        let mut tree = CausalTree::new(config.max_depth, config.min_node_size, mtry);
-
-        if config.honesty {
-            // Split sample for honest estimation
-            let sample_idx_local: Vec<usize> = (0..sample_indices.len()).collect();
-            let (structure_idx, estimation_idx) =
-                legacy_honest_split(&sample_idx_local, config.honesty_fraction, &mut rng_state);
-
-            let x_struct = select_rows_view(&x_sample.view(), &structure_idx);
-            let y_struct: Array1<f64> = structure_idx.iter().map(|&i| y_sample[i]).collect();
-            let w_struct: Array1<f64> = structure_idx.iter().map(|&i| w_sample[i]).collect();
-
-            let x_est = select_rows_view(&x_sample.view(), &estimation_idx);
-            let y_est: Array1<f64> = estimation_idx.iter().map(|&i| y_sample[i]).collect();
-            let w_est: Array1<f64> = estimation_idx.iter().map(|&i| w_sample[i]).collect();
-
-            tree.fit_honest(
-                x_struct.view(),
-                y_struct.view(),
-                w_struct.view(),
-                x_est.view(),
-                y_est.view(),
-                w_est.view(),
-                &mut rng_state,
-            );
-        } else {
-            // Non-honest: use same data for structure and estimation
-            tree.fit_honest(
-                x_sample.view(),
-                y_sample.view(),
-                w_sample.view(),
-                x_sample.view(),
-                y_sample.view(),
-                w_sample.view(),
-                &mut rng_state,
-            );
+    // One random stream: the Y.hat forest, the W.hat forest, then the causal trees.
+    let mut rng = config.seed.unwrap_or(42);
+    let nuisance_spec = TreeSpec {
+        min_node_size: NUISANCE_MIN_NODE_SIZE,
+        max_depth: usize::MAX,
+        mtry,
+        honesty: true,
+        honesty_fraction: NUISANCE_HONESTY_FRACTION,
+    };
+    let y_vec = y.to_vec();
+    let w_vec = w.to_vec();
+    let fit_nuisance =
+        |name: &str, supplied: Option<ArrayView1<f64>>, target: &[f64], rng: &mut u64| {
+            nuisance_estimate(
+                x,
+                name,
+                supplied,
+                target,
+                nt,
+                config.sample_fraction,
+                &nuisance_spec,
+                rng,
+            )
+        };
+    let (y_hat, y_hat_trees) = fit_nuisance("Y.hat", y_hat, &y_vec, &mut rng)?;
+    let w_supplied = w_hat.is_some();
+    let (w_hat, w_hat_trees) = fit_nuisance("W.hat", w_hat, &w_vec, &mut rng)?;
+    if w_supplied {
+        if let Some(i) = w_hat.iter().position(|&e| !(e > 0.0 && e < 1.0)) {
+            return Err(invalid(format!(
+                "w_hat must be strictly between 0 and 1 (overlap); row {i} is {}",
+                w_hat[i]
+            )));
         }
-
-        // OOB predictions
-        for &oob_idx in &oob_indices {
-            let (pred, _) = tree.predict_one(&x.row(oob_idx));
-            oob_count[oob_idx] += 1;
-            let delta = pred - oob_mean[oob_idx];
-            oob_mean[oob_idx] += delta / oob_count[oob_idx] as f64;
-            oob_m2[oob_idx] += delta * (pred - oob_mean[oob_idx]);
+    } else {
+        let outside: Vec<usize> = (0..n)
+            .filter(|&i| !(w_hat[i] > 0.0 && w_hat[i] < 1.0))
+            .collect();
+        if let Some(&i) = outside.first() {
+            return Err(invalid(format!(
+                "the estimated propensity W.hat is 0 or 1 for {} observation(s) (first: row {i}); \
+                 the AIPW average treatment effect needs 0 < W.hat < 1 (overlap). Drop the units \
+                 without overlap or coarsen the covariates",
+                outside.len()
+            )));
         }
-
-        // Accumulate feature importance
-        if config.compute_importance {
-            feature_importance_sum = feature_importance_sum + tree.feature_importances();
-        }
-
-        trees.push(tree);
     }
 
-    // Compute final predictions (average across all trees)
-    let mut predictions = Vec::with_capacity(n);
-    let mut variance_estimates = Vec::with_capacity(n);
+    let mut warnings = Vec::new();
+    let lo = w_hat.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = w_hat.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if lo <= 0.05 && hi >= 0.95 {
+        warnings.push(format!(
+            "Estimated treatment propensities take values between {lo:.3} and {hi:.3} and in \
+             particular get very close to 0 and 1; the AIPW estimate may be unstable. Filtering \
+             the data as in Crump, Hotz, Imbens and Mitnik (Biometrika, 2009) may help"
+        ));
+    } else if lo <= 0.05 {
+        warnings.push(format!(
+            "Estimated treatment propensities go as low as {lo:.3}, so treatment effects for \
+             some controls may not be well identified"
+        ));
+    } else if hi >= 0.95 {
+        warnings.push(format!(
+            "Estimated treatment propensities go as high as {hi:.3}, so treatment effects for \
+             some treated units may not be well identified"
+        ));
+    }
+    if grown != config.n_trees {
+        warnings.push(format!(
+            "n_trees = {} was rounded down to {grown}, a multiple of ci_group_size = {g}",
+            config.n_trees
+        ));
+    }
 
+    // The R-learner residuals and the causal trees grown on them.
+    let yt: Vec<f64> = (0..n).map(|i| y[i] - y_hat[i]).collect();
+    let zt: Vec<f64> = (0..n).map(|i| w[i] - w_hat[i]).collect();
+    let causal_spec = TreeSpec {
+        min_node_size: config.min_node_size,
+        max_depth: config.max_depth,
+        mtry,
+        honesty: config.honesty,
+        honesty_fraction: config.honesty_fraction,
+    };
+    let data = ForestData {
+        x: x.view(),
+        y: &yt,
+        z: Some(&zt),
+    };
+    let forest = fit_honest_forest(
+        &data,
+        config.n_trees,
+        g,
+        config.sample_fraction,
+        &causal_spec,
+        &mut rng,
+        "causal forest trees",
+    )?;
+
+    // Out-of-bag CATEs, their little-bags variances and the R-loss.
+    let mut leaves = try_with_capacity::<(usize, LeafStats)>(grown, "causal forest leaves")?;
+    let mut predictions = try_with_capacity::<f64>(n, "causal forest predictions")?;
+    let mut variance_estimates = try_with_capacity::<f64>(n, "causal forest variances")?;
+    let mut rloss = 0.0;
+    let mut no_group = 0usize;
     for i in 0..n {
         checkpoint()?;
-        preds.clear();
-        for tree in &trees {
-            let (pred, _) = tree.predict_one(&x.row(i));
-            preds.push(pred);
+        leaves.clear();
+        for (t, tree) in forest.trees.iter().enumerate() {
+            if in_bag(&forest.drawn[t], i) {
+                continue;
+            }
+            let l = tree.leaf(x.row(i));
+            if l.n > 0 {
+                leaves.push((t, *l));
+            }
         }
-
-        let mean_pred: f64 = preds.iter().sum::<f64>() / preds.len() as f64;
-        predictions.push(mean_pred);
-
-        // Variance from bootstrap (across trees)
-        let var: f64 = preds.iter().map(|&p| (p - mean_pred).powi(2)).sum::<f64>()
-            / (preds.len() - 1).max(1) as f64;
-        variance_estimates.push(var);
+        if leaves.is_empty() {
+            return Err(invalid(format!(
+                "observation {i} is in the subsample of every causal tree; use more trees \
+                 (n_trees = {grown})"
+            )));
+        }
+        let pooled = pooled_causal(&leaves, g);
+        if !pooled.tau.is_finite() {
+            return Err(invalid(format!(
+                "the CATE of observation {i} is undefined: W - W.hat does not vary among the \
+                 units sharing its leaves"
+            )));
+        }
+        if g >= 2 && pooled.variance.is_nan() {
+            no_group += 1;
+        }
+        let r = yt[i] - pooled.mean_y - pooled.tau * (zt[i] - pooled.mean_z);
+        rloss += r * r;
+        predictions.push(pooled.tau);
+        variance_estimates.push(pooled.variance);
+    }
+    drop(leaves);
+    let HonestForest { trees, drawn } = forest;
+    drop(drawn);
+    let oob_error = rloss / n as f64;
+    if g == 1 {
+        warnings.push(
+            "variance_estimates are NaN: CATE variance estimates need ci_group_size >= 2 (little \
+             bags)"
+                .to_string(),
+        );
+    } else if no_group > 0 {
+        warnings.push(format!(
+            "{no_group} observation(s) have no complete out-of-bag tree group; their variance \
+             estimates are NaN"
+        ));
     }
 
-    // Compute OOB error
-    let oob_error = compute_oob_error(&oob_count, &oob_m2);
-
-    // Compute ATE and its standard error
-    let ate: f64 = predictions.iter().sum::<f64>() / n as f64;
-    let ate_var: f64 = variance_estimates.iter().sum::<f64>() / n as f64
-        + predictions.iter().map(|&p| (p - ate).powi(2)).sum::<f64>() / (n * (n - 1)) as f64;
-    let ate_se = ate_var.sqrt();
+    // The AIPW average treatment effect.
+    let aipw = aipw_scores(
+        y,
+        w,
+        ArrayView1::from(&y_hat),
+        ArrayView1::from(&w_hat),
+        ArrayView1::from(&predictions),
+    )?;
+    let (ate, ate_se) = aipw_ate(&aipw)?;
     let ate_t_stat = ate / ate_se;
-    let ate_df = (n - 2) as f64;
-    let ate_p_value = t_test_p_value(ate_t_stat, ate_df);
+    let ate_p_value = normal_p_value_two_sided(ate_t_stat);
+    let crit = z_critical(0.95)?;
 
-    // 95% CI for ATE
-    let z = 1.96;
-    let ate_ci_lower = ate - z * ate_se;
-    let ate_ci_upper = ate + z * ate_se;
+    let mut importance = Array1::<f64>::zeros(p);
+    if config.compute_importance {
+        for tree in &trees {
+            importance += &tree.split_importance(p);
+        }
+        let total = importance.sum();
+        if total > 0.0 {
+            importance /= total;
+        }
+    }
+    let mut variable_importance: Vec<(String, f64)> = covariate_names
+        .iter()
+        .cloned()
+        .zip(importance.iter().copied())
+        .collect();
+    variable_importance.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // Normalize feature importances
-    let total_importance: f64 = feature_importance_sum.sum();
-    let variable_importance: Vec<(String, f64)> = if total_importance > 0.0 {
-        covariate_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), feature_importance_sum[i] / total_importance))
-            .collect()
-    } else {
-        covariate_names
-            .iter()
-            .map(|name| (name.clone(), 0.0))
-            .collect()
-    };
-
-    // Sort by importance
-    let mut variable_importance = variable_importance;
-    variable_importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
+    config.mtry = Some(mtry);
     Ok(CausalForestResult {
         predictions,
         variance_estimates,
@@ -1264,76 +922,79 @@ pub fn causal_forest_arrays(
         ate_se,
         ate_t_stat,
         ate_p_value,
-        ate_ci_lower,
-        ate_ci_upper,
+        ate_ci_lower: ate - crit * ate_se,
+        ate_ci_upper: ate + crit * ate_se,
         ate_significance: SignificanceLevel::from_p_value(ate_p_value),
         variable_importance,
-        n_trees: config.n_trees,
+        n_trees: grown,
         n_obs: n,
         oob_error,
         covariate_names,
         config,
+        y_hat,
+        w_hat,
+        aipw_scores: aipw,
+        y_hat_trees,
+        w_hat_trees,
+        warnings,
         trees,
     })
 }
 
-/// Select rows from a 2D array.
-fn select_rows_view(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
-    let n_features = data.ncols();
-    let mut result = Array2::zeros((indices.len(), n_features));
-
-    for (i, &idx) in indices.iter().enumerate() {
-        result.row_mut(i).assign(&data.row(idx));
-    }
-
-    result
-}
-
-/// Compute OOB error (MSE of treatment effect predictions).
-///
-/// `counts[i]` and `m2[i]` are observation `i`'s number of out-of-bag
-/// predictions and Welford sum of squared deviations from their mean.
-fn compute_oob_error(counts: &[usize], m2: &[f64]) -> f64 {
-    // For causal forest, we can't directly compute OOB error because
-    // we don't observe the true treatment effect. Instead, we use
-    // a proxy based on R-loss (Nie & Wager, 2021).
-    //
-    // R-loss = (Y - tau(X) * W)^2 adjusted for propensity
-    //
-    // Here we use a simplified version: variance of OOB predictions
-
-    let mut sum_var = 0.0;
-    let mut count = 0;
-
-    for (&c, &ss) in counts.iter().zip(m2) {
-        if c > 1 {
-            sum_var += ss / (c - 1) as f64;
-            count += 1;
+/// A nuisance function (`name` "Y.hat" or "W.hat"): the supplied values (length n, finite), or
+/// the out-of-bag predictions of an honest regression forest of `nt` trees on `target`, with
+/// the number of trees grown (0 when supplied).
+#[allow(clippy::too_many_arguments)]
+fn nuisance_estimate(
+    x: ArrayView2<f64>,
+    name: &str,
+    supplied: Option<ArrayView1<f64>>,
+    target: &[f64],
+    nt: usize,
+    sample_fraction: f64,
+    spec: &TreeSpec,
+    rng: &mut u64,
+) -> EconResult<(Vec<f64>, usize)> {
+    let n = x.nrows();
+    let field = if name == "Y.hat" { "y_hat" } else { "w_hat" };
+    match supplied {
+        Some(v) => {
+            if v.len() != n {
+                return Err(EconError::InvalidSpecification {
+                    message: format!("{field} has {} values for {n} observations", v.len()),
+                });
+            }
+            check_finite_1d(&v, field)?;
+            Ok((v.to_vec(), 0))
+        }
+        None => {
+            let data = ForestData {
+                x: x.view(),
+                y: target,
+                z: None,
+            };
+            let est = oob_regression_forest(&data, nt, sample_fraction, spec, rng)?;
+            if let Some(i) = est.iter().position(|v| v.is_nan()) {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "observation {i} is in the subsample of every one of the {nt} trees of \
+                         the {name} forest, so it has no out-of-bag estimate; use more trees \
+                         (nuisance_trees or n_trees)"
+                    ),
+                });
+            }
+            Ok((est, nt))
         }
     }
-
-    if count > 0 {
-        sum_var / count as f64
-    } else {
-        f64::NAN
-    }
 }
 
-/// Predict CATE for new observations.
-///
-/// # Arguments
-/// * `forest` - A fitted causal forest result
-/// * `new_data` - Dataset with covariate values for prediction
-/// * `covariate_cols` - Names of covariate columns (must match training)
-///
-/// # Returns
-/// Vector of CATE predictions
+/// Predict CATE for new observations from the dataset's covariate columns (read with
+/// [`NaPolicy::Fail`]), in the order the forest was fitted on.
 pub fn causal_forest_predict(
     forest: &CausalForestResult,
     new_data: &Dataset,
     covariate_cols: &[&str],
 ) -> EconResult<Vec<f64>> {
-    // Validate covariate names match
     if covariate_cols.len() != forest.covariate_names.len() {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -1343,29 +1004,16 @@ pub fn causal_forest_predict(
             ),
         });
     }
-
-    // Extract covariates
-    let n = new_data.nrows();
-    let p = covariate_cols.len();
-    let mut x = Array2::zeros((n, p));
-
-    for (j, &col_name) in covariate_cols.iter().enumerate() {
-        let col_data = DesignMatrix::extract_column(new_data.df(), col_name).map_err(|e| {
-            EconError::ColumnNotFound {
-                column: col_name.to_string(),
-                available: vec![format!("{:?}", e)],
-            }
-        })?;
-        for i in 0..n {
-            x[[i, j]] = col_data[i];
-        }
-    }
-
-    // Predict using forest
+    let cols = ColumnRequest::new(new_data.df())
+        .numerics(covariate_cols)
+        .na(NaPolicy::Fail)
+        .extract()?;
+    let x = cols.matrix(covariate_cols, false)?.data;
     causal_forest_predict_arrays(forest, x.view())
 }
 
-/// Predict CATE using array inputs.
+/// Predict CATE for the rows of `x` (as many columns as the forest's covariates, finite): grf's
+/// forest-weighted estimate, pooling the leaves of every causal tree.
 pub fn causal_forest_predict_arrays(
     forest: &CausalForestResult,
     x: ArrayView2<f64>,
@@ -1376,20 +1024,45 @@ pub fn causal_forest_predict_arrays(
                 .to_string(),
         });
     }
-
+    let p = forest.covariate_names.len();
+    if x.ncols() != p {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "x has {} columns; the forest was fitted on {p} covariates",
+                x.ncols()
+            ),
+        });
+    }
+    if let Some(((i, j), v)) = x.indexed_iter().find(|(_, v)| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("x must contain only finite values (row {i}, column {j} is {v})"),
+        });
+    }
     let n = x.nrows();
-    let mut predictions = Vec::with_capacity(n);
-
+    let mut leaves =
+        try_with_capacity::<(usize, LeafStats)>(forest.trees.len(), "causal forest leaves")?;
+    let mut predictions = try_with_capacity::<f64>(n, "causal forest predictions")?;
     for i in 0..n {
         checkpoint()?;
-        let mut sum = 0.0;
-        for tree in &forest.trees {
-            let (pred, _) = tree.predict_one(&x.row(i));
-            sum += pred;
+        leaves.clear();
+        for (t, tree) in forest.trees.iter().enumerate() {
+            let l = tree.leaf(x.row(i));
+            if l.n > 0 {
+                leaves.push((t, *l));
+            }
         }
-        predictions.push(sum / forest.trees.len() as f64);
+        // only tau is needed: no variance (group size 1)
+        let tau = pooled_causal(&leaves, 1).tau;
+        if !tau.is_finite() {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "the CATE of row {i} is undefined: W - W.hat does not vary among the units \
+                     sharing its leaves"
+                ),
+            });
+        }
+        predictions.push(tau);
     }
-
     Ok(predictions)
 }
 
@@ -1638,7 +1311,7 @@ fn relabel(samples: &[usize], y: &[f64], z: &[f64], out: &mut Vec<f64>) -> Optio
         num += dz * (y[i] - yb);
         den += dz * dz;
     }
-    if !(den.abs() >= RELABEL_EPS) {
+    if den.is_nan() || den.abs() < RELABEL_EPS {
         return None;
     }
     let tau = num / den;
@@ -1875,6 +1548,7 @@ fn populate(mut nodes: Vec<Node>, data: &ForestData, estimation: &[usize]) -> Ho
             }
         }
     }
+    nodes.shrink_to_fit();
     HonestTree {
         root: redirect[0],
         nodes,
@@ -1890,9 +1564,7 @@ fn honest_split(
 ) -> (Vec<usize>, Vec<usize>) {
     let mut s = indices.to_vec();
     shuffle(&mut s, rng);
-    let m = s.len();
-    let g = ((m as f64) * (1.0 - honesty_fraction)).ceil() as usize;
-    let g = if m >= 2 { g.clamp(1, m - 1) } else { m };
+    let g = growing_size(s.len(), honesty_fraction);
     let est = s.split_off(g);
     s.shrink_to_fit();
     (s, est)
@@ -1907,6 +1579,22 @@ struct HonestForest {
 
 fn in_bag(bits: &[u64], i: usize) -> bool {
     (bits[i / 64] >> (i % 64)) & 1 == 1
+}
+
+/// One tree's subsample of `k` units, at its exact length: from the group's half-sample `half`
+/// when it is not empty (shuffled copy, truncated), else from the permutation `all` of every unit
+/// (shuffled in place, its first `k`).
+fn draw_subsample(all: &mut [usize], half: &[usize], k: usize, rng: &mut u64) -> Vec<usize> {
+    if half.is_empty() {
+        shuffle(all, rng);
+        all[..k].to_vec()
+    } else {
+        let mut h = half.to_vec();
+        shuffle(&mut h, rng);
+        h.truncate(k);
+        h.shrink_to_fit();
+        h
+    }
 }
 
 /// grf ForestTrainer: `n_trees / group_size` groups. group_size > 1 (train_ci_group): a
@@ -1925,6 +1613,7 @@ fn grow_forest(
     mut on_tree: impl FnMut(HonestTree, &[usize]) -> EconResult<()>,
 ) -> EconResult<()> {
     let n = data.x.nrows();
+    let k = subsample_size(n, sample_fraction, group_size);
     let mut all: Vec<usize> = (0..n).collect();
     for _ in 0..n_trees / group_size {
         let half: Vec<usize> = if group_size > 1 {
@@ -1935,18 +1624,7 @@ fn grow_forest(
         };
         for _ in 0..group_size {
             checkpoint()?;
-            let sample: Vec<usize> = if group_size > 1 {
-                let mut h = half.clone();
-                shuffle(&mut h, rng);
-                let k = ((h.len() as f64) * 2.0 * sample_fraction).ceil() as usize;
-                h.truncate(k.clamp(1, h.len()));
-                h.shrink_to_fit();
-                h
-            } else {
-                shuffle(&mut all, rng);
-                let k = ((n as f64) * sample_fraction).ceil() as usize;
-                all[..k.clamp(1, n)].to_vec()
-            };
+            let sample = draw_subsample(&mut all, &half, k, rng);
             let tree = if spec.honesty {
                 let (growing, estimation) = honest_split(&sample, spec.honesty_fraction, rng);
                 let nodes = grow_tree(data, &growing, spec, rng);
@@ -2101,7 +1779,7 @@ fn pooled_causal(leaves: &[(usize, LeafStats)], group_size: usize) -> Pooled {
         first_stage: first,
         ..nan
     };
-    if !(first.abs() >= RELABEL_EPS) {
+    if first.is_nan() || first.abs() < RELABEL_EPS {
         return out;
     }
     let tau = (ayz - ay * az) / first;
@@ -2195,16 +1873,9 @@ mod tests {
         }
     }
 
-    fn count_nodes(node: &CausalTreeNode) -> u128 {
-        match node {
-            CausalTreeNode::Leaf { .. } => 1,
-            CausalTreeNode::Split { left, right, .. } => 1 + count_nodes(left) + count_nodes(right),
-        }
-    }
-
-    /// Distinct covariate values, alternating treatment and a noisy outcome: every threshold
-    /// the size and treatment-count checks allow is a candidate, so the trees grow as large as
-    /// those checks let them.
+    /// Distinct covariate values, alternating treatment and a noisy outcome with an effect that
+    /// varies with x0: every threshold the stabilisation allows is a candidate, so the trees grow
+    /// as large as the size rules let them.
     fn splittable_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
         let mut rng = seed;
         let mut x = Array2::zeros((n, 3));
@@ -2221,22 +1892,23 @@ mod tests {
         (x, y, w)
     }
 
-    /// The node bound behind `memory_bound` holds for every tree of fitted forests, with and
-    /// without honesty, at node sizes 0 to 5 and depths 3 to 100.
+    /// The node bounds behind `memory_bound` hold for every tree of the causal forest and of a
+    /// nuisance forest grown as the fit grows them, with and without honesty, at node sizes 1 to
+    /// 5 and depths 3 to 100, and are not loose by more than a few times.
     #[test]
     fn memory_bound_counts_at_least_the_nodes_every_tree_grows() {
         for (n, honesty, min_node_size, max_depth) in [
             (400, true, 5, 10),
-            (400, true, 0, 100),
-            (400, false, 0, 100),
+            (400, true, 1, 100),
             (400, false, 1, 100),
+            (400, false, 2, 100),
             (400, false, 5, 100),
             (250, false, 4, 3),
             (61, true, 5, 10),
-            (1_000, false, 0, 100),
+            (1_000, false, 1, 100),
         ] {
             let cfg = CausalForestConfig {
-                n_trees: 6,
+                n_trees: 40,
                 honesty,
                 min_node_size,
                 max_depth,
@@ -2250,45 +1922,75 @@ mod tests {
             let most = fit
                 .trees
                 .iter()
-                .map(|t| count_nodes(t.root.as_ref().unwrap()))
+                .map(|t| t.nodes.len() as u128)
                 .max()
                 .unwrap();
             assert!(
                 most <= bound,
                 "{cfg:?} on {n} rows: a tree has {most} nodes, bound {bound}"
             );
-            // The trees fill a good part of what the bound allows (it is not loose by orders
-            // of magnitude), also where the depth stops them first.
             assert!(4 * most >= bound, "{cfg:?} on {n} rows: {most} of {bound}");
+            // a nuisance forest, as the fit grows it (the W.hat forest's target)
+            let nuisance_bound = cfg.max_nodes_per_nuisance_tree(n);
+            let spec = TreeSpec {
+                min_node_size: NUISANCE_MIN_NODE_SIZE,
+                max_depth: usize::MAX,
+                mtry: 3,
+                honesty: true,
+                honesty_fraction: NUISANCE_HONESTY_FRACTION,
+            };
+            let w_vec = w.to_vec();
+            let data = ForestData {
+                x: x.view(),
+                y: &w_vec,
+                z: None,
+            };
+            let mut nuisance_most = 0u128;
+            let mut rng = 5u64;
+            grow_forest(&data, 6, 1, cfg.sample_fraction, &spec, &mut rng, |t, _| {
+                nuisance_most = nuisance_most.max(t.nodes.len() as u128);
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                nuisance_most <= nuisance_bound,
+                "nuisance tree on {n} rows: {nuisance_most} nodes, bound {nuisance_bound}"
+            );
+            assert!(
+                8 * nuisance_most >= nuisance_bound,
+                "nuisance tree on {n} rows: {nuisance_most} of {nuisance_bound}"
+            );
         }
     }
 
-    /// The subsample, its out-of-bag rest and the recursion's child index vectors are
-    /// allocated at their exact lengths, as `memory_bound` counts them: `Iterator::partition`
-    /// and `filter().collect()` grow a vector by pushing and can leave close to twice its
-    /// length allocated, and the recursion holds child vectors on every level of its path.
+    /// The subsamples, their honest parts and a split's children are allocated at their exact
+    /// lengths, as `memory_bound` counts them: `Iterator::partition` and `filter().collect()`
+    /// grow a vector by pushing and can leave close to twice its length allocated.
     #[test]
     fn index_vectors_are_allocated_at_their_lengths() {
         let mut rng = 5;
-        for (n, fraction) in [(1_000, 0.5), (777, 0.632), (61, 1.0), (10, 0.1)] {
-            let (sample, oob) = subsample(n, fraction, &mut rng);
-            assert_eq!(sample.len() + oob.len(), n);
-            assert_eq!(
-                sample.capacity(),
-                sample.len(),
-                "{n} rows, fraction {fraction}"
-            );
-            assert_eq!(oob.capacity(), oob.len(), "{n} rows, fraction {fraction}");
+        for (n, fraction, group) in [(1_000, 0.5, 2), (777, 0.632, 1), (61, 1.0, 1), (10, 0.1, 2)] {
+            let k = subsample_size(n, fraction, group);
+            let mut all: Vec<usize> = (0..n).collect();
+            let half: Vec<usize> = if group > 1 {
+                all[..n.div_ceil(2)].to_vec()
+            } else {
+                Vec::new()
+            };
+            let sample = draw_subsample(&mut all, &half, k, &mut rng);
+            assert_eq!(sample.len(), k);
+            assert_eq!(sample.capacity(), k, "{n} rows, fraction {fraction}");
+            let (growing, estimation) = honest_split(&sample, 0.5, &mut rng);
+            assert_eq!(growing.len() + estimation.len(), k);
+            assert_eq!(growing.capacity(), growing.len(), "{n} rows");
+            assert_eq!(estimation.capacity(), estimation.len(), "{n} rows");
         }
-        // Thresholds that send one row, or all but a few, to one side, as the splits of very
-        // unbalanced data do, and balanced ones.
         let x = Array2::from_shape_fn((1_000, 1), |(i, _)| i as f64 + 0.25 * (i % 3) as f64);
         let indices: Vec<usize> = (0..1_000).rev().collect();
         for threshold in [0.1, 3.0, 500.0, 996.9, 2_000.0] {
-            let (left, right) = partition_indices(&x.view(), &indices, 0, threshold);
+            let (left, right) =
+                partition_exact(indices.iter().copied(), |i| x[[i, 0]] <= threshold);
             assert_eq!(left.len() + right.len(), 1_000);
-            assert!(left.iter().all(|&i| x[[i, 0]] <= threshold));
-            assert!(right.iter().all(|&i| x[[i, 0]] > threshold));
             assert_eq!(left.capacity(), left.len(), "threshold {threshold}");
             assert_eq!(right.capacity(), right.len(), "threshold {threshold}");
         }
@@ -2299,32 +2001,32 @@ mod tests {
         let d = CausalForestConfig::default();
         let at = |cfg: &CausalForestConfig, n: usize, p: usize| cfg.memory_bound(n, p);
         let base = at(&d, 10_000, 4);
-        // Every level of the recursion's path keeps the covariates its split drew.
-        let mtry = |m: usize| CausalForestConfig {
-            mtry: Some(m),
-            ..d.clone()
+        let with = |f: &dyn Fn(&mut CausalForestConfig)| {
+            let mut c = d.clone();
+            f(&mut c);
+            c
         };
-        assert!(at(&mtry(16), 10_000, 16) > at(&mtry(4), 10_000, 16));
-        assert_eq!(at(&mtry(16), 10_000, 16), at(&mtry(1_000), 10_000, 16));
-        let more_trees = CausalForestConfig {
-            n_trees: 3_000,
-            ..d.clone()
-        };
-        let deeper = CausalForestConfig {
-            max_depth: 20,
-            ..d.clone()
-        };
-        let no_honesty = CausalForestConfig {
-            honesty: false,
-            ..d.clone()
-        };
-        assert!(at(&more_trees, 10_000, 4) > base);
+        assert!(at(&with(&|c| c.n_trees = 3_000), 10_000, 4) > base);
         assert!(at(&d, 20_000, 4) > base);
         assert!(at(&d, 10_000, 8) > base);
-        assert!(at(&no_honesty, 10_000, 4) > base);
-        assert!(at(&deeper, 1_000_000, 4) > at(&d, 1_000_000, 4));
-        // At the default depth a tree has at most 2^11 - 1 nodes however many rows there are.
-        let node = heap_chunk_bytes(size_of::<CausalTreeNode>());
+        assert!(at(&with(&|c| c.honesty = false), 10_000, 4) > base);
+        assert!(at(&with(&|c| c.min_node_size = 1), 10_000, 4) > base);
+        assert!(at(&with(&|c| c.max_depth = 20), 1_000_000, 4) > at(&d, 1_000_000, 4));
+        // the nuisance trees are grown and dropped one at a time: their number does not count
+        assert_eq!(
+            at(&with(&|c| c.nuisance_trees = Some(5_000)), 10_000, 4),
+            base
+        );
+        // groups of 2 round 2001 trees down to 2000; groups of 1 keep all of them
+        let odd = with(&|c| c.n_trees = 2_001);
+        let ungrouped = CausalForestConfig {
+            ci_group_size: 1,
+            ..odd.clone()
+        };
+        assert_eq!(at(&odd, 10_000, 4), base);
+        assert!(at(&ungrouped, 10_000, 4) > at(&odd, 10_000, 4));
+        // At the default depth a causal tree has at most 2^11 - 1 nodes however many rows.
+        let node = size_of::<Node>() as u128;
         assert_eq!(d.max_nodes_per_tree(10_000_000), 2_047);
         assert!(u128::from(at(&d, 1_000_000, 4)) > 2_000 * 2_047 * node);
         let huge = CausalForestConfig {
@@ -2338,18 +2040,18 @@ mod tests {
         assert!(at(&d, 0, 0) > 0);
     }
 
-    /// A `min_node_size` above `usize::MAX / 2` cannot split any node, with or without
-    /// honesty: twice it (the rows a node needs in each part to be split) used to overflow,
-    /// a panic in a debug build and a product wrapped to a small number in a release build.
-    /// Every tree is a single leaf, exactly as at a `min_node_size` of all the rows.
+    /// A `min_node_size` above `usize::MAX / 2` cannot split any node, with or without honesty,
+    /// and neither panics nor wraps (in the split rule or in the memory bound): every causal tree
+    /// is a single leaf, exactly as at a `min_node_size` of all the rows.
     #[test]
     fn a_min_node_size_above_half_of_usize_neither_panics_nor_wraps() {
-        let (x, y, w) = generate_test_data(60, 5);
+        let (x, y, w, _) = overlap_test_data(60, 5);
         for honesty in [true, false] {
             let fit = |min_node_size| {
                 let cfg = CausalForestConfig {
                     honesty,
                     min_node_size,
+                    n_trees: 40,
                     ..small_config()
                 };
                 causal_forest_arrays(x.view(), y.view(), w.view(), names3(), cfg).unwrap()
@@ -2362,33 +2064,28 @@ mod tests {
                 assert!(
                     got.trees
                         .iter()
-                        .all(|t| matches!(t.root, Some(CausalTreeNode::Leaf { .. }))),
+                        .all(|t| matches!(t.nodes[t.root], Node::Leaf(_))),
                     "{case}"
                 );
                 assert_eq!(bits(&got.predictions), bits(&want.predictions), "{case}");
-                assert_eq!(
-                    bits(&got.variance_estimates),
-                    bits(&want.variance_estimates),
-                    "{case}"
-                );
                 assert_eq!(
                     bits(&[got.ate, got.ate_se, got.oob_error]),
                     bits(&[want.ate, want.ate_se, want.oob_error]),
                     "{case}"
                 );
+                let cfg = CausalForestConfig {
+                    honesty,
+                    min_node_size,
+                    ..small_config()
+                };
+                assert_eq!(cfg.max_nodes_per_tree(1_000_000), 1, "{case}");
             }
         }
-        // The rule itself, which a release build would otherwise wrap without a sign: the
-        // product saturates above `usize::MAX / 2` and is exact up to it.
-        let rows = |min_node_size| CausalTree::new(10, min_node_size, 1).min_rows_to_split();
-        assert_eq!(rows(usize::MAX / 2 + 1), usize::MAX);
-        assert_eq!(rows(usize::MAX), usize::MAX);
-        assert_eq!(rows(usize::MAX / 2), usize::MAX - 1);
-        assert_eq!((rows(0), rows(5)), (0, 10));
     }
 
     /// `run_causal_forest_config` gives the configuration `run_causal_forest` used before it
-    /// existed: the arguments, and the defaults where they are `None`.
+    /// existed: the arguments, and the defaults where they are `None` (also of the fields it
+    /// does not take).
     #[test]
     fn run_config_takes_the_arguments_and_the_defaults() {
         let c = run_causal_forest_config(None, None, None, None, None);
@@ -2401,11 +2098,27 @@ mod tests {
             (c.sample_fraction, c.honesty_fraction, c.mtry),
             (d.sample_fraction, d.honesty_fraction, d.mtry)
         );
+        assert_eq!((c.ci_group_size, c.nuisance_trees), (2, None));
         let c = run_causal_forest_config(Some(7), Some(2), Some(false), Some(3), Some(9));
         assert_eq!(
             (c.n_trees, c.min_node_size, c.honesty, c.max_depth, c.seed),
             (7, 2, false, 3, Some(9))
         );
+    }
+
+    /// WP47-9: the default mtry stays p2a's `ceil(sqrt(p))`, stored in the fitted result.
+    #[test]
+    fn test_causal_forest_default_mtry() {
+        for (p, want) in [(3usize, 2usize), (10, 4), (100, 10)] {
+            let (x3, y, w, _) = overlap_test_data(120, 21);
+            let x = Array2::from_shape_fn((120, p), |(i, j)| x3[[i, j % 3]] + j as f64 * 1e-3);
+            let mut c = CausalForestConfig::default();
+            c.n_trees = 20;
+            c.seed = Some(21);
+            let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(p), c).unwrap();
+            assert_eq!(r.config.mtry, Some(want), "p = {p}");
+            assert_eq!(default_mtry(p), want);
+        }
     }
 
     #[test]
@@ -2472,6 +2185,48 @@ mod tests {
                 },
                 "honesty_fraction",
             ),
+            (
+                CausalForestConfig {
+                    ci_group_size: 0,
+                    ..ok.clone()
+                },
+                "ci_group_size",
+            ),
+            (
+                CausalForestConfig {
+                    sample_fraction: 0.75,
+                    ..ok.clone()
+                },
+                "sample_fraction",
+            ), // grf: < 0.5 with CIs
+            (
+                CausalForestConfig {
+                    n_trees: 1,
+                    ..ok.clone()
+                },
+                "n_trees",
+            ), // fewer than one group
+            (
+                CausalForestConfig {
+                    min_node_size: 0,
+                    ..ok.clone()
+                },
+                "min_node_size",
+            ),
+            (
+                CausalForestConfig {
+                    nuisance_trees: Some(0),
+                    ..ok.clone()
+                },
+                "nuisance_trees",
+            ),
+            (
+                CausalForestConfig {
+                    mtry: Some(0),
+                    ..ok.clone()
+                },
+                "mtry",
+            ),
         ] {
             let e = validate_causal_forest_config(&cfg).unwrap_err();
             assert!(
@@ -2486,6 +2241,15 @@ mod tests {
             ..ok.clone()
         };
         assert!(validate_causal_forest_config(&no_honesty).is_ok());
+        // without little bags a larger subsample is allowed
+        assert!(
+            validate_causal_forest_config(&CausalForestConfig {
+                ci_group_size: 1,
+                sample_fraction: 0.75,
+                ..ok.clone()
+            })
+            .is_ok()
+        );
         // full path: n_trees = 0 used to underflow `preds.len() - 1`
         let (x, y, w) = generate_test_data(60, 5);
         let zero = CausalForestConfig { n_trees: 0, ..ok };
@@ -2508,102 +2272,25 @@ mod tests {
         );
     }
 
-    /// Verbatim copy of the split search before the sorted sweep (with
-    /// `self.min_node_size` as an argument and the criterion inlined), kept
-    /// as the reference for the split sweep's guard tests.
-    fn naive_find_best_causal_split(
-        min_node_size: usize,
-        x: &ArrayView2<f64>,
-        y: &ArrayView1<f64>,
-        w: &ArrayView1<f64>,
-        indices: &[usize],
-        features: &[usize],
-    ) -> Option<(usize, f64)> {
-        let mut best_criterion = f64::NEG_INFINITY;
-        let mut best_split = None;
-
-        for &feature in features {
-            // Get unique values for this feature
-            let mut values: Vec<f64> = indices.iter().map(|&i| x[[i, feature]]).collect();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            values.dedup();
-
-            // Try thresholds between consecutive values
-            for window in values.windows(2) {
-                let threshold = (window[0] + window[1]) / 2.0;
-
-                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
-                    indices.iter().partition(|&&i| x[[i, feature]] <= threshold);
-
-                if left_indices.len() < min_node_size || right_indices.len() < min_node_size {
-                    continue;
-                }
-
-                // Check for treatment variation in both children
-                let (left_treated, left_control) = count_treated_control(w, &left_indices);
-                let (right_treated, right_control) = count_treated_control(w, &right_indices);
-
-                if left_treated < 2 || left_control < 2 || right_treated < 2 || right_control < 2 {
-                    continue;
-                }
-
-                // compute_causal_criterion, inlined
-                let criterion = {
-                    let (tau_left, _, n_t_left, n_c_left) =
-                        estimate_treatment_effect(y, w, &left_indices);
-                    let (tau_right, _, n_t_right, n_c_right) =
-                        estimate_treatment_effect(y, w, &right_indices);
-
-                    let w_left = if n_t_left > 0 && n_c_left > 0 {
-                        2.0 * (n_t_left as f64) * (n_c_left as f64) / ((n_t_left + n_c_left) as f64)
-                    } else {
-                        0.0
-                    };
-
-                    let w_right = if n_t_right > 0 && n_c_right > 0 {
-                        2.0 * (n_t_right as f64) * (n_c_right as f64)
-                            / ((n_t_right + n_c_right) as f64)
-                    } else {
-                        0.0
-                    };
-
-                    w_left * tau_left.powi(2) + w_right * tau_right.powi(2)
-                };
-
-                if criterion > best_criterion {
-                    best_criterion = criterion;
-                    best_split = Some((feature, threshold));
-                }
+    /// The decrease of the causal split at `threshold` on feature 0, recomputed from the explicit
+    /// partition of the relabelled node.
+    fn causal_decrease(x: &Array2<f64>, rho: &[f64], idx: &[usize], threshold: f64) -> f64 {
+        let (mut sl, mut nl, mut sr, mut nr) = (0.0, 0.0, 0.0, 0.0);
+        for (k, &i) in idx.iter().enumerate() {
+            if x[[i, 0]] <= threshold {
+                sl += rho[k];
+                nl += 1.0;
+            } else {
+                sr += rho[k];
+                nr += 1.0;
             }
         }
-
-        best_split
+        sl * sl / nl + sr * sr / nr
     }
 
-    /// The split criterion of `split` over `idx`, recomputed from the
-    /// children with `estimate_treatment_effect`; NaN for no split.
-    fn split_criterion(
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        w: &Array1<f64>,
-        idx: &[usize],
-        split: Option<(usize, f64)>,
-    ) -> f64 {
-        let Some((feature, threshold)) = split else {
-            return f64::NAN;
-        };
-        let (left, right) = partition_indices(&x.view(), idx, feature, threshold);
-        let part = |side: &[usize]| {
-            let (tau, _, nt, nc) = estimate_treatment_effect(&y.view(), &w.view(), side);
-            2.0 * nt as f64 * nc as f64 / (nt + nc) as f64 * tau * tau
-        };
-        part(&left) + part(&right)
-    }
-
-    /// Mirror-image data: the groups x = 0 and x = 2 hold the same (y, w)
-    /// pairs, at least two treated and two control rows each, and x = 1 a
-    /// few other rows, all shuffled; y on a grid of 1 / `denom`. The two
-    /// thresholds then have exactly equal criteria.
+    /// Mirror-image data: the groups x = 0 and x = 2 hold the same (y, w) pairs, at least two
+    /// treated and two control rows each, and x = 1 a few other rows, all shuffled; y on a grid
+    /// of 1 / `denom`. The two thresholds then have equal criteria (up to rounding).
     fn mirrored_data(s: &mut u64, denom: f64) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
         let k = 4 + lcg_random(s) % 3;
         let mut group: Vec<(f64, f64)> = Vec::with_capacity(k);
@@ -2633,76 +2320,87 @@ mod tests {
         )
     }
 
-    /// Mirror-image groups (x = 0 and x = 2 hold the same (y, w) pairs) give
-    /// x <= 0.5 and x <= 1.5 exactly equal criteria, 143/3000, on outcomes in
-    /// tenths. Rounding decides which one a search sees as larger, so either
-    /// is a correct answer; the sweep and the old search must each return one.
+    /// The centred treatment of a node: w minus its mean.
+    fn centred(w: &Array1<f64>) -> Vec<f64> {
+        let m = w.mean().unwrap();
+        w.iter().map(|v| v - m).collect()
+    }
+
+    /// Mirror-image groups (x = 0 and x = 2 hold the same (y, w) pairs) give x <= 0.5 and
+    /// x <= 1.5 the same decrease: the groups' pseudo-outcomes have the same sum. Rounding
+    /// decides which one a search sees as larger, so either is a correct answer; the sweep and
+    /// the naive search must each return one.
     #[test]
     fn causal_split_tie_takes_one_of_the_tied_splits() {
         let x = Array2::from_shape_vec((9, 1), vec![2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 2.0])
             .unwrap();
-        let y = Array1::from(vec![0.5, 0.5, 0.5, 0.3, 0.9, 0.3, 0.5, 0.4, 0.4]);
+        let y = vec![0.5, 0.5, 0.5, 0.3, 0.9, 0.3, 0.5, 0.4, 0.4];
         let w = Array1::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0]);
+        let z = centred(&w);
         let idx: Vec<usize> = (0..9).collect();
-        let tree = CausalTree {
-            n_features: 1,
-            ..CausalTree::new(10, 1, 1)
+        let mut rho = Vec::new();
+        relabel(&idx, &y, &z, &mut rho).unwrap();
+        let data = ForestData {
+            x: x.view(),
+            y: &y,
+            z: Some(&z),
         };
-        for (who, split) in [
-            (
-                "sweep",
-                tree.find_best_causal_split(&x.view(), &y.view(), &w.view(), &idx, &[0]),
-            ),
-            (
-                "reference",
-                naive_find_best_causal_split(1, &x.view(), &y.view(), &w.view(), &idx, &[0]),
-            ),
-        ] {
+        let (a, b) = (
+            causal_decrease(&x, &rho, &idx, 0.5),
+            causal_decrease(&x, &rho, &idx, 1.5),
+        );
+        assert!((a - b).abs() <= 1e-12 * a.max(1.0), "{a} vs {b}");
+        let sweep = best_split(&data, &idx, &rho, &[0], 1, &mut Vec::new())
+            .map(|c| (c.feature, c.threshold));
+        let reference = naive_best_split(&x.view(), &y, Some(&z), &idx, &[0], 1);
+        for (who, split) in [("sweep", sweep), ("reference", reference)] {
             assert!(
                 matches!(split, Some((0, t)) if t == 0.5 || t == 1.5),
                 "{who}: {split:?}"
             );
-            let c = split_criterion(&x, &y, &w, &idx, split);
-            assert!((c - 143.0 / 3000.0).abs() < 1e-12, "{who}: criterion {c}");
         }
     }
 
-    /// Reference guard on tie-prone (mirror-image) data. With small integer
-    /// outcomes every sum is exact, so the sweep must choose the old search's
-    /// split; with outcomes in tenths it must choose that split or a
-    /// different one with the same criterion.
+    /// Reference guard on tie-prone (mirror-image) data: the sweep chooses the naive search's
+    /// split, or a different one with the same decrease.
     #[test]
     fn causal_split_sweep_on_tied_data_matches_or_ties_the_reference() {
         let mut s = 77u64;
         for denom in [1.0, 10.0] {
             for rep in 0..1000 {
                 let (x, y, w) = mirrored_data(&mut s, denom);
+                let y = y.to_vec();
+                let z = centred(&w);
                 let idx: Vec<usize> = (0..y.len()).collect();
-                let min_node_size = [1usize, 3][rep % 2];
-                let tree = CausalTree {
-                    n_features: 1,
-                    ..CausalTree::new(10, min_node_size, 1)
+                let min_node_size = [1usize, 2][rep % 2];
+                let mut rho = Vec::new();
+                if relabel(&idx, &y, &z, &mut rho).is_none() {
+                    continue;
+                }
+                let data = ForestData {
+                    x: x.view(),
+                    y: &y,
+                    z: Some(&z),
                 };
-                let got = tree.find_best_causal_split(&x.view(), &y.view(), &w.view(), &idx, &[0]);
-                let want = naive_find_best_causal_split(
-                    min_node_size,
-                    &x.view(),
-                    &y.view(),
-                    &w.view(),
-                    &idx,
-                    &[0],
-                );
-                let ctx = format!("denom={denom} rep={rep} x={x} y={y} w={w}");
-                if denom == 1.0 {
-                    assert_eq!(got, want, "{ctx}");
-                } else if got != want {
-                    let (a, b) = (
-                        split_criterion(&x, &y, &w, &idx, got),
-                        split_criterion(&x, &y, &w, &idx, want),
-                    );
+                let got = best_split(&data, &idx, &rho, &[0], min_node_size, &mut Vec::new())
+                    .map(|c| (c.feature, c.threshold));
+                let want = naive_best_split(&x.view(), &y, Some(&z), &idx, &[0], min_node_size);
+                let ctx = format!("denom={denom} rep={rep} x={x} y={y:?} w={w}");
+                if got != want {
+                    // A split with no decrease beyond rounding (pseudo-outcomes summing to zero
+                    // on both sides) may be found by one search and not by the other.
+                    let scale: f64 = rho
+                        .iter()
+                        .map(|r| r * r)
+                        .sum::<f64>()
+                        .max(f64::MIN_POSITIVE);
+                    let dec = |s: Option<(usize, f64)>| {
+                        s.map_or(0.0, |(_, t)| causal_decrease(&x, &rho, &idx, t))
+                    };
+                    let (a, b) = (dec(got), dec(want));
                     assert!(
-                        (a - b).abs() <= 1e-12 * b.max(1.0),
-                        "{ctx}: {got:?} criterion {a} vs {want:?} criterion {b}"
+                        (a - b).abs() <= 1e-12 * scale,
+                        "{ctx}: {got:?} decrease {a} vs {want:?} decrease {b} (scale {scale})"
                     );
                 }
             }
@@ -3078,6 +2776,239 @@ mod tests {
         assert!(aipw_ate(&[1.0, f64::INFINITY]).is_err());
     }
 
+    // ---- Task 3: the orthogonalised forest (property tests on R-generated designs) ----
+
+    fn names(p: usize) -> Vec<String> {
+        (0..p).map(|j| format!("x{j}")).collect()
+    }
+
+    /// The test configuration: `n_trees`, `seed` and mtry = p (the thresholds were calibrated
+    /// with every covariate a candidate, whatever the default).
+    fn cfg(n_trees: usize, seed: u64, p: usize) -> CausalForestConfig {
+        let mut c = CausalForestConfig::default();
+        c.n_trees = n_trees;
+        c.seed = Some(seed);
+        c.mtry = Some(p);
+        c
+    }
+
+    fn mean(v: &[f64]) -> f64 {
+        v.iter().sum::<f64>() / v.len() as f64
+    }
+
+    fn quantile7(v: &[f64], p: f64) -> f64 {
+        let mut s = v.to_vec();
+        s.sort_by(|a, b| a.total_cmp(b));
+        crate::stats::robust::quantile_sorted(&s, p, crate::stats::robust::QuantileType::T7)
+    }
+
+    /// cf_confounded: X = (x0, x1, x2), the outcome column `y`, W. Callers name the case id.
+    fn confounded(
+        case_id: &str,
+        y: &str,
+    ) -> (p2a_validation::Case, Array2<f64>, Array1<f64>, Array1<f64>) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let c = case_columns(&ds, &["x0", "x1", "x2", "w", y], 1000);
+        (
+            case,
+            matrix(&c[..3]),
+            Array1::from(c[4].clone()),
+            Array1::from(c[3].clone()),
+        )
+    }
+
+    /// ML-20: confounded by x0, no effect. Before: about the naive difference 2.54 (no
+    /// centering; splits on raw Y). Property test (grf not installed); emulation, 24 seeds: ATE
+    /// in [-0.039, 0.009], SE in [0.0710, 0.0755].
+    #[test]
+    fn test_validate_cf_confounded_zero_effect_covers_zero() {
+        let (case, x, y, w) = confounded("cf_confounded", "y0");
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(400, 4701, 3))
+            .unwrap();
+        let naive = case.scalar("naive_y0"); // 2.536097700229202
+        let oracle_se = case.scalar("oracle_y0_se"); // 0.0738093632543377
+        assert!(r.ate.abs() < 0.15, "ate {} (naive {naive})", r.ate);
+        assert!(
+            naive - r.ate > 20.0 * r.ate_se,
+            "ate {} se {}",
+            r.ate,
+            r.ate_se
+        );
+        assert!(
+            r.ate.abs() <= 1.9599639845400536 * r.ate_se,
+            "95% CI excludes 0: ate {} se {}",
+            r.ate,
+            r.ate_se
+        );
+        assert!(r.ate_p_value > 0.05);
+        let ratio = r.ate_se / oracle_se;
+        assert!(
+            (0.8..=1.25).contains(&ratio),
+            "se {} oracle {oracle_se}",
+            r.ate_se
+        );
+        assert!(mean(&r.predictions).abs() < 0.1);
+    }
+
+    /// ML-20: tau = 1, same confounding. Before: about the naive 3.54. Emulation: ATE
+    /// [0.961, 0.997], mean CATE [0.970, 1.008], q90 - q10 of the CATEs 0.31-0.33.
+    #[test]
+    fn test_validate_cf_confounded_constant_effect_recovered() {
+        let (case, x, y, w) = confounded("cf_confounded", "y1");
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(400, 4702, 3))
+            .unwrap();
+        assert!((r.ate - 1.0).abs() <= 0.15, "ate {}", r.ate);
+        assert!(
+            (r.ate - 1.0).abs() <= 2.5758293035489004 * r.ate_se,
+            "ate {} se {}",
+            r.ate,
+            r.ate_se
+        );
+        assert!(case.scalar("naive_y1") - r.ate > 20.0 * r.ate_se);
+        assert!((mean(&r.predictions) - 1.0).abs() <= 0.15);
+        assert!(
+            quantile7(&r.predictions, 0.9) - quantile7(&r.predictions, 0.1) < 0.6,
+            "spurious heterogeneity"
+        );
+    }
+
+    /// ML-20 (CATEs): tau = 1 + 2 x1, confounded by x0. Emulation: ATE [1.937, 2.005] (SATE
+    /// 1.98548), cor(CATE, tau) >= 0.94, x1 the most important; new points tau(0.5, 0.1, 0.5) =
+    /// 1.2 -> [1.127, 1.215], tau(0.5, 0.9, 0.5) = 2.8 -> [2.672, 2.830].
+    #[test]
+    fn test_validate_cf_confounded_heterogeneous_effect_tracks_tau() {
+        let (case, x, y, w) = confounded("cf_confounded", "yh");
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(400, 4703, 3))
+            .unwrap();
+        assert!(
+            (r.ate - case.scalar("sate_yh")).abs() <= 0.15,
+            "ate {}",
+            r.ate
+        );
+        let tau: Vec<f64> = x.column(1).iter().map(|v| 1.0 + 2.0 * v).collect();
+        let (mp, mt) = (mean(&r.predictions), mean(&tau));
+        let cov: f64 = r
+            .predictions
+            .iter()
+            .zip(&tau)
+            .map(|(p, t)| (p - mp) * (t - mt))
+            .sum();
+        let sp = r
+            .predictions
+            .iter()
+            .map(|p| (p - mp).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let st = tau.iter().map(|t| (t - mt).powi(2)).sum::<f64>().sqrt();
+        assert!(cov / (sp * st) >= 0.8, "cor {}", cov / (sp * st));
+        assert_eq!(
+            r.variable_importance[0].0, "x1",
+            "{:?}",
+            r.variable_importance
+        );
+        let new = array![[0.5, 0.1, 0.5], [0.5, 0.9, 0.5]];
+        let p = causal_forest_predict_arrays(&r, new.view()).unwrap();
+        assert!(
+            (p[0] - 1.2).abs() <= 0.4 && (p[1] - 2.8).abs() <= 0.4,
+            "{p:?}"
+        );
+        assert!(p[1] - p[0] >= 1.0, "{p:?}");
+    }
+
+    /// ML-21: randomised design. Before: SE 0.51 (n = 500), 0.45 (n = 2000), i.e. 5.7 and 10
+    /// times the Welch SE. Emulation: SE / Welch SE 1.02-1.06 (500) and 1.02-1.04 (2000);
+    /// SE(2000) / SE(500) in [0.488, 0.502].
+    #[test]
+    fn test_validate_cf_rct_ate_se_shrinks_with_n() {
+        let (case, ds) = crate::test_support::load_case("cf_rct");
+        let mut se = Vec::new();
+        for (rows, welch, oracle_est, oracle_se) in [
+            (500, "dim_se_500", "oracle_est_500", "oracle_se_500"),
+            (2000, "dim_se_2000", "oracle_est_2000", "oracle_se_2000"),
+        ] {
+            let c = case_columns(&ds, &["x0", "x1", "w", "y"], rows);
+            let x = matrix(&c[..2]);
+            let (w, y) = (Array1::from(c[2].clone()), Array1::from(c[3].clone()));
+            let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(2), cfg(200, 4705, 2))
+                .unwrap();
+            let ratio = r.ate_se / case.scalar(welch);
+            assert!(
+                (0.85..=1.3).contains(&ratio),
+                "n {rows}: se {} welch {}",
+                r.ate_se,
+                case.scalar(welch)
+            );
+            assert!(
+                (r.ate - case.scalar(oracle_est)).abs() <= 0.75 * case.scalar(oracle_se),
+                "n {rows}: ate {}",
+                r.ate
+            );
+            se.push(r.ate_se);
+        }
+        assert!((0.4..=0.6).contains(&(se[1] / se[0])), "se {se:?}"); // sqrt(500/2000) = 0.5
+    }
+
+    /// ML-74: 10 of 200 treated, tau = 5. Before: per-tree leaf contrasts of 0 for estimation
+    /// halves without a treated unit shrank every CATE (expected 5 (1 - 0.75^10) = 4.718; repro
+    /// 4.83). Emulation: mean CATE [4.973, 5.059], min CATE >= 4.918, ATE [4.911, 5.024], W.hat
+    /// min [0.019, 0.033].
+    #[test]
+    fn test_validate_cf_rare_treatment_is_not_shrunk() {
+        let (case, ds) = crate::test_support::load_case("cf_rare");
+        let c = case_columns(&ds, &["x0", "x1", "w", "y"], 200);
+        let x = matrix(&c[..2]);
+        let (w, y) = (Array1::from(c[2].clone()), Array1::from(c[3].clone()));
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(2), cfg(400, 4706, 2))
+            .unwrap();
+        let m = mean(&r.predictions);
+        assert!((m - 5.0).abs() <= 0.1, "mean CATE {m}");
+        assert!(
+            m - case.scalar("shrunk_by_empty_arm") > 0.15,
+            "mean CATE {m}"
+        );
+        let min = r.predictions.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(min >= 4.85, "min CATE {min}");
+        assert!(
+            (r.ate - 5.0).abs() <= 0.15 && (r.ate - 5.0).abs() <= 2.5758293035489004 * r.ate_se,
+            "ate {} se {}",
+            r.ate,
+            r.ate_se
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|t| t.starts_with("Estimated treatment propensities go as low as")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            r.to_string()
+                .contains("Warning: Estimated treatment propensities go as low as")
+        );
+    }
+
+    /// ML-76 (side effect): oob_error is the out-of-bag R-loss. Before, the across-tree variance
+    /// of OOB predictions was smallest for a root-only forest. Emulation (paired, 200 trees):
+    /// R-loss 1.118-1.143 (depth 0) against 1.043-1.075 (depth 10), difference >= 0.055. The
+    /// nuisance forests do not depend on max_depth.
+    #[test]
+    fn test_validate_cf_confounded_oob_error_is_the_r_loss() {
+        let (_, x, y, w) = confounded("cf_confounded", "yh");
+        let deep = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(200, 4707, 3))
+            .unwrap();
+        let mut c0 = cfg(200, 4707, 3);
+        c0.max_depth = 0;
+        let shallow = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), c0).unwrap();
+        assert_eq!(deep.y_hat, shallow.y_hat);
+        assert!(
+            shallow.oob_error - deep.oob_error > 0.02,
+            "{} vs {}",
+            shallow.oob_error,
+            deep.oob_error
+        );
+        assert!((0.9..=1.25).contains(&deep.oob_error), "{}", deep.oob_error);
+    }
+
     /// grf sample_poisson(mtry) clamped to [1, p] (create_split_variable_subset).
     #[test]
     fn test_poisson_count_matches_clamped_poisson_mean() {
@@ -3100,43 +3031,6 @@ mod tests {
             );
         }
         assert!(draws(23.0, 3, 100, &mut rng).iter().all(|&v| v == 3));
-    }
-
-    /// Golden (characterization) test: captured on the code before the
-    /// sweep and the Welford OOB accumulation, on continuous outcomes where no
-    /// criterion tie breaks differently; it passes before and after.
-    #[test]
-    fn causal_forest_outputs_unchanged_by_the_sweep() {
-        const GOLDEN: [u64; 5] = [
-            4612786064148362328,
-            4597828295416546379,
-            4612736549338654852,
-            4612690148895398169,
-            4590552795750182621,
-        ];
-        const GOLDEN_OOB: f64 = 0.058642006360354874;
-        let (x, y, w) = generate_test_data(200, 42);
-        let cfg = CausalForestConfig {
-            n_trees: 25,
-            max_depth: 5,
-            seed: Some(42),
-            ..Default::default()
-        };
-        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names3(), cfg).unwrap();
-        let got = [
-            r.ate,
-            r.ate_se,
-            r.predictions[0],
-            r.predictions[199],
-            r.variance_estimates[0],
-        ];
-        let bits = got.map(f64::to_bits);
-        assert_eq!(bits, GOLDEN, "got {bits:?} = {got:?}");
-        assert!(
-            (r.oob_error - GOLDEN_OOB).abs() <= 1e-12 * GOLDEN_OOB.abs(),
-            "oob_error {:?}",
-            r.oob_error
-        );
     }
 
     fn generate_test_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
@@ -3170,77 +3064,309 @@ mod tests {
         (x, y, w)
     }
 
+    /// grf causal_forest(Y.hat = , W.hat = ): with the true nuisances the AIPW ATE is the
+    /// oracle's up to the CATE noise. Emulation: ATE [0.9937, 0.9979] (oracle 1.00098), SE
+    /// [0.0742, 0.0745] (oracle 0.07381).
     #[test]
-    fn test_causal_forest_basic() {
-        let (x, y, w) = generate_test_data(200, 42);
-
-        let config = CausalForestConfig {
-            n_trees: 50,
-            min_node_size: 5,
-            max_depth: 5,
-            honesty: true,
-            seed: Some(42),
-            ..Default::default()
-        };
-
-        let result = causal_forest_arrays(
+    fn test_validate_cf_confounded_supplied_nuisance_matches_oracle_aipw() {
+        let (case, x, y, w) = confounded("cf_confounded", "y1");
+        let e: Array1<f64> = x.column(0).mapv(|v| 0.1 + 0.8 * v);
+        let m: Array1<f64> = x.column(0).mapv(|v| 10.0 * v) + &e;
+        let r = causal_forest_arrays_with_nuisance(
             x.view(),
             y.view(),
             w.view(),
-            vec!["x0".to_string(), "x1".to_string(), "x2".to_string()],
-            config,
+            Some(m.view()),
+            Some(e.view()),
+            names(3),
+            cfg(400, 4704, 3),
         )
         .unwrap();
-
-        // Check basic properties
-        assert_eq!(result.n_obs, 200);
-        assert_eq!(result.n_trees, 50);
-        assert_eq!(result.predictions.len(), 200);
-        assert_eq!(result.variance_estimates.len(), 200);
-
-        // ATE should be positive (true ATE is 1 + 2*E[x0] ~ 2)
+        assert_eq!(r.y_hat, m.to_vec());
+        assert_eq!(r.w_hat, e.to_vec());
+        assert_eq!((r.y_hat_trees, r.w_hat_trees), (0, 0));
+        let (est, se) = (case.scalar("oracle_y1_est"), case.scalar("oracle_y1_se"));
         assert!(
-            result.ate > 0.5,
-            "ATE should be positive, got {}",
-            result.ate
+            (r.ate - est).abs() <= 0.25 * se,
+            "ate {} oracle {est}",
+            r.ate
         );
+        assert!(
+            (r.ate_se / se - 1.0).abs() <= 0.05,
+            "se {} oracle {se}",
+            r.ate_se
+        );
+        assert_eq!(aipw_ate(&r.aipw_scores).unwrap(), (r.ate, r.ate_se));
+        assert!(r.to_string().contains("Y.hat: supplied"));
+    }
 
-        // Variable importance: x0 should be most important
-        let _x0_importance = result
-            .variable_importance
-            .iter()
-            .find(|(name, _)| name == "x0")
-            .map(|(_, imp)| *imp)
-            .unwrap_or(0.0);
+    /// Overlap DGP for the unit tests: x ~ U(0,1)^3 (module LCG), e(x) = 0.2 + 0.6 x0,
+    /// W ~ Bernoulli(e), tau(x) = 1 + 2 x0, Y = 5 + x0 + 0.5 x1 + tau W + 0.5 N(0,1) (Box-Muller).
+    fn overlap_test_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Array1<f64>, Vec<f64>) {
+        let mut rng = seed;
+        let (mut x, mut y, mut w, mut tau) = (
+            Array2::zeros((n, 3)),
+            Array1::zeros(n),
+            Array1::zeros(n),
+            vec![0.0; n],
+        );
+        for i in 0..n {
+            for j in 0..3 {
+                x[[i, j]] = unit_uniform(&mut rng);
+            }
+            w[i] = if unit_uniform(&mut rng) < 0.2 + 0.6 * x[[i, 0]] {
+                1.0
+            } else {
+                0.0
+            };
+            tau[i] = 1.0 + 2.0 * x[[i, 0]];
+            let (u1, u2) = (unit_uniform(&mut rng), unit_uniform(&mut rng));
+            let eps = (-2.0 * (1.0 - u1).ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            y[i] = 5.0 + x[[i, 0]] + 0.5 * x[[i, 1]] + tau[i] * w[i] + 0.5 * eps;
+        }
+        (x, y, w, tau)
+    }
 
-        println!("Variable importances: {:?}", result.variable_importance);
-        println!("ATE: {:.4} (SE: {:.4})", result.ate, result.ate_se);
+    /// Emulation of this design (calib_H, 12 seeds, n = 300, 100 trees): |ATE - SATE| <= 0.188,
+    /// SE in [0.073, 0.097], W.hat in [0.104, 0.914], every variance estimate finite.
+    #[test]
+    fn test_causal_forest_basic() {
+        let (x, y, w, tau) = overlap_test_data(300, 42);
+        let r =
+            causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(100, 42, 3)).unwrap();
+        assert_eq!(
+            (
+                r.n_obs,
+                r.n_trees,
+                r.predictions.len(),
+                r.variance_estimates.len()
+            ),
+            (300, 100, 300, 300)
+        );
+        assert_eq!((r.y_hat_trees, r.w_hat_trees), (50, 50));
+        assert!(
+            r.variance_estimates
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0)
+        );
+        assert!(r.w_hat.iter().all(|e| *e > 0.0 && *e < 1.0));
+        assert!(
+            (r.ate - mean(&tau)).abs() <= 0.35,
+            "ate {} sate {}",
+            r.ate,
+            mean(&tau)
+        );
+        assert!(r.ate_se > 0.03 && r.ate_se < 0.2, "se {}", r.ate_se);
+        assert_eq!(r.aipw_scores.len(), 300);
+        let text = r.to_string();
+        for needle in ["AIPW", "Out-of-bag R-loss", "W.hat range", "z = "] {
+            assert!(text.contains(needle), "{needle}");
+        }
     }
 
     #[test]
     fn test_causal_forest_no_honesty() {
-        let (x, y, w) = generate_test_data(100, 123);
+        let (x, y, w, tau) = overlap_test_data(300, 123);
+        let mut c = cfg(100, 123, 3);
+        c.honesty = false;
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), c).unwrap();
+        assert!((r.ate - mean(&tau)).abs() <= 0.35, "ate {}", r.ate);
+        assert!(r.predictions.iter().all(|p| p.is_finite()));
+    }
 
-        let config = CausalForestConfig {
-            n_trees: 20,
-            min_node_size: 5,
-            max_depth: 4,
-            honesty: false,
-            seed: Some(123),
-            ..Default::default()
+    /// Replaces the T0 golden of the old algorithm (its outputs change by design).
+    #[test]
+    fn test_causal_forest_is_deterministic_per_seed() {
+        let (x, y, w, _) = overlap_test_data(120, 7);
+        let fit = |seed: Option<u64>| {
+            let mut c = cfg(60, 0, 3);
+            c.seed = seed;
+            causal_forest_arrays(x.view(), y.view(), w.view(), names(3), c).unwrap()
         };
+        let bits = |r: &CausalForestResult| -> Vec<u64> {
+            [r.ate, r.ate_se, r.oob_error]
+                .into_iter()
+                .chain(r.predictions.iter().copied())
+                .chain(r.variance_estimates.iter().copied())
+                .chain(r.y_hat.iter().copied())
+                .chain(r.w_hat.iter().copied())
+                .map(f64::to_bits)
+                .collect()
+        };
+        let (a, b) = (fit(Some(7)), fit(Some(7)));
+        assert_eq!(bits(&a), bits(&b));
+        assert_eq!(bits(&fit(None)), bits(&fit(Some(42))));
+        assert_ne!(fit(Some(8)).ate.to_bits(), a.ate.to_bits());
+    }
 
-        let result = causal_forest_arrays(
-            x.view(),
-            y.view(),
-            w.view(),
-            vec!["x0".to_string(), "x1".to_string(), "x2".to_string()],
-            config,
-        )
+    #[test]
+    fn test_causal_forest_ci_group_size_one_has_no_variance_estimates() {
+        let (x, y, w, _) = overlap_test_data(120, 11);
+        let mut c = cfg(61, 11, 3);
+        c.ci_group_size = 1;
+        c.sample_fraction = 0.7; // allowed without little bags
+        let r = causal_forest_arrays(x.view(), y.view(), w.view(), names(3), c).unwrap();
+        assert_eq!(r.n_trees, 61);
+        assert!(r.variance_estimates.iter().all(|v| v.is_nan()));
+        assert!(
+            r.warnings.iter().any(|t| t.contains("ci_group_size")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.ate.is_finite() && r.ate_se.is_finite());
+        // with groups of 2, 61 trees round down to 60 and say so
+        let r2 =
+            causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(61, 11, 3)).unwrap();
+        assert_eq!(r2.n_trees, 60);
+        assert!(
+            r2.warnings
+                .iter()
+                .any(|t| t.contains("n_trees = 61") && t.contains("60")),
+            "{:?}",
+            r2.warnings
+        );
+    }
+
+    #[test]
+    fn test_causal_forest_rejects_invalid_arrays() {
+        let (x, y, mut w, _) = overlap_test_data(120, 5);
+        let msg = |r: EconResult<CausalForestResult>| r.unwrap_err().to_string();
+        let ok = || cfg(60, 5, 3);
+        assert!(
+            msg(causal_forest_arrays(
+                x.view(),
+                y.view(),
+                w.view(),
+                names(2),
+                ok()
+            ))
+            .contains("covariate_names")
+        );
+        let mut c = ok();
+        c.mtry = Some(4);
+        assert!(
+            msg(causal_forest_arrays(
+                x.view(),
+                y.view(),
+                w.view(),
+                names(3),
+                c
+            ))
+            .contains("mtry must be at most the number of covariates (3)")
+        );
+        let x0 = Array2::<f64>::zeros((120, 0));
+        let mut c = ok();
+        c.mtry = None;
+        assert!(
+            msg(causal_forest_arrays(
+                x0.view(),
+                y.view(),
+                w.view(),
+                vec![],
+                c
+            ))
+            .contains("at least one covariate")
+        );
+        let short = Array1::from(vec![0.5; 10]);
+        assert!(
+            msg(causal_forest_arrays_with_nuisance(
+                x.view(),
+                y.view(),
+                w.view(),
+                Some(short.view()),
+                None,
+                names(3),
+                ok()
+            ))
+            .contains("y_hat has 10 values")
+        );
+        let mut e = Array1::from(vec![0.5; 120]);
+        e[3] = 1.0;
+        assert!(
+            msg(causal_forest_arrays_with_nuisance(
+                x.view(),
+                y.view(),
+                w.view(),
+                None,
+                Some(e.view()),
+                names(3),
+                ok()
+            ))
+            .contains("w_hat must be strictly between 0 and 1")
+        );
+        e[3] = f64::NAN;
+        assert!(
+            msg(causal_forest_arrays_with_nuisance(
+                x.view(),
+                y.view(),
+                w.view(),
+                None,
+                Some(e.view()),
+                names(3),
+                ok()
+            ))
+            .contains("finite")
+        );
+        w[0] = 0.5; // was counted as control and fitted
+        assert!(
+            msg(causal_forest_arrays(
+                x.view(),
+                y.view(),
+                w.view(),
+                names(3),
+                ok()
+            ))
+            .contains("w must be binary")
+        );
+    }
+
+    #[test]
+    fn test_causal_forest_predict_checks_columns() {
+        let (x, y, w, _) = overlap_test_data(120, 9);
+        let r =
+            causal_forest_arrays(x.view(), y.view(), w.view(), names(3), cfg(60, 9, 3)).unwrap();
+        assert!(
+            causal_forest_predict_arrays(&r, Array2::zeros((2, 2)).view())
+                .unwrap_err()
+                .to_string()
+                .contains("3 covariates")
+        );
+        assert!(causal_forest_predict_arrays(&r, array![[0.5, f64::NAN, 0.5]].view()).is_err());
+        assert!(
+            causal_forest_predict_arrays(&r, array![[0.5, 0.5, 0.5]].view()).unwrap()[0]
+                .is_finite()
+        );
+    }
+
+    /// T2 1.6 (forests: Fail): a missing covariate is NullValues naming it (was ColumnNotFound
+    /// for any problem).
+    #[test]
+    fn test_causal_forest_dataset_wrapper_reports_missing_values() {
+        use polars::prelude::*;
+        let n = 12;
+        let x1: Vec<Option<f64>> = (0..n)
+            .map(|i| if i == 4 { None } else { Some(i as f64 / 7.0) })
+            .collect();
+        let df = df! {
+            "y" => (0..n).map(|i| (i as f64 * 0.37).sin()).collect::<Vec<f64>>(),
+            "w" => (0..n).map(|i| (i % 2) as i64).collect::<Vec<i64>>(),
+            "x0" => (0..n).map(|i| (i as f64 * 0.61).cos()).collect::<Vec<f64>>(),
+            "x1" => x1,
+        }
         .unwrap();
-
-        assert_eq!(result.n_obs, 100);
-        assert!(result.ate.is_finite());
+        let ds = Dataset::new(df);
+        let r = causal_forest(&ds, "y", "w", &["x0", "x1"], cfg(20, 1, 2));
+        assert!(
+            matches!(&r, Err(EconError::NullValues { column, .. }) if column == "x1"),
+            "{:?}",
+            r.err()
+        );
+        let r = causal_forest(&ds, "y", "w", &["x0", "nope"], cfg(20, 1, 2));
+        assert!(
+            matches!(&r, Err(EconError::ColumnNotFound { column, .. }) if column == "nope"),
+            "{:?}",
+            r.err()
+        );
     }
 
     #[test]
@@ -3263,54 +3389,6 @@ mod tests {
         for &idx in &structure {
             assert!(!est_set.contains(&idx));
         }
-    }
-
-    #[test]
-    fn test_treatment_effect_estimation() {
-        let y = array![1.0, 2.0, 3.0, 10.0, 11.0, 12.0];
-        let w = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        let indices: Vec<usize> = (0..6).collect();
-
-        let (tau, variance, n_t, n_c) = estimate_treatment_effect(&y.view(), &w.view(), &indices);
-
-        // Treatment effect should be: mean(10,11,12) - mean(1,2,3) = 11 - 2 = 9
-        assert!((tau - 9.0).abs() < 0.001, "Expected tau=9, got {}", tau);
-        assert_eq!(n_t, 3);
-        assert_eq!(n_c, 3);
-        assert!(variance.is_finite());
-    }
-
-    #[test]
-    fn test_average_treatment_effect_subset() {
-        let (x, y, w) = generate_test_data(100, 456);
-
-        let config = CausalForestConfig {
-            n_trees: 20,
-            min_node_size: 5,
-            max_depth: 4,
-            honesty: true,
-            seed: Some(456),
-            ..Default::default()
-        };
-
-        let result = causal_forest_arrays(
-            x.view(),
-            y.view(),
-            w.view(),
-            vec!["x0".to_string(), "x1".to_string(), "x2".to_string()],
-            config,
-        )
-        .unwrap();
-
-        // Test full ATE
-        let (ate, ci_lower, ci_upper) = average_treatment_effect(&result, None).unwrap();
-        assert!(ate.is_finite());
-        assert!(ci_lower <= ate && ate <= ci_upper);
-
-        // Test subset ATE
-        let subset: Vec<usize> = (0..50).collect();
-        let (subset_ate, _, _) = average_treatment_effect(&result, Some(&subset)).unwrap();
-        assert!(subset_ate.is_finite());
     }
 
     #[test]
