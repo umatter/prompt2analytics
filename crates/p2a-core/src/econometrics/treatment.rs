@@ -1837,15 +1837,33 @@ fn compute_ps_summary(ps: &Array1<f64>) -> PropensityScoreSummary {
     let var: f64 = ps.iter().map(|&p| (p - mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
     let std_dev = var.sqrt();
 
-    let mut sorted: Vec<f64> = ps.iter().copied().collect();
-    sorted.sort_unstable_by(f64::total_cmp);
-
-    let min = sorted[0];
-    let max = sorted[n - 1];
-    // R quantile() / median(), type 7
-    let median = quantile_sorted(&sorted, 0.5, QuantileType::T7);
-    let p10 = quantile_sorted(&sorted, 0.1, QuantileType::T7);
-    let p90 = quantile_sorted(&sorted, 0.9, QuantileType::T7);
+    let mut placed: Vec<f64> = ps.iter().copied().collect();
+    let (mut min, mut max) = (placed[0], placed[0]);
+    for &v in &placed {
+        if v.total_cmp(&min).is_lt() {
+            min = v;
+        }
+        if v.total_cmp(&max).is_gt() {
+            max = v;
+        }
+    }
+    // R quantile() / median(), type 7, reads the order statistics at floor and ceiling of
+    // 1 + (n - 1) p: put only those in place (linear time) instead of sorting.
+    let nf = n as f64;
+    let probs = [0.1, 0.5, 0.9];
+    let mut from = 0;
+    for &p in &probs {
+        let index = 1.0 + (nf - 1.0) * p;
+        for pos in [index.floor() as usize - 1, index.ceil() as usize - 1] {
+            if pos >= from {
+                placed[from..].select_nth_unstable_by(pos - from, f64::total_cmp);
+                from = pos + 1;
+            }
+        }
+    }
+    let p10 = quantile_sorted(&placed, probs[0], QuantileType::T7);
+    let median = quantile_sorted(&placed, probs[1], QuantileType::T7);
+    let p90 = quantile_sorted(&placed, probs[2], QuantileType::T7);
 
     PropensityScoreSummary {
         mean,
@@ -2675,6 +2693,28 @@ mod tests {
         let (mu, _, alias) = fit_outcome_model(x.view(), &y, &d, true, &names).unwrap();
         assert!(alias.is_some(), "expected the QR's aliasing warning");
         assert!(mu.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_ps_summary_matches_a_full_sort() {
+        // The partial selection against quantile_sorted on fully sorted data, with ties.
+        for n in [1usize, 2, 3, 5, 10, 11, 37, 100, 999, 1000] {
+            let ps: Array1<f64> = (0..n)
+                .map(|i| {
+                    let v = (0.5 + 0.45 * (i as f64 * 2.399).sin()).clamp(0.01, 0.99);
+                    if i % 7 == 0 { 0.5 } else { v }
+                })
+                .collect();
+            let mut sorted = ps.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let s = compute_ps_summary(&ps);
+            assert_eq!(s.min.to_bits(), sorted[0].to_bits(), "n = {n}");
+            assert_eq!(s.max.to_bits(), sorted[n - 1].to_bits(), "n = {n}");
+            for (got, p) in [(s.p10, 0.1), (s.median, 0.5), (s.p90, 0.9)] {
+                let want = quantile_sorted(&sorted, p, QuantileType::T7);
+                assert_eq!(got.to_bits(), want.to_bits(), "n = {n}, p = {p}");
+            }
+        }
     }
 
     #[test]
