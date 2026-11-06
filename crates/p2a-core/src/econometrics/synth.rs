@@ -3736,7 +3736,7 @@ fn ife_controls(c: &mut IfeControls, spec: &IfeSpec, names: &[String]) -> EconRe
     let mut fitted = fe;
     for (mut row, &x) in fitted.rows_mut().into_iter().zip(&xi) {
         for (c, &a) in row.iter_mut().zip(&alpha) {
-            *c = mu + a + x + *c;
+            *c += mu + a + x;
         }
     }
     let residuals = &*resid - &fitted;
@@ -3971,7 +3971,7 @@ fn loo_mspe(m: &GsynthMats, parts: &TreatedParts) -> EconResult<Option<f64>> {
         if qr.rank() < k {
             return Ok(None);
         }
-        if !leverages.contains_key(&t0) {
+        if let std::collections::btree_map::Entry::Vacant(slot) = leverages.entry(t0) {
             let cov = qr.unscaled_covariance()?;
             let fp = parts.f_hat.slice(ndarray::s![..t0, ..]);
             let h = fp
@@ -3979,7 +3979,7 @@ fn loo_mspe(m: &GsynthMats, parts: &TreatedParts) -> EconResult<Option<f64>> {
                 .into_iter()
                 .map(|row| row.dot(&cov.dot(&row)))
                 .collect();
-            leverages.insert(t0, h);
+            slot.insert(h);
         }
         let h = &leverages[&t0];
         // lm.fit's residuals: Q (Q'y with its first rank entries zeroed)

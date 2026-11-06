@@ -119,6 +119,38 @@ Tests (p2a-core, `econometrics::synth::gsynth_tests`): `test_na_gsynth_missing_c
 `test_gsynth_unit_order_is_deterministic`; MCP (`crates/p2a-mcp/tests/tier2/wp13_causal.rs`):
 `test_mcp_gsynth_unbalanced_panel_is_explained`. Not R-pinned.
 
+## Timing
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), interleaved rounds against `fe13b889`
+(before the rewrite to Xu's estimator); new / base as the ratio of medians, on a machine under
+load from other jobs (2026-11-06). The base computed a different estimate on these panels: power
+iteration on the pre-periods, cross-validation on in-sample fit (CAUS-43).
+
+| Fit | panel | new / base |
+|---|---|---|
+| IFE r = 1, unit effects, no covariates (same call as criterion `gsynth`) | 180 / 500 / 1,500 cells | 1.01 / 1.10 / 0.96 |
+| criterion `new_methods_benchmarks`, `gsynth` (7 rounds, noisier) | 180 / 500 / 1,500 cells | 0.98 / 1.10 / 1.10 |
+| IFE r = 2, two-way effects, no covariates | `gsynth_simdata` (1,500 cells) / 50 x 20 panel | 1.13 / 1.11 |
+| LOO CV over r = 0..2, no covariates | `gsynth_simdata` / 50 x 20 panel | 0.34 / 0.35 |
+| LOO CV over r = 0..5, no covariates | `gsynth_simdata` / 50 x 20 panel | 0.12 / 0.11 |
+| default (LOO CV over r = 0..10), no covariates; the two pick different r | `gsynth_simdata` / 50 x 20 panel | 0.05 / 0.04 |
+| IFE r = 2, covariates X1, X2 | `gsynth_simdata` | 6.8 |
+
+The covariate row is the iteration gsynth runs and the base did not (accepted by the maintainer
+on 2026-11-06; it was 7.5 in that quiet run). The two r = 2 rows stay slightly above 1.1x because
+the factors come from a full symmetric eigendecomposition of the demeaned controls' Gram matrix,
+as gsynth's `panel_factor` does, where the base ran power iteration: that step is 0.13 ms of the
+0.60 ms of the `gsynth_simdata` row, against 0.54 ms for the whole base fit in the same
+conditions, so everything else is now faster than the base. A solver for the leading
+eigenvectors only would change the reported numbers and is not used.
+
+Without covariates the fit has no iteration, and its fixed parts are computed once: the panel is
+placed cell by cell without sorting its rows, the means, demeaned outcomes and eigendecomposition
+are shared by every r of a cross-validation, and treated units with the same first treated period
+share a QR of their pre-period design and its leverages.
+`test_gsynth_shared_fits_equal_fresh_fits_bit_for_bit` holds these shared fits to a fresh fit, bit
+for bit, for every force and r on four panels.
+
 ## References
 
 - Xu, Y. (2017). "Generalized Synthetic Control Method: Causal Inference with Interactive Fixed Effects Models." *Political Analysis*, 25(1), 57-76.
