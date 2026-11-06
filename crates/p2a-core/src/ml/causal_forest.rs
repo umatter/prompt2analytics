@@ -3509,4 +3509,98 @@ mod tests {
                 .contains("AIPW scores")
         );
     }
+
+    // ---- Task 5: calibration over seeded replications ----
+
+    /// Calibration over 50 seeded replications (release only: 50 forests of 200 trees). DGP:
+    /// n = 500, x ~ U(0,1)^3, e = 0.1 + 0.8 x0, Y = 10 x0 + W + N(0, 1) (tau = 1). Planning
+    /// emulation, 3 x 50 replications: coverage 50, 45, 48 of 50; mean(SE) / sd(ATE) 1.023,
+    /// 0.799, 0.994; mean ATE 1.0018, 1.0036, 1.0245; mean(variance) / mean((tau_hat - 1)^2)
+    /// 1.71, 1.39, 1.48; CATE 95% interval coverage 0.959, 0.939, 0.946.
+    /// pbinom(41, 50, 0.95) = 0.00076. A replication refused for an out-of-bag W.hat of 0 or 1
+    /// counts as not covered (1 of the 50 here); at most 2 may be.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "release-only: 50 causal forests; run with --release"
+    )]
+    fn test_causal_forest_ate_ci_coverage_over_replications() {
+        let reps = 50;
+        let (mut ates, mut ses, mut covered, mut refused) = (Vec::new(), Vec::new(), 0, 0);
+        let (mut var_sum, mut mse_sum, mut cate_in, mut cate_n) = (0.0, 0.0, 0usize, 0usize);
+        for rep in 0..reps {
+            let mut rng = 9_000 + rep as u64;
+            let n = 500;
+            let (mut x, mut y, mut w) = (Array2::zeros((n, 3)), Array1::zeros(n), Array1::zeros(n));
+            for i in 0..n {
+                for j in 0..3 {
+                    x[[i, j]] = unit_uniform(&mut rng);
+                }
+                w[i] = if unit_uniform(&mut rng) < 0.1 + 0.8 * x[[i, 0]] {
+                    1.0
+                } else {
+                    0.0
+                };
+                let (u1, u2) = (unit_uniform(&mut rng), unit_uniform(&mut rng));
+                let eps = (-2.0 * (1.0 - u1).ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                y[i] = 10.0 * x[[i, 0]] + w[i] + eps;
+            }
+            let r = match causal_forest_arrays(
+                x.view(),
+                y.view(),
+                w.view(),
+                names(3),
+                cfg(200, rep as u64, 3),
+            ) {
+                Ok(r) => r,
+                // An out-of-bag W.hat of exactly 0 or 1 (all of a unit's out-of-bag leaves in
+                // one arm, near x0 = 0 or 1) is refused, where grf returns a NaN ATE. Such a
+                // replication counts as an interval that did not cover.
+                Err(EconError::InvalidSpecification { message })
+                    if message.contains("estimated propensity W.hat is 0 or 1") =>
+                {
+                    refused += 1;
+                    continue;
+                }
+                Err(e) => panic!("replication {rep}: {e}"),
+            };
+            if (r.ate - 1.0).abs() <= 1.9599639845400536 * r.ate_se {
+                covered += 1;
+            }
+            ates.push(r.ate);
+            ses.push(r.ate_se);
+            for (p, v) in r.predictions.iter().zip(&r.variance_estimates) {
+                if v.is_finite() {
+                    var_sum += v;
+                    mse_sum += (p - 1.0).powi(2);
+                    cate_n += 1;
+                    if (p - 1.0).abs() <= 1.9599639845400536 * v.sqrt() {
+                        cate_in += 1;
+                    }
+                }
+            }
+        }
+        let m = mean(&ates);
+        let sd = (ates.iter().map(|a| (a - m).powi(2)).sum::<f64>() / (reps as f64 - 1.0)).sqrt();
+        let ratio = mean(&ses) / sd;
+        let cover = cate_in as f64 / cate_n as f64;
+        eprintln!(
+            "coverage {covered}/50 ({refused} refused), mean ATE {m}, mean(se)/sd(ate) {ratio}, variance/MSE {}, \
+             CATE coverage {cover}",
+            var_sum / mse_sum
+        );
+        assert!(covered >= 42, "coverage {covered}/50 ({refused} refused)");
+        assert!(
+            refused <= 2,
+            "{refused} of 50 replications refused for W.hat in {{0, 1}}"
+        );
+        assert!((m - 1.0).abs() <= 0.08, "mean ATE {m}");
+        assert!((0.6..=1.6).contains(&ratio), "mean(se)/sd(ate) = {ratio}");
+        assert!(
+            (0.5..=3.0).contains(&(var_sum / mse_sum)),
+            "variance/MSE = {}",
+            var_sum / mse_sum
+        );
+        assert!((0.85..=0.995).contains(&cover), "CATE coverage {cover}");
+    }
 }
