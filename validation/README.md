@@ -308,6 +308,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | R-pinned |
 | Diff-in-Diff | [did.md](econometrics/did.md) | not R-pinned |
 | Staggered DiD (Callaway-Sant'Anna) | [staggered_did.md](econometrics/staggered_did.md) | R-pinned, known deviations (CAUS-84) |
+| Extended TWFE (etwfe::etwfe + emfx) | [etwfe.md](econometrics/etwfe.md) | R-pinned, known deviations (CAUS-14) |
 | Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
 | Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | R-pinned, known deviations (CAUS-28) |
 | IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | R-pinned, known deviations (CAUS-92) |

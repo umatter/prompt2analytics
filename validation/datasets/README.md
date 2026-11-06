@@ -163,6 +163,9 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/cf_rct.csv` | 2000 × 4 (x0, x1, w, y) | `cf_rct` | `r/cases/ml_causal_forest.R` | seed 4702; randomised W, tau = 0.2 |
 | `generated/cf_split_node.csv` | 30 × 5 (x, x2, y, z, r) | `cf_split_node` | `r/cases/ml_causal_forest.R` | seed 4710; x2 has ties |
 | `generated/ctmle_sim.csv` | 300 × 7 (yb, yc, a, w1, w2, w3, w4) | `tmle_glm`, `ctmle_cv` | `r/cases/causal_stdreg.R` | seed 20261210; w1 confounder, w2 instrument, w3 precision variable, w4 noise |
+| `generated/etwfe_panel.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_staggered` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8/never (0), time-invariant control xc, treat the absorbing treatment indicator |
+| `generated/etwfe_panel_all_treated.csv` | 960 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, 120 units x 8 periods, cohorts 4/6/8, no never-treated unit |
+| `generated/etwfe_panel_unbalanced.csv` | 923 × 6 (id, year, first_treat, xc, y, treat) | `etwfe_unbalanced` | `r/cases/causal_etwfe.R` | seed 20261103, `etwfe_panel` without year 3 of every 7th unit and years 1-2 of every 11th |
 | `generated/eurodist_matrix.csv` | 21 × 21 (Athens ... Vienna) | `kmeans_lloyd_pca_mds` | `r/cases/ml_hierarchical.R` | `datasets::eurodist` as a 21 × 21 distance matrix (city names as columns) |
 | `generated/evalue_inputs.csv` | 8 × 7 (id, type, est, lo, hi, rare, se) | `evalue_formulas` | `r/cases/regression_smoothers_t3.R` | literal values: eight RR, OR, HR and MD estimates with limits, rare-outcome flags and one SE |
 | `generated/factanal_promax.csv` | 500 × 12 (v1-v12) | `stat_factanal_promax` | `r/cases/stats_power_loglin.R` | seed 20261118 |

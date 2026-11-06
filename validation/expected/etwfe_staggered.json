@@ -1,0 +1,210 @@
+{
+  "schema": 1,
+  "id": "etwfe_staggered",
+  "area": "econometrics/did",
+  "method": "ETWFE (etwfe(ivar = id) + emfx), balanced staggered panel with never-treated: cgroup notyet / never, clustered and iid SEs, a time-invariant control, tref, anticipation",
+  "reference": "etwfe::etwfe(fml = y ~ 0 | y ~ xc, tvar = year, gvar = first_treat, ivar = id, cgroup, tref, vcov = ~id | 'iid'); etwfe::emfx(type); exact delta method written out",
+  "call": "etwfe(y ~ 0, tvar = year, gvar = first_treat, data = etwfe_panel, ivar = id, cgroup = 'notyet' | 'never', vcov = ~id)",
+  "dataset": "validation/datasets/generated/etwfe_panel.csv",
+  "datasets": ["validation/datasets/generated/etwfe_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "etwfe": "0.6.2",
+    "fixest": "0.14.2",
+    "marginaleffects": "1.0.0"
+  },
+  "values": {
+    "notyet_coef": {
+      "names": [".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [1.3081467123851154, 1.4076050932195991, 1.4906905137464908, 1.937908654681725, 2.5569440180354004, 0.92527999756851576, 1.3660869425344468, 1.4166609330996904, 1.215028708779641]
+    },
+    "notyet_se": {
+      "names": [".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [0.2139593213914095, 0.25019434741046476, 0.27990994481355214, 0.25004658273201785, 0.26252472416925399, 0.26069220205935589, 0.30992288667871987, 0.2819379482706425, 0.29088363386322524]
+    },
+    "notyet_pvalue": {
+      "names": [".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [1.2716165516484104e-08, 1.2442705749490817e-07, 4.8218728667904763e-07, 3.423292167902309e-12, 7.7128592016657629e-17, 0.0005539488296244263, 2.3010805605014167e-05, 1.7955173844320497e-06, 5.6582935598135242e-05]
+    },
+    "notyet_emfx_simple_estimate": [1.5639373563198811],
+    "notyet_emfx_simple_se": [0.14930207221135583],
+    "notyet_delta_simple_se": [0.14930208076619811],
+    "notyet_delta_simple_p": [1.125530573445959e-25],
+    "notyet_delta_simple_n": [283],
+    "notyet_delta_simple_ci95": [1.2713106552012423, 1.8565640574385194],
+    "notyet_delta_simple_ci90": [1.3183572872601983, 1.8095174253795634],
+    "notyet_emfx_event_estimate": [1.1703422188163988, 1.390863903427199, 1.4608398763889099, 1.9379086546817252, 2.5569440180354004],
+    "notyet_emfx_event_se": [0.15082277691929935, 0.20320494388518837, 0.21454262229773174, 0.2500465801335906, 0.26252472361549706],
+    "notyet_delta_event_se": [0.15082277237141592, 0.203204942899983, 0.21454262161423285, 0.25004658273201785, 0.26252472416925399],
+    "notyet_delta_event_p": [8.5118270728974883e-15, 7.6670474326431572e-12, 9.8218478624369596e-12, 9.1754780018962103e-15, 2.0391172345865853e-22],
+    "notyet_delta_event_n": [85, 62, 62, 37, 37],
+    "notyet_emfx_event_key": [0, 1, 2, 3, 4],
+    "notyet_emfx_group_estimate": [1.7402589984136663, 1.2360092910675509, 1.2150287087796412],
+    "notyet_emfx_group_se": [0.17619897375905419, 0.220925266740473, 0.29088362896307363],
+    "notyet_delta_group_se": [0.17619897890614172, 0.22092525987854988, 0.29088363386322524],
+    "notyet_delta_group_p": [5.2550731147016453e-23, 2.2101084285094165e-08, 2.9534435303257391e-05],
+    "notyet_delta_group_n": [185, 75, 23],
+    "notyet_emfx_group_key": [4, 6, 8],
+    "notyet_emfx_calendar_estimate": [1.3081467123851154, 1.4076050932195991, 1.262702402384404, 1.7073353836545966, 1.8584601446674567],
+    "notyet_emfx_calendar_se": [0.21395932428317241, 0.25019434802869783, 0.2242363011283646, 0.21982800693009838, 0.22411478833922396],
+    "notyet_delta_calendar_se": [0.2139593213914095, 0.25019434741046476, 0.224236303407052, 0.21982800278066061, 0.22411479203664925],
+    "notyet_delta_calendar_p": [9.7165952441871784e-10, 1.8438640189984998e-08, 1.790390677036327e-08, 8.0565335215122875e-15, 1.1094164986254229e-16],
+    "notyet_delta_calendar_n": [37, 37, 62, 62, 85],
+    "notyet_emfx_calendar_key": [4, 5, 6, 7, 8],
+    "notyet_nobs": 960,
+    "notyet_iid_coef": {
+      "names": [".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [1.3081467123851154, 1.4076050932195991, 1.4906905137464908, 1.937908654681725, 2.5569440180354004, 0.92527999756851576, 1.3660869425344468, 1.4166609330996904, 1.215028708779641]
+    },
+    "notyet_iid_se": {
+      "names": [".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [0.2306513590584138, 0.23065135905841369, 0.24405617676580227, 0.24405617676580232, 0.26978763980319326, 0.26483879482680622, 0.26483879482680628, 0.28872398656563342, 0.28996659241149952]
+    },
+    "notyet_iid_pvalue": {
+      "names": [".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [1.9585302376079035e-08, 1.603513746995147e-09, 1.5539470953329191e-09, 6.5870969901131359e-15, 2.6870531182531684e-20, 0.00050168055266949839, 3.125658735248617e-07, 1.1167187349600335e-06, 3.0876050216945884e-05]
+    },
+    "notyet_iid_emfx_simple_estimate": [1.5639373563198811],
+    "notyet_iid_emfx_simple_se": [0.12667904443564085],
+    "notyet_iid_delta_simple_se": [0.12667905131807211],
+    "notyet_iid_delta_simple_p": [5.1406567815910085e-35],
+    "notyet_iid_delta_simple_n": [283],
+    "notyet_iid_delta_simple_ci95": [1.3156509781407584, 1.8122237344990033],
+    "notyet_iid_delta_simple_ci90": [1.3555688593005784, 1.7723058533391833],
+    "notyet_iid_nobs": 960,
+    "never_coef": {
+      "names": [".Dtreat:first_treat::4:year::1", ".Dtreat:first_treat::4:year::2", ".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::1", ".Dtreat:first_treat::6:year::2", ".Dtreat:first_treat::6:year::3", ".Dtreat:first_treat::6:year::4", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::1", ".Dtreat:first_treat::8:year::2", ".Dtreat:first_treat::8:year::3", ".Dtreat:first_treat::8:year::4", ".Dtreat:first_treat::8:year::5", ".Dtreat:first_treat::8:year::6", ".Dtreat:first_treat::8:year::8"],
+      "values": [0.012752537425780763, -0.00011675651113044161, 1.2239331665115114, 1.3507147650857103, 1.6065591352614708, 2.0182509390702075, 2.5666215627226334, 0.35060332323144239, 0.31913235251258548, -0.068615388214303935, -0.14829682816283091, 1.1574069295754439, 1.5626875374148779, 1.5425967882788711, -0.34457919778882767, -0.3122405140064678, -0.1796768781624053, -0.21894340589876421, -0.28153443336287437, 0.089588154492904415, 1.0368306695330121]
+    },
+    "never_se": {
+      "names": [".Dtreat:first_treat::4:year::1", ".Dtreat:first_treat::4:year::2", ".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::1", ".Dtreat:first_treat::6:year::2", ".Dtreat:first_treat::6:year::3", ".Dtreat:first_treat::6:year::4", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::1", ".Dtreat:first_treat::8:year::2", ".Dtreat:first_treat::8:year::3", ".Dtreat:first_treat::8:year::4", ".Dtreat:first_treat::8:year::5", ".Dtreat:first_treat::8:year::6", ".Dtreat:first_treat::8:year::8"],
+      "values": [0.34397371971235297, 0.33997315458594507, 0.28759477373529951, 0.34892279235824575, 0.42153931608909051, 0.37281351391563872, 0.35922408766845831, 0.39398249569618704, 0.37498878368264194, 0.3894755672107072, 0.37688655436108054, 0.35662853235080233, 0.43366070532446732, 0.34724995090621708, 0.38710318156202617, 0.41671806980453158, 0.35621094575299889, 0.40229127234036288, 0.31227320207611453, 0.33464064382439473, 0.37480848389982918]
+    },
+    "never_pvalue": {
+      "names": [".Dtreat:first_treat::4:year::1", ".Dtreat:first_treat::4:year::2", ".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::1", ".Dtreat:first_treat::6:year::2", ".Dtreat:first_treat::6:year::3", ".Dtreat:first_treat::6:year::4", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::1", ".Dtreat:first_treat::8:year::2", ".Dtreat:first_treat::8:year::3", ".Dtreat:first_treat::8:year::4", ".Dtreat:first_treat::8:year::5", ".Dtreat:first_treat::8:year::6", ".Dtreat:first_treat::8:year::8"],
+      "values": [0.97048799490662696, 0.99972655866588567, 4.1775647392097537e-05, 0.00017747605086154691, 0.00022050101627594474, 3.2568336503088205e-07, 7.8042175681246286e-11, 0.37531741151008668, 0.39645358049149981, 0.86045686772728547, 0.69467005007340588, 0.0015231782693973627, 0.00045954847785860268, 2.006209472484181e-05, 0.37518238446202068, 0.45516419225204208, 0.6149049825065801, 0.5872939591845181, 0.36910936083836932, 0.78938254860238311, 0.0065752892996203032]
+    },
+    "never_emfx_simple_estimate": [1.606923430463236],
+    "never_emfx_simple_se": [0.22261014297493015],
+    "never_delta_simple_se": [0.22261013430336207],
+    "never_delta_simple_p": [5.2543003385819996e-13],
+    "never_delta_simple_n": [283],
+    "never_delta_simple_ci95": [1.1706155846350219, 2.0432312762914502],
+    "never_delta_simple_ci90": [1.2407623436581967, 1.9730845172682754],
+    "never_emfx_event_estimate": [-0.34457919778882767, -0.3122405140064678, 0.096510726730223748, 0.061304384940480426, -0.090809797505291986, -0.019426036960538802, 0, 1.1537388917596623, 1.4361876571539229, 1.5807678663168743, 2.0182509390702075, 2.5666215627226334],
+    "never_emfx_event_se": [0.38710318538480093, 0.4167180759745262, 0.27361911682947881, 0.27152878245195361, 0.17827976118762209, 0.19296265439799584, null, 0.1981259074363125, 0.26104025191728236, 0.29419803658987576, 0.37281351449936057, 0.35922408893602154],
+    "never_delta_event_se": [0.38710318156202617, 0.41671806980453158, 0.27361912422046258, 0.27152878213019166, 0.17827978206077771, 0.19296264226145524, null, 0.19812590540784994, 0.26104025235053074, 0.2941980376667126, 0.37281351391563872, 0.35922408766845831],
+    "never_delta_event_p": [0.3733863180779648, 0.45368556953664896, 0.72429894156309171, 0.82137649619812336, 0.61049516107007773, 0.91981042022112047, null, 5.7710263075859064e-09, 3.7596270623404074e-08, 7.7376296291794028e-08, 6.1781459143607263e-08, 9.0058913121951408e-13],
+    "never_delta_event_n": [23, 23, 48, 48, 85, 85, 85, 85, 62, 62, 37, 37],
+    "never_emfx_event_key": [-7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4],
+    "never_emfx_group_estimate": [1.7532159137303067, 1.4208970850897311, 1.0368306695330121],
+    "never_emfx_group_se": [0.29821319134838242, 0.32510421315900179, 0.37480848178437048],
+    "never_delta_group_se": [0.29821319511303568, 0.32510422427367408, 0.37480848389982918],
+    "never_delta_group_p": [4.1258068535174008e-09, 1.2391159325661328e-05, 0.0056697296552162234],
+    "never_delta_group_n": [185, 75, 23],
+    "never_emfx_group_key": [4, 6, 8],
+    "never_emfx_calendar_estimate": [1.2239331665115114, 1.3507147650857103, 1.4254493749042019, 1.8345560190478971, 1.8514943873760998],
+    "never_emfx_calendar_se": [0.28759477227692448, 0.34892279053778369, 0.32280524588267784, 0.31152157617824566, 0.25495098759690565],
+    "never_delta_calendar_se": [0.28759477373529951, 0.34892279235824575, 0.32280524654173387, 0.31152157711898265, 0.25495098611736544],
+    "never_delta_calendar_p": [2.0834387970224324e-05, 0.00010834565737305305, 1.0062849982602519e-05, 3.884983132416779e-09, 3.8096233376489564e-13],
+    "never_delta_calendar_n": [37, 37, 62, 62, 85],
+    "never_emfx_calendar_key": [4, 5, 6, 7, 8],
+    "never_nobs": 960,
+    "notyet_xc_coef": {
+      "names": ["year::2:xc", "year::3:xc", "year::4:xc", "year::5:xc", "year::6:xc", "year::7:xc", "year::8:xc", ".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8", ".Dtreat:first_treat::4:year::4:xc_dm", ".Dtreat:first_treat::4:year::5:xc_dm", ".Dtreat:first_treat::4:year::6:xc_dm", ".Dtreat:first_treat::4:year::7:xc_dm", ".Dtreat:first_treat::4:year::8:xc_dm", ".Dtreat:first_treat::6:year::6:xc_dm", ".Dtreat:first_treat::6:year::7:xc_dm", ".Dtreat:first_treat::6:year::8:xc_dm", ".Dtreat:first_treat::8:year::8:xc_dm"],
+      "values": [0.073367392470772883, 0.034385655009547253, -0.098029111800586405, 0.56992481526595573, 0.51212406378817332, 0.46668151190842688, 0.56788412651978759, 1.2865548143849008, 1.4936857463847686, 1.5604451329935562, 2.0011419254519081, 2.6260323707960631, 0.90201113638515518, 1.3454869647631218, 1.3814489759948163, 1.1931696297329735, 0.016925691384653913, -0.237406416296502, -0.20109350368343851, -0.020617136471490584, -0.29354949101587863, -0.34635130799857411, 0.041536526598863505, -0.39759744792542084, -0.010817299980850514]
+    },
+    "notyet_xc_se": {
+      "names": ["year::2:xc", "year::3:xc", "year::4:xc", "year::5:xc", "year::6:xc", "year::7:xc", "year::8:xc", ".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8", ".Dtreat:first_treat::4:year::4:xc_dm", ".Dtreat:first_treat::4:year::5:xc_dm", ".Dtreat:first_treat::4:year::6:xc_dm", ".Dtreat:first_treat::4:year::7:xc_dm", ".Dtreat:first_treat::4:year::8:xc_dm", ".Dtreat:first_treat::6:year::6:xc_dm", ".Dtreat:first_treat::6:year::7:xc_dm", ".Dtreat:first_treat::6:year::8:xc_dm", ".Dtreat:first_treat::8:year::8:xc_dm"],
+      "values": [0.10037850455687047, 0.088636362990658191, 0.1317050900497731, 0.12090077131188681, 0.17232545952690784, 0.17851926144819993, 0.16910710154031552, 0.21625536343162691, 0.23960812951550156, 0.26856211795042179, 0.2379814960844609, 0.24414620867907832, 0.25996914509343, 0.29688976783338183, 0.27545367997727632, 0.28292440107565603, 0.1912632783875711, 0.16516146809514953, 0.21211865114105555, 0.22786154644729262, 0.19109578639955957, 0.26726432475816581, 0.29340655678638178, 0.26573808764425066, 0.35768855430604246]
+    },
+    "notyet_xc_pvalue": {
+      "names": ["year::2:xc", "year::3:xc", "year::4:xc", "year::5:xc", "year::6:xc", "year::7:xc", "year::8:xc", ".Dtreat:first_treat::4:year::4", ".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8", ".Dtreat:first_treat::4:year::4:xc_dm", ".Dtreat:first_treat::4:year::5:xc_dm", ".Dtreat:first_treat::4:year::6:xc_dm", ".Dtreat:first_treat::4:year::7:xc_dm", ".Dtreat:first_treat::4:year::8:xc_dm", ".Dtreat:first_treat::6:year::6:xc_dm", ".Dtreat:first_treat::6:year::7:xc_dm", ".Dtreat:first_treat::6:year::8:xc_dm", ".Dtreat:first_treat::8:year::8:xc_dm"],
+      "values": [0.46627239435029355, 0.6987529797109302, 0.45815761233912944, 6.6565643512631231e-06, 0.0035829035677413437, 0.010099960725861898, 0.0010544579793379692, 2.7758561957567166e-08, 7.1601929422441548e-09, 5.3162579216794707e-08, 1.0486846250594206e-13, 2.9088619449333385e-19, 0.00072647746848300901, 1.4005085444557207e-05, 1.8706671591379164e-06, 4.8476116373760639e-05, 0.92963264660522138, 0.15322296142268163, 0.34503862449604394, 0.92805712743519708, 0.12715916991379475, 0.19751334627199524, 0.88766184588123354, 0.13724891286914423, 0.97592453041975569]
+    },
+    "notyet_xc_emfx_simple_estimate": [1.5900261414941697],
+    "notyet_xc_emfx_simple_se": [0.13899852684600858],
+    "notyet_xc_delta_simple_se": [0.13899852433494203],
+    "notyet_xc_delta_simple_p": [2.6645759125825528e-30],
+    "notyet_xc_delta_simple_n": [283],
+    "notyet_xc_delta_simple_ci95": [1.3175940398934691, 1.8624582430948702],
+    "notyet_xc_delta_simple_ci90": [1.3613939146009379, 1.8186583683874014],
+    "notyet_xc_emfx_event_estimate": [1.1481848003026893, 1.4339281731502336, 1.4882692632359997, 2.0011419254519085, 2.6260323707960631],
+    "notyet_xc_emfx_event_se": [0.14928505978777096, 0.19674357821672353, 0.20137777602236331, 0.23798157018005173, 0.2441462097439526],
+    "notyet_xc_delta_event_se": [0.14928505898817443, 0.19674357453361507, 0.20137777514678293, 0.23798149608446093, 0.24414620867907832],
+    "notyet_xc_delta_event_p": [1.4573424245959901e-14, 3.1386698866903111e-13, 1.4634974601941922e-13, 4.141804341924432e-17, 5.5538914071497173e-27],
+    "notyet_xc_delta_event_n": [85, 62, 62, 37, 37],
+    "notyet_xc_emfx_event_key": [0, 1, 2, 3, 4],
+    "notyet_xc_emfx_group_estimate": [1.7935719980022395, 1.2096490257143644, 1.1931696297329735],
+    "notyet_xc_emfx_group_se": [0.1663546801465923, 0.21304687475303402, 0.28292442395270512],
+    "notyet_xc_delta_group_se": [0.16635468502065537, 0.21304687276220732, 0.28292440107565603],
+    "notyet_xc_delta_group_p": [4.2044303362854126e-27, 1.3639509962773927e-08, 2.4727379510931828e-05],
+    "notyet_xc_delta_group_n": [185, 75, 23],
+    "notyet_xc_emfx_group_key": [4, 6, 8],
+    "notyet_xc_emfx_calendar_estimate": [1.2865548143849008, 1.4936857463847686, 1.2949475537159754, 1.7367649251741717, 1.872262630625684],
+    "notyet_xc_emfx_calendar_se": [0.21625536326355652, 0.23960813472753978, 0.21554450901478431, 0.21109045776432994, 0.21076314737280175],
+    "notyet_xc_delta_calendar_se": [0.21625536343162691, 0.23960812951550156, 0.21554451765538335, 0.21109045398768786, 0.21076314744403676],
+    "notyet_xc_delta_calendar_p": [2.6939224802426787e-09, 4.5505298696851026e-10, 1.8806191963891658e-09, 1.9102351444877743e-16, 6.4932312786734844e-19],
+    "notyet_xc_delta_calendar_n": [37, 37, 62, 62, 85],
+    "notyet_xc_emfx_calendar_key": [4, 5, 6, 7, 8],
+    "notyet_xc_nobs": 960,
+    "tref4_coef": {
+      "names": [".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [1.0805684151233168, 1.1636538356502086, 1.610871976585442, 2.2299073399391172, 0.92527999756851531, 1.366086942534446, 1.4166609330996891, 1.2150287087796403]
+    },
+    "tref4_se": {
+      "names": [".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [0.23802851574243197, 0.27802368391116838, 0.24326167373773838, 0.26012896743647868, 0.26055408697572285, 0.30975868911133847, 0.28178857716173644, 0.29072952331791097]
+    },
+    "tref4_pvalue": {
+      "names": [".Dtreat:first_treat::4:year::5", ".Dtreat:first_treat::4:year::6", ".Dtreat:first_treat::4:year::7", ".Dtreat:first_treat::4:year::8", ".Dtreat:first_treat::6:year::6", ".Dtreat:first_treat::6:year::7", ".Dtreat:first_treat::6:year::8", ".Dtreat:first_treat::8:year::8"],
+      "values": [1.3575342114507784e-05, 5.4785699057682453e-05, 1.0776998798543165e-09, 4.367241392425088e-14, 0.00055038333557048795, 2.2798549644769881e-05, 1.7750849299579128e-06, 5.6105026117721469e-05]
+    },
+    "tref4_emfx_simple_estimate": [1.2218777919506258],
+    "tref4_emfx_simple_se": [0.13860454884960577],
+    "tref4_delta_simple_se": [0.1386045459456004],
+    "tref4_delta_simple_p": [1.1907986050191634e-18],
+    "tref4_delta_simple_n": [283],
+    "tref4_delta_simple_ci95": [0.95021787380372214, 1.49353771009753],
+    "tref4_delta_simple_ci90": [0.99389360184004338, 1.4498619820612086],
+    "tref4_emfx_event_estimate": [0.60091364989581897, 1.1956968535955463, 1.2656728265572572, 1.6108719765854422, 2.2299073399391172],
+    "tref4_emfx_event_se": [0.11554136290382366, 0.19817774220309214, 0.21444617171238795, 0.24326167284194658, 0.26012896672625552],
+    "tref4_delta_event_se": [0.11554136405591339, 0.19817774358148507, 0.21444617302956254, 0.24326167373773838, 0.26012896743647868],
+    "tref4_delta_event_p": [1.983759590083241e-07, 1.6048891393330419e-09, 3.590042872238081e-09, 3.544383594372331e-11, 1.0142557726252471e-17],
+    "tref4_delta_event_n": [85, 62, 62, 37, 37],
+    "tref4_emfx_event_key": [0, 1, 2, 3, 4],
+    "tref4_nobs": 960,
+    "ant1_coef": {
+      "names": [".Dtreat:first_treat_ant::3:year::3", ".Dtreat:first_treat_ant::3:year::4", ".Dtreat:first_treat_ant::3:year::5", ".Dtreat:first_treat_ant::3:year::6", ".Dtreat:first_treat_ant::3:year::7", ".Dtreat:first_treat_ant::3:year::8", ".Dtreat:first_treat_ant::5:year::5", ".Dtreat:first_treat_ant::5:year::6", ".Dtreat:first_treat_ant::5:year::7", ".Dtreat:first_treat_ant::5:year::8", ".Dtreat:first_treat_ant::7:year::7", ".Dtreat:first_treat_ant::7:year::8"],
+      "values": [0.073998039232471974, 1.3328127254626065, 1.4002840468369369, 1.5089591149319523, 2.0386194521853054, 2.586990075837734, -0.10619703740770678, 0.90404059008697479, 1.4272897313710251, 1.4071989822350228, 0.20789771245438876, 1.2447283819874095]
+    },
+    "ant1_se": {
+      "names": [".Dtreat:first_treat_ant::3:year::3", ".Dtreat:first_treat_ant::3:year::4", ".Dtreat:first_treat_ant::3:year::5", ".Dtreat:first_treat_ant::3:year::6", ".Dtreat:first_treat_ant::3:year::7", ".Dtreat:first_treat_ant::3:year::8", ".Dtreat:first_treat_ant::5:year::5", ".Dtreat:first_treat_ant::5:year::6", ".Dtreat:first_treat_ant::5:year::7", ".Dtreat:first_treat_ant::5:year::8", ".Dtreat:first_treat_ant::7:year::7", ".Dtreat:first_treat_ant::7:year::8"],
+      "values": [0.23032592034015512, 0.23094891592315797, 0.26444755374818696, 0.27502192936315156, 0.29355157602164877, 0.26485146026427792, 0.30204006320630267, 0.27313981238376295, 0.34401173791564332, 0.29736743907366514, 0.25769625973447741, 0.2921094393461281]
+    },
+    "ant1_pvalue": {
+      "names": [".Dtreat:first_treat_ant::3:year::3", ".Dtreat:first_treat_ant::3:year::4", ".Dtreat:first_treat_ant::3:year::5", ".Dtreat:first_treat_ant::3:year::6", ".Dtreat:first_treat_ant::3:year::7", ".Dtreat:first_treat_ant::3:year::8", ".Dtreat:first_treat_ant::5:year::5", ".Dtreat:first_treat_ant::5:year::6", ".Dtreat:first_treat_ant::5:year::7", ".Dtreat:first_treat_ant::5:year::8", ".Dtreat:first_treat_ant::7:year::7", ".Dtreat:first_treat_ant::7:year::8"],
+      "values": [0.74856532428980438, 6.3818002982880293e-08, 5.5195712506598733e-07, 2.3440599339319377e-07, 2.1522485281961082e-10, 6.6209349282829247e-17, 0.72576068066806987, 0.0012358678292226039, 6.2990483757749847e-05, 6.1733863615355527e-06, 0.42141716958989683, 4.0907327189134171e-05]
+    },
+    "ant1_cell_onset": [3, 3, 3, 3, 3, 3, 5, 5, 5, 5, 7, 7],
+    "ant1_cell_time": [3, 4, 5, 6, 7, 8, 5, 6, 7, 8, 7, 8],
+    "ant1_cell_coef": [0.073998039232471974, 1.3328127254626065, 1.4002840468369369, 1.5089591149319523, 2.0386194521853054, 2.586990075837734, -0.10619703740770678, 0.90404059008697479, 1.4272897313710251, 1.4071989822350228, 0.20789771245438876, 1.2447283819874095],
+    "ant1_cell_se": [0.23032592034015512, 0.23094891592315797, 0.26444755374818696, 0.27502192936315156, 0.29355157602164877, 0.26485146026427792, 0.30204006320630267, 0.27313981238376295, 0.34401173791564332, 0.29736743907366514, 0.25769625973447741, 0.2921094393461281],
+    "ant1_emfx_simple_estimate": [1.2365767789274824],
+    "ant1_emfx_simple_se": [0.13859982983030789],
+    "ant1_delta_simple_se": [0.13859983577858997],
+    "ant1_delta_simple_p": [4.5826927313760484e-19],
+    "ant1_delta_simple_n": [368],
+    "ant1_delta_simple_ci95": [0.96492609253828032, 1.5082274653166849],
+    "ant1_delta_simple_ci90": [1.0086003363521905, 1.4645532215027748],
+    "ant1_emfx_event_estimate": [0.057231163563055708, 1.1828686868235438, 1.4111734357619725, 1.4679268033606099, 2.0386194521853054, 2.586990075837734],
+    "ant1_emfx_event_se": [0.14389006274557892, 0.15561944839676956, 0.21844109529072514, 0.21648417056835795, 0.2935515769561895, 0.26485146153240396],
+    "ant1_delta_event_se": [0.14389006060092113, 0.15561944788024057, 0.21844109567377631, 0.21648417089493166, 0.29355157602164877, 0.26485146026427792],
+    "ant1_delta_event_p": [0.69082015389157836, 2.9377430954431505e-14, 1.0456383970565217e-10, 1.1954686786216186e-11, 3.7934026290374761e-12, 1.5492651464644077e-22],
+    "ant1_delta_event_n": [85, 85, 62, 62, 37, 37],
+    "ant1_emfx_event_key": [0, 1, 2, 3, 4, 5],
+    "ant1_nobs": 960,
+    "n_clusters": 120,
+    "notyet_iid_df": 824
+  }
+}
