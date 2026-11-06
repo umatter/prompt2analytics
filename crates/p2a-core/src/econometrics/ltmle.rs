@@ -930,8 +930,9 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
     )
 }
 
-/// How the iterative nuisance fits run. Both switches change only the cost: the maximum-
-/// likelihood estimates are the same to the fits' convergence rule. Tests turn them off to
+/// How the iterative nuisance fits run. With either switch on the fits reach the same maximum-
+/// likelihood estimates to the convergence rule, with iteration counts and rule-slack differences
+/// as described in validation/econometrics/ltmle.md, "Nuisance fits". Tests turn them off to
 /// compare with the shared GLM from glm.fit's start.
 #[derive(Debug, Clone, Copy)]
 struct FitPaths {
@@ -1467,7 +1468,8 @@ const SATURATED_MEAN: f64 = 1e-6;
 /// is reported as not converged, on the step count from that start, which a warm start would
 /// undercut. Fits that can take the warm path (a response mean off [`SATURATED_MEAN`]) need well
 /// under this many steps from glm.fit's start: Fisher scoring gains about one unit of logit per
-/// step, and the most measured is 33 (validation/econometrics/ltmle.md, "Nuisance fits").
+/// step, and the most measured at the default tolerance, counting all 11,292 such fits of a
+/// sweep, is 42 (validation/econometrics/ltmle.md, "Nuisance fits").
 const WARM_MIN_MAX_ITER: usize = 50;
 
 /// One logistic nuisance fit: the coefficients (NaN for aliased columns), the fitted values
@@ -1626,9 +1628,12 @@ fn fit_q(
 }
 
 /// The start of the logistic Q regression of node `t - 1`, whose response is the targeted
-/// prediction of node t on the logit scale `X_t beta + d_t beta_A + eps`: beta on the shared
-/// history, with the columns node `t - 1` does not have (L_t and A_t) and eps moved into the
-/// intercept at their means. `None` when a coefficient is aliased (glm.fit's start then).
+/// prediction of node t: on the logit scale, node t's linear predictor with every `A_s, s <= t`,
+/// at the regime's value, plus eps. The start is beta on the shared history, with the columns
+/// node `t - 1` does not have (L_t and A_t) and eps moved into the intercept at their means. The
+/// coefficients of the earlier `A_s` stay on the observed columns, although the response has
+/// those treatments at the regime's values, so this is an approximate start, which IRLS then
+/// corrects. `None` when a coefficient is aliased (glm.fit's start then).
 fn warm_start(
     designs: &HistoryDesigns,
     coefficients: ArrayView1<f64>,
@@ -1847,12 +1852,12 @@ fn fit_fluctuation(
     config: &LtmleConfig,
 ) -> EconResult<Fluctuation> {
     // (y, offset, h) of the followers
-    let rows: Vec<[f64; 3]> = h
-        .iter()
-        .zip(y.iter().zip(offset.iter()))
-        .filter(|(hi, _)| **hi > 0.0)
-        .map(|(&hi, (&yi, &oi))| [yi, oi, hi])
-        .collect();
+    let mut rows: Vec<[f64; 3]> = resource::try_with_capacity(h.len(), "LTMLE fluctuation")?;
+    for (&hi, (&yi, &oi)) in h.iter().zip(y.iter().zip(offset.iter())) {
+        if hi > 0.0 {
+            rows.push([yi, oi, hi]);
+        }
+    }
     // (deviance, score, information) at eps; the deviance is the binomial deviance in its
     // quasi-binomial working form, 2 sum h [y log(y/p) + (1-y) log((1-y)/(1-p))]
     let eval = |eps: f64| -> (f64, f64, f64) {
@@ -2910,7 +2915,8 @@ mod tests {
 
     /// Every number the fast paths could move, against the shared GLM from glm.fit's start:
     /// `estimand_tol` for the estimates and their standard errors, `nuisance_tol` for the
-    /// coefficients, predictions, fluctuations and the EIC. The measured gaps are in
+    /// coefficients, predictions, fluctuations and the EIC. The bounds passed in hold on each
+    /// test's own data sets and are not general bounds; the gaps measured on a wider grid are in
     /// validation/econometrics/ltmle.md, "Nuisance fits".
     fn assert_same_as_shared_glm(
         data: &LtmleData,
@@ -2979,7 +2985,9 @@ mod tests {
     }
 
     /// The default deviance rule stops each fit a little short of the maximum-likelihood
-    /// estimate, at a point that depends on its start.
+    /// estimate, at a point that depends on its start. This bound holds on the data sets of the
+    /// tests that use it; test_ltmle_fast_paths_hold_the_gaps_measured_off_the_fixtures has the
+    /// data sets where it does not.
     const DEFAULT_CONTROL_NUISANCE: f64 = 1e-9;
 
     #[test]
@@ -3038,10 +3046,20 @@ mod tests {
             assert_same_as_shared_glm(&data, &c, 1e-10, 1e-10);
             let fast = run_ltmle(&data, c).unwrap();
             let steps = |e: &RegimeEstimate| e.q_models.iter().map(|m| m.iterations).sum::<usize>();
-            reported.push((max_iter, fast.converged, steps(&fast.regime_estimate)));
+            let most = fast
+                .regime_estimate
+                .q_models
+                .iter()
+                .map(|m| m.iterations)
+                .max()
+                .unwrap();
+            reported.push((max_iter, fast.converged, steps(&fast.regime_estimate), most));
         }
-        // the low limits do report non-convergence, and the fits then use up to the limit
-        assert!(reported[0..2].iter().all(|r| !r.1), "{reported:?}");
+        // the low limits do report non-convergence, and a fit then uses up to the limit
+        assert!(
+            reported[0..2].iter().all(|r| !r.1 && r.3 == r.0),
+            "{reported:?}"
+        );
         assert!(reported[reported.len() - 1].1, "{reported:?}");
         let mut c = LtmleConfig::default();
         c.max_iter = WARM_MIN_MAX_ITER;
@@ -3061,9 +3079,10 @@ mod tests {
     fn test_ltmle_fast_paths_report_a_saturated_regime_through_the_shared_glm() {
         // An extreme fluctuation at a later node leaves an earlier Q response with its mean
         // within SATURATED_MEAN of 0 or 1 and a flat likelihood, where the coefficients and the
-        // standard error depend on the start. This fixture depends on that guard: from a warm
-        // start its numbers differ. The harness's saturating seed has the same warnings, and
-        // leaves the lean path at the link's clamp as well.
+        // standard error depend on the start. long_horizon(2500, 10, 21) depends on that guard:
+        // from a warm start its numbers differ. sparse_followers(4000, 10, 3) is the harness's
+        // saturating case; it has the same warnings, leaves the lean path at the link's clamp as
+        // well, and passes without the guard.
         for data in [long_horizon(2500, 10, 21), sparse_followers(4000, 10, 3)] {
             assert_same_as_shared_glm(
                 &data,
@@ -3079,6 +3098,111 @@ mod tests {
                 r.warnings
             );
         }
+    }
+
+    /// `t_max` nodes where `strong` sets the confounding and `shift` the outcome's level;
+    /// `frac` keeps the outcome's probability as a fractional outcome instead of drawing from it.
+    fn shifted_outcome(
+        (n, t_max, seed): (usize, usize, u64),
+        shift: f64,
+        frac: bool,
+        strong: f64,
+    ) -> LtmleData {
+        use rand::{Rng, SeedableRng};
+        let plogis = crate::econometrics::glm::plogis;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let (mut ls, mut az) = (Vec::new(), Vec::new());
+        let mut prev = Array1::<f64>::zeros(n);
+        for _ in 0..t_max {
+            let x = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+            let a: Array1<f64> = (0..n)
+                .map(|i| {
+                    let p = plogis(strong * x[[i, 0]] + 0.2 * prev[i]);
+                    f64::from(u8::from(rng.gen_range(0.0..1.0) < p))
+                })
+                .collect();
+            prev = a.clone();
+            ls.push(x);
+            az.push(a);
+        }
+        let y: Array1<f64> = (0..n)
+            .map(|i| {
+                let mut v = shift + 0.3 * ls[0][[i, 0]] + rng.gen_range(-0.5..0.5);
+                for a in &az {
+                    v += 0.4 * a[i];
+                }
+                let p = plogis(v);
+                if frac {
+                    p
+                } else {
+                    f64::from(u8::from(rng.gen_range(0.0..1.0) < p))
+                }
+            })
+            .collect();
+        let mut outcomes = vec![Array1::zeros(n); t_max - 1];
+        outcomes.push(y);
+        LtmleData::new(outcomes, az, ls).unwrap()
+    }
+
+    #[test]
+    fn test_ltmle_fast_paths_hold_the_gaps_measured_off_the_fixtures() {
+        // The largest gaps of the sweep in validation/econometrics/ltmle.md, "Nuisance fits", at
+        // the default tolerance. Each data set has the bounds it meets, above the tests' usual
+        // 1e-10 and 1e-9, and its warnings and convergence status stay equal.
+        let shifted = |s, shift, strong| shifted_outcome(s, shift, false, strong);
+        for (data, estimand_tol, nuisance_tol) in [
+            (shifted((300, 3, 1), 1.5, 1.2), 1e-9, 2e-8),
+            (shifted((800, 8, 3), 3.0, 2.0), 1e-9, 1e-8),
+            (shifted((300, 3, 2), -5.0, 0.3), 1e-10, 2e-8),
+            (shifted((150, 4, 3), 1.5, 1.2), 1e-9, 2e-8),
+            (shifted((150, 4, 2), 3.0, 2.0), 1e-9, 1e-8),
+            (shifted((300, 3, 4), -5.0, 0.3), 1e-9, 2e-7),
+            (long_horizon(300, 6, 17), 5e-10, 1e-9),
+        ] {
+            assert_same_as_shared_glm(&data, &LtmleConfig::default(), estimand_tol, nuisance_tol);
+        }
+
+        // There the warm start causes the gap: without it the numbers keep the shared GLM's.
+        let lean = FitPaths {
+            lean: true,
+            warm: false,
+        };
+        let cold = FitPaths {
+            lean: false,
+            warm: false,
+        };
+        let warm_case = shifted((300, 3, 1), 1.5, 1.2);
+        let long_case = long_horizon(300, 6, 17);
+        for data in [&warm_case, &long_case] {
+            let a = run_ltmle_with(data, LtmleConfig::default(), lean).unwrap();
+            let b = run_ltmle_with(data, LtmleConfig::default(), cold).unwrap();
+            assert_relative("ate", &[a.ate], &[b.ate], 1e-13);
+            assert_relative("se", &[a.se], &[b.se], 1e-13);
+            let (x, y) = (&a.regime_estimate, &b.regime_estimate);
+            assert_relative("eps", &x.fluctuation_coefs, &y.fluctuation_coefs, 1e-12);
+
+            // and the warm numbers are the closer to the tight reference, the gap being the
+            // deviance rule's slack
+            let fast = run_ltmle(data, LtmleConfig::default()).unwrap();
+            let tight_reference = run_ltmle_with(data, tight(), cold).unwrap();
+            let distance = |r: &LtmleResult| (r.ate - tight_reference.ate).abs();
+            assert!(distance(&fast) < distance(&b));
+        }
+
+        // An always-near-0 regime: most of its fits run out of steps on both paths, psi is about
+        // 1e-13, and the lean path alone moves its relative numbers, with the warm start bit for
+        // bit the same. The ATE's gap stays at rounding.
+        let near_zero = long_horizon(1200, 8, 21);
+        assert_same_as_shared_glm(&near_zero, &LtmleConfig::default(), 1e-6, 1e-6);
+        let a = run_ltmle(&near_zero, LtmleConfig::default()).unwrap();
+        let b = run_ltmle_with(&near_zero, LtmleConfig::default(), lean).unwrap();
+        let c = run_ltmle_with(&near_zero, LtmleConfig::default(), cold).unwrap();
+        let near = |r: &LtmleResult| r.contrast_estimate.clone().unwrap();
+        assert!(near(&c).psi < 1e-12, "{}", near(&c).psi);
+        assert_eq!(near(&a).psi.to_bits(), near(&b).psi.to_bits());
+        assert_eq!(near(&a).fluctuation_coefs, near(&b).fluctuation_coefs);
+        assert_ne!(near(&a).psi.to_bits(), near(&c).psi.to_bits());
+        assert_relative("ate", &[a.ate], &[c.ate], 1e-13);
     }
 
     /// `base` with one more column in the third node's covariates: the first column of the

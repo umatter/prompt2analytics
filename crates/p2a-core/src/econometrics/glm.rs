@@ -656,9 +656,9 @@ impl Problem<'_> {
         let mut working_weights = Array1::zeros(n);
         let mut iterations = 0;
         // Workspaces of every iteration, sized for all rows: the informative rows, their
-        // square-root working weights and their weighted working response. The weighted
-        // design itself is formed only when a step needs its rows (the refinement or the
-        // QR), from these (the same products, bit for bit).
+        // square-root working weights and their weighted working response. Below
+        // LEAN_BLOCKED_MIN_COLUMNS the weighted design itself is formed only when a step needs
+        // its rows (the refinement or the QR), from these (the same products, bit for bit).
         let mut zw = resource::try_zeros1(n, "glm IRLS workspace")?;
         let mut wt = resource::try_vec(n, 0.0, "glm IRLS workspace")?;
         let mut good = resource::try_vec(n, 0usize, "glm IRLS workspace")?;
