@@ -203,6 +203,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/varma_sim.csv` | 400 × 2 (y1, y2) | `varma_hr` | `r/cases/ts_varma.R` | seed 20261114 |
 | `generated/vecm_denmark.csv` | 55 × 4 (LRM, LRY, IBO, IDE) | `vecm_denmark` | `r/cases/ts_vecm.R` | `urca::denmark`, the four model columns |
 | `generated/vecm_sim3.csv` | 250 × 3 (x1, x2, x3) | `vecm_sim3` | `r/cases/ts_vecm.R` | seed 20261101 |
+| `generated/weighting_sim.csv` | 300 × 5 (treat, x1, x2, x3, y; treat and x3 Int64) | `weights_ebal`; read by `weights_sbw`, `weights_energy`, `ipw_aipw_sim` | `r/cases/causal_weighting.R`; read by `r/cases/causal_ipw_aipw.R` | seed 20261104; 151 treated, 149 controls; logit propensity in x1, x2, x3; y = 2 + 1.5 treat + x1 + x2 + N(0, 1) |
 
 ## Adding a dataset
 

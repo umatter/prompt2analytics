@@ -2,203 +2,57 @@
 
 ## Method Overview
 
-Augmented Inverse Probability Weighting (AIPW) combines propensity score weighting with outcome regression for doubly robust treatment effect estimation.
+`run_doubly_robust()` (`crates/p2a-core/src/econometrics/treatment.rs`) combines a logistic
+propensity score (`glm::fit_propensity`) with OLS outcome models fitted per arm on
+(1, covariates) by OLS's solve decision: the normal equations on a full-rank,
+well-conditioned design, pivoted QR otherwise (`lm.fit`; aliased columns count as 0 in
+predictions, as `predict.lm`, with a warning). Three methods:
 
-**p2a Function**: `run_doubly_robust()`
+| Method | Effect | Standard error |
+|--------|--------|----------------|
+| `AIPW` (default) | ATE: mean of psi_i = m1 - m0 + D (Y - m1)/e - (1-D)(Y - m0)/(1-e); ATT: sum phi / n1 with phi = D (Y - m0) - (1-D) e/(1-e) (Y - m0) | analytic: sd(IF)/sqrt(n), n - 1 denominator, with IF = psi (ATE) or (phi - D tau) n/n1 (ATT); `bootstrap_reps = 0`, `se_method` "analytic influence function" |
+| `IPW` | Hajek IPW | bootstrap SD, `se_method` "bootstrap (B replicates)" |
+| `Regression` | mean(m1 - m0) | bootstrap SD |
 
-**Methods**:
-- AIPW (Augmented IPW - doubly robust, default)
-- IPW (IPW component only)
-- Regression (Outcome regression only)
+The AIPW SE ignores the estimation of the nuisance models (the usual influence-function SE of
+the R AIPW and tmle packages). `bootstrap` must be at least 2 for `IPW` and `Regression`; it is
+ignored by `AIPW`. Bootstrap intervals are type-7 percentile intervals (normal interval below
+20 successful replicates); an unseeded bootstrap uses `DEFAULT_BOOTSTRAP_SEED` (42). Analytic
+intervals use `qnorm(0.975)`, p-values the normal survival function. `trim` must be in
+[0, 0.5).
 
-**Estimands**:
-- ATE (Average Treatment Effect)
-- ATT (Average Treatment Effect on Treated)
+## Reference
 
-## Reference Implementations
+- R code: `validation/r/cases/causal_ipw_aipw.R`, case `ipw_aipw_sim`.
+- Data: `validation/datasets/generated/weighting_sim.csv` (300 units, 151 treated).
+- Registry: `validation/methods/causal_weighting.json`, entry `treatment_aipw`.
 
-| Package | Function | Language | Notes |
-|---------|----------|----------|-------|
-| causalweight | `treatweight()` | R | With AIPW option |
-| AIPW | `AIPW()` | R | Dedicated AIPW package |
-| DoubleML | `DoubleMLPLR()` | Python | Cross-fitted |
-| econml | `DRLearner` | Python | |
+| Quantity (trim = 0) | R value |
+|---------------------|---------|
+| AIPW ATE, SE | 1.4265452600187223, 0.12280740322389656 |
+| AIPW ATT, SE | 1.5121321048221326, 0.13667714475644796 |
+| Regression adjustment ATE | 1.4307395308757216 |
+| Outcome R² treated / control | 0.6566631288592546 / 0.6176147190812733 |
 
-## Test Case 1: Synthetic Data with Known DGP
+## Tests and tolerances
 
-### Data Generating Process
+| Test | Checks | Tolerance |
+|------|--------|-----------|
+| `test_validate_aipw` | AIPW ATE, SE, outcome R², `bootstrap_reps = 0`, CI/t/p | effect `Tol::coef(n)`, SE `Tol::se(n)`, R² `Tol::stat(n)` |
+| `test_validate_aipw_att` | AIPW ATT and SE | as above |
+| `test_validate_dr_regression` | regression-adjustment effect; bootstrap SE reported as such (not pinned) | `Tol::coef(n)` |
 
-```
-X1, X2 ~ Uniform(-1, 1)
-D ~ Bernoulli(logit(0.5 + 0.3*X1 + 0.2*X2))
-Y(0) = 1.0*X1 + 0.5*X2 + epsilon
-Y(1) = Y(0) + 2.0  (constant treatment effect)
-Y = D*Y(1) + (1-D)*Y(0)
-
-True ATE = 2.0
-```
-
-### R Code (causalweight)
-
-```r
-library(causalweight)
-
-set.seed(42)
-n <- 1000
-
-x1 <- runif(n, -1, 1)
-x2 <- runif(n, -1, 1)
-
-# Propensity score
-ps <- plogis(0.5 + 0.3*x1 + 0.2*x2)
-d <- rbinom(n, 1, ps)
-
-# Potential outcomes
-y0 <- 1.0*x1 + 0.5*x2 + rnorm(n, 0, 0.5)
-y1 <- y0 + 2.0  # True ATE = 2.0
-y <- d*y1 + (1-d)*y0
-
-data <- data.frame(y = y, d = d, x1 = x1, x2 = x2)
-
-# AIPW estimation
-result <- treatweight(
-  y = data$y,
-  d = data$d,
-  x = data[, c("x1", "x2")],
-  boot = 499,
-  trim = 0.05,
-  ATET = FALSE  # ATE
-)
-
-cat("Method: AIPW (doubly robust)\n")
-cat("ATE:", result$effect, "\n")
-cat("SE:", result$se, "\n")
-```
-
-### R Code (AIPW package)
-
-```r
-library(AIPW)
-
-# Using AIPW package for comparison
-aipw <- AIPW$new(
-  Y = data$y,
-  A = data$d,
-  W = data[, c("x1", "x2")],
-  Q.SL.library = "SL.glm",
-  g.SL.library = "SL.glm"
-)
-aipw$stratified_fit()$summary()
-```
-
-### Expected Results
-
-| Statistic | R (causalweight) | R (AIPW) | p2a (Rust) | Tolerance |
-|-----------|------------------|----------|------------|-----------|
-| ATE | 2.0 ± 0.15 | 2.0 ± 0.15 | 2.0 ± 0.15 | 0.1 |
-| SE | 0.05-0.08 | 0.05-0.08 | 0.05-0.08 | 0.02 |
-
-## Test Case 2: Misspecified Propensity Model
-
-AIPW should be robust when either the propensity or outcome model is correct.
-
-### DGP with Nonlinear Propensity
-
-```
-True PS: logit(0.5 + 0.5*X1^2 + 0.3*X2)  (nonlinear in X1)
-Fitted PS: logit(a + b*X1 + c*X2)  (linear, misspecified)
-Outcome model: correctly specified as linear
-```
-
-### R Code
-
-```r
-set.seed(42)
-n <- 1000
-
-x1 <- runif(n, -1, 1)
-x2 <- runif(n, -1, 1)
-
-# TRUE nonlinear propensity (model is misspecified)
-ps_true <- plogis(0.5 + 0.5*x1^2 + 0.3*x2)
-d <- rbinom(n, 1, ps_true)
-
-# Linear outcome (model is correct)
-y0 <- 1.0*x1 + 0.5*x2 + rnorm(n, 0, 0.5)
-y1 <- y0 + 2.0
-y <- d*y1 + (1-d)*y0
-
-# AIPW should still work due to correct outcome model
-result_aipw <- treatweight(
-  y = y, d = d,
-  x = cbind(x1, x2),
-  boot = 499
-)
-
-# IPW alone will be biased
-result_ipw <- treatweight(
-  y = y, d = d,
-  x = cbind(x1, x2),
-  boot = 499
-  # Note: causalweight always uses AIPW internally
-)
-```
-
-## Test Case 3: Different Methods Comparison
-
-Compare IPW-only, Regression-only, and AIPW on the same data.
-
-### R Code
-
-```r
-set.seed(42)
-n <- 1000
-
-# Well-specified case
-x1 <- runif(n, -1, 1)
-x2 <- runif(n, -1, 1)
-ps <- plogis(0.5 + 0.3*x1 + 0.2*x2)
-d <- rbinom(n, 1, ps)
-y <- 2.0*d + 1.0*x1 + 0.5*x2 + rnorm(n, 0, 0.5)
-
-# All three methods should give similar results
-# (causalweight uses AIPW by default)
-
-# For pure IPW comparison, use manual calculation:
-ps_hat <- predict(glm(d ~ x1 + x2, family = binomial), type = "response")
-w1 <- d / ps_hat
-w0 <- (1-d) / (1 - ps_hat)
-ate_ipw <- sum(w1 * y) / sum(w1) - sum(w0 * y) / sum(w0)
-
-# For pure regression:
-lm_treated <- lm(y ~ x1 + x2, subset = d == 1)
-lm_control <- lm(y ~ x1 + x2, subset = d == 0)
-mu1 <- predict(lm_treated, newdata = data.frame(x1 = x1, x2 = x2))
-mu0 <- predict(lm_control, newdata = data.frame(x1 = x1, x2 = x2))
-ate_reg <- mean(mu1 - mu0)
-```
-
-### Expected Results
-
-| Method | Estimate | Notes |
-|--------|----------|-------|
-| IPW | 2.0 ± 0.2 | Higher variance |
-| Regression | 2.0 ± 0.1 | Lower variance, not doubly robust |
-| AIPW | 2.0 ± 0.1 | Best of both, doubly robust |
-
-## Numerical Precision
-
-| Sample Size | Effect Tolerance | SE Tolerance |
-|-------------|------------------|--------------|
-| n < 500 | 0.15 | 0.03 |
-| n = 500-2000 | 0.08 | 0.015 |
-| n > 2000 | 0.04 | 0.008 |
+Property tests (no case): `test_dr_reports_se_method`, `test_dr_ipw_matches_ipw` (DR IPW and
+IPW agree to 1e-12), `test_dr_regression_recovers_dgp`,
+`test_unseeded_bootstrap_is_reproducible`, `test_ipw_rejects_bad_trim`.
 
 ## Known Differences
 
-1. **Outcome model**: p2a uses OLS for outcome regression; some R packages use machine learning
-2. **Bootstrap**: Implementation details may differ slightly
-3. **Cross-fitting**: p2a does not use cross-fitting; DoubleML does
+1. Outcome models are OLS per arm; packages such as AIPW or tmle default to machine-learning
+   learners.
+2. No cross-fitting (DoubleML cross-fits).
+3. The bootstrap resamples units with the fitted propensity scores and outcome predictions
+   held fixed.
 
 ## Missing values and column types
 
@@ -210,10 +64,11 @@ column that exists is never reported as not found. Int64 and Boolean 0/1 treatme
 read as numbers and give the same result as Float64. Results on complete data are
 unchanged.
 
-R: MatchIt 4.8.0 and tmle 2.1.1 refuse missing treatment or covariate values; p2a refuses missing values in every column the doubly robust estimator reads (checked for T2-WP13).
+R: MatchIt 4.8.0 and tmle 2.1.1 refuse missing treatment or covariate values; p2a refuses
+missing values in every column the doubly robust estimator reads (checked for T2-WP13).
 
-Tests: `test_validate_na_doubly_robust_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
-`weighting_na_refusal`).
+Tests: `test_validate_na_doubly_robust_columns` (case `causal_mediation_na`, registry
+`validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
 ## References
 

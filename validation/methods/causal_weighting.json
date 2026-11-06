@@ -1,0 +1,180 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "weightit_glm",
+      "name": "WeightIt logistic (glm) propensity weights: ATE, ATT, ATC, stabilised ATE",
+      "category": "econometrics",
+      "reference": "WeightIt::weightit(method = 'glm', estimand = 'ATE' | 'ATT' | 'ATC', stabilize); stats::glm(family = binomial)",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_weightit_logistic"
+      ],
+      "quantities": [
+        "propensity scores",
+        "ATE/ATT/ATC weights",
+        "stabilised ATE weights"
+      ],
+      "tolerance": "validation/README.md, n = 300: 1e-8 relative (Tol::coef)",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/ipw_weightit.csv"
+      ]
+    },
+    {
+      "id": "weightit_ebal",
+      "name": "Entropy balancing (WeightIt ebal and the exact convex dual): ATE, ATT, ATC; ESS per group",
+      "category": "econometrics",
+      "reference": "WeightIt::weightit(method = 'ebal', estimand); exact dual min log sum exp(lambda'(x_i - t)) by Newton to |grad| < 1e-14",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "weights_ebal"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_ebal_ate",
+        "p2a-core::econometrics::weightit::tests::test_validate_ebal_att",
+        "p2a-core::econometrics::weightit::tests::test_validate_ebal_atc",
+        "p2a-core::econometrics::weightit::tests::test_validate_entropy_balance_ess"
+      ],
+      "quantities": [
+        "weights (exact dual)",
+        "ESS treated/control",
+        "effect",
+        "WeightIt weights and effect (cross-check)",
+        "weighted means"
+      ],
+      "tolerance": "exact dual 1e-8 relative (Tol::coef(300)); ESS 1e-6 (Tol::stat); WeightIt optim values 1e-4 relative (cross-check)",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/ebal_weightit.csv"
+      ]
+    },
+    {
+      "id": "weightit_energy",
+      "name": "Energy balancing (Huling & Mak 2022): ATT, ATC, improved ATE",
+      "category": "econometrics",
+      "reference": "energy-distance QP on standardised covariates (WeightIt weightit2energy's P and q at lambda = 0, min.w = 0) solved with quadprog::solve.QP; WeightIt 'energy' needs osqp (not installed)",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "weights_energy"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_energy_att",
+        "p2a-core::econometrics::weightit::tests::test_validate_energy_atc",
+        "p2a-core::econometrics::weightit::tests::test_validate_energy_ate"
+      ],
+      "quantities": [
+        "weights",
+        "weighted means",
+        "effect",
+        "number of zero weights",
+        "energy distance"
+      ],
+      "tolerance": "weights 1e-8 relative + 1e-10 absolute; effects and energy 1e-8 relative (Tol::coef(300)); zero counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "weightit_stable",
+      "name": "WeightIt 'stable': stable balancing weights with exact balance (optweight, tols = 0)",
+      "category": "econometrics",
+      "reference": "Zubizarreta (2015) SBW QP with exact balance, solved with quadprog::solve.QP (optweight not installed)",
+      "doc": "validation/econometrics/weightit.md",
+      "cases": [
+        "weights_sbw"
+      ],
+      "tests": [
+        "p2a-core::econometrics::weightit::tests::test_validate_stable_weights"
+      ],
+      "quantities": [
+        "ATT/ATC/ATE weights",
+        "effects"
+      ],
+      "tolerance": "weights 1e-8 relative + 1e-12 absolute; effects 1e-8 relative (Tol::coef(300))",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "sbw",
+      "name": "Stable balancing weights: ATT, ATC, ATE; exact and approximate balance",
+      "category": "econometrics",
+      "reference": "Zubizarreta (2015) QP min sum (w - 1/n)^2, sum w = 1, w >= 0, |sum w x_j - t_j| <= delta sd_j, solved with quadprog::solve.QP",
+      "doc": "validation/econometrics/sbw.md",
+      "cases": [
+        "weights_sbw"
+      ],
+      "tests": [
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_exact",
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_approx",
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_atc",
+        "p2a-core::econometrics::sbw::tests::test_validate_sbw_ate"
+      ],
+      "quantities": [
+        "weights",
+        "weighted means",
+        "objective (per group for ATE)",
+        "number of zero weights",
+        "effect"
+      ],
+      "tolerance": "weights 1e-8 relative + 1e-12 absolute; objective, means and effect 1e-8 relative (Tol::coef(300)); zero counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "treatment_ipw",
+      "name": "IPW (Hajek, Horvitz-Thompson, ATT) with EIF, M-estimation and propensity-known standard errors",
+      "category": "econometrics",
+      "reference": "glm(binomial) propensity; sandwich::vcovHC(type = 'HC0') of lm(y ~ treat, weights); stacked M-estimation sandwich = WeightIt::lm_weightit(vcov = 'asympt')",
+      "doc": "validation/econometrics/treatment_ipw.md",
+      "cases": [
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_ipw_hajek_se",
+        "p2a-core::econometrics::treatment::tests::test_validate_ipw_ht_se",
+        "p2a-core::econometrics::treatment::tests::test_validate_ipw_att_se"
+      ],
+      "quantities": [
+        "effect",
+        "SE (M-estimation; std_error, WP23-14 (a))",
+        "SE (efficient influence function; se_eif)",
+        "SE (propensity known)",
+        "95% CI",
+        "z",
+        "p"
+      ],
+      "tolerance": "validation/README.md, n = 300: effects 1e-8, SEs 1e-6 relative; WeightIt cross-check 1e-6",
+      "deviations": [],
+      "supersedes_legacy": [
+        "validation/expected/ipw_aipw_manual.csv"
+      ]
+    },
+    {
+      "id": "treatment_aipw",
+      "name": "Doubly robust AIPW (ATE, ATT) and regression adjustment",
+      "category": "econometrics",
+      "reference": "AIPW with OLS outcome models per arm (lm), glm(binomial) propensity; SE sd(psi)/sqrt(n)",
+      "doc": "validation/econometrics/treatment_aipw.md",
+      "cases": [
+        "ipw_aipw_sim"
+      ],
+      "tests": [
+        "p2a-core::econometrics::treatment::tests::test_validate_aipw",
+        "p2a-core::econometrics::treatment::tests::test_validate_aipw_att",
+        "p2a-core::econometrics::treatment::tests::test_validate_dr_regression"
+      ],
+      "quantities": [
+        "AIPW ATE and SE",
+        "AIPW ATT and SE",
+        "regression-adjustment ATE",
+        "outcome-model R2"
+      ],
+      "tolerance": "validation/README.md, n = 300: effects 1e-8, SEs and R2 1e-6 relative",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "id": "ipw_aipw_sim",
+  "area": "econometrics/treatment",
+  "method": "IPW (Hajek, HT, ATT) and AIPW on weighting_sim with logistic propensity scores",
+  "reference": "glm(binomial) propensity (WeightIt method = 'glm'); Hajek / Horvitz-Thompson IPW; sandwich::vcovHC(HC0) of the weighted lm and WeightIt::lm_weightit(vcov = 'asympt' | 'HC0'); stacked M-estimation sandwich; AIPW with OLS outcome models",
+  "call": "weightit(treat ~ x1 + x2 + x3, data = weighting_sim, method = 'glm', estimand); lm_weightit(y ~ treat, weightit = W)",
+  "dataset": "validation/datasets/generated/weighting_sim.csv",
+  "datasets": ["validation/datasets/generated/weighting_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "WeightIt": "2.0.0",
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "ps_coef": {
+      "names": ["(Intercept)", "x1", "x2", "x3"],
+      "values": [-0.15551150044598852, 0.73488790476153421, -0.41840322081400116, 0.27269296721572739]
+    },
+    "ps_head": [0.87267705839496457, 0.25744099324381881, 0.67148620443722473, 0.70186297814608234, 0.54745455164538392, 0.14034349892991144, 0.79398162709555264, 0.45492941081092481, 0.60459006487088718, 0.39713223194842012],
+    "glm_ate_weights_head": [1.1458992652324624, 1.3466943244934184, 1.4892338716595361, 3.3541624377328891, 2.2097228104621012, 1.1632553220445974, 1.2594749876745857, 1.8346247620656795, 1.6540132861984187, 1.658738537692821, 3.0854013585331019, 2.2387790949190762],
+    "glm_att_weights_head": [1, 0.34669432449341858, 1, 2.3541624377328891, 1.2097228104621012, 0.16325532204459742, 1, 0.83462476206567948, 1, 0.6587385376928212, 2.0854013585331019, 1],
+    "glm_atc_weights_head": [0.14589926523246249, 1, 0.48923387165953625, 1, 1, 1, 0.2594749876745856, 1, 0.65401328619841859, 1, 1, 1.2387790949190767],
+    "glm_ate_stab_weights_head": [0.57676929683367295, 0.66885818116506424, 0.74958104873530018, 1.6659006774073344, 1.0974956625295098, 0.5777501432821498, 0.63393574379620832, 0.91119696515928716, 0.83252002071987108, 0.82384014038743414, 1.5324160080714402, 1.1268521444426021],
+    "ipw_ate_hajek": 1.4382520579328,
+    "ipw_ate_ht": 1.4177875444032675,
+    "ipw_att": 1.5144404674963763,
+    "ipw_ate_se_naive": 0.20992212935271706,
+    "ipw_att_se_naive": 0.23137177194254968,
+    "ipw_ate_ht_se_naive": 0.39692785210986226,
+    "ipw_ate_se_mest": 0.12257657516966949,
+    "ipw_att_se_mest": 0.15513367447104748,
+    "ipw_ate_ht_se_mest": 0.15067342510051335,
+    "ipw_ate_se_mest_weightit": 0.12257657511202587,
+    "ipw_att_se_mest_weightit": 0.15513367426840752,
+    "ipw_ate_se_mest_ld": 0.1227239579040703,
+    "ipw_ate_se_eif": 0.12260441640780892,
+    "ipw_ate_ht_se_eif": 0.12260359599504984,
+    "ipw_att_se_eif": 0.13644355245633874,
+    "aipw_ate": 1.4265452600187223,
+    "aipw_ate_se": 0.12280740322389656,
+    "aipw_att": 1.5121321048221326,
+    "aipw_att_se": 0.13667714475644796,
+    "ra_ate": 1.4307395308757216,
+    "outcome_r2_treated": 0.6566631288592546,
+    "outcome_r2_control": 0.6176147190812733,
+    "n": 300
+  }
+}

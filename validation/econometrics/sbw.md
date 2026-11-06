@@ -63,6 +63,13 @@ feasibility. A target mean that overflows is refused up front, and a non-finite 
 or multiplier (covariates too large for f64) is a `Computation` error, never a converged
 result.
 
+The `convergence` record of a result reports the solver's final relative residual
+(||r||_inf / (1 + ||b||_inf) exact, the KKT residual over its scale approximate) as
+`final_change`, the quantity `tolerance` bounds; `max_constraint_violation` keeps the largest
+balance violation in covariate units. The ATE solves the two groups separately, and the record
+and `iterations` report the larger step count and residual of the two solves
+(`test_sbw_ate_convergence_record_is_per_solve`).
+
 Before October 2026 the exact path inverted the dense (n+k+1) x (n+k+1) system of the
 equality-constrained problem, then clipped negative weights at `min_weight` and renormalised.
 That is O(n^3) time and O(n^2) memory, and whenever a bound was active the clipped weights
@@ -72,14 +79,53 @@ returns the old output to floating-point noise, `lambda` included.
 
 ### Approximate Balance Solution
 
-When exact balance is infeasible, we use penalized QP:
+With `balance_tol > 0` each weighted covariate mean must lie within delta_j of its target,
+where delta_j = `balance_tol` (`balance_tol_scale = Raw`, the default) or `balance_tol` times
+the covariate's full-sample standard deviation (`StdDev`, n - 1 denominator, Zubizarreta
+2015). The band QP, in the n scale (m reweighted units),
 
 ```
-minimize:    (1/2) * w'w + ρ * ||A*w - b||²
-subject to:  w_i >= l
+minimise   (1/2) ||w||^2
+subject to (1/m) sum_i w_i = 1,   |(1/m) sum_i w_i x_ij - t_j| <= delta_j,   w_i >= l
 ```
 
-Solved via iterative projected gradient descent.
+is solved exactly through its dual in k + 1 variables mu = (y, nu). With covariates centred
+on the band and scaled by the group SD (a_i = [xs_i, 1]/m, half-widths r_j), the dual
+objective is
+
+```
+F(mu) = sum_i h(a_i . mu) - sum_j r_j |y_j| + nu,   h(z) = -z^2/2 (z >= l), l^2/2 - l z (z < l)
+w_i(mu) = max(l, a_i . mu)
+```
+
+-F is minimised by proximal Newton (Lee, Sun & Saunders 2014): each step minimises the
+quadratic model plus the l1 term exactly by the feature-sign method (Lee, Battle, Raina & Ng
+2007) and takes an Armijo step. The (k+1) x (k+1) Hessian `sum_{w_i > l} a_i a_i'` is
+regularised only when singular; memory is O(n k). The solve stops when the KKT residual is
+below 1e-14 (1 + max r_j), or below `tolerance` (1 + max r_j) after an unregularised full step
+that kept the set of units off the bound; running out of `max_iter` returns an unconverged
+result with a note.
+
+Infeasibility is reported, never returned as weights:
+- **Range check** (with `min_weight >= 0`): a band [t_j - delta_j, t_j + delta_j] that misses
+  the reweighted group's range of covariate j cannot be met by non-negative weights.
+- **Dual certificate**: a dual value above U = ((m - (m-1) l)^2 + (m-1) l^2)/2, the largest
+  primal objective on {w >= l, sum w = m}, proves by weak duality that no feasible weights
+  exist (R `solve.QP`: "constraints are inconsistent").
+Both are `InvalidSpecification` errors asking for a larger `balance_tol`.
+
+`balance_penalty` is not used: the QP has no penalty parameter. Only the default 1000 is
+accepted; any other value is an `InvalidSpecification` error that says to omit it (decision
+WP23-10).
+
+### Estimands
+
+ATT reweights the controls to the treated means and ATC the treated to the control means; the
+other group keeps weight 1. ATE solves one problem per group, each reweighted to the pooled
+means; `objective_treated` and `objective_control` report the two objectives
+(`objective_value` is their sum), `lambda_treated` the treated problem's multipliers, and the
+balance tables compare the weighted treated with the weighted controls. With
+`normalize_to_n` each reweighted group sums to its own size, otherwise to 1.
 
 ## Reference Implementation
 
@@ -172,26 +218,38 @@ Further exact-balance checks in the same module:
   configured tolerance; with `max_iter = 4` and `tolerance = 1e-2` the fourth step is within
   tolerance and the solve stops as converged.
 - `test_sbw_exact_overflow_is_an_error_not_a_converged_fallback`: an overflowing target mean,
-  a target that overflows the multipliers and covariates of order 1e200 are errors. With
-  `min_weight < 0` the first used to return uniform weights reported as converged, and the
-  last a singular-matrix error that blamed the constraints.
+  a target that overflows the multipliers and covariates of order 1e200 are errors. The
+  first (with `min_weight < 0`, which skips the range pre-check) used to return uniform
+  weights reported as converged; the last (default configuration) used to be a
+  singular-matrix error that blamed the constraints.
 
-### Test Case 2: Approximate Balance
+### Test Case 2: weighting_sim (ATT, ATC, ATE; exact and approximate)
 
-**Same data as Test 1, but with balance tolerance**:
-```r
-s_approx <- sbw::sbw(dat, ind = "d", out = "y",
-                     bal = list(bal_cov = c("x1", "x2"), bal_alg = FALSE, bal_tol = 0.1, bal_std = "group"),
-                     sol = list(sol_nam = "quadprog"), par = list(par_est = "att"))
-```
+R code: `validation/r/cases/causal_weighting.R`, case `weights_sbw`, on
+`validation/datasets/generated/weighting_sim.csv` (300 units, 151 treated, covariates x1, x2,
+x3). Each problem is the SBW QP solved with `quadprog::solve.QP` (R `sbw` and `optweight` are
+not installed); approximate balance uses delta = 0.1 full-sample SD.
 
-**Expected Results**:
-- Max |Std.Diff| after weighting: < 0.2
-- Weights non-negative
+| Quantity | R value |
+|----------|---------|
+| ATT exact: objective, zero weights, effect | 0.003840102375577727, 20, 1.5617368270324565 |
+| ATC exact: objective, zero weights, effect | 0.004486478085953354, 24, 1.3128019372669482 |
+| ATE exact: objective treated / control, effect | 0.0010394911183649218 / 0.0009247533745617431, 1.4307248209844157 |
+| ATT approximate: objective, zero weights, effect | 0.0023680772629313743, 7, 1.5582772197757029 |
+| ATC approximate: objective, zero weights, effect | 0.0027409649018704484, 13, 1.3451918221996249 |
+| ATE approximate: objective treated / control, effect | 0.0003886807347007872 / 0.0003511886754797501, 1.4663089969510448 |
 
-The Rust approximate solver minimises a penalised objective by projected gradient descent
-rather than solving R's tolerance-constrained QP, so it is checked against these properties,
-not against R's weights.
+Tests (registry `validation/methods/causal_weighting.json`, entry `sbw`):
+`test_validate_sbw_exact`, `test_validate_sbw_approx`, `test_validate_sbw_atc`,
+`test_validate_sbw_ate`. Weights (heads of 12 or 8) at 1e-8 relative + 1e-12 absolute,
+objectives, weighted means and effects at `Tol::coef(n)`, zero-weight counts exact.
+`test_validate_sbw_approx` also checks every weighted mean within 0.1 SD of its target.
+
+Property tests (no case): `test_sbw_estimands_differ`, `test_sbw_approx_scale_invariant`
+(data x 1e-6 and x 1e6 give the same weights in similar steps), `test_sbw_approx_infeasible_is_error`
+(the range check and the dual certificate), `test_sbw_balance_penalty_is_refused` and
+`test_sbw_approx_matches_quadprog_on_test_data` (Test Case 1 data, ATT, `balance_tol = 0.05`
+raw, against `quadprog::solve.QP` to 1e-10; the x2 lower band bound is active).
 
 ## Validation Status
 
@@ -201,18 +259,19 @@ not against R's weights.
 | Exact balance, no binding bound | Equals old dense solution | weights 1e-12 |
 | Exact balance, binding bounds | KKT certificate + quadprog | 1e-9 |
 | Infeasible exact balance | Error, as in R sbw | |
-| Approximate Balance | Implemented | max_std_diff < 0.2 |
-| ATC Estimand | Equals ATT with swapped labels | 1e-12 |
+| Approximate balance (ATT, ATC, ATE) | Pinned to quadprog (weights_sbw) | 1e-8 relative |
+| Exact ATC, ATE | Pinned to quadprog (weights_sbw) | 1e-8 relative |
+| Infeasible approximate balance | Error (range check, dual certificate) | |
 | ESS Computation | Implemented | exact formula |
 | Balance Statistics | Implemented | std_diff, var_ratio |
 
 ## Rust Implementation Notes
 
 1. **Exact Balance**: dual semismooth Newton in the k + 1 constraint dimensions (Schur-complement first step), O(n k^2) per step
-2. **Approximate Balance**: Uses penalized gradient descent
+2. **Approximate Balance**: the band QP through its dual by proximal Newton with an exact feature-sign subproblem, O(n k) memory
 3. **Lower bound**: enforced exactly by the dual (w_i = max(l, a_i . mu)), not by clipping
-4. **Normalization**: Weights normalized to sum to n_reweighted
-5. **Infeasibility**: refused with a message suggesting approximate balance
+4. **Normalization**: each reweighted group sums to its own size (`normalize_to_n`) or to 1
+5. **Infeasibility**: exact balance is refused with a message suggesting approximate balance; approximate balance with one asking for a larger `balance_tol`
 
 ## Missing values and column types
 
@@ -226,8 +285,8 @@ unchanged.
 
 R: sbw is not installed here; not verified.
 
-Tests: `test_validate_na_sbw_columns` (case `causal_mediation_na`, registry `validation/methods/causal_na.json`, id
-`weighting_na_refusal`).
+Tests: `test_validate_na_sbw_columns` (case `causal_mediation_na`, registry
+`validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
 ## References
 
