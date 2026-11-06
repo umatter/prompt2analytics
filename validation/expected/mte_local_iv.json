@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "id": "mte_local_iv",
+  "area": "econometrics/mte",
+  "method": "MTE by local IV, cubic polynomial in P(Z) (probit first stage); ATE, ATT, ATU, LATE(p_min, p_max), PRTE with delta-method SEs; extrapolation shares",
+  "reference": "local IV MTE with a cubic polynomial in the probit propensity (Brinch, Mogstad & Wiswall 2017); Heckman & Vytlacil (2005) weights on a 1001-point grid; delta method with the full HC1 covariance (sandwich::vcovHC(type = 'HC1'))",
+  "call": "glm(d ~ z1 + z2, binomial('probit')); lm(y ~ P + P^2 + P^3); sandwich::vcovHC(type = 'HC1')",
+  "dataset": "validation/datasets/generated/mte_sim.csv",
+  "datasets": ["validation/datasets/generated/mte_sim.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3"
+  },
+  "values": {
+    "n": 2000,
+    "n_grid": 1001,
+    "fs_coef": {
+      "names": ["(Intercept)", "z1", "z2"],
+      "values": [-0.17198324492726194, 0.88681431207833883, 0.64269768920808124]
+    },
+    "mte_coef": {
+      "names": ["(Intercept)", "P", "I(P^2)", "I(P^3)"],
+      "values": [1.2783671439173014, 2.8221892536442938, -1.4180123782891048, -0.018046014420852498]
+    },
+    "p_min": 0.00091767661502407277,
+    "p_max": 0.99990606029075157,
+    "n_grid_in_support": 1000,
+    "ate": {
+      "names": ["est", "se"],
+      "values": [1.3861308654368307, 0.16241927186853242]
+    },
+    "att": {
+      "names": ["est", "se"],
+      "values": [1.83006971114244, 0.20537140769399337]
+    },
+    "atu": {
+      "names": ["est", "se"],
+      "values": [0.85777955628694924, 0.19963581359658983]
+    },
+    "late_support": {
+      "names": ["est", "se"],
+      "values": [1.384696223657913, 0.16174667701823325]
+    },
+    "prte_shift": {
+      "names": ["est", "se"],
+      "values": [1.1977158077199321, 0.14441264820041116]
+    },
+    "mte_at": [2.5380453975538475, 1.3906423645395498, 0.22591515768123357],
+    "mte_se_at": [0.6031169062406827, 0.25491873204481685, 0.5260978405762381],
+    "share_ate_weight_outside_support": 0.000999000999000999,
+    "share_att_weight_outside_support": 0.0018383958158111231,
+    "share_atu_weight_outside_support": 0,
+    "narrow_n": 719,
+    "narrow_p_min": 0.29139661876842909,
+    "narrow_p_max": 0.83211283980229789,
+    "narrow_n_grid_in_support": 541,
+    "narrow_ate": {
+      "names": ["est", "se"],
+      "values": [2.7263808131056031, 3.7286981045644763]
+    },
+    "narrow_share_ate_weight_outside_support": 0.45954045954045952,
+    "narrow_att": {
+      "names": ["est", "se"],
+      "values": [3.4980413947144706, 4.932240228949774]
+    },
+    "narrow_share_att_weight_outside_support": 0.51148569799764665,
+    "narrow_atu": {
+      "names": ["est", "se"],
+      "values": [1.7021636570282048, 2.4696854231225847]
+    },
+    "narrow_share_atu_weight_outside_support": 0.39059407861549805,
+    "narrow_late_support": {
+      "names": ["est", "se"],
+      "values": [1.3822272079836182, 0.63071278509971551]
+    }
+  }
+}

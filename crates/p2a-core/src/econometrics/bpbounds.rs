@@ -27,38 +27,34 @@
 //!
 //! ## Bounds Without Monotonicity
 //!
-//! The Balke-Pearl bounds use linear programming to derive the tightest possible
-//! bounds compatible with the observed data:
+//! The Balke-Pearl bounds are the optimum of the linear program over the 16 response
+//! types; in closed form (Balke & Pearl 1997; Pearl 2009, eq. 8.14-8.15), with
+//! `p_{dy|z}` written `pdy|z`:
 //!
 //! ```text
-//! ACE_lower = max(
-//!     p00|1 - p00|0 - p01|0 - p10|0,
-//!     p00|0 - p00|1 - p01|1 - p10|1,
-//!     p11|1 - p11|0 - p01|0 - p10|0,
-//!     p11|0 - p11|1 - p01|1 - p10|1,
-//!     -1
-//! )
-//!
-//! ACE_upper = min(
-//!     p11|1 - p11|0 + p01|0 + p10|0,
-//!     p11|0 - p11|1 + p01|1 + p10|1,
-//!     p00|0 - p00|1 + p01|1 + p10|1,
-//!     p00|1 - p00|0 + p01|0 + p10|0,
-//!     1
-//! )
+//! ACE_lower = max(p11|1 + p00|0 - 1, p11|0 + p00|1 - 1,
+//!                 p11|0 - p11|1 - p01|1 - p10|0 - p01|0, p11|1 - p11|0 - p01|0 - p10|1 - p01|1,
+//!                 -p10|1 - p01|1, -p10|0 - p01|0,
+//!                 p00|1 - p10|1 - p01|1 - p10|0 - p00|0, p00|0 - p10|0 - p01|0 - p10|1 - p00|1)
+//! ACE_upper = min(1 - p10|1 - p01|0, 1 - p10|0 - p01|1,
+//!                 -p10|0 + p10|1 + p00|1 + p11|0 + p00|0, -p10|1 + p11|1 + p00|1 + p10|0 + p00|0,
+//!                 p11|1 + p00|1, p11|0 + p00|0,
+//!                 -p01|1 + p11|1 + p00|1 + p11|0 + p01|0, -p01|0 + p11|0 + p00|0 + p11|1 + p01|1)
 //! ```
 //!
 //! ## Bounds With Monotonicity
 //!
-//! When monotonicity holds (P(D=1|Z=1,U=u) >= P(D=1|Z=0,U=u) for all u),
-//! the bounds tighten to:
+//! When monotonicity holds (no defiers), the bounds are
 //!
 //! ```text
-//! ACE_lower = p00|0 - p00|1 - p01|1 - p10|1
-//! ACE_upper = p00|0 + p01|0 + p11|0 - p01|1
+//! ACE_lower = p11|1 + p00|0 - 1
+//! ACE_upper = 1 - p10|1 - p01|0
 //! ```
 //!
 //! These correspond to the bounds derived by Robins (1989) and Manski (1990).
+//!
+//! The Wald SE is the delta method with the within-arm covariance of P(Y=1|Z=z) and
+//! P(D=1|Z=z) (equal to 2SLS with HC0 on the expanded data).
 //!
 //! # References
 //!
@@ -81,7 +77,9 @@
 //!   Nonparametric bounds for the causal effect in a binary instrumental-variable
 //!   model. *Stata Journal*, 11(3), 345-367.
 //!
-//! R equivalent: `bpbounds::bpbounds()`
+//! R equivalent: `bpbounds::bpbounds()` (not installed on the reference machine; validated
+//! against a hand-computed table checked with the response-type LP,
+//! `validation/econometrics/bpbounds.md`)
 
 use ndarray::{Array1, ArrayView1};
 use rand::prelude::*;
@@ -90,6 +88,10 @@ use std::fmt;
 
 use crate::errors::{EconError, EconResult};
 use crate::resource;
+use crate::stats::robust::percentile_interval;
+
+/// Seed of the bootstrap resampling when [`BPBoundsConfig::seed`] is `None`.
+pub const DEFAULT_BOOTSTRAP_SEED: u64 = 42;
 
 /// Configuration for Balke-Pearl bounds estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,7 +115,7 @@ pub struct BPBoundsConfig {
     /// Must lie strictly between 0 and 1 when `bootstrap_ci` is set.
     pub alpha: f64,
 
-    /// Random seed for reproducibility
+    /// Seed of the bootstrap resampling (None: [`DEFAULT_BOOTSTRAP_SEED`])
     pub seed: Option<u64>,
 }
 
@@ -526,6 +528,8 @@ pub fn run_bp_bounds(
         compute_bounds_without_monotonicity(&cell_probs)
     };
 
+    warnings.extend(instrumental_inequality_warnings(&cell_probs));
+
     // Compute Wald estimate
     let marginals = cell_probs.marginals();
     let (wald_estimate, wald_se) = compute_wald_estimate(&cell_probs, &marginals);
@@ -594,63 +598,54 @@ pub fn run_bp_bounds(
 /// # Formula
 ///
 /// ```text
-/// ACE_lower = max(
-///     p00|1 - p00|0 - p01|0 - p10|0,
-///     p00|0 - p00|1 - p01|1 - p10|1,
-///     p11|1 - p11|0 - p01|0 - p10|0,
-///     p11|0 - p11|1 - p01|1 - p10|1,
-///     -1
-/// )
-///
-/// ACE_upper = min(
-///     p11|1 - p11|0 + p01|0 + p10|0,
-///     p11|0 - p11|1 + p01|1 + p10|1,
-///     p00|0 - p00|1 + p01|1 + p10|1,
-///     p00|1 - p00|0 + p01|0 + p10|0,
-///     1
-/// )
+/// ACE_lower = max(p11|1 + p00|0 - 1, p11|0 + p00|1 - 1,
+///                 p11|0 - p11|1 - p01|1 - p10|0 - p01|0, p11|1 - p11|0 - p01|0 - p10|1 - p01|1,
+///                 -p10|1 - p01|1, -p10|0 - p01|0,
+///                 p00|1 - p10|1 - p01|1 - p10|0 - p00|0, p00|0 - p10|0 - p01|0 - p10|1 - p00|1)
+/// ACE_upper = min(1 - p10|1 - p01|0, 1 - p10|0 - p01|1,
+///                 -p10|0 + p10|1 + p00|1 + p11|0 + p00|0, -p10|1 + p11|1 + p00|1 + p10|0 + p00|0,
+///                 p11|1 + p00|1, p11|0 + p00|0,
+///                 -p01|1 + p11|1 + p00|1 + p11|0 + p01|0, -p01|0 + p11|0 + p00|0 + p11|1 + p01|1)
 /// ```
+///
+/// (Balke & Pearl 1997; Pearl 2009, eq. 8.14-8.15), equal to the response-type LP.
 fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
-    // Extract probabilities for clarity
-    let p00_z0 = probs.p00_z0;
-    let p01_z0 = probs.p01_z0;
-    let p10_z0 = probs.p10_z0;
-    let p11_z0 = probs.p11_z0;
-    let p00_z1 = probs.p00_z1;
-    let p01_z1 = probs.p01_z1;
-    let p10_z1 = probs.p10_z1;
-    let p11_z1 = probs.p11_z1;
-
-    // Lower bound: max of 5 terms
-    // These come from linear programming constraints on response types
-    let lower_candidates = [
-        p00_z1 - p00_z0 - p01_z0 - p10_z0, // From LP constraint 1
-        p00_z0 - p00_z1 - p01_z1 - p10_z1, // From LP constraint 2
-        p11_z1 - p11_z0 - p01_z0 - p10_z0, // From LP constraint 3
-        p11_z0 - p11_z1 - p01_z1 - p10_z1, // From LP constraint 4
-        -1.0,                              // Trivial bound
+    let CellProbabilities {
+        p00_z0,
+        p01_z0,
+        p10_z0,
+        p11_z0,
+        p00_z1,
+        p01_z1,
+        p10_z1,
+        p11_z1,
+        ..
+    } = *probs;
+    let lower_terms = [
+        p11_z1 + p00_z0 - 1.0,
+        p11_z0 + p00_z1 - 1.0,
+        p11_z0 - p11_z1 - p01_z1 - p10_z0 - p01_z0,
+        p11_z1 - p11_z0 - p01_z0 - p10_z1 - p01_z1,
+        -p10_z1 - p01_z1,
+        -p10_z0 - p01_z0,
+        p00_z1 - p10_z1 - p01_z1 - p10_z0 - p00_z0,
+        p00_z0 - p10_z0 - p01_z0 - p10_z1 - p00_z1,
     ];
-
-    // Upper bound: min of 5 terms
-    let upper_candidates = [
-        p11_z1 - p11_z0 + p01_z0 + p10_z0, // From LP constraint 1
-        p11_z0 - p11_z1 + p01_z1 + p10_z1, // From LP constraint 2
-        p00_z0 - p00_z1 + p01_z1 + p10_z1, // From LP constraint 3
-        p00_z1 - p00_z0 + p01_z0 + p10_z0, // From LP constraint 4
-        1.0,                               // Trivial bound
+    let upper_terms = [
+        1.0 - p10_z1 - p01_z0,
+        1.0 - p10_z0 - p01_z1,
+        -p10_z0 + p10_z1 + p00_z1 + p11_z0 + p00_z0,
+        -p10_z1 + p11_z1 + p00_z1 + p10_z0 + p00_z0,
+        p11_z1 + p00_z1,
+        p11_z0 + p00_z0,
+        -p01_z1 + p11_z1 + p00_z1 + p11_z0 + p01_z0,
+        -p01_z0 + p11_z0 + p00_z0 + p11_z1 + p01_z1,
     ];
-
-    let lower = lower_candidates
+    let lower = lower_terms
         .iter()
-        .cloned()
+        .copied()
         .fold(f64::NEG_INFINITY, f64::max);
-    let upper = upper_candidates
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-
-    // Ensure bounds are valid (lower <= upper)
-    // This should always hold for valid probability distributions
+    let upper = upper_terms.iter().copied().fold(f64::INFINITY, f64::min);
     (lower.max(-1.0), upper.min(1.0))
 }
 
@@ -660,7 +655,7 @@ fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) 
 ///
 /// ```text
 /// ACE_lower = p00|0 - p00|1 - p01|1 - p10|1
-/// ACE_upper = p00|0 + p01|0 + p11|0 - p01|1
+/// ACE_upper = p00|1 + p01|1 + p11|1 - p01|0 = 1 - p10|1 - p01|0
 /// ```
 ///
 /// # Reference
@@ -669,21 +664,15 @@ fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) 
 fn compute_bounds_with_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
     let p00_z0 = probs.p00_z0;
     let p01_z0 = probs.p01_z0;
-    let _p10_z0 = probs.p10_z0;
-    let p11_z0 = probs.p11_z0;
     let p00_z1 = probs.p00_z1;
     let p01_z1 = probs.p01_z1;
     let p10_z1 = probs.p10_z1;
-    let _p11_z1 = probs.p11_z1;
+    let p11_z1 = probs.p11_z1;
 
     // Under monotonicity, bounds simplify
     // These are the Manski-Robins bounds
-    let lower = p00_z0 - p00_z1 - p01_z1 - p10_z1;
-    let upper = p00_z0 + p01_z0 + p11_z0 - p01_z1;
-
-    // Alternative formulation (equivalent):
-    // lower = P(Y=1|Z=0) - P(Y=1|Z=1) - P(D=0|Z=1)
-    // upper = P(Y=1|Z=0) - P(Y=1|Z=1) + P(D=0|Z=0)
+    let lower = p00_z0 - p00_z1 - p01_z1 - p10_z1; // = p11|1 + p00|0 - 1
+    let upper = p00_z1 + p01_z1 + p11_z1 - p01_z0; // = 1 - p10|1 - p01|0
 
     // Clamp to [-1, 1] for safety
     (lower.max(-1.0).min(1.0), upper.max(-1.0).min(1.0))
@@ -712,9 +701,8 @@ fn compute_wald_estimate(
         f64::NAN
     };
 
-    // Standard error using delta method
-    // SE(Wald) = sqrt[ Var(num) / denom^2 + num^2 * Var(denom) / denom^4 ]
-    //          ≈ SE(ITT_Y) / |ITT_D|  (simplified)
+    // Standard error by the delta method:
+    // Var = Var(num) / den^2 + num^2 Var(den) / den^4 - 2 num Cov(num, den) / den^3
 
     let n_z0 = probs.n_z0 as f64;
     let n_z1 = probs.n_z1 as f64;
@@ -731,7 +719,12 @@ fn compute_wald_estimate(
     let se = if denominator.abs() > 1e-10 {
         let denom2 = denominator * denominator;
         let denom4 = denom2 * denom2;
-        (var_numerator / denom2 + numerator * numerator * var_denominator / denom4).sqrt()
+        // within-arm covariance of P(Y=1|Z=z) and P(D=1|Z=z): (p11|z - p_y p_d) / n_z
+        let cov = (probs.p11_z0 - marginals.p_y1_z0 * marginals.p_d1_z0) / n_z0
+            + (probs.p11_z1 - marginals.p_y1_z1 * marginals.p_d1_z1) / n_z1;
+        let var = var_numerator / denom2 + numerator * numerator * var_denominator / denom4
+            - 2.0 * numerator * cov / (denom2 * denominator);
+        var.max(0.0).sqrt()
     } else {
         f64::NAN
     };
@@ -757,7 +750,43 @@ fn validate_bootstrap_config(config: &BPBoundsConfig) -> EconResult<()> {
     Ok(())
 }
 
-/// Compute bootstrap confidence intervals for the bounds.
+/// The type-7 percentile interval at level `1 - alpha` (R's `quantile(type = 7)`) of
+/// bootstrap draws; NaN is refused.
+fn bootstrap_interval(draws: &[f64], alpha: f64) -> EconResult<(f64, f64)> {
+    // percentile_interval sorts its own copy and refuses NaN draws
+    percentile_interval(draws, 1.0 - alpha)
+}
+
+/// Pearl's instrumental inequality for binary Z, D and Y: for each `d`,
+/// `sum_y max_z P(Y = y, D = d | Z = z) <= 1`. Returns one warning per failing `d` (with
+/// a `1e-12` tolerance). A violation means the exclusion restriction or the randomization
+/// of Z fails; the Balke-Pearl bounds may then cross, but they need not, so the
+/// inequality is tested directly rather than inferred from the bounds.
+fn instrumental_inequality_warnings(probs: &CellProbabilities) -> Vec<String> {
+    let sums = [
+        (
+            0,
+            probs.p00_z0.max(probs.p00_z1) + probs.p01_z0.max(probs.p01_z1),
+        ),
+        (
+            1,
+            probs.p10_z0.max(probs.p10_z1) + probs.p11_z0.max(probs.p11_z1),
+        ),
+    ];
+    sums.iter()
+        .filter(|&&(_, sum)| sum > 1.0 + 1e-12)
+        .map(|&(d, sum)| {
+            format!(
+                "the instrumental inequality fails (d = {d}: {sum:.4} > 1): the exclusion \
+                 restriction or randomization of Z is violated; the Balke-Pearl bounds are \
+                 not valid"
+            )
+        })
+        .collect()
+}
+
+/// Compute bootstrap confidence intervals for the bounds (seeded; `seed = None` uses
+/// [`DEFAULT_BOOTSTRAP_SEED`]).
 fn compute_bootstrap_ci(
     z: &ArrayView1<f64>,
     d: &ArrayView1<f64>,
@@ -765,10 +794,7 @@ fn compute_bootstrap_ci(
     config: &BPBoundsConfig,
 ) -> EconResult<(Option<(f64, f64)>, Option<(f64, f64)>, Option<(f64, f64)>)> {
     let n = z.len();
-    let mut rng: StdRng = match config.seed {
-        Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(config.seed.unwrap_or(DEFAULT_BOOTSTRAP_SEED));
 
     let mut lower_bounds =
         resource::try_with_capacity::<f64>(config.n_bootstrap, "bootstrap lower bounds")?;
@@ -818,19 +844,8 @@ fn compute_bootstrap_ci(
         return Ok((None, None, None));
     }
 
-    // Sort for percentile method
-    lower_bounds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    upper_bounds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let n_boot = lower_bounds.len();
-    let lower_idx = ((config.alpha / 2.0) * n_boot as f64).floor() as usize;
-    let upper_idx = ((1.0 - config.alpha / 2.0) * n_boot as f64).ceil() as usize - 1;
-
-    let lower_idx = lower_idx.min(n_boot - 1);
-    let upper_idx = upper_idx.min(n_boot - 1);
-
-    let lower_ci = (lower_bounds[lower_idx], lower_bounds[upper_idx]);
-    let upper_ci = (upper_bounds[lower_idx], upper_bounds[upper_idx]);
+    let lower_ci = bootstrap_interval(&lower_bounds, config.alpha)?;
+    let upper_ci = bootstrap_interval(&upper_bounds, config.alpha)?;
 
     // Overall CI: most conservative interval
     let overall_ci = (lower_ci.0, upper_ci.1);
@@ -861,6 +876,7 @@ pub fn bp_bounds_from_probs(probs: CellProbabilities, monotonicity: bool) -> BPB
     if monotonicity && !monotonicity_satisfied {
         warnings.push("Monotonicity assumed but may not hold in data.".to_string());
     }
+    warnings.extend(instrumental_inequality_warnings(&probs));
 
     BPBoundsResult {
         ace_lower,
@@ -1066,36 +1082,6 @@ mod tests {
         println!("{}", result);
     }
 
-    fn pinned_bp_result() -> BPBoundsResult {
-        let (z, d, y) = create_test_data();
-        let config = BPBoundsConfig {
-            monotonicity: false,
-            bootstrap_ci: true,
-            n_bootstrap: 500,
-            alpha: 0.05,
-            seed: Some(42),
-        };
-        run_bp_bounds(&z.view(), &d.view(), &y.view(), config).unwrap()
-    }
-
-    /// Seeded percentile intervals captured from the current implementation.
-    #[test]
-    fn test_bp_bounds_bootstrap_ci_pinned_seed42() {
-        let r = pinned_bp_result();
-        assert_eq!(
-            r.ace_lower_ci,
-            Some((-0.23737373737373735, 0.4322250639386189))
-        );
-        assert_eq!(
-            r.ace_upper_ci,
-            Some((-0.6133333333333334, 0.12030075187969924))
-        );
-        assert_eq!(
-            r.overall_ci,
-            Some((-0.23737373737373735, 0.12030075187969924))
-        );
-    }
-
     #[test]
     fn test_run_bp_bounds_with_bootstrap() {
         let (z, d, y) = create_test_data();
@@ -1214,69 +1200,189 @@ mod tests {
         println!("Wald: {:.4}", result.wald_estimate);
     }
 
-    /// Validation test: compare with known results from R bpbounds package
-    #[test]
-    fn test_validate_against_r() {
-        // Data from bpbounds R package vignette
-        // This is a simplified version of the vitamin A supplementation example
+    fn probs(c: [usize; 8]) -> CellProbabilities {
+        let (n0, n1) = (c[..4].iter().sum::<usize>(), c[4..].iter().sum::<usize>());
+        let (a, b) = (n0 as f64, n1 as f64);
+        CellProbabilities {
+            p00_z0: c[0] as f64 / a,
+            p01_z0: c[1] as f64 / a,
+            p10_z0: c[2] as f64 / a,
+            p11_z0: c[3] as f64 / a,
+            p00_z1: c[4] as f64 / b,
+            p01_z1: c[5] as f64 / b,
+            p10_z1: c[6] as f64 / b,
+            p11_z1: c[7] as f64 / b,
+            n_z0: n0,
+            n_z1: n1,
+        }
+    }
 
-        // Cell counts (we'll convert to probabilities)
-        // Z=0: assigned to control
-        // Z=1: assigned to treatment
-        // D=0: did not take vitamin A
-        // D=1: took vitamin A
-        // Y=0: survived
-        // Y=1: died (outcome of interest in original study was mortality)
-
-        // For this test, use synthetic data with known bounds
-        let probs = CellProbabilities {
-            // Z=0 stratum
-            p00_z0: 0.50, // D=0, Y=0 | Z=0
-            p01_z0: 0.10, // D=0, Y=1 | Z=0
-            p10_z0: 0.30, // D=1, Y=0 | Z=0
-            p11_z0: 0.10, // D=1, Y=1 | Z=0
-            // Z=1 stratum
-            p00_z1: 0.10, // D=0, Y=0 | Z=1
-            p01_z1: 0.05, // D=0, Y=1 | Z=1
-            p10_z1: 0.70, // D=1, Y=0 | Z=1
-            p11_z1: 0.15, // D=1, Y=1 | Z=1
-            n_z0: 1000,
-            n_z1: 1000,
-        };
-
-        // Compute bounds without monotonicity
-        let (lower, upper) = compute_bounds_without_monotonicity(&probs);
-
-        // Bounds should satisfy basic properties
-        assert!((-1.0..=1.0).contains(&lower));
-        assert!((-1.0..=1.0).contains(&upper));
-        assert!(lower <= upper);
-
-        // Wald estimate
-        let marginals = probs.marginals();
-        let (wald, _) = compute_wald_estimate(&probs, &marginals);
-
-        // Manual Wald calculation for verification:
-        // P(Y=1|Z=0) = 0.10 + 0.10 = 0.20
-        // P(Y=1|Z=1) = 0.05 + 0.15 = 0.20
-        // P(D=1|Z=0) = 0.30 + 0.10 = 0.40
-        // P(D=1|Z=1) = 0.70 + 0.15 = 0.85
-        // Wald = (0.20 - 0.20) / (0.85 - 0.40) = 0.0
-        let expected_wald =
-            (marginals.p_y1_z1 - marginals.p_y1_z0) / (marginals.p_d1_z1 - marginals.p_d1_z0);
-
-        assert!((wald - expected_wald).abs() < 1e-10);
-
-        println!("Validation test:");
-        println!("  Bounds: [{:.4}, {:.4}]", lower, upper);
-        println!("  Wald:   {:.4}", wald);
-        println!(
-            "  P(Y=1|Z=0) = {:.4}, P(Y=1|Z=1) = {:.4}",
-            marginals.p_y1_z0, marginals.p_y1_z1
+    fn close(a: f64, b: f64, what: &str) {
+        assert!(
+            (a - b).abs() <= 1e-12 * b.abs().max(1.0),
+            "{what}: {a} vs {b}"
         );
-        println!(
-            "  P(D=1|Z=0) = {:.4}, P(D=1|Z=1) = {:.4}",
-            marginals.p_d1_z0, marginals.p_d1_z1
+    }
+
+    /// Expand a 2x2x2 count table (order as in `probs`) to raw rows and run the raw-data path.
+    fn bounds_from_rows(counts: [usize; 8], monotonicity: bool) -> BPBoundsResult {
+        let mut rows = Vec::new();
+        for (cell, &c) in counts.iter().enumerate() {
+            let (zv, dv, yv) = (
+                (cell / 4) as f64,
+                ((cell / 2) % 2) as f64,
+                (cell % 2) as f64,
+            );
+            rows.extend(std::iter::repeat_n([zv, dv, yv], c));
+        }
+        let col = |j: usize| Array1::from_iter(rows.iter().map(|r| r[j]));
+        let (z, d, y) = (col(0), col(1), col(2));
+        let cfg = BPBoundsConfig {
+            monotonicity,
+            bootstrap_ci: false,
+            ..Default::default()
+        };
+        run_bp_bounds(&z.view(), &d.view(), &y.view(), cfg).unwrap()
+    }
+
+    fn warns_inequality(r: &BPBoundsResult) -> bool {
+        r.warnings
+            .iter()
+            .any(|w| w.contains("instrumental inequality fails"))
+    }
+
+    /// A table that violates the instrumental inequality (P(Y=0, D=0 | Z=0) = 0.9 and
+    /// P(Y=1, D=0 | Z=1) = 0.9 sum to 1.8 > 1) gives crossing bounds, and the result says why.
+    /// Fails before: no warning named the cause.
+    #[test]
+    fn test_bpbounds_crossing_bounds_warn() {
+        let counts = [18, 1, 0, 1, 1, 18, 1, 0];
+        let free = bp_bounds_from_probs(probs(counts), false);
+        assert!(free.ace_lower > free.ace_upper && free.bounds_width < 0.0);
+        assert!(warns_inequality(&free), "{:?}", free.warnings);
+        let r = bounds_from_rows(counts, false);
+        assert!(r.ace_lower > r.ace_upper);
+        assert!(warns_inequality(&r), "{:?}", r.warnings);
+        // a table satisfying it (vitamin A) carries no such warning
+        let ok = bp_bounds_from_probs(probs([74, 11514, 0, 0, 34, 2385, 12, 9663]), false);
+        assert!(!warns_inequality(&ok), "{:?}", ok.warnings);
+    }
+
+    /// The inequality can fail while the bounds do not cross: z0 = (0, 0, 0, 5),
+    /// z1 = (0, 0, 1, 4) gives, for d = 1, max_z P(y=0, d=1 | z) + max_z P(y=1, d=1 | z)
+    /// = 0.2 + 1.0 = 1.2 > 1, yet bounds [0.2, 0.6]. The warning must still appear, on both
+    /// paths and in both monotonicity modes. Fails before: only crossing bounds warned.
+    #[test]
+    fn test_bpbounds_inequality_fails_without_crossing() {
+        let counts = [0, 0, 0, 5, 0, 0, 1, 4];
+        for monotonicity in [false, true] {
+            let from_probs = bp_bounds_from_probs(probs(counts), monotonicity);
+            let from_rows = bounds_from_rows(counts, monotonicity);
+            for r in [&from_probs, &from_rows] {
+                assert!(r.ace_lower <= r.ace_upper, "mono {monotonicity}");
+                assert!(warns_inequality(r), "mono {monotonicity}: {:?}", r.warnings);
+                assert!(
+                    r.warnings.iter().any(|w| w.contains("d = 1: 1.2000 > 1")),
+                    "{:?}",
+                    r.warnings
+                );
+            }
+        }
+        let free = bp_bounds_from_probs(probs(counts), false);
+        close(free.ace_lower, 0.2, "lower");
+        close(free.ace_upper, 0.6, "upper");
+    }
+
+    /// Balke-Pearl closed form on two hand-computed tables (bpbounds is not installed;
+    /// checked during planning against the exact response-type LP, lpSolve 5.6.23, to
+    /// 5.5e-17). Derivation of Table 2 in validation/econometrics/bpbounds.md. Replaces
+    /// test_validate_against_r, which compared with no R value.
+    #[test]
+    fn test_bpbounds_closed_form_tables() {
+        for (label, counts, wald, mono_lower) in [
+            (
+                "vitamin A",
+                [74, 11514, 0, 0, 34, 2385, 12, 9663],
+                0.0032280386285733,
+                -0.1946228482113902,
+            ),
+            ("table 2", [12, 10, 8, 10, 6, 4, 10, 20], 1.0 / 3.0, -0.2),
+        ] {
+            let mono = bp_bounds_from_probs(probs(counts), true);
+            close(mono.wald_estimate, wald, label);
+            close(mono.ace_lower, mono_lower, label);
+            assert!(mono.monotonicity_satisfied, "{label}");
+            let (lower, upper, mono_upper, wald_se) = match label {
+                "vitamin A" => (
+                    -0.1946228482113902,
+                    0.00539368891445724,
+                    0.00539368891445724,
+                    0.0011591629284325984,
+                ),
+                _ => (-0.2, 0.5, 0.5, 0.3683044231992716),
+            };
+            let free = bp_bounds_from_probs(probs(counts), false);
+            close(free.ace_lower, lower, label);
+            close(free.ace_upper, upper, label);
+            close(mono.ace_upper, mono_upper, label);
+            close(mono.wald_se.unwrap(), wald_se, label);
+            // never inverted on data the IV model can generate
+            assert!(free.bounds_width >= 0.0, "{label}");
+        }
+    }
+
+    /// The interval is the type-7 percentile interval (R quantile(type = 7)). Fails before:
+    /// the index rule floor(alpha/2 B) / ceil((1 - alpha/2) B) - 1 gave 0.1 and 1.0 on draws
+    /// 0.1, ..., 1.0 (type 7: 0.1225, 0.9775).
+    #[test]
+    fn test_bp_bounds_percentile_rule() {
+        let draws: Vec<f64> = (1..=10).rev().map(|i| i as f64 / 10.0).collect(); // unsorted on purpose
+        let (lo, hi) = bootstrap_interval(&draws, 0.05).unwrap();
+        assert!(
+            (lo - 0.1225).abs() < 1e-15 && (hi - 0.9775).abs() < 1e-15,
+            "{lo} {hi}"
+        );
+    }
+
+    /// No seed means DEFAULT_BOOTSTRAP_SEED (42), not OS entropy, and the reported intervals
+    /// are the type-7 intervals of the replayed replicate bounds.
+    #[test]
+    fn test_bp_bounds_bootstrap_ci_seeded() {
+        let (z, d, y) = create_test_data();
+        let run = |seed: Option<u64>| {
+            let c = BPBoundsConfig {
+                n_bootstrap: 500,
+                seed,
+                ..Default::default()
+            };
+            run_bp_bounds(&z.view(), &d.view(), &y.view(), c).unwrap()
+        };
+        let (a, b) = (run(None), run(Some(DEFAULT_BOOTSTRAP_SEED)));
+        assert_eq!(
+            (a.ace_lower_ci, a.ace_upper_ci),
+            (b.ace_lower_ci, b.ace_upper_ci)
+        );
+        let mut rng = StdRng::seed_from_u64(DEFAULT_BOOTSTRAP_SEED);
+        let n = z.len();
+        let (mut lows, mut ups) = (Vec::new(), Vec::new());
+        for _ in 0..500 {
+            let idx: Vec<usize> = (0..n).map(|_| rng.gen_range(0..n)).collect();
+            let pick = |v: &Array1<f64>| Array1::from_iter(idx.iter().map(|&i| v[i]));
+            if let Ok(p) =
+                CellProbabilities::from_data(&pick(&z).view(), &pick(&d).view(), &pick(&y).view())
+            {
+                let (l, u) = compute_bounds_without_monotonicity(&p);
+                lows.push(l);
+                ups.push(u);
+            }
+        }
+        assert_eq!(
+            a.ace_lower_ci,
+            Some(bootstrap_interval(&lows, 0.05).unwrap())
+        );
+        assert_eq!(
+            a.ace_upper_ci,
+            Some(bootstrap_interval(&ups, 0.05).unwrap())
         );
     }
 

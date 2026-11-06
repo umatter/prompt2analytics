@@ -1,197 +1,78 @@
-# Marginal Treatment Effects (MTE) Validation
+# Marginal Treatment Effects (MTE) by local IV
 
-## Method Overview
+**File:** `crates/p2a-core/src/econometrics/ivmte.rs` (`run_ivmte`, `run_ivmte_multi_z`, `ivmte`; MCP tool `iv_mte`).
+**Status:** R-pinned to the Heckman-Vytlacil formulas written out in R (registry
+`validation/methods/econ_gmm_mte.json`, entry `ivmte`), not to an R package.
 
-The Marginal Treatment Effects (MTE) framework connects IV estimation to a choice-theoretic model of treatment selection. It reveals heterogeneity in treatment effects by showing that different IV estimands (LATE, ATT, ATE) are weighted averages of the MTE curve.
+## Method
 
-**Key concepts:**
-- **MTE(u)**: Treatment effect for individuals at the margin of selection (indifferent at unobserved U=u)
-- **Selection equation**: D = 1{P(Z) >= U} where P(Z) is propensity given instrument
-- **LATE, ATT, ATE**: All are integrals of MTE with different weights
+Selection `D = 1{P(Z) >= U_D}`, `U_D ~ U(0, 1)`; `MTE(u) = dE[Y | P = u] / du` (local IV).
 
-## Implementation Details
+1. First stage: P(Z) by probit (default) or logit through the shared GLM (`glm.fit`'s deviance rule; the probit
+   also iterates to a relative coefficient change of 1e-10), or a linear probability model clipped to [0, 1].
+   Regressors `[1, Z]`, plus X with `propensity_covariates`.
+2. Second stage: least squares of Y on `[1, P, .., P^d]`, plus X with `include_covariates`.
+3. `MTE(u) = sum_j j gamma_j u^(j-1)` on the grid `u_i = (i + 0.5) / n_grid`.
+4. Estimands (Heckman & Vytlacil 2005, Table IB), weights normalised to sum to one:
+   - ATE `h(u) = 1`;
+   - ATT `h(u) = Pr(P > u) / E[P]`;
+   - ATU `h(u) = Pr(P <= u) / E[1 - P]`;
+   - LATE(p_min,p_max) `h(u) = 1{p_min <= u <= p_max}`;
+   - PRTE: the user's `prte_weights` (for a policy P -> P', `Pr(P' > u) - Pr(P > u)`).
+5. Delta method `se = sqrt(g' V g)`, `g = sum_i h(u_i) [(j + 1) u_i^j]`, V the HC1 covariance of the polynomial
+   coefficients (`sandwich::vcovHC(type = "HC1")`); first-stage error not included. Pointwise curve SEs and CIs.
+6. Bootstrap (`bootstrap_se`, `n_bootstrap >= 2`): units resampled with ChaCha8 seeded by `seed` (default 42),
+   both stages refitted, SD and type-7 percentile intervals for every estimand and every curve point; failed
+   replicates are counted and reported, resource stops propagate.
+7. ATE, ATT and ATU integrate the polynomial over all of [0, 1]; outside [p_min, p_max] it is extrapolated. The
+   result reports each estimand's weight share outside the support and warns above 1%. A support that contains no
+   grid point is an error (LATE undefined).
 
-**File:** `crates/p2a-core/src/econometrics/ivmte.rs`
+R equivalent: no single function. The point-identified local-IV MTE of Brinch, Mogstad & Wiswall (2017), as Stata
+`mtefe` with a polynomial; R `ivmte` (Shea & Torgovitsky) also point-identifies with a parametric MTR but solves an
+LP and estimates something else (bounds), so it is not the reference. Validated against the formulas written out in
+R (`validation/r/cases/econ_mte.R`).
 
-**Rust API:**
-```rust
-pub fn run_ivmte(
-    y: &ArrayView1<f64>,           // Outcome
-    d: &ArrayView1<f64>,           // Treatment (binary 0/1)
-    z: &ArrayView1<f64>,           // Instrument
-    x: Option<&ArrayView2<f64>>,   // Covariates (optional)
-    config: IVMTEConfig,
-) -> EconResult<IVMTEResult>
-```
+## Cases
 
-**MCP Tool:** `iv_mte`
+- `mte_local_iv`: `mte_sim.csv` (n = 2000, `MTE(u) = 2.5 - 2u`), probit on (z1, z2), cubic in P, 1001-point grid;
+  also the narrow-support subsample |z1| < 0.5 (719 rows) and the PRTE of P' = min(P + 0.1, 1).
+- `mte_bootstrap`: rows 1-400 of `mte_sim.csv`, 25 replicates from the committed index matrix
+  `mte_boot_indices.csv`.
 
-## Reference Implementation
+## Values (four digits; the JSON is canonical)
 
-**R Package:** `ivmte` (Shea & Torgovitsky, 2021)
-- CRAN: https://cran.r-project.org/package=ivmte
-- Version: 1.4.0
+| Estimand | Estimate | HC1 delta SE |
+|---|---|---|
+| ATE | 1.3861 | 0.1624 |
+| ATT | 1.8301 | 0.2054 |
+| ATU | 0.8578 | 0.1996 |
+| LATE(p_min,p_max) | 1.3847 | 0.1617 |
+| PRTE (P + 0.1) | 1.1977 | 0.1444 |
 
-### R Reference Code
+Narrow support (|z1| < 0.5): support [0.2914, 0.8321], 541 of 1001 grid points; weight outside the support
+ATE 46.0%, ATT 51.1%, ATU 39.1%; ATE 2.7264 (SE 3.7287).
 
-```r
-# Install if needed
-# install.packages("ivmte")
+Bootstrap (n = 400, B = 25): ATE 1.3031, SD 0.3246, percentile interval [0.7371, 1.8398].
 
-library(ivmte)
+**Tolerance.** `validation/README.md`: n = 2000 estimates 1e-10, SEs and shares 1e-8; n = 719 and n = 400 estimates
+1e-8, SEs and CIs 1e-6 (relative); first-stage coefficients `Tol::iterative(1e-10)` against the probit MLE (the R
+case polishes glm's IRLS result, which stops about 5e-11 short of the MLE, with three Newton steps); the
+second-stage polynomial coefficients and MTE(u) `Tol::iterative(1e-8)`, because the cubic amplifies the first
+stage's convergence error (1.6e-11 in a probit coefficient moves the P^3 coefficient by 4.7e-9 relative).
 
-# Generate test data with known MTE
-set.seed(12345)
-n <- 500
+## Tests (`econometrics::ivmte::tests`)
 
-# Instrument
-z <- rnorm(n)
-
-# Unobserved heterogeneity (resistance to treatment)
-u <- runif(n)
-
-# Propensity score: P(Z) = Phi(0.5 + 0.8*Z)
-p_z <- pnorm(0.5 + 0.8 * z)
-
-# Treatment assignment: D = 1{P(Z) >= U}
-d <- as.numeric(p_z >= u)
-
-# Potential outcomes with heterogeneous treatment effects
-# Y(0) = 1 + noise
-# Y(1) = 1 + (1.5 + 0.5*U) + noise  (MTE = 1.5 + 0.5*U)
-y0 <- 1 + rnorm(n, 0, 0.5)
-y1 <- 1 + (1.5 + 0.5 * u) + rnorm(n, 0, 0.5)
-
-# Observed outcome
-y <- d * y1 + (1 - d) * y0
-
-# Create data frame
-data <- data.frame(y = y, d = d, z = z)
-
-# Run ivmte
-result <- ivmte(
-  data = data,
-  target = "ate",
-  m0 = ~ 1,
-  m1 = ~ 1 + u + I(u^2),
-  propensity = d ~ z,
-  instrument.name = "z",
-  outcome.name = "y",
-  treatment.name = "d",
-  monocap.m0 = FALSE,
-  monocap.m1 = FALSE
-)
-
-# Print results
-print(result)
-```
-
-## Test Cases
-
-### Test Case 1: Synthetic Data with Known MTE
-
-**Data Generation:**
-- n = 200 observations
-- True MTE(u) = 1.5 + 0.5*u (linear, increasing in u)
-- Propensity: P(Z) = 0.5 + 0.3*Z
-- Selection: D = 1{P(Z) >= U}
-
-**Expected Results:**
-- ATE should be approximately 1.75 (integral of MTE)
-- MTE curve should be increasing
-
-### Test Case 2: Propensity Model Comparison
-
-Compare results across different propensity models:
-- Probit (default, as in Heckman-Vytlacil)
-- Logit
-- Linear probability model
-
-All should give similar ATE estimates with well-specified instruments.
-
-## Validation Results
-
-### Rust vs R Comparison
-
-| Estimand | Rust | R (ivmte) | Absolute Diff | Relative Diff |
-|----------|------|-----------|---------------|---------------|
-| ATE | TBD | TBD | TBD | TBD |
-| ATT | TBD | TBD | TBD | TBD |
-| ATU | TBD | TBD | TBD | TBD |
-| LATE | TBD | TBD | TBD | TBD |
-
-### Tolerance Thresholds
-
-| Sample Size | Coefficients | Standard Errors | p-values |
-|-------------|--------------|-----------------|----------|
-| n = 200 | 0.05 | 0.02 | 0.05 |
-| n = 1000 | 0.01 | 0.005 | 0.01 |
-| n = 5000 | 0.001 | 0.001 | 0.001 |
-
-**Note:** MTE estimation is inherently more variable than standard IV due to the
-polynomial approximation and propensity score estimation stages.
-
-## Rust Test Functions
-
-Location: `crates/p2a-core/src/econometrics/ivmte.rs`
-
-```rust
-#[test]
-fn test_ivmte_basic()
-
-#[test]
-fn test_ivmte_propensity_models()
-
-#[test]
-fn test_ivmte_polynomial_degree()
-
-#[test]
-fn test_treatment_effect_relationships()
-
-#[test]
-fn test_mte_curve()
-
-#[test]
-fn test_weights_sum_to_one()
-```
+R-pinned: `test_validate_mte_local_iv_estimands`, `test_validate_mte_narrow_support`, `test_validate_mte_prte_shift`,
+`test_validate_mte_bootstrap_indices`. Properties: `test_mte_rejects_degenerate_grid_and_support`,
+`test_mte_estimand_and_prte_validation`, `test_mte_bootstrap_seeded`, `test_mte_bootstrap_rejects_one_replication`,
+`test_mte_stops_when_cancelled_in_bootstrap`, the option-parsing tests and the module's earlier tests.
 
 ## References
 
-### Primary Sources
-
-- Heckman, J.J., & Vytlacil, E. (2005). Structural equations, treatment effects,
-  and econometric policy evaluation. *Econometrica*, 73(3), 669-738.
-  https://doi.org/10.1111/j.1468-0262.2005.00594.x
-
-- Heckman, J.J., & Vytlacil, E.J. (2007). Econometric evaluation of social
-  programs, Part I: Causal models, structural models and econometric policy
-  evaluation. *Handbook of Econometrics*, 6, 4779-4874.
-  https://doi.org/10.1016/S1573-4412(07)06070-9
-
-### Implementation References
-
-- Cornelissen, T., Dustmann, C., Raute, A., & Schonberg, U. (2016). From LATE
-  to MTE: Alternative methods for the evaluation of policy interventions.
-  *Labour Economics*, 41, 47-60.
-  https://doi.org/10.1016/j.labeco.2016.06.004
-
-- Mogstad, M., Santos, A., & Torgovitsky, A. (2018). Using instrumental
-  variables for inference about policy relevant treatment parameters.
-  *Econometrica*, 86(5), 1589-1619.
-  https://doi.org/10.3982/ECTA15463
-
-### R Package
-
-- Shea, J., & Torgovitsky, A. (2021). ivmte: Instrumental Variables for
-  Marginal Treatment Effects. R package version 1.4.0.
-  https://CRAN.R-project.org/package=ivmte
-
-## Status
-
-| Aspect | Status |
-|--------|--------|
-| Implementation | Complete |
-| Unit Tests | Complete |
-| MCP Tool | Complete |
-| R Validation | Pending |
-| Documentation | Complete |
+- Heckman, J.J., & Vytlacil, E. (2005). Structural equations, treatment effects, and econometric policy
+  evaluation. *Econometrica*, 73(3), 669-738. https://doi.org/10.1111/j.1468-0262.2005.00594.x
+- Brinch, C.N., Mogstad, M., & Wiswall, M. (2017). Beyond LATE with a discrete instrument. *Journal of Political
+  Economy*, 125(4), 985-1039. https://doi.org/10.1086/692712
+- Cornelissen, T., Dustmann, C., Raute, A., & Schönberg, U. (2016). From LATE to MTE. *Labour Economics*, 41,
+  47-60. https://doi.org/10.1016/j.labeco.2016.06.004

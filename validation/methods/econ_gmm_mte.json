@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "general_gmm",
+      "name": "General GMM: linear IV (two-step, iterative, CUE, one-step fixed W; iid / MDS / HAC) and normal-distribution moments",
+      "category": "econometrics",
+      "reference": "gmm::gmm 1.9.1 (type, vcov, wmatrix, weightsMatrix, centeredVcov, kernel, bw, prewhite), gmm::specTest",
+      "doc": "validation/econometrics/general_gmm.md",
+      "cases": [
+        "gmm_linear_iv"
+      ],
+      "tests": [
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_twostep",
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_iid",
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_iterative",
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_hac",
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_cue",
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_ident",
+        "p2a-core::econometrics::general_gmm::tests::test_validate_gmm_normal_moments"
+      ],
+      "quantities": [
+        "coefficients",
+        "SE",
+        "J",
+        "J p-value",
+        "HAC lag count"
+      ],
+      "tolerance": "validation/README.md at n = 500 (coefficients 1e-8, SE/J/p 1e-6); iterated, CUE and Gauss-Newton fits use Tol::iterative with the same values, documented per test",
+      "deviations": [
+        {
+          "finding": "ECON-68",
+          "quantity": "J for a fixed weighting matrix (ident_mds_J, fixedw_mds_J)",
+          "note": "gmm prints n g' Omega^-1 g for wmatrix = 'ident' and weightsMatrix; it is not chi-squared(q - k) for a non-optimal W, so p2a reports NaN; recorded, not pinned"
+        },
+        {
+          "finding": "ECON-68",
+          "quantity": "default HAC weight (vcov = HAC without kernel or bandwidth)",
+          "note": "p2a's default is the Bartlett kernel with floor(4 (n/100)^(2/9)) lags and no prewhitening, = gmm(kernel = 'Bartlett', bw = m + 1, prewhite = 0), pinned as twostep_hac_bartlett; gmm's default (Quadratic Spectral, bwAndrews, prewhite = 1) is not implemented: twostep_hac, twostep_hac_bw, cue_hac, cue_hac_bw are recorded, not pinned"
+        }
+      ],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ivmte",
+      "name": "Marginal treatment effects by local IV (probit/logit first stage, polynomial in P): ATE, ATT, ATU, LATE(p_min,p_max), PRTE; delta-method and bootstrap SEs",
+      "category": "econometrics",
+      "reference": "no R package (ivmte computes LP bounds; localIV not installed): glm probit polished to the MLE by Newton + lm cubic + Heckman & Vytlacil (2005) weights written out in R (validation/r/cases/econ_mte.R); delta-method SEs with sandwich::vcovHC(type = 'HC1')",
+      "doc": "validation/econometrics/ivmte.md",
+      "cases": [
+        "mte_local_iv",
+        "mte_bootstrap"
+      ],
+      "tests": [
+        "p2a-core::econometrics::ivmte::tests::test_validate_mte_local_iv_estimands",
+        "p2a-core::econometrics::ivmte::tests::test_validate_mte_narrow_support",
+        "p2a-core::econometrics::ivmte::tests::test_validate_mte_prte_shift",
+        "p2a-core::econometrics::ivmte::tests::test_validate_mte_bootstrap_indices"
+      ],
+      "quantities": [
+        "first-stage coefficients",
+        "MTE polynomial coefficients",
+        "p_min",
+        "p_max",
+        "ATE/ATT/ATU/LATE/PRTE estimates and delta SEs",
+        "MTE(u) and its SE",
+        "extrapolation shares",
+        "bootstrap SD, percentile CI and mean"
+      ],
+      "tolerance": "validation/README.md: n = 2000 estimates 1e-10, SEs and shares 1e-8; n = 719 and n = 400 estimates 1e-8, SEs and CIs 1e-6 (relative); first-stage coefficients Tol::iterative(1e-10) against the probit MLE (R: glm, then Newton); the second-stage polynomial coefficients and MTE(u) Tol::iterative(1e-8), because the cubic amplifies the first stage's convergence error",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}

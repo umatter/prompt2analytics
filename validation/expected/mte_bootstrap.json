@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "mte_bootstrap",
+  "area": "econometrics/mte",
+  "method": "MTE bootstrap: units resampled with a committed 400 x 25 index matrix, probit and cubic polynomial refitted per replicate; SD and type-7 percentile intervals",
+  "reference": "nonparametric bootstrap of the local IV MTE: rows resampled with the committed index matrix, glm probit and lm refitted; sd() and quantile(type = 7)",
+  "call": "for (b in 1:25) est(d[U[, b], ]) with est = probit + lm(y ~ P + P^2 + P^3) + HV weights",
+  "dataset": "validation/datasets/generated/mte_boot_indices.csv",
+  "datasets": ["validation/datasets/generated/mte_sim.csv", "validation/datasets/generated/mte_boot_indices.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "n": 400,
+    "replications": 25,
+    "estimate": {
+      "names": ["ate", "att", "atu", "late_support", "mte_mid"],
+      "values": [1.3031395995762929, 1.6161876863756248, 0.94589290429415662, 1.3138878907120588, 1.8877209249432743]
+    },
+    "boot_se": {
+      "names": ["ate", "att", "atu", "late_support", "mte_mid"],
+      "values": [0.32455621017519065, 0.35537235831412672, 0.43930854543108866, 0.30944785978284628, 0.52510543691186007]
+    },
+    "boot_ci_lower": {
+      "names": ["ate", "att", "atu", "late_support", "mte_mid"],
+      "values": [0.73712804399660647, 0.91143339390583122, 0.033059322702564634, 0.80553554088553003, 1.0588295421121621]
+    },
+    "boot_ci_upper": {
+      "names": ["ate", "att", "atu", "late_support", "mte_mid"],
+      "values": [1.8398379921582664, 2.1940109700321044, 1.699719910149144, 1.8108465361419843, 2.7615555221437207]
+    },
+    "boot_mean": {
+      "names": ["ate", "att", "atu", "late_support", "mte_mid"],
+      "values": [1.3130876760478984, 1.536745660298789, 1.0652757435644467, 1.3224047173791393, 1.8668113253560219]
+    }
+  }
+}

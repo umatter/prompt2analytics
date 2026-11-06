@@ -1,159 +1,76 @@
-# Balke-Pearl Bounds Validation
+# Balke-Pearl bounds
 
-## Method Overview
+**File:** `crates/p2a-core/src/econometrics/bpbounds.rs` (`run_bp_bounds`, `bp_bounds_from_probs`).
+**Status:** not R-pinned (closed form; hand-computed table). R's `bpbounds` is not installed on the reference
+machine; both tables below were checked during planning against the exact response-type LP (`lpSolve` 5.6.23: 16
+response types without monotonicity, 12 without defiers; agreement 5.5e-17).
 
-**Balke-Pearl bounds** provide sharp nonparametric bounds on the Average Causal Effect (ACE) using instrumental variables without assuming parametric models. These bounds are the tightest possible given only the observed data and the IV assumptions.
+## Formulas
 
-## Mathematical Framework
+Cell probabilities `p_{dy|z} = P(D = d, Y = y | Z = z)`.
 
-### Cell Probabilities
-For binary variables Z (instrument), D (treatment), Y (outcome):
-- p_{dy|z} = P(D=d, Y=y | Z=z)
-
-Eight cell probabilities: p00|0, p01|0, p10|0, p11|0, p00|1, p01|1, p10|1, p11|1
-
-### Bounds Without Monotonicity
+**Without monotonicity** (Balke & Pearl 1997; Pearl 2009, eq. 8.14-8.15):
 
 ```
-ACE_lower = max(
-    p00|1 - p00|0 - p01|0 - p10|0,
-    p00|0 - p00|1 - p01|1 - p10|1,
-    p11|1 - p11|0 - p01|0 - p10|0,
-    p11|0 - p11|1 - p01|1 - p10|1,
-    -1
-)
+ACE_lower = max( p11|1 + p00|0 - 1,
+                 p11|0 + p00|1 - 1,
+                 p11|0 - p11|1 - p01|1 - p10|0 - p01|0,
+                 p11|1 - p11|0 - p01|0 - p10|1 - p01|1,
+                 -p10|1 - p01|1,
+                 -p10|0 - p01|0,
+                 p00|1 - p10|1 - p01|1 - p10|0 - p00|0,
+                 p00|0 - p10|0 - p01|0 - p10|1 - p00|1 )
 
-ACE_upper = min(
-    p11|1 - p11|0 + p01|0 + p10|0,
-    p11|0 - p11|1 + p01|1 + p10|1,
-    p00|0 - p00|1 + p01|1 + p10|1,
-    p00|1 - p00|0 + p01|0 + p10|0,
-    1
-)
+ACE_upper = min( 1 - p10|1 - p01|0,
+                 1 - p10|0 - p01|1,
+                 -p10|0 + p10|1 + p00|1 + p11|0 + p00|0,
+                 -p10|1 + p11|1 + p00|1 + p10|0 + p00|0,
+                 p11|1 + p00|1,
+                 p11|0 + p00|0,
+                 -p01|1 + p11|1 + p00|1 + p11|0 + p01|0,
+                 -p01|0 + p11|0 + p00|0 + p11|1 + p01|1 )
 ```
 
-### Bounds With Monotonicity
+**With monotonicity** (no defiers): `ACE_lower = p11|1 + p00|0 - 1`, `ACE_upper = 1 - p10|1 - p01|0`.
 
-When assuming no defiers (P(D=1|Z=1,U=u) >= P(D=1|Z=0,U=u)):
-```
-ACE_lower = p00|0 - p00|1 - p01|1 - p10|1
-ACE_upper = p00|0 + p01|0 + p11|0 - p01|1
-```
+**Wald:** `(P(Y=1|Z=1) - P(Y=1|Z=0)) / (P(D=1|Z=1) - P(D=1|Z=0))`, SE by the delta method with the within-arm
+covariance `Cov = (p11|0 - P(Y=1|Z=0) P(D=1|Z=0)) / n_0 + (p11|1 - P(Y=1|Z=1) P(D=1|Z=1)) / n_1`:
+`Var = Var(num)/den^2 + num^2 Var(den)/den^4 - 2 num Cov / den^3` (equals 2SLS with HC0 on the expanded data).
 
-## Reference Implementation
+**Bootstrap:** units resampled (seeded; `seed = None` uses 42), type-7 percentile intervals (R `quantile(type =
+7)`); fewer than 100 valid replicates give no interval.
 
-**R package**: bpbounds (Ramsahai & Palmer)
-- URL: https://cran.r-project.org/package=bpbounds
-- Version tested: 0.1.5
+## Tables
 
-## Test Case 1: Synthetic Data with Known Structure
+| Table | Counts (Z=0: 00, 01, 10, 11 / Z=1: 00, 01, 10, 11) | Bounds (no mono) | Monotone bounds | Wald | Wald SE |
+|---|---|---|---|---|---|
+| Vitamin A (Sommer et al. 1986; published [-0.1946, 0.0054]) | 74, 11514, 0, 0 / 34, 2385, 12, 9663 | -0.1946228482113902, 0.0053936889144572397 | same | 0.0032280386285733001 | 0.0011591629284325984 |
+| Table 2 (40 + 40) | 12, 10, 8, 10 / 6, 4, 10, 20 | -0.2, 0.5 | -0.2, 0.5 | 1/3 | 0.36830442319927159 |
 
-### Data Generation (R)
-```r
-library(bpbounds)
-
-# Create simple compliance data
-set.seed(42)
-n <- 1000
-
-# Instrument (randomized assignment)
-z <- rbinom(n, 1, 0.5)
-
-# Treatment with noncompliance
-# Compliers: D follows Z
-# Always-takers: D=1 regardless
-# Never-takers: D=0 regardless
-u <- runif(n)
-d <- as.numeric((z == 1 & u < 0.7) | (z == 0 & u < 0.2))
-
-# Outcome depends on treatment
-y <- rbinom(n, 1, ifelse(d == 1, 0.7, 0.3))
-
-# Compute cell probabilities
-table(z, d, y)
-```
-
-### Expected Results
-
-Cell Probabilities (from R):
-```
-Z=0: p00=0.35, p01=0.25, p10=0.15, p11=0.25
-Z=1: p00=0.15, p01=0.10, p10=0.25, p11=0.50
-```
-
-Bounds (without monotonicity):
-- Lower: approximately -0.30
-- Upper: approximately 0.70
-
-Bounds (with monotonicity):
-- Lower: approximately 0.15
-- Upper: approximately 0.55
-
-## Test Case 2: Perfect Compliance
-
-When D = Z (perfect compliance), bounds should collapse to the ITT effect.
-
-### R Code
-```r
-# Perfect compliance
-z <- rep(c(0, 1), each = 500)
-d <- z  # Perfect compliance
-y <- rbinom(1000, 1, ifelse(d == 1, 0.8, 0.4))
-
-result <- bpbounds(p = table(z, d, y) / c(500, 500))
-```
-
-### Expected Results
-
-With perfect compliance:
-- P(D=0|Z=1) = 0
-- P(D=1|Z=0) = 0
-- Bounds collapse to point estimate: ITT = P(Y=1|Z=1) - P(Y=1|Z=0)
+Table 2 by hand: p = 0.30, 0.25, 0.20, 0.25 | 0.15, 0.10, 0.25, 0.50.
+- Lower terms: -0.20, -0.60, -0.80, -0.35, -0.35, -0.45, -0.70, -0.55; max -0.20.
+- Upper terms: 0.50, 0.70, 0.75, 0.90, 0.65, 0.55, 1.05, 0.90; min 0.50.
+- Monotone: lower `0.50 + 0.30 - 1 = -0.20`, upper `1 - 0.25 - 0.25 = 0.50`.
+- Wald `(0.60 - 0.50) / (0.75 - 0.45) = 1/3`. `Var(num) = (0.25 + 0.24)/40`, `Var(den) = (0.2475 + 0.1875)/40`,
+  `Cov = (0.025 + 0.05)/40`, so `Var = 0.01225/0.09 + 0.01 * 0.010875/0.0081 - 2 * 0.1 * 0.001875/0.027 =
+  0.1356481...`, SE 0.368304... (0.386700... without the covariance term).
 
 ## Rust Test Functions
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with ECON-80 for the tests and ECON-56 for the monotone bound):
-- `econometrics::bpbounds::tests::test_validate_against_r` (`crates/p2a-core/src/econometrics/bpbounds.rs`): the bounds lie in [-1, 1] with lower ≤ upper, and the Wald ratio equals its own formula within 1e-10. R's `bpbounds` is not installed on the reference machine, so no R value is compared.
-- `econometrics::bpbounds::tests::test_perfect_compliance` (`crates/p2a-core/src/econometrics/bpbounds.rs`): with perfect compliance the Wald estimate is within 0.01 of 0.4.
-
-## Validation Results
-
-### Coefficient Comparison
-
-| Statistic | R bpbounds | Rust p2a-core | Difference |
-|-----------|------------|---------------|------------|
-| ACE Lower (no mono) | -0.30 | TBD | TBD |
-| ACE Upper (no mono) | 0.70 | TBD | TBD |
-| ACE Lower (mono) | 0.15 | TBD | TBD |
-| ACE Upper (mono) | 0.55 | TBD | TBD |
-| Wald Estimate | 0.50 | TBD | TBD |
-
-### Tolerance
-
-| Sample Size | Bounds | Wald Estimate |
-|-------------|--------|---------------|
-| n < 100 | 0.05 | 0.1 |
-| n = 100-1000 | 0.01 | 0.05 |
-| n > 1000 | 0.001 | 0.01 |
+`crates/p2a-core/src/econometrics/bpbounds.rs`:
+- `econometrics::bpbounds::tests::test_bpbounds_closed_form_tables`: both tables, every value above to 1e-12.
+- `econometrics::bpbounds::tests::test_bp_bounds_percentile_rule`: type-7 interval of 0.1, ..., 1.0 is
+  [0.1225, 0.9775].
+- `econometrics::bpbounds::tests::test_bp_bounds_bootstrap_ci_seeded`: no seed equals seed 42; the intervals are
+  those of the replayed replicates.
+- `econometrics::bpbounds::tests::test_perfect_compliance`: with perfect compliance the Wald estimate is the ITT.
 
 ## References
 
-- Balke, A., & Pearl, J. (1997). Bounds on treatment effects from studies with imperfect compliance. *Journal of the American Statistical Association*, 92(439), 1171-1176.
-
-- Pearl, J. (2009). *Causality: Models, Reasoning, and Inference* (2nd ed.). Cambridge University Press.
-
-- Robins, J. M. (1989). The analysis of randomized and non-randomized AIDS treatment trials. In *Health Service Research Methodology* (pp. 113-159).
-
-- Manski, C. F. (1990). Nonparametric bounds on treatment effects. *American Economic Review Papers and Proceedings*, 80(2), 319-323.
-
-- Palmer, T. M., Ramsahai, R. R., Didelez, V., & Sheehan, N. A. (2011). Nonparametric bounds for the causal effect in a binary instrumental-variable model. *Stata Journal*, 11(3), 345-367.
-
-## Implementation Notes
-
-1. **Numerical stability**: Cell probabilities are computed from counts to avoid floating point issues.
-
-2. **Monotonicity check**: The implementation warns when monotonicity is assumed but appears violated in the data.
-
-3. **Bootstrap CI**: Uses percentile method with configurable number of replications.
-
-4. **Wald estimate**: Provided for comparison; should be within bounds if monotonicity holds.
+- Balke, A., & Pearl, J. (1997). Bounds on treatment effects from studies with imperfect compliance. *JASA*,
+  92(439), 1171-1176.
+- Pearl, J. (2009). *Causality* (2nd ed.). Cambridge University Press, chapter 8.
+- Sommer, A., Tarwotjo, I., Djunaedi, E., et al. (1986). Impact of vitamin A supplementation on childhood
+  mortality. *The Lancet*, 327(8491), 1169-1173.
+- Palmer, T. M., Ramsahai, R. R., Didelez, V., & Sheehan, N. A. (2011). Nonparametric bounds for the causal
+  effect in a binary instrumental-variable model. *Stata Journal*, 11(3), 345-367.
