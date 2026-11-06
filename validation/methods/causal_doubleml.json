@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "causal_doubleml",
+      "name": "Double/debiased machine learning: PLR (OLS, lasso, ridge learners), IRM (ATE), PLIV, IIVM (LATE) with cross-fitting",
+      "category": "econometrics",
+      "reference": "An R transcription of DoubleML's published PLR / IRM / PLIV / IIVM scores (Chernozhukov et al. 2018; Bach et al. 2022, 2024) with glmnet/glm learners on fixed folds (DoubleML not installed): dml2, trimming 0.01; learners stats::lm.fit (qr), glmnet::glmnet(lambda = 0.05, standardize = TRUE, thresh = 1e-14) with the exact minimisers of glmnet's objective (*_tight), stats::glm(binomial)",
+      "doc": "validation/econometrics/doubleml.md",
+      "cases": [
+        "doubleml_models"
+      ],
+      "tests": [
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_user_folds",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_plr_ols",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_plr_lasso",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_plr_ridge",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_irm",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_irm_lasso",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_pliv",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_iivm",
+        "p2a-core::econometrics::doubleml::tests::test_validate_doubleml_iivm_one_sided"
+      ],
+      "quantities": [
+        "theta, SE, 95% CI, p-value for PLR (OLS, lasso, ridge), IRM (OLS, lasso outcome learners), PLIV, IIVM, IIVM under one-sided noncompliance",
+        "out-of-fold RMSE and R2 per nuisance (l, m, r, g0, g1, r0, r1) and the pooled outcome / treatment diagnostics",
+        "score Jacobian -E[psi_a]; mean residualized treatment; trimmed propensity range",
+        "fold sizes of the user folds"
+      ],
+      "tolerance": "n = 400: OLS and logistic nuisances at validation/README.md (theta 1e-8; SE, RMSE, R2, CI, Jacobian 1e-6 relative); ridge by its closed form against the exact minimiser (*_tight) at the same README tolerances; lasso (coordinate descent at thresh 1e-14) 1e-9 relative to the exact glmnet minimiser (*_tight); lasso and ridge 1e-8 relative to glmnet's own output; p-values 1e-6 relative (no absolute floor); fold sizes exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
