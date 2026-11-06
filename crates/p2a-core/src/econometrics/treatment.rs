@@ -29,7 +29,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
 use crate::options::Choices;
-use crate::regression::ols::normal_equations_inverse;
+use crate::regression::ols::{normal_equations_inverse, normal_inverse_from_gram};
 use crate::resource;
 use crate::stats::robust::{QuantileType, percentile_interval, quantile_sorted};
 use crate::traits::convergence::{ResultNotes, notes_text};
@@ -1718,6 +1718,53 @@ fn fit_outcome_model(
         });
     }
 
+    // X'X and X'y in one pass over the arm's rows: OLS's solve decision on the cross-product,
+    // no copy of the arm's design. A design that needs the refinement or the QR is copied below.
+    let (m, k) = (indices.len(), x.ncols());
+    if m > k && k > 0 {
+        let xs = x.as_standard_layout();
+        let rows = xs
+            .as_slice()
+            .ok_or_else(|| EconError::Internal("outcome design is not contiguous".into()))?;
+        let mut gram = Array2::<f64>::zeros((k, k));
+        let g = gram
+            .as_slice_mut()
+            .ok_or_else(|| EconError::Internal("outcome cross-product layout".into()))?;
+        let mut xy = Array1::<f64>::zeros(k);
+        let mut sum_y = 0.0;
+        for &i in &indices {
+            let (r, yi) = (&rows[i * k..(i + 1) * k], y[i]);
+            sum_y += yi;
+            for (a, ga) in g.chunks_exact_mut(k).enumerate() {
+                let xa = r[a];
+                xy[a] += xa * yi;
+                for (gc, xc) in ga[a..].iter_mut().zip(&r[a..]) {
+                    *gc += xa * xc;
+                }
+            }
+        }
+        for a in 1..k {
+            for c in 0..a {
+                gram[[a, c]] = gram[[c, a]];
+            }
+        }
+        if let Some(ni) = normal_inverse_from_gram(gram.view())?
+            && !ni.refine
+        {
+            let beta = ni.inverse.dot(&xy);
+            let mu: Array1<f64> = x.dot(&beta);
+            let ybar = sum_y / m as f64;
+            let (mut ssr, mut sst) = (0.0, 0.0);
+            for &i in &indices {
+                let (r, t) = (y[i] - mu[i], y[i] - ybar);
+                ssr += r * r;
+                sst += t * t;
+            }
+            let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+            return Ok((mu, r2, None));
+        }
+    }
+
     let x_group = select_rows(x, &indices)?;
     let y_group: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
     // OLS's solve decision: the normal equations on a full-rank, well-conditioned design,
@@ -1746,7 +1793,7 @@ fn fit_outcome_model(
 }
 
 /// The rows `idx` of `x`, copied row slice by row slice.
-fn select_rows(x: ArrayView2<f64>, idx: &[usize]) -> EconResult<Array2<f64>> {
+pub(crate) fn select_rows(x: ArrayView2<f64>, idx: &[usize]) -> EconResult<Array2<f64>> {
     let p = x.ncols();
     let xs = x.as_standard_layout();
     let src = xs

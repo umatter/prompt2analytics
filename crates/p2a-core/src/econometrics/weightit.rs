@@ -67,6 +67,7 @@ use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
 use crate::econometrics::glm::{GlmFit, GlmSpec, fit_logit_lean};
 use crate::econometrics::sbw::{SBWConfig, SBWEstimand, run_sbw_inner};
+use crate::econometrics::treatment::select_rows;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
@@ -1074,14 +1075,17 @@ fn ebal_solve(
     // 1. Range checks; constant columns that already match their target are skipped.
     let mut solved: Vec<usize> = Vec::with_capacity(k);
     for j in 0..k {
-        let col = x.column(j);
-        if col.iter().any(|v| !v.is_finite()) {
+        let (mut lo, mut hi, mut finite) = (f64::INFINITY, f64::NEG_INFINITY, true);
+        for &v in x.column(j) {
+            finite &= v.is_finite();
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        if !finite {
             return Err(EconError::InvalidSpecification {
                 message: format!("covariate {} must be finite", names[j]),
             });
         }
-        let lo = col.iter().cloned().fold(f64::INFINITY, f64::min);
-        let hi = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let t = target[j];
         if hi == lo {
             if (t - lo).abs() <= 1e-12 * lo.abs().max(1.0) {
@@ -1314,7 +1318,7 @@ fn ebal_groups(
             ),
         });
     }
-    let rows = |idx: &[usize]| x_cov.select(ndarray::Axis(0), idx);
+    let rows = |idx: &[usize]| select_rows(x_cov.view(), idx);
     let means = |idx: &[usize]| -> Vec<f64> {
         (0..x_cov.ncols())
             .map(|j| idx.iter().map(|&i| x_cov[[i, j]]).sum::<f64>() / idx.len() as f64)
@@ -1331,7 +1335,7 @@ fn ebal_groups(
     let mut weights = vec![1.0; n];
     let mut fits = Vec::with_capacity(2);
     let mut fit_group = |idx: &[usize], label: &str, total: usize| -> EconResult<()> {
-        let fit = ebal_solve(rows(idx).view(), &target, names, label, max_iter, tol)?;
+        let fit = ebal_solve(rows(idx)?.view(), &target, names, label, max_iter, tol)?;
         for (&i, &p) in idx.iter().zip(&fit.weights) {
             weights[i] = p * total as f64;
         }
