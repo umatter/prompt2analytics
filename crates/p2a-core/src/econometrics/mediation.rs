@@ -46,7 +46,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
-use crate::econometrics::glm::{GlmLink, GlmSpec, fit_propensity};
+use crate::econometrics::glm::{GlmSpec, fit_propensity_lean};
 use crate::econometrics::medflex::{bootstrap_notes, glm_fit_notes, proportion_note};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
@@ -274,7 +274,8 @@ impl fmt::Display for MediationResult {
 ///
 /// # Estimation details
 ///
-/// The propensity models are logistic GLMs (`glm.fit` IRLS, [`fit_propensity`]); the
+/// The propensity models are logistic GLMs (`glm.fit` IRLS,
+/// [`crate::econometrics::glm::fit_propensity`]'s fit, through the GLM's lean path); the
 /// treatment must be coded 0/1. `trim` must lie in [0, 0.5). The bootstrap resamples the
 /// kept units (no further trimming), uses seed [`DEFAULT_BOOTSTRAP_SEED`] when `seed` is
 /// `None`, reports failed replicates in `warnings` and needs at least 50 usable ones (all of
@@ -654,7 +655,7 @@ fn propensity_scores(
     what: &str,
     names: &[String],
 ) -> EconResult<(Vec<f64>, Vec<String>)> {
-    let pf = fit_propensity(x.view(), ArrayView1::from(d), GlmLink::Logit)?;
+    let pf = fit_propensity_lean(x.view(), ArrayView1::from(d))?;
     let notes = glm_fit_notes(
         &format!("Propensity model {what}"),
         &pf.fit,

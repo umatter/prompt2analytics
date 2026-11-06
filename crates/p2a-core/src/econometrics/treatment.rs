@@ -24,7 +24,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
-use crate::econometrics::glm::{GlmLink, fit_propensity};
+use crate::econometrics::glm::fit_propensity_lean;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::solve::{SingularPolicy, least_squares, sym_inverse};
@@ -539,7 +539,7 @@ pub fn run_ipw_treatment(
     let x = design.data;
 
     // Estimate propensity scores using logit
-    let ps_fit = fit_propensity(x.view(), d.view(), GlmLink::Logit)?;
+    let ps_fit = fit_propensity_lean(x.view(), d.view())?;
     let ps = ps_fit.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
     for w in &ps_fit.fit.warnings {
         warnings.push(format!("propensity model: {w}"));
@@ -1328,7 +1328,7 @@ pub fn run_doubly_robust(
     let x = design.data;
 
     // Estimate propensity scores
-    let ps_fit = fit_propensity(x.view(), d.view(), GlmLink::Logit)?;
+    let ps_fit = fit_propensity_lean(x.view(), d.view())?;
     let ps = ps_fit.scores.mapv(|p| p.clamp(1e-10, 1.0 - 1e-10));
     for w in &ps_fit.fit.warnings {
         warnings.push(format!("propensity model: {w}"));

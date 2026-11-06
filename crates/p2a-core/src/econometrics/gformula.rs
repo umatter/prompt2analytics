@@ -30,8 +30,9 @@
 //!
 //! Linear models take OLS's solve decision (normal equations on a well-conditioned design,
 //! `lm.fit`'s pivoted QR otherwise); logistic models use the shared `glm.fit` IRLS
-//! ([`crate::econometrics::glm::fit_glm`], `epsilon` = `tolerance`). Aliased columns are
-//! reported and predicted with the identified columns.
+//! ([`crate::econometrics::glm::fit_glm`], `epsilon` = `tolerance`; a converged full-rank fit
+//! without warnings through its lean path, which skips the AIC and null-deviance work).
+//! Aliased columns are reported and predicted with the identified columns.
 //!
 //! # Algorithm
 //!
@@ -115,7 +116,7 @@ use std::fmt;
 
 use rand_distr::{Distribution, StandardNormal};
 
-use crate::econometrics::glm::{GlmSpec, fit_glm, plogis};
+use crate::econometrics::glm::{GlmSpec, fit_logit_lean, plogis};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::solve::aliasing_message;
 use crate::regression::ols::solve_ols;
@@ -1621,7 +1622,7 @@ fn fit_predict_model(
         spec.epsilon = config.tolerance;
         spec.max_iter = config.max_iter;
         spec.start = start.as_ref().map(|s| s.view());
-        let fit = fit_glm(x.view(), y.view(), &spec)?;
+        let fit = fit_logit_lean(x.view(), y.view(), &spec)?;
         for w in &fit.warnings {
             warnings.push(format!("{what}: {w}"));
         }

@@ -65,7 +65,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::data::columns::econ_error_from_design;
-use crate::econometrics::glm::{GlmFit, GlmSpec, fit_glm};
+use crate::econometrics::glm::{GlmFit, GlmSpec, fit_logit_lean};
 use crate::econometrics::sbw::{SBWConfig, SBWEstimand, run_sbw_inner};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
@@ -972,7 +972,7 @@ fn logistic_weights(
     let n = d.len();
     let mut spec = GlmSpec::logit();
     spec.max_iter = max_iter;
-    let fit = fit_glm(x.view(), d.view(), &spec)?;
+    let fit = fit_logit_lean(x.view(), d.view(), &spec)?;
     // Clipped only to keep the weights finite.
     let ps: Vec<f64> = fit
         .fitted

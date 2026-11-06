@@ -46,6 +46,13 @@
 //!   deviance rule's 2e-6. The canonical logit keeps the deviance rule alone: its IRLS is
 //!   Newton's method, which converges quadratically and already lands at about 1e-8.
 //!
+//! Refits that read only the coefficients, fitted values, covariance and warnings (the
+//! propensity and outcome models of IPW, AIPW, WeightIt, mediation and the g-formula, and
+//! the TMLE nuisance fits) go through `lean_logit`, the same IRLS for a unit-weight logit
+//! on its common path (normal equations without refinement), which skips the AIC, the
+//! row-wise deviance logarithms and the result assembly; a fit that leaves that path
+//! (separation, an ill-conditioned or rank-deficient step, no convergence) is `fit_glm`'s.
+//!
 //! ```
 //! use ndarray::array;
 //! use p2a_core::econometrics::glm::{fit_glm, GlmSpec};
@@ -1256,6 +1263,458 @@ impl ResultNotes for GlmFit {
     }
 }
 
+// ═══ The lean logit IRLS (refits that read only the coefficients and fitted values) ═══
+
+/// `glm.control` of the nuisance fits (R's `epsilon` and `maxit`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GlmControl {
+    pub epsilon: f64,
+    pub max_iter: usize,
+}
+
+impl GlmControl {
+    /// `family`/`link` with this control and optional 0/1 training weights.
+    pub(crate) fn spec<'a>(
+        self,
+        family: GlmFamily,
+        link: GlmLink,
+        train: Option<ArrayView1<'a, f64>>,
+    ) -> GlmSpec<'a> {
+        let mut spec = GlmSpec::new(family, link);
+        spec.epsilon = self.epsilon;
+        spec.max_iter = self.max_iter;
+        if let Some(t) = train {
+            spec = spec.weights(t);
+        }
+        spec
+    }
+}
+
+/// A logit fit that stayed on the fast path of [`lean_logit`].
+pub(crate) struct LeanLogit {
+    pub coefficients: Array1<f64>,
+    pub iterations: usize,
+    /// Fitted probabilities at `coefficients`.
+    pub fitted: Vec<f64>,
+    /// Linear predictor at `coefficients` (the offset included).
+    pub eta: Vec<f64>,
+    /// `(X'WX)^{-1}` of the last step: the unscaled covariance the shared GLM reports on its
+    /// normal-equations path.
+    pub inverse: Array2<f64>,
+    /// Working weights `mu (1 - mu)` of the last step.
+    pub working_weights: Vec<f64>,
+    /// Deviance at `coefficients`; `NaN` for [`LeanStart::Zero`], which computes none.
+    pub deviance: f64,
+    /// Deviance of the mean of `y` (no offset): the shared GLM's null deviance of a model
+    /// with an intercept and no offset.
+    pub null_deviance: f64,
+}
+
+/// Where [`lean_logit`] starts.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LeanStart<'a> {
+    /// glm.fit's `mustart = (y + 1/2) / 2`; glm.fit's deviance rule.
+    Mustart,
+    /// These coefficients (as glm's `start`); glm.fit's deviance rule.
+    Coef(ArrayView1<'a, f64>),
+    /// Zero coefficients (`eta = offset`); the Newton-step rule.
+    Zero,
+}
+
+/// R's logit-link clamp: a linear predictor beyond it leaves [`lean_logit`]'s fast path.
+const LEAN_ETA_LIMIT: f64 = 30.0;
+
+/// Terms per logarithm in [`lean_logit`]'s deviance: `sum ln(1 + exp(eta))` is taken as the sum
+/// of the logarithms of products of this many factors. Every factor is below `exp(30) + 1`,
+/// so a product stays below `1e209` (finite) and loses at most a few ulps.
+const LEAN_LOG_CHUNK: usize = 16;
+
+/// The IRLS of `glm.fit` for a logit fit of `y` (in [0, 1], unit weights) on every row of `x`,
+/// with an optional offset, on its common path only: Fisher scoring (Newton's method for the
+/// canonical link) solved through the normal equations, by a Cholesky factorisation of
+/// `X'WX` when it is well conditioned ([`well_conditioned_inverse`]; the shared GLM takes the
+/// normal equations without refinement there).
+///
+/// - [`LeanStart::Mustart`]: glm.fit's start (`mustart = (y + 1/2) / 2`) and its deviance rule
+///   (`|dev - devold| / (|dev| + floor) < epsilon`, the floor as in [`fit_glm`]): the same
+///   iterates and iteration count as the shared GLM, up to rounding.
+/// - [`LeanStart::Coef`]: the deviance rule from the given coefficients (glm's `start`; a
+///   warm start from a fit on overlapping rows).
+/// - [`LeanStart::Zero`]: Newton's method from zero coefficients (`eta = offset`), stopped when
+///   the largest step is below `epsilon * max(1, |b|)`, or is below `1e-8 * max(1, |b|)` and
+///   no longer shrinks (rounding level, for an `epsilon` below what rounding allows). No
+///   deviance is computed. For the targeting step, whose estimate starts near 0.
+///
+/// It computes only the coefficients: no covariance, null deviance, AIC or warnings. The
+/// shared GLM computes those, and the hundreds of cross-validation fits of C-TMLE do not use
+/// them. `None` whenever the fit leaves the path on which the shared GLM would report nothing:
+/// a linear predictor at the link's clamp (separation), a design that is not of full rank or
+/// is ill conditioned for the normal equations, a non-finite step, no convergence within
+/// `max_iter`, or a constant `y`. The caller then refits with [`fit_glm`], which reports the
+/// case. A converged fit is the maximum-likelihood estimate the shared GLM reaches.
+pub(crate) fn lean_logit(
+    x: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    offset: Option<ArrayView1<'_, f64>>,
+    start: LeanStart<'_>,
+    ctl: GlmControl,
+) -> EconResult<Option<LeanLogit>> {
+    let (n, k) = x.dim();
+    if n <= k || k == 0 || ctl.max_iter == 0 {
+        return Ok(None);
+    }
+    if let LeanStart::Coef(c) = start
+        && (c.len() != k || !c.iter().all(|v| v.is_finite()))
+    {
+        return Ok(None);
+    }
+    let from_zero = matches!(start, LeanStart::Zero);
+    let xs = x.as_standard_layout();
+    let Some(xrows) = xs.as_slice() else {
+        return Ok(None);
+    };
+    let y = y.as_standard_layout();
+    let Some(y) = y.as_slice() else {
+        return Ok(None);
+    };
+    let off_layout = offset.as_ref().map(|o| o.as_standard_layout());
+    let off: Option<&[f64]> = match &off_layout {
+        Some(o) => match o.as_slice() {
+            Some(v) => Some(v),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let xlogx = |v: f64| if v > 0.0 { v * v.ln() } else { 0.0 };
+    // dev = 2 (sum_i c_i - sum_i (y_i eta_i - ln(1 + exp(eta_i)))), c_i = y ln y + (1-y) ln(1-y)
+    let (mut sum_y, mut sum_c) = (0.0, 0.0);
+    for &v in y {
+        if !(0.0..=1.0).contains(&v) {
+            return Ok(None);
+        }
+        sum_y += v;
+        if v != 0.0 && v != 1.0 {
+            sum_c += xlogx(v) + xlogx(1.0 - v);
+        }
+    }
+    let nf = n as f64;
+    let ybar = sum_y / nf;
+    if !(ybar > 0.0 && ybar < 1.0) {
+        return Ok(None);
+    }
+    let d0 = 2.0 * (sum_c - sum_y * ybar.ln() - (nf - sum_y) * (1.0 - ybar).ln());
+    let per = d0 / nf;
+    let floor = if per.is_finite() && per > 0.0 {
+        0.1 * per
+    } else {
+        0.1
+    };
+    let mut eta = resource::try_vec(n, 0.0, "logit IRLS workspace")?;
+    let mut mu = resource::try_vec(n, 0.0, "logit IRLS workspace")?;
+    // the fitted values each step starts from (its working weights)
+    let mut mu_step = resource::try_vec(n, 0.0, "logit IRLS workspace")?;
+    // mu at `eta`, and the deviance when `deviance`; `None` at the clamp
+    let eval = |eta: &[f64], mu: &mut [f64], deviance: bool| -> Option<f64> {
+        let (mut ye, mut logs, mut prod, mut m) = (0.0, 0.0, 1.0, 0);
+        for ((&e, mi), &yi) in eta.iter().zip(mu.iter_mut()).zip(y) {
+            if e.is_nan() || e.abs() >= LEAN_ETA_LIMIT {
+                return None;
+            }
+            let t = e.exp();
+            *mi = t / (1.0 + t);
+            if deviance {
+                ye += yi * e;
+                prod *= 1.0 + t;
+                m += 1;
+                if m == LEAN_LOG_CHUNK {
+                    logs += prod.ln();
+                    prod = 1.0;
+                    m = 0;
+                }
+            }
+        }
+        if !deviance {
+            return Some(0.0);
+        }
+        let dev = 2.0 * (sum_c - ye + logs + prod.ln());
+        dev.is_finite().then_some(dev)
+    };
+    for (i, (row, e)) in xrows.chunks_exact(k).zip(eta.iter_mut()).enumerate() {
+        *e = match start {
+            LeanStart::Zero => off.map_or(0.0, |o| o[i]),
+            LeanStart::Mustart => {
+                let m = (y[i] + 0.5) / 2.0;
+                (m / (1.0 - m)).ln()
+            }
+            LeanStart::Coef(c) => {
+                let mut v = off.map_or(0.0, |o| o[i]);
+                for (xa, ba) in row.iter().zip(c.iter()) {
+                    v += xa * ba;
+                }
+                v
+            }
+        };
+    }
+    let Some(mut devold) = eval(&eta, &mut mu, !from_zero) else {
+        return Ok(None);
+    };
+    let mut g = vec![0.0; k * k];
+    let mut inverse = Array2::<f64>::zeros((k, k));
+    let mut chol = vec![0.0; k * k];
+    let mut rhs = vec![0.0; k];
+    let (mut solve_scratch, mut scale_scratch) = (vec![0.0; k], vec![0.0; k]);
+    let mut b = Array1::<f64>::zeros(k);
+    let mut b_old = Array1::<f64>::zeros(k);
+    let mut prev_step = f64::INFINITY;
+    for iter in 1..=ctl.max_iter {
+        resource::checkpoint()?;
+        // X'WX (upper triangle) and X'Wz, z = eta - offset + (y - mu) / W, W = mu (1 - mu)
+        g.fill(0.0);
+        rhs.fill(0.0);
+        for (i, row) in xrows.chunks_exact(k).enumerate() {
+            let m = mu[i];
+            let wi = m * (1.0 - m);
+            let eo = eta[i] - off.map_or(0.0, |o| o[i]);
+            let wz = wi * eo + (y[i] - m);
+            for a in 0..k {
+                let xa = row[a];
+                rhs[a] += xa * wz;
+                let wxa = wi * xa;
+                let ga = &mut g[a * k..(a + 1) * k];
+                for c in a..k {
+                    ga[c] += wxa * row[c];
+                }
+            }
+        }
+        if !well_conditioned_inverse(
+            &g,
+            k,
+            &mut chol,
+            &mut solve_scratch,
+            &mut scale_scratch,
+            &mut inverse,
+        ) {
+            return Ok(None);
+        }
+        b_old.assign(&b);
+        ndarray::linalg::general_mat_vec_mul(
+            1.0,
+            &inverse,
+            &ArrayView1::from(&rhs[..]),
+            0.0,
+            &mut b,
+        );
+        if !b.iter().all(|v| v.is_finite()) {
+            return Ok(None);
+        }
+        for (i, (row, e)) in xrows.chunks_exact(k).zip(eta.iter_mut()).enumerate() {
+            let mut v = off.map_or(0.0, |o| o[i]);
+            for (xa, ba) in row.iter().zip(b.iter()) {
+                v += xa * ba;
+            }
+            *e = v;
+        }
+        std::mem::swap(&mut mu, &mut mu_step);
+        let Some(dev) = eval(&eta, &mut mu, !from_zero) else {
+            return Ok(None);
+        };
+        let done = if from_zero {
+            let step = b
+                .iter()
+                .zip(b_old.iter())
+                .fold(0.0_f64, |m, (u, v)| m.max((u - v).abs()));
+            let scale = b.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+            // rounding level: a small step that no longer shrinks
+            let done = step <= ctl.epsilon * scale
+                || (iter > 2 && step >= prev_step && step <= 1e-8 * scale);
+            prev_step = step;
+            done
+        } else {
+            (dev - devold).abs() / (dev.abs() + floor) < ctl.epsilon
+        };
+        if done {
+            for m in mu_step.iter_mut() {
+                *m *= 1.0 - *m;
+            }
+            return Ok(Some(LeanLogit {
+                coefficients: b,
+                iterations: iter,
+                fitted: mu,
+                eta,
+                inverse,
+                working_weights: mu_step,
+                deviance: if from_zero { f64::NAN } else { dev },
+                null_deviance: d0,
+            }));
+        }
+        devold = dev;
+    }
+    Ok(None)
+}
+
+/// Largest 1-norm condition number of the equilibrated `X'WX` (`E = S X'WX S`, `S` the inverse
+/// square roots of its diagonal) that [`lean_logit`] solves by its own Cholesky: OLS's normal
+/// equations take a matrix with `1 / kappa_1(E)` at or above `OLS_REFINE_BELOW_RCOND` (1e-2)
+/// without refinement (`regression::ols::normal_inverse_from_gram`, the decision of the shared
+/// GLM's IRLS); anything else leaves the lean path.
+const LEAN_MAX_CONDITION: f64 = 100.0;
+
+/// The inverse of the symmetric `k x k` matrix whose upper triangle is `g` (row-major), into
+/// `inverse`, when its Cholesky factorisation exists and the 1-norm condition number of its
+/// equilibrated form is at most [`LEAN_MAX_CONDITION`]; `false` otherwise. `chol` (`k x k`),
+/// `y` and `r` (length `k`) are scratch, allocated once by the caller.
+pub(crate) fn well_conditioned_inverse(
+    g: &[f64],
+    k: usize,
+    chol: &mut [f64],
+    y: &mut [f64],
+    r: &mut [f64],
+    inverse: &mut Array2<f64>,
+) -> bool {
+    let at = |a: usize, c: usize| if c >= a { g[a * k + c] } else { g[c * k + a] };
+    // lower-triangular L with L L' = G, row-major in `chol`
+    chol.fill(0.0);
+    for i in 0..k {
+        for j in 0..=i {
+            let mut v = at(i, j);
+            for m in 0..j {
+                v -= chol[i * k + m] * chol[j * k + m];
+            }
+            if i == j {
+                if !(v > 0.0 && v.is_finite()) {
+                    return false;
+                }
+                chol[i * k + i] = v.sqrt();
+            } else {
+                chol[i * k + j] = v / chol[j * k + j];
+            }
+        }
+    }
+    // G^-1 = L^-T L^-1, column by column: solve L y = e_c, then L' x = y
+    for c in 0..k {
+        for i in 0..k {
+            let mut v = if i == c { 1.0 } else { 0.0 };
+            for m in 0..i {
+                v -= chol[i * k + m] * y[m];
+            }
+            y[i] = v / chol[i * k + i];
+        }
+        for i in (0..k).rev() {
+            let mut v = y[i];
+            for m in (i + 1)..k {
+                v -= chol[m * k + i] * inverse[[m, c]];
+            }
+            inverse[[i, c]] = v / chol[i * k + i];
+        }
+    }
+    // kappa_1(E) = ||E||_1 ||E^-1||_1, E = S G S, E^-1 = S^-1 G^-1 S^-1
+    for (i, ri) in r.iter_mut().enumerate().take(k) {
+        *ri = at(i, i).sqrt();
+    }
+    let (mut e_norm, mut einv_norm) = (0.0f64, 0.0f64);
+    for c in 0..k {
+        let (mut ce, mut ci) = (0.0, 0.0);
+        for i in 0..k {
+            ce += (at(i, c) / (r[i] * r[c])).abs();
+            ci += (inverse[[i, c]] * r[i] * r[c]).abs();
+        }
+        e_norm = e_norm.max(ce);
+        einv_norm = einv_norm.max(ci);
+    }
+    let kappa = e_norm * einv_norm;
+    kappa.is_finite() && kappa <= LEAN_MAX_CONDITION
+}
+
+/// [`fit_glm`] for a binomial logit fit of a 0/1 response with no prior weights, offset or
+/// coefficient refinement, by [`lean_logit`] when the fit stays on its path: the refits of
+/// propensity and outcome models (IPW, AIPW, WeightIt, mediation, the g-formula) that read the
+/// coefficients, fitted values, covariance and warnings but not the AIC or a refitted null
+/// deviance. The IRLS is the same (glm.fit's start or `spec.start`, Fisher scoring through the
+/// normal equations, the deviance rule at `spec.epsilon` within `spec.max_iter`), so the fit
+/// is the shared GLM's up to rounding. On the lean path the shared GLM would report nothing:
+/// the result is converged, of full rank, with no warning. Any other case (separation, a
+/// rank-deficient or ill-conditioned weighted design, no convergence, invalid input, another
+/// family, link or spec) is [`fit_glm`]'s own fit, errors and warnings included.
+///
+/// The fields of a lean fit: `vcov` is the inverse of the last step's `X'WX` (dispersion 1),
+/// `deviance` and `null_deviance` are computed with fewer logarithms (a few ulps), and the
+/// log-likelihood and AIC follow from the deviance, which for a 0/1 response is `-2` times the
+/// binomial log-likelihood.
+pub(crate) fn fit_logit_lean(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    spec: &GlmSpec<'_>,
+) -> EconResult<GlmFit> {
+    let plain = spec.family == GlmFamily::Binomial
+        && spec.link == GlmLink::Logit
+        && spec.weights.is_none()
+        && spec.offset.is_none()
+        && spec.coef_tol.is_none()
+        && y.len() == x.nrows()
+        && y.iter().all(|&v| v == 0.0 || v == 1.0);
+    // an intercept column: lean_logit's null deviance is the intercept-only model's
+    let has_ones = (0..x.ncols()).any(|j| x.column(j).iter().all(|&v| v == 1.0));
+    if plain && has_ones && spec.epsilon.is_finite() && spec.epsilon > 0.0 {
+        let start = spec.start.map_or(LeanStart::Mustart, LeanStart::Coef);
+        let ctl = GlmControl {
+            epsilon: spec.epsilon,
+            max_iter: spec.max_iter,
+        };
+        if let Some(fit) = lean_logit(x, y, None, start, ctl)? {
+            let (n, p) = x.dim();
+            let std_errors = Array1::from_iter(fit.inverse.diag().iter().map(|v| v.sqrt()));
+            let aic = fit.deviance + 2.0 * p as f64;
+            return Ok(GlmFit {
+                coefficients: fit.coefficients,
+                std_errors,
+                vcov: fit.inverse,
+                fitted: Array1::from_vec(fit.fitted),
+                linear_predictor: Array1::from_vec(fit.eta),
+                working_weights: Array1::from_vec(fit.working_weights),
+                deviance: fit.deviance,
+                null_deviance: fit.null_deviance,
+                log_likelihood: p as f64 - aic / 2.0,
+                aic,
+                dispersion: 1.0,
+                df_residual: n - p,
+                rank: p,
+                aliased: Vec::new(),
+                converged: true,
+                iterations: fit.iterations,
+                max_iter: spec.max_iter,
+                epsilon: spec.epsilon,
+                boundary: false,
+                separation: false,
+                warnings: Vec::new(),
+            });
+        }
+    }
+    fit_glm(x, y, spec)
+}
+
+/// [`fit_propensity`] with the logit link through [`fit_logit_lean`]: the same checks and
+/// the same fit up to rounding, without the AIC and null-deviance work a propensity refit
+/// does not read.
+pub(crate) fn fit_propensity_lean(
+    x: ArrayView2<f64>,
+    treat: ArrayView1<f64>,
+) -> EconResult<PropensityFit> {
+    if let Some((i, v)) = treat
+        .iter()
+        .enumerate()
+        .find(|(_, v)| **v != 0.0 && **v != 1.0)
+    {
+        return Err(spec_err(format!(
+            "propensity treatment must be coded 0/1 (row {i} is {v})"
+        )));
+    }
+    let fit = fit_logit_lean(x, treat, &GlmSpec::logit())?;
+    Ok(PropensityFit {
+        scores: fit.fitted.clone(),
+        fit,
+    })
+}
+
 /// Relative coefficient change at which [`fit_propensity`] stops refining after the
 /// deviance rule ([`GlmSpec::coef_tol`]); applied to the non-canonical links (probit,
 /// cloglog) only.
@@ -2265,5 +2724,101 @@ mod tests {
         assert!(!used_normal);
         assert_eq!((dup.rank, dup.aliased.clone()), (2, vec![2]));
         assert!(dup.coefficients[2].is_nan() && dup.std_errors[2].is_nan());
+    }
+
+    /// The lean logit refit (`fit_logit_lean`) is the shared GLM's fit: on noisy designs, from
+    /// glm.fit's start and from a warm start, at several sizes, every reported number agrees
+    /// with `fit_glm` to 1e-12 relative (the coefficients to 1e-12, the covariance and SEs, the
+    /// deviance, AIC and log-likelihood to 1e-12), with the same iterations, convergence and
+    /// (no) warnings. A near-separated design that stays below the logit clamp agrees too;
+    /// separated, rank-deficient, weighted, offset and non-logit fits are fit_glm's own.
+    #[test]
+    fn test_fit_logit_lean_matches_fit_glm() {
+        for (n, seed) in [(40, 5), (300, 17), (2500, 41)] {
+            let d = sim_data(n, seed);
+            let glm = fit_glm(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
+            let lean = fit_logit_lean(d.x.view(), d.yb.view(), &GlmSpec::logit()).unwrap();
+            assert!(glm.warnings.is_empty() && lean.warnings.is_empty());
+            assert_fits_agree(&format!("logit n {n}"), &lean, &glm, 1e-12);
+            assert_eq!(lean.df_residual, glm.df_residual);
+            assert_eq!(lean.linear_predictor.len(), n);
+            for (a, b) in lean.linear_predictor.iter().zip(&glm.linear_predictor) {
+                assert!(rel_gap(*a, *b) <= 1e-12, "eta {a} vs {b}");
+            }
+            // warm start from slightly perturbed coefficients (a bootstrap refit's start)
+            let start = glm.coefficients.mapv(|b| b * 0.9 + 0.01);
+            let mut spec = GlmSpec::logit();
+            spec.start = Some(start.view());
+            let glm_s = fit_glm(d.x.view(), d.yb.view(), &spec).unwrap();
+            let lean_s = fit_logit_lean(d.x.view(), d.yb.view(), &spec).unwrap();
+            assert_fits_agree(&format!("logit start n {n}"), &lean_s, &glm_s, 1e-12);
+        }
+        // near separation: a strong predictor, fitted probabilities close to 0 and 1 but the
+        // linear predictor below the clamp
+        let d = sim_data(400, 23);
+        let mut x = d.x.clone();
+        let y = Array1::from_iter((0..400).map(|i| {
+            let e = 6.0 * x[[i, 1]] + 0.3 * x[[i, 2]] - 0.8;
+            f64::from(d.offset[i] * 10.0 < 1.0 / (1.0 + (-e).exp()))
+        }));
+        let glm = fit_glm(x.view(), y.view(), &GlmSpec::logit()).unwrap();
+        assert!(
+            glm.fitted
+                .iter()
+                .any(|&m| !(1e-3..=1.0 - 1e-3).contains(&m))
+        );
+        let lean = fit_logit_lean(x.view(), y.view(), &GlmSpec::logit()).unwrap();
+        assert_fits_agree("near separation", &lean, &glm, 1e-12);
+        // complete separation: fit_glm's fit, warnings and flags, bit for bit
+        let ysep = x.column(1).mapv(|v| f64::from(v > 0.3));
+        let a = fit_glm(x.view(), ysep.view(), &GlmSpec::logit()).unwrap();
+        let b = fit_logit_lean(x.view(), ysep.view(), &GlmSpec::logit()).unwrap();
+        assert!(a.separation && b.separation);
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap()
+        );
+        // aliased column, weights, offset, probit, non-binary response, refinement:
+        // fit_glm's own fit
+        let x1 = x.column(1).to_owned();
+        x.column_mut(3).assign(&x1);
+        let w = d.weights.clone();
+        let o = d.offset.clone();
+        let yq = d.yb.mapv(|v| 0.25 + 0.5 * v);
+        let mut refine = GlmSpec::logit();
+        refine.coef_tol = Some(1e-10);
+        let cases: Vec<(&str, ArrayView2<f64>, ArrayView1<f64>, GlmSpec<'_>)> = vec![
+            ("aliased", x.view(), d.yb.view(), GlmSpec::logit()),
+            (
+                "weights",
+                d.x.view(),
+                d.yb.view(),
+                GlmSpec::logit().weights(w.view()),
+            ),
+            (
+                "offset",
+                d.x.view(),
+                d.yb.view(),
+                GlmSpec::logit().offset(o.view()),
+            ),
+            ("probit", d.x.view(), d.yb.view(), GlmSpec::probit()),
+            ("non-binary", d.x.view(), yq.view(), GlmSpec::logit()),
+            ("refinement", d.x.view(), d.yb.view(), refine),
+        ];
+        for (key, xv, yv, spec) in cases {
+            let a = fit_glm(xv, yv, &spec).unwrap();
+            let b = fit_logit_lean(xv, yv, &spec).unwrap();
+            assert_eq!(
+                serde_json::to_string(&a).unwrap(),
+                serde_json::to_string(&b).unwrap(),
+                "{key}"
+            );
+        }
+        // invalid input: fit_glm's error
+        let mut bad = d.x.clone();
+        bad[[3, 2]] = f64::NAN;
+        let ea = fit_glm(bad.view(), d.yb.view(), &GlmSpec::logit()).unwrap_err();
+        let eb = fit_logit_lean(bad.view(), d.yb.view(), &GlmSpec::logit()).unwrap_err();
+        assert_eq!(ea.to_string(), eb.to_string());
     }
 }
