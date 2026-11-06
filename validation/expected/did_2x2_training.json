@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "id": "did_2x2_training",
+  "area": "causal/did",
+  "method": "2x2 difference-in-differences regression, HC1 and cluster-robust (CR1) standard errors, employee_training (the paper's diff_in_diff example)",
+  "reference": "stats::lm; sandwich::vcovHC(type = 'HC1'), sandwich::vcovCL(cluster = ~employee_id, type = 'HC1'); t-tests on df.residual",
+  "call": "lm(performance ~ training_group + post_training + training_group:post_training [+ tenure [+ years_since_hire]], data = employee_training)",
+  "dataset": "validation/datasets/employee_training.csv",
+  "datasets": ["validation/datasets/employee_training.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "sandwich": "3.1.3",
+    "lmtest": "0.9.40"
+  },
+  "values": {
+    "base_coef": {
+      "names": ["(Intercept)", "training_group", "post_training", "training_group:post_training"],
+      "values": [3.0021376811594251, 0.42221417069242484, 0.12521739130434545, 0.21296162104133362]
+    },
+    "base_se_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "training_group:post_training"],
+      "values": [0.031183372844684983, 0.046308748785947075, 0.042542367693337226, 0.064534596730513982]
+    },
+    "base_se_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "training_group:post_training"],
+      "values": [0.047020823536770846, 0.071922141854605548, 0.023308344576333156, 0.035166867334917605]
+    },
+    "base_t_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "training_group:post_training"],
+      "values": [96.273667897060776, 9.117373752506797, 2.9433573656963237, 3.2999605146775277]
+    },
+    "base_p_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "training_group:post_training"],
+      "values": [0, 3.1657484813548805e-19, 0.0033094024230264593, 0.00099549067392749858]
+    },
+    "base_t_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "training_group:post_training"],
+      "values": [63.846982152741703, 5.8704337747053383, 5.3722129812465864, 6.0557461377824087]
+    },
+    "base_p_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "training_group:post_training"],
+      "values": [0, 5.6237679423200193e-09, 9.3405664695020346e-08, 1.8686940072365678e-09]
+    },
+    "base_df_resid": 1196,
+    "base_rank": 4,
+    "base_r2": 0.21322320903407338,
+    "base_adj_r2": 0.21124968865539628,
+    "tenure_coef": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "training_group:post_training"],
+      "values": [2.8818654725225987, 0.42086226944461202, 0.10787768717576107, 0.011559802752390286, 0.21296162104133187]
+    },
+    "tenure_se_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "training_group:post_training"],
+      "values": [0.041517202902292154, 0.046193150820689949, 0.042980853622334399, 0.0028043595444880954, 0.064199488661096482]
+    },
+    "tenure_se_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "training_group:post_training"],
+      "values": [0.074387528367724123, 0.071763917734145311, 0.025669697743328765, 0.0059062404060924376, 0.035181578428359457]
+    },
+    "tenure_t_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "training_group:post_training"],
+      "values": [69.413767572561866, 9.1109236319101115, 2.5099009927458478, 4.1220829815174076, 3.3171856269064346]
+    },
+    "tenure_p_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "training_group:post_training"],
+      "values": [0, 3.3505800235363512e-19, 0.012207852169180062, 4.0138027659793287e-05, 0.00093664814420030555]
+    },
+    "tenure_t_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "training_group:post_training"],
+      "values": [38.741245149005465, 5.8645386530279344, 4.2025304798844836, 1.9572184600657392, 6.0532139419209798]
+    },
+    "tenure_p_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "training_group:post_training"],
+      "values": [2.3626657760326143e-213, 5.8226747062349036e-09, 2.835995484084711e-05, 0.050554315498641783, 1.8978819213800739e-09]
+    },
+    "tenure_df_resid": 1195,
+    "tenure_rank": 5,
+    "tenure_r2": 0.22340065513795904,
+    "tenure_adj_r2": 0.22080115942293965,
+    "aliased_coef": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "years_since_hire", "training_group:post_training"],
+      "values": [2.8818654725225987, 0.42086226944461202, 0.10787768717576107, 0.011559802752390286, null, 0.21296162104133187]
+    },
+    "aliased_se_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "years_since_hire", "training_group:post_training"],
+      "values": [0.041517202902292154, 0.046193150820689949, 0.042980853622334399, 0.0028043595444880954, null, 0.064199488661096482]
+    },
+    "aliased_se_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "years_since_hire", "training_group:post_training"],
+      "values": [0.074387528367724123, 0.071763917734145311, 0.025669697743328765, 0.0059062404060924376, null, 0.035181578428359457]
+    },
+    "aliased_t_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "years_since_hire", "training_group:post_training"],
+      "values": [69.413767572561866, 9.1109236319101115, 2.5099009927458478, 4.1220829815174076, null, 3.3171856269064346]
+    },
+    "aliased_p_hc1": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "years_since_hire", "training_group:post_training"],
+      "values": [0, 3.3505800235363512e-19, 0.012207852169180062, 4.0138027659793287e-05, null, 0.00093664814420030555]
+    },
+    "aliased_t_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "years_since_hire", "training_group:post_training"],
+      "values": [38.741245149005465, 5.8645386530279344, 4.2025304798844836, 1.9572184600657392, null, 6.0532139419209798]
+    },
+    "aliased_p_cl": {
+      "names": ["(Intercept)", "training_group", "post_training", "tenure", "years_since_hire", "training_group:post_training"],
+      "values": [2.3626657760326143e-213, 5.8226747062349036e-09, 2.835995484084711e-05, 0.050554315498641783, null, 1.8978819213800739e-09]
+    },
+    "aliased_df_resid": 1195,
+    "aliased_rank": 5,
+    "aliased_r2": 0.22340065513795904,
+    "aliased_adj_r2": 0.22080115942293965,
+    "group_means": [3.0021376811594203, 3.127355072463768, 3.4243518518518519, 3.7625308641975308],
+    "n_clusters": 200
+  }
+}

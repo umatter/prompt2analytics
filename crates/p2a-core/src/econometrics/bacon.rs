@@ -42,6 +42,14 @@
 //! - β̂_{kl} is the 2x2 DiD estimate comparing group k to group l
 //! - s_{kl} are weights that sum to 1
 //!
+//! The weights are Goodman-Bacon's Theorem 1, as `bacondecomp::bacon`
+//! (`calculate_weights`): s_{kl} ∝ (n_k + n_l)² V_{kl} with V_{kl} = n_{kl}(1 - n_{kl})
+//! D(1 - D), which is n_T n_C D(1 - D) where n_T and n_C are the rows of the treated
+//! and the control group in the comparison window and D the treated group's share of
+//! post-treatment rows in it. On a balanced panel without always-treated units the
+//! weighted sum is the two-way fixed-effects coefficient. `bacondecomp` refuses
+//! unbalanced panels; here they get a warning that the identity does not hold.
+//!
 //! # References
 //!
 //! - Goodman-Bacon, A. (2021). "Difference-in-Differences with Variation in Treatment Timing".
@@ -67,6 +75,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
+use crate::traits::convergence::{ResultNotes, notes_text};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Public Types
@@ -121,9 +130,9 @@ pub struct BaconComponent {
     /// This is the ATT from comparing these two groups.
     pub estimate: f64,
 
-    /// Weight of this comparison in the overall TWFE estimate.
-    /// Weights sum to 1 across all components.
-    /// Weight depends on group sizes and variance in treatment status.
+    /// Weight of this comparison in the overall TWFE estimate (Goodman-Bacon's
+    /// Theorem 1, as bacondecomp: proportional to n_T n_C D (1 - D) over the rows
+    /// of the comparison window). Weights sum to 1 across all components.
     pub weight: f64,
 
     /// Number of treated observations in this comparison.
@@ -160,8 +169,8 @@ impl fmt::Display for BaconComponent {
 /// with diagnostics about the composition of the estimate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaconDecompResult {
-    /// The overall TWFE DiD estimate.
-    /// This equals the weighted sum of all component estimates.
+    /// The weighted sum of the component estimates: the two-way fixed-effects
+    /// coefficient on a balanced panel without always-treated units.
     pub overall_estimate: f64,
 
     /// All individual 2x2 DiD comparisons contributing to the TWFE estimate.
@@ -203,6 +212,16 @@ pub struct BaconDecompResult {
     /// Rows dropped because of missing values (empty when none were).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+
+    /// Warnings (an unbalanced panel).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for BaconDecompResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 /// Weighted average estimates broken down by comparison type.
@@ -321,6 +340,11 @@ impl fmt::Display for BaconDecompResult {
             )?;
         }
 
+        let notes = notes_text(self);
+        if !notes.is_empty() {
+            writeln!(f)?;
+            write!(f, "{notes}")?;
+        }
         if let Some(note) = self.missing.note() {
             writeln!(f)?;
             writeln!(f, "Missing values: {note}")?;
@@ -428,6 +452,32 @@ pub fn bacon_decomp(
 
     let n_times = times.len();
 
+    // Units not observed in every period (bacondecomp refuses such panels): the
+    // distinct (unit, period) pairs per unit. Unit codes are 0..n_levels and time
+    // indices whole numbers, so the pairs are exact integer keys.
+    let n_incomplete = {
+        let mut pairs: Vec<(i64, i64)> = unit
+            .iter()
+            .zip(time.iter())
+            .map(|(&u, &t)| (u as i64, t as i64))
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut incomplete = 0usize;
+        let mut i = 0;
+        while i < pairs.len() {
+            let u = pairs[i].0;
+            let start = i;
+            while i < pairs.len() && pairs[i].0 == u {
+                i += 1;
+            }
+            if i - start < n_times {
+                incomplete += 1;
+            }
+        }
+        incomplete
+    };
+
     // Build unit -> treatment timing map in one pass over the rows.
     // Treatment timing = first period where treatment = 1 (0 means never treated)
     let mut first_treat: BTreeMap<i64, Option<i64>> = BTreeMap::new();
@@ -529,13 +579,8 @@ pub fn bacon_decomp(
         }
     }
 
-    // Compute weights based on group sizes and timing
-    // Following Goodman-Bacon (2021), weights depend on:
-    // - Share of observations in each group
-    // - Variance of treatment indicator over time for each comparison
-    compute_weights(&mut components, n, n_times, &unit_treatment_time, &times);
-
-    // Normalize weights to sum to 1
+    // The raw weights n_T n_C D (1 - D) were set per comparison (Theorem 1);
+    // normalize them to sum to 1
     let total_weight: f64 = components.iter().map(|c| c.weight).sum();
     if total_weight > 0.0 {
         for comp in &mut components {
@@ -570,6 +615,15 @@ pub fn bacon_decomp(
     // The overall estimate is the weighted sum of components
     let overall_estimate: f64 = components.iter().map(|c| c.weight * c.estimate).sum();
 
+    let mut warnings = Vec::new();
+    if n_incomplete > 0 {
+        warnings.push(format!(
+            "the panel is unbalanced ({n_incomplete} of {n_units} units are not observed in \
+             every period); bacondecomp::bacon refuses unbalanced panels, and the weighted sum \
+             of the 2x2 estimates is then not the two-way fixed-effects coefficient"
+        ));
+    }
+
     Ok(BaconDecompResult {
         overall_estimate,
         components,
@@ -584,6 +638,7 @@ pub fn bacon_decomp(
         timing_groups,
         estimate_by_type,
         missing: cols.missing().clone(),
+        warnings,
     })
 }
 
@@ -652,7 +707,9 @@ fn build_cohort_cells(
 }
 
 /// The 2x2 DiD estimate from the four (group, window) cells, or `None` when
-/// any of them is empty.
+/// any of them is empty. Its unnormalised weight is Goodman-Bacon's Theorem 1
+/// (bacondecomp's `calculate_weights`): n_T n_C D (1 - D), with n_T and n_C the
+/// window rows of the treated and the control group and D = n_T,post / n_T.
 #[allow(clippy::too_many_arguments)]
 fn two_by_two(
     treated: &CohortCells,
@@ -682,11 +739,16 @@ fn two_by_two(
 
     let estimate = (mean_treated_post - mean_treated_pre) - (mean_control_post - mean_control_pre);
 
+    let n_t = (n_treated_pre + n_treated_post) as f64;
+    let n_c = (n_control_pre + n_control_post) as f64;
+    let d = n_treated_post as f64 / n_t;
+    let weight = n_t * n_c * d * (1.0 - d);
+
     Some(BaconComponent {
         treated_group: g_treated,
         control_group: g_control,
         estimate,
-        weight: 0.0, // Will be computed later
+        weight, // normalised in bacon_decomp
         n_treated: n_treated_pre + n_treated_post,
         n_control: n_control_pre + n_control_post,
         comparison_type,
@@ -766,111 +828,6 @@ fn compute_2x2_did_timing(
         comparison_type,
         time_range,
     )
-}
-
-/// Compute weights for each 2x2 comparison following Goodman-Bacon (2021).
-///
-/// Weights depend on:
-/// 1. n_k × n_l / n^2: Product of group shares
-/// 2. V(D_kl): Variance of treatment indicator in the comparison window
-///
-/// The weight formula is: w_kl ∝ (n_k × n_l) × V(D_kl)
-fn compute_weights(
-    components: &mut [BaconComponent],
-    n_total: usize,
-    n_times: usize,
-    unit_treatment_time: &BTreeMap<i64, i64>,
-    times: &[i64],
-) {
-    // Count units in each timing group
-    let mut group_counts: BTreeMap<i64, usize> = BTreeMap::new();
-    for &g in unit_treatment_time.values() {
-        *group_counts.entry(g).or_insert(0) += 1;
-    }
-
-    let n_total_f = n_total as f64;
-
-    for comp in components.iter_mut() {
-        let n_treated = *group_counts.get(&comp.treated_group).unwrap_or(&0);
-        let n_control = if comp.control_group == 0 {
-            *group_counts.get(&0).unwrap_or(&0)
-        } else {
-            *group_counts.get(&comp.control_group).unwrap_or(&0)
-        };
-
-        if n_treated == 0 || n_control == 0 {
-            comp.weight = 0.0;
-            continue;
-        }
-
-        // Group size component: (n_k / n) × (n_l / n)
-        let size_weight = (n_treated as f64 / n_total_f) * (n_control as f64 / n_total_f);
-
-        // Variance of treatment indicator in the comparison window
-        // V(D) = p(1-p) where p is the fraction of treated observations
-        let variance_weight = compute_treatment_variance(
-            comp.treated_group,
-            comp.control_group,
-            times,
-            n_times,
-            &comp.comparison_type,
-        );
-
-        // Combined weight
-        comp.weight = size_weight * variance_weight * (n_total_f.powi(2));
-    }
-}
-
-/// Compute the variance of the treatment indicator for a specific comparison.
-///
-/// This captures how much the treatment status varies within the comparison window,
-/// which affects the precision of the 2x2 estimate.
-fn compute_treatment_variance(
-    g_treated: i64,
-    g_control: i64,
-    times: &[i64],
-    _n_times: usize,
-    comparison_type: &ComparisonType,
-) -> f64 {
-    // Determine the relevant time window for this comparison
-    let (pre_count, post_count) = match comparison_type {
-        ComparisonType::TreatedVsNeverTreated => {
-            // Pre: t < g_treated, Post: t >= g_treated
-            let pre = times.iter().filter(|&&t| t < g_treated).count();
-            let post = times.iter().filter(|&&t| t >= g_treated).count();
-            (pre, post)
-        }
-        ComparisonType::TreatedVsNotYetTreated => {
-            // Pre: t < g_treated, Post: g_treated <= t < g_control
-            let pre = times.iter().filter(|&&t| t < g_treated).count();
-            let post = times
-                .iter()
-                .filter(|&&t| t >= g_treated && t < g_control)
-                .count();
-            (pre, post)
-        }
-        ComparisonType::LaterVsEarlierTreated => {
-            // Pre: g_control <= t < g_treated, Post: t >= g_treated
-            let pre = times
-                .iter()
-                .filter(|&&t| t >= g_control && t < g_treated)
-                .count();
-            let post = times.iter().filter(|&&t| t >= g_treated).count();
-            (pre, post)
-        }
-    };
-
-    let total = pre_count + post_count;
-    if total == 0 {
-        return 0.0;
-    }
-
-    // p = fraction of observations that are "post" (treated)
-    let p = post_count as f64 / total as f64;
-
-    // Variance of binary variable: p(1-p)
-    // This is maximized when p = 0.5 (equal pre/post periods)
-    p * (1.0 - p) * (total as f64)
 }
 
 /// Compute weighted average estimates by comparison type.
@@ -1139,7 +1096,8 @@ mod tests {
     // These tests validate the Goodman-Bacon decomposition against known
     // structural properties:
     // 1. Weights must sum to 1
-    // 2. Weighted sum of 2x2 DD estimates must equal overall TWFE coefficient
+    // 2. The weighted sum of the 2x2 DD estimates is the TWFE coefficient
+    //    (against a within estimator and fixest)
     // 3. Each component has a valid estimate and non-negative weight
     //
     // References:
@@ -1225,28 +1183,137 @@ mod tests {
         );
     }
 
+    /// The balanced two-way within estimator `sum D'' y'' / sum D''^2`, with
+    /// `v'' = v - mean_unit - mean_time + mean`, computed independently of
+    /// `bacon_decomp` (balanced panels only).
+    fn within_twfe(ds: &Dataset, y: &str, unit: &str, time: &str, d: &str) -> f64 {
+        let col = |c: &str| -> Vec<f64> {
+            let s = ds.df().column(c).unwrap().cast(&DataType::Float64).unwrap();
+            s.f64().unwrap().iter().map(|v| v.unwrap()).collect()
+        };
+        let (yv, uv, tv, dv) = (col(y), col(unit), col(time), col(d));
+        let demean = |v: &[f64]| -> Vec<f64> {
+            let mut by_u: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
+            let mut by_t: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
+            for i in 0..v.len() {
+                let e = by_u.entry(uv[i] as i64).or_default();
+                e.0 += v[i];
+                e.1 += 1;
+                let e = by_t.entry(tv[i] as i64).or_default();
+                e.0 += v[i];
+                e.1 += 1;
+            }
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            (0..v.len())
+                .map(|i| {
+                    let (su, nu) = by_u[&(uv[i] as i64)];
+                    let (st, nt) = by_t[&(tv[i] as i64)];
+                    v[i] - su / nu as f64 - st / nt as f64 + mean
+                })
+                .collect()
+        };
+        let (yd, dd) = (demean(&yv), demean(&dv));
+        let num: f64 = yd.iter().zip(&dd).map(|(a, b)| a * b).sum();
+        let den: f64 = dd.iter().map(|b| b * b).sum();
+        num / den
+    }
+
+    /// CAUS-10: the weighted sum of the 2x2 estimates is the TWFE coefficient
+    /// (Theorem 1), against a within estimator computed here and fixest::feols;
+    /// the weights are bacondecomp's (`bacon_fixture.R`). Before: 1.97486 against
+    /// 1.97875, weights 0.1216, 0.1622, 0.0811, ...
     #[test]
-    fn test_validate_bacon_weighted_sum_equals_overall() {
-        // The weighted sum of all 2x2 DD estimates must equal the overall
-        // TWFE coefficient. This is the key decomposition identity:
-        //   beta_TWFE = sum_k sum_l w_kl * beta_kl
-        //
-        // Goodman-Bacon (2021), Theorem 1.
+    fn test_bacon_overall_equals_within_twfe() {
         let dataset = create_validation_bacon_dataset();
         let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
-
-        let weighted_sum: f64 = result
-            .components
-            .iter()
-            .map(|c| c.weight * c.estimate)
-            .sum();
-
+        let twfe = within_twfe(&dataset, "outcome", "unit", "year", "treated");
         assert!(
-            (weighted_sum - result.overall_estimate).abs() < 1e-8,
-            "Weighted sum of 2x2 DDs ({:.10}) must equal overall estimate ({:.10})",
-            weighted_sum,
+            (result.overall_estimate - twfe).abs() < 1e-12,
+            "{} vs {twfe}",
             result.overall_estimate
         );
+        assert!((result.overall_estimate - 1.978749999999999).abs() < 1e-12);
+        for (tg, cg, w) in [
+            (2002, 2004, 0.05),
+            (2002, 2006, 0.10),
+            (2002, 0, 0.15),
+            (2004, 2002, 0.10),
+            (2004, 2006, 0.10),
+            (2004, 0, 0.20),
+            (2006, 2002, 0.10),
+            (2006, 2004, 0.05),
+            (2006, 0, 0.15),
+        ] {
+            let c = comp(&result, tg, cg);
+            assert!((c.weight - w).abs() < 1e-12, "{tg} vs {cg}: {}", c.weight);
+        }
+        assert!(result.warnings.is_empty());
+    }
+
+    /// CAUS-10, CAUS-54: components, weights, type shares and estimates against
+    /// bacondecomp::bacon, and the TWFE coefficient against fixest::feols, on the
+    /// R case panel. Before: weight 0.16684924580770202 against 0.18522230685963997
+    /// and overall 0.80562983175357661 against 0.8711820033888621 (the 2x2
+    /// estimates already matched, T0-WP11).
+    #[test]
+    fn test_validate_bacon_twfe_identity() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("bacon_twfe");
+        let r = bacon_decomp(&ds, "y", "unit", "time", "D").unwrap();
+        let n = r.n_obs;
+        let (tg, cg) = (
+            case.vector("component_treated"),
+            case.vector("component_control"),
+        );
+        assert_eq!(r.components.len(), tg.len());
+        let est: Vec<f64> = tg
+            .iter()
+            .zip(&cg)
+            .map(|(&t, &c)| comp(&r, t as i64, c as i64).estimate)
+            .collect();
+        let w: Vec<f64> = tg
+            .iter()
+            .zip(&cg)
+            .map(|(&t, &c)| comp(&r, t as i64, c as i64).weight)
+            .collect();
+        // bacondecomp's "Earlier vs Later Treated" is TreatedVsNotYetTreated; its
+        // never-treated 99999 is recoded 0 in the case
+        Check::new(&case)
+            .vector("component_estimate", &est, Tol::coef(n))
+            .vector("component_weight", &w, Tol::coef(n))
+            .scalar("twfe", r.overall_estimate, Tol::coef(n))
+            .scalar(
+                "type_weight_treated_vs_untreated",
+                r.treated_vs_never,
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_weight_earlier_vs_later_treated",
+                r.treated_vs_not_yet,
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_weight_later_vs_earlier_treated",
+                r.later_vs_earlier,
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_estimate_treated_vs_untreated",
+                r.estimate_by_type.treated_vs_never.unwrap(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_estimate_earlier_vs_later_treated",
+                r.estimate_by_type.treated_vs_not_yet.unwrap(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "type_estimate_later_vs_earlier_treated",
+                r.estimate_by_type.later_vs_earlier.unwrap(),
+                Tol::coef(n),
+            )
+            .finish();
+        assert!(r.warnings.is_empty());
     }
 
     #[test]
@@ -1471,16 +1538,20 @@ mod tests {
             weight_sum
         );
 
-        // Weighted sum must still equal overall estimate
-        let weighted_sum: f64 = result
-            .components
-            .iter()
-            .map(|c| c.weight * c.estimate)
-            .sum();
-        assert!(
-            (weighted_sum - result.overall_estimate).abs() < 1e-8,
-            "Decomposition identity must hold with heterogeneous effects"
-        );
+        // The decomposition reproduces the TWFE coefficient (within estimator and
+        // R's fixest::feols 3.2335937499999998), with bacondecomp's weights
+        let twfe = within_twfe(&dataset, "outcome", "unit", "year", "treated");
+        assert!((result.overall_estimate - twfe).abs() < 1e-12);
+        assert!((result.overall_estimate - 3.23359375).abs() < 1e-12);
+        for (tg, cg, w) in [
+            (2002, 2004, 0.125),
+            (2002, 0, 0.3125),
+            (2004, 2002, 0.1875),
+            (2004, 0, 0.375),
+        ] {
+            let c = comp(&result, tg, cg);
+            assert!((c.weight - w).abs() < 1e-12, "{tg} vs {cg}: {}", c.weight);
+        }
 
         // The forbidden comparison (later vs earlier) may have different
         // estimates than the clean comparisons. Check that these are present.
@@ -1596,7 +1667,8 @@ mod tests {
     ///   d$D <- as.numeric(d$g > 0 & d$time >= d$g)
     ///   d$y <- 0.5*d$unit + 0.3*d$time + d$D*(1 + 0.2*(d$time - d$g)) + 0.4*sin(1.3*d$unit + 0.7*d$time)
     ///   bacon(y ~ D, data = d, id_var = "unit", time_var = "time")
-    /// The 2x2 estimates match; the weights do not (CAUS-10, Tier 4), so they are not compared.
+    /// The 2x2 estimates and the weights match (`bacon_t0.R`); the overall is
+    /// fixest::feols(y ~ D | unit + time).
     #[test]
     fn test_bacon_components_match_bacondecomp() {
         let r = bacon_decomp(&bacon_panel(|_, _| false), "y", "unit", "time", "D").unwrap();
@@ -1611,8 +1683,38 @@ mod tests {
             assert!((c.estimate - want).abs() < 1e-10, "{tg} vs {cg}");
             assert_eq!(c.time_range, range, "{tg} vs {cg}");
         }
-        let ws: f64 = r.components.iter().map(|c| c.weight * c.estimate).sum();
-        assert!((ws - r.overall_estimate).abs() < 1e-12);
+        for (tg, cg, w) in [
+            (3, 6, 0.14285714285714285),
+            (3, 0, 0.2857142857142857),
+            (6, 3, 0.21428571428571427),
+            (6, 0, 0.35714285714285715),
+        ] {
+            let c = comp(&r, tg, cg);
+            assert!((c.weight - w).abs() < 1e-12, "{tg} vs {cg}: {}", c.weight);
+        }
+        assert!((r.overall_estimate - 1.2801817789851873).abs() < 1e-12);
+    }
+
+    /// bacondecomp refuses unbalanced panels; here the weighted sum is then not
+    /// the TWFE coefficient, which a warning says.
+    #[test]
+    fn test_bacon_unbalanced_panel_warns() {
+        let r = bacon_decomp(
+            &bacon_panel(|u, t| u % 5 == 0 && t % 3 == 0),
+            "y",
+            "unit",
+            "time",
+            "D",
+        )
+        .unwrap();
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        let w = &r.warnings[0];
+        for needle in ["unbalanced", "2 of 12 units", "bacondecomp"] {
+            assert!(w.contains(needle), "{w}");
+        }
+        assert!(format!("{r}").contains("Warning: the panel is unbalanced"));
+        let r = bacon_decomp(&bacon_panel(|_, _| false), "y", "unit", "time", "D").unwrap();
+        assert!(r.warnings.is_empty());
     }
 
     /// Unbalanced: rows with unit %% 5 == 0 and time %% 3 == 0 dropped (92 rows). Unit 5 then

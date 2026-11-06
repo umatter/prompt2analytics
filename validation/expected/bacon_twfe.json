@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "bacon_twfe",
+  "area": "causal/did",
+  "method": "Goodman-Bacon decomposition (2x2 estimates, Theorem 1 weights) and the TWFE coefficient it decomposes, balanced staggered panel with never-treated units",
+  "reference": "bacondecomp::bacon (Goodman-Bacon 2021, Theorem 1); fixest::feols two-way fixed effects",
+  "call": "bacon(y ~ D, data = d, id_var = 'unit', time_var = 'time'); feols(y ~ D | unit + time, data = d)",
+  "dataset": "validation/datasets/generated/cs_cov_panel.csv",
+  "datasets": ["validation/datasets/generated/cs_cov_panel.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "bacondecomp": "0.1.1",
+    "fixest": "0.14.2"
+  },
+  "values": {
+    "component_treated": [3, 3, 3, 5, 5, 5, 7, 7, 7],
+    "component_control": [0, 5, 7, 0, 3, 7, 0, 3, 5],
+    "component_estimate": [1.9538168775149178, 0.89383749471125107, 1.541938138650405, 1.0643198769609463, -0.28710657960155023, 0.55056951920610209, 0.23548397169554036, -1.1045313166488573, -0.35856764379807304],
+    "component_weight": [0.18522230685963997, 0.025658501383153589, 0.033676783065389099, 0.39514092130056527, 0.051317002766307192, 0.053882852904622545, 0.19448342220262194, 0.033676783065389099, 0.026941426452311269],
+    "twfe": 0.87118200338886209,
+    "weighted_sum": 0.87118200338885798,
+    "type_weight_treated_vs_untreated": 0.77484665036282718,
+    "type_estimate_treated_vs_untreated": 1.0689141319470727,
+    "type_weight_earlier_vs_later_treated": 0.11321813735316523,
+    "type_estimate_earlier_vs_later_treated": 0.92324697836209002,
+    "type_weight_later_vs_earlier_treated": 0.11193521228400756,
+    "type_estimate_later_vs_earlier_treated": -0.55023645576910085
+  }
+}

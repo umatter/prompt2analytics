@@ -15,6 +15,7 @@
         "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_analytic_notyet",
         "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_confidence_level_90",
         "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_bootstrap_close_to_analytic",
+        "p2a-core::econometrics::staggered_did::tests::test_validate_staggered_did_reference_cells_have_no_se",
         "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_analytic",
         "p2a-mcp::tier2::wp12_did::test_validate_mcp_staggered_did_string_unit_ids"
       ],
@@ -25,6 +26,7 @@
         "event-study ATT, SE, CI, p",
         "pre-trend Wald W, df, p",
         "90% CI",
+        "reference cells (t = g - 1) and the reference event time: SE NA, as did (analytic and bootstrap)",
         "bootstrap SE within 15% of the analytic SE (B = 999)",
         "MCP text at print precision"
       ],

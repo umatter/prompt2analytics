@@ -423,8 +423,9 @@ EXAMPLES:
         #[arg(long, default_value = "or")]
         method: String,
 
-        /// Unit-bootstrap replications for SEs, at least 50; 0 gives analytic
-        /// influence-function SEs, without covariates only (default: 999)
+        /// Bootstrap replications for SEs, at least 50 (a multiplier bootstrap of the
+        /// influence functions with covariates); 0 gives analytic influence-function SEs
+        /// (default: 999)
         #[arg(long, default_value = "999")]
         bootstrap: usize,
     },
@@ -1043,6 +1044,8 @@ fn execute_did(
                             "treated_post_mean": result.treated_post_mean,
                             "control_pre_mean": result.control_pre_mean,
                             "control_post_mean": result.control_post_mean,
+                            "aliased": result.aliased,
+                            "warnings": result.warnings,
                         });
                         println!("{}", serde_json::to_string_pretty(&json)?);
                     }
@@ -1068,6 +1071,16 @@ fn execute_did(
                             "  Post-treatment (control): {:.4}",
                             result.control_post_mean
                         );
+                        if !result.aliased.is_empty() {
+                            println!(
+                                "\nAliased (dropped, coefficient NA): {}",
+                                result.aliased.join(", ")
+                            );
+                        }
+                        let notes = p2a_core::traits::convergence::notes_text(&result);
+                        if !notes.is_empty() {
+                            print!("\n{notes}");
+                        }
 
                         // Run identification diagnostics
                         let diag_report = did_diagnostics(&result);

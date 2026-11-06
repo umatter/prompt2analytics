@@ -17,99 +17,74 @@ Y = β₀ + β₁×Treatment + β₂×Post + β₃×(Treatment × Post) + ε
 
 | Package | Language | Function | Version Tested |
 |---------|----------|----------|----------------|
-| base | R | Manual interaction regression | - |
+| stats + sandwich | R | `lm`, `vcovHC(type = "HC1")`, `vcovCL(type = "HC1")` | R 4.x (case `did_2x2_training`) |
 | did | R | `att_gt()` for staggered DiD | 2.1-x |
 | statsmodels | Python | Manual interaction regression | 0.14.x |
 
-## Test Cases
+## R reference: case `did_2x2_training`
 
-### Test 1: Classic 2×2 DiD
+`validation/r/cases/causal_did_cov.R`, case `did_2x2_training`, on
+`validation/datasets/employee_training.csv` (1200 rows, 200 employees; the paper's
+`diff_in_diff` example):
 
-**Data Generating Process**:
-```
-Treatment group: Y increases by 5 units after treatment
-Control group: No change
-Both groups have parallel pre-trends
-```
-
-**R Code**:
 ```r
-set.seed(42)
-n_per_group <- 100
-
-# Create balanced panel
-data <- expand.grid(
-  id = 1:(2*n_per_group),
-  time = c("pre", "post")
-)
-
-# Assign treatment (first n_per_group are treated)
-data$treat <- ifelse(data$id <= n_per_group, 1, 0)
-data$post <- ifelse(data$time == "post", 1, 0)
-
-# Outcome with treatment effect = 5
-data$y <- 10 +                           # Baseline
-          2 * data$treat +               # Treated group higher
-          3 * data$post +                # Time trend
-          5 * data$treat * data$post +   # Treatment effect (ATT)
-          rnorm(nrow(data), 0, 1)
-
-# DiD regression
-did_fit <- lm(y ~ treat + post + treat:post, data = data)
-summary(did_fit)
-
-# ATT = coefficient on treat:post
-# Expected: ~5
+lm(performance ~ training_group + post_training + training_group:post_training
+     [+ tenure [+ years_since_hire]], data = employee_training)
+sandwich::vcovHC(fit, type = "HC1")
+sandwich::vcovCL(fit, cluster = ~employee_id, type = "HC1")
+# t and p on df.residual
 ```
 
-**Results Comparison**:
+Three specifications: `base`, `tenure`, and `aliased` (`tenure` and `years_since_hire`, which is
+`tenure + 0.5`: `lm` reports `NA` for `years_since_hire`).
 
-| Statistic | True Value | R Estimate | p2a Rust | Tolerance |
-|-----------|------------|------------|----------|-----------|
-| ATT (β₃) | 5.0 | ~5.0 | ~5.0 | 0.5 |
-| SE(ATT) | - | varies | varies | 0.1 |
-| β(treat) | 2.0 | ~2.0 | ~2.0 | 0.3 |
-| β(post) | 3.0 | ~3.0 | ~3.0 | 0.3 |
+| Quantity | base | tenure | aliased |
+|---|---|---|---|
+| ATT (interaction) | 0.21296162104133362 | 0.21296162104133187 | 0.21296162104133187 |
+| CR1 SE of the ATT | 0.035166867334917605 | | 0.03518157842835946 |
+| HC1 SE of the ATT | 0.06453459673051398 | | |
+| years_since_hire | | | NA |
+| df.residual | 1196 | 1195 | 1195 |
+| R2 | 0.21322320903407338 | | 0.22340065513795904 |
 
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with X-10):
-- `econometrics::did::tests::test_validate_did_classic_2x2` (`crates/p2a-core/src/econometrics/did.rs`): the ATT is within 0.5 of the DGP's 5.0, the group means are within 0.5 of theirs, and the ATT equals the manual difference in differences.
+Group means (control pre, control post, treated pre, treated post): 3.0021376811594203,
+3.127355072463768, 3.424351851851852, 3.762530864197531; 200 clusters. Every coefficient, SE,
+t and p of each specification is in `validation/expected/did_2x2_training.json`.
 
----
+**Test**: `test_validate_did_2x2_training` (`crates/p2a-core/src/econometrics/did.rs`; registry
+`validation/methods/causal_did_cov.json`, method `did_2x2`): coefficients `Tol::coef(1200)`
+(1e-10 relative), HC1 and CR1 SEs `Tol::se(1200)`, t, R2 and adjusted R2 `Tol::stat(1200)`,
+p-values `Tol::p_value(1200)`, df exact, the aliased name and R's warning, the headline fields
+against the interaction's entry, and the group means.
 
-### Test 2: With Covariates
+**Estimation rules** (CAUS-102):
+- the regression is solved as OLS is: the normal equations on a full-rank, well-conditioned
+  design, otherwise `lm`'s pivoted QR (`dqrdc2`, tolerance 1e-7); an aliased control is `NA`
+  (NaN; Display prints `NA`) and the result carries `aliased` and R's warning "Coefficients not
+  defined because of singularities: ...";
+- an aliased treatment x post interaction (for example only treated units) is an
+  `InvalidSpecification` error ("not identified");
+- df = n - rank by checked arithmetic (n <= rank is `InsufficientData`);
+- HC1: `B (sum e_i^2 x_i x_i') B n / df`; CR1: `B meat B (G / (G - 1)) ((n - 1) / df)`, with B the
+  inverse cross-product of the identified columns; clustering needs at least 2 clusters
+  (`vcovCL` fails with one).
 
-**R Code**:
-```r
-set.seed(42)
-n_per_group <- 200
+Before the fix `run_did` inverted X'X: the aliased control got a generalized-inverse coefficient
+with df 1194, an unidentified interaction got a number, and a single cluster fell back to a
+correction of 1.
 
-data <- expand.grid(
-  id = 1:(2*n_per_group),
-  time = c("pre", "post")
-)
+Argument tests: `test_run_did_rejects_n_le_k`, `test_run_did_rejects_single_cluster`,
+`test_run_did_rejects_unidentified_att`.
 
-data$treat <- ifelse(data$id <= n_per_group, 1, 0)
-data$post <- ifelse(data$time == "post", 1, 0)
+## DGP property tests (not R-pinned)
 
-# Add covariate
-data$x <- rnorm(nrow(data))
+`test_did_classic_2x2_recovers_dgp` (ATT within 0.5 of the DGP's 5.0, group means, ATT equal to
+the manual difference in differences), `test_did_with_covariates_recovers_dgp` and
+`test_did_null_effect_recovers_dgp` (p > 0.05; on its deterministic data `lm` +
+`vcovHC(type = "HC1")` gives ATT -0.028054724238937286, SE 0.21315963502411217, p
+0.89535670480011142, which the test quotes).
 
-# Outcome with covariate effect
-data$y <- 10 + 2*data$treat + 3*data$post +
-          5*data$treat*data$post +
-          1.5*data$x +  # Covariate effect
-          rnorm(nrow(data), 0, 1)
-
-did_fit <- lm(y ~ treat + post + treat:post + x, data = data)
-summary(did_fit)
-```
-
-**Validation Criteria**:
-- ATT still close to 5
-- Covariate coefficient close to 1.5
-- Standard errors may be smaller with covariates
-
----
+## Further designs (documentation, not tested)
 
 ### Test 3: Panel DiD with Entity Fixed Effects
 
@@ -146,35 +121,7 @@ did_fe <- plm(y ~ treat:post, data = pdata, model = "within")
 summary(did_fe)
 ```
 
-**Validation Criteria**:
-- ATT (interaction coefficient) close to 5
-- Entity FE absorbed
-- Correct standard errors
-
----
-
-### Test 4: No Treatment Effect (Null Case)
-
-**R Code**:
-```r
-set.seed(42)
-n <- 400
-
-data <- data.frame(
-  treat = rep(c(0, 1), each = n/2),
-  post = rep(c(0, 1), n/2),
-  y = rnorm(n)  # No actual treatment effect
-)
-
-did_fit <- lm(y ~ treat + post + treat:post, data = data)
-summary(did_fit)
-
-# ATT should not be significantly different from 0
-```
-
-**Validation Criteria**:
-- ATT close to 0
-- p-value > 0.05 (fail to reject no effect)
+Not tested: `run_did` has no entity fixed effects (use the panel estimators).
 
 ---
 
@@ -192,14 +139,6 @@ ATT = (Ȳ_treat,post - Ȳ_treat,pre) - (Ȳ_control,post - Ȳ_control,pre)
 | Treated | Ȳ₁₀ | Ȳ₁₁ | Ȳ₁₁ - Ȳ₁₀ |
 
 ATT = (Ȳ₁₁ - Ȳ₁₀) - (Ȳ₀₁ - Ȳ₀₀)
-
-## Numerical Precision Summary
-
-| Test Case | n | ATT Precision |
-|-----------|---|---------------|
-| Classic 2×2 | 400 | < 0.1 |
-| With covariates | 800 | < 0.1 |
-| Panel DiD | 1000 | < 0.05 |
 
 ## Known Differences
 
@@ -241,11 +180,8 @@ result), `test_na_did_omits_missing_rows`, `test_na_did_errors_name_the_column`.
 ## Running the Tests
 
 ```bash
-# Run DiD validation tests
-cargo test -p p2a-core -- did::tests::test_validate
-
-# Run with output
-cargo test -p p2a-core -- did --nocapture
+cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics::did
+Rscript validation/r/run.R --check          # did_2x2_training still reproduces
 ```
 
 ## References
