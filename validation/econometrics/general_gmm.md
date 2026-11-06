@@ -88,3 +88,33 @@ planning gaps 1.2e-15 iterative, 1.3e-10 / 6.3e-10 CUE, 1.8e-11 / 6.9e-10 normal
 |---|---|---|---|
 | `normal_twostep_coef` | 0.04861 | 0.9094 | 1.415 |
 | `normal_iter_coef` | 0.04877 | 0.9069 | 1.406 |
+
+## Timing
+
+Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), five interleaved rounds of the wave-2B timing
+harness (linear IV, q = 5, k = 4) against `fe13b889` (before the GMM rework); new / base as the ratio of
+medians. The machine was shared with other builds; the integration re-time on a quiet machine is
+authoritative.
+
+| Fit | n = 100 / 1,000 / 10,000 |
+|---|---|
+| one-step, identity W (`vcov = Fixed`) | 0.87 / 0.89 / 0.50 |
+| two-step MDS | 1.17 / 0.81 / 0.54 |
+| iterative MDS | 0.73 / 0.46 / 0.38 |
+| two-step IID | 1.07 / 0.61 / 0.63 |
+| two-step HAC | 1.09 / 0.76 / 0.58 |
+| CUE MDS (signed off as a correctness change) | 2.69 / 1.72 / 1.22 |
+
+For q <= 8 the MDS moment covariance of linear IV is formed column by column (`LinearIv::mds_omega`:
+each moment `z_j * e` as one contiguous vector, centred by its own mean, then q (q + 1) / 2 dot
+products) instead of the n x q moment matrix and a matrix product of its transpose; it is about twice
+as fast at q = 5 and equals the matrix form to rounding. CUE's variance reuses the Omega and the
+weighting matrix it computed at the estimate.
+
+Two-step MDS at n = 100 stays above 1.1x of base (1.17). The variance re-evaluates Omega at the
+two-step estimate, as `gmm::gmm` does (the base reused the first-step weighting matrix and did not
+match R's standard errors), so a two-step fit forms two moment covariances and inverts six small
+matrices (Z'Z, X'Z W Z'X twice, Omega twice, G' Omega^-1 G) where the base inverted four. At q = 5 each
+`sym_inverse` costs about 2.5 µs, most of it faer's per-call Cholesky overhead (about 1.6 µs for a 5 x 5
+factorisation), which is shared linear algebra outside this method; the second covariance adds about
+2 µs. No cheaper form gives the same values and the same singularity refusals.
