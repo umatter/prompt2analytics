@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "gformula_hazard",
+  "area": "causal/gformula",
+  "method": "Discrete-time hazard g-formula (pooled logistic, 5 periods, time-fixed L): risks under always / never treat",
+  "reference": "parametric g-formula with a pooled logistic discrete-time hazard and time-fixed covariates (Hernan & Robins 2020, ch. 17), written out (gfoRmula not installed)",
+  "call": "glm(y ~ t + A + L + Lb, person-period data, binomial); standardise prod (1 - h) over L",
+  "dataset": "validation/datasets/generated/gformula_surv.csv",
+  "datasets": ["validation/datasets/generated/gformula_surv.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "hazard_coef": {
+      "names": ["(Intercept)", "t", "A", "L", "Lb"],
+      "values": [-2.8418562733303614, 0.20850004305456832, -0.59981834178666882, 0.62349933389286327, 0.73867243632750212]
+    },
+    "hazard_se": {
+      "names": ["(Intercept)", "t", "A", "L", "Lb"],
+      "values": [0.2281527237778741, 0.059211039280960449, 0.16831969533107491, 0.091471517337029393, 0.16527757374052182]
+    },
+    "risk_always": [0.061959692471891703, 0.12971968074636264, 0.20261463845721828, 0.27965652241932426, 0.359537594778087],
+    "risk_never": [0.10501274736835819, 0.21149002548594853, 0.31735970471358865, 0.42043843162139694, 0.51852120218356346],
+    "risk_diff_T": -0.15898360740547646,
+    "risk_ratio_T": 0.69339034404769795,
+    "risk_natural_point": [0.081930619498968071, 0.1681040393758817, 0.25713812435061534, 0.34738145864621639, 0.43697111971018232],
+    "observed_risk_curve": [0.077500000000000013, 0.17500000000000004, 0.26250000000000007, 0.34000000000000008, 0.4375],
+    "observed_risk_T": 0.4375,
+    "n_person_periods": 1658,
+    "binary_eof_always": 0.36163164924175173,
+    "binary_eof_never": 0.51695510707905579
+  }
+}

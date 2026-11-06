@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "gformula_natural_course",
+      "name": "Parametric g-formula, end-of-follow-up outcome: Normal covariate simulation, natural course and static regimes",
+      "category": "econometrics",
+      "reference": "parametric g-formula (Hernan & Robins 2020, ch. 21) written out in validation/r/cases/causal_gformula.R: stats::lm and stats::glm(binomial, epsilon 1e-14) models, the natural-course integral over Normal(mu_i, sigma) by 120-point Gauss-Hermite (agrees with integrate to 2.2e-14); gfoRmula is not installed",
+      "doc": "validation/econometrics/gformula.md",
+      "cases": ["gformula_natural_course"],
+      "tests": [
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_natural_course_models",
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_natural_course_risks"
+      ],
+      "quantities": ["covariate model coefficients and residual SD", "treatment model coefficients", "binary and continuous outcome model coefficients, residual SD",
+                     "natural-course, always- and never-treat risks (Monte Carlo, against the exact integral)", "natural course against the observed mean"],
+      "tolerance": "n = 2000: models at validation/README.md (coefficients 1e-10, residual SD 1e-8 relative); Monte Carlo risks within 5 Monte Carlo SEs of the exact values (200 000 simulated subjects for the binary outcome, 1 000 000 for the continuous one, seeded); natural course within 0.01 (binary) and 0.02 (continuous) of the observed mean",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "gformula_survival",
+      "name": "Parametric g-formula, discrete-time hazard (pooled logistic) for survival outcomes",
+      "category": "econometrics",
+      "reference": "pooled logistic hazard g-formula (Hernan & Robins 2020, ch. 17 and 21; Keil et al. 2014) written out in validation/r/cases/causal_gformula.R: models on the risk sets with stats::lm / stats::glm(binomial, epsilon 1e-14), risks prod (1 - h) standardised exactly over the empirical covariates (gformula_hazard) or integrated over the Gaussian covariate paths by 16^3-point Gauss-Hermite (gformula_hazard_tv); gfoRmula is not installed",
+      "doc": "validation/econometrics/gformula.md",
+      "cases": ["gformula_hazard", "gformula_hazard_tv"],
+      "tests": [
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_hazard_risks",
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_hazard_default_tolerance",
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_binary_eof_vs_survival",
+        "p2a-core::econometrics::gformula::tests::test_validate_gformula_hazard_tv"
+      ],
+      "quantities": ["hazard coefficients and SEs", "person-periods and risk-set sizes", "covariate and treatment model coefficients on the risk sets, residual SDs",
+                     "risk curves under always / never treat (exact standardisation; Monte Carlo against Gauss-Hermite with a time-varying covariate)",
+                     "natural-course risk curve (point treatment; time-varying treatment)", "observed discrete-time Kaplan-Meier curve",
+                     "risk difference and ratio at the last period", "default-tolerance fit (risks and hazard coefficients, against the tight fit)", "end-of-follow-up logit (binary outcome) as the contrast to the hazard model"],
+      "tolerance": "validation/README.md: hazard coefficients 1e-10 and SEs 1e-8 (person-periods > 1000), covariate/treatment models 1e-8 (n 731-1000), risks 1e-8 (n = 400 or 1000 subjects); default tolerance against the tight fit at Tol::iterative(1e-8); Monte Carlo risk curves within 5 * 0.5 / sqrt(200 000) = 0.0056 absolute (the per-unit risk lies in [0, 1]); counts exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
