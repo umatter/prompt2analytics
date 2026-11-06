@@ -996,14 +996,15 @@ fn ipw_naive_se(
         s1,
         s0,
     } = arms;
-    let (mut v1, mut v0) = (0.0, 0.0);
-    for i in (0..n).filter(|&i| keep[i]) {
-        if d[i] >= 0.5 {
-            v1 += (w[i] * (y[i] - mu1)).powi(2);
-        } else {
-            v0 += (w[i] * (y[i] - mu0)).powi(2);
-        }
+    // Indexed by arm, not branched on: the arms of consecutive units are unpredictable. A unit
+    // not kept has weight 0.
+    let means = [*mu0, *mu1];
+    let mut v = [0.0, 0.0];
+    for ((&wi, &yi), &di) in w.iter().zip(y).zip(d) {
+        let t = usize::from(di >= 0.5);
+        v[t] += (wi * (yi - means[t])).powi(2);
     }
+    let [v0, v1] = v;
     (v1 / (s1 * s1) + v0 / (s0 * s0)).sqrt()
 }
 
@@ -1103,42 +1104,37 @@ fn ipw_mest_se(
             let (w, mu1, mu0) = (&arms.w, arms.mu1, arms.mu0);
             // 1 / s1 and 1 / s0 with s = (sum of the arm's weights) / n
             let (r1, r0) = (nf / arms.s1, nf / arms.s0);
-            let mut a1 = vec![0.0; p];
-            let mut a0 = vec![0.0; p];
-            for i in (0..n).filter(|&i| keep[i]) {
+            // Indexed by arm, not branched on: the arms of consecutive units are unpredictable.
+            // A unit not kept has weight 0, so its terms vanish.
+            let att = kind == IpwKind::Att;
+            let means = [mu0, mu1];
+            // a[t * p..(t + 1) * p] is the score adjustment of arm t
+            let mut a = vec![0.0; 2 * p];
+            for i in 0..n {
+                let t = usize::from(d[i] >= 0.5);
                 // d w_i / d beta = x_i * c, from the unit weight w_i: a treated unit's
                 // -(1-e)/e is -(1-e) w_i (Hajek; 0 for ATT), a control's e/(1-e) is e w_i
                 // (Hajek) or w_i itself (ATT)
-                if d[i] >= 0.5 {
-                    let c = match kind {
-                        IpwKind::Att => 0.0,
-                        _ => -(1.0 - e[i]) * w[i],
-                    };
-                    axpy(&mut a1, c * (y[i] - mu1) * inv_n, row(i));
+                let cs = if att {
+                    [w[i], 0.0]
                 } else {
-                    let c = match kind {
-                        IpwKind::Att => w[i],
-                        _ => e[i] * w[i],
-                    };
-                    axpy(&mut a0, c * (y[i] - mu0) * inv_n, row(i));
-                }
+                    [e[i] * w[i], -(1.0 - e[i]) * w[i]]
+                };
+                let at = &mut a[t * p..(t + 1) * p];
+                axpy(at, cs[t] * (y[i] - means[t]) * inv_n, row(i));
             }
             // f_i = (m1_i + a1' U_i) / s1 - (m0_i + a0' U_i) / s0: one dot per row, with
             // v = I_bb^-1 (a1 / s1 - a0 / s0)
             let v =
-                inv.dot(&ArrayView1::from(&a1[..])) * r1 - inv.dot(&ArrayView1::from(&a0[..])) * r0;
+                inv.dot(&ArrayView1::from(&a[p..])) * r1 - inv.dot(&ArrayView1::from(&a[..p])) * r0;
             let v = v
                 .as_slice()
                 .ok_or_else(|| EconError::Internal("score adjustment layout".into()))?;
+            let scale = [-r0, r1];
             (0..n)
                 .map(|i| {
-                    let m = if !keep[i] {
-                        0.0
-                    } else if d[i] >= 0.5 {
-                        w[i] * (y[i] - mu1) * r1
-                    } else {
-                        -w[i] * (y[i] - mu0) * r0
-                    };
+                    let t = usize::from(d[i] >= 0.5);
+                    let m = w[i] * (y[i] - means[t]) * scale[t];
                     let f = m + dot(v, row(i)) * (d[i] - e[i]);
                     f * f
                 })
