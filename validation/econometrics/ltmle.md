@@ -30,7 +30,7 @@ Nodes are ordered `L_1, A_1, L_2, A_2, ..., L_T, A_T, Y`; time points are 1-base
    earlier node its covariates and its treatment, then the covariates of node t (R's
    `reformulate` order: `A2 ~ L0 + A1 + L1`). The Q design appends `A_t`
    (`Y ~ L0 + A1 + L1 + A2`). The designs are built once per call.
-2. **g.** For each node a binomial logit GLM (`econometrics::glm::fit_glm`, glm.fit's IRLS) of
+2. **g.** For each node a binomial logit GLM (glm.fit's IRLS; see "Nuisance fits" below) of
    `A_t` on its g design, on all subjects. Its fitted values are reported as
    `propensity_scores` (unbounded).
 3. **Cumulative g (`CalcCumG`, `SetA`).** g is predicted with every earlier `A_s` set to the
@@ -50,6 +50,25 @@ Nodes are ordered `L_1, A_1, L_2, A_2, ..., L_T, A_T, Y`; time points are 1-base
 Aliased columns (a duplicated history column, say) get NaN coefficients and predictions use the
 identified columns, as `predict.glm`; the aliasing, convergence and separation warnings of every
 fit are reported with the model they come from.
+
+### Nuisance fits
+
+Every logistic g and Q regression first runs `econometrics::glm::lean_logit_refined`: the same
+Fisher scoring and deviance rule as `fit_glm`, through the normal equations, with the refinement
+step the shared GLM takes when `kappa_1` of the equilibrated `X'WX` is above 100. It computes
+only what LTMLE reads. A fit leaves for `fit_glm` from glm.fit's start, which then reports it,
+when it would report anything: a linear predictor at the link's clamp, a rank-deficient design
+or `kappa_1` above 1e4, no convergence, a binomial response that is not 0/1. A response whose mean
+is within 1e-6 of 0 or 1 goes to `fit_glm` directly.
+
+The Q regression of node `t - 1` starts from node t's coefficients on the shared history, with
+`L_t`, `A_t` and `eps_t` moved into the intercept at their means (`warm_start`); its response is
+node t's targeted prediction. The estimate is the same maximum-likelihood estimate to the
+deviance rule, but `NodeModel::iterations` of those nodes counts fewer steps (2 where glm.fit's
+start takes 4 or 5). `test_ltmle_fast_paths_match_the_shared_glm` and its neighbours hold every
+reported quantity to `fit_glm` from glm.fit's start: on the default control the warnings and
+convergence status are equal, and at the 1e-14 control, where rounding decides the deviance
+rule, the numbers only.
 
 ## 4. Regimes and contrasts
 
@@ -153,6 +172,49 @@ not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_re
 - No `variance.method = "tmle"` (section 6).
 - The full-history designs grow with the number of time points: node t has
   `1 + sum_{s <= t} k_s + t` columns, so the cost per regime grows as `T^3` (as in ltmle).
+  See "Wall-clock against fe13b889" for the cost when a fluctuation saturates a regime.
+
+## Wall-clock against fe13b889 (T3-PERF6B)
+
+Medians in ms over five interleaved rounds of the wave-2B timing harness (`wp27`, one core, one
+rayon thread, `release`), on a shared machine. "Before" is this tree before T3-PERF6B; ratios
+are against fe13b889, whose estimator is not comparable: it fitted shorter histories (its T = 2
+growth ATE is -0.0029, this tree's 0.2397). The n = 100 rows are near the clock's resolution.
+
+| Row | n | fe13b889 | before | this tree | before ratio | ratio |
+|---|---|---:|---:|---:|---:|---:|
+| bench | 100 | 0.5 | 0.4 | 0.4 | 0.91 | 0.87 |
+| bench | 1,000 | 3.6 | 3.4 | 2.0 | 0.96 | 0.55 |
+| bench | 10,000 | 35.4 | 33.8 | 19.8 | 0.96 | 0.56 |
+| linear Q | 100 | 0.1 | 0.2 | 0.1 | 1.32 | 0.87 |
+| linear Q | 1,000 | 1.0 | 1.4 | 0.9 | 1.33 | 0.92 |
+| linear Q | 10,000 | 10.0 | 14.0 | 9.8 | 1.40 | 0.98 |
+| binary Y | 100 | 0.3 | 0.8 | 0.6 | 2.53 | 2.03 |
+| binary Y | 1,000 | 2.6 | 4.0 | 2.3 | 1.55 | 0.88 |
+| binary Y | 10,000 | 25.1 | 38.5 | 22.3 | 1.53 | 0.89 |
+| growth T = 2 | 10,000 | 21.5 | 32.6 | 19.3 | 1.51 | 0.90 |
+| growth T = 3 | 10,000 | 30.1 | 56.4 | 33.2 | 1.87 | 1.10 |
+| growth T = 5 | 10,000 | 49.8 | 119.9 | 54.7 | 2.41 | 1.10 |
+| growth T = 10 | 10,000 | 96.8 | 1,049.0 | 620.9 | 10.84 | 6.41 |
+
+**Growth T = 10 is above 1.1x and not signed off.** Its dataset has about 20 followers of each
+regime at the last node, and the always-treat fluctuation there reaches `eps = 29.2`. Every
+earlier Q response of that regime is then within about `exp(-29)` of 1, and each of those nine
+fits takes 30 IRLS steps in `fit_glm` as its linear predictor climbs to the clamp, where the
+other regime's take 2. Of six data seeds at T = 10, n = 10,000, two saturate this way. Single
+runs, medians of five rounds, with fe13b889's row at 62.5 ms in the same session:
+
+| Data seed | this tree | ratio |
+|---|---:|---:|
+| 42 (the row above), saturates | 437 | 7.0 |
+| 3, saturates | 445 | 7.1 |
+| 1, 2, 4, 5, no saturation | 89-124 | 1.4-2.0 |
+
+Starting `fit_glm` from `warm_start` on those fits (not done) brings seed 42 to 122 ms (1.95x) and
+seed 3 to 110 ms. On seeds 42 and 3 and a saturated fixture, the ATE, SE, regime means, EIC, Q*
+and fluctuation coefficients stay within 5e-11, and the warnings and convergence status are
+equal. The reported Q coefficients of the saturated nodes move, by up to 2.7, because their
+likelihood is flat, so that start changes a reported number and awaits a decision.
 
 ## 13. References
 
@@ -191,7 +253,10 @@ registered): `test_ltmle_config_validation_errors`, `test_ltmle_no_follower_is_a
 `test_ltmle_display_reports_regimes_and_notes`, `test_ltmle_covariate_scale_invariance`,
 `test_ltmle_intermediate_outcomes_warn`, `test_ltmle_data_validation`,
 `test_ltmle_data_validation_errors`, `test_intervention_type_display`,
-`test_ltmle_single_time_point_error`.
+`test_ltmle_single_time_point_error`, `test_ltmle_earlier_q_fits_start_from_the_later_node`,
+`test_ltmle_fast_paths_match_the_shared_glm`, `test_ltmle_fast_paths_match_on_other_regimes`,
+`test_ltmle_fast_paths_leave_for_collinear_and_separated_nodes`,
+`test_ltmle_linear_q_matches_after_the_row_predictions`.
 
 ## 15. Status
 
