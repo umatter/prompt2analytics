@@ -5,7 +5,7 @@
 //! - Log-rank test (comparison of survival curves)
 //! - Cox Proportional Hazards model (semi-parametric regression)
 //! - Accelerated Failure Time models (parametric regression)
-//! - Competing risks / Aalen-Johansen estimator
+//! - Competing risks / Aalen-Johansen estimator, with survfit's delta-method standard errors
 //!
 //! # References
 //!
@@ -14,7 +14,7 @@
 //! - Aalen, O.O. & Johansen, S. (1978). "An Empirical Transition Matrix". Scandinavian J. Statistics, 5:141-150.
 //! - R package `survival` (Therneau & Grambsch). https://cran.r-project.org/package=survival
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use polars::prelude::{DataFrame, DataType};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF, Normal};
@@ -25,8 +25,13 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, Factor, MissingSummary, NaPolicy, column};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{pseudoinverse, safe_inverse};
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, aliasing_message, sym_inverse};
+use crate::regression::ols::{normal_equations_inverse, solve_ols};
 use crate::resource::{checkpoint, try_zeros2};
-use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_cdf};
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text, relative_change};
+use crate::traits::estimator::{
+    SignificanceLevel, chi_squared_p_value, normal_p_value_two_sided, z_critical,
+};
 
 // =============================================================================
 // Column extraction shared by every survival entry point
@@ -186,27 +191,40 @@ fn write_missing(f: &mut fmt::Formatter<'_>, missing: &MissingSummary) -> fmt::R
 // Core Types
 // =============================================================================
 
-/// Wrapper for f64 to use as BTreeMap key.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+/// Wrapper for f64 to use as BTreeMap key, ordered by `f64::total_cmp` (equality, order and
+/// `Ord` agree on -0.0 and NaN).
+#[derive(Debug, Clone, Copy)]
 struct OrderedF64(f64);
 
-impl Eq for OrderedF64 {}
-
-impl Ord for OrderedF64 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
+impl PartialEq for OrderedF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 
-/// Method for handling tied event times in Cox model.
+impl Eq for OrderedF64 {}
+
+impl PartialOrd for OrderedF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// Method for handling tied event times in the Cox model (R `coxph(ties = )`).
+///
+/// Parsed from "efron" or "breslow" (case-insensitive, `FromStr`); other values are refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TiesMethod {
-    /// Breslow approximation (default, faster)
-    #[default]
+    /// Breslow approximation.
     Breslow,
-    /// Efron approximation (more accurate with many ties)
+    /// Efron approximation (default, as coxph).
+    #[default]
     Efron,
 }
 
@@ -219,7 +237,24 @@ impl fmt::Display for TiesMethod {
     }
 }
 
-/// Distribution for Accelerated Failure Time models.
+crate::option_enum!(
+    TiesMethod,
+    crate::options::Choices {
+        option: "ties",
+        values: &[
+            (&["efron"], TiesMethod::Efron),
+            (&["breslow"], TiesMethod::Breslow),
+        ],
+    },
+    no_display
+);
+
+/// Distribution for Accelerated Failure Time models (R `survreg(dist = )`).
+///
+/// Parsed from "weibull", "exponential", "lognormal" (also "log-normal", "log_normal") or
+/// "loglogistic" (also "log-logistic", "log_logistic"), case-insensitive (`FromStr`). R's
+/// "gaussian" and "logistic" families model T rather than log T and are refused, as are
+/// "rayleigh", "t" and "extreme".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AftDistribution {
     /// Exponential distribution (constant hazard)
@@ -243,6 +278,23 @@ impl fmt::Display for AftDistribution {
         }
     }
 }
+
+crate::option_enum!(
+    AftDistribution,
+    crate::options::Choices {
+        option: "dist",
+        values: &[
+            (&["weibull"], AftDistribution::Weibull),
+            (&["exponential"], AftDistribution::Exponential),
+            (&["lognormal", "log_normal"], AftDistribution::LogNormal),
+            (
+                &["loglogistic", "log_logistic"],
+                AftDistribution::LogLogistic
+            ),
+        ],
+    },
+    no_display
+);
 
 // =============================================================================
 // Kaplan-Meier Estimator
@@ -1124,17 +1176,49 @@ pub struct CoxConfig {
     pub max_iter: usize,
     /// Convergence tolerance
     pub tolerance: f64,
-    /// Use robust (sandwich) standard errors
+    /// Lin-Wei (1989) robust (sandwich) standard errors from the score residuals, as
+    /// `coxph(robust = TRUE)`. Implied by `cluster`.
     pub robust_se: bool,
+    /// Column whose levels define clusters for the clustered sandwich (coxph `cluster`): the
+    /// score residuals are summed within clusters first. Implies `robust_se`. Rows with a
+    /// missing cluster label are dropped and reported in `missing`.
+    #[serde(default)]
+    pub cluster: Option<String>,
+}
+
+/// How the reported Cox standard errors were computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CoxSeType {
+    /// sqrt(diag(I^-1)), the inverse information at the estimate (coxph's default).
+    #[default]
+    Model,
+    /// Lin-Wei (1989) sandwich I^-1 (sum_i U_i U_i') I^-1 from the score residuals
+    /// (`coxph(robust = TRUE)`).
+    Robust,
+    /// The same with the score residuals summed within clusters first
+    /// (`coxph(..., cluster = <col>)`).
+    Cluster,
+}
+
+impl fmt::Display for CoxSeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            CoxSeType::Model => "model-based",
+            CoxSeType::Robust => "robust (Lin-Wei sandwich)",
+            CoxSeType::Cluster => "robust, clustered (Lin-Wei sandwich)",
+        })
+    }
 }
 
 impl Default for CoxConfig {
     fn default() -> Self {
         Self {
-            ties: TiesMethod::Breslow,
+            ties: TiesMethod::Efron,
             max_iter: 25,
             tolerance: 1e-9,
             robust_se: false,
+            cluster: None,
         }
     }
 }
@@ -1201,6 +1285,67 @@ pub struct CoxResult {
     /// Rows dropped because of a missing time, status or covariate.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Covariates not estimated because they are constant or collinear with earlier ones
+    /// (coefficient NA in coxph); their entries in every per-variable vector are NaN.
+    #[serde(default)]
+    pub aliased: Vec<String>,
+    /// Warnings (aliasing, non-convergence, "coefficient may be infinite").
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The Newton iteration's convergence record.
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// What `std_errors` are; z, p, the hazard-ratio interval and the Wald test use them.
+    #[serde(default)]
+    pub se_type: CoxSeType,
+    /// The cluster column of a clustered sandwich.
+    #[serde(default)]
+    pub cluster: Option<String>,
+    /// The number of clusters of a clustered sandwich.
+    #[serde(default)]
+    pub n_clusters: Option<usize>,
+    /// Model-based SEs sqrt(diag(I^-1)) (R: sqrt(diag(fit$naive.var)) when robust); equal to
+    /// `std_errors` when `se_type` is `Model`.
+    #[serde(default)]
+    pub naive_std_errors: Vec<f64>,
+    /// Robust score test (R `fit$rscore`) from the score residuals at beta = 0; `None` unless
+    /// `se_type` is robust, `Some(NaN)` when it cannot be computed (see `warnings`).
+    #[serde(default)]
+    pub robust_score_test: Option<f64>,
+    /// p-value of `robust_score_test`.
+    #[serde(default)]
+    pub robust_score_p_value: Option<f64>,
+}
+
+impl CoxResult {
+    /// Degrees of freedom of the overall tests: the identified coefficients.
+    pub fn df(&self) -> usize {
+        self.variables.len() - self.aliased.len()
+    }
+}
+
+impl ResultNotes for CoxResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
+}
+
+/// One overall-test line, or "not reported" when the statistic is NaN.
+fn write_test_line(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
+    stat: f64,
+    df: usize,
+    p: f64,
+) -> fmt::Result {
+    if stat.is_nan() {
+        writeln!(f, "{name}: not reported")
+    } else {
+        writeln!(f, "{name} = {stat:.2}, df = {df}, p = {p:.4}")
+    }
 }
 
 impl fmt::Display for CoxResult {
@@ -1209,22 +1354,49 @@ impl fmt::Display for CoxResult {
         writeln!(f, "====================================")?;
         writeln!(f, "n = {}, events = {}", self.n_obs, self.n_events)?;
         writeln!(f, "Ties method: {}", self.ties_method)?;
+        match (self.se_type, &self.cluster, self.n_clusters) {
+            (CoxSeType::Cluster, Some(c), Some(g)) => writeln!(
+                f,
+                "Standard errors: robust, clustered by {c} ({g} clusters; Lin-Wei sandwich)"
+            )?,
+            (t, _, _) => writeln!(f, "Standard errors: {t}")?,
+        }
         writeln!(f)?;
 
-        writeln!(
-            f,
-            "{:<20} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
-            "Variable", "coef", "se(coef)", "z", "p", "HR", "95% CI HR"
-        )?;
-        writeln!(f, "{}", "-".repeat(90))?;
-
-        for i in 0..self.variables.len() {
+        let robust = self.se_type != CoxSeType::Model;
+        let width = if robust { 101 } else { 90 };
+        if robust {
             writeln!(
                 f,
-                "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{} {:>10.4} [{:.3}, {:.3}]",
+                "{:<20} {:>10} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
+                "Variable", "coef", "se(coef)", "robust se", "z", "p", "HR", "95% CI HR"
+            )?;
+        } else {
+            writeln!(
+                f,
+                "{:<20} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
+                "Variable", "coef", "se(coef)", "z", "p", "HR", "95% CI HR"
+            )?;
+        }
+        writeln!(f, "{}", "-".repeat(width))?;
+
+        for i in 0..self.variables.len() {
+            write!(
+                f,
+                "{:<20} {:>10.4} {:>10.4}",
                 self.variables[i],
                 self.coefficients[i],
-                self.std_errors[i],
+                self.naive_std_errors
+                    .get(i)
+                    .copied()
+                    .unwrap_or(self.std_errors[i]),
+            )?;
+            if robust {
+                write!(f, " {:>10.4}", self.std_errors[i])?;
+            }
+            writeln!(
+                f,
+                " {:>8.2} {:>8.4}{} {:>10.4} [{:.3}, {:.3}]",
                 self.z_stats[i],
                 self.p_values[i],
                 self.significance[i].stars(),
@@ -1234,37 +1406,46 @@ impl fmt::Display for CoxResult {
             )?;
         }
 
-        writeln!(f, "{}", "-".repeat(90))?;
+        writeln!(f, "{}", "-".repeat(width))?;
         writeln!(f)?;
         writeln!(
             f,
             "Concordance = {:.3} (se = {:.3})",
             self.concordance, self.concordance_se
         )?;
-        writeln!(
+        let df = self.df();
+        write_test_line(
             f,
-            "Likelihood ratio test = {:.2}, df = {}, p = {:.4}",
+            "Likelihood ratio test",
             self.lr_test,
-            self.variables.len(),
-            self.lr_p_value
+            df,
+            self.lr_p_value,
         )?;
-        writeln!(
+        write_test_line(f, "Wald test", self.wald_test, df, self.wald_p_value)?;
+        write_test_line(
             f,
-            "Wald test = {:.2}, df = {}, p = {:.4}",
-            self.wald_test,
-            self.variables.len(),
-            self.wald_p_value
-        )?;
-        writeln!(
-            f,
-            "Score (logrank) test = {:.2}, df = {}, p = {:.4}",
+            "Score (logrank) test",
             self.score_test,
-            self.variables.len(),
-            self.score_p_value
+            df,
+            self.score_p_value,
         )?;
+        if let Some(rs) = self.robust_score_test {
+            write_test_line(
+                f,
+                "Robust score test",
+                rs,
+                df,
+                self.robust_score_p_value.unwrap_or(f64::NAN),
+            )?;
+            writeln!(
+                f,
+                "Note: the likelihood ratio and score tests assume independent observations \
+                 within a cluster; the Wald and robust score tests do not."
+            )?;
+        }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-
+        write!(f, "{}", notes_text(self))?;
         write_missing(f, &self.missing)
     }
 }
@@ -1304,7 +1485,19 @@ pub fn run_cox_ph(
     config: Option<CoxConfig>,
 ) -> EconResult<CoxResult> {
     let config = config.unwrap_or_default();
-
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "Cox regression: max_iter must be at least 1, got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Cox regression: tolerance must be finite and > 0, got {}",
+                config.tolerance
+            ),
+        });
+    }
     if x_cols.is_empty() {
         return Err(EconError::InvalidSpecification {
             message: "Cox model requires at least one covariate".to_string(),
@@ -1315,22 +1508,27 @@ pub fn run_cox_ph(
         dataset.df(),
         time_col,
         event_col,
-        None,
+        config.cluster.as_deref(),
         x_cols,
         TimeRule::NonNegative,
         "Cox regression",
     )?;
+    let clusters = data
+        .group
+        .as_ref()
+        .map(|g| (g.codes.as_slice(), g.levels.len()));
+    if let (Some(c), Some((_, g))) = (config.cluster.as_deref(), clusters)
+        && g < 2
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Cox regression: cluster column '{c}' has a single level; clustered standard \
+                 errors need at least 2 clusters"
+            ),
+        });
+    }
     let p = x_cols.len();
     let n = data.time.len();
-    // (time, event, row index), kept rows in their original order
-    let obs_data: Vec<(f64, bool, usize)> = data
-        .time
-        .iter()
-        .zip(&data.event)
-        .enumerate()
-        .map(|(i, (&t, &e))| (t, e, i))
-        .collect();
-
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -1338,135 +1536,229 @@ pub fn run_cox_ph(
             context: format!("Cox regression with {} covariates", p),
         });
     }
-
-    let n_events = obs_data.iter().filter(|(_, e, _)| *e).count();
+    let n_events = data.event.iter().filter(|&&e| e).count();
     if n_events == 0 {
         return Err(EconError::InvalidSpecification {
             message: "No events observed in the data".to_string(),
         });
     }
+    let names: Vec<String> = x_cols.iter().map(|s| s.to_string()).collect();
 
-    let mut x = try_zeros2(n, p, "Cox covariate matrix")?;
-    for (mut col, values) in x.columns_mut().into_iter().zip(&data.x) {
-        for (cell, &v) in col.iter_mut().zip(values) {
-            *cell = v;
+    // Aliasing: a column of [1 | x] that the pivoted QR drops. The intercept stands in for the
+    // baseline hazard, so a constant covariate is aliased with it; of two collinear covariates
+    // the later one is aliased, as coxph decides.
+    let aliased_idx = cox_aliased(&data.x, n)?;
+    let id: Vec<usize> = (0..p).filter(|j| !aliased_idx.contains(j)).collect();
+    let aliased: Vec<String> = aliased_idx.iter().map(|&j| names[j].clone()).collect();
+    if id.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Cox regression: every covariate is constant or collinear with earlier ones \
+                 (aliased: {})",
+                aliased.join(", ")
+            ),
+        });
+    }
+    let q = id.len();
+    let mut warnings: Vec<String> = aliasing_message(&aliased_idx, &names).into_iter().collect();
+
+    // Identified columns, centred and scaled as coxph does: the partial likelihood does not
+    // change under centring, and scaling makes the iteration independent of the units.
+    let mut xs = try_zeros2(n, q, "Cox design")?;
+    let mut scale = Array1::<f64>::zeros(q);
+    for (c, &j) in id.iter().enumerate() {
+        let col = &data.x[j];
+        let centre = col.iter().sum::<f64>() / n as f64;
+        let mad = col.iter().map(|v| (v - centre).abs()).sum::<f64>() / n as f64;
+        let s = 1.0 / mad;
+        scale[c] = s;
+        for (cell, &v) in xs.column_mut(c).iter_mut().zip(col) {
+            *cell = (v - centre) * s;
         }
     }
 
-    // Sort by time (descending for efficient risk set computation)
-    let mut sorted_indices: Vec<usize> = (0..n).collect();
-    sorted_indices.sort_by(|&a, &b| obs_data[b].0.total_cmp(&obs_data[a].0));
-
-    // Newton-Raphson optimization
-    let mut beta: Array1<f64> = Array1::zeros(p);
-    let mut converged = false;
-    let mut iterations = 0;
-
-    // Compute null log-likelihood (beta = 0)
-    let log_likelihood_null = cox_log_likelihood(
-        &obs_data,
-        &x,
-        &Array1::zeros(p),
-        &sorted_indices,
+    let rs = CoxRiskSets::new(&data.time);
+    let fit = cox_newton(
+        &rs,
+        xs.view(),
+        &data.event,
         config.ties,
-    );
+        config.max_iter,
+        config.tolerance,
+    )?;
+    let tol = config.tolerance;
 
-    for iter in 0..config.max_iter {
-        iterations = iter + 1;
-
-        // Compute gradient and Hessian
-        let (grad, hess, ll) =
-            cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
-
-        // Check convergence
-        let grad_norm = grad.iter().map(|g| g.abs()).fold(0.0, f64::max);
-        if grad_norm < config.tolerance {
-            converged = true;
-            break;
+    let v_s = sym_inverse(
+        fit.last.information.view(),
+        SingularPolicy::Error,
+        "Cox information matrix",
+    )?
+    .inverse;
+    let beta_id: Array1<f64> = &fit.beta * &scale;
+    let mut v_model = v_s.clone();
+    for j in 0..q {
+        for k in 0..q {
+            v_model[[j, k]] *= scale[j] * scale[k];
         }
-
-        // Newton-Raphson update: beta_new = beta - H^{-1} * grad
-        let (hess_inv, _) = safe_inverse(&hess.view())?;
-        let delta = hess_inv.dot(&grad);
-
-        // Step halving if needed
-        let mut step = 1.0;
-        let mut new_beta = &beta + &(&delta * step);
-        let mut new_ll = cox_log_likelihood(&obs_data, &x, &new_beta, &sorted_indices, config.ties);
-
-        while new_ll < ll && step > 1e-10 {
-            step *= 0.5;
-            new_beta = &beta + &(&delta * step);
-            new_ll = cox_log_likelihood(&obs_data, &x, &new_beta, &sorted_indices, config.ties);
-        }
-
-        beta = new_beta;
     }
 
-    // Final likelihood and information matrix
-    let (_grad, hess, log_likelihood) =
-        cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
-    let (info_matrix, _) = safe_inverse(&hess.view())?;
+    // coxph.fit's warnings
+    if fit.convergence.converged {
+        let step = v_s.dot(&fit.last.score) * &scale;
+        let flagged: Vec<String> = (0..q)
+            .filter(|&c| {
+                !fit.last.score[c].is_finite()
+                    || (step[c].abs() > tol && step[c].abs() > tol.sqrt() * beta_id[c].abs())
+            })
+            .map(|c| format!("{} ({})", id[c] + 1, names[id[c]]))
+            .collect();
+        if !flagged.is_empty() {
+            warnings.push(format!(
+                "Loglik converged before variable {}; coefficient may be infinite",
+                flagged.join(", ")
+            ));
+        }
+    } else {
+        if let Some(note) = fit.convergence.note("Cox regression") {
+            warnings.push(note);
+        }
+        let eta = xs.dot(&fit.beta);
+        if eta.iter().any(|e| !e.is_finite() || e.abs() > 500.0) || !fit.last.loglik.is_finite() {
+            warnings.push("one or more coefficients may be infinite".to_string());
+        }
+    }
 
-    // Standard errors
-    let std_errors: Vec<f64> = (0..p).map(|i| info_matrix[[i, i]].sqrt()).collect();
+    let se_model: Vec<f64> = (0..q).map(|j| v_model[[j, j]].sqrt()).collect();
+    let robust = config.robust_se || config.cluster.is_some();
+    let (se_id, wald_test, se_type, n_clusters, robust_score_test) = if robust {
+        // Lin-Wei: dfbeta = U V (scaled space), summed within clusters; V_r = dfbeta' dfbeta.
+        let u = cox_score_residuals(&rs, xs.view(), &data.event, fit.beta.view(), config.ties)?;
+        let dfb = collapse_clusters(u.dot(&v_s), clusters)?;
+        checkpoint()?;
+        let v_r_s = dfb.t().dot(&dfb);
+        let se: Vec<f64> = (0..q).map(|j| v_r_s[[j, j]].sqrt() * scale[j]).collect();
+        let g_text = clusters.map_or(String::new(), |(_, g)| format!(" ({g} clusters)"));
+        // Both tests are scale-free, so they are computed in the scaled space.
+        let wald = match quadratic_form_full_rank(&v_r_s, &fit.beta, "Cox robust variance")? {
+            Ok(w) => w,
+            Err(rank) => {
+                warnings.push(format!(
+                    "robust Wald test not reported: the robust variance matrix has rank {rank} \
+                     of {q}{g_text}"
+                ));
+                f64::NAN
+            }
+        };
+        let u0 = cox_score_residuals(
+            &rs,
+            xs.view(),
+            &data.event,
+            Array1::zeros(q).view(),
+            config.ties,
+        )?;
+        let u0 = collapse_clusters(u0, clusters)?;
+        let score0 = u0.sum_axis(ndarray::Axis(0));
+        let rscore = match quadratic_form_full_rank(
+            &u0.t().dot(&u0),
+            &score0,
+            "Cox score residual cross-product",
+        )? {
+            Ok(v) => v,
+            Err(rank) => {
+                warnings.push(format!(
+                    "robust score test not reported: the score residual cross-product has rank \
+                     {rank} of {q}{g_text}"
+                ));
+                f64::NAN
+            }
+        };
+        let kind = if clusters.is_some() {
+            CoxSeType::Cluster
+        } else {
+            CoxSeType::Robust
+        };
+        (se, wald, kind, clusters.map(|(_, g)| g), Some(rscore))
+    } else {
+        let wald = fit.beta.dot(&fit.last.information.dot(&fit.beta));
+        (se_model.clone(), wald, CoxSeType::Model, None, None)
+    };
 
-    // z-statistics and p-values
-    let z_stats: Vec<f64> = beta
+    // Per-variable vectors over every covariate, NaN for the aliased ones.
+    let spread = |v: &[f64]| -> Vec<f64> {
+        let mut out = vec![f64::NAN; p];
+        for (c, &j) in id.iter().enumerate() {
+            out[j] = v[c];
+        }
+        out
+    };
+    let coefficients = spread(&beta_id.to_vec());
+    let std_errors = spread(&se_id);
+    let zc = z_critical(0.95)?;
+    let z_stats: Vec<f64> = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
+        .zip(&std_errors)
+        .map(|(b, s)| b / s)
         .collect();
-
     let p_values: Vec<f64> = z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
-
-    let significance: Vec<SignificanceLevel> = p_values
+    let significance = p_values
         .iter()
         .map(|&pv| SignificanceLevel::from_p_value(pv))
         .collect();
-
-    // Hazard ratios and CIs
-    let hazard_ratios: Vec<f64> = beta.iter().map(|&b| b.exp()).collect();
-    let hr_ci_lower: Vec<f64> = beta
+    let hazard_ratios = coefficients.iter().map(|b| b.exp()).collect();
+    let hr_ci_lower = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| (b - 1.96 * se).exp())
+        .zip(&std_errors)
+        .map(|(b, s)| (b - zc * s).exp())
         .collect();
-    let hr_ci_upper: Vec<f64> = beta
+    let hr_ci_upper = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| (b + 1.96 * se).exp())
+        .zip(&std_errors)
+        .map(|(b, s)| (b + zc * s).exp())
         .collect();
 
-    // Wald test (overall)
-    let wald_test = beta.dot(&hess.dot(&beta));
-    let wald_p_value = chi_squared_p_value(wald_test, p as f64);
-
-    // Score test (at beta = 0)
-    let (grad_null, hess_null, _) = cox_gradient_hessian(
-        &obs_data,
-        &x,
-        &Array1::zeros(p),
-        &sorted_indices,
-        config.ties,
-    );
-    let (info_null, _) = safe_inverse(&hess_null.view())?;
-    let score_test = grad_null.dot(&info_null.dot(&grad_null));
-    let score_p_value = chi_squared_p_value(score_test, p as f64);
-
-    // Likelihood ratio test
+    let df = q as f64;
+    let wald_p_value = chi_squared_p_value(wald_test, df);
+    let info0 = sym_inverse(
+        fit.at_zero.information.view(),
+        SingularPolicy::Error,
+        "Cox information matrix at beta = 0",
+    )?
+    .inverse;
+    let score_test = fit.at_zero.score.dot(&info0.dot(&fit.at_zero.score));
+    let score_p_value = chi_squared_p_value(score_test, df);
+    let log_likelihood = fit.last.loglik;
+    let log_likelihood_null = fit.at_zero.loglik;
     let lr_test = 2.0 * (log_likelihood - log_likelihood_null);
-    let lr_p_value = chi_squared_p_value(lr_test, p as f64);
+    let lr_p_value = chi_squared_p_value(lr_test, df);
 
-    // Concordance (C-index)
-    let (concordance, concordance_se) = compute_concordance(&obs_data, &x, &beta);
+    // Concordance on the identified original-scale columns.
+    let mut x_id = try_zeros2(n, q, "Cox covariate matrix")?;
+    for (c, &j) in id.iter().enumerate() {
+        for (cell, &v) in x_id.column_mut(c).iter_mut().zip(&data.x[j]) {
+            *cell = v;
+        }
+    }
+    let obs_data: Vec<(f64, bool, usize)> = data
+        .time
+        .iter()
+        .zip(&data.event)
+        .enumerate()
+        .map(|(i, (&t, &e))| (t, e, i))
+        .collect();
+    let (concordance, concordance_se) = compute_concordance(&obs_data, &x_id, &beta_id);
 
     Ok(CoxResult {
-        variables: x_cols.iter().map(|s| s.to_string()).collect(),
-        coefficients: beta.to_vec(),
+        variables: names,
+        coefficients,
+        naive_std_errors: spread(&se_model),
+        se_type,
+        cluster: config.cluster.clone(),
+        n_clusters,
+        robust_score_p_value: robust_score_test.map(|t| chi_squared_p_value(t, df)),
+        robust_score_test,
         std_errors,
         z_stats,
         p_values,
@@ -1487,253 +1779,381 @@ pub fn run_cox_ph(
         n_obs: n,
         n_events,
         ties_method: config.ties,
-        converged,
-        iterations,
+        converged: fit.convergence.converged,
+        iterations: fit.convergence.iterations,
         missing: data.missing,
+        aliased,
+        warnings,
+        convergence: fit.convergence,
     })
 }
 
-/// Compute Cox partial log-likelihood.
-fn cox_log_likelihood(
-    obs: &[(f64, bool, usize)],
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    sorted_indices: &[usize],
-    ties: TiesMethod,
-) -> f64 {
-    let n = obs.len();
-    let mut log_lik = 0.0;
-
-    // Compute exp(beta'x) for all observations
-    let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
-    let exp_eta: Vec<f64> = eta.iter().map(|&e| e.exp()).collect();
-
-    // Cumulative sum of exp(eta) from end (for risk set computation)
-    let mut cum_exp_eta = 0.0;
-
-    match ties {
-        TiesMethod::Breslow => {
-            // Breslow approximation
-            for &idx in sorted_indices.iter() {
-                let (_, event, row_idx) = obs[idx];
-                cum_exp_eta += exp_eta[row_idx];
-
-                if event {
-                    log_lik += eta[row_idx] - cum_exp_eta.ln();
-                }
-            }
-        }
-        TiesMethod::Efron => {
-            // Efron approximation - handle ties properly
-            let mut i = 0;
-            while i < sorted_indices.len() {
-                let idx = sorted_indices[i];
-                let (t, _, _) = obs[idx];
-
-                // Find all observations at this time
-                let mut j = i;
-                let mut tie_indices: Vec<usize> = Vec::new();
-                while j < sorted_indices.len() {
-                    let jdx = sorted_indices[j];
-                    if (obs[jdx].0 - t).abs() < 1e-10 {
-                        tie_indices.push(jdx);
-                        cum_exp_eta += exp_eta[obs[jdx].2];
-                        j += 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                // Get events at this time
-                let event_indices: Vec<usize> = tie_indices
-                    .iter()
-                    .filter(|&&tidx| obs[tidx].1)
-                    .copied()
-                    .collect();
-                let d = event_indices.len();
-
-                if d > 0 {
-                    let sum_exp_events: f64 =
-                        event_indices.iter().map(|&tidx| exp_eta[obs[tidx].2]).sum();
-
-                    for (k, &eidx) in event_indices.iter().enumerate() {
-                        let row_idx = obs[eidx].2;
-                        let fraction = k as f64 / d as f64;
-                        log_lik += eta[row_idx] - (cum_exp_eta - fraction * sum_exp_events).ln();
-                    }
-                }
-
-                i = j;
-            }
+/// The covariates (0-based) that the pivoted QR of `[1 | x]` drops (R's `dqrdc2`, tolerance
+/// `LM_QR_TOL`). A well-conditioned full-rank design is certified by its cross-product first.
+fn cox_aliased(cols: &[Vec<f64>], n: usize) -> EconResult<Vec<usize>> {
+    let p = cols.len();
+    let mut xa = try_zeros2(n, p + 1, "Cox design")?;
+    xa.column_mut(0).fill(1.0);
+    for (j, col) in cols.iter().enumerate() {
+        for (cell, &v) in xa.column_mut(j + 1).iter_mut().zip(col) {
+            *cell = v;
         }
     }
-
-    log_lik
+    if normal_equations_inverse(xa.view())?.is_some() {
+        return Ok(Vec::new());
+    }
+    Ok(Qr::decompose(xa.view(), LM_QR_TOL)?
+        .aliased()
+        .into_iter()
+        .filter(|&j| j >= 1)
+        .map(|j| j - 1)
+        .collect())
 }
 
-/// Compute gradient and Hessian for Cox partial likelihood.
-fn cox_gradient_hessian(
-    obs: &[(f64, bool, usize)],
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    sorted_indices: &[usize],
+/// The Newton fit of [`cox_newton`]: the estimate (scaled space), the pass at it, the pass at
+/// beta = 0 and the convergence record.
+struct CoxFit {
+    beta: Array1<f64>,
+    last: CoxPass,
+    at_zero: CoxPass,
+    convergence: Convergence,
+}
+
+/// coxph's iteration (coxfit6): Newton steps from beta = 0, step halving when the log partial
+/// likelihood falls (or is not finite), convergence on its relative change.
+fn cox_newton(
+    rs: &CoxRiskSets,
+    x: ArrayView2<f64>,
+    event: &[bool],
     ties: TiesMethod,
-) -> (Array1<f64>, Array2<f64>, f64) {
-    let n = obs.len();
-    let p = beta.len();
-    let mut grad = Array1::zeros(p);
-    let mut hess = Array2::zeros((p, p));
-    let mut log_lik = 0.0;
+    max_iter: usize,
+    tol: f64,
+) -> EconResult<CoxFit> {
+    let q = x.ncols();
+    let solve = |pass: &CoxPass| -> EconResult<Array1<f64>> {
+        Ok(sym_inverse(
+            pass.information.view(),
+            SingularPolicy::Error,
+            "Cox information matrix",
+        )?
+        .inverse
+        .dot(&pass.score))
+    };
+    checkpoint()?;
+    let at_zero = cox_pass(rs, x, event, Array1::zeros(q).view(), ties);
+    let mut beta = Array1::<f64>::zeros(q);
+    let mut newbeta = solve(&at_zero)?;
+    let mut ll_old = at_zero.loglik;
+    let mut halving = false;
+    let mut converged = false;
+    let mut change = f64::NAN;
+    let mut it = 0;
+    let mut last = None;
+    while it < max_iter {
+        it += 1;
+        checkpoint()?;
+        let pass = cox_pass(rs, x, event, newbeta.view(), ties);
+        change = relative_change(pass.loglik, ll_old);
+        if pass.loglik.is_finite() && change <= tol && !halving {
+            converged = true;
+            last = Some(pass);
+            break;
+        }
+        if it == max_iter {
+            last = Some(pass);
+            break;
+        }
+        if !pass.loglik.is_finite() || pass.loglik < ll_old {
+            halving = true;
+            newbeta = (&newbeta + &beta) / 2.0;
+        } else {
+            halving = false;
+            ll_old = pass.loglik;
+            let step = solve(&pass)?;
+            beta = newbeta.clone();
+            newbeta = &newbeta + &step;
+        }
+    }
+    let last = match last {
+        Some(pass) => pass,
+        None => cox_pass(rs, x, event, newbeta.view(), ties),
+    };
+    Ok(CoxFit {
+        beta: newbeta,
+        last,
+        at_zero,
+        convergence: Convergence::new(
+            converged,
+            it,
+            max_iter,
+            "relative change in the log partial likelihood",
+            change,
+            tol,
+        ),
+    })
+}
 
-    // Compute exp(beta'x) for all observations
-    let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
-    let exp_eta: Vec<f64> = eta.iter().map(|&e| e.exp()).collect();
+/// Rows in descending time order (stable `total_cmp` sort), grouped into blocks of exactly
+/// equal time (coxph compares times exactly; the extractor normalised -0.0 and refused NaN).
+struct CoxRiskSets {
+    order: Vec<usize>,
+    blocks: Vec<std::ops::Range<usize>>,
+}
 
-    // Running sums for risk set computation
-    let mut s0: f64 = 0.0; // sum of exp(eta)
-    let mut s1: Array1<f64> = Array1::zeros(p); // sum of x * exp(eta)
-    let mut s2: Array2<f64> = Array2::zeros((p, p)); // sum of x * x' * exp(eta)
+impl CoxRiskSets {
+    fn new(time: &[f64]) -> CoxRiskSets {
+        let mut order: Vec<usize> = (0..time.len()).collect();
+        order.sort_by(|&a, &b| time[b].total_cmp(&time[a]));
+        let mut blocks = Vec::new();
+        let mut start = 0;
+        while start < order.len() {
+            let t = time[order[start]];
+            let mut end = start + 1;
+            while end < order.len() && time[order[end]] == t {
+                end += 1;
+            }
+            blocks.push(start..end);
+            start = end;
+        }
+        CoxRiskSets { order, blocks }
+    }
+}
 
-    match ties {
-        TiesMethod::Breslow => {
-            for &idx in sorted_indices.iter() {
-                let (_, event, row_idx) = obs[idx];
-                let xi = x.row(row_idx);
-                let exp_eta_i = exp_eta[row_idx];
+/// Log partial likelihood, score and information (minus the Hessian) at `beta`.
+struct CoxPass {
+    loglik: f64,
+    score: Array1<f64>,
+    information: Array2<f64>,
+}
 
-                // Update risk set sums (in-place, zero allocations)
-                s0 += exp_eta_i;
-                for j in 0..p {
-                    s1[j] += xi[j] * exp_eta_i;
-                    for k in 0..p {
-                        s2[[j, k]] += xi[j] * xi[k] * exp_eta_i;
-                    }
+/// `information += w * (m / a - xbar xbar')` on the upper triangle (`m` upper triangle only).
+fn add_information(info: &mut Array2<f64>, m: &Array2<f64>, a: f64, xbar: &[f64], w: f64) {
+    let q = xbar.len();
+    for j in 0..q {
+        for k in j..q {
+            info[[j, k]] += w * (m[[j, k]] / a - xbar[j] * xbar[k]);
+        }
+    }
+}
+
+/// One pass of coxph's partial likelihood (coxfit6): every row of a block of tied times
+/// joins the risk set before the block's deaths are scored. Breslow scores each death
+/// against the full risk set; Efron removes the fraction k/d of the block's deaths for the
+/// k-th of them. `x` is n x q in data row order.
+fn cox_pass(
+    rs: &CoxRiskSets,
+    x: ArrayView2<f64>,
+    event: &[bool],
+    beta: ArrayView1<f64>,
+    ties: TiesMethod,
+) -> CoxPass {
+    let q = beta.len();
+    let eta = x.dot(&beta);
+    let mut loglik = 0.0;
+    let mut score = Array1::<f64>::zeros(q);
+    let mut info = Array2::<f64>::zeros((q, q));
+    let (mut s0, mut s1, mut s2) = (0.0, vec![0.0; q], Array2::<f64>::zeros((q, q)));
+    let (mut e1, mut e2) = (vec![0.0; q], Array2::<f64>::zeros((q, q)));
+    let mut xbar = vec![0.0; q];
+    let mut num = Array2::<f64>::zeros((q, q));
+    for block in &rs.blocks {
+        let rows = &rs.order[block.clone()];
+        let mut d = 0usize;
+        let mut e0 = 0.0;
+        e1.iter_mut().for_each(|v| *v = 0.0);
+        e2.fill(0.0);
+        for &i in rows {
+            let r = eta[i].exp();
+            let xi = x.row(i);
+            s0 += r;
+            for j in 0..q {
+                let rx = r * xi[j];
+                s1[j] += rx;
+                for k in j..q {
+                    s2[[j, k]] += rx * xi[k];
                 }
-
-                if event {
-                    log_lik += eta[row_idx] - s0.ln();
-
-                    // Gradient contribution: x_i - E[X|R_i] (in-place)
-                    let inv_s0 = 1.0 / s0;
-                    for j in 0..p {
-                        let x_bar_j = s1[j] * inv_s0;
-                        grad[j] += xi[j] - x_bar_j;
-                    }
-
-                    // Hessian contribution: -Var[X|R_i]
-                    for j in 0..p {
-                        let x_bar_j = s1[j] * inv_s0;
-                        for k in 0..p {
-                            let x_bar_k = s1[k] * inv_s0;
-                            hess[[j, k]] += s2[[j, k]] * inv_s0 - x_bar_j * x_bar_k;
+            }
+            if event[i] {
+                d += 1;
+                e0 += r;
+                loglik += eta[i];
+                for j in 0..q {
+                    let rx = r * xi[j];
+                    score[j] += xi[j];
+                    e1[j] += rx;
+                    if ties == TiesMethod::Efron {
+                        for k in j..q {
+                            e2[[j, k]] += rx * xi[k];
                         }
                     }
                 }
             }
         }
-        TiesMethod::Efron => {
-            // Efron's method with proper tie handling
-            let mut i = 0;
-            while i < sorted_indices.len() {
-                let idx = sorted_indices[i];
-                let (t, _, _) = obs[idx];
-
-                // Collect all observations at this time
-                let mut tie_indices: Vec<usize> = Vec::new();
-                let mut j = i;
-                while j < sorted_indices.len() {
-                    let jdx = sorted_indices[j];
-                    if (obs[jdx].0 - t).abs() < 1e-10 {
-                        tie_indices.push(jdx);
-                        j += 1;
-                    } else {
-                        break;
-                    }
+        if d == 0 {
+            continue;
+        }
+        match ties {
+            TiesMethod::Breslow => {
+                let df = d as f64;
+                for j in 0..q {
+                    xbar[j] = s1[j] / s0;
+                    score[j] -= df * xbar[j];
                 }
-
-                // Update risk set sums with all tied observations (in-place)
-                for &tidx in &tie_indices {
-                    let row_idx = obs[tidx].2;
-                    let xi = x.row(row_idx);
-                    let exp_eta_i = exp_eta[row_idx];
-
-                    s0 += exp_eta_i;
-                    for jj in 0..p {
-                        s1[jj] += xi[jj] * exp_eta_i;
-                        for kk in 0..p {
-                            s2[[jj, kk]] += xi[jj] * xi[kk] * exp_eta_i;
+                loglik -= df * s0.ln();
+                add_information(&mut info, &s2, s0, &xbar, df);
+            }
+            TiesMethod::Efron => {
+                for k in 0..d {
+                    let f = k as f64 / d as f64;
+                    let a = s0 - f * e0;
+                    for j in 0..q {
+                        xbar[j] = (s1[j] - f * e1[j]) / a;
+                        score[j] -= xbar[j];
+                    }
+                    loglik -= a.ln();
+                    for j in 0..q {
+                        for l in j..q {
+                            num[[j, l]] = s2[[j, l]] - f * e2[[j, l]];
                         }
                     }
+                    add_information(&mut info, &num, a, &xbar, 1.0);
                 }
-
-                // Get event indices at this time
-                let event_indices: Vec<usize> = tie_indices
-                    .iter()
-                    .filter(|&&tidx| obs[tidx].1)
-                    .copied()
-                    .collect();
-                let d = event_indices.len();
-
-                if d > 0 {
-                    // Compute sums over events (in-place)
-                    let mut sum_exp_events: f64 = 0.0;
-                    let mut sum_x_exp_events: Vec<f64> = vec![0.0; p];
-                    let mut sum_xx_exp_events: Array2<f64> = Array2::zeros((p, p));
-
-                    for &eidx in &event_indices {
-                        let row_idx = obs[eidx].2;
-                        let xi = x.row(row_idx);
-                        let exp_eta_i = exp_eta[row_idx];
-
-                        sum_exp_events += exp_eta_i;
-                        for jj in 0..p {
-                            sum_x_exp_events[jj] += xi[jj] * exp_eta_i;
-                            for kk in 0..p {
-                                sum_xx_exp_events[[jj, kk]] += xi[jj] * xi[kk] * exp_eta_i;
-                            }
-                        }
-                    }
-
-                    // Efron contribution for each event
-                    for (k, &eidx) in event_indices.iter().enumerate() {
-                        let row_idx = obs[eidx].2;
-                        let xi = x.row(row_idx);
-                        let fraction = k as f64 / d as f64;
-
-                        let s0_adj = s0 - fraction * sum_exp_events;
-
-                        if s0_adj > 0.0 {
-                            log_lik += eta[row_idx] - s0_adj.ln();
-
-                            let inv_s0_adj = 1.0 / s0_adj;
-                            for jj in 0..p {
-                                let x_bar_jj =
-                                    (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
-                                grad[jj] += xi[jj] - x_bar_jj;
-                            }
-
-                            for jj in 0..p {
-                                let x_bar_jj =
-                                    (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
-                                for kk in 0..p {
-                                    let x_bar_kk =
-                                        (s1[kk] - fraction * sum_x_exp_events[kk]) * inv_s0_adj;
-                                    hess[[jj, kk]] += (s2[[jj, kk]]
-                                        - fraction * sum_xx_exp_events[[jj, kk]])
-                                        * inv_s0_adj
-                                        - x_bar_jj * x_bar_kk;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                i = j;
             }
         }
     }
+    for j in 0..q {
+        for k in (j + 1)..q {
+            info[[k, j]] = info[[j, k]];
+        }
+    }
+    CoxPass {
+        loglik,
+        score,
+        information: info,
+    }
+}
 
-    (grad, hess, log_lik)
+/// Score residuals (R `residuals(fit, type = "score")`, Lin & Wei 1989): one row per
+/// observation in data row order (n x q), summing to the score at `beta`. With Efron ties a
+/// death's share of the k-th tied term is (1 - k/d), as coxph weights it.
+fn cox_score_residuals(
+    rs: &CoxRiskSets,
+    x: ArrayView2<f64>,
+    event: &[bool],
+    beta: ArrayView1<f64>,
+    ties: TiesMethod,
+) -> EconResult<Array2<f64>> {
+    let (n, q) = x.dim();
+    let nb = rs.blocks.len();
+    let len = crate::resource::checked_len(&[nb, q], "Cox score residuals")?;
+    let risk: Vec<f64> = x.dot(&beta).iter().map(|e| e.exp()).collect();
+    // Per block: h, hd (scalars) and hx, hxd, xbm (q each).
+    let mut h = crate::resource::try_vec(nb, 0.0, "Cox score residuals")?;
+    let mut hd = crate::resource::try_vec(nb, 0.0, "Cox score residuals")?;
+    let mut hx = crate::resource::try_vec(len, 0.0, "Cox score residuals")?;
+    let mut hxd = crate::resource::try_vec(len, 0.0, "Cox score residuals")?;
+    let mut xbm = crate::resource::try_vec(len, 0.0, "Cox score residuals")?;
+    let mut ndeath = crate::resource::try_vec(nb, 0usize, "Cox score residuals")?;
+    let (mut s0, mut s1) = (0.0, vec![0.0; q]);
+    let mut e1 = vec![0.0; q];
+    let mut xbar = vec![0.0; q];
+    for (b, block) in rs.blocks.iter().enumerate() {
+        let rows = &rs.order[block.clone()];
+        let (mut d, mut e0) = (0usize, 0.0);
+        e1.iter_mut().for_each(|v| *v = 0.0);
+        for &i in rows {
+            let r = risk[i];
+            s0 += r;
+            for j in 0..q {
+                s1[j] += r * x[[i, j]];
+            }
+            if event[i] {
+                d += 1;
+                e0 += r;
+                for j in 0..q {
+                    e1[j] += r * x[[i, j]];
+                }
+            }
+        }
+        ndeath[b] = d;
+        if d == 0 {
+            continue;
+        }
+        let df = d as f64;
+        let off = b * q;
+        for k in 0..d {
+            let f = match ties {
+                TiesMethod::Efron => k as f64 / df,
+                TiesMethod::Breslow => 0.0,
+            };
+            let a = s0 - f * e0;
+            for j in 0..q {
+                xbar[j] = (s1[j] - f * e1[j]) / a;
+            }
+            let c = 1.0 - f;
+            h[b] += 1.0 / a;
+            hd[b] += c / a;
+            for j in 0..q {
+                hx[off + j] += xbar[j] / a;
+                hxd[off + j] += c * xbar[j] / a;
+                xbm[off + j] += xbar[j] / df;
+            }
+        }
+    }
+    checkpoint()?;
+    let mut u = try_zeros2(n, q, "Cox score residuals")?;
+    let (mut cum_h, mut cum_a) = (0.0, vec![0.0; q]);
+    for (b, block) in rs.blocks.iter().enumerate().rev() {
+        let off = b * q;
+        for &i in &rs.order[block.clone()] {
+            let r = risk[i];
+            for j in 0..q {
+                let xij = x[[i, j]];
+                let mut v = -r * (xij * cum_h - cum_a[j]);
+                if ndeath[b] > 0 {
+                    if event[i] {
+                        v += (xij - xbm[off + j]) - r * (xij * hd[b] - hxd[off + j]);
+                    } else {
+                        v -= r * (xij * h[b] - hx[off + j]);
+                    }
+                }
+                u[[i, j]] = v;
+            }
+        }
+        cum_h += h[b];
+        for j in 0..q {
+            cum_a[j] += hx[off + j];
+        }
+    }
+    Ok(u)
+}
+
+/// `rows` summed within the clusters `codes` (G x q), or `rows` itself without clusters.
+fn collapse_clusters(rows: Array2<f64>, codes: Option<(&[u32], usize)>) -> EconResult<Array2<f64>> {
+    let Some((codes, g)) = codes else {
+        return Ok(rows);
+    };
+    let q = rows.ncols();
+    let mut out = try_zeros2(g, q, "Cox cluster sums")?;
+    for (row, &c) in rows.rows().into_iter().zip(codes) {
+        let mut o = out.row_mut(c as usize);
+        o += &row;
+    }
+    Ok(out)
+}
+
+/// `b' M^-1 b` through a generalized inverse of the symmetric `m`; `Err(rank)` when `m` is
+/// rank-deficient (the test is then not reported).
+fn quadratic_form_full_rank(
+    m: &Array2<f64>,
+    b: &Array1<f64>,
+    what: &str,
+) -> EconResult<Result<f64, usize>> {
+    let inv = sym_inverse(m.view(), SingularPolicy::Generalized, what)?;
+    if !inv.is_full_rank() {
+        return Ok(Err(inv.rank));
+    }
+    Ok(Ok(b.dot(&inv.inverse.dot(b))))
 }
 
 /// Fenwick tree (Binary Indexed Tree) for cumulative frequency queries.
@@ -1877,9 +2297,10 @@ fn compute_concordance(
 pub struct AftConfig {
     /// Distribution family
     pub distribution: AftDistribution,
-    /// Maximum iterations
+    /// Maximum Newton iterations (at least 1).
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence: relative change in the log-likelihood (survreg.control `rel.tolerance`);
+    /// finite and > 0.
     pub tolerance: f64,
 }
 
@@ -1888,7 +2309,7 @@ impl Default for AftConfig {
         Self {
             distribution: AftDistribution::Weibull,
             max_iter: 100,
-            tolerance: 1e-8,
+            tolerance: 1e-9,
         }
     }
 }
@@ -1940,6 +2361,41 @@ pub struct AftResult {
     /// Rows dropped because of a missing time, status or covariate.
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// SE of log(scale) (survreg's "Log(scale)" row); `None` when the scale is fixed.
+    #[serde(default)]
+    pub log_scale_se: Option<f64>,
+    /// True when the scale is fixed at 1 (exponential), not estimated.
+    #[serde(default)]
+    pub scale_fixed: bool,
+    /// Covariates not estimated because they are constant or collinear with earlier ones
+    /// (coefficient NA in survreg); their entries in every per-variable vector are NaN.
+    #[serde(default)]
+    pub aliased: Vec<String>,
+    /// Warnings (aliasing, non-convergence).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The Newton iteration's convergence record.
+    #[serde(default)]
+    pub convergence: Convergence,
+}
+
+impl AftResult {
+    /// (z, p) of survreg's Log(scale) row: ln(scale) / log_scale_se and its two-sided normal
+    /// p-value; `None` when the scale is fixed.
+    pub fn log_scale_test(&self) -> Option<(f64, f64)> {
+        let se = self.log_scale_se?;
+        let z = self.scale.ln() / se;
+        Some((z, normal_p_value_two_sided(z)))
+    }
+}
+
+impl ResultNotes for AftResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 impl fmt::Display for AftResult {
@@ -1970,19 +2426,39 @@ impl fmt::Display for AftResult {
                 self.acceleration_factors[i]
             )?;
         }
+        if let (Some(se), Some((z, p))) = (self.log_scale_se, self.log_scale_test()) {
+            writeln!(
+                f,
+                "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{}",
+                "Log(scale)",
+                self.scale.ln(),
+                se,
+                z,
+                p,
+                SignificanceLevel::from_p_value(p).stars()
+            )?;
+        }
 
         writeln!(f, "{}", "-".repeat(75))?;
-        writeln!(f, "Scale = {:.4}", self.scale)?;
+        if self.scale_fixed {
+            writeln!(f, "Scale fixed at 1 (exponential)")?;
+        } else {
+            writeln!(f, "Scale = {:.4}", self.scale)?;
+        }
         if let Some(shape) = self.shape {
             writeln!(f, "Shape = {:.4}", shape)?;
         }
         writeln!(f)?;
-        writeln!(f, "Log-Likelihood: {:.4}", self.log_likelihood)?;
+        writeln!(
+            f,
+            "Log-Likelihood: {:.4} (time scale, as survreg)",
+            self.log_likelihood
+        )?;
         writeln!(f, "AIC: {:.4}", self.aic)?;
         writeln!(f, "BIC: {:.4}", self.bic)?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
-
+        write!(f, "{}", notes_text(self))?;
         write_missing(f, &self.missing)
     }
 }
@@ -2013,6 +2489,19 @@ pub fn run_aft(
     config: Option<AftConfig>,
 ) -> EconResult<AftResult> {
     let config = config.unwrap_or_default();
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "AFT model: max_iter must be at least 1, got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "AFT model: tolerance must be finite and > 0, got {}",
+                config.tolerance
+            ),
+        });
+    }
     let data = extract_survival(
         dataset.df(),
         time_col,
@@ -2026,9 +2515,6 @@ pub fn run_aft(
     // Design matrix with intercept, kept rows in their original order
     let p = x_cols.len() + 1; // +1 for intercept
     let n = data.time.len();
-    let log_times: Vec<f64> = data.time.iter().map(|t| t.ln()).collect();
-    let deltas = data.event;
-
     if n < p + 1 {
         return Err(EconError::InsufficientData {
             required: p + 1,
@@ -2036,207 +2522,179 @@ pub fn run_aft(
             context: format!("AFT model with {} parameters", p),
         });
     }
-
-    let n_events = deltas.iter().filter(|&&d| d).count();
+    let event = data.event;
+    let n_events = event.iter().filter(|&&d| d).count();
     if n_events == 0 {
         return Err(EconError::InvalidSpecification {
             message: "No events observed in the data".to_string(),
         });
     }
+    let mut variables = vec!["(Intercept)".to_string()];
+    variables.extend(x_cols.iter().map(|s| s.to_string()));
 
-    let mut x = try_zeros2(n, p, "AFT design matrix")?;
+    let mut x = try_zeros2(n, p, "AFT design")?;
     x.column_mut(0).fill(1.0);
     for (j, values) in data.x.iter().enumerate() {
         for (cell, &v) in x.column_mut(j + 1).iter_mut().zip(values) {
             *cell = v;
         }
     }
-    let y: Array1<f64> = Array1::from_vec(log_times);
+    let y: Array1<f64> = data.time.iter().map(|t| t.ln()).collect();
 
-    // Initialize parameters: OLS estimates for location, reasonable scale
-    let xtx = x.t().dot(&x);
-    let xty = x.t().dot(&y);
-    let (xtx_inv, _) = safe_inverse(&xtx.view())?;
-    let mut beta: Array1<f64> = xtx_inv.dot(&xty);
+    // Start: least squares on log t; its pivoted QR decides the aliased covariates (survreg's
+    // NA coefficients).
+    let ls = solve_ols(x.view(), y.view())?;
+    let mut warnings: Vec<String> = aliasing_message(&ls.aliased, &variables)
+        .into_iter()
+        .collect();
+    let id: Vec<usize> = (0..p).filter(|j| !ls.aliased.contains(j)).collect();
+    let q = id.len();
+    let xi = x.select(ndarray::Axis(1), &id);
+    let fixed = config.distribution == AftDistribution::Exponential;
+    let rss: f64 = ls.residuals.iter().map(|r| r * r).sum();
+    let df = n.saturating_sub(ls.rank).max(1);
+    let tau0 = if fixed || rss.is_nan() || rss <= 0.0 {
+        0.0
+    } else {
+        0.5 * (rss / df as f64).ln()
+    };
+    let m = q + usize::from(!fixed);
+    let mut theta = Array1::<f64>::zeros(m);
+    for (c, &j) in id.iter().enumerate() {
+        theta[c] = ls.beta[j];
+    }
+    if !fixed {
+        theta[q] = tau0;
+    }
+    let mut param_names: Vec<String> = id.iter().map(|&j| variables[j].clone()).collect();
+    if !fixed {
+        param_names.push("Log(scale)".to_string());
+    }
 
-    // Initial scale estimate
-    let residuals: Array1<f64> = &y - &x.dot(&beta);
-    let mut log_sigma = (residuals.mapv(|r| r.powi(2)).sum() / (n - p) as f64)
-        .sqrt()
-        .ln();
-
+    let dist = config.distribution;
+    let tol = config.tolerance;
+    let eval = |th: &Array1<f64>| aft_eval(y.view(), xi.view(), &event, th.view(), dist, fixed);
+    checkpoint()?;
+    let e0 = eval(&theta);
+    let mut ll_old = e0.loglik;
+    let mut theta_new = &theta + &damped_newton_step(&e0.neg_hessian, &e0.grad, &param_names)?;
+    let mut halving = false;
     let mut converged = false;
-    let mut iterations = 0;
-    let mut final_ll = 0.0;
-
-    // Pre-allocate buffers for Newton updates
-    let mut delta_beta = Array1::zeros(p);
-    let mut full_hess = Array2::zeros((p + 1, p + 1));
-    let mut full_grad = Array1::zeros(p + 1);
-
-    // Newton-Raphson iteration
-    for iter in 0..config.max_iter {
-        iterations = iter + 1;
-
-        let sigma = log_sigma.exp();
-        let (grad_beta, grad_sigma, hess_bb, hess_bs, hess_ss, ll) =
-            aft_gradient_hessian(&y, &x, &beta, sigma, &deltas, config.distribution);
-        final_ll = ll;
-
-        // Check convergence using relative gradient norm
-        let grad_norm = grad_beta
-            .iter()
-            .map(|g| g.abs())
-            .fold(0.0, f64::max)
-            .max(grad_sigma.abs());
-        if grad_norm < config.tolerance {
+    let mut change = f64::NAN;
+    let mut it = 0;
+    let mut at_new = None;
+    while it < config.max_iter {
+        it += 1;
+        checkpoint()?;
+        let e = eval(&theta_new);
+        change = relative_change(e.loglik, ll_old);
+        if e.loglik.is_finite() && change <= tol && !halving {
             converged = true;
+            theta = theta_new.clone();
+            at_new = Some(e);
             break;
         }
-
-        // Construct full Hessian and gradient (reuse allocated buffers)
-        full_hess
-            .slice_mut(ndarray::s![0..p, 0..p])
-            .assign(&hess_bb);
-        for j in 0..p {
-            full_hess[[j, p]] = hess_bs[j];
-            full_hess[[p, j]] = hess_bs[j];
+        if it == config.max_iter {
+            break;
         }
-        full_hess[[p, p]] = hess_ss;
-
-        full_grad.slice_mut(ndarray::s![0..p]).assign(&grad_beta);
-        full_grad[p] = grad_sigma;
-
-        // Newton step using Cholesky solver
-        match solve_symmetric_system(&full_hess, &full_grad) {
-            Some(delta) => {
-                // Extract delta components
-                for j in 0..p {
-                    delta_beta[j] = delta[j];
-                }
-                let delta_sigma = delta[p];
-
-                // Step halving with early termination
-                let mut step = 1.0;
-                let mut new_ll = ll - 1.0; // Force at least one evaluation
-                let mut halving_count = 0;
-
-                while halving_count < 10 {
-                    // Compute new parameters
-                    let new_log_sigma = log_sigma + delta_sigma * step;
-
-                    // Compute new likelihood
-                    new_ll = aft_log_likelihood_fast(
-                        &y,
-                        &x,
-                        &beta,
-                        &delta_beta,
-                        step,
-                        new_log_sigma.exp(),
-                        &deltas,
-                        config.distribution,
-                    );
-
-                    if new_ll >= ll - 1e-10 || step < 1e-10 {
-                        // Accept step
-                        for j in 0..p {
-                            beta[j] += delta_beta[j] * step;
-                        }
-                        log_sigma = new_log_sigma;
-                        break;
-                    }
-                    step *= 0.5;
-                    halving_count += 1;
-                }
-
-                if halving_count >= 10 {
-                    // Fallback: small gradient step
-                    for j in 0..p {
-                        beta[j] += grad_beta[j] * 0.001;
-                    }
-                    log_sigma += grad_sigma * 0.001;
-                }
-            }
-            None => {
-                // Fall back to gradient descent
-                for j in 0..p {
-                    beta[j] += grad_beta[j] * 0.01;
-                }
-                log_sigma += grad_sigma * 0.01;
-            }
+        if !e.loglik.is_finite() || e.loglik < ll_old {
+            halving = true;
+            theta_new = (&theta_new + &theta) / 2.0;
+        } else {
+            halving = false;
+            ll_old = e.loglik;
+            theta = theta_new.clone();
+            theta_new = &theta + &damped_newton_step(&e.neg_hessian, &e.grad, &param_names)?;
         }
     }
-
-    let sigma = log_sigma.exp();
-    let log_likelihood = final_ll;
-
-    // Compute final Hessian for standard errors (only if we need to)
-    let (_, _, hess_bb, hess_bs, hess_ss, _) = if converged {
-        aft_gradient_hessian(&y, &x, &beta, sigma, &deltas, config.distribution)
-    } else {
-        // Use last computed values by recomputing
-        aft_gradient_hessian(&y, &x, &beta, sigma, &deltas, config.distribution)
+    let convergence = Convergence::new(
+        converged,
+        it,
+        config.max_iter,
+        "relative change in the log-likelihood",
+        change,
+        tol,
+    );
+    let e = match at_new {
+        Some(e) => e,
+        None => eval(&theta),
     };
-
-    full_hess
-        .slice_mut(ndarray::s![0..p, 0..p])
-        .assign(&hess_bb);
-    for j in 0..p {
-        full_hess[[j, p]] = hess_bs[j];
-        full_hess[[p, j]] = hess_bs[j];
+    let var_diag_ok = |v: &Array2<f64>| (0..m).map(|j| v[[j, j]]).collect::<Vec<f64>>();
+    let v = match sym_inverse(
+        e.neg_hessian.view(),
+        SingularPolicy::Error,
+        "AFT information matrix",
+    ) {
+        Ok(inv) => inv.inverse,
+        Err(_) => {
+            return Err(aft_failure(it, change));
+        }
+    };
+    let var_diag = var_diag_ok(&v);
+    aft_check_finite(
+        e.loglik,
+        theta.as_slice().unwrap_or(&[]),
+        &var_diag,
+        it,
+        change,
+    )?;
+    if let Some(note) = convergence.note("AFT model") {
+        warnings.push(note);
     }
-    full_hess[[p, p]] = hess_ss;
 
-    let info_matrix = safe_inverse(&full_hess.view())
-        .map(|(m, _)| m)
-        .unwrap_or_else(|_| Array2::eye(p + 1));
-
-    let std_errors: Vec<f64> = (0..p).map(|i| info_matrix[[i, i]].abs().sqrt()).collect();
-
-    let z_stats: Vec<f64> = beta
+    let mut coefficients = vec![f64::NAN; p];
+    let mut std_errors = vec![f64::NAN; p];
+    for (c, &j) in id.iter().enumerate() {
+        coefficients[j] = theta[c];
+        std_errors[j] = var_diag[c].sqrt();
+    }
+    let z_stats: Vec<f64> = coefficients
         .iter()
-        .zip(std_errors.iter())
-        .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
+        .zip(&std_errors)
+        .map(|(b, s)| b / s)
         .collect();
-
     let p_values: Vec<f64> = z_stats
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
-
-    let significance: Vec<SignificanceLevel> = p_values
+    let significance = p_values
         .iter()
         .map(|&pv| SignificanceLevel::from_p_value(pv))
         .collect();
-
-    let acceleration_factors: Vec<f64> = beta.iter().map(|&b| b.exp()).collect();
-
-    // Variable names
-    let mut variables = vec!["(Intercept)".to_string()];
-    variables.extend(x_cols.iter().map(|s| s.to_string()));
-
-    // Shape parameter (for Weibull: shape = 1/sigma)
-    let shape = match config.distribution {
-        AftDistribution::Weibull => Some(1.0 / sigma),
+    let acceleration_factors = coefficients.iter().map(|b| b.exp()).collect();
+    let (scale, log_scale_se) = if fixed {
+        (1.0, None)
+    } else {
+        (theta[q].exp(), Some(var_diag[q].sqrt()))
+    };
+    let shape = match dist {
+        AftDistribution::Weibull => Some(1.0 / scale),
         AftDistribution::Exponential => Some(1.0),
         _ => None,
     };
-
-    // AIC and BIC
-    let k = (p + 1) as f64;
+    // survreg's log-likelihood is on the time scale: the log-T density carries the Jacobian 1/t.
+    let jacobian: f64 = y
+        .iter()
+        .zip(&event)
+        .filter(|(_, e)| **e)
+        .map(|(v, _)| *v)
+        .sum();
+    let log_likelihood = e.loglik - jacobian;
+    let k = m as f64;
     let aic = -2.0 * log_likelihood + 2.0 * k;
     let bic = -2.0 * log_likelihood + k * (n as f64).ln();
+    let aliased = ls.aliased.iter().map(|&j| variables[j].clone()).collect();
 
     Ok(AftResult {
-        distribution: config.distribution,
+        distribution: dist,
         variables,
-        coefficients: beta.to_vec(),
+        coefficients,
         std_errors,
         z_stats,
         p_values,
         significance,
         acceleration_factors,
-        scale: sigma,
+        scale,
         shape,
         log_likelihood,
         aic,
@@ -2244,52 +2702,244 @@ pub fn run_aft(
         n_obs: n,
         n_events,
         converged,
-        iterations,
+        iterations: it,
         missing: data.missing,
+        log_scale_se,
+        scale_fixed: fixed,
+        aliased,
+        warnings,
+        convergence,
     })
 }
 
-/// Log-likelihood computation with step adjustment.
-/// Computes likelihood at beta + step * delta_beta.
-fn aft_log_likelihood_fast(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    delta_beta: &Array1<f64>,
-    step: f64,
-    sigma: f64,
-    deltas: &[bool],
-    dist: AftDistribution,
-) -> f64 {
-    let n = y.len();
-    let p = beta.len();
-    let sigma_inv = 1.0 / sigma;
-    let log_sigma = sigma.ln();
-    let mut ll = 0.0;
-
-    for i in 0..n {
-        // Compute eta[i] = sum_j x[i,j] * (beta[j] + step * delta_beta[j])
-        let mut eta_i = 0.0;
-        for j in 0..p {
-            eta_i += x[[i, j]] * (beta[j] + step * delta_beta[j]);
-        }
-
-        let z = (y[i] - eta_i) * sigma_inv;
-        let (log_f, log_s) = aft_distribution_functions(z, dist);
-
-        if deltas[i] {
-            ll += log_f - log_sigma;
-        } else {
-            ll += log_s;
-        }
+fn aft_failure(iterations: usize, last_change: f64) -> EconError {
+    EconError::ConvergenceFailure {
+        iterations,
+        last_change,
+        suggestion: "the AFT log-likelihood or its information is not finite or not positive \
+                     definite at the last iterate; if the fit stopped at max_iter, raise \
+                     max_iter; otherwise check for a covariate that separates events from \
+                     censorings, or rescale extreme times"
+            .to_string(),
     }
-
-    ll
 }
 
-/// Solve symmetric positive definite system Hx = b using Cholesky decomposition.
-/// Returns None if the matrix is not positive definite.
-fn solve_symmetric_system(h: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
+/// R2: a fit whose log-likelihood, parameters or variances are not finite (or a variance is
+/// negative) is an error, not a returned result.
+fn aft_check_finite(
+    loglik: f64,
+    theta: &[f64],
+    var_diag: &[f64],
+    iterations: usize,
+    last_change: f64,
+) -> EconResult<()> {
+    let ok = loglik.is_finite()
+        && theta.iter().all(|v| v.is_finite())
+        && var_diag.iter().all(|v| v.is_finite() && *v >= 0.0);
+    if ok {
+        Ok(())
+    } else {
+        Err(aft_failure(iterations, last_change))
+    }
+}
+
+/// Log-likelihood on the log-time scale, its gradient and the negative Hessian over the free
+/// parameters (beta, then tau = ln sigma unless the scale is fixed at 1).
+struct AftEval {
+    loglik: f64,
+    grad: Array1<f64>,
+    neg_hessian: Array2<f64>,
+}
+
+fn aft_eval(
+    y: ArrayView1<f64>,
+    x: ArrayView2<f64>,
+    event: &[bool],
+    theta: ArrayView1<f64>,
+    dist: AftDistribution,
+    fixed_scale: bool,
+) -> AftEval {
+    let q = x.ncols();
+    let m = q + usize::from(!fixed_scale);
+    let tau = if fixed_scale { 0.0 } else { theta[q] };
+    let sigma = tau.exp();
+    let inv_s = 1.0 / sigma;
+    let eta = x.dot(&theta.slice(ndarray::s![..q]));
+    let mut loglik = 0.0;
+    let mut grad = Array1::<f64>::zeros(m);
+    // Hessian (not negated) accumulated on the upper triangle
+    let mut h = Array2::<f64>::zeros((m, m));
+    for i in 0..y.len() {
+        let z = (y[i] - eta[i]) * inv_s;
+        let (l0, l1, l2) = if event[i] {
+            let (g, g1, g2) = aft_log_density(z, dist);
+            (g - tau, g1, g2)
+        } else {
+            aft_log_survival(z, dist)
+        };
+        loglik += l0;
+        let xi = x.row(i);
+        let wb = -l1 * inv_s;
+        let wbb = l2 * inv_s * inv_s;
+        for j in 0..q {
+            grad[j] += wb * xi[j];
+            let a = wbb * xi[j];
+            for k in j..q {
+                h[[j, k]] += a * xi[k];
+            }
+        }
+        if !fixed_scale {
+            grad[q] += -l1 * z - if event[i] { 1.0 } else { 0.0 };
+            let wbt = (l2 * z + l1) * inv_s;
+            for j in 0..q {
+                h[[j, q]] += wbt * xi[j];
+            }
+            h[[q, q]] += l2 * z * z + l1 * z;
+        }
+    }
+    let mut neg_hessian = Array2::<f64>::zeros((m, m));
+    for j in 0..m {
+        for k in j..m {
+            neg_hessian[[j, k]] = -h[[j, k]];
+            neg_hessian[[k, j]] = -h[[j, k]];
+        }
+    }
+    AftEval {
+        loglik,
+        grad,
+        neg_hessian,
+    }
+}
+
+const LN_SQRT_2PI: f64 = 0.918_938_533_204_672_8;
+
+/// `(g, g', g'')` with `g = ln f` of the error distribution at `z`.
+fn aft_log_density(z: f64, dist: AftDistribution) -> (f64, f64, f64) {
+    match dist {
+        AftDistribution::Exponential | AftDistribution::Weibull => {
+            let ez = z.exp();
+            (z - ez, 1.0 - ez, -ez)
+        }
+        AftDistribution::LogNormal => (-0.5 * z * z - LN_SQRT_2PI, -z, -1.0),
+        AftDistribution::LogLogistic => {
+            let pz = logistic(z);
+            (
+                z - 2.0 * softplus(z),
+                1.0 - 2.0 * pz,
+                -2.0 * pz * (1.0 - pz),
+            )
+        }
+    }
+}
+
+/// `(G, G', G'')` with `G = ln S` of the error distribution at `z`.
+fn aft_log_survival(z: f64, dist: AftDistribution) -> (f64, f64, f64) {
+    match dist {
+        AftDistribution::Exponential | AftDistribution::Weibull => {
+            let ez = z.exp();
+            (-ez, -ez, -ez)
+        }
+        AftDistribution::LogNormal => {
+            let m = normal_hazard(z);
+            (ln_normal_sf(z), -m, -m * (m - z))
+        }
+        AftDistribution::LogLogistic => {
+            let pz = logistic(z);
+            (-softplus(z), -pz, -pz * (1.0 - pz))
+        }
+    }
+}
+
+/// `ln(1 - Phi(z))` without underflow (R `pnorm(z, lower.tail = FALSE, log.p = TRUE)`).
+fn ln_normal_sf(z: f64) -> f64 {
+    // Upper tails from the chi-square(1) tail (about 1e-13 relative); statrs `erfc` is off by
+    // 2.5e-11 relative at z = 5.
+    if z < 0.0 {
+        (-0.5 * normal_p_value_two_sided(z)).ln_1p()
+    } else if z < 30.0 {
+        (0.5 * normal_p_value_two_sided(z)).ln()
+    } else {
+        let z2 = 1.0 / (z * z);
+        let series = 1.0 - z2 * (1.0 - z2 * (3.0 - z2 * (15.0 - z2 * (105.0 - z2 * 945.0))));
+        -0.5 * z * z - z.ln() - LN_SQRT_2PI + series.ln()
+    }
+}
+
+/// The normal hazard `phi(z) / (1 - Phi(z))`, exact in both tails.
+fn normal_hazard(z: f64) -> f64 {
+    (-0.5 * z * z - LN_SQRT_2PI - ln_normal_sf(z)).exp()
+}
+
+/// `ln(1 + e^z)` without overflow.
+fn softplus(z: f64) -> f64 {
+    z.max(0.0) + (-z.abs()).exp().ln_1p()
+}
+
+/// `1 / (1 + e^-z)`, exact in both tails.
+fn logistic(z: f64) -> f64 {
+    if z >= 0.0 {
+        1.0 / (1.0 + (-z).exp())
+    } else {
+        let e = z.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// Newton step `d` solving `a d = g` (`a` = the negative Hessian) on the diagonally
+/// equilibrated system; when that is not positive definite, Levenberg damping `mu I` with
+/// `mu` = 1e-8, 1e-7, ..., 1e8.
+fn damped_newton_step(
+    a: &Array2<f64>,
+    g: &Array1<f64>,
+    names: &[String],
+) -> EconResult<Array1<f64>> {
+    let m = g.len();
+    let mut d = Array1::<f64>::zeros(m);
+    for j in 0..m {
+        let v = a[[j, j]].abs();
+        if !(v.is_finite() && v > 0.0) {
+            return Err(EconError::SingularMatrix {
+                context: format!(
+                    "AFT information matrix: no information on {}",
+                    names.get(j).map_or("a parameter", |s| s.as_str())
+                ),
+                suggestion: "check for a constant covariate or non-finite values".to_string(),
+            });
+        }
+        d[j] = 1.0 / v.sqrt();
+    }
+    let mut b = Array2::<f64>::zeros((m, m));
+    for j in 0..m {
+        for k in 0..m {
+            b[[j, k]] = d[j] * a[[j, k]] * d[k];
+        }
+    }
+    let rhs = &d * g;
+    let mut mu = 0.0;
+    loop {
+        let mut bm = b.clone();
+        for j in 0..m {
+            bm[[j, j]] += mu;
+        }
+        if let Some(sol) = cholesky_solve_spd(&bm, &rhs) {
+            return Ok(&d * &sol);
+        }
+        mu = if mu == 0.0 { 1e-8 } else { mu * 10.0 };
+        if mu > 1e8 * 1.000_001 {
+            return Err(EconError::SingularMatrix {
+                context: "AFT information matrix is not positive definite even with damping 1e8"
+                    .to_string(),
+                suggestion: "check for a covariate that separates events from censorings, or \
+                             rescale extreme times"
+                    .to_string(),
+            });
+        }
+    }
+}
+
+/// Solve the symmetric positive definite system Hx = b by Cholesky decomposition; `None`
+/// when the matrix is not positive definite.
+fn cholesky_solve_spd(h: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
     let n = h.nrows();
 
     // Cholesky decomposition: H = L * L'
@@ -2335,195 +2985,6 @@ fn solve_symmetric_system(h: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64
     Some(x)
 }
 
-/// Compute gradient and Hessian for AFT model.
-/// Optimized single-pass computation with efficient memory access.
-fn aft_gradient_hessian(
-    y: &Array1<f64>,
-    x: &Array2<f64>,
-    beta: &Array1<f64>,
-    sigma: f64,
-    deltas: &[bool],
-    dist: AftDistribution,
-) -> (Array1<f64>, f64, Array2<f64>, Array1<f64>, f64, f64) {
-    let n = y.len();
-    let p = beta.len();
-
-    // Pre-compute constants
-    let sigma_inv = 1.0 / sigma;
-    let sigma_inv_sq = sigma_inv * sigma_inv;
-    let log_sigma = sigma.ln();
-
-    // Pre-compute eta = X * beta (vectorized)
-    let eta = x.dot(beta);
-
-    // Initialize accumulators
-    let mut ll = 0.0;
-    let mut grad_beta = Array1::zeros(p);
-    let mut grad_sigma = 0.0;
-    let mut hess_bb = Array2::zeros((p, p));
-    let mut hess_bs = Array1::zeros(p);
-    let mut hess_ss = 0.0;
-
-    // Single pass through all observations
-    for i in 0..n {
-        let z = (y[i] - eta[i]) * sigma_inv;
-        let (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s) =
-            aft_distribution_derivatives(z, dist);
-
-        // Get row slice for efficient access
-        let xi = x.row(i);
-
-        if deltas[i] {
-            // Event observed
-            ll += log_f - log_sigma;
-
-            // Gradient contributions
-            let grad_beta_w = -dlog_f * sigma_inv;
-            grad_sigma += -dlog_f * z - 1.0;
-
-            // Hessian weights
-            let hess_bb_w = d2log_f * sigma_inv_sq;
-            let hess_bs_w = (d2log_f * z + dlog_f) * sigma_inv;
-            hess_ss += d2log_f * z * z + 2.0 * dlog_f * z;
-
-            // Accumulate grad_beta and hess_bs using row view
-            accumulate_weighted_row(&mut grad_beta, xi, grad_beta_w);
-            accumulate_weighted_row(&mut hess_bs, xi, hess_bs_w);
-
-            // Accumulate hess_bb using rank-1 update (only upper triangle)
-            accumulate_rank1_symmetric(&mut hess_bb, xi, hess_bb_w);
-        } else {
-            // Censored observation
-            ll += log_s;
-
-            // Gradient contributions
-            let grad_beta_w = -dlog_s * sigma_inv;
-            grad_sigma += -dlog_s * z;
-
-            // Hessian weights
-            let hess_bb_w = d2log_s * sigma_inv_sq;
-            let hess_bs_w = (d2log_s * z + dlog_s) * sigma_inv;
-            hess_ss += d2log_s * z * z + dlog_s * z;
-
-            // Accumulate grad_beta and hess_bs using row view
-            accumulate_weighted_row(&mut grad_beta, xi, grad_beta_w);
-            accumulate_weighted_row(&mut hess_bs, xi, hess_bs_w);
-
-            // Accumulate hess_bb using rank-1 update
-            accumulate_rank1_symmetric(&mut hess_bb, xi, hess_bb_w);
-        }
-    }
-
-    (grad_beta, grad_sigma, hess_bb, hess_bs, hess_ss, ll)
-}
-
-/// Accumulate weighted row: result += weight * row
-#[inline]
-fn accumulate_weighted_row(result: &mut Array1<f64>, row: ArrayView1<f64>, weight: f64) {
-    for (r, &x) in result.iter_mut().zip(row.iter()) {
-        *r += weight * x;
-    }
-}
-
-/// Accumulate symmetric rank-1 update: result += weight * row * row'
-/// Only updates upper triangle then copies to lower.
-#[inline]
-fn accumulate_rank1_symmetric(result: &mut Array2<f64>, row: ArrayView1<f64>, weight: f64) {
-    let p = row.len();
-    for j in 0..p {
-        let wj = weight * row[j];
-        for k in j..p {
-            result[[j, k]] += wj * row[k];
-        }
-    }
-    // Copy upper to lower triangle
-    for j in 0..p {
-        for k in (j + 1)..p {
-            result[[k, j]] = result[[j, k]];
-        }
-    }
-}
-
-/// Distribution functions for AFT models.
-/// Returns (log_f, log_S) where f is the PDF and S is the survival function.
-fn aft_distribution_functions(z: f64, dist: AftDistribution) -> (f64, f64) {
-    match dist {
-        AftDistribution::Exponential | AftDistribution::Weibull => {
-            // Extreme value (Gumbel) distribution
-            // f(z) = exp(z - exp(z))
-            // S(z) = exp(-exp(z))
-            let exp_z = z.exp();
-            let log_f = z - exp_z;
-            let log_s = -exp_z;
-            (log_f, log_s)
-        }
-        AftDistribution::LogNormal => {
-            // Standard normal distribution
-            let log_f = -0.5 * (z * z + (2.0 * std::f64::consts::PI).ln());
-            let log_s = (1.0 - normal_cdf(z)).ln();
-            (log_f, log_s)
-        }
-        AftDistribution::LogLogistic => {
-            // Logistic distribution
-            // f(z) = exp(z) / (1 + exp(z))^2
-            // S(z) = 1 / (1 + exp(z))
-            let exp_z = z.exp();
-            let denom = 1.0 + exp_z;
-            let log_f = z - 2.0 * denom.ln();
-            let log_s = -denom.ln();
-            (log_f, log_s)
-        }
-    }
-}
-
-/// Distribution derivatives for AFT models.
-/// Returns (log_f, log_S, dlog_f/dz, dlog_S/dz, d²log_f/dz², d²log_S/dz²)
-fn aft_distribution_derivatives(z: f64, dist: AftDistribution) -> (f64, f64, f64, f64, f64, f64) {
-    match dist {
-        AftDistribution::Exponential | AftDistribution::Weibull => {
-            let exp_z = z.exp();
-            let log_f = z - exp_z;
-            let log_s = -exp_z;
-            let dlog_f = 1.0 - exp_z;
-            let dlog_s = -exp_z;
-            let d2log_f = -exp_z;
-            let d2log_s = -exp_z;
-            (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s)
-        }
-        AftDistribution::LogNormal => {
-            let log_f = -0.5 * (z * z + (2.0 * std::f64::consts::PI).ln());
-            let phi = normal_cdf(z);
-            let log_s = (1.0 - phi).ln();
-            let dlog_f = -z;
-            // Mills ratio approximation for numerical stability
-            let mills = if z < -6.0 {
-                -z
-            } else if z > 6.0 {
-                1.0 / z
-            } else {
-                let pdf = (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt();
-                pdf / (1.0 - phi).max(1e-15)
-            };
-            let dlog_s = -mills;
-            let d2log_f = -1.0;
-            let d2log_s = -mills * (mills + z);
-            (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s)
-        }
-        AftDistribution::LogLogistic => {
-            let exp_z = z.exp();
-            let denom = 1.0 + exp_z;
-            let log_f = z - 2.0 * denom.ln();
-            let log_s = -denom.ln();
-            let p = exp_z / denom; // logistic CDF
-            let dlog_f = 1.0 - 2.0 * p;
-            let dlog_s = -p;
-            let d2log_f = -2.0 * p * (1.0 - p);
-            let d2log_s = -p * (1.0 - p);
-            (log_f, log_s, dlog_f, dlog_s, d2log_f, d2log_s)
-        }
-    }
-}
-
 // =============================================================================
 // Competing Risks / Aalen-Johansen
 // =============================================================================
@@ -2537,11 +2998,11 @@ pub struct CumulativeIncidence {
     pub times: Vec<f64>,
     /// Cumulative incidence F(t)
     pub incidence: Vec<f64>,
-    /// Standard errors
+    /// Delta-method SE of F(t), as survfit's multi-state `std.err`.
     pub std_errors: Vec<f64>,
-    /// Lower confidence interval
+    /// Lower limit, log scale as survfit's `conf.type = "log"`; NaN while F(t) = 0.
     pub ci_lower: Vec<f64>,
-    /// Upper confidence interval
+    /// Upper limit, log scale, capped at 1; NaN while F(t) = 0.
     pub ci_upper: Vec<f64>,
 }
 
@@ -2732,9 +3193,12 @@ pub fn run_competing_risks(
         .collect();
 
     let mut current_risk = n_obs;
-    let mut km_surv = 1.0; // Kaplan-Meier for overall survival
-    let mut cum_incidence: Vec<f64> = vec![0.0; event_types_vec.len()];
-    let mut variance: Vec<f64> = vec![0.0; event_types_vec.len()];
+    let mut km_surv = 1.0; // Kaplan-Meier for overall survival, S(t-) before each time
+    let n_types = event_types_vec.len();
+    let mut cum_incidence = crate::resource::try_vec(n_types, 0.0, "competing risks")?;
+    // Running sums of the delta-method variance per cause (CifVarianceSums).
+    let mut sums =
+        crate::resource::try_vec(n_types, CifVarianceSums::default(), "competing risks")?;
 
     for (time, events_at_time) in time_events {
         let t = time.0;
@@ -2748,43 +3212,42 @@ pub fn run_competing_risks(
         let total_censored = *events_at_time.get(&0).unwrap_or(&0);
 
         if current_risk > 0 {
-            // Update cumulative incidence for each event type
+            let n_j = current_risk as f64;
+            let d_j = total_events as f64;
             for (idx, &event_type) in event_types_vec.iter().enumerate() {
-                let d_k = *events_at_time.get(&event_type).unwrap_or(&0);
-                if d_k > 0 {
-                    // Aalen-Johansen increment
-                    let increment = km_surv * (d_k as f64 / current_risk as f64);
-                    cum_incidence[idx] += increment;
-
-                    // Variance (simplified Greenwood-type formula)
-                    variance[idx] += (km_surv.powi(2) * d_k as f64)
-                        / (current_risk as f64 * current_risk as f64);
-                }
+                let d_k = *events_at_time.get(&event_type).unwrap_or(&0) as f64;
+                // Aalen-Johansen increment
+                cum_incidence[idx] += km_surv * d_k / n_j;
+                sums[idx].add(n_j, d_j, d_k, km_surv, cum_incidence[idx]);
             }
-
             // Update Kaplan-Meier for overall survival
             if total_events > 0 {
-                km_surv *= 1.0 - (total_events as f64 / current_risk as f64);
+                km_surv *= 1.0 - d_j / n_j;
             }
         }
 
         // Store results for this time point
         for (idx, cif) in cifs.iter_mut().enumerate() {
+            let f_k = cum_incidence[idx];
+            let se = sums[idx].variance(f_k).max(0.0).sqrt();
             cif.times.push(t);
-            cif.incidence.push(cum_incidence[idx]);
-            let se = variance[idx].sqrt();
+            cif.incidence.push(f_k);
             cif.std_errors.push(se);
 
-            // Confidence intervals using log transformation
-            let (lo, hi) = if cum_incidence[idx] > 0.0 && cum_incidence[idx] < 1.0 {
-                let log_cif = cum_incidence[idx].ln();
-                let se_log = se / cum_incidence[idx];
-                ((log_cif - z * se_log).exp(), (log_cif + z * se_log).exp())
+            // Confidence limits on the log scale, as survfit's conf.type = "log"; undefined
+            // (NaN, R's NA) while the incidence is 0.
+            let (lo, hi) = if f_k > 0.0 {
+                let log_cif = f_k.ln();
+                let se_log = se / f_k;
+                (
+                    (log_cif - z * se_log).exp().clamp(0.0, 1.0),
+                    (log_cif + z * se_log).exp().clamp(0.0, 1.0),
+                )
             } else {
-                (cum_incidence[idx], cum_incidence[idx])
+                (f64::NAN, f64::NAN)
             };
-            cif.ci_lower.push(lo.max(0.0).min(1.0));
-            cif.ci_upper.push(hi.max(0.0).min(1.0));
+            cif.ci_lower.push(lo);
+            cif.ci_upper.push(hi);
         }
 
         current_risk -= total_events + total_censored;
@@ -2799,6 +3262,46 @@ pub fn run_competing_risks(
         conf_level,
         missing: cols.missing().clone(),
     })
+}
+
+/// Running sums of the delta-method variance of one cause's cumulative incidence F_k, as
+/// survfit reports it for the multi-state Aalen-Johansen estimate. At the distinct times t_j
+/// (n_j at risk, d_j events of any cause, d_kj of cause k, S_{j-1} the overall Kaplan-Meier
+/// before t_j and F_j = F_k(t_j)):
+///
+/// ```text
+/// Var F_k(t) = sum_{t_j <= t} [ a_j (F - F_j)^2 + b_j - 2 c_j (F - F_j) ],   F = F_k(t)
+///   a_j = d_j / (n_j (n_j - d_j))   (0 when n_j = d_j)
+///   b_j = S_{j-1}^2 d_kj (n_j - d_kj) / n_j^3
+///   c_j = S_{j-1} d_kj / n_j^2
+/// ```
+///
+/// expanded in F so that each time costs O(1).
+#[derive(Debug, Clone, Copy, Default)]
+struct CifVarianceSums {
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    b: f64,
+    c0: f64,
+    c1: f64,
+}
+
+impl CifVarianceSums {
+    fn add(&mut self, n: f64, d: f64, dk: f64, s_prev: f64, f_j: f64) {
+        let a = if n > d { d / (n * (n - d)) } else { 0.0 };
+        let c = s_prev * dk / (n * n);
+        self.a0 += a;
+        self.a1 += a * f_j;
+        self.a2 += a * f_j * f_j;
+        self.b += s_prev * s_prev * dk * (n - dk) / (n * n * n);
+        self.c0 += c;
+        self.c1 += c * f_j;
+    }
+
+    fn variance(&self, f: f64) -> f64 {
+        f * f * self.a0 - 2.0 * f * self.a1 + self.a2 + self.b - 2.0 * (f * self.c0 - self.c1)
+    }
 }
 
 // =============================================================================
@@ -2935,8 +3438,8 @@ mod tests {
     // =========================================================================
     // Validation Tests: Compare against R's survival package
     // Kaplan-Meier and the log-rank test are R-pinned below (validation/r/cases/
-    // survival.R); the Cox, AFT and competing-risk checks are property checks,
-    // not R-pinned (validation/econometrics/survival_models.md).
+    // survival.R); Cox, AFT and competing risks further down (surv_cox_aft.R,
+    // validation/econometrics/survival.md, Test Cases 5-8).
     // =========================================================================
 
     /// summary(fit, times = t): the row of the last time <= t, and the number at risk at t
@@ -3334,60 +3837,6 @@ mod tests {
         assert!((r.chi_squared - 1.0).abs() < 1e-12, "{}", r.chi_squared);
     }
 
-    /// Create dataset for Cox PH with ties
-    fn create_r_cox_ties_dataset() -> Dataset {
-        // Matches R code:
-        // time <- c(1, 1, 2, 2, 2, 3, 4, 4, 5, 5)
-        // event <- c(1, 1, 1, 0, 1, 1, 1, 0, 1, 1)
-        // x <- c(0, 1, 0, 0, 1, 1, 0, 1, 0, 1)
-        let df = df! {
-            "time" => [1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 4.0, 4.0, 5.0, 5.0],
-            "event" => [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
-            "x" => [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-        }
-        .unwrap();
-        Dataset::new(df).with_name("r_cox_ties_test")
-    }
-
-    #[test]
-    fn test_validate_cox_ties_against_r() {
-        // R's coxph() with heavy ties
-        // Efron: coef ~0.3-0.6, se ~0.6-0.9
-        // Breslow: coef ~0.3-0.6, se ~0.6-0.9
-        let dataset = create_r_cox_ties_dataset();
-
-        // Test Efron method
-        let config_efron = CoxConfig {
-            ties: TiesMethod::Efron,
-            ..Default::default()
-        };
-        let result_efron =
-            run_cox_ph(&dataset, "time", "event", &["x"], Some(config_efron)).unwrap();
-
-        // Coefficient should be positive (x increases hazard)
-        assert!(
-            result_efron.coefficients[0] > -1.5 && result_efron.coefficients[0] < 1.5,
-            "Efron coef should be reasonable, got {}",
-            result_efron.coefficients[0]
-        );
-
-        // Test Breslow method
-        let config_breslow = CoxConfig {
-            ties: TiesMethod::Breslow,
-            ..Default::default()
-        };
-        let result_breslow =
-            run_cox_ph(&dataset, "time", "event", &["x"], Some(config_breslow)).unwrap();
-
-        // Both methods should give similar results
-        assert!(
-            (result_efron.coefficients[0] - result_breslow.coefficients[0]).abs() < 0.5,
-            "Efron ({}) and Breslow ({}) should be similar",
-            result_efron.coefficients[0],
-            result_breslow.coefficients[0]
-        );
-    }
-
     #[test]
     fn test_validate_cox_concordance() {
         // Concordance should match R within ~0.05
@@ -3404,66 +3853,6 @@ mod tests {
         // For reasonable data, concordance shouldn't be exactly 0.5
         // (which would indicate no predictive power)
         // But we accept anything reasonable
-    }
-
-    #[test]
-    fn test_validate_aft_scale_parameter() {
-        // R's survreg with Weibull:
-        // Scale parameter should be positive
-        let dataset = create_test_dataset();
-        let config = AftConfig {
-            distribution: AftDistribution::Weibull,
-            ..Default::default()
-        };
-        let result = run_aft(&dataset, "time", "event", &["x1"], Some(config)).unwrap();
-
-        assert!(
-            result.scale > 0.0,
-            "AFT scale must be positive, got {}",
-            result.scale
-        );
-        assert!(
-            result.shape.unwrap() > 0.0,
-            "Weibull shape must be positive, got {:?}",
-            result.shape
-        );
-
-        // AIC should be finite and reasonable
-        assert!(
-            result.aic.is_finite(),
-            "AIC should be finite, got {}",
-            result.aic
-        );
-    }
-
-    #[test]
-    fn test_validate_aft_distributions() {
-        // Test all supported AFT distributions
-        let dataset = create_test_dataset();
-
-        for dist in [
-            AftDistribution::Weibull,
-            AftDistribution::Exponential,
-            AftDistribution::LogNormal,
-            AftDistribution::LogLogistic,
-        ] {
-            let config = AftConfig {
-                distribution: dist,
-                ..Default::default()
-            };
-            let result = run_aft(&dataset, "time", "event", &["x1"], Some(config));
-
-            assert!(
-                result.is_ok(),
-                "AFT {:?} should succeed, got {:?}",
-                dist,
-                result.err()
-            );
-
-            let r = result.unwrap();
-            assert!(r.scale > 0.0, "Scale must be positive for {:?}", dist);
-            assert!(r.aic.is_finite(), "AIC must be finite for {:?}", dist);
-        }
     }
 
     #[test]
@@ -3866,5 +4255,1042 @@ mod tests {
                 conf_type: KmConfType::Log
             }
         );
+    }
+
+    // =========================================================================
+    // Cox and AFT: option parsing
+    // =========================================================================
+
+    #[test]
+    fn test_ties_method_parses_aliases_and_rejects_unknown() {
+        use TiesMethod::*;
+        TiesMethod::choices().validate().unwrap();
+        for (s, t) in [
+            ("efron", Efron),
+            ("Efron", Efron),
+            (" EFRON ", Efron),
+            ("breslow", Breslow),
+            ("Breslow", Breslow),
+        ] {
+            assert_eq!(s.parse::<TiesMethod>().unwrap(), t, "{s}");
+        }
+        for t in [Efron, Breslow] {
+            assert_eq!(t.to_string().parse::<TiesMethod>().unwrap(), t);
+        }
+        let err = "exact".parse::<TiesMethod>().unwrap_err().to_string();
+        assert!(
+            err.contains("unknown ties 'exact'") && err.contains("efron, breslow"),
+            "{err}"
+        );
+        assert!("".parse::<TiesMethod>().is_err());
+    }
+
+    #[test]
+    fn test_aft_distribution_parses_aliases_and_rejects_unknown() {
+        use AftDistribution::*;
+        AftDistribution::choices().validate().unwrap();
+        for (s, d) in [
+            ("weibull", Weibull),
+            ("Weibull", Weibull),
+            ("exponential", Exponential),
+            ("lognormal", LogNormal),
+            ("log-normal", LogNormal),
+            ("Log-Normal", LogNormal),
+            ("log_normal", LogNormal),
+            ("loglogistic", LogLogistic),
+            ("log-logistic", LogLogistic),
+            ("Log-Logistic", LogLogistic),
+        ] {
+            assert_eq!(s.parse::<AftDistribution>().unwrap(), d, "{s}");
+        }
+        for d in [Weibull, Exponential, LogNormal, LogLogistic] {
+            // Display ("Log-Normal") round-trips
+            assert_eq!(d.to_string().parse::<AftDistribution>().unwrap(), d);
+        }
+        for bad in ["gaussian", "logistic", "rayleigh", "t", "extreme", ""] {
+            assert!(bad.parse::<AftDistribution>().is_err(), "{bad}");
+        }
+        let err = "gaussian"
+            .parse::<AftDistribution>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown dist 'gaussian'")
+                && err.contains("weibull, exponential, lognormal, loglogistic"),
+            "{err}"
+        );
+    }
+
+    // =========================================================================
+    // Cox proportional hazards: R-pinned (validation/r/cases/surv_cox_aft.R;
+    // registry validation/methods/surv_cox_aft.json)
+    // =========================================================================
+
+    const COX_X: [&str; 3] = ["age", "sex", "ph.ecog"];
+
+    /// coxph.control(eps = 1e-12, iter.max = 100), as in the surv_cox_* cases.
+    fn cox_tight(ties: TiesMethod) -> CoxConfig {
+        let mut c = CoxConfig::default();
+        c.ties = ties;
+        c.tolerance = 1e-12;
+        c.max_iter = 100;
+        c
+    }
+
+    fn ties_tag(ties: TiesMethod) -> &'static str {
+        match ties {
+            TiesMethod::Efron => "efron",
+            TiesMethod::Breslow => "breslow",
+        }
+    }
+
+    /// `validation/datasets/generated/<name>.csv`, for property tests that pin no R value.
+    fn generated_dataset(name: &str) -> Dataset {
+        let path = p2a_validation::repo_path(&format!("validation/datasets/generated/{name}.csv"));
+        match crate::data::DataLoader::load_csv(&path) {
+            Ok(df) => Dataset::new(df),
+            Err(e) => panic!("cannot load {}: {e}", path.display()),
+        }
+    }
+
+    /// ECON-46: Breslow scores every death at t against the full risk set {t_j >= t} whatever the
+    /// row order (coxph(ties = "breslow")). Before: rows entered the risk set one at a time; lung
+    /// gave age 0.011070584319508605 in file order and 0.011048660708497025 reversed (R
+    /// 0.011041136385707521).
+    #[test]
+    fn test_validate_cox_breslow_row_order_invariant() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("n") as usize;
+        let rev = Dataset::new(ds.df().reverse());
+        let cfg = cox_tight(TiesMethod::Breslow);
+        let a = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg.clone())).unwrap();
+        let b = run_cox_ph(&rev, "time", "status", &COX_X, Some(cfg)).unwrap();
+        for (x, y) in a.coefficients.iter().zip(&b.coefficients) {
+            assert!(
+                (x - y).abs() <= 1e-12 * y.abs(),
+                "row order changed the Breslow fit: {x} vs {y}"
+            );
+        }
+        let mut check = Check::new(&case);
+        for r in [&a, &b] {
+            check
+                .scalar("n", r.n_obs as f64, Tol::exact())
+                .named("breslow_coef", &r.variables, &r.coefficients, Tol::coef(n))
+                .named("breslow_se", &r.variables, &r.std_errors, Tol::se(n))
+                .scalar("breslow_loglik", r.log_likelihood, Tol::stat(n))
+                .scalar("breslow_loglik_null", r.log_likelihood_null, Tol::stat(n))
+                .scalar("breslow_score_test", r.score_test, Tol::stat(n));
+        }
+        check.finish();
+    }
+
+    /// Heavy ties (10 rows, 5 distinct times, censored rows tied with deaths), Efron and Breslow,
+    /// rows in file order and reversed. Before: Breslow 0.36576456754379533 / reversed
+    /// -0.47976648482093837 (R -0.050231244457068). Replaces a test whose comment quoted "R"
+    /// ranges R does not produce and whose |Efron - Breslow| < 0.5 could not fail.
+    #[test]
+    fn test_validate_cox_ties_small() {
+        let (case, ds) = load_case("surv_cox_ties_small");
+        let n = case.scalar("n") as usize;
+        let rev = Dataset::new(ds.df().reverse());
+        let mut check = Check::new(&case);
+        for ties in [TiesMethod::Efron, TiesMethod::Breslow] {
+            let tag = ties_tag(ties);
+            for d in [&ds, &rev] {
+                let r = run_cox_ph(d, "time", "event", &["x"], Some(cox_tight(ties))).unwrap();
+                check
+                    .named(
+                        &format!("{tag}_coef"),
+                        &r.variables,
+                        &r.coefficients,
+                        Tol::coef(n),
+                    )
+                    .named(
+                        &format!("{tag}_se"),
+                        &r.variables,
+                        &r.std_errors,
+                        Tol::se(n),
+                    )
+                    .scalar(&format!("{tag}_loglik"), r.log_likelihood, Tol::stat(n))
+                    .scalar(
+                        &format!("{tag}_loglik_null"),
+                        r.log_likelihood_null,
+                        Tol::stat(n),
+                    )
+                    .scalar(&format!("{tag}_score_test"), r.score_test, Tol::stat(n));
+            }
+        }
+        check.finish();
+    }
+
+    /// Every number summary.coxph reports for the model-based fit (deviation ECON-89: the
+    /// concordance and its SE are not pinned). Before: up to 100 iterations under the absolute
+    /// score rule, HR limits with 1.96 (sex and ph.ecog upper limits off by 6.0e-6 and 4.1e-6
+    /// relative), no convergence fields.
+    fn check_cox_model(case_id: &str, ties: TiesMethod) {
+        let (case, ds) = load_case(case_id);
+        let n = case.scalar("n") as usize;
+        let tag = ties_tag(ties);
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cox_tight(ties))).unwrap();
+        assert!(
+            r.converged && r.convergence.converged,
+            "{:?}",
+            r.convergence
+        );
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(r.df(), 3);
+        assert!(r.to_string().contains("Converged: yes ("), "{r}");
+        assert_eq!(r.se_type, CoxSeType::Model);
+        assert_eq!(r.naive_std_errors, r.std_errors);
+        Check::new(&case)
+            .scalar("n", r.n_obs as f64, Tol::exact())
+            .scalar("n_event", r.n_events as f64, Tol::exact())
+            .named(
+                &format!("{tag}_coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                &format!("{tag}_se"),
+                &r.variables,
+                &r.std_errors,
+                Tol::se(n),
+            )
+            .named(&format!("{tag}_z"), &r.variables, &r.z_stats, Tol::stat(n))
+            .named(
+                &format!("{tag}_p"),
+                &r.variables,
+                &r.p_values,
+                Tol::p_value(n),
+            )
+            .named(
+                &format!("{tag}_hr_lower"),
+                &r.variables,
+                &r.hr_ci_lower,
+                Tol::stat(n),
+            )
+            .named(
+                &format!("{tag}_hr_upper"),
+                &r.variables,
+                &r.hr_ci_upper,
+                Tol::stat(n),
+            )
+            .scalar(&format!("{tag}_loglik"), r.log_likelihood, Tol::stat(n))
+            .scalar(
+                &format!("{tag}_loglik_null"),
+                r.log_likelihood_null,
+                Tol::stat(n),
+            )
+            .scalar(&format!("{tag}_lr_test"), r.lr_test, Tol::stat(n))
+            .scalar(&format!("{tag}_lr_p"), r.lr_p_value, Tol::p_value(n))
+            .scalar(&format!("{tag}_score_test"), r.score_test, Tol::stat(n))
+            .scalar(&format!("{tag}_score_p"), r.score_p_value, Tol::p_value(n))
+            .scalar(&format!("{tag}_wald_test"), r.wald_test, Tol::stat(n))
+            .scalar(&format!("{tag}_wald_p"), r.wald_p_value, Tol::p_value(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cox_efron_model() {
+        check_cox_model("surv_cox_robust", TiesMethod::Efron)
+    }
+
+    #[test]
+    fn test_validate_cox_breslow_model() {
+        check_cox_model("surv_cox_robust", TiesMethod::Breslow)
+    }
+
+    /// X-15: the stopping rule is the relative change in the log partial likelihood, so the
+    /// iteration does not depend on a covariate's units. Before: the absolute max |score| < 1e-9
+    /// rule ran to max_iter (25), converged = false, at age x 365250 and x 1e6. Coefficients
+    /// (mapped back to age units) are pinned to coxph's tight fit; coxph's default-eps fits are
+    /// a cross-check. Iteration counts are p2a's own property (within one of each other).
+    #[test]
+    fn test_validate_cox_converges_at_large_scale() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let mut check = Check::new(&case);
+        let mut iter_e0 = None;
+        for (tag, s) in [("e0", 1.0), ("em6", 1e-6), ("days", 365250.0), ("e6", 1e6)] {
+            let d = derive_f64(&ds, "age", "age_s", |_, a| a as f64 * s);
+            let mut cfg = CoxConfig::default(); // tolerance 1e-9 = coxph's eps, max_iter 25
+            cfg.ties = TiesMethod::Efron;
+            let r = run_cox_ph(&d, "time", "status", &["age_s", "sex"], Some(cfg)).unwrap();
+            assert!(r.converged, "age x {s}: {:?}", r.convergence);
+            assert!(r.iterations <= 10, "age x {s}: {} iterations", r.iterations);
+            let base = *iter_e0.get_or_insert(r.iterations);
+            assert!(
+                r.iterations.abs_diff(base) <= 1,
+                "age x {s}: {} vs {base}",
+                r.iterations
+            );
+            let back = [r.coefficients[0] * s, r.coefficients[1]];
+            check
+                .named(
+                    "scale_tight_coef",
+                    &["age", "sex"],
+                    &back,
+                    Tol::iterative(1e-7),
+                )
+                .named(
+                    &format!("scale_{tag}_coef"),
+                    &["age", "sex"],
+                    &[r.coefficients[0], r.coefficients[1]],
+                    Tol::iterative(1e-6),
+                );
+        }
+        check.finish();
+    }
+
+    /// R10: stopping at max_iter is reported, not hidden (coxph: "Ran out of iterations and did
+    /// not converge").
+    #[test]
+    fn test_cox_iteration_limit_reports_non_convergence() {
+        let ds = generated_dataset("lung");
+        let mut cfg = cox_tight(TiesMethod::Efron);
+        cfg.max_iter = 2;
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg)).unwrap();
+        assert!(!r.converged && !r.convergence.converged);
+        assert_eq!(r.iterations, 2);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("Cox regression did not converge after 2 iterations")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Converged: no (2 iterations"), "{r}");
+    }
+
+    /// Monotone likelihood (every death has x = 1): coxph 3.5.8 converges at iteration 20 with
+    /// coef 20.794537153866514 and warns "Loglik converged before variable 1; coefficient may
+    /// be infinite". Hand-built fixture, not a reference dataset.
+    #[test]
+    fn test_cox_monotone_likelihood_warns() {
+        let df = df! {
+            "time" => [2.3, 1.1, 4.7, 3.2, 5.9, 0.8, 7.4, 6.1, 8.8, 9.5, 10.2, 3.9],
+            "status" => [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            "x" => [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            "z" => [0.3, -1.2, 0.8, 0.1, -0.5, 1.4, -0.9, 0.6, 2.1, -0.3, 0.4, -1.7],
+        }
+        .unwrap();
+        let mut cfg = CoxConfig::default();
+        cfg.ties = TiesMethod::Efron;
+        cfg.max_iter = 100;
+        let r = run_cox_ph(&Dataset::new(df), "time", "status", &["x", "z"], Some(cfg)).unwrap();
+        assert!(r.converged, "{:?}", r.convergence);
+        assert!(r.coefficients[0] > 15.0, "{:?}", r.coefficients);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Loglik converged before variable 1 (x); coefficient may be infinite"),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// ECON-61 (survival part): age2 = 2 age + sex is aliased; coxph reports NA for it and fits
+    /// age and sex. Before: a pseudo-inverse gave three finite coefficients without a warning.
+    #[test]
+    fn test_validate_cox_aliased_covariate() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("scale_n") as usize;
+        let sex = i64_values(&ds, "sex");
+        let d = derive_f64(&ds, "age", "age2", |i, a| 2.0 * a as f64 + sex[i] as f64);
+        let r = run_cox_ph(
+            &d,
+            "time",
+            "status",
+            &["age", "sex", "age2"],
+            Some(cox_tight(TiesMethod::Efron)),
+        )
+        .unwrap();
+        assert_eq!(r.aliased, vec!["age2".to_string()]);
+        assert_eq!(r.df(), 2);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Coefficients not defined because of singularities: age2"),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .named("aliased_coef", &r.variables, &r.coefficients, Tol::coef(n)) // age2: NaN == NA
+            .named("aliased_se", &r.variables, &r.std_errors, Tol::se(n))
+            .scalar("aliased_loglik", r.log_likelihood, Tol::stat(n))
+            .scalar("aliased_lr_test", r.lr_test, Tol::stat(n))
+            .finish();
+    }
+
+    /// R3: iteration settings are validated in core.
+    #[test]
+    fn test_cox_rejects_bad_iteration_settings() {
+        let ds = generated_dataset("cox_ties_small");
+        for (max_iter, tol, what) in [
+            (0, 1e-9, "max_iter"),
+            (25, 0.0, "tolerance"),
+            (25, -1.0, "tolerance"),
+            (25, f64::NAN, "tolerance"),
+            (25, f64::INFINITY, "tolerance"),
+        ] {
+            let mut cfg = CoxConfig::default();
+            cfg.max_iter = max_iter;
+            cfg.tolerance = tol;
+            match run_cox_ph(&ds, "time", "event", &["x"], Some(cfg)) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains(what), "{message}")
+                }
+                other => panic!("max_iter {max_iter}, tolerance {tol}: {other:?}"),
+            }
+        }
+    }
+
+    /// ECON-45: coxph(robust = TRUE). Before: robust_se was never read, so std_errors were the
+    /// model SEs (efron age 0.0092674110143657 vs robust 0.00988139278005566) and nothing said so.
+    fn check_cox_robust(case_id: &str, ties: TiesMethod) {
+        let (case, ds) = load_case(case_id);
+        let n = case.scalar("n") as usize;
+        let tag = ties_tag(ties);
+        let mut cfg = cox_tight(ties);
+        cfg.robust_se = true;
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg)).unwrap();
+        assert_eq!(r.se_type, CoxSeType::Robust);
+        assert_eq!((r.cluster.as_deref(), r.n_clusters), (None, None));
+        let text = r.to_string();
+        assert!(
+            text.contains("robust se")
+                && text.contains("Standard errors: robust (Lin-Wei sandwich)")
+                && text.contains("Robust score test"),
+            "{text}"
+        );
+        Check::new(&case)
+            .named(
+                &format!("{tag}_coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                &format!("{tag}_se"),
+                &r.variables,
+                &r.naive_std_errors,
+                Tol::se(n),
+            )
+            .named(
+                &format!("{tag}_se_robust"),
+                &r.variables,
+                &r.std_errors,
+                Tol::se(n),
+            )
+            .named(
+                &format!("{tag}_z_robust"),
+                &r.variables,
+                &r.z_stats,
+                Tol::stat(n),
+            )
+            .named(
+                &format!("{tag}_p_robust"),
+                &r.variables,
+                &r.p_values,
+                Tol::p_value(n),
+            )
+            .named(
+                &format!("{tag}_hr_lower_robust"),
+                &r.variables,
+                &r.hr_ci_lower,
+                Tol::stat(n),
+            )
+            .named(
+                &format!("{tag}_hr_upper_robust"),
+                &r.variables,
+                &r.hr_ci_upper,
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("{tag}_wald_test_robust"),
+                r.wald_test,
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("{tag}_wald_p_robust"),
+                r.wald_p_value,
+                Tol::p_value(n),
+            )
+            .scalar(
+                &format!("{tag}_rscore_robust"),
+                r.robust_score_test.unwrap_or(f64::NAN),
+                Tol::stat(n),
+            )
+            .scalar(
+                &format!("{tag}_rscore_p_robust"),
+                r.robust_score_p_value.unwrap_or(f64::NAN),
+                Tol::p_value(n),
+            )
+            .scalar(&format!("{tag}_score_test"), r.score_test, Tol::stat(n)) // model-based
+            .scalar(&format!("{tag}_lr_test"), r.lr_test, Tol::stat(n))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_cox_efron_robust() {
+        check_cox_robust("surv_cox_robust", TiesMethod::Efron)
+    }
+
+    #[test]
+    fn test_validate_cox_breslow_robust() {
+        check_cox_robust("surv_cox_robust", TiesMethod::Breslow)
+    }
+
+    /// coxph(... + cluster(inst)): dfbeta residuals summed within the 18 institutions; the row
+    /// with a missing inst is dropped (226 rows) and reported; robust_se stays false (cluster
+    /// implies it, as in coxph).
+    #[test]
+    fn test_validate_cox_cluster() {
+        let (case, ds) = load_case("surv_cox_robust");
+        let n = case.scalar("n_cluster_obs") as usize;
+        let mut check = Check::new(&case);
+        for ties in [TiesMethod::Efron, TiesMethod::Breslow] {
+            let tag = ties_tag(ties);
+            let mut cfg = cox_tight(ties);
+            cfg.cluster = Some("inst".to_string());
+            let r = run_cox_ph(&ds, "time", "status", &COX_X, Some(cfg)).unwrap();
+            assert_eq!(r.se_type, CoxSeType::Cluster);
+            assert_eq!(r.cluster.as_deref(), Some("inst"));
+            assert_eq!(r.missing.n_dropped, 2, "{:?}", r.missing); // ph.ecog 1, inst 1
+            assert!(
+                r.to_string().contains("clustered by inst (18 clusters"),
+                "{r}"
+            );
+            check
+                .scalar("n_cluster_obs", r.n_obs as f64, Tol::exact())
+                .scalar("n_cluster_event", r.n_events as f64, Tol::exact())
+                .scalar(
+                    "n_clusters",
+                    r.n_clusters.map_or(f64::NAN, |g| g as f64),
+                    Tol::exact(),
+                )
+                .named(
+                    &format!("{tag}_coef_cluster"),
+                    &r.variables,
+                    &r.coefficients,
+                    Tol::coef(n),
+                )
+                .named(
+                    &format!("{tag}_se_model_cluster"),
+                    &r.variables,
+                    &r.naive_std_errors,
+                    Tol::se(n),
+                )
+                .named(
+                    &format!("{tag}_se_cluster"),
+                    &r.variables,
+                    &r.std_errors,
+                    Tol::se(n),
+                )
+                .named(
+                    &format!("{tag}_z_cluster"),
+                    &r.variables,
+                    &r.z_stats,
+                    Tol::stat(n),
+                )
+                .named(
+                    &format!("{tag}_p_cluster"),
+                    &r.variables,
+                    &r.p_values,
+                    Tol::p_value(n),
+                )
+                .scalar(
+                    &format!("{tag}_wald_test_cluster"),
+                    r.wald_test,
+                    Tol::stat(n),
+                )
+                .scalar(
+                    &format!("{tag}_wald_p_cluster"),
+                    r.wald_p_value,
+                    Tol::p_value(n),
+                )
+                .scalar(
+                    &format!("{tag}_rscore_cluster"),
+                    r.robust_score_test.unwrap_or(f64::NAN),
+                    Tol::stat(n),
+                )
+                .scalar(
+                    &format!("{tag}_rscore_p_cluster"),
+                    r.robust_score_p_value.unwrap_or(f64::NAN),
+                    Tol::p_value(n),
+                );
+        }
+        check.finish();
+    }
+
+    /// A clustered variance needs at least two clusters (coxph returns a variance of about 0
+    /// with one).
+    #[test]
+    fn test_cox_cluster_needs_two_levels() {
+        let ds = generated_dataset("lung");
+        let d = derive_i64(&ds, "sex", "one", |_| 1);
+        let mut cfg = cox_tight(TiesMethod::Efron);
+        cfg.cluster = Some("one".into());
+        match run_cox_ph(&d, "time", "status", &COX_X, Some(cfg)) {
+            Err(EconError::InvalidSpecification { message }) => assert!(
+                message.contains("'one'") && message.contains("at least 2 clusters"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// With no more clusters than coefficients the clustered matrices are rank-deficient: SEs
+    /// are reported, the robust Wald and score tests are NaN with a warning (coxph prints
+    /// generalized-inverse statistics).
+    #[test]
+    fn test_cox_robust_tests_need_more_clusters_than_coefficients() {
+        let ds = generated_dataset("lung");
+        let d = derive_f64(&ds, "age", "half", |i, _| if i < 114 { 1.0 } else { 2.0 });
+        let mut cfg = cox_tight(TiesMethod::Efron);
+        cfg.cluster = Some("half".into());
+        let r = run_cox_ph(&d, "time", "status", &COX_X, Some(cfg)).unwrap();
+        assert_eq!(r.n_clusters, Some(2));
+        assert!(r.std_errors.iter().all(|s| s.is_finite()));
+        assert!(r.wald_test.is_nan() && r.robust_score_test.is_some_and(f64::is_nan));
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("robust Wald test not reported")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("robust score test not reported")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("not reported"), "{r}");
+    }
+
+    // =========================================================================
+    // Accelerated failure time: R-pinned (case surv_aft)
+    // =========================================================================
+
+    const AFT_X: [&str; 3] = ["age", "sex", "ph.ecog"];
+
+    /// survreg.control(rel.tolerance = 1e-12, maxiter = 100), as in the surv_aft case.
+    fn aft_tight(dist: AftDistribution) -> AftConfig {
+        let mut c = AftConfig::default();
+        c.distribution = dist;
+        c.tolerance = 1e-12;
+        c.max_iter = 100;
+        c
+    }
+
+    /// Everything summary.survreg reports except the Log(scale) row (check_aft_log_scale).
+    fn check_aft(case_id: &str, dist: AftDistribution, tag: &str) -> AftResult {
+        let (case, ds) = load_case(case_id);
+        let n = case.scalar("n") as usize;
+        let r = run_aft(&ds, "time", "status", &AFT_X, Some(aft_tight(dist))).unwrap();
+        assert!(
+            r.converged && r.warnings.is_empty(),
+            "{dist}: {:?} {:?}",
+            r.convergence,
+            r.warnings
+        );
+        Check::new(&case)
+            .scalar("n", r.n_obs as f64, Tol::exact())
+            .scalar("n_event", r.n_events as f64, Tol::exact())
+            .named(
+                &format!("{tag}_coef"),
+                &r.variables,
+                &r.coefficients,
+                Tol::coef(n),
+            )
+            .named(
+                &format!("{tag}_se"),
+                &r.variables,
+                &r.std_errors,
+                Tol::se(n),
+            )
+            .named(&format!("{tag}_z"), &r.variables, &r.z_stats, Tol::stat(n))
+            .named(
+                &format!("{tag}_p"),
+                &r.variables,
+                &r.p_values,
+                Tol::p_value(n),
+            )
+            .scalar(&format!("{tag}_scale"), r.scale, Tol::stat(n))
+            .scalar(&format!("{tag}_loglik"), r.log_likelihood, Tol::stat(n))
+            .scalar(&format!("{tag}_aic"), r.aic, Tol::stat(n))
+            .scalar(&format!("{tag}_bic"), r.bic, Tol::stat(n))
+            .finish();
+        r
+    }
+
+    fn check_aft_log_scale(case_id: &str, r: &AftResult, tag: &str) {
+        let (case, _) = load_case(case_id);
+        let n = case.scalar("n") as usize;
+        let (z, p) = r.log_scale_test().unwrap();
+        assert!(!r.scale_fixed);
+        Check::new(&case)
+            .scalar(
+                &format!("{tag}_se_log_scale"),
+                r.log_scale_se.unwrap(),
+                Tol::se(n),
+            )
+            .scalar(&format!("{tag}_z_log_scale"), z, Tol::stat(n))
+            .scalar(&format!("{tag}_p_log_scale"), p, Tol::p_value(n))
+            .finish();
+    }
+
+    /// ECON-47. Before: no Newton step was ever taken (Cholesky of the negative-definite
+    /// Hessian), so 100 steps of beta += 0.01 grad diverged: age 54.48, scale inf, logLik -inf.
+    #[test]
+    fn test_validate_aft_weibull() {
+        let r = check_aft("surv_aft", AftDistribution::Weibull, "weibull");
+        check_aft_log_scale("surv_aft", &r, "weibull");
+        assert_eq!(r.shape, Some(1.0 / r.scale));
+    }
+
+    /// ECON-48: exponential = extreme-value errors with the scale fixed at 1; AIC counts 4
+    /// parameters (R 2295.1263026263628 = 2 x 1143.5631513131814 + 8). Before: the Weibull fit
+    /// relabelled.
+    #[test]
+    fn test_validate_aft_exponential() {
+        let r = check_aft("surv_aft", AftDistribution::Exponential, "exponential");
+        assert_eq!(r.scale, 1.0);
+        assert!(r.scale_fixed && r.log_scale_se.is_none() && r.log_scale_test().is_none());
+        assert_eq!(r.shape, Some(1.0));
+        assert!(r.to_string().contains("Scale fixed at 1"), "{r}");
+    }
+
+    /// ECON-47 also: the normal censored second derivative -m (m - z) (was -m (m + z)), the
+    /// normal hazard in the tails, ln S(z) without underflow.
+    #[test]
+    fn test_validate_aft_lognormal() {
+        let r = check_aft("surv_aft", AftDistribution::LogNormal, "lognormal");
+        check_aft_log_scale("surv_aft", &r, "lognormal");
+        assert_eq!(r.shape, None);
+    }
+
+    #[test]
+    fn test_validate_aft_loglogistic() {
+        let r = check_aft("surv_aft", AftDistribution::LogLogistic, "loglogistic");
+        check_aft_log_scale("surv_aft", &r, "loglogistic");
+    }
+
+    /// Phantom-option pair: survreg distinguishes exponential from weibull.
+    #[test]
+    fn test_aft_exponential_differs_from_weibull() {
+        let ds = generated_dataset("lung");
+        let w = run_aft(
+            &ds,
+            "time",
+            "status",
+            &AFT_X,
+            Some(aft_tight(AftDistribution::Weibull)),
+        )
+        .unwrap();
+        let e = run_aft(
+            &ds,
+            "time",
+            "status",
+            &AFT_X,
+            Some(aft_tight(AftDistribution::Exponential)),
+        )
+        .unwrap();
+        assert!(
+            (w.coefficients[1] / e.coefficients[1] - 1.0).abs() > 0.1,
+            "{:?} {:?}",
+            w.coefficients,
+            e.coefficients
+        );
+        assert!((w.scale - e.scale).abs() > 0.1 && (w.aic - e.aic).abs() > 1.0);
+    }
+
+    /// Newton on the equilibrated information does not depend on a covariate's units: age x
+    /// 1e-6 and x 1e6 give survreg's rescaled coefficients in (about) the same number of
+    /// iterations.
+    #[test]
+    fn test_validate_aft_converges_at_any_covariate_scale() {
+        let (case, ds) = load_case("surv_aft");
+        let n = case.scalar("n") as usize;
+        let base = run_aft(
+            &ds,
+            "time",
+            "status",
+            &AFT_X,
+            Some(aft_tight(AftDistribution::Weibull)),
+        )
+        .unwrap();
+        let mut check = Check::new(&case);
+        for (tag, s) in [("em6", 1e-6), ("e6", 1e6)] {
+            let d = derive_f64(&ds, "age", "age_s", |_, a| a as f64 * s);
+            let r = run_aft(
+                &d,
+                "time",
+                "status",
+                &["age_s", "sex", "ph.ecog"],
+                Some(aft_tight(AftDistribution::Weibull)),
+            )
+            .unwrap();
+            assert!(r.converged, "age x {s}: {:?}", r.convergence);
+            assert!(
+                r.iterations.abs_diff(base.iterations) <= 1,
+                "age x {s}: {} vs {}",
+                r.iterations,
+                base.iterations
+            );
+            check.named(
+                &format!("weibull_scale_{tag}_coef"),
+                &["(Intercept)", "age", "sex", "ph.ecog"],
+                &r.coefficients,
+                Tol::coef(n),
+            );
+        }
+        check.finish();
+    }
+
+    /// ECON-61 (survival part): survreg reports NA for age2 = 2 age + sex. Before: an
+    /// identity-matrix SE fallback and a pseudo-inverse start.
+    #[test]
+    fn test_validate_aft_aliased_covariate() {
+        let (case, ds) = load_case("surv_aft");
+        let n = case.scalar("aliased_n") as usize;
+        let sex = i64_values(&ds, "sex");
+        let d = derive_f64(&ds, "age", "age2", |i, a| 2.0 * a as f64 + sex[i] as f64);
+        let r = run_aft(
+            &d,
+            "time",
+            "status",
+            &["age", "sex", "age2"],
+            Some(aft_tight(AftDistribution::Weibull)),
+        )
+        .unwrap();
+        assert_eq!(r.aliased, vec!["age2".to_string()]);
+        assert!(r.std_errors[3].is_nan());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w == "Coefficients not defined because of singularities: age2"),
+            "{:?}",
+            r.warnings
+        );
+        Check::new(&case)
+            .named("aliased_coef", &r.variables, &r.coefficients, Tol::coef(n))
+            .scalar("aliased_scale", r.scale, Tol::stat(n))
+            .scalar("aliased_loglik", r.log_likelihood, Tol::stat(n))
+            .finish();
+    }
+
+    /// R10/R2: the iteration limit is a warning with finite results (survreg: "Ran out of
+    /// iterations").
+    #[test]
+    fn test_aft_iteration_limit_is_a_warning() {
+        let ds = generated_dataset("lung");
+        let mut cfg = aft_tight(AftDistribution::Weibull);
+        cfg.max_iter = 1;
+        let r = run_aft(&ds, "time", "status", &AFT_X, Some(cfg)).unwrap();
+        assert!(!r.converged && r.coefficients.iter().all(|b| b.is_finite()));
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.starts_with("AFT model did not converge after 1 iteration")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(r.to_string().contains("Converged: no"), "{r}");
+    }
+
+    #[test]
+    fn test_aft_rejects_bad_iteration_settings() {
+        let ds = generated_dataset("lung");
+        for (max_iter, tol, what) in [
+            (0, 1e-9, "max_iter"),
+            (100, 0.0, "tolerance"),
+            (100, f64::NAN, "tolerance"),
+        ] {
+            let mut cfg = AftConfig::default();
+            cfg.max_iter = max_iter;
+            cfg.tolerance = tol;
+            match run_aft(&ds, "time", "status", &AFT_X, Some(cfg)) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains(what), "{message}")
+                }
+                other => panic!("max_iter {max_iter}, tolerance {tol}: {other:?}"),
+            }
+        }
+    }
+
+    /// The tail helpers against R 4.3.3: pnorm(z, lower.tail = FALSE, log.p = TRUE),
+    /// exp(dnorm(z, log = TRUE) - that), and pmax(z, 0) + log1p(exp(-abs(z))).
+    #[test]
+    fn test_aft_tail_helpers_match_r() {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs() + 1e-300;
+        for (z, ls, h) in [
+            (-40.0, -0.0, 0.0),
+            (-5.0, -2.8665161296376358e-07, 1.4867199409049061e-06),
+            (-1.0, -0.17275377902344988, 0.28759997093917838),
+            (0.0, -0.69314718055994529, 0.79788456080286529),
+            (1.5, -2.7059444008238898, 1.9386771666225433),
+            (8.0, -35.013437159914552, 8.121368112236123),
+            (29.9, -451.32291245852861, 29.933370411296476),
+            (30.0, -454.32124395634321, 30.033259667434663),
+            (40.0, -804.6084420137538, 40.024968847206338),
+        ] {
+            assert!(
+                close(ln_normal_sf(z), ls),
+                "ln S({z}) = {} vs R {ls}",
+                ln_normal_sf(z)
+            );
+            assert!(
+                close(normal_hazard(z), h),
+                "hazard({z}) = {} vs R {h}",
+                normal_hazard(z)
+            );
+        }
+        for (z, sp) in [
+            (-800.0, 0.0),
+            (-30.0, 9.3576229688397368e-14),
+            (0.0, 0.69314718055994529),
+            (2.0, 2.1269280110429727),
+            (30.0, 30.000000000000092),
+            (800.0, 800.0),
+        ] {
+            assert!(
+                close(softplus(z), sp),
+                "softplus({z}) = {} vs R {sp}",
+                softplus(z)
+            );
+        }
+    }
+
+    /// R2: non-finite results are an error, not a returned fit.
+    #[test]
+    fn test_aft_non_finite_result_is_an_error() {
+        assert!(aft_check_finite(-1.0, &[0.1, 0.2], &[0.01, 0.02], 5, 1e-13).is_ok());
+        for (ll, theta, var) in [
+            (f64::NEG_INFINITY, [0.1, 0.2], [0.01, 0.02]),
+            (-1.0, [f64::NAN, 0.2], [0.01, 0.02]),
+            (-1.0, [0.1, 0.2], [0.01, f64::INFINITY]),
+            (-1.0, [0.1, 0.2], [-1e-3, 0.02]),
+        ] {
+            assert!(matches!(
+                aft_check_finite(ll, &theta, &var, 7, 1e-3),
+                Err(EconError::ConvergenceFailure { iterations: 7, .. })
+            ));
+        }
+    }
+
+    /// coxph's default ties are Efron (and MCP cox_ph already defaults to Efron).
+    #[test]
+    fn test_validate_cox_default_ties_is_efron() {
+        assert_eq!(CoxConfig::default().ties, TiesMethod::Efron);
+        assert_eq!(TiesMethod::default(), TiesMethod::Efron);
+        let (case, ds) = load_case("surv_cox_robust");
+        let r = run_cox_ph(&ds, "time", "status", &COX_X, None).unwrap();
+        assert_eq!(r.ties_method, TiesMethod::Efron);
+        // default eps 1e-9 stops at iteration 3, 3.3e-9 relative from the tight fit (measured in R)
+        Check::new(&case)
+            .named(
+                "efron_coef",
+                &r.variables,
+                &r.coefficients,
+                Tol::iterative(1e-7),
+            )
+            .finish();
+    }
+
+    // =========================================================================
+    // Competing risks: R-pinned (case surv_competing_risks)
+    // =========================================================================
+
+    /// ECON-78: CIF SEs and log-scale limits as survfit (multi-state Aalen-Johansen), continuous
+    /// and tied times, levels 0.95 and 0.5. Before: SEs from sum S(t-)^2 d_k / n^2, larger than
+    /// survfit's.
+    #[test]
+    fn test_validate_competing_risks_se_survfit() {
+        let (case, cont) = load_case("surv_competing_risks"); // analysis dataset: surv_cr_cont
+        let ties = generated_dataset("surv_cr_ties");
+        let mut check = Check::new(&case);
+        for (tag, ds) in [("cont", &cont), ("ties", &ties)] {
+            let n = case.scalar(&format!("{tag}_n")) as usize;
+            for (lev, pct) in [(0.95, 95), (0.5, 50)] {
+                let r = run_competing_risks(ds, "time", "event_type", lev).unwrap();
+                assert_eq!(r.event_types, vec![1, 2]);
+                for (k, cif) in r.cifs.iter().enumerate() {
+                    let k1 = k + 1;
+                    if pct == 95 {
+                        check
+                            .vector(&format!("{tag}_times"), &cif.times, Tol::exact())
+                            .vector(&format!("{tag}_cif_{k1}"), &cif.incidence, Tol::coef(n))
+                            .vector(&format!("{tag}_se_{k1}"), &cif.std_errors, Tol::se(n));
+                    }
+                    check
+                        .vector(
+                            &format!("{tag}_ci{pct}_lower_{k1}"),
+                            &cif.ci_lower,
+                            Tol::stat(n),
+                        )
+                        .vector(
+                            &format!("{tag}_ci{pct}_upper_{k1}"),
+                            &cif.ci_upper,
+                            Tol::stat(n),
+                        );
+                }
+            }
+        }
+        check.finish();
+    }
+
+    /// The O(m) running-sum variance equals the direct double sum over the event times (tied
+    /// times; no R).
+    #[test]
+    fn test_competing_risks_variance_running_sums_match_direct_sum() {
+        let ds = generated_dataset("surv_cr_ties");
+        let time: Vec<f64> = i64_values(&ds, "time").iter().map(|&t| t as f64).collect();
+        let ev = i64_values(&ds, "event_type");
+        let r = run_competing_risks(&ds, "time", "event_type", 0.95).unwrap();
+        let mut uniq = time.clone();
+        uniq.sort_by(f64::total_cmp);
+        uniq.dedup();
+        for (k, cif) in r.cifs.iter().enumerate() {
+            let cause = k as i64 + 1;
+            let (mut s, mut f) = (1.0, 0.0);
+            // (a_j, b_j, c_j, F_j) per time
+            let mut terms: Vec<(f64, f64, f64, f64)> = Vec::new();
+            for (j, &t) in uniq.iter().enumerate() {
+                let n = time.iter().filter(|&&x| x >= t).count() as f64;
+                let at = |pred: &dyn Fn(i64) -> bool| {
+                    time.iter()
+                        .zip(&ev)
+                        .filter(|&(&x, &e)| x == t && pred(e))
+                        .count() as f64
+                };
+                let d = at(&|e| e > 0);
+                let dk = at(&|e| e == cause);
+                let s_prev = s;
+                f += s_prev * dk / n;
+                s *= 1.0 - d / n;
+                let a = if n > d { d / (n * (n - d)) } else { 0.0 };
+                terms.push((
+                    a,
+                    s_prev * s_prev * dk * (n - dk) / (n * n * n),
+                    s_prev * dk / (n * n),
+                    f,
+                ));
+                let var: f64 = terms
+                    .iter()
+                    .map(|&(a, b, c, fj)| a * (f - fj).powi(2) + b - 2.0 * c * (f - fj))
+                    .sum();
+                let se = var.max(0.0).sqrt();
+                assert_eq!(cif.times[j], t);
+                assert!((cif.incidence[j] - f).abs() <= 1e-14, "cause {cause} t {t}");
+                assert!(
+                    (cif.std_errors[j] - se).abs() <= 1e-12 * se + 1e-15,
+                    "cause {cause} t {t}: {} vs direct {se}",
+                    cif.std_errors[j]
+                );
+            }
+        }
     }
 }

@@ -1,0 +1,218 @@
+{
+  "schema": 1,
+  "id": "surv_cox_robust",
+  "area": "econometrics/survival",
+  "method": "Cox PH, Efron and Breslow ties: model-based, robust (Lin-Wei) and cluster(inst) SEs and tests; scale invariance of convergence; aliased covariate; lung",
+  "reference": "survival::coxph(ties, robust = TRUE | cluster(inst), coxph.control(eps = 1e-12, toler.chol = 1e-13)); summary.coxph",
+  "call": "coxph(Surv(time, status) ~ age + sex + ph.ecog, data = lung, ties, robust)",
+  "dataset": "validation/datasets/generated/lung.csv",
+  "datasets": ["validation/datasets/generated/lung.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "survival": "3.5.8"
+  },
+  "values": {
+    "efron_coef": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.011066764596118644, -0.55261239553183705, 0.46372847511573217]
+    },
+    "efron_se": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.0092674110143656993, 0.16773905378342227, 0.11357726616137125]
+    },
+    "efron_z": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.1941592510533645, -3.2944766473128393, 4.0829339425802349]
+    },
+    "efron_p": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.23241567951197936, 0.0009860513754670298, 4.4470666943553044e-05]
+    },
+    "efron_hr_lower": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.99292809720434583, 0.41421301862345022, 1.2726751774517124]
+    },
+    "efron_hr_upper": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.0296619622806114, 0.7994351275184659, 1.9864235807792225]
+    },
+    "efron_loglik": -729.23012137486171,
+    "efron_loglik_null": -744.48045576144023,
+    "efron_lr_test": 30.500668773157031,
+    "efron_lr_p": 1.08281769919846e-06,
+    "efron_score_test": 30.499922704949103,
+    "efron_score_p": 1.0832092476937268e-06,
+    "efron_wald_test": 29.92925119757582,
+    "efron_wald_p": 1.4281652103481059e-06,
+    "efron_iter": 4,
+    "efron_se_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.0098813927800556599, 0.16474842794994721, 0.12415884860232342]
+    },
+    "efron_z_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.1199599937425326, -3.3542802344658984, 3.7349611432129075]
+    },
+    "efron_p_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.2627308106656906, 0.00079571732255805875, 0.00018774417303453892]
+    },
+    "efron_hr_lower_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.99173394391348868, 0.41664806563628304, 1.246552328559742]
+    },
+    "efron_hr_upper_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.0309017849450204, 0.7947629298538863, 2.0280512299739395]
+    },
+    "efron_wald_test_robust": 23.802291418231043,
+    "efron_wald_p_robust": 2.7470204018092232e-05,
+    "efron_rscore_robust": 27.426295857873839,
+    "efron_rscore_p_robust": 4.7921115473113438e-06,
+    "efron_coef_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.01123216425727481, -0.5565934139851324, 0.46921639676610194]
+    },
+    "efron_se_model_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.0092621054059748124, 0.16807103087718264, 0.11429040215873984]
+    },
+    "efron_se_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.0068887270563309762, 0.11228667990703339, 0.11761595327126172]
+    },
+    "efron_z_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.6305137604417157, -4.9568961736686683, 3.9893941571338716]
+    },
+    "efron_p_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.1029929593420579, 7.1628228287979197e-07, 6.6242269016126995e-05]
+    },
+    "efron_wald_test_cluster": 33.861709778103638,
+    "efron_wald_p_cluster": 2.1189367597788285e-07,
+    "efron_rscore_cluster": 7.2686252214025302,
+    "efron_rscore_p_cluster": 0.063811188600160829,
+    "breslow_coef": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.011041136385707521, -0.55188956963765601, 0.46294704033454986]
+    },
+    "breslow_se": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.009266770114202268, 0.16774244801782776, 0.11357405206057965]
+    },
+    "breslow_z": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.191476237096446, -3.2901008430436218, 4.0761690891121587]
+    },
+    "breslow_p": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.23346667990127146, 0.0010015148308245151, 4.5783731904838743e-05]
+    },
+    "breslow_hr_lower": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.99290389778697297, 0.4145097731861046, 1.2716890642828391]
+    },
+    "breslow_hr_upper": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.0296342808584378, 0.80001851099021981, 1.9848594229356789]
+    },
+    "breslow_loglik": -729.48870517677324,
+    "breslow_loglik_null": -744.69281926616088,
+    "breslow_lr_test": 30.408228178775289,
+    "breslow_lr_p": 1.1324237644490538e-06,
+    "breslow_score_test": 30.406406915329907,
+    "breslow_score_p": 1.1334235498606746e-06,
+    "breslow_wald_test": 29.839000828778829,
+    "breslow_wald_p": 1.4919707165505254e-06,
+    "breslow_iter": 4,
+    "breslow_se_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.0098614061933327869, 0.16448354941559706, 0.12396345276805384]
+    },
+    "breslow_z_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.1196310312389668, -3.3552873317635457, 3.7345445774309232]
+    },
+    "breslow_p_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.26287102629218051, 0.00079282589751713249, 0.00018805518113091101]
+    },
+    "breslow_hr_lower_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.99174737682229186, 0.41716585495994035, 1.2460557188080437]
+    },
+    "breslow_hr_upper_robust": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.030834983436127, 0.79492481849236074, 2.0256911341818529]
+    },
+    "breslow_wald_test_robust": 23.791917024520558,
+    "breslow_wald_p_robust": 2.7607500613648749e-05,
+    "breslow_rscore_robust": 27.425228087170602,
+    "breslow_rscore_p_robust": 4.7945834927422063e-06,
+    "breslow_coef_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.011204924458760339, -0.55582545137576989, 0.46837865799179662]
+    },
+    "breslow_se_model_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.0092615200551661187, 0.16807425769912951, 0.11428601812148262]
+    },
+    "breslow_se_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.0068675111622944901, 0.11199820114271293, 0.11712326890785602]
+    },
+    "breslow_z_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [1.6315844552652585, -4.9628069531894816, 3.9990231006981416]
+    },
+    "breslow_p_cluster": {
+      "names": ["age", "sex", "ph.ecog"],
+      "values": [0.10276705509700117, 6.9481634238594176e-07, 6.3604472472843275e-05]
+    },
+    "breslow_wald_test_cluster": 34.061382648109117,
+    "breslow_wald_p_cluster": 1.9229456518491235e-07,
+    "breslow_rscore_cluster": 7.2829246012920512,
+    "breslow_rscore_p_cluster": 0.063406376856543128,
+    "n": 227,
+    "n_event": 164,
+    "n_cluster_obs": 226,
+    "n_cluster_event": 163,
+    "n_clusters": 18,
+    "scale_em6_coef": {
+      "names": ["age", "sex"],
+      "values": [17045.331845411289, -0.5132185171083844]
+    },
+    "scale_em6_iter": 3,
+    "scale_e0_coef": {
+      "names": ["age", "sex"],
+      "values": [0.017045331845411297, -0.5132185171083844]
+    },
+    "scale_e0_iter": 3,
+    "scale_days_coef": {
+      "names": ["age", "sex"],
+      "values": [4.6667575209887166e-08, -0.51321851710838451]
+    },
+    "scale_days_iter": 3,
+    "scale_e6_coef": {
+      "names": ["age", "sex"],
+      "values": [1.704533184541129e-08, -0.51321851710838451]
+    },
+    "scale_e6_iter": 3,
+    "scale_tight_coef": {
+      "names": ["age", "sex"],
+      "values": [0.017045331850165123, -0.51321851983618227]
+    },
+    "scale_n": 228,
+    "aliased_coef": {
+      "names": ["age", "sex", "age2"],
+      "values": [0.017045331850165123, -0.51321851983618227, null]
+    },
+    "aliased_se": {
+      "names": ["age", "sex", "age2"],
+      "values": [0.0092232734772570782, 0.16745796243624203, null]
+    },
+    "aliased_loglik": -742.8482457837714,
+    "aliased_lr_test": 14.123111213246602
+  }
+}

@@ -324,7 +324,7 @@ pub use staggered_did::{
     PreTrendTest, StaggeredDidConfig, StaggeredDidResult, run_staggered_did,
 };
 pub use survival::{
-    AftConfig, AftDistribution, AftResult, CompetingRisksResult, CoxConfig, CoxResult,
+    AftConfig, AftDistribution, AftResult, CompetingRisksResult, CoxConfig, CoxResult, CoxSeType,
     CumulativeIncidence, KaplanMeierResult, KmConfType, KmConfig, LogRankResult, TiesMethod,
     log_rank_test, run_aft, run_competing_risks, run_cox_ph, run_kaplan_meier,
     run_kaplan_meier_with,
