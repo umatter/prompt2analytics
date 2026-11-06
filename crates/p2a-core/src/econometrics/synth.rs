@@ -3314,37 +3314,41 @@ fn mats_from(
     units: Vec<String>,
     times: Vec<i64>,
 ) -> EconResult<GsynthMats> {
-    let n_t = times.len();
     let mut treated = Vec::new();
     let mut controls = Vec::new();
     let mut first_treated = Vec::new();
     for (i, unit) in units.iter().enumerate() {
-        let col = d.column(i);
-        if let Some((t, v)) = col
-            .iter()
-            .enumerate()
-            .find(|(_, v)| **v != 0.0 && **v != 1.0)
-        {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "gsynth needs a 0/1 treatment: unit '{unit}' has {v} at time {}",
-                    times[t]
-                ),
-            });
-        }
-        match (0..n_t).find(|&t| col[t] == 1.0) {
-            None => controls.push(i),
-            Some(t0) => {
-                if let Some(t2) = (t0..n_t).find(|&t| col[t] == 0.0) {
-                    return Err(EconError::InvalidSpecification {
-                        message: format!(
-                            "gsynth needs an absorbing treatment: unit '{unit}' is treated at \
-                             time {} and untreated at {} (R: \"Gsynth can't be used when \
-                             treatments have reversals.\")",
-                            times[t0], times[t2]
-                        ),
-                    });
+        // one pass: a value other than 0/1 anywhere in the unit is refused first, then a reversal
+        let (mut start, mut reversal) = (None, None);
+        for (t, &v) in d.column(i).iter().enumerate() {
+            if v == 1.0 {
+                start = start.or(Some(t));
+            } else if v == 0.0 {
+                if start.is_some() {
+                    reversal = reversal.or(Some(t));
                 }
+            } else {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "gsynth needs a 0/1 treatment: unit '{unit}' has {v} at time {}",
+                        times[t]
+                    ),
+                });
+            }
+        }
+        match (start, reversal) {
+            (None, _) => controls.push(i),
+            (Some(t0), Some(t2)) => {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "gsynth needs an absorbing treatment: unit '{unit}' is treated at \
+                         time {} and untreated at {} (R: \"Gsynth can't be used when \
+                         treatments have reversals.\")",
+                        times[t0], times[t2]
+                    ),
+                });
+            }
+            (Some(t0), None) => {
                 treated.push(i);
                 first_treated.push(t0);
             }
@@ -6446,6 +6450,28 @@ mod gsynth_tests {
             let want_c: Vec<(i64, usize)> = acc.iter().map(|(&e, &(_, c))| (e, c)).collect();
             assert_eq!(counts, want_c, "{first:?}");
         }
+    }
+
+    #[test]
+    fn test_gsynth_treatment_check_refuses_a_bad_value_before_a_reversal() {
+        let message = |d_b: [f64; 4]| {
+            let d = Array2::from_shape_fn((4, 2), |(t, i)| if i == 1 { d_b[t] } else { 0.0 });
+            let y = Array2::from_shape_fn((4, 2), |(t, i)| (t + i) as f64 + 0.3 * (t * i) as f64);
+            let units = vec!["a".to_string(), "b".to_string()];
+            match mats_from(y, d, vec![], units, vec![1, 2, 3, 4]) {
+                Err(EconError::InvalidSpecification { message }) => message,
+                other => panic!("{:?}", other.err()),
+            }
+        };
+        assert_eq!(
+            message([0.0, 1.0, 0.0, 2.0]),
+            "gsynth needs a 0/1 treatment: unit 'b' has 2 at time 4"
+        );
+        let m = message([0.0, 1.0, 0.0, 1.0]);
+        assert!(
+            m.contains("unit 'b' is treated at time 2 and untreated at 3"),
+            "{m}"
+        );
     }
 
     #[test]
