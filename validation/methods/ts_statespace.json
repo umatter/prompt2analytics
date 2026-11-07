@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "forecasting_kalman",
+      "name": "Kalman filter, Durbin-Koopman smoother and forecast with state and observation intercepts",
+      "category": "forecasting",
+      "reference": "stats::KalmanRun / KalmanLike / KalmanSmooth / KalmanForecast (nit = -1) on the model augmented with a constant state",
+      "doc": "validation/forecasting/kalman.md",
+      "cases": [
+        "kalman_intercepts"
+      ],
+      "tests": [
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_intercepts",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_smoother_intercepts",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_intercepts_change_the_fit",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_smoother_singular_covariance",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_filter_scale_invariant",
+        "p2a-core::forecasting::kalman::tests::test_validate_kalman_likelihood_terms_match_filter_and_differences"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "filtered level and slope",
+        "innovations and their variances",
+        "smoothed level, slope and level variance",
+        "forecasts and forecast variances",
+        "log-likelihood without intercepts",
+        "smoothed level with a singular predicted covariance"
+      ],
+      "tolerance": "validation/README.md, n = 50: states, innovations, forecasts 1e-6 relative; log-likelihood 1e-5",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
