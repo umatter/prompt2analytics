@@ -71,8 +71,11 @@ and run `Rscript validation/r/run.R --write <case>`.
 
 | File | Rows × columns | Case(s) | R file | Source |
 |---|---|---|---|---|
+| `generated/ap_blobs.csv` | 115 × 2 (x, y) | `apcluster_blobs`; read by `pam_clara_blobs`, `fuzzy_reference_blobs` | `r/cases/ml_mixtures.R` | seed 20261109; the same blobs and noise as `blobs_noise.csv` |
+| `generated/flexmix_lines.csv` | 200 × 3 (y, x, start) | `flexmix_minprior` | `r/cases/ml_mixtures.R` | seed 20261112; `start` is the fixed 3-cluster start |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
+| `generated/mixture_3d.csv` | 300 × 3 (x1, x2, x3) | `gmm_mclust_3d`; read by `mixtools_em` | `r/cases/ml_mixtures.R` | seed 20261111 |
 | `generated/mtcars.csv` | 32 × 12 (model, mpg, cyl, disp, hp, drat, wt, qsec, vs, am, gear, carb) | `ols_mtcars` | `r/cases/regression.R` | `datasets::mtcars`, row names as `model` |
 | `generated/mte_boot_indices.csv` | 400 × 25 (b01-b25; 1-based row indices into rows 1-400 of `mte_sim.csv`) | `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261207 |
 | `generated/mte_sim.csv` | 2000 × 4 (y, d, z1, z2) | `mte_local_iv`, `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261205 |
