@@ -144,6 +144,10 @@ struct Spectrum {
     real_sorted: Array1<f64>,
     /// All eigenvalues as (real, imaginary) pairs.
     values: Vec<(f64, f64)>,
+    /// The real eigenvalues, when every other one has its exact conjugate in `values`.
+    reals: Vec<f64>,
+    /// One (a, b), b > 0, per conjugate pair a ± bi; empty with `reals` when they do not pair up.
+    pairs: Vec<(f64, f64)>,
     /// False for the NaN placeholder the infallible legacy methods cache after a failure.
     ok: bool,
 }
@@ -156,22 +160,30 @@ pub struct WeightsSpectrum(Arc<Spectrum>);
 
 impl WeightsSpectrum {
     /// log|I - ρW| = Re Σ log(1 - ρλ_i) = Σ ln|1 - ρλ_i| over the complex eigenvalues. A conjugate
-    /// pair a ± bi contributes ln((1 - ρa)² + (ρb)²). One logarithm per eigenvalue, the method
-    /// is evaluated at every step of a likelihood search.
+    /// pair a ± bi contributes ln((1 - ρa)² + (ρb)²): one logarithm per pair, since the method is
+    /// evaluated at every step of a likelihood search.
     pub fn log_det(&self, rho: f64) -> f64 {
-        self.0
-            .values
+        let s = &*self.0;
+        if s.reals.len() + 2 * s.pairs.len() != s.values.len() {
+            return s
+                .values
+                .iter()
+                .map(|&(a, b)| {
+                    let (u, v) = (1.0 - rho * a, rho * b);
+                    0.5 * (u * u + v * v).ln()
+                })
+                .sum();
+        }
+        let reals: f64 = s.reals.iter().map(|&a| (1.0 - rho * a).abs().ln()).sum();
+        let pairs: f64 = s
+            .pairs
             .iter()
             .map(|&(a, b)| {
-                let u = 1.0 - rho * a;
-                if b == 0.0 {
-                    u.abs().ln()
-                } else {
-                    let v = rho * b;
-                    0.5 * (u * u + v * v).ln()
-                }
+                let (u, v) = (1.0 - rho * a, rho * b);
+                (u * u + v * v).ln()
             })
-            .sum()
+            .sum();
+        reals + pairs
     }
 
     /// tr((I - ρW)^-1) = Re Σ 1 / (1 - ρλ_i).
@@ -863,11 +875,35 @@ fn compute_spectrum(w: &Array2<f64>) -> EconResult<Spectrum> {
     }
     let mut real: Vec<f64> = values.iter().map(|&(a, _)| a).collect();
     real.sort_by(f64::total_cmp);
+    let (reals, pairs) = conjugate_pairs(&values);
     Ok(Spectrum {
         real_sorted: Array1::from_vec(real),
         values,
+        reals,
+        pairs,
         ok: true,
     })
+}
+
+/// The real eigenvalues and one member of each conjugate pair; both empty unless every complex
+/// eigenvalue has its exact conjugate.
+fn conjugate_pairs(values: &[(f64, f64)]) -> (Vec<f64>, Vec<(f64, f64)>) {
+    let reals: Vec<f64> = values.iter().filter(|v| v.1 == 0.0).map(|v| v.0).collect();
+    let sorted = |sign: f64| {
+        let mut side: Vec<(f64, f64)> = values
+            .iter()
+            .filter(|v| v.1 * sign > 0.0)
+            .map(|v| (v.0, v.1 * sign))
+            .collect();
+        side.sort_by(|p, q| p.0.total_cmp(&q.0).then(p.1.total_cmp(&q.1)));
+        side
+    };
+    let pairs = sorted(1.0);
+    if pairs == sorted(-1.0) {
+        (reals, pairs)
+    } else {
+        (Vec::new(), Vec::new())
+    }
 }
 
 /// What the infallible legacy methods cache after a failed decomposition: every value NaN.
@@ -875,6 +911,8 @@ fn failed_spectrum(n: usize) -> Spectrum {
     Spectrum {
         real_sorted: Array1::from_elem(n, f64::NAN),
         values: vec![(f64::NAN, f64::NAN); n],
+        reals: Vec::new(),
+        pairs: Vec::new(),
         ok: false,
     }
 }
@@ -1297,6 +1335,33 @@ mod tests {
 
     /// `log_det` on a W with complex eigenvalues is the log-determinant of the dense matrix: a
     /// directed 3-cycle has eigenvalues 1 and exp(±2πi/3), det(I - ρW) = 1 - ρ³.
+    /// One logarithm per conjugate pair gives the sum over all eigenvalues, also through the route
+    /// for a list that does not pair up.
+    #[test]
+    fn test_log_det_by_conjugate_pairs_matches_the_full_sum() {
+        let mut w = crate::spatial::test_fixtures::knn3(WeightStyle::RowStd);
+        let spec = w.try_spectrum().unwrap();
+        assert!(!spec.0.pairs.is_empty());
+        let values = spec.eigenvalues().to_vec();
+        let unpaired = WeightsSpectrum(Arc::new(Spectrum {
+            real_sorted: spec.0.real_sorted.clone(),
+            values: values.clone(),
+            reals: Vec::new(),
+            pairs: Vec::new(),
+            ok: true,
+        }));
+        for rho in [-0.8, 0.0, 0.5, 0.9] {
+            let full: f64 = values
+                .iter()
+                .map(|&(a, b)| 0.5 * ((1.0 - rho * a).powi(2) + (rho * b).powi(2)).ln())
+                .sum();
+            assert!((spec.log_det(rho) - full).abs() < 1e-11, "{rho}");
+            assert!((unpaired.log_det(rho) - full).abs() < 1e-11, "{rho}");
+        }
+        let (reals, pairs) = conjugate_pairs(&[(0.5, 0.0), (0.1, 0.2), (0.1, -0.3)]);
+        assert!(reals.is_empty() && pairs.is_empty());
+    }
+
     #[test]
     fn test_log_det_of_a_directed_cycle() {
         let nb = Neighbors::from_indices(vec![vec![1], vec![2], vec![0]]);

@@ -176,14 +176,15 @@ pub struct SpatialLmTests {
     pub lm_sarma: LmTestResult,
 }
 
-/// What the global tests share: the centred variable, its moments and spdep's weight constants.
+/// What the global tests share: the moments of the centred variable and spdep's weight constants.
 struct WeightConstants {
-    z: Array1<f64>,
     /// Σ z_i²
     zz: f64,
     /// Σ z_i⁴
     z4: f64,
     s0: f64,
+    /// Σ_ij term(i, j, w_ij), summed in the one pass over the links that S0 needs
+    numerator: f64,
     /// n - n_islands
     n_adj: usize,
     n_islands: usize,
@@ -195,6 +196,7 @@ fn weight_constants(
     x: &Array1<f64>,
     listw: &SpatialWeights,
     what: &str,
+    term: impl Fn(&Array1<f64>, usize, usize, f64) -> f64,
 ) -> EconResult<WeightConstants> {
     let n = x.len();
     if n != listw.n() {
@@ -213,14 +215,20 @@ fn weight_constants(
             message: format!("{what}: x is constant, so spatial autocorrelation is undefined"),
         });
     }
+    let mean = x.sum() / n as f64;
+    let z: Array1<f64> = x.mapv(|v| v - mean);
     let mut s0 = 0.0;
+    let mut numerator = 0.0;
     let mut n_islands = 0;
     for i in 0..n {
         let sw = listw.get_weights(i);
         if sw.indices.is_empty() {
             n_islands += 1;
         }
-        s0 += sw.weights.iter().sum::<f64>();
+        for (&j, &w_ij) in sw.indices.iter().zip(sw.weights.iter()) {
+            s0 += w_ij;
+            numerator += term(&z, i, j, w_ij);
+        }
     }
     if !(s0 > 0.0 && s0.is_finite()) {
         return Err(EconError::InvalidSpecification {
@@ -241,20 +249,22 @@ fn weight_constants(
             ),
         });
     }
-    let mean = x.sum() / n as f64;
-    let z: Array1<f64> = x.mapv(|v| v - mean);
-    let zz: f64 = z.iter().map(|&v| v * v).sum();
-    let z4: f64 = z.iter().map(|&v| v.powi(4)).sum();
+    let (mut zz, mut z4) = (0.0, 0.0);
+    for &v in z.iter() {
+        let v2 = v * v;
+        zz += v2;
+        z4 += v2 * v2;
+    }
     if !(zz.is_finite() && z4.is_finite()) {
         return Err(EconError::InvalidSpecification {
             message: format!("{what}: the moments of x overflow; rescale x"),
         });
     }
     Ok(WeightConstants {
-        z,
         zz,
         z4,
         s0,
+        numerator,
         n_adj,
         n_islands,
     })
@@ -300,23 +310,14 @@ pub fn moran_test(
 ) -> EconResult<MoranResult> {
     let n = x.len();
     let WeightConstants {
-        z,
         zz,
         z4,
         s0,
+        numerator,
         n_adj,
         n_islands,
-    } = weight_constants(x, listw, "moran_test")?;
+    } = weight_constants(x, listw, "moran_test", |z, i, j, w| w * z[i] * z[j])?;
     let nn = n_adj as f64;
-
-    // Numerator: sum of w_ij * z_i * z_j
-    let mut numerator = 0.0;
-    for i in 0..n {
-        let sw = listw.get_weights(i);
-        for (idx, &j) in sw.indices.iter().enumerate() {
-            numerator += sw.weights[idx] * z[i] * z[j];
-        }
-    }
 
     // Moran's I and its expectation under no spatial correlation
     let i_stat = (nn / s0) * (numerator / zz);
@@ -477,21 +478,14 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
         zz,
         z4,
         s0,
+        numerator,
         n_adj,
         n_islands,
-        ..
-    } = weight_constants(x, listw, "geary_test")?;
+    } = weight_constants(x, listw, "geary_test", |z, i, j, w| {
+        let diff = z[i] - z[j];
+        w * diff * diff
+    })?;
     let nn = n_adj as f64;
-
-    // Numerator: sum of w_ij * (x_i - x_j)^2
-    let mut numerator = 0.0;
-    for i in 0..n {
-        let sw = listw.get_weights(i);
-        for (idx, &j) in sw.indices.iter().enumerate() {
-            let diff = x[i] - x[j];
-            numerator += sw.weights[idx] * diff * diff;
-        }
-    }
 
     // Geary's C (spdep geary(): n1 = n_adj - 1) and its expectation
     let c_stat = ((nn - 1.0) / (2.0 * s0)) * (numerator / zz);
@@ -653,8 +647,8 @@ pub fn localmoran(
             pvals[i]
         } else {
             // Analytical p-value (two-sided)
-            let normal = Normal::new(0.0, 1.0).unwrap();
-            normal_p_value_two_sided(z_score)
+            // once per unit, so the plain survival function rather than the extended-range tail
+            2.0 * Normal::standard().sf(z_score.abs())
         };
 
         // Determine cluster type
