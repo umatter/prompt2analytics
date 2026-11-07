@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "rf_importance_purity",
+  "area": "ml/trees",
+  "method": "randomForest IncNodePurity (mtry = 2): magnitude and ranking reference over five seeds",
+  "reference": "randomForest::randomForest(ntree = 500, mtry = 2, nodesize = 5 | 10); importance(type = 2) (IncNodePurity), seeds 1-5",
+  "call": "randomForest(tree_importance[, c('x0', 'x1', 'x2')], tree_importance$y, ntree = 500, mtry = 2, nodesize = 5)",
+  "dataset": "validation/datasets/generated/tree_importance.csv",
+  "datasets": ["validation/datasets/generated/tree_importance.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "randomForest": "4.7.1.2"
+  },
+  "values": {
+    "ns5_share_min": [0.95321820740217256, 0.010841379131522449, 0.029205216541177425],
+    "ns5_share_max": [0.95977721806234828, 0.012963615111186849, 0.035344351828503658],
+    "ns5_share_mean": [0.95655420604190122, 0.011728874589446235, 0.031716919368652501],
+    "ns5_purity_min": [4940.8584801015313, 56.158488224253581, 151.40667667390625],
+    "ns5_purity_max": [4975.7096897145157, 67.230192917743381, 183.2019563825595],
+    "ns10_share_min": [0.9559856009616341, 0.0092518696648895091, 0.028238094352624626],
+    "ns10_share_max": [0.96178526681418408, 0.012275339882236707, 0.031781726530770625],
+    "ns10_share_mean": [0.95887767304247162, 0.010451035721824225, 0.030671291235704157],
+    "ns10_purity_min": [4941.5719508399343, 47.790961967930755, 145.94631845415469],
+    "ns10_purity_max": [4970.9097604856706, 63.452289645440068, 164.06790443037147]
+  }
+}

@@ -11,6 +11,11 @@
 //! - **Lazy bootstrap**: each tree draws its sample from (seed, tree index) inside
 //!   its worker; at most a few trees per thread are in memory
 //!
+//! # Variable importance
+//!
+//! A forest's importance is the mean over the trees of the SSE decrease of the splits on each
+//! feature (randomForest `IncNodePurity`), reported raw and as shares.
+//!
 //! # References
 //!
 //! - Breiman, L. (2001). "Random Forests". Machine Learning, 45(1), 5-32.
@@ -43,6 +48,28 @@ pub struct DecisionTree {
     min_samples_split: usize,
     max_features: Option<usize>,
     n_features: usize,
+    /// Summed SSE decrease of this tree's splits per feature (empty before a fit).
+    gain: Vec<f64>,
+}
+
+/// Add the SSE decrease of a node's split to its feature: `sum` of `y - c` over each side, for any
+/// centring constant `c`, over the node's rows with their multiplicity.
+fn add_split_gain(
+    gain: &mut [f64],
+    feature: usize,
+    target: &ArrayView1<f64>,
+    left: &[usize],
+    right: &[usize],
+) {
+    let (nl, nr) = (left.len() as f64, right.len() as f64);
+    let n = nl + nr;
+    let side = |rows: &[usize]| rows.iter().map(|&i| target[i]).sum::<f64>();
+    let (sum_left, sum_right) = (side(left), side(right));
+    let mean = (sum_left + sum_right) / n;
+    let dl = sum_left - nl * mean;
+    let dr = sum_right - nr * mean;
+    let total = dl + dr;
+    gain[feature] += dl * dl / nl + dr * dr / nr - total * total / n;
 }
 
 impl DecisionTree {
@@ -54,6 +81,7 @@ impl DecisionTree {
             min_samples_split,
             max_features,
             n_features: 0,
+            gain: Vec::new(),
         }
     }
 
@@ -67,7 +95,10 @@ impl DecisionTree {
     ) {
         self.n_features = x.ncols();
         let indices: Vec<usize> = (0..x.nrows()).collect();
-        self.root = Some(self.build_tree(&x, &y, &indices, 0, feature_indices, rng_state));
+        let mut gain = vec![0.0; x.ncols()];
+        self.root =
+            Some(self.build_tree(&x, &y, &indices, 0, feature_indices, rng_state, &mut gain));
+        self.gain = gain;
     }
 
     /// Build tree recursively.
@@ -79,6 +110,7 @@ impl DecisionTree {
         depth: usize,
         available_features: Option<&[usize]>,
         rng_state: &mut u64,
+        gain: &mut [f64],
     ) -> TreeNode {
         let n_samples = indices.len();
 
@@ -104,6 +136,7 @@ impl DecisionTree {
             if left_indices.is_empty() || right_indices.is_empty() {
                 return self.create_leaf(y, indices);
             }
+            add_split_gain(gain, best_feature, y, &left_indices, &right_indices);
 
             let left = self.build_tree(
                 x,
@@ -112,6 +145,7 @@ impl DecisionTree {
                 depth + 1,
                 available_features,
                 rng_state,
+                gain,
             );
             let right = self.build_tree(
                 x,
@@ -120,6 +154,7 @@ impl DecisionTree {
                 depth + 1,
                 available_features,
                 rng_state,
+                gain,
             );
 
             TreeNode::Split {
@@ -183,7 +218,7 @@ impl DecisionTree {
         for &feature in features {
             // Get unique values for this feature
             let mut values: Vec<f64> = indices.iter().map(|&i| x[[i, feature]]).collect();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            values.sort_by(f64::total_cmp);
             values.dedup();
 
             // Try thresholds between consecutive values
@@ -246,45 +281,23 @@ impl DecisionTree {
         }
     }
 
-    /// Calculate feature importances based on variance reduction.
-    pub fn feature_importances(&self) -> Array1<f64> {
-        let mut importances = Array1::zeros(self.n_features);
-        if let Some(ref root) = self.root {
-            self.accumulate_importances(root, &mut importances, 1.0);
+    /// The summed SSE decrease of this tree's splits per feature.
+    pub fn impurity_decrease(&self) -> Array1<f64> {
+        if self.gain.is_empty() {
+            Array1::zeros(self.n_features)
+        } else {
+            Array1::from_vec(self.gain.clone())
         }
+    }
 
-        // Normalize
+    /// This tree's share of the SSE decrease per feature (zeros if it has no split).
+    pub fn feature_importances(&self) -> Array1<f64> {
+        let mut importances = self.impurity_decrease();
         let sum: f64 = importances.sum();
         if sum > 0.0 {
             importances /= sum;
         }
-
         importances
-    }
-
-    fn accumulate_importances(&self, node: &TreeNode, importances: &mut Array1<f64>, weight: f64) {
-        if let TreeNode::Split {
-            feature_index,
-            left,
-            right,
-            ..
-        } = node
-        {
-            // Add importance for this feature
-            importances[*feature_index] += weight;
-
-            // Get child weights based on samples
-            let (left_weight, right_weight) = match (left.as_ref(), right.as_ref()) {
-                (TreeNode::Leaf { n_samples: ln, .. }, TreeNode::Leaf { n_samples: rn, .. }) => {
-                    let total = (*ln + *rn) as f64;
-                    (*ln as f64 / total, *rn as f64 / total)
-                }
-                _ => (0.5, 0.5),
-            };
-
-            self.accumulate_importances(left, importances, weight * left_weight);
-            self.accumulate_importances(right, importances, weight * right_weight);
-        }
     }
 
     /// Get a reference to the root node (for TreeSHAP).
@@ -373,6 +386,7 @@ fn build_tree_optimized(
     sorted_feature_indices: &SortedFeatureIndices,
     rng_state: &mut u64,
     budget: Option<&Budget>,
+    gain: &mut [f64],
 ) -> EconResult<TreeNode> {
     // Checked per node, so even one deep tree stops at the deadline.
     if let Some(b) = budget {
@@ -424,6 +438,13 @@ fn build_tree_optimized(
         if split.left_indices.is_empty() || split.right_indices.is_empty() {
             return Ok(make_leaf(target, node_indices));
         }
+        add_split_gain(
+            gain,
+            split.feature,
+            target,
+            &split.left_indices,
+            &split.right_indices,
+        );
 
         let left = build_tree_optimized(
             data,
@@ -437,6 +458,7 @@ fn build_tree_optimized(
             sorted_feature_indices,
             rng_state,
             budget,
+            gain,
         )?;
         let right = build_tree_optimized(
             data,
@@ -450,6 +472,7 @@ fn build_tree_optimized(
             sorted_feature_indices,
             rng_state,
             budget,
+            gain,
         )?;
 
         Ok(TreeNode::Split {
@@ -606,8 +629,12 @@ fn find_best_split_optimized(
 pub struct RandomForestResult {
     /// Predictions for input data
     pub predictions: Vec<f64>,
-    /// Feature importances (mean decrease impurity)
+    /// Share of the total SSE decrease per feature (randomForest `IncNodePurity` normalised to sum
+    /// to one; zeros if no tree split).
     pub feature_importances: Vec<f64>,
+    /// Mean over the trees of the in-bag SSE decrease of the splits on each feature (randomForest
+    /// `IncNodePurity`).
+    pub inc_node_purity: Vec<f64>,
     /// Number of trees in the forest
     pub n_trees: usize,
     /// Out-of-bag R-squared score (if computed)
@@ -627,7 +654,10 @@ impl std::fmt::Display for RandomForestResult {
         }
 
         writeln!(f)?;
-        writeln!(f, "Feature Importances:")?;
+        writeln!(
+            f,
+            "Feature importances (share of the SSE decrease; IncNodePurity):"
+        )?;
 
         // Sort by importance
         let mut indexed: Vec<(usize, f64)> = self
@@ -636,7 +666,7 @@ impl std::fmt::Display for RandomForestResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -646,7 +676,11 @@ impl std::fmt::Display for RandomForestResult {
                     .unwrap_or_else(|| format!("Feature_{}", i)),
                 None => format!("Feature_{}", i),
             };
-            writeln!(f, "  {}: {:.4}", name, importance)?;
+            writeln!(
+                f,
+                "  {}: {:.4} ({:.4})",
+                name, importance, self.inc_node_purity[*i]
+            )?;
         }
 
         if self.feature_importances.len() > 10 {
@@ -752,7 +786,7 @@ pub fn random_forest(
     let mut pred_sum = vec![-0.0f64; n_samples];
     let mut oob_sum = vec![0.0f64; n_samples];
     let mut oob_count = vec![0u32; n_samples];
-    let mut importances: Array1<f64> = Array1::zeros(n_features);
+    let mut inc_node_purity = vec![0.0f64; n_features];
 
     grow_forest(
         &data,
@@ -764,7 +798,9 @@ pub fn random_forest(
                 oob_sum[idx] += pred;
                 oob_count[idx] += 1;
             }
-            importances += &tree.feature_importances();
+            for (sum, &g) in inc_node_purity.iter_mut().zip(&tree.gain) {
+                *sum += g;
+            }
             pred_sum
                 .par_iter_mut()
                 .enumerate()
@@ -779,15 +815,29 @@ pub fn random_forest(
     // Compute OOB score
     let oob_score = compute_oob_score_fast(&oob_sum, &oob_count, &target);
 
-    importances /= num_trees as f64;
+    let feature_importances = purity_shares(&mut inc_node_purity, num_trees);
 
     Ok(RandomForestResult {
         predictions,
-        feature_importances: importances.to_vec(),
+        feature_importances,
+        inc_node_purity,
         n_trees: num_trees,
         oob_score,
         feature_names,
     })
+}
+
+/// Turn the per-tree SSE decreases summed over `n_trees` trees into their mean, in place, and return
+/// each feature's share (zeros if no tree split).
+fn purity_shares(inc_node_purity: &mut [f64], n_trees: usize) -> Vec<f64> {
+    for v in inc_node_purity.iter_mut() {
+        *v /= n_trees as f64;
+    }
+    let total: f64 = inc_node_purity.iter().sum();
+    inc_node_purity
+        .iter()
+        .map(|&v| if total > 0.0 { v / total } else { 0.0 })
+        .collect()
 }
 
 /// Random Forest model with stored trees (for SHAP computation).
@@ -800,15 +850,20 @@ pub struct RandomForestModel {
     pub trees: Vec<DecisionTree>,
     /// Predictions for training data
     pub predictions: Vec<f64>,
-    /// Feature importances (mean decrease impurity)
+    /// Share of the total SSE decrease per feature (randomForest `IncNodePurity` normalised to sum
+    /// to one; zeros if no tree split).
     pub feature_importances: Vec<f64>,
+    /// Mean over the trees of the in-bag SSE decrease of the splits on each feature (randomForest
+    /// `IncNodePurity`).
+    pub inc_node_purity: Vec<f64>,
     /// Number of trees in the forest
     pub n_trees: usize,
     /// Out-of-bag R-squared score (if computed)
     pub oob_score: Option<f64>,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
-    /// Base value (mean prediction, used for SHAP)
+    /// Mean in-sample prediction. `shap_values_model` takes the base value from the explained rows'
+    /// reference instead.
     pub base_value: f64,
 }
 
@@ -824,7 +879,10 @@ impl std::fmt::Display for RandomForestModel {
         }
 
         writeln!(f)?;
-        writeln!(f, "Feature Importances:")?;
+        writeln!(
+            f,
+            "Feature importances (share of the SSE decrease; IncNodePurity):"
+        )?;
 
         let mut indexed: Vec<(usize, f64)> = self
             .feature_importances
@@ -832,7 +890,7 @@ impl std::fmt::Display for RandomForestModel {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -842,7 +900,11 @@ impl std::fmt::Display for RandomForestModel {
                     .unwrap_or_else(|| format!("Feature_{}", i)),
                 None => format!("Feature_{}", i),
             };
-            writeln!(f, "  {}: {:.4}", name, importance)?;
+            writeln!(
+                f,
+                "  {}: {:.4} ({:.4})",
+                name, importance, self.inc_node_purity[*i]
+            )?;
         }
 
         Ok(())
@@ -956,16 +1018,19 @@ pub fn random_forest_with_trees(
     let oob_score = compute_oob_score_fast(&oob_sum, &oob_count, &target);
 
     // Aggregate feature importances
-    let mut importances = Array1::zeros(n_features);
+    let mut inc_node_purity = vec![0.0f64; n_features];
     for tree in &trees {
-        importances = importances + tree.feature_importances();
+        for (sum, &g) in inc_node_purity.iter_mut().zip(&tree.gain) {
+            *sum += g;
+        }
     }
-    importances /= num_trees as f64;
+    let feature_importances = purity_shares(&mut inc_node_purity, num_trees);
 
     Ok(RandomForestModel {
         trees,
         predictions,
-        feature_importances: importances.to_vec(),
+        feature_importances,
+        inc_node_purity,
         n_trees: num_trees,
         oob_score,
         feature_names,
@@ -1040,6 +1105,7 @@ fn grow_forest(
         let (bootstrap_indices, oob_indices) = bootstrap_sample(n_samples, &mut rng_state);
 
         // Build tree on original data using bootstrap indices (no copy)
+        let mut gain = vec![0.0; spec.n_features];
         let root = build_tree_optimized(
             data,
             target,
@@ -1052,6 +1118,7 @@ fn grow_forest(
             sorted,
             &mut tree_rng,
             budget.as_ref(),
+            &mut gain,
         )?;
 
         let tree = DecisionTree {
@@ -1060,6 +1127,7 @@ fn grow_forest(
             min_samples_split: spec.min_split,
             max_features: Some(spec.max_features),
             n_features: spec.n_features,
+            gain,
         };
 
         // Compute OOB predictions for this tree
@@ -1319,22 +1387,20 @@ mod tests {
             r.predictions[0],
             r.predictions[150],
             r.predictions[299],
-            r.feature_importances[0],
-            r.feature_importances[3],
             r.oob_score.unwrap(),
         ];
-        // Captured from the eager-bootstrap code; must stay bit-identical.
-        const EXPECTED: [u64; 6] = [
+        // Captured from the eager-bootstrap code; must stay bit-identical. Importances are pinned
+        // by test_validate_rf_tree_importance_rpart and are no longer captured bits.
+        const EXPECTED: [u64; 4] = [
             0x401d26a9fd218cc0,
             0x4029c6a3b0d89c33,
             0x4030cd6c294f6c87,
-            0x3fd8b33f2441aa5d,
-            0x3fd3df5ecf0af560,
             0x3fee130a9b6dadeb,
         ];
         assert_eq!(got.map(f64::to_bits), EXPECTED);
         assert_eq!(r.predictions, m.predictions);
         assert_eq!(r.feature_importances, m.feature_importances);
+        assert_eq!(r.inc_node_purity, m.inc_node_purity);
         assert_eq!(r.oob_score, m.oob_score);
     }
 
@@ -1661,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rf_classification_iris_like() {
+    fn test_rf_classification_iris_like_recovers_dgp() {
         // Create 3-class classification data similar to Iris.
         // Class 0: x1 ~ [0,2], x2 ~ [0,2]
         // Class 1: x1 ~ [3,5], x2 ~ [3,5]
@@ -1722,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rf_regression_correlation() {
+    fn test_rf_regression_recovers_dgp() {
         // y = x1 + x2 + noise
         // Predictions should correlate well with true values.
         let n = 100;
@@ -1773,58 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rf_feature_importances_sum() {
-        // Feature importances should sum to approximately 1 and be non-negative.
-        let n = 80;
-        let mut x_data = Vec::with_capacity(n * 3);
-        let mut y_data = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let x1 = i as f64;
-            let x2 = ((i * 7 + 3) % 20) as f64;
-            let x3 = ((i * 11 + 5) % 15) as f64;
-            x_data.push(x1);
-            x_data.push(x2);
-            x_data.push(x3);
-            y_data.push(x1 + 0.5 * x2 + 0.1 * ((i * 3) % 7) as f64);
-        }
-
-        let x = Array2::from_shape_vec((n, 3), x_data).unwrap();
-        let y = Array1::from_vec(y_data);
-
-        let result = random_forest(
-            x.view(),
-            y.view(),
-            Some(50),
-            Some(8),
-            Some(2),
-            Some("all"),
-            Some(42),
-            None,
-        )
-        .unwrap();
-
-        // All importances should be non-negative
-        for (i, &imp) in result.feature_importances.iter().enumerate() {
-            assert!(
-                imp >= 0.0,
-                "Feature importance {} should be non-negative, got {:.4}",
-                i,
-                imp
-            );
-        }
-
-        // Sum should be approximately 1.0
-        let sum: f64 = result.feature_importances.iter().sum();
-        assert!(
-            (sum - 1.0).abs() < 0.01,
-            "Feature importances should sum to ~1.0, got {:.6}",
-            sum
-        );
-    }
-
-    #[test]
-    fn test_validate_rf_oob_score_computed() {
+    fn test_rf_oob_score_recovers_dgp() {
         // OOB score should be computed and reasonable.
         let n = 80;
         let mut x_data = Vec::with_capacity(n * 2);
@@ -1862,5 +1877,164 @@ mod tests {
             "OOB R-squared should be positive for predictable data, got {:.4}",
             oob
         );
+    }
+
+    use crate::data::columns::NaPolicy;
+    use p2a_validation::{Case, Check, Tol};
+    const X_IMP: [&str; 3] = ["x0", "x1", "x2"];
+
+    /// Node sizes of a tree (Split nodes hold the sum of their leaves), sorted.
+    fn node_sizes(node: &TreeNode) -> (usize, Vec<usize>) {
+        match node {
+            TreeNode::Leaf { n_samples, .. } => (*n_samples, vec![*n_samples]),
+            TreeNode::Split { left, right, .. } => {
+                let ((nl, mut a), (nr, b)) = (node_sizes(left), node_sizes(right));
+                a.extend(b);
+                a.push(nl + nr);
+                (nl + nr, a)
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_rf_tree_importance_rpart() {
+        // WT-5. One tree of each builder grown on all rows with every feature equals rpart(cp = 0, minsplit = 2,
+        // minbucket = 1, maxdepth = 3). Before: 0.5^depth split counts, shares 1/3, 1/3, 1/3 (R 0.9930, 0.0027, 0.0043).
+        let (case, ds) = crate::test_support::load_case("tree_importance_rpart");
+        let (x, y, _) = crate::ml::extract_xy(&ds, "y", &X_IMP, NaPolicy::Fail).unwrap();
+        let tol = Tol::coef(200);
+        let rows: Vec<usize> = (0..x.nrows()).collect();
+        let sorted = SortedFeatureIndices::new(&x.view());
+        let mut gain = vec![0.0; 3];
+        let mut rng = 1u64;
+        let root = build_tree_optimized(
+            &x.view(),
+            &y.view(),
+            &rows,
+            0,
+            3,
+            2,
+            3,
+            3,
+            &sorted,
+            &mut rng,
+            None,
+            &mut gain,
+        )
+        .unwrap();
+        let mut sizes = node_sizes(&root).1;
+        sizes.sort_unstable();
+        let mut public = DecisionTree::new(3, 2, None);
+        public.fit(x.view(), y.view(), None, &mut 1u64);
+        let mut expected_sizes = case.vector("rf_d3_frame_n");
+        expected_sizes.sort_by(f64::total_cmp);
+        Check::new(&case)
+            .named("rf_d3_importance", &X_IMP, &gain, tol)
+            .named(
+                "rf_d3_importance",
+                &X_IMP,
+                &public.impurity_decrease().to_vec(),
+                tol,
+            )
+            .named(
+                "rf_d3_share",
+                &X_IMP,
+                &public.feature_importances().to_vec(),
+                tol,
+            )
+            .finish();
+        assert_eq!(
+            sizes.iter().map(|&s| s as f64).collect::<Vec<_>>(),
+            expected_sizes
+        );
+    }
+
+    #[test]
+    fn test_validate_rf_importance_band_randomforest() {
+        // WT-5 / ML-105: randomForest IncNodePurity cannot be matched draw by draw, so the p2a forest (same algorithm:
+        // bootstrap, mtry 2 per node, nodes of 5 rows or fewer are leaves) must fall in the five-seed R range
+        // widened by twice its width on each side, and rank x0 > x2 > x1. The R transcription of this forest gave
+        // shares 0.955-0.959 / 0.011-0.012 / 0.030-0.033 over 4 seeds. Before: 0.356 / 0.287 / 0.357 (x2 > x0).
+        let case = Case::load("rf_importance_purity");
+        let (_, ds) = crate::test_support::load_case("tree_importance_rpart");
+        let (x, y, _) = crate::ml::extract_xy(&ds, "y", &X_IMP, NaPolicy::Fail).unwrap();
+        let r = random_forest(
+            x.view(),
+            y.view(),
+            Some(500),
+            Some(30),
+            Some(6),
+            Some("2"),
+            Some(20261109),
+            None,
+        )
+        .unwrap();
+        let band = |lo: Vec<f64>, hi: Vec<f64>| -> Vec<(f64, f64)> {
+            lo.iter()
+                .zip(&hi)
+                .map(|(&l, &h)| (l - 2.0 * (h - l), h + 2.0 * (h - l)))
+                .collect()
+        };
+        let share = band(case.vector("ns5_share_min"), case.vector("ns5_share_max"));
+        let purity = band(case.vector("ns5_purity_min"), case.vector("ns5_purity_max"));
+        for j in 0..3 {
+            let (lo, hi) = share[j];
+            assert!(
+                lo <= r.feature_importances[j] && r.feature_importances[j] <= hi,
+                "share {j}: {} not in [{lo}, {hi}]",
+                r.feature_importances[j]
+            );
+        }
+        assert!(
+            purity[0].0 <= r.inc_node_purity[0] && r.inc_node_purity[0] <= purity[0].1,
+            "{}",
+            r.inc_node_purity[0]
+        );
+        let f = &r.feature_importances;
+        assert!(f[0] > f[2] && f[2] > f[1], "{f:?}");
+    }
+
+    #[test]
+    fn test_rf_importances_are_shares_of_inc_node_purity() {
+        // replaces test_validate_rf_feature_importances_sum (ML-105: it passed with the depth-weighted counts)
+        let (x, y) = noisy_regression(120, 3, 4);
+        let r = random_forest(
+            x.view(),
+            y.view(),
+            Some(20),
+            Some(8),
+            Some(2),
+            Some("all"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+        let m = random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(20),
+            Some(8),
+            Some(2),
+            Some("all"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+        let total: f64 = r.inc_node_purity.iter().sum();
+        assert!(r.inc_node_purity.iter().all(|&v| v >= 0.0) && total > 0.0);
+        for j in 0..3 {
+            assert_eq!(r.feature_importances[j], r.inc_node_purity[j] / total);
+        }
+        assert_eq!(r.inc_node_purity, m.inc_node_purity);
+        let per_tree: Vec<f64> = (0..3)
+            .map(|j| {
+                m.trees
+                    .iter()
+                    .map(|t| t.impurity_decrease()[j])
+                    .sum::<f64>()
+                    / 20.0
+            })
+            .collect();
+        assert_eq!(per_tree, m.inc_node_purity);
     }
 }

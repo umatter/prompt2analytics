@@ -49,6 +49,32 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_tree_importance",
+      "name": "Impurity-decrease importance of the random forest, GBM and quantile forest",
+      "category": "ml",
+      "reference": "rpart::rpart(cp = 0)$variable.importance (one tree); gbm::relative.influence (Gaussian stumps); randomForest::importance(type = 2) IncNodePurity (band)",
+      "doc": "validation/ml/tree_importance.md",
+      "cases": [
+        "tree_importance_rpart",
+        "gbm_stump_influence",
+        "rf_importance_purity"
+      ],
+      "tests": [
+        "p2a-core::ml::trees::tests::test_validate_rf_tree_importance_rpart",
+        "p2a-core::ml::trees::tests::test_validate_rf_importance_band_randomforest"
+      ],
+      "quantities": [
+        "per-tree SSE decrease per feature (random forest, DecisionTree, quantile forest)",
+        "importance shares",
+        "gbm relative.influence, initF, fitted values, split variables",
+        "forest IncNodePurity share and x0 purity (band)",
+        "ranking x0 > x2 > x1"
+      ],
+      "tolerance": "exact pins at the coefficient row, n = 200: 1e-8 relative; forest bands: the five-seed randomForest range widened by twice its width on each side (a documented Monte Carlo tolerance; the p2a forests are seeded); forest-level importances are not R-pinned",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

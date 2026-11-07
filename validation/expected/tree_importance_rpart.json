@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "tree_importance_rpart",
+  "area": "ml/trees",
+  "method": "summed SSE decrease of the primary splits (rpart variable.importance)",
+  "reference": "rpart::rpart(cp = 0, maxcompete = 0, maxsurrogate = 0)$variable.importance",
+  "call": "rpart(y ~ x0 + x1 + x2, data = tree_importance, control = rpart.control(cp = 0, minsplit = 2, minbucket = 1, maxdepth = 3, xval = 0, maxsurrogate = 0, maxcompete = 0, usesurrogate = 0))",
+  "dataset": "validation/datasets/generated/tree_importance.csv",
+  "datasets": ["validation/datasets/generated/tree_importance.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "rpart": "4.1.23"
+  },
+  "values": {
+    "rf_d3_importance": {
+      "names": ["x0", "x1", "x2"],
+      "values": [5131.186984896518, 13.919137538091068, 22.148974767466058]
+    },
+    "rf_d3_share": {
+      "names": ["x0", "x1", "x2"],
+      "values": [0.99301987000311109, 0.0026937198331136959, 0.0042864101637751758]
+    },
+    "rf_d3_frame_n": [200, 97, 53, 38, 15, 44, 7, 37, 103, 51, 28, 23, 52, 24, 28],
+    "rf_d3_n_splits": 7,
+    "qrf_d4_importance": {
+      "names": ["x0", "x1", "x2"],
+      "values": [5134.379207642588, 15.410445877227819, 26.027649553210551]
+    },
+    "qrf_d4_share": {
+      "names": ["x0", "x1", "x2"],
+      "values": [0.99199390299077295, 0.0029773937090241203, 0.0050287033002028901]
+    },
+    "qrf_d4_frame_n": [200, 97, 53, 38, 12, 26, 15, 7, 8, 44, 7, 37, 27, 10, 103, 51, 28, 5, 23, 23, 8, 15, 52, 24, 16, 8, 28, 18, 10],
+    "qrf_d4_n_splits": 14,
+    "tss": 5215.2486511610769
+  }
+}
