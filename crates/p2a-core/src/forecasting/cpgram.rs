@@ -205,32 +205,26 @@ fn apply_taper(x: &mut [f64], taper: f64) {
 }
 
 /// Compute the periodogram ordinates `|X_k|² / n` at the Fourier frequencies
-/// `k = 1..=n/2` of the centered series, with an FFT (O(n log n)) when the
+/// `k = 1..=n/2` of the centred, tapered series, with an FFT (O(n log n)) when the
 /// `spectral-analysis` feature is enabled and a direct DFT otherwise.
 fn compute_periodogram(x: &[f64]) -> Result<Vec<f64>, String> {
-    let n = x.len();
-
-    // Center the data
-    let mean: f64 = x.iter().sum::<f64>() / n as f64;
-    let centered: Vec<f64> = x.iter().map(|&v| v - mean).collect();
-
     #[cfg(feature = "spectral-analysis")]
     {
-        periodogram_fft(&centered)
+        periodogram_fft(x)
     }
     #[cfg(not(feature = "spectral-analysis"))]
     {
-        periodogram_direct(&centered)
+        periodogram_direct(x)
     }
 }
 
-/// Periodogram of a centered series via rustfft.
+/// Periodogram via rustfft.
 #[cfg(feature = "spectral-analysis")]
-fn periodogram_fft(centered: &[f64]) -> Result<Vec<f64>, String> {
-    let n = centered.len();
+fn periodogram_fft(x: &[f64]) -> Result<Vec<f64>, String> {
+    let n = x.len();
     let mut buf: Vec<Complex<f64>> =
         try_with_capacity(n, "the periodogram FFT buffer").map_err(|e| e.to_string())?;
-    buf.extend(centered.iter().map(|&v| Complex::new(v, 0.0)));
+    buf.extend(x.iter().map(|&v| Complex::new(v, 0.0)));
 
     FftPlanner::new().plan_fft_forward(n).process(&mut buf);
 
@@ -242,11 +236,11 @@ fn periodogram_fft(centered: &[f64]) -> Result<Vec<f64>, String> {
         .collect())
 }
 
-/// Periodogram of a centered series via a direct DFT (O(n²)): the fallback
-/// for builds without `spectral-analysis`, and the reference in tests.
+/// Periodogram via a direct DFT (O(n²)): the fallback for builds without
+/// `spectral-analysis`, and the reference in tests.
 #[cfg(any(test, not(feature = "spectral-analysis")))]
-fn periodogram_direct(centered: &[f64]) -> Result<Vec<f64>, String> {
-    let n = centered.len();
+fn periodogram_direct(x: &[f64]) -> Result<Vec<f64>, String> {
+    let n = x.len();
     let n_freq = n / 2; // Number of Fourier frequencies (excluding DC and Nyquist)
 
     let mut pgram = Vec::with_capacity(n_freq);
@@ -259,7 +253,7 @@ fn periodogram_direct(centered: &[f64]) -> Result<Vec<f64>, String> {
         let mut cos_sum = 0.0;
         let mut sin_sum = 0.0;
 
-        for (t, &xt) in centered.iter().enumerate() {
+        for (t, &xt) in x.iter().enumerate() {
             cos_sum += xt * (freq * t as f64).cos();
             sin_sum += xt * (freq * t as f64).sin();
         }
@@ -514,7 +508,10 @@ mod tests {
             0.000553155027280382,
             0.0282290746094887,
         ];
-        let p = compute_periodogram(&mk(16)).unwrap();
+        let x = mk(16);
+        let mean = x.iter().sum::<f64>() / 16.0;
+        let centred: Vec<f64> = x.iter().map(|v| v - mean).collect();
+        let p = compute_periodogram(&centred).unwrap();
         assert_eq!(p.len(), 8);
         for (a, b) in p.iter().zip(R) {
             assert_relative_eq!(*a, b, max_relative = 1e-9);
