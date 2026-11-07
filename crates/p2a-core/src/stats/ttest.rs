@@ -59,6 +59,7 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::{t_quantile, t_test_p_value, validate_level};
 
 /// Type of hypothesis test (direction of alternative).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -72,15 +73,23 @@ pub enum Alternative {
     Less,
 }
 
+crate::option_enum!(
+    Alternative,
+    crate::options::Choices {
+        option: "alternative",
+        values: &[
+            (&["two.sided", "twosided"], Alternative::TwoSided),
+            (&["greater", "right", "gt"], Alternative::Greater),
+            (&["less", "left", "lt"], Alternative::Less),
+        ],
+    }
+);
+
 impl Alternative {
-    /// Parse from string (case-insensitive).
+    /// Parse from string, `None` for an unknown spelling. `FromStr` (`s.parse()`) gives the same
+    /// answer with an error naming the accepted spellings.
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "two.sided" | "two-sided" | "twosided" | "two_sided" => Some(Self::TwoSided),
-            "greater" | "right" | "gt" => Some(Self::Greater),
-            "less" | "left" | "lt" => Some(Self::Less),
-            _ => None,
-        }
+        s.parse().ok()
     }
 }
 
@@ -236,6 +245,7 @@ pub fn one_sample_t_test(
     alternative: Alternative,
     conf_level: f64,
 ) -> EconResult<TTestResult> {
+    validate_level(conf_level, "conf_level")?;
     let n = x.len();
     if n < 2 {
         return Err(EconError::InsufficientData {
@@ -319,6 +329,7 @@ pub fn two_sample_t_test(
     var_equal: bool,
     conf_level: f64,
 ) -> EconResult<TTestResult> {
+    validate_level(conf_level, "conf_level")?;
     let n1 = x.len();
     let n2 = y.len();
 
@@ -425,6 +436,7 @@ pub fn paired_t_test(
     alternative: Alternative,
     conf_level: f64,
 ) -> EconResult<TTestResult> {
+    validate_level(conf_level, "conf_level")?;
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
             message: "Paired t-test requires samples of equal length".to_string(),
@@ -500,6 +512,7 @@ pub fn t_test(
     var_equal: bool,
     conf_level: f64,
 ) -> EconResult<TTestResult> {
+    validate_level(conf_level, "conf_level")?;
     let df = dataset.df();
 
     match y_col {
@@ -545,30 +558,16 @@ pub fn t_test(
 
 /// Compute p-value based on alternative hypothesis.
 fn compute_p_value(t_stat: f64, df: f64, alternative: Alternative) -> f64 {
-    use statrs::distribution::{ContinuousCDF, StudentsT};
-
-    if df <= 0.0 || t_stat.is_nan() {
+    if !(df > 0.0) || t_stat.is_nan() {
         return f64::NAN;
     }
-    if t_stat.is_infinite() || t_stat.abs() > 1e10 {
-        return 0.0;
-    }
-
-    let t_dist = StudentsT::new(0.0, 1.0, df).unwrap();
-
+    let p2 = t_test_p_value(t_stat, df);
     match alternative {
-        Alternative::TwoSided => {
-            // Two-tailed: P(|T| > |t|)
-            2.0 * (1.0 - t_dist.cdf(t_stat.abs()))
-        }
-        Alternative::Greater => {
-            // Right-tailed: P(T > t)
-            1.0 - t_dist.cdf(t_stat)
-        }
-        Alternative::Less => {
-            // Left-tailed: P(T < t)
-            t_dist.cdf(t_stat)
-        }
+        Alternative::TwoSided => p2,
+        Alternative::Greater if t_stat > 0.0 => p2 / 2.0,
+        Alternative::Greater => 1.0 - p2 / 2.0,
+        Alternative::Less if t_stat < 0.0 => p2 / 2.0,
+        Alternative::Less => 1.0 - p2 / 2.0,
     }
 }
 
@@ -580,31 +579,23 @@ fn compute_confidence_interval(
     conf_level: f64,
     alternative: Alternative,
 ) -> (f64, f64) {
-    use statrs::distribution::{ContinuousCDF, StudentsT};
-
-    if df <= 0.0 || std_error.is_nan() || std_error <= 0.0 {
+    if !(df > 0.0) || !(std_error > 0.0) {
         return (f64::NAN, f64::NAN);
     }
-
-    let t_dist = StudentsT::new(0.0, 1.0, df).unwrap();
-    let alpha = 1.0 - conf_level;
-
+    let p = match alternative {
+        Alternative::TwoSided => (1.0 + conf_level) / 2.0,
+        Alternative::Greater | Alternative::Less => conf_level,
+    };
+    let Ok(t_crit) = t_quantile(p, df) else {
+        return (f64::NAN, f64::NAN);
+    };
     match alternative {
         Alternative::TwoSided => {
-            let t_crit = t_dist.inverse_cdf(1.0 - alpha / 2.0);
             let margin = t_crit * std_error;
             (estimate - margin, estimate + margin)
         }
-        Alternative::Greater => {
-            // One-sided lower bound
-            let t_crit = t_dist.inverse_cdf(1.0 - alpha);
-            (estimate - t_crit * std_error, f64::INFINITY)
-        }
-        Alternative::Less => {
-            // One-sided upper bound
-            let t_crit = t_dist.inverse_cdf(1.0 - alpha);
-            (f64::NEG_INFINITY, estimate + t_crit * std_error)
-        }
+        Alternative::Greater => (estimate - t_crit * std_error, f64::INFINITY),
+        Alternative::Less => (f64::NEG_INFINITY, estimate + t_crit * std_error),
     }
 }
 
@@ -1026,5 +1017,155 @@ mod tests {
             t_test(&inf, "v", None, 0.0, Alternative::TwoSided, false, false, 0.95),
             Err(EconError::NonFiniteValues { column, count: 1 }) if column == "v"
         ));
+    }
+
+    /// X-3: conf_level outside (0, 1) (95 for "95%") reached statrs inverse_cdf and panicked.
+    #[test]
+    fn test_t_test_rejects_level_95() {
+        let x = [5.1, 4.8, 6.2, 5.5, 5.9, 4.7];
+        let y = [4.2, 4.9, 5.0, 3.8, 4.4, 4.6];
+        for level in [95.0, 1.5, 1.0, 0.0, -0.5, f64::NAN] {
+            for alt in [
+                Alternative::TwoSided,
+                Alternative::Greater,
+                Alternative::Less,
+            ] {
+                for r in [
+                    one_sample_t_test(&x, 5.0, alt, level),
+                    two_sample_t_test(&x, &y, 0.0, alt, false, level),
+                    two_sample_t_test(&x, &y, 0.0, alt, true, level),
+                    paired_t_test(&x, &y, 0.0, alt, level),
+                ] {
+                    let e = r.unwrap_err();
+                    assert!(
+                        matches!(&e, EconError::InvalidSpecification { message } if message.contains("conf_level")),
+                        "{e}"
+                    );
+                }
+            }
+        }
+        let ds = Dataset::new(df! { "x" => x.to_vec(), "y" => y.to_vec() }.unwrap());
+        let e = t_test(
+            &ds,
+            "x",
+            Some("y"),
+            0.0,
+            Alternative::TwoSided,
+            false,
+            false,
+            95.0,
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("conf_level must be strictly between 0 and 1, got 95"),
+            "{e}"
+        );
+    }
+
+    /// X-3 / R7: CIs at levels other than 0.95 through t_quantile; pinned to t.test.
+    #[test]
+    fn test_validate_t_test_t3_levels() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_ttest_levels_t3");
+        let mut c = Check::new(&case);
+        for (tag, alt) in [
+            ("two", Alternative::TwoSided),
+            ("less", Alternative::Less),
+            ("greater", Alternative::Greater),
+        ] {
+            let one = t_test(&ds, "x", None, 5.0, alt, false, false, 0.90).unwrap();
+            let welch = t_test(&ds, "x", Some("y"), 0.0, alt, false, false, 0.99).unwrap();
+            let paired = t_test(&ds, "x", Some("y"), 0.0, alt, true, false, 0.90).unwrap();
+            for (prefix, r, n) in [
+                ("one90", &one, 12),
+                ("welch99", &welch, 12),
+                ("paired90", &paired, 12),
+            ] {
+                c.scalar(&format!("{prefix}_{tag}_p"), r.p_value, Tol::p_value(n));
+                match alt {
+                    Alternative::TwoSided => {
+                        c.vector(
+                            &format!("{prefix}_two_ci"),
+                            &[r.conf_int_lower, r.conf_int_upper],
+                            Tol::stat(n),
+                        );
+                    }
+                    Alternative::Less => {
+                        assert_eq!(r.conf_int_lower, f64::NEG_INFINITY);
+                        c.scalar(
+                            &format!("{prefix}_less_upper"),
+                            r.conf_int_upper,
+                            Tol::stat(n),
+                        );
+                    }
+                    Alternative::Greater => {
+                        assert_eq!(r.conf_int_upper, f64::INFINITY);
+                        c.scalar(
+                            &format!("{prefix}_greater_lower"),
+                            r.conf_int_lower,
+                            Tol::stat(n),
+                        );
+                    }
+                }
+            }
+        }
+        c.scalar(
+            "one90_t",
+            t_test(
+                &ds,
+                "x",
+                None,
+                5.0,
+                Alternative::TwoSided,
+                false,
+                false,
+                0.95,
+            )
+            .unwrap()
+            .t_statistic,
+            Tol::stat(12),
+        )
+        .scalar(
+            "welch_df",
+            t_test(
+                &ds,
+                "x",
+                Some("y"),
+                0.0,
+                Alternative::TwoSided,
+                false,
+                false,
+                0.95,
+            )
+            .unwrap()
+            .df,
+            Tol::stat(12),
+        )
+        .finish();
+    }
+
+    #[test]
+    fn test_alternative_parses_aliases_and_rejects_unknown() {
+        assert_eq!(Alternative::choices().validate(), Ok(()));
+        for s in [
+            "two.sided",
+            "two-sided",
+            "Two Sided",
+            "twosided",
+            "TWO_SIDED",
+        ] {
+            assert_eq!(
+                s.parse::<Alternative>().unwrap(),
+                Alternative::TwoSided,
+                "{s}"
+            );
+        }
+        assert_eq!("gt".parse::<Alternative>().unwrap(), Alternative::Greater);
+        assert_eq!("Left".parse::<Alternative>().unwrap(), Alternative::Less);
+        assert_eq!(Alternative::from_str("right"), Some(Alternative::Greater)); // the inherent Option API stays
+        assert_eq!(Alternative::from_str("sideways"), None);
+        assert!("sideways".parse::<Alternative>().is_err());
+        assert_eq!(Alternative::TwoSided.to_string(), "two.sided");
     }
 }

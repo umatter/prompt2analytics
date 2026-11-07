@@ -224,6 +224,38 @@ counts exact.
 
 ---
 
+## Confidence levels
+
+`one_sample_t_test`, `two_sample_t_test`, `paired_t_test`, `t_test`, `cor_test`, `prop_test_one`,
+`prop_test_two`, `prop_test_k` and `poisson_test` refuse a `conf_level` outside (0, 1), NaN included,
+with `InvalidSpecification` ("conf_level must be strictly between 0 and 1, got 95"). R's `t.test`
+stops too ("'conf.level' must be a single number between 0 and 1"). Before, 95 for "95%" reached the
+distribution's quantile function and failed there.
+
+`cor_test` refuses a constant x or y and infinite values before any distribution is built; R's
+`cor.test` returns NA with the warning 'the standard deviation is zero'. This is a deviation of the
+registry entry `cor_test_pearson`.
+
+**R Code:** case `stat_ttest_levels_t3` in `validation/r/cases/stats_misc_t3.R`, dataset
+`validation/datasets/generated/ttest_levels_t3.csv` (x has 12 values, y 15; 12 complete pairs).
+
+| Quantity | R |
+|---|---|
+| one sample, level 0.90, two-sided CI | 4.870807801387869, 5.772025531945465 |
+| one sample, level 0.90, one-sided bounds | 5.66351755314406 (less), 4.979315780189274 (greater) |
+| Welch, level 0.99, two-sided CI | -0.40016154497221085, 1.746861544972211 |
+| paired, level 0.90, two-sided CI | -0.16986609694703195, 1.6856994302803654 |
+| t (one sample), Welch df | 1.2809941317687727, 24.975739555092265 |
+
+Every p-value of the three tests under the three alternatives is in the case.
+
+**Rust tests:**
+- `stats::ttest::tests::test_validate_t_test_t3_levels` (R-pinned; registry `validation/methods/stats_misc_t3.json`, id `t_test_levels_t3`)
+- `stats::ttest::tests::test_t_test_rejects_level_95`
+- `stats::cortest::tests::test_cor_test_constant_column`, `stats::cortest::tests::test_cor_test_rejects_invalid_level`
+- `stats::proptest::tests::test_prop_test_rejects_invalid_level`
+- `stats::poissontest::tests::test_poisson_refuses_non_finite_parameters`
+
 ## Numerical Precision Summary
 
 | Method | Metric | Typical Tolerance | Notes |

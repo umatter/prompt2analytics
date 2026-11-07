@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{EconError, EconResult};
 use crate::stats::ttest::Alternative;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::{chi_squared_p_value, normal_quantile, validate_level, z_critical};
 
 /// Result of a proportion test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +193,7 @@ pub fn prop_test_one(
     conf_level: f64,
     correct: bool,
 ) -> EconResult<PropTestResult> {
+    validate_level(conf_level, "conf_level")?;
     if n == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Number of trials must be positive".to_string(),
@@ -207,12 +209,6 @@ pub fn prop_test_one(
             message: "Null proportion must be between 0 and 1 (exclusive)".to_string(),
         });
     }
-    if conf_level <= 0.0 || conf_level >= 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "Confidence level must be between 0 and 1".to_string(),
-        });
-    }
-
     let n_f = n as f64;
     let x_f = x as f64;
     let p_hat = x_f / n_f;
@@ -234,7 +230,7 @@ pub fn prop_test_one(
     let p_value = compute_prop_p_value(chi_sq, 1, alternative, p_hat, p);
 
     // Compute confidence interval using Wilson score method
-    let (ci_lower, ci_upper) = wilson_ci(x, n, conf_level, alternative);
+    let (ci_lower, ci_upper) = wilson_ci(x, n, conf_level, alternative)?;
 
     let correction_str = if correct {
         "with continuity correction"
@@ -285,6 +281,7 @@ pub fn prop_test_two(
     conf_level: f64,
     correct: bool,
 ) -> EconResult<PropTestResult> {
+    validate_level(conf_level, "conf_level")?;
     if n1 == 0 || n2 == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Number of trials must be positive".to_string(),
@@ -322,7 +319,7 @@ pub fn prop_test_two(
     let p_value = compute_prop_p_value(chi_sq, 1, alternative, p1, p2);
 
     // Confidence interval for difference p1 - p2
-    let (ci_lower, ci_upper) = prop_diff_ci(x1, n1, x2, n2, conf_level, correct);
+    let (ci_lower, ci_upper) = prop_diff_ci(x1, n1, x2, n2, conf_level, correct)?;
 
     let correction_str = if correct {
         "with continuity correction"
@@ -370,6 +367,7 @@ pub fn prop_test_k(
     trials: &[u64],
     conf_level: f64,
 ) -> EconResult<PropTestResult> {
+    validate_level(conf_level, "conf_level")?;
     let k = successes.len();
     if k < 2 {
         return Err(EconError::InvalidSpecification {
@@ -425,9 +423,7 @@ pub fn prop_test_k(
     let df = k - 1;
 
     // P-value from chi-squared distribution
-    use statrs::distribution::{ChiSquared, ContinuousCDF};
-    let chi_dist = ChiSquared::new(df as f64).unwrap();
-    let p_value = 1.0 - chi_dist.cdf(chi_sq);
+    let p_value = chi_squared_p_value(chi_sq, df as f64);
 
     Ok(PropTestResult {
         test_name: format!("{}-sample test for equality of proportions", k),
@@ -459,22 +455,15 @@ fn compute_prop_p_value(
     p_hat: f64,
     p_null: f64,
 ) -> f64 {
-    use statrs::distribution::{ChiSquared, ContinuousCDF};
-
     if chi_sq.is_nan() || chi_sq < 0.0 {
         return f64::NAN;
     }
 
-    let chi_dist = match ChiSquared::new(df as f64) {
-        Ok(d) => d,
-        Err(_) => return f64::NAN,
-    };
-
+    let p_two = chi_squared_p_value(chi_sq, df as f64);
     match alternative {
-        Alternative::TwoSided => 1.0 - chi_dist.cdf(chi_sq),
+        Alternative::TwoSided => p_two,
         Alternative::Greater => {
             // One-sided: divide by 2 if in expected direction
-            let p_two = 1.0 - chi_dist.cdf(chi_sq);
             if p_hat >= p_null {
                 p_two / 2.0
             } else {
@@ -482,7 +471,6 @@ fn compute_prop_p_value(
             }
         }
         Alternative::Less => {
-            let p_two = 1.0 - chi_dist.cdf(chi_sq);
             if p_hat <= p_null {
                 p_two / 2.0
             } else {
@@ -493,79 +481,52 @@ fn compute_prop_p_value(
 }
 
 /// Wilson score confidence interval for a single proportion.
-fn wilson_ci(x: u64, n: u64, conf_level: f64, alternative: Alternative) -> (f64, f64) {
-    use statrs::distribution::{ContinuousCDF, Normal};
-
+fn wilson_ci(x: u64, n: u64, conf_level: f64, alternative: Alternative) -> EconResult<(f64, f64)> {
     let n_f = n as f64;
     let p_hat = x as f64 / n_f;
-    let alpha = 1.0 - conf_level;
 
-    let normal = Normal::new(0.0, 1.0).unwrap();
+    let z = match alternative {
+        Alternative::TwoSided => z_critical(conf_level)?,
+        Alternative::Greater | Alternative::Less => normal_quantile(conf_level)?,
+    };
+    let z_sq = z * z;
+    let denom = 1.0 + z_sq / n_f;
+    let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
+    let margin = z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
 
-    match alternative {
-        Alternative::TwoSided => {
-            let z = normal.inverse_cdf(1.0 - alpha / 2.0);
-            let z_sq = z * z;
-
-            let denom = 1.0 + z_sq / n_f;
-            let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
-            let margin =
-                z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
-
-            let lower = (center - margin).max(0.0);
-            let upper = (center + margin).min(1.0);
-            (lower, upper)
-        }
-        Alternative::Greater => {
-            let z = normal.inverse_cdf(1.0 - alpha);
-            let z_sq = z * z;
-
-            let denom = 1.0 + z_sq / n_f;
-            let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
-            let margin =
-                z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
-
-            let lower = (center - margin).max(0.0);
-            (lower, 1.0)
-        }
-        Alternative::Less => {
-            let z = normal.inverse_cdf(1.0 - alpha);
-            let z_sq = z * z;
-
-            let denom = 1.0 + z_sq / n_f;
-            let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
-            let margin =
-                z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
-
-            let upper = (center + margin).min(1.0);
-            (0.0, upper)
-        }
-    }
+    Ok(match alternative {
+        Alternative::TwoSided => ((center - margin).max(0.0), (center + margin).min(1.0)),
+        Alternative::Greater => ((center - margin).max(0.0), 1.0),
+        Alternative::Less => (0.0, (center + margin).min(1.0)),
+    })
 }
 
 /// Confidence interval for difference of two proportions (Newcombe-Wilson method).
-fn prop_diff_ci(x1: u64, n1: u64, x2: u64, n2: u64, conf_level: f64, _correct: bool) -> (f64, f64) {
-    use statrs::distribution::{ContinuousCDF, Normal};
-
+fn prop_diff_ci(
+    x1: u64,
+    n1: u64,
+    x2: u64,
+    n2: u64,
+    conf_level: f64,
+    _correct: bool,
+) -> EconResult<(f64, f64)> {
     let n1_f = n1 as f64;
     let n2_f = n2 as f64;
     let p1 = x1 as f64 / n1_f;
     let p2 = x2 as f64 / n2_f;
     let diff = p1 - p2;
 
-    let alpha = 1.0 - conf_level;
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let z = normal.inverse_cdf(1.0 - alpha / 2.0);
+    let z = z_critical(conf_level)?;
 
     // Newcombe-Wilson method using score intervals for each proportion
-    let (l1, u1) = wilson_ci(x1, n1, conf_level, Alternative::TwoSided);
-    let (l2, u2) = wilson_ci(x2, n2, conf_level, Alternative::TwoSided);
+    let (l1, u1) = wilson_ci(x1, n1, conf_level, Alternative::TwoSided)?;
+    let (l2, u2) = wilson_ci(x2, n2, conf_level, Alternative::TwoSided)?;
 
     // Newcombe's method 10 (hybrid score)
     let lower = diff - z * ((l1 * (1.0 - l1) / n1_f) + (u2 * (1.0 - u2) / n2_f)).sqrt();
     let upper = diff + z * ((u1 * (1.0 - u1) / n1_f) + (l2 * (1.0 - l2) / n2_f)).sqrt();
 
-    (lower.max(-1.0), upper.min(1.0))
+    Ok((lower.max(-1.0), upper.min(1.0)))
 }
 
 #[cfg(test)]
@@ -685,5 +646,66 @@ mod tests {
             "p-value mismatch: Rust={}, R=0.1382",
             result.p_value
         );
+    }
+
+    /// X-3: prop_test_two (no check) and NaN levels (passed `<= 0 || >= 1`) reached statrs inverse_cdf.
+    #[test]
+    fn test_prop_test_rejects_invalid_level() {
+        for level in [1.5, 95.0, 0.0, f64::NAN] {
+            for r in [
+                prop_test_one(15, 100, 0.1, Alternative::TwoSided, level, true),
+                prop_test_two(30, 100, 40, 100, Alternative::TwoSided, level, true),
+                prop_test_k(&[30, 40, 35], &[100, 100, 100], level),
+            ] {
+                assert!(r.unwrap_err().to_string().contains("conf_level"));
+            }
+        }
+    }
+
+    /// STAT-67 (prop.test): statistics and p-values for every alternative, with and without correction; the Wilson CI
+    /// without correction. The corrected and the two-sample CIs are deviations (STAT-63, STAT-59).
+    #[test]
+    fn test_validate_prop_test_t3() {
+        use p2a_validation::{Check, Tol};
+        let (case, _ds) = crate::test_support::load_case("stat_prop_t3");
+        let u = |k: &str| case.scalar(k) as u64;
+        let (x, n, p0) = (u("one_x"), u("one_n"), case.scalar("one_p"));
+        let (x1, n1, x2, n2) = (u("two_x1"), u("two_n1"), u("two_x2"), u("two_n2"));
+        let mut c = Check::new(&case);
+        for correct in [true, false] {
+            for (alt_tag, alt) in [
+                ("two", Alternative::TwoSided),
+                ("less", Alternative::Less),
+                ("greater", Alternative::Greater),
+            ] {
+                let tag = format!("{}_{alt_tag}", if correct { "cc" } else { "nocc" });
+                let one = prop_test_one(x, n, p0, alt, 0.95, correct).unwrap();
+                let two = prop_test_two(x1, n1, x2, n2, alt, 0.95, correct).unwrap();
+                c.scalar(&format!("one_{tag}_stat"), one.chi_squared, Tol::stat(100))
+                    .scalar(&format!("one_{tag}_p"), one.p_value, Tol::p_value(100))
+                    .scalar(&format!("two_{tag}_stat"), two.chi_squared, Tol::stat(100))
+                    .scalar(&format!("two_{tag}_p"), two.p_value, Tol::p_value(100));
+                if !correct {
+                    c.vector(
+                        &format!("one_{tag}_ci"),
+                        &[one.conf_int_lower, one.conf_int_upper],
+                        Tol::stat(100),
+                    );
+                }
+                // deviation STAT-63: one_cc_*_ci (continuity-corrected Wilson) and two_*_ci (Wald +- Yates);
+                // deviation STAT-59: two-sample one-sided CIs.
+            }
+        }
+        let one = prop_test_one(x, n, p0, Alternative::TwoSided, 0.95, true).unwrap();
+        let two = prop_test_two(x1, n1, x2, n2, Alternative::TwoSided, 0.95, true).unwrap();
+        let kx: Vec<u64> = case.vector("k_x").iter().map(|&v| v as u64).collect();
+        let kn: Vec<u64> = case.vector("k_n").iter().map(|&v| v as u64).collect();
+        let k = prop_test_k(&kx, &kn, 0.95).unwrap();
+        c.scalar("one_est", one.estimates[0], Tol::coef(100))
+            .vector("two_est", &two.estimates, Tol::coef(100))
+            .scalar("k_stat", k.chi_squared, Tol::stat(300))
+            .scalar("k_df", k.df as f64, Tol::exact())
+            .scalar("k_p", k.p_value, Tol::p_value(300))
+            .finish();
     }
 }

@@ -86,6 +86,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/reset_quad.csv` | 100 × 2 (y, x) | `diag_reset_quad` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/harvtest_nonlin.csv` | 100 × 2 (y, x) | `diag_harvtest_nonlin` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/ts_acf_spline_t3.csv` | 64 × 4 (x, y, kx, ky) | `stat_ts_acf_spline_t3` | `r/cases/stats_misc_t3.R` | AR(1) pair and spline knots, padded with NA |
+| `generated/ttest_levels_t3.csv` | 15 × 3 (id, x, y) | `stat_ttest_levels_t3` | `r/cases/stats_misc_t3.R` | two samples, padded with NA |
 | `generated/wald_sim.csv` | 100 × 4 (y, x1, x2, x3) | `diag_wald_sim` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/hac_ar1.csv` | 100 × 2 (y, x) | `hac_ar1` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |
 | `generated/quantreg_hetero.csv` | 100 × 2 (y, x) | `quantreg_hetero` | `r/cases/regression_legacy.R` | seed 42, DGP of `scripts/validate_regression_diag.R` |

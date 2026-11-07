@@ -152,3 +152,53 @@ case("stat_modeltables_t3", "stats/modeltables", "two-way cell means with an emp
        reference = "tapply(y, list(fa, fb), mean) (NA for an empty cell); stats::model.tables(aov(y ~ fa * fb), 'means')",
        call = "model.tables(aov(y ~ fa * fb, d), 'means'); tapply(d$y, list(d$fa, d$fb), mean)", packages = character(0))
 })
+
+case("stat_ttest_levels_t3", "stats/ttest", "t.test at conf.level 0.90 and 0.99, all alternatives (one-sample, Welch, paired)", function(ctx) {
+  set.seed(303)
+  x <- round(rnorm(12, 5.2, 1.1), 3); y <- round(rnorm(15, 4.6, 1.6), 3)
+  d <- ctx$gen_dataset("ttest_levels_t3", .pad(list(x = x, y = y)))
+  x <- d$x[!is.na(d$x)]; y <- d$y[!is.na(d$y)]
+  v <- list()
+  # Two-sided: both bounds (key _ci). One-sided: only the finite bound (_upper for 'less', _lower for
+  # 'greater'); the other is -Inf / Inf, which a case file cannot store.
+  put <- function(prefix, tag, h) {
+    ci <- as.numeric(h$conf.int)
+    if (tag == "two") v[[paste0(prefix, "_two_ci")]] <<- vec(ci)
+    else if (tag == "less") { stopifnot(ci[1] == -Inf); v[[paste0(prefix, "_less_upper")]] <<- ci[2] }
+    else { stopifnot(ci[2] == Inf); v[[paste0(prefix, "_greater_lower")]] <<- ci[1] }
+    v[[paste0(prefix, "_", tag, "_p")]] <<- h$p.value
+  }
+  for (alt in c("two.sided", "less", "greater")) {
+    tag <- c(two.sided = "two", less = "less", greater = "greater")[[alt]]
+    put("one90", tag, t.test(x, mu = 5, alternative = alt, conf.level = 0.90))
+    put("welch99", tag, t.test(x, y, alternative = alt, conf.level = 0.99))
+    put("paired90", tag, t.test(x, y[1:12], paired = TRUE, alternative = alt, conf.level = 0.90))
+  }
+  v$one90_t <- unname(t.test(x, mu = 5)$statistic); v$welch_df <- unname(t.test(x, y)$parameter)
+  list(values = v, reference = "stats::t.test (qt(conf.level) one-sided, qt((1 + conf.level)/2) two-sided)",
+       call = "t.test(x, mu = 5, conf.level = 0.9, alternative); t.test(x, y, conf.level = 0.99, alternative); t.test(x, y[1:12], paired = TRUE, ...)",
+       packages = character(0))
+})
+
+case("stat_prop_t3", "stats/prop_test", "prop.test: one-, two- and k-sample, with and without continuity correction, all alternatives", function(ctx) {
+  d <- ctx$dataset("datasets/grunfeld.csv")   # no data needed: prop.test works on counts recorded below
+  v <- list(one_x = 15, one_n = 100, one_p = 0.1, two_x1 = 30, two_n1 = 100, two_x2 = 40, two_n2 = 100)
+  alts <- c(two.sided = "two", less = "less", greater = "greater")
+  for (cor in c(TRUE, FALSE)) for (alt in names(alts)) {
+    tag <- paste0(if (cor) "cc" else "nocc", "_", alts[[alt]])
+    a <- suppressWarnings(prop.test(15, 100, p = 0.1, alternative = alt, correct = cor))
+    v[[paste0("one_", tag, "_stat")]] <- unname(a$statistic); v[[paste0("one_", tag, "_p")]] <- a$p.value
+    v[[paste0("one_", tag, "_ci")]] <- vec(a$conf.int)
+    b <- prop.test(c(30, 40), c(100, 100), alternative = alt, correct = cor)
+    v[[paste0("two_", tag, "_stat")]] <- unname(b$statistic); v[[paste0("two_", tag, "_p")]] <- b$p.value
+    v[[paste0("two_", tag, "_ci")]] <- vec(b$conf.int)
+  }
+  v$one_est <- 15 / 100; v$two_est <- vec(c(0.3, 0.4))
+  k <- prop.test(c(30, 40, 35), c(100, 100, 100))
+  v$k_x <- vec(c(30, 40, 35)); v$k_n <- vec(c(100, 100, 100))
+  v$k_stat <- unname(k$statistic); v$k_df <- unname(k$parameter); v$k_p <- k$p.value
+  list(dataset = "validation/datasets/grunfeld.csv", values = v,
+       reference = "stats::prop.test (Yates YATES = 0.5 capped at |x - n p|; Wilson score CI for k = 1, Wald +- YATES sum(1/n) for k = 2)",
+       call = "prop.test(15, 100, p = 0.1, ...); prop.test(c(30, 40), c(100, 100), ...); prop.test(c(30, 40, 35), c(100, 100, 100))",
+       packages = character(0))
+})

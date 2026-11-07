@@ -78,6 +78,32 @@
       "tolerance": "Tol::coef(23), Tol::stat(23); counts exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "t_test_levels_t3",
+      "name": "t-tests at confidence levels 0.90 and 0.99",
+      "category": "stats",
+      "reference": "stats::t.test",
+      "doc": "validation/stats/hypothesis_tests.md",
+      "cases": ["stat_ttest_levels_t3"],
+      "tests": ["p2a-core::stats::ttest::tests::test_validate_t_test_t3_levels"],
+      "quantities": ["CI bounds (two-sided and one-sided)", "p-values", "t", "Welch df"],
+      "tolerance": "Tol::stat(12), Tol::p_value(12)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "prop_test_t3",
+      "name": "Test of proportions (one-, two- and k-sample)",
+      "category": "stats",
+      "reference": "stats::prop.test",
+      "doc": "validation/stats/prop_test.md",
+      "cases": ["stat_prop_t3"],
+      "tests": ["p2a-core::stats::proptest::tests::test_validate_prop_test_t3"],
+      "quantities": ["X-squared (with and without Yates)", "p-value (two.sided, less, greater)", "estimates", "one-sample Wilson CI without correction", "k-sample X-squared, df, p"],
+      "tolerance": "Tol::stat(100), Tol::p_value(100) (k-sample n = 300)",
+      "deviations": [{"finding": "STAT-63", "quantity": "one-sample CI with continuity correction; two-sample CI", "note": "p2a: Wilson without correction; Newcombe method 10"}, {"finding": "STAT-59", "quantity": "two-sample one-sided CI", "note": "p2a reports the two-sided interval"}],
+      "supersedes_legacy": []
     }
   ]
 }
