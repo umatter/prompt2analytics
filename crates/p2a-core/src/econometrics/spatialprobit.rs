@@ -96,7 +96,8 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
 use crate::resource::{try_zeros1, try_zeros2};
 use crate::spatial::SpatialWeights;
-use crate::traits::estimator::{normal_cdf, normal_pdf};
+use crate::stats::robust::percentile_interval;
+use crate::traits::estimator::{normal_cdf, normal_p_value_two_sided, normal_pdf};
 
 /// Model type for spatial probit estimation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +117,9 @@ impl std::fmt::Display for SpatialProbitModel {
     }
 }
 
+/// The seed of a run whose configuration sets none.
+pub const SPATIAL_PROBIT_DEFAULT_SEED: u64 = 42;
+
 /// Configuration for spatial probit model estimation.
 #[derive(Debug, Clone)]
 pub struct SpatialProbitConfig {
@@ -134,7 +138,7 @@ pub struct SpatialProbitConfig {
     pub rho_prior_range: (f64, f64),
     /// Compute marginal effects
     pub compute_impacts: bool,
-    /// Random seed for reproducibility (optional)
+    /// Random seed; `None` uses [`SPATIAL_PROBIT_DEFAULT_SEED`], so every run is reproducible.
     pub seed: Option<u64>,
     /// Show progress (for long MCMC runs)
     pub verbose: bool,
@@ -237,27 +241,97 @@ pub struct SpatialProbitResult {
     pub rho_draws: Array1<f64>,
 }
 
+/// The R type-7 credible interval of `draws`; NaN for a level outside (0, 1) or no draws.
+fn credible_interval(draws: &[f64], level: f64) -> (f64, f64) {
+    percentile_interval(draws, level).unwrap_or((f64::NAN, f64::NAN))
+}
+
 impl SpatialProbitResult {
-    /// Compute 95% credible interval for a coefficient.
+    /// The central credible interval of coefficient `idx` at `level` (R type-7 quantiles of the
+    /// retained draws); NaN for an index that does not exist or a level outside (0, 1).
     pub fn credible_interval_beta(&self, idx: usize, level: f64) -> (f64, f64) {
-        let alpha = (1.0 - level) / 2.0;
-        let mut draws: Vec<f64> = self.beta_draws.column(idx).to_vec();
-        draws.sort_by(|a, b| a.total_cmp(b));
-        let n = draws.len();
-        let lower_idx = ((n as f64) * alpha) as usize;
-        let upper_idx = ((n as f64) * (1.0 - alpha)) as usize;
-        (draws[lower_idx], draws[upper_idx.min(n - 1)])
+        if idx >= self.beta_draws.ncols() {
+            return (f64::NAN, f64::NAN);
+        }
+        credible_interval(&self.beta_draws.column(idx).to_vec(), level)
     }
 
-    /// Compute 95% credible interval for spatial parameter.
+    /// The central credible interval of the spatial parameter at `level` (R type-7 quantiles of
+    /// the retained draws); NaN for a level outside (0, 1).
     pub fn credible_interval_rho(&self, level: f64) -> (f64, f64) {
-        let alpha = (1.0 - level) / 2.0;
-        let mut draws: Vec<f64> = self.rho_draws.to_vec();
-        draws.sort_by(|a, b| a.total_cmp(b));
-        let n = draws.len();
-        let lower_idx = ((n as f64) * alpha) as usize;
-        let upper_idx = ((n as f64) * (1.0 - alpha)) as usize;
-        (draws[lower_idx], draws[upper_idx.min(n - 1)])
+        credible_interval(&self.rho_draws.to_vec(), level)
+    }
+}
+
+impl std::fmt::Display for SpatialProbitImpacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "Spatial impacts (probability scale; posterior mean and SD):"
+        )?;
+        if self.var_names.is_empty() {
+            return writeln!(f, "(no regressors)");
+        }
+        writeln!(
+            f,
+            "{:>15} {:>12} {:>10} {:>12} {:>10} {:>12} {:>10}",
+            "Variable", "Direct", "(SD)", "Indirect", "(SD)", "Total", "(SD)"
+        )?;
+        for (i, name) in self.var_names.iter().enumerate() {
+            writeln!(
+                f,
+                "{name:>15} {:>12.6} {:>10.6} {:>12.6} {:>10.6} {:>12.6} {:>10.6}",
+                self.direct[i],
+                self.direct_se[i],
+                self.indirect[i],
+                self.indirect_se[i],
+                self.total[i],
+                self.total_se[i]
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for SpatialProbitResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let spatial = match self.model_type {
+            SpatialProbitModel::Sar => "rho",
+            SpatialProbitModel::Sem => "lambda",
+        };
+        writeln!(f, "{} (Bayesian MCMC)", self.model_type)?;
+        writeln!(f, "Retained draws: {}", self.n_draws)?;
+        writeln!(f)?;
+        let (low, high) = self.credible_interval_rho(0.95);
+        writeln!(
+            f,
+            "{spatial}: {:.6} (posterior SD {:.6}, z = {:.3}, p = {:.4}; 95% credible interval [{low:.6}, {high:.6}])",
+            self.rho, self.rho_se, self.rho_z, self.rho_p
+        )?;
+        writeln!(f)?;
+        writeln!(
+            f,
+            "{:>15} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Mean", "Std.Dev", "z", "P>|z|"
+        )?;
+        for (i, name) in self.coef_names.iter().enumerate() {
+            writeln!(
+                f,
+                "{name:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}",
+                self.coefficients[i], self.std_errors[i], self.z_values[i], self.p_values[i]
+            )?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Log-likelihood: {:.4}", self.log_likelihood)?;
+        writeln!(f, "DIC: {:.4}", self.dic)?;
+        writeln!(f, "Pseudo R-squared: {:.4}", self.pseudo_r_squared)?;
+        writeln!(f, "Percent correctly predicted: {:.2}", self.pcp)?;
+        writeln!(f, "N: {}", self.n_obs)?;
+        if let Some(impacts) = &self.impacts {
+            writeln!(f)?;
+            write!(f, "{impacts}")?;
+        }
+        Ok(())
     }
 }
 
@@ -408,7 +482,7 @@ fn run_spatial_probit_internal(
         .collect();
     let p_values: Vec<f64> = z_values
         .iter()
-        .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
+        .map(|&z| normal_p_value_two_sided(z))
         .collect();
 
     let rho_z = if rho_std > 1e-10 {
@@ -416,7 +490,7 @@ fn run_spatial_probit_internal(
     } else {
         0.0
     };
-    let rho_p = 2.0 * (1.0 - normal_cdf(rho_z.abs()));
+    let rho_p = normal_p_value_two_sided(rho_z);
 
     // Build coefficient names
     let mut coef_names = vec!["(Intercept)".to_string()];
@@ -551,10 +625,8 @@ fn run_mcmc_spatial_probit(
 
     // Initialize RNG
     use rand::SeedableRng;
-    let mut rng = match config.seed {
-        Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-        None => rand::rngs::StdRng::from_entropy(),
-    };
+    let mut rng =
+        rand::rngs::StdRng::seed_from_u64(config.seed.unwrap_or(SPATIAL_PROBIT_DEFAULT_SEED));
 
     // Prior parameters
     let prior_precision = config.prior_beta_precision.unwrap_or(0.01);
@@ -1681,6 +1753,62 @@ mod tests {
             0.15050885838734468,
             20_261_029,
         );
+    }
+
+    #[test]
+    fn test_spatial_probit_credible_intervals_are_type7() {
+        // R quantile(type = 7) at 0.025 / 0.975 of 10 sorted draws: x1 + 0.225 (x2 - x1),
+        // x9 + 0.775 (x10 - x9). Before: draws[floor(10 * 0.025)] = x1 and draws[floor(10 * 0.975)] = x10.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let mut c = probit_config(10, false);
+        c.burn_in = 5;
+        let r = run_sar_probit(&d, "y", &["x"], &mut w, c).unwrap();
+        let mut s = r.rho_draws.to_vec();
+        s.sort_by(|a, b| a.total_cmp(b));
+        let expect = (s[0] + 0.225 * (s[1] - s[0]), s[8] + 0.775 * (s[9] - s[8]));
+        let got = r.credible_interval_rho(0.95);
+        assert!(
+            (got.0 - expect.0).abs() <= 1e-12 && (got.1 - expect.1).abs() <= 1e-12,
+            "{got:?} vs {expect:?}"
+        );
+        assert!(r.credible_interval_beta(5, 0.95).0.is_nan());
+        assert!(r.credible_interval_rho(1.5).0.is_nan());
+    }
+
+    #[test]
+    fn test_spatial_probit_unseeded_runs_are_reproducible() {
+        // seed None uses SPATIAL_PROBIT_DEFAULT_SEED (before: entropy, so two runs differed).
+        let (d, w) = create_test_spatial_binary_data();
+        let run = || {
+            let mut c = probit_config(20, false);
+            c.seed = None;
+            run_sem_probit(&d, "y", &["x"], &mut w.clone(), c).unwrap()
+        };
+        assert_eq!(format!("{:?}", run()), format!("{:?}", run()));
+    }
+    #[test]
+    fn test_spatial_probit_display_lists_every_impact_se() {
+        // Every variable's own posterior SDs, not one "Std.Errors" row.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let mut df = d.df().clone();
+        let x2: Vec<f64> = (0..25).map(|i| ((i * 7) % 5) as f64 - 2.0).collect();
+        df.with_column(Column::new("x2".into(), x2)).unwrap();
+        let mut c = probit_config(50, true);
+        c.burn_in = 25;
+        let r = run_sar_probit(&Dataset::new(df), "y", &["x", "x2"], &mut w, c).unwrap();
+        let imp = r.impacts.as_ref().unwrap();
+        let text = r.to_string();
+        for (i, name) in imp.var_names.iter().enumerate() {
+            let total = format!("{:.6}", imp.total[i]);
+            let row = text
+                .lines()
+                .find(|l| l.trim_start().starts_with(name.as_str()) && l.contains(&total))
+                .unwrap_or_else(|| panic!("no impact row for {name}:\n{text}"));
+            for v in [imp.direct_se[i], imp.indirect_se[i], imp.total_se[i]] {
+                assert!(row.contains(&format!("{v:.6}")), "{row}");
+            }
+        }
+        assert!(!text.contains("Std.Errors"), "{text}");
     }
 
     fn short_chain() -> SpatialProbitConfig {
