@@ -200,6 +200,23 @@ impl WeightsSpectrum {
             .sum()
     }
 
+    /// tr((W (I - ρW)^-1)²) = Re Σ (λ_i / (1 - ρλ_i))², a curvature term of the spatial
+    /// log-likelihoods.
+    pub fn trace_w_inverse_squared(&self, rho: f64) -> f64 {
+        self.0
+            .values
+            .iter()
+            .map(|&(a, b)| {
+                let u = 1.0 - rho * a;
+                let v = -rho * b;
+                let d = u * u + v * v;
+                let re = (a * u + b * v) / d;
+                let im = (b * u - a * v) / d;
+                re * re - im * im
+            })
+            .sum()
+    }
+
     /// min_i |1 - ρλ_i|; 0 means that I - ρW is singular.
     pub fn min_modulus(&self, rho: f64) -> f64 {
         self.0

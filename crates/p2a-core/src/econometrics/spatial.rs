@@ -26,6 +26,15 @@
 //! "eigen"). The estimates are pinned to spatialreg's formulas written out in base R
 //! (`validation/econometrics/spatial.md`).
 //!
+//! # Standard errors
+//!
+//! From the observed information of the full log-likelihood at the MLE: analytic for the SAR and
+//! the spatial Durbin model, central differences of the analytic gradient for the SAC. The SEM
+//! keeps errorsarlm's block-diagonal form: `sqrt(s2 diag((X*'X*)^-1))` for beta and the
+//! (lambda, s2) block for lambda. spatialreg's method "eigen" reports the expected information
+//! instead, which differs at finite n. An information matrix that is not positive definite at
+//! the estimate is an error.
+//!
 //! # Data requirements
 //!
 //! Row i of the dataset is unit i of the weights, so the dataset has exactly one row per
@@ -60,8 +69,8 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{matrix_inverse, pseudoinverse, xtx, xty};
-use crate::linalg::solve::{LM_QR_TOL, Qr};
+use crate::linalg::matrix_ops::{cholesky, matrix_inverse, pseudoinverse, xtx, xty};
+use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::regression::ols::{OlsSolve, normal_equations_inverse, solve_ols};
 use crate::spatial::SpatialWeights;
 use crate::spatial::weights::WeightsSpectrum;
@@ -122,8 +131,6 @@ struct OrdRegressions {
     b_wy: Array1<f64>,
     e_y: Array1<f64>,
     e_wy: Array1<f64>,
-    /// (X'X)^-1
-    unscaled: Array2<f64>,
 }
 
 /// One factorisation of X for both regressions: the normal equations on a well-conditioned
@@ -134,28 +141,20 @@ fn ord_regressions(
     wy: &Array1<f64>,
     names: &[String],
 ) -> EconResult<OrdRegressions> {
-    let (b_y, b_wy, unscaled) = match normal_equations_inverse(x.view())? {
+    let (b_y, b_wy) = match normal_equations_inverse(x.view())? {
         Some(normal) => {
             let mut ys = Array2::zeros((y.len(), 2));
             ys.column_mut(0).assign(y);
             ys.column_mut(1).assign(wy);
             let b = normal.coefficients_multi(x.view(), ys.view());
-            (
-                b.column(0).to_owned(),
-                b.column(1).to_owned(),
-                normal.inverse,
-            )
+            (b.column(0).to_owned(), b.column(1).to_owned())
         }
         None => {
             let qr = Qr::decompose(x.view(), LM_QR_TOL)?;
             if qr.rank() < x.ncols() {
                 return Err(aliased_error(&qr.aliased(), names));
             }
-            (
-                qr.coefficients(y.view())?,
-                qr.coefficients(wy.view())?,
-                qr.unscaled_covariance()?,
-            )
+            (qr.coefficients(y.view())?, qr.coefficients(wy.view())?)
         }
     };
     let e_y = y - &x.dot(&b_y);
@@ -165,7 +164,6 @@ fn ord_regressions(
         b_wy,
         e_y,
         e_wy,
-        unscaled,
     })
 }
 
@@ -457,10 +455,15 @@ pub fn run_sar(
     let log_det = spectrum.log_det(rho_opt);
     let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) + log_det;
 
-    // Information matrix and standard errors
-    // Asymptotic variance-covariance matrix
-    let (se_beta, se_rho) =
-        compute_sar_standard_errors(&x_final, &wy, sigma2, rho_opt, listw, &ord.unscaled, n)?;
+    // Standard errors from the observed information at the MLE
+    let info = sar_observed_information(&x_final, &wy, &residuals, sigma2, rho_opt, &spectrum);
+    let se = information_se(
+        &info,
+        if config.durbin { "SDM" } else { "SAR" },
+        k_final + 1,
+    )?;
+    let se_beta = Array1::from_iter(se[..k_final].iter().copied());
+    let se_rho = se[k_final];
 
     // Z-values and p-values
     let z_values: Vec<f64> = beta
@@ -584,9 +587,22 @@ pub fn run_sem(
     let log_det = spectrum.log_det(lambda_opt);
     let ll = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma2.ln()) + log_det;
 
-    // Standard errors
-    let (se_beta, se_lambda) =
-        compute_sem_standard_errors(&x, &x_star, sigma2, lambda_opt, listw, &fit.unscaled, n)?;
+    // Standard errors: errorsarlm's sqrt(s2 diag((X*'X*)^-1)) for beta, the (lambda, s2) block of
+    // the observed information for lambda
+    let se_beta: Array1<f64> = fit.unscaled.diag().mapv(|v| (sigma2 * v).sqrt());
+    let wu = listw.lag(&residuals);
+    let eps_wu = fit.residuals.dot(&wu);
+    let info = ndarray::array![
+        [
+            spectrum.trace_w_inverse_squared(lambda_opt) + wu.dot(&wu) / sigma2,
+            eps_wu / (sigma2 * sigma2)
+        ],
+        [
+            eps_wu / (sigma2 * sigma2),
+            -(n as f64) / (2.0 * sigma2 * sigma2) + rss / sigma2.powi(3)
+        ],
+    ];
+    let se_lambda = information_se(&info, "SEM", 1)?[0];
 
     // Z-values and p-values
     let z_values: Vec<f64> = beta
@@ -828,9 +844,16 @@ pub fn run_sac(
         + spectrum.log_det(rho_opt)
         + spectrum.log_det(lambda_opt);
 
-    // Standard errors (simplified approximation)
-    let (se_beta, se_rho, se_lambda) =
-        compute_sac_standard_errors(&x, sigma2, rho_opt, lambda_opt, listw, &fit.unscaled)?;
+    // Standard errors from the observed information at the MLE
+    let theta: Vec<f64> = beta
+        .iter()
+        .copied()
+        .chain([rho_opt, lambda_opt, sigma2])
+        .collect();
+    let info = sac_observed_information(&y, &wy, &wwy, &x, &wx, &spectrum, &theta)?;
+    let se = information_se(&info, "SAC", k + 2)?;
+    let se_beta = Array1::from_iter(se[..k].iter().copied());
+    let (se_rho, se_lambda) = (se[k], se[k + 1]);
 
     // Z-values and p-values
     let z_values: Vec<f64> = beta
@@ -1083,40 +1106,126 @@ fn optimize_sac(
     Ok((best_rho, best_lambda, -best_ll))
 }
 
-/// Compute standard errors for SAC model parameters.
-fn compute_sac_standard_errors(
+/// The analytic gradient of the full SAC log-likelihood at theta = (beta, rho, lambda, s2):
+/// e = (I - λW) u, u = y - ρWy - Xβ; d/dβ = X*'e / s2 with X* = (I - λW) X;
+/// d/dρ = -tr(W (I - ρW)^-1) + e'(I - λW) Wy / s2; d/dλ = -tr(W (I - λW)^-1) + e'Wu / s2;
+/// d/ds2 = -n / (2 s2) + e'e / (2 s2²).
+fn sac_gradient(
+    y: &Array1<f64>,
+    wy: &Array1<f64>,
+    wwy: &Array1<f64>,
     x: &Array2<f64>,
-    sigma2: f64,
-    _rho: f64,
-    _lambda: f64,
-    listw: &SpatialWeights,
-    xtx_inv: &Array2<f64>,
-) -> EconResult<(Array1<f64>, f64, f64)> {
+    wx: &Array2<f64>,
+    spectrum: &WeightsSpectrum,
+    theta: &[f64],
+) -> Array1<f64> {
     let k = x.ncols();
+    let beta = ndarray::ArrayView1::from(&theta[..k]);
+    let (rho, lambda, s2) = (theta[k], theta[k + 1], theta[k + 2]);
+    let u = y - &(rho * wy) - x.dot(&beta);
+    let w_u = wy - &(rho * wwy) - wx.dot(&beta);
+    let e = &u - &(lambda * &w_u);
+    let mut g = Array1::zeros(k + 3);
+    let score = (x.t().dot(&e) - lambda * wx.t().dot(&e)) / s2;
+    g.slice_mut(ndarray::s![..k]).assign(&score);
+    g[k] = -spectrum.trace_w_inverse(rho) + (e.dot(wy) - lambda * e.dot(wwy)) / s2;
+    g[k + 1] = -spectrum.trace_w_inverse(lambda) + e.dot(&w_u) / s2;
+    g[k + 2] = -(y.len() as f64) / (2.0 * s2) + e.dot(&e) / (2.0 * s2 * s2);
+    g
+}
 
-    // Standard errors for beta
-    let mut se_beta = Array1::zeros(k);
-    for i in 0..k {
-        let var = sigma2 * xtx_inv[[i, i]];
-        se_beta[i] = if var > 0.0 { var.sqrt() } else { 1e-10 };
+/// Minus the Hessian of the full SAC log-likelihood at `theta`, by central differences of its
+/// analytic gradient with step 1e-5 max(|theta_i|, 1), symmetrised.
+fn sac_observed_information(
+    y: &Array1<f64>,
+    wy: &Array1<f64>,
+    wwy: &Array1<f64>,
+    x: &Array2<f64>,
+    wx: &Array2<f64>,
+    spectrum: &WeightsSpectrum,
+    theta: &[f64],
+) -> EconResult<Array2<f64>> {
+    let m = theta.len();
+    let mut hessian = Array2::zeros((m, m));
+    let mut at = theta.to_vec();
+    for i in 0..m {
+        crate::resource::checkpoint()?;
+        let h = 1e-5 * theta[i].abs().max(1.0);
+        at[i] = theta[i] + h;
+        let plus = sac_gradient(y, wy, wwy, x, wx, spectrum, &at);
+        at[i] = theta[i] - h;
+        let minus = sac_gradient(y, wy, wwy, x, wx, spectrum, &at);
+        at[i] = theta[i];
+        hessian
+            .column_mut(i)
+            .assign(&((&plus - &minus) / (2.0 * h)));
     }
+    Ok((&hessian + &hessian.t()) * -0.5)
+}
 
-    // Standard errors for rho and lambda using sparse trace
-    let tr_w2 = listw.trace_w2();
-    let tr_wtw = listw.trace_wtw();
-    let info_term = tr_w2 + tr_wtw;
+/// The observed information of the full SAR/SDM log-likelihood at the MLE, theta = (beta, rho, s2),
+/// e = y - ρWy - Xβ, A = W (I - ρW)^-1:
+/// I_bb = X'X / s2; I_br = X'Wy / s2; I_bs = X'e / s2²; I_rr = tr(A²) + (Wy)'Wy / s2;
+/// I_rs = e'Wy / s2²; I_ss = -n / (2 s2²) + e'e / s2³.
+fn sar_observed_information(
+    x: &Array2<f64>,
+    wy: &Array1<f64>,
+    e: &Array1<f64>,
+    s2: f64,
+    rho: f64,
+    spectrum: &WeightsSpectrum,
+) -> Array2<f64> {
+    let k = x.ncols();
+    let s4 = s2 * s2;
+    let mut info = Array2::zeros((k + 2, k + 2));
+    info.slice_mut(ndarray::s![..k, ..k])
+        .assign(&(xtx(&x.view()) / s2));
+    let x_wy = xty(&x.view(), wy);
+    let x_e = xty(&x.view(), e);
+    for j in 0..k {
+        info[[j, k]] = x_wy[j] / s2;
+        info[[k, j]] = info[[j, k]];
+        info[[j, k + 1]] = x_e[j] / s4;
+        info[[k + 1, j]] = info[[j, k + 1]];
+    }
+    info[[k, k]] = spectrum.trace_w_inverse_squared(rho) + wy.dot(wy) / s2;
+    info[[k, k + 1]] = e.dot(wy) / s4;
+    info[[k + 1, k]] = info[[k, k + 1]];
+    info[[k + 1, k + 1]] = -(e.len() as f64) / (2.0 * s4) + e.dot(e) / (s2 * s4);
+    info
+}
 
-    let var_rho = sigma2 / info_term;
-    let se_rho = if var_rho > 0.0 { var_rho.sqrt() } else { 0.01 };
-
-    let var_lambda = sigma2 / info_term;
-    let se_lambda = if var_lambda > 0.0 {
-        var_lambda.sqrt()
-    } else {
-        0.01
+/// sqrt(diag(I^-1)) of the first `keep` parameters of an observed information matrix `info`, which
+/// must be positive definite (checked on the equilibrated matrix, so the units of y do not matter).
+fn information_se(info: &Array2<f64>, model: &str, keep: usize) -> EconResult<Vec<f64>> {
+    let not_definite = || {
+        EconError::Computation(format!(
+            "{model} information matrix is not positive definite at the estimate"
+        ))
     };
-
-    Ok((se_beta, se_rho, se_lambda))
+    let d = info.nrows();
+    if !info.iter().all(|v| v.is_finite()) || (0..d).any(|i| info[[i, i]] <= 0.0) {
+        return Err(not_definite());
+    }
+    let mut scaled = info.clone();
+    for i in 0..d {
+        for j in 0..d {
+            scaled[[i, j]] /= (info[[i, i]] * info[[j, j]]).sqrt();
+        }
+    }
+    if cholesky(&scaled.view()).is_err() {
+        return Err(not_definite());
+    }
+    let inverse = match sym_inverse(info.view(), SingularPolicy::Error, "information matrix") {
+        Ok(inv) => inv.inverse,
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+        Err(_) => return Err(not_definite()),
+    };
+    let var = inverse.diag();
+    if !var.iter().all(|v| v.is_finite() && *v > 0.0) {
+        return Err(not_definite());
+    }
+    Ok(var.iter().take(keep).map(|v| v.sqrt()).collect())
 }
 
 // ============================================================================
@@ -1371,121 +1480,6 @@ fn optimize_lambda_sem(
     let ll_opt = -neg_ll(lambda_opt);
 
     Ok((lambda_opt, ll_opt))
-}
-
-/// Compute asymptotic standard errors for SAR model parameters.
-///
-/// Uses the inverse of the Fisher information matrix to compute standard errors
-/// for β (regression coefficients) and ρ (spatial autoregressive parameter).
-///
-/// # Standard Error Formulas
-/// - Var(β) ≈ σ² (X'X)⁻¹ (simplified, ignores spatial autocorrelation)
-/// - Var(ρ) derived from: I_ρρ = (1/σ²)[tr(WA + A'W) + (Wỹ)'(Wỹ)/σ²]
-///   where A = W(I - ρW)⁻¹
-///
-/// # Efficiency
-/// Uses sparse trace computations tr(W²) and tr(W'W) which are O(m)
-/// where m = number of non-zero entries, instead of O(n³) dense computation.
-///
-/// # Arguments
-/// * `x` - Design matrix (n × k)
-/// * `_wy` - Spatial lag Wy (reserved for future use)
-/// * `sigma2` - Estimated error variance
-/// * `_rho` - Estimated spatial parameter (reserved for future use)
-/// * `listw` - Spatial weights (provides trace computations)
-/// * `xtx_inv` - Pre-computed (X'X)⁻¹
-/// * `_n` - Number of observations (reserved for future use)
-///
-/// # Returns
-/// Tuple of (standard_errors_beta, standard_error_rho)
-fn compute_sar_standard_errors(
-    x: &Array2<f64>,
-    _wy: &Array1<f64>,
-    sigma2: f64,
-    _rho: f64,
-    listw: &SpatialWeights,
-    xtx_inv: &Array2<f64>,
-    _n: usize,
-) -> EconResult<(Array1<f64>, f64)> {
-    let k = x.ncols();
-
-    // Standard errors for beta (simplified)
-    // Var(β) ≈ σ² (X'X)^{-1}
-    let mut se_beta = Array1::zeros(k);
-    for i in 0..k {
-        let var = sigma2 * xtx_inv[[i, i]];
-        se_beta[i] = if var > 0.0 { var.sqrt() } else { 1e-10 };
-    }
-
-    // Standard error for rho using sparse trace computations
-    // trace(W²) and trace(W'W) computed in O(m) instead of O(n³)
-    let tr_w2 = listw.trace_w2();
-    let tr_wtw = listw.trace_wtw();
-
-    // Approximate variance of rho
-    let var_rho = sigma2 / (tr_w2 + tr_wtw);
-    let se_rho = if var_rho > 0.0 { var_rho.sqrt() } else { 0.01 };
-
-    Ok((se_beta, se_rho))
-}
-
-/// Compute asymptotic standard errors for SEM model parameters.
-///
-/// Standard errors for the Spatial Error Model parameters β and λ.
-///
-/// # Model
-/// SEM: y = Xβ + u, where u = λWu + ε
-///
-/// # Standard Error Formulas
-/// - Var(β) ≈ σ² (X*'X*)⁻¹ where X* = (I - λW)X
-/// - Var(λ) derived from the information matrix element:
-///   I_λλ = (1/σ²)[tr(W²) + tr(W'W)]
-///
-/// # Efficiency
-/// Uses sparse trace computations which are O(m) instead of O(n³)
-/// where m = number of non-zero entries in W.
-///
-/// # Arguments
-/// * `x` - Original design matrix (n × k)
-/// * `_x_star` - Transformed design matrix X* = (I - λW)X (reserved)
-/// * `sigma2` - Estimated error variance
-/// * `_lambda` - Estimated spatial error parameter (reserved)
-/// * `listw` - Spatial weights (provides trace computations)
-/// * `xtx_inv` - Pre-computed (X*'X*)⁻¹ from transformed system
-/// * `_n` - Number of observations (reserved)
-///
-/// # Returns
-/// Tuple of (standard_errors_beta, standard_error_lambda)
-fn compute_sem_standard_errors(
-    x: &Array2<f64>,
-    _x_star: &Array2<f64>,
-    sigma2: f64,
-    _lambda: f64,
-    listw: &SpatialWeights,
-    xtx_inv: &Array2<f64>,
-    _n: usize,
-) -> EconResult<(Array1<f64>, f64)> {
-    let k = x.ncols();
-
-    // Standard errors for beta in transformed model
-    let mut se_beta = Array1::zeros(k);
-    for i in 0..k {
-        let var = sigma2 * xtx_inv[[i, i]];
-        se_beta[i] = if var > 0.0 { var.sqrt() } else { 1e-10 };
-    }
-
-    // Standard error for lambda using sparse trace computations
-    let tr_w2 = listw.trace_w2();
-    let tr_wtw = listw.trace_wtw();
-
-    let var_lambda = sigma2 / (tr_w2 + tr_wtw);
-    let se_lambda = if var_lambda > 0.0 {
-        var_lambda.sqrt()
-    } else {
-        0.01
-    };
-
-    Ok((se_beta, se_lambda))
 }
 
 /// Compute spatial impacts for SAR model.
@@ -1973,6 +1967,131 @@ mod tests {
             .scalar("sac_rho", d.rho, Tol::iterative(1e-4))
             .scalar("sac_lambda", d.lambda, Tol::iterative(1e-4))
             .finish();
+    }
+
+    /// The dataset of the spatial_sar_sdm_sem case, read as a property test's data.
+    fn spatial_sim() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/spatial_sim.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    /// `spatial_sim` with y multiplied by `scale`.
+    fn scaled_y(ds: &Dataset, scale: f64) -> Dataset {
+        let y: Vec<f64> = col(ds, "y").iter().map(|v| v * scale).collect();
+        Dataset::new(df! { "y" => y, "x1" => col(ds, "x1"), "x2" => col(ds, "x2") }.unwrap())
+    }
+
+    /// R: minus the analytic Hessian of the full log-likelihood at the MLE (SAC: central
+    /// differences of its analytic gradient), each cross-checked against stats::optimHess in the
+    /// case (spatial_ml_weights.R). The convention reference `sar_se` (expected information,
+    /// spatialreg's method "eigen") differs at finite n and is not compared.
+    #[test]
+    fn test_validate_spatial_ml_se_observed_information() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("spatial_sar_sdm_sem");
+        let x = ["x1", "x2"];
+        let mut w = knn4(&ds);
+        let with_rho = |names: &[String], se: &[f64], last: &[(&str, f64)]| {
+            let mut n = names.to_vec();
+            let mut v = se.to_vec();
+            for (name, value) in last {
+                n.push((*name).to_string());
+                v.push(*value);
+            }
+            (n, v)
+        };
+        // the estimates are good to the flatness bound of the likelihood (1.3e-7 in rho)
+        let est = Tol::iterative(1e-6);
+        let sar = run_sar(&ds, "y", &x, &mut w, SarConfig::default()).unwrap();
+        let durbin = SarConfig {
+            durbin: true,
+            ..Default::default()
+        };
+        let sdm = run_sar(&ds, "y", &x, &mut w, durbin).unwrap();
+        let sem = run_sem(&ds, "y", &x, &mut w, SemConfig::default()).unwrap();
+        let tight = SacConfig {
+            tol: 1e-10,
+            max_iter: 1000,
+            ..Default::default()
+        };
+        let sac = run_sac(&ds, "y", &x, &mut w, tight).unwrap();
+        let (sar_n, sar_v) = with_rho(&sar.coef_names, &sar.std_errors, &[("rho", sar.rho_se)]);
+        let (sdm_n, sdm_v) = with_rho(&sdm.coef_names, &sdm.std_errors, &[("rho", sdm.rho_se)]);
+        let (sac_n, sac_v) = with_rho(
+            &sac.coef_names,
+            &sac.std_errors,
+            &[("rho", sac.rho_se), ("lambda", sac.lambda_se)],
+        );
+        Check::new(&case)
+            .named("sar_se_obs", &sar_n, &sar_v, est)
+            .named("sdm_se_obs", &sdm_n, &sdm_v, est)
+            .scalar("sem_lambda_se_obs", sem.lambda_se, est)
+            // coordinate descent: lambda is good to 3.6e-7 relative at this tolerance
+            .named("sac_se_obs", &sac_n, &sac_v, Tol::iterative(1e-5))
+            .finish();
+    }
+
+    /// The SEs of a dimensionless rho or lambda do not depend on the units of y, and every beta SE
+    /// scales with them. The estimates themselves move within the likelihood's flatness (1.3e-7
+    /// in rho), so the comparison leaves room for that.
+    #[test]
+    fn test_spatial_ml_se_scale_with_y() {
+        let ds = spatial_sim();
+        let x = ["x1", "x2"];
+        let mut w = knn4(&ds);
+        let close = |a: f64, b: f64, tol: f64, what: &str| {
+            assert!((a - b).abs() <= tol * b.abs(), "{what}: {a} vs {b}");
+        };
+        let tight = || SacConfig {
+            tol: 1e-10,
+            max_iter: 1000,
+            ..Default::default()
+        };
+        let durbin = || SarConfig {
+            durbin: true,
+            ..Default::default()
+        };
+        let d10 = scaled_y(&ds, 10.0);
+        let sar = (
+            run_sar(&ds, "y", &x, &mut w, SarConfig::default()).unwrap(),
+            run_sar(&d10, "y", &x, &mut w, SarConfig::default()).unwrap(),
+        );
+        let sdm = (
+            run_sar(&ds, "y", &x, &mut w, durbin()).unwrap(),
+            run_sar(&d10, "y", &x, &mut w, durbin()).unwrap(),
+        );
+        for (a, b) in [&sar, &sdm] {
+            close(b.rho_se, a.rho_se, 1e-5, "rho se");
+            for (u, v) in a.std_errors.iter().zip(&b.std_errors) {
+                close(*v, 10.0 * u, 1e-5, "beta se");
+            }
+        }
+        let sem = (
+            run_sem(&ds, "y", &x, &mut w, SemConfig::default()).unwrap(),
+            run_sem(&d10, "y", &x, &mut w, SemConfig::default()).unwrap(),
+        );
+        close(sem.1.lambda_se, sem.0.lambda_se, 1e-5, "lambda se");
+        for (u, v) in sem.0.std_errors.iter().zip(&sem.1.std_errors) {
+            close(*v, 10.0 * u, 1e-5, "sem beta se");
+        }
+        let sac = (
+            run_sac(&ds, "y", &x, &mut w, tight()).unwrap(),
+            run_sac(&d10, "y", &x, &mut w, tight()).unwrap(),
+        );
+        close(sac.1.rho_se, sac.0.rho_se, 1e-4, "sac rho se");
+        close(sac.1.lambda_se, sac.0.lambda_se, 1e-4, "sac lambda se");
+        for (u, v) in sac.0.std_errors.iter().zip(&sac.1.std_errors) {
+            close(*v, 10.0 * u, 1e-4, "sac beta se");
+        }
+    }
+
+    #[test]
+    fn test_sac_rho_and_lambda_se_differ() {
+        let ds = spatial_sim();
+        let mut w = knn4(&ds);
+        let sac = run_sac(&ds, "y", &["x1", "x2"], &mut w, SacConfig::default()).unwrap();
+        assert!(sac.rho_se > 0.0 && sac.lambda_se > 0.0);
+        assert!((sac.rho_se - sac.lambda_se).abs() > 0.01, "{sac:?}");
     }
 
     use crate::linalg::matrix_ops::LinalgError;
