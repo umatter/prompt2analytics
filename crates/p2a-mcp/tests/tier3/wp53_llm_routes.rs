@@ -1068,6 +1068,291 @@ mod api_doc {
             })
             .collect()
     }
+
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    const HTTP_RS: &str = include_str!("../../src/transport/http.rs");
+    const CONVERSATION_RS: &str = include_str!("../../src/transport/conversation.rs");
+
+    /// (method, normalized path) of each route line inside a plain ``` fence.
+    fn fenced_routes() -> Vec<(String, String)> {
+        let (mut out, mut fence) = (Vec::new(), None::<String>);
+        for line in DOC.lines() {
+            let t = line.trim_start();
+            if let Some(info) = t.strip_prefix("```") {
+                fence = if fence.is_some() {
+                    None
+                } else {
+                    Some(info.trim().to_string())
+                };
+                continue;
+            }
+            if fence.as_deref() != Some("") {
+                continue;
+            }
+            if let Some((m, p)) = t.split_once(' ')
+                && ["GET", "POST", "PUT", "DELETE"].contains(&m)
+                && p.starts_with('/')
+                && !p.contains(' ')
+            {
+                out.push((m.to_string(), norm(p)));
+            }
+        }
+        out
+    }
+    /// (method, normalized path) of each `.route("..", verb(..))` in a transport source; `prefix` is
+    /// where that router is nested.
+    fn registered_in(src: &str, prefix: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        // Plan sync: http.rs has a test-only `.route("/", ..)` in `mod serve_tests`; read only the non-test part.
+        let src = src.find("#[cfg(test)]").map_or(src, |i| &src[..i]);
+        let mut rest = src;
+        while let Some(i) = rest.find(".route(") {
+            rest = rest[i + ".route(".len()..].trim_start();
+            let Some(after) = rest.strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = after.find('"') else { break };
+            let tail = after[end + 1..]
+                .trim_start()
+                .trim_start_matches(',')
+                .trim_start();
+            let verb: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect();
+            out.push((
+                verb.to_ascii_uppercase(),
+                norm(&format!("{prefix}{}", &after[..end])),
+            ));
+            rest = &after[end + 1..];
+        }
+        out
+    }
+    fn index_keys() -> HashSet<(String, String)> {
+        index().into_iter().map(|(m, p, _)| (m, p)).collect()
+    }
+
+    /// The doc is self-consistent: every route a section documents is in the route index.
+    #[test]
+    fn test_every_documented_route_is_in_the_route_index() {
+        let fenced = fenced_routes();
+        assert!(fenced.len() >= 30, "{fenced:?}");
+        let keys = index_keys();
+        let missing: Vec<_> = fenced.iter().filter(|r| !keys.contains(*r)).collect();
+        assert!(
+            missing.is_empty(),
+            "documented in a section, missing from the route index: {missing:?}"
+        );
+    }
+
+    /// Every route the server registers is in the route index.
+    #[test]
+    fn test_every_registered_route_is_in_the_route_index() {
+        let mut routes = registered_in(HTTP_RS, "");
+        routes.extend(registered_in(CONVERSATION_RS, "/api"));
+        assert!(routes.len() >= 33, "{routes:?}");
+        let keys = index_keys();
+        let missing: Vec<_> = routes.iter().filter(|r| !keys.contains(*r)).collect();
+        assert!(
+            missing.is_empty(),
+            "registered, missing from API_ENDPOINTS.md's route index: {missing:?}"
+        );
+    }
+
+    /// Every index row is registered exactly when its Feature is compiled (a Local server with
+    /// --expose-enumeration, so the enumeration routes exist). Probed with ids that name nothing: a
+    /// registered route answers JSON (404 not_found, 422, ...), an unregistered one 404 with no body.
+    /// GET /api/llm/models may contact the default local Ollama endpoint (refused when none listens).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_every_indexed_route_answers_as_its_feature_says() {
+        let mut config = local_config();
+        config.http.expose_enumeration = true;
+        let (app, _state) = p2a_mcp::transport::http::build_app(&config).await.unwrap();
+        let rows = index();
+        assert!(rows.len() >= 33, "{rows:?}");
+        let mut wrong = Vec::new();
+        for (method, path, feature) in rows {
+            let body = matches!(method.as_str(), "POST" | "PUT").then(|| json!({}));
+            let (s, _, len) = send(
+                &app,
+                &method,
+                &path.replace("{}", "wp53-probe"),
+                Some("wp53-probe"),
+                body,
+            )
+            .await;
+            if unregistered(s, len) == compiled(&feature) {
+                wrong.push(format!(
+                    "{method} {path} (feature {feature}): {s}, {len} bytes"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Every ```json block of the doc that parses.
+    fn json_blocks() -> Vec<Value> {
+        let (mut out, mut fence, mut buf) = (Vec::new(), None::<String>, String::new());
+        for line in DOC.lines() {
+            if let Some(info) = line.trim_start().strip_prefix("```") {
+                match fence.take() {
+                    // a closing fence: keep the block if it was ```json and parses
+                    Some(kind) => {
+                        if kind == "json"
+                            && let Ok(v) = serde_json::from_str::<Value>(&buf)
+                        {
+                            out.push(v);
+                        }
+                    }
+                    // an opening fence: remember its info string
+                    None => fence = Some(info.trim().to_string()),
+                }
+                buf.clear();
+                continue;
+            }
+            if fence.is_some() {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
+        out
+    }
+    fn objects<'a>(v: &'a Value, out: &mut Vec<&'a serde_json::Map<String, Value>>) {
+        match v {
+            Value::Object(o) => {
+                out.push(o);
+                o.values().for_each(|x| objects(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| objects(x, out)),
+            _ => {}
+        }
+    }
+
+    /// D2 and the doc: tool examples name real tools and only their fields. A tool definition (name +
+    /// input_schema) has real properties and `additionalProperties: false`. A tool call (name or tool,
+    /// plus arguments) passes only real arguments. The doc's two POST /api/tools/{name} bodies
+    /// (session_id + arguments) call load_dataset. Before: the tool list example was not JSON,
+    /// regression_ols was called with y_col/x_cols, and the data-loading example put session_id among
+    /// the arguments.
+    #[test]
+    fn test_documented_tool_examples_use_real_tools_and_fields() {
+        let schemas: HashMap<String, Value> = p2a_mcp::server::AnalyticsServer::new()
+            .router_tools()
+            .into_iter()
+            .map(|t| (t.name.to_string(), Value::Object((*t.input_schema).clone())))
+            .collect();
+        let props = |tool: &str| -> HashSet<String> {
+            schemas
+                .get(tool)
+                .and_then(|s| s["properties"].as_object())
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default()
+        };
+        let (mut definitions, mut calls, mut bodies, mut wrong) = (0, 0, 0, Vec::new());
+        for block in json_blocks() {
+            let mut objs = Vec::new();
+            objects(&block, &mut objs);
+            for o in objs {
+                let name = o
+                    .get("name")
+                    .or_else(|| o.get("tool"))
+                    .and_then(Value::as_str);
+                let args = o.get("arguments").and_then(Value::as_object);
+                if let (Some(name), Some(schema)) = (name, o.get("input_schema")) {
+                    definitions += 1;
+                    if !schemas.contains_key(name) {
+                        wrong.push(format!("tool list example names `{name}`, not a tool"));
+                        continue;
+                    }
+                    for k in schema["properties"]
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|p| p.keys())
+                    {
+                        if !props(name).contains(k) {
+                            wrong.push(format!("{name}: example property `{k}` is not a field"));
+                        }
+                    }
+                    if schema.get("additionalProperties") != Some(&json!(false)) {
+                        wrong.push(format!(
+                            "{name}: example schema lacks \"additionalProperties\": false"
+                        ));
+                    }
+                } else if let (Some(name), Some(args)) = (name, args) {
+                    calls += 1;
+                    if !schemas.contains_key(name) {
+                        wrong.push(format!("example calls `{name}`, not a tool"));
+                        continue;
+                    }
+                    for k in args.keys() {
+                        if !props(name).contains(k) {
+                            wrong.push(format!("{name} call: argument `{k}` is not a field"));
+                        }
+                    }
+                } else if let (true, Some(args)) = (o.contains_key("session_id"), args) {
+                    bodies += 1;
+                    for k in args.keys() {
+                        if !props("load_dataset").contains(k) {
+                            wrong.push(format!("load_dataset body: argument `{k}` is not a field"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            definitions >= 1 && calls >= 2 && bodies >= 2,
+            "examples found: {definitions} tool definitions, {calls} tool calls, {bodies} tool request bodies"
+        );
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// INF-9 (doc part): the load formats the doc lists are the ones DataLoader::load dispatches (an
+    /// empty probe file per extension: any error but "Unsupported file format" means a loader read
+    /// it). Every listed extension must load, and every candidate that loads must be listed.
+    #[test]
+    fn test_documented_load_formats_are_the_loader_s() {
+        let start = DOC
+            .find("## Data Loading via Tools")
+            .expect("the data-loading section");
+        let section = &DOC[start..];
+        let section = &section[..section[3..].find("\n## ").map_or(section.len(), |i| i + 3)];
+        let documented: BTreeSet<String> = section
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .flat_map(|l| {
+                l.split('`')
+                    .skip(1)
+                    .step_by(2)
+                    .filter_map(|t| t.strip_prefix('.'))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let dispatched = |ext: &str| {
+            let p = dir.path().join(format!("probe.{ext}"));
+            std::fs::write(&p, b"").unwrap();
+            !matches!(p2a_core::data::DataLoader::load(&p), Err(e) if e.to_string().starts_with("Unsupported file format"))
+        };
+        const CANDIDATES: [&str; 20] = [
+            "csv", "tsv", "txt", "parquet", "pq", "feather", "arrow", "ipc", "xlsx", "xls", "xlsb",
+            "ods", "dta", "sav", "sas7bdat", "xpt", "rds", "json", "jsonl", "ndjson",
+        ];
+        assert!(documented.len() >= 9, "{documented:?}");
+        let undocumented: Vec<_> = CANDIDATES
+            .iter()
+            .filter(|e| dispatched(e) && !documented.contains(**e))
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "the loader reads {undocumented:?}, which API_ENDPOINTS.md does not list"
+        );
+        let refused: Vec<_> = documented.iter().filter(|e| !dispatched(e)).collect();
+        assert!(
+            refused.is_empty(),
+            "API_ENDPOINTS.md lists {refused:?}, which the loader refuses"
+        );
+    }
 }
 
 mod client_routes {
