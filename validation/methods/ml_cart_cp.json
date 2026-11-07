@@ -18,7 +18,9 @@
         "p2a-core::ml::cart::tests::test_validate_cart_cp_class",
         "p2a-core::ml::cart::tests::test_validate_cart_info_split",
         "p2a-core::ml::cart::tests::test_validate_cart_class_ties",
-        "p2a-core::ml::cart::tests::test_validate_cart_class_codes_do_not_change_the_tree"
+        "p2a-core::ml::cart::tests::test_validate_cart_class_codes_do_not_change_the_tree",
+        "p2a-core::ml::cart::tests::test_validate_cart_prune_recomputes",
+        "p2a-core::ml::cart::tests::test_validate_cart_prune_xor"
       ],
       "quantities": [
         "cp table: CP, nsplit, rel error, xerror, xstd",
@@ -29,6 +31,7 @@
         "class probabilities",
         "root risk",
         "min-xerror and 1-SE cp",
+        "pruned cp table, frame, importance and predictions",
         "class ties (lowest label)",
         "invariance to class coding"
       ],

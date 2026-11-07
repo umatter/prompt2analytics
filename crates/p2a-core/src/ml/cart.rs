@@ -42,6 +42,8 @@
 //! assert!(pruned.n_terminal <= result.n_terminal);
 //! ```
 
+use std::collections::BTreeMap;
+
 use ndarray::{Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
@@ -1410,59 +1412,104 @@ pub fn cart_predict_proba(result: &CartResult, x: ArrayView2<f64>) -> EconResult
     Ok(out)
 }
 
-/// Prune a CART tree to a specific complexity parameter.
+/// Prune a CART tree as `rpart::prune`: every split node whose complexity is at most `cp` becomes a
+/// leaf, and the training predictions, the leaf ids, the importance of the remaining splits and the
+/// complexity table follow. With nothing to collapse the tree comes back unchanged, its table
+/// included.
 ///
 /// # Arguments
 ///
 /// * `result` - Fitted CART result
 /// * `cp` - Complexity parameter to prune to
 ///
+/// # Errors
+///
+/// `InvalidSpecification` when `cp` is not finite.
+///
 /// # Returns
 ///
 /// Pruned tree result.
 pub fn cart_prune(result: &CartResult, cp: f64) -> EconResult<CartResult> {
-    let mut new_result = result.clone();
-    new_result.root = prune_node(&result.root, cp);
-    let (n_nodes, n_terminal, depth) = count_tree_stats(&new_result.root);
-    new_result.n_nodes = n_nodes;
-    new_result.n_terminal = n_terminal;
-    new_result.depth = depth;
-    Ok(new_result)
-}
-
-/// Prune a node and its children.
-fn prune_node(node: &CartNode, cp: f64) -> CartNode {
-    if node.split.is_none() || node.complexity < cp {
-        // Terminal node or should be pruned
-        return CartNode {
-            id: node.id,
-            n: node.n,
-            wt: node.wt,
-            dev: node.dev,
-            yval: node.yval,
-            class_probs: node.class_probs.clone(),
-            complexity: node.complexity,
-            split: None,
-            left: None,
-            right: None,
-        };
+    if !cp.is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("CART: cp must be finite, got {cp}"),
+        });
+    }
+    let collapses = result
+        .nodes_preorder()
+        .iter()
+        .any(|node| node.split.is_some() && node.complexity <= cp);
+    if !collapses {
+        return Ok(result.clone());
     }
 
-    // Recursively prune children
-    let left = node.left.as_ref().map(|l| Box::new(prune_node(l, cp)));
-    let right = node.right.as_ref().map(|r| Box::new(prune_node(r, cp)));
+    let mut pruned = result.clone();
+    collapse_nodes(&mut pruned.root, cp);
+    let (n_nodes, n_terminal, depth) = count_tree_stats(&pruned.root);
+    pruned.n_nodes = n_nodes;
+    pruned.n_terminal = n_terminal;
+    pruned.depth = depth;
 
-    CartNode {
-        id: node.id,
-        n: node.n,
-        wt: node.wt,
-        dev: node.dev,
-        yval: node.yval,
-        class_probs: node.class_probs.clone(),
-        complexity: node.complexity,
-        split: node.split.clone(),
-        left,
-        right,
+    let kept: BTreeMap<usize, f64> = pruned
+        .nodes_preorder()
+        .iter()
+        .map(|node| (node.id, node.yval))
+        .collect();
+    for (id, prediction) in pruned.leaf_ids.iter_mut().zip(&mut pruned.predictions) {
+        // A collapsed node's rows go to its deepest kept ancestor; the root is always kept.
+        while *id > 1 && !kept.contains_key(id) {
+            *id /= 2;
+        }
+        if let Some(&yval) = kept.get(id) {
+            *prediction = yval;
+        }
+    }
+
+    let mut importance = vec![0.0; pruned.variable_importance.len()];
+    for node in pruned.nodes_preorder() {
+        if let Some(split) = &node.split {
+            importance[split.feature] += split.improve;
+        }
+    }
+    pruned.variable_importance = importance;
+
+    // The rows with CP above `cp` and the first row at or below it, whose CP becomes `cp`.
+    let mut table: Vec<CpTableRow> = Vec::with_capacity(pruned.cp_table.len());
+    for row in &pruned.cp_table {
+        let collapsed = table
+            .last()
+            .is_some_and(|last| last.cp.max(cp) == row.cp.max(cp));
+        if !collapsed {
+            table.push(row.clone());
+        }
+    }
+    if let Some(last) = table.last_mut() {
+        last.cp = cp;
+    }
+    pruned.cv_error = pruned
+        .cv_error
+        .is_some()
+        .then(|| table.iter().filter_map(|row| row.xerror).collect());
+    pruned.cp_table = table;
+    Ok(pruned)
+}
+
+/// Turn every split node at or below `cp` into a leaf.
+fn collapse_nodes(node: &mut CartNode, cp: f64) {
+    if node.split.is_none() {
+        return;
+    }
+    if node.complexity <= cp {
+        node.split = None;
+        node.left = None;
+        node.right = None;
+        return;
+    }
+    if let Some(left) = &mut node.left {
+        collapse_nodes(left, cp);
+    }
+    if let Some(right) = &mut node.right {
+        collapse_nodes(right, cp);
     }
 }
 
@@ -2483,5 +2530,72 @@ mod tests {
             "{e}"
         );
         assert_eq!(CartMethod::Entropy.to_string(), "information");
+    }
+
+    #[test]
+    fn test_validate_cart_prune_recomputes() {
+        // ML-72. Before: prune kept the unpruned predictions (25 distinct values), importance and cp table (24 rows).
+        let (case, ds) = crate::test_support::load_case("cart_cp_anova");
+        let r = run_cart(&ds, "y", &X_ANOVA, &case_config(&ds, CartMethod::Anova)).unwrap();
+        let p = cart_prune(&r, 0.02).unwrap();
+        let tol = Tol::coef(300);
+        let mut c = Check::new(&case);
+        check_cp_table(&mut c, "anova_pruned_002", &p.cp_table, tol, true);
+        check_frame(&mut c, "anova_pruned_002", &p, tol);
+        check_importance(&mut c, "anova_pruned_002_importance", &p, tol);
+        c.vector("anova_pruned_002_pred", &p.predictions, tol)
+            .vector("anova_pruned_002_pred_head", &p.predictions[..10], tol)
+            .finish();
+        assert_eq!(p.variable_importance[3], 0.0); // x4's splits are all below cp
+        assert_eq!((p.n_nodes, p.n_terminal, p.depth), (11, 6, 3));
+        assert_eq!(p.cv_error.as_ref().map(Vec::len), Some(5));
+        let (x, _, _) = extract_xy(&ds, "y", &X_ANOVA, NaPolicy::Fail).unwrap();
+        assert_eq!(cart_predict(&p, x.view()).unwrap(), p.predictions);
+        // nothing to collapse: rpart returns the tree unchanged, cp table included
+        let same = cart_prune(&r, 0.0005).unwrap();
+        assert_eq!(same.n_nodes, r.n_nodes);
+        assert_eq!(
+            same.cp_table
+                .iter()
+                .map(|row| row.cp.to_bits())
+                .collect::<Vec<_>>(),
+            r.cp_table
+                .iter()
+                .map(|row| row.cp.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert!(cart_prune(&r, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn test_validate_cart_prune_xor() {
+        // ML-72: the root's own improvement is 0.000346 of the root deviance, but its weakest-link complexity
+        // (whole subtree) is 0.33. Before: the cp < 0.001 test made the fit a single leaf.
+        let (case, ds) = crate::test_support::load_case("cart_prune_xor");
+        let mut config = CartConfig::default();
+        config.cp = 0.001;
+        config.min_split = 20;
+        config.min_bucket = 7;
+        config.xval = 0;
+        config.max_surrogate = 0;
+        config.use_surrogate = false;
+        let r = run_cart(&ds, "y", &["x0", "x1"], &config).unwrap();
+        let p5 = cart_prune(&r, 0.05).unwrap();
+        let p50 = cart_prune(&r, 0.5).unwrap();
+        let tol = Tol::coef(40);
+        let mut c = Check::new(&case);
+        check_cp_table(&mut c, "xor", &r.cp_table, tol, false);
+        check_frame(&mut c, "xor", &r, tol);
+        check_importance(&mut c, "xor_importance", &r, tol);
+        check_cp_table(&mut c, "xor_pruned_005", &p5.cp_table, tol, false);
+        check_frame(&mut c, "xor_pruned_005", &p5, tol);
+        check_importance(&mut c, "xor_pruned_005_importance", &p5, tol);
+        check_cp_table(&mut c, "xor_pruned_05", &p50.cp_table, tol, false);
+        c.vector("xor_pruned_005_pred", &p5.predictions, tol)
+            .scalar("xor_pruned_005_leaves", p5.n_terminal as f64, Tol::exact())
+            .scalar("xor_pruned_05_leaves", p50.n_terminal as f64, Tol::exact())
+            .vector("xor_pruned_05_pred", &p50.predictions, tol)
+            .finish();
+        assert!(p50.variable_importance.iter().all(|&v| v == 0.0));
     }
 }
