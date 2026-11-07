@@ -1013,7 +1013,7 @@ fn count_tree_stats(node: &CartNode) -> (usize, usize, usize) {
 }
 
 /// The leaf a row reaches.
-fn find_leaf<'t>(root: &'t CartNode, value: impl Fn(usize) -> f64) -> &'t CartNode {
+fn find_leaf(root: &CartNode, value: impl Fn(usize) -> f64) -> &CartNode {
     let mut node = root;
     while let (Some(split), Some(left), Some(right)) = (&node.split, &node.left, &node.right) {
         node = if (value(split.feature) < split.threshold) == split.direction {
