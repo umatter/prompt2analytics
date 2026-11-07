@@ -709,6 +709,9 @@ fn compute_endspan(n: usize) -> usize {
     compute_minspan(n)
 }
 
+/// Candidate knots closer than this share of their value are one knot: rounding, not data.
+const KNOT_ROUNDING: f64 = 64.0 * f64::EPSILON;
+
 /// Find candidate knot locations for each variable.
 fn find_candidate_knots(
     x: &ArrayView2<f64>,
@@ -742,19 +745,18 @@ fn find_candidate_knots(
         let mut last_idx: Option<usize> = None;
 
         for (i, &val) in valid_range.iter().enumerate() {
-            match last_idx {
-                None => {
-                    selected.push(val);
-                    last_idx = Some(i);
-                }
-                Some(li) if i >= li + minspan => {
-                    // Check if value is different from last selected
-                    if (val - *selected.last().unwrap()).abs() > 1e-10 {
-                        selected.push(val);
-                        last_idx = Some(i);
-                    }
-                }
-                _ => {}
+            let Some(li) = last_idx else {
+                selected.push(val);
+                last_idx = Some(i);
+                continue;
+            };
+            let Some(&last) = selected.last() else {
+                continue;
+            };
+            // A value differs from the last selected by more than its rounding, at any scale of x.
+            if i >= li + minspan && val - last > KNOT_ROUNDING * val.abs().max(last.abs()) {
+                selected.push(val);
+                last_idx = Some(i);
             }
         }
 
@@ -1072,7 +1074,9 @@ fn backward_pass(
         let fit = fit_columns(y, &columns)?;
         let identified = fit.aliased.is_empty();
         // On a full-rank fit the RSS comes from the coefficients, as predict computes it.
-        let mut fitted = vec![0.0; if identified { n } else { 0 }];
+        let mut fitted =
+            resource::try_vec(if identified { n } else { 0 }, 0.0, "MARS fitted values")
+                .map_err(|e| e.to_string())?;
         if identified {
             for (column, &c) in columns.iter().zip(fit.coefficients.iter()) {
                 for (f, v) in fitted.iter_mut().zip(column) {
@@ -1555,6 +1559,50 @@ mod tests {
         assert_eq!(d, r.effective_df());
         let want = r.rss / (120.0 * (1.0 - d / 120.0).powi(2));
         assert!((r.gcv - want).abs() <= 1e-12 * want, "{} vs {want}", r.gcv);
+    }
+
+    /// Candidate knots are told apart at the rounding of x: rescaling a predictor rescales the
+    /// knots and leaves the terms. Before: an absolute gap collapsed a predictor on a small scale
+    /// to one candidate.
+    #[test]
+    fn test_mars_candidate_knots_are_scale_free_in_x() {
+        let (x, y) = two_kink(120, 0);
+        let fit = |scale: f64| {
+            let c = MarsConfig {
+                fast: Some(false),
+                ..Default::default()
+            };
+            let scaled = x.mapv(|v| v * scale);
+            let r = mars(scaled.view(), y.view(), c, None).unwrap();
+            r.basis_functions
+                .iter()
+                .map(|b| {
+                    b.hinges
+                        .iter()
+                        .map(|h| {
+                            (
+                                h.variable,
+                                h.knot / scale,
+                                h.hinge_type == HingeType::Positive,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = fit(1.0);
+        assert!(base.len() > 1, "{base:?}");
+        for scale in [1e-12, 1e12] {
+            let got = fit(scale);
+            assert_eq!(got.len(), base.len(), "{scale}: {got:?}");
+            for (g, b) in got.iter().flatten().zip(base.iter().flatten()) {
+                assert_eq!((g.0, g.2), (b.0, b.2), "{scale}");
+                assert!(
+                    (g.1 - b.1).abs() <= 1e-9 * b.1.abs().max(1.0),
+                    "{scale}: {g:?} {b:?}"
+                );
+            }
+        }
     }
 
     /// The stopping rule is relative: rescaling y gives the same terms at any scale, however small

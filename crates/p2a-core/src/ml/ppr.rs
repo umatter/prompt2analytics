@@ -48,8 +48,9 @@
 //!   last smoother call, a rejected trial included, and at `optlevel = 0` only for the first term.
 //! - A spline smoother on projections tied at either end drops the knots that coincide, and a
 //!   predictor with enough distinct values is fitted. R's knots coincide there and its smoother
-//!   returns NaN criteria. Too few distinct values (4 always suffice) at the start of a search
-//!   are an error; a step that ties the projections later in a search is a rejected step.
+//!   returns NaN criteria. Values tied up to their rounding count as one. Too few distinct values
+//!   (4 always suffice) at the start of a search are an error; any refusal by the smoother later
+//!   in a search is a rejected step.
 //!
 //! # References
 //!
@@ -536,14 +537,13 @@ fn unused_options(c: &PprConfig) -> Vec<String> {
             push("span", c.span, "supsmu");
         }
     }
-    let fixed_span_ignores_bass = c.sm_method == SmoothingMethod::Supsmu && c.span > 0.0;
     if c.sm_method != SmoothingMethod::Spline && c.df != 5.0 {
         push("df", c.df, "spline");
     }
     if c.sm_method != SmoothingMethod::GcvSpline && c.gcvpen != 1.0 {
         push("gcvpen", c.gcvpen, "gcvspline");
     }
-    if fixed_span_ignores_bass && c.bass != 0.0 {
+    if c.sm_method == SmoothingMethod::Supsmu && c.span > 0.0 && c.bass != 0.0 {
         out.push(format!(
             "PPR: bass = {} has no effect with span = {} (it applies to the cross-validated span \
              only)",
@@ -978,6 +978,21 @@ impl Smart<'_> {
         f: &mut [f64],
         t: &mut [f64],
     ) -> EconResult<(f64, f64)> {
+        self.search_direction(buf, control, start, y, a, f, t, Self::smooth_on)
+    }
+
+    /// [`Self::oneone`] with its smoother as an argument.
+    fn search_direction(
+        &self,
+        buf: &mut Buffers,
+        control: Control,
+        start: usize,
+        y: &[f64],
+        a: &mut [f64],
+        f: &mut [f64],
+        t: &mut [f64],
+        mut smooth: impl FnMut(&Self, &mut Buffers, &[f64]) -> EconResult<f64>,
+    ) -> EconResult<(f64, f64)> {
         let (n, p, w, sw) = (self.n, self.p, self.w, self.sw);
         if start == 0 {
             buf.deriv.fill(1.0);
@@ -1012,7 +1027,7 @@ impl Smart<'_> {
                 if norm > 0.0 && norm.is_finite() {
                     let s = 1.0 / norm;
                     buf.trial.iter_mut().for_each(|v| *v *= s);
-                    match self.smooth_on(buf, y) {
+                    match smooth(self, buf, y) {
                         Ok(df) => {
                             let mut s = 0.0;
                             for j in 0..n {
@@ -1025,8 +1040,10 @@ impl Smart<'_> {
                                 break;
                             }
                         }
-                        // A step that ties the projections is rejected once the search has a
-                        // direction to keep; at its start there is none, and the error stands.
+                        // Once the search has a direction to keep, any refusal by the smoother
+                        // (projections it cannot place knots on, a penalty it cannot scale, normal
+                        // equations it cannot factor) rejects the step; at the start there is no
+                        // direction to keep, and the error stands.
                         Err(EconError::InvalidSpecification { .. }) if asr < BIG => {}
                         Err(e) => return Err(e),
                     }
@@ -2239,6 +2256,141 @@ mod tests {
         );
     }
 
+    /// One predictor with a value far above the others: the others keep their knots, and the
+    /// spline smoothers fit it as the super smoother does. Before: every inner knot was dropped
+    /// and the error claimed two distinct values.
+    #[test]
+    fn test_ppr_spline_fits_a_predictor_with_an_outlier() {
+        let n = 100;
+        for far in [1e10, 1e12] {
+            let v: Vec<f64> = (0..n)
+                .map(|i| {
+                    if i == 37 {
+                        far
+                    } else {
+                        ((i * 61) % n) as f64 * 0.0085
+                    }
+                })
+                .collect();
+            let x = Array2::from_shape_fn((n, 1), |(i, _)| v[i]);
+            let y: Vec<f64> = (0..n)
+                .map(|i| v[i].min(1.0).sin() + 0.2 * (((i * 7) % 5) as f64 - 2.0))
+                .collect();
+            for method in [SmoothingMethod::Spline, SmoothingMethod::GcvSpline] {
+                let cfg = PprConfig {
+                    sm_method: method,
+                    ..Default::default()
+                };
+                let r = ppr_with(x.view(), &y, None, &cfg).unwrap();
+                assert!(r.fitted.iter().all(|v| v.is_finite()), "{method} {far}");
+            }
+        }
+    }
+
+    /// `search_direction` with the real smoother on the first `allowed` calls, then `refusal`.
+    /// Returns the search's result, its direction, ridge function and projections, and the
+    /// direction, sorted projections and smooth of the last call that was allowed.
+    #[allow(clippy::type_complexity)]
+    fn search_with_refusal(
+        allowed: usize,
+        refusal: fn() -> EconError,
+    ) -> (
+        EconResult<(f64, f64)>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        (Vec<f64>, Vec<(f64, usize)>, Vec<f64>),
+    ) {
+        let (n, p) = (120, 2);
+        let x: Vec<f64> = (0..n)
+            .flat_map(|i| {
+                let t = i as f64 / n as f64;
+                [t + 0.3 * (t * 17.0).sin(), (t * 9.0).cos()]
+            })
+            .collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let s = 0.6 * x[2 * i] + 0.8 * x[2 * i + 1];
+                (2.0 * s).sin() + 0.15 * (((i * 7) % 5) as f64 - 2.0)
+            })
+            .collect();
+        let w = vec![1.0; n];
+        let smart = Smart {
+            x: &x,
+            w: &w,
+            sw: n as f64,
+            n,
+            p,
+            method: SmoothingMethod::Spline,
+            span: 0.0,
+            bass: 0.0,
+            df: 5.0,
+            gcvpen: 1.0,
+            conv: 1e-3,
+            maxit: 20,
+            control: Control {
+                cutmin: 0.1,
+                mitone: 20,
+            },
+        };
+        let mut buf = smart.buffers().unwrap();
+        let (mut a, mut f, mut t) = (vec![0.0; p], vec![0.0; n], vec![0.0; n]);
+        let mut calls = 0;
+        let mut last = (Vec::new(), Vec::new(), Vec::new());
+        let result = smart.search_direction(
+            &mut buf,
+            smart.control,
+            0,
+            &y,
+            &mut a,
+            &mut f,
+            &mut t,
+            |s, b, yy| {
+                calls += 1;
+                if calls > allowed {
+                    return Err(refusal());
+                }
+                let df = s.smooth_on(b, yy)?;
+                last = (b.trial.clone(), b.order.clone(), b.smo.clone());
+                Ok(df)
+            },
+        );
+        (result, a, f, t, last)
+    }
+
+    /// A smoother refusal after the first accepted smooth rejects the step: the accepted direction,
+    /// ridge function and projections survive. At the start, or with an error that is not a
+    /// refusal, the error stands.
+    #[test]
+    fn test_ppr_search_rejects_a_step_the_smoother_refuses() {
+        let refused = || invalid("the smoother refuses".to_string());
+        let (result, a, f, t, (trial, order, smo)) = search_with_refusal(1, refused);
+        result.unwrap();
+        assert_eq!(a, trial);
+        // the only smooth, by row and standardised as the search leaves it
+        let n = smo.len();
+        let mut by_row = vec![0.0; n];
+        for (pos, &(s, row)) in order.iter().enumerate() {
+            assert_eq!(t[row], s);
+            by_row[row] = smo[pos];
+        }
+        let mean = by_row.iter().sum::<f64>() / n as f64;
+        let sd = (by_row.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        for (got, v) in f.iter().zip(&by_row) {
+            assert!((got - (v - mean) / sd).abs() <= 1e-12, "{got} {v}");
+        }
+
+        // The search does move past this direction when the smoother goes on.
+        let (result, moved, ..) = search_with_refusal(usize::MAX, refused);
+        result.unwrap();
+        assert_ne!(moved, a);
+
+        let (start, ..) = search_with_refusal(0, refused);
+        assert!(start.unwrap_err().to_string().contains("refuses"));
+        let (later, ..) = search_with_refusal(1, || EconError::Computation("failed".to_string()));
+        assert!(later.unwrap_err().to_string().contains("failed"));
+    }
+
     /// Discrete predictors tie the projections heavily, at the ends and in a step of the search;
     /// the spline smoothers fit them. A binary predictor alone has too few distinct values.
     #[test]
@@ -2282,7 +2434,7 @@ mod tests {
             let y: Vec<f64> = (0..n).map(|i| noisy(b[i], i)).collect();
             let e = ppr_with(x.view(), &y, None, &cfg).unwrap_err().to_string();
             assert!(
-                e.contains("too few distinct") && e.contains("2 distinct"),
+                e.contains("too few distinct") && e.contains(": 2 distinct at"),
                 "{e}"
             );
         }

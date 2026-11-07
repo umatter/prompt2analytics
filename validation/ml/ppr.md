@@ -83,9 +83,11 @@ Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_va
 - **Tied projections with a spline smoother.** About 1/12 of the rows or more tied at either end of a sorted
   projection make `ppr.f`'s inner knots coincide with a boundary knot. R then logs non-finite `spar` values and
   returned a `gofn` of 80.205 on six runs of a discrete-predictor test (not compared further). p2a drops the
-  repeated knots, so `nk` follows the shorter knot vector, and fits; untied data keep R's knots. Too few distinct
-  values (4 always suffice) at the start of a search are an error, and a step that ties the projections later in
-  a search is a rejected step.
+  repeated knots, so `nk` follows the shorter knot vector, and fits. Repeats are judged at the rounding of the
+  values (64 machine epsilons of the largest, as a share of the range), so untied data keep R's knots unless the
+  largest value is about 1e13 times the gap between knots; such a value is refused where R fits it. Too few
+  distinct values (4 always suffice) at the start of a search are an error, and any refusal by the smoother later
+  in a search is a rejected step.
 
 ## Missing and non-finite values
 

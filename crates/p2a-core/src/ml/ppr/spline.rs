@@ -17,7 +17,9 @@
 //! and lambda of its last Brent evaluation, not of the spar it reports.
 //!
 //! Tied abscissae move the knots away from `ppr.f`'s, which then coincide: `ppr_spline_knots`
-//! drops the repeats, where R divides by the empty interval and returns NaN criteria.
+//! drops the repeats, where R divides by the empty interval and returns NaN criteria. Repeats are
+//! judged at the rounding of the abscissae (`knot_eps`), so untied values keep `ppr.f`'s knots
+//! unless the largest is about 1e13 times the gap between them.
 
 use super::SmoothingMethod;
 use crate::errors::{EconError, EconResult};
@@ -29,9 +31,6 @@ const NK_MAX: usize = 15;
 const NK_MIN: usize = 6;
 /// Fewest distinct abscissae that always reach [`NK_MIN`] coefficients.
 const DISTINCT_MIN: usize = 4;
-/// On `dx` in [0, 1], knots closer than this are one knot: `(1 - f) v + f v` is only within
-/// rounding of `v`, and projections of tied rows can differ by it.
-const KNOT_EPS: f64 = 1e-10;
 /// Band of the symmetric matrices: `band[i][d]` is entry `(i, i + d)`, `d <= 3`.
 type Band = [[f64; 4]; NK_MAX];
 
@@ -71,14 +70,25 @@ pub(crate) struct SplineFit {
     pub(crate) crit: f64,
 }
 
+/// On `dx` in [0, 1], the distance below which two of the sorted values `x` are one value. The
+/// projections of tied rows differ by rounding, which scales with the values and not with their
+/// range, and `(1 - f) v + f v` is only within rounding of `v`; dividing by the range carries that
+/// over to `dx`. Being a bound for the largest value, it merges values spread over less than
+/// about 1e-13 of the range, however they were computed.
+fn knot_eps(x: &[f64]) -> f64 {
+    let range = x[x.len() - 1] - x[0];
+    64.0 * f64::EPSILON * x[0].abs().max(x[x.len() - 1].abs()) / range
+}
+
 /// `ppr.f`'s knots on `dx` in [0, 1], written to `knot`; returns the number of coefficients `nk`,
 /// with `nk + 4` knots. On untied data `nk = min(n, 15)` and the inner knots lie at the
 /// single-precision fraction `(n - 1) (i - 4) / (nk - 3)` of the sorted `dx`.
 ///
-/// An inner knot on a boundary knot or on the previous inner knot is dropped, so the knots strictly
-/// increase apart from the 4-fold ends. When fewer than two inner knots survive (one value holds
-/// nearly every row), the inner knots are the distinct inner values instead, evenly thinned.
-pub(crate) fn ppr_spline_knots(dx: &[f64], knot: &mut [f64; NK_MAX + 4]) -> usize {
+/// An inner knot within `eps` of a boundary knot or of the previous inner knot is dropped, so the
+/// knots strictly increase apart from the 4-fold ends. When fewer than two inner knots survive (one
+/// value holds nearly every row), the inner knots are the distinct inner values instead, evenly
+/// thinned.
+pub(crate) fn ppr_spline_knots(dx: &[f64], eps: f64, knot: &mut [f64; NK_MAX + 4]) -> usize {
     let n = dx.len();
     let nk = n.min(NK_MAX);
     let (lo, hi) = (dx[0], dx[n - 1]);
@@ -89,19 +99,19 @@ pub(crate) fn ppr_spline_knots(dx: &[f64], knot: &mut [f64; NK_MAX + 4]) -> usiz
         let ip = p as usize;
         let f = p - ip as f64;
         let v = (1.0 - f) * dx[ip] + f * dx[ip + 1];
-        if v - knot[m - 1] > KNOT_EPS && hi - v > KNOT_EPS {
+        if v - knot[m - 1] > eps && hi - v > eps {
             knot[m] = v;
             m += 1;
         }
     }
     if m < NK_MIN {
-        let inner = distinct_values(dx).saturating_sub(2);
+        let inner = distinct_values(dx, eps).saturating_sub(2);
         let keep = inner.min(nk.saturating_sub(4));
         if keep >= NK_MIN - 4 {
             m = 4;
             let (mut seen, mut prev) = (0, lo);
             for &v in dx {
-                if v - prev > KNOT_EPS && hi - v > KNOT_EPS {
+                if v - prev > eps && hi - v > eps {
                     prev = v;
                     if m - 4 < keep && seen >= (m - 4) * inner / keep {
                         knot[m] = v;
@@ -116,12 +126,12 @@ pub(crate) fn ppr_spline_knots(dx: &[f64], knot: &mut [f64; NK_MAX + 4]) -> usiz
     m
 }
 
-/// The values of sorted `dx` that differ by more than [`KNOT_EPS`].
-fn distinct_values(dx: &[f64]) -> usize {
+/// The values of sorted `dx` that differ by more than `eps`.
+fn distinct_values(dx: &[f64], eps: f64) -> usize {
     let mut count = 1;
     let mut prev = dx[0];
     for &v in dx {
-        if v - prev > KNOT_EPS {
+        if v - prev > eps {
             prev = v;
             count += 1;
         }
@@ -208,9 +218,11 @@ struct Solved {
 }
 
 impl Problem {
-    /// Fills `left` and `basis` for sorted `dx` and accumulates `X'WX`, `X'Wy` and `Omega`.
+    /// Fills `left` and `basis` for sorted `dx` and accumulates `X'WX`, `X'Wy` and `Omega`. `eps`
+    /// is the knots' tolerance, for the message when `dx` cannot carry the spline.
     fn new(
         dx: &[f64],
+        eps: f64,
         y: &[f64],
         w: &[f64],
         knot: &[f64],
@@ -221,9 +233,9 @@ impl Problem {
         if nk < NK_MIN {
             return Err(EconError::InvalidSpecification {
                 message: format!(
-                    "smoothing spline: the abscissae have {} distinct values, too few distinct \
-                     values for the spline (at least {DISTINCT_MIN} are needed)",
-                    distinct_values(dx)
+                    "smoothing spline: too few distinct abscissae for the spline: {} distinct at \
+                     {eps:.1e} of their range (at least {DISTINCT_MIN} are needed)",
+                    distinct_values(dx, eps)
                 ),
             });
         }
@@ -258,9 +270,9 @@ impl Problem {
         if !(ratio.is_finite() && ratio > 0.0) {
             return Err(EconError::InvalidSpecification {
                 message: format!(
-                    "smoothing spline: the abscissae have {} distinct values, too few distinct \
-                     values to scale the penalty",
-                    distinct_values(dx)
+                    "smoothing spline: too few distinct abscissae to scale the penalty: {} \
+                     distinct at {eps:.1e} of their range",
+                    distinct_values(dx, eps)
                 ),
             });
         }
@@ -461,6 +473,7 @@ fn brent_spar(mut f: impl FnMut(f64) -> EconResult<f64>) -> EconResult<f64> {
 /// Smooths `y` on sorted `dx` in [0, 1] on `knot`, with the spar that minimises `crit`, into `smo`.
 fn fit_spline(
     dx: &[f64],
+    eps: f64,
     y: &[f64],
     w: &[f64],
     knot: &[f64],
@@ -469,7 +482,7 @@ fn fit_spline(
     basis: &mut [[f64; 4]],
     smo: &mut [f64],
 ) -> EconResult<SplineFit> {
-    let problem = Problem::new(dx, y, w, knot, left, basis)?;
+    let problem = Problem::new(dx, eps, y, w, knot, left, basis)?;
     let spar = brent_spar(|spar| {
         let solved = problem.solve(problem.lambda(spar))?;
         Ok(problem.criterion(&solved, crit, y, w, left, basis))
@@ -512,7 +525,8 @@ pub(crate) fn ppr_spline(
         *d = (v - x[0]) / range;
     }
     let mut knot = [0.0; NK_MAX + 4];
-    let nk = ppr_spline_knots(&work.dx, &mut knot);
+    let eps = knot_eps(x);
+    let nk = ppr_spline_knots(&work.dx, eps, &mut knot);
     let crit = if method == SmoothingMethod::Spline {
         SplineCriterion::DfMatch { df }
     } else {
@@ -520,6 +534,7 @@ pub(crate) fn ppr_spline(
     };
     let fit = fit_spline(
         &work.dx,
+        eps,
         y,
         w,
         &knot[..nk + 4],
@@ -564,14 +579,14 @@ mod tests {
 
     fn knots(dx: &[f64]) -> Vec<f64> {
         let mut knot = [0.0; NK_MAX + 4];
-        let nk = ppr_spline_knots(dx, &mut knot);
+        let nk = ppr_spline_knots(dx, knot_eps(dx), &mut knot);
         knot[..nk + 4].to_vec()
     }
 
     fn problem(dx: &[f64], y: &[f64], w: &[f64]) -> (Problem, Vec<u32>, Vec<[f64; 4]>, Vec<f64>) {
         let knot = knots(dx);
         let (mut left, mut basis) = (vec![0; dx.len()], vec![[0.0; 4]; dx.len()]);
-        let p = Problem::new(dx, y, w, &knot, &mut left, &mut basis).unwrap();
+        let p = Problem::new(dx, knot_eps(dx), y, w, &knot, &mut left, &mut basis).unwrap();
         (p, left, basis, knot)
     }
 
@@ -708,7 +723,8 @@ mod tests {
             SplineCriterion::Gcv { penalty: 2.0 },
         ] {
             let (mut l, mut b, mut smo) = (vec![0; n], vec![[0.0; 4]; n], vec![0.0; n]);
-            let fit = fit_spline(&dx, &y, &w, &knot, crit, &mut l, &mut b, &mut smo).unwrap();
+            let eps = knot_eps(&dx);
+            let fit = fit_spline(&dx, eps, &y, &w, &knot, crit, &mut l, &mut b, &mut smo).unwrap();
             let (mut best, mut best_crit) = (0.0, f64::INFINITY);
             for k in 0..=1500 {
                 let spar = k as f64 / 1000.0;
@@ -766,7 +782,7 @@ mod tests {
         );
         let e = e.unwrap_err().to_string();
         assert!(
-            e.contains("2 distinct values") && e.contains("too few distinct"),
+            e.contains("too few distinct") && e.contains(": 2 distinct at"),
             "{e}"
         );
     }
@@ -846,7 +862,52 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(e.contains("3 distinct values"), "{e}");
+        assert!(e.contains(": 3 distinct at"), "{e}");
+    }
+
+    /// 99 untied values on a scale of 1 and one far above them: the 99 share a small part of `dx`,
+    /// and what separates them there is far above the rounding of values that small.
+    fn with_outlier(far: f64) -> Vec<f64> {
+        let mut x: Vec<f64> = (0..99).map(|i| i as f64 * 0.0085 + 0.003).collect();
+        x.push(far);
+        x
+    }
+
+    /// One large value does not merge the others: the knots stay, and both criteria fit.
+    #[test]
+    fn test_ppr_spline_keeps_knots_under_an_outlier() {
+        for far in [1e10, 1e12] {
+            let x = with_outlier(far);
+            fits_finitely(&x);
+            let eps = knot_eps(&x);
+            let range = far - x[0];
+            let dx: Vec<f64> = x.iter().map(|v| (v - x[0]) / range).collect();
+            let mut knot = [0.0; NK_MAX + 4];
+            assert_eq!(ppr_spline_knots(&dx, eps, &mut knot), 15, "{far}");
+        }
+    }
+
+    /// Projections of tied rows, tied only up to rounding, are one value at any offset and range:
+    /// sums `i + j` along a diagonal direction, and the same scaled and shifted far from zero.
+    #[test]
+    fn test_ppr_spline_merges_rounding_of_tied_rows() {
+        let a = std::f64::consts::FRAC_1_SQRT_2 * 1.1;
+        let mut separated_by_rounding = false;
+        for (scale, shift) in [(1.0, 0.0), (1e-6, 0.0), (1e6, 0.0), (1.0, 1e4)] {
+            let mut x: Vec<f64> = Vec::new();
+            for i in 0..10 {
+                for j in 0..10 {
+                    let (vi, vj) = (i as f64 * scale + shift, j as f64 * scale + shift);
+                    x.push(a * vi + a * vj);
+                }
+            }
+            x.sort_by(f64::total_cmp);
+            let range = x[99] - x[0];
+            let dx: Vec<f64> = x.iter().map(|v| (v - x[0]) / range).collect();
+            assert_eq!(distinct_values(&dx, knot_eps(&x)), 19, "{scale} {shift}");
+            separated_by_rounding |= distinct_values(&dx, 0.0) > 19;
+        }
+        assert!(separated_by_rounding, "no tied rows differ by rounding");
     }
 
     /// Dropping repeats keeps knots strictly increasing inside and leaves untied data alone.
@@ -859,7 +920,7 @@ mod tests {
         assert_eq!(&k[..4], &[0.0; 4]);
         assert_eq!(&k[nk..], &[1.0; 4]);
         for pair in k[3..=nk].windows(2) {
-            assert!(pair[1] - pair[0] > KNOT_EPS, "{k:?}");
+            assert!(pair[1] - pair[0] > knot_eps(&dx), "{k:?}");
         }
         assert!(nk >= NK_MIN, "{k:?}");
         // untied: min(n, 15) coefficients
@@ -890,7 +951,8 @@ mod tests {
             ("spline_gcv", SplineCriterion::Gcv { penalty: 1.0 }),
             ("spline_gcv_pen2", SplineCriterion::Gcv { penalty: 2.0 }),
         ] {
-            let f = fit_spline(&dx, &y, &w, &knot, crit, &mut l, &mut b, &mut smo).unwrap();
+            let eps = knot_eps(&dx);
+            let f = fit_spline(&dx, eps, &y, &w, &knot, crit, &mut l, &mut b, &mut smo).unwrap();
             // R's smooth, edf and lambda are of its last Brent evaluation; its spar is the
             // minimiser. 0.333 for 1/3 moves ratio and spar.
             check
