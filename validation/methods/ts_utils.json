@@ -87,6 +87,32 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ts_cpgram",
+      "name": "Cumulative periodogram white-noise check",
+      "category": "forecasting",
+      "reference": "the body of stats::cpgram (spec.taper, fft, band 1.358 / (sqrt(mp) + 0.12 + 0.11 / sqrt(mp))); asymptotic Kolmogorov (stats:::C_pKS2)",
+      "doc": "validation/timeseries/cpgram.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::cpgram::tests::test_validate_cpgram_white_noise",
+        "p2a-core::forecasting::cpgram::tests::test_validate_cpgram_ar1"
+      ],
+      "quantities": [
+        "frequencies",
+        "cumulative periodogram",
+        "critical value",
+        "max deviation",
+        "statistic",
+        "p-value",
+        "white verdict"
+      ],
+      "tolerance": "Tol::stat(n) (n = 100, 120); p Tol::p_value(n)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

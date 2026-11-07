@@ -1,97 +1,37 @@
-# Cumulative Periodogram Validation
+# Cumulative periodogram
 
-## Method Overview
+`cpgram`, `run_cpgram` and `white_noise_test` in `crates/p2a-core/src/forecasting/cpgram.rs`.
+R reference case: `ts_filter_ar_cpt` (`validation/r/cases/ts_utils.R`), series `wn` (N(3, 1), n = 100) and `ar1`
+(AR(1) 0.9 around 10, n = 120) of `validation/datasets/generated/ts_utils.csv`.
 
-The cumulative periodogram (`cpgram`) is used for testing whether a time series is white noise. It plots the cumulative sum of the periodogram ordinates against frequency, with confidence bands based on the Kolmogorov-Smirnov distribution.
+`stats::cpgram` plots and returns `NULL`, so the case writes out its body. p2a computes the same steps:
 
-**Key Parameters:**
-- `x`: Time series data
-- `taper`: Proportion of data to taper (default: 0.1)
+1. **Centre, then taper.** `spec.taper(scale(x, TRUE, FALSE), p = taper)`: with m = floor(n p), the first and last m values
+   are multiplied by 0.5 (1 - cos(pi (2i - 1) / (2m))), i = 1..m. Tapering before centring would turn the mean into a
+   low-frequency component and declare every series with a non-zero mean non-white.
+2. **Periodogram.** `Mod(fft(x))^2 / n` at the frequencies k / n. R's set has floor(n / 2) + 1 points including (0, 0), and
+   drops the last when that count is even. p2a reports it without (0, 0), so it holds mp points.
+3. **Cumulative periodogram.** Running sum over the total. A series with no variation left is an error.
+4. **Band.** q = sqrt(mp) + 0.12 + 0.11 / sqrt(mp), half-width `critical_value` = 1.358 / q, around the line 2 f, clipped
+   to [0, 1].
 
-## Reference Implementations
+The verdict is `is_white_noise` = max_k |C_k - 2 f_k| <= `critical_value`. `ks_statistic` is the Stephens-modified D, that
+maximum times q, whose 5 % point is R's 1.358. `ks_p_value` is the asymptotic Kolmogorov survival function, without
+shortcuts: 1 - (sqrt(2 pi) / x) sum_{k odd} exp(-k^2 pi^2 / (8 x^2)) below 1, and
+2 sum_{k >= 1} (-1)^(k-1) exp(-2 k^2 x^2) from 1 on, where the first form loses digits.
 
-| Package | Function | Notes |
-|---------|----------|-------|
-| R stats | `cpgram()` | Reference (primarily plotting) |
-| R stats | `spectrum()` | Core periodogram computation |
+A taper outside [0, 0.5] (R's `spec.taper`: "'p' must be between 0 and 0.5"), a non-finite value and fewer than 4
+observations are errors.
 
-## Algorithm
+## Pins
 
-1. Compute periodogram using FFT: I(f) = |FFT(x)|^2 / n
-2. Normalize: cumsum(I) / sum(I)
-3. Plot against normalized frequency (0, 0.5)
-4. Add 95% confidence bands: y +/- 1.358 / sqrt(n)
+| Test | Pinned | Tolerance |
+|---|---|---|
+| `test_validate_cpgram_white_noise` | `wn`: crit 0.18843774417144613, max dev 0.10889787598160139, statistic 0.7847860641362071, p 0.5690823493746275, white; every frequency and cumulative value | `Tol::coef(n)` frequencies, `Tol::stat(n)` the rest, `Tol::p_value(n)` p |
+| `test_validate_cpgram_ar1` | `ar1`: crit 0.1723313593732768, max dev 0.7753420099521079, statistic 6.1098250100511695, p 7.527266358277316e-33, not white | as above |
+| `test_validate_periodogram_against_r` | literal R output, n = 16 | 1e-9 relative |
+| `test_validate_cpgram_untapered_against_r` | literal R output, n = 65, taper 0 | 1e-10 relative |
+| `test_kolmogorov_sf_matches_r` | six points of the survival function | 1e-12 relative |
 
-## Test Cases
-
-### Test Case 1: White Noise (Should Pass Test)
-
-**R Code:**
-```r
-set.seed(42)
-x <- rnorm(256)
-cpgram(x)  # Should stay within bands
-# Extract periodogram values
-spec <- spectrum(x, plot = FALSE)
-cumspec <- cumsum(spec$spec) / sum(spec$spec)
-# For white noise, cumspec should be approximately linear
-```
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-9 for the estimator):
-- `forecasting::cpgram::tests::test_cpgram_white_noise` (`crates/p2a-core/src/forecasting/cpgram.rs`): max deviation < 1 on zero-mean data.
-
-### Test Case 2: Non-White Noise (AR Process)
-
-**R Code:**
-```r
-set.seed(42)
-# AR(1) process with strong autocorrelation
-x <- arima.sim(n = 256, list(ar = 0.9))
-cpgram(x)  # Should deviate from bands at low frequencies
-```
-
-**Rust tests**: no AR(1) test exists (not R-pinned; the R-pinned case comes with TS-22).
-
-### Test Case 3: Periodogram Values
-
-**R Code:**
-```r
-x <- c(1, 2, 3, 4, 5, 6, 7, 8)  # Simple sequence
-spec <- spectrum(x, plot = FALSE, detrend = FALSE)
-print(spec$spec)
-print(cumsum(spec$spec) / sum(spec$spec))
-```
-
-**Rust tests** (not R-pinned: no committed R case is compared; the R-pinned case comes with TS-22 for the tests and TS-9 for the estimator):
-- `forecasting::cpgram::tests::test_cpgram_basic` (`crates/p2a-core/src/forecasting/cpgram.rs`): n, taper 0.1, equal lengths, a last value within 0.01 of 1 and frequencies in (0, 0.5].
-- `forecasting::cpgram::tests::test_cpgram_confidence_bands` (`crates/p2a-core/src/forecasting/cpgram.rs`): 0 ≤ lower ≤ upper ≤ 1.
-- `forecasting::cpgram::tests::test_validate_periodogram_against_r` (`crates/p2a-core/src/forecasting/cpgram.rs`), added in Tier 0 (T0-WP18): the periodogram of the deterministic series `mk(16)` (formula in the test; R `Mod(fft(x - mean(x)))^2/16`, ordinates 2-9) within 1e-9 relative of R 4.3.3 values typed into the test.
-- `forecasting::cpgram::tests::test_validate_cpgram_untapered_against_r` (`crates/p2a-core/src/forecasting/cpgram.rs`), added in Tier 0 (T0-WP18): the untapered cumulative periodogram of `mk(65)` (the body of `stats::cpgram` with `taper = 0`, 32 values) within 1e-10 relative of R 4.3.3 values typed into the test.
-
-The two Tier 0 tests are quoted-value checks, not R-pinned. The default tapered case is not compared with R (TS-9).
-
-## Numerical Precision Summary
-
-| Series Length | Periodogram Tolerance |
-|--------------|----------------------|
-| n < 100 | 1e-6 |
-| n = 100-1000 | 1e-8 |
-| n > 1000 | 1e-10 |
-
-## Known Differences
-
-1. **Tapering**: R uses cosine taper by default; our implementation matches this
-2. **Detrending**: R detrends by default; our implementation includes this option
-3. **FFT normalization**: Minor differences in scaling conventions
-
-## Performance Notes
-
-- O(n log n) complexity due to FFT
-- Rust implementation 5-20x faster than R depending on series length
-- Memory efficient for long time series
-
-## References
-
-1. Brockwell, P. J., & Davis, R. A. (1991). Time Series: Theory and Methods. Springer.
-2. Priestley, M. B. (1981). Spectral Analysis and Time Series. Academic Press.
-3. R Core Team. cpgram() documentation.
+`test_cpgram_rejects_bad_taper_and_non_finite` holds the refusals. Without the `spectral-analysis` feature the
+periodogram is a direct DFT, which `fft_periodogram_matches_direct_dft` compares with the FFT.
