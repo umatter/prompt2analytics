@@ -43,7 +43,7 @@
     {
       "id": "spectrum_t3",
       "name": "Periodogram grid and plot.spec confidence-interval multipliers; AR spectra without an interval",
-      "category": "timeseries",
+      "category": "stats",
       "reference": "stats::spec.pgram; stats:::plot.spec spec.ci; stats::spec.ar (no df)",
       "doc": "validation/timeseries/spectrum.md",
       "cases": ["stat_spectrum_t3"],
@@ -56,7 +56,7 @@
     {
       "id": "mahalanobis_t3",
       "name": "Mahalanobis distances (full rank; singular covariances refused or generalised with the rank)",
-      "category": "multivariate",
+      "category": "stats",
       "reference": "stats::mahalanobis; MASS::ginv; qr(cov)$rank; qchisq",
       "doc": "validation/multivariate/mahalanobis.md",
       "cases": ["stat_mahalanobis_t3"],
@@ -108,7 +108,7 @@
     {
       "id": "pp_test_t3",
       "name": "Phillips-Perron test: statistic, p-value, lag and the regression and Newey-West internals",
-      "category": "timeseries",
+      "category": "stats",
       "reference": "stats::PP.test (internals recomputed with its own code)",
       "doc": "validation/timeseries/pptest.md",
       "cases": ["stat_pp_t3", "stat_pp_gdp_t3"],
@@ -121,7 +121,7 @@
     {
       "id": "cancor_t3",
       "name": "Canonical correlation: centres and dimensions",
-      "category": "multivariate",
+      "category": "stats",
       "reference": "stats::cancor",
       "doc": "validation/multivariate/cancor.md",
       "cases": ["stat_cancor_t3"],
