@@ -17,16 +17,16 @@ Every density goes through a Cholesky factor, so the log-determinant and the Mah
 dimension. `Tied` factors its one covariance once per M-step.
 
 **Start.** `GmmInit::KMeans` (the default), `Classification` or `Parameters`. The k-means start runs on the data
-divided by the root mean column variance, with its own tolerance `1e-4`, so it does not depend on the units. mclust's
+divided by the root mean column variance, with its own tolerance `1e-4`. That is one factor for all columns, so the
+start does not depend on a common rescaling of the columns, but it does depend on their relative units. mclust's
 default start is hierarchical; both reach the pinned optimum (`stopifnot` over 10 k-means seeds in the case).
 
 **Stopping rule.** `relative_change(l, l_prev) < tolerance`, default `1e-8` (`GMM_DEFAULT_TOLERANCE`). mclust stops at
 `|dl| / (1 + |l|) < 1e-5`, which leaves the parameters about 7e-3 from the optimum on these data; the former p2a rule
 `|dl| < 1e-4` is relative 7e-8 at `|l| = 1442`. A fit that reaches `max_iterations` reports `converged = false` and a
 warning. The default `max_iterations` is 1000: at n = 100 on these data the relative stop takes more than the former
-100 passes. The stop is the one step that depends on the data's units: rescaling shifts `l`, which changes the
-denominator of the relative change, so a fit on rescaled data can end at a different iteration. The singularity check,
-the ridge and the k-means start do not depend on the units.
+100 passes. Rescaling shifts `l`, which changes the denominator of the relative change, so a fit on rescaled data can
+end at a different iteration.
 
 **Singular covariance.** A component's covariance counts as singular when a squared pivot of its Cholesky factor falls
 below `SYM_RANK_TOL * d` times its diagonal entry. It then gets a ridge of `GMM_SINGULAR_RIDGE = 1e-10` times each

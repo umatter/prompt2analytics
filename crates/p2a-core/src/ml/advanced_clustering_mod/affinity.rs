@@ -347,8 +347,8 @@ fn affinity_propagation_impl(
         return Err(EconError::ConvergenceFailure {
             iterations,
             last_change: f64::NAN,
-            suggestion: "no exemplar emerged; increase max_iterations or lower the damping \
-                         (apcluster returns an empty clustering here)"
+            suggestion: "no exemplar emerged; increase max_iterations, raise the preference, or \
+                         use a damping nearer 0.5 (apcluster returns an empty clustering here)"
                 .into(),
         });
     }
@@ -523,6 +523,7 @@ mod tests {
         let x = case_matrix(&ds, &["x", "y"]);
         let e = affinity_propagation(x.view(), None, Some(0.9), Some(20), Some(15)).unwrap_err();
         assert!(e.contains("no exemplar"), "{e}");
+        assert!(e.contains("raise the preference"), "{e}");
     }
 
     #[test]

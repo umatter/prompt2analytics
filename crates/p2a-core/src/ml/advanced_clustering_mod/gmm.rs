@@ -662,9 +662,10 @@ fn one_hot(labels: &[usize], n: usize, k: usize) -> EconResult<Array2<f64>> {
 /// Each iteration is an E-step followed by an M-step; the fit stops when
 /// `relative_change(l, l_prev) < tolerance`. At the iteration limit the last M-step is skipped, so
 /// the returned parameters, responsibilities and log-likelihood always belong together. The
-/// singularity check, the ridge and the k-means start do not depend on the data's units; the
-/// relative stop on `l` does, because rescaling shifts `l`, so a fit on rescaled data can end at a
-/// different iteration. See `validation/ml/gmm.md`.
+/// singularity check and the ridge do not depend on any column's units. The k-means start does not
+/// depend on a common rescaling of all columns, but does depend on the columns' relative units. The
+/// relative stop on `l` can change the final iteration, because rescaling shifts `l`. See
+/// `validation/ml/gmm.md`.
 pub fn gaussian_mixture_with(
     data: ArrayView2<'_, f64>,
     config: &GmmConfig,
