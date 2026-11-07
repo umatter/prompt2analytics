@@ -102,9 +102,13 @@ missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 
 ## Known Differences from R
 
-1. **Exact fit** (registry deviation STAT-6): when the regression fits exactly the long-run variance is zero; p2a refuses (`InvalidSpecification`), `PP.test` returns NaN.
+1. **Exact fit** (registry deviation STAT-6): when the regression fits exactly, as for a quadratic or a geometric series, the residuals are rounding error next to the differences or to the level of the series. p2a refuses (`InvalidSpecification`). `PP.test` warns of an essentially perfect fit and returns a statistic made of that rounding error.
 
-2. **Singular matrix handling**: For perfectly linear data (e.g., 1, 2, 3, ..., n), the design matrix becomes singular due to collinearity between the trend and lagged values. p2a returns an error; R stops with "singularities in regression".
+2. **Singular regression**: when the lagged series is constant or a linear trend (for example 1, 2, 3, ..., n), the design matrix is singular. p2a returns `SingularMatrix`, with a check on centred sums that does not depend on the scale or the level of the series; R stops with "singularities in regression".
+
+3. **Range**: p2a refuses a series whose squares do not fit a double (`InvalidSpecification`).
+
+Tests: `stats::pptest::tests::test_pp_test_refuses_singular_regression`, `stats::pptest::tests::test_pp_test_refuses_exact_fit`, `stats::pptest::tests::test_pp_test_is_scale_and_level_free`, `stats::pptest::tests::test_pp_test_refuses_values_whose_squares_leave_the_range`.
 
 ## Performance Comparison
 

@@ -115,7 +115,7 @@
       "tests": ["p2a-core::stats::pptest::tests::test_validate_pp_test_t3_internals", "p2a-core::stats::pptest::tests::test_validate_pp_test_t3_statistic", "p2a-core::stats::pptest::tests::test_validate_pp_test_t3_gdp"],
       "quantities": ["Dickey-Fuller statistic (corrected t)", "p-value (R's table)", "truncation lag (from n - 1)", "gamma (rho - 1)", "t statistic", "sigma^2 (RSS/n)", "lambda^2 (Bartlett long-run variance)"],
       "tolerance": "Tol::coef(n) for gamma, Tol::stat(n) for statistics and variances, Tol::p_value(n); lag exact",
-      "deviations": [{"finding": "STAT-6", "quantity": "statistic of an exact fit", "note": "p2a refuses; PP.test returns NaN"}],
+      "deviations": [{"finding": "STAT-6", "quantity": "statistic of an exact fit", "note": "p2a refuses; PP.test warns of a perfect fit and returns a statistic made of rounding error"}],
       "supersedes_legacy": []
     },
     {

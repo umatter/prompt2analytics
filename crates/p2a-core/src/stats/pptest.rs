@@ -203,6 +203,16 @@ fn pp_p_value(stat: f64, m: usize) -> f64 {
     at_bracket(&TABLE_P, bracket(&critical, stat))
 }
 
+/// Relative size below which the trend leaves nothing of `y_{t-1}`: `1 - r^2(t, y_{t-1})`.
+const SINGULAR_TOL: f64 = 1e-12;
+/// Residual norm relative to the norm of Δy below which the regression fits exactly.
+const EXACT_FIT_TOL: f64 = 1e-12;
+/// Rounding error per value, in units of `f64::EPSILON * max|x|`, that a series on a level far
+/// above its movements carries. Differences of two rounded values reach about 1 unit.
+const ROUNDING_ULPS: f64 = 4.0;
+/// Below this a sum of squares has lost digits to subnormal numbers.
+const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
+
 /// Perform the Phillips-Perron unit root test on a time series.
 ///
 /// # Arguments
@@ -218,8 +228,12 @@ fn pp_p_value(stat: f64, m: usize) -> f64 {
 ///
 /// # Errors
 ///
-/// Fewer than 5 observations (the regression needs a positive residual df), non-finite values,
-/// a singular regression, and an exact fit, whose long-run variance is zero (`PP.test` returns NaN).
+/// - `InsufficientData`: fewer than 5 observations (the regression needs a positive residual df).
+/// - `InvalidSpecification`: non-finite values; squares of the values that do not fit a double;
+///   an exact fit, where the residuals are rounding error next to Δy or to the level of the
+///   series. For an exact fit `PP.test` warns and returns a statistic made of that rounding error.
+/// - `SingularMatrix`: `y_{t-1}` is constant or a linear trend, whatever the scale of the series
+///   (`PP.test` stops: "singularities in regression").
 ///
 /// # Example
 ///
@@ -264,94 +278,80 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     // Compute truncation lag (R: n is length(x) - 1 here)
     let truncation_lag = compute_truncation_lag(n_reg, lshort);
 
-    // Build design matrix for the regression:
-    // Δyₜ = α + β*t + γ*yₜ₋₁ + uₜ
-    //
-    // We regress Δy on [1, t, y_{t-1}]
+    // OLS of Δy on [1, t, y_{t-1}], from sums centred on the means, so that no check or step
+    // depends on the scale or the level of the series.
+    let m = n_reg as f64;
+    let t_bar = (m + 1.0) / 2.0;
+    let s_tt = m * (m * m - 1.0) / 12.0; // t = 1..=m
+    let (mut sum_y, mut sum_dy, mut max_abs) = (0.0, 0.0, 0.0f64);
+    for w in x.windows(2) {
+        sum_y += w[0];
+        sum_dy += w[1] - w[0];
+        max_abs = max_abs.max(w[0].abs());
+    }
+    max_abs = max_abs.max(x[n_reg].abs());
+    let (y_bar, dy_bar) = (sum_y / m, sum_dy / m);
 
-    // Build vectors for regression
-    let mut delta_y = Vec::with_capacity(n_reg);
-    let mut y_lag = Vec::with_capacity(n_reg);
-    let mut trend = Vec::with_capacity(n_reg);
-
-    for t in 1..n {
-        delta_y.push(x[t] - x[t - 1]);
-        y_lag.push(x[t - 1]);
-        trend.push(t as f64);
+    let (mut s_yy, mut s_ty, mut s_td, mut s_yd, mut sum_dy2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (i, w) in x.windows(2).enumerate() {
+        let t_dev = (i + 1) as f64 - t_bar;
+        let y_dev = w[0] - y_bar;
+        let dy = w[1] - w[0];
+        s_yy += y_dev * y_dev;
+        s_ty += t_dev * y_dev;
+        s_td += t_dev * dy;
+        s_yd += y_dev * dy;
+        sum_dy2 += dy * dy;
     }
 
-    // OLS regression: Δy = α + β*t + γ*y_{t-1} + u
-    // Design matrix X = [1, t, y_{t-1}]
-
-    // Compute X'X and X'y using explicit formulas for 3x3 case
-    // X = [1, t, y_lag]
-    let sum_1: f64 = n_reg as f64;
-    let (mut sum_t, mut sum_y, mut sum_t2, mut sum_ty, mut sum_y2) = (0.0, 0.0, 0.0, 0.0, 0.0);
-    let (mut sum_dy, mut sum_t_dy, mut sum_y_dy) = (0.0, 0.0, 0.0);
-    for ((&t, &y), &dy) in trend.iter().zip(&y_lag).zip(&delta_y) {
-        sum_t += t;
-        sum_y += y;
-        sum_t2 += t * t;
-        sum_ty += t * y;
-        sum_y2 += y * y;
-        sum_dy += dy;
-        sum_t_dy += t * dy;
-        sum_y_dy += y * dy;
-    }
-
-    // X'X matrix (symmetric 3x3)
-    // [ n,       sum_t,    sum_y   ]
-    // [ sum_t,   sum_t2,   sum_ty  ]
-    // [ sum_y,   sum_ty,   sum_y2  ]
-
-    // X'y vector
-    // [ sum_dy   ]
-    // [ sum_t_dy ]
-    // [ sum_y_dy ]
-
-    // Solve using Cramer's rule or direct inverse
-    // For robustness, compute determinant and check for singularity
-    let det = sum_1 * (sum_t2 * sum_y2 - sum_ty * sum_ty)
-        - sum_t * (sum_t * sum_y2 - sum_ty * sum_y)
-        + sum_y * (sum_t * sum_ty - sum_t2 * sum_y);
-
-    if det.abs() < 1e-14 {
-        return Err(EconError::SingularMatrix {
-            context: "X'X in Phillips-Perron regression".to_string(),
-            suggestion: "Check for multicollinearity or constant series".to_string(),
+    let squares_underflow = s_yy < MIN_ACCURATE_SQUARES && x[..n_reg].iter().any(|v| *v != x[0]);
+    if !(s_yy.is_finite() && sum_dy2.is_finite()) || squares_underflow {
+        return Err(EconError::InvalidSpecification {
+            message: "Phillips-Perron: the squares of the values do not fit a double; rescale \
+                      the series"
+                .to_string(),
         });
     }
 
-    // Compute inverse of X'X (cofactor matrix / det)
-    let inv_det = 1.0 / det;
+    // What a sum of squares over m rows is worth when each value only carries rounding error.
+    let rounding = m * (ROUNDING_ULPS * f64::EPSILON * max_abs).powi(2);
 
-    // Cofactors for row 3 (needed for γ coefficient and its variance)
-    let c31 = sum_t * sum_ty - sum_t2 * sum_y;
-    let c32 = sum_t * sum_y - sum_1 * sum_ty;
-    let c33 = sum_1 * sum_t2 - sum_t * sum_t;
+    // Sum of squares of y_{t-1} after the trend. It is s_tt s_yy - s_ty^2 over s_tt, and
+    // det(X'X) = m s_tt s_yy_t.
+    let s_yy_t = s_yy - s_ty * (s_ty / s_tt);
+    if s_yy_t <= (SINGULAR_TOL * s_yy).max(rounding) {
+        return Err(EconError::SingularMatrix {
+            context: "X'X in Phillips-Perron regression".to_string(),
+            suggestion: "the lagged series is constant or a linear trend".to_string(),
+        });
+    }
 
-    // Compute γ̂ (coefficient on y_{t-1})
-    // γ̂ = [row 3 of (X'X)^{-1}] · [X'y]
-    let gamma_hat = inv_det * (c31 * sum_dy + c32 * sum_t_dy + c33 * sum_y_dy);
+    let gamma_hat = (s_yd - s_ty * (s_td / s_tt)) / s_yy_t;
+    let beta_hat = (s_td - gamma_hat * s_ty) / s_tt;
 
-    // Compute all coefficients for residuals
-    let c11 = sum_t2 * sum_y2 - sum_ty * sum_ty;
-    let c12 = sum_ty * sum_y - sum_t * sum_y2;
-    let c13 = sum_t * sum_ty - sum_t2 * sum_y;
-    let c21 = c12;
-    let c22 = sum_1 * sum_y2 - sum_y * sum_y;
-    let c23 = sum_t * sum_y - sum_1 * sum_ty;
-
-    let alpha_hat = inv_det * (c11 * sum_dy + c12 * sum_t_dy + c13 * sum_y_dy);
-    let beta_hat = inv_det * (c21 * sum_dy + c22 * sum_t_dy + c23 * sum_y_dy);
-
-    // Compute residuals
-    let residuals: Vec<f64> = (0..n_reg)
-        .map(|i| delta_y[i] - alpha_hat - beta_hat * trend[i] - gamma_hat * y_lag[i])
+    let residuals: Vec<f64> = x
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| {
+            (w[1] - w[0] - dy_bar)
+                - beta_hat * ((i + 1) as f64 - t_bar)
+                - gamma_hat * (w[0] - y_bar)
+        })
         .collect();
 
     // Residual sum of squares
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
+
+    let exact_fit = || {
+        Err(EconError::InvalidSpecification {
+            message: "Phillips-Perron: the long-run variance is zero (the regression on \
+                      [1, t, y_{t-1}] fits exactly)"
+                .to_string(),
+        })
+    };
+    if rss <= (EXACT_FIT_TOL * EXACT_FIT_TOL * sum_dy2).max(rounding) {
+        return exact_fit();
+    }
 
     // Degrees of freedom
     let df = n_reg - 3; // n - 1 observations, 3 parameters; positive since n >= 5
@@ -359,10 +359,8 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     // Residual variance σ̂² (different from Newey-West divisor)
     let sigma_sq = rss / df as f64;
 
-    // Standard error of γ̂
-    // Var(γ̂) = σ̂² × [(X'X)^{-1}]_{33}
-    let var_gamma = sigma_sq * inv_det * c33;
-    let se_gamma = var_gamma.sqrt();
+    // Standard error of γ̂: Var(γ̂) = σ̂² [(X'X)^{-1}]_{33} = σ̂² / s_yy_t
+    let se_gamma = (sigma_sq / s_yy_t).sqrt();
 
     // OLS t-statistic for γ
     let t_stat = gamma_hat / se_gamma;
@@ -371,34 +369,22 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     let lambda_sq = newey_west_variance(&residuals, truncation_lag);
 
     // Residual variance for PP correction (using n divisor, not df)
-    let sigma_sq_nw = rss / n_reg as f64;
+    let sigma_sq_nw = rss / m;
 
     if lambda_sq.is_nan() || lambda_sq <= 0.0 {
+        return exact_fit();
+    }
+
+    // PP.test's statistic, with the sign of λ² - σ̂² kept. sqrt(dx) is sqrt(det(X'X)).
+    let dx_sqrt = (m * s_tt).sqrt() * s_yy_t.sqrt();
+    let z_tau = (sigma_sq_nw / lambda_sq).sqrt() * t_stat
+        - m.powi(3) / (4.0 * 3f64.sqrt() * dx_sqrt * lambda_sq.sqrt()) * (lambda_sq - sigma_sq_nw);
+
+    if !z_tau.is_finite() {
         return Err(EconError::InvalidSpecification {
-            message: "Phillips-Perron: the long-run variance is zero (the regression on \
-                      [1, t, y_{t-1}] fits exactly)"
-                .to_string(),
+            message: format!("Phillips-Perron: the statistic is not finite ({z_tau})"),
         });
     }
-
-    // det(X'X) from centred sums. R's four-term expression gives the same number but cancels
-    // terms of order m^4 sum(y^2).
-    let m = n_reg as f64;
-    let t_bar = sum_t / m;
-    let y_bar = sum_y / m;
-    let s_tt = m * (m * m - 1.0) / 12.0;
-    let (mut s_yy, mut s_ty) = (0.0, 0.0);
-    for (t, y) in trend.iter().zip(&y_lag) {
-        let dev = y - y_bar;
-        s_yy += dev * dev;
-        s_ty += (t - t_bar) * dev;
-    }
-    let dx = m * (s_tt * s_yy - s_ty * s_ty);
-
-    // PP.test's statistic, with the sign of λ² - σ̂² kept
-    let z_tau = (sigma_sq_nw / lambda_sq).sqrt() * t_stat
-        - m.powi(3) / (4.0 * 3f64.sqrt() * dx.sqrt() * lambda_sq.sqrt())
-            * (lambda_sq - sigma_sq_nw);
 
     let p_value = pp_p_value(z_tau, n_reg);
 
@@ -649,7 +635,7 @@ mod tests {
                     .scalar(&k("sigma2"), r.sigma_squared, Tol::stat(200))
                     .scalar(&k("lambda2"), r.lambda_squared, Tol::stat(200))
                     .scalar(&k("lag"), r.truncation_lag as f64, Tol::exact());
-                // {series}_{tag}_stat and _p: pinned by Task 8A (STAT-6, STAT-35; sync 2026-11-01).
+                // {series}_{tag}_stat and _p: pinned by test_validate_pp_test_t3_statistic.
             }
         }
         let r = pp_test(&col("rw100"), true).unwrap();
@@ -657,10 +643,11 @@ mod tests {
             .scalar("rw100_short_t", r.t_statistic, Tol::stat(100))
             .scalar("rw100_short_sigma2", r.sigma_squared, Tol::stat(100))
             .finish();
-        // rw100_short_lag (R 3 from n - 1 = 99) and rw100_short_lambda2: pinned by Task 8A (STAT-6).
+        // rw100_short_lag (R 3 from n - 1 = 99) and rw100_short_lambda2: pinned by
+        // test_validate_pp_test_t3_statistic.
     }
 
-    /// R4: four observations leave 3 regression rows and 3 parameters, a residual df of 0 (sigma^2 = 0/0).
+    /// Four observations leave 3 regression rows and 3 parameters, a residual df of 0 (sigma^2 = 0/0).
     #[test]
     fn test_pp_test_needs_positive_residual_df() {
         let e = pp_test(&[1.0, 2.5, 2.0, 3.7], true).unwrap_err();
@@ -733,6 +720,111 @@ mod tests {
         let r = pp_test(&x, false).unwrap();
         assert!(r.lambda_squared < r.sigma_squared);
         assert!(r.statistic > (r.sigma_squared / r.lambda_squared).sqrt() * r.t_statistic);
+    }
+
+    /// A noisy series with no exact relation, for the scale and level checks below.
+    fn noisy_series() -> Vec<f64> {
+        let mut y = 0.0;
+        (0..120)
+            .map(|i| {
+                let i = f64::from(i);
+                y = 0.7 * y + (i * 1.37).sin() + 0.6 * (i * i * 0.41).cos();
+                y
+            })
+            .collect()
+    }
+
+    /// STAT-6: y_{t-1} collinear with the trend (linear with a step rounding touches, constant,
+    /// linear on a level far above the step) makes X'X singular whatever the scale.
+    #[test]
+    fn test_pp_test_refuses_singular_regression() {
+        let linear: Vec<f64> = (0..50).map(|i| 0.37 + 0.3 * f64::from(i)).collect();
+        let integer_step: Vec<f64> = (1..=50).map(f64::from).collect();
+        let high_level: Vec<f64> = (0..50).map(|i| 1e12 + 0.3 * f64::from(i)).collect();
+        let tiny_linear: Vec<f64> = linear.iter().map(|v| v * 1e-12).collect();
+        for x in [linear, integer_step, high_level, tiny_linear, vec![2.5; 50]] {
+            for lshort in [true, false] {
+                assert!(
+                    matches!(pp_test(&x, lshort), Err(EconError::SingularMatrix { .. })),
+                    "{:?} .. {:?}: {:?}",
+                    x[0],
+                    x[49],
+                    pp_test(&x, lshort).map(|r| r.statistic)
+                );
+            }
+        }
+    }
+
+    /// STAT-6: a regression that fits exactly up to rounding (a quadratic has a linear difference,
+    /// a geometric series a difference proportional to its lag) has no statistic to report.
+    #[test]
+    fn test_pp_test_refuses_exact_fit() {
+        let quadratic: Vec<f64> = (0..50)
+            .map(|i| {
+                let i = f64::from(i);
+                0.37 + 0.3 * i + 0.01 * i * i
+            })
+            .collect();
+        let high_level: Vec<f64> = quadratic.iter().map(|v| 1e12 + v).collect();
+        let geometric: Vec<f64> = (0..50).map(|i| 3.0 * 1.1f64.powi(i)).collect();
+        let tiny: Vec<f64> = geometric.iter().map(|v| v * 1e-12).collect();
+        for x in [quadratic, high_level, geometric, tiny] {
+            for lshort in [true, false] {
+                let r = pp_test(&x, lshort);
+                match r {
+                    Err(EconError::InvalidSpecification { ref message }) => {
+                        assert!(message.contains("fits exactly"), "{message}")
+                    }
+                    other => panic!(
+                        "{:?} .. {:?}: {:?}",
+                        x[0],
+                        x[49],
+                        other.map(|r| r.statistic)
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The statistic, gamma and t do not depend on the scale or the level of the series, so a
+    /// small scale is not "singular" and a high level is not an exact fit.
+    #[test]
+    fn test_pp_test_is_scale_and_level_free() {
+        let x = noisy_series();
+        let base = pp_test(&x, true).unwrap();
+        assert!(base.statistic.is_finite() && base.statistic < 0.0);
+        for scale in [1e-12, 1e-100, 1e12, 1e100] {
+            let scaled: Vec<f64> = x.iter().map(|v| v * scale).collect();
+            let r = pp_test(&scaled, true).unwrap();
+            for (a, b) in [
+                (r.statistic, base.statistic),
+                (r.gamma_hat, base.gamma_hat),
+                (r.t_statistic, base.t_statistic),
+            ] {
+                assert!((a - b).abs() <= 1e-9 * b.abs(), "scale {scale}: {a} vs {b}");
+            }
+            let ratio = r.sigma_squared / (base.sigma_squared * scale * scale);
+            assert!((ratio - 1.0).abs() < 1e-9, "scale {scale}: {ratio}");
+        }
+        let shifted: Vec<f64> = x.iter().map(|v| v + 1e9).collect();
+        let r = pp_test(&shifted, true).unwrap();
+        assert!((r.statistic - base.statistic).abs() < 1e-4, "{r:?}");
+    }
+
+    /// Squares that do not fit an f64 give a refusal, never a NaN statistic.
+    #[test]
+    fn test_pp_test_refuses_values_whose_squares_leave_the_range() {
+        let x = noisy_series();
+        for scale in [1e200, 1e-200] {
+            let scaled: Vec<f64> = x.iter().map(|v| v * scale).collect();
+            let r = pp_test(&scaled, true);
+            match r {
+                Err(EconError::InvalidSpecification { ref message }) => {
+                    assert!(message.contains("squares"), "{message}")
+                }
+                other => panic!("scale {scale}: {:?}", other.map(|r| r.statistic)),
+            }
+        }
     }
 
     /// STAT-35: R's table is interpolated in T, then in the statistic, both with approx(rule = 2).
