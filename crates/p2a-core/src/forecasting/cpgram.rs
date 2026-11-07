@@ -135,7 +135,11 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
     // R's frequency set: floor(n / 2) + 1 points with (0, 0), the last dropped if that is even.
     let mut pgram = compute_periodogram(&tapered)?;
     let len = n / 2 + 1;
-    let mp = if len % 2 == 0 { len - 2 } else { len - 1 };
+    let mp = if len.is_multiple_of(2) {
+        len - 2
+    } else {
+        len - 1
+    };
     pgram.truncate(mp);
 
     let total: f64 = pgram.iter().sum();
@@ -374,12 +378,12 @@ mod tests {
     #[test]
     fn test_kolmogorov_sf_matches_r() {
         for (x, p) in [
-            (0.3, 0.99999069419866549),
-            (0.5, 0.96394524366487511),
+            (0.3, 0.9999906941986655),
+            (0.5, 0.9639452436648751),
             (1.0, 0.26999967167735456),
-            (1.358, 0.050026797334446982),
-            (2.0, 0.00067092525577969533),
-            (3.0, 3.0459959489425258e-08),
+            (1.358, 0.05002679733444698),
+            (2.0, 0.0006709252557796953),
+            (3.0, 3.045995948942526e-08),
         ] {
             assert!(
                 Tol::new(1e-12, 1e-300).allows(kolmogorov_sf(x), p),
