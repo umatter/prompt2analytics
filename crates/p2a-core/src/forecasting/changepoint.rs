@@ -222,9 +222,16 @@ fn checked_cumulative_sums(data: &[f64]) -> Result<(Vec<f64>, Vec<f64>), String>
 ///
 /// `mll_meanvar` floors a variance of zero at 1e-11. After centring by a mean that is not
 /// representable, a segment of tied values has a variance of rounding noise, not zero, so the floor
-/// applies below the rounding level of the prefix sums. A variance under that level cannot be told
-/// from zero here. Noise that escaped the floor would make the cost of the segment depend on the
-/// rounding, and would break the sub-additivity that makes `pelt`'s pruning exact.
+/// applies at the rounding level of the prefix sums, tau = 4 eps Q, with Q the sum of squares of the
+/// whole series. A variance at or under tau cannot be told from zero here, and takes tau, or 1e-11
+/// when tau is smaller. Noise that escaped the floor would make the cost of the segment depend on
+/// the rounding, and would break the sub-additivity that makes `pelt`'s pruning exact.
+///
+/// One value far from the rest raises Q, and tau with it, above the variance of ordinary segments.
+/// A floor below tau would reward each of them for that, so they take tau, the variance nearest to
+/// theirs that the sums can still tell from zero. Limit: from an outlier near 1e9 times the scale of
+/// the series, centring by the mean it contaminates loses the other regimes to rounding, so a
+/// change among them can go unreported where R, on raw sums, finds it.
 #[inline]
 fn segment_cost(
     cum_sum: &[f64],
@@ -250,8 +257,9 @@ fn segment_cost(
         }
         CostFunction::MeanAndVariance => {
             let mut sigma2 = (q - a * a / m) / m;
-            if sigma2 <= 4.0 * f64::EPSILON * cum_sum_sq[cum_sum_sq.len() - 1] {
-                sigma2 = 1e-11;
+            let tau = 4.0 * f64::EPSILON * cum_sum_sq[cum_sum_sq.len() - 1];
+            if sigma2 <= tau {
+                sigma2 = tau.max(1e-11);
             }
             m * (ln_2pi + sigma2.ln() + 1.0)
         }
@@ -410,9 +418,10 @@ fn compute_total_cost(
 ///
 /// # Errors
 /// Fails on a series of fewer than 2 points, on a series too short for two
-/// segments of the minimum segment length, on a non-finite value, on values so
-/// large that the sum of squares overflows, and when the budget installed with
-/// [`crate::resource::with_budget`] is cancelled or past its deadline.
+/// segments of the minimum segment length, on a NaN threshold, on a non-finite
+/// value, on values so large that the sum of squares overflows, and when the
+/// budget installed with [`crate::resource::with_budget`] is cancelled or past
+/// its deadline.
 pub fn binary_segmentation(
     data: &[f64],
     max_changepoints: Option<usize>,
@@ -439,6 +448,12 @@ pub fn binary_segmentation(
 
     let max_cp = max_changepoints.unwrap_or(10);
     let threshold = significance_threshold.unwrap_or(0.0);
+    // No gain compares as above NaN: the search would report no changepoint.
+    if threshold.is_nan() {
+        return Err(format!(
+            "significance_threshold must be a number, got {threshold}"
+        ));
+    }
 
     let (cum_sum, cum_sum_sq) = checked_cumulative_sums(data)?;
 
@@ -676,6 +691,19 @@ mod tests {
         assert!(e.contains("minimum segment length"), "{e}");
     }
 
+    /// `gain > NaN` is never true, so a NaN threshold would report no changepoint.
+    #[test]
+    fn test_binary_segmentation_refuses_a_nan_threshold() {
+        let data = create_mean_shift_data(30, 30, 0.0, 4.0, 1.0);
+        let e = binary_segmentation(&data, Some(3), None, Some(f64::NAN)).unwrap_err();
+        assert!(
+            e.contains("significance_threshold") && e.contains("NaN"),
+            "{e}"
+        );
+        let r = binary_segmentation(&data, Some(3), None, Some(1.0)).unwrap();
+        assert!(r.n_changepoints >= 1);
+    }
+
     /// Optimal partitioning: the exact minimiser that PELT's pruning must not change. O(n^2).
     /// Ties go to the smallest last changepoint, as in `pelt`.
     fn optimal_partitioning(
@@ -839,10 +867,12 @@ mod tests {
     #[test]
     fn test_centred_and_raw_costs_agree_on_counts() {
         let n = 200;
-        for (rate, seed) in [(0.5, 11u64), (1.0, 23), (3.0, 37), (8.0, 41)] {
+        for (rate, seed) in [(0.5, 11u64), (1.0, 23), (3.0, 37), (4.0, 41)] {
             let series = poisson_counts(n, rate, seed);
             let (c1, c2) = compute_cumulative_sums(&series);
             let (r1, r2) = raw_prefix_sums(&series);
+            // Both paths floor a tied segment at 1e-11 only while their rounding level is below it.
+            assert!(4.0 * f64::EPSILON * r2[n] < 1e-11, "rate {rate}: {}", r2[n]);
             for cost in [CostFunction::MeanChange, CostFunction::MeanAndVariance] {
                 for start in 0..n - 1 {
                     for end in start + 2..=n {
@@ -855,8 +885,73 @@ mod tests {
                     }
                 }
                 let pen = 4.0 * (n as f64).ln();
-                let found = pelt(n, &c1, &c2, pen, 2, cost, true).unwrap();
-                assert_eq!(found, pelt(n, &r1, &r2, pen, 2, cost, true).unwrap());
+                // Tied counts have several optima, so the two paths may stop at different ones of
+                // equal objective: each segmentation is scored on the same (raw) sums.
+                let objective = |cps: &[usize]| {
+                    compute_total_cost(n, &r1, &r2, cps, cost, true) + pen * cps.len() as f64
+                };
+                let centred = objective(&pelt(n, &c1, &c2, pen, 2, cost, true).unwrap());
+                let raw = objective(&pelt(n, &r1, &r2, pen, 2, cost, true).unwrap());
+                assert!(
+                    (centred - raw).abs() <= 1e-9 * raw.abs().max(1.0),
+                    "{cost:?} rate {rate}: {centred} vs {raw}"
+                );
+            }
+        }
+    }
+
+    /// N(0, 1) x 300, then N(0, 20) x 300.
+    fn two_variance_regimes(seed: u64) -> Vec<f64> {
+        let mut seed = seed;
+        (0..600)
+            .map(|i| (if i < 300 { 1.0 } else { 20.0 }) * box_muller_cp(&mut seed))
+            .collect()
+    }
+
+    /// The rounding level follows the sum of squares of the whole series, so one large value
+    /// raises it far above the variance of an ordinary segment. Such a segment takes the level
+    /// itself, not a floor below it: a short segment under the level is not rewarded for it.
+    #[test]
+    fn test_meanvar_one_large_value_adds_only_its_own_boundary() {
+        let cost = CostFunction::MeanAndVariance;
+        for seed in [4u64, 5, 6] {
+            let clean = two_variance_regimes(seed * 7919);
+            let r = detect_changepoints(&clean, None, None, cost).unwrap();
+            assert_eq!(r.n_changepoints, 1, "seed {seed}: {:?}", r.changepoints);
+            assert!(r.changepoints[0].abs_diff(300) <= 10, "seed {seed}");
+
+            for outlier in [1e6, 1e7] {
+                let mut series = clean.clone();
+                series[599] = outlier;
+                let r = detect_changepoints(&series, None, None, cost).unwrap();
+                let label = format!("seed {seed} outlier {outlier}: {:?}", r.changepoints);
+                assert_eq!(r.n_changepoints, 2, "{label}");
+                assert!(r.changepoints[0].abs_diff(300) <= 10, "{label}");
+                assert_eq!(r.changepoints[1], 598, "{label}");
+            }
+        }
+    }
+
+    /// With the rounding level raised by one large value, ordinary segments of whole numbers sit
+    /// at or near it, and the pruned search still reaches the reference's objective.
+    #[test]
+    fn test_pelt_matches_optimal_partitioning_with_one_large_value() {
+        let n = 200;
+        let cost = CostFunction::MeanAndVariance;
+        let pen = 4.0 * (n as f64).ln();
+        for rate in [0.5, 3.0, 8.0] {
+            for seed in 1..=5u64 {
+                for outlier in [1e6, 1e7, 1e8] {
+                    let mut series = poisson_counts(n, rate, seed * 104729);
+                    series[n - 1] = outlier;
+                    let r = detect_changepoints(&series, None, Some(2), cost).unwrap();
+                    let (_, f_n) = optimal_partitioning(&series, pen, 2, cost, true);
+                    let penalised = r.total_cost + pen * r.n_changepoints as f64;
+                    assert!(
+                        (penalised - f_n).abs() <= 1e-9 * f_n.abs().max(1.0),
+                        "rate {rate} seed {seed} outlier {outlier}: {penalised} vs {f_n}"
+                    );
+                }
             }
         }
     }

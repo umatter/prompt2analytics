@@ -12,7 +12,7 @@ segment of length m, with a = sum z and q = sum z^2:
 | `CostFunction` | R | Cost |
 |---|---|---|
 | `VarianceChange` | `cpt.var` (mu = mean of the series) | m (ln 2 pi + ln(q / m) + 1), q <= 0 floored at 1e-11 |
-| `MeanAndVariance` | `cpt.meanvar` | m (ln 2 pi + ln s2 + 1), s2 = (q - a^2 / m) / m, s2 floored at 1e-11 at or below 4 eps Q, the rounding level of p2a's centred prefix sums (Q the sum of squares of the whole series; R's level is 0, on raw sums), so a tied segment takes the floor as in R |
+| `MeanAndVariance` | `cpt.meanvar` | m (ln 2 pi + ln s2 + 1), s2 = (q - a^2 / m) / m; at or below tau = 4 eps Q, the rounding level of p2a's centred prefix sums (Q the sum of squares of the whole series), s2 becomes max(tau, 1e-11). R floors s2 = 0 at 1e-11, on raw sums |
 | `MeanChange` | `cpt.mean` (unit variance: scale the series first) | q - a^2 / m |
 
 `penalty = None` is changepoint's MBIC: penalty (k + 2) ln n, with k = 1 for a mean or a variance and 2 for both, and
@@ -46,9 +46,10 @@ MBIC and manual penalties, minimum segments 2 and 7.
 
 Changepoints are compared exactly, the penalty and cost at `Tol::stat(210)`.
 
-`test_pelt_matches_optimal_partitioning` and `test_pelt_matches_optimal_partitioning_on_tied_counts` compare the pruned search
-with a naive reference; `test_centred_and_raw_costs_agree_on_counts` compares the centred costs with the raw ones on whole
-numbers. None of the three compares with R.
+`test_pelt_matches_optimal_partitioning`, `test_pelt_matches_optimal_partitioning_on_tied_counts` and
+`test_pelt_matches_optimal_partitioning_with_one_large_value` compare the pruned search with a naive reference;
+`test_centred_and_raw_costs_agree_on_counts` compares the centred costs with the raw ones on whole numbers. None of the four
+compares with R.
 
 ## Deviations and conventions
 
@@ -57,5 +58,15 @@ numbers. None of the three compares with R.
   R on the centred series.
 - **TS-8 (recorded).** `binary_segmentation` has a zero default threshold and no penalty. `cpt.mean(method = "BinSeg",
   penalty = "MBIC", Q = 10)` finds 0 changepoints (key `cpt_mean_binseg_ncpts`, not compared).
+- **The floor of `MeanAndVariance` (p2a's own).** While tau < 1e-11, that is Q below about 1.1e4, a tied segment takes
+  R's floor. Above that, a tied segment takes tau, so its cost is m ln(tau / 1e-11) above R's: on long count series with a
+  large variance the tied segments are rewarded less than in `cpt.meanvar`. One value far from the rest raises tau too:
+  ordinary segments under tau take tau, not a floor below it, and are not split off for it
+  (`test_meanvar_one_large_value_adds_only_its_own_boundary`: N(0, 1) x 300, N(0, 20) x 300 and a last value of 1e6 or
+  1e7 give the regime change and the value's boundary; `cpt.meanvar` gives the same on three seeds, checked by hand).
+- **Limit of centring.** Centring by a mean that one value contaminates leaves the other regimes to rounding. On the same
+  series a last value of 1e8 moves the regime change by 5 to 9 positions (305 to 309, three seeds), and 1e9 loses it: p2a
+  finds only 598 where `cpt.meanvar` on raw sums finds 300 and 598 at every one of these sizes. Checked by hand against R
+  (changepoint 2.3), not pinned, because the positions depend on rounding.
 - **Convention: minimum segment 2.** p2a's floor is 2 for every cost; `cpt.mean`'s default `minseglen` is 1. The pin calls
   R with `minseglen = 2`.
