@@ -95,10 +95,20 @@ fn classify_image(dest_url: &str) -> ImageRender {
     }
 }
 
+/// The pulldown-cmark extensions [`render_markdown`] parses: exactly the ones it draws.
+///
+/// `Options::all()` would also enable smart punctuation, which rewrites `--robust` as an en dash and
+/// straight quotes as curly ones, breaking commands copied from an answer. It would also enable
+/// footnotes, task lists, metadata blocks, heading attributes, definition lists and GFM blockquote
+/// tags, whose events the renderer skips, so their markers would vanish. Without them that text
+/// stays literal CommonMark.
+fn markdown_options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_MATH
+}
+
 /// Render markdown text to RSX elements with proper styling
 pub fn render_markdown(text: &str) -> Element {
-    let options = Options::all();
-    let parser = Parser::new_ext(text, options);
+    let parser = Parser::new_ext(text, markdown_options());
     let events: Vec<Event> = parser.collect();
 
     let elements = render_events(&events);
@@ -147,6 +157,27 @@ fn render_events(events: &[Event]) -> Vec<Element> {
             Event::Rule => {
                 elements.push(rsx! {
                     hr { class: "my-4 border-gray-300 dark:border-gray-600" }
+                });
+                idx += 1;
+            }
+            // TeX is shown as its source, in its delimiters. There is no math typesetter in the
+            // bundle, and dropping the event would lose the formula.
+            Event::InlineMath(math) => {
+                let m = math.to_string();
+                elements.push(rsx! {
+                    code { class: "px-1.5 py-0.5 text-sm bg-gray-100 dark:bg-gray-700 rounded font-mono",
+                        "${m}$"
+                    }
+                });
+                idx += 1;
+            }
+            // Display math sits inside a paragraph, so a block `div` would be invalid HTML.
+            Event::DisplayMath(math) => {
+                let m = math.to_string();
+                elements.push(rsx! {
+                    code { class: "block my-4 p-4 overflow-x-auto text-sm bg-gray-100 dark:bg-gray-700 rounded font-mono whitespace-pre-wrap",
+                        "$${m}$$"
+                    }
                 });
                 idx += 1;
             }
@@ -887,6 +918,39 @@ mod render_tests {
             out.contains(
                 "<tr><td>sqft</td><td>0.4812</td><td>0.0123</td></tr><tr><td>Größe</td><td>-1.07</td><td>0.31</td></tr></table>"
             ),
+            "{out}"
+        );
+    }
+
+    /// InlineMath and DisplayMath events were skipped, so formulas vanished.
+    #[test]
+    fn test_render_markdown_keeps_math_as_tex_source() {
+        let out = structure("Fit: $\\hat\\beta_1 = 0.48$ and\n\n$$R^2 = 0.71$$\n");
+        assert!(
+            out.contains("<p>Fit: <code>$\\hat\\beta_1 = 0.48$</code> and</p>"),
+            "{out}"
+        );
+        assert!(out.contains("<p><code>$$R^2 = 0.71$$</code></p>"), "{out}");
+    }
+
+    /// Smart punctuation turned `--robust` into an en dash and straight quotes into curly ones, so
+    /// commands copied from an answer broke.
+    #[test]
+    fn test_render_markdown_keeps_flags_and_quotes() {
+        let out = structure("Run `p2a reg ols` with --robust hc1 on \"sales\" and 'grunfeld'.");
+        assert!(
+            out.contains("with --robust hc1 on &#34;sales&#34; and &#39;grunfeld&#39;."),
+            "{out}"
+        );
+    }
+
+    /// With task lists enabled, the [ ] / [x] marker events were skipped. Without the extension the
+    /// markers are plain text.
+    #[test]
+    fn test_render_markdown_keeps_task_markers() {
+        let out = structure("- [ ] check residuals\n- [x] fit model\n");
+        assert!(
+            out.contains("<li>[ ] check residuals</li><li>[x] fit model</li>"),
             "{out}"
         );
     }
