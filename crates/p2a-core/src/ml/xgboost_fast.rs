@@ -27,7 +27,8 @@ pub struct FastXgbConfig {
     pub max_depth: usize,
     /// Learning rate (eta)
     pub learning_rate: f64,
-    /// L1 regularization on leaf weights
+    /// L1 penalty on leaf weights (XGBoost reg_alpha): leaves and split gains use
+    /// ThresholdL1(G, alpha) = sign(G) max(|G| - alpha, 0)
     pub alpha: f64,
     /// L2 regularization on leaf weights
     pub lambda: f64,
@@ -210,11 +211,15 @@ impl GradientHistogram {
     fn find_best_split(
         &self,
         lambda: f64,
+        alpha: f64,
         gamma: f64,
         min_child_weight: f64,
     ) -> Option<(usize, f64)> {
         let total_grad: f64 = self.grad_sum.iter().sum();
         let total_hess: f64 = self.hess_sum.iter().sum();
+        let total_count: u32 = self.count.iter().sum();
+        let t_total = threshold_l1(total_grad, alpha);
+        let score_parent = t_total * t_total / (total_hess + lambda);
 
         if total_hess < min_child_weight {
             return None;
@@ -225,10 +230,17 @@ impl GradientHistogram {
 
         let mut left_grad = 0.0;
         let mut left_hess = 0.0;
+        let mut left_count = 0u32;
 
         for bin in 0..self.grad_sum.len() - 1 {
             left_grad += self.grad_sum[bin];
             left_hess += self.hess_sum[bin];
+            left_count += self.count[bin];
+
+            // A boundary with no rows on one side is not a split, whatever gamma allows
+            if left_count == 0 || left_count == total_count {
+                continue;
+            }
 
             let right_grad = total_grad - left_grad;
             let right_hess = total_hess - left_hess;
@@ -237,11 +249,13 @@ impl GradientHistogram {
                 continue;
             }
 
-            // XGBoost gain formula
+            // XGBoost CalcGain on the thresholded sums
+            let t_left = threshold_l1(left_grad, alpha);
+            let t_right = threshold_l1(right_grad, alpha);
             let gain = 0.5
-                * ((left_grad * left_grad) / (left_hess + lambda)
-                    + (right_grad * right_grad) / (right_hess + lambda)
-                    - (total_grad * total_grad) / (total_hess + lambda));
+                * ((t_left * t_left) / (left_hess + lambda)
+                    + (t_right * t_right) / (right_hess + lambda)
+                    - score_parent);
 
             if gain > best_gain {
                 best_gain = gain;
@@ -323,6 +337,24 @@ impl std::fmt::Display for FastXgbResult {
         writeln!(f, "Learning rate: {}", self.config.learning_rate)?;
         Ok(())
     }
+}
+
+/// XGBoost's ThresholdL1: the sum of gradients soft-thresholded by alpha.
+#[inline]
+fn threshold_l1(g: f64, alpha: f64) -> f64 {
+    if g > alpha {
+        g - alpha
+    } else if g < -alpha {
+        g + alpha
+    } else {
+        0.0
+    }
+}
+
+/// XGBoost's CalcWeight: -ThresholdL1(G, alpha) / (H + lambda).
+#[inline]
+fn leaf_weight(g_sum: f64, h_sum: f64, lambda: f64, alpha: f64) -> f64 {
+    -threshold_l1(g_sum, alpha) / (h_sum + lambda)
 }
 
 /// Refuse what the fit cannot use: too few rows or columns, non-finite data, a bad alpha or n_jobs.
@@ -542,7 +574,7 @@ fn build_tree_histogram(
         let hess_sum: f64 = node_samples.iter().map(|&i| hessians[i]).sum();
 
         // Leaf weight
-        let weight = -grad_sum / (hess_sum + config.lambda);
+        let weight = leaf_weight(grad_sum, hess_sum, config.lambda, config.alpha);
 
         // Check stopping conditions
         if depth >= config.max_depth || n_samples < 2 || hess_sum < config.min_child_weight {
@@ -582,9 +614,12 @@ fn build_tree_histogram(
         let mut best_split: Option<(usize, usize, f64, f64)> = None; // (feature, bin, gain, threshold)
 
         for (feat, hist) in &histograms {
-            if let Some((bin, gain)) =
-                hist.find_best_split(config.lambda, config.gamma, config.min_child_weight)
-            {
+            if let Some((bin, gain)) = hist.find_best_split(
+                config.lambda,
+                config.alpha,
+                config.gamma,
+                config.min_child_weight,
+            ) {
                 if best_split.is_none() || gain > best_split.as_ref().unwrap().2 {
                     let threshold = if bin < binned_data.bin_edges[*feat].len() {
                         binned_data.bin_edges[*feat][bin]
@@ -760,6 +795,101 @@ mod tests {
     }
     fn case_vector(ds: &crate::data::Dataset, col: &str) -> Array1<f64> {
         Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+
+    #[test]
+    fn test_leaf_weight_and_gain_soft_threshold() {
+        // XGBoost CalcWeight: -ThresholdL1(G, alpha) / (H + lambda)
+        assert_eq!(leaf_weight(-10.0, 5.0, 1.0, 0.0), 10.0 / 6.0);
+        assert_eq!(leaf_weight(-10.0, 5.0, 1.0, 5.0), 5.0 / 6.0);
+        assert_eq!(leaf_weight(-10.0, 5.0, 1.0, 12.0), 0.0);
+        assert_eq!(leaf_weight(7.0, 5.0, 1.0, 2.0), -5.0 / 6.0);
+        // gain on thresholded sums: G_L = -8, H_L = 2, G_R = -2, H_R = 2, lambda 1
+        let mut h = GradientHistogram::new(1);
+        h.grad_sum = vec![-8.0, -2.0];
+        h.hess_sum = vec![2.0, 2.0];
+        h.count = vec![2, 2];
+        let (bin, g0) = h.find_best_split(1.0, 0.0, 0.0, 1.0).unwrap(); // (lambda, alpha, gamma, mcw)
+        assert_eq!(bin, 0);
+        assert!((g0 - 4.0 / 3.0).abs() < 1e-13); // 0.5 (64/3 + 4/3 - 100/5)
+        let (_, g1) = h.find_best_split(1.0, 1.0, 0.0, 1.0).unwrap();
+        assert!((g1 - 7.0 / 30.0).abs() < 1e-13); // 0.5 (49/3 + 1/3 - 81/5)
+    }
+
+    #[test]
+    fn test_validate_fast_xgboost_l1_stump() {
+        let (case, ds) = crate::test_support::load_case("ml_xgboost_l1");
+        let x = case_matrix(&ds, &["x1", "x2"]);
+        let y = case_vector(&ds, "y");
+        let mut chk = Check::new(&case);
+        for (alpha, key) in [(0.0, "fast_a0_stump"), (3.0, "fast_a3_stump")] {
+            let mut cfg = FastXgbConfig::default();
+            cfg.n_estimators = 1;
+            cfg.max_depth = 1;
+            cfg.learning_rate = 0.3;
+            cfg.lambda = 1.0;
+            cfg.alpha = alpha;
+            cfg.gamma = 0.0;
+            cfg.min_child_weight = 1.0;
+            let r = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+            let t = &r.trees[0];
+            let root = &t.nodes[0];
+            let (l, rt) = (&t.nodes[root.left.unwrap()], &t.nodes[root.right.unwrap()]);
+            chk.vector(
+                key,
+                &[
+                    root.feature.unwrap() as f64,
+                    root.bin_threshold as f64,
+                    l.weight,
+                    rt.weight,
+                ],
+                Tol::coef(16),
+            );
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_validate_fast_xgboost_l1_four_rounds() {
+        let (case, ds) = crate::test_support::load_case("ml_xgboost_l1");
+        let x = case_matrix(&ds, &["x1", "x2"]);
+        let y = case_vector(&ds, "y");
+        let mut chk = Check::new(&case);
+        for (alpha, key) in [(0.0, "fast_a0_pred4"), (3.0, "fast_a3_pred4")] {
+            let mut cfg = FastXgbConfig::default();
+            cfg.n_estimators = 4;
+            cfg.max_depth = 2;
+            cfg.learning_rate = 0.3;
+            cfg.lambda = 1.0;
+            cfg.alpha = alpha;
+            cfg.gamma = 0.0;
+            cfg.min_child_weight = 1.0;
+            let r = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+            chk.vector(key, &r.predictions, Tol::coef(16));
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_fast_xgboost_never_splits_off_an_empty_child() {
+        // x takes two values: after the root split each child holds one value, every boundary leaves
+        // one side empty with gain 0, and gamma < 0 used to accept that "split"
+        let x = Array2::from_shape_fn((30, 1), |(i, _)| (i % 2) as f64);
+        let y = Array1::from_shape_fn(30, |i| (i % 2) as f64 + 0.1 * (i % 5) as f64);
+        let mut cfg = FastXgbConfig::default();
+        cfg.n_estimators = 2;
+        cfg.max_depth = 3;
+        cfg.gamma = -1.0;
+        cfg.min_child_weight = 0.0;
+        let r = fast_xgboost(x.view(), y.view(), &cfg).unwrap();
+        for t in &r.trees {
+            for n in &t.nodes {
+                assert!(
+                    n.feature.is_none() || (n.left.is_some() && n.right.is_some()),
+                    "{n:?}"
+                );
+            }
+        }
     }
 
     #[test]

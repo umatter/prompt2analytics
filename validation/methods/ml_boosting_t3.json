@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_xgboost_l1",
+      "name": "XGBoost exact and histogram trees: L1 leaf weights and gains",
+      "category": "ml",
+      "reference": "XGBoost exact greedy (Chen & Guestrin 2016) and p2a's histogram variant with xgboost's CalcWeight/CalcGain L1 rule, published algorithm written out in R (xgboost not a dependency of this case)",
+      "doc": "validation/ml/xgboost.md",
+      "cases": [
+        "ml_xgboost_l1"
+      ],
+      "tests": [
+        "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_stump",
+        "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_four_rounds"
+      ],
+      "quantities": [
+        "predictions after 3 (exact) and 4 (histogram) rounds",
+        "root split feature, threshold and gain",
+        "stump bin and leaf weights"
+      ],
+      "tolerance": "validation/README.md, n = 16: 1e-6 relative; split feature and bin exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
