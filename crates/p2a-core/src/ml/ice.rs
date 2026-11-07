@@ -489,7 +489,7 @@ fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>, pdp_curve: &[f64]) -> Eco
 
         sorted.clear();
         sorted.extend(col.iter().copied());
-        sorted.sort_by(f64::total_cmp);
+        sorted.sort_unstable_by(f64::total_cmp);
         range[g_idx] = sorted[n_obs - 1] - sorted[0];
         iqr[g_idx] = quantile_sorted(&sorted, 0.75, QuantileType::T7)
             - quantile_sorted(&sorted, 0.25, QuantileType::T7);

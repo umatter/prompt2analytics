@@ -644,7 +644,7 @@ fn seq_length_out(from: f64, to: f64, n: usize, what: &str) -> EconResult<Vec<f6
 pub(crate) fn default_grid_points(values: &[f64]) -> EconResult<usize> {
     let mut distinct = try_with_capacity::<f64>(values.len(), "partial-dependence grid")?;
     distinct.extend(values.iter().copied().filter(|v| !v.is_nan()));
-    distinct.sort_by(f64::total_cmp);
+    distinct.sort_unstable_by(f64::total_cmp);
     distinct.dedup();
     Ok(distinct.len().clamp(1, DEFAULT_MAX_GRID_POINTS))
 }
@@ -735,7 +735,7 @@ pub fn feature_grid(values: &[f64], spec: &GridSpec, feature: &str) -> EconResul
             check_feature_values(values, feature)?;
             let mut sorted = try_with_capacity::<f64>(values.len(), "partial-dependence grid")?;
             sorted.extend(values.iter().copied().filter(|v| !v.is_nan()));
-            sorted.sort_by(f64::total_cmp);
+            sorted.sort_unstable_by(f64::total_cmp);
             let mut grid = try_with_capacity::<f64>(probs.len(), "partial-dependence grid")?;
             grid.extend(
                 probs
@@ -745,7 +745,7 @@ pub fn feature_grid(values: &[f64], spec: &GridSpec, feature: &str) -> EconResul
             grid
         }
     };
-    grid.sort_by(f64::total_cmp);
+    grid.sort_unstable_by(f64::total_cmp);
     grid.dedup();
     Ok(grid)
 }
