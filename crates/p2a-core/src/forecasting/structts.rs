@@ -830,6 +830,8 @@ struct Minimum {
 const HESSIAN_STEP: f64 = 1e-6;
 /// The Armijo constant of the projected line search.
 const ARMIJO: f64 = 1e-4;
+/// A change in the objective no double-precision search can rely on.
+const STALL_F: f64 = 1e-14;
 /// Line-search halvings before the search gives up.
 const MAX_HALVINGS: usize = 60;
 
@@ -1001,7 +1003,14 @@ fn minimize_nonnegative(
             alpha *= 0.5;
         }
         let Some((next, value, grad)) = accepted else {
-            line_search_failed = true;
+            // A Newton step predicting less than the rounding of f cannot be told
+            // from no step: the search is at the optimum as far as f can resolve it.
+            let predicted: f64 = direction.iter().zip(&g_free).map(|(d, gi)| -d * gi).sum();
+            if usable && predicted <= STALL_F * f.abs().max(1.0) {
+                converged = true;
+            } else {
+                line_search_failed = true;
+            }
             break;
         };
 
@@ -1014,7 +1023,7 @@ fn minimize_nonnegative(
         f = value;
         g = grad;
         iterations += 1;
-        if change_f <= 1e-14 && change_x <= 1e-12 {
+        if change_f <= STALL_F && change_x <= 1e-12 {
             // No further reduction is possible in double precision.
             converged = true;
             break;
@@ -1221,6 +1230,26 @@ mod tests {
         });
         assert!(matches!(stopped, Err(EconError::Cancelled(_))));
         assert!(evals <= bound, "{evals} evaluations");
+    }
+
+    #[test]
+    fn minimize_nonnegative_stops_as_converged_below_the_rounding_of_the_objective() {
+        // f is a quadratic with a jump at every other point, as rounding noise, so
+        // every trial looks worse. A Newton step from just off the optimum predicts
+        // less than that noise: converged. From far off it does not: a failed search.
+        let start = |offset: f64| {
+            let x0 = [1.0 + offset];
+            let mut noisy = move |x: &[f64]| -> EconResult<(f64, Vec<f64>)> {
+                let noise = if x[0] == x0[0] { 0.0 } else { 1.0 };
+                Ok((0.5 * (x[0] - 1.0).powi(2) + noise, vec![x[0] - 1.0]))
+            };
+            minimize_nonnegative(&mut noisy, &x0, 100, 1e-12).unwrap()
+        };
+        let near = start(1e-8);
+        assert!(near.converged && !near.line_search_failed, "{}", near.crit);
+        assert!(near.crit > 1e-12);
+        let far = start(1.0);
+        assert!(!far.converged && far.line_search_failed, "{}", far.crit);
     }
 
     #[test]

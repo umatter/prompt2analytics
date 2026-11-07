@@ -84,7 +84,8 @@ unaffected: with no missing value the two formulas agree.
 The stopping criterion is the scaled projected gradient `max_{i free} |g_i| max(x_i, 1) <= tolerance` (default
 `1e-8`). `x` is in units of `vx`, so a rescaled series follows the same path and `f` only shifts by a constant
 (`test_validate_structts_scale_invariant`, factors `1e-6` and `1e6`). The search also stops as converged when a step changes
-`f` by at most `1e-14` and `x` by at most `1e-12`: no further reduction is possible in double precision.
+`f` by at most `1e-14` and `x` by at most `1e-12`, or when no step is accepted and the Newton step predicts a reduction
+of at most `1e-14 max(|f|, 1)`: no further reduction is possible in double precision.
 
 A stop at `max_iter` is `converged = false`, recorded in `convergence` and in `warnings` as "StructTS did not
 converge after N iterations (...)" (`test_structts_reports_iteration_limit`). A line search that cannot reduce the
