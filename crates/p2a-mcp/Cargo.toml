@@ -19,8 +19,10 @@ path = "src/main.rs"
 # Char-boundary-safe truncation (rule R8)
 p2a-text.workspace = true
 
-# Core analytics engine
-p2a-core = { path = "../p2a-core", features = ["full"] }
+# Core analytics engine. `database` (SQLite and DuckDB: duckdb-sys is a ~1.5 GB native build) is
+# passed through by this crate's own `database` feature, as p2a-cli does, so CI's
+# --no-default-features builds leave it out.
+p2a-core = { path = "../p2a-core", default-features = false, features = ["visualization", "forecasting", "file-formats", "spectral-analysis"] }
 
 # Numerics (for ML tools)
 ndarray.workspace = true
@@ -108,15 +110,17 @@ tempfile = "3.10"
 p2a-validation = { path = "../p2a-validation" }
 
 [features]
-default = []
+default = ["database"]
+# The SQL tools (db_sqlite_*, db_duckdb_*, db_query_file) and p2a-core's database support.
+database = ["p2a-core/database"]
 http = ["axum", "tower", "tower-http", "tokio-stream", "futures", "async-stream"]
 websocket = ["http", "tokio-tungstenite"]
 auth = ["jsonwebtoken"]
 llm = ["async-trait", "reqwest", "futures"]
 db = ["surrealdb"]
-full = ["http", "websocket", "auth", "llm", "db"]
+full = ["http", "websocket", "auth", "llm", "db", "database"]
 # Embedded feature for desktop/mobile apps - includes everything needed for standalone operation
-embedded = ["http", "llm", "db"]
+embedded = ["http", "llm", "db", "database"]
 
 [lints]
 workspace = true

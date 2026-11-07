@@ -174,13 +174,10 @@ use p2a_core::{
         Dataset,
         DatasetInfo,
         SuggestionPriority,
-        duckdb_table_schema,
         // Data quality profiling
         generate_quality_profile,
         // Smart suggestions
         generate_suggestions,
-        list_duckdb_tables,
-        list_sqlite_tables,
         // Data munging
         munging::{
             AggFn,
@@ -237,11 +234,6 @@ use p2a_core::{
         },
         // Verification and preview
         preview_cleaning,
-        query_duckdb,
-        query_file_with_duckdb,
-        // Database connectivity
-        query_sqlite,
-        sqlite_table_schema,
         verify_cleaning,
     },
     dbscan,
@@ -604,7 +596,6 @@ impl AnalyticsServer {
         // Compose all routers from handler modules
         let tool_router = Self::tool_router()
             + Self::utils_router()
-            + Self::database_router()
             + Self::data_router()
             + Self::viz_router()
             + Self::ml_router()
@@ -620,6 +611,9 @@ impl AnalyticsServer {
             + Self::survival_router()
             + Self::cleaning_router()
             + Self::search_router();
+        // The SQL tools (feature `database`).
+        #[cfg(feature = "database")]
+        let tool_router = tool_router + Self::database_router();
         crate::tools::handlers::utils::mark_server_start();
 
         Self {
@@ -679,7 +673,6 @@ impl AnalyticsServer {
         // Compose all routers from handler modules
         let tool_router = Self::tool_router()
             + Self::utils_router()
-            + Self::database_router()
             + Self::data_router()
             + Self::viz_router()
             + Self::ml_router()
@@ -695,6 +688,9 @@ impl AnalyticsServer {
             + Self::survival_router()
             + Self::cleaning_router()
             + Self::search_router();
+        // The SQL tools (feature `database`).
+        #[cfg(feature = "database")]
+        let tool_router = tool_router + Self::database_router();
         crate::tools::handlers::utils::mark_server_start();
 
         Self {
@@ -958,14 +954,17 @@ impl AnalyticsServer {
         dispatch!("export_session" => ExportSessionRequest => export_session);
         dispatch!("import_session" => ImportSessionRequest => import_session);
 
-        // ===== Database =====
-        dispatch!("db_sqlite_query" => SqliteQueryRequest => db_sqlite_query);
-        dispatch!("db_sqlite_tables" => SqliteListTablesRequest => db_sqlite_tables);
-        dispatch!("db_sqlite_schema" => SqliteSchemaRequest => db_sqlite_schema);
-        dispatch!("db_duckdb_query" => DuckDBQueryRequest => db_duckdb_query);
-        dispatch!("db_duckdb_tables" => DuckDBListTablesRequest => db_duckdb_tables);
-        dispatch!("db_duckdb_schema" => DuckDBSchemaRequest => db_duckdb_schema);
-        dispatch!("db_query_file" => DuckDBFileQueryRequest => db_query_file);
+        // ===== Database ===== (feature `database`)
+        #[cfg(feature = "database")]
+        {
+            dispatch!("db_sqlite_query" => SqliteQueryRequest => db_sqlite_query);
+            dispatch!("db_sqlite_tables" => SqliteListTablesRequest => db_sqlite_tables);
+            dispatch!("db_sqlite_schema" => SqliteSchemaRequest => db_sqlite_schema);
+            dispatch!("db_duckdb_query" => DuckDBQueryRequest => db_duckdb_query);
+            dispatch!("db_duckdb_tables" => DuckDBListTablesRequest => db_duckdb_tables);
+            dispatch!("db_duckdb_schema" => DuckDBSchemaRequest => db_duckdb_schema);
+            dispatch!("db_query_file" => DuckDBFileQueryRequest => db_query_file);
+        }
 
         // ===== Visualization =====
         dispatch!("viz_histogram" => HistogramRequest => viz_histogram);
@@ -1638,6 +1637,33 @@ impl std::fmt::Write for QuoteEnds {
 // ServerHandler Implementation
 // ============================================================================
 
+/// The stdio server's instructions; the SQL tools are named only in builds that have them.
+fn server_instructions() -> String {
+    let databases = if cfg!(feature = "database") {
+        ", or 'db_sqlite_query'/'db_duckdb_query' to query databases"
+    } else {
+        ""
+    };
+    format!(
+        "prompt2analytics is a local data analytics engine. \
+         Use 'load_dataset' to load a CSV or Parquet file{databases}. \
+         Then use 'describe_dataset' for summary statistics, \
+         'compute_correlation' for correlations, 'regression_ols' \
+         for linear regression, 'regression_diagnostics' for model validation, \
+         'panel_fixed_effects' or 'panel_random_effects' for panel data, \
+         'hausman_test' to choose between FE/RE, 'iv_2sls' for instrumental \
+         variables, 'diff_in_diff' for difference-in-differences, \
+         'logit' or 'probit' for binary outcomes, \
+         'ts_var' for VAR models, 'ts_varma' for VARMA models, \
+         'ts_vecm' for cointegration analysis, 'ts_var_irf' for impulse responses, \
+         'ml_kmeans' for K-means clustering, 'ml_dbscan' for DBSCAN clustering, \
+         'ml_pca' for principal component analysis, visualization tools: \
+         'viz_histogram', 'viz_scatter', 'viz_line', 'viz_boxplot', 'viz_heatmap' (static PNG), \
+         or interactive tools: 'viz_scatter_interactive', 'viz_histogram_interactive', \
+         'viz_line_interactive' (HTML/Plotly.js output)."
+    )
+}
+
 /// The MCP handler of the stdio transport. Tool calls run the same request
 /// limits as the governed HTTP-side path (arguments, dataset rows and pivot
 /// shapes of this server's own datasets, response size) before and after
@@ -1767,26 +1793,7 @@ impl ServerHandler for AnalyticsServer {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 ..Default::default()
             },
-            instructions: Some(
-                "prompt2analytics is a local data analytics engine. \
-                 Use 'load_dataset' to load a CSV or Parquet file, or \
-                 'db_sqlite_query'/'db_duckdb_query' to query databases. \
-                 Then use 'describe_dataset' for summary statistics, \
-                 'compute_correlation' for correlations, 'regression_ols' \
-                 for linear regression, 'regression_diagnostics' for model validation, \
-                 'panel_fixed_effects' or 'panel_random_effects' for panel data, \
-                 'hausman_test' to choose between FE/RE, 'iv_2sls' for instrumental \
-                 variables, 'diff_in_diff' for difference-in-differences, \
-                 'logit' or 'probit' for binary outcomes, \
-                 'ts_var' for VAR models, 'ts_varma' for VARMA models, \
-                 'ts_vecm' for cointegration analysis, 'ts_var_irf' for impulse responses, \
-                 'ml_kmeans' for K-means clustering, 'ml_dbscan' for DBSCAN clustering, \
-                 'ml_pca' for principal component analysis, visualization tools: \
-                 'viz_histogram', 'viz_scatter', 'viz_line', 'viz_boxplot', 'viz_heatmap' (static PNG), \
-                 or interactive tools: 'viz_scatter_interactive', 'viz_histogram_interactive', \
-                 'viz_line_interactive' (HTML/Plotly.js output)."
-                    .to_string(),
-            ),
+            instructions: Some(server_instructions()),
         }
     }
 }
@@ -1889,6 +1896,7 @@ mod tests {
         assert!(v.message.contains("Ask for less output"), "{}", v.message);
     }
 
+    #[cfg(feature = "database")]
     #[test]
     fn declared_parameters_are_the_schema_properties() {
         let server = AnalyticsServer::new();

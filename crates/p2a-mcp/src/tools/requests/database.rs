@@ -1,4 +1,7 @@
 //! Request types for database tools (SQLite, DuckDB queries).
+//!
+//! These request types are compiled in every build (the source guard in `requests/mod.rs` reads this
+//! file); the tools that take them exist with the `database` feature.
 
 use schemars::JsonSchema;
 use serde::Deserialize;

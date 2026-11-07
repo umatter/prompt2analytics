@@ -1249,6 +1249,7 @@ mod tests {
         assert!(s.to_string().len() <= MAX_ARGUMENT_BYTES + 256);
     }
 
+    #[cfg(feature = "database")]
     #[test]
     fn padding_cannot_push_the_sql_of_a_query_tool_out() {
         let server = crate::server::AnalyticsServer::new();

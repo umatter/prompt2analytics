@@ -560,3 +560,81 @@ mod providers {
         }
     }
 }
+
+mod features {
+    use super::*;
+    const MANIFEST: &str = include_str!("../../Cargo.toml");
+
+    /// WT-8: p2a-mcp's p2a-core dependency leaves `database` (duckdb-sys) off; p2a-mcp's own
+    /// `database` feature passes it through and is in `default`, `full` and `embedded`.
+    #[test]
+    fn test_manifest_passes_the_database_feature_through() {
+        let line = |prefix: &str| {
+            MANIFEST
+                .lines()
+                .find(|l| l.trim_start().starts_with(prefix))
+                .unwrap_or_else(|| panic!("crates/p2a-mcp/Cargo.toml has no `{prefix}` line"))
+        };
+        let core = line("p2a-core =");
+        assert!(core.contains("default-features = false"), "{core}");
+        assert!(
+            !core.contains("\"full\"") && !core.contains("\"database\""),
+            "{core}"
+        );
+        for f in [
+            "\"visualization\"",
+            "\"forecasting\"",
+            "\"file-formats\"",
+            "\"spectral-analysis\"",
+        ] {
+            assert!(core.contains(f), "{core} lacks {f}");
+        }
+        assert_eq!(
+            line("database =").trim(),
+            r#"database = ["p2a-core/database"]"#
+        );
+        for feature in ["default =", "full =", "embedded ="] {
+            let l = line(feature);
+            assert!(l.contains("\"database\""), "{l}");
+        }
+    }
+
+    /// WT-8: the seven SQL tools exist exactly when `database` is compiled.
+    #[test]
+    fn test_database_tools_follow_the_database_feature() {
+        let routed: Vec<String> = p2a_mcp::server::AnalyticsServer::new()
+            .router_tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let present: Vec<&str> = p2a_mcp::tools::registry::OPTIONAL_TOOLS
+            .iter()
+            .copied()
+            .filter(|n| routed.iter().any(|r| r == n))
+            .collect();
+        if cfg!(feature = "database") {
+            assert_eq!(present.len(), 7, "{present:?}");
+        } else {
+            assert!(
+                present.is_empty(),
+                "built without `database`, yet routed: {present:?}"
+            );
+        }
+    }
+
+    /// The server instructions name the SQL tools only in builds that have them.
+    #[test]
+    fn test_instructions_follow_the_database_feature() {
+        use rmcp::ServerHandler;
+        let text = p2a_mcp::server::AnalyticsServer::new()
+            .get_info()
+            .instructions
+            .unwrap();
+        assert_eq!(
+            text.contains("db_sqlite_query"),
+            cfg!(feature = "database"),
+            "{text}"
+        );
+        assert!(text.starts_with("prompt2analytics is a local data analytics engine. Use 'load_dataset' to load a CSV or Parquet file"));
+    }
+}
