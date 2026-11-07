@@ -764,6 +764,65 @@ impl<R: Read + Seek> SasReader<R> {
     }
 }
 
+/// Windows-1252 code points of bytes 0x80..=0x9F; `None` for the five bytes the code page leaves
+/// unassigned (0x81, 0x8D, 0x8F, 0x90, 0x9D). Bytes 0xA0..=0xFF are ISO-8859-1.
+const WINDOWS_1252_80_9F: [Option<char>; 32] = [
+    Some('\u{20AC}'),
+    None,
+    Some('\u{201A}'),
+    Some('\u{192}'),
+    Some('\u{201E}'),
+    Some('\u{2026}'),
+    Some('\u{2020}'),
+    Some('\u{2021}'),
+    Some('\u{2C6}'),
+    Some('\u{2030}'),
+    Some('\u{160}'),
+    Some('\u{2039}'),
+    Some('\u{152}'),
+    None,
+    Some('\u{17D}'),
+    None,
+    None,
+    Some('\u{2018}'),
+    Some('\u{2019}'),
+    Some('\u{201C}'),
+    Some('\u{201D}'),
+    Some('\u{2022}'),
+    Some('\u{2013}'),
+    Some('\u{2014}'),
+    Some('\u{2DC}'),
+    Some('\u{2122}'),
+    Some('\u{161}'),
+    Some('\u{203A}'),
+    Some('\u{153}'),
+    None,
+    Some('\u{17E}'),
+    Some('\u{178}'),
+];
+
+/// Windows-1252 that maps the five unassigned bytes to the C1 control of the same value (as the
+/// WHATWG encoding standard): for text whose encoding is a guess (Stata release 117) and for
+/// showing raw bytes in error messages.
+pub(crate) fn decode_windows_1252_lenient(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => WINDOWS_1252_80_9F[usize::from(b - 0x80)].unwrap_or(char::from(b)),
+            _ => char::from(b),
+        })
+        .collect()
+}
+
+/// UTF-8 when the bytes are valid UTF-8, Windows-1252 otherwise (Stata release 117 text: Stata 13
+/// writes the platform encoding, haven and ReadStat write UTF-8).
+pub(crate) fn decode_utf8_or_windows_1252(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => decode_windows_1252_lenient(bytes),
+    }
+}
+
 /// Load a SAS7BDAT file into a Polars DataFrame.
 pub fn load_sas(path: impl AsRef<Path>) -> Result<DataFrame, SasError> {
     let file = std::fs::File::open(path)?;
@@ -1203,6 +1262,20 @@ mod tests {
         assert_eq!(reader.columns.len(), 2);
         assert_eq!(reader.columns[0].col_type, ColumnType::Numeric);
         assert_eq!(reader.columns[1].col_type, ColumnType::Numeric);
+    }
+
+    #[test]
+    fn test_windows_1252_helpers() {
+        assert_eq!(
+            decode_windows_1252_lenient(&[0x5A, 0xFC, 0x72, 0x80, 0x35]),
+            "Z\u{fc}r\u{20ac}5"
+        );
+        assert_eq!(decode_windows_1252_lenient(&[0x8D, 0x9F]), "\u{8d}\u{178}");
+        assert_eq!(
+            decode_utf8_or_windows_1252("Z\u{fc}rich".as_bytes()),
+            "Z\u{fc}rich"
+        );
+        assert_eq!(decode_utf8_or_windows_1252(&[0x5A, 0xFC]), "Z\u{fc}");
     }
 
     #[test]

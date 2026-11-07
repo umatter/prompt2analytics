@@ -13,6 +13,10 @@
       "tests": [
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_118",
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_118_stata_written",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_117",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_117_windows_1252",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_119",
+        "p2a-core::data::stata::tests::test_validate_read_haven_dta_119_big_endian",
         "p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture"
       ],
       "quantities": [
@@ -24,6 +28,11 @@
       ],
       "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
       "deviations": [
+        {
+          "finding": "DATA-51",
+          "quantity": "release-117 text, default decoding",
+          "note": "convention (re-scope rule 3): p2a decodes release-117 text as UTF-8 when the bytes are valid UTF-8, else as Windows-1252; haven::read_dta(encoding = NULL) reads every release-117 file as Windows-1252, so haven's own UTF-8 117 files show mojibake there; the pins call read_dta with the encoding that gives the intended text (dta117_haven: UTF-8, dta117_latin1: windows-1252)"
+        },
         {
           "finding": "DATA-50",
           "quantity": "dtype of byte, int and long",

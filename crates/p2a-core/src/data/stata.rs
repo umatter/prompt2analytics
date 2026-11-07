@@ -1,18 +1,31 @@
-//! Stata DTA file reader (releases 117-119).
+//! Stata DTA file reader for formats 117 (Stata 13), 118 (Stata 14-18) and 119 (Stata 15-18, more
+//! than 32,767 variables), little-endian (LSF) and big-endian (MSF).
 //!
 //! This is a pure Rust implementation of Stata's `dta` specification. The header is read tag by
 //! tag; the `<map>` then locates every section (slot 2 `<variable_types>`, 3 `<varnames>`, 9
 //! `<data>`, 10 `<strls>`), and the reader checks the tag at each offset instead of scanning for
-//! it. Values are pinned to `haven::read_dta` on the fixtures in `validation/datasets/files/`
-//! (`validation/data/readers.md`). Formats before 117 (Stata 12 and earlier) are refused with
-//! [`StataError::UnsupportedVersion`]; strL contents and value labels are not decoded (see the strL
-//! warning in [`StataReader::read_to_dataframe`]).
+//! it. Field widths by release:
+//!
+//! | Release | `<K>` | `<N>` | label length | variable name |
+//! |---|---|---|---|---|
+//! | 117 | u16 | u32 | u8 | 33 bytes |
+//! | 118 | u16 | u64 | u16 | 129 bytes |
+//! | 119 | u32 | u64 | u16 | 129 bytes |
+//!
+//! Text is UTF-8 in releases 118 and 119. Release 117 text is read as UTF-8 when it is valid UTF-8
+//! (haven and ReadStat write UTF-8) and as Windows-1252 otherwise (Stata 13 writes the platform
+//! encoding). Values are pinned to `haven::read_dta` on the fixtures in
+//! `validation/datasets/files/` (`validation/data/readers.md`). Formats before 117 (Stata 12 and
+//! earlier) are refused with [`StataError::UnsupportedVersion`]; strL contents and value labels are
+//! not decoded (see the strL warning in [`StataReader::read_to_dataframe`]).
 
 use polars::frame::column::Column;
 use polars::prelude::*;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
+
+use super::sas::{decode_utf8_or_windows_1252, decode_windows_1252_lenient};
 
 /// Errors that can occur during Stata file reading.
 #[derive(Error, Debug)]
@@ -38,6 +51,37 @@ pub enum StataError {
 enum ByteOrder {
     LittleEndian, // LSF
     BigEndian,    // MSF
+}
+
+/// The three XML-tagged dta releases and their field widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Release {
+    R117,
+    R118,
+    R119,
+}
+
+impl Release {
+    fn k_width(self) -> usize {
+        if self == Release::R119 { 4 } else { 2 }
+    }
+    fn n_width(self) -> usize {
+        if self == Release::R117 { 4 } else { 8 }
+    }
+    fn label_length_width(self) -> usize {
+        if self == Release::R117 { 1 } else { 2 }
+    }
+    fn name_len(self) -> usize {
+        if self == Release::R117 { 33 } else { 129 }
+    }
+    /// Release 117 text may be Windows-1252; 118 and 119 are UTF-8.
+    fn decode(self, bytes: &[u8], what: impl FnOnce() -> String) -> Result<String, StataError> {
+        match self {
+            Release::R117 => Ok(decode_utf8_or_windows_1252(bytes)),
+            Release::R118 | Release::R119 => String::from_utf8(bytes.to_vec())
+                .map_err(|_| StataError::ParseError(format!("{} is not valid UTF-8", what()))),
+        }
+    }
 }
 
 /// `<map>` slots (Stata dta specification, section 5.2).
@@ -102,8 +146,7 @@ struct Variable {
 pub struct StataReader<R: Read + Seek> {
     reader: BufReader<R>,
     byte_order: ByteOrder,
-    #[allow(dead_code)]
-    version: u8,
+    release: Release,
     n_vars: usize,
     n_obs: u64,
     variables: Vec<Variable>,
@@ -130,12 +173,12 @@ impl<R: Read + Seek> StataReader<R> {
         }
         reader.seek(SeekFrom::Start(0))?;
 
-        let (version, byte_order) = Self::read_header(&mut reader)?;
-        let n_vars_raw = Self::read_uint(&mut reader, 2, byte_order)?;
+        let (release, byte_order) = Self::read_header(&mut reader)?;
+        let n_vars_raw = Self::read_uint(&mut reader, release.k_width(), byte_order)?;
         Self::expect(&mut reader, b"</K><N>")?;
-        let n_obs = Self::read_uint(&mut reader, 8, byte_order)?;
+        let n_obs = Self::read_uint(&mut reader, release.n_width(), byte_order)?;
         Self::expect(&mut reader, b"</N><label>")?;
-        let label_len = Self::read_uint(&mut reader, 2, byte_order)?;
+        let label_len = Self::read_uint(&mut reader, release.label_length_width(), byte_order)?;
         Self::skip(&mut reader, label_len)?;
         Self::expect(&mut reader, b"</label><timestamp>")?;
         let timestamp_len = Self::read_uint(&mut reader, 1, byte_order)?;
@@ -148,7 +191,6 @@ impl<R: Read + Seek> StataReader<R> {
         Self::expect(&mut reader, b"</map>")?;
 
         Self::validate_map(&map, file_len)?;
-        let name_len = if version >= 118 { 129 } else { 33 };
         let types_section = map[MAP_VARNAMES] - map[MAP_VARIABLE_TYPES];
         let names_section = map[MAP_SORTLIST] - map[MAP_VARNAMES];
         let types_fit = n_vars_raw
@@ -156,7 +198,7 @@ impl<R: Read + Seek> StataReader<R> {
             .and_then(|b| b.checked_add(b"<variable_types>".len() as u64))
             .is_some_and(|end| end <= types_section);
         let names_fit = n_vars_raw
-            .checked_mul(name_len as u64)
+            .checked_mul(release.name_len() as u64)
             .and_then(|b| b.checked_add(b"<varnames>".len() as u64))
             .is_some_and(|end| end <= names_section);
         if !types_fit || !names_fit {
@@ -177,8 +219,10 @@ impl<R: Read + Seek> StataReader<R> {
 
         Self::seek_tag(&mut reader, map[MAP_VARNAMES], b"<varnames>")?;
         let mut variables = Vec::with_capacity(n_vars);
-        for dtype in var_types {
-            let name = Self::read_fixed_string(&mut reader, name_len)?;
+        for (i, dtype) in var_types.into_iter().enumerate() {
+            let name = Self::read_fixed_string(&mut reader, release.name_len(), release, || {
+                format!("the name of variable {}", i + 1)
+            })?;
             variables.push(Variable { name, dtype });
         }
 
@@ -189,7 +233,7 @@ impl<R: Read + Seek> StataReader<R> {
         Ok(StataReader {
             reader,
             byte_order,
-            version,
+            release,
             n_vars,
             n_obs,
             variables,
@@ -257,7 +301,7 @@ impl<R: Read + Seek> StataReader<R> {
         // Read observations
         for _ in 0..self.n_obs {
             for (var_idx, dtype) in var_types.iter().enumerate() {
-                let value = self.read_value(dtype)?;
+                let value = self.read_value(dtype, &var_names[var_idx])?;
                 columns[var_idx].push(value);
             }
         }
@@ -274,22 +318,29 @@ impl<R: Read + Seek> StataReader<R> {
     }
 
     /// `<stata_dta><header><release>NNN</release><byteorder>XXX</byteorder><K>`, read exactly.
-    fn read_header(reader: &mut BufReader<R>) -> Result<(u8, ByteOrder), StataError> {
+    fn read_header(reader: &mut BufReader<R>) -> Result<(Release, ByteOrder), StataError> {
         Self::expect(reader, b"<stata_dta><header><release>")?;
         let mut release = [0u8; 3];
         reader.read_exact(&mut release)?;
-        let version = std::str::from_utf8(&release)
-            .ok()
-            .and_then(|s| s.parse::<u8>().ok())
-            .ok_or_else(|| {
-                StataError::InvalidFormat(format!(
-                    "release {:?} is not a number",
-                    String::from_utf8_lossy(&release)
-                ))
-            })?;
-        if !(117..=119).contains(&version) {
-            return Err(StataError::UnsupportedVersion(version));
-        }
+        let release = match &release {
+            b"117" => Release::R117,
+            b"118" => Release::R118,
+            b"119" => Release::R119,
+            other => {
+                return Err(
+                    match std::str::from_utf8(other)
+                        .ok()
+                        .and_then(|s| s.parse::<u8>().ok())
+                    {
+                        Some(v) => StataError::UnsupportedVersion(v),
+                        None => StataError::InvalidFormat(format!(
+                            "release {:?} is not a number",
+                            decode_windows_1252_lenient(other)
+                        )),
+                    },
+                );
+            }
+        };
         Self::expect(reader, b"</release><byteorder>")?;
         let mut order = [0u8; 3];
         reader.read_exact(&mut order)?;
@@ -299,13 +350,13 @@ impl<R: Read + Seek> StataReader<R> {
             _ => return Err(StataError::InvalidFormat("Invalid byte order".into())),
         };
         Self::expect(reader, b"</byteorder><K>")?;
-        Ok((version, byte_order))
+        Ok((release, byte_order))
     }
 
     /// The next `tag.len()` bytes must be `tag`.
     fn expect(reader: &mut BufReader<R>, tag: &[u8]) -> Result<(), StataError> {
         let at = reader.stream_position()?;
-        let shown = String::from_utf8_lossy(tag);
+        let shown = decode_windows_1252_lenient(tag);
         let mut buf = vec![0u8; tag.len()];
         reader.read_exact(&mut buf).map_err(|_| {
             StataError::InvalidFormat(format!(
@@ -315,7 +366,7 @@ impl<R: Read + Seek> StataReader<R> {
         if buf != tag {
             return Err(StataError::InvalidFormat(format!(
                 "expected {shown} at byte {at}, found {:?}",
-                String::from_utf8_lossy(&buf)
+                decode_windows_1252_lenient(&buf)
             )));
         }
         Ok(())
@@ -427,18 +478,25 @@ impl<R: Read + Seek> StataReader<R> {
         })
     }
 
-    fn read_fixed_string(reader: &mut BufReader<R>, len: usize) -> Result<String, StataError> {
+    /// A NUL-terminated fixed-width string, decoded by the release's text rule.
+    fn read_fixed_string(
+        reader: &mut BufReader<R>,
+        len: usize,
+        release: Release,
+        what: impl FnOnce() -> String,
+    ) -> Result<String, StataError> {
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
 
         // Find null terminator
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-
-        String::from_utf8(buf[..end].to_vec())
-            .map_err(|_| StataError::ParseError("Invalid UTF-8 in string".into()))
+        release.decode(&buf[..end], what)
     }
-
-    fn read_value(&mut self, dtype: &StataType) -> Result<AnyValue<'static>, StataError> {
+    fn read_value(
+        &mut self,
+        dtype: &StataType,
+        name: &str,
+    ) -> Result<AnyValue<'static>, StataError> {
         match dtype {
             StataType::Byte => {
                 let v = Self::read_i8(&mut self.reader)?;
@@ -484,7 +542,10 @@ impl<R: Read + Seek> StataReader<R> {
                 }
             }
             StataType::Str(len) => {
-                let s = Self::read_fixed_string(&mut self.reader, *len)?;
+                let release = self.release;
+                let s = Self::read_fixed_string(&mut self.reader, *len, release, || {
+                    format!("a value of variable {name}")
+                })?;
                 Ok(AnyValue::StringOwned(s.into()))
             }
             StataType::StrL => {
@@ -617,6 +678,48 @@ mod tests {
         let case = Case::load("data_readers_values");
         let df = load_stata(fixture_path("dta118_stata_iris.dta")).unwrap();
         assert_matches_haven(&case, "dta118_stata_iris", &df);
+    }
+
+    #[test]
+    fn test_validate_read_haven_dta_117() {
+        // DATA-51: release 117 stores <N> in 4 bytes and the label length in 1; haven writes UTF-8.
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta117_haven.dta")).unwrap();
+        assert_matches_haven(&case, "dta117_haven", &df);
+    }
+
+    #[test]
+    fn test_validate_read_haven_dta_117_windows_1252() {
+        // DATA-51: Stata 13 writes str# text in Windows-1252 ("Z\u{fc}rich" = 5A FC 72 69 63 68,
+        // "\u{20ac}5" = 80 35); haven reads it with encoding = "windows-1252".
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta117_latin1.dta")).unwrap();
+        assert_matches_haven(&case, "dta117_latin1", &df);
+    }
+
+    #[test]
+    fn test_validate_read_haven_dta_119() {
+        // DATA-51: release 119 stores <K> in 4 bytes.
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta119_haven.dta")).unwrap();
+        assert_matches_haven(&case, "dta119_haven", &df);
+    }
+
+    #[test]
+    fn test_validate_read_haven_dta_119_big_endian() {
+        // DATA-51: an MSF 119 file; read as u16, its <K> would be 0.
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta119_msf.dta")).unwrap();
+        assert_matches_haven(&case, "dta119_msf", &df);
+    }
+
+    #[test]
+    fn test_stata_119_k_is_four_bytes() {
+        // DATA-51: byte 72 is the third byte of release 119's u32 <K>: K = 6 + 65536 = 65542,
+        // which does not fit the sections (a u16 read sees K = 6 and then misreads the header).
+        let mut b = fixture_bytes("dta119_haven.dta");
+        b[72] = 1;
+        assert_invalid(load(b), "<K> = 65542 variables do not fit");
     }
 
     #[test]

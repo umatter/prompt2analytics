@@ -57,6 +57,19 @@ The header is read tag by tag (`<stata_dta><header><release>`, `<byteorder>`, `<
 Before, it scanned forward from slot 1 (`<map>` itself) for `<K>`, which sits in the header, so every
 real file failed with `Tag not found: <K>`.
 
+| Release | `<K>` | `<N>` | label length | variable name | text |
+|---|---|---|---|---|---|
+| 117 (Stata 13) | u16 | u32 | u8 | 33 bytes | UTF-8 if valid, else Windows-1252 |
+| 118 (Stata 14-18) | u16 | u64 | u16 | 129 bytes | UTF-8 |
+| 119 (Stata 15-18, > 32,767 variables) | u32 | u64 | u16 | 129 bytes | UTF-8 |
+
+(DATA-51.) Release 117 has no encoding field: Stata 13 writes the platform encoding (Windows-1252 on
+Windows), haven and ReadStat write UTF-8. haven's own default (`encoding = NULL`) reads release 117
+as Windows-1252, so it shows haven's own UTF-8 117 files as mojibake; p2a reads UTF-8 when the bytes
+are valid UTF-8, and the case pins both files with the encoding that gives the intended text
+(`dta117_haven`: `"UTF-8"`, `dta117_latin1`: `"windows-1252"`; both give `"Zürich"`, `"€5"`). Recorded
+as a registry deviation of `data_read_dta`.
+
 Formats 102-116 and releases above 119 are `UnsupportedVersion`.
 
 ## Tests
@@ -71,6 +84,11 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::stata::tests::test_stata_fixture_offsets` | the byte offsets the Stata tests patch |
 | `p2a-core::data::stata::tests::test_validate_read_haven_dta_118` | `dta118_haven` = haven (DATA-22) |
 | `p2a-core::data::stata::tests::test_validate_read_haven_dta_118_stata_written` | `dta118_stata_iris` (Stata 14) = haven (DATA-22, DATA-50) |
+| `p2a-core::data::stata::tests::test_validate_read_haven_dta_117` | `dta117_haven` = haven with `encoding = "UTF-8"` (DATA-51) |
+| `p2a-core::data::stata::tests::test_validate_read_haven_dta_117_windows_1252` | `dta117_latin1` = haven with `encoding = "windows-1252"` (DATA-51) |
+| `p2a-core::data::stata::tests::test_validate_read_haven_dta_119` | `dta119_haven` = haven: u32 `<K>` (DATA-51) |
+| `p2a-core::data::stata::tests::test_validate_read_haven_dta_119_big_endian` | `dta119_msf` = haven (DATA-51) |
+| `p2a-core::data::stata::tests::test_stata_119_k_is_four_bytes` | a release-119 `<K>` of 65542 is read as such (DATA-51) |
 | `p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture` | `DataLoader::load` of `dta118_haven` = haven |
 | `p2a-core::data::stata::tests::test_stata_map_and_header_guards` | map offsets past EOF or off their tag, N and K bounds (DATA-22) |
 | `p2a-core::data::stata::tests::test_stata_pre_117_formats_are_unsupported` | formats 102-116 and release 120 are `UnsupportedVersion` |
