@@ -36,8 +36,9 @@ The first observation therefore adds a large `ln F` and a small `v²/F`; its sta
 **Why the tight optimum, not R's stopping point.** R's L-BFGS-B stops on a relative change in `f` of about
 `2e-9` with a finite-difference gradient, short of the optimum of its own objective. Its stopping point cannot be
 reproduced by another optimiser and is not a property of the model. The reference is the optimum of the same
-objective, found from R's estimate with a much tighter `optim` and an exact Karush-Kuhn-Tucker check at every bound
-(`*_tight` keys); R's default fit stays pinned as a cross-check at its measured gap.
+objective, found in the R case by Newton's method on the exact gradient, written out and checked against
+`stats::KalmanLike`, with the Karush-Kuhn-Tucker sign checked at every bound (`*_tight` keys); R's default fit stays
+pinned as a cross-check at its measured gap.
 
 **Why the optimiser is what it is.** Nelder-Mead on log variances could not reach a variance of 0, which is
 where the Nile trend slope and the UKgas level sit. The projected Newton search holds a bound with

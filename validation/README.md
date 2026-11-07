@@ -374,7 +374,9 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 |--------|------|--------|
 | ARIMA | [arima.md](forecasting/arima.md) | R-pinned |
 | MSTL | [mstl.md](forecasting/mstl.md) | not R-pinned |
-| Structural time series (StructTS) | [structts.md](forecasting/structts.md) | not R-pinned |
+| Structural time series (StructTS) | [structts.md](forecasting/structts.md) | R-pinned |
+| Kalman filter, smoother and forecast with intercepts | [kalman.md](forecasting/kalman.md) | R-pinned |
+| CausalImpact counterfactual (StructTS fit and Kalman forecast) | [causal_impact.md](forecasting/causal_impact.md) | R-pinned |
 | GARCH(p, q) (maximum likelihood, normal and Student-t errors, variance forecasts) | [garch.md](forecasting/garch.md) | R-pinned |
 | Changepoint | no validation document yet | not R-pinned |
 
