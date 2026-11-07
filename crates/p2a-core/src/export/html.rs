@@ -5,10 +5,14 @@
 //! - Email reports
 //! - Jupyter notebook integration
 //! - Standalone reports
+//!
+//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does.
 
+use super::latex::format_cell;
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
+use crate::traits::convergence::{ResultNotes, notes_text};
 
 /// Style options for HTML tables.
 #[derive(Debug, Clone)]
@@ -151,10 +155,9 @@ impl HtmlTableBuilder {
                         String::new()
                     };
                     html.push_str(&format!(
-                        "      <td class=\"coef\">{:.prec$}{}</td>\n",
-                        coef.estimate,
-                        stars,
-                        prec = self.style.coef_decimals
+                        "      <td class=\"coef\">{}{}</td>\n",
+                        format_cell(coef.estimate, self.style.coef_decimals),
+                        stars
                     ));
                 } else {
                     html.push_str("      <td></td>\n");
@@ -170,9 +173,8 @@ impl HtmlTableBuilder {
                     if let Some(idx) = result.variable_names.iter().position(|v| v == var) {
                         let coef = &result.coefficients[idx];
                         html.push_str(&format!(
-                            "      <td class=\"se\">({:.prec$})</td>\n",
-                            coef.std_error,
-                            prec = self.style.se_decimals
+                            "      <td class=\"se\">({})</td>\n",
+                            format_cell(coef.std_error, self.style.se_decimals)
                         ));
                     } else {
                         html.push_str("      <td></td>\n");
@@ -199,19 +201,28 @@ impl HtmlTableBuilder {
             if self.style.show_r_squared {
                 html.push_str("    <tr>\n      <td>R<sup>2</sup></td>\n");
                 for (_, result) in &self.results {
-                    html.push_str(&format!("      <td>{:.4}</td>\n", result.r_squared));
+                    html.push_str(&format!(
+                        "      <td>{}</td>\n",
+                        format_cell(result.r_squared, 4)
+                    ));
                 }
                 html.push_str("    </tr>\n");
 
                 html.push_str("    <tr>\n      <td>Adj. R<sup>2</sup></td>\n");
                 for (_, result) in &self.results {
-                    html.push_str(&format!("      <td>{:.4}</td>\n", result.adj_r_squared));
+                    html.push_str(&format!(
+                        "      <td>{}</td>\n",
+                        format_cell(result.adj_r_squared, 4)
+                    ));
                 }
                 html.push_str("    </tr>\n");
 
                 html.push_str("    <tr>\n      <td>F-statistic</td>\n");
                 for (_, result) in &self.results {
-                    html.push_str(&format!("      <td>{:.2}</td>\n", result.f_statistic));
+                    html.push_str(&format!(
+                        "      <td>{}</td>\n",
+                        format_cell(result.f_statistic, 2)
+                    ));
                 }
                 html.push_str("    </tr>\n");
             }
@@ -302,16 +313,26 @@ impl DiscreteResult {
                 escape_html(&self.variables[i])
             ));
             html.push_str(&format!(
-                "      <td class=\"coef\">{:.4}{}</td>\n",
-                self.coefficients[i], stars
+                "      <td class=\"coef\">{}{}</td>\n",
+                format_cell(self.coefficients[i], 4),
+                stars
             ));
             html.push_str(&format!(
-                "      <td class=\"se\">{:.4}</td>\n",
-                self.std_errors[i]
+                "      <td class=\"se\">{}</td>\n",
+                format_cell(self.std_errors[i], 4)
             ));
-            html.push_str(&format!("      <td>{:.2}</td>\n", self.z_stats[i]));
-            html.push_str(&format!("      <td>{:.4}</td>\n", self.p_values[i]));
-            html.push_str(&format!("      <td>{:.4}</td>\n", self.marginal_effects[i]));
+            html.push_str(&format!(
+                "      <td>{}</td>\n",
+                format_cell(self.z_stats[i], 2)
+            ));
+            html.push_str(&format!(
+                "      <td>{}</td>\n",
+                format_cell(self.p_values[i], 4)
+            ));
+            html.push_str(&format!(
+                "      <td>{}</td>\n",
+                format_cell(self.marginal_effects[i], 4)
+            ));
             html.push_str("    </tr>\n");
         }
         html.push_str("  </tbody>\n");
@@ -319,11 +340,17 @@ impl DiscreteResult {
         // Footer
         html.push_str("  <tfoot>\n");
         html.push_str(&format!(
-            "    <tr><td colspan=\"6\">N = {}, Log-Likelihood = {:.4}</td></tr>\n",
-            self.n_obs, self.log_likelihood
+            "    <tr><td colspan=\"6\">N = {}, Log-Likelihood = {}</td></tr>\n",
+            self.n_obs,
+            format_cell(self.log_likelihood, 4)
         ));
-        html.push_str(&format!("    <tr><td colspan=\"6\">Pseudo R<sup>2</sup> = {:.4}, AIC = {:.2}, BIC = {:.2}</td></tr>\n",
-                               self.pseudo_r_squared, self.aic, self.bic));
+        html.push_str(&format!(
+            "    <tr><td colspan=\"6\">Pseudo R<sup>2</sup> = {}, AIC = {}, BIC = {}</td></tr>\n",
+            format_cell(self.pseudo_r_squared, 4),
+            format_cell(self.aic, 2),
+            format_cell(self.bic, 2)
+        ));
+        html.push_str(&notes_rows(self, 6));
         html.push_str("  </tfoot>\n");
 
         html.push_str("</table>\n");
@@ -366,15 +393,22 @@ impl PanelResult {
                 escape_html(&self.variables[i])
             ));
             html.push_str(&format!(
-                "      <td class=\"coef\">{:.4}{}</td>\n",
-                self.coefficients[i], stars
+                "      <td class=\"coef\">{}{}</td>\n",
+                format_cell(self.coefficients[i], 4),
+                stars
             ));
             html.push_str(&format!(
-                "      <td class=\"se\">{:.4}</td>\n",
-                self.std_errors[i]
+                "      <td class=\"se\">{}</td>\n",
+                format_cell(self.std_errors[i], 4)
             ));
-            html.push_str(&format!("      <td>{:.2}</td>\n", self.t_stats[i]));
-            html.push_str(&format!("      <td>{:.4}</td>\n", self.p_values[i]));
+            html.push_str(&format!(
+                "      <td>{}</td>\n",
+                format_cell(self.t_stats[i], 2)
+            ));
+            html.push_str(&format!(
+                "      <td>{}</td>\n",
+                format_cell(self.p_values[i], 4)
+            ));
             html.push_str("    </tr>\n");
         }
         html.push_str("  </tbody>\n");
@@ -385,12 +419,17 @@ impl PanelResult {
             "    <tr><td colspan=\"5\">N = {}, Groups = {}</td></tr>\n",
             self.n_obs, self.n_groups
         ));
-        html.push_str(&format!("    <tr><td colspan=\"5\">R<sup>2</sup> = {:.4}, Adj. R<sup>2</sup> = {:.4}</td></tr>\n",
-                               self.r_squared, self.adj_r_squared));
         html.push_str(&format!(
-            "    <tr><td colspan=\"5\">F = {:.2} (p = {:.4})</td></tr>\n",
-            self.f_stat, self.f_p_value
+            "    <tr><td colspan=\"5\">R<sup>2</sup> = {}, Adj. R<sup>2</sup> = {}</td></tr>\n",
+            format_cell(self.r_squared, 4),
+            format_cell(self.adj_r_squared, 4)
         ));
+        html.push_str(&format!(
+            "    <tr><td colspan=\"5\">F = {} (p = {})</td></tr>\n",
+            format_cell(self.f_stat, 2),
+            format_cell(self.f_p_value, 4)
+        ));
+        html.push_str(&notes_rows(self, 5));
         html.push_str("  </tfoot>\n");
 
         html.push_str("</table>\n");
@@ -429,6 +468,19 @@ fn significance_stars_html(level: &SignificanceLevel) -> String {
 }
 
 /// Escape HTML special characters.
+/// The convergence line and warnings of a result (one line each), as footer rows.
+fn notes_rows(result: &dyn ResultNotes, colspan: usize) -> String {
+    notes_text(result)
+        .lines()
+        .map(|line| {
+            format!(
+                "    <tr><td colspan=\"{colspan}\">{}</td></tr>\n",
+                escape_html(line)
+            )
+        })
+        .collect()
+}
+
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -548,5 +600,94 @@ mod tests {
     fn test_empty_builder() {
         let builder = HtmlTableBuilder::new();
         assert_eq!(builder.build(), "<p><em>No models to display</em></p>");
+    }
+
+    /// The rows of the table, each cell's inner text.
+    fn html_rows(html: &str) -> Vec<Vec<String>> {
+        html.split("<tr")
+            .skip(1)
+            .map(|row| {
+                row.split("<td")
+                    .skip(1)
+                    .map(|cell| {
+                        let inner = &cell[cell.find('>').unwrap() + 1..];
+                        inner[..inner.find("</td>").unwrap()].to_string()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `-42.7144<sup>***</sup>` as the number and the stars.
+    fn number_and_stars(cell: &str) -> (f64, String) {
+        let (number, rest) = cell.split_once("<sup>").unwrap_or((cell, ""));
+        let number = number.trim_matches(|c| matches!(c, '(' | ')'));
+        (
+            number.parse().unwrap(),
+            rest.trim_end_matches("</sup>").to_string(),
+        )
+    }
+
+    #[test]
+    fn test_validate_html_table_ols_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("export_ols_grunfeld");
+        let fit = |x: &[&str]| {
+            crate::regression::run_ols(
+                &ds,
+                "inv",
+                x,
+                true,
+                crate::regression::CovarianceType::Standard,
+            )
+            .unwrap()
+        };
+        let html = HtmlTableBuilder::new()
+            .add_model("(1)", fit(&["value", "capital"]))
+            .add_model("(2)", fit(&["value"]))
+            .build();
+        let rows = html_rows(&html);
+        let row = |label: &str| {
+            rows.iter()
+                .position(|r| r.first().is_some_and(|c| c == label))
+        };
+        let mut check = Check::new(&case);
+        for m in 0..2 {
+            let tag = format!("m{}_", m + 1);
+            let (mut names, mut coef, mut se) = (Vec::new(), Vec::new(), Vec::new());
+            for name in ["(Intercept)", "value", "capital"] {
+                let i = row(name).unwrap();
+                if rows[i][m + 1].is_empty() {
+                    continue;
+                }
+                let (c, stars) = number_and_stars(&rows[i][m + 1]);
+                let p = case.named(&format!("{tag}p"), name);
+                assert_eq!(stars, SignificanceLevel::from_p_value(p).stars(), "{name}");
+                names.push(name);
+                coef.push(c);
+                se.push(number_and_stars(&rows[i + 1][m + 1]).0);
+            }
+            let footer = |label: &str| number_and_stars(&rows[row(label).unwrap()][m + 1]).0;
+            check
+                .named(&format!("{tag}coef"), &names, &coef, Tol::printed(4))
+                .named(&format!("{tag}se"), &names, &se, Tol::printed(4))
+                .scalar(
+                    &format!("{tag}r2"),
+                    footer("R<sup>2</sup>"),
+                    Tol::printed(4),
+                )
+                .scalar(
+                    &format!("{tag}adj_r2"),
+                    footer("Adj. R<sup>2</sup>"),
+                    Tol::printed(4),
+                )
+                .scalar(
+                    &format!("{tag}f_stat"),
+                    footer("F-statistic"),
+                    Tol::printed(2),
+                )
+                .scalar("n_obs", footer("N"), Tol::exact());
+        }
+        check.finish();
     }
 }

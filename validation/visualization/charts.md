@@ -51,3 +51,15 @@ without leverage: 0.5319056255997687 at observation 16. Tests `test_validate_coo
 (1e-5 relative; measured 7.4e-15), `test_validate_qq_theoretical_quantiles` (1e-11),
 `test_residual_diagnostics_rejects_bad_leverage`.
 
+## Regression-table exporters
+
+`LatexTableBuilder`, `HtmlTableBuilder` and `MarkdownTableBuilder` for lm(inv ~ value + capital) and
+lm(inv ~ value) on Grunfeld (case `export_ols_grunfeld`): coefficients and SEs printed at 4 decimals equal
+R's rounded values, stars follow R's p-values, N/R2/adj. R2/F as summary.lm. Tests
+`test_validate_latex_table_ols_grunfeld`, `test_validate_html_table_ols_grunfeld` and
+`test_validate_markdown_table_ols_grunfeld` (printed precision); `test_latex_table_golden_grunfeld`
+compares the whole output byte for byte with
+`crates/p2a-core/tests/golden/export_latex_ols_grunfeld.tex`, written from R's values. The table notes need `threeparttable`, and
+their legend does not match the stars (DATA-56, DATA-57, open); the ignored test
+`test_latex_table_compiles_with_pdflatex` compiles the golden with `threeparttable` loaded. Undefined values
+print as `NA`.

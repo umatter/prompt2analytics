@@ -120,3 +120,20 @@ case("viz_residual_diag", "visualization", "Standardized residuals and Cook's di
     packages = character(0))
 })
 
+case("export_ols_grunfeld", "export", "Regression-table exporters: two Grunfeld OLS models (stats::lm, classical SEs)", function(ctx) {
+  g <- ctx$dataset("datasets/grunfeld.csv")
+  m1 <- lm(inv ~ value + capital, data = g)
+  m2 <- lm(inv ~ value, data = g)
+  v <- list(n_obs = nobs(m1))
+  for (k in 1:2) {
+    m <- list(m1, m2)[[k]]; s <- summary(m); cf <- coef(s); tag <- paste0("m", k, "_")
+    v[[paste0(tag, "coef")]] <- named(cf[, 1])
+    v[[paste0(tag, "se")]] <- named(cf[, 2])
+    v[[paste0(tag, "p")]] <- named(cf[, 4])
+    v[[paste0(tag, "r2")]] <- s$r.squared
+    v[[paste0(tag, "adj_r2")]] <- s$adj.r.squared
+    v[[paste0(tag, "f_stat")]] <- unname(s$fstatistic["value"])
+  }
+  list(values = v, reference = "stats::lm; summary.lm (classical SEs)",
+       call = "lm(inv ~ value + capital, grunfeld); lm(inv ~ value, grunfeld)", packages = character(0))
+})

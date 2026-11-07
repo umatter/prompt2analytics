@@ -111,6 +111,29 @@
       "tolerance": "validation/README.md statistics row, n = 32: 1e-5 relative (measured 7.4e-15); quantiles 1e-11 relative",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "export_regression_tables",
+      "name": "LaTeX, HTML and Markdown regression tables",
+      "category": "export",
+      "reference": "stats::lm; summary.lm (classical SEs)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "export_ols_grunfeld"
+      ],
+      "tests": [
+        "p2a-core::export::latex::tests::test_validate_latex_table_ols_grunfeld",
+        "p2a-core::export::html::tests::test_validate_html_table_ols_grunfeld",
+        "p2a-core::export::markdown::tests::test_validate_markdown_table_ols_grunfeld"
+      ],
+      "quantities": [
+        "coefficients and SEs at 4 decimals",
+        "stars of R's p-values",
+        "N, R2, adj. R2 (4 decimals), F (2 decimals)"
+      ],
+      "tolerance": "printed precision (Tol::printed(4), Tol::printed(2))",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

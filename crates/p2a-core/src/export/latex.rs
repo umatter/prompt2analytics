@@ -10,10 +10,33 @@
 //! `*` that opens the text (after any leading spaces) gets an empty group
 //! `{}` in front of it, and control characters become spaces, so pass no
 //! LaTeX markup. Labels are restricted to `[A-Za-z0-9:._-]`.
+//!
+//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does.
 
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
+use crate::traits::convergence::{ResultNotes, notes_text};
+
+/// A table's number: NaN prints `NA`, +inf `Inf` and -inf `-Inf` (R's `print`), anything else
+/// with fixed decimals.
+pub(super) fn format_cell(x: f64, decimals: usize) -> String {
+    if x.is_nan() {
+        "NA".to_string()
+    } else if x.is_infinite() {
+        if x > 0.0 { "Inf" } else { "-Inf" }.to_string()
+    } else {
+        format!("{x:.decimals$}")
+    }
+}
+
+/// The convergence line and warnings of a result (one line each), as table notes.
+fn notes_items(result: &dyn ResultNotes) -> String {
+    notes_text(result)
+        .lines()
+        .map(|line| format!("\\item {}\n", escape_latex(line)))
+        .collect()
+}
 
 /// Style options for LaTeX tables.
 #[derive(Debug, Clone)]
@@ -171,10 +194,9 @@ impl LatexTableBuilder {
                         String::new()
                     };
                     latex.push_str(&format!(
-                        " & {:.prec$}{}",
-                        coef.estimate,
-                        stars,
-                        prec = self.style.coef_decimals
+                        " & {}{}",
+                        format_cell(coef.estimate, self.style.coef_decimals),
+                        stars
                     ));
                 } else {
                     latex.push_str(" & ");
@@ -189,9 +211,8 @@ impl LatexTableBuilder {
                     if let Some(idx) = result.variable_names.iter().position(|v| v == var) {
                         let coef = &result.coefficients[idx];
                         latex.push_str(&format!(
-                            " & ({:.prec$})",
-                            coef.std_error,
-                            prec = self.style.se_decimals
+                            " & ({})",
+                            format_cell(coef.std_error, self.style.se_decimals)
                         ));
                     } else {
                         latex.push_str(" & ");
@@ -215,7 +236,7 @@ impl LatexTableBuilder {
         if self.style.show_r_squared {
             latex.push_str("$R^2$");
             for (_, result) in &self.results {
-                latex.push_str(&format!(" & {:.4}", result.r_squared));
+                latex.push_str(&format!(" & {}", format_cell(result.r_squared, 4)));
             }
             latex.push_str(" \\\\\n");
         }
@@ -223,7 +244,7 @@ impl LatexTableBuilder {
         if self.style.show_adj_r_squared {
             latex.push_str("Adj. $R^2$");
             for (_, result) in &self.results {
-                latex.push_str(&format!(" & {:.4}", result.adj_r_squared));
+                latex.push_str(&format!(" & {}", format_cell(result.adj_r_squared, 4)));
             }
             latex.push_str(" \\\\\n");
         }
@@ -231,7 +252,7 @@ impl LatexTableBuilder {
         if self.style.show_f_stat {
             latex.push_str("F-stat");
             for (_, result) in &self.results {
-                latex.push_str(&format!(" & {:.2}", result.f_statistic));
+                latex.push_str(&format!(" & {}", format_cell(result.f_statistic, 2)));
             }
             latex.push_str(" \\\\\n");
         }
@@ -376,13 +397,13 @@ impl DiscreteResult {
         for i in 0..self.variables.len() {
             let stars = significance_stars(&self.significance[i]);
             latex.push_str(&format!(
-                "{} & {:.4}{} & {:.4} & {:.2} & {:.4} \\\\\n",
+                "{} & {}{} & {} & {} & {} \\\\\n",
                 escape_latex(&self.variables[i]),
-                self.coefficients[i],
+                format_cell(self.coefficients[i], 4),
                 stars,
-                self.std_errors[i],
-                self.z_stats[i],
-                self.p_values[i]
+                format_cell(self.std_errors[i], 4),
+                format_cell(self.z_stats[i], 2),
+                format_cell(self.p_values[i], 4)
             ));
         }
 
@@ -393,20 +414,20 @@ impl DiscreteResult {
             self.n_obs
         ));
         latex.push_str(&format!(
-            "Log-Likelihood & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
-            self.log_likelihood
+            "Log-Likelihood & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            format_cell(self.log_likelihood, 4)
         ));
         latex.push_str(&format!(
-            "Pseudo $R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
-            self.pseudo_r_squared
+            "Pseudo $R^2$ & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            format_cell(self.pseudo_r_squared, 4)
         ));
         latex.push_str(&format!(
-            "AIC & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n",
-            self.aic
+            "AIC & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            format_cell(self.aic, 2)
         ));
         latex.push_str(&format!(
-            "BIC & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n",
-            self.bic
+            "BIC & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            format_cell(self.bic, 2)
         ));
 
         latex.push_str("\\hline\\hline\n");
@@ -416,6 +437,7 @@ impl DiscreteResult {
         latex.push_str("\\begin{tablenotes}\\footnotesize\n");
         latex.push_str("\\item Standard errors in parentheses.\n");
         latex.push_str("\\item * p < 0.05, ** p < 0.01, *** p < 0.001\n");
+        latex.push_str(&notes_items(self));
         latex.push_str("\\end{tablenotes}\n");
 
         latex.push_str("\\end{table}\n");
@@ -449,13 +471,13 @@ impl PanelResult {
         for i in 0..self.variables.len() {
             let stars = significance_stars(&self.significance[i]);
             latex.push_str(&format!(
-                "{} & {:.4}{} & {:.4} & {:.2} & {:.4} \\\\\n",
+                "{} & {}{} & {} & {} & {} \\\\\n",
                 escape_latex(&self.variables[i]),
-                self.coefficients[i],
+                format_cell(self.coefficients[i], 4),
                 stars,
-                self.std_errors[i],
-                self.t_stats[i],
-                self.p_values[i]
+                format_cell(self.std_errors[i], 4),
+                format_cell(self.t_stats[i], 2),
+                format_cell(self.p_values[i], 4)
             ));
         }
 
@@ -470,16 +492,16 @@ impl PanelResult {
             self.n_groups
         ));
         latex.push_str(&format!(
-            "$R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
-            self.r_squared
+            "$R^2$ & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            format_cell(self.r_squared, 4)
         ));
         latex.push_str(&format!(
-            "Adj. $R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
-            self.adj_r_squared
+            "Adj. $R^2$ & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            format_cell(self.adj_r_squared, 4)
         ));
         latex.push_str(&format!(
-            "F-stat & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n",
-            self.f_stat
+            "F-stat & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            format_cell(self.f_stat, 2)
         ));
 
         latex.push_str("\\hline\\hline\n");
@@ -489,6 +511,7 @@ impl PanelResult {
         latex.push_str("\\begin{tablenotes}\\footnotesize\n");
         latex.push_str("\\item Standard errors in parentheses.\n");
         latex.push_str("\\item * p < 0.05, ** p < 0.01, *** p < 0.001\n");
+        latex.push_str(&notes_items(self));
         latex.push_str("\\end{tablenotes}\n");
 
         latex.push_str("\\end{table}\n");
@@ -626,5 +649,252 @@ mod tests {
         assert_eq!(significance_stars(&SignificanceLevel::FivePercent), "*");
         assert_eq!(significance_stars(&SignificanceLevel::TenPercent), "†");
         assert_eq!(significance_stars(&SignificanceLevel::NotSignificant), "");
+    }
+
+    /// Grunfeld, read directly: these tests pin no R case.
+    fn grunfeld() -> crate::data::Dataset {
+        let df = crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/grunfeld.csv",
+        ))
+        .unwrap();
+        crate::data::Dataset::new(df)
+    }
+
+    /// The two Grunfeld models of case `export_ols_grunfeld`.
+    fn two_models(ds: &crate::data::Dataset) -> (OlsResult, OlsResult) {
+        let fit = |x: &[&str]| {
+            crate::regression::run_ols(ds, "inv", x, true, CovarianceType::Standard).unwrap()
+        };
+        (fit(&["value", "capital"]), fit(&["value"]))
+    }
+
+    #[test]
+    fn test_export_tables_print_undefined_values_as_na() {
+        use crate::export::{HtmlTableBuilder, MarkdownTableBuilder};
+        let ds = grunfeld();
+        let (mut m, _) = two_models(&ds);
+        let c = &mut m.coefficients[2];
+        (c.estimate, c.std_error, c.t_value, c.p_value) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+        c.significance = SignificanceLevel::NotSignificant;
+        let tex = LatexTableBuilder::new().add_model("(1)", m.clone()).build();
+        assert!(tex.contains("capital & NA \\\\\n  & (NA) \\\\\n"), "{tex}");
+        let html = HtmlTableBuilder::new().add_model("(1)", m.clone()).build();
+        assert!(
+            html.contains("<td class=\"coef\">NA</td>")
+                && html.contains("<td class=\"se\">(NA)</td>"),
+            "{html}"
+        );
+        let md = MarkdownTableBuilder::new().add_model("(1)", m).build();
+        assert!(md.contains("| capital | NA |\n| | (NA) |\n"), "{md}");
+
+        // A fit that really has an aliased column: the row stays and prints NA.
+        let frame = polars::prelude::df!(
+            "y" => [1.1, 1.9, 3.2, 3.8, 5.1, 6.2, 6.8, 8.1],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 9.0],
+            "dup" => [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 18.0]
+        )
+        .unwrap();
+        let aliased = crate::regression::run_ols(
+            &crate::data::Dataset::new(frame),
+            "y",
+            &["x", "dup"],
+            true,
+            CovarianceType::Standard,
+        )
+        .unwrap();
+        assert_eq!(aliased.aliased, ["dup"]);
+        let tex = LatexTableBuilder::new()
+            .add_model("(1)", aliased.clone())
+            .build();
+        assert!(tex.contains("dup & NA \\\\\n  & (NA) \\\\\n"), "{tex}");
+        let html = HtmlTableBuilder::new()
+            .add_model("(1)", aliased.clone())
+            .build();
+        assert!(html.contains("<td class=\"coef\">NA</td>"), "{html}");
+        let md = MarkdownTableBuilder::new()
+            .add_model("(1)", aliased)
+            .build();
+        assert!(md.contains("| dup | NA |\n| | (NA) |\n"), "{md}");
+
+        let mut fe =
+            crate::econometrics::run_fixed_effects(&ds, "inv", &["value", "capital"], "firm")
+                .unwrap();
+        let j = fe.variables.iter().position(|v| v == "capital").unwrap();
+        (
+            fe.coefficients[j],
+            fe.std_errors[j],
+            fe.t_stats[j],
+            fe.p_values[j],
+        ) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+        fe.significance[j] = SignificanceLevel::NotSignificant;
+        assert!(
+            fe.to_latex().contains("capital & NA & NA & NA & NA \\\\"),
+            "{}",
+            fe.to_latex()
+        );
+        assert!(fe.to_html().contains("<td class=\"coef\">NA</td>"));
+        assert_eq!(
+            (
+                format_cell(f64::INFINITY, 2),
+                format_cell(f64::NEG_INFINITY, 2)
+            ),
+            ("Inf".to_string(), "-Inf".to_string())
+        );
+        assert_eq!(
+            (format_cell(-0.126, 2), format_cell(1.0, 4)),
+            ("-0.13".to_string(), "1.0000".to_string())
+        );
+
+        // DiscreteResult: a non-separated logit fit, then a NaN row.
+        let d = crate::data::Dataset::new(
+            polars::prelude::df!(
+                "y" => [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                "x" => [0.1, 0.4, 0.35, 0.8, 0.9, 1.2, 0.5, 1.5, 1.1, 2.0, 0.3, 1.7]
+            )
+            .unwrap(),
+        );
+        let mut lg = crate::econometrics::run_logit(&d, "y", &["x"]).unwrap();
+        let tex = lg.to_latex();
+        assert!(tex.contains("\\item Converged: yes"), "{tex}");
+        assert!(lg.to_html().contains("Converged: yes"));
+        let j = lg.variables.iter().position(|v| v == "x").unwrap();
+        (
+            lg.coefficients[j],
+            lg.std_errors[j],
+            lg.z_stats[j],
+            lg.p_values[j],
+            lg.marginal_effects[j],
+        ) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+        lg.significance[j] = SignificanceLevel::NotSignificant;
+        assert!(
+            lg.to_latex().contains("x & NA & NA & NA & NA \\\\"),
+            "{}",
+            lg.to_latex()
+        );
+        assert!(
+            lg.to_html().contains("<td class=\"coef\">NA</td>")
+                && lg.to_html().contains("<td>NA</td>")
+        );
+    }
+
+    /// The tabular's rows, split into trimmed cells.
+    fn latex_rows(tex: &str) -> Vec<Vec<String>> {
+        tex.lines()
+            .skip_while(|l| !l.starts_with("\\begin{tabular}"))
+            .take_while(|l| !l.starts_with("\\end{tabular}"))
+            .filter_map(|l| l.strip_suffix(" \\\\"))
+            .map(|l| l.split(" & ").map(|c| c.trim().to_string()).collect())
+            .collect()
+    }
+
+    fn cell_number(c: &str) -> f64 {
+        c.trim_matches(|ch| matches!(ch, '(' | ')' | '*' | '†'))
+            .parse()
+            .unwrap_or_else(|_| panic!("not a number: {c:?}"))
+    }
+
+    fn cell_stars(c: &str) -> String {
+        c.chars().filter(|ch| matches!(ch, '*' | '†')).collect()
+    }
+
+    #[test]
+    fn test_validate_latex_table_ols_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("export_ols_grunfeld");
+        let (m1, m2) = two_models(&ds);
+        let tex = LatexTableBuilder::new()
+            .add_model("(1)", m1)
+            .add_model("(2)", m2)
+            .build();
+        let rows = latex_rows(&tex);
+        let names = ["(Intercept)", "value", "capital"];
+        let row = |label: &str| rows.iter().position(|r| r[0] == label).unwrap();
+        let mut coef = [Vec::new(), Vec::new()];
+        let mut se = [Vec::new(), Vec::new()];
+        let mut shown = [Vec::new(), Vec::new()];
+        for name in names {
+            let i = row(name);
+            for m in 0..2 {
+                let cell = rows[i].get(m + 1).map_or("", String::as_str);
+                if cell.is_empty() {
+                    continue;
+                }
+                coef[m].push(cell_number(cell));
+                se[m].push(cell_number(&rows[i + 1][m + 1]));
+                shown[m].push(name);
+                let p = case.named(&format!("m{}_p", m + 1), name);
+                assert_eq!(
+                    cell_stars(cell),
+                    SignificanceLevel::from_p_value(p).stars(),
+                    "{name}"
+                );
+            }
+        }
+        assert_eq!(shown[1], ["(Intercept)", "value"]);
+        let footer = |label: &str, m: usize| cell_number(&rows[row(label)][m]);
+        assert_eq!(footer("N", 1), footer("N", 2));
+        let mut check = Check::new(&case);
+        check.scalar("n_obs", footer("N", 1), Tol::exact());
+        for m in 0..2 {
+            let tag = format!("m{}_", m + 1);
+            check
+                .named(&format!("{tag}coef"), &shown[m], &coef[m], Tol::printed(4))
+                .named(&format!("{tag}se"), &shown[m], &se[m], Tol::printed(4))
+                .scalar(&format!("{tag}r2"), footer("$R^2$", m + 1), Tol::printed(4))
+                .scalar(
+                    &format!("{tag}adj_r2"),
+                    footer("Adj. $R^2$", m + 1),
+                    Tol::printed(4),
+                )
+                .scalar(
+                    &format!("{tag}f_stat"),
+                    footer("F-stat", m + 1),
+                    Tol::printed(2),
+                );
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_latex_table_golden_grunfeld() {
+        let (m1, m2) = two_models(&grunfeld());
+        let tex = LatexTableBuilder::new()
+            .add_model("(1)", m1)
+            .add_model("(2)", m2)
+            .caption("Investment & firm value (Größe_1)")
+            .label("tab:grunfeld")
+            .build();
+        p2a_validation::golden::assert_golden(
+            &p2a_validation::repo_path(
+                "crates/p2a-core/tests/golden/export_latex_ols_grunfeld.tex",
+            ),
+            &tex,
+        );
+    }
+
+    #[test]
+    #[ignore = "needs pdflatex; run with: cargo test -p p2a-core --lib -- --ignored export::latex"]
+    fn test_latex_table_compiles_with_pdflatex() {
+        let table = std::fs::read_to_string(p2a_validation::repo_path(
+            "crates/p2a-core/tests/golden/export_latex_ols_grunfeld.tex",
+        ))
+        .unwrap();
+        // DATA-56: the exporter does not declare that its notes need threeparttable.
+        let doc = format!(
+            "\\documentclass{{article}}\\usepackage[utf8]{{inputenc}}\\usepackage{{threeparttable}}\
+             \\begin{{document}}\n{table}\\end{{document}}\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("doc.tex"), doc).unwrap();
+        let out = std::process::Command::new("pdflatex")
+            .args(["-interaction=nonstopmode", "-halt-on-error", "doc.tex"])
+            .current_dir(dir.path())
+            .output()
+            .expect("pdflatex runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 }

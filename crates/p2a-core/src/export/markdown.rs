@@ -5,7 +5,10 @@
 //! - GitHub issues and pull requests
 //! - Jupyter notebooks
 //! - General documentation
+//!
+//! Undefined values (NaN, e.g. aliased coefficients) print as `NA`, as R does.
 
+use super::latex::format_cell;
 use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
 
@@ -138,10 +141,9 @@ impl MarkdownTableBuilder {
                         String::new()
                     };
                     md.push_str(&format!(
-                        " {:.prec$}{} |",
-                        coef.estimate,
-                        stars,
-                        prec = self.style.coef_decimals
+                        " {}{} |",
+                        format_cell(coef.estimate, self.style.coef_decimals),
+                        stars
                     ));
                 } else {
                     md.push_str(" |");
@@ -156,9 +158,8 @@ impl MarkdownTableBuilder {
                     if let Some(idx) = result.variable_names.iter().position(|v| v == var) {
                         let coef = &result.coefficients[idx];
                         md.push_str(&format!(
-                            " ({:.prec$}) |",
-                            coef.std_error,
-                            prec = self.style.se_decimals
+                            " ({}) |",
+                            format_cell(coef.std_error, self.style.se_decimals)
                         ));
                     } else {
                         md.push_str(" |");
@@ -180,7 +181,7 @@ impl MarkdownTableBuilder {
         if self.style.show_r_squared {
             md.push_str("| R² |");
             for (_, result) in &self.results {
-                md.push_str(&format!(" {:.4} |", result.r_squared));
+                md.push_str(&format!(" {} |", format_cell(result.r_squared, 4)));
             }
             md.push('\n');
         }
@@ -188,7 +189,7 @@ impl MarkdownTableBuilder {
         if self.style.show_adj_r_squared {
             md.push_str("| Adj. R² |");
             for (_, result) in &self.results {
-                md.push_str(&format!(" {:.4} |", result.adj_r_squared));
+                md.push_str(&format!(" {} |", format_cell(result.adj_r_squared, 4)));
             }
             md.push('\n');
         }
@@ -196,7 +197,7 @@ impl MarkdownTableBuilder {
         if self.style.show_f_stat {
             md.push_str("| F-stat |");
             for (_, result) in &self.results {
-                md.push_str(&format!(" {:.2} |", result.f_statistic));
+                md.push_str(&format!(" {} |", format_cell(result.f_statistic, 2)));
             }
             md.push('\n');
         }
@@ -282,5 +283,76 @@ mod tests {
     fn test_empty_builder() {
         let builder = MarkdownTableBuilder::new();
         assert_eq!(builder.build(), "*No models to display*");
+    }
+
+    /// The table's rows, without the `---` separator; cells trimmed.
+    fn markdown_rows(md: &str) -> Vec<Vec<String>> {
+        md.lines()
+            .filter(|l| l.starts_with('|') && !l.contains("---"))
+            .map(|l| {
+                l.trim_matches('|')
+                    .split('|')
+                    .map(|c| c.trim().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `-42.7144\*\*\*` as the number and the stars as written.
+    fn number_and_stars(cell: &str) -> (f64, String) {
+        let end = cell.find('\\').unwrap_or(cell.len());
+        let number = cell[..end].trim_matches(|c| matches!(c, '(' | ')'));
+        (number.parse().unwrap(), cell[end..].to_string())
+    }
+
+    #[test]
+    fn test_validate_markdown_table_ols_grunfeld() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("export_ols_grunfeld");
+        let fit = |x: &[&str]| {
+            crate::regression::run_ols(
+                &ds,
+                "inv",
+                x,
+                true,
+                crate::regression::CovarianceType::Standard,
+            )
+            .unwrap()
+        };
+        let md = MarkdownTableBuilder::new()
+            .add_model("(1)", fit(&["value", "capital"]))
+            .add_model("(2)", fit(&["value"]))
+            .build();
+        let rows = markdown_rows(&md);
+        let row = |label: &str| rows.iter().position(|r| r[0] == label).unwrap();
+        let mut check = Check::new(&case);
+        for m in 0..2 {
+            let tag = format!("m{}_", m + 1);
+            let (mut names, mut coef, mut se) = (Vec::new(), Vec::new(), Vec::new());
+            for name in ["(Intercept)", "value", "capital"] {
+                let i = row(name);
+                if rows[i].get(m + 1).is_none_or(|c| c.is_empty()) {
+                    continue;
+                }
+                let (c, stars) = number_and_stars(&rows[i][m + 1]);
+                let p = case.named(&format!("{tag}p"), name);
+                let want = SignificanceLevel::from_p_value(p)
+                    .stars()
+                    .replace('*', "\\*");
+                assert_eq!(stars, want, "{name}");
+                names.push(name);
+                coef.push(c);
+                se.push(number_and_stars(&rows[i + 1][m + 1]).0);
+            }
+            let footer = |label: &str| number_and_stars(&rows[row(label)][m + 1]).0;
+            check
+                .named(&format!("{tag}coef"), &names, &coef, Tol::printed(4))
+                .named(&format!("{tag}se"), &names, &se, Tol::printed(4))
+                .scalar(&format!("{tag}r2"), footer("R²"), Tol::printed(4))
+                .scalar(&format!("{tag}adj_r2"), footer("Adj. R²"), Tol::printed(4))
+                .scalar(&format!("{tag}f_stat"), footer("F-stat"), Tol::printed(2))
+                .scalar("n_obs", footer("N"), Tol::exact());
+        }
+        check.finish();
     }
 }
