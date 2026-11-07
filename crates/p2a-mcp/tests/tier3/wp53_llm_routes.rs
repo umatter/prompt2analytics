@@ -1028,3 +1028,158 @@ mod chat_conversation {
         }
     }
 }
+
+mod api_doc {
+    use super::*;
+    pub(super) const DOC: &str = include_str!("../../../../API_ENDPOINTS.md");
+
+    /// `{name}` placeholders -> `{}`, the query dropped.
+    pub(super) fn norm(path: &str) -> String {
+        let path = path.split('?').next().unwrap_or("");
+        let mut out = String::new();
+        let mut in_brace = false;
+        for c in path.chars() {
+            match c {
+                '{' => {
+                    in_brace = true;
+                    out.push_str("{}");
+                }
+                '}' => in_brace = false,
+                _ if in_brace => {}
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// (method, normalized path, feature) of every row of the doc's route index.
+    pub(super) fn index() -> Vec<(String, String, String)> {
+        DOC.lines()
+            .filter_map(|l| {
+                let cells: Vec<&str> = l.split('|').map(str::trim).collect();
+                if cells.len() < 5 || !["GET", "POST", "PUT", "DELETE"].contains(&cells[1]) {
+                    return None;
+                }
+                Some((
+                    cells[1].to_string(),
+                    norm(cells[2].trim_matches('`')),
+                    cells[3].trim_matches('`').to_string(),
+                ))
+            })
+            .collect()
+    }
+}
+
+mod client_routes {
+    use super::*;
+    const CLIENT: &str = include_str!("../../../p2a-dioxus/src/api/client.rs");
+
+    /// The text of a call's argument list: from just after its '(' to the matching ')', skipping
+    /// parentheses inside string literals.
+    fn call_args(s: &str) -> &str {
+        let (mut depth, mut in_str, mut escaped) = (1usize, false, false);
+        for (i, c) in s.char_indices() {
+            if in_str {
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => in_str = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &s[..i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        s
+    }
+    /// The string literals of `s`, in order (escapes kept as written).
+    fn literals(s: &str) -> Vec<String> {
+        s.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+    /// (method, path) of every endpoint literal the client passes to its request helpers.
+    fn client_endpoints() -> Vec<(String, String)> {
+        const CALLS: [(&str, &str); 9] = [
+            (".get(", "GET"),
+            (".get_with(", "GET"),
+            (".post(", "POST"),
+            (".post_with(", "POST"),
+            (".put_with(", "PUT"),
+            (".delete(", "DELETE"),
+            (".delete_with(", "DELETE"),
+            (".delete_json_with(", "DELETE"),
+            (".send(", ""),
+        ];
+        let mut out = Vec::new();
+        for (token, verb) in CALLS {
+            let mut from = 0;
+            while let Some(i) = CLIENT[from..].find(token) {
+                let start = from + i + token.len();
+                from = start;
+                let lits = literals(call_args(&CLIENT[start..]));
+                let endpoint = if verb.is_empty() {
+                    match (lits.first(), lits.get(1)) {
+                        (Some(m), Some(p)) if p.starts_with('/') => Some((m.clone(), p.clone())),
+                        _ => None,
+                    }
+                } else {
+                    lits.iter()
+                        .find(|l| l.starts_with('/'))
+                        .map(|p| (verb.to_string(), p.clone()))
+                };
+                out.extend(endpoint);
+            }
+        }
+        out
+    }
+
+    /// MCP-15: every endpoint the Dioxus client calls is in API_ENDPOINTS.md's route index and is
+    /// registered in a build with that row's feature. Before: GET .../full and POST
+    /// .../messages/clear, which no server registered and the index did not list.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dioxus_client_calls_documented_routes() {
+        let index = super::api_doc::index();
+        let endpoints = client_endpoints();
+        assert!(
+            endpoints.len() >= 18,
+            "the scanner found only {endpoints:?}"
+        );
+        let (app, _state) = http_app().await;
+        let mut wrong = Vec::new();
+        for (method, path) in endpoints {
+            let key = super::api_doc::norm(&path);
+            match index.iter().find(|(m, p, _)| *m == method && *p == key) {
+                None => wrong.push(format!("{method} {path} is not in the route index")),
+                Some((_, p, feature)) if compiled(feature) => {
+                    let body = matches!(method.as_str(), "POST" | "PUT").then(|| json!({}));
+                    let (s, _, len) = send(
+                        &app,
+                        &method,
+                        &p.replace("{}", "wp53-probe"),
+                        Some("wp53-probe"),
+                        body,
+                    )
+                    .await;
+                    if unregistered(s, len) {
+                        wrong.push(format!("{method} {path}: {s}, not registered"));
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+}
