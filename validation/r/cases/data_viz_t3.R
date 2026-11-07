@@ -68,3 +68,28 @@ case("viz_boxplot_groups", "visualization", "Box-plot statistics per group (grDe
        call = "boxplot.stats(value[group == g]) for each group", packages = character(0))
 })
 
+case("viz_histogram_bins", "visualization", "Histogram bin count (nclass.Sturges) and equal-width bin counts", function(ctx) {
+  set.seed(5285)
+  norm100 <- rnorm(100, 10, 2)
+  small50 <- 3e-11 + 1e-11 * rnorm(50)           # range ~ 4e-11: below the old absolute 1e-10 cut-off
+  # a decimal grid, values on the breaks up to rounding, and two values just off a break
+  grid13 <- as.numeric(c(sprintf("%.1f", 0:10 / 10), "0.400000000001", "0.799999999999"))
+  long <- data.frame(sample = rep(c("norm100", "small50", "grid13"), c(100, 50, 13)),
+                     value = c(norm100, small50, grid13), stringsAsFactors = FALSE)
+  d <- ctx$gen_dataset("viz_histogram_samples", long)
+  v <- list(sturges_n = vec(c(1, 5, 8, 16, 100, 1000, 1024)))
+  v$sturges_k <- vec(sapply(v$sturges_n, function(n) nclass.Sturges(seq_len(n))))
+  for (s in c("norm100", "small50", "grid13")) {
+    x <- d$value[d$sample == s]
+    k <- nclass.Sturges(x)
+    br <- seq(min(x), max(x), length.out = k + 1)
+    h <- hist(x, breaks = br, plot = FALSE)
+    v[[paste0(s, "_k")]] <- k
+    v[[paste0(s, "_breaks")]] <- vec(br)
+    v[[paste0(s, "_counts")]] <- vec(h$counts)
+  }
+  list(values = v, reference = "grDevices::nclass.Sturges; graphics::hist(breaks = seq(min, max, length.out = k + 1)) with its defaults (right = TRUE, include.lowest = TRUE)",
+       call = "k <- nclass.Sturges(x); hist(x, breaks = seq(min(x), max(x), length.out = k + 1), plot = FALSE)$counts",
+       packages = character(0))
+})
+

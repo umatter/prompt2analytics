@@ -49,6 +49,13 @@ pub struct HistogramResult {
     pub max: f64,
     /// Mean value
     pub mean: f64,
+    /// Values per bin; bin i is `(breaks[i], breaks[i + 1]]`, the first also holding
+    /// the minimum, with values within 1e-7 bin widths of a break assigned as R's
+    /// `hist()` does.
+    pub counts: Vec<u32>,
+    /// The `bins + 1` edges: `min + i * width` for `i < bins` and `max` last (R's
+    /// `seq(min, max, length.out = bins + 1)`); `min + i` (width 1) for constant data.
+    pub breaks: Vec<f64>,
 }
 
 impl std::fmt::Display for HistogramResult {
@@ -63,11 +70,28 @@ impl std::fmt::Display for HistogramResult {
     }
 }
 
+/// R's `nclass.Sturges`, `ceiling(log2(n) + 1)`, in integers; `n >= 1`.
+fn sturges_bins(n: usize) -> usize {
+    let log2 = n.ilog2() as usize;
+    if n.is_power_of_two() {
+        log2 + 1
+    } else {
+        log2 + 2
+    }
+}
+
 /// Generate a histogram from numeric data.
+///
+/// `k` equal-width bins from min to max, right-closed with the lowest value included, values
+/// within 1e-7 bin widths of a break assigned as R's `hist()` does (R:
+/// `hist(x, breaks = seq(min, max, length.out = k + 1))` with its defaults); default
+/// `k` = `nclass.Sturges`; R's default `hist()` breaks (`pretty()`) differ. Constant data
+/// (a range of at most 4 eps times the data's magnitude) get `k` bins of width 1 from the
+/// value.
 ///
 /// # Arguments
 /// * `data` - Numeric values to plot
-/// * `bins` - Number of bins (default: auto-calculated)
+/// * `bins` - Number of bins (default: `nclass.Sturges`)
 /// * `config` - Chart configuration
 pub fn histogram(
     data: &[f64],
@@ -98,35 +122,52 @@ pub fn histogram(
         ));
     }
 
-    // Auto-calculate bins using Sturges' rule if not specified
-    let n_bins = bins
-        .unwrap_or_else(|| {
-            let n = clean_data.len() as f64;
-            (1.0 + 3.322 * n.log10()).ceil() as usize
-        })
-        .max(1);
+    if clean_data.len() > u32::MAX as usize {
+        return Err(VisualizationError::InvalidData(format!(
+            "a histogram counts at most {} values",
+            u32::MAX
+        )));
+    }
 
-    // Calculate bin edges and counts
-    let bin_width = if (max_val - min_val).abs() < 1e-10 {
-        1.0
-    } else {
-        (max_val - min_val) / n_bins as f64
-    };
+    let n_bins = bins.unwrap_or_else(|| sturges_bins(clean_data.len()));
+
+    // Bin width; the breaks exist before anything is counted.
+    let range = max_val - min_val;
+    let constant = range <= 4.0 * f64::EPSILON * min_val.abs().max(max_val.abs());
+    let bin_width = if constant { 1.0 } else { range / n_bins as f64 };
 
     let mut counts = resource::try_vec(n_bins, 0u32, "histogram bins").map_err(invalid_data)?;
+    let n_edges = n_bins
+        .checked_add(1)
+        .ok_or_else(|| VisualizationError::InvalidData(format!("bins is too large: {n_bins}")))?;
+    let mut breaks =
+        resource::try_vec(n_edges, 0.0f64, "histogram bins (edges)").map_err(invalid_data)?;
+    for (i, edge) in breaks.iter_mut().enumerate() {
+        *edge = min_val + i as f64 * bin_width;
+    }
+    breaks[n_bins] = if constant {
+        min_val + n_bins as f64
+    } else {
+        max_val
+    };
 
+    let x_range = checked_axis_range(min_val, breaks[n_bins] + bin_width * 0.01, "x")?;
+
+    // R's hist(): right-closed bins compared with breaks shifted by this fuzz.
+    let fuzz = 1e-7 * if n_bins <= 2 { range } else { bin_width };
     for &val in &clean_data {
-        let bin_idx = if bin_width > 0.0 {
-            ((val - min_val) / bin_width).floor() as usize
-        } else {
-            0
-        };
-        let bin_idx = bin_idx.min(n_bins - 1);
-        counts[bin_idx] += 1;
+        let mut bin = (((val - min_val) / bin_width).ceil() as usize)
+            .saturating_sub(1)
+            .min(n_bins - 1);
+        if bin > 0 && val <= breaks[bin] + fuzz {
+            bin -= 1;
+        } else if bin + 1 < n_bins && val > breaks[bin + 1] + fuzz {
+            bin += 1;
+        }
+        counts[bin] += 1;
     }
 
     let max_count = *counts.iter().max().unwrap_or(&1);
-    let x_range = checked_axis_range(min_val, max_val + bin_width * 0.01, "x")?;
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
@@ -163,8 +204,7 @@ pub fn histogram(
         // Draw histogram bars as rectangles
         for (i, &count) in counts.iter().enumerate() {
             resource::checkpoint().map_err(invalid_data)?;
-            let x0 = min_val + i as f64 * bin_width;
-            let x1 = x0 + bin_width;
+            let (x0, x1) = (breaks[i], breaks[i + 1]);
 
             chart
                 .draw_series(std::iter::once(Rectangle::new(
@@ -187,6 +227,8 @@ pub fn histogram(
         min: min_val,
         max: max_val,
         mean: mean_val,
+        counts,
+        breaks,
     })
 }
 
@@ -2803,5 +2845,45 @@ mod tests {
                 && empty.outliers.is_empty()
         );
         assert!(format!("{r}").contains("allna: no values"));
+    }
+
+    #[test]
+    fn test_validate_histogram_sturges_and_counts() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_histogram_bins");
+        for (n, k) in case
+            .vector("sturges_n")
+            .iter()
+            .zip(case.vector("sturges_k"))
+        {
+            let h = histogram(&wavy(*n as usize), None, small()).unwrap();
+            assert_eq!(h.bins, k as usize, "n = {n}");
+        }
+        let labels = ds.df().column("sample").unwrap().str().unwrap().clone();
+        let values = crate::data::columns::numeric_options(ds.df(), "value").unwrap();
+        let mut check = Check::new(&case);
+        for s in ["norm100", "small50", "grid13"] {
+            let x: Vec<f64> = labels
+                .iter()
+                .zip(&values)
+                .filter(|(l, _)| *l == Some(s))
+                .map(|(_, v)| v.unwrap())
+                .collect();
+            let h = histogram(&x, None, small()).unwrap();
+            let counts: Vec<f64> = h.counts.iter().map(|&c| f64::from(c)).collect();
+            // breaks: the same floating-point operations as R's seq(min, max, length.out = k + 1)
+            check
+                .scalar(&format!("{s}_k"), h.bins as f64, Tol::exact())
+                .vector(&format!("{s}_breaks"), &h.breaks, Tol::exact())
+                .vector(&format!("{s}_counts"), &counts, Tol::exact());
+        }
+        check.finish();
+        // Constant data: Sturges bins of width 1 from the value (p2a's rule; R's hist() uses
+        // pretty() here).
+        let h = histogram(&[5.0; 10], None, small()).unwrap();
+        assert_eq!(
+            (h.bins, h.counts.clone(), h.breaks.clone()),
+            (5, vec![10, 0, 0, 0, 0], vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        );
     }
 }

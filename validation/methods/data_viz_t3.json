@@ -56,6 +56,38 @@
       "tolerance": "exact (Tol::exact): fivenum's operations in R's order",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "viz_histogram_bins",
+      "name": "Histogram bin count and counts",
+      "category": "visualization",
+      "reference": "grDevices::nclass.Sturges; graphics::hist(breaks = seq(min, max, length.out = k + 1)) with its defaults (right = TRUE, include.lowest = TRUE)",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_histogram_bins"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_histogram_sturges_and_counts"
+      ],
+      "quantities": [
+        "nclass.Sturges for n = 1, 5, 8, 16, 100, 1000, 1024",
+        "breaks",
+        "counts (n = 100; n = 50 on a 1e-11 scale; a decimal grid with values on the breaks)"
+      ],
+      "tolerance": "exact (Tol::exact): integer counts; breaks by seq()'s floating-point operations",
+      "deviations": [
+        {
+          "finding": "DATA-85",
+          "quantity": "default breaks",
+          "note": "convention: nclass.Sturges equal-width bins from min to max; R's hist() passes the Sturges count to pretty() (n = 100: 10 bins where p2a has 8); pinned against hist(breaks = seq(min, max, length.out = k + 1))"
+        },
+        {
+          "finding": "DATA-85",
+          "quantity": "constant data",
+          "note": "convention: k bins of width 1 from the value; hist() builds pretty() breaks around it"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

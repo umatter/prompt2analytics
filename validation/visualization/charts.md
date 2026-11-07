@@ -27,3 +27,14 @@ dropped; +-Inf are counted and listed as outliers, as R; they are not drawn. A g
 its slot with n = 0 and NaN statistics, as R's `boxplot`. Case `viz_boxplot_groups`: e.g. `c(1, 7, 12, 15, 15, 16, 18, 18)`
 -> 1, 9.5, 15, 17, 18, no outliers. Test `test_validate_boxplot_stats_chart`, exact.
 
+## Histogram (`histogram()`)
+
+Default bin count `nclass.Sturges` = ceiling(log2(n) + 1). Bins have equal width from min to max,
+right-closed with the lowest value included, and values within 1e-7 bin widths of a break are assigned as
+R's `hist()` does: `hist(x, breaks = seq(min(x), max(x), length.out = k + 1))` with its defaults.
+R-pinned with known deviations: R's default `hist()` passes the Sturges count to `pretty()` (n = 100: 10
+bins where p2a has 8); p2a does not. Constant data (range at most 4 eps times
+the magnitude) get k bins of width 1 starting at the value. Case `viz_histogram_bins`: k = 1, 4, 4, 5, 8,
+11, 11 for n = 1, 5, 8, 16, 100, 1000, 1024; counts `4 7 9 13 31 17 12 7` (n = 100), `3 6 10 14 9 4 4`
+(n = 50 on a 1e-11 scale) and `3 3 2 3 2` (a decimal grid with values on the breaks). Test `test_validate_histogram_sturges_and_counts`, exact.
+
