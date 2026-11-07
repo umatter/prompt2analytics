@@ -292,11 +292,11 @@ impl<R: Read + Seek> StataReader<R> {
         // `<map>`, holds exactly the rows and `</data>`.
         let row_size: u64 = var_types.iter().map(|t| t.size() as u64).sum();
         let rows_end = DATA_END_TAG.len() as u64;
-        let max_obs = if row_size == 0 {
-            0
-        } else {
-            self.data_len.saturating_sub(rows_end) / row_size
-        };
+        let max_obs = self
+            .data_len
+            .saturating_sub(rows_end)
+            .checked_div(row_size)
+            .unwrap_or(0);
         let fits = self
             .n_obs
             .checked_mul(row_size)
