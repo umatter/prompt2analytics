@@ -85,3 +85,32 @@ case("ppr_smoothers", "ml/ppr", "ppr.f ridge smoothers: stats::supsmu (cv, bass 
   list(values = v, reference = "stats::supsmu; stats::smooth.spline(all.knots = ppr.f knots, control.spar = list(low = 0, high = 1.5, tol = 0.01, eps = 0.000244)) = ppr.f spline()",
        call = "supsmu(x, y, span, bass, wt); smooth.spline(dx, y, all.knots, df = 5 | GCV, penalty, control.spar)", packages = character(0))
 })
+
+case("svm_libsvm", "ml/svm", "e1071::svm C-classification (LIBSVM), radial (gamma 0.5) and linear kernels, cost 0.1 / 10, shrinking on and off, labels coded 1 and 2", function(ctx) {
+  set.seed(20261126)
+  n <- 160; x1 <- rnorm(n); x2 <- rnorm(n)
+  cl <- ifelse(x1^2 + x2^2 + rnorm(n, 0, 0.4) > 1.4, 2L, 1L)          # a ring: for the radial kernel
+  cl_lin <- ifelse(x1 + 0.5 * x2 + rnorm(n, 0, 0.5) > 0.3, 2L, 1L)     # a noisy half-plane: for the linear kernel
+  d <- ctx$gen_dataset("svm_sim", data.frame(cls = cl, cls_lin = cl_lin, x1 = round(x1, 10), x2 = round(x2, 10)))
+  stopifnot(is.integer(d$cls), is.integer(d$cls_lin))
+  v <- list(first_class = d$cls[1], first_class_lin = d$cls_lin[1])
+  X <- as.matrix(d[, c("x1", "x2")])
+  runs <- list(radial_c01 = list("radial", 0.1, TRUE), radial_c10 = list("radial", 10, TRUE),
+               linear_c01 = list("linear", 0.1, TRUE), linear_c10 = list("linear", 10, TRUE),
+               radial_c10_noshrink = list("radial", 10, FALSE))
+  for (tag in names(runs)) {
+    k <- runs[[tag]][[1]]; C <- runs[[tag]][[2]]
+    lab <- if (k == "linear") d$cls_lin else d$cls
+    f <- svm(x = X, y = factor(lab), type = "C-classification", kernel = k, cost = C, gamma = 0.5,
+             scale = FALSE, tolerance = 1e-10, shrinking = runs[[tag]][[3]], cachesize = 40)
+    p <- predict(f, X, decision.values = TRUE); dv <- attr(p, "decision.values")
+    sgn <- if (colnames(dv) == "2/1") 1 else if (colnames(dv) == "1/2") -1 else stop("orientation")
+    o <- order(f$index)
+    v[[paste0(tag, "_decision")]] <- vec(sgn * dv[, 1]); v[[paste0(tag, "_bias")]] <- -sgn * f$rho
+    v[[paste0(tag, "_n_sv")]] <- f$tot.nSV; v[[paste0(tag, "_sv_index")]] <- vec(f$index[o])
+    v[[paste0(tag, "_dual_coef")]] <- vec(sgn * f$coefs[o, 1]); v[[paste0(tag, "_pred")]] <- vec(as.numeric(as.character(p)))
+    if (k == "linear") v[[paste0(tag, "_w")]] <- vec(sgn * colSums(f$coefs[, 1] * X[f$index, , drop = FALSE]))
+  }
+  list(values = v, reference = "e1071::svm(type = 'C-classification', kernel, cost, gamma = 0.5, scale = FALSE, tolerance = 1e-10, shrinking) (LIBSVM 3.x)",
+       call = "svm(x = cbind(x1, x2), y = factor(cls) (radial) | factor(cls_lin) (linear), kernel, cost, gamma = 0.5, scale = FALSE, tolerance = 1e-10, shrinking)", packages = "e1071")
+})

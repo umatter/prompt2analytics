@@ -57,6 +57,45 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "fast_svm",
+      "name": "Support vector classification, LIBSVM C-SVC (fast_svm)",
+      "category": "ml",
+      "reference": "e1071::svm(type = 'C-classification', kernel = 'radial' | 'linear', cost, gamma, scale = FALSE, tolerance = 1e-10, shrinking) (LIBSVM 3.x)",
+      "doc": "validation/ml/svm.md",
+      "cases": [
+        "svm_libsvm"
+      ],
+      "tests": [
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_radial_c01",
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_radial_c10",
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_linear_c01",
+        "p2a-core::ml::svm_fast::tests::test_validate_fast_svm_libsvm_linear_c10"
+      ],
+      "quantities": [
+        "decision values on the training rows",
+        "bias (rho)",
+        "radial: number and indices of support vectors, dual coefficients",
+        "linear: weights w",
+        "predictions in the original labels",
+        "shrinking on and off",
+        "properties of every run: 0 <= alpha <= C, sum alpha y = 0, optimality condition, dual objective at least e1071's"
+      ],
+      "tolerance": "Tol::iterative(4e-7), 10x the largest difference measured in the five runs (3.3e-8, a radial dual coefficient), below the 1e-6 limit; support-vector counts and indices (radial) and predictions exact. p2a runs at e1071's tolerance 1e-10 with the rows in their original order.",
+      "deviations": [
+        {
+          "finding": "ML-103",
+          "quantity": "linear runs: alphas and support-vector indices (not compared)",
+          "note": "The dual of a linear kernel need not be unique, so only w is compared; the dual objective of p2a's alphas is checked against e1071's."
+        },
+        {
+          "finding": "ML-40",
+          "quantity": "linear_svm and kernel_svm (ml/svm.rs) against svm_libsvm",
+          "note": "not pinned: linear_svm's select_second_alpha hard-codes the bound 1.0; kernel_svm's SMO skips alpha steps below 1e-5, so it is accurate only to its KKT tolerance. fast_svm is the LIBSVM-equivalent solver."
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
