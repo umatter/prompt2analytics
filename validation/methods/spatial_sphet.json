@@ -7,13 +7,24 @@
       "category": "econometrics",
       "reference": "Kelejian & Prucha (1998) written out in base R (sphet/spdep not installed)",
       "doc": "validation/econometrics/sphet.md",
-      "cases": ["sphet_gmm_hac"],
+      "cases": [
+        "sphet_gmm_hac"
+      ],
       "tests": [
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_instruments",
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_classical",
-        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_white"
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_white",
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_hac",
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_hac_kernels",
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_hac_variable"
       ],
-      "quantities": ["instrument set and rank", "2SLS coefficients", "lambda", "SE classical", "SE White (HC0)"],
+      "quantities": [
+        "instrument set and rank",
+        "2SLS coefficients",
+        "lambda",
+        "SE classical",
+        "SE White (HC0)"
+      ],
       "tolerance": "validation/README.md, n = 150: closed-form 2SLS coefficients 1e-8 and SEs 1e-6 relative",
       "deviations": [],
       "supersedes_legacy": []
