@@ -357,7 +357,7 @@ pub fn acf(
         AcfType::Correlation => {
             let acvf = autocovariance(x, max_lag, demean, adjusted);
             let var = acvf[0];
-            if !(var > 0.0) {
+            if var.is_nan() || var <= 0.0 {
                 return Err(EconError::InvalidSpecification {
                     message: "Variance is zero or negative; cannot compute autocorrelation"
                         .to_string(),
@@ -370,7 +370,7 @@ pub fn acf(
             let acf_vals = {
                 let acvf = autocovariance(x, max_lag, demean, adjusted);
                 let var = acvf[0];
-                if !(var > 0.0) {
+                if var.is_nan() || var <= 0.0 {
                     return Err(EconError::InvalidSpecification {
                         message: "Variance is zero or negative; cannot compute PACF".to_string(),
                     });
@@ -447,7 +447,7 @@ pub fn pacf(x: &[f64], lag_max: Option<usize>) -> EconResult<PacfResult> {
     // First compute ACF
     let acvf = autocovariance(x, max_lag, true, false);
     let var = acvf[0];
-    if !(var > 0.0) {
+    if var.is_nan() || var <= 0.0 {
         return Err(EconError::InvalidSpecification {
             message: "Variance is zero or negative; cannot compute PACF".to_string(),
         });
@@ -643,7 +643,7 @@ pub fn ccf(
             let var_x = autocovariance(x, 0, true, false)[0];
             let var_y = autocovariance(y, 0, true, false)[0];
 
-            if !(var_x > 0.0) || !(var_y > 0.0) {
+            if var_x.is_nan() || var_x <= 0.0 || var_y.is_nan() || var_y <= 0.0 {
                 return Err(EconError::InvalidSpecification {
                     message: "One or both series have zero variance".to_string(),
                 });

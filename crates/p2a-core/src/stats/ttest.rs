@@ -569,7 +569,7 @@ pub fn t_test(
 
 /// Compute p-value based on alternative hypothesis.
 fn compute_p_value(t_stat: f64, df: f64, alternative: Alternative) -> f64 {
-    if !(df > 0.0) || t_stat.is_nan() {
+    if df.is_nan() || df <= 0.0 || t_stat.is_nan() {
         return f64::NAN;
     }
     let p2 = t_test_p_value(t_stat, df);
@@ -590,7 +590,7 @@ fn compute_confidence_interval(
     conf_level: f64,
     alternative: Alternative,
 ) -> (f64, f64) {
-    if !(df > 0.0) || !(std_error > 0.0) {
+    if df.is_nan() || df <= 0.0 || std_error.is_nan() || std_error <= 0.0 {
         return (f64::NAN, f64::NAN);
     }
     let p = match alternative {

@@ -373,7 +373,7 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     // Residual variance for PP correction (using n divisor, not df)
     let sigma_sq_nw = rss / n_reg as f64;
 
-    if !(lambda_sq > 0.0) {
+    if lambda_sq.is_nan() || lambda_sq <= 0.0 {
         return Err(EconError::InvalidSpecification {
             message: "Phillips-Perron: the long-run variance is zero (the regression on \
                       [1, t, y_{t-1}] fits exactly)"
