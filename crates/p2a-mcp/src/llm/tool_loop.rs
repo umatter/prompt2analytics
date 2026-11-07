@@ -30,6 +30,8 @@ pub struct AssistantTurn {
 }
 
 /// A provider's part of the tool loop: message conversion and one model call.
+// The attribute async_trait expands to, on a boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ToolLoopProvider: Send + Sync {
     /// The provider's wire messages for `messages`, as JSON: `{"messages": [..]}`, plus `"system"`
