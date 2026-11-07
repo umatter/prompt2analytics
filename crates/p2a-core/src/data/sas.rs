@@ -24,9 +24,9 @@
 //! file stores each row as a subheader with compression 4, or uncompressed with compression 0 and
 //! type 1. The method is named by the literal at offset 12 of the first column-text block.
 //!
-//! Text cells are trimmed of trailing blanks and NULs; an empty cell is `""`, as haven reads it. Every NaN numeric (SAS `.`, `.A`-`.Z`, `._`) is null and every other value is
-//! kept (1e308 is a valid SAS value). Numerics of 3 to 7 bytes are doubles truncated to their
-//! high-order bytes.
+//! Text cells are trimmed of trailing blanks and NULs; an empty cell is `""`, as haven reads it.
+//! Every NaN numeric (SAS `.`, `.A`-`.Z`, `._`) is null and every other value is kept (1e308 is a
+//! valid SAS value). Numerics of 1 to 7 bytes are doubles truncated to their high-order bytes.
 
 use polars::frame::column::Column;
 use polars::prelude::*;
@@ -69,6 +69,8 @@ const COMPRESSION_NONE: u8 = 0;
 const COMPRESSION_TRUNCATED: u8 = 1;
 const COMPRESSION_ROW: u8 = 4;
 const SUBHEADER_TYPE_ROW: u8 = 1;
+/// Data and mix page rows between two resource checkpoints (a subheader row checks every time).
+const ROWS_PER_CHECKPOINT: usize = 1 << 16;
 
 /// Errors that can occur during SAS file reading.
 #[derive(Error, Debug)]
@@ -547,13 +549,27 @@ struct RowSink {
     text: Vec<Vec<Option<String>>>,
     rows: usize,
     /// Bytes the decoded cells hold. Compressed rows can decode to far more than the file's size,
-    /// so this total is held to the allocation ceiling page by page.
+    /// so this total is held to the allocation ceiling row by row.
     held_bytes: usize,
+    /// The allocation ceiling in force when the read began (`usize::MAX`: none).
+    ceiling: usize,
 }
 
 impl RowSink {
     fn check_held(&self) -> Result<(), SasError> {
+        if self.held_bytes <= self.ceiling {
+            return Ok(());
+        }
         crate::resource::check_alloc::<u8>(self.held_bytes, "SAS cells").map_err(resource_err)
+    }
+
+    /// The budget check of rows stored after a page header or pointer table: unlike subheader
+    /// rows, which pointers can share, each of these occupies its own bytes of the file.
+    fn checkpoint_every_rows(&self) -> Result<(), SasError> {
+        if self.rows.is_multiple_of(ROWS_PER_CHECKPOINT) {
+            crate::resource::checkpoint().map_err(resource_err)?;
+        }
+        Ok(())
     }
 }
 
@@ -733,17 +749,18 @@ impl<R: Read + Seek> SasReader<R> {
         Ok((kind, block_count, pointers))
     }
 
-    /// The subheader signature at the start of `sh`.
-    fn signature(&self, sh: &[u8]) -> Result<u32, SasError> {
+    /// The subheader signature at the start of `sh`; `None` when `sh` is too short to hold one
+    /// (a compressed file stores a row SAS could not shorten as a plain subheader, of any length).
+    fn signature(&self, sh: &[u8]) -> Option<u32> {
         let l = self.layout();
-        let first = read_uint(sh, 0, 4, l.byte_order)? as u32;
+        let first = read_uint(sh, 0, 4, l.byte_order).ok()? as u32;
         if l.is_64bit
             && l.byte_order == ByteOrder::BigEndian
             && (first == 0xFFFF_FFFF || first == 0)
         {
-            return Ok(read_uint(sh, 4, 4, l.byte_order)? as u32);
+            return read_uint(sh, 4, 4, l.byte_order).ok().map(|v| v as u32);
         }
-        Ok(first)
+        Some(first)
     }
 
     /// Pass 1: row size, column count, column text, names and attributes from every metadata
@@ -758,6 +775,10 @@ impl<R: Read + Seek> SasReader<R> {
         let mut names: Vec<(usize, usize, usize)> = Vec::new(); // (text block, offset, length)
         let mut attrs: Vec<(usize, usize, ColumnType)> = Vec::new(); // (offset, width, type)
         let mut compressed_rows = false;
+        // What the metadata below holds, at most 3 bytes per subheader byte (a 24-byte tuple per
+        // 8-byte name pointer): pointers may share one subheader, so the file's size bounds
+        // nothing here.
+        let mut held_bytes = 0usize;
 
         for idx in 0..l.page_count {
             crate::resource::checkpoint().map_err(resource_err)?;
@@ -773,7 +794,14 @@ impl<R: Read + Seek> SasReader<R> {
                     continue;
                 }
                 let sh = &page[p.offset..p.offset + p.length];
-                let sig = self.signature(sh)?;
+                let Some(sig) = self.signature(sh) else {
+                    continue;
+                };
+                if matches!(sig, SIG_COL_TEXT | SIG_COL_NAME | SIG_COL_ATTR) {
+                    held_bytes = add(held_bytes, 3 * p.length)?;
+                    crate::resource::check_alloc::<u8>(held_bytes, "SAS metadata")
+                        .map_err(resource_err)?;
+                }
                 let count_of = |entry: usize| -> Result<usize, SasError> {
                     p.length
                         .checked_sub(2 * il + 12)
@@ -899,9 +927,11 @@ impl<R: Read + Seek> SasReader<R> {
     /// and the page size, the row count fits the pages (one pointer per row in a compressed file),
     /// every column has a nonzero width and lies inside the row, numeric widths are 1 to 8 bytes,
     /// and the column widths add up to at most the row length. So the bytes read per row are
-    /// bounded by the row length, and the cells read by the file size (T0, DATA-49). A valid file
-    /// satisfies all of these. Columns are not checked for disjointness: two overlapping columns
-    /// read the same bytes of the row.
+    /// bounded by the row length, and in an uncompressed file the cells read by the file size (T0,
+    /// DATA-49); compressed rows can decode to more than the file holds, so `read_to_dataframe`
+    /// holds their cells to the allocation ceiling row by row. A valid file satisfies all of
+    /// these. Columns are not checked for disjointness: two overlapping columns read the same
+    /// bytes of the row.
     fn validate_layout(&self) -> Result<(), SasError> {
         let l = self.layout();
         let row_length = self.row_length;
@@ -1003,13 +1033,23 @@ impl<R: Read + Seek> SasReader<R> {
             text: Vec::new(),
             rows: 0,
             held_bytes: 0,
+            ceiling: crate::resource::alloc_ceiling_bytes().unwrap_or(usize::MAX),
         };
         for c in &self.columns {
             let numeric = c.col_type == ColumnType::Numeric;
-            sink.numeric
-                .push(Vec::with_capacity(if numeric { row_capacity } else { 0 }));
-            sink.text
-                .push(Vec::with_capacity(if numeric { 0 } else { row_capacity }));
+            let (numeric_capacity, text_capacity) = if numeric {
+                (row_capacity, 0)
+            } else {
+                (0, row_capacity)
+            };
+            sink.numeric.push(
+                crate::resource::try_with_capacity(numeric_capacity, "SAS columns")
+                    .map_err(resource_err)?,
+            );
+            sink.text.push(
+                crate::resource::try_with_capacity(text_capacity, "SAS columns")
+                    .map_err(resource_err)?,
+            );
         }
         let mut page =
             crate::resource::try_vec(l.page_size, 0u8, "SAS page").map_err(resource_err)?;
@@ -1021,7 +1061,6 @@ impl<R: Read + Seek> SasReader<R> {
                 break;
             }
             crate::resource::checkpoint().map_err(resource_err)?;
-            sink.check_held()?;
             self.read_page(idx, &mut page)?;
             let (kind, block_count, pointers) = self.page_header(&page, idx)?;
 
@@ -1036,6 +1075,7 @@ impl<R: Read + Seek> SasReader<R> {
                 let sh = &page[p.offset..p.offset + p.length];
                 match p.compression {
                     COMPRESSION_ROW => {
+                        crate::resource::checkpoint().map_err(resource_err)?;
                         let decoded = match self.compression {
                             Compression::Rle => rle_decompress(sh, &mut row),
                             Compression::Rdc => rdc_decompress(sh, &mut row),
@@ -1050,15 +1090,20 @@ impl<R: Read + Seek> SasReader<R> {
                             SasError::InvalidFormat(format!("row subheader {k} on page {idx}: {e}"))
                         })?;
                         self.push_row(&mut sink, &row)?;
+                        sink.check_held()?;
                     }
                     COMPRESSION_NONE => {
                         // A row SAS left uncompressed in a compressed file.
                         if self.compression != Compression::None
                             && p.kind == SUBHEADER_TYPE_ROW
                             && p.length == self.row_length
-                            && !KNOWN_SIGNATURES.contains(&self.signature(sh)?)
+                            && self
+                                .signature(sh)
+                                .is_none_or(|sig| !KNOWN_SIGNATURES.contains(&sig))
                         {
+                            crate::resource::checkpoint().map_err(resource_err)?;
                             self.push_row(&mut sink, sh)?;
+                            sink.check_held()?;
                         }
                     }
                     other => {
@@ -1100,11 +1145,11 @@ impl<R: Read + Seek> SasReader<R> {
                     break;
                 }
                 let at = start + r * self.row_length;
-                row.copy_from_slice(&page[at..at + self.row_length]);
-                self.push_row(&mut sink, &row)?;
+                sink.checkpoint_every_rows()?;
+                self.push_row(&mut sink, &page[at..at + self.row_length])?;
+                sink.check_held()?;
             }
         }
-        sink.check_held()?;
         if sink.rows < self.row_count {
             return Err(SasError::InvalidFormat(format!(
                 "the file declares {} rows but holds {}",
@@ -1113,10 +1158,18 @@ impl<R: Read + Seek> SasReader<R> {
         }
 
         let mut df_columns: Vec<Column> = Vec::with_capacity(self.columns.len());
+        // Each buffer is freed as soon as its column is built, so at most one column is held
+        // twice. (Polars builds a column from a slice faster than from an owned Vec of options.)
         for (j, c) in self.columns.iter().enumerate() {
             let column = match c.col_type {
-                ColumnType::Numeric => Column::new(c.name.as_str().into(), &sink.numeric[j]),
-                ColumnType::Character => Column::new(c.name.as_str().into(), &sink.text[j]),
+                ColumnType::Numeric => {
+                    let values = std::mem::take(&mut sink.numeric[j]);
+                    Column::new(c.name.as_str().into(), values.as_slice())
+                }
+                ColumnType::Character => {
+                    let values = std::mem::take(&mut sink.text[j]);
+                    Column::new(c.name.as_str().into(), values.as_slice())
+                }
             };
             df_columns.push(column);
         }
@@ -1191,6 +1244,16 @@ pub(crate) mod fixture_check {
                     col.dtype()
                 );
                 let as_f64 = col.cast(&DataType::Float64).unwrap();
+                // R's NA has to be a null: the column layer reads a NaN as a value of the file.
+                assert!(
+                    as_f64
+                        .f64()
+                        .unwrap()
+                        .into_iter()
+                        .flatten()
+                        .all(|v| !v.is_nan()),
+                    "{stem}.{name}: a missing value loaded as NaN, not null"
+                );
                 let values: Vec<f64> = as_f64
                     .f64()
                     .unwrap()
@@ -1918,6 +1981,169 @@ mod tests {
                 .height(),
             3
         );
+    }
+
+    fn assert_parse_error(r: Result<DataFrame, SasError>, needle: &str) {
+        match r {
+            Err(SasError::ParseError(m)) => assert!(m.contains(needle), "{m}"),
+            other => panic!(
+                "expected ParseError mentioning {needle:?}, got {:?}",
+                other.map_err(|e| e.to_string()).map(|d| d.shape())
+            ),
+        }
+    }
+
+    // sas64_rle_wide.sas7bdat: pages of 8192 at 8192 (metadata), then one compressed row per page.
+    const W_PAGE0: usize = 8192;
+    const W_PAGE1: usize = 16384;
+    const W_PAGE1_POINTER0: usize = W_PAGE1 + 40;
+    const W_PAGE1_ROW0: usize = W_PAGE1 + 3887; // 4305 compressed bytes
+
+    #[test]
+    fn test_sas_cells_are_checked_after_each_compressed_row() {
+        // Pointers can share one compressed subheader, so one page can decode to far more than it
+        // holds. Page 1 gets 3 rows: pointers 0 and 1 share a 4300-character row and pointer 2 is
+        // a row with an unknown RLE command. A ceiling that admits the page, the row and the column
+        // buffers but not two rows' cells stops the read before the third row is decoded.
+        let mut b = fixture_bytes("sas64_rle_wide.sas7bdat");
+        let pointer: Vec<u8> = b[W_PAGE1_POINTER0..W_PAGE1_POINTER0 + 24].to_vec();
+        put(&mut b, W_PAGE1_POINTER0 + 24, &pointer);
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&200u64.to_le_bytes());
+        bad.extend_from_slice(&1u64.to_le_bytes());
+        bad.extend_from_slice(&[COMPRESSION_ROW, SUBHEADER_TYPE_ROW]);
+        put(&mut b, W_PAGE1_POINTER0 + 48, &bad);
+        b[W_PAGE1 + 200] = 0x30;
+        put(&mut b, W_PAGE1 + 34, &3u16.to_le_bytes()); // block count
+        put(&mut b, W_PAGE1 + 36, &3u16.to_le_bytes()); // subheader count
+        let check = b.clone();
+        assert_invalid(
+            load(check),
+            "row subheader 2 on page 1: unknown RLE command",
+        );
+        let r = crate::resource::with_alloc_ceiling(Some(8_400), || load(b));
+        assert_parse_error(r, "SAS cells");
+    }
+
+    #[test]
+    fn test_sas_cells_are_checked_inside_a_data_page() {
+        // sas64_haven page 1 holds 19 rows of 205 bytes: all of them full of text except the last,
+        // whose text is not valid UTF-8. The ceiling admits the page and the column buffers of
+        // these 19 rows, and the cells pass it before the last row is decoded.
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        b[70] = 20;
+        put(&mut b, H_ROW_SIZE + 48, &19u64.to_le_bytes());
+        let rows = H_PAGE1 + 40;
+        b[rows..rows + 19 * 205].fill(b'x');
+        b[rows + 18 * 205..rows + 19 * 205].fill(0xFF);
+        assert_parse_error(load(b.clone()), "row 19");
+        let r = crate::resource::with_alloc_ceiling(Some(5_000), || load(b));
+        assert_parse_error(r, "SAS cells");
+    }
+
+    /// A reader that cancels `token` when the rows' pass reaches the page at `page_at`: after the
+    /// page's own checkpoint, and so before any of the page's rows.
+    struct CancelAtPage {
+        inner: Cursor<Vec<u8>>,
+        page_at: u64,
+        reads: usize,
+        token: crate::resource::CancelToken,
+    }
+
+    impl Read for CancelAtPage {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.inner.position() == self.page_at {
+                self.reads += 1;
+                if self.reads == 2 {
+                    self.token.cancel(); // the first read of the page was the metadata pass
+                }
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for CancelAtPage {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    #[test]
+    fn test_sas_budget_is_checked_before_rows_inside_a_page() {
+        // Both first rows are corrupt, so a read that misses the checkpoint reports them instead.
+        let mut rle = fixture_bytes("sas64_rle_wide.sas7bdat");
+        rle[W_PAGE1_ROW0] = 0x30;
+        let mut plain = fixture_bytes("sas64_haven.sas7bdat");
+        plain[70] = 20;
+        plain[H_PAGE1 + 40..H_PAGE1 + 40 + 205].fill(0xFF);
+        for (bytes, page_at) in [(rle, W_PAGE1 as u64), (plain, H_PAGE1 as u64)] {
+            let token = crate::resource::CancelToken::new();
+            let budget = crate::resource::Budget::new(None, token.clone());
+            let reader = CancelAtPage {
+                inner: Cursor::new(bytes),
+                page_at,
+                reads: 0,
+                token,
+            };
+            let r = crate::resource::with_budget(budget, || {
+                SasReader::new(reader)?.read_to_dataframe()
+            });
+            assert_parse_error(r, "cancelled");
+        }
+    }
+
+    #[test]
+    fn test_sas_metadata_is_held_to_the_allocation_ceiling() {
+        // Metadata pointers can share one subheader too. Pointers 0 and 1 of sas64_haven's page 0
+        // name the same 900 bytes of column text: more than a ceiling that admits the page.
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        for k in 0..2 {
+            let q = H_PAGE0_POINTER0 + 24 * k;
+            put(&mut b, q, &3184u64.to_le_bytes());
+            put(&mut b, q + 8, &900u64.to_le_bytes());
+        }
+        let check = b.clone();
+        assert_invalid(load(check), "the file has no row size subheader");
+        let r = crate::resource::with_alloc_ceiling(Some(5_000), || load(b));
+        assert_parse_error(r, "SAS metadata");
+    }
+
+    #[test]
+    fn test_sas_short_plain_row_in_a_compressed_file() {
+        // sas64_rle_wide cut down to one numeric column `id` of 3 bytes in a row of 3 bytes, the
+        // first of page 1 stored uncompressed: too short to hold a signature, and still a row.
+        let mut b = fixture_bytes("sas64_rle_wide.sas7bdat");
+        let (row_size, col_size) = (W_PAGE0 + 7384, W_PAGE0 + 7360);
+        let (names, attrs) = (W_PAGE0 + 40 + 24 * 3, W_PAGE0 + 40 + 24 * 4);
+        put(&mut b, names + 8, &36u64.to_le_bytes());
+        put(&mut b, attrs + 8, &44u64.to_le_bytes());
+        put(&mut b, col_size + 8, &1u64.to_le_bytes());
+        put(&mut b, row_size + 40, &3u64.to_le_bytes());
+        put(&mut b, row_size + 48, &1u64.to_le_bytes());
+        put(&mut b, W_PAGE0 + 7212 + 16 + 8, &3u32.to_le_bytes());
+        put(&mut b, W_PAGE1_POINTER0 + 8, &3u64.to_le_bytes());
+        b[W_PAGE1_POINTER0 + 16] = COMPRESSION_NONE;
+        put(&mut b, W_PAGE1_ROW0, &[0x00, 0xF8, 0x3F]); // the high-order bytes of 1.5
+        let df = load(b).unwrap();
+        assert_eq!(df.shape(), (1, 1));
+        assert_eq!(df.column("id").unwrap().f64().unwrap().get(0), Some(1.5));
+    }
+
+    #[test]
+    fn test_sas_signature_of_short_subheaders() {
+        let b = fixture_bytes("sas64_haven.sas7bdat");
+        let mut r = SasReader::new(Cursor::new(b)).unwrap();
+        assert_eq!(r.signature(&[1, 2, 3]), None);
+        assert_eq!(r.signature(&[0xFC, 0xFF, 0xFF, 0xFF]), Some(SIG_COL_ATTR));
+        // A big-endian 64-bit signature is in the second word when the first is 0 or all ones.
+        r.byte_order = ByteOrder::BigEndian;
+        assert_eq!(r.signature(&[0, 0, 0, 0, 1, 2, 3]), None);
+        assert_eq!(r.signature(&[0xFF, 0xFF, 0xFF, 0xFF, 1, 2, 3]), None);
+        assert_eq!(
+            r.signature(&[0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFD]),
+            Some(SIG_COL_TEXT)
+        );
+        assert_eq!(r.signature(&[0xF7, 0xF7, 0xF7, 0xF7]), Some(SIG_ROW_SIZE));
     }
 
     #[test]
