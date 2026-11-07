@@ -10,7 +10,7 @@ Conditional inference trees use permutation-based statistical tests to select sp
 - **Function**: `ctree(formula, data, control = ctree_control())`
 - **CRAN**: https://cran.r-project.org/package=partykit
 
-## R Code for Expected Values
+## Illustrative R code (not run: partykit, party and coin are not installed on the validation machine)
 
 ```r
 library(partykit)
@@ -27,12 +27,25 @@ cat("R²:", 1 - sum((y - pred)^2) / sum((y - mean(y))^2), "\n")
 varimp(model)
 ```
 
-## Rust Test Reference
+## What is pinned
 
-- **File**: `crates/p2a-core/tests/validation_ml_advanced.rs`
-- **Tests**: `test_validate_ctree_regression`, `test_validate_ctree_classification`, `test_validate_ctree_predict`
+- The split point against rpart: `test_validate_ctree_split_matches_rpart` (`crates/p2a-core/src/ml/ctree.rs`).
+- Parameter validation: `test_ctree_rejects_minsplit_below_twice_minbucket`, `test_ctree_minbucket_zero_acts_as_one`,
+  `test_ctree_options_parse_aliases_and_reject_unknown`, `test_ctree_maximum_teststat_is_not_the_quadratic_one`.
+  `minsplit` below `2 * minbucket` is refused, because no node of that size can be split into two children of
+  `minbucket` rows. `teststat = maximum` with a classification target is refused until ML-26 and ML-27 fix the
+  statistic. The `MonteCarlo` and `Teststatistic` test types are not implemented and are refused.
 
-## Tolerance
+## What is not R parity
+
+- The node statistics and p-values (ML-26, ML-27). No statistic or p-value is compared with partykit output.
+- The importance definition: `Sum(1 - p)` over the splits on a feature, not partykit's `varimp`.
+
+## DGP property tests
+
+`test_validate_ctree_regression`, `test_validate_ctree_classification` and `test_validate_ctree_predict`
+(`crates/p2a-core/tests/validation_ml_advanced.rs`) check DGP recovery by thresholds, despite their names: they are
+property tests, not R parity, and they will be renamed (X-10).
 
 - Regression R²: > 0.50 (typically > 0.90)
 - Classification accuracy: > 0.75

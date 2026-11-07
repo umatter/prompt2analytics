@@ -10,7 +10,7 @@ Cubist is a rule-based regression model that builds regression trees and extract
 - **Function**: `cubist(x, y, committees = 1, neighbors = 0)`
 - **CRAN**: https://cran.r-project.org/package=Cubist
 
-## R Code for Expected Values
+## Illustrative R code (not run: C50 and Cubist are not installed on the validation machine)
 
 ```r
 library(Cubist)
@@ -34,7 +34,9 @@ cat("5-committee R²:", 1 - sum((y - pred5)^2) / sum((y - mean(y))^2), "\n")
 - **File**: `crates/p2a-core/tests/validation_ml_advanced.rs`
 - **Tests**: `test_validate_cubist_regression`, `test_validate_cubist_committees`, `test_validate_cubist_predict`
 
-## Tolerance
+## Property thresholds (no R parity)
+
+The tests check DGP recovery only, and no number is compared with Cubist output.
 
 - Training R²: > 0.70 (typically > 0.90)
 - Out-of-sample R²: > 0.50
