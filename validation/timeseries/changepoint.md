@@ -12,7 +12,7 @@ segment of length m, with a = sum z and q = sum z^2:
 | `CostFunction` | R | Cost |
 |---|---|---|
 | `VarianceChange` | `cpt.var` (mu = mean of the series) | m (ln 2 pi + ln(q / m) + 1), q <= 0 floored at 1e-11 |
-| `MeanAndVariance` | `cpt.meanvar` | m (ln 2 pi + ln s2 + 1), s2 = (q - a^2 / m) / m, s2 <= 0 floored at 1e-11 |
+| `MeanAndVariance` | `cpt.meanvar` | m (ln 2 pi + ln s2 + 1), s2 = (q - a^2 / m) / m, s2 floored at 1e-11 at or below 4 eps Q, the rounding level of p2a's centred prefix sums (Q the sum of squares of the whole series; R's level is 0, on raw sums), so a tied segment takes the floor as in R |
 | `MeanChange` | `cpt.mean` (unit variance: scale the series first) | q - a^2 / m |
 
 `penalty = None` is changepoint's MBIC: penalty (k + 2) ln n, with k = 1 for a mean or a variance and 2 for both, and
@@ -45,6 +45,10 @@ MBIC and manual penalties, minimum segments 2 and 7.
 | `test_validate_cpt_mean_large_level` | `cpt.mean(lev - mean(lev), MBIC, minseglen = 2)` | 107, 121, 135, 148, 150; penalty |
 
 Changepoints are compared exactly, the penalty and cost at `Tol::stat(210)`.
+
+`test_pelt_matches_optimal_partitioning` and `test_pelt_matches_optimal_partitioning_on_tied_counts` compare the pruned search
+with a naive reference; `test_centred_and_raw_costs_agree_on_counts` compares the centred costs with the raw ones on whole
+numbers. None of the three compares with R.
 
 ## Deviations and conventions
 

@@ -75,8 +75,9 @@ pub enum CostFunction {
 ///
 /// # Errors
 /// Fails on a series too short for the minimum segment length, on a non-finite value or penalty
-/// (a penalty must be finite and non-negative), and when the budget installed with
-/// [`crate::resource::with_budget`] is cancelled or past its deadline.
+/// (a penalty must be finite and non-negative), on values so large that the sum of squares
+/// overflows, and when the budget installed with [`crate::resource::with_budget`] is cancelled or
+/// past its deadline.
 pub fn detect_changepoints(
     data: &[f64],
     penalty: Option<f64>,
@@ -99,12 +100,6 @@ pub fn detect_changepoints(
         ));
     }
 
-    if let Some((i, v)) = data.iter().enumerate().find(|(_, v)| !v.is_finite()) {
-        return Err(format!(
-            "changepoint detection needs finite data: {v} at position {i} (R: NA is not allowed in the data)"
-        ));
-    }
-
     if let Some(p) = penalty
         && !(p.is_finite() && p >= 0.0)
     {
@@ -123,7 +118,7 @@ pub fn detect_changepoints(
     });
 
     // Precompute cumulative sums for efficient cost calculation
-    let (cum_sum, cum_sum_sq) = compute_cumulative_sums(data);
+    let (cum_sum, cum_sum_sq) = checked_cumulative_sums(data)?;
 
     // PELT algorithm
     let changepoints = pelt(n, &cum_sum, &cum_sum_sq, pen, min_seg, cost_function, mbic)?;
@@ -204,8 +199,32 @@ fn compute_cumulative_sums(data: &[f64]) -> (Vec<f64>, Vec<f64>) {
     (cum_sum, cum_sum_sq)
 }
 
+/// The prefix sums of a series, or an error when no cost could be computed from them: a value that
+/// is not finite, or values so large that the sums overflow. The costs would be NaN, no segment
+/// would compare as best, and the search would report no changepoint.
+fn checked_cumulative_sums(data: &[f64]) -> Result<(Vec<f64>, Vec<f64>), String> {
+    if let Some((i, v)) = data.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(format!(
+            "changepoint detection needs finite data: {v} at position {i} (R: NA is not allowed in the data)"
+        ));
+    }
+    let (cum_sum, cum_sum_sq) = compute_cumulative_sums(data);
+    // a^2 reaches m q (Cauchy-Schwarz), so a finite n Q keeps every intermediate of every cost
+    // finite. A sum or square that overflowed is Inf or NaN here too.
+    if !(cum_sum_sq[data.len()] * data.len() as f64).is_finite() {
+        return Err("values too large: the sum of squares overflows".to_string());
+    }
+    Ok((cum_sum, cum_sum_sq))
+}
+
 /// The cost of a segment [start, end) on the centred prefix sums: changepoint's `mll_var`,
 /// `mll_meanvar` and `mll_mean`, without the ln(segment length) term of their MBIC variants.
+///
+/// `mll_meanvar` floors a variance of zero at 1e-11. After centring by a mean that is not
+/// representable, a segment of tied values has a variance of rounding noise, not zero, so the floor
+/// applies below the rounding level of the prefix sums. A variance under that level cannot be told
+/// from zero here. Noise that escaped the floor would make the cost of the segment depend on the
+/// rounding, and would break the sub-additivity that makes `pelt`'s pruning exact.
 #[inline]
 fn segment_cost(
     cum_sum: &[f64],
@@ -231,7 +250,7 @@ fn segment_cost(
         }
         CostFunction::MeanAndVariance => {
             let mut sigma2 = (q - a * a / m) / m;
-            if sigma2 <= 0.0 {
+            if sigma2 <= 4.0 * f64::EPSILON * cum_sum_sq[cum_sum_sq.len() - 1] {
                 sigma2 = 1e-11;
             }
             m * (ln_2pi + sigma2.ln() + 1.0)
@@ -391,7 +410,8 @@ fn compute_total_cost(
 ///
 /// # Errors
 /// Fails on a series of fewer than 2 points, on a series too short for two
-/// segments of the minimum segment length, and when the budget installed with
+/// segments of the minimum segment length, on a non-finite value, on values so
+/// large that the sum of squares overflows, and when the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline.
 pub fn binary_segmentation(
     data: &[f64],
@@ -420,7 +440,7 @@ pub fn binary_segmentation(
     let max_cp = max_changepoints.unwrap_or(10);
     let threshold = significance_threshold.unwrap_or(0.0);
 
-    let (cum_sum, cum_sum_sq) = compute_cumulative_sums(data);
+    let (cum_sum, cum_sum_sq) = checked_cumulative_sums(data)?;
 
     let mut changepoints = Vec::new();
     let mut segments_to_check: Vec<(usize, usize)> = vec![(0, n)];
@@ -753,6 +773,138 @@ mod tests {
         assert_eq!(compared, 54);
     }
 
+    /// Seeded Poisson counts (Knuth's product of uniforms): whole numbers, with many tied values
+    /// at a low rate. The rate changes at the middle of the series.
+    fn poisson_counts(n: usize, rate: f64, seed: u64) -> Vec<f64> {
+        let mut seed = seed;
+        (0..n)
+            .map(|i| {
+                let lambda = if i < n / 2 { rate } else { 2.0 * rate };
+                let limit = (-lambda).exp();
+                let mut count = 0.0;
+                let mut product = lcg_rand_cp(&mut seed);
+                while product > limit {
+                    count += 1.0;
+                    product *= lcg_rand_cp(&mut seed);
+                }
+                count
+            })
+            .collect()
+    }
+
+    /// On whole numbers a tied segment has no variance, so it takes the 1e-11 floor. Centring by
+    /// a mean that is not representable leaves rounding noise in q - a^2 / m, and noise that
+    /// escapes the floor breaks sub-additivity, which is what makes pruning exact. Several
+    /// segmentations of tied values can reach one objective, so the objective is what is compared.
+    #[test]
+    fn test_pelt_matches_optimal_partitioning_on_tied_counts() {
+        let n = 200;
+        let cost = CostFunction::MeanAndVariance;
+        let pen_mbic = 4.0 * (n as f64).ln();
+        let mut compared = 0;
+        for rate in [0.5, 1.0, 3.0, 8.0] {
+            for seed in 1..=15u64 {
+                let series = poisson_counts(n, rate, seed * 7919);
+                for manual in [None, Some(1.0), Some(8.0)] {
+                    let r = detect_changepoints(&series, manual, Some(2), cost).unwrap();
+                    let pen = manual.unwrap_or(pen_mbic);
+                    let (_, f_n) = optimal_partitioning(&series, pen, 2, cost, manual.is_none());
+                    let label = format!("rate {rate} seed {seed} {manual:?}");
+                    let penalised = r.total_cost + pen * r.n_changepoints as f64;
+                    assert!(
+                        (penalised - f_n).abs() <= 1e-9 * f_n.abs().max(1.0),
+                        "{label}: {penalised} vs {f_n}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 180);
+    }
+
+    /// The prefix sums of the raw series, which on small whole numbers are exact: the path that
+    /// centring must agree with.
+    fn raw_prefix_sums(data: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let mut s1 = vec![0.0; data.len() + 1];
+        let mut s2 = vec![0.0; data.len() + 1];
+        for (i, v) in data.iter().enumerate() {
+            s1[i + 1] = s1[i] + v;
+            s2[i + 1] = s2[i] + v * v;
+        }
+        (s1, s2)
+    }
+
+    /// Centring must not change any cost of a series of small whole numbers, tied segments
+    /// included, nor the segmentation found from those costs.
+    #[test]
+    fn test_centred_and_raw_costs_agree_on_counts() {
+        let n = 200;
+        for (rate, seed) in [(0.5, 11u64), (1.0, 23), (3.0, 37), (8.0, 41)] {
+            let series = poisson_counts(n, rate, seed);
+            let (c1, c2) = compute_cumulative_sums(&series);
+            let (r1, r2) = raw_prefix_sums(&series);
+            for cost in [CostFunction::MeanChange, CostFunction::MeanAndVariance] {
+                for start in 0..n - 1 {
+                    for end in start + 2..=n {
+                        let centred = segment_cost(&c1, &c2, start, end, cost);
+                        let raw = segment_cost(&r1, &r2, start, end, cost);
+                        assert!(
+                            (centred - raw).abs() <= 1e-9 * raw.abs().max(1.0),
+                            "{cost:?} rate {rate} [{start}, {end}): {centred} vs {raw}"
+                        );
+                    }
+                }
+                let pen = 4.0 * (n as f64).ln();
+                let found = pelt(n, &c1, &c2, pen, 2, cost, true).unwrap();
+                assert_eq!(found, pelt(n, &r1, &r2, pen, 2, cost, true).unwrap());
+            }
+        }
+    }
+
+    /// Values whose squares or sum overflow would make every cost NaN, and PELT then finds no
+    /// best segment and reports no changepoint.
+    #[test]
+    fn test_overflowing_values_are_refused() {
+        let noisy = |scale: f64| -> Vec<f64> {
+            (0..40)
+                .map(|i| scale * (1.0 + ((i * 37) % 11) as f64 * 0.03))
+                .collect()
+        };
+        for scale in [1e200, 1e308, 1e155] {
+            let data = noisy(scale);
+            for cost in [
+                CostFunction::MeanChange,
+                CostFunction::VarianceChange,
+                CostFunction::MeanAndVariance,
+            ] {
+                let e = detect_changepoints(&data, None, None, cost).unwrap_err();
+                assert!(e.contains("too large"), "{scale} {cost:?}: {e}");
+            }
+            let e = binary_segmentation(&data, Some(3), None, None).unwrap_err();
+            assert!(e.contains("too large"), "{scale}: {e}");
+        }
+        // Large values are fine as long as the sums hold them.
+        let mut data = noisy(1e140);
+        for v in &mut data[20..] {
+            *v *= 3.0;
+        }
+        let r = detect_changepoints(&data, Some(1.0), None, CostFunction::MeanAndVariance).unwrap();
+        assert!(r.total_cost.is_finite());
+    }
+
+    /// `detect_changepoints` refuses a value that is not finite; a direct call of
+    /// `binary_segmentation` got NaN in every prefix sum and answered "no changepoints".
+    #[test]
+    fn test_binary_segmentation_refuses_non_finite_values() {
+        let clean = create_mean_shift_data(20, 20, 0.0, 5.0, 1.0);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut data = clean.clone();
+            data[7] = bad;
+            let e = binary_segmentation(&data, Some(3), None, None).unwrap_err();
+            assert!(e.contains("finite") && e.contains("position 7"), "{e}");
+        }
+    }
+
     /// X-2: an Int64 column gives the changepoints of its Float64 copy; missing values,
     /// text and absent columns are refused by name (they were read as 0).
     #[test]
@@ -845,7 +997,7 @@ mod tests {
     }
 
     // ========================================================================
-    // R-vs-Rust Validation Tests (Phase 6)
+    // Property tests on simulated data
     // ========================================================================
 
     /// LCG for deterministic random numbers
@@ -878,7 +1030,6 @@ mod tests {
 
     #[test]
     fn test_pelt_single_changepoint_recovers_dgp() {
-        // R reference: changepoint::cpt.mean()
         // Single mean change at position 50
         let data = create_mean_shift_data(50, 50, 0.0, 5.0, 1.0);
         let result = detect_changepoints(&data, Some(5.0), None, CostFunction::MeanChange).unwrap();
