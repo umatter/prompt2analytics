@@ -3214,4 +3214,45 @@ mod tests {
         assert!(box_plot(&[("a".into(), vec![f64::NAN])], cfg()).is_err());
         assert!(residual_diagnostics(&[f64::NAN; 3], &[0.1, 0.2, 0.3], None, cfg()).is_err());
     }
+
+    #[test]
+    fn test_dendrogram_leaf_order_chain_linear_memory() {
+        // A leaf list per merge would hold n^2 / 2 indices here.
+        let n = 100_000;
+        let link = chain_linkage(n);
+        validate_linkage(&link, n).unwrap();
+        let order = compute_leaf_order(&link, n);
+        assert_eq!(order, (0..n).collect::<Vec<_>>());
+        let r = dendrogram(&chain_linkage(1_000), None, small()).unwrap();
+        assert_eq!((r.n_samples, r.n_merges), (1_000, 999));
+        assert_eq!(r.max_distance, 999.0);
+    }
+
+    #[test]
+    fn test_dendrogram_rejects_bad_linkage() {
+        for (bad, needle) in [
+            (
+                vec![(0usize, 2usize, 1.0f64, 2usize)], // the cluster this row creates
+                "linkage row 0 refers to cluster 2",
+            ),
+            (
+                vec![(0, 1, 1.0, 2), (usize::MAX, 2, 2.0, 3)],
+                "linkage row 1 refers to cluster 18446744073709551615",
+            ),
+            (
+                vec![(0, 1, 1.0, 2), (2, 2, 2.0, 4)],
+                "linkage row 1 merges cluster 2 with itself",
+            ),
+            (
+                vec![(0, 1, f64::INFINITY, 2)],
+                "linkage row 0 has merge height inf",
+            ),
+        ] {
+            match dendrogram(&bad, None, small()) {
+                Err(VisualizationError::InvalidData(m)) => assert!(m.contains(needle), "{m}"),
+                Err(other) => panic!("{bad:?}: {other:?}"),
+                Ok(_) => panic!("{bad:?} was accepted"),
+            }
+        }
+    }
 }
