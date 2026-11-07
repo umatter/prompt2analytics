@@ -104,6 +104,19 @@
       "tolerance": "Tol::stat(100), Tol::p_value(100) (k-sample n = 300)",
       "deviations": [{"finding": "STAT-63", "quantity": "one-sample CI with continuity correction; two-sample CI", "note": "p2a: Wilson without correction; Newcombe method 10"}, {"finding": "STAT-59", "quantity": "two-sample one-sided CI", "note": "p2a reports the two-sided interval"}],
       "supersedes_legacy": []
+    },
+    {
+      "id": "pp_test_t3",
+      "name": "Phillips-Perron test: statistic, p-value, lag and the regression and Newey-West internals",
+      "category": "timeseries",
+      "reference": "stats::PP.test (internals recomputed with its own code)",
+      "doc": "validation/timeseries/pptest.md",
+      "cases": ["stat_pp_t3", "stat_pp_gdp_t3"],
+      "tests": ["p2a-core::stats::pptest::tests::test_validate_pp_test_t3_internals", "p2a-core::stats::pptest::tests::test_validate_pp_test_t3_statistic", "p2a-core::stats::pptest::tests::test_validate_pp_test_t3_gdp"],
+      "quantities": ["Dickey-Fuller statistic (corrected t)", "p-value (R's table)", "truncation lag (from n - 1)", "gamma (rho - 1)", "t statistic", "sigma^2 (RSS/n)", "lambda^2 (Bartlett long-run variance)"],
+      "tolerance": "Tol::coef(n) for gamma, Tol::stat(n) for statistics and variances, Tol::p_value(n); lag exact",
+      "deviations": [{"finding": "STAT-6", "quantity": "statistic of an exact fit", "note": "p2a refuses; PP.test returns NaN"}],
+      "supersedes_legacy": []
     }
   ]
 }

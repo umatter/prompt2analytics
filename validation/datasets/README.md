@@ -79,6 +79,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/mtcars.csv` | 32 × 12 (model, mpg, cyl, disp, hp, drat, wt, qsec, vs, am, gear, carb) | `ols_mtcars` | `r/cases/regression.R` | `datasets::mtcars`, row names as `model` |
 | `generated/mte_boot_indices.csv` | 400 × 25 (b01-b25; 1-based row indices into rows 1-400 of `mte_sim.csv`) | `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261207 |
 | `generated/mte_sim.csv` | 2000 × 4 (y, d, z1, z2) | `mte_local_iv`, `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261205 |
+| `generated/pp_t3.csv` | 200 × 4 (id, ar, rw, rw100) | `stat_pp_t3` | `r/cases/stats_misc_t3.R` | AR(1) and random walks |
 | `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3` | `r/cases/stats_misc_t3.R` | sine plus noise |
 | `generated/step_legacy.csv` | 100 × 4 (y, x1, x2, x3) | `step_legacy` | `r/cases/regression.R` | seed 42 (DGP of `scripts/validate_regression_diag.R`) |
 | `generated/step_borderline.csv` | 120 × 4 (y, x1, x2, x3) | `step_borderline` | `r/cases/regression.R` | seed 5 |

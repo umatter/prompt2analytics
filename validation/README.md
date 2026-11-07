@@ -366,6 +366,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | not R-pinned |
 | Granger causality (lmtest::grangertest; lag orders, small samples, default order, integer series) | [granger.md](econometrics/timeseries/granger.md), [granger.md](econometrics/granger.md) | R-pinned |
 | ACF, PACF, CCF (missing-value refusal) | [acf.md](stats/acf.md) | R-pinned |
+| Phillips-Perron unit root test (PP.test) | [pptest.md](timeseries/pptest.md) | R-pinned, known deviations (STAT-6) |
 | Spectrum (spec.pgram, spec.ar) | [spectrum.md](timeseries/spectrum.md) | R-pinned, known deviations (STAT-39, STAT-68) |
 
 ### Forecasting

@@ -202,3 +202,54 @@ case("stat_prop_t3", "stats/prop_test", "prop.test: one-, two- and k-sample, wit
        call = "prop.test(15, 100, p = 0.1, ...); prop.test(c(30, 40), c(100, 100), ...); prop.test(c(30, 40, 35), c(100, 100, 100))",
        packages = character(0))
 })
+
+case("stat_pp_t3", "timeseries/pptest", "PP.test and its internals (gamma, t, sigma^2, Newey-West lambda^2, lag) for n = 200 and n = 100", function(ctx) {
+  set.seed(4040)
+  e <- rnorm(200)
+  ar <- numeric(200); ar[1] <- e[1]; for (i in 2:200) ar[i] <- 0.5 * ar[i - 1] + e[i]
+  rw <- cumsum(rnorm(200)) + 0.02 * (1:200)
+  rw100 <- cumsum(rnorm(100))
+  d <- ctx$gen_dataset("pp_t3", .pad(list(ar = round(ar, 8), rw = round(rw, 8), rw100 = round(rw100, 8))))
+  parts <- function(x, lshort) {
+    z <- embed(x, 2); yt <- z[, 1]; yt1 <- z[, 2]; n <- length(yt)
+    u <- (1L:n) - n / 2
+    res <- lm(yt ~ 1 + u + yt1)
+    cf <- coef(summary(res))
+    ee <- residuals(res)
+    ssqru <- sum(ee^2) / n
+    l <- if (lshort) trunc(4 * (n / 100)^0.25) else trunc(12 * (n / 100)^0.25)
+    ssqrtl <- ssqru + .Call(stats:::C_pp_sum, ee, l)
+    pt <- PP.test(x, lshort = lshort)
+    stopifnot(unname(pt$parameter) == l)
+    list(gamma = cf[3, 1] - 1, t = (cf[3, 1] - 1) / cf[3, 2], sigma2 = ssqru, lambda2 = ssqrtl, lag = l,
+         stat = unname(pt$statistic), p = pt$p.value)
+  }
+  v <- list()
+  add <- function(prefix, l) for (k in names(l)) v[[paste0(prefix, "_", k)]] <<- l[[k]]
+  ar <- d$ar; rw <- d$rw; rw100 <- d$rw100[!is.na(d$rw100)]
+  add("ar_short", parts(ar, TRUE)); add("ar_long", parts(ar, FALSE))
+  add("rw_short", parts(rw, TRUE)); add("rw_long", parts(rw, FALSE))
+  add("rw100_short", parts(rw100, TRUE))
+  # p2a computes the lag from length(x) instead of length(x) - 1 (STAT-6): at n = 200 both rules give
+  # 4 (short) and 14 (long); at n = 100 R gives 3 and p2a 4.
+  v$p2a_rule_lag_n100 <- trunc(4 * (100 / 100)^0.25)
+  stopifnot(v$ar_short_lag == trunc(4 * (200 / 100)^0.25), v$ar_long_lag == trunc(12 * (200 / 100)^0.25),
+            v$rw100_short_lag != v$p2a_rule_lag_n100)
+  list(values = v, reference = "stats::PP.test (internals recomputed with its own code: embed, lm, C_pp_sum)",
+       call = "PP.test(x, lshort = TRUE | FALSE)", packages = character(0))
+})
+
+case("stat_pp_gdp_t3", "timeseries/pptest", "PP.test on the paper's gdp_quarterly$gdp_growth (n = 280), short and long lag", function(ctx) {
+  g <- ctx$dataset("datasets/gdp_quarterly.csv")
+  x <- g$gdp_growth
+  stopifnot(!anyNA(x))
+  s <- PP.test(x, lshort = TRUE); l <- PP.test(x, lshort = FALSE)
+  v <- list(gdp_short_stat = unname(s$statistic), gdp_short_lag = unname(s$parameter), gdp_short_p = s$p.value,
+            gdp_long_stat = unname(l$statistic), gdp_long_lag = unname(l$parameter), gdp_long_p = l$p.value,
+            n = length(x))
+  # Cross-check, recorded, not pinned: tseries' Z(t_alpha) uses the same regression, lag rule and table. If it
+  # differs from PP.test, say so in pptest.md; the Rust tests pin PP.test.
+  v$tseries_short_stat <- unname(tseries::pp.test(x, type = "Z(t_alpha)", lshort = TRUE)$statistic)
+  list(values = v, reference = "stats::PP.test (cross-check tseries::pp.test, type Z(t_alpha))",
+       call = "PP.test(gdp_growth, lshort = TRUE | FALSE)", packages = c("tseries"))
+})
