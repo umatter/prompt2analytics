@@ -113,6 +113,52 @@
       "tolerance": "Tol::stat(n) (n = 100, 120); p Tol::p_value(n)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ts_holtwinters",
+      "name": "Holt-Winters filtering and predict intervals",
+      "category": "forecasting",
+      "reference": "stats::HoltWinters (fixed parameters; R's optimum), stats::predict.HoltWinters(prediction.interval = TRUE)",
+      "doc": "validation/forecasting/holtwinters.md",
+      "cases": [
+        "ts_holtwinters_forecast"
+      ],
+      "tests": [
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_additive",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_multiplicative",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_forecast_holt",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_notrend_and_ses",
+        "p2a-core::forecasting::holtwinters::tests::test_validate_holtwinters_at_r_optimum"
+      ],
+      "quantities": [
+        "SSE",
+        "coefficients",
+        "one-step error count and variance",
+        "forecasts",
+        "additive and non-seasonal prediction intervals (95 %, and 80 % to h = 24)"
+      ],
+      "tolerance": "coefficients and forecasts Tol::coef(n), SSE, limits and variance Tol::stat(n), counts exact",
+      "deviations": [
+        {
+          "finding": "TS-24",
+          "quantity": "optimised alpha, beta, gamma",
+          "note": "p2a optimises by Nelder-Mead on [0.01, 0.99]; not pinned; the filter is pinned at R's optimum"
+        },
+        {
+          "finding": "TS-22",
+          "quantity": "multiplicative prediction intervals (airpass_mult_upr, airpass_mult_lwr)",
+          "note": "predict.HoltWinters reads the trend b for s_f when (rel - j) mod f = 0, uses alpha + gamma (1 - alpha) for the one-step term (its h = 1 interval is 0.58 of the residual SD on the case) and shifts the seasonal indices without a trend; p2a refuses multiplicative intervals"
+        }
+      ],
+      "supersedes_legacy": [
+        "validation/expected/holtwinters_airpassengers_add.csv",
+        "validation/expected/holtwinters_airpassengers_mult.csv",
+        "validation/expected/holtwinters_forecast.csv",
+        "validation/expected/holtwinters_nonseasonal.csv",
+        "validation/expected/holtwinters_nonseasonal_data.csv",
+        "validation/expected/holtwinters_synthetic_data.csv",
+        "validation/expected/holtwinters_synthetic_quarterly.csv"
+      ]
     }
   ]
 }
