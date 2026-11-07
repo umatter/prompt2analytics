@@ -48,7 +48,9 @@
 //! following LeSage & Pace (2009). The algorithm uses:
 //!
 //! 1. Albert & Chib (1993) data augmentation for latent y*
-//! 2. Truncated normal sampling for latent outcomes
+//! 2. Exact one-sided truncated normal draws for the latent outcomes, in both tails: normal
+//!    rejection when the bound is on the near side of the mean, Robert's (1995) exponential
+//!    rejection when it is on the far side
 //! 3. Gibbs sampling for parameters
 //!
 //! # Marginal Effects
@@ -79,6 +81,9 @@
 //! - Beron, K.J. & Vijverberg, W.P.M. (2004). "Probit in a Spatial Context:
 //!   A Monte Carlo Analysis". In Anselin, L., Florax, R.J.G.M. & Rey, S.J. (Eds.),
 //!   Advances in Spatial Econometrics (pp. 169-195). Springer.
+//!
+//! - Robert, C.P. (1995). "Simulation of truncated normal variables". *Statistics and
+//!   Computing*, 5(2), 121-125. https://doi.org/10.1007/BF00143942
 //!
 //! - R package `spatialprobit`: Wilhelm, S. & de Matos, M.G. (2013).
 //!   https://cran.r-project.org/package=spatialprobit
@@ -604,6 +609,11 @@ fn run_mcmc_spatial_probit(
             prior_precision,
             &mut rng,
         )?;
+        if !beta.iter().all(|v| v.is_finite()) {
+            return Err(EconError::Computation(format!(
+                "spatial probit: non-finite coefficient draw at iteration {iter}"
+            )));
+        }
 
         // --- Step 3: Sample rho given (y*, beta) using griddy Gibbs ---
         let (new_rho, accepted) = sample_rho_griddy_gibbs(
@@ -1104,104 +1114,53 @@ fn compute_spatial_probit_impacts(
     })
 }
 
-/// Sample from truncated normal, truncated above threshold.
+/// Exact draw from N(0, 1) truncated to [a, inf). For a <= 0, normal rejection (acceptance
+/// Phi(-a) >= 1/2). Otherwise Robert's (1995) exponential rejection with the optimal rate
+/// lambda = (a + sqrt(a^2 + 4)) / 2, accepting z = a + E/lambda with probability
+/// exp(-(z - lambda)^2 / 2) (acceptance above 0.76 for a > 0). NaN or +inf returns a (no loop);
+/// the Gibbs loop refuses non-finite draws.
+fn standard_normal_truncated_below<R: rand::Rng>(a: f64, rng: &mut R) -> f64 {
+    use rand_distr::{Distribution, Exp1, StandardNormal};
+    if a.is_nan() || a == f64::INFINITY {
+        return a;
+    }
+    if a <= 0.0 {
+        loop {
+            let z: f64 = StandardNormal.sample(rng);
+            if z >= a {
+                return z;
+            }
+        }
+    }
+    let lambda = 0.5 * (a + (a * a + 4.0).sqrt());
+    loop {
+        let e: f64 = Exp1.sample(rng);
+        let z = a + e / lambda;
+        let u: f64 = rng.r#gen();
+        if u <= (-0.5 * (z - lambda) * (z - lambda)).exp() {
+            return z;
+        }
+    }
+}
+
+/// Draw from N(mu, sigma^2) truncated to [lower, inf).
 fn sample_truncated_normal_above<R: rand::Rng>(
     mu: f64,
     sigma: f64,
     lower: f64,
     rng: &mut R,
 ) -> f64 {
-    // Use inverse CDF method
-    let alpha = (lower - mu) / sigma;
-    let phi_alpha = normal_cdf(alpha);
-
-    // Ensure valid range for Uniform
-    let lower_bound = phi_alpha.max(1e-10);
-    let upper_bound = 1.0 - 1e-10;
-
-    if lower_bound >= upper_bound {
-        // Extreme case: return value just above threshold
-        return lower + 0.01 * sigma;
-    }
-
-    // Sample u ~ Uniform(phi_alpha, 1)
-    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
-
-    // Return mu + sigma * Phi^{-1}(u)
-    mu + sigma * inverse_normal_cdf(u)
+    mu + sigma * standard_normal_truncated_below((lower - mu) / sigma, rng)
 }
 
-/// Sample from truncated normal, truncated below threshold.
+/// Draw from N(mu, sigma^2) truncated to (-inf, upper].
 fn sample_truncated_normal_below<R: rand::Rng>(
     mu: f64,
     sigma: f64,
     upper: f64,
     rng: &mut R,
 ) -> f64 {
-    // Use inverse CDF method
-    let beta = (upper - mu) / sigma;
-    let phi_beta = normal_cdf(beta);
-
-    // Ensure valid range for Uniform
-    let lower_bound = 1e-10;
-    let upper_bound = phi_beta.max(2e-10);
-
-    if lower_bound >= upper_bound {
-        // Extreme case: return value just below threshold
-        return upper - 0.01 * sigma;
-    }
-
-    // Sample u ~ Uniform(0, phi_beta)
-    let u: f64 = uniform_f64(lower_bound, upper_bound, rng);
-
-    // Return mu + sigma * Phi^{-1}(u)
-    mu + sigma * inverse_normal_cdf(u)
-}
-
-/// The largest scale rand 0.8's `UniformFloat::new(low, high)` settles on, for
-/// `low < high`: the largest `s <= high - low` with `s * max_rand + low < high`.
-///
-/// rand lowers the scale one ulp at a time until that holds, which takes about 1e10 steps
-/// when `high - low` is tiny next to `high` (the truncated-normal draws meet that once the
-/// mean is about 6 standard deviations from the threshold) and cannot be interrupted. The
-/// condition is monotone in `s`, so bisection on the bit pattern finds the same value in at
-/// most 64 steps.
-fn uniform_scale(low: f64, high: f64) -> f64 {
-    // (u64::MAX >> 12) with exponent 0, minus 1: the largest value0_1 rand produces
-    let max_rand = f64::from_bits((u64::MAX >> 12) | (1023_u64 << 52)) - 1.0;
-    let fits = |s: f64| s * max_rand + low < high;
-    let scale = high - low;
-    if fits(scale) {
-        return scale;
-    }
-    // `fits(0.0)` holds because low < high; non-negative floats are ordered by their bits.
-    let (mut lo, mut hi) = (0_u64, scale.to_bits());
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        if fits(f64::from_bits(mid)) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    f64::from_bits(lo)
-}
-
-/// `rand_distr::Uniform::new(low, high).sample(rng)` for `low < high`, bit for bit, with the
-/// scale from [`uniform_scale`] instead of rand's ulp-by-ulp construction loop.
-fn uniform_f64<R: rand::Rng>(low: f64, high: f64, rng: &mut R) -> f64 {
-    let scale = uniform_scale(low, high);
-    // a value in [1, 2) from the top 52 bits, as rand's UniformFloat::sample does
-    let value1_2 = f64::from_bits((rng.next_u64() >> 12) | (1023_u64 << 52));
-    let value0_1 = value1_2 - 1.0;
-    value0_1 * scale + low
-}
-
-/// Inverse of standard normal CDF (quantile function).
-fn inverse_normal_cdf(p: f64) -> f64 {
-    use statrs::distribution::{ContinuousCDF, Normal};
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    normal.inverse_cdf(p.max(1e-15).min(1.0 - 1e-15))
+    mu - sigma * standard_normal_truncated_below((mu - upper) / sigma, rng)
 }
 
 /// Compute standard deviation of an array.
@@ -1464,40 +1423,6 @@ mod tests {
         assert!(matches!(r, Err(EconError::Cancelled(_))));
     }
 
-    #[test]
-    fn uniform_draws_match_rand_and_tiny_intervals_finish() {
-        use rand::SeedableRng;
-        use rand_distr::{Distribution, Uniform};
-        for (low, high) in [
-            (0.0, 1.0),
-            (1e-10, 0.3),
-            (1e-10, 2e-10),
-            (0.5, 1.0 - 1e-10),
-            (0.9, 1.0 - 1e-10),
-            (-3.0, 2.0),
-        ] {
-            let mut a = rand::rngs::StdRng::seed_from_u64(9);
-            let mut b = rand::rngs::StdRng::seed_from_u64(9);
-            let dist: Uniform<f64> = Uniform::new(low, high);
-            for _ in 0..200 {
-                assert_eq!(
-                    dist.sample(&mut a).to_bits(),
-                    uniform_f64(low, high, &mut b).to_bits(),
-                    "[{low}, {high})"
-                );
-            }
-        }
-        // rand's own construction needs ~1e10 one-ulp steps for this interval
-        let (low, high) = (1.0 - 1.5e-10, 1.0 - 1e-10);
-        let max_rand = 1.0 - f64::EPSILON;
-        let s = uniform_scale(low, high);
-        assert!(s * max_rand + low < high);
-        assert!(f64::from_bits(s.to_bits() + 1) * max_rand + low >= high);
-        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-        let u = uniform_f64(low, high, &mut rng);
-        assert!((low..high).contains(&u));
-    }
-
     // R 4.3.3 (fixture): X <- cbind(1, x1); xb <- X %*% beta; A <- diag(n); Wp <- W; rp <- rho
     //   for (it in 1:10) { A <- A + rp*Wp; Wp <- W %*% Wp; rp <- rp*rho; if (abs(rp) < 1e-10) break }
     //   z <- A %*% xb; phi <- dnorm(z); direct <- sum(beta[2]*diag(A)*phi)/n; total <- sum(beta[2]*A*phi)/n
@@ -1555,6 +1480,7 @@ mod tests {
         };
         // Pinned at the values the dense-W sampler printed. Summation order may change the
         // floating-point noise, so 1e-8 relative.
+        // Re-pinned for the exact truncated-normal sampler (Robert 1995, SPAT-6).
         let close = |a: f64, b: f64, what: &str| {
             assert!(
                 (a - b).abs() <= 1e-8 * b.abs().max(1.0),
@@ -1570,24 +1496,24 @@ mod tests {
             (
                 &sar,
                 [
-                    0.26853377453216576,
-                    -1.5824391907711777,
-                    0.9247471464298688,
-                    0.5945409283880447,
-                    0.29034472301461767,
-                    -10.513275392427618,
-                    80.0,
+                    0.21561581519656442,
+                    -1.7620719814393688,
+                    1.0100875460961094,
+                    0.6419059802897408,
+                    0.31414857742601277,
+                    -10.554279814396638,
+                    83.33333333333333,
                 ],
             ),
             (
                 &sem,
                 [
-                    0.3468302105165128,
-                    -4.773850063209376,
-                    6.219834386413967,
-                    7.425521429647995,
-                    4.244364752859552,
-                    -100.86956513153757,
+                    0.375057484757089,
+                    -8.136770598618815,
+                    6.6014133446280585,
+                    7.0002900603296965,
+                    5.28338700058015,
+                    -80.85099173669074,
                     76.66666666666667,
                 ],
             ),
@@ -1601,21 +1527,13 @@ mod tests {
             close(r.pcp, pins[6], "pcp");
         }
         let imp = sar.impacts.as_ref().unwrap();
-        close(imp.direct[0], 0.16947020129887946, "direct");
-        close(imp.indirect[0], 0.06864930005662946, "indirect");
-        close(imp.total[0], 0.2381195013555089, "total");
-        close(imp.direct_se[0], 0.03478246966142034, "direct se");
-        close(imp.indirect_se[0], 0.07196166499069034, "indirect se");
-        close(imp.total_se[0], 0.07184313351227577, "total se");
+        close(imp.direct[0], 0.17744956884009333, "direct");
+        close(imp.indirect[0], 0.05606513641769403, "indirect");
+        close(imp.total[0], 0.23351470525778736, "total");
+        close(imp.direct_se[0], 0.03314944949117544, "direct se");
+        close(imp.indirect_se[0], 0.06918302638820466, "indirect se");
+        close(imp.total_se[0], 0.07512769921233899, "total se");
         assert!(sem.impacts.is_none());
-    }
-
-    #[test]
-    fn test_inverse_normal_cdf() {
-        // Test known values
-        assert!((inverse_normal_cdf(0.5) - 0.0).abs() < 1e-6);
-        assert!(inverse_normal_cdf(0.975) > 1.9 && inverse_normal_cdf(0.975) < 2.0);
-        assert!(inverse_normal_cdf(0.025) < -1.9 && inverse_normal_cdf(0.025) > -2.0);
     }
 
     fn probit_config(n_draws: usize, impacts: bool) -> SpatialProbitConfig {
@@ -1685,6 +1603,84 @@ mod tests {
             "{e}"
         );
         assert!(run_sar_probit(&d, "y", &[], &mut w, probit_config(10, false)).is_ok());
+    }
+
+    /// Exact CDF of N(mu, 1) truncated to [0, inf) (above) or (-inf, 0] (below), through upper tails.
+    fn truncnorm_cdf(x: f64, mu: f64, above: bool) -> f64 {
+        use statrs::distribution::{ContinuousCDF, Normal};
+        let nd = Normal::new(0.0, 1.0).unwrap();
+        if above {
+            1.0 - nd.sf(x - mu) / nd.sf(-mu)
+        } else {
+            nd.sf(mu - x) / nd.sf(mu)
+        }
+    }
+
+    fn ks_check(mu: f64, above: bool, mean: f64, sd: f64, seed: u64) {
+        use rand::SeedableRng;
+        const N: usize = 20_000;
+        // sqrt(-log(0.5e-6) / 2) / sqrt(N): P(D > D_CRIT) = 1e-6
+        const D_CRIT: f64 = 0.019045116000253333;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut draws: Vec<f64> = (0..N)
+            .map(|_| {
+                if above {
+                    sample_truncated_normal_above(mu, 1.0, 0.0, &mut rng)
+                } else {
+                    sample_truncated_normal_below(mu, 1.0, 0.0, &mut rng)
+                }
+            })
+            .collect();
+        assert!(
+            draws
+                .iter()
+                .all(|&v| if above { v >= 0.0 } else { v <= 0.0 }),
+            "mu={mu}: a draw violates the bound"
+        );
+        let m = draws.iter().sum::<f64>() / N as f64;
+        assert!(
+            (m - mean).abs() < 5.0 * sd / (N as f64).sqrt(),
+            "mu={mu}: mean {m} vs {mean}"
+        );
+        draws.sort_by(|a, b| a.total_cmp(b));
+        let d = draws.iter().enumerate().fold(0.0_f64, |acc, (i, &x)| {
+            let f = truncnorm_cdf(x, mu, above);
+            acc.max(f - i as f64 / N as f64)
+                .max((i + 1) as f64 / N as f64 - f)
+        });
+        assert!(d < D_CRIT, "mu={mu}: KS D = {d}");
+    }
+
+    #[test]
+    fn test_truncated_normal_sampler_ks() {
+        // Exact means/SDs from R (lam = dnorm(a) / pnorm(a, lower.tail = FALSE)). The inverse-CDF
+        // sampler drew 7 + qnorm(U(1e-10, 2e-10)) in (0.639, 0.746) at mu = 7 (y = 0), all above
+        // the bound, and returned the constant 0.01 at mu = -8 (y = 1).
+        for (c, &(mu, above, mean, sd)) in [
+            (1.0, true, 1.2875999709391783, 0.79352774732620757),
+            (-2.5, true, 0.32274479766390529, 0.29828476565376677),
+            (-8.0, true, 0.12136811223612298, 0.11968660511206433),
+            (7.0, false, -0.13754561322649739, 0.13513664083682866),
+            (-0.5, false, -1.0091604338370335, 0.69726281680322455),
+        ]
+        .iter()
+        .enumerate()
+        {
+            ks_check(mu, above, mean, sd, 20_261_022 + c as u64);
+        }
+    }
+
+    #[test]
+    fn test_truncated_normal_sampler_tail_6_sigma() {
+        // mu = -6.2 for y = 1: the inverse-CDF sampler worked on Uniform(Phi(6.2), 1 - 1e-10), an
+        // interval of width 1.8e-10.
+        ks_check(
+            -6.2,
+            true,
+            0.1538203828034117,
+            0.15050885838734468,
+            20_261_029,
+        );
     }
 
     fn short_chain() -> SpatialProbitConfig {
