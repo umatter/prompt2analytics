@@ -3,10 +3,19 @@
 ## Method Overview
 
 `run_doubly_robust()` (`crates/p2a-core/src/econometrics/treatment.rs`) combines a logistic
-propensity score (`glm::fit_propensity`) with OLS outcome models fitted per arm on
+propensity score (`glm::fit_propensity_lean`) with OLS outcome models fitted per arm on
 (1, covariates) by OLS's solve decision: the normal equations on a full-rank,
 well-conditioned design, pivoted QR otherwise (`lm.fit`; aliased columns count as 0 in
-predictions, as `predict.lm`, with a warning). Three methods:
+predictions, as `predict.lm`, with a warning).
+
+Propensity fits go through `glm::fit_propensity_lean`: `fit_propensity`'s checks, then the lean
+logit IRLS (`glm::fit_logit_lean`), the same Fisher scoring and deviance rule through the normal
+equations. A fit that leaves that path (separation, a rank-deficient or ill-conditioned weighted
+design, no convergence, a row with `y < 1` above `eta = 15` or `y > 0` below -15, a last step that no
+longer meets the rule once refined) is `fit_glm`'s own fit, warnings included. The lean numbers
+differ from `fit_glm`'s by rounding on regular designs; the gaps measured are at `fit_logit_lean`.
+
+Three methods:
 
 | Method | Effect | Standard error |
 |--------|--------|----------------|

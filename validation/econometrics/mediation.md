@@ -31,8 +31,11 @@ DGP's 0.7), `test_mediation_decomposition_identity`, `test_mediation_proportion_
 ## Tier 3 changes
 
 - **Propensity models** `p(D = 1 | X)` and `p(D = 1 | X, M)` are logistic GLMs fitted by the
-  shared `glm.fit` IRLS (`econometrics::glm::fit_propensity`, epsilon 1e-10), replacing a local
-  Newton-Raphson with a Gauss-Jordan inverse (CAUS-113 part). Point estimates on complete data
+  `glm.fit` IRLS, epsilon 1e-10, replacing a local Newton-Raphson with a Gauss-Jordan inverse
+  (CAUS-113 part). They go through `econometrics::glm::fit_propensity_lean`, the lean logit path,
+  and a fit that leaves it (separation, a rank-deficient or ill-conditioned weighted design, no
+  convergence, a row with `y < 1` above `eta = 15` or `y > 0` below -15, a last step that no longer
+  meets the rule once refined) is `fit_glm`'s own fit. Point estimates on complete data
   move by at most about 1e-9. Non-convergence, fitted probabilities numerically 0 or 1 and
   aliased covariates are reported in `MediationResult::warnings` (Display `Warning:` lines).
 - **Percentile intervals** follow R's `quantile(type = 7)` (they used a floor rule); p-values are
@@ -349,7 +352,8 @@ Medians over interleaved rounds, one core, one rayon thread, `release`, at e4159
 over fe13b889. The first rows are the timing harness (`wp26`, five rounds, load average falling from 5
 to 1), the last the Criterion group `MediationAnalysis` (three rounds, 99 replicates, trim 0.05, load
 average 1.3 to 2; `econometrics_benchmarks` built with `--no-default-features --features ci` at this
-commit, against the fe13b889 binary built from the same bench).
+commit, against the fe13b889 binary, built from the same bench with the default features, so the two
+binaries' features differ; the effect of that on this group was not checked).
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|

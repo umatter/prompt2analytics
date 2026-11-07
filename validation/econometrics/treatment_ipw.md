@@ -3,9 +3,16 @@
 ## Method Overview
 
 `run_ipw_treatment()` (`crates/p2a-core/src/econometrics/treatment.rs`) estimates the ATE or
-ATT by inverse probability weighting with a logistic propensity score (the shared GLM,
-`glm::fit_propensity`; scores clipped to [1e-10, 1 - 1e-10]) and optional symmetric trimming
+ATT by inverse probability weighting with a logistic propensity score
+(`glm::fit_propensity_lean`; scores clipped to [1e-10, 1 - 1e-10]) and optional symmetric trimming
 (`trim` in [0, 0.5); ATT trims treated units on the upper tail only).
+
+Propensity fits go through `glm::fit_propensity_lean`: `fit_propensity`'s checks, then the lean
+logit IRLS (`glm::fit_logit_lean`), the same Fisher scoring and deviance rule through the normal
+equations. A fit that leaves that path (separation, a rank-deficient or ill-conditioned weighted
+design, no convergence, a row with `y < 1` above `eta = 15` or `y > 0` below -15, a last step that no
+longer meets the rule once refined) is `fit_glm`'s own fit, warnings included. The lean numbers
+differ from `fit_glm`'s by rounding on regular designs; the gaps measured are at `fit_logit_lean`.
 
 | Estimator | Effect |
 |-----------|--------|
