@@ -443,6 +443,9 @@ fn preview_fill_na(
         Ok(outcome) => {
             let filled_df = outcome.dataset.df();
             for (col_name, n_filled) in &outcome.filled {
+                if *n_filled == 0 {
+                    continue;
+                }
                 total_affected += *n_filled;
                 let (Ok(before), Ok(after)) = (df.column(col_name), filled_df.column(col_name))
                 else {
@@ -645,16 +648,17 @@ fn preview_replace(
         Err(e) => warnings.push(e.to_string()),
         Ok(outcome) => {
             total_affected = outcome.n_replaced;
-            let columns = (df.column(column), outcome.dataset.df().column(column));
-            if let (Ok(before), Ok(after)) = columns {
-                match changed_mask(before, after) {
-                    Ok(mask) => {
-                        for (idx, _) in mask
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, changed)| **changed)
-                            .take(sample_size)
-                        {
+            if total_affected == 0 {
+                warnings.push(format!(
+                    "No values matching '{}' found in column '{}'",
+                    old_value, column
+                ));
+            } else if let (Ok(before), Ok(after)) =
+                (df.column(column), outcome.dataset.df().column(column))
+            {
+                match first_changes(before, after, sample_size) {
+                    Ok(rows) => {
+                        for idx in rows {
                             sample_changes.push(ChangeExample {
                                 row_index: idx,
                                 column: column.to_string(),
@@ -667,12 +671,6 @@ fn preview_replace(
                         "Column '{column}': values were not compared ({reason})"
                     )),
                 }
-            }
-            if total_affected == 0 {
-                warnings.push(format!(
-                    "No values matching '{}' found in column '{}'",
-                    old_value, column
-                ));
             }
         }
     }
@@ -877,6 +875,26 @@ struct ChangeScan {
     sample_changes: Vec<ChangeExample>,
     dtype_changes: Vec<DtypeChange>,
     warnings: Vec<String>,
+}
+
+/// The first `limit` rows where [`changed_mask`] would be true, without comparing the rest of the
+/// column when the two columns share a type.
+fn first_changes(before: &Column, after: &Column, limit: usize) -> Result<Vec<usize>, String> {
+    let categorical = |dt: &DataType| matches!(dt, DataType::Categorical(..) | DataType::Enum(..));
+    if before.dtype() == after.dtype() && !categorical(before.dtype()) {
+        return Ok((0..before.len())
+            .filter(|&idx| before.get(idx).ok() != after.get(idx).ok())
+            .take(limit)
+            .collect());
+    }
+    let mask = changed_mask(before, after)?;
+    Ok(mask
+        .iter()
+        .enumerate()
+        .filter(|(_, changed)| **changed)
+        .map(|(idx, _)| idx)
+        .take(limit)
+        .collect())
 }
 
 /// One flag per row: does the cell differ between `before` and `after` (of the same height)?
@@ -1409,5 +1427,67 @@ mod tests {
             .collect();
         assert_eq!(s, [(0, "-99", "null"), (2, "-99", "null")]);
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn test_preview_replace_samples_the_first_changes() {
+        let ds = Dataset::new(df!("v" => [1i64, -99, 2, -99, -99, 3]).unwrap());
+        let op = CleaningOperation::Replace {
+            column: "v".into(),
+            old_value: "-99".into(),
+            new_value: "0".into(),
+        };
+        let p = preview_cleaning(&ds, &op, 2);
+        assert_eq!(p.rows_affected, 3);
+        let rows: Vec<usize> = p.sample_changes.iter().map(|c| c.row_index).collect();
+        assert_eq!(rows, [1, 3]);
+
+        // a label a categorical column did not hold goes through the type-changing comparison
+        let labels = Column::new("c".into(), ["a", "b", "a"])
+            .cast(&DataType::from_categories(Categories::global()))
+            .unwrap();
+        let ds = Dataset::new(DataFrame::new(vec![labels]).unwrap());
+        let op = CleaningOperation::Replace {
+            column: "c".into(),
+            old_value: "a".into(),
+            new_value: "z".into(),
+        };
+        let p = preview_cleaning(&ds, &op, 1);
+        assert_eq!(p.rows_affected, 2);
+        assert_eq!(p.sample_changes.len(), 1);
+        assert_eq!(p.sample_changes[0].row_index, 0);
+        assert_eq!(p.sample_changes[0].after, "z");
+    }
+
+    #[test]
+    fn test_preview_with_nothing_to_change_says_so() {
+        let ds = Dataset::new(df!("v" => [1i64, 2, 3], "s" => ["a", "b", "c"]).unwrap());
+        let p = preview_cleaning(
+            &ds,
+            &CleaningOperation::FillNa {
+                columns: None,
+                strategy: "forward".into(),
+                value: None,
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 0);
+        assert!(p.sample_changes.is_empty());
+        assert_eq!(p.warnings, ["No null values found in specified columns"]);
+        let p = preview_cleaning(
+            &ds,
+            &CleaningOperation::Replace {
+                column: "s".into(),
+                old_value: "absent".into(),
+                new_value: "x".into(),
+            },
+            5,
+        );
+        assert_eq!(p.rows_affected, 0);
+        assert!(p.sample_changes.is_empty());
+        assert_eq!(
+            p.warnings,
+            ["No values matching 'absent' found in column 's'"]
+        );
     }
 }
