@@ -310,21 +310,25 @@ fn compute_distances_cholesky(
             message: "Covariance matrix is not positive definite".to_string(),
         })?;
 
-    // Get the lower triangular factor L and convert to ndarray
+    // Get the lower triangular factor L, row by row
     let l_faer = chol.L();
-    let l = Array2::from_shape_fn((p, p), |(i, j)| l_faer[(i, j)]);
+    let l: Vec<f64> = (0..p)
+        .flat_map(|j| (0..p).map(move |k| (j, k)))
+        .map(|(j, k)| l_faer[(j, k)])
+        .collect();
 
     // Solve L z = x[i] - center by forward substitution in one reused buffer; D² = ||z||²
     let mut z = vec![0.0; p];
     let mut distances = vec![0.0; n];
-    for (i, d2) in distances.iter_mut().enumerate() {
+    for (row, d2) in x.outer_iter().zip(distances.iter_mut()) {
         let mut sum_sq = 0.0;
         for j in 0..p {
-            let mut sum = x[[i, j]] - center[j];
-            for k in 0..j {
-                sum -= l[[j, k]] * z[k];
+            let mut sum = row[j] - center[j];
+            let l_row = &l[j * p..(j + 1) * p];
+            for (l_jk, z_k) in l_row.iter().zip(&z[..j]) {
+                sum -= l_jk * z_k;
             }
-            z[j] = sum / l[[j, j]];
+            z[j] = sum / l_row[j];
             sum_sq += z[j] * z[j];
         }
         *d2 = sum_sq;

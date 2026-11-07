@@ -159,19 +159,23 @@ fn newey_west_variance(residuals: &[f64], truncation_lag: usize) -> f64 {
     sigma_sq + 2.0 * gamma_sum
 }
 
-/// Linear interpolation of `(xs, ys)` at `x` with `xs` ascending, clamped to the ends as R's
-/// `approx(rule = 2)`.
-fn interpolate_clamped(xs: &[f64], ys: &[f64], x: f64) -> f64 {
+/// The interval of ascending `xs` holding `x` and the weight of its upper end, clamped to the ends
+/// as R's `approx(rule = 2)`.
+fn bracket(xs: &[f64], x: f64) -> (usize, usize, f64) {
     let last = xs.len() - 1;
     if x <= xs[0] {
-        return ys[0];
+        return (0, 0, 0.0);
     }
     if x >= xs[last] {
-        return ys[last];
+        return (last, last, 0.0);
     }
     let hi = xs.partition_point(|&v| v < x);
-    let w = (x - xs[hi - 1]) / (xs[hi] - xs[hi - 1]);
-    ys[hi - 1] + w * (ys[hi] - ys[hi - 1])
+    (hi - 1, hi, (x - xs[hi - 1]) / (xs[hi] - xs[hi - 1]))
+}
+
+/// Linear interpolation of `(xs, ys)` at a bracket.
+fn at_bracket(ys: &[f64], (lo, hi, w): (usize, usize, f64)) -> f64 {
+    ys[lo] + w * (ys[hi] - ys[lo])
 }
 
 /// The p-value of `PP.test`: R's table (Banerjee et al. 1993, Table 4.2) is interpolated in the
@@ -194,8 +198,9 @@ fn pp_p_value(stat: f64, m: usize) -> f64 {
     if stat.is_nan() {
         return f64::NAN;
     }
-    let critical = TABLE.map(|row| interpolate_clamped(&TABLE_T, &row, m as f64));
-    interpolate_clamped(&critical, &TABLE_P, stat)
+    let in_t = bracket(&TABLE_T, m as f64);
+    let critical = TABLE.map(|row| at_bracket(&row, in_t));
+    at_bracket(&TABLE_P, bracket(&critical, stat))
 }
 
 /// Perform the Phillips-Perron unit root test on a time series.
@@ -281,15 +286,18 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     // Compute X'X and X'y using explicit formulas for 3x3 case
     // X = [1, t, y_lag]
     let sum_1: f64 = n_reg as f64;
-    let sum_t: f64 = trend.iter().sum();
-    let sum_y: f64 = y_lag.iter().sum();
-    let sum_t2: f64 = trend.iter().map(|t| t * t).sum();
-    let sum_ty: f64 = trend.iter().zip(y_lag.iter()).map(|(t, y)| t * y).sum();
-    let sum_y2: f64 = y_lag.iter().map(|y| y * y).sum();
-
-    let sum_dy: f64 = delta_y.iter().sum();
-    let sum_t_dy: f64 = trend.iter().zip(delta_y.iter()).map(|(t, dy)| t * dy).sum();
-    let sum_y_dy: f64 = y_lag.iter().zip(delta_y.iter()).map(|(y, dy)| y * dy).sum();
+    let (mut sum_t, mut sum_y, mut sum_t2, mut sum_ty, mut sum_y2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut sum_dy, mut sum_t_dy, mut sum_y_dy) = (0.0, 0.0, 0.0);
+    for ((&t, &y), &dy) in trend.iter().zip(&y_lag).zip(&delta_y) {
+        sum_t += t;
+        sum_y += y;
+        sum_t2 += t * t;
+        sum_ty += t * y;
+        sum_y2 += y * y;
+        sum_dy += dy;
+        sum_t_dy += t * dy;
+        sum_y_dy += y * dy;
+    }
 
     // X'X matrix (symmetric 3x3)
     // [ n,       sum_t,    sum_y   ]
@@ -379,12 +387,12 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     let t_bar = sum_t / m;
     let y_bar = sum_y / m;
     let s_tt = m * (m * m - 1.0) / 12.0;
-    let s_yy: f64 = y_lag.iter().map(|y| (y - y_bar) * (y - y_bar)).sum();
-    let s_ty: f64 = trend
-        .iter()
-        .zip(y_lag.iter())
-        .map(|(t, y)| (t - t_bar) * (y - y_bar))
-        .sum();
+    let (mut s_yy, mut s_ty) = (0.0, 0.0);
+    for (t, y) in trend.iter().zip(&y_lag) {
+        let dev = y - y_bar;
+        s_yy += dev * dev;
+        s_ty += (t - t_bar) * dev;
+    }
     let dx = m * (s_tt * s_yy - s_ty * s_ty);
 
     // PP.test's statistic, with the sign of λ² - σ̂² kept

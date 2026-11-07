@@ -13,6 +13,7 @@ use crate::traits::estimator::{
     normal_p_value_two_sided, normal_quantile, t_test_p_value, validate_level, z_critical,
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 /// Method for computing correlation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -160,15 +161,21 @@ pub fn cor_test(
         });
     }
 
-    // Remove pairs with NaN
-    let pairs: Vec<(f64, f64)> = x
-        .iter()
-        .zip(y.iter())
-        .filter(|(a, b)| !a.is_nan() && !b.is_nan())
-        .map(|(a, b)| (*a, *b))
-        .collect();
+    // Remove pairs with NaN; the input is used as it is when it has none
+    let has_nan = x.iter().chain(y).any(|v| v.is_nan());
+    let (x_clean, y_clean): (Cow<[f64]>, Cow<[f64]>) = if has_nan {
+        let (xs, ys): (Vec<f64>, Vec<f64>) = x
+            .iter()
+            .zip(y)
+            .filter(|(a, b)| !a.is_nan() && !b.is_nan())
+            .map(|(a, b)| (*a, *b))
+            .unzip();
+        (Cow::Owned(xs), Cow::Owned(ys))
+    } else {
+        (Cow::Borrowed(x), Cow::Borrowed(y))
+    };
 
-    let n = pairs.len();
+    let n = x_clean.len();
     if n < 3 {
         return Err(EconError::InsufficientData {
             required: 3,
@@ -178,9 +185,6 @@ pub fn cor_test(
     }
 
     validate_level(conf_level, "conf_level")?;
-
-    let x_clean: Vec<f64> = pairs.iter().map(|(a, _)| *a).collect();
-    let y_clean: Vec<f64> = pairs.iter().map(|(_, b)| *b).collect();
 
     refuse_inf(&x_clean, "x")?;
     refuse_inf(&y_clean, "y")?;
@@ -548,7 +552,8 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
 fn rank_data(data: &[f64]) -> Vec<f64> {
     let n = data.len();
     let mut indexed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
+    // Tied values share a rank, so the order among them does not matter
+    indexed.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
 
     let mut ranks = vec![0.0; n];
     let mut i = 0;
