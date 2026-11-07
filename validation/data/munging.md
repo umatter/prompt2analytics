@@ -12,6 +12,24 @@ about 1e-15.
 `cut` with custom edges and options and `fill_na` with mean and median are documented in
 [data_layer.md](data_layer.md).
 
+## Melt (pivot_longer)
+
+As `tidyr::pivot_longer`: row-major long format, missing values stay missing, and the value column has
+the polars supertype of the value columns (integer + double gives double; integer + integer stays
+integer; u32, f32 and bool keep their type on their own).
+
+Text melted with non-text columns is refused, as tidyr refuses it ("Can't combine `a` <integer> and `s`
+<character>."); a date or time column melted with a column of another type is refused too (vctrs does,
+and the supertype would give day counts). Date and time columns among themselves take the polars
+supertype.
+
+- R: `pivot_longer(d, c(a, b, c), names_to = "var", values_to = "val")`. Case
+  `data_munging_pivot_longer`, on `munging_wide.csv`.
+- Decisive values: `long_val = [1, 0.5, 5, NA, 1.75, 6, 3, NA, 7, 4, 2.25, 8]`,
+  `long_int_val = [1, 5, NA, 6, 3, 7, 4, 8]`.
+- Tests: `test_validate_melt_pivot_longer`, `test_melt_keeps_dtypes_and_nulls`,
+  `test_melt_refuses_text_with_numbers`.
+
 ## Fill strategies
 
 `FillStrategy::parse` reads the keywords, case- and separator-insensitive: `mean`, `median`, `mode`

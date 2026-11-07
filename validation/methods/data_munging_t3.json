@@ -1,6 +1,12 @@
 {
   "schema": 1,
   "methods": [
+    {"id": "data_melt", "name": "Melt as tidyr::pivot_longer (types and missing values)",
+     "category": "data", "reference": "tidyr::pivot_longer(cols, names_to, values_to)",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_pivot_longer"],
+     "tests": ["p2a-core::data::munging::reshape::tests::test_validate_melt_pivot_longer"],
+     "quantities": ["id, variable and value columns in row-major order", "integer + double -> double", "integer + integer -> integer", "NA kept as missing"],
+     "tolerance": "exact", "deviations": [], "supersedes_legacy": []},
     {"id": "data_fill_mode", "name": "Mode fill as names(which.max(table(x))) and tidyr::replace_na",
      "category": "data", "reference": "names(which.max(table(x))); tidyr::replace_na",
      "doc": "validation/data/munging.md", "cases": ["data_munging_fill_mode"],
