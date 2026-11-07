@@ -254,13 +254,18 @@ impl AutocompleteState {
     }
 
     /// The bytes of `current` that accepting a suggestion replaces: the trigger, the dataset prefix
-    /// in column mode, and the filter. The trigger is looked up in `current` itself, so edits made
-    /// since the dropdown opened cannot shift the range. Names may hold spaces, so the filter text
-    /// is matched as recorded; if the text no longer has it, the range runs to the next whitespace.
+    /// in column mode, and the filter. The recorded offset is used only if `current` has the trigger
+    /// there; otherwise the trigger is looked up again, so a stale offset cannot shift the range.
+    /// Names may hold spaces, so the filter text is matched as recorded; if the text no longer has
+    /// it, the range runs to the next whitespace.
     /// `None` in history mode or when the text no longer contains the trigger.
     pub fn replacement_range(&self, current: &str) -> Option<Range<usize>> {
         let trigger = self.trigger?;
-        let start = find_last_trigger(current, trigger)?;
+        let start = current
+            .get(self.trigger_position..)
+            .filter(|rest| rest.starts_with(trigger))
+            .map(|_| self.trigger_position)
+            .or_else(|| find_last_trigger(current, trigger))?;
         let after_trigger = current.get(start..)?.strip_prefix(trigger)?;
         let body = match &self.column_dataset {
             Some(dataset) => after_trigger
@@ -326,6 +331,24 @@ mod tests {
         // Up from 0 wraps to end
         state.navigate_up();
         assert_eq!(state.selected_index, 2);
+    }
+
+    /// An offset that no longer matches the text (past its end, inside a character, or not on a
+    /// trigger) is not used: the trigger is found in the text, and a text without one is unchanged.
+    #[test]
+    fn test_apply_with_a_stale_offset() {
+        let suggestion = Suggestion::dataset("sales", 10, 3);
+        for (offset, current, expected) in [
+            (9, "@s", "@sales "),
+            (1, "中 @s", "中 @sales "),
+            (0, "x @s", "x @sales "),
+            (0, "no trigger here", "no trigger here"),
+        ] {
+            let mut state = AutocompleteState::new();
+            state.open('@', offset);
+            state.set_filter("s");
+            assert_eq!(state.apply(current, &suggestion), expected, "{current}");
+        }
     }
 
     #[test]
