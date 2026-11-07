@@ -1634,8 +1634,8 @@ mod tests {
 
     /// Case ts_filter_ar_cpt: stats::filter(x, f, method = "convolution", sides = s) on the
     /// 60-value random walk x.
-    fn check_filters(lengths: &[usize], sides: FilterSides, suffix: &str) {
-        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+    fn check_filters(case_id: &str, lengths: &[usize], sides: FilterSides, suffix: &str) {
+        let (case, ds) = crate::test_support::load_case(case_id);
         let x = col(&ds, "x");
         let filters: [(&str, Vec<f64>); 4] = [
             ("filter_p2_05", vec![0.5, 0.5]),
@@ -1656,22 +1656,22 @@ mod tests {
 
     #[test]
     fn test_validate_filter_even_sides2() {
-        check_filters(&[2, 4], FilterSides::Two, "");
+        check_filters("ts_filter_ar_cpt", &[2, 4], FilterSides::Two, "");
     }
 
     #[test]
     fn test_validate_filter_odd_sides2() {
-        check_filters(&[3, 5], FilterSides::Two, "");
+        check_filters("ts_filter_ar_cpt", &[3, 5], FilterSides::Two, "");
     }
 
     #[test]
     fn test_validate_filter_even_sides1() {
-        check_filters(&[2, 4], FilterSides::One, "_sides1");
+        check_filters("ts_filter_ar_cpt", &[2, 4], FilterSides::One, "_sides1");
     }
 
     #[test]
     fn test_validate_filter_odd_sides1() {
-        check_filters(&[3, 5], FilterSides::One, "_sides1");
+        check_filters("ts_filter_ar_cpt", &[3, 5], FilterSides::One, "_sides1");
     }
 
     /// stats::filter(x, c(0.5, -0.2), method = "recursive"), init = 0 (guard).

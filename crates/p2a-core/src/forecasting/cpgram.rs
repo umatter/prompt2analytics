@@ -328,8 +328,8 @@ mod tests {
             .0
     }
 
-    fn check_cpgram(series: &str) {
-        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+    fn check_cpgram(case_id: &str, series: &str) {
+        let (case, ds) = crate::test_support::load_case(case_id);
         let x = col(&ds, series);
         let n = x.len();
         let r = cpgram(&x, Some(0.1)).unwrap();
@@ -359,14 +359,14 @@ mod tests {
     /// 0.10889787598160139, statistic 0.7847860641362071, p 0.5690823493746275, white.
     #[test]
     fn test_validate_cpgram_white_noise() {
-        check_cpgram("wn");
+        check_cpgram("ts_filter_ar_cpt", "wn");
     }
 
     /// AR(1) 0.9 around 10, n = 120: 60 frequencies, crit 0.1723313593732768, max dev
     /// 0.7753420099521079, statistic 6.1098250100511695, p 7.527266358277316e-33, not white.
     #[test]
     fn test_validate_cpgram_ar1() {
-        check_cpgram("ar1");
+        check_cpgram("ts_filter_ar_cpt", "ar1");
     }
 
     /// Asymptotic Kolmogorov survival function. R 4.3.3: 1 - .Call(stats:::C_pKS2, x, 1e-15) for
