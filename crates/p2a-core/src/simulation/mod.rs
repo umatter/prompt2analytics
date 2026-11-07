@@ -21,8 +21,8 @@
 //! # Parameter bounds
 //!
 //! [`Distribution::validate`] (called by [`generate_random_data`]) requires every
-//! floating-point distribution parameter to be finite; a constant column's value
-//! is not checked. Beyond that: a uniform range must have `min < max` and a
+//! floating-point parameter, a constant column's value included, to be finite.
+//! Beyond that: a uniform range must have `min < max` and a
 //! representable width `max - min`; normal and exponential scale parameters must
 //! be positive; probabilities lie in `[0, 1]`; a Poisson mean `lambda` lies in
 //! `(0, 1e13]` (larger means are not sampled accurately); a binomial `n` lies in

@@ -147,8 +147,8 @@ fn require_finite(what: &str, value: f64) -> Result<(), GenerationError> {
 impl Distribution {
     /// Validate distribution parameters.
     ///
-    /// Every distribution parameter (other than a constant column's value)
-    /// must be finite. In addition: a uniform range must be non-empty and
+    /// Every distribution parameter, a constant column's value included, must
+    /// be finite. In addition: a uniform range must be non-empty and
     /// its width representable, normal and exponential scale parameters
     /// positive, a Poisson mean in `(0, 1e13]`, a binomial `n` in `1..=2^53`,
     /// probabilities in `[0, 1]`, and categorical weights non-negative with
@@ -290,7 +290,7 @@ impl Distribution {
                 }
             }
             Distribution::Sequence { .. } => {}
-            Distribution::Constant { .. } => {}
+            Distribution::Constant { value } => require_finite("Constant: value", *value)?,
             Distribution::ConstantString { .. } => {}
         }
         Ok(())
@@ -1190,6 +1190,76 @@ mod tests {
         assert!(((mean - 1e13) / 1e13).abs() < 1e-6, "mean {mean}");
         // sd of the variance ratio at n = 1000 is about 0.045; 0.2 is more than 4 sd
         assert!((var / 1e13 - 1.0).abs() < 0.2, "var/lambda {}", var / 1e13);
+    }
+
+    #[test]
+    fn test_generator_rejects_overflowing_parameters() {
+        use serde_json::json;
+        // The inputs deserialized as the MCP tool and `p2a data generate` do.
+        let spec = |v: serde_json::Value| -> Distribution { serde_json::from_value(v).unwrap() };
+        let cases = [
+            (
+                spec(json!({"type": "uniform", "min": -1e308, "max": 1e308})),
+                "Uniform: the range",
+            ),
+            (
+                spec(json!({"type": "binomial", "n": u64::MAX, "p": 0.5})),
+                "Binomial: n",
+            ),
+            (
+                spec(json!({"type": "binomial", "n": u64::MAX, "p": 1.0})),
+                "Binomial: n",
+            ),
+            (
+                spec(json!({"type": "sequence", "start": i64::MAX - 1})),
+                "Sequence: start",
+            ),
+            (
+                Distribution::Constant {
+                    value: f64::INFINITY,
+                },
+                "Constant: value",
+            ),
+            (
+                Distribution::Constant { value: f64::NAN },
+                "Constant: value",
+            ),
+        ];
+        for (d, needle) in cases {
+            let msg = match generate_random_data(3, vec![ColumnSpec::new("x", d.clone())], Some(1))
+            {
+                Ok(_) => panic!("{d:?} was accepted"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                msg.starts_with("Invalid parameters: ") && msg.contains(needle),
+                "{msg}"
+            );
+        }
+        // Boundaries that stay valid: a nearly widest uniform range, and n = 2^53 with p = 1.
+        let wide = Distribution::Uniform {
+            min: -8.9e307,
+            max: 8.9e307,
+        };
+        assert!(generate_random_data(3, vec![ColumnSpec::new("x", wide)], Some(1)).is_ok());
+        let ds = generate_random_data(
+            3,
+            vec![ColumnSpec::new(
+                "x",
+                Distribution::Binomial { n: 1 << 53, p: 1.0 },
+            )],
+            Some(1),
+        )
+        .unwrap();
+        let v: Vec<i64> = ds
+            .df()
+            .column("x")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(v, vec![1i64 << 53; 3]);
     }
 
     #[test]
