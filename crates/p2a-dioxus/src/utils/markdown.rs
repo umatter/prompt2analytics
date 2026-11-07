@@ -508,11 +508,14 @@ fn render_table_content(events: &[Event]) -> Vec<Element> {
     while idx < events.len() {
         match &events[idx] {
             Event::Start(Tag::TableHead) => {
+                // pulldown-cmark puts the header cells directly in TableHead, without a TableRow.
                 let end_idx = find_table_section_end(&events[idx..], TagEnd::TableHead);
-                let rows = render_table_rows(&events[idx + 1..idx + end_idx], true);
+                let cells = render_table_cells(&events[idx + 1..idx + end_idx], true);
                 elements.push(rsx! {
                     thead { class: "bg-gray-100 dark:bg-gray-700",
-                        {rows.into_iter()}
+                        tr { class: "border-b border-gray-300 dark:border-gray-600",
+                            {cells.into_iter()}
+                        }
                     }
                 });
                 idx += end_idx + 1;
@@ -535,32 +538,6 @@ fn render_table_content(events: &[Event]) -> Vec<Element> {
     }
 
     elements
-}
-
-/// Render table rows
-fn render_table_rows(events: &[Event], is_header: bool) -> Vec<Element> {
-    let mut rows: Vec<Element> = Vec::new();
-    let mut idx = 0;
-
-    while idx < events.len() {
-        match &events[idx] {
-            Event::Start(Tag::TableRow) => {
-                let end_idx = find_table_section_end(&events[idx..], TagEnd::TableRow);
-                let cells = render_table_cells(&events[idx + 1..idx + end_idx], is_header);
-                rows.push(rsx! {
-                    tr { class: "border-b border-gray-300 dark:border-gray-600",
-                        {cells.into_iter()}
-                    }
-                });
-                idx += end_idx + 1;
-            }
-            _ => {
-                idx += 1;
-            }
-        }
-    }
-
-    rows
 }
 
 /// Render table cells
@@ -894,5 +871,23 @@ mod render_tests {
             "{raw}"
         );
         assert!(strip_classes(&raw).contains("<p>ok bold</p>"), "{raw}");
+    }
+
+    /// pulldown-cmark 0.12 puts the header cells directly in TableHead (no TableRow).
+    #[test]
+    fn test_render_markdown_table_has_header_row() {
+        let out = structure(
+            "| Variable | Estimate | SE |\n|---|---:|---:|\n| sqft | 0.4812 | 0.0123 |\n| Größe | -1.07 | 0.31 |\n",
+        );
+        assert!(
+            out.contains("<thead><tr><th>Variable</th><th>Estimate</th><th>SE</th></tr></thead>"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "<tr><td>sqft</td><td>0.4812</td><td>0.0123</td></tr><tr><td>Größe</td><td>-1.07</td><td>0.31</td></tr></table>"
+            ),
+            "{out}"
+        );
     }
 }
