@@ -1273,43 +1273,66 @@ mod tests {
     }
 
     #[test]
-    fn test_causal_impact_no_effect() {
-        let n_pre = 70;
-        let n_post = 30;
-        let treatment_effect = 0.0;
-
-        let (y, time) = generate_causal_impact_data(n_pre, n_post, treatment_effect, 123);
-
-        let df = df! {
-            "y" => &y,
-            "time" => &time,
+    fn test_causal_impact_placebo_calibration() {
+        // No R reference: the CausalImpact package is not installed, and p2a's interval is
+        // the plug-in Gaussian forecast of a StructTS model, not bsts's posterior. Properties
+        // on 200 seeded placebo series (local level, sigma_eta = 0.5, sigma_eps = 1,
+        // n_pre = 80, n_post = 20, no intervention). The same design with stats::StructTS +
+        // KalmanForecast in R (six seeds) gave one-step 95% coverage 0.905-0.965 and
+        // all-horizon pointwise coverage 0.918-0.939 (MC SE about 0.015 and 0.009). The
+        // cumulative interval sums marginal variances: its coverage was 0.35-0.46 there; it
+        // is a registry deviation (TS-5), not asserted here.
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use rand_distr::{Distribution, StandardNormal};
+        let (reps, n_pre, n_post) = (200usize, 80usize, 20usize);
+        let mut rng = ChaCha8Rng::seed_from_u64(20261022);
+        let (mut first, mut all, mut effects) = (0usize, 0.0f64, Vec::with_capacity(reps));
+        for _ in 0..reps {
+            let mut level = 100.0;
+            let y: Vec<f64> = (0..n_pre + n_post)
+                .map(|_| {
+                    let eta: f64 = StandardNormal.sample(&mut rng);
+                    let eps: f64 = StandardNormal.sample(&mut rng);
+                    level += 0.5 * eta;
+                    level + eps
+                })
+                .collect();
+            let time: Vec<i64> = (0..(n_pre + n_post) as i64).collect();
+            let r = run_causal_impact(
+                &ds(&y, &time),
+                "y",
+                "time",
+                (0, n_pre as i64 - 1),
+                (n_pre as i64, (n_pre + n_post) as i64 - 1),
+                None,
+            )
+            .unwrap();
+            assert!(r.convergence.converged);
+            let s = &r.series;
+            let covers =
+                |i: usize| s.point_effect_lower[i] <= 0.0 && 0.0 <= s.point_effect_upper[i];
+            first += covers(n_pre) as usize;
+            all += (n_pre..n_pre + n_post).filter(|&i| covers(i)).count() as f64 / n_post as f64;
+            effects.push(r.summary.average_effect);
         }
-        .unwrap();
-
-        let dataset = Dataset::new(df);
-
-        let result = run_causal_impact(
-            &dataset,
-            "y",
-            "time",
-            (0, (n_pre - 1) as i64),
-            (n_pre as i64, (n_pre + n_post - 1) as i64),
-            None,
-        )
-        .unwrap();
-
-        // Effect should be close to zero
-        let avg_effect_magnitude = result.summary.average_effect.abs();
+        let first_rate = first as f64 / reps as f64;
+        let all_rate = all / reps as f64;
         assert!(
-            avg_effect_magnitude < 5.0,
-            "Average effect {} should be close to zero for no treatment",
-            avg_effect_magnitude
+            (0.88..=0.995).contains(&first_rate),
+            "one-step coverage {first_rate}"
         );
-
-        // Should not be significant (with some probability of false positive)
-        // This is a soft check since we're using random data
-        // p-value should generally be larger for no effect
-        println!("No effect p-value: {}", result.summary.p_value);
+        assert!(
+            (0.88..=0.975).contains(&all_rate),
+            "pointwise coverage {all_rate}"
+        );
+        let mean = effects.iter().sum::<f64>() / reps as f64;
+        let sd =
+            (effects.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / (reps as f64 - 1.0)).sqrt();
+        assert!(
+            mean.abs() <= 4.0 * sd / (reps as f64).sqrt(),
+            "average placebo effect {mean} (sd {sd})"
+        );
     }
 
     #[test]

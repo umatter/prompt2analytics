@@ -60,6 +60,16 @@ it (`causal_impact_refuses_a_seasonal_period_below_two`,
 | Point effect, first step | 131.05353 | `Tol::iterative(1e-6)` |
 | Cumulative effect | -143.46468 | `Tol::iterative(1e-6)` |
 
+## Placebo calibration
+
+`test_causal_impact_placebo_calibration` draws 200 seeded local-level series with no intervention
+(`sigma_eta = 0.5`, `sigma_eps = 1`, `n_pre = 80`, `n_post = 20`) and asserts that the fit converges, the one-step
+95% interval covers 0 at a rate in `[0.88, 0.995]`, the pointwise intervals over all horizons at a rate in
+`[0.88, 0.975]`, and the average effect is unbiased within 4 Monte Carlo standard errors. The windows sit 4-5 Monte
+Carlo standard errors from the same design run with `stats::StructTS` and `KalmanForecast` in R (six seeds): one-step
+0.905-0.965, pointwise 0.918-0.939. p2a's rates at the test's seed are 0.94 and 0.9365. There is no R value to
+compare directly, so this is a property test and stays out of the registry.
+
 ## Known deviation
 
 The registry's deviation for finding TS-5: the variance of the cumulative effect is the sum of the marginal forecast
@@ -75,7 +85,7 @@ false-positive rate was 0.62-0.71. Do not read the cumulative interval or the p-
   `test_causal_impact_insufficient_pre_period`.
 - Reporting: `test_causal_impact_reports_convergence`, `test_causal_impact_aliased_control_warns`,
   `test_causal_impact_tail_probability_is_not_zero`.
-- Properties on simulated data, no R values: `test_causal_impact_positive_effect`,
+- Properties on simulated data, no R values: `test_causal_impact_placebo_calibration`, `test_causal_impact_positive_effect`,
   `test_causal_impact_with_controls`, `test_causal_impact_with_trend`, `test_causal_impact_model_info`,
   `test_causal_impact_inference`, `test_causal_impact_cumulative_effect_recovers_dgp`,
   `test_causal_impact_point_effects_recover_dgp`, `test_causal_impact_intervals_are_ordered`,
