@@ -25,7 +25,7 @@ use std::f64::consts::PI;
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::data::columns::{NaPolicy, numeric_column};
+use crate::data::columns::{NaPolicy, numeric_column, refuse_non_finite};
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity};
 use crate::traits::estimator::{chi_squared_p_value, chi_squared_quantile, validate_level};
@@ -327,7 +327,7 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
         });
     }
 
-    crate::data::columns::refuse_non_finite(x, "x")?;
+    refuse_non_finite(x, "x")?;
 
     if !config.pad_ratio.is_finite() {
         return Err(EconError::InvalidSpecification {
@@ -736,7 +736,7 @@ pub fn spectrum_ar(
 
     // Without this a NaN slips past the zero-variance check (`NaN <= 0.0` is
     // false) and a given order returns an all-NaN spectrum.
-    crate::data::columns::refuse_non_finite(x, "x")?;
+    refuse_non_finite(x, "x")?;
 
     // Fit AR model using Yule-Walker equations
     let max_order = order.unwrap_or_else(|| {

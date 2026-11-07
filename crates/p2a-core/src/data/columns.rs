@@ -823,12 +823,13 @@ pub(crate) fn sample_column(
     name: &str,
     test: &str,
 ) -> EconResult<(Vec<f64>, MissingSummary)> {
-    let cols = ColumnRequest::new(df)
+    let mut cols = ColumnRequest::new(df)
         .numeric(name)
         .na(NaPolicy::Omit)
         .min_rows(1, &format!("{test}: column '{name}'"))
         .extract()?;
-    Ok((cols.numeric(name).to_vec(), cols.missing().clone()))
+    let values = cols.numerics.remove(name).unwrap_or_default();
+    Ok((values, cols.missing))
 }
 
 /// Refuse a series with NaN (`NullValues`) or infinite values (`NonFiniteValues`), as R's
