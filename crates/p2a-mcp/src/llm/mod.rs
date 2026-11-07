@@ -2,6 +2,8 @@
 //!
 //! Provides multi-provider LLM support (Ollama, Anthropic, OpenAI) with
 //! server-side tool execution for HTTP/WebSocket clients.
+//!
+//! `tool_loop`: the one tool-calling loop the providers share.
 
 mod anthropic;
 mod context;
@@ -11,6 +13,7 @@ mod openai;
 mod provider;
 mod retry;
 mod tokens;
+pub mod tool_loop;
 mod tools;
 
 use std::collections::HashMap;
@@ -166,6 +169,11 @@ pub use retry::{RetryConfig, send_with_retry};
 pub use tokens::{
     ContextBudget, estimate_message_tokens, estimate_tokens, estimate_tool_definition_tokens,
     get_model_context_size, known_model_context_size,
+};
+pub use tool_loop::{
+    AssistantTurn, MAX_CALLS_PER_TOOL, MAX_ITERATIONS_NOTE, REPEATED_CALLS_NOTE, StreamSink,
+    ToolLoopConfig, ToolLoopProvider, new_request_id, repeated_tool_note, run_tool_loop,
+    tool_call_id,
 };
 pub use tools::{INTERNAL_TOOLS, TIER1_TOOLS, check_llm_tool_call, get_system_prompt_with_context};
 

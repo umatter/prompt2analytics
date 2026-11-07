@@ -369,4 +369,194 @@ mod providers {
         );
         assert_eq!(sent[3]["content"], result);
     }
+
+    fn tool_call_ids(chunks: &[StreamChunk]) -> Vec<String> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolCall { tool_call } => Some(tool_call.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    fn tool_result_ids(chunks: &[StreamChunk]) -> Vec<String> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolResult { tool_result } => Some(tool_result.tool_call_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    /// The call ids and result ids a later request replays (OpenAI tool_calls / tool messages,
+    /// Anthropic tool_use / tool_result blocks; Ollama sends no ids).
+    fn replayed_ids(kind: Kind, body: &Value) -> (Vec<String>, Vec<String>) {
+        let msgs = body["messages"].as_array().cloned().unwrap_or_default();
+        let s = |v: &Value| v.as_str().unwrap().to_string();
+        match kind {
+            Kind::OpenAI => (
+                msgs.iter()
+                    .filter(|m| m["role"] == "assistant")
+                    .flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default())
+                    .map(|c| s(&c["id"]))
+                    .collect(),
+                msgs.iter()
+                    .filter(|m| m["role"] == "tool")
+                    .map(|m| s(&m["tool_call_id"]))
+                    .collect(),
+            ),
+            Kind::Anthropic => {
+                let blocks = |role: &str, ty: &str, key: &str| -> Vec<String> {
+                    msgs.iter()
+                        .filter(|m| m["role"] == role)
+                        .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+                        .filter(|b| b["type"] == ty)
+                        .map(|b| s(&b[key]))
+                        .collect()
+                };
+                (
+                    blocks("assistant", "tool_use", "id"),
+                    blocks("user", "tool_result", "tool_use_id"),
+                )
+            }
+            Kind::Ollama => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// LLM-20: every provider path numbers its tool calls call_<request>_<n>, unique within the
+    /// request, whatever the provider sent (the OpenAI/Anthropic stubs repeat "dup"; Ollama sends
+    /// none and was numbered call_0 on every iteration).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_every_provider_path_assigns_request_unique_tool_ids() {
+        for kind in KINDS {
+            for streaming in [false, true] {
+                let tag = format!("{kind:?} streaming={streaming}");
+                let r = run(
+                    kind,
+                    streaming,
+                    vec![call1("t1", json!({})), call1("t2", json!({})), text("done")],
+                    true,
+                    None,
+                )
+                .await;
+                assert_eq!(r.message.content, "done", "{tag}");
+                assert_eq!(r.executed, ["t1", "t2"], "{tag}");
+                let (calls, results) = if streaming {
+                    (tool_call_ids(&r.chunks), tool_result_ids(&r.chunks))
+                } else {
+                    replayed_ids(kind, &r.bodies[2])
+                };
+                if !streaming && matches!(kind, Kind::Ollama) {
+                    // Ollama's wire carries no ids; test_tool_ids_differ_between_requests covers this path.
+                    assert!(calls.is_empty() && results.is_empty(), "{tag}");
+                    continue;
+                }
+                let parsed: Vec<_> = calls.iter().map(|id| parse_id(id)).collect();
+                assert!(
+                    parsed.iter().all(Option::is_some),
+                    "{tag}: ids {calls:?} are not call_<request>_<n>"
+                );
+                let parsed: Vec<_> = parsed.into_iter().flatten().collect();
+                assert_eq!(
+                    parsed.iter().map(|p| p.1).collect::<Vec<_>>(),
+                    [1, 2],
+                    "{tag}: {calls:?}"
+                );
+                assert_eq!(
+                    parsed[0].0, parsed[1].0,
+                    "{tag}: one request part per request"
+                );
+                assert_eq!(results, calls, "{tag}: each result carries its call's id");
+            }
+        }
+    }
+
+    /// LLM-20: a request gets its own id space, so ids never repeat within a conversation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_tool_ids_differ_between_requests() {
+        let mut parts = Vec::new();
+        for _ in 0..2 {
+            let r = run(
+                Kind::Ollama,
+                false,
+                vec![call1("t1", json!({}))],
+                false,
+                None,
+            )
+            .await;
+            assert_eq!(r.executed, ["t1"]);
+            let id = r
+                .message
+                .tool_calls
+                .as_ref()
+                .expect("interpret=false returns the calls")[0]
+                .id
+                .clone();
+            assert_eq!(
+                r.message.tool_results.as_ref().expect("and their results")[0].tool_call_id,
+                id
+            );
+            let (req, n) =
+                parse_id(&id).unwrap_or_else(|| panic!("{id} is not call_<request>_<n>"));
+            assert_eq!(n, 1);
+            parts.push(req);
+        }
+        assert_ne!(parts[0], parts[1]);
+    }
+
+    /// LLM-20: a tool call is announced on the stream only when it runs. The second, exact repeat is
+    /// refused before it runs (REPEATED_CALLS_NOTE); the Ollama transport used to announce it anyway.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_tool_calls_are_announced_only_when_executed() {
+        for kind in KINDS {
+            let r = run(
+                kind,
+                true,
+                vec![call1("t", json!({"a": 1})), call1("t", json!({"a": 1}))],
+                true,
+                None,
+            )
+            .await;
+            let announced = r
+                .chunks
+                .iter()
+                .filter(|c| matches!(c, StreamChunk::ToolCall { .. }))
+                .count();
+            assert_eq!(r.bodies.len(), 2, "{kind:?}");
+            assert_eq!(r.executed, ["t"], "{kind:?}");
+            assert_eq!(
+                announced,
+                r.executed.len(),
+                "{kind:?}: {announced} ToolCall chunks for {} executed calls",
+                r.executed.len()
+            );
+            assert_eq!(
+                r.message.content,
+                "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.",
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// Guard: all six paths stop at the iteration cap (3 model calls, 3 tool runs, the cap note).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_every_provider_path_stops_at_the_iteration_cap() {
+        for kind in KINDS {
+            for streaming in [false, true] {
+                let script = (1..=6)
+                    .map(|n| call1(&format!("t{n}"), json!({})))
+                    .collect();
+                let r = run(kind, streaming, script, true, Some(3)).await;
+                assert_eq!(
+                    (r.bodies.len(), r.executed.len()),
+                    (3, 3),
+                    "{kind:?} streaming={streaming}"
+                );
+                assert_eq!(
+                    r.message.content,
+                    "Analysis reached the maximum number of tool calls. Here are the results gathered so far."
+                );
+            }
+        }
+    }
 }

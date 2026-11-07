@@ -3147,7 +3147,12 @@ mod chat_tests {
                 .map(|c| &c["function"]["arguments"])
                 .collect();
             assert_eq!(arguments, [&json!(CUT_ARGUMENTS), &json!("{}")], "{path}");
-            let tool = sent.iter().find(|m| m["tool_call_id"] == "c1").unwrap();
+            // The loop assigns the ids; the first call is the cut-off one.
+            let first_id = &assistant["tool_calls"][0]["id"];
+            let tool = sent
+                .iter()
+                .find(|m| &m["tool_call_id"] == first_id)
+                .unwrap();
             refused(&tool["content"]);
         }
 
@@ -3171,7 +3176,15 @@ mod chat_tests {
             .collect();
         assert_eq!(inputs, [json!({}), json!({})], "{body}");
         let results = blocks("user");
-        let t1 = results.iter().find(|b| b["tool_use_id"] == "t1").unwrap();
+        let first_id = blocks("assistant")
+            .iter()
+            .find(|b| b["type"] == "tool_use")
+            .map(|b| b["id"].clone())
+            .unwrap();
+        let t1 = results
+            .iter()
+            .find(|b| b["tool_use_id"] == first_id)
+            .unwrap();
         assert_eq!(t1["is_error"], true, "{t1}");
         refused(&t1["content"]);
     }
