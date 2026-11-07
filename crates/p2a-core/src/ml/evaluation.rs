@@ -169,9 +169,19 @@ pub fn roc_auc(
         return Err("Need at least one sample".to_string());
     }
 
+    if predictions.iter().any(|p| p.is_nan()) {
+        return Err(
+            "predictions contain NaN; ROC/AUC needs a score for every observation".to_string(),
+        );
+    }
+
+    if actual.iter().any(|v| !v.is_finite()) {
+        return Err("actual labels must be finite (two classes)".to_string());
+    }
+
     // Determine positive and negative class values
     let mut unique_values: Vec<f64> = actual.to_vec();
-    unique_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    unique_values.sort_by(f64::total_cmp);
     unique_values.dedup();
 
     if unique_values.len() != 2 {
@@ -203,9 +213,9 @@ pub fn roc_auc(
 
     // Also add unique prediction values as thresholds for more accurate curve
     let mut pred_thresholds: Vec<f64> = predictions.to_vec();
-    pred_thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    pred_thresholds.sort_by(f64::total_cmp);
     thresholds.extend(pred_thresholds);
-    thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    thresholds.sort_by(f64::total_cmp);
     thresholds.dedup();
 
     let mut tpr = Vec::with_capacity(thresholds.len());
@@ -279,11 +289,7 @@ pub fn roc_auc(
     // Calculate AUC using trapezoidal rule
     // Sort by FPR to ensure proper integration
     let mut points: Vec<(f64, f64)> = fpr.iter().cloned().zip(tpr.iter().cloned()).collect();
-    points.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-    });
+    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-10 && (a.1 - b.1).abs() < 1e-10);
 
     let mut auc = 0.0;
@@ -458,11 +464,7 @@ impl std::fmt::Display for VariableImportanceResult {
 
         // Sort by importance
         let mut indices: Vec<usize> = (0..self.feature_names.len()).collect();
-        indices.sort_by(|&a, &b| {
-            self.importance[b]
-                .partial_cmp(&self.importance[a])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indices.sort_by(|&a, &b| desc_nan_last(self.importance[a], self.importance[b]));
 
         writeln!(
             f,
@@ -494,6 +496,28 @@ impl std::fmt::Display for VariableImportanceResult {
 )]
 pub type PartialDependenceResult = PdpResult;
 
+/// Descending order with NaN last.
+fn desc_nan_last(a: f64, b: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a.is_nan(), b.is_nan()) {
+        (false, false) => b.total_cmp(&a),
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (true, true) => Ordering::Equal,
+    }
+}
+
+/// Ranks from 1, largest value first; ties keep column order, NaN comes last.
+fn rank_descending(values: &[f64]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&a, &b| desc_nan_last(values[a], values[b]));
+    let mut ranks = vec![0; values.len()];
+    for (rank, &idx) in order.iter().enumerate() {
+        ranks[idx] = rank + 1;
+    }
+    ranks
+}
+
 /// Extract variable importance from Random Forest result.
 ///
 /// Uses the built-in mean decrease impurity (MDI) importance.
@@ -509,14 +533,7 @@ pub fn rf_variable_importance(
 
     let importance = result.feature_importances.clone();
 
-    // Calculate ranks
-    let mut indexed: Vec<(usize, f64)> = importance.iter().cloned().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0; n_features];
-    for (rank, (idx, _)) in indexed.iter().enumerate() {
-        ranks[*idx] = rank + 1;
-    }
+    let ranks = rank_descending(&importance);
 
     VariableImportanceResult {
         feature_names: names,
@@ -542,14 +559,7 @@ pub fn gbm_variable_importance(
 
     let importance = result.feature_importances.clone();
 
-    // Calculate ranks
-    let mut indexed: Vec<(usize, f64)> = importance.iter().cloned().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0; n_features];
-    for (rank, (idx, _)) in indexed.iter().enumerate() {
-        ranks[*idx] = rank + 1;
-    }
+    let ranks = rank_descending(&importance);
 
     VariableImportanceResult {
         feature_names: names,
@@ -575,14 +585,7 @@ pub fn cart_variable_importance(
 
     let importance = result.variable_importance.clone();
 
-    // Calculate ranks
-    let mut indexed: Vec<(usize, f64)> = importance.iter().cloned().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut ranks = vec![0; n_features];
-    for (rank, (idx, _)) in indexed.iter().enumerate() {
-        ranks[*idx] = rank + 1;
-    }
+    let ranks = rank_descending(&importance);
 
     VariableImportanceResult {
         feature_names: names,
@@ -934,5 +937,36 @@ mod tests {
             &str,
             usize,
         ) -> EconResult<PdpResult> = cart_partial_dependence;
+    }
+
+    /// NaN scores or labels are refused (they were sorted as equal to everything and counted as negative
+    /// predictions).
+    #[test]
+    fn test_roc_auc_refuses_nan() {
+        let e = roc_auc(&[0.1, f64::NAN, 0.8, 0.4], &[0.0, 0.0, 1.0, 1.0], Some(10)).unwrap_err();
+        assert!(e.contains("NaN"), "{e}");
+        let e = roc_auc(&[0.1, 0.3, 0.8, 0.4], &[0.0, f64::NAN, 1.0, 1.0], Some(10)).unwrap_err();
+        assert!(e.contains("labels"), "{e}");
+        let r = roc_auc(&[0.1, 0.3, 0.8, 0.4], &[0.0, 0.0, 1.0, 1.0], Some(10)).unwrap();
+        assert!((r.auc - 1.0).abs() < 1e-12);
+    }
+
+    /// Importance ranks put NaN last; ties keep column order. Before, NaN compared equal: [0.2, NaN, 0.5, 0.1]
+    /// ranked [1, 2, 3, 4], and CART importances [NaN, b] ranked NaN first.
+    #[test]
+    fn test_importance_ranks_put_nan_last() {
+        assert_eq!(
+            rank_descending(&[0.2, f64::NAN, 0.5, 0.1]),
+            vec![2, 4, 1, 3]
+        );
+        assert_eq!(rank_descending(&[0.3, 0.3, 0.1]), vec![1, 2, 3]);
+        let (x, y) = super::super::pdp::test_fixtures::two_feature_data();
+        let mut fit =
+            super::super::cart(x.view(), y.view(), &super::super::CartConfig::default()).unwrap();
+        fit.variable_importance[0] = f64::NAN;
+        let r = cart_variable_importance(&fit, None);
+        assert_eq!(r.ranks, vec![2, 1]);
+        let shown = format!("{r}");
+        assert!(shown.find("Feature_1").unwrap() < shown.find("Feature_0").unwrap());
     }
 }
