@@ -795,6 +795,24 @@ mod tests {
             lg.to_html().contains("<td class=\"coef\">NA</td>")
                 && lg.to_html().contains("<td>NA</td>")
         );
+        // A logit fit that really has an aliased column.
+        let d = crate::data::Dataset::new(
+            polars::prelude::df!(
+                "y" => [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                "x" => [0.1, 0.4, 0.35, 0.8, 0.9, 1.2, 0.5, 1.5, 1.1, 2.0, 0.3, 1.7],
+                "dup" => [0.2, 0.8, 0.7, 1.6, 1.8, 2.4, 1.0, 3.0, 2.2, 4.0, 0.6, 3.4]
+            )
+            .unwrap(),
+        );
+        let lg = crate::econometrics::run_logit(&d, "y", &["x", "dup"]).unwrap();
+        assert_eq!(lg.aliased, ["dup"]);
+        let tex = lg.to_latex();
+        assert!(tex.contains("dup & NA & NA & NA & NA \\\\"), "{tex}");
+        let html = lg.to_html();
+        assert!(
+            html.contains("<td class=\"coef\">NA</td>") && html.contains("<td>NA</td>"),
+            "{html}"
+        );
     }
 
     /// The tabular's rows, split into trimmed cells.

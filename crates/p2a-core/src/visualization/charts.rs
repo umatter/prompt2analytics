@@ -1572,8 +1572,8 @@ pub fn residual_diagnostics_with(
 
     if p == 0 || p >= n_valid {
         return Err(VisualizationError::InvalidData(format!(
-            "n_params is {p}; it must be at least 1 and below the number of observations \
-             ({n_valid})"
+            "the model has {p} coefficients (n_params); that must be at least 1 and below the \
+             number of observations ({n_valid})"
         )));
     }
     let df = n_valid - p;
@@ -3152,7 +3152,7 @@ mod tests {
         refused(&f, &e, Some(&with(5, -0.2)), None, &["row 5"]);
         let scaled: Vec<f64> = h.iter().map(|v| v * 1.1).collect();
         refused(&f, &e, Some(&scaled), None, &["sum to 4.4000"]);
-        refused(&f, &e, Some(&h), Some(0), &["n_params is 0"]);
+        refused(&f, &e, Some(&h), Some(0), &["the model has 0 coefficients"]);
         refused(
             &f,
             &e,
@@ -3161,6 +3161,17 @@ mod tests {
             &["below the number of observations (32)"],
         );
         refused(&f, &e, None, Some(4), &["needs the model's hat values"]);
+        // Two rows and no n_params: the one-predictor fallback's two coefficients are the cause.
+        refused(
+            &[1.0, 2.0],
+            &[0.5, -0.4],
+            None,
+            None,
+            &[
+                "the model has 2 coefficients",
+                "below the number of observations (2)",
+            ],
+        );
         refused(&f, &vec![0.0; 32], Some(&h), None, &["perfect fit"]);
         refused(
             &f,

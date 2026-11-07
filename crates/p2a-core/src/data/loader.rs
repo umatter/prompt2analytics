@@ -693,14 +693,13 @@ fn shown_key(key: &str) -> Cow<'_, str> {
     p2a_text::ellipsize(key, 64)
 }
 
-/// serde_json's message without its " at line L column C" suffix.
+/// serde_json's message without its " at line L column C" suffix, kept short: the message
+/// quotes a record that is a bare string in full, however long it is.
 fn json_error_text(e: &serde_json::Error) -> String {
     let text = e.to_string();
     let suffix = format!(" at line {} column {}", e.line(), e.column());
-    match text.strip_suffix(&suffix) {
-        Some(message) => message.to_string(),
-        None => text,
-    }
+    let message = text.strip_suffix(&suffix).unwrap_or(&text);
+    p2a_text::ellipsize(message, 200).into_owned()
 }
 
 fn resource_err(e: crate::errors::EconError) -> LoadError {
@@ -1694,6 +1693,15 @@ mod tests {
         assert!(m.contains(&format!("'{}...'", "k".repeat(61))), "{m}");
         assert!(!m.contains(&"k".repeat(62)), "{m}");
 
+        // A record that is one long string: serde_json quotes all of it.
+        let text = "s".repeat(500);
+        let m = json_err(DataLoader::from_jsonl_string(&format!(
+            "{{\"a\": 1}}\n\"{text}\"\n"
+        )));
+        assert!(m.contains("line 2") && m.len() < 300, "{m}");
+        let m = json_err(DataLoader::from_json_string(&format!("[\"{text}\"]")));
+        assert!(m.contains("record 1") && m.len() < 300, "{m}");
+
         let df = DataLoader::from_jsonl_string("\u{feff}{\"a\": 1}\r\n{\"a\": 2}\r\n").unwrap();
         assert_eq!(opt_i64(&df, "a"), [Some(1), Some(2)]);
     }
@@ -1720,8 +1728,8 @@ mod tests {
         }
         let got_k: Vec<i64> = opt_i64(df, "k").into_iter().map(Option::unwrap).collect();
         assert_eq!(got_k, k);
-        // to_json_string wraps strings in literal quotes (open, with WP60), so only the null
-        // positions of the string column are compared until that is fixed.
+        // to_json_string wraps strings in literal quotes, so only the null positions of the
+        // string column are compared until it writes plain JSON strings.
         for (i, v) in opt_str(df, "s").iter().enumerate() {
             assert_eq!(v.is_none(), i % 9 == 0, "row {i}");
         }
