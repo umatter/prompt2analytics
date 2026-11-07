@@ -67,9 +67,9 @@ use crate::errors::{EconError, EconResult};
 /// - `minbucket`: Minimum number of observations in a terminal node. Default is 7.
 /// - `maxdepth`: Maximum depth of the tree, at most 62 (`usize::BITS - 2`,
 ///   because node ids are `2^depth`); 0 means that limit. Default is 0.
-/// - `teststat`: Type of test statistic: "quadratic" (chi-squared) or "max" (maximum).
-///   Default is "quadratic".
-/// - `testtype`: P-value computation method: "bonferroni", "univariate", or "none".
+/// - `teststat`: Type of test statistic: "quadratic" (chi-squared; also "quad") or "maximum"
+///   (also "max"; regression trees only). Default is "quadratic".
+/// - `testtype`: P-value computation method: "bonferroni", or "univariate" (also "none").
 ///   Default is "bonferroni".
 /// - `seed`: Random seed for reproducibility (used in permutation tests if enabled).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,9 +82,9 @@ pub struct CtreeConfig {
     pub minbucket: usize,
     /// Maximum tree depth, at most 62 (0 = that limit)
     pub maxdepth: usize,
-    /// Test statistic type: "quadratic" or "max"
+    /// Test statistic type: "quadratic" (also "quad") or "maximum" (also "max"; regression trees only)
     pub teststat: String,
-    /// P-value adjustment: "bonferroni", "univariate", or "none"
+    /// P-value adjustment: "bonferroni", or "univariate" (also "none")
     pub testtype: String,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
@@ -102,6 +102,55 @@ impl Default for CtreeConfig {
             seed: None,
         }
     }
+}
+
+/// The test statistic of the variable selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CtreeTestStat {
+    /// The squared standardized statistic, chi-squared with one degree of freedom.
+    #[default]
+    Quadratic,
+    /// The absolute standardized statistic, two-sided normal (regression trees only).
+    Maximum,
+}
+
+crate::option_enum!(
+    CtreeTestStat,
+    crate::options::Choices {
+        option: "teststat",
+        values: &[
+            (&["quadratic", "quad"], CtreeTestStat::Quadratic),
+            (&["maximum", "max"], CtreeTestStat::Maximum),
+        ],
+    }
+);
+
+/// The p-value adjustment of the variable selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CtreeTestType {
+    /// Multiply each p-value by the number of variables.
+    #[default]
+    Bonferroni,
+    /// No adjustment.
+    Univariate,
+}
+
+crate::option_enum!(
+    CtreeTestType,
+    crate::options::Choices {
+        option: "testtype",
+        values: &[
+            (&["bonferroni"], CtreeTestType::Bonferroni),
+            (&["univariate", "none"], CtreeTestType::Univariate),
+        ],
+    }
+);
+
+/// `teststat` and `testtype` as parsed by [`ctree`].
+#[derive(Clone, Copy)]
+struct CtreeOptions {
+    teststat: CtreeTestStat,
+    testtype: CtreeTestType,
 }
 
 /// A split in the conditional inference tree.
@@ -147,7 +196,8 @@ pub struct CtreeResult {
     pub n_terminal: usize,
     /// Maximum depth reached
     pub depth: usize,
-    /// Variable importance (permutation-based)
+    /// Sum over the splits on the variable of 1 - (adjusted) p-value; not partykit's permutation
+    /// `varimp`.
     pub variable_importance: Vec<f64>,
     /// P-values for each variable at the root (global test)
     pub root_p_values: Vec<f64>,
@@ -204,7 +254,7 @@ impl std::fmt::Display for CtreeResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         // Normalize
         let total: f64 = indexed.iter().map(|(_, v)| v).sum();
@@ -295,7 +345,7 @@ fn compute_test_statistic(
     y: &ArrayView1<f64>,
     is_classification: bool,
     classes: Option<&[f64]>,
-    teststat: &str,
+    teststat: CtreeTestStat,
 ) -> EconResult<(f64, f64)> {
     let n = x_feature.len();
     if n < 2 {
@@ -378,12 +428,12 @@ fn compute_test_statistic(
         };
 
         let statistic = match teststat {
-            "max" => z.abs(),
-            _ => z * z, // quadratic (default)
+            CtreeTestStat::Maximum => z.abs(),
+            CtreeTestStat::Quadratic => z * z,
         };
 
         // P-value
-        let p_value = if teststat == "max" {
+        let p_value = if teststat == CtreeTestStat::Maximum {
             // Two-sided normal
             let normal = Normal::new(0.0, 1.0).unwrap();
             2.0 * (1.0 - normal.cdf(z.abs()))
@@ -409,6 +459,7 @@ fn select_best_variable(
     is_classification: bool,
     classes: Option<&[f64]>,
     config: &CtreeConfig,
+    options: CtreeOptions,
 ) -> EconResult<Option<(usize, f64, f64, Vec<f64>)>> {
     let n_features = x.ncols();
 
@@ -425,7 +476,7 @@ fn select_best_variable(
             &y_subset.view(),
             is_classification,
             classes,
-            &config.teststat,
+            options.teststat,
         )?;
         results.push((j, stat, pval));
     }
@@ -434,13 +485,12 @@ fn select_best_variable(
     let p_values: Vec<f64> = results.iter().map(|(_, _, p)| *p).collect();
 
     // Apply multiple testing correction
-    let adjusted_p_values: Vec<f64> = match config.testtype.as_str() {
-        "bonferroni" => results
+    let adjusted_p_values: Vec<f64> = match options.testtype {
+        CtreeTestType::Bonferroni => results
             .iter()
             .map(|(_, _, p)| (p * n_features as f64).min(1.0))
             .collect(),
-        "univariate" | "none" => results.iter().map(|(_, _, p)| *p).collect(),
-        _ => results.iter().map(|(_, _, p)| *p).collect(),
+        CtreeTestType::Univariate => results.iter().map(|(_, _, p)| *p).collect(),
     };
 
     // Find the variable with the smallest p-value
@@ -628,6 +678,7 @@ fn build_ctree(
     is_classification: bool,
     classes: Option<&[f64]>,
     config: &CtreeConfig,
+    options: CtreeOptions,
     depth: usize,
     node_id: usize,
     importance: &mut Array1<f64>,
@@ -704,7 +755,8 @@ fn build_ctree(
     }
 
     // Variable selection via permutation tests
-    let selection = select_best_variable(x, y, indices, is_classification, classes, config)?;
+    let selection =
+        select_best_variable(x, y, indices, is_classification, classes, config, options)?;
 
     if let Some((best_var, best_stat, best_pval, p_vals)) = selection {
         root_p_values = p_vals;
@@ -741,6 +793,7 @@ fn build_ctree(
                 is_classification,
                 classes,
                 config,
+                options,
                 depth + 1,
                 node_id * 2,
                 importance,
@@ -752,6 +805,7 @@ fn build_ctree(
                 is_classification,
                 classes,
                 config,
+                options,
                 depth + 1,
                 node_id * 2 + 1,
                 importance,
@@ -845,7 +899,10 @@ fn predict_one(node: &CtreeNode, x: &ArrayView1<f64>) -> f64 {
 ///
 /// `Computation` for fewer than 2 rows, when `x` and `y` differ in length, or
 /// when `mincriterion` is not strictly inside (0, 1), NaN included;
-/// `InvalidSpecification` when `x` or `y` holds a non-finite value or
+/// `InvalidSpecification` for an unknown `teststat` or `testtype`, for partykit's
+/// `MonteCarlo` or `Teststatistic` test types (not implemented), for `minsplit` below
+/// `2 * minbucket` (no node of that size can be split into two children of `minbucket` rows), for
+/// `teststat = maximum` with a classification target, when `x` or `y` holds a non-finite value or
 /// `maxdepth` exceeds 62 (`usize::BITS - 2` on 64-bit targets, since node ids
 /// double at each level); `Cancelled` once the installed computation budget
 /// expires (checked per node).
@@ -892,6 +949,32 @@ pub fn ctree(
             "mincriterion must be between 0 and 1 (e.g., 0.95 for p < 0.05)".to_string(),
         ));
     }
+    let teststat: CtreeTestStat = config.teststat.parse()?;
+    let normalized_testtype = crate::options::normalize(&config.testtype);
+    if normalized_testtype == "montecarlo" || normalized_testtype == "teststatistic" {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "ctree: testtype '{}' (partykit) is not implemented; use bonferroni or univariate",
+                config.testtype
+            ),
+        });
+    }
+    let testtype: CtreeTestType = config.testtype.parse()?;
+    let options = CtreeOptions { teststat, testtype };
+    if config
+        .minbucket
+        .checked_mul(2)
+        .is_none_or(|twice| config.minsplit < twice)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "ctree: minsplit ({}) must be at least 2 * minbucket ({}); a node with fewer rows \
+                 cannot be split into two children of minbucket rows",
+                config.minsplit,
+                config.minbucket.saturating_mul(2)
+            ),
+        });
+    }
     if config.maxdepth > MAX_CTREE_DEPTH {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -923,10 +1006,17 @@ pub fn ctree(
     // Determine if classification or regression
     let unique_y: std::collections::HashSet<i64> = y.iter().map(|&v| (v * 1e10) as i64).collect();
     let is_classification = ctree_classifies(unique_y.len(), n_samples);
+    if teststat == CtreeTestStat::Maximum && is_classification {
+        return Err(EconError::InvalidSpecification {
+            message: "ctree: teststat = maximum is implemented for regression trees only (the \
+                      classification statistic is the quadratic form); use teststat = quadratic"
+                .to_string(),
+        });
+    }
 
     let classes: Option<Vec<f64>> = if is_classification {
         let mut cls: Vec<f64> = unique_y.iter().map(|&v| v as f64 / 1e10).collect();
-        cls.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        cls.sort_by(f64::total_cmp);
         Some(cls)
     } else {
         None
@@ -942,6 +1032,7 @@ pub fn ctree(
         is_classification,
         classes.as_deref(),
         config,
+        options,
         0,
         1,
         &mut importance,
@@ -972,7 +1063,7 @@ pub fn ctree(
 }
 
 /// Whether [`ctree`] fits a classification tree for a target with `n_unique` distinct
-/// values in `n` rows: at most 10 classes, and fewer classes than half the rows.
+/// values in `n` rows: at most 10 classes, and fewer than n / 2, rounded down.
 fn ctree_classifies(n_unique: usize, n: usize) -> bool {
     n_unique <= 10 && n_unique < n / 2
 }
@@ -1047,7 +1138,7 @@ fn find_terminal_node<'a>(node: &'a CtreeNode, x: &ArrayView1<f64>) -> &'a Ctree
 ///
 /// * `dataset` - Input dataset
 /// * `y_col` - Target column: numeric (integer and decimal columns; classification when
-///   it has at most 10 distinct values and fewer than half the rows, as in [`ctree`]),
+///   it has at most 10 distinct values and fewer than n / 2, rounded down, as in [`ctree`]),
 ///   or a text, categorical or boolean column, whose labels become the class codes 0..K-1
 ///   in R `factor()` order (reported in [`CtreeResult::class_names`]). A missing value
 ///   (null or NaN) in the target or a feature is an error naming the column
@@ -1077,8 +1168,10 @@ pub fn run_ctree(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "ctree fits a classification tree only for at most 10 classes and fewer \
-                 classes than half the rows; the target '{y_col}' has {} classes in {} rows. \
-                 Merge rare classes or use C5.0",
+                 classes than n / 2 rounded down ({} for {} rows); the target '{y_col}' has {} \
+                 classes in {} rows. Merge rare classes or use C5.0",
+                x.nrows() / 2,
+                x.nrows(),
                 labels.len(),
                 x.nrows()
             ),
@@ -1862,5 +1955,133 @@ mod tests {
         };
         assert!(ctree(x.view(), y_reg.view(), &cfg).is_ok());
         assert!(ctree(x.view(), y_cls.view(), &cfg).is_ok());
+    }
+
+    #[test]
+    fn test_ctree_rejects_minsplit_below_twice_minbucket() {
+        // ML-28 (design 0.1). A node needs 2 * minbucket rows to split into two children of minbucket, so a smaller
+        // minsplit has no effect (partykit accepts and ignores it); refused (rule R2).
+        let (x, y, _) = rpart_reference_data();
+        let cfg = |ms: usize, mb: usize| CtreeConfig {
+            minsplit: ms,
+            minbucket: mb,
+            ..Default::default()
+        };
+        let e = ctree(x.view(), y.view(), &cfg(10, 6))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("minsplit (10) must be at least 2 * minbucket (12)"),
+            "{e}"
+        );
+        assert!(ctree(x.view(), y.view(), &cfg(12, 6)).is_ok());
+        assert!(ctree(x.view(), y.view(), &cfg(2, 0)).is_ok()); // minbucket 0 acts as 1 (T0-WP15)
+    }
+
+    #[test]
+    fn test_ctree_options_parse_aliases_and_reject_unknown() {
+        CtreeTestStat::choices().validate().unwrap();
+        CtreeTestType::choices().validate().unwrap();
+        assert_eq!(
+            "Maximum".parse::<CtreeTestStat>().unwrap(),
+            CtreeTestStat::Maximum
+        );
+        assert_eq!(
+            "max".parse::<CtreeTestStat>().unwrap(),
+            CtreeTestStat::Maximum
+        );
+        assert_eq!(
+            "quadratic".parse::<CtreeTestStat>().unwrap(),
+            CtreeTestStat::Quadratic
+        );
+        assert_eq!(
+            "none".parse::<CtreeTestType>().unwrap(),
+            CtreeTestType::Univariate
+        );
+        assert_eq!(
+            "Bonferroni".parse::<CtreeTestType>().unwrap(),
+            CtreeTestType::Bonferroni
+        );
+        let (x, y, y_cls) = rpart_reference_data();
+        let run = |ts: &str, tt: &str, y: &Array1<f64>| {
+            ctree(
+                x.view(),
+                y.view(),
+                &CtreeConfig {
+                    minsplit: 10,
+                    minbucket: 5,
+                    teststat: ts.into(),
+                    testtype: tt.into(),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(
+            run("qs2", "bonferroni", &y)
+                .unwrap_err()
+                .to_string()
+                .contains("quadratic")
+        );
+        assert!(
+            run("quadratic", "MonteCarlo", &y)
+                .unwrap_err()
+                .to_string()
+                .contains("not implemented")
+        );
+        assert!(
+            run("maximum", "bonferroni", &y_cls)
+                .unwrap_err()
+                .to_string()
+                .contains("regression")
+        );
+    }
+
+    #[test]
+    fn test_ctree_maximum_teststat_is_not_the_quadratic_one() {
+        // Before: any string other than "max" (partykit's "maximum" included) silently gave the quadratic statistic.
+        let (x, y, _) = rpart_reference_data();
+        let stat = |ts: &str| {
+            let r = ctree(
+                x.view(),
+                y.view(),
+                &CtreeConfig {
+                    minsplit: 10,
+                    minbucket: 5,
+                    teststat: ts.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            r.root.split.expect("the x1 step is significant").statistic
+        };
+        let (quad, max, maximum) = (stat("quadratic"), stat("max"), stat("maximum"));
+        assert_eq!(maximum.to_bits(), max.to_bits());
+        assert!(
+            (max * max - quad).abs() <= 1e-12 * quad,
+            "{max}^2 vs {quad}"
+        );
+    }
+
+    #[test]
+    fn test_ctree_class_rule_message_states_the_rounded_bound() {
+        // T2 leftover minor (T2-WP17 #0, plan sync 2026-11-01). The rule is n_unique < n / 2 with integer
+        // division, but the refusal said "fewer classes than half the rows": 2 classes in 5 rows were refused
+        // although 2 < 2.5. Property test (p2a's own rule; partykit is not installed).
+        let df = polars::prelude::df! {
+            "lab" => ["a", "b", "a", "b", "a"],
+            "x" => [0.1, 0.7, 0.3, 0.9, 0.2],
+        }
+        .unwrap();
+        let e = run_ctree(
+            &crate::Dataset::new(df),
+            "lab",
+            &["x"],
+            &CtreeConfig::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("at most 10 classes"), "{e}"); // test_na_ctree_class_labels asserts this substring
+        assert!(e.contains("n / 2 rounded down (2 for 5 rows)"), "{e}");
+        assert!(!e.contains("half the rows"), "{e}");
     }
 }
