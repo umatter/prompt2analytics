@@ -77,7 +77,7 @@ impl std::fmt::Display for MiniBatchKMeansResult {
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_clusters` - Number of clusters
-/// * `batch_size` - Size of mini-batches (default: 100 or n if smaller)
+/// * `batch_size` - Size of mini-batches, between 1 and n (default: 100 or n if smaller)
 /// * `max_iterations` - Maximum iterations (default: 100)
 /// * `n_init` - Number of initializations (default: 3)
 /// * `seed` - Optional random seed
@@ -120,8 +120,10 @@ pub fn mini_batch_kmeans(
     let batch = batch_size.unwrap_or(100.min(n));
     let max_iter = max_iterations.unwrap_or(100);
     let n_inits = n_init.unwrap_or(3);
-    if batch == 0 {
-        return Err("batch_size must be at least 1, got 0".to_string());
+    if batch == 0 || batch > n {
+        return Err(format!(
+            "batch_size must be between 1 and {n} (the number of rows), got {batch}"
+        ));
     }
     check_runs(max_iter, n_inits)?;
     crate::ml::extract::require_finite(&data, "mini-batch k-means")?;
@@ -706,6 +708,7 @@ pub fn skmeans(
         let mut n_iterations = 0;
 
         for iter in 0..max_iter {
+            checkpoint().map_err(|e| e.to_string())?;
             n_iterations = iter + 1;
 
             // Assignment step: assign to cluster with highest cosine similarity
@@ -815,7 +818,51 @@ pub fn run_skmeans(
 mod tests {
     use super::*;
 
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn noisy_blobs() -> Array2<f64> {
+        Array2::from_shape_fn((30, 2), |(i, j)| {
+            [[1.0, 0.2], [0.2, 1.0], [-1.0, 0.4]][i % 3][j] + 0.1 * ((i * 7 + j * 3) as f64).sin()
+        })
+    }
+
+    #[test]
+    fn test_kmeans_variants_stop_on_a_cancelled_budget() {
+        let x = noisy_blobs();
+        let e = with_budget(cancelled(), || {
+            skmeans(x.view(), 3, None, None, None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "skmeans: {e}");
+        let e = with_budget(cancelled(), || {
+            mini_batch_kmeans(x.view(), 3, None, None, None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "mini-batch: {e}");
+        let e = with_budget(cancelled(), || {
+            trimmed_kmeans(x.view(), 3, None, None, None, Some(1))
+        })
+        .unwrap_err();
+        assert!(e.contains("cancelled"), "trimmed: {e}");
+    }
+
+    #[test]
+    fn test_mini_batch_kmeans_bounds_the_batch_by_the_rows() {
+        let x = noisy_blobs();
+        for bad in [0, 31, usize::MAX] {
+            let e = mini_batch_kmeans(x.view(), 3, Some(bad), None, None, Some(1)).unwrap_err();
+            assert!(e.contains("batch_size must be between 1 and 30"), "{e}");
+        }
+        let full = mini_batch_kmeans(x.view(), 3, Some(30), Some(5), Some(1), Some(1)).unwrap();
+        assert_eq!(full.batch_size, 30);
+    }
 
     #[test]
     fn test_trimmed_kmeans_is_scale_equivariant() {

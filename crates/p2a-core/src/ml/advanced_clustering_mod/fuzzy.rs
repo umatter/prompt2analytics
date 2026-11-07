@@ -120,7 +120,7 @@ crate::option_enum!(
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_clusters` - Number of clusters
-/// * `m` - Fuzziness parameter (must be > 1, default: 2.0). Higher values mean softer clusters.
+/// * `m` - Fuzziness parameter (finite and above 1, default: 2.0). Higher values mean softer clusters.
 /// * `max_iterations` - Maximum iterations (default: 100)
 /// * `tolerance` - Convergence tolerance for objective function (default: sqrt(machine epsilon))
 /// * `distance` - Distance metric (euclidean or manhattan)
@@ -166,8 +166,8 @@ pub fn fuzzy_cmeans(
     }
 
     let fuzz = m.unwrap_or(2.0);
-    if fuzz <= 1.0 {
-        return Err("Fuzziness parameter m must be > 1".to_string());
+    if !fuzz.is_finite() || fuzz <= 1.0 {
+        return Err(format!("m must be finite and above 1, got {fuzz}"));
     }
 
     let max_iter = max_iterations.unwrap_or(100);
@@ -471,8 +471,10 @@ pub fn fanny(
     }
 
     let m = membership_exponent.unwrap_or(2.0);
-    if m <= 1.0 {
-        return Err("membership_exponent must be > 1".to_string());
+    if !m.is_finite() || m <= 1.0 {
+        return Err(format!(
+            "membership_exponent must be finite and above 1, got {m}"
+        ));
     }
 
     let max_iterations = max_iter.unwrap_or(500);
@@ -792,6 +794,15 @@ mod tests {
                 .unwrap_err()
                 .contains("tolerance")
         );
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0] {
+            let e = fuzzy_cmeans(x.view(), 2, Some(bad), None, None, None, None).unwrap_err();
+            assert!(e.contains("m must be finite and above 1"), "{e}");
+            let e = fanny(x.view(), 2, Some(bad), None, None, None).unwrap_err();
+            assert!(
+                e.contains("membership_exponent must be finite and above 1"),
+                "{e}"
+            );
+        }
         let mut nan = x.clone();
         nan[[0, 0]] = f64::NAN;
         assert!(

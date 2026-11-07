@@ -318,6 +318,7 @@ fn compute_laplacian_eigenvectors(
 
         // Power iteration
         for _ in 0..100 {
+            checkpoint().map_err(|e| e.to_string())?;
             // Matrix-vector multiplication
             let mut v_new = vec![0.0; n];
             for i in 0..n {
