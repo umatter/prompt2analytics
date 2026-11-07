@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "pdp_partial_dependence",
+      "name": "Partial dependence, one and two features, on pdp::partial's grid rules (one PDP/ICE engine)",
+      "category": "ml",
+      "reference": "pdp::partial (pdp 0.8.3, brute force): pdp:::pred_grid min(length(unique(x)), 51) uniform points by default, seq(min(x), max(x), length.out = grid.resolution) and quantile(x, probs, type = 7, na.rm = TRUE); pred.grid (sorted by order_grid) for two predictors; mean of the predictions",
+      "doc": "validation/ml/pdp.md",
+      "cases": [
+        "pdp_lm",
+        "pdp_small_scale"
+      ],
+      "tests": [
+        "p2a-core::ml::pdp::tests::test_validate_pdp_grid_rules",
+        "p2a-core::ml::pdp::tests::test_validate_pdp_lm_2d",
+        "p2a-core::ml::pdp::tests::test_validate_pdp_small_scale",
+        "p2a-core::ml::pdp::tests::test_validate_pdp_config_grid_spec"
+      ],
+      "quantities": [
+        "default grid min(length(unique(x)), 51) and its PD, on a feature above and a feature below the cap",
+        "uniform grid seq(min, max, length.out = 25)",
+        "quantile grids at probs 1:9/10 and seq(0, 1, length.out = 20)",
+        "PD values on each grid",
+        "tied feature: unique quantile grid values and their PD",
+        "two-feature PD on 5 x 4 points (grid_resolution_2)",
+        "1e-12-scale feature: 9 distinct quantile and uniform grid points and their PD"
+      ],
+      "tolerance": "grids exact (R's seq.default and quantile.default operations); PD values 1e-12 relative + 1e-12 absolute (closed-form lm predictions; only the summation order differs, measured <= 8.9e-16 * max(|R|, 1))",
+      "deviations": [
+        {
+          "finding": "ML-137",
+          "quantity": "duplicate grid values",
+          "note": "An exact duplicate grid value is listed once; pdp repeats the row with the same yhat. The ties pin compares with R's unique()."
+        },
+        {
+          "finding": "ML-137",
+          "quantity": "NaN predictions",
+          "note": "A NaN prediction propagates into the PD mean; pdp's mean(na.rm = TRUE) drops it, which would average over a subset of the rows without saying so."
+        },
+        {
+          "finding": "ML-137",
+          "quantity": "default grid size with missing feature values",
+          "note": "The default grid counts non-missing values; pdp's length(unique(x)) counts a missing value as one more point."
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
