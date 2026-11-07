@@ -2,6 +2,29 @@
   "schema": 1,
   "methods": [
     {
+      "id": "spatial_logdet",
+      "name": "log|I - rho W| over the complex eigenvalues of W; feasible rho interval; traces of (I - rho W)^-1 and W (I - rho W)^-1",
+      "category": "econometrics",
+      "reference": "spatialreg method 'eigen': Re(sum(log(1 - rho * eigen(W)$values))), eig.range = 1 / range(Re(eig)); base::determinant cross-check",
+      "doc": "validation/spatial/weights.md",
+      "cases": [
+        "spatial_sar_sdm_sem"
+      ],
+      "tests": [
+        "p2a-core::spatial::weights::tests::test_validate_logdet_complex_eigenvalues"
+      ],
+      "quantities": [
+        "log-determinant at rho = -0.8, 0.5, 0.9",
+        "number of complex eigenvalues (|Im| > 1e-4)",
+        "rho interval",
+        "tr((I - 0.5 W)^-1)",
+        "tr(W (I - 0.5 W)^-1)"
+      ],
+      "tolerance": "validation/README.md, n = 80: 1e-5 relative (statistics), rho interval 1e-6, count exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "spatial_weights",
       "name": "Spatial weight styles W, B, C, U, minmax and S; k-nearest-neighbour ties",
       "category": "econometrics",

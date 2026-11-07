@@ -93,6 +93,96 @@
   out
 }
 
+case("spatial_sar_sdm_sem", "econometrics/spatial", "SAR / SDM / SEM / SAC by concentrated ML on a 4-NN row-standardised W, impacts, complex-eigenvalue log-determinant", function(ctx) {
+  d <- .sp_data(ctx); n <- nrow(d); xy <- as.matrix(d[, c("cx", "cy")])
+  stopifnot(.sp_knn_gap(xy, 4) > 1e-6)
+  W <- .sp_style(.sp_knn_b(xy, 4), "W"); y <- d$y
+  X <- cbind("(Intercept)" = 1, x1 = d$x1, x2 = d$x2)
+  ev <- eigen(W, only.values = TRUE)$values
+  # Near-defective eigenvalues of a kNN W come back with |Im| up to ~1e-6 (LAPACK and faer alike); the
+  # genuine complex pairs have |Im| > 0.01, so the count uses a 1e-4 threshold with a clear gap around it.
+  aim <- abs(Im(ev)); cplx <- aim > 1e-4
+  stopifnot(!any(aim > 1e-5 & aim < 1e-3))
+  v <- list(n_complex_eigen = sum(cplx), rho_range = vec(c(1 / min(Re(ev)), 1 / max(Re(ev)))))
+  rhos <- c(-0.8, 0.5, 0.9)
+  v$logdet_rho <- vec(rhos); v$logdet <- vec(vapply(rhos, .sp_logdet, 0, ev = ev))
+  v$logdet_realparts <- vec(vapply(rhos, function(r) sum(log(abs(1 - r * Re(ev)))), 0))   # the pre-fix value
+  v$logdet_direct <- vec(vapply(rhos, function(r) as.numeric(determinant(diag(n) - r * W)$modulus), 0))
+  v$tr_inv_rho05 <- Re(sum(1 / (1 - 0.5 * ev))); v$tr_aw_rho05 <- .sp_tr_aw(0.5, ev)
+  # SAR
+  s <- .sp_sar_fit(y, X, W, ev)
+  v$sar_rho <- s$rho; v$sar_beta <- named(s$beta); v$sar_s2 <- s$s2; v$sar_loglik <- s$ll; v$sar_aic <- s$aic; v$sar_bic <- s$bic
+  v$sar_se <- named(s$se)                                             # expected information: the convention reference
+  v$sar_se_obs <- named(.sp_sar_obs_se(y, X, W, ev, s))
+  v$sar_residuals <- vec(s$e)
+  imp <- .sp_impacts(s$Ainv, W, s$beta[-1])
+  v$sar_impact_direct <- named(imp["direct", ]); v$sar_impact_indirect <- named(imp["indirect", ]); v$sar_impact_total <- named(imp["total", ])
+  # SDM: lag.x1, lag.x2 (W is row-standardised, so the intercept is not lagged, as spatialreg::create_WX)
+  Xd <- cbind(X, lag.x1 = drop(W %*% d$x1), lag.x2 = drop(W %*% d$x2))
+  sd <- .sp_sar_fit(y, Xd, W, ev)
+  v$sdm_rho <- sd$rho; v$sdm_beta <- named(sd$beta); v$sdm_s2 <- sd$s2; v$sdm_loglik <- sd$ll; v$sdm_aic <- sd$aic; v$sdm_bic <- sd$bic
+  v$sdm_se_obs <- named(.sp_sar_obs_se(y, Xd, W, ev, sd))
+  imp <- .sp_impacts(sd$Ainv, W, sd$beta[c("x1", "x2")], sd$beta[c("lag.x1", "lag.x2")])
+  v$sdm_impact_direct <- named(imp["direct", ]); v$sdm_impact_indirect <- named(imp["indirect", ]); v$sdm_impact_total <- named(imp["total", ])
+  # SEM: y = X b + u, u = lambda W u + e; score n e'W u / SSE - tr(W B^-1)
+  wy <- drop(W %*% y); WX <- W %*% X
+  sem_core <- function(l) { Bs <- y - l * wy; Xs <- X - l * WX; q <- qr(Xs); b <- qr.coef(q, Bs); e <- drop(Bs - Xs %*% b)
+    list(b = b, e = e, u = drop(y - X %*% b), sse = sum(e^2), q = q) }
+  llsem <- function(l) { c <- sem_core(l); -n / 2 * log(2 * pi * c$sse / n) - n / 2 + .sp_logdet(l, ev) }
+  semscore <- function(l) { c <- sem_core(l); n * sum(c$e * (W %*% c$u)) / c$sse - .sp_tr_aw(l, ev) }
+  lo <- 1 / min(Re(ev)); hi <- 1 / max(Re(ev))
+  l0 <- optimize(llsem, c(lo + 1e-8, hi - 1e-8), maximum = TRUE, tol = 1e-12)$maximum
+  lam <- uniroot(semscore, c(l0 - 1e-3, l0 + 1e-3), tol = 1e-15, maxiter = 1000)$root
+  c <- sem_core(lam); s2 <- c$sse / n; bse <- sqrt(diag(chol2inv(qr.R(c$q))) * s2)
+  names(c$b) <- names(bse) <- colnames(X); z <- c$b / bse
+  v$sem_lambda <- lam; v$sem_beta <- named(c$b); v$sem_beta_se <- named(bse); v$sem_beta_z <- named(z)
+  v$sem_beta_p <- named(2 * pnorm(abs(z), lower.tail = FALSE)); v$sem_s2 <- s2
+  v$sem_loglik <- llsem(lam); v$sem_aic <- -2 * v$sem_loglik + 2 * (ncol(X) + 2); v$sem_bic <- -2 * v$sem_loglik + log(n) * (ncol(X) + 2)
+  # lambda's SE from the (lambda, s2) block of the observed information; the beta-lambda block is set to its
+  # expectation 0, as errorsarlm's block-diagonal asymptotic covariance
+  wu <- drop(W %*% c$u)
+  I2 <- matrix(c(Re(sum((ev / (1 - lam * ev))^2)) + sum(wu^2) / s2, sum(c$e * wu) / s2^2,
+                 sum(c$e * wu) / s2^2, -n / (2 * s2^2) + sum(c$e^2) / s2^3), 2)
+  v$sem_lambda_se_obs <- sqrt(solve(I2)[1, 1])
+  # SAC: y = rho W y + X b + u, u = lambda W u + e
+  sac_core <- function(r, l) { Ay <- y - r * wy; By <- Ay - l * drop(W %*% Ay); Xs <- X - l * WX
+    q <- qr(Xs); b <- qr.coef(q, By); e <- drop(By - Xs %*% b); u <- drop(Ay - X %*% b)
+    list(b = b, e = e, u = u, sse = sum(e^2)) }
+  llsac <- function(p) { c <- sac_core(p[1], p[2]); -n / 2 * log(2 * pi * c$sse / n) - n / 2 + .sp_logdet(p[1], ev) + .sp_logdet(p[2], ev) }
+  sacgrad <- function(p) { c <- sac_core(p[1], p[2]); Bwy <- wy - p[2] * drop(W %*% wy)
+    c(n * sum(c$e * Bwy) / c$sse - .sp_tr_aw(p[1], ev), n * sum(c$e * (W %*% c$u)) / c$sse - .sp_tr_aw(p[2], ev)) }
+  grid <- seq(-0.95, 0.95, by = 0.05); best <- c(0, 0); bv <- -Inf
+  for (r in grid) for (l in grid) { val <- llsac(c(r, l)); if (is.finite(val) && val > bv) { bv <- val; best <- c(r, l) } }
+  o <- optim(best, function(p) -llsac(p), function(p) -sacgrad(p), method = "BFGS", control = list(reltol = 1e-16, maxit = 10000))
+  p <- o$par
+  for (it in 1:5) { h <- 1e-6; H <- cbind((sacgrad(p + c(h, 0)) - sacgrad(p - c(h, 0))) / (2 * h), (sacgrad(p + c(0, h)) - sacgrad(p - c(0, h))) / (2 * h))
+    p <- p - solve(H, sacgrad(p)) }
+  stopifnot(max(abs(sacgrad(p))) < 1e-9, max(abs(p - o$par)) < 1e-5)
+  c <- sac_core(p[1], p[2]); names(c$b) <- colnames(X)
+  v$sac_rho <- p[1]; v$sac_lambda <- p[2]; v$sac_beta <- named(c$b); v$sac_s2 <- c$sse / n
+  v$sac_loglik <- llsac(p); v$sac_aic <- -2 * v$sac_loglik + 2 * (ncol(X) + 3); v$sac_bic <- -2 * v$sac_loglik + log(n) * (ncol(X) + 3)
+  # SAC standard errors: minus the Hessian of the full log-likelihood by central differences of its analytic
+  # gradient, step 1e-5 max(|theta_i|, 1), symmetrised; cross-checked against optimHess of the log-likelihood
+  sacfullgrad <- function(th) { k <- ncol(X); b <- th[1:k]; r <- th[k + 1]; l <- th[k + 2]; sg <- th[k + 3]
+    u <- y - r * wy - drop(X %*% b); e <- u - l * drop(W %*% u); Xs <- X - l * WX
+    c(drop(crossprod(Xs, e)) / sg,
+      -.sp_tr_aw(r, ev) + sum(e * (wy - l * drop(W %*% wy))) / sg,
+      -.sp_tr_aw(l, ev) + sum(e * (W %*% u)) / sg,
+      -n / (2 * sg) + sum(e^2) / (2 * sg^2)) }
+  sacfullll <- function(th) { k <- ncol(X); u <- y - th[k + 1] * wy - drop(X %*% th[1:k]); e <- u - th[k + 2] * drop(W %*% u)
+    -n / 2 * log(2 * pi * th[k + 3]) + .sp_logdet(th[k + 1], ev) + .sp_logdet(th[k + 2], ev) - sum(e^2) / (2 * th[k + 3]) }
+  th <- c(c$b, p[1], p[2], v$sac_s2); m <- length(th); H <- matrix(0, m, m)
+  for (i in seq_len(m)) { h <- 1e-5 * max(abs(th[i]), 1); d <- numeric(m); d[i] <- h
+    H[, i] <- (sacfullgrad(th + d) - sacfullgrad(th - d)) / (2 * h) }
+  H <- (H + t(H)) / 2
+  stopifnot(max(abs(H - optimHess(th, sacfullll)) / pmax(abs(H), 1)) < 1e-4)
+  se <- sqrt(diag(solve(-H)))[1:(ncol(X) + 2)]; names(se) <- c(colnames(X), "rho", "lambda")
+  v$sac_se_obs <- named(se)
+  list(values = v, reference = "spatialreg::lagsarlm (method 'eigen', Durbin = TRUE), errorsarlm, sacsarlm and impacts (mixedImpactsExact), written out (spdep/spatialreg not installed)",
+       call = "concentrated SAR/SDM/SEM/SAC likelihoods on nb2listw(knn2nb(knearneigh(cbind(cx, cy), 4)), style = 'W'); maximiser polished on the analytic score",
+       packages = character(0))
+})
+
 case("spatial_weights_moran", "spatial/weights", "spdep weight styles W, B, C, U, minmax, S; Moran's I and Geary's C with islands (zero.policy, adjust.n)", function(ctx) {
   d <- .sp_data(ctx); n <- nrow(d); xy <- as.matrix(d[, c("cx", "cy")])
   D <- as.matrix(dist(xy)); Dut <- D[upper.tri(D)]
