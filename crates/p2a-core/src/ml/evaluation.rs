@@ -1,10 +1,13 @@
 //! Model evaluation metrics for classification.
 //!
 //! Implements ROC curves, AUC, confusion matrix, variable importance,
-//! and partial dependence plots.
+//! and partial dependence through the engine in [`crate::ml::pdp`].
 
 use ndarray::{Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
+
+use super::pdp::{PdpConfig, PdpResult};
+use crate::errors::EconResult;
 
 /// Result of ROC curve and AUC calculation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,48 +486,13 @@ impl std::fmt::Display for VariableImportanceResult {
     }
 }
 
-/// Result of partial dependence analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PartialDependenceResult {
-    /// Feature name(s) for PD
-    pub feature_names: Vec<String>,
-    /// Grid values for each feature
-    pub grid_values: Vec<Vec<f64>>,
-    /// Partial dependence values (flattened if 2D)
-    pub pd_values: Vec<f64>,
-    /// Model type used
-    pub model_type: String,
-    /// Is this a 2D partial dependence?
-    pub is_2d: bool,
-}
-
-impl std::fmt::Display for PartialDependenceResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Partial Dependence")?;
-        writeln!(f, "==================")?;
-        writeln!(f, "Model: {}", self.model_type)?;
-        writeln!(f, "Features: {}", self.feature_names.join(", "))?;
-        writeln!(f)?;
-
-        if !self.is_2d {
-            writeln!(f, "{:<12} {:>12}", "Value", "PD")?;
-            writeln!(f, "{:-<26}", "")?;
-
-            for (val, pd) in self.grid_values[0].iter().zip(self.pd_values.iter()) {
-                writeln!(f, "{:<12.4} {:>12.4}", val, pd)?;
-            }
-        } else {
-            writeln!(
-                f,
-                "2D partial dependence with {} x {} grid points",
-                self.grid_values[0].len(),
-                self.grid_values[1].len()
-            )?;
-        }
-
-        Ok(())
-    }
-}
+/// Deprecated name of [`PdpResult`](crate::ml::PdpResult). The GBM and CART helpers return the engine's result
+/// since the PDP/ICE engine was unified: `grid_values`, `pdp_values`, `feature_name`, `model` replace
+/// `grid_values[0]`, `pd_values`, `feature_names`, `model_type`.
+#[deprecated(
+    note = "use `PdpResult`: gbm_partial_dependence and cart_partial_dependence return the PDP engine's result"
+)]
+pub type PartialDependenceResult = PdpResult;
 
 /// Extract variable importance from Random Forest result.
 ///
@@ -627,158 +595,82 @@ pub fn cart_variable_importance(
     }
 }
 
+/// The GBM and CART helpers: the engine on a uniform grid, with the feature and model named in the result.
+fn model_partial_dependence<F>(
+    data: ArrayView2<'_, f64>,
+    predict: F,
+    feature_idx: usize,
+    feature_name: &str,
+    grid_resolution: usize,
+    model: &str,
+) -> EconResult<PdpResult>
+where
+    F: Fn(&Array2<f64>) -> EconResult<Vec<f64>>,
+{
+    let config = PdpConfig {
+        use_quantiles: false,
+        grid_resolution: Some(grid_resolution),
+        ..Default::default()
+    };
+    let mut result = super::pdp::pd_1d(data, feature_idx, predict, &config)?;
+    result.feature_name = Some(feature_name.to_string());
+    result.model = Some(model.to_string());
+    Ok(result)
+}
+
 /// Compute partial dependence for GBM model.
 ///
+/// Uniform grid `seq(min, max, length.out = grid_resolution)` (`pdp::partial(grid.resolution)`), as
+/// [`crate::ml::partial_dependence`] with this `grid_resolution` and `use_quantiles = false`; errors as
+/// [`crate::ml::pdp::feature_grid`]. The GBM's predictions are probabilities for the Binomial family, as
+/// `gbm_predict` returns them.
+///
 /// # Arguments
-/// * `data` - Original feature matrix (n_samples x n_features)
+/// * `data` - Original feature matrix (n_samples x n_features), with the columns the model was fitted on
 /// * `result` - Fitted GBM result
 /// * `feature_idx` - Index of feature for partial dependence
 /// * `feature_name` - Name of the feature
-/// * `grid_resolution` - Number of grid points
+/// * `grid_resolution` - Number of grid points, at least 1
 pub fn gbm_partial_dependence(
     data: ArrayView2<f64>,
     result: &super::GbmResult,
     feature_idx: usize,
     feature_name: &str,
     grid_resolution: usize,
-) -> Result<PartialDependenceResult, String> {
-    use super::gbm_predict;
-
-    let n_samples = data.nrows();
-    let n_features = data.ncols();
-
-    if feature_idx >= n_features {
-        return Err(format!(
-            "Feature index {} out of bounds ({})",
-            feature_idx, n_features
-        ));
-    }
-
-    if result.trees.is_empty() {
-        return Err(
-            "GBM model has no fitted trees - cannot compute partial dependence".to_string(),
-        );
-    }
-
-    // Generate grid values for the feature
-    let col = data.column(feature_idx);
-    let min_val = col.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_val = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-    let step = if grid_resolution > 1 {
-        (max_val - min_val) / (grid_resolution - 1) as f64
-    } else {
-        0.0
-    };
-
-    let grid: Vec<f64> = (0..grid_resolution)
-        .map(|i| min_val + step * i as f64)
-        .collect();
-
-    // Compute partial dependence at each grid point
-    let mut pd_values = Vec::with_capacity(grid_resolution);
-
-    for &grid_val in &grid {
-        // Create modified data with feature set to grid value
-        let mut modified = Array2::zeros((n_samples, n_features));
-        for i in 0..n_samples {
-            for j in 0..n_features {
-                modified[[i, j]] = if j == feature_idx {
-                    grid_val
-                } else {
-                    data[[i, j]]
-                };
-            }
-        }
-
-        // Predict and average
-        let predictions = gbm_predict(result, modified.view())
-            .map_err(|e| format!("GBM prediction failed: {}", e))?;
-        let avg = predictions.iter().sum::<f64>() / n_samples as f64;
-        pd_values.push(avg);
-    }
-
-    Ok(PartialDependenceResult {
-        feature_names: vec![feature_name.to_string()],
-        grid_values: vec![grid],
-        pd_values,
-        model_type: "GBM".to_string(),
-        is_2d: false,
-    })
+) -> EconResult<PdpResult> {
+    model_partial_dependence(
+        data,
+        super::pdp::gbm_predictor(result, data.ncols())?,
+        feature_idx,
+        feature_name,
+        grid_resolution,
+        "GBM",
+    )
 }
 
-/// Compute partial dependence for CART model.
+/// Compute partial dependence for CART model. Grid and errors as [`gbm_partial_dependence`].
 ///
 /// # Arguments
-/// * `data` - Original feature matrix (n_samples x n_features)
+/// * `data` - Original feature matrix (n_samples x n_features), with the columns the model was fitted on
 /// * `result` - Fitted CART result
 /// * `feature_idx` - Index of feature for partial dependence
 /// * `feature_name` - Name of the feature
-/// * `grid_resolution` - Number of grid points
+/// * `grid_resolution` - Number of grid points, at least 1
 pub fn cart_partial_dependence(
     data: ArrayView2<f64>,
     result: &super::CartResult,
     feature_idx: usize,
     feature_name: &str,
     grid_resolution: usize,
-) -> Result<PartialDependenceResult, String> {
-    use super::cart_predict;
-
-    let n_samples = data.nrows();
-    let n_features = data.ncols();
-
-    if feature_idx >= n_features {
-        return Err(format!(
-            "Feature index {} out of bounds ({})",
-            feature_idx, n_features
-        ));
-    }
-
-    // Generate grid values for the feature
-    let col = data.column(feature_idx);
-    let min_val = col.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_val = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-    let step = if grid_resolution > 1 {
-        (max_val - min_val) / (grid_resolution - 1) as f64
-    } else {
-        0.0
-    };
-
-    let grid: Vec<f64> = (0..grid_resolution)
-        .map(|i| min_val + step * i as f64)
-        .collect();
-
-    // Compute partial dependence at each grid point
-    let mut pd_values = Vec::with_capacity(grid_resolution);
-
-    for &grid_val in &grid {
-        // Create modified data with feature set to grid value
-        let mut modified = Array2::zeros((n_samples, n_features));
-        for i in 0..n_samples {
-            for j in 0..n_features {
-                modified[[i, j]] = if j == feature_idx {
-                    grid_val
-                } else {
-                    data[[i, j]]
-                };
-            }
-        }
-
-        // Predict and average
-        let predictions = cart_predict(result, modified.view())
-            .map_err(|e| format!("CART prediction failed: {}", e))?;
-        let avg = predictions.iter().sum::<f64>() / n_samples as f64;
-        pd_values.push(avg);
-    }
-
-    Ok(PartialDependenceResult {
-        feature_names: vec![feature_name.to_string()],
-        grid_values: vec![grid],
-        pd_values,
-        model_type: "CART".to_string(),
-        is_2d: false,
-    })
+) -> EconResult<PdpResult> {
+    model_partial_dependence(
+        data,
+        super::pdp::cart_predictor(result, data.ncols())?,
+        feature_idx,
+        feature_name,
+        grid_resolution,
+        "CART",
+    )
 }
 
 #[cfg(test)]
@@ -931,15 +823,116 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(pd.feature_names, vec!["x0"]);
-        assert_eq!(pd.grid_values.len(), 1);
-        assert_eq!(pd.grid_values[0].len(), 10);
-        assert_eq!(pd.pd_values.len(), 10);
-        assert!(!pd.is_2d);
+        assert_eq!(pd.feature_name.as_deref(), Some("x0"));
+        assert_eq!(pd.grid_values.len(), 10);
+        assert_eq!(pd.pdp_values.len(), 10);
+        assert_eq!(pd.model.as_deref(), Some("GBM"));
 
         // PD should be increasing (since target = 2*x0 + noise)
-        let first = pd.pd_values[0];
-        let last = pd.pd_values[pd.pd_values.len() - 1];
+        let first = pd.pdp_values[0];
+        let last = pd.pdp_values[pd.pdp_values.len() - 1];
         assert!(last > first, "PD should increase with x0");
+    }
+
+    /// The GBM/CART helpers use the same uniform grid rule as every other entry point (pdp's seq, exact) and the same
+    /// averaging (identical to try_partial_dependence on the model's predictions).
+    #[test]
+    fn test_validate_pdp_lm_model_helpers_uniform_grid() {
+        use super::super::pdp::{
+            test_fixtures::{column, matrix},
+            try_partial_dependence,
+        };
+        use super::super::{CartConfig, GbmConfig, cart, cart_predict, gbm, gbm_predict};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("pdp_lm");
+        let x = matrix(&ds, &["x1", "x2", "x3"]);
+        let y = column(&ds, "y");
+        let gc = GbmConfig {
+            n_trees: 30,
+            seed: Some(3),
+            ..Default::default()
+        };
+        let gfit = gbm(x.view(), y.view(), &gc).unwrap();
+        let cfit = cart(x.view(), y.view(), &CartConfig::default()).unwrap();
+        let gpd = gbm_partial_dependence(x.view(), &gfit, 0, "x1", 25).unwrap();
+        let cpd = cart_partial_dependence(x.view(), &cfit, 0, "x1", 25).unwrap();
+        Check::new(&case)
+            .vector("pd_uniform_grid", &gpd.grid_values, Tol::exact())
+            .finish();
+        Check::new(&case)
+            .vector("pd_uniform_grid", &cpd.grid_values, Tol::exact())
+            .finish();
+        let uniform = PdpConfig {
+            use_quantiles: false,
+            grid_resolution: Some(25),
+            ..Default::default()
+        };
+        let gref =
+            try_partial_dependence(&x, 0, |m| gbm_predict(&gfit, m.view()), &uniform).unwrap();
+        let cref =
+            try_partial_dependence(&x, 0, |m| cart_predict(&cfit, m.view()), &uniform).unwrap();
+        assert_eq!(gpd.pdp_values, gref.pdp_values);
+        assert_eq!(cpd.pdp_values, cref.pdp_values);
+        assert_eq!(
+            (gpd.model.as_deref(), cpd.model.as_deref()),
+            (Some("GBM"), Some("CART"))
+        );
+        assert_eq!(gpd.feature_name.as_deref(), Some("x1"));
+    }
+
+    /// grid_resolution 0 is an error (was an empty result); a narrower matrix is an error, not an out-of-bounds
+    /// index in the trees' traversal.
+    #[test]
+    fn test_model_pd_rejects_zero_grid_and_column_mismatch() {
+        use super::super::{CartConfig, GbmConfig, cart, gbm};
+        let (x, y) = super::super::pdp::test_fixtures::two_feature_data();
+        let gc = GbmConfig {
+            n_trees: 5,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let gfit = gbm(x.view(), y.view(), &gc).unwrap();
+        let cfit = cart(x.view(), y.view(), &CartConfig::default()).unwrap();
+        let e = gbm_partial_dependence(x.view(), &gfit, 0, "x0", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("grid_resolution must be at least 1"), "{e}");
+        let e = cart_partial_dependence(x.view(), &cfit, 0, "x0", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("grid_resolution must be at least 1"), "{e}");
+        let narrow = x.slice(ndarray::s![.., 0..1]);
+        let e = gbm_partial_dependence(narrow, &gfit, 0, "x0", 5)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("was fitted on 2 features"), "{e}");
+        let e = cart_partial_dependence(narrow, &cfit, 0, "x0", 5)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("was fitted on 2 features"), "{e}");
+    }
+
+    /// One partial-dependence result type: the alias, and the helpers' signatures.
+    #[test]
+    fn test_partial_dependence_result_is_pdp_result() {
+        #[allow(deprecated)]
+        fn alias_is_pdp_result(r: PdpResult) -> PartialDependenceResult {
+            r
+        }
+        let _ = alias_is_pdp_result;
+        let _: fn(
+            ArrayView2<f64>,
+            &super::super::GbmResult,
+            usize,
+            &str,
+            usize,
+        ) -> EconResult<PdpResult> = gbm_partial_dependence;
+        let _: fn(
+            ArrayView2<f64>,
+            &super::super::CartResult,
+            usize,
+            &str,
+            usize,
+        ) -> EconResult<PdpResult> = cart_partial_dependence;
     }
 }
