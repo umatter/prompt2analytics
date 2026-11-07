@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "ml_cart",
+      "name": "CART as rpart: weakest-link complexity table, V-fold cross-validation, pruning, primary-split importance",
+      "category": "ml",
+      "reference": "rpart::rpart(method = 'anova' | 'class', parms = list(split = 'gini' | 'information'), xval = fold vector, maxsurrogate = 0, maxcompete = 0, usesurrogate = 0); rpart::prune",
+      "doc": "validation/ml/cart.md",
+      "cases": [
+        "cart_cp_anova",
+        "cart_cp_class",
+        "cart_class_ties",
+        "cart_prune_xor"
+      ],
+      "tests": [
+        "p2a-core::ml::cart::tests::test_validate_cart_cp_anova",
+        "p2a-core::ml::cart::tests::test_validate_cart_cp_class",
+        "p2a-core::ml::cart::tests::test_validate_cart_info_split",
+        "p2a-core::ml::cart::tests::test_validate_cart_class_ties",
+        "p2a-core::ml::cart::tests::test_validate_cart_class_codes_do_not_change_the_tree"
+      ],
+      "quantities": [
+        "cp table: CP, nsplit, rel error, xerror, xstd",
+        "frame: node ids, split variable, n, dev, yval, complexity",
+        "split points and directions",
+        "variable importance of the primary splits",
+        "training predictions",
+        "class probabilities",
+        "root risk",
+        "min-xerror and 1-SE cp",
+        "class ties (lowest label)",
+        "invariance to class coding"
+      ],
+      "tolerance": "validation/README.md coefficient row: n = 300 1e-8 relative, n = 30-40 1e-6 relative (abs 1e-12); counts, node ids, split variables, directions and class labels exact",
+      "deviations": [
+        {
+          "finding": "ML-125",
+          "quantity": "surrogate and competitor splits, missing feature values",
+          "note": "not implemented: the cases use maxsurrogate = 0, maxcompete = 0, usesurrogate = 0, and cart() refuses non-finite features"
+        },
+        {
+          "finding": "ML-125",
+          "quantity": "variable importance with default controls",
+          "note": "primary splits only, as rpart(maxsurrogate = 0); rpart's default also counts surrogate splits"
+        }
+      ],
+      "supersedes_legacy": []
+    }
+  ]
+}
