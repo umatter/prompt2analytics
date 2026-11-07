@@ -22,7 +22,7 @@
 //! Numeric storage types: byte, int and long load as Int64, float and double as Float64. Every
 //! missing code (`.`, `.a`-`.z`) loads as null: byte above 100, int above 32,740, long above
 //! 2,147,483,620, float above 0x7EFFFFFF (1.70141173319e38) and double above 0x7FDFFFFFFFFFFFFF
-//! (8.98846567431e307), the format's largest values.
+//! (8.98846567431e307), the format's largest values. A file must declare at least one variable.
 
 use polars::frame::column::Column;
 use polars::prelude::*;
@@ -101,6 +101,8 @@ const DATA_END_TAG: &[u8] = b"</data>";
 /// The format's largest non-missing float and double; every missing code is above them.
 const FLOAT_MAX: f32 = f32::from_bits(0x7EFF_FFFF);
 const DOUBLE_MAX: f64 = f64::from_bits(0x7FDF_FFFF_FFFF_FFFF);
+/// Rows between two resource checkpoints.
+const ROWS_PER_CHECKPOINT: u64 = 1 << 16;
 
 /// Stata variable type
 #[derive(Debug, Clone)]
@@ -198,6 +200,14 @@ impl<R: Read + Seek> StataReader<R> {
         }
         Self::expect(&mut reader, b"</map>")?;
 
+        // A dataset without variables cannot hold observations (and the row loop would spin):
+        // Stata refuses to save one, and ReadStat refuses to read one (DATA-73).
+        if n_vars_raw == 0 {
+            return Err(StataError::InvalidFormat(format!(
+                "the file declares no variables (<K> = 0) and {n_obs} observations; a Stata \
+                 dataset has at least one variable"
+            )));
+        }
         Self::validate_map(&map, file_len)?;
         let types_section = map[MAP_VARNAMES] - map[MAP_VARIABLE_TYPES];
         let names_section = map[MAP_SORTLIST] - map[MAP_VARNAMES];
@@ -301,27 +311,34 @@ impl<R: Read + Seek> StataReader<R> {
             )));
         }
 
-        // Prepare column builders. Capacity is bounded above (see the guard
-        // just above), so this cannot be abused for a huge allocation.
-        let capacity = (self.n_obs as usize).min(1 << 20);
-        let mut columns: Vec<Vec<AnyValue>> = vec![Vec::with_capacity(capacity); self.n_vars];
+        // Column buffers, one per variable and typed by it. The guard above bounds n_obs by
+        // the file size; the cell count is also checked against the per-allocation ceiling.
+        let capacity = usize::try_from(self.n_obs)
+            .unwrap_or(usize::MAX)
+            .min(1 << 20);
+        let cells = crate::resource::checked_len(&[self.n_vars, capacity], "Stata columns")
+            .map_err(resource_err)?;
+        crate::resource::check_alloc::<Option<String>>(cells, "Stata columns")
+            .map_err(resource_err)?;
+        let mut columns = Vec::with_capacity(self.n_vars);
+        for dtype in &var_types {
+            columns.push(ColumnBuf::for_type(dtype, capacity)?);
+        }
 
-        // Read observations
-        for _ in 0..self.n_obs {
+        for row in 0..self.n_obs {
+            if row % ROWS_PER_CHECKPOINT == 0 {
+                crate::resource::checkpoint().map_err(resource_err)?;
+            }
             for (var_idx, dtype) in var_types.iter().enumerate() {
-                let value = self.read_value(dtype, &var_names[var_idx])?;
-                columns[var_idx].push(value);
+                self.read_value(dtype, &var_names[var_idx], &mut columns[var_idx])?;
             }
         }
 
-        // Convert to Polars columns
-        let mut polars_columns: Vec<Column> = Vec::with_capacity(self.n_vars);
-
-        for (var_idx, dtype) in var_types.iter().enumerate() {
-            let col = self.build_column(&var_names[var_idx], dtype, &columns[var_idx])?;
-            polars_columns.push(col);
-        }
-
+        let polars_columns: Vec<Column> = columns
+            .into_iter()
+            .zip(&var_names)
+            .map(|(buf, name)| buf.into_column(name))
+            .collect();
         DataFrame::new(polars_columns).map_err(StataError::PolarsError)
     }
 
@@ -500,111 +517,93 @@ impl<R: Read + Seek> StataReader<R> {
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         release.decode(&buf[..end], what)
     }
+    /// Read one cell of `dtype` and push it to the variable's buffer.
     fn read_value(
         &mut self,
         dtype: &StataType,
         name: &str,
-    ) -> Result<AnyValue<'static>, StataError> {
-        match dtype {
-            StataType::Byte => {
-                let v = Self::read_i8(&mut self.reader)?;
-                // Stata missing values for byte: > 100
-                if v > 100 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Int64(v as i64))
-                }
+        buf: &mut ColumnBuf,
+    ) -> Result<(), StataError> {
+        match (dtype, buf) {
+            (StataType::Byte, ColumnBuf::Int(v)) => {
+                let x = Self::read_i8(&mut self.reader)?;
+                v.push((x <= 100).then_some(i64::from(x))); // 101..=127: . and .a-.z
             }
-            StataType::Int => {
-                let v = Self::read_i16(&mut self.reader, self.byte_order)?;
-                // Stata missing values for int: > 32740
-                if v > 32740 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Int64(v as i64))
-                }
+            (StataType::Int, ColumnBuf::Int(v)) => {
+                let x = Self::read_i16(&mut self.reader, self.byte_order)?;
+                v.push((x <= 32_740).then_some(i64::from(x)));
             }
-            StataType::Long => {
-                let v = Self::read_i32(&mut self.reader, self.byte_order)?;
-                // Stata missing values for long: > 2147483620
-                if v > 2147483620 {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Int64(v as i64))
-                }
+            (StataType::Long, ColumnBuf::Int(v)) => {
+                let x = Self::read_i32(&mut self.reader, self.byte_order)?;
+                v.push((x <= 2_147_483_620).then_some(i64::from(x)));
             }
-            StataType::Float => {
-                let v = Self::read_f32(&mut self.reader, self.byte_order)?;
-                if v.is_nan() || v > FLOAT_MAX {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Float64(v as f64))
-                }
+            (StataType::Float, ColumnBuf::Float(v)) => {
+                let x = Self::read_f32(&mut self.reader, self.byte_order)?;
+                v.push((!x.is_nan() && x <= FLOAT_MAX).then_some(f64::from(x)));
             }
-            StataType::Double => {
-                let v = Self::read_f64(&mut self.reader, self.byte_order)?;
-                if v.is_nan() || v > DOUBLE_MAX {
-                    Ok(AnyValue::Null)
-                } else {
-                    Ok(AnyValue::Float64(v))
-                }
+            (StataType::Double, ColumnBuf::Float(v)) => {
+                let x = Self::read_f64(&mut self.reader, self.byte_order)?;
+                v.push((!x.is_nan() && x <= DOUBLE_MAX).then_some(x));
             }
-            StataType::Str(len) => {
+            (StataType::Str(len), ColumnBuf::Text(v)) => {
                 let release = self.release;
                 let s = Self::read_fixed_string(&mut self.reader, *len, release, || {
                     format!("a value of variable {name}")
                 })?;
-                Ok(AnyValue::StringOwned(s.into()))
+                v.push(Some(s));
             }
-            StataType::StrL => {
-                // Read strL reference (v, o) - 8 bytes
-                let mut buf = [0u8; 8];
-                self.reader.read_exact(&mut buf)?;
-                // For now, return placeholder - full strL support requires reading strls section
-                Ok(AnyValue::StringOwned("<strL>".into()))
+            (StataType::StrL, ColumnBuf::Text(v)) => {
+                // strL reference (v, o): 8 bytes. The <strls> section is not decoded (DATA-74).
+                let mut b = [0u8; 8];
+                self.reader.read_exact(&mut b)?;
+                v.push(Some("<strL>".to_string()));
+            }
+            _ => {
+                return Err(StataError::ParseError(format!(
+                    "internal: the buffer of variable {name} does not match its type"
+                )));
             }
         }
+        Ok(())
+    }
+}
+
+/// The values of one variable, typed by its storage type.
+enum ColumnBuf {
+    Int(Vec<Option<i64>>),
+    Float(Vec<Option<f64>>),
+    Text(Vec<Option<String>>),
+}
+
+impl ColumnBuf {
+    fn for_type(dtype: &StataType, capacity: usize) -> Result<Self, StataError> {
+        let what = "Stata columns";
+        Ok(match dtype {
+            StataType::Byte | StataType::Int | StataType::Long => ColumnBuf::Int(
+                crate::resource::try_with_capacity(capacity, what).map_err(resource_err)?,
+            ),
+            StataType::Float | StataType::Double => ColumnBuf::Float(
+                crate::resource::try_with_capacity(capacity, what).map_err(resource_err)?,
+            ),
+            StataType::Str(_) | StataType::StrL => ColumnBuf::Text(
+                crate::resource::try_with_capacity(capacity, what).map_err(resource_err)?,
+            ),
+        })
     }
 
-    fn build_column(
-        &self,
-        name: &str,
-        dtype: &StataType,
-        values: &[AnyValue<'static>],
-    ) -> Result<Column, StataError> {
-        match dtype {
-            StataType::Byte | StataType::Int | StataType::Long => {
-                let vals: Vec<Option<i64>> = values
-                    .iter()
-                    .map(|v| match v {
-                        AnyValue::Int64(i) => Some(*i),
-                        _ => None,
-                    })
-                    .collect();
-                Ok(Column::new(name.into(), vals))
-            }
-            StataType::Float | StataType::Double => {
-                let vals: Vec<Option<f64>> = values
-                    .iter()
-                    .map(|v| match v {
-                        AnyValue::Float64(f) => Some(*f),
-                        _ => None,
-                    })
-                    .collect();
-                Ok(Column::new(name.into(), vals))
-            }
-            StataType::Str(_) | StataType::StrL => {
-                let vals: Vec<Option<String>> = values
-                    .iter()
-                    .map(|v| match v {
-                        AnyValue::StringOwned(s) => Some(s.to_string()),
-                        _ => None,
-                    })
-                    .collect();
-                Ok(Column::new(name.into(), vals))
-            }
+    fn into_column(self, name: &str) -> Column {
+        match self {
+            ColumnBuf::Int(v) => Column::new(name.into(), v),
+            ColumnBuf::Float(v) => Column::new(name.into(), v),
+            ColumnBuf::Text(v) => Column::new(name.into(), v),
         }
     }
+}
+
+/// Map a core resource error (allocation size, cancellation) to a parse error, as the SAS reader
+/// does: a large valid file is not a corrupt one.
+fn resource_err(e: crate::errors::EconError) -> StataError {
+    StataError::ParseError(e.to_string())
 }
 
 /// Load a Stata DTA file into a Polars DataFrame.
@@ -758,6 +757,46 @@ mod tests {
         let ds = crate::data::DataLoader::load(fixture_path("dta118_haven.dta")).unwrap();
         assert_eq!(ds.name(), Some("dta118_haven"));
         assert_matches_haven(&case, "dta118_haven", ds.df());
+    }
+
+    // ---- refusals ----
+
+    #[test]
+    fn test_validate_stata_k0_n_positive_is_error() {
+        // DATA-73: with <K> = 0 the N guard never ran and the row loop spun N times. ReadStat
+        // refuses the same patched bytes (case values guard__dta_k0_n3, guard__dta_k0_n2p40 = -1).
+        // N = 2^40 comes last: before the fix it spins (debug builds), N = 3 fails first.
+        let case = Case::load("data_readers_values");
+        assert_eq!(case.scalar("guard__dta_k0_n3"), -1.0);
+        assert_eq!(case.scalar("guard__dta_k0_n2p40"), -1.0);
+        for n in [3u64, 0, 1 << 40] {
+            let mut b = fixture_bytes("dta118_haven.dta");
+            put(&mut b, K118, &0u16.to_le_bytes());
+            put(&mut b, N118, &n.to_le_bytes());
+            assert_invalid(
+                load(b),
+                &format!("no variables (<K> = 0) and {n} observations"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_stata_column_buffers_respect_the_allocation_ceiling() {
+        // G3: 6 variables x 6 rows x 24 bytes = 864 bytes of column buffers, refused under a
+        // 64-byte per-allocation ceiling instead of allocated.
+        let e = crate::resource::with_alloc_ceiling(Some(64), || {
+            load_stata(fixture_path("dta118_haven.dta")).unwrap_err()
+        });
+        match e {
+            StataError::ParseError(m) => {
+                assert!(
+                    m.contains("Stata columns") && m.contains("per-allocation limit"),
+                    "{m}"
+                )
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+        assert!(load_stata(fixture_path("dta118_haven.dta")).is_ok()); // ceiling restored
     }
 
     #[test]

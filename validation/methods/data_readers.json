@@ -18,7 +18,8 @@
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_119",
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_119_big_endian",
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_118_storage_types",
-        "p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture"
+        "p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture",
+        "p2a-core::data::stata::tests::test_validate_stata_k0_n_positive_is_error"
       ],
       "quantities": [
         "shape",
