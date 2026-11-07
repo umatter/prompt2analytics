@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "stat_cancor_t3",
+  "area": "multivariate/cancor",
+  "method": "cancor: correlations, coefficients and centres (n = 100, p = 3, q = 2; scale invariance)",
+  "reference": "stats::cancor (QR of the centred data, SVD of Qx'Qy)",
+  "call": "cancor(as.matrix(d[, c('x1','x2','x3')]), as.matrix(d[, c('y1','y2')]))",
+  "dataset": "validation/datasets/generated/cancor_t3.csv",
+  "datasets": ["validation/datasets/generated/cancor_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "cor": [0.87932907247159164, 0.13269379517114782],
+    "xcoef": [0.042047067198829273, 0.041859373305781843, 0.031893286647262993, 0.13900401774072027, -0.16309939887477523, -0.025655251488974917],
+    "ycoef": [0.085318148437044786, 0.014828907930355864, 0.1087873923398459, -0.15285071167931152],
+    "xcenter": {
+      "names": ["x1", "x2", "x3"],
+      "values": [-0.011227038200000006, 0.020827766600000002, 0.0393129329]
+    },
+    "ycenter": {
+      "names": ["y1", "y2"],
+      "values": [-0.017868867900000005, 0.024178476800000005]
+    },
+    "n_canonical": 2
+  }
+}

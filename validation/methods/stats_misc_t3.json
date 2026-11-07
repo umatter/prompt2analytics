@@ -117,6 +117,58 @@
       "tolerance": "Tol::coef(n) for gamma, Tol::stat(n) for statistics and variances, Tol::p_value(n); lag exact",
       "deviations": [{"finding": "STAT-6", "quantity": "statistic of an exact fit", "note": "p2a refuses; PP.test returns NaN"}],
       "supersedes_legacy": []
+    },
+    {
+      "id": "cancor_t3",
+      "name": "Canonical correlation: centres and dimensions",
+      "category": "multivariate",
+      "reference": "stats::cancor",
+      "doc": "validation/multivariate/cancor.md",
+      "cases": ["stat_cancor_t3"],
+      "tests": ["p2a-core::stats::cancor::tests::test_validate_cancor_t3_centres"],
+      "quantities": ["xcenter", "ycenter", "number of canonical pairs"],
+      "tolerance": "Tol::coef(100)",
+      "deviations": [{"finding": "STAT-16", "quantity": "canonical correlations, xcoef, ycoef", "note": "Sigma^-1 instead of the Cholesky factor; R values in cor, xcoef, ycoef (sign-normalised)"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "poisson_test_t3",
+      "name": "Exact Poisson test (one sample, comparison of two rates)",
+      "category": "stats",
+      "reference": "stats::poisson.test",
+      "doc": "validation/stats/poisson_test.md",
+      "cases": ["stat_poisson_t3"],
+      "tests": ["p2a-core::stats::poissontest::tests::test_validate_poisson_test_t3"],
+      "quantities": ["estimate", "expected count (r = 1)", "one-sided p", "two-sided p (symmetric binomial)", "two-sided exact CI"],
+      "tolerance": "Tol::coef(n), Tol::stat(n), Tol::p_value(n) with n the total count",
+      "deviations": [{"finding": "STAT-58", "quantity": "two-sided p-values", "note": "p2a doubles the smaller tail; R sums outcomes with density <= d(x)"}, {"finding": "STAT-59", "quantity": "one-sided CIs", "note": "p2a reports the two-sided interval"}],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "mad_t3",
+      "name": "Median absolute deviation",
+      "category": "stats",
+      "reference": "stats::mad",
+      "doc": "validation/stats/robust.md",
+      "cases": ["stat_robust_weighted_t3"],
+      "tests": ["p2a-core::stats::robust::tests::test_validate_mad_t3"],
+      "quantities": ["mad (constant 1.4826)", "mad (constant 1)", "mad about a given centre"],
+      "tolerance": "Tol::coef(25)",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "cov_wt_t3",
+      "name": "Weighted mean and weighted covariance",
+      "category": "stats",
+      "reference": "stats::weighted.mean; stats::cov.wt",
+      "doc": "validation/stats/weighted.md",
+      "cases": ["stat_robust_weighted_t3"],
+      "tests": ["p2a-core::stats::weighted::tests::test_validate_cov_wt_t3"],
+      "quantities": ["weighted mean", "centre", "unbiased covariance", "correlation", "ML covariance", "normalised weights"],
+      "tolerance": "Tol::coef(25), Tol::stat(25)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

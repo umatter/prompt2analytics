@@ -414,6 +414,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Shapiro-Wilk normality test | [shapiro_wilk.md](stats/shapiro_wilk.md) | R-pinned |
 | t-tests (one-sample, Welch, pooled, paired) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
 | Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-26, STAT-27) |
+| Exact Poisson test (poisson.test) | [poisson_test.md](stats/poisson_test.md) | R-pinned, known deviations (STAT-58, STAT-59) |
 | Test of proportions (prop.test) | [prop_test.md](stats/prop_test.md) | R-pinned, known deviations (STAT-59, STAT-63) |
 | Spline and linear interpolation: default number of points (spline, approx) | [spline.md](stats/spline.md) | R-pinned, known deviations (STAT-40, STAT-69) |
 | Mood test of scale | [mood.md](stats/mood.md) | R-pinned, known deviations (STAT-29) |
@@ -424,6 +425,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
 | Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
 | Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned, known deviations (TOOL-10) |
+| Canonical correlation (cancor) | [cancor.md](multivariate/cancor.md) | R-pinned, known deviations (STAT-16) |
 | Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
 | Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
 | Robust summaries and interpolation (fivenum, IQR, mad, ecdf, density, spline, approx); quantile types 1-9, boxplot.stats; p-value and quantile helpers (pt, pchisq, pf, pnorm tails; qnorm, qt, qchisq) | [robust.md](stats/robust.md) | R-pinned, known deviations (STAT-37, STAT-65, STAT-69, STAT-87) |

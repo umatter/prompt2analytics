@@ -27,54 +27,26 @@ The implementation uses a numerically stable approach:
 
 ## Test Cases
 
-### Test 1: LifeCycleSavings Dataset (R classic example)
+### Case `stat_cancor_t3` (R-pinned in part)
 
-**R Code**:
-```r
-data(LifeCycleSavings)
-pop <- LifeCycleSavings[, 2:3]  # pop15, pop75
-oec <- LifeCycleSavings[, -(2:3)]  # sr, dpi, ddpi
-result <- cancor(pop, oec)
-print(result$cor)
-```
+Case in `validation/r/cases/stats_misc_t3.R`, dataset `validation/datasets/generated/cancor_t3.csv`
+(n = 100).
 
-**Expected Results**:
-| Canonical Correlation | R Value | Tolerance |
-|-----------------------|---------|-----------|
-| ρ₁ | 0.8247... | 1e-4 |
-| ρ₂ | 0.3652... | 1e-4 |
+| Quantity | R | Compared |
+|---|---|---|
+| `xcenter` | -0.011227038200000006, 0.020827766600000002, 0.0393129329 | `Tol::coef(100)` |
+| `ycenter` | -0.017868867900000005, 0.024178476800000005 | `Tol::coef(100)` |
+| number of canonical pairs | 2 | exact |
+| `cor` | 0.8793290724715916, 0.13269379517114782 | no (STAT-16) |
+| `xcoef`, `ycoef` | in the case, sign-normalised | no (STAT-16) |
 
-**Rust Test**: `crates/p2a-core/src/stats/cancor.rs::tests::test_validate_cancor_against_r`
-
-### Test 2: Synthetic Correlated Data
-
-**R Code**:
-```r
-set.seed(42)
-n <- 100
-z <- rnorm(n)
-X <- cbind(z + rnorm(n, 0, 0.5), 0.8*z + rnorm(n, 0, 0.5), 0.5*z + rnorm(n, 0, 0.7))
-Y <- cbind(0.9*z + rnorm(n, 0, 0.4), 0.7*z + rnorm(n, 0, 0.6))
-result <- cancor(X, Y)
-```
-
-**Results Comparison**: Canonical correlations match within 1e-4 tolerance.
-
-**Rust Test**: See unit tests in `cancor.rs`
-
-### Test 3: Simple 2×2 Case
-
-Tests with minimal dimensions to verify basic correctness.
-
-## Numerical Precision Summary
-
-| Statistic | Tolerance | Notes |
-|-----------|-----------|-------|
-| Canonical correlations | 1e-4 | May differ slightly due to Cholesky vs QR approach |
-| Coefficients | 1e-3 | Sign may be flipped (both valid solutions) |
-| Canonical scores | 1e-4 | Depends on coefficient accuracy |
+**Rust tests:** `stats::cancor::tests::test_validate_cancor_t3_centres` (registry
+`validation/methods/stats_misc_t3.json`, id `cancor_t3`);
+`stats::cancor::tests::test_cancor_dimensions_and_order` (dimensions and order, not R-pinned).
 
 ## Known Differences
+
+0. **STAT-16:** the canonical correlations and coefficients are not R's: p2a uses Sigma^-1 where R uses the Cholesky factor. They are registry deviations, not compared.
 
 1. **Coefficient signs**: The sign of canonical coefficients may be flipped compared to R. This is mathematically equivalent since both (a, b) and (-a, -b) produce the same correlation.
 

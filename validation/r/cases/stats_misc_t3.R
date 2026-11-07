@@ -253,3 +253,78 @@ case("stat_pp_gdp_t3", "timeseries/pptest", "PP.test on the paper's gdp_quarterl
   list(values = v, reference = "stats::PP.test (cross-check tseries::pp.test, type Z(t_alpha))",
        call = "PP.test(gdp_growth, lshort = TRUE | FALSE)", packages = c("tseries"))
 })
+
+case("stat_cancor_t3", "multivariate/cancor", "cancor: correlations, coefficients and centres (n = 100, p = 3, q = 2; scale invariance)", function(ctx) {
+  set.seed(42)
+  n <- 100
+  z <- rnorm(n)
+  X <- cbind(z + rnorm(n, 0, 0.5), 0.8 * z + rnorm(n, 0, 0.5), 0.5 * z + rnorm(n, 0, 0.7))
+  Y <- cbind(0.9 * z + rnorm(n, 0, 0.4), 0.7 * z + rnorm(n, 0, 0.6))
+  d <- ctx$gen_dataset("cancor_t3", data.frame(x1 = round(X[, 1], 8), x2 = round(X[, 2], 8), x3 = round(X[, 3], 8),
+                                                  y1 = round(Y[, 1], 8), y2 = round(Y[, 2], 8)))
+  Xd <- as.matrix(d[, c("x1", "x2", "x3")]); Yd <- as.matrix(d[, c("y1", "y2")])
+  cc <- cancor(Xd, Yd)
+  cc10 <- cancor(Xd * 10, Yd * 0.01)
+  stopifnot(max(abs(cc$cor - cc10$cor)) < 1e-12)
+  # Coefficients are identified up to the sign of each canonical pair; normalise so that the first
+  # x coefficient of every pair is positive (the Rust test applies the same rule).
+  s <- sign(cc$xcoef[1, seq_along(cc$cor)])
+  xc <- sweep(cc$xcoef[, seq_along(cc$cor), drop = FALSE], 2, s, "*")
+  yc <- sweep(cc$ycoef[, seq_along(cc$cor), drop = FALSE], 2, s, "*")
+  list(values = list(cor = vec(cc$cor), xcoef = vec(as.numeric(xc)), ycoef = vec(as.numeric(yc)),
+                     xcenter = named(cc$xcenter), ycenter = named(cc$ycenter), n_canonical = length(cc$cor)),
+       reference = "stats::cancor (QR of the centred data, SVD of Qx'Qy)",
+       call = "cancor(as.matrix(d[, c('x1','x2','x3')]), as.matrix(d[, c('y1','y2')]))", packages = character(0))
+})
+
+case("stat_poisson_t3", "stats/poisson_test", "poisson.test: one-sample (exact CI, minlike two-sided p) and two-sample (binom.test); all alternatives", function(ctx) {
+  d <- ctx$dataset("datasets/grunfeld.csv")   # no data needed
+  v <- list()
+  p <- poisson.test(137, 24.19893)
+  v$big_p <- p$p.value; v$big_ci <- vec(p$conf.int); v$big_est <- unname(p$estimate); v$big_expected <- 1 * 24.19893
+  v$x1e6_ci <- vec(poisson.test(1e6, 1)$conf.int)   # large-count interval (STAT-60)
+  for (alt in c("two.sided", "less", "greater")) {
+    a <- poisson.test(10, 5, alternative = alt); tag <- c(two.sided = "two", less = "less", greater = "greater")[[alt]]
+    v[[paste0("x10_", tag, "_p")]] <- a$p.value
+    ci <- as.numeric(a$conf.int); ci[!is.finite(ci)] <- NA   # Inf upper bound of 'greater' cannot be stored
+    v[[paste0("x10_", tag, "_ci")]] <- vec(ci)
+  }
+  v$x10_expected <- 5
+  v$x150_ci <- vec(poisson.test(150, 1)$conf.int)              # gamma shape 150: inside statrs' 125..160 band (STAT-60)
+  v$x2_r5_p <- poisson.test(2, 1, r = 5)$p.value
+  for (alt in c("two.sided", "less", "greater")) {
+    a <- poisson.test(c(11, 21), c(800, 3011), alternative = alt); tag <- c(two.sided = "two", less = "less", greater = "greater")[[alt]]
+    v[[paste0("rr_", tag, "_p")]] <- a$p.value
+    ci <- as.numeric(a$conf.int); ci[!is.finite(ci)] <- NA
+    v[[paste0("rr_", tag, "_ci")]] <- vec(ci)
+  }
+  rr <- poisson.test(c(11, 21), c(800, 3011))
+  v$rr_est <- unname(rr$estimate); v$rr_expected <- unname(rr$parameter)
+  sy <- poisson.test(c(3, 10), c(1, 1))
+  v$sym_p <- sy$p.value; v$sym_ci <- vec(sy$conf.int); v$sym_est <- unname(sy$estimate); v$sym_expected <- unname(sy$parameter)
+  r2 <- poisson.test(c(11, 21), c(800, 3011), r = 2)
+  v$rr_r2_p <- r2$p.value
+  v$rr_r2_r_parameter <- unname(r2$parameter)                   # R: sum(x) r T1 / (T1 + r T2)
+  v$rr_r2_binomial_mean <- 32 * 2 * 800 / (2 * 800 + 3011)      # the binomial mean binom.test uses (p2a's parameter)
+  list(dataset = "validation/datasets/grunfeld.csv", values = v,
+       reference = "stats::poisson.test (one-sample: qgamma CI, minlike two-sided p; two-sample: binom.test)",
+       call = "poisson.test(137, 24.19893); poisson.test(10, 5, alternative); poisson.test(c(11, 21), c(800, 3011), ...)",
+       packages = character(0))
+})
+
+case("stat_robust_weighted_t3", "stats/robust", "mad (default and constant = 1, given centre), weighted.mean and cov.wt (unbiased, ML, cor) with unequal weights", function(ctx) {
+  set.seed(6767)
+  n <- 25
+  x1 <- round(rnorm(n, 10, 3), 4); x2 <- round(0.4 * x1 + rnorm(n, 0, 1.5), 4); w <- round(runif(n, 0.2, 2), 3)
+  d <- ctx$gen_dataset("robust_weighted_t3", data.frame(x1 = x1, x2 = x2, w = w))
+  X <- as.matrix(d[, c("x1", "x2")])
+  cu <- cov.wt(X, wt = d$w, cor = TRUE)
+  cm <- cov.wt(X, wt = d$w, method = "ML")
+  list(values = list(mad = mad(d$x1), mad_const1 = mad(d$x1, constant = 1), mad_center10 = mad(d$x1, center = 10),
+                     wmean = weighted.mean(d$x1, d$w),
+                     covwt_center = vec(cu$center), covwt_unbiased = vec(as.numeric(cu$cov)), covwt_cor = vec(as.numeric(cu$cor)),
+                     covwt_ml = vec(as.numeric(cm$cov)), covwt_wt = vec(cu$wt)),
+       reference = "stats::mad (constant 1.4826); stats::weighted.mean; stats::cov.wt (wt normalised; unbiased divisor 1 - sum(wt^2))",
+       call = "mad(x1[, constant, center]); weighted.mean(x1, w); cov.wt(cbind(x1, x2), wt = w, cor = TRUE[, method = 'ML'])",
+       packages = character(0))
+})

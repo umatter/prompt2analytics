@@ -71,6 +71,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 
 | File | Rows × columns | Case(s) | R file | Source |
 |---|---|---|---|---|
+| `generated/cancor_t3.csv` | 100 × 5 (x1, x2, x3, y1, y2) | `stat_cancor_t3` | `r/cases/stats_misc_t3.R` | x1-x3, y1-y2 with a shared factor |
 | `generated/gmm_iv.csv` | 500 × 7 (y, x1, x2, w, z1, z2, z3) | `gmm_linear_iv` | `r/cases/econ_gmm.R` | seed 20261115 |
 | `generated/ks_t3.csv` | 60 × 8 (id, xn, xu, xe, x5, y5, xa, ya) | `stat_ks_t3` | `r/cases/stats_misc_t3.R` | one- and two-sample KS, padded with NA |
 | `generated/longley.csv` | 16 × 7 (GNP.deflator, GNP, Unemployed, Armed.Forces, Population, Year, Employed) | `ols_longley` | `r/cases/regression.R` | `datasets::longley` |
@@ -80,6 +81,7 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/mte_boot_indices.csv` | 400 × 25 (b01-b25; 1-based row indices into rows 1-400 of `mte_sim.csv`) | `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261207 |
 | `generated/mte_sim.csv` | 2000 × 4 (y, d, z1, z2) | `mte_local_iv`, `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261205 |
 | `generated/pp_t3.csv` | 200 × 4 (id, ar, rw, rw100) | `stat_pp_t3` | `r/cases/stats_misc_t3.R` | AR(1) and random walks |
+| `generated/robust_weighted_t3.csv` | 25 × 3 (x1, x2, w) | `stat_robust_weighted_t3` | `r/cases/stats_misc_t3.R` | two samples and weights |
 | `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3` | `r/cases/stats_misc_t3.R` | sine plus noise |
 | `generated/step_legacy.csv` | 100 × 4 (y, x1, x2, x3) | `step_legacy` | `r/cases/regression.R` | seed 42 (DGP of `scripts/validate_regression_diag.R`) |
 | `generated/step_borderline.csv` | 120 × 4 (y, x1, x2, x3) | `step_borderline` | `r/cases/regression.R` | seed 5 |

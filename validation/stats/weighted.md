@@ -80,6 +80,19 @@ weights and normalised weights 1e-6 (`Tol::coef`), covariances and correlations 
 **Status:** R-pinned with a known deviation (registry `validation/methods/mcp_stats.json`, id
 `mcp_stats_weighted`).
 
+## Library functions (R-pinned)
+
+`weighted_mean` and `cov_wt` with unequal weights, on case `stat_robust_weighted_t3`
+(`validation/r/cases/stats_misc_t3.R`, dataset `validation/datasets/generated/robust_weighted_t3.csv`,
+n = 25): `weighted.mean` 8.465052716836286; `cov.wt` centre 8.465052716836286, 3.871493344367363;
+unbiased covariance 9.293739053294967, 3.86984720894979, 3.86984720894979, 5.164085712092987; correlation
+1, 0.5586011946969572, 0.5586011946969572, 1; ML covariance 8.84032668371106, 3.681049505154189, 3.681049505154189, 4.912146172363351.
+
+**Rust test:** `stats::weighted::tests::test_validate_cov_wt_t3` (also the normalised weights; registry
+`validation/methods/stats_misc_t3.json`, id `cov_wt_t3`). The same case pins `mad`:
+`stats::robust::tests::test_validate_mad_t3` (R 3.02272488, with `constant = 1` 2.0388, centre 10
+3.7128751800000006; id `mad_t3`).
+
 ## Known Differences
 
 - **TOOL-23:** `stats_cov_wt` uses its `center` field to switch the correlation matrix on or

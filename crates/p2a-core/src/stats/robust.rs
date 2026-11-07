@@ -1590,36 +1590,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mad() {
-        // R: mad(c(2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0)) -> 5.9304
-        let data = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0];
-        let result = mad(&data, None, None).unwrap();
-
-        let expected = 5.9304;
-        assert!(
-            (result - expected).abs() < 0.5,
-            "MAD mismatch: Rust={:.6}, R={:.6}",
-            result,
-            expected
-        );
-    }
-
-    #[test]
-    fn test_validate_mad_no_constant() {
-        // R: mad(c(2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0), constant = 1) -> 4.0
-        let data = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0];
-        let result = mad(&data, None, Some(1.0)).unwrap();
-
-        let expected = 4.0;
-        assert!(
-            (result - expected).abs() < 0.1,
-            "MAD (constant=1) mismatch: Rust={:.6}, R={:.6}",
-            result,
-            expected
-        );
-    }
-
-    #[test]
     fn test_validate_ecdf() {
         // R: e <- ecdf(c(1.0, 2.0, 3.0, 4.0, 5.0))
         // R: e(0)=0, e(1)=0.2, e(3)=0.6, e(5)=1.0, e(6)=1.0
@@ -1724,5 +1694,27 @@ mod tests {
             run_density(&[1.0, 2.0, 3.5, 4.0], Some(0.5), "bogus", Some(16)),
             Err(EconError::InvalidSpecification { .. })
         ));
+    }
+
+    /// STAT-67 (robust): mad with the default constant, constant = 1 and a given centre, pinned to R on noisy data.
+    #[test]
+    fn test_validate_mad_t3() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_robust_weighted_t3");
+        let x = numeric_column(ds.df(), "x1", NaPolicy::Fail).unwrap().0;
+        Check::new(&case)
+            .scalar("mad", mad(&x, None, None).unwrap(), Tol::coef(25))
+            .scalar(
+                "mad_const1",
+                mad(&x, None, Some(1.0)).unwrap(),
+                Tol::coef(25),
+            )
+            .scalar(
+                "mad_center10",
+                mad(&x, Some(10.0), None).unwrap(),
+                Tol::coef(25),
+            )
+            .finish();
     }
 }
