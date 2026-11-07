@@ -788,7 +788,7 @@ pub fn event_study_plot(
     }
 
     // Sort by time
-    valid_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    valid_points.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Calculate bounds
     let x_min = valid_points.first().unwrap().0;
@@ -1264,7 +1264,7 @@ pub fn irf_plot(
     }
 
     // Sort by horizon
-    valid_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    valid_points.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Calculate bounds
     let x_min = valid_points.first().unwrap().0;
@@ -2083,7 +2083,7 @@ fn calculate_smooth(points: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
     }
 
     let mut sorted_points = points.to_vec();
-    sorted_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_points.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let n = sorted_points.len();
     let window = ((n as f64 * span) as usize).max(3).min(n);
@@ -3156,5 +3156,62 @@ mod tests {
         assert!(!r.rows.contains(&4));
         assert_eq!(r.rows.len(), 31);
         assert_eq!(r.n_params, 4);
+    }
+
+    /// Merge 0 joins samples 0 and 1; merge i joins the cluster built so far (n + i - 1) with
+    /// sample i + 1.
+    fn chain_linkage(n: usize) -> Vec<(usize, usize, f64, usize)> {
+        let mut l = vec![(0, 1, 1.0, 2)];
+        l.extend((1..n - 1).map(|i| (n + i - 1, i + 1, (i + 1) as f64, i + 2)));
+        l
+    }
+
+    #[test]
+    fn test_charts_accept_utf8_labels_and_reject_empty_inputs() {
+        let cfg = || ChartConfig {
+            title: Some("Größe_kg 収入合計額".into()),
+            x_label: Some("収入合計額".into()),
+            y_label: Some("R²".into()),
+            ..small()
+        };
+        let x = wavy(30);
+        let y: Vec<f64> = x.iter().rev().copied().collect();
+        assert!(histogram(&x, None, cfg()).is_ok());
+        assert!(scatter_plot(&x, &y, cfg()).is_ok());
+        assert!(line_chart(&[("収入".into(), x.clone(), y.clone())], cfg()).is_ok());
+        let b = box_plot(
+            &[
+                ("R²".into(), x.clone()),
+                ("Größe".into(), wavy(7)),
+                ("収入合計額".into(), wavy(12)),
+            ],
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(
+            b.statistics
+                .iter()
+                .map(|s| s.label.as_str())
+                .collect::<Vec<_>>(),
+            ["R²", "Größe", "収入合計額"]
+        );
+        let labels: Vec<String> = (0..25).map(|i| format!("収入合計額_ラベル{i}")).collect();
+        assert!(dendrogram(&chain_linkage(4), Some(&labels[..4]), cfg()).is_ok()); // whole labels
+        assert!(dendrogram(&chain_linkage(25), Some(&labels), cfg()).is_ok()); // > 20 leaves
+        assert!(
+            event_study_plot(
+                &[-1.0, 0.0, 1.0],
+                &[0.1, 0.0, 0.3],
+                &[-0.2, -0.1, 0.0],
+                &[0.4, 0.1, 0.6],
+                cfg()
+            )
+            .is_ok()
+        );
+        // empty or all-missing inputs are errors
+        assert!(histogram(&[f64::NAN; 3], None, cfg()).is_err());
+        assert!(scatter_plot(&[f64::NAN; 2], &[1.0, 2.0], cfg()).is_err());
+        assert!(box_plot(&[("a".into(), vec![f64::NAN])], cfg()).is_err());
+        assert!(residual_diagnostics(&[f64::NAN; 3], &[0.1, 0.2, 0.3], None, cfg()).is_err());
     }
 }
