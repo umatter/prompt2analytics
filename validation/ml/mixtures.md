@@ -9,6 +9,8 @@ All in `crates/p2a-core/src/ml/advanced_clustering_mod/mixtures.rs`.
 `normalmix.init`'s shape (the draw order is p2a's). The stop is `|l - l_prev| < tolerance` with mixtools' defaults (1000
 iterations, `1e-8`). A collapsing component restarts the fit, as mixtools does, at most `MIXTOOLS_MAX_RESTARTS` times.
 The M-step is standard EM; normalmixEM's sigma update uses the previous mu, which has the same fixed point.
+Each sigma comes from distances to its new mu, so neither the data's location nor the gap between components costs
+digits (`test_normal_mix_em_does_not_depend_on_the_data_location`, `test_normal_mix_em_variance_of_clusters_far_apart`).
 
 **`mvnorm_mix_em`, `mvnorm_mix_em_with`.** Multivariate normal mixture EM with full covariances, on the shared
 `gmm::{e_step, m_step}` (the former code fitted diagonal ones). Defaults 10000 iterations and `1e-8`; restarts at most

@@ -337,7 +337,12 @@ pub fn flexmix_with(
     }
     let y_mean = y.sum() / n as f64;
     let sd_y = (y.iter().map(|v| (v - y_mean) * (v - y_mean)).sum::<f64>() / (n - 1) as f64).sqrt();
-    if !sd_y.is_finite() || sd_y <= 0.0 {
+    if !sd_y.is_finite() {
+        return Err(spec(
+            "flexmix: y is too large in magnitude for its variance to be finite".into(),
+        ));
+    }
+    if sd_y <= 0.0 {
         return Err(spec("flexmix: y is constant".into()));
     }
     let floor = FLEXMIX_SIGMA_FLOOR_REL * sd_y;
@@ -874,8 +879,8 @@ pub fn normal_mix_em_with(data: &[f64], config: &NormalMixConfig) -> EconResult<
     let mut constants = vec![0.0; k];
     let mut inv_sigma = vec![0.0; k];
     let mut nj = vec![0.0; k];
-    let mut sum_x = vec![0.0; k];
-    let mut sum_xx = vec![0.0; k];
+    let mut sum_dev = vec![0.0; k];
+    let mut sum_sq = vec![0.0; k];
     let mut ll_prev = f64::NEG_INFINITY;
     let mut last_change = f64::INFINITY;
     let mut iter = 0;
@@ -890,8 +895,7 @@ pub fn normal_mix_em_with(data: &[f64], config: &NormalMixConfig) -> EconResult<
             inv_sigma[j] = 1.0 / sigma[j];
         }
         nj.fill(0.0);
-        sum_x.fill(0.0);
-        sum_xx.fill(0.0);
+        sum_dev.fill(0.0);
         let mut ll = 0.0;
         for (&x, mut post) in data.iter().zip(posterior.rows_mut()) {
             let mut top = f64::NEG_INFINITY;
@@ -904,12 +908,12 @@ pub fn normal_mix_em_with(data: &[f64], config: &NormalMixConfig) -> EconResult<
             let sum_exp: f64 = lp.iter().map(|v| (v - top).exp()).sum();
             let lse = top + sum_exp.ln();
             ll += lse;
+            let dev = x - mean;
             for (j, p) in post.iter_mut().enumerate() {
                 let w = (lp[j] - lse).exp();
                 *p = w;
                 nj[j] += w;
-                sum_x[j] += w * x;
-                sum_xx[j] += w * x * x;
+                sum_dev[j] += w * dev;
             }
         }
         if !ll.is_finite() {
@@ -930,20 +934,32 @@ pub fn normal_mix_em_with(data: &[f64], config: &NormalMixConfig) -> EconResult<
             break;
         }
 
-        // M-step: weights, means and the standard sd about the new means.
+        // M-step: weights, means and the standard sd about the new means. The means are taken about
+        // the sample mean and the sds from distances to the new means: a variance got by subtracting
+        // a squared mean from a second moment cancels when the data's mean, or the gap between two
+        // components, is large against a component's spread.
         let mut collapsed = false;
         for j in 0..k {
             if nj[j] <= n as f64 * f64::EPSILON {
                 collapsed = true;
                 break;
             }
-            let m = sum_x[j] / nj[j];
-            let var = (sum_xx[j] / nj[j] - m * m).max(0.0);
             lambda[j] = nj[j] / n as f64;
-            mu[j] = m;
-            sigma[j] = var.sqrt();
-            if sigma[j] < collapse {
-                collapsed = true;
+            mu[j] = mean + sum_dev[j] / nj[j];
+        }
+        if !collapsed {
+            sum_sq.fill(0.0);
+            for (&x, post) in data.iter().zip(posterior.rows()) {
+                for ((s, &w), &m) in sum_sq.iter_mut().zip(post.iter()).zip(mu.iter()) {
+                    let d = x - m;
+                    *s += w * d * d;
+                }
+            }
+            for j in 0..k {
+                sigma[j] = (sum_sq[j] / nj[j]).sqrt();
+                if sigma[j] < collapse {
+                    collapsed = true;
+                }
             }
         }
         if collapsed {
@@ -1709,6 +1725,73 @@ mod tests {
     }
 
     #[test]
+    fn test_normal_mix_em_does_not_depend_on_the_data_location() {
+        // The data sit on a grid of 2^-16, so adding 2^30 is exact; a variance taken by subtracting
+        // squared means loses every digit on the shifted data, which then counts as a collapse.
+        let mut rng = StdRng::seed_from_u64(5);
+        let noise = Normal::new(0.0, 1.0).unwrap();
+        let x: Vec<f64> = (0..300)
+            .map(|i| {
+                let centre: f64 = if i % 3 == 0 { 6.0 } else { 0.0 };
+                ((centre + noise.sample(&mut rng)) * 65536.0).round() / 65536.0
+            })
+            .collect();
+        let offset = 2f64.powi(30);
+        let fit = |shift: f64| {
+            let shifted: Vec<f64> = x.iter().map(|v| v + shift).collect();
+            let mut cfg = NormalMixConfig::new(2);
+            cfg.start = Some(NormalMixStart {
+                lambda: vec![0.5, 0.5],
+                mu: vec![1.0 + shift, 5.0 + shift],
+                sigma: vec![2.0, 2.0],
+            });
+            normal_mix_em_with(&shifted, &cfg).unwrap()
+        };
+        let (a, b) = (fit(0.0), fit(offset));
+        assert!(a.converged && b.converged, "{a:?} {b:?}");
+        assert_eq!((a.restarts, b.restarts), (0, 0));
+        for j in 0..2 {
+            let near = |p: f64, q: f64, scale: f64| (p - q).abs() <= 1e-5 * scale;
+            assert!(near(b.sigma[j], a.sigma[j], a.sigma[j]), "{a:?} {b:?}");
+            assert!(near(b.lambda[j], a.lambda[j], a.lambda[j]), "{a:?} {b:?}");
+            assert!(near(b.mu[j] - offset, a.mu[j], a.sigma[j]), "{a:?} {b:?}");
+        }
+        assert!((b.loglik - a.loglik).abs() <= 1e-6 * a.loglik.abs());
+    }
+
+    #[test]
+    fn test_normal_mix_em_variance_of_clusters_far_apart() {
+        // Clusters about 2^20 sds apart: each component's sd comes from its own distances, so the
+        // gap between them leaves no trace in it (subtracting squared means would lose five digits).
+        let mut rng = StdRng::seed_from_u64(6);
+        let noise = Normal::new(0.0, 1.0).unwrap();
+        let far = 2f64.powi(20);
+        let groups: Vec<Vec<f64>> = [(0.0, 200), (far, 100)]
+            .iter()
+            .map(|&(c, m)| (0..m).map(|_| c + noise.sample(&mut rng)).collect())
+            .collect();
+        let mut cfg = NormalMixConfig::new(2);
+        cfg.start = Some(NormalMixStart {
+            lambda: vec![0.5, 0.5],
+            mu: vec![1.0, far - 1.0],
+            sigma: vec![2.0, 2.0],
+        });
+        let r = normal_mix_em_with(&groups.concat(), &cfg).unwrap();
+        assert!(r.converged && r.restarts == 0, "{r:?}");
+        for (j, g) in groups.iter().enumerate() {
+            let n = g.len() as f64;
+            let m = g.iter().sum::<f64>() / n;
+            let sd = (g.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / n).sqrt();
+            assert!(
+                (r.sigma[j] - sd).abs() <= 1e-9 * sd,
+                "{} vs {sd}",
+                r.sigma[j]
+            );
+            assert!((r.mu[j] - m).abs() <= 1e-9 * sd, "{} vs {m}", r.mu[j]);
+        }
+    }
+
+    #[test]
     fn test_normal_mix_em_restarts_when_a_variance_collapses() {
         // Three tied values far from the rest: a component on them has variance 0 (mixtools
         // restarts).
@@ -1956,6 +2039,13 @@ mod tests {
             &FlexMixConfig::new(1),
         );
         assert!(tiny.unwrap_err().to_string().contains("observations"));
+        let y_err = |y: Array1<f64>| {
+            flexmix_with(y.view(), x.view(), &FlexMixConfig::new(3))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(y_err(Array1::from_elem(y.len(), 1.5)).contains("y is constant"));
+        assert!(y_err(y.mapv(|v| (v + 1.0) * 1e300)).contains("too large in magnitude"));
     }
 
     #[test]
