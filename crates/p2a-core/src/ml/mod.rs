@@ -406,7 +406,7 @@ pub use c50::{
 };
 pub use cart::{
     CartConfig, CartMethod, CartNode, CartResult, CartSplit, CpTableRow, cart, cart_predict,
-    cart_prune, run_cart, run_cart_default,
+    cart_predict_proba, cart_prune, run_cart, run_cart_default,
 };
 pub use causal_forest::{
     CausalForestConfig, CausalForestResult, average_treatment_effect, causal_forest,
@@ -430,8 +430,8 @@ pub use clustering::{
     cutree_multiple_k, dbscan, hierarchical, kmeans, run_cutree,
 };
 pub use ctree::{
-    CtreeConfig, CtreeNode, CtreeResult, CtreeSplit, ctree, ctree_predict, ctree_predict_proba,
-    run_ctree, run_ctree_default,
+    CtreeConfig, CtreeNode, CtreeResult, CtreeSplit, CtreeTestStat, CtreeTestType, ctree,
+    ctree_predict, ctree_predict_proba, run_ctree, run_ctree_default,
 };
 pub use cubist::{
     CubistConfig, CubistResult, CubistRule, RuleCondition, cubist, cubist_predict, run_cubist,
