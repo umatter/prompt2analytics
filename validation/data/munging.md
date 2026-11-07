@@ -12,6 +12,27 @@ about 1e-15.
 `cut` with custom edges and options and `fill_na` with mean and median are documented in
 [data_layer.md](data_layer.md).
 
+## Fill strategies
+
+`FillStrategy::parse` reads the keywords, case- and separator-insensitive: `mean`, `median`, `mode`
+(`most_frequent`), `forward` (`ffill`, `locf`, `forward_fill`), `backward` (`bfill`, `nocb`,
+`backward_fill`), `zero`, `constant` (`value`). An unknown keyword is an error; a constant keeps its case.
+
+- **Constant**: parsed in the column's type, so the type is kept: every integer width with a range
+  check, Float32/64, Boolean (as `as.logical`), Date (`YYYY-MM-DD`), String verbatim, Categorical/Enum
+  labels. Any other type is an error.
+- **Zero**: 0, FALSE or "". Date, categorical and other types have no zero (`tidyr::replace_na(<Date>,
+  0)` errors too).
+- **Mean, median**: see [data_layer.md](data_layer.md).
+- **Mode**: `names(which.max(table(x)))`. Ties go to the first level in R's sorted order, not to the first
+  occurrence (`k` ties 3, first in the data, and 1: R gives 1). All null is an error.
+- **With no columns named**, a column the strategy or the constant does not fit is skipped and listed in
+  `FillOutcome::skipped`. A named column gets the error.
+
+Case `data_munging_fill_mode`, on `munging_fill.csv`. Decisive values: `k_mode = 1`, `f_mode = 2.5`,
+`s_mode = "a"`. Tests: `test_validate_fill_mode`, `test_fill_constant_uint32_and_date`,
+`test_fill_zero_and_constant_every_dtype`.
+
 ## Replace and missing values
 
 `replace_with(.., new_value: Option<&str>, ..)`: `None` and, by default, the tokens `""` (after trim),

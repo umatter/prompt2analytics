@@ -1,6 +1,12 @@
 {
   "schema": 1,
   "methods": [
+    {"id": "data_fill_mode", "name": "Mode fill as names(which.max(table(x))) and tidyr::replace_na",
+     "category": "data", "reference": "names(which.max(table(x))); tidyr::replace_na",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_fill_mode"],
+     "tests": ["p2a-core::data::munging::clean::tests::test_validate_fill_mode"],
+     "quantities": ["mode (ties to the first sorted level) for integer, double and text columns", "filled columns", "integer type kept"],
+     "tolerance": "exact", "deviations": [], "supersedes_legacy": []},
     {"id": "data_replace", "name": "Replace a sentinel by a missing value as dplyr::na_if",
      "category": "data", "reference": "dplyr::na_if(x, y)",
      "doc": "validation/data/munging.md", "cases": ["data_munging_na_if"],
