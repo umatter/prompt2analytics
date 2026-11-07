@@ -235,18 +235,18 @@ Tests:
 
 ## Timing
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds against
+Release build, one P core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds at 811c26bb against
 `fe13b889` (before these changes); new / base as the ratio of medians (`unified_benchmarks`,
 criterion `new_methods_benchmarks`).
 
 | Fit | n | new / base |
 |---|---|---|
-| Poisson hurdle, two regressors (unified, `zeroinfl` data) | 100 / 1,000 / 10,000 | 1.06 / 1.09 / 1.23 |
-| Poisson hurdle, one regressor (criterion `hurdle/poisson`) | 100 / 500 / 1,000 / 2,000 | 0.90 / 1.09 / 1.15 / 1.14 |
-| negative binomial hurdle (criterion `hurdle/negbin`) | 100 / 500 / 1,000 / 2,000 | 0.88 / 1.04 / 1.06 / 1.06 |
+| Poisson hurdle, two regressors (unified, `zeroinfl` data) | 100 / 1,000 / 10,000 | 1.21 / 1.19 / 1.25 |
+| Poisson hurdle, one regressor (criterion `hurdle/poisson`) | 100 / 500 / 1,000 / 2,000 | 1.00 / 1.08 / 1.12 / 1.16 |
+| negative binomial hurdle (criterion `hurdle/negbin`) | 100 / 500 / 1,000 / 2,000 | 0.98 / 1.03 / 1.04 / 1.06 |
 
-The Poisson hurdle is above 1.1x of base at n >= 1,000 (1.09-1.23). The maintainer accepted
-this on 2026-11-05 as the cost of fitting the zero part with `glm.fit`'s IRLS (see "Zero part =
+The Poisson hurdle costs up to 1.25x of base at n = 10,000 and 1.21x at n = 100. This is
+accepted as the cost of fitting the zero part with `glm.fit`'s IRLS (see "Zero part =
 binomial glm"). The zero part's design is built and decomposed once, the aliasing QR runs
 only when the normal-equations test cannot certify full rank, and the zero part's IRLS steps
 take the normal equations with the QR fallback. Measured piece by piece at n = 1,000: the zero

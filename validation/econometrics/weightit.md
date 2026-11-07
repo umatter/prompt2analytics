@@ -125,24 +125,28 @@ id `weighting_na_refusal`).
 
 ## Wall-clock against fe13b889
 
-Medians in µs over five interleaved rounds of the timing harness (`wp23`, one core, one rayon
-thread, `release`), at e4159ef0, with the machine's load average falling from 5 to 1 during the run (not idle); ratio is this tree over fe13b889.
-Rounds at n = 1,000 and below scatter by about 0.2 either way; those at n = 10,000 by less.
+Medians in µs over three interleaved rounds of the timing harness (`wp23`, one P core, one rayon
+thread, `release`) at 811c26bb; ratio is this tree over fe13b889.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| logistic, covariates on U(-2, 2) | 100 | 36.69 | 19.80 | 0.54 |
-| logistic, covariates on U(-2, 2) | 1,000 | 127.00 | 72.57 | 0.57 |
-| logistic, covariates on U(-2, 2) | 10,000 | 1,671.07 | 1,356.02 | 0.81 |
-| logistic, covariates at mean 40, sd 10 | 1,000 | 122.33 | 84.18 | 0.69 |
-| logistic, covariates at mean 40, sd 10 | 10,000 | 1,659.47 | 1,450.69 | 0.87 |
-| logistic, 3 covariates | 1,000 | 155.41 | 82.27 | 0.53 |
+| logistic, covariates on U(-2, 2) | 100 | 18.14 | 9.97 | 0.55 |
+| logistic, covariates on U(-2, 2) | 1,000 | 122.08 | 73.48 | 0.60 |
+| logistic, covariates on U(-2, 2) | 10,000 | 1,667.85 | 1,331.53 | 0.80 |
+| logistic, covariates at mean 40, sd 10 | 1,000 | 121.59 | 84.98 | 0.70 |
+| logistic, covariates at mean 40, sd 10 | 10,000 | 1,656.59 | 1,454.10 | 0.88 |
+| logistic, 3 covariates | 1,000 | 156.34 | 82.00 | 0.52 |
+| entropy, 3 covariates | 1,000 | 142.85 | 151.06 | 1.06 |
 
 The gains depend on the design's conditioning: uncentred covariates take the refinement on the
 propensity fit's last steps. Past a condition number of 1e4, or with a row its probability does
-not explain beyond `|eta| = 15`, the fit is `fit_glm`'s and pays for both loops. The entropy method does not use this fit. An earlier run measured it at 1.05x
-(300.20 and 314.40 µs, 3 covariates, n = 1,000); that row is not like for like, because
-fe13b889 solved one group for every estimand and this tree solves both groups for the default ATE.
+not explain beyond `|eta| = 15`, the fit is `fit_glm`'s and pays for both loops. The entropy method
+does not use this fit; its row is not like for like, because fe13b889 solved one group for every
+estimand and this tree solves both groups for the default ATE.
+
+Against `fit_glm` the shared lean logit fit differs by at most 4.5e-9 on a coefficient, 9.1e-8 on an SE and
+2.1e-6 on a covariance entry at the default tolerance (quasi-separated fits of n = 15 to 80 with a rare binary
+covariate; 8.2e-11 and 2.7e-11 on heavy-tailed fits). These gaps are accepted.
 
 ## References
 

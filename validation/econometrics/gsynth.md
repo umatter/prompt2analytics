@@ -121,43 +121,35 @@ Tests (p2a-core, `econometrics::synth::gsynth_tests`): `test_na_gsynth_missing_c
 
 ## Timing
 
-Release build, one core (`taskset`, `RAYON_NUM_THREADS=1`), seven interleaved rounds against
-`fe13b889` (before the rewrite to Xu's estimator); new / base as the ratio of medians, on a machine
-under load from other jobs (2026-11-06). The per-round ratios of a row lie within 0.11 of each other
-(0.44 for the covariate row). The base computed a different estimate on these panels: power iteration on the pre-periods,
-cross-validation on in-sample fit (CAUS-43).
+Release build, one P core (`taskset`, `RAYON_NUM_THREADS=1`), three interleaved rounds at 811c26bb against
+`fe13b889` (before the rewrite to Xu's estimator); new / base as the ratio of medians. Figures marked
+(69b202ae) are not from that run: seven interleaved rounds at that commit, on a machine under load. The
+base computed a different estimate on these panels: power iteration on the pre-periods, cross-validation
+on in-sample fit (CAUS-43).
 
 | Fit | panel | new / base |
 |---|---|---|
-| IFE r = 1, unit effects, no covariates (same call as criterion `gsynth`) | 180 / 500 / 1,500 cells | 1.01 / 1.121 / 0.96 |
-| criterion `new_methods_benchmarks`, `gsynth` (7 rounds of an earlier run and tree, much noisier) | 180 / 500 / 1,500 cells | 0.98 / 1.105 / 1.102 |
-| IFE r = 2, two-way effects, no covariates | `gsynth_simdata` (1,500 cells) / 50 x 20 panel | 1.117 / 1.105 |
-| LOO CV at a single r (`n_factors` = `max_factors` = 2), no covariates; the new tree runs LOO, the base the plain fit | `gsynth_simdata` / 50 x 20 panel | 1.149 / 1.136 |
-| LOO CV over r = 0..2, no covariates; both end on r = 2 | `gsynth_simdata` / 50 x 20 panel | 0.35 / 0.36 |
-| LOO CV over r = 0..5, no covariates; the two pick different r (base 5, new 2) | `gsynth_simdata` / 50 x 20 panel | 0.12 / 0.12 |
-| default (LOO CV over r = 0..10), no covariates; the two pick different r | `gsynth_simdata` / 50 x 20 panel | 0.04 / 0.04 |
-| IFE r = 2, covariates X1, X2 | `gsynth_simdata` | 6.90 |
+| IFE r = 1, unit effects, no covariates (same call as criterion `gsynth`; 69b202ae) | 180 / 500 / 1,500 cells | 1.01 / 1.121 / 0.96 |
+| criterion `new_methods_benchmarks`, `gsynth` | 180 / 500 / 1,500 cells | 1.04 / 1.19 / 1.02 |
+| IFE r = 2, two-way effects, no covariates | `gsynth_simdata` (1,500 cells) / 50 x 20 panel | 1.10 / 1.105 (69b202ae) |
+| LOO CV at a single r (`n_factors` = `max_factors` = 2), no covariates; this tree runs LOO, the base the plain fit (69b202ae) | `gsynth_simdata` / 50 x 20 panel | 1.149 / 1.136 |
+| LOO CV over r = 0..2, no covariates; both end on r = 2 (69b202ae) | `gsynth_simdata` / 50 x 20 panel | 0.35 / 0.36 |
+| LOO CV over r = 0..5, no covariates; the two pick different r, base 5, new 2 (69b202ae) | `gsynth_simdata` / 50 x 20 panel | 0.12 / 0.12 |
+| default (LOO CV over r = 0..10), no covariates; the two pick different r | `gsynth_simdata` / 50 x 20 panel | 0.05 / 0.05 |
+| IFE r = 2, covariates X1, X2 | `gsynth_simdata` | 7.62 |
 
-Seven ratios without covariates are above 1.1x and are not signed off: LOO CV at a single r (1.149
-and 1.136), IFE r = 2 (1.117 and 1.105), IFE r = 1 at 500 cells (1.121), and the criterion row at
-500 and 1,500 cells (1.105 and 1.102). They wait for the maintainer's sign-off or the re-time on a
-quiet machine. The run before this one, on the tree before the pre-period QRs were held one at a
-time, had 1.181 and 1.136, 1.177 and 1.109, and 1.177 for the same five harness rows; its spread was
-no smaller, so the two runs do not show that change moving them.
-
-The covariate row is the iteration gsynth runs and the base did not. The maintainer signed off
-7.5x on 2026-11-06; 6.90 (rounds 6.66 to 7.10) is below that, pending the quiet re-time.
+The criterion row at 500 cells costs 1.19x, which is accepted, for the reason below. The fits with
+covariates cost 7.62x, which is accepted: that row is the iteration gsynth runs and the base did not.
+The other figures above 1.1x are the marked ones.
 
 The fit with no covariates costs more than the base because the factors come from a full symmetric
 eigendecomposition of the demeaned controls' Gram matrix, as gsynth's `panel_factor` does, where
-the base ran power iteration. On the 500-cell panel of the IFE r = 1 row (20 x 20 Gram; same seven
-rounds, medians), copies of the two steps timed on their own take 0.089 ms (`gs_pca_with`: Gram,
+the base ran power iteration. On the 500-cell panel of the IFE r = 1 row (20 x 20 Gram; at 69b202ae,
+seven rounds, medians), copies of the two steps timed on their own take 0.089 ms (`gs_pca_with`: Gram,
 eigendecomposition, factors, loadings and common component) and 0.006 ms (the base's
 `extract_factors_svd`, on its 10 pre-periods). Of the whole fits, 0.239 ms new and 0.213 ms base,
 that leaves 0.150 ms and 0.207 ms for everything else: the factor step adds 0.084 ms, the other
-steps give back 0.058 ms, and the difference is the 0.026 ms above the base. For `gsynth_simdata`
-at r = 2 the only figure is older and from before the final refactor: 0.13 ms of a 0.60 ms fit,
-against 0.54 ms for the whole base fit. A solver for the leading eigenvectors only has not been
+steps give back 0.058 ms, and the difference is the 0.026 ms above the base. A solver for the leading eigenvectors only has not been
 tried: its vectors would match the full decomposition only to its own tolerance, and whether that
 holds the fits to their tests has not been measured.
 

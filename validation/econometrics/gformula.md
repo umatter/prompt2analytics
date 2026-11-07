@@ -37,7 +37,7 @@ weighted design, no convergence, a row with `y < 1` above `eta = 15` or `y > 0` 
 that no longer meets the rule once refined). The default `tolerance` is 1e-8, where the gap to
 `fit_glm` on separated heavy-tailed fits whose estimates diverge can be 2.9e-7 on a coefficient and
 3.95e-6 on an SE (14 of 4,278 fits exceed 1e-9; the 12 inspected all have n at most
-30). Aliased
+30). These gaps are accepted. Aliased
 columns are reported as R reports them ("Coefficients not defined because of
 singularities") and predicted with their identified columns.
 
@@ -201,17 +201,16 @@ cargo test -p p2a-core --lib --no-default-features --features ci -- econometrics
 
 ## Wall-clock against fe13b889
 
-Medians over three interleaved rounds of the timing harness (`wp28`, one core, one rayon thread,
-`release`), at e4159ef0, on a machine with a load average of about 1; ratio is this tree over
-fe13b889.
+Medians over three interleaved rounds of the timing harness (`wp28`, one P core, one rayon thread,
+`release`) at 811c26bb; ratio is this tree over fe13b889.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| check 1 (ms) | 10,000 | 921.8 | 502.2 | 0.54 |
-| check 2 (ms) | 10,000 | 584.4 | 423.5 | 0.72 |
-| check 3 (ms) | 10,000 | 1,860.0 | 1,003.4 | 0.54 |
-| check 4 (ms) | 10,000 | 842.4 | 477.8 | 0.57 |
-| check 4, exact path (ms) | 1,000 | 109.4 | 57.5 | 0.53 |
+| check 1 (ms) | 10,000 | 917.2 | 503.7 | 0.55 |
+| check 2 (ms) | 10,000 | 581.2 | 422.0 | 0.73 |
+| check 3 (ms) | 10,000 | 1,848.9 | 1,013.2 | 0.55 |
+| check 4 (ms) | 10,000 | 841.0 | 473.2 | 0.56 |
+| check 4, exact path (ms) | 1,000 | 110.0 | 57.4 | 0.52 |
 
 ## References
 

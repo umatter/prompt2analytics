@@ -105,26 +105,37 @@ and the missing count; the IPW estimates are pinned by the tests above.
 
 ## Wall-clock against fe13b889
 
-Medians in µs over five interleaved rounds of the timing harness (`wp23`, one core, one rayon
-thread, `release`), at e4159ef0, with the machine's load average falling from 5 to 1 during the run
-(not idle); ratio is this tree over fe13b889.
-Rounds at n = 1,000 and below scatter by about 0.2 either way; those at n = 10,000 by less.
+Medians in µs over three interleaved rounds of the timing harness (`wp23` and, for the far-row design,
+`wp6f`; one P core, one rayon thread, `release`) at 811c26bb; ratio is this tree over fe13b889.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| IPW ATE, covariates on U(-2, 2) | 100 | 49.41 | 30.56 | 0.62 |
-| IPW ATE, covariates on U(-2, 2) | 1,000 | 158.82 | 121.50 | 0.77 |
-| IPW ATE, covariates on U(-2, 2) | 10,000 | 1,844.85 | 1,628.94 | 0.88 |
-| IPW ATE, covariates at mean 40, sd 10 | 1,000 | 155.74 | 138.22 | 0.89 |
-| IPW ATE, covariates at mean 40, sd 10 | 10,000 | 1,848.61 | 1,798.79 | 0.97 |
-| IPW ATT, covariates on U(-2, 2) | 1,000 | 152.61 | 110.00 | 0.72 |
-| IPW ATT, covariates on U(-2, 2) | 10,000 | 1,903.62 | 1,512.90 | 0.79 |
+| IPW ATE, covariates on U(-2, 2) | 100 | 25.19 | 19.73 | 0.78 |
+| IPW ATE, covariates on U(-2, 2) | 1,000 | 150.49 | 123.22 | 0.82 |
+| IPW ATE, covariates on U(-2, 2) | 10,000 | 1,849.92 | 1,628.79 | 0.88 |
+| IPW ATE, covariates at mean 40, sd 10 | 1,000 | 163.47 | 141.63 | 0.87 |
+| IPW ATE, covariates at mean 40, sd 10 | 10,000 | 1,845.43 | 1,796.79 | 0.97 |
+| IPW ATT, covariates on U(-2, 2) | 100 | 24.55 | 16.52 | 0.67 |
+| IPW ATT, covariates on U(-2, 2) | 1,000 | 149.73 | 113.10 | 0.76 |
+| IPW ATT, covariates on U(-2, 2) | 10,000 | 1,880.99 | 1,499.17 | 0.80 |
+| IPW ATE, heavy-tailed covariate with far misfit rows | 1,000 | 188.55 | 360.95 | 1.91 |
+| IPW ATE, heavy-tailed covariate with far misfit rows | 10,000 | 2,418.80 | 4,151.72 | 1.72 |
 
 The gains depend on the design's conditioning. Uncentred covariates put the equilibrated X'WX
 above a condition number of 100 from the first step, so the propensity fit takes the refinement
 on its steps near the estimate, and each outcome model takes one refinement pass; at n = 10,000
-that costs 10% over the same data centred. Past a condition number of 1e4, or with a row its
-probability does not explain beyond `|eta| = 15`, the fit is `fit_glm`'s and pays for both loops.
+that costs 10% over the same data centred. Past a condition number of 1e4 the fit is `fit_glm`'s
+and pays for both loops.
+
+**A far misfit row costs 1.72-1.91x, which is accepted.** A converged lean fit with a row past
+`|eta| = 15` (`y < 1` above 15, `y > 0` below -15) is refitted by `fit_glm`, so the call pays for both
+fits. The refit keeps `fit_glm`'s warning, which the lean fit would not give, and the lean numbers are
+not used there. On this design the two trees' standard errors differ by about 1%, so those two rows
+are not strictly like for like.
+
+Against `fit_glm` the shared lean logit fit differs by at most 4.5e-9 on a coefficient, 9.1e-8 on an SE and
+2.1e-6 on a covariance entry at the default tolerance (quasi-separated fits of n = 15 to 80 with a rare binary
+covariate; 8.2e-11 and 2.7e-11 on heavy-tailed fits). These gaps are accepted.
 
 ## References
 

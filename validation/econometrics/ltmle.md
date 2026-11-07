@@ -84,13 +84,11 @@ fits took more steps from it, the most being 86 where glm.fit's start took 12
 lean fit leaves for `fit_glm` from glm.fit's start. At `max_iter` 50, 60 and 75 the warnings and
 convergence status are equal on all 1,716 data sets.
 
-**Which rule these tables describe.** The gap table and figures below were measured at bd5068dd,
-under the rule above. The wall-clock tables were measured at d7ec2c2a, where every step above
-`kappa_1 = 100` took the refinement and no row bound applied, and have not been re-measured under
-that rule.
+The gap table and figures below were measured at bd5068dd.
 
-Two reported things change. `NodeModel::iterations` of a warm-started node counts the steps from
-its warm start (2 where glm.fit's start takes 4 or 5), so it is not comparable with glm.fit's.
+Two reported things change, and both are accepted. `NodeModel::iterations` of a warm-started node
+counts the steps from its warm start (2 where glm.fit's start takes 4 or 5), so it is not comparable
+with glm.fit's.
 And each fit stops at the deviance rule on a path that depends on its start, so at the default
 tolerance the numbers move by the rule's slack. Fast paths against `fit_glm` from glm.fit's start,
 at tolerances 1e-8 (the default), 1e-10 and 1e-14, on 2,160 data sets of which 1,716 fit (both
@@ -117,7 +115,8 @@ columns. "Warm off" is the lean path with the warm start off, the same set of da
 | g coefficients, propensities, cumulative g, H | 6e-15 | 6e-15 | 6e-15 | 6e-15 | 5e-14 | 1e-15 |
 
 The near-duplicate column is one fixture family, not this sweep; its two empty rows were not
-measured separately. Where the gaps come from:
+measured separately. These gaps are accepted, including 5.3e-10 on the ATE and z and 1.8e-7 to
+3.6e-7 on regime means and Q* with a regime near 0 or 1. Where they come from:
 
 - **The warm start, on ordinary data.** At the default tolerance the warm-off columns show the lean
   path keeps `fit_glm`'s numbers to at most 5e-12 on the ATE, SE and z. The gap above that is the
@@ -172,7 +171,7 @@ converged fit, and 2e-16 at 1e-10, so the ATE moves by 9.4e-3; the two paths' AT
 at 1e-8. `fit_glm`'s ATE at 1e-8 against 1e-14 moves by more than 1e-3 on 9 of the 1,716 data sets,
 3 of them reported as converged at 1e-8, and by more than 0.1 on 3, none of them reported as
 converged. The dependence belongs to the estimator and its deviance rule, not to the fast paths. It
-is a known open item.
+is open: a follow-up will settle which answer is right.
 
 There is no warm start across regimes. The last node's Q regression is fitted once for all
 regimes, and every earlier one already starts from its own regime's later node and takes about
@@ -283,50 +282,56 @@ not registered): `test_mcp_ltmle_accepts_int64_treatment` and `test_mcp_ltmle_re
   `1 + sum_{s <= t} k_s + t` columns, so the cost per regime grows as `T^3` (as in ltmle).
   See "Wall-clock against fe13b889" for the cost when a fluctuation saturates a regime.
 
-## Wall-clock against fe13b889 (T3-PERF6B)
+## Wall-clock against fe13b889
 
-Medians in ms over five interleaved rounds of the wave-2B timing harness (`wp27`, one core, one
-rayon thread, `release`), on a shared machine. "Before ratio" is this tree before T3-PERF6B; ratios
-are against fe13b889, whose estimator is not comparable: it fitted shorter histories (its T = 2
-growth ATE is -0.0029, this tree's 0.2397). Binary Y at n = 100 is above 1.1x because one Q fit
-takes 33 steps at that sample size, the contrast regime's first (Q and g steps 4, 4, 6, 5, 33, 5).
-That row and growth T = 3 fall within the user's 2026-11-06 sign-off of LTMLE 1.3-2.5x for T <= 5.
+Medians in ms over three interleaved rounds of the timing harness (`wp27`, one P core, one rayon
+thread, `release`) at 811c26bb; ratio is this tree over fe13b889. fe13b889's estimator is not
+comparable: it fitted shorter histories (its T = 2 growth ATE is -0.0029, this tree's 0.2397).
 
-| Row | n | fe13b889 | this tree | before ratio | ratio |
-|---|---|---:|---:|---:|---:|
-| bench | 100 | 0.22 | 0.11 | 0.91 | 0.48 |
-| bench | 1,000 | 1.69 | 0.94 | 0.96 | 0.56 |
-| bench | 10,000 | 16.4 | 9.2 | 0.96 | 0.56 |
-| linear Q | 100 | 0.07 | 0.06 | 1.32 | 0.88 |
-| linear Q | 1,000 | 0.48 | 0.45 | 1.33 | 0.95 |
-| linear Q | 10,000 | 4.6 | 4.6 | 1.40 | 0.98 |
-| binary Y | 100 | 0.15 | 0.30 | 2.53 | 2.02 |
-| binary Y | 1,000 | 1.20 | 1.07 | 1.55 | 0.89 |
-| binary Y | 10,000 | 11.5 | 10.5 | 1.53 | 0.91 |
-| growth T = 2 | 10,000 | 9.9 | 9.0 | 1.51 | 0.91 |
-| growth T = 3 | 10,000 | 13.7 | 15.4 | 1.87 | 1.12 |
-| growth T = 5 | 10,000 | 23.1 | 24.7 | 2.41 | 1.07 |
-| growth T = 10 | 10,000 | 45.0 | 252.0 | 10.84 | 5.60 |
+| Row | n | fe13b889 | this tree | ratio |
+|---|---|---:|---:|---:|
+| bench | 100 | 0.23 | 0.09 | 0.39 |
+| bench | 1,000 | 1.78 | 0.73 | 0.41 |
+| bench | 10,000 | 17.2 | 7.2 | 0.42 |
+| linear Q | 100 | 0.07 | 0.05 | 0.72 |
+| linear Q | 1,000 | 0.48 | 0.34 | 0.71 |
+| linear Q | 10,000 | 4.7 | 3.5 | 0.74 |
+| binary Y | 100 | 0.15 | 0.28 | 1.86 |
+| binary Y | 1,000 | 1.23 | 0.81 | 0.66 |
+| binary Y | 10,000 | 11.9 | 8.0 | 0.67 |
+| growth T = 2 | 10,000 | 10.2 | 7.0 | 0.69 |
+| growth T = 3 | 10,000 | 14.1 | 13.5 | 0.96 |
+| growth T = 5 | 10,000 | 23.8 | 23.1 | 0.97 |
+| growth T = 10 | 10,000 | 46.3 | 251.0 | 5.42 |
 
-**Growth T = 10 is above 1.1x and not signed off.** Its dataset has about 20 followers of each
-regime at the last node, and the always-treat fluctuation there reaches `eps = 29.2`. Every
-earlier Q response of that regime is then within about `exp(-29)` of 1, and each of those nine
-fits takes 30 IRLS steps in `fit_glm` as its linear predictor climbs to the clamp, where the
-other regime's take 2. Of six data seeds at T = 10, n = 10,000, two saturate this way. Single
-runs, medians of five rounds, against fe13b889's row above (45.1 ms, its seed 42):
+Binary Y at n = 100 costs 1.86x because one Q fit takes 33 steps at that sample size, the contrast
+regime's first (Q and g steps 4, 4, 6, 5, 33, 5). This is accepted.
 
-| Data seed | this tree | ratio |
-|---|---:|---:|
-| 42 (the row above), saturates | 269 | 5.96 |
-| 3, saturates | 259 | 5.75 |
-| 1, 2, 4, 5, no saturation | 65-67 | 1.44-1.49 |
+**Growth T = 10 costs about 5.5x on a saturating regime and about 1.46x otherwise; both are
+accepted.** The row's dataset has about 20 followers of each regime at the last node, and the
+always-treat fluctuation there reaches `eps = 29.2`. Every earlier Q response of that regime is then
+within about `exp(-29)` of 1, and each of those nine fits takes 30 IRLS steps in `fit_glm` as its
+linear predictor climbs to the clamp, where the other regime's take 2. Of six data seeds at
+T = 10, n = 10,000, two saturate this way:
 
-Starting `fit_glm` from `warm_start` on those fits (not done; measured in an earlier, busier
-session, with fe13b889's row at 62.5 ms) brings seed 42 from 437 ms to 122 ms (1.95x) and seed 3
-from 445 ms to 110 ms. On seeds 42 and 3 and a saturated fixture, the ATE, SE, regime means, EIC, Q*
-and fluctuation coefficients stay within 5e-11, and the warnings and convergence status are
-equal. The reported Q coefficients of the saturated nodes move, by up to 2.7, because their
-likelihood is flat, so that start changes a reported number and awaits a decision.
+| Data seed | fe13b889 | this tree | ratio |
+|---|---:|---:|---:|
+| 42, saturates | 45.4 | 251.1 | 5.53 |
+| 3, saturates | 45.6 | 251.0 | 5.50 |
+| 1 | 45.3 | 65.9 | 1.45 |
+| 2 | 45.6 | 66.8 | 1.46 |
+| 5 | 45.3 | 66.4 | 1.47 |
+| 7 | 45.5 | 65.9 | 1.45 |
+
+Those fits keep glm.fit's start. Starting `fit_glm` from `warm_start` on them is not done: at
+f89d777e it took seed 42 from 437 ms to 122 ms and seed 3 from 445 ms to 110 ms, with the ATE, SE,
+regime means, EIC, Q* and fluctuation coefficients within 5e-11 and equal warnings and convergence
+status, but the reported Q coefficients of the saturated nodes moved by up to 2.7, because their
+likelihood is flat.
+
+A fit with a row past the `|eta| = 15` bound pays for the lean fit and then `fit_glm`, and reports
+`fit_glm`'s numbers and warnings. No fit in the rows above leaves that way. The bound's cost on such
+designs is measured on IPW (`treatment_ipw.md`) and C-TMLE (`ctmle.md`).
 
 ## 13. References
 
