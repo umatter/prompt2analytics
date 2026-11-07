@@ -52,9 +52,9 @@ pub struct DecisionTree {
     gain: Vec<f64>,
 }
 
-/// Add the SSE decrease of a node's split to its feature: `sum` of `y - c` over each side, for any
-/// centring constant `c`, over the node's rows with their multiplicity.
-fn add_split_gain(
+/// Add the SSE decrease of a node's split to its feature, over the node's rows with their
+/// multiplicity (random forest and quantile forest: the target; GBM: the pseudo-residuals).
+pub(crate) fn add_split_gain(
     gain: &mut [f64],
     feature: usize,
     target: &ArrayView1<f64>,

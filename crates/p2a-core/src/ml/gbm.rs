@@ -54,6 +54,7 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 
+use super::trees::add_split_gain;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
 
@@ -71,19 +72,18 @@ pub enum GbmFamily {
     Laplace,
 }
 
-impl std::str::FromStr for GbmFamily {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "gaussian" | "mse" | "squared_error" => Ok(GbmFamily::Gaussian),
-            "huber" => Ok(GbmFamily::Huber),
-            "binomial" | "logistic" | "bernoulli" => Ok(GbmFamily::Binomial),
-            "laplace" | "lad" | "absolute_error" => Ok(GbmFamily::Laplace),
-            _ => Err(format!("Unknown GBM family: {}", s)),
-        }
+crate::option_enum!(
+    GbmFamily,
+    crate::options::Choices {
+        option: "family",
+        values: &[
+            (&["gaussian", "mse", "squared_error"], GbmFamily::Gaussian),
+            (&["huber"], GbmFamily::Huber),
+            (&["bernoulli", "binomial", "logistic"], GbmFamily::Binomial),
+            (&["laplace", "lad", "absolute_error"], GbmFamily::Laplace),
+        ],
     }
-}
+);
 
 /// Configuration for Gradient Boosting Machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,8 +127,13 @@ impl Default for GbmConfig {
 /// Result from GBM fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GbmResult {
-    /// Feature importances (mean decrease in impurity)
+    /// Share of `relative_influence` per feature (gbm `summary()` divided by 100; zeros if no tree
+    /// split).
     pub feature_importances: Vec<f64>,
+    /// Summed SSE decrease of the splits on each feature, over all trees (gbm `relative.influence`,
+    /// unscaled).
+    #[serde(default)]
+    pub relative_influence: Vec<f64>,
     /// Training loss at each iteration
     pub train_loss: Vec<f64>,
     /// Final training loss
@@ -152,7 +157,7 @@ impl std::fmt::Display for GbmResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Gradient Boosting Machine Results")?;
         writeln!(f, "==================================")?;
-        writeln!(f, "Family: {:?}", self.config.family)?;
+        writeln!(f, "Family: {}", self.config.family)?;
         writeln!(f, "Number of trees: {}", self.n_trees)?;
         writeln!(f, "Learning rate: {:.4}", self.config.learning_rate)?;
         writeln!(f, "Max depth: {}", self.config.max_depth)?;
@@ -182,7 +187,7 @@ impl std::fmt::Display for GbmResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -227,6 +232,8 @@ pub(crate) enum GbmNode {
 pub(crate) struct GbmTree {
     root: Option<GbmNode>,
     n_features: usize,
+    /// Summed SSE decrease of this tree's splits per feature.
+    gain: Vec<f64>,
 }
 
 impl GbmTree {
@@ -234,6 +241,7 @@ impl GbmTree {
         GbmTree {
             root: None,
             n_features: 0,
+            gain: Vec::new(),
         }
     }
 
@@ -249,6 +257,7 @@ impl GbmTree {
     ) {
         self.n_features = x.ncols();
         let indices: Vec<usize> = (0..x.nrows()).collect();
+        let mut gain = vec![0.0; x.ncols()];
         self.root = Some(self.build_tree(
             x,
             residuals,
@@ -258,7 +267,9 @@ impl GbmTree {
             min_samples_split,
             feature_indices,
             rng_state,
+            &mut gain,
         ));
+        self.gain = gain;
     }
 
     fn build_tree(
@@ -271,6 +282,7 @@ impl GbmTree {
         min_samples_split: usize,
         feature_indices: &[usize],
         rng_state: &mut u64,
+        gain: &mut [f64],
     ) -> GbmNode {
         let n_samples = indices.len();
 
@@ -295,6 +307,7 @@ impl GbmTree {
             if left_indices.is_empty() || right_indices.is_empty() {
                 return self.create_leaf(residuals, indices);
             }
+            add_split_gain(gain, best_feature, residuals, &left_indices, &right_indices);
 
             let mut new_rng = *rng_state;
             let left = self.build_tree(
@@ -306,6 +319,7 @@ impl GbmTree {
                 min_samples_split,
                 feature_indices,
                 &mut new_rng,
+                gain,
             );
             let right = self.build_tree(
                 x,
@@ -316,6 +330,7 @@ impl GbmTree {
                 min_samples_split,
                 feature_indices,
                 rng_state,
+                gain,
             );
 
             GbmNode::Split {
@@ -366,7 +381,7 @@ impl GbmTree {
                 .iter()
                 .map(|&i| (x[[i, feature]], residuals[i], i))
                 .collect();
-            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
             // Scan through sorted values with running sums - O(n)
             let mut left_sum = 0.0;
@@ -437,43 +452,6 @@ impl GbmTree {
                     self.traverse(right, x)
                 }
             }
-        }
-    }
-
-    fn feature_importances(&self) -> Array1<f64> {
-        let mut importances = Array1::zeros(self.n_features);
-        if let Some(ref root) = self.root {
-            self.accumulate_importances(root, &mut importances, 1.0);
-        }
-
-        let sum: f64 = importances.sum();
-        if sum > 0.0 {
-            importances /= sum;
-        }
-
-        importances
-    }
-
-    fn accumulate_importances(&self, node: &GbmNode, importances: &mut Array1<f64>, weight: f64) {
-        if let GbmNode::Split {
-            feature_index,
-            left,
-            right,
-            ..
-        } = node
-        {
-            importances[*feature_index] += weight;
-
-            let (left_weight, right_weight) = match (left.as_ref(), right.as_ref()) {
-                (GbmNode::Leaf { n_samples: ln, .. }, GbmNode::Leaf { n_samples: rn, .. }) => {
-                    let total = (*ln + *rn) as f64;
-                    (*ln as f64 / total, *rn as f64 / total)
-                }
-                _ => (0.5, 0.5),
-            };
-
-            self.accumulate_importances(left, importances, weight * left_weight);
-            self.accumulate_importances(right, importances, weight * right_weight);
         }
     }
 }
@@ -627,7 +605,7 @@ fn compute_init_prediction(y: &ArrayView1<f64>, family: GbmFamily) -> f64 {
         GbmFamily::Laplace => {
             // Median of y
             let mut sorted: Vec<f64> = y.iter().copied().collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted.sort_by(f64::total_cmp);
             let mid = sorted.len() / 2;
             if sorted.len() % 2 == 0 {
                 (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -663,6 +641,25 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
             "X and y must have same number of samples".to_string(),
         ));
     }
+    validate_config(config)?;
+    for j in 0..n_features {
+        let k = x.column(j).iter().filter(|v| !v.is_finite()).count();
+        if k > 0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "GBM: feature column {j} (0-based) has {k} non-finite values (NaN or infinite); remove or impute them first"
+                ),
+            });
+        }
+    }
+    let k = y.iter().filter(|v| !v.is_finite()).count();
+    if k > 0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "GBM: the target has {k} non-finite values (NaN or infinite); remove them first"
+            ),
+        });
+    }
 
     // Validate binary targets for classification
     if config.family == GbmFamily::Binomial {
@@ -683,7 +680,7 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
 
     let mut trees = Vec::with_capacity(config.n_trees);
     let mut train_loss = Vec::with_capacity(config.n_trees);
-    let mut total_importances = Array1::zeros(n_features);
+    let mut relative_influence = vec![0.0f64; n_features];
 
     // Initial loss
     train_loss.push(compute_loss(
@@ -751,9 +748,10 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
             predictions[i] += config.learning_rate * tree.predict_one(&row);
         }
 
-        // Accumulate feature importances
-        let tree_importances = tree.feature_importances();
-        total_importances = total_importances + tree_importances;
+        // Accumulate the relative influence
+        for (sum, &g) in relative_influence.iter_mut().zip(&tree.gain) {
+            *sum += g;
+        }
 
         trees.push(tree);
 
@@ -766,11 +764,12 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
         ));
     }
 
-    // Normalize feature importances
-    let sum: f64 = total_importances.sum();
-    if sum > 0.0 {
-        total_importances /= sum;
-    }
+    // Shares of the relative influence
+    let sum: f64 = relative_influence.iter().sum();
+    let feature_importances: Vec<f64> = relative_influence
+        .iter()
+        .map(|&v| if sum > 0.0 { v / sum } else { 0.0 })
+        .collect();
 
     // Convert predictions to probabilities for classification
     let final_predictions = if config.family == GbmFamily::Binomial {
@@ -780,7 +779,8 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
     };
 
     Ok(GbmResult {
-        feature_importances: total_importances.to_vec(),
+        feature_importances,
+        relative_influence,
         train_loss: train_loss.clone(),
         final_train_loss: *train_loss.last().unwrap_or(&0.0),
         n_trees: config.n_trees,
@@ -790,6 +790,42 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
         feature_names: None,
         trees,
     })
+}
+
+/// Refuse settings no fit can honour.
+fn validate_config(config: &GbmConfig) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+    if config.n_trees < 1 {
+        return invalid("GBM: n_trees must be at least 1, got 0".to_string());
+    }
+    if config.max_depth < 1 {
+        return invalid("GBM: max_depth must be at least 1, got 0".to_string());
+    }
+    if !config.learning_rate.is_finite() || config.learning_rate <= 0.0 {
+        return invalid(format!(
+            "GBM: learning_rate must be finite and above 0, got {}",
+            config.learning_rate
+        ));
+    }
+    if !(config.subsample > 0.0 && config.subsample <= 1.0) {
+        return invalid(format!(
+            "GBM: subsample must be in (0, 1], got {}",
+            config.subsample
+        ));
+    }
+    if !(config.colsample_bytree > 0.0 && config.colsample_bytree <= 1.0) {
+        return invalid(format!(
+            "GBM: colsample_bytree must be in (0, 1], got {}",
+            config.colsample_bytree
+        ));
+    }
+    if !config.huber_delta.is_finite() || config.huber_delta <= 0.0 {
+        return invalid(format!(
+            "GBM: huber_delta must be finite and above 0, got {}",
+            config.huber_delta
+        ));
+    }
+    Ok(())
 }
 
 /// Select rows from a 2D array.
@@ -1118,5 +1154,102 @@ mod tests {
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-10);
         assert!((sigmoid(100.0) - 1.0).abs() < 1e-10);
         assert!(sigmoid(-100.0) < 1e-10);
+    }
+
+    #[test]
+    fn test_validate_gbm_stump_influence() {
+        // WT-5. 50 Gaussian stumps equal gbm(interaction.depth = 1, n.minobsinnode = 1, bag.fraction = 1):
+        // fitted values, initF, split variables, and relative.influence (summed SSE decrease). Before:
+        // feature_importances = split shares 0.68, 0.12, 0.20 (R 0.99494, 0.00159, 0.00348).
+        use crate::data::columns::NaPolicy;
+        use p2a_validation::{Check, Tol};
+        let names = ["x0", "x1", "x2"];
+        let (case, ds) = crate::test_support::load_case("gbm_stump_influence");
+        let (x, y, _) = crate::ml::extract_xy(&ds, "y", &names, NaPolicy::Fail).unwrap();
+        let mut config = GbmConfig::default();
+        config.n_trees = 50;
+        config.learning_rate = 0.1;
+        config.max_depth = 1;
+        config.min_samples_split = 2;
+        config.subsample = 1.0;
+        config.colsample_bytree = 1.0;
+        config.family = GbmFamily::Gaussian;
+        let r = gbm(x.view(), y.view(), &config).unwrap();
+        let split_var: Vec<f64> = r
+            .trees
+            .iter()
+            .map(|t| match &t.root {
+                Some(GbmNode::Split { feature_index, .. }) => *feature_index as f64,
+                _ => -1.0,
+            })
+            .collect();
+        let tol = Tol::coef(200);
+        Check::new(&case)
+            .named("influence", &names, &r.relative_influence, tol)
+            .named("influence_share", &names, &r.feature_importances, tol)
+            .scalar("init_f", r.init_prediction, tol)
+            .vector("fitted", &r.predictions, tol)
+            .vector("split_var", &split_var, Tol::exact())
+            .finish();
+    }
+
+    #[test]
+    fn test_gbm_rejects_bad_arguments() {
+        // ML-105: n_trees = 0 returned a model without trees whose gbm_predict then failed; NaN went into the sorts.
+        let x = Array2::from_shape_fn((30, 2), |(i, j)| (i * (j + 3) % 17) as f64 + 0.1 * j as f64);
+        let y = Array1::from_shape_fn(30, |i| (i % 7) as f64 + 0.3 * (i % 3) as f64);
+        assert!(gbm(x.view(), y.view(), &GbmConfig::default()).is_ok());
+        let bad = |f: &dyn Fn(&mut GbmConfig), what: &str| {
+            let mut c = GbmConfig::default();
+            f(&mut c);
+            let e = gbm(x.view(), y.view(), &c).unwrap_err().to_string();
+            assert!(e.contains(what), "{what}: {e}");
+        };
+        bad(&|c| c.n_trees = 0, "n_trees");
+        bad(&|c| c.max_depth = 0, "max_depth");
+        bad(&|c| c.learning_rate = 0.0, "learning_rate");
+        bad(&|c| c.learning_rate = f64::NAN, "learning_rate");
+        bad(&|c| c.subsample = 0.0, "subsample");
+        bad(&|c| c.subsample = 1.5, "subsample");
+        bad(&|c| c.colsample_bytree = 0.0, "colsample_bytree");
+        bad(&|c| c.huber_delta = -1.0, "huber_delta");
+        let mut xb = x.clone();
+        xb[[3, 1]] = f64::NAN;
+        assert!(
+            gbm(xb.view(), y.view(), &GbmConfig::default())
+                .unwrap_err()
+                .to_string()
+                .contains("non-finite")
+        );
+        let mut yb = y.clone();
+        yb[2] = f64::INFINITY;
+        assert!(
+            gbm(x.view(), yb.view(), &GbmConfig::default())
+                .unwrap_err()
+                .to_string()
+                .contains("non-finite")
+        );
+    }
+
+    #[test]
+    fn test_gbm_family_parses_aliases_and_rejects_unknown() {
+        GbmFamily::choices().validate().unwrap();
+        for (s, f) in [
+            ("gaussian", GbmFamily::Gaussian),
+            ("squared-error", GbmFamily::Gaussian),
+            ("bernoulli", GbmFamily::Binomial),
+            ("Binomial", GbmFamily::Binomial),
+            ("LAD", GbmFamily::Laplace),
+            ("huber", GbmFamily::Huber),
+        ] {
+            assert_eq!(s.parse::<GbmFamily>().unwrap(), f, "{s}");
+        }
+        assert!(
+            "poisson"
+                .parse::<GbmFamily>()
+                .unwrap_err()
+                .to_string()
+                .contains("gaussian")
+        );
     }
 }
