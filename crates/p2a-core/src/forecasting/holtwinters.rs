@@ -1358,10 +1358,45 @@ mod tests {
             assert_eq!(r.gamma, Some(fixed));
         }
 
-        // The objective ran on the fixed value: refitting at the optimum reproduces the SSE.
+        // The reported fit uses the fixed values: refitting at the optimum reproduces the SSE.
         let opt = fit(Some(1.0), None, Some(0.0));
         let again = fit(Some(1.0), opt.beta, Some(0.0));
         assert_eq!(opt.sse.to_bits(), again.sse.to_bits());
+    }
+
+    /// The objective uses a fixed value as given, not the optimiser's edge. The first step of a
+    /// noisy level series starts Holt's trend at 3. With a fixed beta of 0 that trend stays, and
+    /// alpha must be large to keep the errors down (0.81 on a grid of this series). With a beta of
+    /// 0.01 the trend decays, and an objective on that value would choose a small alpha (0.23), with
+    /// several times the SSE at beta = 0.
+    #[test]
+    fn test_fixed_beta_of_zero_reaches_the_objective() {
+        let mut seed = 20_261_107u64;
+        let mut y: Vec<f64> = (0..5000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345) % (1 << 31);
+                100.0 + 17.0 * (seed as f64 / (1u64 << 31) as f64 - 0.5)
+            })
+            .collect();
+        y[0] = y[1] - 3.0;
+        let fit = |alpha: Option<f64>| {
+            let mut c = HoltWintersConfig::default();
+            c.use_seasonal = false;
+            c.alpha = alpha;
+            c.beta = Some(0.0);
+            holt_winters(&y, c).unwrap()
+        };
+        let opt = fit(None);
+        assert_eq!(opt.beta, Some(0.0));
+        let grid_best = (1..100)
+            .map(|i| fit(Some(i as f64 / 100.0)).sse)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            opt.sse <= grid_best * 1.01,
+            "alpha {}: {} vs {grid_best}",
+            opt.alpha,
+            opt.sse
+        );
     }
 
     /// X-5: `run_holt_winters` sends period 0 to the non-seasonal path, and the filter took
