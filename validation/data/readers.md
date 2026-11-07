@@ -91,6 +91,12 @@ placeholder `"<strL>"` stays) and value labels and display formats (DATA-75).
 | column attribute vector | offset (int), width (4), name flag (2), type (1) at int + 6 (DATA-19; before, int + 4) |
 | column name pointer | text block, offset, length (u16 each) into the column-text blocks (DATA-47; before, `VAR1`..`VARn`) |
 
+Numerics are 1 to 8 bytes: an IEEE double truncated to its high-order bytes, at the end of the 8
+bytes in little-endian files and at the start in big-endian files; a width-4 numeric is a truncated
+double, not a float (DATA-21; before, `1.0` stored in 4 bytes read as 1.875). Every NaN (SAS `.`,
+`.A`-`.Z`, `._`) is null and every other value is kept: 1e308 is a SAS value (the old reader nulled
+8-byte values above 8.988e307).
+
 ## Tests
 
 Tests that do not load `data_readers_values` (byte offsets, decoders, guards) are listed here but not in
@@ -129,3 +135,9 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::sas::tests::sas_rejects_negative_fields` | T0 (DATA-49): negative width and offset, oversized subheader and block counts |
 | `p2a-core::data::sas::tests::sas_bounds_rows_and_columns_by_the_layout` | T0 (DATA-49): row count, page capacity, column widths and extents |
 | `p2a-core::data::sas::tests::test_validate_sas_stops_at_row_count_for_character_only_files` | T0 (DATA-49): one row counter; ReadStat reads 2 and 59 rows too |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit` | `sas64_haven` = haven (DATA-18, -19, -20, -47; 1e308 kept) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit_pad` | `sas64_pad` = haven (DATA-18) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics` | `sas64_short` = haven: widths 3-8 (DATA-21) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics_big_endian` | `sas64_short_be` = haven (DATA-21) |
+| `p2a-core::data::sas::tests::test_sas_truncated_numerics_both_byte_orders` | truncated doubles, hand-computed from IEEE 754 (DATA-21) |
+| `p2a-core::data::sas::tests::sas_rejects_wide_numerics` | a numeric of width 9 is refused |

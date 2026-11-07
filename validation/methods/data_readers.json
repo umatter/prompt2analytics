@@ -71,7 +71,11 @@
         "p2a-core::data::sas::tests::test_validate_data_readers_manifest_lists_every_fixture",
         "p2a-core::data::sas::tests::test_validate_sas_unknown_column_type_is_error",
         "p2a-core::data::sas::tests::test_validate_sas_column_names_from_the_column_text",
-        "p2a-core::data::sas::tests::test_validate_sas_stops_at_row_count_for_character_only_files"
+        "p2a-core::data::sas::tests::test_validate_sas_stops_at_row_count_for_character_only_files",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_64_bit_pad",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics",
+        "p2a-core::data::sas::tests::test_validate_read_sas7bdat_short_numerics_big_endian"
       ],
       "quantities": [
         "shape",

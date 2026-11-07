@@ -19,7 +19,9 @@
 //! data page holds `block count` rows after its header. A mix page holds
 //! `block count - subheader count` rows after its pointer table.
 //!
-//! Text cells are trimmed of trailing blanks and NULs; an empty cell is `""`, as haven reads it.
+//! Text cells are trimmed of trailing blanks and NULs; an empty cell is `""`, as haven reads it. Every NaN numeric (SAS `.`, `.A`-`.Z`, `._`) is null and every other value is
+//! kept (1e308 is a valid SAS value). Numerics of 3 to 7 bytes are doubles truncated to their
+//! high-order bytes.
 
 use polars::frame::column::Column;
 use polars::prelude::*;
@@ -270,39 +272,23 @@ fn trim_text(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-/// A SAS numeric cell: width 8 is a double (null if NaN or above 8.988e307), width 4 a float, widths
-/// 1 to 3 and 5 to 7 sit at the end of the 8 bytes.
+/// A SAS numeric of `cell.len()` (1..=8) bytes: the high-order bytes of an IEEE double, at the end
+/// of the 8 bytes in little-endian files and at the start in big-endian files (a LENGTH 4 numeric
+/// is a truncated double, not a float). Every NaN (SAS `.`, `.A`-`.Z`, `._`) is missing.
 fn decode_numeric(cell: &[u8], order: ByteOrder) -> Option<f64> {
     let w = cell.len();
     if w == 0 || w > 8 {
         return None;
     }
-    let v = match w {
-        8 => {
-            let b: [u8; 8] = cell.try_into().ok()?;
-            let v = match order {
-                ByteOrder::LittleEndian => f64::from_le_bytes(b),
-                ByteOrder::BigEndian => f64::from_be_bytes(b),
-            };
-            if v > 8.988e307 {
-                return None;
-            }
-            v
-        }
-        4 => {
-            let b: [u8; 4] = cell.try_into().ok()?;
-            f64::from(match order {
-                ByteOrder::LittleEndian => f32::from_le_bytes(b),
-                ByteOrder::BigEndian => f32::from_be_bytes(b),
-            })
-        }
-        _ => {
-            let mut buf = [0u8; 8];
+    let mut buf = [0u8; 8];
+    let v = match order {
+        ByteOrder::LittleEndian => {
             buf[8 - w..].copy_from_slice(cell);
-            match order {
-                ByteOrder::LittleEndian => f64::from_le_bytes(buf),
-                ByteOrder::BigEndian => f64::from_be_bytes(buf),
-            }
+            f64::from_le_bytes(buf)
+        }
+        ByteOrder::BigEndian => {
+            buf[..w].copy_from_slice(cell);
+            f64::from_be_bytes(buf)
         }
     };
     (!v.is_nan()).then_some(v)
@@ -641,7 +627,7 @@ impl<R: Read + Seek> SasReader<R> {
 
     /// Check the row and column layout against the page geometry: the row length is between 1
     /// and the page size, the row count fits the pages,
-    /// every column has a nonzero width and lies inside the row,
+    /// every column has a nonzero width and lies inside the row, numeric widths are 1 to 8 bytes,
     /// and the column widths add up to at most the row length. So the bytes read per row are
     /// bounded by the row length, and the cells read by the file size (T0, DATA-49). A valid file
     /// satisfies all of these. Columns are not checked for disjointness: two overlapping columns
@@ -679,6 +665,12 @@ impl<R: Read + Seek> SasReader<R> {
                 return Err(SasError::InvalidFormat(format!(
                     "column {i} (offset {offset}, width {width}) extends past the row_length \
                      of {row_length}"
+                )));
+            }
+            if column.col_type == ColumnType::Numeric && width > 8 {
+                return Err(SasError::InvalidFormat(format!(
+                    "numeric column {} has width {width}; SAS numerics are 1 to 8 bytes",
+                    column.name
                 )));
             }
             total_width = add(total_width, width)?;
@@ -885,7 +877,7 @@ pub(crate) mod fixture_check {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture_check::{fixture_bytes, fixture_path, put};
+    use super::fixture_check::{assert_matches_haven, fixture_bytes, fixture_path, put};
     use super::*;
     use p2a_validation::Case;
     use std::io::Cursor;
@@ -902,6 +894,14 @@ mod tests {
                 other.map(|d| d.shape())
             ),
         }
+    }
+
+    /// The case id is an argument so that every registered test names it (strict lint,
+    /// `registered-test-loads-no-case`).
+    fn haven(case_id: &str, stem: &str) {
+        let case = Case::load(case_id);
+        let df = load_sas(fixture_path(&format!("{stem}.sas7bdat"))).unwrap();
+        assert_matches_haven(&case, stem, &df);
     }
 
     // sas64_haven.sas7bdat (haven::write_sas: 64-bit, little-endian, no pad, header 8192, pages
@@ -1159,6 +1159,76 @@ mod tests {
         assert_eq!(
             load(b).unwrap().height() as f64,
             case.scalar("guard__sas_row_count_59")
+        );
+    }
+
+    // ---- DATA-21: numerics shorter than 8 bytes; every NaN is missing, nothing else ----
+
+    #[test]
+    fn test_validate_read_sas7bdat_64_bit() {
+        // DATA-18, DATA-19, DATA-20, DATA-47 together; ratio[10] = 1e308 is a value (DATA-21).
+        haven("data_readers_values", "sas64_haven");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_64_bit_pad() {
+        haven("data_readers_values", "sas64_pad");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_short_numerics() {
+        // DATA-21: widths 3, 4, 6, 7, 5, 8 are truncated doubles (width 4 is not an f32).
+        haven("data_readers_values", "sas64_short");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_short_numerics_big_endian() {
+        // DATA-21: in a big-endian file the kept bytes lead the double.
+        haven("data_readers_values", "sas64_short_be");
+    }
+
+    #[test]
+    fn test_sas_truncated_numerics_both_byte_orders() {
+        // 1.0 = 3FF0000000000000, 10804.37 = 40C51A2F5C28F5C3, -0.1 = BFB999999999999A. Keeping
+        // the high-order bytes: 3 -> 1.0; 4 -> 40C51A2F00000000 = 10804.3671875;
+        // 6 -> BFB9999999990000 = -0.0999999999994543 (haven: sas64_short ratio[11]).
+        assert_eq!(
+            decode_numeric(&[0x3F, 0xF0, 0x00], ByteOrder::BigEndian),
+            Some(1.0)
+        );
+        assert_eq!(
+            decode_numeric(&[0x00, 0xF0, 0x3F], ByteOrder::LittleEndian),
+            Some(1.0)
+        );
+        assert_eq!(
+            decode_numeric(&[0x40, 0xC5, 0x1A, 0x2F], ByteOrder::BigEndian),
+            Some(10804.3671875)
+        );
+        assert_eq!(
+            decode_numeric(&[0x2F, 0x1A, 0xC5, 0x40], ByteOrder::LittleEndian),
+            Some(10804.3671875)
+        );
+        assert_eq!(
+            decode_numeric(&[0xBF, 0xB9, 0x99, 0x99, 0x99, 0x99], ByteOrder::BigEndian),
+            Some(-0.0999999999994543)
+        );
+        assert_eq!(
+            decode_numeric(&1e308f64.to_le_bytes(), ByteOrder::LittleEndian),
+            Some(1e308)
+        );
+        assert_eq!(
+            decode_numeric(&[0xFF, 0xFF, 0xFE], ByteOrder::BigEndian),
+            None
+        ); // SAS missing
+    }
+
+    #[test]
+    fn sas_rejects_wide_numerics() {
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_COL_ATTR + 16 + 16 + 8, &9u32.to_le_bytes()); // income width 9
+        assert_invalid(
+            load(b),
+            "numeric column income has width 9; SAS numerics are 1 to 8 bytes",
         );
     }
 }
