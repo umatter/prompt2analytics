@@ -113,8 +113,9 @@ jobs:
         # tests, the `/ws` routing test and the limits-hold test over a
         # websocket session never compile. A separate step with its own
         # feature set would build p2a-mcp and its test binaries a second
-        # time. `p2a-chat` has no test surface and no p2a-core dependency, so
-        # it's not invoked here. `p2a-dioxus` is not compiled here — its
+        # time. `p2a-text` (dependency-free text helpers) and `p2a-chat` (the
+        # terminal client, no p2a-core dependency) run their own tests.
+        # `p2a-dioxus` is not compiled here — its
         # WebKit/GTK deps dominate compile time and its web target is checked
         # in its own job.
         #
@@ -133,6 +134,8 @@ jobs:
           cargo test -p p2a-core --tests --no-default-features --features ci
           cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth,websocket"
           cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis
+          cargo test -p p2a-text
+          cargo test -p p2a-chat --lib
         env:
           RUST_TEST_THREADS: 4
 
@@ -228,6 +231,7 @@ jobs:
           cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth,websocket"
           cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
           cargo clippy -p p2a-chat
+          cargo clippy -p p2a-text
           cargo clippy -p p2a-validation --all-targets
 
   dioxus-check:
