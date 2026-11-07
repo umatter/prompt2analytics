@@ -3,9 +3,9 @@
   "methods": [
     {
       "id": "sphet",
-      "name": "Spatial GMM (Kelejian-Prucha): spatial 2SLS",
+      "name": "Spatial GMM (Kelejian-Prucha): spatial 2SLS, GM + FGLS error model, GS2SLS SARAR; classical, White and spatial-HAC SEs; SE of rho",
       "category": "econometrics",
-      "reference": "Kelejian & Prucha (1998) written out in base R (sphet/spdep not installed)",
+      "reference": "Kelejian & Prucha (1998, 1999, 2007, 2010) written out in base R (sphet/spdep not installed); kernels, HAC, heteroskedastic GM moments and the Psi of the rho variance follow sphet 2.1-1 (kernelsfun.R, twostagels.R, gm_functions.R)",
       "doc": "validation/econometrics/sphet.md",
       "cases": [
         "sphet_gmm_hac"
@@ -28,13 +28,46 @@
       ],
       "quantities": [
         "instrument set and rank",
-        "2SLS coefficients",
+        "2SLS / FGLS / GS2SLS coefficients",
         "lambda",
+        "GM rho (hom, het)",
+        "GM objective",
+        "GM sigma^2",
+        "SE of rho",
         "SE classical",
-        "SE White (HC0)"
+        "SE White (HC0)",
+        "SE spatial HAC, fixed bandwidth (triangular at d = 0.15 and 0.30; Epanechnikov, rectangular, bisquare, Parzen, Tukey-Hanning and quadratic spectral at d = 0.15)",
+        "SE spatial HAC, variable bandwidth (Epanechnikov)",
+        "p-values (upper tail)"
       ],
-      "tolerance": "validation/README.md, n = 150: closed-form 2SLS coefficients 1e-8 and SEs 1e-6 relative",
-      "deviations": [],
+      "tolerance": "validation/README.md, n = 150: closed-form 2SLS coefficients 1e-8 and SEs 1e-6 relative; GM rho and everything after it Tol::iterative(1e-8) (exact R minimiser; Rust safeguarded Newton to a 1e-10 relative step); SE of rho 1e-6",
+      "deviations": [
+        {
+          "finding": "SPAT-8",
+          "quantity": "SE spatial HAC, variable bandwidth",
+          "note": "The variable bandwidth takes W's neighbour sets as the distance object (each unit's farthest W-neighbour); sphet takes a separate sphet::distance object. The case writes out the p2a definition."
+        },
+        {
+          "finding": "SPAT-8",
+          "quantity": "SE of rho, error model",
+          "note": "alpha_r = 0, its value under exogenous X (Kelejian-Prucha 2010, Theorem 2); sphet's Psi plugs in the sample alpha_r, which is O_p(n^-1/2), so the two differ by O(1/n) relative."
+        },
+        {
+          "finding": "SPAT-8",
+          "quantity": "GM rho, weighting",
+          "note": "rho is the step-1 identity-weighted GM estimate, with its valid sandwich SE; sphet's gstslshet adds the efficient step with Psi^-1 weights."
+        },
+        {
+          "finding": "SPAT-8",
+          "quantity": "GM rho, het = false",
+          "note": "The Kelejian-Prucha (1999) three moments; sphet's spreg(het = FALSE) uses the Drukker et al. two-moment version."
+        },
+        {
+          "finding": "SPAT-8",
+          "quantity": "GM rho, search interval",
+          "note": "[-0.99, 0.99]; sphet's nlminb bounds are (-0.9, 0.9), which cut off valid estimates in [0.9, 0.99)."
+        }
+      ],
       "supersedes_legacy": []
     }
   ]

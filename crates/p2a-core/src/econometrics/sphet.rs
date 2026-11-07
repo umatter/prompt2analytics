@@ -2307,8 +2307,8 @@ mod tests {
     /// Case sphet_gmm_hac on sphet_sim.csv (n = 150). W = 5 nearest neighbours on (cx, cy),
     /// row-standardised, as the case's .knn_w. The 5th and 6th neighbour distances differ by at
     /// least 3.0e-5, so there are no ties.
-    fn sphet_case() -> (Case, Dataset, SpatialWeights, Vec<[f64; 2]>) {
-        let (case, ds) = crate::test_support::load_case("sphet_gmm_hac");
+    fn sphet_case(id: &str) -> (Case, Dataset, SpatialWeights, Vec<[f64; 2]>) {
+        let (case, ds) = crate::test_support::load_case(id);
         let coords = coords_of(&ds);
         let w = knn5(&coords);
         (case, ds, w, coords)
@@ -2345,7 +2345,7 @@ mod tests {
         // R: H = cbind(X, W Xn, W^2 Xn), Xn = X[, -1]: qr(H)$rank = h_rank = 7 = h_cols. The
         // earlier set cbind(X, W X, W^2 X) had h_old_cols = 9 columns of rank h_old_rank = 7
         // (W 1 = 1 for row-standardised W).
-        let (case, ds, w, _) = sphet_case();
+        let (case, ds, w, _) = sphet_case("sphet_gmm_hac");
         let r = run_sphet(
             &ds,
             "y_sar",
@@ -2387,7 +2387,7 @@ mod tests {
 
     #[test]
     fn test_validate_sphet_sar_classical() {
-        let (case, ds, w, _) = sphet_case();
+        let (case, ds, w, _) = sphet_case("sphet_gmm_hac");
         let r = run_sphet(
             &ds,
             "y_sar",
@@ -2409,7 +2409,7 @@ mod tests {
 
     #[test]
     fn test_validate_sphet_sar_white() {
-        let (case, ds, w, _) = sphet_case();
+        let (case, ds, w, _) = sphet_case("sphet_gmm_hac");
         let r = run_sphet(
             &ds,
             "y_sar",
@@ -2510,7 +2510,7 @@ mod tests {
 
     #[test]
     fn test_validate_sphet_sar_hac() {
-        let (case, ds, w, coords) = sphet_case();
+        let (case, ds, w, coords) = sphet_case("sphet_gmm_hac");
         let mut check = Check::new(&case);
         for (key, d, k) in [
             ("sar_se_hac_tri_015", 0.15, SpatialHacKernel::Triangular),
@@ -2535,7 +2535,7 @@ mod tests {
 
     #[test]
     fn test_validate_sphet_sar_hac_kernels() {
-        let (case, ds, w, coords) = sphet_case();
+        let (case, ds, w, coords) = sphet_case("sphet_gmm_hac");
         let mut check = Check::new(&case);
         for (key, k) in [
             ("sar_se_hac_rect_015", SpatialHacKernel::Rectangular),
@@ -2584,7 +2584,7 @@ mod tests {
     #[test]
     fn test_validate_sphet_sar_hac_variable() {
         // The variable bandwidth: each unit's farthest W-neighbour; invariant to the row order.
-        let (case, ds, w, coords) = sphet_case();
+        let (case, ds, w, coords) = sphet_case("sphet_gmm_hac");
         let cfg = |c: &[[f64; 2]]| SphetConfig {
             hac_bandwidth: None,
             ..hac_config(
@@ -2840,7 +2840,7 @@ mod tests {
         // R .gm_rho: KP (1999), three moments, sigma^2 concentrated out, exact minimiser on
         // [-0.99, 0.99]. The former invalid moments (u'Wu - rho (Wu)'Wu)^2 + (u'W^2u - rho
         // (Wu)'W^2u)^2 gave 0.8995203819178312.
-        let (case, ds, w, _) = sphet_case();
+        let (case, ds, w, _) = sphet_case("sphet_gmm_hac");
         let gm = estimate_rho_gm(
             &ols_residuals(&ds, "y_sem"),
             &w,
@@ -2882,7 +2882,7 @@ mod tests {
     #[test]
     fn test_validate_sphet_sem_gm_het() {
         // R .gm_rho_het: KP (2010), m1 = eb'eb - e' diag(W'W) e, m2 = eb'e (sphet's gg_het).
-        let (case, ds, w, _) = sphet_case();
+        let (case, ds, w, _) = sphet_case("sphet_gmm_hac");
         let gm = estimate_rho_gm(
             &ols_residuals(&ds, "y_sem"),
             &w,
@@ -3081,18 +3081,18 @@ mod tests {
 
     #[test]
     fn test_validate_sphet_sem_se_hom() {
-        sem_se_case(false, "sem_hom");
+        sem_se_case("sphet_gmm_hac", false, "sem_hom");
     }
 
     #[test]
     fn test_validate_sphet_sem_se_het() {
-        sem_se_case(true, "sem_het");
+        sem_se_case("sphet_gmm_hac", true, "sem_het");
     }
 
-    fn sem_se_case(het: bool, prefix: &str) {
+    fn sem_se_case(id: &str, het: bool, prefix: &str) {
         // The former "robust" and HAC arms were (sum e^2) A^3 n/(n-k) = (0.0485, 0.0063, 0.0079)
         // at the hom rho, against White (0.1582, 0.1164, 0.0828).
-        let (case, ds, w, coords) = sphet_case();
+        let (case, ds, w, coords) = sphet_case(id);
         let mut check = Check::new(&case);
         let tri = SpatialHacKernel::Triangular;
         for (cfg, key) in [
@@ -3145,7 +3145,7 @@ mod tests {
     fn test_validate_sphet_rho_se() {
         // R .sphet_rho_se (the SEM with alpha_r = 0). The former formula,
         // sqrt(sigma2 n / (tr W^2 + tr W'W)), gave 1.699 for the SEM.
-        let (case, ds, w, _) = sphet_case();
+        let (case, ds, w, _) = sphet_case("sphet_gmm_hac");
         let mut check = Check::new(&case);
         for (y, model, het, key) in [
             ("y_sem", SphetModel::SpatialError, false, "sem_hom_rho_se"),
@@ -3292,19 +3292,19 @@ mod tests {
 
     #[test]
     fn test_validate_sphet_sarar() {
-        sarar_case(false, "sarar");
+        sarar_case("sphet_gmm_hac", false, "sarar");
     }
 
     #[test]
     fn test_validate_sphet_sarar_het() {
-        sarar_case(true, "sarar_het");
+        sarar_case("sphet_gmm_hac", true, "sarar_het");
     }
 
-    fn sarar_case(het: bool, prefix: &str) {
+    fn sarar_case(id: &str, het: bool, prefix: &str) {
         // KP (1998): step 3 is 2SLS of (I - rho W) y on (I - rho W) Z with the SAME H. The former
         // H* = (I - rho W) H gave (1.779856692, 0.785289465, -0.3910324443, -0.1066714867) for
         // the hom case.
-        let (case, ds, w, coords) = sphet_case();
+        let (case, ds, w, coords) = sphet_case(id);
         let mut check = Check::new(&case);
         let step1 = run_sphet(
             &ds,
@@ -3387,7 +3387,7 @@ mod tests {
     fn test_validate_sphet_sar_p_values() {
         // R 2 pnorm(-|z|): x1 1.6666858432319872e-22; 2 (1 - pnorm(|z|)) reads 0 there. Relative
         // tolerance only, because Tol::p_value treats everything below 1e-12 as equal.
-        let (case, ds, w, _) = sphet_case();
+        let (case, ds, w, _) = sphet_case("sphet_gmm_hac");
         let r = run_sphet(
             &ds,
             "y_sar",

@@ -2,7 +2,7 @@
 
 ## Method Overview
 
-The `spatialprobit` module implements Bayesian spatial probit models for binary dependent variables with spatial dependence. These models are equivalent to R's `spatialprobit` package (Wilhelm & de Matos, 2013).
+The `spatialprobit` module implements Bayesian spatial probit models for binary dependent variables with spatial dependence. They follow the model of R's `spatialprobit` package (Wilhelm & de Matos, 2013). They are **not R-pinned**: that package is not installed, and the validation is by the property tests below.
 
 ### Models Implemented
 
@@ -22,9 +22,12 @@ The `spatialprobit` module implements Bayesian spatial probit models for binary 
   be dropped.
 - Missing values (null or NaN) in y or X are refused with `NullValues` naming the column,
   as in spdep/spatialreg (`na.fail`); remove the incomplete rows and rebuild W first.
-- Integer and Boolean (0/1) columns are accepted. The outcome is 0/1 and may be an Int64,
-  Float64 or Boolean column with both values present. (A non-binary outcome is still read
-  as y >= 0.5; SPAT-6, Tier 3.)
+- Integer and Boolean (0/1) columns are accepted. The outcome is exactly 0/1 and may be an
+  Int64, Float64 or Boolean column with both values present; any other value is refused with
+  `InvalidSpecification` naming the column and the first offending row.
+- `n_draws` must be at least 2 (a posterior SD needs two retained draws), `thin` at least 1.
+- `compute_impacts` needs at least one regressor besides the intercept.
+- With no `seed`, a run uses the documented default seed 42, so every run is reproducible.
 - Tests (T2-WP14): `test_na_spatial_probit_int64_and_boolean_outcome` and
   `test_na_spatial_probit_missing_outcome` (`econometrics::spatialprobit::tests`).
 
@@ -34,123 +37,55 @@ Uses Bayesian MCMC with data augmentation following LeSage & Pace (2009):
 
 1. **Data Augmentation**: Albert & Chib (1993) method for latent y*
 2. **Sampling Steps**:
-   - Sample y* from truncated normal given (beta, rho) and observed y
+   - Sample y* from the exact one-sided truncated normal given (beta, rho) and observed y: normal rejection when the bound is on the near side of the mean, Robert's (1995) exponential rejection when it is on the far side, so both tails are exact
    - Sample beta from conjugate multivariate normal posterior
    - Sample rho using Griddy Gibbs (Ritter & Tanner, 1992)
-3. **Posterior Inference**: Means, standard deviations, and credible intervals from MCMC draws
+3. **Posterior Inference**: Means, standard deviations, and credible intervals (R type-7 quantiles of the retained draws) from MCMC draws
 
-## Reference Implementation
+## Validation
 
-### R Code (spatialprobit package)
-```r
-library(spatialprobit)
-library(spdep)
+There is no R reference: `spatialprobit` is not installed, and the seeded chains could not be
+compared anyway (`StdRng` is ChaCha12). What is checked:
 
-# Create spatial weights
-coords <- cbind(lon = runif(100), lat = runif(100))
-nb <- knn2nb(knearneigh(coords, k = 5))
-listw <- nb2listw(nb, style = "W")
-W <- listw2mat(listw)
+**The latent draws**, against the exact distribution. `test_truncated_normal_sampler_ks` and
+`test_truncated_normal_sampler_tail_6_sigma` draw 20,000 values from N(mu, 1) truncated at 0 and
+compare them with the exact one-sided truncated-normal CDF (through upper tails, so that it is
+accurate far from the mean):
 
-# Generate data with spatial structure
-set.seed(12345)
-n <- 100
-X <- cbind(1, rnorm(n))
-beta_true <- c(0.5, 0.5)
-rho_true <- 0.3
+- every draw is on the right side of the bound;
+- the sample mean is within 5 SD / sqrt(N) of the exact mean;
+- the Kolmogorov-Smirnov distance is below 0.019045116000253333 (`sqrt(-log(0.5e-6) / 2) / sqrt(N)`,
+  P(D > critical) = 1e-6).
 
-# y* = rho*W*y* + X*beta + epsilon
-A <- diag(n) - rho_true * W
-epsilon <- rnorm(n)
-y_star <- solve(A) %*% (X %*% beta_true + epsilon)
-y <- as.numeric(y_star > 0)
+| mu | Truncation | Exact mean | Exact SD |
+|---|---|---|---|
+| 1 | y = 1, above 0 | 1.28759997 | 0.79352775 |
+| -2.5 | y = 1, above 0 | 0.32274480 | 0.29828477 |
+| -6.2 | y = 1, above 0 | 0.15382038 | 0.15050886 |
+| -8 | y = 1, above 0 | 0.12136811 | 0.11968661 |
+| 7 | y = 0, below 0 | -0.13754561 | 0.13513664 |
+| -0.5 | y = 0, below 0 | -1.00916043 | 0.69726282 |
 
-# Estimate SAR probit
-result <- sarprobit(y ~ X[,2], W = W, ndraw = 1000, burn.in = 200)
-summary(result)
+The means and SDs are computed in R from `lam = dnorm(a) / pnorm(a, lower.tail = FALSE)`. The
+inverse-CDF sampler this replaced failed in both tails: at mu = 7 every draw was above the bound,
+and at mu = -8 every draw was the constant 0.01.
 
-# Estimate SEM probit
-result_sem <- semprobit(y ~ X[,2], W = W, ndraw = 1000, burn.in = 200)
-summary(result_sem)
-```
+**The impacts of one draw**: `probit_draw_impacts_match_r_reference` pins direct and total effects
+against the Neumann series transcribed in R.
 
-## Test Cases
+**Credible intervals**: `test_spatial_probit_credible_intervals_are_type7` checks R's
+`quantile(type = 7)` formula on the sorted draws, to 1e-12.
 
-### Test Case 1: SAR Probit with Simulated Data
+**Seeded chains**: `seeded_probit_runs_are_unchanged` pins seeded posterior summaries as a
+regression test. These are this implementation's own values, not a reference.
 
-**Setup:**
-- n = 25 observations (5x5 grid)
-- k = 4 nearest neighbors, row-standardized weights
-- True model: P(y=1) = Phi(0.5 + 0.5*x + spatial_effect)
-- Seed: 12345
-
-**Rust Implementation:**
-```rust
-use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
-use p2a_core::econometrics::spatialprobit::{run_sar_probit, SpatialProbitConfig};
-
-let config = SpatialProbitConfig {
-    n_draws: 1000,
-    burn_in: 200,
-    seed: Some(12345),
-    ..Default::default()
-};
-
-let result = run_sar_probit(&dataset, "y", &["x"], &mut listw, config)?;
-```
-
-**Expected Results:**
-| Parameter | Estimate Range | Notes |
-|-----------|---------------|-------|
-| rho | -0.5 to 0.5 | Should capture spatial dependence |
-| Intercept | 0.0 to 1.0 | Varies with data |
-| x coefficient | 0.3 to 0.7 | Around true value 0.5 |
-
-### Test Case 2: SEM Probit Validation
-
-**Setup:**
-- Same data as Test Case 1
-- SEM model specification
-
-**Expected Behavior:**
-- Lambda should capture spatial error correlation
-- Coefficient estimates similar to non-spatial probit when lambda is near 0
-
-### Test Case 3: Marginal Effects (Spatial Impacts)
-
-For SAR probit, marginal effects are:
-- **Direct effect**: Average diagonal of S_k * phi(A^{-1}*X*beta)
-- **Indirect effect**: Average off-diagonal of S_k * phi(A^{-1}*X*beta)
-- **Total effect**: Direct + Indirect
-
-where S_k = A^{-1} * beta_k, A = I - rho*W
-
-**Validation:**
-- Total effect > Direct effect when rho > 0 (positive spillovers)
-- Direct + Indirect = Total (additive decomposition)
-
-## Comparison with R Results
-
-### Tolerance Guidelines
-
-| Statistic | Tolerance | Notes |
-|-----------|-----------|-------|
-| Posterior means | 0.1 | MCMC sampling variation |
-| Posterior SDs | 0.05 | Depends on draws |
-| Spatial parameter | 0.1 | Inherent MCMC variation |
-| Marginal effects | 0.05 | Depends on draws and approximation |
-
-Note: Spatial probit models use MCMC estimation, so exact replication requires matching:
-- Random seed
-- Number of draws
-- Burn-in period
-- Same data and weights matrix
+Exact replication of an R run would require the same random stream. Posterior summaries agree
+with another implementation only up to Monte Carlo error.
 
 ### Differences from R spatialprobit
 
-1. **Approximation method**: Our implementation uses Neumann series approximation for (I - rho*W)^{-1} which may differ slightly from direct matrix inversion
-2. **Truncated normal sampling**: Uses inverse CDF method
-3. **Griddy Gibbs**: Uses 50-point grid for rho sampling
+1. **Approximation method**: a truncated Neumann series for (I - rho*W)^{-1}.
+2. **Griddy Gibbs**: a 50-point grid for rho.
 
 ## MCMC Diagnostics
 
@@ -175,6 +110,7 @@ The result includes:
 - `run_sar_probit()`: SAR probit estimation
 - `run_sem_probit()`: SEM probit estimation
 - `sample_latent_y()`: Truncated normal sampling for y*
+- `standard_normal_truncated_below()`: Exact draw from N(0, 1) truncated to [a, inf) (Robert 1995)
 - `sample_beta()`: Conjugate normal posterior for beta
 - `sample_rho_griddy_gibbs()`: Griddy Gibbs for spatial parameter
 - `compute_spatial_probit_impacts()`: Direct/indirect/total effects
@@ -203,9 +139,12 @@ The result includes:
    In Anselin, L., Florax, R.J.G.M. & Rey, S.J. (Eds.), *Advances in Spatial Econometrics*
    (pp. 169-195). Springer.
 
+5. Robert, C.P. (1995). "Simulation of truncated normal variables". *Statistics and Computing*,
+   5(2), 121-125. https://doi.org/10.1007/BF00143942
+
 ### R Package Reference
 
-5. Wilhelm, S. & de Matos, M.G. (2013). "Estimating Spatial Probit Models in R".
+6. Wilhelm, S. & de Matos, M.G. (2013). "Estimating Spatial Probit Models in R".
    *The R Journal*, 5(1), 130-143.
    https://cran.r-project.org/package=spatialprobit
 
@@ -215,18 +154,22 @@ The result includes:
 - R package `spdep`: Spatial dependence and weights
 - R package `spatialreg`: Spatial regression models (continuous outcomes)
 
-## Test Results Summary
+## Tests
 
-| Test | Status | Notes |
-|------|--------|-------|
-| test_sar_probit_basic | PASS | Basic SAR estimation works |
-| test_sem_probit_basic | PASS | Basic SEM estimation works |
-| test_spatial_probit_impacts | PASS | Direct/indirect/total computed correctly |
-| test_credible_intervals | PASS | 95% CI contains posterior mean |
-| test_truncated_normal_sampling | PASS | Samples correctly constrained |
-| test_inverse_normal_cdf | PASS | Quantile function accurate |
-| test_na_spatial_probit_int64_and_boolean_outcome | PASS | Int64 and Boolean outcomes give the Float64 result (same seed) |
-| test_na_spatial_probit_missing_outcome | PASS | A null outcome is `NullValues` naming `y` |
+All in `econometrics::spatialprobit::tests`:
+
+- Estimation: `test_sar_probit_basic`, `test_sem_probit_basic`, `test_spatial_probit_impacts`,
+  `test_credible_intervals`, `test_truncated_normal_sampling`.
+- Sampler: `test_truncated_normal_sampler_ks`, `test_truncated_normal_sampler_tail_6_sigma`.
+- Inputs: `test_spatial_probit_rejects_n_draws_0`, `test_spatial_probit_rejects_thin_0`,
+  `test_spatial_probit_rejects_non_binary`, `test_spatial_probit_rejects_impacts_without_regressors`,
+  `probit_rejects_zero_draws_and_zero_thinning`,
+  `probit_rejects_draw_counts_that_overflow_or_cannot_be_stored`, `probit_sampler_honours_cancellation`.
+- Output: `test_spatial_probit_display_lists_every_impact_se`,
+  `test_spatial_probit_credible_intervals_are_type7`, `test_spatial_probit_unseeded_runs_are_reproducible`.
+- Pins: `probit_draw_impacts_match_r_reference`, `seeded_probit_runs_are_unchanged`.
+- Missing values: `test_na_spatial_probit_int64_and_boolean_outcome`,
+  `test_na_spatial_probit_missing_outcome`.
 
 ## MCP Tool Integration
 
@@ -235,3 +178,6 @@ Tools exposed:
 - `sem_probit_model`: SEM probit for binary outcomes with spatial error
 
 Both tools require spatial weights to be created first using `spatial_neighbors`.
+
+`SpatialProbitResult` and `SpatialProbitImpacts` implement `Display`, with one impact row per
+variable carrying its own posterior SDs.
