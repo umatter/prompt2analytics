@@ -10,7 +10,10 @@ Conditional inference trees use permutation-based statistical tests to select sp
 - **Function**: `ctree(formula, data, control = ctree_control())`
 - **CRAN**: https://cran.r-project.org/package=partykit
 
-## Illustrative R code (not run: partykit, party and coin are not installed on the validation machine)
+## Illustrative R code (not run; no number is compared with partykit)
+
+partykit is installed on the validation machine, but p2a's node statistics are known to differ from it (ML-26,
+ML-27), so a pin would record those differences. party and coin are not installed.
 
 ```r
 library(partykit)

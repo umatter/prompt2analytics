@@ -2066,7 +2066,7 @@ mod tests {
     fn test_ctree_class_rule_message_states_the_rounded_bound() {
         // T2 leftover minor (T2-WP17 #0, plan sync 2026-11-01). The rule is n_unique < n / 2 with integer
         // division, but the refusal said "fewer classes than half the rows": 2 classes in 5 rows were refused
-        // although 2 < 2.5. Property test (p2a's own rule; partykit is not installed).
+        // although 2 < 2.5. Property test of p2a's own rule; no number is compared with partykit.
         let df = polars::prelude::df! {
             "lab" => ["a", "b", "a", "b", "a"],
             "x" => [0.1, 0.7, 0.3, 0.9, 0.2],
