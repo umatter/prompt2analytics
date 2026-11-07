@@ -81,16 +81,18 @@ Tests: `test_validate_na_doubly_robust_columns` (case `causal_mediation_na`, reg
 
 ## Wall-clock against fe13b889
 
-Medians in µs over five interleaved rounds of the timing harness (`wp23`, one core, one rayon
-thread, `release`), at e4159ef0, with the machine's load average falling from 5 to 1 during the
-run (not idle); ratio is this tree over fe13b889. Rounds at n = 1,000 and below scatter widely:
-the ratio of the fastest rounds is 0.76 at n = 100 and 0.64 at n = 1,000.
+Medians in µs over three interleaved rounds of the timing harness (`wp23`, one P core, one rayon
+thread, `release`) at 811c26bb; ratio is this tree over fe13b889.
 
 | Row | n | fe13b889 | this tree | ratio |
 |---|---|---:|---:|---:|
-| AIPW | 100 | 51.15 | 29.84 | 0.58 |
-| AIPW | 1,000 | 240.66 | 120.82 | 0.50 |
-| AIPW | 10,000 | 1,870.75 | 1,323.86 | 0.71 |
+| AIPW | 100 | 25.98 | 16.86 | 0.65 |
+| AIPW | 1,000 | 162.20 | 103.86 | 0.64 |
+| AIPW | 10,000 | 1,863.52 | 1,341.66 | 0.72 |
+
+Against `fit_glm` the shared lean logit fit differs by at most 4.5e-9 on a coefficient, 9.1e-8 on an SE and
+2.1e-6 on a covariance entry at the default tolerance (quasi-separated fits of n = 15 to 80 with a rare binary
+covariate; 8.2e-11 and 2.7e-11 on heavy-tailed fits). These gaps are accepted.
 
 ## References
 

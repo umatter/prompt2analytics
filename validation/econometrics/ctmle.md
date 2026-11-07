@@ -138,6 +138,21 @@ R: ctmle is not installed here; not verified.
 Tests: `test_validate_na_ctmle_columns` (case `causal_mediation_na`, registry
 `validation/methods/causal_na.json`, id `weighting_na_refusal`).
 
+## Wall-clock against fe13b889
+
+Medians over three interleaved rounds (`wp6f`, one P core, one rayon thread, `release`, 5 repetitions
+a round) at 811c26bb, logistic outcome, two covariates; ratio is this tree over fe13b889.
+
+| Row | n | fe13b889 (ms) | this tree (ms) | ratio |
+|---|---|---:|---:|---:|
+| normal covariates | 1,000 | 2.57 | 2.26 | 0.88 |
+| heavy-tailed covariate with far misfit rows | 1,000 | 3.02 | 5.55 | 1.84 |
+
+**A far misfit row costs 1.84x, which is accepted.** C-TMLE runs many lean fits, and a converged one
+with a row past `|eta| = 15` (`y < 1` above 15, `y > 0` below -15) is refitted by `fit_glm`, so that
+fit pays for both. The refit keeps `fit_glm`'s warning, and the lean numbers are not used there. On
+this design the two trees' ATEs differ by about 2%, so that row is not strictly like for like.
+
 ## References
 
 - van der Laan, M.J. & Gruber, S. (2010). "Collaborative Double Robust Targeted Maximum Likelihood Estimation." *The International Journal of Biostatistics*, 6(1).
