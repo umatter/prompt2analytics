@@ -696,14 +696,14 @@ fn estimate_sem_gmm(
     let fitted = x.dot(&second.beta);
     let residuals = y - &fitted;
 
-    // Standard errors for beta
-    let (vcov_mat, _) = compute_sem_se(
-        x,
+    // Standard errors for beta: on the transformed data
+    let vcov_mat = delta_vcov(
         &x_star,
         &second.residuals,
-        sigma2,
         &second.unscaled,
-        config,
+        config.se_type,
+        hac,
+        listw,
     )?;
 
     // Standard error for rho
@@ -1845,46 +1845,6 @@ fn estimate_rho_gm(
     })
 }
 
-/// Compute standard errors for SEM model.
-fn compute_sem_se(
-    _x: &Array2<f64>,
-    _x_star: &Array2<f64>,
-    residuals_star: &Array1<f64>,
-    sigma2: f64,
-    xtx_star_inv: &Array2<f64>,
-    config: &SphetConfig,
-) -> EconResult<(Array2<f64>, Array1<f64>)> {
-    let n = residuals_star.len();
-    let k = xtx_star_inv.nrows();
-
-    match config.se_type {
-        SphetSE::Standard => {
-            let vcov = sigma2 * xtx_star_inv;
-            let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov, se))
-        }
-        SphetSE::Robust | SphetSE::HAC => {
-            // For SEM, use HC-robust formula
-            let mut omega = Array2::<f64>::zeros((k, k));
-            for i in 0..n {
-                let e_sq = residuals_star[i] * residuals_star[i];
-                for j in 0..k {
-                    for l in 0..k {
-                        omega[[j, l]] += e_sq * xtx_star_inv[[j, l]];
-                    }
-                }
-            }
-
-            // Small sample correction (HC1)
-            omega *= n as f64 / (n - k) as f64;
-
-            let vcov = xtx_star_inv.dot(&omega).dot(xtx_star_inv);
-            let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov, se))
-        }
-    }
-}
-
 /// Compute standard error for ρ.
 ///
 /// Based on the asymptotic theory from Kelejian-Prucha (2010).
@@ -2721,6 +2681,68 @@ mod tests {
                 "{e}"
             );
         }
+    }
+
+    #[test]
+    fn test_validate_sphet_sem_se_hom() {
+        sem_se_case(false, "sem_hom");
+    }
+
+    #[test]
+    fn test_validate_sphet_sem_se_het() {
+        sem_se_case(true, "sem_het");
+    }
+
+    fn sem_se_case(het: bool, prefix: &str) {
+        // The former "robust" and HAC arms were (sum e^2) A^3 n/(n-k) = (0.0485, 0.0063, 0.0079)
+        // at the hom rho, against White (0.1582, 0.1164, 0.0828).
+        let (case, ds, w, coords) = sphet_case();
+        let mut check = Check::new(&case);
+        let tri = SpatialHacKernel::Triangular;
+        for (cfg, key) in [
+            (
+                config(SphetModel::SpatialError, SphetSE::Standard, het),
+                "se_classical",
+            ),
+            (
+                config(SphetModel::SpatialError, SphetSE::Robust, het),
+                "se_white",
+            ),
+            (
+                hac_config(SphetModel::SpatialError, het, &coords, 0.15, tri),
+                "se_hac_tri_015",
+            ),
+        ] {
+            let r = run_sphet(&ds, "y_sem", &XS, &w, cfg).unwrap();
+            check
+                .vector(
+                    &format!("{prefix}_coef"),
+                    &r.coefficients,
+                    Tol::iterative(1e-8),
+                )
+                .vector(&format!("{prefix}_{key}"), &r.std_errors, Tol::se(N_SIM));
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_sphet_sem_white_se_is_scale_equivariant() {
+        // SPAT-9: x1 * 0.1 must multiply the x1 SE by exactly 10 (it was 20.4 in the finding's repro).
+        let (ds, w, _) = sim();
+        let mut df = ds.df().clone();
+        df.with_column(Column::new(
+            "x1".into(),
+            column(&ds, "x1")
+                .iter()
+                .map(|v| 0.1 * v)
+                .collect::<Vec<f64>>(),
+        ))
+        .unwrap();
+        let c = || config(SphetModel::SpatialError, SphetSE::Robust, true);
+        let a = run_sphet(&ds, "y_sem", &XS, &w, c()).unwrap();
+        let b = run_sphet(&Dataset::new(df), "y_sem", &XS, &w, c()).unwrap();
+        assert!(Tol::new(1e-9, 0.0).allows(b.std_errors[1], 10.0 * a.std_errors[1]));
+        assert!(Tol::new(1e-9, 0.0).allows(b.std_errors[0], a.std_errors[0]));
     }
 
     /// The layout of `create_test_data`.

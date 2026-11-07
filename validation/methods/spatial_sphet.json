@@ -18,7 +18,9 @@
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_hac_kernels",
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_sar_hac_variable",
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_gm_hom",
-        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_gm_het"
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_gm_het",
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_se_hom",
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_se_het"
       ],
       "quantities": [
         "instrument set and rank",
