@@ -638,3 +638,171 @@ mod features {
         assert!(text.starts_with("prompt2analytics is a local data analytics engine. Use 'load_dataset' to load a CSV or Parquet file"));
     }
 }
+
+#[cfg(feature = "db")]
+mod conversations {
+    use super::*;
+
+    /// A live session with one conversation ("t1") holding the user message "hi".
+    pub(super) async fn seeded() -> (axum::Router, String, String) {
+        let (app, _state) = http_app().await;
+        let sid = new_session(&app).await;
+        let (s, conv, _) = send(
+            &app,
+            "POST",
+            "/api/conversations",
+            None,
+            Some(json!({"session_id": sid, "title": "t1"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{conv}");
+        let cid = conv["data"]["id"].as_str().unwrap().to_string();
+        let (s, m, _) = send(
+            &app,
+            "POST",
+            &format!("/api/conversations/{cid}/messages"),
+            Some(&sid),
+            Some(json!({"role": "user", "content": "hi"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{m}");
+        (app, sid, cid)
+    }
+
+    /// MCP-15: GET .../full answers as GET /api/conversations/{id}, with the same ownership check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_full_is_an_alias_of_get_conversation() {
+        let (app, sid, cid) = seeded().await;
+        let (s, full, len) = send(
+            &app,
+            "GET",
+            &format!("/api/conversations/{cid}/full"),
+            Some(&sid),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{len} bytes: {full}");
+        let (_, plain, _) = send(
+            &app,
+            "GET",
+            &format!("/api/conversations/{cid}"),
+            Some(&sid),
+            None,
+        )
+        .await;
+        assert_eq!(full, plain);
+        assert_eq!(
+            (
+                full["data"]["conversation"]["id"].as_str(),
+                full["data"]["messages"][0]["content"].as_str()
+            ),
+            (Some(cid.as_str()), Some("hi"))
+        );
+        let stranger = "00000000-0000-4000-8000-000000000000";
+        let (s, body, _) = send(
+            &app,
+            "GET",
+            &format!("/api/conversations/{cid}/full"),
+            Some(stranger),
+            None,
+        )
+        .await;
+        assert_eq!(
+            (s, body["code"].as_str()),
+            (StatusCode::NOT_FOUND, Some("not_found"))
+        );
+    }
+
+    /// MCP-15: the web UI archives with PUT {is_archived}; PUT applies title and is_archived.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_put_updates_title_and_archive_state() {
+        let (app, sid, cid) = seeded().await;
+        let uri = format!("/api/conversations/{cid}");
+        let put = |body: Value| send(&app, "PUT", &uri, Some(&sid), Some(body));
+        let (s, b, _) = put(json!({"is_archived": true})).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(
+            (b["data"]["is_archived"].clone(), b["data"]["title"].clone()),
+            (json!(true), json!("t1"))
+        );
+        let (s, b, _) = put(json!({"title": "t2", "is_archived": false})).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(
+            (b["data"]["is_archived"].clone(), b["data"]["title"].clone()),
+            (json!(false), json!("t2"))
+        );
+        let (s, b, _) = put(json!({"title": "t3"})).await;
+        assert_eq!(
+            (
+                s,
+                b["data"]["title"].clone(),
+                b["data"]["is_archived"].clone()
+            ),
+            (StatusCode::OK, json!("t3"), json!(false))
+        );
+        let (_, list, _) = send(
+            &app,
+            "GET",
+            &format!("/api/conversations?session_id={sid}"),
+            Some(&sid),
+            None,
+        )
+        .await;
+        assert_eq!(list["data"][0]["title"], "t3");
+        let (s, b, _) = put(json!({})).await;
+        assert_eq!(
+            (s, b["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_arguments"))
+        );
+        assert!(
+            b["error"]
+                .as_str()
+                .unwrap()
+                .contains("send `title`, `is_archived` or both"),
+            "{b}"
+        );
+        let (s, b, _) = put(json!({"archived": true})).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+        assert!(
+            b.as_str().unwrap().contains("unknown field `archived`"),
+            "{b}"
+        );
+    }
+
+    /// MCP-15: POST .../messages/clear answers as DELETE .../messages.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_messages_clear_is_an_alias_of_delete_messages() {
+        let (app, sid, cid) = seeded().await;
+        let (s, b, len) = send(
+            &app,
+            "POST",
+            &format!("/api/conversations/{cid}/messages/clear"),
+            Some(&sid),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{len} bytes: {b}");
+        assert_eq!(b["data"]["deleted_count"], 1);
+        let (_, msgs, _) = send(
+            &app,
+            "GET",
+            &format!("/api/conversations/{cid}/messages"),
+            Some(&sid),
+            None,
+        )
+        .await;
+        assert_eq!(msgs["data"], json!([]));
+        let (s, b, _) = send(
+            &app,
+            "DELETE",
+            &format!("/api/conversations/{cid}/messages"),
+            Some(&sid),
+            None,
+        )
+        .await;
+        assert_eq!(
+            (s, b["data"]["deleted_count"].clone()),
+            (StatusCode::OK, json!(0))
+        );
+    }
+}
