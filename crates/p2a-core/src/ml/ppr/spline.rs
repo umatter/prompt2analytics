@@ -15,6 +15,9 @@
 //! The returned fit, df, spar and lambda all belong to the minimiser. R differs twice: `sgram.f`
 //! integrates the quadratic term with 0.333 for 1/3, and `sbart.c` returns the smooth, leverages
 //! and lambda of its last Brent evaluation, not of the spar it reports.
+//!
+//! Tied abscissae move the knots away from `ppr.f`'s, which then coincide: `ppr_spline_knots`
+//! drops the repeats, where R divides by the empty interval and returns NaN criteria.
 
 use super::SmoothingMethod;
 use crate::errors::{EconError, EconResult};
@@ -22,6 +25,13 @@ use crate::resource;
 
 /// Most B-spline coefficients: `ppr.f` uses `nk = min(n, 15)`.
 const NK_MAX: usize = 15;
+/// Fewest coefficients that give the penalty's scale an inner coefficient to take its trace over.
+const NK_MIN: usize = 6;
+/// Fewest distinct abscissae that always reach [`NK_MIN`] coefficients.
+const DISTINCT_MIN: usize = 4;
+/// On `dx` in [0, 1], knots closer than this are one knot: `(1 - f) v + f v` is only within
+/// rounding of `v`, and projections of tied rows can differ by it.
+const KNOT_EPS: f64 = 1e-10;
 /// Band of the symmetric matrices: `band[i][d]` is entry `(i, i + d)`, `d <= 3`.
 type Band = [[f64; 4]; NK_MAX];
 
@@ -61,20 +71,62 @@ pub(crate) struct SplineFit {
     pub(crate) crit: f64,
 }
 
-/// `ppr.f`'s knots on `dx` in [0, 1]: `nk = min(n, 15)` coefficients, `nk + 4` knots, the inner
-/// ones at the single-precision fraction `(n - 1) (i - 4) / (nk - 3)` of the sorted `dx`.
-pub(crate) fn ppr_spline_knots(dx: &[f64]) -> Vec<f64> {
+/// `ppr.f`'s knots on `dx` in [0, 1], written to `knot`; returns the number of coefficients `nk`,
+/// with `nk + 4` knots. On untied data `nk = min(n, 15)` and the inner knots lie at the
+/// single-precision fraction `(n - 1) (i - 4) / (nk - 3)` of the sorted `dx`.
+///
+/// An inner knot on a boundary knot or on the previous inner knot is dropped, so the knots strictly
+/// increase apart from the 4-fold ends. When fewer than two inner knots survive (one value holds
+/// nearly every row), the inner knots are the distinct inner values instead, evenly thinned.
+pub(crate) fn ppr_spline_knots(dx: &[f64], knot: &mut [f64; NK_MAX + 4]) -> usize {
     let n = dx.len();
     let nk = n.min(NK_MAX);
-    let mut knot = vec![dx[0]; nk + 4];
-    knot[nk..nk + 4].fill(dx[n - 1]);
+    let (lo, hi) = (dx[0], dx[n - 1]);
+    knot[..4].fill(lo);
+    let mut m = 4;
     for i in 5..=nk {
         let p = (((n - 1) * (i - 4)) as f32 / (nk - 3) as f32) as f64;
         let ip = p as usize;
         let f = p - ip as f64;
-        knot[i - 1] = (1.0 - f) * dx[ip] + f * dx[ip + 1];
+        let v = (1.0 - f) * dx[ip] + f * dx[ip + 1];
+        if v - knot[m - 1] > KNOT_EPS && hi - v > KNOT_EPS {
+            knot[m] = v;
+            m += 1;
+        }
     }
-    knot
+    if m < NK_MIN {
+        let inner = distinct_values(dx).saturating_sub(2);
+        let keep = inner.min(nk.saturating_sub(4));
+        if keep >= NK_MIN - 4 {
+            m = 4;
+            let (mut seen, mut prev) = (0, lo);
+            for &v in dx {
+                if v - prev > KNOT_EPS && hi - v > KNOT_EPS {
+                    prev = v;
+                    if m - 4 < keep && seen >= (m - 4) * inner / keep {
+                        knot[m] = v;
+                        m += 1;
+                    }
+                    seen += 1;
+                }
+            }
+        }
+    }
+    knot[m..m + 4].fill(hi);
+    m
+}
+
+/// The values of sorted `dx` that differ by more than [`KNOT_EPS`].
+fn distinct_values(dx: &[f64]) -> usize {
+    let mut count = 1;
+    let mut prev = dx[0];
+    for &v in dx {
+        if v - prev > KNOT_EPS {
+            prev = v;
+            count += 1;
+        }
+    }
+    count
 }
 
 /// The four cubic B-splines non-zero on `[t[left], t[left + 1])`, at `x` (Cox-de Boor).
@@ -166,11 +218,12 @@ impl Problem {
         basis: &mut [[f64; 4]],
     ) -> EconResult<Problem> {
         let nk = knot.len() - 4;
-        if nk < 6 {
+        if nk < NK_MIN {
             return Err(EconError::InvalidSpecification {
                 message: format!(
-                    "smoothing spline: the scale of the penalty needs at least 6 observations, \
-                     got {nk}"
+                    "smoothing spline: the abscissae have {} distinct values, too few distinct \
+                     values for the spline (at least {DISTINCT_MIN} are needed)",
+                    distinct_values(dx)
                 ),
             });
         }
@@ -204,9 +257,11 @@ impl Problem {
         let ratio = t1 / t2;
         if !(ratio.is_finite() && ratio > 0.0) {
             return Err(EconError::InvalidSpecification {
-                message: "smoothing spline: the abscissae have too few distinct values to scale \
-                          the penalty"
-                    .to_string(),
+                message: format!(
+                    "smoothing spline: the abscissae have {} distinct values, too few distinct \
+                     values to scale the penalty",
+                    distinct_values(dx)
+                ),
             });
         }
         Ok(Problem {
@@ -244,7 +299,8 @@ impl Problem {
                     return Err(EconError::InvalidSpecification {
                         message: format!(
                             "smoothing spline: the penalised normal equations are not positive \
-                             definite (pivot {}); the smoothing parameter is too small",
+                             definite (pivot {}); the abscissae are too unevenly spaced for the \
+                             knots",
                             i + 1
                         ),
                     });
@@ -432,8 +488,9 @@ fn fit_spline(
     })
 }
 
-/// `ppr`'s spline smoother on sorted `x` with `x[n - 1] > x[0]`: df matching for
-/// `SmoothingMethod::Spline`, GCV with `gcvpen` otherwise. Writes `smo`; returns the equivalent df.
+/// `ppr`'s spline smoother on sorted `x` with `x[n - 1] > x[0]` and at least 6 observations: df
+/// matching for `SmoothingMethod::Spline`, GCV with `gcvpen` otherwise. Writes `smo`; returns the
+/// equivalent df.
 pub(crate) fn ppr_spline(
     x: &[f64],
     y: &[f64],
@@ -445,13 +502,17 @@ pub(crate) fn ppr_spline(
     work: &mut SplineWork,
 ) -> EconResult<f64> {
     let n = x.len();
+    if n < 6 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("smoothing spline: needs at least 6 observations, got {n}"),
+        });
+    }
     let range = x[n - 1] - x[0];
     for (d, &v) in work.dx.iter_mut().zip(x) {
         *d = (v - x[0]) / range;
     }
     let mut knot = [0.0; NK_MAX + 4];
-    let nk = n.min(NK_MAX);
-    knot[..nk + 4].copy_from_slice(&ppr_spline_knots(&work.dx));
+    let nk = ppr_spline_knots(&work.dx, &mut knot);
     let crit = if method == SmoothingMethod::Spline {
         SplineCriterion::DfMatch { df }
     } else {
@@ -501,8 +562,14 @@ mod tests {
         (dx, y, w)
     }
 
+    fn knots(dx: &[f64]) -> Vec<f64> {
+        let mut knot = [0.0; NK_MAX + 4];
+        let nk = ppr_spline_knots(dx, &mut knot);
+        knot[..nk + 4].to_vec()
+    }
+
     fn problem(dx: &[f64], y: &[f64], w: &[f64]) -> (Problem, Vec<u32>, Vec<[f64; 4]>, Vec<f64>) {
-        let knot = ppr_spline_knots(dx);
+        let knot = knots(dx);
         let (mut left, mut basis) = (vec![0; dx.len()], vec![[0.0; 4]; dx.len()]);
         let p = Problem::new(dx, y, w, &knot, &mut left, &mut basis).unwrap();
         (p, left, basis, knot)
@@ -512,7 +579,7 @@ mod tests {
     #[test]
     fn test_ppr_spline_penalty_is_exact() {
         let (dx, _, _) = curve(100);
-        let knot = ppr_spline_knots(&dx);
+        let knot = knots(&dx);
         let nk = knot.len() - 4;
         let omega = penalty_matrix(&knot, nk);
         let mut simpson = [[0.0; 4]; NK_MAX];
@@ -611,7 +678,10 @@ mod tests {
             "{} {trace}",
             solved.edf
         );
-        // A large lambda: close to the penalty's null space, a weighted line.
+        // A large lambda: the penalty's null space, a weighted line. 1e6 is above the largest lambda
+        // the spar bracket reaches on these data (about 2e5); by 1e12 X'WX is lost to rounding in
+        // the Cholesky factors (the fit is off by 4, and the factorisation fails by 1e13). The gap
+        // here is the smallest of any lambda, about 6e-7: truncation falls and rounding rises.
         let big = p.solve(1e6).unwrap();
         let sw: f64 = w.iter().sum();
         let xb: f64 = dx.iter().zip(&w).map(|(a, b)| a * b).sum::<f64>() / sw;
@@ -621,7 +691,7 @@ mod tests {
         for i in 0..60 {
             let line = yb + sxy / sxx * (dx[i] - xb);
             let fit = fitted_at(&big.coef, left[i] as usize, &basis[i]);
-            assert!((fit - line).abs() <= 1e-3, "{i}: {fit} {line}");
+            assert!((fit - line).abs() <= 2e-6, "{i}: {fit} {line}");
         }
     }
 
@@ -694,7 +764,109 @@ mod tests {
             &mut smo,
             &mut work,
         );
-        assert!(e.is_err());
+        let e = e.unwrap_err().to_string();
+        assert!(
+            e.contains("2 distinct values") && e.contains("too few distinct"),
+            "{e}"
+        );
+    }
+
+    /// The smooth of noisy `y` on the sorted abscissae, fitted by both criteria.
+    fn fits_finitely(x: &[f64]) {
+        let n = x.len();
+        let y: Vec<f64> = (0..n)
+            .map(|i| x[i].sin() + 0.2 * (((i * 7) % 5) as f64 - 2.0))
+            .collect();
+        let w = vec![1.0; n];
+        let mut work = SplineWork::new(n).unwrap();
+        let mut smo = vec![f64::NAN; n];
+        for method in [SmoothingMethod::Spline, SmoothingMethod::GcvSpline] {
+            let edf = ppr_spline(x, &y, &w, method, 3.0, 1.0, &mut smo, &mut work).unwrap();
+            assert!(edf.is_finite() && edf > 1.0, "{method}: {edf}");
+            assert!(smo.iter().all(|v| v.is_finite()), "{method}: {smo:?}");
+        }
+    }
+
+    /// `count` rows at each value, in order.
+    fn tied(groups: &[(f64, usize)]) -> Vec<f64> {
+        groups
+            .iter()
+            .flat_map(|&(v, count)| std::iter::repeat_n(v, count))
+            .collect()
+    }
+
+    /// Ties at either end make `ppr.f`'s knots coincide with the boundary knots: inner interval
+    /// empty at the top (0/0 in the basis), coefficients with no data and no penalty at the bottom.
+    #[test]
+    fn test_ppr_spline_fits_tied_abscissae() {
+        // top-heavy: a fifth of the rows on the last value
+        fits_finitely(&tied(&[
+            (1.0, 20),
+            (2.0, 20),
+            (3.0, 20),
+            (4.0, 20),
+            (5.0, 20),
+        ]));
+        // top-heavy beyond the last quantile
+        let mut top: Vec<f64> = (0..70).map(|i| i as f64 * 0.1).collect();
+        top.extend(tied(&[(7.0, 30)]));
+        fits_finitely(&top);
+        // bottom-heavy
+        fits_finitely(&tied(&[
+            (0.0, 40),
+            (1.0, 19),
+            (2.0, 19),
+            (3.0, 19),
+            (4.0, 3),
+        ]));
+        // both ends, and one value holding nearly every row, which leaves no quantile inside
+        let mut both = tied(&[(0.0, 30)]);
+        both.extend((1..40).map(|i| i as f64 * 0.1));
+        both.extend(tied(&[(4.0, 30)]));
+        fits_finitely(&both);
+        let mut spike = tied(&[(0.0, 95)]);
+        spike.extend([1.0, 2.0, 3.0, 4.0, 5.0]);
+        fits_finitely(&spike);
+        // four distinct values is the fewest that always fits; three are refused
+        fits_finitely(&tied(&[(0.0, 10), (1.0, 10), (2.0, 10), (3.0, 10)]));
+        // n = 25 puts every quantile on a row, so no knot falls between two values
+        let mut work = SplineWork::new(25).unwrap();
+        let mut smo = vec![0.0; 25];
+        let x = tied(&[(0.0, 10), (1.0, 10), (2.0, 5)]);
+        let y: Vec<f64> = (0..25).map(|i| ((i * 7) % 5) as f64).collect();
+        let e = ppr_spline(
+            &x,
+            &y,
+            &[1.0; 25],
+            SmoothingMethod::GcvSpline,
+            3.0,
+            1.0,
+            &mut smo,
+            &mut work,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("3 distinct values"), "{e}");
+    }
+
+    /// Dropping repeats keeps knots strictly increasing inside and leaves untied data alone.
+    #[test]
+    fn test_ppr_spline_knots_strictly_increase() {
+        // (1 - f) v + f v off v by rounding must not pass for a new knot: 0.1 repeats
+        let mut dx = tied(&[(0.0, 10), (0.1, 60), (0.3, 10), (0.7, 10), (1.0, 10)]);
+        let k = knots(&dx);
+        let nk = k.len() - 4;
+        assert_eq!(&k[..4], &[0.0; 4]);
+        assert_eq!(&k[nk..], &[1.0; 4]);
+        for pair in k[3..=nk].windows(2) {
+            assert!(pair[1] - pair[0] > KNOT_EPS, "{k:?}");
+        }
+        assert!(nk >= NK_MIN, "{k:?}");
+        // untied: min(n, 15) coefficients
+        dx = (0..100).map(|i| i as f64 / 99.0).collect();
+        assert_eq!(knots(&dx).len(), 15 + 4);
+        dx = (0..9).map(|i| i as f64 / 8.0).collect();
+        assert_eq!(knots(&dx).len(), 9 + 4);
     }
 
     /// Case `ppr_smoothers`, against `smooth.spline(all.knots = ppr knots)` with `ppr`'s
@@ -706,7 +878,7 @@ mod tests {
         let (case, dx, y) = smooth_data("ppr_smoothers");
         let n = dx.len();
         let w = vec![1.0; n];
-        let knot = ppr_spline_knots(&dx);
+        let knot = knots(&dx);
         assert_eq!(knot.len(), 15 + 4);
         let knots13: Vec<f64> = knot[3..16].to_vec(); // c(0, inner, 1) as smooth.spline's all.knots
         let (p, left, basis, _) = problem(&dx, &y, &w);

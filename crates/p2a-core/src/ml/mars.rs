@@ -942,6 +942,7 @@ fn forward_pass(
 
                 // Try each knot
                 for &knot in &candidate_knots[j] {
+                    resource::checkpoint().map_err(|e| e.to_string())?;
                     for i in 0..n {
                         pos[i] = parent_col[i] * (xj[i] - knot).max(0.0);
                         neg[i] = parent_col[i] * (knot - xj[i]).max(0.0);
@@ -966,11 +967,11 @@ fn forward_pass(
         }
 
         // Check if improvement meets threshold
-        let relative_improvement = best_gcv_reduction / (current_gcv + 1e-10);
         let Some((parent, j, knot, score)) = best else {
             break;
         };
-        if relative_improvement < thresh {
+        // `best` is set only on a positive reduction, so current_gcv > 0 here
+        if best_gcv_reduction / current_gcv < thresh {
             break;
         }
 
@@ -1554,6 +1555,37 @@ mod tests {
         assert_eq!(d, r.effective_df());
         let want = r.rss / (120.0 * (1.0 - d / 120.0).powi(2));
         assert!((r.gcv - want).abs() <= 1e-12 * want, "{} vs {want}", r.gcv);
+    }
+
+    /// The stopping rule is relative: rescaling y gives the same terms at any scale, however small
+    /// its GCV. Before: an absolute floor in the denominator left tiny responses intercept-only.
+    #[test]
+    fn test_mars_stopping_rule_is_scale_free() {
+        let (x, y) = two_kink(120, 0);
+        let terms = |scale: f64, intercept: bool| {
+            let c = MarsConfig {
+                intercept,
+                fast: Some(false),
+                ..Default::default()
+            };
+            let scaled = y.mapv(|v| v * scale);
+            let r = mars(x.view(), scaled.view(), c, None).unwrap();
+            r.basis_functions
+                .iter()
+                .map(|b| {
+                    b.hinges
+                        .iter()
+                        .map(|h| (h.variable, h.knot, h.hinge_type == HingeType::Positive))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for intercept in [true, false] {
+            let base = terms(1.0, intercept);
+            assert!(base.len() > 1, "{base:?}");
+            assert_eq!(terms(1e-6, intercept), base);
+            assert_eq!(terms(1e6, intercept), base);
+        }
     }
 
     /// WT-12: intercept = false fits without the constant; the fit is least squares on the

@@ -46,6 +46,10 @@
 //!   smoothing parameter (`ppr/spline.rs`; R does neither), so spline fits agree with R
 //!   only to about 1%. A term's `edf` belongs to its stored ridge function; R reports that of the
 //!   last smoother call, a rejected trial included, and at `optlevel = 0` only for the first term.
+//! - A spline smoother on projections tied at either end drops the knots that coincide, and a
+//!   predictor with enough distinct values is fitted. R's knots coincide there and its smoother
+//!   returns NaN criteria. Too few distinct values (4 always suffice) at the start of a search
+//!   are an error; a step that ties the projections later in a search is a rejected step.
 //!
 //! # References
 //!
@@ -500,10 +504,11 @@ fn validate(
             return Err(invalid("PPR: the weights sum to zero".to_string()));
         }
     }
+    // Against a value of y, not the mean: a rounded mean differs from a constant y.
     let w = |i: usize| weights.map_or(1.0, |wt| wt[i]);
-    let sw: f64 = (0..n).map(w).sum();
-    let yb = (0..n).map(|i| w(i) * y[i]).sum::<f64>() / sw;
-    if !((0..n).any(|i| w(i) > 0.0 && y[i] != yb)) {
+    let mut positive = (0..n).filter(|&i| w(i) > 0.0).map(|i| y[i]);
+    let first = positive.next();
+    if positive.all(|v| Some(v) == first) {
         return Err(invalid(
             "PPR: the response is constant on the rows with positive weight".to_string(),
         ));
@@ -531,11 +536,19 @@ fn unused_options(c: &PprConfig) -> Vec<String> {
             push("span", c.span, "supsmu");
         }
     }
+    let fixed_span_ignores_bass = c.sm_method == SmoothingMethod::Supsmu && c.span > 0.0;
     if c.sm_method != SmoothingMethod::Spline && c.df != 5.0 {
         push("df", c.df, "spline");
     }
     if c.sm_method != SmoothingMethod::GcvSpline && c.gcvpen != 1.0 {
         push("gcvpen", c.gcvpen, "gcvspline");
+    }
+    if fixed_span_ignores_bass && c.bass != 0.0 {
+        out.push(format!(
+            "PPR: bass = {} has no effect with span = {} (it applies to the cross-validated span \
+             only)",
+            c.bass, c.span
+        ));
     }
     out
 }
@@ -567,9 +580,10 @@ pub fn ppr(
 /// `InvalidSpecification` when a parameter is out of range, when `y` (or `weights`) does not
 /// match the rows of `x`, when there are fewer than 4 observations (6 for the spline smoothers),
 /// when `x`, `y` or a weight is non-finite, a weight is negative or the weights sum to zero, when
-/// `y` or every predictor is constant, and when the projections pool into fewer than three
-/// groups. `Cancelled` once the installed computation budget expires (checked per term, per
-/// search step and per backfitting pass).
+/// `y` or every predictor is constant, when the response is too large to scale, when the
+/// projections pool into fewer than three groups, and when a spline smoother starts a search on too
+/// few distinct projection values (4 always suffice). `Cancelled` once the installed computation
+/// budget expires (checked per term, per search step and per backfitting pass).
 pub fn ppr_with(
     x: ArrayView2<f64>,
     y: &[f64],
@@ -659,6 +673,8 @@ struct Buffers {
     deriv_sorted: Vec<f64>,
     step: Vec<f64>,
     trial: Vec<f64>,
+    direction: DirectionWork,
+    pooled: PoolWork,
     supsmu: supsmu::SupsmuWork,
     spline: Option<spline::SplineWork>,
 }
@@ -706,10 +722,11 @@ impl Smart<'_> {
             ss += w[j] * r[j] * r[j];
         }
         let ys = (ss / sw).sqrt();
-        if !ys.gt(&0.0) {
-            return Err(invalid(
-                "PPR: the response is constant on the rows with positive weight".to_string(),
-            ));
+        if !(ys.is_finite() && ys > 0.0) {
+            return Err(invalid(format!(
+                "PPR: the response's weighted standard deviation is {ys}, which cannot scale it; \
+                 rescale the response"
+            )));
         }
         let s = 1.0 / ys;
         r.iter_mut().for_each(|v| *v *= s);
@@ -781,6 +798,8 @@ impl Smart<'_> {
             deriv_sorted: col()?,
             step: resource::try_vec(p, 0.0, "PPR work")?,
             trial: resource::try_vec(p, 0.0, "PPR work")?,
+            direction: DirectionWork::new(p)?,
+            pooled: PoolWork::new(n)?,
             supsmu: supsmu::SupsmuWork::new(n)?,
             spline: match self.method {
                 SmoothingMethod::Supsmu => None,
@@ -962,7 +981,7 @@ impl Smart<'_> {
         let (n, p, w, sw) = (self.n, self.p, self.w, self.sw);
         if start == 0 {
             buf.deriv.fill(1.0);
-            a.copy_from_slice(&pprdir(self.x, p, w, sw, y, &buf.deriv)?);
+            pprdir(self.x, p, w, sw, y, &buf.deriv, &mut buf.direction, a)?;
         }
         let norm = a.iter().map(|v| v * v).sum::<f64>().sqrt();
         if norm > 0.0 {
@@ -993,16 +1012,23 @@ impl Smart<'_> {
                 if norm > 0.0 && norm.is_finite() {
                     let s = 1.0 / norm;
                     buf.trial.iter_mut().for_each(|v| *v *= s);
-                    let df = self.smooth_on(buf, y)?;
-                    let mut s = 0.0;
-                    for j in 0..n {
-                        let e = buf.ys[j] - buf.smo[j];
-                        s += buf.ws[j] * e * e;
-                    }
-                    let s = s / sw;
-                    if s < asr {
-                        accepted = Some((s, df));
-                        break;
+                    match self.smooth_on(buf, y) {
+                        Ok(df) => {
+                            let mut s = 0.0;
+                            for j in 0..n {
+                                let e = buf.ys[j] - buf.smo[j];
+                                s += buf.ws[j] * e * e;
+                            }
+                            let s = s / sw;
+                            if s < asr {
+                                accepted = Some((s, df));
+                                break;
+                            }
+                        }
+                        // A step that ties the projections is rejected once the search has a
+                        // direction to keep; at its start there is none, and the error stands.
+                        Err(EconError::InvalidSpecification { .. }) if asr < BIG => {}
+                        Err(e) => return Err(e),
                     }
                 }
                 cut *= 0.5;
@@ -1028,15 +1054,30 @@ impl Smart<'_> {
             if iter > control.mitone || p <= 1 {
                 break;
             }
-            pprder(&buf.xs, &buf.smo, &buf.ws, FDEL, &mut buf.deriv_sorted)?;
+            pprder(
+                &buf.xs,
+                &buf.smo,
+                &buf.ws,
+                FDEL,
+                &mut buf.deriv_sorted,
+                &mut buf.pooled,
+            )?;
             for j in 0..n {
                 buf.resid[j] = y[j] - f[j];
             }
             for (pos, &(_, row)) in buf.order.iter().enumerate() {
                 buf.deriv[row] = buf.deriv_sorted[pos];
             }
-            buf.step
-                .copy_from_slice(&pprdir(self.x, p, w, sw, &buf.resid, &buf.deriv)?);
+            pprdir(
+                self.x,
+                p,
+                w,
+                sw,
+                &buf.resid,
+                &buf.deriv,
+                &mut buf.direction,
+                &mut buf.step,
+            )?;
         }
         let mut s = 0.0;
         for j in 0..n {
@@ -1222,15 +1263,52 @@ impl Smart<'_> {
     }
 }
 
-/// The Gauss-Newton step on rows `x` (n x p, row-major): least squares of `r` on `d x_j` centred
-/// by weighted means, with weights `w`, by [`ppconj`].
-fn pprdir(x: &[f64], p: usize, w: &[f64], sw: f64, r: &[f64], d: &[f64]) -> EconResult<Vec<f64>> {
+/// Work space of [`pprdir`] and [`ppconj`]: `g` packed, the others of length `p`.
+struct DirectionWork {
+    e: Vec<f64>,
+    z: Vec<f64>,
+    c: Vec<f64>,
+    g: Vec<f64>,
+    res: Vec<f64>,
+    dir: Vec<f64>,
+    gd: Vec<f64>,
+    prev: Vec<f64>,
+}
+
+impl DirectionWork {
+    fn new(p: usize) -> EconResult<Self> {
+        let packed = resource::checked_len(&[p, p + 1], "PPR direction step")? / 2;
+        let col = || resource::try_vec(p, 0.0, "PPR direction step");
+        Ok(DirectionWork {
+            e: col()?,
+            z: col()?,
+            c: col()?,
+            g: resource::try_vec(packed, 0.0, "PPR direction step")?,
+            res: col()?,
+            dir: col()?,
+            gd: col()?,
+            prev: col()?,
+        })
+    }
+}
+
+/// The Gauss-Newton step into `out`, on rows `x` (n x p, row-major): least squares of `r` on
+/// `d x_j` centred by weighted means, with weights `w`, by [`ppconj`].
+fn pprdir(
+    x: &[f64],
+    p: usize,
+    w: &[f64],
+    sw: f64,
+    r: &[f64],
+    d: &[f64],
+    work: &mut DirectionWork,
+    out: &mut [f64],
+) -> EconResult<()> {
     resource::checkpoint()?;
-    let packed = resource::checked_len(&[p, p + 1], "PPR direction step")? / 2;
-    let mut e = resource::try_vec(p, 0.0, "PPR direction step")?;
-    let mut z = resource::try_vec(p, 0.0, "PPR direction step")?;
-    let mut c = resource::try_vec(p, 0.0, "PPR direction step")?;
-    let mut g = resource::try_vec(packed, 0.0, "PPR direction step")?;
+    let DirectionWork { e, z, c, g, .. } = work;
+    e.fill(0.0);
+    c.fill(0.0);
+    g.fill(0.0);
     for (l, row) in x.chunks_exact(p).enumerate() {
         let wd = w[l] * d[l];
         for (ei, v) in e.iter_mut().zip(row) {
@@ -1261,7 +1339,7 @@ fn pprdir(x: &[f64], p: usize, w: &[f64], sw: f64, r: &[f64], d: &[f64]) -> Econ
     }
     g.iter_mut().for_each(|v| *v /= sw);
     c.iter_mut().for_each(|v| *v /= sw);
-    ppconj(&g, &c, p)
+    ppconj(p, work, out)
 }
 
 /// `out = G v` for `G` a packed upper triangle by columns.
@@ -1279,13 +1357,22 @@ fn packed_mul(g: &[f64], v: &[f64], out: &mut [f64]) {
     }
 }
 
-/// Conjugate gradients on `G x = c`, restarted `MITCJ` times.
-fn ppconj(g: &[f64], c: &[f64], p: usize) -> EconResult<Vec<f64>> {
-    let col = || resource::try_vec(p, 0.0, "PPR conjugate gradients");
-    let (mut x, mut res, mut dir, mut gd, mut prev) = (col()?, col()?, col()?, col()?, col()?);
+/// Conjugate gradients on `G x = c` (`work.g`, `work.c`) into `x`, restarted `MITCJ` times.
+fn ppconj(p: usize, work: &mut DirectionWork, x: &mut [f64]) -> EconResult<()> {
+    let DirectionWork {
+        c,
+        g,
+        res,
+        dir,
+        gd,
+        prev,
+        ..
+    } = work;
+    x.fill(0.0);
+    dir.fill(0.0);
     for _ in 0..MITCJ {
-        prev.copy_from_slice(&x);
-        packed_mul(g, &x, &mut gd);
+        prev.copy_from_slice(x);
+        packed_mul(g, x, gd);
         let mut h = 0.0;
         for i in 0..p {
             res[i] = gd[i] - c[i];
@@ -1300,8 +1387,8 @@ fn ppconj(g: &[f64], c: &[f64], p: usize) -> EconResult<Vec<f64>> {
             for i in 0..p {
                 dir[i] = beta * dir[i] - res[i];
             }
-            packed_mul(g, &dir, &mut gd);
-            let t: f64 = gd.iter().zip(&dir).map(|(a, b)| a * b).sum();
+            packed_mul(g, dir, gd);
+            let t: f64 = gd.iter().zip(dir.iter()).map(|(a, b)| a * b).sum();
             if !t.gt(&0.0) {
                 // no curvature left along dir (G is singular here): x is as good as it gets
                 break;
@@ -1321,14 +1408,14 @@ fn ppconj(g: &[f64], c: &[f64], p: usize) -> EconResult<Vec<f64>> {
         }
         let change = x
             .iter()
-            .zip(&prev)
+            .zip(prev.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f64::max);
         if !change.ge(&CJEPS) {
             break;
         }
     }
-    Ok(x)
+    Ok(())
 }
 
 /// Merge runs of `x` closer than `del` (ppr.f `pool`): each run gets the weighted means of its `x`
@@ -1378,9 +1465,34 @@ fn pool(x: &mut [f64], y: &mut [f64], w: &mut [f64], del: f64) {
     }
 }
 
+/// Work space of [`pprder`].
+struct PoolWork {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    w: Vec<f64>,
+}
+
+impl PoolWork {
+    fn new(n: usize) -> EconResult<Self> {
+        let col = || resource::try_vec(n, 0.0, "PPR derivative");
+        Ok(PoolWork {
+            x: col()?,
+            y: col()?,
+            w: col()?,
+        })
+    }
+}
+
 /// The derivative of the smooth `s` on sorted `x` (ppr.f `pprder`): central differences between
 /// the groups of `x` pooled at `fdel` of the interquartile range, one-sided at the two ends.
-fn pprder(x: &[f64], s: &[f64], w: &[f64], fdel: f64, d: &mut [f64]) -> EconResult<()> {
+fn pprder(
+    x: &[f64],
+    s: &[f64],
+    w: &[f64],
+    fdel: f64,
+    d: &mut [f64],
+    work: &mut PoolWork,
+) -> EconResult<()> {
     let n = x.len();
     if !x[n - 1].gt(&x[0]) {
         d.fill(0.0);
@@ -1399,13 +1511,16 @@ fn pprder(x: &[f64], s: &[f64], w: &[f64], fdel: f64, d: &mut [f64]) -> EconResu
         scale = x[j - 1] - x[i - 1];
     }
     let del = fdel * scale * 2.0;
-    let mut sx = resource::try_vec(n, 0.0, "PPR derivative")?;
-    let mut sy = resource::try_vec(n, 0.0, "PPR derivative")?;
-    let mut sw = resource::try_vec(n, 0.0, "PPR derivative")?;
+    let PoolWork {
+        x: sx,
+        y: sy,
+        w: sw,
+    } = work;
     sx.copy_from_slice(x);
     sy.copy_from_slice(s);
     sw.copy_from_slice(w);
-    pool(&mut sx, &mut sy, &mut sw, del);
+    pool(sx, sy, sw, del);
+    let (sx, sy) = (&*sx, &*sy);
     // The end (exclusive) of the group starting at `start`.
     let group_end = |start: usize| {
         let mut e = start + 1;
@@ -1847,7 +1962,8 @@ mod tests {
         let s = [0.1, 0.4, 0.45, 0.9, 1.3, 1.35, 2.2, 2.0];
         let w = [1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 0.5, 1.0];
         let mut d = [0.0; 8];
-        pprder(&x, &s, &w, FDEL, &mut d).unwrap();
+        let mut work = PoolWork::new(8).unwrap();
+        pprder(&x, &s, &w, FDEL, &mut d, &mut work).unwrap();
         let want = [
             0.6578947368421053,
             0.6666666666666667,
@@ -1867,7 +1983,7 @@ mod tests {
         assert!((py[2] - 0.43333333333333335).abs() < 1e-15, "{py:?}");
         assert_eq!(pw[1], 3.0);
         let x2 = [0.0, 0.001, 0.002, 0.003, 1.0, 1.001, 1.002, 1.003];
-        let err = pprder(&x2, &[0.1; 8], &[1.0; 8], FDEL, &mut d)
+        let err = pprder(&x2, &[0.1; 8], &[1.0; 8], FDEL, &mut d, &mut work)
             .unwrap_err()
             .to_string();
         assert!(err.contains("br is too large"), "{err}");
@@ -1880,10 +1996,15 @@ mod tests {
         let r: Vec<f64> = (1..=10).map(|j| (j as f64).sin()).collect();
         let d: Vec<f64> = (1..=10).map(|j| (j as f64).cos()).collect();
         let w = [1.0, 2.0, 1.0, 1.0, 0.5, 1.0, 1.0, 3.0, 1.0, 1.0];
-        let e = pprdir(&x, 3, &w, 12.5, &r, &d).unwrap();
+        let mut work = DirectionWork::new(3).unwrap();
+        let mut e = [0.0; 3];
         let want = [1.245593551338366, -0.7643088303995245, -0.12125488790032093];
-        for (a, b) in e.iter().zip(want) {
-            assert!((a - b).abs() <= 1e-12 * b.abs(), "{e:?}");
+        // twice on one work space: nothing of the first call may reach the second
+        for _ in 0..2 {
+            pprdir(&x, 3, &w, 12.5, &r, &d, &mut work, &mut e).unwrap();
+            for (a, b) in e.iter().zip(want) {
+                assert!((a - b).abs() <= 1e-12 * b.abs(), "{e:?}");
+            }
         }
     }
     /// Design section 3.2: options R distinguishes give different fits (before: bit-identical).
@@ -2008,6 +2129,30 @@ mod tests {
                 .to_string()
                 .contains("constant")
         );
+        // a constant whose rounded mean differs from it, and one on the positive weights only
+        let tenth = vec![0.1; y.len()];
+        assert!(
+            ppr_with(x.view(), &tenth, None, &validate::cfg())
+                .unwrap_err()
+                .to_string()
+                .contains("constant")
+        );
+        let mut mostly = tenth.clone();
+        mostly[0] = 7.0;
+        let mut wt = vec![1.0; y.len()];
+        wt[0] = 0.0;
+        assert!(
+            ppr_with(x.view(), &mostly, Some(&wt), &validate::cfg())
+                .unwrap_err()
+                .to_string()
+                .contains("constant")
+        );
+        // a response too large to square has no scale
+        let huge: Vec<f64> = y.iter().map(|v| (v + 1.5) * 1e200).collect();
+        let e = ppr_with(x.view(), &huge, None, &validate::cfg())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("rescale the response"), "{e}");
         let k = ndarray::Array2::from_elem((y.len(), 2), 1.0);
         assert!(
             ppr_with(k.view(), &y, None, &validate::cfg())
@@ -2072,5 +2217,74 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("df = 8"))
         );
+        // a fixed span returns before the bass rule; a cross-validated span uses it
+        let mut fixed = validate::cfg();
+        fixed.span = 0.3;
+        fixed.bass = 5.0;
+        let r = ppr_with(x.view(), &y, None, &fixed).unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w
+                == "PPR: bass = 5 has no effect with span = 0.3 (it applies to the \
+                    cross-validated span only)"),
+            "{:?}",
+            r.warnings
+        );
+        let mut cv = validate::cfg();
+        cv.bass = 5.0;
+        let r = ppr_with(x.view(), &y, None, &cv).unwrap();
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("bass")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// Discrete predictors tie the projections heavily, at the ends and in a step of the search;
+    /// the spline smoothers fit them. A binary predictor alone has too few distinct values.
+    #[test]
+    fn test_ppr_spline_fits_discrete_predictors() {
+        let noisy = |v: f64, i: usize| v + 0.3 * (((i * 7) % 5) as f64 - 2.0);
+        let n = 100;
+        let a: Vec<f64> = (0..n).map(|i| (i % 5 + 1) as f64).collect();
+        let b: Vec<f64> = (0..n).map(|i| ((i * 3) % 2) as f64).collect();
+        for method in [SmoothingMethod::Spline, SmoothingMethod::GcvSpline] {
+            let cfg = PprConfig {
+                sm_method: method,
+                ..Default::default()
+            };
+            // five values, a fifth of the rows on the last
+            let x = Array2::from_shape_fn((n, 1), |(i, _)| a[i]);
+            let y: Vec<f64> = (0..n).map(|i| noisy(a[i].sqrt(), i)).collect();
+            let r = ppr_with(x.view(), &y, None, &cfg).unwrap();
+            assert!(r.fitted.iter().all(|v| v.is_finite()), "{method}");
+            // 40% at the bottom, 3% at the top
+            let bottom: Vec<f64> = (0..n)
+                .map(|i| match i {
+                    0..40 => 0.0,
+                    97.. => 4.0,
+                    _ => ((i % 3) + 1) as f64,
+                })
+                .collect();
+            let x = Array2::from_shape_fn((n, 1), |(i, _)| bottom[i]);
+            let y: Vec<f64> = (0..n).map(|i| noisy(bottom[i], i)).collect();
+            let r = ppr_with(x.view(), &y, None, &cfg).unwrap();
+            assert!(r.fitted.iter().all(|v| v.is_finite()), "{method}");
+            // two predictors, ten projection values, a direction search
+            let x = Array2::from_shape_fn((n, 2), |(i, j)| if j == 0 { a[i] } else { b[i] });
+            let y: Vec<f64> = (0..n).map(|i| noisy(a[i] + 2.0 * b[i], i)).collect();
+            let r = ppr_with(x.view(), &y, None, &cfg).unwrap();
+            assert!(r.fitted.iter().all(|v| v.is_finite()), "{method}");
+            let rss: f64 = r.residuals.iter().map(|e| e * e).sum();
+            let tss: f64 = y.iter().map(|v| (v - r.y_mean).powi(2)).sum();
+            assert!(rss < 0.5 * tss, "{method}: {rss} {tss}");
+            // binary
+            let x = Array2::from_shape_fn((n, 1), |(i, _)| b[i]);
+            let y: Vec<f64> = (0..n).map(|i| noisy(b[i], i)).collect();
+            let e = ppr_with(x.view(), &y, None, &cfg).unwrap_err().to_string();
+            assert!(
+                e.contains("too few distinct") && e.contains("2 distinct"),
+                "{e}"
+            );
+        }
     }
 }

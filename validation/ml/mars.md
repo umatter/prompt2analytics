@@ -16,6 +16,7 @@ GCV is Friedman (1991), eq. 30, as earth's `GetGcv`: `RSS / (n (1 - C/n)^2)` wit
 | `test_mars_without_intercept` | `intercept = false`: no constant, least squares on the returned basis to 1e-10 relative, uncentred R-squared as `lm(y ~ 0 + ...)`, `predict` equal to the fitted values exactly |
 | `test_mars_design_has_full_rank` | The returned basis is identified: a collinear pair adds only its identified hinge, as earth does |
 | `test_mars_incremental_scoring_matches_refits` | Every forward candidate's RSS and every backward deletion's RSS equal a full `least_squares` refit to 1e-9 relative, with the same aliased set |
+| `test_mars_stopping_rule_is_scale_free` | `y` rescaled by 1e-6 and 1e6 gives the same terms, with and without the intercept |
 | `test_mars_validates_parameters` | Spans, `nprune`, `nk`, `degree`, `penalty`, `thresh`, `fast_k`, non-finite data, feature names |
 
 ## Known differences from earth

@@ -185,6 +185,11 @@ impl KernelCache {
         let two_l = resource::checked_len(&[l, 2], "SVM kernel cache")?;
         let eight_l = resource::checked_len(&[l, 8], "SVM kernel cache")?;
         let budget = (size_bytes / 4).saturating_sub(eight_l).max(two_l);
+        // The entries it can hold: a default budget above l^2 must not refuse a small problem.
+        resource::check_alloc::<f32>(
+            budget.min(l.saturating_mul(l)),
+            "SVM kernel cache (cache_size_mb)",
+        )?;
         let mut heads: Vec<Head> = resource::try_with_capacity(l + 1, "SVM kernel cache")?;
         for _ in 0..=l {
             heads.push(Head {
@@ -238,9 +243,13 @@ impl KernelCache {
                 let oldest = self.heads[self.root].next;
                 self.release(oldest);
             }
+            resource::check_alloc::<f32>(len, "SVM kernel cache column")?;
             let data = &mut self.heads[index].data;
-            data.try_reserve_exact(len - data.len())
-                .map_err(|_| EconError::ResourceLimit("SVM kernel cache".to_string()))?;
+            data.try_reserve_exact(len - data.len()).map_err(|_| {
+                EconError::ResourceLimit(format!(
+                    "SVM kernel cache: could not allocate a column of {len} entries"
+                ))
+            })?;
             data.resize(len, 0.0);
             self.heads[index].len = len;
             self.free -= more;
@@ -478,18 +487,8 @@ impl Solver<'_> {
             }
         }
         let Some(i) = gmax_idx else {
-            // no variable can go up: the same stopping test, with what is left
-            for j in 0..active {
-                let v = if self.q.y[j] > 0.0 {
-                    (self.status[j] != Bound::Lower).then_some(self.g[j])
-                } else {
-                    (self.status[j] != Bound::Upper).then_some(-self.g[j])
-                };
-                if let Some(v) = v {
-                    gmax2 = gmax2.max(v);
-                }
-            }
-            self.gap = gmax + gmax2;
+            // the set of variables that can go up is empty: m(a) is minus infinity
+            self.gap = f64::NEG_INFINITY;
             return Ok(None);
         };
         self.q.get_q(i, active)?;
@@ -850,25 +849,33 @@ pub fn fast_svm(
 ) -> Result<FastSvmResult, String> {
     validate(&data, &labels, config)?;
     let classes = binary_classes(&labels)?;
-    train(
-        data,
-        &classes.y.to_vec(),
-        (classes.negative, classes.positive),
-        config,
-    )
-    .map_err(|e| e.to_string())
+    let (negative, positive) = (classes.negative, classes.positive);
+    let y = if classes.y.is_standard_layout() {
+        classes.y.into_raw_vec_and_offset().0
+    } else {
+        classes.y.to_vec()
+    };
+    train(data, y, (negative, positive), config).map_err(|e| e.to_string())
 }
 
 fn train(
     data: ArrayView2<f64>,
-    y: &[f64],
+    y: Vec<f64>,
     class_labels: (f64, f64),
     config: &FastSvmConfig,
 ) -> EconResult<FastSvmResult> {
     let (n, p) = data.dim();
-    let len = resource::checked_len(&[n, p], "SVM data")?;
-    let mut x: Vec<f64> = resource::try_with_capacity(len, "SVM data")?;
-    x.extend(data.iter().copied());
+    let copied;
+    let x: &[f64] = match data.as_slice() {
+        Some(s) => s,
+        None => {
+            let len = resource::checked_len(&[n, p], "SVM data")?;
+            let mut v: Vec<f64> = resource::try_with_capacity(len, "SVM data")?;
+            v.extend(data.iter().copied());
+            copied = v;
+            &copied
+        }
+    };
 
     let size_bytes = config.cache_size_mb.saturating_mul(1 << 20);
     let mut qd = resource::try_vec(n, 0.0, "SVM kernel diagonal")?;
@@ -886,11 +893,11 @@ fn train(
     rows.iter_mut().enumerate().for_each(|(i, r)| *r = i);
     let mut solver = Solver {
         q: QMatrix {
-            x: &x,
+            x,
             p,
             kernel: config.kernel,
             rows,
-            y: y.to_vec(),
+            y,
             qd,
             cache: KernelCache::new(n, size_bytes)?,
             evaluations: 0,
@@ -913,17 +920,19 @@ fn train(
         return Err(overflow());
     }
 
+    // By row, first signed: y is -1 or 1 by position and alpha >= 0, so alpha is the magnitude.
     let mut alphas = resource::try_vec(n, 0.0, "SVM dual")?;
     for (pos, &row) in solver.q.rows.iter().enumerate() {
-        alphas[row] = solver.alpha[pos];
+        alphas[row] = solver.alpha[pos] * solver.q.y[pos];
     }
     let mut support_vector_indices = Vec::new();
     let mut dual_coefficients = Vec::new();
-    for (row, &a) in alphas.iter().enumerate() {
-        if a != 0.0 {
+    for (row, a) in alphas.iter_mut().enumerate() {
+        if *a != 0.0 {
             support_vector_indices.push(row);
-            dual_coefficients.push(a * y[row]);
+            dual_coefficients.push(*a);
         }
+        *a = a.abs();
     }
 
     // Decision values in double precision on every row, as svm_predict_values.
@@ -931,7 +940,7 @@ fn train(
     let kernel = config.kernel;
     let budget = resource::current_budget();
     let mut decision_values = resource::try_vec(n, 0.0, "SVM decision values")?;
-    let (x_ref, svs, coefs) = (&x, &support_vector_indices, &dual_coefficients);
+    let (x_ref, svs, coefs) = (x, &support_vector_indices, &dual_coefficients);
     decision_values
         .par_iter_mut()
         .enumerate()
@@ -1242,6 +1251,18 @@ mod tests {
         assert_eq!(c.column(3), &[4.0, 2.0, 3.0, 1.0]);
         // Column 1 ended between the two swapped indices, so it was given up.
         assert_eq!(c.get_data(1, 2).unwrap().0, 0);
+    }
+
+    /// The cache is held to the allocation ceiling by what it can hold, not by its budget: a budget
+    /// over the ceiling is refused only where the problem could fill it.
+    #[test]
+    fn test_kernel_cache_respects_the_allocation_ceiling() {
+        let bytes = 100 << 20;
+        resource::with_alloc_ceiling(Some(1 << 20), || {
+            let e = KernelCache::new(10_000, bytes).err().unwrap().to_string();
+            assert!(e.contains("cache_size_mb"), "{e}");
+            assert!(KernelCache::new(100, bytes).is_ok());
+        });
     }
 
     /// ML-103: the kernel cache is bounded by cache_size_mb and never changes the solution.

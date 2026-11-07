@@ -58,7 +58,9 @@ Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_va
 `test_smoothing_method_parses_aliases_and_rejects_unknown`, `test_ppr_rejects_invalid_options`,
 `test_ppr_reports_options_the_smoother_ignores`, `test_ppr_spline_penalty_is_exact`,
 `test_ppr_spline_fit_is_consistent`, `test_ppr_spline_brent_finds_the_minimum`,
-`test_ppr_spline_refuses_what_it_cannot_scale`, `test_ppr_supsmu_ties_and_constant_x`.
+`test_ppr_spline_refuses_what_it_cannot_scale`, `test_ppr_spline_fits_tied_abscissae`,
+`test_ppr_spline_knots_strictly_increase`, `test_ppr_spline_fits_discrete_predictors`,
+`test_ppr_supsmu_ties_and_constant_x`.
 
 ## Deviations from R
 
@@ -78,6 +80,12 @@ Without R: `test_ppr_fitted_equals_predict_on_training_rows`, `test_ppr_ridge_va
   bounds).
 - **`gof`** is the RSS the search tracked, as in R: just above the RSS of `fitted` when the last term of the
   final pass kept its old fit.
+- **Tied projections with a spline smoother.** About 1/12 of the rows or more tied at either end of a sorted
+  projection make `ppr.f`'s inner knots coincide with a boundary knot. R then logs non-finite `spar` values and
+  returned a `gofn` of 80.205 on six runs of a discrete-predictor test (not compared further). p2a drops the
+  repeated knots, so `nk` follows the shorter knot vector, and fits; untied data keep R's knots. Too few distinct
+  values (4 always suffice) at the start of a search are an error, and a step that ties the projections later in
+  a search is a rejected step.
 
 ## Missing and non-finite values
 
