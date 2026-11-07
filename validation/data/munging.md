@@ -45,3 +45,13 @@ rule (DATA-69, Tier 4).
 Case `data_munging_na_if`, on `munging_fill.csv`. Decisive value:
 `k_na_if_3 = [NA, NA, 1, NA, 1, 2, NA, 5, 4, 6]`. Tests: `test_validate_replace_na_if`,
 `test_replace_with_none_gives_null`, `test_replace_typed_every_dtype`.
+
+## Value counts
+
+`value_counts_with(.., normalize)`: counts, or proportions with every row in the denominator (the
+missing values are a group of their own), as `dplyr::count(d, g, sort = TRUE)` and `n / sum(n)`. Tied
+counts order by value, ascending, missing last.
+
+Case `data_munging_value_counts`, on `munging_counts.csv`. Decisive values: `vc_n = [4, 3, 2, 1]`,
+`vc_proportion = [0.4, 0.3, 0.2, 0.1]`. Tests: `test_validate_value_counts`,
+`test_value_counts_normalize`.

@@ -217,16 +217,27 @@ pub fn group_by(dataset: &Dataset, by: &[&str], aggs: &[AggSpec]) -> MungeResult
 /// //          C        | 50
 /// ```
 pub fn value_counts(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
+    value_counts_with(dataset, column, false)
+}
+
+/// [`value_counts`], with a Float64 column "proportion" (the count over all rows: missing values are
+/// a group of their own and count in the denominator) instead of "count" when `normalize`, as
+/// `dplyr::count(d, x, sort = TRUE) |> mutate(proportion = n / sum(n))`.
+///
+/// Rows run from the largest count down; tied counts by value, ascending, missing last (categories
+/// by label), as `dplyr::count(sort = TRUE)`, so the order does not change between calls.
+pub fn value_counts_with(dataset: &Dataset, column: &str, normalize: bool) -> MungeResult<Dataset> {
     // Validate column exists
     if dataset.df().column(column).is_err() {
         return Err(MungeError::ColumnNotFound(column.to_string()));
     }
+    let value_column = if normalize { "proportion" } else { "count" };
 
     // Use lazy frame for value_counts
     let lazy = dataset.df().clone().lazy();
 
     let result = lazy
-        .select([col(column).value_counts(true, true, "count", false)])
+        .select([col(column).value_counts(true, true, value_column, normalize)])
         .collect()
         .map_err(|e| MungeError::AggregationError(e.to_string()))?;
 
@@ -235,7 +246,24 @@ pub fn value_counts(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
         .unnest([column], None)
         .map_err(|e| MungeError::AggregationError(e.to_string()))?;
 
-    Ok(Dataset::new(unnested))
+    // polars leaves tied counts in hash order.
+    let value_key = match unnested.column(column)?.dtype() {
+        DataType::Categorical(..) | DataType::Enum(..) => col(column).cast(DataType::String),
+        _ => col(column),
+    };
+    let sorted = unnested
+        .lazy()
+        .sort_by_exprs(
+            [col(value_column), value_key],
+            SortMultipleOptions::default()
+                .with_order_descending_multi([true, false])
+                .with_nulls_last_multi([true, true])
+                .with_maintain_order(true),
+        )
+        .collect()
+        .map_err(|e| MungeError::AggregationError(e.to_string()))?;
+
+    Ok(Dataset::new(sorted))
 }
 
 /// Compute multiple aggregations without grouping (overall summary).
@@ -556,4 +584,132 @@ mod tests {
         let result = describe(&data, Some(&["region"]));
         assert!(matches!(result, Err(MungeError::TypeMismatch { .. })));
     }
+
+    #[test]
+    fn test_value_counts_normalize() {
+        // DATA-65 (core): normalize did not exist; the MCP field was ignored.
+        // R: prop.table(table(c("a","b","a","c","a","b"))) = 0.5, 0.3333333, 0.1666667
+        let ds = Dataset::new(df!("g" => ["a", "b", "a", "c", "a", "b"]).unwrap());
+        let p = value_counts_with(&ds, "g", true).unwrap();
+        let names: Vec<String> = p
+            .df()
+            .get_column_names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(names, ["g", "proportion"]);
+        assert_eq!(
+            p.df()
+                .column("g")
+                .unwrap()
+                .str()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [Some("a"), Some("b"), Some("c")]
+        );
+        assert_eq!(
+            p.df()
+                .column("proportion")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect::<Vec<_>>(),
+            [0.5, 2.0 / 6.0, 1.0 / 6.0]
+        );
+        // Tied counts come in the order of dplyr::count(x, sort = TRUE): value ascending, missing last,
+        // the same on every call.
+        let tied = Dataset::new(
+            df!("g" => [Some("b"), Some("a"), Some("b"), Some("a"), Some("c"), None]).unwrap(),
+        );
+        for _ in 0..20 {
+            let c = value_counts_with(&tied, "g", false).unwrap();
+            assert_eq!(
+                c.df()
+                    .column("g")
+                    .unwrap()
+                    .str()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                [Some("a"), Some("b"), Some("c"), None]
+            );
+            assert_eq!(
+                c.df()
+                    .column("count")
+                    .unwrap()
+                    .cast(&DataType::Int64)
+                    .unwrap()
+                    .i64()
+                    .unwrap()
+                    .into_no_null_iter()
+                    .collect::<Vec<_>>(),
+                [2, 2, 1, 1]
+            );
+            let t = value_counts_with(&tied, "g", true).unwrap();
+            assert_eq!(
+                t.df()
+                    .column("g")
+                    .unwrap()
+                    .str()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                [Some("a"), Some("b"), Some("c"), None]
+            );
+            assert_eq!(
+                t.df()
+                    .column("proportion")
+                    .unwrap()
+                    .f64()
+                    .unwrap()
+                    .into_no_null_iter()
+                    .collect::<Vec<_>>(),
+                [2.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0]
+            );
+        }
+        assert!(
+            value_counts_with(&ds, "g", false)
+                .unwrap()
+                .df()
+                .equals_missing(value_counts(&ds, "g").unwrap().df())
+        );
+    }
+
+    #[test]
+    fn test_validate_value_counts() {
+        use p2a_validation::{Check, Tol};
+        // validation/r/cases/data_munging_t3.R, case data_munging_value_counts:
+        // dplyr::count(d, g, sort = TRUE) (NA is a group) and n / sum(n); counts 4, 3, 2, 1 are distinct
+        let (case, ds) = crate::test_support::load_case("data_munging_value_counts");
+        let f = |d: &Dataset, c: &str| -> Vec<f64> {
+            d.df()
+                .column(c)
+                .unwrap()
+                .cast(&DataType::Float64)
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_iter()
+                .map(|v| v.unwrap_or(f64::NAN))
+                .collect()
+        };
+        let c = value_counts_with(&ds, "g", false).unwrap();
+        let p = value_counts_with(&ds, "g", true).unwrap();
+        Check::new(&case)
+            .vector("vc_g", &f(&c, "g"), Tol::exact())
+            .vector("vc_n", &f(&c, "count"), Tol::exact())
+            .vector("vc_proportion", &f(&p, "proportion"), Tol::exact())
+            .finish();
+        assert_eq!(f(&p, "g")[..2], f(&c, "g")[..2]);
+        assert_eq!(
+            (
+                c.df().column("g").unwrap().null_count(),
+                p.df().column("g").unwrap().null_count()
+            ),
+            (1, 1)
+        );
+    }
+
 }

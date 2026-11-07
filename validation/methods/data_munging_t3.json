@@ -12,6 +12,12 @@
      "doc": "validation/data/munging.md", "cases": ["data_munging_na_if"],
      "tests": ["p2a-core::data::munging::clean::tests::test_validate_replace_na_if"],
      "quantities": ["integer, double and text columns after na_if", "missing count"],
+     "tolerance": "exact", "deviations": [], "supersedes_legacy": []},
+    {"id": "data_value_counts", "name": "Value counts and proportions as dplyr::count",
+     "category": "data", "reference": "dplyr::count(d, g, sort = TRUE); n / sum(n)",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_value_counts"],
+     "tests": ["p2a-core::data::munging::aggregate::tests::test_validate_value_counts"],
+     "quantities": ["values (NA a group)", "counts", "proportions"],
      "tolerance": "exact", "deviations": [], "supersedes_legacy": []}
   ]
 }
