@@ -20,7 +20,8 @@
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_gm_hom",
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_gm_het",
         "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_se_hom",
-        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_se_het"
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_sem_se_het",
+        "p2a-core::econometrics::sphet::tests::test_validate_sphet_rho_se"
       ],
       "quantities": [
         "instrument set and rank",

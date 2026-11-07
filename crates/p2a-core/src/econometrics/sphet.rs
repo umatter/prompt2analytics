@@ -122,7 +122,9 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::linalg::solve::{LM_QR_TOL, Qr, aliasing_message, least_squares};
+use crate::linalg::solve::{
+    LM_QR_TOL, Qr, SingularPolicy, aliasing_message, least_squares, sym_inverse,
+};
 use crate::regression::HacKernel;
 use crate::regression::ols::{NormalInverse, normal_equations_inverse};
 use crate::resource::{checked_len, checkpoint, try_zeros2};
@@ -706,8 +708,9 @@ fn estimate_sem_gmm(
         listw,
     )?;
 
-    // Standard error for rho
-    let se_rho = compute_rho_se(&second.residuals, listw, sigma2, config)?;
+    let (se_rho, rho_note) = gm_rho_se(&gm, &first.residuals, None, listw, config.het)?;
+    let mut warnings = gm.warnings;
+    warnings.extend(rho_note);
 
     Ok(build_result(ResultParts {
         coef_names,
@@ -722,7 +725,7 @@ fn estimate_sem_gmm(
         fitted,
         df,
         instruments: Vec::new(),
-        warnings: gm.warnings,
+        warnings,
         gm: Some(gm.convergence),
         rho_moments: Some(gm_moments_name(config.het).to_string()),
     }))
@@ -807,9 +810,20 @@ fn estimate_sarar_gmm(
         hac,
         listw,
     )?;
-    let se_rho = compute_rho_se(&residuals_star, listw, sigma2, config)?;
+    let (se_rho, rho_note) = gm_rho_se(
+        &gm,
+        &u1,
+        Some(FirstStep {
+            z: &z,
+            zh: &t1.zh,
+            a: &t1.a,
+        }),
+        listw,
+        config.het,
+    )?;
 
     let mut warnings = gm.warnings;
+    warnings.extend(rho_note);
     warnings.extend(instruments.dropped_warning());
     Ok(build_result(ResultParts {
         coef_names,
@@ -1845,29 +1859,368 @@ fn estimate_rho_gm(
     })
 }
 
-/// Compute standard error for ρ.
-///
-/// Based on the asymptotic theory from Kelejian-Prucha (2010).
-fn compute_rho_se(
-    residuals: &Array1<f64>,
-    listw: &SpatialWeights,
-    sigma2: f64,
-    _config: &SphetConfig,
-) -> EconResult<f64> {
-    let n = residuals.len();
+/// A sparse symmetric matrix in compressed rows, with each row sorted by column.
+struct SparseSym {
+    ptr: Vec<usize>,
+    idx: Vec<usize>,
+    val: Vec<f64>,
+}
 
-    // Approximate variance using trace formulas
-    // Var(ρ̂) ≈ σ²/(trace(W²) + trace(W'W))
-    let tr_w2 = listw.trace_w2();
-    let tr_wtw = listw.trace_wtw();
-    let info = tr_w2 + tr_wtw;
-
-    if info <= 0.0 {
-        return Ok(0.01); // Fallback
+impl SparseSym {
+    fn row(&self, i: usize) -> (&[usize], &[f64]) {
+        let (a, b) = (self.ptr[i], self.ptr[i + 1]);
+        (&self.idx[a..b], &self.val[a..b])
     }
 
-    let var_rho = sigma2 * n as f64 / info;
-    Ok(var_rho.max(0.0).sqrt())
+    fn n(&self) -> usize {
+        self.ptr.len() - 1
+    }
+
+    /// `v I`
+    fn identity(n: usize, v: f64) -> EconResult<Self> {
+        Ok(SparseSym {
+            ptr: (0..=n).collect(),
+            idx: (0..n).collect(),
+            val: crate::resource::try_vec(n, v, "GM moment matrix")?,
+        })
+    }
+
+    /// `W + W'`
+    fn w_plus_wt(listw: &SpatialWeights) -> EconResult<Self> {
+        let n = listw.n();
+        let t = RowsOfTranspose::of(listw)?;
+        let nnz: usize = (0..n).map(|i| listw.get_weights(i).indices.len()).sum();
+        let mut out = SparseSym {
+            ptr: Vec::with_capacity(n + 1),
+            idx: crate::resource::try_with_capacity(2 * nnz, "W + W'")?,
+            val: crate::resource::try_with_capacity(2 * nnz, "W + W'")?,
+        };
+        out.ptr.push(0);
+        for i in 0..n {
+            let sw = listw.get_weights(i);
+            let (rows, weights) = t.row(i);
+            // merge row i of W with column i of W, both sorted
+            let (mut a, mut b) = (0, 0);
+            while a < sw.indices.len() || b < rows.len() {
+                let ja = sw.indices.get(a).copied().unwrap_or(usize::MAX);
+                let jb = rows.get(b).copied().unwrap_or(usize::MAX);
+                let j = ja.min(jb);
+                let mut v = 0.0;
+                if ja == j {
+                    v += sw.weights[a];
+                    a += 1;
+                }
+                if jb == j {
+                    v += weights[b];
+                    b += 1;
+                }
+                out.idx.push(j);
+                out.val.push(v);
+            }
+            out.ptr.push(out.idx.len());
+        }
+        Ok(out)
+    }
+
+    /// `scale (W'W - diag(W'W))` when `zero_diagonal`, `scale W'W` otherwise: entry (j, k) is
+    /// the sum of w_ij w_ik over the rows i.
+    fn wtw(listw: &SpatialWeights, zero_diagonal: bool, scale: f64) -> EconResult<Self> {
+        let n = listw.n();
+        let t = RowsOfTranspose::of(listw)?;
+        let too_many = || {
+            EconError::ResourceLimit(
+                "W'W for the GM variance of rho has too many entries".to_string(),
+            )
+        };
+        let bound = (0..n).try_fold(0_usize, |m, i| {
+            let k = listw.get_weights(i).indices.len();
+            k.checked_mul(k).and_then(|kk| m.checked_add(kk))
+        });
+        let bound = bound.ok_or_else(too_many)?;
+        let bound = bound.min(n.checked_mul(n).ok_or_else(too_many)?);
+        let what = format!("W'W for the GM variance of rho needs up to {bound} entries");
+        let mut out = SparseSym {
+            ptr: Vec::with_capacity(n + 1),
+            idx: crate::resource::try_with_capacity(bound, &what)?,
+            val: crate::resource::try_with_capacity(bound, &what)?,
+        };
+        out.ptr.push(0);
+        let mut dense = crate::resource::try_vec(n, 0.0_f64, &what)?;
+        let mut seen = crate::resource::try_vec(n, false, &what)?;
+        let mut touched: Vec<usize> = Vec::new();
+        for j in 0..n {
+            if j.is_multiple_of(1024) {
+                checkpoint()?;
+            }
+            let (rows, weights) = t.row(j);
+            for (&i, &w_ij) in rows.iter().zip(weights) {
+                let sw = listw.get_weights(i);
+                for (&k, &w_ik) in sw.indices.iter().zip(&sw.weights) {
+                    if !seen[k] {
+                        seen[k] = true;
+                        touched.push(k);
+                    }
+                    dense[k] += w_ij * w_ik;
+                }
+            }
+            touched.sort_unstable();
+            for &k in &touched {
+                if !(zero_diagonal && k == j) {
+                    out.idx.push(k);
+                    out.val.push(scale * dense[k]);
+                }
+                dense[k] = 0.0;
+                seen[k] = false;
+            }
+            touched.clear();
+            out.ptr.push(out.idx.len());
+        }
+        Ok(out)
+    }
+
+    fn mul_vec(&self, x: &Array1<f64>) -> Array1<f64> {
+        Array1::from_iter((0..self.n()).map(|i| {
+            let (idx, val) = self.row(i);
+            idx.iter().zip(val).map(|(&j, &v)| v * x[j]).sum::<f64>()
+        }))
+    }
+
+    fn diag(&self) -> Array1<f64> {
+        Array1::from_iter((0..self.n()).map(|i| {
+            let (idx, val) = self.row(i);
+            idx.binary_search(&i).map_or(0.0, |pos| val[pos])
+        }))
+    }
+
+    /// `sum_ij self_ij other_ij g_i g_j` (g = 1 when `None`): tr(self G other G) for symmetric
+    /// matrices.
+    fn weighted_inner(&self, other: &SparseSym, g: Option<&Array1<f64>>) -> f64 {
+        let mut total = 0.0;
+        for i in 0..self.n() {
+            let (ia, va) = self.row(i);
+            let (ib, vb) = other.row(i);
+            let (mut a, mut b) = (0, 0);
+            let mut row = 0.0;
+            while a < ia.len() && b < ib.len() {
+                match ia[a].cmp(&ib[b]) {
+                    std::cmp::Ordering::Less => a += 1,
+                    std::cmp::Ordering::Greater => b += 1,
+                    std::cmp::Ordering::Equal => {
+                        let cell = va[a] * vb[b];
+                        row += g.map_or(cell, |g| cell * g[ia[a]]);
+                        a += 1;
+                        b += 1;
+                    }
+                }
+            }
+            total += g.map_or(row, |g| row * g[i]);
+        }
+        total
+    }
+}
+
+/// The columns of W as rows: for each j, the units i with w_ij != 0 in ascending order.
+struct RowsOfTranspose {
+    ptr: Vec<usize>,
+    idx: Vec<usize>,
+    val: Vec<f64>,
+}
+
+impl RowsOfTranspose {
+    fn of(listw: &SpatialWeights) -> EconResult<Self> {
+        let n = listw.n();
+        let mut ptr = crate::resource::try_vec(n + 1, 0_usize, "W'")?;
+        for i in 0..n {
+            for &j in &listw.get_weights(i).indices {
+                ptr[j + 1] += 1;
+            }
+        }
+        for j in 0..n {
+            ptr[j + 1] += ptr[j];
+        }
+        let nnz = ptr[n];
+        let mut idx = crate::resource::try_vec(nnz, 0_usize, "W'")?;
+        let mut val = crate::resource::try_vec(nnz, 0.0_f64, "W'")?;
+        let mut next = ptr.clone();
+        for i in 0..n {
+            let sw = listw.get_weights(i);
+            for (&j, &w) in sw.indices.iter().zip(&sw.weights) {
+                idx[next[j]] = i;
+                val[next[j]] = w;
+                next[j] += 1;
+            }
+        }
+        Ok(RowsOfTranspose { ptr, idx, val })
+    }
+
+    fn row(&self, j: usize) -> (&[usize], &[f64]) {
+        let (a, b) = (self.ptr[j], self.ptr[j + 1]);
+        (&self.idx[a..b], &self.val[a..b])
+    }
+}
+
+/// The endogenous first step of a SARAR fit (Z, P_H Z and (Zh'Zh)^-1), which the variance of
+/// the moments has to account for. The error model's first step is OLS on exogenous X, so
+/// alpha_r = -n^-1 E[X~'(A_r + A_r') eps] = 0 (Kelejian-Prucha 2010, Theorem 2) and it has none.
+struct FirstStep<'a> {
+    z: &'a Array2<f64>,
+    zh: &'a Array2<f64>,
+    a: &'a Array2<f64>,
+}
+
+/// `(I - rho W')^-1 b` by the Neumann series `sum_p (rho W')^p b`, stopping when the term falls
+/// below 1e-12 of the partial sum. `None` when it diverges. For a row-standardised W a Krylov
+/// solver would converge at the same rate, rho^p.
+fn solve_i_minus_rho_wt(
+    listw: &SpatialWeights,
+    rho: f64,
+    b: &Array1<f64>,
+) -> EconResult<Option<Array1<f64>>> {
+    const MAX_TERMS: usize = 100_000;
+    let largest = |v: &Array1<f64>| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    let b_max = largest(b);
+    let mut sum = b.clone();
+    if b_max == 0.0 {
+        return Ok(Some(sum));
+    }
+    let mut term = b.clone();
+    for p in 1..=MAX_TERMS {
+        if p.is_multiple_of(64) {
+            checkpoint()?;
+        }
+        term = rho * &listw.lag_transpose(&term);
+        let t_max = largest(&term);
+        if !t_max.is_finite() || t_max > 1e12 * b_max {
+            return Ok(None);
+        }
+        sum += &term;
+        if t_max <= 1e-12 * largest(&sum) {
+            return Ok(Some(sum));
+        }
+    }
+    Ok(None)
+}
+
+/// SE of the GM rho: sqrt([(J'J)^-1 J' Psi J (J'J)^-1]_00 / n), the GMM sandwich of the
+/// identity-weighted estimator, with J = d m / d theta and Psi the variance of the moments of
+/// Kelejian-Prucha (2010, Theorem 2) as sphet's `psirhorho_het` computes it (`het`), or its
+/// homoskedastic analogue with the mu3 and mu4 terms of `psirhorho_hom` for the three moments
+/// A1 = I, A2 = W'W, A3 = W. `u` holds the first-step residuals. Returns NaN and a warning when
+/// the asymptotic variance does not apply or cannot be formed.
+fn gm_rho_se(
+    gm: &GmSolve,
+    u: &Array1<f64>,
+    first: Option<FirstStep<'_>>,
+    listw: &SpatialWeights,
+    het: bool,
+) -> EconResult<(f64, Option<String>)> {
+    let rho = gm.rho;
+    if gm.on_boundary {
+        return Ok((
+            f64::NAN,
+            Some(
+                "the SE of rho is not reported: the GM estimate is at the boundary of the search interval, where its asymptotic variance does not apply"
+                    .to_string(),
+            ),
+        ));
+    }
+    let n = u.len();
+    let eps = listw.transform_y(u, rho);
+    let (bs, ds): (Vec<SparseSym>, Vec<Array1<f64>>) = if het {
+        (
+            vec![
+                SparseSym::wtw(listw, true, 2.0)?,
+                SparseSym::w_plus_wt(listw)?,
+            ],
+            Vec::new(),
+        )
+    } else {
+        let wtw = SparseSym::wtw(listw, false, 2.0)?;
+        let diag_wtw = 0.5 * &wtw.diag();
+        (
+            vec![
+                SparseSym::identity(n, 2.0)?,
+                wtw,
+                SparseSym::w_plus_wt(listw)?,
+            ],
+            vec![Array1::ones(n), diag_wtw, Array1::zeros(n)],
+        )
+    };
+
+    // a_r = (I - rho W')^-1 T alpha_r, T = n Zh (Zh'Zh)^-1, alpha_r = -n^-1 Z~'(A_r + A_r') eps
+    let mut avec: Vec<Array1<f64>> = Vec::new();
+    if let Some(first) = &first {
+        let zt = listw.transform_x(first.z, rho);
+        for b in &bs {
+            let t_r = -first.zh.dot(&first.a.dot(&zt.t().dot(&b.mul_vec(&eps))));
+            match solve_i_minus_rho_wt(listw, rho, &t_r)? {
+                Some(a_r) => avec.push(a_r),
+                None => {
+                    return Ok((
+                        f64::NAN,
+                        Some(format!(
+                            "the SE of rho is not available: (I - rho W')^-1 has no convergent Neumann series at rho = {rho}"
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+
+    let m = bs.len();
+    let nf = n as f64;
+    let mut psi = Array2::<f64>::zeros((m, m));
+    let ga = eps.mapv(|e| e * e);
+    let s2 = eps.dot(&eps) / nf;
+    let mu3 = eps.iter().map(|e| e * e * e).sum::<f64>() / nf;
+    let mu4 = eps.iter().map(|e| e * e * e * e).sum::<f64>() / nf;
+    for r in 0..m {
+        for t in r..m {
+            let mut v = if het {
+                0.5 * bs[r].weighted_inner(&bs[t], Some(&ga))
+            } else {
+                s2 * s2 * 0.5 * bs[r].weighted_inner(&bs[t], None)
+                    + (mu4 - 3.0 * s2 * s2) * ds[r].dot(&ds[t])
+            };
+            if !avec.is_empty() {
+                let (ar, at) = (&avec[r], &avec[t]);
+                if het {
+                    v += ar
+                        .iter()
+                        .zip(&ga)
+                        .zip(at)
+                        .map(|((a, g), b)| a * g * b)
+                        .sum::<f64>();
+                } else {
+                    v += s2 * ar.dot(at) + mu3 * (ar.dot(&ds[t]) + at.dot(&ds[r]));
+                }
+            }
+            psi[[r, t]] = v / nf;
+            psi[[t, r]] = v / nf;
+        }
+    }
+
+    let gmat = &gm.parts.gmat;
+    let slope = &gmat.column(0) + &(2.0 * rho * &gmat.column(1));
+    let mut j = Array2::<f64>::zeros((m, if het { 1 } else { 2 }));
+    j.column_mut(0).assign(&slope);
+    if !het {
+        j.column_mut(1).assign(&gmat.column(2));
+    }
+    let jj = j.t().dot(&j);
+    let jj_inv = match sym_inverse(jj.view(), SingularPolicy::Error, "GM Jacobian J'J") {
+        Ok(inv) => inv.inverse,
+        Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+        Err(_) => {
+            return Ok((
+                f64::NAN,
+                Some("the SE of rho is not available: the GM Jacobian is singular".to_string()),
+            ));
+        }
+    };
+    let bread = jj_inv.dot(&j.t());
+    let v = bread.dot(&psi).dot(&bread.t());
+    Ok(((v[[0, 0]] / nf).max(0.0).sqrt(), None))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2743,6 +3096,155 @@ mod tests {
         let b = run_sphet(&Dataset::new(df), "y_sem", &XS, &w, c()).unwrap();
         assert!(Tol::new(1e-9, 0.0).allows(b.std_errors[1], 10.0 * a.std_errors[1]));
         assert!(Tol::new(1e-9, 0.0).allows(b.std_errors[0], a.std_errors[0]));
+    }
+
+    #[test]
+    fn test_validate_sphet_rho_se() {
+        // R .sphet_rho_se (the SEM with alpha_r = 0). The former formula,
+        // sqrt(sigma2 n / (tr W^2 + tr W'W)), gave 1.699 for the SEM.
+        let (case, ds, w, _) = sphet_case();
+        let mut check = Check::new(&case);
+        for (y, model, het, key) in [
+            ("y_sem", SphetModel::SpatialError, false, "sem_hom_rho_se"),
+            ("y_sem", SphetModel::SpatialError, true, "sem_het_rho_se"),
+            ("y_sarar", SphetModel::SARAR, false, "sarar_rho_se"),
+            ("y_sarar", SphetModel::SARAR, true, "sarar_het_rho_se"),
+        ] {
+            // the rho SE does not depend on se_type
+            for se in [SphetSE::Standard, SphetSE::Robust] {
+                let r = run_sphet(&ds, y, &XS, &w, config(model, se, het)).unwrap();
+                check.scalar(key, r.rho_se.unwrap(), Tol::se(N_SIM));
+            }
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_sphet_rho_se_scale_invariant() {
+        // The former SE scaled with y.
+        let (ds, w, _) = sim();
+        let (x1, x2, y) = (column(&ds, "x1"), column(&ds, "x2"), column(&ds, "y_sem"));
+        for het in [true, false] {
+            let se = |s: f64| {
+                let df = df! {
+                    "y" => y.iter().map(|v| v * s).collect::<Vec<f64>>(),
+                    "x1" => x1.clone(),
+                    "x2" => x2.clone(),
+                }
+                .unwrap();
+                run_sphet(
+                    &Dataset::new(df),
+                    "y",
+                    &XS,
+                    &w,
+                    config(SphetModel::SpatialError, SphetSE::Standard, het),
+                )
+                .unwrap()
+                .rho_se
+                .unwrap()
+            };
+            let base = se(1.0);
+            for s in [1e-6, 10.0, 1e6] {
+                assert!(Tol::new(1e-8, 0.0).allows(se(s), base), "het={het} s={s}");
+            }
+        }
+    }
+
+    /// SEM: y = 1 + 0.8 x + u, u = (I - 0.4 W)^-1 e, e ~ N(0, 1), coordinates U(0, 1)^2,
+    /// W = 5-NN row-standardised.
+    fn simulated_sem(n: usize, seed: u64) -> (Dataset, SpatialWeights) {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, StandardNormal, Uniform};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let unif = Uniform::new(0.0, 1.0);
+        let coords: Vec<[f64; 2]> = (0..n)
+            .map(|_| [unif.sample(&mut rng), unif.sample(&mut rng)])
+            .collect();
+        let w = knn5(&coords);
+        let x: Vec<f64> = (0..n)
+            .map(|_| {
+                let v: f64 = StandardNormal.sample(&mut rng);
+                v
+            })
+            .collect();
+        let e = Array1::from_iter((0..n).map(|_| {
+            let v: f64 = StandardNormal.sample(&mut rng);
+            v
+        }));
+        let mut u = e.clone();
+        for _ in 0..200 {
+            u = &e + &(0.4 * &w.lag(&u)); // 0.4^200: exact to rounding
+        }
+        let y: Vec<f64> = (0..n).map(|i| 1.0 + 0.8 * x[i] + u[i]).collect();
+        (Dataset::new(df! { "y" => y, "x" => x }.unwrap()), w)
+    }
+
+    #[test]
+    fn test_sphet_rho_se_shrinks_with_n() {
+        // Seeded property. The GM variance is O(1/n). Base-R Monte Carlo of this design: n = 150,
+        // SD 0.10 / mean SE 0.11; n = 600, SD 0.0525 / mean SE 0.0523. The former SE was about 1.3
+        // at both n = 225 and n = 900.
+        for het in [true, false] {
+            let se = |n: usize| {
+                let (d, w) = simulated_sem(n, 7);
+                run_sphet(
+                    &d,
+                    "y",
+                    &["x"],
+                    &w,
+                    config(SphetModel::SpatialError, SphetSE::Standard, het),
+                )
+                .unwrap()
+                .rho_se
+                .unwrap()
+            };
+            let ratio = se(600) / se(150);
+            assert!((0.3..0.75).contains(&ratio), "het={het}: SE ratio {ratio}");
+        }
+    }
+
+    #[test]
+    fn test_sphet_rho_se_is_nan_at_the_boundary_and_for_a_divergent_series() {
+        let (ds, w, _) = sim();
+        let (x1, x2, cx, cy) = (
+            column(&ds, "x1"),
+            column(&ds, "x2"),
+            column(&ds, "cx"),
+            column(&ds, "cy"),
+        );
+        let y: Vec<f64> = (0..N_SIM)
+            .map(|i| 1.0 + 0.8 * x1[i] - 0.5 * x2[i] + cx[i] + cy[i])
+            .collect();
+        let df = df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap();
+        let r = run_sphet(
+            &Dataset::new(df),
+            "y",
+            &XS,
+            &w,
+            config(SphetModel::SpatialError, SphetSE::Standard, true),
+        )
+        .unwrap();
+        assert!(r.rho_se.unwrap().is_nan() && r.rho_z.unwrap().is_nan());
+        assert!(r.rho_p.unwrap().is_nan());
+        assert!(
+            r.warnings
+                .iter()
+                .any(|m| m.contains("SE of rho is not reported")),
+            "{:?}",
+            r.warnings
+        );
+        // Binary weights have spectral radius about 5: at rho = 0.9 the series diverges.
+        let coords = coords_of(&ds);
+        let pts: Vec<(f64, f64)> = coords.iter().map(|c| (c[0], c[1])).collect();
+        let b = SpatialWeights::from_neighbors(&Neighbors::from_knn(&pts, 5), WeightStyle::Binary);
+        let v = Array1::from(column(&ds, "x1"));
+        assert!(solve_i_minus_rho_wt(&b, 0.9, &v).unwrap().is_none());
+        let exact = solve_i_minus_rho_wt(&w, 0.4, &v).unwrap().unwrap();
+        // (I - 0.4 W') exact = v
+        let back = &exact - &(0.4 * &w.lag_transpose(&exact));
+        for (a, b) in back.iter().zip(&v) {
+            assert!((a - b).abs() < 1e-10, "{a} vs {b}");
+        }
     }
 
     /// The layout of `create_test_data`.
