@@ -1,7 +1,8 @@
-# validation/r/cases/ml_boosting_t3.R -- boosting and BART references (T3-WP46: ML-43, ML-63, ML-136,
-# ML-106, WT-13). xgboost, lightgbm, mboost, BART and adabag are NOT case dependencies; every reference here is
-# either an installed R function (rpart, glm, lm, integrate) or a published algorithm written out in
-# plain R, named in the case's `reference`:
+# validation/r/cases/ml_boosting_t3.R -- boosting and BART references (ML-43, ML-63, ML-136,
+# ML-106, WT-13). lightgbm, BART and adabag are NOT case dependencies; every reference here is an installed R
+# function (rpart, glm, lm, integrate), a published algorithm written out in plain R, named in the case's
+# `reference`, or (ml_mboost_pkg, ml_xgboost_pkg) the mboost or xgboost package as a cross-check of the
+# written-out algorithm:
 #  * ml_adaboost_samme  -- AdaBoost.M1 (Freund & Schapire 1997) and SAMME (Zhu, Zou, Rosset & Hastie 2009,
 #    Algorithm 2; adabag::boosting(coeflearn = "Zhu", boos = FALSE)) with rpart weak learners
 #    (method "class"/"anova", case weights, maxdepth = d, minsplit = 2, minbucket = 1, cp = 0, xval = 0,
@@ -16,6 +17,9 @@
 #  * ml_bart_probit_single_leaf -- probit BART (BART::pbart, Albert & Chib 1993 data augmentation) with
 #    trees that cannot split: the exact posterior of Phi(binaryOffset + f), f ~ N(0, 9 / k^2), by quadrature;
 #  * ml_bart_probit_glm -- glm(binomial(link = "probit")) fitted probabilities on a linear-index DGP.
+#  * ml_mboost_pkg      -- mboost::mboost with bols learners on the data of ml_mboost_bols;
+#  * ml_xgboost_pkg     -- xgboost::xgb.train(tree_method = "exact") on the data of ml_xgboost_l1, whose exact
+#    trees it matches up to xgboost's single precision.
 
 .thr <- function(G, a) if (G > a) G - a else if (G < -a) G + a else 0
 .xgb_exact <- function(X, y, M, md, eta, lam, a, gam = 0, mcw = 1) {
@@ -281,4 +285,50 @@ case("ml_bart_probit_glm", "ml/bart", "Probit BART target: glm probit fitted pro
        reference = "stats::glm(family = binomial(link = 'probit')) fitted probabilities (a property target for probit BART, not an equality)",
        call = "glm(y ~ x1 + x2 + x3, family = binomial(link = 'probit'), control = glm.control(epsilon = 1e-14))",
        packages = character(0))
+})
+
+case("ml_mboost_pkg", "ml/mboost", "Componentwise boosting with bols learners against the mboost package", function(ctx) {
+  d <- ctx$dataset("datasets/generated/mboost_sim.csv")
+  suppressPackageStartupMessages(library(mboost)) # the formula's bols() and its bbs() are looked up on the search path
+  vals <- list()
+  for (fam in c("gaussian", "binomial", "binomial_glm", "poisson")) {
+    F <- switch(fam, gaussian = mboost::Gaussian(), binomial = mboost::Binomial(),
+                binomial_glm = mboost::Binomial(type = "glm"), poisson = mboost::Poisson())
+    y <- switch(fam, gaussian = d$yg, binomial = factor(d$yb), binomial_glm = d$yb, poisson = d$yc)
+    dd <- data.frame(y = y, x1 = d$x1, x2 = d$x2, x3 = d$x3)
+    m <- mboost::mboost(y ~ bols(x1) + bols(x2) + bols(x3), data = dd, family = F,
+                        control = mboost::boost_control(mstop = 100, nu = 0.1))
+    cf <- coef(m, which = "")
+    off <- as.numeric(m$offset[1])
+    vals[[paste0(fam, "_offset")]] <- off
+    vals[[paste0(fam, "_coef")]] <- vec(unname(sapply(cf, function(b) b[[2]])))
+    vals[[paste0(fam, "_intercept")]] <- off + sum(sapply(cf, function(b) b[[1]]))
+    vals[[paste0(fam, "_sel")]] <- vec(tabulate(mboost::selected(m), 3))
+    vals[[paste0(fam, "_resp")]] <- vec(as.numeric(predict(m, type = "response")))
+  }
+  list(values = vals,
+       reference = "mboost::mboost with bols learners: the package itself, a cross-check of ml_mboost_bols",
+       call = "mboost(y ~ bols(x1) + bols(x2) + bols(x3), family = Gaussian() | Binomial() | Binomial(type = 'glm') | Poisson(), control = boost_control(mstop = 100, nu = 0.1)); factor(y) for Binomial()",
+       packages = c("mboost"))
+})
+
+case("ml_xgboost_pkg", "ml/xgboost", "XGBoost exact trees with and without L1 against the xgboost package", function(ctx) {
+  d <- ctx$dataset("datasets/generated/xgb_small.csv")
+  X <- cbind(x1 = d$x1, x2 = d$x2)
+  dm <- xgboost::xgb.DMatrix(X, label = d$y, nthread = 1)
+  vals <- list()
+  for (a in c(0, 3)) {
+    m <- xgboost::xgb.train(list(objective = "reg:squarederror", tree_method = "exact", eta = 0.3, lambda = 1,
+                                 alpha = a, gamma = 0, min_child_weight = 1, max_depth = 2,
+                                 base_score = mean(d$y), nthread = 1), dm, nrounds = 3, verbose = 0)
+    tree <- xgboost::xgb.model.dt.tree(model = m)
+    root <- as.data.frame(tree)[tree$Tree == 0 & tree$Node == 0, ]
+    vals[[paste0("a", a, "_pred")]] <- vec(as.numeric(predict(m, dm)))
+    # xgboost reports twice the gain of Chen & Guestrin's eq. 7
+    vals[[paste0("a", a, "_root")]] <- vec(c(match(root$Feature, c("x1", "x2")) - 1, root$Split, root$Gain / 2))
+  }
+  list(values = vals,
+       reference = "xgboost::xgb.train(tree_method = 'exact'): the package itself, in single precision, a cross-check of ml_xgboost_l1's exact trees; p2a's histogram trees bin differently and are not compared",
+       call = "reg:squarederror, tree_method = 'exact', base_score = mean(y), eta = 0.3, lambda = 1, alpha in {0, 3}, gamma = 0, min_child_weight = 1, max_depth = 2, nrounds = 3",
+       packages = c("xgboost"))
 })

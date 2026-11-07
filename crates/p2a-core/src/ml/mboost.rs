@@ -1473,6 +1473,29 @@ mod tests {
             .finish();
     }
 
+    /// The mboost package itself, on the data of the written-out families.
+    #[test]
+    fn test_validate_mboost_package_paths() {
+        let (case, ds) = crate::test_support::load_case("ml_mboost_pkg");
+        let mut chk = Check::new(&case);
+        for (key, y, family) in [
+            ("gaussian", "yg", MboostFamily::Gaussian),
+            ("binomial", "yb", MboostFamily::Binomial),
+            ("binomial_glm", "yb", MboostFamily::BinomialGlm),
+            ("poisson", "yc", MboostFamily::Poisson),
+        ] {
+            let zero = bols(&ds, y, family, 0, 0.1);
+            let r = bols(&ds, y, family, 100, 0.1);
+            let sel: Vec<f64> = r.selection_frequency.iter().map(|&v| v as f64).collect();
+            chk.scalar(&format!("{key}_offset"), zero.intercept, Tol::coef(200))
+                .vector(&format!("{key}_coef"), &r.coefficients, Tol::coef(200))
+                .scalar(&format!("{key}_intercept"), r.intercept, Tol::coef(200))
+                .vector(&format!("{key}_sel"), &sel, Tol::exact())
+                .vector(&format!("{key}_resp"), &r.predictions, Tol::coef(200));
+        }
+        chk.finish();
+    }
+
     #[test]
     fn test_validate_mboost_gaussian_path() {
         check_path("ml_mboost_bols", "gaussian", "yg", MboostFamily::Gaussian);

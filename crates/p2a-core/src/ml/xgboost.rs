@@ -1239,6 +1239,42 @@ mod tests {
         chk.finish();
     }
 
+    /// The xgboost package itself, in single precision, hence the absolute tolerance.
+    #[test]
+    fn test_validate_xgboost_exact_package() {
+        let (case, ds) = crate::test_support::load_case("ml_xgboost_pkg");
+        let x = case_matrix(&ds, &["x1", "x2"]);
+        let y = case_vector(&ds, "y");
+        let single_precision = Tol::new(0.0, 1e-6);
+        let mut chk = Check::new(&case);
+        for (alpha, pred, root) in [(0.0, "a0_pred", "a0_root"), (3.0, "a3_pred", "a3_root")] {
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 3;
+            c.max_depth = 2;
+            c.learning_rate = 0.3;
+            c.lambda = 1.0;
+            c.alpha = alpha;
+            c.gamma = 0.0;
+            c.min_child_weight = 1.0;
+            let r = xgboost(x.view(), y.view(), &c).unwrap();
+            let XGBoostNode::Split {
+                feature,
+                threshold,
+                gain,
+                ..
+            } = &r.trees[0].root
+            else {
+                panic!("root is a leaf")
+            };
+            chk.vector(pred, &r.predictions, single_precision).vector(
+                root,
+                &[*feature as f64, *threshold, *gain],
+                single_precision,
+            );
+        }
+        chk.finish();
+    }
+
     #[test]
     fn test_split_gain_on_thresholded_sums() {
         // 0.5 * [T(GL)^2/(HL+l) + T(GR)^2/(HR+l) - T(G)^2/(H+l)] - gamma, T = ThresholdL1(., alpha)

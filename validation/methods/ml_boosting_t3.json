@@ -36,22 +36,25 @@
       "id": "ml_xgboost_l1",
       "name": "XGBoost exact and histogram trees: L1 leaf weights and gains",
       "category": "ml",
-      "reference": "XGBoost exact greedy (Chen & Guestrin 2016) and p2a's histogram variant with xgboost's CalcWeight/CalcGain L1 rule, published algorithm written out in R (xgboost not a dependency of this case)",
+      "reference": "xgboost::xgb.train(tree_method = 'exact') 3.2 for the exact trees (case ml_xgboost_pkg); XGBoost exact greedy (Chen & Guestrin 2016) and p2a's histogram variant with xgboost's CalcWeight/CalcGain L1 rule, published algorithm written out in R (ml_xgboost_l1). The package's histogram trees bin differently and are not compared.",
       "doc": "validation/ml/xgboost.md",
       "cases": [
-        "ml_xgboost_l1"
+        "ml_xgboost_l1",
+        "ml_xgboost_pkg"
       ],
       "tests": [
         "p2a-core::ml::xgboost::tests::test_validate_xgboost_exact_l1",
         "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_stump",
-        "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_four_rounds"
+        "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_four_rounds",
+        "p2a-core::ml::xgboost::tests::test_validate_xgboost_exact_package"
       ],
       "quantities": [
         "predictions after 3 (exact) and 4 (histogram) rounds",
         "root split feature, threshold and gain",
-        "stump bin and leaf weights"
+        "stump bin and leaf weights",
+        "package predictions, root split and gain, alpha 0 and 3"
       ],
-      "tolerance": "validation/README.md, n = 16: 1e-6 relative; split feature and bin exact",
+      "tolerance": "validation/README.md, n = 16: 1e-6 relative; split feature and bin exact; the xgboost package: 1e-6 absolute (it computes in single precision)",
       "deviations": [],
       "supersedes_legacy": []
     },
@@ -59,10 +62,11 @@
       "id": "ml_mboost",
       "name": "Component-wise boosting with bols learners: Gaussian, Binomial(), Binomial(type = 'glm'), Poisson; least-squares tree learner",
       "category": "ml",
-      "reference": "mboost(y ~ bols(x1) + bols(x2) + bols(x3)) published family definitions (mboost 2.9 R/family.R) written out in R; stats::lm and stats::glm for the limits; the tree learner is p2a's own least-squares tree written out in R, a self-consistency check, not R-pinned (mboost's btree is ctree-based)",
+      "reference": "mboost::mboost(y ~ bols(x1) + bols(x2) + bols(x3)) 2.9 (case ml_mboost_pkg: offset, coefficients, selections, fitted responses after 100 steps); the same family definitions (R/family.R) written out in R (ml_mboost_bols: also the first step and the 2000-step paths); stats::lm and stats::glm for the limits; the tree learner is p2a's own least-squares tree written out in R, a self-consistency check, not R-pinned (mboost's btree is ctree-based)",
       "doc": "validation/ml/mboost.md",
       "cases": [
-        "ml_mboost_bols"
+        "ml_mboost_bols",
+        "ml_mboost_pkg"
       ],
       "tests": [
         "p2a-core::ml::mboost::tests::test_validate_mboost_gaussian_path",
@@ -70,6 +74,7 @@
         "p2a-core::ml::mboost::tests::test_validate_mboost_binomial_glm_path",
         "p2a-core::ml::mboost::tests::test_validate_mboost_poisson_path",
         "p2a-core::ml::mboost::tests::test_validate_mboost_converged_limits",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_package_paths",
         "p2a-core::ml::mboost::tests::test_validate_mboost_tree_depth"
       ],
       "quantities": [
