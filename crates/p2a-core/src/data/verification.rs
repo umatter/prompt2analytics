@@ -10,6 +10,7 @@ use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::Dataset;
+use super::columns::is_numeric_dtype;
 use super::quality::generate_quality_profile;
 
 /// Result of a cleaning operation with verification.
@@ -45,6 +46,17 @@ pub struct VerificationReport {
     pub quality_delta: QualityDelta,
     /// Any warnings generated during verification
     pub warnings: Vec<String>,
+    /// Columns whose type changed
+    #[serde(default)]
+    pub dtype_changes: Vec<DtypeChange>,
+}
+
+/// A column whose type a cleaning step changed (polars dtype names, e.g. "i64", "f64").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DtypeChange {
+    pub column: String,
+    pub before: String,
+    pub after: String,
 }
 
 /// Example of a change made during cleaning.
@@ -807,7 +819,7 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
     };
 
     // Detect changes by comparing dataframes
-    let (rows_modified, sample_changes) = detect_changes(before, after, 5);
+    let scan = detect_changes(before, after, 5);
 
     let mut warnings = Vec::new();
     if rows_after == 0 && rows_before > 0 {
@@ -819,35 +831,82 @@ pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> V
             quality_delta.issues_introduced.len()
         ));
     }
+    warnings.extend(scan.warnings);
 
     VerificationReport {
         rows_before,
         rows_after,
-        rows_modified,
+        rows_modified: scan.rows_modified,
         rows_removed: rows_before.saturating_sub(rows_after),
         rows_added: rows_after.saturating_sub(rows_before),
-        sample_changes,
+        sample_changes: scan.sample_changes,
         quality_delta,
         warnings,
+        dtype_changes: scan.dtype_changes,
     }
 }
 
+/// What [`detect_changes`] found.
+struct ChangeScan {
+    rows_modified: usize,
+    sample_changes: Vec<ChangeExample>,
+    dtype_changes: Vec<DtypeChange>,
+    warnings: Vec<String>,
+}
+
+/// One flag per row: does the cell differ between `before` and `after` (of the same height)?
+///
+/// Columns of one type compare by value. polars' `AnyValue` comparison has no rule for two types, so
+/// a type change compares as doubles when both sides are numeric or boolean (R: `1L == 1.0` is TRUE)
+/// and as text otherwise (labels for categoricals, ISO dates, decimal numbers). The error names a
+/// pair that cannot be cast.
+fn changed_mask(before: &Column, after: &Column) -> Result<Vec<bool>, String> {
+    let (dt_before, dt_after) = (before.dtype(), after.dtype());
+    let incomparable = || format!("{dt_before} -> {dt_after}");
+    let categorical = |dt: &DataType| matches!(dt, DataType::Categorical(..) | DataType::Enum(..));
+    if dt_before == dt_after && !categorical(dt_before) {
+        return Ok((0..before.len())
+            .map(|idx| before.get(idx).ok() != after.get(idx).ok())
+            .collect());
+    }
+    if is_numeric_dtype(dt_before, true) && is_numeric_dtype(dt_after, true) {
+        let as_doubles = |c: &Column| c.cast(&DataType::Float64).map_err(|_| incomparable());
+        let (a, b) = (as_doubles(before)?, as_doubles(after)?);
+        // na-ok: cast to Float64 above; both sides are compared with their nulls
+        let (a, b) = (
+            a.f64().map_err(|_| incomparable())?,
+            b.f64().map_err(|_| incomparable())?,
+        );
+        return Ok(a
+            .iter()
+            .zip(b.iter())
+            .map(|cells| match cells {
+                (None, None) => false,
+                (Some(x), Some(y)) => !(x == y || (x.is_nan() && y.is_nan())),
+                _ => true,
+            })
+            .collect());
+    }
+    let as_text = |c: &Column| c.cast(&DataType::String).map_err(|_| incomparable());
+    let (a, b) = (as_text(before)?, as_text(after)?);
+    let (a, b) = (
+        a.str().map_err(|_| incomparable())?,
+        b.str().map_err(|_| incomparable())?,
+    );
+    Ok(a.iter().zip(b.iter()).map(|(x, y)| x != y).collect())
+}
+
 /// Detect changes between two datasets.
-fn detect_changes(
-    before: &Dataset,
-    after: &Dataset,
-    sample_size: usize,
-) -> (usize, Vec<ChangeExample>) {
+fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> ChangeScan {
     let df_before = before.df();
     let df_after = after.df();
 
-    let mut changes = Vec::new();
-    let mut modified_count = 0;
-
-    // Only compare if row counts are the same
-    if df_before.height() != df_after.height() {
-        return (0, changes);
-    }
+    let mut scan = ChangeScan {
+        rows_modified: 0,
+        sample_changes: Vec::new(),
+        dtype_changes: Vec::new(),
+        warnings: Vec::new(),
+    };
 
     let col_names: Vec<String> = df_before
         .get_column_names()
@@ -865,26 +924,47 @@ fn detect_changes(
             Err(_) => continue,
         };
 
-        // Compare values
-        for idx in 0..df_before.height() {
-            let val_before = col_before.get(idx).ok();
-            let val_after = col_after.get(idx).ok();
+        if col_before.dtype() != col_after.dtype() {
+            let change = DtypeChange {
+                column: col_name.clone(),
+                before: col_before.dtype().to_string(),
+                after: col_after.dtype().to_string(),
+            };
+            scan.warnings.push(format!(
+                "Column '{}' changed type from {} to {}",
+                change.column, change.before, change.after
+            ));
+            scan.dtype_changes.push(change);
+        }
 
-            if val_before != val_after {
-                modified_count += 1;
-                if changes.len() < sample_size {
-                    changes.push(ChangeExample {
-                        row_index: idx,
-                        column: col_name.clone(),
-                        before: format!("{:?}", val_before),
-                        after: format!("{:?}", val_after),
-                    });
-                }
+        // Cells are only compared when the row counts are the same
+        if df_before.height() != df_after.height() {
+            continue;
+        }
+
+        let mask = match changed_mask(col_before, col_after) {
+            Ok(mask) => mask,
+            Err(reason) => {
+                scan.warnings.push(format!(
+                    "Column '{col_name}': values were not compared ({reason})"
+                ));
+                continue;
+            }
+        };
+        for (idx, _) in mask.iter().enumerate().filter(|(_, changed)| **changed) {
+            scan.rows_modified += 1;
+            if scan.sample_changes.len() < sample_size {
+                scan.sample_changes.push(ChangeExample {
+                    row_index: idx,
+                    column: col_name.clone(),
+                    before: format!("{:?}", col_before.get(idx).ok()),
+                    after: format!("{:?}", col_after.get(idx).ok()),
+                });
             }
         }
     }
 
-    (modified_count, changes)
+    scan
 }
 
 impl VerificationReport {
@@ -921,6 +1001,16 @@ impl VerificationReport {
             "Issues: {} → {}\n",
             self.quality_delta.issues_before, self.quality_delta.issues_after
         ));
+
+        if !self.dtype_changes.is_empty() {
+            summary.push_str("\nType changes:\n");
+            for change in &self.dtype_changes {
+                summary.push_str(&format!(
+                    "  {}: {} → {}\n",
+                    change.column, change.before, change.after
+                ));
+            }
+        }
 
         if !self.quality_delta.issues_resolved.is_empty() {
             summary.push_str(&format!(
@@ -1181,4 +1271,59 @@ mod tests {
         assert!(summary.contains("10"));
         assert!(summary.contains("Alice"));
     }
+
+    #[test]
+    fn test_verify_cleaning_int_to_float_fill() {
+        // DATA-23 repro: a mean fill turns Int64 into Float64 and verify_cleaning panicked with
+        // "not implemented: scalar eq_missing for mixed dtypes Int64(1) and Float64(1.0) is not supported".
+        let before =
+            Dataset::new(df!("x" => [Some(1i64), None, Some(3)], "y" => ["a", "b", "c"]).unwrap());
+        let after =
+            crate::data::munging::fill_na(&before, None, crate::data::munging::FillStrategy::Mean)
+                .unwrap();
+        assert_eq!(after.df().column("x").unwrap().dtype(), &DataType::Float64);
+        let report = verify_cleaning(&before, &after, "fill_na mean");
+        assert_eq!(report.rows_modified, 1); // only the filled cell (1 == 1.0, as R's ==)
+        assert_eq!(
+            report.dtype_changes,
+            [DtypeChange {
+                column: "x".into(),
+                before: "i64".into(),
+                after: "f64".into()
+            }]
+        );
+        assert_eq!(
+            (
+                report.sample_changes[0].row_index,
+                report.sample_changes[0].column.as_str()
+            ),
+            (1, "x")
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w == "Column 'x' changed type from i64 to f64"),
+            "{:?}",
+            report.warnings
+        );
+        assert!(
+            report.summary().contains("Type changes:\n  x: i64 → f64\n"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    #[test]
+    fn test_verify_cleaning_cast_text_to_int() {
+        // String vs Int64 cells reached the same unimplemented! arm
+        let before = Dataset::new(df!("v" => ["1", "N/A", "3"]).unwrap());
+        let after = crate::data::munging::cast(&before, "v", "int").unwrap();
+        let report = verify_cleaning(&before, &after, "cast");
+        assert_eq!(report.rows_modified, 1); // "1" == 1 and "3" == 3 as text; "N/A" -> missing
+        assert_eq!(report.dtype_changes.len(), 1);
+        assert_eq!(report.sample_changes[0].row_index, 1);
+    }
+
+
 }
