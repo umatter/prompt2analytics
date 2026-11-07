@@ -136,9 +136,10 @@ pub fn pivot(dataset: &Dataset, index: &[&str], on: &str, values: &str) -> Munge
 /// # Errors
 ///
 /// [`MungeError::ColumnNotFound`] for a column that does not exist; [`MungeError::ReshapeError`] for
-/// no value variable, duplicate output names, text melted together with non-text columns, a date or
-/// time column melted together with another type (tidyr refuses both), and types without a common
-/// type.
+/// no value variable, duplicate output names, text melted together with non-text columns (tidyr
+/// refuses them too), a date, datetime, duration or time column melted together with another kind of
+/// column (dates combine with datetimes, as in tidyr, and durations of different units with each
+/// other), and types without a common type.
 pub fn melt(
     dataset: &Dataset,
     id_vars: &[&str],
@@ -277,9 +278,22 @@ fn melt_value_type(df: &DataFrame, value_vars: &[&str]) -> MungeResult<DataType>
             list.join(", ")
         ))
     };
-    if dtypes.iter().any(DataType::is_temporal) && !dtypes.iter().all(DataType::is_temporal) {
+    // Dates and datetimes are points in time and combine. The polars supertype would also take a
+    // duration with a date, and read the duration's count as a date.
+    let temporal_family = |dt: &DataType| match dt {
+        DataType::Date | DataType::Datetime(..) => Some(0),
+        DataType::Duration(..) => Some(1),
+        DataType::Time => Some(2),
+        _ => None,
+    };
+    if dtypes.iter().any(DataType::is_temporal)
+        && dtypes
+            .iter()
+            .any(|dt| temporal_family(dt) != temporal_family(&dtypes[0]))
+    {
         return Err(refuse(
-            "date/time and other columns do not combine (R's tidyr::pivot_longer refuses them too)",
+            "dates, durations, times and other columns do not combine (R's tidyr::pivot_longer \
+             refuses a date with anything but a datetime too)",
         ));
     }
     let common = match selected.get_supertype() {
@@ -860,5 +874,62 @@ mod tests {
         );
         let e = err_text(melt(&dated, &["id"], &["d", "a"], "var", "val"));
         assert!(e.contains("'d' (date)") && e.contains("munge_cast"), "{e}");
+        // a duration's count is not a date, whatever the polars supertype says; nor a time of day
+        let date = || {
+            Int32Chunked::from_slice("d".into(), &[18262, 18263])
+                .into_date()
+                .into_column()
+        };
+        let span = |unit| {
+            Int64Chunked::from_slice("span".into(), &[1_000, 2_000])
+                .into_duration(unit)
+                .into_column()
+        };
+        let moment = Int64Chunked::from_slice("at".into(), &[86_400_000, 172_800_000])
+            .into_datetime(TimeUnit::Milliseconds, None)
+            .into_column();
+        let clock = Int64Chunked::from_slice("clock".into(), &[1_000, 2_000])
+            .into_time()
+            .into_column();
+        let frame = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("id".into(), [1i64, 2]),
+                date(),
+                moment.clone(),
+                span(TimeUnit::Milliseconds),
+                clock.clone(),
+            ])
+            .unwrap(),
+        );
+        for pair in [
+            ["d", "span"],
+            ["at", "span"],
+            ["span", "clock"],
+            ["d", "clock"],
+        ] {
+            let e = err_text(melt(&frame, &["id"], &pair, "var", "val"));
+            assert!(e.contains(pair[0]) && e.contains("munge_cast"), "{e}");
+        }
+    }
+
+    #[test]
+    fn test_melt_combines_dates_with_datetimes() {
+        let ds = Dataset::new(
+            DataFrame::new(vec![
+                Column::new("id".into(), [1i64, 2]),
+                Int32Chunked::from_slice("d".into(), &[1, 2])
+                    .into_date()
+                    .into_column(),
+                Int64Chunked::from_slice("at".into(), &[3_600_000, 90_000_000])
+                    .into_datetime(TimeUnit::Milliseconds, None)
+                    .into_column(),
+            ])
+            .unwrap(),
+        );
+        let out = melt(&ds, &["id"], &["d", "at"], "var", "val").unwrap();
+        let val = out.df().column("val").unwrap();
+        assert!(matches!(val.dtype(), DataType::Datetime(..)), "{val:?}");
+        assert_eq!(val.len(), 4);
+        assert_eq!(val.null_count(), 0);
     }
 }

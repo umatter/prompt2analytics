@@ -51,9 +51,10 @@ the polars supertype of the value columns (integer + double gives double; intege
 integer; u32, f32 and bool keep their type on their own).
 
 Text melted with non-text columns is refused, as tidyr refuses it ("Can't combine `a` <integer> and `s`
-<character>."); a date or time column melted with a column of another type is refused too (vctrs does,
-and the supertype would give day counts). Date and time columns among themselves take the polars
-supertype.
+<character>."); a date, datetime, duration or time column melted with another kind of column is refused
+too (vctrs refuses a date with anything but a datetime, and the supertype would give day counts, or read a
+duration as a date). Dates combine with datetimes, and durations of different units with each other, at
+the polars supertype.
 
 - R: `pivot_longer(d, c(a, b, c), names_to = "var", values_to = "val")`. Case
   `data_munging_pivot_longer`, on `munging_wide.csv`.
