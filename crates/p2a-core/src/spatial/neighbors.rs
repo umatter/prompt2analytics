@@ -395,7 +395,11 @@ impl Neighbors {
 
     /// Get the average number of neighbors.
     pub fn avg_neighbors(&self) -> f64 {
-        self.n_links() as f64 / self.n as f64
+        if self.n == 0 {
+            0.0
+        } else {
+            self.n_links() as f64 / self.n as f64
+        }
     }
 
     /// Make the neighbor structure symmetric.
@@ -1461,6 +1465,13 @@ mod tests {
 
         // Should be approximately 3940 km
         assert!((dist - 3940.0).abs() < 50.0);
+    }
+
+    #[test]
+    fn test_empty_neighbour_list_has_zero_average() {
+        let nb = Neighbors::from_knn(&[], 5);
+        assert_eq!((nb.n(), nb.n_links()), (0, 0));
+        assert_eq!(nb.avg_neighbors(), 0.0);
     }
 
     /// R: brute force with the stable order() on a tied 5 x 5 integer grid, i.e.

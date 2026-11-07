@@ -292,7 +292,15 @@ pub fn moran_test_residuals(
     }
 
     let k = x.ncols();
-    let df = n - k;
+    let df = n
+        .checked_sub(k)
+        .filter(|&d| d >= 1)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: k + 1,
+            provided: n,
+            context: "moran_test_residuals: residual degrees of freedom n - k must be at least 1"
+                .to_string(),
+        })?;
 
     // Compute Moran's I for residuals
     let mut numerator = 0.0;
@@ -307,7 +315,21 @@ pub fn moran_test_residuals(
         }
     }
 
+    if !(s0 > 0.0 && s0.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "moran_test_residuals: the spatial weights have no links (S0 = 0): every \
+                      unit is an island; use a larger distance band or more neighbours"
+                .to_string(),
+        });
+    }
     let denominator: f64 = residuals.iter().map(|&r| r * r).sum();
+    if !(denominator > 0.0 && denominator.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "moran_test_residuals: the residuals are all zero or not finite, so spatial \
+                      autocorrelation is undefined"
+                .to_string(),
+        });
+    }
     let i_stat = (n as f64 / s0) * (numerator / denominator);
 
     // Expected value for residuals
@@ -869,6 +891,23 @@ mod tests {
         // Simple 4-point structure
         let nb = Neighbors::from_indices(vec![vec![1, 2], vec![0, 3], vec![0, 3], vec![1, 2]]);
         SpatialWeights::from_neighbors(&nb, crate::spatial::WeightStyle::RowStd)
+    }
+
+    #[test]
+    fn test_moran_test_residuals_refuses_df_below_one() {
+        let ring3 = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices(vec![vec![1, 2], vec![0, 2], vec![0, 1]]),
+            crate::spatial::WeightStyle::RowStd,
+        );
+        let e = Array1::from_vec(vec![0.1, -0.2, 0.1]);
+        match moran_test_residuals(&e, &Array2::ones((3, 4)), &ring3) {
+            Err(EconError::InsufficientData {
+                required: 5,
+                provided: 3,
+                ..
+            }) => {}
+            other => panic!("expected InsufficientData {{ 5, 3 }}, got {other:?}"),
+        }
     }
 
     #[test]

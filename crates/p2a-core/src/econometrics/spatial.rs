@@ -180,6 +180,47 @@ fn transformed_fit(
     Ok(fit)
 }
 
+/// beta (k, including the intercept and any SDM lags), `spatial` spatial parameters and sigma^2:
+/// the likelihood needs more observations than parameters (a saturated fit has zero SSE and an
+/// infinite log-likelihood).
+fn check_spatial_sample(n: usize, k: usize, spatial: usize, model: &str) -> EconResult<()> {
+    let params = k + spatial + 1;
+    if n <= params {
+        return Err(EconError::InsufficientData {
+            required: params + 1,
+            provided: n,
+            context: format!(
+                "{model}: {k} regression coefficient(s), {spatial} spatial parameter(s) and \
+                 sigma^2 need more observations than parameters"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a design of deficient rank (see [`aliased_error`]): the normal equations settle a
+/// well-conditioned design, the pivoted QR decides the others.
+fn check_not_aliased(x: &Array2<f64>, names: &[String]) -> EconResult<()> {
+    if normal_equations_inverse(x.view())?.is_some() {
+        return Ok(());
+    }
+    let qr = Qr::decompose(x.view(), LM_QR_TOL)?;
+    if qr.rank() < x.ncols() {
+        return Err(aliased_error(&qr.aliased(), names));
+    }
+    Ok(())
+}
+
+/// n - used, checked; [`check_spatial_sample`] has already ruled the underflow out on every path.
+fn residual_df(n: usize, used: usize, model: &str) -> EconResult<usize> {
+    n.checked_sub(used)
+        .ok_or_else(|| EconError::InsufficientData {
+            required: used + 1,
+            provided: n,
+            context: format!("{model}: residual degrees of freedom"),
+        })
+}
+
 /// Refuses an optimiser tolerance that is not finite and positive, and `max_iter == 0`.
 /// Shared by the cross-section estimators here and the spatial panel ones in `splm`.
 pub(crate) fn validate_optimizer(tol: f64, max_iter: usize) -> EconResult<()> {
@@ -408,6 +449,8 @@ pub fn run_sar(
     };
 
     let k_final = x_final.ncols();
+    let model = if config.durbin { "SDM" } else { "SAR" };
+    check_spatial_sample(n, k_final, 1, model)?;
 
     // Build coefficient names
     let mut coef_names = vec!["(Intercept)".to_string()];
@@ -517,7 +560,7 @@ pub fn run_sar(
         fitted,
         impacts,
         n_obs: n,
-        df: n - k_final - 1,
+        df: residual_df(n, k_final + 1, model)?,
         is_durbin: config.durbin,
     })
 }
@@ -556,6 +599,9 @@ pub fn run_sem(
     for &name in x_cols {
         coef_names.push(name.to_string());
     }
+
+    check_spatial_sample(n, k, 1, "SEM")?;
+    check_not_aliased(&x, &coef_names)?;
 
     let spectrum = listw.try_spectrum()?;
 
@@ -648,7 +694,7 @@ pub fn run_sem(
         residuals,
         fitted,
         n_obs: n,
-        df: n - k - 1,
+        df: residual_df(n, k + 1, "SEM")?,
     })
 }
 
@@ -685,7 +731,7 @@ pub struct SacConfig {
     pub tol: f64,
     /// Maximum iterations for optimization
     pub max_iter: usize,
-    /// Grid search resolution for initial parameter search
+    /// Grid search resolution for initial parameter search (at least 2)
     pub grid_resolution: usize,
 }
 
@@ -781,6 +827,14 @@ pub fn run_sac(
     config: SacConfig,
 ) -> EconResult<SacResult> {
     validate_optimizer(config.tol, config.max_iter)?;
+    if config.grid_resolution < 2 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "grid_resolution must be at least 2, got {}",
+                config.grid_resolution
+            ),
+        });
+    }
     let (y, x) = spatial_model_data(dataset, y_col, x_cols, listw)?;
     let n = y.len();
     let k = x.ncols(); // intercept + regressors
@@ -790,6 +844,9 @@ pub fn run_sac(
     for &name in x_cols {
         coef_names.push(name.to_string());
     }
+
+    check_spatial_sample(n, k, 2, "SAC")?;
+    check_not_aliased(&x, &coef_names)?;
 
     // Pre-compute eigenvalues
     let spectrum = listw.try_spectrum()?;
@@ -906,7 +963,7 @@ pub fn run_sac(
         residuals,
         fitted,
         n_obs: n,
-        df: n - k - 2,
+        df: residual_df(n, k + 2, "SAC")?,
     })
 }
 
@@ -2155,6 +2212,99 @@ mod tests {
             )
             .unwrap();
             assert_impacts(&imp, rho, d, i, t);
+        }
+    }
+
+    /// n units on a ring, noisy y = 1 + 0.5 x + e.
+    fn ring_data(n: usize) -> (Dataset, SpatialWeights) {
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 1.7).sin() + i as f64).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| 1.0 + 0.5 * v + if i % 2 == 0 { 0.3 } else { -0.2 })
+            .collect();
+        let nb =
+            Neighbors::from_indices((0..n).map(|i| vec![(i + 1) % n, (i + n - 1) % n]).collect());
+        (
+            Dataset::new(df! { "y" => y, "x" => x }.unwrap()),
+            SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd),
+        )
+    }
+
+    fn insufficient(r: EconResult<impl std::fmt::Debug>, req: usize, prov: usize, model: &str) {
+        match r {
+            Err(EconError::InsufficientData {
+                required,
+                provided,
+                context,
+            }) => {
+                assert_eq!((required, provided), (req, prov), "{context}");
+                assert!(context.contains(model), "{context}");
+            }
+            other => {
+                panic!("expected InsufficientData {{ {req}, {prov} }} for {model}, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_spatial_ml_refuses_samples_no_larger_than_the_parameter_count() {
+        // SAR: beta (2) + rho + sigma^2 = 4 parameters -> n >= 5; SDM adds lag.x -> 6; SEM 5; SAC 6
+        for n in [2, 4] {
+            let (d, mut w) = ring_data(n);
+            let sar = run_sar(&d, "y", &["x"], &mut w, SarConfig::default());
+            insufficient(sar, 5, n, "SAR");
+            let sem = run_sem(&d, "y", &["x"], &mut w, SemConfig::default());
+            insufficient(sem, 5, n, "SEM");
+        }
+        let (d, mut w) = ring_data(5);
+        let c = SarConfig {
+            durbin: true,
+            ..Default::default()
+        };
+        insufficient(run_sar(&d, "y", &["x"], &mut w, c), 6, 5, "SDM");
+        let sac = run_sac(&d, "y", &["x"], &mut w, SacConfig::default());
+        insufficient(sac, 6, 5, "SAC");
+        let ok = run_sar(&d, "y", &["x"], &mut w, SarConfig::default()).unwrap();
+        assert_eq!((ok.n_obs, ok.df), (5, 2));
+    }
+
+    #[test]
+    fn test_spatial_ml_refuses_aliased_regressors() {
+        // lagsarlm / errorsarlm / sacsarlm: "There are aliased coefficients in the model"
+        let ds = spatial_sim();
+        let x1 = col(&ds, "x1");
+        let twice: Vec<f64> = x1.iter().map(|v| 2.0 * v).collect();
+        let d =
+            Dataset::new(df! { "y" => col(&ds, "y"), "x1" => x1, "x1_twice" => twice }.unwrap());
+        let mut w = knn4(&ds);
+        let x = ["x1", "x1_twice"];
+        let aliased = |r: EconResult<Vec<f64>>| match r {
+            Err(EconError::PerfectMulticollinearity { columns }) => {
+                assert_eq!(columns, ["x1_twice"])
+            }
+            other => panic!("expected PerfectMulticollinearity, got {other:?}"),
+        };
+        aliased(run_sar(&d, "y", &x, &mut w, SarConfig::default()).map(|r| r.coefficients));
+        aliased(run_sem(&d, "y", &x, &mut w, SemConfig::default()).map(|r| r.coefficients));
+        aliased(run_sac(&d, "y", &x, &mut w, SacConfig::default()).map(|r| r.coefficients));
+    }
+
+    #[test]
+    fn test_sac_refuses_a_grid_below_two() {
+        let (d, mut w) = ring_data(12);
+        for g in [0, 1] {
+            let c = SacConfig {
+                grid_resolution: g,
+                ..Default::default()
+            };
+            match run_sac(&d, "y", &["x"], &mut w, c) {
+                Err(EconError::InvalidSpecification { message }) => {
+                    assert!(message.contains("grid_resolution"), "{message}");
+                    assert!(message.contains("at least 2"), "{message}");
+                }
+                other => panic!("expected InvalidSpecification, got {other:?}"),
+            }
         }
     }
 
