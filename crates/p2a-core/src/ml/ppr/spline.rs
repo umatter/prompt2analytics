@@ -122,7 +122,7 @@ fn penalty_matrix(t: &[f64], nk: usize) -> Band {
     let mut omega = [[0.0; 4]; NK_MAX];
     for left in 3..nk {
         let h = t[left + 1] - t[left];
-        if !(h > 0.0) {
+        if !h.gt(&0.0) {
             continue;
         }
         let a = bspline4_d2(t, left, t[left]);

@@ -43,7 +43,7 @@ pub(crate) fn supsmu_sorted(
     work: &mut SupsmuWork,
 ) {
     let n = x.len();
-    if !(x[n - 1] > x[0]) {
+    if !x[n - 1].gt(&x[0]) {
         let (mut sy, mut sw) = (0.0, 0.0);
         for j in 0..n {
             sy += w[j] * y[j];
@@ -57,7 +57,7 @@ pub(crate) fn supsmu_sorted(
     let mut i = n / 4;
     let mut j = 3 * i;
     let mut scale = x[j - 1] - x[i - 1];
-    while !(scale > 0.0) {
+    while !scale.gt(&0.0) {
         if j < n {
             j += 1;
         }

@@ -834,7 +834,7 @@ impl ForwardState {
             }
         }
         let norm_u = dot(u, u).sqrt();
-        if !(norm_u > LM_QR_TOL * norm_b) {
+        if !norm_u.gt(&(LM_QR_TOL * norm_b)) {
             return false;
         }
         u.iter_mut().for_each(|v| *v /= norm_u);
@@ -1146,7 +1146,7 @@ fn compute_effective_df(basis: &[BasisFunction], penalty: f64) -> f64 {
 /// GCV = RSS / (n * (1 - d/n)^2), infinite once d >= n: earth's `GetGcv`; Friedman (1991), eq. 30.
 fn compute_gcv(rss: f64, n: usize, effective_df: f64) -> f64 {
     let n_f = n as f64;
-    if !(effective_df < n_f) {
+    if !effective_df.lt(&n_f) {
         return f64::INFINITY;
     }
     rss / (n_f * (1.0 - effective_df / n_f).powi(2))

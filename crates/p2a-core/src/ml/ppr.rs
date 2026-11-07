@@ -223,10 +223,10 @@ impl PprResult {
 /// The ridge function at `s`: exact at a projection, linear between two, constant beyond them.
 fn ridge_value(t: &[f64], f: &[f64], s: f64) -> f64 {
     let n = t.len();
-    if !(s > t[0]) {
+    if !s.gt(&t[0]) {
         return f[0];
     }
-    if !(s < t[n - 1]) {
+    if !s.lt(&t[n - 1]) {
         return f[n - 1];
     }
     // t[low] < s < t[high]
@@ -496,7 +496,7 @@ fn validate(
                 "PPR: weights must be finite and non-negative".to_string(),
             ));
         }
-        if !(wt.iter().sum::<f64>() > 0.0) {
+        if wt.iter().sum::<f64>() <= 0.0 {
             return Err(invalid("PPR: the weights sum to zero".to_string()));
         }
     }
@@ -706,7 +706,7 @@ impl Smart<'_> {
             ss += w[j] * r[j] * r[j];
         }
         let ys = (ss / sw).sqrt();
-        if !(ys > 0.0) {
+        if !ys.gt(&0.0) {
             return Err(invalid(
                 "PPR: the response is constant on the rows with positive weight".to_string(),
             ));
@@ -1089,7 +1089,7 @@ impl Smart<'_> {
                 Ok(0.0)
             }
             method => {
-                if !(buf.xs[n - 1] > buf.xs[0]) {
+                if !buf.xs[n - 1].gt(&buf.xs[0]) {
                     let (mut sy, mut sw) = (0.0, 0.0);
                     for j in 0..n {
                         sy += buf.ws[j] * buf.ys[j];
@@ -1291,7 +1291,7 @@ fn ppconj(g: &[f64], c: &[f64], p: usize) -> EconResult<Vec<f64>> {
             res[i] = gd[i] - c[i];
             h += res[i] * res[i];
         }
-        if !(h > 0.0) {
+        if !h.gt(&0.0) {
             break;
         }
         let mut beta = 0.0;
@@ -1302,7 +1302,7 @@ fn ppconj(g: &[f64], c: &[f64], p: usize) -> EconResult<Vec<f64>> {
             }
             packed_mul(g, &dir, &mut gd);
             let t: f64 = gd.iter().zip(&dir).map(|(a, b)| a * b).sum();
-            if !(t > 0.0) {
+            if !t.gt(&0.0) {
                 // no curvature left along dir (G is singular here): x is as good as it gets
                 break;
             }
@@ -1313,7 +1313,7 @@ fn ppconj(g: &[f64], c: &[f64], p: usize) -> EconResult<Vec<f64>> {
                 res[i] += alpha * gd[i];
                 s += res[i] * res[i];
             }
-            if !(s > 0.0) {
+            if !s.gt(&0.0) {
                 break;
             }
             beta = s / h;
@@ -1324,7 +1324,7 @@ fn ppconj(g: &[f64], c: &[f64], p: usize) -> EconResult<Vec<f64>> {
             .zip(&prev)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f64::max);
-        if !(change >= CJEPS) {
+        if !change.ge(&CJEPS) {
             break;
         }
     }
@@ -1382,14 +1382,14 @@ fn pool(x: &mut [f64], y: &mut [f64], w: &mut [f64], del: f64) {
 /// the groups of `x` pooled at `fdel` of the interquartile range, one-sided at the two ends.
 fn pprder(x: &[f64], s: &[f64], w: &[f64], fdel: f64, d: &mut [f64]) -> EconResult<()> {
     let n = x.len();
-    if !(x[n - 1] > x[0]) {
+    if !x[n - 1].gt(&x[0]) {
         d.fill(0.0);
         return Ok(());
     }
     let mut i = n / 4;
     let mut j = 3 * i;
     let mut scale = x[j - 1] - x[i - 1];
-    while !(scale > 0.0) {
+    while !scale.gt(&0.0) {
         if j < n {
             j += 1;
         }
@@ -1849,13 +1849,13 @@ mod tests {
         let mut d = [0.0; 8];
         pprder(&x, &s, &w, FDEL, &mut d).unwrap();
         let want = [
-            0.65789473684210531,
-            0.66666666666666674,
-            0.66666666666666674,
+            0.6578947368421053,
+            0.6666666666666667,
+            0.6666666666666667,
             0.5803571428571429,
             0.565217391304348,
             0.565217391304348,
-            0.23333333333333331,
+            0.2333333333333333,
             -0.13333333333333344,
         ];
         for (a, b) in d.iter().zip(want) {
@@ -1863,7 +1863,7 @@ mod tests {
         }
         let (mut px, mut py, mut pw) = (x, s, w);
         pool(&mut px, &mut py, &mut pw, FDEL * 2.0 * (2.0 - 0.51));
-        assert!((px[1] - 0.50666666666666671).abs() < 1e-15, "{px:?}");
+        assert!((px[1] - 0.5066666666666667).abs() < 1e-15, "{px:?}");
         assert!((py[2] - 0.43333333333333335).abs() < 1e-15, "{py:?}");
         assert_eq!(pw[1], 3.0);
         let x2 = [0.0, 0.001, 0.002, 0.003, 1.0, 1.001, 1.002, 1.003];
@@ -1881,11 +1881,7 @@ mod tests {
         let d: Vec<f64> = (1..=10).map(|j| (j as f64).cos()).collect();
         let w = [1.0, 2.0, 1.0, 1.0, 0.5, 1.0, 1.0, 3.0, 1.0, 1.0];
         let e = pprdir(&x, 3, &w, 12.5, &r, &d).unwrap();
-        let want = [
-            1.245593551338366,
-            -0.76430883039952446,
-            -0.12125488790032093,
-        ];
+        let want = [1.245593551338366, -0.7643088303995245, -0.12125488790032093];
         for (a, b) in e.iter().zip(want) {
             assert!((a - b).abs() <= 1e-12 * b.abs(), "{e:?}");
         }
