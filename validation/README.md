@@ -413,6 +413,10 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | PAM and CLARA (cluster::pam, clara); fuzzy c-means partition and FANNY recorded (e1071::cmeans, cluster::fanny) | [partitioning.md](ml/partitioning.md) | R-pinned, known deviations (ML-11, ML-9) |
 | SHAP (TreeSHAP with interaction values; Kernel SHAP) | [shap.md](ml/shap.md) | R-pinned, known deviations (ML-100) |
 | Partial dependence (one and two features) and ICE / centred ICE curves on pdp::partial's grid rules | [pdp.md](ml/pdp.md) | R-pinned, known deviations (ML-137) |
+| AdaBoost (M1 and SAMME written out with rpart learners; R2's first learner) | [adaboost.md](ml/adaboost.md) | R-pinned |
+| XGBoost exact trees (xgboost::xgb.train; the L1 rule written out); histogram trees | [xgboost.md](ml/xgboost.md) | R-pinned |
+| Component-wise boosting (mboost::mboost with bols; four families); the tree learner is not R-pinned | [mboost.md](ml/mboost.md) | R-pinned |
+| BART (probit: quadrature posterior and glm property, no BART-package pin; regression sampler unpinned) | [bart.md](ml/bart.md) | R-pinned, known deviations (ML-16) |
 
 ### Statistical Methods
 | Method | File | Status |

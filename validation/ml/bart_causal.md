@@ -26,7 +26,7 @@ Since we cannot do full Bayesian MCMC, uncertainty is quantified via bootstrap:
 
 1. Resample data with replacement B times
 2. Re-estimate CATE for each bootstrap sample
-3. Compute confidence intervals from bootstrap distribution (percentile method)
+3. Compute confidence intervals from bootstrap distribution: percentiles by R's `quantile(type = 7)`, which the CATE lines of the summary use too
 
 ### Differences from Full BART
 
@@ -192,6 +192,9 @@ Note: We do not expect exact numerical agreement with bartCause because:
 
 ## Validation Tests
 
+Not R-pinned: `bartCause` is a different model (see the table above). Regression and probit BART are in
+[bart.md](bart.md).
+
 ### Unit Tests (Rust)
 
 Location: `crates/p2a-core/src/ml/bart_causal.rs` (module tests)
@@ -203,7 +206,7 @@ Location: `crates/p2a-core/src/ml/bart_causal.rs` (module tests)
 | `test_bart_causal_heterogeneity` | CATE varies with effect modifier | Pass |
 | `test_bart_causal_insufficient_data` | Error handling for small samples | Pass |
 | `test_bootstrap_se` | Bootstrap SE calculation | Pass |
-| `test_percentile_ci` | Percentile CI calculation | Pass |
+| `test_percentile_ci` | Percentile CI calculation against `quantile(0:99, c(0.025, 0.975))` = 2.475, 96.525 | Pass |
 | `test_tree_ensemble_fit_predict` | Tree ensemble mechanics | Pass |
 | `test_display` | Display trait implementation | Pass |
 
