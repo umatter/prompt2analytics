@@ -60,8 +60,8 @@ number.
 The fits at R's optimum supersede `validation/expected/holtwinters_*.csv`: R 4.3.3 reproduces those seven files' values to
 their 15 digits, with the legacy series regenerated from the legacy seeds.
 
-**Deviation TS-24.** The optimiser is not pinned. p2a runs Nelder-Mead on [0.01, 0.99], R L-BFGS-B from its own starts. The
-filter is pinned at R's optimum.
+**Deviation TS-24.** The optimiser is not pinned. p2a runs Nelder-Mead on [0.01, 0.99], R L-BFGS-B from its own starts. A
+fixed value is used as given, whichever parameters are optimised. The filter is pinned at R's optimum.
 
 ## Input data (column types and missing values)
 

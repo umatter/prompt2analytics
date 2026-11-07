@@ -961,16 +961,20 @@ fn optimize_parameters(
     max_iter: usize,
     tolerance: f64,
 ) -> EconResult<(f64, f64, f64)> {
-    let alpha = init_alpha.clamp(0.01, 0.99);
-    let beta = init_beta.clamp(0.01, 0.99);
-    let gamma = init_gamma.clamp(0.01, 0.99);
+    // Only what is optimised stays in the optimiser's box: a fixed value is used as given.
+    let start = |init: f64, optimize: bool| {
+        if optimize {
+            init.clamp(0.01, 0.99)
+        } else {
+            init
+        }
+    };
+    let alpha = start(init_alpha, optimize_alpha);
+    let beta = start(init_beta, optimize_beta);
+    let gamma = start(init_gamma, optimize_gamma);
 
     // Build the objective function that evaluates SSE
     let objective = |params: &[f64]| -> f64 {
-        let a = params[0].clamp(0.01, 0.99);
-        let b = params[1].clamp(0.01, 0.99);
-        let g = params[2].clamp(0.01, 0.99);
-
         match run_filter(
             y,
             period,
@@ -978,9 +982,9 @@ fn optimize_parameters(
             l_start,
             b_start,
             s_start,
-            a,
-            b,
-            g,
+            params[0],
+            params[1],
+            params[2],
             use_trend,
             use_seasonal,
             seasonal_type,
@@ -1025,7 +1029,7 @@ fn optimize_parameters(
         let mut idx = 0;
         for (i, &optimizing) in param_mask.iter().enumerate() {
             if optimizing {
-                full[i] = reduced_params[idx];
+                full[i] = reduced_params[idx].clamp(0.01, 0.99);
                 idx += 1;
             }
         }
@@ -1327,6 +1331,37 @@ mod tests {
             .vector(&format!("{tag}_upr"), &p.upper, Tol::stat(n))
             .vector(&format!("{tag}_lwr"), &p.lower, Tol::stat(n))
             .finish();
+    }
+
+    /// A fixed value stays as given while another parameter is optimised: at 1.0 and 0.0 it left
+    /// the optimiser's box and came back as 0.99 and 0.01.
+    #[test]
+    fn test_fixed_parameters_are_not_clamped_while_optimising() {
+        let ds = series_dataset();
+        let y = col(&ds, "airpass");
+        let fit = |alpha: Option<f64>, beta: Option<f64>, gamma: Option<f64>| {
+            let mut c = HoltWintersConfig::default();
+            c.period = 12;
+            c.alpha = alpha;
+            c.beta = beta;
+            c.gamma = gamma;
+            holt_winters(&y, c).unwrap()
+        };
+
+        let r = fit(Some(1.0), None, Some(0.2));
+        assert_eq!(r.alpha, 1.0);
+        assert_eq!(r.gamma, Some(0.2));
+        for fixed in [0.0, 1.0] {
+            let r = fit(None, Some(fixed), None);
+            assert_eq!(r.beta, Some(fixed));
+            let r = fit(None, None, Some(fixed));
+            assert_eq!(r.gamma, Some(fixed));
+        }
+
+        // The objective ran on the fixed value: refitting at the optimum reproduces the SSE.
+        let opt = fit(Some(1.0), None, Some(0.0));
+        let again = fit(Some(1.0), opt.beta, Some(0.0));
+        assert_eq!(opt.sse.to_bits(), again.sse.to_bits());
     }
 
     /// X-5: `run_holt_winters` sends period 0 to the non-seasonal path, and the filter took

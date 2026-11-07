@@ -193,7 +193,7 @@
         {
           "finding": "TS-24",
           "quantity": "optimised alpha, beta, gamma",
-          "note": "p2a optimises by Nelder-Mead on [0.01, 0.99]; not pinned; the filter is pinned at R's optimum"
+          "note": "p2a optimises by Nelder-Mead on [0.01, 0.99] and uses a fixed value as given; not pinned; the filter is pinned at R's optimum"
         },
         {
           "finding": "TS-22",
