@@ -70,7 +70,11 @@ are valid UTF-8, and the case pins both files with the encoding that gives the i
 (`dta117_haven`: `"UTF-8"`, `dta117_latin1`: `"windows-1252"`; both give `"Zürich"`, `"€5"`). Recorded
 as a registry deviation of `data_read_dta`.
 
-Formats 102-116 and releases above 119 are `UnsupportedVersion`.
+Missing values: byte above 100, int above 32,740, long above 2,147,483,620, float above 0x7EFFFFFF
+(1.7014117331926443e38) and double above 0x7FDFFFFFFFFFFFFF (8.9884656743115785e307) are `.` or
+`.a`-`.z` and load as null. `dta118_types` holds each type's extremes: the largest float and double
+were null before (the old thresholds 1.701e38 and 8.988e307 lie below them). Formats 102-116
+and releases above 119 are `UnsupportedVersion`.
 
 ## Tests
 
@@ -89,6 +93,7 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::stata::tests::test_validate_read_haven_dta_119` | `dta119_haven` = haven: u32 `<K>` (DATA-51) |
 | `p2a-core::data::stata::tests::test_validate_read_haven_dta_119_big_endian` | `dta119_msf` = haven (DATA-51) |
 | `p2a-core::data::stata::tests::test_stata_119_k_is_four_bytes` | a release-119 `<K>` of 65542 is read as such (DATA-51) |
+| `p2a-core::data::stata::tests::test_validate_read_haven_dta_118_storage_types` | `dta118_types` = haven: byte/int/long/float/double extremes and missing codes |
 | `p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture` | `DataLoader::load` of `dta118_haven` = haven |
 | `p2a-core::data::stata::tests::test_stata_map_and_header_guards` | map offsets past EOF or off their tag, N and K bounds (DATA-22) |
 | `p2a-core::data::stata::tests::test_stata_pre_117_formats_are_unsupported` | formats 102-116 and release 120 are `UnsupportedVersion` |

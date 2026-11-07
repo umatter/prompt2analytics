@@ -18,6 +18,11 @@
 //! `validation/datasets/files/` (`validation/data/readers.md`). Formats before 117 (Stata 12 and
 //! earlier) are refused with [`StataError::UnsupportedVersion`]; strL contents and value labels are
 //! not decoded (see the strL warning in [`StataReader::read_to_dataframe`]).
+//!
+//! Numeric storage types: byte, int and long load as Int64, float and double as Float64. Every
+//! missing code (`.`, `.a`-`.z`) loads as null: byte above 100, int above 32,740, long above
+//! 2,147,483,620, float above 0x7EFFFFFF (1.70141173319e38) and double above 0x7FDFFFFFFFFFFFFF
+//! (8.98846567431e307), the format's largest values.
 
 use polars::frame::column::Column;
 use polars::prelude::*;
@@ -93,6 +98,9 @@ const MAP_DATA: usize = 9;
 const MAP_STRLS: usize = 10;
 const DATA_TAG: &[u8] = b"<data>";
 const DATA_END_TAG: &[u8] = b"</data>";
+/// The format's largest non-missing float and double; every missing code is above them.
+const FLOAT_MAX: f32 = f32::from_bits(0x7EFF_FFFF);
+const DOUBLE_MAX: f64 = f64::from_bits(0x7FDF_FFFF_FFFF_FFFF);
 
 /// Stata variable type
 #[derive(Debug, Clone)]
@@ -527,7 +535,7 @@ impl<R: Read + Seek> StataReader<R> {
             }
             StataType::Float => {
                 let v = Self::read_f32(&mut self.reader, self.byte_order)?;
-                if v.is_nan() || v > 1.701e38 {
+                if v.is_nan() || v > FLOAT_MAX {
                     Ok(AnyValue::Null)
                 } else {
                     Ok(AnyValue::Float64(v as f64))
@@ -535,7 +543,7 @@ impl<R: Read + Seek> StataReader<R> {
             }
             StataType::Double => {
                 let v = Self::read_f64(&mut self.reader, self.byte_order)?;
-                if v.is_nan() || v > 8.988e307 {
+                if v.is_nan() || v > DOUBLE_MAX {
                     Ok(AnyValue::Null)
                 } else {
                     Ok(AnyValue::Float64(v))
@@ -720,6 +728,27 @@ mod tests {
         let mut b = fixture_bytes("dta119_haven.dta");
         b[72] = 1;
         assert_invalid(load(b), "<K> = 65542 variables do not fit");
+    }
+
+    #[test]
+    fn test_validate_read_haven_dta_118_storage_types() {
+        // byte, int, long, float, double at their valid extremes (100, 32740, 2147483620,
+        // 1.7014117331926443e38 = 0x7EFFFFFF, 8.9884656743115785e307 = 0x7FDFFFFFFFFFFFFF are
+        // values; ., .a, .b, .c, .z, .y are null).
+        let case = Case::load("data_readers_values");
+        let df = load_stata(fixture_path("dta118_types.dta")).unwrap();
+        assert_matches_haven(&case, "dta118_types", &df);
+        let dtypes: Vec<DataType> = df.get_columns().iter().map(|c| c.dtype().clone()).collect();
+        assert_eq!(
+            dtypes,
+            [
+                DataType::Int64,
+                DataType::Int64,
+                DataType::Int64,
+                DataType::Float64,
+                DataType::Float64
+            ]
+        );
     }
 
     #[test]
