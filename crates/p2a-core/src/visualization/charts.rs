@@ -3,6 +3,7 @@
 use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
 use crate::resource;
+use crate::traits::convergence::{ResultNotes, notes_text};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use plotters::prelude::*;
 
@@ -1419,10 +1420,26 @@ pub struct ResidualDiagnosticsResult {
     pub residuals_vs_leverage: String,
     /// Number of observations
     pub n_observations: usize,
-    /// Standardized residuals
+    /// Standardized residuals (R's `rstandard`); NaN at leverage one
     pub standardized_residuals: Vec<f64>,
-    /// Cook's distances
+    /// Cook's distances (R's `cooks.distance`); NaN at leverage one
     pub cooks_distance: Vec<f64>,
+    /// Hat values used: the given leverage or the one-predictor formula.
+    pub leverage: Vec<f64>,
+    /// Number of coefficients p (given, or the rounded sum of the hat values).
+    pub n_params: usize,
+    /// Residual standard error `sqrt(sum e^2 / (n - p))` (R's `summary.lm` sigma).
+    pub sigma: f64,
+    /// 0-based input row of each element of the vectors above.
+    pub rows: Vec<usize>,
+    /// What the caller should know: the leverage fallback, observations not plotted.
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for ResidualDiagnosticsResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 impl std::fmt::Display for ResidualDiagnosticsResult {
@@ -1430,6 +1447,13 @@ impl std::fmt::Display for ResidualDiagnosticsResult {
         writeln!(f, "Residual Diagnostics")?;
         writeln!(f, "====================")?;
         writeln!(f, "Observations: {}", self.n_observations)?;
+        writeln!(f, "Coefficients (p): {}", self.n_params)?;
+        writeln!(
+            f,
+            "Residual standard error: {:.4} on {} degrees of freedom",
+            self.sigma,
+            self.n_observations - self.n_params
+        )?;
         writeln!(f)?;
         writeln!(f, "Plots Generated:")?;
         writeln!(
@@ -1443,17 +1467,25 @@ impl std::fmt::Display for ResidualDiagnosticsResult {
             f,
             "  - Residuals vs Leverage: {} bytes",
             self.residuals_vs_leverage.len()
-        )
+        )?;
+        write!(f, "{}", notes_text(self))
     }
 }
 
-/// Generate residual diagnostic plots for regression analysis.
+/// Generate residual diagnostic plots for regression analysis: R's `plot.lm`
+/// (`which = c(1:3, 5)`).
 ///
 /// Creates four diagnostic plots:
 /// 1. Residuals vs Fitted - checks linearity and homoscedasticity
-/// 2. Normal Q-Q - checks normality of residuals
+/// 2. Normal Q-Q - checks normality of residuals (`qnorm(ppoints(n))`)
 /// 3. Scale-Location - checks homoscedasticity (√|standardized residuals| vs fitted)
 /// 4. Residuals vs Leverage - identifies influential observations
+///
+/// The standardized residuals are R's `rstandard` and the Cook's distances R's
+/// `cooks.distance`, both NaN and not plotted at leverage one. They are exact only with the
+/// model's hat values: without `leverage` the one-predictor formula is used, with a warning,
+/// which is exact for a model with one regressor and an intercept. Leverage that is not a
+/// number in `[0, 1]` at a used row is an error naming the row.
 ///
 /// # Arguments
 /// * `fitted` - Fitted/predicted values from the regression
@@ -1464,6 +1496,19 @@ pub fn residual_diagnostics(
     fitted: &[f64],
     residuals: &[f64],
     leverage: Option<&[f64]>,
+    config: ChartConfig,
+) -> Result<ResidualDiagnosticsResult, VisualizationError> {
+    residual_diagnostics_with(fitted, residuals, leverage, None, config)
+}
+
+/// As [`residual_diagnostics`], with the model size. `n_params`: R's model rank; `None` takes
+/// it from the hat values (their rounded sum) or, without them, from the one-predictor
+/// formula.
+pub fn residual_diagnostics_with(
+    fitted: &[f64],
+    residuals: &[f64],
+    leverage: Option<&[f64]>,
+    n_params: Option<usize>,
     config: ChartConfig,
 ) -> Result<ResidualDiagnosticsResult, VisualizationError> {
     if fitted.is_empty() || residuals.is_empty() {
@@ -1478,85 +1523,112 @@ pub fn residual_diagnostics(
         ));
     }
 
-    let n = fitted.len();
+    if leverage.is_some_and(|lev| lev.len() != fitted.len()) {
+        return Err(VisualizationError::InvalidData(
+            "Leverage must have same length as fitted".to_string(),
+        ));
+    }
 
     // Filter out invalid values
-    let valid_indices: Vec<usize> = (0..n)
+    let rows: Vec<usize> = (0..fitted.len())
         .filter(|&i| fitted[i].is_finite() && residuals[i].is_finite())
         .collect();
 
-    if valid_indices.is_empty() {
+    if rows.is_empty() {
         return Err(VisualizationError::InvalidData(
             "No valid data points".to_string(),
         ));
     }
 
-    let fitted_valid: Vec<f64> = valid_indices.iter().map(|&i| fitted[i]).collect();
-    let residuals_valid: Vec<f64> = valid_indices.iter().map(|&i| residuals[i]).collect();
+    let fitted_valid: Vec<f64> = rows.iter().map(|&i| fitted[i]).collect();
+    let residuals_valid: Vec<f64> = rows.iter().map(|&i| residuals[i]).collect();
+    let n_valid = rows.len();
+    let mut warnings = Vec::new();
 
-    let n_valid = fitted_valid.len();
-
-    // Calculate standardized residuals
-    let mean_residual: f64 = residuals_valid.iter().sum::<f64>() / n_valid as f64;
-    let variance: f64 = residuals_valid
-        .iter()
-        .map(|r| (r - mean_residual).powi(2))
-        .sum::<f64>()
-        / (n_valid - 1) as f64;
-    let std_dev = variance.sqrt();
-
-    let standardized_residuals: Vec<f64> = if std_dev > 1e-10 {
-        residuals_valid
-            .iter()
-            .map(|r| (r - mean_residual) / std_dev)
-            .collect()
-    } else {
-        vec![0.0; n_valid]
+    // Leverage and the number of coefficients
+    let (leverage_valid, p) = match leverage {
+        Some(lev) => {
+            let hat = given_leverage(lev, &rows)?;
+            let p = match n_params {
+                Some(p) => p,
+                None => params_from_hat_values(&hat)?,
+            };
+            (hat, p)
+        }
+        None => {
+            let (hat, p0, note) = one_predictor_leverage(&fitted_valid);
+            if n_params.is_some_and(|p| p != p0) {
+                return Err(VisualizationError::InvalidData(format!(
+                    "n_params = {} needs the model's hat values (leverage); without them only a \
+                     model with one regressor and an intercept (p = 2) can be diagnosed",
+                    n_params.unwrap_or(p0)
+                )));
+            }
+            warnings.push(note.to_string());
+            (hat, p0)
+        }
     };
 
-    // Calculate or use provided leverage values
-    let leverage_valid: Vec<f64> = if let Some(lev) = leverage {
-        if lev.len() != n {
-            return Err(VisualizationError::InvalidData(
-                "Leverage must have same length as fitted".to_string(),
-            ));
-        }
-        valid_indices.iter().map(|&i| lev[i]).collect()
-    } else {
-        // Simple approximation: 1/n + (x - mean(x))^2 / sum((x - mean(x))^2)
-        let mean_fitted: f64 = fitted_valid.iter().sum::<f64>() / n_valid as f64;
-        let ss_fitted: f64 = fitted_valid.iter().map(|f| (f - mean_fitted).powi(2)).sum();
-        if ss_fitted > 1e-10 {
-            fitted_valid
-                .iter()
-                .map(|f| 1.0 / n_valid as f64 + (f - mean_fitted).powi(2) / ss_fitted)
-                .collect()
+    if p == 0 || p >= n_valid {
+        return Err(VisualizationError::InvalidData(format!(
+            "n_params is {p}; it must be at least 1 and below the number of observations \
+             ({n_valid})"
+        )));
+    }
+    let df = n_valid - p;
+
+    // sigma, scaled so that it cannot overflow
+    let largest = residuals_valid.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+    if largest == 0.0 {
+        return Err(VisualizationError::InvalidData(
+            "all residuals are zero (a perfect fit): standardized residuals and Cook's distance \
+             are undefined"
+                .to_string(),
+        ));
+    }
+    let scaled_rss: f64 = residuals_valid.iter().map(|e| (e / largest).powi(2)).sum();
+    let sigma = largest * (scaled_rss / df as f64).sqrt();
+
+    // R's rstandard.lm and cooks.distance.lm; leverage one as lm.influence
+    let mut standardized_residuals = Vec::with_capacity(n_valid);
+    let mut cooks_distance = Vec::with_capacity(n_valid);
+    let mut leverage_one = Vec::new();
+    for ((e, h), row) in residuals_valid.iter().zip(&leverage_valid).zip(&rows) {
+        if *h >= 1.0 - 10.0 * f64::EPSILON {
+            standardized_residuals.push(f64::NAN);
+            cooks_distance.push(f64::NAN);
+            leverage_one.push(*row);
         } else {
-            vec![1.0 / n_valid as f64; n_valid]
+            let r = e / (sigma * (1.0 - h).sqrt());
+            standardized_residuals.push(r);
+            cooks_distance.push(r * r * h / (p as f64 * (1.0 - h)));
         }
-    };
+    }
+    if !leverage_one.is_empty() {
+        warnings.push(format!(
+            "observations with leverage one have NaN standardized residuals and Cook's \
+             distances and are not plotted (rows {leverage_one:?})"
+        ));
+    }
 
-    // Calculate Cook's distance: D_i = (r_i^2 / p) * (h_i / (1 - h_i))
-    // where p is number of parameters (approximate with 2 for simple regression)
-    let p = 2.0;
-    let cooks_distance: Vec<f64> = standardized_residuals
-        .iter()
-        .zip(leverage_valid.iter())
-        .map(|(r, h)| {
-            let h_clamped = h.min(0.9999);
-            (r.powi(2) / p) * (h_clamped / (1.0 - h_clamped))
-        })
+    // Generate the four diagnostic plots: all rows against the fitted values, the rest
+    // only where the standardized residual is a number.
+    let plotted: Vec<usize> = (0..n_valid)
+        .filter(|&i| standardized_residuals[i].is_finite())
         .collect();
+    let pick = |v: &[f64]| -> Vec<f64> { plotted.iter().map(|&i| v[i]).collect() };
+    let fitted_plotted = pick(&fitted_valid);
+    let standardized_plotted = pick(&standardized_residuals);
 
-    // Generate the four diagnostic plots
     let residuals_vs_fitted =
         generate_residuals_vs_fitted(&fitted_valid, &residuals_valid, &config)?;
-    let qq_plot = generate_qq_plot(&standardized_residuals, &config)?;
-    let scale_location = generate_scale_location(&fitted_valid, &standardized_residuals, &config)?;
+    let qq_plot = generate_qq_plot(&standardized_plotted, &config)?;
+    let scale_location = generate_scale_location(&fitted_plotted, &standardized_plotted, &config)?;
     let residuals_vs_leverage = generate_residuals_vs_leverage(
-        &leverage_valid,
-        &standardized_residuals,
-        &cooks_distance,
+        &pick(&leverage_valid),
+        &standardized_plotted,
+        &pick(&cooks_distance),
+        p,
         &config,
     )?;
 
@@ -1568,7 +1640,72 @@ pub fn residual_diagnostics(
         n_observations: n_valid,
         standardized_residuals,
         cooks_distance,
+        leverage: leverage_valid,
+        n_params: p,
+        sigma,
+        rows,
+        warnings,
     })
+}
+
+/// The hat values of the used rows, clamped to `[0, 1]`; a value that is not a number in
+/// that range (up to rounding) is an error naming the row.
+fn given_leverage(lev: &[f64], rows: &[usize]) -> Result<Vec<f64>, VisualizationError> {
+    rows.iter()
+        .map(|&i| {
+            let v = lev[i];
+            if v.is_finite() && (-1e-12..=1.0 + 1e-12).contains(&v) {
+                Ok(v.clamp(0.0, 1.0))
+            } else {
+                Err(VisualizationError::InvalidData(format!(
+                    "leverage at row {i} is {v}; hat values must be finite numbers between 0 and 1"
+                )))
+            }
+        })
+        .collect()
+}
+
+/// The number of coefficients of a linear model from its hat values, whose sum is its rank.
+fn params_from_hat_values(hat: &[f64]) -> Result<usize, VisualizationError> {
+    let sum: f64 = hat.iter().sum();
+    let p = sum.round();
+    if (sum - p).abs() > 0.05 || p < 1.0 {
+        return Err(VisualizationError::InvalidData(format!(
+            "the leverage values sum to {sum:.4}, but the hat values of a linear model sum to its \
+             number of coefficients; pass the model's hat values (R: hatvalues(model)) or n_params"
+        )));
+    }
+    Ok(p as usize)
+}
+
+/// Hat values without the design: `1/n + (f - mean f)^2 / sum (f - mean f)^2` (p = 2), exact
+/// for a model with one regressor and an intercept; 1/n (p = 1) for constant fitted values.
+/// Also the number of coefficients and the warning that says so.
+fn one_predictor_leverage(fitted: &[f64]) -> (Vec<f64>, usize, &'static str) {
+    let n = fitted.len() as f64;
+    let mean = corrected_mean(fitted.iter().copied());
+    let largest = fitted.iter().fold(0.0f64, |m, f| m.max(f.abs()));
+    let spread = fitted.iter().fold(0.0f64, |m, f| m.max((f - mean).abs()));
+    if !spread.is_finite() || spread <= 4.0 * f64::EPSILON * largest {
+        return (
+            vec![1.0 / n; fitted.len()],
+            1,
+            "leverage not supplied and the fitted values are constant: hat values 1/n as for an \
+             intercept-only model (p = 1)",
+        );
+    }
+    let squares: Vec<f64> = fitted
+        .iter()
+        .map(|f| ((f - mean) / spread).powi(2))
+        .collect();
+    let sum: f64 = squares.iter().sum();
+    (
+        squares.iter().map(|q| 1.0 / n + q / sum).collect(),
+        2,
+        "leverage not supplied: hat values computed as for a regression on one predictor (1/n + \
+         (f - mean f)^2 / sum (f - mean f)^2, p = 2); exact only for a model with one regressor \
+         and an intercept; pass the model's hat values (R: hatvalues(model)) for any other model",
+    )
 }
 
 /// Generate Residuals vs Fitted plot.
@@ -1652,21 +1789,27 @@ fn generate_residuals_vs_fitted(
     encode_rgb_to_png_base64(&buffer, config.width, config.height)
 }
 
+/// The abscissae of a normal Q-Q plot: R's `qnorm(ppoints(n))`.
+fn qq_theoretical_quantiles(n: usize) -> Result<Vec<f64>, VisualizationError> {
+    let a = if n <= 10 { 0.375 } else { 0.5 };
+    (1..=n)
+        .map(|i| {
+            let p = (i as f64 - a) / (n as f64 + 1.0 - 2.0 * a);
+            crate::traits::normal_quantile(p).map_err(invalid_data)
+        })
+        .collect()
+}
+
 /// Generate Q-Q plot for normality check.
 fn generate_qq_plot(
     standardized_residuals: &[f64],
     config: &ChartConfig,
 ) -> Result<String, VisualizationError> {
-    let n = standardized_residuals.len();
-
     // Sort residuals
     let mut sorted_residuals: Vec<f64> = standardized_residuals.to_vec();
-    sorted_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_residuals.sort_by(f64::total_cmp);
 
-    // Calculate theoretical quantiles (standard normal)
-    let theoretical: Vec<f64> = (1..=n)
-        .map(|i| normal_quantile((i as f64 - 0.5) / n as f64))
-        .collect();
+    let theoretical = qq_theoretical_quantiles(sorted_residuals.len())?;
 
     let x_min = theoretical.first().copied().unwrap_or(-3.0);
     let x_max = theoretical.last().copied().unwrap_or(3.0);
@@ -1822,6 +1965,7 @@ fn generate_residuals_vs_leverage(
     leverage: &[f64],
     standardized_residuals: &[f64],
     cooks_distance: &[f64],
+    n_params: usize,
     config: &ChartConfig,
 ) -> Result<String, VisualizationError> {
     let x_min = 0.0;
@@ -1879,7 +2023,7 @@ fn generate_residuals_vs_leverage(
         // Draw Cook's distance contour lines (approximate)
         if has_influential {
             // D = r^2 * h / (p * (1-h)) => r = sqrt(D * p * (1-h) / h)
-            let p = 2.0;
+            let p = n_params as f64;
             for &d in &[0.5, 1.0] {
                 let contour_points: Vec<(f64, f64)> = (1..100)
                     .map(|i| {
@@ -1961,36 +2105,6 @@ fn calculate_smooth(points: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
     // Remove duplicates in x
     smoothed.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-10);
     smoothed
-}
-
-/// Approximation of the standard normal quantile function (inverse CDF).
-fn normal_quantile(p: f64) -> f64 {
-    // Rational approximation by Abramowitz and Stegun
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-
-    let p_clamped = p.max(1e-10).min(1.0 - 1e-10);
-
-    if p_clamped < 0.5 {
-        -rational_approximation((-2.0 * p_clamped.ln()).sqrt())
-    } else {
-        rational_approximation((-2.0 * (1.0 - p_clamped).ln()).sqrt())
-    }
-}
-
-fn rational_approximation(t: f64) -> f64 {
-    let c0 = 2.515517;
-    let c1 = 0.802853;
-    let c2 = 0.010328;
-    let d1 = 1.432788;
-    let d2 = 0.189269;
-    let d3 = 0.001308;
-
-    t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
 }
 
 // Helper functions
@@ -2885,5 +2999,162 @@ mod tests {
             (h.bins, h.counts.clone(), h.breaks.clone()),
             (5, vec![10, 0, 0, 0, 0], vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
         );
+    }
+
+    #[test]
+    fn test_validate_cooks_distance_rstandard() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("viz_residual_diag");
+        let col = |c: &str| numeric_column(ds.df(), c, NaPolicy::Fail).unwrap().0;
+        let n = case.scalar("n") as usize;
+        // three regressors, R's hat values given: p is their (rounded) sum, 4
+        let m3 = residual_diagnostics(&col("fitted3"), &col("resid3"), Some(&col("hat3")), small())
+            .unwrap();
+        assert_eq!(m3.n_params, case.scalar("p3") as usize);
+        assert!(m3.warnings.is_empty(), "{:?}", m3.warnings);
+        assert_eq!(m3.rows, (0..n).collect::<Vec<_>>());
+        let m3p = residual_diagnostics_with(
+            &col("fitted3"),
+            &col("resid3"),
+            Some(&col("hat3")),
+            Some(4),
+            small(),
+        )
+        .unwrap();
+        assert_eq!(
+            (&m3p.standardized_residuals, &m3p.cooks_distance),
+            (&m3.standardized_residuals, &m3.cooks_distance)
+        );
+        // one regressor, no leverage: the one-predictor hat values are exact here
+        let m1 = residual_diagnostics(&col("fitted1"), &col("resid1"), None, small()).unwrap();
+        assert_eq!(m1.n_params, case.scalar("p1") as usize);
+        assert!(
+            m1.warnings.iter().any(|w| w.contains("one predictor")),
+            "{:?}",
+            m1.warnings
+        );
+        for (a, b) in m1.leverage.iter().zip(col("hat1")) {
+            assert!((a - b).abs() < 1e-14, "{a} vs {b}");
+        }
+        // observation 0 has leverage one: NaN as R, not plotted, warned
+        let ml = residual_diagnostics(
+            &col("fitted_l1"),
+            &col("resid_l1"),
+            Some(&col("hat_l1")),
+            small(),
+        )
+        .unwrap();
+        assert_eq!(ml.n_params, case.scalar("p_l1") as usize);
+        assert!(
+            ml.warnings.iter().any(|w| w.contains("leverage one")),
+            "{:?}",
+            ml.warnings
+        );
+        assert!(format!("{ml}").contains("Warning: observations with leverage one"));
+        Check::new(&case)
+            .scalar("sigma3", m3.sigma, Tol::stat(n))
+            .vector("rstandard3", &m3.standardized_residuals, Tol::stat(n))
+            .vector("cooks3", &m3.cooks_distance, Tol::stat(n))
+            .scalar("sigma1", m1.sigma, Tol::stat(n))
+            .vector("rstandard1", &m1.standardized_residuals, Tol::stat(n))
+            .vector("cooks1", &m1.cooks_distance, Tol::stat(n))
+            .scalar("sigma_l1", ml.sigma, Tol::stat(n))
+            .vector("rstandard_l1", &ml.standardized_residuals, Tol::stat(n))
+            .vector("cooks_l1", &ml.cooks_distance, Tol::stat(n))
+            .finish();
+        // R flags nothing above 0.5 for the three-regressor model, and only observation 16
+        // for mpg ~ wt
+        assert_eq!(m3.cooks_distance.iter().filter(|d| **d > 0.5).count(), 0);
+        let flagged: Vec<usize> = m1
+            .cooks_distance
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d > 0.5)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(flagged, vec![16]);
+    }
+
+    #[test]
+    fn test_validate_qq_theoretical_quantiles() {
+        use p2a_validation::{Check, Tol};
+        let (case, _) = crate::test_support::load_case("viz_residual_diag");
+        let mut check = Check::new(&case);
+        for n in [1usize, 8, 11, 32] {
+            // statrs' normal quantile agrees with R's qnorm to a few ulp
+            check.vector(
+                &format!("qq_ppoints_{n}"),
+                &qq_theoretical_quantiles(n).unwrap(),
+                Tol::new(1e-11, 1e-15),
+            );
+        }
+        check.finish();
+    }
+
+    #[test]
+    fn test_residual_diagnostics_rejects_bad_leverage() {
+        use crate::data::columns::{NaPolicy, numeric_column};
+        let df = crate::data::DataLoader::load_csv(p2a_validation::repo_path(
+            "validation/datasets/generated/viz_residual_diag.csv",
+        ))
+        .unwrap();
+        let col = |c: &str| numeric_column(&df, c, NaPolicy::Fail).unwrap().0;
+        let (f, e, h) = (col("fitted3"), col("resid3"), col("hat3"));
+        let refused = |fitted: &[f64],
+                       resid: &[f64],
+                       hat: Option<&[f64]>,
+                       n_params: Option<usize>,
+                       needles: &[&str]| {
+            match residual_diagnostics_with(fitted, resid, hat, n_params, small()) {
+                Err(VisualizationError::InvalidData(m)) => {
+                    for needle in needles {
+                        assert!(m.contains(needle), "{m}");
+                    }
+                }
+                Err(other) => panic!("{other:?}"),
+                Ok(_) => panic!("accepted: {needles:?}"),
+            }
+        };
+        let with = |i: usize, v: f64| {
+            let mut h = h.clone();
+            h[i] = v;
+            h
+        };
+        refused(
+            &f,
+            &e,
+            Some(&with(3, f64::NAN)),
+            None,
+            &["leverage at row 3 is NaN"],
+        );
+        refused(
+            &f,
+            &e,
+            Some(&with(0, 1.5)),
+            None,
+            &["row 0", "between 0 and 1"],
+        );
+        refused(&f, &e, Some(&with(5, -0.2)), None, &["row 5"]);
+        let scaled: Vec<f64> = h.iter().map(|v| v * 1.1).collect();
+        refused(&f, &e, Some(&scaled), None, &["sum to 4.4000"]);
+        refused(&f, &e, Some(&h), Some(0), &["n_params is 0"]);
+        refused(
+            &f,
+            &e,
+            Some(&h),
+            Some(32),
+            &["below the number of observations (32)"],
+        );
+        refused(&f, &e, None, Some(4), &["needs the model's hat values"]);
+        refused(&f, &vec![0.0; 32], Some(&h), None, &["perfect fit"]);
+        // A row dropped for its fitted value is not checked for its leverage.
+        let mut f4 = f.clone();
+        f4[4] = f64::NAN;
+        let r =
+            residual_diagnostics_with(&f4, &e, Some(&with(4, f64::NAN)), None, small()).unwrap();
+        assert!(!r.rows.contains(&4));
+        assert_eq!(r.rows.len(), 31);
+        assert_eq!(r.n_params, 4);
     }
 }

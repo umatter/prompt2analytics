@@ -93,3 +93,30 @@ case("viz_histogram_bins", "visualization", "Histogram bin count (nclass.Sturges
        packages = character(0))
 })
 
+case("viz_residual_diag", "visualization", "Standardized residuals and Cook's distance (stats::rstandard, cooks.distance), mtcars", function(ctx) {
+  mt <- datasets::mtcars
+  m3 <- lm(mpg ~ wt + hp + qsec, data = mt)
+  m1 <- lm(mpg ~ wt, data = mt)
+  mt$d1 <- as.numeric(seq_len(nrow(mt)) == 1)
+  ml <- lm(mpg ~ wt + d1, data = mt)             # observation 1 has leverage one
+  d <- ctx$gen_dataset("viz_residual_diag", data.frame(
+    fitted3 = unname(fitted(m3)), resid3 = unname(resid(m3)), hat3 = unname(hatvalues(m3)),
+    fitted1 = unname(fitted(m1)), resid1 = unname(resid(m1)), hat1 = unname(hatvalues(m1)),
+    fitted_l1 = unname(fitted(ml)), resid_l1 = unname(resid(ml)), hat_l1 = unname(hatvalues(ml))))
+  # the read-back columns are the model's own doubles
+  stopifnot(identical(d$resid3, unname(resid(m3))), identical(d$hat3, unname(hatvalues(m3))),
+            identical(d$hat_l1[1], 1), is.nan(rstandard(ml)[1]))
+  list(values = list(
+    n = nrow(d), p3 = m3$rank, p1 = m1$rank, p_l1 = ml$rank,
+    sigma3 = summary(m3)$sigma, sigma1 = summary(m1)$sigma, sigma_l1 = summary(ml)$sigma,
+    rstandard3 = vec(rstandard(m3)), cooks3 = vec(cooks.distance(m3)),
+    rstandard1 = vec(rstandard(m1)), cooks1 = vec(cooks.distance(m1)),
+    # NaN at observation 1 (JSON null); named() so that run.R --check compares the null position
+    rstandard_l1 = named(rstandard(ml)), cooks_l1 = named(cooks.distance(ml)),
+    qq_ppoints_1 = vec(qnorm(ppoints(1))), qq_ppoints_8 = vec(qnorm(ppoints(8))),
+    qq_ppoints_11 = vec(qnorm(ppoints(11))), qq_ppoints_32 = vec(qnorm(ppoints(32)))),
+    reference = "stats::rstandard.lm; stats::cooks.distance.lm; stats::hatvalues; stats::qnorm(stats::ppoints(n))",
+    call = "lm(mpg ~ wt + hp + qsec, mtcars); lm(mpg ~ wt, mtcars); lm(mpg ~ wt + d1, mtcars) with d1 = 1 for row 1",
+    packages = character(0))
+})
+

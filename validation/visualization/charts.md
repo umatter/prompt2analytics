@@ -38,3 +38,16 @@ the magnitude) get k bins of width 1 starting at the value. Case `viz_histogram_
 11, 11 for n = 1, 5, 8, 16, 100, 1000, 1024; counts `4 7 9 13 31 17 12 7` (n = 100), `3 6 10 14 9 4 4`
 (n = 50 on a 1e-11 scale) and `3 3 2 3 2` (a decimal grid with values on the breaks). Test `test_validate_histogram_sturges_and_counts`, exact.
 
+## Residual diagnostics (`residual_diagnostics`, `residual_diagnostics_with`)
+
+R's `plot.lm` quantities: `rstandard` r_i = e_i / (s sqrt(1 - h_i)) with s^2 = sum e^2 / (n - p) and
+`cooks.distance` D_i = r_i^2 h_i / (p (1 - h_i)); leverage one (h >= 1 - 10 eps) gives NaN and is not
+plotted. p is `n_params`, or the rounded sum of the hat values (= the model rank). Without hat values the
+one-predictor formula 1/n + (f - mean f)^2 / sum (f - mean f)^2 is used (exact for a model with one
+regressor and an intercept) and a warning says so. Q-Q abscissae: `qnorm(ppoints(n))`. Case
+`viz_residual_diag` (mtcars): lm(mpg ~ wt + hp + qsec) with R's hat values: p = 4, sigma =
+2.5777848825208176, max Cook's distance 0.3328494305479045 (observation 16, not > 0.5); lm(mpg ~ wt)
+without leverage: 0.5319056255997687 at observation 16. Tests `test_validate_cooks_distance_rstandard`
+(1e-5 relative; measured 7.4e-15), `test_validate_qq_theoretical_quantiles` (1e-11),
+`test_residual_diagnostics_rejects_bad_leverage`.
+

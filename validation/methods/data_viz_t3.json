@@ -88,6 +88,29 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "viz_residual_diagnostics",
+      "name": "Residual diagnostics: standardized residuals, Cook's distance, Q-Q quantiles",
+      "category": "visualization",
+      "reference": "stats::rstandard.lm; stats::cooks.distance.lm; stats::hatvalues; stats::qnorm(stats::ppoints(n))",
+      "doc": "validation/visualization/charts.md",
+      "cases": [
+        "viz_residual_diag"
+      ],
+      "tests": [
+        "p2a-core::visualization::charts::tests::test_validate_cooks_distance_rstandard",
+        "p2a-core::visualization::charts::tests::test_validate_qq_theoretical_quantiles"
+      ],
+      "quantities": [
+        "rstandard, cooks.distance and sigma for lm(mpg ~ wt + hp + qsec) with hat values (p = 4)",
+        "lm(mpg ~ wt) without leverage (one-predictor hat values, p = 2)",
+        "leverage one -> NaN",
+        "qnorm(ppoints(n)) for n = 1, 8, 11, 32"
+      ],
+      "tolerance": "validation/README.md statistics row, n = 32: 1e-5 relative (measured 7.4e-15); quantiles 1e-11 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
