@@ -20,7 +20,9 @@ For every fixture the case records the shape, the column names in file order, ev
 (R `NA` and every tagged missing value as `null`) and every text column (the strings haven returns,
 with their UTF-8 byte lengths, so `run.R --check` notices a changed decoding). The Rust helper
 `data::sas::fixture_check::assert_matches_haven` compares a reader's `DataFrame` with all of it.
-Stata byte/int/long columns load as Int64 and compare after a cast to f64. A text cell haven reads
+Stata byte/int/long columns load as Int64 and compare after a cast to f64. A Stata `str#` value ends at
+its first NUL and loses its trailing blanks, as haven reads it (ReadStat strips them; Stata itself
+keeps them; `dta118_blanks__sw` pins it on a patched copy). A text cell haven reads
 as `""` is `""` in both readers; `str_replace_value(column, "", null)` turns such cells into missing
 values.
 
@@ -139,7 +141,9 @@ byte, a set bit a command of marker `m` and next byte `n`: `m < 0x10` inserts `m
 from that offset back. A decompressed row must be exactly the row length.
 
 Compressed rows can decode to far more than the file's size, so the bytes the decoded cells hold are
-checked against the allocation ceiling after each page.
+checked against the allocation ceiling after each compressed row, and the budget before each one.
+The same check follows every other row, and the metadata subheaders are held to the ceiling as they
+are read.
 
 The RLE and RDC fixtures were compressed by the fixture script's own encoders (haven cannot write
 compressed files) and certified by haven reading them identically to their uncompressed sources;
@@ -175,6 +179,7 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::stata::tests::test_validate_read_haven_dta_119_big_endian` | `dta119_msf` = haven (DATA-51) |
 | `p2a-core::data::stata::tests::test_stata_119_k_is_four_bytes` | a release-119 `<K>` of 65542 is read as such (DATA-51) |
 | `p2a-core::data::stata::tests::test_validate_read_haven_dta_118_storage_types` | `dta118_types` = haven: byte/int/long/float/double extremes and missing codes |
+| `p2a-core::data::stata::tests::test_validate_read_dta_trailing_blanks` | `dta118_haven` with trailing blanks in `sw` = haven: stripped, leading blanks kept |
 | `p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture` | `DataLoader::load` of `dta118_haven` = haven |
 | `p2a-core::data::stata::tests::test_validate_stata_k0_n_positive_is_error` | `<K>` = 0 refused for N = 3, 0, 2^40; ReadStat refuses too (DATA-73) |
 | `p2a-core::data::stata::tests::test_stata_column_buffers_respect_the_allocation_ceiling` | column buffers under a 64-byte ceiling are refused (G3) |

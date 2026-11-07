@@ -14,7 +14,8 @@
 //!
 //! Text is UTF-8 in releases 118 and 119. Release 117 text is read as UTF-8 when it is valid UTF-8
 //! (haven and ReadStat write UTF-8) and as Windows-1252 otherwise (Stata 13 writes the platform
-//! encoding). Values are pinned to `haven::read_dta` on the fixtures in
+//! encoding). A `str#` value ends at its first NUL and loses its trailing blanks, as haven reads
+//! it (Stata itself keeps them). Values are pinned to `haven::read_dta` on the fixtures in
 //! `validation/datasets/files/` (`validation/data/readers.md`). Formats before 117 (Stata 12 and
 //! earlier) are refused with [`StataError::UnsupportedVersion`]; strL contents and value labels are
 //! not decoded (see the strL warning in [`StataReader::read_to_dataframe`]).
@@ -311,12 +312,12 @@ impl<R: Read + Seek> StataReader<R> {
             )));
         }
 
-        // Column buffers, one per variable and typed by it. The guard above bounds n_obs by
-        // the file size; the cell count is also checked against the per-allocation ceiling.
-        let capacity = usize::try_from(self.n_obs)
-            .unwrap_or(usize::MAX)
-            .min(1 << 20);
-        let cells = crate::resource::checked_len(&[self.n_vars, capacity], "Stata columns")
+        // Column buffers, one per variable and typed by it, grown past their initial capacity as
+        // rows are read. The guard above bounds n_obs by the file size; every cell the file
+        // declares is also checked against the per-allocation ceiling.
+        let n_obs = usize::try_from(self.n_obs).unwrap_or(usize::MAX);
+        let capacity = n_obs.min(1 << 20);
+        let cells = crate::resource::checked_len(&[self.n_vars, n_obs], "Stata columns")
             .map_err(resource_err)?;
         crate::resource::check_alloc::<Option<String>>(cells, "Stata columns")
             .map_err(resource_err)?;
@@ -352,18 +353,17 @@ impl<R: Read + Seek> StataReader<R> {
             b"118" => Release::R118,
             b"119" => Release::R119,
             other => {
-                return Err(
-                    match std::str::from_utf8(other)
-                        .ok()
-                        .and_then(|s| s.parse::<u8>().ok())
-                    {
-                        Some(v) => StataError::UnsupportedVersion(v),
-                        None => StataError::InvalidFormat(format!(
-                            "release {:?} is not a number",
-                            decode_windows_1252_lenient(other)
+                let shown = decode_windows_1252_lenient(other);
+                return Err(if !other.iter().all(u8::is_ascii_digit) {
+                    StataError::InvalidFormat(format!("release {shown:?} is not a number"))
+                } else {
+                    match shown.parse::<u8>() {
+                        Ok(v) => StataError::UnsupportedVersion(v),
+                        Err(_) => StataError::InvalidFormat(format!(
+                            "release {shown} is not supported (117, 118 and 119 are)"
                         )),
-                    },
-                );
+                    }
+                });
             }
         };
         Self::expect(reader, b"</release><byteorder>")?;
@@ -503,7 +503,8 @@ impl<R: Read + Seek> StataReader<R> {
         })
     }
 
-    /// A NUL-terminated fixed-width string, decoded by the release's text rule.
+    /// A NUL-terminated fixed-width string without its trailing blanks, as ReadStat reads it,
+    /// decoded by the release's text rule.
     fn read_fixed_string(
         reader: &mut BufReader<R>,
         len: usize,
@@ -515,6 +516,10 @@ impl<R: Read + Seek> StataReader<R> {
 
         // Find null terminator
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let end = buf[..end]
+            .iter()
+            .rposition(|&b| b != b' ')
+            .map_or(0, |i| i + 1);
         release.decode(&buf[..end], what)
     }
     /// Read one cell of `dtype` and push it to the variable's buffer.
@@ -800,6 +805,47 @@ mod tests {
     }
 
     #[test]
+    fn test_stata_cell_check_covers_every_declared_row() {
+        // The buffers start at 2^20 rows at most, and the rest grows in the read. 1.5 x 2^20 rows
+        // of 6 cells need 226 MiB: above this ceiling, while the first 2^20 rows' 151 MiB are not.
+        let mut b = fixture_bytes("dta118_haven.dta");
+        let n = 3u64 << 19;
+        let end = b.len() + n as usize * 57;
+        b.resize(end, 0);
+        put(&mut b, N118, &n.to_le_bytes());
+        put(&mut b, MAP118 + 8 * 10, &(end as u64).to_le_bytes()); // <strls>, after the rows
+        let e = crate::resource::with_alloc_ceiling(Some(160 << 20), || load(b).unwrap_err());
+        match e {
+            StataError::ParseError(m) => assert!(m.contains("Stata columns"), "{m}"),
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_read_dta_trailing_blanks() {
+        // ReadStat strips a str# value's trailing blanks and keeps its leading ones. `sw` is a
+        // str26, 23 bytes into the 57-byte row; the case patches the same cells of the same file.
+        let case = Case::load("data_readers_values");
+        let mut b = fixture_bytes("dta118_haven.dta");
+        let data = u64::from_le_bytes(b[MAP118 + 72..MAP118 + 80].try_into().unwrap()) as usize + 6;
+        for (i, cell) in [&b"x  "[..], b"  y ", b"   "].iter().enumerate() {
+            let at = data + 57 * i + 23;
+            b[at..at + 26].fill(0);
+            put(&mut b, at, cell);
+        }
+        let df = load(b).unwrap();
+        let got: Vec<&str> = df
+            .column("sw")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(got, case.names("dta118_blanks__sw"));
+        assert_eq!(got[..3], ["x", "  y", ""]);
+    }
+
+    #[test]
     fn test_stata_map_and_header_guards() {
         // DATA-22: each <map> offset is checked against the file and against the tag found there;
         // the T0 observation guard is bounded by the <data> section.
@@ -836,5 +882,15 @@ mod tests {
         let mut b = fixture_bytes("dta118_haven.dta");
         b[28..31].copy_from_slice(b"120");
         assert!(matches!(load(b), Err(StataError::UnsupportedVersion(120))));
+        // Three digits that do not fit the error's u8, and text that is not a release at all.
+        let mut b = fixture_bytes("dta118_haven.dta");
+        b[28..31].copy_from_slice(b"300");
+        assert_invalid(
+            load(b),
+            "release 300 is not supported (117, 118 and 119 are)",
+        );
+        let mut b = fixture_bytes("dta118_haven.dta");
+        b[28..31].copy_from_slice(b"+12");
+        assert_invalid(load(b), "release \"+12\" is not a number");
     }
 }

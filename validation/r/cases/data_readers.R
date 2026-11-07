@@ -96,6 +96,20 @@ case("data_readers_values", "data/readers",
     g <- read_sas(tmp)$grp; stopifnot(all(validUTF8(g)))
     vals$sas64_wlatin1_code29__grp <<- named(setNames(as.numeric(nchar(g, "bytes")), enc2utf8(g)))
   })
+  # dta118_haven with trailing blanks in `sw` (str26, 23 bytes into the 57-byte row; the <data> offset
+  # is <map> slot 9, at byte 163 + 72): ReadStat strips them and keeps the leading ones.
+  local({
+    r <- rd("dta118_haven.dta")
+    at <- sum(as.integer(r[163 + 72 + 1:8]) * 256^(0:7)) + nchar("<data>") + 23
+    cells <- c("x  ", "  y ", "   ")
+    for (i in seq_along(cells)) {
+      b <- charToRaw(cells[i])
+      r[at + 57 * (i - 1) + 1:26] <- c(b, as.raw(rep(0L, 26 - length(b))))
+    }
+    tmp <- tempfile(fileext = ".dta"); on.exit(unlink(tmp)); writeBin(r, tmp)
+    g <- read_dta(tmp)$sw; stopifnot(identical(g[1:3], c("x", "  y", "")))
+    vals$dta118_blanks__sw <<- named(setNames(as.numeric(nchar(g, "bytes")), enc2utf8(g)))
+  })
   for (k in names(vals)[startsWith(names(vals), "guard__")]) vals[[k]] <- as.numeric(vals[[k]])
   stopifnot(vals$guard__sas_page_type_0x0280 == 150, vals$guard__sas_page_type_0x4000 == 60,
             vals$guard__sas_page_type_0x0300 == -1, vals$guard__sas_row_count_59 == 59,

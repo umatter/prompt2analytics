@@ -18,6 +18,7 @@
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_119",
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_119_big_endian",
         "p2a-core::data::stata::tests::test_validate_read_haven_dta_118_storage_types",
+        "p2a-core::data::stata::tests::test_validate_read_dta_trailing_blanks",
         "p2a-core::data::stata::tests::test_validate_dataloader_loads_dta_fixture",
         "p2a-core::data::stata::tests::test_validate_stata_k0_n_positive_is_error"
       ],
@@ -25,7 +26,7 @@
         "shape",
         "column names and order",
         "numeric values of byte/int/long/float/double (missing codes null)",
-        "text values (UTF-8; release 117 Windows-1252)",
+        "text values (UTF-8; release 117 Windows-1252; trailing blanks stripped)",
         "refusals: <K> = 0, map offsets, observation bound, releases"
       ],
       "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
