@@ -558,16 +558,6 @@ mod tests {
     }
 
     #[test]
-    fn test_describe() {
-        let data = make_sales_data();
-
-        let result = describe(&data, Some(&["revenue", "orders"])).unwrap();
-
-        // describe returns multiple rows (count, mean, std, min, 25%, 50%, 75%, max)
-        assert!(result.nrows() >= 1);
-    }
-
-    #[test]
     fn test_describe_all_numeric() {
         let data = make_sales_data();
 
@@ -712,4 +702,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_validate_describe() {
+        use p2a_validation::{Check, Tol};
+        // case data_munging_describe: describe returns ONE row with <col>_count/_mean/_std/_min/_max;
+        // R: sum(!is.na(x)), mean/sd/min/max(na.rm = TRUE) on an Int64 and a Float64 column with NA
+        let (case, ds) = crate::test_support::load_case("data_munging_describe");
+        let d = describe(&ds, Some(&["k", "f"])).unwrap();
+        assert_eq!(d.nrows(), 1);
+        let names = ["count", "mean", "std", "min", "max"];
+        let stats = |c: &str| -> Vec<f64> {
+            names
+                .iter()
+                .map(|s| {
+                    d.df()
+                        .column(&format!("{c}_{s}"))
+                        .unwrap()
+                        .cast(&DataType::Float64)
+                        .unwrap()
+                        .f64()
+                        .unwrap()
+                        .get(0)
+                        .unwrap()
+                })
+                .collect()
+        };
+        // 8 non-missing values each; mean and sd at the README tolerances, the rest exact
+        let m = 8;
+        let (k, f) = (stats("k"), stats("f"));
+        Check::new(&case)
+            .named_subset(
+                "describe_k",
+                &["count", "min", "max"],
+                &names,
+                &k,
+                Tol::exact(),
+            )
+            .named_subset("describe_k", &["mean"], &names, &k, Tol::coef(m))
+            .named_subset("describe_k", &["std"], &names, &k, Tol::stat(m))
+            .named_subset(
+                "describe_f",
+                &["count", "min", "max"],
+                &names,
+                &f,
+                Tol::exact(),
+            )
+            .named_subset("describe_f", &["mean"], &names, &f, Tol::coef(m))
+            .named_subset("describe_f", &["std"], &names, &f, Tol::stat(m))
+            .finish();
+    }
 }

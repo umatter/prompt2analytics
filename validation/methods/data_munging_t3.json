@@ -1,6 +1,29 @@
 {
   "schema": 1,
   "methods": [
+    {"id": "data_lag", "name": "Lag, lead, diff and pct_change as dplyr::lag / lead (positional, within groups)",
+     "category": "data", "reference": "dplyr::lag, dplyr::lead (group_by); x - lag(x, k); (y - lag(y)) / lag(y)",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_lag"],
+     "tests": ["p2a-core::data::munging::features::tests::test_validate_lag_dplyr"],
+     "quantities": ["lag 1", "lag 2 within groups", "lead 1 within groups", "diff 1 and 2", "pct_change 1", "integer type kept", "NA as missing"],
+     "tolerance": "exact for integers; 1e-14 relative for double differences and ratios (the same IEEE operations as R)",
+     "deviations": [], "supersedes_legacy": []},
+    {"id": "data_cut", "name": "Equal-width and quantile bins as base::cut on integer data with NA",
+     "category": "data", "reference": "base::cut(x, breaks = n); cut(x, c(-Inf, quantile(x, (1:(n-1))/n, type = 7, na.rm = TRUE), Inf))",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_cut"],
+     "tests": ["p2a-core::data::munging::features::tests::test_validate_cut"],
+     "quantities": ["equal-width breaks", "equal-width bin codes", "quantile edges", "quantile bin codes", "NA count"],
+     "tolerance": "exact", "deviations": [], "supersedes_legacy": []},
+    {"id": "data_model_matrix", "name": "One-hot dummies as model.matrix(~ 0 + factor(g))",
+     "category": "data", "reference": "stats::model.matrix(~ 0 + factor(g))",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_model_matrix"],
+     "tests": ["p2a-core::data::munging::features::tests::test_validate_model_matrix"],
+     "quantities": ["dummy per level (integer factor)", "level counts"],
+     "tolerance": "exact",
+     "deviations": [
+       {"finding": "DATA-40", "quantity": "drop_first baseline", "note": "p2a drops an arbitrary level, R's treatment contrast drops the first sorted level; drop_first is not pinned (Tier 4)"},
+       {"finding": "DATA-41", "quantity": "text level names; NA dummy", "note": "text levels are named with quotes (region_\"west\") and NA gets a dummy; only an integer factor is pinned (Tier 4)"}],
+     "supersedes_legacy": []},
     {"id": "data_melt", "name": "Melt as tidyr::pivot_longer (types and missing values)",
      "category": "data", "reference": "tidyr::pivot_longer(cols, names_to, values_to)",
      "doc": "validation/data/munging.md", "cases": ["data_munging_pivot_longer"],
@@ -25,6 +48,12 @@
      "tests": ["p2a-core::data::munging::aggregate::tests::test_validate_value_counts"],
      "quantities": ["values (NA a group)", "counts", "proportions"],
      "tolerance": "exact", "deviations": [], "supersedes_legacy": []},
+    {"id": "data_describe", "name": "Column summaries (count, mean, sd, min, max) with na.rm",
+     "category": "data", "reference": "sum(!is.na(x)); mean, sd, min, max (na.rm = TRUE)",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_describe"],
+     "tests": ["p2a-core::data::munging::aggregate::tests::test_validate_describe"],
+     "quantities": ["count", "mean", "sd", "min", "max (integer and double columns)"],
+     "tolerance": "count, min, max exact; mean Tol::coef(n), sd Tol::stat(n) (validation/README.md); measured agreement about 1e-15", "deviations": [], "supersedes_legacy": []},
     {"id": "data_join_suffix", "name": "Join column names under suffix collisions as dplyr (add_suffixes)",
      "category": "data", "reference": "dplyr::left_join / inner_join / right_join / full_join(keep = TRUE) / cross_join, suffix = c('', '_right')",
      "doc": "validation/data/munging.md", "cases": ["data_munging_join_suffix"],
@@ -33,6 +62,12 @@
      "tolerance": "exact",
      "deviations": [
        {"finding": "DATA-43", "quantity": "full-join keys", "note": "p2a's full join keeps both key columns (k, k_right); pinned against full_join(keep = TRUE); dplyr's default coalesces them (Tier 4)"}],
-     "supersedes_legacy": []}
+     "supersedes_legacy": []},
+    {"id": "data_filter", "name": "Row filter with missing values as dplyr::filter",
+     "category": "data", "reference": "dplyr::filter",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_filter"],
+     "tests": ["p2a-core::data::munging::transform::tests::test_validate_filter_integer_with_nulls"],
+     "quantities": ["kept row ids (integer and double conditions with NA)"],
+     "tolerance": "exact", "deviations": [], "supersedes_legacy": []}
   ]
 }

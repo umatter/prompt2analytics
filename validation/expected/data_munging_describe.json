@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "data_munging_describe",
+  "area": "data/munging",
+  "method": "Column summaries with na.rm = TRUE: non-missing count, mean, sd, min, max (integer and double columns)",
+  "reference": "sum(!is.na(x)); mean, sd, min, max with na.rm = TRUE",
+  "call": "sapply(d[c('k', 'f')], function(v) c(sum(!is.na(v)), mean(v, na.rm = TRUE), sd(v, na.rm = TRUE), min(v, na.rm = TRUE), max(v, na.rm = TRUE)))",
+  "dataset": "validation/datasets/generated/munging_fill.csv",
+  "datasets": ["validation/datasets/generated/munging_fill.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "describe_k": {
+      "names": ["count", "mean", "std", "min", "max"],
+      "values": [8, 3.125, 1.807721533549109, 1, 6]
+    },
+    "describe_f": {
+      "names": ["count", "mean", "std", "min", "max"],
+      "values": [8, 2.296875, 1.253455046490072, 0.5, 4.125]
+    }
+  }
+}

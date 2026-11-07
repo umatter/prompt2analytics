@@ -3152,6 +3152,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_regex_helpers_match_stringr() {
+        // DATA-42: the regex helpers had no value tests.
+        // x <- c("ann@ex.org, bob@ex.com", NA, "no email", "tim@a.b.c")
+        let ds = Dataset::new(
+            df!("x" => [Some("ann@ex.org, bob@ex.com"), None, Some("no email"), Some("tim@a.b.c")])
+                .unwrap(),
+        );
+        // stringr::str_match(x, "([a-z]+)@([a-z.]+)")[, 3]: "ex.org" NA NA "a.b.c"
+        let m = regex_extract(&ds, "x", "([a-z]+)@([a-z.]+)", "dom", 2).unwrap();
+        assert_eq!(
+            split_col(&m, "dom"),
+            [Some("ex.org".into()), None, None, Some("a.b.c".into())]
+        );
+        // str_extract_all(x, "[a-z]+@") pasted with ";": "ann@;bob@" NA "" "tim@"
+        let a = regex_extract_all(&ds, "x", "[a-z]+@", "users", Some(";")).unwrap();
+        assert_eq!(
+            split_col(&a, "users"),
+            [
+                Some("ann@;bob@".into()),
+                None,
+                Some(String::new()),
+                Some("tim@".into())
+            ]
+        );
+        // str_count(x, "@"): 2 NA 0 1
+        let c = regex_count(&ds, "x", "@", "n").unwrap();
+        assert_eq!(
+            c.df()
+                .column("n")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [Some(2), None, Some(0), Some(1)]
+        );
+        // str_replace_all(x, "([a-z]+)@", "<\\1>") (p2a writes the group as $1)
+        let r = regex_replace(&ds, "x", "([a-z]+)@", "<$1>").unwrap();
+        assert_eq!(
+            split_col(&r, "x"),
+            [
+                Some("<ann>ex.org, <bob>ex.com".into()),
+                None,
+                Some("no email".into()),
+                Some("<tim>a.b.c".into())
+            ]
+        );
+    }
 
     #[test]
     fn test_fill_mode() {

@@ -12,6 +12,38 @@ about 1e-15.
 `cut` with custom edges and options and `fill_na` with mean and median are documented in
 [data_layer.md](data_layer.md).
 
+## Lag, lead, diff and pct_change
+
+Positional, as `dplyr::lag` and `dplyr::lead` without `order_by`, within `group_by` groups in data
+order; a time-aware lag (`plm::lag`, gaps) is DATA-39 (Tier 4). An integer column stays integer in `lag`
+and `diff`; NA is a missing value, not NaN.
+
+- R: `d %>% group_by(g) %>% mutate(lag2 = lag(x, 2), lead1 = lead(y, 1))`, `x - lag(x, k)`,
+  `(y - lag(y)) / lag(y)`. Case `data_munging_lag`, on `munging_long.csv` (Int64 with NA, interleaved groups).
+- Decisive values: `lag2_x_by_g = [NA, NA, NA, NA, 3, 5, NA, NA, 8, NA, 4, 2]`,
+  `diff2_x = [NA, NA, NA, 5, NA, -1, 2, NA, 2, NA, 3, 9]`.
+- Test: `test_validate_lag_dplyr`.
+
+## Binning (cut) on integer data
+
+`EqualWidth(n)` is `cut(x, n)` (R's range widened by 0.1% at both ends); `Quantile(n)` is `cut` on type-7
+edges with open outer bins.
+
+- R: `cut(x, 4)`; `cut(x, c(-Inf, quantile(x, c(1, 2) / 3, type = 7, na.rm = TRUE), Inf))`. Case
+  `data_munging_cut`, on `munging_cut.csv`.
+- Decisive values: `ew_breaks = [2.973, 9.75, 16.5, 23.25, 30.027]`, `q_edges = [9, 18]`, `n_na = 2`.
+- Test: `test_validate_cut`.
+
+## One-hot (model.matrix)
+
+An integer factor and the full dummy set, as `model.matrix(~ 0 + factor(g))`. Not pinned: the baseline
+of `drop_first`, an arbitrary level where R's treatment contrast drops the first sorted level (DATA-40,
+Tier 4), and the names of text levels, which are quoted, and the dummy for NA (DATA-41, Tier 4). Both
+are registry deviations.
+
+- Case `data_munging_model_matrix`, on `munging_factor.csv`. Decisive value: `level_counts = [3, 4, 3]`.
+- Test: `test_validate_model_matrix`.
+
 ## Melt (pivot_longer)
 
 As `tidyr::pivot_longer`: row-major long format, missing values stay missing, and the value column has
@@ -74,6 +106,13 @@ Case `data_munging_value_counts`, on `munging_counts.csv`. Decisive values: `vc_
 `vc_proportion = [0.4, 0.3, 0.2, 0.1]`. Tests: `test_validate_value_counts`,
 `test_value_counts_normalize`.
 
+## Describe
+
+One row of `<col>_count`, `_mean`, `_std`, `_min`, `_max` over the non-missing values.
+
+Case `data_munging_describe`, on `munging_fill.csv`. Decisive values: `k`: count 8, mean 3.125, sd
+1.807721533549109; `f`: count 8, mean 2.296875, sd 1.253455046490072. Test: `test_validate_describe`.
+
 ## Join column names
 
 The right-hand columns are named by `dplyr:::add_suffixes`: a name that is taken gets the suffix, again
@@ -89,6 +128,13 @@ Case `data_munging_join_suffix`, on `munging_join_frames.csv`. Decisive names: `
 value, value_right, value_right_right`; `cross_join(AB, C)` gives `k, value, value_right, k_right,
 value_right_right`. Tests: `test_validate_join_suffix_dplyr`, `test_join_suffix_collision`.
 
+## Filter
+
+A row whose condition is NA is dropped, as `dplyr::filter`.
+
+Case `data_munging_filter`, on `munging_long.csv`. Decisive values: `ids_x_ge_5 = [1, 4, 6, 9, 11, 12]`,
+`ids_y_lt_9 = [2, 5, 6, 7, 10, 11]`. Test: `test_validate_filter_integer_with_nulls`.
+
 ## Verification of cleaning steps
 
 A type change is a column-level change: `VerificationReport.dtype_changes`, a warning and a `Type
@@ -100,3 +146,8 @@ skipped with a warning. Tests: `test_verify_cleaning_int_to_float_fill`,
 The previews run the operation: `preview_fill_na` shows each sampled cell's real new value and reports an
 unknown strategy as a warning; `preview_replace` counts typed matches in every column type. Tests:
 `test_preview_fill_na_shows_real_fill_values`, `test_preview_replace_counts_typed_matches`.
+
+## Not covered here (Tier 4)
+
+DATA-11 (integer normalize and pct_change), DATA-36 (row and column order of deduplicate, group_by,
+stack), DATA-71 (rank ties).

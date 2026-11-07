@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "data_munging_cut",
+  "area": "data/munging",
+  "method": "base::cut(x, breaks = n) and cut() on type-7 quantile edges with open outer bins, integer data with NA",
+  "reference": "base::cut(x, breaks = 4); base::cut(x, c(-Inf, quantile(x, 1:2 / 3, type = 7, na.rm = TRUE), Inf))",
+  "call": "cut(x, 4); cut(x, c(-Inf, quantile(x, c(1, 2) / 3, type = 7, na.rm = TRUE), Inf))",
+  "dataset": "validation/datasets/generated/munging_cut.csv",
+  "datasets": ["validation/datasets/generated/munging_cut.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {},
+  "values": {
+    "ew_breaks": [2.9729999999999999, 9.75, 16.5, 23.25, 30.027000000000001],
+    "ew_codes": [1, 0, -1, 3, 0, 2, 0, 3, -1, 1, 2, 0],
+    "q_edges": [9, 18],
+    "q_codes": [1, 0, -1, 2, 0, 1, 0, 2, -1, 1, 2, 0],
+    "n_na": 2
+  }
+}

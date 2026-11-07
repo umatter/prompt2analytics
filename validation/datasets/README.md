@@ -84,6 +84,13 @@ and run `Rscript validation/r/run.R --write <case>`.
 | `generated/mtcars.csv` | 32 × 12 (model, mpg, cyl, disp, hp, drat, wt, qsec, vs, am, gear, carb) | `ols_mtcars` | `r/cases/regression.R` | `datasets::mtcars`, row names as `model` |
 | `generated/mte_boot_indices.csv` | 400 × 25 (b01-b25; 1-based row indices into rows 1-400 of `mte_sim.csv`) | `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261207 |
 | `generated/mte_sim.csv` | 2000 × 4 (y, d, z1, z2) | `mte_local_iv`, `mte_bootstrap` | `r/cases/econ_mte.R` | seed 20261205 |
+| `generated/munging_counts.csv` | 10 × 2 (id, g) | `data_munging_value_counts` | `r/cases/data_munging_t3.R` | integer values with NA, distinct counts |
+| `generated/munging_cut.csv` | 12 × 2 (id, x) | `data_munging_cut` | `r/cases/data_munging_t3.R` | integer values with NA and ties |
+| `generated/munging_factor.csv` | 10 × 3 (id, g, w) | `data_munging_model_matrix` | `r/cases/data_munging_t3.R` | integer-coded factor; seed 5012 |
+| `generated/munging_fill.csv` | 10 × 4 (id, k, f, s) | `data_munging_fill_mode`, `data_munging_na_if`, `data_munging_describe` | `r/cases/data_munging_t3.R` | integer, double and text columns with NA and tied modes |
+| `generated/munging_join_frames.csv` | 6 × 4 (frame, k, value, value_right) | `data_munging_join_suffix` | `r/cases/data_munging_t3.R` | three frames A, AB, C in one file |
+| `generated/munging_long.csv` | 12 × 4 (id, g, x, y) | `data_munging_lag`, `data_munging_filter` | `r/cases/data_munging_t3.R` | interleaved groups, Int64 and Float64 with NA; seed 5011 |
+| `generated/munging_wide.csv` | 4 × 4 (id, a, b, c) | `data_munging_pivot_longer` | `r/cases/data_munging_t3.R` | integer and double columns with NA |
 | `generated/pp_t3.csv` | 200 × 4 (id, ar, rw, rw100) | `stat_pp_t3` | `r/cases/stats_misc_t3.R` | AR(1) and random walks |
 | `generated/robust_weighted_t3.csv` | 25 × 3 (x1, x2, w) | `stat_robust_weighted_t3` | `r/cases/stats_misc_t3.R` | two samples and weights |
 | `generated/spectrum_t3.csv` | 96 × 2 (t, x) | `stat_spectrum_t3` | `r/cases/stats_misc_t3.R` | sine plus noise |
