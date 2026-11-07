@@ -771,10 +771,114 @@ pub fn load_sas(path: impl AsRef<Path>) -> Result<DataFrame, SasError> {
     reader.read_to_dataframe()
 }
 
+/// Test-only comparison of a reader's DataFrame with haven's read of the same committed fixture
+/// (case `data_readers_values`, `validation/r/cases/data_readers.R`; the fixtures are in
+/// `validation/datasets/files/`, written by `validation/r/fixtures/data_readers.R`). The Stata
+/// reader's tests use it too.
+#[cfg(test)]
+pub(crate) mod fixture_check {
+    use p2a_validation::{Case, Check, Tol};
+    use polars::prelude::*;
+
+    /// Absolute path of a committed fixture.
+    pub(crate) fn fixture_path(name: &str) -> std::path::PathBuf {
+        p2a_validation::repo_path(&format!("validation/datasets/files/{name}"))
+    }
+
+    /// The bytes of a committed fixture (for tests that patch fields).
+    pub(crate) fn fixture_bytes(name: &str) -> Vec<u8> {
+        std::fs::read(fixture_path(name)).unwrap_or_else(|e| {
+            panic!(
+                "fixture {name}: {e}; regenerate with `Rscript validation/r/fixtures/data_readers.R`"
+            )
+        })
+    }
+
+    /// Write `bytes` into `b` at `at`.
+    pub(crate) fn put(b: &mut [u8], at: usize, bytes: &[u8]) {
+        b[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// `df` equals haven's read of fixture `stem`: the shape, the column names in file order,
+    /// every numeric value exactly (null where R has NA) and every string exactly.
+    pub(crate) fn assert_matches_haven(case: &Case, stem: &str, df: &DataFrame) {
+        let shape = case.vector(&format!("{stem}__shape"));
+        assert_eq!(
+            (df.height() as f64, df.width() as f64),
+            (shape[0], shape[1]),
+            "{stem}: rows x columns"
+        );
+        let columns_key = format!("{stem}__columns");
+        let names: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            names.as_slice(),
+            case.names(&columns_key),
+            "{stem}: column names and order"
+        );
+        let numeric = case.vector(&columns_key);
+        let mut check = Check::new(case);
+        for (j, name) in names.iter().enumerate() {
+            let key = format!("{stem}__{name}");
+            let col = df.column(name).unwrap();
+            if numeric[j] == 1.0 {
+                assert!(
+                    matches!(col.dtype(), DataType::Float64 | DataType::Int64),
+                    "{stem}.{name}: numeric in haven, {:?} here",
+                    col.dtype()
+                );
+                let as_f64 = col.cast(&DataType::Float64).unwrap();
+                let values: Vec<f64> = as_f64
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect();
+                check.vector(&key, &values, Tol::exact());
+            } else {
+                assert_eq!(
+                    col.dtype(),
+                    &DataType::String,
+                    "{stem}.{name}: text in haven"
+                );
+                let want = case.names(&key);
+                let utf8_len = case.vector(&key);
+                let got: Vec<Option<&str>> = col.str().unwrap().into_iter().collect();
+                assert_eq!(got.len(), want.len(), "{stem}.{name}: length");
+                for (i, (g, w)) in got.iter().zip(want).enumerate() {
+                    assert_eq!(w.len() as f64, utf8_len[i], "{stem}.{name}[{i}]: case JSON");
+                    assert_eq!(*g, Some(w.as_str()), "{stem}.{name}[{i}]");
+                }
+            }
+        }
+        check.finish();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::fixture_check::{fixture_bytes, fixture_path};
     use super::*;
+    use p2a_validation::Case;
     use std::io::Cursor;
+
+    // sas64_haven.sas7bdat (haven::write_sas: 64-bit, little-endian, no pad, header 8192, pages
+    // of 4096): page 0 holds the metadata, pages 1-4 the 60 rows (19, 19, 19, 3) of 205 bytes.
+    const H_PAGE0: usize = 8192;
+    const H_PAGE1: usize = H_PAGE0 + 4096;
+    const H_PAGE1_TYPE: usize = H_PAGE1 + 32;
+    const H_ROW_SIZE: usize = H_PAGE0 + 3288; // row length at +40, row count at +48 (i64)
+    const H_COL_ATTR: usize = H_PAGE0 + 2912; // vector j at +16 + 16 j: offset +0, width +8, type +14
+    const H_COL_NAME: usize = H_PAGE0 + 3084; // pointer j at +16 + 8 j: text block, offset, length
+    const H_COL_TEXT: usize = H_PAGE0 + 3184; // the compression literal at +8 + 12
+    // sas32_iris.sas7bdat (SAS 9.4: 32-bit, little-endian, pad 4, header 65536, one mix page).
+    const I_PAGE0: usize = 65536;
+    const I_PAGE0_TYPE: usize = I_PAGE0 + 16;
+    const I_ROW_SIZE: usize = I_PAGE0 + 65056; // row count at +24 (i32)
+    const I_COL_ATTR: usize = I_PAGE0 + 64456; // vector j at +12 + 12 j: offset +0, width +4, type +10
 
     #[test]
     fn test_magic_number() {
@@ -1099,5 +1203,45 @@ mod tests {
         assert_eq!(reader.columns.len(), 2);
         assert_eq!(reader.columns[0].col_type, ColumnType::Numeric);
         assert_eq!(reader.columns[1].col_type, ColumnType::Numeric);
+    }
+
+    #[test]
+    fn test_sas_fixture_offsets() {
+        // The constants above are this layout; a regenerated fixture with another layout fails here.
+        let b = fixture_bytes("sas64_haven.sas7bdat");
+        assert_eq!(
+            &b[H_ROW_SIZE..H_ROW_SIZE + 8],
+            &[0xF7, 0xF7, 0xF7, 0xF7, 0, 0, 0, 0]
+        );
+        assert_eq!(&b[H_COL_ATTR..H_COL_ATTR + 4], &[0xFC, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(&b[H_COL_NAME..H_COL_NAME + 4], &[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(&b[H_COL_TEXT..H_COL_TEXT + 4], &[0xFD, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(
+            &b[H_PAGE1_TYPE..H_PAGE1_TYPE + 6],
+            &[0x00, 0x01, 19, 0, 0, 0]
+        );
+        let i = fixture_bytes("sas32_iris.sas7bdat");
+        assert_eq!(&i[I_ROW_SIZE..I_ROW_SIZE + 4], &[0xF7, 0xF7, 0xF7, 0xF7]);
+        assert_eq!(&i[I_COL_ATTR..I_COL_ATTR + 4], &[0xFC, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(
+            &i[I_PAGE0_TYPE..I_PAGE0_TYPE + 6],
+            &[0x00, 0x02, 163, 0, 13, 0]
+        );
+    }
+
+    #[test]
+    fn test_validate_data_readers_manifest_lists_every_fixture() {
+        // DATA-50: every fixture of the manifest exists and has its shape in the case.
+        let case = Case::load("data_readers_values");
+        let manifest = std::fs::read_to_string(case.dataset_path()).unwrap();
+        let mut n = 0;
+        for line in manifest.lines().skip(1) {
+            let file = line.split(',').next().unwrap().trim_matches('"');
+            let stem = file.rsplit_once('.').unwrap().0;
+            assert!(fixture_path(file).is_file(), "{file}");
+            assert_eq!(case.vector(&format!("{stem}__shape")).len(), 2, "{stem}");
+            n += 1;
+        }
+        assert_eq!(n, 18);
     }
 }

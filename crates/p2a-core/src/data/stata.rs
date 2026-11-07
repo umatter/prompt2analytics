@@ -478,7 +478,14 @@ pub fn load_stata(path: impl AsRef<Path>) -> Result<DataFrame, StataError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::sas::fixture_check::fixture_bytes;
     use std::io::Cursor;
+
+    // dta118_haven.dta (haven::write_dta(version = 14), LSF): the <K> value (u16) at byte 70, the
+    // <N> value (u64) at 79, the 14 <map> slots (u64) from byte 163.
+    const K118: usize = 70;
+    const N118: usize = 79;
+    const MAP118: usize = 163;
 
     #[test]
     fn test_stata_type_from_code() {
@@ -801,5 +808,21 @@ mod tests {
         let col = df.column("val").unwrap().f64().unwrap();
         assert_eq!(col.get(0), Some(42.0));
         assert_eq!(col.get(1), None); // Missing value should be null
+    }
+
+    #[test]
+    fn test_stata_fixture_offsets() {
+        // The constants above are this layout; a regenerated fixture with another layout fails here.
+        let b = fixture_bytes("dta118_haven.dta");
+        assert_eq!(&b[K118 - 3..K118], b"<K>");
+        assert_eq!(&b[N118 - 3..N118], b"<N>");
+        assert_eq!(&b[MAP118 - 5..MAP118], b"<map>");
+        assert_eq!(
+            u64::from_le_bytes(b[MAP118 + 8..MAP118 + 16].try_into().unwrap()),
+            158
+        );
+        let b = fixture_bytes("dta119_haven.dta");
+        assert_eq!(&b[67..70], b"<K>");
+        assert_eq!(&b[70..74], &[6, 0, 0, 0]); // release 119: <K> is a u32
     }
 }

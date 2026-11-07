@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "data_read_sas7bdat",
+      "name": "SAS .sas7bdat reader (32/64-bit, both byte orders, uncompressed, RLE, RDC)",
+      "category": "data",
+      "reference": "haven::read_sas (haven 2.5.5, ReadStat) on haven-written, SAS-written and byte-level-transformed fixtures; ReadStat's reads and refusals of the patched copies; RLE/RDC command tables of ReadStat (hand-built decoder tests)",
+      "doc": "validation/data/readers.md",
+      "cases": [
+        "data_readers_values"
+      ],
+      "tests": [
+        "p2a-core::data::sas::tests::test_validate_data_readers_manifest_lists_every_fixture"
+      ],
+      "quantities": [
+        "shape",
+        "column names and order",
+        "numeric values (widths 3-8, both byte orders; NaN null)",
+        "text values by encoding byte (20, 28, 29, 0/62/204)",
+        "RLE and RDC rows",
+        "page types 0x0000/0x0400/0x4000, 0x0100, 0x0200/0x0280, 0x9000",
+        "refusals: layout fields, unknown page and column types, missing rows, compression"
+      ],
+      "tolerance": "exact (Tol::exact): the reader decodes the same bytes haven decodes",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
