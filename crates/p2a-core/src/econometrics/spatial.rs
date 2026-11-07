@@ -69,7 +69,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{cholesky, matrix_inverse, pseudoinverse, xtx, xty};
+use crate::linalg::matrix_ops::{cholesky, matrix_inverse, xtx, xty};
 use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::regression::ols::{OlsSolve, normal_equations_inverse, solve_ols};
 use crate::spatial::SpatialWeights;
@@ -205,7 +205,7 @@ pub struct SarConfig {
     pub tol: f64,
     /// Maximum iterations for optimization
     pub max_iter: usize,
-    /// Compute spatial impacts
+    /// Compute spatial impacts (SAR and spatial Durbin model)
     pub compute_impacts: bool,
 }
 
@@ -238,25 +238,24 @@ impl Default for SemConfig {
     }
 }
 
-/// Spatial impacts: direct, indirect, and total effects.
+/// Spatial impacts: direct, indirect, and total effects (spatialreg's exact impacts).
 ///
-/// For the SAR model, the interpretation of coefficients is complicated
-/// by the feedback loop (Wy appears on both sides). Impacts decompose
-/// the total effect into direct (own) and indirect (spillover) effects.
+/// For the SAR and the spatial Durbin model, the interpretation of coefficients is complicated
+/// by the feedback loop (Wy appears on both sides). With S_k = (I - ρW)^{-1} (β_k I + θ_k W)
+/// (θ_k = 0 for the SAR), the direct effect is the mean of diag(S_k), the total effect the mean
+/// row sum of S_k and the indirect effect their difference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpatialImpacts {
-    /// Direct effects (diagonal of (I - ρW)^{-1} β)
+    /// Direct effects, mean(diag(S_k))
     pub direct: Vec<f64>,
     /// Indirect effects (total - direct)
     pub indirect: Vec<f64>,
-    /// Total effects (column sums of (I - ρW)^{-1} β)
+    /// Total effects, mean(rowSums(S_k))
     pub total: Vec<f64>,
     /// Variable names
     pub var_names: Vec<String>,
-    /// Non-fatal warnings about the impact computation. Non-empty when the
-    /// spatial multiplier (I - ρW)^{-1} could not be computed and the impacts
-    /// were degraded to a fallback (e.g. indirect effects reported as zero),
-    /// so callers can distinguish "no spillovers" from "computation failed".
+    /// Non-empty only when I - ρW is singular at the estimate (min |1 - ρλ| at or below 1e-10) or
+    /// the total effect could not be solved; the effects are then `NaN`.
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -485,8 +484,17 @@ pub fn run_sar(
     let bic = -2.0 * ll + (n_params as f64) * (n as f64).ln();
 
     // Compute impacts if requested
-    let impacts = if config.compute_impacts && !config.durbin {
-        Some(compute_impacts(&beta, rho_opt, listw, &coef_names[1..])?)
+    let impacts = if config.compute_impacts {
+        let p = x_cols.len();
+        let b = beta.to_vec();
+        let lags = config.durbin.then(|| &b[1 + p..1 + 2 * p]);
+        Some(impacts_exact(
+            &b[1..1 + p],
+            lags,
+            rho_opt,
+            listw,
+            &coef_names[1..1 + p],
+        )?)
     } else {
         None
     };
@@ -1482,52 +1490,87 @@ fn optimize_lambda_sem(
     Ok((lambda_opt, ll_opt))
 }
 
-/// Compute spatial impacts for SAR model.
+/// min |1 - ρλ| at or below which I - ρW is treated as singular (condition number of about 1e10
+/// or more, where the dense inverse refuses and spatialreg's solve() stops).
+const IMPACT_SINGULAR_TOL: f64 = 1e-10;
+
+/// spatialreg's exact impacts (lagImpactsExact; mixedImpactsExact for the SDM, whose lagged
+/// coefficients are `lags`).
 ///
-/// For a SAR model, the total effect of a unit change in x_k is not simply β_k
-/// because of the spatial multiplier effect. The impacts decompose into:
-/// - Direct: effect on own observation
-/// - Indirect: effect on other observations (spillovers)
-/// - Total: direct + indirect
-///
-/// The direct effect needs tr((I - ρW)^{-1}), computed exactly from the complex eigenvalues
-/// the fit has already cached (spatialreg's `evalues` route). The total effect needs the sum
-/// of all entries of (I - ρW)^{-1}: n / (1 - ρc) when every row of W sums to c, otherwise
-/// one linear solve (I - ρW) v = 1. The dense inverse ([`compute_impacts_dense`]) is formed
-/// only when the eigen decomposition failed, the solve (I - ρW) v = 1 failed, or a sum is
-/// not finite. A solve stopped by cancellation or a resource limit returns that error
-/// instead.
-fn compute_impacts(
-    beta: &Array1<f64>,
+/// With S_k = (I - ρW)^{-1} (β_k I + θ_k W), the direct effect is tr(S_k) / n from the complex
+/// eigenvalues the fit has already cached. The total effect is 1'S_k 1 / n: a closed form when
+/// every row of W sums to one value, otherwise one linear solve per term. There is no dense
+/// inverse. When I - ρW is singular, or a solve fails, the effects are `NaN` with a warning;
+/// cancellation and resource limits return their errors.
+fn impacts_exact(
+    slopes: &[f64],
+    lags: Option<&[f64]>,
     rho: f64,
     listw: &mut SpatialWeights,
     var_names: &[String],
 ) -> EconResult<SpatialImpacts> {
+    let spectrum = listw.try_spectrum()?;
     let n = listw.n();
-    let k = beta.len() - 1; // Exclude intercept
-
-    let diag_sum = listw.trace_inverse_i_minus_rho_w(rho)?;
-    let total_sum = match listw.constant_row_sum() {
-        Some(c) => n as f64 / (1.0 - rho * c),
-        None => match listw.solve_i_minus_rho_w(rho, &Array1::ones(n)) {
-            Ok(v) => v.sum(),
-            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
-            Err(_) => f64::NAN,
-        },
-    };
-    let (diag_sum, total_sum) = match diag_sum {
-        Some(d) if d.is_finite() && total_sum.is_finite() => (d, total_sum),
-        _ => return compute_impacts_dense(beta, rho, listw, var_names),
-    };
-
     let n_f = n as f64;
-    let direct: Vec<f64> = (0..k).map(|j| beta[j + 1] * diag_sum / n_f).collect();
-    let total: Vec<f64> = (0..k).map(|j| beta[j + 1] * total_sum / n_f).collect();
-    let indirect: Vec<f64> = total
-        .iter()
-        .zip(direct.iter())
-        .map(|(t, d)| t - d)
+    let p = slopes.len();
+    let degraded = |why: String| SpatialImpacts {
+        direct: vec![f64::NAN; p],
+        indirect: vec![f64::NAN; p],
+        total: vec![f64::NAN; p],
+        var_names: var_names.to_vec(),
+        warnings: vec![why],
+    };
+
+    let m = spectrum.min_modulus(rho);
+    if m.is_nan() || m <= IMPACT_SINGULAR_TOL {
+        return Ok(degraded(format!(
+            "(I - rho W) is singular at rho = {rho} (min |1 - rho lambda| = {m:.1e}); direct, \
+             indirect and total impacts are not reported"
+        )));
+    }
+
+    let tr_a = spectrum.trace_inverse(rho);
+    let tr_aw = lags.map_or(0.0, |_| spectrum.trace_w_inverse(rho));
+    let (s1, s2) = match listw.constant_row_sum() {
+        Some(c) => (n_f / (1.0 - rho * c), n_f * c / (1.0 - rho * c)),
+        None => {
+            let ones = Array1::ones(n);
+            let solved = listw.solve_i_minus_rho_w(rho, &ones).and_then(|v| {
+                let s1 = v.sum();
+                if lags.is_some() {
+                    let lagged = listw.lag(&ones);
+                    Ok((s1, listw.solve_i_minus_rho_w(rho, &lagged)?.sum()))
+                } else {
+                    Ok((s1, 0.0))
+                }
+            });
+            match solved {
+                Ok(sums) => sums,
+                Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
+                Err(e) => {
+                    return Ok(degraded(format!(
+                        "(I - rho W) v = b could not be solved at rho = {rho}: {e}; direct, \
+                         indirect and total impacts are not reported"
+                    )));
+                }
+            }
+        }
+    };
+    if ![tr_a, tr_aw, s1, s2].iter().all(|v| v.is_finite()) {
+        return Ok(degraded(format!(
+            "the traces of (I - rho W)^-1 are not finite at rho = {rho}; direct, indirect and \
+             total impacts are not reported"
+        )));
+    }
+
+    let theta = |j: usize| lags.map_or(0.0, |t| t[j]);
+    let direct: Vec<f64> = (0..p)
+        .map(|j| (slopes[j] * tr_a + theta(j) * tr_aw) / n_f)
         .collect();
+    let total: Vec<f64> = (0..p)
+        .map(|j| (slopes[j] * s1 + theta(j) * s2) / n_f)
+        .collect();
+    let indirect: Vec<f64> = total.iter().zip(&direct).map(|(t, d)| t - d).collect();
 
     Ok(SpatialImpacts {
         direct,
@@ -1538,90 +1581,16 @@ fn compute_impacts(
     })
 }
 
-/// Spatial impacts from the dense inverse (I - ρW)^{-1}: the fallback of
-/// [`compute_impacts`], with fallible n x n allocations.
-fn compute_impacts_dense(
+/// [`impacts_exact`] of a SAR coefficient vector that holds the intercept first.
+#[cfg(test)]
+fn compute_impacts(
     beta: &Array1<f64>,
     rho: f64,
-    listw: &SpatialWeights,
+    listw: &mut SpatialWeights,
     var_names: &[String],
 ) -> EconResult<SpatialImpacts> {
-    let n = listw.n();
-    let k = beta.len() - 1; // Exclude intercept
-
-    // Compute (I - ρW)^{-1}
-    let w = listw.try_to_dense()?;
-    let mut i_rho_w = crate::resource::try_zeros2(n, n, "dense matrix I - rho*W")?;
-    for i in 0..n {
-        i_rho_w[[i, i]] = 1.0;
-    }
-    for i in 0..n {
-        for j in 0..n {
-            i_rho_w[[i, j]] -= rho * w[[i, j]];
-        }
-    }
-    drop(w);
-
-    let multiplier = match matrix_inverse(&i_rho_w.view()) {
-        Ok(inv) if !inv.iter().any(|v| v.is_nan() || v.is_infinite()) => inv,
-        _ => {
-            // LU-based inverse failed or produced NaN; fall back to SVD pseudoinverse
-            match pseudoinverse(&i_rho_w.view()) {
-                Ok(pinv) => pinv,
-                Err(_) => {
-                    // Both the LU inverse and the SVD pseudoinverse of (I - ρW)
-                    // failed (e.g. ρ near 1/λ_max makes it ill-conditioned).
-                    // Return degraded impacts (indirect = 0) but flag it loudly
-                    // so this is not mistaken for a genuine "no spillovers"
-                    // result.
-                    return Ok(SpatialImpacts {
-                        direct: beta.slice(ndarray::s![1..]).to_vec(),
-                        indirect: vec![0.0; k],
-                        total: beta.slice(ndarray::s![1..]).to_vec(),
-                        var_names: var_names.to_vec(),
-                        warnings: vec![
-                            "(I - rho*W) could not be inverted (LU and pseudoinverse both \
-                             failed); indirect/spillover effects are reported as zero and are \
-                             NOT reliable. Check for a near-unit-root spatial parameter or an \
-                             ill-conditioned weight matrix."
-                                .to_string(),
-                        ],
-                    });
-                }
-            }
-        }
-    };
-
-    // For each variable (excluding intercept)
-    let mut direct = vec![0.0; k];
-    let mut total = vec![0.0; k];
-
-    for j in 0..k {
-        let beta_j = beta[j + 1]; // Skip intercept
-
-        // Direct effect: average of diagonal of S_j = β_j * (I - ρW)^{-1}
-        let diag_sum: f64 = (0..n).map(|i| multiplier[[i, i]]).sum();
-        direct[j] = beta_j * diag_sum / n as f64;
-
-        // Total effect: average of column sums (or equivalently, sum of any row)
-        let total_sum: f64 = multiplier.sum();
-        total[j] = beta_j * total_sum / n as f64;
-    }
-
-    // Indirect = Total - Direct
-    let indirect: Vec<f64> = total
-        .iter()
-        .zip(direct.iter())
-        .map(|(t, d)| t - d)
-        .collect();
-
-    Ok(SpatialImpacts {
-        direct,
-        indirect,
-        total,
-        var_names: var_names.to_vec(),
-        warnings: Vec::new(),
-    })
+    let slopes: Vec<f64> = beta.iter().skip(1).copied().collect();
+    impacts_exact(&slopes, None, rho, listw, var_names)
 }
 
 #[cfg(test)]
@@ -2094,7 +2063,6 @@ mod tests {
         assert!((sac.rho_se - sac.lambda_se).abs() > 0.01, "{sac:?}");
     }
 
-    use crate::linalg::matrix_ops::LinalgError;
     use crate::spatial::test_fixtures::{band2, knn3};
     use ndarray::array;
 
@@ -2152,9 +2120,7 @@ mod tests {
                 [-0.9729643888739399, 0.24324109721848497],
                 [1.2663700599039887, -0.31659251497599716],
             ),
-            // q = 1.68: dense solve; it returns NaN (faer 0.22.6 full-pivot LU), so the
-            // impacts come from the dense-inverse fallback
-            // (see dense_impacts_fallback_matches_the_trace_route)
+            // q = 1.68: dense LU solve (q > 0.99)
             (
                 band2(WeightStyle::Binary),
                 -0.35,
@@ -2192,64 +2158,73 @@ mod tests {
         }
     }
 
+    /// R: spatialreg mixedImpactsExact written out: S_k = (I - rho W)^-1 (beta_k I + theta_k W),
+    /// direct = mean(diag(S_k)), total = mean(rowSums(S_k)) (spatial_ml_weights.R).
     #[test]
-    fn dense_impacts_fallback_matches_the_trace_route() {
-        // compute_impacts reaches the dense inverse only when the eigen decomposition fails,
-        // the solve (I - rho W) v = 1 fails (no fixture provokes either), or a sum is not
-        // finite (e.g. rho = 1 with row-standardised W; see
-        // dense_impacts_pseudoinverse_branch_stays_finite). Of the R reference cases only the
-        // last provokes one: its dense LU solve returns NaN (faer 0.22.6's full-pivot LU is
-        // wrong for n >= 16, a known pre-existing defect left to a later tier), so it is
-        // answered by the dense inverse. That inverse's own LU result is NaN for every case
-        // here (n = 30), so the values come from its pseudoinverse branch. The fallback is
-        // called directly so that every case checks it against R.
-        let beta = array![1.0, 2.0, -0.5];
-        let names: [String; 2] = ["a".into(), "b".into()];
-        for (mut w, rho, d, i, t) in r_solve_impact_cases() {
-            let dense = compute_impacts_dense(&beta, rho, &w, &names).unwrap();
-            assert_impacts(&dense, rho, d, i, t);
-            let traced = compute_impacts(&beta, rho, &mut w, &names).unwrap();
-            for j in 0..2 {
-                assert!(
-                    (dense.direct[j] - traced.direct[j]).abs() < 1e-9
-                        && (dense.indirect[j] - traced.indirect[j]).abs() < 1e-9
-                        && (dense.total[j] - traced.total[j]).abs() < 1e-9,
-                    "rho={rho} j={j}: {dense:?} vs {traced:?}"
-                );
-            }
+    fn test_validate_sdm_impacts() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("spatial_sar_sdm_sem");
+        let mut w = knn4(&ds);
+        let c = SarConfig {
+            durbin: true,
+            compute_impacts: true,
+            ..Default::default()
+        };
+        let r = run_sar(&ds, "y", &["x1", "x2"], &mut w, c).unwrap();
+        let imp = r.impacts.expect("SDM impacts");
+        assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
+        // rho is good to the flatness bound of the likelihood (1.3e-7)
+        let est = Tol::iterative(1e-6);
+        Check::new(&case)
+            .named("sdm_impact_direct", &imp.var_names, &imp.direct, est)
+            .named("sdm_impact_indirect", &imp.var_names, &imp.indirect, est)
+            .named("sdm_impact_total", &imp.var_names, &imp.total, est)
+            .finish();
+    }
+
+    /// The same impacts through the closed form (constant row sums) and through the solves: the
+    /// binary list is rescaled so that the rows do not sum to one value.
+    #[test]
+    fn test_sdm_impacts_match_the_dense_formula_without_constant_row_sums() {
+        let names = vec!["a".to_string()];
+        for mut w in [band2(WeightStyle::RowStd), band2(WeightStyle::Binary)] {
+            let rho = 0.05;
+            let n = w.n();
+            let imp = impacts_exact(&[2.0], Some(&[0.7][..]), rho, &mut w, &names).unwrap();
+            let d = w.try_to_dense().unwrap();
+            let a = Array2::<f64>::eye(n) - &d * rho;
+            let ainv = crate::linalg::matrix_ops::matrix_inverse(&a.view()).unwrap();
+            let s = (&ainv * 2.0) + ainv.dot(&d) * 0.7;
+            let direct = s.diag().sum() / n as f64;
+            let total = s.sum() / n as f64;
+            assert!((imp.direct[0] - direct).abs() < 1e-9, "{imp:?}");
+            assert!((imp.total[0] - total).abs() < 1e-9, "{imp:?}");
+            assert!((imp.indirect[0] - (total - direct)).abs() < 1e-9, "{imp:?}");
         }
     }
 
+    /// rho = 1 on a row-standardised W: I - W is singular (W 1 = 1), where spatialreg's solve()
+    /// stops. The impacts are NaN with a warning, never pseudo-inverse numbers.
     #[test]
-    fn dense_impacts_pseudoinverse_branch_stays_finite() {
-        // With row-standardised W, rho = 1 makes I - rho W singular, so matrix_inverse
-        // reports it ill-conditioned (cond > CONDITION_THRESHOLD) and compute_impacts_dense
-        // takes the SVD pseudoinverse branch. This pins that branch's current output: Ok,
-        // finite effects, and no warning (the missing warning is a T0-WP21 hand-off).
-        let w = knn3(WeightStyle::RowStd);
-        let rho = 1.0;
-        let n = w.n();
-        let i_rho_w = Array2::<f64>::eye(n) - &w.try_to_dense().unwrap() * rho;
-        let lu = matrix_inverse(&i_rho_w.view());
-        assert!(
-            matches!(lu, Err(LinalgError::IllConditioned(_))),
-            "the LU inverse must reject I - W as ill-conditioned for this case to reach the \
-             pseudoinverse branch, got {lu:?}"
-        );
-
-        let beta = array![1.0, 2.0, -0.5];
-        let names: [String; 2] = ["a".into(), "b".into()];
-        let imp = compute_impacts_dense(&beta, rho, &w, &names).unwrap();
-        assert_eq!(imp.direct.len(), 2);
-        for j in 0..2 {
+    fn test_impacts_report_a_singular_multiplier() {
+        let names = vec!["a".to_string(), "b".to_string()];
+        let mut w = knn3(WeightStyle::RowStd);
+        for imp in [
+            compute_impacts(&array![1.0, 2.0, -0.5], 1.0, &mut w, &names).unwrap(),
+            impacts_exact(&[2.0, -0.5], Some(&[0.3, 0.1][..]), 1.0, &mut w, &names).unwrap(),
+        ] {
+            assert_eq!(imp.warnings.len(), 1, "{:?}", imp.warnings);
+            assert!(imp.warnings[0].contains("singular"), "{}", imp.warnings[0]);
             assert!(
-                imp.direct[j].is_finite()
-                    && imp.indirect[j].is_finite()
-                    && imp.total[j].is_finite(),
-                "j={j}: {imp:?}"
+                imp.direct
+                    .iter()
+                    .chain(&imp.indirect)
+                    .chain(&imp.total)
+                    .all(|v| v.is_nan()),
+                "{imp:?}"
             );
+            assert_eq!(imp.var_names, names);
         }
-        assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
     }
 
     #[test]

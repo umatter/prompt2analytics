@@ -13,7 +13,8 @@
       "tests": [
         "p2a-core::econometrics::spatial::tests::test_validate_sar_sdm_sem_concentrated_ml",
         "p2a-core::econometrics::spatial::tests::test_validate_sac_concentrated_ml",
-        "p2a-core::econometrics::spatial::tests::test_validate_spatial_ml_se_observed_information"
+        "p2a-core::econometrics::spatial::tests::test_validate_spatial_ml_se_observed_information",
+        "p2a-core::econometrics::spatial::tests::test_validate_sdm_impacts"
       ],
       "quantities": [
         "rho",
@@ -24,7 +25,7 @@
         "AIC",
         "BIC",
         "SAR residuals",
-        "SAR direct, indirect and total impacts",
+        "SAR and SDM direct, indirect and total impacts",
         "SEM coefficient SE, z and p",
         "observed-information coefficient, rho and lambda SEs (SAR, SDM, SAC; lambda for the SEM)"
       ],

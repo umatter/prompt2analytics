@@ -25,12 +25,12 @@
 //! the number of links; the older `from_*` constructors keep their behaviour.
 //!
 //! `SpatialWeights` keeps W sparse (one index and weight list per row) and forms a dense
-//! n x n matrix for the eigenvalues that maximum-likelihood estimation needs. The SAR
-//! total impact forms a dense I - ρW as well when it needs the solve (I - ρW) v = 1 (the
-//! rows of W do not all have one sum) and the Neumann series is ruled out (|ρ| times the
-//! spectral radius of W is at least 0.99, which binary weights often reach) or does not
-//! settle. If the eigen decomposition or that solve fails, or a sum is not finite, the
-//! impacts fall back to the dense inverse of I - ρW.
+//! n x n matrix for the eigenvalues that maximum-likelihood estimation needs. The SAR and
+//! spatial Durbin total impact forms a dense I - ρW as well when it needs the solve
+//! (I - ρW) v = b (the rows of W do not all have one sum) and the Neumann series is ruled out
+//! (|ρ| times the spectral radius of W is at least 0.99, which binary weights often reach) or
+//! does not settle. If I - ρW is singular or that solve fails, the impacts are NaN with a
+//! warning.
 //!
 //! # Example
 //!
