@@ -15,8 +15,13 @@
 //!
 //! # Centered ICE (c-ICE)
 //!
-//! Centering reveals heterogeneity by subtracting the prediction at an anchor point:
-//! c-ICE_i(x_s) = ICE_i(x_s) - ICE_i(x_anchor)
+//! Centering reveals heterogeneity by subtracting the prediction at the smallest grid value:
+//! c-ICE_i(x_s) = ICE_i(x_s) - ICE_i(min grid value)
+//!
+//! # Grids
+//!
+//! Grids and centring as `pdp::partial` (pdp 0.8.3); computed by the engine in [`crate::ml::pdp`]. By default
+//! `min(length(unique(x)), 51)` uniform points over the sampled rows' non-missing values.
 //!
 //! # References
 //!
@@ -46,7 +51,7 @@
 //! // Compute centered ICE curves (c-ICE) for feature 0
 //! let config = IceConfig {
 //!     feature_index: 0,
-//!     grid_resolution: 5,
+//!     grid_resolution: Some(5),
 //!     center: true,
 //!     ..Default::default()
 //! };
@@ -77,10 +82,13 @@
 //! );
 //! ```
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use ndarray::{Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
+use super::pdp::{self, GridSpec};
 use crate::errors::{EconError, EconResult};
+use crate::resource::{try_vec, try_with_capacity, try_zeros2};
+use crate::stats::robust::{QuantileType, quantile_sorted};
 
 /// Configuration for ICE curve computation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,20 +96,23 @@ pub struct IceConfig {
     /// Index of the feature to compute ICE for (0-indexed).
     pub feature_index: usize,
 
-    /// Number of grid points for the feature range. Default: 50.
-    pub grid_resolution: usize,
+    /// `seq(min, max, length.out = grid_resolution)` over the feature's non-missing values, at least 1.
+    /// `None` (default) is pdp's choice, `min(length(unique(x)), 51)` points.
+    pub grid_resolution: Option<usize>,
 
-    /// Whether to center curves at the minimum feature value (c-ICE). Default: false.
+    /// Subtract each curve's value at the smallest grid value (c-ICE, `pdp::partial(center = TRUE)`).
+    /// Default: false.
     pub center: bool,
 
-    /// Fraction of observations to use (for large datasets). Default: 1.0 (all).
+    /// Fraction of observations to use, in (0, 1]; the grid is built from the sampled rows. Default: 1.0 (all).
     /// Set to e.g. 0.1 to randomly sample 10% of observations.
     pub frac_to_plot: f64,
 
-    /// Random seed for sampling when frac_to_plot < 1.0.
+    /// Random seed for sampling when frac_to_plot < 1.0 (default 42).
     pub seed: Option<u64>,
 
-    /// Custom grid values (overrides grid_resolution if provided).
+    /// User grid (pdp's `pred.grid`): overrides `grid_resolution`; non-empty and finite; sorted ascending, each
+    /// value once.
     pub grid_values: Option<Vec<f64>>,
 
     /// Feature name (for display purposes).
@@ -112,12 +123,34 @@ impl Default for IceConfig {
     fn default() -> Self {
         IceConfig {
             feature_index: 0,
-            grid_resolution: 50,
+            grid_resolution: None,
             center: false,
             frac_to_plot: 1.0,
             seed: None,
             grid_values: None,
             feature_name: None,
+        }
+    }
+}
+
+impl IceConfig {
+    /// The grid specification for a feature with these values: `grid_values` -> `Values`; else
+    /// `Uniform(grid_resolution)`, with `min(length(unique(x)), 51)` points when `grid_resolution` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidSpecification` for empty `grid_values` or `grid_resolution` `Some(0)`.
+    pub fn grid_spec(&self, values: &[f64]) -> EconResult<GridSpec> {
+        match (&self.grid_values, self.grid_resolution) {
+            (Some(grid), _) if grid.is_empty() => Err(EconError::InvalidSpecification {
+                message: "grid_values must contain at least one value".to_string(),
+            }),
+            (Some(grid), _) => Ok(GridSpec::Values(grid.clone())),
+            (None, Some(0)) => Err(EconError::InvalidSpecification {
+                message: "grid_resolution must be at least 1, got 0".to_string(),
+            }),
+            (None, Some(n)) => Ok(GridSpec::Uniform(n)),
+            (None, None) => Ok(GridSpec::Uniform(pdp::default_grid_points(values)?)),
         }
     }
 }
@@ -300,6 +333,27 @@ pub fn compute_ice_curves<F>(
 where
     F: Fn(ArrayView2<f64>) -> Vec<f64>,
 {
+    ice_core(data, |m: &Array2<f64>| Ok(predict_fn(m.view())), config)
+}
+
+/// [`compute_ice_curves`] for a prediction function that can fail: its errors are returned unchanged, at the
+/// first grid point that fails.
+pub fn try_compute_ice_curves<F>(
+    data: ArrayView2<f64>,
+    predict_fn: F,
+    config: &IceConfig,
+) -> EconResult<IceResult>
+where
+    F: Fn(ArrayView2<f64>) -> EconResult<Vec<f64>>,
+{
+    ice_core(data, |m: &Array2<f64>| predict_fn(m.view()), config)
+}
+
+/// ICE on the engine of [`crate::ml::pdp`], for every entry point of this module.
+fn ice_core<F>(data: ArrayView2<'_, f64>, predict: F, config: &IceConfig) -> EconResult<IceResult>
+where
+    F: Fn(&Array2<f64>) -> EconResult<Vec<f64>>,
+{
     let n_obs = data.nrows();
     let n_features = data.ncols();
 
@@ -317,21 +371,16 @@ where
         });
     }
 
-    if config.grid_resolution < 2 {
+    let frac = config.frac_to_plot;
+    if !(frac > 0.0 && frac <= 1.0) {
         return Err(EconError::InvalidSpecification {
-            message: "Grid resolution must be at least 2".to_string(),
-        });
-    }
-
-    if config.frac_to_plot <= 0.0 || config.frac_to_plot > 1.0 {
-        return Err(EconError::InvalidSpecification {
-            message: "frac_to_plot must be in (0, 1]".to_string(),
+            message: format!("frac_to_plot must be in (0, 1], got {frac}"),
         });
     }
 
     // Sample observations if needed
-    let (sampled_indices, sampled_data) = if config.frac_to_plot < 1.0 {
-        let n_sample = ((n_obs as f64) * config.frac_to_plot).ceil() as usize;
+    let sampled_data = if frac < 1.0 {
+        let n_sample = ((n_obs as f64) * frac).ceil() as usize;
         let n_sample = n_sample.max(1).min(n_obs);
 
         let mut rng_state = config.seed.unwrap_or(42);
@@ -345,101 +394,60 @@ where
         indices.truncate(n_sample);
         indices.sort_unstable(); // Sort for cache-friendly access
 
-        let sampled = select_rows(&data, &indices);
-        (indices, sampled)
+        select_rows(&data, &indices)
     } else {
-        let indices: Vec<usize> = (0..n_obs).collect();
-        (indices, data.to_owned())
+        data.to_owned()
     };
 
     let n_sampled = sampled_data.nrows();
+    let feature_index = config.feature_index;
 
-    // Determine grid values
-    let grid_values = if let Some(ref custom_grid) = config.grid_values {
-        custom_grid.clone()
-    } else {
-        // Extract feature column and compute range
-        let feature_col = sampled_data.column(config.feature_index);
-        let mut feature_values: Vec<f64> = feature_col.iter().cloned().collect();
-        feature_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        let min_val = *feature_values.first().unwrap();
-        let max_val = *feature_values.last().unwrap();
-
-        if (max_val - min_val).abs() < 1e-10 {
-            return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Feature {} has no variance (all values are {:.4})",
-                    config.feature_index, min_val
-                ),
-            });
-        }
-
-        // Create evenly spaced grid
-        let step = (max_val - min_val) / (config.grid_resolution - 1) as f64;
-        (0..config.grid_resolution)
-            .map(|i| min_val + i as f64 * step)
-            .collect()
-    };
-
+    // The original feature values and the grid built from them
+    let original_feature_values = sampled_data.column(feature_index).to_vec();
+    let spec = config.grid_spec(&original_feature_values)?;
+    let grid_values = pdp::feature_grid(
+        &original_feature_values,
+        &spec,
+        &format!("feature {feature_index}"),
+    )?;
     let n_grid = grid_values.len();
 
-    // Store original feature values
-    let original_feature_values: Vec<f64> = sampled_data
-        .column(config.feature_index)
-        .iter()
-        .cloned()
-        .collect();
+    // Compute ICE curves: one prediction call per grid point
+    let mut ice_curves = try_zeros2(n_sampled, n_grid, "ICE curves")?;
+    pdp::evaluate_grid(
+        sampled_data.view(),
+        &[feature_index],
+        &[grid_values.as_slice()],
+        predict,
+        |g, predictions| {
+            ice_curves
+                .column_mut(g[0])
+                .assign(&ArrayView1::from(predictions));
+            Ok(())
+        },
+    )?;
 
-    // Compute ICE curves
-    // For efficiency, we batch all predictions for each grid value
-    let mut ice_curves = Array2::zeros((n_sampled, n_grid));
-
-    for (g_idx, &grid_val) in grid_values.iter().enumerate() {
-        // Create modified data with feature set to grid value
-        let mut modified_data = sampled_data.clone();
-
-        for i in 0..n_sampled {
-            modified_data[[i, config.feature_index]] = grid_val;
-        }
-
-        // Get predictions for all observations at this grid point
-        let predictions = predict_fn(modified_data.view());
-
-        if predictions.len() != n_sampled {
-            return Err(EconError::Computation(format!(
-                "Prediction function returned {} values but expected {}",
-                predictions.len(),
-                n_sampled
-            )));
-        }
-
-        // Store predictions
-        for (i, &pred) in predictions.iter().enumerate() {
-            ice_curves[[i, g_idx]] = pred;
-        }
-    }
-
-    // Apply centering if requested (Goldstein et al. 2015, Section 3.1)
-    // c-ICE_i(x_s) = ICE_i(x_s) - ICE_i(x_anchor)
+    // Apply centering if requested (Goldstein et al. 2015, Section 3.1):
+    // the grid is sorted, so column 0 is the smallest grid value
     let centered = config.center;
     if centered {
-        // Center at the first grid point (minimum feature value)
-        let anchor_predictions = ice_curves.column(0).to_owned();
-        for g_idx in 0..n_grid {
-            for i in 0..n_sampled {
-                ice_curves[[i, g_idx]] -= anchor_predictions[i];
-            }
+        let anchor = ice_curves.column(0).to_owned();
+        for mut column in ice_curves.columns_mut() {
+            column -= &anchor;
         }
     }
 
     // Compute PDP (average of ICE curves)
-    let pdp_curve: Vec<f64> = (0..n_grid)
-        .map(|g_idx| ice_curves.column(g_idx).mean().unwrap_or(0.0))
-        .collect();
+    let mut pdp_curve = try_with_capacity::<f64>(n_grid, "ICE curves")?;
+    pdp_curve.extend(
+        ice_curves
+            .columns()
+            .into_iter()
+            .map(|column| column.iter().sum::<f64>() / n_sampled as f64),
+    );
 
     // Compute heterogeneity statistics
-    let ice_spread = compute_ice_spread(&ice_curves.view(), &pdp_curve);
+    let ice_spread = compute_ice_spread(ice_curves.view(), &pdp_curve)?;
 
     // Convert ice_curves to Vec for JSON serialization
     let ice_curves_vec: Vec<Vec<f64>> =
@@ -449,7 +457,7 @@ where
         grid_values,
         ice_curves,
         pdp_curve,
-        feature_index: config.feature_index,
+        feature_index,
         feature_name: config.feature_name.clone(),
         n_obs: n_sampled,
         n_grid,
@@ -460,41 +468,31 @@ where
     })
 }
 
-/// Compute ICE spread statistics to quantify heterogeneity.
-fn compute_ice_spread(ice_curves: &ArrayView2<f64>, pdp_curve: &[f64]) -> IceSpread {
+/// Compute ICE spread statistics to quantify heterogeneity: population SD, range and `IQR()` (type 7) per grid
+/// point; a grid point with a NaN prediction gets NaN for all three.
+fn compute_ice_spread(ice_curves: ArrayView2<'_, f64>, pdp_curve: &[f64]) -> EconResult<IceSpread> {
     let n_grid = ice_curves.ncols();
     let n_obs = ice_curves.nrows();
 
-    let mut std_dev = Vec::with_capacity(n_grid);
-    let mut range = Vec::with_capacity(n_grid);
-    let mut iqr = Vec::with_capacity(n_grid);
+    let mut std_dev = try_vec(n_grid, f64::NAN, "ICE spread")?;
+    let mut range = try_vec(n_grid, f64::NAN, "ICE spread")?;
+    let mut iqr = try_vec(n_grid, f64::NAN, "ICE spread")?;
+    let mut sorted = try_with_capacity::<f64>(n_obs, "ICE spread")?;
 
-    for g_idx in 0..n_grid {
-        let col = ice_curves.column(g_idx);
-        let mean = col.mean().unwrap_or(0.0);
-
-        // Standard deviation
+    for (g_idx, col) in ice_curves.columns().into_iter().enumerate() {
+        if col.iter().any(|v| v.is_nan()) {
+            continue;
+        }
+        let mean = col.iter().sum::<f64>() / n_obs as f64;
         let variance = col.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n_obs as f64;
-        std_dev.push(variance.sqrt());
+        std_dev[g_idx] = variance.sqrt();
 
-        // Range
-        let min_val = col.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_val = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        range.push(max_val - min_val);
-
-        // IQR
-        let mut sorted: Vec<f64> = col.iter().cloned().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        let q1_idx = n_obs / 4;
-        let q3_idx = (3 * n_obs) / 4;
-        let q1 = if n_obs > 0 { sorted[q1_idx] } else { 0.0 };
-        let q3 = if n_obs > 0 {
-            sorted[q3_idx.min(n_obs - 1)]
-        } else {
-            0.0
-        };
-        iqr.push(q3 - q1);
+        sorted.clear();
+        sorted.extend(col.iter().copied());
+        sorted.sort_by(f64::total_cmp);
+        range[g_idx] = sorted[n_obs - 1] - sorted[0];
+        iqr[g_idx] = quantile_sorted(&sorted, 0.75, QuantileType::T7)
+            - quantile_sorted(&sorted, 0.25, QuantileType::T7);
     }
 
     // Heterogeneity index: max(std) / mean(|pdp|)
@@ -506,12 +504,12 @@ fn compute_ice_spread(ice_curves: &ArrayView2<f64>, pdp_curve: &[f64]) -> IceSpr
         max_std // If PDP is near zero, just use max std
     };
 
-    IceSpread {
+    Ok(IceSpread {
         std_dev,
         range,
         iqr,
         heterogeneity_index,
-    }
+    })
 }
 
 use super::lcg_random;
@@ -530,15 +528,18 @@ fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
 
 /// Compute ICE curves using a GBM model.
 ///
-/// Convenience function that wraps `ice_curves` for GBM models.
-///
 /// # Arguments
 ///
-/// * `data` - Feature matrix used for computing ICE
+/// * `data` - Feature matrix used for computing ICE, with the columns the model was fitted on
 /// * `gbm_result` - Fitted GBM model
 /// * `feature_index` - Index of feature to analyze
-/// * `grid_resolution` - Number of grid points (default: 50)
+/// * `grid_resolution` - Number of grid points (default: `min(length(unique(x)), 51)`, as pdp)
 /// * `center` - Whether to compute centered ICE (default: false)
+///
+/// # Errors
+///
+/// `InvalidSpecification` for a model without trees or data with another column count; the model's prediction
+/// errors are returned unchanged.
 pub fn ice_curves_gbm(
     data: ArrayView2<f64>,
     gbm_result: &crate::ml::GbmResult,
@@ -548,7 +549,7 @@ pub fn ice_curves_gbm(
 ) -> EconResult<IceResult> {
     let config = IceConfig {
         feature_index,
-        grid_resolution: grid_resolution.unwrap_or(50),
+        grid_resolution,
         center: center.unwrap_or(false),
         feature_name: gbm_result
             .feature_names
@@ -557,49 +558,33 @@ pub fn ice_curves_gbm(
         ..Default::default()
     };
 
-    compute_ice_curves(
-        data,
-        |x| crate::ml::gbm_predict(gbm_result, x).unwrap_or_else(|_| vec![0.0; x.nrows()]),
-        &config,
-    )
+    ice_core(data, pdp::gbm_predictor(gbm_result, data.ncols())?, &config)
 }
 
-/// Compute ICE curves using a Random Forest model.
-///
-/// Convenience function that wraps `ice_curves` for Random Forest models.
+/// ICE curves of a random forest fitted with [`crate::ml::random_forest_with_trees`] (the forest's mean tree
+/// prediction). Arguments and errors as [`ice_curves_gbm`].
 pub fn ice_curves_rf(
     data: ArrayView2<f64>,
-    rf_result: &crate::ml::RandomForestResult,
+    model: &crate::ml::RandomForestModel,
     feature_index: usize,
     grid_resolution: Option<usize>,
     center: Option<bool>,
 ) -> EconResult<IceResult> {
-    // Random Forest stores fitted predictions, not trees for prediction
-    // We need to re-fit or use a different approach
-    // For now, this is a placeholder - RF doesn't expose predict easily
     let config = IceConfig {
         feature_index,
-        grid_resolution: grid_resolution.unwrap_or(50),
+        grid_resolution,
         center: center.unwrap_or(false),
-        feature_name: rf_result
+        feature_name: model
             .feature_names
             .as_ref()
             .and_then(|names| names.get(feature_index).cloned()),
         ..Default::default()
     };
 
-    // Note: Random Forest result doesn't store trees for prediction
-    // This is a limitation - user should use ice_curves directly with predict_fn
-    Err(EconError::InvalidSpecification {
-        message: "Random Forest ICE requires using compute_ice_curves() directly with a predict function. \
-                  The RF result doesn't store trees for out-of-sample prediction."
-            .to_string(),
-    })
+    ice_core(data, pdp::forest_predictor(model, data.ncols())?, &config)
 }
 
-/// Compute ICE curves using a CART model.
-///
-/// Convenience function that wraps `ice_curves` for CART models.
+/// Compute ICE curves using a CART model. Arguments and errors as [`ice_curves_gbm`].
 pub fn ice_curves_cart(
     data: ArrayView2<f64>,
     cart_result: &crate::ml::CartResult,
@@ -609,7 +594,7 @@ pub fn ice_curves_cart(
 ) -> EconResult<IceResult> {
     let config = IceConfig {
         feature_index,
-        grid_resolution: grid_resolution.unwrap_or(50),
+        grid_resolution,
         center: center.unwrap_or(false),
         feature_name: cart_result
             .feature_names
@@ -618,9 +603,9 @@ pub fn ice_curves_cart(
         ..Default::default()
     };
 
-    compute_ice_curves(
+    ice_core(
         data,
-        |x| crate::ml::cart_predict(cart_result, x).unwrap_or_else(|_| vec![0.0; x.nrows()]),
+        pdp::cart_predictor(cart_result, data.ncols())?,
         &config,
     )
 }
@@ -628,7 +613,9 @@ pub fn ice_curves_cart(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ml::pdp::test_fixtures::*;
     use ndarray::array;
+    use p2a_validation::{Check, Tol};
 
     /// Simple linear model for testing: y = 2*x0 + 3*x1
     fn linear_predict(x: ArrayView2<f64>) -> Vec<f64> {
@@ -648,7 +635,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 5,
+            grid_resolution: Some(5),
             center: false,
             ..Default::default()
         };
@@ -672,7 +659,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 5,
+            grid_resolution: Some(5),
             center: false,
             ..Default::default()
         };
@@ -710,7 +697,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 5,
+            grid_resolution: Some(5),
             center: true,
             ..Default::default()
         };
@@ -738,7 +725,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 5,
+            grid_resolution: Some(5),
             center: false,
             ..Default::default()
         };
@@ -776,7 +763,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 5,
+            grid_resolution: Some(5),
             center: false,
             ..Default::default()
         };
@@ -806,7 +793,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 50, // Ignored when custom grid provided
+            grid_resolution: Some(50), // Ignored when custom grid provided
             grid_values: Some(vec![0.0, 2.5, 5.0, 7.5, 10.0]),
             center: false,
             ..Default::default()
@@ -830,7 +817,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 10,
+            grid_resolution: Some(10),
             frac_to_plot: 0.1, // Use 10% of data
             seed: Some(42),
             center: false,
@@ -858,25 +845,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ice_error_no_variance() {
-        let data = array![[1.0, 2.0], [1.0, 3.0], [1.0, 4.0],];
-
-        let config = IceConfig {
-            feature_index: 0, // All values are 1.0
-            ..Default::default()
-        };
-
-        let result = compute_ice_curves(data.view(), linear_predict, &config);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_ice_display() {
         let data = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0],];
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 5,
+            grid_resolution: Some(5),
             feature_name: Some("test_feature".to_string()),
             ..Default::default()
         };
@@ -897,7 +871,7 @@ mod tests {
 
         let config = IceConfig {
             feature_index: 0,
-            grid_resolution: 3,
+            grid_resolution: Some(3),
             center: false,
             ..Default::default()
         };
@@ -908,5 +882,300 @@ mod tests {
         // Different x1 values mean different slopes when varying x0
         assert!(result.ice_spread.std_dev.iter().any(|&s| s > 0.0));
         assert!(result.ice_spread.range.iter().any(|&r| r > 0.0));
+    }
+
+    fn lm_view_closure(b: &[f64]) -> impl Fn(ArrayView2<f64>) -> Vec<f64> + Copy + '_ {
+        move |m: ArrayView2<f64>| m.rows().into_iter().map(|r| pdp_lm_value(b, r)).collect()
+    }
+
+    fn flat(a: &Array2<f64>) -> Vec<f64> {
+        a.iter().copied().collect() // standard layout: row-major, observation slowest (as the case stores it)
+    }
+
+    /// pdp::partial(ice = TRUE[, center = TRUE]) on an unsorted user grid: the grid is sorted (order_grid) and the
+    /// centred curves start at the smallest grid value. Before: the grid kept the user's order, anchored at 1.3.
+    #[test]
+    fn test_validate_pdp_lm_ice_custom_grid() {
+        let (case, ds) = crate::test_support::load_case("pdp_lm");
+        let x = matrix(&ds, &["x1", "x2", "x3"]);
+        let b = pdp_lm_coef(&case);
+        let config = IceConfig {
+            grid_values: Some(case.vector("ice_user_grid")), // 1.3, -1.7, 0.25, -0.6, 1.9
+            ..Default::default()
+        };
+        let ice = compute_ice_curves(x.view(), lm_view_closure(&b), &config).unwrap();
+        let config = IceConfig {
+            center: true,
+            ..config
+        };
+        let cice = compute_ice_curves(x.view(), lm_view_closure(&b), &config).unwrap();
+        Check::new(&case)
+            .vector("ice_sorted_grid", &ice.grid_values, Tol::exact())
+            .vector("ice_custom_yhat", &flat(&ice.ice_curves), PD_TOL)
+            .vector("ice_custom_pd", &ice.pdp_curve, PD_TOL)
+            .vector("ice_sorted_grid", &cice.grid_values, Tol::exact())
+            .vector("cice_custom_yhat", &flat(&cice.ice_curves), PD_TOL)
+            .vector("cice_custom_pd", &cice.pdp_curve, PD_TOL)
+            .finish();
+    }
+
+    /// The 8-point uniform ICE grid and the spread statistics: population SD, range, IQR type 7.
+    #[test]
+    fn test_validate_pdp_lm_ice_uniform() {
+        let (case, ds) = crate::test_support::load_case("pdp_lm");
+        let x = matrix(&ds, &["x1", "x2", "x3"]);
+        let b = pdp_lm_coef(&case);
+        let config = IceConfig {
+            grid_resolution: Some(8),
+            ..Default::default()
+        };
+        let r = compute_ice_curves(x.view(), lm_view_closure(&b), &config).unwrap();
+        let d = compute_ice_curves(x.view(), lm_view_closure(&b), &IceConfig::default()).unwrap();
+        Check::new(&case)
+            .vector("ice_uniform_grid", &r.grid_values, Tol::exact())
+            .vector("ice_uniform_yhat", &flat(&r.ice_curves), PD_TOL)
+            .vector("ice_uniform_pd", &r.pdp_curve, PD_TOL)
+            .vector("ice_uniform_sd_pop", &r.ice_spread.std_dev, PD_TOL)
+            .vector("ice_uniform_range", &r.ice_spread.range, PD_TOL)
+            .vector("ice_uniform_iqr7", &r.ice_spread.iqr, PD_TOL)
+            // the default grid: pdp's min(length(unique(x)), 51) points
+            .vector("pd_default_grid", &d.grid_values, Tol::exact())
+            .vector("pd_default_yhat", &d.pdp_curve, PD_TOL)
+            .finish();
+    }
+
+    /// Centred ICE for a feature on the 1e-12 scale (was Err "Feature 0 has no variance").
+    #[test]
+    fn test_validate_pdp_small_scale_cice() {
+        let (case, ds) = crate::test_support::load_case("pdp_small_scale");
+        let x = matrix(&ds, &["x", "z"]);
+        let b = case.by_names("coef", &["(Intercept)", "x", "z"]);
+        let config = IceConfig {
+            grid_resolution: Some(6),
+            center: true,
+            ..Default::default()
+        };
+        let f = |m: ArrayView2<f64>| -> Vec<f64> {
+            m.rows()
+                .into_iter()
+                .map(|r| small_scale_value(&b, r))
+                .collect()
+        };
+        let r = compute_ice_curves(x.view(), f, &config).unwrap();
+        Check::new(&case)
+            .vector("cice_uniform_grid", &r.grid_values, Tol::exact())
+            .vector("cice_uniform_yhat", &flat(&r.ice_curves), PD_TOL)
+            .finish();
+    }
+
+    /// An empty or non-finite custom grid is an error (it reached the centring step, or gave an empty PDP).
+    #[test]
+    fn test_ice_empty_custom_grid_is_error() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2]];
+        for center in [true, false] {
+            let config = IceConfig {
+                grid_values: Some(vec![]),
+                center,
+                ..Default::default()
+            };
+            let e = compute_ice_curves(x.view(), linear_predict, &config).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message }
+                    if message.contains("grid_values must contain at least one value")),
+                "{e}"
+            );
+        }
+        let config = IceConfig {
+            grid_values: Some(vec![1.0, f64::NAN]),
+            ..Default::default()
+        };
+        let e = compute_ice_curves(x.view(), linear_predict, &config).unwrap_err();
+        assert!(e.to_string().contains("grid_values must be finite"), "{e}");
+    }
+
+    /// A GBM whose prediction fails is an error, not all-zero curves.
+    #[test]
+    fn test_ice_gbm_prediction_error_propagates() {
+        let (x, y) = two_feature_data();
+        let gc = crate::ml::GbmConfig {
+            n_trees: 5,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let mut fit = crate::ml::gbm(x.view(), y.view(), &gc).unwrap();
+        fit.trees.clear(); // a GBM without fitted trees: gbm_predict errs
+        let e = ice_curves_gbm(x.view(), &fit, 0, Some(5), None).unwrap_err();
+        assert!(e.to_string().contains("no fitted trees"), "{e}");
+    }
+
+    /// Data with fewer columns than the model was fitted on is an error, not an out-of-bounds index in the
+    /// trees' traversal (every tree here splits on column 1 first).
+    #[test]
+    fn test_ice_model_wrappers_refuse_column_mismatch() {
+        let (x, y) = two_feature_data();
+        let narrow = x.slice(ndarray::s![.., 0..1]);
+        let gc = crate::ml::GbmConfig {
+            n_trees: 5,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let gfit = crate::ml::gbm(x.view(), y.view(), &gc).unwrap();
+        let cfit = crate::ml::cart(x.view(), y.view(), &crate::ml::CartConfig::default()).unwrap();
+        for e in [
+            ice_curves_gbm(narrow, &gfit, 0, Some(4), None).unwrap_err(),
+            ice_curves_cart(narrow, &cfit, 0, Some(4), None).unwrap_err(),
+        ] {
+            assert!(
+                e.to_string()
+                    .contains("was fitted on 2 features; the data has 1 columns"),
+                "{e}"
+            );
+        }
+    }
+
+    /// frac_to_plot NaN refused (was silently 1); grid_resolution 0 refused, 1 accepted (pdp's
+    /// seq(length.out = 1)); a constant feature gives a one-point grid (was Err "has no variance"), as pdp.
+    #[test]
+    fn test_ice_parameter_rules() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2]];
+        let c = IceConfig {
+            frac_to_plot: f64::NAN,
+            ..Default::default()
+        };
+        assert!(
+            compute_ice_curves(x.view(), linear_predict, &c)
+                .unwrap_err()
+                .to_string()
+                .contains("frac_to_plot must be in (0, 1]")
+        );
+        let c = IceConfig {
+            grid_resolution: Some(0),
+            ..Default::default()
+        };
+        assert!(
+            compute_ice_curves(x.view(), linear_predict, &c)
+                .unwrap_err()
+                .to_string()
+                .contains("grid_resolution must be at least 1")
+        );
+        let c = IceConfig {
+            grid_resolution: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            compute_ice_curves(x.view(), linear_predict, &c)
+                .unwrap()
+                .grid_values,
+            vec![1.0]
+        );
+        let flat_x = array![[1.0, 2.0], [1.0, 3.5], [1.0, 3.9]];
+        let c = IceConfig {
+            center: true,
+            ..Default::default()
+        };
+        let r = compute_ice_curves(flat_x.view(), linear_predict, &c).unwrap();
+        assert_eq!(r.grid_values, vec![1.0]);
+        assert!(r.ice_curves.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_ice_prediction_error_propagates() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2]];
+        let calls = std::cell::Cell::new(0);
+        let failing = |m: ArrayView2<f64>| -> EconResult<Vec<f64>> {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                Err(EconError::Computation("model failed".into()))
+            } else {
+                Ok(linear_predict(m))
+            }
+        };
+        let e = try_compute_ice_curves(x.view(), failing, &IceConfig::default()).unwrap_err();
+        assert!(matches!(&e, EconError::Computation(m) if m == "model failed"));
+        assert_eq!(calls.get(), 2);
+    }
+
+    /// A NaN prediction gives NaN spread statistics at its grid point and leaves the others alone.
+    #[test]
+    fn test_ice_spread_nan_column() {
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.9], [4.0, 5.2]];
+        let f = |m: ArrayView2<f64>| -> Vec<f64> {
+            (0..m.nrows())
+                .map(|i| {
+                    if m[[i, 0]] == 2.0 && i == 1 {
+                        f64::NAN
+                    } else {
+                        linear_predict(m)[i]
+                    }
+                })
+                .collect()
+        };
+        let c = IceConfig {
+            grid_values: Some(vec![1.0, 2.0, 3.0]),
+            ..Default::default()
+        };
+        let r = compute_ice_curves(x.view(), f, &c).unwrap();
+        for spread in [
+            &r.ice_spread.std_dev,
+            &r.ice_spread.range,
+            &r.ice_spread.iqr,
+        ] {
+            assert!(spread[1].is_nan());
+            assert!(spread[0].is_finite() && spread[2].is_finite());
+        }
+    }
+
+    /// ice_curves_rf on a RandomForestModel (it always returned an error): every ICE value is the forest's tree
+    /// average on the modified row, and at an observation's own x1 it is that observation's fitted value, bit for
+    /// bit. A property, so it reads the data directly and pins no R value.
+    #[test]
+    fn test_ice_curves_rf_uses_forest_predictions() {
+        let (x, y) = pdp_lm_data();
+        let model = crate::ml::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(20),
+            Some(6),
+            None,
+            None,
+            Some(11),
+            None,
+        )
+        .unwrap();
+        let r = ice_curves_rf(x.view(), &model, 0, Some(6), None).unwrap();
+        for i in 0..x.nrows() {
+            for (g, &v) in r.grid_values.iter().enumerate() {
+                let mut row = x.row(i).to_owned();
+                row[0] = v;
+                let want = model
+                    .trees
+                    .iter()
+                    .map(|t| t.predict_one(&row.view()))
+                    .sum::<f64>()
+                    / model.trees.len() as f64;
+                assert_eq!(r.ice_curves[[i, g]].to_bits(), want.to_bits());
+            }
+        }
+        let own = IceConfig {
+            grid_values: Some(x.column(0).to_vec()),
+            ..Default::default()
+        };
+        let f = crate::ml::pdp::forest_predictor(&model, 3).unwrap();
+        let r = try_compute_ice_curves(x.view(), |v| f(&v.to_owned()), &own).unwrap();
+        for i in 0..x.nrows() {
+            let g = r.grid_values.iter().position(|&v| v == x[[i, 0]]).unwrap();
+            assert_eq!(
+                r.ice_curves[[i, g]].to_bits(),
+                model.predictions[i].to_bits()
+            );
+        }
+        // wrong column count
+        let e =
+            ice_curves_rf(x.slice(ndarray::s![.., 0..2]), &model, 0, Some(6), None).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("was fitted on 3 features; the data has 2 columns"),
+            "{e}"
+        );
     }
 }

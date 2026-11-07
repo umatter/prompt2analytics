@@ -45,6 +45,34 @@
         }
       ],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ice_curves",
+      "name": "ICE and centred ICE curves (pdp::partial(ice = TRUE, center = TRUE)), with the per-point spread statistics",
+      "category": "ml",
+      "reference": "pdp::partial(ice = TRUE, center = TRUE) (pdp 0.8.3): curves on the sorted pred.grid, centred at the smallest grid value; population SD, range and stats::IQR (type 7) per grid point",
+      "doc": "validation/ml/pdp.md",
+      "cases": [
+        "pdp_lm",
+        "pdp_small_scale"
+      ],
+      "tests": [
+        "p2a-core::ml::ice::tests::test_validate_pdp_lm_ice_custom_grid",
+        "p2a-core::ml::ice::tests::test_validate_pdp_lm_ice_uniform",
+        "p2a-core::ml::ice::tests::test_validate_pdp_small_scale_cice"
+      ],
+      "quantities": [
+        "unsorted user grid sorted as order_grid",
+        "ICE curves and their mean on the user grid",
+        "centred ICE curves and their mean",
+        "8-point uniform ICE grid, curves and mean",
+        "per-point population SD, range and IQR (type 7)",
+        "default grid min(length(unique(x)), 51) and the mean of its curves",
+        "centred ICE for a 1e-12-scale feature"
+      ],
+      "tolerance": "grids exact; curves, means and spread statistics 1e-12 relative + 1e-12 absolute (closed-form lm predictions)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

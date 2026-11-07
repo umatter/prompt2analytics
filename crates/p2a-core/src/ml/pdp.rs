@@ -94,6 +94,7 @@ use ndarray::{Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
+use crate::ml::{CartResult, GbmResult, RandomForestModel};
 use crate::resource::{checked_len, checkpoint, try_vec, try_with_capacity};
 use crate::stats::robust::{QuantileType, quantile_sorted};
 
@@ -875,6 +876,68 @@ where
     })
 }
 
+// ---------------------------------------------------------------------------
+// Model adapters for the engine.
+// ---------------------------------------------------------------------------
+
+fn check_model_columns(model: &str, fitted: usize, n_cols: usize) -> EconResult<()> {
+    if fitted != n_cols {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the {model} model was fitted on {fitted} features; the data has {n_cols} columns"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The prediction function of a fitted GBM. Refuses a model without trees and data whose column count differs
+/// from the training data (the length of the per-feature importance vector); prediction errors propagate.
+pub(crate) fn gbm_predictor(
+    fit: &GbmResult,
+    n_cols: usize,
+) -> EconResult<impl Fn(&Array2<f64>) -> EconResult<Vec<f64>> + '_> {
+    if fit.trees.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message:
+                "the GBM model has no fitted trees; partial dependence and ICE need a fitted model"
+                    .to_string(),
+        });
+    }
+    check_model_columns("GBM", fit.feature_importances.len(), n_cols)?;
+    Ok(move |m: &Array2<f64>| crate::ml::gbm_predict(fit, m.view()))
+}
+
+/// The prediction function of a fitted CART, with the column check of [`gbm_predictor`].
+pub(crate) fn cart_predictor(
+    fit: &CartResult,
+    n_cols: usize,
+) -> EconResult<impl Fn(&Array2<f64>) -> EconResult<Vec<f64>> + '_> {
+    check_model_columns("CART", fit.variable_importance.len(), n_cols)?;
+    Ok(move |m: &Array2<f64>| crate::ml::cart_predict(fit, m.view()))
+}
+
+/// The mean of a forest's tree predictions, computed as `random_forest_with_trees` computes `predictions`, so a
+/// training row gives its fitted value bit for bit. Refuses a forest without trees and the wrong column count.
+pub(crate) fn forest_predictor(
+    model: &RandomForestModel,
+    n_cols: usize,
+) -> EconResult<impl Fn(&Array2<f64>) -> EconResult<Vec<f64>> + '_> {
+    if model.trees.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "the random forest model has no trees".to_string(),
+        });
+    }
+    check_model_columns("random forest", model.feature_importances.len(), n_cols)?;
+    Ok(move |m: &Array2<f64>| {
+        let mut out = try_with_capacity::<f64>(m.nrows(), "random forest predictions")?;
+        out.extend(m.rows().into_iter().map(|row| {
+            model.trees.iter().map(|t| t.predict_one(&row)).sum::<f64>() / model.trees.len() as f64
+        }));
+        Ok(out)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_fixtures::*;
@@ -1410,6 +1473,36 @@ mod tests {
         calls.set(0);
         let e = try_partial_dependence_2d(&x, 0, 1, failing, &c).unwrap_err();
         assert!(matches!(&e, EconError::Computation(m) if m == "model failed"));
+    }
+
+    /// The adapters' training column count is the importance vector length; fails if a model rewrite changes that.
+    #[test]
+    fn test_model_feature_counts_match_training_columns() {
+        let (x, y) = two_feature_data();
+        let gc = crate::ml::GbmConfig {
+            n_trees: 3,
+            seed: Some(1),
+            ..Default::default()
+        };
+        let gfit = crate::ml::gbm(x.view(), y.view(), &gc).unwrap();
+        let cfit = crate::ml::cart(x.view(), y.view(), &crate::ml::CartConfig::default()).unwrap();
+        let rf = crate::ml::random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(3),
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap();
+        assert!(gbm_predictor(&gfit, 2).is_ok());
+        assert!(cart_predictor(&cfit, 2).is_ok());
+        assert!(forest_predictor(&rf, 2).is_ok());
+        assert!(gbm_predictor(&gfit, 3).is_err());
+        assert!(cart_predictor(&cfit, 1).is_err());
+        assert!(forest_predictor(&rf, 3).is_err());
     }
 }
 
