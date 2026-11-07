@@ -11,6 +11,7 @@
         "ml_xgboost_l1"
       ],
       "tests": [
+        "p2a-core::ml::xgboost::tests::test_validate_xgboost_exact_l1",
         "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_stump",
         "p2a-core::ml::xgboost_fast::tests::test_validate_fast_xgboost_l1_four_rounds"
       ],

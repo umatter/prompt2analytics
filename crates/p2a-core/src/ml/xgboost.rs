@@ -9,7 +9,8 @@
 //! - **Second-order optimization**: Uses both gradient (g) and hessian (h) for tree construction
 //! - **Regularized objective**: Includes gamma (split penalty) and lambda (L2 weight penalty)
 //! - **Optimal leaf weights**: Analytically computed as w* = -G / (H + lambda)
-//! - **Split gain formula**: Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G+H)^2/(H+lambda)] - gamma
+//! - **Split gain formula**: Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G+H)^2/(H+lambda)] - gamma,
+//!   with G replaced by ThresholdL1(G, alpha) when alpha > 0 (XGBoost CalcGain)
 //!
 //! ## Example
 //!
@@ -36,8 +37,8 @@
 //! ## References
 //!
 //! - Chen, T., & Guestrin, C. (2016). "XGBoost: A Scalable Tree Boosting System".
-//!   Proceedings of the 22nd ACM SIGKDD, 785-794. https://doi.org/10.1145/2939672.2939785
-//! - XGBoost Documentation: https://xgboost.readthedocs.io/en/stable/tutorials/model.html
+//!   Proceedings of the 22nd ACM SIGKDD, 785-794. <https://doi.org/10.1145/2939672.2939785>
+//! - XGBoost Documentation: <https://xgboost.readthedocs.io/en/stable/tutorials/model.html>
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
@@ -263,6 +264,7 @@ impl std::fmt::Display for XGBoostResult {
         writeln!(f, "Learning rate: {:.4}", self.config.learning_rate)?;
         writeln!(f, "Max depth: {}", self.config.max_depth)?;
         writeln!(f, "Lambda (L2): {:.4}", self.config.lambda)?;
+        writeln!(f, "Alpha (L1): {:.4}", self.config.alpha)?;
         writeln!(f, "Gamma (min split gain): {:.4}", self.config.gamma)?;
 
         if self.config.subsample < 1.0 {
@@ -304,7 +306,7 @@ impl std::fmt::Display for XGBoostResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
@@ -447,30 +449,32 @@ pub(super) fn check_finite_xy(x: ArrayView2<f64>, y: ArrayView1<f64>) -> EconRes
     Ok(())
 }
 
+/// XGBoost's ThresholdL1: the sum of gradients soft-thresholded by alpha.
+#[inline]
+fn threshold_l1(g: f64, alpha: f64) -> f64 {
+    if g > alpha {
+        g - alpha
+    } else if g < -alpha {
+        g + alpha
+    } else {
+        0.0
+    }
+}
+
 /// Optimal leaf weight with L1 and L2 regularization.
-/// w* = -G / (H + lambda) with L1 soft thresholding
-/// Reference: Chen & Guestrin (2016), Equation 5
+/// w* = -ThresholdL1(G, alpha) / (H + lambda)
+/// Reference: Chen & Guestrin (2016), Equation 5; XGBoost CalcWeight
 #[inline]
 fn optimal_weight(g_sum: f64, h_sum: f64, lambda: f64, alpha: f64) -> f64 {
     if h_sum < 1e-10 {
         return 0.0;
     }
-
-    // L1 soft thresholding
-    let g_thresh = if g_sum > alpha {
-        g_sum - alpha
-    } else if g_sum < -alpha {
-        g_sum + alpha
-    } else {
-        return 0.0;
-    };
-
-    -g_thresh / (h_sum + lambda)
+    -threshold_l1(g_sum, alpha) / (h_sum + lambda)
 }
 
-/// Compute split gain.
-/// Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G_L+G_R)^2/(H_L+H_R+lambda)] - gamma
-/// Reference: Chen & Guestrin (2016), Equation 7
+/// Compute split gain on the thresholded sums, T = ThresholdL1(., alpha).
+/// Gain = 0.5 * [T(G_L)^2/(H_L+lambda) + T(G_R)^2/(H_R+lambda) - T(G_L+G_R)^2/(H_L+H_R+lambda)] - gamma
+/// Reference: Chen & Guestrin (2016), Equation 7; XGBoost CalcGain
 #[inline]
 fn split_gain(
     g_left: f64,
@@ -478,29 +482,20 @@ fn split_gain(
     g_right: f64,
     h_right: f64,
     lambda: f64,
+    alpha: f64,
     gamma: f64,
 ) -> f64 {
-    let score_left = if h_left > 0.0 {
-        g_left * g_left / (h_left + lambda)
-    } else {
-        0.0
-    };
-    let score_right = if h_right > 0.0 {
-        g_right * g_right / (h_right + lambda)
-    } else {
-        0.0
-    };
-    let score_parent = {
-        let g_total = g_left + g_right;
-        let h_total = h_left + h_right;
-        if h_total > 0.0 {
-            g_total * g_total / (h_total + lambda)
+    let score = |g: f64, h: f64| {
+        if h > 0.0 {
+            let t = threshold_l1(g, alpha);
+            t * t / (h + lambda)
         } else {
             0.0
         }
     };
-
-    0.5 * (score_left + score_right - score_parent) - gamma
+    0.5 * (score(g_left, h_left) + score(g_right, h_right)
+        - score(g_left + g_right, h_left + h_right))
+        - gamma
 }
 
 /// Build an XGBoost tree using exact greedy algorithm.
@@ -544,7 +539,7 @@ fn build_tree(
     for &feature in feature_indices {
         // Sort indices by feature value
         let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
-        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         // Scan with incremental sums - O(n) after sorting
         let mut g_left = 0.0;
@@ -575,6 +570,7 @@ fn build_tree(
                 g_right,
                 h_right,
                 config.lambda,
+                config.alpha,
                 config.gamma,
             );
 
@@ -704,6 +700,16 @@ pub fn xgboost(
             "X and y must have same number of samples".to_string(),
         ));
     }
+
+    if !config.alpha.is_finite() || config.alpha < 0.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "alpha must be finite and non-negative (got {})",
+                config.alpha
+            ),
+        });
+    }
+    check_finite_xy(x, y)?;
 
     // Validate binary targets for classification
     if config.objective == XGBoostObjective::BinaryLogistic {
@@ -922,7 +928,21 @@ pub fn run_xgboost_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
     use ndarray::array;
+    use p2a_validation::{Check, Tol};
+
+    fn case_matrix(ds: &crate::data::Dataset, cols: &[&str]) -> Array2<f64> {
+        let mut m = Array2::zeros((ds.nrows(), cols.len()));
+        for (j, c) in cols.iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            m.column_mut(j).assign(&Array1::from_vec(v));
+        }
+        m
+    }
+    fn case_vector(ds: &crate::data::Dataset, col: &str) -> Array1<f64> {
+        Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
 
     #[test]
     fn test_xgboost_regression_basic() {
@@ -1007,49 +1027,81 @@ mod tests {
 
     #[test]
     fn test_xgboost_regularization() {
-        // Test that regularization actually affects the model
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0],
-            [9.0],
-            [10.0]
-        ];
-        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        // y = x = 1..10, base 5.5, one depth-1 round, eta 0.3. The best split is x <= 5.5 for every
+        // setting below (score k(10 - k)/2 per side); G_L = 12.5 over 5 rows, G_R = -12.5.
+        let x = Array2::from_shape_fn((10, 1), |(i, _)| (i + 1) as f64);
+        let y = Array1::from_shape_fn(10, |i| (i + 1) as f64);
+        for (lambda, alpha, gamma, w) in [
+            (0.0, 0.0, 0.0, 2.5),          // 12.5 / 5
+            (10.0, 0.0, 1.0, 12.5 / 15.0), // 12.5 / (5 + 10); gain 0.5 * 20.83 - 1 > 0
+            (0.0, 10.0, 0.0, 0.5),         // ThresholdL1(12.5, 10) / 5
+        ] {
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 1;
+            c.max_depth = 1;
+            c.learning_rate = 0.3;
+            c.lambda = lambda;
+            c.alpha = alpha;
+            c.gamma = gamma;
+            c.min_child_weight = 0.0;
+            let r = xgboost(x.view(), y.view(), &c).unwrap();
+            for i in 0..10 {
+                let want = if i < 5 { 5.5 - 0.3 * w } else { 5.5 + 0.3 * w };
+                assert!(
+                    (r.predictions[i] - want).abs() < 1e-12,
+                    "lambda {lambda} alpha {alpha}: {} vs {want}",
+                    r.predictions[i]
+                );
+            }
+        }
+    }
 
-        // No regularization
-        let config_noreg = XGBoostConfig {
-            n_estimators: 20,
-            learning_rate: 0.3,
-            max_depth: 3,
-            lambda: 0.0,
-            gamma: 0.0,
-            ..Default::default()
-        };
+    #[test]
+    fn test_validate_xgboost_exact_l1() {
+        let (case, ds) = crate::test_support::load_case("ml_xgboost_l1");
+        let x = case_matrix(&ds, &["x1", "x2"]);
+        let y = case_vector(&ds, "y");
+        let mut chk = Check::new(&case);
+        for (alpha, pred, root) in [
+            (0.0, "exact_a0_pred", "exact_a0_root"),
+            (3.0, "exact_a3_pred", "exact_a3_root"),
+        ] {
+            let mut c = XGBoostConfig::default();
+            c.n_estimators = 3;
+            c.max_depth = 2;
+            c.learning_rate = 0.3;
+            c.lambda = 1.0;
+            c.alpha = alpha;
+            c.gamma = 0.0;
+            c.min_child_weight = 1.0;
+            let r = xgboost(x.view(), y.view(), &c).unwrap();
+            let XGBoostNode::Split {
+                feature,
+                threshold,
+                gain,
+                ..
+            } = &r.trees[0].root
+            else {
+                panic!("root is a leaf")
+            };
+            chk.vector(pred, &r.predictions, Tol::coef(16)).vector(
+                root,
+                &[*feature as f64, *threshold, *gain],
+                Tol::coef(16),
+            );
+        }
+        chk.finish();
+    }
 
-        // Strong regularization
-        let config_reg = XGBoostConfig {
-            n_estimators: 20,
-            learning_rate: 0.3,
-            max_depth: 3,
-            lambda: 10.0,
-            gamma: 1.0,
-            ..Default::default()
-        };
-
-        let result_noreg = xgboost(x.view(), y.view(), &config_noreg).unwrap();
-        let result_reg = xgboost(x.view(), y.view(), &config_reg).unwrap();
-
-        // Regularized model should have higher training error (less overfitting)
-        // This is expected behavior - regularization trades training accuracy for generalization
-        // Note: With only 10 samples, both models may fit well, so we just check they run
-        assert!(result_noreg.final_train_rmse >= 0.0);
-        assert!(result_reg.final_train_rmse >= 0.0);
+    #[test]
+    fn test_split_gain_on_thresholded_sums() {
+        // 0.5 * [T(GL)^2/(HL+l) + T(GR)^2/(HR+l) - T(G)^2/(H+l)] - gamma, T = ThresholdL1(., alpha)
+        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.0) - 4.0 / 3.0).abs() < 1e-13);
+        assert!((split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 1.0, 0.0) - 7.0 / 30.0).abs() < 1e-13);
+        assert!((split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0, 0.0) - (-5.0 / 3.0)).abs() < 1e-13);
+        assert!(
+            (split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.5) - (4.0 / 3.0 - 0.5)).abs() < 1e-13
+        );
     }
 
     #[test]
@@ -1200,14 +1252,14 @@ mod tests {
     fn test_split_gain() {
         // Test the split gain calculation
         // Gain = 0.5 * [G_L^2/(H_L+lambda) + G_R^2/(H_R+lambda) - (G+H)^2/(H+lambda)] - gamma
-        let gain = split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0);
+        let gain = split_gain(-5.0, 2.0, -5.0, 2.0, 1.0, 0.0, 0.0);
         // Left: (-5)^2 / (2+1) = 25/3
         // Right: (-5)^2 / (2+1) = 25/3
         // Parent: (-10)^2 / (4+1) = 100/5 = 20
         // Gain = 0.5 * (25/3 + 25/3 - 20) - 0 = 0.5 * (50/3 - 20) = 0.5 * (-10/3) < 0
 
         // A good split should have positive gain
-        let good_gain = split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0);
+        let good_gain = split_gain(-8.0, 2.0, -2.0, 2.0, 1.0, 0.0, 0.0);
         // This represents a split where one side has much stronger gradient
         // Should have positive gain
         assert!(good_gain > 0.0, "Good split should have positive gain");
