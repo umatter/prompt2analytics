@@ -411,14 +411,14 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | Cochran-Mantel-Haenszel Test | [mantelhaen_test.md](stats/mantelhaen_test.md) | R-pinned |
 | Shapiro-Wilk normality test | [shapiro_wilk.md](stats/shapiro_wilk.md) | R-pinned |
 | t-tests (one-sample, Welch, pooled, paired) | [hypothesis_tests.md](stats/hypothesis_tests.md) | R-pinned |
-| Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-27) |
+| Kolmogorov-Smirnov test | [ks_test.md](stats/ks_test.md) | R-pinned, known deviations (STAT-26, STAT-27) |
 | Mood test of scale | [mood.md](stats/mood.md) | R-pinned, known deviations (STAT-29) |
 | Ansari-Bradley test of scale | [ansari.md](stats/ansari.md) | R-pinned, known deviations (STAT-12, STAT-13, STAT-14, STAT-79) |
 | Exact binomial test | [binom.md](stats/binom.md) | R-pinned, known deviations (STAT-15) |
 | Bartlett, Fligner-Killeen and F tests of variances | [bartlett.md](stats/bartlett.md) | R-pinned |
 | Pairwise t-tests | [pairwise_t_test.md](stats/pairwise_t_test.md) | R-pinned |
-| Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned |
-| Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned |
+| Pearson correlation test (cor.test, two-sided) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
+| Chi-squared test for trend in proportions (prop.trend.test) | [new_methods.md](stats/new_methods.md) | R-pinned, known deviations (X-3) |
 | Mahalanobis distance | [mahalanobis.md](multivariate/mahalanobis.md) | R-pinned, known deviations (TOOL-10) |
 | Weighted mean and covariance (weighted.mean, cov.wt) | [weighted.md](stats/weighted.md) | R-pinned, known deviations (TOOL-23) |
 | Mauchly's sphericity test | [mauchly.md](stats/mauchly.md) | R-pinned, known deviations (STAT-82) |
