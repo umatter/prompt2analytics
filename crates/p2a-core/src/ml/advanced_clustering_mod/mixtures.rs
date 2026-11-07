@@ -497,7 +497,7 @@ pub fn flexmix_with(
                 .map(|(wi, r)| wi * r * r)
                 .sum();
             let mut s = (wrss / (mean_w * (n - rank) as f64)).sqrt();
-            if !(s >= floor) {
+            if s.is_nan() || s < floor {
                 s = floor;
                 if !degenerate.contains(&orig[j]) {
                     degenerate.push(orig[j]);
