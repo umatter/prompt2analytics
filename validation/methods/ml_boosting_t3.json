@@ -23,6 +23,35 @@
       "tolerance": "validation/README.md, n = 16: 1e-6 relative; split feature and bin exact",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_mboost",
+      "name": "Component-wise boosting with bols learners: Gaussian, Binomial(), Binomial(type = 'glm'), Poisson; least-squares tree learner",
+      "category": "ml",
+      "reference": "mboost(y ~ bols(x1) + bols(x2) + bols(x3)) published family definitions (mboost 2.9 R/family.R) written out in R; stats::lm and stats::glm for the limits; the tree learner is p2a's own least-squares tree written out in R, a self-consistency check, not R-pinned (mboost's btree is ctree-based)",
+      "doc": "validation/ml/mboost.md",
+      "cases": [
+        "ml_mboost_bols"
+      ],
+      "tests": [
+        "p2a-core::ml::mboost::tests::test_validate_mboost_gaussian_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_binomial_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_binomial_glm_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_poisson_path",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_converged_limits"
+      ],
+      "quantities": [
+        "offset",
+        "first step",
+        "coefficients and intercept after 100 steps",
+        "selection counts",
+        "fitted responses",
+        "converged coefficients (lm, glm, glm / 2)",
+        "tree-learner fits at depth 1 and 2"
+      ],
+      "tolerance": "100-step paths and tree fits: validation/README.md, n = 200: 1e-8 relative; 2000-step paths and limits: 1e-6 relative (iterative)",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -1,6 +1,8 @@
 //! Model-based Gradient Boosting (mboost).
 //!
-//! Pure Rust implementation of component-wise gradient boosting, equivalent to R's mboost package.
+//! Component-wise gradient boosting after R's mboost: the linear learner is mboost's bols(xj) with
+//! an intercept; the families are Gaussian(), Binomial() (default), Binomial(type = "glm") and
+//! Poisson().
 //! This approach differs from traditional gradient boosting (like GBM) by updating only one
 //! component (variable) per iteration, providing automatic variable selection.
 //!
@@ -55,7 +57,9 @@
 //!   boosting in R: A hands-on tutorial using the R package mboost.
 //!   Computational Statistics, 29(1-2), 3-35.
 //!
-//! Implementation validated against R package mboost 2.9-11.
+//! Pinned to mboost's family definitions written out in R (validation/ml/mboost.md); the mboost
+//! package is not a dependency of those runs. The tree learner is a least-squares tree, not
+//! mboost's ctree-based btree.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use serde::{Deserialize, Serialize};
@@ -73,32 +77,50 @@ pub enum MboostFamily {
     /// Negative gradient: y - f(x)
     #[default]
     Gaussian,
-    /// Binomial (log-loss) for binary classification.
-    /// Negative gradient: y - sigmoid(f(x))
+    /// mboost's default Binomial(): y coded -1/+1, f = log-odds / 2, negative gradient
+    /// 2 y exp(-2 y f) / (ln 2 (1 + exp(-2 y f))), offset log(p / (1 - p)) / 2; coefficients are
+    /// half of glm's at convergence.
     Binomial,
+    /// mboost Binomial(type = "glm", link = "logit"): y in {0, 1}, f = log-odds, negative gradient
+    /// y - p, offset qlogis(mean((y + 0.5) / 2)); coefficients on glm's scale.
+    BinomialGlm,
     /// Poisson (negative log-likelihood) for count data.
     /// Negative gradient: y - exp(f(x))
     Poisson,
 }
 
-impl std::str::FromStr for MboostFamily {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "gaussian" | "normal" | "squared_error" | "mse" => Ok(MboostFamily::Gaussian),
-            "binomial" | "logistic" | "bernoulli" => Ok(MboostFamily::Binomial),
-            "poisson" | "count" => Ok(MboostFamily::Poisson),
-            _ => Err(format!("Unknown mboost family: {}", s)),
-        }
-    }
-}
+crate::option_enum!(
+    MboostFamily,
+    crate::options::Choices {
+        option: "family",
+        values: &[
+            (
+                &["gaussian", "normal", "squared_error", "mse"],
+                MboostFamily::Gaussian
+            ),
+            (
+                &[
+                    "binomial",
+                    "logistic",
+                    "bernoulli",
+                    "binomial_adaboost",
+                    "adaboost"
+                ],
+                MboostFamily::Binomial
+            ),
+            (&["binomial_glm", "glm"], MboostFamily::BinomialGlm),
+            (&["poisson", "count"], MboostFamily::Poisson),
+        ],
+    },
+    no_display
+);
 
 impl std::fmt::Display for MboostFamily {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MboostFamily::Gaussian => write!(f, "Gaussian"),
             MboostFamily::Binomial => write!(f, "Binomial"),
+            MboostFamily::BinomialGlm => write!(f, "Binomial (glm)"),
             MboostFamily::Poisson => write!(f, "Poisson"),
         }
     }
@@ -116,17 +138,17 @@ pub enum MboostBaseLearner {
     Tree,
 }
 
-impl std::str::FromStr for MboostBaseLearner {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "linear" | "bols" | "l2" => Ok(MboostBaseLearner::Linear),
-            "tree" | "btree" | "stump" => Ok(MboostBaseLearner::Tree),
-            _ => Err(format!("Unknown base learner: {}", s)),
-        }
-    }
-}
+crate::option_enum!(
+    MboostBaseLearner,
+    crate::options::Choices {
+        option: "base_learner",
+        values: &[
+            (&["linear", "bols", "l2"], MboostBaseLearner::Linear),
+            (&["tree", "btree", "stump"], MboostBaseLearner::Tree),
+        ],
+    },
+    no_display
+);
 
 impl std::fmt::Display for MboostBaseLearner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -275,6 +297,12 @@ impl std::fmt::Display for MboostResult {
         writeln!(f, "Model-based Boosting (mboost) Results")?;
         writeln!(f, "======================================")?;
         writeln!(f, "Family: {}", self.config.family)?;
+        if self.config.family == MboostFamily::Binomial {
+            writeln!(
+                f,
+                "Coefficients are on the half-log-odds scale of mboost Binomial()"
+            )?;
+        }
         writeln!(f, "Base learner: {}", self.config.base_learner)?;
         writeln!(f, "Iterations (mstop): {}", self.iterations)?;
         writeln!(f, "Learning rate (nu): {:.4}", self.config.nu)?;
@@ -305,7 +333,7 @@ impl std::fmt::Display for MboostResult {
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         for (i, importance) in indexed.iter().take(10) {
             if *importance > 0.0 {
@@ -352,6 +380,21 @@ fn sigmoid(x: f64) -> f64 {
     }
 }
 
+/// mboost Binomial()'s response: f = log-odds / 2, with |f| capped at 36 as mboost does.
+fn binomial_response(f: f64) -> f64 {
+    sigmoid(2.0 * f.clamp(-36.0, 36.0))
+}
+
+/// Response scale of the linear predictor.
+fn to_response(f: f64, family: MboostFamily) -> f64 {
+    match family {
+        MboostFamily::Gaussian => f,
+        MboostFamily::Binomial => binomial_response(f),
+        MboostFamily::BinomialGlm => sigmoid(f),
+        MboostFamily::Poisson => f.exp(),
+    }
+}
+
 /// Compute initial prediction (offset).
 fn compute_init_prediction(y: &ArrayView1<f64>, family: MboostFamily) -> f64 {
     match family {
@@ -360,9 +403,14 @@ fn compute_init_prediction(y: &ArrayView1<f64>, family: MboostFamily) -> f64 {
             y.iter().sum::<f64>() / y.len() as f64
         }
         MboostFamily::Binomial => {
-            // Log-odds of mean probability
+            // Half the log-odds of the mean
             let p = y.iter().sum::<f64>() / y.len() as f64;
             let p = p.clamp(1e-10, 1.0 - 1e-10);
+            0.5 * (p / (1.0 - p)).ln()
+        }
+        MboostFamily::BinomialGlm => {
+            // qlogis(mean((y + 0.5) / 2))
+            let p = y.iter().map(|&v| (v + 0.5) / 2.0).sum::<f64>() / y.len() as f64;
             (p / (1.0 - p)).ln()
         }
         MboostFamily::Poisson => {
@@ -390,6 +438,18 @@ fn compute_negative_gradient(
             }
         }
         MboostFamily::Binomial => {
+            // 2 s exp(-2 s f) / (ln 2 (1 + exp(-2 s f))) with s = 2 y - 1 in {-1, 1}
+            for i in 0..n {
+                let s = 2.0 * y[i] - 1.0;
+                let e = (-2.0 * s * predictions[i]).exp();
+                gradient[i] = if e.is_finite() {
+                    2.0 * s * e / (std::f64::consts::LN_2 * (1.0 + e))
+                } else {
+                    2.0 * s / std::f64::consts::LN_2 // the limit as e grows
+                };
+            }
+        }
+        MboostFamily::BinomialGlm => {
             // Negative gradient of log-loss: y - sigmoid(f(x))
             for i in 0..n {
                 let p = sigmoid(predictions[i]);
@@ -422,6 +482,17 @@ fn compute_loss(y: &ArrayView1<f64>, predictions: &Array1<f64>, family: MboostFa
                 / n
         }
         MboostFamily::Binomial => {
+            // mboost's loss: log-loss at p = sigmoid(2 f)
+            -y.iter()
+                .zip(predictions.iter())
+                .map(|(&yi, &pi)| {
+                    let p = binomial_response(pi);
+                    yi * p.max(1e-15).ln() + (1.0 - yi) * (1.0 - p).max(1e-15).ln()
+                })
+                .sum::<f64>()
+                / n
+        }
+        MboostFamily::BinomialGlm => {
             // Log-loss (negative log-likelihood)
             -y.iter()
                 .zip(predictions.iter())
@@ -712,7 +783,10 @@ pub fn mboost(
     let iters_plus_one = mstop_plus_one(config.mstop)?;
 
     // Validate binary targets for classification
-    if config.family == MboostFamily::Binomial {
+    if matches!(
+        config.family,
+        MboostFamily::Binomial | MboostFamily::BinomialGlm
+    ) {
         for &yi in y.iter() {
             if yi != 0.0 && yi != 1.0 {
                 return Err(EconError::Computation(
@@ -866,11 +940,7 @@ pub fn mboost(
         .collect();
 
     // Convert predictions to response scale for classification
-    let final_predictions = match config.family {
-        MboostFamily::Binomial => predictions.mapv(sigmoid).to_vec(),
-        MboostFamily::Poisson => predictions.mapv(|x| x.exp()).to_vec(),
-        MboostFamily::Gaussian => predictions.to_vec(),
-    };
+    let final_predictions = predictions.mapv(|f| to_response(f, config.family)).to_vec();
 
     Ok(MboostResult {
         coefficients,
@@ -1067,7 +1137,7 @@ pub fn mboost_cv(
     let cv_optimal_mstop = cv_error
         .iter()
         .enumerate()
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(i, _)| i)
         .unwrap_or(config.mstop);
 
@@ -1117,11 +1187,10 @@ pub fn mboost_predict(result: &MboostResult, x: ArrayView2<f64>) -> EconResult<V
         }
 
         // Convert to response scale
-        let final_preds = match result.config.family {
-            MboostFamily::Binomial => predictions.iter().map(|&p| sigmoid(p)).collect(),
-            MboostFamily::Poisson => predictions.iter().map(|&p| p.exp()).collect(),
-            MboostFamily::Gaussian => predictions,
-        };
+        let final_preds = predictions
+            .iter()
+            .map(|&f| to_response(f, result.config.family))
+            .collect();
 
         return Ok(final_preds);
     }
@@ -1195,6 +1264,159 @@ mod tests {
     use super::*;
     use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
     use ndarray::array;
+
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use p2a_validation::{Check, Tol};
+
+    fn case_matrix(ds: &crate::data::Dataset, cols: &[&str]) -> Array2<f64> {
+        let mut m = Array2::zeros((ds.nrows(), cols.len()));
+        for (j, c) in cols.iter().enumerate() {
+            let (v, _) = numeric_column(ds.df(), c, NaPolicy::Fail).unwrap();
+            m.column_mut(j).assign(&Array1::from_vec(v));
+        }
+        m
+    }
+    fn case_vector(ds: &crate::data::Dataset, col: &str) -> Array1<f64> {
+        Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+    /// The case's CSV for tests that use its data but none of its reference values.
+    fn mboost_sim() -> crate::data::Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/mboost_sim.csv");
+        crate::data::Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+    fn bols(
+        ds: &crate::data::Dataset,
+        y: &str,
+        family: MboostFamily,
+        mstop: usize,
+        nu: f64,
+    ) -> MboostResult {
+        let x = case_matrix(ds, &["x1", "x2", "x3"]);
+        let yv = case_vector(ds, y);
+        let mut c = MboostConfig::default();
+        c.mstop = mstop;
+        c.nu = nu;
+        c.family = family;
+        c.base_learner = MboostBaseLearner::Linear;
+        c.center = true;
+        mboost(x.view(), yv.view(), &c).unwrap()
+    }
+    fn check_path(case_id: &str, key: &str, y: &str, family: MboostFamily) {
+        let (case, ds) = crate::test_support::load_case(case_id);
+        let s = case.vector(&format!("{key}_step1")); // R: (variable, a, b, rss) of the first bols step
+        let j = s[0] as usize;
+        let zero = bols(&ds, y, family, 0, 0.1); // mstop 0 returns the offset
+        let one = bols(&ds, y, family, 1, 0.1);
+        let r = bols(&ds, y, family, 100, 0.1);
+        assert_eq!(one.selection_frequency[j], 1);
+        // p2a does not report the learner's RSS; s[3] is passed through so the vector compares element-wise
+        let step1 = [
+            j as f64,
+            (one.intercept - zero.intercept) / 0.1,
+            one.coefficients[j] / 0.1,
+            s[3],
+        ];
+        let sel: Vec<f64> = r.selection_frequency.iter().map(|&v| v as f64).collect();
+        Check::new(&case)
+            .scalar(&format!("{key}_offset"), zero.intercept, Tol::coef(200))
+            .vector(&format!("{key}_step1"), &step1, Tol::coef(200))
+            .vector(&format!("{key}_m100_coef"), &r.coefficients, Tol::coef(200))
+            .scalar(
+                &format!("{key}_m100_intercept"),
+                r.intercept,
+                Tol::coef(200),
+            )
+            .vector(&format!("{key}_m100_sel"), &sel, Tol::exact())
+            .vector(&format!("{key}_m100_resp"), &r.predictions, Tol::coef(200))
+            .finish();
+    }
+
+    #[test]
+    fn test_validate_mboost_gaussian_path() {
+        check_path("ml_mboost_bols", "gaussian", "yg", MboostFamily::Gaussian);
+    }
+    #[test]
+    fn test_validate_mboost_binomial_path() {
+        check_path("ml_mboost_bols", "binomial", "yb", MboostFamily::Binomial);
+    }
+    #[test]
+    fn test_validate_mboost_binomial_glm_path() {
+        check_path(
+            "ml_mboost_bols",
+            "binomial_glm",
+            "yb",
+            MboostFamily::BinomialGlm,
+        );
+    }
+    #[test]
+    fn test_validate_mboost_poisson_path() {
+        check_path("ml_mboost_bols", "poisson", "yc", MboostFamily::Poisson);
+    }
+
+    #[test]
+    fn test_validate_mboost_converged_limits() {
+        let (case, ds) = crate::test_support::load_case("ml_mboost_bols");
+        let names = ["(Intercept)", "x1", "x2", "x3"];
+        let mut chk = Check::new(&case);
+        for (key, y, family) in [
+            ("gaussian", "yg", MboostFamily::Gaussian),
+            ("binomial", "yb", MboostFamily::Binomial),
+            ("binomial_glm", "yb", MboostFamily::BinomialGlm),
+            ("poisson", "yc", MboostFamily::Poisson),
+        ] {
+            let r = bols(&ds, y, family, 2000, 0.5);
+            let v = [
+                r.intercept,
+                r.coefficients[0],
+                r.coefficients[1],
+                r.coefficients[2],
+            ];
+            // the written-out boosting is 4.3e-8 (relative, largest) from glm at mstop 2000 and does
+            // not move further. Near the fixed point the selected component is decided by rounding
+            // (RSS differences below one ulp of sum u^2), so R and Rust may take different late
+            // steps: both keys use the iterative tolerance.
+            chk.named(&format!("{key}_limit"), &names, &v, Tol::iterative(1e-6))
+                .vector(&format!("{key}_m2000_coef"), &v, Tol::iterative(1e-6));
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_mboost_binomial_step_is_half_logit_scale() {
+        let ds = mboost_sim();
+        let a = bols(&ds, "yb", MboostFamily::Binomial, 1, 0.1);
+        let g = bols(&ds, "yb", MboostFamily::BinomialGlm, 1, 0.1);
+        // both pick x2; Binomial()'s negative gradient is (2 / ln 2)(y - 0.515), the glm one y - 0.5075
+        assert!(
+            (a.coefficients[1] / g.coefficients[1] - 2.0 / std::f64::consts::LN_2).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn test_mboost_family_parses_aliases_and_rejects_unknown() {
+        MboostFamily::choices().validate().unwrap();
+        MboostBaseLearner::choices().validate().unwrap();
+        assert_eq!(
+            "Binomial-GLM".parse::<MboostFamily>().unwrap(),
+            MboostFamily::BinomialGlm
+        );
+        assert_eq!(
+            "bernoulli".parse::<MboostFamily>().unwrap(),
+            MboostFamily::Binomial
+        );
+        assert_eq!(
+            "bols".parse::<MboostBaseLearner>().unwrap(),
+            MboostBaseLearner::Linear
+        );
+        let e = "gamma".parse::<MboostFamily>().unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("expected one of: gaussian, binomial, binomial_glm, poisson"),
+            "{e}"
+        );
+        assert_eq!(MboostFamily::BinomialGlm.to_string(), "Binomial (glm)");
+        assert_eq!(MboostFamily::Binomial.to_string(), "Binomial");
+    }
 
     fn cancelled() -> Budget {
         let t = CancelToken::new();

@@ -100,3 +100,93 @@ case("ml_xgboost_l1", "ml/xgboost", "XGBoost exact and histogram trees with the 
        packages = character(0))
 })
 
+.mb_ngrad <- list(
+  gaussian = function(y, f) y - f,
+  binomial = function(y, f) { yt <- 2 * y - 1; e <- exp(-2 * yt * f); -(-2 * yt * e) / (log(2) * (1 + e)) },
+  binomial_glm = function(y, f) { p <- plogis(f); dlogis(f) * (y - p) / (p * (1 - p)) },
+  poisson = function(y, f) y - exp(f))
+.mb_off <- list(
+  gaussian = function(y) mean(y),
+  binomial = function(y) { p <- mean(y > 0); 1/2 * log(p / (1 - p)) },
+  binomial_glm = function(y) qlogis(mean((y + 0.5) / 2)),
+  poisson = function(y) log(mean(y)))
+.mb_resp <- list(gaussian = identity,
+  binomial = function(f) { f <- pmin(abs(f), 36) * sign(f); exp(f) / (exp(f) + exp(-f)) },
+  binomial_glm = plogis, poisson = exp)
+.mb_bols <- function(X, y, fam, mstop, nu) {
+  n <- nrow(X); p <- ncol(X); f0 <- .mb_off[[fam]](y); f <- rep(f0, n); slope <- rep(0, p); icpt <- f0; sel <- rep(0, p); step1 <- NULL
+  for (m in seq_len(mstop)) {
+    u <- .mb_ngrad[[fam]](y, f); best <- Inf
+    for (j in 1:p) {
+      xc <- X[, j] - mean(X[, j]); b <- sum(xc * (u - mean(u))) / sum(xc^2); a <- mean(u) - b * mean(X[, j])
+      rss <- sum((u - a - b * X[, j])^2)
+      if (rss < best) { best <- rss; bj <- j; bb <- b; ba <- a }
+    }
+    if (m == 1) step1 <- c(bj - 1, ba, bb, best)
+    f <- f + nu * (ba + bb * X[, bj]); slope[bj] <- slope[bj] + nu * bb; icpt <- icpt + nu * ba; sel[bj] <- sel[bj] + 1
+  }
+  list(slope = slope, intercept = icpt, resp = .mb_resp[[fam]](f), sel = sel, offset = f0, step1 = step1)
+}
+# p2a's componentwise least-squares tree learner on one variable (depth d, children >= minn rows)
+.mb_tree <- function(X, y, mstop, nu, depth, minn) {
+  n <- nrow(X); f <- rep(mean(y), n)
+  fit1 <- function(x, u) {
+    o <- order(x); xs <- x[o]; us <- u[o]; pred <- numeric(n)
+    node <- function(lo, hi, dep) {         # rows o[lo..hi] (1-based, inclusive)
+      m <- hi - lo + 1; tot <- sum(us[lo:hi])
+      best <- -Inf; bi <- NA; ls <- 0
+      if (dep < depth) for (i in lo:(hi - 1)) {
+        ls <- ls + us[i]; ln <- i - lo + 1; rn <- m - ln
+        if (ln < minn || rn < minn) next
+        if (abs(xs[i + 1] - xs[i]) < 1e-10) next
+        g <- ls^2 / ln + (tot - ls)^2 / rn
+        if (g > best) { best <- g; bi <- i }
+      }
+      if (is.na(bi)) { mu <- tot / m; pred[o[lo:hi]] <<- mu; return(sum((us[lo:hi] - mu)^2)) }
+      node(lo, bi, dep + 1) + node(bi + 1, hi, dep + 1)
+    }
+    rss <- node(1, n, 0); list(rss = rss, pred = pred)
+  }
+  sel <- rep(0, ncol(X))
+  for (m in seq_len(mstop)) {
+    u <- y - f; best <- Inf
+    for (j in seq_len(ncol(X))) { ft <- fit1(X[, j], u); if (ft$rss < best) { best <- ft$rss; bp <- ft$pred; bj <- j } }
+    f <- f + nu * bp; sel[bj] <- sel[bj] + 1
+  }
+  list(f = f, sel = sel)
+}
+
+case("ml_mboost_bols", "ml/mboost", "Componentwise boosting with bols learners (Gaussian, Binomial adaboost and glm, Poisson), converged limits, tree learner depth", function(ctx) {
+  set.seed(4636)
+  n <- 200
+  x1 <- runif(n); x2 <- runif(n); x3 <- runif(n) - 0.5
+  yg <- 2 * x1 + 0.5 * x2 + rnorm(n, sd = 0.3)
+  yb <- rbinom(n, 1, plogis(-0.4 + 1.6 * x1 - 1.1 * x2))
+  yc <- rpois(n, exp(0.2 + 0.9 * x1 - 0.6 * x2))
+  d <- ctx$gen_dataset("mboost_sim", data.frame(x1, x2, x3, yg, yb, yc))
+  X <- cbind(d$x1, d$x2, d$x3)
+  vals <- list()
+  for (fam in c("gaussian", "binomial", "binomial_glm", "poisson")) {
+    y <- switch(fam, gaussian = d$yg, binomial = d$yb, binomial_glm = d$yb, poisson = d$yc)
+    r <- .mb_bols(X, y, fam, 100, 0.1); rc <- .mb_bols(X, y, fam, 2000, 0.5)
+    vals[[paste0(fam, "_offset")]] <- r$offset
+    vals[[paste0(fam, "_step1")]] <- vec(r$step1)
+    vals[[paste0(fam, "_m100_coef")]] <- vec(r$slope)
+    vals[[paste0(fam, "_m100_intercept")]] <- r$intercept
+    vals[[paste0(fam, "_m100_sel")]] <- vec(r$sel)
+    vals[[paste0(fam, "_m100_resp")]] <- vec(r$resp)
+    vals[[paste0(fam, "_m2000_coef")]] <- vec(c(rc$intercept, rc$slope))
+  }
+  gl <- coef(glm(yb ~ x1 + x2 + x3, data = d, family = binomial(), control = glm.control(epsilon = 1e-14, maxit = 100)))
+  gp <- coef(glm(yc ~ x1 + x2 + x3, data = d, family = poisson(), control = glm.control(epsilon = 1e-14, maxit = 100)))
+  gg <- coef(lm(yg ~ x1 + x2 + x3, data = d))
+  vals$gaussian_limit <- named(gg); vals$binomial_limit <- named(gl / 2); vals$binomial_glm_limit <- named(gl); vals$poisson_limit <- named(gp)
+  t1 <- .mb_tree(X, d$yg, 30, 0.1, 1, 5); t2 <- .mb_tree(X, d$yg, 30, 0.1, 2, 5)
+  stopifnot(max(abs(t1$f - t2$f)) > 1e-3)
+  vals$tree_d1_m30_pred <- vec(t1$f); vals$tree_d2_m30_pred <- vec(t2$f); vals$tree_d2_m30_sel <- vec(t2$sel)
+  list(values = vals,
+       reference = "mboost::mboost(y ~ bols(x1) + bols(x2) + bols(x3), family = Gaussian() | Binomial() | Binomial(type = 'glm') | Poisson(), control = boost_control(mstop, nu)) written out in R from mboost 2.9 R/family.R (ngradient, offset, response); limits from stats::lm / stats::glm (epsilon 1e-14); Binomial() limit = glm logit coefficients / 2; tree learner = p2a's least-squares tree on one variable; mboost is not a case dependency",
+       call = "bols(xj) = OLS on [1, xj], selection by RSS; mstop = 100, nu = 0.1 (paths), mstop = 2000, nu = 0.5 (limits); tree: mstop = 30, nu = 0.1, depth 1 and 2, children >= 5 rows",
+       packages = character(0))
+})
+
