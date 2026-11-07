@@ -58,6 +58,7 @@ use crate::data::columns::{MissingSummary, NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource;
 use crate::traits::SignificanceLevel;
+use crate::traits::estimator::normal_quantile;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Constants of swilk.c (Royston 1995, AS R94)
@@ -312,11 +313,10 @@ fn swilk(x: &[f64]) -> EconResult<(f64, f64)> {
     if n == 3 {
         a[0] = std::f64::consts::FRAC_1_SQRT_2;
     } else {
-        let normal = Normal::standard();
         let an25 = an + 0.25;
         let mut summ2 = 0.0;
         for (i, ai) in a.iter_mut().enumerate() {
-            let m = normal.inverse_cdf(((i + 1) as f64 - 0.375) / an25);
+            let m = normal_quantile(((i + 1) as f64 - 0.375) / an25)?;
             *ai = m;
             summ2 += m * m;
         }
@@ -529,7 +529,11 @@ mod tests {
                 .scalar(&format!("{col}_w"), r.w_statistic, Tol::stat(r.n))
                 .scalar(&format!("{col}_p"), r.p_value, Tol::p_value(r.n))
                 .scalar(&format!("{col}_n"), r.n as f64, Tol::exact());
-            assert_eq!(r.reject_normality, r.p_value < 0.05, "{col}");
+            assert_eq!(
+                r.reject_normality,
+                case.scalar(&format!("{col}_p")) < 0.05,
+                "{col}"
+            );
         }
         check.finish();
     }
