@@ -28,6 +28,61 @@
       "tolerance": "EM_PARAM 1e-5 relative, EM_LOGLIK 1e-12 relative (tight fixed points), FIXED_POINT 1e-10 relative from the tight values; df and classification exact. Differences from mclust in the doc: k-means start, relative_change stopping rule (iteration counts not pinned), relative ridge and a warning for a singular covariance where mclust reports NA.",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_mixtools",
+      "name": "Normal and multivariate normal mixture EM",
+      "category": "ml",
+      "reference": "mixtools::normalmixEM, mixtools::mvnormalmixEM",
+      "doc": "validation/ml/mixtures.md",
+      "cases": [
+        "mixtools_em"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_uni",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_uni_start",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_uni_fixed_point",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_mv",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_mixtools_mv_start"
+      ],
+      "quantities": [
+        "log-likelihood",
+        "lambda",
+        "mu",
+        "sigma"
+      ],
+      "tolerance": "EM_PARAM 1e-5 relative, EM_LOGLIK 1e-12 relative (tight fixed points), FIXED_POINT 1e-10 relative from the tight values. Standard EM against normalmixEM's previous-mu sigma update: same fixed point, noted in the doc.",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
+      "id": "ml_flexmix",
+      "name": "Gaussian regression mixtures with minprior",
+      "category": "ml",
+      "reference": "flexmix::flexmix(FLXMRglm(family = \"gaussian\")); a written-out FLXfit in the case",
+      "doc": "validation/ml/mixtures.md",
+      "cases": [
+        "flexmix_minprior"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_flexmix_minprior",
+        "p2a-core::ml::advanced_clustering_mod::mixtures::tests::test_validate_flexmix_keep"
+      ],
+      "quantities": [
+        "k",
+        "k0",
+        "log-likelihood",
+        "df",
+        "AIC",
+        "BIC",
+        "prior",
+        "coefficients",
+        "sigma",
+        "cluster"
+      ],
+      "tolerance": "prune 1e-9 relative, keep 1e-7 relative (a borderline stop); log-likelihood 1e-12 and 1e-11; integers exact. Iteration counts and the iteration of a removal are not R-pinned. Exact-fit component: floor and warning where R stops with NaN; the random start uses p2a's RNG, the pins pass the case's start column.",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

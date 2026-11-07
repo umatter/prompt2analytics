@@ -64,3 +64,98 @@ case("gmm_mclust_3d", "ml/clustering", "Gaussian mixtures G = 3 in d = 3: mclust
 })
 
 # Written-out univariate EM (the EM for a normal mixture; standard M-step), iterated to a 1e-15 fixed point.
+.uni_em_tight <- function(x, lambda, mu, sigma) {
+  n <- length(x); k <- length(mu)
+  for (it in 1:200000) {
+    dens <- sapply(1:k, function(j) lambda[j] * dnorm(x, mu[j], sigma[j])); post <- dens / rowSums(dens)
+    nj <- colSums(post); lam <- nj / n; m <- colSums(post * x) / nj
+    s <- sqrt(colSums(post * (x - matrix(m, n, k, byrow = TRUE))^2) / nj)
+    ch <- max(abs(c(lam - lambda, m - mu, s - sigma))); lambda <- lam; mu <- m; sigma <- s
+    if (ch < 1e-15) break
+  }
+  stopifnot(it < 200000)
+  dens <- sapply(1:k, function(j) lambda[j] * dnorm(x, mu[j], sigma[j]))
+  list(lambda = lambda, mu = mu, sigma = sigma, loglik = sum(log(rowSums(dens))))
+}
+
+case("mixtools_em", "ml/clustering", "mixtools normalmixEM (univariate) and mvnormalmixEM (full covariance) from fixed starts", function(ctx) {
+  d <- ctx$dataset("datasets/generated/mixture_3d.csv"); X <- as.matrix(d); x <- X[, 1]; n <- length(x)
+  v <- list()
+  invisible(capture.output(u <- normalmixEM(x, lambda = c(0.4, 0.3, 0.3), mu = c(-0.5, 1.5, 4), sigma = c(1, 1, 1), epsilon = 1e-12, maxit = 10000)))
+  stopifnot(u$restarts == 0, length(u$all.loglik) - 1 < 10000)
+  v$uni_loglik <- u$loglik; v$uni_lambda <- vec(u$lambda); v$uni_mu <- vec(u$mu); v$uni_sigma <- vec(u$sigma)
+  v$uni_iterations <- length(u$all.loglik) - 1
+  t <- .uni_em_tight(x, u$lambda, u$mu, u$sigma)
+  v$uni_tight_loglik <- t$loglik; v$uni_tight_lambda <- vec(t$lambda); v$uni_tight_mu <- vec(t$mu); v$uni_tight_sigma <- vec(t$sigma)
+  # p2a's deterministic start (seed = None): equal weights, the population sd, means at the centres of
+  # k equal-width bins of the range. It reaches the same optimum.
+  k <- 3; mu0 <- min(x) + ((0:(k - 1)) + 0.5) / k * (max(x) - min(x)); s0 <- sqrt(mean((x - mean(x))^2))
+  td <- .uni_em_tight(x, rep(1 / k, k), mu0, rep(s0, k))
+  stopifnot(max(abs(c(td$lambda, td$mu, td$sigma) - c(t$lambda, t$mu, t$sigma))) < 1e-12)
+  v$uni_det_start_mu <- vec(mu0); v$uni_det_start_sigma <- s0
+  v$uni_det_start_loglik <- sum(log(rowSums(sapply(1:k, function(j) dnorm(x, mu0[j], s0) / k))))   # loglik_history[1] for seed = None
+  invisible(capture.output(mv <- mvnormalmixEM(X, lambda = c(0.4, 0.33, 0.27), mu = list(c(0, 0, 0), c(4, 1, -1), c(1, 5, 2)),
+                      sigma = list(diag(3), diag(3), diag(3)), epsilon = 1e-12, maxit = 10000)))
+  stopifnot(mv$restarts == 0)
+  v$mv_loglik <- mv$loglik; v$mv_lambda <- vec(mv$lambda); v$mv_mu <- vec(unlist(mv$mu)); v$mv_sigma <- vec(unlist(mv$sigma))
+  v$mv_iterations <- length(mv$all.loglik) - 1
+  tm <- .mclust_tight(X, "VVV", mv$posterior)                       # same model, mixtools' component order
+  v$mv_tight_loglik <- tm$loglik; v$mv_tight_lambda <- vec(tm$parameters$pro); v$mv_tight_mu <- vec(tm$parameters$mean)
+  v$mv_tight_sigma <- vec(tm$parameters$variance$sigma)
+  list(values = v, reference = "mixtools::normalmixEM(epsilon = 1e-12); mixtools::mvnormalmixEM(epsilon = 1e-12), given starts; *_tight: written-out EM (univariate) / mclust::mstep+estep VVV (multivariate) to a 1e-15 fixed point",
+       call = "normalmixEM(x1, lambda, mu, sigma); mvnormalmixEM(X, lambda, mu, sigma)", packages = c("mixtools", "mclust"))
+})
+
+# Written-out flexmix::FLXfit for FLXMRglm(gaussian) + FLXPconstant, classify = "weighted" (flexmix 2.3.21).
+.flex_rep <- function(X, y, cluster, k, minprior, tol, itmax) {
+  N <- nrow(X); post <- matrix(0.1, N, k); for (K in 1:k) post[cluster == K, K] <- 0.9
+  post <- post / rowSums(post); llh <- -Inf; removed <- integer(0)
+  for (iter in 1:itmax) {
+    prior <- colMeans(post); nok <- which(prior < minprior)
+    if (length(nok)) {
+      removed <- c(removed, iter); prior <- prior[-nok]; prior <- prior / sum(prior)
+      post <- post[, -nok, drop = FALSE]; post <- post / rowSums(post); k <- ncol(post)
+    }
+    coef <- matrix(0, ncol(X), k); sig <- numeric(k)
+    for (j in 1:k) { fit <- lm.wfit(X, y, post[, j]); coef[, j] <- fit$coefficients
+      sig[j] <- sqrt(sum(fit$weights * fit$residuals^2 / mean(fit$weights)) / (N - fit$rank)) }
+    lp <- sapply(1:k, function(j) dnorm(y, X %*% coef[, j], sig[j], log = TRUE)) + matrix(log(prior), N, k, byrow = TRUE)
+    mx <- apply(lp, 1, max); lse <- mx + log(rowSums(exp(lp - mx))); post <- exp(lp - lse)
+    llh_old <- llh; llh <- sum(lse)
+    if (abs(llh - llh_old) / (abs(llh) + 0.1) < tol) break
+  }
+  list(k = k, iter = iter, llh = llh, prior = colMeans(post), coef = coef, sigma = sig, removed = removed)
+}
+
+case("flexmix_minprior", "ml/clustering", "flexmix regression mixture from a fixed 3-cluster start: minprior = 0.1 removes the third component, minprior = 0.05 keeps it", function(ctx) {
+  set.seed(20261112)
+  n <- 200; x <- runif(n, 0, 10); g <- sample(1:2, n, replace = TRUE, prob = c(0.6, 0.4))
+  y <- ifelse(g == 1, 1 + 0.5 * x, 6 - 0.4 * x) + rnorm(n, 0, 0.6)
+  start <- c(ifelse(g == 1, 1, 2)[1:190], rep(3, 10))                   # a third start component of 10 points (5%)
+  d <- ctx$gen_dataset("flexmix_lines", data.frame(y = round(y, 10), x = round(x, 10), start = start))
+  X <- cbind(1, d$x); v <- list()
+  for (cfg in list(list(tag = "prune", mp = 0.1), list(tag = "keep", mp = 0.05))) {
+    f <- flexmix(y ~ x, data = d, cluster = d$start, control = list(minprior = cfg$mp, tolerance = 1e-12, iter.max = 5000))
+    stopifnot(f@converged)
+    r <- .flex_rep(X, d$y, d$start, 3, cfg$mp, 1e-12, 5000)
+    p <- parameters(f); o <- order(p["coef.(Intercept)", ])
+    stopifnot(r$k == f@k, r$iter == f@iter, abs(r$llh - as.numeric(logLik(f))) < 1e-9, max(abs(rbind(r$coef, r$sigma) - p)) < 1e-12)
+    tg <- cfg$tag
+    v[[paste0(tg, "_k")]] <- f@k; v[[paste0(tg, "_k0")]] <- max(d$start); v[[paste0(tg, "_iterations")]] <- f@iter
+    v[[paste0(tg, "_removed_at")]] <- vec(if (length(r$removed)) r$removed else 0)
+    v[[paste0(tg, "_loglik")]] <- as.numeric(logLik(f)); v[[paste0(tg, "_df")]] <- attr(logLik(f), "df")
+    v[[paste0(tg, "_aic")]] <- AIC(f); v[[paste0(tg, "_bic")]] <- BIC(f)
+    v[[paste0(tg, "_prior")]] <- vec(prior(f)[o]); v[[paste0(tg, "_coef")]] <- vec(p[1:2, o]); v[[paste0(tg, "_sigma")]] <- vec(p[3, o])
+    v[[paste0(tg, "_cluster")]] <- vec(match(clusters(f), o))
+  }
+  # A start posterior that puts component 3 on exactly two points: lm.wfit fits them exactly, sigma = 0,
+  # and flexmix stops with "Log-likelihood: NaN" (p2a floors sigma and warns instead).
+  P <- matrix(0, n, 3); P[cbind(1:n, ifelse(d$start == 3, 1, d$start))] <- 1; P[1:2, ] <- 0; P[1:2, 3] <- 1
+  e <- tryCatch(flexmix(y ~ x, data = d, cluster = P, control = list(minprior = 0, tolerance = 1e-12, iter.max = 50)), error = function(e) e)
+  stopifnot(inherits(e, "error"), grepl("NaN", conditionMessage(e)))
+  list(values = v, reference = "flexmix::flexmix(y ~ x, cluster = start, control = list(minprior = 0.1 | 0.05, tolerance = 1e-12)); a written-out FLXfit agrees to 1e-12",
+       call = "flexmix(y ~ x, data = flexmix_lines, cluster = start)", packages = "flexmix")
+})
+
+# The same three blobs plus noise as ml_density_clustering.R's blobs_noise (same seed and draws), written
+# under this package's own name so that WP43 does not depend on WP41's dataset in the same wave.
