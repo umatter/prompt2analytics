@@ -69,6 +69,36 @@
       "tolerance": "validation/README.md, n = 50: states, innovations, forecasts 1e-6 relative; log-likelihood 1e-5",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "forecasting_causal_impact",
+      "name": "CausalImpact counterfactual from a local-level StructTS fit on the pre-period",
+      "category": "forecasting",
+      "reference": "stats::StructTS(type = 'level') on the pre-period (tight optimum) + stats::KalmanForecast; qnorm(0.975) bands. The CausalImpact package (bsts) is not installed and is not the reference.",
+      "doc": "validation/forecasting/causal_impact.md",
+      "cases": [
+        "structts_nile_ukgas"
+      ],
+      "tests": [
+        "p2a-core::forecasting::causal_impact::tests::test_validate_causal_impact_counterfactual_nile"
+      ],
+      "quantities": [
+        "model variances",
+        "pre-period log-likelihood",
+        "counterfactual forecast",
+        "upper 95% band",
+        "point effects",
+        "cumulative effect"
+      ],
+      "tolerance": "Tol::iterative(1e-6); log-likelihood Tol::stat(90)",
+      "deviations": [
+        {
+          "finding": "TS-5",
+          "quantity": "cumulative and average effect intervals, p-value",
+          "note": "the variance of the cumulative effect is the sum of the marginal forecast variances; placebo coverage of the 95% cumulative interval 0.35-0.46 (R simulation of the same design; test_causal_impact_placebo_calibration asserts the pointwise intervals only)."
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

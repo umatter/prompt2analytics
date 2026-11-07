@@ -8,6 +8,11 @@
 //! in the absence of the intervention. The difference between observed and
 //! predicted values in the post-intervention period gives the causal effect.
 //!
+//! Model fitting is the StructTS engine (diffuse prior, R's objective, projected
+//! Newton); the intervals are the plug-in Gaussian forecast of that model, not a
+//! posterior. The `CausalImpact` package (bsts) is the method's source, not its
+//! numerical reference: `validation/forecasting/causal_impact.md`.
+//!
 //! # Algorithm
 //!
 //! 1. **Pre-period Model Fitting**: Fit a structural time series model to
@@ -34,7 +39,6 @@
 //!   <https://google.github.io/CausalImpact/>
 //!   <https://cran.r-project.org/package=CausalImpact>
 
-use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
@@ -42,11 +46,14 @@ use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, NaPolicy};
 use crate::errors::{EconError, EconResult};
 use crate::forecasting::kalman::{
-    StateSpaceModel, admit_filter_history_and_forecast, kalman_filter, kalman_forecast,
-    kalman_loglik,
+    admit_filter_history_and_forecast, kalman_filter, kalman_forecast,
 };
-use crate::forecasting::structts::nelder_mead_optimize;
+use crate::forecasting::structts::{SpecNaming, StructuralFit, StructuralSpec, fit_structural};
+use crate::linalg::solve::aliasing_message;
+use crate::regression::ols::solve_ols;
 use crate::resource::{try_zeros2, with_remedy};
+use crate::traits::convergence::{Convergence, ResultNotes};
+use crate::traits::estimator::{validate_level, z_critical};
 
 /// Configuration for CausalImpact analysis.
 #[derive(Debug, Clone)]
@@ -200,6 +207,21 @@ pub struct CausalImpactResult {
     pub model: CausalImpactModel,
     /// Causal inference statistics.
     pub inference: CausalInference,
+    /// The model fit's convergence record.
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// Warnings: clipped periods, an aliased control, the fit's convergence.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for CausalImpactResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 /// Run CausalImpact analysis on a dataset.
@@ -227,7 +249,12 @@ pub struct CausalImpactResult {
 /// fallibly: a [`EconError::ResourceLimit`] naming `seasonal_period` when
 /// they cannot be.
 /// [`EconError::InvalidSpecification`] for a `seasonal_period` below 2 or
-/// longer than the pre-period, checked before anything is sized by it.
+/// longer than the pre-period, checked before anything is sized by it; for an
+/// `alpha` outside (0, 1), a `max_iter` below 1 or a `tolerance` that is not
+/// finite and positive; for a period whose start is after its end or that holds
+/// no time value; for a pre-period that does not end before the post-period; and
+/// for a time column that is not strictly increasing.
+/// A period reaching past the data is clipped to it, with a warning.
 /// [`EconError::Cancelled`] once the budget installed with
 /// [`crate::resource::with_budget`] is cancelled or past its deadline.
 ///
@@ -255,6 +282,32 @@ pub fn causal_impact(
     time_col: &str,
     config: CausalImpactConfig,
 ) -> EconResult<CausalImpactResult> {
+    // The configuration before any column is read.
+    validate_level(config.alpha, "alpha")?;
+    if config.max_iter < 1 {
+        return Err(EconError::InvalidSpecification {
+            message: format!("max_iter must be at least 1, got {}", config.max_iter),
+        });
+    }
+    if !config.tolerance.is_finite() || config.tolerance <= 0.0 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be finite and positive, got {}",
+                config.tolerance
+            ),
+        });
+    }
+    for (name, (start, end)) in [
+        ("pre_period", config.pre_period),
+        ("post_period", config.post_period),
+    ] {
+        if start > end {
+            return Err(EconError::InvalidSpecification {
+                message: format!("{name} start {start} is after its end {end}"),
+            });
+        }
+    }
+
     // One request: a whole-number time index (a fractional time is an error, not
     // truncated), the response and the controls, all without missing values.
     let control_names: Vec<&str> = config
@@ -272,86 +325,135 @@ pub fn causal_impact(
         .extract()?;
     let time: Vec<i64> = cols.time_index(time_col).to_vec();
     let y: Vec<f64> = cols.numeric(response_col).to_vec();
-    let controls = config.control_series.as_ref().map(|names| {
-        names
-            .iter()
-            .map(|name| cols.numeric(name).to_vec())
-            .collect::<Vec<Vec<f64>>>()
-    });
+    // An empty control list is no control regression.
+    let controls = config
+        .control_series
+        .as_ref()
+        .filter(|names| !names.is_empty())
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| cols.numeric(name).to_vec())
+                .collect::<Vec<Vec<f64>>>()
+        });
 
-    // Find indices for pre and post periods based on time values
-    let pre_start_idx = time
-        .iter()
-        .position(|&t| t >= config.pre_period.0)
-        .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!(
-                "Pre-period start {} not found in time series",
-                config.pre_period.0
-            ),
-        })?;
-
-    let pre_end_idx = time
-        .iter()
-        .rposition(|&t| t <= config.pre_period.1)
-        .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!(
-                "Pre-period end {} not found in time series",
-                config.pre_period.1
-            ),
-        })?;
-
-    let post_start_idx = time
-        .iter()
-        .position(|&t| t >= config.post_period.0)
-        .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!(
-                "Post-period start {} not found in time series",
-                config.post_period.0
-            ),
-        })?;
-
-    let post_end_idx = time
-        .iter()
-        .rposition(|&t| t <= config.post_period.1)
-        .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!(
-                "Post-period end {} not found in time series",
-                config.post_period.1
-            ),
-        })?;
-
-    // Validate periods
-    if pre_end_idx >= post_start_idx {
+    if let Some(i) = (1..time.len()).find(|&i| time[i] <= time[i - 1]) {
         return Err(EconError::InvalidSpecification {
-            message: "Pre-period must end before post-period begins".to_string(),
+            message: format!(
+                "time column '{time_col}' must be strictly increasing; row {} has {} after {}",
+                i + 1,
+                time[i],
+                time[i - 1]
+            ),
         });
     }
 
-    let n_pre = pre_end_idx - pre_start_idx + 1;
-    let _n_post = post_end_idx - post_start_idx + 1;
+    let (periods, warnings) = PeriodIndices::locate(&time, config.pre_period, config.post_period)?;
 
-    if n_pre < 10 {
+    if periods.n_pre < 10 {
         return Err(EconError::InsufficientData {
             required: 10,
-            provided: n_pre,
+            provided: periods.n_pre,
             context: "CausalImpact requires at least 10 pre-period observations".to_string(),
         });
     }
     if let Some(period) = config.seasonal_period {
-        check_seasonal_period(period, n_pre)?;
+        check_seasonal_period(period, periods.n_pre)?;
     }
 
     // Run the core algorithm
-    run_causal_impact_core(
-        &y,
-        &time,
-        controls.as_ref(),
-        pre_start_idx,
-        pre_end_idx,
-        post_start_idx,
-        post_end_idx,
-        &config,
-    )
+    run_causal_impact_core(&y, &time, controls.as_ref(), &periods, &config, warnings)
+}
+
+/// Where the two periods sit in the series. Every length is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PeriodIndices {
+    pre_start: usize,
+    pre_end: usize,
+    post_start: usize,
+    post_end: usize,
+    n_pre: usize,
+    n_post: usize,
+    /// Observations between the two periods.
+    n_gap: usize,
+}
+
+impl PeriodIndices {
+    /// The first index at or after a period's start and the last at or before its
+    /// end, for strictly increasing `time`, and the warnings for what was clipped.
+    fn locate(time: &[i64], pre: (i64, i64), post: (i64, i64)) -> EconResult<(Self, Vec<String>)> {
+        let (Some(&first), Some(&last)) = (time.first(), time.last()) else {
+            return Err(EconError::InsufficientData {
+                required: 10,
+                provided: 0,
+                context: "CausalImpact requires at least 10 pre-period observations".to_string(),
+            });
+        };
+        let find = |name: &str, (start, end): (i64, i64)| -> EconResult<(usize, usize)> {
+            let from = time.iter().position(|&t| t >= start);
+            let to = time.iter().rposition(|&t| t <= end);
+            match (from, to) {
+                (Some(from), Some(to)) if from <= to => Ok((from, to)),
+                _ => Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "{name} [{start}, {end}] contains no time values (the time column runs \
+                         from {first} to {last})"
+                    ),
+                }),
+            }
+        };
+        let (pre_start, pre_end) = find("pre_period", pre)?;
+        let (post_start, post_end) = find("post_period", post)?;
+        if pre_end >= post_start {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Pre-period must end before post-period begins (pre_period ends at time {}, \
+                     post_period starts at time {})",
+                    time[pre_end], time[post_start]
+                ),
+            });
+        }
+        let length = |from: usize, to: usize, what: &str| -> EconResult<usize> {
+            to.checked_sub(from)
+                .and_then(|d| d.checked_add(1))
+                .ok_or_else(|| EconError::InvalidSpecification {
+                    message: format!("{what} has no observations"),
+                })
+        };
+        let periods = Self {
+            pre_start,
+            pre_end,
+            post_start,
+            post_end,
+            n_pre: length(pre_start, pre_end, "pre_period")?,
+            n_post: length(post_start, post_end, "post_period")?,
+            // pre_end < post_start was checked above.
+            n_gap: post_start - pre_end - 1,
+        };
+        let mut warnings = Vec::new();
+        if pre.0 < first {
+            warnings.push(format!(
+                "pre_period start {} is before the first time value {first}; the pre-period \
+                 starts at {first}",
+                pre.0
+            ));
+        }
+        if post.1 > last {
+            warnings.push(format!(
+                "post_period end {} is after the last time value {last}; the post-period ends \
+                 at {last}",
+                post.1
+            ));
+        }
+        Ok((periods, warnings))
+    }
+
+    /// Steps from the end of the pre-period to the end of the post-period.
+    fn horizon(&self) -> EconResult<usize> {
+        self.n_gap
+            .checked_add(self.n_post)
+            .ok_or_else(|| crate::resource::overflow("the forecast horizon"))
+    }
 }
 
 /// Simplified interface for CausalImpact.
@@ -390,67 +492,58 @@ fn run_causal_impact_core(
     y: &[f64],
     time: &[i64],
     controls: Option<&Vec<Vec<f64>>>,
-    pre_start: usize,
-    pre_end: usize,
-    post_start: usize,
-    post_end: usize,
+    periods: &PeriodIndices,
     config: &CausalImpactConfig,
+    mut warnings: Vec<String>,
 ) -> EconResult<CausalImpactResult> {
-    let n_pre = pre_end - pre_start + 1;
-    let n_post = post_end - post_start + 1;
+    let PeriodIndices {
+        pre_start,
+        pre_end,
+        post_start,
+        post_end,
+        n_pre,
+        n_post,
+        ..
+    } = *periods;
 
     // The counterfactual's filter pass keeps its history and holds it while
     // the forecast over the gap and the post-period (predict_counterfactual's
     // horizon) is built. Admit both as one figure before the fit, whose
     // likelihood passes keep neither, so that a refusal comes before any
     // fitting work.
-    let m = compute_state_dim(config);
-    let horizon = (post_start - pre_end - 1).saturating_add(n_post);
+    let spec = causal_spec(config);
+    let m = spec.state_dim()?;
+    let horizon = periods.horizon()?;
     admit_filter_history_and_forecast(n_pre, m, horizon)
-        .map_err(|e| with_remedy(e, &history_remedy(config, m)))?;
+        .map_err(|e| with_remedy(e, &history_remedy(&spec, m)))?;
 
-    // Step 1: Extract pre-period data for model fitting
-    let y_pre: Vec<f64> = y[pre_start..=pre_end].to_vec();
+    // Step 1: The control regression on the pre-period; what it leaves is what
+    // the model is fitted to.
+    let y_pre = &y[pre_start..=pre_end];
+    let regression = match controls {
+        Some(controls) => Some(regress_out_controls(
+            y,
+            controls,
+            periods,
+            config.control_series.as_deref().unwrap_or_default(),
+            &mut warnings,
+        )?),
+        None => None,
+    };
+    let y_for_model = regression
+        .as_ref()
+        .map_or(y_pre, |r| r.residuals.as_slice());
 
-    let controls_pre = controls.map(|c| {
-        c.iter()
-            .map(|col| col[pre_start..=pre_end].to_vec())
-            .collect::<Vec<_>>()
-    });
+    // Step 2: The structural model on the pre-period.
+    let fit = fit_structural(y_for_model, spec, None, config.max_iter, config.tolerance)?;
+    warnings.extend(fit.warnings.iter().cloned());
 
-    // Step 2: Fit structural time series model on pre-period data
-    let (model_params, regression_coefs, log_lik) =
-        fit_bsts_model(&y_pre, controls_pre.as_ref(), config)?;
+    // Step 3: The filter over the pre-period, the forecast beyond it.
+    let (predicted, predicted_var) =
+        predict_counterfactual(y_for_model, y.len(), regression.as_ref(), &fit, periods)?;
 
-    // Step 3: Build state-space model with fitted parameters
-    let ssm = build_state_space_model(&model_params, controls, config)?;
-
-    // Step 4: Run Kalman filter/smoother on full series up to end of pre-period
-    // For post-period, we predict the counterfactual
-    let y_var = sample_variance(&y_pre);
-    let init_state = initialize_state(&y_pre, config);
-    let init_cov = initialize_covariance(y_var, config)?;
-
-    // For prediction, we need to extend the observation series with NaN for post-period
-    // and use the control series (if any) as known inputs
-    let (predicted, predicted_var) = predict_counterfactual(
-        y,
-        time,
-        controls,
-        &ssm,
-        regression_coefs.as_ref(),
-        &init_state,
-        &init_cov,
-        pre_start,
-        pre_end,
-        post_start,
-        post_end,
-    )?;
-
-    // Step 5: Compute causal effects
-    let z_alpha = Normal::new(0.0, 1.0)
-        .unwrap()
-        .inverse_cdf(1.0 - config.alpha / 2.0);
+    // Step 4: Compute causal effects
+    let z_alpha = z_critical(1.0 - config.alpha)?;
 
     let mut series = CausalImpactSeries {
         time: time.to_vec(),
@@ -498,7 +591,7 @@ fn run_causal_impact_core(
             .push(cumulative + z_alpha * cum_se);
     }
 
-    // Step 6: Compute summary statistics
+    // Step 5: Compute summary statistics
     let post_effects: Vec<f64> = series.point_effect[post_start..=post_end].to_vec();
     let post_predicted: Vec<f64> = predicted[post_start..=post_end].to_vec();
     let post_variances: Vec<f64> = predicted_var[post_start..=post_end].to_vec();
@@ -525,19 +618,20 @@ fn run_causal_impact_core(
         0.0
     };
 
-    // Bayesian tail probability (approximate using normal)
-    // P(effect < 0) if effect > 0, P(effect > 0) if effect < 0
-    let normal = Normal::new(0.0, 1.0).unwrap();
+    // Tail probabilities of the plug-in normal: the upper tail through sf, since
+    // 1 - cdf is exactly 0 from about 8.3 standard deviations.
+    let normal = Normal::standard();
     let z_cumulative = if cumulative_se > 0.0 {
         cumulative_effect / cumulative_se
     } else {
         0.0
     };
-
+    let prob_positive = normal.sf(-z_cumulative);
+    let prob_negative = normal.cdf(-z_cumulative);
     let p_value = if cumulative_effect >= 0.0 {
-        normal.cdf(-z_cumulative) // P(effect < 0) under posterior
+        prob_negative
     } else {
-        1.0 - normal.cdf(-z_cumulative) // P(effect > 0) under posterior
+        prob_positive
     };
 
     let summary = CausalImpactSummary {
@@ -557,22 +651,14 @@ fn run_causal_impact_core(
 
     // Model info
     let n_params = count_params(config, controls.is_some());
+    let coef = spec.coefficients(&fit.variances);
+    let log_lik = fit.log_likelihood;
     let model = CausalImpactModel {
-        level_variance: model_params[0],
-        slope_variance: if config.include_trend {
-            Some(model_params[1])
-        } else {
-            None
-        },
-        seasonal_variance: config.seasonal_period.map(|_| {
-            if config.include_trend {
-                model_params[2]
-            } else {
-                model_params[1]
-            }
-        }),
-        observation_variance: *model_params.last().unwrap(),
-        regression_coefficients: regression_coefs.clone(),
+        level_variance: coef.level,
+        slope_variance: coef.slope,
+        seasonal_variance: coef.seasonal,
+        observation_variance: coef.epsilon,
+        regression_coefficients: regression.map(|r| r.coefficients),
         control_names: config.control_series.clone(),
         log_likelihood: log_lik,
         aic: -2.0 * log_lik + 2.0 * n_params as f64,
@@ -582,9 +668,6 @@ fn run_causal_impact_core(
     };
 
     // Causal inference
-    let prob_positive = 1.0 - normal.cdf(-z_cumulative);
-    let prob_negative = normal.cdf(-z_cumulative);
-
     let inference = CausalInference {
         prob_positive,
         prob_negative,
@@ -598,484 +681,139 @@ fn run_causal_impact_core(
         series,
         model,
         inference,
+        convergence: fit.convergence,
+        warnings,
     })
 }
 
-/// Model parameters for BSTS.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct ModelParams {
-    level_var: f64,
-    slope_var: Option<f64>,
-    seasonal_var: Option<f64>,
-    obs_var: f64,
+/// What the control regression gives the fit and the counterfactual.
+struct ControlRegression {
+    /// Intercept, then one per control; NaN for an aliased control.
+    coefficients: Vec<f64>,
+    /// The pre-period residuals, which the model is fitted to.
+    residuals: Vec<f64>,
+    /// The regression's value at every row of the series, from the identified
+    /// coefficients only, as R's `predict.lm` on a rank-deficient fit.
+    adjustment: Vec<f64>,
 }
 
-/// Fit BSTS model using MLE on pre-period data.
-fn fit_bsts_model(
-    y_pre: &[f64],
-    controls_pre: Option<&Vec<Vec<f64>>>,
-    config: &CausalImpactConfig,
-) -> EconResult<(Vec<f64>, Option<Vec<f64>>, f64)> {
-    let y_var = sample_variance(y_pre);
-
-    // If we have controls, first regress y on controls to get regression coefficients
-    // Then model the residuals with BSTS
-    let (y_for_bsts, regression_coefs) = if let Some(controls) = controls_pre {
-        let (residuals, coefs) = regress_out_controls(y_pre, controls)?;
-        (residuals, Some(coefs))
-    } else {
-        (y_pre.to_vec(), None)
-    };
-
-    // Initialize variance parameters based on data variance
-    // Following Harvey (1990) and R's CausalImpact defaults
-    let init_params = initialize_variance_params(y_var, config);
-
-    // Optimize using Nelder-Mead. A parameter vector the model cannot use
-    // scores 1e20. A stopped budget stops the fit instead of scoring the
-    // vertex, and so would a ResourceLimit, which the likelihood pass raises
-    // only when its m × m transition or initial covariance cannot be
-    // allocated (it keeps no Kalman history; causal_impact admits the
-    // counterfactual's before the fit).
-    let objective = |log_params: &[f64]| -> EconResult<f64> {
-        let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
-        match compute_bsts_loglik(&y_for_bsts, &params, config) {
-            Ok(ll) => Ok(-ll),
-            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => Err(e),
-            Err(_) => Ok(1e20),
-        }
-    };
-
-    // Transform to log scale for optimization
-    let init_log: Vec<f64> = init_params
-        .iter()
-        .map(|&p| (p / y_var).max(1e-10).ln())
-        .collect();
-
-    let (best_log_params, neg_loglik, _converged) =
-        nelder_mead_optimize(&objective, &init_log, config.max_iter, config.tolerance)?;
-
-    // Transform back
-    let best_params: Vec<f64> = best_log_params.iter().map(|&lp| y_var * lp.exp()).collect();
-
-    Ok((best_params, regression_coefs, -neg_loglik))
-}
-
-/// Initialize variance parameters.
-fn initialize_variance_params(y_var: f64, config: &CausalImpactConfig) -> Vec<f64> {
-    let mut params = Vec::new();
-
-    // Level variance (always included)
-    params.push(y_var * 0.1);
-
-    // Slope variance (if trend)
-    if config.include_trend {
-        params.push(y_var * 0.01);
-    }
-
-    // Seasonal variance (if seasonality)
-    if config.seasonal_period.is_some() {
-        params.push(y_var * 0.1);
-    }
-
-    // Observation variance
-    params.push(y_var * 0.5);
-
-    params
-}
-
-/// Regress y on control variables using OLS.
-fn regress_out_controls(y: &[f64], controls: &Vec<Vec<f64>>) -> EconResult<(Vec<f64>, Vec<f64>)> {
-    let n = y.len();
-    let k = controls.len();
-
-    if k == 0 {
-        return Ok((y.to_vec(), vec![]));
-    }
-
-    // Build design matrix [1, X1, X2, ...]
-    let x = Array2::from_shape_fn(
-        (n, k + 1),
-        |(i, j)| {
-            if j == 0 { 1.0 } else { controls[j - 1][i] }
-        },
-    );
-
-    let y_arr = Array1::from_vec(y.to_vec());
-
-    // OLS: beta = (X'X)^{-1} X'y
-    let xtx = x.t().dot(&x);
-    let xty = x.t().dot(&y_arr);
-
-    let xtx_inv = crate::linalg::matrix_ops::safe_inverse(&xtx.view())
-        .map_err(|e| EconError::SingularMatrix {
-            context: format!("Control regression X'X: {}", e),
-            suggestion: "Check for perfect multicollinearity in control series".to_string(),
-        })?
-        .0;
-
-    let beta = xtx_inv.dot(&xty);
-
-    // Compute residuals
-    let fitted = x.dot(&beta);
-    let residuals: Vec<f64> = y_arr
-        .iter()
-        .zip(fitted.iter())
-        .map(|(yi, fi)| yi - fi)
-        .collect();
-
-    Ok((residuals, beta.to_vec()))
-}
-
-/// Build state-space model for BSTS.
-fn build_state_space_model(
-    params: &[f64],
-    _controls: Option<&Vec<Vec<f64>>>,
-    config: &CausalImpactConfig,
-) -> EconResult<StateSpaceModel> {
-    let mut param_idx = 0;
-    let level_var = params[param_idx];
-    param_idx += 1;
-
-    let slope_var = if config.include_trend {
-        let v = params[param_idx];
-        param_idx += 1;
-        Some(v)
-    } else {
-        None
-    };
-
-    let seasonal_var = if config.seasonal_period.is_some() {
-        let v = params[param_idx];
-        param_idx += 1;
-        Some(v)
-    } else {
-        None
-    };
-
-    let obs_var = params[param_idx];
-
-    // Build model based on configuration
-    match (slope_var, seasonal_var, config.seasonal_period) {
-        // Local level only
-        (None, None, None) => {
-            let transition = Array2::from_elem((1, 1), 1.0);
-            let observation = Array1::from_elem(1, 1.0);
-            let selection = Array2::from_elem((1, 1), 1.0);
-            let state_cov = Array2::from_elem((1, 1), level_var.max(1e-12));
-
-            StateSpaceModel::new(
-                transition,
-                observation,
-                selection,
-                state_cov,
-                obs_var.max(1e-12),
-            )
-        }
-
-        // Local linear trend (no seasonality)
-        (Some(slope_v), None, None) => {
-            let transition = Array2::from_shape_vec((2, 2), vec![1.0, 1.0, 0.0, 1.0]).unwrap();
-            let observation = Array1::from_vec(vec![1.0, 0.0]);
-            let selection = Array2::eye(2);
-            let state_cov = Array2::from_shape_vec(
-                (2, 2),
-                vec![level_var.max(1e-12), 0.0, 0.0, slope_v.max(1e-12)],
-            )
-            .unwrap();
-
-            StateSpaceModel::new(
-                transition,
-                observation,
-                selection,
-                state_cov,
-                obs_var.max(1e-12),
-            )
-        }
-
-        // Local level with seasonality
-        (None, Some(seas_v), Some(_)) => {
-            let m = compute_state_dim(config); // level + (period-1) seasonal states
-            let mut transition =
-                seasonal_square(config, m, "the seasonal model's transition matrix")?;
-
-            // Level: μ_{t+1} = μ_t
-            transition[[0, 0]] = 1.0;
-
-            // Seasonal: γ_t = -γ_{t-1} - ... - γ_{t-s+1}
-            for j in 1..m {
-                transition[[1, j]] = -1.0;
-            }
-            for i in 2..m {
-                transition[[i, i - 1]] = 1.0;
-            }
-
-            // Observation: y_t = μ_t + γ_t
-            let mut observation = Array1::zeros(m);
-            observation[0] = 1.0; // Level
-            observation[1] = 1.0; // Seasonal
-
-            // Selection matrix
-            let mut selection = Array2::zeros((m, 2));
-            selection[[0, 0]] = 1.0; // Level gets innovation
-            selection[[1, 1]] = 1.0; // Seasonal gets innovation
-
-            let state_cov = Array2::from_shape_vec(
-                (2, 2),
-                vec![level_var.max(1e-12), 0.0, 0.0, seas_v.max(1e-12)],
-            )
-            .unwrap();
-
-            StateSpaceModel::new(
-                transition,
-                observation,
-                selection,
-                state_cov,
-                obs_var.max(1e-12),
-            )
-        }
-
-        // Full BSM: level + trend + seasonality
-        (Some(slope_v), Some(seas_v), Some(_)) => {
-            let m = compute_state_dim(config); // level + slope + (period-1) seasonal states
-
-            let mut transition =
-                seasonal_square(config, m, "the seasonal model's transition matrix")?;
-            // Level: μ_{t+1} = μ_t + ν_t
-            transition[[0, 0]] = 1.0;
-            transition[[0, 1]] = 1.0;
-            // Slope: ν_{t+1} = ν_t
-            transition[[1, 1]] = 1.0;
-            // Seasonal
-            for j in 2..m {
-                transition[[2, j]] = -1.0;
-            }
-            for i in 3..m {
-                transition[[i, i - 1]] = 1.0;
-            }
-
-            let mut observation = Array1::zeros(m);
-            observation[0] = 1.0; // Level
-            observation[2] = 1.0; // Seasonal
-
-            let mut selection = Array2::zeros((m, 3));
-            selection[[0, 0]] = 1.0;
-            selection[[1, 1]] = 1.0;
-            selection[[2, 2]] = 1.0;
-
-            let state_cov = Array2::from_shape_vec(
-                (3, 3),
-                vec![
-                    level_var.max(1e-12),
-                    0.0,
-                    0.0,
-                    0.0,
-                    slope_v.max(1e-12),
-                    0.0,
-                    0.0,
-                    0.0,
-                    seas_v.max(1e-12),
-                ],
-            )
-            .unwrap();
-
-            StateSpaceModel::new(
-                transition,
-                observation,
-                selection,
-                state_cov,
-                obs_var.max(1e-12),
-            )
-        }
-
-        // Local linear trend without seasonal variance (shouldn't happen but handle it)
-        (Some(slope_v), None, Some(_)) | (Some(slope_v), Some(_), None) => {
-            // Fall back to local linear trend
-            let transition = Array2::from_shape_vec((2, 2), vec![1.0, 1.0, 0.0, 1.0]).unwrap();
-            let observation = Array1::from_vec(vec![1.0, 0.0]);
-            let selection = Array2::eye(2);
-            let state_cov = Array2::from_shape_vec(
-                (2, 2),
-                vec![level_var.max(1e-12), 0.0, 0.0, slope_v.max(1e-12)],
-            )
-            .unwrap();
-
-            StateSpaceModel::new(
-                transition,
-                observation,
-                selection,
-                state_cov,
-                obs_var.max(1e-12),
-            )
-        }
-
-        // Level with seasonal period but no seasonal variance (treat as level only)
-        (None, None, Some(_)) => {
-            let transition = Array2::from_elem((1, 1), 1.0);
-            let observation = Array1::from_elem(1, 1.0);
-            let selection = Array2::from_elem((1, 1), 1.0);
-            let state_cov = Array2::from_elem((1, 1), level_var.max(1e-12));
-
-            StateSpaceModel::new(
-                transition,
-                observation,
-                selection,
-                state_cov,
-                obs_var.max(1e-12),
-            )
-        }
-
-        // Seasonal variance but no period specified (shouldn't happen, treat as level only)
-        (None, Some(_), None) => {
-            let transition = Array2::from_elem((1, 1), 1.0);
-            let observation = Array1::from_elem(1, 1.0);
-            let selection = Array2::from_elem((1, 1), 1.0);
-            let state_cov = Array2::from_elem((1, 1), level_var.max(1e-12));
-
-            StateSpaceModel::new(
-                transition,
-                observation,
-                selection,
-                state_cov,
-                obs_var.max(1e-12),
-            )
-        }
-    }
-}
-
-/// Compute log-likelihood for BSTS model.
-fn compute_bsts_loglik(y: &[f64], params: &[f64], config: &CausalImpactConfig) -> EconResult<f64> {
-    let ssm = build_state_space_model(params, None, config)?;
-    let y_var = sample_variance(y);
-    let init_state = initialize_state(y, config);
-    let init_cov = initialize_covariance(y_var, config)?;
-
-    kalman_loglik(y, &ssm, init_state.view(), init_cov.view())
-}
-
-/// Predict counterfactual for post-period.
-fn predict_counterfactual(
+/// Regress the pre-period of `y` on an intercept and the controls by OLS, aliased
+/// controls reported in `warnings`.
+fn regress_out_controls(
     y: &[f64],
-    _time: &[i64],
-    controls: Option<&Vec<Vec<f64>>>,
-    ssm: &StateSpaceModel,
-    regression_coefs: Option<&Vec<f64>>,
-    init_state: &Array1<f64>,
-    init_cov: &Array2<f64>,
-    pre_start: usize,
-    pre_end: usize,
-    post_start: usize,
-    post_end: usize,
-) -> EconResult<(Vec<f64>, Vec<f64>)> {
-    let n = y.len();
+    controls: &[Vec<f64>],
+    periods: &PeriodIndices,
+    control_names: &[String],
+    warnings: &mut Vec<String>,
+) -> EconResult<ControlRegression> {
+    let (from, to) = (periods.pre_start, periods.pre_end);
+    let k = controls.len() + 1; // a Vec's length is below usize::MAX
+    let mut x = try_zeros2(periods.n_pre, k, "the control regression's design")?;
+    x.column_mut(0).fill(1.0);
+    for (j, control) in controls.iter().enumerate() {
+        x.column_mut(j + 1)
+            .assign(&ndarray::ArrayView1::from(&control[from..=to]));
+    }
+    let y_pre = ndarray::ArrayView1::from(&y[from..=to]);
+    let solved = solve_ols(x.view(), y_pre)?;
 
-    // For prediction, we use the model fitted on pre-period
-    // In pre-period: use actual observations
-    // In post-period: predict using state-space model (counterfactual)
+    let mut names = Vec::with_capacity(k);
+    names.push("(Intercept)".to_string());
+    names.extend(control_names.iter().cloned());
+    if let Some(message) = aliasing_message(&solved.aliased, &names) {
+        warnings.push(message);
+        warnings.push(
+            "the control regression is rank deficient: the counterfactual uses the identified \
+             coefficients only"
+                .to_string(),
+        );
+    }
 
-    // If we have controls, adjust y for regression component
-    let y_adjusted: Vec<f64> = if let (Some(controls), Some(coefs)) = (controls, regression_coefs) {
-        y.iter()
-            .enumerate()
-            .map(|(i, &yi)| {
-                let mut adjustment = coefs[0]; // Intercept
-                for (j, control) in controls.iter().enumerate() {
-                    adjustment += coefs[j + 1] * control[i];
-                }
-                yi - adjustment
-            })
-            .collect()
-    } else {
-        y.to_vec()
+    let coefficients = solved.beta.to_vec();
+    let identified = |j: usize| {
+        let b = coefficients[j];
+        if b.is_nan() { 0.0 } else { b }
     };
+    let adjustment = (0..y.len())
+        .map(|i| {
+            identified(0)
+                + controls
+                    .iter()
+                    .enumerate()
+                    .map(|(j, control)| identified(j + 1) * control[i])
+                    .sum::<f64>()
+        })
+        .collect();
+    Ok(ControlRegression {
+        residuals: solved.residuals.to_vec(),
+        coefficients,
+        adjustment,
+    })
+}
 
-    let y_pre_adjusted: Vec<f64> = y_adjusted[pre_start..=pre_end].to_vec();
+/// The counterfactual and its variance at all `n` rows: in the pre-period the
+/// filtered fit of `y_for_model`, in the gap and the post-period the forecast of the
+/// fitted model, outside the two periods the nearest value.
+fn predict_counterfactual(
+    y_for_model: &[f64],
+    n: usize,
+    regression: Option<&ControlRegression>,
+    fit: &StructuralFit,
+    periods: &PeriodIndices,
+) -> EconResult<(Vec<f64>, Vec<f64>)> {
+    let PeriodIndices {
+        pre_start,
+        pre_end,
+        post_end,
+        ..
+    } = *periods;
+    let ssm = &fit.model;
+    let filter_result =
+        kalman_filter(y_for_model, ssm, fit.init_state.view(), fit.init_cov.view())?;
+    let forecast_result = kalman_forecast(&filter_result, ssm, periods.horizon()?)?;
+    let adjustment = |i: usize| regression.map_or(0.0, |r| r.adjustment[i]);
 
-    // Run Kalman filter on pre-period
-    let filter_result = kalman_filter(&y_pre_adjusted, ssm, init_state.view(), init_cov.view())?;
-
-    // Get final filtered state and covariance (kept for potential future use)
-    let n_pre = pre_end - pre_start + 1;
-    let _final_state = vec_to_array1(&filter_result.filtered_states[n_pre - 1]);
-    let _final_cov = nested_vec_to_array2(&filter_result.filtered_covs[n_pre - 1]);
-
-    // Forecast for post-period
-    let n_post = post_end - post_start + 1;
-    let n_gap = post_start - pre_end - 1; // Gap between pre and post (if any)
-    let forecast_horizon = n_gap + n_post;
-
-    let forecast_result = kalman_forecast(&filter_result, ssm, forecast_horizon)?;
-
-    // Build predicted and variance arrays
     let mut predicted = vec![0.0; n];
     let mut predicted_var = vec![0.0; n];
 
-    // Pre-period: use smoothed/filtered predictions
-    for i in 0..n_pre {
+    // Pre-period: Z' a_t|t and Z' P_t|t Z + H.
+    let z = ssm.observation.as_slice_memory_order();
+    let z = z.ok_or_else(|| EconError::Computation("the observation vector".to_string()))?;
+    for (i, (state, cov)) in filter_result
+        .filtered_states
+        .iter()
+        .zip(&filter_result.filtered_covs)
+        .enumerate()
+    {
         let idx = pre_start + i;
-        // Predicted observation = Z' * filtered_state
-        let state = vec_to_array1(&filter_result.filtered_states[i]);
-        predicted[idx] = ssm.observation.dot(&state);
-        // Prediction variance from filtered covariance
-        let cov = nested_vec_to_array2(&filter_result.filtered_covs[i]);
-        predicted_var[idx] = ssm.observation.dot(&cov.dot(&ssm.observation)) + ssm.obs_var;
+        let level: f64 = z.iter().zip(state).map(|(a, b)| a * b).sum();
+        let quadratic: f64 = z
+            .iter()
+            .zip(cov)
+            .filter(|(zj, _)| **zj != 0.0)
+            .map(|(zj, row)| zj * z.iter().zip(row).map(|(a, b)| a * b).sum::<f64>())
+            .sum();
+        predicted[idx] = level + adjustment(idx);
+        predicted_var[idx] = quadratic + ssm.obs_var;
     }
 
-    // Add back regression component if present
-    if let (Some(controls), Some(coefs)) = (controls, regression_coefs) {
-        for i in 0..n {
-            let mut adjustment = coefs[0];
-            for (j, control) in controls.iter().enumerate() {
-                adjustment += coefs[j + 1] * control[i];
-            }
-            predicted[i] += adjustment;
-        }
+    // The gap and the post-period: the forecast (the counterfactual).
+    for (h, (forecast, variance)) in forecast_result
+        .forecasts
+        .iter()
+        .zip(&forecast_result.variances)
+        .enumerate()
+    {
+        let idx = pre_end + 1 + h;
+        predicted[idx] = forecast + adjustment(idx);
+        predicted_var[idx] = *variance;
     }
 
-    // Post-period: use forecasts (counterfactual)
-    for i in 0..n_post {
-        let idx = post_start + i;
-        let forecast_idx = n_gap + i;
-        if forecast_idx < forecast_result.forecasts.len() {
-            predicted[idx] = forecast_result.forecasts[forecast_idx];
-            predicted_var[idx] = forecast_result.variances[forecast_idx];
-
-            // Add back regression component
-            if let (Some(controls), Some(coefs)) = (controls, regression_coefs) {
-                let mut adjustment = coefs[0];
-                for (j, control) in controls.iter().enumerate() {
-                    adjustment += coefs[j + 1] * control[idx];
-                }
-                predicted[idx] += adjustment;
-            }
-        }
-    }
-
-    // Fill any gaps
-    for i in (pre_end + 1)..post_start {
-        let gap_idx = i - pre_end - 1;
-        if gap_idx < forecast_result.forecasts.len() {
-            predicted[i] = forecast_result.forecasts[gap_idx];
-            predicted_var[i] = forecast_result.variances[gap_idx];
-
-            if let (Some(controls), Some(coefs)) = (controls, regression_coefs) {
-                let mut adjustment = coefs[0];
-                for (j, control) in controls.iter().enumerate() {
-                    adjustment += coefs[j + 1] * control[i];
-                }
-                predicted[i] += adjustment;
-            }
-        }
-    }
-
-    // For indices before pre_start, just use first prediction
+    // Outside the two periods, the nearest value.
     for i in 0..pre_start {
         predicted[i] = predicted[pre_start];
         predicted_var[i] = predicted_var[pre_start];
     }
-
-    // For indices after post_end, use last prediction
     for i in (post_end + 1)..n {
         predicted[i] = predicted[post_end];
         predicted_var[i] = predicted_var[post_end];
@@ -1084,62 +822,29 @@ fn predict_counterfactual(
     Ok((predicted, predicted_var))
 }
 
-/// Initialize state for Kalman filter.
-fn initialize_state(y: &[f64], config: &CausalImpactConfig) -> Array1<f64> {
-    let state_dim = compute_state_dim(config);
-
-    let mut state = Array1::zeros(state_dim);
-    state[0] = y[0]; // Level = first observation
-
-    if config.include_trend && state_dim >= 2 {
-        // Slope from first difference
-        state[1] = if y.len() > 1 { y[1] - y[0] } else { 0.0 };
+/// CausalImpact's level, optional trend and optional seasonal as an engine model.
+fn causal_spec(config: &CausalImpactConfig) -> StructuralSpec {
+    StructuralSpec {
+        slope: config.include_trend,
+        seasonal: config.seasonal_period,
+        naming: CAUSAL_IMPACT_NAMING,
     }
-
-    state
 }
 
-/// Initialize covariance for Kalman filter.
-fn initialize_covariance(y_var: f64, config: &CausalImpactConfig) -> EconResult<Array2<f64>> {
-    let state_dim = compute_state_dim(config);
-
-    // Diffuse initialization
-    let mut cov = match config.seasonal_period {
-        Some(_) => seasonal_square(
-            config,
-            state_dim,
-            "the seasonal model's initial state covariance",
-        )?,
-        None => Array2::zeros((state_dim, state_dim)),
-    };
-    cov.diag_mut().fill(y_var * 10.0);
-    Ok(cov)
-}
-
-/// Compute state dimension based on config.
-///
-/// [`causal_impact`] checks `seasonal_period` first; saturating all the same,
-/// so that no use can panic on it.
-fn compute_state_dim(config: &CausalImpactConfig) -> usize {
-    let mut dim: usize = 1; // Level
-
-    if config.include_trend {
-        dim += 1; // Slope
-    }
-
-    if let Some(period) = config.seasonal_period {
-        dim = dim.saturating_add(period.saturating_sub(1)); // Seasonal states
-    }
-
-    dim
-}
+const CAUSAL_IMPACT_NAMING: SpecNaming = SpecNaming {
+    method: "CausalImpact",
+    transition: "the seasonal model's transition matrix",
+    prior: "the seasonal model's initial state covariance",
+    remedy: seasonal_square_remedy,
+    check_period: check_seasonal_period,
+};
 
 /// What to change when the Kalman history and forecast of an `m`-dimensional
 /// state are refused: the history grows with the pre-period, the forecast
 /// with the post-period, and with a seasonal component the state dimension
 /// follows from `seasonal_period`.
-fn history_remedy(config: &CausalImpactConfig, m: usize) -> String {
-    match seasonal_dim_note(config, m) {
+fn history_remedy(spec: &StructuralSpec, m: usize) -> String {
+    match seasonal_dim_note(spec, m) {
         Some(note) => {
             format!("{note}; use a smaller seasonal_period or a shorter pre_period or post_period")
         }
@@ -1147,13 +852,12 @@ fn history_remedy(config: &CausalImpactConfig, m: usize) -> String {
     }
 }
 
-/// How `config`'s `seasonal_period` sets the state dimension `m`, for a
-/// remedy, or `None` without a seasonal component. The period is read from
-/// `config`, so the note cannot describe a different one from the model that
-/// was sized.
-fn seasonal_dim_note(config: &CausalImpactConfig, m: usize) -> Option<String> {
-    config.seasonal_period.map(|period| {
-        if config.include_trend {
+/// How `spec`'s `seasonal` sets the state dimension `m`, for a remedy, or `None`
+/// without a seasonal component. The period is read from `spec`, so the note
+/// cannot describe a different one from the model that was sized.
+fn seasonal_dim_note(spec: &StructuralSpec, m: usize) -> Option<String> {
+    spec.seasonal.map(|period| {
+        if spec.slope {
             format!(
                 "with seasonal_period {period} and include_trend the state dimension is \
                  seasonal_period + 1 = {m}"
@@ -1189,23 +893,12 @@ fn check_seasonal_period(period: usize, n_pre: usize) -> EconResult<()> {
     Ok(())
 }
 
-/// An m × m zero matrix of a seasonal model, `what` it is, allocated
-/// fallibly: a [`EconError::ResourceLimit`] that names `seasonal_period` and
-/// `m` when its size overflows, exceeds the per-allocation ceiling or cannot
-/// be allocated. `what` is static and the remedy is formatted only on a
-/// refusal, so the likelihood passes of the fit allocate no text.
-fn seasonal_square(
-    config: &CausalImpactConfig,
-    m: usize,
-    what: &'static str,
-) -> EconResult<Array2<f64>> {
-    try_zeros2(m, m, what).map_err(|e| {
-        let remedy = seasonal_dim_note(config, m).map_or_else(
-            || "use a smaller seasonal_period".to_string(),
-            |note| format!("{note}; use a smaller seasonal_period"),
-        );
-        with_remedy(e, &remedy)
-    })
+/// The remedy of a refused m × m matrix: it names `seasonal_period` and `m`.
+fn seasonal_square_remedy(spec: &StructuralSpec, m: usize) -> String {
+    seasonal_dim_note(spec, m).map_or_else(
+        || "use a smaller seasonal_period".to_string(),
+        |note| format!("{note}; use a smaller seasonal_period"),
+    )
 }
 
 /// Count number of parameters for AIC/BIC.
@@ -1230,37 +923,10 @@ fn count_params(config: &CausalImpactConfig, has_controls: bool) -> usize {
     n
 }
 
-/// Sample variance.
-fn sample_variance(y: &[f64]) -> f64 {
-    let n = y.len() as f64;
-    if n < 2.0 {
-        return 1.0;
-    }
-    let mean = y.iter().sum::<f64>() / n;
-    y.iter().map(|&yi| (yi - mean).powi(2)).sum::<f64>() / (n - 1.0)
-}
-
-// Helper functions for array conversions
-
-fn vec_to_array1(v: &[f64]) -> Array1<f64> {
-    Array1::from_vec(v.to_vec())
-}
-
-fn nested_vec_to_array2(v: &[Vec<f64>]) -> Array2<f64> {
-    let rows = v.len();
-    let cols = if rows > 0 { v[0].len() } else { 0 };
-    let mut arr = Array2::zeros((rows, cols));
-    for i in 0..rows {
-        for j in 0..cols {
-            arr[[i, j]] = v[i][j];
-        }
-    }
-    arr
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p2a_validation::{Check, Tol};
     use polars::prelude::*;
 
     /// X-2: an Int64 response fits as its Float64 copy; missing values in the response,
@@ -1320,6 +986,234 @@ mod tests {
         let time: Vec<i64> = (0..n as i64).collect();
 
         (y, time)
+    }
+
+    fn ds(y: &[f64], time: &[i64]) -> Dataset {
+        Dataset::new(df! {"y" => y, "time" => time}.unwrap())
+    }
+
+    fn refused(dataset: &Dataset, config: CausalImpactConfig, needles: &[&str]) {
+        match causal_impact(dataset, "y", "time", config) {
+            Err(EconError::InvalidSpecification { message }) => {
+                for needle in needles {
+                    assert!(message.contains(needle), "{needle:?} not in {message}");
+                }
+            }
+            other => panic!(
+                "expected InvalidSpecification for {needles:?}, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
+    fn periods(pre_period: (i64, i64), post_period: (i64, i64)) -> CausalImpactConfig {
+        CausalImpactConfig {
+            pre_period,
+            post_period,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_causal_impact_rejects_inverted_periods() {
+        let (y, time) = generate_causal_impact_data(50, 30, 5.0, 789);
+        let d = ds(&y, &time);
+        refused(
+            &d,
+            periods((0, 39), (50, 45)),
+            &["post_period start 50 is after its end 45"],
+        );
+        refused(
+            &d,
+            periods((39, 0), (40, 79)),
+            &["pre_period start 39 is after its end 0"],
+        );
+        refused(
+            &d,
+            periods((0, 39), (200, 210)),
+            &["post_period [200, 210] contains no time values", "0 to 79"],
+        );
+        // A period between two time values holds no observation.
+        let even: Vec<i64> = time.iter().map(|t| 2 * t).collect();
+        refused(
+            &ds(&y, &even),
+            periods((0, 78), (81, 81)),
+            &["post_period [81, 81] contains no time values"],
+        );
+        // Rows 4 and 5 (1-based) swapped.
+        let mut swapped = time.clone();
+        swapped.swap(3, 4);
+        refused(
+            &ds(&y, &swapped),
+            periods((0, 39), (40, 79)),
+            &["must be strictly increasing", "row 5"],
+        );
+    }
+
+    #[test]
+    fn test_causal_impact_rejects_degenerate_config() {
+        let (y, time) = generate_causal_impact_data(50, 30, 5.0, 789);
+        let d = ds(&y, &time);
+        for alpha in [0.0, 1.0, 1.5, f64::NAN] {
+            refused(
+                &d,
+                CausalImpactConfig {
+                    alpha,
+                    ..periods((0, 49), (50, 79))
+                },
+                &["alpha must be strictly between 0 and 1"],
+            );
+        }
+        refused(
+            &d,
+            CausalImpactConfig {
+                max_iter: 0,
+                ..periods((0, 49), (50, 79))
+            },
+            &["max_iter"],
+        );
+        refused(
+            &d,
+            CausalImpactConfig {
+                tolerance: 0.0,
+                ..periods((0, 49), (50, 79))
+            },
+            &["tolerance"],
+        );
+    }
+
+    #[test]
+    fn test_validate_causal_impact_counterfactual_nile() {
+        let (case, cds) = crate::test_support::load_case("structts_nile_ukgas");
+        // Rows t = 1..100: nile is missing in rows 101-108.
+        let d = Dataset::new(cds.df().slice(0, 100));
+        let r = run_causal_impact(&d, "nile", "t", (1, 90), (91, 100), None).unwrap();
+        let (m, s) = (&r.model, &r.series);
+        let tol = Tol::iterative(1e-6);
+        Check::new(&case)
+            .named(
+                "nile_pre90_coef_tight",
+                &["level", "epsilon"],
+                &[m.level_variance, m.observation_variance],
+                tol,
+            )
+            .scalar("nile_pre90_loglik_tight", m.log_likelihood, Tol::stat(90))
+            .vector("nile_pre90_forecast", &s.predicted[90..100], tol)
+            .vector("nile_pre90_upper", &s.predicted_upper[90..100], tol)
+            .vector("nile_pre90_point_effect", &s.point_effect[90..100], tol)
+            .scalar("nile_pre90_cum_effect", r.summary.cumulative_effect, tol)
+            .finish();
+        assert_eq!((m.n_pre, m.n_post), (90, 10));
+        assert!(r.convergence.converged);
+    }
+
+    #[test]
+    fn test_causal_impact_tail_probability_is_not_zero() {
+        // Effect -8 on noise of half-width 0.5 and level steps of half-width 1.
+        let (y, time) = generate_causal_impact_data(70, 30, -8.0, 42);
+        let r = run_causal_impact(&ds(&y, &time), "y", "time", (0, 69), (70, 99), None).unwrap();
+        assert!(r.summary.cumulative_effect < 0.0);
+        let z = r.inference.expected_effect / r.inference.effect_sd;
+        // Below -9, 1 - Phi(|z|) is exactly 0 in double precision; above -37,
+        // Phi(z) is still a normal double.
+        assert!(-37.0 < z && z < -9.0, "{z}");
+        assert!(r.summary.p_value > 0.0);
+        assert!(r.inference.prob_positive > 0.0);
+        let want = Normal::standard().sf(-z);
+        assert!(
+            ((r.summary.p_value - want) / want).abs() < 1e-12,
+            "{} vs {want}",
+            r.summary.p_value
+        );
+    }
+
+    #[test]
+    fn test_causal_impact_clipped_periods_warn() {
+        let (y, time) = generate_causal_impact_data(70, 30, 5.0, 37);
+        let r = causal_impact(&ds(&y, &time), "y", "time", periods((-5, 69), (70, 500))).unwrap();
+        for needle in [
+            "pre_period start -5 is before the first time value 0",
+            "post_period end 500 is after the last time value 99",
+        ] {
+            assert!(
+                r.warnings.iter().any(|w| w.contains(needle)),
+                "{needle}: {:?}",
+                r.warnings
+            );
+        }
+        assert_eq!((r.model.n_pre, r.model.n_post), (70, 30));
+        assert_eq!(r.notes_warnings(), r.warnings);
+    }
+
+    #[test]
+    fn test_causal_impact_reports_convergence() {
+        let (y, time) = generate_causal_impact_data(70, 30, 10.0, 555);
+        let d = ds(&y, &time);
+        let limited = causal_impact(
+            &d,
+            "y",
+            "time",
+            CausalImpactConfig {
+                max_iter: 1,
+                ..periods((0, 69), (70, 99))
+            },
+        )
+        .unwrap();
+        assert!(!limited.convergence.converged);
+        assert!(
+            limited.warnings[0].starts_with("CausalImpact did not converge after 1 iteration"),
+            "{:?}",
+            limited.warnings
+        );
+        assert_eq!(limited.notes_convergence().unwrap().iterations, 1);
+        let default = causal_impact(&d, "y", "time", periods((0, 69), (70, 99))).unwrap();
+        assert!(default.convergence.converged);
+        assert!(default.warnings.is_empty(), "{:?}", default.warnings);
+    }
+
+    #[test]
+    fn test_causal_impact_aliased_control_warns() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(29);
+        let n = 80;
+        let c1: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>()).collect();
+        let c2: Vec<f64> = c1.iter().map(|c| 2.0 * c).collect();
+        let y: Vec<f64> = c1
+            .iter()
+            .enumerate()
+            .map(|(t, c)| {
+                let effect = if t >= 60 { 3.0 } else { 0.0 };
+                0.5 * c + (rng.r#gen::<f64>() - 0.5) + effect
+            })
+            .collect();
+        let time: Vec<i64> = (0..n as i64).collect();
+        let d = Dataset::new(df! {"y" => &y, "time" => &time, "c1" => &c1, "c2" => &c2}.unwrap());
+        let r = run_causal_impact(&d, "y", "time", (0, 59), (60, 79), Some(&["c1", "c2"])).unwrap();
+        assert!(r.model.regression_coefficients.as_ref().unwrap()[2].is_nan());
+        for needle in [
+            "Coefficients not defined because of singularities: c2",
+            "the control regression is rank deficient",
+        ] {
+            assert!(
+                r.warnings.iter().any(|w| w.contains(needle)),
+                "{needle}: {:?}",
+                r.warnings
+            );
+        }
+        assert!(r.summary.cumulative_effect.is_finite());
+    }
+
+    #[test]
+    fn test_causal_impact_empty_control_list_is_no_controls() {
+        let (y, time) = generate_causal_impact_data(50, 30, 5.0, 19);
+        let d = ds(&y, &time);
+        let none = run_causal_impact(&d, "y", "time", (0, 49), (50, 79), None).unwrap();
+        let empty = run_causal_impact(&d, "y", "time", (0, 49), (50, 79), Some(&[])).unwrap();
+        assert_eq!(
+            none.summary.cumulative_effect,
+            empty.summary.cumulative_effect
+        );
+        assert!(empty.model.regression_coefficients.is_none());
     }
 
     #[test]
@@ -1582,8 +1476,13 @@ mod tests {
         assert!(result.model.log_likelihood.is_finite());
         assert!(result.model.aic.is_finite());
         assert!(result.model.bic.is_finite());
-        assert!(result.model.level_variance > 0.0);
-        assert!(result.model.observation_variance > 0.0);
+        // A variance can be 0 at the bound, as in R.
+        assert!(result.model.level_variance >= 0.0 && result.model.level_variance.is_finite());
+        assert!(
+            result.model.observation_variance >= 0.0
+                && result.model.observation_variance.is_finite()
+        );
+        assert!(result.convergence.converged);
     }
 
     #[test]
@@ -1610,7 +1509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_causal_impact_cumulative_effect() {
+    fn test_causal_impact_cumulative_effect_recovers_dgp() {
         // Create data with a known additive effect of 5.0 in the post-period.
         // Verify the estimated cumulative effect is close to n_post * 5.0 = 150.
         let n_pre = 80;
@@ -1652,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_causal_impact_point_effects() {
+    fn test_causal_impact_point_effects_recover_dgp() {
         // Verify that point-wise effects in the post-period average near the true effect.
         let n_pre = 70;
         let n_post = 30;
@@ -1695,7 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_causal_impact_credible_intervals() {
+    fn test_causal_impact_intervals_are_ordered() {
         // Verify that the credible interval for the average effect contains
         // the true effect value (at least occasionally with random data).
         let n_pre = 80;
@@ -1744,7 +1643,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_causal_impact_series_lengths() {
+    fn test_causal_impact_series_lengths() {
         // Verify that all output series have consistent lengths.
         let n_pre = 60;
         let n_post = 20;
@@ -2035,13 +1934,10 @@ mod tests {
 
     #[test]
     fn bsts_model_matrices_are_allocated_fallibly() {
-        // build_state_space_model allocated the m × m transition with
-        // Array2::zeros, and initialize_covariance the m × m prior with
-        // from_diag. Both are infallible: a matrix the allocator cannot
-        // provide aborted the process, and one whose size overflows panicked.
-        // Both are now a ResourceLimit that names seasonal_period. Before the
-        // fix the refusals below returned Ok and the overflow panicked.
-        let y_var = 4.0;
+        // The m × m transition and prior are allocated fallibly: a matrix the
+        // allocator cannot provide is a ResourceLimit that names seasonal_period,
+        // and one whose size overflows is refused before any allocation.
+        let (y, _) = generate_causal_impact_data(40, 0, 0.0, 41);
         // 8 · 12² = 1,152 bytes and 8 · 13² = 1,352 bytes > 1 KiB.
         let ceiling = Some(1 << 10);
         for (include_trend, m, remedy) in [
@@ -2062,13 +1958,11 @@ mod tests {
                 include_trend,
                 ..seasonal_config(40, 10)
             };
-            let params = initialize_variance_params(y_var, &config);
-            // The model is sized by compute_state_dim, so the remedy below is
-            // checked against the dimension the code computes.
-            assert_eq!(compute_state_dim(&config), m, "{config:?}");
-            match crate::resource::with_alloc_ceiling(ceiling, || {
-                build_state_space_model(&params, None, &config)
-            }) {
+            let spec = causal_spec(&config);
+            let variances = vec![1.0; spec.parameter_names().len()];
+            // The remedy below is checked against the dimension the code computes.
+            assert_eq!(spec.state_dim().unwrap(), m, "{config:?}");
+            match crate::resource::with_alloc_ceiling(ceiling, || spec.model(&variances)) {
                 Err(EconError::ResourceLimit(msg)) => assert!(
                     msg.starts_with("the seasonal model's transition matrix would need")
                         && msg.ends_with(remedy)
@@ -2077,9 +1971,7 @@ mod tests {
                 ),
                 other => panic!("expected ResourceLimit, got {other:?}"),
             }
-            match crate::resource::with_alloc_ceiling(ceiling, || {
-                initialize_covariance(y_var, &config)
-            }) {
+            match crate::resource::with_alloc_ceiling(ceiling, || spec.prior(&y)) {
                 Err(EconError::ResourceLimit(msg)) => assert!(
                     msg.starts_with("the seasonal model's initial state covariance would need")
                         && msg.ends_with(remedy),
@@ -2088,47 +1980,40 @@ mod tests {
                 other => panic!("expected ResourceLimit, got {other:?}"),
             }
             // An m × m whose size overflows is refused before any allocation.
-            let huge = CausalImpactConfig {
-                seasonal_period: Some(usize::MAX / 4),
-                ..config.clone()
+            let huge = StructuralSpec {
+                seasonal: Some(usize::MAX / 4),
+                ..spec
             };
             assert!(matches!(
-                build_state_space_model(&params, None, &huge),
+                huge.model(&variances),
                 Err(EconError::ResourceLimit(msg)) if msg.contains("overflows")
             ));
             assert!(matches!(
-                initialize_covariance(y_var, &huge),
+                huge.prior(&y),
                 Err(EconError::ResourceLimit(msg)) if msg.contains("overflows")
             ));
-            // Without a ceiling the prior is the diagonal it was.
-            assert_eq!(
-                initialize_covariance(y_var, &config).unwrap(),
-                Array2::from_diag(&Array1::from_elem(m, y_var * 10.0))
-            );
         }
     }
 
     #[test]
     fn remedies_without_a_seasonal_component_name_no_period() {
-        // seasonal_dim_note fell back to period 0 when the configuration had
-        // no seasonal component, so a refused seasonal_square read "with
-        // seasonal_period 0 the state dimension is seasonal_period = 1". The
-        // note is now absent without a period and the remedy names none.
+        // Without a seasonal component the note is absent and the remedy names no
+        // period, not "seasonal_period 0".
         for include_trend in [false, true] {
-            let config = CausalImpactConfig {
+            let spec = causal_spec(&CausalImpactConfig {
                 include_trend,
                 seasonal_period: None,
                 ..seasonal_config(40, 10)
-            };
-            let m = compute_state_dim(&config);
-            assert_eq!(seasonal_dim_note(&config, m), None, "{config:?}");
+            });
+            let m = spec.state_dim().unwrap();
+            assert_eq!(seasonal_dim_note(&spec, m), None, "{spec:?}");
             assert_eq!(
-                history_remedy(&config, m),
+                history_remedy(&spec, m),
                 "use a shorter pre_period or post_period"
             );
             // 8 · 1² and 8 · 2² bytes are both above a 4-byte ceiling.
             match crate::resource::with_alloc_ceiling(Some(4), || {
-                seasonal_square(&config, m, "the seasonal model's transition matrix")
+                spec.square(m, spec.naming.transition)
             }) {
                 Err(EconError::ResourceLimit(msg)) => assert!(
                     msg.ends_with("; use a smaller seasonal_period")
@@ -2140,8 +2025,8 @@ mod tests {
             }
         }
         // With a period the note is the one both remedies carry.
-        let seasonal = seasonal_config(40, 10);
-        let m = compute_state_dim(&seasonal);
+        let seasonal = causal_spec(&seasonal_config(40, 10));
+        let m = seasonal.state_dim().unwrap();
         let note = seasonal_dim_note(&seasonal, m).unwrap();
         assert_eq!(
             note,
@@ -2154,10 +2039,9 @@ mod tests {
     }
 
     #[test]
-    fn compute_state_dim_is_the_dimension_of_the_model_that_runs() {
-        // The admission sizes the history by compute_state_dim; the filter
-        // runs the model build_state_space_model builds, from
-        // initialize_state and initialize_covariance. All four must agree.
+    fn state_dim_is_the_dimension_of_the_model_that_runs() {
+        // The admission sizes the history by state_dim; the filter runs the model
+        // the spec builds, from its prior. All must agree.
         let (y, _) = generate_causal_impact_data(40, 0, 0.0, 41);
         for (include_trend, seasonal_period, m) in [
             (false, None, 1),
@@ -2167,51 +2051,34 @@ mod tests {
             (true, Some(2), 3),
             (true, Some(12), 13),
         ] {
-            let config = CausalImpactConfig {
+            let spec = causal_spec(&CausalImpactConfig {
                 include_trend,
                 seasonal_period,
                 ..seasonal_config(40, 10)
-            };
-            let params = initialize_variance_params(4.0, &config);
-            assert_eq!(compute_state_dim(&config), m, "{config:?}");
-            let model = build_state_space_model(&params, None, &config).unwrap();
-            assert_eq!(model.state_dim(), m, "{config:?}");
-            assert_eq!(initialize_state(&y, &config).len(), m);
-            assert_eq!(initialize_covariance(4.0, &config).unwrap().dim(), (m, m));
+            });
+            let variances = vec![1.0; spec.parameter_names().len()];
+            assert_eq!(spec.state_dim().unwrap(), m, "{spec:?}");
+            assert_eq!(spec.model(&variances).unwrap().state_dim(), m, "{spec:?}");
+            let (a0, p0, _) = spec.prior(&y).unwrap();
+            assert_eq!(a0.len(), m);
+            assert_eq!(p0.dim(), (m, m));
         }
     }
 
     #[test]
-    fn fit_bsts_model_keeps_no_history_and_stops_on_a_stopped_budget() {
-        // The objective scored every Err as 1e20, so a stopped budget left
-        // the Nelder-Mead search running on 1e20 vertices for max_iter
-        // iterations and returned Ok. Its likelihood passes keep no Kalman
-        // history: had they run kalman_filter, which admits its history,
-        // every evaluation under this ceiling would be ResourceLimit.
+    fn fit_structural_keeps_no_history_and_stops_on_a_stopped_budget() {
+        // The likelihood passes keep no Kalman history: had they run kalman_filter,
+        // which admits its history, every evaluation under this ceiling would be
+        // ResourceLimit. A stopped budget stops the search instead of scoring.
         let (y, _) = generate_causal_impact_data(40, 0, 0.0, 32);
-        let config = seasonal_config(40, 1);
-        // The history would be 145,280 bytes, above 64 KiB; the fit keeps
-        // none of it and finds exactly what it finds without a ceiling.
-        let bounded = crate::resource::with_alloc_ceiling(Some(64 << 10), || {
-            fit_bsts_model(&y, None, &config)
-        });
-        assert_eq!(bounded.unwrap(), fit_bsts_model(&y, None, &config).unwrap());
-        assert!(matches!(
-            cancelled(|| fit_bsts_model(&y, None, &config)),
-            Err(EconError::Cancelled(_))
-        ));
-        // With no iterations the loop never runs, so this pins the
-        // objective's pass-through alone: the initial simplex must not score
-        // a cancelled likelihood as 1e20.
-        let no_iterations = CausalImpactConfig {
-            max_iter: 0,
-            ..config.clone()
-        };
-        assert!(matches!(
-            cancelled(|| fit_bsts_model(&y, None, &no_iterations)),
-            Err(EconError::Cancelled(_))
-        ));
+        let spec = causal_spec(&seasonal_config(40, 1));
+        let run = || fit_structural(&y, spec, None, 100, 1e-8);
+        // The history would be 145,280 bytes, above 64 KiB; the fit keeps none of
+        // it and finds exactly what it finds without a ceiling.
+        let bounded = crate::resource::with_alloc_ceiling(Some(64 << 10), run).unwrap();
+        assert_eq!(bounded.variances, run().unwrap().variances);
+        assert!(matches!(cancelled(run), Err(EconError::Cancelled(_))));
         // Without a budget or a ceiling nothing changes.
-        assert!(fit_bsts_model(&y, None, &config).is_ok());
+        assert!(run().is_ok());
     }
 }
