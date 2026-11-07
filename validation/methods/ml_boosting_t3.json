@@ -84,6 +84,35 @@
       "tolerance": "100-step paths and tree fits: validation/README.md, n = 200: 1e-8 relative; 2000-step paths and limits: 1e-6 relative (iterative)",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_bart_probit",
+      "name": "Probit BART (classification) by data augmentation",
+      "category": "ml",
+      "reference": "BART::pbart model (the BART package is not a dependency of these cases): exact posterior with unsplittable trees by stats::integrate; glm(binomial(probit)) as a property target",
+      "doc": "validation/ml/bart.md",
+      "cases": [
+        "ml_bart_probit_single_leaf",
+        "ml_bart_probit_glm"
+      ],
+      "tests": [
+        "p2a-core::ml::bart::tests::test_validate_bart_probit_single_leaf_posterior",
+        "p2a-core::ml::bart::tests::test_validate_bart_probit_tracks_glm_probit"
+      ],
+      "quantities": [
+        "offset",
+        "posterior mean and SD of P(y = 1)",
+        "proximity to glm probit probabilities (property)"
+      ],
+      "tolerance": "offset 1e-6 relative; posterior mean 0.009 and SD 0.006 absolute (5 Monte Carlo SDs from 200 R replications); glm property: mean absolute difference < 0.085, correlation > 0.90",
+      "deviations": [
+        {
+          "finding": "ML-16",
+          "quantity": "tree grow/prune kernel",
+          "note": "Probit and regression BART share a kernel whose Metropolis-Hastings ratio is an open finding (ML-16, ML-121); the single-leaf pin excludes it and the glm property is insensitive to it."
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }

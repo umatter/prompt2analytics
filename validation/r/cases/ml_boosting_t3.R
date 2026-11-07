@@ -253,3 +253,32 @@ case("ml_adaboost_samme", "ml/adaboost", "AdaBoost.M1 and SAMME with depth-limit
        packages = c("rpart"))
 })
 
+case("ml_bart_probit_single_leaf", "ml/bart", "Probit BART with unsplittable trees: exact posterior of Phi(offset + f)", function(ctx) {
+  set.seed(4639)
+  n <- 40
+  d <- ctx$gen_dataset("bart_probit_small", data.frame(x1 = runif(n), y = rbinom(n, 1, 0.4)))
+  y <- d$y; k <- 2; s0 <- 3 / k; off <- qnorm(mean(y))
+  lp <- function(f) dnorm(f, 0, s0, log = TRUE) + sum(y * pnorm(off + f, log.p = TRUE) + (1 - y) * pnorm(off + f, lower.tail = FALSE, log.p = TRUE))
+  c0 <- lp(optimize(function(f) -lp(f), c(-5, 5))$minimum)
+  dens <- function(f) exp(sapply(f, lp) - c0)
+  Z <- integrate(dens, -Inf, Inf, rel.tol = 1e-13)$value
+  m1 <- integrate(function(f) pnorm(off + f) * dens(f), -Inf, Inf, rel.tol = 1e-13)$value / Z
+  m2 <- integrate(function(f) pnorm(off + f)^2 * dens(f), -Inf, Inf, rel.tol = 1e-13)$value / Z
+  list(values = list(offset = off, post_mean_p = m1, post_sd_p = sqrt(m2 - m1^2), prior_sd_f = s0),
+       reference = "BART::pbart model (Chipman, George & McCulloch 2010, sec. 4; Albert & Chib 1993): y = 1{z > 0}, z ~ N(binaryOffset + f, 1), binaryOffset = qnorm(mean(y)), leaf prior N(0, (3 / (k sqrt(m)))^2); with unsplittable trees f ~ N(0, 9 / k^2); posterior by stats::integrate (rel.tol 1e-13); BART is not a case dependency",
+       call = "k = 2; posterior mean and sd of pnorm(qnorm(mean(y)) + f) under p(f | y)",
+       packages = character(0))
+})
+
+case("ml_bart_probit_glm", "ml/bart", "Probit BART target: glm probit fitted probabilities on a linear-index DGP", function(ctx) {
+  set.seed(4640)
+  n <- 300
+  x1 <- runif(n, -1, 1); x2 <- runif(n, -1, 1); x3 <- runif(n, -1, 1)
+  y <- rbinom(n, 1, pnorm(-0.2 + 1.0 * x1 - 0.7 * x2))
+  d <- ctx$gen_dataset("bart_probit_sim", data.frame(x1, x2, x3, y))
+  g <- glm(y ~ x1 + x2 + x3, data = d, family = binomial(link = "probit"), control = glm.control(epsilon = 1e-14, maxit = 100))
+  list(values = list(glm_coef = named(coef(g)), glm_prob = vec(fitted(g))),
+       reference = "stats::glm(family = binomial(link = 'probit')) fitted probabilities (a property target for probit BART, not an equality)",
+       call = "glm(y ~ x1 + x2 + x3, family = binomial(link = 'probit'), control = glm.control(epsilon = 1e-14))",
+       packages = character(0))
+})
