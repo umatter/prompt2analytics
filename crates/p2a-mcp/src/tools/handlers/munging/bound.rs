@@ -814,8 +814,10 @@ pub(super) fn concat(frames: &[&DataFrame]) -> u64 {
     bound.bytes()
 }
 
-/// `munge_melt`: every row once per value variable, the id columns
-/// gathered, the variable names as String and the values as Float64.
+/// `munge_melt`: every row once per value variable, the id columns gathered,
+/// the variable names as String and the value column of the value columns'
+/// common type, as `p2a_core::data::munging::melt` builds it. No bound for text
+/// melted with non-text columns, which core refuses.
 pub(super) fn melt(
     df: &DataFrame,
     id_vars: &[&str],
@@ -837,8 +839,47 @@ pub(super) fn melt(
         .iter()
         .fold(0u64, |acc, v| acc.saturating_add(out_of_line(v.len())));
     bound.string(variable_name, names.saturating_mul(height));
-    bound.fixed(value_name, 8);
+    let common = df
+        .select(distinct_names(value_vars))
+        .ok()?
+        .get_supertype()?
+        .ok()?;
+    let labels = matches!(common, DataType::Categorical(..) | DataType::Enum(..));
+    let differ = value_vars
+        .iter()
+        .any(|v| df.column(v).is_ok_and(|c| c.dtype() != &common));
+    if common == DataType::String || (labels && differ) {
+        let mut text = 0u64;
+        for v in value_vars {
+            let col = df.column(v).ok()?;
+            if !matches!(
+                col.dtype(),
+                DataType::String | DataType::Categorical(..) | DataType::Enum(..)
+            ) {
+                return None;
+            }
+            let as_text = col.cast(&DataType::String).ok()?;
+            text = text.saturating_add(text_bytes(as_text.as_materialized_series()));
+        }
+        bound.string(value_name, text);
+    } else if let Some(values) = fixed_values(&common, rows, df.max_n_chunks() as u64) {
+        bound.column(value_name, values);
+    } else {
+        // Categorical, enum or nested: the concatenated column cannot exceed its parts.
+        let mut values = 0u64;
+        for v in value_vars {
+            let col = df.column(v).ok()?;
+            values = values.saturating_add(session::series_bytes(col.as_materialized_series()));
+        }
+        bound.column(value_name, values);
+    }
     Some(bound.bytes())
+}
+
+/// `names` without repeats, in their first order.
+fn distinct_names<'a>(names: &[&'a str]) -> Vec<&'a str> {
+    let mut seen = HashSet::with_capacity(names.len());
+    names.iter().copied().filter(|n| seen.insert(*n)).collect()
 }
 
 /// The bytes of one row index of polars (`IdxSize`): a sample with
@@ -1175,4 +1216,38 @@ pub(super) fn diff(df: &DataFrame, column: &str, new_column: &str) -> Option<u64
     let mut bound = Bound::keeping(df, &[new_column]);
     bound.fixed(new_column, width);
     Some(bound.bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_core::data::Dataset;
+    use p2a_core::data::munging::melt as core_melt;
+
+    /// The bound of munge_melt covers what the quotas charge for the typed value column:
+    /// text stays text, u32/f32 widen to f64, nulls stay null.
+    #[test]
+    fn melt_bound_covers_text_and_typed_value_columns() {
+        let long = "a fairly long value that does not fit in a string view";
+        let df = df!(
+            "id" => [1i64, 2, 3, 4],
+            "s1" => [Some(long), None, Some("x"), Some(long)],
+            "s2" => [Some("y"), Some(long), None, Some(long)],
+            "u" => [1u32, 2, 3, 4],
+            "f" => [Some(1.5f32), None, Some(2.5), Some(0.25)]
+        )
+        .unwrap();
+        let ds = Dataset::new(df.clone());
+        for vars in [&["s1", "s2"][..], &["u", "f"][..], &["s1"][..]] {
+            let built = core_melt(&ds, &["id"], vars, "variable", "value").unwrap();
+            let charged = session::datasets_bytes_of([("", &built)]);
+            let bound = melt(&df, &["id"], vars, "variable", "value").expect("a bound");
+            assert!(
+                bound >= charged,
+                "{vars:?}: bound {bound} < charged {charged}"
+            );
+        }
+        // text with non-text is refused by core; the bound gives up instead of guessing
+        assert!(melt(&df, &["id"], &["s1", "u"], "variable", "value").is_none());
+    }
 }
