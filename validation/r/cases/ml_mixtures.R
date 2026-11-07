@@ -159,3 +159,27 @@ case("flexmix_minprior", "ml/clustering", "flexmix regression mixture from a fix
 
 # The same three blobs plus noise as ml_density_clustering.R's blobs_noise (same seed and draws), written
 # under this package's own name so that WP43 does not depend on WP41's dataset in the same wave.
+.ap_blobs <- function(ctx) {
+  set.seed(20261109)
+  a <- cbind(rnorm(40, 0, 0.3), rnorm(40, 0, 0.3)); b <- cbind(rnorm(35, 3, 0.4), rnorm(35, 0, 0.4))
+  cc <- cbind(rnorm(30, 1.5, 0.25), rnorm(30, 2.5, 0.25)); noise <- cbind(runif(10, -2, 5), runif(10, -2, 4.5))
+  m <- round(rbind(a, b, cc, noise), 10)
+  ctx$gen_dataset("ap_blobs", data.frame(x = m[, 1], y = m[, 2]))
+}
+
+case("apcluster_blobs", "ml/clustering", "Affinity propagation (apcluster, negative squared distances, q = 0.5, nonoise): damping 0.9 and 0.5 (2000/100) and 0.9 at p2a's defaults (200/15)", function(ctx) {
+  d <- .ap_blobs(ctx); X <- as.matrix(d); N <- nrow(X)
+  S <- -as.matrix(dist(X))^2; v <- list(preference = median(S[row(S) != col(S)]))
+  for (cfg in list(list(tag = "lam9", lam = 0.9, maxits = 2000, convits = 100), list(tag = "lam5", lam = 0.5, maxits = 2000, convits = 100),
+                   list(tag = "lam9_default", lam = 0.9, maxits = 200, convits = 15))) {
+    a <- suppressWarnings(apcluster(negDistMat(r = 2), X, q = 0.5, lam = cfg$lam, nonoise = TRUE, maxits = cfg$maxits, convits = cfg$convits))
+    stopifnot(abs(a@p - v$preference) < 1e-15)
+    tg <- cfg$tag
+    v[[paste0(tg, "_exemplars")]] <- vec(sort(a@exemplars)); v[[paste0(tg, "_n_clusters")]] <- length(a@exemplars)
+    lab <- integer(N); for (k in seq_along(a@clusters)) lab[a@clusters[[k]]] <- a@exemplars[k]
+    v[[paste0(tg, "_exemplar_of")]] <- vec(lab); v[[paste0(tg, "_netsim")]] <- a@netsim; v[[paste0(tg, "_iterations")]] <- a@it
+    v[[paste0(tg, "_converged")]] <- as.numeric(a@it < cfg$maxits)
+  }
+  list(values = v, reference = "apcluster::apcluster(negDistMat(r = 2), q = 0.5, lam, nonoise = TRUE, maxits, convits)",
+       call = "apcluster(negDistMat(r = 2), ap_blobs, q = 0.5, lam = 0.9, maxits = 2000, convits = 100)", packages = "apcluster")
+})

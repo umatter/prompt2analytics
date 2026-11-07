@@ -83,6 +83,31 @@
       "tolerance": "prune 1e-9 relative, keep 1e-7 relative (a borderline stop); log-likelihood 1e-12 and 1e-11; integers exact. Iteration counts and the iteration of a removal are not R-pinned. Exact-fit component: floor and warning where R stops with NaN; the random start uses p2a's RNG, the pins pass the case's start column.",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ml_affinity_propagation",
+      "name": "Affinity propagation",
+      "category": "ml",
+      "reference": "apcluster::apcluster(negDistMat(r = 2), q = 0.5, nonoise = TRUE)",
+      "doc": "validation/ml/affinity_propagation.md",
+      "cases": [
+        "apcluster_blobs"
+      ],
+      "tests": [
+        "p2a-core::ml::advanced_clustering_mod::affinity::tests::test_validate_apcluster_lam9",
+        "p2a-core::ml::advanced_clustering_mod::affinity::tests::test_validate_apcluster_lam9_defaults"
+      ],
+      "quantities": [
+        "exemplars",
+        "exemplar of each point",
+        "n_clusters",
+        "net similarity",
+        "converged",
+        "preference"
+      ],
+      "tolerance": "integers exact; net similarity and preference 1e-12 relative. Iteration counts and non-converged states are not R-pinned. No noise added (nonoise = TRUE); no exemplars is an error where apcluster returns an empty result; defaults 0.5/200/15 against apcluster's 0.9/1000/100, which would cost at least 100 iterations per run. lam5 is recorded, not pinned: apcluster oscillates to maxits, and one ulp of the preference makes the same iteration converge.",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }
