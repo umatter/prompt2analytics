@@ -18,7 +18,8 @@ pub struct ChangepointResult {
     pub n_changepoints: usize,
     /// Segment statistics (mean and variance for each segment)
     pub segments: Vec<SegmentStats>,
-    /// Total cost (negative log-likelihood) of the segmentation
+    /// Sum of the segment costs, without the penalties: changepoint's cost functions, including
+    /// their ln(segment length) term under the MBIC default
     pub total_cost: f64,
     /// Penalty value used
     pub penalty: f64,
@@ -41,15 +42,16 @@ pub struct SegmentStats {
     pub variance: f64,
 }
 
-/// Cost function type for changepoint detection
+/// Cost function type for changepoint detection, as the normal costs of the changepoint package
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CostFunction {
-    /// Detect changes in mean (assumes constant variance)
+    /// Changes in mean under unit variance (`cpt.mean`): scale the series first, as with
+    /// `cpt.mean`
     #[default]
     MeanChange,
-    /// Detect changes in variance (assumes constant mean)
+    /// Changes in variance about the mean of the whole series (`cpt.var` with mu = mean(data))
     VarianceChange,
-    /// Detect changes in both mean and variance
+    /// Changes in both mean and variance (`cpt.meanvar`)
     MeanAndVariance,
 }
 
@@ -57,17 +59,24 @@ pub enum CostFunction {
 ///
 /// # Arguments
 /// * `data` - Time series data
-/// * `penalty` - Penalty for adding a changepoint (use None for automatic MBIC penalty matching R's changepoint package)
+/// * `penalty` - Penalty for adding a changepoint. `None` is changepoint's MBIC: (k + 2) ln(n), with
+///   k = 1 for mean or variance and 2 for both, and a cost term of ln(segment length) per
+///   segment. `Some(p)` is its "Manual": penalty p and the plain costs.
 /// * `min_segment_length` - Minimum length of a segment (default: 2)
 /// * `cost_function` - Type of change to detect
 ///
 /// # Returns
 /// * `ChangepointResult` with detected changepoints and segment statistics
 ///
+/// The costs run on data centred by the mean of the series, so a large level does not cancel,
+/// and the result is the exact optimum: pruning uses the cost without the ln(segment length) term
+/// (see `pelt`). The pruned search returns what optimal partitioning returns; on a series at a
+/// large level `cpt.meanvar` and `cpt.mean`, which do not centre, can differ.
+///
 /// # Errors
-/// Fails on a series too short for the minimum segment length, and when the
-/// budget installed with [`crate::resource::with_budget`] is cancelled or past
-/// its deadline.
+/// Fails on a series too short for the minimum segment length, on a non-finite value or penalty
+/// (a penalty must be finite and non-negative), and when the budget installed with
+/// [`crate::resource::with_budget`] is cancelled or past its deadline.
 pub fn detect_changepoints(
     data: &[f64],
     penalty: Option<f64>,
@@ -90,10 +99,20 @@ pub fn detect_changepoints(
         ));
     }
 
-    // Default penalty: MBIC (Modified BIC) to match R's changepoint::cpt.mean() default.
-    // R uses penalty="MBIC" by default, which applies 3*log(n) for mean change
-    // and 3*log(n) for variance change (one parameter estimated per segment).
-    // For mean-and-variance change (two parameters), the penalty is higher.
+    if let Some((i, v)) = data.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        return Err(format!(
+            "changepoint detection needs finite data: {v} at position {i} (R: NA is not allowed in the data)"
+        ));
+    }
+
+    if let Some(p) = penalty
+        && !(p.is_finite() && p >= 0.0)
+    {
+        return Err(format!("penalty must be a finite number >= 0, got {p}"));
+    }
+
+    // changepoint's MBIC when no penalty is given: (k + 2) ln(n), k parameters per segment.
+    let mbic = penalty.is_none();
     let pen = penalty.unwrap_or_else(|| {
         let log_n = (n as f64).ln();
         match cost_function {
@@ -107,19 +126,24 @@ pub fn detect_changepoints(
     let (cum_sum, cum_sum_sq) = compute_cumulative_sums(data);
 
     // PELT algorithm
-    let changepoints = pelt(data, &cum_sum, &cum_sum_sq, pen, min_seg, cost_function)?;
+    let changepoints = pelt(n, &cum_sum, &cum_sum_sq, pen, min_seg, cost_function, mbic)?;
 
     // Compute segment statistics
     let segments = compute_segment_stats(data, &changepoints);
 
     // Compute total cost
-    let total_cost = compute_total_cost(data, &changepoints, cost_function);
+    let total_cost =
+        compute_total_cost(n, &cum_sum, &cum_sum_sq, &changepoints, cost_function, mbic);
 
-    let method = match cost_function {
-        CostFunction::MeanChange => "PELT (mean change)",
-        CostFunction::VarianceChange => "PELT (variance change)",
-        CostFunction::MeanAndVariance => "PELT (mean and variance change)",
+    let kind = match cost_function {
+        CostFunction::MeanChange => "mean change",
+        CostFunction::VarianceChange => "variance change",
+        CostFunction::MeanAndVariance => "mean and variance change",
     };
+    let method = format!(
+        "PELT ({kind}; {} penalty)",
+        if mbic { "MBIC" } else { "manual" }
+    );
 
     Ok(ChangepointResult {
         n_changepoints: changepoints.len(),
@@ -127,25 +151,62 @@ pub fn detect_changepoints(
         segments,
         total_cost,
         penalty: pen,
-        method: method.to_string(),
+        method,
     })
 }
 
-/// Compute cumulative sums for efficient segment cost calculation
+/// Compensated (Neumaier) running sum.
+#[derive(Default)]
+struct Neumaier {
+    sum: f64,
+    c: f64,
+}
+
+impl Neumaier {
+    fn add(&mut self, v: f64) {
+        let t = self.sum + v;
+        if self.sum.abs() >= v.abs() {
+            self.c += (self.sum - t) + v;
+        } else {
+            self.c += (v - t) + self.sum;
+        }
+        self.sum = t;
+    }
+
+    fn value(&self) -> f64 {
+        self.sum + self.c
+    }
+}
+
+/// changepoint's sumstat on data centred by the global mean (`cpt.var`'s mu): prefix sums of z and
+/// z^2, each a running compensated value. Centring makes every cost shift-invariant, so a level
+/// of 1e7 no longer cancels.
 fn compute_cumulative_sums(data: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = data.len();
+    let mut total = Neumaier::default();
+    for &v in data {
+        total.add(v);
+    }
+    let mu = total.value() / n as f64;
+
     let mut cum_sum = vec![0.0; n + 1];
     let mut cum_sum_sq = vec![0.0; n + 1];
-
+    let mut s1 = Neumaier::default();
+    let mut s2 = Neumaier::default();
     for i in 0..n {
-        cum_sum[i + 1] = cum_sum[i] + data[i];
-        cum_sum_sq[i + 1] = cum_sum_sq[i] + data[i] * data[i];
+        let z = data[i] - mu;
+        s1.add(z);
+        s2.add(z * z);
+        cum_sum[i + 1] = s1.value();
+        cum_sum_sq[i + 1] = s2.value();
     }
 
     (cum_sum, cum_sum_sq)
 }
 
-/// Compute the cost of a segment [start, end) using cumulative sums
+/// The cost of a segment [start, end) on the centred prefix sums: changepoint's `mll_var`,
+/// `mll_meanvar` and `mll_mean`, without the ln(segment length) term of their MBIC variants.
+#[inline]
 fn segment_cost(
     cum_sum: &[f64],
     cum_sum_sq: &[f64],
@@ -153,54 +214,61 @@ fn segment_cost(
     end: usize,
     cost_function: CostFunction,
 ) -> f64 {
-    let n = (end - start) as f64;
-    if n <= 0.0 {
+    let m = (end - start) as f64;
+    if m <= 0.0 {
         return f64::INFINITY;
     }
 
-    let sum = cum_sum[end] - cum_sum[start];
-    let sum_sq = cum_sum_sq[end] - cum_sum_sq[start];
-    let mean = sum / n;
-    let variance = (sum_sq / n) - mean * mean;
+    let a = cum_sum[end] - cum_sum[start];
+    let q = cum_sum_sq[end] - cum_sum_sq[start];
+    let ln_2pi = (2.0 * std::f64::consts::PI).ln();
 
     match cost_function {
-        CostFunction::MeanChange => {
-            // Negative log-likelihood assuming known variance
-            // Cost = n * log(variance) where variance is computed from residuals
-            let ss = sum_sq - sum * sum / n;
-            if ss <= 0.0 {
-                0.0
-            } else {
-                ss // Sum of squared residuals from mean
-            }
-        }
+        CostFunction::MeanChange => q - a * a / m,
         CostFunction::VarianceChange => {
-            // Cost for variance change detection
-            let var = variance.max(1e-10);
-            n * var.ln() + n
+            let x3 = if q <= 0.0 { 1e-11 } else { q };
+            m * (ln_2pi + (x3 / m).ln() + 1.0)
         }
         CostFunction::MeanAndVariance => {
-            // Cost for both mean and variance change
-            let var = variance.max(1e-10);
-            n * (var.ln() + 1.0)
+            let mut sigma2 = (q - a * a / m) / m;
+            if sigma2 <= 0.0 {
+                sigma2 = 1e-11;
+            }
+            m * (ln_2pi + sigma2.ln() + 1.0)
         }
     }
 }
 
 /// PELT (Pruned Exact Linear Time) algorithm for multiple changepoint detection.
 ///
+/// Under MBIC the objective adds ln(segment length) per segment, looked up in a table. Pruning
+/// uses the cost without that term: the base costs are sub-additive and ln(T - s) >= ln(T - t), so
+/// F[s] + C(s, t) > F[t] rules s out for good, while the test with the term (changepoint's) is
+/// not a valid PELT bound: two halves of a segment of length L add 2 ln(L / 2) > ln(L).
+///
+/// A candidate that fails the test at t stays eligible until t + min_seg: the argument for
+/// dropping it compares with the segmentation that ends at t, which a later T cannot extend
+/// before T >= t + min_seg.
+///
 /// When pruning removes no candidate (as with a large penalty), the work is
 /// quadratic in the length of the series, so the budget installed by the
 /// caller is checked at every step.
 fn pelt(
-    data: &[f64],
+    n: usize,
     cum_sum: &[f64],
     cum_sum_sq: &[f64],
     penalty: f64,
     min_seg: usize,
     cost_function: CostFunction,
+    mbic: bool,
 ) -> Result<Vec<usize>, String> {
-    let n = data.len();
+    let ln_len: Vec<f64> = if mbic {
+        (0..=n)
+            .map(|m| if m == 0 { 0.0 } else { (m as f64).ln() })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // F[t] = minimum cost of segmenting data[0..t]
     let mut f = vec![f64::INFINITY; n + 1];
@@ -209,8 +277,9 @@ fn pelt(
     // cp[t] = last changepoint before t in the optimal segmentation
     let mut cp: Vec<Option<usize>> = vec![None; n + 1];
 
-    // R = set of candidate changepoint positions (pruning set)
-    let mut r: Vec<usize> = vec![0];
+    // Candidate changepoints: position, base cost at this t, and the t from which a pruned
+    // candidate is dropped (usize::MAX while it has passed the test).
+    let mut cands: Vec<(usize, f64, usize)> = vec![(0, 0.0, usize::MAX)];
 
     for t in min_seg..=n {
         // One step costs O(|R|), so a check every step is negligible.
@@ -220,12 +289,14 @@ fn pelt(
         let mut best_cost = f64::INFINITY;
         let mut best_cp = None;
 
-        for &s in &r {
-            if t - s >= min_seg {
-                let cost = f[s] + segment_cost(cum_sum, cum_sum_sq, s, t, cost_function) + penalty;
+        for (s, base, _) in cands.iter_mut() {
+            if t - *s >= min_seg {
+                *base = segment_cost(cum_sum, cum_sum_sq, *s, t, cost_function);
+                let ln_term = if mbic { ln_len[t - *s] } else { 0.0 };
+                let cost = f[*s] + *base + ln_term + penalty;
                 if cost < best_cost {
                     best_cost = cost;
-                    best_cp = Some(s);
+                    best_cp = Some(*s);
                 }
             }
         }
@@ -233,21 +304,14 @@ fn pelt(
         f[t] = best_cost;
         cp[t] = best_cp;
 
-        // Pruning step: remove candidates that can never be optimal
-        // Keep s if F[s] + C(y_{s+1:t}) <= F[t]
-        let mut new_r = Vec::new();
-        for &s in &r {
-            if s + min_seg <= t {
-                let cost_to_t = f[s] + segment_cost(cum_sum, cum_sum_sq, s, t, cost_function);
-                if cost_to_t <= f[t] {
-                    new_r.push(s);
-                }
-            } else {
-                new_r.push(s);
+        // Pruning step: Keep s while F[s] + C(y_{s+1:t}) <= F[t]
+        cands.retain_mut(|(s, base, drop_at)| {
+            if *s + min_seg <= t && *drop_at == usize::MAX && f[*s] + *base > best_cost {
+                *drop_at = t + min_seg;
             }
-        }
-        new_r.push(t);
-        r = new_r;
+            t + 1 < *drop_at
+        });
+        cands.push((t, 0.0, usize::MAX));
     }
 
     // Backtrack to find changepoints
@@ -298,23 +362,25 @@ fn compute_segment_stats(data: &[f64], changepoints: &[usize]) -> Vec<SegmentSta
 }
 
 /// Compute total cost of the segmentation
-fn compute_total_cost(data: &[f64], changepoints: &[usize], cost_function: CostFunction) -> f64 {
-    let (cum_sum, cum_sum_sq) = compute_cumulative_sums(data);
-    let n = data.len();
-
+fn compute_total_cost(
+    n: usize,
+    cum_sum: &[f64],
+    cum_sum_sq: &[f64],
+    changepoints: &[usize],
+    cost_function: CostFunction,
+    mbic: bool,
+) -> f64 {
     let mut boundaries: Vec<usize> = vec![0];
     boundaries.extend(changepoints.iter().copied());
     boundaries.push(n);
 
     let mut total = 0.0;
     for i in 0..boundaries.len() - 1 {
-        total += segment_cost(
-            &cum_sum,
-            &cum_sum_sq,
-            boundaries[i],
-            boundaries[i + 1],
-            cost_function,
-        );
+        let (start, end) = (boundaries[i], boundaries[i + 1]);
+        total += segment_cost(cum_sum, cum_sum_sq, start, end, cost_function);
+        if mbic {
+            total += ((end - start) as f64).ln();
+        }
     }
 
     total
@@ -404,7 +470,14 @@ pub fn binary_segmentation(
     changepoints.sort();
 
     let segments = compute_segment_stats(data, &changepoints);
-    let total_cost = compute_total_cost(data, &changepoints, CostFunction::MeanChange);
+    let total_cost = compute_total_cost(
+        n,
+        &cum_sum,
+        &cum_sum_sq,
+        &changepoints,
+        CostFunction::MeanChange,
+        false,
+    );
 
     // Use BIC as penalty estimate
     let penalty = (n as f64).ln();
@@ -487,6 +560,198 @@ pub fn run_binary_segmentation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use p2a_validation::{Check, Tol};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        crate::data::columns::numeric_column(ds.df(), name, crate::data::columns::NaPolicy::Omit)
+            .unwrap()
+            .0
+    }
+
+    fn cps(r: &ChangepointResult) -> Vec<f64> {
+        r.changepoints.iter().map(|&c| c as f64).collect()
+    }
+
+    /// Case ts_filter_ar_cpt, lev: N(0, 1) x 80, N(0, 3) x 70, N(0, 1) x 60, + 1e7, 6 decimals.
+    /// changepoint::cpt.var(lev, method = "PELT", penalty = "MBIC"): 84, 151; pen 3 ln 210; the
+    /// sum of the mbic var.norm costs = logLik(cv)[1] + sum(log(seg.len)). cpt.var on the
+    /// centred series gives the same changepoints.
+    #[test]
+    fn test_validate_cpt_var_large_level() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let lev = col(&ds, "lev");
+        let r = detect_changepoints(&lev, None, None, CostFunction::VarianceChange).unwrap();
+        let mean = lev.iter().sum::<f64>() / lev.len() as f64;
+        let centred: Vec<f64> = lev.iter().map(|v| v - mean).collect();
+        let r0 = detect_changepoints(&centred, None, None, CostFunction::VarianceChange).unwrap();
+        Check::new(&case)
+            .vector("cpt_var_cpts", &cps(&r), Tol::exact())
+            .vector("cpt_var_centred_cpts", &cps(&r0), Tol::exact())
+            .scalar("cpt_var_pen", r.penalty, Tol::stat(210))
+            .scalar("cpt_var_cost", r.total_cost, Tol::stat(210))
+            .finish();
+        assert!(r.method.contains("MBIC"), "{}", r.method);
+    }
+
+    /// cpt.var(lev, penalty = "Manual", pen.value = 10): 84, 151, cost logLik(cv)[1] (no ln m
+    /// terms).
+    #[test]
+    fn test_validate_cpt_var_manual_penalty() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let lev = col(&ds, "lev");
+        let r = detect_changepoints(&lev, Some(10.0), None, CostFunction::VarianceChange).unwrap();
+        Check::new(&case)
+            .vector("cpt_var_manual10_cpts", &cps(&r), Tol::exact())
+            .scalar("cpt_var_manual10_cost", r.total_cost, Tol::stat(210))
+            .finish();
+        assert!(r.method.contains("manual"), "{}", r.method);
+    }
+
+    /// cpt.meanvar(lev - mean(lev), MBIC): 2, 84, 152, pen 4 ln 210. (R on the raw series gives
+    /// 54 changepoints: changepoint's own raw-sum cancellation, key cpt_meanvar_cpts, recorded
+    /// only; p2a centres, so the raw and centred series agree.)
+    #[test]
+    fn test_validate_cpt_meanvar_large_level() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let lev = col(&ds, "lev");
+        let r = detect_changepoints(&lev, None, None, CostFunction::MeanAndVariance).unwrap();
+        Check::new(&case)
+            .vector("cpt_meanvar_centred_cpts", &cps(&r), Tol::exact())
+            .scalar("cpt_meanvar_pen", r.penalty, Tol::stat(210))
+            .finish();
+    }
+
+    /// cpt.mean(lev - mean(lev), MBIC, minseglen = 2): 107, 121, 135, 148, 150 (unit-variance
+    /// cost, as R; p2a's minimum segment is 2, R's cpt.mean default is 1).
+    #[test]
+    fn test_validate_cpt_mean_large_level() {
+        let (case, ds) = crate::test_support::load_case("ts_filter_ar_cpt");
+        let lev = col(&ds, "lev");
+        let r = detect_changepoints(&lev, None, None, CostFunction::MeanChange).unwrap();
+        Check::new(&case)
+            .vector("cpt_mean_centred_cpts", &cps(&r), Tol::exact())
+            .scalar("cpt_mean_pen", r.penalty, Tol::stat(210))
+            .finish();
+    }
+
+    /// R checkData: "Missing value: NA is not allowed in the data"; a manual penalty must be a
+    /// number >= 0.
+    #[test]
+    fn test_changepoint_rejects_bad_inputs() {
+        let data: Vec<f64> = (0..40)
+            .map(|i| ((i * 37) % 11) as f64 * 0.3 + if i < 20 { 0.0 } else { 4.0 })
+            .collect();
+        let mut with_nan = data.clone();
+        with_nan[7] = f64::NAN;
+        let e = detect_changepoints(&with_nan, None, None, CostFunction::MeanChange).unwrap_err();
+        assert!(e.contains("finite") && e.contains("position 7"), "{e}");
+        for pen in [-1.0, f64::NAN, f64::INFINITY] {
+            let e =
+                detect_changepoints(&data, Some(pen), None, CostFunction::MeanChange).unwrap_err();
+            assert!(e.contains("penalty"), "{e}");
+        }
+        let e = detect_changepoints(&data, None, Some(usize::MAX), CostFunction::MeanChange)
+            .unwrap_err();
+        assert!(e.contains("minimum segment length"), "{e}");
+    }
+
+    /// Optimal partitioning: the exact minimiser that PELT's pruning must not change. O(n^2).
+    /// Ties go to the smallest last changepoint, as in `pelt`.
+    fn optimal_partitioning(
+        data: &[f64],
+        penalty: f64,
+        min_seg: usize,
+        cost: CostFunction,
+        mbic: bool,
+    ) -> (Vec<usize>, f64) {
+        let n = data.len();
+        let (s1, s2) = compute_cumulative_sums(data);
+        let mut f = vec![f64::INFINITY; n + 1];
+        f[0] = -penalty;
+        let mut last = vec![0usize; n + 1];
+        for t in min_seg..=n {
+            for s in 0..=(t - min_seg) {
+                if !f[s].is_finite() {
+                    continue;
+                }
+                let m = (t - s) as f64;
+                let c = segment_cost(&s1, &s2, s, t, cost) + if mbic { m.ln() } else { 0.0 };
+                let v = f[s] + c + penalty;
+                if v < f[t] {
+                    f[t] = v;
+                    last[t] = s;
+                }
+            }
+        }
+        let mut cps = Vec::new();
+        let mut t = n;
+        while t > 0 {
+            let s = last[t];
+            if s > 0 {
+                cps.push(s);
+            }
+            t = s;
+        }
+        cps.reverse();
+        (cps, f[n])
+    }
+
+    /// PELT returns the exact optimum for each cost, under MBIC (pruned on the base cost: the
+    /// ln(segment length) term breaks the PELT condition) and a manual penalty, for minimum
+    /// segments of 2 and 7. Compared with a naive reference on seeded noisy series with a mean
+    /// shift, a variance shift and both.
+    #[test]
+    fn test_pelt_matches_optimal_partitioning() {
+        let mut seed: u64 = 20261107;
+        let mut noise = |mean: f64, sd: f64| mean + sd * box_muller_cp(&mut seed);
+        let n = 200;
+        let mean_shift: Vec<f64> = (0..n)
+            .map(|i| noise(if (70..130).contains(&i) { 2.0 } else { 0.0 }, 1.0))
+            .collect();
+        let var_shift: Vec<f64> = (0..n)
+            .map(|i| noise(1.0, if i < 110 { 1.0 } else { 3.0 }))
+            .collect();
+        let both: Vec<f64> = (0..n)
+            .map(|i| {
+                if i < 90 {
+                    noise(0.0, 0.5)
+                } else {
+                    noise(3.0, 2.0)
+                }
+            })
+            .collect();
+        let mut compared = 0;
+        for series in [&mean_shift, &var_shift, &both] {
+            for cost in [
+                CostFunction::MeanChange,
+                CostFunction::VarianceChange,
+                CostFunction::MeanAndVariance,
+            ] {
+                let k = if cost == CostFunction::MeanAndVariance {
+                    4.0
+                } else {
+                    3.0
+                };
+                for min_seg in [2usize, 7] {
+                    for manual in [None, Some(1.5), Some(8.0)] {
+                        let r = detect_changepoints(series, manual, Some(min_seg), cost).unwrap();
+                        let pen = manual.unwrap_or(k * (n as f64).ln());
+                        let (cps, f_n) =
+                            optimal_partitioning(series, pen, min_seg, cost, manual.is_none());
+                        assert_eq!(r.changepoints, cps, "{cost:?} {min_seg} {manual:?}");
+                        let penalised = r.total_cost + pen * r.n_changepoints as f64;
+                        assert!(
+                            (penalised - f_n).abs() <= 1e-9 * f_n.abs().max(1.0),
+                            "{cost:?} {min_seg} {manual:?}: {penalised} vs {f_n}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 54);
+    }
 
     /// X-2: an Int64 column gives the changepoints of its Float64 copy; missing values,
     /// text and absent columns are refused by name (they were read as 0).

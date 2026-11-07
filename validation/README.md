@@ -376,7 +376,7 @@ records for quantities that are not pinned. Everything else is `not R-pinned`.
 | MSTL | [mstl.md](forecasting/mstl.md) | not R-pinned |
 | Structural time series (StructTS) | [structts.md](forecasting/structts.md) | not R-pinned |
 | GARCH(p, q) (maximum likelihood, normal and Student-t errors, variance forecasts) | [garch.md](forecasting/garch.md) | R-pinned |
-| Changepoint | no validation document yet | not R-pinned |
+| Changepoint (PELT: cpt.var, cpt.meanvar, cpt.mean) | [changepoint.md](timeseries/changepoint.md) | R-pinned, known deviations (TS-18, TS-8) |
 
 ### Machine Learning
 | Method | File | Status |

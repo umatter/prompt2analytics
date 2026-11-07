@@ -52,6 +52,41 @@
       "tolerance": "coefficients Tol::coef(n), var.pred and AIC Tol::stat(n), orders exact (n = 24, 60); ar_ols_var and the finite AICs of the saturated call are the rounding of an exact fit in R and are recorded, not compared",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "ts_changepoint",
+      "name": "PELT changepoints (variance, mean and variance, mean)",
+      "category": "forecasting",
+      "reference": "changepoint::cpt.var, cpt.meanvar, cpt.mean (method = 'PELT', penalty = 'MBIC' | 'Manual')",
+      "doc": "validation/timeseries/changepoint.md",
+      "cases": [
+        "ts_filter_ar_cpt"
+      ],
+      "tests": [
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_var_large_level",
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_var_manual_penalty",
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_meanvar_large_level",
+        "p2a-core::forecasting::changepoint::tests::test_validate_cpt_mean_large_level"
+      ],
+      "quantities": [
+        "changepoints",
+        "penalty",
+        "total cost (sum of segment costs incl. MBIC terms)"
+      ],
+      "tolerance": "changepoints exact, penalty and cost Tol::stat(210)",
+      "deviations": [
+        {
+          "finding": "TS-8",
+          "quantity": "binary segmentation",
+          "note": "zero default threshold and no penalty; cpt.mean BinSeg MBIC Q = 10 finds 0 changepoints (cpt_mean_binseg_ncpts), recorded only"
+        },
+        {
+          "finding": "TS-18",
+          "quantity": "cpt.mean and cpt.meanvar on uncentred data at large levels (cpt_meanvar_cpts, 54 changepoints)",
+          "note": "changepoint cancels on raw sums; p2a centres, and the pins use R on the centred series"
+        }
+      ],
+      "supersedes_legacy": []
     }
   ]
 }
