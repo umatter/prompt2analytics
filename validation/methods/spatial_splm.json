@@ -42,6 +42,39 @@
       "tolerance": "n = 294. Parameters Tol::iterative(1e-8) and logLik 1e-10, because the Newton profile optimiser converges quadratically to the root of the analytic profile gradient (R's optimum is Newton-polished to |gradient| < 1e-9). SEs Tol::iterative(1e-6): central differences of the analytic score against R's Richardson Jacobian. The non-spatial within fits at validation/README.md (coef 1e-8, SE and statistics 1e-6).",
       "deviations": [],
       "supersedes_legacy": []
+    },
+    {
+      "id": "spatial_splm_spgm",
+      "name": "Spatial panel GM/2SLS (spgm): w2sls, b2sls, ec2sls and g2sls spatial-lag models, the within GM spatial-error model and the within GS2SLS",
+      "category": "econometrics",
+      "reference": "written out (splm not installed): Baltagi (1981) EC2SLS, Kapoor, Kelejian & Prucha (2007) within GM moments (the exact root of the cubic first-order condition, checked against optim), Kelejian & Prucha (1998) GS2SLS, 2SLS with instruments [X, WX, W^2X] (validation/r/cases/spatial_splm.R)",
+      "doc": "validation/econometrics/splm.md",
+      "cases": [
+        "splm_spml_spgm"
+      ],
+      "tests": [
+        "p2a-core::econometrics::splm::tests::test_validate_spgm_w2sls",
+        "p2a-core::econometrics::splm::tests::test_validate_spgm_b2sls",
+        "p2a-core::econometrics::splm::tests::test_validate_spgm_ec2sls",
+        "p2a-core::econometrics::splm::tests::test_validate_spgm_g2sls",
+        "p2a-core::econometrics::splm::tests::test_validate_spgm_within_error_gm",
+        "p2a-core::econometrics::splm::tests::test_validate_spgm_within_gs2sls"
+      ],
+      "quantities": [
+        "coefficients",
+        "rho",
+        "SE of every coefficient and of rho (2SLS)",
+        "Sargan statistic",
+        "number of instruments",
+        "sigma_nu^2 (w2sls)",
+        "sigma_1^2 (b2sls)",
+        "sigma_mu^2 (ec2sls, g2sls)",
+        "GM lambda and sigma^2",
+        "FGLS coefficients and SEs"
+      ],
+      "tolerance": "Closed-form 2SLS and FGLS at validation/README.md: coef Tol::coef(n), SE Tol::se(n), Sargan and variances Tol::stat(n) (n = 294 observations, 49 entity means for b2sls); the GM lambda and sigma^2 at Tol::iterative(1e-10), because the root of the cubic first-order condition is found by Newton-bisection to tol = 1e-8, after which the error is of the order of the squared step. Step 3 of the GS2SLS uses the original instruments H (Kelejian & Prucha 1998); not compared with splm (not installed).",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

@@ -105,28 +105,6 @@ model_gmm <- spgm(y ~ x1 + x2, data = data,
 summary(model_gmm)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_spgm_basic() {
-    let (dataset, mut listw) = create_spatial_panel_data();
-
-    let config = SpgmConfig {
-        method: SpgmMethod::W2sls,
-        lag: false,
-        spatial_error: true,
-        ..Default::default()
-    };
-
-    let result = run_spgm(
-        &dataset, "y", &["x1", "x2"],
-        "entity", "time", &mut listw, config
-    ).unwrap();
-
-    assert_eq!(result.method, SpgmMethod::W2sls);
-}
-```
-
 ## Validation Results
 
 ### Coefficients Comparison
