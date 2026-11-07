@@ -94,8 +94,8 @@ pub struct CpgramResult {
 /// A `CpgramResult` containing the cumulative periodogram and confidence intervals
 ///
 /// # Errors
-/// Fails on fewer than 4 observations, a non-finite value, a taper outside [0, 0.5], and a series
-/// without variation once tapered.
+/// Fails on fewer than 4 observations, a non-finite value, a taper outside [0, 0.5], a series
+/// without variation once tapered, and values so large that the periodogram overflows.
 ///
 /// # Example
 /// ```
@@ -143,7 +143,12 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
     pgram.truncate(mp);
 
     let total: f64 = pgram.iter().sum();
-    if total.is_nan() || total <= 0.0 {
+    // The series is finite here, so a total that is not comes from overflow. Past that point every
+    // cumulated value would be NaN, and the deviation folded over them would read as white noise.
+    if !total.is_finite() {
+        return Err("values too large: the periodogram overflows".to_string());
+    }
+    if total <= 0.0 {
         return Err("the tapered series has no variation".to_string());
     }
     let mut cumsum = Vec::with_capacity(mp);
@@ -400,6 +405,25 @@ mod tests {
         assert!(cpgram(&y, None).unwrap_err().contains("finite"));
     }
     use approx::assert_relative_eq;
+
+    /// Finite values whose periodogram overflows: every cumulated value would be NaN, and the
+    /// largest deviation, folded past the NaNs, would be 0 and report white noise.
+    #[test]
+    fn test_cpgram_refuses_a_periodogram_that_overflows() {
+        let noisy = |scale: f64| -> Vec<f64> {
+            (0..64)
+                .map(|i| scale * (((i * 37) % 11) as f64 * 0.09 - 0.45))
+                .collect()
+        };
+        for scale in [1e200, 1e308] {
+            let e = cpgram(&noisy(scale), Some(0.1)).unwrap_err();
+            assert!(e.contains("too large"), "{scale}: {e}");
+        }
+        // Not the overflow: no variation, and a large scale that still fits.
+        let e = cpgram(&[3.0; 64], Some(0.1)).unwrap_err();
+        assert!(e.contains("no variation"), "{e}");
+        assert!(cpgram(&noisy(1e100), Some(0.1)).is_ok());
+    }
 
     #[test]
     fn test_cpgram_basic() {
