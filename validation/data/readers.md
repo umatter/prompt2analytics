@@ -33,18 +33,18 @@ display formats are not read (DATA-75); SAS non-ASCII text under an encoding cod
 The case also records what ReadStat does with the corrupted copies the Rust guard tests build
 (`guard__*`: rows read, or -1 when ReadStat refuses the file):
 
-| Key | Patch | ReadStat |
+| Key | Patch | ReadStat | p2a |
 |---|---|---|---|
-| `guard__sas_page_type_0x0280` | `sas32_iris` page 0 type 0x0280 | 150 rows |
-| `guard__sas_page_type_0x4000` | `sas64_haven` page 0 type 0x4000 | 60 rows |
-| `guard__sas_page_type_0x0300` | `sas64_haven` page 1 type 0x0300 | refused |
-| `guard__sas_row_count_59` | row count 60 -> 59 | 59 rows |
-| `guard__sas_row_count_61` | row count 60 -> 61 | refused |
-| `guard__sas_type_code_3` | column 0 type code 3 | refused |
-| `guard__sas_char_only_row_count_2` | `sas32_iris`, every column text, row count 2 | 2 rows |
-| `guard__sas_wlatin1_byte_0x81` | `sas64_wlatin1`, byte 0x81 in a text cell | refused |
-| `guard__sas_wlatin1_code_204` | `sas64_wlatin1`, encoding byte 204 | 60 rows, as code 62 |
-| `guard__dta_k0_n3`, `guard__dta_k0_n2p40` | `dta118_haven`, `<K>` = 0, `<N>` = 3 or 2^40 | refused |
+| `guard__sas_page_type_0x0280` | `sas32_iris` page 0 type 0x0280 | 150 rows | 150 rows (a mix page) |
+| `guard__sas_page_type_0x4000` | `sas64_haven` page 0 type 0x4000 | 60 rows | 60 rows (a metadata page) |
+| `guard__sas_page_type_0x0300` | `sas64_haven` page 1 type 0x0300 | refused | `InvalidFormat`: unknown page type |
+| `guard__sas_row_count_59` | row count 60 -> 59 | 59 rows | 59 rows |
+| `guard__sas_row_count_61` | row count 60 -> 61 | refused | `InvalidFormat`: declares 61 rows but holds 60 |
+| `guard__sas_type_code_3` | column 0 type code 3 | refused | `InvalidFormat`: unknown type code 3 |
+| `guard__sas_char_only_row_count_2` | `sas32_iris`, every column text, row count 2 | 2 rows | 2 rows |
+| `guard__sas_wlatin1_byte_0x81` | `sas64_wlatin1`, byte 0x81 in a text cell | refused | `ParseError`: not a Windows-1252 character |
+| `guard__sas_wlatin1_code_204` | `sas64_wlatin1`, encoding byte 204 | 60 rows, as code 62 | 60 rows, as code 62 |
+| `guard__dta_k0_n3`, `guard__dta_k0_n2p40` | `dta118_haven`, `<K>` = 0, `<N>` = 3 or 2^40 | refused | `InvalidFormat`: no variables |
 
 `sas64_wlatin1_code29__grp` is haven's read of `sas64_wlatin1` with encoding byte 29 (ISO-8859-1:
 byte 0x80 is U+0080, not the euro sign).
@@ -92,6 +92,12 @@ placeholder `"<strL>"` stays) and value labels and display formats (DATA-75).
 | column attribute vector | offset (int), width (4), name flag (2), type (1) at int + 6 (DATA-19; before, int + 4) |
 | column name pointer | text block, offset, length (u16 each) into the column-text blocks (DATA-47; before, `VAR1`..`VARn`) |
 
+Page types are masked with 0x0F00 (as ReadStat): 0x000 and 0x400 are metadata pages (0x4000 too),
+0x100 data pages, 0x200 mix pages (0x280 too); 0x9000 pages are skipped; anything else is an error.
+A mix page holds `block count - subheader count` rows after its pointer table, aligned to 8 bytes (on
+32-bit files the table ends at 24 + 12 n, 4 bytes short of the boundary when n is odd). One row
+counter covers every page; a file holding fewer rows than it declares is an error (DATA-48).
+
 Numerics are 1 to 8 bytes: an IEEE double truncated to its high-order bytes, at the end of the 8
 bytes in little-endian files and at the start in big-endian files; a width-4 numeric is a truncated
 double, not a float (DATA-21; before, `1.0` stored in 4 bytes read as 1.875). Every NaN (SAS `.`,
@@ -108,6 +114,48 @@ bytes 0x80-0xFF under codes 0, 29, 62, 64 and 204:
 | 29 | ISO-8859-1 | byte = code point |
 | 0, 62, 204 | Windows-1252 (62 is SAS's wlatin1: every SAS-written file checked here) | Windows-1252; the 5 unassigned bytes are an error (ReadStat errors too) |
 | any other | (ReadStat converts with iconv; 64 decodes as Windows-1254) | ASCII text is read; non-ASCII text is an error naming the code |
+
+Compressed files (`COMPRESS=CHAR`, literal `SASYZCRL`; `COMPRESS=BINARY`, `SASYZCR2`, at offset 12
+of the first column-text block) store each row as a subheader of compression 4 on metadata pages,
+or, when compression would not shorten it, as a plain subheader of compression 0 and type 1; each
+page ends with a truncated pointer (compression 1), which is skipped. RLE commands (high nibble of
+the control byte, `l` its low nibble, `n` the next byte), as ReadStat's `sas_rle_decompress`:
+
+| Command | Effect |
+|---|---|
+| 0x0 / 0x1 | copy `n + 64 + 256 l` bytes / that plus 4096 |
+| 0x2 | copy `l + 96` bytes |
+| 0x4 | insert the byte after `n`, `n + 18 + 256 l` times |
+| 0x5 / 0x6 / 0x7 | insert `@` / blank / NUL, `n + 17 + 256 l` times |
+| 0x8 / 0x9 / 0xA / 0xB | copy `l + 1` / `l + 17` / `l + 33` / `l + 49` bytes |
+| 0xC | insert byte `n`, `l + 3` times |
+| 0xD / 0xE / 0xF | insert `@` / blank / NUL, `l + 2` times |
+
+RDC (Ross Data Compression), as ReadStat's `sas7bdat_parse_subheader_rdc` and pandas'
+`rdc_decompress`: a big-endian 16-bit control word precedes up to 16 items; a clear bit is a literal
+byte, a set bit a command of marker `m` and next byte `n`: `m < 0x10` inserts `m + 3` copies of `n`;
+`m >> 4 = 1` inserts `(m & 15) + 19 + 16 n` copies of the following byte; `m >> 4 = 2` copies
+`16 + <following byte>` bytes from `(m & 15) + 3 + 16 n` back; `m >> 4 = c` (3..15) copies `c` bytes
+from that offset back. A decompressed row must be exactly the row length.
+
+Compressed rows can decode to far more than the file's size, so the bytes the decoded cells hold are
+checked against the allocation ceiling after each page.
+
+The RLE and RDC fixtures were compressed by the fixture script's own encoders (haven cannot write
+compressed files) and certified by haven reading them identically to their uncompressed sources;
+together they use every RLE command and every RDC item type.
+
+## Cross-checks made while planning (not part of the tests)
+
+- pandas 3.0.1 `read_stata` / `read_sas` agree with haven on `dta118_haven`, `dta118_stata_iris`,
+  `dta118_types`, `dta119_haven`, `dta119_msf`, `sas32_iris`, `sas32_nopad_rle` and `sas32_rdc`.
+  pandas differs where it is limited: it reads release 117 as Latin-1, cuts haven-written SAS
+  column names at the text-block size field (names 7-9 come out empty) and lacks RLE commands 0x1
+  and 0x2.
+- Three public SAS-written files of the US Department of Education's EADA survey (32-bit, wlatin1,
+  2,062-2,074 rows x 167 columns; one uncompressed, two RLE-compressed with and without the pad and a
+  0x9000 page; 1.8-3.3 MB, not committed) load identically to `read_sas`, including non-ASCII names
+  such as "Bayamón".
 
 ## Tests
 
@@ -156,3 +204,18 @@ Tests that do not load `data_readers_values` (byte offsets, decoders, guards) ar
 | `p2a-core::data::sas::tests::test_validate_read_sas7bdat_windows_1252` | `sas64_wlatin1` = haven (encoding 62) |
 | `p2a-core::data::sas::tests::test_validate_read_sas7bdat_encoding_codes` | encoding bytes 204 and 29 and an unassigned byte, as ReadStat |
 | `p2a-core::data::sas::tests::test_sas_text_encodings` | the Windows-1252 and encoding-byte decoders, hand-computed |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_32_bit` | `sas32_iris` (SAS 9.4) = haven: pad, mix-page alignment (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rle` | `sas64_rle` = haven: RLE rows, 0x9000 page (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rle_wide` | `sas64_rle_wide` = haven: RLE command 0x1 (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rle_32_bit` | `sas32_nopad_rle` = haven (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rdc` | `sas64_rdc` = haven: RDC rows, plain rows, 0x4000 pages (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_compressed_rdc_32_bit` | `sas32_rdc` = haven (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_read_sas7bdat_masked_page_types` | page types 0x4000 and 0x0280 read as ReadStat reads them (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_sas_unknown_page_type_is_error` | page type 0x0300 refused; ReadStat refuses too (DATA-48) |
+| `p2a-core::data::sas::tests::test_validate_sas_missing_rows_are_an_error` | 61 rows declared, 60 held: refused, as ReadStat (DATA-48) |
+| `p2a-core::data::sas::tests::test_sas_compressed_rows_need_a_method` | compressed rows without a literal: `UnsupportedCompression` (DATA-48) |
+| `p2a-core::data::sas::tests::test_sas_corrupt_compressed_rows_are_errors` | a bad RLE command, a short RDC row, an unknown pointer compression (DATA-48) |
+| `p2a-core::data::sas::tests::test_sas_rle_decompress_every_command` | every RLE command, hand-built from the command table |
+| `p2a-core::data::sas::tests::test_sas_rdc_decompress_every_command` | every RDC item, hand-built from the command table |
+| `p2a-core::data::sas::tests::test_sas_decompressed_cells_respect_the_allocation_ceiling` | what decoded cells hold is refused above the allocation ceiling |
+| `p2a-core::data::sas::tests::test_validate_dataloader_loads_sas7bdat_fixture` | `DataLoader::load` of `sas64_rle` = haven |

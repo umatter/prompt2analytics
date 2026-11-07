@@ -1,9 +1,10 @@
 //! SAS7BDAT file reader (pure Rust implementation).
 //!
-//! Reads uncompressed files, 32- and 64-bit, little- and big-endian. The layout follows ReadStat
-//! (`readstat_sas.c`, `readstat_sas7bdat_read.c`) and pandas (`pandas/io/sas/sas7bdat.py`). Every
-//! case is pinned to `haven::read_sas` on the fixtures in `validation/datasets/files/`
-//! (`validation/data/readers.md`).
+//! Reads uncompressed, RLE-compressed (`SASYZCRL`, SAS `COMPRESS=CHAR`) and RDC-compressed
+//! (`SASYZCR2`, `COMPRESS=BINARY`) files, 32- and 64-bit, little- and big-endian. The layout
+//! follows ReadStat (`readstat_sas.c`, `readstat_sas7bdat_read.c`, `readstat_sas_rle.c`) and pandas
+//! (`pandas/io/sas/sas7bdat.py`, `_sas.pyx`). Every case is pinned to `haven::read_sas` on the
+//! fixtures in `validation/datasets/files/` (`validation/data/readers.md`).
 //!
 //! | Field | Where |
 //! |---|---|
@@ -16,9 +17,12 @@
 //! | page header | type, block count, subheader count: u16 at B, B + 2, B + 4 (B = 16 or 32) |
 //! | subheader pointer | offset, length (int), compression (u8), type (u8), from B + 8 |
 //!
-//! Page type 0 is a metadata page, 256 a data page and 512 a mix page; other pages are skipped. A
-//! data page holds `block count` rows after its header. A mix page holds
-//! `block count - subheader count` rows after its pointer table.
+//! Page types are masked with 0x0F00: 0x000 and 0x400 are metadata pages (0x4000 too), 0x100 data
+//! pages and 0x200 mix pages (0x280 too). 0x9000 pages hold nothing and are skipped; any other type
+//! is an error. A data page holds `block count` rows after its header. A mix page holds
+//! `block count - subheader count` rows after its pointer table, aligned to 8 bytes. A compressed
+//! file stores each row as a subheader with compression 4, or uncompressed with compression 0 and
+//! type 1. The method is named by the literal at offset 12 of the first column-text block.
 //!
 //! Text cells are trimmed of trailing blanks and NULs; an empty cell is `""`, as haven reads it. Every NaN numeric (SAS `.`, `.A`-`.Z`, `._`) is null and every other value is
 //! kept (1e308 is a valid SAS value). Numerics of 3 to 7 bytes are doubles truncated to their
@@ -43,13 +47,28 @@ const HEADER_PREFIX: usize = 288;
 /// big-endian 64-bit signature whose first word is 0 or all ones).
 const SIG_ROW_SIZE: u32 = 0xF7F7_F7F7;
 const SIG_COL_SIZE: u32 = 0xF6F6_F6F6;
+const SIG_COUNTS: u32 = 0xFFFF_FC00;
 const SIG_COL_TEXT: u32 = 0xFFFF_FFFD;
 const SIG_COL_NAME: u32 = 0xFFFF_FFFF;
 const SIG_COL_ATTR: u32 = 0xFFFF_FFFC;
+const SIG_FORMAT: u32 = 0xFFFF_FBFE;
+const SIG_COL_LIST: u32 = 0xFFFF_FFFE;
+const KNOWN_SIGNATURES: [u32; 8] = [
+    SIG_ROW_SIZE,
+    SIG_COL_SIZE,
+    SIG_COUNTS,
+    SIG_COL_TEXT,
+    SIG_COL_NAME,
+    SIG_COL_ATTR,
+    SIG_FORMAT,
+    SIG_COL_LIST,
+];
 
-/// Subheader pointer compression codes.
+/// Subheader pointer compression codes and the row subheader type.
 const COMPRESSION_NONE: u8 = 0;
 const COMPRESSION_TRUNCATED: u8 = 1;
+const COMPRESSION_ROW: u8 = 4;
+const SUBHEADER_TYPE_ROW: u8 = 1;
 
 /// Errors that can occur during SAS file reading.
 #[derive(Error, Debug)]
@@ -117,7 +136,15 @@ enum ColumnType {
     Character,
 }
 
-/// What a page holds.
+/// Row compression named by the first column-text block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Compression {
+    None,
+    Rle,
+    Rdc,
+}
+
+/// What a page holds (page type masked with 0x0F00; 0x9000 pages are skipped).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PageKind {
     Meta,
@@ -325,13 +352,192 @@ fn decode_numeric(cell: &[u8], order: ByteOrder) -> Option<f64> {
     (!v.is_nan()).then_some(v)
 }
 
+fn take(src: &[u8], i: &mut usize, what: &str) -> Result<u8, String> {
+    let b = *src
+        .get(*i)
+        .ok_or_else(|| format!("{what} command is truncated"))?;
+    *i += 1;
+    Ok(b)
+}
+
+fn emit_copy(out: &mut [u8], o: &mut usize, bytes: &[u8], what: &str) -> Result<(), String> {
+    let (end, row_length) = (*o + bytes.len(), out.len());
+    out.get_mut(*o..end)
+        .ok_or_else(|| {
+            format!("{what} row decompresses to more than the row length of {row_length} bytes")
+        })?
+        .copy_from_slice(bytes);
+    *o = end;
+    Ok(())
+}
+
+fn emit_fill(out: &mut [u8], o: &mut usize, byte: u8, n: usize, what: &str) -> Result<(), String> {
+    let (end, row_length) = (*o + n, out.len());
+    out.get_mut(*o..end)
+        .ok_or_else(|| {
+            format!("{what} row decompresses to more than the row length of {row_length} bytes")
+        })?
+        .fill(byte);
+    *o = end;
+    Ok(())
+}
+
+/// SAS RLE (`SASYZCRL`) row decompression, as ReadStat's `sas_rle_decompress`. Each control byte
+/// is a command (high nibble) and a length `l` (low nibble); `n` is the next input byte:
+///
+/// | Command | Effect |
+/// |---|---|
+/// | 0x0 / 0x1 | copy `n + 64 + 256 l` bytes / that plus 4096 |
+/// | 0x2 | copy `l + 96` bytes |
+/// | 0x4 | insert the byte after `n`, `n + 18 + 256 l` times |
+/// | 0x5 / 0x6 / 0x7 | insert `@` / blank / NUL, `n + 17 + 256 l` times |
+/// | 0x8 / 0x9 / 0xA / 0xB | copy `l + 1` / `l + 17` / `l + 33` / `l + 49` bytes |
+/// | 0xC | insert byte `n`, `l + 3` times |
+/// | 0xD / 0xE / 0xF | insert `@` / blank / NUL, `l + 2` times |
+///
+/// 0x3 is not a command. The output must fill `out` exactly.
+fn rle_decompress(src: &[u8], out: &mut [u8]) -> Result<(), String> {
+    let (mut i, mut o) = (0usize, 0usize);
+    while i < src.len() {
+        let control = take(src, &mut i, "RLE")?;
+        let l = usize::from(control & 0x0F);
+        let (copy, fill) = match control >> 4 {
+            0x0 => (usize::from(take(src, &mut i, "RLE")?) + 64 + 256 * l, None),
+            0x1 => (
+                usize::from(take(src, &mut i, "RLE")?) + 64 + 256 * l + 4096,
+                None,
+            ),
+            0x2 => (l + 96, None),
+            0x4 => {
+                let n = usize::from(take(src, &mut i, "RLE")?);
+                (0, Some((take(src, &mut i, "RLE")?, n + 18 + 256 * l)))
+            }
+            0x5 => (
+                0,
+                Some((b'@', usize::from(take(src, &mut i, "RLE")?) + 17 + 256 * l)),
+            ),
+            0x6 => (
+                0,
+                Some((b' ', usize::from(take(src, &mut i, "RLE")?) + 17 + 256 * l)),
+            ),
+            0x7 => (
+                0,
+                Some((0u8, usize::from(take(src, &mut i, "RLE")?) + 17 + 256 * l)),
+            ),
+            0x8 => (l + 1, None),
+            0x9 => (l + 17, None),
+            0xA => (l + 33, None),
+            0xB => (l + 49, None),
+            0xC => (0, Some((take(src, &mut i, "RLE")?, l + 3))),
+            0xD => (0, Some((b'@', l + 2))),
+            0xE => (0, Some((b' ', l + 2))),
+            0xF => (0, Some((0u8, l + 2))),
+            _ => return Err(format!("unknown RLE command 0x{control:02x}")),
+        };
+        if copy > 0 {
+            let bytes = src.get(i..i + copy).ok_or_else(|| {
+                format!("RLE copy of {copy} bytes runs past the end of the compressed row")
+            })?;
+            emit_copy(out, &mut o, bytes, "RLE")?;
+            i += copy;
+        }
+        if let Some((byte, n)) = fill {
+            emit_fill(out, &mut o, byte, n, "RLE")?;
+        }
+    }
+    if o != out.len() {
+        return Err(format!(
+            "RLE row decompresses to {o} bytes, not the row length of {}",
+            out.len()
+        ));
+    }
+    Ok(())
+}
+
+/// SAS RDC (`SASYZCR2`, Ross Data Compression) row decompression, as ReadStat's
+/// `sas7bdat_parse_subheader_rdc` and pandas' `rdc_decompress`. A big-endian 16-bit control word
+/// precedes up to 16 items; a clear bit is one literal byte, a set bit a command of marker byte `m`
+/// and next byte `n`:
+///
+/// | Marker | Effect |
+/// |---|---|
+/// | `m < 0x10` | insert `m + 3` copies of `n` |
+/// | `m >> 4 == 1` | insert `(m & 15) + 19 + 16 n` copies of the byte after `n` |
+/// | `m >> 4 == 2` | copy `16 + (byte after n)` bytes from `(m & 15) + 3 + 16 n` back |
+/// | `m >> 4 == c`, c in 3..=15 | copy `c` bytes from `(m & 15) + 3 + 16 n` back |
+///
+/// Copies may overlap their source (byte by byte, as pandas); a back reference before the start of
+/// the row is an error. The output must fill `out` exactly.
+fn rdc_decompress(src: &[u8], out: &mut [u8]) -> Result<(), String> {
+    let (mut i, mut o) = (0usize, 0usize);
+    while i < src.len() {
+        let hi = take(src, &mut i, "RDC")?;
+        let control = u16::from_be_bytes([hi, take(src, &mut i, "RDC control word")?]);
+        for bit in 0..16u32 {
+            if i >= src.len() {
+                break;
+            }
+            if control & (0x8000 >> bit) == 0 {
+                let b = take(src, &mut i, "RDC")?;
+                emit_fill(out, &mut o, b, 1, "RDC")?;
+                continue;
+            }
+            let marker = take(src, &mut i, "RDC")?;
+            let next = take(src, &mut i, "RDC")?;
+            let low = usize::from(marker & 0x0F);
+            match marker >> 4 {
+                0 => emit_fill(out, &mut o, next, low + 3, "RDC")?,
+                1 => {
+                    let b = take(src, &mut i, "RDC")?;
+                    emit_fill(out, &mut o, b, low + 19 + 16 * usize::from(next), "RDC")?;
+                }
+                c => {
+                    let back = low + 3 + 16 * usize::from(next);
+                    let len = if c == 2 {
+                        usize::from(take(src, &mut i, "RDC")?) + 16
+                    } else {
+                        usize::from(c)
+                    };
+                    if back > o {
+                        return Err(format!(
+                            "RDC back reference of {back} bytes before the start of the row"
+                        ));
+                    }
+                    if o + len > out.len() {
+                        return Err(format!(
+                            "RDC row decompresses to more than the row length of {} bytes",
+                            out.len()
+                        ));
+                    }
+                    for k in o..o + len {
+                        out[k] = out[k - back];
+                    }
+                    o += len;
+                }
+            }
+        }
+    }
+    if o != out.len() {
+        return Err(format!(
+            "RDC row decompresses to {o} bytes, not the row length of {}",
+            out.len()
+        ));
+    }
+    Ok(())
+}
+
 /// The kind of a page from its type word.
-fn page_kind(page_type: u16) -> PageKind {
-    match page_type {
-        0 => PageKind::Meta,
-        256 => PageKind::Data,
-        512 => PageKind::Mix,
-        _ => PageKind::Skip,
+fn page_kind(page_type: u16, page_idx: usize) -> Result<PageKind, SasError> {
+    if page_type & 0x9000 == 0x9000 {
+        return Ok(PageKind::Skip);
+    }
+    match page_type & 0x0F00 {
+        0x0000 | 0x0400 => Ok(PageKind::Meta),
+        0x0100 => Ok(PageKind::Data),
+        0x0200 => Ok(PageKind::Mix),
+        _ => Err(SasError::InvalidFormat(format!(
+            "page {page_idx} has the unknown page type 0x{page_type:04x}"
+        ))),
     }
 }
 
@@ -340,6 +546,15 @@ struct RowSink {
     numeric: Vec<Vec<Option<f64>>>,
     text: Vec<Vec<Option<String>>>,
     rows: usize,
+    /// Bytes the decoded cells hold. Compressed rows can decode to far more than the file's size,
+    /// so this total is held to the allocation ceiling page by page.
+    held_bytes: usize,
+}
+
+impl RowSink {
+    fn check_held(&self) -> Result<(), SasError> {
+        crate::resource::check_alloc::<u8>(self.held_bytes, "SAS cells").map_err(resource_err)
+    }
 }
 
 /// SAS7BDAT file reader
@@ -354,6 +569,7 @@ pub struct SasReader<R: Read + Seek> {
     page_count: usize,
     row_length: usize,
     row_count: usize,
+    compression: Compression,
     columns: Vec<ColumnInfo>,
 }
 
@@ -438,6 +654,7 @@ impl<R: Read + Seek> SasReader<R> {
             page_count,
             row_length: 0,
             row_count: 0,
+            compression: Compression::None,
             columns: Vec::new(),
         };
         sas_reader.parse_metadata()?;
@@ -471,7 +688,7 @@ impl<R: Read + Seek> SasReader<R> {
     ) -> Result<(PageKind, usize, Vec<Pointer>), SasError> {
         let l = self.layout();
         let t = l.page_type_offset();
-        let kind = page_kind(read_uint(page, t, 2, l.byte_order)? as u16);
+        let kind = page_kind(read_uint(page, t, 2, l.byte_order)? as u16, idx)?;
         let block_count = read_u16(page, t + 2, l.byte_order)?;
         let subheader_count = read_u16(page, t + 4, l.byte_order)?;
         let mut pointers = Vec::new();
@@ -540,6 +757,7 @@ impl<R: Read + Seek> SasReader<R> {
         let mut texts: Vec<Vec<u8>> = Vec::new();
         let mut names: Vec<(usize, usize, usize)> = Vec::new(); // (text block, offset, length)
         let mut attrs: Vec<(usize, usize, ColumnType)> = Vec::new(); // (offset, width, type)
+        let mut compressed_rows = false;
 
         for idx in 0..l.page_count {
             crate::resource::checkpoint().map_err(resource_err)?;
@@ -549,7 +767,8 @@ impl<R: Read + Seek> SasReader<R> {
                 continue;
             }
             for p in pointers {
-                // Truncated subheaders carry no metadata.
+                // Rows (compression 4) and truncated subheaders carry no metadata.
+                compressed_rows |= p.length > 0 && p.compression == COMPRESSION_ROW;
                 if p.length == 0 || p.compression != COMPRESSION_NONE {
                     continue;
                 }
@@ -585,6 +804,13 @@ impl<R: Read + Seek> SasReader<R> {
                     }
                     SIG_COL_TEXT => {
                         let blob = sh.get(il..).unwrap_or(&[]).to_vec();
+                        if texts.is_empty() {
+                            self.compression = match blob.get(12..20) {
+                                Some(b"SASYZCRL") => Compression::Rle,
+                                Some(b"SASYZCR2") => Compression::Rdc,
+                                _ => Compression::None,
+                            };
+                        }
                         texts.push(blob);
                     }
                     SIG_COL_NAME => {
@@ -629,6 +855,13 @@ impl<R: Read + Seek> SasReader<R> {
         if attrs.is_empty() {
             return Err(SasError::InvalidFormat("No columns found in file".into()));
         }
+        if compressed_rows && self.compression == Compression::None {
+            return Err(SasError::UnsupportedCompression(
+                "the file stores compressed rows but names no compression method (SASYZCRL or \
+                 SASYZCR2 at offset 12 of the first column-text subheader)"
+                    .into(),
+            ));
+        }
         self.row_length = row_length
             .ok_or_else(|| SasError::InvalidFormat("the file has no row size subheader".into()))?;
         self.row_count = row_count.unwrap_or(0);
@@ -663,7 +896,7 @@ impl<R: Read + Seek> SasReader<R> {
     }
 
     /// Check the row and column layout against the page geometry: the row length is between 1
-    /// and the page size, the row count fits the pages,
+    /// and the page size, the row count fits the pages (one pointer per row in a compressed file),
     /// every column has a nonzero width and lies inside the row, numeric widths are 1 to 8 bytes,
     /// and the column widths add up to at most the row length. So the bytes read per row are
     /// bounded by the row length, and the cells read by the file size (T0, DATA-49). A valid file
@@ -681,7 +914,12 @@ impl<R: Read + Seek> SasReader<R> {
                 l.page_size
             )));
         }
-        let rows_per_page = l.page_size / row_length;
+        let rows_per_page = match self.compression {
+            Compression::None => l.page_size / row_length,
+            Compression::Rle | Compression::Rdc => {
+                l.page_size.saturating_sub(l.page_header_size()) / (l.pointer_size() + 1)
+            }
+        };
         let max_rows = l.page_count.saturating_mul(rows_per_page);
         if self.row_count > max_rows {
             return Err(SasError::InvalidFormat(format!(
@@ -727,7 +965,10 @@ impl<R: Read + Seek> SasReader<R> {
         for (j, c) in self.columns.iter().enumerate() {
             let cell = &row[c.offset..c.offset + c.length];
             match c.col_type {
-                ColumnType::Numeric => sink.numeric[j].push(decode_numeric(cell, order)),
+                ColumnType::Numeric => {
+                    sink.held_bytes += size_of::<Option<f64>>();
+                    sink.numeric[j].push(decode_numeric(cell, order));
+                }
                 ColumnType::Character => {
                     let value = decode_sas_text(trim_text(cell), self.encoding).map_err(|e| {
                         SasError::ParseError(format!(
@@ -736,6 +977,7 @@ impl<R: Read + Seek> SasReader<R> {
                             sink.rows + 1
                         ))
                     })?;
+                    sink.held_bytes += value.len() + size_of::<Option<String>>();
                     sink.text[j].push(Some(value));
                 }
             }
@@ -744,7 +986,7 @@ impl<R: Read + Seek> SasReader<R> {
         Ok(())
     }
 
-    /// Read the data into a DataFrame (pass 2: rows in page order).
+    /// Read the data into a DataFrame (pass 2: rows in page order, subheader rows first).
     pub fn read_to_dataframe(mut self) -> Result<DataFrame, SasError> {
         let l = self.layout();
         // Bound the pre-allocation: `row_count` is parsed from a page subheader
@@ -760,6 +1002,7 @@ impl<R: Read + Seek> SasReader<R> {
             numeric: Vec::new(),
             text: Vec::new(),
             rows: 0,
+            held_bytes: 0,
         };
         for c in &self.columns {
             let numeric = c.col_type == ColumnType::Numeric;
@@ -778,14 +1021,63 @@ impl<R: Read + Seek> SasReader<R> {
                 break;
             }
             crate::resource::checkpoint().map_err(resource_err)?;
+            sink.check_held()?;
             self.read_page(idx, &mut page)?;
             let (kind, block_count, pointers) = self.page_header(&page, idx)?;
+
+            // Rows stored as subheaders (compressed files).
+            for (k, p) in pointers.iter().enumerate() {
+                if sink.rows >= self.row_count {
+                    break;
+                }
+                if p.length == 0 || p.compression == COMPRESSION_TRUNCATED {
+                    continue;
+                }
+                let sh = &page[p.offset..p.offset + p.length];
+                match p.compression {
+                    COMPRESSION_ROW => {
+                        let decoded = match self.compression {
+                            Compression::Rle => rle_decompress(sh, &mut row),
+                            Compression::Rdc => rdc_decompress(sh, &mut row),
+                            Compression::None => {
+                                return Err(SasError::UnsupportedCompression(format!(
+                                    "subheader {k} on page {idx} is a compressed row, but the file \
+                                     names no compression method (SASYZCRL or SASYZCR2)"
+                                )));
+                            }
+                        };
+                        decoded.map_err(|e| {
+                            SasError::InvalidFormat(format!("row subheader {k} on page {idx}: {e}"))
+                        })?;
+                        self.push_row(&mut sink, &row)?;
+                    }
+                    COMPRESSION_NONE => {
+                        // A row SAS left uncompressed in a compressed file.
+                        if self.compression != Compression::None
+                            && p.kind == SUBHEADER_TYPE_ROW
+                            && p.length == self.row_length
+                            && !KNOWN_SIGNATURES.contains(&self.signature(sh)?)
+                        {
+                            self.push_row(&mut sink, sh)?;
+                        }
+                    }
+                    other => {
+                        return Err(SasError::UnsupportedCompression(format!(
+                            "subheader {k} on page {idx} has compression code {other}"
+                        )));
+                    }
+                }
+            }
 
             // Rows stored after the page header (data pages) or the pointer table (mix pages).
             let (start, n) = match kind {
                 PageKind::Data => (l.page_header_size(), block_count),
                 PageKind::Mix => {
-                    let start = add(l.page_header_size(), mul(pointers.len(), l.pointer_size())?)?;
+                    let mut start =
+                        add(l.page_header_size(), mul(pointers.len(), l.pointer_size())?)?;
+                    if start % 8 == 4 {
+                        start += 4; // 32-bit mix pages align the rows to 8 bytes
+                    }
                     let n = block_count.checked_sub(pointers.len()).ok_or_else(|| {
                         SasError::InvalidFormat(format!(
                             "block count {block_count} on page {idx} is smaller than its {} \
@@ -811,6 +1103,13 @@ impl<R: Read + Seek> SasReader<R> {
                 row.copy_from_slice(&page[at..at + self.row_length]);
                 self.push_row(&mut sink, &row)?;
             }
+        }
+        sink.check_held()?;
+        if sink.rows < self.row_count {
+            return Err(SasError::InvalidFormat(format!(
+                "the file declares {} rows but holds {}",
+                self.row_count, sink.rows
+            )));
         }
 
         let mut df_columns: Vec<Column> = Vec::with_capacity(self.columns.len());
@@ -951,6 +1250,7 @@ mod tests {
     // sas64_haven.sas7bdat (haven::write_sas: 64-bit, little-endian, no pad, header 8192, pages
     // of 4096): page 0 holds the metadata, pages 1-4 the 60 rows (19, 19, 19, 3) of 205 bytes.
     const H_PAGE0: usize = 8192;
+    const H_PAGE0_TYPE: usize = H_PAGE0 + 32;
     const H_PAGE0_SUBHEADER_COUNT: usize = H_PAGE0 + 36;
     const H_PAGE0_POINTER0: usize = H_PAGE0 + 40; // offset (i64), length (i64), compression, type
     const H_PAGE1: usize = H_PAGE0 + 4096;
@@ -1343,5 +1643,289 @@ mod tests {
                 .contains("code 64 is not supported")
         );
         assert_eq!(decode_sas_text(b"plain", 64).unwrap(), "plain");
+    }
+
+    // ---- DATA-48: compression, page types, mix-page alignment, one row counter ----
+
+    #[test]
+    fn test_validate_read_sas7bdat_32_bit() {
+        // Written by SAS 9.4: 32-bit with the pad (DATA-18), one mix page with 13 subheaders, so
+        // the rows start 4 bytes after the pointer table, at 184 (DATA-48 alignment).
+        haven("data_readers_values", "sas32_iris");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_compressed_rle() {
+        // DATA-48: rows as RLE subheaders on metadata pages after a 0x9000 page; every RLE
+        // command but 0x1.
+        haven("data_readers_values", "sas64_rle");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_compressed_rle_wide() {
+        // DATA-48: rows of 4300 bytes of literal text use RLE command 0x1 (copy n + 64 + 256 l + 4096).
+        haven("data_readers_values", "sas64_rle_wide");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_compressed_rle_32_bit() {
+        haven("data_readers_values", "sas32_nopad_rle");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_compressed_rdc() {
+        // DATA-48: RDC rows on 0x4000 metadata pages; rows 1 and 30 stored uncompressed
+        // (compression 0, type 1).
+        haven("data_readers_values", "sas64_rdc");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_compressed_rdc_32_bit() {
+        haven("data_readers_values", "sas32_rdc");
+    }
+
+    #[test]
+    fn test_validate_read_sas7bdat_masked_page_types() {
+        // DATA-48: 0x4000 reads as a metadata page and 0x0280 as a mix page; ReadStat reads the
+        // same patched bytes as the originals (guard__sas_page_type_0x4000 = 60, _0x0280 = 150).
+        let case = Case::load("data_readers_values");
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_PAGE0_TYPE, &0x4000u16.to_le_bytes());
+        let df = load(b).unwrap();
+        assert_eq!(
+            df.height() as f64,
+            case.scalar("guard__sas_page_type_0x4000")
+        );
+        assert_matches_haven(&case, "sas64_haven", &df);
+        let mut b = fixture_bytes("sas32_iris.sas7bdat");
+        put(&mut b, I_PAGE0_TYPE, &0x0280u16.to_le_bytes());
+        let df = load(b).unwrap();
+        assert_eq!(
+            df.height() as f64,
+            case.scalar("guard__sas_page_type_0x0280")
+        );
+        assert_matches_haven(&case, "sas32_iris", &df);
+    }
+
+    #[test]
+    fn test_validate_sas_unknown_page_type_is_error() {
+        // ReadStat refuses it too (guard__sas_page_type_0x0300 = -1).
+        let case = Case::load("data_readers_values");
+        assert_eq!(case.scalar("guard__sas_page_type_0x0300"), -1.0);
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_PAGE1_TYPE, &0x0300u16.to_le_bytes());
+        assert_invalid(load(b), "page 1 has the unknown page type 0x0300");
+    }
+
+    #[test]
+    fn test_validate_sas_missing_rows_are_an_error() {
+        // One row counter over every page type; a file holding fewer rows than it declares is
+        // refused, as ReadStat refuses it (guard__sas_row_count_61 = -1).
+        let case = Case::load("data_readers_values");
+        assert_eq!(case.scalar("guard__sas_row_count_61"), -1.0);
+        let mut b = fixture_bytes("sas64_haven.sas7bdat");
+        put(&mut b, H_ROW_SIZE + 48, &61u64.to_le_bytes());
+        assert_invalid(load(b), "the file declares 61 rows but holds 60");
+    }
+
+    #[test]
+    fn test_sas_compressed_rows_need_a_method() {
+        let mut b = fixture_bytes("sas64_rle.sas7bdat");
+        let at = b.windows(8).position(|w| w == b"SASYZCRL").unwrap();
+        assert_eq!(at, H_COL_TEXT + 8 + 12);
+        b[at..at + 8].copy_from_slice(b"        ");
+        match load(b) {
+            Err(SasError::UnsupportedCompression(m)) => {
+                assert!(m.contains("names no compression method"), "{m}")
+            }
+            other => panic!(
+                "expected UnsupportedCompression, got {:?}",
+                other.map(|d| d.shape())
+            ),
+        }
+    }
+
+    #[test]
+    fn test_sas_corrupt_compressed_rows_are_errors() {
+        // sas64_rle page 2 (at 16384): pointer 0 -> a 148-byte RLE row at 16384 + 3948 = 20332.
+        let mut b = fixture_bytes("sas64_rle.sas7bdat");
+        b[20332] = 0x30;
+        assert_invalid(
+            load(b),
+            "row subheader 0 on page 2: unknown RLE command 0x30",
+        );
+        // sas64_rdc page 1: pointer 1 (at 12288 + 40 + 24) is a 36-byte RDC row; cut it to 10.
+        let mut b = fixture_bytes("sas64_rdc.sas7bdat");
+        put(&mut b, 12288 + 40 + 24 + 8, &10u64.to_le_bytes());
+        assert_invalid(
+            load(b),
+            "row subheader 1 on page 1: RDC row decompresses to 13 bytes, not the row length of 205",
+        );
+        // An unknown pointer compression code.
+        let mut b = fixture_bytes("sas64_rdc.sas7bdat");
+        b[12288 + 40 + 24 + 16] = 2;
+        match load(b) {
+            Err(SasError::UnsupportedCompression(m)) => {
+                assert!(
+                    m.contains("subheader 1 on page 1 has compression code 2"),
+                    "{m}"
+                )
+            }
+            other => panic!(
+                "expected UnsupportedCompression, got {:?}",
+                other.map(|d| d.shape())
+            ),
+        }
+    }
+
+    #[test]
+    fn test_sas_rle_decompress_every_command() {
+        // Hand-built from ReadStat's command table (readstat_sas_rle.c), one command each.
+        let mut src = vec![0x00, 0x00];
+        src.extend(0u8..64); // 0x0: copy 0 + 64 + 0
+        src.push(0x20);
+        src.extend([7u8; 96]); // 0x2: copy 0 + 96
+        src.extend([0x40, 0x02, b'A']); // 0x4: 'A' x (2 + 18)
+        src.extend([0x50, 0x01]); // 0x5: '@' x (1 + 17)
+        src.extend([0x61, 0x00]); // 0x6: ' ' x (0 + 17 + 256)
+        src.extend([0x70, 0x03]); // 0x7: NUL x (3 + 17)
+        src.extend([0x82, 1, 2, 3]); // 0x8: copy 2 + 1
+        src.push(0x90);
+        src.extend([9u8; 17]); // 0x9: copy 0 + 17
+        src.push(0xA1);
+        src.extend([10u8; 34]); // 0xA: copy 1 + 33
+        src.push(0xB0);
+        src.extend([11u8; 49]); // 0xB: copy 0 + 49
+        src.extend([0xC2, b'z']); // 0xC: 'z' x (2 + 3)
+        src.extend([0xD1, 0xE0, 0xF3]); // '@' x 3, ' ' x 2, NUL x 5
+        let mut want: Vec<u8> = (0u8..64).collect();
+        for (byte, n) in [(7u8, 96usize), (b'A', 20), (b'@', 18), (b' ', 273), (0, 20)] {
+            want.extend(std::iter::repeat_n(byte, n));
+        }
+        want.extend([1, 2, 3]);
+        for (byte, n) in [
+            (9u8, 17usize),
+            (10, 34),
+            (11, 49),
+            (b'z', 5),
+            (b'@', 3),
+            (b' ', 2),
+            (0, 5),
+        ] {
+            want.extend(std::iter::repeat_n(byte, n));
+        }
+        let mut out = vec![0u8; want.len()];
+        rle_decompress(&src, &mut out).unwrap();
+        assert_eq!(out, want);
+
+        // 0x1: copy n + 64 + 256 l + 4096.
+        let long: Vec<u8> = (0..4160u32).map(|i| (i % 251) as u8).collect();
+        let mut src = vec![0x10, 0x00];
+        src.extend(&long);
+        let mut out = vec![0u8; 4160];
+        rle_decompress(&src, &mut out).unwrap();
+        assert_eq!(out, long);
+
+        let mut out = vec![0u8; 4];
+        assert!(
+            rle_decompress(&[0x30], &mut out)
+                .unwrap_err()
+                .contains("unknown RLE command 0x30")
+        );
+        assert!(
+            rle_decompress(&[0x40, 0x02], &mut out)
+                .unwrap_err()
+                .contains("truncated")
+        );
+        assert!(
+            rle_decompress(&[0xC9, b'x'], &mut out)
+                .unwrap_err()
+                .contains("more than the row length")
+        );
+        assert!(
+            rle_decompress(&[0xC0, b'x'], &mut out)
+                .unwrap_err()
+                .contains("decompresses to 3 bytes")
+        );
+    }
+
+    #[test]
+    fn test_sas_rdc_decompress_every_command() {
+        // Hand-built from ReadStat's sas7bdat_parse_subheader_rdc / pandas' rdc_decompress.
+        let run = |src: &[u8], n: usize| {
+            let mut out = vec![0u8; n];
+            rdc_decompress(src, &mut out).map(|()| out)
+        };
+        assert_eq!(run(&[0x00, 0x00, b'a', b'b', b'c'], 3).unwrap(), b"abc"); // literals
+        assert_eq!(run(&[0x80, 0x00, 0x02, b'x'], 5).unwrap(), b"xxxxx"); // short RLE: 2 + 3
+        assert_eq!(
+            run(&[0x80, 0x00, 0x11, 0x02, b'y'], 52).unwrap(),
+            vec![b'y'; 52]
+        ); // 1 + 19 + 32
+        // short pattern: 6 literals, then copy 3 bytes from 3 + 3 + 16 * 0 = 6 back (0x33 0x00)
+        assert_eq!(
+            run(
+                &[0x02, 0x00, b'a', b'b', b'c', b'd', b'e', b'f', 0x33, 0x00],
+                9
+            )
+            .unwrap(),
+            b"abcdefabc"
+        );
+        // long pattern: 16 literals, then copy 0 + 16 bytes from 13 + 3 = 16 back (0x2D 0x00 0x00)
+        let mut src = vec![0x00, 0x00];
+        src.extend(b'A'..=b'P');
+        src.extend([0x80, 0x00, 0x2D, 0x00, 0x00]);
+        let mut want: Vec<u8> = (b'A'..=b'P').collect();
+        want.extend(b'A'..=b'P');
+        assert_eq!(run(&src, 32).unwrap(), want);
+        // an overlapping copy (6 bytes from 3 back) repeats the pattern, as pandas
+        assert_eq!(
+            run(&[0x10, 0x00, b'a', b'b', b'c', 0x60, 0x00], 9).unwrap(),
+            b"abcabcabc"
+        );
+        assert!(
+            run(&[0x80, 0x00, 0x30, 0x00], 4)
+                .unwrap_err()
+                .contains("before the start")
+        );
+        assert!(
+            run(&[0x80, 0x00, 0x30], 4)
+                .unwrap_err()
+                .contains("truncated")
+        );
+    }
+
+    #[test]
+    fn test_sas_decompressed_cells_respect_the_allocation_ceiling() {
+        // Compressed rows can decode to far more than the file's size, so what the decoded cells
+        // hold is checked against the ceiling. sas64_rle_wide: 3 rows of 4300 bytes of text are
+        // above a ceiling that admits its page (8192 bytes), its row and its column buffers.
+        let e = crate::resource::with_alloc_ceiling(Some(10_000), || {
+            load_sas(fixture_path("sas64_rle_wide.sas7bdat")).unwrap_err()
+        });
+        match e {
+            SasError::ParseError(m) => {
+                assert!(
+                    m.contains("SAS cells") && m.contains("per-allocation limit"),
+                    "{m}"
+                )
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+        assert_eq!(
+            load_sas(fixture_path("sas64_rle_wide.sas7bdat"))
+                .unwrap()
+                .height(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_validate_dataloader_loads_sas7bdat_fixture() {
+        // The path `p2a data load` and MCP load_dataset take.
+        let case = Case::load("data_readers_values");
+        let ds = crate::data::DataLoader::load(fixture_path("sas64_rle.sas7bdat")).unwrap();
+        assert_eq!(ds.name(), Some("sas64_rle"));
+        assert_matches_haven(&case, "sas64_rle", ds.df());
     }
 }
