@@ -1297,7 +1297,7 @@ fn fit_working(
                 GlmSpec::logit()
             };
             spec.start = start.map(|s| s.view());
-            // fit_glm's own fit for the Poisson family and whenever it would report anything
+            // fit_glm's own fit for the Poisson family and whenever the fit leaves the lean path
             let fit = fit_logit_lean(x.view(), y.view(), &spec)
                 .map_err(|e| prefixed(e, "outcome working model: "))?;
             let notes = glm_fit_notes(MODEL, &fit, &spec, &plan.working_names);

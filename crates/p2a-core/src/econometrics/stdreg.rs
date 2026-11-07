@@ -1406,8 +1406,10 @@ struct ReplicateFit {
 ///   the Monte Carlo error of the standard error. `solve_ols` (the pivoted QR) otherwise.
 /// - Logistic: `tmle::lean_logit` from `start` (glm.fit's deviance rule and iterates, without
 ///   the shared GLM's covariance, deviances and warnings), and the shared GLM when the fit
-///   leaves that path (separation, aliasing, ill conditioning, no convergence), so those
-///   replicates are counted as before.
+///   leaves that path (separation, aliasing, ill conditioning, no convergence, a converged fit
+///   with a row beyond the bound `LEAN_MISFIT_ETA`), so those replicates are counted as the shared
+///   GLM reports them. A replicate past the bound can therefore count as not converged where the
+///   path alone would have converged.
 /// - Poisson: the shared GLM.
 fn fit_replicate(
     x: &Array2<f64>,
