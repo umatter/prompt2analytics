@@ -39,6 +39,19 @@
       "tolerance": "Tol::coef(30)",
       "deviations": [{"finding": "STAT-69", "quantity": "method = 'fmm'", "note": "not pinned"}, {"finding": "STAT-40", "quantity": "monotone and periodic methods", "note": "not pinned"}],
       "supersedes_legacy": []
+    },
+    {
+      "id": "spectrum_t3",
+      "name": "Periodogram grid and plot.spec confidence-interval multipliers; AR spectra without an interval",
+      "category": "timeseries",
+      "reference": "stats::spec.pgram; stats:::plot.spec spec.ci; stats::spec.ar (no df)",
+      "doc": "validation/timeseries/spectrum.md",
+      "cases": ["stat_spectrum_t3"],
+      "tests": ["p2a-core::stats::spectrum::tests::test_validate_spectrum_t3_grid_and_ci"],
+      "quantities": ["frequencies", "peak frequency", "CI multipliers at given df (levels 0.95, 0.90)"],
+      "tolerance": "Tol::coef(96); multipliers 1e-10 relative",
+      "deviations": [{"finding": "STAT-39", "quantity": "df and bandwidth", "note": "R 6.5521 and 0.010842; p2a 18 and 0.03125"}, {"finding": "STAT-68", "quantity": "spectral ordinates", "note": "p2a about 2x R, different taper and edge smoothing"}],
+      "supersedes_legacy": []
     }
   ]
 }

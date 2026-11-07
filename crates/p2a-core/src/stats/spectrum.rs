@@ -25,8 +25,10 @@ use std::f64::consts::PI;
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::data::columns::{NaPolicy, numeric_column};
 use crate::errors::{EconError, EconResult};
 use crate::resource::{checkpoint, checkpoint_stride, try_with_capacity};
+use crate::traits::estimator::{chi_squared_p_value, chi_squared_quantile, validate_level};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
@@ -116,7 +118,8 @@ pub struct SpectrumResult {
     pub bandwidth: f64,
 
     /// Degrees of freedom for confidence interval computation.
-    /// For smoothed periodogram: df ≈ 2 × bandwidth × n
+    /// For smoothed periodogram: df ≈ 2 × bandwidth × n.
+    /// `f64::INFINITY` for AR spectra, which have no chi-square interval.
     pub df: f64,
 
     /// Number of observations in the original series.
@@ -147,38 +150,38 @@ impl SpectrumResult {
         self.spec
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(i, &s)| (self.freq[i], s))
     }
 
-    /// Compute approximate 95% confidence interval multipliers.
+    /// Confidence interval multipliers: the interval is `[spec * lower, spec * upper]`.
     ///
-    /// For a smoothed periodogram, the spectral estimate follows a scaled
-    /// chi-squared distribution. The confidence interval is:
-    /// [spec * df / chi2_upper, spec * df / chi2_lower]
+    /// R's `stats:::plot.spec` rule (`spec.ci`): for `X ~ chi^2(df)` the tail `1 - level` is split
+    /// in proportion to `P(X > df)` above and `P(X <= df)` below, so the multipliers are
+    /// `df / qchisq(1 - (1 - level) P(X > df), df)` and `df / qchisq((1 - level) P(X <= df), df)`.
+    /// The df is p2a's own, which is not `spec.pgram`'s (STAT-39).
     ///
-    /// Returns (lower_multiplier, upper_multiplier) such that
-    /// CI = [spec * lower_mult, spec * upper_mult]
-    pub fn confidence_multipliers(&self, level: f64) -> (f64, f64) {
-        use statrs::distribution::{ChiSquared, ContinuousCDF};
-
-        if self.df < 2.0 {
-            // Not enough smoothing for meaningful CI
-            return (0.0, f64::INFINITY);
+    /// `Ok(None)` when the df is not finite and positive: an AR spectrum has no chi-square
+    /// interval (R's `spec.ar` reports no df). A level outside (0, 1) is an error.
+    pub fn confidence_interval_multipliers(&self, level: f64) -> EconResult<Option<(f64, f64)>> {
+        validate_level(level, "level")?;
+        if !(self.df.is_finite() && self.df > 0.0) {
+            return Ok(None);
         }
+        let tail = 1.0 - level;
+        let above = chi_squared_p_value(self.df, self.df);
+        let q_upper = chi_squared_quantile(1.0 - tail * above, self.df)?;
+        let q_lower = chi_squared_quantile(tail * (1.0 - above), self.df)?;
+        Ok(Some((self.df / q_upper, self.df / q_lower)))
+    }
 
-        let alpha = 1.0 - level;
-        let chi2 = ChiSquared::new(self.df).unwrap();
-
-        // Lower and upper quantiles of chi-squared
-        let chi2_lower = chi2.inverse_cdf(alpha / 2.0);
-        let chi2_upper = chi2.inverse_cdf(1.0 - alpha / 2.0);
-
-        // Multipliers for the spectral estimate
-        let lower_mult = self.df / chi2_upper;
-        let upper_mult = self.df / chi2_lower;
-
-        (lower_mult, upper_mult)
+    /// [`Self::confidence_interval_multipliers`] as a pair: `(NaN, NaN)` when there is no interval
+    /// (an AR spectrum) or the level is invalid.
+    pub fn confidence_multipliers(&self, level: f64) -> (f64, f64) {
+        match self.confidence_interval_multipliers(level) {
+            Ok(Some(m)) => m,
+            _ => (f64::NAN, f64::NAN),
+        }
     }
 }
 
@@ -192,8 +195,16 @@ impl fmt::Display for SpectrumResult {
         writeln!(f, "Method: {}", self.method)?;
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "Series Length Used: {}", self.n_used)?;
-        writeln!(f, "Bandwidth: {:.4}", self.bandwidth)?;
-        writeln!(f, "Degrees of Freedom: {:.2}", self.df)?;
+        if self.df.is_finite() {
+            writeln!(f, "Bandwidth: {:.4}", self.bandwidth)?;
+            writeln!(f, "Degrees of Freedom: {:.2}", self.df)?;
+        } else {
+            writeln!(f, "Bandwidth: not defined (AR spectrum)")?;
+            writeln!(
+                f,
+                "Degrees of Freedom: not defined (AR spectrum: no chi-square interval)"
+            )?;
+        }
         writeln!(f, "Taper: {:.1}%", self.taper * 100.0)?;
         writeln!(f, "Detrend: {}", if self.detrend { "Yes" } else { "No" })?;
 
@@ -316,11 +327,7 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
         });
     }
 
-    if x.iter().any(|v| !v.is_finite()) {
-        return Err(EconError::InvalidSpecification {
-            message: "the series contains NaN or infinite values".to_string(),
-        });
-    }
+    crate::stats::acf::refuse_non_finite(x, "x")?;
 
     if !config.pad_ratio.is_finite() {
         return Err(EconError::InvalidSpecification {
@@ -729,11 +736,7 @@ pub fn spectrum_ar(
 
     // Without this a NaN slips past the zero-variance check (`NaN <= 0.0` is
     // false) and a given order returns an all-NaN spectrum.
-    if x.iter().any(|v| !v.is_finite()) {
-        return Err(EconError::InvalidSpecification {
-            message: "the series contains NaN or infinite values".to_string(),
-        });
-    }
+    crate::stats::acf::refuse_non_finite(x, "x")?;
 
     // Fit AR model using Yule-Walker equations
     let max_order = order.unwrap_or_else(|| {
@@ -946,41 +949,7 @@ fn select_ar_order_aic(x: &[f64], max_order: usize) -> EconResult<(Vec<f64>, f64
 
 /// Extract a numeric column from a dataset.
 fn extract_column(dataset: &Dataset, col_name: &str) -> EconResult<Vec<f64>> {
-    use polars::prelude::*;
-
-    let series = dataset
-        .df()
-        .column(col_name)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: col_name.to_string(),
-            available: dataset
-                .df()
-                .get_column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        })?;
-
-    let values = series
-        .cast(&DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn {
-            column: col_name.to_string(),
-        })?;
-
-    // na-legacy(T4): non-strict cast (text turns into nulls; NaN passes through)
-    let ca = values.f64().map_err(|_| EconError::NonNumericColumn {
-        column: col_name.to_string(),
-    })?;
-
-    // Refuse missing values with their number, as R's na.action = na.fail refuses them.
-    let missing = ca.null_count();
-    if missing > 0 {
-        return Err(EconError::NullValues {
-            column: col_name.to_string(),
-            count: missing,
-        });
-    }
-    Ok(ca.into_iter().flatten().collect())
+    numeric_column(dataset.df(), col_name, NaPolicy::Fail).map(|(v, _)| v)
 }
 
 /// Run spectral density estimation on a dataset column.
@@ -1257,17 +1226,9 @@ mod tests {
         assert!(upper > 1.0);
     }
 
-    /// Validation test against R spec.pgram
-    ///
-    /// R code:
-    /// ```r
-    /// x <- sin(2*pi*(1:100)/10)
-    /// sp <- spec.pgram(x, spans=c(3,3), taper=0.1, plot=FALSE)
-    /// # Peak frequency should be at 0.1
-    /// sp$freq[which.max(sp$spec)]
-    /// ```
+    /// A sine of period 10 peaks near frequency 0.1.
     #[test]
-    fn test_validate_spectrum_against_r() {
+    fn test_spectrum_sine_peak_property() {
         // Generate sine wave with period 10 (frequency 0.1)
         let x: Vec<f64> = (1..=100)
             .map(|i| (2.0 * PI * i as f64 / 10.0).sin())
@@ -1276,26 +1237,18 @@ mod tests {
         let config = SpectrumConfig::with_spans(vec![3, 3]);
         let result = spectrum(&x, config).unwrap();
 
-        // R output: peak frequency should be at or very near 0.1
         let (peak_freq, _) = result.peak_frequency().unwrap();
 
         assert!(
             (peak_freq - 0.1).abs() < 0.02,
-            "Peak frequency {} should match R's result (≈0.1)",
+            "Peak frequency {} should be near 0.1",
             peak_freq
         );
     }
 
-    /// Validation test: Raw periodogram (no smoothing) against R
-    ///
-    /// R code:
-    /// ```r
-    /// x <- 1:10
-    /// sp <- spec.pgram(x, spans=NULL, taper=0, detrend=TRUE, plot=FALSE)
-    /// length(sp$freq)  # Should be 5 (n/2)
-    /// ```
+    /// The raw periodogram of 10 points has 5 ordinates.
     #[test]
-    fn test_validate_raw_periodogram() {
+    fn test_raw_periodogram_length_property() {
         let x: Vec<f64> = (1..=10).map(|i| i as f64).collect();
 
         let config = SpectrumConfig::raw();
@@ -1313,74 +1266,9 @@ mod tests {
         );
     }
 
-    /// Comprehensive validation test against R spec.pgram
-    ///
-    /// R code:
-    /// ```r
-    /// set.seed(42)
-    /// x <- sin(2*pi*(1:100)/10)
-    /// sp <- spec.pgram(x, spans=c(3,3), taper=0.1, detrend=TRUE, plot=FALSE)
-    /// sp$freq[which.max(sp$spec)]  # 0.1
-    /// sp$bandwidth  # 0.0104083300
-    /// sp$df  # 6.5521
-    /// ```
+    /// A linear series has no power left after detrending.
     #[test]
-    fn test_validate_spectrum_comprehensive_against_r() {
-        // Generate sine wave with period 10 (frequency 0.1) - same as R
-        let x: Vec<f64> = (1..=100)
-            .map(|i| (2.0 * PI * i as f64 / 10.0).sin())
-            .collect();
-
-        let config = SpectrumConfig {
-            spans: Some(vec![3, 3]),
-            taper: 0.1,
-            detrend: true,
-            demean: false,
-            pad_ratio: 0.0,
-        };
-        let result = spectrum(&x, config).unwrap();
-
-        // R: SINE_PEAK_FREQ = 0.100000
-        let (peak_freq, _) = result.peak_frequency().unwrap();
-        assert!(
-            (peak_freq - 0.1).abs() < 0.01,
-            "Peak frequency {} should be 0.1 (R = 0.1)",
-            peak_freq
-        );
-
-        // Check number of frequencies (should be n/2 = 50)
-        assert_eq!(result.freq.len(), 50, "Should have n/2 = 50 frequencies");
-
-        // Check that frequencies span (0, 0.5]
-        assert!(
-            result.freq.first().unwrap() > &0.0,
-            "First frequency should be positive"
-        );
-        assert!(
-            result.freq.last().unwrap() <= &0.5,
-            "Last frequency should be <= 0.5"
-        );
-
-        // R produces df ≈ 6.55 for spans=c(3,3)
-        // Our implementation uses a different df formula but should be in similar range
-        // The important thing is that df increases with more smoothing
-        assert!(
-            result.df > 2.0,
-            "Degrees of freedom {} should be > 2 for smoothed periodogram",
-            result.df
-        );
-    }
-
-    /// Validation: Detrended linear series should have near-zero power
-    ///
-    /// R code:
-    /// ```r
-    /// x <- 1:20
-    /// sp <- spec.pgram(x, spans=NULL, taper=0.1, detrend=TRUE, plot=FALSE)
-    /// sum(sp$spec)  # 0 or very small
-    /// ```
-    #[test]
-    fn test_validate_detrend_linear() {
+    fn test_detrend_linear_has_no_power() {
         let x: Vec<f64> = (1..=20).map(|i| i as f64).collect();
 
         let config = SpectrumConfig {
@@ -1401,16 +1289,9 @@ mod tests {
         );
     }
 
-    /// Validation: Two-frequency series should show peaks at both frequencies
-    ///
-    /// R code:
-    /// ```r
-    /// x <- cos(2*pi*(1:50)/5) + 0.5*cos(2*pi*(1:50)/10)
-    /// sp <- spec.pgram(x, spans=c(3), taper=0.1, detrend=TRUE, plot=FALSE)
-    /// # Highest peaks at f=0.2 and f=0.1
-    /// ```
+    /// Two cosines give the highest peaks at their frequencies 0.2 and 0.1.
     #[test]
-    fn test_validate_two_frequency_spectrum() {
+    fn test_two_frequency_peaks_property() {
         // Signal with two frequencies: f=0.2 (period 5) and f=0.1 (period 10)
         let x: Vec<f64> = (1..=50)
             .map(|i| (2.0 * PI * i as f64 / 5.0).cos() + 0.5 * (2.0 * PI * i as f64 / 10.0).cos())
@@ -1449,9 +1330,9 @@ mod tests {
         );
     }
 
-    /// Validation: White noise should have relatively flat spectrum
+    /// The spectrum of pseudo-random white noise is relatively flat.
     #[test]
-    fn test_validate_white_noise_spectrum() {
+    fn test_white_noise_spectrum_cv_property() {
         // Generate pseudo-random white noise using LCG
         let mut x = Vec::with_capacity(100);
         let mut seed: u64 = 42;
@@ -1544,7 +1425,7 @@ mod tests {
         x[10] = f64::NAN;
         assert!(matches!(
             spectrum(&x, SpectrumConfig::default()),
-            Err(EconError::InvalidSpecification { .. })
+            Err(EconError::NullValues { .. })
         ));
         let x = mk(64);
         let inf = SpectrumConfig {
@@ -1585,14 +1466,17 @@ mod tests {
         nan[10] = f64::NAN;
         let mut inf = mk(64);
         inf[20] = f64::NEG_INFINITY;
-        for x in [&nan, &inf] {
-            for order in [Some(2), None] {
-                let r = spectrum_ar(x, order, Some(50));
-                assert!(
-                    matches!(&r, Err(EconError::InvalidSpecification { message }) if message.contains("NaN or infinite")),
-                    "{order:?}: {r:?}"
-                );
-            }
+        for order in [Some(2), None] {
+            let r = spectrum_ar(&nan, order, Some(50));
+            assert!(
+                matches!(&r, Err(EconError::NullValues { .. })),
+                "{order:?}: {r:?}"
+            );
+            let r = spectrum_ar(&inf, order, Some(50));
+            assert!(
+                matches!(&r, Err(EconError::NonFiniteValues { .. })),
+                "{order:?}: {r:?}"
+            );
         }
 
         // Finite, but every squared deviation is about 1e400.
@@ -1859,5 +1743,82 @@ mod tests {
                 assert!((a - b).abs() <= 1e-9 * b.abs(), "span={span}: {a} vs {b}");
             }
         }
+    }
+
+    /// Non-finite input is refused (R: na.fail), so the peak and the FFT never see NaN.
+    #[test]
+    fn test_spectrum_refuses_non_finite() {
+        let mut x: Vec<f64> = (0..32)
+            .map(|i| (i as f64 * 0.7).sin() + 0.01 * i as f64)
+            .collect();
+        x[5] = f64::NAN;
+        assert!(
+            matches!(spectrum(&x, SpectrumConfig::default()), Err(EconError::NullValues { ref column, count: 1 }) if column == "x")
+        );
+        assert!(matches!(
+            spectrum_ar(&x, Some(1), None),
+            Err(EconError::NullValues { .. })
+        ));
+        x[5] = f64::INFINITY;
+        assert!(
+            matches!(spectrum(&x, SpectrumConfig::default()), Err(EconError::NonFiniteValues { ref column, count: 1 }) if column == "x")
+        );
+    }
+
+    /// The series of case `stat_spectrum_t3`, read without loading the case.
+    fn t3_dataset() -> Dataset {
+        let path = p2a_validation::repo_path("validation/datasets/generated/spectrum_t3.csv");
+        Dataset::new(crate::data::DataLoader::load_csv(&path).unwrap())
+    }
+
+    /// STAT-38: an AR spectrum has no chi-square df (R's spec.ar has none); asking for its interval panicked.
+    #[test]
+    fn test_spectrum_ar_no_ci() {
+        let ds = t3_dataset();
+        for order in [Some(2), None] {
+            let r = run_spectrum_ar(&ds, "x", order, Some(50)).unwrap();
+            assert!(!r.df.is_finite());
+            assert_eq!(r.confidence_interval_multipliers(0.95).unwrap(), None);
+            let (lo, hi) = r.confidence_multipliers(0.95); // old API: no panic, no interval
+            assert!(lo.is_nan() && hi.is_nan());
+            let text = r.to_string();
+            assert!(text.contains("Degrees of Freedom: not defined"), "{text}");
+        }
+        let p = run_spectrum(&ds, "x", SpectrumConfig::with_spans(vec![3, 3])).unwrap();
+        for level in [0.0, 1.0, 95.0, -0.1, f64::NAN] {
+            let e = p.confidence_interval_multipliers(level).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("level")),
+                "{e}"
+            );
+        }
+    }
+
+    /// STAT-62 (spectrum), STAT-38: spec.pgram's frequency grid and peak, and plot.spec's spec.ci at given df.
+    #[test]
+    fn test_validate_spectrum_t3_grid_and_ci() {
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("stat_spectrum_t3");
+        let r = run_spectrum(&ds, "x", SpectrumConfig::with_spans(vec![3, 3])).unwrap(); // taper 0.1, detrend
+        // closed-form chi-square quantiles only (WP02 helpers: <= 8e-13), so a tight tolerance
+        const CI_TOL: Tol = Tol::new(1e-10, 0.0);
+        let mut ci95 = Vec::new();
+        let mut ci90 = Vec::new();
+        for df in case.vector("ci_df") {
+            let mut at = r.clone();
+            at.df = df;
+            let (lo, hi) = at.confidence_interval_multipliers(0.95).unwrap().unwrap();
+            ci95.extend([lo, hi]);
+            let (lo, hi) = at.confidence_interval_multipliers(0.90).unwrap().unwrap();
+            ci90.extend([lo, hi]);
+        }
+        Check::new(&case)
+            .vector("freq", &r.freq, Tol::coef(96))
+            .scalar("peak_freq", r.peak_frequency().unwrap().0, Tol::coef(96))
+            .vector("ci95_at_df", &ci95, CI_TOL)
+            .vector("ci90_at_df", &ci90, CI_TOL)
+            .finish();
+        // deviation STAT-39: df 6.552102376599634 and bandwidth 0.01084201041388611 (p2a 18 and 0.03125).
+        // deviation STAT-68: spec and raw_spec (p2a about 2x R and a different taper).
     }
 }

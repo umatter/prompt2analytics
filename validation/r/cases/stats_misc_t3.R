@@ -77,3 +77,28 @@ case("stat_ts_acf_spline_t3", "stats/acf", "acf, pacf, ccf (lag.max defaults and
        call = "acf(x); pacf(x); acf(x, type = 'covariance'); ccf(x, y, lag.max = 5); spline(kx, ky, method = 'natural'[, n = 1])",
        packages = character(0))
 })
+
+case("stat_spectrum_t3", "timeseries/spectrum", "spec.pgram grid and peak (n = 96, spans = c(3, 3), taper 0.1) and plot.spec's spec.ci multipliers", function(ctx) {
+  set.seed(9696)
+  n <- 96
+  tt <- 1:n
+  x <- sin(2 * pi * tt / 8) + 0.5 * arima.sim(list(ar = 0.4), n)
+  d <- ctx$gen_dataset("spectrum_t3", data.frame(t = tt, x = round(as.numeric(x), 8)))
+  stopifnot(nextn(n) == n)
+  sp <- spec.pgram(d$x, spans = c(3, 3), taper = 0.1, detrend = TRUE, plot = FALSE)
+  raw <- spec.pgram(d$x, taper = 0, detrend = TRUE, plot = FALSE)
+  # plot.spec's private spec.ci, verbatim (R 4.3.3)
+  spec_ci <- function(df, coverage = 0.95) {
+    tail <- (1 - coverage)
+    upper.quantile <- 1 - tail * pchisq(df, df, lower.tail = FALSE)
+    lower.quantile <- tail * pchisq(df, df)
+    1 / (qchisq(c(upper.quantile, lower.quantile), df) / df)
+  }
+  list(values = list(freq = vec(sp$freq), peak_freq = sp$freq[which.max(sp$spec)], spec = vec(sp$spec),
+                     df = sp$df, bandwidth = sp$bandwidth, raw_spec = vec(raw$spec), raw_df = raw$df, raw_bandwidth = raw$bandwidth,
+                     ci_df = vec(c(sp$df, 2, 18, 7.5)),
+                     ci95_at_df = vec(c(spec_ci(sp$df), spec_ci(2), spec_ci(18), spec_ci(7.5))),
+                     ci90_at_df = vec(c(spec_ci(sp$df, 0.9), spec_ci(2, 0.9), spec_ci(18, 0.9), spec_ci(7.5, 0.9)))),
+       reference = "stats::spec.pgram (frequencies k / N, modified Daniell spans, taper); stats:::plot.spec's spec.ci (unequal tails proportional to P(X <= df))",
+       call = "spec.pgram(x, spans = c(3, 3), taper = 0.1, detrend = TRUE); spec_ci(df, coverage)", packages = character(0))
+})

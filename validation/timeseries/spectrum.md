@@ -20,107 +20,50 @@ Key parameters:
 
 ## Test Cases
 
-### Test 1: Sine Wave with Known Frequency
+### Frequency grid, peak and interval multipliers (R-pinned)
 
-**Purpose**: Verify peak detection at the correct frequency.
+Case `stat_spectrum_t3` in `validation/r/cases/stats_misc_t3.R`; data in
+`validation/datasets/generated/spectrum_t3.csv` (n = 96, a sine of period 8 plus AR(1) noise).
 
-**Data**: Sine wave with period 10 (frequency 0.1)
 ```r
-x <- sin(2*pi*(1:100)/10)
+sp <- spec.pgram(d$x, spans = c(3, 3), taper = 0.1, detrend = TRUE, plot = FALSE)
+spec_ci <- function(df, coverage = 0.95) {   # stats:::plot.spec's private spec.ci, verbatim
+  tail <- 1 - coverage
+  upper.quantile <- 1 - tail * pchisq(df, df, lower.tail = FALSE)
+  lower.quantile <- tail * pchisq(df, df)
+  1 / (qchisq(c(upper.quantile, lower.quantile), df) / df)
+}
 ```
 
-**R Code**:
-```r
-sp <- spec.pgram(x, spans=c(3,3), taper=0.1, detrend=TRUE, plot=FALSE)
-sp$freq[which.max(sp$spec)]  # Should be 0.1
-```
+| Quantity | R | Tolerance |
+|---|---|---|
+| `freq` | k / 96, k = 1..48 | `Tol::coef(96)` |
+| `peak_freq` | 0.125 | `Tol::coef(96)` |
+| `spec_ci(df, 0.95)` at df 6.552102376599634 | 0.4161299390667409, 4.203003061009554 | 1e-10 relative |
+| `spec_ci(df, 0.95)` at df 2 | 0.2502670177925996, 31.136857826846274 | 1e-10 relative |
+| `spec_ci(df, 0.95)` at df 18 | 0.5648042334184131, 2.1531260261391543 | 1e-10 relative |
+| `spec_ci(df, 0.95)` at df 7.5 | 0.4362718681455841, 3.721713558236682 | 1e-10 relative |
+| `spec_ci(df, 0.90)` at the same df | `ci90_at_df` in the case | 1e-10 relative |
 
-**Results Comparison**:
+**Rust test:** `stats::spectrum::tests::test_validate_spectrum_t3_grid_and_ci`.
 
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| Peak frequency | 0.1000 | 0.10 | ±0.01 | ✅ PASS |
-| Number of frequencies | 50 | 50 | exact | ✅ PASS |
+### Confidence interval
 
-**Rust Test**: `crates/p2a-core/src/stats/spectrum.rs::tests::test_validate_spectrum_comprehensive_against_r`
+`SpectrumResult::confidence_interval_multipliers(level)` is R's `plot.spec` rule: the two tails are
+split in proportion to `P(X <= df)` and `P(X > df)` for `X ~ chi^2(df)`, so the multipliers are
+`df / qchisq(1 - (1 - level) P(X > df), df)` and `df / qchisq((1 - level) P(X <= df), df)`. The level
+is validated. The df that goes in is p2a's own (STAT-39, below).
 
-### Test 2: Detrended Linear Series
+**AR spectra report no interval.** R's `spec.ar` has no df. `spectrum_ar` sets df to infinity,
+`confidence_interval_multipliers` returns `Ok(None)` for it, the older `confidence_multipliers` returns
+`(NaN, NaN)`, and Display says "Degrees of Freedom: not defined". Tested by
+`stats::spectrum::tests::test_spectrum_ar_no_ci`.
 
-**Purpose**: Verify that detrending removes linear trends completely.
+### Properties
 
-**Data**: Linear series 1, 2, ..., 20
-```r
-x <- 1:20
-```
-
-**R Code**:
-```r
-sp <- spec.pgram(x, spans=NULL, taper=0.1, detrend=TRUE, plot=FALSE)
-sum(sp$spec)  # Should be ~0
-```
-
-**Results Comparison**:
-
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| Total spectral power | 0.0 | < 1e-8 | < 1e-6 | ✅ PASS |
-
-**Rust Test**: `crates/p2a-core/src/stats/spectrum.rs::tests::test_validate_detrend_linear`
-
-### Test 3: Two-Frequency Series
-
-**Purpose**: Verify detection of multiple spectral peaks.
-
-**Data**: Superposition of two cosines
-```r
-x <- cos(2*pi*(1:50)/5) + 0.5*cos(2*pi*(1:50)/10)
-```
-
-Expected peaks: f=0.2 (dominant) and f=0.1 (secondary)
-
-**R Code**:
-```r
-sp <- spec.pgram(x, spans=c(3), taper=0.1, detrend=TRUE, plot=FALSE)
-ord <- order(sp$spec, decreasing=TRUE)
-sp$freq[ord[1:5]]  # Top frequencies
-```
-
-**Results Comparison**:
-
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| Primary peak | 0.20 | ~0.20 | ±0.04 | ✅ PASS |
-| Secondary peak | 0.10 | ~0.10 | ±0.04 | ✅ PASS |
-
-**Rust Test**: `crates/p2a-core/src/stats/spectrum.rs::tests::test_validate_two_frequency_spectrum`
-
-### Test 4: White Noise (Flat Spectrum)
-
-**Purpose**: Verify that white noise produces approximately flat spectrum after smoothing.
-
-**R Code**:
-```r
-set.seed(42)
-x <- rnorm(100)
-sp <- spec.pgram(x, spans=c(5,5), taper=0.1, detrend=FALSE, plot=FALSE)
-sd(sp$spec) / mean(sp$spec)  # Coefficient of variation ~0.35
-```
-
-**Results Comparison**:
-
-| Metric | R Value | Rust Value | Tolerance | Status |
-|--------|---------|------------|-----------|--------|
-| Coefficient of variation | ~0.35 | < 2.0 | < 2.0 | ✅ PASS |
-
-**Rust Test**: `crates/p2a-core/src/stats/spectrum.rs::tests::test_validate_white_noise_spectrum`
-
-## Numerical Precision Summary
-
-| Computation | Relative Tolerance | Notes |
-|-------------|-------------------|-------|
-| Peak frequency detection | ±2% | Depends on frequency resolution |
-| Spectral density values | ±10% | Small differences due to taper normalization |
-| Detrending | < 1e-8 | Very precise |
+These compare no R number: `test_spectrum_sine_peak_property`, `test_raw_periodogram_length_property`,
+`test_detrend_linear_has_no_power`, `test_two_frequency_peaks_property`,
+`test_white_noise_spectrum_cv_property` (all in `stats::spectrum::tests`).
 
 ## Missing values
 
@@ -131,10 +74,13 @@ missing cells (R's `sum(is.na(x))`); the count is pinned with the ACF readers'
 
 ## Known Differences from R
 
-1. **Bandwidth calculation**: Our implementation uses a simplified bandwidth formula. R's formula is more sophisticated.
-2. **Degrees of freedom**: Calculated differently; both are approximations for chi-squared confidence intervals.
-3. **Taper normalization**: Slightly different variance preservation factors.
-4. **Frequency scaling**: Both use unit frequency (Nyquist = 0.5), consistent with R's default.
+**STAT-39 (df and bandwidth):** on the case above R gives df 6.552102376599634 and bandwidth
+0.01084201041388611; p2a gives 18 and 0.03125. The interval multipliers are pinned at given df, so
+they carry p2a's df until STAT-39 is fixed.
+
+**STAT-68 (ordinates):** p2a's spectral ordinates are about twice R's and differ in the taper and in the
+smoothing at the edges. The peak (`spec` 7.658276496605042 at frequency 0.125 in R) is at the same
+frequency. R's `spec`, `raw_spec`, `raw_df` and `raw_bandwidth` are recorded in the case.
 
 ## Performance Comparison
 
