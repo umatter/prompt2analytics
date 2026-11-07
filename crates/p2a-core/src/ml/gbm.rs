@@ -57,6 +57,7 @@ use serde::{Deserialize, Serialize};
 use super::trees::add_split_gain;
 use crate::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 
 /// Loss function family for GBM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -678,8 +679,9 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
     let init_pred = compute_init_prediction(&y, config.family);
     let mut predictions = Array1::from_elem(n_samples, init_pred);
 
-    let mut trees = Vec::with_capacity(config.n_trees);
-    let mut train_loss = Vec::with_capacity(config.n_trees);
+    let mut trees = resource::try_with_capacity(config.n_trees, "GBM trees")?;
+    let mut train_loss =
+        resource::try_with_capacity(config.n_trees.saturating_add(1), "GBM training loss")?;
     let mut relative_influence = vec![0.0f64; n_features];
 
     // Initial loss
@@ -692,6 +694,7 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
 
     // Boosting iterations
     for _ in 0..config.n_trees {
+        resource::checkpoint()?;
         // Compute negative gradient (pseudo-residuals)
         let residuals =
             compute_negative_gradient(&y, &predictions, config.family, config.huber_delta);
@@ -819,7 +822,9 @@ fn validate_config(config: &GbmConfig) -> EconResult<()> {
             config.colsample_bytree
         ));
     }
-    if !config.huber_delta.is_finite() || config.huber_delta <= 0.0 {
+    if config.family == GbmFamily::Huber
+        && (!config.huber_delta.is_finite() || config.huber_delta <= 0.0)
+    {
         return invalid(format!(
             "GBM: huber_delta must be finite and above 0, got {}",
             config.huber_delta
@@ -1212,7 +1217,22 @@ mod tests {
         bad(&|c| c.subsample = 0.0, "subsample");
         bad(&|c| c.subsample = 1.5, "subsample");
         bad(&|c| c.colsample_bytree = 0.0, "colsample_bytree");
-        bad(&|c| c.huber_delta = -1.0, "huber_delta");
+        bad(
+            &|c| {
+                c.family = GbmFamily::Huber;
+                c.huber_delta = -1.0;
+            },
+            "huber_delta",
+        );
+        // Only the Huber family reads huber_delta.
+        let unread = GbmConfig {
+            huber_delta: 0.0,
+            n_trees: 2,
+            ..GbmConfig::default()
+        };
+        assert!(gbm(x.view(), y.view(), &unread).is_ok());
+        // An impossible tree count is an error, not a failed allocation.
+        bad(&|c| c.n_trees = usize::MAX, "GBM");
         let mut xb = x.clone();
         xb[[3, 1]] = f64::NAN;
         assert!(
@@ -1229,6 +1249,19 @@ mod tests {
                 .to_string()
                 .contains("non-finite")
         );
+    }
+
+    #[test]
+    fn test_gbm_stops_at_a_cancelled_budget() {
+        let x = Array2::from_shape_fn((40, 2), |(i, j)| ((i * 7 + j * 3) % 11) as f64);
+        let y = Array1::from_shape_fn(40, |i| 0.5 * ((i * 7) % 11) as f64 + ((i * 13) % 5) as f64);
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        let budget = crate::resource::Budget::new(None, token);
+        let err =
+            crate::resource::with_budget(budget, || gbm(x.view(), y.view(), &GbmConfig::default()))
+                .unwrap_err();
+        assert!(matches!(err, EconError::Cancelled(_)), "{err}");
     }
 
     #[test]
