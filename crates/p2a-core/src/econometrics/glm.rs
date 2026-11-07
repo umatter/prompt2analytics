@@ -1405,9 +1405,9 @@ pub(crate) fn lean_logit(
 /// [`lean_logit`] for a design with uncentred covariates or correlated columns (natural scales,
 /// long treatment histories): when the condition number of the equilibrated `X'WX` is above
 /// [`LEAN_MAX_CONDITION`] and at most [`LEAN_REFINED_MAX_CONDITION`], the steps near the estimate
-/// ([`LEAN_REFINE_WITHIN`]) take the refinement the shared GLM's normal equations take there
-/// (`b += (X'WX)^{-1} X'W (z - X b)`) instead of leaving the path. Further out it leaves the
-/// path, and the shared GLM takes OLS's decision.
+/// ([`LEAN_REFINE_WITHIN`]) and the last step take the refinement the shared GLM's normal equations
+/// take there (`b += (X'WX)^{-1} X'W (z - X b)`) instead of leaving the path. Further out it leaves
+/// the path, and the shared GLM takes OLS's decision.
 pub(crate) fn lean_logit_refined(
     x: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
@@ -1480,7 +1480,8 @@ fn lean_logit_within(
     };
     let mut eta = resource::try_vec(n, 0.0, "logit IRLS workspace")?;
     let mut mu = resource::try_vec(n, 0.0, "logit IRLS workspace")?;
-    // the fitted values each step starts from (its working weights)
+    // the fit each step starts from: its working weights, and a late refinement
+    let mut eta_step = resource::try_vec(n, 0.0, "logit IRLS workspace")?;
     let mut mu_step = resource::try_vec(n, 0.0, "logit IRLS workspace")?;
     // mu at `eta`, and the deviance when `deviance`; `None` at the clamp
     let eval = |eta: &[f64], mu: &mut [f64], deviance: bool| -> Option<f64> {
@@ -1557,8 +1558,9 @@ fn lean_logit_within(
     let mut b = Array1::<f64>::zeros(k);
     let mut b_old = Array1::<f64>::zeros(k);
     let mut prev_step = f64::INFINITY;
-    // Whether the next step may be the last. glm.fit's start is far from the estimate; a warm
-    // start, or the Newton-step rule (no deviance), may stop at any step.
+    // Whether the next step is likely to be the last, and takes its refinement as it goes.
+    // glm.fit's start is far from the estimate; a warm start, or the Newton-step rule (no
+    // deviance), may stop at any step.
     let mut near_estimate = !matches!(start, LeanStart::Mustart);
     // the weighted rows of the blocked cross-product
     let blocked = k >= LEAN_BLOCKED_MIN_COLUMNS;
@@ -1643,27 +1645,14 @@ fn lean_logit_within(
         );
         let needs_refinement = kappa > LEAN_MAX_CONDITION;
         if needs_refinement && near_estimate {
-            // OLS's refinement step: b += (X'WX)^{-1} X'W (z - X b)
-            rhs.fill(0.0);
-            for (i, (row, (&m, (&e, &yi)))) in xrows
-                .chunks_exact(k)
-                .zip(mu.iter().zip(eta.iter().zip(y)))
-                .enumerate()
-            {
-                let wi = m * (1.0 - m);
-                let wz = wi * (e - off.map_or(0.0, |o| o[i])) + (yi - m);
-                let r = wz - wi * ArrayView1::from(row).dot(&b);
-                for (rh, &xa) in rhs.iter_mut().zip(row) {
-                    *rh += xa * r;
-                }
-            }
-            ndarray::linalg::general_mat_vec_mul(
-                1.0,
-                &inverse,
-                &ArrayView1::from(&rhs[..]),
-                1.0,
-                &mut b,
-            );
+            let cols = WeightedColumns {
+                xrows,
+                mu: &mu,
+                eta: &eta,
+                y,
+                off,
+            };
+            cols.refine(k, &inverse, &mut rhs, &mut b);
         }
         if !b.iter().all(|v| v.is_finite()) {
             return Ok(None);
@@ -1671,15 +1660,10 @@ fn lean_logit_within(
         let Some(bs) = b.as_slice() else {
             return Ok(None);
         };
-        for (i, (row, e)) in xrows.chunks_exact(k).zip(eta.iter_mut()).enumerate() {
-            let mut v = off.map_or(0.0, |o| o[i]);
-            for (xa, ba) in row.iter().zip(bs) {
-                v += xa * ba;
-            }
-            *e = v;
-        }
+        std::mem::swap(&mut eta, &mut eta_step);
+        lean_linear_predictor(xrows, off, bs, &mut eta);
         std::mem::swap(&mut mu, &mut mu_step);
-        let Some(dev) = eval(&eta, &mut mu, !from_zero) else {
+        let Some(mut dev) = eval(&eta, &mut mu, !from_zero) else {
             return Ok(None);
         };
         let change = (dev - devold).abs() / (dev.abs() + floor);
@@ -1699,8 +1683,31 @@ fn lean_logit_within(
         };
         if done {
             if needs_refinement && !near_estimate {
-                // a last step taken without its refinement
-                return Ok(None);
+                // The rule stopped at a step that took no refinement: it takes it now, from the
+                // fit it started at. Only the deviance rule gets here (`near_estimate` is always
+                // set under the Newton-step rule).
+                let cols = WeightedColumns {
+                    xrows,
+                    mu: &mu_step,
+                    eta: &eta_step,
+                    y,
+                    off,
+                };
+                cols.refine(k, &inverse, &mut rhs, &mut b);
+                if !b.iter().all(|v| v.is_finite()) {
+                    return Ok(None);
+                }
+                let Some(bs) = b.as_slice() else {
+                    return Ok(None);
+                };
+                lean_linear_predictor(xrows, off, bs, &mut eta);
+                let Some(refined) = eval(&eta, &mut mu, true) else {
+                    return Ok(None);
+                };
+                if (refined - devold).abs() / (refined.abs() + floor) >= ctl.epsilon {
+                    return Ok(None);
+                }
+                dev = refined;
             }
             if eta.iter().zip(y).any(|(&e, &v)| {
                 (v < 1.0 && e > LEAN_MISFIT_ETA) || (v > 0.0 && e < -LEAN_MISFIT_ETA)
@@ -1727,6 +1734,17 @@ fn lean_logit_within(
     Ok(None)
 }
 
+/// `eta = offset + X b`, with `eta.len()` rows of `b.len()` columns in `xrows`.
+fn lean_linear_predictor(xrows: &[f64], off: Option<&[f64]>, b: &[f64], eta: &mut [f64]) {
+    for (i, (row, e)) in xrows.chunks_exact(b.len()).zip(eta.iter_mut()).enumerate() {
+        let mut v = off.map_or(0.0, |o| o[i]);
+        for (xa, ba) in row.iter().zip(b) {
+            v += xa * ba;
+        }
+        *e = v;
+    }
+}
+
 /// The rows and the current fit of a [`lean_logit_within`] step.
 struct WeightedColumns<'a> {
     xrows: &'a [f64],
@@ -1737,6 +1755,26 @@ struct WeightedColumns<'a> {
 }
 
 impl WeightedColumns<'_> {
+    /// OLS's refinement step on the solve `b` of this fit's normal equations:
+    /// `b += (X'WX)^{-1} X'W (z - X b)`. `rhs` is scratch.
+    fn refine(&self, k: usize, inverse: &Array2<f64>, rhs: &mut [f64], b: &mut Array1<f64>) {
+        rhs.fill(0.0);
+        for (i, (row, (&m, (&e, &yi)))) in self
+            .xrows
+            .chunks_exact(k)
+            .zip(self.mu.iter().zip(self.eta.iter().zip(self.y)))
+            .enumerate()
+        {
+            let wi = m * (1.0 - m);
+            let wz = wi * (e - self.off.map_or(0.0, |o| o[i])) + (yi - m);
+            let r = wz - wi * ArrayView1::from(row).dot(&*b);
+            for (rh, &xa) in rhs.iter_mut().zip(row) {
+                *rh += xa * r;
+            }
+        }
+        ndarray::linalg::general_mat_vec_mul(1.0, inverse, &ArrayView1::from(&*rhs), 1.0, b);
+    }
+
     /// Adds the upper triangle of `X'WX` to `g` (`k x k`, row-major) and `X'Wz` to `rhs`, row by
     /// row, with `W = mu (1 - mu)` and `z = eta - offset + (y - mu) / W`.
     fn cross(&self, k: usize, g: &mut [f64], rhs: &mut [f64]) {
@@ -1815,9 +1853,10 @@ const LEAN_MAX_CONDITION: f64 = 100.0;
 const LEAN_REFINED_MAX_CONDITION: f64 = 1e4;
 
 /// Relative deviance change of a step below which the next step of [`lean_logit_refined`] takes
-/// the refinement. The steps before need none: Newton's method corrects their rounding (of order
-/// `eps * kappa`, far from the estimate), so only the steps that may be last take it, and a last
-/// step that came without it leaves the path.
+/// the refinement as it goes. The steps before need none: Newton's method corrects their rounding
+/// (of order `eps * kappa`, far from the estimate). A step the deviance rule stops at without one,
+/// which happens when the deviance change falls from above this to below the rule's `epsilon` in
+/// one step, takes it afterwards from the fit it started at, so every fit ends on a refined step.
 const LEAN_REFINE_WITHIN: f64 = 1e-3;
 
 /// Linear predictor beyond which a row that its fitted probability does not explain (`y < 1` at a
@@ -1932,7 +1971,7 @@ fn inverse_and_condition(
 /// on quasi-separated fits of n = 15 to 80 with a rare binary covariate; on 1,491 heavy-tailed fits
 /// that stay on the path they are 8.2e-11 and 2.7e-11.
 /// Any other case (separation, a rank-deficient or ill-conditioned weighted design, no convergence,
-/// a last step without its refinement, a row beyond [`LEAN_MISFIT_ETA`], invalid input, another
+/// a row beyond [`LEAN_MISFIT_ETA`], invalid input, another
 /// family, link or spec) is [`fit_glm`]'s own fit, errors and warnings included.
 ///
 /// The fields of a lean fit: `vcov` is the inverse of the last step's `X'WX` (dispersion 1),
@@ -3464,8 +3503,7 @@ mod tests {
         }
     }
 
-    /// Further out than the refined path's bound the shared GLM decides and reports, as does a
-    /// last step that came without its refinement.
+    /// Further out than the refined path's bound the shared GLM decides and reports.
     #[test]
     fn test_logit_lean_leaves_the_path_for_fit_glm() {
         use rand::{Rng, SeedableRng};
@@ -3508,15 +3546,32 @@ mod tests {
         );
         let g = same(&alias, &GlmSpec::logit());
         assert_eq!((g.rank, g.aliased.clone()), (2, vec![2]));
-        // a loose rule stops at a step that the refinement had not reached yet
+    }
+
+    /// A loose rule stops at a step that took no refinement while it ran. The step takes it
+    /// afterwards and the fit stays on the path, as close to the shared GLM's as a fit refined at
+    /// every step.
+    #[test]
+    fn test_logit_lean_refines_a_last_step_after_the_rule_stops() {
+        let (x, y) = off_lean_design(1500, 17, true);
         let mut loose = GlmSpec::logit();
         loose.epsilon = 1e-2;
-        assert!(
-            logit_lean_path(x.view(), y.view(), &loose)
-                .unwrap()
-                .is_none()
+        let glm = fit_glm(x.view(), y.view(), &loose).unwrap();
+        let lean = logit_lean_path(x.view(), y.view(), &loose)
+            .unwrap()
+            .expect("on the lean path");
+        assert_eq!(
+            (lean.iterations, lean.converged, &lean.warnings),
+            (glm.iterations, glm.converged, &glm.warnings)
         );
-        assert!(same(&x, &loose).converged);
+        for (a, b) in lean
+            .coefficients
+            .iter()
+            .zip(&glm.coefficients)
+            .chain(lean.std_errors.iter().zip(&glm.std_errors))
+        {
+            assert!((a - b).abs() <= 1e-10 * b.abs(), "{a} vs {b}");
+        }
     }
 
     /// The fixed-width cross-products are the row pass, bit for bit.
