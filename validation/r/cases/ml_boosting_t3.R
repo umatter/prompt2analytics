@@ -190,3 +190,66 @@ case("ml_mboost_bols", "ml/mboost", "Componentwise boosting with bols learners (
        packages = character(0))
 })
 
+.ada_ctl <- function(md) rpart::rpart.control(maxdepth = md, minsplit = 2, minbucket = 1, cp = 0, xval = 0,
+                                               maxcompete = 0, maxsurrogate = 0, usesurrogate = 0)
+.ada_tree <- function(d, y, w, md, method) {
+  dd <- data.frame(yy = if (method == "class") factor(y) else y, x1 = d$x1, x2 = d$x2, x3 = d$x3)
+  f <- rpart::rpart(yy ~ x1 + x2 + x3, data = dd, weights = w, method = method, control = .ada_ctl(md))
+  if (method == "class") as.numeric(as.character(predict(f, dd, type = "class"))) else unname(predict(f, dd))
+}
+.samme <- function(d, y, M, md, lr) {
+  K <- length(unique(y)); n <- length(y); w <- rep(1 / n, n); alpha <- err <- numeric(0); H <- list(); w1 <- NULL
+  for (m in seq_len(M)) {
+    h <- .ada_tree(d, y, w, md, "class"); miss <- as.numeric(h != y); e <- sum(w * miss) / sum(w)
+    if (e >= 1 - 1 / K) break
+    ec <- min(max(e, 1e-10), 1 - 1e-10); a <- lr * (log((1 - ec) / ec) + log(K - 1))
+    w <- w * exp(a * miss); w <- w / sum(w); if (m == 1) w1 <- w
+    alpha <- c(alpha, a); err <- c(err, e); H[[m]] <- h
+  }
+  cls <- sort(unique(y))
+  sc <- sapply(cls, function(k) Reduce(`+`, Map(function(a, h) a * (h == k), alpha, H)))
+  pred <- cls[apply(sc, 1, which.max)]
+  list(alpha = alpha, err = err, w1 = w1, pred = pred, acc = mean(pred == y))
+}
+.m1 <- function(d, y, M, md, lr) {
+  n <- length(y); w <- rep(1 / n, n); alpha <- err <- numeric(0); score <- rep(0, n)
+  for (m in seq_len(M)) {
+    h <- .ada_tree(d, y, w, md, "class"); miss <- as.numeric(h != y); e <- sum(w * miss) / sum(w)
+    if (e >= 0.5) break
+    ec <- min(max(e, 1e-10), 1 - 1e-10); a <- lr * 0.5 * log((1 - ec) / ec)
+    score <- score + a * h; w <- w * exp(a * ifelse(miss == 1, 1, -1)); w <- w / sum(w)
+    alpha <- c(alpha, a); err <- c(err, e)
+  }
+  list(alpha = alpha, err = err, score = score)
+}
+
+case("ml_adaboost_samme", "ml/adaboost", "AdaBoost.M1 and SAMME with depth-limited rpart weak learners; the first AdaBoost.R2 learner", function(ctx) {
+  set.seed(46)
+  n <- 120
+  x1 <- runif(n); x2 <- runif(n); x3 <- rnorm(n)
+  s <- 2.2 * x1 - 1.5 * x2 + rnorm(n, sd = 0.45)
+  y3 <- cut(s, quantile(s, c(0, 1/3, 2/3, 1)), include.lowest = TRUE, labels = FALSE) - 1
+  yb <- ifelse(s + rnorm(n, sd = 0.3) > median(s), 1, -1)
+  yr <- 1.3 * x1 + x2 * x3 + rnorm(n, sd = 0.3)
+  d <- ctx$gen_dataset("adaboost_sim", data.frame(x1, x2, x3, y3, yb, yr))
+  s1 <- .samme(d, d$y3, 8, 1, 1); s2 <- .samme(d, d$y3, 8, 2, 1); s25 <- .samme(d, d$y3, 8, 2, 0.5)
+  m1 <- .m1(d, d$yb, 8, 1, 1); m3 <- .m1(d, d$yb, 8, 3, 1)
+  k2 <- .samme(d, d$yb, 8, 1, 1)
+  stopifnot(length(s1$alpha) == 8, length(s2$alpha) == 8, length(m1$alpha) == 8, length(m3$alpha) == 8,
+            isTRUE(all.equal(k2$alpha, 2 * m1$alpha, tolerance = 1e-14)),
+            all(k2$pred == ifelse(m1$score >= 0, 1, -1)),          # SAMME with K = 2 is M1
+            any(s1$pred != s2$pred), !isTRUE(all.equal(m1$score, m3$score)))   # depth matters
+  n1 <- rep(1 / n, n)
+  list(values = list(
+         samme_d1_alpha = vec(s1$alpha), samme_d1_err = vec(s1$err), samme_d1_w1 = vec(s1$w1),
+         samme_d1_pred = vec(s1$pred), samme_d1_acc = s1$acc,
+         samme_d2_alpha = vec(s2$alpha), samme_d2_err = vec(s2$err), samme_d2_pred = vec(s2$pred), samme_d2_acc = s2$acc,
+         samme_d2_lr05_alpha = vec(s25$alpha), samme_d2_lr05_pred = vec(s25$pred),
+         m1_d1_alpha = vec(m1$alpha), m1_d1_score = vec(m1$score),
+         m1_d3_alpha = vec(m3$alpha), m1_d3_score = vec(m3$score),
+         r2_tree1_d1 = vec(.ada_tree(d, d$yr, n1, 1, "anova")), r2_tree1_d2 = vec(.ada_tree(d, d$yr, n1, 2, "anova"))),
+       reference = "SAMME (Zhu et al. 2009, Alg. 2; adabag::boosting(coeflearn = 'Zhu', boos = FALSE)) and AdaBoost.M1 (Freund & Schapire 1997) written out in R with rpart::rpart weak learners (case weights, maxdepth = d, minsplit = 2, minbucket = 1, cp = 0); adabag is not a case dependency",
+       call = "rpart(y ~ x1 + x2 + x3, weights = w, method = 'class', control = rpart.control(maxdepth = d, minsplit = 2, minbucket = 1, cp = 0, xval = 0, maxcompete = 0, maxsurrogate = 0, usesurrogate = 0)); alpha = lr * (log((1 - e) / e) + log(K - 1)); w <- w * exp(alpha * miss)",
+       packages = c("rpart"))
+})
+

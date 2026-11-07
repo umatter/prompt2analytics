@@ -2,6 +2,37 @@
   "schema": 1,
   "methods": [
     {
+      "id": "ml_adaboost",
+      "name": "AdaBoost.M1, SAMME and AdaBoost.R2 with depth-limited CART weak learners",
+      "category": "ml",
+      "reference": "SAMME (Zhu et al. 2009; adabag::boosting(coeflearn = 'Zhu', boos = FALSE)) and AdaBoost.M1 written out in R with rpart::rpart weak learners (adabag not a case dependency); rpart anova for the first R2 learner",
+      "doc": "validation/ml/adaboost.md",
+      "cases": [
+        "ml_adaboost_samme"
+      ],
+      "tests": [
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_depth1",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_depth2",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_learning_rate",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_samme_first_round_weights",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_m1_depth1",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_m1_depth3",
+        "p2a-core::ml::adaboost::tests::test_validate_adaboost_r2_first_learner"
+      ],
+      "quantities": [
+        "estimator weights",
+        "weak-learner weighted errors",
+        "round-1 weights",
+        "class predictions",
+        "training accuracy",
+        "M1 scores",
+        "first R2 learner fitted values"
+      ],
+      "tolerance": "validation/README.md, n = 120: 1e-8 relative; labels and accuracies exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    },
+    {
       "id": "ml_xgboost_l1",
       "name": "XGBoost exact and histogram trees: L1 leaf weights and gains",
       "category": "ml",
