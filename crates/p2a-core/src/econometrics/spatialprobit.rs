@@ -36,8 +36,11 @@
 //! dropped. Missing values (null or NaN) in y or X are refused with
 //! `EconError::NullValues` naming the column (spatialprobit, like spatialreg, has no
 //! `na.omit` route); remove the incomplete rows and rebuild W first. Integer and Boolean
-//! columns are accepted. The outcome is 0/1: an Int64, Float64 or Boolean column with both
-//! values present.
+//! columns are accepted. The outcome is exactly 0/1: an Int64, Float64 or Boolean column with
+//! both values present; any other value is refused, not dichotomised.
+//!
+//! `n_draws` must be at least 2 (a posterior standard deviation needs two retained draws),
+//! `thin` at least 1, and `compute_impacts` needs at least one regressor besides the intercept.
 //!
 //! # Estimation Method
 //!
@@ -344,13 +347,28 @@ fn run_spatial_probit_internal(
 ) -> EconResult<SpatialProbitResult> {
     // Refuse impossible draw counts before any work.
     total_mcmc_draws(&config)?;
+    if config.compute_impacts && x_cols.is_empty() {
+        return Err(EconError::InvalidSpecification {
+            message: "compute_impacts needs at least one regressor besides the intercept; pass x columns or set compute_impacts = false".to_string(),
+        });
+    }
 
     // y (0/1, integer or Boolean) and [1, X]; one row per unit of W, no missing values
     let (y, x) = super::spatial::spatial_model_data(dataset, y_col, x_cols, listw)?;
     let n = y.len();
 
     // Validate y is binary
-    let n_positive = y.iter().filter(|&&v| v >= 0.5).count();
+    let is_non_binary = |v: f64| v != 0.0 && v != 1.0;
+    if let Some(row) = y.iter().position(|&v| is_non_binary(v)) {
+        let count = y.iter().filter(|&&v| is_non_binary(v)).count();
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Dependent variable '{y_col}' must be binary (0/1); row {row} is {} ({count} non-binary values)",
+                y[row]
+            ),
+        });
+    }
+    let n_positive = y.iter().filter(|&&v| v == 1.0).count();
     if n_positive == 0 || n_positive == n {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -475,12 +493,14 @@ fn run_spatial_probit_internal(
 }
 
 /// The number of Gibbs iterations, burn_in + n_draws * thin, after checking that at least
-/// one draw is kept, the thinning interval is positive and the total does not overflow.
+/// two draws are kept, the thinning interval is positive and the total does not overflow.
 fn total_mcmc_draws(config: &SpatialProbitConfig) -> EconResult<usize> {
     let (n_draws, burn_in, thin) = (config.n_draws, config.burn_in, config.thin);
-    if n_draws == 0 {
+    if n_draws < 2 {
         return Err(EconError::InvalidSpecification {
-            message: "n_draws must be at least 1".to_string(),
+            message: format!(
+                "n_draws must be at least 2 (posterior standard deviations need two retained draws), got {n_draws}"
+            ),
         });
     }
     if thin == 0 {
@@ -1422,7 +1442,8 @@ mod tests {
         // overflow of burn_in + n_draws * thin, and an n_draws x k buffer larger than isize::MAX bytes
         for c in [
             cfg(usize::MAX / 2, 0, 3),
-            cfg(1, usize::MAX, 1),
+            // n_draws = 1 is refused before the overflow check
+            cfg(2, usize::MAX, 1),
             cfg(usize::MAX / 8, 0, 1),
         ] {
             assert!(matches!(
@@ -1595,6 +1616,75 @@ mod tests {
         assert!((inverse_normal_cdf(0.5) - 0.0).abs() < 1e-6);
         assert!(inverse_normal_cdf(0.975) > 1.9 && inverse_normal_cdf(0.975) < 2.0);
         assert!(inverse_normal_cdf(0.025) < -1.9 && inverse_normal_cdf(0.025) > -2.0);
+    }
+
+    fn probit_config(n_draws: usize, impacts: bool) -> SpatialProbitConfig {
+        let mut c = SpatialProbitConfig::default();
+        c.n_draws = n_draws;
+        c.burn_in = 10;
+        c.compute_impacts = impacts;
+        c.seed = Some(42);
+        c
+    }
+
+    #[test]
+    fn test_spatial_probit_rejects_n_draws_0() {
+        // n_draws = 1 returned Ok with NaN posterior SDs (0/0) before.
+        let (d, mut w) = create_test_spatial_binary_data();
+        for n_draws in [0, 1] {
+            for run in [run_sar_probit, run_sem_probit] {
+                let e = run(&d, "y", &["x"], &mut w, probit_config(n_draws, false)).unwrap_err();
+                assert!(
+                    matches!(&e, EconError::InvalidSpecification { message } if message.contains("n_draws")),
+                    "{e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_spatial_probit_rejects_thin_0() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        let mut c = probit_config(10, false);
+        c.thin = 0;
+        let e = run_sar_probit(&d, "y", &["x"], &mut w, c).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("thin")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_spatial_probit_rejects_non_binary() {
+        // Before: y in {0, 1.7} (and counts) were thresholded at 0.5 without a word.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let y: Vec<f64> = outcome(&d).iter().map(|v| 1.7 * v).collect();
+        let mut df = d.df().clone();
+        df.with_column(Column::new("y".into(), y)).unwrap();
+        let e = run_sem_probit(
+            &Dataset::new(df),
+            "y",
+            &["x"],
+            &mut w,
+            probit_config(10, false),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("binary") && message.contains("'y'")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn test_spatial_probit_rejects_impacts_without_regressors() {
+        // Before: Ok with empty impact vectors, which a caller reading variable 0 cannot index.
+        let (d, mut w) = create_test_spatial_binary_data();
+        let e = run_sar_probit(&d, "y", &[], &mut w, probit_config(10, true)).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("compute_impacts")),
+            "{e}"
+        );
+        assert!(run_sar_probit(&d, "y", &[], &mut w, probit_config(10, false)).is_ok());
     }
 
     fn short_chain() -> SpatialProbitConfig {
