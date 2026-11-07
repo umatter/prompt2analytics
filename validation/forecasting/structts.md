@@ -42,8 +42,12 @@ pinned as a cross-check at its measured gap.
 
 **Why the optimiser is what it is.** Nelder-Mead on log variances could not reach a variance of 0, which is
 where the Nile trend slope and the UKgas level sit. The projected Newton search holds a bound with
-`A = {i : x_i = 0, g_i >= 0}`, takes the Hessian of the rest from forward differences of the exact gradient, shifts it
-when it is not positive definite, and accepts a projected step on the Armijo condition.
+`A = {i : x_i = 0, g_i >= 0}` and accepts a projected step on the Armijo condition. While a step still reduces `f` by more
+than `1e-6`, the curvature of the free set is the scoring matrix `Σ [∂v_i ∂v_j / F + ½ ∂F_i ∂F_j / F²] / n_obs` (the
+expected Hessian, Harvey 1990, sec. 3.4.6), which the differentiated filter computes in the same pass. Then the search
+finishes on Newton steps with the Hessian from forward differences of the exact gradient, shifted when it is not
+positive definite, so that it converges quadratically; a stop on the criterion after scoring steps waits for one Newton
+step taken from within the tolerance.
 
 ## Guards
 
@@ -85,8 +89,13 @@ unaffected: with no missing value the two formulas agree.
 The stopping criterion is the scaled projected gradient `max_{i free} |g_i| max(x_i, 1) <= tolerance` (default
 `1e-8`). `x` is in units of `vx`, so a rescaled series follows the same path and `f` only shifts by a constant
 (`test_validate_structts_scale_invariant`, factors `1e-6` and `1e6`). The search also stops as converged when a step changes
-`f` by at most `1e-14` and `x` by at most `1e-12`, or when no step is accepted and the Newton step predicts a reduction
-of at most `1e-14 max(|f|, 1)`: no further reduction is possible in double precision.
+`f` by at most `1e-14` and `x` by at most `1e-12`.
+
+Near the optimum the reduction a Newton step predicts falls below the rounding of `f`, a sum over the series: at the
+UKgas optimum a gradient of `4e-6` predicts about `5e-14`. Such a step (a predicted reduction of at most
+`1e-10 max(|f|, 1)`) is accepted when it reduces the scaled projected gradient, which the differentiated filter computes
+far more precisely than that; when it reduces neither, the search stops as converged
+(`minimize_nonnegative_judges_a_step_below_the_rounding_of_the_objective_by_its_gradient`).
 
 A stop at `max_iter` is `converged = false`, recorded in `convergence` and in `warnings` as "StructTS did not
 converge after N iterations (...)" (`test_structts_reports_iteration_limit`). A line search that cannot reduce the

@@ -699,6 +699,9 @@ pub(crate) struct LikelihoodTerms {
     pub(crate) d_ssq: Vec<f64>,
     /// ∂sumlog/∂θ_j
     pub(crate) d_sumlog: Vec<f64>,
+    /// The scoring matrix Σ_t [∂v_i ∂v_j / F + ½ ∂F_i ∂F_j / F²], row-major: the expected
+    /// Hessian of ½ (ssq + sumlog) (Harvey 1990, sec. 3.4.6).
+    pub(crate) info: Vec<f64>,
 }
 
 /// The likelihood terms of `model` and their exact gradient: the Kalman
@@ -746,6 +749,8 @@ pub(crate) fn kalman_likelihood_terms(
     let mut dan = try_vec(checked_len(&[k, m], WHAT)?, 0.0, WHAT)?;
     let mut dp = try_vec(checked_len(&[k, mm], WHAT)?, 0.0, WHAT)?;
     let mut dpn = try_vec(checked_len(&[k, mm], WHAT)?, 0.0, WHAT)?;
+    let mut dvs = try_vec(k, 0.0, WHAT)?;
+    let mut dfs = try_vec(k, 0.0, WHAT)?;
 
     let mut out = LikelihoodTerms {
         ssq: 0.0,
@@ -753,6 +758,7 @@ pub(crate) fn kalman_likelihood_terms(
         n_used: 0,
         d_ssq: try_vec(k, 0.0, WHAT)?,
         d_sumlog: try_vec(k, 0.0, WHAT)?,
+        info: try_vec(checked_len(&[k, k], WHAT)?, 0.0, WHAT)?,
     };
 
     let per_step = m
@@ -801,6 +807,8 @@ pub(crate) fn kalman_likelihood_terms(
             let df = step.z_dot(&dm) + derivatives[j].obs_var;
             out.d_ssq[j] += 2.0 * v * dv / f - v * v * df / (f * f);
             out.d_sumlog[j] += df / f;
+            dvs[j] = dv;
+            dfs[j] = df;
 
             let (c_v, c_dv, c_df) = (v / f, dv / f, v * df / (f * f));
             for (i, o) in da[j * m..(j + 1) * m].iter_mut().enumerate() {
@@ -815,6 +823,11 @@ pub(crate) fn kalman_likelihood_terms(
                     dp_j[i * m + l] = value;
                     dp_j[l * m + i] = value;
                 }
+            }
+        }
+        for i in 0..k {
+            for j in 0..k {
+                out.info[i * k + j] += dvs[i] * dvs[j] / f + 0.5 * dfs[i] * dfs[j] / (f * f);
             }
         }
         step.update(&an, &pn, &m_vec, v, f, &mut a, &mut p);
@@ -1026,15 +1039,8 @@ fn check_filter_result(
     filter_result: &KalmanFilterResult,
     model: &StateSpaceModel,
 ) -> EconResult<()> {
+    check_filter_dimension(filter_result, model)?;
     let (n, m) = (filter_result.n_obs, filter_result.state_dim);
-    if model.state_dim() != m {
-        return Err(EconError::InvalidSpecification {
-            message: format!(
-                "the model's state dimension is {} but the filter result's is {m}",
-                model.state_dim()
-            ),
-        });
-    }
     let bad = filter_result.predicted_states.len() != n
         || filter_result.predicted_covs.len() != n
         || filter_result.filtered_states.len() != n
@@ -1049,6 +1055,51 @@ fn check_filter_result(
             .chain(&filter_result.filtered_covs)
             .any(|c| c.len() != m || c.iter().any(|row| row.len() != m));
     if bad {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the filter result's per-step vectors must hold {n} steps of a \
+                 {m}-dimensional state"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The model and the filter result have one state dimension.
+fn check_filter_dimension(
+    filter_result: &KalmanFilterResult,
+    model: &StateSpaceModel,
+) -> EconResult<()> {
+    let m = filter_result.state_dim;
+    if model.state_dim() != m {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the model's state dimension is {} but the filter result's is {m}",
+                model.state_dim()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `Ok` when the filter result's last filtered step, all a forecast reads, is the
+/// result's dimension: a forecast costs nothing per observation of the series.
+fn check_forecast_start(
+    filter_result: &KalmanFilterResult,
+    model: &StateSpaceModel,
+) -> EconResult<()> {
+    check_filter_dimension(filter_result, model)?;
+    let (n, m) = (filter_result.n_obs, filter_result.state_dim);
+    let last_is_bad = n > 0
+        && (filter_result.filtered_states.get(n - 1).map(Vec::len) != Some(m)
+            || filter_result
+                .filtered_covs
+                .get(n - 1)
+                .is_none_or(|c| c.len() != m || c.iter().any(|row| row.len() != m)));
+    if filter_result.filtered_states.len() != n
+        || filter_result.filtered_covs.len() != n
+        || last_is_bad
+    {
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "the filter result's per-step vectors must hold {n} steps of a \
@@ -1093,7 +1144,7 @@ pub fn kalman_forecast(
     let m = filter_result.state_dim;
 
     model.validate()?;
-    check_filter_result(filter_result, model)?;
+    check_forecast_start(filter_result, model)?;
 
     // Admit what the forecast keeps, counted by the bytes its nested Vecs
     // hold, before any work.
@@ -1842,6 +1893,42 @@ mod tests {
                 (exact - numeric).abs() <= 1e-6 * exact.abs(),
                 "{j}: {exact} vs {numeric}"
             );
+        }
+        // The scoring matrix from central differences of the filter's v and F.
+        let moved = |j: usize, by: f64| {
+            let mut x = at;
+            x[j] += by * 1e-6 * at[j];
+            filter_llt(&y, &model(x[0], x[1], x[2]))
+        };
+        let slope = |j: usize| {
+            let (up, down) = (moved(j, 1.0), moved(j, -1.0));
+            let scale = 2.0 * 1e-6 * at[j];
+            let dv: Vec<f64> = (0..50)
+                .map(|t| (up.innovations[t] - down.innovations[t]) / scale)
+                .collect();
+            let df: Vec<f64> = (0..50)
+                .map(|t| (up.innovation_vars[t] - down.innovation_vars[t]) / scale)
+                .collect();
+            (dv, df)
+        };
+        let base = filter_llt(&y, &model(at[0], at[1], at[2]));
+        let slopes = [slope(0), slope(1), slope(2)];
+        for i in 0..3 {
+            for j in 0..3 {
+                let numeric: f64 = (0..50)
+                    .map(|t| {
+                        let f = base.innovation_vars[t];
+                        slopes[i].0[t] * slopes[j].0[t] / f
+                            + 0.5 * slopes[i].1[t] * slopes[j].1[t] / (f * f)
+                    })
+                    .sum();
+                let exact = t.info[i * 3 + j];
+                assert!(
+                    (exact - numeric).abs() <= 1e-5 * exact.abs(),
+                    "info[{i}, {j}]: {exact} vs {numeric}"
+                );
+                assert_eq!(exact, t.info[j * 3 + i]);
+            }
         }
     }
 

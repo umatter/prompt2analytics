@@ -711,12 +711,16 @@ impl<'a> StructuralObjective<'a> {
         self.model.obs_var = self.p[self.disturbances] * self.vx;
     }
 
-    /// Objective and gradient at `x`. With every variance 0 the filter has no
-    /// positive innovation variance; the value is 1000, as R's `getLike`.
-    fn eval(&mut self, x: &[f64]) -> EconResult<(f64, Vec<f64>)> {
+    /// Objective, gradient and scoring matrix at `x`. With every variance 0 the
+    /// filter has no positive innovation variance; the value is 1000, as R's `getLike`.
+    fn eval(&mut self, x: &[f64]) -> EconResult<Evaluation> {
         self.set_free(x);
         if self.p.iter().all(|v| *v == 0.0) {
-            return Ok((1000.0, vec![0.0; x.len()]));
+            return Ok(Evaluation {
+                f: 1000.0,
+                g: vec![0.0; x.len()],
+                scoring: None,
+            });
         }
         let terms = kalman_likelihood_terms(
             self.y,
@@ -733,7 +737,12 @@ impl<'a> StructuralObjective<'a> {
             .zip(&terms.d_sumlog)
             .map(|(a, b)| 0.5 * (a + b) / n)
             .collect();
-        Ok((f, g))
+        let scoring = terms.info.iter().map(|v| v / n).collect();
+        Ok(Evaluation {
+            f,
+            g,
+            scoring: Some(scoring),
+        })
     }
 }
 
@@ -815,6 +824,20 @@ pub(crate) fn fit_structural(
     })
 }
 
+/// One evaluation of the objective for [`minimize_nonnegative`].
+struct Evaluation {
+    f: f64,
+    g: Vec<f64>,
+    /// The expected Hessian at this point, row-major, when the objective has one.
+    scoring: Option<Vec<f64>>,
+}
+
+impl Evaluation {
+    fn is_finite(&self) -> bool {
+        self.f.is_finite() && self.g.iter().all(|v| v.is_finite())
+    }
+}
+
 /// What [`minimize_nonnegative`] returns.
 struct Minimum {
     x: Vec<f64>,
@@ -832,6 +855,11 @@ const HESSIAN_STEP: f64 = 1e-6;
 const ARMIJO: f64 = 1e-4;
 /// A change in the objective no double-precision search can rely on.
 const STALL_F: f64 = 1e-14;
+/// A predicted reduction of the objective, relative to max(|f|, 1), within the
+/// rounding of an objective summed over a series.
+const NOISE_F: f64 = 1e-10;
+/// The reduction in the objective below which scoring gives way to Newton steps.
+const SCORING_UNTIL: f64 = 1e-6;
 /// Line-search halvings before the search gives up.
 const MAX_HALVINGS: usize = 60;
 
@@ -903,33 +931,52 @@ fn newton_direction(h: &Array2<f64>, g_free: &[f64]) -> Vec<f64> {
 
 /// Minimise `fg` over x ≥ 0 by a projected Newton method: the Hessian of the free
 /// set from forward differences of the exact gradient, a Levenberg shift, a
-/// projected Armijo search. A coordinate reaches its bound 0 exactly. It stops when
+/// projected Armijo search. While the objective supplies a scoring matrix and each
+/// step still reduces it by more than [`SCORING_UNTIL`], that matrix stands in for the
+/// Hessian, which saves a gradient per free coordinate; the search then finishes on
+/// Newton steps, whose rate the stopping tolerance needs. A coordinate reaches its
+/// bound 0 exactly. It stops when
 /// the scaled projected gradient is at most `tolerance`, when no further reduction
 /// is possible in double precision, or at `max_iter`. An `Err` other than a failed
 /// trial ([`is_failed_trial`]) stops it at once; a failed trial at the start is an
 /// error. The budget is checked once per iteration.
 fn minimize_nonnegative(
-    fg: &mut dyn FnMut(&[f64]) -> EconResult<(f64, Vec<f64>)>,
+    fg: &mut dyn FnMut(&[f64]) -> EconResult<Evaluation>,
     x0: &[f64],
     max_iter: usize,
     tolerance: f64,
 ) -> EconResult<Minimum> {
     let mut x: Vec<f64> = x0.iter().map(|v| v.max(0.0)).collect();
-    let (mut f, mut g) = fg(&x)?;
-    if !f.is_finite() {
+    let start = fg(&x)?;
+    if !start.f.is_finite() {
         return Err(EconError::Computation(format!(
-            "the objective is {f} at the starting point"
+            "the objective is {} at the starting point",
+            start.f
         )));
     }
+    let Evaluation {
+        mut f,
+        mut g,
+        mut scoring,
+    } = start;
+    let mut scoring_phase = true;
+    // Scoring converges linearly: a stop on the criterion after scoring steps waits
+    // for one Newton step taken from within it, whose quadratic rate puts the
+    // estimate well inside the tolerance.
+    let (mut scored, mut polished) = (false, false);
     let mut iterations = 0usize;
     let mut converged = false;
     let mut line_search_failed = false;
 
     loop {
         checkpoint()?;
-        if projected_gradient(&x, &g) <= tolerance {
+        let at_tolerance = projected_gradient(&x, &g) <= tolerance;
+        if at_tolerance && (!scored || polished) {
             converged = true;
             break;
+        }
+        if at_tolerance {
+            scoring_phase = false;
         }
         if iterations >= max_iter {
             break;
@@ -939,29 +986,40 @@ fn minimize_nonnegative(
             .collect();
         let g_free: Vec<f64> = free.iter().map(|&i| g[i]).collect();
 
-        // The Hessian of the free block.
+        // The Hessian of the free block: the scoring matrix, or forward differences of
+        // the gradient.
         let k = free.len();
         let mut h = Array2::zeros((k, k));
         let mut usable = true;
-        for (col, &j) in free.iter().enumerate() {
-            let step = HESSIAN_STEP * x[j].max(1.0);
-            let mut trial = x.clone();
-            trial[j] += step;
-            match fg(&trial) {
-                Ok((value, grad)) if value.is_finite() && grad.iter().all(|v| v.is_finite()) => {
-                    for (row, &i) in free.iter().enumerate() {
-                        h[[row, col]] = (grad[i] - g[i]) / step;
+        let scoring_step = scoring_phase && scoring.is_some();
+        scored |= scoring_step;
+        if let Some(info) = scoring.as_deref().filter(|_| scoring_step) {
+            for (row, &i) in free.iter().enumerate() {
+                for (col, &j) in free.iter().enumerate() {
+                    h[[row, col]] = info[i * x.len() + j];
+                }
+            }
+        } else {
+            for (col, &j) in free.iter().enumerate() {
+                let step = HESSIAN_STEP * x[j].max(1.0);
+                let mut trial = x.clone();
+                trial[j] += step;
+                match fg(&trial) {
+                    Ok(at) if at.is_finite() => {
+                        for (row, &i) in free.iter().enumerate() {
+                            h[[row, col]] = (at.g[i] - g[i]) / step;
+                        }
                     }
+                    Ok(_) => {
+                        usable = false;
+                        break;
+                    }
+                    Err(e) if is_failed_trial(&e) => {
+                        usable = false;
+                        break;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Ok(_) => {
-                    usable = false;
-                    break;
-                }
-                Err(e) if is_failed_trial(&e) => {
-                    usable = false;
-                    break;
-                }
-                Err(e) => return Err(e),
             }
         }
         let direction = if usable {
@@ -971,6 +1029,12 @@ fn minimize_nonnegative(
             let scale = g_free.iter().fold(1.0f64, |a, v| a.max(v.abs()));
             g_free.iter().map(|v| -v / scale).collect()
         };
+
+        // A Newton step that predicts a reduction within the rounding of f cannot be
+        // judged by f: it is judged by the gradient, which is exact to far below that.
+        let predicted: f64 = direction.iter().zip(&g_free).map(|(d, gi)| -d * gi).sum();
+        let below_noise = !scoring_step && usable && predicted <= NOISE_F * f.abs().max(1.0);
+        let crit = projected_gradient(&x, &g);
 
         // The projected Armijo search.
         let mut alpha = 1.0;
@@ -984,15 +1048,17 @@ fn minimize_nonnegative(
                 break;
             }
             match fg(&trial) {
-                Ok((value, grad)) if value.is_finite() && grad.iter().all(|v| v.is_finite()) => {
+                Ok(at) if at.is_finite() => {
                     let decrease: f64 = trial
                         .iter()
                         .zip(&x)
                         .zip(&g)
                         .map(|((t, xi), gi)| gi * (t - xi))
                         .sum();
-                    if value <= f + ARMIJO * decrease {
-                        accepted = Some((trial, value, grad));
+                    let by_gradient =
+                        below_noise && alpha == 1.0 && projected_gradient(&trial, &at.g) < crit;
+                    if by_gradient || at.f <= f + ARMIJO * decrease {
+                        accepted = Some((trial, at));
                         break;
                     }
                 }
@@ -1002,11 +1068,16 @@ fn minimize_nonnegative(
             }
             alpha *= 0.5;
         }
-        let Some((next, value, grad)) = accepted else {
-            // A Newton step predicting less than the rounding of f cannot be told
-            // from no step: the search is at the optimum as far as f can resolve it.
-            let predicted: f64 = direction.iter().zip(&g_free).map(|(d, gi)| -d * gi).sum();
-            if usable && predicted <= STALL_F * f.abs().max(1.0) {
+        let Some((next, at)) = accepted else {
+            if scoring_step {
+                // The scoring direction failed; the Newton one may not.
+                scoring_phase = false;
+                continue;
+            }
+            // A Newton step predicting a reduction within the rounding of f that
+            // reduces neither f nor the gradient: the search is at the optimum as far
+            // as double precision resolves it.
+            if at_tolerance || below_noise {
                 converged = true;
             } else {
                 line_search_failed = true;
@@ -1014,15 +1085,20 @@ fn minimize_nonnegative(
             break;
         };
 
-        let change_f = (f - value).abs();
+        let change_f = (f - at.f).abs();
         let change_x = next
             .iter()
             .zip(&x)
             .fold(0.0f64, |a, (n, o)| a.max((n - o).abs() / n.max(1.0)));
         x = next;
-        f = value;
-        g = grad;
+        f = at.f;
+        g = at.g;
+        scoring = at.scoring;
         iterations += 1;
+        polished |= at_tolerance;
+        if change_f <= SCORING_UNTIL {
+            scoring_phase = false;
+        }
         if change_f <= STALL_F && change_x <= 1e-12 {
             // No further reduction is possible in double precision.
             converged = true;
@@ -1044,6 +1120,27 @@ fn minimize_nonnegative(
 mod tests {
     use super::*;
     use p2a_validation::{Check, Tol};
+
+    /// The search on a plain objective, which has no scoring matrix: Newton throughout.
+    fn minimize_nonnegative(
+        fg: &mut dyn FnMut(&[f64]) -> EconResult<(f64, Vec<f64>)>,
+        x0: &[f64],
+        max_iter: usize,
+        tolerance: f64,
+    ) -> EconResult<Minimum> {
+        super::minimize_nonnegative(
+            &mut |x: &[f64]| {
+                fg(x).map(|(f, g)| Evaluation {
+                    f,
+                    g,
+                    scoring: None,
+                })
+            },
+            x0,
+            max_iter,
+            tolerance,
+        )
+    }
 
     /// X-2: an Int64 column fits as its Float64 copy; missing values, text and absent
     /// columns are refused by name.
@@ -1156,7 +1253,7 @@ mod tests {
             assert!(
                 matches!(
                     cancelled(|| minimize_nonnegative(
-                        &mut |x: &[f64]| objective.eval(x),
+                        &mut |x: &[f64]| objective.eval(x).map(|e| (e.f, e.g)),
                         &x0,
                         0,
                         1e-8
@@ -1233,22 +1330,30 @@ mod tests {
     }
 
     #[test]
-    fn minimize_nonnegative_stops_as_converged_below_the_rounding_of_the_objective() {
+    fn minimize_nonnegative_judges_a_step_below_the_rounding_of_the_objective_by_its_gradient() {
         // f is a quadratic with a jump at every other point, as rounding noise, so
-        // every trial looks worse. A Newton step from just off the optimum predicts
-        // less than that noise: converged. From far off it does not: a failed search.
-        let start = |offset: f64| {
+        // every trial looks worse by f. A Newton step from just off the optimum
+        // predicts a reduction within that noise and is judged by the gradient: it is
+        // taken and the search converges. From far off it is judged by f: a failed
+        // search. With a gradient as noisy as f nothing is gained either way, and the
+        // search stops as converged where f cannot resolve the step.
+        let run = |offset: f64, gradient_noise: f64| {
             let x0 = [1.0 + offset];
             let mut noisy = move |x: &[f64]| -> EconResult<(f64, Vec<f64>)> {
-                let noise = if x[0] == x0[0] { 0.0 } else { 1.0 };
-                Ok((0.5 * (x[0] - 1.0).powi(2) + noise, vec![x[0] - 1.0]))
+                let moved = x[0] != x0[0];
+                let noise = if moved { 1.0 } else { 0.0 };
+                let g = x[0] - 1.0 + if moved { gradient_noise } else { 0.0 };
+                Ok((0.5 * (x[0] - 1.0).powi(2) + noise, vec![g]))
             };
             minimize_nonnegative(&mut noisy, &x0, 100, 1e-12).unwrap()
         };
-        let near = start(1e-8);
+        let near = run(1e-8, 0.0);
         assert!(near.converged && !near.line_search_failed, "{}", near.crit);
-        assert!(near.crit > 1e-12);
-        let far = start(1.0);
+        assert!((near.x[0] - 1.0).abs() < 1e-15, "{}", near.x[0]);
+        let flat = run(1e-8, 1.0);
+        assert!(flat.converged && !flat.line_search_failed);
+        assert_eq!(flat.x[0], 1.0 + 1e-8);
+        let far = run(1.0, 0.0);
         assert!(!far.converged && far.line_search_failed, "{}", far.crit);
     }
 
