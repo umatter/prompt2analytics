@@ -12,22 +12,76 @@ use super::neighbors::Neighbors;
 use crate::errors::EconResult;
 use crate::resource::{checkpoint, try_zeros2};
 
-/// Weighting style for spatial weights matrix.
+/// Weighting style for spatial weights matrix, as `spdep::nb2listw` with `zero.policy = TRUE`.
 ///
-/// Controls how the raw neighbor relationships are converted to weights.
+/// Controls how the binary neighbour list B is converted to weights. A unit without neighbours
+/// (an island) keeps an empty row and does not count in `eff.n = n - #islands`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WeightStyle {
-    /// Binary weights (0/1) - "B" in R
+    /// spdep "B": w_ij = 1.
     Binary,
-    /// Row-standardized (weights sum to 1 for each row) - "W" in R
+    /// spdep "W": w_ij = 1 / n_i; each row with neighbours sums to 1.
     #[default]
     RowStd,
-    /// Globally standardized (weights sum to n) - "C" in R
+    /// spdep "C": w_ij = eff.n / sum(B); the weights sum to eff.n.
     GlobalStd,
-    /// Variance-stabilizing (Tiefelsdorf et al. 1999) - "S" in R
+    /// spdep "S" (Tiefelsdorf, Griffith & Boots 1999): w_ij = (eff.n / Q) / sqrt(n_i) with
+    /// Q = sum_i sqrt(n_i); the weights sum to eff.n.
     VarStab,
-    /// Minmax normalization (divide by largest row sum) - "minmax" in R
+    /// spdep "minmax" (Kelejian & Prucha 2010): w_ij = 1 / min(max_i row sum, max_j column sum).
     MinMax,
+    /// spdep "U": w_ij = 1 / sum(B); the weights sum to 1.
+    UnitSum,
+    /// General weights not derived from a style, such as the unstandardised inverse-distance
+    /// weights of [`SpatialWeights::from_distance_decay`]. A label only: `FromStr` refuses it,
+    /// and [`SpatialWeights::from_neighbors`] has no general weights to apply, so it builds
+    /// binary weights and labels them `Binary`.
+    Custom,
+}
+
+crate::option_enum!(
+    WeightStyle,
+    crate::options::Choices {
+        option: "weight style",
+        values: &[
+            (
+                &["W", "row", "rowstd", "row_standardised", "row_standardized"],
+                WeightStyle::RowStd
+            ),
+            (&["B", "binary"], WeightStyle::Binary),
+            (
+                &[
+                    "C",
+                    "global",
+                    "globalstd",
+                    "globally_standardised",
+                    "globally_standardized"
+                ],
+                WeightStyle::GlobalStd
+            ),
+            (&["U", "unit_sum", "unitsum"], WeightStyle::UnitSum),
+            (&["minmax", "mm", "min_max"], WeightStyle::MinMax),
+            (
+                &[
+                    "S",
+                    "varstab",
+                    "variance_stabilising",
+                    "variance_stabilizing"
+                ],
+                WeightStyle::VarStab
+            ),
+        ],
+    },
+    no_display
+);
+
+impl std::fmt::Display for WeightStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WeightStyle::Custom => f.write_str("custom"),
+            s => f.write_str(Self::choices().canonical(*s)),
+        }
+    }
 }
 
 /// Sparse representation of spatial weights for a single observation.
@@ -113,94 +167,60 @@ impl SpatialWeights {
     /// ```
     pub fn from_neighbors(nb: &Neighbors, style: WeightStyle) -> Self {
         let n = nb.n();
-        let mut weights = Vec::with_capacity(n);
+        let style = if style == WeightStyle::Custom {
+            WeightStyle::Binary
+        } else {
+            style
+        };
+        let card = nb.cardinalities();
+        let eff_n = card.iter().filter(|&&c| c > 0).count() as f64;
+        let links = nb.n_links() as f64;
 
-        // First pass: calculate raw weights based on style
-        let raw_weights: Vec<SparseWeights> = (0..n)
-            .map(|i| {
-                let indices = nb.get_neighbors(i).to_vec();
-                let n_neighbors = indices.len();
-                let w = if n_neighbors == 0 {
-                    vec![]
-                } else {
-                    match style {
-                        WeightStyle::Binary => vec![1.0; n_neighbors],
-                        WeightStyle::RowStd => vec![1.0 / n_neighbors as f64; n_neighbors],
-                        // For other styles, start with binary and transform later
-                        _ => vec![1.0; n_neighbors],
-                    }
-                };
-                SparseWeights {
-                    indices,
-                    weights: w,
-                }
-            })
-            .collect();
-
-        // Apply global transformations for certain styles
-        match style {
+        // The one weight of each row (spdep nb2listw on the binary list)
+        let per_row: Vec<f64> = match style {
+            WeightStyle::Binary | WeightStyle::Custom => vec![1.0; n],
+            WeightStyle::RowStd => card
+                .iter()
+                .map(|&c| if c > 0 { 1.0 / c as f64 } else { 0.0 })
+                .collect(),
             WeightStyle::GlobalStd => {
-                // Sum of all weights should equal n
-                let total: f64 = raw_weights
-                    .iter()
-                    .map(|sw| sw.weights.iter().sum::<f64>())
-                    .sum();
-                let scale = if total > 0.0 { n as f64 / total } else { 1.0 };
-                weights = raw_weights
-                    .into_iter()
-                    .map(|sw| SparseWeights {
-                        indices: sw.indices,
-                        weights: sw.weights.iter().map(|&w| w * scale).collect(),
-                    })
-                    .collect();
+                vec![if links > 0.0 { eff_n / links } else { 0.0 }; n]
+            }
+            WeightStyle::UnitSum => vec![if links > 0.0 { 1.0 / links } else { 0.0 }; n],
+            WeightStyle::MinMax => {
+                let mut col_sums = vec![0usize; n];
+                for i in 0..n {
+                    for &j in nb.get_neighbors(i) {
+                        if let Some(c) = col_sums.get_mut(j) {
+                            *c += 1;
+                        }
+                    }
+                }
+                let max_row = card.iter().copied().max().unwrap_or(0);
+                let max_col = col_sums.iter().copied().max().unwrap_or(0);
+                let divisor = max_row.min(max_col) as f64;
+                vec![if divisor > 0.0 { 1.0 / divisor } else { 0.0 }; n]
             }
             WeightStyle::VarStab => {
-                // Variance-stabilizing: w_ij = 1/sqrt(n_i * n_j)
-                let cardinalities = nb.cardinalities();
-                weights = raw_weights
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, sw)| {
-                        let ni = cardinalities[i] as f64;
-                        let w: Vec<f64> = sw
-                            .indices
-                            .iter()
-                            .map(|&j| {
-                                let nj = cardinalities[j] as f64;
-                                if ni > 0.0 && nj > 0.0 {
-                                    1.0 / (ni * nj).sqrt()
-                                } else {
-                                    0.0
-                                }
-                            })
-                            .collect();
-                        SparseWeights {
-                            indices: sw.indices,
-                            weights: w,
+                // Rows scaled by 1 / sqrt(sum_j b_ij^2) = 1 / sqrt(n_i), then all rescaled to eff.n
+                let q: f64 = card.iter().map(|&c| (c as f64).sqrt()).sum();
+                card.iter()
+                    .map(|&c| {
+                        if c > 0 && q > 0.0 {
+                            eff_n / q / (c as f64).sqrt()
+                        } else {
+                            0.0
                         }
                     })
-                    .collect();
+                    .collect()
             }
-            WeightStyle::MinMax => {
-                // Divide all weights by the maximum row sum
-                let row_sums: Vec<f64> = raw_weights
-                    .iter()
-                    .map(|sw| sw.weights.iter().sum())
-                    .collect();
-                let max_sum = row_sums.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let scale = if max_sum > 0.0 { 1.0 / max_sum } else { 1.0 };
-                weights = raw_weights
-                    .into_iter()
-                    .map(|sw| SparseWeights {
-                        indices: sw.indices,
-                        weights: sw.weights.iter().map(|&w| w * scale).collect(),
-                    })
-                    .collect();
-            }
-            _ => {
-                weights = raw_weights;
-            }
-        }
+        };
+        let weights: Vec<SparseWeights> = (0..n)
+            .map(|i| SparseWeights {
+                indices: nb.get_neighbors(i).to_vec(),
+                weights: vec![per_row[i]; card[i]],
+            })
+            .collect();
 
         SpatialWeights {
             // O(1): the neighbour lists are shared, not copied
@@ -262,7 +282,7 @@ impl SpatialWeights {
         let style = if row_standardize {
             WeightStyle::RowStd
         } else {
-            WeightStyle::Binary // Not quite accurate, but closest
+            WeightStyle::Custom
         };
 
         SpatialWeights {
@@ -751,6 +771,28 @@ fn compute_spectrum(m: &Array2<f64>) -> Spectrum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::columns::{NaPolicy, numeric_column};
+    use crate::errors::EconError;
+    use crate::spatial::{MoranAlternative, moran_test};
+
+    fn col(ds: &crate::data::Dataset, name: &str) -> Vec<f64> {
+        numeric_column(ds.df(), name, NaPolicy::Fail).unwrap().0
+    }
+
+    fn coords_of(ds: &crate::data::Dataset) -> Vec<(f64, f64)> {
+        col(ds, "cx").into_iter().zip(col(ds, "cy")).collect()
+    }
+
+    fn expect_spec(r: EconResult<impl std::fmt::Debug>, needles: &[&str]) {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => {
+                for n in needles {
+                    assert!(message.contains(n), "`{message}` does not mention `{n}`");
+                }
+            }
+            other => panic!("expected InvalidSpecification mentioning {needles:?}, got {other:?}"),
+        }
+    }
 
     fn simple_neighbors() -> Neighbors {
         // 4-point grid: 0-1
@@ -940,5 +982,137 @@ mod tests {
         assert!(lower < 0.0);
         assert!(upper > 0.0);
         assert!((upper - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_weight_style_parses_aliases_and_rejects_unknown() {
+        WeightStyle::choices().validate().unwrap();
+        use WeightStyle::*;
+        for (s, v) in [
+            ("W", RowStd),
+            ("w", RowStd),
+            ("row", RowStd),
+            ("RowStd", RowStd),
+            ("row-standardised", RowStd),
+            ("B", Binary),
+            ("binary", Binary),
+            ("C", GlobalStd),
+            ("global", GlobalStd),
+            ("U", UnitSum),
+            ("unit sum", UnitSum),
+            ("minmax", MinMax),
+            ("MM", MinMax),
+            ("min-max", MinMax),
+            ("S", VarStab),
+            ("varstab", VarStab),
+            ("Variance_Stabilizing", VarStab),
+        ] {
+            assert_eq!(s.parse::<WeightStyle>().unwrap(), v, "{s}");
+        }
+        for bad in ["custom", "unstandardized", "Q", ""] {
+            expect_spec(
+                bad.parse::<WeightStyle>(),
+                &["weight style", "W, B, C, U, minmax, S"],
+            );
+        }
+        let shown: Vec<String> = [RowStd, Binary, GlobalStd, UnitSum, MinMax, VarStab, Custom]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(shown, ["W", "B", "C", "U", "minmax", "S", "custom"]);
+    }
+
+    /// R: spdep::nb2listw styles written out (validation/r/cases/spatial_ml_weights.R, case
+    /// spatial_weights_moran).
+    #[test]
+    fn test_validate_weight_styles() {
+        use WeightStyle::*;
+        use p2a_validation::{Check, Tol};
+        let (case, ds) = crate::test_support::load_case("spatial_weights_moran");
+        let coords = coords_of(&ds);
+        let n = coords.len();
+        let x1 = Array1::from(col(&ds, "x1"));
+        let band = Neighbors::try_from_distance(&coords, 0.0, 0.2, None).unwrap();
+        let cards: Vec<f64> = band.cardinalities().iter().map(|&c| c as f64).collect();
+        let mut chk = Check::new(&case);
+        chk.scalar("band_links", band.n_links() as f64, Tol::exact())
+            .vector("band_row_sums", &cards, Tol::exact());
+        for (key, style) in [
+            ("W", RowStd),
+            ("B", Binary),
+            ("C", GlobalStd),
+            ("U", UnitSum),
+            ("minmax", MinMax),
+            ("S", VarStab),
+        ] {
+            let w = SpatialWeights::from_neighbors(&band, style);
+            assert_eq!(w.style(), style);
+            let row_sums: Vec<f64> = (0..n)
+                .map(|i| w.get_weights(i).weights.iter().sum())
+                .collect();
+            let moran = moran_test(&x1, &w, MoranAlternative::Greater).unwrap();
+            chk.vector(
+                &format!("style_{key}_row1"),
+                &w.get_weights(0).weights,
+                Tol::coef(n),
+            )
+            .scalar(&format!("style_{key}_sum"), w.sum_weights(), Tol::coef(n))
+            .vector(&format!("style_{key}_row_sums"), &row_sums, Tol::coef(n))
+            .scalar(
+                &format!("style_{key}_moran_I"),
+                moran.statistic,
+                Tol::stat(n),
+            );
+        }
+        // minmax divides by min(max row sum 3, max column sum 2) (spdep; Kelejian & Prucha 2010)
+        let asym = SpatialWeights::from_neighbors(
+            &Neighbors::from_indices(vec![vec![1, 2, 3], vec![2], vec![3], vec![1]]),
+            MinMax,
+        );
+        chk.scalar(
+            "asym_minmax_weight",
+            asym.get_weights(0).weights[0],
+            Tol::exact(),
+        )
+        .scalar("asym_minmax_sum", asym.sum_weights(), Tol::coef(4));
+        // islands: C and S scale to eff.n = n - #islands (zero.policy = TRUE), U to 1
+        let isl = Neighbors::try_from_distance(&coords, 0.0, 0.12, None).unwrap();
+        let ids: Vec<f64> = isl.isolates().iter().map(|&i| i as f64).collect();
+        chk.scalar("n_islands", ids.len() as f64, Tol::exact())
+            .vector("islands", &ids, Tol::exact())
+            .scalar(
+                "islands_style_C_sum",
+                SpatialWeights::from_neighbors(&isl, GlobalStd).sum_weights(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "islands_style_S_sum",
+                SpatialWeights::from_neighbors(&isl, VarStab).sum_weights(),
+                Tol::coef(n),
+            )
+            .scalar(
+                "islands_style_U_sum",
+                SpatialWeights::from_neighbors(&isl, UnitSum).sum_weights(),
+                Tol::coef(n),
+            )
+            .finish();
+    }
+
+    #[test]
+    fn test_distance_decay_weights_are_labelled_custom() {
+        let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 2.0), (1.5, 1.5)];
+        let nb = Neighbors::from_knn(&coords, 2);
+        assert_eq!(
+            SpatialWeights::from_distance_decay(&nb, &coords, 1.0, false).style(),
+            WeightStyle::Custom
+        );
+        assert_eq!(
+            SpatialWeights::from_distance_decay(&nb, &coords, 1.0, true).style(),
+            WeightStyle::RowStd
+        );
+        // from_neighbors has no general weights to apply: Custom builds binary weights and says so
+        let b = SpatialWeights::from_neighbors(&nb, WeightStyle::Custom);
+        assert_eq!(b.style(), WeightStyle::Binary);
+        assert!(b.get_weights(0).weights.iter().all(|&w| w == 1.0));
     }
 }

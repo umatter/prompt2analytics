@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "methods": [
+    {
+      "id": "spatial_weights",
+      "name": "Spatial weight styles W, B, C, U, minmax and S; k-nearest-neighbour ties",
+      "category": "econometrics",
+      "reference": "spdep::nb2listw(style, zero.policy = TRUE) and spdep::knearneigh(x, k, use_kd_tree = FALSE), written out in base R (spdep not installed)",
+      "doc": "validation/spatial/weights.md",
+      "cases": [
+        "spatial_weights_moran"
+      ],
+      "tests": [
+        "p2a-core::spatial::weights::tests::test_validate_weight_styles",
+        "p2a-core::spatial::neighbors::tests::test_validate_knn_ties_match_knearneigh_without_kd_tree"
+      ],
+      "quantities": [
+        "row-1 weights",
+        "weight sums",
+        "row sums",
+        "Moran's I under each style",
+        "minmax on an asymmetric list",
+        "C, S and U sums with islands",
+        "island ids",
+        "neighbour sets on a tied integer grid"
+      ],
+      "tolerance": "validation/README.md, n = 80: weights 1e-6, Moran's I 1e-5 relative; counts and neighbour ids exact",
+      "deviations": [],
+      "supersedes_legacy": []
+    }
+  ]
+}
