@@ -366,7 +366,7 @@ impl<'a> RecordTable<'a> {
                 IdxSize::MAX
             )));
         }
-        if self.rows % (1 << 16) == 0 {
+        if self.rows.is_multiple_of(1 << 16) {
             crate::resource::checkpoint().map_err(resource_err)?;
             self.check_table_size(self.columns.len())?;
         }
