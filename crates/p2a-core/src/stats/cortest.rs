@@ -39,6 +39,9 @@ crate::option_enum!(
     }
 );
 
+/// Below this a sum of squares has lost digits to subnormal numbers.
+const MIN_ACCURATE_SQUARES: f64 = f64::MIN_POSITIVE / f64::EPSILON;
+
 /// Refuse a constant column, whose correlation is undefined. `what` names it in the message.
 fn refuse_constant(values: &[f64], what: &str) -> EconResult<()> {
     match values.first() {
@@ -196,6 +199,14 @@ fn pearson_test(
 ) -> EconResult<CorTestResult> {
     let n = x.len();
     let r = pearson_correlation(x, y);
+    // The columns are not constant here (`cor_test` refuses that), so only their range is left.
+    if r.is_nan() {
+        return Err(EconError::InvalidSpecification {
+            message: "the squared deviations of x or y do not fit a double (overflow or \
+                      underflow); rescale the column"
+                .to_string(),
+        });
+    }
 
     // Test statistic: t = r * sqrt((n-2) / (1-r²))
     let df = (n - 2) as f64;
@@ -512,7 +523,8 @@ fn kendall_var_s_no_ties(n: usize) -> f64 {
     (n * n.saturating_sub(1) * (2 * n + 5)) as f64 / 18.0
 }
 
-/// Compute Pearson correlation coefficient.
+/// Pearson correlation coefficient. NaN for a constant column and for squares a double cannot hold
+/// accurately (infinite, or lost to underflow).
 fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
     let n = x.len() as f64;
     let x_mean: f64 = x.iter().sum::<f64>() / n;
@@ -530,11 +542,13 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
         sum_y2 += dy * dy;
     }
 
-    if sum_x2 == 0.0 || sum_y2 == 0.0 {
+    let accurate = |sum: f64| (MIN_ACCURATE_SQUARES..=f64::MAX).contains(&sum);
+    if !accurate(sum_x2) || !accurate(sum_y2) || !sum_xy.is_finite() {
         return f64::NAN;
     }
 
-    sum_xy / (sum_x2 * sum_y2).sqrt()
+    // The product of the sums can overflow where each sum fits; rounding can leave |r| just above 1.
+    (sum_xy / (sum_x2.sqrt() * sum_y2.sqrt())).clamp(-1.0, 1.0)
 }
 
 /// Assign ranks to data, handling ties with average ranks.
@@ -1093,8 +1107,70 @@ mod tests {
         );
     }
 
+    /// r does not depend on the scale; the product of the two sums leaves the range before either sum does.
     #[test]
-    fn test_validate_correlation_names() {
+    fn test_pearson_is_scale_free() {
+        let x = [1.0, -2.3, 1.7, 3.1, -2.2, 1.4, 2.8];
+        let y = [0.4, 2.3, -1.7, 1.1, 2.2, -1.4, 0.8];
+        let run = |x: &[f64], y: &[f64]| {
+            cor_test(
+                x,
+                y,
+                CorrelationMethod::Pearson,
+                Alternative::TwoSided,
+                0.95,
+            )
+            .unwrap()
+        };
+        let base = run(&x, &y);
+        for scale in [1e80, 1e100, 1e-100] {
+            let scaled = run(&x.map(|v| v * scale), &y.map(|v| v * scale));
+            assert!((scaled.estimate - base.estimate).abs() < 1e-12);
+            assert!((scaled.p_value - base.p_value).abs() < 1e-10);
+        }
+        // Perfectly correlated data stay perfectly correlated, with r inside [-1, 1] and a defined CI.
+        let big = x.map(|v| v * 1e100);
+        let perfect = run(&big, &big);
+        assert!((perfect.estimate - 1.0).abs() < 1e-12 && perfect.estimate <= 1.0);
+        assert!(perfect.p_value < 1e-10);
+        assert!(perfect.conf_low.unwrap() > 0.99);
+    }
+
+    /// Squares that overflow or underflow are refused, not an r of 0 or NaN in an `Ok`.
+    #[test]
+    fn test_pearson_refuses_squares_out_of_range() {
+        let x = [1.0, -2.3, 1.7, 3.1, -2.2, 1.4, 2.8];
+        let y = [0.4, 2.3, -1.7, 1.1, 2.2, -1.4, 0.8];
+        for scale in [1e200, 1e-200] {
+            for (a, b) in [(x.map(|v| v * scale), y), (x, y.map(|v| v * scale))] {
+                let err = cor_test(
+                    &a,
+                    &b,
+                    CorrelationMethod::Pearson,
+                    Alternative::TwoSided,
+                    0.95,
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(err, EconError::InvalidSpecification { ref message } if message.contains("rescale")),
+                    "{err}"
+                );
+            }
+            // Ranks do not see the scale.
+            let big = x.map(|v| v * scale);
+            let spearman = cor_test(
+                &big,
+                &y,
+                CorrelationMethod::Spearman,
+                Alternative::TwoSided,
+                0.95,
+            );
+            assert!(spearman.unwrap().estimate.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_cor_test_names() {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
@@ -1133,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_run_cor_test_wrapper() {
+    fn test_run_cor_test_wrapper() {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
