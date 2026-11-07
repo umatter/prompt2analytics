@@ -121,7 +121,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::xtx;
 use crate::linalg::solve::{
     LM_QR_TOL, Qr, SingularPolicy, aliasing_message, least_squares, sym_inverse,
 };
@@ -752,9 +752,7 @@ fn estimate_sarar_gmm(
     let k = x.ncols();
 
     let instruments = spatial_instruments(x, listw, config.instrument_order, coef_names)?;
-    let h = instruments.h.clone();
     let (z, z_names) = with_spatial_lag(y, x, listw, coef_names)?;
-    let wy = z.column(k).to_owned();
 
     // Step 1: Initial S2SLS
     let t1 = tsls(y, &z, &instruments, k, &z_names)?;
@@ -764,52 +762,22 @@ fn estimate_sarar_gmm(
     let gm = estimate_rho_gm(&u1, listw, config.het, config)?;
     let rho = gm.rho;
 
-    // Step 3: Cochrane-Orcutt transformation and re-estimation
-    // y* = (I - ρW)y, Z* = (I - ρW)Z, H* = (I - ρW)H
+    // Step 3: GS2SLS: 2SLS of (I - rho W) y on (I - rho W) Z with the same instruments H
     let y_star = listw.transform_y(y, rho);
-    let z_star = transform_matrix(listw, &z, rho);
-    let h_star = transform_matrix(listw, &h, rho);
+    let z_star = listw.transform_x(&z, rho);
+    let t3 = tsls(&y_star, &z_star, &instruments, 0, &z_names)?;
+    let beta: Array1<f64> = t3.delta.slice(s![..k]).to_owned();
+    let lambda = t3.delta[k];
 
-    // S2SLS on transformed data
-    let hh_star = xtx(&h_star.view());
-    let (hh_star_inv, _) = safe_inverse(&hh_star.view())?;
-    let hz_star = h_star.t().dot(&z_star);
-    let ph_z_star = h_star.dot(&hh_star_inv.dot(&hz_star));
-    let zph_z_star = z_star.t().dot(&ph_z_star);
-    let (zph_z_star_inv, _) = safe_inverse(&zph_z_star.view())?;
-    let hy_star = h_star.t().dot(&y_star);
-    let ph_y_star = h_star.dot(&hh_star_inv.dot(&hy_star));
-    let zph_y_star = z_star.t().dot(&ph_y_star);
-    let delta = zph_z_star_inv.dot(&zph_y_star);
-
-    // Extract β and λ
-    let beta: Array1<f64> = delta.slice(s![..k]).to_owned();
-    let lambda = delta[k];
-
-    // Residuals in transformed space
-    let fitted_star = z_star.dot(&delta);
-    let residuals_star = &y_star - &fitted_star;
-    let rss: f64 = residuals_star.iter().map(|r| r * r).sum();
-    let sigma2 = rss / (n - k - 1) as f64;
+    let residuals_star = &y_star - &z_star.dot(&t3.delta);
+    let df = residual_df(n, k + 1)?;
+    let sigma2 = residuals_star.dot(&residuals_star) / df as f64;
 
     // Residuals in original space
-    let fitted = x.dot(&beta) + lambda * &wy;
+    let fitted = z.dot(&t3.delta);
     let residuals = y - &fitted;
 
-    // Standard errors
-    let z_hat = {
-        let hh = xtx(&h_star.view());
-        let (hh_inv, _) = safe_inverse(&hh.view())?;
-        h_star.dot(&hh_inv.dot(&h_star.t().dot(&z_star)))
-    };
-    let vcov_mat = delta_vcov(
-        &z_hat,
-        &residuals_star,
-        &zph_z_star_inv,
-        config.se_type,
-        hac,
-        listw,
-    )?;
+    let vcov_mat = delta_vcov(&t3.zh, &residuals_star, &t3.a, config.se_type, hac, listw)?;
     let (se_rho, rho_note) = gm_rho_se(
         &gm,
         &u1,
@@ -836,7 +804,7 @@ fn estimate_sarar_gmm(
         sigma2,
         residuals,
         fitted,
-        df: residual_df(n, k + 1)?,
+        df,
         instruments: instruments.names,
         warnings,
         gm: Some(gm.convergence),
@@ -1538,23 +1506,6 @@ fn spatial_hac_meat(
         }
     }
     Ok(pairs.finish(white, 1.0))
-}
-
-/// Transform a matrix: M* = (I - ρW)M
-fn transform_matrix(listw: &SpatialWeights, m: &Array2<f64>, rho: f64) -> Array2<f64> {
-    let n = m.nrows();
-    let k = m.ncols();
-    let mut result = Array2::zeros((n, k));
-
-    for col in 0..k {
-        let m_col = m.column(col).to_owned();
-        let wm_col = listw.lag(&m_col);
-        for i in 0..n {
-            result[[i, col]] = m_col[i] - rho * wm_col[i];
-        }
-    }
-
-    result
 }
 
 /// The GM estimate of rho is searched on [-GM_RHO_BOUND, GM_RHO_BOUND].
@@ -3245,6 +3196,57 @@ mod tests {
         for (a, b) in back.iter().zip(&v) {
             assert!((a - b).abs() < 1e-10, "{a} vs {b}");
         }
+    }
+
+    #[test]
+    fn test_validate_sphet_sarar() {
+        sarar_case(false, "sarar");
+    }
+
+    #[test]
+    fn test_validate_sphet_sarar_het() {
+        sarar_case(true, "sarar_het");
+    }
+
+    fn sarar_case(het: bool, prefix: &str) {
+        // KP (1998): step 3 is 2SLS of (I - rho W) y on (I - rho W) Z with the SAME H. The former
+        // H* = (I - rho W) H gave (1.779856692, 0.785289465, -0.3910324443, -0.1066714867) for
+        // the hom case.
+        let (case, ds, w, coords) = sphet_case();
+        let mut check = Check::new(&case);
+        let step1 = run_sphet(
+            &ds,
+            "y_sarar",
+            &XS,
+            &w,
+            config(SphetModel::SpatialLag, SphetSE::Standard, het),
+        )
+        .unwrap();
+        check.vector("sarar_step1_coef", &delta(&step1), Tol::coef(N_SIM));
+        let tri = SpatialHacKernel::Triangular;
+        for (cfg, key) in [
+            (
+                config(SphetModel::SARAR, SphetSE::Standard, het),
+                "se_classical",
+            ),
+            (config(SphetModel::SARAR, SphetSE::Robust, het), "se_white"),
+            (
+                hac_config(SphetModel::SARAR, het, &coords, 0.15, tri),
+                "se_hac_tri_015",
+            ),
+        ] {
+            let r = run_sphet(&ds, "y_sarar", &XS, &w, cfg).unwrap();
+            assert!(r.converged, "{:?}", r.warnings);
+            check
+                .scalar(
+                    &format!("{prefix}_rho"),
+                    r.rho.unwrap(),
+                    Tol::iterative(1e-8),
+                )
+                .vector(&format!("{prefix}_coef"), &delta(&r), Tol::iterative(1e-8))
+                .vector(&format!("{prefix}_{key}"), &delta_se(&r), Tol::se(N_SIM));
+        }
+        check.finish();
     }
 
     /// The layout of `create_test_data`.
