@@ -112,9 +112,11 @@ pub struct XGBoostConfig {
     pub min_child_weight: f64,
     /// Fraction of samples to use for each tree (subsample)
     pub subsample: f64,
-    /// Fraction of features to use for each tree (colsample_bytree)
+    /// Fraction of columns sampled once per tree (colsample_bytree): ceil(fraction * p), at least 1
     pub colsample_bytree: f64,
-    /// Fraction of features to use for each split (colsample_bylevel)
+    /// Fraction of the tree's columns sampled once per depth level, shared by every node at that
+    /// level (XGBoost colsample_bylevel): ceil(fraction * columns), at least 1 (XGBoost uses
+    /// floor, at least 1)
     pub colsample_bylevel: f64,
     /// Objective function
     pub objective: XGBoostObjective,
@@ -269,6 +271,13 @@ impl std::fmt::Display for XGBoostResult {
 
         if self.config.subsample < 1.0 {
             writeln!(f, "Subsample: {:.2}", self.config.subsample)?;
+        }
+        if self.config.colsample_bylevel < 1.0 {
+            writeln!(
+                f,
+                "Colsample by level: {:.2}",
+                self.config.colsample_bylevel
+            )?;
         }
         if self.config.colsample_bytree < 1.0 {
             writeln!(f, "Colsample by tree: {:.2}", self.config.colsample_bytree)?;
@@ -505,6 +514,8 @@ fn build_tree(
     h: &ArrayView1<f64>,
     indices: &[usize],
     feature_indices: &[usize],
+    levels: &mut LevelColumns,
+    rng_state: &mut u64,
     config: &XGBoostConfig,
     depth: usize,
 ) -> XGBoostNode {
@@ -536,7 +547,7 @@ fn build_tree(
     let mut best_left_indices = Vec::new();
     let mut best_right_indices = Vec::new();
 
-    for &feature in feature_indices {
+    for &feature in levels.columns(depth, feature_indices, rng_state) {
         // Sort indices by feature value
         let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
         sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -604,6 +615,8 @@ fn build_tree(
         h,
         &best_left_indices,
         feature_indices,
+        levels,
+        rng_state,
         config,
         depth + 1,
     );
@@ -613,6 +626,8 @@ fn build_tree(
         h,
         &best_right_indices,
         feature_indices,
+        levels,
+        rng_state,
         config,
         depth + 1,
     );
@@ -648,22 +663,61 @@ fn random_subsample(n: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize> 
     indices
 }
 
-/// Select a random subset of feature indices.
-fn random_features(n_features: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize> {
+/// A random subset of `base` of ceil(fraction * len) entries, at least 1 (all of it, with no
+/// draw, when fraction >= 1).
+fn random_subset(base: &[usize], fraction: f64, rng_state: &mut u64) -> Vec<usize> {
     if fraction >= 1.0 {
-        return (0..n_features).collect();
+        return base.to_vec();
     }
 
-    let n_select = ((n_features as f64) * fraction).ceil() as usize;
-    let mut indices: Vec<usize> = (0..n_features).collect();
+    let n = base.len();
+    let n_select = (((n as f64) * fraction).ceil() as usize).clamp(1, n);
+    let mut indices = base.to_vec();
 
-    for i in 0..n_select.min(n_features) {
-        let j = i + lcg_random(rng_state) % (n_features - i);
+    for i in 0..n_select {
+        let j = i + lcg_random(rng_state) % (n - i);
         indices.swap(i, j);
     }
 
     indices.truncate(n_select);
     indices
+}
+
+/// Select a random subset of feature indices.
+fn random_features(n_features: usize, fraction: f64, rng_state: &mut u64) -> Vec<usize> {
+    random_subset(&(0..n_features).collect::<Vec<_>>(), fraction, rng_state)
+}
+
+/// The columns of one tree's depth levels: each level's subset is drawn from the tree's columns
+/// the first time a node at that depth is split, and reused by every other node at that depth.
+struct LevelColumns {
+    fraction: f64,
+    sets: Vec<Vec<usize>>,
+}
+
+impl LevelColumns {
+    fn new(fraction: f64) -> Self {
+        Self {
+            fraction,
+            sets: Vec::new(),
+        }
+    }
+
+    fn columns<'a>(
+        &'a mut self,
+        depth: usize,
+        tree_columns: &'a [usize],
+        rng_state: &mut u64,
+    ) -> &'a [usize] {
+        if self.fraction >= 1.0 {
+            return tree_columns;
+        }
+        while self.sets.len() <= depth {
+            self.sets
+                .push(random_subset(tree_columns, self.fraction, rng_state));
+        }
+        &self.sets[depth]
+    }
 }
 
 /// Fit an XGBoost model.
@@ -701,6 +755,14 @@ pub fn xgboost(
         ));
     }
 
+    if !(config.colsample_bylevel > 0.0 && config.colsample_bylevel <= 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "colsample_bylevel must be in (0, 1] (got {})",
+                config.colsample_bylevel
+            ),
+        });
+    }
     if !config.alpha.is_finite() || config.alpha < 0.0 {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -759,6 +821,8 @@ pub fn xgboost(
             &h.view(),
             &sample_indices,
             &feature_indices,
+            &mut LevelColumns::new(config.colsample_bylevel),
+            &mut rng_state,
             config,
             0,
         );
@@ -942,6 +1006,88 @@ mod tests {
     }
     fn case_vector(ds: &crate::data::Dataset, col: &str) -> Array1<f64> {
         Array1::from_vec(numeric_column(ds.df(), col, NaPolicy::Fail).unwrap().0)
+    }
+
+    fn four_signal_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut u = || (lcg_random(&mut s) % 100_000) as f64 / 100_000.0;
+        let x = Array2::from_shape_fn((n, 4), |_| u());
+        let noise: Vec<f64> = (0..n).map(|_| 0.1 * (u() - 0.5)).collect();
+        let y = Array1::from_shape_fn(n, |i| x.row(i).sum() + noise[i]);
+        (x, y)
+    }
+    fn features_by_depth(
+        node: &XGBoostNode,
+        depth: usize,
+        out: &mut Vec<std::collections::BTreeSet<usize>>,
+    ) {
+        if let XGBoostNode::Split {
+            feature,
+            left,
+            right,
+            ..
+        } = node
+        {
+            if out.len() <= depth {
+                out.resize_with(depth + 1, Default::default);
+            }
+            out[depth].insert(*feature);
+            features_by_depth(left, depth + 1, out);
+            features_by_depth(right, depth + 1, out);
+        }
+    }
+    fn bylevel_fit(fraction: f64) -> XGBoostResult {
+        let (x, y) = four_signal_data(200, 13);
+        let mut c = XGBoostConfig::default();
+        c.n_estimators = 20;
+        c.max_depth = 3;
+        c.learning_rate = 0.3;
+        c.colsample_bylevel = fraction;
+        c.seed = Some(7);
+        xgboost(x.view(), y.view(), &c).unwrap()
+    }
+
+    #[test]
+    fn test_colsample_bylevel_one_feature_per_level() {
+        // ceil(0.25 * 4) = 1 column per level: every split at one depth of one tree uses the same column
+        let r = bylevel_fit(0.25);
+        let mut roots = std::collections::BTreeSet::new();
+        for t in &r.trees {
+            let mut levels = Vec::new();
+            features_by_depth(&t.root, 0, &mut levels);
+            assert!(levels.iter().all(|s| s.len() <= 1), "{levels:?}");
+            roots.extend(levels.first().into_iter().flatten().copied());
+        }
+        assert!(
+            roots.len() >= 2,
+            "the level draws vary across trees: {roots:?}"
+        );
+        // not vacuous: without per-level sampling some depth mixes columns
+        let full = bylevel_fit(1.0);
+        assert!(full.trees.iter().any(|t| {
+            let mut l = Vec::new();
+            features_by_depth(&t.root, 0, &mut l);
+            l.iter().any(|s| s.len() >= 2)
+        }));
+    }
+
+    #[test]
+    fn test_colsample_bylevel_changes_the_fit() {
+        assert_ne!(bylevel_fit(1.0).predictions, bylevel_fit(0.25).predictions);
+    }
+
+    #[test]
+    fn test_xgboost_rejects_bad_colsample_bylevel() {
+        let (x, y) = four_signal_data(20, 1);
+        for v in [0.0, -0.5, 1.5, f64::NAN] {
+            let mut c = XGBoostConfig::default();
+            c.colsample_bylevel = v;
+            let e = xgboost(x.view(), y.view(), &c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with("colsample_bylevel")),
+                "{e}"
+            );
+        }
     }
 
     #[test]
