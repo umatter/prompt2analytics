@@ -52,6 +52,19 @@
       "tolerance": "Tol::coef(96); multipliers 1e-10 relative",
       "deviations": [{"finding": "STAT-39", "quantity": "df and bandwidth", "note": "R 6.5521 and 0.010842; p2a 18 and 0.03125"}, {"finding": "STAT-68", "quantity": "spectral ordinates", "note": "p2a about 2x R, different taper and edge smoothing"}],
       "supersedes_legacy": []
+    },
+    {
+      "id": "mahalanobis_t3",
+      "name": "Mahalanobis distances (full rank; singular covariances refused or generalised with the rank)",
+      "category": "multivariate",
+      "reference": "stats::mahalanobis; MASS::ginv; qr(cov)$rank; qchisq",
+      "doc": "validation/multivariate/mahalanobis.md",
+      "cases": ["stat_mahalanobis_t3"],
+      "tests": ["p2a-core::stats::mahalanobis::tests::test_validate_mahalanobis_t3_full_rank", "p2a-core::stats::mahalanobis::tests::test_validate_mahalanobis_t3_generalized", "p2a-core::stats::mahalanobis::tests::test_validate_mahalanobis_t3_singular_is_error"],
+      "quantities": ["D^2 (full rank)", "centre", "chi-square threshold at df = rank", "generalised D^2", "rank", "refusal of a singular covariance"],
+      "tolerance": "Tol::stat(n), Tol::coef(n); thresholds 1e-10 relative",
+      "deviations": [],
+      "supersedes_legacy": []
     }
   ]
 }

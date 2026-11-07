@@ -32,7 +32,7 @@ The Rust implementation uses Cholesky decomposition for efficient computation:
 2. Solve Lz = (x - μ) via forward substitution
 3. D² = z'z = ||z||²
 
-This avoids explicit matrix inverse and is more numerically stable. Falls back to pseudoinverse for singular/near-singular covariance matrices.
+This avoids explicit matrix inverse and is more numerically stable. A rank-deficient covariance is an error by default (see "Singular covariance").
 
 ## Reference Implementations
 
@@ -73,13 +73,46 @@ cov_mat <- cov(x)
 mahalanobis(x, center, cov_mat)
 ```
 
-**Rust Test:** `crates/p2a-core/src/stats/mahalanobis.rs::tests::test_validate_mahalanobis_against_r`
+**Rust Test:** `crates/p2a-core/src/stats/mahalanobis.rs::tests::test_mahalanobis_distance_sum_identity`
 
 ### Test 4: Pre-inverted Covariance
 
 **Test:** Verify same results when providing inverse covariance directly.
 
 **Rust Test:** `crates/p2a-core/src/stats/mahalanobis.rs::tests::test_mahalanobis_inverted`
+
+## Singular covariance (R-pinned)
+
+R's `mahalanobis` stops on a rank-deficient covariance ("system is exactly singular"), and so do
+`mahalanobis` and `run_mahalanobis` (`SingularMatrix`, naming the rank). A silent pseudoinverse would
+report distances whose chi-square df is the rank, not p, under a threshold written for p.
+`mahalanobis_with` and `run_mahalanobis_with` take `SingularCovariance::Generalized`: the distances use
+a generalized inverse, `rank` holds the numerical rank and `warnings` says so. On a sample covariance
+these are `MASS::ginv`'s distances, because the centred rows lie in the covariance's range.
+`MahalanobisResult::outlier_threshold(level)` is `qchisq(level, rank)`. A given `cov` must be symmetric
+(R's `solve` does not check); an estimated covariance needs at least two rows.
+
+**R Code:** case `stat_mahalanobis_t3` in `validation/r/cases/stats_misc_t3.R`, dataset
+`validation/datasets/generated/mahalanobis_t3.csv`.
+
+| Quantity | R |
+|---|---|
+| full rank, centre (`f1`, `f2`, `f3`) | 10.009863333333334, 4.71697, -0.9299966666666667 |
+| full rank, `qchisq(0.975, 3)` | 9.348403604496145 |
+| b = 2 a (rank 1), first `ginv` distances | 1.445901639344263, 0.39672131147541, 0.0032786885245901704 |
+| b = 2 a, `qchisq(0.975, 1)` against `qchisq(0.975, 2)` | 5.023886187314885, 7.377758908227871 |
+| total = sum of parts (rank 2 of 3), first `ginv` distances | 0.8617761007344652, 0.7505022370089935, 0.5086063079427657 |
+| total, `qchisq(0.975, 2)` against `qchisq(0.975, 3)` | 7.377758908227871, 9.348403604496145 |
+
+**Rust tests:**
+- `stats::mahalanobis::tests::test_validate_mahalanobis_t3_full_rank` (every distance, the centre, the rank and threshold)
+- `stats::mahalanobis::tests::test_validate_mahalanobis_t3_singular_is_error` (both singular designs refuse; R's `solve` stops on them)
+- `stats::mahalanobis::tests::test_validate_mahalanobis_t3_generalized` (`ginv` distances, rank, threshold, warning)
+- `stats::mahalanobis::tests::test_mahalanobis_needs_two_rows_for_covariance`
+
+**Status:** R-pinned (registry `validation/methods/stats_misc_t3.json`, id `mahalanobis_t3`).
+
+The MCP tool's threshold is a separate item (TOOL-10 below); `outlier_threshold` is what it can call.
 
 ## Missing values (R-pinned)
 
@@ -145,7 +178,7 @@ numbers against `which(complete.cases(a, b))`, the ten printed distances against
 
 2. **Matrix inverse**: R uses `solve()`, Rust uses LU decomposition via faer.
 
-3. **Singular matrices**: Both will fail on singular covariance matrices.
+3. **Singular matrices**: Both refuse a rank-deficient covariance. `SingularCovariance::Generalized` is p2a's explicit alternative.
 
 ## Performance Comparison
 

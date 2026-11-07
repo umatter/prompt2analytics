@@ -10,6 +10,13 @@
 //! - Uses triangular solves instead of matrix multiplication
 //! - Batch processes all observations using matrix operations
 //!
+//! # Singular covariance
+//!
+//! A rank-deficient covariance is an error, as R's `mahalanobis` stops on it ("system is exactly
+//! singular"). [`SingularCovariance::Generalized`] gives the distances on the rank-r subspace
+//! instead, with a warning. The chi-square df of the distances is the rank
+//! ([`MahalanobisResult::rank`], [`MahalanobisResult::outlier_threshold`]).
+//!
 //! # References
 //!
 //! - Mahalanobis, P. C. (1936). "On the generalized distance in statistics".
@@ -20,10 +27,39 @@
 use crate::data::Dataset;
 use crate::data::columns::{ColumnRequest, MissingSummary, NaPolicy};
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::safe_inverse;
+use crate::linalg::solve::{SingularPolicy, sym_inverse};
+use crate::traits::convergence::ResultNotes;
+use crate::traits::estimator::{chi_squared_quantile, validate_level};
 use faer::prelude::*;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
+
+/// What to do with a rank-deficient covariance matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SingularCovariance {
+    /// Refuse it, as R's `mahalanobis` does.
+    #[default]
+    Error,
+    /// Use a generalized inverse and report the rank and a warning.
+    Generalized,
+}
+
+crate::option_enum!(
+    SingularCovariance,
+    crate::options::Choices {
+        option: "singular covariance policy",
+        values: &[
+            (&["error", "refuse"], SingularCovariance::Error),
+            (
+                &["generalized", "generalised", "ginv", "pseudoinverse"],
+                SingularCovariance::Generalized
+            ),
+        ],
+    }
+);
+
+/// Name of the matrix in messages.
+const COVARIANCE: &str = "Mahalanobis covariance matrix";
 
 /// Result from Mahalanobis distance computation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +80,33 @@ pub struct MahalanobisResult {
     /// Rows dropped because of missing values (dataset wrapper; nothing for a matrix).
     #[serde(default, skip_serializing_if = "MissingSummary::is_empty")]
     pub missing: MissingSummary,
+    /// Numerical rank of the covariance used, the chi-square df of the distances; `n_vars` when
+    /// `inverted`.
+    #[serde(default)]
+    pub rank: usize,
+    /// Warnings (a generalized inverse was used).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl MahalanobisResult {
+    /// The chi-square outlier threshold `qchisq(level, rank)`. The level must lie in (0, 1); a
+    /// covariance of rank 0 has no threshold.
+    pub fn outlier_threshold(&self, level: f64) -> EconResult<f64> {
+        validate_level(level, "level")?;
+        if self.rank == 0 {
+            return Err(EconError::InvalidSpecification {
+                message: "rank 0 covariance: no chi-square threshold".to_string(),
+            });
+        }
+        chi_squared_quantile(level, self.rank as f64)
+    }
+}
+
+impl ResultNotes for MahalanobisResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
 }
 
 /// Compute squared Mahalanobis distance for observations.
@@ -74,7 +137,9 @@ pub struct MahalanobisResult {
 ///
 /// # Returns
 ///
-/// Vector of squared Mahalanobis distances, one per observation.
+/// Vector of squared Mahalanobis distances, one per observation. A rank-deficient covariance is
+/// [`EconError::SingularMatrix`], as in R; see [`mahalanobis_with`] for the alternative. An
+/// estimated covariance needs at least two rows.
 ///
 /// # Examples
 ///
@@ -92,6 +157,22 @@ pub fn mahalanobis(
     cov: Option<ArrayView2<f64>>,
     inverted: bool,
 ) -> EconResult<MahalanobisResult> {
+    mahalanobis_with(x, center, cov, inverted, SingularCovariance::Error)
+}
+
+/// [`mahalanobis`] with a policy for a rank-deficient covariance.
+///
+/// With [`SingularCovariance::Generalized`] the distances use a generalized inverse. The centred
+/// rows of a sample covariance lie in its range, where every reflexive generalized inverse gives
+/// the same quadratic form, so these are also `MASS::ginv`'s distances. `rank` is the chi-square
+/// df, and `warnings` says the inverse was generalized. A given `cov` must be symmetric.
+pub fn mahalanobis_with(
+    x: ArrayView2<f64>,
+    center: Option<ArrayView1<f64>>,
+    cov: Option<ArrayView2<f64>>,
+    inverted: bool,
+    singular: SingularCovariance,
+) -> EconResult<MahalanobisResult> {
     let (n, p) = x.dim();
 
     if n == 0 {
@@ -101,6 +182,14 @@ pub fn mahalanobis(
     if p == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Data must have at least one variable".to_string(),
+        });
+    }
+
+    if cov.is_none() && n < 2 {
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n,
+            context: "Mahalanobis: the sample covariance needs at least 2 rows".to_string(),
         });
     }
 
@@ -118,7 +207,7 @@ pub fn mahalanobis(
             }
             c.to_owned()
         }
-        None => x.mean_axis(Axis(0)).unwrap(),
+        None => x.mean_axis(Axis(0)).ok_or(EconError::EmptyDataset)?,
     };
 
     // Compute or use provided covariance matrix
@@ -143,24 +232,40 @@ pub fn mahalanobis(
     };
 
     // Compute distances using optimized batch method
-    let distances = if inverted {
-        // If already inverted, use direct quadratic form computation
-        compute_distances_with_inverse(x, &center_vec, &cov_matrix)
+    let mut warnings = Vec::new();
+    let (distances, rank) = if inverted {
+        // If already inverted, use direct quadratic form computation (R checks no inverse either)
+        (
+            compute_distances_with_inverse(x, &center_vec, &cov_matrix),
+            p,
+        )
     } else {
-        // Try Cholesky-based method first (more numerically stable and often faster)
-        // Fall back to inverse-based method for singular/near-singular matrices
-        match compute_distances_cholesky(x, &center_vec, &cov_matrix) {
-            Ok(d) => d,
-            Err(_) => {
-                // Fallback: use pseudoinverse for singular matrices
-                let (cov_inv, _) = safe_inverse(&cov_matrix.view()).map_err(|e| {
-                    EconError::InvalidSpecification {
-                        message: format!("Failed to compute covariance inverse: {}", e),
-                    }
-                })?;
-                compute_distances_with_inverse(x, &center_vec, &cov_inv)
+        let policy = match singular {
+            SingularCovariance::Error => SingularPolicy::Error,
+            SingularCovariance::Generalized => SingularPolicy::Generalized,
+        };
+        let inv = sym_inverse(cov_matrix.view(), policy, COVARIANCE).map_err(|e| match e {
+            EconError::SingularMatrix { context, .. } => EconError::SingularMatrix {
+                context,
+                suggestion: "drop the redundant column(s) (R's mahalanobis stops: 'system is \
+                             exactly singular'), or pass SingularCovariance::Generalized for \
+                             distances on the rank-r subspace (chi-square df = rank)"
+                    .to_string(),
+            },
+            other => other,
+        })?;
+        let distances = if inv.is_full_rank() {
+            // The Cholesky route is the stable one. It fails only on an indefinite given matrix,
+            // for which the inverse is what R's solve gives.
+            match compute_distances_cholesky(x, &center_vec, &cov_matrix) {
+                Ok(d) => d,
+                Err(_) => compute_distances_with_inverse(x, &center_vec, &inv.inverse),
             }
-        }
+        } else {
+            warnings.extend(inv.warning(COVARIANCE));
+            compute_distances_with_inverse(x, &center_vec, &inv.inverse)
+        };
+        (distances, inv.rank)
     };
 
     let mut rows = crate::resource::try_with_capacity(n, "row indices")?;
@@ -174,6 +279,8 @@ pub fn mahalanobis(
         inverted,
         rows,
         missing: MissingSummary::none(n),
+        rank,
+        warnings,
     })
 }
 
@@ -207,39 +314,23 @@ fn compute_distances_cholesky(
     let l_faer = chol.L();
     let l = Array2::from_shape_fn((p, p), |(i, j)| l_faer[(i, j)]);
 
-    // Compute distances using forward substitution for each observation
+    // Solve L z = x[i] - center by forward substitution in one reused buffer; D² = ||z||²
+    let mut z = vec![0.0; p];
     let mut distances = vec![0.0; n];
-    for i in 0..n {
-        // Compute centered observation: b = x[i] - center
-        let mut b = Array1::zeros(p);
+    for (i, d2) in distances.iter_mut().enumerate() {
+        let mut sum_sq = 0.0;
         for j in 0..p {
-            b[j] = x[[i, j]] - center[j];
+            let mut sum = x[[i, j]] - center[j];
+            for k in 0..j {
+                sum -= l[[j, k]] * z[k];
+            }
+            z[j] = sum / l[[j, j]];
+            sum_sq += z[j] * z[j];
         }
-
-        // Solve L z = b via forward substitution
-        let z = forward_substitution(&l, &b);
-
-        // D² = ||z||²
-        distances[i] = z.iter().map(|&v| v * v).sum();
+        *d2 = sum_sq;
     }
 
     Ok(distances)
-}
-
-/// Forward substitution to solve L x = b where L is lower triangular.
-fn forward_substitution(l: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
-    let n = b.len();
-    let mut x = Array1::zeros(n);
-
-    for i in 0..n {
-        let mut sum = b[i];
-        for j in 0..i {
-            sum -= l[[i, j]] * x[j];
-        }
-        x[i] = sum / l[[i, i]];
-    }
-
-    x
 }
 
 /// Compute distances when the inverse covariance matrix is already provided.
@@ -356,12 +447,24 @@ pub fn mahalanobis_single(
 ///
 /// # Returns
 ///
-/// `MahalanobisResult` with distances for each complete row.
+/// `MahalanobisResult` with distances for each complete row. A rank-deficient covariance is an
+/// error; see [`run_mahalanobis_with`].
 pub fn run_mahalanobis(
     dataset: &Dataset,
     columns: &[&str],
     center: Option<&[f64]>,
     cov: Option<ArrayView2<f64>>,
+) -> EconResult<MahalanobisResult> {
+    run_mahalanobis_with(dataset, columns, center, cov, SingularCovariance::Error)
+}
+
+/// [`run_mahalanobis`] with a policy for a rank-deficient covariance (see [`mahalanobis_with`]).
+pub fn run_mahalanobis_with(
+    dataset: &Dataset,
+    columns: &[&str],
+    center: Option<&[f64]>,
+    cov: Option<ArrayView2<f64>>,
+    singular: SingularCovariance,
 ) -> EconResult<MahalanobisResult> {
     if columns.is_empty() {
         return Err(EconError::InvalidSpecification {
@@ -379,7 +482,7 @@ pub fn run_mahalanobis(
     let center_arr = center.map(|c| Array1::from_vec(c.to_vec()));
     let center_view = center_arr.as_ref().map(|a| a.view());
 
-    let mut result = mahalanobis(data.view(), center_view, cov, false)?;
+    let mut result = mahalanobis_with(data.view(), center_view, cov, false, singular)?;
     result.rows.clear();
     result.rows.extend_from_slice(cols.rows());
     result.missing = cols.missing().clone();
@@ -390,6 +493,7 @@ pub fn run_mahalanobis(
 mod tests {
     use super::*;
     use ndarray::array;
+    use p2a_validation::{Check, Tol};
 
     #[test]
     fn test_mahalanobis_basic() {
@@ -427,7 +531,7 @@ mod tests {
     #[test]
     fn test_mahalanobis_auto_center_cov() {
         // Let function compute center and covariance
-        let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0],];
+        let x = array![[1.0, 2.0], [2.0, 3.5], [3.0, 3.0], [4.0, 5.5],];
 
         let result = mahalanobis(x.view(), None, None, false).unwrap();
 
@@ -480,22 +584,8 @@ mod tests {
 
     /// Validate against R's mahalanobis() function
     #[test]
-    fn test_validate_mahalanobis_against_r() {
-        // R code:
-        // x <- matrix(c(1,2,3,4,5,6), ncol=2, byrow=TRUE)
-        // center <- colMeans(x)  # [2, 3]
-        // cov <- cov(x)
-        // mahalanobis(x, center, cov)
-        // Result: [2, 0, 2]  (for perfectly collinear data, distances are equal)
-
-        // Non-collinear data for better test
-        // R code:
-        // set.seed(42)
-        // x <- matrix(c(1,2, 3,5, 2,4, 5,3), ncol=2, byrow=TRUE)
-        // center <- colMeans(x)  # [2.75, 3.5]
-        // cov <- cov(x)
-        // mahalanobis(x, center, cov)
-
+    fn test_mahalanobis_distance_sum_identity() {
+        // With the sample covariance the distances sum to (n - 1) p.
         let x = array![[1.0, 2.0], [3.0, 5.0], [2.0, 4.0], [5.0, 3.0],];
 
         let result = mahalanobis(x.view(), None, None, false).unwrap();
@@ -504,8 +594,6 @@ mod tests {
         assert!((result.center[0] - 2.75).abs() < 1e-10);
         assert!((result.center[1] - 3.5).abs() < 1e-10);
 
-        // Note: Small differences due to numerical precision
-        // The sum of Mahalanobis distances should equal (n-1)*p for sample covariance
         // Here n=4, p=2, so sum should be 3*2 = 6.0
         let sum: f64 = result.distances.iter().sum();
 
@@ -574,5 +662,133 @@ mod tests {
             run_mahalanobis(&ds, &["a", "nope"], None, None),
             Err(EconError::ColumnNotFound { .. })
         ));
+    }
+
+    /// STAT-54: R's mahalanobis stops on a singular covariance ("system is exactly singular"); p2a silently used a
+    /// pseudoinverse and dropped the warning.
+    #[test]
+    fn test_validate_mahalanobis_t3_singular_is_error() {
+        let (case, ds) = crate::test_support::load_case("stat_mahalanobis_t3");
+        assert_eq!(case.scalar("ab_r_error"), 1.0);
+        assert_eq!(case.scalar("total_r_error"), 1.0);
+        for (cols, rank) in [
+            (&["a", "b"][..], "rank 1 of 2"),
+            (&["p1", "p2", "total"][..], "rank 2 of 3"),
+        ] {
+            let e = run_mahalanobis(&ds, cols, None, None).unwrap_err();
+            match &e {
+                EconError::SingularMatrix {
+                    context,
+                    suggestion,
+                } => {
+                    assert!(context.contains(rank), "{context}");
+                    assert!(suggestion.contains("Generalized"), "{suggestion}");
+                }
+                other => panic!("expected SingularMatrix, got {other}"),
+            }
+        }
+        // the array entry point too
+        let x = ndarray::array![[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0], [5.5, 11.0]];
+        assert!(matches!(
+            mahalanobis(x.view(), None, None, false),
+            Err(EconError::SingularMatrix { .. })
+        ));
+    }
+
+    /// R4: the covariance needs n >= 2 rows (n - 1 = 0 divided by zero).
+    #[test]
+    fn test_mahalanobis_needs_two_rows_for_covariance() {
+        let x = ndarray::array![[1.0, 2.0]];
+        assert!(matches!(
+            mahalanobis(x.view(), None, None, false),
+            Err(EconError::InsufficientData {
+                required: 2,
+                provided: 1,
+                ..
+            })
+        ));
+        let cov = ndarray::array![[1.0, 0.0], [0.0, 1.0]];
+        assert!(mahalanobis(x.view(), None, Some(cov.view()), false).is_ok()); // given covariance: one row is fine
+    }
+
+    /// STAT-54: the generalised distances live on the rank-r subspace; rank and threshold are reported.
+    #[test]
+    fn test_validate_mahalanobis_t3_generalized() {
+        let (case, ds) = crate::test_support::load_case("stat_mahalanobis_t3");
+        let ab = run_mahalanobis_with(
+            &ds,
+            &["a", "b"],
+            None,
+            None,
+            SingularCovariance::Generalized,
+        )
+        .unwrap();
+        let tot = run_mahalanobis_with(
+            &ds,
+            &["p1", "p2", "total"],
+            None,
+            None,
+            SingularCovariance::Generalized,
+        )
+        .unwrap();
+        Check::new(&case)
+            .vector("ab_ginv_d2", &ab.distances, Tol::stat(5))
+            .scalar("ab_rank", ab.rank as f64, Tol::exact())
+            .scalar(
+                "ab_threshold_rank",
+                ab.outlier_threshold(0.975).unwrap(),
+                Tol::new(1e-10, 0.0),
+            )
+            .vector("total_ginv_d2", &tot.distances, Tol::stat(8))
+            .scalar("total_rank", tot.rank as f64, Tol::exact())
+            .scalar(
+                "total_threshold_rank",
+                tot.outlier_threshold(0.975).unwrap(),
+                Tol::new(1e-10, 0.0),
+            )
+            .finish();
+        assert_eq!(ab.warnings, vec!["Mahalanobis covariance matrix is singular (rank 1 of 2); a generalized inverse was used".to_string()]);
+        assert!(
+            crate::traits::convergence::notes_text(&ab)
+                .contains("Warning: Mahalanobis covariance matrix is singular")
+        );
+        assert!(ab.outlier_threshold(95.0).is_err());
+    }
+
+    /// STAT-44 (mahalanobis.rs part): full-rank distances and centre pinned to R; rank = p, no warning.
+    #[test]
+    fn test_validate_mahalanobis_t3_full_rank() {
+        let (case, ds) = crate::test_support::load_case("stat_mahalanobis_t3");
+        let r = run_mahalanobis(&ds, &["f1", "f2", "f3"], None, None).unwrap();
+        Check::new(&case)
+            .vector("full_d2", &r.distances, Tol::stat(30))
+            .vector("full_center", &r.center, Tol::coef(30))
+            .scalar(
+                "full_threshold",
+                r.outlier_threshold(0.975).unwrap(),
+                Tol::new(1e-10, 0.0),
+            )
+            .finish();
+        assert_eq!(r.rank, 3);
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_singular_covariance_parses_aliases_and_rejects_unknown() {
+        assert_eq!(SingularCovariance::choices().validate(), Ok(()));
+        assert_eq!(
+            "ginv".parse::<SingularCovariance>().unwrap(),
+            SingularCovariance::Generalized
+        );
+        assert_eq!(
+            "Generalised".parse::<SingularCovariance>().unwrap(),
+            SingularCovariance::Generalized
+        );
+        assert_eq!(
+            "refuse".parse::<SingularCovariance>().unwrap(),
+            SingularCovariance::Error
+        );
+        assert!("ridge".parse::<SingularCovariance>().is_err());
+        assert_eq!(SingularCovariance::default(), SingularCovariance::Error);
     }
 }

@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "stat_mahalanobis_t3",
+  "area": "multivariate/mahalanobis",
+  "method": "mahalanobis: full-rank distances; singular covariances (R refuses) and the Moore-Penrose distances with the rank",
+  "reference": "stats::mahalanobis (solve(cov): refuses a singular covariance); MASS::ginv for the generalised distances; qr(cov)$rank; qchisq(0.975, df)",
+  "call": "mahalanobis(X, colMeans(X), cov(X)); rowSums((C %*% MASS::ginv(cov(X))) * C)",
+  "dataset": "validation/datasets/generated/mahalanobis_t3.csv",
+  "datasets": ["validation/datasets/generated/mahalanobis_t3.csv"],
+  "r_version": "R version 4.3.3 (2024-02-29)",
+  "packages": {
+    "MASS": "7.3.60.0.1"
+  },
+  "values": {
+    "full_d2": [2.0754358425361144, 1.9126777984532726, 4.6820023379129037, 2.3558781093878527, 5.3258683194772019, 4.4130568151531788, 1.5838507580082526, 1.5738233803552186, 2.6702715350677888, 2.3509567053946077, 1.8887305162588799, 0.81938840432649318, 2.3142825677586711, 5.3591852463404681, 1.9169784958456777, 2.3633599222977599, 5.6546967006836093, 5.9564963781615168, 0.80145201366520857, 1.4513951396808331, 5.5084794596714595, 5.3870028157556726, 0.70978494594665142, 4.577305098347062, 0.48433895690135931, 0.48785451186695838, 7.3875802915357678, 2.7046008890774167, 1.647673652433403, 0.63559239169874349],
+    "full_center": {
+      "names": ["f1", "f2", "f3"],
+      "values": [10.009863333333334, 4.7169699999999999, -0.92999666666666669]
+    },
+    "full_threshold": 9.3484036044961449,
+    "ab_r_error": 1,
+    "ab_ginv_d2": [1.445901639344263, 0.39672131147541001, 0.0032786885245901704, 0.26557377049180331, 1.8885245901639347],
+    "ab_rank": 1,
+    "ab_threshold_rank": 5.0238861873148846,
+    "ab_threshold_p": 7.3777589082278707,
+    "total_r_error": 1,
+    "total_ginv_d2": [0.8617761007344652, 0.75050223700899354, 0.50860630794276573, 1.5151257406694998, 4.4553790710441206, 2.2473381367759635, 2.3130139334583943, 1.3482584723658007],
+    "total_rank": 2,
+    "total_threshold_rank": 7.3777589082278707,
+    "total_threshold_p": 9.3484036044961449
+  }
+}

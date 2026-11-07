@@ -102,3 +102,30 @@ case("stat_spectrum_t3", "timeseries/spectrum", "spec.pgram grid and peak (n = 9
        reference = "stats::spec.pgram (frequencies k / N, modified Daniell spans, taper); stats:::plot.spec's spec.ci (unequal tails proportional to P(X <= df))",
        call = "spec.pgram(x, spans = c(3, 3), taper = 0.1, detrend = TRUE); spec_ci(df, coverage)", packages = character(0))
 })
+
+case("stat_mahalanobis_t3", "multivariate/mahalanobis", "mahalanobis: full-rank distances; singular covariances (R refuses) and the Moore-Penrose distances with the rank", function(ctx) {
+  set.seed(31)
+  n <- 30
+  f1 <- round(rnorm(n, 10, 2), 4); f2 <- round(0.5 * f1 + rnorm(n, 0, 1), 4); f3 <- round(rnorm(n, -1, 0.5), 4)
+  a <- c(1, 2, 3, 4, 5.5, rep(NA, n - 5)); b <- 2 * a
+  set.seed(32)
+  p1 <- round(c(runif(8, 1, 5), rep(NA, n - 8)), 2); p2 <- round(c(runif(8, 0, 3), rep(NA, n - 8)), 2)
+  d <- ctx$gen_dataset("mahalanobis_t3", data.frame(id = 1:n, f1 = f1, f2 = f2, f3 = f3, a = a, b = b, p1 = p1, p2 = p2, total = p1 + p2))
+  F <- as.matrix(d[, c("f1", "f2", "f3")])
+  full <- mahalanobis(F, colMeans(F), cov(F))
+  sing <- function(M) {
+    err <- tryCatch({ mahalanobis(M, colMeans(M), cov(M)); 0 }, error = function(e) 1)
+    S <- cov(M); G <- MASS::ginv(S); C <- sweep(M, 2, colMeans(M))
+    list(r_error = err, ginv_d2 = vec(rowSums((C %*% G) * C)), rank = qr(S)$rank,
+         threshold_rank = qchisq(0.975, qr(S)$rank), threshold_p = qchisq(0.975, ncol(M)))
+  }
+  A <- as.matrix(d[1:5, c("a", "b")]); P <- as.matrix(d[1:8, c("p1", "p2", "total")])
+  s2 <- sing(A); s3 <- sing(P)
+  stopifnot(s2$r_error == 1, s3$r_error == 1, s2$rank == 1, s3$rank == 2)
+  v <- list(full_d2 = vec(full), full_center = named(colMeans(F)), full_threshold = qchisq(0.975, 3))
+  for (k in names(s2)) v[[paste0("ab_", k)]] <- s2[[k]]
+  for (k in names(s3)) v[[paste0("total_", k)]] <- s3[[k]]
+  list(values = v, packages = "MASS",
+       reference = "stats::mahalanobis (solve(cov): refuses a singular covariance); MASS::ginv for the generalised distances; qr(cov)$rank; qchisq(0.975, df)",
+       call = "mahalanobis(X, colMeans(X), cov(X)); rowSums((C %*% MASS::ginv(cov(X))) * C)")
+})
