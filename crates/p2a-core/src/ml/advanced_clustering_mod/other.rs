@@ -3,7 +3,10 @@
 use ndarray::{Array2, ArrayView2};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+
+/// Seed of the random starts when `seed` is `None`.
+pub const KPROTOTYPES_DEFAULT_SEED: u64 = 42;
 
 // =============================================================================
 // K-Prototypes (kprototypes)
@@ -131,11 +134,30 @@ pub fn kprototypes(
 
     let max_iter = max_iterations.unwrap_or(100);
     let n_inits = n_init.unwrap_or(10);
+    if max_iter == 0 {
+        return Err("max_iterations must be at least 1, got 0".to_string());
+    }
+    if n_inits == 0 {
+        return Err("n_init must be at least 1, got 0".to_string());
+    }
+    if let Some(g) = gamma {
+        if !g.is_finite() || g < 0.0 {
+            return Err(format!("gamma must be finite and at least 0, got {g}"));
+        }
+    }
+    crate::ml::extract::require_finite(&numeric_data, "k-prototypes")?;
+    if let Some((i, row)) = categorical_data
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.len() != d_cat)
+    {
+        return Err(format!(
+            "categorical row {i} has {} entries, row 0 has {d_cat}",
+            row.len()
+        ));
+    }
 
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(KPROTOTYPES_DEFAULT_SEED));
 
     // Auto-compute gamma if not provided
     // Use ratio of average numeric variance to average categorical entropy
@@ -180,6 +202,7 @@ pub fn kprototypes(
         let mut n_iterations = 0;
 
         for iter in 0..max_iter {
+            crate::resource::checkpoint().map_err(|e| e.to_string())?;
             n_iterations = iter + 1;
             let old_labels = labels.clone();
 
@@ -221,8 +244,8 @@ pub fn kprototypes(
             // Update step
             let mut cluster_counts = vec![0usize; n_clusters];
             let mut num_sums: Array2<f64> = Array2::zeros((n_clusters, d_num));
-            let mut cat_counts: Vec<Vec<HashMap<usize, usize>>> =
-                vec![vec![HashMap::new(); d_cat]; n_clusters];
+            let mut cat_counts: Vec<Vec<BTreeMap<usize, usize>>> =
+                vec![vec![BTreeMap::new(); d_cat]; n_clusters];
 
             for i in 0..n {
                 let c = labels[i];
@@ -250,10 +273,16 @@ pub fn kprototypes(
             for c in 0..n_clusters {
                 if cluster_counts[c] > 0 {
                     for j in 0..d_cat {
-                        if let Some((&mode, _)) =
-                            cat_counts[c][j].iter().max_by_key(|(_, count)| *count)
-                        {
-                            cat_proto[c][j] = mode;
+                        // The most frequent category; a tie goes to the smallest (as
+                        // clustMixType's which.max over sorted levels).
+                        let mut mode: Option<(usize, usize)> = None;
+                        for (&category, &count) in &cat_counts[c][j] {
+                            if mode.is_none_or(|(_, best)| count > best) {
+                                mode = Some((category, count));
+                            }
+                        }
+                        if let Some((category, _)) = mode {
+                            cat_proto[c][j] = category;
                         }
                     }
                 }
@@ -338,6 +367,68 @@ mod tests {
     use super::*;
 
     use ndarray::array;
+
+    #[test]
+    fn test_kprototypes_seeded_runs_are_identical_under_mode_ties() {
+        // ML-60: modes were taken in HashMap order, so identical seeded calls could differ.
+        let num = Array2::from_shape_fn((8, 1), |(i, _)| {
+            if i < 4 {
+                0.1 * i as f64
+            } else {
+                5.0 + 0.1 * i as f64
+            }
+        });
+        let cat: Vec<Vec<usize>> = [0, 1, 0, 1, 2, 3, 2, 3].iter().map(|&c| vec![c]).collect();
+        let first = kprototypes(num.view(), &cat, 2, Some(0.5), None, Some(3), Some(42)).unwrap();
+        for _ in 0..20 {
+            let r = kprototypes(num.view(), &cat, 2, Some(0.5), None, Some(3), Some(42)).unwrap();
+            assert_eq!(
+                (&r.labels, &r.categorical_prototypes, r.total_cost.to_bits()),
+                (
+                    &first.labels,
+                    &first.categorical_prototypes,
+                    first.total_cost.to_bits()
+                )
+            );
+        }
+        let mut protos = first.categorical_prototypes.clone();
+        protos.sort();
+        assert_eq!(protos, vec![vec![0], vec![2]]); // ties go to the smallest category
+    }
+
+    #[test]
+    fn test_kprototypes_rejects_ragged_and_bad_parameters() {
+        let num = Array2::from_shape_fn((4, 1), |(i, _)| i as f64);
+        let ragged = vec![vec![0, 1], vec![0], vec![1, 1], vec![0, 0]];
+        assert!(
+            kprototypes(num.view(), &ragged, 2, None, None, None, None)
+                .unwrap_err()
+                .contains("categorical")
+        );
+        let cat = vec![vec![0]; 4];
+        assert!(
+            kprototypes(num.view(), &cat, 2, Some(f64::NAN), None, None, None)
+                .unwrap_err()
+                .contains("gamma")
+        );
+        assert!(
+            kprototypes(num.view(), &cat, 2, None, Some(0), None, None)
+                .unwrap_err()
+                .contains("max_iterations")
+        );
+        let a = kprototypes(num.view(), &cat, 2, None, None, None, None).unwrap();
+        let b = kprototypes(
+            num.view(),
+            &cat,
+            2,
+            None,
+            None,
+            None,
+            Some(KPROTOTYPES_DEFAULT_SEED),
+        )
+        .unwrap();
+        assert_eq!(a.total_cost.to_bits(), b.total_cost.to_bits());
+    }
 
     #[test]
     fn test_kprototypes_basic() {

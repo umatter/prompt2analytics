@@ -1,9 +1,24 @@
 //! K-means variants: mini-batch ([`mini_batch_kmeans`]), trimmed ([`trimmed_kmeans`]) and spherical ([`skmeans`]).
 
+use crate::resource::checkpoint;
+use crate::traits::convergence::{Convergence, ResultNotes, notes_text};
 use ndarray::{Array2, ArrayView2};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
+
+/// Seed of the random starts when `seed` is `None`.
+pub const KMEANS_VARIANTS_DEFAULT_SEED: u64 = 42;
+
+/// Shared parameter checks of the three variants.
+fn check_runs(max_iterations: usize, n_init: usize) -> Result<(), String> {
+    if max_iterations == 0 {
+        return Err("max_iterations must be at least 1, got 0".to_string());
+    }
+    if n_init == 0 {
+        return Err("n_init must be at least 1, got 0".to_string());
+    }
+    Ok(())
+}
 
 // =============================================================================
 // Mini-Batch K-Means
@@ -105,11 +120,13 @@ pub fn mini_batch_kmeans(
     let batch = batch_size.unwrap_or(100.min(n));
     let max_iter = max_iterations.unwrap_or(100);
     let n_inits = n_init.unwrap_or(3);
+    if batch == 0 {
+        return Err("batch_size must be at least 1, got 0".to_string());
+    }
+    check_runs(max_iter, n_inits)?;
+    crate::ml::extract::require_finite(&data, "mini-batch k-means")?;
 
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(KMEANS_VARIANTS_DEFAULT_SEED));
 
     let mut best_result: Option<MiniBatchKMeansResult> = None;
     let mut best_inertia = f64::INFINITY;
@@ -121,6 +138,7 @@ pub fn mini_batch_kmeans(
 
         // Mini-batch loop
         for _iter in 0..max_iter {
+            checkpoint().map_err(|e| e.to_string())?;
             // Sample a mini-batch
             let batch_indices: Vec<usize> = (0..batch).map(|_| rng.gen_range(0..n)).collect();
 
@@ -275,6 +293,24 @@ pub struct TrimmedKMeansResult {
     pub n: usize,
     /// Number of trimmed points
     pub n_trimmed: usize,
+    /// Whether the concentration step reached its fixed point (the assignment did not change)
+    #[serde(default)]
+    pub converged: bool,
+    /// What the fit could not do
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The stopping rule's final state
+    #[serde(default)]
+    pub convergence: Convergence,
+}
+
+impl ResultNotes for TrimmedKMeansResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 impl std::fmt::Display for TrimmedKMeansResult {
@@ -285,7 +321,6 @@ impl std::fmt::Display for TrimmedKMeansResult {
         writeln!(f, "Number of observations: {}", self.n)?;
         writeln!(f, "Trimming proportion: {:.1}%", self.alpha * 100.0)?;
         writeln!(f, "Trimmed points: {}", self.n_trimmed)?;
-        writeln!(f, "Iterations: {}", self.n_iterations)?;
         writeln!(f, "Inertia (WCSS, non-trimmed): {:.4}", self.inertia)?;
         writeln!(f)?;
 
@@ -303,7 +338,7 @@ impl std::fmt::Display for TrimmedKMeansResult {
         }
         writeln!(f, "  Trimmed (noise): {} points", self.n_trimmed)?;
 
-        Ok(())
+        write!(f, "{}", notes_text(self))
     }
 }
 
@@ -364,11 +399,16 @@ pub fn trimmed_kmeans(
     let n_inits = n_init.unwrap_or(10);
     let n_trim = (n as f64 * trim_prop).ceil() as usize;
     let n_keep = n - n_trim;
+    check_runs(max_iter, n_inits)?;
+    if n_keep < n_clusters {
+        return Err(format!(
+            "alpha = {trim_prop} trims {n_trim} of {n} rows, which leaves fewer rows than the \
+             {n_clusters} clusters"
+        ));
+    }
+    crate::ml::extract::require_finite(&data, "trimmed k-means")?;
 
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(KMEANS_VARIANTS_DEFAULT_SEED));
 
     let mut best_result: Option<TrimmedKMeansResult> = None;
     let mut best_inertia = f64::INFINITY;
@@ -377,10 +417,14 @@ pub fn trimmed_kmeans(
         // Initialize centroids using k-means++ on non-trimmed subset
         let mut centroids = mini_batch_kmeans_plusplus_init(&data, n_clusters, &mut rng);
         let mut labels = vec![-1i32; n];
+        let mut previous = vec![-2i32; n];
         let mut trimmed_mask = vec![false; n];
         let mut n_iterations = 0;
+        let mut converged = false;
+        let mut changed = n;
 
         for iter in 0..max_iter {
+            checkpoint().map_err(|e| e.to_string())?;
             n_iterations = iter + 1;
 
             // Compute distances and assign to nearest centroid
@@ -401,7 +445,7 @@ pub fn trimmed_kmeans(
             }
 
             // Sort by distance and trim the largest
-            distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+            distances.sort_by(|a, b| a.0.total_cmp(&b.0));
 
             // Reset trimmed mask and labels
             trimmed_mask.fill(false);
@@ -416,8 +460,15 @@ pub fn trimmed_kmeans(
                 }
             }
 
+            // The concentration step's fixed point: the same assignment gives the same centroids.
+            changed = labels.iter().zip(&previous).filter(|(a, b)| a != b).count();
+            if changed == 0 {
+                converged = true;
+                break;
+            }
+            previous.copy_from_slice(&labels);
+
             // Update centroids using only non-trimmed points
-            let old_centroids = centroids.clone();
             for j in 0..n_clusters {
                 let mut sum = vec![0.0; d];
                 let mut count = 0;
@@ -434,20 +485,6 @@ pub fn trimmed_kmeans(
                         centroids[[j, k]] = sum[k] / count as f64;
                     }
                 }
-            }
-
-            // Check convergence
-            let max_shift: f64 = (0..n_clusters)
-                .map(|j| {
-                    (0..d)
-                        .map(|k| (centroids[[j, k]] - old_centroids[[j, k]]).powi(2))
-                        .sum::<f64>()
-                        .sqrt()
-                })
-                .fold(0.0, f64::max);
-
-            if max_shift < 1e-6 {
-                break;
             }
         }
 
@@ -466,6 +503,15 @@ pub fn trimmed_kmeans(
         if inertia < best_inertia {
             best_inertia = inertia;
 
+            let convergence = Convergence::new(
+                converged,
+                n_iterations,
+                max_iter,
+                "labels changed in the last iteration",
+                changed as f64,
+                0.0,
+            );
+            let warnings: Vec<String> = convergence.note("Trimmed k-means").into_iter().collect();
             let trimmed_indices: Vec<usize> = trimmed_mask
                 .iter()
                 .enumerate()
@@ -483,6 +529,9 @@ pub fn trimmed_kmeans(
                 n_clusters,
                 n,
                 n_trimmed: n_trim,
+                converged,
+                warnings,
+                convergence,
             });
         }
     }
@@ -624,11 +673,13 @@ pub fn skmeans(
     let max_iter = max_iterations.unwrap_or(100);
     let tolerance = tol.unwrap_or(1e-6);
     let n_inits = n_init.unwrap_or(10);
+    check_runs(max_iter, n_inits)?;
+    if !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(format!("tol must be finite and positive, got {tolerance}"));
+    }
+    crate::ml::extract::require_finite(&data, "spherical k-means")?;
 
-    let mut rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    let mut rng = StdRng::seed_from_u64(seed.unwrap_or(KMEANS_VARIANTS_DEFAULT_SEED));
 
     // Normalize data to unit vectors
     let mut normalized_data: Vec<Vec<f64>> = Vec::with_capacity(n);
@@ -765,6 +816,105 @@ mod tests {
     use super::*;
 
     use ndarray::array;
+
+    #[test]
+    fn test_trimmed_kmeans_is_scale_equivariant() {
+        // The old stop |shift| < 1e-6 (absolute) ended after one pass on data in small units.
+        let x = Array2::from_shape_fn((60, 2), |(i, j)| {
+            [[0.0, 0.0], [2.0, 0.5], [1.0, 2.0]][i % 3][j] + 0.6 * ((i * 13 + j * 5) as f64).sin()
+        });
+        let base = trimmed_kmeans(x.view(), 3, Some(0.1), Some(100), Some(1), Some(4)).unwrap();
+        let small = trimmed_kmeans(
+            (&x * 2f64.powi(-24)).view(),
+            3,
+            Some(0.1),
+            Some(100),
+            Some(1),
+            Some(4),
+        )
+        .unwrap();
+        assert!(base.converged && small.converged);
+        assert_eq!(
+            (small.labels.clone(), small.n_iterations),
+            (base.labels.clone(), base.n_iterations)
+        );
+        assert!(base.n_iterations > 1);
+    }
+
+    #[test]
+    fn test_trimmed_kmeans_reports_the_iteration_limit() {
+        let x = Array2::from_shape_fn((60, 2), |(i, j)| {
+            [[0.0, 0.0], [2.0, 0.5], [1.0, 2.0]][i % 3][j] + 0.6 * ((i * 13 + j * 5) as f64).sin()
+        });
+        let r = trimmed_kmeans(x.view(), 3, Some(0.1), Some(1), Some(1), Some(4)).unwrap();
+        assert!(!r.converged);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("did not converge")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(format!("{r}").contains("Converged: no"));
+    }
+
+    #[test]
+    fn test_kmeans_variants_reject_bad_parameters_and_default_seeds_are_fixed() {
+        let x = Array2::from_shape_fn((12, 2), |(i, j)| {
+            (i % 3) as f64 * 4.0 + 0.1 * ((i + j) as f64).cos()
+        });
+        assert!(
+            mini_batch_kmeans(x.view(), 2, Some(0), None, None, None)
+                .unwrap_err()
+                .contains("batch_size")
+        );
+        assert!(
+            mini_batch_kmeans(x.view(), 2, None, Some(0), None, None)
+                .unwrap_err()
+                .contains("max_iterations")
+        );
+        assert!(
+            trimmed_kmeans(x.view(), 2, Some(0.1), None, Some(0), None)
+                .unwrap_err()
+                .contains("n_init")
+        );
+        assert!(
+            trimmed_kmeans(x.view(), 11, Some(0.45), None, None, None)
+                .unwrap_err()
+                .contains("alpha")
+        );
+        assert!(
+            skmeans(x.view(), 2, None, Some(-1.0), None, None)
+                .unwrap_err()
+                .contains("tol")
+        );
+        let mut nan = x.clone();
+        nan[[2, 1]] = f64::NAN;
+        assert!(
+            mini_batch_kmeans(nan.view(), 2, None, None, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+        assert!(
+            trimmed_kmeans(nan.view(), 2, None, None, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+        assert!(
+            skmeans(nan.view(), 2, None, None, None, None)
+                .unwrap_err()
+                .contains("finite")
+        );
+        let a = mini_batch_kmeans(x.view(), 2, None, None, None, None).unwrap();
+        let b = mini_batch_kmeans(
+            x.view(),
+            2,
+            None,
+            None,
+            None,
+            Some(KMEANS_VARIANTS_DEFAULT_SEED),
+        )
+        .unwrap();
+        assert_eq!(a.inertia.to_bits(), b.inertia.to_bits());
+    }
 
     #[test]
     fn test_mini_batch_kmeans_basic() {
