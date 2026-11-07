@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::api::{DatasetMeta, ToolDefinition, api};
 use crate::components::AutocompleteDropdown;
-use crate::state::autocomplete::{AutocompleteState, Suggestion};
+use crate::state::autocomplete::{AutocompleteState, Suggestion, find_last_trigger};
 use crate::state::{ChatState, SessionState};
 
 /// ChatInput component - textarea with send button and autocomplete
@@ -176,16 +176,15 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
             textarea_value.set(value.clone());
 
             // Try to detect autocomplete triggers
-            let suggestions = detect_and_generate_suggestions(
+            let mut ac = autocomplete.write();
+            if let Some(suggestions) = detect_and_generate_suggestions(
                 &value,
-                &mut autocomplete,
+                &mut ac,
                 &cached_tools.read(),
                 &cached_datasets.read(),
                 &chat_state.read().prompt_history,
-            );
-
-            if let Some(suggestions) = suggestions {
-                autocomplete.write().set_suggestions(suggestions);
+            ) {
+                ac.set_suggestions(suggestions);
             }
         }
     };
@@ -319,7 +318,7 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
 /// Detect triggers and generate suggestions based on input
 fn detect_and_generate_suggestions(
     input: &str,
-    autocomplete: &mut Signal<AutocompleteState>,
+    ac: &mut AutocompleteState,
     tools: &[ToolDefinition],
     datasets: &[DatasetMeta],
     history: &[String],
@@ -339,7 +338,6 @@ fn detect_and_generate_suggestions(
             // Verify this dataset exists
             if let Some(dataset) = datasets.iter().find(|d| d.name == dataset_name) {
                 // Open in column mode
-                let mut ac = autocomplete.write();
                 if !ac.is_open
                     || !ac.is_column_mode()
                     || ac.column_dataset.as_deref() != Some(dataset_name)
@@ -347,7 +345,6 @@ fn detect_and_generate_suggestions(
                     ac.open_column_mode(dataset_name, at_pos);
                 }
                 ac.set_filter(filter);
-                drop(ac);
 
                 // Generate column suggestions
                 let filter_lower = filter.to_lowercase();
@@ -368,12 +365,10 @@ fn detect_and_generate_suggestions(
 
         // Make sure there's no space after @ (which would cancel the trigger)
         if !filter.contains(' ') {
-            let mut ac = autocomplete.write();
             if !ac.is_open || ac.trigger != Some('@') || ac.is_column_mode() {
                 ac.open('@', at_pos);
             }
             ac.set_filter(filter);
-            drop(ac);
 
             // Generate dataset suggestions
             let filter_lower = filter.to_lowercase();
@@ -394,12 +389,10 @@ fn detect_and_generate_suggestions(
 
         // Make sure there's no space after / (which would cancel the trigger)
         if !filter.contains(' ') {
-            let mut ac = autocomplete.write();
             if !ac.is_open || ac.trigger != Some('/') {
                 ac.open('/', slash_pos);
             }
             ac.set_filter(filter);
-            drop(ac);
 
             // Generate tool suggestions
             let filter_lower = filter.to_lowercase();
@@ -433,44 +426,20 @@ fn detect_and_generate_suggestions(
             .collect();
 
         if !matching.is_empty() {
-            let mut ac = autocomplete.write();
             if !ac.is_open {
                 ac.is_open = true;
                 ac.trigger = None;
                 ac.trigger_position = 0;
             }
             ac.set_filter(input);
-            drop(ac);
 
             return Some(matching);
         }
     }
 
     // No suggestions - close autocomplete
-    autocomplete.write().close();
+    ac.close();
     None
-}
-
-/// Find the **byte offset** of the last occurrence of a trigger character
-/// (`@` or `/`) that could start an autocomplete pattern — i.e. one at the
-/// start of the input or immediately after whitespace.
-///
-/// Returns a byte offset (not a char index) so callers can slice the input
-/// string directly. The trigger characters are single-byte ASCII, so the
-/// offset immediately after the trigger is always a valid char boundary.
-/// (The previous version returned a `Vec<char>` index that callers used as a
-/// byte index — corrupting the filter text, or panicking, whenever a
-/// multi-byte character preceded the trigger.)
-fn find_last_trigger(input: &str, trigger: char) -> Option<usize> {
-    let mut result = None;
-    let mut prev_is_boundary = true; // start of string counts as a boundary
-    for (byte_idx, c) in input.char_indices() {
-        if c == trigger && prev_is_boundary {
-            result = Some(byte_idx);
-        }
-        prev_is_boundary = c.is_whitespace();
-    }
-    result
 }
 
 /// Accept a suggestion and insert it into the textarea
@@ -479,107 +448,9 @@ fn accept_suggestion(
     autocomplete: &mut Signal<AutocompleteState>,
     suggestion: &Suggestion,
 ) {
-    let ac = autocomplete.read();
-    let current_value = textarea_value.read().clone();
-
-    let new_value = if let Some(trigger) = ac.trigger {
-        // We have a trigger - replace from trigger position
-        let (start, _end) = ac.get_replacement_range();
-        let before = &current_value[..start];
-        let after = if ac.is_column_mode() {
-            // In column mode, insert @dataset.column
-            let insert_pos = start
-                + 1
-                + ac.column_dataset.as_ref().map(|d| d.len()).unwrap_or(0)
-                + 1
-                + ac.filter_text.len();
-            if insert_pos < current_value.len() {
-                &current_value[insert_pos..]
-            } else {
-                ""
-            }
-        } else {
-            let insert_pos = start + 1 + ac.filter_text.len();
-            if insert_pos < current_value.len() {
-                &current_value[insert_pos..]
-            } else {
-                ""
-            }
-        };
-
-        // Build the new value
-        match trigger {
-            '@' => {
-                if ac.is_column_mode() {
-                    // Insert full @dataset.column
-                    format!(
-                        "{}@{} {}",
-                        before,
-                        suggestion.insert_text,
-                        after.trim_start()
-                    )
-                } else {
-                    // Insert @dataset (without trailing dot to allow column access)
-                    format!(
-                        "{}@{} {}",
-                        before,
-                        suggestion.insert_text,
-                        after.trim_start()
-                    )
-                }
-            }
-            '/' => {
-                // Insert /tool
-                format!(
-                    "{}/{} {}",
-                    before,
-                    suggestion.insert_text,
-                    after.trim_start()
-                )
-            }
-            _ => current_value,
-        }
-    } else {
-        // History mode - replace entire input
-        suggestion.insert_text.clone()
-    };
-
-    drop(ac);
-    textarea_value.set(new_value.trim_end().to_string() + " ");
+    let new_value = autocomplete
+        .read()
+        .apply(&textarea_value.read(), suggestion);
+    textarea_value.set(new_value);
     autocomplete.write().close();
-}
-
-#[cfg(test)]
-mod trigger_tests {
-    use super::find_last_trigger;
-
-    #[test]
-    fn returns_byte_offset_after_multibyte_chars() {
-        // "café @data" — 'é' is 2 bytes, so the '@' is at byte offset 6, not
-        // char index 5. The returned offset must let `&input[pos + 1..]` slice
-        // correctly to "data".
-        let input = "café @data";
-        let at = find_last_trigger(input, '@').unwrap();
-        assert_eq!(&input[at..at + 1], "@");
-        assert_eq!(&input[at + 1..], "data");
-    }
-
-    #[test]
-    fn requires_start_or_whitespace_before_trigger() {
-        // '@' embedded in a word (email-like) is not a trigger.
-        assert_eq!(find_last_trigger("foo@bar", '@'), None);
-        // At start.
-        assert_eq!(find_last_trigger("@ds", '@'), Some(0));
-        // Picks the last valid trigger.
-        let input = "@a @b";
-        let at = find_last_trigger(input, '@').unwrap();
-        assert_eq!(&input[at + 1..], "b");
-    }
-
-    #[test]
-    fn slash_trigger_after_multibyte() {
-        let input = "λ /tool";
-        let slash = find_last_trigger(input, '/').unwrap();
-        assert_eq!(&input[slash + 1..], "tool");
-    }
 }
