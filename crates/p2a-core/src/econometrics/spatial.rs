@@ -26,6 +26,13 @@
 //! "eigen"). The estimates are pinned to spatialreg's formulas written out in base R
 //! (`validation/econometrics/spatial.md`).
 //!
+//! # Search interval and convergence
+//!
+//! rho and lambda are searched on spatialreg's `1/range(Re(eig))`, less 1e-8 at each end. A W
+//! whose interval is not finite (no negative or no positive real part among its eigenvalues) is
+//! refused. Results carry a [`Convergence`] and warnings (non-convergence; an estimate on the
+//! interval bound, which spatialreg says should not be used) through [`ResultNotes`].
+//!
 //! # Standard errors
 //!
 //! From the observed information of the full log-likelihood at the MLE: analytic for the SAR and
@@ -74,6 +81,7 @@ use crate::linalg::solve::{LM_QR_TOL, Qr, SingularPolicy, sym_inverse};
 use crate::regression::ols::{OlsSolve, normal_equations_inverse, solve_ols};
 use crate::spatial::SpatialWeights;
 use crate::spatial::weights::WeightsSpectrum;
+use crate::traits::convergence::{Convergence, ResultNotes};
 use crate::traits::estimator::normal_p_value_two_sided;
 
 /// Outcome `y` and design `[1, X]` (intercept first) of a spatial cross-section model (SAR,
@@ -178,6 +186,113 @@ fn transformed_fit(
         return Err(aliased_error(&fit.aliased, names));
     }
     Ok(fit)
+}
+
+/// What a search keeps away from the ends of the interval, where I - ρW is singular.
+const INTERVAL_MARGIN: f64 = 1e-8;
+
+/// spatialreg's search interval 1/range(Re(eig)). Refuses an interval that is not finite (W has no
+/// negative or no positive real part among its eigenvalues, up to rounding), where neither
+/// spatialreg's nor any other golden section can start.
+fn search_interval(listw: &mut SpatialWeights) -> EconResult<(f64, f64)> {
+    let (lo, hi) = listw.try_rho_range()?;
+    let width = hi - lo;
+    if !(lo.abs() <= 1e12 && hi.abs() <= 1e12 && width > 4.0 * INTERVAL_MARGIN) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "the spatial weights give no finite search interval for the spatial parameter: \
+                 1/range(Re(eigenvalues)) = ({lo}, {hi}); W needs eigenvalues with negative and \
+                 positive real parts"
+            ),
+        });
+    }
+    Ok((lo, hi))
+}
+
+/// The outcome of a golden-section search.
+#[derive(Debug)]
+struct GoldenSection {
+    x: f64,
+    value: f64,
+    convergence: Convergence,
+    /// The final bracket still holds an end of the search interval.
+    at_bound: bool,
+}
+
+/// Maximises `f` on (lo + 1e-8, hi - 1e-8) by golden section. NaN counts as infeasible, like
+/// `NEG_INFINITY`. The bracket decides everything but the direction of each step, so the search
+/// takes the same number of steps at any scale of `f`.
+fn golden_section_max(
+    mut f: impl FnMut(f64) -> EconResult<f64>,
+    lo: f64,
+    hi: f64,
+    tol: f64,
+    max_iter: usize,
+) -> EconResult<GoldenSection> {
+    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    let mut eval = |r: f64| -> EconResult<f64> {
+        let v = f(r)?;
+        Ok(if v.is_nan() { f64::NEG_INFINITY } else { v })
+    };
+    let (lower, upper) = (lo + INTERVAL_MARGIN, hi - INTERVAL_MARGIN);
+    let (mut a, mut b) = (lower, upper);
+    let mut c = b - (b - a) / phi;
+    let mut d = a + (b - a) / phi;
+    let mut fc = eval(c)?;
+    let mut fd = eval(d)?;
+    let mut steps = 0;
+    for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
+        if (b - a).abs() < tol {
+            break;
+        }
+        if fc > fd {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - (b - a) / phi;
+            fc = eval(c)?;
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + (b - a) / phi;
+            fd = eval(d)?;
+        }
+        steps += 1;
+    }
+    let width = (b - a).abs();
+    let x = (a + b) / 2.0;
+    Ok(GoldenSection {
+        x,
+        value: eval(x)?,
+        convergence: Convergence::new(
+            width < tol,
+            steps,
+            max_iter,
+            "golden-section bracket width",
+            width,
+            tol,
+        ),
+        at_bound: a == lower || b == upper,
+    })
+}
+
+/// The notes of a spatial fit: non-convergence, then any parameter on the interval bound.
+fn spatial_warnings(
+    convergence: &Convergence,
+    model: &str,
+    at_bound: &[(&str, bool)],
+) -> Vec<String> {
+    let mut warnings: Vec<String> = convergence.note(model).into_iter().collect();
+    for (name, bound) in at_bound {
+        if *bound {
+            warnings.push(format!(
+                "{name} on interval bound (spatialreg: results should not be used)"
+            ));
+        }
+    }
+    warnings
 }
 
 /// beta (k, including the intercept and any SDM lags), `spatial` spatial parameters and sigma^2:
@@ -350,6 +465,21 @@ pub struct SarResult {
 
     /// Whether the Spatial Durbin Model was estimated
     pub is_durbin: bool,
+    /// How the search for rho ended
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// Non-convergence and a rho on the interval bound
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for SarResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 /// Result from SEM (Spatial Error Model).
@@ -395,6 +525,21 @@ pub struct SemResult {
     pub n_obs: usize,
     /// Degrees of freedom
     pub df: usize,
+    /// How the search for lambda ended
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// Non-convergence and a lambda on the interval bound
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for SemResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 /// Fit a Spatial Autoregressive Lag (SAR) model.
@@ -469,13 +614,11 @@ pub fn run_sar(
     let ord = ord_regressions(&x_final, &y, &wy, &coef_names)?;
     let spectrum = listw.try_spectrum()?;
 
-    // Get valid range for ρ
-    let (rho_min, rho_max) = listw.try_rho_range()?;
-    let rho_min = rho_min.max(-0.999);
-    let rho_max = rho_max.min(0.999);
+    // spatialreg's interval for ρ
+    let (rho_min, rho_max) = search_interval(listw)?;
 
     // Optimize concentrated log-likelihood over ρ
-    let (rho_opt, _ll_opt) = optimize_rho_sar(
+    let search = optimize_rho_sar(
         &ord,
         &spectrum,
         rho_min,
@@ -483,6 +626,7 @@ pub fn run_sar(
         config.tol,
         config.max_iter,
     )?;
+    let rho_opt = search.x;
 
     // Final estimates at the optimal ρ; the regression of y - ρWy on X is linear in ρ
     let beta = &ord.b_y - &(rho_opt * &ord.b_wy);
@@ -562,6 +706,8 @@ pub fn run_sar(
         n_obs: n,
         df: residual_df(n, k_final + 1, model)?,
         is_durbin: config.durbin,
+        warnings: spatial_warnings(&search.convergence, model, &[("rho", search.at_bound)]),
+        convergence: search.convergence,
     })
 }
 
@@ -605,13 +751,11 @@ pub fn run_sem(
 
     let spectrum = listw.try_spectrum()?;
 
-    // Get valid range for λ
-    let (lambda_min, lambda_max) = listw.try_rho_range()?;
-    let lambda_min = lambda_min.max(-0.999);
-    let lambda_max = lambda_max.min(0.999);
+    // spatialreg's interval for λ
+    let (lambda_min, lambda_max) = search_interval(listw)?;
 
     // Optimize concentrated log-likelihood over λ
-    let (lambda_opt, _ll_opt) = optimize_lambda_sem(
+    let search = optimize_lambda_sem(
         &y,
         &x,
         listw,
@@ -621,6 +765,7 @@ pub fn run_sem(
         config.tol,
         config.max_iter,
     )?;
+    let lambda_opt = search.x;
 
     // Compute final estimates at optimal λ
     // Transform: (I - λW)y = (I - λW)X β + ε
@@ -695,6 +840,8 @@ pub fn run_sem(
         fitted,
         n_obs: n,
         df: residual_df(n, k + 1, "SEM")?,
+        warnings: spatial_warnings(&search.convergence, "SEM", &[("lambda", search.at_bound)]),
+        convergence: search.convergence,
     })
 }
 
@@ -799,6 +946,21 @@ pub struct SacResult {
     pub n_obs: usize,
     /// Degrees of freedom
     pub df: usize,
+    /// How the coordinate descent ended
+    #[serde(default)]
+    pub convergence: Convergence,
+    /// Non-convergence and a rho or lambda on the interval bound
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl ResultNotes for SacResult {
+    fn notes_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+    fn notes_convergence(&self) -> Option<Convergence> {
+        Some(self.convergence.clone())
+    }
 }
 
 /// Fit a SAC (SARAR) model - combined spatial lag and spatial error.
@@ -851,10 +1013,8 @@ pub fn run_sac(
     // Pre-compute eigenvalues
     let spectrum = listw.try_spectrum()?;
 
-    // Get valid range for ρ and λ
-    let (param_min, param_max) = listw.try_rho_range()?;
-    let param_min = param_min.max(-0.99);
-    let param_max = param_max.min(0.99);
+    // spatialreg's interval for ρ and λ
+    let (param_min, param_max) = search_interval(listw)?;
 
     // Pre-compute Wy, W²y, and WX
     let wy = listw.lag(&y);
@@ -869,7 +1029,7 @@ pub fn run_sac(
     }
 
     // Optimize using coordinate descent with grid search initialization
-    let (rho_opt, lambda_opt, _ll_opt) = optimize_sac(
+    let search = optimize_sac(
         &y,
         &wy,
         &wwy,
@@ -882,6 +1042,7 @@ pub fn run_sac(
         config.max_iter,
         config.grid_resolution,
     )?;
+    let (rho_opt, lambda_opt) = (search.rho, search.lambda);
 
     // Compute final estimates at optimal (ρ, λ)
     // Transform: (I - λW)(I - ρW)y = (I - λW)Xβ + ε
@@ -915,7 +1076,23 @@ pub fn run_sac(
         .copied()
         .chain([rho_opt, lambda_opt, sigma2])
         .collect();
-    let info = sac_observed_information(&y, &wy, &wwy, &x, &wx, &spectrum, &theta)?;
+    // Steps in each parameter's own units: beta by its size or its SE, s2 by itself, rho and
+    // lambda by their size and staying inside the interval
+    let dimensionless = |v: f64| {
+        let room = (v - param_min).min(param_max - v);
+        (1e-5 * v.abs().max(1.0)).min(0.5 * room)
+    };
+    let steps: Vec<f64> = beta
+        .iter()
+        .zip(fit.unscaled.diag())
+        .map(|(b, u)| 1e-5 * b.abs().max((sigma2 * u).sqrt()))
+        .chain([
+            dimensionless(rho_opt),
+            dimensionless(lambda_opt),
+            1e-5 * sigma2,
+        ])
+        .collect();
+    let info = sac_observed_information(&y, &wy, &wwy, &x, &wx, &spectrum, &theta, &steps)?;
     let se = information_se(&info, "SAC", k + 2)?;
     let se_beta = Array1::from_iter(se[..k].iter().copied());
     let (se_rho, se_lambda) = (se[k], se[k + 1]);
@@ -964,6 +1141,15 @@ pub fn run_sac(
         fitted,
         n_obs: n,
         df: residual_df(n, k + 2, "SAC")?,
+        warnings: spatial_warnings(
+            &search.convergence,
+            "SAC",
+            &[
+                ("rho", search.rho_at_bound),
+                ("lambda", search.lambda_at_bound),
+            ],
+        ),
+        convergence: search.convergence,
     })
 }
 
@@ -976,6 +1162,18 @@ pub fn run_sac_dataset(
     config: SacConfig,
 ) -> EconResult<SacResult> {
     run_sac(dataset, y_col, x_cols, listw, config)
+}
+
+/// Golden-section steps of one coordinate of the SAC coordinate descent.
+const SAC_INNER_STEPS: usize = 50;
+
+/// The outcome of the SAC coordinate descent.
+struct SacOptimum {
+    rho: f64,
+    lambda: f64,
+    convergence: Convergence,
+    rho_at_bound: bool,
+    lambda_at_bound: bool,
 }
 
 /// Optimize spatial parameters (ρ, λ) for SAC/SARAR model.
@@ -1020,7 +1218,7 @@ pub fn run_sac_dataset(
 /// * `grid_resolution` - Number of grid points per dimension for initial search
 ///
 /// # Returns
-/// Tuple of (ρ_optimal, λ_optimal, log_likelihood)
+/// ρ and λ, the outcome of the coordinate descent, and whether each ended on the interval bound
 fn optimize_sac(
     y: &Array1<f64>,
     wy: &Array1<f64>,
@@ -1033,7 +1231,7 @@ fn optimize_sac(
     tol: f64,
     max_iter: usize,
     grid_resolution: usize,
-) -> EconResult<(f64, f64, f64)> {
+) -> EconResult<SacOptimum> {
     let n = y.len();
     let n_f64 = n as f64;
     let const_term = 0.5 * n_f64 * (1.0 + (2.0 * std::f64::consts::PI).ln());
@@ -1106,7 +1304,10 @@ fn optimize_sac(
     }
 
     // Coordinate descent refinement
-    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    let mut converged = false;
+    let mut iterations = 0;
+    let mut change = f64::NAN;
+    let (mut rho_at_bound, mut lambda_at_bound) = (false, false);
 
     for _ in 0..max_iter {
         crate::resource::checkpoint()?;
@@ -1114,61 +1315,51 @@ fn optimize_sac(
         let old_lambda = best_lambda;
 
         // Optimize rho with lambda fixed
-        let mut a = param_min;
-        let mut b = param_max;
-        let mut c = b - (b - a) / phi;
-        let mut d = a + (b - a) / phi;
-
-        for _ in 0..50 {
-            if (b - a).abs() < tol {
-                break;
-            }
-            let fc = neg_ll(c, best_lambda);
-            let fd = neg_ll(d, best_lambda);
-            if fc < fd {
-                b = d;
-                d = c;
-                c = b - (b - a) / phi;
-            } else {
-                a = c;
-                c = d;
-                d = a + (b - a) / phi;
-            }
-        }
-        best_rho = (a + b) / 2.0;
+        let rho = golden_section_max(
+            |r| Ok(-neg_ll(r, best_lambda)),
+            param_min,
+            param_max,
+            tol,
+            SAC_INNER_STEPS,
+        )?;
+        best_rho = rho.x;
+        rho_at_bound = rho.at_bound;
 
         // Optimize lambda with rho fixed
-        a = param_min;
-        b = param_max;
-        c = b - (b - a) / phi;
-        d = a + (b - a) / phi;
+        let lambda = golden_section_max(
+            |l| Ok(-neg_ll(best_rho, l)),
+            param_min,
+            param_max,
+            tol,
+            SAC_INNER_STEPS,
+        )?;
+        best_lambda = lambda.x;
+        lambda_at_bound = lambda.at_bound;
 
-        for _ in 0..50 {
-            if (b - a).abs() < tol {
-                break;
-            }
-            let fc = neg_ll(best_rho, c);
-            let fd = neg_ll(best_rho, d);
-            if fc < fd {
-                b = d;
-                d = c;
-                c = b - (b - a) / phi;
-            } else {
-                a = c;
-                c = d;
-                d = a + (b - a) / phi;
-            }
-        }
-        best_lambda = (a + b) / 2.0;
-
-        // Check convergence
-        if (best_rho - old_rho).abs() < tol && (best_lambda - old_lambda).abs() < tol {
+        iterations += 1;
+        change = (best_rho - old_rho)
+            .abs()
+            .max((best_lambda - old_lambda).abs());
+        if change < tol {
+            converged = true;
             break;
         }
     }
 
-    best_ll = neg_ll(best_rho, best_lambda);
-    Ok((best_rho, best_lambda, -best_ll))
+    Ok(SacOptimum {
+        rho: best_rho,
+        lambda: best_lambda,
+        convergence: Convergence::new(
+            converged,
+            iterations,
+            max_iter,
+            "change in (rho, lambda)",
+            change,
+            tol,
+        ),
+        rho_at_bound,
+        lambda_at_bound,
+    })
 }
 
 /// The analytic gradient of the full SAC log-likelihood at theta = (beta, rho, lambda, s2):
@@ -1200,7 +1391,7 @@ fn sac_gradient(
 }
 
 /// Minus the Hessian of the full SAC log-likelihood at `theta`, by central differences of its
-/// analytic gradient with step 1e-5 max(|theta_i|, 1), symmetrised.
+/// analytic gradient with the given steps, symmetrised.
 fn sac_observed_information(
     y: &Array1<f64>,
     wy: &Array1<f64>,
@@ -1209,13 +1400,14 @@ fn sac_observed_information(
     wx: &Array2<f64>,
     spectrum: &WeightsSpectrum,
     theta: &[f64],
+    steps: &[f64],
 ) -> EconResult<Array2<f64>> {
     let m = theta.len();
     let mut hessian = Array2::zeros((m, m));
     let mut at = theta.to_vec();
     for i in 0..m {
         crate::resource::checkpoint()?;
-        let h = 1e-5 * theta[i].abs().max(1.0);
+        let h = steps[i];
         at[i] = theta[i] + h;
         let plus = sac_gradient(y, wy, wwy, x, wx, spectrum, &at);
         at[i] = theta[i] - h;
@@ -1322,7 +1514,7 @@ fn information_se(info: &Array2<f64>, model: &str, keep: usize) -> EconResult<Ve
 /// * `max_iter` - Maximum iterations
 ///
 /// # Returns
-/// Tuple of (ρ_optimal, log_likelihood)
+/// The golden section's outcome
 fn optimize_rho_sar(
     ord: &OrdRegressions,
     spectrum: &WeightsSpectrum,
@@ -1330,9 +1522,8 @@ fn optimize_rho_sar(
     rho_max: f64,
     tol: f64,
     max_iter: usize,
-) -> EconResult<(f64, f64)> {
+) -> EconResult<GoldenSection> {
     let n_f64 = ord.e_y.len() as f64;
-    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0; // Golden ratio
 
     // Constant term in log-likelihood
     let const_term = 0.5 * n_f64 * (1.0 + (2.0 * std::f64::consts::PI).ln());
@@ -1341,52 +1532,21 @@ fn optimize_rho_sar(
     let ey_ewy = ord.e_y.dot(&ord.e_wy);
     let ewy_ewy = ord.e_wy.dot(&ord.e_wy);
 
-    let mut a = rho_min;
-    let mut b = rho_max;
-
-    let neg_ll = |rho: f64| -> f64 {
-        let rss = ey_ey - 2.0 * rho * ey_ewy + rho * rho * ewy_ewy;
-        let sigma2 = rss / n_f64;
-
-        if sigma2 <= 0.0 {
-            return f64::INFINITY;
-        }
-
-        // Negative concentrated log-likelihood (for minimization)
-        const_term + 0.5 * n_f64 * sigma2.ln() - spectrum.log_det(rho)
-    };
-
-    // Golden section search (each iteration is O(p) instead of O(n*k))
-    let mut c = b - (b - a) / phi;
-    let mut d = a + (b - a) / phi;
-    let mut fc = neg_ll(c);
-    let mut fd = neg_ll(d);
-
-    for _ in 0..max_iter {
-        crate::resource::checkpoint()?;
-        if (b - a).abs() < tol {
-            break;
-        }
-
-        if fc < fd {
-            b = d;
-            d = c;
-            fd = fc;
-            c = b - (b - a) / phi;
-            fc = neg_ll(c);
-        } else {
-            a = c;
-            c = d;
-            fc = fd;
-            d = a + (b - a) / phi;
-            fd = neg_ll(d);
-        }
-    }
-
-    let rho_opt = (a + b) / 2.0;
-    let ll_opt = -neg_ll(rho_opt);
-
-    Ok((rho_opt, ll_opt))
+    // Each step is O(p) instead of O(n*k)
+    golden_section_max(
+        |rho| {
+            let rss = ey_ey - 2.0 * rho * ey_ewy + rho * rho * ewy_ewy;
+            let sigma2 = rss / n_f64;
+            if sigma2 <= 0.0 {
+                return Ok(f64::NEG_INFINITY);
+            }
+            Ok(spectrum.log_det(rho) - const_term - 0.5 * n_f64 * sigma2.ln())
+        },
+        rho_min,
+        rho_max,
+        tol,
+        max_iter,
+    )
 }
 
 /// Optimize spatial error parameter λ for SEM model.
@@ -1423,7 +1583,7 @@ fn optimize_rho_sar(
 /// * `max_iter` - Maximum iterations
 ///
 /// # Returns
-/// Tuple of (λ_optimal, log_likelihood)
+/// The golden section's outcome
 fn optimize_lambda_sem(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -1433,11 +1593,10 @@ fn optimize_lambda_sem(
     lambda_max: f64,
     tol: f64,
     max_iter: usize,
-) -> EconResult<(f64, f64)> {
+) -> EconResult<GoldenSection> {
     let n = y.len();
     let n_f64 = n as f64;
     let k = x.ncols();
-    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
 
     // Pre-compute Wy and WX (these don't change with lambda)
     let wy = listw.lag(y);
@@ -1479,9 +1638,6 @@ fn optimize_lambda_sem(
     let ywy: f64 = y.iter().zip(wy.iter()).map(|(&a, &b)| a * b).sum();
     let wywy: f64 = wy.iter().map(|&v| v * v).sum();
 
-    let mut a = lambda_min;
-    let mut b = lambda_max;
-
     let neg_ll = |lambda: f64| -> f64 {
         let l2 = lambda * lambda;
 
@@ -1514,37 +1670,14 @@ fn optimize_lambda_sem(
         const_term + 0.5 * n_f64 * sigma2.ln() - spectrum.log_det(lambda)
     };
 
-    // Golden section search (each iteration is now O(k³ + p) instead of O(n*k))
-    let mut c = b - (b - a) / phi;
-    let mut d = a + (b - a) / phi;
-    let mut fc = neg_ll(c);
-    let mut fd = neg_ll(d);
-
-    for _ in 0..max_iter {
-        crate::resource::checkpoint()?;
-        if (b - a).abs() < tol {
-            break;
-        }
-
-        if fc < fd {
-            b = d;
-            d = c;
-            fd = fc;
-            c = b - (b - a) / phi;
-            fc = neg_ll(c);
-        } else {
-            a = c;
-            c = d;
-            fc = fd;
-            d = a + (b - a) / phi;
-            fd = neg_ll(d);
-        }
-    }
-
-    let lambda_opt = (a + b) / 2.0;
-    let ll_opt = -neg_ll(lambda_opt);
-
-    Ok((lambda_opt, ll_opt))
+    // Each step is O(k³ + p) instead of O(n*k)
+    golden_section_max(
+        |lambda| Ok(-neg_ll(lambda)),
+        lambda_min,
+        lambda_max,
+        tol,
+        max_iter,
+    )
 }
 
 /// min |1 - ρλ| at or below which I - ρW is treated as singular (condition number of about 1e10
@@ -2212,6 +2345,128 @@ mod tests {
             )
             .unwrap();
             assert_impacts(&imp, rho, d, i, t);
+        }
+    }
+
+    #[test]
+    fn test_spatial_ml_reports_convergence() {
+        let ds = spatial_sim();
+        let mut w = knn4(&ds);
+        let x = ["x1", "x2"];
+        let sar = run_sar(&ds, "y", &x, &mut w, SarConfig::default()).unwrap();
+        let sem = run_sem(&ds, "y", &x, &mut w, SemConfig::default()).unwrap();
+        let sac = run_sac(&ds, "y", &x, &mut w, SacConfig::default()).unwrap();
+        for (c, warn) in [
+            (&sar.convergence, &sar.warnings),
+            (&sem.convergence, &sem.warnings),
+            (&sac.convergence, &sac.warnings),
+        ] {
+            assert!(
+                c.converged && c.iterations >= 1 && warn.is_empty(),
+                "{c:?} {warn:?}"
+            );
+        }
+        let c = SarConfig {
+            max_iter: 5,
+            ..Default::default()
+        };
+        let short = run_sar(&ds, "y", &x, &mut w, c).unwrap();
+        assert!(!short.convergence.converged && short.convergence.iterations == 5);
+        assert!(
+            short
+                .warnings
+                .iter()
+                .any(|m| m.contains("did not converge")),
+            "{:?}",
+            short.warnings
+        );
+        assert!(crate::traits::convergence::notes_text(&short).contains("did not converge"));
+        let s = SemConfig {
+            max_iter: 5,
+            ..Default::default()
+        };
+        let sem5 = run_sem(&ds, "y", &x, &mut w, s).unwrap();
+        assert!(!sem5.convergence.converged);
+        let a = SacConfig {
+            max_iter: 1,
+            ..Default::default()
+        };
+        let sac1 = run_sac(&ds, "y", &x, &mut w, a).unwrap();
+        assert!(!sac1.convergence.converged && !sac1.warnings.is_empty());
+    }
+
+    /// y x 1e-6 and y x 1e6 leave rho and lambda unchanged, and the golden sections take the same
+    /// steps: they depend only on the bracket.
+    #[test]
+    fn test_spatial_ml_invariant_to_the_scale_of_y() {
+        let ds = spatial_sim();
+        let mut w = knn4(&ds);
+        let x = ["x1", "x2"];
+        let fit = |s: f64, w: &mut SpatialWeights| {
+            let d = scaled_y(&ds, s);
+            (
+                run_sar(&d, "y", &x, w, SarConfig::default()).unwrap(),
+                run_sem(&d, "y", &x, w, SemConfig::default()).unwrap(),
+                run_sac(&d, "y", &x, w, SacConfig::default()).unwrap(),
+            )
+        };
+        let (sar1, sem1, sac1) = fit(1.0, &mut w);
+        for s in [1e-6, 1e6] {
+            let (sar, sem, sac) = fit(s, &mut w);
+            // flatness bound 1.3e-7
+            assert!((sar.rho - sar1.rho).abs() <= 1e-6, "scale {s}");
+            assert!((sem.lambda - sem1.lambda).abs() <= 1e-6, "scale {s}");
+            assert!((sac.rho - sac1.rho).abs() <= 1e-5, "scale {s}");
+            assert!((sac.lambda - sac1.lambda).abs() <= 1e-5, "scale {s}");
+            assert_eq!(sar.convergence.iterations, sar1.convergence.iterations);
+            assert_eq!(sem.convergence.iterations, sem1.convergence.iterations);
+            let b = sar.coefficients[1] / s;
+            assert!((b - sar1.coefficients[1]).abs() <= 1e-5 * sar1.coefficients[1].abs());
+        }
+    }
+
+    /// A rho beyond the old clamp of 0.999 is inside spatialreg's interval (upper bound 1 for a
+    /// row-standardised W).
+    #[test]
+    fn test_sar_search_covers_the_spatialreg_interval() {
+        let ds = spatial_sim();
+        let mut w = knn4(&ds);
+        let (x1, x2) = (col(&ds, "x1"), col(&ds, "x2"));
+        let mu: Array1<f64> = (0..x1.len())
+            .map(|i| 1.0 + 0.8 * x1[i] - 0.5 * x2[i] + 0.01 * (i as f64).sin())
+            .collect();
+        let y = w.solve_i_minus_rho_w(0.9995, &mu).unwrap();
+        let d = Dataset::new(df! { "y" => y.to_vec(), "x1" => x1, "x2" => x2 }.unwrap());
+        let r = run_sar(&d, "y", &["x1", "x2"], &mut w, SarConfig::default()).unwrap();
+        assert!(r.rho > 0.999, "{}", r.rho);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn test_golden_section_flags_a_bound_optimum() {
+        let bound = golden_section_max(|r| Ok(r), -1.0, 1.0, 1e-10, 200).unwrap();
+        assert!(bound.at_bound);
+        assert!((bound.x - (1.0 - 1e-8)).abs() < 1e-9, "{}", bound.x);
+        let inner = golden_section_max(|r| Ok(-(r - 0.3).powi(2)), -1.0, 1.0, 1e-10, 200).unwrap();
+        assert!(!inner.at_bound);
+        assert!((inner.x - 0.3).abs() < 1e-9, "{}", inner.x);
+        assert!(inner.convergence.converged);
+    }
+
+    /// No eigenvalue with a real part away from zero: 1/range(Re(eig)) is not a finite interval.
+    #[test]
+    fn test_spatial_ml_refuses_an_unbounded_search_interval() {
+        let (d, _) = ring_data(8);
+        let chain: Vec<Vec<usize>> = (0..8)
+            .map(|i| if i < 7 { vec![i + 1] } else { vec![] })
+            .collect();
+        let mut w =
+            SpatialWeights::from_neighbors(&Neighbors::from_indices(chain), WeightStyle::RowStd);
+        match run_sem(&d, "y", &["x"], &mut w, SemConfig::default()) {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(message.contains("interval"), "{message}");
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
         }
     }
 
