@@ -13,6 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::http::{ApiResponse, AppState, ContentItem};
+use super::routes_sessions::{LookupError, live_session, lookup_error_response};
 use crate::audit::{AuditEntry, AuditLogger, ResultSummary, sanitize_arguments};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
@@ -949,30 +950,10 @@ pub async fn llm_chat(
         }
     };
 
-    // Get the session
-    let session = match state.session_manager.get_session(&request.session_id).await {
+    // Get the session (a stored one is adopted)
+    let session = match live_session(&state, &request.session_id).await {
         Ok(s) => s,
-        Err(crate::session::SessionError::NotFound) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::<()>::error("Session not found")),
-            )
-                .into_response();
-        }
-        Err(crate::session::SessionError::Expired) => {
-            return (
-                StatusCode::GONE,
-                Json(ApiResponse::<()>::error("Session expired")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::<()>::error(e.to_string())),
-            )
-                .into_response();
-        }
+        Err(e) => return lookup_error_response(e),
     };
 
     #[cfg(feature = "db")]
@@ -2013,23 +1994,16 @@ async fn run_chat_stream(
 
     tracing::info!(interpret = %request.interpret, conversation_id = ?request.conversation_id, "LLM chat request received");
 
-    // Get the session
-    let session = match state.session_manager.get_session(&request.session_id).await {
+    // Get the session (a stored one is adopted)
+    let session = match live_session(&state, &request.session_id).await {
         Ok(s) => s,
-        Err(crate::session::SessionError::NotFound) => {
-            let _ = tx
-                .send(ProgressEvent::Error {
-                    error: "Session not found".to_string(),
-                })
-                .await;
-            return;
-        }
         Err(e) => {
-            let _ = tx
-                .send(ProgressEvent::Error {
-                    error: e.to_string(),
-                })
-                .await;
+            let error = match e {
+                LookupError::Session(SessionError::NotFound) => "Session not found".to_string(),
+                LookupError::Session(e) => e.to_string(),
+                LookupError::Internal => "internal error".to_string(),
+            };
+            let _ = tx.send(ProgressEvent::Error { error }).await;
             return;
         }
     };

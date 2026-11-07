@@ -10,8 +10,8 @@ use axum::{
 use serde::Deserialize;
 
 use super::http::{ApiResponse, AppState};
+use super::routes_sessions::{live_session, lookup_error_response};
 use crate::exec::CallOrigin;
-use crate::session::SessionError;
 
 /// Request to call a tool.
 #[derive(Debug, Deserialize)]
@@ -143,30 +143,10 @@ pub(crate) async fn call_tool(
         arguments,
     }): Json<CallToolRequest>,
 ) -> Response {
-    // Get the session
-    let session = match state.session_manager.get_session(&session_id).await {
+    // Get the session (a stored one is adopted)
+    let session = match live_session(&state, &session_id).await {
         Ok(s) => s,
-        Err(SessionError::NotFound) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::<()>::error("Session not found")),
-            )
-                .into_response();
-        }
-        Err(SessionError::Expired) => {
-            return (
-                StatusCode::GONE,
-                Json(ApiResponse::<()>::error("Session expired")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::<()>::error(e.to_string())),
-            )
-                .into_response();
-        }
+        Err(e) => return lookup_error_response(e),
     };
 
     // The arguments move into the call. The metadata capture below is the

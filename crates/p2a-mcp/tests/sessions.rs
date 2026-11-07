@@ -820,6 +820,89 @@ async fn reload_is_refused_under_memory_pressure() {
     assert!(headers.contains_key(header::RETRY_AFTER));
 }
 
+/// A stored session still within its TTL (a RocksDB server after a restart) is adopted by every
+/// route that takes a session id, not only by GET /api/sessions/{id}.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_and_chat_routes_adopt_a_stored_session() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let stored = uuid::Uuid::new_v4().to_string();
+    pm(&state)
+        .db()
+        .upsert_session(&p2a_mcp::db::DbSession::new(stored.clone(), None))
+        .await
+        .unwrap();
+
+    let (st, body) = call(
+        &r,
+        "POST",
+        "/api/tools/list_datasets",
+        None,
+        Some(json!({"session_id": stored, "arguments": {}})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "tool route: {body}");
+    assert!(
+        state.session_manager.get_session(&stored).await.is_ok(),
+        "adopted into the registry"
+    );
+}
+
+/// An Ollama stub answering every chat in one line, which parses as a whole body and as a stream.
+#[cfg(feature = "llm")]
+async fn ollama_stub() -> String {
+    let router = Router::new().route(
+        "/api/chat",
+        axum::routing::post(|| async {
+            r#"{"message":{"role":"assistant","content":"stub reply"},"done":true}"#
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    format!("http://{addr}")
+}
+
+#[cfg(feature = "llm")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_routes_adopt_a_stored_session() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let base_url = ollama_stub().await;
+    let stored_session = || async {
+        let id = uuid::Uuid::new_v4().to_string();
+        pm(&state)
+            .db()
+            .upsert_session(&p2a_mcp::db::DbSession::new(id.clone(), None))
+            .await
+            .unwrap();
+        id
+    };
+    let body = |id: &str| {
+        json!({"session_id": id, "message": "hi",
+            "provider": {"provider_type": "ollama", "base_url": base_url, "model": "stub"}})
+    };
+
+    let id = stored_session().await;
+    let (st, answer) = call(&r, "POST", "/api/llm/chat", None, Some(body(&id))).await;
+    assert_eq!(st, StatusCode::OK, "chat route: {answer}");
+    assert_eq!(answer["data"]["message"]["content"], "stub reply");
+
+    let id = stored_session().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/llm/chat/stream")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body(&id).to_string()))
+        .unwrap();
+    let resp = r.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20)
+        .await
+        .unwrap();
+    let events = String::from_utf8_lossy(&bytes);
+    assert!(!events.contains("Session not found"), "{events}");
+    assert!(events.contains(r#""type":"done""#), "{events}");
+}
+
 /// `GET /api/sessions/{id}` adopts a stored session through the persistent
 /// manager; a full registry answers 503 `capacity` with `Retry-After`, as
 /// session creation does.

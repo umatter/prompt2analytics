@@ -117,7 +117,7 @@ pub(crate) async fn list_sessions(State(state): State<AppState>) -> impl IntoRes
 
 /// Why [`live_session`] found no session.
 #[derive(Debug)]
-enum LookupError {
+pub(crate) enum LookupError {
     /// The registry's answer: not found, expired, or full (adoption).
     Session(SessionError),
     /// The store failed (logged). The session may still exist, so this is
@@ -129,7 +129,7 @@ enum LookupError {
 /// Look up a live session. With persistence, a stored session still within
 /// its TTL is adopted (a RocksDB server after a restart), subject to the
 /// registry's capacity.
-async fn live_session(
+pub(crate) async fn live_session(
     state: &AppState,
     id: &str,
 ) -> Result<std::sync::Arc<crate::session::Session>, LookupError> {
@@ -149,6 +149,24 @@ async fn live_session(
         .get_session(id)
         .await
         .map_err(LookupError::Session)
+}
+
+/// The answer of the tool and chat routes when [`live_session`] finds no session: 404, 410, 503
+/// `capacity` (adoption found the registry full) or 500 `internal`.
+pub(crate) fn lookup_error_response(error: LookupError) -> Response {
+    let plain = |status, text: &str| (status, Json(ApiResponse::<()>::error(text))).into_response();
+    match error {
+        LookupError::Session(SessionError::NotFound) => {
+            plain(StatusCode::NOT_FOUND, "Session not found")
+        }
+        LookupError::Session(SessionError::Expired) => plain(StatusCode::GONE, "Session expired"),
+        LookupError::Session(SessionError::MaxSessionsReached) => capacity_response(),
+        LookupError::Internal => error_with(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+            "internal",
+        ),
+    }
 }
 
 /// Get session information: 404 `not_found`, 410 `session_expired`, 503

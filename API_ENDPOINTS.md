@@ -51,6 +51,7 @@ Examples in this document marked "captured" are real responses of a sandboxed se
 - The `db` routes exist when the server is built with the `db` feature and its session database opens. The database is in memory unless `P2A_DB_PATH` names a directory.
 - With `P2A_ACCESS_TOKEN` set, every route except `/health` and CORS preflight needs `Authorization: Bearer <token>`.
 - A route that is not registered in the server's mode answers 404 with an empty body (`GET /api/sessions` answers 405 there, because `POST /api/sessions` exists).
+- With the session database, a stored session within its TTL (a RocksDB server after a restart) is taken back by every route that takes a session id and by the websocket `auth` message; when the session table is full the HTTP routes answer 503 `capacity`.
 - The tools a server has depend on its build: without the `database` feature (CI's `--no-default-features --features http,llm,auth,websocket`) the seven `db_*` tools are missing; the default build, `full` and `embedded` have them.
 
 ---
