@@ -159,6 +159,9 @@ impl std::fmt::Display for MboostBaseLearner {
     }
 }
 
+/// Deepest tree the tree base learner grows.
+pub const MBOOST_MAX_TREE_DEPTH: usize = 30;
+
 /// Configuration for mboost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MboostConfig {
@@ -179,7 +182,7 @@ pub struct MboostConfig {
     /// Base learner type (default: Linear).
     pub base_learner: MboostBaseLearner,
 
-    /// Maximum depth for tree base learner (default: 1, i.e., stumps).
+    /// Maximum depth of the least-squares tree fitted to one variable per iteration (1 = stump).
     /// Only used when base_learner = Tree.
     pub tree_depth: usize,
 
@@ -228,6 +231,9 @@ struct BaseLearnerFit {
     go_left: bool,
     /// Residual sum of squares after fitting
     rss: f64,
+    /// For a tree deeper than a stump: its leaves left to right, as (upper threshold, mean); the
+    /// last threshold is infinite. Empty otherwise.
+    steps: Vec<(f64, f64)>,
 }
 
 /// Coefficient path entry for one variable at one iteration.
@@ -564,6 +570,7 @@ fn fit_linear_base_learner(
         threshold: None,
         go_left: true,
         rss,
+        steps: Vec::new(),
     }
 }
 
@@ -645,6 +652,7 @@ fn fit_tree_base_learner(
             threshold: None,
             go_left: true,
             rss,
+            steps: Vec::new(),
         };
     };
 
@@ -665,6 +673,119 @@ fn fit_tree_base_learner(
         threshold: Some(best_threshold),
         go_left: true,
         rss: left_ss + right_ss,
+        steps: Vec::new(),
+    }
+}
+
+/// Grow a least-squares tree on one variable over the contiguous segment `order[lo..hi]` (a tree on
+/// one variable keeps sorted rows contiguous). The split is the stump rule of
+/// [`fit_tree_base_learner`] on the segment; a leaf pushes (`upper`, mean) to `steps`, left to
+/// right, and returns its sum of squares around the mean.
+fn fit_tree_segment(
+    x_col: &ArrayView1<f64>,
+    residuals: &ArrayView1<f64>,
+    order: &[usize],
+    (lo, hi): (usize, usize),
+    total: f64,
+    depth: usize,
+    min_samples: usize,
+    upper: f64,
+    steps: &mut Vec<(f64, f64)>,
+) -> f64 {
+    let m = hi - lo;
+    let mut best: Option<(usize, f64, f64)> = None; // (last position on the left, threshold, left sum)
+    if depth > 0 {
+        let mut best_gain = f64::NEG_INFINITY;
+        let mut left_sum = 0.0;
+        for i in lo..hi - 1 {
+            let idx = order[i];
+            left_sum += residuals[idx];
+            let left_n = i + 1 - lo;
+            let right_n = m - left_n;
+            if left_n < min_samples || right_n < min_samples {
+                continue;
+            }
+            let (x_val, next_x) = (x_col[idx], x_col[order[i + 1]]);
+            if (next_x - x_val).abs() < 1e-10 {
+                continue;
+            }
+            let right_sum = total - left_sum;
+            let gain = left_sum * left_sum / left_n as f64 + right_sum * right_sum / right_n as f64;
+            if gain > best_gain {
+                best_gain = gain;
+                best = Some((i, (x_val + next_x) / 2.0, left_sum));
+            }
+        }
+    }
+    match best {
+        Some((pos, threshold, left_sum)) => {
+            let mid = pos + 1;
+            let left_ss = fit_tree_segment(
+                x_col,
+                residuals,
+                order,
+                (lo, mid),
+                left_sum,
+                depth - 1,
+                min_samples,
+                threshold,
+                steps,
+            );
+            let right_ss = fit_tree_segment(
+                x_col,
+                residuals,
+                order,
+                (mid, hi),
+                total - left_sum,
+                depth - 1,
+                min_samples,
+                upper,
+                steps,
+            );
+            left_ss + right_ss
+        }
+        None => {
+            let mean = total / m as f64;
+            steps.push((upper, mean));
+            order[lo..hi]
+                .iter()
+                .fold(0.0, |ss, &k| ss + (residuals[k] - mean).powi(2))
+        }
+    }
+}
+
+/// The tree learner: the stump of [`fit_tree_base_learner`] at depth 1, a deeper least-squares tree
+/// on the one variable otherwise.
+fn fit_tree_learner(
+    x_col: &ArrayView1<f64>,
+    residuals: &ArrayView1<f64>,
+    order: &[usize],
+    min_samples: usize,
+    tree_depth: usize,
+) -> BaseLearnerFit {
+    if tree_depth <= 1 {
+        return fit_tree_base_learner(x_col, residuals, order, min_samples);
+    }
+    let total: f64 = residuals.iter().sum();
+    let mut steps = Vec::new();
+    let rss = fit_tree_segment(
+        x_col,
+        residuals,
+        order,
+        (0, order.len()),
+        total,
+        tree_depth,
+        min_samples,
+        f64::INFINITY,
+        &mut steps,
+    );
+    BaseLearnerFit {
+        coefficient: 0.0,
+        intercept: 0.0,
+        threshold: None,
+        go_left: true,
+        rss,
+        steps,
     }
 }
 
@@ -689,7 +810,21 @@ fn feature_orders(x: &ArrayView2<f64>) -> EconResult<Vec<usize>> {
 }
 
 /// Shared input checks of [`mboost`] and [`mboost_cv`].
-fn check_mboost_inputs(x: &ArrayView2<f64>, y: &ArrayView1<f64>) -> EconResult<()> {
+fn check_mboost_inputs(
+    x: &ArrayView2<f64>,
+    y: &ArrayView1<f64>,
+    config: &MboostConfig,
+) -> EconResult<()> {
+    if config.base_learner == MboostBaseLearner::Tree
+        && !(1..=MBOOST_MAX_TREE_DEPTH).contains(&config.tree_depth)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tree_depth must be between 1 and {MBOOST_MAX_TREE_DEPTH} (got {})",
+                config.tree_depth
+            ),
+        });
+    }
     let n_samples = x.nrows();
     if n_samples < 2 {
         return Err(EconError::Computation(
@@ -741,8 +876,11 @@ fn mstop_plus_one(mstop: usize) -> EconResult<usize> {
     })
 }
 
-/// Predict using a tree stump for one variable.
+/// Predict using the tree learner for one variable.
 fn predict_stump(x_val: f64, fit: &BaseLearnerFit) -> f64 {
+    if !fit.steps.is_empty() {
+        return fit.steps[fit.steps.partition_point(|&(upper, _)| upper < x_val)].1;
+    }
     match fit.threshold {
         Some(thresh) => {
             if x_val <= thresh {
@@ -776,7 +914,7 @@ pub fn mboost(
     y: ArrayView1<f64>,
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
-    check_mboost_inputs(&x, &y)?;
+    check_mboost_inputs(&x, &y, config)?;
     check_step_size(config.nu)?;
     let n_samples = x.nrows();
     let n_features = x.ncols();
@@ -856,6 +994,7 @@ pub fn mboost(
             threshold: None,
             go_left: true,
             rss: f64::INFINITY,
+            steps: Vec::new(),
         };
 
         for j in 0..n_features {
@@ -866,11 +1005,12 @@ pub fn mboost(
                 MboostBaseLearner::Linear => {
                     fit_linear_base_learner(&x_col, &residuals.view(), x_mean)
                 }
-                MboostBaseLearner::Tree => fit_tree_base_learner(
+                MboostBaseLearner::Tree => fit_tree_learner(
                     &x_col,
                     &residuals.view(),
                     &orders[j * n_samples..(j + 1) * n_samples],
                     config.min_samples_split,
+                    config.tree_depth,
                 ),
             };
 
@@ -980,7 +1120,7 @@ pub fn mboost_cv(
     y: ArrayView1<f64>,
     config: &MboostConfig,
 ) -> EconResult<MboostResult> {
-    check_mboost_inputs(&x, &y)?;
+    check_mboost_inputs(&x, &y, config)?;
     check_step_size(config.nu)?;
     let n_folds = config.cv_folds.unwrap_or(5);
     let n_samples = x.nrows();
@@ -1064,6 +1204,7 @@ pub fn mboost_cv(
                 threshold: None,
                 go_left: true,
                 rss: f64::INFINITY,
+                steps: Vec::new(),
             };
 
             for j in 0..n_features {
@@ -1074,11 +1215,12 @@ pub fn mboost_cv(
                     MboostBaseLearner::Linear => {
                         fit_linear_base_learner(&x_col, &residuals.view(), x_mean)
                     }
-                    MboostBaseLearner::Tree => fit_tree_base_learner(
+                    MboostBaseLearner::Tree => fit_tree_learner(
                         &x_col,
                         &residuals.view(),
                         &orders[j * n_train..(j + 1) * n_train],
                         config.min_samples_split,
+                        config.tree_depth,
                     ),
                 };
 
@@ -1416,6 +1558,44 @@ mod tests {
         );
         assert_eq!(MboostFamily::BinomialGlm.to_string(), "Binomial (glm)");
         assert_eq!(MboostFamily::Binomial.to_string(), "Binomial");
+    }
+
+    #[test]
+    fn test_validate_mboost_tree_depth() {
+        let (case, ds) = crate::test_support::load_case("ml_mboost_bols");
+        let x = case_matrix(&ds, &["x1", "x2", "x3"]);
+        let y = case_vector(&ds, "yg");
+        let mut chk = Check::new(&case);
+        for (depth, key) in [(1, "tree_d1_m30_pred"), (2, "tree_d2_m30_pred")] {
+            let mut c = MboostConfig::default();
+            c.mstop = 30;
+            c.nu = 0.1;
+            c.base_learner = MboostBaseLearner::Tree;
+            c.tree_depth = depth;
+            c.min_samples_split = 5;
+            let r = mboost(x.view(), y.view(), &c).unwrap();
+            chk.vector(key, &r.predictions, Tol::coef(200));
+            if depth == 2 {
+                let sel: Vec<f64> = r.selection_frequency.iter().map(|&v| v as f64).collect();
+                chk.vector("tree_d2_m30_sel", &sel, Tol::exact());
+            }
+        }
+        chk.finish();
+    }
+
+    #[test]
+    fn test_mboost_tree_depth_must_be_1_to_30() {
+        let (x, y) = noisy_data(40, 2, 3);
+        for d in [0, MBOOST_MAX_TREE_DEPTH + 1] {
+            let mut c = MboostConfig::default();
+            c.base_learner = MboostBaseLearner::Tree;
+            c.tree_depth = d;
+            let e = mboost(x.view(), y.view(), &c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.starts_with("tree_depth")),
+                "{e}"
+            );
+        }
     }
 
     fn cancelled() -> Budget {
@@ -1814,6 +1994,7 @@ mod tests {
                 threshold: None,
                 go_left: true,
                 rss,
+                steps: Vec::new(),
             };
         }
 
@@ -1823,6 +2004,7 @@ mod tests {
             threshold: Some(best_threshold),
             go_left: true,
             rss: best_rss,
+            steps: Vec::new(),
         }
     }
 

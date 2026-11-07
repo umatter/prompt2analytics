@@ -38,7 +38,8 @@
         "p2a-core::ml::mboost::tests::test_validate_mboost_binomial_path",
         "p2a-core::ml::mboost::tests::test_validate_mboost_binomial_glm_path",
         "p2a-core::ml::mboost::tests::test_validate_mboost_poisson_path",
-        "p2a-core::ml::mboost::tests::test_validate_mboost_converged_limits"
+        "p2a-core::ml::mboost::tests::test_validate_mboost_converged_limits",
+        "p2a-core::ml::mboost::tests::test_validate_mboost_tree_depth"
       ],
       "quantities": [
         "offset",
