@@ -3,7 +3,7 @@
 use ndarray::{Array2, ArrayView2};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 /// Seed of the random starts when `seed` is `None`.
 pub const KPROTOTYPES_DEFAULT_SEED: u64 = 42;
@@ -244,8 +244,8 @@ pub fn kprototypes(
             // Update step
             let mut cluster_counts = vec![0usize; n_clusters];
             let mut num_sums: Array2<f64> = Array2::zeros((n_clusters, d_num));
-            let mut cat_counts: Vec<Vec<BTreeMap<usize, usize>>> =
-                vec![vec![BTreeMap::new(); d_cat]; n_clusters];
+            let mut cat_counts: Vec<Vec<HashMap<usize, usize>>> =
+                vec![vec![HashMap::new(); d_cat]; n_clusters];
 
             for i in 0..n {
                 let c = labels[i];
@@ -274,10 +274,13 @@ pub fn kprototypes(
                 if cluster_counts[c] > 0 {
                     for j in 0..d_cat {
                         // The most frequent category; a tie goes to the smallest (as
-                        // clustMixType's which.max over sorted levels).
+                        // clustMixType's which.max over sorted levels), so the choice does not
+                        // depend on the map's iteration order.
                         let mut mode: Option<(usize, usize)> = None;
                         for (&category, &count) in &cat_counts[c][j] {
-                            if mode.is_none_or(|(_, best)| count > best) {
+                            if mode.is_none_or(|(current, best)| {
+                                count > best || (count == best && category < current)
+                            }) {
                                 mode = Some((category, count));
                             }
                         }
