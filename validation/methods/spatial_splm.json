@@ -3,9 +3,9 @@
   "methods": [
     {
       "id": "spatial_splm_spml",
-      "name": "Spatial panel ML (spml): within (individual, time, two-way) and pooled lag, error and SARAR models",
+      "name": "Spatial panel ML (spml): within (individual, time, two-way) and pooled lag, error and SARAR models; individual random effects with Baltagi, KKP or no spatial error",
       "category": "econometrics",
-      "reference": "written out (splm not installed): Elhorst (2003), Baltagi, Song & Koh (2003), Millo & Piras (2012) likelihoods, optimize/optim with a Newton polish, SEs from the Richardson Jacobian of the analytic score (numDeriv 2016.8.1.1); plm::plm(model = 'within', effect = ...) 2.6.7 for the non-spatial within coefficients (validation/r/cases/spatial_splm.R)",
+      "reference": "written out (splm not installed): Elhorst (2003), Baltagi, Song & Koh (2003), Kapoor, Kelejian & Prucha (2007), Millo & Piras (2012) likelihoods, optimize/optim with a Newton polish, SEs from the Richardson Jacobian of the analytic score (numDeriv 2016.8.1.1); plm::plm(model = 'within', effect = ...) 2.6.7 for the non-spatial within coefficients; nlme::lme(method = 'ML') for the non-spatial random-effects fit (validation/r/cases/spatial_splm.R)",
       "doc": "validation/econometrics/splm.md",
       "cases": [
         "splm_spml_spgm"
@@ -20,16 +20,24 @@
         "p2a-core::econometrics::splm::tests::test_validate_spml_twoways_error",
         "p2a-core::econometrics::splm::tests::test_validate_spml_pooling_lag",
         "p2a-core::econometrics::splm::tests::test_validate_spml_pooling_error",
-        "p2a-core::econometrics::splm::tests::test_validate_spml_within_none_plm"
+        "p2a-core::econometrics::splm::tests::test_validate_spml_within_none_plm",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_random_baltagi",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_random_kkp",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_random_none_lme",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_random_lag",
+        "p2a-core::econometrics::splm::tests::test_validate_spml_random_sarar_baltagi"
       ],
       "quantities": [
         "coefficients",
         "rho",
         "lambda",
+        "phi (random effects)",
         "sigma2 (ML)",
+        "sigma2_mu (random effects)",
         "SE of every parameter (observed information)",
         "logLik",
-        "plm within coefficients"
+        "plm within coefficients",
+        "nlme::lme random-effects coefficients, variances and logLik"
       ],
       "tolerance": "n = 294. Parameters Tol::iterative(1e-8) and logLik 1e-10, because the Newton profile optimiser converges quadratically to the root of the analytic profile gradient (R's optimum is Newton-polished to |gradient| < 1e-9). SEs Tol::iterative(1e-6): central differences of the analytic score against R's Richardson Jacobian. The non-spatial within fits at validation/README.md (coef 1e-8, SE and statistics 1e-6).",
       "deviations": [],

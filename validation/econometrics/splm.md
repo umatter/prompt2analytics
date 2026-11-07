@@ -89,29 +89,6 @@ model_re <- spml(y ~ x1 + x2, data = data,
 summary(model_re)
 ```
 
-**Rust Test:**
-```rust
-#[test]
-fn test_spml_random_effects() {
-    let (dataset, mut listw) = create_larger_panel_data();
-
-    let config = SpmlConfig {
-        model: SpatialPanelModel::Random,
-        lag: false,
-        spatial_error: SpatialErrorType::None,
-        ..Default::default()
-    };
-
-    let result = run_spml(
-        &dataset, "y", &["x1"],
-        "entity", "time", &mut listw, config
-    ).unwrap();
-
-    assert_eq!(result.model, SpatialPanelModel::Random);
-    assert!(result.variance.sigma_mu.is_some());
-}
-```
-
 ### Test Case 3: GMM Estimation (W2SLS)
 
 **R Code:**
