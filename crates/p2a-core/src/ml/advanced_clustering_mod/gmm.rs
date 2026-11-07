@@ -245,7 +245,7 @@ pub struct GmmConfig {
     pub covariance_type: CovarianceType,
     /// Start (default a k-means partition).
     pub init: GmmInit,
-    /// Maximum number of E-steps (default 100).
+    /// Maximum number of E-steps (default 1000).
     pub max_iterations: usize,
     /// Stopping rule on the relative change of the log-likelihood (default
     /// [`GMM_DEFAULT_TOLERANCE`]).
@@ -261,7 +261,7 @@ impl GmmConfig {
             n_components,
             covariance_type: CovarianceType::Full,
             init: GmmInit::default(),
-            max_iterations: 100,
+            max_iterations: 1000,
             tolerance: GMM_DEFAULT_TOLERANCE,
             seed: None,
         }
@@ -855,7 +855,7 @@ pub fn gaussian_mixture_with(
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_components` - Number of mixture components
 /// * `covariance_type` - Type of covariance parameters (default: Full)
-/// * `max_iterations` - Maximum EM iterations (default: 100)
+/// * `max_iterations` - Maximum EM iterations (default: 1000)
 /// * `tolerance` - Stopping rule on the relative change of the log-likelihood (default:
 ///   [`GMM_DEFAULT_TOLERANCE`])
 /// * `seed` - Seed of the k-means start (default: [`GMM_DEFAULT_SEED`])
@@ -1204,6 +1204,16 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    #[test]
+    fn test_gmm_default_limit_lets_small_samples_converge() {
+        // At n = 100 the default relative stop needs more than 100 passes on these data.
+        let x = mixture_3d();
+        let head = x.slice(ndarray::s![..100, ..]);
+        let r = gaussian_mixture(head, 3, None, None, None, None).unwrap();
+        assert!(r.converged, "{} iterations", r.n_iterations);
+        assert!(r.n_iterations > 100, "{} iterations", r.n_iterations);
     }
 
     #[test]
