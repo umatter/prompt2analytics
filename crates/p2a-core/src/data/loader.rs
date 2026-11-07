@@ -402,9 +402,11 @@ impl<'a> RecordTable<'a> {
 
     /// Set this record's cell of column `j`, padding the rows it was absent from.
     fn set(&mut self, j: usize, cell: JsonCell<'a>) -> Result<(), LoadError> {
-        let column = &mut self.columns[j];
         let needed = self.rows + 1;
-        if column.capacity() < needed {
+        if self.columns[j].capacity() < needed {
+            // Padding fills this column to the table's height, so the table counts here too.
+            self.check_table_size(self.columns.len())?;
+            let column = &mut self.columns[j];
             let capacity = needed.max(column.capacity().saturating_mul(2));
             crate::resource::check_alloc::<JsonCell>(capacity, "JSON column")
                 .map_err(resource_err)?;
@@ -416,6 +418,7 @@ impl<'a> RecordTable<'a> {
                     ))
                 })?;
         }
+        let column = &mut self.columns[j];
         column.resize_with(self.rows, || JsonCell::Null);
         column.push(cell);
         Ok(())
@@ -433,7 +436,12 @@ impl<'a> RecordTable<'a> {
                 "the JSON records contain no fields".to_string(),
             ));
         }
+        // Empty and sparse records add height without touching a column; every column
+        // below is built at the full height.
         let rows = self.rows;
+        let cells = crate::resource::checked_len(&[rows, self.columns.len()], "JSON table")
+            .map_err(resource_err)?;
+        crate::resource::check_alloc::<JsonCell>(cells, "JSON table").map_err(resource_err)?;
         let mut columns = Vec::with_capacity(self.columns.len());
         for (name, cells) in self.names.into_iter().zip(self.columns) {
             crate::resource::checkpoint().map_err(resource_err)?;
@@ -868,8 +876,9 @@ impl DataLoader {
         table.into_frame()
     }
 
-    /// Load a JSON file (`.json`) holding an array of flat records, the layout of
-    /// [`Dataset::to_json_string`] and `export_dataset`.
+    /// Load a JSON file (`.json`) holding an array of flat records, the layout `export_dataset`
+    /// writes. [`Dataset::to_json_string`] has the same layout but currently wraps string values
+    /// in literal quotes, which come back as part of the text.
     pub fn load_json(path: impl AsRef<Path>) -> Result<DataFrame, LoadError> {
         Self::from_json_string(&read_json_text(path.as_ref())?)
     }
@@ -1558,7 +1567,7 @@ mod tests {
         let text = concat!(
             r#"{"id": 1, "x": 1.5, "flag": true, "name": "Größe", "mixed": 1}"#,
             "\n",
-            r#"{"id": 2, "x": null, "flag": false, "name": "a\"b\\cé", "mixed": "two"}"#,
+            r#"{"id": 2, "x": null, "flag": false, "name": "a\"b\\c\u00e9", "mixed": "two"}"#,
             "\n",
             r#"{"x": -0.125, "id": 3, "flag": null, "extra": 7}"#,
             "\n",
@@ -1711,6 +1720,8 @@ mod tests {
         }
         let got_k: Vec<i64> = opt_i64(df, "k").into_iter().map(Option::unwrap).collect();
         assert_eq!(got_k, k);
+        // to_json_string wraps strings in literal quotes (open, with WP60), so only the null
+        // positions of the string column are compared until that is fixed.
         for (i, v) in opt_str(df, "s").iter().enumerate() {
             assert_eq!(v.is_none(), i % 9 == 0, "row {i}");
         }
@@ -1746,6 +1757,33 @@ mod tests {
         );
         let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
             DataLoader::from_json_string(&records)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        // One wide record and then empty ones: no column is created and no size tick falls
+        // after the first record, so only the frame's own check sees the height.
+        let head: String = (0..400)
+            .map(|i| format!("\"k{i}\": 1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let wide = format!("{{{head}}}\n{}", "{}\n".repeat(399));
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_jsonl_string(&wide)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        let wide_records = format!("[{{{head}}}{}]", ",{}".repeat(399));
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_json_string(&wide_records)
+        });
+        assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
+        assert_eq!(
+            DataLoader::from_jsonl_string(&wide).unwrap().shape(),
+            (400, 400)
+        );
+        // The padding of existing columns is refused when it happens: the bad last line is
+        // never reached.
+        let refilled = format!("{wide}{{{head}}}\nnot json\n");
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 16), || {
+            DataLoader::from_jsonl_string(&refilled)
         });
         assert!(matches!(r, Err(LoadError::Resource(_))), "{r:?}");
         // Without the ceiling the same text loads, padded with nulls.
