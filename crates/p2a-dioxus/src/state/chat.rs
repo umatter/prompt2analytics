@@ -552,3 +552,158 @@ impl ChatState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! ChatState as ChatPanel::handle_send drives it.
+    use super::*;
+    use crate::api::ToolResult;
+    use serde_json::json;
+
+    fn reply(content: &str) -> Message {
+        Message {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_results: None,
+        }
+    }
+
+    /// The first half of a turn, as handle_send runs it: processing starts, the prompt and a
+    /// streaming placeholder are added, then the history for the request is built.
+    fn send(chat: &mut ChatState, prompt: &str) -> Vec<Message> {
+        chat.start_processing();
+        chat.add_user_message(prompt);
+        chat.add_streaming_message();
+        chat.build_history()
+    }
+
+    /// The end of a turn: the Done event, then stop_processing.
+    fn finish(chat: &mut ChatState, done: Message) {
+        chat.finalize_message(done);
+        chat.stop_processing();
+    }
+
+    /// interpret = false: Done carries the calls and the backend's is_error for each result. A
+    /// failed call is marked failed and goes back to the model as is_error = true.
+    #[test]
+    fn test_failed_tool_results_stay_failed_in_history() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "fit both models");
+        chat.set_active_tool("regression_ols".to_string(), json!({"dataset": "sales"}));
+        chat.clear_active_tool(Some("OLS Regression Results".to_string()));
+        chat.set_active_tool(
+            "panel_fixed_effects".to_string(),
+            json!({"dataset": "sales"}),
+        );
+        chat.clear_active_tool(Some("Error: column 'firm' not found".to_string()));
+        finish(
+            &mut chat,
+            Message {
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call_1".into(),
+                        name: "regression_ols".into(),
+                        arguments: json!({"dataset": "sales"}),
+                    },
+                    ToolCall {
+                        id: "call_2".into(),
+                        name: "panel_fixed_effects".into(),
+                        arguments: json!({"dataset": "sales"}),
+                    },
+                ]),
+                tool_results: Some(vec![
+                    ToolResult {
+                        tool_call_id: "call_1".into(),
+                        content: "OLS Regression Results".into(),
+                        is_error: false,
+                    },
+                    ToolResult {
+                        tool_call_id: "call_2".into(),
+                        content: "Error: column 'firm' not found".into(),
+                        is_error: true,
+                    },
+                ]),
+            },
+        );
+        let last = chat.messages.last().expect("the reply");
+        assert!(!last.is_streaming);
+        let status: Vec<(&str, Option<bool>)> = last
+            .tool_calls
+            .iter()
+            .map(|tc| (tc.id.as_str(), tc.success))
+            .collect();
+        assert_eq!(status, [("call_1", Some(true)), ("call_2", Some(false))]);
+
+        let history = chat.build_history();
+        let roles: Vec<&str> = history.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool"]);
+        let ids: Vec<&str> = history[1]
+            .tool_calls
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, ["call_1", "call_2"]);
+        let results: Vec<(&str, bool)> = history[2]
+            .tool_results
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|r| (r.tool_call_id.as_str(), r.is_error))
+            .collect();
+        assert_eq!(results, [("call_1", false), ("call_2", true)]);
+    }
+
+    /// interpret = true: Done carries no tool calls. Each ToolEnd result lands on its own running
+    /// call, even for two calls of one tool, and the streamed calls stay.
+    #[test]
+    fn test_tool_end_results_attach_to_the_running_call() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "summarise price and sqft");
+        chat.set_active_tool("summary_stats".to_string(), json!({"column": "price"}));
+        chat.clear_active_tool(Some("price: mean 312.4".to_string()));
+        chat.set_active_tool("summary_stats".to_string(), json!({"column": "sqft"}));
+        chat.clear_active_tool(Some("sqft: mean 1840".to_string()));
+        finish(&mut chat, reply("Price averages 312.4, sqft 1840."));
+        let last = chat.messages.last().expect("the reply");
+        assert_eq!(last.content, "Price averages 312.4, sqft 1840.");
+        let calls: Vec<(serde_json::Value, Option<&str>)> = last
+            .tool_calls
+            .iter()
+            .map(|tc| (tc.arguments.clone(), tc.result.as_deref()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (json!({"column": "price"}), Some("price: mean 312.4")),
+                (json!({"column": "sqft"}), Some("sqft: mean 1840")),
+            ]
+        );
+        assert!(chat.active_tool.is_none());
+        // The success flag a ToolEnd sets is not asserted. ToolEnd carries no status, so a failed
+        // call cannot be told apart here.
+    }
+
+    /// A result over 2,000 bytes is cut on a char boundary in the history.
+    #[test]
+    fn test_history_cuts_long_results_on_a_char_boundary() {
+        let mut chat = ChatState::new();
+        send(&mut chat, "show the labels");
+        chat.set_active_tool("head_dataset".to_string(), json!({"dataset": "labels"}));
+        // 'a' then 1500 x 'é' (2 bytes each): 3001 bytes. Byte 2000 falls inside an 'é' (bytes
+        // 1999..2001), so the cut is at 1999: "a" + 999 x 'é'.
+        chat.clear_active_tool(Some(format!("a{}", "é".repeat(1500))));
+        finish(&mut chat, reply("Here are the labels."));
+        let history = chat.build_history();
+        assert_eq!(history.len(), 3, "{history:?}");
+        let content = &history[2].tool_results.as_deref().unwrap_or_default()[0].content;
+        assert!(
+            content.starts_with(&format!("a{}...\n[Result truncated", "é".repeat(999))),
+            "{content}"
+        );
+    }
+}
