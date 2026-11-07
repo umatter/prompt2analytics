@@ -17,6 +17,8 @@
 #  * dplyr joins with suffix = c("", "_right") (dplyr:::add_suffixes appends the suffix until the
 #    name is unique) for chained joins whose names collide; full_join(keep = TRUE) because p2a's full
 #    join keeps both key columns (DATA-43, Tier 4). Strings are carried in the `names` of named values.
+# Calls go through the namespace: case files share one R session, and an attached dplyr would mask
+# stats::lag for the plm formulas of the case files sourced after this one.
 
 .munging_long <- function() {
   set.seed(5011)
@@ -60,10 +62,12 @@
 case("data_munging_lag", "data/munging",
      "dplyr::lag / lead (positional, within groups), diff and pct_change on integer data with NA",
      function(ctx) {
-  suppressPackageStartupMessages(library(dplyr))
   d <- ctx$gen_dataset("munging_long", .munging_long())
   stopifnot(is.integer(d$x), is.integer(d$g), is.integer(dplyr::lag(d$x)))
-  by_g <- d %>% group_by(g) %>% mutate(lag2 = lag(x, 2), lead1 = lead(y, 1)) %>% ungroup()
+  by_g <- d |>
+    dplyr::group_by(g) |>
+    dplyr::mutate(lag2 = dplyr::lag(x, 2), lead1 = dplyr::lead(y, 1)) |>
+    dplyr::ungroup()
   list(values = list(
          lag1_x = vec(dplyr::lag(d$x, 1)),
          lag2_x_by_g = vec(by_g$lag2),
@@ -122,11 +126,10 @@ case("data_munging_model_matrix", "data/munging",
 case("data_munging_pivot_longer", "data/munging",
      "tidyr::pivot_longer: row-major long format, NA kept, integer + double -> double, integer + integer -> integer",
      function(ctx) {
-  suppressPackageStartupMessages(library(tidyr))
   d <- ctx$gen_dataset("munging_wide", .munging_wide())
   stopifnot(is.integer(d$a), is.double(d$b), is.integer(d$c))
-  long <- pivot_longer(d, c(a, b, c), names_to = "var", values_to = "val")
-  long_int <- pivot_longer(d, c(a, c), names_to = "var", values_to = "val")
+  long <- tidyr::pivot_longer(d, c(a, b, c), names_to = "var", values_to = "val")
+  long_int <- tidyr::pivot_longer(d, c(a, c), names_to = "var", values_to = "val")
   stopifnot(is.double(long$val), is.integer(long_int$val))
   list(values = list(
          long_id = vec(long$id),
@@ -141,7 +144,6 @@ case("data_munging_pivot_longer", "data/munging",
 case("data_munging_fill_mode", "data/munging",
      "Mode fill: names(which.max(table(x))) (ties to the first sorted level), then tidyr::replace_na",
      function(ctx) {
-  suppressPackageStartupMessages(library(tidyr))
   d <- ctx$gen_dataset("munging_fill", .munging_fill())
   stopifnot(is.integer(d$k), is.double(d$f), is.character(d$s))
   mode_of <- function(v) names(which.max(table(v)))
@@ -151,11 +153,11 @@ case("data_munging_fill_mode", "data/munging",
   stopifnot(k_mode == 1L, f_mode == 2.5, s_mode == "a")
   list(values = list(
          k_mode = k_mode,
-         k_filled = vec(replace_na(d$k, k_mode)),
+         k_filled = vec(tidyr::replace_na(d$k, k_mode)),
          f_mode = f_mode,
-         f_filled = vec(replace_na(d$f, f_mode)),
+         f_filled = vec(tidyr::replace_na(d$f, f_mode)),
          s_mode = named(setNames(1, s_mode)),
-         s_filled = .strings(replace_na(d$s, s_mode))),
+         s_filled = .strings(tidyr::replace_na(d$s, s_mode))),
        reference = "names(which.max(table(x))); tidyr::replace_na(x, mode)",
        call = "replace_na(d$k, as.integer(names(which.max(table(d$k)))))",
        packages = c("tidyr"))
@@ -164,12 +166,11 @@ case("data_munging_fill_mode", "data/munging",
 case("data_munging_na_if", "data/munging",
      "dplyr::na_if: a sentinel value becomes NA in integer, double and character columns",
      function(ctx) {
-  suppressPackageStartupMessages(library(dplyr))
   d <- ctx$gen_dataset("munging_fill", .munging_fill())
   list(values = list(
-         k_na_if_3 = vec(na_if(d$k, 3L)),
-         f_na_if_1_25 = vec(na_if(d$f, 1.25)),
-         s_na_if_c = .strings(na_if(d$s, "c"))),
+         k_na_if_3 = vec(dplyr::na_if(d$k, 3L)),
+         f_na_if_1_25 = vec(dplyr::na_if(d$f, 1.25)),
+         s_na_if_c = .strings(dplyr::na_if(d$s, "c"))),
        reference = "dplyr::na_if(x, y)",
        call = "na_if(d$k, 3L); na_if(d$f, 1.25); na_if(d$s, 'c')",
        packages = c("dplyr"))
@@ -178,9 +179,8 @@ case("data_munging_na_if", "data/munging",
 case("data_munging_value_counts", "data/munging",
      "dplyr::count(d, g, sort = TRUE) with the NA group; proportion = n / sum(n)",
      function(ctx) {
-  suppressPackageStartupMessages(library(dplyr))
   d <- ctx$gen_dataset("munging_counts", .munging_counts())
-  cnt <- count(d, g, sort = TRUE)
+  cnt <- dplyr::count(d, g, sort = TRUE)
   stopifnot(!anyDuplicated(cnt$n))   # distinct counts: the order is unambiguous
   list(values = list(
          vc_g = vec(cnt$g),
@@ -206,20 +206,19 @@ case("data_munging_describe", "data/munging",
 case("data_munging_join_suffix", "data/munging",
      "dplyr joins with suffix c('', '_right'): colliding right-hand names get the suffix until unique",
      function(ctx) {
-  suppressPackageStartupMessages(library(dplyr))
   d <- ctx$gen_dataset("munging_join_frames", .munging_join_frames())
   A <- d[d$frame == "A", c("k", "value")]
   AB <- d[d$frame == "AB", c("k", "value", "value_right")]
   C <- d[d$frame == "C", c("k", "value")]
   sfx <- c("", "_right")
   out <- list(
-    a = left_join(AB, C, by = "k", suffix = sfx),
-    b = left_join(A, AB, by = "k", suffix = sfx),
-    c = full_join(AB, AB, by = "k", suffix = sfx, keep = TRUE),
-    d = right_join(AB, C, by = "k", suffix = sfx),
-    e = inner_join(AB, C, by = "k", suffix = sfx),
-    f = cross_join(AB, C, suffix = sfx),
-    g = left_join(AB, C, by = "k", suffix = c("", "_c")))
+    a = dplyr::left_join(AB, C, by = "k", suffix = sfx),
+    b = dplyr::left_join(A, AB, by = "k", suffix = sfx),
+    c = dplyr::full_join(AB, AB, by = "k", suffix = sfx, keep = TRUE),
+    d = dplyr::right_join(AB, C, by = "k", suffix = sfx),
+    e = dplyr::inner_join(AB, C, by = "k", suffix = sfx),
+    f = dplyr::cross_join(AB, C, suffix = sfx),
+    g = dplyr::left_join(AB, C, by = "k", suffix = c("", "_c")))
   stopifnot(identical(names(out$a), c("k", "value", "value_right", "value_right_right")),
             identical(names(out$b), c("k", "value", "value_right", "value_right_right")))
   values <- list()
@@ -237,9 +236,8 @@ case("data_munging_join_suffix", "data/munging",
 case("data_munging_filter", "data/munging",
      "dplyr::filter on an integer and a double column with NA (rows whose condition is NA are dropped)",
      function(ctx) {
-  suppressPackageStartupMessages(library(dplyr))
   d <- ctx$gen_dataset("munging_long", .munging_long())
-  list(values = list(ids_x_ge_5 = vec(filter(d, x >= 5)$id), ids_y_lt_9 = vec(filter(d, y < 9)$id)),
+  list(values = list(ids_x_ge_5 = vec(dplyr::filter(d, x >= 5)$id), ids_y_lt_9 = vec(dplyr::filter(d, y < 9)$id)),
        reference = "dplyr::filter(d, x >= 5); dplyr::filter(d, y < 9)",
        call = "filter(d, x >= 5)$id; filter(d, y < 9)$id",
        packages = c("dplyr"))
