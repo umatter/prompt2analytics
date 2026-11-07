@@ -2927,7 +2927,7 @@ pub fn run_gsynth(
         }
     };
 
-    let (dynamic_effects, dynamic_counts) = event_time_att(&est.eff, &m.first_treated);
+    let (dynamic_effects, dynamic_counts) = event_time_att(&est.eff, &m.first_treated)?;
     let mut pre_sum = 0.0;
     let mut pre_n = 0usize;
     let mut unit_effects = Vec::with_capacity(n_treated);
@@ -4681,7 +4681,7 @@ fn parametric_bootstrap(
             }
             let pm = resampled_mats(m, &y_cols, &y_cols, Some(y))?;
             let fit = gsynth_estimate(&pm, spec, names)?;
-            let (ev, _) = event_time_att(&fit.eff, &pm.first_treated);
+            let (ev, _) = event_time_att(&fit.eff, &pm.first_treated)?;
             Ok((fit.att, ev))
         })();
         reps.record(attempt)?;
@@ -4715,7 +4715,7 @@ fn nonparametric_bootstrap(
                     eff[[t, j]] = pm.y[[t, c]] - fit.fitted[[t, c]];
                 }
             }
-            let (ev, _) = event_time_att(&eff, &pm.first_treated);
+            let (ev, _) = event_time_att(&eff, &pm.first_treated)?;
             Ok((att_of(&eff, &pm.first_treated), ev))
         })();
         reps.record(attempt)?;
@@ -4777,12 +4777,12 @@ fn bootstrap_summary(
 fn event_time_att(
     eff: &Array2<f64>,
     first_treated: &[usize],
-) -> (Vec<(i64, f64)>, Vec<(i64, usize)>) {
+) -> EconResult<(Vec<(i64, f64)>, Vec<(i64, usize)>)> {
     let (Some(&lo), Some(&hi)) = (first_treated.iter().min(), first_treated.iter().max()) else {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     // event time e = t - t0 + 1 runs over 1 - hi ..= T - lo; slot s = e - (1 - hi)
-    let mut acc = vec![(0.0, 0usize); eff.nrows() + hi - lo];
+    let mut acc = crate::resource::try_vec(eff.nrows() + hi - lo, (0.0, 0usize), "event-time ATT")?;
     for (j, &t0) in first_treated.iter().enumerate() {
         for t in 0..eff.nrows() {
             let a = &mut acc[t + hi - t0];
@@ -4796,7 +4796,7 @@ fn event_time_att(
         .map(|(s, &(v, c))| (event(s), v / c as f64))
         .collect();
     let counts = seen().map(|(s, &(_, c))| (event(s), c)).collect();
-    (effects, counts)
+    Ok((effects, counts))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -6565,7 +6565,7 @@ mod gsynth_tests {
                     a.1 += 1;
                 }
             }
-            let (effects, counts) = event_time_att(&eff, &first);
+            let (effects, counts) = event_time_att(&eff, &first).unwrap();
             let want_e: Vec<(i64, u64)> = acc
                 .iter()
                 .map(|(&e, &(s, c))| (e, (s / c as f64).to_bits()))
@@ -7707,7 +7707,7 @@ mod gsynth_tests {
         };
         let reps = parametric_bootstrap(&m, &spec, &[], &base.boot_base(), &draws, 50).unwrap();
         assert_eq!(reps.failed, 0);
-        let (dynamic, _) = event_time_att(&base.eff, &m.first_treated);
+        let (dynamic, _) = event_time_att(&base.eff, &m.first_treated).unwrap();
         let s = bootstrap_summary(base.att, &dynamic, &reps, 0.95).unwrap();
         let dse: Vec<f64> = s.dynamic_se.iter().map(|(_, v)| *v).collect();
         Check::new(&case)

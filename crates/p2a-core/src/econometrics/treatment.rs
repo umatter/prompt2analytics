@@ -652,7 +652,7 @@ pub fn run_ipw_treatment(
     let ys = y.as_slice().ok_or_else(not_contiguous)?;
     let ds = d.as_slice().ok_or_else(not_contiguous)?;
     let es = ps.as_slice().ok_or_else(not_contiguous)?;
-    let arms = weighted_arm_means(ys, ds, es, &keep_mask, kind);
+    let arms = weighted_arm_means(ys, ds, es, &keep_mask, kind)?;
     let se_naive = ipw_naive_se(ys, ds, es, &keep_mask, kind, effect, &arms);
     let se_mest = match ipw_mest_se(x_ps.view(), ys, ds, es, &keep_mask, kind, effect, &arms) {
         Ok(v) => Some(v),
@@ -935,9 +935,15 @@ struct ArmWeights {
     s0: f64,
 }
 
-fn weighted_arm_means(y: &[f64], d: &[f64], e: &[f64], keep: &[bool], kind: IpwKind) -> ArmWeights {
+fn weighted_arm_means(
+    y: &[f64],
+    d: &[f64],
+    e: &[f64],
+    keep: &[bool],
+    kind: IpwKind,
+) -> EconResult<ArmWeights> {
     let n = y.len();
-    let mut w = vec![0.0; n];
+    let mut w = resource::try_vec(n, 0.0, "IPW weights")?;
     let (mut s1, mut sy1, mut s0, mut sy0) = (0.0, 0.0, 0.0, 0.0);
     for i in 0..n {
         if !keep[i] {
@@ -953,13 +959,13 @@ fn weighted_arm_means(y: &[f64], d: &[f64], e: &[f64], keep: &[bool], kind: IpwK
             sy0 += wi * y[i];
         }
     }
-    ArmWeights {
+    Ok(ArmWeights {
         w,
         mu1: sy1 / s1,
         mu0: sy0 / s0,
         s1,
         s0,
-    }
+    })
 }
 
 /// SE with the propensity treated as known, over the kept units. Hajek and ATT: HC0 of the
@@ -2921,7 +2927,7 @@ mod tests {
             d.as_slice().unwrap(),
             e.as_slice().unwrap(),
         );
-        let arms = weighted_arm_means(ys, ds, es, &keep, kind);
+        let arms = weighted_arm_means(ys, ds, es, &keep, kind).unwrap();
         let err = ipw_mest_se(x.view(), ys, ds, es, &keep, kind, 1e159, &arms).unwrap_err();
         assert!(
             matches!(err, EconError::SingularMatrix { .. }),

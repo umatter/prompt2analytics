@@ -1144,7 +1144,8 @@ fn ebal_solve(
         })
         .collect();
     // row-major m x kk
-    let mut c = resource::try_vec(m * kk, 0.0, "entropy-balancing scores")?;
+    let len = resource::checked_len(&[m, kk], "entropy-balancing scores")?;
+    let mut c = resource::try_vec(len, 0.0, "entropy-balancing scores")?;
     for (cj, &j) in solved.iter().enumerate() {
         for i in 0..m {
             c[i * kk + cj] = (x[[i, j]] - target[j]) / sd[cj];
