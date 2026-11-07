@@ -51,3 +51,20 @@ case("pam_clara_blobs", "ml/clustering", "PAM (k = 2, 3, 4) and full-sample CLAR
        call = "pam(ap_blobs, k); clara(ap_blobs, 3, samples = 1, sampsize = nrow(ap_blobs), pamLike = TRUE)", packages = "cluster")
 })
 
+case("fuzzy_reference_blobs", "ml/clustering", "FANNY (k = 3, memb.exp = 2) and fuzzy c-means (k = 3, m = 2, fixed start) on ap_blobs: recorded for ML-11 / ML-9", function(ctx) {
+  d <- ctx$dataset("datasets/generated/ap_blobs.csv"); X <- as.matrix(d); n <- nrow(X)
+  v <- list()
+  f <- fanny(X, 3, memb.exp = 2, maxit = 5000, tol = 1e-15)
+  stopifnot(f$convergence[["converged"]] == 1)
+  o <- order(sapply(1:3, function(j) mean(X[f$clustering == j, 1])))
+  v$fanny_membership <- vec(f$membership[, o]); v$fanny_coeff <- vec(unname(f$coeff))
+  v$fanny_objective <- f$objective[["objective"]]; v$fanny_clustering <- vec(match(f$clustering, o))
+  v$fanny_iterations <- f$convergence[["iterations"]]
+  c0 <- rbind(c(0, 0), c(3, 0), c(1.5, 2.5))
+  cm <- cmeans(X, centers = c0, iter.max = 10000, dist = "euclidean", method = "cmeans", m = 2, control = list(reltol = 1e-15))
+  oc <- order(cm$centers[, 1])
+  v$cmeans_start <- vec(c0); v$cmeans_centers <- vec(cm$centers[oc, ]); v$cmeans_membership <- vec(cm$membership[, oc])
+  v$cmeans_withinerror <- cm$withinerror; v$cmeans_cluster <- vec(match(cm$cluster, oc)); v$cmeans_iterations <- cm$iter
+  list(values = v, reference = "cluster::fanny(x, 3, memb.exp = 2, tol = 1e-15); e1071::cmeans(x, centers = start, m = 2, dist = 'euclidean')",
+       call = "fanny(ap_blobs, 3); cmeans(ap_blobs, centers = start, m = 2)", packages = c("cluster", "e1071"))
+})
