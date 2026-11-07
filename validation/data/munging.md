@@ -73,3 +73,18 @@ counts order by value, ascending, missing last.
 Case `data_munging_value_counts`, on `munging_counts.csv`. Decisive values: `vc_n = [4, 3, 2, 1]`,
 `vc_proportion = [0.4, 0.3, 0.2, 0.1]`. Tests: `test_validate_value_counts`,
 `test_value_counts_normalize`.
+
+## Join column names
+
+The right-hand columns are named by `dplyr:::add_suffixes`: a name that is taken gets the suffix, again
+until it is unique, and earlier names win (`value_right_right`). The right names are checked against the
+left columns polars keeps: all of them, except that a right join drops the left keys. The right keys
+take part, as in `dplyr:::join_cols`, although inner and left joins then drop them. Where dplyr
+silently drops a column under an empty suffix, an empty suffix that leaves a name on both sides is an error.
+
+p2a's full join keeps both key columns (`k`, `k_right`; DATA-43, Tier 4), so the pin uses
+`full_join(keep = TRUE)` and is a registry deviation.
+
+Case `data_munging_join_suffix`, on `munging_join_frames.csv`. Decisive names: `left_join(AB, C)` gives `k,
+value, value_right, value_right_right`; `cross_join(AB, C)` gives `k, value, value_right, k_right,
+value_right_right`. Tests: `test_validate_join_suffix_dplyr`, `test_join_suffix_collision`.

@@ -24,6 +24,15 @@
      "doc": "validation/data/munging.md", "cases": ["data_munging_value_counts"],
      "tests": ["p2a-core::data::munging::aggregate::tests::test_validate_value_counts"],
      "quantities": ["values (NA a group)", "counts", "proportions"],
-     "tolerance": "exact", "deviations": [], "supersedes_legacy": []}
+     "tolerance": "exact", "deviations": [], "supersedes_legacy": []},
+    {"id": "data_join_suffix", "name": "Join column names under suffix collisions as dplyr (add_suffixes)",
+     "category": "data", "reference": "dplyr::left_join / inner_join / right_join / full_join(keep = TRUE) / cross_join, suffix = c('', '_right')",
+     "doc": "validation/data/munging.md", "cases": ["data_munging_join_suffix"],
+     "tests": ["p2a-core::data::munging::join::tests::test_validate_join_suffix_dplyr"],
+     "quantities": ["output column names per join type", "joined column values"],
+     "tolerance": "exact",
+     "deviations": [
+       {"finding": "DATA-43", "quantity": "full-join keys", "note": "p2a's full join keeps both key columns (k, k_right); pinned against full_join(keep = TRUE); dplyr's default coalesces them (Tier 4)"}],
+     "supersedes_legacy": []}
   ]
 }
