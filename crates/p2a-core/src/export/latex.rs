@@ -733,6 +733,26 @@ mod tests {
             fe.to_latex()
         );
         assert!(fe.to_html().contains("<td class=\"coef\">NA</td>"));
+        // A panel fit's warnings reach both table footers.
+        let frame = polars::prelude::df!(
+            "firm" => [1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+            "y" => [1.1, 2.3, 2.9, 4.2, 2.2, 2.8, 4.1, 5.3, 3.3, 3.9, 5.2, 5.8],
+            "x" => [1.0, 2.0, 3.0, 4.5, 1.5, 2.5, 3.0, 4.0, 1.0, 2.5, 3.5, 4.0],
+            "region" => [7.0, 7.0, 7.0, 7.0, 9.0, 9.0, 9.0, 9.0, 4.0, 4.0, 4.0, 4.0]
+        )
+        .unwrap();
+        let warned = crate::econometrics::run_fixed_effects(
+            &crate::data::Dataset::new(frame),
+            "y",
+            &["x", "region"],
+            "firm",
+        )
+        .unwrap();
+        assert!(!warned.warnings.is_empty());
+        let tex = warned.to_latex();
+        assert!(tex.contains("\\item Warning:"), "{tex}");
+        let html = warned.to_html();
+        assert!(html.contains("<td colspan=\"5\">Warning:"), "{html}");
         assert_eq!(
             (
                 format_cell(f64::INFINITY, 2),

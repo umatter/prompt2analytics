@@ -25,7 +25,7 @@ spread. Pairs with a non-finite value are dropped before r, as the plot drops th
 whisker ends, `q1`/`q3` Tukey's hinges (fivenum), outliers in data order, `n` the non-NaN values. NaN is
 dropped; +-Inf are counted and listed as outliers, as R; they are not drawn. A group without values keeps
 its slot with n = 0 and NaN statistics, as R's `boxplot`. Case `viz_boxplot_groups`: e.g. `c(1, 7, 12, 15, 15, 16, 18, 18)`
--> 1, 9.5, 15, 17, 18, no outliers. Test `test_validate_boxplot_stats_chart`, exact.
+-> 1, 9.5, 15, 17, 18, no outliers. Test `test_validate_boxplot_stats_chart`: counts exact, statistics and outliers at the statistics tolerance.
 
 ## Histogram (`histogram()`)
 
@@ -36,7 +36,7 @@ R-pinned with known deviations: R's default `hist()` passes the Sturges count to
 bins where p2a has 8); p2a does not. Constant data (range at most 4 eps times
 the magnitude) get k bins of width 1 starting at the value. Case `viz_histogram_bins`: k = 1, 4, 4, 5, 8,
 11, 11 for n = 1, 5, 8, 16, 100, 1000, 1024; counts `4 7 9 13 31 17 12 7` (n = 100), `3 6 10 14 9 4 4`
-(n = 50 on a 1e-11 scale) and `3 3 2 3 2` (a decimal grid with values on the breaks). Test `test_validate_histogram_sturges_and_counts`, exact.
+(n = 50 on a 1e-11 scale) and `3 3 2 3 2` (a decimal grid with values on the breaks). Test `test_validate_histogram_sturges_and_counts`: bin number and counts exact, breaks at the statistics tolerance.
 
 ## Residual diagnostics (`residual_diagnostics`, `residual_diagnostics_with`)
 

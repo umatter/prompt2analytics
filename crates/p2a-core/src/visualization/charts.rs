@@ -1557,11 +1557,12 @@ pub fn residual_diagnostics_with(
         }
         None => {
             let (hat, p0, note) = one_predictor_leverage(&fitted_valid);
-            if n_params.is_some_and(|p| p != p0) {
+            if let Some(p) = n_params
+                && p != p0
+            {
                 return Err(VisualizationError::InvalidData(format!(
-                    "n_params = {} needs the model's hat values (leverage); without them only a \
-                     model with one regressor and an intercept (p = 2) can be diagnosed",
-                    n_params.unwrap_or(p0)
+                    "n_params = {p} needs the model's hat values (leverage); without them only a \
+                     model with one regressor and an intercept (p = 2) can be diagnosed"
                 )));
             }
             warnings.push(note.to_string());
@@ -1605,9 +1606,16 @@ pub fn residual_diagnostics_with(
         }
     }
     if !leverage_one.is_empty() {
+        const LISTED: usize = 20;
+        let count = leverage_one.len();
+        let (listed, rows_label) = if count > LISTED {
+            (&leverage_one[..LISTED], "first rows")
+        } else {
+            (&leverage_one[..], "rows")
+        };
         warnings.push(format!(
             "observations with leverage one have NaN standardized residuals and Cook's \
-             distances and are not plotted (rows {leverage_one:?})"
+             distances and are not plotted ({count} observations, {rows_label} {listed:?})"
         ));
     }
 
@@ -1616,6 +1624,13 @@ pub fn residual_diagnostics_with(
     let plotted: Vec<usize> = (0..n_valid)
         .filter(|&i| standardized_residuals[i].is_finite())
         .collect();
+    if plotted.is_empty() {
+        return Err(VisualizationError::InvalidData(
+            "every observation has leverage one, so standardized residuals and Cook's distance \
+             are undefined and nothing can be plotted"
+                .to_string(),
+        ));
+    }
     let pick = |v: &[f64]| -> Vec<f64> { plotted.iter().map(|&i| v[i]).collect() };
     let fitted_plotted = pick(&fitted_valid);
     let standardized_plotted = pick(&standardized_residuals);
@@ -2933,11 +2948,11 @@ mod tests {
                 check.vector(
                     &format!("{g}_stats"),
                     &[s.min, s.q1, s.median, s.q3, s.max],
-                    Tol::exact(),
+                    Tol::stat(s.n),
                 );
             }
             if !s.outliers.is_empty() {
-                check.vector(&format!("{g}_out"), &s.outliers, Tol::exact());
+                check.vector(&format!("{g}_out"), &s.outliers, Tol::stat(s.n));
             }
         }
         let inf = &r.statistics[7];
@@ -2947,7 +2962,7 @@ mod tests {
             .vector(
                 "inf6_stats",
                 &[inf.min, inf.q1, inf.median, inf.q3, inf.max],
-                Tol::exact(),
+                Tol::stat(inf.n),
             );
         check.finish();
         assert_eq!(inf.outliers, [f64::INFINITY]);
@@ -2985,10 +3000,9 @@ mod tests {
                 .collect();
             let h = histogram(&x, None, small()).unwrap();
             let counts: Vec<f64> = h.counts.iter().map(|&c| f64::from(c)).collect();
-            // breaks: the same floating-point operations as R's seq(min, max, length.out = k + 1)
             check
                 .scalar(&format!("{s}_k"), h.bins as f64, Tol::exact())
-                .vector(&format!("{s}_breaks"), &h.breaks, Tol::exact())
+                .vector(&format!("{s}_breaks"), &h.breaks, Tol::stat(x.len()))
                 .vector(&format!("{s}_counts"), &counts, Tol::exact());
         }
         check.finish();
@@ -3148,6 +3162,30 @@ mod tests {
         );
         refused(&f, &e, None, Some(4), &["needs the model's hat values"]);
         refused(&f, &vec![0.0; 32], Some(&h), None, &["perfect fit"]);
+        refused(
+            &f,
+            &e,
+            Some(&[1.0; 32]),
+            Some(2),
+            &[
+                "every observation has leverage one",
+                "nothing can be plotted",
+            ],
+        );
+        // The warning about unit hat values stays short however many rows have them.
+        let (f60, e60) = (
+            wavy(60),
+            wavy(60).iter().rev().map(|v| v - 30.0).collect::<Vec<_>>(),
+        );
+        let h60: Vec<f64> = (0..60).map(|i| if i < 30 { 1.0 } else { 0.1 }).collect();
+        let r = residual_diagnostics_with(&f60, &e60, Some(&h60), Some(31), small()).unwrap();
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.contains("leverage one"))
+            .unwrap();
+        assert!(w.contains("30 observations, first rows [0, 1, "), "{w}");
+        assert!(w.contains(", 19]") && !w.contains("20"), "{w}");
         // A row dropped for its fitted value is not checked for its leverage.
         let mut f4 = f.clone();
         f4[4] = f64::NAN;

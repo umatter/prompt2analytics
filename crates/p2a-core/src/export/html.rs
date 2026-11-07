@@ -467,7 +467,6 @@ fn significance_stars_html(level: &SignificanceLevel) -> String {
     }
 }
 
-/// Escape HTML special characters.
 /// The convergence line and warnings of a result (one line each), as footer rows.
 fn notes_rows(result: &dyn ResultNotes, colspan: usize) -> String {
     notes_text(result)
@@ -481,6 +480,7 @@ fn notes_rows(result: &dyn ResultNotes, colspan: usize) -> String {
         .collect()
 }
 
+/// Escape HTML special characters.
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

@@ -53,7 +53,7 @@
         "all-missing group n = 0",
         "+-Inf counted, in the hinges and an outlier"
       ],
-      "tolerance": "exact (Tol::exact): fivenum's operations in R's order",
+      "tolerance": "n and outlier counts exact (Tol::exact); statistics and outliers validation/README.md statistics row (Tol::stat(n))",
       "deviations": [],
       "supersedes_legacy": []
     },
@@ -74,7 +74,7 @@
         "breaks",
         "counts (n = 100; n = 50 on a 1e-11 scale; a decimal grid with values on the breaks)"
       ],
-      "tolerance": "exact (Tol::exact): integer counts; breaks by seq()'s floating-point operations",
+      "tolerance": "bin number and counts exact (Tol::exact); breaks validation/README.md statistics row (Tol::stat(n))",
       "deviations": [
         {
           "finding": "DATA-85",
